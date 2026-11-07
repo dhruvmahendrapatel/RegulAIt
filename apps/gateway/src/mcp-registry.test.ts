@@ -476,8 +476,10 @@ afterAll(async () => {
   // restores the posture it FOUND, mcpAdmissionMode included (ADR-0181 ships `enforce`)
   await restoreStrictAdmission?.();
   delete process.env[DEPLOY_MODE_ENV];
+  // ADR-0256: a source that was refreshed has append-only snapshot evidence, so it is never deleted. Disable this
+  // suite's sources instead, so no later sweep in the run dials the closed fake.
   if (createdRegistryIds.length > 0) {
-    await db.delete(mcpRegistries).where(inArray(mcpRegistries.id, createdRegistryIds));
+    await db.update(mcpRegistries).set({ enabled: false }).where(inArray(mcpRegistries.id, createdRegistryIds));
   }
   if (createdServerIds.length > 0) {
     await db.delete(mcpServers).where(inArray(mcpServers.id, createdServerIds));

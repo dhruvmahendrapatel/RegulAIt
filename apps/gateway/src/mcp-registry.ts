@@ -101,6 +101,8 @@ import {
   auditLog,
   eq,
   isNull,
+  mcpCatalogueItems,
+  mcpCatalogueSnapshots,
   mcpRegistries,
   mcpRegistryEntries,
   mcpServers,
@@ -109,7 +111,11 @@ import {
   type Db,
 } from "@regulait/db";
 import {
+  catalogueDedupeKey,
   localServerNameFor,
+  parseCommunityList,
+  type McpCatalogueDelivery,
+  type McpCatalogueListingKind,
   MCP_REGISTRY_LIST_PATH,
   MCP_REGISTRY_MAX_PAGE_SIZE,
   normalizeRegistryPage,
@@ -160,6 +166,10 @@ export const mcpRegistryRuleIds = {
   synced: "mcp-registry-synced",
   syncRefused: "mcp-registry-sync-refused",
   imported: "mcp-registry-entry-imported",
+  /** ADR-0256: a preset source seeded, or a signed offline bundle imported (or refused) */
+  seeded: "mcp-catalogue-source-seeded",
+  bundleImported: "mcp-catalogue-bundle-imported",
+  bundleRefused: "mcp-catalogue-bundle-refused",
   importConflict: "mcp-registry-import-conflict",
   swept: "mcp-registry-swept",
 } as const;
@@ -303,6 +313,9 @@ export interface RegistryRow {
   url: string;
   enabled: boolean;
   allowPrivateRanges: boolean | null;
+  /** ADR-0256: absent means an ADR-0101 registry pull */
+  listingKind?: McpCatalogueListingKind;
+  delivery?: McpCatalogueDelivery;
 }
 
 export interface SyncRegistryResult {
@@ -333,6 +346,8 @@ export interface SyncRegistryResult {
   serversCreated: 0;
   /** grants this sync created. ALWAYS ZERO. */
   grantsCreated: 0;
+  /** ADR-0256: the append-only snapshot an `ok` refresh recorded, else null */
+  snapshotId?: string | null;
 }
 
 const EMPTY_COUNTS = {
@@ -351,12 +366,15 @@ const EMPTY_COUNTS = {
   grantsCreated: 0 as const,
 };
 
-async function readBounded(res: Response): Promise<unknown> {
+async function readBoundedText(res: Response): Promise<string> {
   const text = await res.text();
   if (text.length > MCP_REGISTRY_MAX_BODY_BYTES) {
     throw new Error(`registry response exceeded ${MCP_REGISTRY_MAX_BODY_BYTES} bytes`);
   }
-  return JSON.parse(text) as unknown;
+  return text;
+}
+async function readBounded(res: Response): Promise<unknown> {
+  return JSON.parse(await readBoundedText(res)) as unknown;
 }
 
 /**
@@ -412,6 +430,11 @@ export async function syncRegistry(
     return out;
   };
 
+  // ── ADR-0256: an offline-bundle source is never dialled. Its url is provenance only; a signed bundle refreshes it.
+  if (registry.delivery === "offline_bundle") {
+    return finish("skipped", `MCP catalogue source '${registry.name}' is delivered by signed offline bundle and is never pulled`, {});
+  }
+
   // ── THE AIR-GAP GATE. Before DNS, before the allow-list, before any socket.
   const airgap = airGappedFederationRefusal(deployMode);
   if (airgap) {
@@ -466,10 +489,40 @@ export async function syncRegistry(
     grantsCreated: 0;
   };
   const seenNames: string[] = [];
+  const seenDigests: string[] = [];
   let cursor: string | null = null;
+  const ingest = async (entries: NormalizedRegistryEntry[]) => {
+    for (const entry of entries) {
+      counts.entriesSeen += 1;
+      seenNames.push(entry.upstreamName);
+      seenDigests.push(registryEntryDigest({ registryId: registry.id, ...entry }));
+      if (entry.kind === "remote") counts.remote += 1;
+      else counts.catalogueOnly += 1;
+      const persisted = await upsertEntry(db, registry.id, entry, now);
+      if (persisted.created) counts.created += 1;
+      else counts.updated += 1;
+      if (persisted.drift) counts.driftDetected += 1;
+      if (persisted.conflict) counts.conflicts += 1;
+    }
+  };
 
   try {
-    for (let page = 0; page < maxPages; page += 1) {
+    // ── ADR-0256: a community list is ONE bounded markdown document at the configured url, read through the same
+    // guard. Every entry it yields is catalogue-only (a list names a repository, never an endpoint).
+    if (registry.listingKind === "community") {
+      const res = await guardedFetch(registry.url, {
+        method: "GET",
+        headers: { accept: "text/markdown, text/plain" },
+        signal: AbortSignal.timeout(MCP_REGISTRY_FETCH_TIMEOUT_MS),
+      });
+      if (!res.ok) throw new Error(`community list returned HTTP ${res.status}`);
+      const parsed = parseCommunityList(await readBoundedText(res));
+      counts.pages = 1;
+      counts.malformed += parsed.skipped;
+      counts.truncated = parsed.capped;
+      await ingest(parsed.entries);
+    }
+    for (let page = 0; registry.listingKind !== "community" && page < maxPages; page += 1) {
       const url = listingUrl(registry.url, { cursor, limit: MCP_REGISTRY_MAX_PAGE_SIZE });
       const res = await guardedFetch(url, {
         method: "GET",
@@ -480,17 +533,7 @@ export async function syncRegistry(
       const normalized = normalizeRegistryPage(await readBounded(res));
       counts.pages += 1;
       counts.malformed += normalized.skipped;
-      for (const entry of normalized.entries) {
-        counts.entriesSeen += 1;
-        seenNames.push(entry.upstreamName);
-        if (entry.kind === "remote") counts.remote += 1;
-        else counts.catalogueOnly += 1;
-        const persisted = await upsertEntry(db, registry.id, entry, now);
-        if (persisted.created) counts.created += 1;
-        else counts.updated += 1;
-        if (persisted.drift) counts.driftDetected += 1;
-        if (persisted.conflict) counts.conflicts += 1;
-      }
+      await ingest(normalized.entries);
       // OPAQUE cursor, passed back verbatim. Never parsed, never constructed.
       cursor = normalized.nextCursor;
       if (!cursor) break;
@@ -509,6 +552,18 @@ export async function syncRegistry(
   if (!counts.truncated) {
     counts.markedMissing = await markMissing(db, registry.id, seenNames, now);
   }
+
+  // ── ADR-0256: the refresh is a SNAPSHOT — one append-only row, and every row this pass asserted points at it.
+  const snapshotId = await recordCatalogueSnapshot(db, {
+    registryId: registry.id,
+    listingKind: registry.listingKind ?? "registry",
+    delivery: "pull",
+    actorUserId: opts.actorUserId ?? null,
+    entryCount: counts.entriesSeen,
+    truncated: counts.truncated,
+    digests: seenDigests,
+    now,
+  });
 
   const reason =
     `MCP registry '${registry.name}' synced ${counts.entriesSeen} entr(ies) over ${counts.pages} page(s)` +
@@ -544,6 +599,8 @@ export async function syncRegistry(
       conflicts: counts.conflicts,
       serversCreated: 0,
       grantsCreated: 0,
+      listingKind: registry.listingKind ?? "registry",
+      snapshotId,
     },
     effect: "allow",
     ruleId: mcpRegistryRuleIds.synced,
@@ -551,12 +608,70 @@ export async function syncRegistry(
     reason,
   });
 
-  return finish("ok", reason, counts);
+  return { ...(await finish("ok", reason, counts)), snapshotId };
+}
+
+/** ADR-0256: sha256 over the sorted release digests a refresh saw — the same set always gives the same digest */
+export function snapshotContentDigest(digests: readonly string[]): string {
+  return createHash("sha256").update([...digests].sort().join("\n"), "utf8").digest("hex");
+}
+
+/**
+ * ADR-0256: write the append-only snapshot row for one successful refresh, then point every catalogue row this
+ * refresh asserted (its `last_synced_at` is this pass's `now`) at it. Returns the snapshot id.
+ */
+export async function recordCatalogueSnapshot(
+  db: Db,
+  a: {
+    registryId: string;
+    listingKind: McpCatalogueListingKind;
+    delivery: McpCatalogueDelivery;
+    actorUserId: string | null;
+    entryCount: number;
+    truncated: boolean;
+    digests: readonly string[];
+    now: Date;
+    bundle?: { keyId: string; digest: string; createdAt: Date };
+  },
+): Promise<string> {
+  const [snap] = await db
+    .insert(mcpCatalogueSnapshots)
+    .values({
+      registryId: a.registryId,
+      listingKind: a.listingKind,
+      delivery: a.delivery,
+      actorUserId: a.actorUserId,
+      entryCount: a.entryCount,
+      truncated: a.truncated,
+      contentDigest: snapshotContentDigest(a.digests),
+      bundleKeyId: a.bundle?.keyId ?? null,
+      bundleDigest: a.bundle?.digest ?? null,
+      bundleCreatedAt: a.bundle?.createdAt ?? null,
+    })
+    .returning({ id: mcpCatalogueSnapshots.id });
+  await db
+    .update(mcpRegistryEntries)
+    .set({ lastSnapshotId: snap!.id })
+    .where(and(eq(mcpRegistryEntries.registryId, a.registryId), eq(mcpRegistryEntries.lastSyncedAt, a.now)));
+  return snap!.id;
+}
+
+/** ADR-0256: the deduped item for an entry, created on first sight. Idempotent on the unique dedupe key. */
+async function catalogueItemFor(db: Db, entry: NormalizedRegistryEntry): Promise<string> {
+  const dedupeKey = catalogueDedupeKey(entry);
+  const [inserted] = await db
+    .insert(mcpCatalogueItems)
+    .values({ dedupeKey })
+    .onConflictDoNothing({ target: mcpCatalogueItems.dedupeKey })
+    .returning({ id: mcpCatalogueItems.id });
+  if (inserted) return inserted.id;
+  const [found] = await db.select({ id: mcpCatalogueItems.id }).from(mcpCatalogueItems).where(eq(mcpCatalogueItems.dedupeKey, dedupeKey));
+  return found!.id;
 }
 
 /** Upsert one catalogue entry. Idempotent on `(registry_id, upstream_name)`,
  * which is what makes running the sweep twice a no-op rather than a duplicate. */
-async function upsertEntry(
+export async function upsertEntry(
   db: Db,
   registryId: string,
   entry: NormalizedRegistryEntry,
@@ -576,7 +691,10 @@ async function upsertEntry(
   // ADR-0175 A5: our own first sighting of this exact entry release
   await recordSighting(db, "registry_entry", registryEntryDigest({ registryId, ...entry }), now);
 
+  const catalogueItemId = await catalogueItemFor(db, entry);
   const common = {
+    catalogueItemId,
+    paidSignal: entry.paidSignal,
     upstreamVersion: entry.upstreamVersion,
     title: entry.title,
     description: entry.description,
@@ -686,7 +804,7 @@ async function detectConflict(
  * an abandoned name — is not authority to remove a governed object from an
  * operator's estate. It is information, and the operator acts on it.
  */
-async function markMissing(db: Db, registryId: string, seen: string[], now: Date): Promise<number> {
+export async function markMissing(db: Db, registryId: string, seen: string[], now: Date): Promise<number> {
   const rows = await db
     .select({ id: mcpRegistryEntries.id, upstreamName: mcpRegistryEntries.upstreamName })
     .from(mcpRegistryEntries)
@@ -1061,9 +1179,12 @@ export async function runMcpRegistrySync(
       url: mcpRegistries.url,
       enabled: mcpRegistries.enabled,
       allowPrivateRanges: mcpRegistries.allowPrivateRanges,
+      listingKind: mcpRegistries.listingKind,
+      delivery: mcpRegistries.delivery,
     })
     .from(mcpRegistries)
-    .where(eq(mcpRegistries.enabled, true))
+    // ADR-0256: an offline-bundle source is never pulled, so the sweep never picks it
+    .where(and(eq(mcpRegistries.enabled, true), eq(mcpRegistries.delivery, "pull")))
     .orderBy(sql`${mcpRegistries.lastSyncAt} asc nulls first`, asc(mcpRegistries.id))) as RegistryRow[];
 
   if (registries.length === 0) {
@@ -1138,6 +1259,8 @@ export const createMcpRegistrySchema = z
     url: z.string().min(1).max(2000),
     enabled: z.boolean().optional(),
     allowPrivateRanges: z.boolean().nullish(),
+    /** ADR-0256: 'community' makes the url a markdown list whose entries are unvetted and catalogue-only */
+    listingKind: z.enum(["registry", "community"]).optional(),
   })
   .strict();
 
@@ -1248,6 +1371,7 @@ export function registerMcpRegistryRoutes(app: FastifyInstance, db: Db, deps: Mc
         url: body.url,
         enabled: body.enabled ?? false,
         allowPrivateRanges: body.allowPrivateRanges ?? null,
+        listingKind: body.listingKind ?? "registry",
       })
       .returning();
     await db.insert(auditLog).values({
@@ -1293,6 +1417,10 @@ export function registerMcpRegistryRoutes(app: FastifyInstance, db: Db, deps: Mc
     const body = updateMcpRegistrySchema.parse(req.body);
     const [before] = await db.select().from(mcpRegistries).where(eq(mcpRegistries.id, registryId));
     if (!before) return reply.status(404).send({ error: "unknown_registry" });
+    // ADR-0256: an offline-bundle source's url is the provenance its bundles declared, not a destination
+    if (before.delivery === "offline_bundle" && body.url !== undefined) {
+      return reply.status(409).send({ error: "offline_bundle_source", detail: "an offline-bundle source is refreshed only by a signed bundle; its url is provenance and is never edited or dialled" });
+    }
     const nextUrl = body.url ?? before.url;
     const nextFlag = body.allowPrivateRanges !== undefined ? body.allowPrivateRanges ?? null : before.allowPrivateRanges;
     if (body.url !== undefined || body.allowPrivateRanges !== undefined) {
@@ -1383,6 +1511,8 @@ export function registerMcpRegistryRoutes(app: FastifyInstance, db: Db, deps: Mc
         url: registry.url,
         enabled: registry.enabled,
         allowPrivateRanges: registry.allowPrivateRanges,
+        listingKind: registry.listingKind,
+        delivery: registry.delivery,
       },
       { actorUserId: req.authCtx.userId ?? null, deps },
     );

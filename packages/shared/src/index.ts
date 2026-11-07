@@ -638,6 +638,9 @@ export {
   usableRemoteUrl,
   pickRemote,
   localServerNameFor,
+  MCP_PAID_SIGNALS,
+  paidSignalFor,
+  type McpPaidSignal,
   type McpRemoteTransportType,
   type McpRegistryEntryKind,
   type McpCatalogueReason,
@@ -647,6 +650,28 @@ export {
   type NormalizedRegistryEntry,
   type NormalizedRegistryPage,
 } from "./mcp-registry.js";
+export {
+  MCP_CATALOGUE_LISTING_KINDS,
+  MCP_CATALOGUE_DELIVERIES,
+  MCP_CATALOGUE_PRESETS,
+  MCP_CATALOGUE_PRESET_IDS,
+  MCP_CATALOGUE_BUNDLE_FORMAT,
+  MCP_CATALOGUE_BUNDLE_MAX_ENTRIES,
+  MCP_CATALOGUE_BUNDLE_MAX_BYTES,
+  MCP_COMMUNITY_LIST_MAX_ENTRIES,
+  mcpCatalogueBundleSchema,
+  mcpCatalogueBundleEntrySchema,
+  bundleEntriesUsable,
+  catalogueDedupeKey,
+  githubRepoKey,
+  parseCommunityList,
+  vettingFor,
+  type McpCatalogueListingKind,
+  type McpCatalogueDelivery,
+  type McpCatalogueVetting,
+  type McpCataloguePreset,
+  type McpCatalogueBundle,
+} from "./mcp-catalogue.js";
 
 /** ADR-0097 — the admin CLEAR action on a held MCP server. A reason is
  * REQUIRED and there is no auto-clear: admitting a manifest a scanner flagged
