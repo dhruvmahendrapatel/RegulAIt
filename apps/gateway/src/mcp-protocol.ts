@@ -41,6 +41,7 @@
 import { randomUUID } from "node:crypto";
 import type { GovernedActor } from "@regulait/policy-kernel";
 import { DelegationRefusedError } from "./delegation.js";
+import { definitionPinRefusal } from "./mcp-definition-pins.js";
 import { actorForGrant, delegationRefusalDecision } from "./in-process-delegation.js";
 import { armOutboundIdentity, outboundIdentityFor } from "./mcp-identity-assertion.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -343,6 +344,29 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs, stdioHold: {
 
   const [serverRow] = await db.select().from(mcpServers).where(eq(mcpServers.id, serverId));
   if (!serverRow) return { kind: "method_not_found" };
+
+  // ADR-0246 — a prompt or resource that changed since approval is refused (under 'block'), before any connect
+  const pinTarget =
+    method === "prompts/get" && typeof decided.name === "string"
+      ? ({ kind: "prompt", name: decided.name } as const)
+      : method === "resources/read" && typeof decided.uri === "string"
+        ? ({ kind: "resource", name: decided.uri } as const)
+        : null;
+  if (pinTarget) {
+    const pinned = await definitionPinRefusal(db, serverId, pinTarget.kind, pinTarget.name);
+    if (pinned) {
+      const decision: Decision = { effect: "deny", ruleId: pinned.ruleId, ruleChain: [], reason: pinned.reason };
+      await db.insert(auditLog).values({
+        userId,
+        serverId,
+        toolName: grant,
+        detail: { receiptClass: "decision", phase: "protocol", method, projectId, definitionPinStatus: pinned.status },
+        ...decision,
+      });
+      recordDecision({ surface: "mcp_protocol", effect: "deny" });
+      return { kind: "denied", decision };
+    }
+  }
 
   // GATE 2 — the kernel, on the protocol surface
   const ref = { serverId, name: grant, kind, surface: "protocol" as const };

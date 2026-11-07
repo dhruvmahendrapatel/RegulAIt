@@ -80,3 +80,29 @@ export async function relaxStrictAdmissionForTest(
       .where(eq(orgSettings.id, ORG_SETTINGS_ID));
   };
 }
+
+/**
+ * ADR-0246 — relax MCP definition pinning (to 'warn') and/or the high-risk gate (to 'off') for a test file that
+ * changes a manifest, or invents tool names, ON PURPOSE and is about something else. Kept apart from the ADR-0181
+ * set above, which a test replays against the database as it stood at migration 0159. Restores what it found.
+ */
+export async function relaxMcpPinningForTest(
+  db: Db,
+  keys: ReadonlyArray<"mcpDefinitionPinMode" | "mcpHighRiskMode"> = ["mcpDefinitionPinMode"],
+): Promise<() => Promise<void>> {
+  const before = await loadOrgSettings(db);
+  const lax: Partial<OrgSettingsRow> = {};
+  const saved: Partial<OrgSettingsRow> = {};
+  if (keys.includes("mcpDefinitionPinMode")) {
+    lax.mcpDefinitionPinMode = "warn";
+    saved.mcpDefinitionPinMode = before.mcpDefinitionPinMode;
+  }
+  if (keys.includes("mcpHighRiskMode")) {
+    lax.mcpHighRiskMode = "off";
+    saved.mcpHighRiskMode = before.mcpHighRiskMode;
+  }
+  await db.update(orgSettings).set(lax).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  return async () => {
+    await db.update(orgSettings).set(saved).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  };
+}

@@ -46,6 +46,7 @@ import {
   type PiiHit,
   type PreparedPiiApproval,
   type ScannableTool,
+  type McpServedDefinitions,
   type McpUpstreamTransport,
   CONTENT_TRUST_REFUSAL_CODE,
   CONTENT_TRUST_RULE_ID,
@@ -106,6 +107,8 @@ import {
   recordManifestScan,
   type McpAdmissionTrigger,
 } from "./mcp-admission.js";
+import { definitionPinRefusal, recordDefinitionPins } from "./mcp-definition-pins.js";
+import { highRiskRefusal, recordRiskClassification } from "./mcp-high-risk.js";
 import { loadEntitlements } from "./entitlements.js";
 // ADR-0185 G3 — the non-tool MCP methods
 import {
@@ -885,7 +888,20 @@ async function executeGovernedToolCallInner(
       : errMessage(err));
   };
 
+  // ADR-0246: a tool that changed since approval is refused before any connect (under 'block')
+  const refuseChangedDefinition = async (): Promise<GovernedToolCallOutcome | null> => {
+    const pinned = await definitionPinRefusal(db, serverId, "tool", toolName);
+    if (!pinned) return null;
+    const decision: Decision = { effect: "deny", ruleId: pinned.ruleId, ruleChain: [], reason: pinned.reason };
+    await db.insert(auditLog).values({ userId, serverId, toolName, ...decision, detail: { projectId, phase: "definition-pins", status: pinned.status, receiptClass: "decision" } });
+    return { kind: "denied", decision };
+  };
+
   try {
+    if (kind) {
+      const pinned = await refuseChangedDefinition();
+      if (pinned) return pinned;
+    }
     if (!kind) {
       // B3S-01: this sync is a connect BEFORE any decision; for stdio it
       // starts a process, so it needs an entitlement on the server first
@@ -912,9 +928,18 @@ async function executeGovernedToolCallInner(
       const found = upstreamTools.find((t) => t.name === toolName);
       if (!found) {
         await operationSucceeded();
-        return { kind: "unknown_tool" };
+        return (await refuseChangedDefinition()) ?? { kind: "unknown_tool" };
       }
+      // (a tool this sync found is approved: under 'block' syncUpstreamTools returns no other)
       kind = toolKind(found);
+    }
+
+    // ADR-0246 addendum: a high-risk (offensive) server needs its policy template and an authorised target, and
+    // every call's arguments are audited, redacted; refused here before the kernel decision and any tool call
+    const highRisk = await highRiskRefusal(db, { userId, serverId, toolName, arguments: args.arguments, projectId: projectId ?? null });
+    if (highRisk) {
+      if (upstream) await operationSucceeded();
+      return { kind: "denied", decision: { effect: "deny", ruleId: highRisk.ruleId, ruleChain: [], reason: highRisk.reason } };
     }
 
     // The generation was read before the server/tool snapshot above. A first
@@ -1974,6 +1999,33 @@ export async function consumeApprovalOrRetire(
  * a manifest, adjudicate it, store what is admissible". `trigger` only labels
  * the audit row the adjudication writes — it changes no threshold, no state
  * rule and no order of operations. */
+/**
+ * The prompts, resources and resource templates the upstream serves, for the kinds it advertises. First page only
+ * (the pin cap is per kind anyway). A list that fails is `null` (not observed): its stored pins are left alone, so
+ * a flaky `prompts/list` never reads as "every prompt was removed".
+ */
+async function observeServedDefinitions(
+  client: Client,
+  tools: readonly unknown[],
+  /** the same `/metrics` labels the manifest read uses, so each list request is counted once (ADR-0185 G5) */
+  observe: { serverId: string; transport?: McpUpstreamTransport | null | undefined },
+): Promise<McpServedDefinitions> {
+  const caps = client.getServerCapabilities() ?? {};
+  const list = async <T>(fetch: (timeout: number) => Promise<T>): Promise<T | null> => {
+    try {
+      return await withUpstreamRetry(({ deadlineMs }) => fetch(deadlineMs), { budgetMs: timeouts().mcpListToolsMs, observe });
+    } catch {
+      return null;
+    }
+  };
+  const prompts = caps.prompts ? await list(async (timeout) => (await client.listPrompts(undefined, { timeout })).prompts) : [];
+  const resources = caps.resources ? await list(async (timeout) => (await client.listResources(undefined, { timeout })).resources) : [];
+  const resourceTemplates = caps.resources
+    ? await list(async (timeout) => (await client.listResourceTemplates(undefined, { timeout })).resourceTemplates)
+    : [];
+  return { tools, prompts, resources, resourceTemplates };
+}
+
 export async function syncUpstreamTools(
   db: Db,
   serverId: string,
@@ -2009,9 +2061,18 @@ export async function syncUpstreamTools(
         `and no tool from it was returned. An admin must review and clear the server.`,
     );
   }
+  // ADR-0246 — DEFINITION PINNING. The prompts and resources lists are read on this same connection (only for a
+  // capability the server advertises), before the transaction; the comparison, its audit row and the manifest
+  // upsert then commit together. Under 'block' a tool that changed since approval is neither stored nor returned.
+  const served = await observeServedDefinitions(client, tools, { serverId, transport });
+  let returned: Tool[] = tools;
   await db.transaction(async (rawTx) => {
     const tx = rawTx as unknown as Db;
-    for (const tool of tools) {
+    const pins = await recordDefinitionPins(tx, serverId, served, trigger);
+    // ADR-0246 addendum: offensive tooling makes the server high-risk (over the whole served manifest)
+    await recordRiskClassification(tx, serverId, tools, trigger);
+    returned = pins.blockedTools.size > 0 ? tools.filter((t) => !pins.blockedTools.has(t.name)) : tools;
+    for (const tool of returned) {
       await tx
         .insert(mcpTools)
         .values({
@@ -2026,9 +2087,9 @@ export async function syncUpstreamTools(
           set: { kind: toolKind(tool), description: tool.description ?? null, inputSchema: tool.inputSchema },
         });
     }
-    if (onStored) await onStored(tx, tools);
+    if (onStored) await onStored(tx, returned);
   });
-  return tools;
+  return returned;
 }
 
 

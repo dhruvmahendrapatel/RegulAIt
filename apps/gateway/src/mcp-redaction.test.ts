@@ -11,7 +11,7 @@ import { approvalArgumentsDigest } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
 import { beginTrace, type TraceContext } from "./tracing.js";
-import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+import { relaxMcpPinningForTest, relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 import { relaxApprovalSigningForTest } from "./testing/approval-signing-posture.js";
 // ADR-0186 A2+B: this suite pins pre-0186 single-approver tool-call approvals (decided
 // through API keys, unsigned); signing and the sensitive quorum are relaxed for its run
@@ -21,6 +21,7 @@ let restoreApprovalSigning: (() => Promise<void>) | undefined;
 // ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
 // seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
 let restoreStrictAdmission: (() => Promise<void>) | undefined;
+let restorePinning: (() => Promise<void>) | undefined;
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -62,6 +63,9 @@ beforeAll(async () => {
   await runMigrations(db, path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations"));
   restoreApprovalSigning = await relaxApprovalSigningForTest(db);
   restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
+  // ADR-0246: each fixture invents fresh tool names on one server, so definition pinning would refuse them as
+  // unapproved; this file is about redaction, so pinning is put in 'warn' (its own tests: mcp-definition-pins)
+  restorePinning = await relaxMcpPinningForTest(db);
   app = buildApp(db, { bootstrapToken: "mcp-redaction-bootstrap", dataKey: "a".repeat(64) });
   httpServer = http.createServer((req, res) => {
     let body = "";
@@ -97,6 +101,7 @@ beforeAll(async () => {
 beforeEach(() => { wireCalls = []; response = undefined; upstreamError = undefined; onInitialize = undefined; onCall = undefined; });
 afterAll(async () => {
   await restoreApprovalSigning?.();
+  await restorePinning?.();
   await restoreStrictAdmission?.();
   await app?.close();
   httpServer?.closeAllConnections();
