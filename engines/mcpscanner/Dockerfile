@@ -29,13 +29,15 @@ COPY engines/mcpscanner/requirements-build.txt engines/mcpscanner/requirements-s
 # the headers go first, so setup.py's OpenSSL probe fails and the HASH module is not compiled in. The sdist (sha256
 # checked by --require-hashes) is built in a FIXED directory, without debug info and with that directory mapped away:
 # pip's own build dir is random, and the .so carried its path, so two builds differed (engine-images-build repro).
+# SOURCE_DATE_EPOCH (1980-01-01, the zip format's floor) fixes the wheel's zip timestamps: pip records the wheel's
+# hash in direct_url.json and RECORD, so a wheel built at another second changed the installed files.
 RUN rm -rf /usr/include/openssl /usr/include/x86_64-linux-gnu/openssl \
  && python -m venv /opt/build \
  && /opt/build/bin/pip install --no-cache-dir --disable-pip-version-check --require-hashes --no-deps --only-binary :all: -r requirements-build.txt \
  && /opt/build/bin/pip download --no-cache-dir --disable-pip-version-check --require-hashes --no-deps --no-build-isolation --no-binary :all: -d /sdist -r requirements-sdist.txt \
  && mkdir /build/src && tar -xzf /sdist/yara_python-4.5.4.tar.gz -C /build/src \
  && cd /build/src/yara_python-4.5.4 \
- && CFLAGS="-g0 -ffile-prefix-map=/build/src/yara_python-4.5.4=." \
+ && SOURCE_DATE_EPOCH=315532800 CFLAGS="-g0 -ffile-prefix-map=/build/src/yara_python-4.5.4=." \
     /opt/build/bin/pip wheel --no-cache-dir --disable-pip-version-check --no-deps --no-build-isolation -w /wheels . \
  && ls /wheels/yara_python-4.5.4-cp312-cp312-linux_x86_64.whl
 
