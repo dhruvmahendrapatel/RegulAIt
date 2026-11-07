@@ -84,8 +84,8 @@ test.describe("I-2 rollout F: the consolidated view expands in place", () => {
 
   test("a subject opens from the keyboard as a named region, Esc closes it; the warning and both bases stay on the row", async ({ page }) => {
     await mockOps(page);
-    // the superseded-lines note's in-text link fails axe's link-in-text-block on main already (not this change); this
-    // test answers with no superseded lines so the axe run below covers the table it is about
+    // this test answers with no superseded lines so the axe run below covers the table it is about; the note that
+    // superseded lines bring, and its in-text link, have their own test below
     await page.route(
       (u) => u.pathname === "/v1/cost-consolidated",
       (route) => route.fulfill({ json: { ...CONSOLIDATED, reconciliation: { ...CONSOLIDATED.reconciliation, supersededLinesExcluded: 0 } } }),
@@ -126,6 +126,22 @@ test.describe("I-2 rollout F: the consolidated view expands in place", () => {
     await expect(toggle).toHaveAttribute("aria-expanded", "false");
     await expect(toggle).toBeFocused();
     await expect(region).toHaveCount(0);
+  });
+
+  test("the superseded-lines note: its in-text link is underlined, so it is not told apart by colour alone", async ({ page }) => {
+    await mockOps(page);
+    await page.goto("/ui/admin/cost-consolidation?tab=consolidated");
+    const note = page.getByTestId("cc-reconciliation-note");
+    await expect(note).toContainText(`${CONSOLIDATED.reconciliation.supersededLinesExcluded} superseded duplicate line(s) are excluded`);
+    const link = note.getByRole("link", { name: "Reconciliation tab", exact: true });
+    await expect(link).toHaveAttribute("href", /\?tab=reconciliation$/);
+    expect(await link.evaluate((el) => getComputedStyle(el).textDecorationLine)).toContain("underline");
+    await expectAxeClean(page, "consolidated view, superseded-lines note");
+
+    // the link still goes where it said
+    await link.click();
+    await expect(page).toHaveURL(/[?&]tab=reconciliation/);
+    await expect(page.getByText("Superseded lines (marked, never deleted)")).toBeVisible();
   });
 
   test("a failed consolidated read is an error with Retry, never an empty view", async ({ page }) => {
