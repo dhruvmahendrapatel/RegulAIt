@@ -361,7 +361,7 @@ describe("route census: KNOWN_UI_GAPS only shrinks", () => {
   // and the census itself fails an entry that names no route, a route the UI now
   // calls directly, or a 501 stub. The list is still CODEOWNERS-reviewed.
   it("THE PINNED SIZES: known gaps, machine-only and superseded entries", () => {
-    expect(KNOWN_UI_GAPS_MAX).toBe(0);
+    expect(KNOWN_UI_GAPS_MAX).toBe(7); // ADR-0241 (P21): seven API-only usage-extractor routes, raised for the master's review on the PR (#453 Governed Designer)
     expect(KNOWN_UI_GAPS.size).toBe(KNOWN_UI_GAPS_MAX);
     expect(MACHINE_ONLY.size).toBe(46); // GET /v1/receipts/keys left: the posture page lists the keys to retire them; ADR-0195 SD4b added the endpoint agent channel; SD2b added the federation issuer's discovery document and JWKS; #453 c6508111468 added the MCP Streamable HTTP GET probe (405); ADR-0210 added the OIDC-profile identity assertion issuer's discovery document and JWKS; ADR-0219 added the governed A2A call (POST /v1/a2a/agents/:agentId/messages)
     expect(SUPERSEDED.size).toBe(16); // ADR-0211 added GET /v1/org/settings/risk-treatments (the settings read carries it); ADR-0223 added GET /v1/model-drift/settings (the card drift view carries it)
