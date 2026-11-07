@@ -843,3 +843,50 @@ describe("ADR-0187 engine bindings (PR #203 review [14])", () => {
     expect(workflowDefinitionSchema.safeParse(def("modelscan")).success).toBe(false);
   });
 });
+
+describe("ADR-0260 review bindings", () => {
+  const def = (stage: Record<string, unknown>) => ({
+    workflow: "w",
+    stages: [{ id: "i", type: "trigger" }, { id: "c", type: "automated_check", ...stage }],
+  });
+  const ok = (stage: Record<string, unknown>) => workflowDefinitionSchema.safeParse(def(stage)).success;
+
+  it("accepts a review bound to a declared check, for every profile", () => {
+    for (const profile of ["code_review", "security_review", "design_review"]) {
+      expect(ok({ checks: ["r"], reviews: [{ check: "r", agent: "reviewer", profile }] })).toBe(true);
+    }
+  });
+
+  it("refuses an unknown profile, a nit fail-on and an undeclared check", () => {
+    expect(ok({ checks: ["r"], reviews: [{ check: "r", agent: "a", profile: "vibes" }] })).toBe(false);
+    expect(ok({ checks: ["r"], reviews: [{ check: "r", agent: "a", profile: "code_review", failOn: "nit" }] })).toBe(false);
+    expect(ok({ checks: ["x"], reviews: [{ check: "r", agent: "a", profile: "code_review" }] })).toBe(false);
+  });
+
+  it("refuses a check decided twice (two reviews, or a review and an eval/engine)", () => {
+    const review = { check: "r", agent: "a", profile: "code_review" };
+    expect(ok({ checks: ["r"], reviews: [review, review] })).toBe(false);
+    expect(ok({ checks: ["r"], reviews: [review], evals: [{ check: "r", dataset: "d", agent: "a" }] })).toBe(false);
+    expect(
+      ok({ checks: ["r"], reviews: [review], engines: [{ check: "r", engine: "garak", agent: "a", sets: ["s"] }] }),
+    ).toBe(false);
+  });
+
+  it("refuses review bindings on a stage that is not an automated_check", () => {
+    const parsed = workflowDefinitionSchema.safeParse({
+      workflow: "w",
+      stages: [
+        { id: "i", type: "trigger" },
+        { id: "p", type: "planning", reviews: [{ check: "r", agent: "a", profile: "code_review" }] },
+      ],
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it("bounds the answer budget", () => {
+    const at = (maxTokens: number) => ok({ checks: ["r"], reviews: [{ check: "r", agent: "a", profile: "code_review", maxTokens }] });
+    expect(at(4096)).toBe(true);
+    expect(at(100)).toBe(false);
+    expect(at(100_000)).toBe(false);
+  });
+});
