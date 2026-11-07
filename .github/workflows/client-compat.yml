@@ -1,0 +1,110 @@
+name: Client compatibility
+
+# ADR-0257 (backlog P33): off-the-shelf third-party clients, unmodified, against a
+# real gateway — the official OpenAI and Anthropic SDKs, the Laravel AI SDK
+# (laravel/ai) and dart_mcp. Each client is a digest-pinned image whose
+# dependencies are vendored at IMAGE BUILD; at test time the clients run on an
+# `--internal` docker network whose only reachable host is the gateway, so the
+# only network this job uses is the image build (and the usual checkout/pnpm
+# install). There is no real provider key: the served agent is the mock provider.
+#
+# Cost: a separate job, run only when a PR touches the compat or MCP surfaces (or
+# this harness), plus nightly and on demand — never on every PR.
+on:
+  workflow_dispatch:
+  schedule:
+    # nightly, off the hour (CI's other crons sit on :00)
+    - cron: "37 3 * * *"
+  pull_request:
+    paths:
+      - "apps/gateway/client-compat/**"
+      - ".github/workflows/client-compat.yml"
+      # the provider-compatible surfaces and the model catalogue clients read
+      - "apps/gateway/src/compat-*.ts"
+      # the governed MCP endpoint and everything it gates through
+      - "apps/gateway/src/mcp-*.ts"
+      # the auth hook (Bearer and x-api-key), the route table, the dispatch core
+      - "apps/gateway/src/app.ts"
+      - "apps/gateway/src/route-classes.ts"
+      - "apps/gateway/src/agents-connectors.ts"
+      - "apps/gateway/src/project-header.ts"
+      # the mock provider every compat call is served by, and the decision kernel
+      - "packages/model-provider/**"
+      - "packages/policy-kernel/**"
+
+# Least privilege: the job checks out code and builds local images; it writes nothing.
+permissions:
+  contents: read
+
+concurrency:
+  group: client-compat-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  client-compat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16@sha256:9e2cf6287f25c3151f4c9421ccce2b17f3e60061c111a29165e0d2cdd9ff0a97
+        env:
+          POSTGRES_USER: regulait
+          POSTGRES_PASSWORD: regulait
+          POSTGRES_DB: regulait_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U regulait -d regulait_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://regulait:regulait@localhost:5432/regulait_test
+      REGULAIT_DATABASE_SSL: disable
+      REGULAIT_SCHEDULER: 'off'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # The images build while pnpm installs and the gateway compiles.
+      - name: Build the client images (dependencies vendored here, at image build)
+        run: |
+          set -euo pipefail
+          for c in node-sdks laravel-ai dart-mcp; do
+            ( docker build -t "regulait-client-compat/$c:local" "apps/gateway/client-compat/clients/$c" \
+                > "$RUNNER_TEMP/build-$c.log" 2>&1; echo $? > "$RUNNER_TEMP/build-$c.rc" ) &
+          done
+          echo "started"
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build the gateway and its workspace dependencies
+        run: pnpm --filter "@regulait/gateway..." build
+
+      - name: Wait for the client images
+        timeout-minutes: 10
+        run: |
+          set -uo pipefail
+          rc=0
+          for c in node-sdks laravel-ai dart-mcp; do
+            while [ ! -s "$RUNNER_TEMP/build-$c.rc" ]; do sleep 5; done
+            code=$(cat "$RUNNER_TEMP/build-$c.rc")
+            echo "::group::docker build $c (exit $code)"; cat "$RUNNER_TEMP/build-$c.log"; echo "::endgroup::"
+            if [ "$code" != 0 ]; then echo "::error::image $c did not build (exit $code)"; rc=1; fi
+          done
+          exit $rc
+
+      - name: Client compatibility harness
+        working-directory: apps/gateway
+        run: pnpm exec vitest run --config client-compat/vitest.config.ts

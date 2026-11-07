@@ -1,6 +1,6 @@
 ---
 phase: demo-prep-live-integrations-merged
-last_updated: 2026-10-29
+last_updated: 2026-11-07
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -20,6 +20,16 @@ roadmap: ../product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-11-07 - backlog P33: third-party client compatibility tests ([ADR-0257](../decisions/0257-third-party-client-compat-tests.md), builder lane, branch `builder/p33-client-compat-tests`).**
+- **Built:** `apps/gateway/client-compat/` runs the official `openai` 7.43.0 and `@anthropic-ai/sdk` 1.3.0, `laravel/ai`
+  v1.3.0 (its `openai-compatible` and `anthropic` drivers) and `dart_mcp` 0.5.2, each in a digest-pinned image with
+  dependencies vendored at build, against a real gateway on an `--internal` network. Checks: auth, governed allow,
+  governed deny, streaming, tool calls, cost attribution (usage rows priced and carrying the project) and audit. Own
+  workflow `client-compat.yml` (compat/MCP paths, nightly 03:37 UTC, on demand). Locally 8/8 green.
+- **Fixed (trivial):** the SSE shims forced `Connection: keep-alive`, which hung laravel/ai's Anthropic stream.
+- **Follow-ups recorded (PENDING §2h P33):** a governed `/v1/responses` shim (laravel/ai's default `openai` driver
+  needs it); provider-shaped 401s on compat routes; dart_mcp has no HTTP transport of its own. No migration.
 
 **2026-10-29 - the customer demo moves to one date, Saturday 2026-10-31 (owner, #453 c6508111468).**
 - **Date:** the internal run-through on Sun 11-01 and the external demo on Tue 11-03 are dropped; there is one run, on
