@@ -103,6 +103,8 @@ export const MCP_CATALOGUE_REASONS = [
   "stdio_only",
   "remote_url_unusable",
   "no_distribution",
+  // ADR-0256: a community list names a repository, never an endpoint, so its entries are catalogue-only by construction
+  "community_listing",
 ] as const;
 export type McpCatalogueReason = (typeof MCP_CATALOGUE_REASONS)[number];
 
@@ -224,6 +226,40 @@ export interface NormalizedRegistryEntry {
   updatedAt: string | null;
   packageCount: number;
   remoteCount: number;
+  /** ADR-0256: what the listing itself says about payment (`x402`, or `paid`), or null. A heuristic FLAG for an
+   * operator, never a verdict; see `paidSignalFor`. */
+  paidSignal: McpPaidSignal | null;
+}
+
+/** ADR-0256: the payment signals a catalogue entry can carry */
+export const MCP_PAID_SIGNALS = ["x402", "paid"] as const;
+export type McpPaidSignal = (typeof MCP_PAID_SIGNALS)[number];
+
+/** words that, as whole tokens in a listing's own text, say "this costs money" (ADR-0256) */
+const PAID_TOKENS: ReadonlySet<string> = new Set(["paid", "pricing", "subscription", "pay-per-call", "pay-per-use", "payment", "payments"]);
+
+/**
+ * ADR-0256 — does the listing's own text or metadata say this entry is paid?
+ *
+ * `x402` (the HTTP 402 payment protocol) anywhere in the name, title, description, website, a remote url or a
+ * `_meta` key wins, because an x402 server asks the CALLER's agent to pay per call. Otherwise a whole-word payment
+ * token in the title or description flags `paid`. Linear: lower-case, then split on non-word characters (no regex
+ * with a quantifier on record input, M-074). A flag, not a verdict: an operator reads it before importing.
+ */
+export function paidSignalFor(fields: {
+  texts: ReadonlyArray<string | null | undefined>;
+  metaKeys?: ReadonlyArray<string>;
+  describing?: ReadonlyArray<string | null | undefined>;
+}): McpPaidSignal | null {
+  const hay = [...fields.texts, ...(fields.metaKeys ?? [])].map((t) => (t ?? "").toLowerCase());
+  if (hay.some((t) => t.includes("x402"))) return "x402";
+  for (const t of fields.describing ?? []) {
+    if (!t) continue;
+    for (const token of t.toLowerCase().split(/[^a-z0-9-]/)) {
+      if (PAID_TOKENS.has(token)) return "paid";
+    }
+  }
+  return null;
 }
 
 /**
@@ -372,6 +408,17 @@ export function normalizeRegistryPage(payload: unknown): NormalizedRegistryPage 
       updatedAt: clip(official?.updatedAt),
       packageCount: Array.isArray(server.packages) ? server.packages.length : 0,
       remoteCount: Array.isArray(server.remotes) ? server.remotes.length : 0,
+      paidSignal: paidSignalFor({
+        texts: [
+          name,
+          server.title,
+          server.description,
+          server.websiteUrl,
+          ...(Array.isArray(server.remotes) ? server.remotes.map((r) => (typeof r.url === "string" ? r.url : null)) : []),
+        ],
+        metaKeys: Object.keys(row._meta ?? {}),
+        describing: [server.title, server.description],
+      }),
     });
   }
   const nextCursor = typeof parsed.metadata?.nextCursor === "string" && parsed.metadata.nextCursor !== ""
