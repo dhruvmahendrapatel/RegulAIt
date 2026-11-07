@@ -12,8 +12,8 @@ name: Engine images (build only)
 # fails unless both builds of every engine name the same input commit and the
 # same manifest digest and image id, and reports them per engine in the step
 # summary. workflow_dispatch runs the same check on any branch.
-# Runs only when an engine's own files change, so the Actions budget in ci.yml
-# stays true.
+# On a pull request it runs only when an engine's own files change; a merge group and the nightly schedule run it
+# always (ADR-0252 addendum).
 
 on:
   pull_request:
@@ -32,14 +32,20 @@ on:
       # a lock or signature change (the lock-update bot's PR) builds nothing new
       - '!engines/images.lock.json'
       - '!engines/signatures/**'
+  # ADR-0252 addendum (owner decision 2026-11-07): the engine build-and-compare is part of the FULL suite, so a merge
+  # group and the nightly schedule run it for every engine whatever changed (`merge_group` takes no path filter).
+  merge_group:
+    types: [checks_requested]
+  schedule:
+    - cron: '17 3 * * *'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: engine-images-build-${{ github.ref }}
-  cancel-in-progress: true
+  group: engine-images-build-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
