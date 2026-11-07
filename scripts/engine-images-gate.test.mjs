@@ -13,7 +13,7 @@ describe("ENG-IMG publish gate: the input set of the real repository", () => {
   const pkgs = readWorkspace();
 
   it("each engine's closure is its package, the runner and shared (the shim stage builds exactly these)", () => {
-    for (const id of ENGINE_IDS) expect(workspaceClosure(id, pkgs)).toEqual([`packages/engine-${id}`, "packages/engine-runner", "packages/shared"]);
+    for (const id of ENGINE_IDS) expect(workspaceClosure(id, pkgs)).toEqual([`packages/engine-${id}`, "packages/engine-runner", "packages/shared"].sort());
   });
 
   it("an engine's inputs never include another engine's directory, the lock, the signatures or the generated module", () => {

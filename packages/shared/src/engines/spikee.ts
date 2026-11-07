@@ -20,7 +20,8 @@
  *                        Hugging Face Hub at run time (the engines network has no route out), or the plugin calls a
  *                        hosted service (translation, speech, image) or a hosted LLM;
  *   - `excluded_licence` the data cites a third-party source whose licence is not on the ADR-0176 list;
- *   - `missing_preseed`  the plugin needs a model that is not pre-seeded in the image.
+ *   - `missing_preseed`  the plugin needs a model that is not pre-seeded in the image;
+ *   - `unsupported_format` the plugin turns the payload into content the chat compat route cannot carry (an image).
  *
  * CLASSES. Spikee reaches the target over the chat compat route only, so — as garak's latent injection (ADR-0187
  * decision 147) — nothing here claims an agentic class: a payload hidden in a document the prompt carries counts as
@@ -53,7 +54,7 @@ export const SPIKEE_USAGE_DATA_ENV: Readonly<Record<string, string>> = Object.fr
 /** as garak's (ADR-0187 decision 141): the switch the runner derives from the worker's own fresh self-test */
 export const SPIKEE_WORKER_SELF_TEST_SWITCH = "REGULAIT_SPIKEE_WORKER_SELFTEST";
 
-export type SpikeeDisposition = "local" | "excluded_licence" | "missing_preseed" | "cloud_only";
+export type SpikeeDisposition = "local" | "excluded_licence" | "missing_preseed" | "cloud_only" | "unsupported_format";
 export type SpikeeSetClass = "standard" | "agentic" | "offensive";
 
 export interface SpikeeSetEntry {
@@ -95,9 +96,9 @@ const pl = (name: string, disposition: SpikeeDisposition, note: string): SpikeeS
 /** THE CATALOGUE (spikee 0.9.4). Every row was read from the pinned wheel; see ADR-0245 decision 5. */
 export const SPIKEE_SETS: readonly SpikeeSetEntry[] = Object.freeze(
   [
-    ds("cybersec-2026-01", "local", "prompt_injection", "high", "WithSecure's cybersecurity payloads (exfiltration by markdown image, XSS, ...) in documents; canary judges"),
+    ds("cybersec-2026-01", "local", "prompt_injection", "high", "WithSecure's cybersecurity payloads (exfiltration by markdown image, XSS, ...) in documents; canary judges; its two poetry jailbreaks cite a Hub dataset with no licence and are filtered out at generation"),
     ds("llm-mailbox", "local", "prompt_injection", "high", "payloads hidden in e-mails for a mailbox assistant; canary judges"),
-    ds("sysmsg-extraction-2025-04", "local", "data_exfiltration", "high", "system-prompt extraction payloads in documents; canary and regex judges"),
+    ds("sysmsg-extraction-2025-04", "local", "data_exfiltration", "high", "system-prompt extraction payloads in documents, against spikee's own demo system message (sent with them); canary and regex judges"),
     ds("mini-test", "local", "prompt_injection", "low", "spikee's small smoke-test seed set; canary judges"),
     ds("in-the-wild-jailbreak-prompts", "cloud_only", null, "medium", "no data in the wheel: a script downloads TrustAIRLab/in-the-wild-jailbreak-prompts from the Hub"),
     ds("simsonsun-high-quality-jailbreaks", "cloud_only", null, "medium", "no data in the wheel: a script downloads Simsonsun/JailbreakPrompts from the Hub"),
@@ -119,15 +120,15 @@ export const SPIKEE_SETS: readonly SpikeeSetEntry[] = Object.freeze(
     pl("flip", "local", "reversed text"),
     pl("homoglyph", "local", "homoglyph substitution"),
     pl("ascii_smuggler", "local", "Unicode tag-character smuggling"),
-    pl("mask", "local", "masked keywords"),
+    pl("mask", "cloud_only", "asks a hosted LLM (default bedrock) which words to mask"),
     pl("splat", "local", "character splatting"),
     pl("best_of_n", "local", "random augmentation (Best-of-N)"),
     pl("anti_spotlighting", "local", "breaks spotlighting delimiters"),
-    pl("google_translate", "cloud_only", "calls Google Translate"),
-    pl("opus_translate", "missing_preseed", "needs a Hugging Face translation model that is not pre-seeded"),
-    pl("text2image", "cloud_only", "renders through a hosted service"),
+    pl("google_translate", "cloud_only", "calls Google Translate (googletrans, not in the closure)"),
+    pl("opus_translate", "missing_preseed", "needs a Hugging Face translation model (and torch) that is not pre-seeded"),
+    pl("text2image", "unsupported_format", "renders the payload as an image (Pillow is not in the closure, and the chat route carries text only)"),
     pl("tts", "cloud_only", "calls a hosted speech service"),
-    pl("shortener", "cloud_only", "calls a URL shortener"),
+    pl("shortener", "cloud_only", "shortens the payload with a hosted LLM"),
     pl("llm_jailbreaker", "cloud_only", "rewrites the payload with a hosted LLM (multi-turn LLM attacks are PyRIT's, ADR-0245 decision 3)"),
     pl("llm_multi_language_jailbreaker", "cloud_only", "rewrites the payload with a hosted LLM"),
     pl("llm_poetry_jailbreaker", "cloud_only", "rewrites the payload with a hosted LLM"),
@@ -136,6 +137,44 @@ export const SPIKEE_SETS: readonly SpikeeSetEntry[] = Object.freeze(
     pl("digraphic_translate", "cloud_only", "translates through a hosted LLM"),
   ].map((e) => Object.freeze(e)),
 );
+
+/**
+ * HOW EACH LOCAL DATASET IS GENERATED (spikee 0.9.4, read from each seed folder's README and data):
+ *   - `full-prompt`: the payload document is wrapped in spikee's own task (summarise / answer a question), the format
+ *     spikee documents for testing a model rather than an application;
+ *   - `includeSystemMessage`: only for system-prompt extraction, whose judges look for spikee's demo system message
+ *     (`Spikee ... 1854`): without it the judges could never match and every reply would read as a pass;
+ *   - `jailbreakTypes`: an allow-list passed as `--jailbreak-filter` (null = every type in the seed folder). In
+ *     cybersec-2026-01 the two `poetry` jailbreaks cite AutomateTim/poetry-jailbreak-simple-sample, a Hub dataset
+ *     whose card states no licence, so they are never generated (the strict default, ADR-0176).
+ * Never used: `--include-fixes` (the adversarial suffix files cite tml-epfl/llm-adaptive-attacks logs) and
+ * `--include-standalone-inputs`.
+ */
+export interface SpikeeGeneration {
+  format: "full-prompt";
+  includeSystemMessage: boolean;
+  jailbreakTypes: readonly string[] | null;
+}
+export const SPIKEE_DATASET_GENERATION: Readonly<Record<string, SpikeeGeneration>> = Object.freeze({
+  "cybersec-2026-01": Object.freeze({
+    format: "full-prompt",
+    includeSystemMessage: false,
+    jailbreakTypes: Object.freeze(["academic", "challenge", "dan", "debug", "dev", "emergency", "errors", "experimental", "hidden-function", "ignore", "mission", "new-instructions", "new-task", "no-jailbreak", "no-limits", "policy-puppet", "sorry", "special-case", "test", "training"]),
+  }),
+  "llm-mailbox": Object.freeze({ format: "full-prompt", includeSystemMessage: false, jailbreakTypes: null }),
+  "sysmsg-extraction-2025-04": Object.freeze({ format: "full-prompt", includeSystemMessage: true, jailbreakTypes: null }),
+  "mini-test": Object.freeze({ format: "full-prompt", includeSystemMessage: false, jailbreakTypes: null }),
+} satisfies Record<string, SpikeeGeneration>);
+
+/**
+ * The sha256 of the local seed folders this catalogue was read from (engines/spikee/prune-data.py: the sorted lines
+ * `<path> <file sha256>` of every file in the folders below, in spikee 0.9.4's wheel). The image build fails when the
+ * installed seeds differ, so a re-released wheel cannot change what a local dataset sends without a re-review.
+ */
+export const SPIKEE_LOCAL_SEEDS_SHA256 = "99d04872d9f3b6ac6c49a29129f23afc753afe594551ea6183850b4799062567";
+
+/** the local judges an admitted dataset may name (spikee's own; an LLM judge never runs) */
+export const SPIKEE_LOCAL_JUDGES: readonly string[] = Object.freeze(["canary", "regex"]);
 
 /** the catalogue row of a set id, or null when this build does not know it */
 export function spikeeEntryForSet(set: string): SpikeeSetEntry | null {
