@@ -70,6 +70,7 @@ import {
 import { IMPORTS_ENDPOINT, IMPORTS_PATH, IMPORTS_QUERY_KEY, IMPORTS_SORT, IMPORT_COLUMNS, type ImportBatch } from "./costImports";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+import cc from "./costConsolidation.module.css";
 
 // ---------------------------------------------------------------------------
 // mirrors of the gateway's read projections
@@ -1332,7 +1333,7 @@ export default function CostConsolidationPage() {
                     )}
                     <p className={v.faint}>{consolidated.data?.staleness.note}</p>
                     {consolidated.data && consolidated.data.reconciliation.supersededLinesExcluded > 0 && (
-                      <p className={v.dim} data-testid="cc-reconciliation-note">
+                      <p className={`${v.dim} ${cc.inlineLinks}`} data-testid="cc-reconciliation-note">
                         {consolidated.data.reconciliation.supersededLinesExcluded} superseded duplicate line(s) are
                         excluded from the imported side above — marked by a reconciliation pass, never deleted. The
                         full list is on the{" "}
