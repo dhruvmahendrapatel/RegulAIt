@@ -65,10 +65,12 @@ LABEL org.regulait.build-stage="runtime (production dependencies only)"
 # ADR-0184 / ADR-0200 (patch, never allow-list): CVE-2026-76844 and CVE-2026-85091 (zlib1g, HIGH).
 # The pinned base digest is still the newest published one and ships 1:1.3.dfsg+really1.3.1-1+b1;
 # the fix is in Debian trixie-security. Upgrade exactly that package to exactly the fixed version,
-# then drop the apt lists. Remove this when a rebuilt base digest already carries it.
+# then drop what apt and dpkg wrote with wall-clock content (the lists, their logs and ldconfig's
+# aux-cache), so the layer stays byte-reproducible (ADR-0187 addendum 2026-10-21: build and rebuild
+# must match). Remove this when a rebuilt base digest already carries the fix.
 RUN apt-get update \
  && apt-get install -y --only-upgrade --no-install-recommends zlib1g=1:1.3.dfsg+really1.3.1-1+deb13u1 \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log /var/cache/ldconfig/aux-cache
 
 # ADR-0184: the runtime runs only `node` and `sh` (docker-start.sh), never a
 # package manager. The base image ships npm with its own bundled dependencies,
