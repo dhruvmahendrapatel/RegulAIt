@@ -404,8 +404,7 @@ function MappingEditor(props: {
         <code>+</code> to add them, or a sum over a list. No code or expressions.
       </p>
       <form
-        className={u.panel}
-        style={{ padding: 0, border: 0, background: "none" }}
+        className={`${u.panel} ${u.panelBare}`}
         onSubmit={(e) => {
           e.preventDefault();
           const out = buildMapping(draft);
@@ -421,7 +420,7 @@ function MappingEditor(props: {
         {MAIN_FIELDS.map(fieldInput)}
         <details className={u.more}>
           <summary>Image out, audio out, and sums over a list</summary>
-          <div className={u.panel} style={{ padding: 0, border: 0, background: "none" }}>
+          <div className={`${u.panel} ${u.panelBare}`}>
             {MORE_FIELDS.map(fieldInput)}
             <Field label="The totals include">
               <Select value={draft.totalsInclude} onChange={(e) => setDraft((d) => ({ ...d, totalsInclude: e.target.value === "text_only" ? "text_only" : "all" }))}>
@@ -502,8 +501,7 @@ function TestPanel(props: { agentId: string; version: UsageExtractorVersion; isA
         the sample.
       </p>
       <form
-        className={u.panel}
-        style={{ padding: 0, border: 0, background: "none" }}
+        className={`${u.panel} ${u.panelBare}`}
         onSubmit={(e) => {
           e.preventDefault();
           const out = buildTestBody(sample, expected, fields);

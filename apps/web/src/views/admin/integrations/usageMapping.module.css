@@ -234,3 +234,10 @@ textarea.mono {
   background: var(--danger-soft);
   color: var(--danger-soft-text);
 }
+
+/* a panel's layout without its box, for a form or block that already sits inside one */
+.panelBare {
+  padding: 0;
+  border: 0;
+  background: none;
+}
