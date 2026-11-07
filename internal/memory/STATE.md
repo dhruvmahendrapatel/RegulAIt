@@ -1,6 +1,6 @@
 ---
 phase: demo-prep-live-integrations-merged
-last_updated: 2026-10-29
+last_updated: 2026-11-07
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -20,6 +20,8 @@ roadmap: ../product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-11-07 - P-01 in progress: one governed decision core (owner "Yes, ADR then build", #453).** [ADR-0251](../decisions/0251-one-governed-decision-core.md) (Proposed) puts model, connector, MCP and A2A calls behind one sequence: posture, entitlement, attribution mandate, data scope, rate limits, ABAC, approval rules, cost attribution, audit; error is deny. ARCHITECTURE.md now describes the four paths as built (only MCP had approval rules, rate limits and ABAC; A2A never called the kernel). Builder lane `builder/gov-core-unify`, migration 0307 (`when` 1785234000000); slices connector, model, A2A, then ABAC v5 after #707.
 
 **2026-10-29 - the customer demo moves to one date, Saturday 2026-10-31 (owner, #453 c6508111468).**
 - **Date:** the internal run-through on Sun 11-01 and the external demo on Tue 11-03 are dropped; there is one run, on
