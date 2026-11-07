@@ -46,3 +46,4 @@ Searched and checked 2026-10-17 against `proxy.golang.org` (release dates) and e
 |---|---|---|
 | `apisec-inc/mcp-audit` (head `6ae4e1f`, checked 2026-11-07) | MIT | ADR-0259: a Python CLI with one tagged release (`v1.0.0`, 2026-01-15); it cannot run inside this static agent, and its secret patterns are not RE2 data. Its host list and its secret and risk categories informed `internal/collect/mcp.go`'s compiled checks. |
 | `github.com/tailscale/hujson` | BSD-3-Clause | Considered for JSONC MCP configs; no tagged release (pseudo-versions only), so a JSONC config is reported as the gap `mcp_config_unparsed`. |
+| `giggsoinc/PatronAI` (commit `79bdcc8`, checked 2026-11-07) | Apache-2.0 | ADR-0259 §7, owner-approved design reference: an AWS-centric Python stack that downloads a ~750 MB model on first start. Its MCP config-change event inspired the gateway's `endpoint-mcp-servers-added` audit, re-implemented natively; no code or data copied. |

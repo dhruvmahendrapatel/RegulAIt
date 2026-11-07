@@ -834,11 +834,11 @@ export function registerEndpointAgentRoutes(app: FastifyInstance, db: Db, opts: 
         .returning({ id: endpointAgentReports.id });
       if (!row) return reply.status(202).send({ accepted: true, duplicate: true });
       await db.update(endpointDevices).set({ lastReportAt: sql`now()` }).where(eq(endpointDevices.id, agent.deviceId));
-      let mcp = { upserted: 0, pruned: 0 };
+      let mcp = { upserted: 0, pruned: 0, added: 0 };
       if (mcpConfigEnabled) {
         // a report that could not read every MCP config (a gap) never prunes what an earlier one saw
         const complete = !report.gaps.some((g) => g.kind === MCP_CONFIG_KIND);
-        mcp = await recordMcpServers(db, { deviceId: agent.deviceId, reportId: row.id, collectedAt: new Date(report.collectedAt), sightings: reduction.mcpServers, complete });
+        mcp = await recordMcpServers(db, { sourceId: agent.sourceId, deviceId: agent.deviceId, reportId: row.id, collectedAt: new Date(report.collectedAt), sightings: reduction.mcpServers, complete });
       }
       await db.update(endpointAgentIdentities).set({ lastReportAt: sql`now()` }).where(eq(endpointAgentIdentities.identityId, agent.identityId));
       await audit(db, NIL_UUID, "discovery_source", agent.sourceId, "endpoint-agent-report-accepted", "allow", `an endpoint agent report was accepted: ${report.facts.length} fact(s), ${reduction.sightings.length} catalogue sighting(s) (ADR-0195 SD4b)`, {
@@ -852,6 +852,7 @@ export function registerEndpointAgentRoutes(app: FastifyInstance, db: Db, opts: 
         mcpFactsRefused: reduction.mcpRefused,
         mcpServersRecorded: mcp.upserted,
         mcpServersPruned: mcp.pruned,
+        mcpServersAdded: mcp.added,
         droppedSnapshots: report.droppedSnapshots,
         bodySha256,
       });

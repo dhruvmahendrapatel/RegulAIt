@@ -197,13 +197,19 @@ export function endpointOrgPolicy(settings: Pick<DiscoverySettingsView, "endpoin
  * Upsert one report's sightings for its device. A row only moves forward (an older report never overwrites a
  * newer one). When the report observed mcp_config completely (`complete`: no mcp_config gap), rows of the device
  * that this report did not list are deleted: the server is no longer configured.
+ *
+ * A server newly configured on a device that already had MCP servers is a config change worth a look (the idea
+ * comes from PatronAI's config-hash change event, re-implemented here as row identity, ADR-0259): it is audited
+ * as `endpoint-mcp-servers-added` with the new identities (package, host or command; never a secret).
  */
 export async function recordMcpServers(
   db: Db,
-  input: { deviceId: string; reportId: string; collectedAt: Date; sightings: readonly McpServerSighting[]; complete: boolean },
-): Promise<{ upserted: number; pruned: number }> {
+  input: { sourceId: string; deviceId: string; reportId: string; collectedAt: Date; sightings: readonly McpServerSighting[]; complete: boolean },
+): Promise<{ upserted: number; pruned: number; added: number }> {
   return db.transaction(async (tx) => {
     const t = tx as unknown as Db;
+    const [had] = await t.select({ n: sql<number>`count(*)::int` }).from(endpointMcpServers).where(eq(endpointMcpServers.deviceId, input.deviceId));
+    const added: Array<{ identityKind: string; identity: string }> = [];
     let upserted = 0;
     for (const s of input.sightings) {
       const values = { ...s, deviceId: input.deviceId, lastReportId: input.reportId, firstSeenAt: input.collectedAt, lastSeenAt: input.collectedAt };
@@ -216,8 +222,22 @@ export async function recordMcpServers(
           set: { lastReportId: input.reportId, signatureId, provider, transport, command, package: pkg, packageVersion, host, disabled, risks, riskyTools, autoApprovedTools, secretTypes, lastSeenAt: input.collectedAt },
           setWhere: sql`${endpointMcpServers.lastSeenAt} <= ${input.collectedAt.toISOString()}::timestamptz`,
         })
-        .returning({ id: endpointMcpServers.id });
+        // xmax = 0 only on a freshly inserted row: the server was not configured on this device before
+        .returning({ id: endpointMcpServers.id, inserted: sql<boolean>`(xmax = 0)` });
       upserted += rows.length;
+      if (rows[0]?.inserted) added.push({ identityKind: s.identityKind, identity: s.identity });
+    }
+    if ((had?.n ?? 0) > 0 && added.length > 0) {
+      await t.insert(auditLog).values({
+        userId: NIL_UUID,
+        objectType: "discovery_source",
+        objectId: input.sourceId,
+        detail: { subsystem: "shadow-ai-discovery", adr: "0259", deviceId: input.deviceId, reportId: input.reportId, added: added.slice(0, 50) },
+        effect: "allow",
+        ruleId: "endpoint-mcp-servers-added",
+        ruleChain: [],
+        reason: `${added.length} MCP server(s) newly configured on endpoint device ${input.deviceId} (ADR-0259)`,
+      });
     }
     let pruned = 0;
     if (input.complete) {
@@ -227,7 +247,7 @@ export async function recordMcpServers(
         .returning({ id: endpointMcpServers.id });
       pruned = gone.length;
     }
-    return { upserted, pruned };
+    return { upserted, pruned, added: (had?.n ?? 0) > 0 ? added.length : 0 };
   });
 }
 

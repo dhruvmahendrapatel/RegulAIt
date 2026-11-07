@@ -155,6 +155,48 @@ so it applies on every device. Unlinking uses POST so the route needs no DELETE 
 Backend and agent only. The UI needs (the switch on the Discovery sources settings, the inventory list with its
 filters and verdicts, link and unlink) are posted on #453.
 
+### 7. Design reference: giggsoinc/PatronAI (owner-approved, 2026-11-07)
+
+PatronAI is Apache-2.0 and written in Python; it was checked at commit `79bdcc8` (2026-06-02). It is used as a
+**design reference only**: nothing is copied and it is not a dependency. It is AWS-centric, downloads a model of
+about 750 MB on first start, and its login is weak. ADR-0195 already pins its provider and detector data files for
+SD1 and SD2. The owner asked for three comparisons:
+
+1. **MCP-registration detection** (`agent/install/scan_mcp_configs.py.frag`, `src/ingestor/pipeline_mcp_change.py`).
+   - Its endpoint scan reads only `mcpServers` from four hosts (Claude Desktop, Cursor, Continue, Cline).
+   - It keeps the argument flags and env key **names**, and drops values.
+   - It raises a high-severity event when a config file's SHA-256 changes.
+
+   This collector already covers more hosts and server-map keys, and it reports packages, hosts, secret types and
+   risk flags. It keeps no env names, because ADR-0195 lane A6 forbids storing them. One idea was taken and
+   re-implemented natively. When a server is newly configured on a device that already had MCP servers, the gateway
+   audits `endpoint-mcp-servers-added`, naming the new identities. Row identity is used rather than a file hash,
+   which would also fire on an unrelated settings edit. Two of its paths go into the collection manifest's data,
+   not code, when the pack is built (ADR-0195 SD4): Continue (`.continue/config.json`) and Cline
+   (`.config/Cline/mcp_settings.json`).
+2. **AI provider endpoints and domains** (`config/providers.yaml`, `config/unauthorized.csv`): 87 hosts.
+   - Compared with the hostnames in the shipped catalogues, about 60 entries do not match exactly.
+   - Leaving out generic hosting platforms (Vercel, Render, Railway, Fly, `amazonaws.com`), which are not AI signals
+     on their own, the missing providers include:
+     - Together AI, AI21, Dify, n8n Cloud, Flowise, Langflow, Modal, Banana, Beam, Lepton;
+     - Anyscale endpoints, Pinecone, Chroma Cloud, Weights & Biases, Comet, Scale;
+     - LangChain Hub, xAI Grok, NVIDIA API catalog, Google AI Studio, NotebookLM, Opal, Vertex AI;
+     - v0, Manus, Suno, Stack AI, BuildShip, Sim, GPT4All.
+   - `SHADOW_AI_CATALOG_V1` is frozen and V2 is pinned by entry count and hash (ADR-0195 decision 15), so adding them
+     is a catalogue change: a new pinned version or admin seed rows, each endpoint checked against vendor
+     documentation. That is a separate catalogue PR, not part of P35. It is recorded as a follow-up.
+3. **Endpoint checklist** (`scan_packages`, `scan_processes`, `scan_ide_plugins`, `scan_browsers`,
+   `scan_shell_history`, `scan_containers`, `scan_vector_dbs`).
+   - Already covered by the agent: running AI processes and listening ports (`local_runtime`), IDE plugins
+     (`ide_extension`), browser extensions, AI CLIs and desktop apps.
+   - Missing **read-only** checks that fit ADR-0195 decision 19: globally installed AI language packages (pip
+     site-packages, npm global), local AI container images, and local vector databases. They are recorded as
+     follow-ups for the SD4 fact set; each needs the employee notice updated.
+   - **Not built, needs an owner decision:** browser history and shell history markers. ADR-0195 decision 19 lists
+     browsing history as an explicit non-goal of the agent, and shell history holds the commands people typed. A
+     marker check would read that content on the device even if only a fact left it. That reverses an accepted
+     owner decision, so it is escalated on #453 rather than built here.
+
 ## Consequences
 
 - MCP use on endpoints becomes an answerable question per device: which servers, what they run, which carry secrets,
@@ -167,7 +209,8 @@ filters and verdicts, link and unlink) are posted on #453.
   package and host identities are the precise ones.
 - The agent config route still serves no pack (ADR-0195 SD4: the pack signer is pending). `endpointOrgPolicy` is
   what that route will serve; until then no agent collects mcp_config, which is the secure default.
-- Follow-ups: the UI (on #453); P23's server scanner can take the `unregistered` inventory as its queue; re-check
+- Follow-ups: the PatronAI-derived catalogue additions and the read-only package, container and vector-DB checks
+  (section 7); the owner's call on history markers; the UI (on #453); P23's server scanner can take the `unregistered` inventory as its queue; re-check
   mcp-audit and a JSONC/TOML parser at the next ADR-0176 review.
 
 ## Numbering

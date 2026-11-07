@@ -371,8 +371,16 @@ describe("ADR-0259: reports", () => {
   it("prunes servers a newer complete report no longer lists; a gap prunes nothing; an older report never overwrites", async () => {
     await setSwitch(true);
     const a = await enrolled();
+    await send(a, [SERVERS.fs], { collectedAt: now(-120_000) });
+    // first sight of MCP on the device is the baseline: no "added" event
+    const addedFor = () => db.select().from(auditLog).where(sql`${auditLog.ruleId} = 'endpoint-mcp-servers-added' AND ${auditLog.detail}->>'deviceId' = ${a.deviceId}`);
+    expect(await addedFor()).toEqual([]);
     await send(a, [SERVERS.fs, SERVERS.shell], { collectedAt: now(-60_000) });
     expect((await rowsOf(a.deviceId)).length).toBe(2);
+    // a server newly configured on a device that already had one is audited, naming the identity only
+    const added = await addedFor();
+    expect(added.length).toBe(1);
+    expect((added[0]!.detail as { added: unknown }).added).toEqual([{ identityKind: "command", identity: "bash" }]);
     // a report that could not read every config: nothing is pruned
     await send(a, [SERVERS.fs], { collectedAt: now(-30_000), gaps: [{ kind: "mcp_config", reason: "permission_denied" }] });
     expect((await rowsOf(a.deviceId)).length).toBe(2);
