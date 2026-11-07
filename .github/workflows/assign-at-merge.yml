@@ -1,0 +1,105 @@
+# ADR-0252: write the shared append-only files after a merge, never on a branch.
+#
+# A PR adds a migration as packages/db/migrations/pending/<slug>.sql, an ADR as its own file, and STATE/PENDING
+# entries as fragments under internal/fragments/. None of them touches a line another PR touches, so PRs merge in any
+# order. After each merge to main that brings such a file, this job runs scripts/assign-at-merge.mjs, which numbers
+# the pending migrations (journal entry, idx, `when`, rename), adds the missing ADR index rows and folds the
+# fragments, and pushes the result to one branch, `assign-at-merge/<main sha>`.
+#
+# Push-only, like engine-images.yml's lock-pr job (owner decision, 2026-10-21): it opens no PR, and never merges,
+# approves or enables auto-merge. The master opens the PR from the branch and enqueues it, so the change goes
+# through the merge queue and its full CI like any other (a PR opened with GITHUB_TOKEN would start no CI).
+#
+# One assignment in flight: while an assign-at-merge PR is open, a run pushes nothing. When that PR merges, its own
+# push to main (it deletes pending files and fragments) starts this job again, which picks up anything that merged in
+# the meantime. The script is deterministic, so a human can run it by hand on a branch from main and get the same
+# result (CONTRIBUTING_PARALLEL_SESSIONS §4.1).
+name: Assign at merge
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/db/migrations/pending/**'
+      - 'internal/decisions/**'
+      - 'internal/fragments/**'
+  workflow_dispatch:
+
+# one run at a time, in order; never cancel a run that may be pushing
+concurrency:
+  group: assign-at-merge
+  cancel-in-progress: false
+
+# writes one branch; reads the open PRs to see whether an assignment is already in flight
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  assign:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # the newest main, not the commit that triggered the run: a later merge may already be there
+          ref: main
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          # 22.18+ strips the types of packages/db/src/pending-migrations.ts, which the script imports
+          node-version: '22'
+
+      - name: Number pending migrations, add ADR rows, fold fragments
+        id: plan
+        run: |
+          set -euo pipefail
+          node scripts/assign-at-merge.mjs --write | tee "$RUNNER_TEMP/plan.txt"
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "Nothing to assign."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git status --short
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: The result passes the migration guard against main
+        if: steps.plan.outputs.changed == 'true'
+        run: node scripts/migration-watermark-guard.mjs HEAD
+
+      - name: Push the assignment branch (the master opens the PR and enqueues it)
+        if: steps.plan.outputs.changed == 'true'
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          open="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --json headRefName --jq '[.[] | select(.headRefName | startswith("assign-at-merge/"))] | length')"
+          if [ "$open" != "0" ]; then
+            echo "An assign-at-merge PR is already open; when it merges, its push starts this job again for anything newer." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          main="$(git rev-parse HEAD)"
+          branch="assign-at-merge/${main:0:12}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          # staged by path: only what the script may write (renames, the journal, the ADR index, the fold targets, fragments)
+          git add -A -- packages/db/migrations internal/decisions/README.md internal/memory/STATE.md internal/product/PENDING.md internal/fragments
+          if [ -n "$(git status --porcelain)" ]; then echo "::error::the script wrote outside its paths:"; git status --short; exit 1; fi
+          git commit -q -m "chore: assign migration numbers and fold docs at merge (ADR-0252)" -m "Written by scripts/assign-at-merge.mjs from main at ${main:0:12}, run ${GITHUB_RUN_ID}."
+          auth="$(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+          # no force: an existing branch for this main commit is refused, never overwritten
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" push origin "HEAD:refs/heads/${branch}"
+          {
+            echo "### Assignment branch pushed: \`${branch}\`"
+            echo ""
+            echo "The master opens a PR against \`main\` from it (title: \`chore: assign migration numbers and fold docs at merge (ADR-0252)\`) and enqueues it with \`gh pr merge --merge --auto\`. This job opens, merges and approves nothing."
+            echo ""
+            echo "- Compare URL: https://github.com/${GITHUB_REPOSITORY}/compare/main...${branch}?expand=1"
+            echo ""
+            echo '```'
+            cat "$RUNNER_TEMP/plan.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

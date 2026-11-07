@@ -10,6 +10,23 @@ Ordered by what actually blocks a sale, not by ADR number.
 
 ---
 
+## 0. New items, newest first (ADR-0252)
+
+A PR adds a new item as a fragment file under `internal/fragments/` whose first line is `<!-- fold: pending -->`;
+the assign-at-merge step moves it here after the merge. Move an item into its section below when you next edit
+this file.
+
+<!-- fold:pending newest-first -->
+
+**Q1 — Turn on the merge queue (owner settings, ADR-0252).** Blocked on the owner. Enable the merge queue on `main`
+with merge method "merge commit"; make the required checks ones that report on `merge_group` (`ci.yml`'s
+`build-and-test`, `security.yml`, `import-cycles.yml`, `ui-enterprise.yml`), not a path-filtered workflow. Then the
+master switches its loop to `gh pr merge <n> --merge --auto` and opens each `assign-at-merge/*` branch's PR.
+Follow-ups: Drizzle v1's journal-free migrator; a schema-to-SQL parity test (C-03); a per-lane cap on open PRs and
+per-PR status checklists (R-08).
+
+---
+
 ## 1. The three that gate an enterprise deal
 
 | # | Gap | Why it blocks | Where it's recorded |

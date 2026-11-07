@@ -140,6 +140,10 @@ on:
   # semantic conflict between two PRs that were each green against an older
   # base, and slow rot from the outside world (a moved base image, a yanked
   # transitive dependency) with no commit of ours to blame.
+  # ADR-0252: the merge queue tests the combined result of the queued PRs (review R-03, R-06) before main moves.
+  # `merge_group` takes no path filter, so a queued docs-only PR runs this too, which a PR run skips.
+  merge_group:
+    types: [checks_requested]
   schedule:
     - cron: '0 6 * * 1'
   workflow_dispatch:
@@ -153,6 +157,11 @@ concurrency:
 # checks out code and uploads artifacts; nothing writes to the repository, issues, PRs or packages.
 permissions:
   contents: read
+
+# ADR-0252: CI databases are disposable, so migrations merged but not yet numbered (packages/db/migrations/pending/)
+# are applied in their provisional order. A long-lived database refuses them (packages/db/src/pending-migrations.ts).
+env:
+  REGULAIT_MIGRATIONS_UNASSIGNED: apply
 
 jobs:
   # ── build-and-test, split (2026-10-10) ─────────────────────────────────────
@@ -282,16 +291,25 @@ jobs:
       - name: Pre-flight — every gateway route has UI or a reason (route census)
         if: ${{ !cancelled() && (steps.affordances.outcome == 'success' || steps.affordances.outcome == 'failure') }}
         run: node scripts/preflight-ui-route-census.mjs
-      # CONTRIBUTING_PARALLEL_SESSIONS §4.1: a migration added below the base branch's newest `when`
-      # never applies on a database that already ran the base branch (fresh CI databases hide it).
-      - name: Pre-flight — every new migration sits above main's migration watermark
-        if: github.event_name == 'pull_request'
+      # CONTRIBUTING_PARALLEL_SESSIONS §4.1, ADR-0252, review C-03: merged migrations and journal entries are
+      # unchanged, the folder and the journal agree, and the journal grows only by the assign-at-merge step's
+      # numbering of pending files (a new `when` below the base's newest would never apply). In the merge queue
+      # the base is the commit the queued PR is merged onto.
+      - name: Pre-flight — merged migrations unchanged; the journal grows only at merge time
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         env:
           BASE_REF: ${{ github.base_ref }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
         run: |
           set -euo pipefail
-          git fetch --no-tags --depth=1 origin "refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
-          node scripts/migration-watermark-guard.mjs "origin/$BASE_REF"
+          if [ -n "$MG_BASE_SHA" ]; then
+            git fetch --no-tags --depth=1 origin "$MG_BASE_SHA"
+            base="$MG_BASE_SHA"
+          else
+            git fetch --no-tags --depth=1 origin "refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+            base="origin/$BASE_REF"
+          fi
+          node scripts/migration-watermark-guard.mjs "$base"
 
       # internal/process/AgentCoordination.md stays a CURRENT-STATE file: one Live-status row per
       # agent, one Status line per task, inboxes acked within 12h, a line
@@ -617,7 +635,8 @@ jobs:
       - id: scope
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
+          # a merge-group commit is a merge too: HEAD^1 is what the queued PR is merged onto
+          if [ "${{ github.event_name }}" != "pull_request" ] && [ "${{ github.event_name }}" != "merge_group" ]; then
             echo "Not a PR (${{ github.event_name }}) — building unconditionally."
             echo "build=true" >> "$GITHUB_OUTPUT"
             exit 0

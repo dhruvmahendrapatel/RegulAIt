@@ -20,6 +20,20 @@ roadmap: ../product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+<!-- fold:state-recap newest-first -->
+
+**2026-11-07 - merge queue readiness and merge-time numbering ([ADR-0252](../decisions/0252-merge-queue-and-merge-time-numbering.md), owner decision on #453; review R-03, R-06, R-07, R-08, C-03, C-04).**
+- **Migrations:** a PR adds `packages/db/migrations/pending/<slug>.sql` and never edits the journal. After the merge,
+  `assign-at-merge.yml` numbers it (`scripts/assign-at-merge.mjs`) and pushes `assign-at-merge/<sha>`; the master
+  opens and enqueues that PR. `runMigrations` refuses pending files unless `REGULAIT_MIGRATIONS_UNASSIGNED=apply`
+  (CI and the gateway suite only). The guard now also refuses edits to merged migrations, removed entries and
+  journal/file mismatches (C-03); the `@regulait/db` `generate` script is gone.
+- **Docs:** ADR index rows come from the ADR file's header at merge time; STATE and PENDING appends are fragments under
+  `internal/fragments/`. The route-census size pins are dropped (C-04).
+- **CI:** `ci`, `security`, `import-cycles` and `ui-enterprise` run on `merge_group`.
+- **Owner, to finish:** turn on the merge queue for `main` (merge commit) and make the required checks report on
+  `merge_group`. The master enqueues with `gh pr merge --merge --auto` from then on
+  (CONTRIBUTING_PARALLEL_SESSIONS §8).
 
 **2026-10-29 - the customer demo moves to one date, Saturday 2026-10-31 (owner, #453 c6508111468).**
 - **Date:** the internal run-through on Sun 11-01 and the external demo on Tue 11-03 are dropped; there is one run, on
@@ -5536,6 +5550,14 @@ the schema: 151 text columns match the S6 shape (S6 said ~34); 84 guarded, 67 ex
 audit, tool references, platform copies, ingested, machine, conversation, signed evidence, check-constrained), pinned
 against `information_schema` and against the ADR's generated block. Open: whether to guard jsonb
 `config_versions.body` string leaves; ingested columns stay a residual.
+
+ADR-0252 (2026-11-07) put `main` behind the GitHub merge queue and moved every shared append to merge time:
+migration numbers, journal entries and `when` values (`packages/db/migrations/pending/<slug>.sql`, numbered by
+`scripts/assign-at-merge.mjs` after the merge), ADR index rows (from the ADR header) and STATE/PENDING appends
+(fragments under `internal/fragments/`). Pending migrations never reach a long-lived database; the migration guard
+checks merged migrations are frozen and that the journal grows only by assignment.
+
+<!-- fold:state-decisions -->
 
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);

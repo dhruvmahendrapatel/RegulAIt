@@ -56,6 +56,11 @@ and must still be managed: every number collision in §4, because two branches c
 
 ## 4. The silent hazards — collisions git will not warn you about
 
+> **Since 2026-11-07 ([ADR-0252](../decisions/0252-merge-queue-and-merge-time-numbering.md)) most of this section is
+> handled at merge time.** A PR no longer claims a migration number, a journal line, an ADR index row or a line at
+> the end of STATE.md or PENDING.md. Follow §8 ("Builder steps") for the flow; the subsections below keep the
+> mechanisms, which still explain why the rules exist.
+
 These are ordered by how quietly they fail. The first is the one that can waste a day.
 
 ### 4.1 Migration watermark poisoning (silent, permanent, retry-proof)
@@ -71,9 +76,9 @@ So a single generated migration with a real timestamp sets the watermark far int
 **every subsequent hand-numbered migration is silently skipped forever**. No error. No warning.
 The schema simply stops advancing.
 
-> **Rule: never run `drizzle-kit generate` on this repo.** Hand-author the `.sql` file and hand-append
-> the journal entry, continuing the +1,000,000 ms convention (the journal's last `when` plus 1,000,000;
-> the §4.2 commands print it).
+> **Rule: never run `drizzle-kit generate` on this repo** (ADR-0252 removed the `generate` script). Hand-author
+> the `.sql` file as `packages/db/migrations/pending/<slug>.sql` and **do not touch the journal**: the
+> assign-at-merge step appends the entry after the merge, continuing the +1,000,000 ms convention.
 
 Two related traps from the same mechanism:
 
@@ -96,6 +101,30 @@ Two related traps from the same mechanism:
 > `scripts/migration-watermark-guard.mjs`, which refuses any new entry not above the base branch's newest
 > `when`.
 
+> **Superseded on 2026-11-07 by ADR-0252: numbers are assigned at merge time.**
+> 1. A PR adds `packages/db/migrations/pending/<slug>.sql` (lowercase words joined by `_`). It does not pick a number,
+>    does not edit `meta/_journal.json`, and refers to the migration by its slug. Several files in one PR are numbered
+>    in name order, so name them to sort in run order.
+> 2. CI applies pending files in provisional order on its disposable databases (`REGULAIT_MIGRATIONS_UNASSIGNED=apply`,
+>    also set by the gateway's vitest config). A long-lived database refuses them (`UnassignedMigrationsError`), so a
+>    provisional number never reaches one. Do not set the variable on a database you keep.
+> 3. After the merge, `.github/workflows/assign-at-merge.yml` runs `scripts/assign-at-merge.mjs`. It numbers every pending
+>    file (number and idx one above the journal's highest, `when` = last `when` + 1,000,000), renames it, appends
+>    its entry and pushes the result to `assign-at-merge/<main sha>`. The master opens that PR and enqueues it.
+> 4. The guard (`scripts/migration-watermark-guard.mjs`, on PRs and in the merge queue) refuses: a changed or removed
+>    merged entry; a changed merged `.sql`; a numbered file with no entry, or an entry with no file; a bad pending name;
+>    and any new journal entry that is not exactly the assign step's numbering of pending files the same diff removes.
+>
+> **Converting an open PR** that still adds a numbered migration the old way:
+>
+> ```bash
+> git fetch origin main && git merge origin/main             # merge, never rebase (M-067)
+> git checkout origin/main -- packages/db/migrations/meta/_journal.json
+> git mv packages/db/migrations/0290_my_change.sql packages/db/migrations/pending/my_change.sql
+> grep -rn "0290_my_change" --exclude-dir=node_modules .     # change each reference to the slug (my_change)
+> node scripts/migration-watermark-guard.mjs origin/main     # must pass
+> ```
+
 ### 4.2 Same-number files that merge with **zero** conflict
 
 Two sessions each take migration `0101` (or ADR `0097`) with different descriptive slugs. Git sees
@@ -103,7 +132,9 @@ two distinct new files and **auto-merges both**. There is no conflict marker, no
 migrations claiming one number and a journal that can only describe one of them.
 
 > **Rule: claim the number before you use it.** Push a one-line placeholder commit reserving the
-> number, or announce the claim, before writing the body.
+> number, or announce the claim, before writing the body. *(ADR-0252: still true for ADR numbers. Migrations no
+> longer take a number on a branch; two PRs with the same pending slug get a plain add/add conflict, which git does
+> report.)*
 
 Do not trust a table of sequence heads in a document: it goes stale with the next merge. Read the heads
 from the tree at the moment you claim a number:
@@ -126,6 +157,9 @@ A file with a retired number added now would carry a `when` below the database's
 
 ### 4.3 `_journal.json` always conflicts on append
 
+*(ADR-0252: no branch edits the journal any more; only the assign-at-merge step does, one PR at a time. Kept for
+history and for converting older PRs.)*
+
 Appending an entry requires rewriting the previous last entry's `}` into `},`, so two concurrent
 appends **always** touch the same physical line. This is the one guaranteed conflict in the set —
 which makes it the *good* case, because git will tell you. Resolve by keeping **both** entries and
@@ -139,12 +173,23 @@ keeping one. The lost row is invisible forever after.
 > **Merge-time assertion:** `ls internal/decisions/[0-9]*.md | wc -l` must equal
 > `grep -cE '^\| \[[0-9]{4}\]' internal/decisions/README.md`. CI now checks this, row order and links with
 > `scripts/adr-index.test.mjs` (FS-55).
+>
+> **ADR-0252: do not add the row by hand.** Add only the ADR file, with the template header (`# ADR-NNNN: Title`,
+> `- **Status**:`, `- **Date**:`, and `- **Index**:` if the title is too long for the table). The assign-at-merge
+> step adds the row after the merge. `scripts/adr-index.test.mjs` checks the index as that step will leave it, so
+> a header it cannot read fails CI on the PR.
 
 ### 4.5 STATE.md recap clobber
 
 Both sessions prepend to the same `## Where we are` window; the merge silently drops one session's
 entire record. Rule 3.4 (one owner) exists for this. If both must write, write to *different*
 sections and never the same paragraph.
+
+**ADR-0252: appends go in fragments.** A new recap paragraph, a new Decisions paragraph or a new PENDING item is a
+file `internal/fragments/<YYYY-MM-DD>-<lane>-<slug>.md` whose first line is `<!-- fold: state-recap -->`,
+`<!-- fold: state-decisions -->` or `<!-- fold: pending -->`. The assign-at-merge step moves it to its marker and
+deletes it ([internal/fragments/README.md](../fragments/README.md)). Edits to an existing paragraph or row are still
+ordinary edits, and still collide if two PRs edit the same one.
 
 ### 4.6 One decision fans out across four sequences
 
@@ -154,6 +199,10 @@ them collision-prone, for one decision. Serialize decision-commits between the s
 session lands its whole set before the other starts.
 
 ### 4.7 CI cannot catch any of this
+
+*(ADR-0252: no longer true once the merge queue is on. The queue runs `ci.yml`, `security.yml`, `import-cycles.yml`
+and `ui-enterprise.yml` on the combined result of every queued PR, docs-only PRs included, because `merge_group`
+takes no path filter. The text below records how it was.)*
 
 There is **no `push:` trigger**, and the `pull_request` workflow skips markdown and state paths.
 Every assertion in §4 is a **manual** merge-time check. ~~(GitHub Actions minutes are also
@@ -189,7 +238,8 @@ If both sessions run on **one** machine, these fight:
 
 ## 6. Merge-time checklist
 
-Run these by hand before merging either direction. CI runs only the first (as `scripts/adr-index.test.mjs`):
+Run these by hand before merging either direction. CI runs the first (as `scripts/adr-index.test.mjs`) and the
+second (as `scripts/migration-watermark-guard.mjs`, ADR-0252), on PRs and in the merge queue:
 
 ```bash
 # 1. ADR files and index rows agree
@@ -213,3 +263,28 @@ git diff --stat <base>..HEAD -- packages/db/
 Read [CLAUDE.md](../../CLAUDE.md) → [internal/memory/STATE.md](../memory/STATE.md) →
 [mistakes.md](../memory/mistakes.md) → this file, then **ask which surface you own** before editing
 anything. The other session may be mid-task in a file that looks idle.
+
+## 8. Builder steps under the merge queue (ADR-0252)
+
+For a builder lane, from branch to merge:
+
+1. **Branch** from `origin/main`. Merge main into it when you need to, never rebase (M-067).
+2. **Migration:** add `packages/db/migrations/pending/<slug>.sql`. Do not number it and do not touch
+   `meta/_journal.json`. Refer to it by its slug. Run the gateway tests as usual: the suite applies it.
+3. **ADR:** claim the next free ADR number (§4.2) and add only the ADR file with the template header. No README row.
+4. **STATE.md / PENDING.md:** add a fragment under `internal/fragments/` for each new paragraph or item (§4.5). Edit
+   existing text in place only when you must.
+5. **Check** before pushing: `node scripts/migration-watermark-guard.mjs origin/main` and
+   `npx vitest run --dir scripts adr-index assign-at-merge`, plus your own tests.
+6. **Draft PR**, then mark it ready when CI is green. Do not merge it yourself, and do not merge main into it only to
+   stay current: the queue tests it on top of everything ahead of it.
+7. **The master enqueues it** (`gh pr merge <n> --merge --auto`). If the queue run fails, the PR leaves the queue;
+   fix it on the branch and the master enqueues it again.
+8. **After the merge,** the assign-at-merge job numbers your migration and folds your ADR row and fragments; its PR
+   goes through the queue too. Until it lands, `main` holds your migration unnumbered, and a long-lived database
+   refuses to migrate, by design (§4.1).
+
+**For the master:** enqueue instead of merging. When an `assign-at-merge/<sha>` branch appears, open a PR from the
+newest one (title "chore: assign migration numbers and fold docs at merge (ADR-0252)") and enqueue it. Keep one
+open at a time, and delete older `assign-at-merge/*` branches that never got a PR. If the job cannot run,
+`node scripts/assign-at-merge.mjs --write` on a branch from main gives the same result.
