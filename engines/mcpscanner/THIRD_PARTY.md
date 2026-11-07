@@ -3,7 +3,8 @@
 Open-source components the mcpscanner image ships (ADR-0176 admission rules: MIT, Apache-2.0, BSD or ISC, or a public-domain
 dedication; maintained; pinned; works air-gapped). The Python closure is pinned by `engines/mcpscanner/requirements.txt` (every
 wheel by version and sha256) and installed with `pip install --require-hashes --no-deps --only-binary :all:`. Facts were
-read from the pinned wheels and the sdist on 2026-11-07 (ADR-0242).
+read from the pinned wheels and the sdist on 2026-11-07 (ADR-0242). `litellm` and `filelock` are overridden above the
+upstream pins for published advisories (ADR-0242 §3).
 
 **Admission status: NOT ADMISSIBLE YET.** The image builds and passes its licence gate and offline smoke scan (measured
 locally, 2026-11-07), but it is not published: no digest is recorded in `engines/images.lock.json`, the image-level scan
@@ -28,6 +29,8 @@ ADR-0242 §6). The shipped manifest carries no digest, so the engine cannot be e
 | `anyio` | 4.16.0 | MIT |
 | `attrs` | 26.1.0 | MIT |
 | `boolean.py` | 5.0 | BSD-2-Clause |
+| `boto3` | 1.43.126 | Apache-2.0 |
+| `botocore` | 1.43.126 | Apache-2.0 |
 | `CacheControl` | 0.14.4 | Apache-2.0 |
 | `certifi` | 2026.10.23 | MPL-2.0 (accepted by owner, ADR-0187) |
 | `cffi` | 2.1.1 | MIT-0 (accepted by owner, ADR-0187) |
@@ -37,7 +40,6 @@ ADR-0242 §6). The shipped manifest carries no digest, so the engine cannot be e
 | `cryptography` | 50.0.2 | Apache-2.0 OR BSD-3-Clause |
 | `cyclonedx-python-lib` | 11.12.0 | Apache-2.0 |
 | `defusedxml` | 0.7.1 | PSF-2.0 (accepted by owner, ADR-0187) |
-| `distro` | 1.9.0 | Apache License, Version 2.0 |
 | `expandvars` | 1.1.2 | MIT |
 | `fastapi` | 0.162.0 | MIT |
 | `fastuuid` | 0.14.0 | BSD-3-Clause |
@@ -45,20 +47,24 @@ ADR-0242 §6). The shipped manifest carries no digest, so the engine cannot be e
 | `frozenlist` | 1.8.0 | Apache-2.0 |
 | `fsspec` | 2026.9.0 | BSD-3-Clause |
 | `h11` | 0.16.0 | MIT |
+| `h2` | 4.4.1 | MIT |
 | `hf-xet` | 1.8.0 | Apache-2.0 |
+| `hpack` | 4.2.0 | MIT |
 | `httpcore` | 1.0.9 | BSD-3-Clause |
 | `httpcore2` | 2.16.0 | BSD-3-Clause |
 | `httpx` | 0.28.1 | BSD-3-Clause |
 | `httpx2` | 2.16.0 | BSD-3-Clause |
-| `huggingface_hub` | 2.4.0 | Apache-2.0 |
+| `huggingface_hub` | 1.33.0 | Apache-2.0 |
+| `hyperframe` | 6.1.0 | MIT |
 | `idna` | 3.20 | BSD-3-Clause |
 | `importlib_metadata` | 8.9.0 | Apache-2.0 |
 | `Jinja2` | 3.1.6 | BSD-3-Clause |
 | `jiter` | 0.19.0 | MIT |
+| `jmespath` | 1.1.0 | MIT |
 | `jsonschema` | 4.26.0 | MIT |
 | `jsonschema-specifications` | 2025.9.1 | MIT |
 | `license-expression` | 30.4.4 | Apache-2.0 |
-| `litellm` | 1.93.2 | MIT |
+| `litellm` | 1.108.2 | MIT |
 | `markdown-it-py` | 4.2.0 | MIT |
 | `MarkupSafe` | 3.0.4 | BSD-3-Clause |
 | `mcp` | 2.3.0 | MIT |
@@ -66,7 +72,7 @@ ADR-0242 §6). The shipped manifest carries no digest, so the engine cannot be e
 | `mdurl` | 0.1.2 | MIT |
 | `msgpack` | 1.2.4 | Apache-2.0 |
 | `multidict` | 7.2.1 | Apache-2.0 |
-| `openai` | 2.54.0 | Apache-2.0 |
+| `openai` | 3.46.0 | Apache-2.0 |
 | `opentelemetry-api` | 1.45.2 | Apache-2.0 |
 | `packageurl-python` | 0.17.6 | MIT |
 | `packaging` | 26.3 | Apache-2.0 OR BSD-2-Clause |
@@ -80,9 +86,11 @@ ADR-0242 §6). The shipped manifest carries no digest, so the engine cannot be e
 | `pycparser` | 3.12 | BSD-3-Clause |
 | `pydantic` | 2.14.3 | MIT |
 | `pydantic_core` | 2.50.4 | MIT |
+| `pydantic-settings` | 2.16.2 | MIT |
 | `Pygments` | 2.21.0 | BSD-2-Clause |
 | `PyJWT` | 2.15.1 | MIT |
 | `pyparsing` | 3.3.3 | MIT |
+| `python-dateutil` | 2.9.0.post0 | Dual License |
 | `python-dotenv` | 1.2.4 | BSD-3-Clause |
 | `python-multipart` | 0.0.33 | Apache-2.0 |
 | `PyYAML` | 6.0.3 | MIT |
@@ -91,7 +99,9 @@ ADR-0242 §6). The shipped manifest carries no digest, so the engine cannot be e
 | `requests` | 2.34.2 | Apache-2.0 |
 | `rich` | 15.0.0 | MIT |
 | `rpds-py` | 2026.9.1 | MIT |
+| `s3transfer` | 0.19.3 | Apache License 2.0 |
 | `shellingham` | 1.5.4 | ISC License |
+| `six` | 1.17.0 | MIT |
 | `sniffio` | 1.3.1 | MIT OR Apache-2.0 |
 | `sortedcontainers` | 2.4.0 | Apache 2.0 |
 | `sse-starlette` | 3.6.0 | BSD-3-Clause |

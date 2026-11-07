@@ -132,6 +132,18 @@ describe("ADR-0242 the manifest, the images and the lockfiles agree", () => {
     expect(readFileSync(path.join(root, "engines/mcpscanner/requirements-sdist.txt"), "utf8")).toMatch(/^yara-python==4\.5\.4 \\\n    --hash=sha256:[0-9a-f]{64}$/m);
   });
 
+  it("the published advisories stay fixed: litellm and filelock overridden, the CEL helper rebuilt with Go 1.27.3", () => {
+    for (const id of ["mcpscanner", "skillscanner"]) {
+      const req = readFileSync(path.join(root, "engines", id, "requirements.txt"), "utf8");
+      expect(req).toMatch(/^litellm==1\.108\.2 \\$/m);
+      expect(req).toMatch(/^filelock==4\.2\.9 \\$/m);
+    }
+    const docker = readFileSync(path.join(root, "engines/skillscanner/Dockerfile"), "utf8");
+    expect(docker).toMatch(/^FROM --platform=linux\/amd64 golang:1\.27-trixie@sha256:[0-9a-f]{64} AS cel$/m);
+    expect(docker).toContain('test "$(go env GOVERSION)" = "go1.27.3"');
+    expect(docker).toContain("cel-helper.py \"$SP\" /build/cel/skill-scanner-cel-go-linux-amd64 go1.27.3");
+  });
+
   it("the drivers build no remote analyzer and refuse cloud credentials", () => {
     const mcp = readFileSync(path.join(root, "engines/mcpscanner/scan.py"), "utf8");
     expect(mcp).toContain("analyzers = [YaraAnalyzer(rules_dir=RULES_DIR), SchemaReferenceAnalyzer()]");

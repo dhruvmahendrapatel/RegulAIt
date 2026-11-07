@@ -9,6 +9,9 @@
 # EXCLUDED: pcodedmp (GPL-3.0, a dependency of oletools). skill-scanner reaches oletools only through
 # `oletools.oleid` for Office files, which never imports it (olevba imports it lazily for P-code, inside a try);
 # the Dockerfile asserts it is absent (ADR-0242 §4).
+# OVERRIDE of an upstream pin (ADR-0242 §3), for a published advisory, resolved with `uv pip compile --override`:
+#   filelock 4.2.9 (litellm 1.108.2 declares filelock<4.0; 3.x carries CVE-2026-112940, fixed only in 4.2.1).
+#   skill-scanner never imports litellm on our path (the driver checks), so litellm's own bound is not exercised.
 cisco-ai-skill-scanner==2.3.2 \
     --hash=sha256:0222d84c9c98419623d1e2a1b56a52af4b9ca07a6e9767cb6241dc7a16f0efa5
 aiohappyeyeballs==2.7.1 \
@@ -55,8 +58,8 @@ fastapi==0.162.0 \
     --hash=sha256:3785963de305dd09912426cb81f2d230fce98ab3521cdfe97265c8d14983128c
 fastuuid==0.14.0 \
     --hash=sha256:808527f2407f58a76c916d6aa15d58692a4a019fdf8d4c32ac7ff303b7d7af09
-filelock==3.32.7 \
-    --hash=sha256:65ff0d0190ea42038b32bda4b77834fb05be2cad4c5b9b01aa4dfb3614536e52
+filelock==4.2.9 \
+    --hash=sha256:a379c50a729e5b68c8519a4d26489f755d9769960a236ecd838190e2a78db2e9
 flatbuffers==25.12.19 \
     --hash=sha256:7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4
 frozenlist==1.8.0 \

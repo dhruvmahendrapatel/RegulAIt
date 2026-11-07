@@ -101,13 +101,29 @@ The driver is the only code we write around each engine (ADR-0176). It is run as
 ### 3. The images (`engines/<id>/Dockerfile`)
 
 - Every base image is pinned by digest: `python:3.12-slim-trixie@sha256:4840d514…`, `node:22-trixie-slim@sha256:be1e2a3d…`
-  for the licence gate, and `python:3.12-trixie@sha256:cad37dd2…` to build yara-python. All are CPython 3.12.16.
+  for the licence gate, `python:3.12-trixie@sha256:cad37dd2…` to build yara-python (all CPython 3.12.16), and
+  `golang:1.27-trixie@sha256:af1bfc26…` (Go 1.27.3) to rebuild skill-scanner's CEL helper.
 - The closure comes from our lockfile (`requirements.txt`): every wheel is pinned by sha256 and installed with
-  `--require-hashes --no-deps --only-binary :all:`. That is 101 wheels for mcp-scanner and 99 for skill-scanner,
+  `--require-hashes --no-deps --only-binary :all:`. That is 110 wheels for mcp-scanner and 99 for skill-scanner,
   resolved for cp312 manylinux x86_64. pip is removed from the image.
 - **yara-python is built from its hashed sdist with no OpenSSL** (`requirements-sdist.txt`). The OpenSSL headers are
   deleted before the build, and the build fails if the module links `libcrypto`. setuptools is pinned by hash
   (`requirements-build.txt`) and never ships.
+- **Three published advisories are fixed in the image, not allow-listed** (found by the CI-pinned Trivy 0.74.0 on the
+  first local build):
+  - mcp-scanner pins `litellm==1.93.2` (CVE-2026-114612, GHSA-g5ff-637f-6q2m). Our lockfile overrides it to 1.108.2,
+    the version skill-scanner already uses (`uv pip compile --override`). mcp-scanner imports litellm and never calls
+    it on our path.
+  - `filelock` 3.32.7 (CVE-2026-112940) is fixed only in 4.2.1. litellm 1.108.2 declares `filelock<4.0`, so both
+    lockfiles override filelock to 4.2.9. garak already ships filelock 4.x with litellm; the smoke scans prove both
+    engines still run.
+  - skill-scanner's wheel bundles a Go CEL helper built with Go 1.27.1, whose standard library carries four advisories.
+    The image rebuilds it from skill-scanner's own sdist (sha256 checked) with Go 1.27.3 (`golang:1.27-trixie`, pinned
+    by digest) and the flags of its packaging script. `cel-helper.py` swaps it in and rewrites the four
+    build-describing fields of its manifest, which skill-scanner checks at every start. The module downloads are
+    checked against the sdist's `go.sum` and happen at build time only.
+  The remaining HIGH findings are in Debian packages of the pinned base image with no fix published. They are the same
+  as the modelscan image's, and the CI gate only fails on fixable ones.
 - **pcodedmp is not installed and xxxswf is pruned.** The build fails if pcodedmp is present, and checks that
   `oletools.oleid` still imports.
 - **The YARA rules are baked in.** For mcp-scanner they are copied read-only to `/opt/mcpscanner/yara_rules`; for
@@ -123,11 +139,14 @@ The driver is the only code we write around each engine (ADR-0176). It is run as
 - The image runs as uid 10001.
 
 **Measured, 2026-11-07.** Both images were built locally (the scratch build added only this sandbox's TLS-proxy CA
-for pip; the committed Dockerfiles do not). The mcpscanner licence gate gave 100 allowed, 8 admitted and 0 denied,
+for pip; the committed Dockerfiles do not). The mcpscanner licence gate gave 109 allowed, 8 admitted and 0 denied,
 and yara-python linked no libcrypto. The skillscanner gate gave 104 allowed, 10 admitted and 0 denied. Each image ran
-both fixtures with `--network=none --read-only --cap-drop=ALL`. The reports are committed as test fixtures
+both fixtures with `--network=none --read-only --cap-drop=ALL` and no `/tmp`. The first run found that litellm 1.108.2 needs a writable temp directory at import, and a read-only container
+has none. The driver now falls back to its output directory, and it reports `failed` (never nothing) when the engine
+cannot start. The reports are committed as test fixtures
 (`packages/shared/src/engines/fixtures/admission-scan`). Image sizes are 739 MB (mcpscanner) and 1.54 GB
-(skillscanner; onnxruntime and magika come in through skill-scanner's file-type detection).
+(skillscanner; onnxruntime and magika come in through skill-scanner's file-type detection). The pinned Trivy
+0.74.0 with CI's gate (`scripts/security-gate.mjs`, empty allow-list) passed on both: 0 fixable HIGH or CRITICAL.
 
 ### 4. The verdict flows into the existing admission states (fail closed)
 

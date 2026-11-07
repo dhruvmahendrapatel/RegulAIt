@@ -3,7 +3,8 @@
 Open-source components the skillscanner image ships (ADR-0176 admission rules: MIT, Apache-2.0, BSD or ISC, or a public-domain
 dedication; maintained; pinned; works air-gapped). The Python closure is pinned by `engines/skillscanner/requirements.txt` (every
 wheel by version and sha256) and installed with `pip install --require-hashes --no-deps --only-binary :all:`. Facts were
-read from the pinned wheels and the sdist on 2026-11-07 (ADR-0242).
+read from the pinned wheels and the sdist on 2026-11-07 (ADR-0242). `litellm` and `filelock` are overridden above the
+upstream pins for published advisories (ADR-0242 §3).
 
 **Admission status: NOT ADMISSIBLE YET.** The image builds and passes its licence gate and offline smoke scan (measured
 locally, 2026-11-07), but it is not published: no digest is recorded in `engines/images.lock.json`, the image-level scan
@@ -43,7 +44,7 @@ ADR-0242 §6). The shipped manifest carries no digest, so the engine cannot be e
 | `easygui` | 0.98.3 | BSD-3-Clause |
 | `fastapi` | 0.162.0 | MIT |
 | `fastuuid` | 0.14.0 | BSD-3-Clause |
-| `filelock` | 3.32.7 | MIT |
+| `filelock` | 4.2.9 | MIT |
 | `flatbuffers` | 25.12.19 | Apache 2.0 |
 | `frozenlist` | 1.8.0 | Apache-2.0 |
 | `fsspec` | 2026.9.0 | BSD-3-Clause |
@@ -123,7 +124,7 @@ ADR-0242 §6). The shipped manifest carries no digest, so the engine cannot be e
 | **pruned:** `oletools/thirdparty/xxxswf`, `oletools/pyxswf.py` | 0.60.2 | no licence stated: removed in the build |
 | oletools' own `thirdparty/` kept: `oledump` (public-domain dedication, Didier Stevens), `tablestream` and `xglob` (BSD-2-Clause), `prettytable` (BSD-3-Clause) | 0.60.2 | as listed (ADR-0242 open question 4) |
 | `yara-x`'s statically linked Rust crates (from the wheel's CycloneDX SBOM) | 1.23.0 | mostly MIT / Apache-2.0; also Apache-2.0 WITH LLVM-exception, Zlib and Unicode-3.0 terms, **pending an owner decision** (ADR-0242 open question 3) |
-| the Go CEL helper inside the skill-scanner wheel (`skill_scanner/core/cel/_bin`) | 2.3.2 | cel-go (Apache-2.0) and the Go standard library (BSD-3-Clause) |
+| the Go CEL helper (`skill_scanner/core/cel/_bin`), REBUILT in the image from the hashed sdist with Go 1.27.3 (the wheel's was Go 1.27.1, with stdlib advisories) | 2.3.2 | its Go modules, per the sdist's `go.mod`: cel-go v0.32.0 and cel.dev/expr (Apache-2.0), protobuf-go and golang.org/x/exp (BSD-3-Clause), antlr4-go (BSD-3-Clause), genproto (Apache-2.0), go.yaml.in/yaml/v3 (MIT and Apache-2.0), and the Go standard library (BSD-3-Clause) |
 
 Cloud clients in this closure (`litellm`, `openai`, `anthropic`) are hard dependencies upstream. The driver never builds an
 analyzer that uses them, refuses to start with any cloud credential set, sets `LITELLM_LOCAL_MODEL_COST_MAP=True` (litellm

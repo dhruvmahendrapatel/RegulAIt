@@ -67,6 +67,17 @@ def failed(out_path, reason, extra=None):
     sys.exit(2)
 
 
+def use_writable_tempdir(out_path):
+    """a read-only sandbox may have no /tmp: the output directory, which the sandbox must give us anyway, serves then"""
+    import tempfile
+
+    try:
+        tempfile.gettempdir()
+    except FileNotFoundError:
+        os.environ["TMPDIR"] = os.path.dirname(os.path.abspath(out_path))
+        tempfile.tempdir = None
+
+
 def slug(text):
     return "".join(c if c.isalnum() else "_" for c in str(text).strip().lower()).strip("_")[:64] or "unnamed"
 
@@ -96,6 +107,7 @@ def main(argv):
     if not os.path.isfile(os.path.join(skill_dir, "SKILL.md")):
         failed(out_path, "no SKILL.md", {"rulesSha256": actual})
 
+    use_writable_tempdir(out_path)
     try:
         from skill_scanner.core.analyzer_factory import build_core_analyzers
         from skill_scanner.core.scan_policy import ScanPolicy

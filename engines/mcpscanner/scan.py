@@ -65,6 +65,18 @@ def failed(out_path, reason, extra=None):
     sys.exit(2)
 
 
+def use_writable_tempdir(out_path):
+    """litellm (imported by mcpscanner's package root) asks for a temp dir at import. A read-only sandbox may have
+    no /tmp: the output directory, which the sandbox must give us anyway, serves then."""
+    import tempfile
+
+    try:
+        tempfile.gettempdir()
+    except FileNotFoundError:
+        os.environ["TMPDIR"] = os.path.dirname(os.path.abspath(out_path))
+        tempfile.tempdir = None
+
+
 def slug(text):
     return "".join(c if c.isalnum() else "_" for c in str(text).strip().lower()).strip("_")[:64] or "unnamed"
 
@@ -100,12 +112,16 @@ def main(argv):
 
     import asyncio
 
-    from mcpscanner.core.analyzers.schema_reference_analyzer import SchemaReferenceAnalyzer
-    from mcpscanner.core.analyzers.static_analyzer import StaticAnalyzer
-    from mcpscanner.core.analyzers.yara_analyzer import YaraAnalyzer
+    use_writable_tempdir(out_path)
+    try:
+        from mcpscanner.core.analyzers.schema_reference_analyzer import SchemaReferenceAnalyzer
+        from mcpscanner.core.analyzers.static_analyzer import StaticAnalyzer
+        from mcpscanner.core.analyzers.yara_analyzer import YaraAnalyzer
 
-    analyzers = [YaraAnalyzer(rules_dir=RULES_DIR), SchemaReferenceAnalyzer()]
-    static = StaticAnalyzer(analyzers=analyzers)
+        analyzers = [YaraAnalyzer(rules_dir=RULES_DIR), SchemaReferenceAnalyzer()]
+        static = StaticAnalyzer(analyzers=analyzers)
+    except Exception as e:  # an engine that cannot start is never a pass
+        failed(out_path, f"engine did not start: {type(e).__name__}", {"rulesSha256": actual})
     built = sorted(type(a).__name__ for a in static.analyzers) if hasattr(static, "analyzers") else None
     if built is not None and built != ["SchemaReferenceAnalyzer", "YaraAnalyzer"]:
         failed(out_path, "unexpected analyzer set", {"rulesSha256": actual})
