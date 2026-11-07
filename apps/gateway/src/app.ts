@@ -393,6 +393,7 @@ export interface BuildAppOptions {
 import { z } from "zod";
 import { boundTargetsForApprovals, registerMcpProxy } from "./mcp-proxy.js";
 import { clearUpstreamCredentialOnUrlMove, registerMcpUpstreamCredentialRoutes } from "./mcp-upstream-credential.js";
+import { disableUpstreamExchangeOnUrlMove, registerUpstreamTokenExchangeRoutes } from "./upstream-token-exchange.js";
 import { registerA2aRoutes } from "./a2a.js";
 import { registerPrivacyOpsRoutes } from "./privacy-ops.js";
 import { ExternalEffectBlockedError } from "./external-effects.js";
@@ -2455,6 +2456,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         // the row lock orders it against a concurrent set: the secret never follows the url to a new destination
         if (body.url !== undefined && written.url !== before.url) {
           await clearUpstreamCredentialOnUrlMove(tx as unknown as Db, {
+            serverId,
+            label,
+            fromUrl: before.url,
+            toUrl: written.url,
+            userId: req.authCtx.userId ?? null,
+          });
+          // ADR-0238: and turns its token exchange off (a token audienced to the old upstream never follows the url)
+          await disableUpstreamExchangeOnUrlMove(tx as unknown as Db, {
             serverId,
             label,
             fromUrl: before.url,
@@ -5776,6 +5785,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0204 — a server's static upstream credential: set, rotate, clear (admin-only through the default gate, each a
   // settings_relax step-up, audited); reads show only whether one is set, its header and last four characters
   registerMcpUpstreamCredentialRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0238: RFC 8693 token exchange for down-scoped upstream credentials (admin, settings_relax step-up)
+  registerUpstreamTokenExchangeRoutes(app, db, { dataKey: opts.dataKey });
   registerA2aRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0097 part A — the admission review queue and the reason-required,
   // audited clear. Admin-only through the default gate, like the MCP registry

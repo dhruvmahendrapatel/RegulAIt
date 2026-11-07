@@ -5537,6 +5537,17 @@ audit, tool references, platform copies, ingested, machine, conversation, signed
 against `information_schema` and against the ADR's generated block. Open: whether to guard jsonb
 `config_versions.body` string leaves; ingested columns stay a residual.
 
+**ADR-0238 (builder, 2026-11-07, Proposed): down-scoped upstream credentials by RFC 8693 token exchange (backlog
+P12(d)).** Step 1 found the `/oauth/token` exchange (ADR-0188 S5) is inbound only: the gateway is its authorization
+server and only resource. Added the gateway as an RFC 8693 client of an upstream's own authorization server, per MCP
+server or connector (migration 0293: `upstream_token_exchanges` plus the `upstream_token_exchange_scopes` join table;
+replay namespace `upstream_exchanged_token`). Off by default; every write is a `settings_relax` step-up; a url move
+turns it off. After the governed decision, the action's mapped scopes (unmapped = refused) are requested with a 60 s
+ES256 assertion for the person, through `oauth4webapi` over the egress-guarded fetch; the answer must stay within
+scope, the pinned audience and a ≤ 900 s lifetime, is claimed against replay, audited without the token, attached to
+that one call only and never cached. UI needs posted on #453. Follow-ups in the ADR (connector base_url move, reverse
+conflict refusals, private_key_jwt, ADR-0231 jwt-bearer profile).
+
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
 (b) standing policy for future scaffolds recorded (ADR-0006, no implementation yet — nothing to

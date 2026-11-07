@@ -299,6 +299,9 @@ export const REPLAY_NAMESPACES = [
   "delegation_authz",
   // ADR-0190 I3: the executor channel's one-use request proofs (migration 0187 widens the CHECK)
   "executor_channel",
+  // ADR-0238: an upstream access token obtained by token exchange (its SHA-256, never the token), so a token an upstream
+  // authorization server hands out twice (to this person or another) is never attached a second time
+  "upstream_exchanged_token",
 ] as const;
 export type ReplayNamespace = (typeof REPLAY_NAMESPACES)[number];
 
