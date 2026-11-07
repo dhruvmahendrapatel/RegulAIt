@@ -1618,6 +1618,27 @@
       "when": 1785209000000,
       "tag": "0282_theme_account_org_lock",
       "breakpoints": true
+    },
+    {
+      "idx": 285,
+      "version": "7",
+      "when": 1785212000000,
+      "tag": "0285_connector_disable",
+      "breakpoints": true
+    },
+    {
+      "idx": 286,
+      "version": "7",
+      "when": 1785213000000,
+      "tag": "0286_mcp_server_disable",
+      "breakpoints": true
+    },
+    {
+      "idx": 287,
+      "version": "7",
+      "when": 1785214000000,
+      "tag": "0287_pm_webhook_secret_rotation",
+      "breakpoints": true
     }
   ]
 }

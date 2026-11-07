@@ -217,6 +217,8 @@ function mailPublicUrl(): { ok: true; url: string } | { ok: false; status: 422; 
 
 /** stable rule ids — the strings an operator greps the audit log for */
 export const CHATOPS_RULE_IDS = {
+  /** ADR-0207 (G3): an inbound callback on a workspace whose connector is disabled, refused after its signature */
+  connectorDisabledRefused: "chatops-connector-disabled-refused",
   connectionRegistered: "chatops-connection-registered",
   connectionDeleted: "chatops-connection-deleted",
   identityLinked: "chatops-identity-linked",
@@ -376,6 +378,16 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
   // test seam that could be true while the shipped path is not.
   const now = () => Math.floor(Date.now() / 1000);
 
+  /** ADR-0207 (G3): true (and one deny audit row) when the workspace's connector is disabled */
+  const refuseDisabledChatConnector = async (conn: { id: string; name: string; connectorId: string }, kind: string): Promise<boolean> => {
+    const [c] = await db.select({ name: connectors.name, disabledAt: connectors.disabledAt }).from(connectors).where(eq(connectors.id, conn.connectorId));
+    if (!c?.disabledAt) return false;
+    await audit(null, "chatops_connection", conn.id, CHATOPS_RULE_IDS.connectorDisabledRefused, "deny",
+      `an inbound ${kind} on ChatOps workspace '${conn.name}' was refused: its connector '${c.name}' is disabled (ADR-0207)`,
+      { connection: conn.name, connectorId: conn.connectorId, inbound: kind });
+    return true;
+  };
+
   const audit = (
     actorUserId: string | null,
     objectType: "chatops_connection" | "chat_identity_link" | "workflow" | "mcp_tool",
@@ -516,6 +528,13 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
     }
     const [connector] = await db.select().from(connectors).where(eq(connectors.id, body.connectorId));
     if (!connector) return reply.status(400).send({ error: "invalid_reference", detail: "connectorId names no connector" });
+    // ADR-0207 (G3), review of #605: a disabled connector carries nothing, so no new workspace is registered on it
+    if (connector.disabledAt) {
+      return reply.status(409).send({
+        error: "connector_disabled",
+        detail: `connector '${connector.name}' is disabled: enable it again before registering a ChatOps workspace on it`,
+      });
+    }
     // the OUTBOUND credential must already live in the ordinary connector store
     if (connector.providerKind !== body.provider) {
       return reply.status(400).send({
@@ -826,6 +845,10 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
   ): Promise<{ ok: true; messageRef: string | null } | { ok: false; status: number; body: Record<string, unknown> }> {
     const [connector] = await db.select().from(connectors).where(eq(connectors.id, conn.connectorId));
     if (!connector) return { ok: false, status: 400, body: { error: "invalid_reference", detail: "the ChatOps connector was deleted" } };
+    // ADR-0207 (G3): a disabled connector carries nothing, the product's own cards and mails included
+    if (connector.disabledAt) {
+      return { ok: false, status: 403, body: { error: "connector_disabled", detail: `connector '${connector.name}' is disabled` } };
+    }
     // ADR-0113 — TEAMS OUTBOUND EXISTS NOW. `connector-provider` grew a real
     // Bot Framework Connector adapter, so the courier routes through the
     // RESOLVED provider for the connection's own provider rather than assuming
@@ -1491,6 +1514,13 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         return reply.status(401).send({ error: "unauthenticated", code: sig.code });
       }
 
+      // ---- ADR-0207 (G3), review of #605: a disabled connector decides nothing
+      // Checked after the signature (the platform is proven, so the deny row is
+      // not an amplification) and before anything is parsed or acted on.
+      if (await refuseDisabledChatConnector(conn, "interaction")) {
+        return reply.status(403).send({ error: "connector_disabled", detail: "this workspace's connector is disabled; nothing sent through it is acted on" });
+      }
+
       // ---- the workspace pin (batch 2b review), before anything is acted on
       const offTeam = await slackTeamRefusal(conn, rawBody, "interaction");
       if (offTeam) return reply.status(offTeam.status).send(offTeam.body);
@@ -1682,6 +1712,9 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         nowSeconds: now(),
       });
       if (!sig.ok) return { ok: false, code: sig.code };
+      // ADR-0207 (G3), review of #605: a disabled connector acts on nothing (after the signature, so the deny row is
+      // never written for an unproven packet)
+      if (await refuseDisabledChatConnector(conn, provider === "slack" ? "event" : "message")) return { ok: false, code: "connector_disabled" };
       return { ok: true, v: { conn, rawBody, headers } };
     };
 

@@ -310,6 +310,9 @@ async function connectorWriteBinding(
   };
 }
 
+/** ADR-0207 (G3): the rule id of the refusal a disabled connector answers with */
+export const CONNECTOR_DISABLED_RULE_ID = "connector-disabled-refused";
+
 export async function executeGovernedConnectorCall(
   db: Db,
   dataKey: string | undefined,
@@ -400,6 +403,18 @@ export async function executeGovernedConnectorCall(
   const sink: { usageEventId?: string | null; costUsd?: number | null } = {};
   let binding: ConnectorWriteBinding | null = null;
   const attempt = async (out: ConnectorReplyRecorder): Promise<ConnectorAttemptResult> => {
+    // ADR-0207 (G3): a disabled connector refuses every governed call, first and before any other check, so a call
+    // that waited for an approval is refused when it comes back to run, and nothing is sent or metered.
+    if (connector.disabledAt) {
+      const reason =
+        `Connector '${connector.name}' is disabled (since ${connector.disabledAt.toISOString()}): every governed call ` +
+        "to it is refused until an admin enables it again";
+      await db.insert(auditLog).values({ userId, objectType: "connector", objectId: connectorId,
+        detail: { phase: "connector-disabled", operation: body.operation, ...(projectId ? { projectId } : {}), ...(args.detail ?? {}),
+          receiptClass: "decision" },
+        effect: "deny", ruleId: CONNECTOR_DISABLED_RULE_ID, ruleChain: [], reason });
+      return out.status(403).send({ error: "connector_disabled", ruleId: CONNECTOR_DISABLED_RULE_ID, detail: reason });
+    }
     // pillar 5 + ADR-0011: attribution must point at a real project the caller
     // may bill to — mirror the model invoke path. Checked up front, before any
     // execution or metering can happen.

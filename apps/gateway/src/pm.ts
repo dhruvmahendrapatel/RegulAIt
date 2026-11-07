@@ -40,9 +40,14 @@ import {
   createDecisionSchema,
   createPmConnectionSchema,
   pmSyncSchema,
+  replaceConnectionTokenSchema,
+  rotatePmWebhookSecretSchema,
+  updatePmConnectionSchema,
 } from "@regulait/shared";
 import { refuseIfExpansionBlocked } from "./licensing.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
+import { requireStepUp } from "./step-up.js";
+import { connectionMoveStepUp, connectionTokenStepUp, TOKEN_REQUIRED_FOR_MOVE } from "./integration-lifecycle.js";
 import {
   ConnectionEgressBlockedError,
   guardConnectionCall,
@@ -83,8 +88,19 @@ const CONNECTION_COLUMNS = {
   project: pmConnections.project,
   mapping: pmConnections.mapping,
   apiVersion: pmConnections.apiVersion,
+  driftResolution: pmConnections.driftResolution,
+  /** ADR-0207 (G6): while a rotation's grace window is open (database clock), when the previous webhook secret stops
+   * being accepted; null otherwise */
+  previousSecretValidUntil: sql<Date | null>`CASE WHEN ${pmConnections.previousWebhookSecretValidUntil} > now() THEN ${pmConnections.previousWebhookSecretValidUntil} END`.mapWith(
+    pmConnections.previousWebhookSecretValidUntil,
+  ),
   createdAt: pmConnections.createdAt,
 };
+
+/** ADR-0207 (G6): how long the previous webhook secret is still accepted after a rotation */
+export const PM_WEBHOOK_SECRET_OVERLAP_HOURS = 24;
+/** a fresh per-connection webhook secret (ADR-0010): shown once, stored as a hash and an envelope */
+const mintWebhookSecret = () => `rglwh_${randomBytes(24).toString("hex")}`;
 
 /**
  * ADR-0034 amendment #2 — EVERY PM PROVIDER RESOLUTION GOES THROUGH THE EGRESS
@@ -446,7 +462,7 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
     // an AES-256-GCM ciphertext is stored alongside because provider-native
     // verification (linear/asana HMAC signatures, generic's signed envelope)
     // must re-derive MACs from the secret itself — a hash cannot key an HMAC.
-    const webhookSecret = `rglwh_${randomBytes(24).toString("hex")}`;
+    const webhookSecret = mintWebhookSecret();
     const dataKey = opts.dataKey;
     // #453 follow-up: the creation is on the record in the same transaction as the row, as the delete is
     const row = await db.transaction(async (tx) => {
@@ -523,6 +539,209 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
     });
     if (!removed) return reply.status(404).send({ error: "unknown_connection" });
     return { removed: true, ...removed };
+  });
+
+  // ADR-0207 (G6): edit a connection, replace its token and rotate its webhook secret. The name is part of the webhook
+  // address and the provider decides the adapter, so neither can change. A new base URL is adjudicated by the egress
+  // guard again, as on create; a rotation only tightens, so it needs no step-up. Review of #605: a base URL change
+  // would send the stored token to another host, so it needs the new host's token in the same request (the stored one
+  // is replaced, never sent there) and a `settings_relax` step-up bound to the connection and both URLs; replacing the
+  // token needs one bound to the connection. Each change is audited in the same transaction as its write, and no
+  // response ever carries the token.
+  const pmName = z.object({ name: z.string().min(1).max(256) });
+  app.patch("/v1/pm/connections/:name", async (req, reply) => {
+    const { name } = pmName.parse(req.params);
+    const parsedBody = updatePmConnectionSchema.safeParse(req.body);
+    // the body may hold a token, and a zod issue list could echo it: the messages only, never the values
+    if (!parsedBody.success) return reply.status(400).send({ error: "invalid_request", detail: parsedBody.error.issues.map((i) => i.message).join("; ") });
+    const body = parsedBody.data;
+    if (!opts.dataKey) return reply.status(503).send({ error: "pm_connections_require_data_key" });
+    const [before] = await db.select().from(pmConnections).where(eq(pmConnections.name, name));
+    if (!before) return reply.status(404).send({ error: "unknown_connection" });
+    const moves = body.baseUrl !== undefined && body.baseUrl !== before.baseUrl;
+    if (moves && body.token === undefined) return reply.status(422).send(TOKEN_REQUIRED_FOR_MOVE);
+    if (!moves && body.token !== undefined) {
+      return reply.status(400).send({ error: "invalid_request", detail: "the base URL is unchanged: replace the token with POST /v1/pm/connections/:name/token" });
+    }
+    if (body.apiVersion != null && before.provider !== "jira") {
+      return reply.status(400).send({ error: "invalid_request", detail: "apiVersion only applies to jira connections" });
+    }
+    const next = {
+      project: body.project ?? before.project,
+      baseUrl: body.baseUrl === undefined ? before.baseUrl : body.baseUrl,
+      apiVersion: body.apiVersion === undefined ? before.apiVersion : body.apiVersion,
+      driftResolution: body.driftResolution ?? before.driftResolution,
+    };
+    // the edited connection must still resolve, exactly as a new one must
+    try {
+      resolvePmProvider({ provider: before.provider, token: moves && body.token !== undefined ? body.token : decryptSecret(opts.dataKey, before.tokenCiphertext), baseUrl: next.baseUrl, apiVersion: next.apiVersion });
+    } catch (err) {
+      if (err instanceof PmProviderError) return reply.status(422).send({ error: "unsupported_pm_provider", detail: err.message });
+      throw err;
+    }
+    if (next.baseUrl && next.baseUrl !== before.baseUrl) {
+      const refusal = await refuseConnectionEgressWrite(db, {
+        surface: "pm_connection",
+        baseUrl: next.baseUrl,
+        userId: req.authCtx.userId ?? null,
+        phase: "pm_connection_write",
+        label: `pm connection '${name}' baseUrl`,
+        detail: { name, provider: before.provider },
+      });
+      if (refusal) return reply.status(400).send(refusal);
+    }
+    const fields = ["project", "baseUrl", "apiVersion", "driftResolution"] as const;
+    const changed = fields.filter((f) => next[f] !== before[f]);
+    if (changed.length === 0) {
+      const [row] = await db.select(CONNECTION_COLUMNS).from(pmConnections).where(eq(pmConnections.id, before.id));
+      return row;
+    }
+    let stepUp: string | null = null;
+    if (moves) {
+      const su = await requireStepUp(db, req, reply, connectionMoveStepUp("pm_connection", before.id, before.baseUrl, next.baseUrl));
+      if (!su.ok) return reply;
+      stepUp = su.method;
+    }
+    const dataKey = opts.dataKey;
+    const row = await db.transaction(async (tx) => {
+      const [r] = await tx
+        .update(pmConnections)
+        .set({ ...next, ...(moves && body.token !== undefined ? { tokenCiphertext: encryptSecret(dataKey, body.token) } : {}) })
+        // compare-and-set on every field the audit row reports as "from"
+        .where(
+          and(
+            eq(pmConnections.id, before.id),
+            eq(pmConnections.project, before.project),
+            sql`${pmConnections.baseUrl} IS NOT DISTINCT FROM ${before.baseUrl}`,
+            sql`${pmConnections.apiVersion} IS NOT DISTINCT FROM ${before.apiVersion}`,
+            eq(pmConnections.driftResolution, before.driftResolution),
+          ),
+        )
+        .returning(CONNECTION_COLUMNS);
+      if (!r) return null;
+      await tx.insert(auditLog).values({
+        userId: req.authCtx.userId ?? SYSTEM_IDENTITY,
+        objectType: "pm_connection",
+        objectId: before.id,
+        detail: {
+          phase: "updated",
+          name,
+          provider: before.provider,
+          from: Object.fromEntries(changed.map((f) => [f, before[f]])),
+          to: Object.fromEntries(changed.map((f) => [f, next[f]])),
+          ...(moves ? { tokenReplaced: true, stepUp } : {}),
+        },
+        effect: "allow",
+        ruleId: "pm-connection-updated",
+        ruleChain: [],
+        reason:
+          `PM connection '${name}' updated: ${changed.join(", ")}` +
+          (moves ? "; the token was replaced with the new host's (the previous one was never sent there)" : ""),
+      });
+      return r;
+    });
+    if (!row) return reply.status(409).send({ error: "changed_concurrently", detail: "the connection changed while this edit was decided; reload and try again" });
+    return row;
+  });
+
+  app.post("/v1/pm/connections/:name/token", async (req, reply) => {
+    const { name } = pmName.parse(req.params);
+    const parsed = replaceConnectionTokenSchema.safeParse(req.body);
+    // the zod issue list could echo the body back, and the body holds the token: a fixed sentence instead
+    if (!parsed.success) return reply.status(400).send({ error: "invalid_request", detail: "expected { token } (1 to 512 characters)" });
+    if (!opts.dataKey) return reply.status(503).send({ error: "pm_connections_require_data_key" });
+    const dataKey = opts.dataKey;
+    const [target] = await db.select({ id: pmConnections.id }).from(pmConnections).where(eq(pmConnections.name, name));
+    if (!target) return reply.status(404).send({ error: "unknown_connection" });
+    // review of #605: a credential change, so a step-up bound to this connection (ADR-0204's credential routes)
+    const su = await requireStepUp(db, req, reply, connectionTokenStepUp("pm_connection", target.id));
+    if (!su.ok) return reply;
+    const out = await db.transaction(async (tx) => {
+      const [r] = await tx
+        .update(pmConnections)
+        .set({ tokenCiphertext: encryptSecret(dataKey, parsed.data.token) })
+        .where(eq(pmConnections.id, target.id))
+        .returning({ id: pmConnections.id, provider: pmConnections.provider, secretSetAt: pmConnections.secretSetAt });
+      if (!r) return null;
+      await tx.insert(auditLog).values({
+        userId: req.authCtx.userId ?? SYSTEM_IDENTITY,
+        objectType: "pm_connection",
+        objectId: r.id,
+        detail: { phase: "token-rotated", name, provider: r.provider, stepUp: su.method },
+        effect: "allow",
+        ruleId: "pm-connection-token-rotated",
+        ruleChain: [],
+        reason: `PM connection '${name}': token replaced; the previous token was destroyed here (revoke it in the PM tool)`,
+      });
+      return r;
+    });
+    if (!out) return reply.status(404).send({ error: "unknown_connection" });
+    return { replaced: true, secretSetAt: out.secretSetAt };
+  });
+
+  app.post("/v1/pm/connections/:name/webhook-secret/rotate", async (req, reply) => {
+    const { name } = pmName.parse(req.params);
+    const body = rotatePmWebhookSecretSchema.parse(req.body ?? {});
+    if (!opts.dataKey) return reply.status(503).send({ error: "pm_connections_require_data_key" });
+    const dataKey = opts.dataKey;
+    const webhookSecret = mintWebhookSecret();
+    const immediate = body.immediate === true;
+    const out = await db.transaction(async (tx) => {
+      const [conn] = await tx
+        .select({
+          id: pmConnections.id,
+          provider: pmConnections.provider,
+          hash: pmConnections.webhookSecretHash,
+          ciphertext: pmConnections.webhookSecretCiphertext,
+          // decided on the database clock, like the webhook's own check
+          windowOpen: sql<boolean>`coalesce(${pmConnections.previousWebhookSecretValidUntil} > now(), false)`,
+          validUntil: pmConnections.previousWebhookSecretValidUntil,
+        })
+        .from(pmConnections)
+        .where(eq(pmConnections.name, name))
+        .for("update");
+      if (!conn) return { status: 404, body: { error: "unknown_connection" } as Record<string, unknown> };
+      if (conn.windowOpen && !immediate) {
+        return {
+          status: 409,
+          body: {
+            error: "rotation_in_progress",
+            detail: "a rotation's grace window is still open: wait until the previous secret expires, or rotate immediately",
+            previousValidUntil: conn.validUntil,
+          } as Record<string, unknown>,
+        };
+      }
+      // the current secret becomes the previous one for the overlap; an immediate rotation (or a connection with no
+      // secret yet) keeps none, so every older secret stops working now
+      const keepPrevious = !immediate && conn.hash !== null;
+      const [r] = await tx
+        .update(pmConnections)
+        .set({
+          webhookSecretHash: sha256(webhookSecret),
+          webhookSecretCiphertext: encryptSecret(dataKey, webhookSecret),
+          previousWebhookSecretHash: keepPrevious ? conn.hash : null,
+          previousWebhookSecretCiphertext: keepPrevious ? conn.ciphertext : null,
+          previousWebhookSecretValidUntil: keepPrevious ? sql`now() + make_interval(hours => ${PM_WEBHOOK_SECRET_OVERLAP_HOURS})` : null,
+        })
+        .where(eq(pmConnections.id, conn.id))
+        .returning({ previousValidUntil: pmConnections.previousWebhookSecretValidUntil });
+      await tx.insert(auditLog).values({
+        userId: req.authCtx.userId ?? SYSTEM_IDENTITY,
+        objectType: "pm_connection",
+        objectId: conn.id,
+        detail: { phase: "webhook-secret-rotated", name, provider: conn.provider, immediate, previousValidUntil: r?.previousValidUntil ?? null },
+        effect: "allow",
+        ruleId: "pm-webhook-secret-rotated",
+        ruleChain: [],
+        reason:
+          `PM connection '${name}': webhook secret rotated; ` +
+          (r?.previousValidUntil
+            ? `the previous secret is accepted until ${r.previousValidUntil.toISOString()}`
+            : "every older secret stopped working at once"),
+      });
+      return { status: 200, body: { webhookSecret, previousValidUntil: r?.previousValidUntil ?? null } as Record<string, unknown> };
+    });
+    return reply.status(out.status).send(out.body);
   });
 
   // §2/§3: link every task-graph node to a real work item in the customer's
@@ -1057,31 +1276,46 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
       // before the ciphertext column can still authenticate legacy-header
       // traffic — a presented value whose sha256 matches the stored hash IS
       // the secret.
-      let secret: string | null = null;
-      if (conn.webhookSecretCiphertext && opts.dataKey) {
-        secret = decryptSecret(opts.dataKey, conn.webhookSecretCiphertext);
-      } else {
+      const secretFrom = (hash: string, ciphertext: string | null): string | null => {
+        if (ciphertext && opts.dataKey) return decryptSecret(opts.dataKey, ciphertext);
         const presented = headers["x-regulait-webhook-secret"];
-        if (typeof presented === "string") {
-          const presentedHash = Buffer.from(sha256(presented), "hex");
-          const storedHash = Buffer.from(conn.webhookSecretHash, "hex");
-          if (constantTimeEqual(presentedHash, storedHash)) {
-            secret = presented;
-          }
+        if (typeof presented !== "string") return null;
+        const presentedHash = Buffer.from(sha256(presented), "hex");
+        return constantTimeEqual(presentedHash, Buffer.from(hash, "hex")) ? presented : null;
+      };
+      // ADR-0207 (G6): during a rotation's grace window (database clock) the previous secret is accepted too, tried
+      // only after the current one fails verification; once the window closes it is never read
+      const [previous] = await db
+        .select({ hash: pmConnections.previousWebhookSecretHash, ciphertext: pmConnections.previousWebhookSecretCiphertext })
+        .from(pmConnections)
+        .where(and(eq(pmConnections.id, conn.id), sql`${pmConnections.previousWebhookSecretValidUntil} > now()`));
+      const secrets = [
+        secretFrom(conn.webhookSecretHash, conn.webhookSecretCiphertext),
+        previous?.hash ? secretFrom(previous.hash, previous.ciphertext) : null,
+      ].filter((v): v is string => v !== null);
+      if (secrets.length === 0) return reply.status(401).send({ error: "unauthenticated" });
+
+      let result: ReturnType<typeof parseInboundWebhook> | undefined;
+      let failure: unknown = null;
+      for (const secret of secrets) {
+        try {
+          result = parseInboundWebhook(conn.provider, {
+            headers,
+            query,
+            rawBody,
+            secret,
+            connectionProject: conn.project,
+          });
+          failure = null;
+          break;
+        } catch (err) {
+          failure = err;
+          // a verification failure tries the next accepted secret; anything else (malformed, a bug) stops here
+          if (!(err instanceof PmProviderError) || err.status === 400) break;
         }
       }
-      if (secret === null) return reply.status(401).send({ error: "unauthenticated" });
-
-      let result;
-      try {
-        result = parseInboundWebhook(conn.provider, {
-          headers,
-          query,
-          rawBody,
-          secret,
-          connectionProject: conn.project,
-        });
-      } catch (err) {
+      if (failure !== null || result === undefined) {
+        const err = failure;
         if (err instanceof PmProviderError) {
           // 400 = verified but malformed; anything else = verification
           // failure. Neither response carries secret material.

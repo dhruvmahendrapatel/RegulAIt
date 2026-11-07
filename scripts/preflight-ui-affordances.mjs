@@ -84,9 +84,6 @@ export const NO_REMOVE_BY_DESIGN = new Map([
  */
 export const KNOWN_REMOVE_GAPS = new Map([
   ["/v1/projects", "G1 project archive (#604)"],
-  ["/v1/connectors", "G3 connector disable and delete (#605)"],
-  ["/v1/servers", "G4 MCP server disable and delete (#605)"],
-  ["/v1/mcp-registries", "G9 MCP registry remove (#606)"],
   ["/v1/llm/datasets", "not yet proposed: fine-tuning datasets have no retire; raise on #453"],
 ]);
 

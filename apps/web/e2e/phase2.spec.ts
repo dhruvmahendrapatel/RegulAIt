@@ -560,7 +560,7 @@ test("mcp servers: set a per-tool price override and see it persist (O10)", asyn
 
 test("git connections: seeded connection listed with provider hints", async () => {
   await nav("Git connections", "Git connections");
-  await expect(page.getByRole("cell", { name: "demo-git" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "demo-git", exact: true })).toBeVisible();
   await shot(page, "phase2-20-git-connections");
   track.assertClean("git connections");
 });
@@ -569,7 +569,8 @@ test("pm connections: create a mock connection → one-time webhook secret revea
   await nav("PM connections", "PM connections");
   await page.getByLabel("Name").fill(`e2e-pm-${Date.now() % 100000}`);
   await page.getByLabel("Project", { exact: false }).first().fill("E2E-DEMO");
-  await page.getByLabel("Token").fill("e2e-token");
+  // exact: the row's "Replace token: <name>" button also carries the word (ADR-0207)
+  await page.getByLabel("Token", { exact: true }).fill("e2e-token");
   await page.getByRole("button", { name: "Add connection" }).click();
   await expect(page.getByTestId("revealed-secret")).toBeVisible();
   await shot(page, "phase2-21-pm-connections");
