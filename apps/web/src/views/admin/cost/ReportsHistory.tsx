@@ -8,9 +8,10 @@
  *    (`GET /v1/reports/runs?definitionId=&limit=`). A non-admin gets only the
  *    runs they could have generated themselves; the page says so.
  */
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
+import { DataList } from "../../../ui/DataList";
 import { ago, fmtAt, fmtUsd } from "../../../api/format";
 import { Badge, Button, Card, EmptyState, Field, Select, Table } from "../../../ui/kit";
 import { KV, useProjects } from "../adminKit";
@@ -208,16 +209,9 @@ export function ReportDefinitionDetail(props: { id: string; onClose: () => void;
   );
 }
 
-const RUN_LIMITS = [50, 100, 200] as const;
-
 export function ReportRunsCard(props: { definitions: Array<{ id: string; name: string }>; onOpenRun: (id: string) => void }) {
   const [definitionId, setDefinitionId] = useState("");
-  const [limit, setLimit] = useState<number>(RUN_LIMITS[0]);
-  const q = useQuery({
-    queryKey: ["admin", "report-runs", definitionId, limit],
-    queryFn: () =>
-      api.get<{ runs: RunRecord[] }>(`/v1/reports/runs?limit=${limit}${definitionId ? `&definitionId=${encodeURIComponent(definitionId)}` : ""}`),
-  });
+  const filters = useMemo(() => ({ definitionId: definitionId || undefined }), [definitionId]);
   const defName = new Map(props.definitions.map((d) => [d.id, d.name]));
   return (
     <Card title="Run history">
@@ -233,35 +227,32 @@ export function ReportRunsCard(props: { definitions: Array<{ id: string; name: s
               ))}
             </Select>
           </Field>
-          <Field label="Show at most">
-            <Select value={String(limit)} onChange={(e) => setLimit(Number(e.target.value))}>
-              {RUN_LIMITS.map((n) => (
-                <option key={n} value={n}>
-                  {n}
-                </option>
-              ))}
-            </Select>
-          </Field>
         </div>
-        <Table<RunRecord>
-          rows={q.data?.runs}
-          loading={q.isLoading}
-          error={q.error}
-          onRetry={() => void q.refetch()}
+        <DataList<RunRecord & { definitionName?: string | null }>
+          listId="report-runs"
+          noun="report runs"
+          endpoint="/v1/reports/runs"
+          exportPath="/v1/reports/runs/export.xlsx"
+          queryKey={["admin", "report-runs", "list"]}
+          legacyKey="runs"
+          filters={filters}
+          defaultSort={{ key: "g", dir: "desc" }}
           rowKey={(r) => r.id}
           empty={<EmptyState title="No runs" body="No report matching this filter has been generated, or none is within what you can see." />}
           columns={[
-            { key: "d", header: "Definition", render: (r) => defName.get(r.definitionId) ?? "deleted definition" },
-            { key: "g", header: "Generated", render: (r) => ago(r.generatedAt) },
-            { key: "t", header: "Trigger", render: (r) => r.trigger },
-            { key: "p", header: "Period", render: (r) => `${r.periodStart.slice(0, 10)} – ${r.periodEnd.slice(0, 10)}` },
-            { key: "s", header: "Entitlement", render: (r) => (r.effectiveProjectIds === null ? "org-wide" : `${r.effectiveProjectIds.length} project(s)`) },
-            { key: "n", header: "Rows", align: "right", render: (r) => r.rowCount },
+            { key: "d", header: "Definition", main: true, sortable: true, render: (r) => r.definitionName ?? defName.get(r.definitionId) ?? "deleted definition" },
+            { key: "g", header: "Generated", main: true, sortable: true, render: (r) => ago(r.generatedAt) },
+            { key: "t", header: "Trigger", main: true, sortable: true, render: (r) => r.trigger },
+            { key: "p", header: "Period", main: true, sortable: true, render: (r) => `${r.periodStart.slice(0, 10)} – ${r.periodEnd.slice(0, 10)}` },
+            { key: "s", header: "Entitlement", main: true, sortable: true, render: (r) => (r.effectiveProjectIds === null ? "org-wide" : `${r.effectiveProjectIds.length} project(s)`) },
+            { key: "n", header: "Rows", main: true, sortable: true, align: "right", render: (r) => r.rowCount },
+            { key: "f", header: "Format", sortable: true, render: (r) => r.format },
             {
               key: "o",
               header: "",
               srHeader: "Actions",
               align: "right",
+              action: true,
               render: (r) => (
                 <Button size="sm" aria-label={`Open the ${defName.get(r.definitionId) ?? "report"} run from ${ago(r.generatedAt)}`} onClick={() => props.onOpenRun(r.id)}>
                   Open
@@ -270,7 +261,6 @@ export function ReportRunsCard(props: { definitions: Array<{ id: string; name: s
             },
           ]}
         />
-        {(q.data?.runs?.length ?? 0) >= limit && <p className={v.faint}>Showing the newest {limit}. Choose a definition, or raise the limit, for older runs.</p>}
         <p className={v.faint}>Only runs you could generate yourself are listed; an administrator sees every run.</p>
       </div>
     </Card>
