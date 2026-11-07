@@ -11,6 +11,9 @@
  *    cookie carries only an opaque 256-bit handle (no user id, no TOTP state),
  *    with HttpOnly, SameSite, a narrow Path, a minutes-long Max-Age and Secure
  *    over TLS; the server keeps only sha256(handle).
+ * 3. The same rule on the ADR-0240 external-portal challenge cookie (PR #709): an
+ *    opaque 256-bit handle, HttpOnly, SameSite=Strict, scoped to one verify path,
+ *    at most 10 minutes; the server keeps only sha256(handle).
  *
  * Pure: no database.
  */
@@ -20,6 +23,8 @@ import { generateFeedbackLinkToken } from "./feedback.js";
 import { generateScimToken } from "./scim.js";
 import { hashToken } from "./token-hash.js";
 import { generateVirtualKeyToken } from "./virtual-keys.js";
+import { challengeCookie, newChallengeToken } from "./external-mfa.js";
+import { EXTERNAL_MFA_COOKIE } from "@regulait/shared";
 
 /** bits of randomness in a token: the random part after its fixed prefix */
 function randomBits(token: string, prefix: string, encoding: "hex" | "base64url"): number {
@@ -34,6 +39,7 @@ describe("hashToken only ever sees high-entropy, server-generated tokens", () =>
     ["session / pending-MFA handle (generateSessionToken)", generateSessionToken, "rgls_", 256],
     ["SCIM token (generateScimToken)", generateScimToken, "rglscim_", 256],
     ["signed feedback link (generateFeedbackLinkToken, ADR-0182 A13)", generateFeedbackLinkToken, "rglf_", 256],
+    ["external-portal MFA challenge (newChallengeToken, ADR-0240)", newChallengeToken, "rgxm_", 256],
   ];
 
   for (const [name, generate, prefix, bits] of generators) {
@@ -63,5 +69,19 @@ describe("the pending-MFA cookie carries an opaque handle, never state", () => {
     expect(mfaPendingCookie(token, false, 300)).not.toContain("Secure");
     // the clearing form written after /auth/mfa/verify holds nothing at all
     expect(mfaPendingCookie("", true, 0)).toBe(`${MFA_PENDING_COOKIE}=; Path=/auth/mfa; HttpOnly; SameSite=Lax; Max-Age=0; Secure`);
+  });
+});
+
+describe("the external-portal MFA challenge cookie carries an opaque handle, never state (ADR-0240)", () => {
+  it("is HttpOnly, SameSite=Strict, scoped to the portal's verify path, and clears to an empty value", () => {
+    const { token } = newChallengeToken();
+    expect(challengeCookie("supplier", token, true, 600)).toBe(
+      `${EXTERNAL_MFA_COOKIE}=${token}; Path=/supplier/v1/session/mfa; HttpOnly; SameSite=Strict; Max-Age=600; Secure`,
+    );
+    expect(challengeCookie("auditor", token, true, 600)).toBe(
+      `${EXTERNAL_MFA_COOKIE}=${token}; Path=/v1/auditor/session/mfa; HttpOnly; SameSite=Strict; Max-Age=600; Secure`,
+    );
+    expect(challengeCookie("auditor", "", true, 0)).toBe(`${EXTERNAL_MFA_COOKIE}=; Path=/v1/auditor/session/mfa; HttpOnly; SameSite=Strict; Max-Age=0; Secure`);
+    expect(token).toMatch(/^rgxm_[0-9a-f]{64}$/);
   });
 });

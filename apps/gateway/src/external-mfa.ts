@@ -68,6 +68,12 @@ export async function loadFactorView(db: Db, portal: ExternalMfaPortal, grantId:
   };
 }
 
+/** a challenge handle: 256 random bits, opaque (no grant, factor or code in it); only its sha256 is stored */
+export function newChallengeToken(): { token: string; tokenHash: string } {
+  const token = EXTERNAL_MFA_TOKEN_PREFIX + randomBytes(32).toString("hex");
+  return { token, tokenHash: hashToken(token) };
+}
+
 export type StartOutcome =
   | { kind: "locked"; factorId: string }
   | { kind: "challenge"; factorId: string; token: string; expiresAt: Date; enrol: { secret: string; otpauthUri: string } | null };
@@ -104,13 +110,13 @@ export async function startChallenge(tx: Db, ref: ExternalGrantRef, dataKey: str
     .update(externalMfaChallenges)
     .set({ revokedAt: sql`now()` })
     .where(and(eq(externalMfaChallenges.factorId, factor!.id), isNull(externalMfaChallenges.consumedAt), isNull(externalMfaChallenges.revokedAt)));
-  const token = EXTERNAL_MFA_TOKEN_PREFIX + randomBytes(32).toString("hex");
+  const { token, tokenHash } = newChallengeToken();
   const [challenge] = await tx
     .insert(externalMfaChallenges)
     .values({
       factorId: factor!.id,
       ...(ref.portal === "supplier" ? { supplierInvitationId: ref.linkId } : { auditorLinkId: ref.linkId }),
-      tokenHash: hashToken(token),
+      tokenHash,
       expiresAt: sql`now() + make_interval(mins => ${L.challengeMinutes})`,
     })
     .returning();
