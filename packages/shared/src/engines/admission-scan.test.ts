@@ -112,7 +112,10 @@ describe("ADR-0242 the manifest, the images and the lockfiles agree", () => {
     ["skillscanner", "cisco-ai-skill-scanner", "2.3.2"],
   ])("%s: the requirements pin %s==%s by hash, and the Dockerfile and driver name the same version", (id, pkg, version) => {
     const req = readFileSync(path.join(root, "engines", id, "requirements.txt"), "utf8");
-    expect(req).toMatch(new RegExp(`^${pkg}==${version.replace(/\./g, "\\.")} \\\\\\n    --hash=sha256:[0-9a-f]{64}$`, "m"));
+    // a plain string check (no regex built from data): the pin line, then its hash line
+    const pinAt = req.split("\n").indexOf(`${pkg}==${version} \\`);
+    expect(pinAt).toBeGreaterThanOrEqual(0);
+    expect(req.split("\n")[pinAt + 1]).toMatch(/^    --hash=sha256:[0-9a-f]{64}$/);
     // every pinned line carries exactly one hash
     const pins = req.split("\n").filter((l) => /^[A-Za-z0-9_.-]+==/.test(l));
     expect(req.match(/--hash=sha256:[0-9a-f]{64}/g)?.length).toBe(pins.length);
