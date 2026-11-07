@@ -955,6 +955,60 @@ export const mcpServerUpstreamCredentials = pgTable(
 export type McpServerUpstreamCredentialRow = typeof mcpServerUpstreamCredentials.$inferSelect;
 
 /**
+ * ADR-0238 (P12(d), migration 0299) — RFC 8693 token exchange for DOWN-SCOPED upstream credentials. At most one row
+ * per MCP server or per connector (exactly one foreign key set). No row, or `enabled` false (the default), exchanges
+ * nothing. Written only by the admin routes (settings_relax step-up), each write audited in its transaction. The
+ * client secret is the data-key envelope (CIPHERTEXT_COLUMNS); `secretSetAt` is stamped by `regulait_stamp_secret_set`.
+ * Admin-owned configuration: no ADR-0234 RLS batch.
+ */
+export const upstreamTokenExchanges = pgTable(
+  "upstream_token_exchanges",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    mcpServerId: uuid("mcp_server_id").references(() => mcpServers.id, { onDelete: "cascade" }),
+    connectorId: uuid("connector_id").references(() => connectors.id, { onDelete: "cascade" }),
+    enabled: boolean("enabled").notNull().default(false),
+    tokenEndpoint: text("token_endpoint").notNull(),
+    /** the `aud` of the subject token we present (the upstream authorization server's identifier) */
+    subjectTokenAudience: text("subject_token_audience").notNull(),
+    /** RFC 8693 `audience` of the issued token: pinned here, never taken from a call */
+    audience: text("audience").notNull(),
+    /** RFC 8707 `resource`, when wanted */
+    resource: text("resource"),
+    clientId: text("client_id").notNull(),
+    clientSecretCiphertext: text("client_secret_ciphertext").notNull(),
+    clientSecretLast4: text("client_secret_last4").notNull(),
+    maxTokenTtlSeconds: integer("max_token_ttl_seconds").notNull().default(300),
+    setBy: uuid("set_by").references(() => users.id, { onDelete: "set null" }),
+    secretSetAt: timestamp("secret_set_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("upstream_token_exchanges_server_uq").on(t.mcpServerId),
+    unique("upstream_token_exchanges_connector_uq").on(t.connectorId),
+    check("upstream_token_exchanges_target_check", sql`(${t.mcpServerId} IS NULL) <> (${t.connectorId} IS NULL)`),
+    check("upstream_token_exchanges_ttl_check", sql`${t.maxTokenTtlSeconds} BETWEEN 30 AND 900`),
+    check("upstream_token_exchanges_last4_check", sql`char_length(${t.clientSecretLast4}) = 4`),
+  ],
+);
+export type UpstreamTokenExchangeRow = typeof upstreamTokenExchanges.$inferSelect;
+
+/** ADR-0238: the per-action scope map (one row per configuration, action and scope; an unmapped action is refused) */
+export const upstreamTokenExchangeScopes = pgTable(
+  "upstream_token_exchange_scopes",
+  {
+    exchangeId: uuid("exchange_id")
+      .notNull()
+      .references(() => upstreamTokenExchanges.id, { onDelete: "cascade" }),
+    /** an MCP tool name, an MCP JSON-RPC method, or a connector operation */
+    action: text("action").notNull(),
+    scope: text("scope").notNull(),
+  },
+  (t) => [primaryKey({ name: "upstream_token_exchange_scopes_pk", columns: [t.exchangeId, t.action, t.scope] })],
+);
+
+/**
  * ADR-0219 (P10, migration 0253) — A REMOTE AGENT reached over the agent-to-agent (A2A) protocol. Registered by an
  * admin only while `org_settings.a2a_enabled`; its card was read through the guarded fetch and is kept as a bounded
  * snapshot. Every call goes through `executeGovernedA2aCall` (a2a.ts): the person's grant (default-deny), the lead

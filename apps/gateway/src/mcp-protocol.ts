@@ -43,6 +43,7 @@ import type { GovernedActor } from "@regulait/policy-kernel";
 import { DelegationRefusedError } from "./delegation.js";
 import { actorForGrant, delegationRefusalDecision } from "./in-process-delegation.js";
 import { armOutboundIdentity, outboundIdentityFor } from "./mcp-identity-assertion.js";
+import { armUpstreamExchange, UpstreamExchangeHolder } from "./upstream-token-exchange.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
@@ -631,12 +632,26 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs, stdioHold: {
     });
     if (!armed.ok) return { kind: "denied", decision: armed.decision };
   }
+  // ADR-0238: a token-exchange server receives only a token obtained for the scopes mapped to THIS method
+  const upstreamExchange = new UpstreamExchangeHolder(serverRow.url);
+  {
+    const exchanged = await armUpstreamExchange(upstreamExchange, {
+      db,
+      dataKey: args.dataKey,
+      server: serverRow,
+      sponsorUserId: userId,
+      actors: delegatedActor ? delegatedActor.chain.actors : null,
+      action: method,
+      projectId,
+    });
+    if (!exchanged.ok) return { kind: "denied", decision: exchanged.decision };
+  }
   const breaker = await breakerAdmits(db, serverRow);
   if (breaker) return { kind: "upstream_circuit_open", reason: breaker.reason, retryAfterMs: breaker.refusedUntilMs };
   let upstream: Client | null = null;
   try {
     try {
-      upstream = await connectUpstream(db, serverRow, { outboundIdentity, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, linkedOfferId, principal: args.principal ?? null } });
+      upstream = await connectUpstream(db, serverRow, { outboundIdentity, upstreamExchange, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, linkedOfferId, principal: args.principal ?? null } });
     } catch (err) {
       if (classifyUpstreamError(err).why !== "our_own_refusal") {
         await recordUpstreamFailure(db, serverRow, errMessage(err));

@@ -295,3 +295,13 @@ paths = ['''^docs/ops/BOM_VERIFICATION\.md$''']
 commits = ["90c44ef1f3b7079e9f1658e256e5870a24152171"]
 regexTarget = "secret"
 regexes = ['''^505e806bf46aedd490d099490e7e8d69bd2dec822045e37703cfb4749c746deb$''']
+
+[[allowlists]]
+description = "ADR-0238 token-exchange unit test: two synthetic values from commit b7c3ff4 (since replaced by runtime-built zero-entropy values; history is never rewritten)"
+condition = "AND"
+paths = ['''^apps/gateway/src/upstream-token-exchange\.test\.ts$''']
+regexTarget = "secret"
+regexes = [
+  '''^opaque-token-value-0123456789$''',
+  '''^placeholder-secret-0123456789$''',
+]
