@@ -109,20 +109,22 @@ const ModelCredentialsPage = screen(() => import("./screens/admin-integrations")
 const CustomProvidersPage = screen(() => import("./screens/admin-integrations"), "CustomProvidersPage");
 const ExternalScorersPage = screen(() => import("./screens/admin-quality-security"), "ExternalScorersPage");
 const ConnectorsPage = screen(() => import("./screens/admin-integrations"), "ConnectorsPage");
-const McpServersPage = screen(() => import("./screens/admin-integrations"), "McpServersPage");
+// P3 (#453 c6527514889): each long operations/cost area is one lazy chunk whose module owns its nested <Routes> — the
+// overview at the index, each full list on its own page — so the sub-pages add nothing to the entry bundle.
+const McpServersArea = screen(() => import("./screens/admin-integrations"), "McpServersArea");
 const GitConnectionsPage = screen(() => import("./screens/admin-integrations"), "GitConnectionsPage");
 const PmConnectionsPage = screen(() => import("./screens/admin-integrations"), "PmConnectionsPage");
 const DeployTargetsPage = screen(() => import("./screens/admin-integrations"), "DeployTargetsPage");
-const EnginesPage = screen(() => import("./screens/admin-integrations"), "EnginesPage");
+const EnginesArea = screen(() => import("./screens/admin-integrations"), "EnginesArea");
 const CostDashboardPage = screen(() => import("./screens/admin-cost-optimization"), "CostDashboardPage");
-const CostConsolidationPage = screen(() => import("./screens/admin-cost-optimization"), "CostConsolidationPage");
+const CostConsolidationArea = screen(() => import("./screens/admin-cost-optimization"), "CostConsolidationArea");
 const SpendMonitorPage = screen(() => import("./screens/admin-cost-optimization"), "SpendMonitorPage");
 const BillingPage = screen(() => import("./screens/admin-cost-optimization"), "BillingPage");
 const OptimizationPage = screen(() => import("./screens/admin-cost-optimization"), "OptimizationPage");
 const ComplianceProfilesPage = screen(() => import("./screens/admin-compliance-infra"), "ComplianceProfilesPage");
 const CompliancePacksPage = screen(() => import("./screens/admin-compliance-infra"), "CompliancePacksPage");
 const FrameworkImportsPage = screen(() => import("./screens/admin-compliance-infra"), "FrameworkImportsPage");
-const InfrastructurePage = screen(() => import("./screens/admin-compliance-infra"), "InfrastructurePage");
+const InfrastructureArea = screen(() => import("./screens/admin-compliance-infra"), "InfrastructureArea");
 const TrustPublishingPage = screen(() => import("./screens/admin-compliance-infra"), "TrustPublishingPage");
 // ADR-0225 (P13 d): the public trust centre and the auditor portal (their own chunk, no app shell)
 const TrustCenterPage = screen(() => import("./screens/trust"), "TrustCenterPage");
@@ -334,7 +336,7 @@ function ApplicationRoutes() {
                 {/* ADR-0088 */}
                 <Route path="external-scorers" element={<ExternalScorersPage />} />
                 <Route path="connectors" element={<ConnectorsPage />} />
-                <Route path="mcp-servers" element={<McpServersPage />} />
+                <Route path="mcp-servers/*" element={<McpServersArea />} />
                 {/* ADR-0173 batch 2b */}
                 <Route path="webhooks" element={<WebhooksPage />} />
                 <Route path="admission" element={<AdmissionReviewPage />} />
@@ -342,10 +344,10 @@ function ApplicationRoutes() {
                 <Route path="pm-connections" element={<PmConnectionsPage />} />
                 <Route path="deploy-targets" element={<DeployTargetsPage />} />
                 {/* ADR-0187 (X26) */}
-                <Route path="engines" element={<EnginesPage />} />
+                <Route path="engines/*" element={<EnginesArea />} />
                 <Route path="cost" element={<CostDashboardPage />} />
                 {/* ADR-0069 */}
-                <Route path="cost-consolidation" element={<CostConsolidationPage />} />
+                <Route path="cost-consolidation/*" element={<CostConsolidationArea />} />
                 <Route path="spend-monitor" element={<SpendMonitorPage />} />
                 <Route path="billing" element={<BillingPage />} />
                 <Route path="optimization" element={<OptimizationPage />} />
@@ -355,7 +357,7 @@ function ApplicationRoutes() {
                 <Route path="compliance-packs/imports" element={<FrameworkImportsPage />} />
                 {/* ADR-0225 (P13 d) */}
                 <Route path="trust-publishing" element={<TrustPublishingPage />} />
-                <Route path="infrastructure" element={<InfrastructurePage />} />
+                <Route path="infrastructure/*" element={<InfrastructureArea />} />
                 {/* ADR-0224 (P13 c) */}
                 <Route path="privacy" element={<ProcessingRecordsPage />} />
                 <Route path="privacy/requests" element={<DataSubjectRequestsPage />} />
