@@ -2045,7 +2045,9 @@ export const usageExtractorVersions = pgTable(
   ],
 );
 
-/** ADR-0241: the sample-response test of one mapping version (append-only evidence; only the sample's hash is kept) */
+/** ADR-0241: the sample-response test of one mapping version. No route updates or deletes a test, but a test is not
+ * append-only: it is deleted with its version and agent (ON DELETE CASCADE). The audit rows are the record that outlives
+ * it. Only the sample's hash is kept. */
 export const usageExtractorTests = pgTable(
   "usage_extractor_tests",
   {
