@@ -282,7 +282,6 @@ export const INDIRECT_UI_CALLS = new Map([
     ["GET /v1/mcp-registries/:registryId/entries", "apps/web/src/views/admin/integrations/McpRegistriesPanel.tsx"],
     ["GET /v1/model-artifacts", "apps/web/src/views/admin/governance/ModelArtifactsTab.tsx"],
     ["GET /v1/onboarding/imports", "apps/web/src/views/admin/settings/OnboardingImportsCards.tsx"],
-    ["GET /v1/reports/runs", "apps/web/src/views/admin/cost/ReportsHistory.tsx"],
     ["GET /v1/scheduler/jobs/:name/runs", "apps/web/src/views/admin/settings/SchedulerJobHistory.tsx"],
     ["GET /v1/security/data-key/attestations", "apps/web/src/views/admin/settings/DataKeyPage.tsx"],
     ["GET /v1/spend/anomalies", "apps/web/src/views/admin/cost/SpendHistory.tsx"],
