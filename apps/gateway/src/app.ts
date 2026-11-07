@@ -511,6 +511,7 @@ import { registerAppearanceRoutes } from "./appearance.js";
 import { registerModelRateLimitRoutes } from "./model-rate-limits.js";
 // ADR-0202 decision 4 — the per-beat simulated fallback for the hosted demo (admin-only, audited)
 import { registerDemoBeatRoutes } from "./demo-beats.js";
+import { registerConnectorCatalogueRoutes } from "./connector-catalogue.js";
 // ADR-0185 G5 — request metrics (a no-op seam until the meter lands)
 import { registerMetricsHooks } from "./metrics.js";
 import {
@@ -5806,6 +5807,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerModelRateLimitRoutes(app, db);
   // ADR-0202 decision 4 — the demo beats' simulated fallback; admin-only (not in NON_ADMIN_ROUTES), audited
   registerDemoBeatRoutes(app, db);
+  // ADR-0255 (P31) — the governed connector catalogue; admin-only (not in NON_ADMIN_ROUTES), enablement audited
+  registerConnectorCatalogueRoutes(app, db);
   registerPosturePresetRoutes(app, db, { sink: anchorSink, bootstrapConfigured: Boolean(opts.bootstrapToken) });
   // ADR-0124 — the kill switch and safe modes
   registerExecutionControlRoutes(app, db);
