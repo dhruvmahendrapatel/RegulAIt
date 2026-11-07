@@ -677,6 +677,9 @@ export interface UsageEventsResponse {
     inputTokens?: number;
     outputTokens?: number;
     measuredCostSavedUsd?: number;
+    /** events with no project, and refused events, over every row the filter matches */
+    unattributed?: number;
+    refused?: number;
   };
 }
 
