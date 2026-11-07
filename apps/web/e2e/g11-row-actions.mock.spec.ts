@@ -199,7 +199,7 @@ test.describe("G11 row actions", () => {
 
   test("Executors: Revoke asks for the name to be typed and posts the revoke; a revoked executor offers none", async ({ page }) => {
     const api = await mockApi(page);
-    await page.goto("/ui/admin/engines");
+    await page.goto("/ui/admin/engines?tab=isolation"); // P3: executors are on the Isolation tab
     await expect(page.getByRole("button", { name: "Manage executor team-17-retired" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Revoke executor team-17-retired" })).toHaveCount(0);
     await page.getByRole("button", { name: "Revoke executor team-17-sandbox" }).click();
@@ -315,7 +315,7 @@ test.describe("G11 row actions", () => {
 
   test("Executors: Cancel on Revoke posts nothing and returns focus to the row's button", async ({ page }) => {
     const api = await mockApi(page);
-    await page.goto("/ui/admin/engines");
+    await page.goto("/ui/admin/engines?tab=isolation"); // P3: executors are on the Isolation tab
     const row = page.getByRole("button", { name: "Revoke executor team-17-sandbox" });
     await row.click();
     const dialog = page.getByRole("dialog", { name: "Revoke team-17-sandbox?" });
@@ -328,7 +328,7 @@ test.describe("G11 row actions", () => {
 
   test("Executors: a refused Revoke is shown inline on the executors card", async ({ page }) => {
     const api = await mockApi(page, { refuse: { "/v1/executors/e1/revoke": { status: 409, body: { error: "executor_already_revoked" } } } });
-    await page.goto("/ui/admin/engines");
+    await page.goto("/ui/admin/engines?tab=isolation"); // P3: executors are on the Isolation tab
     await page.getByRole("button", { name: "Revoke executor team-17-sandbox" }).click();
     const dialog = page.getByRole("dialog", { name: "Revoke team-17-sandbox?" });
     await dialog.getByLabel("Type team-17-sandbox to confirm").fill("team-17-sandbox");
