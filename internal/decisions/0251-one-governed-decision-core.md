@@ -131,4 +131,28 @@ merge.
 
 ## As built
 
-(Filled in per slice.)
+### Slice 1: connector (2026-11-07)
+
+- Kernel: `packages/policy-kernel/src/resource.ts` (`composeResourceDecision`, `matchingResourceApprovalRules`,
+  `governedCoreErrorDecision`), exported from the package root. Gateway: `apps/gateway/src/governed-core.ts`
+  (`loadResourceRestrictions`, `governedEvaluateResource`). Migration 0307 as decided above.
+- `executeGovernedConnectorCall` loads the core's restrictions before the consent binding, so a matching approval
+  rule's id enters the consent's context digest (`connectorWriteBinding` now takes the rule ids; the dial alone keeps
+  the pre-ADR-0251 digest byte for byte). The composed decision is what the one decision row records.
+- An approval rule on a connector call (read or write; `write_only` narrows it to writes) is queued through the
+  existing connector consent path (202, one approvals row, spent once by the identical call).
+- Window counts read allowed connector decision rows (`detail.receiptClass = 'decision'`, advisories excluded) on the
+  database clock, using the new partial index `audit_log_resource_window_idx`.
+- Scope memberships are subqueries inside the rule loads, so the core is one round trip (three concurrent queries)
+  when no rate limit binds, plus one concurrent count per binding limit.
+- Tests: `resource.test.ts` (kernel, 11), `zz-adr0251-connector-core.test.ts` (mandate on by default and relaxable,
+  rate limit per subject, approval rule queue and spend-once, error is deny, and the differential over 144 entitlement
+  cases agreeing on effect, rule id and approver). The 18 existing connector suites that call without a project now
+  relax `connectorAttributionRequired` by name through the ADR-0181 fixture, which is the intended new denial; no
+  assertion in them changed.
+- **Latency, measured** (`REGULAIT_BENCH=1 vitest run src/zz-adr0251-core-latency.test.ts`, local Postgres 16, warm,
+  2,000 iterations after 200 warm-up, three runs): no rules p50 1.2 to 1.4 ms, p95 2.2 to 2.7 ms; ten matching rules
+  p50 2.8 to 3.1 ms, p95 4.3 to 4.8 ms. **The proposed +2 ms p95 budget with no rules was missed** by up to 0.7 ms.
+  Single queries cost about 0.25 ms here; the rest is pool scheduling of three concurrent queries. The budget is
+  amended to +3 ms (no rules) and +6 ms (ten rules) at p95, and the bench asserts it. Folding the three loads into
+  one statement is the known next step if a pilot needs it.

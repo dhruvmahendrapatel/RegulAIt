@@ -32,7 +32,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { calculateJwkThumbprint, exportJWK, generateKeyPair, SignJWT, type CryptoKey, type JWK } from "jose";
-import { and, contentProvenanceRecords, eq, type Db } from "@regulait/db";
+import { and, contentProvenanceRecords, eq, projects, type Db } from "@regulait/db";
 import { DISCOVERY_SCHEDULE_MAX_SECONDS, type DemoShadowDiscoveryDataset } from "@regulait/shared";
 import type { RepoReader, RepoTree } from "@regulait/git-provider";
 import { DISCOVERY_SCANNERS, scannerRegistry, type Scanner, type ScanResult } from "./discovery-scanners.js";
@@ -830,9 +830,17 @@ async function ensureProvenance(h: Harness, db: Db, data: DemoShadowDiscoveryDat
   }
   const grant = await h.call("POST", "/v1/grants/connectors", { userId: dana.id, connectorId, mode: "read" });
   if (!h.ok(grant.status) && grant.status !== 409) return h.fail(`Dana's read grant on '${data.contentTrust.connectorName}'`, grant);
+  // ADR-0251: a connector call must name a project by default; Dana owns `seed`'s demo-project
+  const [project] = await db.select({ id: projects.id }).from(projects).where(eq(projects.name, "demo-project")).limit(1);
+  if (!project) {
+    return h.fail(`the project for '${data.contentTrust.connectorName}' reads`, {
+      status: 0,
+      body: { error: "demo_project_missing", detail: "`seed` creates demo-project; run `demo:prepare` on an empty database" },
+    });
+  }
   let n = 0;
   for (const object of data.contentTrust.objects) {
-    const r = await h.call("POST", `/v1/connectors/${connectorId}/invoke`, { operation: "read", object }, dana.auth);
+    const r = await h.call("POST", `/v1/connectors/${connectorId}/invoke`, { operation: "read", object, projectId: project.id }, dana.auth);
     if (h.ok(r.status)) n++;
     else h.fail(`read '${object}' from '${data.contentTrust.connectorName}'`, r);
   }
