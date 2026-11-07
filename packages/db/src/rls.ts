@@ -359,7 +359,13 @@ interface ScopablePool {
 }
 
 const BEGIN_RE = /^\s*(begin|start\s+transaction)\b/i;
-const END_RE = /^\s*(commit|end|rollback)\b(?!\s+to\b)/i;
+const END_RE = /^\s*(commit|end|rollback|abort)\b(?!\s+to\b)/i;
+/**
+ * #700 review: `COMMIT AND CHAIN` / `ROLLBACK AND CHAIN` start a new transaction at once, and the transaction-local
+ * scope does not carry over, so the chained transaction would run as the connecting (owner) role with no principal.
+ * Refused anywhere in a scoped statement's text, before anything is sent.
+ */
+const CHAIN_RE = /\b(commit|end|rollback|abort)\b(\s+(work|transaction))?\s+and\s+chain\b/i;
 const SCOPED = Symbol.for("regulait.rls.scopedPool");
 
 function queryText(args: QueryArgs): string {
@@ -385,40 +391,87 @@ function settle<T>(p: Promise<T>, cb?: (err: unknown, res?: unknown) => void): P
   return undefined;
 }
 
-/** run one statement as its own scoped transaction on `client` (which the caller owns) */
+function refuseChain(text: string): void {
+  if (CHAIN_RE.test(text)) {
+    throw new RlsContextError("rls scope: COMMIT/ROLLBACK AND CHAIN cannot run inside an RLS scope; nothing was run");
+  }
+}
+
+/** roll back after a failure; if even that fails the client's state is unknown and it must be destroyed, not pooled */
+async function rollbackOrMark(client: ScopableClient, err: unknown): Promise<never> {
+  try {
+    await client.query("ROLLBACK");
+  } catch {
+    throw Object.assign(err instanceof Error ? err : new Error(String(err)), { [STATE_UNKNOWN]: true });
+  }
+  throw err;
+}
+
+/**
+ * Run one statement as its own scoped transaction on `client` (which the caller owns). The setup (BEGIN plus the
+ * scope) is inside the try (#700 review): a setup that fails (the connecting role lacks `regulait_app`, a bad scope)
+ * leaves an aborted transaction, which is rolled back here, or the client is marked for destruction, so an aborted
+ * connection never goes back to the pool. A failed COMMIT is handled the same way.
+ */
 async function scopedStatement(client: ScopableClient, scope: RlsScope, args: QueryArgs): Promise<unknown> {
-  await client.query(`BEGIN; ${scopeStatement(scope)}`);
+  refuseChain(queryText(args));
+  const setup = `BEGIN; ${scopeStatement(scope)}`;
   let res: unknown;
   try {
+    await client.query(setup);
     res = await client.query(...args);
+    await client.query("COMMIT");
   } catch (err) {
-    try {
-      await client.query("ROLLBACK");
-    } catch {
-      // the client's transaction state is unknown: the caller must destroy it, never pool it
-      throw Object.assign(err instanceof Error ? err : new Error(String(err)), { [STATE_UNKNOWN]: true });
-    }
-    throw err;
+    return rollbackOrMark(client, err);
   }
-  await client.query("COMMIT");
   return res;
 }
 const STATE_UNKNOWN = Symbol.for("regulait.rls.clientStateUnknown");
+function isStateUnknown(err: unknown): boolean {
+  return !!err && typeof err === "object" && (err as Record<symbol, unknown>)[STATE_UNKNOWN] === true;
+}
 
 function scopedClient(client: ScopableClient, scope: RlsScope): ScopableClient {
   let inTx = false;
+  // set when a rollback after a failure itself failed: the next release destroys the client instead of pooling it
+  let broken: Error | undefined;
+  // set once this wrapper has given the client back itself (a failed scope setup after BEGIN, below)
+  let released = false;
+  const release = (err?: unknown): void => {
+    if (released) return; // the caller's own release after ours is a no-op, never a double release
+    released = true;
+    client.release(err ?? broken);
+  };
   const query = (...raw: QueryArgs): unknown => {
+    if (released) {
+      throw new RlsContextError("rls scope: this client was returned to the pool after a failed scope setup; nothing was run");
+    }
     const { args, cb } = splitCallback(raw);
     if (isSubmittable(args)) {
       throw new RlsContextError("rls scope: a cursor or stream cannot run inside an RLS scope; nothing was run");
     }
     const text = queryText(args);
+    refuseChain(text);
     const run = async (): Promise<unknown> => {
       if (BEGIN_RE.test(text)) {
-        const res = await client.query(...args);
-        await client.query(scopeStatement(scope));
-        inTx = true;
-        return res;
+        // #700 review: a failed scope setup after BEGIN is rolled back here and the client given back to the pool
+        // (destroyed if the rollback also failed). drizzle issues BEGIN outside its own try/finally, so on this
+        // failure it would neither roll back nor release: the connection would leak, aborted. A caller that does
+        // release afterwards gets a no-op; any further query on this wrapper is refused.
+        try {
+          const res = await client.query(...args);
+          await client.query(scopeStatement(scope));
+          inTx = true;
+          return res;
+        } catch (err) {
+          try {
+            return await rollbackOrMark(client, err);
+          } catch (e) {
+            if (isStateUnknown(e)) broken = e as Error;
+            release();
+            throw e;
+          }
+        }
       }
       if (inTx) {
         const res = await client.query(...args);
@@ -432,6 +485,7 @@ function scopedClient(client: ScopableClient, scope: RlsScope): ScopableClient {
   return new Proxy(client, {
     get(target, prop, receiver) {
       if (prop === "query") return query;
+      if (prop === "release") return release;
       const v = Reflect.get(target, prop, receiver);
       return typeof v === "function" ? v.bind(target) : v;
     },
@@ -462,8 +516,7 @@ export function scopePoolForRls<P extends object>(pool: P): P {
         return res;
       } catch (err) {
         // a client whose transaction state is unknown (ROLLBACK failed) is destroyed, never returned to the pool
-        const unknownState = !!err && typeof err === "object" && (err as Record<symbol, unknown>)[STATE_UNKNOWN] === true;
-        client.release(unknownState ? (err as Error) : undefined);
+        client.release(isStateUnknown(err) ? (err as Error) : undefined);
         throw err;
       }
     };

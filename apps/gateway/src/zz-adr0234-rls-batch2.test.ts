@@ -191,6 +191,62 @@ describe("the pooled connection is clean after every scoped statement and transa
   });
 });
 
+describe("#700 review: a failed scope setup never returns an aborted connection to the pool", () => {
+  // a login that is NOT a member of regulait_app: `set_config('role', 'regulait_app', true)` fails after BEGIN
+  const role = `rls0234b2_nogrant_${process.pid}`;
+  const password = randomUUID();
+  let noGrant: Db;
+  const aborted = /current transaction is aborted/i;
+  beforeAll(async () => {
+    await admin.execute(sql.raw(`DROP ROLE IF EXISTS ${role}`));
+    await admin.execute(sql.raw(`CREATE ROLE ${role} LOGIN PASSWORD '${password}'`));
+    const u = new URL(urlFor(SCRATCH_DB));
+    u.username = role;
+    u.password = password;
+    noGrant = createDb(u.toString(), { max: 1 }); // ONE connection: the next statement reuses the failed one
+  });
+  afterAll(async () => {
+    await noGrant?.$client.end().catch(() => undefined);
+    await admin.execute(sql.raw(`DROP ROLE IF EXISTS ${role}`)).catch(() => undefined);
+  });
+  const settled = async () =>
+    (await noGrant.execute<{ ok: number; uid: string | null }>(sql`select 1 as ok, current_setting('regulait.user_id', true) as uid`))
+      .rows[0]!;
+
+  it("a plain scoped statement whose setup fails is rolled back; the next pooled statement works", async () => {
+    const err = await runWithRlsPrincipal({ userId: ids.alice }, () => pgError(noGrant.execute(sql`select 1`)));
+    expect(err).toMatch(/permission denied|must be (a )?member/i);
+    expect(err).not.toMatch(aborted);
+    const next = await settled();
+    expect(next.ok).toBe(1);
+    expect(next.uid ?? "").toBe("");
+  });
+
+  it("a scoped transaction whose setup fails after BEGIN is rolled back; the next pooled statement works", async () => {
+    const err = await runWithRlsPrincipal({ userId: ids.alice }, () =>
+      pgError(noGrant.transaction(async (tx) => tx.execute(sql`select 1`))),
+    );
+    expect(err).toMatch(/permission denied|must be (a )?member/i);
+    const next = await settled();
+    expect(next.ok).toBe(1);
+    expect(next.uid ?? "").toBe("");
+  });
+});
+
+describe("#700 review: COMMIT/ROLLBACK AND CHAIN is refused inside a scope", () => {
+  it("in a plain statement and inside a scoped transaction, before anything is sent", async () => {
+    await runWithRlsPrincipal({ userId: ids.alice }, async () => {
+      expect(await pgError(one.execute(sql.raw("commit and chain")))).toMatch(/AND CHAIN/);
+      expect(await pgError(one.execute(sql.raw("ROLLBACK WORK AND CHAIN")))).toMatch(/AND CHAIN/);
+      expect(
+        await pgError(one.transaction(async (tx) => tx.execute(sql.raw("select 1; commit and chain")))),
+      ).toMatch(/AND CHAIN/);
+      // AND NO CHAIN is the default and harmless; the pool still answers in scope afterwards
+      expect(await approvalIds(one)).toEqual([ids.aliceApproval]);
+    });
+  });
+});
+
 describe("0313: the column guard on users updates (the #682 hard gate)", () => {
   it("`authenticate` may change sign-in state but never an identity column", async () => {
     const bumped = await runWithRlsSystem("authenticate", "test.sign-in", async () =>

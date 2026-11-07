@@ -188,3 +188,25 @@ CREATE POLICY approvals_update ON approvals FOR UPDATE
         SELECT ad.approval_id FROM approval_decisions ad WHERE ad.decider_user_id = (SELECT regulait_rls_user_id()))
     )
   );
+--> statement-breakpoint
+
+-- #700 review: the guarded-digest helper returns a digest of identity columns for any user id. It exists for the
+-- users_update policy alone, so only the app role (which evaluates that policy) may call it; PUBLIC may not.
+REVOKE EXECUTE ON FUNCTION regulait_rls_users_guarded_digest(uuid, boolean) FROM PUBLIC;
+--> statement-breakpoint
+GRANT EXECUTE ON FUNCTION regulait_rls_users_guarded_digest(uuid, boolean) TO regulait_app;
+--> statement-breakpoint
+
+-- #700 review: indexes for the participant branches of approvals_select / approvals_update. Without them each branch
+-- is a sequential scan of approvals (or of the assignment and decision tables) on every scoped read of the queue.
+CREATE INDEX approvals_approver_user_idx ON approvals (approver_user_id);
+--> statement-breakpoint
+CREATE INDEX approvals_named_approver_user_idx ON approvals (named_approver_user_id);
+--> statement-breakpoint
+CREATE INDEX approvals_decided_by_idx ON approvals (decided_by);
+--> statement-breakpoint
+CREATE INDEX approvals_approver_role_idx ON approvals (approver_role_id);
+--> statement-breakpoint
+CREATE INDEX approval_decisions_decider_user_idx ON approval_decisions (decider_user_id);
+--> statement-breakpoint
+CREATE INDEX approval_assignments_escalation_assignee_idx ON approval_assignments (escalation_assignee_id);

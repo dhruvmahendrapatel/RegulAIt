@@ -294,8 +294,14 @@ unprotected. So the scope is declared once per request and applied to every stat
     after its `BEGIN`.
 - **Decision 3 still holds.** Nothing is set at session level, and a client returns to the pool as it came out:
   tests prove this after a statement, a failing statement, a transaction and a failing transaction.
-- **Refused or destroyed connections.** A cursor or stream inside a scope is refused. A client whose `ROLLBACK`
-  failed is destroyed rather than pooled.
+- **Refused or destroyed connections.** A cursor or stream inside a scope is refused, and so is `COMMIT AND CHAIN`
+  or `ROLLBACK AND CHAIN` (the chained transaction would start without the transaction-local scope, as the owner).
+  A client whose `ROLLBACK` failed is destroyed rather than pooled.
+- **A failed scope setup (#700 review).** The `BEGIN` plus scope setup sits inside the same try as the statement, so
+  a setup that fails (for example a connecting role that is not a member of `regulait_app`) is rolled back, or the
+  client destroyed, and never returned to the pool aborted. After a transaction's `BEGIN` the wrapper also gives the
+  client back itself on that failure, because drizzle issues `BEGIN` outside its own try/finally and would otherwise
+  leak the connection; the caller's later release is a no-op and further queries on that wrapper are refused.
 - **The scope helpers start a returned lazy drizzle builder inside the scope.** A builder awaited after the helper
   returned would otherwise run unscoped.
 
@@ -356,6 +362,13 @@ express it until batch 4 moves review-role membership into SQL:
 0313 also widens the approvals visibility superset by one branch the gateway already admits: an active delegate of an
 approver-role member (`regulait_rls_delegator_groups()`, ADR-0022 x ADR-0046).
 
+**Indexes and grants for the new policies (#700 review).** 0313 indexes every column a participant branch of
+`approvals_select` / `approvals_update` compares with the principal: approvals `approver_user_id`,
+`named_approver_user_id`, `decided_by` and `approver_role_id`, `approval_decisions.decider_user_id` and
+`approval_assignments.escalation_assignee_id` (`assignee_id` was already covered by
+`approval_assignments_assignee_idx`). `regulait_rls_users_guarded_digest` is revoked from PUBLIC and granted to
+`regulait_app` alone, the role that evaluates the users policy.
+
 **Measured (batch 2).**
 - Setup: same bench, `packages/db/bench/rls-cost.mjs`, with a request-scope column. Local Postgres 16, 4 vCPU,
   100,000 approvals, median of 25.
@@ -386,13 +399,16 @@ approver-role member (`regulait_rls_delegator_groups()`, ADR-0022 x ADR-0046).
   that line.
 
 **Tests.**
-- `apps/gateway/src/zz-adr0234-rls-batch2.test.ts` (11 tests):
+- `apps/gateway/src/zz-adr0234-rls-batch2.test.ts` (14 tests):
   - plain, raw and transactional statements under a scope;
   - a lazy builder;
   - concurrent scopes on one pool;
   - leaving a scope;
   - refused inputs;
   - a clean pool after every shape;
+  - a failed scope setup (a login without `regulait_app`), for a plain statement and a transaction, followed by a
+    working statement on the same single pooled connection;
+  - `AND CHAIN` refused in a statement and inside a transaction;
   - the 0313 column guard;
   - the gateway hooks, with an unfiltered probe route for a principal and for the bootstrap token.
 - The slice-1 file was updated for the 0313 policies and the extended migration guard (29 tests).
