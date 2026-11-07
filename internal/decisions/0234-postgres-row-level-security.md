@@ -79,13 +79,14 @@ the role split, because it is the only option that protects real boundaries insi
 
    | Reason | Opens |
    |---|---|
-   | `authenticate` | users (read only in slice 1; see batch 2), auth_mfa_pending: sign-in and session resolution, before a principal exists |
+   | `authenticate` | users (read; from batch 2 also update, never the guarded identity columns), auth_mfa_pending: sign-in and session resolution, before a principal exists |
    | `identity_provisioning` | users (all): SCIM and the seed |
    | `audit_chain` | audit_log (read): the chain writer's tip read, under the append lock |
    | `audit_verify` | audit_log (read): verification, anchoring and export jobs |
-   | `approval_maintenance` | approvals (all): expiry, SLA and routing sweeps |
+   | `approval_maintenance` | approvals (all): expiry, SLA and routing sweeps, and (batch 2) the workflow and decide steps listed in "As built (batch 2)" |
    | `rls_membership` | users (read): entered only by the SET clause of the 0272 helper functions |
    | `migration` | every slice-1 table: a later migration's data step |
+   | `audit_subject` | audit_log (append, and read back its own row): batch 2, entered only by the chain writer for the INSERT of a row naming a user other than the principal |
 
    - `withSystemContext` refuses `rls_membership` and `migration` (they belong to SQL) and any unregistered value.
 
@@ -275,6 +276,118 @@ The same steps per table back out a later batch. No backup restore is needed, be
   principal cannot forge an audit row about another user, cannot promote itself, and `authenticate` cannot write
   users), each with positive controls.
 - `packages/db/bench/rls-cost.mjs` produced the decision 8 table.
+
+## As built (batch 2): request-scoped adoption (2026-11-07)
+
+**Why the mechanism changed.** The batch-2 text above says requests "run inside `withPrincipal`". The gateway has
+about 1,100 non-test query sites on the four slice-1 tables (users 226, approvals 120, audit_log 734,
+auth_mfa_pending 10). Wrapping each is neither reviewable nor safe in one batch, and a site missed is a site
+unprotected. So the scope is declared once per request and applied to every statement below it:
+
+- **`packages/db/src/rls.ts`:** `runWithRlsPrincipal`, `runWithRlsSystem`, `runWithRlsPrincipalStep` (principal
+  plus a registered reason), `runWithoutRlsScope`, `withinSystemReason` (one step inside an open `tx`), and
+  `scopePoolForRls`, which `createDb` applies to every pool.
+- **The scope rides an AsyncLocalStorage.** Outside a scope the pool behaves exactly as before, so the migrator,
+  scripts and unadopted paths are unchanged. Inside a scope:
+  - a plain statement runs as `BEGIN; set role + setting (LOCAL); <statement>; COMMIT` on one checked-out client;
+  - a transaction (`pool.connect` + `BEGIN`, which is drizzle's `db.transaction`) gets the role and setting right
+    after its `BEGIN`.
+- **Decision 3 still holds.** Nothing is set at session level, and a client returns to the pool as it came out:
+  tests prove this after a statement, a failing statement, a transaction and a failing transaction.
+- **Refused or destroyed connections.** A cursor or stream inside a scope is refused. A client whose `ROLLBACK`
+  failed is destroyed rather than pooled.
+- **The scope helpers start a returned lazy drizzle builder inside the scope.** A builder awaited after the helper
+  returned would otherwise run unscoped.
+
+**Gateway wiring (`apps/gateway/src/app.ts`).**
+- Two preHandlers bracket the auth hook. Credential resolution runs under `authenticate`. Then the request runs as
+  `runWithRlsPrincipal({ userId })` to its end, or with no scope when it resolved no user: an exempt route or the
+  bootstrap token.
+- **Unscoped paths, recorded for batch 7.** These run exactly as before this batch: unauthenticated routes (login,
+  webhooks, SCIM with its own token), bootstrap-token requests, the scheduler's sweeps, and `scheduleBackgroundWork`.
+- `scheduleBackgroundWork` deliberately leaves the scope, so that work spawned by a request does not run as that
+  request's principal (an approver's decision must not run the resumed builder turn as the approver).
+- A detached promise that does not go through it inherits the request's scope; batch 7 audits these.
+
+**The #682 gates, closed in migration 0289.**
+- **Column guard on `users`.**
+  - `authenticate` may update a user row (failed-login counters, lockout, password rehash, MFA state), but never
+    `is_admin`, `disabled_at`, `email`, `username`, `scim_external_id` or `cost_center`.
+  - A user editing its own row gets the same guard, minus `username`, which `POST /auth/username` lets a user
+    change. This replaces slice 1's "not admin, not disabled" check and closes the threat-model note on self-edits.
+  - How it works: a `STABLE` helper (`regulait_rls_users_guarded_digest`) reads the stored row in the statement's
+    snapshot. It has a SET clause, so it does not recurse into the users policies, and it returns only a digest.
+- **Audit attribution.**
+  - `audit_log.user_id` is the sponsor or subject (ADR-0188), not necessarily the actor. An approver's decision row,
+    a runner's result row and an admin action on a target user all name someone else, so binding it to the
+    principal at the database contradicts the data model.
+  - The chain writer, the one funnel every `insert(auditLog)` goes through, enters the new internal reason
+    `audit_subject` for exactly its INSERT, and only when a row names a user other than the principal. It is decided
+    in SQL from the principal the database holds, counted and reported to the sink.
+  - A raw INSERT that skips the writer still has to name the principal, and the slice-1 forgery test now proves
+    that path.
+  - This narrows #682 finding 2 to "no forged row outside the chain writer". It is the main design point for review.
+- **Approvals requester self-route guard removed.** Self-approval is decided per flow by the gateway: remediation
+  and compliance-profile changes refuse it, and a governed tool call's approval may name its requester. The
+  database rule refused legitimate decisions. What remains:
+  - `USING` without the review-role branch;
+  - `WITH CHECK` requiring the new row to stay a participant row;
+  - the 0272 column privileges on the routing identity.
+
+**Steps that act on someone else's approvals (named, greppable, counted).** These run as the principal plus
+`approval_maintenance`, because their authorization is the gateway's own and the participant predicate cannot
+express it until batch 4 moves review-role membership into SQL:
+
+| Path label | What |
+|---|---|
+| `approvals.decide` | `decideOneApproval`: named approver, role, ADR-0168 review role, delegation, quorum and SoD are checked in code. A third user still gets the 403, not an existence-hiding 404. |
+| `approvals.bulk-decide` | the bulk queue's pre-read, which feeds the same decide path |
+| `approvals.lazy-sla-sweep` | the SLA and routing sweep `GET /v1/approvals` runs on read (it walks every pending row; the listing is then read back under the principal alone) |
+| `workflows.stage-approval` | a stage's approval is the initiator's request, created by whoever advanced the instance |
+| `workflows.supersede-gates`, `workflows.quorum-any` | a workflow effect on every pending gate of the instance |
+| `engine-runs.run-approval` | an engine run's approval, queued in the run-as user's name |
+
+**Measured (batch 2).**
+- Setup: same bench, `packages/db/bench/rls-cost.mjs`, with a request-scope column. Local Postgres 16, 4 vCPU,
+  100,000 approvals, median of 25.
+- The request scope adds two round trips per statement (`BEGIN` plus the setting in one, `COMMIT`).
+
+| Statement | Superuser (no RLS) | Request scope |
+|---|---|---|
+| approvals, newest 100 (the queue page) | 31.1 ms | 41.7 ms |
+| approvals, by primary key | 0.15 ms | 0.68 ms |
+| users, by email | 0.14 ms | 0.29 ms |
+| a bare `select 1` | 0.12 ms | 0.34 ms |
+| a request-shaped burst, 20 point reads | 3.6 ms | 19.3 ms |
+
+- Per request this is about +0.2 to +0.8 ms a statement. A route issuing 20 statements pays about 15 ms locally,
+  more on a networked database.
+- The cheaper shape, one transaction per request, is rejected: it holds a connection and an open transaction for
+  the life of a streaming request.
+- Statement pipelining is a later optimisation if the cost shows in production traces.
+
+**Rollout rule from #683 (master's note).**
+- A migration's data step that READS a slice-1 table sees zero rows there under FORCE without the `migration`
+  context. An orphan clean-up such as `... where not exists (select 1 from users ...)` would then treat every
+  reference as an orphan and null it.
+- A superuser migrator bypasses RLS (local and CI today), so this bites only a non-superuser owner, which is exactly
+  the batch-7 runtime.
+- The slice-1 later-migration guard now also fails any migration after 0272 whose data step reads a slice-1 table
+  without `set_config('regulait.system_context', 'migration', true)`. #683 (and any rebase of it above 0272) must add
+  that line.
+
+**Tests.**
+- `apps/gateway/src/zz-adr0234-rls-batch2.test.ts` (11 tests):
+  - plain, raw and transactional statements under a scope;
+  - a lazy builder;
+  - concurrent scopes on one pool;
+  - leaving a scope;
+  - refused inputs;
+  - a clean pool after every shape;
+  - the 0289 column guard;
+  - the gateway hooks, with an unfiltered probe route for a principal and for the bootstrap token.
+- The slice-1 file was updated for the 0289 policies and the extended migration guard (29 tests).
+- The full gateway suite runs in CI's shards.
 
 ## Appendix: the inventory (2026-11-06, migrated head)
 

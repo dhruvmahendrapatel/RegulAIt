@@ -281,27 +281,24 @@ describe("the write side: WITH CHECK and column privileges (#682 review)", () =>
     }
   });
 
-  it("finding 1: the requester cannot route its own approval to itself or record itself as the decider", async () => {
-    for (const set of [{ approverUserId: ids.alice }, { status: "approved", decidedBy: ids.alice }] as const) {
-      const msg = await pgError(
-        withPrincipal(su, { userId: ids.alice }, (tx) => tx.update(approvals).set(set).where(eq(approvals.id, ids.aliceApproval))),
-      );
-      expect(msg).toMatch(/new row violates row-level security policy for table "approvals"/);
-    }
-    expect((await status(ids.aliceApproval)).approver).toBe(ids.root);
-  });
-
-  it("round 2: the requester CAN update its own pending row (NULL decided_by is not a self-route)", async () => {
-    expect((await su.select({ d: approvals.decidedBy }).from(approvals).where(eq(approvals.id, ids.aliceApproval)))[0]!.d).toBeNull();
-    const own = await withPrincipal(su, { userId: ids.alice }, (tx) =>
-      tx.update(approvals).set({ decisionReason: "rls0234 requester note" }).where(eq(approvals.id, ids.aliceApproval)).returning({ id: approvals.id }),
-    );
-    expect(own).toEqual([{ id: ids.aliceApproval }]);
-    // and the guard did not turn fail-open: routing it to herself is still refused
-    const self = await pgError(
-      withPrincipal(su, { userId: ids.alice }, (tx) => tx.update(approvals).set({ approverUserId: ids.alice }).where(eq(approvals.id, ids.aliceApproval))),
-    );
-    expect(self).toMatch(/new row violates row-level security policy for table "approvals"/);
+  it("batch 2 (0289): self-approval is the product's call per flow, so a requester may update and decide its own row", async () => {
+    // rolled back at the end, so the fixture stays pending for the tests after this one
+    const ROLLBACK = new Error("rls0234 rollback");
+    const seen = await withPrincipal(su, { userId: ids.alice }, async (tx) => {
+      const noted = await tx.update(approvals).set({ decisionReason: "rls0234 requester note" }).where(eq(approvals.id, ids.aliceApproval)).returning({ id: approvals.id });
+      const decided = await tx
+        .update(approvals)
+        .set({ status: "approved", decidedBy: ids.alice })
+        .where(eq(approvals.id, ids.aliceApproval))
+        .returning({ id: approvals.id });
+      throw Object.assign(ROLLBACK, { noted, decided });
+    }).catch((e: unknown) => e as { noted?: unknown; decided?: unknown });
+    expect(seen).toMatchObject({ noted: [{ id: ids.aliceApproval }], decided: [{ id: ids.aliceApproval }] });
+    expect((await status(ids.aliceApproval)).status).toBe("pending");
+    // what still holds: the routing identity is out of reach (column privileges), whoever asks
+    expect(
+      await pgError(withPrincipal(su, { userId: ids.alice }, (tx) => tx.update(approvals).set({ namedApproverUserId: ids.alice }).where(eq(approvals.id, ids.aliceApproval)))),
+    ).toMatch(/permission denied for table approvals/);
   });
 
   it("positive controls: a routed role member may claim, approval_maintenance may route, an admin may decide", async () => {
@@ -319,27 +316,39 @@ describe("the write side: WITH CHECK and column privileges (#682 review)", () =>
     expect(decided).toEqual([{ id: ids.reviewApproval }]);
   });
 
-  it("finding 2: alice cannot append an audit row attributed to bob", async () => {
+  it("finding 2: a raw INSERT naming another user is refused; the chain writer appends it only under audit_subject (batch 2)", async () => {
+    // a raw statement that skips the chain writer must name the principal
     const forged = await pgError(
       withPrincipal(su, { userId: ids.alice }, (tx) =>
-        tx.insert(auditLog).values({ userId: ids.bob, effect: "allow", ruleId: "rls0234", ruleChain: [], reason: "rls0234 forged" }),
+        tx.execute(
+          sql`insert into audit_log (user_id, effect, rule_id, rule_chain, reason) values (${ids.bob}, 'allow', 'rls0234', '[]'::jsonb, 'rls0234 forged')`,
+        ),
       ),
     );
-    expect(forged).toMatch(/new row violates row-level security policy for table "audit_log"/);
-    expect(
-      await su.execute(sql`select 1 from audit_log where reason = 'rls0234 forged'`).then((r) => r.rows.length),
-    ).toBe(0);
+    expect(forged).toMatch(/row-level security policy for table "audit_log"|audit/i);
+    expect(await su.execute(sql`select 1 from audit_log where reason = 'rls0234 forged'`).then((r) => r.rows.length)).toBe(0);
+    // through the chain writer a row ABOUT someone else (audit_log.user_id is the sponsor or subject, ADR-0188) is
+    // appended under the registered audit_subject reason, counted, and the setting does not outlive the INSERT.
+    // carol, not bob: the next describe needs the global tip to stay a row bob cannot see.
+    const before = rlsSystemContextCounts().audit_subject ?? 0;
+    const after = await withPrincipal(su, { userId: ids.alice }, async (tx) => {
+      await tx.insert(auditLog).values({ userId: ids.carol, effect: "allow", ruleId: "rls0234", ruleChain: [], reason: "rls0234 subject row" });
+      return (await tx.execute<{ sys: string | null }>(sql`select current_setting('regulait.system_context', true) as sys`)).rows[0]!.sys;
+    });
+    expect(after ?? "").toBe("");
+    expect(rlsSystemContextCounts().audit_subject).toBe(before + 1);
+    expect(await su.execute(sql`select 1 from audit_log where reason = 'rls0234 subject row'`).then((r) => r.rows.length)).toBe(1);
   });
 
-  it("finding 3: a principal cannot promote or re-enable itself, and `authenticate` has no write path on users", async () => {
+  it("finding 3: neither a principal nor `authenticate` can promote a user (0289 column guard, batch 2)", async () => {
     const promote = await pgError(
       withPrincipal(su, { userId: ids.alice }, (tx) => tx.update(users).set({ isAdmin: true }).where(eq(users.id, ids.alice))),
     );
     expect(promote).toMatch(/new row violates row-level security policy for table "users"/);
-    const viaAuth = await withSystemContext(su, "authenticate", "test.sign-in", (tx) =>
-      tx.update(users).set({ isAdmin: true }).where(eq(users.id, ids.alice)).returning({ id: users.id }),
+    const viaAuth = await pgError(
+      withSystemContext(su, "authenticate", "test.sign-in", (tx) => tx.update(users).set({ isAdmin: true }).where(eq(users.id, ids.alice))),
     );
-    expect(viaAuth).toEqual([]);
+    expect(viaAuth).toMatch(/new row violates row-level security policy for table "users"/);
     const [alice] = await su.select({ isAdmin: users.isAdmin }).from(users).where(eq(users.id, ids.alice));
     expect(alice!.isAdmin).toBe(false);
   });
@@ -466,6 +475,21 @@ describe("later migrations that touch rows of an RLS table enter the migration c
       .filter((f) => {
         const body = readFileSync(path.join(migrationsFolder, f), "utf8");
         return dml.test(body) && !/set_config\(\s*'regulait\.system_context'\s*,\s*'migration'\s*,\s*true\s*\)/i.test(body);
+      });
+    expect(offenders).toEqual([]);
+  });
+
+  // batch 2 (the #683 lesson): a data step on ANY table that READS a slice-1 table (an orphan clean-up's
+  // `not exists (select 1 from users ...)`) sees ZERO rows there under FORCE without the migration context, and
+  // would treat every reference as an orphan. So such a migration must enter the context too.
+  it("every migration after 0272 whose data step reads a slice-1 table sets regulait.system_context = 'migration'", () => {
+    const dataStep = /\b(insert\s+into|update\s+(public\.)?"?\w+"?\s+set|delete\s+from)\b/i;
+    const reads = new RegExp(`\\b(from|join)\\s+(public\\.)?"?(${RLS_TABLES.join("|")})"?\\b`, "i");
+    const offenders = readdirSync(migrationsFolder)
+      .filter((f) => /^\d{4}_.*\.sql$/.test(f) && Number(f.slice(0, 4)) > 272)
+      .filter((f) => {
+        const body = readFileSync(path.join(migrationsFolder, f), "utf8");
+        return dataStep.test(body) && reads.test(body) && !/set_config\(\s*'regulait\.system_context'\s*,\s*'migration'\s*,\s*true\s*\)/i.test(body);
       });
     expect(offenders).toEqual([]);
   });

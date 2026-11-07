@@ -5470,6 +5470,19 @@ its tip under `audit_chain`. Measured: queue page 24.7 to 39.9 ms on 100k approv
 (gateway adoption, credentials, approval satellites and membership, project-scoped, the rest, runtime login cut-over)
 follow, one PR each. Until batch 7 a non-superuser table-owner runtime is unsupported; none exists.
 
+**ADR-0234 batch 2 (builder, 2026-11-07, Proposed): request-scoped RLS adoption.**
+- **Mechanism:** every authenticated gateway request now runs as its principal through an AsyncLocalStorage scope that
+  the pool applies per statement and per transaction (`runWithRlsPrincipal`, `scopePoolForRls` in `createDb`), not
+  ~1,100 wrapped call sites. Credential resolution runs under `authenticate`.
+- **Migration 0289:**
+  - the column guard on `users` (the #682 hard gate);
+  - the chain writer's `audit_subject` reason for rows that name a sponsor or subject;
+  - the approvals requester self-route guard is removed (self-approval stays a per-flow product rule).
+- **Named steps:** decide, bulk-decide, the lazy SLA sweep and workflow and engine-run approval effects run as the
+  principal plus `approval_maintenance`.
+- **Still unscoped:** unauthenticated routes, the bootstrap token, the scheduler and background work (batch 7).
+- **Measured:** +0.2 to +0.8 ms a statement.
+
 **ADR-0230 (design, 2026-11-06, Proposed): SAP business agents over MCP (P19).**
 - **Where it lives:** `create_sales_order` (`API_SALES_ORDER_SRV`) goes in the regulAIt-ABAP MCP server, and the gateway's existing MCP path governs it.
 - **Safety:** a required idempotency key; principal propagation with the person's own IdP token (preferred) or a dedicated per-trust RegulAIt key (fallback, never the ADR-0210 key), through the BTP Destination service, with technical users refused for writes; approve-first defaults seeded for `system_class = 'sap_business'` (quorum 2 with the requester excluded, a rate limit, a project budget required).
