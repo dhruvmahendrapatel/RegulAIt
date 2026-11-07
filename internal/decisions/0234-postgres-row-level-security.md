@@ -309,7 +309,7 @@ unprotected. So the scope is declared once per request and applied to every stat
   request's principal (an approver's decision must not run the resumed builder turn as the approver).
 - A detached promise that does not go through it inherits the request's scope; batch 7 audits these.
 
-**The #682 gates, closed in migration 0289.**
+**The #682 gates, closed in migration 0313.**
 - **Column guard on `users`.**
   - `authenticate` may update a user row (failed-login counters, lockout, password rehash, MFA state), but never
     `is_admin`, `disabled_at`, `email`, `username`, `scim_external_id` or `cost_center`.
@@ -353,7 +353,7 @@ express it until batch 4 moves review-role membership into SQL:
 | `policy-simulation.replay` (`audit_verify`) | a policy simulation replays recorded traffic within the caller's simulation scope (their team, or the org for an admin) |
 
 `runAsPrincipalStepIfScoped(reason, path, fn)` applies a step only when the request is a principal (no-op otherwise).
-0289 also widens the approvals visibility superset by one branch the gateway already admits: an active delegate of an
+0313 also widens the approvals visibility superset by one branch the gateway already admits: an active delegate of an
 approver-role member (`regulait_rls_delegator_groups()`, ADR-0022 x ADR-0046).
 
 **Measured (batch 2).**
@@ -393,9 +393,9 @@ approver-role member (`regulait_rls_delegator_groups()`, ADR-0022 x ADR-0046).
   - leaving a scope;
   - refused inputs;
   - a clean pool after every shape;
-  - the 0289 column guard;
+  - the 0313 column guard;
   - the gateway hooks, with an unfiltered probe route for a principal and for the bootstrap token.
-- The slice-1 file was updated for the 0289 policies and the extended migration guard (29 tests).
+- The slice-1 file was updated for the 0313 policies and the extended migration guard (29 tests).
 - The full gateway suite runs in CI's shards.
 
 ## Appendix: the inventory (2026-11-06, migrated head)

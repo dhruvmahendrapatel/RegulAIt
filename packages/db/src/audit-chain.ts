@@ -265,7 +265,7 @@ export async function appendChainedAuditRows(
   // (`auditChainClock`), `at` never decreases along `seq`. Truncated to milliseconds in SQL (what a `Date`
   // holds), so the value hashed below is the value stored.
   const dbNow = await auditChainClock(tx);
-  // ADR-0234: leave `audit_chain`. The INSERT below runs under the caller's context, except (batch 2, 0289) when
+  // ADR-0234: leave `audit_chain`. The INSERT below runs under the caller's context, except (batch 2, 0313) when
   // the caller is a principal with no system reason and a row names a user other than that principal: audit_log
   // .user_id is the sponsor or subject (ADR-0188), so such a row is appended under the registered `audit_subject`
   // reason, for this INSERT only (restored right after it) and counted. Decided in SQL, from the principal the

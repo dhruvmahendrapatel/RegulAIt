@@ -4,12 +4,12 @@
  * Slice 1 shipped explicit wrappers. Batch 2 makes the scope implicit: a request (or a sweep) declares it once with
  * `runWithRlsPrincipal` / `runWithRlsSystem`, and the pool every `createDb` handle is built on applies it to every
  * statement and transaction issued inside that async context. These tests run against a scratch database migrated to
- * the head (0272 slice 1 + 0289 column guard) and prove, with the application's own filters skipped:
+ * the head (0272 slice 1 + 0313 column guard) and prove, with the application's own filters skipped:
  *   - a plain handle, a raw pool query and a drizzle transaction inside a principal scope see only that principal's
  *     rows (positive control: outside a scope the superuser login sees everything);
  *   - concurrent scopes on one shared pool do not bleed into each other;
  *   - a failing statement and a failing transaction roll back, and the ONE pooled connection comes back clean;
- *   - the 0289 column guard: `authenticate` and a self-edit may change sign-in state, never identity columns;
+ *   - the 0313 column guard: `authenticate` and a self-edit may change sign-in state, never identity columns;
  *   - the gateway hooks: an authenticated request runs as its principal, a bootstrap-token request runs unscoped.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -191,7 +191,7 @@ describe("the pooled connection is clean after every scoped statement and transa
   });
 });
 
-describe("0289: the column guard on users updates (the #682 hard gate)", () => {
+describe("0313: the column guard on users updates (the #682 hard gate)", () => {
   it("`authenticate` may change sign-in state but never an identity column", async () => {
     const bumped = await runWithRlsSystem("authenticate", "test.sign-in", async () =>
       db.update(users).set({ failedLoginCount: 3 }).where(eq(users.id, ids.alice)).returning({ id: users.id }),

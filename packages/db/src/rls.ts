@@ -58,7 +58,7 @@ export const RLS_SYSTEM_REASONS = [
   /** a later migration that touches rows of an RLS table: every slice-1 table */
   "migration",
   /**
-   * batch 2 (0289): entered only by the audit chain writer, for the INSERT of a row that names a user other than
+   * batch 2 (0313): entered only by the audit chain writer, for the INSERT of a row that names a user other than
    * the principal (audit_log.user_id is the sponsor or subject, ADR-0188): audit_log (append, and read its own row)
    */
   "audit_subject",

@@ -281,7 +281,7 @@ describe("the write side: WITH CHECK and column privileges (#682 review)", () =>
     }
   });
 
-  it("batch 2 (0289): self-approval is the product's call per flow, so a requester may update and decide its own row", async () => {
+  it("batch 2 (0313): self-approval is the product's call per flow, so a requester may update and decide its own row", async () => {
     // rolled back at the end, so the fixture stays pending for the tests after this one
     const ROLLBACK = new Error("rls0234 rollback");
     const seen = await withPrincipal(su, { userId: ids.alice }, async (tx) => {
@@ -340,7 +340,7 @@ describe("the write side: WITH CHECK and column privileges (#682 review)", () =>
     expect(await su.execute(sql`select 1 from audit_log where reason = 'rls0234 subject row'`).then((r) => r.rows.length)).toBe(1);
   });
 
-  it("finding 3: neither a principal nor `authenticate` can promote a user (0289 column guard, batch 2)", async () => {
+  it("finding 3: neither a principal nor `authenticate` can promote a user (0313 column guard, batch 2)", async () => {
     const promote = await pgError(
       withPrincipal(su, { userId: ids.alice }, (tx) => tx.update(users).set({ isAdmin: true }).where(eq(users.id, ids.alice))),
     );

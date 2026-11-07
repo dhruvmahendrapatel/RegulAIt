@@ -48,6 +48,7 @@ const DECISION_WRITERS = [
   "playground.ts",
   "privacy-ops.ts", // ADR-0224: the processing limit's dispatch refusal
   "redteam.ts",
+  "usage-extractors.ts", // ADR-0241: a dispatch whose usage mapping could not read the response, kept on built-in counts (insert(auditLog) on the chained handle)
   "use-case-gate.ts",
   "use-cases.ts",
   "vendors.ts", // ADR-0213: the vendor questionnaire drafter's refused model use (insert(auditLog), chained handle)
