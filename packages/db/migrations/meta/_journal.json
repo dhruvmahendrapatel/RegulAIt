@@ -1618,6 +1618,13 @@
       "when": 1785209000000,
       "tag": "0282_theme_account_org_lock",
       "breakpoints": true
+    },
+    {
+      "idx": 310,
+      "version": "7",
+      "when": 1785237000000,
+      "tag": "0310_connector_catalogue",
+      "breakpoints": true
     }
   ]
 }

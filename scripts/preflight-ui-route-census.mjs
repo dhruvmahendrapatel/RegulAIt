@@ -314,8 +314,26 @@ export const INDIRECT_UI_CALLS = new Map([
  * until the entry is deleted, and KNOWN_UI_GAPS_MAX is lowered to match.
  */
 export const KNOWN_UI_GAPS = new Map([
-  // empty: batch U4 (ui-gaps-details) closed the last 22. A new entry needs a reason and raises nothing:
+  // batch U4 (ui-gaps-details) closed the last 22. A new entry needs a reason and raises nothing:
   // KNOWN_UI_GAPS_MAX stays 0, so build the screen instead.
+  //
+  // EXCEPTION (ADR-0255, P31, 2026-11-07): the P31 brief is "API and backend only; post the catalogue UI need on
+  // #453 for the Governed Designer", so these two routes ship with their screen owned by that lane. The ratchet is
+  // raised to 2 for them alone, visibly, and the Designer's catalogue screen deletes both entries and lowers it to 0.
+  [
+    "GET /v1/connector-catalogue",
+    {
+      does: "lists the curated catalogue pieces (status, actions, upstream) and the community pieces available, not enabled (paginated, q filter)",
+      tracking: "ADR-0255 / P31: catalogue screen for the Governed Designer, requested on #453",
+    },
+  ],
+  [
+    "POST /v1/connector-catalogue/:pieceKey/enablement",
+    {
+      does: "enables (admin, step-up) or disables a curated piece, with a reason, audited",
+      tracking: "ADR-0255 / P31: catalogue screen for the Governed Designer, requested on #453",
+    },
+  ],
 ]);
 
 /**
@@ -324,7 +342,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 0;
+export const KNOWN_UI_GAPS_MAX = 2; // ADR-0255 exception above; back to 0 with the catalogue screen
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 
