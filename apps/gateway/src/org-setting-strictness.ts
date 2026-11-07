@@ -292,6 +292,8 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   frameworkImportsEnabled: notEqual(false),
   // ADR-0225 (P13 d): public trust pages and auditor access ship off; turning them on publishes outside the org
   trustPagesEnabled: notEqual(false),
+  // ADR-0240: a TOTP step after the auditor link ships on; off lets a forwarded link alone open a session
+  trustAuditorMfaRequired: notEqual(true),
 
   // --- budgets and approvals ------------------------------------------------
   budgetEnforcement: notEqual("block"),

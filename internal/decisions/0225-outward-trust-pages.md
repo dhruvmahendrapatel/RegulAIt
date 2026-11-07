@@ -141,3 +141,18 @@ unchanged.
 4. Showing on the published page when an item was last reviewed, and prompting re-review after N days.
 5. A mocked end-to-end spec for the admin journey (draft, edit, publish, grant, auditor view). The gateway integration
    suite and the enterprise UI harness cover it today.
+
+## Addendum 2026-11-07: auditor MFA ([ADR-0240](0240-external-portal-mfa.md))
+
+Follow-up 1 above is closed by ADR-0240, which builds one second factor (TOTP) for this portal and the supplier portal
+of ADR-0221. It needs no outbound mail, so it works air-gapped.
+- A spent link now opens a second-factor challenge, not a session. The first use of a grant enrols an authenticator,
+  and every later link asks for a code.
+- `org_settings.trust_auditor_mfa_required` ships `true` (migration 0296). Relaxing it through `PUT /v1/org/settings`
+  (`trustAuditorMfaRequired: false`) is a `settings_relax` step-up, audited.
+- New public route: `POST /v1/auditor/session/mfa`. New admin routes: `GET` and `POST …/mfa/reset` under
+  `/v1/trust/auditor-grants/:grantId`.
+- Five consecutive wrong codes lock the factor. Only the inviting admin's reset recovers it.
+
+The passkey alternative stays a follow-up (ADR-0240, limits). The consolidation of follow-up 3 has begun: the second
+factor is the shared piece, and link issue and the session cookie stay per portal for now.

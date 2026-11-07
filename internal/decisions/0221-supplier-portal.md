@@ -156,3 +156,17 @@ defence. No magic-link library fits a Fastify gateway with our own session table
     own entry in the navigation rail. It keeps its route.
   - The supplier page no longer skips the app-wide sign-in check. It makes one `GET /auth/me`, as the other public
     pages do. That call carries no supplier data and gets a 401 for someone with no platform account.
+
+## Addendum 2026-11-07: supplier MFA ([ADR-0240](0240-external-portal-mfa.md))
+
+The "No supplier MFA" limit above is closed by ADR-0240, which builds one second factor for this portal and the
+auditor portal of ADR-0225.
+- A spent link now opens a second-factor challenge, not a session. The first use of a grant enrols a TOTP
+  authenticator, and every later link asks for a code.
+- `org_settings.supplier_portal_mfa_required` ships `true` (migration 0296). Relaxing it through
+  `PUT /v1/supplier-portal/settings` (`mfaRequired: false`) is a `settings_relax` step-up, audited.
+- New supplier route: `POST /supplier/v1/session/mfa`. New admin routes: `GET` and `POST …/mfa/reset` under
+  `/v1/vendors/:vendorId/supplier-access/:accessId`.
+- Five consecutive wrong codes lock the factor. Only the inviting admin's reset recovers it.
+
+Decisions 3 and 4 above still describe the link and the session. The second factor sits between them.
