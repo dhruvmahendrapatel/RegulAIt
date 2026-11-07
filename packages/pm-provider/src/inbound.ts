@@ -21,11 +21,23 @@
  * payloads (valid but irrelevant — event types we do not consume) that must
  * be 200-and-dropped, never errored: a webhook endpoint that errors on valid
  * traffic gets auto-disabled by the sender.
+ *
+ * REPLAY (ADR-0010 amendment, S-03 of the 2026-11-07 review). Two walls:
+ *   - a SIGNED timestamp within PM_WEBHOOK_REPLAY_WINDOW_SECONDS wherever one
+ *     is signed: Linear's `webhookTimestamp` (inside the HMAC'd body) and the
+ *     generic contract's `x-regulait-timestamp` (inside its HMAC). The window
+ *     is the Slack ChatOps one (CHATOPS_REPLAY_WINDOW_SECONDS, 300 s).
+ *   - a delivery key (inboundDeliveryKey) the gateway records once per
+ *     connection in `pm_webhook_deliveries`: the sha256 of the exact body,
+ *     plus the provider's own delivery id where it sends one. A second
+ *     delivery with either value is acknowledged and not processed.
+ * Jira, monday, Azure DevOps and Asana sign no timestamp, so for them the
+ * delivery record is the only replay wall; that is stated, not hidden.
  */
 
 import { createHash, createHmac } from "node:crypto";
 import { z } from "zod";
-import { constantTimeEqual, pmWebhookSchema } from "@regulait/shared";
+import { CHATOPS_REPLAY_WINDOW_SECONDS, constantTimeEqual, pmWebhookSchema } from "@regulait/shared";
 import { PmProviderError, type PmProviderKind } from "./index.js";
 
 /** ADR-0010's normalized inbound event — reused, never re-invented. */
@@ -42,7 +54,16 @@ export interface InboundWebhookInput {
   secret: string;
   /** the connection's configured project/board/team — context for parsers */
   connectionProject: string;
+  /** milliseconds since the epoch; injectable so the replay tests own the clock */
+  nowMs?: number;
 }
+
+/** The signed-timestamp window, the same 300 s as Slack ChatOps (ADR-0061). */
+export const PM_WEBHOOK_REPLAY_WINDOW_SECONDS = CHATOPS_REPLAY_WINDOW_SECONDS;
+
+/** generic contract headers: unix seconds, and `sha256=<hex HMAC of "<ts>.<raw body>">` */
+export const GENERIC_TIMESTAMP_HEADER = "x-regulait-timestamp";
+export const GENERIC_SIGNATURE_HEADER = "x-regulait-signature";
 
 export type InboundWebhookResult =
   /** a provider verification challenge — answer it, process nothing */
@@ -87,6 +108,18 @@ function requireHmacHeader(input: InboundWebhookInput, provider: string, header:
   if (typeof presented !== "string" || !constantTimeEqual(presented, hmacHex(input.secret, input.rawBody))) {
     throw new PmProviderError(
       `${provider} webhook ${typeof presented === "string" ? "invalid" : "missing"} ${header} signature`,
+      401,
+    );
+  }
+}
+
+/** Refuse a signed timestamp outside the window, either side of now (401). */
+function requireFreshTimestamp(input: InboundWebhookInput, provider: string, signedAtMs: number): void {
+  const now = input.nowMs ?? Date.now();
+  const skew = Math.abs(now - signedAtMs);
+  if (!Number.isFinite(signedAtMs) || skew > PM_WEBHOOK_REPLAY_WINDOW_SECONDS * 1000) {
+    throw new PmProviderError(
+      `${provider} webhook timestamp is outside the ${PM_WEBHOOK_REPLAY_WINDOW_SECONDS} s replay window`,
       401,
     );
   }
@@ -205,7 +238,10 @@ export function parseJiraInboundWebhook(input: InboundWebhookInput): InboundWebh
 
 // ---------------------------------------------------------------------------
 // linear — Linear signs every delivery: header `linear-signature` is the hex
-// HMAC-SHA256 of the raw body under the webhook signing secret. Payloads:
+// HMAC-SHA256 of the raw body under the webhook signing secret, and the body
+// carries `webhookTimestamp` (ms), which is therefore signed: it must be
+// within PM_WEBHOOK_REPLAY_WINDOW_SECONDS, and a body without it is refused.
+// Payloads:
 // { action: "create"|"update"|"remove", type: "Issue"|"Comment"|...,
 //   data: { id, identifier, title, description?, state?: { name },
 //           issueId?/issue? on Comment }, updatedFrom? }.
@@ -217,6 +253,8 @@ const linearPayloadSchema = z
   .object({
     action: z.string(),
     type: z.string(),
+    /** ms since the epoch, inside the signed body (Linear's replay guard) */
+    webhookTimestamp: z.number().optional(),
     data: z
       .object({
         id: z.union([z.string(), z.number()]).transform(String).optional(),
@@ -242,6 +280,10 @@ export function parseLinearInboundWebhook(input: InboundWebhookInput): InboundWe
   if (!parsed.success) {
     throw new PmProviderError("unrecognized linear webhook payload (no action/type)", 400);
   }
+  if (parsed.data.webhookTimestamp === undefined) {
+    throw new PmProviderError("linear webhook carries no signed webhookTimestamp", 401);
+  }
+  requireFreshTimestamp(input, "linear", parsed.data.webhookTimestamp);
   const { action, type, data } = parsed.data;
   if (type === "Issue") {
     if (!data?.id) throw new PmProviderError("linear Issue payload carries no data.id", 400);
@@ -582,35 +624,119 @@ export function parseAzureDevOpsInboundWebhook(input: InboundWebhookInput): Inbo
 }
 
 // ---------------------------------------------------------------------------
-// generic_webhook + mock — symmetric with our OUTBOUND generic contract:
-// verification is `x-regulait-signature: sha256=<hex HMAC-SHA256 of the raw
-// body>` under the connection's webhook secret. The pre-existing legacy
-// header (`x-regulait-webhook-secret: <secret>`) stays accepted for bridges
-// built against ADR-0010's first cut, but a presented signature always takes
-// precedence — a request carrying a BAD signature is rejected even if the
-// legacy header is also present and valid. The body IS the normalized
-// ADR-0010 shape (this adapter speaks RegulAIt's own vocabulary); the mock
-// shares the parser as the tests' e2e vehicle.
+// generic_webhook + mock — RegulAIt's own contract, so it is the strict one:
+//   x-regulait-timestamp: <unix seconds>
+//   x-regulait-signature: sha256=<hex HMAC-SHA256 of "<timestamp>.<raw body>">
+// under the connection's webhook secret, with the timestamp inside the
+// PM_WEBHOOK_REPLAY_WINDOW_SECONDS window. There is no other mechanism: the
+// static `x-regulait-webhook-secret` header and the body-only signature of
+// ADR-0010's first cut were removed (S-03; ADR-0180, no grandfathering), so a
+// request carrying either is refused. The body IS the normalized ADR-0010
+// shape; the mock shares the parser as the tests' e2e vehicle.
 // ---------------------------------------------------------------------------
 
+const genericSignature = (secret: string, timestamp: string, rawBody: string): string =>
+  `sha256=${createHmac("sha256", secret).update(`${timestamp}.${rawBody}`).digest("hex")}`;
+
+/** The headers a sender (a bridge, or a test) attaches to a generic inbound delivery. */
+export function signGenericInboundWebhook(
+  secret: string,
+  rawBody: string,
+  nowSeconds: number = Math.floor(Date.now() / 1000),
+): Record<string, string> {
+  const timestamp = String(nowSeconds);
+  return {
+    [GENERIC_TIMESTAMP_HEADER]: timestamp,
+    [GENERIC_SIGNATURE_HEADER]: genericSignature(secret, timestamp, rawBody),
+  };
+}
+
 export function parseGenericInboundWebhook(input: InboundWebhookInput): InboundWebhookResult {
-  const signature = input.headers["x-regulait-signature"];
-  if (typeof signature === "string") {
-    if (!constantTimeEqual(signature, `sha256=${hmacHex(input.secret, input.rawBody)}`)) {
-      throw new PmProviderError("generic webhook x-regulait-signature verification failed", 401);
-    }
-  } else {
-    const legacy = input.headers["x-regulait-webhook-secret"];
-    if (typeof legacy !== "string" || !constantTimeEqual(legacy, input.secret)) {
-      throw new PmProviderError(
-        "generic webhook requires x-regulait-signature or the legacy x-regulait-webhook-secret header",
-        401,
-      );
-    }
+  const timestamp = input.headers[GENERIC_TIMESTAMP_HEADER];
+  const signature = input.headers[GENERIC_SIGNATURE_HEADER];
+  if (typeof timestamp !== "string" || typeof signature !== "string") {
+    throw new PmProviderError(
+      `generic webhook requires ${GENERIC_TIMESTAMP_HEADER} and ${GENERIC_SIGNATURE_HEADER}`,
+      401,
+    );
   }
+  if (!/^[0-9]{1,12}$/.test(timestamp)) {
+    throw new PmProviderError(`generic webhook ${GENERIC_TIMESTAMP_HEADER} is not unix seconds`, 401);
+  }
+  if (!constantTimeEqual(signature, genericSignature(input.secret, timestamp, input.rawBody))) {
+    throw new PmProviderError(`generic webhook ${GENERIC_SIGNATURE_HEADER} verification failed`, 401);
+  }
+  requireFreshTimestamp(input, "generic", Number(timestamp) * 1000);
   // the body is the normalized contract itself; a malformed one is the
   // caller's validation error (ZodError → gateway 400), same as before
   return { kind: "events", events: [pmWebhookSchema.parse(parseJsonBody(input, "generic"))] };
+}
+
+// ---------------------------------------------------------------------------
+// Delivery key — what the gateway records once per connection so a replay is
+// acknowledged and never processed twice (pm_webhook_deliveries).
+//   contentSha256  the sha256 of the exact body bytes (for generic/mock, of the
+//               signed "<timestamp>.<body>"): always present, and the key
+//               that matters for an attacker, because it is the signed (or
+//               token-guarded) part of every delivery.
+//   deliveryId  the provider's own id for the delivery where it sends one, so
+//               a provider RETRY that re-stamps the body is still one
+//               delivery: jira `x-atlassian-webhook-identifier`, linear
+//               `linear-delivery`, azure_devops body `id`, monday body
+//               `event.triggerUuid`. Asana and generic send none.
+// An id longer than 200 characters is stored as its sha256.
+// ---------------------------------------------------------------------------
+
+export interface InboundDeliveryKey {
+  contentSha256: string;
+  deliveryId: string | null;
+}
+
+export function inboundDeliveryKey(provider: PmProviderKind, input: InboundWebhookInput): InboundDeliveryKey {
+  // generic signs "<timestamp>.<body>", and its body carries no timestamp of its own: keying on the signed content
+  // lets two identical reports sent at different times through, while a replay (same timestamp) is a duplicate
+  // inside the window and refused outside it
+  const signedTimestamp = input.headers[GENERIC_TIMESTAMP_HEADER];
+  const content =
+    (provider === "generic_webhook" || provider === "mock") && typeof signedTimestamp === "string"
+      ? `${signedTimestamp}.${input.rawBody}`
+      : input.rawBody;
+  const contentSha256 = createHash("sha256").update(content, "utf8").digest("hex");
+  let raw: unknown;
+  const bodyField = (pick: (b: Record<string, unknown>) => unknown): unknown => {
+    try {
+      const b = JSON.parse(input.rawBody) as unknown;
+      return b !== null && typeof b === "object" ? pick(b as Record<string, unknown>) : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  switch (provider) {
+    case "jira":
+      raw = input.headers["x-atlassian-webhook-identifier"];
+      break;
+    case "linear":
+      raw = input.headers["linear-delivery"];
+      break;
+    case "azure_devops":
+      raw = bodyField((b) => b.id);
+      break;
+    case "monday":
+      raw = bodyField((b) => {
+        const ev = b.event;
+        return ev !== null && typeof ev === "object" ? (ev as Record<string, unknown>).triggerUuid : undefined;
+      });
+      break;
+    case "asana":
+    case "generic_webhook":
+    case "mock":
+      raw = undefined;
+      break;
+  }
+  const id = typeof raw === "string" || typeof raw === "number" ? String(raw).trim() : "";
+  const deliveryId =
+    id === "" ? null : id.length > 200 ? `sha256:${createHash("sha256").update(id, "utf8").digest("hex")}` : id;
+  return { contentSha256, deliveryId };
 }
 
 // ---------------------------------------------------------------------------

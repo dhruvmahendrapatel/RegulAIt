@@ -12,7 +12,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { z } from "zod";
-import { and, connectors, createDb, eq, inArray, mcpTools, modelCredentials, projects, runMigrations, usageEvents, type Db } from "@regulait/db";
+import { and, auditLog, connectors, createDb, eq, inArray, mcpTools, modelCredentials, pmSyncEvents, projects, runMigrations, usageEvents, type Db } from "@regulait/db";
 // ADR-0104 — the consent fingerprint the approvals queue row is bound to.
 import { approvalArgumentsDigest } from "@regulait/shared";
 import { resolveModelProvider, type MockModelProvider } from "@regulait/model-provider";
@@ -30,6 +30,8 @@ import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { relaxApprovalSigningForTest } from "./testing/approval-signing-posture.js";
 import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
 import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
+import { genericInbound } from "./testing/pm-webhook.js";
+import { signGenericInboundWebhook } from "@regulait/pm-provider";
 // ADR-0186 A2+B: this suite pins pre-0186 single-approver tool-call approvals (decided
 // through API keys, unsigned); signing and the sensitive quorum are relaxed for its run
 // and restored after (M-068). Dual control and signing are proved in zz-b4ab-*.
@@ -3930,10 +3932,17 @@ describe("PM inbound sync (EPIC-06, ADR-0010)", () => {
     const wrongSecret = await app.inject({
       method: "POST",
       url: "/v1/pm/webhooks/mock-inbound",
-      headers: { "x-regulait-webhook-secret": "rglwh_wrong" },
-      payload: { externalId: "1", event: "updated" },
+      ...genericInbound("rglwh_wrong", { externalId: "1", event: "updated" }),
     });
     expect(wrongSecret.statusCode).toBe(401);
+    // S-03: the static header is refused even when it holds the RIGHT secret (no grandfathering)
+    const staticHeader = await app.inject({
+      method: "POST",
+      url: "/v1/pm/webhooks/mock-inbound",
+      headers: { "x-regulait-webhook-secret": webhookSecret },
+      payload: { externalId: "1", event: "updated" },
+    });
+    expect(staticHeader.statusCode).toBe(401);
   });
 
   it("inbound events record without touching the state machine; unmatched items are logged", async () => {
@@ -3986,8 +3995,7 @@ describe("PM inbound sync (EPIC-06, ADR-0010)", () => {
     const unmatched = await app.inject({
       method: "POST",
       url: "/v1/pm/webhooks/mock-inbound",
-      headers: { "x-regulait-webhook-secret": webhookSecret },
-      payload: { externalId: "does-not-exist", event: "updated", state: "Done" },
+      ...genericInbound(webhookSecret, { externalId: "does-not-exist", event: "updated", state: "Done" }),
     });
     expect(unmatched.statusCode).toBe(202);
     expect(unmatched.json().matched).toBe(false);
@@ -4001,8 +4009,7 @@ describe("PM inbound sync (EPIC-06, ADR-0010)", () => {
     const agreeing = await app.inject({
       method: "POST",
       url: "/v1/pm/webhooks/mock-inbound",
-      headers: { "x-regulait-webhook-secret": webhookSecret },
-      payload: { externalId: nodeExternalId, event: "updated", state: "Doing" },
+      ...genericInbound(webhookSecret, { externalId: nodeExternalId, event: "updated", state: "Doing" }),
     });
     expect(agreeing.json()).toEqual({ matched: true, drift: false });
 
@@ -4023,8 +4030,7 @@ describe("PM inbound sync (EPIC-06, ADR-0010)", () => {
     const drifting = await app.inject({
       method: "POST",
       url: "/v1/pm/webhooks/mock-inbound",
-      headers: { "x-regulait-webhook-secret": webhookSecret },
-      payload: { externalId: nodeExternalId, event: "updated", state: "Done" },
+      ...genericInbound(webhookSecret, { externalId: nodeExternalId, event: "updated", state: "Done" }),
     });
     expect(drifting.json()).toEqual({ matched: true, drift: true });
 
@@ -4050,8 +4056,7 @@ describe("PM inbound sync (EPIC-06, ADR-0010)", () => {
     const deleted = await app.inject({
       method: "POST",
       url: "/v1/pm/webhooks/mock-inbound",
-      headers: { "x-regulait-webhook-secret": webhookSecret },
-      payload: { externalId: nodeExternalId, event: "deleted" },
+      ...genericInbound(webhookSecret, { externalId: nodeExternalId, event: "deleted" }),
     });
     expect(deleted.json().matched).toBe(true);
     const links = await app.inject({
@@ -4160,6 +4165,7 @@ describe("provider-native inbound webhooks (pillar 8 depth)", () => {
       const payload = JSON.stringify({
         action: "update",
         type: "Issue",
+        webhookTimestamp: Date.now(),
         data: { id: externalId, identifier: "INB-1", title: "watched natively", state: { name: "Done" } },
         updatedFrom: { stateId: "st-prog" },
       });
@@ -4184,7 +4190,7 @@ describe("provider-native inbound webhooks (pillar 8 depth)", () => {
 
       // a BAD signature (right shape, wrong key) is 401 and processes nothing
       const tamper = JSON.stringify({
-        action: "update", type: "Issue",
+        action: "update", type: "Issue", webhookTimestamp: Date.now(),
         data: { id: externalId, state: { name: "In Progress" } },
       });
       const bad = await app.inject({
@@ -4198,6 +4204,32 @@ describe("provider-native inbound webhooks (pillar 8 depth)", () => {
       expect(bad.statusCode).toBe(401);
       const after = await app.inject({ method: "GET", headers: niaAuth, url: `/v1/pm/links?runId=${runId}` });
       expect(after.json().links.find((l: { nodeId: string }) => l.nodeId === "a").inboundState).toBe("Done");
+
+      // S-03: a correctly signed delivery whose signed webhookTimestamp is stale is refused
+      const stale = JSON.stringify({
+        action: "update", type: "Issue", webhookTimestamp: Date.now() - 301_000,
+        data: { id: externalId, state: { name: "Todo" } },
+      });
+      const staleRes = await app.inject({
+        method: "POST", url: "/v1/pm/webhooks/linear-inbound",
+        headers: {
+          "content-type": "application/json",
+          "linear-signature": createHmac("sha256", linWebhookSecret).update(stale).digest("hex"),
+        },
+        payload: stale,
+      });
+      expect(staleRes.statusCode).toBe(401);
+      // S-03: the first, accepted delivery replayed byte for byte is acknowledged and not processed
+      const replay = await app.inject({
+        method: "POST", url: "/v1/pm/webhooks/linear-inbound",
+        headers: {
+          "content-type": "application/json",
+          "linear-signature": createHmac("sha256", linWebhookSecret).update(payload).digest("hex"),
+        },
+        payload,
+      });
+      expect(replay.statusCode).toBe(200);
+      expect(replay.json()).toEqual({ ok: true, duplicate: true });
     } finally {
       srv.closeAllConnections();
       await new Promise<void>((r) => srv.close(() => r()));
@@ -4314,7 +4346,63 @@ describe("provider-native inbound webhooks (pillar 8 depth)", () => {
     expect(irrelevant.json().ignored).toContain("sprint_started");
   });
 
-  it("generic_webhook: the outbound-symmetric x-regulait-signature now verifies inbound traffic too", async () => {
+  it("S-03: a replayed jira delivery is 200-acknowledged, audited and NOT re-processed; a reused delivery id is a duplicate too", async () => {
+    const conn = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/pm/connections",
+      payload: {
+        name: "jira-replay", provider: "jira", project: "REG",
+        baseUrl: `${DEAD_LOOPBACK}/acme-jira`, token: "bot@example.com:api-token",
+      },
+    });
+    expect(conn.statusCode).toBe(201);
+    const secret = conn.json().webhookSecret as string;
+    const connId = conn.json().id as string;
+    const delivery = {
+      method: "POST" as const,
+      url: `/v1/pm/webhooks/jira-replay?token=${secret}`,
+      headers: { "content-type": "application/json", "x-atlassian-webhook-identifier": "jira-delivery-1" },
+      payload: JSON.stringify({ webhookEvent: "jira:issue_updated", issue: { id: "REPLAY-1", fields: { status: { name: "Done" } } } }),
+    };
+    const countEvents = async () =>
+      (await db.select().from(pmSyncEvents).where(eq(pmSyncEvents.connectionId, connId))).length;
+
+    const first = await app.inject(delivery);
+    expect(first.statusCode).toBe(202);
+    expect(await countEvents()).toBe(1);
+
+    // the identical delivery again: acknowledged, never processed
+    const replay = await app.inject(delivery);
+    expect(replay.statusCode).toBe(200);
+    expect(replay.json()).toEqual({ ok: true, duplicate: true });
+    expect(await countEvents()).toBe(1);
+
+    // a DIFFERENT body under the same provider delivery id is a duplicate too (a provider retry)
+    const retry = await app.inject({
+      ...delivery,
+      payload: JSON.stringify({ webhookEvent: "jira:issue_updated", issue: { id: "REPLAY-1", fields: { status: { name: "Doing" } } } }),
+    });
+    expect(retry.json()).toEqual({ ok: true, duplicate: true });
+    expect(await countEvents()).toBe(1);
+
+    // non-vacuity: a new delivery (new id, new body) is processed
+    const fresh = await app.inject({
+      ...delivery,
+      headers: { ...delivery.headers, "x-atlassian-webhook-identifier": "jira-delivery-2" },
+      payload: JSON.stringify({ webhookEvent: "jira:issue_updated", issue: { id: "REPLAY-1", fields: { status: { name: "Review" } } } }),
+    });
+    expect(fresh.statusCode).toBe(202);
+    expect(await countEvents()).toBe(2);
+
+    const dupAudits = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.ruleId, "pm-webhook-duplicate"), eq(auditLog.objectId, connId)));
+    expect(dupAudits).toHaveLength(2);
+    expect(dupAudits[0]!.effect).toBe("deny");
+    expect(JSON.stringify(dupAudits)).not.toContain(secret);
+  });
+
+  it("generic_webhook: a timestamped x-regulait-signature verifies inbound traffic; S-03 refuses the old forms and replays", async () => {
     const conn = await app.inject({
       method: "POST", headers: AUTH, url: "/v1/pm/connections",
       payload: {
@@ -4326,7 +4414,22 @@ describe("provider-native inbound webhooks (pillar 8 depth)", () => {
     const secret = conn.json().webhookSecret as string;
 
     const body = JSON.stringify({ externalId: "no-such-item", event: "updated", state: "done" });
-    const signed = await app.inject({
+    const signedDelivery = {
+      method: "POST" as const, url: "/v1/pm/webhooks/generic-inbound",
+      headers: { "content-type": "application/json", ...signGenericInboundWebhook(secret, body) },
+      payload: body,
+    };
+    const signed = await app.inject(signedDelivery);
+    expect(signed.statusCode).toBe(202);
+    expect(signed.json()).toEqual({ matched: false });
+
+    // the same signed delivery replayed: acknowledged, not processed
+    const replayed = await app.inject(signedDelivery);
+    expect(replayed.statusCode).toBe(200);
+    expect(replayed.json()).toEqual({ ok: true, duplicate: true });
+
+    // the first cut's body-only signature, and the static header with the right secret: both refused
+    const bodyOnly = await app.inject({
       method: "POST", url: "/v1/pm/webhooks/generic-inbound",
       headers: {
         "content-type": "application/json",
@@ -4334,20 +4437,21 @@ describe("provider-native inbound webhooks (pillar 8 depth)", () => {
       },
       payload: body,
     });
-    expect(signed.statusCode).toBe(202);
-    expect(signed.json()).toEqual({ matched: false });
-
-    // a bad signature loses even when the legacy header is valid — precedence
-    const both = await app.inject({
+    expect(bodyOnly.statusCode).toBe(401);
+    const staticHeader = await app.inject({
       method: "POST", url: "/v1/pm/webhooks/generic-inbound",
-      headers: {
-        "content-type": "application/json",
-        "x-regulait-signature": "sha256=deadbeef",
-        "x-regulait-webhook-secret": secret,
-      },
+      headers: { "content-type": "application/json", "x-regulait-webhook-secret": secret },
       payload: body,
     });
-    expect(both.statusCode).toBe(401);
+    expect(staticHeader.statusCode).toBe(401);
+
+    // a correctly signed delivery with a stale timestamp is refused
+    const stale = await app.inject({
+      method: "POST", url: "/v1/pm/webhooks/generic-inbound",
+      headers: { "content-type": "application/json", ...signGenericInboundWebhook(secret, body, Math.floor(Date.now() / 1000) - 301) },
+      payload: body,
+    });
+    expect(stale.statusCode).toBe(401);
   });
 });
 

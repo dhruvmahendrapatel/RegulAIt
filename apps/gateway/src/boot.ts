@@ -43,6 +43,7 @@ import { ensureInternalIdentities } from "./in-process-delegation.js";
 import { runMigrations, type Db } from "@regulait/db";
 import { buildApp, type BuildAppOptions } from "./app.js";
 import { RATE_LIMIT_COUNTER_RETENTION_MS, pruneRateLimitCounters } from "./rate-limit-store.js";
+import { prunePmWebhookDeliveries } from "./pm.js";
 import { describeTrustProxy, resolveTrustProxy } from "./trusted-proxy.js";
 import { describeHsts, resolveHsts } from "./hsts.js";
 import { describeEgressPosture, resolveDeployMode } from "./deploy-posture.js";
@@ -267,9 +268,11 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // must not run underneath the suite.
   let anchorTimer: NodeJS.Timeout | null = null;
   let rateLimitPruneTimer: NodeJS.Timeout | null = null;
+  let pmDeliveryPruneTimer: NodeJS.Timeout | null = null;
   app.addHook("onClose", async () => {
     if (anchorTimer) clearInterval(anchorTimer);
     if (rateLimitPruneTimer) clearInterval(rateLimitPruneTimer);
+    if (pmDeliveryPruneTimer) clearInterval(pmDeliveryPruneTimer);
   });
 
   // ADR-0185 G5 — the separate metrics listener. Its close hook is registered
@@ -343,6 +346,18 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
       Math.max(60_000, RATE_LIMIT_COUNTER_RETENTION_MS / 4),
     );
     rateLimitPruneTimer.unref();
+
+    // S-03: the PM webhook delivery records are bounded by a 30-day retention (prunePmWebhookDeliveries). Hygiene,
+    // like the counters above: a missed prune only keeps rows longer, which refuses more replays, never fewer.
+    pmDeliveryPruneTimer = setInterval(
+      () => {
+        void prunePmWebhookDeliveries(db).catch((err: unknown) => {
+          app.log.warn({ err }, "PM webhook delivery prune failed; replay refusal is unaffected");
+        });
+      },
+      60 * 60 * 1000,
+    );
+    pmDeliveryPruneTimer.unref();
   }
 
   // ADR-0064 — the tick loop. ON unless REGULAIT_SCHEDULER says off (ADR-0181:

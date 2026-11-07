@@ -21,6 +21,12 @@ roadmap: ../product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-11-07 - S-03 (PM inbound webhook replay) is fixed on `builder/s03-pm-webhook-replay` ([ADR-0010 amendment](../decisions/0010-pm-inbound-sync-webhooks-plus-read-through.md), migration 0304).**
+- `pm_webhook_deliveries` records each delivery once per connection (body hash, plus the provider delivery id); a duplicate is 200, audited `pm-webhook-duplicate`, and not processed; 30-day prune on the boot timers.
+- Linear's signed `webhookTimestamp` and the generic contract's new `x-regulait-timestamp` (signed as `<ts>.<body>`) must be within 300 s.
+- Removed (ADR-0180): the generic static `x-regulait-webhook-secret` header, the body-only signature and the gateway's legacy hash fallback.
+- Jira/monday URL-token rotation is #605's ADR-0207 rotate route (HOLD); #605 must drop its own copy of the legacy fallback when it rebases.
+
 **2026-10-29 - the customer demo moves to one date, Saturday 2026-10-31 (owner, #453 c6508111468).**
 - **Date:** the internal run-through on Sun 11-01 and the external demo on Tue 11-03 are dropped; there is one run, on
   10-31. LIVE is never re-prepared, so every beat, state-changing ones included, runs on LIVE once, at the demo; the
