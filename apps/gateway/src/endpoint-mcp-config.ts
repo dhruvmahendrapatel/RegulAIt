@@ -43,6 +43,7 @@ import {
   sql,
   type Db,
 } from "@regulait/db";
+import { scrubAuditText } from "@regulait/shared";
 import { loadDiscoverySettings, type DiscoverySettingsView } from "./discovery-posture.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
@@ -139,12 +140,21 @@ export function mcpIdentityOf(s: Pick<McpServerFact, "package" | "host" | "comma
   return { identityKind: "unknown", identity: UNNAMED };
 }
 
+/** a device-reported identifier that is credential-shaped is never stored: it is reported as "(unnamed)" */
+const notCredential = (v: string | undefined): string | undefined => (v === undefined || scrubAuditText(v) === v ? v : UNNAMED);
+
 /** inventory sightings of a report's mcp_config facts; anything malformed is skipped (the report schema refuses it) */
 export function mcpSightingsOf(facts: readonly McpConfigFact[]): McpServerSighting[] {
   const out = new Map<string, McpServerSighting>();
   for (const f of facts) {
     if (f.kind !== MCP_CONFIG_KIND || f.matchedOn !== MCP_SERVER_MATCHED_ON || !f.server || !CONFIG_ROOTS.has(f.location.root) || !f.location.path) continue;
-    const s = f.server;
+    // the entry name, command, tool names and package are shape-checked on the device and again by the schema; a
+    // value that is still credential-shaped (someone named a server after a key) is dropped here (ADR-0233)
+    const raw = f.server;
+    const s: McpServerFact = { ...raw, name: notCredential(raw.name)! };
+    if (raw.command !== undefined) s.command = notCredential(raw.command)!;
+    if (raw.package !== undefined && notCredential(raw.package) !== raw.package) delete s.package;
+    if (raw.riskyTools !== undefined) s.riskyTools = raw.riskyTools.filter((t) => notCredential(t) === t);
     const id = mcpIdentityOf(s);
     const secretTypes = [...new Set((s.keys ?? []).filter((k) => k.present).map((k) => k.ruleId || "listed_name"))].sort().slice(0, SECRET_TYPES_MAX);
     const sighting: McpServerSighting = {

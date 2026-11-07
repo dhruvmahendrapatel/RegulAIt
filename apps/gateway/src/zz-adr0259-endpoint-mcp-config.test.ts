@@ -430,4 +430,12 @@ describe("ADR-0259: reduction (no database)", () => {
     expect(JSON.stringify(out)).not.toContain(KEY_NAME);
     expect(out[1]!.secretTypes).toEqual(["mcp.secret.authorization_header"]);
   });
+
+  it("drops an identifier that is still credential-shaped (ADR-0233): the server is stored as (unnamed)", () => {
+    // built at run time: never a key-shaped literal in the repo
+    const key = "sk-ant-" + "api03-" + "Q".repeat(40);
+    const [s] = mcpSightingsOf([server({ name: key, transport: "stdio", command: "node" }) as unknown as McpConfigFact]);
+    expect(s!.serverName).toBe("(unnamed)");
+    expect(JSON.stringify(s)).not.toContain(key);
+  });
 });
