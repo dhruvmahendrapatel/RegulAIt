@@ -1627,24 +1627,10 @@
       "breakpoints": true
     },
     {
-      "idx": 300,
+      "idx": 313,
       "version": "7",
-      "when": 1785227000000,
-      "tag": "0300_connector_disable",
-      "breakpoints": true
-    },
-    {
-      "idx": 301,
-      "version": "7",
-      "when": 1785228000000,
-      "tag": "0301_mcp_server_disable",
-      "breakpoints": true
-    },
-    {
-      "idx": 302,
-      "version": "7",
-      "when": 1785229000000,
-      "tag": "0302_pm_webhook_secret_rotation",
+      "when": 1785248000000,
+      "tag": "0313_rls_batch2_guards",
       "breakpoints": true
     }
   ]

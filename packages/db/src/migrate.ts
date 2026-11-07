@@ -3,14 +3,26 @@ import path from "node:path";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { getTableColumns, sql } from "drizzle-orm";
 import type { Db } from "./index.js";
+import { resolveMigrationsFolder } from "./pending-migrations.js";
 import { auditLog } from "./schema.js";
 
 /** the identity a migration's audit rows are attributed to: the system itself */
 export const MIGRATION_AUDIT_ACTOR = "00000000-0000-0000-0000-000000000000";
 
+/**
+ * Apply the folder's journal. ADR-0252: a folder that still holds `pending/` migrations (merged, not yet numbered) is
+ * refused unless `REGULAIT_MIGRATIONS_UNASSIGNED=apply` declares the database disposable; then they are applied after
+ * the numbered ones, in the order the assign-at-merge step would number them now.
+ */
 export async function runMigrations(db: Db, migrationsFolder: string) {
-  await migrate(db, { migrationsFolder });
-  await buildConcurrentIndexes(db, migrationsFolder);
+  const { folder, provisional, cleanup } = resolveMigrationsFolder(migrationsFolder);
+  try {
+    if (provisional.length) console.log(`[regulait] migrations: applying ${provisional.length} unassigned migration(s) with provisional numbers (disposable database): ${provisional.map((a) => a.to).join(", ")}`);
+    await migrate(db, { migrationsFolder: folder });
+    await buildConcurrentIndexes(db, folder);
+  } finally {
+    cleanup();
+  }
   await drainMigrationAuditOutbox(db);
 }
 
@@ -21,7 +33,8 @@ export async function runMigrations(db: Db, migrationsFolder: string) {
  * the journalled marker; once that file is in the folder's journal (and so applied by `migrate`), `runMigrations`
  * builds the index here, outside any transaction, on a pool connection in autocommit.
  *
- * Add to this list only an index; anything else belongs in a migration file.
+ * Add to this list only an index; anything else belongs in a migration file. `migration` is the journal tag, or, for a
+ * migration still under `pending/` (ADR-0252), its slug.
  */
 export const CONCURRENT_INDEXES: ReadonlyArray<{ migration: string; name: string; create: string }> = [
   {
@@ -32,12 +45,16 @@ export const CONCURRENT_INDEXES: ReadonlyArray<{ migration: string; name: string
   },
 ];
 
-/** the tags of the folder's journal: the migrations `migrate` has applied from this folder */
+/**
+ * The tags of the folder's journal, the migrations `migrate` has applied from this folder, and each tag's slug (the
+ * tag without its number). ADR-0252: a migration added under `pending/` has no number until it merges, so a
+ * `CONCURRENT_INDEXES` entry for it names the slug.
+ */
 function journalTags(migrationsFolder: string): Set<string> {
   const journal = JSON.parse(readFileSync(path.join(migrationsFolder, "meta", "_journal.json"), "utf8")) as {
     entries: Array<{ tag: string }>;
   };
-  return new Set(journal.entries.map((e) => e.tag));
+  return new Set(journal.entries.flatMap((e) => [e.tag, e.tag.replace(/^\d+_/, "")]));
 }
 
 /**
