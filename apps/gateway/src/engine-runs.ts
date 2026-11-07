@@ -93,7 +93,6 @@ import {
   isTerminalEngineRunStatus,
   normaliseEngineResult,
   garakConfigProblem,
-  pyritConfigProblem,
   spikeeConfigProblem,
   promptfooConfigProblem,
   updateEngineScheduleSchema,
@@ -337,12 +336,10 @@ export async function validateEngineRunRequest(
       ? promptfooConfigProblem(input.config.sets)
       : input.engineId === "garak"
         ? garakConfigProblem(input.config)
-        : // ADR-0245: spikee needs a dataset; PyRIT takes only max_turns
+        : // ADR-0245: spikee needs a dataset
           input.engineId === "spikee"
           ? spikeeConfigProblem(input.config)
-          : input.engineId === "pyrit"
-            ? pyritConfigProblem(input.config)
-            : null;
+          : null;
   if (configProblem) return { ok: false, status: 422, error: "engine_config_invalid", detail: configProblem };
   if (!engine.enabled) {
     return { ok: false, status: 409, error: "engine_disabled", detail: `engine ${input.engineId} is off; an admin enables it after its runner self-test passes` };

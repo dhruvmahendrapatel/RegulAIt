@@ -128,7 +128,7 @@ describe("#437 review: the --apply and --check signature gates of the CLI", () =
 });
 
 describe("N10: the bot's PR is the lock transition CI accepts", () => {
-  const first = signedPublish({ promptfoo: img("promptfoo", "1", "2"), modelscan: img("modelscan", "3", "4"), garak: img("garak", "5", "6"), spikee: img("spikee", "7", "8"), pyrit: img("pyrit", "a", "b") }, c1, "2026-10-18T05:00:00.000Z");
+  const first = signedPublish({ promptfoo: img("promptfoo", "1", "2"), modelscan: img("modelscan", "3", "4"), garak: img("garak", "5", "6"), spikee: img("spikee", "7", "8") }, c1, "2026-10-18T05:00:00.000Z");
   const a1 = applySignedPublish(blank(), first, { verify: () => undefined });
 
   it("first signed publish: every engine moves to generation 1, the PR is a HOLD draft that stages only --apply's files", () => {
@@ -147,7 +147,6 @@ describe("N10: the bot's PR is the lock transition CI accepts", () => {
       "engines/signatures/modelscan.sigstore.json",
       "engines/signatures/garak.sigstore.json",
       "engines/signatures/spikee.sigstore.json",
-      "engines/signatures/pyrit.sigstore.json",
     ]);
     expect(pr.body).toContain(expectedIdentity());
     expect(pr.body).not.toContain("by GITHUB_TOKEN");

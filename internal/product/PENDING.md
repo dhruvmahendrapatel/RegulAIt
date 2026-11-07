@@ -128,7 +128,7 @@ its own ADR, and open source is checked first (ADR-0176).
 
 | # | Gap | What it would take |
 |---|---|---|
-| **P26** | **Two more red-team engines: Spikee (indirect prompt injection) and PyRIT (multi-turn attacks).** garak and promptfoo cover single-turn probes; nothing covered payloads hidden in documents or attacker-driven conversations. | Built by [ADR-0245](../decisions/0245-spikee-pyrit-redteam-engines.md) (migration 0301): both as ADR-0187 sidecar engines, PyRIT's attacker and scorer through the gateway as the run's judge, and the ADR-0217 re-test extended to engine runs. Left: the first signed image publish (then an admin enables each after its self-test), the Engines-page UI (#453), and open questions 1-3 of the ADR. |
+| **P26** | **Two more red-team engines: Spikee (indirect prompt injection) and PyRIT (multi-turn attacks).** garak and promptfoo cover single-turn probes; nothing covered payloads hidden in documents or attacker-driven conversations. | [ADR-0245](../decisions/0245-spikee-pyrit-redteam-engines.md) (migration 0301): Spikee built as an ADR-0187 sidecar engine, and the ADR-0217 re-test extended to engine runs. Left: **PyRIT's build** (designed in the ADR; partial work on `builder/p26-pyrit-wip`; two builder attempts were stopped by a content-safety filter), the first signed Spikee image publish (then an admin enables it after its self-test), the Engines-page UI (#453), and the ADR's open questions. |
 
 ## 3. Structural gaps — the ADR shipped, a named half did not
 

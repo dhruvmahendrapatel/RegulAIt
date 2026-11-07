@@ -40,7 +40,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { bundlePath, checkBundleForEntry, SIGNATURES_DIR, TRUSTED_ROOT, verifyEntrySignature } from "./engine-images-lock-verify.mjs";
 
-export const ENGINE_IDS = ["promptfoo", "modelscan", "garak", "spikee", "pyrit"];
+export const ENGINE_IDS = ["promptfoo", "modelscan", "garak", "spikee"];
 export const LOCK_SCHEMA = "regulait.engine-images-lock.v1";
 export const UNSET_DIGEST = `sha256:${"0".repeat(64)}`;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;

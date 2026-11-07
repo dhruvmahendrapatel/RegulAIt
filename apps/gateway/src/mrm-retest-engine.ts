@@ -1,5 +1,5 @@
 /**
- * ADR-0245 — ADR-0217's automatic re-test, for SIDECAR ENGINE runs (garak, promptfoo, spikee, PyRIT).
+ * ADR-0245 — ADR-0217's automatic re-test, for SIDECAR ENGINE runs (garak, promptfoo, spikee).
  *
  * An engine run is asynchronous: the sweep can only queue it (`createEngineRun`, through every gate a person's run
  * passes: entitlement, project, budget, approvals). So a re-test of kind `engine` is claimed `running` with the engine

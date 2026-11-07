@@ -159,7 +159,6 @@ describe("ENG-IMG engine image lock", () => {
     it("ADR-0245: a base lock from before an engine joined reads that engine as never published, and nothing else", () => {
       const old = blank();
       delete old.engines.spikee;
-      delete old.engines.pyrit;
       expect(() => validateLock(old)).toThrow(LockError);
       const base = readLockAt("origin/main", { git: () => JSON.stringify(old) });
       expect(base).toEqual(blank());
@@ -168,7 +167,7 @@ describe("ENG-IMG engine image lock", () => {
       extra.engines.unknown = blank().engines.garak;
       expect(() => readLockAt("origin/main", { git: () => JSON.stringify(extra) })).toThrow(LockError);
       const bad = blank();
-      delete bad.engines.pyrit;
+      delete bad.engines.garak;
       bad.engines.spikee.publishGeneration = 3;
       expect(() => readLockAt("origin/main", { git: () => JSON.stringify(bad) })).toThrow(LockError);
     });

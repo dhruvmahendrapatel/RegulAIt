@@ -1,10 +1,10 @@
 /**
- * ADR-0245 — ADR-0217's automatic re-test picks up red-team ENGINE runs (spikee, PyRIT, garak, promptfoo).
+ * ADR-0245 — ADR-0217's automatic re-test picks up red-team ENGINE runs (spikee, garak, promptfoo).
  *
  *  - a completed engine run a person made against a certified agent is a re-test suite (kind `engine`), one per
  *    engine and configuration; a run a re-test started is never itself a source;
  *  - the re-test is created through `createEngineRun` as that person, so every gate applies: with the engine off
- *    (the secure default, and spikee/PyRIT have no published image) the re-test is `refused` with `engine_disabled`,
+ *    (the secure default, and spikee has no published image) the re-test is `refused` with `engine_disabled`,
  *    and no engine run is created;
  *  - an engine run a re-test waits on settles it in the same transaction that ends the run (here: a cancel through
  *    the real route), never as a pass; a refused approval settles it `refused`; the mapping is pure and total;
@@ -83,7 +83,7 @@ async function certify(id: string, reason: string) {
 }
 
 /** an engine run row as the gateway writes one (status and links chosen by the case) */
-async function engineRun(engineId: "spikee" | "pyrit" | "garak", status: "completed" | "queued", sets: string[], extra: Partial<typeof engineRuns.$inferInsert> = {}) {
+async function engineRun(engineId: "spikee" | "garak", status: "completed" | "queued", sets: string[], extra: Partial<typeof engineRuns.$inferInsert> = {}) {
   const [r] = await db
     .insert(engineRuns)
     .values({
@@ -94,7 +94,7 @@ async function engineRun(engineId: "spikee" | "pyrit" | "garak", status: "comple
       runAsUserId: anaId,
       targetKind: "agent",
       targetAgentId: subjectId,
-      judgeAgentId: engineId === "pyrit" ? judgeId : null,
+      judgeAgentId: engineId === "garak" ? judgeId : null,
       config: { sets, params: {} },
       configHash: `p26-${engineId}-${sets.join(",")}`,
       trials: 2,
@@ -134,10 +134,10 @@ beforeAll(async () => {
   subjectId = await makeAgent(`p26-subject-${RUN}`);
   judgeId = await makeAgent(`p26-judge-${RUN}`);
   // the person's own engine runs against the subject: two configurations of spikee (the newer of the same
-  // configuration wins), and a PyRIT run with its judge
+  // configuration wins), and a garak run with a judge
   await engineRun("spikee", "completed", ["dataset:llm-mailbox"], { createdAt: new Date(Date.now() - 2 * DAY) });
   await engineRun("spikee", "completed", ["dataset:llm-mailbox"], { createdAt: new Date(Date.now() - DAY) });
-  await engineRun("pyrit", "completed", ["attack:crescendo"]);
+  await engineRun("garak", "completed", ["agent_breaker.agentbreaker"]);
   // a run that did not complete is never a source
   await engineRun("garak", "queued", ["encoding.injectbase64"]);
   const card = await app.inject({ method: "POST", url: "/v1/mrm/cards", headers: AUTH, payload: { agentId: subjectId, intendedUse: "p26: answer tickets" } });
@@ -185,7 +185,7 @@ describe("a model change re-tests the person's engine runs, through every gate",
     const engine = mine.runs.filter((r) => r.kind === "engine");
     expect(engine).toHaveLength(2);
     const rows = await db.select().from(mrmRetestRuns).where(and(eq(mrmRetestRuns.cardId, cardId), eq(mrmRetestRuns.kind, "engine")));
-    expect(rows.map((r) => r.sourceName).sort()).toEqual(["PyRIT: attack:crescendo", "Spikee: dataset:llm-mailbox"]);
+    expect(rows.map((r) => r.sourceName).sort()).toEqual(["Spikee: dataset:llm-mailbox", "garak: agent_breaker.agentbreaker"]);
     for (const r of rows) {
       expect(r.status).toBe("refused");
       expect(r.reason).toMatch(/^engine_disabled/);
@@ -233,7 +233,7 @@ describe("an engine run a re-test waits on settles it when it ends", () => {
   });
 
   it("the database refuses an engine link on a re-test that is not of kind engine", async () => {
-    const run = await engineRun("pyrit", "queued", ["attack:tap"]);
+    const run = await engineRun("garak", "queued", ["dan.dan_11_0"]);
     await expect(
       db.insert(mrmRetestRuns).values({ cardId, driftKey: `p26-${RUN}-bad`, kind: "redteam", sourceId: run.id, sourceName: "bad", status: "running", engineRunId: run.id }),
     ).rejects.toThrow();

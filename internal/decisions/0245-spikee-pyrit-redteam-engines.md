@@ -1,6 +1,6 @@
 # ADR-0245: Spikee and PyRIT as sidecar red-team engines
 
-- **Status**: Accepted
+- **Status**: Accepted (Spikee built; PyRIT designed, its build deferred to a follow-up slice: see "As built")
 - **Date**: 2026-11-07
 
 ## Context
@@ -39,8 +39,8 @@ goes through its own licence gate at build time (decision 8).
    `engines/<id>/Dockerfile`) that leases work from the gateway and never runs the tool itself, and, under ADR-0190
    I5, a task that runs the tool in the executor's sandbox under the run's `engine_worker` placement, with the run's
    virtual key as the task secret and the gateway channel as its only route. Nothing new is added to the contract:
-   `ENGINE_IDS` gains `spikee` and `pyrit` (migration 0301 widens `engines_id_check` and seeds both rows, off), each
-   has a manifest entry, a shared catalogue (`packages/shared/src/engines/{spikee,pyrit}.ts`), taxonomy rows
+   `ENGINE_IDS` gains each engine as it is built (this slice: `spikee`; migration 0301 widens `engines_id_check` and
+   seeds its row, off). Each has a manifest entry, a shared catalogue (`packages/shared/src/engines/<id>.ts`), taxonomy rows
    (`ENGINE_TAXONOMY` version 4), compose services under the `engines` profile, and a lock entry in
    `engines/images.lock.json`.
 
@@ -181,3 +181,70 @@ goes through its own licence gate at build time (decision 8).
 3. **Licences outside the ADR-0176 list in the two closures.** Any found are listed in each engine's
    `licence-allow.json` as reused from ADR-0187 decision 193 and await the owner's confirmation for these engines
    (see the "As built" section).
+4. **Finishing PyRIT** (see "As built"): a builder working in a session that can review and write PyRIT's attack
+   driver and its seed handling, or the owner's call to drop PyRIT for DeepTeam (decision 12).
+
+## As built (2026-11-07, branch `builder/p26-spikee-pyrit-engines`)
+
+**Spikee: built.** `packages/engine-spikee` mirrors garak's runner and task modules, and `engines/spikee` holds the
+image (70 hash-pinned wheels, a licence gate, a data prune and the THIRD_PARTY notes).
+- **Target.** Every built-in LLM path in Spikee 0.9.4 goes through any-llm's provider registry, which reads a hosted
+  endpoint and key from the environment or `.env` and has no per-request header setting. So the target is a small
+  workspace module, `targets/regulait_gateway.py`, using Spikee's own `<cwd>/targets/` hook. It uses the standard
+  `urllib` with proxies off and redirects refused. It calls one URL, `<base>/chat/completions`, with the run key from
+  `REGULAIT_SPIKEE_API_KEY` and only `x-regulait-*` headers.
+- **Processes.** Each dataset runs as two isolated Spikee processes (`python -I -B`, Spikee's own CLI): `generate`
+  from the image's read-only seeds, then `test --target regulait_gateway --threads 1 --attempts 1 --max-retries 1`.
+  No target, judge or plugin options and no attack module are ever passed. The trials cap selects entries
+  deterministically.
+- **Measured.** Real Spikee in the pinned closure against a fake gateway passes 5 cases:
+  - a complying target reads `fail` and a refusing one `pass`;
+  - exactly 6 calls for 3 entries × 2 items, each a POST to `/v1/chat/completions` with the run key and only the
+    agent and project headers;
+  - a 401 reads `unknown`, never a pass;
+  - system-prompt extraction against a leaking target reads `fail`.
+- **Guards.** Every guard was shown red once by breaking it (the builder's report on the PR lists them).
+- **Image.** It built locally, with the sandbox's TLS proxy CA passed only as a BuildKit secret. `pip check` passes,
+  the prune removed 8 excluded paths, and the licence gate reports 77 allowed, 9 admitted by the allow file and
+  0 denied. Inside the image (`--network=none`, uid 10001), the offline generate step works.
+
+**Catalogue corrections from reading the 0.9.4 wheel:**
+- `plugin:mask` is `cloud_only`: it asks a hosted LLM which words to mask.
+- `plugin:text2image` is `unsupported_format`: it renders an image locally, which the chat route cannot carry.
+- `dataset:cybersec-2026-01` stays local. Its two `poetry` jailbreaks cite a Hub sample with no stated licence and
+  are never generated (`--jailbreak-filter` names the other 20 types).
+- `dataset:sysmsg-extraction-2025-04` is generated with `--include-system-message`. Its regex judge looks for
+  Spikee's own demo system message, so without it every reply would read as a false pass.
+
+**Licences outside the ADR-0176 list.** Nine are listed in `engines/spikee/licence-allow.json` as "reused from
+ADR-0187 decision 193 (or 106) for spikee; owner to confirm (ADR-0245)": PSF-2.0 (python, aiohappyeyeballs,
+typing_extensions), MPL-2.0 unmodified (certifi, tqdm), CNRI-Python (regex), and numpy's Zlib, libgfortran and
+libquadmath. The gate accepts that wording as a third form, which admits like "pending". This is open question 3.
+
+**PyRIT: designed, not built in this slice.** Two builder attempts were stopped by a content-safety filter while
+handling PyRIT's harmful-objective seed data and attack code, before any file compiled. The design above
+(decisions 2 and 7) stands. In this slice:
+- `pyrit` is not in `ENGINE_IDS`, the lock, compose or migration 0301, so nothing half-built ships.
+- The partial work (the run plan, the driver config and the gateway-only invariant, uncompiled) is kept on branch
+  `builder/p26-pyrit-wip`.
+- The follow-up adds the engine with its own migration.
+
+Findings recorded for that follow-up:
+- **av.** PyRIT's hard dependency `av` 19.0.2 bundles GPL libx264 and libx265, so its `av.libs` must be pruned at
+  build time, with the build asserting that `av` cannot be imported. This needs the owner's confirmation.
+- **scipy.** Its bundled libgfortran and libquadmath are a new subject for the owner's decision 106.
+- **Memory.** It must be set to in-memory SQLite directly; `initialize_pyrit_async` must not be called, because it
+  loads `.env` files and can read Azure Key Vault.
+- **Request fields.** `OpenAIChatTarget` sends only fields the compat route allows (temperature, top_p, seed and n
+  stay unset).
+- **Scorers.** TAP and PAIR need a `FloatScaleThresholdScorer` over a `SelfAskScaleScorer`.
+- **Objectives.** Only the AI Red Team seed files, each pinned by sha256 and referred to by index. Output and logs
+  must never echo seed or model text.
+
+**The engine re-test (decision 11) is built for every red-team engine.** The re-test was measured on Postgres 16
+(`zz-adr0245-engine-retest.test.ts`):
+- one suite per engine and configuration, run as its person;
+- `refused` with `engine_disabled` while the engine is off, and no run made;
+- a cancel through the real route settles it `reported`, once, with its audit row (red with the hook removed);
+- the database refuses an engine link on a non-engine row.
+

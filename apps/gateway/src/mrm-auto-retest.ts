@@ -18,7 +18,7 @@
  *  4. attaches the result to the card's pending re-certification request, or to the next one requested.
  *
  * ADR-0245: a third kind, `engine`. Each completed red-team ENGINE run a person ran against the agent (garak,
- * promptfoo, spikee, PyRIT; one per engine and configuration, newest first, never a run a re-test started) is
+ * promptfoo, spikee; one per engine and configuration, newest first, never a run a re-test started) is
  * created again through `createEngineRun` as that person, on that project, with the same sets, judge, trials and
  * budget, so every gate a person's run passes applies (entitlement, project, budget, approvals). An engine run is
  * asynchronous, so the re-test stays `running` and is settled when the run ends (mrm-retest-engine.ts).

@@ -129,7 +129,7 @@ export const SPIKEE_SETS: readonly SpikeeSetEntry[] = Object.freeze(
     pl("text2image", "unsupported_format", "renders the payload as an image (Pillow is not in the closure, and the chat route carries text only)"),
     pl("tts", "cloud_only", "calls a hosted speech service"),
     pl("shortener", "cloud_only", "shortens the payload with a hosted LLM"),
-    pl("llm_jailbreaker", "cloud_only", "rewrites the payload with a hosted LLM (multi-turn LLM attacks are PyRIT's, ADR-0245 decision 3)"),
+    pl("llm_jailbreaker", "cloud_only", "rewrites the payload with a hosted LLM (multi-turn LLM attacks are left to a governed attacker path, ADR-0245 decision 3)"),
     pl("llm_multi_language_jailbreaker", "cloud_only", "rewrites the payload with a hosted LLM"),
     pl("llm_poetry_jailbreaker", "cloud_only", "rewrites the payload with a hosted LLM"),
     pl("prompt_decomposition", "cloud_only", "rewrites the payload with a hosted LLM"),

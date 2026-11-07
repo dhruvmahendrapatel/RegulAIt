@@ -160,7 +160,7 @@ describe("ENG-IMG publish gate: the decision, on a throwaway repository", () => 
 
   it("force publishes every engine; a never-published engine publishes", () => {
     expect(decide(base, { force: true }).publish).toEqual(ENGINE_IDS);
-    const r = plan({ engines: { promptfoo: { sourceCommit: null }, modelscan: { sourceCommit: base }, garak: { sourceCommit: base }, spikee: { sourceCommit: base }, pyrit: { sourceCommit: base } } }, { changed: () => [] });
+    const r = plan({ engines: { promptfoo: { sourceCommit: null }, modelscan: { sourceCommit: base }, garak: { sourceCommit: base }, spikee: { sourceCommit: base } } }, { changed: () => [] });
     expect(r.publish).toEqual(["promptfoo"]);
     expect(r.engines.promptfoo.reason).toBe("never published");
   });

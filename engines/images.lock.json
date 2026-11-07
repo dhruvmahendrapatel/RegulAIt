@@ -32,14 +32,6 @@
       "publishGeneration": 0,
       "sourceCommit": null,
       "publishedAt": null
-    },
-    "pyrit": {
-      "repository": null,
-      "manifestDigest": null,
-      "imageId": null,
-      "publishGeneration": 0,
-      "sourceCommit": null,
-      "publishedAt": null
     }
   }
 }
