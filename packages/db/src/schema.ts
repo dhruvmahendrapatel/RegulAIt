@@ -3156,7 +3156,7 @@ export const pmConnections = pgTable("pm_connections", {
   })
     .notNull()
     .default("manual"),
-  /** ADR-0207 (migration 0279): the previous webhook secret after a rotation, accepted until
+  /** ADR-0207 (migration 0287): the previous webhook secret after a rotation, accepted until
    * `previousWebhookSecretValidUntil` (database clock, 24 h after the rotation). All three set together or all NULL. */
   previousWebhookSecretHash: text("previous_webhook_secret_hash"),
   previousWebhookSecretCiphertext: text("previous_webhook_secret_ciphertext"),

@@ -7,7 +7,7 @@
 
 The owner approved the after-demo lifecycle proposals on 2026-10-29 (#453, comment 6509969403) and unparked the
 G3–G6 set on 2026-10-30 (#453, comment 6522492997, which also reserved migrations 0219–0222 and this ADR number;
-0219–0221 were renumbered 0285–0279 above main at merge).
+0219–0221 were renumbered 0285–0287 above main at merge).
 Before this change:
 
 - a connector could not be disabled or removed, only its credential, and saving or removing that credential was not
@@ -101,7 +101,7 @@ same transaction as their write. A refusal has its own code. No response or audi
   unfinished workflow instance has a `git_operation` stage naming the connection (a `jsonb_path_exists` query; at
   most 20 names or ids of each).
 
-### G6 — PM connections (migration 0279)
+### G6 — PM connections (migration 0287)
 
 - `PATCH /v1/pm/connections/:name {project?, baseUrl?, apiVersion?, driftResolution?}`. The name is part of the webhook
   address and the provider picks the adapter, so neither can change. The edited connection must still resolve; a new
@@ -119,7 +119,7 @@ same transaction as their write. A refusal has its own code. No response or audi
 
 ### Migrations, UI and size
 
-- 0285–0279 (reserved as 0219–0221; renumbered above main at merge) are hand-written (never `drizzle-kit generate`),
+- 0285–0287 (reserved as 0219–0221; renumbered above main at merge) are hand-written (never `drizzle-kit generate`),
   with journal `when` = 1785212000000 + (N − 277) × 1,000,000.
   0222 is left unused. The two `disabled_reason` columns are registered in `prose-scrub.ts` (ADR-0102).
 - The UI calls each route literally (so the route census and affordance parity see them), and the edit, token and
