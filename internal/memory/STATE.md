@@ -1,6 +1,6 @@
 ---
 phase: demo-prep-live-integrations-merged
-last_updated: 2026-10-29
+last_updated: 2026-11-07
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -20,6 +20,8 @@ roadmap: ../product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-11-07 - backlog P26 built on `builder/p26-spikee-pyrit-engines` ([ADR-0245](../decisions/0245-spikee-pyrit-redteam-engines.md), migration 0301):** Spikee and PyRIT join garak and promptfoo as sidecar red-team engines (off until their first signed image publish), PyRIT's attacker goes through the gateway as the run's judge, and the ADR-0217 automatic re-test now repeats red-team engine runs.
 
 **2026-10-29 - the customer demo moves to one date, Saturday 2026-10-31 (owner, #453 c6508111468).**
 - **Date:** the internal run-through on Sun 11-01 and the external demo on Tue 11-03 are dropped; there is one run, on
@@ -5536,6 +5538,17 @@ the schema: 151 text columns match the S6 shape (S6 said ~34); 84 guarded, 67 ex
 audit, tool references, platform copies, ingested, machine, conversation, signed evidence, check-constrained), pinned
 against `information_schema` and against the ADR's generated block. Open: whether to guard jsonb
 `config_versions.body` string leaves; ingested columns stay a residual.
+
+**ADR-0245 (builder, 2026-11-07): Spikee and PyRIT as sidecar red-team engines (backlog P26).** Spikee 0.9.4
+(Apache-2.0, indirect prompt injection in documents) and PyRIT 1.1.0 (MIT, multi-turn attacks) are ADR-0187 / ADR-0190
+I5 engines: pinned, hash-locked, licence-gated images built in CI, off and `not_built` until their first signed
+publish (null lock entries, so nothing can enable them before then). PyRIT's attacker and scorer are the run's judge
+agent through the gateway on the run key (`requiresJudge`), and every PyRIT attack is `offensive` (approval first).
+Migration 0301 (`when` 1785228000000) widens `engines_id_check`, seeds both rows and gives the ADR-0217 auto re-test a
+third kind, `engine` (`mrm_retest_runs.engine_run_id`), which repeats a person's red-team engine runs of any engine
+after a model change and settles in the transaction that ends the run. The lock reader treats an engine missing from
+an older base lock as never published. DeepTeam and Augustus are documented alternates. Open: a separate attacker
+agent, Spikee's LLM judge through the gateway, owner confirmation of reused licence acceptances, and the UI (#453).
 
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
