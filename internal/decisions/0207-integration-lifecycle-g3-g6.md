@@ -120,7 +120,7 @@ same transaction as their write. A refusal has its own code. No response or audi
 ### Migrations, UI and size
 
 - 0285–0287 (reserved as 0219–0221; renumbered above main at merge) are hand-written (never `drizzle-kit generate`),
-  with journal `when` = 1785212000000 + (N − 277) × 1,000,000.
+  with journal `when` = 1785212000000 + (N − 285) × 1,000,000.
   0222 is left unused. The two `disabled_reason` columns are registered in `prose-scrub.ts` (ADR-0102).
 - The UI calls each route literally (so the route census and affordance parity see them), and the edit, token and
   rotation dialogs load lazily from one module. All JS measures 1,119,655 B with main merged in (2026-11-06), inside the
