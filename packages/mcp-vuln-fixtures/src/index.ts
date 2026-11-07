@@ -1,6 +1,6 @@
 /**
  * @regulait/mcp-vuln-fixtures — TEST ONLY (ADR-0246). Deliberately vulnerable MCP servers for CI. Never shipped:
- * `.dockerignore` keeps the package out of the image and every consumer takes it as a devDependency.
+ * the Dockerfile deletes the package after the production install, and every consumer takes it as a devDependency.
  */
 export {
   fakeAwsAccessKeyId,

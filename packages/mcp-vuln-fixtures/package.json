@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "license": "UNLICENSED",
-  "description": "TEST ONLY. Deliberately vulnerable MCP servers for CI (ADR-0246). Never shipped: excluded from the image by .dockerignore and depended on only as a devDependency.",
+  "description": "TEST ONLY. Deliberately vulnerable MCP servers for CI (ADR-0246). Never shipped: deleted from the image build stage after the production install, and depended on only as a devDependency.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

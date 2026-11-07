@@ -5547,7 +5547,7 @@ annotations), prompt, resource and resource template gets a SHA-256 over its RFC
 changed or added tool is neither stored nor served, and a call to it, or `prompts/get` / `resources/read` of a changed
 item, is refused (`mcp-definition-blocked`) before any connect. `warn` is a settings_relax relaxation. Re-approval
 (`POST /v1/servers/:id/definition-pins/approve`) is bound by step-up to the exact reviewed digests, compare-and-set,
-audited. `@regulait/mcp-vuln-fixtures` (test-only, `.dockerignore`d, gateway devDependency) serves seven attack classes
+audited. `@regulait/mcp-vuln-fixtures` (test-only, deleted from the image build stage, gateway devDependency) serves seven attack classes
 over real MCP; the two unlicensed upstream projects were not read. Addendum: our own offensive-tooling rule set marks a
 server `risk_class = 'high'` (sticky); under `mcp_high_risk_mode = 'enforce'` each call is refused until the policy
 template (fleet approval rule, quorum >= 2, plus a rate limit) is applied, must name targets covered by

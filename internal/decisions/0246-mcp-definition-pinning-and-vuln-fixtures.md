@@ -104,8 +104,9 @@ step-up, and the relaxation is named in the audit row.
 ### Part 2: deliberately vulnerable MCP fixtures
 
 A new test-only package, `packages/mcp-vuln-fixtures`. It is `private`, a devDependency of the gateway only, and
-excluded from the image by `.dockerignore` (pnpm tolerates the missing workspace package under `--frozen-lockfile`;
-checked). The gateway's `*.test.ts` files are already excluded from the image. Each fixture is plain data and can be
+deleted from the image's build stage after the production install. It stays in the build context, because a
+workspace install without it fails with `ERR_PNPM_WORKSPACE_PKG_NOT_FOUND` (this broke the engine image builds when it
+was first `.dockerignore`d). Engine images take only `pnpm deploy --prod` of their own package, so it is never in them. The gateway's `*.test.ts` files are already excluded from the image. Each fixture is plain data and can be
 served over a real Streamable HTTP MCP transport through the low-level SDK `Server`, so the manifest arrives exactly as
 written. A rug-pull fixture is switched with `pull(state)`, and the state records every method and call received.
 
