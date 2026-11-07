@@ -158,7 +158,7 @@ export const INDIRECT_UI_CALLS = new Map([
   ].map((r) => [
     r,
     {
-      file: "apps/web/src/views/admin/compliance/InfrastructurePage.tsx",
+      file: "apps/web/src/views/admin/compliance/infraLedgers.tsx",
       evidence: "api.post(pr.url",
       reason: "propose(…) keeps the path in state; the confirm dialog posts it",
     },
@@ -168,24 +168,40 @@ export const INDIRECT_UI_CALLS = new Map([
     ["GET /v1/runs/export.xlsx", "apps/web/src/views/runs/RunsPage.tsx"],
     ["GET /v1/incidents/export.xlsx", "apps/web/src/views/incidents/IncidentsPage.tsx"],
     ["GET /v1/users/export.xlsx", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    // ADR-0226 P2 batch B: the identity and access lists
+    ["GET /v1/users/:userId/sessions/export.xlsx", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    ["GET /v1/revocations/export.xlsx", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    ["GET /v1/users/:userId/revocations/agents/export.xlsx", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    ["GET /v1/users/:userId/revocations/connectors/export.xlsx", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    ["GET /v1/keys/export.xlsx", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    ["GET /v1/roles/:roleId/assignments/export.xlsx", "apps/web/src/views/admin/identity/RolesPage.tsx"],
+    ["GET /v1/teams/export.xlsx", "apps/web/src/views/admin/identity/TeamsPage.tsx"],
+    ["GET /v1/virtual-keys/export.xlsx", "apps/web/src/views/admin/identity/VirtualKeysPage.tsx"],
+    ["GET /v1/virtual-keys/:keyId/usage/export.xlsx", "apps/web/src/views/admin/identity/VirtualKeysPage.tsx"],
+    ["GET /v1/admin/credentials/export.xlsx", "apps/web/src/views/admin/identity/CredentialsPage.tsx"],
+    ["GET /v1/workload-identities/export.xlsx", "apps/web/src/views/admin/identity/WorkloadIdentitiesPage.tsx"],
+    ["GET /v1/auth/link-requests/export.xlsx", "apps/web/src/views/admin/identity/SsoPage.tsx"],
+    ["GET /v1/chatops/identity-links/export.xlsx", "apps/web/src/views/admin/governance/ChatOpsPage.tsx"],
+    ["GET /v1/agents/export.xlsx", "apps/web/src/views/admin/integrations/AgentsPage.tsx"],
+    ["GET /v1/licenses/verifications/export.xlsx", "apps/web/src/views/admin/settings/LicensingPage.tsx"],
     // P2 batch C: the workflows, engines, cost and operations lists
     ["GET /v1/admission/skills/export.xlsx", "apps/web/src/views/admin/governance/AdmissionReviewPage.tsx"],
     ["GET /v1/billing/statements/export.xlsx", "apps/web/src/views/admin/cost/BillingHistory.tsx"],
     ["GET /v1/builder/threads/export.xlsx", "apps/web/src/views/builder/BuilderInboxPage.tsx"],
     ["GET /v1/compliance/pack-reports/export.xlsx", "apps/web/src/views/admin/compliance/PackRecords.tsx"],
     ["GET /v1/cost-events/export.xlsx", "apps/web/src/views/admin/cost/OptimizationPage.tsx"],
-    ["GET /v1/cost-imports/:importId/export.xlsx", "apps/web/src/views/admin/cost/CostImportDetail.tsx"],
-    ["GET /v1/cost-imports/export.xlsx", "apps/web/src/views/admin/cost/CostConsolidationPage.tsx"],
+    ["GET /v1/cost-imports/:importId/export.xlsx", "apps/web/src/views/admin/cost/CostImportsPages.tsx"],
+    ["GET /v1/cost-imports/export.xlsx", "apps/web/src/views/admin/cost/CostImportsPages.tsx"],
     ["GET /v1/engine-runs/export.xlsx", "apps/web/src/views/admin/governance/EngineRunsPanel.tsx"],
     ["GET /v1/engine-schedules/export.xlsx", "apps/web/src/views/admin/integrations/EngineSchedulesCard.tsx"],
     ["GET /v1/evals/datasets/export.xlsx", "apps/web/src/views/admin/governance/EvalsPage.tsx"],
     ["GET /v1/evals/runs/export.xlsx", "apps/web/src/views/admin/governance/EvalsPage.tsx"],
-    ["GET /v1/executors/:executorId/attestations/export.xlsx", "apps/web/src/views/admin/integrations/isolation/ExecutorDetail.tsx"],
-    ["GET /v1/infra/backups/export.xlsx", "apps/web/src/views/admin/compliance/InfrastructurePage.tsx"],
-    ["GET /v1/infra/certs/export.xlsx", "apps/web/src/views/admin/compliance/InfrastructurePage.tsx"],
-    ["GET /v1/infra/findings/export.xlsx", "apps/web/src/views/admin/compliance/InfrastructurePage.tsx"],
-    ["GET /v1/infra/patches/export.xlsx", "apps/web/src/views/admin/compliance/InfrastructurePage.tsx"],
-    ["GET /v1/infra/resources/export.xlsx", "apps/web/src/views/admin/compliance/InfrastructurePage.tsx"],
+    ["GET /v1/executors/:executorId/attestations/export.xlsx", "apps/web/src/views/admin/integrations/EnginesSubpages.tsx"],
+    ["GET /v1/infra/backups/export.xlsx", "apps/web/src/views/admin/compliance/infraLedgers.tsx"],
+    ["GET /v1/infra/certs/export.xlsx", "apps/web/src/views/admin/compliance/infraLedgers.tsx"],
+    ["GET /v1/infra/findings/export.xlsx", "apps/web/src/views/admin/compliance/infraLedgers.tsx"],
+    ["GET /v1/infra/patches/export.xlsx", "apps/web/src/views/admin/compliance/infraLedgers.tsx"],
+    ["GET /v1/infra/resources/export.xlsx", "apps/web/src/views/admin/compliance/infraLedgers.tsx"],
     ["GET /v1/llm/jobs/export.xlsx", "apps/web/src/views/admin/llm/RegulAItLlmPage.tsx"],
     ["GET /v1/mcp-registries/:registryId/entries/export.xlsx", "apps/web/src/views/admin/integrations/McpRegistriesPanel.tsx"],
     ["GET /v1/mcp/admission/export.xlsx", "apps/web/src/views/admin/governance/AdmissionReviewPage.tsx"],
@@ -267,17 +283,27 @@ export const INDIRECT_UI_CALLS = new Map([
     ["GET /v1/governance/decision-regression/runs", "apps/web/src/views/admin/governance/DecisionRegressionPage.tsx"],
     ["GET /v1/incidents", "apps/web/src/views/admin/governance/IncidentsTab.tsx"],
     ["GET /v1/feedback", "apps/web/src/views/feedback/feedbackKit.tsx"],
+    // ADR-0226 P2 batch B: the identity lists DataList reads from the path its page hands it (`endpoint`)
+    ["GET /v1/auth/link-requests", "apps/web/src/views/admin/identity/SsoPage.tsx"],
+    ["GET /v1/keys", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    ["GET /v1/licenses/verifications", "apps/web/src/views/admin/settings/LicensingPage.tsx"],
+    ["GET /v1/admin/credentials", "apps/web/src/views/admin/identity/CredentialsPage.tsx"],
+    ["GET /v1/revocations", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    ["GET /v1/roles/:roleId/assignments", "apps/web/src/views/admin/identity/RolesPage.tsx"],
+    ["GET /v1/chatops/identity-links", "apps/web/src/views/admin/governance/ChatOpsPage.tsx"],
+    ["GET /v1/users/:userId/revocations/agents", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    ["GET /v1/users/:userId/revocations/connectors", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    ["GET /v1/virtual-keys", "apps/web/src/views/admin/identity/VirtualKeysPage.tsx"],
     // ADR-0226 P2 batch C: a list the shared control reads, page by page, from the endpoint its page hands it
     ["GET /v1/admission/skills", "apps/web/src/views/admin/governance/AdmissionReviewPage.tsx"],
     ["GET /v1/billing/statements", "apps/web/src/views/admin/cost/BillingHistory.tsx"],
     ["GET /v1/compliance/pack-reports", "apps/web/src/views/admin/compliance/PackRecords.tsx"],
-    ["GET /v1/cost-imports", "apps/web/src/views/admin/cost/CostConsolidationPage.tsx"],
     ["GET /v1/engine-schedules", "apps/web/src/views/admin/integrations/EngineSchedulesCard.tsx"],
     ["GET /v1/executors/:executorId/attestations", "apps/web/src/views/admin/integrations/isolation/ExecutorDetail.tsx"],
-    ["GET /v1/infra/backups", "apps/web/src/views/admin/compliance/InfrastructurePage.tsx"],
-    ["GET /v1/infra/certs", "apps/web/src/views/admin/compliance/InfrastructurePage.tsx"],
-    ["GET /v1/infra/findings", "apps/web/src/views/admin/compliance/InfrastructurePage.tsx"],
-    ["GET /v1/infra/patches", "apps/web/src/views/admin/compliance/InfrastructurePage.tsx"],
+    ["GET /v1/infra/backups", "apps/web/src/views/admin/compliance/infraLedgers.tsx"],
+    ["GET /v1/infra/certs", "apps/web/src/views/admin/compliance/infraLedgers.tsx"],
+    ["GET /v1/infra/findings", "apps/web/src/views/admin/compliance/infraLedgers.tsx"],
+    ["GET /v1/infra/patches", "apps/web/src/views/admin/compliance/infraLedgers.tsx"],
     ["GET /v1/llm/jobs", "apps/web/src/views/admin/llm/RegulAItLlmPage.tsx"],
     ["GET /v1/mcp-registries/:registryId/entries", "apps/web/src/views/admin/integrations/McpRegistriesPanel.tsx"],
     ["GET /v1/model-artifacts", "apps/web/src/views/admin/governance/ModelArtifactsTab.tsx"],
@@ -315,8 +341,13 @@ export const INDIRECT_UI_CALLS = new Map([
  * until the entry is deleted, and KNOWN_UI_GAPS_MAX is lowered to match.
  */
 export const KNOWN_UI_GAPS = new Map([
-  // empty: batch U4 (ui-gaps-details) closed the last 22. A new entry needs a reason and raises nothing:
-  // KNOWN_UI_GAPS_MAX stays 0, so build the screen instead.
+  ["GET /v1/usage-extractors", { does: "reads the org switch and every agent's active usage-mapping version", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["PUT /v1/usage-extractors/enabled", { does: "turns the usage extractor on (settings_relax step-up) or off", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["GET /v1/agents/:agentId/usage-extractor/versions", { does: "lists an agent's usage-mapping versions with each one's latest sample test", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["POST /v1/agents/:agentId/usage-extractor/versions", { does: "saves a new usage-mapping version (validated JSON pointers)", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["POST /v1/agents/:agentId/usage-extractor/versions/:versionId/test", { does: "tests a version against a sample response and the counts the admin expects", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["POST /v1/agents/:agentId/usage-extractor/versions/:versionId/activate", { does: "activates a version whose latest test passed (settings_relax step-up)", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["POST /v1/agents/:agentId/usage-extractor/deactivate", { does: "returns an agent to its adapter's built-in usage counts", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
 ]);
 
 /**
@@ -325,7 +356,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 0;
+export const KNOWN_UI_GAPS_MAX = 7;
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 
