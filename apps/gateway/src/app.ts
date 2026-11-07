@@ -394,6 +394,7 @@ import { z } from "zod";
 import { boundTargetsForApprovals, registerMcpProxy } from "./mcp-proxy.js";
 import { clearUpstreamCredentialOnUrlMove, registerMcpUpstreamCredentialRoutes } from "./mcp-upstream-credential.js";
 import { registerA2aRoutes } from "./a2a.js";
+import { registerMcpBundleRoutes } from "./mcp-bundles.js";
 import { registerPrivacyOpsRoutes } from "./privacy-ops.js";
 import { ExternalEffectBlockedError } from "./external-effects.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
@@ -3320,6 +3321,24 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             ...(carveOuts.length > 0 ? { revokedTools: carveOuts } : {}),
           };
         }),
+      // ADR-0236: tools held through a governed MCP bundle, at the role tier (a revocation subtracts from them)
+      ...(entitlements.bundleToolGrants ?? []).map((g) => {
+        const rev = revocationFor(g.toolName);
+        return {
+          kind: "tool" as const,
+          toolName: g.toolName,
+          source: "bundle" as const,
+          bundle: g.bundleName ?? g.bundleId,
+          bundleId: g.bundleId,
+          bundleVersion: g.version,
+          via: g.via,
+          toolTier: g.toolTier ?? "read",
+          maxTier: g.maxTier ?? "read",
+          grantId: g.id,
+          revoked: Boolean(rev),
+          ...(rev ? { revocationId: rev.id } : {}),
+        };
+      }),
     ];
     // Every active revocation, so overrides are discoverable and reversible
     // via DELETE /v1/revocations/:id even when no grant currently matches.
@@ -5777,6 +5796,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // settings_relax step-up, audited); reads show only whether one is set, its header and last four characters
   registerMcpUpstreamCredentialRoutes(app, db, { dataKey: opts.dataKey });
   registerA2aRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0236 (P11) — governed MCP bundles: admin-only through the default gate, default-off, audited; enforcement is
+  // the kernel's bundle-tool-allow-list rule, fed by loadEntitlements at the existing MCP interception point
+  registerMcpBundleRoutes(app, db);
   // ADR-0097 part A — the admission review queue and the reason-required,
   // audited clear. Admin-only through the default gate, like the MCP registry
   // writes it sits beside.
