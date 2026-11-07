@@ -83,6 +83,7 @@ RUN rm -rf /usr/local/lib/python3.12/site-packages/pip /usr/local/lib/python3.12
            /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.12
 COPY --from=closure /opt/skillscanner /opt/skillscanner
 COPY engines/skillscanner/fixtures /opt/skillscanner/fixtures
+COPY engines/skillscanner/selftest.py /opt/skillscanner/selftest.py
 RUN chmod -R a-w /opt/skillscanner \
  && mkdir -p /work /in /out && chown 10001:10001 /work /in /out
 ENV HOME=/work \
@@ -96,7 +97,10 @@ ENV HOME=/work \
     REGULAIT_SKILLSCANNER_RULES_MANIFEST=/opt/skillscanner/rules.sha256
 USER 10001:10001
 WORKDIR /work
-RUN --network=none /opt/skillscanner/venv/bin/python -I /opt/skillscanner/scan.py /opt/skillscanner/fixtures/bad /work/bad.json \
+# the driver's fail-closed self-test: analyzers_failed, a failed or missing rule contract, an unexpected analyzer
+# set and a result with no to_dict all fail (ADR-0242 review of #727)
+RUN --network=none /opt/skillscanner/venv/bin/python -I /opt/skillscanner/selftest.py /opt/skillscanner/fixtures/results \
+ && /opt/skillscanner/venv/bin/python -I /opt/skillscanner/scan.py /opt/skillscanner/fixtures/bad /work/bad.json \
  && /opt/skillscanner/venv/bin/python -I -c "import json,sys; r=json.load(open('/work/bad.json')); sys.exit(0 if r['status']=='completed' and any(f['severity'] in ('high','critical') for f in r['findings']) else 'bad fixture not flagged')" \
  && /opt/skillscanner/venv/bin/python -I /opt/skillscanner/scan.py /opt/skillscanner/fixtures/clean /work/clean.json \
  && /opt/skillscanner/venv/bin/python -I -c "import json,sys; r=json.load(open('/work/clean.json')); sys.exit(0 if r['status']=='completed' and not [f for f in r['findings'] if f['severity'] in ('medium','high','critical')] else 'clean fixture flagged')" \

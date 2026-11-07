@@ -199,7 +199,17 @@ and nothing changes. The engine's say reaches the existing states in two places:
 3. **Publish.** `engines/images.lock.json`, the publish workflow, `scripts/build-engine-image.sh`, the compose
    services and the image-level Trivy and SBOM scan in CI (ADR-0184). Only then does the manifest carry a digest, and
    only then can an admin enable the engine (audited, with a `settings_relax` step-up, ADR-0187 decision 3).
-4. **UI** (posted on #453): the Engines page rows, and the engine's status and findings on the MCP and skill
+4. **Sandbox enforcement, a hard requirement for phase 2 (from the #727 review).** Nothing in phase 1 enforces the
+   task's sandbox, because no runner exists yet. Phase 1 is safe only because neither engine can be enabled without
+   a published digest. The phase-2 executor must run every admission-scan task with:
+   - no network, a read-only root filesystem, `cap-drop=ALL`, no new privileges and a non-root uid;
+   - CPU, memory, pids and wall-clock limits;
+   - a bounded input. Both drivers now refuse anything over 8 MiB, but the executor's own limit is the real bound.
+
+   Phase 2 must ship a test that starts the real task under the executor and proves each limit (an egress attempt is
+   refused, a write to the root fails, a fork bomb and an over-long run are stopped), and that a task the executor
+   could not confine is reported `not_run`, which holds.
+5. **UI** (posted on #453): the Engines page rows, and the engine's status and findings on the MCP and skill
    admission review pages.
 
 ### 7. Scope the owner added on 2026-11-07 (relayed by two scheduled master notes), and what this PR did with it
@@ -239,6 +249,28 @@ and nothing changes. The engine's say reaches the existing states in two places:
    - apply ATR to MCP tool descriptions. mcp-scanner reads YARA, not ATR's Sigma-style YAML, so this needs either a
      converted rule set or our own matcher over the vendored snapshot.
    Neither fits this PR cleanly.
+
+### 8. Review of #727 (2026-11-07): what changed
+
+- **The skill driver fails closed on every failure signal skill-scanner 2.3.2 records:**
+  - a non-empty top-level `analyzers_failed` (strict-load fallback, rule-contract and analyzer `last_error` failures);
+  - `scan_metadata.rule_contract.status` other than `passed`, or missing;
+  - an unexpected `analyzers_used`;
+  - a result with no usable `to_dict`.
+
+  Its pure `summarise` step has a fixture per case (`engines/skillscanner/fixtures/results`) and a self-test
+  (`selftest.py`) that runs in the image build under `--network=none` and in the shared test suite.
+- **The mcp driver fails closed** when the analyzer set cannot be read.
+- **The gateway pins what ran.** `ADMISSION_SCAN_ENGINES` carries the exact analyzer list each driver emits and the
+  committed rule-set digest. A report with any other list (including an empty one) or another digest is `unknown`.
+- **Fixed text.** A mismatched report's own strings never reach a reason or an audit row.
+- **Foreign key.** `admission_engine_scans.engine_id` references `engines(id)`, and `engine_version` carries its
+  point-in-time exception comment.
+- **Reproducible builds.** Both images join the reproducible-build check (`engine-images-build.yml`, two clean builds
+  compared) as `UNPUBLISHED_ENGINE_IDS`. `--plan` never publishes them, and `build-engine-image.sh push` refuses
+  them until phase 2.
+- **Row-level security** (information): `admission_engine_scans` joins the ADR-0234 RLS batch that covers its
+  parents, `mcp_servers` and `builder_skills`.
 
 ## Consequences
 

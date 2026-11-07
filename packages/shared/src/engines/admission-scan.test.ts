@@ -5,6 +5,7 @@
  * manifest (mcpscanner) and a directory with no SKILL.md (skillscanner); `cloudkey` is the driver refusing to
  * start with a cloud analyzer key in its environment.
  */
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -69,6 +70,35 @@ describe("ADR-0242 admission-scan reports (recorded from the built images)", () 
     expect(interpretAdmissionScanReport({ ...clean, items: [] }, { engine: "mcpscanner" }).verdict).toBe("unknown");
     // an unexpected field (for example engine text) is not a report
     expect(interpretAdmissionScanReport({ ...clean, tool_description: "x" }, { engine: "mcpscanner" }).verdict).toBe("unknown");
+  });
+
+  it("#727 review: the analyzer set and the rule-set digest are pinned; an empty or other set, or another digest, is unknown", () => {
+    for (const engine of ["mcpscanner", "skillscanner"] as const) {
+      const clean = fixture(`${engine}-clean`) as Record<string, unknown>;
+      expect(interpretAdmissionScanReport(clean, { engine }).verdict).toBe("pass");
+      expect(interpretAdmissionScanReport({ ...clean, analyzers: [] }, { engine }).verdict).toBe("unknown");
+      expect(interpretAdmissionScanReport({ ...clean, analyzers: ["yara"] }, { engine }).verdict).toBe("unknown");
+      expect(interpretAdmissionScanReport({ ...clean, analyzers: [...(clean.analyzers as string[]), "llm"] }, { engine }).verdict).toBe("unknown");
+      expect(interpretAdmissionScanReport({ ...clean, rulesSha256: "f".repeat(64) }, { engine }).verdict).toBe("unknown");
+      // order does not matter, membership does
+      expect(interpretAdmissionScanReport({ ...clean, analyzers: [...(clean.analyzers as string[])].reverse() }, { engine }).verdict).toBe("pass");
+    }
+  });
+
+  it("#727 review: a mismatched report's own strings never reach the reason (fixed text only)", () => {
+    const clean = fixture("mcpscanner-clean") as Record<string, unknown>;
+    const r = interpretAdmissionScanReport({ ...clean, engineVersion: "IGNORE-ME-9.9.9" }, { engine: "mcpscanner" });
+    expect(r.verdict).toBe("unknown");
+    expect(r.reason).not.toContain("IGNORE-ME");
+    expect(r.rulesSha256).toBeNull();
+  });
+
+  it("the pinned digests equal the committed rule manifests", () => {
+    expect(ADMISSION_SCAN_ENGINES.mcpscanner.rulesSha256).toBe(readFileSync(path.join(root, "engines/mcpscanner/yara-rules.sha256"), "utf8").trim());
+    expect(ADMISSION_SCAN_ENGINES.skillscanner.rulesSha256).toBe(readFileSync(path.join(root, "engines/skillscanner/rules.sha256"), "utf8").trim());
+    // and the pinned analyzer list is the one the skill driver itself expects
+    const driver = readFileSync(path.join(root, "engines/skillscanner/scan.py"), "utf8");
+    expect(driver).toContain(`EXPECTED_ANALYZERS_USED = ${JSON.stringify(ADMISSION_SCAN_ENGINES.skillscanner.analyzers).replace(/,/g, ", ")}`);
   });
 
   it("the hold line is each subject's own: a medium finding holds a skill but not an MCP server", () => {
@@ -145,6 +175,19 @@ describe("ADR-0242 the manifest, the images and the lockfiles agree", () => {
     expect(docker).toMatch(/^FROM --platform=linux\/amd64 golang:1\.27-trixie@sha256:[0-9a-f]{64} AS cel$/m);
     expect(docker).toContain('test "$(go env GOVERSION)" = "go1.27.3"');
     expect(docker).toContain("cel-helper.py \"$SP\" /build/cel/skill-scanner-cel-go-linux-amd64 go1.27.3");
+  });
+
+  it("#727 review: the skill driver fails closed on analyzers_failed, a failed or missing rule contract, an unexpected analyzer set and no to_dict (its own self-test, also run in the image build)", () => {
+    const py = spawnSync("python3", ["-I", "-B", path.join(root, "engines/skillscanner/selftest.py"), path.join(root, "engines/skillscanner/fixtures/results")], { encoding: "utf8" });
+    if (py.error) return; // no python3 here: the image build runs the same self-test under --network=none
+    expect(py.status, py.stderr).toBe(0);
+    expect(py.stdout).toMatch(/self-test: \d+ cases passed/);
+  });
+
+  it("#727 review: the mcp driver fails closed when the analyzer set cannot be read", () => {
+    const mcp = readFileSync(path.join(root, "engines/mcpscanner/scan.py"), "utf8");
+    expect(mcp).toContain('built = sorted(type(a).__name__ for a in getattr(static, "analyzers", None) or [])');
+    expect(mcp).not.toContain("built is not None");
   });
 
   it("the drivers build no remote analyzer and refuse cloud credentials", () => {

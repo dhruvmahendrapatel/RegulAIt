@@ -28,12 +28,14 @@ ON CONFLICT ("id") DO NOTHING;
 --> statement-breakpoint
 CREATE TABLE "admission_engine_scans" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
-  "engine_id" text NOT NULL,
+  "engine_id" text NOT NULL REFERENCES "engines"("id") ON DELETE RESTRICT,
   "mcp_server_id" uuid REFERENCES "mcp_servers"("id") ON DELETE CASCADE,
   "builder_skill_id" uuid REFERENCES "builder_skills"("id") ON DELETE CASCADE,
   -- the subject's digest the scan was of: the MCP manifest digest, or the skill's prompt-section digest
   "subject_digest" text NOT NULL,
   "engine_run_id" uuid REFERENCES "engine_runs"("id") ON DELETE SET NULL,
+  -- point-in-time copy (ADR-0200 addendum exception): the engine version that produced THIS scan, kept as evidence;
+  -- engines.version moves on with the next build and must not rewrite what an old scan was made with
   "engine_version" text NOT NULL,
   -- the sha256 of the rule set the engine reported (null when it failed before reading its rules)
   "rules_sha256" text,

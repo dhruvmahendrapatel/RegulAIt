@@ -24,10 +24,27 @@ import { SKILL_ADMISSION_HOLD_AT } from "../skill-admission.js";
 export const ADMISSION_SCAN_REPORT_SCHEMA = "regulait.admission-scan.v1";
 
 /** the engines that scan an admission subject, and the subject each one scans */
+// The report is untrusted output from a container that has just processed attacker-controlled content, so the
+// gateway does not take its word for what ran (#727 review): the analyzer set and the rule-set digest are pinned
+// here, to exactly what the driver emits and what engines/<id>/ commits (`yara-rules.sha256`, `rules.sha256`;
+// admission-scan.test.ts keeps them in lockstep). Any other analyzer list, including an empty one, or any other
+// digest makes the report `unknown`.
 export const ADMISSION_SCAN_ENGINES = {
-  mcpscanner: { subject: "mcp_server", version: "4.8.7", holdAt: MCP_ADMISSION_HOLD_AT },
-  skillscanner: { subject: "builder_skill", version: "2.3.2", holdAt: SKILL_ADMISSION_HOLD_AT },
-} as const satisfies Record<string, { subject: string; version: string; holdAt: McpAdmissionSeverity }>;
+  mcpscanner: {
+    subject: "mcp_server",
+    version: "4.8.7",
+    holdAt: MCP_ADMISSION_HOLD_AT,
+    analyzers: ["yara", "schema"],
+    rulesSha256: "61b5a21ad1b4279a6593e880448a39628daf8b11a1039b32ba09e149ad5261fa",
+  },
+  skillscanner: {
+    subject: "builder_skill",
+    version: "2.3.2",
+    holdAt: SKILL_ADMISSION_HOLD_AT,
+    analyzers: ["static_analyzer", "bytecode", "pipeline", "correlation"],
+    rulesSha256: "1fce40df3c101daf610b3ff5cd4007bb0ce0ef32b9fdf42938566e22b183e1bd",
+  },
+} as const satisfies Record<string, { subject: string; version: string; holdAt: McpAdmissionSeverity; analyzers: readonly string[]; rulesSha256: string }>;
 export type AdmissionScanEngineId = keyof typeof ADMISSION_SCAN_ENGINES;
 export const ADMISSION_SCAN_ENGINE_IDS = Object.keys(ADMISSION_SCAN_ENGINES) as AdmissionScanEngineId[];
 
@@ -92,9 +109,15 @@ export function interpretAdmissionScanReport(raw: unknown, expect: { engine: Adm
   const parsed = admissionScanReportSchema.safeParse(raw);
   if (!parsed.success) return UNKNOWN("the report is not a regulait.admission-scan.v1 report");
   const r = parsed.data;
-  const version = expect.version ?? ADMISSION_SCAN_ENGINES[expect.engine].version;
-  if (r.engine !== expect.engine || r.engineVersion !== version) return UNKNOWN(`the report is from ${r.engine} ${r.engineVersion}, not ${expect.engine} ${version}`, r.rulesSha256 ?? null);
-  if (r.status !== "completed") return UNKNOWN("the engine reported a failed scan", r.rulesSha256 ?? null);
+  const spec = ADMISSION_SCAN_ENGINES[expect.engine];
+  const version = expect.version ?? spec.version;
+  // fixed text only: nothing the report says is echoed into a reason (an audit row carries it)
+  if (r.engine !== expect.engine || r.engineVersion !== version) return UNKNOWN(`the report names another engine or version than ${expect.engine} ${version}`);
+  if (r.status !== "completed") return UNKNOWN("the engine reported a failed scan");
+  if (r.rulesSha256 !== spec.rulesSha256) return UNKNOWN("the report's rule-set digest is not the pinned one");
+  const ran = [...r.analyzers].sort();
+  const pinned = [...spec.analyzers].sort();
+  if (ran.length !== pinned.length || ran.some((a, i) => a !== pinned[i])) return UNKNOWN("the report's analyzer set is not the pinned one");
   if (r.items.length === 0) return UNKNOWN("the engine scanned nothing", r.rulesSha256);
   if (r.items.some((i) => i.status !== "completed")) return UNKNOWN("an item did not scan", r.rulesSha256);
   const counts = new Map<string, McpAdmissionFinding>();

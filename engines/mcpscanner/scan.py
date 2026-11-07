@@ -122,8 +122,9 @@ def main(argv):
         static = StaticAnalyzer(analyzers=analyzers)
     except Exception as e:  # an engine that cannot start is never a pass
         failed(out_path, f"engine did not start: {type(e).__name__}", {"rulesSha256": actual})
-    built = sorted(type(a).__name__ for a in static.analyzers) if hasattr(static, "analyzers") else None
-    if built is not None and built != ["SchemaReferenceAnalyzer", "YaraAnalyzer"]:
+    # fail closed: an analyzer set we cannot read is not the expected one
+    built = sorted(type(a).__name__ for a in getattr(static, "analyzers", None) or [])
+    if built != ["SchemaReferenceAnalyzer", "YaraAnalyzer"]:
         failed(out_path, "unexpected analyzer set", {"rulesSha256": actual})
 
     async def run():

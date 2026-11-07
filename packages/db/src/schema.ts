@@ -13781,11 +13781,14 @@ export const admissionEngineScans = pgTable(
   "admission_engine_scans",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    engineId: text("engine_id", { enum: ["mcpscanner", "skillscanner"] }).notNull(),
+    engineId: text("engine_id", { enum: ["mcpscanner", "skillscanner"] })
+      .notNull()
+      .references(() => engines.id, { onDelete: "restrict" }),
     mcpServerId: uuid("mcp_server_id").references(() => mcpServers.id, { onDelete: "cascade" }),
     builderSkillId: uuid("builder_skill_id").references(() => builderSkills.id, { onDelete: "cascade" }),
     subjectDigest: text("subject_digest").notNull(),
     engineRunId: uuid("engine_run_id").references(() => engineRuns.id, { onDelete: "set null" }),
+    // point-in-time copy (ADR-0200 addendum exception): the version that produced THIS scan, kept as evidence
     engineVersion: text("engine_version").notNull(),
     rulesSha256: text("rules_sha256"),
     verdict: text("verdict", { enum: ADMISSION_SCAN_VERDICTS }).notNull(),

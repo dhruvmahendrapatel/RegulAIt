@@ -23,6 +23,7 @@ SCHEMA = "regulait.admission-scan.v1"
 # wheel and therefore inside this image; the digest below is over exactly the directory the scanner reads
 RULES_DIR = os.environ.get("REGULAIT_SKILLSCANNER_RULES_DIR", "/opt/skillscanner/venv/lib/python3.12/site-packages/skill_scanner/data/packs")
 RULES_MANIFEST = os.environ.get("REGULAIT_SKILLSCANNER_RULES_MANIFEST", "/opt/skillscanner/rules.sha256")
+MAX_INPUT_BYTES = 8 * 1024 * 1024
 EXPECTED_ANALYZERS = ["BytecodeAnalyzer", "CorrelationAnalyzer", "PipelineAnalyzer", "StaticAnalyzer"]
 
 REMOTE_SWITCHES = (
@@ -106,6 +107,12 @@ def main(argv):
         failed(out_path, "rules digest mismatch", {"rulesSha256": actual})
     if not os.path.isfile(os.path.join(skill_dir, "SKILL.md")):
         failed(out_path, "no SKILL.md", {"rulesSha256": actual})
+    total = 0
+    for root, _dirs, files in os.walk(skill_dir):
+        for name in files:
+            total += os.path.getsize(os.path.join(root, name))
+    if total > MAX_INPUT_BYTES:
+        failed(out_path, "skill over the input limit", {"rulesSha256": actual})
 
     use_writable_tempdir(out_path)
     try:
@@ -130,13 +137,50 @@ def main(argv):
     if leaked:
         failed(out_path, "remote client imported: " + ",".join(leaked), {"rulesSha256": actual})
 
-    data = result.to_dict() if hasattr(result, "to_dict") else {}
-    errors = 0
+    try:
+        data = result_dict(result)
+    except Exception as e:  # no to_dict, or it raised: never an empty pass
+        failed(out_path, f"scan result did not serialise: {type(e).__name__}", {"rulesSha256": actual})
+    report = summarise(data, actual)
+    with open(out_path, "w") as f:
+        json.dump(report, f)
+    sys.exit(0 if report["status"] == "completed" else 2)
+
+
+# The analyzer names skill-scanner 2.3.2 reports in `analyzers_used` for the core set, slugged; the gateway pins the
+# same list (ADR-0242 §4, packages/shared/src/engines/admission-scan.ts).
+EXPECTED_ANALYZERS_USED = ["static_analyzer", "bytecode", "pipeline", "correlation"]
+
+
+def result_dict(result):
+    """the scan result as a dict; raises when skill-scanner's result has no to_dict or does not return a dict"""
+    to_dict = getattr(result, "to_dict", None)
+    if not callable(to_dict):
+        raise TypeError("scan result has no to_dict")
+    data = to_dict()
+    if not isinstance(data, dict):
+        raise TypeError("to_dict did not return an object")
+    return data
+
+
+def summarise(data, rules_sha256):
+    """skill-scanner's ScanResult.to_dict() -> a regulait.admission-scan.v1 report. Pure, so the image build can test it
+    on recorded and crafted results (selftest.py). Fail closed on every failure signal skill-scanner 2.3.2 records:
+    the top-level `analyzers_failed` list (strict-load fallback, rule-contract and analyzer `last_error` failures),
+    `scan_metadata.rule_contract.status` other than "passed" (or missing), the older `scan_metadata` error keys, an
+    unknown severity, and an analyzer set other than the core one."""
+    reasons = []
+    if not isinstance(data, dict):
+        data = {}
+        reasons.append("result is not an object")
     findings = []
     for f in data.get("findings") or []:
+        if not isinstance(f, dict):
+            reasons.append("finding is not an object")
+            continue
         sev = SEVERITIES.get(str(value(f.get("severity", ""))).upper())
         if sev is None:
-            errors += 1
+            reasons.append("finding at an unknown severity")
             continue
         findings.append(
             {
@@ -146,25 +190,35 @@ def main(argv):
                 "name": str(f.get("file_path") or "SKILL.md")[:256],
             }
         )
-    meta = data.get("scan_metadata") or {}
+    if data.get("analyzers_failed"):
+        reasons.append("analyzers_failed is not empty")
+    meta = data.get("scan_metadata")
+    if not isinstance(meta, dict):
+        meta = {}
+        reasons.append("no scan_metadata")
+    contract = meta.get("rule_contract")
+    if not isinstance(contract, dict) or contract.get("status") != "passed":
+        reasons.append("rule_contract did not pass")
     for key in ("analyzer_errors", "errors"):
         if meta.get(key):
-            errors += 1
+            reasons.append(f"scan_metadata.{key} is not empty")
+    used = [slug(a) for a in data.get("analyzers_used") or []]
+    if sorted(used) != sorted(EXPECTED_ANALYZERS_USED):
+        reasons.append("unexpected analyzers_used")
+    ok = not reasons
     report = {
         "schema": SCHEMA,
         "engine": ENGINE,
         "engineVersion": ENGINE_VERSION,
-        "status": "failed" if errors else "completed",
-        "analyzers": [slug(a) for a in data.get("analyzers_used") or []],
-        "rulesSha256": actual,
-        "items": [{"kind": "skill", "name": "SKILL.md", "status": "failed" if errors else "completed"}],
+        "status": "completed" if ok else "failed",
+        "analyzers": used,
+        "rulesSha256": rules_sha256,
+        "items": [{"kind": "skill", "name": "SKILL.md", "status": "completed" if ok else "failed"}],
         "findings": findings,
     }
-    if errors:
-        report["error"] = f"{errors} analyzer error(s)"
-    with open(out_path, "w") as f:
-        json.dump(report, f)
-    sys.exit(2 if errors else 0)
+    if not ok:
+        report["error"] = ("; ".join(reasons))[:200]
+    return report
 
 
 if __name__ == "__main__":
