@@ -11,7 +11,7 @@
  */
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { ENGINE_IDS } from "./engine-images-lock.mjs";
+import { REPRO_ENGINE_IDS as ENGINE_IDS } from "./engine-images-gate.mjs";
 
 /** the verdict per engine for records { a, b } (either may be undefined: that build did not finish) */
 export function compareBuilds(records) {

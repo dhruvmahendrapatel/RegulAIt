@@ -1,4 +1,4 @@
--- ADR-0240: one second factor (TOTP) for the two external portals, the supplier portal (ADR-0221) and the auditor
+-- Pending migration external_portal_mfa (numbered at merge, ADR-0252). ADR-0240: one second factor (TOTP) for the two external portals, the supplier portal (ADR-0221) and the auditor
 -- portal (ADR-0225). Hand-authored (never drizzle-kit generate). Re-runnable: every statement is idempotent.
 --
 -- 1. Two org settings, both shipped ON (ADR-0180): `supplier_portal_mfa_required` and `trust_auditor_mfa_required`.
@@ -56,13 +56,13 @@ CREATE INDEX IF NOT EXISTS "external_mfa_challenges_factor_idx" ON "external_mfa
 --> statement-breakpoint
 INSERT INTO "migration_audit_outbox" ("migration", "object_type", "object_id", "rule_id", "reason", "detail")
 SELECT
-  '0296_external_portal_mfa',
+  'external_portal_mfa',
   'org_settings',
   NULL,
   'external-portal-mfa-strict',
-  'Migration 0296 introduced a required second factor (TOTP) for the supplier portal and the auditor portal at the ' ||
+  'Migration external_portal_mfa (ADR-0240) introduced a required second factor (TOTP) for the supplier portal and the auditor portal at the ' ||
     'STRICT value (required): a single-use link alone no longer opens a session. Relaxing either is audited, with a step-up.',
-  jsonb_build_object('phase', 'migration-0296', 'settings', jsonb_build_object(
+  jsonb_build_object('phase', 'migration-external_portal_mfa', 'settings', jsonb_build_object(
     'supplierPortalMfaRequired', "supplier_portal_mfa_required",
     'trustAuditorMfaRequired', "trust_auditor_mfa_required"))
 FROM "org_settings";

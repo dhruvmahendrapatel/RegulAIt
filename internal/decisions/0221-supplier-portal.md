@@ -163,7 +163,7 @@ The "No supplier MFA" limit above is closed by ADR-0240, which builds one second
 auditor portal of ADR-0225.
 - A spent link now opens a second-factor challenge, not a session. The first use of a grant enrols a TOTP
   authenticator, and every later link asks for a code.
-- `org_settings.supplier_portal_mfa_required` ships `true` (migration 0296). Relaxing it through
+- `org_settings.supplier_portal_mfa_required` ships `true` (migration `external_portal_mfa`, ADR-0240). Relaxing it through
   `PUT /v1/supplier-portal/settings` (`mfaRequired: false`) is a `settings_relax` step-up, audited.
 - New supplier route: `POST /supplier/v1/session/mfa`. New admin routes: `GET` and `POST …/mfa/reset` under
   `/v1/vendors/:vendorId/supplier-access/:accessId`.

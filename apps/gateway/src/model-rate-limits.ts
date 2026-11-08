@@ -208,7 +208,7 @@ export function registerModelRateLimitRoutes(app: FastifyInstance, db: Db) {
     return reply.send({ deleted: true });
   });
 
-  // The org opt-in. Off by default; both directions need the step-up (turning it on is the
+  // The org switch. On by default since ADR-0251; both directions need the step-up (turning it on is the
   // owner's opt-in gate, turning it off lifts every limit at once) and are audited old -> new.
   app.put("/v1/rules/model-rate-limits/enforcement", async (req, reply) => {
     const { enabled } = setModelRateLimitEnforcementSchema.parse(req.body);

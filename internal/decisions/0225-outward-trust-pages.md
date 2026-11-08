@@ -148,7 +148,7 @@ Follow-up 1 above is closed by ADR-0240, which builds one second factor (TOTP) f
 of ADR-0221. It needs no outbound mail, so it works air-gapped.
 - A spent link now opens a second-factor challenge, not a session. The first use of a grant enrols an authenticator,
   and every later link asks for a code.
-- `org_settings.trust_auditor_mfa_required` ships `true` (migration 0296). Relaxing it through `PUT /v1/org/settings`
+- `org_settings.trust_auditor_mfa_required` ships `true` (migration `external_portal_mfa`, ADR-0240). Relaxing it through `PUT /v1/org/settings`
   (`trustAuditorMfaRequired: false`) is a `settings_relax` step-up, audited.
 - New public route: `POST /v1/auditor/session/mfa`. New admin routes: `GET` and `POST …/mfa/reset` under
   `/v1/trust/auditor-grants/:grantId`.

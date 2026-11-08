@@ -828,7 +828,7 @@ describe("B — the execution recheck", () => {
     const tool = nextTool();
     expect((await rule(tool, { quorum: 1 })).statusCode).toBe(201);
     const fresh = async () => {
-      const id = await queued(tool, { text: `facts-${randomBytes(2).toString("hex")}` });
+      const id = await queued(tool, { text: `facts-${randomBytes(6).toString("hex")}` });
       expect((await signAndDecide(P.a, id)).json()).toMatchObject({ status: "approved" });
       return row(id);
     };

@@ -1,7 +1,7 @@
 /**
  * ADR-0240 — the one second factor of the external portals (the supplier portal of ADR-0221 and the auditor portal
  * of ADR-0225): limits, token and cookie shapes, and the bodies both portals send. The gateway's
- * `external-mfa.ts` enforces every limit here; migration 0296's CHECKs repeat the ones a row must never break.
+ * `external-mfa.ts` enforces every limit here; the external_portal_mfa migration's CHECKs repeat the ones a row must never break.
  *
  * The flow, for either portal, while its `…MfaRequired` setting is on (the shipped default):
  *   1. the single-use link is redeemed as before and is SPENT; no session is opened yet;

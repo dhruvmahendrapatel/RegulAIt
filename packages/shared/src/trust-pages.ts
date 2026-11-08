@@ -19,7 +19,7 @@ import { z } from "zod";
 /** THE STRICT DEFAULT. The column default of migration 0247. */
 export const TRUST_PAGES_STRICT_DEFAULTS = Object.freeze({
   trustPagesEnabled: false as boolean,
-  /** ADR-0240 (migration 0296): an auditor proves a TOTP code after the link, before any session */
+  /** ADR-0240 (pending migration external_portal_mfa): an auditor proves a TOTP code after the link, before any session */
   trustAuditorMfaRequired: true as boolean,
 });
 export type TrustPagesSettings = { -readonly [K in keyof typeof TRUST_PAGES_STRICT_DEFAULTS]: (typeof TRUST_PAGES_STRICT_DEFAULTS)[K] };

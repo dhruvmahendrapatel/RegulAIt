@@ -255,7 +255,7 @@ beforeAll(async () => {
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   // ADR-0188 S4: agents created here act under the strict `own_grants` default with grants of their own
   autoGrantCreatedAgentsForTest(app, db, { mirrorTools: true });
-  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, connectorAttributionRequired: false });
   await app.ready();
 
   const [prior] = await db.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));

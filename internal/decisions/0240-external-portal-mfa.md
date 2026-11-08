@@ -2,10 +2,11 @@
 
 - **Status**: Accepted (builder slice; API and backend only, the screens are the Governed Designer's on #453)
 - **Date**: 2026-11-07
+- **Index**: One second factor (TOTP) for the external portals, supplier and auditor (the ADR-0221 and ADR-0225 MFA follow-ups)
 - **Driver**: the "supplier MFA" follow-up of [ADR-0221](0221-supplier-portal.md) and the "auditor MFA" follow-up of
   [ADR-0225](0225-outward-trust-pages.md), dispatched together by the master session. The ADR-0200 security checklist
   requires MFA for admins and step-up, and these two portals are external principals reaching governed data.
-- **Migration**: `0296_external_portal_mfa.sql` (journal `when` 1785223000000).
+- **Migration**: `pending/external_portal_mfa.sql` (numbered at merge, ADR-0252).
 - **Amends**: ADR-0221 (decisions 3 and 4, the sign-in) and ADR-0225 (the sign-in link), each with an addendum that
   points here. **Extends**: [ADR-0180](0180-continuous-assurance-strict-by-default.md) (strict by default),
   [ADR-0183](0183-post-d4-delivery-plan.md) batch 2.1 (`totp.ts` on `otpauth`),
@@ -29,7 +30,7 @@ second factor is the first piece of that consolidation, so one ADR covers both p
    `@fastify/rate-limit`. The state machine for both portals is one module, `apps/gateway/src/external-mfa.ts`. Each
    portal keeps its own routes, refusal bodies and audit object type (`supplier_access`, `auditor_grant`).
 2. **Required by default (ADR-0180).** `org_settings.supplier_portal_mfa_required` and
-   `org_settings.trust_auditor_mfa_required` both ship `true` (migration 0296, with the strict values recorded in the
+   `org_settings.trust_auditor_mfa_required` both ship `true` (migration `external_portal_mfa`, with the strict values recorded in the
    migration outbox). Each portal's existing settings path relaxes it:
    - the supplier flag through `PUT /v1/supplier-portal/settings` (`mfaRequired`), the endpoint ADR-0221 set apart for
      its settings;
