@@ -105,6 +105,12 @@ export class UnassignedMigrationsError extends Error {
  * `REGULAIT_MIGRATIONS_UNASSIGNED=apply`, a temporary copy in which they are numbered as `assignPending` would number
  * them now; `cleanup` removes it. Anything else throws `UnassignedMigrationsError`.
  */
+/** true when the folder holds a numbered migration its journal does not list: the journal is a prefix of the folder */
+export function isJournalPrefix(migrationsFolder: string, journal: Journal = readJournal(migrationsFolder)): boolean {
+  const tags = new Set(journal.entries.map((e) => e.tag));
+  return readdirSync(migrationsFolder).some((f) => NUMBERED_RE.test(f) && !tags.has(f.slice(0, -4)));
+}
+
 export function resolveMigrationsFolder(
   migrationsFolder: string,
   env: Record<string, string | undefined> = process.env,
@@ -112,7 +118,13 @@ export function resolveMigrationsFolder(
   const pending = pendingFiles(migrationsFolder);
   if (pending.length === 0) return { folder: migrationsFolder, provisional: [], cleanup: () => {} };
   if (env[UNASSIGNED_ENV] !== "apply") throw new UnassignedMigrationsError(pending);
-  const { journal, assignments } = assignPending(readJournal(migrationsFolder), pending);
+  const current = readJournal(migrationsFolder);
+  // A folder whose journal stops short of its numbered files is a migration to an earlier point (an upgrade test
+  // copies the folder and truncates the journal). Pending files belong after the full journal only: numbered on top of
+  // a prefix they would take the numbers of real migrations and run against a schema they were not written for. So
+  // they are not applied there; the journal prefix is migrated as it stands.
+  if (isJournalPrefix(migrationsFolder, current)) return { folder: migrationsFolder, provisional: [], cleanup: () => {} };
+  const { journal, assignments } = assignPending(current, pending);
   const tmp = mkdtempSync(path.join(tmpdir(), "regulait-migrations-"));
   mkdirSync(path.join(tmp, "meta"));
   writeFileSync(path.join(tmp, "meta", "_journal.json"), formatJournal(journal));
