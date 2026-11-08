@@ -154,6 +154,12 @@ tool tiers plus lazy tool-loading into P11. The other two are new items:
 | **P21** | **A configurable usage extractor for every provider.** Cost attribution reads token counts through per-adapter code, and modality pricing ([ADR-0212](../decisions/0212-modality-pricing-and-model-rate-limits.md)) only works where an adapter reports a modality split. A new or custom provider cannot be priced without a code change. | An admin-defined mapping from a provider's response (JSON pointers) to text, image, audio and cached input and output token counts. It feeds the existing pillar 5 attribution and ADR-0212 modality pricing, validated and bounded, with a sample-response test before activation, and audited. Reference: `gravitee-io/gravitee-policy-ai-prompt-token-tracking` (Apache-2.0, Java; its custom JSON-pointer extractor covers text tokens only). Extend it to modalities and cached tokens. |
 | **P22** | **A Kubernetes operator for BYOC installs.** Pillar 3's BYOC mode is deployed from Terraform and container images, with no declarative, in-cluster way for a customer to run and upgrade RegulAIt. | An operator with CRDs for a RegulAIt deployment, covering version, mode (byoc / air_gapped), the data-key reference, backup policy and egress posture. It reconciles toward the signed update bundle (ADR-0041) and reports drift (pillar 3). Air-gapped: no image pulls outside the customer registry. Reference: `gravitee-io/gravitee-kubernetes-operator` (Apache-2.0, Go) for CRD shape and reconcile design. Use an established operator framework (ADR-0176). Post-demo, needs its own ADR. |
 
+## 2g. AI security tools from the 2026 roadmap scan (owner, 2026-11-07)
+
+| # | Gap | What it would take |
+|---|---|---|
+| **P25** | **Measured injection-detector baselines.** The heuristic and trained prompt-injection detectors had no recall or false-positive numbers on public benchmarks. | **Built (ADR-0244).** NotInject, InjecAgent (sampled) and AgentDojo v1 vendored as pinned snapshots, a JailbreakBench sample, plus our own 100 web-agent scenarios (WASP categories, clean room); CI gates the heuristic at a 2-point tolerance, the trained classifier is measured offline. Left: HackAPrompt (owner to accept its gate), AgentDojo's task-dependent attacks, gating the trained classifier once its image builds in CI. |
+
 ## 3. Structural gaps — the ADR shipped, a named half did not
 
 These are cases where an ADR is Accepted and genuinely working, but a specific clause is
