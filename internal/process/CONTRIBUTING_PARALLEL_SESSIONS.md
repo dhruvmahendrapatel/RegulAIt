@@ -124,6 +124,16 @@ Two related traps from the same mechanism:
 > grep -rn "0290_my_change" --exclude-dir=node_modules .     # change each reference to the slug (my_change)
 > node scripts/migration-watermark-guard.mjs origin/main     # must pass
 > ```
+>
+> Notes for the conversion (#738):
+> - **Several migrations in one PR:** move each one, and name the slugs so they sort in run order
+>   (`my_change_a_tables.sql`, `my_change_b_policies.sql`); the assign step numbers them in byte order of their names.
+> - **References:** the grep must also cover tests that name the tag or number (placement and guard tests, fixtures),
+>   the ADR, and fragments under `internal/fragments/`. Say "the `<slug>` migration" in prose; the number appears
+>   only after assign-at-merge.
+> - **Snapshots:** this repo keeps only `meta/0000_snapshot.json`, so there is no per-migration snapshot to move.
+> - **Check** with the gateway tests (they apply pending files, `REGULAIT_MIGRATIONS_UNASSIGNED=apply`) and
+>   `pnpm exec vitest run --dir scripts assign-at-merge`, then push. Never renumber by hand.
 
 ### 4.2 Same-number files that merge with **zero** conflict
 
@@ -218,15 +228,18 @@ touches code, or the weekly run of `main`). A docs-only ADR PR still skips CI, s
 ### 4.8 CI is split: fast checks on a PR, the full suite at merge time (owner decision, 2026-11-07)
 
 The free public-repo runner pool holds about 20 jobs at once and a full run was about 30, so only one PR's CI ran at
-a time and over 200 runs queued. Since 2026-11-07 (ADR-0252 addendum):
+a time and over 200 runs queued. Since 2026-11-07 (ADR-0262):
 
 | Event | What runs |
 |---|---|
-| `pull_request`, code changed | `ci.yml`: build, typecheck, package suites, static pre-flights (migration guard, licence gate), the four gateway shards. `security.yml`: everything (CodeQL, gitleaks, dependency audit, Trivy, engine image scans). `ui-enterprise.yml`: tokens, baseline guard and bundle size. `import-cycles.yml`. |
-| `pull_request`, `apps/web/**` (or `packages/shared/**`, the lockfile) changed | also the mocked SPA shards and the three enterprise browser jobs and screenshot pack |
-| `pull_request`, docs only | every `ci.yml` and `ui-enterprise.yml` job is skipped by `if:`; `build-and-test` still reports, and passes only if every part was skipped. Security still runs. |
-| `pull_request`, engine files changed | the engine build-and-compare, as before |
-| `merge_group`, push to `main`, nightly 03:17 UTC | everything: the above plus the SPA journeys, docker build, every SPA and browser shard, the demo journeys, gVisor and the engine build-and-compare |
+| `pull_request`, code changed | `ci.yml`: build, typecheck, package suites, static pre-flights (migration guard, licence gate), and the four gateway shards and their coverage check, web-only PRs included (gateway tests read `apps/web` sources). `security.yml`: CodeQL, gitleaks, dependency audit. `ui-enterprise.yml`: tokens, baseline guard and bundle size. |
+| `pull_request`, code outside `apps/web/**` changed | also `import-cycles.yml`, and `integrations.yml` when its paths match (both path-filtered; neither reads `apps/web`) |
+| `pull_request`, `apps/web/**` (or `packages/shared/**`, the lockfile) changed (`web`) | also the mocked SPA shards and the Chromium enterprise browser job |
+| `pull_request`, the root image's build context or its Trivy gate changed (`image`) | also Trivy: the root `Dockerfile`, `.dockerignore`, the workspace manifests and lockfile, `apps/**` and `packages/**` (not tests or `apps/web/e2e`), `security.yml`, `security/image-allowlist*.json`, and `scripts/security-{gate,runtime-contents,suppressions}.mjs` and `scripts/security-cosign-verify.sh` |
+| `pull_request`, an engine's own input changed (`engines`) | also the engine image scans and SBOMs, and the engine build-and-compare: `engines/**`, any `Dockerfile`, the lockfile, the engine packages and scripts, `security/image-allowlist.engine-*.json`, the gate scripts the engine scan runs, the image workflows. Not `packages/**` or `apps/**`, which each engine's shim stage also copies: a change there alone builds and compares the engines at merge time. |
+| `pull_request`, docs only | every scope-gated job is skipped by `if:`; `build-and-test` and `ui enterprise / all` still report. gitleaks and the dependency audit still run. |
+| `pull_request`, the scope rules themselves changed | everything, as a full run (`scripts/ci-scope.mjs`, its test, `.github/actions/ci-scope`) |
+| `merge_group`, push to `main`, nightly 03:17 UTC (`security.yml` 05:17 UTC) | everything: the above plus the SPA journeys, docker build, every SPA shard, Firefox, WebKit and the screenshot pack, every engine image scan, the demo journeys, gVisor and the engine build-and-compare |
 
 What this means for a builder:
 
@@ -238,14 +251,20 @@ What this means for a builder:
   concurrency group of its own (`github.run_id`), because GitHub cancels an older *pending* run in a shared group
   whatever `cancel-in-progress` says.
 - The scope fails closed (`scripts/ci-scope.mjs`): a rename counts at both its paths, and a diff it cannot read means
-  a full run.
+  a full run. A required job gated directly on the scope (CodeQL, Trivy) runs unless the scope said `'false'`
+  (`!cancelled() && ... != 'false'`), so a scope that failed runs it; the gated jobs behind `build-and-test` and
+  `ui enterprise / all` are judged by those aggregates against their own outputs.
 - Required checks (set by the owner when the queue is enabled) are names that report on every PR and every merge
   group: `build-and-test`, `SAST (CodeQL)`, `Secret scan (gitleaks)`, `Dependency audit (pnpm)`, `Image scan and SBOMs
   (Trivy)` and `ui enterprise / all`. Never require a job gated by `scope` directly (a skip counts as a pass), a
   path-filtered workflow (`import-cycles`, `integrations`, `endpoint-agent`, `engine-images-build`, `gvisor`, `demo`)
   or a workflow without a `merge_group` trigger.
 - No job is gated by a workflow-level path filter any more where it can be required. Gate a new job on the `scope`
-  job's outputs (`.github/actions/ci-scope`): `code`, `web` or `full`.
+  job's outputs (`.github/actions/ci-scope`): `full`, `code`, `web`, `image` or `engines`, and add a case
+  to `scripts/ci-scope.test.mjs`.
+- PR trim (owner decision 2026-11-07, measured about 37 check runs per PR before it): a web-only PR runs about 23 jobs
+  and a gateway-only PR about 19, against 37 before. The largest remaining items are the five mocked SPA shards and the
+  four gateway shards.
 
 ## 5. Shared machine resources
 

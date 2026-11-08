@@ -91,6 +91,7 @@ import {
   serverReleaseStatus,
 } from "./release-age.js";
 import { registerSkillAdmissionRoutes } from "./skill-admission.js";
+import { engineAdmissionFor, engineHoldFindings, withEngineMcpFindings } from "./admission-engine-scans.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 
@@ -334,15 +335,25 @@ export async function assertAdmitted(db: Db, serverId: string): Promise<void> {
       admissionState: mcpServers.admissionState,
       admissionFindings: mcpServers.admissionFindings,
       admissionSeverity: mcpServers.admissionSeverity,
+      admissionManifestDigest: mcpServers.admissionManifestDigest,
     })
     .from(mcpServers)
     .where(eq(mcpServers.id, serverId));
   if (!row) return; // an unknown server is the caller's own 404, not ours
-  if (row.admissionState !== "held") {
+  // ADR-0242: a server whose stored state admits is still held while the mcpscanner engine is on and has not
+  // passed its current manifest digest (an admin's clearance for the digest stands; an unknown digest is the
+  // sync's to scan, so nothing is held before the first manifest is read)
+  const engineHold =
+    row.admissionState !== "held" && row.admissionState !== "cleared" && row.admissionManifestDigest
+      ? await engineAdmissionFor(db, { kind: "mcp_server", id: serverId, digest: row.admissionManifestDigest })
+      : null;
+  if (row.admissionState !== "held" && !engineHold?.holds) {
     if (org.minReleaseAgeDays > 0) await assertReleaseAged(db, serverId, org.minReleaseAgeDays);
     return;
   }
-  const findings = (row.admissionFindings as McpAdmissionFinding[] | null) ?? [];
+  const findings = engineHold?.holds
+    ? engineHoldFindings(engineHold.engineId, engineHold)
+    : ((row.admissionFindings as McpAdmissionFinding[] | null) ?? []);
   const detail =
     `MCP server '${row.name}' is HELD by admission scanning (severity ` +
     `${row.admissionSeverity ?? "unknown"}, hold threshold ${MCP_ADMISSION_HOLD_AT}): ` +
@@ -358,6 +369,7 @@ export async function assertAdmitted(db: Db, serverId: string): Promise<void> {
       phase: "connect",
       admissionState: row.admissionState,
       severity: row.admissionSeverity,
+      engine: engineHold?.holds ? { engineId: engineHold.engineId, status: engineHold.status } : null,
       findingCount: findings.length,
       scannerVersion: MCP_ADMISSION_SCANNER_VERSION,
     },
@@ -436,10 +448,12 @@ async function scanAndPersistManifest(
     .where(eq(mcpServers.id, serverId));
   if (!before) return { mode, scan: null, state: null };
 
-  const scan = withVendoredMcpFindings(
-    withReservedNameFindings(scanMcpManifest(tools), tools),
-    tools,
-    org.vendoredDetectionPacks,
+  // ADR-0242: with the mcpscanner engine on, its verdict on THIS digest joins the scan (no scan yet, an engine
+  // error or a flag all hold, fail closed); with it off (the default) this is the scan unchanged
+  const scan = await withEngineMcpFindings(
+    db,
+    serverId,
+    withVendoredMcpFindings(withReservedNameFindings(scanMcpManifest(tools), tools), tools, org.vendoredDetectionPacks),
   );
   const reserved = scan.findings.some((f) => f.rule === MCP_RESERVED_PREFIX_RULE);
   const state = reserved
@@ -541,11 +555,16 @@ export async function admissionHidesTools(db: Db, serverId: string): Promise<boo
       admissionState: mcpServers.admissionState,
       releaseDigest: mcpServers.releaseDigest,
       releaseSeenAt: mcpServers.releaseSeenAt,
+      admissionManifestDigest: mcpServers.admissionManifestDigest,
     })
     .from(mcpServers)
     .where(eq(mcpServers.id, serverId));
   if (!row) return false;
   if (org.mcpAdmissionMode === "enforce" && row.admissionState === "held") return true;
+  // ADR-0242: the engine's live say, as in assertAdmitted
+  if (org.mcpAdmissionMode === "enforce" && row.admissionState !== "cleared" && row.admissionManifestDigest) {
+    if ((await engineAdmissionFor(db, { kind: "mcp_server", id: serverId, digest: row.admissionManifestDigest })).holds) return true;
+  }
   // ADR-0175 A5: a server in release-age quarantine contributes no tools either
   if (org.minReleaseAgeDays > 0) return (await serverReleaseStatus(db, row, org.minReleaseAgeDays)).quarantined;
   return false;

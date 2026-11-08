@@ -21,7 +21,7 @@ bash scripts/package-linux.sh <bin> <out> <version>   # unsigned .deb and .rpm
 | `cmd/regulait-agent` | The CLI: `redeem-ticket`, `register`, `run-once`, `run`, `preview`, `version` |
 | `internal/contract` | The wire contract SD4b implements, with golden bodies in `testdata/` |
 | `internal/pack` | ADR-0041-format pack verification and the collection-manifest validator |
-| `internal/collect` | The collectors, over `fs.FS` roots (`os.Root` in production) |
+| `internal/collect` | The collectors, over `fs.FS` roots (`os.Root` in production); `mcp.go` is ADR-0259's opt-in `mcp_config` collector (MCP host configs: servers, key types and risk flags, never values; off unless the org policy enables it) |
 | `internal/secrets` | Key patterns compiled from the shared `dlp.secret.*` rules (RE2) |
 | `internal/privacy` | The pre-upload pseudonymity guard |
 | `internal/devicekey` | Device keys: TPM (Linux, Windows), file and DPAPI fallbacks, the darwin refusal |
