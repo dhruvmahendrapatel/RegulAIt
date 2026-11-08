@@ -237,6 +237,10 @@ export interface ModelDispatchResult {
      * Text is the remainder. Pillar 5 prices each modality from it. */
     modality?: ModalityTokenCounts;
   };
+  /** ADR-0241 (P21): the decoded provider object the usage block came from (the response body, or the last streamed
+   * event that carried usage), so an admin-defined usage mapping can read it. In memory only: never stored, logged or
+   * returned to a caller. Absent when the adapter has none (mock, artifact). */
+  usageSource?: unknown;
   /** provider-side message/request identifier for cross-system audit joins */
   providerMessageId: string | null;
   /** ADR-0175 A4 — THE MODEL THE PROVIDER SAYS IT SERVED, verbatim from the
@@ -485,6 +489,7 @@ export class AnthropicProvider implements ModelProvider {
         outputTokens: msg.usage.output_tokens,
         ...cacheUsage(msg.usage.cache_read_input_tokens, msg.usage.cache_creation_input_tokens),
       },
+      usageSource: msg,
       providerMessageId: msg.id ?? null,
       servedModel: reportedModel(msg.model),
     };
@@ -758,6 +763,7 @@ async function dispatchChatCompletions(
         let id: string | null = null;
         let servedModel: string | null = null;
         let usage: ModelDispatchResult["usage"] = { inputTokens: 0, outputTokens: 0 };
+        let usageSource: unknown;
         // tool_calls arrive fragmented across deltas, keyed by index
         const toolAcc = new Map<number, { id: string; name: string; args: string }>();
         for await (const chunk of stream) {
@@ -778,6 +784,7 @@ async function dispatchChatCompletions(
           }
           if (choice?.finish_reason) finishReason = choice.finish_reason;
           if (chunk.usage) {
+            usageSource = chunk;
             usage = {
               inputTokens: chunk.usage.prompt_tokens ?? 0,
               outputTokens: chunk.usage.completion_tokens ?? 0,
@@ -798,6 +805,7 @@ async function dispatchChatCompletions(
           refusal,
           ...(toolCalls.length > 0 ? { toolCalls } : {}),
           usage,
+          ...(usageSource !== undefined ? { usageSource } : {}),
           providerMessageId: id,
           servedModel,
         };
@@ -831,6 +839,7 @@ async function dispatchChatCompletions(
           ...cacheUsage(res.usage?.prompt_tokens_details?.cached_tokens, undefined),
           ...openAiChatModality(res.usage),
         },
+        usageSource: res,
         providerMessageId: res.id ?? null,
         servedModel: reportedModel(res.model),
       };
@@ -973,6 +982,7 @@ function normalizeOpenAiResponse(res: OpenAI.Responses.Response): ModelDispatchR
       ...(reasoningTokens > 0 ? { reasoningTokens } : {}),
       ...cacheUsage(res.usage?.input_tokens_details?.cached_tokens, undefined),
     },
+    usageSource: res,
     providerMessageId: res.id ?? null,
     servedModel: reportedModel(res.model),
   };
@@ -1529,6 +1539,7 @@ export class GoogleProvider implements ModelProvider {
     let id: string | null = null;
     let servedModel: string | null = null;
     let usage: ModelDispatchResult["usage"] = { inputTokens: 0, outputTokens: 0 };
+    let usageSource: unknown;
     const toolCalls: Array<{ id: string; name: string; arguments: unknown }> = [];
     const absorb = (chunk: GeminiChunk) => {
       id = id ?? chunk.responseId ?? null;
@@ -1551,6 +1562,7 @@ export class GoogleProvider implements ModelProvider {
       }
       if (candidate?.finishReason) finishReason = candidate.finishReason;
       if (chunk.usageMetadata) {
+        usageSource = chunk;
         usage = {
           inputTokens: chunk.usageMetadata.promptTokenCount ?? 0,
           outputTokens: chunk.usageMetadata.candidatesTokenCount ?? 0,
@@ -1617,6 +1629,7 @@ export class GoogleProvider implements ModelProvider {
       refusal,
       ...(toolCalls.length > 0 ? { toolCalls } : {}),
       usage,
+      ...(usageSource !== undefined ? { usageSource } : {}),
       providerMessageId: id,
       servedModel,
     };
@@ -2804,6 +2817,7 @@ export const ANTHROPIC_DEFAULT_BASE = "https://api.anthropic.com";
 /** `openai`'s own default base URL. */
 export const OPENAI_DEFAULT_BASE = "https://api.openai.com/v1";
 export { GOOGLE_DEFAULT_BASE, XAI_DEFAULT_BASE };
+export * from "./usage-extractor.js";
 
 /**
  * The endpoint a provider kind reaches when NO `baseUrl` override is supplied.

@@ -20,7 +20,7 @@ pure core with fake models (`test_detector_core.py`).
 ```
 # from the repository root, on a host that can reach huggingface.co, github.com and PyPI (build time only)
 docker build -f agents/trained-detectors/Dockerfile -t regulait/trained-detectors:0.2.0 .
-# or the alternative injection classifier (ADR-0247: lower false positives on AgentDojo, far higher on NotInject)
+# or the alternative injection classifier (ADR-0247: fewer false positives on AgentDojo, JailbreakBench and web-agent text, far more on NotInject)
 docker build -f agents/trained-detectors/Dockerfile --build-arg INJECTION_MODEL=protectai -t regulait/trained-detectors:0.2.0-protectai .
 python3 -I -m unittest discover -s agents/trained-detectors -p 'test_*.py'
 ```
@@ -50,11 +50,23 @@ docker run -d --name trained-detectors -e DETECTOR_API_KEY=<random> -p 8080:8080
 3. **Policies & gates → Guardrails → Trained detectors:** turn each detector on and choose the service. The defaults are
    strict: mode `block`, and a failed or slow call is treated as a hit.
 
+## Offline baseline (ADR-0244)
+
+`eval_baselines.py` runs the injection classifier, through `server.load_models` and `detector_core.score_injection`,
+over the vendored injection snapshots in `packages/shared/src/eval-datasets/vendor/injection-baselines/` and, with
+`--write`, records its precision, recall and FPR in `injection-baselines.expected.json` (not gated in CI, because this
+image is not built there). Run it after any change to the model pin, the windowing or the default threshold:
+
+```sh
+DETECTOR_MODELS_DIR=<dir filled by fetch_models.py> python3 eval_baselines.py --write
+```
+
 ## Limits
 
-- Measured on the ADR-0244 baselines at threshold 0.5 (ADR-0247): PIGuard catches 80% of InjecAgent and 76% of
-  AgentDojo injections and flags 11.5% of NotInject's benign trigger-word prompts and 11.3% of AgentDojo's benign
-  tasks. The ProtectAI alternative flags 43% of NotInject but only 3% of AgentDojo's benign tasks.
+- Measured on the five ADR-0244 baselines at threshold 0.5 (ADR-0247): PIGuard's pooled recall is 79.4% and its
+  pooled benign false-positive rate 19.1% (ProtectAI: 77.8% and 30.0%). PIGuard is far better on NotInject's
+  trigger-word prompts (11.5% against 43.4%) but worse on JailbreakBench's benign prompts (26.0% against 1.0%) and on
+  RegulAIt's web-agent set (72.0% against 50.0%); no model here is usable on web-agent content as it stands.
 - English only. The models catch what they were trained on; they miss novel phrasings and can fire on benign text
   that discusses these topics. The rule-based detectors always run beside them.
 - Long text is scored in overlapping windows of about 1,500 characters, so very long inputs take longer; the gateway's

@@ -4,7 +4,7 @@
 - **Date**: 2026-09-06
 - **Relates to**: [ADR-0099](0099-audit-log-credential-scrub.md) (the `audit_log` scrub this
   extends — same detector, same marker grammar, deliberately not a second implementation),
-  [ADR-0060](0060-audit-tamper-evidence.md) (the `createDb` Proxy this reuses; the reason a
+  [ADR-0060](0060-tamper-evident-audit.md) (the `createDb` Proxy this reuses; the reason a
   chokepoint exists at all), [ADR-0042](0042-guardrail-engine.md) (`CREDENTIAL_MATERIAL_RULES`,
   the one detector), [ADR-0055](0055-shadow-ai-discovery.md) (`redactKeyFragment` — a record is a
   pointer to a secret, never a copy of one), [ADR-0021](0021-org-settings-configurability-layer.md)

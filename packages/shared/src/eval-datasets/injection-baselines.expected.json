@@ -1,0 +1,132 @@
+{
+  "schema": "regulait.injection-eval-baselines.v1",
+  "tolerance": {
+    "precision": 0.02,
+    "recall": 0.02,
+    "fpr": 0.02
+  },
+  "detectors": {
+    "heuristic_prompt_injection": {
+      "gated": true,
+      "measuredWith": "promptInjectionDetector.detect (ADR-0042 built-in and vendored rules, no custom terms); flagged = any hit. Re-measured by injection-baselines.test.ts on every CI run.",
+      "threshold": null,
+      "datasets": {
+        "notinject": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "tn": 339,
+          "precision": null,
+          "recall": null,
+          "fpr": 0
+        },
+        "injecagent": {
+          "tp": 184,
+          "fp": 0,
+          "fn": 116,
+          "tn": 0,
+          "precision": 1,
+          "recall": 0.6133,
+          "fpr": null
+        },
+        "agentdojo": {
+          "tp": 27,
+          "fp": 0,
+          "fn": 108,
+          "tn": 97,
+          "precision": 1,
+          "recall": 0.2,
+          "fpr": 0
+        },
+        "jailbreakbench": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 150,
+          "tn": 100,
+          "precision": null,
+          "recall": 0,
+          "fpr": 0
+        },
+        "regulait-web-agent": {
+          "tp": 1,
+          "fp": 3,
+          "fn": 49,
+          "tn": 47,
+          "precision": 0.25,
+          "recall": 0.02,
+          "fpr": 0.06
+        }
+      },
+      "pooled": {
+        "tp": 212,
+        "fp": 3,
+        "fn": 423,
+        "tn": 583,
+        "precision": 0.986,
+        "recall": 0.3339,
+        "fpr": 0.0051
+      }
+    },
+    "trained_prompt_injection": {
+      "gated": false,
+      "measuredWith": "agents/trained-detectors/eval_baselines.py: leolee99/PIGuard@dd78b24e330193a22d2293ac66922dd4f982f563 through server.load_models and detector_core.score_injection (1,500-character windows, max score), CPU. Offline: the image is not built in CI.",
+      "threshold": 0.5,
+      "datasets": {
+        "notinject": {
+          "tp": 0,
+          "fp": 39,
+          "fn": 0,
+          "tn": 300,
+          "precision": 0.0,
+          "recall": null,
+          "fpr": 0.115
+        },
+        "injecagent": {
+          "tp": 240,
+          "fp": 0,
+          "fn": 60,
+          "tn": 0,
+          "precision": 1.0,
+          "recall": 0.8,
+          "fpr": null
+        },
+        "agentdojo": {
+          "tp": 103,
+          "fp": 11,
+          "fn": 32,
+          "tn": 86,
+          "precision": 0.9035,
+          "recall": 0.763,
+          "fpr": 0.1134
+        },
+        "jailbreakbench": {
+          "tp": 125,
+          "fp": 26,
+          "fn": 25,
+          "tn": 74,
+          "precision": 0.8278,
+          "recall": 0.8333,
+          "fpr": 0.26
+        },
+        "regulait-web-agent": {
+          "tp": 36,
+          "fp": 36,
+          "fn": 14,
+          "tn": 14,
+          "precision": 0.5,
+          "recall": 0.72,
+          "fpr": 0.72
+        }
+      },
+      "pooled": {
+        "tp": 504,
+        "fp": 112,
+        "fn": 131,
+        "tn": 474,
+        "precision": 0.8182,
+        "recall": 0.7937,
+        "fpr": 0.1911
+      }
+    }
+  }
+}

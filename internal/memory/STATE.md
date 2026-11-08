@@ -1,6 +1,6 @@
 ---
 phase: demo-prep-live-integrations-merged
-last_updated: 2026-10-29
+last_updated: 2026-11-07
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -20,6 +20,22 @@ roadmap: ../product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+<!-- fold:state-recap newest-first -->
+
+**2026-11-07 - merge queue readiness and merge-time numbering ([ADR-0252](../decisions/0252-merge-queue-and-merge-time-numbering.md), owner decision on #453; review R-03, R-06, R-07, R-08, C-03, C-04).**
+- **Migrations:** a PR adds `packages/db/migrations/pending/<slug>.sql` and never edits the journal. After the merge,
+  `assign-at-merge.yml` numbers it (`scripts/assign-at-merge.mjs`) and pushes `assign-at-merge/<sha>`; the master
+  opens and enqueues that PR. `runMigrations` refuses pending files unless `REGULAIT_MIGRATIONS_UNASSIGNED=apply`
+  (CI and the gateway suite only). The guard now also refuses edits to merged migrations, removed entries and
+  journal/file mismatches (C-03); the `@regulait/db` `generate` script is gone.
+- **Docs:** ADR index rows come from the ADR file's header at merge time; STATE and PENDING appends are fragments under
+  `internal/fragments/`. The route-census size pins are dropped (C-04).
+- **CI:** `ci`, `security`, `import-cycles` and `ui-enterprise` run on `merge_group`.
+- **Owner, to finish:** turn on the merge queue for `main` (merge commit) and make the required checks report on
+  `merge_group`. The master enqueues with `gh pr merge --merge --auto` from then on
+  (CONTRIBUTING_PARALLEL_SESSIONS §8).
+
+**2026-11-07 - P-01 in progress: one governed decision core (owner "Yes, ADR then build", #453).** [ADR-0251](../decisions/0251-one-governed-decision-core.md) (Proposed) puts model, connector, MCP and A2A calls behind one sequence: posture, entitlement, attribution mandate, data scope, rate limits, ABAC, approval rules, cost attribution, audit; error is deny. ARCHITECTURE.md now describes the four paths as built (only MCP had approval rules, rate limits and ABAC; A2A never called the kernel). Builder lane `builder/gov-core-unify`, migration `governed_core_resource_rules` (pending, numbered at merge time, ADR-0252); slices connector, model, A2A, then ABAC v5 after #707. **Slices 1-3 built on #715** (connector `02ddcff1`, model `99ed2831`, A2A `3563f475`): connector and A2A calls get the attribution mandate (on by default), rate limits and approval rules; model rate limits enforced by default and model approval rules refuse (no queue yet); A2A now meets the kill switch, safe modes and literacy gate. Each slice has a differential test. Latency: +1.3 ms p50 / +2.2-2.7 ms p95 with no rules (budget amended to +3 ms, see ADR As built). Open: ABAC v5 after #707; queue/replay for model and A2A approvals.
 
 **2026-10-29 - the customer demo moves to one date, Saturday 2026-10-31 (owner, #453 c6508111468).**
 - **Date:** the internal run-through on Sun 11-01 and the external demo on Tue 11-03 are dropped; there is one run, on
@@ -2444,7 +2460,7 @@ an old unscrubbed span. Deliberate — the write is the chance, and rewriting hi
 data is a worse precedent.
 
 **2026-09-12 — S11 and S12 closed, and R0 reconciled.**
-([ADR-0110](../decisions/0110-backup-rescan-reopen-and-preflight-gate.md), migration 0109.)
+([ADR-0110](../decisions/0110-rescan-reopens-a-miss-and-the-preflight-runs.md), migration 0109.)
 
 **S11 — the owner decided a re-scan SHOULD re-open a miss, and that is now what happens.** One
 `backup_runs` row per finding: the idempotency read keys on `finding_id` + `kind='backup'`
@@ -2993,7 +3009,7 @@ object_type) and two approvals joins for the copilot.
 **2026-08-22 (night) — B6 closed: the last three buildable residuals are live-retested; the
 copilot's hallucination class is shut twice over; a parallel-sessions protocol now governs this
 repo.** Since the paragraph below: the L6d two-layer narration fix landed and live-retested,
-then [ADR-0096](../decisions/0096-copilot-entity-aware-planning.md) replaced disclosure
+then [ADR-0096](../decisions/0096-entity-aware-copilot-planning.md) replaced disclosure
 with structural refusal — deterministic entity extraction (the model may never assert
 existence), entitlement-scoped exact-match resolution, and four honest outcomes
 (resolved+filtered with a proven row delta, 422 unresolved, 422 ambiguous-with-candidates,
@@ -5460,6 +5476,17 @@ user or server that an approval rule is scoped to (cascade delete). **Amendment 
 match re-owes every takeover; option (b) (pool intersection) is the recorded long-term simplification. Open follow-ups: a
 rule-editor warning for shadowed tightenings and equal-specificity overlaps, and option (b).
 
+**ADR-0241 (builder, 2026-11-07, Proposed): a configurable usage extractor (backlog P21).** An admin maps a provider's
+decoded response body to usage counts per agent with RFC 6901 pointers (`@hyperjump/json-pointer` 1.1.3) plus one
+bounded `arraySum` step: text in/out (required), image and audio in/out (ADR-0212 split), cache read/write (counted,
+not priced). Bounded mapping (4 KiB, 256-char/12-segment pointers) and body (20k values, depth 64, 1 MiB text); no code
+execution. Versions are immutable; a version activates only on a passing exact-count sample test (sample hash only) and
+a settings_relax step-up; the org switch `usage_extractor_enabled` is off by default, step-up to enable. Runs at the one
+pricing point before `priceDispatchUsage`; the usage row names the version. Fail closed = the adapter's built-in counts
+(the call has already run), audited and stamped; the pre-dispatch unpriced-under-budget refusals are unchanged.
+Migration 0297. API only: the mapping editor UI is on #453 for the Governed Designer (seven routes in KNOWN_UI_GAPS,
+ratchet raised 0 to 7 for the master's review).
+
 **ADR-0234 (builder, 2026-11-06, Proposed): Postgres row-level security (PENDING S7), batch 1.** No table has an org
 or tenant key (ADR-0041), so on the owner's instruction ("the best, most secure") RLS is keyed on the authenticated
 principal: policies read a transaction-local `regulait.user_id` or a registered `regulait.system_context`, set only by
@@ -5469,6 +5496,19 @@ setting means zero rows. Migration 0272 covers users, auth_mfa_pending, approval
 its tip under `audit_chain`. Measured: queue page 24.7 to 39.9 ms on 100k approvals, point lookups +1.5 ms. Batches 2-7
 (gateway adoption, credentials, approval satellites and membership, project-scoped, the rest, runtime login cut-over)
 follow, one PR each. Until batch 7 a non-superuser table-owner runtime is unsupported; none exists.
+
+**ADR-0234 batch 2 (builder, 2026-11-07, Proposed): request-scoped RLS adoption.**
+- **Mechanism:** every authenticated gateway request now runs as its principal through an AsyncLocalStorage scope that
+  the pool applies per statement and per transaction (`runWithRlsPrincipal`, `scopePoolForRls` in `createDb`), not
+  ~1,100 wrapped call sites. Credential resolution runs under `authenticate`.
+- **Migration 0313:**
+  - the column guard on `users` (the #682 hard gate);
+  - the chain writer's `audit_subject` reason for rows that name a sponsor or subject;
+  - the approvals requester self-route guard is removed (self-approval stays a per-flow product rule).
+- **Named steps:** decide, bulk-decide, the lazy SLA sweep and workflow and engine-run approval effects run as the
+  principal plus `approval_maintenance`.
+- **Still unscoped:** unauthenticated routes, the bootstrap token, the scheduler and background work (batch 7).
+- **Measured:** +0.2 to +0.8 ms a statement.
 
 **ADR-0230 (design, 2026-11-06, Proposed): SAP business agents over MCP (P19).**
 - **Where it lives:** `create_sales_order` (`API_SALES_ORDER_SRV`) goes in the regulAIt-ABAP MCP server, and the gateway's existing MCP path governs it.
@@ -5537,7 +5577,15 @@ audit, tool references, platform copies, ingested, machine, conversation, signed
 against `information_schema` and against the ADR's generated block. Open: whether to guard jsonb
 `config_versions.body` string leaves; ingested columns stay a residual.
 
-**ADR-0247 (builder, 2026-11-07): a permissively licensed injection and harm classifier, served as ONNX (P28).** `agents/trained-detectors/` now bakes `leolee99/PIGuard` (MIT) as the default injection classifier and keeps `protectai/deberta-v3-base-prompt-injection-v2` as `--build-arg INJECTION_MODEL=protectai`; harm stays `unitary/toxic-bert` with reasons mapped to our own labels (`HARM_LABELS.md`). A new `export` build stage (hash-locked `export-requirements.txt`) writes ONNX graphs offline from stock Transformers classes and fails unless they match PyTorch (same token ids, |dp| < 1e-4); the runtime closure (`requirements.txt`) is ONNX Runtime + tokenizers + Presidio/spaCy, no PyTorch. Measured with ADR-0244's `eval_baselines.py` from P25 commit `cc4da9a6` (not yet merged), threshold 0.5: PIGuard NotInject FPR 11.5%, InjecAgent recall 80.0%, AgentDojo recall 76.3% / FPR 11.3%, pooled recall 78.9% / FPR 11.5% (ProtectAI: 42.8%, 84.3%, 72.6% / 3.1%, 80.7% / 33.9%). After P25 merges, re-run `eval_baselines.py --write` on main. Open owner decision: PIGuard's training set includes CC BY-NC 4.0 sources (Alpaca, no_robots); options (a) accept, (b) build the ProtectAI variant, (c) fine-tune deberta-v3-base on the permissive subset. The image stays outside the shipped product (ADR-0220 §8).
+**ADR-0244 (builder, 2026-11-07): pinned offline baselines for the prompt-injection detectors (P25).** Three MIT benchmarks are vendored under `packages/shared/src/eval-datasets/vendor/injection-baselines/` (300 kB, sha256-pinned in `MANIFEST.json` and `injection-baselines.ts`, refreshed only by `scripts/refresh-injection-eval-snapshots.py`): NotInject (339 benign), InjecAgent (300 of 2,108, stratified, seed 20261107) and AgentDojo v1 (97 benign, 135 injection texts), a seeded JailbreakBench sample (150 attack prompts, 100 benign behaviours; MIT verified for the HF dataset and the artifacts repo), plus our own web-agent set (50 injections over WASP's ten published categories × five carriers and 50 benign look-alikes; WASP is CC BY-NC, so only its category names are cited, clean room). HackAPrompt is MIT but gated (the account must share its HF identity), so it is left out pending the owner. `injection-baselines.test.ts` re-measures the heuristic detector every CI run and fails on a drop in precision or recall, or a rise in FPR, beyond 2 points; `node scripts/injection-eval-baseline.mjs` prints the delta table and `--write` re-pins. The trained classifier is measured offline by `agents/trained-detectors/eval_baselines.py` and recorded ungated. Measured: heuristic NotInject FPR 0%, InjecAgent recall 61.3%, AgentDojo recall 20.0% / FPR 0%; trained (threshold 0.5) NotInject FPR 43.4%, InjecAgent recall 84.3%, AgentDojo recall 72.6% / FPR 3.1%; JailbreakBench heuristic recall 0% / FPR 0%, trained recall 75.3% / FPR 1.0%; web-agent set heuristic recall 2% / FPR 6%, trained recall 60% / FPR 50%. No migration.
+
+ADR-0252 (2026-11-07) put `main` behind the GitHub merge queue and moved every shared append to merge time:
+migration numbers, journal entries and `when` values (`packages/db/migrations/pending/<slug>.sql`, numbered by
+`scripts/assign-at-merge.mjs` after the merge), ADR index rows (from the ADR header) and STATE/PENDING appends
+(fragments under `internal/fragments/`). Pending migrations never reach a long-lived database; the migration guard
+checks merged migrations are frozen and that the journal grows only by assignment.
+
+<!-- fold:state-decisions -->
 
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);

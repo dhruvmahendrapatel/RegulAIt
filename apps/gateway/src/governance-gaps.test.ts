@@ -203,7 +203,7 @@ beforeAll(async () => {
   // no org PII floor, suppress-and-disclose on a block project, live deltas otherwise.
   restoreSb1Posture = await relaxDataPostureForTest(db, { org: { defaultPiiMode: "none" }, interception: { streamingOnBlockMode: "suppress" }, guardrails: { promptInjectionMode: "warn" } });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
-  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireMcpAttribution: false });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, connectorAttributionRequired: false, requireMcpAttribution: false });
   // ADR-0052 §4: this suite exercises a route now tier-gated on
   // `advanced_orchestration` — run under a real signed license granting it
   // (removed in afterAll; the deployment ends UNLICENSED as it started).

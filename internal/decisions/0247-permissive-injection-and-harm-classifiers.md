@@ -1,7 +1,8 @@
 # ADR-0247: A permissively licensed injection and harm classifier, served as ONNX
 
-- **Status**: Accepted (implemented; one owner decision open, below)
+- **Status**: Accepted (implemented; owner decisions open on the default model and the training data, below)
 - **Date**: 2026-11-07
+- **Index**: A permissively licensed injection and harm classifier, served as ONNX (P28): PIGuard (MIT) by default and ProtectAI v2 by build argument, toxic-bert with our own labels, parity-gated ONNX, no PyTorch at run time; no model meets a 15% benign-FPR bar on every ADR-0244 set, so the default and a fine-tune are owner decisions
 - **Related**: ADR-0220 (trained runtime detectors), ADR-0244 (injection-detector baselines, P25), ADR-0176 and
   ADR-0177 (open source first; the licence list), ADR-0180 (secure by default), ADR-0200, PENDING.md row P28
 - **Migrations**: none
@@ -35,6 +36,11 @@ snapshots, through the service's own windowing:
 
 Fine-tuning was to be done only if no candidate met all five.
 
+**Re-measured, 2026-11-08.** ADR-0244 merged with two more sets than the three this bar was written against:
+JailbreakBench (MIT, 150 attacks, 100 benign) and RegulAIt's own 100-case web-agent set. Applied to every set with
+benign cases, criteria 1 and 2 (a benign false-positive rate of at most 15%) are met by **no** candidate (table below).
+By the brief, that calls for a fine-tune. It is not done here (see "Open owner decisions").
+
 ## Survey
 
 Licences and sizes from the Hugging Face API on 2026-11-07; numbers measured here (4 vCPU, PyTorch first, then the
@@ -59,7 +65,8 @@ compared on licence, labels, size and latency only.
 ## Decision
 
 1. **Injection: PIGuard, by default.** `leolee99/PIGuard` at revision `dd78b24e330193a22d2293ac66922dd4f982f563`. It is
-   the only candidate that meets the bar. The ADR-0220 model stays in the lock as the alternative, chosen at build time
+   the only candidate that met the bar as first written; against all five ADR-0244 sets none does (below), so the
+   default is an open owner decision. The ADR-0220 model stays in the lock as the alternative, chosen at build time
    with `--build-arg INJECTION_MODEL=protectai`; it trades far more NotInject false positives for fewer on AgentDojo's
    benign tasks. One image carries one injection model.
 2. **No `trust_remote_code`, anywhere.** PIGuard's repository ships its own modelling file. We read it and do not run
@@ -88,7 +95,9 @@ compared on licence, labels, size and latency only.
    build prints each graph's sha256. The runtime image has ONNX Runtime and `tokenizers` and no PyTorch or
    Transformers: the Python environment drops from about 1.4 GB to 410 MB, and the image from about 2 GB to about
    1.7 GB.
-6. **No fine-tuning.** A candidate met the bar, so none was done, and no training data was gathered.
+6. **No fine-tune in this PR.** PIGuard met the bar as first written (three sets). Against all five sets, no
+   candidate does, so a fine-tune is now indicated; it needs a GPU and a permissively licensed training set, neither
+   available in this build (option (c) below). No training data was gathered.
 7. **Unchanged:** the ADR-0088 contract, the gateway, the defaults (mode `block`, threshold 0.5, fail closed), the
    windowing, and the "not part of the shipped product image" position of ADR-0220 §8.
 
@@ -106,8 +115,29 @@ this branch's `server.py`, `detector_core.py` and `models.lock.json` copied over
 | AgentDojo | 135 / 97 | 90.4% (103/114) | **76.3%** (103/135) | **11.3%** (11/97) | 72.6% (98/135) | 3.1% (3/97) |
 | Pooled | 435 / 436 | 87.3% | 78.9% (343/435) | 11.5% (50/436) | 80.7% (351/435) | 33.9% (148/436) |
 
-When P25 merges, re-run `eval_baselines.py --write` on main so its `trained_prompt_injection` entry records PIGuard; the
-numbers above are what it will write.
+### All five ADR-0244 sets (re-measured 2026-11-08, after P25 merged)
+
+`eval_baselines.py --write` on this branch after merging main (it now records PIGuard in
+`injection-baselines.expected.json`), same closure and graphs, threshold 0.5. ProtectAI v2 is the entry main recorded
+before this change.
+
+| Dataset | Cases (inj / benign) | PIGuard recall | PIGuard FPR | ProtectAI v2 recall | ProtectAI v2 FPR |
+|---|---|---|---|---|---|
+| NotInject | 0 / 339 | n/a | **11.5%** | n/a | 43.4% |
+| InjecAgent | 300 / 0 | 80.0% | n/a | **84.3%** | n/a |
+| AgentDojo | 135 / 97 | **76.3%** | 11.3% | 72.6% | **3.1%** |
+| JailbreakBench | 150 / 100 | **83.3%** | 26.0% | 75.3% | **1.0%** |
+| RegulAIt web-agent | 50 / 50 | **72.0%** | 72.0% | 60.0% | **50.0%** |
+| Pooled | 635 / 586 | **79.4%** | **19.1%** | 77.8% | 30.0% |
+
+The other candidates on the two new sets (PyTorch, threshold 0.5; recall / FPR): jackhhao 78.0% / 9.0% and
+86.0% / 86.0%; deepset 99.3% / 50.0% and 100% / 100%; fmops 99.3% / 89.0% and 100% / 100%. At threshold 0.9 PIGuard's
+JailbreakBench FPR falls to 11.0% (recall 70.7%), but the web-agent set stays at 66.0%.
+
+Read honestly: PIGuard's pooled advantage comes from NotInject, which is its authors' own benchmark, and which
+outweighs the other benign sets by count. On three of the four sets with benign cases, the ProtectAI model raises fewer
+false alarms. No model here is usable on the web-agent set as it stands (every one flags half or more of its benign
+pages), which is the case an agent gateway sees most.
 
 What the numbers say, and what they do not:
 - PIGuard cuts NotInject false positives by three quarters for four points of InjecAgent recall, and gains four points
@@ -130,7 +160,17 @@ What the numbers say, and what they do not:
   datasets and an agent-loop metric, not text-level recall on our snapshots, so they cannot be placed in the table
   above; we did not run the model.
 
-## Open owner decision: PIGuard's training data
+## Open owner decisions
+
+### 1. Which injection model is the default
+
+Built: PIGuard by default, ProtectAI by build argument; switching the default is a one-line change to
+`DEFAULT_VARIANT` in `fetch_models.py` and the Dockerfile `ARG`. PIGuard has the lower pooled false-positive rate and
+higher recall; ProtectAI has fewer false positives on AgentDojo, JailbreakBench and the web-agent set and its training
+data is permissive. Neither meets a 15% bar on every set, and the web-agent result says a fine-tune on agent-style
+benign content (option (c) below) is the real fix.
+
+### 2. PIGuard's training data
 
 PIGuard's weights are MIT, which is what ADR-0176 governs. Its published training set (`datasets/train.json` in the MIT
 code repository, commit `1b5751e88bf7475acbedfc8eda795ce060307c84`, 76,735 rows from 22 sources) includes two sources
@@ -150,7 +190,8 @@ the air-gapped bundle (ADR-0220 §8), pending the transitive-licence decision.
 ## Consequences
 
 - An admin who turns the injection detector on at the default threshold sees roughly a quarter of the false blocks the
-  ADR-0220 model caused on trigger-word prompts, and more on long multi-step instructions.
+  ADR-0220 model caused on trigger-word prompts, but more on long multi-step instructions, jailbreak-style benign
+  prompts and web-agent content (above).
 - The image no longer carries PyTorch; inference is a little faster (57 ms against 78 ms per window in PyTorch).
 - The export stage needs network at build time for the second closure (PyPI and the PyTorch CPU index), as the
   closure stage already did. The running service is as offline as before.
