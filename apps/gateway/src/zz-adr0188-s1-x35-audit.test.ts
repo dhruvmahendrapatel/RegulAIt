@@ -59,7 +59,8 @@ beforeAll(async () => {
 
   // a migrations folder whose journal stops before 0180
   tmp = mkdtempSync(path.join(tmpdir(), "a188x35-"));
-  cpSync(migrationsFolder, tmp, { recursive: true });
+  // ADR-0252: a folder cut back to an older migration carries no `pending/` files (they would run on the old schema)
+  cpSync(migrationsFolder, tmp, { recursive: true, filter: (src) => path.basename(src) !== "pending" });
   const journalPath = path.join(tmp, "meta", "_journal.json");
   const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: Array<{ idx: number; tag: string }> };
   const cut = journal.entries.find((e) => e.tag === "0180_agent_workload_identity")!.idx;

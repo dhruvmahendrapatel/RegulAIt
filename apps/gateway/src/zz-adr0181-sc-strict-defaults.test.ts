@@ -125,7 +125,8 @@ describe("ADR-0181 SC — a fresh org reads every admission/monitor default STRI
   it("0159 updates EXISTING rows as for a first load (a database at 0158 with the old lax values)", async () => {
     // a migrations folder whose journal stops before 0159
     tmpMigrations = mkdtempSync(path.join(tmpdir(), "sdsc-mig-"));
-    cpSync(migrationsFolder, tmpMigrations, { recursive: true });
+    // ADR-0252: a folder cut back to an older migration carries no `pending/` files (they would run on the old schema)
+    cpSync(migrationsFolder, tmpMigrations, { recursive: true, filter: (src) => path.basename(src) !== "pending" });
     const journalPath = path.join(tmpMigrations, "meta", "_journal.json");
     const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: Array<{ idx: number; tag: string }> };
     // cut every entry FROM 0159 on, so 0159 is the newest migration the second

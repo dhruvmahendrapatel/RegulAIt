@@ -45,7 +45,8 @@ beforeAll(async () => {
   db = createDb(urlFor(SCRATCH_DB));
   // migrate to 0170 only (0171 and later cut from a copy of the journal)
   tmp = mkdtempSync(path.join(tmpdir(), "b4c8-0171-"));
-  cpSync(migrationsFolder, tmp, { recursive: true });
+  // ADR-0252: a folder cut back to an older migration carries no `pending/` files (they would run on the old schema)
+  cpSync(migrationsFolder, tmp, { recursive: true, filter: (src) => path.basename(src) !== "pending" });
   const journalPath = path.join(tmp, "meta", "_journal.json");
   const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: Array<{ idx: number; tag: string }> };
   const cut = journal.entries.find((e) => e.tag === "0171_approval_role_snapshot")!.idx;
