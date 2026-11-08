@@ -44,7 +44,7 @@ name: Security
 # on the private-repo minutes budget ci.yml's arithmetic describes. Docs-only
 # PRs still run the secret scan: a secret pasted into a Markdown file is still a secret.
 #
-# ADR-0252 addendum, PR trim (owner decision 2026-11-07). On a pull request the `engines` job also reads the PR's
+# ADR-0261, PR trim (owner decision 2026-11-07). On a pull request the `engines` job also reads the PR's
 # scope (.github/actions/ci-scope), and three jobs run only when their inputs changed:
 #   SAST (CodeQL)                    any code (anything but docs)
 #   Image scan and SBOMs (Trivy)     the root image's build context, the lockfile or this workflow
@@ -60,7 +60,7 @@ on:
     types: [checks_requested]
   push:
     branches: [main]
-  # New advisories arrive without a commit of ours: re-run the gates nightly (the full suite, ADR-0252 addendum).
+  # New advisories arrive without a commit of ours: re-run the gates nightly (the full suite, ADR-0261).
   schedule:
     - cron: '17 5 * * *'
   workflow_dispatch:
@@ -506,7 +506,7 @@ jobs:
   # engine image, so the PR that adds an engine directory is the PR that first
   # builds, scans and (once on main) signs it.
   #
-  # It also reads the run's scope (ADR-0252 addendum, PR trim): `code` and `image` gate CodeQL and Trivy, and on a PR
+  # It also reads the run's scope (ADR-0261, PR trim): `code` and `image` gate CodeQL and Trivy, and on a PR
   # that changes no engine input the engine list is empty, so no engine image is built or scanned.
   engines:
     name: Scope and engine images

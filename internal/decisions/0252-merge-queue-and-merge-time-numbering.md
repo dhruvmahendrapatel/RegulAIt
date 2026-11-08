@@ -100,6 +100,10 @@ Existing numbered migrations, journal entries and ADR rows are untouched.
 
 ## Addendum (2026-11-07): fast checks on a PR, the full suite at merge time
 
+> **Now [ADR-0261](0261-ci-split-fast-pr-checks-full-suite-at-merge.md).** This addendum and the PR trim below record
+> the decisions as made on 2026-11-07; ADR-0261 is the current record of the CI split, with the review fixes to the
+> trim. Where they differ, ADR-0261 holds.
+
 **Owner decision, 2026-11-07.** The free public-repo runner pool runs about 20 jobs at once, and a full CI run was
 about 30 jobs, so only one PR's CI ran at a time and nearly 200 runs were queued. CI is split. Built in #734
 (`.github/actions/ci-scope` and the workflow triggers), documented in CONTRIBUTING_PARALLEL_SESSIONS §4.8.
