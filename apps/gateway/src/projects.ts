@@ -2536,8 +2536,10 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     // breakdown only names it — without it, MCP spend would show up as an
     // unexplained gap between the total and agent+connector.
     const mcpWhere = and(where, eq(usageEvents.objectType, "mcp_tool"));
+    // ADR-0237: third-party guardrail calls are a FOURTH object type, already inside `measured`/`byUser`
+    const guardrailScorerWhere = and(where, eq(usageEvents.objectType, "guardrail_scorer"));
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 3600 * 1000);
-    const [[measured], byUser, byAgent, byConnector, byMcpTool, byTeam, estimated, [recent], modalityRows] =
+    const [[measured], byUser, byAgent, byConnector, byMcpTool, byTeam, estimated, [recent], modalityRows, byGuardrailScorer] =
       await Promise.all([
       db
         .select({
@@ -2651,6 +2653,17 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         .from(usageEvents)
         .where(agentWhere)
         .groupBy(sql`${usageEvents.modalityUsage} IS NOT NULL`),
+      // ADR-0237: spend on third-party guardrail calls, by vendor and guardrail kind
+      db
+        .select({
+          provider: usageEvents.provider,
+          scorerKind: usageEvents.operation,
+          costUsd: sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8`,
+          events: count(),
+        })
+        .from(usageEvents)
+        .where(guardrailScorerWhere)
+        .groupBy(usageEvents.provider, usageEvents.operation),
     ]);
     const splitRow = modalityRows.find((r) => r.split);
     const unsplitRow = modalityRows.find((r) => !r.split);
@@ -2706,6 +2719,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       byAgent,
       byConnector,
       byMcpTool,
+      byGuardrailScorer,
       byTeam,
       byModality,
       estimatedSavings: estimated,

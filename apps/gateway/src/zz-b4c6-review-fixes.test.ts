@@ -142,7 +142,7 @@ async function enrol(s: Session): Promise<SoftAuthenticator> {
 }
 
 async function mkUser(label: string, isAdmin = false): Promise<User> {
-  const u = await withKey(AUTH, "POST", "/v1/users", { email: `b4c6-${label}-${randomBytes(2).toString("hex")}-${RUN}@example.com`, displayName: `b4c6 ${label}`, isAdmin });
+  const u = await withKey(AUTH, "POST", "/v1/users", { email: `b4c6-${label}-${randomBytes(6).toString("hex")}-${RUN}@example.com`, displayName: `b4c6 ${label}`, isAdmin });
   expect(u.statusCode, u.body).toBe(201);
   const id = u.json().id as string;
   const key = await withKey(AUTH, "POST", `/v1/users/${id}/keys`, { name: "b4c6" });

@@ -46,7 +46,8 @@ beforeAll(async () => {
   // migrate to 0170 only (0171 and later cut from a copy of the journal)
   tmp = mkdtempSync(path.join(tmpdir(), "b4c8-0171-"));
   cpSync(migrationsFolder, tmp, { recursive: true });
-  // ADR-0252: a pending migration is written against head, never this older schema; the full run below applies it
+  // ADR-0252: a snapshot truncated to an older migration must not carry today's unnumbered pending/ files,
+  // which would apply on top of a schema that predates the tables they reference
   rmSync(path.join(tmp, "pending"), { recursive: true, force: true });
   const journalPath = path.join(tmp, "meta", "_journal.json");
   const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: Array<{ idx: number; tag: string }> };

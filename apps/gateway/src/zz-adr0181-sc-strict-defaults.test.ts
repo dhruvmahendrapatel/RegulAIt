@@ -126,7 +126,8 @@ describe("ADR-0181 SC — a fresh org reads every admission/monitor default STRI
     // a migrations folder whose journal stops before 0159
     tmpMigrations = mkdtempSync(path.join(tmpdir(), "sdsc-mig-"));
     cpSync(migrationsFolder, tmpMigrations, { recursive: true });
-    // ADR-0252: a pending migration is written against head, never this older schema; the full run below applies it
+    // ADR-0252: a snapshot truncated to an older migration must not carry today's unnumbered pending/ files,
+    // which would apply on top of a schema that predates the tables they reference
     rmSync(path.join(tmpMigrations, "pending"), { recursive: true, force: true });
     const journalPath = path.join(tmpMigrations, "meta", "_journal.json");
     const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: Array<{ idx: number; tag: string }> };
