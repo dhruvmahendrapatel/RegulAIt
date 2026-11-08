@@ -185,7 +185,7 @@ describe("ADR-0195 SD4b: facts become catalogue sightings only", () => {
   it("refuses env_name facts, so an environment-variable name is never kept, even when the catalogue knows it", () => {
     const report = { os: "linux" as const, collectedAt: NOW.toISOString(), facts: [fact({ kind: "env_name", matchedOn: "envName", identifier: "EXAMPLE_API_KEY", location: { root: "home", path: ".profile" } })] };
     const out = reduceReportFacts(report, catalogue);
-    expect(out).toEqual({ sightings: [], envRefused: 1, unmatched: 0 });
+    expect(out).toEqual({ sightings: [], envRefused: 1, unmatched: 0, mcpRefused: 0, mcpServers: [] });
     expect(JSON.stringify(out)).not.toContain("EXAMPLE_API_KEY");
   });
 
@@ -211,7 +211,7 @@ describe("ADR-0195 SD4b: facts become catalogue sightings only", () => {
     for (const kind of ["assistant_config", "cli", "desktop_app"] as const) {
       const report = { os: "linux" as const, collectedAt: NOW.toISOString(), facts: [fact({ kind, matchedOn: "envName", identifier: "EXAMPLE_API_KEY", location: { root: "home", path: ".profile" } })] };
       const out = reduceReportFacts(report, catalogue);
-      expect(out).toEqual({ sightings: [], envRefused: 1, unmatched: 0 });
+      expect(out).toEqual({ sightings: [], envRefused: 1, unmatched: 0, mcpRefused: 0, mcpServers: [] });
       expect(JSON.stringify(out)).not.toContain("EXAMPLE_API_KEY");
     }
   });

@@ -1769,7 +1769,7 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
     // attacker may have influenced. They are evaluated as PHASE INPUT before
     // they reach a model or an answer; a block WITHHOLDS the samples. The
     // grounded answer is composed from counts, so it survives intact.
-    const policy = await resolveGuardrailPolicy(db, { projectId: body.projectId ?? null });
+    const policy = await resolveGuardrailPolicy(db, { projectId: body.projectId ?? null, userId });
     const sampleText = evidence.samples.map((s) => s.text).join("\n");
     // ADR-0220: the same runner as every other enforcement site, so a trained
     // injection classifier an org has turned on also scans this evidence

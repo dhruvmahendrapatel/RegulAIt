@@ -271,6 +271,7 @@ func validateEntry(e *Entry) error {
 		contract.KindAssistantConfig:  {"files", "keyNames"},
 		contract.KindCLI:              {"executables"},
 		contract.KindEnvName:          {"envNames"},
+		contract.KindMCPConfig:        {"files"},
 	}
 	required := map[contract.Kind][]string{
 		contract.KindDesktopApp:       {"bundleIds", "uninstallNames", "desktopIds"},
@@ -280,6 +281,7 @@ func validateEntry(e *Entry) error {
 		contract.KindAssistantConfig:  {"files"},
 		contract.KindCLI:              {"executables"},
 		contract.KindEnvName:          {"envNames"},
+		contract.KindMCPConfig:        {"files"},
 	}
 	ok := map[string]bool{}
 	for _, f := range allowed[e.Kind] {
