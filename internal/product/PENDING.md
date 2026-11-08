@@ -18,6 +18,8 @@ this file.
 
 <!-- fold:pending newest-first -->
 
+**P37 — Ingest Cisco DefenseClaw's audit export (from the security and infra review, owner 2026-11-07).** Customers who already run DefenseClaw on their endpoints had no way to get its decisions into RegulAIt's findings and audit trail. **Built ([ADR-0261](../decisions/0261-defenseclaw-telemetry-ingest.md)), API only:** an HTTP JSONL receiver with a per-source write-only token, record-id dedup and a time window, attributed third-party evidence and `defenseclaw/<connector>` findings. Open: the admin screen (#453), OTLP, an evidence retention sweep, and a check against a real captured export sample before a customer install.
+
 **Q1 — Turn on the merge queue (owner settings, ADR-0252).** Blocked on the owner. Enable the merge queue on `main`
 with merge method "merge commit"; make the required checks ones that report on `merge_group` (`ci.yml`'s
 `build-and-test`, `security.yml`, `import-cycles.yml`, `ui-enterprise.yml`), not a path-filtered workflow. Then the

@@ -22,6 +22,8 @@ roadmap: ../product/ROADMAP.md
 ## Where we are (read this paragraph first)
 <!-- fold:state-recap newest-first -->
 
+**2026-11-08 - P37 built (builder lane, [ADR-0261](../decisions/0261-defenseclaw-telemetry-ingest.md)): a DefenseClaw audit-export ingest adapter.** API and backend only; the six admin routes are known UI gaps tracked on #453 (owner decision 2026-11-07). Migration `pending/third_party_ingest.sql`, numbered at merge. P1 on-device enforcement stays a post-demo clean-room build informed by the DefenseClaw report.
+
 **2026-11-07 - merge queue readiness and merge-time numbering ([ADR-0252](../decisions/0252-merge-queue-and-merge-time-numbering.md), owner decision on #453; review R-03, R-06, R-07, R-08, C-03, C-04).**
 - **Migrations:** a PR adds `packages/db/migrations/pending/<slug>.sql` and never edits the journal. After the merge,
   `assign-at-merge.yml` numbers it (`scripts/assign-at-merge.mjs`) and pushes `assign-at-merge/<sha>`; the master
@@ -5591,6 +5593,53 @@ migration numbers, journal entries and `when` values (`packages/db/migrations/pe
 `scripts/assign-at-merge.mjs` after the merge), ADR index rows (from the ADR header) and STATE/PENDING appends
 (fragments under `internal/fragments/`). Pending migrations never reach a long-lived database; the migration guard
 checks merged migrations are frozen and that the journal grows only by assignment.
+
+**ADR-0237 (builder, 2026-11-07): native adapters for third-party guardrail providers (PENDING P12(a)).** The
+ADR-0088/0220 external-scorer shim gains `adapter` (pending migration `guardrail_vendor_adapters`, plus
+`adapter_options` and `price_per_call_usd`): OpenAI Moderation (harm; official `openai` SDK 6.49.0), Azure AI Content
+Safety (harm and Prompt Shields; plain HTTPS, the Azure SDK is unmaintained) and Lakera Guard (injection, PII, harm;
+plain HTTPS, no JS SDK). Replies are parsed strictly into the ADR-0088 verdict, so the ADR-0220 trained detectors use
+them unchanged and fail closed; long input is scanned in overlapping windows (Gravitee AI prompt guard rails as a
+design reference only). Guardrail kinds only, HTTPS only, key required and never echoed; air-gapped refuses vendor
+adapters everywhere; enabling one is a `settings_relax` step-up. Every call is a `usage_events` row
+(`guardrail_scorer`, attributed to the caller and project; the project cost rollup gains `byGuardrailScorer`) and a
+content-free audit row. UI on #453. Follow-ups: Bedrock ApplyGuardrail, Model Armor, Azure disconnected containers.
+
+**ADR-0242 (builder, 2026-11-07, Proposed): Cisco mcp-scanner and skill-scanner as offline admission-scan engines
+(PENDING P23), phase 1.** Two ADR-0187 engines of a new kind `admission_scan` (`mcpscanner` 4.8.7, `skillscanner` 2.3.2),
+registered off with no digest, so they cannot be enabled until phase 2 publishes the images. Our driver per engine
+builds only the local analyzers, refuses any cloud/LLM/AI Defense/VirusTotal key, sets litellm's local price map
+(measured: six connects without it, none with it) and checks the baked rule digest; the images are hash-locked, pass a
+licence gate and an in-image `--network=none` smoke scan (built and run locally). yara-python is built from its sdist
+without OpenSSL (its wheel bundles EOL 1.1.1w); pcodedmp (GPL-3.0) is excluded. Verdicts land in
+`admission_engine_scans` (pending migration `admission_engine_scans`) and flow into the MCP and skill admission states and audit; with an engine
+on, only a `pass` for the current digest admits (fail closed). Skills enter through builder create, SKILL.md import,
+update, template seeding and agent-bundle import; there is no plugin upload yet. Phase 2: the runner stage and
+`subject` target, queueing, publish, UI (#453). Four owner questions in the ADR.
+
+**ADR-0239 (builder, 2026-11-07): one policy language, slice 1 (PENDING P8).** The nine hand-written kernel evaluators
+are inventoried with a Cedar fit for each. Rate limits move onto Cedar first (`policy-kernel/src/rate-limit-cedar.ts`):
+one `forbid` per limit, entity by position, no stored value in policy text, preparsed per size. The kernel stays
+dependency-free: `EvaluationInput.rateLimitEvaluator` is injected (default `legacyRateLimitEvaluator`), and the gateway
+passes Cedar. Errors deny (`rate-limit-engine-error`). `REGULAIT_RATE_LIMIT_EVALUATOR=legacy` is kept for one release,
+logged at boot, and any other value refuses boot. A fast-check differential test shows the two agree. Only possibly-exhausted
+limits reach Cedar (review finding 1), so a call with no exhausted limit makes no wasm call and a denied one costs
+about 0.15 ms (ABAC is 1.3 ms). Next: approval-rule match (slice 2), batched into one Cedar call. No
+Zanzibar store: membership is flat, so Cedar entity parents suffice; OpenFGA if it becomes recursive. No migration.
+
+**ADR-0261 (builder, 2026-11-07, Accepted, backlog P37): ingest Cisco DefenseClaw's audit export as attributed
+third-party evidence.** Option (b) of the DefenseClaw comparison (`internal/reviews/2026-11-07-defenseclaw-comparison.md`).
+`POST /v1/third-party-ingest/defenseclaw/records` takes the HTTP JSONL export (schema family v8, pinned; documented
+fields only), authenticated in-route by one write-only `rgti_` token per source (hash only, shown once; the P13b scoped
+credential had not landed, so this follows the SD4b enrolment-token pattern). A source is off until enabled with a
+`settings_relax` step-up; issuing the token is also a step-up; all audited. The exporter cannot sign bodies, so replay
+protection is a `(source, record_id)` dedup plus a 15-minute/5-minute window on the database clock; 1 MiB, 512 records,
+64 KiB lines, per-line rejects, 100k records per source per hour. Identity, content and paths are dropped at parse time;
+the host becomes the device pseudonym. Records are append-only (`third_party_ingest_records`) and name one audit-chain
+row per batch (`attribution: third_party, enforcement: false`); risky records open `defenseclaw/<connector>` ADR-0195
+findings (signal source `defenseclaw_export`). API only; the admin screen is tracked on #453. Follow-ups: OTLP
+(protobuf decoder, ADR-0176 search), an evidence retention sweep, and a check against a real captured sample before a
+customer install (the envelope is only partly documented).
 
 <!-- fold:state-decisions -->
 
