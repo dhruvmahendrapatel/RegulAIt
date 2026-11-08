@@ -334,6 +334,8 @@ describe("#280 (4237493038): the legacy-safe audit_anchors TSA constraint, on an
     await admin.execute(sql.raw(`CREATE DATABASE ${UPGRADE_DB}`));
     tmp = mkdtempSync(path.join(tmpdir(), "a189-mig-"));
     cpSync(migrationsFolder, tmp, { recursive: true });
+    // ADR-0252: a pending migration is written against head, never this older schema; the full run below applies it
+    rmSync(path.join(tmp, "pending"), { recursive: true, force: true });
     const journalPath = path.join(tmp, "meta", "_journal.json");
     const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: Array<{ idx: number }> };
     journal.entries = journal.entries.filter((e) => e.idx < 182);

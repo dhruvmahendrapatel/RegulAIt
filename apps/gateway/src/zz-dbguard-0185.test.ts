@@ -215,6 +215,8 @@ beforeAll(async () => {
   // migrate to the migration before 0185 only (0185 and anything after it cut from a copy of the journal)
   tmp = mkdtempSync(path.join(tmpdir(), "dbg185-"));
   cpSync(migrationsFolder, tmp, { recursive: true });
+  // ADR-0252: a pending migration is written against head, never this older schema; the full run below applies it
+  rmSync(path.join(tmp, "pending"), { recursive: true, force: true });
   const journalPath = path.join(tmp, "meta", "_journal.json");
   const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: Array<{ when: number; tag: string }> };
   const cut = journal.entries.find((e) => e.tag === TAG_0185)!.when;
