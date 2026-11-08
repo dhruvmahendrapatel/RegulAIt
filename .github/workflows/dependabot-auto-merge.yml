@@ -1,8 +1,9 @@
 # Dependabot auto-merge, semver-patch only (owner decision 2026-11-07, #738 section 4 with the owner's amendment 5).
 #
 # A Dependabot PR that is a semver-PATCH update of the root npm workspace or of a pinned GitHub Action is queued for
-# merge with `gh pr merge --auto --merge`: it merges only once every required check is green (branch protection and
-# the merge queue decide, never this job), and as a merge commit (M-067). Everything else waits for a reviewer:
+# merge with `gh pr merge --auto --merge`, and only when the base branch enforces the six required checks (below): it
+# then merges once they are green (branch protection and the merge queue decide, never this job), as a merge commit
+# (M-067). Everything else waits for a reviewer:
 #   - minor and major updates;
 #   - the engine manifests (engines/**) and base-image digests, which republish the engine images;
 #   - the pip entries (security-fix PRs only, hand-recompiled).
@@ -10,6 +11,12 @@
 # The cooldown does not cover SECURITY updates, so the job also checks every version the PR moves to was published at
 # least 7 days ago (scripts/dependabot-release-age.mjs, read from the BASE commit, never the PR). A version too young,
 # or any lookup that fails, leaves the PR for a reviewer (#746 review finding 1, ADR-0180 fail closed).
+#
+# Enforced checks (2026-11-08, after #759): `gh pr merge --auto` waits only for the checks the target branch REQUIRES.
+# With no branch protection and no active ruleset requiring them, it merges at once, red or queued checks included.
+# So the job first reads, at run time, whether the base branch enforces all six required checks
+# (scripts/dependabot-required-checks.mjs, from the BASE commit). If it does not, or the answer cannot be read, the PR
+# is not queued and gets one comment saying why. The workflow never waits for checks and merges by itself.
 #
 # Spoofing: the queue job runs only when Dependabot opened the PR, Dependabot pushed the commit, Dependabot (not a
 # re-run by someone else) triggered the run, and the branch is in this repository. `--match-head-commit` pins the
@@ -77,14 +84,39 @@ jobs:
             echo "Not auto-merged: ${UPDATE_TYPE:-unknown update type} in ${ECOSYSTEM:-unknown} ${DIRECTORY:-}. A reviewer merges it." >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      # The age gate's code comes from the BASE commit (reviewed, on main), never from the PR branch.
+      # The gates' code comes from the BASE commit (reviewed, on main), never from the PR branch.
       - if: steps.eligible.outputs.patch == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
-          sparse-checkout: scripts/dependabot-release-age.mjs
+          sparse-checkout: |
+            scripts/dependabot-release-age.mjs
+            scripts/dependabot-required-checks.mjs
           sparse-checkout-cone-mode: false
+
+      - id: gate
+        name: The base branch enforces every required check (else auto-merge would merge at once)
+        if: steps.eligible.outputs.patch == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.event.pull_request.base.ref }}
+        run: node scripts/dependabot-required-checks.mjs
+
+      - name: Say why it is not queued
+        if: steps.eligible.outputs.patch == 'true' && steps.gate.outputs.enforced != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          BRANCH: ${{ github.event.pull_request.base.ref }}
+        run: |
+          marker='<!-- dependabot-auto-merge:not-enforced -->'
+          seen=$(gh pr view "$PR_URL" --json comments --jq "[.comments[].body | select(contains(\"$marker\"))] | length")
+          if [ "$seen" = 0 ]; then
+            printf '%s\nNot auto-merged: `%s` does not enforce all six required checks, or that could not be verified. Auto-merge would merge at once without them, so a reviewer merges this PR.\n' "$marker" "$BRANCH" > body.md
+            gh pr comment "$PR_URL" --body-file body.md
+          fi
 
       - id: age
         name: Every new version is at least 7 days old (security updates skip the cooldown)
@@ -96,7 +128,10 @@ jobs:
         run: node scripts/dependabot-release-age.mjs
 
       - name: Queue it
-        if: steps.eligible.outputs.patch == 'true' && steps.age.outputs.old_enough == 'true'
+        if: >-
+          steps.eligible.outputs.patch == 'true' &&
+          steps.gate.outputs.enforced == 'true' &&
+          steps.age.outputs.old_enough == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
