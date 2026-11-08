@@ -966,6 +966,7 @@ export async function executeGovernedConnectorCall(
     const connectorGuardrails: GuardrailPolicy = await resolveGuardrailPolicy(db, {
       projectId,
       connectorId,
+      userId,
     });
     let cgInput: Awaited<ReturnType<typeof runGuardrailsAsync>> | null = null;
     if (connectorGuardrails.active) {

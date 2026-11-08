@@ -1,4 +1,4 @@
-// ADR-0252 addendum: the PR scope fails closed. A rename out of code into docs is still a code change, and a diff
+// ADR-0262: the PR scope fails closed. A rename out of code into docs is still a code change, and a diff
 // that cannot be read means a full run.
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -85,7 +85,7 @@ describe("the PR scope (fails closed)", () => {
   });
 });
 
-// ADR-0252 addendum, PR trim (owner decision 2026-11-07): one case per rule.
+// ADR-0262, PR trim (owner decision 2026-11-07): one case per rule.
 describe("the PR scope's trim rules", () => {
   it("a full run sets every output, so nothing is trimmed at merge time", () => {
     for (const k of OUTPUTS) expect(FULL[k], k).toBe(true);

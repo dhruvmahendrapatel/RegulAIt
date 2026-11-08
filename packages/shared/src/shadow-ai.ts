@@ -60,6 +60,7 @@
  * correctly. A finding is a pointer to a secret, never a copy of one.
  */
 import { z } from "zod";
+import type { ThirdPartyEvidenceKind } from "./third-party-ingest/index.js";
 import {
   activeDiscoveryPosture,
   PRESENCE_BACKING_KINDS,
@@ -298,7 +299,8 @@ export const DEFAULT_AI_SIGNATURES: ReadonlyArray<Omit<AiSignature, "lastUpdated
 export const EVIDENCE_KINDS = ["egress_log", "code_scan", "saas_export", "self_reported"] as const;
 export type EvidenceKind = (typeof EVIDENCE_KINDS)[number];
 /** ADR-0195: a finding's signal comes from an import (`EvidenceKind`) or from a discovery scanner */
-export type FindingSignalSource = EvidenceKind | DiscoveryEvidenceKind;
+/** ADR-0261: or from a third-party export (attributed evidence, never a RegulAIt decision) */
+export type FindingSignalSource = EvidenceKind | DiscoveryEvidenceKind | ThirdPartyEvidenceKind;
 
 const isoish = z.string().min(4).max(40);
 
