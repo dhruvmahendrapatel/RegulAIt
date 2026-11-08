@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"slices"
 	"time"
 
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/auth"
@@ -151,6 +152,12 @@ func (c *Cycle) RunOnce(ctx context.Context) (*Result, error) {
 	}
 	for _, k := range conf.OrgPolicy.DisabledKinds {
 		if _, ok := disabled[k]; !ok {
+			disabled[k] = collect.GapDisabledByOrgPolicy
+		}
+	}
+	// ADR-0259: an opt-in kind stays off unless the org policy enables it
+	for _, k := range contract.OptInKinds {
+		if _, ok := disabled[k]; !ok && !slices.Contains(conf.OrgPolicy.EnabledOptInKinds, k) {
 			disabled[k] = collect.GapDisabledByOrgPolicy
 		}
 	}

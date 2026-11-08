@@ -189,6 +189,7 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   "scheduler_runs.job_name": "platform_copy",
   "use_case_decision_records.intake_template_name": "platform_copy",
   "cert_inventory.common_name": "ingested",
+  "endpoint_mcp_servers.server_name": "ingested",
   "imported_cost_lines.description": "ingested",
   "infra_resources.name": "ingested",
   "mcp_registry_entries.description": "ingested",

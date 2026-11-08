@@ -8005,6 +8005,8 @@ export const discoverySettings = pgTable(
     saasSourcesEnabled: boolean("saas_sources_enabled").notNull().default(false),
     identitySourcesEnabled: boolean("identity_sources_enabled").notNull().default(false),
     mlPlatformSourcesEnabled: boolean("ml_platform_sources_enabled").notNull().default(false),
+    // ADR-0259: endpoint MCP client-config discovery through the SD4 agent, off (pending migration endpoint_mcp_config_discovery, ADR-0252)
+    endpointMcpConfigEnabled: boolean("endpoint_mcp_config_enabled").notNull().default(false),
     version: integer("version").notNull().default(1),
     updatedBy: uuid("updated_by"),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -8202,6 +8204,8 @@ export const endpointAgentReports = pgTable(
     factsReceived: integer("facts_received").notNull(),
     factsEnvRefused: integer("facts_env_refused").notNull(),
     factsUnmatched: integer("facts_unmatched").notNull(),
+    /** ADR-0259 (pending migration endpoint_mcp_config_discovery, ADR-0252): mcp_config facts refused because the org switch was off (counted, never stored) */
+    factsMcpRefused: integer("facts_mcp_refused").notNull().default(0),
     droppedSnapshots: integer("dropped_snapshots").notNull(),
     gaps: jsonb("gaps").$type<Array<{ kind: string; reason: string }>>().notNull().default(sql`'[]'::jsonb`),
     sightings: jsonb("sightings").$type<EndpointAgentSighting[]>().notNull().default(sql`'[]'::jsonb`),
@@ -8222,6 +8226,7 @@ export const endpointAgentReports = pgTable(
       sql`${t.factsReceived} BETWEEN 0 AND 2000 AND ${t.factsEnvRefused} BETWEEN 0 AND ${t.factsReceived} AND ${t.factsUnmatched} BETWEEN 0 AND ${t.factsReceived} AND ${t.droppedSnapshots} BETWEEN 0 AND 1000000`,
     ),
     check("endpoint_agent_reports_gaps_check", sql`jsonb_typeof(${t.gaps}) = 'array' AND jsonb_array_length(${t.gaps}) <= 200`),
+    check("endpoint_agent_reports_mcp_refused_check", sql`${t.factsMcpRefused} BETWEEN 0 AND ${t.factsReceived}`),
     check("endpoint_agent_reports_sightings_check", sql`jsonb_typeof(${t.sightings}) = 'array' AND jsonb_array_length(${t.sightings}) <= 2000`),
     check(
       "endpoint_agent_reports_status_check",
@@ -8229,6 +8234,83 @@ export const endpointAgentReports = pgTable(
     ),
     index("endpoint_agent_reports_pending_idx").on(t.sourceId, t.receivedAt).where(sql`${t.status} = 'pending'`),
   ],
+);
+
+// ===========================================================================
+// ADR-0259 (P35) — MCP CLIENT CONFIGS ON EMPLOYEE MACHINES (pending migration endpoint_mcp_config_discovery, ADR-0252)
+// ===========================================================================
+
+export const ENDPOINT_MCP_TRANSPORTS = ["stdio", "http", "sse", "unknown"] as const;
+export const ENDPOINT_MCP_IDENTITY_KINDS = ["package", "host", "command", "unknown"] as const;
+export const ENDPOINT_MCP_LINK_IDENTITY_KINDS = ["package", "host", "command"] as const;
+export const ENDPOINT_MCP_RISKS = [
+  "shell_launcher",
+  "container_privileged",
+  "host_root_mount",
+  "unpinned_package",
+  "secret_in_args",
+  "plaintext_remote",
+  "auto_approve_all",
+  "risky_tool_auto_approved",
+] as const;
+
+/**
+ * One MCP server entry of one host config on one device, from the device's signed report. Evidence: refreshed by
+ * each newer report, deleted with the device or past the endpoint retention. Never an argument, env or header
+ * value, URL path or query, or key; secrets are kept as their TYPE (rule id) only.
+ */
+export const endpointMcpServers = pgTable(
+  "endpoint_mcp_servers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => endpointDevices.id, { onDelete: "cascade" }),
+    /** the report that last refreshed it (no foreign key, so a report's deletion never rewrites this row) */
+    lastReportId: uuid("last_report_id").notNull(),
+    // exception (ADR-0200 addendum): signed-report evidence, the manifest's catalogue identifiers for the MCP host
+    signatureId: text("signature_id").notNull(),
+    provider: text("provider").notNull(),
+    configRoot: text("config_root", { enum: ["home", "system_applications", "appdata", "localappdata"] }).notNull(),
+    configPath: text("config_path").notNull(),
+    serverName: text("server_name").notNull(),
+    transport: text("transport", { enum: ENDPOINT_MCP_TRANSPORTS }).notNull(),
+    command: text("command"),
+    package: text("package"),
+    packageVersion: text("package_version"),
+    host: text("host"),
+    identityKind: text("identity_kind", { enum: ENDPOINT_MCP_IDENTITY_KINDS }).notNull(),
+    identity: text("identity").notNull(),
+    disabled: boolean("disabled").notNull().default(false),
+    // exception (ADR-0200 addendum): closed-vocabulary evidence sets from one signed report, not references
+    risks: text("risks").array().$type<Array<(typeof ENDPOINT_MCP_RISKS)[number]>>().notNull().default(sql`'{}'::text[]`),
+    riskyTools: text("risky_tools").array().notNull().default(sql`'{}'::text[]`),
+    autoApprovedTools: integer("auto_approved_tools").notNull().default(0),
+    secretTypes: text("secret_types").array().notNull().default(sql`'{}'::text[]`),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    unique("endpoint_mcp_servers_entry_uq").on(t.deviceId, t.configRoot, t.configPath, t.serverName, t.identityKind, t.identity),
+    index("endpoint_mcp_servers_identity_idx").on(t.identityKind, t.identity),
+    index("endpoint_mcp_servers_last_seen_idx").on(t.lastSeenAt),
+  ],
+);
+export type EndpointMcpServerRow = typeof endpointMcpServers.$inferSelect;
+
+/** an admin's statement that a configured server identity is an approved `mcp_servers` row (audited) */
+export const endpointMcpServerLinks = pgTable(
+  "endpoint_mcp_server_links",
+  {
+    identityKind: text("identity_kind", { enum: ENDPOINT_MCP_LINK_IDENTITY_KINDS }).notNull(),
+    identity: text("identity").notNull(),
+    mcpServerId: uuid("mcp_server_id")
+      .notNull()
+      .references(() => mcpServers.id, { onDelete: "cascade" }),
+    linkedBy: uuid("linked_by").references(() => users.id, { onDelete: "set null" }),
+    linkedAt: timestamp("linked_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ name: "endpoint_mcp_server_links_pk", columns: [t.identityKind, t.identity] }), index("endpoint_mcp_server_links_server_idx").on(t.mcpServerId)],
 );
 export type EndpointAgentReportRow = typeof endpointAgentReports.$inferSelect;
 

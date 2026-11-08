@@ -976,6 +976,10 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/discovery/sources/:sourceId/endpoint-devices": "internal",
   "GET /v1/discovery/sources/:sourceId/endpoint-devices/export.xlsx": "internal",
   "POST /v1/discovery/endpoint-devices/:deviceId/revoke": "internal",
+  // ADR-0259 (P35): the MCP servers enrolled devices' host configs name, and the admin's links to approved servers
+  "GET /v1/discovery/endpoint-mcp-servers": "internal",
+  "POST /v1/discovery/endpoint-mcp-server-links": "internal",
+  "POST /v1/discovery/endpoint-mcp-server-links/remove": "internal",
   // ADR-0193 (I4) P1: content source trust tiers, the write floor, and the P0 provenance evidence view
   "GET /v1/content-trust": "internal",
   "PUT /v1/content-trust/sources/:sourceKind/:sourceId": "internal",
@@ -2239,6 +2243,9 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/discovery/sources/:sourceId/enrolment-tokens/export.xlsx": "shadow-ai",
   "POST /v1/discovery/enrolment-tokens/:tokenId/revoke": "shadow-ai",
   "GET /v1/discovery/sources/:sourceId/endpoint-devices": "shadow-ai",
+  "GET /v1/discovery/endpoint-mcp-servers": "shadow-ai",
+  "POST /v1/discovery/endpoint-mcp-server-links": "shadow-ai",
+  "POST /v1/discovery/endpoint-mcp-server-links/remove": "shadow-ai",
   "GET /v1/discovery/sources/:sourceId/endpoint-devices/export.xlsx": "shadow-ai",
   "POST /v1/discovery/endpoint-devices/:deviceId/revoke": "shadow-ai",
   "GET /v1/content-trust": "content-provenance",
