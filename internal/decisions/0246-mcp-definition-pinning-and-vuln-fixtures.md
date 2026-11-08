@@ -201,6 +201,15 @@ refuses a credential-shaped argument.
   content, and it treats every network-shaped string as a target to be authorised, so a benign host-shaped value in an
   argument (an unrelated URL) must also be on the list for the call to pass. (Review finding 2 — the scope, now that
   the scan covers the whole argument tree.)
+- The scan reads values under a target-named key verbatim, and **tokenises every other string** (on whitespace and
+  shell/punctuation separators, keeping `.`, `:`, `/`, `-`, `_`, `@` so a URL, `host:port`, CIDR or email stays whole),
+  testing each token — so a target embedded in a free-text argument (`command: "nmap -sV victim.example"`) is caught.
+  (Round-2 review finding 1.)
+- **Stated limitation (round-2 review finding 2):** a **single-label** host in an unrecognised key or free text
+  (`lhost: "victim"`, no dot) is *not* flagged as a target, because a bare word is indistinguishable from a module
+  name, flag or ordinary token and flagging every word would refuse benign calls wholesale. A single-label value is
+  still enforced when it sits under a target-named key (taken verbatim, then refused if unauthorised). Closing the gap
+  in general would require a high-risk tool's `inputSchema` to declare which fields are targets; that is deferred.
 - The pins are of the **list metadata** — a tool's definition, a prompt's descriptor, a resource's descriptor — not of
   the `prompts/get` message body or the `resources/read` content. A server can change what it returns on `get`/`read`
   without tripping a pin; that content is governed by the output guardrails (PII, prompt-injection), not by pinning.

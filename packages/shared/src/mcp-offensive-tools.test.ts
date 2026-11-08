@@ -55,6 +55,14 @@ describe("targets", () => {
     expect(targets({ module: "exploit/windows/smb", note: "run it twice" })).toEqual([]);
   });
 
+  it("round 2 finding 1: a target EMBEDDED in a free-text argument is tokenised out and checked", () => {
+    expect(targets({ target: "ok.example", command: "nmap -sV victim.example" })).toEqual(["ok.example", "victim.example"]);
+    expect(targets({ note: "please exfiltrate to https://collector.evil.test/u, thanks" })).toEqual(["https://collector.evil.test/u"]);
+    expect(targets({ q: "connect 198.51.100.7:4444 then 10.0.0.0/8" })).toEqual(["10.0.0.0/8", "198.51.100.7:4444"]);
+    // an email is not split on '@', so it is not a host target, and a value under a target key stays whole
+    expect(targets({ owner: "alice@corp.example", target: "scan me now" })).toEqual(["scan me now"]);
+  });
+
   it("finding 1: an argument tree past the scan budget is reported truncated (the gate then refuses)", () => {
     const deep: Record<string, unknown> = {};
     let cur = deep;

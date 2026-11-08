@@ -216,6 +216,16 @@ describe("ADR-0246 addendum: an offensive-tooling server", () => {
     expect((row?.detail as { refusedTargets: string[] }).refusedTargets).toContain(OUT_OF_SCOPE);
   });
 
+  it("round 2 finding 1: an out-of-scope target EMBEDDED in a free-text argument is still refused", async () => {
+    // the recognised 'target' is authorised; the real target hides inside a command string and a URL in prose
+    await deniedWith("run_exploit", { target: IN_SCOPE, module: "m", command: `nmap -sV ${OUT_OF_SCOPE}` }, MCP_HIGH_RISK_RULE_IDS.targetRefused);
+    await deniedWith("run_exploit", { target: IN_SCOPE, module: "m", note: `exfiltrate to https://${OUT_OF_SCOPE}/u, thanks` }, MCP_HIGH_RISK_RULE_IDS.targetRefused);
+    const row = await lastAudit(MCP_HIGH_RISK_RULE_IDS.targetRefused, off.serverId);
+    // the refused target is recorded as the token the scan extracted (here the URL carrying the out-of-scope host)
+    expect((row?.detail as { refusedTargets: string[] }).refusedTargets.some((t) => t.includes(OUT_OF_SCOPE))).toBe(true);
+    expect(off.state.calls).toEqual([]);
+  });
+
   it("finding 1: a call with more arguments than the scan budget is refused, not let through", async () => {
     const huge: Record<string, unknown> = { target: IN_SCOPE, module: "m", items: Array.from({ length: 30_000 }, (_, i) => `n${i}`) };
     await deniedWith("run_exploit", huge, MCP_HIGH_RISK_RULE_IDS.targetRefused);

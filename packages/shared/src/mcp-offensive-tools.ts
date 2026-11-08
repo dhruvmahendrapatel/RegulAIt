@@ -149,6 +149,13 @@ export function looksLikeNetworkTarget(value: string): boolean {
   return !!t && (t.kind !== "host" || t.host.includes("."));
 }
 
+/** Separators that break a free-text argument (a command line, a query, prose) into candidate target tokens. `.`,
+ * `:`, `/`, `-`, `_` and `@` are kept, so a URL, a `host:port`, a CIDR and an email stay whole (an email is then not
+ * a target, because its `@` makes it an invalid host). */
+const TARGET_TOKEN_SEPARATORS = /[\s,;'"`=()[\]{}<>|*!?\\]+/;
+/** At most this many tokens are tested per string; a string with more drains the scan budget and the call is refused. */
+const MAX_TOKENS_PER_STRING = 512;
+
 /** Every target string in a call's arguments, scanned over the WHOLE tree (ADR-0246 addendum, review findings 1-2). */
 export function extractTargets(args: Record<string, unknown> | undefined | null): ExtractedTargets {
   const targets = new Set<string>();
@@ -160,9 +167,22 @@ export function extractTargets(args: Record<string, unknown> | undefined | null)
       return;
     }
     if (typeof value === "string") {
-      // under a target-named key: taken verbatim (even a bare word, so a scoped call still names its target);
-      // anywhere else: taken only when it is network-shaped, so an unrecognised/nested target cannot ride along
-      if (underTargetKey || looksLikeNetworkTarget(value)) targets.add(value);
+      // under a target-named key: the whole value is the target, taken verbatim (even a bare word, so a scoped call
+      // still names its target; `checkTargets` refuses it if unparseable)
+      if (underTargetKey) {
+        targets.add(value);
+        return;
+      }
+      // anywhere else: a target may be EMBEDDED in free text (a command line, a query), so the string is tokenised
+      // and each network-shaped token is taken as a target to authorise (review round 2, finding 1)
+      const tokens = value.split(TARGET_TOKEN_SEPARATORS);
+      for (let i = 0; i < tokens.length; i++) {
+        if (i >= MAX_TOKENS_PER_STRING || budget-- <= 0) {
+          truncated = true;
+          return;
+        }
+        if (tokens[i] && looksLikeNetworkTarget(tokens[i]!)) targets.add(tokens[i]!);
+      }
       return;
     }
     if (value === null || typeof value !== "object") {
