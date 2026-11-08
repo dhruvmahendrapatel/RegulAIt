@@ -6478,7 +6478,8 @@ export const modelCardEvidence = pgTable(
  * `running`) before its suite runs, unique on (card, drift key, kind, source), so a drift is re-tested at most
  * once per suite however often the sweep runs. `card_approval_id` is the re-certification request the result
  * is attached to: set when the request is created, or at once when one is already pending. */
-export const MRM_RETEST_KINDS = ["eval", "redteam"] as const;
+// ADR-0245 (pending migration spikee_engine_and_engine_retest): `engine` re-runs a red-team engine run a person already ran against the agent
+export const MRM_RETEST_KINDS = ["eval", "redteam", "engine"] as const;
 /** `reported`: the suite ran but its runner gave no gate verdict (e.g. no gating class exercised) — never a pass */
 export const MRM_RETEST_STATUSES = ["running", "passed", "failed_gate", "reported", "refused", "skipped"] as const;
 export const mrmRetestRuns = pgTable(
@@ -6491,13 +6492,15 @@ export const mrmRetestRuns = pgTable(
     /** the certification and configuration-change count this re-test answers */
     driftKey: text("drift_key").notNull(),
     kind: text("kind", { enum: MRM_RETEST_KINDS }).notNull(),
-    /** the eval dataset (kind eval) or red-team library (kind redteam) re-run */
+    /** the eval dataset (kind eval), red-team library (kind redteam) or engine run (kind engine) re-run */
     sourceId: uuid("source_id").notNull(),
     sourceName: text("source_name").notNull(),
     runAsUserId: uuid("run_as_user_id").references(() => users.id, { onDelete: "set null" }),
     projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
     evalRunId: uuid("eval_run_id").references(() => evalRuns.id, { onDelete: "set null" }),
     redteamRunId: uuid("redteam_run_id").references((): AnyPgColumn => redteamRuns.id, { onDelete: "set null" }),
+    /** ADR-0245 (migration spikee_engine_and_engine_retest): kind engine — the engine run this re-test started (`source_id` is the run repeated) */
+    engineRunId: uuid("engine_run_id").references((): AnyPgColumn => engineRuns.id, { onDelete: "set null" }),
     status: text("status", { enum: MRM_RETEST_STATUSES }).notNull(),
     reason: text("reason"),
     /** the measured figures, copied at completion: gatePassed, regression, meanScore, passRate, asr */
@@ -6507,7 +6510,9 @@ export const mrmRetestRuns = pgTable(
     finishedAt: timestamp("finished_at", { withTimezone: true }),
   },
   (t) => [
-    check("mrm_retest_runs_kind_check", sql`${t.kind} IN ('eval','redteam')`),
+    check("mrm_retest_runs_kind_check", sql`${t.kind} IN ('eval','redteam','engine')`),
+    check("mrm_retest_runs_engine_run_check", sql`${t.engineRunId} IS NULL OR ${t.kind} = 'engine'`),
+    uniqueIndex("mrm_retest_runs_engine_run_uq").on(t.engineRunId).where(sql`${t.engineRunId} IS NOT NULL`),
     check(
       "mrm_retest_runs_status_check",
       sql`${t.status} IN ('running','passed','failed_gate','reported','refused','skipped')`,
