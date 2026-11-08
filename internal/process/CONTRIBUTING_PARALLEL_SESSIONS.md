@@ -228,7 +228,7 @@ touches code, or the weekly run of `main`). A docs-only ADR PR still skips CI, s
 ### 4.8 CI is split: fast checks on a PR, the full suite at merge time (owner decision, 2026-11-07)
 
 The free public-repo runner pool holds about 20 jobs at once and a full run was about 30, so only one PR's CI ran at
-a time and over 200 runs queued. Since 2026-11-07 (ADR-0252 addendum):
+a time and over 200 runs queued. Since 2026-11-07 (ADR-0262):
 
 | Event | What runs |
 |---|---|
