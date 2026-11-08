@@ -56,6 +56,11 @@ and must still be managed: every number collision in §4, because two branches c
 
 ## 4. The silent hazards — collisions git will not warn you about
 
+> **Since 2026-11-07 ([ADR-0252](../decisions/0252-merge-queue-and-merge-time-numbering.md)) most of this section is
+> handled at merge time.** A PR no longer claims a migration number, a journal line, an ADR index row or a line at
+> the end of STATE.md or PENDING.md. Follow §8 ("Builder steps") for the flow; the subsections below keep the
+> mechanisms, which still explain why the rules exist.
+
 These are ordered by how quietly they fail. The first is the one that can waste a day.
 
 ### 4.1 Migration watermark poisoning (silent, permanent, retry-proof)
@@ -71,9 +76,9 @@ So a single generated migration with a real timestamp sets the watermark far int
 **every subsequent hand-numbered migration is silently skipped forever**. No error. No warning.
 The schema simply stops advancing.
 
-> **Rule: never run `drizzle-kit generate` on this repo.** Hand-author the `.sql` file and hand-append
-> the journal entry, continuing the +1,000,000 ms convention (the journal's last `when` plus 1,000,000;
-> the §4.2 commands print it).
+> **Rule: never run `drizzle-kit generate` on this repo** (ADR-0252 removed the `generate` script). Hand-author
+> the `.sql` file as `packages/db/migrations/pending/<slug>.sql` and **do not touch the journal**: the
+> assign-at-merge step appends the entry after the merge, continuing the +1,000,000 ms convention.
 
 Two related traps from the same mechanism:
 
@@ -96,6 +101,40 @@ Two related traps from the same mechanism:
 > `scripts/migration-watermark-guard.mjs`, which refuses any new entry not above the base branch's newest
 > `when`.
 
+> **Superseded on 2026-11-07 by ADR-0252: numbers are assigned at merge time.**
+> 1. A PR adds `packages/db/migrations/pending/<slug>.sql` (lowercase words joined by `_`). It does not pick a number,
+>    does not edit `meta/_journal.json`, and refers to the migration by its slug. Several files in one PR are numbered
+>    in name order, so name them to sort in run order.
+> 2. CI applies pending files in provisional order on its disposable databases (`REGULAIT_MIGRATIONS_UNASSIGNED=apply`,
+>    also set by the gateway's vitest config). A long-lived database refuses them (`UnassignedMigrationsError`), so a
+>    provisional number never reaches one. Do not set the variable on a database you keep.
+> 3. After the merge, `.github/workflows/assign-at-merge.yml` runs `scripts/assign-at-merge.mjs`. It numbers every pending
+>    file (number and idx one above the journal's highest, `when` = last `when` + 1,000,000), renames it, appends
+>    its entry and pushes the result to `assign-at-merge/<main sha>`. The master opens that PR and enqueues it.
+> 4. The guard (`scripts/migration-watermark-guard.mjs`, on PRs and in the merge queue) refuses: a changed or removed
+>    merged entry; a changed merged `.sql`; a numbered file with no entry, or an entry with no file; a bad pending name;
+>    and any new journal entry that is not exactly the assign step's numbering of pending files the same diff removes.
+>
+> **Converting an open PR** that still adds a numbered migration the old way:
+>
+> ```bash
+> git fetch origin main && git merge origin/main             # merge, never rebase (M-067)
+> git checkout origin/main -- packages/db/migrations/meta/_journal.json
+> git mv packages/db/migrations/0290_my_change.sql packages/db/migrations/pending/my_change.sql
+> grep -rn "0290_my_change" --exclude-dir=node_modules .     # change each reference to the slug (my_change)
+> node scripts/migration-watermark-guard.mjs origin/main     # must pass
+> ```
+>
+> Notes for the conversion (#738):
+> - **Several migrations in one PR:** move each one, and name the slugs so they sort in run order
+>   (`my_change_a_tables.sql`, `my_change_b_policies.sql`); the assign step numbers them in byte order of their names.
+> - **References:** the grep must also cover tests that name the tag or number (placement and guard tests, fixtures),
+>   the ADR, and fragments under `internal/fragments/`. Say "the `<slug>` migration" in prose; the number appears
+>   only after assign-at-merge.
+> - **Snapshots:** this repo keeps only `meta/0000_snapshot.json`, so there is no per-migration snapshot to move.
+> - **Check** with the gateway tests (they apply pending files, `REGULAIT_MIGRATIONS_UNASSIGNED=apply`) and
+>   `pnpm exec vitest run --dir scripts assign-at-merge`, then push. Never renumber by hand.
+
 ### 4.2 Same-number files that merge with **zero** conflict
 
 Two sessions each take migration `0101` (or ADR `0097`) with different descriptive slugs. Git sees
@@ -103,7 +142,9 @@ two distinct new files and **auto-merges both**. There is no conflict marker, no
 migrations claiming one number and a journal that can only describe one of them.
 
 > **Rule: claim the number before you use it.** Push a one-line placeholder commit reserving the
-> number, or announce the claim, before writing the body.
+> number, or announce the claim, before writing the body. *(ADR-0252: still true for ADR numbers. Migrations no
+> longer take a number on a branch; two PRs with the same pending slug get a plain add/add conflict, which git does
+> report.)*
 
 Do not trust a table of sequence heads in a document: it goes stale with the next merge. Read the heads
 from the tree at the moment you claim a number:
@@ -126,6 +167,9 @@ A file with a retired number added now would carry a `when` below the database's
 
 ### 4.3 `_journal.json` always conflicts on append
 
+*(ADR-0252: no branch edits the journal any more; only the assign-at-merge step does, one PR at a time. Kept for
+history and for converting older PRs.)*
+
 Appending an entry requires rewriting the previous last entry's `}` into `},`, so two concurrent
 appends **always** touch the same physical line. This is the one guaranteed conflict in the set —
 which makes it the *good* case, because git will tell you. Resolve by keeping **both** entries and
@@ -139,12 +183,23 @@ keeping one. The lost row is invisible forever after.
 > **Merge-time assertion:** `ls internal/decisions/[0-9]*.md | wc -l` must equal
 > `grep -cE '^\| \[[0-9]{4}\]' internal/decisions/README.md`. CI now checks this, row order and links with
 > `scripts/adr-index.test.mjs` (FS-55).
+>
+> **ADR-0252: do not add the row by hand.** Add only the ADR file, with the template header (`# ADR-NNNN: Title`,
+> `- **Status**:`, `- **Date**:`, and `- **Index**:` if the title is too long for the table). The assign-at-merge
+> step adds the row after the merge. `scripts/adr-index.test.mjs` checks the index as that step will leave it, so
+> a header it cannot read fails CI on the PR.
 
 ### 4.5 STATE.md recap clobber
 
 Both sessions prepend to the same `## Where we are` window; the merge silently drops one session's
 entire record. Rule 3.4 (one owner) exists for this. If both must write, write to *different*
 sections and never the same paragraph.
+
+**ADR-0252: appends go in fragments.** A new recap paragraph, a new Decisions paragraph or a new PENDING item is a
+file `internal/fragments/<YYYY-MM-DD>-<lane>-<slug>.md` whose first line is `<!-- fold: state-recap -->`,
+`<!-- fold: state-decisions -->` or `<!-- fold: pending -->`. The assign-at-merge step moves it to its marker and
+deletes it ([internal/fragments/README.md](../fragments/README.md)). Edits to an existing paragraph or row are still
+ordinary edits, and still collide if two PRs edit the same one.
 
 ### 4.6 One decision fans out across four sequences
 
@@ -154,6 +209,10 @@ them collision-prone, for one decision. Serialize decision-commits between the s
 session lands its whole set before the other starts.
 
 ### 4.7 CI cannot catch any of this
+
+*(ADR-0252: no longer true once the merge queue is on. The queue runs `ci.yml`, `security.yml`, `import-cycles.yml`
+and `ui-enterprise.yml` on the combined result of every queued PR, docs-only PRs included, because `merge_group`
+takes no path filter. The text below records how it was.)*
 
 There is **no `push:` trigger**, and the `pull_request` workflow skips markdown and state paths.
 Every assertion in §4 is a **manual** merge-time check. ~~(GitHub Actions minutes are also
@@ -165,6 +224,47 @@ docs-only or state-only diff never enters CI, so every §4 assertion is still ch
 
 *2026-10-24 (FS-55): `scripts/adr-index.test.mjs` checks §4.4 in CI, but only on a run that happens (a PR that
 touches code, or the weekly run of `main`). A docs-only ADR PR still skips CI, so run §6 step 1 by hand.*
+
+### 4.8 CI is split: fast checks on a PR, the full suite at merge time (owner decision, 2026-11-07)
+
+The free public-repo runner pool holds about 20 jobs at once and a full run was about 30, so only one PR's CI ran at
+a time and over 200 runs queued. Since 2026-11-07 (ADR-0252 addendum):
+
+| Event | What runs |
+|---|---|
+| `pull_request`, code changed | `ci.yml`: build, typecheck, package suites, static pre-flights (migration guard, licence gate), and the four gateway shards and their coverage check, web-only PRs included (gateway tests read `apps/web` sources). `security.yml`: CodeQL, gitleaks, dependency audit. `ui-enterprise.yml`: tokens, baseline guard and bundle size. |
+| `pull_request`, code outside `apps/web/**` changed | also `import-cycles.yml`, and `integrations.yml` when its paths match (both path-filtered; neither reads `apps/web`) |
+| `pull_request`, `apps/web/**` (or `packages/shared/**`, the lockfile) changed (`web`) | also the mocked SPA shards and the Chromium enterprise browser job |
+| `pull_request`, the root image's build context or its Trivy gate changed (`image`) | also Trivy: the root `Dockerfile`, `.dockerignore`, the workspace manifests and lockfile, `apps/**` and `packages/**` (not tests or `apps/web/e2e`), `security.yml`, `security/image-allowlist*.json`, and `scripts/security-{gate,runtime-contents,suppressions}.mjs` and `scripts/security-cosign-verify.sh` |
+| `pull_request`, an engine's own input changed (`engines`) | also the engine image scans and SBOMs, and the engine build-and-compare: `engines/**`, any `Dockerfile`, the lockfile, the engine packages and scripts, `security/image-allowlist.engine-*.json`, the gate scripts the engine scan runs, the image workflows. Not `packages/**` or `apps/**`, which each engine's shim stage also copies: a change there alone builds and compares the engines at merge time. |
+| `pull_request`, docs only | every scope-gated job is skipped by `if:`; `build-and-test` and `ui enterprise / all` still report. gitleaks and the dependency audit still run. |
+| `pull_request`, the scope rules themselves changed | everything, as a full run (`scripts/ci-scope.mjs`, its test, `.github/actions/ci-scope`) |
+| `merge_group`, push to `main`, nightly 03:17 UTC (`security.yml` 05:17 UTC) | everything: the above plus the SPA journeys, docker build, every SPA shard, Firefox, WebKit and the screenshot pack, every engine image scan, the demo journeys, gVisor and the engine build-and-compare |
+
+What this means for a builder:
+
+- A green PR is no longer the whole proof. The merge queue runs the full suite on the combined result; a failure
+  there drops the PR from the queue, and you fix it on the branch like any other red check.
+- To run the full suite on a branch before it is queued, use **Run workflow** (`workflow_dispatch`) on `ci.yml`,
+  `ui-enterprise.yml`, `demo.yml` or `gvisor.yml`.
+- A newer push to a PR cancels its older run. Every other run (merge group, push to main, schedule, manual) has a
+  concurrency group of its own (`github.run_id`), because GitHub cancels an older *pending* run in a shared group
+  whatever `cancel-in-progress` says.
+- The scope fails closed (`scripts/ci-scope.mjs`): a rename counts at both its paths, and a diff it cannot read means
+  a full run. A required job gated directly on the scope (CodeQL, Trivy) runs unless the scope said `'false'`
+  (`!cancelled() && ... != 'false'`), so a scope that failed runs it; the gated jobs behind `build-and-test` and
+  `ui enterprise / all` are judged by those aggregates against their own outputs.
+- Required checks (set by the owner when the queue is enabled) are names that report on every PR and every merge
+  group: `build-and-test`, `SAST (CodeQL)`, `Secret scan (gitleaks)`, `Dependency audit (pnpm)`, `Image scan and SBOMs
+  (Trivy)` and `ui enterprise / all`. Never require a job gated by `scope` directly (a skip counts as a pass), a
+  path-filtered workflow (`import-cycles`, `integrations`, `endpoint-agent`, `engine-images-build`, `gvisor`, `demo`)
+  or a workflow without a `merge_group` trigger.
+- No job is gated by a workflow-level path filter any more where it can be required. Gate a new job on the `scope`
+  job's outputs (`.github/actions/ci-scope`): `full`, `code`, `web`, `image` or `engines`, and add a case
+  to `scripts/ci-scope.test.mjs`.
+- PR trim (owner decision 2026-11-07, measured about 37 check runs per PR before it): a web-only PR runs about 23 jobs
+  and a gateway-only PR about 19, against 37 before. The largest remaining items are the five mocked SPA shards and the
+  four gateway shards.
 
 ## 5. Shared machine resources
 
@@ -189,7 +289,8 @@ If both sessions run on **one** machine, these fight:
 
 ## 6. Merge-time checklist
 
-Run these by hand before merging either direction. CI runs only the first (as `scripts/adr-index.test.mjs`):
+Run these by hand before merging either direction. CI runs the first (as `scripts/adr-index.test.mjs`) and the
+second (as `scripts/migration-watermark-guard.mjs`, ADR-0252), on PRs and in the merge queue:
 
 ```bash
 # 1. ADR files and index rows agree
@@ -213,3 +314,29 @@ git diff --stat <base>..HEAD -- packages/db/
 Read [CLAUDE.md](../../CLAUDE.md) → [internal/memory/STATE.md](../memory/STATE.md) →
 [mistakes.md](../memory/mistakes.md) → this file, then **ask which surface you own** before editing
 anything. The other session may be mid-task in a file that looks idle.
+
+## 8. Builder steps under the merge queue (ADR-0252)
+
+For a builder lane, from branch to merge:
+
+1. **Branch** from `origin/main`. Merge main into it when you need to, never rebase (M-067).
+2. **Migration:** add `packages/db/migrations/pending/<slug>.sql`. Do not number it and do not touch
+   `meta/_journal.json`. Refer to it by its slug. Run the gateway tests as usual: the suite applies it.
+3. **ADR:** claim the next free ADR number (§4.2) and add only the ADR file with the template header. No README row.
+4. **STATE.md / PENDING.md:** add a fragment under `internal/fragments/` for each new paragraph or item (§4.5). Edit
+   existing text in place only when you must.
+5. **Check** before pushing: `node scripts/migration-watermark-guard.mjs origin/main` and
+   `npx vitest run --dir scripts adr-index assign-at-merge`, plus your own tests.
+6. **Draft PR**, then mark it ready when CI is green. Do not merge it yourself, and do not merge main into it only to
+   stay current: the queue tests it on top of everything ahead of it.
+7. **The master enqueues it** (`gh pr merge <n> --merge --auto`). If the queue run fails, the PR leaves the queue;
+   fix it on the branch and the master enqueues it again.
+8. **After the merge,** the assign-at-merge job numbers your migration and folds your ADR row and fragments; its PR
+   goes through the queue too. Until it lands, `main` holds your migration unnumbered, and a long-lived database
+   refuses to migrate, by design (§4.1).
+
+**For the master:** enqueue instead of merging. When an `assign-at-merge/<sha>` branch appears, open a PR from the
+newest one (title "chore: assign migration numbers and fold docs at merge (ADR-0252)") and enqueue it. Keep one
+open at a time, and delete older `assign-at-merge/*` branches that never got a PR: while one is unmerged, the job
+pushes no new branch and its summary names the one waiting. If the job cannot run,
+`node scripts/assign-at-merge.mjs --write` on a branch from main gives the same result.

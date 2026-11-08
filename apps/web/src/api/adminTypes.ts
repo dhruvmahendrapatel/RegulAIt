@@ -26,6 +26,11 @@ export interface ApiKey {
   createdAt: string;
   lastUsedAt: string | null;
   revokedAt: string | null;
+  expiresAt?: string | null;
+  /** ADR-0098: derived by the gateway — active, expiring, expired or revoked */
+  state?: "active" | "expiring" | "expired" | "revoked";
+  /** ADR-0226: the holder's email, joined by the list contract */
+  userEmail?: string | null;
 }
 
 export interface UserSession {
@@ -188,6 +193,9 @@ export interface Role {
 }
 
 export interface RoleAssignment {
+  /** ADR-0226: the assignment's own id (a holder can be listed twice: directly and through a group) */
+  id?: string;
+  origin?: "direct" | "group";
   userId: string;
   email: string;
   displayName: string | null;
@@ -213,6 +221,9 @@ export interface Team {
   name: string;
   defaultClassifications?: string[] | null;
   members?: Array<{ userId: string; name: string }>;
+  createdAt?: string;
+  /** ADR-0226: the member count, from the list contract */
+  memberCount?: number;
 }
 
 /** O9 (ADR-0027): a revocation is CREATED 'full' (the ADR-0019 total). An
@@ -227,6 +238,8 @@ export interface McpRevocation {
   id: string;
   userId: string;
   serverId: string;
+  /** ADR-0226: joined by the list contract */
+  serverName?: string | null;
   toolName: string | null;
   scope?: RevocationScope;
   createdAt: string;

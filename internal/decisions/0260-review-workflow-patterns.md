@@ -2,6 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-11-07
+- **Index**: Review patterns from OneRedOak/claude-code-workflows (MIT) for our reviewers and as governed review checks (code, OWASP security, design) at the workflow automated-checks stage (P36)
 - **Backlog**: P36 (owner-approved 2026-11-07, PENDING.md §2i)
 - **Amends**: the workflow engine (pillar 2, [WORKFLOW_ENGINE_SPEC.md](../product/WORKFLOW_ENGINE_SPEC.md) §2 stage 8 and
   §3 "Automated check"); builds on [ADR-0044](0044-agent-evaluation-harness.md) (eval-bound checks) and

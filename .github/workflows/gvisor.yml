@@ -23,17 +23,14 @@
 # This is CI-runner verification: one GitHub-hosted runner kernel and Docker version, not a customer host.
 name: gVisor
 
+# ADR-0252 addendum (owner decision 2026-11-07): gVisor is part of the FULL suite: a merge group, a push to main
+# that touches the isolation paths, and the nightly schedule. A pull request no longer runs it (before 2026-11-07 it
+# ran on a PR touching the paths listed under push).
 on:
-  pull_request:
-    paths:
-      - "packages/sandbox-executor/**"
-      - "packages/shared/src/isolation/**"
-      - "apps/gateway/src/executor-*"
-      - "docker-compose.yml"
-      - "spikes/isolation-i0/fetch-gvisor.sh"
-      - "spikes/isolation-i0/THIRD_PARTY.md"
-      - ".github/workflows/gvisor.yml"
-      - "scripts/gvisor-l2-gate.mjs"
+  merge_group:
+    types: [checks_requested]
+  schedule:
+    - cron: '17 3 * * *'
   push:
     branches: [main]
     paths:
@@ -48,8 +45,8 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: gvisor-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: gvisor-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Least privilege for GITHUB_TOKEN: the job checks out code and uploads an artifact; it writes nothing to GitHub.
 permissions:
@@ -77,7 +74,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .node-version
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile

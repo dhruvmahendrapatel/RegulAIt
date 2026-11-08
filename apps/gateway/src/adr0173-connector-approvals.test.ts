@@ -57,7 +57,7 @@ const approvalRow = async (id: string) => (await k.db.select().from(approvals).w
 beforeAll(async () => {
   k = await builderKit("p2bl-conn");
   restoreApprovalSigning = await relaxApprovalSigningForTest(k.db);
-  restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false, connectorAttributionRequired: false });
   owner = await k.person("owner");
   other = await k.person("other");
   stranger = await k.person("stranger");
