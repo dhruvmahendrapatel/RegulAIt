@@ -18,8 +18,9 @@ name: UI enterprise harness
 #
 # Everything runs against the built SPA (`vite preview`) and the harness's mocked API: no gateway, database or seed.
 
-# ADR-0252 addendum (owner decision 2026-11-07): on a PR, `static` runs when code changed and the browser and
-# screenshot jobs only when the web app changed; a merge group, a push to main and the nightly schedule run all of it.
+# ADR-0262 (owner decisions 2026-11-07): on a PR, `static` runs when code changed and Chromium only when the
+# web app changed; Firefox, WebKit and the screenshot pack run only on a full run (a merge group, a push to main, the
+# nightly schedule, a manual run), which runs all of it.
 on:
   pull_request:
   merge_group:
@@ -38,7 +39,7 @@ permissions:
   contents: read
 
 jobs:
-  # ADR-0252 addendum: what this run must cover (.github/actions/ci-scope)
+  # ADR-0262: what this run must cover (.github/actions/ci-scope)
   scope:
     name: ui enterprise / scope
     runs-on: ubuntu-24.04
@@ -70,20 +71,28 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .node-version
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
 
       # Compared with the PR's base branch; on a schedule or manual run there is nothing to compare with.
       - name: No enterprise baseline grew
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         env:
           BASE_REF: ${{ github.base_ref }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
         run: |
           set -euo pipefail
-          git fetch --no-tags --depth=1 origin "refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
-          node scripts/ui-enterprise-baseline.mjs --guard "origin/$BASE_REF"
+          # ADR-0252: in the merge queue, compare with the commit the queued PR is merged onto
+          if [ -n "$MG_BASE_SHA" ]; then
+            git fetch --no-tags --depth=1 origin "$MG_BASE_SHA"
+            base="$MG_BASE_SHA"
+          else
+            git fetch --no-tags --depth=1 origin "refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+            base="origin/$BASE_REF"
+          fi
+          node scripts/ui-enterprise-baseline.mjs --guard "$base"
 
       - name: No new hard-coded colour or spacing in apps/web (design-token ratchet)
         if: success() || failure()
@@ -112,7 +121,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        browser: [chromium, firefox, webkit]
+        # PR trim: Chromium alone on a PR; all three engines on a full run (merge group, push, nightly, manual)
+        browser: ${{ fromJSON(needs.scope.outputs.full == 'true' && '["chromium","firefox","webkit"]' || '["chromium"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -122,7 +132,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .node-version
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
@@ -230,7 +240,8 @@ jobs:
   screenshots:
     name: ui enterprise / screenshot pack
     needs: scope
-    if: needs.scope.outputs.web == 'true'
+    # PR trim: only on a full run
+    if: needs.scope.outputs.full == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -242,7 +253,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .node-version
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
@@ -337,9 +348,10 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  # THE CHECK TO REQUIRE for this workflow (ADR-0252 addendum; #734 review finding 3). A job skipped by `if:` counts
+  # THE CHECK TO REQUIRE for this workflow (ADR-0262; #734 review finding 3). A job skipped by `if:` counts
   # as passing, so without this a failed `scope` would skip all three jobs and pass. Green only when the scope
-  # succeeded and each part either succeeded or was skipped because its own condition was false.
+  # succeeded and each part either succeeded or was skipped because its own condition was false. The browser matrix
+  # reports one result: Chromium alone on a PR, all three engines on a full run.
   all:
     name: ui enterprise / all
     needs: [scope, static, browsers, screenshots]
@@ -355,4 +367,4 @@ jobs:
           echo "$RESULTS" | jq -e '
             def ok(want): if want == "true" then .result == "success" else .result == "skipped" end;
             .scope.outputs as $o |
-            .scope.result == "success" and (.static | ok($o.code)) and (.browsers | ok($o.web)) and (.screenshots | ok($o.web))' > /dev/null
+            .scope.result == "success" and (.static | ok($o.code)) and (.browsers | ok($o.web)) and (.screenshots | ok($o.full))' > /dev/null

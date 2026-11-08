@@ -1,4 +1,4 @@
--- Migration 0290. ADR-0223 amendment 1 (P13b follow-up from the #628 security review): a scoped, write-only
+-- Pending migration drift_ingest_credentials (ADR-0252: numbered at merge). ADR-0223 amendment 1 (P13b follow-up from the #628 security review): a scoped, write-only
 -- ingestion credential per drift monitor, so a pipeline no longer pushes production summaries with an admin API key.
 -- Hand-authored (never drizzle-kit generate). Re-runnable: every statement is idempotent.
 --

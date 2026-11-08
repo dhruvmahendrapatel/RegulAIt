@@ -39,6 +39,7 @@ import {
   OAUTH_INTROSPECTION_PATH,
   OAUTH_REVOCATION_PATH,
   OAUTH_TOKEN_PATH,
+  DEFENSECLAW_INGEST_PATH,
 } from "@regulait/shared";
 
 /** ADR-0187: the routes only an engine runner credential reaches */
@@ -185,6 +186,9 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // and refuse everything while the endpoint agent source is disabled (the strict default). Listed in
   // NON_ADMIN_ROUTES too, so `public`. The agent's other routes take its DPoP-bound self token only.
   ...ENDPOINT_AGENT_ENROLMENT_PATHS,
+  // ADR-0261 (P37): a DefenseClaw exporter holds no RegulAIt session or API key; the route authenticates IN-ROUTE on
+  // the source's write-only `rgti_` token (hash lookup), and that token reaches nothing else.
+  DEFENSECLAW_INGEST_PATH,
 ]);
 
 export const NON_ADMIN_ROUTES = new Set([
@@ -289,6 +293,9 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/virtual-keys",
   "GET /v1/virtual-keys",
   "GET /v1/virtual-keys/:keyId/usage",
+  // ADR-0226: the Excel exports of the two lists above, under the same visibility (own keys; 404 for another's)
+  "GET /v1/virtual-keys/export.xlsx",
+  "GET /v1/virtual-keys/:keyId/usage/export.xlsx",
   "PATCH /v1/virtual-keys/:keyId",
   "DELETE /v1/virtual-keys/:keyId",
   "POST /v1/connectors/:connectorId/invoke",
@@ -377,6 +384,10 @@ export const NON_ADMIN_ROUTES = new Set([
   // act and stays admin — and there is no status-writing PATCH at all
   // (transitions are their own audited endpoint, acceptance its own record).
   "POST /v1/risks",
+  // ADR-0214 amendment — per-asset posture scores: any user, scoped in the handler to the assets the caller can
+  // already read (an agent they steward, a use case they own or may read; everything for an admin)
+  "GET /v1/reports/posture/assets",
+  "GET /v1/reports/posture/assets/:kind/:assetId",
   "GET /v1/risks",
   "GET /v1/risks/library",
   // G2/X8: the scenario library — same class as the risk library
@@ -889,6 +900,8 @@ export const NON_ADMIN_ROUTES = new Set([
   ...EXECUTOR_CHANNEL_ROUTES,
   // ADR-0195 SD4b — the endpoint agent's enrolment (auth-exempt above too; in-route bulk token or device ticket)
   ...ENDPOINT_AGENT_ENROLMENT_PATHS.map((p) => `POST ${p}`),
+  // ADR-0261 (P37): the third-party exporter route (authenticated in-route by its source token)
+  `POST ${DEFENSECLAW_INGEST_PATH}`,
 
   // ADR-0189 slice B4 — the Decision BOM and AI BOM reads, bundles and the
   // online verifier. The gate is `bom_export_roles` (§7, §9), checked IN THE

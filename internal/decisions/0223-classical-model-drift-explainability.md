@@ -44,7 +44,7 @@ re-testing after a model change (#615).
    use the reference's bin edges.
 4. **Alerts through the one alerts table.** A `drift` report opens or refreshes a `classical_model_drift` episode on
    `governance_alerts` in the same transaction as the report and its audit row, with the owner and due time the
-   [ADR-0182](0182-batch-d4-accountability.md) S5 rules derive. The [ADR-0157](0157-governance-monitor.md) monitor
+   [ADR-0182](0182-accountability-records-d4.md) S5 rules derive. The [ADR-0157](0157-governance-monitor-alerts.md) monitor
    reads the latest report per monitor and resolves the episode when it is back within thresholds; an `insufficient`
    latest report holds the episode however many follow, so an open drift alert keeps its severity, title and feature
    list. Three `insufficient` reports in a row also raise a separate low-severity "not evaluable" episode under its
@@ -117,7 +117,7 @@ re-testing after a model change (#615).
 only needs to push summaries to one monitor held a credential that could do anything an admin can. The master
 session dispatched this follow-up (requirements: one monitor, write-only, admin-only issue/rotate/revoke with step-up,
 audited in the same transaction, shown once and stored as a hash, immediate revocation, expiry by default, rate
-limits, replay-safe, off unless issued). Migration `0290_drift_ingest_credentials.sql`.
+limits, replay-safe, off unless issued). Pending migration `drift_ingest_credentials` (ADR-0252: numbered when it merges).
 
 **Decision.**
 
@@ -177,7 +177,7 @@ posted on #453 for the Governed Designer session.
 
 ### As built (2026-11-07)
 
-- Migration `0290_drift_ingest_credentials.sql` (`when` 1785217000000): the table, and two nullable columns on
+- Pending migration `pending/drift_ingest_credentials.sql` (ADR-0252; numbered at merge): the table, and two nullable columns on
   `model_drift_reports` (`ingest_credential_id`, `idempotency_key`) with a partial unique index. No function or
   trigger.
 - Gateway: `drift-ingest-credentials.ts` (the admin routes and the ingest route); `classical-drift.ts` now exposes
