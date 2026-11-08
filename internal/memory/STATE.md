@@ -1,6 +1,6 @@
 ---
 phase: demo-prep-live-integrations-merged
-last_updated: 2026-10-29
+last_updated: 2026-11-07
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -34,6 +34,15 @@ roadmap: ../product/ROADMAP.md
 - **Owner, to finish:** turn on the merge queue for `main` (merge commit) and make the required checks report on
   `merge_group`. The master enqueues with `gh pr merge --merge --auto` from then on
   (CONTRIBUTING_PARALLEL_SESSIONS §8).
+
+**2026-11-07 - P-01 in progress: one governed decision core (owner "Yes, ADR then build", #453).** [ADR-0251](../decisions/0251-one-governed-decision-core.md) (Proposed) puts model, connector, MCP and A2A calls behind one sequence: posture, entitlement, attribution mandate, data scope, rate limits, ABAC, approval rules, cost attribution, audit; error is deny. ARCHITECTURE.md now describes the four paths as built (only MCP had approval rules, rate limits and ABAC; A2A never called the kernel). Builder lane `builder/gov-core-unify`, migration `governed_core_resource_rules` (pending, numbered at merge time, ADR-0252); slices connector, model, A2A, then ABAC v5 after #707. **Slices 1-3 built on #715** (connector `02ddcff1`, model `99ed2831`, A2A `3563f475`): connector and A2A calls get the attribution mandate (on by default), rate limits and approval rules; model rate limits enforced by default and model approval rules refuse (no queue yet); A2A now meets the kill switch, safe modes and literacy gate. Each slice has a differential test. Latency: +1.3 ms p50 / +2.2-2.7 ms p95 with no rules (budget amended to +3 ms, see ADR As built). Open: ABAC v5 after #707; queue/replay for model and A2A approvals.
+
+**2026-11-07 - S-03 (PM inbound webhook replay) is fixed on `builder/s03-pm-webhook-replay` ([ADR-0010 amendment](../decisions/0010-pm-inbound-sync-webhooks-plus-read-through.md), migration `pm_webhook_deliveries` (pending, numbered at merge)).**
+- `pm_webhook_deliveries` records each delivery once per connection (body hash, plus the provider delivery id); a duplicate is 200, audited `pm-webhook-duplicate`, and not processed; 30-day prune on the boot timers.
+- Linear's signed `webhookTimestamp` and the generic contract's new `x-regulait-timestamp` (signed as `<ts>.<body>`) must be within 300 s.
+- Removed (ADR-0180): the generic static `x-regulait-webhook-secret` header, the body-only signature and the gateway's legacy hash fallback.
+- Jira/monday URL-token rotation is #605's ADR-0207 rotate route (HOLD); #605 must drop its own copy of the legacy fallback when it rebases.
+- #717 review (21:09): Jira, monday, Azure DevOps and Asana must also carry an in-body creation time no older than 7 days (below the 30-day record retention), so a replay after the prune is refused; concurrent-duplicate test added ([ADR-0010 amendment (b)](../decisions/0010-pm-inbound-sync-webhooks-plus-read-through.md)).
 
 **2026-10-29 - the customer demo moves to one date, Saturday 2026-10-31 (owner, #453 c6508111468).**
 - **Date:** the internal run-through on Sun 11-01 and the external demo on Tue 11-03 are dropped; there is one run, on
@@ -2458,7 +2467,7 @@ an old unscrubbed span. Deliberate — the write is the chance, and rewriting hi
 data is a worse precedent.
 
 **2026-09-12 — S11 and S12 closed, and R0 reconciled.**
-([ADR-0110](../decisions/0110-backup-rescan-reopen-and-preflight-gate.md), migration 0109.)
+([ADR-0110](../decisions/0110-rescan-reopens-a-miss-and-the-preflight-runs.md), migration 0109.)
 
 **S11 — the owner decided a re-scan SHOULD re-open a miss, and that is now what happens.** One
 `backup_runs` row per finding: the idempotency read keys on `finding_id` + `kind='backup'`
@@ -3007,7 +3016,7 @@ object_type) and two approvals joins for the copilot.
 **2026-08-22 (night) — B6 closed: the last three buildable residuals are live-retested; the
 copilot's hallucination class is shut twice over; a parallel-sessions protocol now governs this
 repo.** Since the paragraph below: the L6d two-layer narration fix landed and live-retested,
-then [ADR-0096](../decisions/0096-copilot-entity-aware-planning.md) replaced disclosure
+then [ADR-0096](../decisions/0096-entity-aware-copilot-planning.md) replaced disclosure
 with structural refusal — deterministic entity extraction (the model may never assert
 existence), entitlement-scoped exact-match resolution, and four honest outcomes
 (resolved+filtered with a proven row delta, 422 unresolved, 422 ambiguous-with-candidates,
@@ -5574,6 +5583,8 @@ the schema: 151 text columns match the S6 shape (S6 said ~34); 84 guarded, 67 ex
 audit, tool references, platform copies, ingested, machine, conversation, signed evidence, check-constrained), pinned
 against `information_schema` and against the ADR's generated block. Open: whether to guard jsonb
 `config_versions.body` string leaves; ingested columns stay a residual.
+
+**ADR-0244 (builder, 2026-11-07): pinned offline baselines for the prompt-injection detectors (P25).** Three MIT benchmarks are vendored under `packages/shared/src/eval-datasets/vendor/injection-baselines/` (300 kB, sha256-pinned in `MANIFEST.json` and `injection-baselines.ts`, refreshed only by `scripts/refresh-injection-eval-snapshots.py`): NotInject (339 benign), InjecAgent (300 of 2,108, stratified, seed 20261107) and AgentDojo v1 (97 benign, 135 injection texts), a seeded JailbreakBench sample (150 attack prompts, 100 benign behaviours; MIT verified for the HF dataset and the artifacts repo), plus our own web-agent set (50 injections over WASP's ten published categories × five carriers and 50 benign look-alikes; WASP is CC BY-NC, so only its category names are cited, clean room). HackAPrompt is MIT but gated (the account must share its HF identity), so it is left out pending the owner. `injection-baselines.test.ts` re-measures the heuristic detector every CI run and fails on a drop in precision or recall, or a rise in FPR, beyond 2 points; `node scripts/injection-eval-baseline.mjs` prints the delta table and `--write` re-pins. The trained classifier is measured offline by `agents/trained-detectors/eval_baselines.py` and recorded ungated. Measured: heuristic NotInject FPR 0%, InjecAgent recall 61.3%, AgentDojo recall 20.0% / FPR 0%; trained (threshold 0.5) NotInject FPR 43.4%, InjecAgent recall 84.3%, AgentDojo recall 72.6% / FPR 3.1%; JailbreakBench heuristic recall 0% / FPR 0%, trained recall 75.3% / FPR 1.0%; web-agent set heuristic recall 2% / FPR 6%, trained recall 60% / FPR 50%. No migration.
 
 ADR-0252 (2026-11-07) put `main` behind the GitHub merge queue and moved every shared append to merge time:
 migration numbers, journal entries and `when` values (`packages/db/migrations/pending/<slug>.sql`, numbered by

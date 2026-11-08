@@ -29,6 +29,10 @@ on:
       - scripts/engine-images-repro.mjs
       - .github/workflows/engine-images.yml
       - .github/workflows/engine-images-build.yml
+      # ADR-0252 addendum, PR trim: every engine image COPYs the workspace lockfile, and a Dockerfile anywhere is an
+      # image input (the same rule as ci-scope's `engines`)
+      - pnpm-lock.yaml
+      - '**/Dockerfile'
       # a lock or signature change (the lock-update bot's PR) builds nothing new
       - '!engines/images.lock.json'
       - '!engines/signatures/**'
@@ -55,7 +59,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        engine: [promptfoo, modelscan, garak]
+        engine: [promptfoo, modelscan, garak, mcpscanner, skillscanner]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -77,7 +81,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        engine: [promptfoo, modelscan, garak]
+        engine: [promptfoo, modelscan, garak, mcpscanner, skillscanner]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

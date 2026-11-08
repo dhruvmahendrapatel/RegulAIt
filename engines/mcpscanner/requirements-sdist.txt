@@ -1,0 +1,7 @@
+# ADR-0242 — built from source, pinned by the sdist's sha256, linked against the base image's libssl3
+# (Debian trixie, patched by the OS) instead of the OpenSSL 1.1.1w (end of life) the 4.5.4 wheel bundles.
+# Built in the image's closure stage with:
+#   pip install --require-hashes --no-deps --no-build-isolation --no-binary :all: -r requirements-sdist.txt
+# after requirements-build.txt (the setuptools that builds it; removed from the venv afterwards).
+yara-python==4.5.4 \
+    --hash=sha256:4c682170f3d5cb3a73aa1bd0dc9ab1c0957437b937b7a83ff6d7ffd366415b9c
