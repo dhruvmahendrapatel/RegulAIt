@@ -41,7 +41,7 @@ roadmap: ../product/ROADMAP.md
 - `pm_webhook_deliveries` records each delivery once per connection (body hash, plus the provider delivery id); a duplicate is 200, audited `pm-webhook-duplicate`, and not processed; 30-day prune on the boot timers.
 - Linear's signed `webhookTimestamp` and the generic contract's new `x-regulait-timestamp` (signed as `<ts>.<body>`) must be within 300 s.
 - Removed (ADR-0180): the generic static `x-regulait-webhook-secret` header, the body-only signature and the gateway's legacy hash fallback.
-- Jira/monday URL-token rotation is #605's ADR-0207 rotate route (HOLD); #605 must drop its own copy of the legacy fallback when it rebases.
+- Jira/monday URL-token rotation is #605's rotate route (HOLD; its ADR number is assigned when it merges); #605 must drop its own copy of the legacy fallback when it rebases.
 - #717 review (21:09): Jira, monday, Azure DevOps and Asana must also carry an in-body creation time no older than 7 days (below the 30-day record retention), so a replay after the prune is refused; concurrent-duplicate test added ([ADR-0010 amendment (b)](../decisions/0010-pm-inbound-sync-webhooks-plus-read-through.md)).
 
 **2026-10-29 - the customer demo moves to one date, Saturday 2026-10-31 (owner, #453 c6508111468).**
