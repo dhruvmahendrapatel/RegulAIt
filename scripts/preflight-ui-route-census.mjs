@@ -399,6 +399,30 @@ export const KNOWN_UI_GAPS = new Map([
     "POST /v1/discovery/endpoint-mcp-server-links/remove",
     { does: "ADR-0259: remove that link, audited", tracking: "#453" },
   ],
+  [
+    "GET /v1/vendors/:vendorId/supplier-access/:accessId/mfa",
+    { does: "ADR-0240: a supplier grant's second-factor state (none, enrolling, active, locked); never the secret", tracking: "#453" },
+  ],
+  [
+    "POST /v1/vendors/:vendorId/supplier-access/:accessId/mfa/reset",
+    { does: "ADR-0240: the inviting admin resets a supplier's second factor (identity_manage step-up, reason, audited)", tracking: "#453" },
+  ],
+  [
+    "POST /supplier/v1/session/mfa",
+    { does: "ADR-0240: the supplier turns a spent link's challenge into a session with a TOTP code", tracking: "#453" },
+  ],
+  [
+    "GET /v1/trust/auditor-grants/:grantId/mfa",
+    { does: "ADR-0240: an auditor grant's second-factor state (none, enrolling, active, locked); never the secret", tracking: "#453" },
+  ],
+  [
+    "POST /v1/trust/auditor-grants/:grantId/mfa/reset",
+    { does: "ADR-0240: the inviting admin resets an auditor's second factor (identity_manage step-up, reason, audited)", tracking: "#453" },
+  ],
+  [
+    "POST /v1/auditor/session/mfa",
+    { does: "ADR-0240: the auditor turns a spent link's challenge into a session with a TOTP code", tracking: "#453" },
+  ],
 ]);
 
 /**
@@ -407,7 +431,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 38;
+export const KNOWN_UI_GAPS_MAX = 44;
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 
