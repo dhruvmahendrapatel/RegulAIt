@@ -59,6 +59,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { evaluateConnector } from "@regulait/policy-kernel";
+import { CONNECTOR_PIECE_GATE_RULE_ID, refusePieceConnector } from "./connector-catalogue.js";
 import {
   CREDENTIAL_HOST_CONNECTOR_KINDS,
   ConnectorProviderError,
@@ -843,6 +844,35 @@ export async function executeGovernedConnectorCall(
         error: "no_connector_credential",
         detail: `connector '${connector.name}' (${connector.providerKind}) has no stored credential`,
       });
+    }
+
+    // ADR-0255 (P31) — a CATALOGUE PIECE runs only while an admin has it enabled, never on an air-gapped deployment,
+    // and never against a typed baseUrl. Checked on every invoke (an enablement can be withdrawn after the connector
+    // was created), after the entitlement decision, so it can only ever refuse.
+    const pieceRefusal = await refusePieceConnector(db, {
+      providerKind: connector.providerKind,
+      baseUrl,
+      label: `connector '${connector.name}' (${connector.providerKind})`,
+    });
+    if (pieceRefusal) {
+      await db.insert(auditLog).values({
+        userId,
+        objectType: "connector",
+        objectId: connectorId,
+        detail: {
+          phase: "piece_gate",
+          error: pieceRefusal.error,
+          connectorKind: connector.providerKind,
+          operation: body.operation,
+          ...(projectId ? { projectId } : {}),
+          receiptClass: "decision",
+        },
+        effect: "deny",
+        ruleId: CONNECTOR_PIECE_GATE_RULE_ID,
+        ruleChain: [],
+        reason: pieceRefusal.detail,
+      });
+      return out.status(pieceRefusal.status).send({ decision, error: pieceRefusal.error, detail: pieceRefusal.detail });
     }
 
     // §8.4 PII ENFORCEMENT (pillar 3), connector path. The effective piiMode

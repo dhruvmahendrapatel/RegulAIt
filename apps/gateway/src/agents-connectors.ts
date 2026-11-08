@@ -40,13 +40,16 @@ import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.j
 import { literacySlot } from "./ai-literacy.js";
 import { errMessage } from "./err-serializer.js";
 import { abacPrincipalFromRequest } from "./abac-principal.js";
+import { refusePieceConnector } from "./connector-catalogue.js";
 import {
   CREDENTIAL_HOST_CONNECTOR_KINDS,
   ConnectorProviderError,
   connectorCredentialHosts,
   connectorDefaultBaseUrl,
   isConnectorProviderKind,
+  isPieceProviderKind,
   parseOutlookCredential,
+  parsePieceCredentialShape,
   parseResendCredential,
   parseSnowflakeCredential,
   parseTeamsCredential,
@@ -5175,6 +5178,10 @@ export function registerAgentConnectorRoutes(
       what: `creating connector '${body.name}'`,
     });
     if (licenseRefusal) return reply.status(licenseRefusal.status).send(licenseRefusal.body);
+    // ADR-0255 (P31) — a catalogue-piece connector needs its piece enabled first (and is refused air-gapped or with a
+    // baseUrl). The same predicate runs again on every invoke; this is the earliest honest failure.
+    const pieceRefusal = await refusePieceConnector(db, { providerKind: body.providerKind, baseUrl: body.baseUrl, label: `connector '${body.name}'` });
+    if (pieceRefusal) return reply.status(pieceRefusal.status).send({ error: pieceRefusal.error, detail: pieceRefusal.detail });
     // ADR-0034 amendment #2 — the earliest honest failure for a connector
     // endpoint. NOT a substitute for the invoke-time check (see the note
     // there): this is so a typo, or a deliberate IMDS/collector URL, is a 400
@@ -5251,7 +5258,12 @@ export function registerAgentConnectorRoutes(
       // ADR-0202 lane E: {apiKey, from}, the sender explicit
       resend: parseResendCredential,
     };
-    const parseShape = connector.providerKind ? shapeParsers[connector.providerKind] : undefined;
+    // ADR-0255: a catalogue piece's credential ({siteUrl, email, apiToken} for Jira Cloud, a Google OAuth client and
+    // refresh token for Sheets and Gmail, a token for Slack and GitHub) is shape-checked by the piece's own parser
+    const parseShape = connector.providerKind
+      ? (shapeParsers[connector.providerKind] ??
+        (isPieceProviderKind(connector.providerKind) ? (t: string) => parsePieceCredentialShape(connector.providerKind!, t) : undefined))
+      : undefined;
     if (parseShape) {
       try {
         parseShape(body.token);

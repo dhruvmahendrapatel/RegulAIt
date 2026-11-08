@@ -414,6 +414,8 @@ const SAMPLE_CREDENTIAL: Record<string, string> = {
   teams: JSON.stringify({ appId: "app", appPassword: "pw" }),
   outlook: JSON.stringify({ appId: "app", appPassword: "pw", tenantId: "tenant", senderUpn: "approvals@example.com" }),
   snowflake: JSON.stringify({ account: "acme-x1", user: "u", privateKey: "-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----" }),
+  // ADR-0255: the one catalogue piece whose host the credential names
+  piece_jira_cloud: JSON.stringify({ siteUrl: "https://acme.atlassian.net", email: "bot@acme.example", apiToken: "t" }),
 };
 const entry = (host: string): EgressAllowEntry => ({ host, allowPrivateRanges: false, allowPlaintextHttp: false });
 const hostOf = (url: string) => new URL(url).hostname;

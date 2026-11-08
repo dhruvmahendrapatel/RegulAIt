@@ -348,6 +348,24 @@ export const KNOWN_UI_GAPS = new Map([
   ["POST /v1/agents/:agentId/usage-extractor/versions/:versionId/test", { does: "tests a version against a sample response and the counts the admin expects", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["POST /v1/agents/:agentId/usage-extractor/versions/:versionId/activate", { does: "activates a version whose latest test passed (settings_relax step-up)", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["POST /v1/agents/:agentId/usage-extractor/deactivate", { does: "returns an agent to its adapter's built-in usage counts", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  // EXCEPTION (ADR-0255, P31, 2026-11-07): the P31 brief is "API and backend only; post the catalogue UI need on
+  // #453 for the Governed Designer", so these two routes ship with their screen owned by that lane. The ratchet is
+  // raised to 2 for them alone, visibly, and the Designer's catalogue screen deletes both entries and lowers it by 2. RAISED for review: the master decides on
+  // the PR whether to keep this or build the screen first.
+  [
+    "GET /v1/connector-catalogue",
+    {
+      does: "lists the curated catalogue pieces (status, actions, upstream) and the community pieces available, not enabled (paginated, q filter)",
+      tracking: "ADR-0255 / P31: catalogue screen for the Governed Designer, requested on #453",
+    },
+  ],
+  [
+    "POST /v1/connector-catalogue/:pieceKey/enablement",
+    {
+      does: "enables (admin, step-up) or disables a curated piece, with a reason, audited",
+      tracking: "ADR-0255 / P31: catalogue screen for the Governed Designer, requested on #453",
+    },
+  ],
 ]);
 
 /**
@@ -356,7 +374,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 7;
+export const KNOWN_UI_GAPS_MAX = 9; // ADR-0241 (7) + ADR-0255 (2), each raised for the master's review
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 

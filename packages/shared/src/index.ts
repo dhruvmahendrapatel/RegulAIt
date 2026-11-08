@@ -1505,6 +1505,12 @@ export const connectorProviderKindSchema = z.enum([
   "snowflake",
   "generic",
   "mock",
+  // ADR-0255 (P31): the curated connector-catalogue pieces (@regulait/connector-provider PIECE_PROVIDER_KINDS)
+  "piece_slack",
+  "piece_jira_cloud",
+  "piece_github",
+  "piece_google_sheets",
+  "piece_gmail",
 ]);
 
 export const createConnectorSchema = z.object({

@@ -49,6 +49,10 @@
 import { createHash, createPrivateKey, createPublicKey, createSign } from "node:crypto";
 import { constantTimeEqual, redactPII, scrubSecrets, secretRepresentations } from "@regulait/shared";
 import { z } from "zod";
+import { PieceCallError, PieceConnectorProvider, isPieceProviderKind, parsePieceCredential, pieceHosts } from "./pieces.js";
+
+export * from "./pieces.js";
+export { AVAILABLE_PIECES, EXCLUDED_PIECES } from "./pieces-available.js";
 
 export const CONNECTOR_PROVIDER_KINDS = [
   "http",
@@ -62,6 +66,13 @@ export const CONNECTOR_PROVIDER_KINDS = [
   "snowflake",
   "generic",
   "mock",
+  // ADR-0255 (P31): the curated connector-catalogue pieces (pieces.ts PIECE_PROVIDER_KINDS; pieces.test.ts holds the
+  // two lists equal)
+  "piece_slack",
+  "piece_jira_cloud",
+  "piece_github",
+  "piece_google_sheets",
+  "piece_gmail",
 ] as const;
 export type ConnectorProviderKind = (typeof CONNECTOR_PROVIDER_KINDS)[number];
 
@@ -2287,6 +2298,16 @@ export function resolveConnectorProvider(
   config: ConnectorProviderConfig,
   fetchImpl?: FetchLike,
 ): ConnectorProvider {
+  if (isPieceProviderKind(config.kind)) {
+    if (!config.token) {
+      throw new ConnectorProviderError(`${config.kind} connector requires a credential (ADR-0255; see parsePieceCredential)`);
+    }
+    if (!fetchImpl) {
+      // ADR-0255: a piece never falls back to the global fetch. The gateway always hands it the guarded one.
+      throw new ConnectorProviderError(`${config.kind} connector requires the egress-guarded fetch`);
+    }
+    return new PieceAdapter(config.kind, new PieceConnectorProvider(config.kind, config.token, fetchImpl));
+  }
   switch (config.kind) {
     case "mock":
       return sharedMock;
@@ -2478,6 +2499,13 @@ export const CREDENTIAL_HOST_CONNECTOR_KINDS: ReadonlySet<string> = new Set([
   "teams",
   "outlook",
   "snowflake",
+  // ADR-0255: every catalogue piece takes the guarded-fetch branch, compiled vendor host or not, so no piece request
+  // ever reaches the global fetch (the compiled-default branch hands the global fetch to a permissive posture)
+  "piece_slack",
+  "piece_jira_cloud",
+  "piece_github",
+  "piece_google_sheets",
+  "piece_gmail",
 ]);
 
 /**
@@ -2491,6 +2519,13 @@ export function connectorCredentialHosts(
   kind: string,
   token: string | null,
 ): { typed: string | null; compiled: string[] } {
+  if (isPieceProviderKind(kind)) {
+    try {
+      return pieceHosts(kind, token);
+    } catch (err) {
+      throw toConnectorError(err);
+    }
+  }
   switch (kind) {
     case "snowflake":
       return {
@@ -2518,5 +2553,36 @@ export function connectorCredentialHosts(
     }
     default:
       return { typed: null, compiled: [] };
+  }
+}
+
+/** ADR-0255: a PieceCallError as the error types the gateway already classifies (502 / 429 / 400). */
+function toConnectorError(err: unknown): unknown {
+  if (!(err instanceof PieceCallError)) return err;
+  if (err.status === 429) return new ConnectorRateLimitError(err.message, err.retryAfterSeconds, 429);
+  return new ConnectorProviderError(err.message, err.status);
+}
+
+/** Validate a piece credential's shape at write time; throws ConnectorProviderError (ADR-0255). */
+export function parsePieceCredentialShape(kind: string, token: string): void {
+  if (!isPieceProviderKind(kind)) return;
+  try {
+    parsePieceCredential(kind, token);
+  } catch (err) {
+    throw toConnectorError(err);
+  }
+}
+
+class PieceAdapter implements ConnectorProvider {
+  constructor(
+    readonly kind: ConnectorProviderKind,
+    private readonly inner: PieceConnectorProvider,
+  ) {}
+  async invoke(invocation: ConnectorInvocation): Promise<ConnectorInvokeResult> {
+    try {
+      return await this.inner.invoke(invocation);
+    } catch (err) {
+      throw toConnectorError(err);
+    }
   }
 }

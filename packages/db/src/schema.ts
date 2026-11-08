@@ -1209,6 +1209,9 @@ export const auditLog = pgTable(
         // ADR-0202 decision 4: an admin switching one demo beat between live and
         // its simulated fallback (demo_beat_fallbacks). Plain text column.
         "demo_beat",
+        // ADR-0255 (P31): an admin enabling or disabling a connector-catalogue piece
+        // (connector_piece_enablements). Plain text column — no DDL needed.
+        "connector_piece",
         // ADR-0224 (P13 c): records of processing and data-subject requests. Plain text column.
         "processing_record",
         "data_subject_request",
@@ -15773,3 +15776,27 @@ export const modelExplainabilityArtefacts = pgTable(
   ],
 );
 export type ModelExplainabilityArtefactRow = typeof modelExplainabilityArtefacts.$inferSelect;
+
+/**
+ * ADR-0255 (P31, pending migration connector_catalogue) — THE CONNECTOR CATALOGUE: which curated Activepieces pieces an admin has ENABLED.
+ * Secure by default (ADR-0180): no row means not enabled, and a connector of a piece kind can be neither created nor
+ * invoked until its row exists. Enabling (POST /v1/connector-catalogue/:pieceKey/enablement, admin, step-up) inserts the
+ * row and its audit row in one transaction; disabling deletes it, also audited. The CHECK repeats CURATED_PIECES'
+ * keys (@regulait/connector-provider), so a row cannot name a piece with no RegulAIt adapter. 3NF: the admin is a
+ * foreign key, never a copied name or email.
+ */
+export const connectorPieceEnablements = pgTable(
+  "connector_piece_enablements",
+  {
+    pieceKey: text("piece_key").primaryKey(),
+    enabledByUserId: uuid("enabled_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    enabledAt: timestamp("enabled_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "connector_piece_enablements_piece_key_check",
+      sql`${t.pieceKey} IN ('slack', 'jira-cloud', 'github', 'google-sheets', 'gmail')`,
+    ),
+  ],
+);
+export type ConnectorPieceEnablementRow = typeof connectorPieceEnablements.$inferSelect;
