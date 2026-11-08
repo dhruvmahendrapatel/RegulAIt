@@ -1,5 +1,5 @@
 <!-- fold: state-decisions -->
-**ADR-0261 (builder, 2026-11-08): the CI split.** Fast, scope-gated checks on a pull request; the full suite on the
+**ADR-0262 (builder, 2026-11-08): the CI split.** Fast, scope-gated checks on a pull request; the full suite on the
 merge group, a push to `main`, nightly and manual runs. The `scope` job (`scripts/ci-scope.mjs`) fails closed and
 writes `full`, `code`, `web`, `image` and `engines`; the six required checks report on every PR and merge group
 (two aggregates that accept a skip only where the scope said `'false'`, CodeQL and Trivy gated fail-closed, gitleaks

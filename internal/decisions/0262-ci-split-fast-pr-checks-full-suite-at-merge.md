@@ -1,4 +1,4 @@
-# ADR-0261: Fast checks on a pull request, the full CI suite at merge time
+# ADR-0262: Fast checks on a pull request, the full CI suite at merge time
 
 - **Status**: Accepted (owner decisions of 2026-11-07: the CI split, then the PR trim; #738 Lane A asks for this ADR)
 - **Date**: 2026-11-08
@@ -78,6 +78,10 @@ job that failed or wrote nothing runs it.
 - **gitleaks and the dependency audit** are never trimmed.
 - Never require a job that is gated by the scope directly, a path-filtered workflow (`import-cycles`, `integrations`,
   `endpoint-agent`, `engine-images-build`, `gvisor`, `demo`), or a workflow with no `merge_group` trigger.
+- **Where it is set.** The repository records no branch protection, so this list lives in the GitHub setting
+  (Settings → Rules → Rulesets, on `main`). On 2026-11-08 the builder read it through the API: `main` had no branch
+  protection and no active ruleset, so nothing was required yet (the ruleset comes with the org move, in two steps per
+  #738). Whoever changes the ruleset updates this list in the same change, and states the date it was read back.
 
 ### Other rules
 
