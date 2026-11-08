@@ -1939,3 +1939,14 @@ organization (#738) before the design could work.
 
 Rule: before designing CI or process around a GitHub feature, check in GitHub's documentation that it is available for
 this repository's owner type and plan, and record the check in the PR or ADR.
+
+### M-114 (2026-11-07) - A rename by global replace hit three unrelated tables in schema.ts
+
+Building S-03 I renamed my new column `body_sha256` to `content_sha256` with a replace across five files, schema.ts
+among them. schema.ts already had `body_sha256` columns on `ai_bom_snapshots`, `decision_boms` and one more, with CHECKs
+that hash `body`; the replace renamed all of them. `git diff` (three unexpected `-` lines) caught it before any commit,
+and the file was restored and re-edited.
+
+Rule: never rename by a repo-wide or file-wide string replace in a shared file (`schema.ts`, `_journal.json`, `app.ts`,
+STATE.md). Count the occurrences in each file first (`grep -c` on `HEAD`'s version); if any exist that the change did not
+add, edit the new block only, then check that `git diff` shows no `-` line outside it.

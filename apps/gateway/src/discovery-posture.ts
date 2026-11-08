@@ -23,6 +23,8 @@ export interface DiscoverySettingsView {
   endpointRetentionDays: number;
   /** ADR-0235: the wider-source family switches (all off by default) */
   families: DiscoveryFamilySwitches;
+  /** ADR-0259: MCP client-config discovery through the endpoint agent (off by default) */
+  endpointMcpConfig: boolean;
   version: number;
   updatedAt: string | null;
 }
@@ -35,6 +37,7 @@ export async function loadDiscoverySettings(db: Db): Promise<DiscoverySettingsVi
       credentialWarningAgeDays: DISCOVERY_CREDENTIAL_WARNING_DEFAULT_DAYS,
       endpointRetentionDays: DISCOVERY_ENDPOINT_RETENTION_DEFAULT_DAYS,
       families: DISCOVERY_FAMILY_SWITCHES_DEFAULT,
+      endpointMcpConfig: false,
       version: 1,
       updatedAt: null,
     };
@@ -43,6 +46,7 @@ export async function loadDiscoverySettings(db: Db): Promise<DiscoverySettingsVi
     credentialWarningAgeDays: row.credentialWarningAgeDays,
     endpointRetentionDays: row.endpointRetentionDays,
     families: { saas: row.saasSourcesEnabled, identity: row.identitySourcesEnabled, ml_platform: row.mlPlatformSourcesEnabled },
+    endpointMcpConfig: row.endpointMcpConfigEnabled,
     version: row.version,
     updatedAt: row.updatedAt.toISOString(),
   };

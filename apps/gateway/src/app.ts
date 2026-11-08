@@ -195,6 +195,7 @@ import { runAiBomSignoffs, type AiBomSignoff } from "./ai-bom-signoff.js";
 import { registerRedTeamRoutes } from "./redteam.js";
 import { registerReportingRoutes } from "./reporting.js";
 import { registerPostureRoutes } from "./posture.js";
+import { registerAssetScoreRoutes } from "./asset-score.js";
 import { registerTrustDashboardRoutes } from "./trust-dashboard.js";
 import { registerUseCaseOverviewRoutes } from "./use-case-overview.js";
 import { registerUseCaseDraftRoutes } from "./use-case-drafts.js";
@@ -422,6 +423,7 @@ import { z } from "zod";
 import { boundTargetsForApprovals, registerMcpProxy } from "./mcp-proxy.js";
 import { clearUpstreamCredentialOnUrlMove, registerMcpUpstreamCredentialRoutes } from "./mcp-upstream-credential.js";
 import { registerA2aRoutes } from "./a2a.js";
+import { registerMcpBundleRoutes } from "./mcp-bundles.js";
 import { registerPrivacyOpsRoutes } from "./privacy-ops.js";
 import { ExternalEffectBlockedError } from "./external-effects.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
@@ -471,6 +473,8 @@ import {
   REGISTRATION_ADMISSION_STATE,
 } from "./mcp-admission.js";
 import { registerMcpToolSyncRoutes } from "./mcp-tool-sync.js";
+import { registerMcpDefinitionPinRoutes } from "./mcp-definition-pins.js";
+import { registerMcpHighRiskRoutes } from "./mcp-high-risk.js";
 // ADR-0101 — federated MCP registries. Admin-only through the default gate;
 // a sync writes only the catalogue and an import is an explicit operator act.
 import { privateRangesRelaxation, registerMcpRegistryRoutes } from "./mcp-registry.js";
@@ -605,6 +609,7 @@ import { registerMcpIdentityOidcRoutes } from "./mcp-identity-oidc-routes.js";
 import { registerEndpointImportRoutes } from "./endpoint-import-routes.js";
 import { registerThirdPartyIngestRoutes } from "./third-party-ingest-routes.js";
 import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
+import { registerEndpointMcpConfigRoutes } from "./endpoint-mcp-config.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
 import { registerCostImportRoutes } from "./cost-import.js";
 import { registerCostReconciliationRoutes } from "./cost-reconcile.js";
@@ -3403,6 +3408,24 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             ...(carveOuts.length > 0 ? { revokedTools: carveOuts } : {}),
           };
         }),
+      // ADR-0236: tools held through a governed MCP bundle, at the role tier (a revocation subtracts from them)
+      ...(entitlements.bundleToolGrants ?? []).map((g) => {
+        const rev = revocationFor(g.toolName);
+        return {
+          kind: "tool" as const,
+          toolName: g.toolName,
+          source: "bundle" as const,
+          bundle: g.bundleName ?? g.bundleId,
+          bundleId: g.bundleId,
+          bundleVersion: g.version,
+          via: g.via,
+          toolTier: g.toolTier ?? "read",
+          maxTier: g.maxTier ?? "read",
+          grantId: g.id,
+          revoked: Boolean(rev),
+          ...(rev ? { revocationId: rev.id } : {}),
+        };
+      }),
     ];
     // Every active revocation, so overrides are discoverable and reversible
     // via DELETE /v1/revocations/:id even when no grant currently matches.
@@ -5674,6 +5697,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // instance it anchors WITH, so the readers grade the medium the writer uses.
   const anchorSink: AnchorSink | null = opts.auditAnchorSink !== undefined ? opts.auditAnchorSink : resolveAnchorSink();
   registerPostureRoutes(app, db, { sink: anchorSink });
+  registerAssetScoreRoutes(app, db);
   // ADR-0148 — the six-dimension trust dashboard (demo task C1)
   registerTrustDashboardRoutes(app, db);
   // ADR-0082 — the standing agent dependency inventory: per registered agent,
@@ -5891,6 +5915,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // settings_relax step-up, audited); reads show only whether one is set, its header and last four characters
   registerMcpUpstreamCredentialRoutes(app, db, { dataKey: opts.dataKey });
   registerA2aRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0236 (P11) — governed MCP bundles: admin-only through the default gate, default-off, audited; enforcement is
+  // the kernel's bundle-tool-allow-list rule, fed by loadEntitlements at the existing MCP interception point
+  registerMcpBundleRoutes(app, db);
   // ADR-0097 part A — the admission review queue and the reason-required,
   // audited clear. Admin-only through the default gate, like the MCP registry
   // writes it sits beside.
@@ -5898,6 +5925,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // #609 follow-up: an admin's on-demand manifest sync for one server — admin-only through the default gate, rate
   // limited per server, a settings_relax step-up, and the live path's admission, egress, transport and scan gates
   registerMcpToolSyncRoutes(app, db);
+  // ADR-0246: definition pinning (rug-pull detection) — the changed-since-approval queue, the diff, the re-approval
+  registerMcpDefinitionPinRoutes(app, db);
+  // ADR-0246 addendum: offensive MCP servers as high-risk — the policy template and the authorised-targets list
+  registerMcpHighRiskRoutes(app, db);
   // ADR-0101 — configure an upstream MCP registry, pull its catalogue, and
   // import ONE entry as a federated `mcp_servers` row that is `unscanned`,
   // ungranted and subject to the same ADR-0097 admission and ADR-0043 egress
@@ -5989,6 +6020,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     dataKey: opts.dataKey,
     ...(opts.discoveryScanners === undefined ? {} : { registry: opts.discoveryScanners }),
   });
+  // ADR-0259 (P35) — the MCP servers enrolled devices' host configs name, with the registry diff, and the admin's
+  // links to approved servers. Admin-only by default; reads what the agent reports, contacts nothing.
+  registerEndpointMcpConfigRoutes(app, db);
   // ADR-0069 — CROSS-VENDOR COST CONSOLIDATION. Admin-only by default: the ONLY
   // route here in NON_ADMIN_ROUTES is `GET /v1/users/:userId/cost-consolidated`,
   // which refuses in-handler unless the caller IS that user. Uploading a file

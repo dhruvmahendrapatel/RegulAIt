@@ -198,7 +198,7 @@ async function enrol(engineId: EngineId, digest: string, version: string, over: 
   // PR #205 review [54], ADR-0188 S7: the runner generates its own KEY and registers only the public half
   const client = runnerKey();
   const r = await inject("POST", "/v1/engine-runner/register", enrolment, {
-    name: `${engineId}-runner-${randomBytes(2).toString("hex")}`,
+    name: `${engineId}-runner-${randomBytes(6).toString("hex")}`,
     imageDigest: digest,
     engineVersion: version,
     selfTest: selfTest(digest, version, over),
