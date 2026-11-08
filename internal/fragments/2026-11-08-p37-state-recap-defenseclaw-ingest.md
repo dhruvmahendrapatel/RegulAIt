@@ -1,0 +1,2 @@
+<!-- fold: state-recap -->
+**2026-11-08 - P37 built (builder lane, [ADR-0261](../decisions/0261-defenseclaw-telemetry-ingest.md)): a DefenseClaw audit-export ingest adapter.** API and backend only; the six admin routes are known UI gaps tracked on #453 (owner decision 2026-11-07). Migration `pending/third_party_ingest.sql`, numbered at merge. P1 on-device enforcement stays a post-demo clean-room build informed by the DefenseClaw report.
