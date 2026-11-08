@@ -8,9 +8,12 @@
  * ONE CALL, IN ORDER (each refusal is audited and returned as `denied`; nothing leaves the box):
  *  1. the org setting `a2aEnabled` (default false, ADR-0180);
  *  2. the agent exists and is enabled, and the named skill is on its card;
- *  3. the lead ceiling: a worker may call only the agents its lead chain allows (it can only NARROW, never widen);
+ *  3. ADR-0251: the one governed core. The kernel's `evaluateA2a` decides the kill switch, safe modes and AI literacy
+ *     gate first, then the lead ceiling: a worker may call only the agents its lead chain allows (it can only NARROW);
  *  4. the person's grant (`a2a_agent_grants`): default-deny, for the whole agent or that one skill. A worker never has
  *     a grant of its own: it calls as the person who started the run, so it never exceeds them;
+ *     The core then adds the attribution mandate (`a2a_attribution_required`, on by default), the A2A rate limits
+ *     and the A2A approval rules (no queue yet, so a matching rule refuses). An error is a deny.
  *  5. the project: it exists and the person may attribute to it (`assertProjectAttribution`), then the pillar-5
  *     budget gate (`preDispatchProjectGate`: a project over its hard block is refused and escalated);
  *  6. the project's PII mode (`projectPiiMode`, the org floor when unattributed): block refuses on a hit, warn and log
@@ -43,8 +46,6 @@ import {
   asc,
   auditLog,
   eq,
-  isNull,
-  or,
   usageEvents,
   users,
   type A2aAgentCredentialRow,
@@ -59,6 +60,10 @@ import { assertProjectAttribution, enforcePII, piiCategoryList, preDispatchProje
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { checkStepUp, requireStepUp } from "./step-up.js";
 import { timeouts } from "./timeouts.js";
+import { evaluateA2a, governedCoreErrorDecision, RESOURCE_RULE_IDS, type GovernedResource, type GovernedResourceDecision } from "@regulait/policy-kernel";
+import { governedEvaluateResource } from "./governed-core.js";
+import { loadExecutionDial, postureOf } from "./execution-posture.js";
+import { literacySlot } from "./ai-literacy.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 /** the JSON-RPC binding is the one transport this gateway speaks to a remote agent */
@@ -262,6 +267,18 @@ export function replyText(result: Message | Task): { text: string; taskState: st
   return { text: out.join("\n").slice(0, A2A_REPLY_MAX_CHARS), taskState: task.status ? String(task.status.state) : null };
 }
 
+/** ADR-0251 — the HTTP status and error code of a refusal the core decided. The two refusals the route made before
+ * ADR-0251 (lead ceiling, no grant) keep their 403 `forbidden`. */
+function a2aRefusalStatus(d: GovernedResourceDecision): [number, string] {
+  if (d.ruleId === A2A_RULE_IDS.leadCeiling || d.ruleId === A2A_RULE_IDS.noGrant) return [403, "forbidden"];
+  if (d.ruleId.startsWith("execution-") || d.ruleId.startsWith("ai-literacy")) return [403, "execution_refused"];
+  if (d.ruleId === RESOURCE_RULE_IDS.attribution) return [409, "attribution_required"];
+  if (d.ruleId === RESOURCE_RULE_IDS.coreError) return [503, "governed_core_error"];
+  if (d.ruleChain.some((t) => t.rule === RESOURCE_RULE_IDS.rateLimit && t.outcome === "deny")) return [429, "rate_limited"];
+  if (d.matchedApprovalRuleIds.length) return [403, "approval_required"];
+  return [403, "forbidden"];
+}
+
 export async function executeGovernedA2aCall(db: Db, args: GovernedA2aCallArgs, deps: A2aDeps = {}): Promise<GovernedA2aCallOutcome> {
   const skillId = args.skillId ?? null;
   const projectId = args.projectId ?? null;
@@ -269,7 +286,7 @@ export async function executeGovernedA2aCall(db: Db, args: GovernedA2aCallArgs, 
   const deny = async (status: number, error: string, ruleId: string, reason: string, label: string, extra: Record<string, unknown> = {}): Promise<GovernedA2aCallOutcome> => {
     const [row] = await db
       .insert(auditLog)
-      .values({ userId: args.userId, objectType: "a2a_agent", objectId: args.agentId, toolName: skillId, detail: { ...base, ...extra }, effect: "deny", ruleId, ruleChain: [ruleId], reason: `${label}: ${reason}` })
+      .values({ userId: args.userId, objectType: "a2a_agent", objectId: args.agentId, toolName: skillId, detail: { ...base, ...extra, receiptClass: "decision" }, effect: "deny", ruleId, ruleChain: [ruleId], reason: `${label}: ${reason}` })
       .returning({ id: auditLog.id });
     return { kind: "denied", status, error, ruleId, reason, auditId: row!.id };
   };
@@ -286,20 +303,40 @@ export async function executeGovernedA2aCall(db: Db, args: GovernedA2aCallArgs, 
     return deny(400, "unknown_skill", A2A_RULE_IDS.unknownSkill, `its card lists no skill '${skillId.slice(0, 128)}'`, label);
   }
 
-  // 3. the lead ceiling (only ever narrows)
-  if (args.ceilingAgentIds && !args.ceilingAgentIds.includes(agent.id)) {
-    return deny(403, "forbidden", A2A_RULE_IDS.leadCeiling, "this worker's lead does not allow it to call this agent", label);
+  // 3-4. ADR-0251 slice 3 (review S-05): the ONE GOVERNED CORE. The kernel's `evaluateA2a` decides the posture (kill
+  //    switch, safe modes, AI literacy), the lead ceiling (only ever narrows) and the person's grant (default-deny);
+  //    the core then adds the attribution mandate (`a2a_attribution_required`, on by default), the A2A rate limits and
+  //    approval rules (no A2A approval queue yet, so a matching rule refuses). An error is a deny.
+  const resource: GovernedResource = { type: "a2a", id: agent.id, name: agent.name, skillId };
+  let core: GovernedResourceDecision;
+  let grantId: string | null = null;
+  try {
+    const [grants, dial, literacy] = await Promise.all([
+      db
+        .select({ id: a2aAgentGrants.id, userId: a2aAgentGrants.userId, agentId: a2aAgentGrants.agentId, skillId: a2aAgentGrants.skillId })
+        .from(a2aAgentGrants)
+        .where(and(eq(a2aAgentGrants.agentId, agent.id), eq(a2aAgentGrants.userId, args.userId))),
+      loadExecutionDial(db),
+      literacySlot(db, args.userId),
+    ]);
+    const entitlement = evaluateA2a({
+      userId: args.userId,
+      execution: { ...postureOf(dial.mode, null), approverUserId: dial.approverUserId, ...literacy },
+      agent: { id: agent.id, name: agent.name },
+      skillId,
+      grants,
+      ceilingAgentIds: args.ceilingAgentIds ?? null,
+    });
+    if (entitlement.effect === "allow") grantId = entitlement.ruleId;
+    core = await governedEvaluateResource(db, { userId: args.userId, resource, projectId, base: entitlement, canQueue: false });
+  } catch (err) {
+    core = governedCoreErrorDecision(resource, err);
   }
-
-  // 4. the person's grant (default-deny)
-  const [grant] = await db
-    .select({ id: a2aAgentGrants.id })
-    .from(a2aAgentGrants)
-    .where(and(eq(a2aAgentGrants.agentId, agent.id), eq(a2aAgentGrants.userId, args.userId), skillId === null ? isNull(a2aAgentGrants.skillId) : or(isNull(a2aAgentGrants.skillId), eq(a2aAgentGrants.skillId, skillId))))
-    .limit(1);
-  if (!grant) {
-    return deny(403, "forbidden", A2A_RULE_IDS.noGrant, skillId === null ? "you have no access to this agent" : `you have no access to this agent's skill '${skillId}'`, label);
+  if (core.effect !== "allow" || !grantId) {
+    const [status, error] = a2aRefusalStatus(core);
+    return deny(status, error, core.ruleId, core.reason, label, core.matchedApprovalRuleIds.length ? { matchedApprovalRuleIds: core.matchedApprovalRuleIds } : {});
   }
+  const grant = { id: grantId };
 
   // 5. the project: it must exist and the person may attribute to it, then the pillar-5 budget gate (the same
   //    `assertProjectAttribution` and `preDispatchProjectGate` the MCP and model paths call). Unattributed = the
@@ -357,7 +394,7 @@ export async function executeGovernedA2aCall(db: Db, args: GovernedA2aCallArgs, 
     const reason = blocked ?? "the remote agent did not return a usable reply";
     const [row] = await db
       .insert(auditLog)
-      .values({ userId: args.userId, objectType: "a2a_agent", objectId: agent.id, toolName: skillId, detail: { ...grantDetail, outcome: blocked ? "egress_blocked" : "upstream_error" }, effect: "allow", ruleId: A2A_RULE_IDS.upstreamError, ruleChain: [A2A_RULE_IDS.callAllowed], reason: `${label}: the call was allowed, but ${reason}; nothing was charged` })
+      .values({ userId: args.userId, objectType: "a2a_agent", objectId: agent.id, toolName: skillId, detail: { ...grantDetail, outcome: blocked ? "egress_blocked" : "upstream_error", receiptClass: "decision" }, effect: "allow", ruleId: A2A_RULE_IDS.upstreamError, ruleChain: [A2A_RULE_IDS.callAllowed], reason: `${label}: the call was allowed, but ${reason}; nothing was charged` })
       .returning({ id: auditLog.id });
     return { kind: "upstream_error", status: 502, error: "a2a_upstream_error", reason, auditId: row!.id };
   }
@@ -372,7 +409,7 @@ export async function executeGovernedA2aCall(db: Db, args: GovernedA2aCallArgs, 
       .returning({ id: usageEvents.id });
     const [audit] = await tx
       .insert(auditLog)
-      .values({ userId: args.userId, objectType: "a2a_agent", objectId: agent.id, toolName: skillId, detail: { ...grantDetail, outcome: "replied", taskState, usageEventId: usage!.id, costUsd, replyChars: text.length }, effect: "allow", ruleId: A2A_RULE_IDS.callAllowed, ruleChain: [A2A_RULE_IDS.callAllowed], reason: `${label}: message sent${skillId ? ` for skill '${skillId}'` : ""} and a reply received` })
+      .values({ userId: args.userId, objectType: "a2a_agent", objectId: agent.id, toolName: skillId, detail: { ...grantDetail, outcome: "replied", taskState, usageEventId: usage!.id, costUsd, replyChars: text.length, receiptClass: "decision" }, effect: "allow", ruleId: A2A_RULE_IDS.callAllowed, ruleChain: [A2A_RULE_IDS.callAllowed], reason: `${label}: message sent${skillId ? ` for skill '${skillId}'` : ""} and a reply received` })
       .returning({ id: auditLog.id });
     return { usageEventId: usage!.id, auditId: audit!.id };
   });

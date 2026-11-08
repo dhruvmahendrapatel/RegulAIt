@@ -126,7 +126,7 @@ ALTER TABLE eval_runs ALTER COLUMN scoring_semantics SET DEFAULT 2;
 Every pre-existing row is stamped **1** — what actually produced it — by the column default, and
 everything written afterwards defaults to **2**. **History is MARKED, never rewritten and never
 deleted.** No stored score, pass flag, aggregate, delta or gate verdict is touched.
-**`audit_log` is not touched at all**, so [ADR-0060](0060-tamper-evident-audit-log.md)'s hash chain
+**`audit_log` is not touched at all**, so [ADR-0060](0060-tamper-evident-audit.md)'s hash chain
 is unaffected by construction rather than by care.
 
 ### 3.2 Comparison refuses, in four places

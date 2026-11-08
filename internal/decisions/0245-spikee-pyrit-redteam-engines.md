@@ -2,6 +2,8 @@
 
 - **Status**: Accepted (Spikee built; PyRIT designed, its build deferred to a follow-up slice: see "As built")
 - **Date**: 2026-11-07
+- **Index**: Spikee and PyRIT as sidecar red-team engines (P26): Spikee built, PyRIT designed and deferred; the ADR-0217 re-test repeats engine runs
+- **Migration**: pending `spikee_engine_and_engine_retest`
 
 ## Context
 
@@ -39,8 +41,8 @@ goes through its own licence gate at build time (decision 8).
    `engines/<id>/Dockerfile`) that leases work from the gateway and never runs the tool itself, and, under ADR-0190
    I5, a task that runs the tool in the executor's sandbox under the run's `engine_worker` placement, with the run's
    virtual key as the task secret and the gateway channel as its only route. Nothing new is added to the contract:
-   `ENGINE_IDS` gains each engine as it is built (this slice: `spikee`; migration 0301 widens `engines_id_check` and
-   seeds its row, off). Each has a manifest entry, a shared catalogue (`packages/shared/src/engines/<id>.ts`), taxonomy rows
+   `ENGINE_IDS` gains each engine as it is built (this slice: `spikee`; the pending migration `spikee_engine_and_engine_retest` widens
+   `engines_id_check` and seeds its row, off). Each has a manifest entry, a shared catalogue (`packages/shared/src/engines/<id>.ts`), taxonomy rows
    (`ENGINE_TAXONOMY` version 4), compose services under the `engines` profile, and a lock entry in
    `engines/images.lock.json`.
 
@@ -124,7 +126,7 @@ goes through its own licence gate at build time (decision 8).
       trials and budget, so every gate applies: entitlement, project, budget, the approvals rule, and the engine being
       on and self-tested. The `MRM_AUTO_RETEST_MAX_SUITES` cap still counts it.
     - An engine run is asynchronous. The re-test row is claimed `running` and linked to the run it started
-      (`mrm_retest_runs.engine_run_id`, migration 0301) under that run's row lock. It is settled in the same
+      (`mrm_retest_runs.engine_run_id`, the same migration) under that run's row lock. It is settled in the same
       transaction that ends the run (`settleEngineRetestTx`, called from every terminal path: `endLockedRun` and the
       approval refusal), from the gateway's normalised verdict:
 
@@ -223,7 +225,7 @@ libquadmath. The gate accepts that wording as a third form, which admits like "p
 **PyRIT: designed, not built in this slice.** Two builder attempts were stopped by a content-safety filter while
 handling PyRIT's harmful-objective seed data and attack code, before any file compiled. The design above
 (decisions 2 and 7) stands. In this slice:
-- `pyrit` is not in `ENGINE_IDS`, the lock, compose or migration 0301, so nothing half-built ships.
+- `pyrit` is not in `ENGINE_IDS`, the lock, compose or the migration, so nothing half-built ships.
 - The partial work (the run plan, the driver config and the gateway-only invariant, uncompiled) is kept on branch
   `builder/p26-pyrit-wip`.
 - The follow-up adds the engine with its own migration.
