@@ -110,7 +110,7 @@ async function runDemoTrafficRun(
   const danaAuth = await keyFor(dana.id);
   const adaAuth = await keyFor(ada.id);
 
-  const projects: Json[] = (await call("GET", "/v1/projects", adaAuth)).body.projects ?? [];
+  const projects: Json[] = (await call("GET", "/v1/projects?archived=include", adaAuth)).body.projects ?? [];
   const hipaa = projects.find((p) => p.name === "hipaa-project");
   // the demo posture requires every dispatch to be attributed to a project
   // (demo:setup's hardening preset) — Dana owns demo-project

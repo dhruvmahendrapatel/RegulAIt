@@ -27,6 +27,17 @@ CHUNK_CHARS = 1_500
 CHUNK_OVERLAP = 200
 # a harm label or PII entity counts as a reason at or above this probability
 REASON_MIN = 0.5
+# ADR-0247: harm reasons are RegulAIt's own labels (defined in HARM_LABELS.md),
+# not the model's. Each model label maps to one of ours; a label with no
+# mapping is reported under its own bare name.
+HARM_LABELS = {
+    "toxic": "toxicity",
+    "severe_toxic": "severe_toxicity",
+    "obscene": "obscenity",
+    "threat": "violent_threat",
+    "insult": "harassment",
+    "identity_hate": "hate",
+}
 
 
 class RequestError(ValueError):
@@ -91,7 +102,7 @@ def score_harm(text: str, classify: Callable[[str], Mapping[str, float]]) -> dic
             p = _clamp(p)
             best = max(best, p)
             if p >= REASON_MIN:
-                labels.add(_label(label))
+                labels.add(HARM_LABELS.get(_label(label), _label(label)))
     return {"score": best, "reasons": sorted(labels)}
 
 
@@ -120,6 +131,49 @@ def score_pii(
             seen.add(key)
             reasons.append(key[0])
     return {"score": best, "reasons": reasons[:20]}
+
+
+def softmax(logits: Sequence[float]) -> list[float]:
+    """Mutually exclusive classes (the injection classifier)."""
+    top = max(logits)
+    exps = [math.exp(x - top) for x in logits]
+    total = sum(exps)
+    return [e / total for e in exps]
+
+
+def sigmoid(logits: Sequence[float]) -> list[float]:
+    """Independent labels (the multi-label harm classifier)."""
+    return [1.0 / (1.0 + math.exp(-x)) if x >= 0 else math.exp(x) / (1.0 + math.exp(x)) for x in logits]
+
+
+def run_onnx(session, ids: Sequence[int], mask: Sequence[int]) -> list[float]:
+    """One window through an ONNX Runtime session exported by export_onnx.py
+    (inputs ``input_ids`` and ``attention_mask``, output ``logits``)."""
+    import numpy as np
+
+    feeds = {"input_ids": np.asarray([ids], dtype=np.int64), "attention_mask": np.asarray([mask], dtype=np.int64)}
+    return [float(x) for x in session.run(["logits"], feeds)[0][0]]
+
+
+def make_classifier(
+    encode: Callable[[str], tuple[Sequence[int], Sequence[int]]],
+    infer: Callable[[Sequence[int], Sequence[int]], Sequence[float]],
+    labels: Sequence[str],
+    multi_label: bool,
+) -> Callable[[str], dict]:
+    """A window -> {label: probability} callable from a tokenizer and a model.
+    Refuses (ValueError, so the request fails closed) a model whose output
+    width does not match its label list."""
+
+    def classify(text: str) -> dict:
+        ids, mask = encode(text)
+        logits = list(infer(ids, mask))
+        if len(logits) != len(labels):
+            raise ValueError("model output does not match its labels")
+        probs = sigmoid(logits) if multi_label else softmax(logits)
+        return dict(zip(labels, probs))
+
+    return classify
 
 
 def _label(raw: str) -> str:
