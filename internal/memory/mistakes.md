@@ -1889,7 +1889,58 @@ Rule: a reserved migration number never reserves a place in the watermark. A lan
 highest migration is renumbered to the next free numbers above it before merge: file, tag, `idx`, and `when` by
 the formula. A `when`-only re-stamp breaks the placement tests. CI enforces it (`scripts/migration-watermark-guard.mjs`, #646).
 
-### M-109 (2026-11-07) - A rename by global replace hit three unrelated tables in schema.ts
+## 2026-10-31 to 2026-11-07 (demo freeze, then the whole-build review)
+
+Numbering note: ADR-0227 already cites M-109 for the 10-31 conflict interleave, so that entry keeps the number. The four
+entries #738 asked for as "M-109 to M-112" are logged as M-110 to M-113.
+
+### M-109 (2026-10-31) - A conflict in a large code file was resolved by keeping both sides, and the blocks interleaved
+
+On 10-31 a merge conflict in a large code file was resolved centrally by keeping neighbouring blocks from both sides,
+which can interleave them silently into code that matches neither branch. ADR-0227 (decision on conflicts) and the
+coordination board cited the rule as M-109 at the time, but the entry was never written here; it is logged now from
+those two records.
+
+Rule: a merge conflict in code is resolved by the lane's builder, by hand, followed by a full workspace build
+(`pnpm -r build`); the master resolves only the migration journal and the ADR index mechanically.
+
+### M-110 (2026-11-07) - A verified one-line fix on #605 was missed across three review rounds
+
+The reviewer raised a one-line fix on #605 at ee3d71b6 (the rescan query lacks `isNull(mcpServers.disabledAt)`, so
+disabled servers use up capped batch slots). It was still open at 3c30ced9 and at 78414e79. Every push after round 2
+reacted to `main` moving, the lane's status posts on #453 never listed the finding, and `READY` meant "CI green", not
+"findings closed" (whole-build review R-02).
+
+Rule: a `READY at <sha>` post lists every finding from every round, numbered, each with the commit that fixes it or
+"deferred, accepted by the owner"; a delta review starts from the previous round's open findings.
+
+### M-111 (2026-11-07) - A script that resolved census-test conflicts deleted a guard assertion on four PRs
+
+A script resolved the recurring conflicts in the route-census test and silently dropped `expect(SUPERSEDED.size)` on
+#639, #640, #681 and #692. It was restored later (whole-build review R-04).
+
+Rule: never resolve a conflict in a test file by script; resolve it by hand and check that the merged file has at least
+as many assertions as the base branch's copy.
+
+### M-112 (2026-11-07) - REPEAT of M-104: each PR passed the size limit alone, and the combined tree did not
+
+`main` was over the entry-JS ceiling at 6a06dc1 (139,555 B against 139,500 B) after PRs that each passed size-limit on
+their own branch merged together (whole-build review R-06). M-104's rule relied on the master remembering to build the
+combined tree by hand, so it failed.
+
+Rule: size-limit runs on the combined tree, in the merge queue on the merge-group ref (ADR-0252), never only on each PR
+branch.
+
+### M-113 (2026-11-07) - CI was designed around the merge queue before checking the account type could use it
+
+The process plan assumed GitHub merge queue was available. Merge queue is offered only for repositories owned by an
+organization, and this repository is owned by a personal account, so the owner had to decide on a move into a free
+organization (#738) before the design could work.
+
+Rule: before designing CI or process around a GitHub feature, check in GitHub's documentation that it is available for
+this repository's owner type and plan, and record the check in the PR or ADR.
+
+### M-114 (2026-11-07) - A rename by global replace hit three unrelated tables in schema.ts
 
 Building S-03 I renamed my new column `body_sha256` to `content_sha256` with a replace across five files, schema.ts
 among them. schema.ts already had `body_sha256` columns on `ai_bom_snapshots`, `decision_boms` and one more, with CHECKs

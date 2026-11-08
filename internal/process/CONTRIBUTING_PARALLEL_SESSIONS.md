@@ -124,6 +124,16 @@ Two related traps from the same mechanism:
 > grep -rn "0290_my_change" --exclude-dir=node_modules .     # change each reference to the slug (my_change)
 > node scripts/migration-watermark-guard.mjs origin/main     # must pass
 > ```
+>
+> Notes for the conversion (#738):
+> - **Several migrations in one PR:** move each one, and name the slugs so they sort in run order
+>   (`my_change_a_tables.sql`, `my_change_b_policies.sql`); the assign step numbers them in byte order of their names.
+> - **References:** the grep must also cover tests that name the tag or number (placement and guard tests, fixtures),
+>   the ADR, and fragments under `internal/fragments/`. Say "the `<slug>` migration" in prose; the number appears
+>   only after assign-at-merge.
+> - **Snapshots:** this repo keeps only `meta/0000_snapshot.json`, so there is no per-migration snapshot to move.
+> - **Check** with the gateway tests (they apply pending files, `REGULAIT_MIGRATIONS_UNASSIGNED=apply`) and
+>   `pnpm exec vitest run --dir scripts assign-at-merge`, then push. Never renumber by hand.
 
 ### 4.2 Same-number files that merge with **zero** conflict
 
