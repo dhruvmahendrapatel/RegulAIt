@@ -157,8 +157,11 @@ tool tiers plus lazy tool-loading into P11. The other two are new items:
 
 ## 2g. AI security tools from the 2026 roadmap scan (owner, 2026-11-07)
 
+The owner approved these on 2026-11-07. Each needs its own ADR, and open source is checked first (ADR-0176).
+
 | # | Gap | What it would take |
 |---|---|---|
+| **P23** | **Cisco mcp-scanner and skill-scanner as offline admission engines.** MCP manifests are scanned only by our own in-process rules, and builder skills (SKILL.md) by the ADR-0175 A6 rules; no external engine scans either supply-chain surface. | [ADR-0242](../decisions/0242-mcp-and-skill-scanner-engines.md). **Phase 1 built (this PR):** both engines registered (kind `admission_scan`, off, no digest); hash-locked images with baked rules, an offline driver that builds only local analyzers and refuses cloud keys, and an in-image no-network smoke scan; yara-python built without the EOL OpenSSL its wheel bundles; GPL pcodedmp excluded; verdicts in `admission_engine_scans` (pending migration `admission_engine_scans`), folded into the MCP and skill admission states and audit, fail closed. **Phase 2:** the runner stage and `subject` target, queueing at sync/save/re-scan, publish and lock, UI (#453). Five owner questions in the ADR. **Owner scope added 2026-11-07 (ADR-0242 §7):** anthropics/skills corpus measured (SKILL.md 18/19 pass; bundles 10/19 held); ATR 3.5.6 already ships inside skill-scanner; follow-ups: ATR 4.3.0 + ATLAS/OWASP ids + ATR on MCP tools, SKILL.md frontmatter validation at import, offline OSV at MCP admission, any new skill channel (e.g. Dart `skills` CLI) must create a `builder_skills` row. |
 | **P25** | **Measured injection-detector baselines.** The heuristic and trained prompt-injection detectors had no recall or false-positive numbers on public benchmarks. | **Built (ADR-0244).** NotInject, InjecAgent (sampled) and AgentDojo v1 vendored as pinned snapshots, a JailbreakBench sample, plus our own 100 web-agent scenarios (WASP categories, clean room); CI gates the heuristic at a 2-point tolerance, the trained classifier is measured offline. Left: HackAPrompt (owner to accept its gate), AgentDojo's task-dependent attacks, gating the trained classifier once its image builds in CI. |
 
 ## 3. Structural gaps — the ADR shipped, a named half did not

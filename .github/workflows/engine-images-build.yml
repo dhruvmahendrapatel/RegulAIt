@@ -59,7 +59,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        engine: [promptfoo, modelscan, garak]
+        engine: [promptfoo, modelscan, garak, mcpscanner, skillscanner]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -81,7 +81,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        engine: [promptfoo, modelscan, garak]
+        engine: [promptfoo, modelscan, garak, mcpscanner, skillscanner]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -63,6 +63,7 @@ import {
   // with the migration's CHECKs by being the same constants
   ARTIFACT_FORMATS,
   ARTIFACT_SCAN_VERDICTS,
+  ADMISSION_SCAN_VERDICTS,
   ENGINE_IDS,
   ENGINE_ITEM_VERDICTS,
   ENGINE_KINDS,
@@ -13934,6 +13935,48 @@ export const artifactScans = pgTable(
     uniqueIndex("artifact_scans_engine_run_unique").on(t.engineRunId).where(sql`${t.engineRunId} IS NOT NULL`),
   ],
 );
+
+/**
+ * ADR-0242 (P23, pending migration admission_engine_scans) — one admission-scan engine's verdict on one MCP server or builder skill at one
+ * digest. The admission gate reads the latest row for the subject's CURRENT digest; with the engine on, only a
+ * `pass` there admits (fail closed).
+ */
+export const admissionEngineScans = pgTable(
+  "admission_engine_scans",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    engineId: text("engine_id", { enum: ["mcpscanner", "skillscanner"] })
+      .notNull()
+      .references(() => engines.id, { onDelete: "restrict" }),
+    mcpServerId: uuid("mcp_server_id").references(() => mcpServers.id, { onDelete: "cascade" }),
+    builderSkillId: uuid("builder_skill_id").references(() => builderSkills.id, { onDelete: "cascade" }),
+    subjectDigest: text("subject_digest").notNull(),
+    engineRunId: uuid("engine_run_id").references(() => engineRuns.id, { onDelete: "set null" }),
+    // point-in-time copy (ADR-0200 addendum exception): the version that produced THIS scan, kept as evidence
+    engineVersion: text("engine_version").notNull(),
+    rulesSha256: text("rules_sha256"),
+    verdict: text("verdict", { enum: ADMISSION_SCAN_VERDICTS }).notNull(),
+    // point-in-time evidence (ADR-0200 addendum exception): the counts-only findings of THIS scan
+    findings: jsonb("findings").$type<Array<{ rule: string; severity: string; tool: string; where: string; count: number }>>().notNull().default([]),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("admission_engine_scans_engine_check", sql`${t.engineId} IN ('mcpscanner', 'skillscanner')`),
+    check(
+      "admission_engine_scans_subject_check",
+      sql`(${t.engineId} = 'mcpscanner' AND ${t.mcpServerId} IS NOT NULL AND ${t.builderSkillId} IS NULL) OR (${t.engineId} = 'skillscanner' AND ${t.builderSkillId} IS NOT NULL AND ${t.mcpServerId} IS NULL)`,
+    ),
+    check("admission_engine_scans_digest_check", sql`${t.subjectDigest} ~ '^[0-9a-f]{64}$'`),
+    check("admission_engine_scans_rules_check", sql`${t.rulesSha256} IS NULL OR ${t.rulesSha256} ~ '^[0-9a-f]{64}$'`),
+    check("admission_engine_scans_verdict_check", sql`${t.verdict} IN ('pass', 'fail', 'unknown')`),
+    check("admission_engine_scans_findings_check", sql`jsonb_typeof(${t.findings}) = 'array'`),
+    check("admission_engine_scans_version_check", sql`length(${t.engineVersion}) BETWEEN 1 AND 32`),
+    index("admission_engine_scans_mcp_idx").on(t.mcpServerId, t.subjectDigest, t.createdAt.desc()).where(sql`${t.mcpServerId} IS NOT NULL`),
+    index("admission_engine_scans_skill_idx").on(t.builderSkillId, t.subjectDigest, t.createdAt.desc()).where(sql`${t.builderSkillId} IS NOT NULL`),
+    uniqueIndex("admission_engine_scans_engine_run_unique").on(t.engineRunId).where(sql`${t.engineRunId} IS NOT NULL`),
+  ],
+);
+export type AdmissionEngineScanRow = typeof admissionEngineScans.$inferSelect;
 
 // ===========================================================================
 // ADR-0216 (P14 + P15, migration 0266) — model-file signatures and the supply-chain block.
