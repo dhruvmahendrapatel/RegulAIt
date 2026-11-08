@@ -217,3 +217,30 @@ merge.
 - Intended new denials, as listed above: A2A under the kill switch, read-only or approval dial; a person whose AI
   literacy is not current; an unattributed A2A call; a call over an A2A rate limit or matching an A2A approval rule.
 
+
+### Review #715 round 1 (2026-11-08)
+
+1. **Every named approver signs** (blocking, fixed). A connector write held by the execution dial *and* matched by an
+   approval rule needs one consent per distinct required approver: the dial's approver and each matching rule's
+   approver. Each consent binds that approver and the rule ids that demanded it, so one approver can never release a
+   call another was named for. The hold asks the next missing approver, and execution spends every consent once. The
+   matched rule ids reach `toolApprovalRequirements`. Tested in `zz-adr0251-connector-core.test.ts`.
+2. **Rate limits are soft under concurrency** (accepted, recorded here). The window count is read when the call is
+   decided, and the call's allowed row is written later, so calls that are decided at the same moment can each see the
+   same count. The overshoot is bounded by the number of calls in flight for that subject and resource. This is the
+   same semantics as the project budget gate ("overshoots by at most one call per call in flight", ARCHITECTURE.md)
+   and the MCP rate windows. On A2A the in-flight window is longer, because the allowed row is written after the
+   remote agent replies. A hard limit (an advisory lock per subject and resource held from the count to the decision
+   row, or a reservation row) is a follow-up. It is not taken here, because it puts a lock on every governed call's
+   hot path and needs its own latency measurement.
+3. **Side rows do not spend a slot** (fixed). The window counts only the call's own decision row. Connector decision
+   rows carry no `phase`; A2A call rows carry `phase: "call"`. A PII warning or a guardrail row of the same call no
+   longer counts as a second call.
+4. **No admin routes yet for `resource_approval_rules` and `resource_rate_limits`** (follow-up). Today the tables can
+   only be written with direct SQL. No rows means no change in behaviour, and no UI exposes them. The routes come
+   next and follow `/v1/rules/model-rate-limits`: admin only, a `settings_relax` step-up for every removal or
+   loosening, and an audit row with the old and new values in the same transaction as the write. They must exist
+   before any UI exposes these tables.
+5. **Latency bench size.** `zz-adr0251-core-latency.test.ts` measures 0 rules, then 10 matching rules (5 approval
+   rules and 5 rate limits under their limit). Each binding rate limit adds one concurrent count query, so the cost
+   grows with the number of limits that bind one subject and resource, not with traffic.
