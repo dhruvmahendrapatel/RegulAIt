@@ -2778,6 +2778,20 @@ export const externalScorers = pgTable("external_scorers", {
   lastTestError: text("last_test_error"),
   createdBy: uuid("created_by"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  /** ADR-0237 (migration guardrail_vendor_adapters): the wire dialect. `regulait` = the ADR-0088
+   * contract; a vendor adapter (openai_moderation / azure_content_safety /
+   * lakera_guard) translates in the gateway and may claim guardrail kinds only.
+   * CHECK-constrained to the list in @regulait/shared EXTERNAL_SCORER_ADAPTERS. */
+  adapter: text("adapter", { enum: ["regulait", "openai_moderation", "azure_content_safety", "lakera_guard"] })
+    .notNull()
+    .default("regulait"),
+  /** ADR-0237. Denormalisation exception (ADR-0200 addendum): a schema-validated
+   * configuration document (`vendorAdapterOptionsSchema`: OpenAI model, Lakera
+   * project id), not a list of references. Null = the adapter's defaults. */
+  adapterOptions: jsonb("adapter_options").$type<{ model?: string; projectId?: string }>(),
+  /** ADR-0237: the vendor's list price per call, written to usage_events.cost_usd
+   * on every successful call. Null = unpriced, never invented (as connectors). */
+  pricePerCallUsd: doublePrecision("price_per_call_usd"),
 });
 
 export type ExternalScorerRow = typeof externalScorers.$inferSelect;
