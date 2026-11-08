@@ -95,7 +95,7 @@ describe("affordance census: a notBuilt route counts only when the file defines 
   });
 
   it("no exemption names a stub: a stub is skipped already, so an entry for one is stale", () => {
-    expect(DELIBERATELY_API_ONLY.size).toBe(0);
+    expect(DELIBERATELY_API_ONLY.size).toBe(2); // ADR-0236 bundle archive and grant revoke, until the #453 bundle screen (owner decision 2026-11-07, #697)
   });
 });
 

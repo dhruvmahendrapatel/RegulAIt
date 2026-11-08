@@ -349,6 +349,20 @@ export const KNOWN_UI_GAPS = new Map([
   ["POST /v1/agents/:agentId/usage-extractor/versions/:versionId/test", { does: "tests a version against a sample response and the counts the admin expects", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["POST /v1/agents/:agentId/usage-extractor/versions/:versionId/activate", { does: "activates a version whose latest test passed (settings_relax step-up)", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["POST /v1/agents/:agentId/usage-extractor/deactivate", { does: "returns an agent to its adapter's built-in usage counts", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  // batch U4 (ui-gaps-details) closed the last 22. The entries below are the ADR-0236 (P11) MCP bundle routes:
+  // the owner decided on 2026-11-07 (#697) to ship them API-first while the Governed Designer builds the bundle
+  // screen requested on #453. Building that screen closes these and lowers KNOWN_UI_GAPS_MAX back to 0.
+  ["GET /v1/mcp-bundles", { does: "lists governed MCP bundles with the default-off setting, version and grant count (ADR-0236)", tracking: "#453" }],
+  ["POST /v1/mcp-bundles", { does: "creates a bundle at version 1 from exact (server, tool) pairs, with an optional approver for dangerous tools", tracking: "#453" }],
+  ["GET /v1/mcp-bundles/:bundleId", { does: "reads a bundle: its current tools and version history", tracking: "#453" }],
+  ["PATCH /v1/mcp-bundles/:bundleId", { does: "changes a bundle's description or its approver for dangerous tools", tracking: "#453" }],
+  ["DELETE /v1/mcp-bundles/:bundleId", { does: "archives a bundle: every grant of it confers nothing from then on", tracking: "#453" }],
+  ["PUT /v1/mcp-bundles/:bundleId/items", { does: "writes a new version of a bundle's tools (compare-and-set; adding a tool is a step-up)", tracking: "#453" }],
+  ["GET /v1/mcp-bundles/:bundleId/versions/:version", { does: "reads one immutable version of a bundle", tracking: "#453" }],
+  ["GET /v1/mcp-bundles/:bundleId/grants", { does: "lists who holds a bundle (user, role or team) and up to which scope tier", tracking: "#453" }],
+  ["POST /v1/mcp-bundles/:bundleId/grants", { does: "grants a bundle to a user, role or team up to a scope tier (read by default)", tracking: "#453" }],
+  ["DELETE /v1/mcp-bundles/:bundleId/grants/:grantId", { does: "revokes a bundle grant", tracking: "#453" }],
+  ["PUT /v1/mcp-tools/:toolId/dangerous", { does: "flags or clears a tool's dangerous scope tier (clearing is a step-up)", tracking: "#453" }],
   // batch U4 (ui-gaps-details) closed the last 22. ADR-0261 (P37) adds six: the owner decided on 2026-11-07 to raise
   // the cap by exactly these and ship the DefenseClaw ingest API-only, with the admin screen tracked on #453.
   ["GET /v1/third-party-ingest/sources", { does: "lists third-party ingest sources (DefenseClaw), their state, credential issue time and the ingest limits", tracking: "#453" }],
@@ -367,7 +381,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 15;
+export const KNOWN_UI_GAPS_MAX = 26;
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 
