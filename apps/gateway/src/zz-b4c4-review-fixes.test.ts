@@ -137,7 +137,7 @@ async function enrol(s: Session): Promise<SoftAuthenticator> {
   const opt = await as(s, "POST", "/v1/auth/passkeys/registration-options", {});
   expect(opt.statusCode, opt.body).toBe(200);
   const auth = new SoftAuthenticator({ origin: ORIGIN });
-  const reg = await as(s, "POST", "/v1/auth/passkeys", { challengeId: opt.json().challengeId, response: auth.register(opt.json().options), label: `b4c-${randomBytes(2).toString("hex")}` });
+  const reg = await as(s, "POST", "/v1/auth/passkeys", { challengeId: opt.json().challengeId, response: auth.register(opt.json().options), label: `b4c-${randomBytes(6).toString("hex")}` });
   expect(reg.statusCode, reg.body).toBe(201);
   return auth;
 }
@@ -155,7 +155,7 @@ async function mkPerson(label: string, isAdmin = false): Promise<Person> {
   const u = await mkUser(label, isAdmin);
   return { ...u, auth: await enrol(u.s) };
 }
-const person = (label: string) => mkPerson(`${label}-${randomBytes(2).toString("hex")}`);
+const person = (label: string) => mkPerson(`${label}-${randomBytes(6).toString("hex")}`);
 
 async function startUpstream(): Promise<{ url: string; close: () => Promise<void> }> {
   const httpServer = http.createServer((req, res) => {
@@ -406,14 +406,14 @@ describe("F15: a call that became sensitive after its consent needs the sensitiv
 
 describe("F16: reactivating an account that still holds privilege needs a settings_relax step-up", () => {
   it("an admin account", async () => {
-    const u = await mkUser(`react-adm-${randomBytes(2).toString("hex")}`);
+    const u = await mkUser(`react-adm-${randomBytes(6).toString("hex")}`);
     await db.update(usersTable).set({ isAdmin: true, disabledAt: new Date() }).where(eq(usersTable.id, u.id));
     const disabled = async () => expect((await db.select({ d: usersTable.disabledAt }).from(usersTable).where(eq(usersTable.id, u.id)))[0]!.d).not.toBeNull();
     await provesRelax("POST", `/v1/users/${u.id}/reactivate`, {}, disabled);
   });
 
   it("an approver-role holder", async () => {
-    const u = await mkUser(`react-role-${randomBytes(2).toString("hex")}`);
+    const u = await mkUser(`react-role-${randomBytes(6).toString("hex")}`);
     await db.insert(roleAssignments).values({ userId: u.id, roleId });
     await db.update(usersTable).set({ disabledAt: new Date() }).where(eq(usersTable.id, u.id));
     const disabled = async () => expect((await db.select({ d: usersTable.disabledAt }).from(usersTable).where(eq(usersTable.id, u.id)))[0]!.d).not.toBeNull();
@@ -421,7 +421,7 @@ describe("F16: reactivating an account that still holds privilege needs a settin
   });
 
   it("control: an account with no privilege is reactivated without one", async () => {
-    const u = await mkUser(`react-plain-${randomBytes(2).toString("hex")}`);
+    const u = await mkUser(`react-plain-${randomBytes(6).toString("hex")}`);
     await db.update(usersTable).set({ disabledAt: new Date() }).where(eq(usersTable.id, u.id));
     const r = await as(P.adm.s, "POST", `/v1/users/${u.id}/reactivate`, {});
     expect(r.statusCode, r.body).toBe(200);
