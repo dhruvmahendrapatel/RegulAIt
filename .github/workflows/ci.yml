@@ -355,6 +355,12 @@ jobs:
         if: ${{ !cancelled() && (steps.affordances.outcome == 'success' || steps.affordances.outcome == 'failure') }}
         run: node scripts/licence-gate-workspace.mjs
 
+      # #738 (review O-01): every production dependency of every workspace package has a THIRD_PARTY.md row naming
+      # the version the lockfile resolves (CLAUDE.md "open source first", rule 3).
+      - name: THIRD_PARTY.md rows for every production dependency (ADR-0176)
+        if: ${{ !cancelled() && (steps.affordances.outcome == 'success' || steps.affordances.outcome == 'failure') }}
+        run: node scripts/preflight-third-party.mjs
+
       # The engine image lock may only change as `--apply` changes it (#425
       # review): every published sourceCommit is on main, and an engine whose
       # image changed moved its publishGeneration to exactly main's + 1. A
