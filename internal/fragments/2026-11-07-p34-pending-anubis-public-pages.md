@@ -1,2 +1,0 @@
-<!-- fold: pending -->
-**P34 — Anubis in front of the public pages (from the security and infra review, owner 2026-11-07).** An optional proof-of-work bot and AI-scraper check for the trust centre, auditor portal and supplier portal only, never the API, admin console or gateway. **Built as config, PROPOSED in [ADR-0258](../decisions/0258-anubis-public-pages.md)**, off by default (`install.sh --anubis`). Open: a live run of Caddy and Anubis before the first deployment that turns it on, and the #453 UI item for a pass cookie that expires mid-page.
