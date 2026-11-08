@@ -39,7 +39,7 @@ on:
       # harness starts is built from. A bump that touches nothing under the
       # paths above still changes that gateway, so it runs this gate too.
       - "pnpm-lock.yaml"
-      # ADR-0252 addendum, PR trim: a Markdown file under packages/** or apps/gateway/src/** changes no code
+      # ADR-0262, PR trim: a Markdown file under packages/** or apps/gateway/src/** changes no code
       - "!**/*.md"
   # ADR-0252: part of the full suite at merge time. `merge_group` takes no path filter, so every merge group runs it;
   # so does each push to main (#721 review finding 3).

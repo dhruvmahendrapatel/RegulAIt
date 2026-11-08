@@ -10,7 +10,7 @@ name: CI
 # parallel jobs each bill separately. So the cost of a run is the SUM of its
 # jobs, not the longest one. Every knob below exists to keep that sum down:
 #
-#  1-3. SUPERSEDED on 2026-11-07 (ADR-0252 addendum, owner decision): the budget that binds now is the free
+#  1-3. SUPERSEDED on 2026-11-07 (ADR-0262, owner decision): the budget that binds now is the free
 #     public-repo runner pool, not billed minutes. A PR runs the FAST set and a merge group, a push to main and
 #     the nightly schedule run the FULL set (see the trigger block below). There is a `push:` trigger again; there
 #     is no `paths-ignore` (a docs-only PR skips every job by `if:` and `build-and-test` still reports); and
@@ -123,7 +123,7 @@ name: CI
 # `pull_request` to `types: [ready_for_review]` so draft iterations stop
 # billing — NOT taken now, because this repo's agents open drafts and a draft
 # that never runs CI is a draft nobody can trust.
-# ADR-0252 addendum (owner decision 2026-11-07): FAST checks on a pull request, the FULL suite at merge time.
+# ADR-0262 (owner decision 2026-11-07): FAST checks on a pull request, the FULL suite at merge time.
 # The free public-repo runner pool (~20 concurrent jobs) against ~30 jobs per PR meant one PR's CI at a time.
 #   pull_request   the `scope` job reads the PR's diff. Code changed: build, typecheck, lint, the package suites,
 #                  the static pre-flights (migration guard, licence gate) and the gateway shards (web-only PRs too:
@@ -398,7 +398,7 @@ jobs:
   gateway-tests:
     name: gateway shard ${{ matrix.shard }}
     needs: scope
-    # ADR-0252 addendum (PR trim): skipped only on a docs-only PR. A web-only PR still runs it: gateway tests read
+    # ADR-0262 (PR trim): skipped only on a docs-only PR. A web-only PR still runs it: gateway tests read
     # apps/web sources (step-up-posture-guard walks every product source, apps/web included).
     if: needs.scope.outputs.code == 'true'
     runs-on: ubuntu-24.04
@@ -644,7 +644,7 @@ jobs:
   # runs whenever a dependency failed (`!cancelled()`, not the default
   # `success()`, which would skip it) and checks each result itself.
   #
-  # ADR-0252 addendum: a part is skipped only when its own scope output is false. The scope must have succeeded; the
+  # ADR-0262: a part is skipped only when its own scope output is false. The scope must have succeeded; the
   # build and static pre-flights must succeed when code changed (else be skipped), and the gateway shards and their
   # coverage check must succeed when code outside apps/web/** changed (else be skipped).
   build-and-test:
@@ -667,7 +667,7 @@ jobs:
   docker-build:
     # The quickstart path must never rot: prove the compose image still builds.
     #
-    # ADR-0252 addendum: part of the full suite only (merge group, push to main, nightly, manual), and there it
+    # ADR-0262: part of the full suite only (merge group, push to main, nightly, manual), and there it
     # ALWAYS builds. It used to skip when no image file changed in `HEAD^1..HEAD`; on a merge group that range is
     # wrong (in a group of several PRs, HEAD^1 is the previous queued PR's temporary commit, not main, so an earlier
     # PR's Dockerfile or lockfile change would go unseen), and a full run is meant to run everything (#721 review).
@@ -695,7 +695,7 @@ jobs:
   # (install + build dominate), on the same `pull_request` paths-ignore as the
   # rest of this workflow.
   spa-journeys:
-    # ADR-0252 addendum: the full suite only (merge group, push to main, nightly, manual)
+    # ADR-0262: the full suite only (merge group, push to main, nightly, manual)
     needs: scope
     if: needs.scope.outputs.full == 'true'
     runs-on: ubuntu-24.04
@@ -856,7 +856,7 @@ jobs:
   # parallel jobs, with a final job proving every listed spec ran exactly once;
   # the layout and the proof live in mock-ui-shards.yml, shared with demo.yml.
   spa-mock:
-    # ADR-0252 addendum: on a PR only when the web app changed; always on a full run
+    # ADR-0262: on a PR only when the web app changed; always on a full run
     needs: scope
     if: needs.scope.outputs.web == 'true'
     uses: ./.github/workflows/mock-ui-shards.yml

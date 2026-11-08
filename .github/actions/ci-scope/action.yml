@@ -1,4 +1,4 @@
-# ADR-0252 addendum (owner decision 2026-11-07): fast checks on a PR, the full suite at merge time.
+# ADR-0262 (owner decision 2026-11-07): fast checks on a PR, the full suite at merge time.
 #
 # Decides what a run must cover. On a merge group, a push to main, the nightly schedule or a manual run, the answer is
 # always everything (`full`). On a pull request it reads the PR's own diff from GitHub's merge commit (check out with
