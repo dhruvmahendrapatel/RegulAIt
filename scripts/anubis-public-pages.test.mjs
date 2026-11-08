@@ -218,6 +218,9 @@ describe("the Kubernetes hook, the installer and the bundle name the same image"
 });
 
 describe("scripts/install.sh --check", () => {
+  // each case runs the real installer (preflight, openssl, compose rendering) up to four times; the vitest default of
+  // 5 s is too short on a loaded CI runner, as it was on #729
+  const INSTALL_TIMEOUT_MS = 120_000;
   const hasOpenssl = spawnSync("openssl", ["version"]).status === 0;
   const run = (dir, args) => {
     const dataKey = spawnSync("openssl", ["rand", "-hex", "32"], { encoding: "utf8" }).stdout.trim();
@@ -258,7 +261,7 @@ describe("scripts/install.sh --check", () => {
       r = run(dir, ["--domain", "anubis.example", "--no-anubis"]);
       expect(envOf()).toContain("\nREGULAIT_ANUBIS=off\n");
     });
-  });
+  }, INSTALL_TIMEOUT_MS);
 
   it.runIf(hasOpenssl)("refuses --anubis without Caddy in front (--tls none)", () => {
     withDir((dir) => {
@@ -266,7 +269,7 @@ describe("scripts/install.sh --check", () => {
       expect(r.status).toBe(1);
       expect(r.output).toContain("--anubis needs Caddy in front");
     });
-  });
+  }, INSTALL_TIMEOUT_MS);
 
   it.runIf(hasOpenssl)("air-gapped --anubis runs the bundle's plain tag, never pulling", () => {
     withDir((dir) => {
@@ -275,5 +278,5 @@ describe("scripts/install.sh --check", () => {
       const override = readFileSync(path.join(dir, "compose.install.yml"), "utf8");
       expect(override).toContain("\n  anubis:\n    image: ghcr.io/techarohq/anubis:v1.28.2\n    pull_policy: never\n");
     });
-  });
+  }, INSTALL_TIMEOUT_MS);
 });
