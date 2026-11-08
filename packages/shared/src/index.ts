@@ -4928,6 +4928,8 @@ export * from "./mcp-upstream-credential.js";
 export * from "./library-lifecycle.js";
 // ADR-0220: trained runtime detectors (PII recogniser, injection classifier, harm model) behind the external-scorer contract
 export * from "./trained-detectors.js";
+// ADR-0237: native adapters for third-party guardrail providers (OpenAI Moderation, Azure AI Content Safety, Lakera Guard)
+export * from "./guardrail-vendor-adapters.js";
 // ADR-0224 (P13 c): privacy operations — records of processing, data-subject requests, the processing limit
 export * from "./privacy-ops.js";
 
@@ -4938,3 +4940,5 @@ export * from "./framework-imports.js";
 export * from "./supplier-portal.js";
 // ADR-0222 (P13(a)): fairness testing — the group metrics, thresholds and outcome (pure)
 export * from "./fairness.js";
+// ADR-0261 (P37): third-party security telemetry ingest — the DefenseClaw JSONL parser and mapping (pure)
+export * from "./third-party-ingest/index.js";

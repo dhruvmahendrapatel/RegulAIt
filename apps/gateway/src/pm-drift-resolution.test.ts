@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { auditLog, createDb, desc, eq, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { genericInbound } from "./testing/pm-webhook.js";
 
 /**
  * O7 (ADR-0027, migration 0045) — PM drift AUTO-RESOLUTION. Per-connection
@@ -70,8 +71,7 @@ async function mkLinkedRun(name: string, connectionName: string) {
 async function webhook(connection: { name: string; secret: string }, payload: Record<string, unknown>) {
   return app.inject({
     method: "POST", url: `/v1/pm/webhooks/${connection.name}`,
-    headers: { "x-regulait-webhook-secret": connection.secret },
-    payload,
+    ...genericInbound(connection.secret, payload),
   });
 }
 

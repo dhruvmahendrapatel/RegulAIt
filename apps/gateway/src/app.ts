@@ -605,6 +605,7 @@ import { registerContentTrustRoutes } from "./content-trust-routes.js";
 import { registerFederationRoutes } from "./federation-routes.js";
 import { registerMcpIdentityOidcRoutes } from "./mcp-identity-oidc-routes.js";
 import { registerEndpointImportRoutes } from "./endpoint-import-routes.js";
+import { registerThirdPartyIngestRoutes } from "./third-party-ingest-routes.js";
 import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
 import { registerCostImportRoutes } from "./cost-import.js";
@@ -5794,7 +5795,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // admin-typed outbound endpoint under the same egress guard and the same
   // register → test → enable lifecycle — applied to a measuring instrument
   // instead of a model. Admin-only via the global gate.
-  registerExternalScorerRoutes(app, db, { dataKey: opts.dataKey });
+  registerExternalScorerRoutes(app, db, {
+    dataKey: opts.dataKey,
+    // test seams only (the same ones the trained-detector runtime takes); production passes neither
+    ...(opts.trainedDetectorResolve ? { resolve: opts.trainedDetectorResolve } : {}),
+    ...(opts.trainedDetectorFetch ? { fetchImpl: opts.trainedDetectorFetch } : {}),
+  });
   // ADR-0065 — REGULAIT-LLM. Registered next to the custom-provider surface
   // because it answers the adjacent question: that one is "which model that we
   // do not own may our people reach?", this one is "which model may our people
@@ -5978,6 +5984,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     dataKey: opts.dataKey,
     ...(opts.discoveryScanners === undefined ? {} : { registry: opts.discoveryScanners }),
   });
+  // ADR-0261 (P37) — third-party security telemetry ingest (Cisco DefenseClaw's HTTP JSONL export): the admin source
+  // lifecycle (admin-only by default; enabling and issuing the write-only credential are step-ups, audited) and the
+  // exporter's route, authenticated in-route by the source's `rgti_` token. Records are attributed third-party evidence.
+  registerThirdPartyIngestRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0195 SD4b — the RegulAIt endpoint agent: ticket redemption and registration (authenticated in-route by the
   // bulk token or the device ticket), the agent's own routes (its DPoP-bound self token only), and the admin's
   // enrolment-token and device routes (admin-only by default). Nothing works until an endpoint agent source is enabled.
