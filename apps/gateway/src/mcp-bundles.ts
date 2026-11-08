@@ -37,6 +37,7 @@ import {
   mcpBundles,
   mcpServers,
   mcpTools,
+  roleAssignments,
   roles,
   sql,
   teamMembers,
@@ -48,7 +49,7 @@ import {
 import { BUNDLE_SCOPE_TIERS } from "@regulait/policy-kernel";
 import { isReservedToolName } from "./mcp-protocol.js";
 import { loadOrgSettings } from "./org-settings.js";
-import { refuseSodMint, type SodMint } from "./sod.js";
+import { refuseSodFootprint } from "./sod.js";
 import { requireStepUp, CHANGED_CONCURRENTLY } from "./step-up.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
@@ -147,27 +148,49 @@ async function unknownItems(db: Db, items: readonly Item[]): Promise<Item[]> {
 
 type Subject = { kind: "user"; id: string } | { kind: "role"; id: string } | { kind: "team"; id: string };
 
-/** ADR-0091 — the SoD gate for every tool a subject would come to hold; the first refusal body, or null */
-async function refuseBundleSod(db: Db, subject: Subject, items: readonly Item[], actorUserId: string | null) {
-  if (items.length === 0) return null;
-  let userIds: string[] = [];
-  if (subject.kind === "user") userIds = [subject.id];
-  if (subject.kind === "team") {
-    userIds = (await db.select({ userId: teamMembers.userId }).from(teamMembers).where(eq(teamMembers.teamId, subject.id)).limit(10_000)).map(
-      (m) => m.userId,
-    );
+/**
+ * The most identities one SoD check covers (review of #697). Above it the grant is refused rather than checked in
+ * part: a truncated holder list would let the unchecked members through (fail open).
+ */
+export const MCP_BUNDLE_SOD_MAX_IDENTITIES = 10_000;
+
+type SodGate = { ok: true } | { ok: false; status: 409 | 422; body: Record<string, unknown> };
+
+/**
+ * ADR-0091 — the SoD gate for every tool the subjects would come to hold, as ONE batched check (review of #697: the
+ * per-item × per-member loop was an N+1). The identities are resolved in at most three queries (direct users, role
+ * assignees, team members), and `refuseSodFootprint` checks every (identity, tool) pair in memory against queries
+ * that depend only on the enabled SoD rules. More than MCP_BUNDLE_SOD_MAX_IDENTITIES identities is refused (422).
+ */
+async function bundleSodGate(db: Db, subjects: readonly Subject[], items: readonly Item[], actorUserId: string | null, bundleId: string): Promise<SodGate> {
+  if (items.length === 0 || subjects.length === 0) return { ok: true };
+  const cap = MCP_BUNDLE_SOD_MAX_IDENTITIES + 1;
+  const ids = new Set(subjects.filter((x) => x.kind === "user").map((x) => x.id));
+  const roleIds = subjects.filter((x) => x.kind === "role").map((x) => x.id);
+  const teamIds = subjects.filter((x) => x.kind === "team").map((x) => x.id);
+  if (roleIds.length > 0) {
+    for (const r of await db.selectDistinct({ userId: roleAssignments.userId }).from(roleAssignments).where(inArray(roleAssignments.roleId, roleIds)).limit(cap)) ids.add(r.userId);
   }
-  for (const item of items) {
-    const mints: SodMint[] =
-      subject.kind === "role"
-        ? [{ kind: "role_tool", roleId: subject.id, serverId: item.serverId, toolName: item.toolName }]
-        : userIds.map((userId) => ({ kind: "tool", userId, serverId: item.serverId, toolName: item.toolName }));
-    for (const mint of mints) {
-      const sod = await refuseSodMint(db, mint, actorUserId);
-      if (sod) return sod;
-    }
+  if (teamIds.length > 0) {
+    for (const m of await db.selectDistinct({ userId: teamMembers.userId }).from(teamMembers).where(inArray(teamMembers.teamId, teamIds)).limit(cap)) ids.add(m.userId);
   }
-  return null;
+  if (ids.size > MCP_BUNDLE_SOD_MAX_IDENTITIES) {
+    return {
+      ok: false,
+      status: 422,
+      body: {
+        error: "bundle_holders_too_many",
+        detail: `This change would give the bundle's tools to more than ${MCP_BUNDLE_SOD_MAX_IDENTITIES} people at once, which is more than one separation-of-duties check covers. Grant it to smaller teams or roles. Nothing was saved.`,
+      },
+    };
+  }
+  const sod = await refuseSodFootprint(
+    db,
+    { capabilities: items.map((i) => ({ kind: "mcp_tool" as const, objectId: i.serverId, toolName: i.toolName, mode: null })), userIds: [...ids] },
+    actorUserId,
+    { kind: "mcp_bundle", bundleId, subjects: subjects.map((x) => `${x.kind}:${x.id}`).slice(0, 50), toolCount: items.length },
+  );
+  return sod ? { ok: false, status: 409, body: sod } : { ok: true };
 }
 
 const subjectOf = (g: { userId: string | null; roleId: string | null; teamId: string | null }): Subject =>
@@ -301,6 +324,16 @@ export function registerMcpBundleRoutes(app: FastifyInstance, db: Db): void {
     if (!before) return reply.status(404).send({ error: "unknown_bundle" });
     if (await refuseWhenDisabled(req, reply, bundleId, "update")) return reply;
     if (await refuseBadApprover(parsed.data.approverUserId, reply)) return reply;
+    // review of #697: who signs off a dangerous tool is part of what the hold enforces, so naming a different approver
+    // is a governed relaxation (a step-up). Clearing the approver only tightens (dangerous calls then fail closed).
+    const naming = parsed.data.approverUserId !== undefined && parsed.data.approverUserId !== null && parsed.data.approverUserId !== before.approverUserId;
+    if (naming) {
+      const su = await requireStepUp(db, req, reply, {
+        kind: "settings_relax",
+        facts: { op: "mcp_bundle_approver", bundleId, approverBefore: before.approverUserId, approverAfter: parsed.data.approverUserId },
+      });
+      if (!su.ok) return reply;
+    }
     const row = await db.transaction(async (tx) => {
       const [updated] = await tx
         .update(mcpBundles)
@@ -309,7 +342,8 @@ export function registerMcpBundleRoutes(app: FastifyInstance, db: Db): void {
           ...(parsed.data.approverUserId !== undefined ? { approverUserId: parsed.data.approverUserId } : {}),
           updatedAt: sql`now()`,
         })
-        .where(eq(mcpBundles.id, bundleId))
+        // compare-and-set: the step-up was decided on the approver read above
+        .where(and(eq(mcpBundles.id, bundleId), sql`${mcpBundles.approverUserId} IS NOT DISTINCT FROM ${before.approverUserId}`))
         .returning();
       if (!updated) return null;
       const approverChanged = parsed.data.approverUserId !== undefined && parsed.data.approverUserId !== before.approverUserId;
@@ -324,7 +358,7 @@ export function registerMcpBundleRoutes(app: FastifyInstance, db: Db): void {
       );
       return updated;
     });
-    if (!row) return reply.status(404).send({ error: "unknown_bundle" });
+    if (!row) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     return bundleView(row);
   });
 
@@ -353,11 +387,9 @@ export function registerMcpBundleRoutes(app: FastifyInstance, db: Db): void {
     if (added.length === 0 && removed.length === 0) return reply.status(409).send({ error: "no_change", detail: "the items are the same as the current version. Nothing was saved." });
     if (added.length > 0) {
       // ADR-0091: every existing holder would come to hold the added tools
-      const holders = await db.select().from(mcpBundleGrants).where(eq(mcpBundleGrants.bundleId, bundleId)).limit(10_000);
-      for (const g of holders) {
-        const sod = await refuseBundleSod(db, subjectOf(g), added, req.authCtx.userId ?? null);
-        if (sod) return reply.status(409).send(sod);
-      }
+      const holders = await db.select().from(mcpBundleGrants).where(eq(mcpBundleGrants.bundleId, bundleId));
+      const gate = await bundleSodGate(db, holders.map(subjectOf), added, req.authCtx.userId ?? null, bundleId);
+      if (!gate.ok) return reply.status(gate.status).send(gate.body);
       // a version that adds tools widens access for every holder at once: a governed relaxation
       const su = await requireStepUp(db, req, reply, {
         kind: "settings_relax",
@@ -467,8 +499,8 @@ export function registerMcpBundleRoutes(app: FastifyInstance, db: Db): void {
           : (await db.select({ l: teams.name }).from(teams).where(eq(teams.id, subject.id)))[0]?.l;
     if (label === undefined) return reply.status(404).send({ error: `unknown_${subject.kind}` });
     const items = (await versionItems(db, bundleId, bundle.currentVersion)).flatMap((i) => (i.serverId ? [{ serverId: i.serverId, toolName: i.toolName }] : []));
-    const sod = await refuseBundleSod(db, subject, items, req.authCtx.userId ?? null);
-    if (sod) return reply.status(409).send(sod);
+    const gate = await bundleSodGate(db, [subject], items, req.authCtx.userId ?? null, bundleId);
+    if (!gate.ok) return reply.status(gate.status).send(gate.body);
     const row = await db.transaction(async (tx) => {
       const [created] = await tx
         .insert(mcpBundleGrants)

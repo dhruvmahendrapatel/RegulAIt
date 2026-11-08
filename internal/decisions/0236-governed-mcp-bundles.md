@@ -80,6 +80,14 @@ bundles the kernel names the most direct holding (user, then role, then team).
 - A version that **adds** a tool widens access for every holder at once: it is a `settings_relax` step-up, and the
   ADR-0091 separation-of-duties gate runs for every added tool and every existing holder. A version that only
   **removes** tools narrows and needs neither.
+- The SoD gate is **one batched check** per write (review of #697). The identities a grant or a widening version
+  reaches are resolved in at most three queries (direct users, role assignees, team members), and
+  `refuseSodFootprint` (`sod.ts`) checks every (identity, tool) pair in memory. Its query count depends only on the
+  enabled SoD rules and their sides, never on how many tools or people are involved (a test pins this). All the
+  bundle's tools are checked as ONE mint, so a bundle that would confer every side of a rule by itself is refused.
+  A write that would reach more than `MCP_BUNDLE_SOD_MAX_IDENTITIES` (10,000) people is refused (`422
+  bundle_holders_too_many`) rather than checked in part, because a truncated holder list would let the unchecked
+  members through.
 - Every bundle table advances the governance policy epoch, so a decision taken before a change is re-checked.
 - "Delete" archives: the bundle confers nothing from then on and its history stays.
 
@@ -108,6 +116,15 @@ was copied from it.
   (`mcp_bundles.approver_user_id`, rule id `bundle-dangerous-tool`), through the same Approvals Queue as every other
   hold. With no approver it is refused (fail closed). A grant with `max_tier = dangerous` is refused (400) while the
   bundle names no approver.
+- **Four eyes** (security review of #697): when the caller is the bundle's own approver, the dangerous call is denied
+  (fail closed), approved or not. Otherwise an admin could name themselves approver and hold the bundle, or the
+  approver could simply be a holder, and sign off their own dangerous calls. The rule lives in the kernel, so it holds
+  however the approver came to hold the bundle (directly, through a role, or through a team joined later). Another
+  approver must be named on the bundle for that person to use the tool.
+- **Naming an approver is a relaxation** (review of #697): who signs off is part of what the hold enforces, so
+  `PATCH /v1/mcp-bundles/:bundleId` with a new, non-null `approverUserId` is a `settings_relax` step-up, written with
+  a compare-and-set on the approver it was decided on. Clearing the approver only tightens (dangerous calls then fail
+  closed) and needs no step-up.
 - The hold applies to the bundle path only. A direct or role grant keeps its own rules, and a tool held both ways is
   decided by the direct or role grant first, as before.
 
@@ -166,8 +183,12 @@ pillar-1 grant tiers). Built only on what is already in use: Drizzle, zod, Fasti
 
 - **UI**: a bundle editor and grant screen on the MCP governance pages (posted on #453 for the Governed Designer
   session).
-- **SoD holdings**: the ADR-0091 gate checks every bundle MINT, but its read-time holdings do not yet include
-  bundle-held tools, so a later direct grant is not checked against a bundle-held side.
+- **SoD holdings (known gap, named by the review of #697)**: the ADR-0091 gate checks every bundle MINT (a grant, or a
+  version that adds tools), but not membership changes after it. **A user who joins a team or is assigned a role after
+  a bundle was granted to it gets the bundle's tools with no SoD check**, and the read-time holdings
+  (`holdersOfSelector`) do not yet include bundle-held tools, so a later direct grant is not checked against a
+  bundle-held side either. The fix is to add bundle grants to the holdings and to the team-join and role-assignment
+  mint footprints. Until then the read-time violators view does not show these pairs.
 - **Certification campaigns** (ADR-0090) do not yet list bundle grants as reviewable items.
 - **Simulation page** label for the new `bundle-tool-allow-list` rule (web).
 - **RLS** (ADR-0234) for the bundle tables with the next slice.

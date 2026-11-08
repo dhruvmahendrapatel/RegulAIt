@@ -1310,6 +1310,21 @@ function evaluateTool(input: EvaluationInput): Decision {
           `${refLabel(g.bundleId, g.bundleName)}, which names no approver — failing closed`,
       };
     }
+    if (g.approverUserId === userId) {
+      // review of #697 (security): four eyes. The bundle's approver may not sign off their own dangerous call (they
+      // could name themselves approver and hold the bundle, or simply also be a holder), so it fails closed, approved
+      // or not. Another approver must be named on the bundle for them to use the tool.
+      chain.push({ rule: "bundle-tool-allow-list", outcome: "deny", grantId: g.id });
+      return {
+        effect: "deny",
+        ruleId: BUNDLE_DANGEROUS_RULE_ID,
+        ruleChain: chain,
+        reason:
+          `'${tool.name}' on server ${serverRef} is a dangerous tool held through MCP bundle ` +
+          `${refLabel(g.bundleId, g.bundleName)}, whose approver is the caller; a dangerous call needs a different ` +
+          `person to sign it off — failing closed`,
+      };
+    }
     if (input.approvedApprovalId) {
       chain.push({ rule: "bundle-tool-allow-list", outcome: "satisfied-by-approval", grantId: input.approvedApprovalId });
     } else {

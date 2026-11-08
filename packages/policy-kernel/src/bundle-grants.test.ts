@@ -172,6 +172,21 @@ describe("ADR-0236 bundle grants in the kernel", () => {
       expect(d.ruleId).toBe(BUNDLE_DANGEROUS_RULE_ID);
     });
 
+    it("the bundle's approver cannot sign off their own dangerous call (four eyes, fail closed)", () => {
+      const own = writeGrant({ toolTier: "dangerous", maxTier: "dangerous", approverUserId: USER });
+      const held = evaluate(input(writeTool, { bundleToolGrants: [own] }));
+      expect(held.effect).toBe("deny");
+      expect(held.ruleId).toBe(BUNDLE_DANGEROUS_RULE_ID);
+      // an approval row (even one they decided themselves) does not get it through
+      const approved = evaluate(input(writeTool, { bundleToolGrants: [own], approvedApprovalId: "ap-self" }));
+      expect(approved.effect).toBe("deny");
+      expect(approved.ruleId).toBe(BUNDLE_DANGEROUS_RULE_ID);
+      // a different person holding the same bundle is still held for that approver
+      const other = evaluate({ ...input(writeTool, { bundleToolGrants: [own] }), userId: "user-b" });
+      expect(other.effect).toBe("require_approval");
+      expect(other.approverUserId).toBe(USER);
+    });
+
     it("the dangerous hold applies only to the bundle path: a direct grant keeps its own rules", () => {
       const d = evaluate(
         input(writeTool, {

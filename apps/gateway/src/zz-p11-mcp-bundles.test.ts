@@ -44,6 +44,8 @@ import { loadEntitlements } from "./entitlements.js";
 import { buildApp } from "./app.js";
 import { governedEvaluate } from "./governed-evaluate.js";
 import { MCP_BUNDLE_RULE_IDS } from "./mcp-bundles.js";
+import { checkSodFootprint } from "./sod.js";
+import { randomUUID } from "node:crypto";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -378,6 +380,23 @@ describe("MCP bundles: scope tiers (read < write < dangerous)", () => {
     expect(d.ruleId).toBe(BUNDLE_DANGEROUS_RULE_ID);
   });
 
+  it("naming an approver is a relaxation (step-up), and an approver can never sign off their own dangerous call", async () => {
+    const asked = await req("PATCH", `/v1/mcp-bundles/${tiersId}`, { approverUserId: adminId }, adminKey);
+    expect(asked.statusCode, asked.body).toBe(403);
+    expect(asked.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax" });
+    // the holder is named approver of their own dangerous tool: four eyes, so the call fails closed
+    expect((await req("PATCH", `/v1/mcp-bundles/${tiersId}`, { approverUserId: tiered })).statusCode).toBe(200);
+    const own = await decide(tiered, WRITE);
+    expect(own.effect).toBe("deny");
+    expect(own.ruleId).toBe(BUNDLE_DANGEROUS_RULE_ID);
+    expect(own.reason).toContain("different person");
+    // another approver: the call pauses for them again
+    expect((await req("PATCH", `/v1/mcp-bundles/${tiersId}`, { approverUserId: adminId })).statusCode).toBe(200);
+    const held = await decide(tiered, WRITE);
+    expect(held.effect).toBe("require_approval");
+    expect(held.approverUserId).toBe(adminId);
+  });
+
   it("clearing the dangerous flag is a relaxation: an API key is asked for a step-up", async () => {
     const asked = await req("PUT", `/v1/mcp-tools/${writeToolId}/dangerous`, { dangerous: false }, adminKey);
     expect(asked.statusCode, asked.body).toBe(403);
@@ -385,5 +404,64 @@ describe("MCP bundles: scope tiers (read < write < dangerous)", () => {
     const ok = await req("PUT", `/v1/mcp-tools/${writeToolId}/dangerous`, { dangerous: false });
     expect(ok.statusCode, ok.body).toBe(200);
     expect((await decide(tiered, WRITE)).effect).toBe("allow");
+  });
+});
+
+describe("MCP bundles: the SoD gate is one batched check (review of #697)", () => {
+  let ruleId: string;
+
+  it("a bundle that would confer both sides of a rule by itself is refused, for a team as for a user", async () => {
+    const rule = await req("POST", "/v1/sod/rules", {
+      name: `p11-sod-${RUN}`,
+      reason: "reading and writing the same ledger is maker-checker",
+      a: { kind: "mcp_tool", objectId: serverId, toolName: READ.name },
+      b: { kind: "mcp_tool", objectId: serverId, toolName: WRITE.name },
+    });
+    expect(rule.statusCode, rule.body).toBe(201);
+    ruleId = rule.json().id;
+    const r = await mkBundle("p11-sod", [item(READ), item(WRITE)]);
+    expect(r.statusCode, r.body).toBe(201);
+    const id = r.json().id as string;
+    const toUser = await req("POST", `/v1/mcp-bundles/${id}/grants`, { userId: outsider });
+    expect(toUser.statusCode, toUser.body).toBe(409);
+    expect(toUser.json()).toMatchObject({ error: "sod_conflict", ruleId });
+    const toTeam = await req("POST", `/v1/mcp-bundles/${id}/grants`, { teamId });
+    expect(toTeam.statusCode, toTeam.body).toBe(409);
+    const [refusal] = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.ruleId, "sod-conflict-refused"), eq(auditLog.objectId, ruleId)))
+      .orderBy(desc(auditLog.seq))
+      .limit(1);
+    expect(refusal?.detail).toMatchObject({ mintKind: "mcp_bundle", mint: { bundleId: id, toolCount: 2 } });
+  });
+
+  it("the number of queries does not grow with the tools or the people a grant reaches", async () => {
+    const counting = (n: { calls: number }) =>
+      new Proxy(db, {
+        get(target, prop, receiver) {
+          const v = Reflect.get(target, prop, receiver);
+          if (typeof v === "function" && ["select", "selectDistinct", "execute", "insert", "update", "delete"].includes(String(prop))) {
+            return (...args: unknown[]) => {
+              n.calls++;
+              return (v as (...a: unknown[]) => unknown).apply(target, args);
+            };
+          }
+          return v;
+        },
+      }) as Db;
+    const caps = (names: string[]) => names.map((toolName) => ({ kind: "mcp_tool" as const, objectId: serverId, toolName, mode: null }));
+    const small = { calls: 0 };
+    await checkSodFootprint(counting(small), { capabilities: caps([READ.name]), userIds: [outsider] });
+    const big = { calls: 0 };
+    const manyTools = Array.from({ length: 200 }, (_, i) => `p11_many_${i}_${RUN}`);
+    const manyPeople = Array.from({ length: 5_000 }, () => randomUUID());
+    await checkSodFootprint(counting(big), { capabilities: caps([READ.name, ...manyTools]), userIds: [outsider, ...manyPeople] });
+    expect(small.calls).toBeGreaterThan(0);
+    expect(big.calls).toBe(small.calls);
+  });
+
+  afterAll(async () => {
+    if (ruleId) await req("DELETE", `/v1/sod/rules/${ruleId}`);
   });
 });
