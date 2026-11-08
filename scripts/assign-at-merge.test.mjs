@@ -10,6 +10,7 @@ import {
   UnassignedMigrationsError,
   WHEN_STEP,
   assignPending,
+  isJournalPrefix,
   resolveMigrationsFolder,
 } from "../packages/db/src/pending-migrations.ts";
 import { apply, plan } from "./assign-at-merge.mjs";
@@ -235,15 +236,31 @@ describe("pending migrations in runMigrations (ADR-0252)", () => {
     expect(existsSync(staged.folder)).toBe(false);
   });
 
-  it("leaves pending files out of a journal cut short on purpose, so a later full run applies them once", () => {
+  it("never applies pending files on top of a journal prefix (an upgrade test's truncated copy)", () => {
     const r = repo();
     const folder = path.join(r.root, "packages/db/migrations");
     r.write("packages/db/migrations/pending/gamma.sql", "select 1;\n");
-    // a copy-and-cut test drops the newest entry from the journal but keeps its file
-    r.write("packages/db/migrations/meta/_journal.json", JSON.stringify(journal("0279_a")));
-    const cut = resolveMigrationsFolder(folder, {});
-    expect(cut.folder).toBe(folder);
-    expect(cut.provisional).toEqual([]);
+    // what an upgrade test does: copy the folder and cut the journal back to an earlier migration
+    const journalPath = path.join(folder, "meta/_journal.json");
+    const full = JSON.parse(readFileSync(journalPath, "utf8"));
+    writeFileSync(journalPath, JSON.stringify({ ...full, entries: full.entries.slice(0, 1) }, null, 2) + "\n");
+    expect(isJournalPrefix(folder)).toBe(true);
+    const env = { REGULAIT_MIGRATIONS_UNASSIGNED: "apply" };
+    const staged = resolveMigrationsFolder(folder, env);
+    // the prefix is migrated as it stands: no provisional numbers, so nothing collides with 0281_b
+    expect(staged.folder).toBe(folder);
+    expect(staged.provisional).toEqual([]);
+    // still fail closed without the disposable-database switch
+    expect(() => resolveMigrationsFolder(folder, {})).toThrow(UnassignedMigrationsError);
+    // the full journal again: the pending file is applied after it
+    writeFileSync(journalPath, JSON.stringify(full, null, 2) + "\n");
+    expect(isJournalPrefix(folder)).toBe(false);
+    const fullRun = resolveMigrationsFolder(folder, env);
+    try {
+      expect(fullRun.provisional.map((a) => a.to)).toEqual(["0282_gamma.sql"]);
+    } finally {
+      fullRun.cleanup();
+    }
   });
 });
 

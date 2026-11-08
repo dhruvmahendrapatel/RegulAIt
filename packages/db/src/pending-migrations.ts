@@ -100,31 +100,30 @@ export class UnassignedMigrationsError extends Error {
   }
 }
 
-/** true when the folder holds a numbered migration file the journal does not list (a journal cut short on purpose) */
-function isCutJournal(migrationsFolder: string, journal: Journal): boolean {
-  const listed = new Set(journal.entries.map((e) => `${e.tag}.sql`));
-  return readdirSync(migrationsFolder).some((f) => NUMBERED_RE.test(f) && !listed.has(f));
-}
-
 /**
  * The folder `migrate` should read. With no pending files, the folder itself. With pending files and
  * `REGULAIT_MIGRATIONS_UNASSIGNED=apply`, a temporary copy in which they are numbered as `assignPending` would number
- * them now; `cleanup` removes it. A journal cut short (see `isCutJournal`) is read as written, without the pending
- * files. Anything else throws `UnassignedMigrationsError`.
+ * them now; `cleanup` removes it. Anything else throws `UnassignedMigrationsError`.
  */
+/** true when the folder holds a numbered migration its journal does not list: the journal is a prefix of the folder */
+export function isJournalPrefix(migrationsFolder: string, journal: Journal = readJournal(migrationsFolder)): boolean {
+  const tags = new Set(journal.entries.map((e) => e.tag));
+  return readdirSync(migrationsFolder).some((f) => NUMBERED_RE.test(f) && !tags.has(f.slice(0, -4)));
+}
+
 export function resolveMigrationsFolder(
   migrationsFolder: string,
   env: Record<string, string | undefined> = process.env,
 ): { folder: string; provisional: Assignment[]; cleanup: () => void } {
   const pending = pendingFiles(migrationsFolder);
   if (pending.length === 0) return { folder: migrationsFolder, provisional: [], cleanup: () => {} };
-  const current = readJournal(migrationsFolder);
-  // A journal cut short on purpose (a test that migrates to an older migration first: zz-dbguard-0185 and the other
-  // copy-and-cut suites) leaves out numbered files that are still in the folder. Pending files are numbered after the
-  // head, so they do not belong to such a journal: applying them there would give them a provisional `when` below the
-  // head's, and the later full run would apply them a second time. The cut journal is migrated as written.
-  if (isCutJournal(migrationsFolder, current)) return { folder: migrationsFolder, provisional: [], cleanup: () => {} };
   if (env[UNASSIGNED_ENV] !== "apply") throw new UnassignedMigrationsError(pending);
+  const current = readJournal(migrationsFolder);
+  // A folder whose journal stops short of its numbered files is a migration to an earlier point (an upgrade test
+  // copies the folder and truncates the journal). Pending files belong after the full journal only: numbered on top of
+  // a prefix they would take the numbers of real migrations and run against a schema they were not written for. So
+  // they are not applied there; the journal prefix is migrated as it stands.
+  if (isJournalPrefix(migrationsFolder, current)) return { folder: migrationsFolder, provisional: [], cleanup: () => {} };
   const { journal, assignments } = assignPending(current, pending);
   const tmp = mkdtempSync(path.join(tmpdir(), "regulait-migrations-"));
   mkdirSync(path.join(tmp, "meta"));
