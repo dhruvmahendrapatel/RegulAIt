@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 
 // §5 role-bundled AGENT + CONNECTOR grants (ADR-0014), end-to-end through the
 // gateway: a role that bundles an agent + a connector confers them to an
@@ -21,6 +22,7 @@ const BOOT = "test-bootstrap-token";
 const AUTH = { authorization: `Bearer ${BOOT}` };
 
 let db: Db;
+let restoreConnectorAttribution: (() => Promise<void>) | undefined;
 let app: ReturnType<typeof buildApp>;
 let userId: string;
 let roleId: string;
@@ -40,6 +42,8 @@ async function authFor(uid: string): Promise<{ authorization: string }> {
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0251: these calls pin behaviour other than the attribution mandate, so they relax it by name
+  restoreConnectorAttribution = await relaxGovernanceGatesForTest(db, { connectorAttributionRequired: false });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
 
   const user = await app.inject({
@@ -76,6 +80,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreConnectorAttribution?.();
   await app.close();
 });
 

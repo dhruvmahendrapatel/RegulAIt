@@ -1,4 +1,4 @@
--- Migration 0312. ADR-0259 (P35): discovery of MCP client configs on employee machines, through the read-only
+-- Pending migration endpoint_mcp_config_discovery (numbered at merge, ADR-0252). ADR-0259 (P35): discovery of MCP client configs on employee machines, through the read-only
 -- ADR-0195 SD4 endpoint agent. Hand-authored (never drizzle-kit generate). Re-runnable: every statement is idempotent.
 --
 -- 1. `discovery_settings.endpoint_mcp_config_enabled`: the org switch, default false (ADR-0180 first-load posture).

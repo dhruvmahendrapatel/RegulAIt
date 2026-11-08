@@ -90,6 +90,9 @@ export function configureTrainedDetectorRuntime(deps: RuntimeDeps): void {
 export interface TrainedDetectorRuntime {
   settings: TrainedDetectorSetting[];
   scorers: () => Promise<Map<string, ResolvedExternalScorer>>;
+  /** ADR-0237: who a third-party vendor call is attributed to (pillar 5) */
+  attribution: { userId: string | null; projectId: string | null };
+  db: Db;
 }
 
 function settingFromRow(row: GuardrailTrainedDetectorRow, scorerName: string | null): TrainedDetectorSetting {
@@ -106,7 +109,10 @@ function settingFromRow(row: GuardrailTrainedDetectorRow, scorerName: string | n
 
 /** The enabled detectors (one indexed read), or undefined when none is on —
  * the overwhelmingly common case, which then costs nothing more. */
-export async function loadTrainedDetectorRuntime(db: Db): Promise<TrainedDetectorRuntime | undefined> {
+export async function loadTrainedDetectorRuntime(
+  db: Db,
+  attribution: { userId?: string | null | undefined; projectId?: string | null | undefined } = {},
+): Promise<TrainedDetectorRuntime | undefined> {
   const rows = await db
     .select({ row: guardrailTrainedDetectors, scorerName: externalScorers.name })
     .from(guardrailTrainedDetectors)
@@ -117,6 +123,8 @@ export async function loadTrainedDetectorRuntime(db: Db): Promise<TrainedDetecto
   let pending: Promise<Map<string, ResolvedExternalScorer>> | null = null;
   return {
     settings,
+    db,
+    attribution: { userId: attribution.userId ?? null, projectId: attribution.projectId ?? null },
     scorers: () => {
       pending ??= (async () => {
         const names = [...new Set(settings.map((s) => s.scorerName).filter((n): n is string => !!n))];
@@ -165,6 +173,12 @@ export async function runTrainedCalls(
       try {
         const verdict = await callExternalScorer(scorer, trainedScorerRequest(plan.kind, phase, text), {
           timeoutMs: plan.setting.timeoutMs,
+          // ADR-0237: a vendor adapter attributes and audits every call (ignored by the RegulAIt contract)
+          vendor: {
+            db: runtime.db,
+            attribution: { ...runtime.attribution, source: phase === "output" ? "guardrail_output" : "guardrail_input" },
+            phase: phase === "output" ? "output" : "input",
+          },
         });
         return { plan, ok: true, verdict };
       } catch {

@@ -105,7 +105,7 @@ A new signature kind, `mcp_config`, in `agents/endpoint/internal/collect/mcp.go`
 
 ### 3. The org switch (ADR-0180, secure by default)
 
-`discovery_settings.endpoint_mcp_config_enabled`, default **false** (migration 0312). `PUT /v1/discovery/settings
+`discovery_settings.endpoint_mcp_config_enabled`, default **false** (pending migration `endpoint_mcp_config_discovery`). `PUT /v1/discovery/settings
 {endpointMcpConfig: true}` is a `settings_relax` step-up bound to that change
 (`DISCOVERY_STEP_UP_KEYS.endpointMcpConfig`) and is audited as `discovery-settings-relaxed`. Turning it off is free.
 While it is off:
@@ -215,5 +215,6 @@ SD1 and SD2. The owner asked for three comparisons:
 
 ## Numbering
 
-ADR 0259 and migration 0312 (`when` 1785239000000) were assigned by the master session for P35. The PENDING row is
-P35 in §2i.
+ADR 0259 was assigned by the master session for P35. The migration was first claimed as 0312; under ADR-0252 it is
+the pending file `packages/db/migrations/pending/endpoint_mcp_config_discovery.sql`, numbered after the merge. The
+PENDING row and the STATE entry are fragments under `internal/fragments/`.

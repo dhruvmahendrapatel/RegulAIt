@@ -2319,6 +2319,11 @@ export const updateOrgSettingsSchema = z
     mcpPrivateRangesDefault: z.boolean().optional(),
     /** ADR-0219 (P10): calls to remote agents over A2A. Strict false; true relaxes it (settings_relax step-up). */
     a2aEnabled: z.boolean().optional(),
+    /** ADR-0251 (migration governed_core_resource_rules): must a connector call name a project? true (the ADR-0180 default) = an unattributed
+     * connector call is refused `attribution-required`; false (an audited admin relaxation) = it runs, metered Unattributed. */
+    connectorAttributionRequired: z.boolean().optional(),
+    /** ADR-0251 (migration governed_core_resource_rules): the same mandate for calls to remote agents over A2A. */
+    a2aAttributionRequired: z.boolean().optional(),
     /** ADR-0097: the MCP ADMISSION posture ('enforce' is the strict default since ADR-0181). 'off' = no manifest
      * scan runs at all and behaviour is byte-identical to pre-0097. 'log' =
      * every manifest sync is scanned and the verdict/findings are recorded on
@@ -4845,6 +4850,7 @@ export * from "./receipts/verify.js";
 
 // ADR-0187 decisions 185–192: the built-in CyberSecEval eval datasets (pure: pins, mapping, digests).
 export * from "./eval-datasets/cyberseceval.js";
+export * from "./eval-datasets/injection-baselines.js";
 // ADR-0188 S7: REGULAIT_PUBLIC_URL parsed one way, by the gateway and by engine runners
 export * from "./public-url.js";
 // ADR-0195 SD1: the v2 shadow-AI catalogue (v1 frozen inside it), seed rows, and the pure repo analyser
@@ -4862,6 +4868,8 @@ export * from "./mcp-upstream-credential.js";
 export * from "./library-lifecycle.js";
 // ADR-0220: trained runtime detectors (PII recogniser, injection classifier, harm model) behind the external-scorer contract
 export * from "./trained-detectors.js";
+// ADR-0237: native adapters for third-party guardrail providers (OpenAI Moderation, Azure AI Content Safety, Lakera Guard)
+export * from "./guardrail-vendor-adapters.js";
 // ADR-0224 (P13 c): privacy operations — records of processing, data-subject requests, the processing limit
 export * from "./privacy-ops.js";
 
@@ -4872,3 +4880,5 @@ export * from "./framework-imports.js";
 export * from "./supplier-portal.js";
 // ADR-0222 (P13(a)): fairness testing — the group metrics, thresholds and outcome (pure)
 export * from "./fairness.js";
+// ADR-0261 (P37): third-party security telemetry ingest — the DefenseClaw JSONL parser and mapping (pure)
+export * from "./third-party-ingest/index.js";

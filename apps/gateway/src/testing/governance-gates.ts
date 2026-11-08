@@ -36,6 +36,9 @@ export interface GovernanceGates {
   requireMcpAttribution: boolean;
   keyCustodyEnforced: boolean;
   requirePreviewBeforeActivate: boolean;
+  /** ADR-0251: the attribution mandate on connector and A2A calls */
+  connectorAttributionRequired: boolean;
+  a2aAttributionRequired: boolean;
 }
 
 /** the ADR-0181 defaults — what `restore()` writes back */
@@ -48,6 +51,8 @@ export const STRICT_GOVERNANCE_GATES: GovernanceGates = {
   requireMcpAttribution: true,
   keyCustodyEnforced: true,
   requirePreviewBeforeActivate: true,
+  connectorAttributionRequired: true,
+  a2aAttributionRequired: true,
 };
 
 /** every SB2 gate relaxed — for suites written before ADR-0181 that pin
@@ -61,6 +66,8 @@ export const LAX_GOVERNANCE_GATES: GovernanceGates = {
   requireMcpAttribution: false,
   keyCustodyEnforced: false,
   requirePreviewBeforeActivate: false,
+  connectorAttributionRequired: false,
+  a2aAttributionRequired: false,
 };
 
 async function write(db: Db, g: Partial<GovernanceGates>): Promise<void> {
@@ -69,6 +76,8 @@ async function write(db: Db, g: Partial<GovernanceGates>): Promise<void> {
     ...(g.dispatchAttributionRequired !== undefined ? { dispatchAttributionRequired: g.dispatchAttributionRequired } : {}),
     ...(g.mrmEnforced !== undefined ? { mrmEnforced: g.mrmEnforced } : {}),
     ...(g.mrmStalenessRecertEnabled !== undefined ? { mrmStalenessRecertEnabled: g.mrmStalenessRecertEnabled } : {}),
+    ...(g.connectorAttributionRequired !== undefined ? { connectorAttributionRequired: g.connectorAttributionRequired } : {}),
+    ...(g.a2aAttributionRequired !== undefined ? { a2aAttributionRequired: g.a2aAttributionRequired } : {}),
   };
   const icp = {
     ...(g.requireProjectAttribution !== undefined ? { requireProjectAttribution: g.requireProjectAttribution } : {}),
