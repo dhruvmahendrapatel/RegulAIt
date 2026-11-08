@@ -1,6 +1,6 @@
 ---
 phase: demo-prep-live-integrations-merged
-last_updated: 2026-10-29
+last_updated: 2026-11-07
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -34,6 +34,8 @@ roadmap: ../product/ROADMAP.md
 - **Owner, to finish:** turn on the merge queue for `main` (merge commit) and make the required checks report on
   `merge_group`. The master enqueues with `gh pr merge --merge --auto` from then on
   (CONTRIBUTING_PARALLEL_SESSIONS §8).
+
+**2026-11-07 - P-01 in progress: one governed decision core (owner "Yes, ADR then build", #453).** [ADR-0251](../decisions/0251-one-governed-decision-core.md) (Proposed) puts model, connector, MCP and A2A calls behind one sequence: posture, entitlement, attribution mandate, data scope, rate limits, ABAC, approval rules, cost attribution, audit; error is deny. ARCHITECTURE.md now describes the four paths as built (only MCP had approval rules, rate limits and ABAC; A2A never called the kernel). Builder lane `builder/gov-core-unify`, migration `governed_core_resource_rules` (pending, numbered at merge time, ADR-0252); slices connector, model, A2A, then ABAC v5 after #707. **Slices 1-3 built on #715** (connector `02ddcff1`, model `99ed2831`, A2A `3563f475`): connector and A2A calls get the attribution mandate (on by default), rate limits and approval rules; model rate limits enforced by default and model approval rules refuse (no queue yet); A2A now meets the kill switch, safe modes and literacy gate. Each slice has a differential test. Latency: +1.3 ms p50 / +2.2-2.7 ms p95 with no rules (budget amended to +3 ms, see ADR As built). Open: ABAC v5 after #707; queue/replay for model and A2A approvals.
 
 **2026-11-07 - S-03 (PM inbound webhook replay) is fixed on `builder/s03-pm-webhook-replay` ([ADR-0010 amendment](../decisions/0010-pm-inbound-sync-webhooks-plus-read-through.md), migration `pm_webhook_deliveries` (pending, numbered at merge)).**
 - `pm_webhook_deliveries` records each delivery once per connection (body hash, plus the provider delivery id); a duplicate is 200, audited `pm-webhook-duplicate`, and not processed; 30-day prune on the boot timers.

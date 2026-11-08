@@ -157,7 +157,7 @@ import {
 } from "./conversations.js";
 import { ownerChangeGate, resolveRegistrationOwner, withOwnership } from "./ownership.js";
 import { CHANGED_CONCURRENTLY, checkStepUp, requireStepUp } from "./step-up.js";
-import { checkModelRateLimit } from "./model-rate-limits.js";
+import { governedModelGate } from "./governed-core.js";
 import { resolveDispatchUsage } from "./usage-extractors.js";
 import {
   prepareConversationContext,
@@ -1398,17 +1398,22 @@ async function dispatchAttempt(
         };
   }
 
-  // ADR-0212 (P12 c) — THE MODEL RATE LIMIT. In this one shared core so every
-  // dispatch path inherits it, after the lifecycle gate and before any provider
-  // work: a refusal costs no tokens and writes no usage row (it is audited).
-  // Off until an admin opts in, so by default this is one indexed read.
-  const modelLimit = await checkModelRateLimit(db, {
+  // ADR-0251 slice 2 — THE ONE GOVERNED CORE on a model dispatch: the model rate limit (ADR-0212, enforced by
+  // default since migration governed_core_resource_rules) and the model approval rules. In this one shared core so every dispatch path
+  // inherits it, after the lifecycle gate and before any provider work: a refusal costs no tokens and writes no
+  // usage row (it is audited). An error is a deny.
+  const coreRefusal = await governedModelGate(db, {
     userId,
     agentId: served.id,
     agentName: served.name,
+    mode: args.mode ?? "execute",
     projectId: args.projectId ?? null,
   });
-  if (modelLimit) return modelLimit;
+  if (coreRefusal) {
+    if (coreRefusal.auditLogId) sink.auditLogId = coreRefusal.auditLogId;
+    const { auditLogId: _auditLogId, ...refusal } = coreRefusal;
+    return refusal;
+  }
 
   // ADR-0066 §2/§3 — THE VIRTUAL-KEY CEILING. Placed FIRST, before the MRM
   // gate and before any provider work, for the same reason every gate below is
