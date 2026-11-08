@@ -59,4 +59,13 @@ describe("no two tracked files differ only by case or extension (G10-G15-VERIFY)
     ]);
     expect(findBasenameCollisions(["x/go.mod", "x/GO.mod"])).toEqual([["x/GO.mod", "x/go.mod"]]);
   });
+
+  it("lets Composer's and Dart's manifest/lock pairs stand together (ADR-0257), but nothing else with their stem", () => {
+    expect(findBasenameCollisions(["c/composer.json", "c/composer.lock", "d/pubspec.yaml", "d/pubspec.lock"])).toEqual([]);
+    expect(findBasenameCollisions(["c/composer.json", "c/composer.lock", "c/Composer.php"])).toEqual([
+      ["c/Composer.php", "c/composer.json", "c/composer.lock"],
+    ]);
+    // only the real pairs: a manifest beside the OTHER toolchain's lock is still a collision
+    expect(findBasenameCollisions(["x/pubspec.json", "x/pubspec.lock"])).toEqual([["x/pubspec.json", "x/pubspec.lock"]]);
+  });
 });

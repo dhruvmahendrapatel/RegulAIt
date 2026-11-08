@@ -25,7 +25,7 @@ import { describe, expect, it } from "vitest";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const PKG = (name: string) => path.join(ROOT, "packages", name, "src");
-const ENGINES = ["engine-garak", "engine-modelscan", "engine-promptfoo"] as const;
+const ENGINES = ["engine-garak", "engine-modelscan", "engine-promptfoo", "engine-spikee"] as const;
 
 const SPAWN_IMPORT = /["'`](?:node:)?child_process["'`]/;
 /** every import edge of one module, by specifier; type-only imports and re-exports are left out (TypeScript erases them) */
