@@ -106,7 +106,7 @@ flow was found that needs execute during planning: the seed leaves plan-only bef
   do by hand for egress relaxations), and ONLY when the refusal is the bootstrap credential's own; API-key and session
   mints, and every other refusal, reach the test unchanged. It hooks app instances through Fastify's `fastify.initialization`
   diagnostics channel and loads no gateway module at setup time, so a suite's own `vi.mock()`s still apply. It relaxes
-  the suite database (`DATABASE_URL`) only; the eleven suites that run on their own scratch database and enrol their own
+  the suite database (`DATABASE_URL`) only; the twelve suites that run on their own scratch database and enrol their own
   steppable admin wrap their bootstrap mint in `relaxStepUpAround(db, ...)` by hand.
 - Tests: `adr0250-grant-mint-step-up.test.ts` (all eight routes: admin API key refused, no grant refused, another
   mint's grant refused and unspent, the exact grant allowed and spent); `plan-only.test.ts` (the opt-in regression test
