@@ -122,6 +122,8 @@ async function mockGateway(page: Page, patch: Partial<MockState> = {}): Promise<
       if (p === "/v1/inventory/graph") return json(route, { nodes: [], edges: [], summary: { nodes: 0, edges: 0, unattachedRisks: 0 } });
     }
     if (p === "/v1/risks/scenarios") return json(route, { scenarios: [], note: "" });
+    // signed links ON with one live link, so a write control would show if the tab offered one
+    if (p === `/v1/use-cases/${UC}/feedback-links`) return json(route, { enabled: true, links: [{ id: "l1", createdAt: "2026-11-01T09:00:00Z", expiresAt: "2026-11-20T09:00:00Z", uses: 2, maxUses: 50, state: "active" }] });
     return json(route, {});
   });
   return s;
@@ -270,6 +272,37 @@ test.describe("the decision summary", () => {
 });
 
 test.describe("access: the record opens to its owner, read only", () => {
+  // #745 review (code + security, 2026-11-08): the owner reads the record; no tab offers the owner a write. The same
+  // pages as an admin show each control, so a missing control is the gate working, not a page that did not load.
+  const WRITES: Array<{ tab: string; ready: RegExp; controls: Array<{ role: "button" | "combobox"; name: RegExp }> }> = [
+    { tab: "risks", ready: /Wrong field extracted/, controls: [{ role: "button", name: /^Link control$/ }, { role: "button", name: /^Save residual$/ }, { role: "button", name: /Remove.*ISO42001-A\.6\.2\.4/ }] },
+    { tab: "incidents", ready: /EU AI Act role of the organisation/, controls: [{ role: "combobox", name: /EU AI Act role/ }] },
+    { tab: "feedback", ready: /Public signed links/, controls: [{ role: "button", name: /^Create link$/ }, { role: "button", name: /^Revoke/ }] },
+  ];
+  for (const w of WRITES) {
+    test(`${w.tab}: an admin has its write controls; the owner reads the tab without them`, async ({ page }) => {
+      await mockGateway(page, { me: ADMIN });
+      await page.goto(`${RECORD}?tab=${w.tab}`);
+      await expect(page.getByText(w.ready).first()).toBeVisible();
+      for (const c of w.controls) await expect(page.getByRole(c.role, { name: c.name }).first()).toBeVisible();
+
+      await page.unrouteAll({ behavior: "ignoreErrors" });
+      await mockGateway(page, { me: OWNER, canMarkMet: false });
+      await page.goto(`${RECORD}?tab=${w.tab}`);
+      await expect(page.getByText(w.ready).first()).toBeVisible();
+      for (const c of w.controls) await expect(page.getByRole(c.role, { name: c.name })).toHaveCount(0);
+    });
+  }
+
+  test("stack and audit: the owner gets no write control there either", async ({ page }) => {
+    await mockGateway(page, { me: OWNER, canMarkMet: false });
+    for (const tab of ["stack", "audit"]) {
+      await page.goto(`${RECORD}?tab=${tab}`);
+      await expect(page.getByRole("heading", { level: 1, name: "Claims document intake" })).toBeVisible();
+      await expect(page.getByRole("tabpanel").getByRole("button", { name: /^(Add|Link|Save|Remove|Revoke|Create|Delete|Edit|Halt|Approve)\b/ })).toHaveCount(0);
+    }
+  });
+
   test("a signed-in non-admin owner opens it; admin-only parts say they are not available", async ({ page }) => {
     await mockGateway(page, { me: OWNER, canMarkMet: false });
     await page.goto(RECORD);

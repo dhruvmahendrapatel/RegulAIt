@@ -297,7 +297,7 @@ export default function UseCaseOverviewPage() {
           />
         ) : null}
         {tab === "frameworks" ? <FrameworksTab query={frameworks} /> : null}
-        {tab === "risks" ? <RisksTab useCaseId={id} risks={data.risks} acceptance={acceptance} canEdit={isAdmin || Boolean(auth?.userId && auth.userId === data.useCase.ownerUserId)} onRefresh={refresh} /> : null}
+        {tab === "risks" ? <RisksTab useCaseId={id} risks={data.risks} acceptance={acceptance} canEdit={isAdmin} onRefresh={refresh} /> : null}
         {tab === "stack" ? <StackTab useCaseId={id} data={data.stack} /> : null}
         {tab === "dependencies" ? <Card title="Dependencies and inherited risk"><DependencyGraphPanel useCaseId={id} /></Card> : null}
         {tab === "approvals" ? <ApprovalsTab approvals={data.approvals} userName={userName} /> : null}
@@ -783,7 +783,7 @@ function RisksTab({ useCaseId, risks, acceptance, canEdit, onRefresh }: { useCas
         </div></Card>;
       })}
       {/* this use case's own risks come first; the generic library sits below them */}
-      {canEdit ? <RiskLibraryPicker useCaseId={useCaseId} onAdded={() => void onRefresh()} /> : <p className={v.dim}>Adding risks and controls is open to the use case&apos;s owner and administrators.</p>}
+      {canEdit ? <RiskLibraryPicker useCaseId={useCaseId} onAdded={() => void onRefresh()} /> : <p className={v.dim}>Risks and their controls are changed by an administrator. You can read them here.</p>}
     </div>
   );
 }
