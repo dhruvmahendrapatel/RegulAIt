@@ -25,6 +25,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { genericInbound } from "./testing/pm-webhook.js";
 import { decryptSecret } from "./secrets.js";
 import { executeGovernedToolCall, MCP_SERVER_DISABLED_RULE_ID, resolveNodeToolContext } from "./mcp-proxy.js";
 import { CONNECTOR_DISABLED_RULE_ID } from "./connector-call.js";
@@ -518,7 +519,8 @@ describe("G6 PM connections: edit, replace token, rotate the webhook secret", ()
     return { id: r.json().id as string, secret: r.json().webhookSecret as string };
   }
   const hook = (name: string, secret: string) =>
-    app.inject({ method: "POST", url: `/v1/pm/webhooks/${N(name)}`, headers: { "x-regulait-webhook-secret": secret }, payload: { externalId: "nope", event: "updated" } });
+    // S-03 (main): the static x-regulait-webhook-secret header is refused; a delivery is signed with the secret
+    app.inject({ method: "POST", url: `/v1/pm/webhooks/${N(name)}`, ...genericInbound(secret, { externalId: "nope", event: "updated" }) });
 
   it("edits project and drift resolution (audited with both values); the name cannot change", async () => {
     const { id } = await mkPm("p-edit");
