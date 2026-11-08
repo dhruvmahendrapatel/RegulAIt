@@ -45,6 +45,19 @@ function isGoModulePair(group) {
   return names.length === 2 && names[0] === "go.mod" && names[1] === "go.sum";
 }
 
+/**
+ * ADR-0257: the same holds for Composer's `composer.json`/`composer.lock` and Dart's `pubspec.yaml`/`pubspec.lock`
+ * (the client compatibility images): each toolchain fixes both names, and neither file is ever imported.
+ */
+const MANIFEST_LOCK_PAIRS = [
+  ["composer.json", "composer.lock"],
+  ["pubspec.lock", "pubspec.yaml"],
+];
+function isManifestLockPair(group) {
+  const names = group.map((f) => String(f).split(/[\\/]/).pop()).sort();
+  return names.length === 2 && MANIFEST_LOCK_PAIRS.some(([a, b]) => names[0] === a && names[1] === b);
+}
+
 /** groups of 2+ paths that collide, each sorted, in path order */
 export function findBasenameCollisions(files) {
   const byKey = new Map();
@@ -55,7 +68,7 @@ export function findBasenameCollisions(files) {
     byKey.set(k, list);
   }
   return [...byKey.values()]
-    .filter((g) => g.length > 1 && !isGoModulePair(g))
+    .filter((g) => g.length > 1 && !isGoModulePair(g) && !isManifestLockPair(g))
     .map((g) => [...g].sort())
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
 }
