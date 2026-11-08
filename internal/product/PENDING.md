@@ -18,6 +18,8 @@ this file.
 
 <!-- fold:pending newest-first -->
 
+**P28 — A permissively licensed injection and harm classifier. Built (ADR-0247); two owner decisions open.** Llama Guard and Prompt Guard are excluded by the Llama licence (ADR-0176/0177). PIGuard (MIT) is the default injection classifier and ProtectAI v2 a build-time alternative; toxic-bert stays for harm with our own labels; both are served as parity-checked ONNX with no PyTorch at run time. On the five ADR-0244 sets PIGuard has pooled recall 79.4% and benign FPR 19.1% (ProtectAI 77.8% / 30.0%), but no model meets a 15% benign-FPR bar on every set (web-agent: PIGuard 72%, ProtectAI 50%). Open: (1) which model is the default; (2) PIGuard's CC BY-NC training sources, or (c) a fine-tune of deberta-v3-base on permissively licensed agent-style data (needs a GPU).
+
 **P35: MCP client configs on employee machines (from the security and infra review, owner 2026-11-07).** The endpoint agent saw that an MCP host's config existed, but not which MCP servers it names, what they run, which carry embedded secrets, which tools are auto-approved, or which are not governed here.
 
 **Built (backend and agent), [ADR-0259](../decisions/0259-endpoint-mcp-config-discovery.md), pending migration `endpoint_mcp_config_discovery`.**
