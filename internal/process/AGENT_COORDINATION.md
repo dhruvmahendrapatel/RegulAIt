@@ -70,8 +70,18 @@ C (knowledge management).
   rebase, squash or force-push, and never `git add -A`.
 - **Open-PR cap: at most 5 open PRs per lane** (#738). Finish or close one before opening a sixth; a parked prototype
   becomes a draft issue, not an open PR.
-- **No sibling-branch merges.** Never merge one lane's branch into another. A stacked PR targets its parent PR's
-  branch as its base.
+- **No sibling-branch merges.** Never merge one lane's branch into another. CI enforces it
+  (`scripts/preflight-branch-merges.mjs`, in the `ci / scope` job): every merge in the PR may bring in only commits
+  already on `main`.
+- **Stacked PRs.** A PR that needs another open PR's work targets that PR's branch as its base, and carries the
+  `stacked` label. Only the master adds `stacked`: ask in "To Claude" with both PR numbers.
+  - The check reads the labels when it runs, so after the label is added, re-run the failed `ci / scope` job (or push).
+  - When the parent merges, retarget the stacked PR to `main`, merge `main` into it and push (a base change alone
+    starts no CI run). The master then removes the label.
+  - **The label is a convention, not an access control.** Every agent here acts as the owner's account and can add the
+    label itself; a PR can also edit `ci.yml` or the script to skip the step; and on a fork PR, adding a label needs
+    triage permission. The backstops are the independent review (which reads every workflow diff) and the master's
+    merge audit.
 - **Before you push:**
   - build the whole workspace;
   - run the tests for what you touched;

@@ -2460,7 +2460,7 @@ an old unscrubbed span. Deliberate — the write is the chance, and rewriting hi
 data is a worse precedent.
 
 **2026-09-12 — S11 and S12 closed, and R0 reconciled.**
-([ADR-0110](../decisions/0110-backup-rescan-reopen-and-preflight-gate.md), migration 0109.)
+([ADR-0110](../decisions/0110-rescan-reopens-a-miss-and-the-preflight-runs.md), migration 0109.)
 
 **S11 — the owner decided a re-scan SHOULD re-open a miss, and that is now what happens.** One
 `backup_runs` row per finding: the idempotency read keys on `finding_id` + `kind='backup'`
@@ -3009,7 +3009,7 @@ object_type) and two approvals joins for the copilot.
 **2026-08-22 (night) — B6 closed: the last three buildable residuals are live-retested; the
 copilot's hallucination class is shut twice over; a parallel-sessions protocol now governs this
 repo.** Since the paragraph below: the L6d two-layer narration fix landed and live-retested,
-then [ADR-0096](../decisions/0096-copilot-entity-aware-planning.md) replaced disclosure
+then [ADR-0096](../decisions/0096-entity-aware-copilot-planning.md) replaced disclosure
 with structural refusal — deterministic entity extraction (the model may never assert
 existence), entitlement-scoped exact-match resolution, and four honest outcomes
 (resolved+filtered with a proven row delta, 422 unresolved, 422 ambiguous-with-candidates,
