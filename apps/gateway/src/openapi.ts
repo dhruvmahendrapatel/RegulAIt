@@ -262,8 +262,10 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
     responseNote:
       "At most 100 rows, newest first by `requestedAt` unless `order=asc`. `status` takes one status or a " +
       "comma-separated list. `total` counts every row the same filters and visibility match, and `hasMore` is " +
-      "true when `total` exceeds the rows returned.",
+      "true when `total` exceeds the rows returned. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the " +
+      "shared list contract (ADR-0226) under the same visibility and filters (`order` is then refused).",
   },
+  "GET /v1/approvals/export.xlsx": { summary: "The approvals queue as an Excel file: every approval the caller may see (the same visibility as the queue) that matches the filters, in the requested sort, with the requested `columns` in order. Audited." },
   "POST /v1/approvals/:approvalId/decide": {
     summary: "Approve or deny a pending request. Non-admin by design — the named approver is usually not an admin.",
     // ADR-0180 A2: the decide body also accepts measured conditions
@@ -277,7 +279,8 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
   "GET /v1/projects/:projectId/costs": { summary: "Per-project AI spend, attributed at the point of every gateway call (pillar 5)." },
   "GET /v1/projects/:projectId/costs.csv": { summary: "The same ledger as a streamed CSV export." },
   "GET /v1/cost-events": { summary: "The raw cost ledger, one row per priced gateway call." },
-  "GET /v1/usage-events": { summary: "The raw usage ledger, one row per governed call (priced or not)." },
+  "GET /v1/usage-events": { summary: "The raw usage ledger, one row per governed call (priced or not). With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226), with `userId`, `objectType` and `excludeObjectType` filters." },
+  "GET /v1/usage-events/export.xlsx": { summary: "The usage ledger as an Excel file: every event the caller may see (a non-admin: their own) that matches the filters, in the requested sort, with the requested `columns` in order. Audited." },
   "GET /v1/usage-events/summary": {
     summary:
       "Spend by agent, connector, MCP tool, project or UTC day, aggregated over every usage event in a window " +

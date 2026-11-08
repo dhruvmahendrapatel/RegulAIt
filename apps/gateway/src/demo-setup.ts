@@ -392,7 +392,7 @@ if (seeded.status >= 400 && packList.length === 0) {
 }
 
 /** the project everything in the demo is attributed to */
-const demoProject: Json | undefined = ((await call("GET", "/v1/projects")).projects ?? []).find(
+const demoProject: Json | undefined = ((await call("GET", "/v1/projects?archived=include")).projects ?? []).find(
   (p: Json) => p.name === "demo-project",
 );
 

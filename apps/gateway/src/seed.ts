@@ -686,7 +686,7 @@ for (const [teamId, userId] of [
 // --- projects ------------------------------------------------------------
 // Budgets are scaled to the seeded demo spend below, so budget-vs-actual is a
 // real reading rather than a rounding error against a placeholder cap.
-const projectList = (await call("GET", "/v1/projects")).projects ?? [];
+const projectList = (await call("GET", "/v1/projects?archived=include")).projects ?? [];
 async function ensureProject(payload: Json): Promise<string> {
   const existing = projectList.find((p: Json) => p.name === payload.name);
   if (existing) return existing.id;
@@ -748,7 +748,7 @@ async function ensureInitiative(name: string, costCenter?: string): Promise<stri
 const platformInitiativeId = await ensureInitiative("Platform Modernization", "CC-PLAT");
 // Group the demo project under it — only when it isn't already there, so a
 // re-seed neither re-PATCHes nor overwrites a later manual regrouping.
-const demoRow = ((await call("GET", "/v1/projects")).projects ?? []).find(
+const demoRow = ((await call("GET", "/v1/projects?archived=include")).projects ?? []).find(
   (p: Json) => p.id === demoProjectId,
 );
 if (!demoRow?.initiativeId) {

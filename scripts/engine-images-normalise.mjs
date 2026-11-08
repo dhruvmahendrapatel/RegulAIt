@@ -15,7 +15,7 @@
  * lock). Left in, a lock merge would change the next build's inputs and its digest, and the next lock, without end.
  * The build context therefore carries the all-null form `renderTs` writes before the first publish, and the publish
  * gate (engine-images-gate.mjs) does not count the file as an image input. The rewrite is strict: anything but the
- * exact 18 value lines of the generated shape fails the build.
+ * exact value lines of the generated shape (six per engine in ENGINE_IDS) fails the build.
  *
  * `modules-yaml`: pnpm writes node_modules/.modules.yaml with the time of the install (`prunedAt`) and the hoisted
  * packages in the order the concurrent install finished them. The keys are sorted and `prunedAt` is set from
@@ -47,7 +47,10 @@ export function neutraliseLock(text) {
     n += 1;
     return `${indent}${key}: ${key === "publishGeneration" ? "0" : "null"},`;
   });
-  if (n !== 18) throw new NormaliseError(`images-lock: expected 18 value lines (3 engines x 6 fields), found ${n}; the generated shape changed`);
+  // ADR-0245: six value lines per engine block, counted from the module itself (this script also runs inside the image
+  // build, where the lock script is not in the context); a module with no engine block is refused
+  const engines = text.split("\n").filter((line) => /^  [a-z]+: Object\.freeze\(\{$/.test(line)).length;
+  if (engines === 0 || n !== engines * 6) throw new NormaliseError(`images-lock: expected ${engines * 6} value lines (${engines} engines x 6 fields), found ${n}; the generated shape changed`);
   const result = out.join("\n");
   if (/sha256:[0-9a-f]{64}|"[0-9a-f]{40}"/.test(result)) throw new NormaliseError("images-lock: a digest or commit is still present after the rewrite");
   return result;

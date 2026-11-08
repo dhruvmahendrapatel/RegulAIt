@@ -5,13 +5,13 @@
  * context answers 409 with what blocks; force-delete requires a recorded
  * reason and provenance survives.
  */
-import { useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../../../api/client";
 import { withStepUp } from "../../../stepup/stepUp";
 import type { Team } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
 import { ago } from "../../../api/format";
-import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Select } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, RowActions, Select } from "../../../ui/kit";
 import { DataList } from "../../../ui/DataList";
 import {
   ReasonModal,
@@ -26,6 +26,9 @@ import {
 } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+
+// G10 (ADR-0206): the rename dialog is its own chunk, loaded when an admin opens it
+const RenameModal = lazy(() => import("./RenameModal").then((m) => ({ default: m.RenameModal })));
 
 async function deleteWithBody(path: string, body: unknown): Promise<void> {
   const res = await fetch(path, {
@@ -58,6 +61,7 @@ export default function TeamsPage() {
   const [memberUser, setMemberUser] = useState("");
   const [removeMember, setRemoveMember] = useState<{ team: Team; userId: string; name: string } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<Team | null>(null);
+  const [renameTarget, setRenameTarget] = useState<Team | null>(null);
   const [forceDelete, setForceDelete] = useState<{
     team: Team;
     contextItems: number;
@@ -242,9 +246,19 @@ export default function TeamsPage() {
                 align: "right",
                 action: true,
                 render: (team) => (
-                  <Button size="sm" variant="danger" onClick={() => setConfirmDelete(team)}>
-                    delete team
-                  </Button>
+                  <RowActions
+                    slot="0"
+                    secondary={
+                      <Button size="sm" aria-label={`Rename team ${team.name}`} onClick={() => setRenameTarget(team)}>
+                        Rename
+                      </Button>
+                    }
+                    rest={
+                      <Button size="sm" variant="danger" onClick={() => setConfirmDelete(team)}>
+                        delete team
+                      </Button>
+                    }
+                  />
                 ),
               },
             ]}
@@ -256,6 +270,11 @@ export default function TeamsPage() {
         </Card>
       </div>
 
+      {renameTarget && (
+        <Suspense fallback={null}>
+          <RenameModal noun="team" target={renameTarget} onClose={() => setRenameTarget(null)} />
+        </Suspense>
+      )}
       <ConfirmModal
         open={removeMember !== null}
         title={`Remove ${removeMember?.name} from ${removeMember?.team.name}?`}

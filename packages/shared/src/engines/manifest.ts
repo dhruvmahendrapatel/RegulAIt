@@ -19,6 +19,7 @@
 import { GARAK_ENGINE_VERSION, GARAK_USAGE_DATA_ENV, GARAK_WORKER_SELF_TEST_SWITCH, garakJudgeSets, garakManifestSets, garakReducedSet } from "./garak.js";
 import { ENGINE_IMAGES_LOCK } from "./images-lock.js";
 import { MODELSCAN_ENGINE_VERSION, modelscanReducedSet } from "./modelscan.js";
+import { SPIKEE_ENGINE_VERSION, SPIKEE_USAGE_DATA_ENV, SPIKEE_WORKER_SELF_TEST_SWITCH, spikeeJudgeSets, spikeeManifestSets, spikeeReducedSet } from "./spikee.js";
 import { ADMISSION_SCAN_ENGINES } from "./admission-scan.js";
 import { PROMPTFOO_ENGINE_VERSION, PROMPTFOO_USAGE_DATA_ENV, promptfooManifestSets, promptfooReducedSet } from "./promptfoo.js";
 import { ENGINE_SELF_TEST_FUTURE_SKEW_MS, ENGINE_SELF_TEST_MAX_AGE_SECONDS, type EngineId, type EngineKind, type EngineNotRunReason, type RunnerSelfTest } from "./contract.js";
@@ -312,6 +313,39 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
       "maintainer count",
       "transitive licences: as mcpscanner, plus numpy's (ADR-0187 decision 106); yara-x's statically linked Rust crates carry Apache-2.0 WITH LLVM-exception, Zlib and Unicode-3.0 terms awaiting an owner decision; pcodedmp (GPL-3.0) is excluded",
       "the runner and sandbox path (phase 2); the driver and the image's offline smoke scan were measured on 2026-11-07 (ADR-0242 §3)",
+    ],
+  },
+  // ADR-0245: spikee (indirect prompt injection in documents). Off, and no image until its first signed publish:
+  // the lock's null digest means no runner passes the self-test, so it cannot be enabled (secure by construction).
+  spikee: {
+    id: "spikee",
+    kind: "redteam",
+    displayName: "Spikee",
+    version: SPIKEE_ENGINE_VERSION,
+    // bump with every build change; plus one per recorded publish (the lock moves it)
+    generation: 1 + ENGINE_IMAGES_LOCK.spikee.publishGeneration,
+    imageDigest: ENGINE_IMAGES_LOCK.spikee.manifestDigest,
+    licence: "Apache-2.0",
+    maintainerCount: null,
+    usageDataEnv: { ...SPIKEE_USAGE_DATA_ENV, [SPIKEE_WORKER_SELF_TEST_SWITCH]: "1" },
+    workerAttestedSwitches: [...Object.keys(SPIKEE_USAGE_DATA_ENV), SPIKEE_WORKER_SELF_TEST_SWITCH],
+    needsModelAccess: true,
+    // its admitted datasets are judged by local canary/regex judges: no judge model
+    requiresJudge: false,
+    judgeSets: spikeeJudgeSets(),
+    // as garak (ADR-0190 I5): the runner holds the runner key and never runs spikee; the task sandbox holds only the run key
+    credentialIsolation: true,
+    taskImage: ENGINE_IMAGES_LOCK.spikee.imageId,
+    taskEntry: { command: "/usr/local/bin/node", args: ["/app/dist/task-main.js"] },
+    sets: spikeeManifestSets(),
+    airGappedReducedSet: spikeeReducedSet(),
+    lastVerified: "2026-11-07",
+    reCheckBy: "2027-02-07",
+    unverified: [
+      "image digest and signature: no publish is recorded yet (engines/images.lock.json), so the engine cannot be enabled",
+      "maintainer count",
+      "transitive licences inside the image beyond the hash-pinned closure's metadata (CI's image scan)",
+      "runtime behaviour inside the built image (the worker's egress test, an air-gapped run)",
     ],
   },
 });

@@ -5724,6 +5724,8 @@ the screen is tracked on #453. Open:
 - JSONC/TOML configs, a gap until a maintained parser passes ADR-0176;
 - the agent config route serving the opt-in once the SD4 pack signer lands.
 
+**ADR-0247 (builder, 2026-11-07/08): a permissively licensed injection and harm classifier, served as ONNX (P28).** `agents/trained-detectors/` bakes `leolee99/PIGuard` (MIT) as the default injection classifier and keeps `protectai/deberta-v3-base-prompt-injection-v2` as `--build-arg INJECTION_MODEL=protectai`; harm stays `unitary/toxic-bert` with reasons mapped to our own labels (`HARM_LABELS.md`). A new `export` build stage (hash-locked `export-requirements.txt`) writes ONNX graphs offline from stock Transformers classes and fails unless they match PyTorch (same token ids, |dp| < 1e-4); the runtime closure is ONNX Runtime + tokenizers + Presidio/spaCy, no PyTorch. `injection-baselines.expected.json` now records PIGuard (threshold 0.5): NotInject FPR 11.5%, InjecAgent recall 80.0%, AgentDojo 76.3% / 11.3%, JailbreakBench 83.3% / 26.0%, web-agent 72.0% / 72.0%, pooled 79.4% / 19.1% (ProtectAI: 43.4%, 84.3%, 72.6% / 3.1%, 75.3% / 1.0%, 60.0% / 50.0%, 77.8% / 30.0%). No candidate meets a 15% benign-FPR bar on every set. Owner decisions open: the default model; PIGuard's CC BY-NC 4.0 training sources (Alpaca, no_robots); or a fine-tune on permissive agent-style data. The image stays outside the shipped product (ADR-0220 §8).
+
 <!-- fold:state-decisions -->
 
 ## Open Questions

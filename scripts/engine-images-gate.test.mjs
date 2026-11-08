@@ -14,7 +14,7 @@ describe("ENG-IMG publish gate: the input set of the real repository", () => {
   const pkgs = readWorkspace();
 
   it("each engine's closure is its package, the runner and shared (the shim stage builds exactly these)", () => {
-    for (const id of ENGINE_IDS) expect(workspaceClosure(id, pkgs)).toEqual([`packages/engine-${id}`, "packages/engine-runner", "packages/shared"]);
+    for (const id of ENGINE_IDS) expect(workspaceClosure(id, pkgs)).toEqual([`packages/engine-${id}`, "packages/engine-runner", "packages/shared"].sort());
   });
 
   it("an engine's inputs never include another engine's directory, the lock, the signatures or the generated module", () => {
@@ -161,7 +161,7 @@ describe("ENG-IMG publish gate: the decision, on a throwaway repository", () => 
 
   it("force publishes every engine; a never-published engine publishes", () => {
     expect(decide(base, { force: true }).publish).toEqual(ENGINE_IDS);
-    const r = plan({ engines: { promptfoo: { sourceCommit: null }, modelscan: { sourceCommit: base }, garak: { sourceCommit: base } } }, { changed: () => [] });
+    const r = plan({ engines: { promptfoo: { sourceCommit: null }, modelscan: { sourceCommit: base }, garak: { sourceCommit: base }, spikee: { sourceCommit: base } } }, { changed: () => [] });
     expect(r.publish).toEqual(["promptfoo"]);
     expect(r.engines.promptfoo.reason).toBe("never published");
   });
