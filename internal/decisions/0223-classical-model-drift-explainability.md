@@ -44,7 +44,7 @@ re-testing after a model change (#615).
    use the reference's bin edges.
 4. **Alerts through the one alerts table.** A `drift` report opens or refreshes a `classical_model_drift` episode on
    `governance_alerts` in the same transaction as the report and its audit row, with the owner and due time the
-   [ADR-0182](0182-batch-d4-accountability.md) S5 rules derive. The [ADR-0157](0157-governance-monitor.md) monitor
+   [ADR-0182](0182-accountability-records-d4.md) S5 rules derive. The [ADR-0157](0157-governance-monitor-alerts.md) monitor
    reads the latest report per monitor and resolves the episode when it is back within thresholds; an `insufficient`
    latest report holds the episode however many follow, so an open drift alert keeps its severity, title and feature
    list. Three `insufficient` reports in a row also raise a separate low-severity "not evaluable" episode under its
