@@ -248,8 +248,12 @@ describe("compose and Caddy wiring for the tunnel front", () => {
   });
 
   it("the shared routes overwrite every forwarding header and strip CF-Connecting-IP for both upstreams", () => {
+    // the two upstreams (Keycloak and the gateway); the optional ADR-0258 bot check after them has its own test
+    // (anubis-public-pages.test.mjs)
+    const upstreams = routes.slice(0, routes.indexOf("(regulait_public_gate_off)"));
+    expect(upstreams.length).toBeGreaterThan(0);
     for (const header of ["X-Forwarded-For {args[0]}", "X-Real-IP {args[0]}", "X-Forwarded-Proto {args[1]}", "X-Forwarded-Host {host}", "-CF-Connecting-IP"]) {
-      expect(routes.split(`header_up ${header}\n`).length - 1, header).toBe(2);
+      expect(upstreams.split(`header_up ${header}\n`).length - 1, header).toBe(2);
     }
   });
 });

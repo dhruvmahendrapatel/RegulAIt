@@ -23,6 +23,7 @@ const dbSrc = path.resolve(here, "../../../packages/db/src");
 
 /** every gateway module that writes a `receiptClass: "decision"` audit row (B2's list) */
 const DECISION_WRITERS = [
+  "a2a.ts", // ADR-0219/ADR-0251: remote agent calls (insert(auditLog) on the chained handle)
   "agent-setup-assist.ts", // ADR-0205: the setup assistant's refused model draft (insert(auditLog) on the chained handle)
   "agents-connectors.ts", // agent dispatch: lifecycle, PII, egress and fallback refusals
   "app.ts", // advisory evaluate callouts and builder approval resumes
@@ -37,8 +38,10 @@ const DECISION_WRITERS = [
   "delegated-evaluate.ts", // ADR-0188 delegated dispatch
   "engine-runs.ts",
   "engine-tasks.ts", // ADR-0190 I5: an engine run's task start (its entitlement decision, with its engine_worker placement)
+  "governed-core.ts", // ADR-0251: a model dispatch refused by the governed core (insert(auditLog), chained handle)
   "governed-evaluate.ts", // the `governance-policy-changed` refusal row of the MCP tool, MCP protocol and connector paths
   "guardrails.ts",
+  "mcp-high-risk.ts", // ADR-0246 addendum: a call to a high-risk MCP server refused (or passed on) by the target gate
   "mcp-identity-assertion.ts", // ADR-0188 S8: an opted-in server's call refused because no identity assertion can be made
   "mcp-protocol.ts", // MCP protocol methods
   "model-supply-chain.ts", // ADR-0216: a dispatch refused because a cited model file fails the supply-chain check

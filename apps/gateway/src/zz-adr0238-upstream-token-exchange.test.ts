@@ -244,7 +244,7 @@ beforeAll(async () => {
   await runMigrations(db, migrationsFolder);
   restores.push(await relaxStrictAdmissionForTest(db));
   restores.push(await relaxIdentityForTest(db, { mfaRequired: "off" }));
-  restores.push(await relaxGovernanceGatesForTest(db, { requireMcpAttribution: false }));
+  restores.push(await relaxGovernanceGatesForTest(db, { requireMcpAttribution: false, connectorAttributionRequired: false }));
   restores.push(await relaxDataPostureForTest(db, { org: { defaultPiiMode: "none" }, interception: false, guardrails: false }));
   const [prior] = await db.select({ mode: sql<string>`step_up_mode`, actions: sql<unknown>`step_up_actions` }).from(sql`org_settings`).where(sql`id = ${ORG_SETTINGS_ID}`);
   restores.push(async () => {

@@ -152,7 +152,7 @@ export interface SodSelector {
 }
 
 /** a capability a mint would confer (same vocabulary as a selector side) */
-interface Capability {
+export interface Capability {
   kind: SodCapabilityKind;
   objectId: string;
   toolName: string | null;
@@ -562,7 +562,30 @@ export async function checkSodMint(
   // decision time excludes it and nothing else
   const rules = opts.excludeRuleId ? allRules.filter((r) => r.id !== opts.excludeRuleId) : allRules;
   if (rules.length === 0) return null;
-  const { capabilities, userIds } = await mintFootprint(db, mint);
+  return checkSodFootprintAgainst(db, rules, await mintFootprint(db, mint));
+}
+
+/** what a grant confers: every listed capability on every listed identity */
+export interface SodFootprint {
+  capabilities: Capability[];
+  userIds: string[];
+}
+
+/**
+ * ADR-0236 (review of #697): one SoD check for a whole footprint. The query count depends on the enabled rules and
+ * their sides only (rules, selectors, one resolution and at most one holder map per side), never on how many
+ * capabilities or identities the footprint carries; every identity is checked in memory. A footprint conferring
+ * several capabilities at once is checked as ONE mint, so a grant that would confer every side of a rule by itself is
+ * refused (the "bundle-internal" case), which a per-capability loop would miss.
+ */
+export async function checkSodFootprint(db: Db, footprint: SodFootprint): Promise<SodConflict | null> {
+  const rules = await db.select().from(sodRules).where(eq(sodRules.enabled, true)).orderBy(sodRules.createdAt);
+  if (rules.length === 0) return null;
+  return checkSodFootprintAgainst(db, rules, footprint);
+}
+
+async function checkSodFootprintAgainst(db: Db, rules: SodRuleRow[], footprint: SodFootprint): Promise<SodConflict | null> {
+  const { capabilities, userIds } = footprint;
   if (capabilities.length === 0 || userIds.length === 0) return null;
   const selectorsByRule = await loadRuleSelectors(db, rules);
 
@@ -716,6 +739,32 @@ export async function refuseSodMint(
       conflict: body.conflict,
       ruleName: conflict.rule.name,
     },
+    effect: "deny",
+    ruleId: "sod-conflict-refused",
+    ruleChain: [],
+    reason: body.detail,
+  });
+  return body;
+}
+
+/**
+ * ADR-0236: `refuseSodMint` for a whole footprint (a bundle granted to a team, say): one batched check, and on conflict
+ * the same audited `sod-conflict-refused` row and 409 body. `mintDetail` names the grant on the trail.
+ */
+export async function refuseSodFootprint(
+  db: Db,
+  footprint: SodFootprint,
+  actorUserId: string | null,
+  mintDetail: Record<string, unknown> & { kind: string },
+): Promise<SodRefusalBody | null> {
+  const conflict = await checkSodFootprint(db, footprint);
+  if (!conflict) return null;
+  const body = await buildRefusalBody(db, conflict);
+  await db.insert(auditLog).values({
+    userId: actorUserId ?? conflict.userId,
+    objectType: "sod_rule",
+    objectId: conflict.rule.id,
+    detail: { mintKind: mintDetail.kind, mint: mintDetail, conflict: body.conflict, ruleName: conflict.rule.name },
     effect: "deny",
     ruleId: "sod-conflict-refused",
     ruleChain: [],

@@ -333,8 +333,10 @@ describe("#280 (4237493038): the legacy-safe audit_anchors TSA constraint, on an
     await admin.execute(sql.raw(`DROP DATABASE IF EXISTS ${UPGRADE_DB} WITH (FORCE)`));
     await admin.execute(sql.raw(`CREATE DATABASE ${UPGRADE_DB}`));
     tmp = mkdtempSync(path.join(tmpdir(), "a189-mig-"));
-    // ADR-0252: a folder cut back to an older migration carries no `pending/` files (they would run on the old schema)
-    cpSync(migrationsFolder, tmp, { recursive: true, filter: (src) => path.basename(src) !== "pending" });
+    cpSync(migrationsFolder, tmp, { recursive: true });
+    // ADR-0252: a snapshot truncated to an older migration must not carry today's unnumbered pending/ files,
+    // which would apply on top of a schema that predates the tables they reference
+    rmSync(path.join(tmp, "pending"), { recursive: true, force: true });
     const journalPath = path.join(tmp, "meta", "_journal.json");
     const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: Array<{ idx: number }> };
     journal.entries = journal.entries.filter((e) => e.idx < 182);

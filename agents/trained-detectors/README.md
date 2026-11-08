@@ -44,6 +44,17 @@ docker run -d --name trained-detectors -e DETECTOR_API_KEY=<random> -p 8080:8080
 3. **Policies & gates → Guardrails → Trained detectors:** turn each detector on and choose the service. The defaults are
    strict: mode `block`, and a failed or slow call is treated as a hit.
 
+## Offline baseline (ADR-0244)
+
+`eval_baselines.py` runs the injection classifier, through `server.load_models` and `detector_core.score_injection`,
+over the vendored injection snapshots in `packages/shared/src/eval-datasets/vendor/injection-baselines/` and, with
+`--write`, records its precision, recall and FPR in `injection-baselines.expected.json` (not gated in CI, because this
+image is not built there). Run it after any change to the model pin, the windowing or the default threshold:
+
+```sh
+DETECTOR_MODELS_DIR=<dir filled by fetch_models.py> python3 eval_baselines.py --write
+```
+
 ## Limits
 
 - English only. The models catch what they were trained on; they miss novel phrasings and can fire on benign text

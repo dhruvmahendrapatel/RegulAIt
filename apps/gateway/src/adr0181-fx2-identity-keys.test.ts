@@ -337,8 +337,10 @@ describe("ADR-0181 FX2 migration 0160 — no grandfathering, every change audite
   beforeAll(async () => {
     // a copy of the migrations folder whose journal stops at 0159
     partial = mkdtempSync(path.join(tmpdir(), "fx2-migrations-"));
-    // ADR-0252: a folder cut back to an older migration carries no `pending/` files (they would run on the old schema)
-    cpSync(migrationsFolder, partial, { recursive: true, filter: (src) => path.basename(src) !== "pending" });
+    cpSync(migrationsFolder, partial, { recursive: true });
+    // ADR-0252: a snapshot truncated to an older migration must not carry today's unnumbered pending/ files,
+    // which would apply on top of a schema that predates the tables they reference
+    rmSync(path.join(partial, "pending"), { recursive: true, force: true });
     const journalPath = path.join(partial, "meta", "_journal.json");
     const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: Array<{ idx: number; tag: string }> };
     expect(journal.entries.some((e) => e.tag === "0160_strict_identity_followups")).toBe(true);

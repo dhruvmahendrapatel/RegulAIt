@@ -70,3 +70,7 @@ apps/web/e2e/artifacts/demo/fallback-deck.html
 # merge leftovers (PR #633 review: a 15k-line schema.ts.orig was committed by accident)
 *.orig
 *.rej
+
+# Python bytecode (ADR-0242: the engine drivers are Python)
+__pycache__/
+*.pyc
