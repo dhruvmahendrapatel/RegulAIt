@@ -42,7 +42,16 @@ name: Security
 #
 # Cost: the repository is public, so standard GitHub-hosted runners do not draw
 # on the private-repo minutes budget ci.yml's arithmetic describes. Docs-only
-# PRs still run: a secret pasted into a Markdown file is still a secret.
+# PRs still run the secret scan: a secret pasted into a Markdown file is still a secret.
+#
+# ADR-0262, PR trim (owner decision 2026-11-07). On a pull request the `engines` job also reads the PR's
+# scope (.github/actions/ci-scope), and three jobs run only when their inputs changed:
+#   SAST (CodeQL)                    any code (anything but docs)
+#   Image scan and SBOMs (Trivy)     the root image's build context, the lockfile or this workflow
+#   Engine image scan and SBOM (*)   engines/**, any Dockerfile, the lockfile or an image workflow
+# The gitleaks and pnpm-audit gates run on every PR. Everything runs on a merge group, a push to main, the nightly
+# schedule and a manual run. FAIL CLOSED: the two required jobs run unless the scope said 'false', so a scope that
+# failed or wrote nothing runs them (`!cancelled() && ... != 'false'`, never `== 'true'`).
 
 on:
   pull_request:
@@ -51,9 +60,9 @@ on:
     types: [checks_requested]
   push:
     branches: [main]
-  # New advisories arrive without a commit of ours: re-run the gates weekly.
+  # New advisories arrive without a commit of ours: re-run the gates nightly (the full suite, ADR-0262).
   schedule:
-    - cron: '17 5 * * 1'
+    - cron: '17 5 * * *'
   workflow_dispatch:
 
 concurrency:
@@ -77,6 +86,8 @@ env:
 jobs:
   sast:
     name: SAST (CodeQL)
+    needs: engines
+    if: ${{ !cancelled() && needs.engines.outputs.code != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     # security-events: write lets the analyze step upload the SARIF to the
@@ -110,13 +121,13 @@ jobs:
       # tarball sha256 (downloaded 2026-10-23; the action does not check it):
       # 64518dc413c8e7b5733fee2489e830a899bb1e3f28c8873b5869d5cc90164c5c
       # Reproduce locally with the commands in docs/ops/SECURITY_CI.md.
-      - uses: github/codeql-action/init@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+      - uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           languages: javascript-typescript, actions
           build-mode: none
           tools: https://github.com/github/codeql-action/releases/download/codeql-bundle-v2.27.3/codeql-bundle-linux64.tar.gz
 
-      - uses: github/codeql-action/analyze@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+      - uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           category: /security-gate
           upload: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'always' || 'never' }}
@@ -175,8 +186,9 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
-          # the gates' own code and configuration (unquoted on purpose: a path list)
-          WATCHED: .gitleaks.toml security/ .github/workflows/security.yml .github/workflows/release-ai-bom.yml scripts/release-ai-bom.mjs packages/shared/src/bom/release-switch.ts packages/shared/src/bom/release-ai-bom.ts packages/shared/src/bom/release-sbom-identity.ts scripts/security-gate.mjs scripts/security-cosign-verify.sh scripts/security-suppressions.mjs scripts/security-runtime-contents.mjs Dockerfile :(glob)engines/*/Dockerfile :(glob)engines/*/licence-gate.mjs :(glob)engines/*/licence-allow.json
+          # the gates' own code and configuration, and the CI scope that decides whether CodeQL and Trivy run on a PR
+          # (unquoted on purpose: a path list)
+          WATCHED: .gitleaks.toml security/ .github/actions/ scripts/ci-scope.mjs scripts/ci-scope.test.mjs .github/workflows/security.yml .github/workflows/release-ai-bom.yml scripts/release-ai-bom.mjs packages/shared/src/bom/release-switch.ts packages/shared/src/bom/release-ai-bom.ts packages/shared/src/bom/release-sbom-identity.ts scripts/security-gate.mjs scripts/security-cosign-verify.sh scripts/security-suppressions.mjs scripts/security-runtime-contents.mjs Dockerfile :(glob)engines/*/Dockerfile :(glob)engines/*/licence-gate.mjs :(glob)engines/*/licence-allow.json
         run: |
           set -euo pipefail
           changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- ${WATCHED})"
@@ -240,7 +252,7 @@ jobs:
 
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: 22
+          node-version-file: .node-version
 
       # corepack resolves pnpm from `packageManager` and checks the download
       # against the npm registry's signature. The version check then holds
@@ -271,6 +283,8 @@ jobs:
 
   image:
     name: Image scan and SBOMs (Trivy)
+    needs: engines
+    if: ${{ !cancelled() && needs.engines.outputs.image != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     services:
@@ -492,19 +506,31 @@ jobs:
   # Discovery is the filesystem, not a list: every engines/*/Dockerfile is an
   # engine image, so the PR that adds an engine directory is the PR that first
   # builds, scans and (once on main) signs it.
+  #
+  # It also reads the run's scope (ADR-0262, PR trim): `code` and `image` gate CodeQL and Trivy, and on a PR
+  # that changes no engine input the engine list is empty, so no engine image is built or scanned.
   engines:
-    name: Discover engine images
+    name: Scope and engine images
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       engines: ${{ steps.find.outputs.engines }}
+      code: ${{ steps.scope.outputs.code }}
+      image: ${{ steps.scope.outputs.image }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 2
+
+      - id: scope
+        uses: ./.github/actions/ci-scope
 
       - name: Find engines/*/Dockerfile
         id: find
+        env:
+          # 'false' only on a PR whose scope read cleanly and found no engine input; anything else builds them all
+          ENGINES_CHANGED: ${{ steps.scope.outputs.engines }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -521,6 +547,9 @@ jobs:
             names+=("$name")
           done
           if [ "${#names[@]}" -eq 0 ]; then
+            json='[]'
+          elif [ "$ENGINES_CHANGED" = false ]; then
+            echo "This PR changes no engine image input; the engine images are built and scanned at merge time."
             json='[]'
           else
             json="$(printf '%s\n' "${names[@]}" | jq -R . | jq -cs .)"

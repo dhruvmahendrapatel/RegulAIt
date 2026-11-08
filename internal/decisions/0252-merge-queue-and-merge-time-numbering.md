@@ -100,6 +100,10 @@ Existing numbered migrations, journal entries and ADR rows are untouched.
 
 ## Addendum (2026-11-07): fast checks on a PR, the full suite at merge time
 
+> **Now [ADR-0262](0262-ci-split-fast-pr-checks-full-suite-at-merge.md).** This addendum and the PR trim below record
+> the decisions as made on 2026-11-07; ADR-0262 is the current record of the CI split, with the review fixes to the
+> trim. Where they differ, ADR-0262 holds.
+
 **Owner decision, 2026-11-07.** The free public-repo runner pool runs about 20 jobs at once, and a full CI run was
 about 30 jobs, so only one PR's CI ran at a time and nearly 200 runs were queued. CI is split. Built in #734
 (`.github/actions/ci-scope` and the workflow triggers), documented in CONTRIBUTING_PARALLEL_SESSIONS §4.8.
@@ -114,7 +118,7 @@ about 30 jobs, so only one PR's CI ran at a time and nearly 200 runs were queued
   outputs, never by a workflow-level path filter, so a skipped job still reports. `build-and-test` passes only if
   every part succeeded, or (a docs-only PR) every part was skipped. Required names: `build-and-test`,
   `SAST (CodeQL)`, `Secret scan (gitleaks)`, `Dependency audit (pnpm)`, `Image scan and SBOMs (Trivy)`,
-  `ui enterprise / tokens, baseline guard, bundle size`.
+  `ui enterprise / all` (the aggregate #734's review asked for).
 - `cancel-in-progress` applies to `pull_request` runs only.
 - Open source checked (ADR-0176): `dorny/paths-filter` (MIT) would do the diff, but ci.yml already refuses a
   third-party paths action in the CI path as a supply-chain surface; the decision is a `git diff` of the PR's merge
@@ -122,3 +126,30 @@ about 30 jobs, so only one PR's CI ran at a time and nearly 200 runs were queued
 - Trade-off accepted: a PR can be green and still fail in the queue on a journey, demo or browser job it did not run.
   Any branch can run the full suite by `workflow_dispatch`. The push-to-main run repeats the merge group's run on the
   same tree; the owner asked for it, and it can be dropped if runner time binds again.
+
+### PR trim (owner decision 2026-11-07, later the same day)
+
+Measured on #604 after #734: a PR still ran about 37 check runs, which queue 15 to 20 minutes on the ~20-job pool.
+The full suite on `merge_group`, a push to `main` and nightly is unchanged. On a `pull_request`:
+
+- **ui enterprise:** Chromium only. Firefox, WebKit and the screenshot pack run on a full run. `ui enterprise / all`
+  stays the one required check; it requires the browser matrix when `web` and the screenshot pack when `full`.
+- **CodeQL:** only when code changed (`code`). Its job runs unless the scope said `'false'`, so a failed scope runs it.
+- **Engine image scans and SBOMs, and the engine build-and-compare:** only when an engine's own input changed
+  (`engines`: `engines/**`, any `Dockerfile`, the lockfile, the engine packages and scripts, the engine allow-lists and
+  the gate scripts the engine scan runs, the image workflows). This is not every input: each engine Dockerfile's shim
+  stage also copies `packages/` and `apps/`, so a change there alone builds and compares the engines at merge time
+  (the engine scan is not a required check). **Trivy** for the root image only when its build context or its own gate
+  changed (`image`: also `security/image-allowlist*.json`, `scripts/security-{gate,runtime-contents,suppressions}.mjs`
+  and `scripts/security-cosign-verify.sh`, so the required scan runs on the PR that changes how it judges). Trivy fails closed like CodeQL. `security.yml` now runs
+  nightly instead of weekly, so the scans keep a nightly full run.
+- **Import cycles and the Kong integrations:** skipped on a PR whose code changes are all under `apps/web/**` (their
+  path filters; neither builds or reads `apps/web`). **The gateway shards and their coverage check are not:** they run
+  whenever `code` is true. A first cut skipped them on web-only PRs, but gateway tests read `apps/web` sources
+  (`step-up-posture-guard.test.ts` walks every product source, `apps/web` included, and six others read named web
+  files), so a web change could break them green on its PR (#737 review and security review, finding 1). Moving those
+  cross-tree tests into `build-and-test-base` would make a web-only gateway skip safe; that is a later item.
+- **Fail closed:** unchanged. An unreadable diff, an empty diff and a change to the scope rules themselves are full runs.
+  `build-and-test` judges the build, the gateway shards and their coverage check against `code`.
+- The required check names do not change.
+

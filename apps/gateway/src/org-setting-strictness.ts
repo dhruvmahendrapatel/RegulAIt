@@ -269,7 +269,16 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   mcpPrivateRangesDefault: notEqual(false),
   // ADR-0219 (P10): turning on calls to remote A2A agents opens a new egress path and a new callable
   a2aEnabled: notEqual(false),
+  // ADR-0236 (P11): turning on MCP bundles opens a new way to grant tools to many people at once
+  mcpBundlesEnabled: notEqual(false),
+  // ADR-0251: the attribution mandate for connector and A2A calls; turning it off lets calls run unattributed
+  connectorAttributionRequired: notEqual(true),
+  a2aAttributionRequired: notEqual(true),
   mcpAdmissionMode: notEqual("enforce"),
+  // ADR-0246: 'warn' serves a tool, prompt or resource that changed since approval instead of refusing it
+  mcpDefinitionPinMode: notEqual("block"),
+  // ADR-0246 addendum: 'off' lets calls to an offensive-tooling server through without the template or target checks
+  mcpHighRiskMode: notEqual("enforce"),
   minReleaseAgeDays: atLeast(7),
   credentialUnusedDays: atMost(90),
   staleCredentialAlerts: notEqual(true),
