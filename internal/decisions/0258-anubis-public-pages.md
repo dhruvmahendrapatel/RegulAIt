@@ -129,3 +129,19 @@ installer switch.
   was executed in this session; the Caddyfile and policy were written against Caddy 2.11's and Anubis 1.28.2's
   documented syntax and Anubis's config structs, and need a live run before the first deployment that turns it on.
 - No migration.
+
+## Review round 1 (2026-11-08, #729)
+
+- **Security (blocking), fixed:** Anubis sets no Content-Security-Policy and its pages are same-origin with the portals.
+  Caddy now sets the strictest CSP Anubis documents as working (v1.28.2 `content-security-policy` advice, plus
+  `frame-ancestors 'none'`) on `/.within.website/*` (replacing), and the same CSP set-if-absent on the public paths, so
+  Anubis's relayed 403 page gets it and the gateway's own CSP on allowed responses is unchanged. Pinned in
+  `scripts/anubis-public-pages.test.mjs`.
+- **Security (non-blocking), done:** the Kubernetes hook gains a NetworkPolicy: ingress only from pods labelled
+  `regulait.io/anubis-client: "true"` to 8923, no egress, so the metrics port is closed.
+- **Code (non-blocking):** the unescaped `redir={uri}` (a second query parameter is lost on return) is documented in
+  ANUBIS.md rather than changed, because Caddy has no URL-escaping placeholder for the whole request URI and the public
+  pages keep their tokens in the fragment. A live smoke test (401 → 307 → challenge; a blocked user agent → 403) and
+  adding the Anubis image to the Trivy image-scan matrix are follow-ups: the first needs a host that can run the stack,
+  the second is a security-workflow change outside this lane.
+

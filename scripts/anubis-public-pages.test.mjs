@@ -106,7 +106,8 @@ describe("Caddy: the public-page gate", () => {
     const on = snippet("regulait_public_gate_on");
     expect(on).toContain(`\t@regulait_public_pages path ${PUBLIC_PATHS}\n`);
     expect(on.match(/^\t+forward_auth /gm)).toHaveLength(1);
-    expect(on).toContain("\thandle @regulait_public_pages {\n\t\troute {\n\t\t\tforward_auth {$REGULAIT_ANUBIS_UPSTREAM:anubis:8923} {\n");
+    expect(on).toContain("\t\troute {\n\t\t\tforward_auth {$REGULAIT_ANUBIS_UPSTREAM:anubis:8923} {\n");
+    expect(on.indexOf("\t\troute {\n\t\t\tforward_auth")).toBeGreaterThan(on.indexOf("\thandle @regulait_public_pages {\n"));
     expect(on).toContain("uri /.within.website/x/cmd/anubis/api/check\n");
     expect(on).toContain("\t\t\timport regulait_gateway_proxy {args[0]} {args[1]}\n");
     // Anubis is never the gateway's proxy: the only reverse_proxy here goes to Anubis itself
@@ -127,6 +128,18 @@ describe("Caddy: the public-page gate", () => {
     for (const header of ["X-Forwarded-For {args[0]}", "X-Real-IP {args[0]}", "X-Forwarded-Proto {args[1]}", "-CF-Connecting-IP", "-X-Original-Uri"]) {
       expect(on.split(`header_up ${header}\n`).length - 1, header).toBe(2);
     }
+  });
+
+  it("on: Anubis's pages carry the strict CSP it documents, and its deny page gets it only where the gateway set none", () => {
+    const on = snippet("regulait_public_gate_on");
+    const csp = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+    expect(on).toContain(`\t\theader >Content-Security-Policy "${csp}"\n`);
+    expect(on).toContain(`\t\theader ?Content-Security-Policy "${csp}"\n`);
+    // the replacing form sits in the /.within.website/ block, the set-if-absent form on the public pages
+    expect(on.indexOf("header >Content-Security-Policy")).toBeLessThan(on.indexOf("@regulait_public_pages path"));
+    expect(on.indexOf("header ?Content-Security-Policy")).toBeGreaterThan(on.indexOf("handle @regulait_public_pages {"));
+    for (const d of ["default-src 'none'", "base-uri 'none'", "frame-ancestors 'none'", "form-action 'self'"]) expect(csp).toContain(d);
+    expect(csp).not.toMatch(/\*|https?:|'unsafe-eval'/);
   });
 
   it("on: the pass-challenge request, which can carry a sign-in link's fragment, is kept out of the access log", () => {
@@ -186,6 +199,12 @@ describe("the Kubernetes hook, the installer and the bundle name the same image"
     expect(k8s).toContain("readOnlyRootFilesystem: true");
     expect(k8s).toContain("type: ClusterIP");
     expect(k8s).toContain("replicas: 1");
+    // NetworkPolicy: only labelled ingress pods, only the HTTP port, no egress (the metrics port stays closed)
+    expect(k8s).toContain("kind: NetworkPolicy");
+    expect(k8s).toContain("matchLabels: { regulait.io/anubis-client: \"true\" }");
+    expect(k8s).toContain("- { protocol: TCP, port: 8923 }");
+    expect(k8s).toMatch(/\n {2}egress: \[\]\n/);
+    expect(k8s).not.toContain("port: 9090 }\n      ");
   });
 
   it("install.sh and build-image-bundle.sh pin the same tag and image ids", () => {

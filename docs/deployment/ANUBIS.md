@@ -71,6 +71,17 @@ exposed without the check. The profile without `on` runs Anubis but never asks i
 **Record the choice.** In your deployment record, note who turned it on, when, why, and the allow-list entries in force.
 The setting is a deployment file, not an in-app setting, so the product's audit log does not see it.
 
+**Content-Security-Policy.** Anubis sets none, and its pages share the portals' origin, so Caddy adds the strictest
+CSP Anubis documents as working to everything under `/.within.website/` (`default-src 'none'`; scripts, styles, images,
+fonts, workers and connections from `'self'` only; `'unsafe-inline'` for scripts and styles because Anubis's loader and
+critical CSS are inline; `base-uri 'none'`; `frame-ancestors 'none'`). The same CSP goes on Anubis's deny page when it
+comes back on a public path; the gateway's own CSP on every allowed response is left unchanged.
+
+**Query strings on the way back.** After the challenge, Anubis returns the visitor to the page they asked for. Caddy
+passes that address as `redir={uri}` without escaping it (as Anubis's own Caddy example does), so a public URL with more
+than one query parameter comes back with only the first. The public pages carry their sign-in tokens in the URL
+fragment, not the query, so nothing they need is lost; a page that relies on several query parameters would.
+
 ## Allow-listing a named auditor or supplier
 
 Ask them for the egress addresses their browser uses (their office or VPN range), then add an entry to your copy of
@@ -134,7 +145,8 @@ BotStopper edition can. If your organisation cannot show them on a compliance pa
 
 If you terminate TLS on your own proxy (`--tls none`), or run on Kubernetes, run Anubis beside your proxy instead.
 `infra/anubis/k8s/anubis.yaml` is a pinned single-replica Deployment and ClusterIP Service in subrequest mode, with the
-same settings as the compose profile. Then configure your proxy's external-authorisation hook (nginx `auth_request`,
+same settings as the compose profile, and a NetworkPolicy that admits only pods you label
+`regulait.io/anubis-client: "true"` to port 8923 (the metrics port stays closed) and allows no egress. Then configure your proxy's external-authorisation hook (nginx `auth_request`,
 Traefik `forwardAuth`, Caddy `forward_auth`; see Anubis's "Subrequest Authentication" documentation) **on the public paths
 above only**, route `/.within.website/*` to the Service, set `X-Real-IP` to the client address your proxy vouches for,
 and strip any client-sent `X-Original-Uri`. Anubis's deny answer must be a non-2xx status (the policy sets `DENY: 403`),

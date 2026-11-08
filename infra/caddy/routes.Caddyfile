@@ -143,6 +143,12 @@
 		# parameter of pass-challenge. Do not write that request to the access
 		# log. Anubis itself logs the path only, never the query.
 		log_skip /.within.website/x/cmd/anubis/api/pass-challenge
+		# Anubis sets no Content-Security-Policy, and these pages share the portals'
+		# origin. This is the strictest CSP Anubis documents as working (v1.28.2,
+		# docs/admin/configuration/content-security-policy): its inline loader and
+		# critical CSS need 'unsafe-inline'; every other source is 'self' or none.
+		# `>` = set on the response, replacing anything upstream sent.
+		header >Content-Security-Policy "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 		reverse_proxy {$REGULAIT_ANUBIS_UPSTREAM:anubis:8923} {
 			header_up X-Forwarded-For {args[0]}
 			header_up X-Real-IP {args[0]}
@@ -155,6 +161,10 @@
 
 	@regulait_public_pages path /ui/trust /ui/trust/* /ui/audit /ui/audit/* /ui/supplier /ui/supplier/* /v1/trust-center /v1/trust-center/* /v1/auditor/* /v1/supplier/*
 	handle @regulait_public_pages {
+		# Anubis's own deny page (403) comes back on this path through
+		# forward_auth. `?` sets the same CSP only when the response has none, so
+		# the gateway's own CSP on every allowed response is left as it is.
+		header ?Content-Security-Policy "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 		route {
 			forward_auth {$REGULAIT_ANUBIS_UPSTREAM:anubis:8923} {
 				uri /.within.website/x/cmd/anubis/api/check

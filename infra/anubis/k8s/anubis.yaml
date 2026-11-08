@@ -79,3 +79,25 @@ spec:
   selector: { app.kubernetes.io/name: regulait-anubis }
   ports:
     - { name: http, port: 8923, targetPort: http }
+---
+# Only your ingress may reach Anubis, and only on its HTTP port: the metrics port (9090) stays unreachable from other
+# pods. Label your ingress or gateway pods `regulait.io/anubis-client: "true"` (any namespace). A Prometheus that should
+# scrape 9090 needs its own rule, which you add deliberately.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: regulait-anubis
+  labels: { app.kubernetes.io/name: regulait-anubis, app.kubernetes.io/part-of: regulait }
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: regulait-anubis }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels: { regulait.io/anubis-client: "true" }
+      ports:
+        - { protocol: TCP, port: 8923 }
+  # Anubis makes no outbound call in this policy (air-gapped: no GeoIP, DNSBL or remote lists), so no egress is allowed.
+  egress: []
