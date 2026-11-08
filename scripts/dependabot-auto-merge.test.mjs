@@ -56,7 +56,10 @@ describe("the 7-day cooldown", () => {
     }
   });
 
-  it("pnpm resolves no version younger than 7 days", () => {
-    expect(yaml.load(read("pnpm-workspace.yaml")).minimumReleaseAge).toBe(10080);
+  // pnpm's `minimumReleaseAge` is deliberately not set: `pnpm deploy --legacy` (every engine image build) re-resolves
+  // and refuses a version the lockfile already holds when it is younger than the limit, so a fresh security fix in
+  // the lockfile would break every image build. The Dependabot cooldown is the gate (#746 CI, 2026-11-08).
+  it("does not set pnpm's minimumReleaseAge, which breaks the engine image builds", () => {
+    expect(yaml.load(read("pnpm-workspace.yaml")).minimumReleaseAge).toBeUndefined();
   });
 });

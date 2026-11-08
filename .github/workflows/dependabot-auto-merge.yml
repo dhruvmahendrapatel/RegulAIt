@@ -6,8 +6,7 @@
 #   - minor and major updates;
 #   - the engine manifests (engines/**) and base-image digests, which republish the engine images;
 #   - the pip entries (security-fix PRs only, hand-recompiled).
-# A 7-day cooldown in .github/dependabot.yml and `minimumReleaseAge` in pnpm-workspace.yaml keep a version from being
-# proposed, or resolved, until it has been public for a week.
+# A 7-day cooldown in .github/dependabot.yml keeps a version from being proposed until it has been public for a week.
 #
 # `pull_request`, never `pull_request_target`: the job checks out nothing and runs no code from the PR. Its token can
 # only do what the `permissions` below allow. dependabot/fetch-metadata (MIT) reads the update's metadata from the

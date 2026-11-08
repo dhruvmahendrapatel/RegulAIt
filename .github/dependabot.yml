@@ -4,8 +4,9 @@
 # Owner decision 2026-11-07 (#738, amendment 5): a semver-PATCH group of the root workspace or of the
 # GitHub Actions is merged automatically once every required check is green
 # (.github/workflows/dependabot-auto-merge.yml); minor and major bumps go to a reviewer. The npm and
-# actions entries wait 7 days after a release before proposing it (`cooldown`), and pnpm will not
-# resolve a version younger than 7 days (`minimumReleaseAge` in pnpm-workspace.yaml). Engine manifests are image inputs:
+# actions entries wait 7 days after a release before proposing it (`cooldown`). pnpm's
+# `minimumReleaseAge` is not used: `pnpm deploy` in the engine image builds re-resolves and would refuse a
+# locked version younger than the limit, a security fix included. Engine manifests are image inputs:
 # merging a bump there republishes the engine images (publish gate, lock PR).
 # Not covered on purpose: infra/demo-fixtures/** (seeded demo data) and spikes/**.
 # The two pip entries open security-fix PRs only (see below).
