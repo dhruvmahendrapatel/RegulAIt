@@ -8,7 +8,7 @@
   (air-gapped mode), ADR-0175 A5 (release-age sightings), ADR-0176 (open source first), ADR-0180 (secure by default),
   ADR-0200 (engineering guidelines and the normalized-schema addendum). Coordinates with P23 (MCP and skill scanners,
   `builder/p23-mcp-skill-scanners`) and P27 (tool-change pinning, `builder/p27-mcp-pinning-fixtures`) on #453.
-- **Migration**: 0311 (`0311_mcp_catalogue_seed`), `when` 1785238000000; renumbered above main's highest at merge.
+- **Migration**: the `mcp_catalogue_seed` migration (`packages/db/migrations/pending/mcp_catalogue_seed.sql`), numbered at merge (ADR-0252).
 
 ## Context
 
@@ -118,7 +118,7 @@ path.
 
 - A refreshed source can no longer be deleted (its snapshots restrict it). There is no delete route; the ADR-0101 test
   suite now disables its sources instead of deleting them.
-- `catalogue_item_id` is NULL for a row synced before 0311 until its source is refreshed again; nothing is backfilled.
+- `catalogue_item_id` is NULL for a row synced before this migration until its source is refreshed again; nothing is backfilled.
   The deduped view only lists linked rows.
 - The catalogue tables are org-wide admin tables, like `mcp_registries`, so they are not in an ADR-0234 RLS batch.
 - An exported bundle does not carry `packages[]` (the catalogue never stored it), so `packageCount` is 0 in a bundle.

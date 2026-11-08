@@ -11,7 +11,7 @@
 --    what was asserted, when, by whom, its content digest and, for a bundle, the key that signed it. Evidence:
 --    UPDATE, DELETE and TRUNCATE are refused (0185's pattern, functions pin search_path).
 -- 4. `mcp_registry_entries` gains `catalogue_item_id`, `paid_signal` and `last_snapshot_id`. Nothing is backfilled:
---    a row from before 0311 is linked by the next refresh of its source (NULL until then).
+--    a row from before this migration is linked by the next refresh of its source (NULL until then).
 --
 -- No row is inserted. A fresh install still has zero sources; seeding is an admin act (ADR-0180).
 
