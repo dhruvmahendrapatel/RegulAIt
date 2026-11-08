@@ -17,6 +17,9 @@
 # So the job first reads, at run time, whether the base branch enforces all six required checks
 # (scripts/dependabot-required-checks.mjs, from the BASE commit). If it does not, or the answer cannot be read, the PR
 # is not queued and gets one comment saying why. The workflow never waits for checks and merges by itself.
+# Owner switch (#761 review, round 2): nothing is queued unless the repository variable DEPENDABOT_AUTOMERGE is exactly
+# `enabled`. It is unset until the owner's ruleset with the six required checks exists, and it is checked twice: by the
+# gate script and again in the queue step's own condition, so a fault in the script cannot open the gate on its own.
 #
 # Spoofing: the queue job runs only when Dependabot opened the PR, Dependabot pushed the commit, Dependabot (not a
 # re-run by someone else) triggered the run, and the branch is in this repository. `--match-head-commit` pins the
@@ -102,6 +105,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           BRANCH: ${{ github.event.pull_request.base.ref }}
+          AUTOMERGE_SWITCH: ${{ vars.DEPENDABOT_AUTOMERGE }}
         run: node scripts/dependabot-required-checks.mjs
 
       - name: Say why it is not queued
@@ -114,7 +118,7 @@ jobs:
           marker='<!-- dependabot-auto-merge:not-enforced -->'
           seen=$(gh pr view "$PR_URL" --json comments --jq "[.comments[].body | select(contains(\"$marker\"))] | length")
           if [ "$seen" = 0 ]; then
-            printf '%s\nNot auto-merged: `%s` does not enforce all six required checks, or that could not be verified. Auto-merge would merge at once without them, so a reviewer merges this PR.\n' "$marker" "$BRANCH" > body.md
+            printf '%s\nNot auto-merged: the owner switch DEPENDABOT_AUTOMERGE is not `enabled`, or `%s` does not enforce all six required checks, or that could not be verified. Auto-merge would merge at once without them, so a reviewer merges this PR.\n' "$marker" "$BRANCH" > body.md
             gh pr comment "$PR_URL" --body-file body.md
           fi
 
@@ -129,6 +133,7 @@ jobs:
 
       - name: Queue it
         if: >-
+          vars.DEPENDABOT_AUTOMERGE == 'enabled' &&
           steps.eligible.outputs.patch == 'true' &&
           steps.gate.outputs.enforced == 'true' &&
           steps.age.outputs.old_enough == 'true'

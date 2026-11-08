@@ -20,8 +20,12 @@
 // ruleset. Org-level rulesets also appear in rules/branches; if this token cannot read one, the gate fails closed and
 // auto-merge stays off, which is safe but looks like a bug.
 //
+// Owner switch (#761 review, round 2): before any API read, AUTOMERGE_SWITCH (the repository variable
+// DEPENDABOT_AUTOMERGE) must be exactly "enabled"; anything else, unset included, means "not enforced". The owner sets it
+// only once the ruleset exists. The workflow's queue step checks the variable again, independently of this script.
+//
 // usage (from .github/workflows/dependabot-auto-merge.yml):
-//   REPO=owner/name BRANCH=main node scripts/dependabot-required-checks.mjs
+//   AUTOMERGE_SWITCH=enabled REPO=owner/name BRANCH=main node scripts/dependabot-required-checks.mjs
 // writes `enforced=true|false` to $GITHUB_OUTPUT and the reasons to $GITHUB_STEP_SUMMARY and stdout. Exit 0 either way.
 import { execFileSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
@@ -62,9 +66,13 @@ export function rulesetChecks(rules, ruleset) {
 
 /**
  * @param {{ branch: () => any, rules: () => any, ruleset: (id: number) => {enforcement?: string, current_user_can_bypass?: string} }} api
+ * @param {string | undefined} switchValue the owner switch; only exactly "enabled" lets the API check run
  * @returns {{ enforced: boolean, reasons: string[] }}
  */
-export function checkEnforced(api) {
+export function checkEnforced(api, switchValue) {
+  if (switchValue !== "enabled") {
+    return { enforced: false, reasons: ["the owner switch DEPENDABOT_AUTOMERGE is not set to enabled"] };
+  }
   let have;
   try {
     const memo = new Map();
@@ -110,7 +118,9 @@ export function liveApi(repo, branch, run = execFileSync) {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const repo = process.env.REPO;
   const branch = process.env.BRANCH;
-  const res = repo && branch ? checkEnforced(liveApi(repo, branch)) : { enforced: false, reasons: ["REPO or BRANCH is not set"] };
+  const res = repo && branch
+    ? checkEnforced(liveApi(repo, branch), process.env.AUTOMERGE_SWITCH ?? "")
+    : { enforced: false, reasons: ["REPO or BRANCH is not set"] };
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `enforced=${res.enforced}\n`);
   const msg = res.enforced
     ? `The target branch enforces every required check: ${REQUIRED_CHECKS.join(", ")}.`
