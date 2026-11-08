@@ -1,5 +1,7 @@
 // ADR-0188 S2 — the actor chain types and scope algebra (dependency-free; see actor.ts)
 export * from "./actor.js";
+// ADR-0251 — the restriction layer of the one governed decision core (model, connector, A2A)
+export * from "./resource.js";
 import {
   checkActorChain,
   scopeCovers,

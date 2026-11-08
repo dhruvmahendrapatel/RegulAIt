@@ -190,7 +190,7 @@ beforeAll(async () => {
   restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
-  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, connectorAttributionRequired: false });
 
   const u = await post("/v1/users", {
     email: `adr0124-${RUN}@example.com`,

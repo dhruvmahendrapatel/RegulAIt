@@ -236,7 +236,7 @@ beforeAll(async () => {
   // PII handling, so it sets the floor off explicitly; restored in afterAll.
   restoreSb1Posture = await relaxDataPostureForTest(db, { org: { defaultPiiMode: "none" }, interception: false, guardrails: false });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
-  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, keyCustodyEnforced: false });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, connectorAttributionRequired: false, keyCustodyEnforced: false });
 
   savedMode = process.env[DEPLOY_MODE_ENV];
   realFetch = globalThis.fetch;
