@@ -18,6 +18,10 @@
     "./abac": {
       "types": "./dist/abac.d.ts",
       "default": "./dist/abac.js"
+    },
+    "./rate-limit-cedar": {
+      "types": "./dist/rate-limit-cedar.d.ts",
+      "default": "./dist/rate-limit-cedar.js"
     }
   },
   "scripts": {

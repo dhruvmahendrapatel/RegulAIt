@@ -1824,6 +1824,8 @@ export const auditLog = pgTable(
   },
   (t) => [
     index("audit_log_user_at_idx").on(t.userId, t.at),
+    // ADR-0251 (migration governed_core_resource_rules): window counts for connector and A2A rate limits
+    index("audit_log_resource_window_idx").on(t.userId, t.objectType, t.objectId, t.at).where(sql`${t.effect} = 'allow'`),
     check("audit_log_chain_version_check", sql`${t.chainVersion} IS NULL OR ${t.chainVersion} IN (1, 2)`),
     check(
       "audit_log_actor_chain_check",
@@ -2095,6 +2097,55 @@ export const modelRateLimits = pgTable(
     index("model_rate_limits_agent_idx").on(t.agentId),
     check("model_rate_limits_max_calls_check", sql`${t.maxCalls} BETWEEN 1 AND 1000000`),
     check("model_rate_limits_window_check", sql`${t.windowSeconds} BETWEEN 1 AND 2592000`),
+  ],
+);
+
+// ADR-0251 (migration governed_core_resource_rules): approval rules and rate limits for the call types that are not MCP tool calls. One
+// subject dimension (the same scope discriminant as approval_rules) and one resource binding: the type plus at most
+// one foreign key matching it (CHECK `*_type_ck`); no key = every resource of the type. The MCP tool path's tables
+// stay byte-identical, and models keep their rate limits in model_rate_limits (ADR-0212).
+export const resourceApprovalRules = pgTable(
+  "resource_approval_rules",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    resourceType: text("resource_type", { enum: ["model", "connector", "a2a"] }).notNull(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    connectorId: uuid("connector_id").references(() => connectors.id, { onDelete: "cascade" }),
+    a2aAgentId: uuid("a2a_agent_id").references(() => a2aAgents.id, { onDelete: "cascade" }),
+    scope: text("scope", { enum: ["user", "role", "team", "fleet"] }).notNull().default("user"),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    roleId: uuid("role_id").references(() => roles.id, { onDelete: "cascade" }),
+    teamId: uuid("team_id").references(() => teams.id, { onDelete: "cascade" }),
+    writeOnly: boolean("write_only").notNull().default(false),
+    approverUserId: uuid("approver_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("resource_approval_rules_type_idx").on(t.resourceType, t.scope)],
+);
+
+export const resourceRateLimits = pgTable(
+  "resource_rate_limits",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    resourceType: text("resource_type", { enum: ["connector", "a2a"] }).notNull(),
+    connectorId: uuid("connector_id").references(() => connectors.id, { onDelete: "cascade" }),
+    a2aAgentId: uuid("a2a_agent_id").references(() => a2aAgents.id, { onDelete: "cascade" }),
+    scope: text("scope", { enum: ["user", "role", "team", "fleet"] }).notNull().default("user"),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    roleId: uuid("role_id").references(() => roles.id, { onDelete: "cascade" }),
+    teamId: uuid("team_id").references(() => teams.id, { onDelete: "cascade" }),
+    maxCalls: integer("max_calls").notNull(),
+    windowSeconds: integer("window_seconds").notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("resource_rate_limits_type_idx").on(t.resourceType, t.scope),
+    check("resource_rate_limits_max_calls_check", sql`${t.maxCalls} BETWEEN 1 AND 1000000`),
+    check("resource_rate_limits_window_check", sql`${t.windowSeconds} BETWEEN 1 AND 2592000`),
   ],
 );
 
@@ -4565,9 +4616,9 @@ export const orgSettings = pgTable(
      * strict separation of duties: creating delegations is refused and
      * existing windows stop applying immediately. An admin may turn it on. */
     approvalDelegationEnabled: boolean("approval_delegation_enabled").notNull().default(false),
-    /** ADR-0212 (P12 c, migration 0230): model rate limits are enforced only once an
-     * admin opts in (step-up, audited) through PUT /v1/rules/model-rate-limits/enforcement */
-    modelRateLimitsEnabled: boolean("model_rate_limits_enabled").notNull().default(false),
+    /** ADR-0212 (P12 c, migration 0230): model rate limits enforcement. ADR-0251 (migration governed_core_resource_rules): TRUE by default;
+     * an admin may turn it off (step-up, audited) through PUT /v1/rules/model-rate-limits/enforcement */
+    modelRateLimitsEnabled: boolean("model_rate_limits_enabled").notNull().default(true),
     /** ADR-0241 (P21, migration 0297): admin-defined usage mappings are read at dispatch only once an admin opts in
      * (settings_relax step-up, audited) through PUT /v1/usage-extractors/enabled. Off = every count is the adapter's
      * built-in extraction. */
@@ -4692,6 +4743,12 @@ export const orgSettings = pgTable(
     /** ADR-0219 (P10, migration 0253): calls to remote agents over A2A. FALSE (the default, ADR-0180) = no remote
      * agent can be registered or called; an admin may turn it on (settings_relax step-up, audited). */
     a2aEnabled: boolean("a2a_enabled").notNull().default(false),
+    /** ADR-0251 (migration governed_core_resource_rules): must a connector call name a project? TRUE (the ADR-0180 default) = an unattributed
+     * connector call is refused (`attribution-required`), audited, before anything is sent; an admin may relax it
+     * (settings_relax step-up, audited), and the call then meters into the Unattributed bucket. */
+    connectorAttributionRequired: boolean("connector_attribution_required").notNull().default(true),
+    /** ADR-0251 (migration governed_core_resource_rules): the same mandate for calls to remote agents over A2A. */
+    a2aAttributionRequired: boolean("a2a_attribution_required").notNull().default(true),
     /** ADR-0097 (migration 0103): the MCP ADMISSION posture. 'enforce'
      * (DEFAULT since ADR-0181, migration 0159) refuses a `held` server BEFORE
      * any upstream connect and keeps it out of tool discovery until an admin

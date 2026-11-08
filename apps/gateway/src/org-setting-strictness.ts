@@ -269,6 +269,9 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   mcpPrivateRangesDefault: notEqual(false),
   // ADR-0219 (P10): turning on calls to remote A2A agents opens a new egress path and a new callable
   a2aEnabled: notEqual(false),
+  // ADR-0251: the attribution mandate for connector and A2A calls; turning it off lets calls run unattributed
+  connectorAttributionRequired: notEqual(true),
+  a2aAttributionRequired: notEqual(true),
   mcpAdmissionMode: notEqual("enforce"),
   // ADR-0246: 'warn' serves a tool, prompt or resource that changed since approval instead of refusing it
   mcpDefinitionPinMode: notEqual("block"),
