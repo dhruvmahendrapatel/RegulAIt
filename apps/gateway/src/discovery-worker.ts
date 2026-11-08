@@ -94,6 +94,7 @@ import { federationAudiences } from "./discovery-cloud-scanners.js";
 import { awsPrincipalRoleArn, federationTokenMinter } from "./federation-signing-keys.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
 import { errMessage } from "./err-serializer.js";
+import { runEndpointMcpRetention } from "./endpoint-mcp-config.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -876,7 +877,7 @@ export const RETENTION_BATCH = 1000;
  * WHATEVER its disposition (the audit log keeps the disposition event, which never held a name). A sanctioned device
  * seen again after its finding was deleted comes back as a new, open finding.
  */
-export async function runEndpointRetention(db: Db): Promise<{ findingsDeleted: number; pseudonymsDeleted: number }> {
+export async function runEndpointRetention(db: Db): Promise<{ findingsDeleted: number; pseudonymsDeleted: number; mcpServersDeleted: number }> {
   const { endpointRetentionDays } = await loadDiscoverySettings(db);
   const findings = await db.execute(sql`
     DELETE FROM shadow_ai_findings
@@ -890,10 +891,12 @@ export async function runEndpointRetention(db: Db): Promise<{ findingsDeleted: n
                    WHERE kind IN ('device_user', 'device') AND last_seen_at < now() - make_interval(days => ${endpointRetentionDays})
                    LIMIT ${RETENTION_BATCH})
      RETURNING id`);
-  const out = { findingsDeleted: findings.rows.length, pseudonymsDeleted: pseudonyms.rows.length };
-  if (out.findingsDeleted + out.pseudonymsDeleted > 0) {
+  // ADR-0259: the devices' configured MCP servers follow the same retention
+  const mcpServersDeleted = await runEndpointMcpRetention(db, endpointRetentionDays, RETENTION_BATCH);
+  const out = { findingsDeleted: findings.rows.length, pseudonymsDeleted: pseudonyms.rows.length, mcpServersDeleted };
+  if (out.findingsDeleted + out.pseudonymsDeleted + out.mcpServersDeleted > 0) {
     await audit(db, "discovery_settings", null, "discovery-endpoint-retention", "allow",
-      `endpoint evidence past the ${endpointRetentionDays}-day retention deleted: ${out.findingsDeleted} device finding(s), ${out.pseudonymsDeleted} device-user pseudonym(s)`,
+      `endpoint evidence past the ${endpointRetentionDays}-day retention deleted: ${out.findingsDeleted} device finding(s), ${out.pseudonymsDeleted} device-user pseudonym(s), ${out.mcpServersDeleted} configured MCP server row(s)`,
       { endpointRetentionDays, ...out });
   }
   return out;
