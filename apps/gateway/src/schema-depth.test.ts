@@ -229,7 +229,7 @@ beforeAll(async () => {
   await runMigrations(db, migrationsFolder);
   restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
-  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireProjectAttribution: false, requireMcpAttribution: false });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, connectorAttributionRequired: false, requireProjectAttribution: false, requireMcpAttribution: false });
   gatewayUrl = await app.listen({ port: 0, host: "127.0.0.1" });
   mock = resolveModelProvider({ provider: "mock" }) as MockModelProvider;
   mcpUpstream = await startMcpUpstream();

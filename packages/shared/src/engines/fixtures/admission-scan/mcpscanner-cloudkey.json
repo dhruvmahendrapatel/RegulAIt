@@ -1,0 +1,1 @@
+{"schema": "regulait.admission-scan.v1", "engine": "mcpscanner", "engineVersion": "4.8.7", "status": "failed", "error": "remote analyzer switch set: MCP_SCANNER_LLM_API_KEY"}
