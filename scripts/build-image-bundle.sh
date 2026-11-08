@@ -61,6 +61,7 @@ VERSION=""
 OUT=""
 SKIP_BUILD=0
 WITH_ENGINES=0
+WITH_ANUBIS=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -68,8 +69,9 @@ while [ $# -gt 0 ]; do
     --out)        OUT="${2:-}"; shift 2 ;;
     --skip-build) SKIP_BUILD=1; shift ;;
     --with-engines) WITH_ENGINES=1; shift ;;
+    --with-anubis) WITH_ANUBIS=1; shift ;;
     -h|--help)
-      printf 'Usage: scripts/build-image-bundle.sh --version <v> [--out <tar>] [--skip-build] [--with-engines]\n'
+      printf 'Usage: scripts/build-image-bundle.sh --version <v> [--out <tar>] [--skip-build] [--with-engines] [--with-anubis]\n'
       exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
@@ -108,6 +110,23 @@ case " $CADDY_IMAGE_IDS " in
   *) die "$CADDY_TAG has image id $CADDY_ID, which is not pinned (allowed: $CADDY_IMAGE_IDS)" ;;
 esac
 
+# ADR-0258 (opt-in): the Anubis image for an air-gapped `install.sh --anubis`, pulled by digest, tagged and checked
+# against the same pinned ids as scripts/install.sh (docker-compose.yml `anubis`). Re-pin all three together.
+ANUBIS_REFS=()
+if [ "$WITH_ANUBIS" = "1" ]; then
+  ANUBIS_IMAGE="ghcr.io/techarohq/anubis:v1.28.2@sha256:5fcbce70ee6168be5b226d19bec90111d0acd0daf13028fa06b044cf3ebbbd5f"
+  ANUBIS_TAG="ghcr.io/techarohq/anubis:v1.28.2"
+  ANUBIS_IMAGE_IDS="sha256:77ec8a8d7915eef8a9a8633d5918d221ca99b1cc18e3820e1fcffc2fdf5c730c sha256:b2840ef91910b533ab4d10db28196ca1a5e6c7f1f286127e08f20e2634e6bccb sha256:5fcbce70ee6168be5b226d19bec90111d0acd0daf13028fa06b044cf3ebbbd5f sha256:7be540e764715f583f2c6a429e94075a79942b935c2a96c462111c380bd12c21 sha256:4dc4d9361874eb9aca785979ad6100836746dcd3772052388047b4ed1b43153d"
+  docker image inspect "$ANUBIS_IMAGE" >/dev/null 2>&1 || docker pull "$ANUBIS_IMAGE"
+  docker tag "$ANUBIS_IMAGE" "$ANUBIS_TAG"
+  ANUBIS_ID="$(docker image inspect --format '{{.Id}}' "$ANUBIS_TAG")"
+  case " $ANUBIS_IMAGE_IDS " in
+    *" $ANUBIS_ID "*) ok "$ANUBIS_TAG is the pinned image ($ANUBIS_ID)" ;;
+    *) die "$ANUBIS_TAG has image id $ANUBIS_ID, which is not pinned (allowed: $ANUBIS_IMAGE_IDS)" ;;
+  esac
+  ANUBIS_REFS+=("$ANUBIS_IMAGE" "$ANUBIS_TAG")
+fi
+
 ENGINE_REFS=()
 if [ "$WITH_ENGINES" = "1" ]; then
   step "Fetching the engine images the lock records (engines/images.lock.json)"
@@ -138,7 +157,7 @@ fi
 
 step "Saving the bundle"
 mkdir -p "$(dirname "$OUT")"
-docker save -o "$OUT" "$GATEWAY_IMAGE" postgres:16 "$CADDY_IMAGE" "$CADDY_TAG" ${ENGINE_REFS[@]+"${ENGINE_REFS[@]}"}
+docker save -o "$OUT" "$GATEWAY_IMAGE" postgres:16 "$CADDY_IMAGE" "$CADDY_TAG" ${ENGINE_REFS[@]+"${ENGINE_REFS[@]}"} ${ANUBIS_REFS[@]+"${ANUBIS_REFS[@]}"}
 ok "$OUT ($(du -h "$OUT" | cut -f1))"
 
 cat <<NEXT

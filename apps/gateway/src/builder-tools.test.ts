@@ -155,7 +155,7 @@ beforeAll(async () => {
   // its own database: tool-call approvals here record append-only decisions (ADR-0186 A)
   k = await builderKit("bld-tools", { scratch: true });
   restoreApprovalSigning = await relaxApprovalSigningForTest(k.db);
-  restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false, connectorAttributionRequired: false });
   restoreStrictAdmission = await relaxStrictAdmissionForTest(k.db);
   owner = await k.person("owner");
   colleague = await k.person("colleague");
