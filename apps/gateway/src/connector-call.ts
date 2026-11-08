@@ -58,7 +58,8 @@ import {
   usageEvents,
   type Db,
 } from "@regulait/db";
-import { evaluateConnector } from "@regulait/policy-kernel";
+import { evaluateConnector, governedCoreErrorDecision, matchingResourceApprovalRules, type GovernedResource } from "@regulait/policy-kernel";
+import { governedEvaluateResource, loadResourceRestrictions, type ResourceRestrictions } from "./governed-core.js";
 import {
   CREDENTIAL_HOST_CONNECTOR_KINDS,
   ConnectorProviderError,
@@ -247,6 +248,8 @@ async function connectorWriteBinding(
     invocation: { operation: "read" | "write"; object: string | null; payload: Record<string, unknown> | null };
     preparedPii: { argumentsDigest: string; argumentsPreview: unknown } | null;
     approverUserId: string | null;
+    /** the "rules" that demanded this consent: the dial's hold and/or ADR-0251 approval rules, in a stable order */
+    ruleIds: readonly string[];
   },
 ): Promise<ConnectorWriteBinding> {
   const { connector } = input;
@@ -262,8 +265,9 @@ async function connectorWriteBinding(
     approvalArgumentsDigest({ projectId: input.projectId, arguments: input.invocation });
   const dualControlOrg = await loadOrgSettings(db);
   const contextDigest = approvalContextDigest({
-    // the dial's hold is the one "rule" that demanded this consent
-    ruleVersions: [{ ruleId: "execution-require-approval", activeVersionId: null }],
+    // the dial's hold and/or the ADR-0251 approval rules that demanded this consent (the dial alone is byte-identical
+    // to the pre-ADR-0251 digest)
+    ruleVersions: input.ruleIds.map((ruleId) => ({ ruleId, activeVersionId: null })),
     requiredApproverUserId: input.approverUserId,
     approvalScope: "action",
     // ADR-0186 A: the org's signing and sensitive quorum, as for an MCP consent
@@ -402,6 +406,8 @@ export async function executeGovernedConnectorCall(
    * REFERENCES that row rather than recomputing its figures (rule 1). */
   const sink: { usageEventId?: string | null; costUsd?: number | null } = {};
   let binding: ConnectorWriteBinding | null = null;
+  /** ADR-0251 finding 1: one consent per required approver (the dial's and each matching rule's) */
+  let bindings: Array<{ approverUserId: string | null; binding: ConnectorWriteBinding }> = [];
   const attempt = async (out: ConnectorReplyRecorder): Promise<ConnectorAttemptResult> => {
     // ADR-0207 (G3): a disabled connector refuses every governed call, first and before any other check, so a call
     // that waited for an approval is refused when it comes back to run, and nothing is sent or metered.
@@ -453,20 +459,55 @@ export async function executeGovernedConnectorCall(
     ]);
 
     // ADR-0173 batch 2b: the dial WITH its approver, and — only while it holds
-    // writes — this write's consent binding (nothing is read otherwise).
+    // writes, or while an ADR-0251 approval rule binds this call — this call's consent binding (nothing is read
+    // otherwise).
     const dial = await loadExecutionDial(db);
     const connectorLiteracy = await literacySlot(db, userId); // ADR-0182 A14
-    binding =
-      dial.mode === "require_approval" && body.operation === "write"
-        ? await connectorWriteBinding(db, {
-            userId,
-            connector,
-            projectId,
-            invocation: originalInvocation,
-            preparedPii: preparedPii ? { argumentsDigest: preparedPii.argumentsDigest, argumentsPreview: preparedPii.argumentsPreview } : null,
-            approverUserId: dial.approverUserId,
-          })
-        : null;
+    // ADR-0251 — the one governed core's restrictions for this call, loaded BEFORE the consent binding so a matching
+    // approval rule's id enters the consent's context digest. A load that fails is a deny (`governed-core-error`).
+    const coreResource: GovernedResource = { type: "connector", id: connectorId, name: connector.name, operation: body.operation };
+    let coreRestrictions: ResourceRestrictions | null = null;
+    let coreError: unknown = null;
+    try {
+      coreRestrictions = await loadResourceRestrictions(db, { userId, resource: coreResource });
+    } catch (err) {
+      coreError = err;
+    }
+    const dialHolds = dial.mode === "require_approval" && body.operation === "write";
+    const matchedRules = coreRestrictions ? matchingResourceApprovalRules(coreResource, coreRestrictions.approvalRules) : [];
+    // ADR-0251 review #715 finding 1 — EVERY NAMED APPROVER SIGNS. The dial's approver and each matching rule's approver
+    // is a separate required consent: one binding per distinct approver (its context digest names that approver and the
+    // rules that demanded it), and the call is released only when every one of them holds an approved, bound consent.
+    // One approver can never release a call another approver was named for.
+    const required: Array<{ approverUserId: string | null; ruleIds: string[] }> = [];
+    const requireFrom = (approverUserId: string | null, ruleId: string) => {
+      const slot = required.find((r) => r.approverUserId === approverUserId);
+      if (slot) slot.ruleIds.push(ruleId);
+      else required.push({ approverUserId, ruleIds: [ruleId] });
+    };
+    if (dialHolds) requireFrom(dial.approverUserId, "execution-require-approval");
+    for (const r of matchedRules) requireFrom(r.approverUserId, r.id);
+    bindings = await Promise.all(
+      required.map(async (r) => ({
+        approverUserId: r.approverUserId,
+        binding: await connectorWriteBinding(db, {
+          userId,
+          connector,
+          projectId,
+          invocation: originalInvocation,
+          preparedPii: preparedPii ? { argumentsDigest: preparedPii.argumentsDigest, argumentsPreview: preparedPii.argumentsPreview } : null,
+          approverUserId: r.approverUserId,
+          ruleIds: r.ruleIds,
+        }),
+      })),
+    );
+    // a consent that is fresh for ONE required approver is not stale for another (their context digests differ by design)
+    const freshIds = new Set(bindings.map((b) => b.binding.approvedApprovalId).filter((id): id is string => id !== null));
+    for (const b of bindings) b.binding.retired = b.binding.retired.filter((r) => !freshIds.has(r.id));
+    const allConsented = bindings.length > 0 && bindings.every((b) => b.binding.approvedApprovalId !== null);
+    // the consent this call still lacks (dial first, then rules by specificity); null when nothing is missing
+    const missing = bindings.find((b) => b.binding.approvedApprovalId === null) ?? null;
+    binding = missing?.binding ?? bindings[0]?.binding ?? null;
     // ADR-0188 S4: a delegated call carries the stored chain, read now; a grant that cannot be read refuses
     let delegatedActor: GovernedActor | null = null;
     let delegationRefusal: ReturnType<typeof delegationRefusalDecision> | null = null;
@@ -478,7 +519,7 @@ export async function executeGovernedConnectorCall(
         delegationRefusal = delegationRefusalDecision(err);
       }
     }
-    const decision = delegationRefusal
+    const entitlement = delegationRefusal
       ? (delegationRefusal as ReturnType<typeof evaluateConnector>)
       : evaluateConnector({
       userId,
@@ -487,7 +528,8 @@ export async function executeGovernedConnectorCall(
       // per-subject halt of its own; the dial governs it.
       execution: { ...postureOf(dial.mode, null), approverUserId: dial.approverUserId, ...connectorLiteracy },
       // this path CAN queue a write (ADR-0173 batch 2b)
-      writeApprovalQueue: { approvedApprovalId: binding?.approvedApprovalId ?? null },
+      // the dial's hold is released only when EVERY required consent is in hand (finding 1)
+      writeApprovalQueue: { approvedApprovalId: allConsented ? (bindings[0]!.binding.approvedApprovalId) : null },
       connectorId,
       connectorName: connector.name,
       operation: body.operation,
@@ -496,6 +538,25 @@ export async function executeGovernedConnectorCall(
       roleConnectorGrants: roleConnectorGrantsForUser,
       connectorRevocations: connectorRevocationsForUser,
     });
+    // ADR-0251 — the restriction layer on top of the entitlement decision: attribution mandate, rate limits, ABAC,
+    // approval rules. A deny stays a deny; an error is a deny.
+    const composed =
+      coreError || !coreRestrictions
+        ? governedCoreErrorDecision(coreResource, coreError)
+        : await governedEvaluateResource(db, {
+            userId,
+            resource: coreResource,
+            projectId,
+            base: entitlement,
+            approvedApprovalId: allConsented ? bindings[0]!.binding.approvedApprovalId : null,
+            canQueue: true,
+            restrictions: coreRestrictions,
+          });
+    // a hold is raised for the approver whose consent is still missing, so each named approver is asked in turn
+    const decision =
+      composed.effect === "require_approval" && missing?.approverUserId
+        ? { ...composed, approverUserId: missing.approverUserId }
+        : composed;
     recordDecision({ surface: "connector", effect: decision.effect });
 
     // ADR-0186 V, decision 32 — OUTBOUND CREDENTIAL AUDIENCE. The caller's own
@@ -572,7 +633,9 @@ export async function executeGovernedConnectorCall(
           ...(args.detail ?? {}),
           // ADR-0189 B2: the approved queue row this decision relied on (R5), and the policy generation (checked
           // equal to the current one in this transaction) and kill-switch state it was decided under (§4)
-          ...(binding?.approvedApprovalId ? { approvedApprovalId: binding.approvedApprovalId } : {}),
+          ...(allConsented ? { approvedApprovalId: bindings[0]!.binding.approvedApprovalId } : {}),
+          // ADR-0251 finding 1: every consent that released this call, when more than one approver was named
+          ...(allConsented && bindings.length > 1 ? { approvedApprovalIds: bindings.map((h) => h.binding.approvedApprovalId) } : {}),
           policyEpoch: admissionGeneration.epoch,
           killSwitch: killSwitchState(postureOf(dial.mode, null)),
           receiptClass: "decision",
@@ -695,7 +758,8 @@ export async function executeGovernedConnectorCall(
         callerUserId: userId,
         approverUserId: decision.approverUserId!,
         ruleId: null,
-        matchedApprovalRuleIds: [],
+        // finding 1: the matched ADR-0251 rules ride along (each has its own consent binding above)
+        matchedApprovalRuleIds: decision.matchedApprovalRuleIds,
         projectId,
       });
       if (!requirement.satisfiable) {
@@ -777,8 +841,16 @@ export async function executeGovernedConnectorCall(
     // atomically, right before anything executes. Losing the race (a second
     // re-submit of the same approved call) runs nothing.
     const consumeHeld = async (): Promise<ConnectorAttemptResult | null> => {
-      const approvedId = binding?.approvedApprovalId;
-      if (!approvedId || !binding) return null;
+      // finding 1: spend every required consent, each exactly once
+      for (const held of bindings) {
+        const refused = await consumeOne(held.binding);
+        if (refused) return refused;
+      }
+      return null;
+    };
+    const consumeOne = async (binding: ConnectorWriteBinding): Promise<ConnectorAttemptResult | null> => {
+      const approvedId = binding.approvedApprovalId;
+      if (!approvedId) return null;
       const spent = await spendBoundApproval(db, {
         approvalId: approvedId,
         policyEpoch: admissionGeneration!.epoch,
@@ -909,6 +981,7 @@ export async function executeGovernedConnectorCall(
     const connectorGuardrails: GuardrailPolicy = await resolveGuardrailPolicy(db, {
       projectId,
       connectorId,
+      userId,
     });
     let cgInput: Awaited<ReturnType<typeof runGuardrailsAsync>> | null = null;
     if (connectorGuardrails.active) {

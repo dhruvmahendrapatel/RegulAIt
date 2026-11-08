@@ -22,6 +22,7 @@ import { a2aAgentCredentials, a2aAgentGrants, a2aAgents, and, auditLog, createDb
 import { buildApp } from "./app.js";
 import { A2A_RULE_IDS, A2A_SKILL_METADATA_KEY, executeGovernedA2aCall } from "./a2a.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -34,6 +35,8 @@ const DATA_KEY = randomBytes(32).toString("hex");
 const SECRET = `p10-secret-${randomBytes(12).toString("hex")}`;
 
 let db: Db;
+// ADR-0251: this suite pins the A2A path, not the attribution mandate (zz-adr0251-a2a-core pins that), so it relaxes it by name
+let restoreA2aAttribution: (() => Promise<void>) | undefined;
 let app: ReturnType<typeof buildApp>;
 const restores: Array<() => Promise<void>> = [];
 const agentIds: string[] = [];
@@ -158,6 +161,7 @@ async function register(name: string, url: string, extra: Record<string, unknown
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreA2aAttribution = await relaxGovernanceGatesForTest(db, { a2aAttributionRequired: false });
   restores.push(await relaxIdentityForTest(db, { mfaRequired: "off" }));
   const [before] = await db.select({ a2aEnabled: orgSettings.a2aEnabled }).from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   restores.push(async () => void (await setEnabled(before?.a2aEnabled ?? false)));
@@ -177,6 +181,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreA2aAttribution?.();
   try {
     if (agentIds.length > 0) await db.delete(a2aAgents).where(inArray(a2aAgents.id, agentIds));
     for (const r of restores.reverse()) await r();

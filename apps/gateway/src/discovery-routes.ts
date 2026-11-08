@@ -18,7 +18,8 @@
  *   GET    /v1/discovery/runs                             recent runs, optionally for one source
  *   GET    /v1/discovery/settings                         the warning age and the endpoint retention
  *   PUT    /v1/discovery/settings                         lengthening either is a `settings_relax` step-up (CAS)
- *                                                     turning a wider-source family on (ADR-0235) is the same step-up
+ *                                                     turning a wider-source family on (ADR-0235) is the same step-up,
+ *                                                     and so is turning on endpoint MCP config discovery (ADR-0259)
  *   POST   /v1/discovery/pseudonyms/:pseudonym/reveal     a `pseudonym_reveal` step-up, audited
  *
  * THE SECRET NEVER LEAVES. No view below returns `secret_ciphertext` or the
@@ -152,6 +153,8 @@ const settingsSchema = z
       .object({ saas: z.boolean().optional(), identity: z.boolean().optional(), ml_platform: z.boolean().optional() })
       .strict()
       .optional(),
+    // ADR-0259: MCP client-config discovery through the endpoint agent; turning it on is a relaxation
+    endpointMcpConfig: z.boolean().optional(),
   })
   .strict();
 const uuidParam = z.object({ sourceId: z.string().uuid() });
@@ -839,6 +842,9 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
       const afterFamilies = { ...beforeFamilies, ...(body.families ?? {}) };
       const turnedOn = DISCOVERY_GATED_FAMILIES.filter((f) => afterFamilies[f] && !beforeFamilies[f]);
       if (turnedOn.length > 0) relaxed[DISCOVERY_STEP_UP_KEYS.families] = turnedOn;
+      // ADR-0259: reading MCP host configs on employee machines is off until an admin turns it on (step-up); off is free
+      const mcpAfter = body.endpointMcpConfig ?? row.endpointMcpConfigEnabled;
+      if (mcpAfter && !row.endpointMcpConfigEnabled) relaxed[DISCOVERY_STEP_UP_KEYS.endpointMcpConfig] = true;
       if (Object.keys(relaxed).length > 0) {
         const r = await spendStepUp(req, { kind: "settings_relax", facts: { values: relaxed } }, null);
         if (r) return r;
@@ -851,6 +857,7 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
           saasSourcesEnabled: afterFamilies.saas,
           identitySourcesEnabled: afterFamilies.identity,
           mlPlatformSourcesEnabled: afterFamilies.ml_platform,
+          endpointMcpConfigEnabled: mcpAfter,
           version: row.version + 1,
           updatedBy: actor(req),
           updatedAt: sql`now()`,
@@ -858,7 +865,10 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
         .where(eq(discoverySettings.id, 1));
       await audit(t, req, "discovery_settings", null, Object.keys(relaxed).length ? "discovery-settings-relaxed" : "discovery-settings-updated", "allow",
         `discovery settings updated${Object.keys(relaxed).length ? " (relaxed, with a step-up)" : ""}`,
-        { before: { credentialWarningAgeDays: row.credentialWarningAgeDays, endpointRetentionDays: row.endpointRetentionDays, families: beforeFamilies }, after: { credentialWarningAgeDays: body.credentialWarningAgeDays ?? row.credentialWarningAgeDays, endpointRetentionDays: body.endpointRetentionDays ?? row.endpointRetentionDays, families: afterFamilies } });
+        {
+          before: { credentialWarningAgeDays: row.credentialWarningAgeDays, endpointRetentionDays: row.endpointRetentionDays, families: beforeFamilies, endpointMcpConfig: row.endpointMcpConfigEnabled },
+          after: { credentialWarningAgeDays: body.credentialWarningAgeDays ?? row.credentialWarningAgeDays, endpointRetentionDays: body.endpointRetentionDays ?? row.endpointRetentionDays, families: afterFamilies, endpointMcpConfig: mcpAfter },
+        });
       return true;
     });
     if (isRefusal(out)) return send(reply, out);

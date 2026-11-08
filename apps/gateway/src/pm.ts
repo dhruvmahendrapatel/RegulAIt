@@ -14,6 +14,7 @@ import {
   pmConnections,
   pmLinks,
   pmSyncEvents,
+  pmWebhookDeliveries,
   sql,
   users,
   workflowInstances,
@@ -21,6 +22,7 @@ import {
 } from "@regulait/db";
 import {
   PmProviderError,
+  inboundDeliveryKey,
   mappingFor,
   parseInboundWebhook,
   resolveApprovalAction,
@@ -36,7 +38,6 @@ import { ExternalEffectBlockedError, runExternalWrite } from "./external-effects
 import type { RunState, TaskGraph } from "@regulait/orchestration-kernel";
 import type { WorkflowDefinition } from "@regulait/workflow-kernel";
 import {
-  constantTimeEqual,
   createDecisionSchema,
   createPmConnectionSchema,
   pmSyncSchema,
@@ -1232,8 +1233,8 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
 
   // ADR-0010 inbound + pillar-8 depth: PROVIDER-NATIVE webhooks. The route is
   // authenticated by the per-connection secret using whatever mechanism the
-  // tool can actually send (HMAC signature, URL token, basic auth, or the
-  // legacy shared-secret header) — NOT by a bearer token; the global auth
+  // tool can actually send (HMAC signature, URL token, basic auth; S-03
+  // removed the static shared-secret header) — NOT by a bearer token; the global auth
   // hook exempts exactly this route. Translation to the normalized shape is
   // @regulait/pm-provider's parseInboundWebhook; the downstream processing
   // above is unchanged.
@@ -1272,40 +1273,41 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
       const query = (req.query ?? {}) as Record<string, string | undefined>;
 
       // The parsers verify against the PLAINTEXT secret (HMACs cannot be
-      // keyed by a hash): decrypt the stored ciphertext. Connections minted
-      // before the ciphertext column can still authenticate legacy-header
-      // traffic — a presented value whose sha256 matches the stored hash IS
-      // the secret.
-      const secretFrom = (hash: string, ciphertext: string | null): string | null => {
-        if (ciphertext && opts.dataKey) return decryptSecret(opts.dataKey, ciphertext);
-        const presented = headers["x-regulait-webhook-secret"];
-        if (typeof presented !== "string") return null;
-        const presentedHash = Buffer.from(sha256(presented), "hex");
-        return constantTimeEqual(presentedHash, Buffer.from(hash, "hex")) ? presented : null;
-      };
+      // keyed by a hash): decrypt the stored ciphertext. S-03 (ADR-0180, no
+      // grandfathering): there is no other path. The legacy compare of a
+      // presented `x-regulait-webhook-secret` against the stored hash, used
+      // when the ciphertext or the data key was missing, is removed, so such
+      // a connection (or a gateway without its data key) refuses all traffic.
+      if (!conn.webhookSecretCiphertext || !opts.dataKey) {
+        return reply.status(401).send({ error: "unauthenticated" });
+      }
+      const dataKey = opts.dataKey;
       // ADR-0207 (G6): during a rotation's grace window (database clock) the previous secret is accepted too, tried
-      // only after the current one fails verification; once the window closes it is never read
+      // only after the current one fails verification; once the window closes it is never read. It follows the same
+      // S-03 rule: only a stored ciphertext is ever used, never a presented-header compare against its hash
       const [previous] = await db
-        .select({ hash: pmConnections.previousWebhookSecretHash, ciphertext: pmConnections.previousWebhookSecretCiphertext })
+        .select({ ciphertext: pmConnections.previousWebhookSecretCiphertext })
         .from(pmConnections)
         .where(and(eq(pmConnections.id, conn.id), sql`${pmConnections.previousWebhookSecretValidUntil} > now()`));
       const secrets = [
-        secretFrom(conn.webhookSecretHash, conn.webhookSecretCiphertext),
-        previous?.hash ? secretFrom(previous.hash, previous.ciphertext) : null,
+        decryptSecret(dataKey, conn.webhookSecretCiphertext),
+        previous?.ciphertext ? decryptSecret(dataKey, previous.ciphertext) : null,
       ].filter((v): v is string => v !== null);
-      if (secrets.length === 0) return reply.status(401).send({ error: "unauthenticated" });
 
       let result: ReturnType<typeof parseInboundWebhook> | undefined;
+      // the secret that verified this delivery; the S-03 replay key below is derived with it
+      let secret = secrets[0]!;
       let failure: unknown = null;
-      for (const secret of secrets) {
+      for (const candidate of secrets) {
         try {
           result = parseInboundWebhook(conn.provider, {
             headers,
             query,
             rawBody,
-            secret,
+            secret: candidate,
             connectionProject: conn.project,
           });
+          secret = candidate;
           failure = null;
           break;
         } catch (err) {
@@ -1336,9 +1338,50 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
         // webhooks that error on payloads they legitimately deliver
         return reply.status(200).send({ ok: true, ignored: result.reason });
       }
+      // S-03: record the delivery ONCE before processing it. A second delivery with the same body or the same
+      // provider delivery id is a replay (or a provider retry of one already handled): acknowledged 200 so the
+      // sender does not retry or disable the hook, audited, and not processed. If processing then fails, the
+      // record is removed so the provider's retry is processed.
+      const key = inboundDeliveryKey(conn.provider, { headers, query, rawBody, secret, connectionProject: conn.project });
+      const [recorded] = await db
+        .insert(pmWebhookDeliveries)
+        .values({ connectionId: conn.id, contentSha256: key.contentSha256, deliveryId: key.deliveryId })
+        .onConflictDoNothing()
+        .returning({ id: pmWebhookDeliveries.id });
+      if (!recorded) {
+        await db.insert(auditLog).values({
+          userId: SYSTEM_IDENTITY,
+          objectType: "pm_connection",
+          objectId: conn.id,
+          detail: {
+            phase: "webhook-duplicate",
+            connection: conn.name,
+            provider: conn.provider,
+            contentSha256: key.contentSha256,
+            deliveryId: key.deliveryId,
+          },
+          effect: "deny",
+          ruleId: "pm-webhook-duplicate",
+          ruleChain: [],
+          reason: `PM connection '${conn.name}': a webhook delivery already received was presented again; acknowledged and not processed`,
+        });
+        return reply.status(200).send({ ok: true, duplicate: true });
+      }
       const results: Array<{ matched: false } | { matched: true; drift: boolean }> = [];
-      for (const event of result.events) {
-        results.push(await processInboundEvent(conn, event));
+      try {
+        for (const event of result.events) {
+          results.push(await processInboundEvent(conn, event));
+        }
+      } catch (err) {
+        // Known limits (review of #717, findings 4 and 5), accepted and recorded in the ADR-0010 amendment:
+        //  - a multi-event batch (Asana) that fails at event N has applied events 1..N-1; the provider's retry applies
+        //    them again. Each is a state report (inbound state, orphan, drift audit), so a repeat re-records the same
+        //    facts rather than inventing new ones.
+        //  - a concurrent duplicate that arrived while this attempt ran was already answered 200 and dropped. With the
+        //    record gone, the event is processed again only if the provider retries THIS attempt's 5xx, which every
+        //    supported provider does.
+        await db.delete(pmWebhookDeliveries).where(eq(pmWebhookDeliveries.id, recorded.id));
+        throw err;
       }
       // single-event payloads keep the original ADR-0010 response shape;
       // multi-event payloads (asana batches) report per-event outcomes
@@ -1795,4 +1838,21 @@ export async function fileGovernanceAlertTicket(
     });
     return { outcome: "created" as const, connectionId: conn.id, connectionName: conn.name, externalId: ref.id, externalUrl: ref.url };
   });
+}
+
+/** S-03: how long a delivery record is kept. Far longer than the 300 s signed-timestamp window, and longer than any
+ * provider's retry schedule (Asana retries for 24 h, Linear for 6 h), so a replay inside it is always recognised. */
+export const PM_WEBHOOK_DELIVERY_RETENTION_DAYS = 30;
+
+/** S-03: drop delivery records past the retention, on the database clock. Hygiene, not enforcement: within the
+ * retention a replay is refused by the record; past it, by the signed-timestamp window (Linear, generic) or by the
+ * in-body creation-time limit (PM_UNSIGNED_DELIVERY_MAX_AGE_DAYS, shorter than the retention) for the rest. */
+export async function prunePmWebhookDeliveries(
+  db: Db,
+  retentionDays: number = PM_WEBHOOK_DELIVERY_RETENTION_DAYS,
+): Promise<number> {
+  const res = await db.execute(
+    sql`delete from pm_webhook_deliveries where received_at < now() - make_interval(days => ${retentionDays})`,
+  );
+  return (res as unknown as { rowCount?: number }).rowCount ?? 0;
 }

@@ -560,6 +560,7 @@ describe("6. the covered / NOT-covered inventory", () => {
     "imported_cost_lines.superseded_reason",
     "interception_scope_rules.note",
     "license_verifications.reason",
+    "mcp_authorised_targets.note",
     "mcp_registry_entries.catalogue_reason",
     "mcp_servers.admission_clear_reason",
     "mcp_servers.disabled_reason",
