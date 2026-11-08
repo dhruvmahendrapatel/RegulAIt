@@ -10,7 +10,7 @@ name: CI
 # parallel jobs each bill separately. So the cost of a run is the SUM of its
 # jobs, not the longest one. Every knob below exists to keep that sum down:
 #
-#  1-3. SUPERSEDED on 2026-11-07 (ADR-0252 addendum, owner decision): the budget that binds now is the free
+#  1-3. SUPERSEDED on 2026-11-07 (ADR-0262, owner decision): the budget that binds now is the free
 #     public-repo runner pool, not billed minutes. A PR runs the FAST set and a merge group, a push to main and
 #     the nightly schedule run the FULL set (see the trigger block below). There is a `push:` trigger again; there
 #     is no `paths-ignore` (a docs-only PR skips every job by `if:` and `build-and-test` still reports); and
@@ -116,6 +116,21 @@ name: CI
 #     ~4.5x its slowest run. The caps stay as they are pending the master's
 #     call on tightening them; the proposal (shards 15, base 10) is in the PR
 #     that recorded these numbers.
+#     RE-MEASURED 2026-11-08 (30+ green ci runs per shard, the 40 most recent completed runs): the
+#     suite has grown to 538 files and the slowest test step has about doubled since 2026-10-10.
+#     Test step mean / max, job mean:
+#       gateway shard 1      12:15 / 14:06   job 14:55
+#       gateway shard 2      11:58 / 14:54   job 14:33
+#       gateway shard 3      11:23 / 13:29   job 14:04
+#       gateway shard 4      14:43 / 16:55   job 17:19
+#     Shard 4 was cancelled at the 20-min cap with every test passed (#761 12:22 UTC, #768 job
+#     128779504700), which also fails the coverage check. Cause: the count split gives shard 4 the
+#     heaviest files. Splitting run 42495963943's per-file durations the way Vitest does (SHA-1 order,
+#     equal counts): four shards carry 289 / 287 / 227 / 346 s of test time; five carry
+#     245 / 173 / 236 / 217 / 278 s, so the slowest shard drops ~20% (to ~14.5 min a job on average,
+#     ~16.5 at the slowest seen). Hence a fifth matrix entry, as this header prescribes; the cap
+#     stays at 20. Vitest 4.1 has no duration-based --shard; a custom sequencer would be our own code
+#     for a solved problem, so the count split stays (ADR-0176).
 # Re-measure if the suite grows materially; these are real numbers, not guesses,
 # and they should stay that way. The next lever, when a shard nears its 20-min
 # cap, is a fifth matrix entry (one more ~2m15s setup), not a higher cap.
@@ -123,12 +138,12 @@ name: CI
 # `pull_request` to `types: [ready_for_review]` so draft iterations stop
 # billing — NOT taken now, because this repo's agents open drafts and a draft
 # that never runs CI is a draft nobody can trust.
-# ADR-0252 addendum (owner decision 2026-11-07): FAST checks on a pull request, the FULL suite at merge time.
+# ADR-0262 (owner decision 2026-11-07): FAST checks on a pull request, the FULL suite at merge time.
 # The free public-repo runner pool (~20 concurrent jobs) against ~30 jobs per PR meant one PR's CI at a time.
 #   pull_request   the `scope` job reads the PR's diff. Code changed: build, typecheck, lint, the package suites,
-#                  the static pre-flights (migration guard, licence gate) and the gateway suite. The web app
-#                  changed: also the mocked SPA shards. Docs only: every job is skipped and `build-and-test`
-#                  still reports (a skipped dependency is allowed only then).
+#                  the static pre-flights (migration guard, licence gate) and the gateway shards (web-only PRs too:
+#                  gateway tests read apps/web sources, #737 review). The web app changed: also the mocked SPA shards. Docs only: every job
+#                  is skipped and `build-and-test` still reports (it allows a skip only where the scope said so).
 #   merge_group    everything, on the combined result of the queued PRs: the above plus the SPA journeys and
 #   push to main   the docker build. The merge queue is where the full suite gates a merge.
 #   nightly        everything, for rot with no commit of ours to blame (a moved base image, a yanked dependency).
@@ -154,11 +169,20 @@ concurrency:
 permissions:
   contents: read
 
+# ADR-0252: CI databases are disposable, so migrations merged but not yet numbered (packages/db/migrations/pending/)
+# are applied in their provisional order. A long-lived database refuses them (packages/db/src/pending-migrations.ts).
+env:
+  REGULAIT_MIGRATIONS_UNASSIGNED: apply
+
 jobs:
   # What this run must cover (.github/actions/ci-scope). Cheap, and always runs, so the jobs below can be skipped
   # by a job-level `if:` and still report.
   scope:
     name: ci / scope
+    # pull-requests: read for the sibling-merge pre-flight's live label read; nothing here writes.
+    permissions:
+      contents: read
+      pull-requests: read
     runs-on: ubuntu-24.04
     timeout-minutes: 3
     outputs:
@@ -172,6 +196,35 @@ jobs:
           fetch-depth: 2
       - id: scope
         uses: ./.github/actions/ci-scope
+      # #738 §1: no sibling-branch merges. Every merge in base..head may bring in only commits already on main; a
+      # stacked PR targets its parent's branch and carries the `stacked` label (AGENT_COORDINATION §4). The labels are
+      # read from the API when the step runs, not from the event payload: adding a label starts no run, and a re-run
+      # replays the payload of the original event, so only a live read lets "add the label, re-run this job" work.
+      # Here, not in a later job, so a docs-only PR is checked too. The treeless fetch brings commit history only (about
+      # a second). Not on merge_group: every queue merge's second parent is a PR head.
+      # The history goes into a separate, empty bare repository, never the shallow checkout: from 2026-11-08 07:33 a
+      # treeless --unshallow fetch into the checkout crashed the runner's git 2.56.0 on every PR ("BUG:
+      # builtin/pack-objects.c:5098: should_include_obj ..." while repacking local objects the promisor pack links to).
+      # An empty repository has no local objects to repack. The script only reads commits, through GIT_DIR.
+      - name: Pre-flight — no sibling-branch merges
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          labels="$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER" --jq '[.labels[].name] | join(",")')"
+          hist="$RUNNER_TEMP/history.git"
+          git init --bare --quiet "$hist"
+          # the token goes to git through the environment, never the command line
+          GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraheader \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" \
+            git -C "$hist" fetch --no-tags --filter=tree:0 "$GITHUB_SERVER_URL/$GH_REPO.git" \
+            "+refs/heads/main:refs/remotes/origin/main" "+$BASE_SHA:refs/remotes/pr/base" "+$HEAD_SHA:refs/remotes/pr/head"
+          GIT_DIR="$hist" node scripts/preflight-branch-merges.mjs "$BASE_SHA" "$HEAD_SHA" --main origin/main --labels "$labels"
 
   # ── build-and-test, split (2026-10-10) ─────────────────────────────────────
   # One job ran everything and the gateway suite (372 files, serial against one
@@ -203,7 +256,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .node-version
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
@@ -302,22 +355,27 @@ jobs:
       - name: Pre-flight — every gateway route has UI or a reason (route census)
         if: ${{ !cancelled() && (steps.affordances.outcome == 'success' || steps.affordances.outcome == 'failure') }}
         run: node scripts/preflight-ui-route-census.mjs
-      # CONTRIBUTING_PARALLEL_SESSIONS §4.1: a migration added below the base branch's newest `when`
-      # never applies on a database that already ran the base branch (fresh CI databases hide it).
-      - name: Pre-flight — every new migration sits above main's migration watermark
-        if: github.event_name == 'pull_request'
+      # CONTRIBUTING_PARALLEL_SESSIONS §4.1, ADR-0252, review C-03: merged migrations and journal entries are
+      # unchanged, the folder and the journal agree, and the journal grows only by the assign-at-merge step's
+      # numbering of pending files (a new `when` below the base's newest would never apply). In the merge queue
+      # the base is the commit the queued PR is merged onto.
+      - name: Pre-flight — merged migrations unchanged; the journal grows only at merge time
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         env:
           BASE_REF: ${{ github.base_ref }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
         run: |
           set -euo pipefail
-          git fetch --no-tags --depth=1 origin "refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
-          node scripts/migration-watermark-guard.mjs "origin/$BASE_REF"
+          if [ -n "$MG_BASE_SHA" ]; then
+            git fetch --no-tags --depth=1 origin "$MG_BASE_SHA"
+            base="$MG_BASE_SHA"
+          else
+            git fetch --no-tags --depth=1 origin "refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+            base="origin/$BASE_REF"
+          fi
+          node scripts/migration-watermark-guard.mjs "$base"
 
-      # internal/process/AgentCoordination.md stays a CURRENT-STATE file: one Live-status row per
-      # agent, one Status line per task, inboxes acked within 12h, a line
-      # budget. History lives in git. `pnpm checkin` is the only writer of a row.
-      #
-      # The same step runs every `scripts/*.test.mjs` — `--dir scripts` scopes
+      # Runs every `scripts/*.test.mjs` — `--dir scripts` scopes
       # discovery to this directory, so an untracked nested checkout on a
       # developer machine is never swept in. That includes the G10-G15-VERIFY
       # guard (`basename-collisions.test.mjs`): no two tracked files in one
@@ -326,11 +384,9 @@ jobs:
       # (case-insensitive) checkout while every Linux gate stays green.
       # Runs whenever the pre-flight steps ran, whatever they found: a census
       # failure must not hide the scripts' own tests (they include the census's).
-      - name: Coordination file lint (structure only — never agent staleness) + repo filename guard
+      - name: Scripts tests (including the repo filename guard)
         if: ${{ !cancelled() && (steps.affordances.outcome == 'success' || steps.affordances.outcome == 'failure') }}
-        run: |
-          node scripts/coordination.mjs lint
-          pnpm exec vitest run --dir scripts
+        run: pnpm exec vitest run --dir scripts
 
       # FS-22 / ADR-0176 addendum (2026-10-24): every package in the shipped
       # workspace closure (`pnpm licenses list --prod`) is on the ADR-0176 list,
@@ -357,6 +413,8 @@ jobs:
   gateway-tests:
     name: gateway shard ${{ matrix.shard }}
     needs: scope
+    # ADR-0262 (PR trim): skipped only on a docs-only PR. A web-only PR still runs it: gateway tests read
+    # apps/web sources (step-up-posture-guard walks every product source, apps/web included).
     if: needs.scope.outputs.code == 'true'
     runs-on: ubuntu-24.04
     # A blast-radius cap, not a target: the slowest shard plus setup is well
@@ -390,7 +448,8 @@ jobs:
         # deadline upper bounds (a timeout fires within N ms) and each shard
         # runs alone on its runner, so they see LESS load than they did when the
         # gateway shared `pnpm -r test`'s parallelism with every other package.
-        shard: [1, 2, 3, 4]
+        # FIVE since 2026-11-08 (see "RE-MEASURED 2026-11-08" at the top): shard 4 of four reached the 20-min cap.
+        shard: [1, 2, 3, 4, 5]
 
 
     services:
@@ -444,7 +503,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .node-version
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
@@ -557,7 +616,7 @@ jobs:
     name: gateway / every test file ran exactly once
     needs: [scope, gateway-tests]
     # runs when a shard failed too, so a red run still says whether the shards
-    # covered the suite; it does not run on a cancelled (superseded) run, or on a docs-only PR
+    # covered the suite; it does not run on a cancelled (superseded) run, or when the shards were skipped
     if: ${{ !cancelled() && needs.scope.outputs.code == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -570,7 +629,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .node-version
           cache: pnpm
 
       # `vitest list --filesOnly` only resolves the include globs: no build, no
@@ -601,8 +660,9 @@ jobs:
   # runs whenever a dependency failed (`!cancelled()`, not the default
   # `success()`, which would skip it) and checks each result itself.
   #
-  # ADR-0252 addendum: the parts are skipped on a docs-only PR, and only then. The scope must have succeeded; with
-  # code changed every part must be a success, and with no code changed every part must be skipped.
+  # ADR-0262: a part is skipped only when its own scope output is false. The scope must have succeeded; the
+  # build and static pre-flights must succeed when code changed (else be skipped), and the gateway shards and their
+  # coverage check must succeed when code outside apps/web/** changed (else be skipped).
   build-and-test:
     needs: [scope, build-and-test-base, gateway-tests, gateway-coverage]
     if: ${{ !cancelled() }}
@@ -615,23 +675,18 @@ jobs:
         run: |
           echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
           echo "$RESULTS" | jq -e '
+            def ok(want): if want == "true" then .result == "success" else .result == "skipped" end;
+            .scope.outputs as $o |
             length == 4 and .scope.result == "success" and
-            (del(.scope) | to_entries | map(.value.result)) as $parts |
-            if .scope.outputs.code == "true" then all($parts[]; . == "success") else all($parts[]; . == "skipped") end' > /dev/null
+            (."build-and-test-base" | ok($o.code)) and (."gateway-tests" | ok($o.code)) and (."gateway-coverage" | ok($o.code))' > /dev/null
 
   docker-build:
     # The quickstart path must never rot: prove the compose image still builds.
     #
-    # But it only rots when something the image is made of changes, so on a PR
-    # this job first asks whether any such file moved and skips the ~5-minute
-    # build if not — paying ~1 minute of runner startup instead. On schedule and
-    # on workflow_dispatch it always builds, which is what stops a slow rot
-    # (e.g. a base-image tag going stale) from hiding behind untouched files.
-    #
-    # Deliberately NOT `dorny/paths-filter` or `tj-actions/changed-files`: a
-    # third-party action in the CI path is a supply-chain surface, and native
-    # `paths:` filters are workflow-level only, not per-job.
-    # ADR-0252 addendum: the full suite only (merge group, push to main, nightly, manual)
+    # ADR-0262: part of the full suite only (merge group, push to main, nightly, manual), and there it
+    # ALWAYS builds. It used to skip when no image file changed in `HEAD^1..HEAD`; on a merge group that range is
+    # wrong (in a group of several PRs, HEAD^1 is the previous queued PR's temporary commit, not main, so an earlier
+    # PR's Dockerfile or lockfile change would go unseen), and a full run is meant to run everything (#721 review).
     needs: scope
     if: needs.scope.outputs.full == 'true'
     runs-on: ubuntu-24.04
@@ -640,33 +695,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # For a pull_request the checked-out commit is the MERGE commit, so
-          # HEAD^1 is the base and `HEAD^1..HEAD` is exactly the PR's diff.
-          # Depth 2 is all that needs fetching for that.
-          fetch-depth: 2
 
-      - id: scope
-        run: |
-          set -euo pipefail
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            echo "Not a PR (${{ github.event_name }}) — building unconditionally."
-            echo "build=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          changed="$(git diff --name-only HEAD^1 HEAD)"
-          echo "Changed files:"; echo "$changed"
-          # Anything that can alter the produced image: the recipe itself, the
-          # compose stack, the ignore file that decides the build context, the
-          # lockfile, and every package manifest in the workspace.
-          if printf '%s\n' "$changed" | grep -qE '^(Dockerfile|docker-compose\.yml|\.dockerignore|pnpm-lock\.yaml|pnpm-workspace\.yaml|package\.json|(apps|packages)/[^/]+/package\.json)$'; then
-            echo "build=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "No image-relevant file changed — skipping the build to save CI minutes."
-            echo "build=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - if: steps.scope.outputs.build == 'true'
-        run: docker build -t regulait-gateway:ci .
+      - run: docker build -t regulait-gateway:ci .
 
   # F01 — the two SPA journeys that had no gate at all. `phase1.spec.ts` (the
   # developer persona: sign-in with a one-time password, chat, runs, workflows,
@@ -681,7 +711,7 @@ jobs:
   # (install + build dominate), on the same `pull_request` paths-ignore as the
   # rest of this workflow.
   spa-journeys:
-    # ADR-0252 addendum: the full suite only (merge group, push to main, nightly, manual)
+    # ADR-0262: the full suite only (merge group, push to main, nightly, manual)
     needs: scope
     if: needs.scope.outputs.full == 'true'
     runs-on: ubuntu-24.04
@@ -728,7 +758,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .node-version
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
@@ -842,7 +872,7 @@ jobs:
   # parallel jobs, with a final job proving every listed spec ran exactly once;
   # the layout and the proof live in mock-ui-shards.yml, shared with demo.yml.
   spa-mock:
-    # ADR-0252 addendum: on a PR only when the web app changed; always on a full run
+    # ADR-0262: on a PR only when the web app changed; always on a full run
     needs: scope
     if: needs.scope.outputs.web == 'true'
     uses: ./.github/workflows/mock-ui-shards.yml

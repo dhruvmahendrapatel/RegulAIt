@@ -101,6 +101,7 @@ export const MACHINE_ONLY = new Map([
 
   // ---- runner and executor channels (credentialed machines) ----------------
   ["* /v1/engine-runner/*", { reason: "runner channel: only an engine runner credential reaches these (ADR-0187, route-classes.ts; ADR-0188 S7 adds the key rotation route; ADR-0190 I5 adds the three task routes; ENG-IMG removes the runner artifact route)", matches: 9 }],
+  ["POST /v1/third-party-ingest/defenseclaw/records", "third-party exporter channel: a customer's DefenseClaw HTTP JSONL exporter posts here with its source's write-only rgti_ token, never a person (ADR-0261)"],
   ["* /v1/endpoint-agent/*", { reason: "endpoint agent channel: the agent's install step (bulk enrolment token), its registration (device ticket) and its own DPoP-bound self token reach these, never a person (ADR-0195 SD4b)", matches: 5 }],
   ["* /v1/executor-channel/*", { reason: "executor channel: only an enrolled executor reaches these (ADR-0190; I4 adds the two stdio session routes, I5 the two task input routes)", matches: 11 }],
 
@@ -168,6 +169,22 @@ export const INDIRECT_UI_CALLS = new Map([
     ["GET /v1/runs/export.xlsx", "apps/web/src/views/runs/RunsPage.tsx"],
     ["GET /v1/incidents/export.xlsx", "apps/web/src/views/incidents/IncidentsPage.tsx"],
     ["GET /v1/users/export.xlsx", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    // ADR-0226 P2 batch B: the identity and access lists
+    ["GET /v1/users/:userId/sessions/export.xlsx", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    ["GET /v1/revocations/export.xlsx", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    ["GET /v1/users/:userId/revocations/agents/export.xlsx", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    ["GET /v1/users/:userId/revocations/connectors/export.xlsx", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    ["GET /v1/keys/export.xlsx", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    ["GET /v1/roles/:roleId/assignments/export.xlsx", "apps/web/src/views/admin/identity/RolesPage.tsx"],
+    ["GET /v1/teams/export.xlsx", "apps/web/src/views/admin/identity/TeamsPage.tsx"],
+    ["GET /v1/virtual-keys/export.xlsx", "apps/web/src/views/admin/identity/VirtualKeysPage.tsx"],
+    ["GET /v1/virtual-keys/:keyId/usage/export.xlsx", "apps/web/src/views/admin/identity/VirtualKeysPage.tsx"],
+    ["GET /v1/admin/credentials/export.xlsx", "apps/web/src/views/admin/identity/CredentialsPage.tsx"],
+    ["GET /v1/workload-identities/export.xlsx", "apps/web/src/views/admin/identity/WorkloadIdentitiesPage.tsx"],
+    ["GET /v1/auth/link-requests/export.xlsx", "apps/web/src/views/admin/identity/SsoPage.tsx"],
+    ["GET /v1/chatops/identity-links/export.xlsx", "apps/web/src/views/admin/governance/ChatOpsPage.tsx"],
+    ["GET /v1/agents/export.xlsx", "apps/web/src/views/admin/integrations/AgentsPage.tsx"],
+    ["GET /v1/licenses/verifications/export.xlsx", "apps/web/src/views/admin/settings/LicensingPage.tsx"],
     // P2 batch C: the workflows, engines, cost and operations lists
     ["GET /v1/admission/skills/export.xlsx", "apps/web/src/views/admin/governance/AdmissionReviewPage.tsx"],
     ["GET /v1/billing/statements/export.xlsx", "apps/web/src/views/admin/cost/BillingHistory.tsx"],
@@ -267,6 +284,17 @@ export const INDIRECT_UI_CALLS = new Map([
     ["GET /v1/governance/decision-regression/runs", "apps/web/src/views/admin/governance/DecisionRegressionPage.tsx"],
     ["GET /v1/incidents", "apps/web/src/views/admin/governance/IncidentsTab.tsx"],
     ["GET /v1/feedback", "apps/web/src/views/feedback/feedbackKit.tsx"],
+    // ADR-0226 P2 batch B: the identity lists DataList reads from the path its page hands it (`endpoint`)
+    ["GET /v1/auth/link-requests", "apps/web/src/views/admin/identity/SsoPage.tsx"],
+    ["GET /v1/keys", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    ["GET /v1/licenses/verifications", "apps/web/src/views/admin/settings/LicensingPage.tsx"],
+    ["GET /v1/admin/credentials", "apps/web/src/views/admin/identity/CredentialsPage.tsx"],
+    ["GET /v1/revocations", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    ["GET /v1/roles/:roleId/assignments", "apps/web/src/views/admin/identity/RolesPage.tsx"],
+    ["GET /v1/chatops/identity-links", "apps/web/src/views/admin/governance/ChatOpsPage.tsx"],
+    ["GET /v1/users/:userId/revocations/agents", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    ["GET /v1/users/:userId/revocations/connectors", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    ["GET /v1/virtual-keys", "apps/web/src/views/admin/identity/VirtualKeysPage.tsx"],
     // ADR-0226 P2 batch C: a list the shared control reads, page by page, from the endpoint its page hands it
     ["GET /v1/admission/skills", "apps/web/src/views/admin/governance/AdmissionReviewPage.tsx"],
     ["GET /v1/billing/statements", "apps/web/src/views/admin/cost/BillingHistory.tsx"],
@@ -314,8 +342,63 @@ export const INDIRECT_UI_CALLS = new Map([
  * until the entry is deleted, and KNOWN_UI_GAPS_MAX is lowered to match.
  */
 export const KNOWN_UI_GAPS = new Map([
-  // empty: batch U4 (ui-gaps-details) closed the last 22. A new entry needs a reason and raises nothing:
-  // KNOWN_UI_GAPS_MAX stays 0, so build the screen instead.
+  ["GET /v1/usage-extractors", { does: "reads the org switch and every agent's active usage-mapping version", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["PUT /v1/usage-extractors/enabled", { does: "turns the usage extractor on (settings_relax step-up) or off", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["GET /v1/agents/:agentId/usage-extractor/versions", { does: "lists an agent's usage-mapping versions with each one's latest sample test", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["POST /v1/agents/:agentId/usage-extractor/versions", { does: "saves a new usage-mapping version (validated JSON pointers)", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["POST /v1/agents/:agentId/usage-extractor/versions/:versionId/test", { does: "tests a version against a sample response and the counts the admin expects", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["POST /v1/agents/:agentId/usage-extractor/versions/:versionId/activate", { does: "activates a version whose latest test passed (settings_relax step-up)", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["POST /v1/agents/:agentId/usage-extractor/deactivate", { does: "returns an agent to its adapter's built-in usage counts", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["GET /v1/mcp/definition-pins", { does: "lists the MCP servers with a tool, prompt or resource changed since approval (rug-pull queue)", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["GET /v1/servers/:serverId/definition-pins", { does: "one server's pinned definitions with each changed item's RFC 6902 diff", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["POST /v1/servers/:serverId/definition-pins/approve", { does: "re-approves reviewed changed items against their digests (settings_relax step-up)", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["GET /v1/servers/:serverId/high-risk-policy", { does: "shows a server's offensive-tooling classification and whether its policy template is applied", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["POST /v1/servers/:serverId/high-risk-policy", { does: "applies the high-risk policy template: a quorum approval rule and a rate limit", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["POST /v1/servers/:serverId/risk-class", { does: "an admin marks a server high-risk by hand when the automatic classifier missed its neutrally-named offensive tools", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["GET /v1/mcp/authorised-targets", { does: "lists the authorised targets of high-risk MCP servers", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["POST /v1/mcp/authorised-targets", { does: "adds an authorised target (settings_relax step-up)", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["DELETE /v1/mcp/authorised-targets/:id", { does: "removes an authorised target", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  // batch U4 (ui-gaps-details) closed the last 22. The entries below are the ADR-0236 (P11) MCP bundle routes:
+  // the owner decided on 2026-11-07 (#697) to ship them API-first while the Governed Designer builds the bundle
+  // screen requested on #453. Building that screen closes these and lowers KNOWN_UI_GAPS_MAX back to 0.
+  ["GET /v1/mcp-bundles", { does: "lists governed MCP bundles with the default-off setting, version and grant count (ADR-0236)", tracking: "#453" }],
+  ["POST /v1/mcp-bundles", { does: "creates a bundle at version 1 from exact (server, tool) pairs, with an optional approver for dangerous tools", tracking: "#453" }],
+  ["GET /v1/mcp-bundles/:bundleId", { does: "reads a bundle: its current tools and version history", tracking: "#453" }],
+  ["PATCH /v1/mcp-bundles/:bundleId", { does: "changes a bundle's description or its approver for dangerous tools", tracking: "#453" }],
+  ["DELETE /v1/mcp-bundles/:bundleId", { does: "archives a bundle: every grant of it confers nothing from then on", tracking: "#453" }],
+  ["PUT /v1/mcp-bundles/:bundleId/items", { does: "writes a new version of a bundle's tools (compare-and-set; adding a tool is a step-up)", tracking: "#453" }],
+  ["GET /v1/mcp-bundles/:bundleId/versions/:version", { does: "reads one immutable version of a bundle", tracking: "#453" }],
+  ["GET /v1/mcp-bundles/:bundleId/grants", { does: "lists who holds a bundle (user, role or team) and up to which scope tier", tracking: "#453" }],
+  ["POST /v1/mcp-bundles/:bundleId/grants", { does: "grants a bundle to a user, role or team up to a scope tier (read by default)", tracking: "#453" }],
+  ["DELETE /v1/mcp-bundles/:bundleId/grants/:grantId", { does: "revokes a bundle grant", tracking: "#453" }],
+  ["PUT /v1/mcp-tools/:toolId/dangerous", { does: "flags or clears a tool's dangerous scope tier (clearing is a step-up)", tracking: "#453" }],
+  // ADR-0261 (P37) adds six: the owner decided on 2026-11-07 to raise the cap by exactly these and ship the
+  // DefenseClaw ingest API-only, with the admin screen tracked on #453.
+  ["GET /v1/third-party-ingest/sources", { does: "lists third-party ingest sources (DefenseClaw), their state, credential issue time and the ingest limits", tracking: "#453" }],
+  ["POST /v1/third-party-ingest/sources", { does: "creates a DefenseClaw ingest source, off by default", tracking: "#453" }],
+  ["PUT /v1/third-party-ingest/sources/:sourceId/enabled", { does: "turns a source on (step-up, audited) or off (audited)", tracking: "#453" }],
+  ["POST /v1/third-party-ingest/sources/:sourceId/credential", { does: "issues or replaces the source's write-only rgti_ token, shown once (step-up, audited)", tracking: "#453" }],
+  ["POST /v1/third-party-ingest/sources/:sourceId/credential/revoke", { does: "revokes the source's ingest token (audited)", tracking: "#453" }],
+  ["GET /v1/third-party-ingest/sources/:sourceId/records", { does: "the newest third-party evidence a source delivered, each marked third-party with its linked findings", tracking: "#453" }],
+  ["GET /v1/reports/posture/assets", { does: "pages per-asset posture scores (agents or use cases) the caller can read, each with objectives and ranked actions", tracking: "ADR-0214 amendment (P3): the brief is API-only; the per-asset score screen is posted on #453 (c6703277931) for the Governed Designer, and the owner chose the temporary gap on #705 (2026-11-07)" }],
+  ["GET /v1/reports/posture/assets/:kind/:assetId", { does: "one agent's or use case's posture score, with its objectives, not-applicable list and ranked actions", tracking: "ADR-0214 amendment (P3): the brief is API-only; the per-asset score screen is posted on #453 (c6703277931) for the Governed Designer, and the owner chose the temporary gap on #705 (2026-11-07)" }],
+  // ADR-0259 (P35): owner decision on #733 (2026-11-07, option c): the backend landed before its screen; the UI
+  // lane builds it on #453, then deletes these three.
+  [
+    "GET /v1/discovery/endpoint-mcp-servers",
+    {
+      does: "ADR-0259: the MCP servers enrolled devices' host configs name, with risk flags, secret types and the registry diff (linked, registered, unregistered); keyset-paginated, filters status/risky/secrets/deviceId",
+      tracking: "#453",
+    },
+  ],
+  [
+    "POST /v1/discovery/endpoint-mcp-server-links",
+    { does: "ADR-0259: link a configured MCP server identity (package, host or command) to an approved mcp_servers row, audited", tracking: "#453" },
+  ],
+  [
+    "POST /v1/discovery/endpoint-mcp-server-links/remove",
+    { does: "ADR-0259: remove that link, audited", tracking: "#453" },
+  ],
 ]);
 
 /**
@@ -324,7 +407,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 0;
+export const KNOWN_UI_GAPS_MAX = 38;
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 

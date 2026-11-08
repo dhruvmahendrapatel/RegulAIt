@@ -36,6 +36,7 @@ import {
   type EndpointObservation,
   type EndpointObservationKey,
 } from "@regulait/shared";
+import { MCP_CONFIG_KIND, MCP_SERVER_MATCHED_ON, mcpServerSchema, mcpSightingsOf, type McpServerSighting } from "./endpoint-mcp-config.js";
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -149,9 +150,9 @@ export const rotateRequestSchema = z
   })
   .strict();
 
-export const FACT_KINDS = ["desktop_app", "ide_extension", "browser_extension", "local_runtime", "assistant_config", "cli", "env_name"] as const;
+export const FACT_KINDS = ["desktop_app", "ide_extension", "browser_extension", "local_runtime", "assistant_config", "cli", "env_name", "mcp_config"] as const;
 const ROOTS = ["home", "system_applications", "appdata", "localappdata", "path", "registry", "process_table"] as const;
-const MATCHED_ON = ["bundleId", "desktopId", "uninstallName", "extensionId", "processName", "port", "processName+port", "file", "executable", "envName"] as const;
+const MATCHED_ON = ["bundleId", "desktopId", "uninstallName", "extensionId", "processName", "port", "processName+port", "file", "executable", "envName", "mcpServer"] as const;
 type MatchedOn = (typeof MATCHED_ON)[number];
 
 const factSchema = z
@@ -169,8 +170,13 @@ const factSchema = z
       .array(z.object({ keyName: z.string().min(1).max(128), ruleId: z.string().max(64).optional(), present: z.boolean() }).strict())
       .max(ENDPOINT_FACT_MAX_KEYS)
       .optional(),
+    // ADR-0259: one configured MCP server, on an mcp_config fact only
+    server: mcpServerSchema.optional(),
   })
-  .strict();
+  .strict()
+  .refine((f) => (f.kind === MCP_CONFIG_KIND) === (f.matchedOn === MCP_SERVER_MATCHED_ON) && (f.kind === MCP_CONFIG_KIND) === (f.server !== undefined), {
+    message: "an mcp_config fact, and only one, is matched on mcpServer and carries a server",
+  });
 export type EndpointFact = z.infer<typeof factSchema>;
 
 export const reportSchema = z
@@ -268,6 +274,8 @@ export function reportFresh(collectedAt: string, now: Date): boolean {
 
 /** which SD3 match type a fact's `matchedOn` is (`envName` has none: it is refused, see the module comment) */
 const MATCH_TYPE_OF: Readonly<Record<Exclude<MatchedOn, "envName">, EndpointMatchType>> = {
+  // ADR-0259: a configured MCP server is a sighting of its host's config file (the manifest's catalogue path)
+  mcpServer: "config_path",
   bundleId: "bundle_id",
   desktopId: "app_name",
   uninstallName: "app_name",
@@ -305,6 +313,10 @@ export interface FactReduction {
   envRefused: number;
   /** facts no enabled catalogue row matched (dropped: a manifest is built from the catalogue) */
   unmatched: number;
+  /** ADR-0259: mcp_config facts refused because the org switch is off (counted, never kept) */
+  mcpRefused: number;
+  /** ADR-0259: the configured MCP servers, for `endpoint_mcp_servers` (empty while the switch is off) */
+  mcpServers: McpServerSighting[];
 }
 
 const NO_DEVICE = "device";
@@ -314,12 +326,22 @@ const NO_DEVICE = "device";
  * (`reduceEndpointObservations`, detection is data). Only the matched
  * catalogue value, its provider, the OS, the ecosystem and a count survive.
  */
-export function reduceReportFacts(report: Pick<EndpointReport, "facts" | "os" | "collectedAt">, catalogue: readonly AiSignature[]): FactReduction {
+export function reduceReportFacts(
+  report: Pick<EndpointReport, "facts" | "os" | "collectedAt">,
+  catalogue: readonly AiSignature[],
+  /** ADR-0259: is endpoint MCP config discovery on for the org? (off: every mcp_config fact is refused) */
+  mcpConfigEnabled = false,
+): FactReduction {
   let envRefused = 0;
+  let mcpRefused = 0;
   const observations: EndpointObservation[] = [];
   for (const [i, f] of report.facts.entries()) {
     if (f.kind === "env_name" || f.matchedOn === "envName") {
       envRefused += 1;
+      continue;
+    }
+    if (f.kind === MCP_CONFIG_KIND && !mcpConfigEnabled) {
+      mcpRefused += 1;
       continue;
     }
     const keys: EndpointObservationKey[] = [];
@@ -351,7 +373,8 @@ export function reduceReportFacts(report: Pick<EndpointReport, "facts" | "os" | 
   }
   const reduction = reduceEndpointObservations({ observations }, catalogue, { unmatchedSample: 0 });
   const sightings = reduction.matched.map((m) => ({ kind: m.kind, value: m.value, provider: m.provider, os: m.os, ecosystem: m.ecosystem, count: m.count }));
-  return { sightings, envRefused, unmatched: reduction.unmatchedCount };
+  const mcpServers = mcpConfigEnabled ? mcpSightingsOf(report.facts) : [];
+  return { sightings, envRefused, unmatched: reduction.unmatchedCount, mcpRefused, mcpServers };
 }
 
 // ---------------------------------------------------------------------------

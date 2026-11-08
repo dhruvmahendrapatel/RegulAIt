@@ -10,10 +10,10 @@
   PII mode, MCP data-scope defaults, audit retention) is the product's single most defensible
   claim — and §4 items 4+7 observed that the seeded demo does not lead with it and that
   workflow templates are not discoverable by cascade profile.
-- **Extends**: [ADR-0019](0019-data-sensitivity-dimension.md) /
+- **Extends**: [ADR-0019](0019-per-user-revocation-and-full-attribution.md) /
   [ADR-0073](0073-rules-engine-versioning.md) (the cascade sources this derives from),
   [ADR-0074](0074-rule-read-model-write-choke-point.md) (the profile-edit path the flip test
-  exercises), [ADR-0022](0022-workflow-template-retire.md) (templates as immutable-ish rows).
+  exercises), [ADR-0022](0022-identity-lifecycle-approver-visibility.md) (templates as immutable-ish rows).
 
 ## Context
 

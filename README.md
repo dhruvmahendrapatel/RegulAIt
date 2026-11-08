@@ -220,8 +220,7 @@ the `scripts/*.test.mjs` tests), `gateway-tests` (the gateway suite split
 and each running the unique-constraint pre-flight on its own database after its
 tests) and `gateway-coverage` (every gateway test file ran in exactly one shard).
 This sequence adds a repo-wide `--noEmit` typecheck and an explicitly disposable
-database, and leaves out the base job's `AgentCoordination.md` lint (the agents'
-bookkeeping file, not part of verifying a checkout). It is the only sequence whose result is meaningful:
+database. It is the only sequence whose result is meaningful:
 anything that skips a step below can go green on a tree that does not actually
 build.
 
