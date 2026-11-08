@@ -145,3 +145,21 @@ off by default, and turning it on needs a step-up.**
   - one ledger column: `usage_events.usage_extractor_version_id`.
 
   It adds no functions or triggers.
+
+## Addendum (2026-11-07): review follow-ups on #713 (findings 4, 2 and 6)
+
+- **Database errors after the call (finding 4).** `resolveDispatchUsage` runs after the provider has served and
+  billed the call. A database error in any of its steps (the switch read, the active-version read, or the fallback
+  audit) now keeps the adapter's built-in counts instead of failing the dispatch. The usage row records
+  `usageExtractor: {versionId: null, result: "error", failure}`, where `failure` is a fixed string and never the
+  error text. No audit row is attempted, because the database is what failed.
+- **Fallback audit volume (finding 2).** An agent whose adapter sets no `usageSource` falls back on every call. This
+  covers the mock and artifact adapters, and any adapter outside `@regulait/model-provider`. Every fallback is still
+  stamped on its usage row. The `usage-extractor-fallback` audit row, however, is now written at most once per
+  mapping version per hour (`FALLBACK_AUDIT_WINDOW_SECONDS`). The window is read on the database clock.
+  - We chose this over refusing activation by provider kind. A refusal list would have to track which adapters set
+    `usageSource`, and it would wrongly block a custom adapter that does set it.
+- **Wording (finding 6).** A sample test is not append-only. No route updates or deletes one, but it is deleted with
+  its version and its agent (`ON DELETE CASCADE`). Its audit rows are the record that outlives it.
+  - Migration 0297's comment still says "append-only evidence". The comment was left unchanged because the migration
+    has already been applied. The schema comment and this addendum are the corrected statement.
