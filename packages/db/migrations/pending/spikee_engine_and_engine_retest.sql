@@ -2,7 +2,8 @@
 -- (multi-turn attacks) is designed in the same ADR and follows in its own slice with its own migration. Hand-authored (never drizzle-kit generate). Re-runnable: every statement is idempotent.
 --
 -- 1. `engines_id_check` gains 'spikee', in lockstep with ENGINE_IDS in @regulait/shared
---    (packages/shared/src/engines/contract.ts), which the drizzle schema reads.
+--    (packages/shared/src/engines/contract.ts), which the drizzle schema reads. It keeps ADR-0242's two admission-scan
+--    engines: this file is assigned after `admission_engine_scans`, which merged first.
 -- 2. Its row, OFF (`enabled` defaults to false and `engines_enabled_needs_self_test_check` holds).
 --    Version and digest are re-synced from the shipped manifest by the gateway (`syncEngineManifest`); no route
 --    writes them, and the manifest's digest is null until the first signed publish is recorded in
@@ -18,7 +19,7 @@
 ALTER TABLE "engines" DROP CONSTRAINT IF EXISTS "engines_id_check";
 --> statement-breakpoint
 ALTER TABLE "engines" ADD CONSTRAINT "engines_id_check"
-  CHECK ("id" IN ('promptfoo', 'modelscan', 'garak', 'spikee'));
+  CHECK ("id" IN ('promptfoo', 'modelscan', 'garak', 'mcpscanner', 'skillscanner', 'spikee'));
 --> statement-breakpoint
 INSERT INTO "engines" ("id", "kind", "version", "licence") VALUES
   ('spikee', 'redteam', '0.9.4', 'Apache-2.0')

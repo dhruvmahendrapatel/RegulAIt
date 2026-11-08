@@ -63,6 +63,7 @@ import {
   // with the migration's CHECKs by being the same constants
   ARTIFACT_FORMATS,
   ARTIFACT_SCAN_VERDICTS,
+  ADMISSION_SCAN_VERDICTS,
   ENGINE_IDS,
   ENGINE_ITEM_VERDICTS,
   ENGINE_KINDS,
@@ -140,6 +141,10 @@ import {
   DISCOVERY_RUN_TRIGGERS,
   DISCOVERY_SOURCE_KINDS,
   DISCOVERY_EVIDENCE_KINDS,
+  // ADR-0261 (P37): third-party security telemetry ingest
+  THIRD_PARTY_EVIDENCE_KINDS,
+  THIRD_PARTY_INGEST_KINDS,
+  DEFENSECLAW_BUCKETS,
   DISCOVERY_PSEUDONYM_KINDS,
   DISCOVERY_WRITE_SCOPE_STATES,
   AI_SIGNATURE_KINDS,
@@ -1672,6 +1677,9 @@ export const auditLog = pgTable(
         "discovery_run",
         "discovery_settings",
         "discovery_pseudonym",
+        // ADR-0261 (P37): a third-party ingest source (created, enabled, disabled, its write-only credential issued or
+        // revoked) and each accepted or refused batch of third-party evidence. Plain text column — no DDL.
+        "third_party_ingest_source",
         // ADR-0193 (I4): a content provenance record (objectId = the record) and a trust-tier change (a source's
         // tier, or the write floor). Plain text column — no DDL.
         "content_provenance",
@@ -2770,6 +2778,20 @@ export const externalScorers = pgTable("external_scorers", {
   lastTestError: text("last_test_error"),
   createdBy: uuid("created_by"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  /** ADR-0237 (migration guardrail_vendor_adapters): the wire dialect. `regulait` = the ADR-0088
+   * contract; a vendor adapter (openai_moderation / azure_content_safety /
+   * lakera_guard) translates in the gateway and may claim guardrail kinds only.
+   * CHECK-constrained to the list in @regulait/shared EXTERNAL_SCORER_ADAPTERS. */
+  adapter: text("adapter", { enum: ["regulait", "openai_moderation", "azure_content_safety", "lakera_guard"] })
+    .notNull()
+    .default("regulait"),
+  /** ADR-0237. Denormalisation exception (ADR-0200 addendum): a schema-validated
+   * configuration document (`vendorAdapterOptionsSchema`: OpenAI model, Lakera
+   * project id), not a list of references. Null = the adapter's defaults. */
+  adapterOptions: jsonb("adapter_options").$type<{ model?: string; projectId?: string }>(),
+  /** ADR-0237: the vendor's list price per call, written to usage_events.cost_usd
+   * on every successful call. Null = unpriced, never invented (as connectors). */
+  pricePerCallUsd: doublePrecision("price_per_call_usd"),
 });
 
 export type ExternalScorerRow = typeof externalScorers.$inferSelect;
@@ -7546,7 +7568,8 @@ export const shadowAiImports = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     // ADR-0195 SD0 (migration 0202): the import kinds plus the scanner evidence kinds, one path for both
-    kind: text("kind", { enum: [...EVIDENCE_KINDS, ...DISCOVERY_EVIDENCE_KINDS] }).notNull(),
+    // ADR-0261 (migration pending/third_party_ingest): plus the third-party export kinds
+    kind: text("kind", { enum: [...EVIDENCE_KINDS, ...DISCOVERY_EVIDENCE_KINDS, ...THIRD_PARTY_EVIDENCE_KINDS] }).notNull(),
     mode: text("mode", { enum: ["dry_run", "apply"] }).notNull(),
     status: text("status", { enum: ["planned", "applied", "refused"] }).notNull(),
     source: text("source"),
@@ -13940,6 +13963,48 @@ export const artifactScans = pgTable(
   ],
 );
 
+/**
+ * ADR-0242 (P23, pending migration admission_engine_scans) — one admission-scan engine's verdict on one MCP server or builder skill at one
+ * digest. The admission gate reads the latest row for the subject's CURRENT digest; with the engine on, only a
+ * `pass` there admits (fail closed).
+ */
+export const admissionEngineScans = pgTable(
+  "admission_engine_scans",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    engineId: text("engine_id", { enum: ["mcpscanner", "skillscanner"] })
+      .notNull()
+      .references(() => engines.id, { onDelete: "restrict" }),
+    mcpServerId: uuid("mcp_server_id").references(() => mcpServers.id, { onDelete: "cascade" }),
+    builderSkillId: uuid("builder_skill_id").references(() => builderSkills.id, { onDelete: "cascade" }),
+    subjectDigest: text("subject_digest").notNull(),
+    engineRunId: uuid("engine_run_id").references(() => engineRuns.id, { onDelete: "set null" }),
+    // point-in-time copy (ADR-0200 addendum exception): the version that produced THIS scan, kept as evidence
+    engineVersion: text("engine_version").notNull(),
+    rulesSha256: text("rules_sha256"),
+    verdict: text("verdict", { enum: ADMISSION_SCAN_VERDICTS }).notNull(),
+    // point-in-time evidence (ADR-0200 addendum exception): the counts-only findings of THIS scan
+    findings: jsonb("findings").$type<Array<{ rule: string; severity: string; tool: string; where: string; count: number }>>().notNull().default([]),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("admission_engine_scans_engine_check", sql`${t.engineId} IN ('mcpscanner', 'skillscanner')`),
+    check(
+      "admission_engine_scans_subject_check",
+      sql`(${t.engineId} = 'mcpscanner' AND ${t.mcpServerId} IS NOT NULL AND ${t.builderSkillId} IS NULL) OR (${t.engineId} = 'skillscanner' AND ${t.builderSkillId} IS NOT NULL AND ${t.mcpServerId} IS NULL)`,
+    ),
+    check("admission_engine_scans_digest_check", sql`${t.subjectDigest} ~ '^[0-9a-f]{64}$'`),
+    check("admission_engine_scans_rules_check", sql`${t.rulesSha256} IS NULL OR ${t.rulesSha256} ~ '^[0-9a-f]{64}$'`),
+    check("admission_engine_scans_verdict_check", sql`${t.verdict} IN ('pass', 'fail', 'unknown')`),
+    check("admission_engine_scans_findings_check", sql`jsonb_typeof(${t.findings}) = 'array'`),
+    check("admission_engine_scans_version_check", sql`length(${t.engineVersion}) BETWEEN 1 AND 32`),
+    index("admission_engine_scans_mcp_idx").on(t.mcpServerId, t.subjectDigest, t.createdAt.desc()).where(sql`${t.mcpServerId} IS NOT NULL`),
+    index("admission_engine_scans_skill_idx").on(t.builderSkillId, t.subjectDigest, t.createdAt.desc()).where(sql`${t.builderSkillId} IS NOT NULL`),
+    uniqueIndex("admission_engine_scans_engine_run_unique").on(t.engineRunId).where(sql`${t.engineRunId} IS NOT NULL`),
+  ],
+);
+export type AdmissionEngineScanRow = typeof admissionEngineScans.$inferSelect;
+
 // ===========================================================================
 // ADR-0216 (P14 + P15, migration 0266) — model-file signatures and the supply-chain block.
 // ===========================================================================
@@ -15835,3 +15900,87 @@ export const modelExplainabilityArtefacts = pgTable(
   ],
 );
 export type ModelExplainabilityArtefactRow = typeof modelExplainabilityArtefacts.$inferSelect;
+
+// ===========================================================================
+// ADR-0261 (P37, migration pending/third_party_ingest) — THIRD-PARTY SECURITY TELEMETRY INGEST
+//
+// A source is a customer's DefenseClaw deployment pushing its HTTP JSONL log export. It is off until an admin enables
+// it (a `settings_relax` step-up, audited), and it has at most one write-only credential, stored as a sha256 hash and
+// confined to the one ingest route. What arrives is THIRD-PARTY EVIDENCE: append-only rows, never a RegulAIt decision.
+// Single-tenant deployment: like the other register tables (0281 header), no tenant column and no RLS.
+// ===========================================================================
+
+export const thirdPartyIngestSources = pgTable(
+  "third_party_ingest_sources",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kind: text("kind", { enum: THIRD_PARTY_INGEST_KINDS }).notNull(),
+    name: text("name").notNull(),
+    /** the pinned export schema family; a record naming another family is refused */
+    schemaFamily: text("schema_family").notNull().default("v8"),
+    enabled: boolean("enabled").notNull().default(false),
+    /** sha256 hex of the `rgti_` credential; NULL until one is issued, and again once revoked */
+    tokenHash: text("token_hash"),
+    tokenIssuedAt: timestamp("token_issued_at", { withTimezone: true }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("third_party_ingest_sources_token_hash_uq").on(t.tokenHash),
+    uniqueIndex("third_party_ingest_sources_name_uq").on(sql`lower(${t.name})`),
+  ],
+);
+export type ThirdPartyIngestSourceRow = typeof thirdPartyIngestSources.$inferSelect;
+
+/**
+ * One accepted third-party record. APPEND-ONLY EVIDENCE (a trigger refuses UPDATE, DELETE and TRUNCATE): a
+ * point-in-time copy of allow-listed, scrubbed fields from a verbatim external payload, which is the ADR-0200
+ * exception for `attributes`. The unique (source, record id) pair is the dedup the exporter's docs require. Each row
+ * names the audit-chain row of the batch it arrived in (`audit_log` carries no FKs by design).
+ */
+export const thirdPartyIngestRecords = pgTable(
+  "third_party_ingest_records",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => thirdPartyIngestSources.id, { onDelete: "restrict" }),
+    recordId: text("record_id").notNull(),
+    bucket: text("bucket", { enum: DEFENSECLAW_BUCKETS }).notNull(),
+    /** an identifier the sending product chose (excluded from the content guard as `ingested`) */
+    eventName: text("event_name"),
+    severity: text("severity", { enum: ["critical", "high", "medium", "low", "info", "error"] }),
+    /** the sending product's own action (block, alert, allow…): its decision, never ours */
+    action: text("action"),
+    connector: text("connector"),
+    /** the device pseudonym (ADR-0195 decision 20); the host name itself is never stored */
+    devicePseudonym: text("device_pseudonym"),
+    /** allow-listed, bounded, scrubbed fields of the external payload (verbatim-payload exception, ADR-0200) */
+    attributes: jsonb("attributes").$type<Record<string, unknown>>().notNull(),
+    observedAt: timestamp("observed_at", { withTimezone: true }).notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+    recordSha256: text("record_sha256").notNull(),
+    batchSha256: text("batch_sha256").notNull(),
+    auditLogId: uuid("audit_log_id").notNull(),
+  },
+  (t) => [
+    uniqueIndex("third_party_ingest_records_dedup_uq").on(t.sourceId, t.recordId),
+    index("third_party_ingest_records_source_received_idx").on(t.sourceId, t.receivedAt.desc()),
+  ],
+);
+export type ThirdPartyIngestRecordRow = typeof thirdPartyIngestRecords.$inferSelect;
+
+/** which finding a third-party record opened or widened (a join table: findings are deleted by retention, records are not) */
+export const thirdPartyIngestRecordFindings = pgTable(
+  "third_party_ingest_record_findings",
+  {
+    recordId: uuid("record_id")
+      .notNull()
+      .references(() => thirdPartyIngestRecords.id, { onDelete: "cascade" }),
+    findingId: uuid("finding_id")
+      .notNull()
+      .references(() => shadowAiFindings.id, { onDelete: "cascade" }),
+  },
+  (t) => [primaryKey({ columns: [t.recordId, t.findingId] }), index("third_party_ingest_record_findings_finding_idx").on(t.findingId)],
+);

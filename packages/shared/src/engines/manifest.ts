@@ -20,6 +20,7 @@ import { GARAK_ENGINE_VERSION, GARAK_USAGE_DATA_ENV, GARAK_WORKER_SELF_TEST_SWIT
 import { ENGINE_IMAGES_LOCK } from "./images-lock.js";
 import { MODELSCAN_ENGINE_VERSION, modelscanReducedSet } from "./modelscan.js";
 import { SPIKEE_ENGINE_VERSION, SPIKEE_USAGE_DATA_ENV, SPIKEE_WORKER_SELF_TEST_SWITCH, spikeeJudgeSets, spikeeManifestSets, spikeeReducedSet } from "./spikee.js";
+import { ADMISSION_SCAN_ENGINES } from "./admission-scan.js";
 import { PROMPTFOO_ENGINE_VERSION, PROMPTFOO_USAGE_DATA_ENV, promptfooManifestSets, promptfooReducedSet } from "./promptfoo.js";
 import { ENGINE_SELF_TEST_FUTURE_SKEW_MS, ENGINE_SELF_TEST_MAX_AGE_SECONDS, type EngineId, type EngineKind, type EngineNotRunReason, type RunnerSelfTest } from "./contract.js";
 
@@ -244,6 +245,74 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
       "runtime behaviour inside the built image (the worker's egress test, an air-gapped run)",
       "the pre-seeded Hugging Face assets (ADR-0187 decisions 198-200) are proven to load offline by the image build, which the signed publish ran; no run inside the published image is recorded yet",
       "the judge path (agent_breaker's attacker, parser and judge re-pointed at the run's judge through the gateway) was measured with the pinned garak outside the image only (ADR-0187 decision 204)",
+    ],
+  },
+  // ADR-0242: mcp-scanner, run by our offline driver (engines/mcpscanner/scan.py) on one MCP server manifest. Its runs are started by the
+  // admission gate, never by a person, and its verdict joins that subject's admission state. No image is
+  // published yet (phase 2 adds the runner stage and the lock entry), so the digest is null and the engine
+  // cannot be enabled (secure default).
+  mcpscanner: {
+    id: "mcpscanner",
+    kind: "admission_scan",
+    displayName: "mcp-scanner",
+    version: ADMISSION_SCAN_ENGINES.mcpscanner.version,
+    generation: 1,
+    imageDigest: null,
+    licence: "Apache-2.0",
+    maintainerCount: null,
+    // the driver refuses to start with any cloud analyzer credential set and builds only local analyzers
+    // (YARA with the baked rules, schema reference); the task runs with no network. The worker attests the switch below.
+    usageDataEnv: { REGULAIT_MCPSCANNER_OFFLINE_ANALYZERS_ONLY: "1" },
+    workerAttestedSwitches: ["REGULAIT_MCPSCANNER_OFFLINE_ANALYZERS_ONLY"],
+    needsModelAccess: false,
+    requiresJudge: false,
+    judgeSets: [],
+    credentialIsolation: false,
+    taskImage: null,
+    taskEntry: { command: "/opt/mcpscanner/venv/bin/python", args: ["-I", "/opt/mcpscanner/scan.py", "/in", "/out/report.json"] },
+    sets: { scan: "standard" },
+    airGappedReducedSet: [],
+    lastVerified: "2026-11-07",
+    reCheckBy: "2027-05-07",
+    unverified: [
+      "the published image, its digest and signature (phase 2: the runner stage and the publish)",
+      "maintainer count",
+      "transitive licences: the PSF-2.0, MPL-2.0, MIT-0 and CNRI-Python terms are the ones the owner accepted for garak (ADR-0187 decision 193); yara-python is built from source without OpenSSL",
+      "the runner and sandbox path (phase 2); the driver and the image's offline smoke scan were measured on 2026-11-07 (ADR-0242 §3)",
+    ],
+  },
+  // ADR-0242: skill-scanner, run by our offline driver (engines/skillscanner/scan.py) on one agent skill (SKILL.md and its files). Its runs are started by the
+  // admission gate, never by a person, and its verdict joins that subject's admission state. No image is
+  // published yet (phase 2 adds the runner stage and the lock entry), so the digest is null and the engine
+  // cannot be enabled (secure default).
+  skillscanner: {
+    id: "skillscanner",
+    kind: "admission_scan",
+    displayName: "skill-scanner",
+    version: ADMISSION_SCAN_ENGINES.skillscanner.version,
+    generation: 1,
+    imageDigest: null,
+    licence: "Apache-2.0",
+    maintainerCount: null,
+    // the driver refuses to start with any cloud analyzer credential set and builds only local analyzers
+    // (static signatures on the baked YARA-X packs, bytecode, pipeline, correlation); the task runs with no network. The worker attests the switch below.
+    usageDataEnv: { REGULAIT_SKILLSCANNER_OFFLINE_ANALYZERS_ONLY: "1" },
+    workerAttestedSwitches: ["REGULAIT_SKILLSCANNER_OFFLINE_ANALYZERS_ONLY"],
+    needsModelAccess: false,
+    requiresJudge: false,
+    judgeSets: [],
+    credentialIsolation: false,
+    taskImage: null,
+    taskEntry: { command: "/opt/skillscanner/venv/bin/python", args: ["-I", "/opt/skillscanner/scan.py", "/in", "/out/report.json"] },
+    sets: { scan: "standard" },
+    airGappedReducedSet: [],
+    lastVerified: "2026-11-07",
+    reCheckBy: "2027-05-07",
+    unverified: [
+      "the published image, its digest and signature (phase 2: the runner stage and the publish)",
+      "maintainer count",
+      "transitive licences: as mcpscanner, plus numpy's (ADR-0187 decision 106); yara-x's statically linked Rust crates carry Apache-2.0 WITH LLVM-exception, Zlib and Unicode-3.0 terms awaiting an owner decision; pcodedmp (GPL-3.0) is excluded",
+      "the runner and sandbox path (phase 2); the driver and the image's offline smoke scan were measured on 2026-11-07 (ADR-0242 §3)",
     ],
   },
   // ADR-0245: spikee (indirect prompt injection in documents). Off, and no image until its first signed publish:

@@ -16,3 +16,4 @@ export * from "./garak-owasp-2025.js";
 export * from "./spikee.js";
 export * from "./images-lock.js";
 export * from "./supply-chain.js";
+export * from "./admission-scan.js";

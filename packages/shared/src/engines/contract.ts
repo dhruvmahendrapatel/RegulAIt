@@ -26,13 +26,14 @@ import { compactJwsSchema, workloadPublicJwkSchema } from "../identity/contract.
 // Vocabularies (each mirrors a CHECK in migration 0173)
 // ---------------------------------------------------------------------------
 
-/** the engines this build knows (`engines.id`); an admin cannot add one */
-// ADR-0245 (pending migration spikee_engine_and_engine_retest): spikee joins as a red-team engine (PyRIT follows in its own slice)
-export const ENGINE_IDS = ["promptfoo", "modelscan", "garak", "spikee"] as const;
+/** the engines this build knows (`engines.id`); an admin cannot add one. ADR-0242 (pending migration `admission_engine_scans`): the two
+ * admission-scan engines (Cisco mcp-scanner and skill-scanner). ADR-0245 (pending migration
+ * `spikee_engine_and_engine_retest`): spikee joins as a red-team engine (PyRIT follows in its own slice). */
+export const ENGINE_IDS = ["promptfoo", "modelscan", "garak", "mcpscanner", "skillscanner", "spikee"] as const;
 export type EngineId = (typeof ENGINE_IDS)[number];
 
 /** what an engine measures (`engines.kind`) */
-export const ENGINE_KINDS = ["redteam", "eval", "model_scan"] as const;
+export const ENGINE_KINDS = ["redteam", "eval", "model_scan", "admission_scan"] as const;
 export type EngineKind = (typeof ENGINE_KINDS)[number];
 
 /**

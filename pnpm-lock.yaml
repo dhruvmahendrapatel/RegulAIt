@@ -199,6 +199,9 @@ importers:
       oidc-provider:
         specifier: 9.12.2
         version: 9.12.2
+      openai:
+        specifier: 6.49.0
+        version: 6.49.0(@aws-sdk/credential-provider-node@3.972.93)(@smithy/signature-v4@5.7.5)(ws@8.22.0)(zod@4.6.7)
       openid-client:
         specifier: ^6.8.4
         version: 6.8.8
