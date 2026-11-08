@@ -5,6 +5,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import yaml from "js-yaml";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   UnassignedMigrationsError,
@@ -291,5 +292,65 @@ describe("the doc folds", () => {
     expect(names.size).toBe(2);
     const all = [...targets.values()].join("\n").match(/^<!-- fold:[a-z-]+/gm);
     expect(all.sort()).toEqual(["<!-- fold:pending", "<!-- fold:state-decisions", "<!-- fold:state-recap"]);
+  });
+});
+
+// 2026-11-08: the workflow's "outside its paths" check read `git status --porcelain`, which also lists the STAGED
+// changes, so the first real fold (main 571f2d99, #707's fragment) failed listing its own STATE.md and fragment. This
+// runs the workflow's own staging step in a repo where the script really wrote.
+describe("the assign-at-merge workflow's staging step", () => {
+  const wf = yaml.load(readFileSync(path.resolve(import.meta.dirname, "../.github/workflows/assign-at-merge.yml"), "utf8"));
+  const steps = wf.jobs.assign.steps;
+  const stage = steps.find((s) => s.id === "stage");
+  const run = (r) => {
+    try {
+      return { ok: true, out: execFileSync("bash", ["-c", stage.run], { cwd: r.root, encoding: "utf8", stdio: "pipe" }) };
+    } catch (e) {
+      return { ok: false, out: `${e.stdout}${e.stderr}` };
+    }
+  };
+
+  it("passes when the script folded a fragment into STATE.md and numbered a migration", () => {
+    const r = repo();
+    pr(r, "a", "gamma", "0002");
+    merge(r, "a");
+    apply(r.root, plan(r.root));
+    const res = run(r);
+    expect(res.out).not.toContain("outside its paths");
+    expect(res.ok).toBe(true);
+    const staged = r.git("diff", "--cached", "--name-status");
+    expect(staged).toMatch(/^D\tinternal\/fragments\/2026-11-07-gamma\.md$/m);
+    expect(staged).toMatch(/^M\tinternal\/memory\/STATE\.md$/m);
+    expect(staged).toMatch(/packages\/db\/migrations\/0282_gamma\.sql/);
+  });
+
+  it("passes when only a fragment was folded (no migration)", () => {
+    const r = repo();
+    r.write("internal/fragments/2026-11-08-x.md", "<!-- fold: state-decisions -->\nx\n");
+    r.git("add", "-A");
+    r.git("commit", "-q", "-m", "fragment only");
+    apply(r.root, plan(r.root));
+    expect(run(r).ok).toBe(true);
+  });
+
+  it("fails on a change outside the script's paths, tracked or untracked", () => {
+    for (const stray of ["apps/x.ts", "internal/memory/mistakes.md"]) {
+      const r = repo();
+      pr(r, "a", "gamma", "0002");
+      merge(r, "a");
+      apply(r.root, plan(r.root));
+      r.write(stray, "stray\n");
+      const res = run(r);
+      expect(res.ok, stray).toBe(false);
+      expect(res.out, stray).toContain("outside its paths");
+      expect(res.out, stray).toContain(stray);
+    }
+  });
+
+  it("runs before the push step, only when the plan changed something", () => {
+    const ids = steps.map((s) => s.id ?? s.name);
+    expect(ids.indexOf("stage")).toBeLessThan(steps.findIndex((s) => String(s.name).startsWith("Push the assignment branch")));
+    expect(stage.if).toBe("steps.plan.outputs.changed == 'true'");
+    expect(stage.run).not.toContain("git status --porcelain");
   });
 });
