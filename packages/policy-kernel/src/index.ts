@@ -489,6 +489,32 @@ export interface RateLimit {
   currentCount: number;
 }
 
+/** ADR-0239 — the call facts a rate limit is matched against. */
+export interface RateLimitMatchContext {
+  userId: string;
+  serverId: string;
+  toolName: string;
+  deployContext: readonly string[] | null | undefined;
+}
+
+/** ADR-0239 — a rate-limit engine's answer. `error` is a DENY in the kernel, never an allow. */
+export type RateLimitVerdict =
+  | { kind: "none" }
+  | { kind: "exhausted"; limit: RateLimit }
+  | { kind: "error"; message: string };
+
+/**
+ * ADR-0239 — a rate-limit engine. Given the limits and the call, name the FIRST limit (in input order) that matches
+ * the call and is exhausted. Pure and synchronous, like the kernel.
+ */
+export interface RateLimitEvaluator {
+  readonly engine: string;
+  firstExhausted(limits: readonly RateLimit[], ctx: RateLimitMatchContext): RateLimitVerdict;
+}
+
+/** ADR-0239 rule id of the deny an erroring rate-limit evaluator produces. */
+export const RATE_LIMIT_ENGINE_ERROR_RULE_ID = "rate-limit-engine-error";
+
 export interface ToolRef {
   serverId: string;
   name: string;
@@ -585,6 +611,13 @@ export interface EvaluationInput {
   revocations?: readonly Revocation[];
   approvalRules?: readonly ApprovalRule[];
   rateLimits?: readonly RateLimit[];
+  /**
+   * ADR-0239 — which engine answers the rate-limit step. Absent/null = `legacyRateLimitEvaluator`, the hand-written
+   * predicate below, so every caller that does not pass one is unchanged. The gateway passes the Cedar evaluator
+   * (`@regulait/policy-kernel/rate-limit-cedar`) unless `REGULAIT_RATE_LIMIT_EVALUATOR=legacy` keeps the old one
+   * for this release. An evaluator that errors or throws DENIES the call.
+   */
+  rateLimitEvaluator?: RateLimitEvaluator | null;
   dataScopeRules?: readonly DataScopeRule[];
   /** the call's arguments — required for data-scope rules to be checkable */
   args?: Record<string, unknown>;
@@ -889,6 +922,26 @@ export function matchingApprovalRules(
 }
 
 /**
+ * ADR-0239 — the hand-written rate-limit predicate, kept behind `REGULAIT_RATE_LIMIT_EVALUATOR=legacy` for one
+ * release after the Cedar evaluator became the gateway default. The differential test
+ * (`rate-limit-cedar.test.ts`) holds the two to the same answer. Delete it with the switch.
+ */
+export const legacyRateLimitEvaluator: RateLimitEvaluator = {
+  engine: "legacy",
+  firstExhausted(limits, ctx) {
+    const hit = limits.find(
+      (l) =>
+        ruleAppliesToSubject(l, ctx.userId) &&
+        ruleAppliesToServer(l, ctx.serverId) &&
+        ruleAppliesToDeployMode(l, ctx.deployContext) &&
+        matchesScope(l.toolName, ctx.toolName) &&
+        l.currentCount >= l.maxCalls,
+    );
+    return hit ? { kind: "exhausted", limit: hit } : { kind: "none" };
+  },
+};
+
+/**
  * AER-017 — the deployment-wide approval HOLD, evaluated after entitlement.
  *
  * Returns the descriptor when the dial is set to `require_approval`, or null.
@@ -1143,14 +1196,34 @@ function evaluateTool(input: EvaluationInput): Decision {
   // PILLAR 1: widened rate limits each keep their own per-subject count/window
   // (the gateway counts each independently). The first exhausted one denies —
   // tightest-wins with no summing and no cross-scope relaxation.
-  const exhaustedLimit = (input.rateLimits ?? []).find(
-    (l) =>
-      ruleAppliesToSubject(l, userId) &&
-      ruleAppliesToServer(l, serverId) &&
-      ruleAppliesToDeployMode(l, input.deployContext) &&
-      matchesScope(l.toolName, tool.name) &&
-      l.currentCount >= l.maxCalls,
-  );
+  //
+  // ADR-0239: the match runs on the injected evaluator (Cedar in the gateway), with the hand-written predicate as
+  // the default. No limits = no evaluator call. An evaluator that errors or throws denies: default-deny holds.
+  const limits = input.rateLimits ?? [];
+  let verdict: RateLimitVerdict = { kind: "none" };
+  if (limits.length > 0) {
+    const evaluator = input.rateLimitEvaluator ?? legacyRateLimitEvaluator;
+    try {
+      verdict = evaluator.firstExhausted(limits, {
+        userId,
+        serverId,
+        toolName: tool.name,
+        deployContext: input.deployContext,
+      });
+    } catch (e) {
+      verdict = { kind: "error", message: e instanceof Error ? e.message : String(e) };
+    }
+  }
+  if (verdict.kind === "error") {
+    chain.push({ rule: "rate-limit", outcome: "deny", grantId: RATE_LIMIT_ENGINE_ERROR_RULE_ID });
+    return {
+      effect: "deny",
+      ruleId: RATE_LIMIT_ENGINE_ERROR_RULE_ID,
+      ruleChain: chain,
+      reason: `rate-limit evaluation failed, so the call is refused: ${verdict.message}`,
+    };
+  }
+  const exhaustedLimit = verdict.kind === "exhausted" ? verdict.limit : undefined;
   if (exhaustedLimit) {
     chain.push({ rule: "rate-limit", outcome: "deny", grantId: exhaustedLimit.id });
     return {
