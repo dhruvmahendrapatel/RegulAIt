@@ -1,8 +1,9 @@
 # ADR-0237: Native adapters for third-party guardrail providers
 
-- **Status**: Accepted (builder, 2026-11-07; backlog P12(a), `internal/product/PENDING.md`)
+- **Status**: Accepted (implemented)
+- **Related**: backlog P12(a) in `internal/product/PENDING.md`; ADR-0088, ADR-0220, ADR-0062, ADR-0176, ADR-0180
 - **Date**: 2026-11-07
-- **Migration**: 0292 (`when` 1785219000000)
+- **Migration**: `packages/db/migrations/pending/guardrail_vendor_adapters.sql` (numbered at merge, ADR-0252)
 
 ## Context
 

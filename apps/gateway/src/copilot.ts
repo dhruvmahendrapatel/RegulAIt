@@ -111,6 +111,7 @@ import {
   virtualKeys,
   workflowInstances,
   workflowTemplates,
+  runAsPrincipalStepIfScoped,
   type Db,
 } from "@regulait/db";
 import {
@@ -1067,6 +1068,18 @@ function approvalEntityPredicates(
 }
 
 export async function retrieveEvidence(
+  db: Db,
+  plan: CopilotQueryPlan,
+  scope: CopilotScope,
+  now: Date,
+): Promise<CopilotEvidence> {
+  // ADR-0234 batch 2: the copilot answers over the ledger within the caller's COPILOT scope (resolveCopilotScope:
+  // the projects and MCP tools the kernel lets them see), not only the rows about themselves, so its ledger reads
+  // run as the principal plus audit_verify; the scope filters below remain the authorization.
+  return runAsPrincipalStepIfScoped("audit_verify", "copilot.evidence", () => retrieveEvidenceUnscoped(db, plan, scope, now));
+}
+
+async function retrieveEvidenceUnscoped(
   db: Db,
   plan: CopilotQueryPlan,
   scope: CopilotScope,
