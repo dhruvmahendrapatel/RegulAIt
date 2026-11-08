@@ -126,9 +126,6 @@ describe("ADR-0181 SC — a fresh org reads every admission/monitor default STRI
     // a migrations folder whose journal stops before 0159
     tmpMigrations = mkdtempSync(path.join(tmpdir(), "sdsc-mig-"));
     cpSync(migrationsFolder, tmpMigrations, { recursive: true });
-    // ADR-0252: a cut copy stands for a PAST schema; pending/ migrations come after the head, and applying them
-    // here would take a provisional `when` above the cut and move the watermark past the migrations still to run
-    rmSync(path.join(tmpMigrations, "pending"), { recursive: true, force: true });
     const journalPath = path.join(tmpMigrations, "meta", "_journal.json");
     const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: Array<{ idx: number; tag: string }> };
     // cut every entry FROM 0159 on, so 0159 is the newest migration the second

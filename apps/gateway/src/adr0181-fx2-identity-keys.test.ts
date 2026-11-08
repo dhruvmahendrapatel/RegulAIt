@@ -338,9 +338,6 @@ describe("ADR-0181 FX2 migration 0160 — no grandfathering, every change audite
     // a copy of the migrations folder whose journal stops at 0159
     partial = mkdtempSync(path.join(tmpdir(), "fx2-migrations-"));
     cpSync(migrationsFolder, partial, { recursive: true });
-    // ADR-0252: a cut copy stands for a PAST schema; pending/ migrations come after the head, and applying them
-    // here would take a provisional `when` above the cut and move the watermark past the migrations still to run
-    rmSync(path.join(partial, "pending"), { recursive: true, force: true });
     const journalPath = path.join(partial, "meta", "_journal.json");
     const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: Array<{ idx: number; tag: string }> };
     expect(journal.entries.some((e) => e.tag === "0160_strict_identity_followups")).toBe(true);

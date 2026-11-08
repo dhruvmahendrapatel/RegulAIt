@@ -215,9 +215,6 @@ beforeAll(async () => {
   // migrate to the migration before 0185 only (0185 and anything after it cut from a copy of the journal)
   tmp = mkdtempSync(path.join(tmpdir(), "dbg185-"));
   cpSync(migrationsFolder, tmp, { recursive: true });
-  // ADR-0252: a cut copy stands for a PAST schema; pending/ migrations come after the head, and applying them
-  // here would take a provisional `when` above the cut and move the watermark past the migrations still to run
-  rmSync(path.join(tmp, "pending"), { recursive: true, force: true });
   const journalPath = path.join(tmp, "meta", "_journal.json");
   const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: Array<{ when: number; tag: string }> };
   const cut = journal.entries.find((e) => e.tag === TAG_0185)!.when;
