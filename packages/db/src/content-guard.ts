@@ -60,6 +60,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.agents, ["name"]],
   [s.a2aAgents, ["name"]],
   [s.a2aAgentCredentials, ["headerName"]],
+  // ADR-0236 (P11): governed MCP bundles
+  [s.mcpBundles, ["name", "description"]],
   [s.builderAgents, ["name", "description"]],
   [s.builderAgentSubagents, ["name", "description"]],
   [s.builderAgentSchedules, ["name"]],
@@ -164,6 +166,7 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   "data_scope_rules.tool_name": "tool_reference",
   "grant_certification_items.tool_name": "tool_reference",
   "identity_tool_grants.tool_name": "tool_reference",
+  "mcp_bundle_version_items.tool_name": "tool_reference",
   "policy_simulation_flips.tool_name": "tool_reference",
   "rate_limits.tool_name": "tool_reference",
   "revocations.tool_name": "tool_reference",

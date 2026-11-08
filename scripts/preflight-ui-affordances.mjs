@@ -43,9 +43,12 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  * somebody reviews.
  */
 export const DELIBERATELY_API_ONLY = new Map([
-  // (none today). A DELETE that is still a 501 `notBuilt` stub needs no entry:
-  // a stub deletes nothing, so the census skips it until it becomes a real
-  // handler, and an entry for one is reported stale (see staleExemptions).
+  // A DELETE that is still a 501 `notBuilt` stub needs no entry: a stub deletes nothing, so the census skips it until
+  // it becomes a real handler, and an entry for one is reported stale (see staleExemptions).
+  // ADR-0236 (P11), owner decision 2026-11-07 (#697): API-first until the bundle screen requested on #453 lands; these
+  // two entries are deleted when it does (KNOWN_UI_GAPS in preflight-ui-route-census.mjs holds the same routes).
+  ["/v1/mcp-bundles/:x", "archiving an MCP bundle: API-only until the bundle screen on #453 (owner decision 2026-11-07, #697)"],
+  ["/v1/mcp-bundles/:x/grants/:x", "revoking an MCP bundle grant: API-only until the bundle screen on #453 (owner decision 2026-11-07, #697)"],
 ]);
 
 /**
