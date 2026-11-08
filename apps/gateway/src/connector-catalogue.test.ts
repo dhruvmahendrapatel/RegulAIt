@@ -69,7 +69,13 @@ beforeAll(async () => {
   await db.delete(connectorPieceEnablements);
   restorePosture = await relaxDataPostureForTest(db, { org: { defaultPiiMode: "none" }, interception: false, guardrails: false });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
-  restoreGates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, keyCustodyEnforced: false });
+  // this suite is about the piece gate, not the ADR-0251 attribution mandate (proved in its own suites)
+  restoreGates = await relaxGovernanceGatesForTest(db, {
+    mrmEnforced: false,
+    dispatchAttributionRequired: false,
+    keyCustodyEnforced: false,
+    connectorAttributionRequired: false,
+  });
   savedMode = process.env[DEPLOY_MODE_ENV];
   delete process.env[DEPLOY_MODE_ENV];
   const [org] = await db.select({ p: orgSettings.egressCompiledDefaultPolicy }).from(orgSettings);
@@ -110,6 +116,10 @@ describe("the connector catalogue (ADR-0255)", () => {
     expect(body.available.items).toHaveLength(5);
     expect(body.available.total).toBeGreaterThan(100);
     expect(body.available.items.every((i: { status: string }) => i.status === "available_not_enabled")).toBe(true);
+    expect(body.available.source.commit).toMatch(/^[0-9a-f]{40}$/);
+    for (const i of body.available.items as Array<{ key: string; upstreamPath: string }>) {
+      expect(i.upstreamPath).toBe(`packages/pieces/community/${i.key}`);
+    }
     const q = await app.inject({ method: "GET", url: "/v1/connector-catalogue?q=notion", headers: AUTH });
     expect(q.json().available.items.every((i: { key: string }) => i.key.includes("notion"))).toBe(true);
     expect((await app.inject({ method: "GET", url: "/v1/connector-catalogue?limit=1000", headers: AUTH })).statusCode).toBe(400);
@@ -136,6 +146,20 @@ describe("the connector catalogue (ADR-0255)", () => {
     const res = await createSlackPieceConnector();
     expect(res.statusCode).toBe(403);
     expect(res.json().error).toBe("piece_not_enabled");
+  });
+
+  it("two concurrent enables record one transition, not two", async () => {
+    const tag = uniq(); // the shared suite database keeps earlier runs' audit rows
+    const [a, b] = await Promise.all([setEnabled("gmail", true, `race one ${tag}`), setEnabled("gmail", true, `race two ${tag}`)]);
+    expect(a.statusCode).toBe(200);
+    expect(b.statusCode).toBe(200);
+    const rows = (await db.select().from(auditLog).where(eq(auditLog.ruleId, CONNECTOR_CATALOGUE_RULE_ID))).filter(
+      (r) => [`race one ${tag}`, `race two ${tag}`].includes((r.detail as { reason?: string }).reason ?? ""),
+    );
+    const transitions = rows.map((r) => (r.detail as { transition: { from: string; to: string } }).transition);
+    expect(transitions.filter((t) => t.from === "not_enabled" && t.to === "enabled")).toHaveLength(1);
+    expect(transitions.filter((t) => t.from === "enabled" && t.to === "enabled")).toHaveLength(1);
+    await setEnabled("gmail", false);
   });
 
   it("enable and disable are audited with the transition and the reason", async () => {
@@ -211,6 +235,8 @@ describe("the connector catalogue (ADR-0255)", () => {
       const res = await invoke(connectorId);
       expect(res.statusCode).toBe(403);
       expect(res.json().error).toBe("piece_not_enabled");
+      // the answer carries the gate's own deny, the decision the audit row records
+      expect(res.json().decision).toMatchObject({ effect: "deny", ruleId: CONNECTOR_PIECE_GATE_RULE_ID });
       expect(hits).toHaveLength(0);
       const row = await lastRow(CONNECTOR_PIECE_GATE_RULE_ID);
       expect(row!.effect).toBe("deny");

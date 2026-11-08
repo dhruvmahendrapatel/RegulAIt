@@ -23,6 +23,7 @@ import { z } from "zod";
 import { auditLog, connectorPieceEnablements, eq, type Db } from "@regulait/db";
 import {
   AVAILABLE_PIECES,
+  AVAILABLE_PIECES_SOURCE,
   CURATED_PIECES,
   curatedPieceByKey,
   curatedPieceByKind,
@@ -141,10 +142,13 @@ export function registerConnectorCatalogueRoutes(app: FastifyInstance, db: Db): 
         total: matching.length,
         limit,
         offset,
-        items: matching.slice(offset, offset + limit).map(([key, version]) => ({
+        // each row was checked against the upstream tree at `source.commit` (scripts/connector-catalogue-refresh.mjs)
+        source: AVAILABLE_PIECES_SOURCE,
+        items: matching.slice(offset, offset + limit).map(([key, version, upstreamPath]) => ({
           key,
           npm: `@activepieces/piece-${key}`,
           version,
+          upstreamPath,
           status: "available_not_enabled" as const,
         })),
       },
@@ -180,19 +184,21 @@ export function registerConnectorCatalogueRoutes(app: FastifyInstance, db: Db): 
     }
     const userId = req.authCtx.userId ?? null;
     const view = await db.transaction(async (tx) => {
-      const [before] = await tx
-        .select()
-        .from(connectorPieceEnablements)
-        .where(eq(connectorPieceEnablements.pieceKey, pieceKey))
-        .for("update");
-      const from = before ? "enabled" : "not_enabled";
+      // The write itself says what the state was, so two concurrent enables cannot both record "not_enabled ->
+      // enabled": the insert that loses the primary-key race returns no row (and the delete that finds nothing, none).
+      // A `SELECT ... FOR UPDATE` cannot serve here, because it locks nothing when the row does not exist yet.
+      const changed = enabled
+        ? await tx
+            .insert(connectorPieceEnablements)
+            .values({ pieceKey, enabledByUserId: userId }) // enabled_at is the database clock (M-075)
+            .onConflictDoNothing()
+            .returning({ pieceKey: connectorPieceEnablements.pieceKey })
+        : await tx
+            .delete(connectorPieceEnablements)
+            .where(eq(connectorPieceEnablements.pieceKey, pieceKey))
+            .returning({ pieceKey: connectorPieceEnablements.pieceKey });
       const to = enabled ? "enabled" : "not_enabled";
-      if (enabled && !before) {
-        // enabled_at is the database clock (M-075)
-        await tx.insert(connectorPieceEnablements).values({ pieceKey, enabledByUserId: userId }).onConflictDoNothing();
-      } else if (!enabled && before) {
-        await tx.delete(connectorPieceEnablements).where(eq(connectorPieceEnablements.pieceKey, pieceKey));
-      }
+      const from = changed.length > 0 ? (enabled ? "not_enabled" : "enabled") : to;
       await tx.insert(auditLog).values({
         // bootstrap has no user identity; the nil uuid marks a non-user actor and `via` says which it was
         userId: userId ?? NIL_USER,

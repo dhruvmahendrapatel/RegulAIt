@@ -726,6 +726,47 @@ export async function executeGovernedConnectorCall(
       });
     }
 
+    // ADR-0255 (P31) — a CATALOGUE PIECE runs only while an admin has it enabled, never on an air-gapped deployment,
+    // and never against a typed baseUrl (the connector's or its credential's). Checked on every invoke (an enablement
+    // can be withdrawn after the connector was created), after the entitlement decision and the budget gate, and
+    // BEFORE the approvals hold, so an approver is never asked to consent to a call that would be refused. It can only
+    // refuse, and its answer carries its own deny decision, matching the audit row.
+    if (connector.providerKind && isConnectorProviderKind(connector.providerKind)) {
+      const [pieceCred] = await db
+        .select({ baseUrl: connectorCredentials.baseUrl })
+        .from(connectorCredentials)
+        .where(eq(connectorCredentials.connectorId, connectorId));
+      const pieceRefusal = await refusePieceConnector(db, {
+        providerKind: connector.providerKind,
+        baseUrl: pieceCred?.baseUrl ?? connector.baseUrl ?? null,
+        label: `connector '${connector.name}' (${connector.providerKind})`,
+      });
+      if (pieceRefusal) {
+        await db.insert(auditLog).values({
+          userId,
+          objectType: "connector",
+          objectId: connectorId,
+          detail: {
+            phase: "piece_gate",
+            error: pieceRefusal.error,
+            connectorKind: connector.providerKind,
+            operation: body.operation,
+            ...(projectId ? { projectId } : {}),
+            receiptClass: "decision",
+          },
+          effect: "deny",
+          ruleId: CONNECTOR_PIECE_GATE_RULE_ID,
+          ruleChain: [],
+          reason: pieceRefusal.detail,
+        });
+        return out.status(pieceRefusal.status).send({
+          decision: { effect: "deny", ruleId: CONNECTOR_PIECE_GATE_RULE_ID, ruleChain: [], reason: pieceRefusal.detail },
+          error: pieceRefusal.error,
+          detail: pieceRefusal.detail,
+        });
+      }
+    }
+
     // ADR-0173 batch 2b — THE HOLD. After the entitlement deny and the budget
     // gate (a write that cannot run is never queued), before the credential,
     // PII, guardrails, egress and the provider: a held write executes nothing.
@@ -916,35 +957,6 @@ export async function executeGovernedConnectorCall(
         error: "no_connector_credential",
         detail: `connector '${connector.name}' (${connector.providerKind}) has no stored credential`,
       });
-    }
-
-    // ADR-0255 (P31) — a CATALOGUE PIECE runs only while an admin has it enabled, never on an air-gapped deployment,
-    // and never against a typed baseUrl. Checked on every invoke (an enablement can be withdrawn after the connector
-    // was created), after the entitlement decision, so it can only ever refuse.
-    const pieceRefusal = await refusePieceConnector(db, {
-      providerKind: connector.providerKind,
-      baseUrl,
-      label: `connector '${connector.name}' (${connector.providerKind})`,
-    });
-    if (pieceRefusal) {
-      await db.insert(auditLog).values({
-        userId,
-        objectType: "connector",
-        objectId: connectorId,
-        detail: {
-          phase: "piece_gate",
-          error: pieceRefusal.error,
-          connectorKind: connector.providerKind,
-          operation: body.operation,
-          ...(projectId ? { projectId } : {}),
-          receiptClass: "decision",
-        },
-        effect: "deny",
-        ruleId: CONNECTOR_PIECE_GATE_RULE_ID,
-        ruleChain: [],
-        reason: pieceRefusal.detail,
-      });
-      return out.status(pieceRefusal.status).send({ decision, error: pieceRefusal.error, detail: pieceRefusal.detail });
     }
 
     // §8.4 PII ENFORCEMENT (pillar 3), connector path. The effective piiMode
