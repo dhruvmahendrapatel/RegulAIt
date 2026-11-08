@@ -79,6 +79,10 @@ async function countAllowed(db: Db, userId: string, resource: GovernedResource, 
         eq(auditLog.effect, "allow"),
         gte(auditLog.at, sql`now() - make_interval(secs => ${windowSeconds})`),
         sql`${auditLog.detail} ->> 'receiptClass' = 'decision'`,
+        // review #715 finding 3: only the call's OWN decision counts. Side rows of the same call (a PII warning
+        // `phase: "pii"`, a guardrail `phase: "guardrail"`) are also allowed decisions and would spend a second slot.
+        // The connector decision row carries no phase; the A2A call rows carry `phase: "call"`.
+        sql`coalesce(${auditLog.detail} ->> 'phase', 'call') = 'call'`,
         sql.raw(NOT_ADVISORY_SQL),
       ),
     );

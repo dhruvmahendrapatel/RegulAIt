@@ -17,7 +17,7 @@ import { evaluateConnector, RESOURCE_RULE_IDS, type ExecutionMode } from "@regul
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { relaxApprovalSigningForTest } from "./testing/approval-signing-posture.js";
-import { governedEvaluateResource } from "./governed-core.js";
+import { governedEvaluateResource, loadResourceRestrictions } from "./governed-core.js";
 
 let restoreApprovalSigning: (() => Promise<void>) | undefined;
 let restoreGates: () => Promise<void> = async () => {};
@@ -25,6 +25,7 @@ let k: BuilderKit;
 let owner: Person;
 let other: Person;
 let approver: Person;
+let dialApprover: Person;
 let connectorId = "";
 let allowHostId = "";
 let receiver: http.Server;
@@ -55,6 +56,7 @@ beforeAll(async () => {
   owner = await k.person("owner");
   other = await k.person("other");
   approver = await k.person("approver");
+  dialApprover = await k.person("dial-approver");
 
   receiver = http.createServer((req, res) => {
     let body = "";
@@ -188,6 +190,84 @@ describe("ADR-0251 slice 1: connector approval rules (P-01)", () => {
       expect((await invoke(other, "write")).statusCode).toBe(200);
     } finally {
       await k.db.delete(resourceApprovalRules).where(eq(resourceApprovalRules.id, rule!.id));
+    }
+  });
+});
+
+describe("ADR-0251 review #715 finding 1: every named approver signs", () => {
+  const setDial = async (mode: "normal" | "require_approval") => {
+    const r = await k.req("PUT", "/v1/execution/mode", k.BOOT, {
+      mode,
+      reason: `adr0251 finding 1: ${mode}`,
+      ...(mode === "require_approval" ? { approverUserId: dialApprover.id } : {}),
+    });
+    expect(r.statusCode, r.body).toBeLessThan(300);
+  };
+  const decide = (id: string, who: Person) => k.req("POST", `/v1/approvals/${id}/decide`, who.auth, { decision: "approved" });
+
+  it("a write held by the dial AND a rule with another approver runs only after BOTH approvers sign, then spends both", async () => {
+    const [rule] = await k.db
+      .insert(resourceApprovalRules)
+      .values({ resourceType: "connector", connectorId, scope: "user", userId: owner.id, approverUserId: approver.id })
+      .returning();
+    await setDial("require_approval");
+    try {
+      const note = `two-approvers-${k.RUN}`;
+      const before = received.length;
+      // 1. the dial's consent is asked for first
+      const first = await invoke(owner, "write", { note });
+      expect(first.statusCode, first.body).toBe(202);
+      const dialApproval = first.json().approvalId as string;
+      expect((await k.db.select().from(approvals).where(eq(approvals.id, dialApproval)))[0]).toMatchObject({ approverUserId: dialApprover.id });
+      expect((await decide(dialApproval, dialApprover)).statusCode).toBeLessThan(300);
+      // 2. the dial's approver alone does NOT release it: the rule's approver is asked next
+      const second = await invoke(owner, "write", { note });
+      expect(second.statusCode, second.body).toBe(202);
+      const ruleApproval = second.json().approvalId as string;
+      expect(ruleApproval).not.toBe(dialApproval);
+      expect((await k.db.select().from(approvals).where(eq(approvals.id, ruleApproval)))[0]).toMatchObject({ approverUserId: approver.id });
+      expect(received.length).toBe(before);
+      // the dial's approver cannot decide the rule's consent
+      expect((await decide(ruleApproval, dialApprover)).statusCode).toBeGreaterThanOrEqual(400);
+      expect(received.length).toBe(before);
+      // 3. with both consents in hand the identical call runs once, and both are spent
+      expect((await decide(ruleApproval, approver)).statusCode).toBeLessThan(300);
+      const ran = await invoke(owner, "write", { note });
+      expect(ran.statusCode, ran.body).toBe(200);
+      expect(received.length).toBe(before + 1);
+      const rows = await k.db.select().from(approvals).where(eq(approvals.connectorId, connectorId));
+      expect(rows.find((r) => r.id === dialApproval)?.status).toBe("consumed");
+      expect(rows.find((r) => r.id === ruleApproval)?.status).toBe("consumed");
+      // 4. spent: the same call is held again
+      expect((await invoke(owner, "write", { note })).statusCode).toBe(202);
+      expect(received.length).toBe(before + 1);
+    } finally {
+      await setDial("normal");
+      await k.db.delete(resourceApprovalRules).where(eq(resourceApprovalRules.id, rule!.id));
+    }
+  });
+});
+
+describe("ADR-0251 review #715 finding 3: a call's side rows do not spend a second rate-limit slot", () => {
+  it("counts the call's own decision row once, not its PII-warning or guardrail rows", async () => {
+    const [limit] = await k.db
+      .insert(resourceRateLimits)
+      .values({ resourceType: "connector", connectorId, scope: "user", userId: other.id, maxCalls: 100, windowSeconds: 3600 })
+      .returning();
+    try {
+      const count = async () =>
+        (await loadResourceRestrictions(k.db, { userId: other.id, resource: { type: "connector", id: connectorId, operation: "read" } })).rateLimits.find(
+          (l) => l.id === limit!.id,
+        )!.currentCount;
+      const base = await count();
+      const row = (detail: Record<string, unknown>, ruleId: string) =>
+        k.db.insert(auditLog).values({ userId: other.id, objectType: "connector", objectId: connectorId, detail, effect: "allow", ruleId, ruleChain: [], reason: "adr0251 finding 3 fixture" });
+      await row({ operation: "read", receiptClass: "decision" }, "g1");
+      await row({ phase: "pii", pii: { mode: "warn" }, operation: "read", receiptClass: "decision" }, "pii-warned");
+      await row({ phase: "guardrail", receiptClass: "decision" }, "guardrail-warned");
+      expect(await count()).toBe(base + 1);
+    } finally {
+      await k.db.delete(resourceRateLimits).where(eq(resourceRateLimits.id, limit!.id));
     }
   });
 });
