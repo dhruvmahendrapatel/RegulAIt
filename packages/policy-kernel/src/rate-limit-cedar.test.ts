@@ -17,7 +17,9 @@ import {
 } from "./index.js";
 import {
   cedarRateLimitEvaluator,
+  cedarRateLimitEvaluatorUnfiltered,
   RATE_LIMIT_CEDAR_SCHEMA_TEXT,
+  rateLimitCedarCallCount,
   rateLimitPolicySet,
 } from "./rate-limit-cedar.js";
 
@@ -28,15 +30,15 @@ const MODES = ["hosted", "byoc", "air_gapped"] as const;
 
 const arbLimit: fc.Arbitrary<RateLimit> = fc.record({
   id: fc.uuid(),
-  userId: fc.oneof(fc.constantFrom(...USERS), fc.constant(null)),
-  serverId: fc.oneof(fc.constantFrom(...SERVERS), fc.constant(null)),
+  userId: fc.oneof(fc.constantFrom(...USERS), fc.constant(null), fc.constant(undefined)),
+  serverId: fc.oneof(fc.constantFrom(...SERVERS), fc.constant(null), fc.constant(undefined)),
   roleId: fc.option(fc.constant("r-1"), { nil: undefined }),
   teamId: fc.option(fc.constant("t-1"), { nil: undefined }),
   scope: fc.option(fc.constantFrom("user", "role", "team", "fleet"), { nil: undefined }),
   serverScope: fc.option(fc.constantFrom("server", "all"), { nil: undefined }),
   deployMode: fc.oneof(fc.constantFrom(...MODES), fc.constant(null), fc.constant(undefined)),
-  toolName: fc.oneof(fc.constantFrom(...TOOLS), fc.constant(null)),
-  maxCalls: fc.integer({ min: 0, max: 4 }),
+  toolName: fc.oneof(fc.constantFrom(...TOOLS), fc.constant(null), fc.constant(undefined)),
+  maxCalls: fc.integer({ min: -2, max: 4 }),
   windowSeconds: fc.constantFrom(60, 3600),
   currentCount: fc.integer({ min: 0, max: 5 }),
 }) as fc.Arbitrary<RateLimit>;
@@ -94,8 +96,13 @@ describe("ADR-0239 — Cedar rate limits agree with the hand-written evaluator",
           deployContext: call.deployContext,
         };
         const legacy = legacyRateLimitEvaluator.firstExhausted(limits, ctx);
+        // ADR-0239 review finding 1: the filtered default and the unfiltered engine path both agree with legacy,
+        // and the reported limit is the caller's own object
         const onCedar = cedarRateLimitEvaluator.firstExhausted(limits, ctx);
+        const unfiltered = cedarRateLimitEvaluatorUnfiltered.firstExhausted(limits, ctx);
         expect(onCedar).toEqual(legacy);
+        expect(unfiltered).toEqual(legacy);
+        if (legacy.kind === "exhausted" && onCedar.kind === "exhausted") expect(onCedar.limit).toBe(legacy.limit);
       }),
       { numRuns: 5000 },
     );
@@ -112,13 +119,34 @@ describe("ADR-0239 — Cedar rate limits agree with the hand-written evaluator",
     );
   }, PROPERTY_TIMEOUT_MS);
 
+  it("makes no wasm call when no limit is exhausted", () => {
+    const calm: RateLimit[] = Array.from({ length: 1000 }, (_, i) => ({
+      id: `rl-${i}`,
+      userId: "u-1",
+      serverId: "s-1",
+      toolName: null,
+      maxCalls: 10,
+      windowSeconds: 60,
+      currentCount: 3,
+    }));
+    const before = rateLimitCedarCallCount();
+    const ctx = { userId: "u-1", serverId: "s-1", toolName: "read_rows", deployContext: null };
+    expect(cedarRateLimitEvaluator.firstExhausted(calm, ctx)).toEqual({ kind: "none" });
+    expect(rateLimitCedarCallCount()).toBe(before);
+    // one exhausted limit among them: one call, and Cedar names it
+    const hot = [...calm.slice(0, 500), { ...calm[0]!, id: "rl-hot", currentCount: 10 }, ...calm.slice(500)];
+    const v = cedarRateLimitEvaluator.firstExhausted(hot, ctx);
+    expect(v).toEqual({ kind: "exhausted", limit: hot[500] });
+    expect(rateLimitCedarCallCount()).toBe(before + 1);
+  });
+
   it("agrees past the cached policy-set size", () => {
     fc.assert(
       fc.property(arbCall, fc.array(arbLimit, { minLength: 257, maxLength: 300 }), (call, limits) => {
         const ctx = { ...call, deployContext: call.deployContext };
-        expect(cedarRateLimitEvaluator.firstExhausted(limits, ctx)).toEqual(
-          legacyRateLimitEvaluator.firstExhausted(limits, ctx),
-        );
+        const legacy = legacyRateLimitEvaluator.firstExhausted(limits, ctx);
+        expect(cedarRateLimitEvaluator.firstExhausted(limits, ctx)).toEqual(legacy);
+        expect(cedarRateLimitEvaluatorUnfiltered.firstExhausted(limits, ctx)).toEqual(legacy);
       }),
       { numRuns: 20 },
     );

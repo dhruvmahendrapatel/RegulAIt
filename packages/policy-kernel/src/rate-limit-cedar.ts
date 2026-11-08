@@ -63,7 +63,13 @@ namespace ${NS} {
 
 const SCHEMA_NAME = "regulait-rate-limit-v1";
 const PSET_PREFIX = "regulait-rate-limit-v1-";
-/** Policy sets up to this size are parsed once and cached; larger ones are parsed per call (still correct). */
+/**
+ * Policy sets up to this size are parsed once and cached; larger ones are parsed per call (still correct, about 20x
+ * slower). The cache is never evicted: at most one set per size, so a long-running process holds at most
+ * 1 + 2 + ... + 256 = 32,896 parsed policies. Because only possibly-exhausted limits reach Cedar (see
+ * `cedarRateLimitEvaluator`), a set of size n is built only when n limits are exhausted on one call at once, so in
+ * practice only the smallest sizes are ever parsed.
+ */
 const MAX_CACHED_SIZE = 256;
 
 /**
@@ -195,15 +201,53 @@ function evaluateOnCedar(limits: readonly RateLimit[], ctx: RateLimitMatchContex
   return first === -1 ? { kind: "none" } : { kind: "exhausted", limit: limits[first]! };
 }
 
-/** The Cedar rate-limit evaluator (the default from ADR-0239). Never throws: every failure is an `error` verdict. */
+let wasmCalls = 0;
+
+/** Test-only: how many times the Cedar engine has been called in this process. */
+export function rateLimitCedarCallCount(): number {
+  return wasmCalls;
+}
+
+function guarded(limits: readonly RateLimit[], ctx: RateLimitMatchContext): RateLimitVerdict {
+  if (limits.length === 0) return { kind: "none" };
+  try {
+    wasmCalls++;
+    return evaluateOnCedar(limits, ctx);
+  } catch (e) {
+    return { kind: "error", message: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * A limit Cedar could report: exhausted (`currentCount >= maxCalls`), or carrying a count Cedar cannot represent, so
+ * that it still reaches the engine and fails closed. Exhaustion is a conjunct of every policy, so a limit that fails
+ * this test can never be the answer, and leaving it out cannot change the verdict.
+ */
+function possiblyExhausted(l: RateLimit): boolean {
+  return !Number.isSafeInteger(l.currentCount) || !Number.isSafeInteger(l.maxCalls) || l.currentCount >= l.maxCalls;
+}
+
+/**
+ * ADR-0239 review finding 1. Every limit, unfiltered, through Cedar. Kept for the differential test, which holds it,
+ * the filtered evaluator and the legacy one to the same answer.
+ */
+export const cedarRateLimitEvaluatorUnfiltered: RateLimitEvaluator = {
+  engine: `cedar-wasm@${cedar.getCedarVersion()}`,
+  firstExhausted: guarded,
+};
+
+/**
+ * The Cedar rate-limit evaluator (the default from ADR-0239). Never throws: every failure is an `error` verdict.
+ *
+ * Only possibly-exhausted limits are sent to Cedar, in their original order, so the common case (nothing exhausted)
+ * makes no wasm call at all and the synchronous call never blocks the event loop for it. Cedar still decides every
+ * match: the filter only drops limits whose exhaustion conjunct is already false. The verdict is mapped back to the
+ * caller's own object, so the reported limit is identical to the unfiltered answer.
+ */
 export const cedarRateLimitEvaluator: RateLimitEvaluator = {
   engine: `cedar-wasm@${cedar.getCedarVersion()}`,
   firstExhausted(limits, ctx) {
-    if (limits.length === 0) return { kind: "none" };
-    try {
-      return evaluateOnCedar(limits, ctx);
-    } catch (e) {
-      return { kind: "error", message: e instanceof Error ? e.message : String(e) };
-    }
+    const candidates = limits.filter(possiblyExhausted);
+    return guarded(candidates, ctx);
   },
 };
