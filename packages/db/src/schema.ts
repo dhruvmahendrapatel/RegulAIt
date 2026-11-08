@@ -889,6 +889,18 @@ export const mcpServers = pgTable("mcp_servers", {
    * changed manifest. Our own clock, never a publisher's date. */
   releaseDigest: text("release_digest"),
   releaseSeenAt: timestamp("release_seen_at", { withTimezone: true }).notNull().defaultNow(),
+  /** ADR-0246 (the pending `mcp_definition_pins` migration): when this server's tool, prompt and resource definitions were first pinned
+   * (`mcp_definition_pins`). NULL = no admitted manifest has been seen yet, so the next one is the baseline. Set
+   * once; a later empty manifest is a change against the baseline, never a second baseline. */
+  definitionsPinnedAt: timestamp("definitions_pinned_at", { withTimezone: true }),
+  /** ADR-0246 addendum (the pending `mcp_definition_pins` migration): 'high' when a manifest's tools match the offensive-tooling rule set
+   * (`classifyOffensiveTools`). Sticky: a later manifest never lowers it. Under `mcp_high_risk_mode = 'enforce'`
+   * every call to a high-risk server needs the policy template and an authorised target. */
+  riskClass: text("risk_class", { enum: ["standard", "high"] }).notNull().default("standard"),
+  riskClassifiedAt: timestamp("risk_classified_at", { withTimezone: true }),
+  /** Point-in-time evidence (ADR-0200 exception, like `admission_findings`): the classifier verdict that made the
+   * server high-risk, counts and locations only (tool, category, rule, where), never matched text. */
+  riskFindings: jsonb("risk_findings"),
   /** ADR-0185 G4 (migration 0169) — how the gateway reaches this upstream.
    * `streamable_http` (the default, so every pre-0169 row keeps what it used)
    * and `sse` connect to `url` through the egress guard; `stdio` starts
@@ -1140,9 +1152,82 @@ export const mcpTools = pgTable(
      * the manifest re-sync upsert (kind/description only) provably never
      * clobbers an admin-set price. Null = no override = the server price. */
     pricePerCallUsd: doublePrecision("price_per_call_usd"),
+    /** ADR-0236 (migration `mcp_bundles`): an admin flag for the top scope tier (read < write < dangerous). A dangerous tool
+     * held through an MCP bundle always pauses for the bundle's approver. The manifest re-sync never touches it. */
+    dangerous: boolean("dangerous").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex("mcp_tools_server_name_uq").on(t.serverId, t.name)],
+);
+
+/**
+ * ADR-0246 (the pending `mcp_definition_pins` migration) — MCP DEFINITION PINNING (rug-pull detection). One row per tool, prompt, resource or
+ * resource template a server has served since its admission baseline, keyed by (server, kind, name). A tool's
+ * name is its name; a resource's is its URI; a template's is its URI template.
+ *
+ * The approved pair is what an admin (or the admission baseline) accepted; the observed pair is what the server
+ * served at its latest manifest fetch. The item's status is derived, never stored: equal digests = approved; both
+ * set and different = changed; no approved digest = added after approval; no observed digest = removed. Under the
+ * strict default (`org_settings.mcp_definition_pin_mode = 'block'`) anything not approved is refused until an
+ * admin re-approves it against the observed digest they reviewed.
+ */
+/**
+ * ADR-0246 addendum (the pending `mcp_definition_pins` migration) — the admin-maintained AUTHORISED TARGETS of high-risk (offensive) MCP servers.
+ * A call to a high-risk server must name its target(s), and every one must be covered here: a host (hostname or
+ * IP), a domain (itself and its subdomains) or a CIDR. Adding an entry is a settings_relax step-up, audited.
+ */
+export const mcpAuthorisedTargets = pgTable(
+  "mcp_authorised_targets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kind: text("kind", { enum: ["host", "domain", "cidr"] }).notNull(),
+    value: text("value").notNull(),
+    note: text("note").notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("mcp_authorised_targets_kind_value_uq").on(t.kind, t.value),
+    index("mcp_authorised_targets_created_by_idx").on(t.createdBy),
+    check("mcp_authorised_targets_kind_check", sql`${t.kind} IN ('host', 'domain', 'cidr')`),
+  ],
+);
+
+export const mcpDefinitionPins = pgTable(
+  "mcp_definition_pins",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    serverId: uuid("server_id")
+      .notNull()
+      .references(() => mcpServers.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: ["tool", "prompt", "resource", "resource_template"] }).notNull(),
+    name: text("name").notNull(),
+    approvedDigest: text("approved_digest"),
+    /** Point-in-time evidence (ADR-0200 normalisation exception): the exact definition that was approved, kept
+     * verbatim so the admin diff shows what changed even after the server stops serving it. */
+    approvedDefinition: jsonb("approved_definition").$type<Record<string, unknown>>(),
+    /** NULL = baseline taken at admission; otherwise the admin who re-approved this definition. */
+    approvedBy: uuid("approved_by").references(() => users.id, { onDelete: "set null" }),
+    approvedAt: timestamp("approved_at", { withTimezone: true }),
+    observedDigest: text("observed_digest"),
+    /** Point-in-time evidence (ADR-0200 normalisation exception): the definition as the server served it at
+     * `observedAt`, kept verbatim for the admin diff. Never sent to a model while the item is not approved. */
+    observedDefinition: jsonb("observed_definition").$type<Record<string, unknown>>(),
+    observedAt: timestamp("observed_at", { withTimezone: true }).notNull().defaultNow(),
+    /** when the observed digest last moved away from the approved one; NULL while approved */
+    changedAt: timestamp("changed_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("mcp_definition_pins_server_kind_name_uq").on(t.serverId, t.kind, t.name),
+    index("mcp_definition_pins_approved_by_idx").on(t.approvedBy),
+    index("mcp_definition_pins_drift_idx")
+      .on(t.serverId)
+      .where(sql`${t.approvedDigest} IS DISTINCT FROM ${t.observedDigest}`),
+    check("mcp_definition_pins_kind_check", sql`${t.kind} IN ('tool', 'prompt', 'resource', 'resource_template')`),
+    check("mcp_definition_pins_some_digest", sql`${t.approvedDigest} IS NOT NULL OR ${t.observedDigest} IS NOT NULL`),
+    check("mcp_definition_pins_approved_pair", sql`(${t.approvedDigest} IS NULL) = (${t.approvedDefinition} IS NULL)`),
+    check("mcp_definition_pins_observed_pair", sql`(${t.observedDigest} IS NULL) = (${t.observedDefinition} IS NULL)`),
+  ],
 );
 
 export const toolGrants = pgTable(
@@ -1179,6 +1264,90 @@ export const serverGrants = pgTable(
   },
   (t) => [uniqueIndex("server_grants_user_server_uq").on(t.userId, t.serverId)],
 );
+
+/**
+ * ADR-0236 (P11, migration `mcp_bundles`) — a governed MCP bundle: a named, versioned list of exact (server, tool) pairs that
+ * an admin grants to a user, a role or a team as one unit. A bundle is a grant SOURCE at the role tier: per-user
+ * revocations still subtract from it, and every restriction after the grant step (halt, lead ceiling, the actor
+ * intersection, ABAC, rate limits, approvals, data scope) still applies. `current_version` is the version every grant
+ * follows; `archived_at` set = the bundle grants nothing.
+ */
+export const mcpBundles = pgTable("mcp_bundles", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull().unique("mcp_bundles_name_uq"),
+  description: text("description"),
+  currentVersion: integer("current_version").notNull().default(1),
+  archivedAt: timestamp("archived_at", { withTimezone: true }),
+  /** who signs off a call to a DANGEROUS tool held through this bundle; null = such a call is refused */
+  approverUserId: uuid("approver_user_id").references(() => users.id, { onDelete: "set null" }),
+  createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export type McpBundleRow = typeof mcpBundles.$inferSelect;
+
+/** ADR-0236 — one immutable version of a bundle (append-only; a change is a new row) */
+export const mcpBundleVersions = pgTable(
+  "mcp_bundle_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    bundleId: uuid("bundle_id")
+      .notNull()
+      .references(() => mcpBundles.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("mcp_bundle_versions_bundle_version_uq").on(t.bundleId, t.version)],
+);
+
+/** ADR-0236 — the exact (server, tool) pairs of one version (append-only). Point-in-time snapshot: `server_id` is
+ * SET NULL when the server is removed (a NULL server matches no call) and `tool_name` is the name the kernel matches
+ * on, as in role_tool_grants. */
+export const mcpBundleVersionItems = pgTable(
+  "mcp_bundle_version_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    versionId: uuid("version_id")
+      .notNull()
+      .references(() => mcpBundleVersions.id, { onDelete: "cascade" }),
+    serverId: uuid("server_id").references(() => mcpServers.id, { onDelete: "set null" }),
+    toolName: text("tool_name").notNull(),
+  },
+  (t) => [
+    uniqueIndex("mcp_bundle_version_items_uq").on(t.versionId, t.serverId, t.toolName),
+    index("mcp_bundle_version_items_server_idx").on(t.serverId, t.versionId),
+  ],
+);
+
+/** ADR-0236 — who holds a bundle: exactly one of a user, a role or a team (DB CHECK). No row = nothing granted. */
+export const mcpBundleGrants = pgTable(
+  "mcp_bundle_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    bundleId: uuid("bundle_id")
+      .notNull()
+      .references(() => mcpBundles.id, { onDelete: "cascade" }),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    roleId: uuid("role_id").references(() => roles.id, { onDelete: "cascade" }),
+    teamId: uuid("team_id").references(() => teams.id, { onDelete: "cascade" }),
+    /** the highest scope tier this grant reaches (read < write < dangerous); default 'read' (ADR-0180) */
+    maxTier: text("max_tier", { enum: ["read", "write", "dangerous"] }).notNull().default("read"),
+    grantedBy: uuid("granted_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("mcp_bundle_grants_user_uq").on(t.bundleId, t.userId).where(sql`${t.userId} IS NOT NULL`),
+    uniqueIndex("mcp_bundle_grants_role_uq").on(t.bundleId, t.roleId).where(sql`${t.roleId} IS NOT NULL`),
+    uniqueIndex("mcp_bundle_grants_team_uq").on(t.bundleId, t.teamId).where(sql`${t.teamId} IS NOT NULL`),
+    index("mcp_bundle_grants_user_idx").on(t.userId).where(sql`${t.userId} IS NOT NULL`),
+    index("mcp_bundle_grants_role_idx").on(t.roleId).where(sql`${t.roleId} IS NOT NULL`),
+    index("mcp_bundle_grants_team_idx").on(t.teamId).where(sql`${t.teamId} IS NOT NULL`),
+    check("mcp_bundle_grants_max_tier_check", sql`${t.maxTier} IN ('read', 'write', 'dangerous')`),
+    check("mcp_bundle_grants_one_subject_check", sql`num_nonnulls(${t.userId}, ${t.roleId}, ${t.teamId}) = 1`),
+  ],
+);
+export type McpBundleGrantRow = typeof mcpBundleGrants.$inferSelect;
 
 // No FKs on purpose: audit records must survive user/server deletion.
 // One audit trail for every object type (§7): MCP tool calls fill
@@ -1273,6 +1442,9 @@ export const auditLog = pgTable(
         // ADR-0219 (P10): an admin registering, re-carding, crediting, granting or removing a remote A2A agent,
         // and every governed A2A call (allowed or refused). Plain text column — no DDL needed.
         "a2a_agent",
+        // ADR-0236 (P11): a governed MCP bundle created, changed (a new version), archived, granted or revoked, and
+        // every refused attempt. Plain text column — no DDL needed.
+        "mcp_bundle",
         // ADR-0037: SCIM group sync. Group CRUD and every membership
         // add/remove audits here; SCIM USER provisioning keeps objectType
         // "user" so "what happened to this account" stays one query. Plain
@@ -3392,6 +3564,33 @@ export const pmSyncEvents = pgTable(
   (t) => [index("pm_sync_events_conn_idx").on(t.connectionId, t.receivedAt)],
 );
 
+// S-03 (ADR-0010 amendment, migration `pm_webhook_deliveries` (pending, numbered at merge)): one row per inbound PM webhook
+// delivery that reached processing, so a replay is acknowledged and never
+// processed twice. Keyed per connection by the sha256 of the signed content
+// (the exact body; generic: "<timestamp>.<body>") and, where the provider
+// sends one, its own delivery id (either one matching is a duplicate). Pruned
+// after PM_WEBHOOK_DELIVERY_RETENTION_DAYS; the row is a dedup marker, not
+// evidence: the audit trail and pm_sync_events hold that.
+export const pmWebhookDeliveries = pgTable(
+  "pm_webhook_deliveries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => pmConnections.id, { onDelete: "cascade" }),
+    contentSha256: text("content_sha256").notNull(),
+    deliveryId: text("delivery_id"),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("pm_webhook_deliveries_content_uq").on(t.connectionId, t.contentSha256),
+    uniqueIndex("pm_webhook_deliveries_delivery_uq")
+      .on(t.connectionId, t.deliveryId)
+      .where(sql`${t.deliveryId} IS NOT NULL`),
+    index("pm_webhook_deliveries_received_idx").on(t.receivedAt),
+  ],
+);
+
 // MODEL DISPATCH: one platform credential per model provider, AES-256-GCM
 // encrypted with REGULAIT_DATA_KEY (same discipline as git/PM connection
 // tokens — never plaintext at rest, never returned by any endpoint).
@@ -4683,6 +4882,9 @@ export const orgSettings = pgTable(
     /** ADR-0219 (P10, migration 0253): calls to remote agents over A2A. FALSE (the default, ADR-0180) = no remote
      * agent can be registered or called; an admin may turn it on (settings_relax step-up, audited). */
     a2aEnabled: boolean("a2a_enabled").notNull().default(false),
+    /** ADR-0236 (P11, migration `mcp_bundles`): governed MCP bundles. FALSE (the default, ADR-0180) = no bundle can be created,
+     * changed or granted, and the gateway loads no bundle grant; an admin may turn it on (settings_relax step-up, audited). */
+    mcpBundlesEnabled: boolean("mcp_bundles_enabled").notNull().default(false),
     /** ADR-0251 (migration governed_core_resource_rules): must a connector call name a project? TRUE (the ADR-0180 default) = an unattributed
      * connector call is refused (`attribution-required`), audited, before anything is sent; an admin may relax it
      * (settings_relax step-up, audited), and the call then meters into the Unattributed bucket. */
@@ -4698,6 +4900,16 @@ export const orgSettings = pgTable(
     mcpAdmissionMode: text("mcp_admission_mode", { enum: ["off", "log", "enforce"] })
       .notNull()
       .default("enforce"),
+    /** ADR-0246 (the pending `mcp_definition_pins` migration): what a tool, prompt or resource that changed since approval does. 'block' (the
+     * strict default, ADR-0180) refuses it until an admin re-approves it against the reviewed diff; 'warn' lets it
+     * serve and only audits the change. Relaxing to 'warn' needs a settings_relax step-up and is audited. */
+    mcpDefinitionPinMode: text("mcp_definition_pin_mode", { enum: ["block", "warn"] })
+      .notNull()
+      .default("block"),
+    /** ADR-0246 addendum: 'enforce' (strict default) gates every call to a high-risk MCP server on the policy
+     * template (an approval rule with quorum of at least 2 and a rate limit) and the authorised-targets list; 'off'
+     * is a settings_relax relaxation, audited. */
+    mcpHighRiskMode: text("mcp_high_risk_mode", { enum: ["enforce", "off"] }).notNull().default("enforce"),
     /** ADR-0175 A5 (migration 0140): the release-age cooldown in days. 7
      * (DEFAULT since ADR-0181, migration 0159). 0 = off; an admin may relax
      * it (audited). */
@@ -7793,6 +8005,8 @@ export const discoverySettings = pgTable(
     saasSourcesEnabled: boolean("saas_sources_enabled").notNull().default(false),
     identitySourcesEnabled: boolean("identity_sources_enabled").notNull().default(false),
     mlPlatformSourcesEnabled: boolean("ml_platform_sources_enabled").notNull().default(false),
+    // ADR-0259: endpoint MCP client-config discovery through the SD4 agent, off (pending migration endpoint_mcp_config_discovery, ADR-0252)
+    endpointMcpConfigEnabled: boolean("endpoint_mcp_config_enabled").notNull().default(false),
     version: integer("version").notNull().default(1),
     updatedBy: uuid("updated_by"),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -7990,6 +8204,8 @@ export const endpointAgentReports = pgTable(
     factsReceived: integer("facts_received").notNull(),
     factsEnvRefused: integer("facts_env_refused").notNull(),
     factsUnmatched: integer("facts_unmatched").notNull(),
+    /** ADR-0259 (pending migration endpoint_mcp_config_discovery, ADR-0252): mcp_config facts refused because the org switch was off (counted, never stored) */
+    factsMcpRefused: integer("facts_mcp_refused").notNull().default(0),
     droppedSnapshots: integer("dropped_snapshots").notNull(),
     gaps: jsonb("gaps").$type<Array<{ kind: string; reason: string }>>().notNull().default(sql`'[]'::jsonb`),
     sightings: jsonb("sightings").$type<EndpointAgentSighting[]>().notNull().default(sql`'[]'::jsonb`),
@@ -8010,6 +8226,7 @@ export const endpointAgentReports = pgTable(
       sql`${t.factsReceived} BETWEEN 0 AND 2000 AND ${t.factsEnvRefused} BETWEEN 0 AND ${t.factsReceived} AND ${t.factsUnmatched} BETWEEN 0 AND ${t.factsReceived} AND ${t.droppedSnapshots} BETWEEN 0 AND 1000000`,
     ),
     check("endpoint_agent_reports_gaps_check", sql`jsonb_typeof(${t.gaps}) = 'array' AND jsonb_array_length(${t.gaps}) <= 200`),
+    check("endpoint_agent_reports_mcp_refused_check", sql`${t.factsMcpRefused} BETWEEN 0 AND ${t.factsReceived}`),
     check("endpoint_agent_reports_sightings_check", sql`jsonb_typeof(${t.sightings}) = 'array' AND jsonb_array_length(${t.sightings}) <= 2000`),
     check(
       "endpoint_agent_reports_status_check",
@@ -8017,6 +8234,83 @@ export const endpointAgentReports = pgTable(
     ),
     index("endpoint_agent_reports_pending_idx").on(t.sourceId, t.receivedAt).where(sql`${t.status} = 'pending'`),
   ],
+);
+
+// ===========================================================================
+// ADR-0259 (P35) — MCP CLIENT CONFIGS ON EMPLOYEE MACHINES (pending migration endpoint_mcp_config_discovery, ADR-0252)
+// ===========================================================================
+
+export const ENDPOINT_MCP_TRANSPORTS = ["stdio", "http", "sse", "unknown"] as const;
+export const ENDPOINT_MCP_IDENTITY_KINDS = ["package", "host", "command", "unknown"] as const;
+export const ENDPOINT_MCP_LINK_IDENTITY_KINDS = ["package", "host", "command"] as const;
+export const ENDPOINT_MCP_RISKS = [
+  "shell_launcher",
+  "container_privileged",
+  "host_root_mount",
+  "unpinned_package",
+  "secret_in_args",
+  "plaintext_remote",
+  "auto_approve_all",
+  "risky_tool_auto_approved",
+] as const;
+
+/**
+ * One MCP server entry of one host config on one device, from the device's signed report. Evidence: refreshed by
+ * each newer report, deleted with the device or past the endpoint retention. Never an argument, env or header
+ * value, URL path or query, or key; secrets are kept as their TYPE (rule id) only.
+ */
+export const endpointMcpServers = pgTable(
+  "endpoint_mcp_servers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => endpointDevices.id, { onDelete: "cascade" }),
+    /** the report that last refreshed it (no foreign key, so a report's deletion never rewrites this row) */
+    lastReportId: uuid("last_report_id").notNull(),
+    // exception (ADR-0200 addendum): signed-report evidence, the manifest's catalogue identifiers for the MCP host
+    signatureId: text("signature_id").notNull(),
+    provider: text("provider").notNull(),
+    configRoot: text("config_root", { enum: ["home", "system_applications", "appdata", "localappdata"] }).notNull(),
+    configPath: text("config_path").notNull(),
+    serverName: text("server_name").notNull(),
+    transport: text("transport", { enum: ENDPOINT_MCP_TRANSPORTS }).notNull(),
+    command: text("command"),
+    package: text("package"),
+    packageVersion: text("package_version"),
+    host: text("host"),
+    identityKind: text("identity_kind", { enum: ENDPOINT_MCP_IDENTITY_KINDS }).notNull(),
+    identity: text("identity").notNull(),
+    disabled: boolean("disabled").notNull().default(false),
+    // exception (ADR-0200 addendum): closed-vocabulary evidence sets from one signed report, not references
+    risks: text("risks").array().$type<Array<(typeof ENDPOINT_MCP_RISKS)[number]>>().notNull().default(sql`'{}'::text[]`),
+    riskyTools: text("risky_tools").array().notNull().default(sql`'{}'::text[]`),
+    autoApprovedTools: integer("auto_approved_tools").notNull().default(0),
+    secretTypes: text("secret_types").array().notNull().default(sql`'{}'::text[]`),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    unique("endpoint_mcp_servers_entry_uq").on(t.deviceId, t.configRoot, t.configPath, t.serverName, t.identityKind, t.identity),
+    index("endpoint_mcp_servers_identity_idx").on(t.identityKind, t.identity),
+    index("endpoint_mcp_servers_last_seen_idx").on(t.lastSeenAt),
+  ],
+);
+export type EndpointMcpServerRow = typeof endpointMcpServers.$inferSelect;
+
+/** an admin's statement that a configured server identity is an approved `mcp_servers` row (audited) */
+export const endpointMcpServerLinks = pgTable(
+  "endpoint_mcp_server_links",
+  {
+    identityKind: text("identity_kind", { enum: ENDPOINT_MCP_LINK_IDENTITY_KINDS }).notNull(),
+    identity: text("identity").notNull(),
+    mcpServerId: uuid("mcp_server_id")
+      .notNull()
+      .references(() => mcpServers.id, { onDelete: "cascade" }),
+    linkedBy: uuid("linked_by").references(() => users.id, { onDelete: "set null" }),
+    linkedAt: timestamp("linked_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ name: "endpoint_mcp_server_links_pk", columns: [t.identityKind, t.identity] }), index("endpoint_mcp_server_links_server_idx").on(t.mcpServerId)],
 );
 export type EndpointAgentReportRow = typeof endpointAgentReports.$inferSelect;
 

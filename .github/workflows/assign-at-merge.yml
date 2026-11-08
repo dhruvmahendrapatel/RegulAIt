@@ -69,6 +69,24 @@ jobs:
         if: steps.plan.outputs.changed == 'true'
         run: node scripts/migration-watermark-guard.mjs HEAD
 
+      # Stage by path only what the script may write: renames, the journal, the ADR index, the fold targets and the
+      # fragments it deletes. Whatever is still unstaged or untracked after that is outside those paths and fails the
+      # run. (Until 2026-11-08 this check read `git status --porcelain`, which also lists the STAGED changes, so every
+      # run that assigned anything failed with "wrote outside its paths" and listed its own files.)
+      - name: Stage only the script's own paths
+        id: stage
+        if: steps.plan.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          git add -A -- packages/db/migrations internal/decisions/README.md internal/memory/STATE.md internal/product/PENDING.md internal/fragments
+          outside="$(git ls-files --modified --deleted --others --exclude-standard)"
+          if [ -n "$outside" ]; then
+            echo "::error::the script wrote outside its paths:"
+            printf '%s\n' "$outside"
+            exit 1
+          fi
+          git status --short
+
       - name: Push the assignment branch (the master opens the PR and enqueues it)
         if: steps.plan.outputs.changed == 'true'
         env:
@@ -104,9 +122,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$branch"
-          # staged by path: only what the script may write (renames, the journal, the ADR index, the fold targets, fragments)
-          git add -A -- packages/db/migrations internal/decisions/README.md internal/memory/STATE.md internal/product/PENDING.md internal/fragments
-          if [ -n "$(git status --porcelain)" ]; then echo "::error::the script wrote outside its paths:"; git status --short; exit 1; fi
           git commit -q -m "chore: assign migration numbers and fold docs at merge (ADR-0252)" -m "Written by scripts/assign-at-merge.mjs from main at ${main:0:12}, run ${GITHUB_RUN_ID}."
           auth="$(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
           # no force: an existing branch for this main commit is refused, never overwritten

@@ -1632,6 +1632,55 @@
       "when": 1785248000000,
       "tag": "0313_rls_batch2_guards",
       "breakpoints": true
+    },
+    {
+      "idx": 314,
+      "version": "7",
+      "when": 1785249000000,
+      "tag": "0314_admission_engine_scans",
+      "breakpoints": true
+    },
+    {
+      "idx": 315,
+      "version": "7",
+      "when": 1785250000000,
+      "tag": "0315_governed_core_resource_rules",
+      "breakpoints": true
+    },
+    {
+      "idx": 316,
+      "version": "7",
+      "when": 1785251000000,
+      "tag": "0316_guardrail_vendor_adapters",
+      "breakpoints": true
+    },
+    {
+      "idx": 317,
+      "version": "7",
+      "when": 1785252000000,
+      "tag": "0317_pm_webhook_deliveries",
+      "breakpoints": true
+    },
+    {
+      "idx": 318,
+      "version": "7",
+      "when": 1785253000000,
+      "tag": "0318_third_party_ingest",
+      "breakpoints": true
+    },
+    {
+      "idx": 319,
+      "version": "7",
+      "when": 1785254000000,
+      "tag": "0319_mcp_bundles",
+      "breakpoints": true
+    },
+    {
+      "idx": 320,
+      "version": "7",
+      "when": 1785255000000,
+      "tag": "0320_mcp_definition_pins",
+      "breakpoints": true
     }
   ]
 }

@@ -23,7 +23,7 @@
 # This is CI-runner verification: one GitHub-hosted runner kernel and Docker version, not a customer host.
 name: gVisor
 
-# ADR-0252 addendum (owner decision 2026-11-07): gVisor is part of the FULL suite: a merge group, a push to main
+# ADR-0262 (owner decision 2026-11-07): gVisor is part of the FULL suite: a merge group, a push to main
 # that touches the isolation paths, and the nightly schedule. A pull request no longer runs it (before 2026-11-07 it
 # ran on a PR touching the paths listed under push).
 on:
