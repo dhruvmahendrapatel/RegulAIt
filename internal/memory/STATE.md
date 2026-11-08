@@ -22,6 +22,8 @@ roadmap: ../product/ROADMAP.md
 ## Where we are (read this paragraph first)
 <!-- fold:state-recap newest-first -->
 
+**2026-11-07 - backlog P26 built on `builder/p26-spikee-pyrit-engines` ([ADR-0245](../decisions/0245-spikee-pyrit-redteam-engines.md)):** Spikee joins garak and promptfoo as a sidecar red-team engine (off until its first signed image publish), the ADR-0217 automatic re-test now repeats red-team engine runs, and PyRIT is designed but its build is deferred (two builder attempts were stopped by a content-safety filter).
+
 **2026-11-07 - backlog P33: third-party client compatibility tests ([ADR-0257](../decisions/0257-third-party-client-compat-tests.md), builder lane, branch `builder/p33-client-compat-tests`).**
 - **Built:** `apps/gateway/client-compat/` (the harness) and `client-compat/` (the client images) run the official
   `openai` 7.43.0 and `@anthropic-ai/sdk` 1.3.0, `laravel/ai` v1.3.0 (its `openai-compatible` and `anthropic` drivers)
@@ -5734,6 +5736,21 @@ untouched). Both sources are share-alike (MCP also non-commercial), so items are
 refs are risk slugs, not numbers, because 2026 reuses numbers for different risks; the v1→v2 diff is ten title changes
 and one description change. No CSA AICM pack (licence). No migration. Open: the MCP list is a beta; the evaluator
 catalog's `owasp:llm:NN` ids stay on 2025 numbering; console labels (UI, #453).
+
+**ADR-0245 (builder, 2026-11-07): Spikee and PyRIT as sidecar red-team engines (backlog P26).** Spikee 0.9.4
+(Apache-2.0, indirect prompt injection in documents) is built as an ADR-0187 / ADR-0190 I5 engine: a pinned,
+hash-locked, licence-gated image built in CI, a gateway-only workspace target, off and `not_built` until its first
+signed publish (a null lock entry, so nothing can enable it before then). Its unused `datasets` requirement and the 18
+packages only it needs are left out of the image (fsspec CVE-2026-104851), removed rather than allow-listed. PyRIT
+1.1.0 is designed in the ADR (attacker and scorer = the run's judge through the gateway, every attack `offensive`) but
+NOT built: two builder attempts were stopped by a content-safety filter; the partial work is on
+`builder/p26-pyrit-wip`, and `pyrit` is in no runtime list. The pending migration `spikee_engine_and_engine_retest`
+widens `engines_id_check`, seeds spikee and gives the ADR-0217 auto re-test a third kind, `engine`
+(`mrm_retest_runs.engine_run_id`), which repeats a person's red-team engine runs of any engine after a model change and
+settles in the transaction that ends the run. The lock reader treats an engine missing from an older base lock as never
+published. The agentic_security coverage diff added nothing (multimodal recorded as the one gap). Open: finishing
+PyRIT, owner confirmation of the eight reused licence acceptances, Spikee's LLM judge through the gateway, a governed
+multimodal route, and the UI (#453).
 
 <!-- fold:state-decisions -->
 
