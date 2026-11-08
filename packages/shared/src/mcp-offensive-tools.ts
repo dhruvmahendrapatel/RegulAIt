@@ -149,9 +149,9 @@ export function looksLikeNetworkTarget(value: string): boolean {
   return !!t && (t.kind !== "host" || t.host.includes("."));
 }
 
-/** Separators that break a free-text argument (a command line, a query, prose) into candidate target tokens. `.`,
- * `:`, `/`, `-`, `_` and `@` are kept, so a URL, a `host:port`, a CIDR and an email stay whole (an email is then not
- * a target, because its `@` makes it an invalid host). */
+/** Separators that break a free-text argument (a command line, a query, prose) into candidate target tokens. The
+ * carrier characters `.`, `:`, `/`, `-`, `_` and `@` are kept inside a token, so a URL, a `host:port`, a `user@host`
+ * and a CIDR survive the split whole; `normaliseTarget` then reduces each token to its host with one URL parser. */
 const TARGET_TOKEN_SEPARATORS = /[\s,;'"`=()[\]{}<>|*!?\\]+/;
 /** At most this many tokens are tested per string; a string with more drains the scan budget and the call is refused. */
 const MAX_TOKENS_PER_STRING = 512;
@@ -215,33 +215,56 @@ function isHostname(s: string): boolean {
   return s.split(".").every((l) => HOST_LABEL.test(l) && !l.startsWith("-") && !l.endsWith("-"));
 }
 
-/** A raw target as an IP, a CIDR or a hostname; null when it is none of them. A URL is read for its host. */
+/** The host of a token read as a URL authority (ADR-0176: a validated parser, not hand-rolled regex). A real
+ * scheme is honoured; otherwise a synthetic `x://` is prefixed. The WHATWG URL parser then strips userinfo
+ * (`user@host`), a port (`host:port`, a trailing `host:`), a path (`host/path`) and brackets, and lowercases and
+ * punycodes the host — so a target in ANY of those forms is reduced to the same host. Returns the host with a
+ * single trailing dot stripped, or null when the token carries no host or the parser rejects it. */
+function hostFromAuthority(raw: string): string | null {
+  const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw);
+  let hostname: string;
+  try {
+    hostname = new URL(hasScheme ? raw : `x://${raw}`).hostname;
+  } catch {
+    return null;
+  }
+  const h = hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "").toLowerCase();
+  return h.length > 0 ? h : null;
+}
+
+/** A raw target as an IP, a CIDR or a hostname; null when it is none of them. One parser handles every carrier
+ * form — `user@host`, `host:port`, a trailing `host:`, `host/path`, a scheme-less or full URL, brackets and
+ * trailing punctuation — by reading the token as a URL authority (ADR-0246 round-3 review: fix the root cause,
+ * not one case at a time). CIDRs and bare IPs are handled first, because a URL parser would drop a CIDR's prefix
+ * as a path and rejects an unbracketed IPv6. */
 export function normaliseTarget(raw: string): NormalisedTarget | null {
-  let s = raw.trim();
+  const s = raw.trim();
   if (!s || s.length > 2048) return null;
-  if (/^[a-z][a-z0-9+.-]{0,30}:\/\//i.test(s)) {
-    try {
-      s = new URL(s).hostname;
-    } catch {
-      return null;
-    }
-  }
-  s = s.replace(/^\[|\]$/g, "").toLowerCase();
-  const slash = s.indexOf("/");
-  if (slash > 0) {
-    const ip = s.slice(0, slash);
-    const prefix = Number(s.slice(slash + 1));
+
+  // 1. a bare CIDR, before any URL parsing so the prefix is never read as a path.
+  const cidr = s.match(/^([0-9a-f.:]+)\/(\d{1,3})$/i);
+  if (cidr) {
+    const ip = cidr[1]!.toLowerCase();
     const family = isIP(ip);
-    if (!family || !Number.isInteger(prefix) || prefix < 0 || prefix > (family === 4 ? 32 : 128)) return null;
-    return { kind: "cidr", ip, prefix, family: family === 4 ? "ipv4" : "ipv6" };
+    if (family) {
+      const prefix = Number(cidr[2]);
+      if (prefix < 0 || prefix > (family === 4 ? 32 : 128)) return null;
+      return { kind: "cidr", ip, prefix, family: family === 4 ? "ipv4" : "ipv6" };
+    }
+    // the left side is not an IP (a host with a numeric path) — fall through to the URL parser.
   }
-  const family = isIP(s);
-  if (family) return { kind: "ip", ip: s, family: family === 4 ? "ipv4" : "ipv6" };
-  const hostPort = s.match(/^([^:]+):\d{1,5}$/);
-  if (hostPort) s = hostPort[1]!;
-  s = s.replace(/\.$/, "");
-  if (!isHostname(s)) return null;
-  return { kind: "host", host: s };
+
+  // 2. a bare IP, with or without brackets (the WHATWG parser needs brackets for IPv6, so handle it here).
+  const bare = s.replace(/^\[|\]$/g, "").toLowerCase();
+  const bareFamily = isIP(bare);
+  if (bareFamily) return { kind: "ip", ip: bare, family: bareFamily === 4 ? "ipv4" : "ipv6" };
+
+  // 3. every other carrier form, reduced to its host by the one URL-authority parser.
+  const host = hostFromAuthority(s);
+  if (host === null) return null;
+  const hostFamily = isIP(host);
+  if (hostFamily) return { kind: "ip", ip: host, family: hostFamily === 4 ? "ipv4" : "ipv6" };
+  return isHostname(host) ? { kind: "host", host } : null;
 }
 
 /** Normalise an admin's authorised-target entry, or null when it is not one. */

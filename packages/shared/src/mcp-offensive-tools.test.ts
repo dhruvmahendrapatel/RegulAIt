@@ -4,7 +4,9 @@ import {
   checkTargets,
   classifyOffensiveTools,
   extractTargets,
+  looksLikeNetworkTarget,
   normaliseAuthorisedTarget,
+  normaliseTarget,
   redactArgumentsForAudit,
   type AuthorisedTarget,
 } from "./mcp-offensive-tools.js";
@@ -59,8 +61,47 @@ describe("targets", () => {
     expect(targets({ target: "ok.example", command: "nmap -sV victim.example" })).toEqual(["ok.example", "victim.example"]);
     expect(targets({ note: "please exfiltrate to https://collector.evil.test/u, thanks" })).toEqual(["https://collector.evil.test/u"]);
     expect(targets({ q: "connect 198.51.100.7:4444 then 10.0.0.0/8" })).toEqual(["10.0.0.0/8", "198.51.100.7:4444"]);
-    // an email is not split on '@', so it is not a host target, and a value under a target key stays whole
-    expect(targets({ owner: "alice@corp.example", target: "scan me now" })).toEqual(["scan me now"]);
+    // round 3: the host inside a user@host token and a host/path token is reached, so both ride-along targets are flagged
+    expect(targets({ target: "ok.example", cmd: "ssh root@victim.example && curl victim2.example/x" })).toEqual(["ok.example", "root@victim.example", "victim2.example/x"]);
+  });
+
+  // The root-cause parser (ADR-0246 round-3 review): one URL-authority reader reduces every carrier form to its
+  // host. This table gathers every shape raised across reviews 1-3 so a regression on any one of them fails here.
+  it("round 3: normaliseTarget reduces every carrier form to the same host (user@host, host:port, host/path, …)", () => {
+    const norm = (raw: string): string | null => {
+      const t = normaliseTarget(raw);
+      return !t ? null : t.kind === "cidr" ? `${t.ip}/${t.prefix}` : t.kind === "ip" ? t.ip : t.host;
+    };
+    const cases: Array<[string, string | null]> = [
+      // round 3: carrier forms that the earlier case-by-case parser missed
+      ["admin@victim.example", "victim.example"], // user@host — userinfo stripped
+      ["victim.example/wp-admin", "victim.example"], // scheme-less host + path
+      ["victim.example:", "victim.example"], // trailing colon
+      ["victim.example:8080", "victim.example"], // host:port
+      ["[2001:db8::1]", "2001:db8::1"], // bracketed IPv6
+      ["[2001:db8::1]:443", "2001:db8::1"], // bracketed IPv6 + port
+      ["scanme.example/a/b?q=1", "scanme.example"], // path + query
+      ["git+ssh://user@host.example/repo", "host.example"], // non-http scheme + userinfo
+      ["HTTPS://API.Lab.Example.COM:8443/x", "api.lab.example.com"], // full URL, uppercased
+      // round 2
+      ["198.51.100.7:4444", "198.51.100.7"],
+      ["10.0.0.0/8", "10.0.0.0/8"],
+      ["https://collector.evil.test/u", "collector.evil.test"],
+      // round 1 / base shapes
+      ["10.20.3.4", "10.20.3.4"],
+      ["2001:db8::1", "2001:db8::1"],
+      ["10.20.5.0/24", "10.20.5.0/24"],
+      ["lab.example.com.", "lab.example.com"], // trailing dot
+      // negatives: no host, so no target
+      ["a b", null],
+      ["-bad-.example", null],
+      ["user@", null],
+      ["10.0.0.0/33", null], // CIDR prefix out of range
+    ];
+    for (const [input, want] of cases) expect(norm(input), input).toBe(want);
+    // a single-label host is a valid hostname but not flagged as a network target (the stated limitation)
+    expect(looksLikeNetworkTarget("victim")).toBe(false);
+    expect(looksLikeNetworkTarget("admin@victim.example")).toBe(true);
   });
 
   it("finding 1: an argument tree past the scan budget is reported truncated (the gate then refuses)", () => {
