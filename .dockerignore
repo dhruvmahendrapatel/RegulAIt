@@ -14,3 +14,5 @@ graphify-out
 **/*.spec.ts
 apps/web/e2e
 scratchpad
+# ADR-0242: the skill-scanner image's smoke-scan fixtures are skills, and a skill is a SKILL.md
+!engines/skillscanner/fixtures/**/SKILL.md

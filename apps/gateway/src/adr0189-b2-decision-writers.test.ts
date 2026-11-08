@@ -23,6 +23,7 @@ const dbSrc = path.resolve(here, "../../../packages/db/src");
 
 /** every gateway module that writes a `receiptClass: "decision"` audit row (B2's list) */
 const DECISION_WRITERS = [
+  "a2a.ts", // ADR-0219/ADR-0251: remote agent calls (insert(auditLog) on the chained handle)
   "agent-setup-assist.ts", // ADR-0205: the setup assistant's refused model draft (insert(auditLog) on the chained handle)
   "agents-connectors.ts", // agent dispatch: lifecycle, PII, egress and fallback refusals
   "app.ts", // advisory evaluate callouts and builder approval resumes
@@ -37,6 +38,7 @@ const DECISION_WRITERS = [
   "delegated-evaluate.ts", // ADR-0188 delegated dispatch
   "engine-runs.ts",
   "engine-tasks.ts", // ADR-0190 I5: an engine run's task start (its entitlement decision, with its engine_worker placement)
+  "governed-core.ts", // ADR-0251: a model dispatch refused by the governed core (insert(auditLog), chained handle)
   "governed-evaluate.ts", // the `governance-policy-changed` refusal row of the MCP tool, MCP protocol and connector paths
   "guardrails.ts",
   "mcp-identity-assertion.ts", // ADR-0188 S8: an opted-in server's call refused because no identity assertion can be made
@@ -48,6 +50,7 @@ const DECISION_WRITERS = [
   "playground.ts",
   "privacy-ops.ts", // ADR-0224: the processing limit's dispatch refusal
   "redteam.ts",
+  "usage-extractors.ts", // ADR-0241: a dispatch whose usage mapping could not read the response, kept on built-in counts (insert(auditLog) on the chained handle)
   "use-case-gate.ts",
   "use-cases.ts",
   "vendors.ts", // ADR-0213: the vendor questionnaire drafter's refused model use (insert(auditLog), chained handle)
@@ -120,6 +123,6 @@ it("no production module writes audit_log with raw SQL or builds a handle that s
 it("the shared writer calls the fact capture in the chained append, and the two handle builders wrap with it", () => {
   const chain = readFileSync(path.join(dbSrc, "audit-chain.ts"), "utf8");
   expect(chain).toMatch(/await captureDecisionFacts\(tx as never, rows\);/);
-  expect(readFileSync(path.join(dbSrc, "index.ts"), "utf8")).toMatch(/withAuditChain\(drizzle\(pool/);
+  expect(readFileSync(path.join(dbSrc, "index.ts"), "utf8")).toMatch(/withAuditChain\(drizzle\((scopePoolForRls\()?pool/);
   expect(readFileSync(path.join(dbSrc, "bom-session-lock.ts"), "utf8")).toMatch(/withAuditChain\(drizzle\(client/);
 });

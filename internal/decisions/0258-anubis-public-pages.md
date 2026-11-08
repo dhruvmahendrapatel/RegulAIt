@@ -2,10 +2,11 @@
 
 - **Status**: Proposed
 - **Date**: 2026-11-07
+- **Index**: Anubis as an optional, off-by-default proof-of-work bot and AI-scraper check in front of the public trust centre, auditor portal and supplier portal only (backlog P34)
 
 ## Context
 
-Owner-approved on 2026-11-07 as backlog P34 (PENDING.md §2i, "From the security and infra review"): add **Anubis**
+Owner-approved on 2026-11-07 as backlog P34 (PENDING.md, "from the security and infra review"): add **Anubis**
 (TecharoHQ/anubis, MIT, Go, v1.28.x) as an optional proof-of-work anti-bot and anti-AI-scraper reverse proxy in front of
 RegulAIt's **public pages only**: the trust centre ([ADR-0225](0225-outward-trust-pages.md)), the supplier portal
 ([ADR-0221](0221-supplier-portal.md)) and the auditor portal (ADR-0225). It must never cover the API, the admin console or
