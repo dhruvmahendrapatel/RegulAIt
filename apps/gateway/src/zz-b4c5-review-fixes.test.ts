@@ -138,7 +138,7 @@ async function enrol(s: Session): Promise<SoftAuthenticator> {
   const opt = await as(s, "POST", "/v1/auth/passkeys/registration-options", {});
   expect(opt.statusCode, opt.body).toBe(200);
   const auth = new SoftAuthenticator({ origin: ORIGIN });
-  const reg = await as(s, "POST", "/v1/auth/passkeys", { challengeId: opt.json().challengeId, response: auth.register(opt.json().options), label: `b4c-${randomBytes(2).toString("hex")}` });
+  const reg = await as(s, "POST", "/v1/auth/passkeys", { challengeId: opt.json().challengeId, response: auth.register(opt.json().options), label: `b4c-${randomBytes(6).toString("hex")}` });
   expect(reg.statusCode, reg.body).toBe(201);
   return auth;
 }
@@ -156,7 +156,7 @@ async function mkPerson(label: string, isAdmin = false): Promise<Person> {
   const u = await mkUser(label, isAdmin);
   return { ...u, auth: await enrol(u.s) };
 }
-const person = (label: string) => mkPerson(`${label}-${randomBytes(2).toString("hex")}`);
+const person = (label: string) => mkPerson(`${label}-${randomBytes(6).toString("hex")}`);
 
 async function startUpstream(): Promise<{ url: string; close: () => Promise<void> }> {
   const httpServer = http.createServer((req, res) => {
@@ -381,7 +381,7 @@ describe("F19: a rule edit naming an account serialises with that account's reac
     const tool = nextTool();
     // the approver role keeps the pool satisfiable while the named seat moves to the disabled account
     const ruleId = await rule(tool);
-    const u = await mkUser(`seat-${randomBytes(2).toString("hex")}`);
+    const u = await mkUser(`seat-${randomBytes(6).toString("hex")}`);
     await db.update(usersTable).set({ disabledAt: new Date() }).where(eq(usersTable.id, u.id));
     const res = await racedMaybeBlocking(
       async (tx) => {
@@ -437,7 +437,7 @@ describe("F22 (verdict): project membership is already a policy-epoch source", (
 
 describe("first-passkey race: a ceremony admitted without a step-up completes only while none is still possible", () => {
   it("two 'first' ceremonies from one fresh session: the second completion is refused", async () => {
-    const u = await mkUser(`first-pk-${randomBytes(2).toString("hex")}`);
+    const u = await mkUser(`first-pk-${randomBytes(6).toString("hex")}`);
     const o1 = await as(u.s, "POST", "/v1/auth/passkeys/registration-options", {});
     expect(o1.statusCode, o1.body).toBe(200);
     const o2 = await as(u.s, "POST", "/v1/auth/passkeys/registration-options", {});
@@ -461,7 +461,7 @@ describe("F23: an admin's own password and second factor are not reset without a
   });
 
   it("mfa/clear on the caller's own account needs settings_relax", async () => {
-    const u = await mkUser(`self-mfa-${randomBytes(2).toString("hex")}`);
+    const u = await mkUser(`self-mfa-${randomBytes(6).toString("hex")}`);
     await db.update(usersTable).set({ isAdmin: true }).where(eq(usersTable.id, u.id));
     const enrolled = await as(u.s, "POST", "/auth/totp/enroll");
     expect(enrolled.statusCode, enrolled.body).toBe(200);
@@ -476,7 +476,7 @@ describe("F23: an admin's own password and second factor are not reset without a
 
 describe("F24: a TOTP step-up never burns a code against an authenticator cleared meanwhile", () => {
   it("an MFA clear committed while the verify waited refuses the code", async () => {
-    const u = await mkUser(`totp-race-${randomBytes(2).toString("hex")}`);
+    const u = await mkUser(`totp-race-${randomBytes(6).toString("hex")}`);
     const enrolled = await as(u.s, "POST", "/auth/totp/enroll");
     expect(enrolled.statusCode, enrolled.body).toBe(200);
     const secret = enrolled.json().secret as string;
@@ -528,7 +528,7 @@ describe("F27: an SSO provider's default role never mints identities into an app
     const mod = (await import("./approval-pool.js")) as Record<string, unknown>;
     expect(typeof mod.grantJitDefaultRole, "grantJitDefaultRole").toBe("function");
     const grant = mod.grantJitDefaultRole as (db: Db, userId: string, roleId: string) => Promise<string>;
-    const u = await mkUser(`jit-${randomBytes(2).toString("hex")}`);
+    const u = await mkUser(`jit-${randomBytes(6).toString("hex")}`);
     expect(await grant(db, u.id, roleId)).toBe("withheld");
     expect(await db.select().from(roleAssignments).where(and(eq(roleAssignments.userId, u.id), eq(roleAssignments.roleId, roleId)))).toHaveLength(0);
     const [plainRole] = await db.insert(roles).values({ name: `b4c5 plain ${RUN}` }).returning({ id: roles.id });
@@ -568,7 +568,7 @@ describe("F29: delegation writes serialise with consumption through the policy e
 describe("F30: in passkey mode only principals who can sign count towards satisfiability", () => {
   it("a quorum-2 pool with one passkey holder is refused at queue time", async () => {
     const [r6] = await db.insert(roles).values({ name: `b4c5 nokey ${RUN}` }).returning({ id: roles.id });
-    const noKey = await mkUser(`nokey-${randomBytes(2).toString("hex")}`);
+    const noKey = await mkUser(`nokey-${randomBytes(6).toString("hex")}`);
     await db.insert(roleAssignments).values({ userId: noKey.id, roleId: r6!.id, createdAt: new Date(Date.now() - 60_000) });
     const tool = nextTool();
     await rule(tool, { approverRoleId: r6!.id, quorum: 2 });

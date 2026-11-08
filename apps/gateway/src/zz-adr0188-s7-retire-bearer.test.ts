@@ -142,7 +142,7 @@ async function enrolRunner(): Promise<{ id: string; caller: Caller; client: Test
   expect(t.statusCode, t.body).toBe(201);
   const client = new TestWorkloadClient(app, { issuer: ORIGIN, dataKey: DATA_KEY, kind: "engine_runner" });
   const r = await inject("POST", "/v1/engine-runner/register", { authorization: `Bearer ${t.json().token}` }, {
-    name: `s7-runner-${randomBytes(2).toString("hex")}`,
+    name: `s7-runner-${randomBytes(6).toString("hex")}`,
     ...PF_BUILD(),
     selfTest: selfTest(),
     publicJwk: client.publicJwk,
@@ -706,7 +706,7 @@ describe("S7 — key rotation (decision 12) and revocation", () => {
           .sign(signer.privateKey);
         const t = await inject("POST", "/v1/engines/promptfoo/enrollment-tokens", admin.key, { label: `s7-sup-${RUN}` });
         const r = await inject("POST", "/v1/engine-runner/register", { authorization: `Bearer ${t.json().token}` }, {
-          name: `s7-sup-${randomBytes(2).toString("hex")}`,
+          name: `s7-sup-${randomBytes(6).toString("hex")}`,
           ...PF_BUILD(),
           selfTest: selfTest(),
           publicJwk: fresh.publicJwk,
