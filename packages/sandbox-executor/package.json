@@ -24,8 +24,7 @@
   "dependencies": {
     "@regulait/shared": "workspace:*",
     "jose": "6.2.14",
-    "write-file-atomic": "8.0.0",
-    "zod": "4.6.7"
+    "write-file-atomic": "8.0.0"
   },
   "devDependencies": {
     "@types/node": "26.6.6",

@@ -355,6 +355,12 @@ jobs:
         if: ${{ !cancelled() && (steps.affordances.outcome == 'success' || steps.affordances.outcome == 'failure') }}
         run: node scripts/licence-gate-workspace.mjs
 
+      # #738: production code imports only declared dependencies and declares nothing it does not import
+      # (knip.jsonc holds the scope and the reasons for each exception).
+      - name: Dependencies declared and used (knip --production)
+        if: ${{ !cancelled() && (steps.affordances.outcome == 'success' || steps.affordances.outcome == 'failure') }}
+        run: pnpm exec knip --production
+
       # The engine image lock may only change as `--apply` changes it (#425
       # review): every published sourceCommit is on main, and an engine whose
       # image changed moved its publishGeneration to exactly main's + 1. A

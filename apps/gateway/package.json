@@ -55,7 +55,6 @@
     "@peculiar/asn1-ess": "2.10.0",
     "@peculiar/asn1-schema": "2.10.0",
     "@peculiar/asn1-x509": "2.10.0",
-    "@regulait/api-client": "workspace:*",
     "@regulait/cloud-discovery": "workspace:*",
     "@regulait/connector-provider": "workspace:*",
     "@regulait/db": "workspace:*",
@@ -67,7 +66,6 @@
     "@regulait/orchestration-kernel": "workspace:*",
     "@regulait/pm-provider": "workspace:*",
     "@regulait/policy-kernel": "workspace:*",
-    "@regulait/sandbox-executor": "workspace:*",
     "@regulait/shared": "workspace:*",
     "@regulait/training-provider": "workspace:*",
     "@regulait/workflow-kernel": "workspace:*",
@@ -94,9 +92,11 @@
     "zod": "4.6.7"
   },
   "devDependencies": {
+    "@regulait/api-client": "workspace:*",
     "@regulait/engine-garak": "workspace:*",
     "@regulait/engine-modelscan": "workspace:*",
     "@regulait/engine-promptfoo": "workspace:*",
+    "@regulait/sandbox-executor": "workspace:*",
     "@types/node": "26.6.6",
     "fflate": "0.8.3",
     "simple-statistics": "7.12.1",

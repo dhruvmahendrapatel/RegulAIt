@@ -1,0 +1,25 @@
+// knip --production (#738): every workspace's production code imports only what its package.json declares, and
+// declares nothing it does not import. Run in CI (build-and-test-base) and by `pnpm gate`.
+//
+// Scope: the dependency rules only. Unused files and exports (about 560 findings at 2026-11-07, mostly scripts and
+// demo entry points knip cannot see, and kept public API) are a separate clean-up, not a warn-only phase of this
+// check: the rules below fail the build today.
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "include": ["dependencies", "unlisted", "binaries", "unresolved"],
+  "ignoreBinaries": [
+    // util-linux tools the sandbox-init script calls inside its image, not npm binaries
+    "unshare",
+    "dmesg",
+    // apps/web's playwright.enterprise.config.ts runs `npx --no-install vite`; vite is an apps/web devDependency,
+    // which --production does not count
+    "vite"
+  ],
+  "workspaces": {
+    "apps/gateway": {
+      // the gateway's top-level modules are its entry points: the server, and the CLIs package.json and the images
+      // run as `node dist/<name>.js`
+      "entry": ["src/*.ts!", "!src/*.test.ts!"]
+    }
+  }
+}

@@ -7,9 +7,19 @@ Root `devDependencies` used only by the scripts in this directory. Nothing here 
 | Package | Version | Licence | Used by | Why |
 |---|---|---|---|---|
 | `dependency-cruiser` | 18.7.0 | MIT | `preflight-import-cycles.mjs` (and the module list of `preflight-import-smoke.mjs`) | ADR-0190 I4 follow-ups: finds the static import cycles of the compiled gateway, for the CI ratchet against new ones. It parses (acorn) and resolves (enhanced-resolve); the script only selects, sorts and compares edges. Works offline, no network at run time. Its transitive runtime closure is 42 packages (39 MIT, 3 ISC; checked 2026-10-16), 34 of them new to the lockfile. |
+| `knip` | 6.44.1 | ISC | `knip.jsonc` (CI `build-and-test-base`, `pnpm gate`) | #738: `knip --production` fails when a workspace's production code imports an undeclared package or declares one it never imports (the dependency half of review O-01). Parses with oxc (MIT, per-platform native bindings from npm, or the bundled WASI build), resolves with oxc-resolver (MIT); no network at run time. Its new closure is 60 lockfile entries, all MIT or ISC (checked 2026-11-08). Pinned one release behind the newest (6.44.2, 2026-11-07) to respect a 7-day release cooldown. |
 | `js-yaml` | 4.3.2 | MIT | `refresh-framework-imports.mjs` | ADR-0215 (P5): parses the MITRE ATLAS YAML release when a developer refreshes the vendored framework-import snapshots. Safe `JSON_SCHEMA` load only (no custom types). The same version was already in the lockfile through other tools; one dependency (`argparse`, Python-2.0 licence, CLI only and not loaded by `load`). Never runs in the product: the product reads the vendored JSON. |
 
 ## Search record (ADR-0176)
+
+Unused and undeclared dependency detection, 2026-11-08 (#738):
+
+- `knip` 6.44.1 (ISC, webpro-nl/knip, actively maintained, weekly releases): chosen. Named by the owner in #738; workspace
+  aware (pnpm), a production mode that ignores tests and devDependencies, and per-tool plugins (Vitest, Playwright, Vite)
+  that find their entry points.
+- `depcheck` (MIT): last release 1.4.7 on 2023-10-17, so not maintained under ADR-0176; no pnpm workspace support.
+- `dependency-cruiser` (already a dev tool here): can flag undeclared imports with a custom rule, but has no "declared and
+  unused" check and no production mode.
 
 YAML parsing for the framework-import refresh, 2026-10-30:
 
