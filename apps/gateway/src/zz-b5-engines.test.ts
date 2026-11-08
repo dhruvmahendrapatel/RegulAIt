@@ -403,12 +403,14 @@ describe("secure by default", () => {
     const r = await inject("GET", "/v1/engines", alice.key);
     expect(r.statusCode, r.body).toBe(200);
     const list = r.json().engines as Array<{ id: string; enabled: boolean; maxConcurrent: number; signature: string }>;
-    // ADR-0242 (pending migration `admission_engine_scans`): the two admission-scan engines are listed too, off and unpublished
-    expect(list.map((e) => e.id).sort()).toEqual(["garak", "mcpscanner", "modelscan", "promptfoo", "skillscanner"]);
-    for (const id of ["mcpscanner", "skillscanner"]) expect(list.find((e) => e.id === id)!.signature).toBe("not_built");
+    // ADR-0242 and ADR-0245 (pending migration `admission_engine_scans`): the two admission-scan engines and spikee are listed too, off and unpublished
+    expect(list.map((e) => e.id).sort()).toEqual(["garak", "mcpscanner", "modelscan", "promptfoo", "skillscanner", "spikee"]);
+    for (const id of ["mcpscanner", "skillscanner", "spikee"]) expect(list.find((e) => e.id === id)!.signature).toBe("not_built");
     expect(list.every((e) => e.enabled === false && e.maxConcurrent === 1)).toBe(true);
     // this suite's manifest has no modelscan image: nothing can enable it
     expect(list.find((e) => e.id === "modelscan")!.signature).toBe("not_built");
+    // ADR-0245: spikee has no published image yet (null in the lock), so it cannot be enabled either
+    expect(list.find((e) => e.id === "spikee")!.signature).toBe("not_built");
     const [org] = await db.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
     expect({
       engineMaxRunTimeoutMinutes: org!.engineMaxRunTimeoutMinutes,
