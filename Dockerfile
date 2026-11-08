@@ -54,10 +54,16 @@ COPY apps ./apps
 # store, offline, with `--prod` for the gateway and the workspace packages it
 # depends on (`@regulait/gateway...`). The lockfile is not rewritten
 # (--frozen-lockfile), and apps/web keeps only its built dist.
+#
+# ADR-0246: `packages/mcp-vuln-fixtures` (deliberately vulnerable MCP servers, a gateway devDependency used only by
+# tests) stays in the build context, because every workspace install must resolve it (a context without it fails
+# with ERR_PNPM_WORKSPACE_PKG_NOT_FOUND), and is deleted here, after the production install, so it never reaches the
+# runtime image. Engine images take only `pnpm deploy --prod` of their own package and never contain it.
 RUN NODE_OPTIONS=--max-old-space-size=3072 pnpm install --frozen-lockfile \
  && NODE_OPTIONS=--max-old-space-size=3072 pnpm -r build \
  && rm -rf node_modules apps/*/node_modules packages/*/node_modules \
- && pnpm install --frozen-lockfile --prod --offline --filter "@regulait/gateway..."
+ && pnpm install --frozen-lockfile --prod --offline --filter "@regulait/gateway..." \
+ && rm -rf packages/mcp-vuln-fixtures
 
 FROM node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS runtime
 LABEL org.regulait.build-stage="runtime (production dependencies only)"
