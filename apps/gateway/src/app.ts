@@ -5812,7 +5812,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // admin-typed outbound endpoint under the same egress guard and the same
   // register → test → enable lifecycle — applied to a measuring instrument
   // instead of a model. Admin-only via the global gate.
-  registerExternalScorerRoutes(app, db, { dataKey: opts.dataKey });
+  registerExternalScorerRoutes(app, db, {
+    dataKey: opts.dataKey,
+    // test seams only (the same ones the trained-detector runtime takes); production passes neither
+    ...(opts.trainedDetectorResolve ? { resolve: opts.trainedDetectorResolve } : {}),
+    ...(opts.trainedDetectorFetch ? { fetchImpl: opts.trainedDetectorFetch } : {}),
+  });
   // ADR-0065 — REGULAIT-LLM. Registered next to the custom-provider surface
   // because it answers the adjacent question: that one is "which model that we
   // do not own may our people reach?", this one is "which model may our people

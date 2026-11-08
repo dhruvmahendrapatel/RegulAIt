@@ -2868,6 +2868,20 @@ export const externalScorers = pgTable("external_scorers", {
   lastTestError: text("last_test_error"),
   createdBy: uuid("created_by"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  /** ADR-0237 (migration guardrail_vendor_adapters): the wire dialect. `regulait` = the ADR-0088
+   * contract; a vendor adapter (openai_moderation / azure_content_safety /
+   * lakera_guard) translates in the gateway and may claim guardrail kinds only.
+   * CHECK-constrained to the list in @regulait/shared EXTERNAL_SCORER_ADAPTERS. */
+  adapter: text("adapter", { enum: ["regulait", "openai_moderation", "azure_content_safety", "lakera_guard"] })
+    .notNull()
+    .default("regulait"),
+  /** ADR-0237. Denormalisation exception (ADR-0200 addendum): a schema-validated
+   * configuration document (`vendorAdapterOptionsSchema`: OpenAI model, Lakera
+   * project id), not a list of references. Null = the adapter's defaults. */
+  adapterOptions: jsonb("adapter_options").$type<{ model?: string; projectId?: string }>(),
+  /** ADR-0237: the vendor's list price per call, written to usage_events.cost_usd
+   * on every successful call. Null = unpriced, never invented (as connectors). */
+  pricePerCallUsd: doublePrecision("price_per_call_usd"),
 });
 
 export type ExternalScorerRow = typeof externalScorers.$inferSelect;
@@ -3466,6 +3480,33 @@ export const pmSyncEvents = pgTable(
     receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("pm_sync_events_conn_idx").on(t.connectionId, t.receivedAt)],
+);
+
+// S-03 (ADR-0010 amendment, migration `pm_webhook_deliveries` (pending, numbered at merge)): one row per inbound PM webhook
+// delivery that reached processing, so a replay is acknowledged and never
+// processed twice. Keyed per connection by the sha256 of the signed content
+// (the exact body; generic: "<timestamp>.<body>") and, where the provider
+// sends one, its own delivery id (either one matching is a duplicate). Pruned
+// after PM_WEBHOOK_DELIVERY_RETENTION_DAYS; the row is a dedup marker, not
+// evidence: the audit trail and pm_sync_events hold that.
+export const pmWebhookDeliveries = pgTable(
+  "pm_webhook_deliveries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => pmConnections.id, { onDelete: "cascade" }),
+    contentSha256: text("content_sha256").notNull(),
+    deliveryId: text("delivery_id"),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("pm_webhook_deliveries_content_uq").on(t.connectionId, t.contentSha256),
+    uniqueIndex("pm_webhook_deliveries_delivery_uq")
+      .on(t.connectionId, t.deliveryId)
+      .where(sql`${t.deliveryId} IS NOT NULL`),
+    index("pm_webhook_deliveries_received_idx").on(t.receivedAt),
+  ],
 );
 
 // MODEL DISPATCH: one platform credential per model provider, AES-256-GCM

@@ -1345,7 +1345,7 @@ async function executeGovernedToolCallInner(
     // OUTPUT is exactly the surface the ADR names as in-scope. Both phases run
     // here — arguments in, tool result out — with PII excluded (its dedicated
     // path is directly above).
-    const mcpGuardrails = await resolveGuardrailPolicy(db, { projectId });
+    const mcpGuardrails = await resolveGuardrailPolicy(db, { projectId, userId });
     let mgInput: Awaited<ReturnType<typeof runGuardrailsAsync>> | null = null;
     if (mcpGuardrails.active) {
       mgInput = await runGuardrailsAsync(mcpGuardrails, "input", JSON.stringify(args.arguments ?? null));

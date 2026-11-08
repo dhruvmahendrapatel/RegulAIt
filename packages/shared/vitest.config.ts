@@ -44,7 +44,19 @@ export const TIMING_FILES = [
 export default defineConfig({
   test: {
     projects: [
-      { extends: true, test: { name: "unit", include: ["src/**/*.test.ts"], exclude: TIMING_FILES, sequence: { groupOrder: 0 } } },
+      // #738: a test with a type error fails this package's own `test` script, not only the build. The unit project
+      // runs `tsc --noEmit` over the package's tsconfig once and reports each error in any test file (the timing
+      // files included) as a failed test; an error in a source file fails the run too (ignoreSourceErrors stays false).
+      {
+        extends: true,
+        test: {
+          name: "unit",
+          include: ["src/**/*.test.ts"],
+          exclude: TIMING_FILES,
+          sequence: { groupOrder: 0 },
+          typecheck: { enabled: true, checker: "tsc", tsconfig: "./tsconfig.json", include: ["src/**/*.test.ts"] },
+        },
+      },
       { extends: true, test: { name: "timing", include: TIMING_FILES, fileParallelism: false, sequence: { groupOrder: 1 } } },
     ],
   },

@@ -587,7 +587,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs, stdioHold: {
       return { kind: "pii_blocked", reason, pii: { mode: piiMode, action: "block", inputHits, outputHits: [], withheld: false } };
     }
   }
-  const guardrails = await resolveGuardrailPolicy(db, { projectId });
+  const guardrails = await resolveGuardrailPolicy(db, { projectId, userId });
   if (guardrails.active) {
     const evaluation = await runGuardrailsAsync(guardrails, "input", inputText);
     const g = guardrailOutcome(evaluation);
