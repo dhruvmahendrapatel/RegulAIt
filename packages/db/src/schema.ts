@@ -889,6 +889,18 @@ export const mcpServers = pgTable("mcp_servers", {
    * changed manifest. Our own clock, never a publisher's date. */
   releaseDigest: text("release_digest"),
   releaseSeenAt: timestamp("release_seen_at", { withTimezone: true }).notNull().defaultNow(),
+  /** ADR-0246 (the pending `mcp_definition_pins` migration): when this server's tool, prompt and resource definitions were first pinned
+   * (`mcp_definition_pins`). NULL = no admitted manifest has been seen yet, so the next one is the baseline. Set
+   * once; a later empty manifest is a change against the baseline, never a second baseline. */
+  definitionsPinnedAt: timestamp("definitions_pinned_at", { withTimezone: true }),
+  /** ADR-0246 addendum (the pending `mcp_definition_pins` migration): 'high' when a manifest's tools match the offensive-tooling rule set
+   * (`classifyOffensiveTools`). Sticky: a later manifest never lowers it. Under `mcp_high_risk_mode = 'enforce'`
+   * every call to a high-risk server needs the policy template and an authorised target. */
+  riskClass: text("risk_class", { enum: ["standard", "high"] }).notNull().default("standard"),
+  riskClassifiedAt: timestamp("risk_classified_at", { withTimezone: true }),
+  /** Point-in-time evidence (ADR-0200 exception, like `admission_findings`): the classifier verdict that made the
+   * server high-risk, counts and locations only (tool, category, rule, where), never matched text. */
+  riskFindings: jsonb("risk_findings"),
   /** ADR-0185 G4 (migration 0169) — how the gateway reaches this upstream.
    * `streamable_http` (the default, so every pre-0169 row keeps what it used)
    * and `sse` connect to `url` through the egress guard; `stdio` starts
@@ -1146,6 +1158,76 @@ export const mcpTools = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex("mcp_tools_server_name_uq").on(t.serverId, t.name)],
+);
+
+/**
+ * ADR-0246 (the pending `mcp_definition_pins` migration) — MCP DEFINITION PINNING (rug-pull detection). One row per tool, prompt, resource or
+ * resource template a server has served since its admission baseline, keyed by (server, kind, name). A tool's
+ * name is its name; a resource's is its URI; a template's is its URI template.
+ *
+ * The approved pair is what an admin (or the admission baseline) accepted; the observed pair is what the server
+ * served at its latest manifest fetch. The item's status is derived, never stored: equal digests = approved; both
+ * set and different = changed; no approved digest = added after approval; no observed digest = removed. Under the
+ * strict default (`org_settings.mcp_definition_pin_mode = 'block'`) anything not approved is refused until an
+ * admin re-approves it against the observed digest they reviewed.
+ */
+/**
+ * ADR-0246 addendum (the pending `mcp_definition_pins` migration) — the admin-maintained AUTHORISED TARGETS of high-risk (offensive) MCP servers.
+ * A call to a high-risk server must name its target(s), and every one must be covered here: a host (hostname or
+ * IP), a domain (itself and its subdomains) or a CIDR. Adding an entry is a settings_relax step-up, audited.
+ */
+export const mcpAuthorisedTargets = pgTable(
+  "mcp_authorised_targets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kind: text("kind", { enum: ["host", "domain", "cidr"] }).notNull(),
+    value: text("value").notNull(),
+    note: text("note").notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("mcp_authorised_targets_kind_value_uq").on(t.kind, t.value),
+    index("mcp_authorised_targets_created_by_idx").on(t.createdBy),
+    check("mcp_authorised_targets_kind_check", sql`${t.kind} IN ('host', 'domain', 'cidr')`),
+  ],
+);
+
+export const mcpDefinitionPins = pgTable(
+  "mcp_definition_pins",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    serverId: uuid("server_id")
+      .notNull()
+      .references(() => mcpServers.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: ["tool", "prompt", "resource", "resource_template"] }).notNull(),
+    name: text("name").notNull(),
+    approvedDigest: text("approved_digest"),
+    /** Point-in-time evidence (ADR-0200 normalisation exception): the exact definition that was approved, kept
+     * verbatim so the admin diff shows what changed even after the server stops serving it. */
+    approvedDefinition: jsonb("approved_definition").$type<Record<string, unknown>>(),
+    /** NULL = baseline taken at admission; otherwise the admin who re-approved this definition. */
+    approvedBy: uuid("approved_by").references(() => users.id, { onDelete: "set null" }),
+    approvedAt: timestamp("approved_at", { withTimezone: true }),
+    observedDigest: text("observed_digest"),
+    /** Point-in-time evidence (ADR-0200 normalisation exception): the definition as the server served it at
+     * `observedAt`, kept verbatim for the admin diff. Never sent to a model while the item is not approved. */
+    observedDefinition: jsonb("observed_definition").$type<Record<string, unknown>>(),
+    observedAt: timestamp("observed_at", { withTimezone: true }).notNull().defaultNow(),
+    /** when the observed digest last moved away from the approved one; NULL while approved */
+    changedAt: timestamp("changed_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("mcp_definition_pins_server_kind_name_uq").on(t.serverId, t.kind, t.name),
+    index("mcp_definition_pins_approved_by_idx").on(t.approvedBy),
+    index("mcp_definition_pins_drift_idx")
+      .on(t.serverId)
+      .where(sql`${t.approvedDigest} IS DISTINCT FROM ${t.observedDigest}`),
+    check("mcp_definition_pins_kind_check", sql`${t.kind} IN ('tool', 'prompt', 'resource', 'resource_template')`),
+    check("mcp_definition_pins_some_digest", sql`${t.approvedDigest} IS NOT NULL OR ${t.observedDigest} IS NOT NULL`),
+    check("mcp_definition_pins_approved_pair", sql`(${t.approvedDigest} IS NULL) = (${t.approvedDefinition} IS NULL)`),
+    check("mcp_definition_pins_observed_pair", sql`(${t.observedDigest} IS NULL) = (${t.observedDefinition} IS NULL)`),
+  ],
 );
 
 export const toolGrants = pgTable(
@@ -4818,6 +4900,16 @@ export const orgSettings = pgTable(
     mcpAdmissionMode: text("mcp_admission_mode", { enum: ["off", "log", "enforce"] })
       .notNull()
       .default("enforce"),
+    /** ADR-0246 (the pending `mcp_definition_pins` migration): what a tool, prompt or resource that changed since approval does. 'block' (the
+     * strict default, ADR-0180) refuses it until an admin re-approves it against the reviewed diff; 'warn' lets it
+     * serve and only audits the change. Relaxing to 'warn' needs a settings_relax step-up and is audited. */
+    mcpDefinitionPinMode: text("mcp_definition_pin_mode", { enum: ["block", "warn"] })
+      .notNull()
+      .default("block"),
+    /** ADR-0246 addendum: 'enforce' (strict default) gates every call to a high-risk MCP server on the policy
+     * template (an approval rule with quorum of at least 2 and a rate limit) and the authorised-targets list; 'off'
+     * is a settings_relax relaxation, audited. */
+    mcpHighRiskMode: text("mcp_high_risk_mode", { enum: ["enforce", "off"] }).notNull().default("enforce"),
     /** ADR-0175 A5 (migration 0140): the release-age cooldown in days. 7
      * (DEFAULT since ADR-0181, migration 0159). 0 = off; an admin may relax
      * it (audited). */

@@ -349,6 +349,15 @@ export const KNOWN_UI_GAPS = new Map([
   ["POST /v1/agents/:agentId/usage-extractor/versions/:versionId/test", { does: "tests a version against a sample response and the counts the admin expects", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["POST /v1/agents/:agentId/usage-extractor/versions/:versionId/activate", { does: "activates a version whose latest test passed (settings_relax step-up)", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["POST /v1/agents/:agentId/usage-extractor/deactivate", { does: "returns an agent to its adapter's built-in usage counts", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["GET /v1/mcp/definition-pins", { does: "lists the MCP servers with a tool, prompt or resource changed since approval (rug-pull queue)", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["GET /v1/servers/:serverId/definition-pins", { does: "one server's pinned definitions with each changed item's RFC 6902 diff", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["POST /v1/servers/:serverId/definition-pins/approve", { does: "re-approves reviewed changed items against their digests (settings_relax step-up)", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["GET /v1/servers/:serverId/high-risk-policy", { does: "shows a server's offensive-tooling classification and whether its policy template is applied", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["POST /v1/servers/:serverId/high-risk-policy", { does: "applies the high-risk policy template: a quorum approval rule and a rate limit", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["POST /v1/servers/:serverId/risk-class", { does: "an admin marks a server high-risk by hand when the automatic classifier missed its neutrally-named offensive tools", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["GET /v1/mcp/authorised-targets", { does: "lists the authorised targets of high-risk MCP servers", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["POST /v1/mcp/authorised-targets", { does: "adds an authorised target (settings_relax step-up)", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["DELETE /v1/mcp/authorised-targets/:id", { does: "removes an authorised target", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
   // batch U4 (ui-gaps-details) closed the last 22. The entries below are the ADR-0236 (P11) MCP bundle routes:
   // the owner decided on 2026-11-07 (#697) to ship them API-first while the Governed Designer builds the bundle
   // screen requested on #453. Building that screen closes these and lowers KNOWN_UI_GAPS_MAX back to 0.
@@ -363,8 +372,8 @@ export const KNOWN_UI_GAPS = new Map([
   ["POST /v1/mcp-bundles/:bundleId/grants", { does: "grants a bundle to a user, role or team up to a scope tier (read by default)", tracking: "#453" }],
   ["DELETE /v1/mcp-bundles/:bundleId/grants/:grantId", { does: "revokes a bundle grant", tracking: "#453" }],
   ["PUT /v1/mcp-tools/:toolId/dangerous", { does: "flags or clears a tool's dangerous scope tier (clearing is a step-up)", tracking: "#453" }],
-  // batch U4 (ui-gaps-details) closed the last 22. ADR-0261 (P37) adds six: the owner decided on 2026-11-07 to raise
-  // the cap by exactly these and ship the DefenseClaw ingest API-only, with the admin screen tracked on #453.
+  // ADR-0261 (P37) adds six: the owner decided on 2026-11-07 to raise the cap by exactly these and ship the
+  // DefenseClaw ingest API-only, with the admin screen tracked on #453.
   ["GET /v1/third-party-ingest/sources", { does: "lists third-party ingest sources (DefenseClaw), their state, credential issue time and the ingest limits", tracking: "#453" }],
   ["POST /v1/third-party-ingest/sources", { does: "creates a DefenseClaw ingest source, off by default", tracking: "#453" }],
   ["PUT /v1/third-party-ingest/sources/:sourceId/enabled", { does: "turns a source on (step-up, audited) or off (audited)", tracking: "#453" }],
@@ -381,7 +390,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 26;
+export const KNOWN_UI_GAPS_MAX = 35;
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 

@@ -196,6 +196,7 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   "mcp_registry_entries.upstream_name": "ingested",
   "mcp_tools.description": "ingested",
   "mcp_tools.name": "ingested",
+  "mcp_definition_pins.name": "ingested",
   "scim_groups.display_name": "ingested",
   "trace_scores.name": "ingested",
   "users.display_name": "ingested",

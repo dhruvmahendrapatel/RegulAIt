@@ -473,6 +473,8 @@ import {
   REGISTRATION_ADMISSION_STATE,
 } from "./mcp-admission.js";
 import { registerMcpToolSyncRoutes } from "./mcp-tool-sync.js";
+import { registerMcpDefinitionPinRoutes } from "./mcp-definition-pins.js";
+import { registerMcpHighRiskRoutes } from "./mcp-high-risk.js";
 // ADR-0101 — federated MCP registries. Admin-only through the default gate;
 // a sync writes only the catalogue and an import is an explicit operator act.
 import { privateRangesRelaxation, registerMcpRegistryRoutes } from "./mcp-registry.js";
@@ -5922,6 +5924,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // #609 follow-up: an admin's on-demand manifest sync for one server — admin-only through the default gate, rate
   // limited per server, a settings_relax step-up, and the live path's admission, egress, transport and scan gates
   registerMcpToolSyncRoutes(app, db);
+  // ADR-0246: definition pinning (rug-pull detection) — the changed-since-approval queue, the diff, the re-approval
+  registerMcpDefinitionPinRoutes(app, db);
+  // ADR-0246 addendum: offensive MCP servers as high-risk — the policy template and the authorised-targets list
+  registerMcpHighRiskRoutes(app, db);
   // ADR-0101 — configure an upstream MCP registry, pull its catalogue, and
   // import ONE entry as a federated `mcp_servers` row that is `unscanned`,
   // ungranted and subject to the same ADR-0097 admission and ADR-0043 egress
