@@ -749,7 +749,7 @@ services:
     # Docker Hub registry API on 2026-11-06 (26.8.0 was sha256:27b3230f... on
     # 2026-10-23). The digest is what
     # is run. Upgrade deliberately (docs/deployment/SSO_KEYCLOAK.md § Upgrades).
-    image: ${REGULAIT_KC_IMAGE:-keycloak/keycloak:26.8.1-1@sha256:a78d6b79572168cb25886b80a8b5b8d4ed4390743e3eecb810538683e209dd6b}
+    image: ${REGULAIT_KC_IMAGE:-keycloak/keycloak:26.8.1-2@sha256:3f3c5f8e03c614774b4bd9173b88391fefa4153bfc010d8012d59ad825377332}
     profiles: ["sso"]
     depends_on:
       keycloak-db-init:
