@@ -16,7 +16,7 @@ path must not exist in RegulAIt, and the model layer must keep working air-gappe
 ### Inventory (step 1)
 
 Every model adapter lives in `packages/model-provider`. Each was checked against the AI SDK (`@ai-sdk/provider`
-4.0.36, LanguageModelV4).
+4.0.35, LanguageModelV4).
 
 | Adapter | Built on | Streaming | Tools / tool choice | Structured output | Usage, cache, modality | Errors and retries | AI SDK coverage |
 |---|---|---|---|---|---|---|---|
@@ -30,7 +30,7 @@ Every model adapter lives in `packages/model-provider`. Each was checked against
 ## Decision
 
 1. **Use the specification and the per-vendor packages, never the `ai` core.** `packages/model-provider` depends on
-   `@ai-sdk/provider` 4.0.36 and `@ai-sdk/google` 4.0.113, pinned exactly. It does not install `ai` or
+   `@ai-sdk/provider` 4.0.35 and `@ai-sdk/google` 4.0.109, pinned exactly (see As built for the release-age choice). It does not install `ai` or
    `@ai-sdk/gateway`. Without the core there is no resolver that turns a string id into a gateway call. Every model is
    a provider **instance** we construct with the agent's key, the configured base URL and our deadline-bound, egress-guarded
    fetch (`resolveModelProvider` is still the single funnel).
@@ -107,3 +107,22 @@ P21 (ADR-0241) merged first, so this PR carried `usageSource` into `google-ai-sd
 streaming, and the last raw event that carried `usageMetadata` when streaming. That is the same object the legacy
 adapter reported. `src/google-usage-source.test.ts` pins both paths. Under ADR-0252 the STATE and PENDING entries
 are fragments in `internal/fragments/`, and the index row is generated from this file's header at merge time.
+
+## As built (2026-11-08, #723 review)
+
+- **Continuation.** `@ai-sdk/google` continues a long Gemini output on its own when a hop finishes with
+  `CONTINUATION`, sending one HTTP request per hop. Both paths now read usage from the SDK's per-hop sum
+  (`providerMetadata.google.usageMetadata`, built by `addGoogleUsageMetadata`), not from the last hop. Before this
+  fix the streaming path billed only the last hop, which under-counted pillar-5 cost and budget.
+- **Deadline.** The adapter passes one `abortSignal` (`AbortSignal.timeout(modelDispatchTimeout())`) for the whole
+  dispatch, so every hop and every body read share one AER-021 deadline. `deadlineBoundFetch` still binds each fetch
+  as well. A `GoogleProvider` built directly, outside `resolveModelProvider`, is therefore bounded too.
+- **`usageSource` (P21).** It is the raw vendor object that carried usage, with its `usageMetadata` replaced by the
+  same per-hop sum. An admin usage mapping (ADR-0241) therefore reads exactly the tokens `usage` reports. With a
+  single hop it is the vendor object unchanged.
+- **Release age.** The pins are `@ai-sdk/provider` 4.0.35 and `@ai-sdk/google` 4.0.109, with `provider-utils`
+  5.0.72 transitive. All three were released on 2026-10-30, eight days before adoption. This follows the repo's
+  precedent of not admitting releases from the week of adoption (`@hyperjump/json-pointer` 1.1.3 over 1.1.4, and
+  `rfc6902` in #719). The first pins (4.0.36 / 4.0.113) were 1 to 3 days old.
+- `src/google-usage-source.test.ts` pins two-hop continuation on both paths and the whole-dispatch deadline. Both
+  of those tests fail with the fix reverted.
