@@ -2,13 +2,14 @@
 
 - **Status**: Accepted (builder lane P33; owner-approved 2026-11-07, "From the SDK and platform review")
 - **Date**: 2026-11-07
+- **Index**: Third-party client compatibility tests in CI (backlog P33): official OpenAI and Anthropic SDKs, Laravel AI SDK and dart_mcp against a real gateway
 - **Amends**: [ADR-0053](0053-public-api-sdks.md) by addition only. ADR-0053's decision stands unchanged: RegulAIt
   publishes a TypeScript SDK and no other language. This ADR adds no SDK; it proves that clients other people publish
   work against the gateway as they are.
 - **Builds on**: [ADR-0020](0020-ide-interception-compat-endpoints.md) (the provider-compatible surfaces), the MCP
   proxy (pillar 1), ADR-0180/0181 (strict defaults).
 - **Migration**: none.
-- **Backlog item**: [PENDING.md](../product/PENDING.md) §2h P33
+- **Backlog item**: [PENDING.md](../product/PENDING.md) P33 (a §0 fragment under ADR-0252)
 
 ## Context
 

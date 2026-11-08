@@ -65,6 +65,8 @@ jobs:
       DATABASE_URL: postgres://regulait:regulait@localhost:5432/regulait_test
       REGULAIT_DATABASE_SSL: disable
       REGULAIT_SCHEDULER: 'off'
+      # ADR-0252: this job's database is disposable, so pending (unnumbered) migrations apply from a temporary copy.
+      REGULAIT_MIGRATIONS_UNASSIGNED: apply
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-label="Illustrative Use-case review regulAIt interface mockup">
+<rect x="0" y="0" width="1440" height="900" rx="0" fill="#F3F0FF"/>
+<rect x="0" y="0" width="245" height="900" rx="0" fill="#211E45"/>
+<text x="30" y="57" font-family="Arial,sans-serif" font-size="29" font-weight="700" fill="#FFFFFF">regulAIt</text>
+<text x="30" y="84" font-family="Arial,sans-serif" font-size="12" font-weight="500" fill="#BFC9E2">AI governance workspace</text>
+<text x="38" y="165" font-family="Arial,sans-serif" font-size="17" font-weight="500" fill="#C9D2E6">Home</text>
+<text x="38" y="225" font-family="Arial,sans-serif" font-size="17" font-weight="500" fill="#C9D2E6">My actions</text>
+<text x="38" y="285" font-family="Arial,sans-serif" font-size="17" font-weight="500" fill="#4F46E5">Use cases</text>
+<text x="38" y="345" font-family="Arial,sans-serif" font-size="17" font-weight="500" fill="#C9D2E6">Approvals</text>
+<text x="38" y="405" font-family="Arial,sans-serif" font-size="17" font-weight="500" fill="#C9D2E6">Risk &amp; controls</text>
+<text x="38" y="465" font-family="Arial,sans-serif" font-size="17" font-weight="500" fill="#C9D2E6">Evidence</text>
+<text x="38" y="525" font-family="Arial,sans-serif" font-size="17" font-weight="500" fill="#C9D2E6">Monitoring</text>
+<text x="38" y="585" font-family="Arial,sans-serif" font-size="17" font-weight="500" fill="#C9D2E6">Reports</text>
+<rect x="270" y="18" width="900" height="48" rx="14" fill="#FFFFFF"/>
+<text x="296" y="49" font-family="Arial,sans-serif" font-size="16" font-weight="500" fill="#62647E">Search use cases, risks, evidence and controls</text>
+<text x="1280" y="49" font-family="Arial,sans-serif" font-size="15" font-weight="700" fill="#4F46E5">Concept</text>
+<text x="282" y="132" font-family="Arial,sans-serif" font-size="33" font-weight="700" fill="#211E45">Customer support assistant</text>
+<text x="282" y="166" font-family="Arial,sans-serif" font-size="16" font-weight="500" fill="#62647E">AI use case · Review pending · Illustrative record</text>
+<rect x="282" y="204" width="267" height="146" rx="14" fill="#FFFFFF"/>
+<text x="302" y="241" font-family="Arial,sans-serif" font-size="16" font-weight="500" fill="#62647E">Inherent risk</text>
+<text x="302" y="302" font-family="Arial,sans-serif" font-size="29" font-weight="700" fill="#211E45">High</text>
+<rect x="567" y="204" width="267" height="146" rx="14" fill="#FFFFFF"/>
+<text x="587" y="241" font-family="Arial,sans-serif" font-size="16" font-weight="500" fill="#62647E">Residual risk</text>
+<text x="587" y="302" font-family="Arial,sans-serif" font-size="29" font-weight="700" fill="#211E45">Medium</text>
+<rect x="852" y="204" width="267" height="146" rx="14" fill="#FFFFFF"/>
+<text x="872" y="241" font-family="Arial,sans-serif" font-size="16" font-weight="500" fill="#62647E">Evidence</text>
+<text x="872" y="302" font-family="Arial,sans-serif" font-size="29" font-weight="700" fill="#211E45">Incomplete</text>
+<rect x="1137" y="204" width="267" height="146" rx="14" fill="#FFFFFF"/>
+<text x="1157" y="241" font-family="Arial,sans-serif" font-size="16" font-weight="500" fill="#62647E">Open conditions</text>
+<text x="1157" y="302" font-family="Arial,sans-serif" font-size="29" font-weight="700" fill="#211E45">3</text>
+<rect x="282" y="374" width="1125" height="139" rx="14" fill="#FFFFFF"/>
+<text x="310" y="414" font-family="Arial,sans-serif" font-size="24" font-weight="700" fill="#211E45">Decision readiness</text>
+<text x="310" y="449" font-family="Arial,sans-serif" font-size="18" font-weight="500" fill="#62647E">Evidence and approval conditions remain outstanding. Review before deciding.</text>
+<text x="310" y="484" font-family="Arial,sans-serif" font-size="15" font-weight="500" fill="#4F46E5">Evidence gap    ·    Owner assigned    ·    No implied approval</text>
+<text x="297" y="559" font-family="Arial,sans-serif" font-size="17" font-weight="600" fill="#4F46E5">Overview</text>
+<text x="462" y="559" font-family="Arial,sans-serif" font-size="17" font-weight="600" fill="#62647E">Risks</text>
+<text x="627" y="559" font-family="Arial,sans-serif" font-size="17" font-weight="600" fill="#62647E">Evidence</text>
+<text x="792" y="559" font-family="Arial,sans-serif" font-size="17" font-weight="600" fill="#62647E">Approvals</text>
+<text x="957" y="559" font-family="Arial,sans-serif" font-size="17" font-weight="600" fill="#62647E">Audit</text>
+<text x="1122" y="559" font-family="Arial,sans-serif" font-size="17" font-weight="600" fill="#62647E">Decision records</text>
+<rect x="282" y="592" width="705" height="229" rx="14" fill="#FFFFFF"/>
+<rect x="1006" y="592" width="401" height="229" rx="14" fill="#FFFFFF"/>
+<text x="307" y="636" font-family="Arial,sans-serif" font-size="23" font-weight="700" fill="#211E45">Use-case overview</text>
+<text x="307" y="682" font-family="Arial,sans-serif" font-size="17" font-weight="500" fill="#62647E">Business owner: Customer support</text>
+<text x="307" y="722" font-family="Arial,sans-serif" font-size="17" font-weight="500" fill="#62647E">Purpose: Assist agents with draft responses</text>
+<text x="307" y="762" font-family="Arial,sans-serif" font-size="17" font-weight="500" fill="#62647E">Data: Customer interactions and internal policies</text>
+<text x="1030" y="636" font-family="Arial,sans-serif" font-size="23" font-weight="700" fill="#211E45">Assessment summary</text>
+<text x="1030" y="685" font-family="Arial,sans-serif" font-size="17" font-weight="500" fill="#62647E">Residual risk: Medium</text>
+<text x="1030" y="728" font-family="Arial,sans-serif" font-size="17" font-weight="500" fill="#62647E">Evidence: 3 of 5 required items</text>
+<text x="1030" y="772" font-family="Arial,sans-serif" font-size="17" font-weight="500" fill="#4F46E5">Next: Complete conditions</text>
+<text x="282" y="866" font-family="Arial,sans-serif" font-size="13" font-weight="700" fill="#62647E">ILLUSTRATIVE MOCKUP · NOT LIVE PRODUCT DATA</text>
+</svg>

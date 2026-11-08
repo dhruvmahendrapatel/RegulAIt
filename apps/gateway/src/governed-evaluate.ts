@@ -30,6 +30,7 @@ import { evaluateAbac } from "@regulait/policy-kernel/abac";
 import { EVALUATION_ONLY_EXECUTION, killSwitchState, resolveExecutionPosture } from "./execution-posture.js";
 // ADR-0185 G5 — the decision counter (a no-op seam until the meter lands)
 import { recordDecision } from "./metrics.js";
+import { activeRateLimitEvaluator } from "./rate-limit-evaluator.js";
 import {
   BATCH4_STRICT_DEFAULTS,
   MCP_PROTOCOL_METHOD_GRANTS,
@@ -855,6 +856,8 @@ export async function governedEvaluate(
         approverName: nameOf.get(r.approverUserId) ?? null,
       })),
       rateLimits: limitRows,
+      // ADR-0239: Cedar by default; REGULAIT_RATE_LIMIT_EVALUATOR=legacy keeps the hand-written one for a release
+      rateLimitEvaluator: activeRateLimitEvaluator(),
       dataScopeRules: scopes,
       args: evaluatedArgs,
       approvedApprovalId: heldApprovalId,
