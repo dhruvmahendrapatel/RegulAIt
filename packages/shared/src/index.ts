@@ -4874,6 +4874,8 @@ export * from "./mcp-upstream-credential.js";
 export * from "./library-lifecycle.js";
 // ADR-0220: trained runtime detectors (PII recogniser, injection classifier, harm model) behind the external-scorer contract
 export * from "./trained-detectors.js";
+// ADR-0237: native adapters for third-party guardrail providers (OpenAI Moderation, Azure AI Content Safety, Lakera Guard)
+export * from "./guardrail-vendor-adapters.js";
 // ADR-0224 (P13 c): privacy operations — records of processing, data-subject requests, the processing limit
 export * from "./privacy-ops.js";
 

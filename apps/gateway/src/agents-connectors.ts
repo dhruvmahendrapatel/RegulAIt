@@ -1678,6 +1678,7 @@ async function dispatchAttempt(
   const guardrails = await resolveGuardrailPolicy(db, {
     projectId: args.projectId ?? null,
     agentId: served.id,
+    userId,
   });
   let guardrailInput: Awaited<ReturnType<typeof runGuardrailsAsync>> | null = null;
   if (guardrails.active) {
