@@ -36,6 +36,7 @@ import {
   ModelProviderError,
   STREAM_THRESHOLD_TOKENS,
   geminiModality,
+  modelDispatchTimeout,
   reportedModel,
   type GeminiUsageMetadata,
 } from "./core.js";
@@ -107,6 +108,10 @@ export class GoogleProvider implements ModelProvider {
       ...(tools ? { tools } : {}),
       ...(toolChoice ? { toolChoice } : {}),
       ...(responseFormat ? { responseFormat } : {}),
+      // AER-021 for the WHOLE dispatch: the SDK continues a long Gemini output on its own
+      // (`CONTINUATION`), one HTTP request per hop, and `deadlineBoundFetch` arms its timer per
+      // request. One signal for the dispatch bounds every hop and every body read together.
+      abortSignal: AbortSignal.timeout(modelDispatchTimeout()),
     };
 
     const useStream = req.onText !== undefined || maxTokens > STREAM_THRESHOLD_TOKENS;
@@ -115,21 +120,25 @@ export class GoogleProvider implements ModelProvider {
     let finishRaw: string | undefined;
     const raw: GeminiRaw = {};
     let usageMeta: GeminiUsageMetadata | null | undefined;
-    /** ADR-0241 (P21): the decoded vendor object the usage block came from, exactly as the legacy adapter reported it */
+    /** ADR-0241 (P21): the decoded vendor object the usage block came from. When Gemini continued
+     * the output over several hops, its `usageMetadata` is replaced by the SDK's per-hop sum, so
+     * `usageSource` and `usage` always describe the same tokens (see ADR-0253, As built). */
     let usageSource: unknown;
     let responseId: string | null;
 
     if (useStream) {
       const s = await collectStream(model, options, req.onText, "google");
+      let carrier: GeminiRaw | undefined;
       for (const chunk of s.rawChunks as GeminiRaw[]) {
         raw.responseId ??= chunk?.responseId;
         raw.modelVersion ??= reportedModel(chunk?.modelVersion) ?? undefined;
         raw.promptFeedback ??= confirmedBlock(chunk?.promptFeedback?.blockReason) ? chunk.promptFeedback : undefined;
-        if (chunk?.usageMetadata) {
-          usageMeta = chunk.usageMetadata;
-          usageSource = chunk;
-        }
+        if (chunk?.usageMetadata) carrier = chunk;
       }
+      // the SDK's sum over every continuation hop (the last raw chunk holds only the last hop)
+      const meta = (s.providerMetadata?.["google"] ?? {}) as { usageMetadata?: GeminiUsageMetadata | null };
+      usageMeta = meta.usageMetadata ?? carrier?.usageMetadata;
+      if (carrier) usageSource = { ...carrier, usageMetadata: usageMeta };
       text = s.text;
       calls = toolCallsOf(s.content);
       finishRaw = s.finishRaw;
@@ -147,7 +156,7 @@ export class GoogleProvider implements ModelProvider {
       const meta = (result.providerMetadata?.google ?? {}) as { usageMetadata?: GeminiUsageMetadata | null };
       // the SDK's per-hop sum when Gemini continued a long output, else the body's own block
       usageMeta = meta.usageMetadata ?? body.usageMetadata;
-      if (body.usageMetadata) usageSource = body;
+      if (body.usageMetadata || usageMeta) usageSource = { ...body, usageMetadata: usageMeta };
       text = result.content.map((c) => (c.type === "text" ? c.text : "")).join("");
       calls = toolCallsOf(result.content);
       finishRaw = result.finishReason.raw;

@@ -47,3 +47,82 @@ describe("Gemini usageSource (P21 on @ai-sdk/google)", () => {
     expect("usageSource" in r).toBe(false);
   });
 });
+
+// ── #723 review findings 1–3: Gemini continuation (`CONTINUATION`) over several HTTP hops ──
+import { ModelProviderError, resolveModelProvider, setModelDispatchTimeoutMs, modelDispatchTimeout } from "./index.js";
+
+const hop1 = {
+  responseId: "r-c1",
+  modelVersion: "gemini-x-001",
+  candidates: [{ content: { parts: [{ text: "part one " }] }, finishReason: "CONTINUATION", continuationToken: "tok-1" }],
+  usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 100 },
+};
+const hop2 = {
+  responseId: "r-c2",
+  modelVersion: "gemini-x-001",
+  candidates: [{ content: { parts: [{ text: "part two" }] }, finishReason: "STOP" }],
+  usageMetadata: { promptTokenCount: 12, candidatesTokenCount: 40 },
+};
+
+describe("Gemini continuation: usage, usageSource and the deadline cover every hop", () => {
+  it("non-streaming: usage is the sum of both hops, and usageSource carries the same sum", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const r = await new GoogleProvider({
+      apiKey: "k",
+      fetchImpl: async (_u, init) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return json(bodies.length === 1 ? hop1 : hop2);
+      },
+    }).dispatch({ model: "gemini-x", input: "write a lot" });
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]!.continuationToken).toBe("tok-1");
+    expect(r.outputText).toBe("part one part two");
+    expect(r.usage).toEqual({ inputTokens: 22, outputTokens: 140 });
+    expect((r.usageSource as { usageMetadata: unknown }).usageMetadata).toMatchObject({
+      promptTokenCount: 22,
+      candidatesTokenCount: 140,
+    });
+  });
+
+  it("streaming: usage is the sum of both hops (not just the last chunk), and usageSource agrees", async () => {
+    const sse = (c: unknown) =>
+      new Response("data: " + JSON.stringify(c) + "\n\n", { status: 200, headers: { "content-type": "text/event-stream" } });
+    let calls = 0;
+    const deltas: string[] = [];
+    const r = await new GoogleProvider({
+      apiKey: "k",
+      fetchImpl: async () => (++calls === 1 ? sse(hop1) : sse(hop2)),
+    }).dispatch({ model: "gemini-x", input: "write a lot", onText: (d) => deltas.push(d) });
+    expect(calls).toBe(2);
+    expect(deltas.join("")).toBe("part one part two");
+    expect(r.usage).toEqual({ inputTokens: 22, outputTokens: 140 });
+    expect((r.usageSource as { usageMetadata: unknown }).usageMetadata).toMatchObject({
+      promptTokenCount: 22,
+      candidatesTokenCount: 140,
+    });
+  });
+
+  it("the model deadline bounds the whole dispatch, not each hop", async () => {
+    const prior = modelDispatchTimeout();
+    setModelDispatchTimeoutMs(80);
+    try {
+      // every hop answers in 50 ms, inside the per-fetch deadline, but three hops take 150 ms
+      const slowHop: typeof fetch = (_u, init) =>
+        new Promise<Response>((resolve, reject) => {
+          const t = setTimeout(() => resolve(json(hop1)), 50);
+          init?.signal?.addEventListener("abort", () => {
+            clearTimeout(t);
+            reject(init.signal!.reason);
+          });
+        });
+      const provider = resolveModelProvider({ provider: "google", apiKey: "k", baseUrl: null }, slowHop);
+      const started = Date.now();
+      const err = await provider.dispatch({ model: "gemini-x", input: "x" }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ModelProviderError);
+      expect((err as ModelProviderError).status).toBe(504);
+      expect(Date.now() - started).toBeLessThan(1_000);
+    } finally {
+      setModelDispatchTimeoutMs(prior);
+    }
+  });
+});

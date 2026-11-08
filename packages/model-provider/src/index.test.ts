@@ -3016,18 +3016,25 @@ describe("AER-021 — every provider kind observes the configured model deadline
     });
   });
 
-  it("NEGATIVE CONTROL: the same unbounded fetch, unwrapped, stays pending", async () => {
+  it("NEGATIVE CONTROL: the dead fetch, given no signal at all, stays pending", async () => {
     // Without this the tests above could be passing because the injected fetch
-    // rejects on its own. Constructing the adapter DIRECTLY bypasses
-    // `resolveModelProvider`, which is the only place the deadline is bound — so
-    // this is also a precise statement of where the binding lives.
+    // rejects on its own. It only ever settles through a signal it is handed.
+    const settled = await Promise.race([
+      deadFetch("https://example.invalid/").then(() => "settled").catch(() => "settled"),
+      new Promise<string>((r) => setTimeout(() => r("pending"), PINNED_MS * 6)),
+    ]);
+    expect(settled, "an unsignalled dead fetch has no deadline of its own").toBe("pending");
+  });
+
+  it("ADR-0253: the Gemini adapter bounds the WHOLE dispatch, even built directly without resolveModelProvider", async () => {
+    // Since the AI SDK continues long Gemini outputs over several HTTP hops, the per-fetch
+    // binding alone could let one dispatch run N x the deadline; the adapter now arms one
+    // dispatch-level signal of its own.
     await withDeadline(PINNED_MS, async () => {
-      const unbounded = new GoogleProvider({ apiKey: "k", baseUrl: null, fetchImpl: deadFetch });
-      const settled = await Promise.race([
-        unbounded.dispatch(req).then(() => "settled").catch(() => "settled"),
-        new Promise<string>((r) => setTimeout(() => r("pending"), PINNED_MS * 6)),
-      ]);
-      expect(settled, "an unwrapped raw fetch has no deadline of its own").toBe("pending");
+      const direct = new GoogleProvider({ apiKey: "k", baseUrl: null, fetchImpl: deadFetch });
+      const err = await direct.dispatch(req).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ModelProviderError);
+      expect((err as ModelProviderError).status).toBe(504);
     });
   });
 
