@@ -1681,6 +1681,13 @@
       "when": 1785255000000,
       "tag": "0320_mcp_definition_pins",
       "breakpoints": true
+    },
+    {
+      "idx": 321,
+      "version": "7",
+      "when": 1785256000000,
+      "tag": "0321_endpoint_mcp_config_discovery",
+      "breakpoints": true
     }
   ]
 }
