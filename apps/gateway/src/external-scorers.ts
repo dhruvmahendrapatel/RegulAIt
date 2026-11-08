@@ -33,7 +33,10 @@ import type { FastifyInstance } from "fastify";
 import { and, auditLog, eq, externalScorers, guardrailTrainedDetectors, type Db, type ExternalScorerRow } from "@regulait/db";
 import {
   createExternalScorerSchema,
+  isVendorAdapter,
   parseExternalScorerResponse,
+  vendorAdapterRefusal,
+  type ExternalScorerAdapter,
   setExternalScorerEnabledSchema,
   updateExternalScorerSchema,
   type ExternalScorerFacts,
@@ -50,6 +53,22 @@ import {
   type EgressResolver,
 } from "./egress-guard.js";
 import { errMessage } from "./err-serializer.js";
+import { resolveDeployMode } from "./deploy-posture.js";
+import { requireRelaxStepUp } from "./step-up.js";
+import type { VendorCallAttribution } from "./guardrail-vendor-adapters.js";
+
+/**
+ * ADR-0237 + ADR-0062: a third-party guardrail adapter sends scanned text to a
+ * vendor's public API. An air-gapped deployment refuses it at registration, at
+ * enable, at the connection test and at every call, whatever the allow-list
+ * says: the deployment mode is the floor, and no admin setting loosens it.
+ */
+export function vendorAdapterAirGapRefusal(adapter: string): string | null {
+  if (!isVendorAdapter(adapter)) return null;
+  return resolveDeployMode() === "air_gapped"
+    ? `adapter '${adapter}' calls a third-party vendor API, which an air-gapped deployment (REGULAIT_DEPLOY_MODE=air_gapped) refuses`
+    : null;
+}
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 
@@ -108,6 +127,15 @@ export async function resolveExternalScorersByName(
       facts.push({ ...base, reachable: false, detail: decision.reason });
       continue;
     }
+    const airGap = vendorAdapterAirGapRefusal(row.adapter);
+    if (airGap) {
+      facts.push({ ...base, reachable: false, detail: airGap });
+      continue;
+    }
+    if (isVendorAdapter(row.adapter) && !row.keyCiphertext) {
+      facts.push({ ...base, reachable: false, detail: `adapter '${row.adapter}' needs an API key and none is stored` });
+      continue;
+    }
     if (row.keyCiphertext && !dataKey) {
       facts.push({
         ...base,
@@ -140,9 +168,23 @@ export async function resolveExternalScorersByName(
 export async function callExternalScorer(
   scorer: ResolvedExternalScorer,
   req: ExternalScorerRequest,
-  opts: { timeoutMs?: number } = {},
+  opts: {
+    timeoutMs?: number;
+    /** ADR-0237: required for a vendor adapter, whose every call is attributed and audited */
+    vendor?: { db: Db; attribution: VendorCallAttribution; phase: "input" | "output" };
+  } = {},
 ): Promise<ExternalScorerVerdict> {
   const timeoutMs = opts.timeoutMs ?? EXTERNAL_SCORER_TIMEOUT_MS;
+  if (isVendorAdapter(scorer.row.adapter)) {
+    // fail closed: a vendor call that cannot be attributed and audited is not made
+    if (!opts.vendor) throw new Error(`external scorer '${scorer.row.name}' (${scorer.row.adapter}) needs call attribution`);
+    const airGap = vendorAdapterAirGapRefusal(scorer.row.adapter);
+    if (airGap) throw new Error(airGap);
+    const { callVendorScorer } = await import("./guardrail-vendor-adapters.js");
+    // the vendor adapters scan ONE text: the input on the input phase, the output on the output phase
+    const text = opts.vendor.phase === "output" ? req.output : req.input;
+    return callVendorScorer(opts.vendor.db, scorer, { scorerKind: req.scorerKind, phase: opts.vendor.phase, text }, opts.vendor.attribution, timeoutMs);
+  }
   let res: Response;
   try {
     res = await scorer.fetchImpl(scorer.row.baseUrl, {
@@ -244,8 +286,17 @@ export function registerExternalScorerRoutes(
 
   app.post("/v1/external-scorers", async (req, reply) => {
     const body = createExternalScorerSchema.parse(req.body);
+    const adapter: ExternalScorerAdapter = body.adapter ?? "regulait";
     if (body.apiKey && !opts.dataKey) {
       return reply.status(503).send({ error: "no_data_key", detail: "set REGULAIT_DATA_KEY" });
+    }
+    const airGap = vendorAdapterAirGapRefusal(adapter);
+    if (airGap) {
+      await audit(actor(req), null, "egress-blocked", `external scorer registration refused: ${airGap}`, { phase: "registration", adapter, code: "air_gapped" }, "deny");
+      return reply.status(403).send({ error: "air_gapped", detail: airGap });
+    }
+    if (isVendorAdapter(adapter) && !body.apiKey) {
+      return reply.status(422).send({ error: "api_key_required", detail: `adapter '${adapter}' needs the vendor API key` });
     }
     // THE GUARD, at the earliest honest moment. Not a substitute for the
     // pre-flight at run time or the per-request check inside the guarded
@@ -280,6 +331,9 @@ export function registerExternalScorerRoutes(
         keyCiphertext: body.apiKey && opts.dataKey ? encryptSecret(opts.dataKey, body.apiKey) : null,
         scorerKinds: body.scorerKinds,
         allowPlaintextHttp: body.allowPlaintextHttp ?? false,
+        adapter,
+        adapterOptions: body.adapterOptions ?? null,
+        pricePerCallUsd: body.pricePerCallUsd ?? null,
         // ALWAYS false on create — a connection test stands between
         // registration and use, exactly like a custom provider.
         enabled: false,
@@ -300,6 +354,9 @@ export function registerExternalScorerRoutes(
         scorerKinds: body.scorerKinds,
         allowPlaintextHttp: row!.allowPlaintextHttp,
         hasApiKey: row!.keyCiphertext != null,
+        adapter,
+        adapterOptions: row!.adapterOptions,
+        pricePerCallUsd: row!.pricePerCallUsd,
       },
     );
     return reply.status(201).send(publicRow(row!));
@@ -315,7 +372,30 @@ export function registerExternalScorerRoutes(
     }
     const nextBaseUrl = body.baseUrl ?? row.baseUrl;
     const nextPlaintext = body.allowPlaintextHttp ?? row.allowPlaintextHttp;
-    const endpointMoved = nextBaseUrl !== row.baseUrl || nextPlaintext !== row.allowPlaintextHttp;
+    const nextAdapter: ExternalScorerAdapter = body.adapter ?? row.adapter;
+    const nextOptions = body.adapterOptions !== undefined ? body.adapterOptions : row.adapterOptions;
+    // ADR-0237: the merged combination is checked as a whole (a PATCH may move only one part of it)
+    const comboRefusal = vendorAdapterRefusal({
+      adapter: nextAdapter,
+      scorerKinds: body.scorerKinds ?? ((row.scorerKinds as string[]) ?? []),
+      allowPlaintextHttp: nextPlaintext,
+      options: nextOptions,
+    });
+    if (comboRefusal) return reply.status(422).send({ error: "adapter_invalid", detail: comboRefusal });
+    const airGap = vendorAdapterAirGapRefusal(nextAdapter);
+    if (airGap) return reply.status(403).send({ error: "air_gapped", detail: airGap });
+    const nextHasKey = body.apiKey !== undefined ? body.apiKey !== null : row.keyCiphertext != null;
+    if (isVendorAdapter(nextAdapter) && !nextHasKey) {
+      return reply.status(422).send({ error: "api_key_required", detail: `adapter '${nextAdapter}' needs the vendor API key` });
+    }
+    // moving the endpoint, the dialect or the vendor options (a Lakera project is a different policy) re-arms the gate,
+    // and so does replacing the key of a vendor adapter (a different account)
+    const endpointMoved =
+      nextBaseUrl !== row.baseUrl ||
+      nextPlaintext !== row.allowPlaintextHttp ||
+      nextAdapter !== row.adapter ||
+      JSON.stringify(nextOptions ?? null) !== JSON.stringify(row.adapterOptions ?? null) ||
+      (isVendorAdapter(nextAdapter) && body.apiKey !== undefined);
     if (endpointMoved) {
       const decision = await preflight(nextBaseUrl, nextPlaintext);
       if (!decision.ok) {
@@ -337,6 +417,9 @@ export function registerExternalScorerRoutes(
         ...(body.baseUrl !== undefined ? { baseUrl: body.baseUrl } : {}),
         ...(body.scorerKinds !== undefined ? { scorerKinds: body.scorerKinds } : {}),
         ...(body.allowPlaintextHttp !== undefined ? { allowPlaintextHttp: body.allowPlaintextHttp } : {}),
+        ...(body.adapter !== undefined ? { adapter: body.adapter } : {}),
+        ...(body.adapterOptions !== undefined ? { adapterOptions: body.adapterOptions } : {}),
+        ...(body.pricePerCallUsd !== undefined ? { pricePerCallUsd: body.pricePerCallUsd } : {}),
         // null CLEARS the key; undefined keeps it
         ...(body.apiKey !== undefined
           ? { keyCiphertext: body.apiKey && opts.dataKey ? encryptSecret(opts.dataKey, body.apiKey) : null }
@@ -397,7 +480,9 @@ export function registerExternalScorerRoutes(
       scorerKind: (row.scorerKinds as string[])[0] ?? "llm_as_judge",
     };
     try {
-      const verdict = await callExternalScorer(scorer, probe);
+      const verdict = await callExternalScorer(scorer, probe, {
+        vendor: { db, attribution: { userId: actor(req), projectId: null, source: "connection_test" }, phase: "input" },
+      });
       await recordTest(scorerId, null);
       await audit(
         actor(req),
@@ -437,6 +522,20 @@ export function registerExternalScorerRoutes(
           `POST /v1/external-scorers/${scorerId}/test first`,
       });
     }
+    const vendor = isVendorAdapter(row.adapter);
+    if (body.enabled && vendor) {
+      const airGap = vendorAdapterAirGapRefusal(row.adapter);
+      if (airGap) return reply.status(403).send({ error: "air_gapped", detail: airGap });
+      // ADR-0237: enabling a vendor adapter lets scanned text leave for a third party — a relaxation, so a
+      // settings_relax step-up bound to this scorer and adapter (ADR-0180). Turning it off is tightening.
+      if (!row.enabled) {
+        const ok = await requireRelaxStepUp(db, req, reply, {
+          [`externalScorers.${scorerId}.enabled`]: true,
+          [`externalScorers.${scorerId}.adapter`]: row.adapter,
+        });
+        if (!ok) return reply;
+      }
+    }
     const [updated] = await db
       .update(externalScorers)
       .set({ enabled: body.enabled })
@@ -447,7 +546,13 @@ export function registerExternalScorerRoutes(
       scorerId,
       body.enabled ? "external-scorer-enabled" : "external-scorer-disabled",
       `external scorer '${row.name}' ${body.enabled ? "ENABLED" : "disabled"}`,
-      { phase: "enablement", enabled: body.enabled, baseUrl: row.baseUrl },
+      {
+        phase: "enablement",
+        enabled: body.enabled,
+        baseUrl: row.baseUrl,
+        adapter: row.adapter,
+        ...(body.enabled && vendor && !row.enabled ? { stepUp: "settings_relax" } : {}),
+      },
     );
     return publicRow(updated!);
   });
