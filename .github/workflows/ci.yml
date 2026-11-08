@@ -169,7 +169,7 @@ jobs:
       contents: read
       pull-requests: read
     runs-on: ubuntu-24.04
-    timeout-minutes: 3
+    timeout-minutes: 5
     outputs:
       full: ${{ steps.scope.outputs.full }}
       code: ${{ steps.scope.outputs.code }}
@@ -185,8 +185,10 @@ jobs:
       # stacked PR targets its parent's branch and carries the `stacked` label (AGENT_COORDINATION §4). The labels are
       # read from the API when the step runs, not from the event payload: adding a label starts no run, and a re-run
       # replays the payload of the original event, so only a live read lets "add the label, re-run this job" work.
-      # Here, not in a later job, so a docs-only PR is checked too. The treeless unshallow fetch brings commit history
-      # only (about a second). Not on merge_group: every queue merge's second parent is a PR head.
+      # Here, not in a later job, so a docs-only PR is checked too. A plain unshallow fetch (no --filter): git 2.56 on
+      # the runner dies in pack-objects ("should_include_obj should only be called on existing objects") when a
+      # shallow checkout is unshallowed with --filter=tree:0; the full history is ~70 MB and ~15 s. Not on
+      # merge_group: every queue merge's second parent is a PR head.
       - name: Pre-flight — no sibling-branch merges
         if: github.event_name == 'pull_request'
         env:
@@ -198,7 +200,7 @@ jobs:
         run: |
           set -euo pipefail
           labels="$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER" --jq '[.labels[].name] | join(",")')"
-          git fetch --no-tags --filter=tree:0 --unshallow origin \
+          git fetch --no-tags --unshallow origin \
             "+refs/heads/main:refs/remotes/origin/main" "+$BASE_SHA:refs/remotes/pr/base" "+$HEAD_SHA:refs/remotes/pr/head"
           node scripts/preflight-branch-merges.mjs "$BASE_SHA" "$HEAD_SHA" --main origin/main --labels "$labels"
 
