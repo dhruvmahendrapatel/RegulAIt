@@ -24,6 +24,9 @@
  *     pending-MFA cookie or the `pendingToken` body field.
  *   - SCIM bearer tokens `rglscim_` (`generateScimToken`): randomBytes(32), 256 bits.
  *   - federated-link proof tokens (`raiseLinkRequest`): randomBytes(32), 256 bits.
+ *   - external-portal MFA challenge handles `rgxm_` (`newChallengeToken`, external-mfa.ts, ADR-0240):
+ *     randomBytes(32), 256 bits; looked up from the `regulait_ext_mfa` cookie scoped to the portal's
+ *     `…/session/mfa` path. The six-digit TOTP code is never hashed here: `totp.ts` verifies it.
  * A low-entropy secret (a password, a one-time password, a short code someone
  * types) must NEVER be passed here: use `hashPassword` / `verifyPassword`.
  * `token-hash.test.ts` pins the generators' entropy.
