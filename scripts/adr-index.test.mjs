@@ -81,6 +81,8 @@ describe("ADR references and relative links resolve (#738)", () => {
   // this file names the pattern it looks for; nothing else is exempt
   const self = "scripts/adr-index.test.mjs";
 
+  // Unlike the link test below, this scan covers code spans and blocks too: a workflow comment or a script citing an
+  // ADR in code is still a citation that must resolve.
   it("every ADR-NNNN cited in .github/, scripts/, internal/ or CLAUDE.md has a file in internal/decisions/", () => {
     expect(tracked.length).toBeGreaterThan(400); // non-vacuity: the real tree
     const missing = [];
@@ -97,8 +99,18 @@ describe("ADR references and relative links resolve (#738)", () => {
     const bad = [];
     for (const f of md) {
       // links inside code are examples, not links
-      const text = read(f).replace(/```[\s\S]*?```/g, "").replace(/`[^`\n]*`/g, "");
-      for (const m of text.matchAll(/\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g)) {
+      // (backtick and tilde fences, then inline code; indented code blocks are not stripped, because list
+      // continuations look the same)
+      const text = read(f)
+        .replace(/^(`{3,}|~{3,})[^\n]*\n[\s\S]*?^\1[ \t]*$/gm, "")
+        .replace(/`[^`\n]*`/g, "");
+      // inline links `[x](target)` and reference definitions `[x]: target`
+      const targets = [
+        ...[...text.matchAll(/\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g)].map((m) => m[1]),
+        ...[...text.matchAll(/^ {0,3}\[[^\]\n]+\]:\s*<?([^\s>]+)>?/gm)].map((m) => m[1]),
+      ];
+      for (const raw of targets) {
+        const m = [null, raw];
         let target = m[1].split("#")[0];
         if (!target || /^[a-z][a-z0-9+.-]*:/i.test(target) || target.startsWith("/")) continue;
         try {

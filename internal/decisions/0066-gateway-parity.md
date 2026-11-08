@@ -3,8 +3,8 @@
 - **Status**: Accepted
 - **Date**: 2026-08-07
 - **Relates to**: [ADR-0020](0020-ide-interception-compat-endpoints.md) and
-  [ADR-0024](0024-interception-depth-metering-scope-custody.md) (the two provider-shaped compat shims this builds on),
-  [ADR-0016](0016-transitive-per-node-budget-ceiling.md) (`executeGovernedDispatch`, the one dispatch core),
+  ADR-0024 (the two provider-shaped compat shims this builds on),
+  ADR-0016 (`executeGovernedDispatch`, the one dispatch core),
   [ADR-0019](0019-per-user-revocation-and-full-attribution.md) and
   [ADR-0014](0014-role-bundled-agent-connector-grants.md) (the entitlement inputs re-evaluated per hop),
   [ADR-0062](0062-mode-scoped-egress.md) (the egress *ceiling* shape this copies),

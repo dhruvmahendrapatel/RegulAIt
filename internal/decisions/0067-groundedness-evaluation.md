@@ -288,7 +288,7 @@ they are the reason the judged metrics exist.**
   refusal, and unification is named follow-up rather than done.
 - **THE JUDGE-BACKED METRICS' JUDGMENT IS UNVERIFIED IN THIS BUILD.** No model provider is connected
   in this environment — the caveat that has been load-bearing since
-  [ADR-0016](0016-transitive-per-node-budget-ceiling.md). What is proved end to end: the refusal (both flavours,
+  ADR-0016. What is proved end to end: the refusal (both flavours,
   with the absence of rows asserted), the prompt construction from the case's context, the strict
   verdict parser, the per-claim storage, the `model-judged` labelling, and the fact that the judge
   is handed the metric and the context rather than only the output. What is **not** proved is that a
