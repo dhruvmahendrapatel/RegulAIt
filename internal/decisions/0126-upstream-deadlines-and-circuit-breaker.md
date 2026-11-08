@@ -2,11 +2,11 @@
 
 - **Status**: Accepted
 - **Date**: 2026-09-26
-- **Relates to**: [ADR-0043](0043-mcp-egress-guard.md) (the refusal this sits beside, and must not be
-  confused with), [ADR-0097](0097-mcp-admission-control.md) (the other pre-connect refusal),
+- **Relates to**: [ADR-0043](0043-mcp-oidc-egress-guard.md) (the refusal this sits beside, and must not be
+  confused with), [ADR-0097](0097-mcp-admission-scanning-and-auth-discovery.md) (the other pre-connect refusal),
   [ADR-0124](0124-kill-switch-and-safe-modes.md) (the halt these columns are deliberately separate
   from), [ADR-0125](0125-shared-enforcement-counters.md) (the SQL-increment pattern reused here),
-  [ADR-0021](0021-admin-configurable-policy.md) (the configurability mandate this incurs debt
+  [ADR-0021](0021-org-settings-configurability-layer.md) (the configurability mandate this incurs debt
   against), [ROADMAP §8](../product/ROADMAP.md) G2
 - **Migration**: [`0116_upstream_circuit_breaker.sql`](../../packages/db/migrations/0116_upstream_circuit_breaker.sql)
 

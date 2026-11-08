@@ -8,7 +8,7 @@
 - **Driver**: the "Known follow-ups" entry in `internal/memory/STATE.md`: *"`planning` is a
   vocabulary item, not a control (pillar 2 §2 stage 2)"*. Closing it was explicitly a feature,
   not a fix.
-- **Changes semantics of**: [ADR-0018](0018-workflow-engine-slice.md)'s kernel (the `planning`
+- **Changes semantics of**: [ADR-0018](0018-six-dimension-assignment-matching.md)'s kernel (the `planning`
   stage type). **Extends**: [ADR-0011](0011-shared-projects-on-one-project-entity.md) (the
   `assertProjectAttribution` refusal idiom this copies),
   [ADR-0016](0016-transitive-per-node-budget-ceiling.md) (the run-plan path it also guards).

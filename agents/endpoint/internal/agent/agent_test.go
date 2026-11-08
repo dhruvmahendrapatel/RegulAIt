@@ -40,6 +40,11 @@ const collection = `{"schema":"regulait.endpoint-collection/1","entries":[
  {"signatureId":"sig.env","kind":"env_name","provider":"example","envNames":["EXAMPLE_API_KEY"]}
 ]}`
 
+// mcpCollection adds an mcp_config entry (ADR-0259) to the fixture collection.
+const mcpCollection = `{"schema":"regulait.endpoint-collection/1","entries":[
+ {"signatureId":"sig.mcp","kind":"mcp_config","provider":"example","files":[{"os":"linux","root":"home","path":".config/example/mcp.json"}]}
+]}`
+
 func bulkToken() string { return "bulk-" + strings.Repeat("t", 24) }
 
 type fixture struct {
@@ -89,6 +94,7 @@ func (f *fixture) cycle() *Cycle {
 	home := fstest.MapFS{
 		".config/example/settings.json": {Data: []byte(`{"env":{"EXAMPLE_API_KEY":"sk-ant-api03-` + strings.Repeat("Z", 40) + `"}}`)},
 		".bashrc":                       {Data: []byte("export EXAMPLE_API_KEY=\n")},
+		".config/example/mcp.json":      {Data: []byte(`{"mcpServers":{"fs":{"command":"npx","args":["@example/fs-server@1.0.0"]}}}`)},
 	}
 	return &Cycle{
 		Options: f.opts,
@@ -623,6 +629,34 @@ func TestSecretsNeverReachLogsOrErrors(t *testing.T) {
 	for name, secret := range map[string]string{"bulk token": bulkToken(), "ticket": tf.Ticket} {
 		if strings.Contains(everything, secret) {
 			t.Errorf("the %s appears in logs or errors:\n%s", name, everything)
+		}
+	}
+}
+
+// ADR-0259: an opt-in kind in a signed manifest is collected only when the org policy enables it.
+func TestOptInKindNeedsOrgPolicy(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		f := newFixture(t, 5)
+		f.gw.Lock()
+		f.gw.Config.Pack = f.signer.Pack("1.0.0", []byte(mcpCollection))
+		if enabled {
+			f.gw.Config.OrgPolicy.EnabledOptInKinds = []contract.Kind{contract.KindMCPConfig}
+		}
+		f.gw.Unlock()
+		Redeem(context.Background(), f.opts)
+		r, err := f.cycle().RunOnce(context.Background())
+		if err != nil {
+			t.Fatalf("%v\n%s", err, f.logs)
+		}
+		off := false
+		for _, g := range r.Report.Gaps {
+			off = off || g.Kind == contract.KindMCPConfig && g.Reason == collect.GapDisabledByOrgPolicy
+		}
+		if enabled == off || enabled != (len(r.Report.Facts) == 1) {
+			t.Fatalf("enabled=%v: facts %+v gaps %+v", enabled, r.Report.Facts, r.Report.Gaps)
+		}
+		if enabled && (r.Report.Facts[0].Server == nil || r.Report.Facts[0].Server.Package != "@example/fs-server") {
+			t.Fatalf("fact: %+v", r.Report.Facts[0])
 		}
 	}
 }

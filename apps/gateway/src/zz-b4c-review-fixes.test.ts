@@ -121,7 +121,7 @@ async function enrol(s: Session): Promise<SoftAuthenticator> {
   const opt = await as(s, "POST", "/v1/auth/passkeys/registration-options", {});
   expect(opt.statusCode, opt.body).toBe(200);
   const auth = new SoftAuthenticator({ origin: ORIGIN });
-  const reg = await as(s, "POST", "/v1/auth/passkeys", { challengeId: opt.json().challengeId, response: auth.register(opt.json().options), label: `b4c-${randomBytes(2).toString("hex")}` });
+  const reg = await as(s, "POST", "/v1/auth/passkeys", { challengeId: opt.json().challengeId, response: auth.register(opt.json().options), label: `b4c-${randomBytes(6).toString("hex")}` });
   expect(reg.statusCode, reg.body).toBe(201);
   return auth;
 }
@@ -139,7 +139,7 @@ async function mkPerson(label: string, isAdmin = false): Promise<Person> {
   const u = await mkUser(label, isAdmin);
   return { ...u, auth: await enrol(u.s) };
 }
-const person = (label: string) => mkPerson(`${label}-${randomBytes(2).toString("hex")}`);
+const person = (label: string) => mkPerson(`${label}-${randomBytes(6).toString("hex")}`);
 
 async function startUpstream(): Promise<{ url: string; close: () => Promise<void> }> {
   const httpServer = http.createServer((req, res) => {
@@ -449,7 +449,7 @@ describe("F6: step-up ceremonies ride the strict auth-tier rate limit", () => {
     limited.inject({ method: "POST", url, remoteAddress: ip, headers: CSRF, cookies: { regulait_session: s.token }, payload: payload as object });
 
   async function totpUser(label: string) {
-    const u = await mkUser(`${label}-${randomBytes(2).toString("hex")}`);
+    const u = await mkUser(`${label}-${randomBytes(6).toString("hex")}`);
     const enrolled = await as(u.s, "POST", "/auth/totp/enroll");
     expect(enrolled.statusCode, enrolled.body).toBe(200);
     const secret = enrolled.json().secret as string;

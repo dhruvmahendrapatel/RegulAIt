@@ -3345,15 +3345,15 @@ Items 1–3 are the recommended first implementation batch. Documentation correc
 **Priority:** first  
 **Evidence:** repository-reported defect; test configuration inspected.
 
-[internal/product/PENDING.md](internal/product/PENDING.md), section 5, reports two unhandled `TypeError: socket.destroySoon is not a function` errors associated with [apps/gateway/src/mcp-admission-auth.test.ts](apps/gateway/src/mcp-admission-auth.test.ts). The same errors reportedly accompanied both successful and failed process exit codes. The latest state also carries this issue forward.
+[internal/product/PENDING.md](../../product/PENDING.md), section 5, reports two unhandled `TypeError: socket.destroySoon is not a function` errors associated with [apps/gateway/src/mcp-admission-auth.test.ts](../../../apps/gateway/src/mcp-admission-auth.test.ts). The same errors reportedly accompanied both successful and failed process exit codes. The latest state also carries this issue forward.
 
-[apps/gateway/vitest.config.ts](apps/gateway/vitest.config.ts) disables file parallelism because files share database state. Do not enable parallelism as a shortcut without first isolating that state.
+[apps/gateway/vitest.config.ts](../../../apps/gateway/vitest.config.ts) disables file parallelism because files share database state. Do not enable parallelism as a shortcut without first isolating that state.
 
 **Recommended work**
 
 - Reproduce the teardown failure on a scratch database. Record the command, tool versions, errors, and process exit status.
 - Trace server, socket, and MCP transport cleanup; fix the lifecycle ordering and await completion. Do not assume the historical diagnosis is the complete root cause.
-- Inspect the existing [CI workflow](.github/workflows/ci.yml) before adding another pipeline. Verify the reported Actions-cap limitation is still current.
+- Inspect the existing [CI workflow](../../../.github/workflows/ci.yml) before adding another pipeline. Verify the reported Actions-cap limitation is still current.
 - Establish one reproducible verification command or documented sequence covering build, typecheck, gateway integration tests, and critical browser journeys. Required gates must actually execute.
 - Do not hide unhandled errors or accept a summary count as proof of success when the process reports errors.
 
@@ -3371,9 +3371,9 @@ Reference: [Vitest unhandled-error configuration](https://main.vitest.dev/config
 **Priority:** first batch  
 **Evidence:** observed difference in source; exploitability and complete caller coverage remain an investigation.
 
-The model path explicitly invokes `preDispatchProjectGate` in [apps/gateway/src/agents-connectors.ts](apps/gateway/src/agents-connectors.ts), approximately line 1349.
+The model path explicitly invokes `preDispatchProjectGate` in [apps/gateway/src/agents-connectors.ts](../../../apps/gateway/src/agents-connectors.ts), approximately line 1349.
 
-The shared MCP execution path in [apps/gateway/src/mcp-proxy.ts](apps/gateway/src/mcp-proxy.ts) evaluates permissions, approvals, content controls, and upstream calls, then writes usage events around line 554. No equivalent project-budget pre-dispatch check was found in that file during this review. Caller-level protection must be traced before concluding that every MCP entry point is affected.
+The shared MCP execution path in [apps/gateway/src/mcp-proxy.ts](../../../apps/gateway/src/mcp-proxy.ts) evaluates permissions, approvals, content controls, and upstream calls, then writes usage events around line 554. No equivalent project-budget pre-dispatch check was found in that file during this review. Caller-level protection must be traced before concluding that every MCP entry point is affected.
 
 Unattributed MCP calls deliberately enter a null-project usage bucket. That is a disclosed behavior, not automatically a defect.
 
@@ -3398,7 +3398,7 @@ Unattributed MCP calls deliberately enter a null-project usage bucket. That is a
 **Priority:** resolve alongside F02  
 **Evidence:** design question supported by execution structure.
 
-[apps/gateway/src/orchestration.ts](apps/gateway/src/orchestration.ts), around lines 820 onward, checks measured spending between turns. A completed turn can cross a ceiling before the next check. Pre-dispatch checks against measured spend alone should not be described as exact spending reservations.
+[apps/gateway/src/orchestration.ts](../../../apps/gateway/src/orchestration.ts), around lines 820 onward, checks measured spending between turns. A completed turn can cross a ceiling before the next check. Pre-dispatch checks against measured spend alone should not be described as exact spending reservations.
 
 **Recommended work**
 
@@ -3416,9 +3416,9 @@ Concurrent behavior and permitted overshoot are explicitly defined and tested. P
 **Priority:** first batch  
 **Evidence:** repository-reported finding S5, not independently reproduced.
 
-[internal/product/PENDING.md](internal/product/PENDING.md), S5, reports that an AWS-shaped key was redacted in `audit_log` but persisted verbatim in `mcp_servers.admission_clear_reason`. The recorded schema sweep identified 47 operator-prose columns outside the ledger. That count is historical and should be rechecked.
+[internal/product/PENDING.md](../../product/PENDING.md), S5, reports that an AWS-shaped key was redacted in `audit_log` but persisted verbatim in `mcp_servers.admission_clear_reason`. The recorded schema sweep identified 47 operator-prose columns outside the ledger. That count is historical and should be rechecked.
 
-Related implementation: [packages/shared/src/audit-scrub.ts](packages/shared/src/audit-scrub.ts), [packages/db/src/schema.ts](packages/db/src/schema.ts), and [ADR-0099](internal/decisions/0099-audit-log-credential-scrub.md).
+Related implementation: [packages/shared/src/audit-scrub.ts](../../../packages/shared/src/audit-scrub.ts), [packages/db/src/schema.ts](../../../packages/db/src/schema.ts), and [ADR-0099](../../decisions/0099-audit-log-credential-scrub.md).
 
 **Recommended work**
 
@@ -3438,7 +3438,7 @@ Representative synthetic secrets are protected across all declared covered write
 **Priority:** targeted investigation during governance hardening  
 **Evidence:** source observation, not a confirmed authorization bypass.
 
-[apps/gateway/src/governed-evaluate.ts](apps/gateway/src/governed-evaluate.ts), around lines 200–209, looks up approved tool actions using user/server/tool and status. [apps/gateway/src/mcp-proxy.ts](apps/gateway/src/mcp-proxy.ts) handles approval queueing and atomic consumption. This review did not establish immutable argument-payload binding.
+[apps/gateway/src/governed-evaluate.ts](../../../apps/gateway/src/governed-evaluate.ts), around lines 200–209, looks up approved tool actions using user/server/tool and status. [apps/gateway/src/mcp-proxy.ts](../../../apps/gateway/src/mcp-proxy.ts) handles approval queueing and atomic consumption. This review did not establish immutable argument-payload binding.
 
 **Recommended work**
 
@@ -3466,7 +3466,7 @@ Exercise the actual UI and backend together:
 6. Execute a delegated run and demonstrate ancestor entitlement/budget restrictions.
 7. Restart during work, lose a provider connection, expire a credential, and recover without silently duplicating effects.
 
-Sources: [apps/web/src/App.tsx](apps/web/src/App.tsx), [workflow handling](apps/gateway/src/workflows.ts), [delegation tests](apps/gateway/src/delegation-conformance.test.ts), and [plan-only tests](apps/gateway/src/plan-only.test.ts).
+Sources: [apps/web/src/App.tsx](../../../apps/web/src/App.tsx), [workflow handling](../../../apps/gateway/src/workflows.ts), [delegation tests](../../../apps/gateway/src/delegation-conformance.test.ts), and [plan-only tests](../../../apps/gateway/src/plan-only.test.ts).
 
 Plan-only tests explicitly retain unconstrained behavior for calls without a workflow instance. Verify whether required attribution closes that boundary for the intended product promise.
 
@@ -3479,7 +3479,7 @@ A new operator completes the supported journeys using documented setup. Pending,
 **Priority:** before a customer pilot  
 **Evidence:** existing implementation and documented operational gaps.
 
-Relevant sources: [docker-compose.yml](docker-compose.yml), [deployment runbooks](docs/deployment/README.md), [boot sequence](apps/gateway/src/boot.ts), [release-key runbook](infra/release-keys/README.md), and [readiness checklist](docs/ops/DEPLOYMENT_READINESS_CHECKLIST.md).
+Relevant sources: [docker-compose.yml](../../../docker-compose.yml), [deployment runbooks](../../../docs/deployment/README.md), [boot sequence](../../../apps/gateway/src/boot.ts), [release-key runbook](../../../infra/release-keys/README.md), and [readiness checklist](../../../docs/ops/DEPLOYMENT_READINESS_CHECKLIST.md).
 
 **Recommended work**
 
@@ -3500,13 +3500,13 @@ An operator can install, upgrade, and recover from the runbooks without undocume
 **Priority:** alongside fixes  
 **Evidence:** observed contradictions.
 
-- [PENDING.md](internal/product/PENDING.md) says the S3 audit sink is unwired; [audit-chain.ts](apps/gateway/src/audit-chain.ts) implements sink resolution and runtime Object Lock checks.
-- The same backlog says copilot proposals have no applier; [copilot.ts](apps/gateway/src/copilot.ts), around line 1883 onward, implements approval-gated application for supported proposal kinds. Do not infer support for every kind.
-- [STATE.md](internal/memory/STATE.md) front matter says August 13 while its latest narrative is September 6.
-- [boot.ts](apps/gateway/src/boot.ts), around lines 196–197, prints legacy /app and /admin URLs, while the current product surface is /ui.
-- Historical deployment shape-only claims must be read with later implementations: [deploy.ts](apps/gateway/src/deploy.ts), around line 733, builds live AWS/Azure/GCP/Kubernetes clients behind a live flag.
-- Shipped [guardrails](packages/shared/src/guardrails.ts) are heuristics. Do not market them as comprehensive classifiers.
-- Local [training-provider](packages/training-provider/src/index.ts) functionality includes retrieval and classical classification; do not describe it as local transformer training.
+- [PENDING.md](../../product/PENDING.md) says the S3 audit sink is unwired; [audit-chain.ts](../../../apps/gateway/src/audit-chain.ts) implements sink resolution and runtime Object Lock checks.
+- The same backlog says copilot proposals have no applier; [copilot.ts](../../../apps/gateway/src/copilot.ts), around line 1883 onward, implements approval-gated application for supported proposal kinds. Do not infer support for every kind.
+- [STATE.md](../../memory/STATE.md) front matter says August 13 while its latest narrative is September 6.
+- [boot.ts](../../../apps/gateway/src/boot.ts), around lines 196–197, prints legacy /app and /admin URLs, while the current product surface is /ui.
+- Historical deployment shape-only claims must be read with later implementations: [deploy.ts](../../../apps/gateway/src/deploy.ts), around line 733, builds live AWS/Azure/GCP/Kubernetes clients behind a live flag.
+- Shipped [guardrails](../../../packages/shared/src/guardrails.ts) are heuristics. Do not market them as comprehensive classifiers.
+- Local [training-provider](../../../packages/training-provider/src/index.ts) functionality includes retrieval and classical classification; do not describe it as local transformer training.
 
 **Acceptance criteria**
 

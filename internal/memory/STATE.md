@@ -1,6 +1,6 @@
 ---
 phase: demo-prep-live-integrations-merged
-last_updated: 2026-10-29
+last_updated: 2026-11-07
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -22,6 +22,10 @@ roadmap: ../product/ROADMAP.md
 ## Where we are (read this paragraph first)
 <!-- fold:state-recap newest-first -->
 
+**2026-11-07 - backlog P27 built on `builder/p27-mcp-pinning-fixtures` ([ADR-0246](../decisions/0246-mcp-definition-pinning-and-vuln-fixtures.md), the `mcp_definition_pins` migration (numbered at merge)):** MCP rug-pull detection (per-item definition pins at admission, compared on every manifest fetch, a changed item blocked by default until an admin re-approves it against an RFC 6902 diff) and the test-only clean-room `@regulait/mcp-vuln-fixtures` (eight attack classes, kept out of the image). Addendum (owner, same day): offensive tool servers are classified high-risk, and every call needs a policy template (quorum approval, rate limit), an authorised target and a redacted-argument audit. API only; the review UI goes to #453.
+
+**2026-11-08 - P37 built (builder lane, [ADR-0261](../decisions/0261-defenseclaw-telemetry-ingest.md)): a DefenseClaw audit-export ingest adapter.** API and backend only; the six admin routes are known UI gaps tracked on #453 (owner decision 2026-11-07). Migration `pending/third_party_ingest.sql`, numbered at merge. P1 on-device enforcement stays a post-demo clean-room build informed by the DefenseClaw report.
+
 **2026-11-07 - merge queue readiness and merge-time numbering ([ADR-0252](../decisions/0252-merge-queue-and-merge-time-numbering.md), owner decision on #453; review R-03, R-06, R-07, R-08, C-03, C-04).**
 - **Migrations:** a PR adds `packages/db/migrations/pending/<slug>.sql` and never edits the journal. After the merge,
   `assign-at-merge.yml` numbers it (`scripts/assign-at-merge.mjs`) and pushes `assign-at-merge/<sha>`; the master
@@ -34,6 +38,15 @@ roadmap: ../product/ROADMAP.md
 - **Owner, to finish:** turn on the merge queue for `main` (merge commit) and make the required checks report on
   `merge_group`. The master enqueues with `gh pr merge --merge --auto` from then on
   (CONTRIBUTING_PARALLEL_SESSIONS §8).
+
+**2026-11-07 - P-01 in progress: one governed decision core (owner "Yes, ADR then build", #453).** [ADR-0251](../decisions/0251-one-governed-decision-core.md) (Proposed) puts model, connector, MCP and A2A calls behind one sequence: posture, entitlement, attribution mandate, data scope, rate limits, ABAC, approval rules, cost attribution, audit; error is deny. ARCHITECTURE.md now describes the four paths as built (only MCP had approval rules, rate limits and ABAC; A2A never called the kernel). Builder lane `builder/gov-core-unify`, migration `governed_core_resource_rules` (pending, numbered at merge time, ADR-0252); slices connector, model, A2A, then ABAC v5 after #707. **Slices 1-3 built on #715** (connector `02ddcff1`, model `99ed2831`, A2A `3563f475`): connector and A2A calls get the attribution mandate (on by default), rate limits and approval rules; model rate limits enforced by default and model approval rules refuse (no queue yet); A2A now meets the kill switch, safe modes and literacy gate. Each slice has a differential test. Latency: +1.3 ms p50 / +2.2-2.7 ms p95 with no rules (budget amended to +3 ms, see ADR As built). Open: ABAC v5 after #707; queue/replay for model and A2A approvals.
+
+**2026-11-07 - S-03 (PM inbound webhook replay) is fixed on `builder/s03-pm-webhook-replay` ([ADR-0010 amendment](../decisions/0010-pm-inbound-sync-webhooks-plus-read-through.md), migration `pm_webhook_deliveries` (pending, numbered at merge)).**
+- `pm_webhook_deliveries` records each delivery once per connection (body hash, plus the provider delivery id); a duplicate is 200, audited `pm-webhook-duplicate`, and not processed; 30-day prune on the boot timers.
+- Linear's signed `webhookTimestamp` and the generic contract's new `x-regulait-timestamp` (signed as `<ts>.<body>`) must be within 300 s.
+- Removed (ADR-0180): the generic static `x-regulait-webhook-secret` header, the body-only signature and the gateway's legacy hash fallback.
+- Jira/monday URL-token rotation is #605's G6 rotate route (HOLD; its ADR is not yet on `main`); #605 must drop its own copy of the legacy fallback when it rebases.
+- #717 review (21:09): Jira, monday, Azure DevOps and Asana must also carry an in-body creation time no older than 7 days (below the 30-day record retention), so a replay after the prune is refused; concurrent-duplicate test added ([ADR-0010 amendment (b)](../decisions/0010-pm-inbound-sync-webhooks-plus-read-through.md)).
 
 **2026-10-29 - the customer demo moves to one date, Saturday 2026-10-31 (owner, #453 c6508111468).**
 - **Date:** the internal run-through on Sun 11-01 and the external demo on Tue 11-03 are dropped; there is one run, on
@@ -2458,7 +2471,7 @@ an old unscrubbed span. Deliberate — the write is the chance, and rewriting hi
 data is a worse precedent.
 
 **2026-09-12 — S11 and S12 closed, and R0 reconciled.**
-([ADR-0110](../decisions/0110-backup-rescan-reopen-and-preflight-gate.md), migration 0109.)
+([ADR-0110](../decisions/0110-rescan-reopens-a-miss-and-the-preflight-runs.md), migration 0109.)
 
 **S11 — the owner decided a re-scan SHOULD re-open a miss, and that is now what happens.** One
 `backup_runs` row per finding: the idempotency read keys on `finding_id` + `kind='backup'`
@@ -3007,7 +3020,7 @@ object_type) and two approvals joins for the copilot.
 **2026-08-22 (night) — B6 closed: the last three buildable residuals are live-retested; the
 copilot's hallucination class is shut twice over; a parallel-sessions protocol now governs this
 repo.** Since the paragraph below: the L6d two-layer narration fix landed and live-retested,
-then [ADR-0096](../decisions/0096-copilot-entity-aware-planning.md) replaced disclosure
+then [ADR-0096](../decisions/0096-entity-aware-copilot-planning.md) replaced disclosure
 with structural refusal — deterministic entity extraction (the model may never assert
 existence), entitlement-scoped exact-match resolution, and four honest outcomes
 (resolved+filtered with a proven row delta, 422 unresolved, 422 ambiguous-with-candidates,
@@ -5575,11 +5588,111 @@ audit, tool references, platform copies, ingested, machine, conversation, signed
 against `information_schema` and against the ADR's generated block. Open: whether to guard jsonb
 `config_versions.body` string leaves; ingested columns stay a residual.
 
+**ADR-0244 (builder, 2026-11-07): pinned offline baselines for the prompt-injection detectors (P25).** Three MIT benchmarks are vendored under `packages/shared/src/eval-datasets/vendor/injection-baselines/` (300 kB, sha256-pinned in `MANIFEST.json` and `injection-baselines.ts`, refreshed only by `scripts/refresh-injection-eval-snapshots.py`): NotInject (339 benign), InjecAgent (300 of 2,108, stratified, seed 20261107) and AgentDojo v1 (97 benign, 135 injection texts), a seeded JailbreakBench sample (150 attack prompts, 100 benign behaviours; MIT verified for the HF dataset and the artifacts repo), plus our own web-agent set (50 injections over WASP's ten published categories × five carriers and 50 benign look-alikes; WASP is CC BY-NC, so only its category names are cited, clean room). HackAPrompt is MIT but gated (the account must share its HF identity), so it is left out pending the owner. `injection-baselines.test.ts` re-measures the heuristic detector every CI run and fails on a drop in precision or recall, or a rise in FPR, beyond 2 points; `node scripts/injection-eval-baseline.mjs` prints the delta table and `--write` re-pins. The trained classifier is measured offline by `agents/trained-detectors/eval_baselines.py` and recorded ungated. Measured: heuristic NotInject FPR 0%, InjecAgent recall 61.3%, AgentDojo recall 20.0% / FPR 0%; trained (threshold 0.5) NotInject FPR 43.4%, InjecAgent recall 84.3%, AgentDojo recall 72.6% / FPR 3.1%; JailbreakBench heuristic recall 0% / FPR 0%, trained recall 75.3% / FPR 1.0%; web-agent set heuristic recall 2% / FPR 6%, trained recall 60% / FPR 50%. No migration.
+
 ADR-0252 (2026-11-07) put `main` behind the GitHub merge queue and moved every shared append to merge time:
 migration numbers, journal entries and `when` values (`packages/db/migrations/pending/<slug>.sql`, numbered by
 `scripts/assign-at-merge.mjs` after the merge), ADR index rows (from the ADR header) and STATE/PENDING appends
 (fragments under `internal/fragments/`). Pending migrations never reach a long-lived database; the migration guard
 checks merged migrations are frozen and that the journal grows only by assignment.
+
+**ADR-0237 (builder, 2026-11-07): native adapters for third-party guardrail providers (PENDING P12(a)).** The
+ADR-0088/0220 external-scorer shim gains `adapter` (pending migration `guardrail_vendor_adapters`, plus
+`adapter_options` and `price_per_call_usd`): OpenAI Moderation (harm; official `openai` SDK 6.49.0), Azure AI Content
+Safety (harm and Prompt Shields; plain HTTPS, the Azure SDK is unmaintained) and Lakera Guard (injection, PII, harm;
+plain HTTPS, no JS SDK). Replies are parsed strictly into the ADR-0088 verdict, so the ADR-0220 trained detectors use
+them unchanged and fail closed; long input is scanned in overlapping windows (Gravitee AI prompt guard rails as a
+design reference only). Guardrail kinds only, HTTPS only, key required and never echoed; air-gapped refuses vendor
+adapters everywhere; enabling one is a `settings_relax` step-up. Every call is a `usage_events` row
+(`guardrail_scorer`, attributed to the caller and project; the project cost rollup gains `byGuardrailScorer`) and a
+content-free audit row. UI on #453. Follow-ups: Bedrock ApplyGuardrail, Model Armor, Azure disconnected containers.
+
+**ADR-0242 (builder, 2026-11-07, Proposed): Cisco mcp-scanner and skill-scanner as offline admission-scan engines
+(PENDING P23), phase 1.** Two ADR-0187 engines of a new kind `admission_scan` (`mcpscanner` 4.8.7, `skillscanner` 2.3.2),
+registered off with no digest, so they cannot be enabled until phase 2 publishes the images. Our driver per engine
+builds only the local analyzers, refuses any cloud/LLM/AI Defense/VirusTotal key, sets litellm's local price map
+(measured: six connects without it, none with it) and checks the baked rule digest; the images are hash-locked, pass a
+licence gate and an in-image `--network=none` smoke scan (built and run locally). yara-python is built from its sdist
+without OpenSSL (its wheel bundles EOL 1.1.1w); pcodedmp (GPL-3.0) is excluded. Verdicts land in
+`admission_engine_scans` (pending migration `admission_engine_scans`) and flow into the MCP and skill admission states and audit; with an engine
+on, only a `pass` for the current digest admits (fail closed). Skills enter through builder create, SKILL.md import,
+update, template seeding and agent-bundle import; there is no plugin upload yet. Phase 2: the runner stage and
+`subject` target, queueing, publish, UI (#453). Four owner questions in the ADR.
+
+**ADR-0239 (builder, 2026-11-07): one policy language, slice 1 (PENDING P8).** The nine hand-written kernel evaluators
+are inventoried with a Cedar fit for each. Rate limits move onto Cedar first (`policy-kernel/src/rate-limit-cedar.ts`):
+one `forbid` per limit, entity by position, no stored value in policy text, preparsed per size. The kernel stays
+dependency-free: `EvaluationInput.rateLimitEvaluator` is injected (default `legacyRateLimitEvaluator`), and the gateway
+passes Cedar. Errors deny (`rate-limit-engine-error`). `REGULAIT_RATE_LIMIT_EVALUATOR=legacy` is kept for one release,
+logged at boot, and any other value refuses boot. A fast-check differential test shows the two agree. Only possibly-exhausted
+limits reach Cedar (review finding 1), so a call with no exhausted limit makes no wasm call and a denied one costs
+about 0.15 ms (ABAC is 1.3 ms). Next: approval-rule match (slice 2), batched into one Cedar call. No
+Zanzibar store: membership is flat, so Cedar entity parents suffice; OpenFGA if it becomes recursive. No migration.
+
+**ADR-0261 (builder, 2026-11-07, Accepted, backlog P37): ingest Cisco DefenseClaw's audit export as attributed
+third-party evidence.** Option (b) of the DefenseClaw comparison (`internal/reviews/2026-11-07-defenseclaw-comparison.md`).
+`POST /v1/third-party-ingest/defenseclaw/records` takes the HTTP JSONL export (schema family v8, pinned; documented
+fields only), authenticated in-route by one write-only `rgti_` token per source (hash only, shown once; the P13b scoped
+credential had not landed, so this follows the SD4b enrolment-token pattern). A source is off until enabled with a
+`settings_relax` step-up; issuing the token is also a step-up; all audited. The exporter cannot sign bodies, so replay
+protection is a `(source, record_id)` dedup plus a 15-minute/5-minute window on the database clock; 1 MiB, 512 records,
+64 KiB lines, per-line rejects, 100k records per source per hour. Identity, content and paths are dropped at parse time;
+the host becomes the device pseudonym. Records are append-only (`third_party_ingest_records`) and name one audit-chain
+row per batch (`attribution: third_party, enforcement: false`); risky records open `defenseclaw/<connector>` ADR-0195
+findings (signal source `defenseclaw_export`). API only; the admin screen is tracked on #453. Follow-ups: OTLP
+(protobuf decoder, ADR-0176 search), an evidence retention sweep, and a check against a real captured sample before a
+customer install (the envelope is only partly documented).
+
+**ADR-0236 (builder, 2026-11-07): governed MCP bundles (backlog P11).** Step 1 finding: roles already bundle MCP tools
+for users (`role_tool_grants`, `role_server_grants`), with per-user revocations; nothing reached a team, a tool set could
+not be shared by several roles and teams as one unit, and grants had no versions. A bundle is a named, versioned list of
+exact (server, tool) pairs granted to a user, role or team (`mcp_bundle_grants`, one subject). The kernel rule
+`bundle-tool-allow-list` sits at the role tier and is fed by `loadEntitlements`, so every MCP decision and tool list
+enforces it; a person's own revocation always wins, there is no wildcard, and every later narrowing applies. Versions are
+append-only with a compare-and-set; a version that adds a tool is a `settings_relax` step-up plus an SoD check per
+holder. Default-off `org_settings.mcp_bundles_enabled` (a step-up to enable). Scope tiers (owner-approved, design reference: the Gravitee APIM MCP server, ideas only): grants default to `max_tier` read, `mcp_tools.dangerous` is an admin flag, and a dangerous tool held through a bundle always pauses for the bundle's approver (fail closed without one). migration `mcp_bundles`. Open: dynamic lazy tool-loading (follow-up); the owner's reading
+of "bounded by each user's allow-list" (ADR §Open question); UI on #453; SoD holdings, certification campaigns and RLS
+follow-ups.
+
+**ADR-0214 amendment (builder, 2026-11-07): one explainable score per asset (PENDING P3 follow-up).** Agents and use
+cases are scored, over the ADR-0214 objectives that apply to each (agent: risk, adversarial, access, evaluation, divisor
+60; use case: risk, access, divisor 35), with the published weights and the shared `combineObjectives()`. Coverage,
+audit and spend are listed as not applicable; model cards, MCP servers and connectors are not scored (no ledger row
+names them). `GET /v1/reports/posture/assets` (keyset, at most 100) and `/:kind/:assetId`, scoped to assets the caller
+can already read (admin all; steward's agents; owned use cases), `private, no-store`, no server cache. No migration.
+API only; the per-asset UI is requested on #453.
+
+**ADR-0262 (builder, 2026-11-08): the CI split.** Fast, scope-gated checks on a pull request; the full suite on the
+merge group, a push to `main`, nightly and manual runs. The `scope` job (`scripts/ci-scope.mjs`) fails closed and
+writes `full`, `code`, `web`, `image` and `engines`; the six required checks report on every PR and merge group
+(two aggregates that accept a skip only where the scope said `'false'`, CodeQL and Trivy gated fail-closed, gitleaks
+and the dependency audit never trimmed). It supersedes the two 2026-11-07 addenda in ADR-0252. Check runs per PR push
+went from about 37 to about 7 (docs), 19 (gateway) and 23 (web). No migration.
+
+**ADR-0246 (builder, 2026-11-07): MCP definition pinning and clean-room vulnerable MCP fixtures (backlog P27).** The
+first admitted manifest of a server is its baseline: every tool (name, title, description, input/output schema,
+annotations), prompt, resource and resource template gets a SHA-256 over its RFC 8785 form in `mcp_definition_pins`
+(approved and observed digest and definition; status derived, never stored). Every manifest fetch compares, audited
+(`mcp-definition-changed`) in the sync's transaction. `org_settings.mcp_definition_pin_mode` defaults to `block`: a
+changed or added tool is neither stored nor served, and a call to it, or `prompts/get` / `resources/read` of a changed
+item, is refused (`mcp-definition-blocked`) before any connect. `warn` is a settings_relax relaxation. Re-approval
+(`POST /v1/servers/:id/definition-pins/approve`) is bound by step-up to the exact reviewed digests, compare-and-set,
+audited. `@regulait/mcp-vuln-fixtures` (test-only, deleted from the image build stage, gateway devDependency) serves eight attack classes
+over real MCP; the two unlicensed upstream projects were not read. Addendum: our own offensive-tooling rule set marks a
+server `risk_class = 'high'` (sticky); under `mcp_high_risk_mode = 'enforce'` each call is refused until the policy
+template (fleet approval rule, quorum >= 2, plus a rate limit) is applied, must name targets covered by
+`mcp_authorised_targets` (adding one is a step-up), and is audited with redacted arguments. Migration: pending `mcp_definition_pins` (numbered at merge, ADR-0252). Open: the UI
+(#453), P23's scanners on the fixtures, and comparison per call rather than per listing.
+
+**ADR-0258 (builder, 2026-11-07, Proposed): Anubis in front of the public pages only (backlog P34).** Off by default;
+`install.sh --anubis` (or profile `anubis` plus `REGULAIT_ANUBIS=on`) turns it on, and the admin records the choice
+(docs/deployment/ANUBIS.md). Caddy asks Anubis by `forward_auth` about the trust centre, auditor portal and supplier
+portal paths only and still proxies to the gateway itself. Pinned v1.28.2 by digest, air-gapped policy, allow-list for
+named auditors, 403 for known scrapers, good bots commented out, a Kubernetes hook. Neither Caddy nor Anubis was run in
+the build session: a live run is needed before the first deployment that turns it on. UI follow-up on #453: the public
+pages should handle a pass cookie that expires mid-page.
+=======
+**ADR-0244 (builder, 2026-11-07): pinned offline baselines for the prompt-injection detectors (P25).** Three MIT benchmarks are vendored under `packages/shared/src/eval-datasets/vendor/injection-baselines/` (300 kB, sha256-pinned in `MANIFEST.json` and `injection-baselines.ts`, refreshed only by `scripts/refresh-injection-eval-snapshots.py`): NotInject (339 benign), InjecAgent (300 of 2,108, stratified, seed 20261107) and AgentDojo v1 (97 benign, 135 injection texts), a seeded JailbreakBench sample (150 attack prompts, 100 benign behaviours; MIT verified for the HF dataset and the artifacts repo), plus our own web-agent set (50 injections over WASP's ten published categories × five carriers and 50 benign look-alikes; WASP is CC BY-NC, so only its category names are cited, clean room). HackAPrompt is MIT but gated (the account must share its HF identity), so it is left out pending the owner. `injection-baselines.test.ts` re-measures the heuristic detector every CI run and fails on a drop in precision or recall, or a rise in FPR, beyond 2 points; `node scripts/injection-eval-baseline.mjs` prints the delta table and `--write` re-pins. The trained classifier is measured offline by `agents/trained-detectors/eval_baselines.py` and recorded ungated. Measured: heuristic NotInject FPR 0%, InjecAgent recall 61.3%, AgentDojo recall 20.0% / FPR 0%; trained (threshold 0.5) NotInject FPR 43.4%, InjecAgent recall 84.3%, AgentDojo recall 72.6% / FPR 3.1%; JailbreakBench heuristic recall 0% / FPR 0%, trained recall 75.3% / FPR 1.0%; web-agent set heuristic recall 2% / FPR 6%, trained recall 60% / FPR 50%. No migration.
 
 <!-- fold:state-decisions -->
 

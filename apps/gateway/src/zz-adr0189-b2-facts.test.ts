@@ -243,7 +243,7 @@ beforeAll(async () => {
   await runMigrations(db, migrationsFolder);
   restores.push(await relaxApprovalSigningForTest(db));
   restores.push(await relaxStrictAdmissionForTest(db));
-  restores.push(await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireMcpAttribution: false, keyCustodyEnforced: false }));
+  restores.push(await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, connectorAttributionRequired: false, requireMcpAttribution: false, keyCustodyEnforced: false }));
   restores.push(await relaxDataPostureForTest(db, { org: { defaultPiiMode: "none" }, interception: false, guardrails: false }));
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "b".repeat(64) });
   upstream = await startUpstream();
