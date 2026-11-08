@@ -82,7 +82,7 @@ follows. The original text is left as written.
    window and every provider's retry schedule (Asana 24 h, Linear 6 h). A missed prune only keeps rows longer, which
    refuses more replays, never fewer.
 5. **Jira and monday URL tokens.** The `?token=` value IS the connection's webhook secret, so rotating the token is
-   rotating that secret. The rotation path is ADR-0207 (G6), `POST /v1/pm/connections/:name/webhook-secret/rotate`
+   rotating that secret. The rotation path is the G6 rotation ADR on PR #605 (not yet on `main`), `POST /v1/pm/connections/:name/webhook-secret/rotate`
    with a 24-hour overlap, built on PR #605 (migration 0287). This change does not duplicate it. Until #605 merges,
    rotation is deleting and re-creating the connection (a new secret, registered again in the PM tool). Operator
    steps: rotate, update the webhook URL in Jira (System → WebHooks) or monday (Integrations → Webhooks) to the new
