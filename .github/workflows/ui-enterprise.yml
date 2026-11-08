@@ -18,7 +18,7 @@ name: UI enterprise harness
 #
 # Everything runs against the built SPA (`vite preview`) and the harness's mocked API: no gateway, database or seed.
 
-# ADR-0252 addendum (owner decisions 2026-11-07): on a PR, `static` runs when code changed and Chromium only when the
+# ADR-0262 (owner decisions 2026-11-07): on a PR, `static` runs when code changed and Chromium only when the
 # web app changed; Firefox, WebKit and the screenshot pack run only on a full run (a merge group, a push to main, the
 # nightly schedule, a manual run), which runs all of it.
 on:
@@ -39,7 +39,7 @@ permissions:
   contents: read
 
 jobs:
-  # ADR-0252 addendum: what this run must cover (.github/actions/ci-scope)
+  # ADR-0262: what this run must cover (.github/actions/ci-scope)
   scope:
     name: ui enterprise / scope
     runs-on: ubuntu-24.04
@@ -348,7 +348,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  # THE CHECK TO REQUIRE for this workflow (ADR-0252 addendum; #734 review finding 3). A job skipped by `if:` counts
+  # THE CHECK TO REQUIRE for this workflow (ADR-0262; #734 review finding 3). A job skipped by `if:` counts
   # as passing, so without this a failed `scope` would skip all three jobs and pass. Green only when the scope
   # succeeded and each part either succeeded or was skipped because its own condition was false. The browser matrix
   # reports one result: Chromium alone on a PR, all three engines on a full run.

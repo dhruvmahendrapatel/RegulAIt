@@ -378,6 +378,10 @@ export const NON_ADMIN_ROUTES = new Set([
   // act and stays admin — and there is no status-writing PATCH at all
   // (transitions are their own audited endpoint, acceptance its own record).
   "POST /v1/risks",
+  // ADR-0214 amendment — per-asset posture scores: any user, scoped in the handler to the assets the caller can
+  // already read (an agent they steward, a use case they own or may read; everything for an admin)
+  "GET /v1/reports/posture/assets",
+  "GET /v1/reports/posture/assets/:kind/:assetId",
   "GET /v1/risks",
   "GET /v1/risks/library",
   // G2/X8: the scenario library — same class as the risk library
