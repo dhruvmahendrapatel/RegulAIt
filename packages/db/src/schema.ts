@@ -1152,6 +1152,9 @@ export const mcpTools = pgTable(
      * the manifest re-sync upsert (kind/description only) provably never
      * clobbers an admin-set price. Null = no override = the server price. */
     pricePerCallUsd: doublePrecision("price_per_call_usd"),
+    /** ADR-0236 (migration `mcp_bundles`): an admin flag for the top scope tier (read < write < dangerous). A dangerous tool
+     * held through an MCP bundle always pauses for the bundle's approver. The manifest re-sync never touches it. */
+    dangerous: boolean("dangerous").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex("mcp_tools_server_name_uq").on(t.serverId, t.name)],
@@ -1262,6 +1265,90 @@ export const serverGrants = pgTable(
   (t) => [uniqueIndex("server_grants_user_server_uq").on(t.userId, t.serverId)],
 );
 
+/**
+ * ADR-0236 (P11, migration `mcp_bundles`) — a governed MCP bundle: a named, versioned list of exact (server, tool) pairs that
+ * an admin grants to a user, a role or a team as one unit. A bundle is a grant SOURCE at the role tier: per-user
+ * revocations still subtract from it, and every restriction after the grant step (halt, lead ceiling, the actor
+ * intersection, ABAC, rate limits, approvals, data scope) still applies. `current_version` is the version every grant
+ * follows; `archived_at` set = the bundle grants nothing.
+ */
+export const mcpBundles = pgTable("mcp_bundles", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull().unique("mcp_bundles_name_uq"),
+  description: text("description"),
+  currentVersion: integer("current_version").notNull().default(1),
+  archivedAt: timestamp("archived_at", { withTimezone: true }),
+  /** who signs off a call to a DANGEROUS tool held through this bundle; null = such a call is refused */
+  approverUserId: uuid("approver_user_id").references(() => users.id, { onDelete: "set null" }),
+  createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export type McpBundleRow = typeof mcpBundles.$inferSelect;
+
+/** ADR-0236 — one immutable version of a bundle (append-only; a change is a new row) */
+export const mcpBundleVersions = pgTable(
+  "mcp_bundle_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    bundleId: uuid("bundle_id")
+      .notNull()
+      .references(() => mcpBundles.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("mcp_bundle_versions_bundle_version_uq").on(t.bundleId, t.version)],
+);
+
+/** ADR-0236 — the exact (server, tool) pairs of one version (append-only). Point-in-time snapshot: `server_id` is
+ * SET NULL when the server is removed (a NULL server matches no call) and `tool_name` is the name the kernel matches
+ * on, as in role_tool_grants. */
+export const mcpBundleVersionItems = pgTable(
+  "mcp_bundle_version_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    versionId: uuid("version_id")
+      .notNull()
+      .references(() => mcpBundleVersions.id, { onDelete: "cascade" }),
+    serverId: uuid("server_id").references(() => mcpServers.id, { onDelete: "set null" }),
+    toolName: text("tool_name").notNull(),
+  },
+  (t) => [
+    uniqueIndex("mcp_bundle_version_items_uq").on(t.versionId, t.serverId, t.toolName),
+    index("mcp_bundle_version_items_server_idx").on(t.serverId, t.versionId),
+  ],
+);
+
+/** ADR-0236 — who holds a bundle: exactly one of a user, a role or a team (DB CHECK). No row = nothing granted. */
+export const mcpBundleGrants = pgTable(
+  "mcp_bundle_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    bundleId: uuid("bundle_id")
+      .notNull()
+      .references(() => mcpBundles.id, { onDelete: "cascade" }),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    roleId: uuid("role_id").references(() => roles.id, { onDelete: "cascade" }),
+    teamId: uuid("team_id").references(() => teams.id, { onDelete: "cascade" }),
+    /** the highest scope tier this grant reaches (read < write < dangerous); default 'read' (ADR-0180) */
+    maxTier: text("max_tier", { enum: ["read", "write", "dangerous"] }).notNull().default("read"),
+    grantedBy: uuid("granted_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("mcp_bundle_grants_user_uq").on(t.bundleId, t.userId).where(sql`${t.userId} IS NOT NULL`),
+    uniqueIndex("mcp_bundle_grants_role_uq").on(t.bundleId, t.roleId).where(sql`${t.roleId} IS NOT NULL`),
+    uniqueIndex("mcp_bundle_grants_team_uq").on(t.bundleId, t.teamId).where(sql`${t.teamId} IS NOT NULL`),
+    index("mcp_bundle_grants_user_idx").on(t.userId).where(sql`${t.userId} IS NOT NULL`),
+    index("mcp_bundle_grants_role_idx").on(t.roleId).where(sql`${t.roleId} IS NOT NULL`),
+    index("mcp_bundle_grants_team_idx").on(t.teamId).where(sql`${t.teamId} IS NOT NULL`),
+    check("mcp_bundle_grants_max_tier_check", sql`${t.maxTier} IN ('read', 'write', 'dangerous')`),
+    check("mcp_bundle_grants_one_subject_check", sql`num_nonnulls(${t.userId}, ${t.roleId}, ${t.teamId}) = 1`),
+  ],
+);
+export type McpBundleGrantRow = typeof mcpBundleGrants.$inferSelect;
+
 // No FKs on purpose: audit records must survive user/server deletion.
 // One audit trail for every object type (§7): MCP tool calls fill
 // serverId/toolName; agent and connector decisions fill objectId/detail.
@@ -1355,6 +1442,9 @@ export const auditLog = pgTable(
         // ADR-0219 (P10): an admin registering, re-carding, crediting, granting or removing a remote A2A agent,
         // and every governed A2A call (allowed or refused). Plain text column — no DDL needed.
         "a2a_agent",
+        // ADR-0236 (P11): a governed MCP bundle created, changed (a new version), archived, granted or revoked, and
+        // every refused attempt. Plain text column — no DDL needed.
+        "mcp_bundle",
         // ADR-0037: SCIM group sync. Group CRUD and every membership
         // add/remove audits here; SCIM USER provisioning keeps objectType
         // "user" so "what happened to this account" stays one query. Plain
@@ -4792,6 +4882,9 @@ export const orgSettings = pgTable(
     /** ADR-0219 (P10, migration 0253): calls to remote agents over A2A. FALSE (the default, ADR-0180) = no remote
      * agent can be registered or called; an admin may turn it on (settings_relax step-up, audited). */
     a2aEnabled: boolean("a2a_enabled").notNull().default(false),
+    /** ADR-0236 (P11, migration `mcp_bundles`): governed MCP bundles. FALSE (the default, ADR-0180) = no bundle can be created,
+     * changed or granted, and the gateway loads no bundle grant; an admin may turn it on (settings_relax step-up, audited). */
+    mcpBundlesEnabled: boolean("mcp_bundles_enabled").notNull().default(false),
     /** ADR-0251 (migration governed_core_resource_rules): must a connector call name a project? TRUE (the ADR-0180 default) = an unattributed
      * connector call is refused (`attribution-required`), audited, before anything is sent; an admin may relax it
      * (settings_relax step-up, audited), and the call then meters into the Unattributed bucket. */

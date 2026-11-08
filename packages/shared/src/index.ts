@@ -2372,6 +2372,8 @@ export const updateOrgSettingsSchema = z
     mcpPrivateRangesDefault: z.boolean().optional(),
     /** ADR-0219 (P10): calls to remote agents over A2A. Strict false; true relaxes it (settings_relax step-up). */
     a2aEnabled: z.boolean().optional(),
+    /** ADR-0236 (P11): governed MCP bundles. Strict false; true relaxes it (settings_relax step-up). */
+    mcpBundlesEnabled: z.boolean().optional(),
     /** ADR-0251 (migration governed_core_resource_rules): must a connector call name a project? true (the ADR-0180 default) = an unattributed
      * connector call is refused `attribution-required`; false (an audited admin relaxation) = it runs, metered Unattributed. */
     connectorAttributionRequired: z.boolean().optional(),
