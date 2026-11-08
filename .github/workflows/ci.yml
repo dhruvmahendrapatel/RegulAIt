@@ -126,9 +126,9 @@ name: CI
 # ADR-0252 addendum (owner decision 2026-11-07): FAST checks on a pull request, the FULL suite at merge time.
 # The free public-repo runner pool (~20 concurrent jobs) against ~30 jobs per PR meant one PR's CI at a time.
 #   pull_request   the `scope` job reads the PR's diff. Code changed: build, typecheck, lint, the package suites,
-#                  the static pre-flights (migration guard, licence gate) and the gateway suite. The web app
-#                  changed: also the mocked SPA shards. Docs only: every job is skipped and `build-and-test`
-#                  still reports (a skipped dependency is allowed only then).
+#                  the static pre-flights (migration guard, licence gate) and the gateway shards (web-only PRs too:
+#                  gateway tests read apps/web sources, #737 review). The web app changed: also the mocked SPA shards. Docs only: every job
+#                  is skipped and `build-and-test` still reports (it allows a skip only where the scope said so).
 #   merge_group    everything, on the combined result of the queued PRs: the above plus the SPA journeys and
 #   push to main   the docker build. The merge queue is where the full suite gates a merge.
 #   nightly        everything, for rot with no commit of ours to blame (a moved base image, a yanked dependency).
@@ -208,7 +208,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .node-version
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
@@ -327,11 +327,7 @@ jobs:
           fi
           node scripts/migration-watermark-guard.mjs "$base"
 
-      # internal/process/AgentCoordination.md stays a CURRENT-STATE file: one Live-status row per
-      # agent, one Status line per task, inboxes acked within 12h, a line
-      # budget. History lives in git. `pnpm checkin` is the only writer of a row.
-      #
-      # The same step runs every `scripts/*.test.mjs` — `--dir scripts` scopes
+      # Runs every `scripts/*.test.mjs` — `--dir scripts` scopes
       # discovery to this directory, so an untracked nested checkout on a
       # developer machine is never swept in. That includes the G10-G15-VERIFY
       # guard (`basename-collisions.test.mjs`): no two tracked files in one
@@ -340,11 +336,9 @@ jobs:
       # (case-insensitive) checkout while every Linux gate stays green.
       # Runs whenever the pre-flight steps ran, whatever they found: a census
       # failure must not hide the scripts' own tests (they include the census's).
-      - name: Coordination file lint (structure only — never agent staleness) + repo filename guard
+      - name: Scripts tests (including the repo filename guard)
         if: ${{ !cancelled() && (steps.affordances.outcome == 'success' || steps.affordances.outcome == 'failure') }}
-        run: |
-          node scripts/coordination.mjs lint
-          pnpm exec vitest run --dir scripts
+        run: pnpm exec vitest run --dir scripts
 
       # FS-22 / ADR-0176 addendum (2026-10-24): every package in the shipped
       # workspace closure (`pnpm licenses list --prod`) is on the ADR-0176 list,
@@ -371,6 +365,8 @@ jobs:
   gateway-tests:
     name: gateway shard ${{ matrix.shard }}
     needs: scope
+    # ADR-0252 addendum (PR trim): skipped only on a docs-only PR. A web-only PR still runs it: gateway tests read
+    # apps/web sources (step-up-posture-guard walks every product source, apps/web included).
     if: needs.scope.outputs.code == 'true'
     runs-on: ubuntu-24.04
     # A blast-radius cap, not a target: the slowest shard plus setup is well
@@ -458,7 +454,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .node-version
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
@@ -571,7 +567,7 @@ jobs:
     name: gateway / every test file ran exactly once
     needs: [scope, gateway-tests]
     # runs when a shard failed too, so a red run still says whether the shards
-    # covered the suite; it does not run on a cancelled (superseded) run, or on a docs-only PR
+    # covered the suite; it does not run on a cancelled (superseded) run, or when the shards were skipped
     if: ${{ !cancelled() && needs.scope.outputs.code == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -584,7 +580,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .node-version
           cache: pnpm
 
       # `vitest list --filesOnly` only resolves the include globs: no build, no
@@ -615,8 +611,9 @@ jobs:
   # runs whenever a dependency failed (`!cancelled()`, not the default
   # `success()`, which would skip it) and checks each result itself.
   #
-  # ADR-0252 addendum: the parts are skipped on a docs-only PR, and only then. The scope must have succeeded; with
-  # code changed every part must be a success, and with no code changed every part must be skipped.
+  # ADR-0252 addendum: a part is skipped only when its own scope output is false. The scope must have succeeded; the
+  # build and static pre-flights must succeed when code changed (else be skipped), and the gateway shards and their
+  # coverage check must succeed when code outside apps/web/** changed (else be skipped).
   build-and-test:
     needs: [scope, build-and-test-base, gateway-tests, gateway-coverage]
     if: ${{ !cancelled() }}
@@ -629,9 +626,10 @@ jobs:
         run: |
           echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
           echo "$RESULTS" | jq -e '
+            def ok(want): if want == "true" then .result == "success" else .result == "skipped" end;
+            .scope.outputs as $o |
             length == 4 and .scope.result == "success" and
-            (del(.scope) | to_entries | map(.value.result)) as $parts |
-            if .scope.outputs.code == "true" then all($parts[]; . == "success") else all($parts[]; . == "skipped") end' > /dev/null
+            (."build-and-test-base" | ok($o.code)) and (."gateway-tests" | ok($o.code)) and (."gateway-coverage" | ok($o.code))' > /dev/null
 
   docker-build:
     # The quickstart path must never rot: prove the compose image still builds.
@@ -711,7 +709,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .node-version
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile

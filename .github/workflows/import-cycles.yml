@@ -27,6 +27,9 @@ on:
       - 'internal/**'
       - '.gitignore'
       - 'LICENSE'
+      # ADR-0252 addendum, PR trim: the ratchet and smoke build and scan apps/gateway and its workspace dependencies;
+      # apps/web is not one of them, so a web-only change cannot add a gateway import edge
+      - 'apps/web/**'
   # ADR-0252 addendum: also at merge time, on each push to main and nightly
   merge_group:
     types: [checks_requested]
@@ -57,7 +60,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .node-version
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
