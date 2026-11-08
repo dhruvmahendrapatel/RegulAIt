@@ -4224,8 +4224,8 @@ export const certRotations = pgTable("cert_rotations", {
   certId: uuid("cert_id")
     .notNull()
     .references(() => certInventory.id, { onDelete: "cascade" }),
-  findingId: uuid("finding_id"),
-  approvalId: uuid("approval_id"),
+  findingId: uuid("finding_id").references((): AnyPgColumn => infraFindings.id, { onDelete: "set null" }),
+  approvalId: uuid("approval_id").references((): AnyPgColumn => approvals.id, { onDelete: "set null" }),
   oldSerial: text("old_serial"),
   newSerial: text("new_serial"),
   newNotAfter: timestamp("new_not_after", { withTimezone: true }),
@@ -4247,7 +4247,7 @@ export const patchRecords = pgTable(
     resourceId: uuid("resource_id")
       .notNull()
       .references(() => infraResources.id, { onDelete: "cascade" }),
-    findingId: uuid("finding_id"),
+    findingId: uuid("finding_id").references((): AnyPgColumn => infraFindings.id, { onDelete: "set null" }),
     cve: text("cve").notNull(),
     package: text("package"),
     installedVersion: text("installed_version"),
@@ -4275,7 +4275,7 @@ export const backupRuns = pgTable(
     resourceId: uuid("resource_id")
       .notNull()
       .references(() => infraResources.id, { onDelete: "cascade" }),
-    findingId: uuid("finding_id"),
+    findingId: uuid("finding_id").references((): AnyPgColumn => infraFindings.id, { onDelete: "set null" }),
     kind: text("kind", { enum: ["backup", "restore"] }).notNull().default("backup"),
     // success | failed | missed | restore_proposed | restored
     status: text("status", {
@@ -4701,7 +4701,7 @@ export const orgSettings = pgTable(
     /** fixed_agent only: the agent every compaction summarization runs on. It
      * must still be in the caller's own entitled+dispatchable roster — a fixed
      * pick can never widen entitlement, only pin a choice inside it. */
-    summarizerAgentId: uuid("summarizer_agent_id"),
+    summarizerAgentId: uuid("summarizer_agent_id").references((): AnyPgColumn => agents.id, { onDelete: "set null" }),
 
     // --- governance / compliance behavioural defaults ----------------------
     /** effective piiMode for a project whose classifications resolve to none.
@@ -4766,7 +4766,7 @@ export const orgSettings = pgTable(
      * approver. Persisted so the Infrastructure page's approver pick survives
      * reloads and admins; each propose call still names its approver
      * explicitly (this is the prefill/default, never a hidden actor). */
-    infraApproverUserId: uuid("infra_approver_user_id"),
+    infraApproverUserId: uuid("infra_approver_user_id").references((): AnyPgColumn => users.id, { onDelete: "set null" }),
 
     // --- audit retention ----------------------------------------------------
     autoPruneEnabled: boolean("auto_prune_enabled").notNull().default(false),
@@ -5097,7 +5097,7 @@ export const orgSettings = pgTable(
      * caller's own entitled, dispatchable roster — naming one here can pin a
      * choice, never widen entitlement. NULL while enabled = `judged:
      * unavailable` with `judge_required`, never a silent no-annotation run. */
-    recommendationJudgeAgentId: uuid("recommendation_judge_agent_id"),
+    recommendationJudgeAgentId: uuid("recommendation_judge_agent_id").references((): AnyPgColumn => agents.id, { onDelete: "set null" }),
     /** ADR-0215 (migration 0248): may an admin import vendored framework content as new
      * draft pack versions, and accept imported regulatory feed entries? false (default) =
      * the import routes refuse and the feed is the hand-curated list only. */
@@ -5653,10 +5653,10 @@ export const promptPromotions = pgTable(
     requestedByUserId: uuid("requested_by_user_id")
       .notNull()
       .references(() => users.id, { onDelete: "restrict" }),
-    approverUserId: uuid("approver_user_id").notNull(),
+    approverUserId: uuid("approver_user_id").notNull().references((): AnyPgColumn => users.id, { onDelete: "restrict" }),
     approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
     status: text("status", { enum: PROMPT_PROMOTION_STATUSES }).notNull().default("pending_approval"),
-    decidedByUserId: uuid("decided_by_user_id"),
+    decidedByUserId: uuid("decided_by_user_id").references((): AnyPgColumn => users.id, { onDelete: "restrict" }),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
     result: jsonb("result").$type<Record<string, unknown>>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -6826,7 +6826,7 @@ export const reportDefinitions = pgTable(
      * fallback set — which now says, in its own note, that it is a fallback and
      * that a pack should be attached. Set, and the section is computed from the
      * pack's controls against the real ledgers, stamped with the pack version. */
-    packId: uuid("pack_id"),
+    packId: uuid("pack_id").references((): AnyPgColumn => compliancePacks.id, { onDelete: "set null" }),
     createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -13993,7 +13993,7 @@ export const engineEnrollmentTokens = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     usedAt: timestamp("used_at", { withTimezone: true }),
-    runnerId: uuid("runner_id"),
+    runnerId: uuid("runner_id").references((): AnyPgColumn => engineRunners.id, { onDelete: "set null" }),
   },
   (t) => [check("engine_enrollment_tokens_expiry_check", sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} <= ${t.createdAt} + interval '60 minutes'`)],
 );
@@ -14097,7 +14097,7 @@ export const engineSchedules = pgTable(
     intervalHours: integer("interval_hours").notNull(),
     nextRunAt: timestamp("next_run_at", { withTimezone: true }).notNull(),
     enabled: boolean("enabled").notNull().default(true),
-    lastRunId: uuid("last_run_id"),
+    lastRunId: uuid("last_run_id").references((): AnyPgColumn => engineRuns.id, { onDelete: "set null" }),
     lastSkip: text("last_skip"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
