@@ -357,7 +357,7 @@ describe("route census: KNOWN_UI_GAPS only shrinks", () => {
   // size. Every route PR edited the same three lines, so they were a merge hot spot; each entry's reason and the
   // stale-entry checks already enforce intent.
   it("THE PINNED GAP CEILING, and every known gap says what it does and where it is tracked", () => {
-    expect(KNOWN_UI_GAPS_MAX).toBe(18); // ADR-0241 (P21): seven API-only usage-extractor routes, raised for the master's review on the PR (#453 Governed Designer); owner decision 2026-11-07 (#697): plus the 11 ADR-0236 MCP bundle routes, which wait for the bundle screen on #453
+    expect(KNOWN_UI_GAPS_MAX).toBe(24); // ADR-0241 (P21): seven API-only usage-extractor routes, raised for the master's review on the PR (#453 Governed Designer); ADR-0261 (P37): six API-only DefenseClaw ingest admin routes, owner decision 2026-11-07 (#453); owner decision 2026-11-07 (#697): plus the 11 ADR-0236 MCP bundle routes, which wait for the bundle screen on #453
     expect(KNOWN_UI_GAPS.size).toBe(KNOWN_UI_GAPS_MAX);
     for (const [key, g] of KNOWN_UI_GAPS) {
       expect(g.does, key).toBeTruthy();

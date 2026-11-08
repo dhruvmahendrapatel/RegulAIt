@@ -271,6 +271,9 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   a2aEnabled: notEqual(false),
   // ADR-0236 (P11): turning on MCP bundles opens a new way to grant tools to many people at once
   mcpBundlesEnabled: notEqual(false),
+  // ADR-0251: the attribution mandate for connector and A2A calls; turning it off lets calls run unattributed
+  connectorAttributionRequired: notEqual(true),
+  a2aAttributionRequired: notEqual(true),
   mcpAdmissionMode: notEqual("enforce"),
   minReleaseAgeDays: atLeast(7),
   credentialUnusedDays: atMost(90),

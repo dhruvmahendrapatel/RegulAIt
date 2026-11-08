@@ -2321,6 +2321,11 @@ export const updateOrgSettingsSchema = z
     a2aEnabled: z.boolean().optional(),
     /** ADR-0236 (P11): governed MCP bundles. Strict false; true relaxes it (settings_relax step-up). */
     mcpBundlesEnabled: z.boolean().optional(),
+    /** ADR-0251 (migration governed_core_resource_rules): must a connector call name a project? true (the ADR-0180 default) = an unattributed
+     * connector call is refused `attribution-required`; false (an audited admin relaxation) = it runs, metered Unattributed. */
+    connectorAttributionRequired: z.boolean().optional(),
+    /** ADR-0251 (migration governed_core_resource_rules): the same mandate for calls to remote agents over A2A. */
+    a2aAttributionRequired: z.boolean().optional(),
     /** ADR-0097: the MCP ADMISSION posture ('enforce' is the strict default since ADR-0181). 'off' = no manifest
      * scan runs at all and behaviour is byte-identical to pre-0097. 'log' =
      * every manifest sync is scanned and the verdict/findings are recorded on
@@ -4875,3 +4880,5 @@ export * from "./framework-imports.js";
 export * from "./supplier-portal.js";
 // ADR-0222 (P13(a)): fairness testing — the group metrics, thresholds and outcome (pure)
 export * from "./fairness.js";
+// ADR-0261 (P37): third-party security telemetry ingest — the DefenseClaw JSONL parser and mapping (pure)
+export * from "./third-party-ingest/index.js";

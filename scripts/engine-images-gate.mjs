@@ -40,6 +40,16 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ENGINE_IDS } from "./engine-images-lock.mjs";
 
+/**
+ * ADR-0242: engines whose images CI builds twice and compares (engine-images-build.yml), but which are NOT
+ * published and have no lock entry yet (phase 2 adds their runner shim, lock entry and publish). They have no
+ * `@regulait/engine-<id>` workspace package: their images are built from engines/<id> alone. `--plan` never
+ * publishes them, because it only walks ENGINE_IDS.
+ */
+export const UNPUBLISHED_ENGINE_IDS = ["mcpscanner", "skillscanner"];
+/** every engine the reproducible-build check covers */
+export const REPRO_ENGINE_IDS = [...ENGINE_IDS, ...UNPUBLISHED_ENGINE_IDS];
+
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const GENERATED_LOCK_MODULE = "packages/shared/src/engines/images-lock.ts";
 export const ROOT_INPUTS = [
@@ -96,11 +106,12 @@ export function workspaceClosure(engine, pkgs) {
 
 /** the git pathspecs of one engine's image inputs */
 export function inputPathspecs(engine, pkgs = readWorkspace()) {
-  if (!ENGINE_IDS.includes(engine)) throw new GateError(`unknown engine: ${engine}`);
+  if (!REPRO_ENGINE_IDS.includes(engine)) throw new GateError(`unknown engine: ${engine}`);
   return [
     ":(glob)engines/*",
     `engines/${engine}`,
-    ...workspaceClosure(engine, pkgs),
+    // an unpublished engine's image copies nothing from the workspace (ADR-0242)
+    ...(UNPUBLISHED_ENGINE_IDS.includes(engine) ? [] : workspaceClosure(engine, pkgs)),
     ...WORKSPACE_DIRS.map((b) => `:(glob)${b}/*/package.json`),
     ...ROOT_INPUTS,
     ":(exclude)engines/images.lock.json",

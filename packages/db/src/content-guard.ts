@@ -105,6 +105,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.webhookSubscriptions, ["name"]],
   [s.deployTargets, ["name"]],
   [s.discoverySources, ["name"]],
+  // ADR-0261 (P37): a third-party ingest source an admin names
+  [s.thirdPartyIngestSources, ["name"]],
   [s.engineRunners, ["name"]],
   [s.executors, ["name"]],
   [s.externalScorers, ["name"]],
@@ -151,6 +153,8 @@ export const CONTENT_GUARD_EXCLUSION_REASONS: Readonly<Record<ContentGuardExclus
 
 /** DELIBERATELY NOT GUARDED — named, with a category, so the inventory test can tell a decision from an oversight. */
 export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclusion>> = {
+  // ADR-0261: an event identifier the sending product chose (a linear lower-case identifier check bounds it)
+  "third_party_ingest_records.event_name": "ingested",
   "ai_incident_actions.title": "prose_owned_by_adr0102",
   "ai_incidents.summary": "prose_owned_by_adr0102",
   "ai_incidents.title": "prose_owned_by_adr0102",
