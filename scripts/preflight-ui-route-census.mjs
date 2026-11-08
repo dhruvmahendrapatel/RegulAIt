@@ -375,6 +375,8 @@ export const KNOWN_UI_GAPS = new Map([
       tracking: "ADR-0255 / P31: catalogue screen for the Governed Designer, requested on #453",
     },
   ],
+  ["GET /v1/reports/posture/assets", { does: "pages per-asset posture scores (agents or use cases) the caller can read, each with objectives and ranked actions", tracking: "ADR-0214 amendment (P3): the brief is API-only; the per-asset score screen is posted on #453 (c6703277931) for the Governed Designer, and the owner chose the temporary gap on #705 (2026-11-07)" }],
+  ["GET /v1/reports/posture/assets/:kind/:assetId", { does: "one agent's or use case's posture score, with its objectives, not-applicable list and ranked actions", tracking: "ADR-0214 amendment (P3): the brief is API-only; the per-asset score screen is posted on #453 (c6703277931) for the Governed Designer, and the owner chose the temporary gap on #705 (2026-11-07)" }],
 ]);
 
 /**
@@ -383,7 +385,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 15; // ADR-0241 (7) + ADR-0261 (6) + ADR-0255 (2)
+export const KNOWN_UI_GAPS_MAX = 17; // ADR-0241 (7) + ADR-0261 (6) + ADR-0214 amendment (2) + ADR-0255 (2)
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 

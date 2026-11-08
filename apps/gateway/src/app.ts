@@ -195,6 +195,7 @@ import { runAiBomSignoffs, type AiBomSignoff } from "./ai-bom-signoff.js";
 import { registerRedTeamRoutes } from "./redteam.js";
 import { registerReportingRoutes } from "./reporting.js";
 import { registerPostureRoutes } from "./posture.js";
+import { registerAssetScoreRoutes } from "./asset-score.js";
 import { registerTrustDashboardRoutes } from "./trust-dashboard.js";
 import { registerUseCaseOverviewRoutes } from "./use-case-overview.js";
 import { registerUseCaseDraftRoutes } from "./use-case-drafts.js";
@@ -5675,6 +5676,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // instance it anchors WITH, so the readers grade the medium the writer uses.
   const anchorSink: AnchorSink | null = opts.auditAnchorSink !== undefined ? opts.auditAnchorSink : resolveAnchorSink();
   registerPostureRoutes(app, db, { sink: anchorSink });
+  registerAssetScoreRoutes(app, db);
   // ADR-0148 — the six-dimension trust dashboard (demo task C1)
   registerTrustDashboardRoutes(app, db);
   // ADR-0082 — the standing agent dependency inventory: per registered agent,
