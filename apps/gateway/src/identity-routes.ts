@@ -98,6 +98,8 @@ export function registerIdentityRoutes(app: FastifyInstance, db: Db, opts: { dat
   registerOAuthRoutes(app, db, { dataKey: opts.dataKey });
   // admin: identities, credentials, an agent's own grants
   app.get("/v1/workload-identities", s4.list);
+  // ADR-0226: the identity list's Excel export (admin, audited)
+  app.get("/v1/workload-identities/export.xlsx", s4.exportList);
   app.post("/v1/workload-identities", s6.create);
   app.get("/v1/workload-identities/:identityId", s4.get);
   app.patch("/v1/workload-identities/:identityId", s4.patch);

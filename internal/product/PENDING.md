@@ -10,6 +10,23 @@ Ordered by what actually blocks a sale, not by ADR number.
 
 ---
 
+## 0. New items, newest first (ADR-0252)
+
+A PR adds a new item as a fragment file under `internal/fragments/` whose first line is `<!-- fold: pending -->`;
+the assign-at-merge step moves it here after the merge. Move an item into its section below when you next edit
+this file.
+
+<!-- fold:pending newest-first -->
+
+**Q1 — Turn on the merge queue (owner settings, ADR-0252).** Blocked on the owner. Enable the merge queue on `main`
+with merge method "merge commit"; make the required checks ones that report on `merge_group` (`ci.yml`'s
+`build-and-test`, `security.yml`, `import-cycles.yml`, `ui-enterprise.yml`), not a path-filtered workflow. Then the
+master switches its loop to `gh pr merge <n> --merge --auto` and opens each `assign-at-merge/*` branch's PR.
+Follow-ups: Drizzle v1's journal-free migrator; a schema-to-SQL parity test (C-03); a per-lane cap on open PRs and
+per-PR status checklists (R-08).
+
+---
+
 ## 1. The three that gate an enterprise deal
 
 | # | Gap | Why it blocks | Where it's recorded |
@@ -30,7 +47,7 @@ Ordered by what actually blocks a sale, not by ADR number.
 | **S6** | **Content columns store operator text verbatim** — `name`, `title`, `description`, `summary`, `body` across templates, agents, projects and packs. **DECIDED 2026-11-06 in [ADR-0233](../decisions/0233-content-column-credential-guard.md) (Proposed; PR pending owner/master release), migration 0273.** Content is not redacted (a description may be needed byte-exact); a write carrying a credential shape is REFUSED with `422 credential_in_content`, naming the field and rule labels, never the value. Same detector as ADR-0099/0102 (`scrubAuditText`, by reference; includes the vendored open-source pipelock pack). Sited as a third `createDb` wrapper, so imports and raw writes are covered. An admin may relax it (`content_credential_guard`, `settings_relax` step-up, audited). Existing rows are reported (`GET /v1/admin/content-credential-report`), never rewritten. The count was stale: the schema has **151** matching text columns, **84 guarded and 67 excluded by category**, pinned against `information_schema`. | Residuals: jsonb bodies (`config_versions.body` and six summaries) are not guarded (owner question in ADR-0233); ingested columns (MCP tool names/descriptions, registry entries, IdP display names) are not guarded; application-layer only; shape-based. |
 | **S3** | **No real release keypair.** ADR-0041's update-bundle verifier and ADR-0052's license verifier both pin a **dev** public key whose private half was not retained. | Generate offline, rotate per `infra/release-keys/` runbook, retire the dev key. |
 | **S4** | Deferred by owner decision, still open: SAST/SCA/secret-scanning in CI (D3), third-party pen test (D4), WAF/DDoS at the edge (D5), HSM/FIPS option (D7). **2026-10-02 ([ADR-0167](../decisions/0167-security-review-batch.md), SEC-02/CFG-05):** `@xmldom/xmldom` is pinned to 0.8.15 by a root `pnpm.overrides` entry — the ONE runtime-reachable HIGH advisory in `pnpm audit` (9 open advisories on 0.8.13, incl. quadratic parsing, under the auth-exempt SAML ACS); node-saml 5.1.0 / xml-crypto 6.1.2 declare `^0.8.10`, so the pin is in range. Remove the override once they raise their own floor. The remaining HIGHs (fastify schema/URL, drizzle identifier escaping, fast-uri, ip-address, js-yaml, react-router) were each traced to an unreachable or dev-only path; the `pnpm audit --audit-level=high` CI gate stays deferred with D3 until that upgrade batch lands, because it would fail today on advisories that do not apply. | ENTERPRISE_READINESS_PLAN Bucket 3 |
-| **S7** | **Postgres row-level security is not enabled** (owner, 2026-10-24: post-demo backlog, #453 comment 6390166382). No migration enables RLS; each deployment is single-tenant with one org ([ADR-0041](../decisions/0041-byoc-primary-motion.md)) and tenant scoping relies on the gateway's object-level checks. Item 14 of the [ADR-0200](../decisions/0200-engineering-best-practice-guidelines.md) security checklist asks for RLS on tenant-scoped tables as defence in depth; [ADR-0060](../decisions/0060-tamper-evident-audit.md) lists it as a follow-up. | **In progress (2026-11-06): [ADR-0234](../decisions/0234-postgres-row-level-security.md) (Proposed).** The inventory found no org or tenant key, so RLS is keyed on the authenticated principal. Batch 1 (migration 0272: the `regulait_app` role, the transaction layer, users, auth_mfa_pending, approvals, audit_log, the measured cost) is the first PR; batches 2-7 follow in the ADR's rollout order. Not demo-blocking. |
+| **S7** | **Postgres row-level security is not enabled** (owner, 2026-10-24: post-demo backlog, #453 comment 6390166382). No migration enables RLS; each deployment is single-tenant with one org ([ADR-0041](../decisions/0041-byoc-primary-motion.md)) and tenant scoping relies on the gateway's object-level checks. Item 14 of the [ADR-0200](../decisions/0200-engineering-best-practice-guidelines.md) security checklist asks for RLS on tenant-scoped tables as defence in depth; [ADR-0060](../decisions/0060-tamper-evident-audit.md) lists it as a follow-up. | **In progress (2026-11-06): [ADR-0234](../decisions/0234-postgres-row-level-security.md) (Proposed).** The inventory found no org or tenant key, so RLS is keyed on the authenticated principal. Batch 1 (migration 0272: the `regulait_app` role, the transaction layer, users, auth_mfa_pending, approvals, audit_log, the measured cost) merged in #682; batch 2 (migration 0313, request-scoped adoption in the gateway) is the next PR; batches 3-7 follow in the ADR's rollout order. Not demo-blocking. |
 
 ---
 
@@ -83,7 +100,7 @@ already covers each node, and that check feeds the lanes.
 
 | # | Gap | What it would take |
 |---|---|---|
-| **P18** | **No node-by-node coverage check against a full governance framework map.** Packs, controls and roles have grown ADR by ADR. Nobody has checked them against one complete map of the field, so coverage gaps and overlaps are not visible in one place. The map's nodes are listed after this table. | **Step 1, an audit (Codex, markdown only, ADR-0227):** for each node, record built / partial / missing, with the evidence (ADR, file, pack ID) and, for gaps, a one-line scope. Record it under `internal/reviews/`, with no new claims of compliance or certification. **Step 2, the master:** turn confirmed gaps into lanes, each with its own ADR. Use the order of ADR-0176 open-source-first imports first, then packs, then controls. Content licensed share-alike or non-commercial is cited by ID only (as P5). |
+| **P18** | **No node-by-node coverage check against a full governance framework map.** Packs, controls and roles have grown ADR by ADR. Nobody has checked them against one complete map of the field, so coverage gaps and overlaps are not visible in one place. The map's nodes are listed after this table. | **Step 1, an audit (Codex, markdown only, ADR-0227):** for each node, record built / partial / missing, with the evidence (ADR, file, pack ID) and, for gaps, a one-line scope. Record it under `internal/reviews/`, with no new claims of compliance or certification. **Step 2, the master:** turn confirmed gaps into lanes, each with its own ADR. Use the order of ADR-0176 open-source-first imports first, then packs, then controls. Content licensed share-alike or non-commercial is cited by ID only (as P5). **Step 1 done 2026-11-07:** [internal/reviews/2026-11-07-p18-framework-coverage.md](../reviews/2026-11-07-p18-framework-coverage.md) (57 nodes: 16 built, 21 partial, 20 missing; ranked lanes A1–A5, B1–B8, C1–C6 for step 2). |
 
 **Map nodes to check:**
 
@@ -137,11 +154,11 @@ tool tiers plus lazy tool-loading into P11. The other two are new items:
 | **P21** | **A configurable usage extractor for every provider.** Cost attribution reads token counts through per-adapter code, and modality pricing ([ADR-0212](../decisions/0212-modality-pricing-and-model-rate-limits.md)) only works where an adapter reports a modality split. A new or custom provider cannot be priced without a code change. | An admin-defined mapping from a provider's response (JSON pointers) to text, image, audio and cached input and output token counts. It feeds the existing pillar 5 attribution and ADR-0212 modality pricing, validated and bounded, with a sample-response test before activation, and audited. Reference: `gravitee-io/gravitee-policy-ai-prompt-token-tracking` (Apache-2.0, Java; its custom JSON-pointer extractor covers text tokens only). Extend it to modalities and cached tokens. |
 | **P22** | **A Kubernetes operator for BYOC installs.** Pillar 3's BYOC mode is deployed from Terraform and container images, with no declarative, in-cluster way for a customer to run and upgrade RegulAIt. | An operator with CRDs for a RegulAIt deployment, covering version, mode (byoc / air_gapped), the data-key reference, backup policy and egress posture. It reconciles toward the signed update bundle (ADR-0041) and reports drift (pillar 3). Air-gapped: no image pulls outside the customer registry. Reference: `gravitee-io/gravitee-kubernetes-operator` (Apache-2.0, Go) for CRD shape and reconcile design. Use an established operator framework (ADR-0176). Post-demo, needs its own ADR. |
 
-## 2i. From the security and infra review (owner, 2026-11-07)
+## 2g. AI security tools from the 2026 roadmap scan (owner, 2026-11-07)
 
 | # | Gap | What it would take |
 |---|---|---|
-| **P37** | **Ingest Cisco DefenseClaw's audit export.** Customers who already run DefenseClaw on their endpoints had no way to get its decisions into RegulAIt's findings and audit trail. | **Built ([ADR-0261](../decisions/0261-defenseclaw-telemetry-ingest.md), migration 0314), API only.** HTTP JSONL receiver with a per-source write-only token, record-id dedup and a time window, attributed third-party evidence and `defenseclaw/<connector>` findings. Open: the admin screen (#453), OTLP, an evidence retention sweep, and a check against a real captured export sample before a customer install. |
+| **P25** | **Measured injection-detector baselines.** The heuristic and trained prompt-injection detectors had no recall or false-positive numbers on public benchmarks. | **Built (ADR-0244).** NotInject, InjecAgent (sampled) and AgentDojo v1 vendored as pinned snapshots, a JailbreakBench sample, plus our own 100 web-agent scenarios (WASP categories, clean room); CI gates the heuristic at a 2-point tolerance, the trained classifier is measured offline. Left: HackAPrompt (owner to accept its gate), AgentDojo's task-dependent attacks, gating the trained classifier once its image builds in CI. |
 
 ## 3. Structural gaps — the ADR shipped, a named half did not
 

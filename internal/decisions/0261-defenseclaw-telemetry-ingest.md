@@ -2,7 +2,9 @@
 
 - **Status**: Accepted (owner-approved backlog item P37, 2026-11-07; built by a builder lane)
 - **Date**: 2026-11-07
-- **Backlog**: [PENDING §2i, P37](../product/PENDING.md)
+- **Index**: Ingest Cisco DefenseClaw's HTTP JSONL audit export as attributed third-party evidence (P37)
+- **Backlog**: [PENDING, P37](../product/PENDING.md)
+- **Migration**: `pending/third_party_ingest.sql` (numbered at merge, ADR-0252)
 - **Source report**: [DefenseClaw comparison](../reviews/2026-11-07-defenseclaw-comparison.md), option (b)
 
 ## Context
@@ -96,5 +98,5 @@ The adapter is API and backend only. The admin screen is a follow-up, posted on 
 
 ### Migration
 
-0314 (`when` 1785241000000, as reserved by the master). Per CONTRIBUTING_PARALLEL_SESSIONS §4.1, renumber above
-main's highest migration at merge.
+`packages/db/migrations/pending/third_party_ingest.sql`. Per ADR-0252 it has no number on the branch; the
+assign-at-merge step numbers it and appends its journal entry after the merge.

@@ -62,6 +62,11 @@ import {
   users,
   workflowInstances,
   runWithAuditActor,
+  runWithRlsPrincipal,
+  runWithRlsSystem,
+  runWithRlsPrincipalStep,
+  runWithoutRlsScope,
+  currentRlsScope,
   complianceProfiles,
   configVersions,
   type Db,
@@ -295,6 +300,29 @@ import {
   type ListSpec,
 } from "./list-contract.js";
 import { USERS_LIST, usersFilterQuery, usersReader, usersWhere } from "./users-list.js";
+import {
+  AGENT_REVOCATIONS_LIST,
+  API_KEYS_LIST,
+  CONNECTOR_REVOCATIONS_LIST,
+  MCP_REVOCATIONS_LIST,
+  ROLE_HOLDERS_LIST,
+  agentRevocationsReader,
+  agentRevocationsWhere,
+  answerListExport,
+  answerListPage,
+  apiKeysFilterQuery,
+  apiKeysReader,
+  apiKeysWhere,
+  connectorRevocationsReader,
+  connectorRevocationsWhere,
+  mcpRevocationsFilterQuery,
+  mcpRevocationsReader,
+  mcpRevocationsWhere,
+  noListFilters,
+  roleHoldersFilterQuery,
+  roleHoldersReader,
+  roleHoldersWhere,
+} from "./identity-lists.js";
 import { DELEGATIONS_LIST, delegationsFilterQuery, delegationsReader, delegationsWhere, userNameSql } from "./delegations-list.js";
 import { evaluateIpEnvelope } from "./net-policy.js";
 import { activeDelegatorsFor, activeDelegationFrom } from "./delegations.js";
@@ -509,6 +537,7 @@ import {
 } from "./org-settings.js";
 import { registerAppearanceRoutes } from "./appearance.js";
 import { registerModelRateLimitRoutes } from "./model-rate-limits.js";
+import { registerUsageExtractorRoutes } from "./usage-extractors.js";
 // ADR-0202 decision 4 — the per-beat simulated fallback for the hosted demo (admin-only, audited)
 import { registerDemoBeatRoutes } from "./demo-beats.js";
 // ADR-0185 G5 — request metrics (a no-op seam until the meter lands)
@@ -1177,6 +1206,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "GET /v1/auth/step-up/:stepUpId",
   ]);
 
+  // ADR-0234 batch 2: credential resolution reads users and MFA challenges under the registered `authenticate`
+  // system context (it opens nothing in approvals or audit_log). The hook after the auth hook replaces it with the
+  // resolved principal, or with no scope at all when the request resolved none.
+  app.addHook("preHandler", (_req, _reply, done) => {
+    runWithRlsSystem("authenticate", "gateway.auth", () => done());
+  });
+
   app.addHook("preHandler", async (req, reply) => {
     if (AUTH_EXEMPT_ROUTES.has(req.routeOptions.url ?? "")) {
       req.authCtx = { userId: null, isAdmin: false, via: "api-key" };
@@ -1398,6 +1434,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       }
     }
     req.authCtx = ctx;
+  });
+
+  // ADR-0234 batch 2: from here to the end of the request every statement on the slice-1 tables runs as the
+  // authenticated principal (role regulait_app, FORCE row-level security), whatever the route forgets to filter.
+  // A request with no user (an exempt route, the bootstrap token) leaves the `authenticate` scope and runs
+  // unscoped, exactly as before this batch; ADR-0234 records those paths for the runtime cut-over (batch 7).
+  app.addHook("preHandler", (req, _reply, done) => {
+    const userId = req.authCtx?.userId;
+    if (typeof userId === "string" && userId.length > 0) {
+      runWithRlsPrincipal({ userId }, () => done());
+    } else {
+      runWithoutRlsScope(() => done());
+    }
   });
 
   // ADR-0187 — THE ENGINE RUNNER CEILING, both directions: a runner or
@@ -1941,7 +1990,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     return reply.status(201).send({ ...row, expirySource: resolved.source, token });
   });
 
-  app.get("/v1/keys", async (req) => {
+  // ADR-0226: with any of sort/dir/cursor/offset/count, the shared list contract (holder's email joined, state
+  // filter and sort); with none of them, exactly the response below. Never the token, its hash or a prefix.
+  app.get("/v1/keys/export.xlsx", async (req, reply) =>
+    answerListExport(db, req, reply, API_KEYS_LIST, apiKeysReader(db), apiKeysFilterQuery, apiKeysWhere),
+  );
+  app.get("/v1/keys", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      return answerListPage(db, req, reply, API_KEYS_LIST, apiKeysReader(db), apiKeysFilterQuery, apiKeysWhere);
+    }
     const { userId } = z.object({ userId: z.string().uuid().optional() }).parse(req.query);
     const rows = await db
       .select({
@@ -2966,8 +3023,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   // ADR-0022: who holds a role — the missing read that makes assignments
   // manageable (unassign is the DELETE above; this names the holders).
-  app.get("/v1/roles/:roleId/assignments", async (req) => {
+  // ADR-0226: the shared list contract with any of sort/dir/cursor/offset/count (rows carry the assignment id);
+  // with none of them, exactly the response below.
+  app.get("/v1/roles/:roleId/assignments/export.xlsx", async (req, reply) => {
     const { roleId } = z.object({ roleId: z.string().uuid() }).parse(req.params);
+    return answerListExport(db, req, reply, ROLE_HOLDERS_LIST, roleHoldersReader(db), roleHoldersFilterQuery, (f) => roleHoldersWhere(roleId, f), { roleId });
+  });
+  app.get("/v1/roles/:roleId/assignments", async (req, reply) => {
+    const { roleId } = z.object({ roleId: z.string().uuid() }).parse(req.params);
+    if (wantsListContract(req.query)) {
+      return answerListPage(db, req, reply, ROLE_HOLDERS_LIST, roleHoldersReader(db), roleHoldersFilterQuery, (f) => roleHoldersWhere(roleId, f));
+    }
     const rows = await db
       .select({
         userId: roleAssignments.userId,
@@ -3158,8 +3224,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     return reply.status(201).send(row);
   });
 
-  app.get("/v1/users/:userId/revocations/agents", async (req) => {
+  // ADR-0226: the shared list contract with any of sort/dir/cursor/offset/count; with none, the response below
+  app.get("/v1/users/:userId/revocations/agents/export.xlsx", async (req, reply) => {
     const { userId } = revocationUserParam.parse(req.params);
+    return answerListExport(db, req, reply, AGENT_REVOCATIONS_LIST, agentRevocationsReader(db), noListFilters, () => agentRevocationsWhere(userId), { userId });
+  });
+  app.get("/v1/users/:userId/revocations/agents", async (req, reply) => {
+    const { userId } = revocationUserParam.parse(req.params);
+    if (wantsListContract(req.query)) {
+      return answerListPage(db, req, reply, AGENT_REVOCATIONS_LIST, agentRevocationsReader(db), noListFilters, () => agentRevocationsWhere(userId));
+    }
     const rows = await db
       .select({
         id: agentRevocations.id,
@@ -3206,8 +3280,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     return reply.status(201).send(row);
   });
 
-  app.get("/v1/users/:userId/revocations/connectors", async (req) => {
+  // ADR-0226: the shared list contract with any of sort/dir/cursor/offset/count; with none, the response below
+  app.get("/v1/users/:userId/revocations/connectors/export.xlsx", async (req, reply) => {
     const { userId } = revocationUserParam.parse(req.params);
+    return answerListExport(db, req, reply, CONNECTOR_REVOCATIONS_LIST, connectorRevocationsReader(db), noListFilters, () => connectorRevocationsWhere(userId), { userId });
+  });
+  app.get("/v1/users/:userId/revocations/connectors", async (req, reply) => {
+    const { userId } = revocationUserParam.parse(req.params);
+    if (wantsListContract(req.query)) {
+      return answerListPage(db, req, reply, CONNECTOR_REVOCATIONS_LIST, connectorRevocationsReader(db), noListFilters, () => connectorRevocationsWhere(userId));
+    }
     const rows = await db
       .select({
         id: connectorRevocations.id,
@@ -3327,7 +3409,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     return { entitlements: entries, revocations: entitlements.revocations ?? [] };
   });
 
-  app.get("/v1/revocations", async (req) => {
+  // ADR-0226: the shared list contract with any of sort/dir/cursor/offset/count (the server's name joined);
+  // with none of them, exactly the response below.
+  app.get("/v1/revocations/export.xlsx", async (req, reply) =>
+    answerListExport(db, req, reply, MCP_REVOCATIONS_LIST, mcpRevocationsReader(db), mcpRevocationsFilterQuery, mcpRevocationsWhere),
+  );
+  app.get("/v1/revocations", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      return answerListPage(db, req, reply, MCP_REVOCATIONS_LIST, mcpRevocationsReader(db), mcpRevocationsFilterQuery, mcpRevocationsWhere);
+    }
     const query = z
       .object({ userId: z.string().uuid().optional(), serverId: z.string().uuid().optional() })
       .parse(req.query);
@@ -4004,8 +4094,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // pendingApprovalsNeedingAttention.
     const workbenchOn = await routingActive(db);
     if (workbenchOn) {
-      const needing = await pendingApprovalsNeedingAttention(db);
-      await materializeAndEvaluate(db, needing, me || null);
+      // ADR-0234 batch 2: this is the SLA and routing sweep run on read (a deployment with no cron relies on it),
+      // so it walks EVERY pending row, not the reader's: it runs under approval_maintenance as the principal. The
+      // listing below is read back under the principal alone, so what the reader SEES is still RLS-bounded.
+      const sweep = async () => {
+        const needing = await pendingApprovalsNeedingAttention(db);
+        await materializeAndEvaluate(db, needing, me || null);
+      };
+      const scope = currentRlsScope();
+      await (scope?.kind === "principal"
+        ? runWithRlsPrincipalStep({ userId: scope.userId }, "approval_maintenance", "approvals.lazy-sla-sweep", sweep)
+        : sweep());
     }
     // ADR-0046 §1: routing decides WHOSE QUEUE a row shows in. A non-admin
     // therefore also sees the rows assigned (or escalated) to a role or team
@@ -4575,8 +4674,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
    * items, and a chat decision writes its refusal audit row.
    */
   async function decideOneApproval(input: Parameters<typeof decideOneApprovalUnguarded>[0]): ReturnType<typeof decideOneApprovalUnguarded> {
+    // ADR-0234 batch 2: the decision is authorized by the gateway's own decision logic below (named approver,
+    // approver role, ADR-0168 review role, delegation, quorum, separation of duties), and a review-role member is not
+    // a participant the 0272 predicate can express (the membership lives in configuration until batch 4). So the
+    // step runs as the principal AND under approval_maintenance: the principal still sees what it sees elsewhere, the
+    // approval rows are open to the step, and a third user still gets the gateway's 403, not an existence-hiding 404.
+    const scope = currentRlsScope();
+    const run = () => decideOneApprovalUnguarded(input);
     try {
-      return await decideOneApprovalUnguarded(input);
+      return await (scope?.kind === "principal"
+        ? runWithRlsPrincipalStep({ userId: scope.userId }, "approval_maintenance", "approvals.decide", run)
+        : run());
     } catch (err) {
       if (!(err instanceof AiBomError)) throw err;
       return { ok: false as const, status: err.status, body: { ...(err.extra ?? {}), error: err.code, detail: err.message } };
@@ -5805,6 +5913,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerOrgSettingsRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0212 (P12 b/c): model rate limits, their org opt-in, and per-modality agent prices
   registerModelRateLimitRoutes(app, db);
+  // ADR-0241 (P21): admin usage mappings (versioned, sample-tested, step-up to activate; off by default)
+  registerUsageExtractorRoutes(app, db);
   // ADR-0202 decision 4 — the demo beats' simulated fallback; admin-only (not in NON_ADMIN_ROUTES), audited
   registerDemoBeatRoutes(app, db);
   registerPosturePresetRoutes(app, db, { sink: anchorSink, bootstrapConfigured: Boolean(opts.bootstrapToken) });
