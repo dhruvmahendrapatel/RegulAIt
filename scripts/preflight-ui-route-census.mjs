@@ -101,6 +101,7 @@ export const MACHINE_ONLY = new Map([
 
   // ---- runner and executor channels (credentialed machines) ----------------
   ["* /v1/engine-runner/*", { reason: "runner channel: only an engine runner credential reaches these (ADR-0187, route-classes.ts; ADR-0188 S7 adds the key rotation route; ADR-0190 I5 adds the three task routes; ENG-IMG removes the runner artifact route)", matches: 9 }],
+  ["POST /v1/third-party-ingest/defenseclaw/records", "third-party exporter channel: a customer's DefenseClaw HTTP JSONL exporter posts here with its source's write-only rgti_ token, never a person (ADR-0261)"],
   ["* /v1/endpoint-agent/*", { reason: "endpoint agent channel: the agent's install step (bulk enrolment token), its registration (device ticket) and its own DPoP-bound self token reach these, never a person (ADR-0195 SD4b)", matches: 5 }],
   ["* /v1/executor-channel/*", { reason: "executor channel: only an enrolled executor reaches these (ADR-0190; I4 adds the two stdio session routes, I5 the two task input routes)", matches: 11 }],
 
@@ -348,10 +349,18 @@ export const KNOWN_UI_GAPS = new Map([
   ["POST /v1/agents/:agentId/usage-extractor/versions/:versionId/test", { does: "tests a version against a sample response and the counts the admin expects", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["POST /v1/agents/:agentId/usage-extractor/versions/:versionId/activate", { does: "activates a version whose latest test passed (settings_relax step-up)", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["POST /v1/agents/:agentId/usage-extractor/deactivate", { does: "returns an agent to its adapter's built-in usage counts", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  // batch U4 (ui-gaps-details) closed the last 22. ADR-0261 (P37) adds six: the owner decided on 2026-11-07 to raise
+  // the cap by exactly these and ship the DefenseClaw ingest API-only, with the admin screen tracked on #453.
+  ["GET /v1/third-party-ingest/sources", { does: "lists third-party ingest sources (DefenseClaw), their state, credential issue time and the ingest limits", tracking: "#453" }],
+  ["POST /v1/third-party-ingest/sources", { does: "creates a DefenseClaw ingest source, off by default", tracking: "#453" }],
+  ["PUT /v1/third-party-ingest/sources/:sourceId/enabled", { does: "turns a source on (step-up, audited) or off (audited)", tracking: "#453" }],
+  ["POST /v1/third-party-ingest/sources/:sourceId/credential", { does: "issues or replaces the source's write-only rgti_ token, shown once (step-up, audited)", tracking: "#453" }],
+  ["POST /v1/third-party-ingest/sources/:sourceId/credential/revoke", { does: "revokes the source's ingest token (audited)", tracking: "#453" }],
+  ["GET /v1/third-party-ingest/sources/:sourceId/records", { does: "the newest third-party evidence a source delivered, each marked third-party with its linked findings", tracking: "#453" }],
   // EXCEPTION (ADR-0255, P31, 2026-11-07): the P31 brief is "API and backend only; post the catalogue UI need on
-  // #453 for the Governed Designer", so these two routes ship with their screen owned by that lane. The ratchet is
-  // raised to 2 for them alone, visibly, and the Designer's catalogue screen deletes both entries and lowers it by 2. RAISED for review: the master decides on
-  // the PR whether to keep this or build the screen first.
+  // #453 for the Governed Designer", so these two routes ship with their screen owned by that lane. These two
+  // raise the cap by 2, visibly; the Designer's catalogue screen deletes both entries and lowers it by 2. RAISED for review:
+  // the owner or master decides on the PR whether to keep this or build the screen first.
   [
     "GET /v1/connector-catalogue",
     {
@@ -374,7 +383,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 9; // ADR-0241 (7) + ADR-0255 (2), each raised for the master's review
+export const KNOWN_UI_GAPS_MAX = 15; // ADR-0241 (7) + ADR-0261 (6) + ADR-0255 (2)
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 

@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-09-26
-- **Relates to**: [ADR-0060](0060-audit-hash-chain.md) (the content hash that decided where the
+- **Relates to**: [ADR-0060](0060-tamper-evident-audit.md) (the content hash that decided where the
   advisory marker lives), [ADR-0102](0102-operator-prose-credential-scrub.md) (preserves booleans by
   identity, so the marker survives the write path), [ADR-0104](0104-approval-payload-binding.md) /
   [ADR-0124](0124-kill-switch-and-safe-modes.md) (the queue and the dial the callout must not

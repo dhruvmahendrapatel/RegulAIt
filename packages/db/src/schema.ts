@@ -63,6 +63,7 @@ import {
   // with the migration's CHECKs by being the same constants
   ARTIFACT_FORMATS,
   ARTIFACT_SCAN_VERDICTS,
+  ADMISSION_SCAN_VERDICTS,
   ENGINE_IDS,
   ENGINE_ITEM_VERDICTS,
   ENGINE_KINDS,
@@ -140,6 +141,10 @@ import {
   DISCOVERY_RUN_TRIGGERS,
   DISCOVERY_SOURCE_KINDS,
   DISCOVERY_EVIDENCE_KINDS,
+  // ADR-0261 (P37): third-party security telemetry ingest
+  THIRD_PARTY_EVIDENCE_KINDS,
+  THIRD_PARTY_INGEST_KINDS,
+  DEFENSECLAW_BUCKETS,
   DISCOVERY_PSEUDONYM_KINDS,
   DISCOVERY_WRITE_SCOPE_STATES,
   AI_SIGNATURE_KINDS,
@@ -1675,6 +1680,9 @@ export const auditLog = pgTable(
         "discovery_run",
         "discovery_settings",
         "discovery_pseudonym",
+        // ADR-0261 (P37): a third-party ingest source (created, enabled, disabled, its write-only credential issued or
+        // revoked) and each accepted or refused batch of third-party evidence. Plain text column — no DDL.
+        "third_party_ingest_source",
         // ADR-0193 (I4): a content provenance record (objectId = the record) and a trust-tier change (a source's
         // tier, or the write floor). Plain text column — no DDL.
         "content_provenance",
@@ -1745,6 +1753,8 @@ export const auditLog = pgTable(
   },
   (t) => [
     index("audit_log_user_at_idx").on(t.userId, t.at),
+    // ADR-0251 (migration governed_core_resource_rules): window counts for connector and A2A rate limits
+    index("audit_log_resource_window_idx").on(t.userId, t.objectType, t.objectId, t.at).where(sql`${t.effect} = 'allow'`),
     check("audit_log_chain_version_check", sql`${t.chainVersion} IS NULL OR ${t.chainVersion} IN (1, 2)`),
     check(
       "audit_log_actor_chain_check",
@@ -2016,6 +2026,55 @@ export const modelRateLimits = pgTable(
     index("model_rate_limits_agent_idx").on(t.agentId),
     check("model_rate_limits_max_calls_check", sql`${t.maxCalls} BETWEEN 1 AND 1000000`),
     check("model_rate_limits_window_check", sql`${t.windowSeconds} BETWEEN 1 AND 2592000`),
+  ],
+);
+
+// ADR-0251 (migration governed_core_resource_rules): approval rules and rate limits for the call types that are not MCP tool calls. One
+// subject dimension (the same scope discriminant as approval_rules) and one resource binding: the type plus at most
+// one foreign key matching it (CHECK `*_type_ck`); no key = every resource of the type. The MCP tool path's tables
+// stay byte-identical, and models keep their rate limits in model_rate_limits (ADR-0212).
+export const resourceApprovalRules = pgTable(
+  "resource_approval_rules",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    resourceType: text("resource_type", { enum: ["model", "connector", "a2a"] }).notNull(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    connectorId: uuid("connector_id").references(() => connectors.id, { onDelete: "cascade" }),
+    a2aAgentId: uuid("a2a_agent_id").references(() => a2aAgents.id, { onDelete: "cascade" }),
+    scope: text("scope", { enum: ["user", "role", "team", "fleet"] }).notNull().default("user"),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    roleId: uuid("role_id").references(() => roles.id, { onDelete: "cascade" }),
+    teamId: uuid("team_id").references(() => teams.id, { onDelete: "cascade" }),
+    writeOnly: boolean("write_only").notNull().default(false),
+    approverUserId: uuid("approver_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("resource_approval_rules_type_idx").on(t.resourceType, t.scope)],
+);
+
+export const resourceRateLimits = pgTable(
+  "resource_rate_limits",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    resourceType: text("resource_type", { enum: ["connector", "a2a"] }).notNull(),
+    connectorId: uuid("connector_id").references(() => connectors.id, { onDelete: "cascade" }),
+    a2aAgentId: uuid("a2a_agent_id").references(() => a2aAgents.id, { onDelete: "cascade" }),
+    scope: text("scope", { enum: ["user", "role", "team", "fleet"] }).notNull().default("user"),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    roleId: uuid("role_id").references(() => roles.id, { onDelete: "cascade" }),
+    teamId: uuid("team_id").references(() => teams.id, { onDelete: "cascade" }),
+    maxCalls: integer("max_calls").notNull(),
+    windowSeconds: integer("window_seconds").notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("resource_rate_limits_type_idx").on(t.resourceType, t.scope),
+    check("resource_rate_limits_max_calls_check", sql`${t.maxCalls} BETWEEN 1 AND 1000000`),
+    check("resource_rate_limits_window_check", sql`${t.windowSeconds} BETWEEN 1 AND 2592000`),
   ],
 );
 
@@ -4486,9 +4545,9 @@ export const orgSettings = pgTable(
      * strict separation of duties: creating delegations is refused and
      * existing windows stop applying immediately. An admin may turn it on. */
     approvalDelegationEnabled: boolean("approval_delegation_enabled").notNull().default(false),
-    /** ADR-0212 (P12 c, migration 0230): model rate limits are enforced only once an
-     * admin opts in (step-up, audited) through PUT /v1/rules/model-rate-limits/enforcement */
-    modelRateLimitsEnabled: boolean("model_rate_limits_enabled").notNull().default(false),
+    /** ADR-0212 (P12 c, migration 0230): model rate limits enforcement. ADR-0251 (migration governed_core_resource_rules): TRUE by default;
+     * an admin may turn it off (step-up, audited) through PUT /v1/rules/model-rate-limits/enforcement */
+    modelRateLimitsEnabled: boolean("model_rate_limits_enabled").notNull().default(true),
     /** ADR-0241 (P21, migration 0297): admin-defined usage mappings are read at dispatch only once an admin opts in
      * (settings_relax step-up, audited) through PUT /v1/usage-extractors/enabled. Off = every count is the adapter's
      * built-in extraction. */
@@ -4613,6 +4672,12 @@ export const orgSettings = pgTable(
     /** ADR-0219 (P10, migration 0253): calls to remote agents over A2A. FALSE (the default, ADR-0180) = no remote
      * agent can be registered or called; an admin may turn it on (settings_relax step-up, audited). */
     a2aEnabled: boolean("a2a_enabled").notNull().default(false),
+    /** ADR-0251 (migration governed_core_resource_rules): must a connector call name a project? TRUE (the ADR-0180 default) = an unattributed
+     * connector call is refused (`attribution-required`), audited, before anything is sent; an admin may relax it
+     * (settings_relax step-up, audited), and the call then meters into the Unattributed bucket. */
+    connectorAttributionRequired: boolean("connector_attribution_required").notNull().default(true),
+    /** ADR-0251 (migration governed_core_resource_rules): the same mandate for calls to remote agents over A2A. */
+    a2aAttributionRequired: boolean("a2a_attribution_required").notNull().default(true),
     /** ADR-0097 (migration 0103): the MCP ADMISSION posture. 'enforce'
      * (DEFAULT since ADR-0181, migration 0159) refuses a `held` server BEFORE
      * any upstream connect and keeps it out of tool discovery until an admin
@@ -7487,7 +7552,8 @@ export const shadowAiImports = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     // ADR-0195 SD0 (migration 0202): the import kinds plus the scanner evidence kinds, one path for both
-    kind: text("kind", { enum: [...EVIDENCE_KINDS, ...DISCOVERY_EVIDENCE_KINDS] }).notNull(),
+    // ADR-0261 (migration pending/third_party_ingest): plus the third-party export kinds
+    kind: text("kind", { enum: [...EVIDENCE_KINDS, ...DISCOVERY_EVIDENCE_KINDS, ...THIRD_PARTY_EVIDENCE_KINDS] }).notNull(),
     mode: text("mode", { enum: ["dry_run", "apply"] }).notNull(),
     status: text("status", { enum: ["planned", "applied", "refused"] }).notNull(),
     source: text("source"),
@@ -13881,6 +13947,48 @@ export const artifactScans = pgTable(
   ],
 );
 
+/**
+ * ADR-0242 (P23, pending migration admission_engine_scans) — one admission-scan engine's verdict on one MCP server or builder skill at one
+ * digest. The admission gate reads the latest row for the subject's CURRENT digest; with the engine on, only a
+ * `pass` there admits (fail closed).
+ */
+export const admissionEngineScans = pgTable(
+  "admission_engine_scans",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    engineId: text("engine_id", { enum: ["mcpscanner", "skillscanner"] })
+      .notNull()
+      .references(() => engines.id, { onDelete: "restrict" }),
+    mcpServerId: uuid("mcp_server_id").references(() => mcpServers.id, { onDelete: "cascade" }),
+    builderSkillId: uuid("builder_skill_id").references(() => builderSkills.id, { onDelete: "cascade" }),
+    subjectDigest: text("subject_digest").notNull(),
+    engineRunId: uuid("engine_run_id").references(() => engineRuns.id, { onDelete: "set null" }),
+    // point-in-time copy (ADR-0200 addendum exception): the version that produced THIS scan, kept as evidence
+    engineVersion: text("engine_version").notNull(),
+    rulesSha256: text("rules_sha256"),
+    verdict: text("verdict", { enum: ADMISSION_SCAN_VERDICTS }).notNull(),
+    // point-in-time evidence (ADR-0200 addendum exception): the counts-only findings of THIS scan
+    findings: jsonb("findings").$type<Array<{ rule: string; severity: string; tool: string; where: string; count: number }>>().notNull().default([]),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("admission_engine_scans_engine_check", sql`${t.engineId} IN ('mcpscanner', 'skillscanner')`),
+    check(
+      "admission_engine_scans_subject_check",
+      sql`(${t.engineId} = 'mcpscanner' AND ${t.mcpServerId} IS NOT NULL AND ${t.builderSkillId} IS NULL) OR (${t.engineId} = 'skillscanner' AND ${t.builderSkillId} IS NOT NULL AND ${t.mcpServerId} IS NULL)`,
+    ),
+    check("admission_engine_scans_digest_check", sql`${t.subjectDigest} ~ '^[0-9a-f]{64}$'`),
+    check("admission_engine_scans_rules_check", sql`${t.rulesSha256} IS NULL OR ${t.rulesSha256} ~ '^[0-9a-f]{64}$'`),
+    check("admission_engine_scans_verdict_check", sql`${t.verdict} IN ('pass', 'fail', 'unknown')`),
+    check("admission_engine_scans_findings_check", sql`jsonb_typeof(${t.findings}) = 'array'`),
+    check("admission_engine_scans_version_check", sql`length(${t.engineVersion}) BETWEEN 1 AND 32`),
+    index("admission_engine_scans_mcp_idx").on(t.mcpServerId, t.subjectDigest, t.createdAt.desc()).where(sql`${t.mcpServerId} IS NOT NULL`),
+    index("admission_engine_scans_skill_idx").on(t.builderSkillId, t.subjectDigest, t.createdAt.desc()).where(sql`${t.builderSkillId} IS NOT NULL`),
+    uniqueIndex("admission_engine_scans_engine_run_unique").on(t.engineRunId).where(sql`${t.engineRunId} IS NOT NULL`),
+  ],
+);
+export type AdmissionEngineScanRow = typeof admissionEngineScans.$inferSelect;
+
 // ===========================================================================
 // ADR-0216 (P14 + P15, migration 0266) — model-file signatures and the supply-chain block.
 // ===========================================================================
@@ -15800,3 +15908,87 @@ export const connectorPieceEnablements = pgTable(
   ],
 );
 export type ConnectorPieceEnablementRow = typeof connectorPieceEnablements.$inferSelect;
+
+// ===========================================================================
+// ADR-0261 (P37, migration pending/third_party_ingest) — THIRD-PARTY SECURITY TELEMETRY INGEST
+//
+// A source is a customer's DefenseClaw deployment pushing its HTTP JSONL log export. It is off until an admin enables
+// it (a `settings_relax` step-up, audited), and it has at most one write-only credential, stored as a sha256 hash and
+// confined to the one ingest route. What arrives is THIRD-PARTY EVIDENCE: append-only rows, never a RegulAIt decision.
+// Single-tenant deployment: like the other register tables (0281 header), no tenant column and no RLS.
+// ===========================================================================
+
+export const thirdPartyIngestSources = pgTable(
+  "third_party_ingest_sources",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kind: text("kind", { enum: THIRD_PARTY_INGEST_KINDS }).notNull(),
+    name: text("name").notNull(),
+    /** the pinned export schema family; a record naming another family is refused */
+    schemaFamily: text("schema_family").notNull().default("v8"),
+    enabled: boolean("enabled").notNull().default(false),
+    /** sha256 hex of the `rgti_` credential; NULL until one is issued, and again once revoked */
+    tokenHash: text("token_hash"),
+    tokenIssuedAt: timestamp("token_issued_at", { withTimezone: true }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("third_party_ingest_sources_token_hash_uq").on(t.tokenHash),
+    uniqueIndex("third_party_ingest_sources_name_uq").on(sql`lower(${t.name})`),
+  ],
+);
+export type ThirdPartyIngestSourceRow = typeof thirdPartyIngestSources.$inferSelect;
+
+/**
+ * One accepted third-party record. APPEND-ONLY EVIDENCE (a trigger refuses UPDATE, DELETE and TRUNCATE): a
+ * point-in-time copy of allow-listed, scrubbed fields from a verbatim external payload, which is the ADR-0200
+ * exception for `attributes`. The unique (source, record id) pair is the dedup the exporter's docs require. Each row
+ * names the audit-chain row of the batch it arrived in (`audit_log` carries no FKs by design).
+ */
+export const thirdPartyIngestRecords = pgTable(
+  "third_party_ingest_records",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => thirdPartyIngestSources.id, { onDelete: "restrict" }),
+    recordId: text("record_id").notNull(),
+    bucket: text("bucket", { enum: DEFENSECLAW_BUCKETS }).notNull(),
+    /** an identifier the sending product chose (excluded from the content guard as `ingested`) */
+    eventName: text("event_name"),
+    severity: text("severity", { enum: ["critical", "high", "medium", "low", "info", "error"] }),
+    /** the sending product's own action (block, alert, allow…): its decision, never ours */
+    action: text("action"),
+    connector: text("connector"),
+    /** the device pseudonym (ADR-0195 decision 20); the host name itself is never stored */
+    devicePseudonym: text("device_pseudonym"),
+    /** allow-listed, bounded, scrubbed fields of the external payload (verbatim-payload exception, ADR-0200) */
+    attributes: jsonb("attributes").$type<Record<string, unknown>>().notNull(),
+    observedAt: timestamp("observed_at", { withTimezone: true }).notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+    recordSha256: text("record_sha256").notNull(),
+    batchSha256: text("batch_sha256").notNull(),
+    auditLogId: uuid("audit_log_id").notNull(),
+  },
+  (t) => [
+    uniqueIndex("third_party_ingest_records_dedup_uq").on(t.sourceId, t.recordId),
+    index("third_party_ingest_records_source_received_idx").on(t.sourceId, t.receivedAt.desc()),
+  ],
+);
+export type ThirdPartyIngestRecordRow = typeof thirdPartyIngestRecords.$inferSelect;
+
+/** which finding a third-party record opened or widened (a join table: findings are deleted by retention, records are not) */
+export const thirdPartyIngestRecordFindings = pgTable(
+  "third_party_ingest_record_findings",
+  {
+    recordId: uuid("record_id")
+      .notNull()
+      .references(() => thirdPartyIngestRecords.id, { onDelete: "cascade" }),
+    findingId: uuid("finding_id")
+      .notNull()
+      .references(() => shadowAiFindings.id, { onDelete: "cascade" }),
+  },
+  (t) => [primaryKey({ columns: [t.recordId, t.findingId] }), index("third_party_ingest_record_findings_finding_idx").on(t.findingId)],
+);
