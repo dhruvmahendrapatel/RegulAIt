@@ -157,9 +157,11 @@ describe("Dependabot auto-merge: the base branch must enforce the required check
   const api = ({ branch = off, rules = [], enforcement = {} } = {}) => ({
     branch: () => (branch instanceof Error ? (() => { throw branch; })() : branch),
     rules: () => (rules instanceof Error ? (() => { throw rules; })() : rules),
-    enforcement: (id) => {
+    // a string is the enforcement with no bypass for this token; an object sets both fields
+    ruleset: (id) => {
       if (!(id in enforcement)) throw new Error(`ruleset ${id} not found`);
-      return enforcement[id];
+      const e = enforcement[id];
+      return typeof e === "string" ? { enforcement: e, current_user_can_bypass: "never" } : e;
     },
   });
 
@@ -206,16 +208,43 @@ describe("Dependabot auto-merge: the base branch must enforce the required check
     expect(r.reasons[0]).toContain("could not be read");
   });
 
-  it("reads the three endpoints for the given repository and branch, and refuses a ruleset with no enforcement", () => {
+  it("refuses a ruleset this token can bypass, or one that does not say (#761 security review)", () => {
+    for (const bypass of ["always", "pull_requests_only", "exempt", undefined]) {
+      const r = checkEnforced(api({ rules: [rule(4, REQUIRED_CHECKS)], enforcement: { 4: { enforcement: "active", current_user_can_bypass: bypass } } }));
+      expect(r.enforced, String(bypass)).toBe(false);
+    }
+    expect(checkEnforced(api({ rules: [rule(4, REQUIRED_CHECKS)], enforcement: { 4: { enforcement: "active", current_user_can_bypass: "never" } } })).enforced).toBe(true);
+    // a bypassable ruleset does not count even when another, binding one supplies the rest
+    expect(checkEnforced(api({ rules: [rule(4, REQUIRED_CHECKS.slice(0, 3)), rule(5, REQUIRED_CHECKS.slice(3))],
+      enforcement: { 4: "active", 5: { enforcement: "active", current_user_can_bypass: "pull_requests_only" } } })).enforced).toBe(false);
+  });
+
+  it("reads every page of the branch rules, each ruleset once, for the given repository and branch", () => {
     const calls = [];
     const run = (_cmd, args) => {
-      calls.push(args[1]);
-      if (args[1].startsWith("repos/o/r/rulesets/")) return JSON.stringify({});
-      return JSON.stringify(args[1].includes("/rules/") ? [rule(5, REQUIRED_CHECKS)] : off);
+      const route = args.at(-1);
+      calls.push(args.slice(1).join(" "));
+      if (route === "repos/o/r/rulesets/5") return JSON.stringify({ enforcement: "active", current_user_can_bypass: "never" });
+      if (route === "repos/o/r/rulesets/6") return JSON.stringify({ enforcement: "active", current_user_can_bypass: "never" });
+      if (route.includes("/rules/")) return JSON.stringify([[rule(5, REQUIRED_CHECKS.slice(0, 3))], [rule(6, REQUIRED_CHECKS.slice(3)), rule(5, [])]]);
+      return JSON.stringify(off);
     };
     const r = checkEnforced(liveApi("o/r", "release/1", run));
-    expect(calls).toEqual(["repos/o/r/branches/release%2F1", "repos/o/r/rules/branches/release%2F1", "repos/o/r/rulesets/5"]);
-    expect(r.enforced).toBe(false);
+    expect(calls).toEqual(["repos/o/r/branches/release%2F1", "--paginate --slurp repos/o/r/rules/branches/release%2F1",
+      "repos/o/r/rulesets/5", "repos/o/r/rulesets/6"]);
+    expect(r.enforced).toBe(true); // the six checks are split across two pages
+  });
+
+  it("fails closed on a ruleset with no enforcement, or rule pages that are not lists", () => {
+    const run = (bad) => (_cmd, args) => {
+      const route = args.at(-1);
+      if (route.startsWith("repos/o/r/rulesets/")) return JSON.stringify(bad === "ruleset" ? {} : { enforcement: "active", current_user_can_bypass: "never" });
+      if (route.includes("/rules/")) return JSON.stringify(bad === "pages" ? [{ message: "Not Found" }] : [[rule(5, REQUIRED_CHECKS)]]);
+      return JSON.stringify(off);
+    };
+    expect(checkEnforced(liveApi("o/r", "main", run("none"))).enforced).toBe(true);
+    expect(checkEnforced(liveApi("o/r", "main", run("ruleset"))).enforced).toBe(false);
+    expect(checkEnforced(liveApi("o/r", "main", run("pages"))).enforced).toBe(false);
   });
 
   it("wires the gate: base-commit script, runs when eligible, comments once when refused, never merges by itself", () => {

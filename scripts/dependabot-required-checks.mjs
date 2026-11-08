@@ -6,11 +6,19 @@
 // enforce every check in REQUIRED_CHECKS, read at run time from the two places GitHub enforces them:
 //   - classic branch protection: GET /repos/{repo}/branches/{branch} -> protection.required_status_checks
 //     (contexts, and checks[].context), counted only when protection.enabled and enforcement_level != "off";
-//   - rulesets: GET /repos/{repo}/rules/branches/{branch} -> rules of type required_status_checks, counted only
-//     when the ruleset they come from is enforcement "active" (GET /repos/{repo}/rulesets/{id}; "evaluate" and
-//     "disabled" do not block a merge).
+//   - rulesets: GET /repos/{repo}/rules/branches/{branch} (every page) -> rules of type required_status_checks,
+//     counted only when the ruleset they come from (GET /repos/{repo}/rulesets/{id}) is enforcement "active" ("evaluate"
+//     and "disabled" do not block a merge) AND its current_user_can_bypass is "never". That field is this token's
+//     (github-actions[bot]'s) own bypass status: if the ruleset lets the token bypass it ("always",
+//     "pull_requests_only", "exempt") or does not say, its checks do not bind the merge this job enables (#761 review).
 // Any lookup that fails, any missing check, or any unreadable answer means "not enforced": the workflow leaves the PR
 // for a reviewer and comments why. The workflow never waits and merges by itself.
+//
+// Limits (#761 review): the protection is read once, when auto-merge is enabled. If the protection is removed later,
+// a PR already queued would merge at once; removing it is an admin action, and whoever does it turns off auto-merge
+// on open Dependabot PRs first. A check is matched by name only; pinning the app that must report it belongs in the
+// ruleset. Org-level rulesets also appear in rules/branches; if this token cannot read one, the gate fails closed and
+// auto-merge stays off, which is safe but looks like a bug.
 //
 // usage (from .github/workflows/dependabot-auto-merge.yml):
 //   REPO=owner/name BRANCH=main node scripts/dependabot-required-checks.mjs
@@ -39,31 +47,32 @@ export function protectionChecks(branch) {
   return [...(rsc.contexts ?? []), ...(rsc.checks ?? []).map((c) => c?.context)].filter((c) => typeof c === "string");
 }
 
-/** the check names active rulesets enforce; `enforcement(id)` returns a ruleset's enforcement or throws */
-export function rulesetChecks(rules, enforcement) {
+/** the check names rulesets enforce on this token; `ruleset(id)` returns {enforcement, current_user_can_bypass} or throws */
+export function rulesetChecks(rules, ruleset) {
   if (!Array.isArray(rules)) throw new Error("the branch rules could not be read");
   const out = [];
   for (const r of rules) {
     if (r?.type !== "required_status_checks") continue;
-    if (enforcement(r.ruleset_id) !== "active") continue;
+    const rs = ruleset(r.ruleset_id);
+    if (rs?.enforcement !== "active" || rs?.current_user_can_bypass !== "never") continue;
     for (const c of r.parameters?.required_status_checks ?? []) if (typeof c?.context === "string") out.push(c.context);
   }
   return out;
 }
 
 /**
- * @param {{ branch: () => any, rules: () => any, enforcement: (id: number) => string }} api
+ * @param {{ branch: () => any, rules: () => any, ruleset: (id: number) => {enforcement?: string, current_user_can_bypass?: string} }} api
  * @returns {{ enforced: boolean, reasons: string[] }}
  */
 export function checkEnforced(api) {
   let have;
   try {
     const memo = new Map();
-    const enforcement = (id) => {
-      if (!memo.has(id)) memo.set(id, api.enforcement(id));
+    const ruleset = (id) => {
+      if (!memo.has(id)) memo.set(id, api.ruleset(id));
       return memo.get(id);
     };
-    have = new Set([...protectionChecks(api.branch()), ...rulesetChecks(api.rules(), enforcement)]);
+    have = new Set([...protectionChecks(api.branch()), ...rulesetChecks(api.rules(), ruleset)]);
   } catch (e) {
     return { enforced: false, reasons: [`the branch's required checks could not be read (${e instanceof Error ? e.message : String(e)})`] };
   }
@@ -73,8 +82,15 @@ export function checkEnforced(api) {
     : { enforced: true, reasons: [] };
 }
 
-function ghJson(route, run = execFileSync) {
-  return JSON.parse(run("gh", ["api", route], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+function ghJson(route, run = execFileSync, extra = []) {
+  return JSON.parse(run("gh", ["api", ...extra, route], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+}
+
+/** every page of a list endpoint, flattened (a non-array page throws: fail closed) */
+function ghList(route, run = execFileSync) {
+  const pages = ghJson(route, run, ["--paginate", "--slurp"]);
+  if (!Array.isArray(pages) || !pages.every(Array.isArray)) throw new Error(`${route} did not return a list`);
+  return pages.flat();
 }
 
 /** the live API for one repository and branch (GITHUB_TOKEN with contents: read is enough for all three) */
@@ -82,11 +98,11 @@ export function liveApi(repo, branch, run = execFileSync) {
   const b = encodeURIComponent(branch);
   return {
     branch: () => ghJson(`repos/${repo}/branches/${b}`, run),
-    rules: () => ghJson(`repos/${repo}/rules/branches/${b}`, run),
-    enforcement: (id) => {
-      const e = ghJson(`repos/${repo}/rulesets/${Number(id)}`, run).enforcement;
-      if (typeof e !== "string") throw new Error(`ruleset ${id} has no enforcement`);
-      return e;
+    rules: () => ghList(`repos/${repo}/rules/branches/${b}`, run),
+    ruleset: (id) => {
+      const { enforcement, current_user_can_bypass } = ghJson(`repos/${repo}/rulesets/${Number(id)}`, run) ?? {};
+      if (typeof enforcement !== "string") throw new Error(`ruleset ${id} has no enforcement`);
+      return { enforcement, current_user_can_bypass };
     },
   };
 }
