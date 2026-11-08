@@ -38,6 +38,7 @@ import {
   createApprovalRuleSchema,
   createAuthorisedTargetSchema,
   extractTargets,
+  markServerHighRiskSchema,
   normaliseAuthorisedTarget,
   redactArgumentsForAudit,
   type AuthorisedTarget,
@@ -50,6 +51,7 @@ const NIL_USER = "00000000-0000-0000-0000-000000000000";
 
 export const MCP_HIGH_RISK_RULE_IDS = {
   classified: "mcp-server-high-risk",
+  markedManually: "mcp-server-high-risk-marked",
   noPolicy: "mcp-high-risk-no-policy",
   targetRequired: "mcp-high-risk-target-required",
   targetRefused: "mcp-high-risk-target-refused",
@@ -141,7 +143,8 @@ export async function highRiskRefusal(
   if ((await loadOrgSettings(db)).mcpHighRiskMode !== "enforce") return null;
 
   const redacted = redactArgumentsForAudit(call.arguments ?? {});
-  const targets = extractTargets(call.arguments);
+  const extracted = extractTargets(call.arguments);
+  const targets = extracted.targets;
   let refusal: HighRiskRefusal | null = null;
   let refused: string[] = [];
   const policy = await highRiskPolicyApplied(db, call.serverId);
@@ -151,6 +154,13 @@ export async function highRiskRefusal(
       reason:
         `MCP server '${server.name}' is high-risk (offensive tooling) and its policy template is not applied ` +
         `(an approval rule with quorum >= ${HIGH_RISK_MIN_QUORUM} and a rate limit); every call is refused until it is`,
+    };
+  } else if (extracted.truncated) {
+    // the argument tree was too large to scan to the end, so a target may be unscanned: refuse rather than let it
+    // ride (fail closed, ADR-0180; review finding 1 — the cap no longer silently drops targets)
+    refusal = {
+      ruleId: MCP_HIGH_RISK_RULE_IDS.targetRefused,
+      reason: `a call to high-risk MCP server '${server.name}' has more arguments than the target scan can cover; it is refused so no target goes unchecked`,
     };
   } else if (targets.length === 0) {
     refusal = {
@@ -205,6 +215,39 @@ export function registerMcpHighRiskRoutes(app: FastifyInstance, db: Db): void {
     const policy = await highRiskPolicyApplied(db, serverId);
     const mode = (await loadOrgSettings(db)).mcpHighRiskMode;
     return { serverId, ...server, mode, policyApplied: !!(policy.approvalRuleId && policy.rateLimitId), ...policy };
+  });
+
+  /**
+   * MARK A SERVER HIGH-RISK BY HAND (review finding 3). The automatic classifier reads tool names and descriptions,
+   * so a server that names its offensive tools neutrally stays `standard`; an admin marks it here, with a reason,
+   * audited. It only tightens — a server is never lowered to `standard` — so no step-up, like applying the template.
+   */
+  app.post("/v1/servers/:serverId/risk-class", async (req, reply) => {
+    const { serverId } = serverParam.parse(req.params);
+    const body = markServerHighRiskSchema.parse(req.body);
+    const [server] = await db.select({ name: mcpServers.name, riskClass: mcpServers.riskClass }).from(mcpServers).where(eq(mcpServers.id, serverId));
+    if (!server) return reply.status(404).send({ error: "unknown_server" });
+    if (server.riskClass === "high") {
+      return reply.status(409).send({ error: "already_high_risk", detail: `MCP server '${server.name}' is already high-risk.` });
+    }
+    await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      await tx.update(mcpServers).set({ riskClass: "high", riskClassifiedAt: new Date() }).where(eq(mcpServers.id, serverId));
+      await tx.insert(auditLog).values({
+        userId: req.authCtx.userId ?? NIL_USER,
+        serverId,
+        objectType: "mcp_server",
+        objectId: serverId,
+        detail: { phase: "risk-classification", trigger: "manual", via: req.authCtx.via, reason: body.reason },
+        effect: "allow",
+        ruleId: MCP_HIGH_RISK_RULE_IDS.markedManually,
+        ruleChain: [],
+        reason:
+          `MCP server '${server.name}' marked HIGH-RISK by an admin — reason: ${body.reason}. Every call now needs the ` +
+          `high-risk policy template and an authorised target. It is never lowered automatically.`,
+      });
+    });
+    return reply.status(200).send({ serverId, riskClass: "high" as const });
   });
 
   /**

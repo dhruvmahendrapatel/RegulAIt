@@ -208,9 +208,45 @@ describe("ADR-0246 addendum: an offensive-tooling server", () => {
     expect(off.state.calls).toEqual([]);
   });
 
+  it("finding 2: a target hidden in an unrecognised or nested key is checked, not just the recognised one", async () => {
+    // the recognised 'target' holds an authorised value; an out-of-scope host rides in an unrecognised key
+    await deniedWith("run_exploit", { target: IN_SCOPE, module: "m", lhost: OUT_OF_SCOPE }, MCP_HIGH_RISK_RULE_IDS.targetRefused);
+    await deniedWith("run_exploit", { target: IN_SCOPE, module: "m", opts: { callback: OUT_OF_SCOPE } }, MCP_HIGH_RISK_RULE_IDS.targetRefused);
+    const row = await lastAudit(MCP_HIGH_RISK_RULE_IDS.targetRefused, off.serverId);
+    expect((row?.detail as { refusedTargets: string[] }).refusedTargets).toContain(OUT_OF_SCOPE);
+  });
+
+  it("finding 1: a call with more arguments than the scan budget is refused, not let through", async () => {
+    const huge: Record<string, unknown> = { target: IN_SCOPE, module: "m", items: Array.from({ length: 30_000 }, (_, i) => `n${i}`) };
+    await deniedWith("run_exploit", huge, MCP_HIGH_RISK_RULE_IDS.targetRefused);
+    expect(off.state.calls).toEqual([]);
+  });
+
   it("relaxing the high-risk mode to 'off' needs the step-up", async () => {
     const asked = await app.inject({ method: "PUT", url: "/v1/org/settings", headers: adminKey, payload: { mcpHighRiskMode: "off" } });
     expect(asked.statusCode, asked.body).toBe(403);
     expect(asked.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax" });
+  });
+
+  it("finding 3: an admin marks a neutrally-named server high-risk by hand, audited, and it is then gated", async () => {
+    // the rug-pull fixture names its tools neutrally, so the automatic classifier leaves it 'standard'
+    const benign = await register("rug-pull");
+    const [before] = await db.select({ riskClass: mcpServers.riskClass }).from(mcpServers).where(eq(mcpServers.id, benign.serverId));
+    expect(before?.riskClass).toBe("standard");
+
+    const marked = await app.inject({ method: "POST", url: `/v1/servers/${benign.serverId}/risk-class`, headers: boot, payload: { reason: "manual pen-test scope: it drives nmap under the hood" } });
+    expect(marked.statusCode, marked.body).toBe(200);
+    expect(marked.json()).toMatchObject({ riskClass: "high" });
+    expect((await lastAudit(MCP_HIGH_RISK_RULE_IDS.markedManually, benign.serverId))?.effect).toBe("allow");
+
+    // now gated: a call is refused for want of the policy template, and the upstream sees no tools/call
+    const out = await executeGovernedToolCall(db, undefined, { userId: ids.caller, serverId: benign.serverId, toolName: "get_weather", arguments: { city: "Oslo" } });
+    expect(out.kind, JSON.stringify(out)).toBe("denied");
+    if (out.kind === "denied") expect(out.decision.ruleId).toBe(MCP_HIGH_RISK_RULE_IDS.noPolicy);
+    expect(benign.state.calls).toEqual([]);
+
+    // idempotent-ish: marking an already-high server is a 409, nothing changes
+    const again = await app.inject({ method: "POST", url: `/v1/servers/${benign.serverId}/risk-class`, headers: boot, payload: { reason: "again" } });
+    expect(again.statusCode).toBe(409);
   });
 });

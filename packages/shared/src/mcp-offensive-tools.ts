@@ -125,26 +125,65 @@ export interface AuthorisedTarget {
   value: string;
 }
 
-const MAX_TARGETS = 64;
+/** The whole argument tree is walked to this many nodes and this deep. Past either bound the scan is incomplete, so
+ * `extractTargets` reports `truncated` and the gate refuses the call (fail closed, ADR-0180) rather than trust a
+ * partial scan. The bounds are generous: a real offensive-tool call names a handful of targets. */
+const MAX_TARGET_NODES = 20_000;
+const MAX_TARGET_DEPTH = 16;
 
-/** The raw target strings in a call's arguments (bounded). Non-string values under a target key count as
- * unparseable targets, so they are refused rather than ignored. */
-export function extractTargets(args: Record<string, unknown> | undefined | null): string[] {
-  const out: string[] = [];
-  const take = (v: unknown) => {
-    if (out.length >= MAX_TARGETS) return;
-    if (typeof v === "string") out.push(v);
-    else if (Array.isArray(v)) for (const x of v.slice(0, MAX_TARGETS)) take(x);
-    else out.push("<non-string>");
-  };
-  const visit = (obj: Record<string, unknown>, depth: number) => {
-    for (const [k, v] of Object.entries(obj)) {
-      if (TARGET_ARGUMENT_KEYS.has(k.toLowerCase())) take(v);
-      else if (depth === 0 && v !== null && typeof v === "object" && !Array.isArray(v)) visit(v as Record<string, unknown>, 1);
+export interface ExtractedTargets {
+  /** every target the call carries: the values under a target-named key (a non-string there is `<non-string>`, which
+   *  `checkTargets` refuses), AND every host-, IP-, CIDR- or URL-shaped string ANYWHERE in the arguments — so a
+   *  target hidden in an unrecognised key (`lhost`, `callback`, `dest`, …) or nested below depth 1 is still checked. */
+  targets: string[];
+  /** the argument tree exceeded the node or depth budget, so a value may be unscanned. The caller refuses. */
+  truncated: boolean;
+}
+
+/** Does this string look like a network target (so a high-risk call carrying it must have it authorised)? A URL, an
+ * IP, a CIDR, or a MULTI-label hostname (a dotted name); a bare single word like `module` or `true` is not a target,
+ * which is why the whole-tree scan does not refuse every call. */
+export function looksLikeNetworkTarget(value: string): boolean {
+  if (typeof value !== "string" || value.length === 0 || value.length > 2048) return false;
+  const t = normaliseTarget(value);
+  return !!t && (t.kind !== "host" || t.host.includes("."));
+}
+
+/** Every target string in a call's arguments, scanned over the WHOLE tree (ADR-0246 addendum, review findings 1-2). */
+export function extractTargets(args: Record<string, unknown> | undefined | null): ExtractedTargets {
+  const targets = new Set<string>();
+  let truncated = false;
+  let budget = MAX_TARGET_NODES;
+  const visit = (value: unknown, depth: number, underTargetKey: boolean): void => {
+    if (budget-- <= 0) {
+      truncated = true;
+      return;
+    }
+    if (typeof value === "string") {
+      // under a target-named key: taken verbatim (even a bare word, so a scoped call still names its target);
+      // anywhere else: taken only when it is network-shaped, so an unrecognised/nested target cannot ride along
+      if (underTargetKey || looksLikeNetworkTarget(value)) targets.add(value);
+      return;
+    }
+    if (value === null || typeof value !== "object") {
+      // a non-string leaf under a target key is an unparseable target, refused rather than ignored
+      if (underTargetKey) targets.add("<non-string>");
+      return;
+    }
+    if (depth >= MAX_TARGET_DEPTH) {
+      truncated = true;
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const x of value) visit(x, depth + 1, underTargetKey);
+      return;
+    }
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      visit(v, depth + 1, underTargetKey || TARGET_ARGUMENT_KEYS.has(k.toLowerCase()));
     }
   };
-  if (args && typeof args === "object") visit(args, 0);
-  return out;
+  if (args && typeof args === "object") visit(args, 0, false);
+  return { targets: [...targets], truncated };
 }
 
 type NormalisedTarget = { kind: "ip"; ip: string; family: "ipv4" | "ipv6" } | { kind: "cidr"; ip: string; prefix: number; family: "ipv4" | "ipv6" } | { kind: "host"; host: string };
@@ -289,5 +328,14 @@ export const createAuthorisedTargetSchema = z
     kind: z.enum(AUTHORISED_TARGET_KINDS),
     value: z.string().trim().min(1).max(2048),
     note: z.string().trim().min(1).max(500),
+  })
+  .strict();
+
+/** POST /v1/servers/:serverId/risk-class — an admin marks a server high-risk by hand, because the automatic
+ * classifier reads names and descriptions and a server can name its offensive tools neutrally (review finding 3). It
+ * only ever tightens: a server is never lowered to `standard` here, as the automatic path never lowers it either. */
+export const markServerHighRiskSchema = z
+  .object({
+    reason: z.string().trim().min(1).max(2000),
   })
   .strict();

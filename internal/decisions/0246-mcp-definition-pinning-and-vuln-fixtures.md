@@ -155,12 +155,18 @@ audited as `mcp-server-high-risk`. The class is sticky: a later manifest never l
 these checks in order:
 1. **Default deny until the policy template is applied** (`mcp-high-risk-no-policy`). The template is a fleet approval
    rule on every tool of the server with quorum of at least 2, plus a fleet rate limit on the server.
-2. **Target scoping.** The call must name its target(s) in a target-named argument (`target`, `host`, `url`, `ip`,
-   `cidr`, `rhosts` and similar, at the top level or one object down). Without one it is refused as
-   `mcp-high-risk-target-required`. Every target must be covered by the admin-maintained `mcp_authorised_targets` list,
-   or the call is refused as `mcp-high-risk-target-refused`. Entries are a host (hostname or IP), a domain (itself and
-   its subdomains) or a CIDR, matched with `node:net`'s `BlockList`. URLs are read for their host. Look-alikes, wider
-   ranges and unparseable values are refused.
+2. **Target scoping.** The call must name a target. `extractTargets` walks the WHOLE argument tree (not just the
+   target-named keys at the top or one level down): the value under a target-named key (`target`, `host`, `url`, `ip`,
+   `cidr`, `rhosts` and similar) is taken verbatim, and in addition ANY host-, IP-, CIDR- or URL-shaped string
+   anywhere in the arguments is taken as a target — so a target hidden in an unrecognised key (`lhost`, `callback`,
+   `dest`, …) or nested below the first level is still checked (review finding 2). A bare word that is not
+   network-shaped (a module name, a flag) is not treated as a target, so an ordinary call is not refused wholesale.
+   With no target the call is refused `mcp-high-risk-target-required`. Every target must be covered by the
+   admin-maintained `mcp_authorised_targets` list, or the call is refused `mcp-high-risk-target-refused`. Entries are a
+   host (hostname or IP), a domain (itself and its subdomains) or a CIDR, matched with `node:net`'s `BlockList`. URLs
+   are read for their host. Look-alikes, wider ranges and unparseable values are refused. The scan is bounded (20 000
+   nodes, depth 16); an argument tree past that bound is refused `mcp-high-risk-target-refused` rather than scanned in
+   part, so the cap never silently drops a target (review finding 1, fail closed under ADR-0180).
 3. **Full audit.** Every call writes one row with its arguments: refused, or `mcp-high-risk-call` when passed on.
    Values under secret-named keys are replaced, string leaves go through ADR-0099's `scrubAuditText`, and the copy is
    bounded. The audit writer's own field scrub then applies on top.
@@ -175,6 +181,10 @@ refuses a credential-shaped argument.
   (`approverUserId`, `approverRoleId`, `quorum` 2–5, `maxCalls`, `windowSeconds`). Applying it tightens, so it needs no
   step-up. It goes through `createApprovalRuleRow`, the one approval-rule writer, and is audited in the same
   transaction.
+- `POST /v1/servers/:serverId/risk-class`: an admin marks a server high-risk by hand with a reason, audited
+  (`mcp-server-high-risk-marked`), because the automatic classifier reads names and descriptions and a server can name
+  its offensive tools neutrally (review finding 3). It only tightens — a server already `high` returns 409 and nothing
+  is lowered — so no step-up, like applying the template.
 - `GET` and `POST /v1/mcp/authorised-targets`: adding a target widens what a server may be pointed at, so it needs a
   `settings_relax` step-up bound to the normalised target, and is audited.
 - `DELETE /v1/mcp/authorised-targets/:id`: narrowing, audited, no step-up.
@@ -184,11 +194,21 @@ refuses a credential-shaped argument.
 "SIMULATED" string.
 
 **Limits.**
-- The classifier reads names and descriptions, not behaviour. A server that hides what it does needs an admin's
-  judgement; the definition pins catch it changing later.
+- The classifier reads names and descriptions, not behaviour, so it is **best-effort**: a server that names its
+  offensive tools neutrally stays `standard` until an admin marks it high-risk by hand (`POST .../risk-class`). The
+  definition pins catch it changing later. (Review finding 3.)
+- Target scoping reads the call's arguments. It cannot see a target a tool derives internally or fetches from returned
+  content, and it treats every network-shaped string as a target to be authorised, so a benign host-shaped value in an
+  argument (an unrelated URL) must also be on the list for the call to pass. (Review finding 2 — the scope, now that
+  the scan covers the whole argument tree.)
+- The pins are of the **list metadata** — a tool's definition, a prompt's descriptor, a resource's descriptor — not of
+  the `prompts/get` message body or the `resources/read` content. A server can change what it returns on `get`/`read`
+  without tripping a pin; that content is governed by the output guardrails (PII, prompt-injection), not by pinning.
+  If `prompts/list` or `resources/list` fails, that kind is "not observed" and its pins are left unchanged. (Review
+  finding 4.)
 - Prompts and resources of a high-risk server are governed by the ordinary protocol gates only.
 - The authorised-targets list is deployment-wide, not per server.
-- The class is never lowered automatically. There is no downgrade route; re-registering the server is the way.
+- The class is never lowered automatically, and there is no downgrade route; re-registering the server is the way.
 
 ## Consequences
 

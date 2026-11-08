@@ -37,10 +37,35 @@ describe("targets", () => {
     normaliseAuthorisedTarget("cidr", "2001:db8::/32")!,
   ];
 
-  it("extracts targets from target-named arguments, one level down too", () => {
-    expect(extractTargets({ target: "a", opts: { hosts: ["b", "c"] }, other: "x" })).toEqual(["a", "b", "c"]);
-    expect(extractTargets({ ports: "22" })).toEqual([]);
-    expect(extractTargets({ target: 42 })).toEqual(["<non-string>"]);
+  const targets = (args: Record<string, unknown>) => extractTargets(args).targets.sort();
+
+  it("extracts targets from target-named arguments at any depth", () => {
+    expect(targets({ target: "a", opts: { hosts: ["b", "c"] }, other: "x" })).toEqual(["a", "b", "c"]);
+    expect(targets({ ports: "22" })).toEqual([]);
+    expect(targets({ target: 42 })).toEqual(["<non-string>"]);
+    expect(extractTargets({ target: "a" }).truncated).toBe(false);
+  });
+
+  it("finding 2: a network-shaped string in ANY key, however deep, is taken as a target", () => {
+    // a recognised key holds an authorised decoy; the real target hides in an unrecognised or nested key
+    expect(targets({ target: "authorised.example", lhost: "victim.example.test" })).toEqual(["authorised.example", "victim.example.test"]);
+    expect(targets({ opts: { scan: { callback: "http://evil.example.test:9001/x" } } })).toEqual(["http://evil.example.test:9001/x"]);
+    expect(targets({ dest: "203.0.113.9" })).toEqual(["203.0.113.9"]);
+    // bare words and non-network strings are NOT targets, so an ordinary call is not refused wholesale
+    expect(targets({ module: "exploit/windows/smb", note: "run it twice" })).toEqual([]);
+  });
+
+  it("finding 1: an argument tree past the scan budget is reported truncated (the gate then refuses)", () => {
+    const deep: Record<string, unknown> = {};
+    let cur = deep;
+    for (let i = 0; i < 40; i++) {
+      const next: Record<string, unknown> = {};
+      cur.child = next;
+      cur = next;
+    }
+    expect(extractTargets(deep).truncated).toBe(true);
+    const wide = { items: Array.from({ length: 30_000 }, (_, i) => `n${i}`) };
+    expect(extractTargets(wide).truncated).toBe(true);
   });
 
   it("authorises IPs in a CIDR, listed hosts, domains and their subdomains, URLs by host, and contained IPv4 ranges", () => {
