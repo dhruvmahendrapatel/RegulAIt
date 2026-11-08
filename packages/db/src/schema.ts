@@ -3392,6 +3392,33 @@ export const pmSyncEvents = pgTable(
   (t) => [index("pm_sync_events_conn_idx").on(t.connectionId, t.receivedAt)],
 );
 
+// S-03 (ADR-0010 amendment, migration `pm_webhook_deliveries` (pending, numbered at merge)): one row per inbound PM webhook
+// delivery that reached processing, so a replay is acknowledged and never
+// processed twice. Keyed per connection by the sha256 of the signed content
+// (the exact body; generic: "<timestamp>.<body>") and, where the provider
+// sends one, its own delivery id (either one matching is a duplicate). Pruned
+// after PM_WEBHOOK_DELIVERY_RETENTION_DAYS; the row is a dedup marker, not
+// evidence: the audit trail and pm_sync_events hold that.
+export const pmWebhookDeliveries = pgTable(
+  "pm_webhook_deliveries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => pmConnections.id, { onDelete: "cascade" }),
+    contentSha256: text("content_sha256").notNull(),
+    deliveryId: text("delivery_id"),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("pm_webhook_deliveries_content_uq").on(t.connectionId, t.contentSha256),
+    uniqueIndex("pm_webhook_deliveries_delivery_uq")
+      .on(t.connectionId, t.deliveryId)
+      .where(sql`${t.deliveryId} IS NOT NULL`),
+    index("pm_webhook_deliveries_received_idx").on(t.receivedAt),
+  ],
+);
+
 // MODEL DISPATCH: one platform credential per model provider, AES-256-GCM
 // encrypted with REGULAIT_DATA_KEY (same discipline as git/PM connection
 // tokens — never plaintext at rest, never returned by any endpoint).
