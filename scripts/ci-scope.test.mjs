@@ -125,26 +125,38 @@ describe("the PR scope's trim rules", () => {
     }
   });
 
-  it("rule 4: a PR that changes only apps/web/** and docs skips the gateway; anything else outside apps/web/** runs it", () => {
-    expect(scopeOf(["apps/web/src/a.tsx", "apps/web/src/a.css", "docs/a.md", "internal/b.md", "README.md"]))
-      .toMatchObject({ code: true, web: true, gateway: false });
-    for (const f of ["apps/gateway/src/a.ts", "packages/shared/src/a.ts", "packages/db/migrations/pending/x.sql", "scripts/x.mjs",
-      "integrations/kong/handler.lua", "pnpm-lock.yaml", "package.json"]) {
-      expect(scopeOf(["apps/web/src/a.tsx", f]).gateway, f).toBe(true);
+  it("rule 3: the Trivy gate's own inputs set `image`, so the required scan runs on the PR that changes how it judges", () => {
+    for (const f of ["security/image-allowlist.json", "security/image-allowlist.engine-garak.json", "scripts/security-gate.mjs",
+      "scripts/security-runtime-contents.mjs", "scripts/security-suppressions.mjs", "scripts/security-cosign-verify.sh"]) {
+      expect(scopeOf([f]).image, f).toBe(true);
     }
-    // the shape of #604 at 2c3aa886: web and gateway together, so the gateway shards were right to run
-    expect(scopeOf(["apps/web/src/a.tsx", "apps/gateway/src/projects.ts", "packages/db/src/schema.ts"]).gateway).toBe(true);
+    // the gate's tests and the other allow-lists are code (CodeQL runs) but not image inputs
+    for (const f of ["scripts/security-gate.test.mjs", "security/sast-allowlist.json", "security/audit-allowlist.json"]) {
+      expect(scopeOf([f]), f).toMatchObject({ code: true, image: false });
+    }
   });
 
-  it("rule 4: a rename out of apps/web/ into the gateway counts at both paths", () => {
-    const { root } = prMerge(({ git }) => git("mv", "apps/web/src/helper.ts", "apps/gateway/src/helper.ts"));
-    expect(changedFiles(root).sort()).toEqual(["apps/gateway/src/helper.ts", "apps/web/src/helper.ts"]);
-    expect(scopeForEvent("pull_request", root)).toMatchObject({ full: false, gateway: true, web: true });
+  it("rule 3: an engine's allow-list and the gate scripts its scan runs set `engines`; the root allow-list does not", () => {
+    for (const f of ["security/image-allowlist.engine-garak.json", "security/image-allowlist.engine-new-one.json", "scripts/security-gate.mjs",
+      "scripts/security-suppressions.mjs", "scripts/security-cosign-verify.sh"]) {
+      expect(scopeOf([f]).engines, f).toBe(true);
+    }
+    for (const f of ["security/image-allowlist.json", "scripts/security-runtime-contents.mjs"]) {
+      expect(scopeOf([f]).engines, f).toBe(false);
+    }
+  });
+
+  it("rule 4: there is no web-only gateway skip, because gateway tests read apps/web sources", () => {
+    expect(OUTPUTS).not.toContain("gateway");
+    expect(scopeOf(["apps/web/src/views/admin/governance/auditObjectLinks.ts"])).toMatchObject({ full: false, code: true, web: true });
+    // the reason: the step-up posture guard (a gateway test) walks every product source under apps/, apps/web included
+    const guard = readFileSync(path.join(repo, "apps/gateway/src/step-up-posture-guard.test.ts"), "utf8");
+    expect(guard).toContain('for (const top of ["apps", "packages"])');
   });
 
   it("rule 5: a change to the scope rules themselves is a full run", () => {
     for (const f of ["scripts/ci-scope.mjs", "scripts/ci-scope.test.mjs", ".github/actions/ci-scope/action.yml"]) {
-      expect(scopeOf(["docs/a.md", f]), f).toMatchObject({ full: true, gateway: true, engines: true });
+      expect(scopeOf(["docs/a.md", f]), f).toMatchObject({ full: true, code: true, image: true, engines: true });
     }
   });
 
@@ -168,15 +180,16 @@ describe("the workflows wire the scope fail-closed", () => {
     expect(find.run).toContain('elif [ "$ENGINES_CHANGED" = false ]; then');
   });
 
-  it("build-and-test checks each part against its own scope output, and the gateway parts against `gateway`", () => {
+  it("build-and-test checks each part against `code`: the gateway shards run on every code PR, web-only included", () => {
     const jobs = workflow("ci.yml").jobs;
-    expect(jobs["gateway-tests"].if).toBe("needs.scope.outputs.gateway == 'true'");
-    expect(jobs["gateway-coverage"].if).toContain("needs.scope.outputs.gateway == 'true'");
+    expect(jobs["gateway-tests"].if).toBe("needs.scope.outputs.code == 'true'");
+    expect(jobs["gateway-coverage"].if).toBe("${{ !cancelled() && needs.scope.outputs.code == 'true' }}");
+    expect(jobs.scope.outputs).not.toHaveProperty("gateway");
     const rule = jobs["build-and-test"].steps.at(-1).run;
     expect(rule).toContain('.scope.result == "success"');
     expect(rule).toContain('(."build-and-test-base" | ok($o.code))');
-    expect(rule).toContain('(."gateway-tests" | ok($o.gateway))');
-    expect(rule).toContain('(."gateway-coverage" | ok($o.gateway))');
+    expect(rule).toContain('(."gateway-tests" | ok($o.code))');
+    expect(rule).toContain('(."gateway-coverage" | ok($o.code))');
   });
 
   it("ui enterprise / all requires Chromium on a web PR and the screenshot pack only on a full run", () => {

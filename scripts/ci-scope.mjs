@@ -12,9 +12,14 @@
 // Outputs (each 'true' or 'false'; every one is 'true' on a full run):
 //   code     any changed file that is not documentation
 //   web      the web app or what it is built from
-//   gateway  any code outside apps/web/** (the gateway suites, the Kong integrations, the import-cycle ratchet)
-//   image    an input of the root Dockerfile image (Trivy)
-//   engines  an input of an engine image (engines/**, any Dockerfile, the lockfile, the image workflows)
+//   image    an input of the root Dockerfile image, or of the Trivy gate that judges it (allow-list, gate scripts)
+//   engines  an engine's own inputs (engines/**, any Dockerfile, the lockfile, the engine allow-lists and gate scripts,
+//            the image workflows). NOT every input: each engine Dockerfile also COPYs packages/ and apps/ (the shim
+//            stage), so a change there alone gives engines=false and the engine build-and-compare runs at merge time.
+//
+// There is no gateway-only output: the gateway shards run whenever `code` is true, web-only PRs included. Gateway
+// tests read apps/web sources (step-up-posture-guard walks every product source, apps/web included), so a web
+// change can fail them (#737 review finding 1).
 //
 // usage: node scripts/ci-scope.mjs   (reads GITHUB_EVENT_NAME; appends the outputs to $GITHUB_OUTPUT if set)
 import { execFileSync } from "node:child_process";
@@ -25,22 +30,22 @@ import { fileURLToPath } from "node:url";
 /** documentation only: cannot change a build, a test or an image */
 export const DOCS_RE = /^(internal|docs)\/|\.md$|^\.gitignore$|^LICENSE$/;
 /** the web app, the shared package it imports, the workspace manifests, and the workflows and action that run its suites */
-export const WEB_RE = /^(apps\/web\/|packages\/shared\/|pnpm-lock\.yaml$|pnpm-workspace\.yaml$|package\.json$|\.github\/workflows\/(ci|ui-enterprise|mock-ui-shards)\.yml$|\.github\/actions\/|scripts\/ci-scope\.mjs$)/;
+export const WEB_RE = /^(apps\/web\/|packages\/shared\/|pnpm-lock\.yaml$|pnpm-workspace\.yaml$|package\.json$|\.github\/workflows\/(ci|ui-enterprise|mock-ui-shards)\.yml$|\.github\/actions\/)/;
 
-/** the web app alone: a change here (and docs) cannot move the gateway, the Kong integrations or the import cycles */
-export const WEB_ONLY_RE = /^apps\/web\//;
 /** the root image's build context (Dockerfile COPYs the workspace manifests, packages/ and apps/; .dockerignore
- *  drops tests and apps/web/e2e) and the workflow that scans it */
-export const IMAGE_RE = /^(Dockerfile|\.dockerignore|pnpm-lock\.yaml|pnpm-workspace\.yaml|package\.json|tsconfig\.base\.json)$|^(apps|packages)\/|^\.github\/workflows\/security\.yml$/;
+ *  drops tests and apps/web/e2e), the workflow that scans it, and the Trivy gate's own inputs: its allow-lists and the
+ *  gate, runtime-contents, suppressions and cosign-verify scripts (#737 review finding 2) */
+export const IMAGE_RE = /^(Dockerfile|\.dockerignore|pnpm-lock\.yaml|pnpm-workspace\.yaml|package\.json|tsconfig\.base\.json)$|^(apps|packages)\/|^\.github\/workflows\/security\.yml$|^security\/image-allowlist[^/]*\.json$|^scripts\/security-(gate|runtime-contents|suppressions)\.mjs$|^scripts\/security-cosign-verify\.sh$/;
 /** files the root image's .dockerignore leaves out of the build context */
 export const IMAGE_IGNORED_RE = /\.(test|spec)\.ts$|^apps\/web\/e2e\//;
-/** an engine image's inputs: its directory, any Dockerfile, the lockfile, the engine packages and scripts, the image workflows */
-export const ENGINES_RE = /^engines\/|(^|\/)Dockerfile$|^pnpm-lock\.yaml$|^packages\/engine-|^scripts\/(build-engine-image\.sh|engine-images-[a-z-]+\.mjs)$|^\.github\/workflows\/(security|engine-images|engine-images-build)\.yml$/;
+/** an engine's own inputs: its directory, any Dockerfile, the lockfile, the engine packages and scripts, the engine
+ *  allow-lists and the gate scripts its scan runs, the image workflows (not packages/ and apps/: see the header) */
+export const ENGINES_RE = /^engines\/|(^|\/)Dockerfile$|^pnpm-lock\.yaml$|^packages\/engine-|^scripts\/(build-engine-image\.sh|engine-images-[a-z-]+\.mjs)$|^security\/image-allowlist\.engine-[^/]+\.json$|^scripts\/security-(gate|suppressions)\.mjs$|^scripts\/security-cosign-verify\.sh$|^\.github\/workflows\/(security|engine-images|engine-images-build)\.yml$/;
 /** the scope machinery: changing it is a full run */
 export const SELF_RE = /^(scripts\/ci-scope(\.test)?\.mjs|\.github\/actions\/ci-scope\/.*)$/;
 
-export const FULL = Object.freeze({ full: true, code: true, web: true, gateway: true, image: true, engines: true, reason: "" });
-export const OUTPUTS = Object.freeze(["full", "code", "web", "gateway", "image", "engines"]);
+export const FULL = Object.freeze({ full: true, code: true, web: true, image: true, engines: true, reason: "" });
+export const OUTPUTS = Object.freeze(["full", "code", "web", "image", "engines"]);
 
 /** the scope for a list of changed paths (null = could not be read) */
 export function scopeOf(files) {
@@ -52,7 +57,6 @@ export function scopeOf(files) {
     full: false,
     code: code.length > 0,
     web: files.some((f) => WEB_RE.test(f)),
-    gateway: code.some((f) => !WEB_ONLY_RE.test(f)),
     image: code.some((f) => IMAGE_RE.test(f) && !IMAGE_IGNORED_RE.test(f)),
     engines: code.some((f) => ENGINES_RE.test(f)),
     reason: "",

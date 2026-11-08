@@ -19,14 +19,11 @@ outputs:
   web:
     description: "'true' when the web app or what it is built from changed (always on a full run)"
     value: ${{ steps.scope.outputs.web }}
-  gateway:
-    description: "'true' when code outside apps/web/** changed: the gateway suites, Kong integrations, import cycles"
-    value: ${{ steps.scope.outputs.gateway }}
   image:
-    description: "'true' when an input of the root Dockerfile image changed (the Trivy scan)"
+    description: "'true' when an input of the root Dockerfile image or of its Trivy gate (allow-list, gate scripts) changed"
     value: ${{ steps.scope.outputs.image }}
   engines:
-    description: "'true' when an engine image input changed: engines/**, any Dockerfile, the lockfile, the image workflows"
+    description: "'true' when an engine's own input changed: engines/**, any Dockerfile, the lockfile, the engine allow-lists and gate scripts, the image workflows (not packages/ or apps/, which the shim stage also copies)"
     value: ${{ steps.scope.outputs.engines }}
 runs:
   using: composite

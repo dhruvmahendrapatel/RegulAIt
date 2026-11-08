@@ -125,9 +125,9 @@ name: CI
 # that never runs CI is a draft nobody can trust.
 # ADR-0252 addendum (owner decision 2026-11-07): FAST checks on a pull request, the FULL suite at merge time.
 # The free public-repo runner pool (~20 concurrent jobs) against ~30 jobs per PR meant one PR's CI at a time.
-#   pull_request   the `scope` job reads the PR's diff. Code changed: build, typecheck, lint, the package suites
-#                  and the static pre-flights (migration guard, licence gate). Code outside apps/web/** changed:
-#                  also the gateway shards. The web app changed: also the mocked SPA shards. Docs only: every job
+#   pull_request   the `scope` job reads the PR's diff. Code changed: build, typecheck, lint, the package suites,
+#                  the static pre-flights (migration guard, licence gate) and the gateway shards (web-only PRs too:
+#                  gateway tests read apps/web sources, #737 review). The web app changed: also the mocked SPA shards. Docs only: every job
 #                  is skipped and `build-and-test` still reports (it allows a skip only where the scope said so).
 #   merge_group    everything, on the combined result of the queued PRs: the above plus the SPA journeys and
 #   push to main   the docker build. The merge queue is where the full suite gates a merge.
@@ -170,7 +170,6 @@ jobs:
       full: ${{ steps.scope.outputs.full }}
       code: ${{ steps.scope.outputs.code }}
       web: ${{ steps.scope.outputs.web }}
-      gateway: ${{ steps.scope.outputs.gateway }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -372,8 +371,9 @@ jobs:
   gateway-tests:
     name: gateway shard ${{ matrix.shard }}
     needs: scope
-    # ADR-0252 addendum (PR trim): a PR that changes only apps/web/** and docs cannot move the gateway
-    if: needs.scope.outputs.gateway == 'true'
+    # ADR-0252 addendum (PR trim): skipped only on a docs-only PR. A web-only PR still runs it: gateway tests read
+    # apps/web sources (step-up-posture-guard walks every product source, apps/web included).
+    if: needs.scope.outputs.code == 'true'
     runs-on: ubuntu-24.04
     # A blast-radius cap, not a target: the slowest shard plus setup is well
     # under it (see the arithmetic above). If a shard nears it, add a shard to
@@ -574,7 +574,7 @@ jobs:
     needs: [scope, gateway-tests]
     # runs when a shard failed too, so a red run still says whether the shards
     # covered the suite; it does not run on a cancelled (superseded) run, or when the shards were skipped
-    if: ${{ !cancelled() && needs.scope.outputs.gateway == 'true' }}
+    if: ${{ !cancelled() && needs.scope.outputs.code == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -635,7 +635,7 @@ jobs:
             def ok(want): if want == "true" then .result == "success" else .result == "skipped" end;
             .scope.outputs as $o |
             length == 4 and .scope.result == "success" and
-            (."build-and-test-base" | ok($o.code)) and (."gateway-tests" | ok($o.gateway)) and (."gateway-coverage" | ok($o.gateway))' > /dev/null
+            (."build-and-test-base" | ok($o.code)) and (."gateway-tests" | ok($o.code)) and (."gateway-coverage" | ok($o.code))' > /dev/null
 
   docker-build:
     # The quickstart path must never rot: prove the compose image still builds.

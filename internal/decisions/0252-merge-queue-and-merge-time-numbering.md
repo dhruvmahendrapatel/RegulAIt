@@ -131,15 +131,21 @@ The full suite on `merge_group`, a push to `main` and nightly is unchanged. On a
 - **ui enterprise:** Chromium only. Firefox, WebKit and the screenshot pack run on a full run. `ui enterprise / all`
   stays the one required check; it requires the browser matrix when `web` and the screenshot pack when `full`.
 - **CodeQL:** only when code changed (`code`). Its job runs unless the scope said `'false'`, so a failed scope runs it.
-- **Engine image scans and SBOMs, and the engine build-and-compare:** only when an engine input changed (`engines`:
-  `engines/**`, any `Dockerfile`, the lockfile, the engine packages and scripts, the image workflows). **Trivy** for
-  the root image only when its build context changed (`image`). Trivy fails closed like CodeQL. `security.yml` now runs
+- **Engine image scans and SBOMs, and the engine build-and-compare:** only when an engine's own input changed
+  (`engines`: `engines/**`, any `Dockerfile`, the lockfile, the engine packages and scripts, the engine allow-lists and
+  the gate scripts the engine scan runs, the image workflows). This is not every input: each engine Dockerfile's shim
+  stage also copies `packages/` and `apps/`, so a change there alone builds and compares the engines at merge time
+  (the engine scan is not a required check). **Trivy** for the root image only when its build context or its own gate
+  changed (`image`: also `security/image-allowlist*.json`, `scripts/security-{gate,runtime-contents,suppressions}.mjs`
+  and `scripts/security-cosign-verify.sh`, so the required scan runs on the PR that changes how it judges). Trivy fails closed like CodeQL. `security.yml` now runs
   nightly instead of weekly, so the scans keep a nightly full run.
-- **Gateway shards and their coverage check, import cycles, the Kong integrations:** skipped on a PR whose code changes
-  are all under `apps/web/**` (`gateway`). #604 at 2c3aa886 was not designer-only: it changed 13 files under
-  `apps/gateway/src/` and two migrations, so `code` correctly chose the gateway; the over-inclusion was that a truly
-  web-only PR also ran it, and `gateway` fixes that.
+- **Import cycles and the Kong integrations:** skipped on a PR whose code changes are all under `apps/web/**` (their
+  path filters; neither builds or reads `apps/web`). **The gateway shards and their coverage check are not:** they run
+  whenever `code` is true. A first cut skipped them on web-only PRs, but gateway tests read `apps/web` sources
+  (`step-up-posture-guard.test.ts` walks every product source, `apps/web` included, and six others read named web
+  files), so a web change could break them green on its PR (#737 review and security review, finding 1). Moving those
+  cross-tree tests into `build-and-test-base` would make a web-only gateway skip safe; that is a later item.
 - **Fail closed:** unchanged. An unreadable diff, an empty diff and a change to the scope rules themselves are full runs.
-  `build-and-test` judges the build against `code` and the gateway parts against `gateway`.
+  `build-and-test` judges the build, the gateway shards and their coverage check against `code`.
 - The required check names do not change.
 
