@@ -116,6 +116,21 @@ name: CI
 #     ~4.5x its slowest run. The caps stay as they are pending the master's
 #     call on tightening them; the proposal (shards 15, base 10) is in the PR
 #     that recorded these numbers.
+#     RE-MEASURED 2026-11-08 (30+ green ci runs per shard, the 40 most recent completed runs): the
+#     suite has grown to 538 files and the slowest test step has about doubled since 2026-10-10.
+#     Test step mean / max, job mean:
+#       gateway shard 1      12:15 / 14:06   job 14:55
+#       gateway shard 2      11:58 / 14:54   job 14:33
+#       gateway shard 3      11:23 / 13:29   job 14:04
+#       gateway shard 4      14:43 / 16:55   job 17:19
+#     Shard 4 was cancelled at the 20-min cap with every test passed (#761 12:22 UTC, #768 job
+#     128779504700), which also fails the coverage check. Cause: the count split gives shard 4 the
+#     heaviest files. Splitting run 42495963943's per-file durations the way Vitest does (SHA-1 order,
+#     equal counts): four shards carry 289 / 287 / 227 / 346 s of test time; five carry
+#     245 / 173 / 236 / 217 / 278 s, so the slowest shard drops ~20% (to ~14.5 min a job on average,
+#     ~16.5 at the slowest seen). Hence a fifth matrix entry, as this header prescribes; the cap
+#     stays at 20. Vitest 4.1 has no duration-based --shard; a custom sequencer would be our own code
+#     for a solved problem, so the count split stays (ADR-0176).
 # Re-measure if the suite grows materially; these are real numbers, not guesses,
 # and they should stay that way. The next lever, when a shard nears its 20-min
 # cap, is a fifth matrix entry (one more ~2m15s setup), not a higher cap.
@@ -433,7 +448,8 @@ jobs:
         # deadline upper bounds (a timeout fires within N ms) and each shard
         # runs alone on its runner, so they see LESS load than they did when the
         # gateway shared `pnpm -r test`'s parallelism with every other package.
-        shard: [1, 2, 3, 4]
+        # FIVE since 2026-11-08 (see "RE-MEASURED 2026-11-08" at the top): shard 4 of four reached the 20-min cap.
+        shard: [1, 2, 3, 4, 5]
 
 
     services:
