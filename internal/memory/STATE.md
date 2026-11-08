@@ -5641,6 +5641,32 @@ findings (signal source `defenseclaw_export`). API only; the admin screen is tra
 (protobuf decoder, ADR-0176 search), an evidence retention sweep, and a check against a real captured sample before a
 customer install (the envelope is only partly documented).
 
+**ADR-0236 (builder, 2026-11-07): governed MCP bundles (backlog P11).** Step 1 finding: roles already bundle MCP tools
+for users (`role_tool_grants`, `role_server_grants`), with per-user revocations; nothing reached a team, a tool set could
+not be shared by several roles and teams as one unit, and grants had no versions. A bundle is a named, versioned list of
+exact (server, tool) pairs granted to a user, role or team (`mcp_bundle_grants`, one subject). The kernel rule
+`bundle-tool-allow-list` sits at the role tier and is fed by `loadEntitlements`, so every MCP decision and tool list
+enforces it; a person's own revocation always wins, there is no wildcard, and every later narrowing applies. Versions are
+append-only with a compare-and-set; a version that adds a tool is a `settings_relax` step-up plus an SoD check per
+holder. Default-off `org_settings.mcp_bundles_enabled` (a step-up to enable). Scope tiers (owner-approved, design reference: the Gravitee APIM MCP server, ideas only): grants default to `max_tier` read, `mcp_tools.dangerous` is an admin flag, and a dangerous tool held through a bundle always pauses for the bundle's approver (fail closed without one). migration `mcp_bundles`. Open: dynamic lazy tool-loading (follow-up); the owner's reading
+of "bounded by each user's allow-list" (ADR §Open question); UI on #453; SoD holdings, certification campaigns and RLS
+follow-ups.
+
+**ADR-0214 amendment (builder, 2026-11-07): one explainable score per asset (PENDING P3 follow-up).** Agents and use
+cases are scored, over the ADR-0214 objectives that apply to each (agent: risk, adversarial, access, evaluation, divisor
+60; use case: risk, access, divisor 35), with the published weights and the shared `combineObjectives()`. Coverage,
+audit and spend are listed as not applicable; model cards, MCP servers and connectors are not scored (no ledger row
+names them). `GET /v1/reports/posture/assets` (keyset, at most 100) and `/:kind/:assetId`, scoped to assets the caller
+can already read (admin all; steward's agents; owned use cases), `private, no-store`, no server cache. No migration.
+API only; the per-asset UI is requested on #453.
+
+**ADR-0262 (builder, 2026-11-08): the CI split.** Fast, scope-gated checks on a pull request; the full suite on the
+merge group, a push to `main`, nightly and manual runs. The `scope` job (`scripts/ci-scope.mjs`) fails closed and
+writes `full`, `code`, `web`, `image` and `engines`; the six required checks report on every PR and merge group
+(two aggregates that accept a skip only where the scope said `'false'`, CodeQL and Trivy gated fail-closed, gitleaks
+and the dependency audit never trimmed). It supersedes the two 2026-11-07 addenda in ADR-0252. Check runs per PR push
+went from about 37 to about 7 (docs), 19 (gateway) and 23 (web). No migration.
+
 <!-- fold:state-decisions -->
 
 ## Open Questions
