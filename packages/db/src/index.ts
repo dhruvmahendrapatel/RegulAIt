@@ -18,6 +18,7 @@ export {
   CONCURRENT_INDEX_LOCK_TIMEOUT_MS,
   ConcurrentIndexBlockedError,
 } from "./migrate.js";
+export { PENDING_DIR, UNASSIGNED_ENV, UnassignedMigrationsError, assignPending, pendingFiles } from "./pending-migrations.js";
 export { and, asc, count, desc, eq, getTableColumns, gt, gte, inArray, isNotNull, isNull, lt, lte, ne, notInArray, or, sql } from "drizzle-orm";
 // Types consumers need to build reusable predicates without taking a direct
 // dependency on drizzle-orm (PILLAR 1 rule-scoping SQL pre-filter, etc.).
@@ -50,11 +51,21 @@ export {
   setRlsSystemContextSink,
   withPrincipal,
   withSystemContext,
+  currentRlsScope,
+  runWithRlsPrincipal,
+  runWithRlsSystem,
+  runWithRlsPrincipalStep,
+  runAsPrincipalStepIfScoped,
+  runWithoutRlsScope,
+  withinSystemReason,
+  scopePoolForRls,
+  type RlsScope,
   type RlsCallerSystemReason,
   type RlsPrincipal,
   type RlsSystemContextEntry,
   type RlsSystemReason,
 } from "./rls.js";
+import { scopePoolForRls } from "./rls.js";
 
 // ADR-0189 B2 — the shared decision fact writer (called by the audit chain writer)
 export { captureDecisionFacts, loadDecisionCaptureStatus } from "./decision-facts.js";
@@ -426,5 +437,6 @@ export function createDb(connectionString: string, override: Partial<DbPoolConfi
     });
   });
   // ADR-0233 (S6): the content-credential guard is OUTERMOST, so it sees the value the caller wrote
-  return withContentGuard(withProseScrub(withAuditChain(drizzle(pool, { schema }))));
+  // ADR-0234 batch 2: statements issued inside an RLS scope (runWithRlsPrincipal / runWithRlsSystem) run scoped
+  return withContentGuard(withProseScrub(withAuditChain(drizzle(scopePoolForRls(pool), { schema }))));
 }

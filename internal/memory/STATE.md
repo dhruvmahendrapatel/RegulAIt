@@ -20,6 +20,20 @@ roadmap: ../product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+<!-- fold:state-recap newest-first -->
+
+**2026-11-07 - merge queue readiness and merge-time numbering ([ADR-0252](../decisions/0252-merge-queue-and-merge-time-numbering.md), owner decision on #453; review R-03, R-06, R-07, R-08, C-03, C-04).**
+- **Migrations:** a PR adds `packages/db/migrations/pending/<slug>.sql` and never edits the journal. After the merge,
+  `assign-at-merge.yml` numbers it (`scripts/assign-at-merge.mjs`) and pushes `assign-at-merge/<sha>`; the master
+  opens and enqueues that PR. `runMigrations` refuses pending files unless `REGULAIT_MIGRATIONS_UNASSIGNED=apply`
+  (CI and the gateway suite only). The guard now also refuses edits to merged migrations, removed entries and
+  journal/file mismatches (C-03); the `@regulait/db` `generate` script is gone.
+- **Docs:** ADR index rows come from the ADR file's header at merge time; STATE and PENDING appends are fragments under
+  `internal/fragments/`. The route-census size pins are dropped (C-04).
+- **CI:** `ci`, `security`, `import-cycles` and `ui-enterprise` run on `merge_group`.
+- **Owner, to finish:** turn on the merge queue for `main` (merge commit) and make the required checks report on
+  `merge_group`. The master enqueues with `gh pr merge --merge --auto` from then on
+  (CONTRIBUTING_PARALLEL_SESSIONS §8).
 
 **2026-10-29 - the customer demo moves to one date, Saturday 2026-10-31 (owner, #453 c6508111468).**
 - **Date:** the internal run-through on Sun 11-01 and the external demo on Tue 11-03 are dropped; there is one run, on
@@ -5481,6 +5495,19 @@ its tip under `audit_chain`. Measured: queue page 24.7 to 39.9 ms on 100k approv
 (gateway adoption, credentials, approval satellites and membership, project-scoped, the rest, runtime login cut-over)
 follow, one PR each. Until batch 7 a non-superuser table-owner runtime is unsupported; none exists.
 
+**ADR-0234 batch 2 (builder, 2026-11-07, Proposed): request-scoped RLS adoption.**
+- **Mechanism:** every authenticated gateway request now runs as its principal through an AsyncLocalStorage scope that
+  the pool applies per statement and per transaction (`runWithRlsPrincipal`, `scopePoolForRls` in `createDb`), not
+  ~1,100 wrapped call sites. Credential resolution runs under `authenticate`.
+- **Migration 0313:**
+  - the column guard on `users` (the #682 hard gate);
+  - the chain writer's `audit_subject` reason for rows that name a sponsor or subject;
+  - the approvals requester self-route guard is removed (self-approval stays a per-flow product rule).
+- **Named steps:** decide, bulk-decide, the lazy SLA sweep and workflow and engine-run approval effects run as the
+  principal plus `approval_maintenance`.
+- **Still unscoped:** unauthenticated routes, the bootstrap token, the scheduler and background work (batch 7).
+- **Measured:** +0.2 to +0.8 ms a statement.
+
 **ADR-0230 (design, 2026-11-06, Proposed): SAP business agents over MCP (P19).**
 - **Where it lives:** `create_sales_order` (`API_SALES_ORDER_SRV`) goes in the regulAIt-ABAP MCP server, and the gateway's existing MCP path governs it.
 - **Safety:** a required idempotency key; principal propagation with the person's own IdP token (preferred) or a dedicated per-trust RegulAIt key (fallback, never the ADR-0210 key), through the BTP Destination service, with technical users refused for writes; approve-first defaults seeded for `system_class = 'sap_business'` (quorum 2 with the requester excluded, a rate limit, a project budget required).
@@ -5548,16 +5575,15 @@ audit, tool references, platform copies, ingested, machine, conversation, signed
 against `information_schema` and against the ADR's generated block. Open: whether to guard jsonb
 `config_versions.body` string leaves; ingested columns stay a residual.
 
-**ADR-0236 (builder, 2026-11-07): governed MCP bundles (backlog P11).** Step 1 finding: roles already bundle MCP tools
-for users (`role_tool_grants`, `role_server_grants`), with per-user revocations; nothing reached a team, a tool set could
-not be shared by several roles and teams as one unit, and grants had no versions. A bundle is a named, versioned list of
-exact (server, tool) pairs granted to a user, role or team (`mcp_bundle_grants`, one subject). The kernel rule
-`bundle-tool-allow-list` sits at the role tier and is fed by `loadEntitlements`, so every MCP decision and tool list
-enforces it; a person's own revocation always wins, there is no wildcard, and every later narrowing applies. Versions are
-append-only with a compare-and-set; a version that adds a tool is a `settings_relax` step-up plus an SoD check per
-holder. Default-off `org_settings.mcp_bundles_enabled` (a step-up to enable). Scope tiers (owner-approved, design reference: the Gravitee APIM MCP server, ideas only): grants default to `max_tier` read, `mcp_tools.dangerous` is an admin flag, and a dangerous tool held through a bundle always pauses for the bundle's approver (fail closed without one). Migration 0298. Open: dynamic lazy tool-loading (follow-up); the owner's reading
-of "bounded by each user's allow-list" (ADR §Open question); UI on #453; SoD holdings, certification campaigns and RLS
-follow-ups.
+**ADR-0244 (builder, 2026-11-07): pinned offline baselines for the prompt-injection detectors (P25).** Three MIT benchmarks are vendored under `packages/shared/src/eval-datasets/vendor/injection-baselines/` (300 kB, sha256-pinned in `MANIFEST.json` and `injection-baselines.ts`, refreshed only by `scripts/refresh-injection-eval-snapshots.py`): NotInject (339 benign), InjecAgent (300 of 2,108, stratified, seed 20261107) and AgentDojo v1 (97 benign, 135 injection texts), a seeded JailbreakBench sample (150 attack prompts, 100 benign behaviours; MIT verified for the HF dataset and the artifacts repo), plus our own web-agent set (50 injections over WASP's ten published categories × five carriers and 50 benign look-alikes; WASP is CC BY-NC, so only its category names are cited, clean room). HackAPrompt is MIT but gated (the account must share its HF identity), so it is left out pending the owner. `injection-baselines.test.ts` re-measures the heuristic detector every CI run and fails on a drop in precision or recall, or a rise in FPR, beyond 2 points; `node scripts/injection-eval-baseline.mjs` prints the delta table and `--write` re-pins. The trained classifier is measured offline by `agents/trained-detectors/eval_baselines.py` and recorded ungated. Measured: heuristic NotInject FPR 0%, InjecAgent recall 61.3%, AgentDojo recall 20.0% / FPR 0%; trained (threshold 0.5) NotInject FPR 43.4%, InjecAgent recall 84.3%, AgentDojo recall 72.6% / FPR 3.1%; JailbreakBench heuristic recall 0% / FPR 0%, trained recall 75.3% / FPR 1.0%; web-agent set heuristic recall 2% / FPR 6%, trained recall 60% / FPR 50%. No migration.
+
+ADR-0252 (2026-11-07) put `main` behind the GitHub merge queue and moved every shared append to merge time:
+migration numbers, journal entries and `when` values (`packages/db/migrations/pending/<slug>.sql`, numbered by
+`scripts/assign-at-merge.mjs` after the merge), ADR index rows (from the ADR header) and STATE/PENDING appends
+(fragments under `internal/fragments/`). Pending migrations never reach a long-lived database; the migration guard
+checks merged migrations are frozen and that the journal grows only by assignment.
+
+<!-- fold:state-decisions -->
 
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);

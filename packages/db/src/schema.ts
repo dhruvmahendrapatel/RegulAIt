@@ -1135,7 +1135,7 @@ export const mcpTools = pgTable(
      * the manifest re-sync upsert (kind/description only) provably never
      * clobbers an admin-set price. Null = no override = the server price. */
     pricePerCallUsd: doublePrecision("price_per_call_usd"),
-    /** ADR-0236 (migration 0298): an admin flag for the top scope tier (read < write < dangerous). A dangerous tool
+    /** ADR-0236 (migration `mcp_bundles`): an admin flag for the top scope tier (read < write < dangerous). A dangerous tool
      * held through an MCP bundle always pauses for the bundle's approver. The manifest re-sync never touches it. */
     dangerous: boolean("dangerous").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1179,7 +1179,7 @@ export const serverGrants = pgTable(
 );
 
 /**
- * ADR-0236 (P11, migration 0298) — a governed MCP bundle: a named, versioned list of exact (server, tool) pairs that
+ * ADR-0236 (P11, migration `mcp_bundles`) — a governed MCP bundle: a named, versioned list of exact (server, tool) pairs that
  * an admin grants to a user, a role or a team as one unit. A bundle is a grant SOURCE at the role tier: per-user
  * revocations still subtract from it, and every restriction after the grant step (halt, lead ceiling, the actor
  * intersection, ABAC, rate limits, approvals, data scope) still applies. `current_version` is the version every grant
@@ -2327,6 +2327,11 @@ export const approvals = pgTable(
     check("approvals_quorum_check", sql`${t.quorum} BETWEEN 1 AND 5`),
     check("approvals_signature_mode_check", sql`${t.signatureMode} IN ('passkey', 'step_up', 'off')`),
     index("approvals_status_idx").on(t.status),
+    // ADR-0234 batch 2 (migration 0313): the participant branches of approvals_select / approvals_update
+    index("approvals_approver_user_idx").on(t.approverUserId),
+    index("approvals_named_approver_user_idx").on(t.namedApproverUserId),
+    index("approvals_decided_by_idx").on(t.decidedBy),
+    index("approvals_approver_role_idx").on(t.approverRoleId),
     check(
       "approvals_review_role_check",
       sql`(${t.reviewRoleId} IS NULL) = (${t.reviewRoleName} IS NULL) AND (${t.reviewRoleId} IS NULL) = (${t.reviewRound} IS NULL)`,
@@ -4695,7 +4700,7 @@ export const orgSettings = pgTable(
     /** ADR-0219 (P10, migration 0253): calls to remote agents over A2A. FALSE (the default, ADR-0180) = no remote
      * agent can be registered or called; an admin may turn it on (settings_relax step-up, audited). */
     a2aEnabled: boolean("a2a_enabled").notNull().default(false),
-    /** ADR-0236 (P11, migration 0298): governed MCP bundles. FALSE (the default, ADR-0180) = no bundle can be created,
+    /** ADR-0236 (P11, migration `mcp_bundles`): governed MCP bundles. FALSE (the default, ADR-0180) = no bundle can be created,
      * changed or granted, and the gateway loads no bundle grant; an admin may turn it on (settings_relax step-up, audited). */
     mcpBundlesEnabled: boolean("mcp_bundles_enabled").notNull().default(false),
     /** ADR-0097 (migration 0103): the MCP ADMISSION posture. 'enforce'
@@ -6543,6 +6548,8 @@ export const approvalAssignments = pgTable(
     uniqueIndex("approval_assignments_approval_uq").on(t.approvalId),
     index("approval_assignments_assignee_idx").on(t.assigneeKind, t.assigneeId),
     index("approval_assignments_due_idx").on(t.slaState, t.dueAt),
+    // ADR-0234 batch 2 (migration 0313): the escalation branch of the approvals policies
+    index("approval_assignments_escalation_assignee_idx").on(t.escalationAssigneeId),
   ],
 );
 
@@ -13210,6 +13217,8 @@ export const approvalDecisions = pgTable(
     ),
     check("approval_decisions_reason_check", sql`${t.reason} IS NULL OR length(${t.reason}) <= 2000`),
     index("approval_decisions_approval_idx").on(t.approvalId, t.decidedAt),
+    // ADR-0234 batch 2 (migration 0313): the decider branch of the approvals policies
+    index("approval_decisions_decider_user_idx").on(t.deciderUserId),
   ],
 );
 export type ApprovalDecisionRow = typeof approvalDecisions.$inferSelect;
