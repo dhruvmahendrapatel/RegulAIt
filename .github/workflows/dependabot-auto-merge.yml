@@ -7,6 +7,21 @@
 #   - the engine manifests (engines/**) and base-image digests, which republish the engine images;
 #   - the pip entries (security-fix PRs only, hand-recompiled).
 # A 7-day cooldown in .github/dependabot.yml keeps a version from being proposed until it has been public for a week.
+# The cooldown does not cover SECURITY updates, so the job also checks every version the PR moves to was published at
+# least 7 days ago (scripts/dependabot-release-age.mjs, read from the BASE commit, never the PR). A version too young,
+# or any lookup that fails, leaves the PR for a reviewer (#746 review finding 1, ADR-0180 fail closed).
+#
+# Spoofing: the queue job runs only when Dependabot opened the PR, Dependabot pushed the commit, Dependabot (not a
+# re-run by someone else) triggered the run, and the branch is in this repository. `--match-head-commit` pins the
+# commit it enables auto-merge for. If anyone else pushes to the branch later, the `disarm` job turns auto-merge off,
+# so their commit needs a review (#746 review finding 2).
+#
+# Who merges (#746 review finding 3): auto-merge enabled with GITHUB_TOKEN is performed by github-actions[bot], and
+# GitHub starts no workflow run for an event that token causes. Without the merge queue, the push to main after such a
+# merge therefore runs no push-to-main workflow (image signing, engine publish): the next push or the nightly run
+# covers it. With the merge queue on, the queue builds the merge group itself; if GitHub were to start no
+# `merge_group` run for a PR this token enqueued, the PR would wait in the queue and never merge (fail closed). The
+# owner confirms which when the queue is enabled; a GitHub App token is the fix if either gap matters.
 #
 # `pull_request`, never `pull_request_target`: the job checks out nothing and runs no code from the PR. Its token can
 # only do what the `permissions` below allow. dependabot/fetch-metadata (MIT) reads the update's metadata from the
@@ -27,8 +42,13 @@ permissions:
 jobs:
   patch:
     name: queue a semver-patch Dependabot update
-    # Dependabot opened it, from this repository (a fork's PR never gets a write token)
-    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.actor == 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository
+    # Dependabot opened it, pushed this commit and triggered this run (not a re-run by someone else), from this
+    # repository (a fork's PR never gets a write token)
+    if: >-
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.actor == 'dependabot[bot]' &&
+      github.triggering_actor == 'dependabot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -40,24 +60,69 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Queue it when it is a patch update of the workspace or of an action
-        if: >-
-          steps.meta.outputs.update-type == 'version-update:semver-patch' &&
-          ((steps.meta.outputs.package-ecosystem == 'npm_and_yarn' && steps.meta.outputs.directory == '/') ||
-           steps.meta.outputs.package-ecosystem == 'github_actions')
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-        run: gh pr merge --auto --merge "$PR_URL"
-
-      - name: Say why it was left for a reviewer
-        if: >-
-          !(steps.meta.outputs.update-type == 'version-update:semver-patch' &&
-          ((steps.meta.outputs.package-ecosystem == 'npm_and_yarn' && steps.meta.outputs.directory == '/') ||
-           steps.meta.outputs.package-ecosystem == 'github_actions'))
+      - id: eligible
+        name: Is it a patch update of the workspace or of an action
         env:
           UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
           ECOSYSTEM: ${{ steps.meta.outputs.package-ecosystem }}
           DIRECTORY: ${{ steps.meta.outputs.directory }}
         run: |
-          echo "Not auto-merged: ${UPDATE_TYPE:-unknown update type} in ${ECOSYSTEM:-unknown} ${DIRECTORY:-}. A reviewer merges it." >> "$GITHUB_STEP_SUMMARY"
+          ok=false
+          if [ "$UPDATE_TYPE" = version-update:semver-patch ]; then
+            if [ "$ECOSYSTEM" = npm_and_yarn ] && [ "$DIRECTORY" = / ]; then ok=true; fi
+            if [ "$ECOSYSTEM" = github_actions ]; then ok=true; fi
+          fi
+          echo "patch=$ok" >> "$GITHUB_OUTPUT"
+          if [ "$ok" != true ]; then
+            echo "Not auto-merged: ${UPDATE_TYPE:-unknown update type} in ${ECOSYSTEM:-unknown} ${DIRECTORY:-}. A reviewer merges it." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # The age gate's code comes from the BASE commit (reviewed, on main), never from the PR branch.
+      - if: steps.eligible.outputs.patch == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+          sparse-checkout: scripts/dependabot-release-age.mjs
+          sparse-checkout-cone-mode: false
+
+      - id: age
+        name: Every new version is at least 7 days old (security updates skip the cooldown)
+        if: steps.eligible.outputs.patch == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPDATED_DEPS: ${{ steps.meta.outputs.updated-dependencies-json }}
+          ECOSYSTEM: ${{ steps.meta.outputs.package-ecosystem }}
+        run: node scripts/dependabot-release-age.mjs
+
+      - name: Queue it
+        if: steps.eligible.outputs.patch == 'true' && steps.age.outputs.old_enough == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: gh pr merge --auto --merge --match-head-commit "$HEAD_SHA" "$PR_URL"
+
+  disarm:
+    name: turn auto-merge off after a push by anyone but Dependabot
+    # a Dependabot PR from this repository, changed by anyone else: their commit must not ride Dependabot's auto-merge
+    if: >-
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      (github.actor != 'dependabot[bot]' || github.triggering_actor != 'dependabot[bot]') &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Disable auto-merge if it is on
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          on=$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null')
+          if [ "$on" = true ]; then
+            gh pr merge --disable-auto "$PR_URL"
+            echo "Auto-merge turned off: this PR was changed by someone other than Dependabot. A reviewer merges it." >> "$GITHUB_STEP_SUMMARY"
+          fi
