@@ -18,6 +18,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 
 /**
  * F02 (connector path) / ADR-0103 amendment 2026-10-03 — the pillar-5 PROJECT
@@ -50,6 +51,7 @@ const AUTH = { authorization: `Bearer ${BOOT}` };
 const PROFILE_TAG = `f02c-finreg-${RUN}`;
 
 let db: Db;
+let restoreConnectorAttribution: (() => Promise<void>) | undefined;
 let app: ReturnType<typeof buildApp>;
 let receiver: http.Server;
 let receiverHits = 0;
@@ -116,6 +118,8 @@ async function setEnforcement(value: "block" | "warn_only"): Promise<"block" | "
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0251: these calls pin behaviour other than the attribution mandate, so they relax it by name
+  restoreConnectorAttribution = await relaxGovernanceGatesForTest(db, { connectorAttributionRequired: false });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "c".repeat(64) });
 
   receiver = http.createServer((req, res) => {
@@ -163,6 +167,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreConnectorAttribution?.();
   // M-068: remove the loopback allow entry this file created, while the app is up; asserted last
   const loopback = await removeEgressAllowEntry(app, AUTH, { id: allowHostId });
   try {

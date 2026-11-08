@@ -352,15 +352,13 @@ describe("route census: KNOWN_UI_GAPS only shrinks", () => {
     expect(out.failures.map((f) => f.kind)).toEqual(["bad-entry"]);
   });
 
-  // THE PINS. Every list's size is fixed here, so adding an entry anywhere is a
-  // deliberate edit to this file too (and both files are CODEOWNERS-reviewed).
-  // KNOWN_UI_GAPS_MAX only ever goes DOWN: lower it as gaps close, never raise it.
-  it("THE PINNED SIZES: known gaps, machine-only, superseded and indirect entries", () => {
-    expect(KNOWN_UI_GAPS_MAX).toBe(0);
+  // THE PIN. KNOWN_UI_GAPS_MAX only ever goes DOWN: lower it as gaps close, never raise it.
+  // Review C-04 (owner-approved, ADR-0252): MACHINE_ONLY, SUPERSEDED and INDIRECT_UI_CALLS are no longer pinned by
+  // size. Every route PR edited the same three lines, so they were a merge hot spot; each entry's reason and the
+  // stale-entry checks already enforce intent.
+  it("THE PINNED GAP CEILING, and every known gap says what it does and where it is tracked", () => {
+    expect(KNOWN_UI_GAPS_MAX).toBe(38); // ADR-0259 (P35): three API-only endpoint MCP inventory and link routes, owner decision on #733 2026-11-07 (#453); ADR-0241 (P21): seven API-only usage-extractor routes; ADR-0246 (P27): nine API-only pinning and high-risk routes (the manual mark-high-risk route added in review); ADR-0236 (P11): eleven API-only MCP bundle routes, owner decision 2026-11-07 (#697), awaiting the bundle screen on #453; ADR-0261 (P37): six API-only DefenseClaw ingest admin routes (owner decision 2026-11-07); ADR-0214 amendment (P3): two per-asset score routes, owner-approved temporary gap on #705; all raised for the master's review (#453 Governed Designer)
     expect(KNOWN_UI_GAPS.size).toBe(KNOWN_UI_GAPS_MAX);
-    expect(MACHINE_ONLY.size).toBe(46); // GET /v1/receipts/keys left: the posture page lists the keys to retire them; ADR-0195 SD4b added the endpoint agent channel; SD2b added the federation issuer's discovery document and JWKS; #453 c6508111468 added the MCP Streamable HTTP GET probe (405); ADR-0210 added the OIDC-profile identity assertion issuer's discovery document and JWKS; ADR-0219 added the governed A2A call (POST /v1/a2a/agents/:agentId/messages)
-    expect(SUPERSEDED.size).toBe(16); // ADR-0211 added GET /v1/org/settings/risk-treatments (the settings read carries it); ADR-0223 added GET /v1/model-drift/settings (the card drift view carries it); restored after a merge dropped it
-    expect(INDIRECT_UI_CALLS.size).toBe(108); // ADR-0226: the list exports DataList downloads from the path its page passes (3 pilot, 26 batch A, plus batch C's, plus P2 batch D: the Inbox's approvals export too), the 21 batch A list routes it reads from the endpoint its page passes (P3: the discovery runs page reads its runs this way too), (P2 batch C) the list routes it reads page by page, and the golden cases it reads page by page (merged with main after #655-#657, #640)
     for (const [key, g] of KNOWN_UI_GAPS) {
       expect(g.does, key).toBeTruthy();
       expect(g.tracking, key).toBeTruthy();

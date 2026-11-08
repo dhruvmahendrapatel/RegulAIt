@@ -282,6 +282,8 @@ export async function resolveGuardrailPolicy(
     projectId?: string | null | undefined;
     agentId?: string | null | undefined;
     connectorId?: string | null | undefined;
+    /** ADR-0237: the caller, for cost attribution of a third-party guardrail call (absent = unattributed) */
+    userId?: string | null | undefined;
   },
 ): Promise<GuardrailPolicy> {
   const scopeId = args.agentId ?? args.connectorId ?? null;
@@ -315,7 +317,7 @@ export async function resolveGuardrailPolicy(
       .where(eq(orgSettings.id, ORG_SETTINGS_ID))
       .then((r) => r[0]),
     // ADR-0220: the trained detectors in force (one indexed read; none by default)
-    loadTrainedDetectorRuntime(db),
+    loadTrainedDetectorRuntime(db, { userId: args.userId ?? null, projectId: args.projectId ?? null }),
   ]);
 
   const orgModes: Partial<GuardrailModes> = orgRow ? rowModes(orgRow) : { ...GUARDRAIL_DEFAULT_MODES };

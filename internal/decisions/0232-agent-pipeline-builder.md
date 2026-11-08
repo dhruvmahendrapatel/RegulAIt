@@ -570,3 +570,27 @@ follow-up.
    packages be shareable across Shared Projects (pillar 4), with cost attributed to the triggering project?
 8. **Export signing.** Should export bundles be signed with the instance's existing evidence-signing key or with a
    separate key?
+
+## Addendum (2026-11-07): canvas library candidates (owner-approved; no build while this ADR is paused)
+
+The owner had several open-source repositories reviewed for reuse (#453). Two canvas libraries pass ADR-0176 (licence,
+maintenance, air-gapped) as **dependency candidates** for the `/builder/pipelines` canvas. Nothing is built until the owner
+accepts this ADR; the comparison below is the first slice when it is unpaused.
+
+| Candidate | Licence | Fit | Open questions for the spike |
+|---|---|---|---|
+| `@flowgram.ai/fixed-layout-editor` and `@flowgram.ai/free-layout-editor` (ByteDance FlowGram, about 1.0.16) | MIT | The fixed (step-sequence) layout matches the SAP CPI-style integration-flow model this ADR describes. The free layout suits DAGs. Forms, variable scoping and node-runtime hooks are built in. | Recently reached 1.0, so API stability is uncertain. Transitive UI dependencies and bundle size against the entry ceiling. Some docs are Chinese-first. |
+| `@xyflow/react` (React Flow, about 12.x) | MIT | Mature, widely used, and the canvas Langflow uses. Free layout only, so step-sequence semantics would be ours. | More of the CPI-style step model to write ourselves. |
+
+**Design references only, with no code copied:**
+- Langflow (MIT): node palette, typed ports and the flow JSON shape.
+- AionUi (Apache-2.0): the multi-agent workspace UX.
+
+**Excluded:** Skyvern (AGPL-3.0).
+
+**Spike criteria:**
+- the canvas holds no secrets;
+- every run goes through the gateway's governed dispatch;
+- the entry bundle stays under its ceiling, with the canvas lazy-loaded on `/builder/pipelines`;
+- it works offline;
+- it meets the DESIGN_GUIDELINES accessibility rules (keyboard-operable nodes and edges).

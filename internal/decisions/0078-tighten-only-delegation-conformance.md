@@ -8,8 +8,8 @@
   package the existing ceilings (ADR-0016) as an asserted, documented invariant: "no worker
   exceeds the initiating user" as a runnable conformance check, plus an A2A/MCP interop note.
   Differentiation defense against the Agent 365 / AgentCore identity trajectory.
-- **Extends**: [ADR-0016](0016-orchestration-kernel.md) (the delegation ceilings under test),
-  [ADR-0021](0021-org-dials-and-ceilings.md) (the ceiling model), the pillar-7 execution-time
+- **Extends**: [ADR-0016](0016-transitive-per-node-budget-ceiling.md) (the delegation ceilings under test),
+  [ADR-0021](0021-org-settings-configurability-layer.md) (the ceiling model), the pillar-7 execution-time
   attacks in `apps/gateway/src/pillar7-inheritance.test.ts` (not duplicated — extended).
 
 ## Context
