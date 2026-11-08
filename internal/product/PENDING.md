@@ -18,6 +18,21 @@ this file.
 
 <!-- fold:pending newest-first -->
 
+**P35: MCP client configs on employee machines (from the security and infra review, owner 2026-11-07).** The endpoint agent saw that an MCP host's config existed, but not which MCP servers it names, what they run, which carry embedded secrets, which tools are auto-approved, or which are not governed here.
+
+**Built (backend and agent), [ADR-0259](../decisions/0259-endpoint-mcp-config-discovery.md), pending migration `endpoint_mcp_config_discovery`.**
+- `apisec-inc/mcp-audit` (MIT) fails the maintenance and fit check (one tagged release; a Python CLI), so the read-only Go agent gains a native `mcp_config` collector.
+- It reports servers, secret types (never values), compiled risk flags and risky auto-approved tools, and never executes a server.
+- It is default off per org (step-up, audited) and an opt-in kind on the device.
+- The inventory has the ADR-0122 registry diff and audited links to approved servers, and it feeds the host config's shadow-AI device finding.
+
+**Open:**
+- the UI (#453; the three routes are temporary KNOWN_UI_GAPS);
+- the owner's call on browser and shell history markers (#453);
+- PatronAI-derived catalogue additions;
+- JSONC/TOML configs, a reported gap;
+- the agent config route serving the opt-in once the SD4 pack signer lands.
+
 **P34 — Anubis in front of the public pages (from the security and infra review, owner 2026-11-07).** An optional proof-of-work bot and AI-scraper check for the trust centre, auditor portal and supplier portal only, never the API, admin console or gateway. **Built as config, PROPOSED in [ADR-0258](../decisions/0258-anubis-public-pages.md)**, off by default (`install.sh --anubis`). Open: a live run of Caddy and Anubis before the first deployment that turns it on, and the #453 UI item for a pass cookie that expires mid-page.
 
 | **P27** | **MCP rug-pull detection, and our own vulnerable MCP fixtures.** A clean-scanning change to an admitted MCP server (a description edit, a widened schema, an added tool, a changed prompt or resource) went through unreviewed, and the public vulnerable-MCP test servers carry no licence. | Built by [ADR-0246](../decisions/0246-mcp-definition-pinning-and-vuln-fixtures.md) (the `mcp_definition_pins` migration (numbered at merge)): per-item definition pins taken at admission and compared on every manifest fetch; a changed item is blocked by default until an admin re-approves it against an RFC 6902 diff (step-up, audited); 'warn' is an audited relaxation. Clean-room fixtures for eight attack classes in the test-only `@regulait/mcp-vuln-fixtures`. Addendum (owner, same day): offensive tool servers are classified high-risk by our own rule set, and every call needs a policy template (quorum ≥ 2 approval, requester excluded, rate limit), a target on the admin's authorised list, and a full audit with redacted arguments. Left: the review UI (#453), P23's scanners consuming the fixtures, and the ADR's honest limits (comparison at listing, not per call). |
