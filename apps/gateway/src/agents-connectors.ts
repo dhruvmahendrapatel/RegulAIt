@@ -157,7 +157,8 @@ import {
 } from "./conversations.js";
 import { ownerChangeGate, resolveRegistrationOwner, withOwnership } from "./ownership.js";
 import { CHANGED_CONCURRENTLY, checkStepUp, requireStepUp } from "./step-up.js";
-import { checkModelRateLimit } from "./model-rate-limits.js";
+import { governedModelGate } from "./governed-core.js";
+import { resolveDispatchUsage } from "./usage-extractors.js";
 import {
   prepareConversationContext,
   type PreparedConversationContext,
@@ -229,6 +230,8 @@ import {
 } from "./tracing.js";
 // ADR-0185 G5 — the decision counter (a no-op seam until the meter lands)
 import { recordDecision } from "./metrics.js";
+import { wantsListContract } from "./list-contract.js";
+import { AGENTS_LIST, agentsFilterQuery, agentsReader, agentsWhere, answerListExport, answerListPage } from "./identity-lists.js";
 
 const userIdParam = z.object({ userId: z.string().uuid() });
 const agentIdParam = z.object({ agentId: z.string().uuid() });
@@ -1395,17 +1398,22 @@ async function dispatchAttempt(
         };
   }
 
-  // ADR-0212 (P12 c) — THE MODEL RATE LIMIT. In this one shared core so every
-  // dispatch path inherits it, after the lifecycle gate and before any provider
-  // work: a refusal costs no tokens and writes no usage row (it is audited).
-  // Off until an admin opts in, so by default this is one indexed read.
-  const modelLimit = await checkModelRateLimit(db, {
+  // ADR-0251 slice 2 — THE ONE GOVERNED CORE on a model dispatch: the model rate limit (ADR-0212, enforced by
+  // default since migration governed_core_resource_rules) and the model approval rules. In this one shared core so every dispatch path
+  // inherits it, after the lifecycle gate and before any provider work: a refusal costs no tokens and writes no
+  // usage row (it is audited). An error is a deny.
+  const coreRefusal = await governedModelGate(db, {
     userId,
     agentId: served.id,
     agentName: served.name,
+    mode: args.mode ?? "execute",
     projectId: args.projectId ?? null,
   });
-  if (modelLimit) return modelLimit;
+  if (coreRefusal) {
+    if (coreRefusal.auditLogId) sink.auditLogId = coreRefusal.auditLogId;
+    const { auditLogId: _auditLogId, ...refusal } = coreRefusal;
+    return refusal;
+  }
 
   // ADR-0066 §2/§3 — THE VIRTUAL-KEY CEILING. Placed FIRST, before the MRM
   // gate and before any provider work, for the same reason every gate below is
@@ -2264,6 +2272,16 @@ async function dispatchAttempt(
   // invented dollar figure. ADR-0212 (P12 b): when the provider reports image or
   // audio tokens, each modality is priced at its own list price (falling back to
   // the text price); with no modality data this is the text-only formula, unchanged.
+  // ADR-0241 (P21): when the org switch is on and the served agent has an active, tested usage mapping, the
+  // counts priced below are the mapping's reading of the provider's response; a mapping that cannot read it
+  // leaves the adapter's built-in counts in place (fail closed, audited, stamped on the usage row).
+  const dispatchUsage = await resolveDispatchUsage(db, {
+    agentId: served.id,
+    userId,
+    projectId: args.projectId ?? null,
+    result,
+  });
+  result = { ...result, usage: dispatchUsage.usage };
   const priced = priceDispatchUsage(served, result.usage);
   const costUsd = priced.costUsd;
   // The measured version of routing's savings claim: what the baseline agent
@@ -2393,6 +2411,8 @@ async function dispatchAttempt(
     measuredCostSavedUsd,
     // ADR-0212 (P12 b): the text/image/audio split; NULL without modality data
     modalityUsage: priced.modality,
+    // ADR-0241: which usage-mapping version produced these counts (NULL = the adapter's own)
+    usageExtractorVersionId: dispatchUsage.versionId,
     stopReason: result.stopReason,
     refusal: result.refusal,
     providerMessageId: result.providerMessageId,
@@ -2431,6 +2451,7 @@ async function dispatchAttempt(
           }
         : {}),
       ...(customDestination ? { customProviderId: served.customProviderId, egress: customDestination } : {}),
+      ...(dispatchUsage.outcome ? { usageExtractor: dispatchUsage.outcome } : {}),
       ...(args.detail ?? {}),
       ...piiDetail,
       ...guardrailDetail,
@@ -3414,7 +3435,15 @@ export function registerAgentConnectorRoutes(
   });
 
   // REL-10: bounded — `limit` (default LIST_DEFAULT_LIMIT, max LIST_MAX_LIMIT)
-  app.get("/v1/agents", async (req) => {
+  //
+  // ADR-0226: with any of sort/dir/cursor/offset/count it answers the shared list contract (a name or model search,
+  // one agent by id for a deep link, an enabled filter) with an honest total in place of the silent bound; with none
+  // of them, exactly the response below.
+  app.get("/v1/agents/export.xlsx", async (req, reply) =>
+    answerListExport(db, req, reply, AGENTS_LIST, agentsReader(db), agentsFilterQuery, agentsWhere),
+  );
+  app.get("/v1/agents", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, AGENTS_LIST, agentsReader(db), agentsFilterQuery, agentsWhere);
     const { limit } = listLimitQuery.parse(req.query);
     // ADR-0168 amendment item 6: each row carries its stewardship view
     // (stewardName, successorName, orphaned, reviewOverdue, cadence) computed

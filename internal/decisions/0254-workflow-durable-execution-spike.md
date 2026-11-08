@@ -2,7 +2,8 @@
 
 - **Status**: Accepted. This is a spike verdict under ADR-0176 ("none fits, because …").
 - **Date**: 2026-11-07
-- **Backlog item**: [PENDING.md](../product/PENDING.md) §2h P30 (owner, 2026-11-07)
+- **Index**: **`vercel/workflow` on Postgres does not fit as pillar 2's durable-execution engine; the existing stage runner stays (spike, owner backlog P30, 2026-11-07).** None fits (ADR-0176): hard-coded `workflow`/`workflow_drizzle`/`graphile_worker` schemas with their own 30-migration journal (no RLS, plaintext step data), about 14–16 ms per step against 0.7–0.9 ms for the current transaction, fast churn (178 versions since 4.0), an unauthenticated loopback delivery route, audit that cannot share the event's transaction, and pinned vulnerable zod/undici. It passed air-gapped and ran in fastify through the standalone build. trigger.dev is also rejected (owner input). Retry/backoff and in-stage fan-out go to the existing runner over graphile-worker or pg-boss, each in its own ADR. Prototype in `spikes/workflow-p30/` behind `REGULAIT_WORKFLOW_DURABLE_P30` (default off). No migration.
+- **Backlog item**: [PENDING.md](../product/PENDING.md) P30 (owner, 2026-11-07)
 - **Prototype**: [`spikes/workflow-p30/`](../../spikes/workflow-p30/README.md). It is behind the default-off switch
   `REGULAIT_WORKFLOW_DURABLE_P30` and no workspace package imports it.
 - **Migration**: none. The reserved number 0309 (`when` 1785236000000) is not used and is released.
