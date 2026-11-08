@@ -62,6 +62,11 @@ import {
   users,
   workflowInstances,
   runWithAuditActor,
+  runWithRlsPrincipal,
+  runWithRlsSystem,
+  runWithRlsPrincipalStep,
+  runWithoutRlsScope,
+  currentRlsScope,
   complianceProfiles,
   configVersions,
   type Db,
@@ -190,6 +195,7 @@ import { runAiBomSignoffs, type AiBomSignoff } from "./ai-bom-signoff.js";
 import { registerRedTeamRoutes } from "./redteam.js";
 import { registerReportingRoutes } from "./reporting.js";
 import { registerPostureRoutes } from "./posture.js";
+import { registerAssetScoreRoutes } from "./asset-score.js";
 import { registerTrustDashboardRoutes } from "./trust-dashboard.js";
 import { registerUseCaseOverviewRoutes } from "./use-case-overview.js";
 import { registerUseCaseDraftRoutes } from "./use-case-drafts.js";
@@ -418,6 +424,7 @@ import { z } from "zod";
 import { boundTargetsForApprovals, registerMcpProxy } from "./mcp-proxy.js";
 import { clearUpstreamCredentialOnUrlMove, registerMcpUpstreamCredentialRoutes } from "./mcp-upstream-credential.js";
 import { registerA2aRoutes } from "./a2a.js";
+import { registerMcpBundleRoutes } from "./mcp-bundles.js";
 import { registerPrivacyOpsRoutes } from "./privacy-ops.js";
 import { ExternalEffectBlockedError } from "./external-effects.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
@@ -467,6 +474,8 @@ import {
   REGISTRATION_ADMISSION_STATE,
 } from "./mcp-admission.js";
 import { registerMcpToolSyncRoutes } from "./mcp-tool-sync.js";
+import { registerMcpDefinitionPinRoutes } from "./mcp-definition-pins.js";
+import { registerMcpHighRiskRoutes } from "./mcp-high-risk.js";
 // ADR-0101 — federated MCP registries. Admin-only through the default gate;
 // a sync writes only the catalogue and an import is an explicit operator act.
 import { privateRangesRelaxation, registerMcpRegistryRoutes } from "./mcp-registry.js";
@@ -533,6 +542,7 @@ import {
 } from "./org-settings.js";
 import { registerAppearanceRoutes } from "./appearance.js";
 import { registerModelRateLimitRoutes } from "./model-rate-limits.js";
+import { registerUsageExtractorRoutes } from "./usage-extractors.js";
 // ADR-0202 decision 4 — the per-beat simulated fallback for the hosted demo (admin-only, audited)
 import { registerDemoBeatRoutes } from "./demo-beats.js";
 // ADR-0185 G5 — request metrics (a no-op seam until the meter lands)
@@ -598,7 +608,9 @@ import { registerContentTrustRoutes } from "./content-trust-routes.js";
 import { registerFederationRoutes } from "./federation-routes.js";
 import { registerMcpIdentityOidcRoutes } from "./mcp-identity-oidc-routes.js";
 import { registerEndpointImportRoutes } from "./endpoint-import-routes.js";
+import { registerThirdPartyIngestRoutes } from "./third-party-ingest-routes.js";
 import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
+import { registerEndpointMcpConfigRoutes } from "./endpoint-mcp-config.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
 import { registerCostImportRoutes } from "./cost-import.js";
 import { registerCostReconciliationRoutes } from "./cost-reconcile.js";
@@ -1200,6 +1212,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "GET /v1/auth/step-up/:stepUpId",
   ]);
 
+  // ADR-0234 batch 2: credential resolution reads users and MFA challenges under the registered `authenticate`
+  // system context (it opens nothing in approvals or audit_log). The hook after the auth hook replaces it with the
+  // resolved principal, or with no scope at all when the request resolved none.
+  app.addHook("preHandler", (_req, _reply, done) => {
+    runWithRlsSystem("authenticate", "gateway.auth", () => done());
+  });
+
   app.addHook("preHandler", async (req, reply) => {
     if (AUTH_EXEMPT_ROUTES.has(req.routeOptions.url ?? "")) {
       req.authCtx = { userId: null, isAdmin: false, via: "api-key" };
@@ -1421,6 +1440,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       }
     }
     req.authCtx = ctx;
+  });
+
+  // ADR-0234 batch 2: from here to the end of the request every statement on the slice-1 tables runs as the
+  // authenticated principal (role regulait_app, FORCE row-level security), whatever the route forgets to filter.
+  // A request with no user (an exempt route, the bootstrap token) leaves the `authenticate` scope and runs
+  // unscoped, exactly as before this batch; ADR-0234 records those paths for the runtime cut-over (batch 7).
+  app.addHook("preHandler", (req, _reply, done) => {
+    const userId = req.authCtx?.userId;
+    if (typeof userId === "string" && userId.length > 0) {
+      runWithRlsPrincipal({ userId }, () => done());
+    } else {
+      runWithoutRlsScope(() => done());
+    }
   });
 
   // ADR-0187 — THE ENGINE RUNNER CEILING, both directions: a runner or
@@ -3377,6 +3409,24 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             ...(carveOuts.length > 0 ? { revokedTools: carveOuts } : {}),
           };
         }),
+      // ADR-0236: tools held through a governed MCP bundle, at the role tier (a revocation subtracts from them)
+      ...(entitlements.bundleToolGrants ?? []).map((g) => {
+        const rev = revocationFor(g.toolName);
+        return {
+          kind: "tool" as const,
+          toolName: g.toolName,
+          source: "bundle" as const,
+          bundle: g.bundleName ?? g.bundleId,
+          bundleId: g.bundleId,
+          bundleVersion: g.version,
+          via: g.via,
+          toolTier: g.toolTier ?? "read",
+          maxTier: g.maxTier ?? "read",
+          grantId: g.id,
+          revoked: Boolean(rev),
+          ...(rev ? { revocationId: rev.id } : {}),
+        };
+      }),
     ];
     // Every active revocation, so overrides are discoverable and reversible
     // via DELETE /v1/revocations/:id even when no grant currently matches.
@@ -4072,8 +4122,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // pendingApprovalsNeedingAttention.
     const workbenchOn = await routingActive(db);
     if (workbenchOn) {
-      const needing = await pendingApprovalsNeedingAttention(db);
-      await materializeAndEvaluate(db, needing, me || null);
+      // ADR-0234 batch 2: this is the SLA and routing sweep run on read (a deployment with no cron relies on it),
+      // so it walks EVERY pending row, not the reader's: it runs under approval_maintenance as the principal. The
+      // listing below is read back under the principal alone, so what the reader SEES is still RLS-bounded.
+      const sweep = async () => {
+        const needing = await pendingApprovalsNeedingAttention(db);
+        await materializeAndEvaluate(db, needing, me || null);
+      };
+      const scope = currentRlsScope();
+      await (scope?.kind === "principal"
+        ? runWithRlsPrincipalStep({ userId: scope.userId }, "approval_maintenance", "approvals.lazy-sla-sweep", sweep)
+        : sweep());
     }
     // ADR-0046 §1: routing decides WHOSE QUEUE a row shows in. A non-admin
     // therefore also sees the rows assigned (or escalated) to a role or team
@@ -4699,8 +4758,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
    * items, and a chat decision writes its refusal audit row.
    */
   async function decideOneApproval(input: Parameters<typeof decideOneApprovalUnguarded>[0]): ReturnType<typeof decideOneApprovalUnguarded> {
+    // ADR-0234 batch 2: the decision is authorized by the gateway's own decision logic below (named approver,
+    // approver role, ADR-0168 review role, delegation, quorum, separation of duties), and a review-role member is not
+    // a participant the 0272 predicate can express (the membership lives in configuration until batch 4). So the
+    // step runs as the principal AND under approval_maintenance: the principal still sees what it sees elsewhere, the
+    // approval rows are open to the step, and a third user still gets the gateway's 403, not an existence-hiding 404.
+    const scope = currentRlsScope();
+    const run = () => decideOneApprovalUnguarded(input);
     try {
-      return await decideOneApprovalUnguarded(input);
+      return await (scope?.kind === "principal"
+        ? runWithRlsPrincipalStep({ userId: scope.userId }, "approval_maintenance", "approvals.decide", run)
+        : run());
     } catch (err) {
       if (!(err instanceof AiBomError)) throw err;
       return { ok: false as const, status: err.status, body: { ...(err.extra ?? {}), error: err.code, detail: err.message } };
@@ -5690,6 +5758,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // instance it anchors WITH, so the readers grade the medium the writer uses.
   const anchorSink: AnchorSink | null = opts.auditAnchorSink !== undefined ? opts.auditAnchorSink : resolveAnchorSink();
   registerPostureRoutes(app, db, { sink: anchorSink });
+  registerAssetScoreRoutes(app, db);
   // ADR-0148 — the six-dimension trust dashboard (demo task C1)
   registerTrustDashboardRoutes(app, db);
   // ADR-0082 — the standing agent dependency inventory: per registered agent,
@@ -5809,7 +5878,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // admin-typed outbound endpoint under the same egress guard and the same
   // register → test → enable lifecycle — applied to a measuring instrument
   // instead of a model. Admin-only via the global gate.
-  registerExternalScorerRoutes(app, db, { dataKey: opts.dataKey });
+  registerExternalScorerRoutes(app, db, {
+    dataKey: opts.dataKey,
+    // test seams only (the same ones the trained-detector runtime takes); production passes neither
+    ...(opts.trainedDetectorResolve ? { resolve: opts.trainedDetectorResolve } : {}),
+    ...(opts.trainedDetectorFetch ? { fetchImpl: opts.trainedDetectorFetch } : {}),
+  });
   // ADR-0065 — REGULAIT-LLM. Registered next to the custom-provider surface
   // because it answers the adjacent question: that one is "which model that we
   // do not own may our people reach?", this one is "which model may our people
@@ -5902,6 +5976,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // settings_relax step-up, audited); reads show only whether one is set, its header and last four characters
   registerMcpUpstreamCredentialRoutes(app, db, { dataKey: opts.dataKey });
   registerA2aRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0236 (P11) — governed MCP bundles: admin-only through the default gate, default-off, audited; enforcement is
+  // the kernel's bundle-tool-allow-list rule, fed by loadEntitlements at the existing MCP interception point
+  registerMcpBundleRoutes(app, db);
   // ADR-0097 part A — the admission review queue and the reason-required,
   // audited clear. Admin-only through the default gate, like the MCP registry
   // writes it sits beside.
@@ -5909,6 +5986,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // #609 follow-up: an admin's on-demand manifest sync for one server — admin-only through the default gate, rate
   // limited per server, a settings_relax step-up, and the live path's admission, egress, transport and scan gates
   registerMcpToolSyncRoutes(app, db);
+  // ADR-0246: definition pinning (rug-pull detection) — the changed-since-approval queue, the diff, the re-approval
+  registerMcpDefinitionPinRoutes(app, db);
+  // ADR-0246 addendum: offensive MCP servers as high-risk — the policy template and the authorised-targets list
+  registerMcpHighRiskRoutes(app, db);
   // ADR-0101 — configure an upstream MCP registry, pull its catalogue, and
   // import ONE entry as a federated `mcp_servers` row that is `unscanned`,
   // ungranted and subject to the same ADR-0097 admission and ADR-0043 egress
@@ -5929,6 +6010,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerOrgSettingsRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0212 (P12 b/c): model rate limits, their org opt-in, and per-modality agent prices
   registerModelRateLimitRoutes(app, db);
+  // ADR-0241 (P21): admin usage mappings (versioned, sample-tested, step-up to activate; off by default)
+  registerUsageExtractorRoutes(app, db);
   // ADR-0202 decision 4 — the demo beats' simulated fallback; admin-only (not in NON_ADMIN_ROUTES), audited
   registerDemoBeatRoutes(app, db);
   registerPosturePresetRoutes(app, db, { sink: anchorSink, bootstrapConfigured: Boolean(opts.bootstrapToken) });
@@ -5987,6 +6070,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     dataKey: opts.dataKey,
     ...(opts.discoveryScanners === undefined ? {} : { registry: opts.discoveryScanners }),
   });
+  // ADR-0261 (P37) — third-party security telemetry ingest (Cisco DefenseClaw's HTTP JSONL export): the admin source
+  // lifecycle (admin-only by default; enabling and issuing the write-only credential are step-ups, audited) and the
+  // exporter's route, authenticated in-route by the source's `rgti_` token. Records are attributed third-party evidence.
+  registerThirdPartyIngestRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0195 SD4b — the RegulAIt endpoint agent: ticket redemption and registration (authenticated in-route by the
   // bulk token or the device ticket), the agent's own routes (its DPoP-bound self token only), and the admin's
   // enrolment-token and device routes (admin-only by default). Nothing works until an endpoint agent source is enabled.
@@ -5994,6 +6081,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     dataKey: opts.dataKey,
     ...(opts.discoveryScanners === undefined ? {} : { registry: opts.discoveryScanners }),
   });
+  // ADR-0259 (P35) — the MCP servers enrolled devices' host configs name, with the registry diff, and the admin's
+  // links to approved servers. Admin-only by default; reads what the agent reports, contacts nothing.
+  registerEndpointMcpConfigRoutes(app, db);
   // ADR-0069 — CROSS-VENDOR COST CONSOLIDATION. Admin-only by default: the ONLY
   // route here in NON_ADMIN_ROUTES is `GET /v1/users/:userId/cost-consolidated`,
   // which refuses in-handler unless the caller IS that user. Uploading a file

@@ -13,7 +13,7 @@ name: Demo journey
 # The `changes` job (one billed minute) therefore diffs THIS push against the
 # previous head and the journey runs only when demo code changed in it; it
 # always runs on `workflow_dispatch`.
-# ADR-0252 addendum (owner decision 2026-11-07): the demo journeys are part of the FULL suite, run at merge time
+# ADR-0262 (owner decision 2026-11-07): the demo journeys are part of the FULL suite, run at merge time
 # (merge group), on each push to main and nightly; a pull request no longer runs them. Before 2026-11-07 they ran on
 # a PR touching apps/web/**, the demo and governance paths of the gateway, packages/shared/src/** or packages/db/**.
 on:
@@ -29,6 +29,11 @@ on:
 # checks out code and uploads artifacts; nothing writes to the repository, issues, PRs or packages.
 permissions:
   contents: read
+
+# ADR-0252: CI databases are disposable, so migrations merged but not yet numbered (packages/db/migrations/pending/)
+# are applied in their provisional order. A long-lived database refuses them (packages/db/src/pending-migrations.ts).
+env:
+  REGULAIT_MIGRATIONS_UNASSIGNED: apply
 
 jobs:
   changes:
@@ -123,7 +128,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .node-version
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
@@ -326,7 +331,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .node-version
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
@@ -464,7 +469,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .node-version
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
@@ -613,7 +618,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .node-version
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile

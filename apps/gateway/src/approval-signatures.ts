@@ -74,6 +74,7 @@ import {
   webauthnCredentials,
   type ApprovalDecisionRow,
   type SQL,
+  runAsPrincipalStepIfScoped,
   type Db,
 } from "@regulait/db";
 import {
@@ -1297,7 +1298,12 @@ export function approvalSigningPosture(mode: ApprovalSignatureMode, env: NodeJS.
 // ---------------------------------------------------------------------------
 
 export function registerApprovalSigningRoutes(app: FastifyInstance, db: Db): void {
-  app.post("/v1/approvals/:approvalId/signing-options", async (req, reply) => {
+  // ADR-0234 batch 2: the route's own eligibility check (named approver, role snapshot, delegation, queue time) is
+  // the authorization and reads the approval and its pool beyond what the 0272 predicate lets the caller see, so the
+  // handler runs as the principal plus approval_maintenance, like the decide path; a caller who is not eligible gets
+  // the route's 403, not an existence-hiding 404
+  app.post("/v1/approvals/:approvalId/signing-options", (req, reply) =>
+    runAsPrincipalStepIfScoped("approval_maintenance", "approvals.signing-options", async () => {
     const { approvalId } = (req.params ?? {}) as { approvalId?: string };
     if (!approvalId || !UUID_RE.test(approvalId)) return reply.status(404).send({ error: "unknown_approval" });
     const caller = stepUpCallerOf(req);
@@ -1391,5 +1397,6 @@ export function registerApprovalSigningRoutes(app: FastifyInstance, db: Db): voi
       signedPayload: payload,
       expiresAt: ceremony!.expiresAt.toISOString(),
     };
-  });
+    }),
+  );
 }
