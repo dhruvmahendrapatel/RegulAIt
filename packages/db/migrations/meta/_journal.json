@@ -1688,6 +1688,27 @@
       "when": 1785256000000,
       "tag": "0321_endpoint_mcp_config_discovery",
       "breakpoints": true
+    },
+    {
+      "idx": 322,
+      "version": "7",
+      "when": 1785257000000,
+      "tag": "0322_normalize_n1_foreign_keys",
+      "breakpoints": true
+    },
+    {
+      "idx": 323,
+      "version": "7",
+      "when": 1785258000000,
+      "tag": "0323_project_archive",
+      "breakpoints": true
+    },
+    {
+      "idx": 324,
+      "version": "7",
+      "when": 1785259000000,
+      "tag": "0324_project_archive_write_guard",
+      "breakpoints": true
     }
   ]
 }
