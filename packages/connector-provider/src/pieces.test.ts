@@ -5,6 +5,7 @@
 import { describe, expect, it } from "vitest";
 import {
   AVAILABLE_PIECES,
+  AVAILABLE_PIECES_SOURCE,
   CONNECTOR_PROVIDER_KINDS,
   CREDENTIAL_HOST_CONNECTOR_KINDS,
   CURATED_PIECES,
@@ -57,6 +58,10 @@ describe("catalogue pieces (ADR-0255)", () => {
     for (const k of Object.keys(EXCLUDED_PIECES)) expect(keys.has(k)).toBe(false);
     for (const k of ["http", "webhook", "graphql", "smtp"]) expect(EXCLUDED_PIECES[k]).toBeTruthy();
     expect(AVAILABLE_PIECES.length).toBeGreaterThan(100);
+    // every row names its verified upstream path; names with no community source are not listed (#753 review)
+    for (const [key, , upstreamPath] of AVAILABLE_PIECES) expect(upstreamPath).toBe(`packages/pieces/community/${key}`);
+    for (const k of ["agent", "activity", "csv", "pdf"]) expect(keys.has(k), k).toBe(false);
+    expect(AVAILABLE_PIECES_SOURCE.commit).toMatch(/^[0-9a-f]{40}$/);
   });
 
   it("refuses to run without the injected (guarded) fetch", () => {

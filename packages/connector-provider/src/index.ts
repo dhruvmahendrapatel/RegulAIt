@@ -52,7 +52,7 @@ import { z } from "zod";
 import { PieceCallError, PieceConnectorProvider, isPieceProviderKind, parsePieceCredential, pieceHosts } from "./pieces.js";
 
 export * from "./pieces.js";
-export { AVAILABLE_PIECES, EXCLUDED_PIECES } from "./pieces-available.js";
+export { AVAILABLE_PIECES, AVAILABLE_PIECES_SOURCE, EXCLUDED_PIECES } from "./pieces-available.js";
 
 export const CONNECTOR_PROVIDER_KINDS = [
   "http",

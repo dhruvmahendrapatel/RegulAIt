@@ -27,8 +27,12 @@ from Activepieces:
   `0.23.1`, `@activepieces/piece-jira-cloud` `0.6.4`, `@activepieces/piece-github` `0.11.1`,
   `@activepieces/piece-google-sheets` `0.19.5` and `@activepieces/piece-gmail` `0.18.6`. The request builders are our
   own, written against each vendor's public REST API.
-- **The available list:** the names and versions of the other `@activepieces/piece-*` packages, from the public npm
-  registry search API (`scripts/connector-catalogue-refresh.mjs`, a dev-time tool).
+- **The available list:** the names, versions and upstream paths of the other `@activepieces/piece-*` packages
+  (`scripts/connector-catalogue-refresh.mjs`, a dev-time tool).
+  - The versions come from the public npm registry search API.
+  - An entry is kept only if the upstream tree, at the commit recorded in `AVAILABLE_PIECES_SOURCE`, has
+    `packages/pieces/community/<key>/package.json` declaring that exact name.
+  - Names with no community source are dropped, including those under `packages/pieces/core/`.
 
 **Why the licence is MIT.**
 - None of the curated packages has an npm `license` field, so the package metadata does not settle it.

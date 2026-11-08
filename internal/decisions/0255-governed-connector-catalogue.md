@@ -124,15 +124,27 @@ We inspected the published packages before choosing.
    - the rest of the community catalogue as `available_not_enabled`, paginated (`limit` up to 200, `offset`) with a
      plain-substring `q` filter.
 
-   That list, `AVAILABLE_PIECES` (755 entries on 2026-11-07), is names and versions only. It is generated at dev time by
-   `scripts/connector-catalogue-refresh.mjs` from the npm registry search API. The product never fetches it, so it
-   works air-gapped.
+   That list, `AVAILABLE_PIECES` (728 entries on 2026-11-08), holds names, versions and upstream paths only. It is
+   generated at dev time by `scripts/connector-catalogue-refresh.mjs`, and the product never fetches it, so it works
+   air-gapped. npm alone cannot prove where a package comes from: the `@activepieces/piece-*` packages carry no
+   `license` or `repository` field, and some published names (`agent`, `activity`, …) have no community source or live
+   under `packages/pieces/core/`. So the script keeps an entry only when all of these hold:
+   - npm publishes `@activepieces/piece-<key>`;
+   - the upstream tree, at the commit recorded in `AVAILABLE_PIECES_SOURCE`, has
+     `packages/pieces/community/<key>/package.json` declaring exactly that name;
+   - the name passes the EE guard's own rules, which the script imports rather than repeats;
+   - the key is neither curated nor excluded. The curated keys are read from `CURATED_PIECES` by the guard's own parser.
+
+   The guard re-checks every row in CI. 27 published names were dropped on 2026-11-08, 14 of them because they live
+   under `core/`.
 10. **No EE code, enforced.** `scripts/activepieces-ee-guard.mjs` fails on:
     - a tracked file under an Activepieces `ee` path;
     - an import, export-from, dynamic import or require of an `@activepieces/*` package other than `piece-*`,
       `pieces-framework`, `pieces-common` or `shared`, or of any Activepieces `ee` path;
     - a lockfile entry for such a package;
-    - a curated `upstream.path` outside `packages/pieces/community/`.
+    - a curated `upstream.path` outside `packages/pieces/community/`, or fewer upstream paths than curated pieces;
+    - an `AVAILABLE_PIECES` row whose upstream path is not exactly `packages/pieces/community/<key>`, or a file with no
+      recorded upstream commit.
 
     It runs in CI through its test (`vitest run --dir scripts`).
 
@@ -146,10 +158,10 @@ We inspected the published packages before choosing.
 - Google credentials are exchanged on every call, which is one extra request through the guarded fetch. Caching the
   access token is a follow-up, and the cache must never cross connectors.
 - **UI.** The brief is API and backend only, and the catalogue screen goes to the Governed Designer, requested on #453.
-  The route census forbids a new UI gap (`KNOWN_UI_GAPS_MAX` = 0). We list the two routes there and raise the ratchet to
-  2, visibly in the census and its test, with this ADR as the reason. The Designer's screen deletes both entries and
-  returns the ratchet to 0. This departs from the census rule ("build the screen instead"), so it is flagged for the
-  master in the PR.
+  The route census allows no unreviewed UI gap. We list the two routes in `KNOWN_UI_GAPS` and raise `KNOWN_UI_GAPS_MAX`
+  by 2: from 13 to 15 on main as of 2026-11-08, after ADR-0241's 7 and ADR-0261's 6. The change is visible in the census
+  and its test, with this ADR as the reason. The Designer's screen deletes both entries and lowers the cap by 2. Raising
+  the cap needs an owner decision, so it is flagged for the master and the owner on #753.
 - Open source first (ADR-0176): `@activepieces/pieces-framework` and the pieces were checked and are not used, for the
   unmet requirements above: no injected fetch, credentials in the piece's own context, and an engine runtime. Re-check
   if the framework gains an injectable HTTP client and an externally supplied credential. Recorded in

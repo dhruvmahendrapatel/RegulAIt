@@ -5,6 +5,8 @@
 import { describe, expect, it } from "vitest";
 import {
   allowedActivepiecesPackage,
+  availableFindings,
+  curatedKeys,
   badSpecifier,
   curatedUpstreamFindings,
   isActivepiecesEePath,
@@ -55,7 +57,24 @@ describe("activepieces-ee-guard (ADR-0255)", () => {
   });
 
   it("refuses a curated upstream outside packages/pieces/community", () => {
-    expect(curatedUpstreamFindings('upstream: { npm: "x", version: "1", path: "packages/ee/slack" }')).toHaveLength(1);
-    expect(curatedUpstreamFindings('upstream: { npm: "x", version: "1", path: "packages/pieces/community/slack" }')).toEqual([]);
+    const one = (p) => `export const CURATED_PIECES = [\n  {\n    key: "slack",\n    upstream: { npm: "x", version: "1", path: "${p}" },\n  },\n];`;
+    expect(curatedUpstreamFindings(one("packages/ee/slack"))).toHaveLength(1);
+    expect(curatedUpstreamFindings(one("packages/pieces/community/slack"))).toEqual([]);
+  });
+
+  it("a curated check that matches nothing fails instead of passing", () => {
+    expect(curatedUpstreamFindings("no curated pieces here").length).toBeGreaterThan(0);
+    const one = 'export const CURATED_PIECES = [\n  {\n    key: "slack",\n    upstream: { npm: "x", version: "1", path: "packages/pieces/community/slack" },\n  },\n  {\n    key: "gmail",\n  },\n];';
+    expect(curatedKeys(one)).toEqual(["slack", "gmail"]);
+    expect(curatedUpstreamFindings(one).join()).toMatch(/2 pieces but only 1 upstream path/);
+  });
+
+  it("checks every available row's upstream path and the recorded commit", () => {
+    const ok = 'commit: "' + "a".repeat(40) + '",\n  ["notion", "0.8.3", "packages/pieces/community/notion"],\n';
+    expect(availableFindings(ok)).toEqual([]);
+    expect(availableFindings('commit: "' + "a".repeat(40) + '",\n  ["agent", "0.3.7", "packages/pieces/core/agent"],\n')).toHaveLength(1);
+    expect(availableFindings('  ["notion", "0.8.3", "packages/pieces/community/notion"],\n').join()).toMatch(/no 40-character upstream commit/);
+    expect(availableFindings("").join()).toMatch(/vacuous/);
+    expect(availableFindings('commit: "' + "a".repeat(40) + '",\n  ["notion", "0.8.3"],\n').join()).toMatch(/only 0 are/);
   });
 });

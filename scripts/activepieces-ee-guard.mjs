@@ -10,7 +10,9 @@
  *      that names activepieces;
  *   3. a lockfile entry for an `@activepieces/*` package outside the allowed set;
  *   4. a curated catalogue piece (`CURATED_PIECES` in packages/connector-provider/src/pieces.ts) whose `upstream.path`
- *      is not under `packages/pieces/community/`.
+ *      is not under `packages/pieces/community/`, or fewer upstream paths than curated pieces;
+ *   5. an "available" row (`AVAILABLE_PIECES` in pieces-available.ts) whose upstream path is not exactly
+ *      `packages/pieces/community/<key>`, whose name is not allowed, or a file with no recorded upstream commit.
  *
  * It is run by its test (`activepieces-ee-guard.test.mjs`), which CI's `vitest run --dir scripts` step executes, and
  * can be run by hand: `node scripts/activepieces-ee-guard.mjs` (exit 0 clean, 1 on a finding, 2 if it cannot run).
@@ -80,12 +82,43 @@ export function scan(files, read) {
   return findings;
 }
 
+/** the `key:` of every CURATED_PIECES entry, parsed from pieces.ts (also used by connector-catalogue-refresh.mjs) */
+export function curatedKeys(piecesSrc) {
+  const start = piecesSrc.indexOf("export const CURATED_PIECES");
+  if (start === -1) return [];
+  const block = piecesSrc.slice(start);
+  return [...block.matchAll(/^\s{4}key:\s*"([a-z0-9-]{1,80})",$/gm)].map((m) => m[1]);
+}
+
 export function curatedUpstreamFindings(piecesSrc) {
   const findings = [];
-  for (const m of piecesSrc.matchAll(/upstream:\s*\{[^}]{0,300}\bpath:\s*"([^"]{0,200})"/g)) {
-    if (!m[1].startsWith("packages/pieces/community/") || m[1].split("/").includes("ee") || m[1].includes("..")) {
-      findings.push(`CURATED_PIECES: upstream path '${m[1]}' is not under packages/pieces/community/`);
+  const keys = curatedKeys(piecesSrc);
+  const paths = [...piecesSrc.matchAll(/upstream:\s*\{[^}]{0,300}\bpath:\s*"([^"]{0,200})"/g)].map((m) => m[1]);
+  // a regex that matches nothing must not pass as "checked" (#753 review)
+  if (keys.length === 0) findings.push("CURATED_PIECES: no curated piece keys found; the check would be vacuous");
+  if (paths.length < keys.length) findings.push(`CURATED_PIECES: ${keys.length} pieces but only ${paths.length} upstream paths found`);
+  for (const p of paths) {
+    if (!p.startsWith("packages/pieces/community/") || p.split("/").includes("ee") || p.includes("..")) {
+      findings.push(`CURATED_PIECES: upstream path '${p}' is not under packages/pieces/community/`);
     }
+  }
+  return findings;
+}
+
+/**
+ * Every AVAILABLE_PIECES row in pieces-available.ts names its upstream path, and that path is exactly
+ * packages/pieces/community/<key> for an allowed package name; the file records the upstream commit it was checked at.
+ */
+export function availableFindings(availableSrc) {
+  const findings = [];
+  const rows = [...availableSrc.matchAll(/^\s{2}\["([^"\n]{0,100})", "([^"\n]{0,50})", "([^"\n]{0,200})"\],$/gm)];
+  const lines = availableSrc.split("\n").filter((l) => /^\s{2}\["/.test(l)).length;
+  if (rows.length === 0) findings.push("AVAILABLE_PIECES: no rows found; the check would be vacuous");
+  if (rows.length !== lines) findings.push(`AVAILABLE_PIECES: ${lines} rows but only ${rows.length} are [key, version, path]`);
+  if (!/commit:\s*"[0-9a-f]{40}"/.test(availableSrc)) findings.push("AVAILABLE_PIECES_SOURCE: no 40-character upstream commit recorded");
+  for (const [, key, , p] of rows) {
+    if (p !== `packages/pieces/community/${key}`) findings.push(`AVAILABLE_PIECES: '${key}' has upstream path '${p}', not packages/pieces/community/${key}`);
+    if (!allowedActivepiecesPackage(`@activepieces/piece-${key}`)) findings.push(`AVAILABLE_PIECES: '${key}' is not an allowed package name`);
   }
   return findings;
 }
@@ -102,7 +135,8 @@ export function run() {
     }
   };
   const pieces = read("packages/connector-provider/src/pieces.ts");
-  return [...scan(files, read), ...curatedUpstreamFindings(pieces)];
+  const available = read("packages/connector-provider/src/pieces-available.ts");
+  return [...scan(files, read), ...curatedUpstreamFindings(pieces), ...availableFindings(available)];
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
