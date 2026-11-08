@@ -22,6 +22,8 @@ roadmap: ../product/ROADMAP.md
 ## Where we are (read this paragraph first)
 <!-- fold:state-recap newest-first -->
 
+**2026-11-07 - backlog P27 built on `builder/p27-mcp-pinning-fixtures` ([ADR-0246](../decisions/0246-mcp-definition-pinning-and-vuln-fixtures.md), the `mcp_definition_pins` migration (numbered at merge)):** MCP rug-pull detection (per-item definition pins at admission, compared on every manifest fetch, a changed item blocked by default until an admin re-approves it against an RFC 6902 diff) and the test-only clean-room `@regulait/mcp-vuln-fixtures` (eight attack classes, kept out of the image). Addendum (owner, same day): offensive tool servers are classified high-risk, and every call needs a policy template (quorum approval, rate limit), an authorised target and a redacted-argument audit. API only; the review UI goes to #453.
+
 **2026-11-08 - P37 built (builder lane, [ADR-0261](../decisions/0261-defenseclaw-telemetry-ingest.md)): a DefenseClaw audit-export ingest adapter.** API and backend only; the six admin routes are known UI gaps tracked on #453 (owner decision 2026-11-07). Migration `pending/third_party_ingest.sql`, numbered at merge. P1 on-device enforcement stays a post-demo clean-room build informed by the DefenseClaw report.
 
 **2026-11-07 - merge queue readiness and merge-time numbering ([ADR-0252](../decisions/0252-merge-queue-and-merge-time-numbering.md), owner decision on #453; review R-03, R-06, R-07, R-08, C-03, C-04).**
@@ -5666,6 +5668,31 @@ writes `full`, `code`, `web`, `image` and `engines`; the six required checks rep
 (two aggregates that accept a skip only where the scope said `'false'`, CodeQL and Trivy gated fail-closed, gitleaks
 and the dependency audit never trimmed). It supersedes the two 2026-11-07 addenda in ADR-0252. Check runs per PR push
 went from about 37 to about 7 (docs), 19 (gateway) and 23 (web). No migration.
+
+**ADR-0246 (builder, 2026-11-07): MCP definition pinning and clean-room vulnerable MCP fixtures (backlog P27).** The
+first admitted manifest of a server is its baseline: every tool (name, title, description, input/output schema,
+annotations), prompt, resource and resource template gets a SHA-256 over its RFC 8785 form in `mcp_definition_pins`
+(approved and observed digest and definition; status derived, never stored). Every manifest fetch compares, audited
+(`mcp-definition-changed`) in the sync's transaction. `org_settings.mcp_definition_pin_mode` defaults to `block`: a
+changed or added tool is neither stored nor served, and a call to it, or `prompts/get` / `resources/read` of a changed
+item, is refused (`mcp-definition-blocked`) before any connect. `warn` is a settings_relax relaxation. Re-approval
+(`POST /v1/servers/:id/definition-pins/approve`) is bound by step-up to the exact reviewed digests, compare-and-set,
+audited. `@regulait/mcp-vuln-fixtures` (test-only, deleted from the image build stage, gateway devDependency) serves eight attack classes
+over real MCP; the two unlicensed upstream projects were not read. Addendum: our own offensive-tooling rule set marks a
+server `risk_class = 'high'` (sticky); under `mcp_high_risk_mode = 'enforce'` each call is refused until the policy
+template (fleet approval rule, quorum >= 2, plus a rate limit) is applied, must name targets covered by
+`mcp_authorised_targets` (adding one is a step-up), and is audited with redacted arguments. Migration: pending `mcp_definition_pins` (numbered at merge, ADR-0252). Open: the UI
+(#453), P23's scanners on the fixtures, and comparison per call rather than per listing.
+
+**ADR-0258 (builder, 2026-11-07, Proposed): Anubis in front of the public pages only (backlog P34).** Off by default;
+`install.sh --anubis` (or profile `anubis` plus `REGULAIT_ANUBIS=on`) turns it on, and the admin records the choice
+(docs/deployment/ANUBIS.md). Caddy asks Anubis by `forward_auth` about the trust centre, auditor portal and supplier
+portal paths only and still proxies to the gateway itself. Pinned v1.28.2 by digest, air-gapped policy, allow-list for
+named auditors, 403 for known scrapers, good bots commented out, a Kubernetes hook. Neither Caddy nor Anubis was run in
+the build session: a live run is needed before the first deployment that turns it on. UI follow-up on #453: the public
+pages should handle a pass cookie that expires mid-page.
+=======
+**ADR-0244 (builder, 2026-11-07): pinned offline baselines for the prompt-injection detectors (P25).** Three MIT benchmarks are vendored under `packages/shared/src/eval-datasets/vendor/injection-baselines/` (300 kB, sha256-pinned in `MANIFEST.json` and `injection-baselines.ts`, refreshed only by `scripts/refresh-injection-eval-snapshots.py`): NotInject (339 benign), InjecAgent (300 of 2,108, stratified, seed 20261107) and AgentDojo v1 (97 benign, 135 injection texts), a seeded JailbreakBench sample (150 attack prompts, 100 benign behaviours; MIT verified for the HF dataset and the artifacts repo), plus our own web-agent set (50 injections over WASP's ten published categories × five carriers and 50 benign look-alikes; WASP is CC BY-NC, so only its category names are cited, clean room). HackAPrompt is MIT but gated (the account must share its HF identity), so it is left out pending the owner. `injection-baselines.test.ts` re-measures the heuristic detector every CI run and fails on a drop in precision or recall, or a rise in FPR, beyond 2 points; `node scripts/injection-eval-baseline.mjs` prints the delta table and `--write` re-pins. The trained classifier is measured offline by `agents/trained-detectors/eval_baselines.py` and recorded ungated. Measured: heuristic NotInject FPR 0%, InjecAgent recall 61.3%, AgentDojo recall 20.0% / FPR 0%; trained (threshold 0.5) NotInject FPR 43.4%, InjecAgent recall 84.3%, AgentDojo recall 72.6% / FPR 3.1%; JailbreakBench heuristic recall 0% / FPR 0%, trained recall 75.3% / FPR 1.0%; web-agent set heuristic recall 2% / FPR 6%, trained recall 60% / FPR 50%. No migration.
 
 <!-- fold:state-decisions -->
 
