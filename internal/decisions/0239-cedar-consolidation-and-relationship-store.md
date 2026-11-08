@@ -63,11 +63,32 @@ record, and about 50 µs per call with no data at all. Passing the limits as a c
 no measurable difference. Parsing the policy set per call costs about 5× more, so the set is preparsed once per size
 (`preparsePolicySet` / `statefulIsAuthorized`, cached up to 256 limits).
 
-So a check that took nanoseconds now takes a few hundred microseconds. That is acceptable in the gateway: each
-governed call already makes several database round trips and runs ABAC, and the Cedar call is skipped when no limit
-applies. It does rule out putting every remaining evaluator on Cedar one wasm call each. A later slice should batch
-all Cedar-backed rule types into **one** `isAuthorized` call per governed call. Approval rules would ride on the
-rate-limit request, so the fixed ~50 µs is paid once.
+Sending every limit to Cedar made a check that took nanoseconds take a few hundred microseconds. The synchronous
+wasm call also blocks the Node event loop, and `governedEvaluate` can run the kernel up to three times per call.
+
+**Review finding 1 (2026-11-08): only possibly-exhausted limits reach Cedar.** Exhaustion
+(`currentCount >= maxCalls`) is a conjunct of every rate-limit policy. A limit whose counts are both safe integers and
+not exhausted can therefore never be Cedar's answer, and the evaluator drops it before the call. Limits with a count
+Cedar cannot represent are kept, so they still fail closed. The survivors keep their original order and are the
+caller's own objects, so the reported limit is unchanged. Cedar still decides every match. Microseconds per check,
+measured on 2026-11-08 on the same machine:
+
+| Limits on the call | Hand-written | Cedar, none exhausted | Cedar, one exhausted | Cedar, unfiltered (before) |
+|---|---|---|---|---|
+| 1 | 0.14 | 0.08 | 158 | 205 |
+| 5 | 0.08 | 0.10 | 134 | 453 |
+| 20 | 0.21 | 0.16 | 124 | 1 162 |
+| 100 | 1.0 | 0.66 | 168 | 6 107 |
+| 300 | 3.3 | 2.1 | 124 | 77 370 |
+
+The common case, where no limit is exhausted, makes no wasm call and costs the same as the hand-written code. A call
+that is about to be denied pays one wasm call of about 0.12–0.17 ms, whatever the number of limits. The uncached
+path above 256 limits is reached only when more than 256 limits are exhausted at once.
+
+The fixed cost of a wasm call still rules out putting every remaining evaluator on Cedar one call each. A later slice
+should batch all Cedar-backed rule types into **one** `isAuthorized` call per governed call, with the same
+pre-filtering where a conjunct is cheap to test. Approval rules would ride on the rate-limit request, so the fixed
+~50 µs is paid once.
 
 ## Decision
 
@@ -141,10 +162,16 @@ an entity parent or a context fact; Cedar and the kernel still decide. SpiceDB i
 
 ## Consequences
 
-- Rate-limit decisions are made by Cedar in every gateway that has not set the legacy switch. The Decision is
-  unchanged, and the gateway's rate-limit tests pass on both settings.
-- A governed call with rate limits costs about 0.2–1.4 ms more (1–20 limits). A call with no limits costs nothing
-  more.
+- Rate-limit decisions are made by Cedar in every gateway that has not set the legacy switch, and the Decision is
+  unchanged.
+  - CI runs the gateway suites on the default (Cedar) setting only.
+  - The `legacy` setting was run locally on 2026-11-08 against Postgres: `rate-limit`, `a4-mode-dimension`,
+    `policy-simulation` and the switch test, 54/54 on each setting.
+- Cost after review finding 1:
+  - No extra cost for a call with no limits, or with no exhausted limit.
+  - About 0.12–0.17 ms for a call where at least one limit is exhausted.
+- The preparsed policy-set cache is bounded by size, never evicted, and holds at most 32,896 parsed policies. Only
+  sizes equal to a count of simultaneously exhausted limits are ever built.
 - New rule id `rate-limit-engine-error`. Audit consumers that alert on rate-limit denials should include it.
 - New boot-refusal case: an unrecognised `REGULAIT_RATE_LIMIT_EVALUATOR`.
 - No new dependency: `@cedar-policy/cedar-wasm` 4.14.0 is already pinned and listed in `THIRD_PARTY.md`.
