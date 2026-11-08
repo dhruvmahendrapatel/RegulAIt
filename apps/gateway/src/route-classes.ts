@@ -39,6 +39,7 @@ import {
   OAUTH_INTROSPECTION_PATH,
   OAUTH_REVOCATION_PATH,
   OAUTH_TOKEN_PATH,
+  DEFENSECLAW_INGEST_PATH,
 } from "@regulait/shared";
 
 /** ADR-0187: the routes only an engine runner credential reaches */
@@ -179,6 +180,9 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // and refuse everything while the endpoint agent source is disabled (the strict default). Listed in
   // NON_ADMIN_ROUTES too, so `public`. The agent's other routes take its DPoP-bound self token only.
   ...ENDPOINT_AGENT_ENROLMENT_PATHS,
+  // ADR-0261 (P37): a DefenseClaw exporter holds no RegulAIt session or API key; the route authenticates IN-ROUTE on
+  // the source's write-only `rgti_` token (hash lookup), and that token reaches nothing else.
+  DEFENSECLAW_INGEST_PATH,
 ]);
 
 export const NON_ADMIN_ROUTES = new Set([
@@ -882,6 +886,8 @@ export const NON_ADMIN_ROUTES = new Set([
   ...EXECUTOR_CHANNEL_ROUTES,
   // ADR-0195 SD4b — the endpoint agent's enrolment (auth-exempt above too; in-route bulk token or device ticket)
   ...ENDPOINT_AGENT_ENROLMENT_PATHS.map((p) => `POST ${p}`),
+  // ADR-0261 (P37): the third-party exporter route (authenticated in-route by its source token)
+  `POST ${DEFENSECLAW_INGEST_PATH}`,
 
   // ADR-0189 slice B4 — the Decision BOM and AI BOM reads, bundles and the
   // online verifier. The gate is `bom_export_roles` (§7, §9), checked IN THE
