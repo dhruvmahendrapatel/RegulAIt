@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    // The MCP SDK's option types aren't authored for exactOptionalPropertyTypes (as in the gateway).
+    "exactOptionalPropertyTypes": false
+  },
+  "include": ["src"]
+}

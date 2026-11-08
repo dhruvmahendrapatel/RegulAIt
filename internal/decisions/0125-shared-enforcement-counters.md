@@ -2,10 +2,10 @@
 
 - **Status**: Accepted
 - **Date**: 2026-09-26
-- **Relates to**: [ADR-0031](0031-security-hardening-batch.md) item 4 (the HTTP rate limiter this
+- **Relates to**: [ADR-0031](0031-p0-hardening-streaming-exports-proxy-trust-rate-limits-csp.md) item 4 (the HTTP rate limiter this
   moves out of process memory), [ADR-0064](0064-in-process-scheduler.md) (enforcement never depends
   on a sweep — why the prune here is allowed to be a plain timer),
-  [ADR-0087](0087-pillar7-orchestration.md) §5.2 (the measured run/node budgets whose accumulation
+  ADR-0087 §5.2 (the measured run/node budgets whose accumulation
   this makes atomic), [ROADMAP §8](../product/ROADMAP.md) G1
 - **Migration**: [`0115_rate_limit_counters.sql`](../../packages/db/migrations/0115_rate_limit_counters.sql)
 

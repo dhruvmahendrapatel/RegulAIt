@@ -108,11 +108,13 @@ const round1 = (x: number) => Math.round(x * 10) / 10;
 const pctText = (x: number) => `${Math.round(x)}%`;
 const n = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
 
-interface Draft {
+/** one objective before weighting: its card, its raw 0–100 score, and the deficits that cost it points */
+export interface ObjectiveDraft {
   objective: Omit<PostureObjective, "contribution" | "score" | "weight"> & { raw: number };
   /** each candidate action with the objective's raw score once that deficit is removed */
   fixes: Array<{ key: string; title: string; fixedRaw: number; why: string; link?: { to: string; label: string } }>;
 }
+type Draft = ObjectiveDraft;
 
 function coverage(d: PostureScoreInput): Draft {
   const packs = d.packs.active;
@@ -343,21 +345,33 @@ function spend(d: PostureScoreInput): Draft {
 const ORDER: ObjectiveId[] = ["coverage", "risk", "adversarial", "access", "evaluation", "audit", "spend"];
 const BUILDERS: Record<ObjectiveId, (d: PostureScoreInput) => Draft> = { coverage, risk, adversarial, access, evaluation, audit, spend };
 
-/** Score the posture document. Pure and deterministic: no clock, no randomness, no I/O. */
-export function scorePosture(d: PostureScoreInput): PostureScore {
-  const drafts = ORDER.map((id) => BUILDERS[id](d));
+/**
+ * Weight a set of objective drafts into one estimate and a ranked action list. The estimate is the weighted mean of
+ * the drafts' sub-scores over the weights of the objectives present: for the org-wide estimate that is all seven and
+ * the divisor is 100; a per-asset estimate (ADR-0214 amendment, asset-score.ts) passes only the objectives that apply
+ * to its kind. Pure: no clock, no randomness, no I/O.
+ */
+export function combineObjectives(drafts: ObjectiveDraft[]): {
+  score: number;
+  weightTotal: number;
+  objectives: PostureObjective[];
+  actions: PostureAction[];
+} {
+  const weightTotal = drafts.reduce((acc, dr) => acc + POSTURE_WEIGHTS[dr.objective.id], 0);
   const objectives: PostureObjective[] = drafts.map(({ objective: { raw, ...o } }) => {
     const score = Math.round(clamp(raw));
     const weight = POSTURE_WEIGHTS[o.id];
-    return { ...o, weight, score, contribution: round1((weight * score) / 100) };
+    return { ...o, weight, score, contribution: weightTotal ? round1((weight * score) / weightTotal) : 0 };
   });
-  const total = Math.round(objectives.reduce((acc, o) => acc + (o.weight * o.score) / 100, 0));
+  // one division of the whole weighted sum, so an exact half (72.5) is not lost to per-term float error
+  const total = weightTotal ? Math.round(objectives.reduce((acc, o) => acc + o.weight * o.score, 0) / weightTotal) : 0;
 
   const candidates = drafts.flatMap((dr, i) => {
     const o = objectives[i]!;
+    const share = round1((o.weight * 100) / weightTotal);
     return dr.fixes.map((f) => {
       const gain = Math.max(0, Math.round(clamp(f.fixedRaw)) - o.score);
-      const points = round1((o.weight * gain) / 100);
+      const points = round1((o.weight * gain) / weightTotal);
       const lead = o.measured ? `Worth ${points} points` : `Worth up to ${points} points once measured`;
       return {
         order: i,
@@ -365,7 +379,7 @@ export function scorePosture(d: PostureScoreInput): PostureScore {
         objective: o.id,
         title: f.title,
         points,
-        reason: `${lead}: ${f.why}. ${o.title} is at ${o.score} of 100 and carries ${o.weight}% of the estimate.`,
+        reason: `${lead}: ${f.why}. ${o.title} is at ${o.score} of 100 and carries ${share}% of the estimate.`,
         link: f.link ?? o.link,
       };
     });
@@ -374,6 +388,12 @@ export function scorePosture(d: PostureScoreInput): PostureScore {
   const actions: PostureAction[] = candidates
     .filter((c) => c.points > 0)
     .map(({ order: _order, ...c }, i) => ({ rank: i + 1, ...c }));
+  return { score: total, weightTotal, objectives, actions };
+}
+
+/** Score the posture document. Pure and deterministic: no clock, no randomness, no I/O. */
+export function scorePosture(d: PostureScoreInput): PostureScore {
+  const { score: total, objectives, actions } = combineObjectives(ORDER.map((id) => BUILDERS[id](d)));
 
   return {
     estimate: true,

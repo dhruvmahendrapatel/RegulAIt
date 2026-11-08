@@ -2,13 +2,13 @@
 
 - **Status**: Accepted
 - **Date**: 2026-09-07
-- **Relates to**: [ADR-0060](0060-audit-log-hash-chain.md) (`canonicalJson` — the one canonicalization,
+- **Relates to**: [ADR-0060](0060-tamper-evident-audit.md) (`canonicalJson` — the one canonicalization,
   reused here rather than re-implemented), [ADR-0099](0099-audit-log-credential-scrub.md) and
   [ADR-0102](0102-operator-prose-credential-scrub.md) (`scrubAuditDetail` — the one redactor, reused
-  for the approver-facing preview), [ADR-0040](0040-abac-policy-layer.md) (the ABAC route into the
-  same queue — see the honest limits), [ADR-0073](0073-config-versions-canary.md) (rule bodies
+  for the approver-facing preview), [ADR-0040](0040-abac-policy-as-code.md) (the ABAC route into the
+  same queue — see the honest limits), [ADR-0073](0073-rules-engine-versioning.md) (rule bodies
   resolve through `config_versions`, so an older body carrying no scope has to read as the strict
-  one), [ADR-0022](0022-approval-delegation.md) / [ADR-0046](0046-approvals-workbench.md) (the one
+  one), [ADR-0022](0022-identity-lifecycle-approver-visibility.md) / [ADR-0046](0046-review-workbench.md) (the one
   queue and its inbox, whose row shape carries the new fields with no route change),
   [ADR-0103](0103-mcp-path-project-budget-gate.md) (the budget gate sited immediately above the
   queueing block this ADR changes)

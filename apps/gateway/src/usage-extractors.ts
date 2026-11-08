@@ -60,8 +60,13 @@ export interface DispatchUsage {
   /** the mapping version that produced `usage`; null = the adapter's built-in extraction */
   versionId: string | null;
   /** present only when a mapping was active: what happened, for the usage row's detail */
-  outcome?: { versionId: string; version: number; result: "mapped" | "fallback"; failure?: string };
+  outcome?:
+    | { versionId: string; version: number; result: "mapped" | "fallback"; failure?: string }
+    | { versionId: null; result: "error"; failure: string };
 }
+
+/** at most one fallback audit row per mapping version in this window (ADR-0241 follow-up, review finding 2) */
+export const FALLBACK_AUDIT_WINDOW_SECONDS = 3600;
 
 async function switchOn(db: Db): Promise<boolean> {
   const [row] = await db
@@ -80,6 +85,21 @@ export async function resolveDispatchUsage(
   args: { agentId: string; userId: string; projectId?: string | null; result: Pick<ModelDispatchResult, "usage" | "usageSource"> },
 ): Promise<DispatchUsage> {
   const builtIn: DispatchUsage = { usage: args.result.usage, versionId: null };
+  // Runs after the provider call, so the spend has happened: a database error here must never fail the dispatch
+  // (review finding 4). It keeps the built-in counts and stamps the failure on the usage row; no audit row is
+  // attempted, since the database is what failed. The message is a fixed string, never the error text.
+  try {
+    return await resolveWithMapping(db, args, builtIn);
+  } catch {
+    return { ...builtIn, outcome: { versionId: null, result: "error", failure: "the usage mapping could not be read; the adapter's built-in counts were used" } };
+  }
+}
+
+async function resolveWithMapping(
+  db: Db,
+  args: { agentId: string; userId: string; projectId?: string | null; result: Pick<ModelDispatchResult, "usage" | "usageSource"> },
+  builtIn: DispatchUsage,
+): Promise<DispatchUsage> {
   if (!(await switchOn(db))) return builtIn;
   const [active] = await db
     .select({ versionId: usageExtractorVersions.id, version: usageExtractorVersions.version, mapping: usageExtractorVersions.mapping })
@@ -100,12 +120,35 @@ export async function resolveDispatchUsage(
       outcome: { versionId: active.versionId, version: active.version, result: "mapped" },
     };
   }
+  // Every fallback is stamped on its usage row; the audit row is rate-limited to one per version per window, so an
+  // adapter that sets no usageSource (mock, artifact, an adapter outside this package) cannot write one audit row per
+  // call (review finding 2). The window is read on the database clock (M-075).
+  const [recent] = await db
+    .select({ id: auditLog.id })
+    .from(auditLog)
+    .where(
+      and(
+        eq(auditLog.objectType, "agent"),
+        eq(auditLog.objectId, args.agentId),
+        eq(auditLog.ruleId, "usage-extractor-fallback"),
+        sql`${auditLog.at} > now() - make_interval(secs => ${FALLBACK_AUDIT_WINDOW_SECONDS})`,
+        sql`${auditLog.detail}->>'usageExtractorVersionId' = ${active.versionId}`,
+      ),
+    )
+    .limit(1);
+  if (recent) {
+    return {
+      ...builtIn,
+      outcome: { versionId: active.versionId, version: active.version, result: "fallback", failure: extracted.reason },
+    };
+  }
   await db.insert(auditLog).values({
     userId: args.userId,
     objectType: "agent",
     objectId: args.agentId,
     detail: {
       phase: "usage-extractor-fallback",
+      auditWindowSeconds: FALLBACK_AUDIT_WINDOW_SECONDS,
       usageExtractorVersionId: active.versionId,
       version: active.version,
       failure: extracted.reason,
