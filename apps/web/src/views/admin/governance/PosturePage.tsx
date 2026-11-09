@@ -31,6 +31,7 @@ import { PostureEstimate, type PostureScoreDoc } from "./PostureEstimate";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 import p from "./posture.module.css";
+import ed from "./executiveDashboard.module.css";
 
 interface PostureDoc {
   generatedAt: string;
@@ -332,7 +333,7 @@ export default function PosturePage() {
   return (
     <>
       <PageHeader
-        title="Posture"
+        title="Executive Dashboard"
         info={<p>The one-page executive read of everything the operator pages hold: pack coverage, open risks, red-team posture, spend vs budget, governance activity, audit anchoring and the use-case pipeline. The posture estimate at the top weighs seven objectives by published formulae and ranks what to fix first; it is an estimate, never a compliance verdict. Every number is computed from the real ledgers at the moment this page loads — nothing is a stored rollup — and where a ledger is empty the page says unmeasured, never zero-implies-good. Print this page for the meeting: the browser's print view drops the app chrome.</p>}
         actions={
           <span className={p.noPrint}>
@@ -345,10 +346,31 @@ export default function PosturePage() {
       <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
         {d && (
           <div className={v.stack}>
+            <section className={ed.executiveIntro} aria-label="Executive overview">
+              <div>
+                <h2>AI governance at a glance</h2>
+                <p>Live governance and risk indicators from the existing reporting ledger. Open each card for the underlying operational detail.</p>
+              </div>
+              <div className={ed.executiveMeta}>
+                <Badge tone="info">Last {d.window.days} days</Badge>
+                <span className={v.faint}>Spend is a list-price estimate; empty measurements remain unmeasured.</span>
+                <span className={p.noPrint}>
+                  <Button variant="ghost" onClick={() => void q.refetch()} disabled={q.isFetching}>
+                    {q.isFetching ? "Refreshing…" : "Refresh"}
+                  </Button>
+                </span>
+              </div>
+            </section>
             {/* ---------------- estimate, objectives and what to fix first ---------------- */}
             {d.score && <PostureEstimate score={d.score} />}
             {/* ---------------- headlines ---------------- */}
-            <div className={v.grid4}>
+            <div className={ed.executiveKpis}>
+              <Headline
+                value={d.useCases.total}
+                label="registered AI use cases"
+                line={<>Recorded use cases: {d.useCases.proposed} proposed, {d.useCases.underReview} under review, {d.useCases.approved} approved, {d.useCases.rejected} rejected and {d.useCases.retired} retired. This is an inventory count, not a compliance score.</>}
+                link={<SectionLink to="/admin/use-cases" label="use-case registry →" />}
+              />
               <Headline
                 value={
                   d.packs.active.length === 0
