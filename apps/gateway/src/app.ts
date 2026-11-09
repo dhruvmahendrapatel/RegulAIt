@@ -561,7 +561,7 @@ import { registerSchedulerRoutes } from "./scheduler-api.js";
 // ADR-0186 (batch 4) — the foundation registers every §4.9 route; each module
 // answers 501 not_built until its slice lands (A/B Claude, R/S/V Codex)
 import { registerPasskeyRoutes } from "./passkeys.js";
-import { approvalRuleStepUp, CHANGED_CONCURRENTLY, checkStepUp, ownerChangeStepUpArgs, registerStepUpRoutes, requireStepUp, requireStepUps, revocationLiftStepUp, grantMintStepUp, type StepUpCheckArgs } from "./step-up.js";
+import { approvalRuleStepUp, CHANGED_CONCURRENTLY, checkStepUp, ownerChangeStepUpArgs, registerStepUpRoutes, requireStepUp, requireStepUps, revocationLiftStepUp, grantMintStepUp, rolesHoldingGrants, type StepUpCheckArgs } from "./step-up.js";
 import { ApprovalRuleWriteRefusedError, approverPoolShiftFacts, isApproverRole, lockApprovalRuleRouting, lockApproverRoles, namedApproverSeatExists, sameApproverPoolShift, type ApproverPoolShift } from "./approval-pool.js";
 import {
   decisionView,
@@ -2691,7 +2691,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     );
     if (sod) return reply.status(409).send(sod);
     // ADR-0250 (review S-04): minting widens default deny — a fresh step-up bound to exactly this grant
-    const serverMint = grantMintStepUp({ kind: "server", userId: body.userId, serverId: body.serverId, readOnlyAll: true });
+    const serverMint = grantMintStepUp({ kind: "server", userId: body.userId, serverId: body.serverId, readOnlyAll: body.readOnlyAll });
     if (!(await requireStepUp(db, req, reply, serverMint)).ok) return reply;
     // a server read-only grant relaxes this person's default deny on every read tool, present and future, so it is
     // on the trail in the same transaction as the row, exactly like a tool grant (PR #181 review)
@@ -2936,9 +2936,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // rule with a narrower pool, who signs moves to a wider pool: the same step-up, bound to the takeover facts
     const shift: ApproverPoolShift = { change: "member-add", objectType: "role", objectId: body.roleId, userId };
     const takeover = await approverPoolShiftFacts(db, shift);
+    // ADR-0250 (PR #720 review): a role that holds grants confers them, which widens default deny like minting them
+    const confersGrants = (await rolesHoldingGrants(db, [body.roleId])).has(body.roleId);
     const stepUps: StepUpCheckArgs[] = [
       ...(approverRole ? [{ kind: "settings_relax" as const, facts: { userId, values: { approverRoleId: body.roleId } } }] : []),
       ...(takeover ? [{ kind: "settings_relax" as const, facts: takeover }] : []),
+      ...(confersGrants ? [grantMintStepUp({ kind: "role_assignment", userId, roleId: body.roleId })] : []),
     ];
     if (stepUps.length > 0 && !(await requireStepUps(db, req, reply, stepUps))) return reply;
     // ADR-0186 A (Class A): decided again under the approver-role lock — a role that

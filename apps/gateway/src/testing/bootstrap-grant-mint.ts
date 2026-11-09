@@ -23,7 +23,10 @@ import diagnostics from "node:diagnostics_channel";
 import { afterAll } from "vitest";
 import { createDb, type Db } from "@regulait/db";
 
-const MINT_ROUTE = /^\/v1\/(grants\/(tools|servers|agents|connectors)|roles\/[^/]+\/grants\/(tools|servers|agents|connectors))$/;
+// the eight grant mints, and (PR #720 review) the three ways a role holding grants reaches someone: a direct role
+// assignment, a group-role mapping and the onboarding group-role import
+const MINT_ROUTE =
+  /^\/v1\/(grants\/(tools|servers|agents|connectors)|roles\/[^/]+\/grants\/(tools|servers|agents|connectors)|users\/[^/]+\/roles|group-role-mappings|onboarding\/imports\/group-roles)$/;
 
 type InjectOpts = { method?: string; url?: string };
 type InjectRes = { statusCode: number; body: string };

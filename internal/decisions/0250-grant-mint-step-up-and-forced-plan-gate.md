@@ -52,6 +52,25 @@ Each of the eight POST routes requires a `settings_relax` step-up bound to `{op:
   other relaxation. Removing `settings_relax` from `step_up_actions` (itself a stepped-up, audited relaxation) turns
   this off with the rest.
 - DELETE routes stay without step-up: removing a grant narrows access.
+- **Grants conferred through a role (PR #720 review, finding 1).** Assigning a role, or mapping a group to it, confers
+  every grant the role holds, which widens default deny like minting them. The same `grant_mint` step-up applies when
+  the role holds any tool, server-read, agent or connector grant (`rolesHoldingGrants`), bound to exactly what is
+  written; a role holding none needs no step-up. A role gains a grant only through a stepped-up role-grant mint, or
+  through an approved SoD override (below):
+
+  | Route | `grant` facts |
+  |---|---|
+  | `POST /v1/users/:userId/roles` | `{kind: "role_assignment", userId, roleId}` |
+  | `POST /v1/group-role-mappings` | `{kind: "group_role_mapping", source, externalGroup, roleId}` |
+  | `POST /v1/onboarding/imports/group-roles` (apply) | `{kind: "group_role_mappings", mappings}` (every such mapping, sorted) |
+
+  These join any approver-pool step-up the route already asks for; all of them are checked before any is spent.
+  Group membership itself comes from the IdP (login and SCIM sync) and is outside this gate, as before (ADR-0091).
+- The person server-grant digest binds the `readOnlyAll` the request writes, as the role-server route does.
+- **SoD overrides.** A mint the SoD gate refuses can be requested as an override; when another person approves it,
+  `executeOverriddenMint` (`sod.ts`) writes the grant or assignment without this step-up. That is not a single-key path:
+  the requester cannot decide their own override, and the decision is an `approval_decide` act, a step-up kind in the
+  strict default. A leaked admin key alone cannot complete one.
 
 ### P-02: the plan-only gate is forced at project level, on every surface
 
@@ -82,7 +101,7 @@ flow was found that needs execute during planning: the seed leaves plan-only bef
 
 ## Consequences
 
-- A leaked admin API key can no longer mint grants. Grant administration happens in a signed-in browser session with a
+- A leaked admin API key can no longer mint grants, nor confer them by assigning or mapping a role that holds them. Grant administration happens in a signed-in browser session with a
   fresh second factor, like the other relaxations. The admin UI's grant buttons go through `withStepUp`, and the demo
   seed mints its grants during first-admin setup (before Ada enrols), reporting rather than forcing a mint it cannot
   re-send on a re-seed.
@@ -91,15 +110,18 @@ flow was found that needs execute during planning: the seed leaves plan-only bef
   `requireMcpAttribution`, ADR-0181), and an admin who relaxes those (audited) accepts that unattributed calls meet no
   plan gate.
 - **Honest limits.**
-  - An invoke or run that names **no project** (and no instance) has nothing to key on and is not plan-gated. The
-    invoke path has no project-attribution requirement today; making one mandatory is a separate decision.
+  - An invoke or run that names **no project** (and no instance) has nothing to key on and is not plan-gated. By
+    default such a dispatch is refused anyway (`dispatchAttributionRequired`, strict default `true`, in the shared
+    governed dispatch); the limit applies only once an admin relaxes that setting, which is audited.
   - An instance created **without a project** can only be gated by naming it (ADR-0079), as before.
   - A run's worker loop is gated when the run is planned, not on every tool call it makes: a run planned before an
     instance of its project entered planning keeps running.
   - The MCP session reads the engine-key exception once per session; the planning state itself is read on every
     `tools/call`.
   - The project lookup filters `workflow_instances` by `project_id` and non-terminal status without a dedicated index
-    (no migration in this batch); add a partial index if the table grows large.
+    (no migration in this batch). It runs on every mutating invoke, run and compat call and every MCP write tool, so
+    the follow-up is planned, not conditional: a pending migration adding `workflow_instances (project_id) WHERE status
+    NOT IN ('completed', 'aborted', 'denied', 'rolled_back')` (PENDING, ADR-0200 data).
 - Test setup: about 180 gateway suites mint grants in setup with the bootstrap credential, which passes a step-up only
   while no admin can give one, and the shared test database may hold such an admin left by an earlier file. The
   setup file `testing/bootstrap-grant-mint.ts` repeats such a mint once inside `relaxStepUpAround` (what suites already

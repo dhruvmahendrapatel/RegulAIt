@@ -5,16 +5,20 @@ import {
   agentGrants,
   connectorGrants,
   createDb,
+  groupRoleMappings,
   eq,
   mcpServers,
   ORG_SETTINGS_ID,
   orgSettings,
   roleAgentGrants,
+  roleAssignments,
   roleConnectorGrants,
   roleServerGrants,
+  roles,
   roleToolGrants,
   runMigrations,
   serverGrants,
+  and,
   toolGrants,
   users,
   type Db,
@@ -223,5 +227,91 @@ describe("ADR-0250 (S-04): every grant mint is a step-up action", () => {
     expect(minted.statusCode, minted.body).toBe(201);
     expect(await grantSpent(db, right.grantId)).toBe(true);
     expect(await c.rows(granteeId)).toBe(before + 1);
+  });
+});
+
+/**
+ * PR #720 review (code and security, finding 1): a role that holds grants confers them, so assigning it, or mapping a
+ * group to it, widens default deny exactly like minting the grants. The same `grant_mint` step-up applies, bound to
+ * the assignment or mappings; a role holding no grant needs none.
+ */
+describe("ADR-0250 (PR #720 review): role assignment and group mappings that confer grants are step-up actions", () => {
+  let grantingRoleId: string;
+  let grantingRoleName: string;
+  let plainRoleId: string;
+  beforeAll(async () => {
+    grantingRoleName = `gm-granting-${RUN}`;
+    const [granting] = await db.insert(roles).values({ name: grantingRoleName }).returning();
+    grantingRoleId = granting!.id;
+    await db.insert(roleToolGrants).values({ roleId: grantingRoleId, serverId, toolName: "gm_conferred" });
+    const [plain] = await db.insert(roles).values({ name: `gm-plain-${RUN}` }).returning();
+    plainRoleId = plain!.id;
+  });
+
+  const assigned = async (userId: string, roleId: string) =>
+    (await db.select().from(roleAssignments).where(and(eq(roleAssignments.userId, userId), eq(roleAssignments.roleId, roleId)))).length;
+  const mapped = async (externalGroup: string) =>
+    (await db.select().from(groupRoleMappings).where(eq(groupRoleMappings.externalGroup, externalGroup))).length;
+
+  it("POST /v1/users/:userId/roles: a granting role needs the step-up bound to the assignment; a plain role does not", async () => {
+    const url = `/v1/users/${otherId}/roles`;
+    const byKey = await app.inject({ method: "POST", url, headers: adminKeyAuth, payload: { roleId: grantingRoleId } });
+    expect(byKey.statusCode, byKey.body).toBe(403);
+    expect(byKey.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax", credential: "api_key" });
+    expect(await assigned(otherId, grantingRoleId)).toBe(0);
+
+    const wrong = await grantStepUpForTest(db, adminId, grantMintStepUp({ kind: "role_assignment", userId: granteeId, roleId: grantingRoleId }));
+    const refused = await app.inject({ method: "POST", url, ...stepUpRequest(wrong), payload: { roleId: grantingRoleId } });
+    expect([403, 422], refused.body).toContain(refused.statusCode);
+    expect(await grantSpent(db, wrong.grantId)).toBe(false);
+    expect(await assigned(otherId, grantingRoleId)).toBe(0);
+
+    const right = await grantStepUpForTest(db, adminId, grantMintStepUp({ kind: "role_assignment", userId: otherId, roleId: grantingRoleId }));
+    const ok = await app.inject({ method: "POST", url, ...stepUpRequest(right), payload: { roleId: grantingRoleId } });
+    expect(ok.statusCode, ok.body).toBe(201);
+    expect(await grantSpent(db, right.grantId)).toBe(true);
+    expect(await assigned(otherId, grantingRoleId)).toBe(1);
+
+    // a role holding no grant confers nothing: no step-up (an admin key may assign it)
+    const plain = await app.inject({ method: "POST", url, headers: adminKeyAuth, payload: { roleId: plainRoleId } });
+    expect(plain.statusCode, plain.body).toBe(201);
+  });
+
+  it("POST /v1/group-role-mappings: mapping a group to a granting role needs the step-up bound to the mapping", async () => {
+    const group = `gm-group-${RUN}`;
+    const payload = { source: "oidc", externalGroup: group, roleId: grantingRoleId };
+    const byKey = await app.inject({ method: "POST", url: "/v1/group-role-mappings", headers: adminKeyAuth, payload });
+    expect(byKey.statusCode, byKey.body).toBe(403);
+    expect(byKey.json()).toMatchObject({ error: "step_up_required", credential: "api_key" });
+    expect(await mapped(group)).toBe(0);
+
+    const right = await grantStepUpForTest(db, adminId, grantMintStepUp({ kind: "group_role_mapping", source: "oidc", externalGroup: group, roleId: grantingRoleId }));
+    const ok = await app.inject({ method: "POST", url: "/v1/group-role-mappings", ...stepUpRequest(right), payload });
+    expect(ok.statusCode, ok.body).toBe(201);
+    expect(await grantSpent(db, right.grantId)).toBe(true);
+    expect(await mapped(group)).toBe(1);
+
+    const plainGroup = `gm-plain-group-${RUN}`;
+    const plain = await app.inject({ method: "POST", url: "/v1/group-role-mappings", headers: adminKeyAuth, payload: { source: "oidc", externalGroup: plainGroup, roleId: plainRoleId } });
+    expect(plain.statusCode, plain.body).toBe(201);
+  });
+
+  it("POST /v1/onboarding/imports/group-roles (apply): mappings to granting roles need one step-up bound to all of them", async () => {
+    const group = `gm-import-${RUN}`;
+    const payload = { mode: "apply", rows: [{ source: "oidc", externalGroup: group, roleName: grantingRoleName }] };
+    const byKey = await app.inject({ method: "POST", url: "/v1/onboarding/imports/group-roles", headers: adminKeyAuth, payload });
+    expect(byKey.statusCode, byKey.body).toBe(403);
+    expect(byKey.json()).toMatchObject({ error: "step_up_required", credential: "api_key" });
+    expect(await mapped(group)).toBe(0);
+
+    const right = await grantStepUpForTest(
+      db,
+      adminId,
+      grantMintStepUp({ kind: "group_role_mappings", mappings: [{ source: "oidc", externalGroup: group, roleId: grantingRoleId }] }),
+    );
+    const ok = await app.inject({ method: "POST", url: "/v1/onboarding/imports/group-roles", ...stepUpRequest(right), payload });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect(await grantSpent(db, right.grantId)).toBe(true);
+    expect(await mapped(group)).toBe(1);
   });
 });

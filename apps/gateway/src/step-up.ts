@@ -112,6 +112,10 @@ import {
   oidcProviders,
   ORG_SETTINGS_ID,
   orgSettings,
+  roleAgentGrants,
+  roleConnectorGrants,
+  roleServerGrants,
+  roleToolGrants,
   samlProviders,
   sql,
   ssoReauthRequests,
@@ -686,6 +690,25 @@ export function revocationLiftStepUp(
  */
 export function grantMintStepUp(grant: Record<string, unknown>): StepUpCheckArgs {
   return { kind: "settings_relax", facts: { op: "grant_mint", grant } };
+}
+
+/**
+ * ADR-0250 (PR #720 review): assigning a role, or mapping a group to it, confers the role's grants, which widens
+ * default deny exactly like minting them. Which of these roles hold any tool, server-read, agent or connector grant;
+ * a role in the result needs the `grant_mint` step-up to be assigned or mapped. A role that later gains a grant does
+ * so through a stepped-up role-grant mint, so a role holding none at the check cannot be used to widen access
+ * without one.
+ */
+export async function rolesHoldingGrants(db: Db, roleIds: readonly string[]): Promise<Set<string>> {
+  const ids = [...new Set(roleIds)];
+  if (ids.length === 0) return new Set();
+  const found = await Promise.all([
+    db.selectDistinct({ roleId: roleToolGrants.roleId }).from(roleToolGrants).where(inArray(roleToolGrants.roleId, ids)),
+    db.selectDistinct({ roleId: roleServerGrants.roleId }).from(roleServerGrants).where(inArray(roleServerGrants.roleId, ids)),
+    db.selectDistinct({ roleId: roleAgentGrants.roleId }).from(roleAgentGrants).where(inArray(roleAgentGrants.roleId, ids)),
+    db.selectDistinct({ roleId: roleConnectorGrants.roleId }).from(roleConnectorGrants).where(inArray(roleConnectorGrants.roleId, ids)),
+  ]);
+  return new Set(found.flat().map((r) => r.roleId));
 }
 export function revocationScopeStepUp(kind: "mcp" | "connectors", revocationId: string, scope: string): StepUpCheckArgs {
   return { kind: "settings_relax", facts: { values: { revocationScope: { kind, revocationId, scope } } } };

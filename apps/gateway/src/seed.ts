@@ -427,8 +427,9 @@ await mintGrant(`/v1/roles/${analystRoleId}/grants/tools`, {
   serverId: warehouseServerId,
   toolName: "query",
 });
+// ADR-0250 (PR #720 review): assigning a role that holds grants confers them, the same step-up as minting them
 for (const userId of [danaId, averyId]) {
-  await call("POST", `/v1/users/${userId}/roles`, { roleId: analystRoleId });
+  await mintGrant(`/v1/users/${userId}/roles`, { roleId: analystRoleId }); // 409 dup = fine
 }
 
 for (const [userId, serverId, toolName] of [
