@@ -82,6 +82,7 @@ import { isStdioSessionLostError } from "./stdio-session-loss.js";
 import { PROJECT_HEADER } from "./project-header.js";
 import { stdioRefusalSentence } from "./mcp-egress.js";
 import { armOutboundIdentity, IdentityAssertionRefusedError, outboundIdentityFor, type OutboundIdentity } from "./mcp-identity-assertion.js";
+import { armUpstreamExchange, UpstreamExchangeHolder } from "./upstream-token-exchange.js";
 import { timeouts } from "./timeouts.js";
 import {
   attemptsForToolKind,
@@ -296,6 +297,8 @@ export async function connectUpstream(
     retry?: RetryReport;
     retryAttempts?: number;
     outboundIdentity?: OutboundIdentity | null;
+    /** ADR-0238: the call's down-scoped token holder (unarmed until the call is allowed) */
+    upstreamExchange?: UpstreamExchangeHolder | null;
     /**
      * ADR-0190 I4: the call a stdio connect serves (person, project, delegation grant), the inputs of the
      * isolation placement. Absent = no project: a stdio connect is refused `policy_unresolved` (fail closed).
@@ -338,6 +341,7 @@ export async function connectUpstream(
           : {}),
         // ADR-0188 S8: an opted-in server's identity holder (unarmed until the call is allowed)
         ...(opts.outboundIdentity ? { outboundIdentity: opts.outboundIdentity } : {}),
+        ...(opts.upstreamExchange ? { upstreamExchange: opts.upstreamExchange } : {}),
       });
     },
     {
@@ -796,6 +800,8 @@ async function executeGovernedToolCallInner(
   let upstream: Client | null = null;
   // ADR-0188 S8: an opted-in server's identity holder, on every connect of this call; armed only once allowed
   const outboundIdentity = outboundIdentityFor(serverRow);
+  // ADR-0238: this call's down-scoped token holder (never shared with another call); armed only once allowed
+  const upstreamExchange = new UpstreamExchangeHolder(serverRow.url);
   const redactActive = piiMode === "redact";
   const closeUpstream = async () => {
     if (upstream) {
@@ -926,7 +932,7 @@ async function executeGovernedToolCallInner(
       try {
         // ADR-0190 I4 (review M1): for stdio this is an UNLINKED placement (`placeStdioSession`): there is no tool
         // decision yet, so its placement row is keyed to its own audit row and is outside the I4/I8 decision contract
-        upstream = await connectUpstream(db, serverRow, { outboundIdentity, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, principal: args.principal ?? null } });
+        upstream = await connectUpstream(db, serverRow, { outboundIdentity, upstreamExchange, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, principal: args.principal ?? null } });
         upstreamTools = await syncUpstreamTools(db, serverId, upstream, "sync", serverRow.transport);
       } catch (err) {
         await operationFailed(err);
@@ -1416,11 +1422,25 @@ async function executeGovernedToolCallInner(
       });
       if (!armed.ok) return { kind: "denied", decision: armed.decision };
     }
+    // ADR-0238: a server with token exchange on receives only a token obtained for THIS tool's mapped scopes. After
+    // the decision and before the connect or any approval is consumed, so a refusal contacts nothing and spends nothing.
+    {
+      const exchanged = await armUpstreamExchange(upstreamExchange, {
+        db,
+        dataKey,
+        server: serverRow,
+        sponsorUserId: userId,
+        actors: delegatedActor ? delegatedActor.chain.actors : null,
+        action: toolName,
+        projectId,
+      });
+      if (!exchanged.ok) return { kind: "denied", decision: exchanged.decision };
+    }
     if (!upstream) {
       const refused = await breakerRefusesUpstream();
       if (refused) return refused;
       try {
-        upstream = await connectUpstream(db, serverRow, { outboundIdentity, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, linkedOfferId, principal: args.principal ?? null } });
+        upstream = await connectUpstream(db, serverRow, { outboundIdentity, upstreamExchange, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, linkedOfferId, principal: args.principal ?? null } });
       } catch (err) {
         await operationFailed(err);
         if (redactActive) throw new Error("MCP upstream connection failed under PII redaction");
