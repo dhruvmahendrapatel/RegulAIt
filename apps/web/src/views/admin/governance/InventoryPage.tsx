@@ -183,7 +183,7 @@ export default function InventoryPage() {
   return (
     <>
       <PageHeader
-        title="Inventory"
+        title="Agent inventory"
         info={
           <p>
             The standing dependency view: per registered agent, who holds a grant on it, what its runs actually touched,
