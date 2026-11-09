@@ -148,7 +148,7 @@ export default function UseCasesPage() {
 
   return (
     <>
-      <PageHeader title="AI Use-Cases" sub="Manage the AI use-case lifecycle, from registration and assessment to review and oversight." actions={<RegisterSplitButton />} />
+      <PageHeader title="AI registry" sub="Manage the AI use-case lifecycle, from registration and assessment to review and oversight." actions={<RegisterSplitButton />} />
       <div className={v.stack}>
         <div className={r.tiles} role="group" aria-label="Headline counts">
           {tile("Use cases", counts.total, false, {})}
