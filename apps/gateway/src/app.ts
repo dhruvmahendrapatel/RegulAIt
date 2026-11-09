@@ -326,6 +326,7 @@ import {
 } from "./identity-lists.js";
 import { DELEGATIONS_LIST, delegationsFilterQuery, delegationsReader, delegationsWhere, userNameSql } from "./delegations-list.js";
 import { evaluateIpEnvelope } from "./net-policy.js";
+import { APPROVALS_LIST, type ApprovalListRow } from "./approvals-list.js";
 import { activeDelegatorsFor, activeDelegationFrom } from "./delegations.js";
 
 declare module "fastify" {
@@ -545,6 +546,8 @@ import { registerModelRateLimitRoutes } from "./model-rate-limits.js";
 import { registerUsageExtractorRoutes } from "./usage-extractors.js";
 // ADR-0202 decision 4 — the per-beat simulated fallback for the hosted demo (admin-only, audited)
 import { registerDemoBeatRoutes } from "./demo-beats.js";
+import { registerProjectArchiveRoutes } from "./project-archive.js";
+import { registerRoleTeamRenameRoutes } from "./role-team-rename.js";
 // ADR-0185 G5 — request metrics (a no-op seam until the meter lands)
 import { registerMetricsHooks } from "./metrics.js";
 import {
@@ -4073,7 +4076,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // a non-admin sees exactly the approvals naming them as approver — PLUS,
   // while a delegation window to them is active (ADR-0022), the pending
   // approvals of their delegator(s), marked delegatedFrom.
-  app.get("/v1/approvals", async (req) => {
+  // §6 Approvals Queue — the visibility of one read, shared by the page, its
+  // count and the Excel export (ADR-0226), so the three cannot disagree.
+  const approvalsScope = async (
+    req: FastifyRequest,
+    { status, objectType, approverUserId }: Omit<z.infer<typeof approvalsListQuery>, "order">,
+  ) => {
     // B9b — THREE server-side filters, not one.
     //
     // The queue is fleet-wide and capped at 100 rows, which is what makes this
@@ -4097,7 +4105,6 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // `asc`, because the oldest waiting decision is the one that matters most.
     // `total` and `hasMore` say how many rows the SAME filters and scope match,
     // so a capped page is never mistaken for the whole queue.
-    const { status, objectType, approverUserId, order } = approvalsListQuery.parse(req.query);
     // ADR-0022 delegation widening: a non-admin sees their own rows PLUS the
     // PENDING rows of anyone actively delegating to them (pending only — a
     // delegate covers live decisions, they don't inherit the archive).
@@ -4179,21 +4186,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       scopeCondition,
     ].filter((c) => c !== undefined);
     const listWhere = conditions.length > 0 ? and(...conditions) : undefined;
-    // `id` breaks requested_at ties so the page boundary is stable in either order
-    const [rows, [counted]] = await Promise.all([
-      db
-        .select()
-        .from(approvals)
-        .where(listWhere)
-        .orderBy(
-          ...(order === "asc"
-            ? [asc(approvals.requestedAt), asc(approvals.id)]
-            : [desc(approvals.requestedAt), desc(approvals.id)]),
-        )
-        .limit(APPROVALS_PAGE_LIMIT),
-      db.select({ n: sql<number>`count(*)::int` }).from(approvals).where(listWhere),
-    ]);
-    const total = counted?.n ?? rows.length;
+    return { listWhere, me, delegators };
+  };
+  /** each queue row with its names, labels, decisions and routing sidecar, as the queue shows it */
+  const enrichApprovals = async (rows: Array<typeof approvals.$inferSelect>, me: string, delegators: string[]) => {
     // ADR-0186 A/B: each tool-call row's per-principal decisions (never the assertion)
     const toolCallRowIds = rows.filter((r) => isToolCallApproval(r)).map((r) => r.id);
     const decisionRows = toolCallRowIds.length
@@ -4545,96 +4541,163 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         },
       };
     };
-    return {
-      approvals: rows.map((r) => ({
-        ...r,
-        // ADR-0186 A/B (§4.9): the dual-control and signature view of a tool-call row
-        ...(isToolCallApproval(r)
-          ? (() => {
-              const ds = decisionsByApproval.get(r.id) ?? [];
-              const mine = ds.find((d) => d.deciderUserId === me) ?? null;
+    return rows.map((r) => ({
+      ...r,
+      // ADR-0186 A/B (§4.9): the dual-control and signature view of a tool-call row
+      ...(isToolCallApproval(r)
+        ? (() => {
+            const ds = decisionsByApproval.get(r.id) ?? [];
+            const mine = ds.find((d) => d.deciderUserId === me) ?? null;
+            return {
+              approvalsCount: principalCountFor.get(r.id) ?? 0,
+              myDecision: mine ? mine.decision : null,
+              decisions: ds.map((d) => ({
+                ...decisionView(d),
+                principalName: d.principalUserId ? (nameOf.get(d.principalUserId) ?? null) : null,
+                deciderName: d.deciderUserId ? (nameOf.get(d.deciderUserId) ?? null) : null,
+              })),
+            };
+          })()
+        : {}),
+      serverName: r.serverId ? approvalServerLabel.get(r.serverId) ?? null : null,
+      projectName: r.projectId ? projectLabel.get(r.projectId) ?? null : null,
+      useCaseId:
+        r.objectType === "workflow" && r.instanceId ? (useCaseForInstance.get(r.instanceId) ?? null) : null,
+      // ADR-0168 amendment: the reviewer role this row is the required review of
+      reviewRole: r.reviewRoleId ? { id: r.reviewRoleId, name: r.reviewRoleName } : null,
+      // AER-039: host + posture + manifest digest only — never the URL
+      ...(r.objectType === "mcp_tool" ? { boundTarget: boundTargetFor.get(r.id) ?? null } : {}),
+      // Finding-6 separation-of-duties surface: the person who would sign
+      // IS the user who triggered the governed action — the UI badges it,
+      // deciding it requires a recorded reason. Three ways that happens,
+      // matching the decide-time test in `decideOneApproval`:
+      //   · the template named the requester as the approver outright;
+      //   · it is ALREADY decided and the requester is who signed it —
+      //     historical fact, so an admin or auditor reading the row back
+      //     sees the badge too, not just the person who did it;
+      //   · it is still pending and reached THIS viewer, who is the
+      //     requester, through a delegation from the named approver.
+      // The last one is viewer-relative on purpose: the same row is an
+      // ordinary arm's-length gate in everyone else's inbox.
+      selfReview:
+        r.userId === r.approverUserId ||
+        (r.decidedBy !== null && r.decidedBy === r.userId) ||
+        (r.status === "pending" && r.userId === me && delegatedFor.has(r.approverUserId)),
+      requestedByName: nameOf.get(r.userId) ?? null,
+      approverName: nameOf.get(r.approverUserId) ?? null,
+      decidedByName: r.decidedBy ? (nameOf.get(r.decidedBy) ?? null) : null,
+      objectLabel:
+        (r.instanceId ? instanceLabel.get(r.instanceId) : null) ??
+        (r.runId ? runLabel.get(r.runId) : null) ??
+        (r.projectId ? projectLabel.get(r.projectId) : null) ??
+        (r.objectType === "infra_operation" ? infraLabelFor(r.stageId) : null) ??
+        (r.objectType === "model_card" ? modelCardLabelFor(r.stageId) : null) ??
+        (r.objectType === "grant_certification" ? grantCertLabelFor(r.stageId) : null) ??
+        (r.objectType === "sod_override" ? sodOverrideLabelFor(r.stageId) : null) ??
+        (r.objectType === "remediation" ? governanceRemediationLabelFor(r.stageId) : null) ??
+        (r.objectType === "compliance_profile" ? complianceVersionLabelFor(r.stageId) : null) ??
+        r.toolName ??
+        null,
+      // ADR-0022: this row reached the caller via an active delegation —
+      // the UI badges it and the decide endpoint records on-behalf-of.
+      ...(r.approverUserId !== me && delegatedFor.has(r.approverUserId)
+        ? { delegatedFrom: nameOf.get(r.approverUserId) ?? r.approverUserId }
+        : {}),
+      // ADR-0046: the routing + SLA sidecar, purely additive. Absent when no
+      // routing rule is enabled, so a pre-0058 client sees the identical shape.
+      ...(assignmentFor.has(r.id)
+        ? {
+            assignment: (() => {
+              const a = assignmentFor.get(r.id)!;
               return {
-                approvalsCount: principalCountFor.get(r.id) ?? 0,
-                myDecision: mine ? mine.decision : null,
-                decisions: ds.map((d) => ({
-                  ...decisionView(d),
-                  principalName: d.principalUserId ? (nameOf.get(d.principalUserId) ?? null) : null,
-                  deciderName: d.deciderUserId ? (nameOf.get(d.deciderUserId) ?? null) : null,
-                })),
+                assigneeKind: a.assigneeKind,
+                assigneeId: a.assigneeId,
+                ruleId: a.ruleId,
+                quorum: a.quorum,
+                claimedByUserId: a.claimedByUserId,
+                claimable:
+                  a.assigneeKind !== "user" && a.claimedByUserId === null && r.status === "pending",
+                slaState: a.slaState,
+                warnAt: a.warnAt,
+                dueAt: a.dueAt,
+                breachedAt: a.breachedAt,
+                escalatedAt: a.escalatedAt,
+                escalationAssigneeKind: a.escalationAssigneeKind,
+                escalationAssigneeId: a.escalationAssigneeId,
               };
-            })()
-          : {}),
-        serverName: r.serverId ? approvalServerLabel.get(r.serverId) ?? null : null,
-        projectName: r.projectId ? projectLabel.get(r.projectId) ?? null : null,
-        useCaseId:
-          r.objectType === "workflow" && r.instanceId ? (useCaseForInstance.get(r.instanceId) ?? null) : null,
-        // ADR-0168 amendment: the reviewer role this row is the required review of
-        reviewRole: r.reviewRoleId ? { id: r.reviewRoleId, name: r.reviewRoleName } : null,
-        // AER-039: host + posture + manifest digest only — never the URL
-        ...(r.objectType === "mcp_tool" ? { boundTarget: boundTargetFor.get(r.id) ?? null } : {}),
-        // Finding-6 separation-of-duties surface: the person who would sign
-        // IS the user who triggered the governed action — the UI badges it,
-        // deciding it requires a recorded reason. Three ways that happens,
-        // matching the decide-time test in `decideOneApproval`:
-        //   · the template named the requester as the approver outright;
-        //   · it is ALREADY decided and the requester is who signed it —
-        //     historical fact, so an admin or auditor reading the row back
-        //     sees the badge too, not just the person who did it;
-        //   · it is still pending and reached THIS viewer, who is the
-        //     requester, through a delegation from the named approver.
-        // The last one is viewer-relative on purpose: the same row is an
-        // ordinary arm's-length gate in everyone else's inbox.
-        selfReview:
-          r.userId === r.approverUserId ||
-          (r.decidedBy !== null && r.decidedBy === r.userId) ||
-          (r.status === "pending" && r.userId === me && delegatedFor.has(r.approverUserId)),
-        requestedByName: nameOf.get(r.userId) ?? null,
-        approverName: nameOf.get(r.approverUserId) ?? null,
-        decidedByName: r.decidedBy ? (nameOf.get(r.decidedBy) ?? null) : null,
-        objectLabel:
-          (r.instanceId ? instanceLabel.get(r.instanceId) : null) ??
-          (r.runId ? runLabel.get(r.runId) : null) ??
-          (r.projectId ? projectLabel.get(r.projectId) : null) ??
-          (r.objectType === "infra_operation" ? infraLabelFor(r.stageId) : null) ??
-          (r.objectType === "model_card" ? modelCardLabelFor(r.stageId) : null) ??
-          (r.objectType === "grant_certification" ? grantCertLabelFor(r.stageId) : null) ??
-          (r.objectType === "sod_override" ? sodOverrideLabelFor(r.stageId) : null) ??
-          (r.objectType === "remediation" ? governanceRemediationLabelFor(r.stageId) : null) ??
-          (r.objectType === "compliance_profile" ? complianceVersionLabelFor(r.stageId) : null) ??
-          r.toolName ??
-          null,
-        // ADR-0022: this row reached the caller via an active delegation —
-        // the UI badges it and the decide endpoint records on-behalf-of.
-        ...(r.approverUserId !== me && delegatedFor.has(r.approverUserId)
-          ? { delegatedFrom: nameOf.get(r.approverUserId) ?? r.approverUserId }
-          : {}),
-        // ADR-0046: the routing + SLA sidecar, purely additive. Absent when no
-        // routing rule is enabled, so a pre-0058 client sees the identical shape.
-        ...(assignmentFor.has(r.id)
-          ? {
-              assignment: (() => {
-                const a = assignmentFor.get(r.id)!;
-                return {
-                  assigneeKind: a.assigneeKind,
-                  assigneeId: a.assigneeId,
-                  ruleId: a.ruleId,
-                  quorum: a.quorum,
-                  claimedByUserId: a.claimedByUserId,
-                  claimable:
-                    a.assigneeKind !== "user" && a.claimedByUserId === null && r.status === "pending",
-                  slaState: a.slaState,
-                  warnAt: a.warnAt,
-                  dueAt: a.dueAt,
-                  breachedAt: a.breachedAt,
-                  escalatedAt: a.escalatedAt,
-                  escalationAssigneeKind: a.escalationAssigneeKind,
-                  escalationAssigneeId: a.escalationAssigneeId,
-                };
-              })(),
-            }
-          : {}),
-        ...contextConflictFor(r),
-      })),
+            })(),
+          }
+        : {}),
+      ...contextConflictFor(r),
+    }));
+  };
+  // ADR-0226: with any of sort/dir/cursor/offset/count the queue answers the
+  // shared list contract (the same visibility and filters; `order` is the
+  // legacy page's own and is refused there); with none of them, exactly the
+  // capped, oldest- or newest-first page below. GET /v1/approvals/export.xlsx
+  // is the Inbox list control's download: the same scope, filters and audit row.
+  const approvalsFilterQuery = approvalsListQuery.omit({ order: true }).strict();
+  const approvalsReader = (me: string, delegators: string[]): ListReader<ApprovalListRow> => ({
+    fetch: async (q) => {
+      const rows = await db
+        .select({ a: approvals, _cursorAt: q.cursorAt })
+        .from(approvals)
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset);
+      const enriched = await enrichApprovals(rows.map((r) => r.a), me, delegators);
+      return enriched.map((r, i) => ({ ...r, _cursorAt: rows[i]!._cursorAt }));
+    },
+    countable: (where) => db.select({ one: sql`1` }).from(approvals).where(where),
+    idOf: (r) => r.id,
+  });
+  // ADR-0226: the queue as an Excel file, read through approvalsScope (the
+  // visibility a non-admin's page has, never wider) and audited before the first
+  // byte by sendListExport (the list-export-xlsx row every list export writes).
+  app.get("/v1/approvals/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const filters = approvalsFilterQuery.parse(filterParams(q));
+      const ex = parseListExport(APPROVALS_LIST, q);
+      const { listWhere, me, delegators } = await approvalsScope(req, filters);
+      await sendListExport(db, req, reply, APPROVALS_LIST, approvalsReader(me, delegators), listWhere, ex, filters);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+  app.get("/v1/approvals", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      try {
+        const q = req.query as Record<string, unknown>;
+        const filters = approvalsFilterQuery.parse(filterParams(q));
+        const page = parseListPage(APPROVALS_LIST, q);
+        const { listWhere, me, delegators } = await approvalsScope(req, filters);
+        return await runListPage(db, APPROVALS_LIST, approvalsReader(me, delegators), listWhere, page);
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
+    const { status, objectType, approverUserId, order } = approvalsListQuery.parse(req.query);
+    const { listWhere, me, delegators } = await approvalsScope(req, { status, objectType, approverUserId });
+    // `id` breaks requested_at ties so the page boundary is stable in either order
+    const [rows, [counted]] = await Promise.all([
+      db
+        .select()
+        .from(approvals)
+        .where(listWhere)
+        .orderBy(
+          ...(order === "asc"
+            ? [asc(approvals.requestedAt), asc(approvals.id)]
+            : [desc(approvals.requestedAt), desc(approvals.id)]),
+        )
+        .limit(APPROVALS_PAGE_LIMIT),
+      db.select({ n: sql<number>`count(*)::int` }).from(approvals).where(listWhere),
+    ]);
+    const total = counted?.n ?? rows.length;
+    return {
+      approvals: await enrichApprovals(rows, me, delegators),
       total,
       hasMore: total > rows.length,
       limit: APPROVALS_PAGE_LIMIT,
@@ -5964,6 +6027,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerUsageExtractorRoutes(app, db);
   // ADR-0202 decision 4 — the demo beats' simulated fallback; admin-only (not in NON_ADMIN_ROUTES), audited
   registerDemoBeatRoutes(app, db);
+  // ADR-0206: G1 project archive and G10 rename roles and teams (admin-only)
+  registerProjectArchiveRoutes(app, db);
+  registerRoleTeamRenameRoutes(app, db);
   registerPosturePresetRoutes(app, db, { sink: anchorSink, bootstrapConfigured: Boolean(opts.bootstrapToken) });
   // ADR-0124 — the kill switch and safe modes
   registerExecutionControlRoutes(app, db);

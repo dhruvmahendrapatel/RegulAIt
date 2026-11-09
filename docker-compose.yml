@@ -51,7 +51,7 @@ x-postgres: &postgres
 
 # --- Sidecar engine runners (profile: engines) — ADR-0187 --------------------
 #
-# Each engine (promptfoo, modelscan, garak) runs as ONE long-running runner
+# Each engine (promptfoo, modelscan, garak, spikee) runs as ONE long-running runner
 # container that pulls work from the gateway over a lease; the gateway never
 # starts containers and has no Docker socket. Every engine is OFF in the product
 # until an admin enables it after the runner's self-test passes. The per-engine
@@ -640,6 +640,29 @@ services:
       REGULAIT_GARAK_JOBS_DIR: /jobs
       REGULAIT_GARAK_RESULTS_DIR: /results
 
+  # --- spikee engine: runner (profile: engines) — ADR-0245 -------------------
+  #
+  # As garak (ADR-0190 I5): the runner never runs spikee; each run executes as an
+  # engine TASK in the executor's sandbox under the run's `engine_worker`
+  # placement, with the run's key as the task secret and the gateway channel as
+  # its only route. Its digest default is all-zero (no image) until the first
+  # signed publish is recorded in engines/images.lock.json, so it cannot start.
+  engine-spikee:
+    <<: *engine-runner
+    platform: linux/amd64
+    image: ${REGULAIT_ENGINE_SPIKEE_REPOSITORY:-regulait/engine-spikee}@${REGULAIT_ENGINE_SPIKEE_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    volumes:
+      - engine-spikee-state:/state
+      - engine-spikee-jobs:/jobs
+      - engine-spikee-results:/results
+    environment:
+      REGULAIT_GATEWAY_URL: http://gateway:3000
+      REGULAIT_ENGINE_ENROLLMENT_TOKEN: ${REGULAIT_ENGINE_SPIKEE_ENROLLMENT_TOKEN:-}
+      REGULAIT_ENGINE_IMAGE_REF: ${REGULAIT_ENGINE_SPIKEE_REPOSITORY:-regulait/engine-spikee}@${REGULAIT_ENGINE_SPIKEE_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+      REGULAIT_ENGINE_IMAGE_DIGEST: ${REGULAIT_ENGINE_SPIKEE_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+      REGULAIT_SPIKEE_JOBS_DIR: /jobs
+      REGULAIT_SPIKEE_RESULTS_DIR: /results
+
   # --- engine task images (profile: engine-images) — ADR-0190 I5 follow-up --
   #
   # Each engine has ONE image with two uses (engines/*/Dockerfile): the runner
@@ -650,7 +673,8 @@ services:
   # daemon, from the repository root; every base in the Dockerfiles is pinned
   # by digest and every image runs as uid 10001:
   #
-  #   docker compose --profile engine-images build engine-promptfoo-image engine-modelscan-image engine-garak-image
+  #   docker compose --profile engine-images build engine-promptfoo-image engine-modelscan-image engine-garak-image \
+  #     engine-spikee-image
   #
   # (pending execution: no session that wrote this had a Docker daemon.)
   # They are never services: `up` with this profile runs each as an inert
@@ -687,6 +711,13 @@ services:
       context: .
       dockerfile: engines/garak/Dockerfile
     image: regulait/engine-garak:local
+
+  engine-spikee-image:
+    <<: *engine-image
+    build:
+      context: .
+      dockerfile: engines/spikee/Dockerfile
+    image: regulait/engine-spikee:local
 
   # --- Identity broker (profile: sso) — ADR-0174 ------------------------------
   #
@@ -1289,6 +1320,21 @@ volumes:
       device: tmpfs
       o: "size=16m,uid=10001,gid=10001,mode=0750"
   engine-garak-results:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=256m,uid=10001,gid=10001,mode=0750"
+  # ADR-0245: the spikee runner's own state (its runner key only) and its two
+  # tmpfs-backed exchange volumes, sized as garak's
+  engine-spikee-state:
+  engine-spikee-jobs:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=16m,uid=10001,gid=10001,mode=0750"
+  engine-spikee-results:
     driver: local
     driver_opts:
       type: tmpfs

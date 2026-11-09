@@ -365,6 +365,34 @@ describe("route census: KNOWN_UI_GAPS only shrinks", () => {
     }
   });
 
+  it("every real INDIRECT_UI_CALLS entry is a served route with a reason, and its file holds its evidence and its path", () => {
+    const repo = new URL("../", import.meta.url);
+    const fileText = (rel) => {
+      try {
+        return readFileSync(new URL(rel, repo), "utf8");
+      } catch {
+        return null;
+      }
+    };
+    const served = new Set(registryRoutes(fileText("apps/gateway/src/openapi-registry.ts")).map((r) => `${r.method} ${r.path}`));
+    expect(served.size).toBeGreaterThan(100);
+    expect(INDIRECT_UI_CALLS.size).toBeGreaterThan(0);
+    const none = { get: new Set(), post: new Set(), put: new Set(), patch: new Set(), del: new Set() };
+    for (const [key, entry] of INDIRECT_UI_CALLS) {
+      expect(served.has(key), `${key}: the gateway serves no such route`).toBe(true);
+      expect(typeof entry.file === "string" && entry.file.startsWith("apps/web/src/"), `${key}: file must be a path under apps/web/src`).toBe(true);
+      if (entry.pathIn !== undefined) expect(typeof entry.pathIn === "string" && entry.pathIn.startsWith("apps/web/src/"), `${key}: pathIn must be a path under apps/web/src`).toBe(true);
+      // an empty or trivial evidence string is "in" every file, so it would prove nothing
+      expect(typeof entry.evidence === "string" && entry.evidence.trim().length >= 8, `${key}: evidence must be the call text, not a fragment`).toBe(true);
+      expect(typeof entry.reason === "string" && entry.reason.length > 12, `${key}: reason a reviewer can check`).toBe(true);
+      expect(fileText(entry.file)?.includes(entry.evidence), `${key}: '${entry.evidence}' is not in ${entry.file}`).toBe(true);
+      // the census's own check, against the shipped files: evidence in `file`, the route's path written in `pathIn`
+      const out = census({ routes: [route(key)], ui: none, fileText, ...empty, indirect: new Map([[key, entry]]) });
+      expect(out.failures, key).toEqual([]);
+      expect(out.counts.indirect, key).toBe(1);
+    }
+  });
+
   it("the real lists never name one route twice", () => {
     const keys = [...SUPERSEDED.keys(), ...INDIRECT_UI_CALLS.keys(), ...KNOWN_UI_GAPS.keys(), ...MACHINE_ONLY.keys()];
     expect(new Set(keys).size).toBe(keys.length);

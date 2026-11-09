@@ -5,7 +5,10 @@ revision, into <out>/<dir>/, and refuses (exit 1) on any sha256 mismatch.
 Runs only in the Dockerfile's `weights` stage; the final image carries the
 verified files and no downloader. Standard library only.
 
-    python3 -I fetch_models.py models.lock.json /opt/models
+    python3 -I fetch_models.py models.lock.json /opt/models [injection-variant]
+
+ADR-0247: an entry with a ``variant`` is one of several models for its
+``dir``; only the chosen variant (default ``piguard``) is fetched.
 """
 
 import hashlib
@@ -15,6 +18,20 @@ import sys
 import urllib.request
 
 HF = "https://huggingface.co"
+DEFAULT_VARIANT = "piguard"
+
+
+def selected(lock: dict, variant: str = DEFAULT_VARIANT) -> list[dict]:
+    """The lock entries one build uses: every entry without a variant, plus
+    the chosen variant. Refuses an unknown variant, or a dir claimed twice."""
+    variants = {m["variant"] for m in lock["models"] if "variant" in m}
+    if variant not in variants:
+        sys.exit(f"unknown injection variant {variant!r} (have {sorted(variants)})")
+    chosen = [m for m in lock["models"] if m.get("variant", variant) == variant]
+    dirs = [m["dir"] for m in chosen]
+    if len(dirs) != len(set(dirs)):
+        sys.exit("two lock entries claim one model directory")
+    return chosen
 
 
 def fetch(url: str, dest: str, want: str) -> None:
@@ -33,10 +50,10 @@ def fetch(url: str, dest: str, want: str) -> None:
     os.replace(tmp, dest)
 
 
-def main(lock_path: str, out: str) -> None:
+def main(lock_path: str, out: str, variant: str = DEFAULT_VARIANT) -> None:
     with open(lock_path) as f:
         lock = json.load(f)
-    for m in lock["models"]:
+    for m in selected(lock, variant):
         d = os.path.join(out, m["dir"])
         os.makedirs(d, exist_ok=True)
         for name, sha in m["files"].items():
@@ -48,4 +65,4 @@ def main(lock_path: str, out: str) -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2])
+    main(*sys.argv[1:4])

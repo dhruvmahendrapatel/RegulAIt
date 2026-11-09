@@ -25,7 +25,8 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, InfoButton, Table, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, InfoButton, type Tone } from "../../../ui/kit";
+import { DataList, type DataColumn } from "../../../ui/DataList";
 import { QueryGate, useAction } from "../adminKit";
 import v from "../../views.module.css";
 import { fmtDateTime } from "../../../api/format";
@@ -94,6 +95,58 @@ const evidenceLine = (e: Record<string, unknown>): string =>
     .map(([k, val]) => `${k}: ${String(val)}`)
     .join(" · ");
 
+/**
+ * ADR-0226: a rule's findings; the ids and sortable ones match the gateway's RECOMMENDATION_FINDINGS_LIST. The list
+ * pages the deterministic findings only (the gateway never judges a list read, so sorting or paging bills no judge
+ * dispatch), and each row's verdict comes from the page's one report read, by key, so a list never disagrees with the
+ * report it sits under.
+ */
+const findingColumns = (judgedOf: (r: Finding) => JudgeAnnotation | undefined): Array<DataColumn<Finding>> => [
+  { key: "holder", header: "Holder", main: true, sortable: true, render: (r) => r.holder.label },
+  {
+    key: "object",
+    header: "Grant",
+    main: true,
+    sortable: true,
+    render: (r) => r.object?.label ?? (r.grants ? r.grants.map((g) => `${g.side}: ${g.object.label}`).join(" + ") : "—"),
+  },
+  {
+    key: "why",
+    header: "Why (evidence attached)",
+    main: true,
+    sortable: true,
+    render: (r) => {
+      const judged = judgedOf(r);
+      return (
+        <>
+          <div>{r.rationale}</div>
+          <div className={v.faint}>{evidenceLine(r.evidence)}</div>
+          {judged && (
+            <div>
+              <Badge tone={verdictTone(judged.verdict)}>
+                {judged.method}: {judged.verdict}
+              </Badge>{" "}
+              <span className={v.faint}>
+                {judged.note} — advisory only ({judged.judge}); it did not create this finding and cannot change the
+                evidence above.
+              </span>
+            </div>
+          )}
+        </>
+      );
+    },
+  },
+  { key: "evidence", header: "Evidence", render: (r) => <span className={v.faint}>{evidenceLine(r.evidence)}</span> },
+  {
+    key: "judged",
+    header: "Model-judged (advisory)",
+    render: (r) => {
+      const judged = judgedOf(r);
+      return judged ? <Badge tone={verdictTone(judged.verdict)}>{`${judged.method}: ${judged.verdict}`}</Badge> : <span className={v.faint}>—</span>;
+    },
+  },
+];
+
 export default function RecommendationsPage() {
   const act = useAction();
   const report = useQuery({
@@ -115,6 +168,9 @@ export default function RecommendationsPage() {
     }, "Campaign opened over exactly the grants this rule flags right now — each item routed to its named reviewer (due in 14 days)");
 
   const d = report.data;
+  // the verdicts of the one report read, by finding key: every rule's list shows these, never a judgement of its own
+  const judgedByKey = new Map((d?.rules ?? []).flatMap((r) => r.findings.flatMap((f) => (f.judged ? [[f.key, f.judged] as const] : []))));
+  const columns = findingColumns((r) => r.judged ?? judgedByKey.get(r.key));
   return (
     <>
       <PageHeader
@@ -187,40 +243,18 @@ export default function RecommendationsPage() {
                   ) : (
                     <>
                       {rule.findings.length > 0 && (
-                        <Table
-                          rows={rule.findings}
+                        // ADR-0226: this rule's findings, sorted, paged and exported by the server from the same report
+                        <DataList<Finding>
+                          listId="access-recommendation-findings"
+                          noun={`findings for ${rule.id}`}
+                          endpoint="/v1/recommendations/access"
+                          exportPath="/v1/recommendations/access/export.xlsx"
+                          queryKey={["admin", "recommendations", "findings", rule.id]}
+                          legacyKey="findings"
+                          filters={{ rule: rule.id }}
+                          defaultSort={{ key: "holder", dir: "asc" }}
                           rowKey={(r) => r.key}
-                          columns={[
-                            { key: "holder", header: "Holder", render: (r) => r.holder.label },
-                            {
-                              key: "object",
-                              header: "Grant",
-                              render: (r) =>
-                                r.object?.label ??
-                                (r.grants ? r.grants.map((g) => `${g.side}: ${g.object.label}`).join(" + ") : "—"),
-                            },
-                            {
-                              key: "why",
-                              header: "Why (evidence attached)",
-                              render: (r) => (
-                                <>
-                                  <div>{r.rationale}</div>
-                                  <div className={v.faint}>{evidenceLine(r.evidence)}</div>
-                                  {r.judged && (
-                                    <div>
-                                      <Badge tone={verdictTone(r.judged.verdict)}>
-                                        {r.judged.method}: {r.judged.verdict}
-                                      </Badge>{" "}
-                                      <span className={v.faint}>
-                                        {r.judged.note} — advisory only ({r.judged.judge}); it did not create this
-                                        finding and cannot change the evidence above.
-                                      </span>
-                                    </div>
-                                  )}
-                                </>
-                              ),
-                            },
-                          ]}
+                          columns={columns}
                         />
                       )}
                       {rule.notAssessable.length > 0 && (
