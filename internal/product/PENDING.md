@@ -18,6 +18,10 @@ this file.
 
 <!-- fold:pending newest-first -->
 
+**Plan-gate project index (ADR-0250 follow-up, PR #720 review finding 4).** `guardProjectPlanOnly` reads `workflow_instances` by `project_id` and non-terminal status on every mutating invoke, run and compat call and every MCP write tool, and only `workflow_instances_status_idx` exists. Add a pending migration with a partial index `workflow_instances (project_id) WHERE status NOT IN ('completed', 'aborted', 'denied', 'rolled_back')` (ADR-0200 data), and declare it in `schema.ts`.
+
+~~**S8**~~ — ~~**Grant mints had no step-up; the plan-only gate was opt-in**~~ (whole-build review 2026-11-07, S-04 and P-02). **CLOSED 2026-11-07 by [ADR-0250](../decisions/0250-grant-mint-step-up-and-forced-plan-gate.md) (no migration).** The eight grant-mint POSTs take a `settings_relax` step-up; the plan-only gate keys on the project on invoke, runs, compat and MCP. Remaining limits, in ADR-0250: an invoke or run naming no project is not plan-gated, and an instance without a project is gated only when named.
+
 **P30 — Durable execution for pillar 2's stages (SDK and platform review, owner, 2026-11-07).** The stage runner is
 request-driven: there is no fan-out inside a stage and no automatic retry with backoff. **Spiked 2026-11-07
 ([ADR-0254](../decisions/0254-workflow-durable-execution-spike.md)): `vercel/workflow` with `@workflow/world-postgres`

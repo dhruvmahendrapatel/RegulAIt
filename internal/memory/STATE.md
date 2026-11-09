@@ -5786,6 +5786,8 @@ ADR. trigger.dev is rejected too (owner input, 2026-11-07); its wait-for-token, 
 concurrency patterns are borrowed. Prototype `spikes/workflow-p30/` behind `REGULAIT_WORKFLOW_DURABLE_P30` (default
 off). No migration; reserved 0309 released. PENDING P30.
 
+**ADR-0250 (builder, 2026-11-07, Accepted): grant mints need a step-up; the plan-only gate is forced at project level (whole-build review S-04, P-02; PENDING S8 closed).** The eight grant-mint POSTs take a `settings_relax` step-up bound to `{op: "grant_mint", grant}` (`grantMintStepUp`), so an admin API key can no longer mint; DELETE is unchanged; no new kind, no migration. `guardProjectPlanOnly` (plan-only.ts) refuses a mutating call 409 `plan_only_stage` while any live instance of the attributed project rests in planning, on invoke, runs, compat and MCP write tools, audited on that instance's trail; the engine's own work for another instance (nested build-stage run, engine-run key) is the one audited exception. The demo seed mints its grants before Ada enrols; the admin UI's grant buttons go through `withStepUp`. Limits (ADR-0250): a call naming no project is not plan-gated; an instance without a project is gated only when named. Follow-up: a partial index on `workflow_instances(project_id)` for live statuses if the table grows.
+
 <!-- fold:state-decisions -->
 
 ## Open Questions
