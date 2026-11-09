@@ -14,7 +14,6 @@
  * reason (the gateway's decision-regression gate refuses anything else).
  */
 import { useEffect, useId, useRef, useState } from "react";
-import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../../api/client";
 import type { DirectoryUser, ReviewPolicy } from "../../../api/types";
@@ -39,7 +38,6 @@ import {
   type RoleDraft,
 } from "./reviewPolicy";
 import p from "./reviewPolicy.module.css";
-import g from "./governanceOverview.module.css";
 import { RequiredTestsEditor } from "./RequiredTestsEditor";
 import { PreviewImpactModal, type RegressionAcceptance } from "./DecisionRegressionPage";
 
@@ -54,21 +52,6 @@ export default function ReviewPolicyPage() {
         info={<p>Each role a tier lists is one required review, and any member of that role can complete it. Nobody reviews a use case they proposed. A tier with no roles keeps a single named approver.</p>}
       />
       <div className={v.stack}>
-        <nav className={g.hub} aria-label="Governance and policy workspaces">
-          <Link className={g.hubCard} to="/admin/governance/review-policy" aria-current="page">
-            <strong>Review policy</strong><span>Reviewer roles, tier requirements and risk acceptance</span>
-          </Link>
-          <Link className={g.hubCard} to="/admin/model-policy">
-            <strong>Model policy</strong><span>Feature allow-lists and data-class restrictions</span>
-          </Link>
-          <Link className={g.hubCard} to="/admin/abac-policies">
-            <strong>Access policies</strong><span>Attribute-based access controls</span>
-          </Link>
-          <Link className={g.hubCard} to="/admin/compliance-packs">
-            <strong>Compliance evidence</strong><span>Framework mappings and recorded evidence</span>
-          </Link>
-        </nav>
-        <p className={v.faint}>Governance functions remain in their existing permission-controlled workspaces. This overview does not imply policy counts or approval states that have not been measured.</p>
         <QueryGate loading={policy.isLoading || directory.isLoading} error={policy.error ?? directory.error} onRetry={() => { void policy.refetch(); void directory.refetch(); }}>
           {policy.data ? <PolicyForm key={policy.data.updatedAt ?? "new"} policy={policy.data} people={directory.data?.users ?? []} /> : null}
         </QueryGate>
