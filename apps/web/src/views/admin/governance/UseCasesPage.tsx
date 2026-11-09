@@ -164,13 +164,11 @@ export default function UseCasesPage() {
                   const count = statusCount(chip.value);
                   const percent = counts.total > 0 ? (count / counts.total) * 100 : 0;
                   return (
-                    <button key={chip.value} type="button" className={r.analyticsRow}
-                      aria-pressed={filters.status === chip.value}
-                      onClick={() => set({ status: chip.value })}>
+                    <div key={chip.value} className={r.analyticsRow}>
                       <span>{chip.label}</span>
                       <span className={r.analyticsTrack}><span className={r.analyticsFill} style={{ width: `${percent}%` }} /></span>
                       <strong>{count}</strong>
-                    </button>
+                    </div>
                   );
                 })}
               </div>
