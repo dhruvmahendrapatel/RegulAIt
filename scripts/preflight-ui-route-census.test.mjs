@@ -357,11 +357,39 @@ describe("route census: KNOWN_UI_GAPS only shrinks", () => {
   // size. Every route PR edited the same three lines, so they were a merge hot spot; each entry's reason and the
   // stale-entry checks already enforce intent.
   it("THE PINNED GAP CEILING, and every known gap says what it does and where it is tracked", () => {
-    expect(KNOWN_UI_GAPS_MAX).toBe(44); // ADR-0240: six API-only external-portal second-factor routes (owner decision 2026-11-07, #453; #709), screens briefed on #453; ADR-0259 (P35): three API-only endpoint MCP inventory and link routes, owner decision on #733 2026-11-07 (#453); ADR-0241 (P21): seven API-only usage-extractor routes; ADR-0246 (P27): nine API-only pinning and high-risk routes (the manual mark-high-risk route added in review); ADR-0236 (P11): eleven API-only MCP bundle routes, owner decision 2026-11-07 (#697), awaiting the bundle screen on #453; ADR-0261 (P37): six API-only DefenseClaw ingest admin routes (owner decision 2026-11-07); ADR-0214 amendment (P3): two per-asset score routes, owner-approved temporary gap on #705; all raised for the master's review (#453 Governed Designer)
+    expect(KNOWN_UI_GAPS_MAX).toBe(50); // ADR-0240: six API-only external-portal second-factor routes (owner decision 2026-11-07, #453; #709), screens briefed on #453; ADR-0238 (P12(d)): six API-only upstream token-exchange routes, master decision 2026-11-08 (#712), awaiting the form on #453; ADR-0259 (P35): three API-only endpoint MCP inventory and link routes, owner decision on #733 2026-11-07 (#453); ADR-0241 (P21): seven API-only usage-extractor routes; ADR-0246 (P27): nine API-only pinning and high-risk routes (the manual mark-high-risk route added in review); ADR-0236 (P11): eleven API-only MCP bundle routes, owner decision 2026-11-07 (#697), awaiting the bundle screen on #453; ADR-0261 (P37): six API-only DefenseClaw ingest admin routes (owner decision 2026-11-07); ADR-0214 amendment (P3): two per-asset score routes, owner-approved temporary gap on #705; all raised for the master's review (#453 Governed Designer)
     expect(KNOWN_UI_GAPS.size).toBe(KNOWN_UI_GAPS_MAX);
     for (const [key, g] of KNOWN_UI_GAPS) {
       expect(g.does, key).toBeTruthy();
       expect(g.tracking, key).toBeTruthy();
+    }
+  });
+
+  it("every real INDIRECT_UI_CALLS entry is a served route with a reason, and its file holds its evidence and its path", () => {
+    const repo = new URL("../", import.meta.url);
+    const fileText = (rel) => {
+      try {
+        return readFileSync(new URL(rel, repo), "utf8");
+      } catch {
+        return null;
+      }
+    };
+    const served = new Set(registryRoutes(fileText("apps/gateway/src/openapi-registry.ts")).map((r) => `${r.method} ${r.path}`));
+    expect(served.size).toBeGreaterThan(100);
+    expect(INDIRECT_UI_CALLS.size).toBeGreaterThan(0);
+    const none = { get: new Set(), post: new Set(), put: new Set(), patch: new Set(), del: new Set() };
+    for (const [key, entry] of INDIRECT_UI_CALLS) {
+      expect(served.has(key), `${key}: the gateway serves no such route`).toBe(true);
+      expect(typeof entry.file === "string" && entry.file.startsWith("apps/web/src/"), `${key}: file must be a path under apps/web/src`).toBe(true);
+      if (entry.pathIn !== undefined) expect(typeof entry.pathIn === "string" && entry.pathIn.startsWith("apps/web/src/"), `${key}: pathIn must be a path under apps/web/src`).toBe(true);
+      // an empty or trivial evidence string is "in" every file, so it would prove nothing
+      expect(typeof entry.evidence === "string" && entry.evidence.trim().length >= 8, `${key}: evidence must be the call text, not a fragment`).toBe(true);
+      expect(typeof entry.reason === "string" && entry.reason.length > 12, `${key}: reason a reviewer can check`).toBe(true);
+      expect(fileText(entry.file)?.includes(entry.evidence), `${key}: '${entry.evidence}' is not in ${entry.file}`).toBe(true);
+      // the census's own check, against the shipped files: evidence in `file`, the route's path written in `pathIn`
+      const out = census({ routes: [route(key)], ui: none, fileText, ...empty, indirect: new Map([[key, entry]]) });
+      expect(out.failures, key).toEqual([]);
+      expect(out.counts.indirect, key).toBe(1);
     }
   });
 

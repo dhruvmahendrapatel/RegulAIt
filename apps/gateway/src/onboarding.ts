@@ -108,7 +108,7 @@ import { envFallbackAllowed, loadOrgSettings } from "./org-settings.js";
 import { refuseIfSeatCapReached } from "./licensing.js";
 import { reconcileGroupRoles } from "./group-roles.js";
 import { isApproverRole, lockApproverRoles } from "./approval-pool.js";
-import { approvalRuleStepUp, CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
+import { approvalRuleStepUp, CHANGED_CONCURRENTLY, grantMintStepUp, requireStepUps, rolesHoldingGrants, type StepUpCheckArgs } from "./step-up.js";
 // ADR-0074: a pack RE-APPLY over an existing profile is an edit of twelve
 // versioned fields, so it goes through the one choke point.
 import { applyRuleEdit, isRuleEditRefusal } from "./rule-writes.js";
@@ -906,9 +906,23 @@ export function registerOnboardingRoutes(
       approverMappings.sort((a, b) =>
         `${a.source}\u0000${a.externalGroup}\u0000${a.roleId}`.localeCompare(`${b.source}\u0000${b.externalGroup}\u0000${b.roleId}`),
       );
-      const facts = { values: { approverRoleGroups: approverMappings } };
-      if (!(await requireStepUp(db, req, reply, { kind: "settings_relax", facts })).ok) return reply;
     }
+    // ADR-0250 (PR #720 review): a mapping to a role that holds grants confers them on every member of the group,
+    // which widens default deny like minting them: one grant_mint step-up, bound to every such mapping this import
+    // creates (sorted, so the same file asks for the same grant)
+    const createEntries = plan.entries
+      .filter((e) => e.action === "create")
+      .map((e) => ({ source: e.source, externalGroup: e.externalGroup, roleId: roleByName.get(e.roleName.toLowerCase())!.id }));
+    const granting = await rolesHoldingGrants(db, createEntries.map((m) => m.roleId));
+    const grantingMappings = createEntries
+      .filter((m) => granting.has(m.roleId))
+      .sort((a, b) => `${a.source}\u0000${a.externalGroup}\u0000${a.roleId}`.localeCompare(`${b.source}\u0000${b.externalGroup}\u0000${b.roleId}`));
+    // both are checked before either is spent (requireStepUps), so a missing one never consumes the other
+    const stepUps: StepUpCheckArgs[] = [
+      ...(approverMappings.length > 0 ? [{ kind: "settings_relax" as const, facts: { values: { approverRoleGroups: approverMappings } } }] : []),
+      ...(grantingMappings.length > 0 ? [grantMintStepUp({ kind: "group_role_mappings", mappings: grantingMappings })] : []),
+    ];
+    if (stepUps.length > 0 && !(await requireStepUps(db, req, reply, stepUps))) return reply;
     // ADR-0186 A (Class A): the mappings are written under the approver-role lock, and a
     // role that became an approver role since the step-up was decided refuses the import
     const createIds = plan.entries.filter((e) => e.action === "create").map((e) => roleByName.get(e.roleName.toLowerCase())!.id);

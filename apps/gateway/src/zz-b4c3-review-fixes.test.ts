@@ -60,6 +60,7 @@ import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { drainBackgroundWork } from "./background-work.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -265,7 +266,8 @@ beforeAll(async () => {
   for (const name of TOOLS) {
     const t = await withKey(AUTH, "POST", `/v1/servers/${serverId}/tools`, { name, kind: "write" });
     expect([200, 201]).toContain(t.statusCode);
-    const g = await withKey(AUTH, "POST", "/v1/grants/tools", { userId: P.caller.id, serverId, toolName: name });
+    // ADR-0250: a grant mint is a step-up; this file's own steppable admin means the bootstrap credential needs this
+    const g = await relaxStepUpAround(db, () => withKey(AUTH, "POST", "/v1/grants/tools", { userId: P.caller.id, serverId, toolName: name }));
     expect([200, 201]).toContain(g.statusCode);
   }
 }, 180_000);

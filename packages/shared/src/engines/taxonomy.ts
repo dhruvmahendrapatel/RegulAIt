@@ -17,6 +17,7 @@ import type { RedTeamAttackClass } from "../redteam.js";
 import type { EvalScorerKind } from "../evals.js";
 import { garakTaxonomyEntries } from "./garak.js";
 import { promptfooTaxonomyEntries } from "./promptfoo.js";
+import { spikeeTaxonomyEntries } from "./spikee.js";
 
 export interface EngineTaxonomyEntry {
   /** the engine's vocabulary (`sourceTaxonomy.system` in the envelope) */
@@ -39,11 +40,12 @@ export interface EngineTaxonomy {
  * THE TABLE. Version history: 1 = empty (foundation); 2 = promptfoo 0.123.1 rows (B5-P, from the
  * catalogue in promptfoo.ts: plugin rows apply to a plugin's `basic` test cases, `strategy:<id>`
  * rows to the test cases that strategy rewrote); 3 = garak 0.17.0 rows (B5-G, from the catalogue in
- * garak.ts: one row per admitted probe, keyed by garak's `module.Class`).
+ * garak.ts: one row per admitted probe, keyed by garak's `module.Class`); 4 = spikee 0.9.4
+ * rows (ADR-0245: one row per admitted spikee dataset, keyed by the set id).
  */
 export const ENGINE_TAXONOMY: EngineTaxonomy = Object.freeze({
-  version: 3,
-  entries: Object.freeze([...promptfooTaxonomyEntries(), ...garakTaxonomyEntries()].map((e) => Object.freeze(e))),
+  version: 4,
+  entries: Object.freeze([...promptfooTaxonomyEntries(), ...garakTaxonomyEntries(), ...spikeeTaxonomyEntries()].map((e) => Object.freeze(e))),
 });
 
 /** the entry for one (system, id), or null when the item is unmapped */

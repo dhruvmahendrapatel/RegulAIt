@@ -421,6 +421,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/workflows/instances/:instanceId/abort",
   "GET /v1/workflows/instances/:instanceId",
   "GET /v1/approvals",
+  // ADR-0226: the queue's Excel export, read through the same visibility as the list (never wider)
+  "GET /v1/approvals/export.xlsx",
   // ADR-0046 — the review workbench's REVIEWER-facing surface. Each of these
   // is a non-admin route for the same reason deciding an approval is: the
   // person doing the reviewing is not an admin. Every one of them still
@@ -465,6 +467,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // ADR-0226: the list's Excel export, under the same scope as the list
   "GET /v1/cost-events/export.xlsx",
   "GET /v1/usage-events",
+  // ADR-0226: the ledger's Excel export, with the identical self-scoping (userId forced to self)
+  "GET /v1/usage-events/export.xlsx",
   // the windowed by-agent / by-connector aggregate of the same ledger; the
   // handler applies the identical self-scoping (userId forced to self)
   "GET /v1/usage-events/summary",

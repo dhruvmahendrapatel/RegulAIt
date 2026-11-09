@@ -293,6 +293,7 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   { table: "federation_signing_keys", column: "private_key_ciphertext", what: "federation signing private keys" },
   // ADR-0204 (migration 0214): the static credential an admin attached to an MCP server (sent upstream, never returned)
   { table: "mcp_server_upstream_credentials", column: "secret_ciphertext", what: "MCP server upstream credentials" },
+  { table: "upstream_token_exchanges", column: "client_secret_ciphertext", what: "token-exchange client secrets (ADR-0238)" },
   // ADR-0222 (migration 0271): a fairness evaluation dataset's kept columns (label, prediction, protected
   // attributes), set to NULL at the retention date or on delete
   { table: "fairness_datasets", column: "rows_ciphertext", what: "fairness evaluation datasets" },
