@@ -875,7 +875,7 @@ function GrantForm(props: { uOpts: Array<{ v: string; l: string }>; aOpts: Array
       className={a.formRow}
       onSubmit={(e) => {
         e.preventDefault();
-        void act.run(() => api.post("/v1/grants/agents", { userId, agentId }), "Agent granted");
+        void act.run(() => withStepUp((h) => stepUpApi.post("/v1/grants/agents", { userId, agentId }, h)), "Agent granted");
       }}
     >
       <Field label="User">

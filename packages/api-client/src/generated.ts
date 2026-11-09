@@ -539,7 +539,7 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * The raw usage ledger, one row per governed call (priced or not).
+ * The raw usage ledger, one row per governed call (priced or not). With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226), with `userId`, `objectType` and `excludeObjectType` filters.
  * @stability public-stable — auth: user
    */
   getV1UsageEvents<T = unknown>(options?: RequestOptions): Promise<T> {

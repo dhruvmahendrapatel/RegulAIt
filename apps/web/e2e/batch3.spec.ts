@@ -13,6 +13,7 @@ import { AxeBuilder } from "@axe-core/playwright";
 import { passTotp, reprovisionTotp } from "./totp-sign-in";
 import { activate, escapeToTrigger, expectDialogTrap, typeAt } from "./keyboard-audit";
 import { disposablePassword } from "./demo-credentials";
+import { confirmStepUp } from "./admin-api";
 
 const state = JSON.parse(readFileSync(fileURLToPath(new URL(".e2e-state.json", import.meta.url)), "utf8")) as { baseUrl: string };
 const BOOT = { authorization: "Bearer e2e-bootstrap-token", "content-type": "application/json" };
@@ -132,8 +133,11 @@ test("MCP methods require audited enablement and a separate real per-user protoc
   await page.getByLabel("Protocol user").selectOption(ownerId);
   await page.getByLabel("Protocol server").selectOption(servers[0].id);
   await page.getByLabel("Protocol grant", { exact: true }).selectOption("mcp:resources");
-  const response = page.waitForResponse((r) => r.url().endsWith("/v1/grants/tools") && r.request().method() === "POST");
+  // ADR-0250: a grant mint needs a step-up; the first POST is refused 403 step_up_required, the app asks
+  // "Confirm it's you" and resends it with the grant, so wait for the POST that is not that refusal
+  const response = page.waitForResponse((r) => r.url().endsWith("/v1/grants/tools") && r.request().method() === "POST" && r.status() !== 403);
   await page.getByRole("button", { name: "Add protocol grant" }).click();
+  await confirmStepUp(page, EMAIL);
   expect((await response).ok()).toBe(true);
   const entitlements = await request(`/v1/users/${ownerId}/servers/${servers[0].id}/entitlements`);
   expect(entitlements.entitlements).toEqual(expect.arrayContaining([expect.objectContaining({ toolName: "mcp:resources", source: "direct" })]));

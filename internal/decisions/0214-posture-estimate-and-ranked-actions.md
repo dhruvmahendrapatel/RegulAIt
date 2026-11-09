@@ -74,3 +74,83 @@ weights and formulae are RegulAIt's own policy semantics, which rule 4 reserves 
   the same sections (the inventory already holds most of them) and is left as a follow-up.
 - **Access hygiene deductions are linear and uncapped per item type** (10 points each); a large SoD backlog floors the
   objective at 0 rather than distinguishing 10 violations from 100.
+
+## Amendment (2026-11-07): one explainable score per asset
+
+- **Driver**: the follow-up this ADR left open under "Honest limits" and PENDING **P3** ("one score per asset and per
+  organisation"). Builder lane `builder/p3-asset-scores`.
+- **Migration**: **none.** Like the org-wide estimate, a per-asset score is a pure function of ledger rows read in the
+  same request. **Setting**: none; read-only and additive.
+
+### Which assets, and why
+
+An asset is scored only where ADR-0214's objectives can be measured on it from rows that name it:
+
+| Asset | Scored | Objectives that apply | Why |
+|---|---|---|---|
+| Agent | yes | risk treatment (20), adversarial resilience (15), access hygiene (15), answer quality (10) | `ai_risks.agent_id`, `redteam_runs.agent_id` and `eval_runs.agent_id` name it; `agents.owner_user_id` is its steward |
+| Use case | yes | risk treatment (20), access hygiene (15) | `ai_risks.use_case_id` names it; `ai_use_cases.owner_user_id` is its owner |
+| Model card | no | none | a card describes an agent or a custom provider; no risk, red-team or evaluation row names the card, so its outcomes are its agent's (scoring it would count the agent twice) |
+| MCP server, connector | no | none | no risk, red-team or evaluation row names one; every objective would be unmeasured, so the score would always read 0 and say nothing |
+
+Control coverage, audit integrity and spend control are **not applicable** to any single asset: packs are evaluated for
+the organisation or a project, the audit trail is anchored once per deployment, and budgets sit on projects. A use
+case's adversarial resilience and answer quality belong to the agents it names, which are scored as agents (a use-case
+owner cannot necessarily read those agents' red-team results, so folding them in would also leak them).
+
+### Decision
+
+`apps/gateway/src/asset-score.ts`, sharing `combineObjectives()` with `scorePosture()` (extracted, so the arithmetic,
+rounding, counterfactual points and tie-break are one implementation):
+
+1. **Same weights, applicable subset.** Each asset's score is the weighted mean of the ADR-0214 objectives that apply
+   to its kind, with the published constants: an agent divides by 60, a use case by 35. Each objective's `sharePct`
+   (weight ÷ divisor) is on the payload. The org-wide estimate is unchanged (all seven, divisor 100).
+2. **Not applicable is not unmeasured.** An objective that applies but has no rows scores 0 (an agent with no risk
+   registered, no red-team run, no groundedness run in the window). An objective that cannot be measured per asset is
+   listed under `notApplicable` with its reason and is left out of the divisor, so an org-wide fact neither punishes nor
+   flatters one asset.
+3. **Formulae per asset**, in words on the payload: risk treatment = risks naming the asset that are not open ÷ all
+   risks naming it; adversarial resilience = (1 − upper bound of the agent's latest attack-success rate) × 100, halved
+   when none of its runs falls in the 30-day window; answer quality = the agent's latest groundedness pass rate in the
+   window × 100; access hygiene = 100 when the recorded owner is an active account, else 0. (Separation of duties and
+   certification campaigns attach to people and campaigns, not to one asset, so the org objective's deductions do not
+   apply.)
+4. **Ranked actions per asset, each with a link to fix it**: the risk register, red-team runs, evaluations or the agent
+   inventory for an agent; the use case's own page for a use case.
+5. **Estimate, disclaimer, never "compliant"; deterministic, no AI** — `scoreAsset()` reads no clock, randomness or
+   I/O; the window start comes from the database clock (M-075).
+
+### API
+
+- `GET /v1/reports/posture/assets?kind=agent|use_case&limit=1..100&cursor=` — one page in name order, keyset on
+  (name, id), default 25, at most 100; `nextCursor` is null on the last page. The page is scored with one query per
+  ledger for all its rows (no N+1).
+- `GET /v1/reports/posture/assets/:kind/:assetId` — one asset.
+
+**Object-level authorisation.** Both routes are open to any authenticated user (NON_ADMIN_ROUTES) and scope in the
+handler to what the caller can already read: an admin sees every asset; anyone else sees the agents they steward (the
+`agent-stewardship.ts` rule) and the use cases they own (the `GET /v1/use-cases` list scope; the detail route also
+admits whoever `canReadUseCase` admits). An asset the caller cannot read is the same 404 as one that does not exist.
+
+**Caching.** None on the server. Both responses carry `Cache-Control: private, no-store`, so no cache is shared
+between users or outlives the authorisation check made on the request.
+
+### Tests
+
+- `asset-score.test.ts` — golden scores worked by hand from the weights (agent 85, stale red-team 75, orphaned 60,
+  empty 0; use case 43, 0, 100), the ranked actions with their points and reasons, the not-applicable list, and no
+  "compliant"/"certified".
+- `asset-score-authz.test.ts` — two stewards cannot see each other's agents or use cases (404, identical to a missing
+  id), an admin sees all, keyset pages, bounds (limit 101, unknown kind and forged cursor refused), `private, no-store`,
+  and the served score equals `scoreAsset()` of the seeded ledger rows (73).
+- The extraction keeps every ADR-0214 org-wide test green. One arithmetic change rides with it: the estimate now
+  divides the whole weighted sum once instead of summing per-term quotients, so an exact half is not lost to float
+  error. For the org-wide divisor of 100 the two agree except at such a boundary.
+
+### Honest limits
+
+- **No sort by score.** Pages are in name order; ranking all of a large fleet by score would mean scoring every asset
+  on each request. A "worst first" view is a follow-up if the UI needs one.
+- **Access hygiene per asset is binary.** It is ownership only; an overdue stewardship review does not cost points.
+- **UI not built here.** The per-asset display is requested from the Governed Designer on #453.

@@ -38,6 +38,7 @@ import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { drainBackgroundWork } from "./background-work.js";
 
 declare global {
@@ -64,6 +65,7 @@ vi.mock("@regulait/model-provider", async (importOriginal) => {
 });
 
 const { buildApp } = await import("./app.js");
+const { resolveDispatchUsage } = await import("./usage-extractors.js");
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -234,7 +236,8 @@ beforeAll(async () => {
   });
   expect(a.statusCode, a.body).toBe(201);
   agentId = a.json().id as string;
-  const g = await app.inject({ method: "POST", url: "/v1/grants/agents", headers: AUTH, payload: { userId: caller.id, agentId } });
+  // ADR-0250: a grant mint is a step-up; this file's own steppable admin means the bootstrap credential needs this
+  const g = await relaxStepUpAround(db, () => app.inject({ method: "POST", url: "/v1/grants/agents", headers: AUTH, payload: { userId: caller.id, agentId } }));
   expect(g.statusCode, g.body).toBeLessThan(300);
   const mp = await viaKey("PUT", `/v1/agents/${agentId}/modality-pricing`, { costPerMTokImageIn: 10, costPerMTokAudioOut: 40 });
   expect(mp.statusCode, mp.body).toBe(200);
@@ -373,6 +376,25 @@ describe("ADR-0241 usage extractor", () => {
     globalThis.__u241Body = undefined;
     await invoke();
     expect(((await latestUsage()).detail as { usageExtractor: { failure: string } }).usageExtractor.failure).toMatch(/no response body/);
+    // review finding 2: repeated fallbacks (an adapter with no usageSource falls back on every call) are each stamped
+    // on their usage row, but audited at most once per version per window
+    await invoke();
+    expect(((await latestUsage()).detail as { usageExtractor: { result: string } }).usageExtractor.result).toBe("fallback");
+    expect((await audits("usage-extractor-fallback")).length).toBe(1);
+  });
+
+  it("review finding 4: a database error after the provider call keeps the built-in counts, never fails the dispatch", async () => {
+    const broken = new Proxy({} as Db, {
+      get: () => () => {
+        throw new Error("connection terminated: secret-detail");
+      },
+    });
+    const usage = { inputTokens: 7, outputTokens: 3 };
+    const out = await resolveDispatchUsage(broken, { agentId, userId: caller.id, result: { usage, usageSource: BODY } });
+    expect(out.usage).toBe(usage);
+    expect(out.versionId).toBeNull();
+    expect(out.outcome).toEqual({ versionId: null, result: "error", failure: expect.stringMatching(/built-in counts/) });
+    expect(JSON.stringify(out)).not.toContain("secret-detail");
   });
 
   it("deactivating and turning the switch off need no step-up and are audited", async () => {

@@ -33,7 +33,7 @@ import { openAssuranceGuardrailWindow, seedStrictData } from "./seed-strict-data
 import { applyDemoERelaxation } from "./demo-relax-e-lib.js";
 import { assuranceAgentNames } from "./demo-intake-seed-lib.js"; // B4S-06: --open-assurance-window
 import * as sharedForFixtures from "@regulait/shared";
-import type { DemoIntakeFixtures } from "@regulait/shared";
+import { DEMO_SHADOW_DISCOVERY, type DemoIntakeFixtures } from "@regulait/shared";
 import { demoSeedRefusal, demoSeedSignal, realAdminEmails } from "./seed-demo-guard.js"; // ADR-0181 FX3
 import { liveDemoEgressHosts, liveProfileRequested } from "./demo-live-lib.js"; // ADR-0202 lane L: live-demo egress
 
@@ -136,6 +136,41 @@ async function call(method: string, url: string, payload?: unknown, headers = AU
   }
 }
 
+/**
+ * ADR-0250 (review S-04): minting a grant is a `settings_relax` step-up. The bootstrap credential passes it only during
+ * first-admin setup, so every mint is seeded before Ada enrols. Converges on re-seed: after she enrolled, ONLY the
+ * bootstrap credential's own refusal is reported (the grant is normally there from the first run) and an admin adds a
+ * missing one in the UI; every other refusal still fails the seed, and a duplicate is 409 as before.
+ */
+const grantMintsSkipped: string[] = [];
+async function mintGrant(url: string, payload: Json): Promise<Json> {
+  const res = await app.inject({ method: "POST", url, headers: AUTH, payload });
+  if (res.statusCode === 403) {
+    let body: Json = {};
+    try {
+      body = res.json() as Json;
+    } catch {
+      /* not JSON: not the refusal we expect */
+    }
+    if (
+      body.error === "step_up_required" &&
+      body.actionKind === "settings_relax" &&
+      body.credential === "bootstrap" &&
+      Array.isArray(body.methods) &&
+      body.methods.length === 0
+    ) {
+      grantMintsSkipped.push(`${url} ${JSON.stringify(payload)}`);
+      return {};
+    }
+  }
+  if (res.statusCode >= 400 && res.statusCode !== 409) throw new Error(`POST ${url} -> ${res.statusCode}: ${res.body}`);
+  try {
+    return res.json();
+  } catch {
+    return {};
+  }
+}
+
 // ADR-0181 (SB1): the guardrails / data / runtime strict-default configuration the demo needs
 for (const line of (await seedStrictData(app, { bootstrapToken: BOOT })).lines) console.log(line);
 
@@ -218,7 +253,7 @@ for (const spec of AGENTS) {
 }
 for (const userId of [adminId, danaId, averyId]) {
   for (const agentId of Object.values(agentIds)) {
-    await call("POST", "/v1/grants/agents", { userId, agentId }); // 409 dup = fine
+    await mintGrant("/v1/grants/agents", { userId, agentId }); // 409 dup = fine
   }
 }
 
@@ -321,65 +356,12 @@ if (process.argv.includes("--open-assurance-window")) {
   for (const n of window.notes) console.log(`  ${n}`);
 }
 
-// ADR-0181 (FX2): Ada enrols TOTP before any key is minted for her — an
-// un-enrolled admin's key is refused, and none is issued (seedAdminMfa below)
 await seedDemoEgressAllow(); // before Ada enrols: adding an allow entry is a stepped-up relaxation (B4S-06, ADR-0034)
 await seedDemoBeatERelaxation(); // before Ada enrols: relaxing a setting is a stepped-up relaxation (B4S-06)
-const [adminMfa, morganMfa] = await seedAdminMfa([adminId, morganId]);
 
-const keys: Record<string, string> = {};
-const keyIds: Record<string, string> = {};
-for (const [name, id] of [
-  ["admin", adminId],
-  ["dana", danaId],
-  ["avery", averyId],
-] as const) {
-  // ADR-0181 (FX2): an admin who has not enrolled TOTP is issued no key
-  if (name === "admin" && adminMfa.status === "refused") continue;
-  const minted = await call("POST", `/v1/users/${id}/keys`, { name: "seed", expiresAt: demoKeyExpiresAt(SEED_PERSONA_KEY_TTL_DAYS) });
-  keys[name] = minted.token;
-  keyIds[name] = minted.id;
-}
-const danaAuth = { authorization: `Bearer ${keys.dana}` };
-const averyAuth = { authorization: `Bearer ${keys.avery}` };
-
-// a review recorded today (by Ada) schedules the next one by the cadence
-if (keys.admin) {
-  const adaAuth = { authorization: `Bearer ${keys.admin}` };
-  for (const id of reviewToday) await call("POST", `/v1/agents/${id}/stewardship/review`, {}, adaAuth);
-}
-// ADR-0181 (FX2): Ada's one-time password was issued by her TOTP enrolment
-if (adminMfa.status === "enrolled") passwords.admin = adminMfa.password;
-else {
-  const ada = ((await call("GET", "/v1/users")).users ?? []).find((u: Json) => u.id === adminId);
-  passwords.admin = ada?.hasPassword ? "(already set — unchanged)" : "(not issued — see the admin TOTP line)";
-}
-
-// ADR-0181: that was the last use of Ada's seed key. An admin-owned API key
-// carries administrator power on every admin route, so the stale-credential
-// monitor flags it as over-scoped (a true finding). It is revoked here rather
-// than handed to the presenter; Dana's and Avery's keys (not admins) are kept.
-for (const n of await revokeScriptKeys(app, BOOT, [keyIds.admin])) console.log(`  ${n}`);
-
-// --- per-user agent policy (§4 default + ceiling, §5.2 run budget) -------
-// Upsert, so re-running converges rather than duplicating. The ceilings are
-// real: Avery is capped at tier 1, so the premium/frontier agents are denied
-// for him even though he holds a grant for every one of them.
-await call("POST", `/v1/users/${danaId}/agent-policy`, {
-  defaultAgentId: agentIds["balanced-mock"],
-  ceilingAgentId: agentIds["premium-mock"],
-  routingMode: "automatic",
-  runBudgetUsd: 0.25,
-  runBudgetBreachAction: "approve",
-});
-await call("POST", `/v1/users/${averyId}/agent-policy`, {
-  defaultAgentId: agentIds["fast-mock"],
-  ceilingAgentId: agentIds["balanced-mock"],
-  routingMode: "automatic",
-  runBudgetUsd: 0.1,
-  runBudgetBreachAction: "replan",
-});
-
+// ADR-0250 (review S-04): minting a grant is a settings_relax step-up, which the bootstrap credential passes only
+// during first-admin setup — so the MCP servers, the role and per-user tool grants and the connector grants are
+// seeded here, BEFORE Ada enrols (the same pattern as the agent grants, passwords and stewardship above).
 // --- MCP servers + tool inventory ----------------------------------------
 // Hostnames are deliberately unreachable (RFC 2606 `.invalid`): registering a
 // server and its tool inventory is a governance act and needs no live
@@ -437,16 +419,17 @@ const analystRoleId = await ensureRole(
   "repo-analyst",
   "read-only across repo-tools, plus warehouse query",
 );
-await call("POST", `/v1/roles/${analystRoleId}/grants/servers`, {
+await mintGrant(`/v1/roles/${analystRoleId}/grants/servers`, {
   serverId: repoServerId,
   readOnlyAll: true,
 }); // 409 dup = fine
-await call("POST", `/v1/roles/${analystRoleId}/grants/tools`, {
+await mintGrant(`/v1/roles/${analystRoleId}/grants/tools`, {
   serverId: warehouseServerId,
   toolName: "query",
 });
+// ADR-0250 (PR #720 review): assigning a role that holds grants confers them, the same step-up as minting them
 for (const userId of [danaId, averyId]) {
-  await call("POST", `/v1/users/${userId}/roles`, { roleId: analystRoleId });
+  await mintGrant(`/v1/users/${userId}/roles`, { roleId: analystRoleId }); // 409 dup = fine
 }
 
 for (const [userId, serverId, toolName] of [
@@ -454,12 +437,104 @@ for (const [userId, serverId, toolName] of [
   [danaId, warehouseServerId, "export_table"],
   [averyId, repoServerId, "read_file"],
 ] as const) {
-  await call("POST", "/v1/grants/tools", { userId, serverId, toolName });
+  await mintGrant("/v1/grants/tools", { userId, serverId, toolName });
 }
 // Dana loses one tool out of the role's read-only-all; Avery loses the role's
 // warehouse tool grant. Both deviations stay flagged, never silent.
 await call("POST", "/v1/revocations", { userId: danaId, serverId: repoServerId, toolName: "search_code" });
 await call("POST", "/v1/revocations", { userId: averyId, serverId: warehouseServerId, toolName: "query" });
+
+// --- connectors (§2) -----------------------------------------------------
+const connectorList = (await call("GET", "/v1/connectors")).connectors ?? [];
+async function ensureConnector(name: string, kind: string, extras: Json = {}): Promise<string> {
+  const existing = connectorList.find((c: Json) => c.name === name);
+  if (existing) return existing.id;
+  return (await call("POST", "/v1/connectors", { name, kind, ...extras })).id;
+}
+// jira-cloud stays GOVERNANCE-ONLY (no providerKind) — decision + audit, no
+// execution, no cost. snowflake-analytics gets the keyless 'mock' adapter and a
+// flat price, so it EXECUTES and METERS with zero external keys: one demoable
+// connector in each mode side by side.
+const jiraConnectorId = await ensureConnector("jira-cloud", "issue-tracker");
+const warehouseConnectorId = await ensureConnector("snowflake-analytics", "data-warehouse", {
+  providerKind: "mock",
+  pricePerCallUsd: 0.002,
+});
+for (const grant of [
+  { userId: danaId, connectorId: jiraConnectorId, mode: "readwrite", allowedObjects: ["issue", "comment"] },
+  { userId: danaId, connectorId: warehouseConnectorId, mode: "read" },
+  { userId: averyId, connectorId: jiraConnectorId, mode: "read" },
+]) {
+  await mintGrant("/v1/grants/connectors", grant); // 409 dup = fine
+}
+// ADR-0250: Dana's read grant on the content-trust policy library that `demo:shadow --setup` created before this seed;
+// minted here, before Ada enrols, because the shadow story phase runs after she has (and the bootstrap credential
+// cannot mint then). Absent library (a seed without the shadow setup) = nothing to grant.
+const policyLibrary = connectorList.find((c: Json) => c.name === DEMO_SHADOW_DISCOVERY.contentTrust.connectorName);
+if (policyLibrary) await mintGrant("/v1/grants/connectors", { userId: danaId, connectorId: policyLibrary.id, mode: "read" });
+
+// ADR-0181 (FX2): Ada enrols TOTP before any key is minted for her — an
+// un-enrolled admin's key is refused, and none is issued (seedAdminMfa below)
+const [adminMfa, morganMfa] = await seedAdminMfa([adminId, morganId]);
+
+const keys: Record<string, string> = {};
+const keyIds: Record<string, string> = {};
+for (const [name, id] of [
+  ["admin", adminId],
+  ["dana", danaId],
+  ["avery", averyId],
+] as const) {
+  // ADR-0181 (FX2): an admin who has not enrolled TOTP is issued no key
+  if (name === "admin" && adminMfa.status === "refused") continue;
+  const minted = await call("POST", `/v1/users/${id}/keys`, { name: "seed", expiresAt: demoKeyExpiresAt(SEED_PERSONA_KEY_TTL_DAYS) });
+  keys[name] = minted.token;
+  keyIds[name] = minted.id;
+}
+const danaAuth = { authorization: `Bearer ${keys.dana}` };
+const averyAuth = { authorization: `Bearer ${keys.avery}` };
+
+// a review recorded today (by Ada) schedules the next one by the cadence
+if (keys.admin) {
+  const adaAuth = { authorization: `Bearer ${keys.admin}` };
+  for (const id of reviewToday) await call("POST", `/v1/agents/${id}/stewardship/review`, {}, adaAuth);
+}
+// ADR-0181 (FX2): Ada's one-time password was issued by her TOTP enrolment
+if (adminMfa.status === "enrolled") passwords.admin = adminMfa.password;
+else {
+  const ada = ((await call("GET", "/v1/users")).users ?? []).find((u: Json) => u.id === adminId);
+  passwords.admin = ada?.hasPassword ? "(already set — unchanged)" : "(not issued — see the admin TOTP line)";
+}
+
+// ADR-0181: that was the last use of Ada's seed key. An admin-owned API key
+// carries administrator power on every admin route, so the stale-credential
+// monitor flags it as over-scoped (a true finding). It is revoked here rather
+// than handed to the presenter; Dana's and Avery's keys (not admins) are kept.
+for (const n of await revokeScriptKeys(app, BOOT, [keyIds.admin])) console.log(`  ${n}`);
+if (grantMintsSkipped.length > 0) {
+  console.log(
+    `  ${grantMintsSkipped.length} grant mint(s) not re-sent: an admin can step up now, so the bootstrap credential ` +
+      `cannot mint (ADR-0250). Each is normally already there from the first seed; add a missing one in the UI.`,
+  );
+}
+
+// --- per-user agent policy (§4 default + ceiling, §5.2 run budget) -------
+// Upsert, so re-running converges rather than duplicating. The ceilings are
+// real: Avery is capped at tier 1, so the premium/frontier agents are denied
+// for him even though he holds a grant for every one of them.
+await call("POST", `/v1/users/${danaId}/agent-policy`, {
+  defaultAgentId: agentIds["balanced-mock"],
+  ceilingAgentId: agentIds["premium-mock"],
+  routingMode: "automatic",
+  runBudgetUsd: 0.25,
+  runBudgetBreachAction: "approve",
+});
+await call("POST", `/v1/users/${averyId}/agent-policy`, {
+  defaultAgentId: agentIds["fast-mock"],
+  ceilingAgentId: agentIds["balanced-mock"],
+  routingMode: "automatic",
+  runBudgetUsd: 0.1,
+  runBudgetBreachAction: "replan",
+});
 
 // --- policy rules: approvals, data scopes, rate limits (§3) --------------
 // None of the three rule tables has a natural unique key, so each rule is
@@ -541,30 +616,6 @@ if (!existingRateLimits.some((r: Json) => r.scope === "role" && r.roleId === ana
     maxCalls: 500,
     windowSeconds: 3600,
   });
-}
-
-// --- connectors (§2) -----------------------------------------------------
-const connectorList = (await call("GET", "/v1/connectors")).connectors ?? [];
-async function ensureConnector(name: string, kind: string, extras: Json = {}): Promise<string> {
-  const existing = connectorList.find((c: Json) => c.name === name);
-  if (existing) return existing.id;
-  return (await call("POST", "/v1/connectors", { name, kind, ...extras })).id;
-}
-// jira-cloud stays GOVERNANCE-ONLY (no providerKind) — decision + audit, no
-// execution, no cost. snowflake-analytics gets the keyless 'mock' adapter and a
-// flat price, so it EXECUTES and METERS with zero external keys: one demoable
-// connector in each mode side by side.
-const jiraConnectorId = await ensureConnector("jira-cloud", "issue-tracker");
-const warehouseConnectorId = await ensureConnector("snowflake-analytics", "data-warehouse", {
-  providerKind: "mock",
-  pricePerCallUsd: 0.002,
-});
-for (const grant of [
-  { userId: danaId, connectorId: jiraConnectorId, mode: "readwrite", allowedObjects: ["issue", "comment"] },
-  { userId: danaId, connectorId: warehouseConnectorId, mode: "read" },
-  { userId: averyId, connectorId: jiraConnectorId, mode: "read" },
-]) {
-  await call("POST", "/v1/grants/connectors", grant); // 409 dup = fine
 }
 
 // --- workflow templates + assignment + compliance ------------------------
@@ -684,7 +735,7 @@ for (const [teamId, userId] of [
 // --- projects ------------------------------------------------------------
 // Budgets are scaled to the seeded demo spend below, so budget-vs-actual is a
 // real reading rather than a rounding error against a placeholder cap.
-const projectList = (await call("GET", "/v1/projects")).projects ?? [];
+const projectList = (await call("GET", "/v1/projects?archived=include")).projects ?? [];
 async function ensureProject(payload: Json): Promise<string> {
   const existing = projectList.find((p: Json) => p.name === payload.name);
   if (existing) return existing.id;
@@ -746,7 +797,7 @@ async function ensureInitiative(name: string, costCenter?: string): Promise<stri
 const platformInitiativeId = await ensureInitiative("Platform Modernization", "CC-PLAT");
 // Group the demo project under it — only when it isn't already there, so a
 // re-seed neither re-PATCHes nor overwrites a later manual regrouping.
-const demoRow = ((await call("GET", "/v1/projects")).projects ?? []).find(
+const demoRow = ((await call("GET", "/v1/projects?archived=include")).projects ?? []).find(
   (p: Json) => p.id === demoProjectId,
 );
 if (!demoRow?.initiativeId) {

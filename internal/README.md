@@ -25,7 +25,8 @@ Everything in this folder is for the people and agents building RegulAIt. None o
 | [product/](product/) | Vision, pillar specs, roadmap, demo scripts and runbooks, including the demo-only account setup and teardown |
 | [research/](research/) | Research notes and spike write-ups |
 | [reviews/](reviews/) | Review records and archives |
-| [process/](process/) | How parallel sessions and agents work together: [CONTRIBUTING_PARALLEL_SESSIONS.md](process/CONTRIBUTING_PARALLEL_SESSIONS.md), [AgentCoordination.md](process/AgentCoordination.md), [PathForward.md](process/PathForward.md) and the external-review input ledgers |
+| [process/](process/) | How parallel sessions and agents work together: [CONTRIBUTING_PARALLEL_SESSIONS.md](process/CONTRIBUTING_PARALLEL_SESSIONS.md), the live board [AGENT_COORDINATION.md](process/AGENT_COORDINATION.md) and [PathForward.md](process/PathForward.md) |
+| [archive/](archive/) | Retired records, read-only, one folder per month with a README row per file (the old three-agent board and the Codex and Gemini ledgers are in [archive/2026-10/](archive/2026-10/)) |
 
 `CLAUDE.md` stays at the repository root, where Claude Code loads it. Customer-facing docs stay in `docs/`
 (`docs/api`, `docs/deployment`, `docs/ops`), next to the code.
