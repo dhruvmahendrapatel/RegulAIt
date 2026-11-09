@@ -1169,6 +1169,8 @@ export async function executeGovernedConnectorCall(
         actors: delegatedActor ? delegatedActor.chain.actors : null,
         action: body.operation,
         projectId: projectId ?? null,
+        // the destination this call is about to use: a token is obtained only for the one it was configured for
+        destination: baseUrl,
       });
       if (exchanged.kind === "refused") {
         return out.status(403).send({

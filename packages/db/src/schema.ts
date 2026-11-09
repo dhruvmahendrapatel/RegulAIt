@@ -996,6 +996,8 @@ export const upstreamTokenExchanges = pgTable(
     clientSecretCiphertext: text("client_secret_ciphertext").notNull(),
     clientSecretLast4: text("client_secret_last4").notNull(),
     maxTokenTtlSeconds: integer("max_token_ttl_seconds").notNull().default(300),
+    /** connectors only: the origin the exchange was configured for (null = the adapter's compiled default); a call to any other is refused */
+    connectorDestination: text("connector_destination"),
     setBy: uuid("set_by").references(() => users.id, { onDelete: "set null" }),
     secretSetAt: timestamp("secret_set_at", { withTimezone: true }).notNull().defaultNow(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1006,6 +1008,10 @@ export const upstreamTokenExchanges = pgTable(
     unique("upstream_token_exchanges_connector_uq").on(t.connectorId),
     check("upstream_token_exchanges_target_check", sql`(${t.mcpServerId} IS NULL) <> (${t.connectorId} IS NULL)`),
     check("upstream_token_exchanges_ttl_check", sql`${t.maxTokenTtlSeconds} BETWEEN 30 AND 900`),
+    check(
+      "upstream_token_exchanges_destination_check",
+      sql`${t.connectorDestination} IS NULL OR (${t.mcpServerId} IS NULL AND char_length(${t.connectorDestination}) <= 2048)`,
+    ),
     check("upstream_token_exchanges_last4_check", sql`char_length(${t.clientSecretLast4}) = 4`),
   ],
 );

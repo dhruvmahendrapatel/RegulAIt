@@ -599,6 +599,45 @@ describe("ADR-0238 — the connector path", () => {
     expect(conn.seen.length).toBe(before + 1);
     expect(w.body).not.toContain(issuedTokens[0]!);
   });
+
+  // review (#712): the token's audience never follows a changed destination, on connectors as on MCP servers
+  it("A CHANGED DESTINATION: a credential with a new baseUrl turns the exchange off (audited); the new host never sees an exchanged token", async () => {
+    const elsewhere = await startConnectorUpstream();
+    try {
+      const [pinned] = await db.select().from(upstreamTokenExchanges).where(eq(upstreamTokenExchanges.connectorId, connectorId));
+      expect(pinned!.connectorDestination).toBe(new URL(conn.base).origin);
+      // a synthetic, zero-entropy credential built at runtime (never a real one)
+      const staticToken = "c".repeat(32);
+      const cred = await app.inject({ method: "POST", url: `/v1/connectors/${connectorId}/credential`, headers: AUTH, payload: { token: staticToken, baseUrl: elsewhere.base } });
+      expect(cred.statusCode, cred.body).toBe(201);
+      const [row] = await db.select().from(upstreamTokenExchanges).where(eq(upstreamTokenExchanges.connectorId, connectorId));
+      expect(row!.enabled).toBe(false);
+      const off = await lastAudit(UPSTREAM_EXCHANGE_RULE_IDS.updated, connectorId);
+      expect(off!.detail).toMatchObject({ tokenExchange: "disabled", cause: "destination_change", from: new URL(conn.base).origin, to: new URL(elsewhere.base).origin });
+
+      // the next call: nothing is exchanged, and the new host gets only the credential stored for it
+      issuedTokens = [];
+      const asBefore = asSeen.length;
+      const r = await invoke("read");
+      expect(r.statusCode, r.body).toBe(200);
+      expect(asSeen.length).toBe(asBefore);
+      expect(elsewhere.seen).toHaveLength(1);
+      expect(elsewhere.seen[0]!.headers.authorization).toBe(`Bearer ${staticToken}`);
+
+      // and if it were on again without being re-pinned (a race, or a row written around the API), the send-time
+      // check still refuses it before anything is obtained or sent
+      await db.update(upstreamTokenExchanges).set({ enabled: true }).where(eq(upstreamTokenExchanges.id, row!.id));
+      const raced = await invoke("read");
+      expect(raced.statusCode, raced.body).toBe(403);
+      expect(raced.json()).toMatchObject({ error: "upstream_token_exchange_refused", code: "destination_mismatch" });
+      expect(asSeen.length).toBe(asBefore);
+      expect(elsewhere.seen).toHaveLength(1);
+      expect(issuedTokens).toHaveLength(0);
+    } finally {
+      await app.inject({ method: "DELETE", url: `/v1/connectors/${connectorId}/credential`, headers: AUTH });
+      await elsewhere.close();
+    }
+  });
 });
 
 describe("ADR-0238 — a url move turns it off, and nothing ever logs a token", () => {

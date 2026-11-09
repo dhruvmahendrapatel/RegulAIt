@@ -47,6 +47,7 @@ import { z } from "zod";
 import { createMiddleware, type Middleware } from "@modelcontextprotocol/sdk/client/middleware.js";
 import {
   auditLog,
+  connectorCredentials,
   connectors,
   eq,
   mcpServers,
@@ -186,6 +187,27 @@ export function checkExchangeResponse(input: {
 }
 
 // ---------------------------------------------------------------------------
+// A connector's destination (the token's audience never follows a changed destination)
+// ---------------------------------------------------------------------------
+
+/** the origin a destination URL names, or the URL as given when it does not parse; null stays null (the compiled default) */
+export function destinationOrigin(url: string | null | undefined): string | null {
+  if (url === null || url === undefined || url === "") return null;
+  try {
+    return new URL(url).origin;
+  } catch {
+    return url;
+  }
+}
+
+/** where a connector's calls go now: its credential's baseUrl, else its own (ADR-0034 amendment #2), as an origin */
+export async function connectorEffectiveDestination(t: Db, connectorId: string): Promise<string | null> {
+  const [c] = await t.select({ baseUrl: connectors.baseUrl }).from(connectors).where(eq(connectors.id, connectorId));
+  const [cred] = await t.select({ baseUrl: connectorCredentials.baseUrl }).from(connectorCredentials).where(eq(connectorCredentials.connectorId, connectorId));
+  return destinationOrigin(cred?.baseUrl ?? c?.baseUrl ?? null);
+}
+
+// ---------------------------------------------------------------------------
 // Loading a target's configuration
 // ---------------------------------------------------------------------------
 
@@ -227,6 +249,11 @@ export interface ExchangeContext {
   /** the tool, JSON-RPC method or connector operation that was allowed */
   action: string;
   projectId?: string | null;
+  /**
+   * connectors only: the destination this call is about to be sent to (the credential's baseUrl, else the connector's;
+   * null = the adapter's compiled default). It must be the one the exchange was configured for, or nothing is obtained.
+   */
+  destination?: string | null;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -296,6 +323,15 @@ export async function exchangeUpstreamToken(ctx: ExchangeContext): Promise<Excha
     code,
     decision: await writeExchangeRefusal(ctx, code, why),
   });
+
+  // 0. a connector's token goes only where the exchange was configured to send it: a changed destination (a new
+  //    credential baseUrl, say) is refused here, before anything is obtained, even if the write-time switch-off raced
+  if (ctx.target.kind === "connector") {
+    if (ctx.destination === undefined) return refuse("destination_mismatch", "the call's destination was not stated, so it cannot be checked");
+    if (destinationOrigin(ctx.destination) !== row.connectorDestination) {
+      return refuse("destination_mismatch", "the connector's destination changed since the exchange was configured; an admin re-confirms it with a step-up");
+    }
+  }
 
   // 1. DEFAULT-DENY: only the scopes mapped to this one action, never the union of the server's
   const scopes = loaded.scopes.get(ctx.action);
@@ -544,6 +580,37 @@ export async function disableUpstreamExchangeOnUrlMove(
   return true;
 }
 
+/**
+ * A connector credential write (stored, replaced or removed) that changes where the connector calls turns its token
+ * exchange off, audited in the same transaction: a token pinned to the old audience is never sent to a new host. The
+ * send-time check in `exchangeUpstreamToken` refuses it as well, so this is the visible half of the same rule.
+ */
+export async function disableConnectorExchangeOnDestinationChange(
+  tx: Db,
+  args: { connectorId: string; label: string; userId: string | null; cause: "credential_stored" | "credential_replaced" | "credential_removed" },
+): Promise<boolean> {
+  const [row] = await tx
+    .select({ id: upstreamTokenExchanges.id, enabled: upstreamTokenExchanges.enabled, destination: upstreamTokenExchanges.connectorDestination })
+    .from(upstreamTokenExchanges)
+    .where(eq(upstreamTokenExchanges.connectorId, args.connectorId))
+    .for("update");
+  if (!row || !row.enabled) return false;
+  const now = await connectorEffectiveDestination(tx, args.connectorId);
+  if (now === row.destination) return false;
+  await tx.update(upstreamTokenExchanges).set({ enabled: false, updatedAt: new Date() }).where(eq(upstreamTokenExchanges.id, row.id));
+  await tx.insert(auditLog).values({
+    userId: args.userId ?? NIL_USER,
+    objectType: "connector",
+    objectId: args.connectorId,
+    detail: { phase: "update", tokenExchange: "disabled", cause: "destination_change", via: args.cause, from: row.destination, to: now, receiptClass: "configuration" },
+    effect: "allow",
+    ruleId: UPSTREAM_EXCHANGE_RULE_IDS.updated,
+    ruleChain: [],
+    reason: `${args.label}: its destination changed, so its token exchange was turned off (an admin turns it on again, with a step-up)`,
+  });
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // The admin routes: GET / PUT / DELETE /v1/{servers|connectors}/:id/token-exchange
 // ---------------------------------------------------------------------------
@@ -603,17 +670,22 @@ export function upstreamExchangeStepUpArgs(op: "set" | "update" | "clear", targe
   };
 }
 
-async function lockTarget(t: Db, target: ExchangeTarget): Promise<{ label: string; url: string | null; transport: string | null; profile: string | null } | null> {
+async function lockTarget(
+  t: Db,
+  target: ExchangeTarget,
+): Promise<{ label: string; url: string | null; transport: string | null; profile: string | null; destination: string | null } | null> {
   if (target.kind === "mcp_server") {
     const [s] = await t
       .select({ name: mcpServers.name, url: mcpServers.url, transport: mcpServers.transport, profile: mcpServers.identityAssertionProfile })
       .from(mcpServers)
       .where(eq(mcpServers.id, target.id))
       .for("update");
-    return s ? { label: `MCP server '${s.name}'`, url: s.url, transport: s.transport ?? null, profile: s.profile } : null;
+    return s ? { label: `MCP server '${s.name}'`, url: s.url, transport: s.transport ?? null, profile: s.profile, destination: null } : null;
   }
   const [c] = await t.select({ name: connectors.name }).from(connectors).where(eq(connectors.id, target.id)).for("update");
-  return c ? { label: `connector '${c.name}'`, url: null, transport: null, profile: null } : null;
+  if (!c) return null;
+  // the destination this configuration is pinned to, read under the connector's row lock
+  return { label: `connector '${c.name}'`, url: null, transport: null, profile: null, destination: await connectorEffectiveDestination(t, target.id) };
 }
 
 const targetParams = {
@@ -732,6 +804,8 @@ export function registerUpstreamTokenExchangeRoutes(app: FastifyInstance, db: Db
           resource: values.resource,
           clientId: values.clientId,
           maxTokenTtlSeconds: values.maxTokenTtlSeconds,
+          // connectors: pinned to where the connector calls now; a later change of destination turns it off
+          connectorDestination: kind === "connector" ? locked.destination : null,
           setBy: req.authCtx.userId ?? null,
           updatedAt: new Date(),
           ...secretColumns,
@@ -765,6 +839,7 @@ export function registerUpstreamTokenExchangeRoutes(app: FastifyInstance, db: Db
             phase: "token-exchange-config",
             tokenExchange: existing ? "updated" : "set",
             ...values,
+            ...(kind === "connector" ? { destination: locked.destination } : {}),
             // turning it on (or keeping it on while changing what it may obtain) is the relaxation
             relaxation: values.enabled,
             receiptClass: "configuration",

@@ -76,6 +76,7 @@ export const UPSTREAM_EXCHANGE_REFUSAL_CODES = [
   "token_replayed", // the same token was handed out before (to this or another person): never reused
   "audit_failed",
   "profile_conflict", // the server already sends its own Authorization (oidc_bearer profile)
+  "destination_mismatch", // the call goes somewhere other than the destination the exchange was configured for
 ] as const;
 export type UpstreamExchangeRefusalCode = (typeof UPSTREAM_EXCHANGE_REFUSAL_CODES)[number];
 

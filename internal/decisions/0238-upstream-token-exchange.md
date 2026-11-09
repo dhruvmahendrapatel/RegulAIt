@@ -37,7 +37,11 @@ Add an outbound token exchange, generic over MCP servers and connectors, off by 
    secret), claimed in the write's transaction under the target's row lock, and audited in that transaction. No read
    returns the secret (only its last four characters). Refused, audited: a stdio server, a server on the `oidc_bearer`
    profile or with an ADR-0204 Bearer credential (both already own `Authorization`). A server url move turns the
-   exchange off (audited), like ADR-0204 and S8.
+   exchange off (audited), like ADR-0204 and S8. A connector's configuration is pinned to the destination its calls
+   went to when it was set (`connector_destination`: the credential's `baseUrl`, else the connector's, as an origin;
+   NULL = the adapter's compiled default). A credential write that changes it (stored, replaced or removed) turns the
+   exchange off in the same transaction, audited, and a call whose destination differs is refused at send time
+   (`destination_mismatch`) before anything is obtained (review of #712).
 3. **At call time**, after the governed decision (entitlement, approvals, budget, PII, guardrails) and before the
    connect, any approval being spent, or the connector call:
    - **default-deny**: an action with no mapped scope is refused before anything is sent;
@@ -112,8 +116,6 @@ form parameters of step 4. That is a migration and a small branch, decided when 
 ### Follow-ups
 
 - UI: the admin form for the configuration and scope map (posted on #453).
-- A connector `base_url` change does not yet turn the exchange off (the server url move does). The token's audience is
-  pinned, so it would be rejected by any other resource server, but the strict behaviour is to turn it off as well.
 - Refusing the reverse conflicts at write time: setting an ADR-0204 Bearer credential or the `oidc_bearer` profile while
   an exchange is on. At call time this already fails closed (the arm refuses the `oidc_bearer` profile, and the
   exchanged token replaces a static Bearer value).

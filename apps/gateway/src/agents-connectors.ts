@@ -139,6 +139,7 @@ import {
 import { z } from "zod";
 import { listLimitQuery } from "./list-limit.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
+import { disableConnectorExchangeOnDestinationChange } from "./upstream-token-exchange.js";
 import {
   assertProjectAttribution,
   enforcePII,
@@ -5314,6 +5315,14 @@ export function registerAgentConnectorRoutes(
         ruleChain: [],
         reason: `connector '${connector.name}' credential ${prior ? "replaced" : "stored"}`,
       });
+      // ADR-0238: a new destination turns the connector's token exchange off (audited), so a token pinned to the
+      // old audience is never sent to the new host
+      await disableConnectorExchangeOnDestinationChange(tx as unknown as Db, {
+        connectorId,
+        label: `connector '${connector.name}'`,
+        userId: req.authCtx.userId ?? null,
+        cause: prior ? "credential_replaced" : "credential_stored",
+      });
       return stored!;
     });
     return reply.status(201).send(row);
@@ -5346,6 +5355,13 @@ export function registerAgentConnectorRoutes(
           ruleId: "connector-credential-removed",
           ruleChain: [],
           reason: `connector credential removed`,
+        });
+        // ADR-0238: the connector falls back to its own destination, which may differ: same rule as a replacement
+        await disableConnectorExchangeOnDestinationChange(tx as unknown as Db, {
+          connectorId,
+          label: `connector ${connectorId}`,
+          userId: req.authCtx.userId ?? null,
+          cause: "credential_removed",
         });
       }
       return rows;
