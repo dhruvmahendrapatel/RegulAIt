@@ -1,0 +1,21 @@
+/* Executive dashboard: token-based visual hierarchy; retains all posture details. */
+.executiveIntro {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  padding: var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+.executiveIntro h2 { margin: 0 0 var(--s1); font-size: var(--text-xl); }
+.executiveIntro p { margin: 0; color: var(--text-dim); max-width: 70ch; }
+.executiveMeta { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); }
+.executiveKpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--s2); }
+.executiveKpis > * { min-width: 0; }
+@media (max-width: 1100px) { .executiveKpis { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 700px) { .executiveKpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 420px) { .executiveKpis { grid-template-columns: minmax(0, 1fr); } }
+@media print { .executiveIntro { break-inside: avoid; } .executiveKpis { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
