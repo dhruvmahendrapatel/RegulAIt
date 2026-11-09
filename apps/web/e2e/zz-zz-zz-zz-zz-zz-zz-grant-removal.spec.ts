@@ -22,6 +22,7 @@
  */
 import { expect, test, type Page } from "@playwright/test";
 import { passTotp } from "./totp-sign-in";
+import { confirmStepUp } from "./admin-api";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -62,6 +63,8 @@ async function signIn(page: Page, email: string, candidates: string[], settleOn:
 }
 
 test("a direct agent grant can be removed from the UI, and is really gone", async ({ page }) => {
+  // ADR-0250: the sign-in and the grant's step-up each spend a TOTP step (may wait a 30 s window)
+  test.setTimeout(120_000);
   await signIn(page, "admin@regulait.local", [ADMIN_PASSWORD, state.passwords.admin], ADMIN_PASSWORD);
 
   await page.goto("/ui/admin/agents");
@@ -83,10 +86,16 @@ test("a direct agent grant can be removed from the UI, and is really gone", asyn
 
   await userSel.selectOption(userId!);
   await agentSel.selectOption(agentId!);
+  // ADR-0250: a grant mint is a step-up — the first POST is refused 403 step_up_required, the app asks
+  // "Confirm it's you" and resends it with the grant. Wait for the POST that is not that refusal, answering
+  // the dialog when it asks (a 409 answered before any step-up never opens it).
   const granted = page.waitForResponse(
-    (r) => r.url().includes("/v1/grants/agents") && r.request().method() === "POST",
+    (r) => r.url().includes("/v1/grants/agents") && r.request().method() === "POST" && r.status() !== 403,
   );
   await grantForm.getByRole("button", { name: "Grant" }).click();
+  const stepUpDialog = page.getByTestId("step-up-dialog");
+  await Promise.race([granted, stepUpDialog.waitFor({ state: "visible" })]);
+  if (await stepUpDialog.isVisible()) await confirmStepUp(page);
   // 201 created, or 409 if this user already holds it — either way the grant
   // exists after this line, which is all the removal half needs.
   expect([201, 200, 409]).toContain((await granted).status());
