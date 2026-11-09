@@ -22,6 +22,10 @@ roadmap: ../product/ROADMAP.md
 ## Where we are (read this paragraph first)
 <!-- fold:state-recap newest-first -->
 
+**2026-11-07 - P30 spike: `vercel/workflow` rejected for pillar 2 ([ADR-0254](../decisions/0254-workflow-durable-execution-spike.md)).**
+The existing stage runner stays the engine. Retry/backoff and in-stage fan-out are follow-ups over graphile-worker or
+pg-boss. The prototype is in `spikes/workflow-p30/` (default off); there is no product or migration change.
+
 **2026-11-07 - backlog P26 built on `builder/p26-spikee-pyrit-engines` ([ADR-0245](../decisions/0245-spikee-pyrit-redteam-engines.md)):** Spikee joins garak and promptfoo as a sidecar red-team engine (off until its first signed image publish), the ADR-0217 automatic re-test now repeats red-team engine runs, and PyRIT is designed but its build is deferred (two builder attempts were stopped by a content-safety filter).
 
 **2026-11-07 - backlog P33: third-party client compatibility tests ([ADR-0257](../decisions/0257-third-party-client-compat-tests.md), builder lane, branch `builder/p33-client-compat-tests`).**
@@ -5751,6 +5755,36 @@ settles in the transaction that ends the run. The lock reader treats an engine m
 published. The agentic_security coverage diff added nothing (multimodal recorded as the one gap). Open: finishing
 PyRIT, owner confirmation of the eight reused licence acceptances, Spikee's LLM judge through the gateway, a governed
 multimodal route, and the UI (#453).
+
+**ADR-0238 (builder, 2026-11-07, Proposed): down-scoped upstream credentials by RFC 8693 token exchange (backlog
+P12(d)).** Step 1 found the `/oauth/token` exchange (ADR-0188 S5) is inbound only: the gateway is its authorization
+server and only resource. Added the gateway as an RFC 8693 client of an upstream's own authorization server, per MCP
+server or connector (pending migration `upstream_token_exchange`: `upstream_token_exchanges` plus the `upstream_token_exchange_scopes` join table;
+replay namespace `upstream_exchanged_token`). Off by default; every write is a `settings_relax` step-up; a url move
+turns it off. After the governed decision, the action's mapped scopes (unmapped = refused) are requested with a 60 s
+ES256 assertion for the person, through `oauth4webapi` over the egress-guarded fetch; the answer must stay within
+scope, the pinned audience and a ≤ 900 s lifetime, is claimed against replay, audited without the token, attached to
+that one call only and never cached. UI needs posted on #453. Follow-ups in the ADR (connector base_url move, reverse
+conflict refusals, private_key_jwt, ADR-0231 jwt-bearer profile, and MCP-spec OAuth 2.1/DCR on our own MCP
+endpoint, out of scope per ADR-0097). Design reference cited (ideas only): loglux/authmcp-gateway (MIT).
+
+**ADR-0254 (builder, 2026-11-07, Accepted spike verdict): `vercel/workflow` does not fit as pillar 2's engine (P30).**
+A time-boxed spike ran one real pillar-2 sequence on `workflow` 5.4.0 + `@workflow/world-postgres` 5.1.1 inside fastify
+through the standalone build: requirements, then a sign-off hook that resumes across a host restart, then three fan-out
+checks, with the real kernel `transition()` in durable steps. 7/7 tests passed twice in a loopback-only network
+namespace. Verdict "none fits" (ADR-0176):
+- the `workflow`/`workflow_drizzle`/`graphile_worker` schemas are hard-coded and bring their own 30-migration journal
+  (no RLS, plaintext step data);
+- about 14–16 ms per step against 0.7–0.9 ms for the current transaction;
+- 178 versions since 4.0, with 5.0 on 2026-09-30;
+- an unauthenticated loopback delivery route;
+- audit that cannot share the event's transaction;
+- zod and undici pinned at vulnerable versions.
+
+The existing runner stays; retry/backoff and in-stage fan-out go to it over graphile-worker or pg-boss, each in its own
+ADR. trigger.dev is rejected too (owner input, 2026-11-07); its wait-for-token, idempotency-key and per-queue
+concurrency patterns are borrowed. Prototype `spikes/workflow-p30/` behind `REGULAIT_WORKFLOW_DURABLE_P30` (default
+off). No migration; reserved 0309 released. PENDING P30.
 
 <!-- fold:state-decisions -->
 
