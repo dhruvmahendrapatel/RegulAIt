@@ -148,7 +148,7 @@ export default function UseCasesPage() {
 
   return (
     <>
-      <PageHeader title="AI Use-Cases" sub="Manage the AI use-case lifecycle, from registration and assessment to review and oversight." actions={<RegisterSplitButton />} />
+      <PageHeader title="AI registry" sub="Every AI use case in your organization, and where it stands." actions={<RegisterSplitButton />} />
       <div className={v.stack}>
         <div className={r.tiles} role="group" aria-label="Headline counts">
           {tile("Use cases", counts.total, false, {})}
@@ -156,35 +156,6 @@ export default function UseCasesPage() {
           {tile("Approved", counts.approved, filters.status === "approved" && filters.tier === "all", { status: "approved" })}
           {tile("High tier", counts.highTier, filters.tier === "high_or_prohibited" && filters.status === "all", { tier: "high_or_prohibited" })}
         </div>
-        <section className={r.analytics} aria-label="Use-case portfolio overview">
-          <Card title="Lifecycle overview">
-            {summary ? (
-              <div className={r.analyticsRows}>
-                {STATUS_CHIPS.filter((chip) => chip.value !== "all").map((chip) => {
-                  const count = statusCount(chip.value);
-                  const percent = counts.total > 0 ? (count / counts.total) * 100 : 0;
-                  return (
-                    <button key={chip.value} type="button" className={r.analyticsRow}
-                      aria-pressed={filters.status === chip.value}
-                      onClick={() => set({ status: chip.value })}>
-                      <span>{chip.label}</span>
-                      <span className={r.analyticsTrack}><span className={r.analyticsFill} style={{ width: `${percent}%` }} /></span>
-                      <strong>{count}</strong>
-                    </button>
-                  );
-                })}
-              </div>
-            ) : <p className={v.faint}>Portfolio breakdown appears when the registry has loaded.</p>}
-          </Card>
-          <Card title="Portfolio risk & review">
-            <div className={r.analyticsSummary}>
-              <div><strong>{summary ? counts.highTier : "—"}</strong><span>High or prohibited tier</span></div>
-              <div><strong>{summary ? counts.underReview : "—"}</strong><span>Under review</span></div>
-              <div><strong>{summary ? counts.approved : "—"}</strong><span>Approved</span></div>
-            </div>
-            <p className={v.faint}>These are registry counts, not a policy-compliance score. Risk tier follows the existing EU AI Act screening.</p>
-          </Card>
-        </section>
         <Card>
           {empty ? (
             <EmptyState
