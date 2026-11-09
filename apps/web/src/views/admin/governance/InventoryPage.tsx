@@ -19,7 +19,6 @@
  * grant rows and the register, never about observed traffic).
  */
 import { useState } from "react";
-import inv from "./inventoryOverview.module.css";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
@@ -171,7 +170,6 @@ function FeedList(props: { title: string; edges: FeedEdgeView[]; direction: "out
 export default function InventoryPage() {
   // ADR-0226: the registered agents page on the server; the window comes with each page
   const [days, setDays] = useState(90);
-  const [visibleAgents, setVisibleAgents] = useState<InventoryAgent[] | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
   const detail = useQuery({
     queryKey: ["admin", "inventory", openId],
@@ -183,7 +181,7 @@ export default function InventoryPage() {
   return (
     <>
       <PageHeader
-        title="Inventory"
+        title="Agent inventory"
         info={
           <p>
             The standing dependency view: per registered agent, who holds a grant on it, what its runs actually touched,
@@ -195,14 +193,6 @@ export default function InventoryPage() {
         }
       />
       <div className={v.stack}>
-        <section aria-label="Visible inventory summary" className={inv.overview}>
-          <div className={inv.tile}><span>Agents on this page</span><strong>{visibleAgents?.length ?? "—"}</strong></div>
-          <div className={inv.tile}><span>Active lifecycle</span><strong>{visibleAgents ? visibleAgents.filter((a) => a.lifecycle.status === "active").length : "—"}</strong></div>
-          <div className={inv.tile}><span>Unowned or orphaned</span><strong>{visibleAgents ? visibleAgents.filter((a) => a.ownership !== "owned").length : "—"}</strong></div>
-          <div className={inv.tile}><span>Grant overreach</span><strong>{visibleAgents ? visibleAgents.filter((a) => a.alignment?.overreach).length : "—"}</strong></div>
-          <div className={inv.tile}><span>Open linked risks</span><strong>{visibleAgents ? visibleAgents.reduce((n, a) => n + a.links.openRisks, 0) : "—"}</strong></div>
-        </section>
-        <p className={v.faint}>These figures summarise only the records currently loaded in the table, not the full organisation inventory. Lifecycle, grants and observed usage remain distinct.</p>
           <Card title="Registered agents" flush>
               <DataList<InventoryAgent>
                 listId="inventory-agents"
@@ -215,8 +205,7 @@ export default function InventoryPage() {
                 rowKey={(r) => r.id}
                 onRowClick={(r) => setOpenId(openId === r.id ? null : r.id)}
                 rowLabel={(r) => `Open the dependencies of ${r.name}`}
-                onRows={(rows, raw) => {
-                  setVisibleAgents(rows);
+                onRows={(_rows, raw) => {
                   const w = raw.window as { days?: number } | undefined;
                   if (typeof w?.days === "number") setDays(w.days);
                 }}
