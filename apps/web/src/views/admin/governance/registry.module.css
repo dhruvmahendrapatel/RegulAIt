@@ -156,7 +156,7 @@
   flex-direction: column;
   gap: var(--s-half);
   min-width: 0;
-  max-width: 340px;
+  max-width: min(19rem, 22vw);
 }
 .nameText {
   font-weight: 600;
@@ -170,7 +170,9 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.registryList [data-fold-step="lg"] :is(th, td) { padding-inline: var(--s1); }
 .registryList [data-fold-step="sm"] table { table-layout: fixed; width: 100%; }
+.registryList [data-fold-step="sm"] .nameCell { max-width: none; }
 .registryList [data-fold-step="sm"] .nameSub { white-space: normal; overflow-wrap: anywhere; }
 .registryList [data-fold="actions"] > :first-child { display: none; }
 .nowrap { white-space: nowrap; }

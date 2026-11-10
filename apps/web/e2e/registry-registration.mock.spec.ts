@@ -239,8 +239,10 @@ test.describe("ADR-0168: one registry, one way in", () => {
       await expect(page.getByRole("button", { name: "Download Excel" })).toBeVisible();
       const retire = page.getByRole("button", { name: "Retire Support ticket summarizer" });
       const retireBox = await retire.boundingBox();
+      const tableBox = await page.getByRole("table").locator("..").boundingBox();
       expect(retireBox).not.toBeNull();
-      expect(retireBox!.x + retireBox!.width).toBeLessThanOrEqual(width);
+      expect(tableBox).not.toBeNull();
+      expect(retireBox!.x + retireBox!.width).toBeLessThanOrEqual(tableBox!.x + tableBox!.width);
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
       await checkScreen(page, `Registry at ${width}px`, `registry-${width}`);
     });
