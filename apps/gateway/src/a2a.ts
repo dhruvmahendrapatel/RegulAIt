@@ -53,7 +53,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { mcpUpstreamHeaderNameProblem, mcpUpstreamSecretProblem, setMcpUpstreamCredentialSchema } from "@regulait/shared";
-import { createGuardedFetch, egressRefusal } from "./egress-guard.js";
+import { createGuardedFetch, EGRESS_REDIRECT_REASON, egressRedirectRefused, egressRefusal, egressResponseTooLarge } from "./egress-guard.js";
 import { checkMcpServerUrl, loadMcpEgressPosture } from "./mcp-egress.js";
 import { loadOrgSettings, piiInternationalCategories } from "./org-settings.js";
 import { assertProjectAttribution, enforcePII, piiCategoryList, preDispatchProjectGate, projectPiiMode } from "./projects.js";
@@ -73,6 +73,14 @@ export const A2A_CARD_MAX_BYTES = 60_000;
 /** what a caller may send and what we hand back, in characters */
 export const A2A_MESSAGE_MAX_CHARS = 32_000;
 export const A2A_REPLY_MAX_CHARS = 64_000;
+/**
+ * A2A-SEC-02: the transport bounds on what a remote agent may send back, counted while the body streams and after
+ * content decoding, before the SDK parses a byte. The card bound sits above A2A_CARD_MAX_BYTES (the stored,
+ * normalised card) so a card with some unknown fields still registers; the RPC bound covers a full
+ * A2A_REPLY_MAX_CHARS reply with JSON escaping and envelope, and also caps a non-2xx error body.
+ */
+export const A2A_CARD_RESPONSE_MAX_BYTES = 256 * 1024;
+export const A2A_RPC_RESPONSE_MAX_BYTES = 1024 * 1024;
 /** headers the A2A transport sets itself, so a credential may never name them */
 const A2A_RESERVED_HEADERS = ["a2a-version", "a2a-extensions"];
 
@@ -174,11 +182,12 @@ export interface A2aDeps {
 }
 
 /** the guarded fetch for one agent, on the CURRENT posture, with the credential added on the registered origin only */
-async function agentFetch(db: Db, agent: { url: string; allowPrivateRanges: boolean | null }, credential: { headerName: string; value: string } | null, deps: A2aDeps): Promise<typeof fetch> {
+async function agentFetch(db: Db, agent: { url: string; allowPrivateRanges: boolean | null }, credential: { headerName: string; value: string } | null, maxResponseBytes: number, deps: A2aDeps): Promise<typeof fetch> {
   const posture = await loadMcpEgressPosture(db, agent.allowPrivateRanges);
   const guarded = createGuardedFetch({
     allowList: posture.allowList,
     privateLan: { openByDefault: posture.openByDefault },
+    maxResponseBytes,
     ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
   });
   const registered = originOf(agent.url);
@@ -214,12 +223,14 @@ export function a2aCredentialView(row: A2aAgentCredentialRow | undefined | null)
 
 /** read the card at `url` through the guarded fetch (no credential: a card is public by the protocol) */
 async function fetchCard(db: Db, url: string, allowPrivateRanges: boolean | null, deps: A2aDeps): Promise<{ ok: true; card: AgentCard } | { ok: false; code: string; detail: string }> {
-  const fetchImpl = await agentFetch(db, { url, allowPrivateRanges }, null, deps);
+  const fetchImpl = await agentFetch(db, { url, allowPrivateRanges }, null, A2A_CARD_RESPONSE_MAX_BYTES, deps);
   try {
     const card = await new DefaultAgentCardResolver({ fetchImpl }).resolve(url);
     const problem = cardProblem(card, url);
     return problem ? { ok: false, code: "card_refused", detail: problem } : { ok: true, card };
   } catch (err) {
+    if (egressResponseTooLarge(err)) return { ok: false, code: "card_too_large", detail: `the agent card response was larger than ${A2A_CARD_RESPONSE_MAX_BYTES} bytes, so it was refused` };
+    if (egressRedirectRefused(err)) return { ok: false, code: "egress_blocked", detail: EGRESS_REDIRECT_REASON };
     const blocked = egressRefusal(err);
     if (blocked) return { ok: false, code: "egress_blocked", detail: blocked };
     return { ok: false, code: "card_unreadable", detail: "the agent card could not be read from the url" };
@@ -377,7 +388,7 @@ export async function executeGovernedA2aCall(db: Db, args: GovernedA2aCallArgs, 
   const grantDetail = { ...base, grantId: grant.id, url: agent.url, ...(piiDetail ? { pii: piiDetail } : {}) };
   let result: Message | Task;
   try {
-    const fetchImpl = await agentFetch(db, agent, opened.credential, deps);
+    const fetchImpl = await agentFetch(db, agent, opened.credential, A2A_RPC_RESPONSE_MAX_BYTES, deps);
     const client = await new ClientFactory({ transports: [new JsonRpcTransportFactory({ fetchImpl })], preferredTransports: [JSONRPC] }).createFromAgentCard(clientCard(agent.card, agent.url));
     result = await client.sendMessage(
       {
@@ -389,12 +400,18 @@ export async function executeGovernedA2aCall(db: Db, args: GovernedA2aCallArgs, 
       { signal: AbortSignal.timeout(timeouts().outboundDefaultMs) },
     );
   } catch (err) {
+    // the remote party's text is not ours to repeat, and that includes a redirect's Location (A2A-SEC-01): every
+    // outcome below is a fixed sentence, or the egress reason the guard produced from our own configuration
+    let outcome: "redirect_refused" | "response_too_large" | "egress_blocked" | "upstream_error";
+    let reason: string;
     const blocked = egressRefusal(err);
-    // the remote party's error text is not ours to repeat: a fixed sentence, and the egress reason when it was ours
-    const reason = blocked ?? "the remote agent did not return a usable reply";
+    if (egressRedirectRefused(err)) [outcome, reason] = ["redirect_refused", EGRESS_REDIRECT_REASON];
+    else if (egressResponseTooLarge(err)) [outcome, reason] = ["response_too_large", `the remote agent's response was larger than ${A2A_RPC_RESPONSE_MAX_BYTES} bytes, so it was refused`];
+    else if (blocked) [outcome, reason] = ["egress_blocked", blocked];
+    else [outcome, reason] = ["upstream_error", "the remote agent did not return a usable reply"];
     const [row] = await db
       .insert(auditLog)
-      .values({ userId: args.userId, objectType: "a2a_agent", objectId: agent.id, toolName: skillId, detail: { ...grantDetail, outcome: blocked ? "egress_blocked" : "upstream_error", receiptClass: "decision" }, effect: "allow", ruleId: A2A_RULE_IDS.upstreamError, ruleChain: [A2A_RULE_IDS.callAllowed], reason: `${label}: the call was allowed, but ${reason}; nothing was charged` })
+      .values({ userId: args.userId, objectType: "a2a_agent", objectId: agent.id, toolName: skillId, detail: { ...grantDetail, outcome, receiptClass: "decision" }, effect: "allow", ruleId: A2A_RULE_IDS.upstreamError, ruleChain: [A2A_RULE_IDS.callAllowed], reason: `${label}: the call was allowed, but ${reason}; nothing was charged` })
       .returning({ id: auditLog.id });
     return { kind: "upstream_error", status: 502, error: "a2a_upstream_error", reason, auditId: row!.id };
   }
