@@ -366,6 +366,19 @@ export default function PosturePage() {
             {/* ---------------- headlines ---------------- */}
             <div className={ed.executiveKpis}>
               <Headline
+                value={d.agentOwnership.total}
+                label="registered AI agents"
+                line={<>Agent inventory: {d.agentOwnership.owned} owned, {d.agentOwnership.unowned} unowned, {d.agentOwnership.orphaned} orphaned. {d.agentOwnership.note}</>}
+                chip={d.agentOwnership.unowned + d.agentOwnership.orphaned > 0 ? <Badge tone="warn">Ownership attention needed</Badge> : null}
+                link={<SectionLink to="/admin/inventory" label="agent inventory →" />}
+              />
+              <Headline
+                value={d.governance.approvalsPending}
+                label="pending governance approvals"
+                line={<>Pending approvals in the existing governance queue, not a count of all assigned personal tasks. {d.governance.approvalsDecidedInWindow} approvals decided in the last {d.window.days} days.</>}
+                link={<SectionLink to="/admin/approvals" label="approvals queue →" />}
+              />
+              <Headline
                 value={d.useCases.total}
                 label="registered AI use cases"
                 line={<>Recorded use cases: {d.useCases.proposed} proposed, {d.useCases.underReview} under review, {d.useCases.approved} approved, {d.useCases.rejected} rejected and {d.useCases.retired} retired. This is an inventory count, not a compliance score.</>}
