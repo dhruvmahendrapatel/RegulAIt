@@ -32,7 +32,6 @@ import {
   eq,
   externalScorers,
   guardrailTrainedDetectors,
-  sql,
   type Db,
   type GuardrailTrainedDetectorRow,
 } from "@regulait/db";
@@ -60,6 +59,7 @@ import {
 import type { ResolvedExternalScorer } from "./external-scorers.js";
 import type { EgressResolver } from "./egress-guard.js";
 import { CHANGED_CONCURRENTLY, requireRelaxStepUp } from "./step-up.js";
+import { lockTrainedDetectorBindings } from "./trained-detector-lock.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -193,8 +193,6 @@ export async function runTrainedCalls(
 // admin routes — admin-only by the global gate (none in NON_ADMIN_ROUTES)
 // ---------------------------------------------------------------------------
 
-/** advisory lock for the per-kind PUT, whose step-up rests on the stored row */
-const TRAINED_DETECTOR_LOCK_KEY = 6_000_000_220;
 
 function publicSetting(kind: TrainedDetectorKind, row: GuardrailTrainedDetectorRow | undefined, scorerName: string | null) {
   return {
@@ -258,10 +256,13 @@ export function registerTrainedDetectorRoutes(app: FastifyInstance, db: Db): voi
 
     // turning one on needs an enabled (connection-tested) scorer claiming the kind
     let scorerName: string | null = null;
+    /** P7R-01: the scorer as checked here; the write below refuses if it moved before the lock */
+    let scorerChecked: unknown = null;
     if (next.scorerId) {
       const [scorer] = await db.select().from(externalScorers).where(eq(externalScorers.id, next.scorerId));
       if (!scorer) return reply.status(404).send({ error: "unknown_external_scorer" });
       scorerName = scorer.name;
+      scorerChecked = scorer;
       if (next.enabled) {
         const claim = TRAINED_DETECTOR_SCORER_KIND[kind];
         if (!(scorer.scorerKinds as string[]).includes(claim)) {
@@ -289,10 +290,16 @@ export function registerTrainedDetectorRoutes(app: FastifyInstance, db: Db): voi
 
     const saved = await db.transaction(async (txRaw) => {
       const tx = txRaw as unknown as Db;
-      await tx.execute(sql`select pg_advisory_xact_lock(${TRAINED_DETECTOR_LOCK_KEY}::bigint)`);
+      // the same lock the external-scorer writes take (P7R-01), so a binding and a scorer change never interleave
+      await lockTrainedDetectorBindings(tx);
       const [now] = await tx.select().from(guardrailTrainedDetectors).where(eq(guardrailTrainedDetectors.kind, kind));
       // the step-up was decided on `before`; a row that moved since is refused, never overwritten
       if (JSON.stringify(now ?? null) !== JSON.stringify(before ?? null)) return null;
+      // P7R-01: and the scorer checked above (enabled, kinds, endpoint) is still the scorer being bound
+      if (next.scorerId) {
+        const [scorerNow] = await tx.select().from(externalScorers).where(eq(externalScorers.id, next.scorerId)).for("update");
+        if (JSON.stringify(scorerNow ?? null) !== JSON.stringify(scorerChecked)) return null;
+      }
       const values = { ...next, updatedByUserId: actor, updatedAt: new Date() };
       const [row] = await tx
         .insert(guardrailTrainedDetectors)
