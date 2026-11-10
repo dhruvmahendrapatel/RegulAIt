@@ -2,7 +2,7 @@
  * The AI registry (ADR-0168 item 2; ADR-0080 for the use-case object).
  *
  * One place to see every registered AI use case and where it stands: headline
- * counts, filter chips, a table, and a right-hand preview a row opens without
+ * counts, filters, a table, and a right-hand preview a row opens without
  * leaving the list. There is ONE way in — "Register AI use case" opens the
  * intake wizard (ADR-0168 item 1); this page creates nothing itself.
  *
@@ -13,8 +13,9 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent a
 import { Link } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Input, RowActions, Select } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Input, Select } from "../../../ui/kit";
 import { DataList, type DataColumn } from "../../../ui/DataList";
+import { FoldTable } from "../../../ui/fold";
 import { UseCasePreviewDrawer } from "./UseCasePreviewDrawer";
 import { RetireUseCaseDialog } from "./RetireUseCase";
 import {
@@ -36,14 +37,20 @@ import v from "../../views.module.css";
 
 const INTAKE = "/admin/governance/intake";
 
-const STATUS_CHIPS: Array<{ value: StatusFilter; label: string }> = [
-  { value: "all", label: "All" },
+const STATUS_OPTIONS: Array<{ value: StatusFilter; label: string }> = [
+  { value: "all", label: "All statuses" },
   { value: "in_review", label: "In review" },
   { value: "needs_info", label: "Needs information" },
   { value: "recertification", label: "Re-review" },
   { value: "approved", label: "Approved" },
   { value: "rejected", label: "Rejected" },
   { value: "retired", label: "Retired" },
+];
+
+const LIFECYCLE_STAGES: Array<{ value: StatusFilter; label: string }> = [
+  { value: "proposed", label: "Proposed" },
+  { value: "under_review", label: "Under review" },
+  ...STATUS_OPTIONS.filter(({ value }) => value === "needs_info" || value === "approved" || value === "rejected" || value === "retired"),
 ];
 
 interface RegistrySummary {
@@ -66,22 +73,24 @@ const USE_CASE_COLUMNS: Array<DataColumn<UseCaseRow>> = [
       </span>
     ),
   },
-  { key: "status", header: "Status", main: true, sortable: true, required: "Status is always shown", render: (row) => <Badge tone={rowStatus(row).tone}>{rowStatus(row).label}</Badge> },
+  { key: "status", header: "Status", main: true, sortable: true, required: "Status is always shown", fold: { md: "name" }, render: (row) => <Badge tone={rowStatus(row).tone}>{rowStatus(row).label}</Badge> },
   {
     key: "tier",
     header: "Tier",
     main: true,
     sortable: true,
     required: "The risk tier is always shown",
+    fold: { md: "name" },
     render: (row) => (row.euAiActTier ? <Badge tone={tierTone(row.euAiActTier)}>{tierLabel(row.euAiActTier)}</Badge> : <span className={`${v.faint} ${r.nowrap}`}>Not screened</span>),
   },
-  { key: "owner", header: "Owner", main: true, sortable: true, render: (row) => <span className={r.nowrap}>{row.ownerName ?? "Unnamed"}</span> },
-  { key: "created", header: "Created", main: true, sortable: true, render: (row) => <span className={r.nowrap}>{fmtDay(row.createdAt)}</span> },
+  { key: "owner", header: "Owner", main: true, sortable: true, fold: { md: "name" }, render: (row) => row.ownerName ?? "Unnamed" },
+  { key: "created", header: "Created", main: true, sortable: true, fold: { md: "name" }, render: (row) => <span className={r.nowrap}>{fmtDay(row.createdAt)}</span> },
   {
     key: "validUntil",
     header: "Valid until",
     main: true,
     sortable: true,
+    fold: { md: "name" },
     render: (row) => {
       const until = validity(row.approvedUntil);
       return <span className={`${r.nowrap} ${until.expired ? r.expired : ""}`}>{until.text}</span>;
@@ -93,14 +102,16 @@ const USE_CASE_COLUMNS: Array<DataColumn<UseCaseRow>> = [
     main: true,
     sortable: true,
     align: "right",
+    fold: { md: "name" },
     render: (row) => (row.openConditions ? <Badge tone="warn">{row.openConditions}</Badge> : <span className={v.faint}>{row.openConditions === 0 ? "0" : "—"}</span>),
   },
-  { key: "sensitivity", header: "Data sensitivity", sortable: true, render: (row) => row.dataSensitivity },
-  { key: "decided", header: "Decided", sortable: true, render: (row) => (row.decidedAt ? fmtDay(row.decidedAt) : "—") },
+  { key: "sensitivity", header: "Data sensitivity", sortable: true, fold: { md: "name" }, render: (row) => row.dataSensitivity },
+  { key: "decided", header: "Decided", sortable: true, fold: { md: "name" }, render: (row) => (row.decidedAt ? fmtDay(row.decidedAt) : "—") },
 ];
 
 export default function UseCasesPage() {
   const queryClient = useQueryClient();
+  const [exportTarget, setExportTarget] = useState<HTMLDivElement | null>(null);
   const [filters, setFilters] = useState<RegistryFilters>(NO_FILTERS);
   // the search runs on the server, a moment after typing stops
   const [q, setQ] = useState("");
@@ -117,7 +128,7 @@ export default function UseCasesPage() {
     }),
     [q, filters.status, filters.tier, filters.owner],
   );
-  // the headline and chip counts and the owner choices come with every page, across every use case you may see
+  // Counts and owner choices cover every use case the existing endpoint makes visible.
   const [summary, setSummary] = useState<RegistrySummary | null>(null);
   const [rows, setRows] = useState<UseCaseRow[]>([]);
   const onRows = useCallback((pageRows: UseCaseRow[], raw: Record<string, unknown>) => {
@@ -134,8 +145,8 @@ export default function UseCasesPage() {
   const set = (patch: Partial<RegistryFilters>) => setFilters((f) => ({ ...f, ...patch }));
   const statusCount = (value: StatusFilter) => summary?.statusCounts[value] ?? 0;
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["admin", "use-cases"] });
-  const tile = (label: string, value: number, pressed: boolean, apply: Partial<RegistryFilters>) => (
-    <button type="button" className={r.tile} aria-pressed={pressed} aria-label={`${label}: ${summary ? value : "not loaded"}. ${pressed ? "Clear filter" : "Filter registry"}`} onClick={() => setFilters(pressed ? NO_FILTERS : { ...NO_FILTERS, ...apply })}>
+  const tile = (label: string, value: number, tone: string, pressed: boolean | undefined, apply: Partial<RegistryFilters>) => (
+    <button type="button" className={r.tile} data-tone={tone} aria-pressed={pressed} onClick={() => setFilters(pressed ? NO_FILTERS : { ...NO_FILTERS, ...apply })}>
       <span className={r.tileLabel}>{label}</span>{" "}
       <span className={r.tileValue}>{summary ? value : "—"}</span>
     </button>
@@ -148,34 +159,19 @@ export default function UseCasesPage() {
 
   return (
     <>
-      <PageHeader title="AI registry" sub="AI use cases · Review risk tier, owner, lifecycle and governance status. Figures come from the existing registry, not illustrative examples." actions={<RegisterSplitButton />} />
+      <PageHeader
+        title="AI registry"
+        sub="Review the risk tier, owner and lifecycle status of your AI use cases."
+        actions={<div className={r.headerActions}><RegisterSplitButton /><div className={r.exportSlot} ref={setExportTarget} /></div>}
+      />
       <div className={v.stack}>
         <div className={r.tiles} role="group" aria-label="Headline counts">
-          {tile("Use cases", counts.total, false, {})}
-          {tile("Under review", counts.underReview, filters.status === "in_review" && filters.tier === "all", { status: "in_review" })}
-          {tile("Approved", counts.approved, filters.status === "approved" && filters.tier === "all", { status: "approved" })}
-          {tile("High tier", counts.highTier, filters.tier === "high_or_prohibited" && filters.status === "all", { tier: "high_or_prohibited" })}
-          {tile("Needs information", statusCount("needs_info"), filters.status === "needs_info" && filters.tier === "all", { status: "needs_info" })}
+          {tile("Use cases", counts.total, "total", undefined, {})}
+          {tile("Approved", counts.approved, "approved", filters.status === "approved" && filters.tier === "all", { status: "approved" })}
+          {tile("In review", counts.underReview, "review", filters.status === "in_review" && filters.tier === "all", { status: "in_review" })}
+          {tile("High or prohibited", counts.highTier, "risk", filters.tier === "high_or_prohibited" && filters.status === "all", { tier: "high_or_prohibited" })}
+          {tile("Needs information", statusCount("needs_info"), "pending", filters.status === "needs_info" && filters.tier === "all", { status: "needs_info" })}
         </div>
-        <section className={r.analytics} aria-label="Use-case portfolio overview">
-          <Card title="Lifecycle overview">
-            {summary ? (
-              <div className={r.analyticsRows}>
-                {STATUS_CHIPS.filter((chip) => chip.value !== "all").map((chip) => {
-                  const count = statusCount(chip.value);
-                  const percent = counts.total > 0 ? (count / counts.total) * 100 : 0;
-                  return (
-                    <div key={chip.value} className={r.analyticsRow}>
-                      <span>{chip.label}</span>
-                      <span className={r.analyticsTrack}><span className={r.analyticsFill} style={{ width: `${percent}%` }} /></span>
-                      <strong>{count}</strong>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : <p className={v.faint}>Portfolio breakdown appears when the registry has loaded.</p>}
-          </Card>
-        </section>
         <Card>
           {empty ? (
             <EmptyState
@@ -193,13 +189,11 @@ export default function UseCasesPage() {
                 value={filters.search}
                 onChange={(e) => set({ search: e.target.value })}
               />
-              <div className={r.chips} role="group" aria-label="Status">
-                {STATUS_CHIPS.map((chip) => (
-                  <button key={chip.value} type="button" className={r.chip} aria-pressed={filters.status === chip.value} onClick={() => set({ status: chip.value })}>
-                    {chip.label} <span className={r.chipCount}>{statusCount(chip.value)}</span>
-                  </button>
+              <Select className={r.chipSelect} aria-label="Status" value={filters.status} onChange={(e) => set({ status: e.target.value as StatusFilter })}>
+                {STATUS_OPTIONS.map(({ value, label }) => (
+                  <option key={value} value={value}>{summary ? `${label} (${statusCount(value)})` : label}</option>
                 ))}
-              </div>
+              </Select>
               <Select className={r.chipSelect} aria-label="Tier" value={filters.tier} onChange={(e) => set({ tier: e.target.value as TierFilter })}>
                 <option value="all">All tiers</option>
                 <option value="high_or_prohibited">High or prohibited</option>
@@ -218,12 +212,13 @@ export default function UseCasesPage() {
               )}
             </div>
           )}
-          <div hidden={Boolean(empty)}>
+          <div className={r.registryList} hidden={Boolean(empty)}>
             <DataList<UseCaseRow>
               listId="use-cases"
               noun="use cases"
               endpoint="/v1/use-cases"
               exportPath="/v1/use-cases/export.xlsx"
+              exportTarget={empty ? null : exportTarget}
               queryKey={["admin", "use-cases", "list"]}
               legacyKey="useCases"
               filters={serverFilters}
@@ -235,6 +230,7 @@ export default function UseCasesPage() {
                 setOpenId(openId === row.id ? null : row.id);
               }}
               onRows={onRows}
+              table={FoldTable<UseCaseRow>}
               empty={<EmptyState title="No use cases match these filters" body="Use cases exist, but none fits every filter you chose." action={<Button size="sm" onClick={() => setFilters(NO_FILTERS)}>Clear all</Button>} />}
               columns={[
                 ...USE_CASE_COLUMNS,
@@ -244,31 +240,45 @@ export default function UseCasesPage() {
                   srHeader: "Actions",
                   align: "right",
                   action: true,
-                  render: (row) => (
-                    <RowActions
-                      slot="5rem"
-                      secondary={
-                        row.status !== "retired" && (
-                          <Button
-                            size="sm"
-                            variant="danger"
-                            aria-label={`Retire ${row.name}`}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setRetiring(row);
-                            }}
-                          >
-                            Retire
-                          </Button>
-                        )
-                      }
-                    />
+                  fold: { sm: "name" },
+                  render: (row) => row.status !== "retired" && (
+                    <Button
+                      size="sm"
+                      variant="danger"
+                      aria-label={`Retire ${row.name}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setRetiring(row);
+                      }}
+                    >
+                      Retire
+                    </Button>
                   ),
                 },
               ]}
             />
           </div>
         </Card>
+        {summary && !empty && (
+          <section aria-label="Lifecycle overview">
+            <Card title="Lifecycle overview">
+              <div className={r.analyticsRows}>
+                {LIFECYCLE_STAGES.map(({ value, label }) => {
+                  const count = statusCount(value);
+                  return (
+                    <div key={value} className={r.analyticsRow}>
+                      <span>{label}</span>
+                      <span className={r.analyticsTrack} aria-hidden="true">
+                        <span className={r.analyticsFill} style={{ width: `${(count / counts.total) * 100}%` }} />
+                      </span>
+                      <strong>{count}</strong>
+                    </div>
+                  );
+                })}
+              </div>
+            </Card>
+          </section>
+        )}
       </div>
       {retiring && <RetireUseCaseDialog id={retiring.id} name={retiring.name} onClose={() => setRetiring(null)} onRetired={refresh} />}
       {openId && <UseCasePreviewDrawer id={openId} row={rows.find((row) => row.id === openId)} onClose={closePreview} onChanged={refresh} />}

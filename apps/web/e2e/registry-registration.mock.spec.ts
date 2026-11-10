@@ -5,7 +5,7 @@
  *  - ONE entry point: the registry creates nothing itself; its split
  *    "Register AI use case" action (and the home page's link) open the intake
  *    wizard, and the menu also offers the existing agent registration;
- *  - the registry: headline tiles, status chips, tier/owner filters, search,
+ *  - the registry: headline tiles, status/tier/owner filters, search,
  *    the Valid until / Open conditions columns, and a row opening the right
  *    preview with "Open use case";
  *  - the registration's "Similar use cases" rail: lists existing use cases
@@ -67,18 +67,26 @@ const assist = {
 
 const json = (route: Route, body: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
-async function mockApi(page: Page) {
+async function mockApi(page: Page, isAdmin = true) {
   const created: unknown[] = [];
+  const retired: unknown[] = [];
+  let registryRows = useCases;
   await page.route("**/*", async (route) => {
     const p = new URL(route.request().url()).pathname;
     if (route.request().resourceType() === "document" || (!p.startsWith("/v1") && !p.startsWith("/auth"))) return route.continue();
     const method = route.request().method();
-    if (p === "/auth/me") return json(route, { userId: "u", isAdmin: true, via: "session", user: { id: "u", email: "avery@example.test", displayName: "Avery Admin" }, mustChangePassword: false, totpEnabled: true, passwordSet: true, mfaSetupRequired: false });
-    if (p === "/v1/me") return json(route, { userId: "u", isAdmin: true, user: { id: "u", email: "avery@example.test", displayName: "Avery Admin" } });
+    if (p === "/auth/me") return json(route, { userId: "u", isAdmin, via: "session", user: { id: "u", email: "avery@example.test", displayName: "Avery Admin" }, mustChangePassword: false, totpEnabled: true, passwordSet: true, mfaSetupRequired: false });
+    if (p === "/v1/me") return json(route, { userId: "u", isAdmin, user: { id: "u", email: "avery@example.test", displayName: "Avery Admin" } });
     if (p === "/v1/use-cases" && method === "GET") {
       // ADR-0226: the registry's filters, sort and figures run on the server
       const q = new URL(route.request().url()).searchParams;
-      return json(route, isContractRead(q) ? useCasesContract(useCases, q) : { useCases });
+      return json(route, isContractRead(q) ? useCasesContract(registryRows, q) : { useCases: registryRows });
+    }
+    if (p === "/v1/use-cases/export.xlsx") return route.fulfill({ contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", body: "mock workbook" });
+    if (p === `/v1/use-cases/${USE_CASE}/retire` && method === "POST") {
+      retired.push(route.request().postDataJSON());
+      registryRows = registryRows.map((entry) => entry.id === USE_CASE ? { ...entry, status: "retired" } : entry);
+      return json(route, { ok: true });
     }
     if (p === "/v1/use-cases" && method === "POST") {
       created.push(route.request().postDataJSON());
@@ -107,7 +115,7 @@ async function mockApi(page: Page) {
     if (p === "/v1/setup/status") return json(route, { complete: true, doneCount: 0, totalCount: 0, steps: [] });
     return json(route, {});
   });
-  return { created };
+  return { created, retired };
 }
 
 async function setTheme(page: Page, theme: "light" | "dark") {
@@ -130,7 +138,7 @@ async function checkScreen(page: Page, label: string, shot?: string) {
 }
 
 test.describe("ADR-0168: one registry, one way in", () => {
-  test("the registry: tiles, chips, filters, the new columns and the preview drawer", async ({ page }) => {
+  test("the registry: tiles, filters, sortable columns and the preview drawer", async ({ page }) => {
     await mockApi(page);
     await page.goto("/ui/admin/use-cases");
     await expect(page.getByRole("heading", { level: 1, name: "AI registry" })).toBeVisible();
@@ -144,7 +152,11 @@ test.describe("ADR-0168: one registry, one way in", () => {
 
     // headline tiles
     const tiles = page.getByRole("group", { name: "Headline counts" });
-    await expect(tiles.getByRole("button")).toHaveText(["Use cases 5", "Under review 3", "Approved 2", "High tier 2"]);
+    await expect(tiles.getByRole("button")).toHaveText(["Use cases 5", "Approved 2", "In review 3", "High or prohibited 2", "Needs information 1"]);
+    const lifecycle = page.getByRole("region", { name: "Lifecycle overview" });
+    await expect(lifecycle.locator("strong")).toHaveText(["1", "1", "1", "2", "0", "0"]);
+    await expect(lifecycle.locator("[aria-hidden=true] > span").first()).toHaveAttribute("style", "width: 20%;");
+    await expect(lifecycle.getByRole("button", { name: "Proposed" })).toHaveCount(0);
     // valid until: a date after approval, an expired approval called out, a dash before; open conditions counted
     const approved = table.getByRole("link", { name: /^Support ticket summarizer, Approved/ });
     await expect(approved).toContainText("20 Aug 2027");
@@ -154,13 +166,17 @@ test.describe("ADR-0168: one registry, one way in", () => {
     await checkScreen(page, "Registry", "registry");
 
     // a tile filters; pressing it again clears
-    await tiles.getByRole("button", { name: "Under review 3", exact: true }).click();
+    const reviewTile = tiles.getByRole("button", { name: "In review 3", exact: true });
+    await reviewTile.focus();
+    await page.keyboard.press("Space");
     await expect(table.getByRole("link")).toHaveCount(3);
-    await expect(page.getByRole("group", { name: "Status" }).getByRole("button", { name: /In review/ })).toHaveAttribute("aria-pressed", "true");
-    await tiles.getByRole("button", { name: "Under review 3", exact: true }).click();
+    await expect(reviewTile).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByLabel("Status", { exact: true })).toHaveValue("in_review");
+    await page.keyboard.press("Space");
     await expect(table.getByRole("link")).toHaveCount(5);
-    // chips, tier, owner and search narrow together; "Clear all" resets
-    await page.getByRole("group", { name: "Status" }).getByRole("button", { name: /^Approved/ }).click();
+    await expect(reviewTile).toHaveAttribute("aria-pressed", "false");
+    // Status, tier, owner and search narrow together; "Clear all" resets
+    await page.getByLabel("Status", { exact: true }).selectOption("approved");
     await expect(table.getByRole("link")).toHaveCount(2);
     await page.getByLabel("Tier").selectOption("high");
     await expect(table.getByRole("link")).toHaveCount(1);
@@ -175,6 +191,13 @@ test.describe("ADR-0168: one registry, one way in", () => {
     await expect(page.getByText("No use cases match these filters")).toBeVisible();
     await page.getByRole("button", { name: "Clear all" }).first().click();
     await expect(table.getByRole("link")).toHaveCount(5);
+    const sorted = page.waitForRequest((request) => {
+      const url = new URL(request.url());
+      return url.pathname === "/v1/use-cases" && url.searchParams.get("sort") === "name" && url.searchParams.get("dir") === "asc";
+    });
+    await table.getByRole("button", { name: "Name", exact: true }).click();
+    await sorted;
+    await expect(table.getByRole("link").first()).toHaveAccessibleName(/^Credit-limit-increase assistant/);
 
     // a row opens the right-hand preview; its primary action opens the record
     await approved.focus();
@@ -205,6 +228,97 @@ test.describe("ADR-0168: one registry, one way in", () => {
     await checkScreen(page, "Registry (preview of a use case under review)");
     await page.keyboard.press("Escape");
     await expect(reviewing).toHaveCount(0);
+  });
+
+  for (const width of [390, 1024, 1440]) {
+    test(`registry layout and accessibility at ${width}px in both themes`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 950 });
+      await mockApi(page);
+      await page.goto("/ui/admin/use-cases");
+      await expect(page.getByRole("link", { name: /^Support ticket summarizer, Approved/ })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Download Excel" })).toBeVisible();
+      const retire = page.getByRole("button", { name: "Retire Support ticket summarizer" });
+      const retireBox = await retire.boundingBox();
+      expect(retireBox).not.toBeNull();
+      expect(retireBox!.x + retireBox!.width).toBeLessThanOrEqual(width);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+      await checkScreen(page, `Registry at ${width}px`, `registry-${width}`);
+    });
+  }
+
+  test("export uses the current filters and retirement requires an audit reason", async ({ page }) => {
+    const { retired } = await mockApi(page);
+    await page.goto("/ui/admin/use-cases");
+    await expect(page.getByRole("link", { name: /^Credit-limit-increase assistant,/ })).toBeVisible();
+    await page.getByLabel("Tier", { exact: true }).selectOption("high");
+    await expect(page.getByRole("table").getByRole("link")).toHaveCount(2);
+    const exported = page.waitForRequest((request) => new URL(request.url()).pathname === "/v1/use-cases/export.xlsx");
+    await page.getByRole("button", { name: "Download Excel" }).click();
+    const query = new URL((await exported).url()).searchParams;
+    expect(query.get("tier")).toBe("high");
+    expect(query.get("sort")).toBe("created");
+    expect(query.get("columns")).toBe("name,status,tier,owner,created,validUntil,conditions");
+
+    await page.getByRole("button", { name: "Retire Credit-limit-increase assistant" }).click();
+    const dialog = page.getByRole("dialog", { name: "Retire Credit-limit-increase assistant?" });
+    const confirm = dialog.getByRole("button", { name: "Retire use case" });
+    await expect(confirm).toBeDisabled();
+    await dialog.getByLabel("Reason for retiring (recorded in the audit log)").fill("  Superseded by a narrower use case  ");
+    await confirm.click();
+    await expect(dialog).toHaveCount(0);
+    expect(retired).toEqual([{ reason: "Superseded by a narrower use case" }]);
+    await expect(page.getByRole("link", { name: /^Credit-limit-increase assistant, Retired/ })).toBeVisible();
+  });
+
+  test("headline counts wait for the registry and an empty response offers registration", async ({ page }) => {
+    await mockApi(page);
+    let release: () => void = () => undefined;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    await page.route(/\/v1\/use-cases\?/, async (route) => {
+      await pending;
+      return json(route, useCasesContract([], new URL(route.request().url()).searchParams));
+    });
+    await page.goto("/ui/admin/use-cases");
+    try {
+      const tiles = page.getByRole("group", { name: "Headline counts" });
+      await expect(tiles.getByRole("button", { name: "Use cases —" })).toBeVisible();
+      await expect(page.getByRole("region", { name: "Lifecycle overview" })).toHaveCount(0);
+    } finally {
+      release();
+    }
+    await expect(page.getByText("No AI use cases yet")).toBeVisible();
+    await expect(page.getByRole("link", { name: "Register the first use case" })).toHaveAttribute("href", "/ui/admin/governance/intake");
+  });
+
+  test("a registry read failure offers retry and a 403 explains access denial", async ({ page }) => {
+    await mockApi(page);
+    let failure: number | null = 500;
+    await page.route(/\/v1\/use-cases\?/, (route) => {
+      if (failure) return json(route, { message: "Registry unavailable" }, failure);
+      return route.fallback();
+    });
+    await page.goto("/ui/admin/use-cases");
+    const failed = page.getByRole("alert").filter({ hasText: "Couldn't load this list" });
+    await expect(failed).toBeVisible();
+    failure = null;
+    await failed.getByRole("button", { name: "Retry" }).click();
+    await expect(page.getByRole("link", { name: /^Support ticket summarizer, Approved/ })).toBeVisible();
+    failure = 403;
+    await page.reload();
+    await expect(page.getByRole("alert").filter({ hasText: "You don't have access to this view" })).toBeVisible();
+    await expect(page.getByRole("link", { name: /^Support ticket summarizer, Approved/ })).toHaveCount(0);
+  });
+
+  test("the admin boundary prevents registry reads from a non-admin session", async ({ page }) => {
+    const listReads: string[] = [];
+    page.on("request", (request) => {
+      if (new URL(request.url()).pathname === "/v1/use-cases") listReads.push(request.url());
+    });
+    await mockApi(page, false);
+    await page.goto("/ui/admin/use-cases");
+    await expect(page.getByRole("alert").filter({ hasText: "You don't have access to this view" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Register AI use case", exact: true })).toHaveCount(0);
+    expect(listReads).toEqual([]);
   });
 
   test("every way in leads to the intake wizard; the split menu also registers an agent", async ({ page }) => {
