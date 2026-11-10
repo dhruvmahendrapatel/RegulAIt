@@ -148,13 +148,14 @@ export default function UseCasesPage() {
 
   return (
     <>
-      <PageHeader title="AI registry" sub="Manage the AI use-case lifecycle, from registration and assessment to review and oversight." actions={<RegisterSplitButton />} />
+      <PageHeader title="AI registry" sub="AI use cases · Review risk tier, owner, lifecycle and governance status. Figures come from the existing registry, not illustrative examples." actions={<RegisterSplitButton />} />
       <div className={v.stack}>
         <div className={r.tiles} role="group" aria-label="Headline counts">
           {tile("Use cases", counts.total, false, {})}
           {tile("Under review", counts.underReview, filters.status === "in_review" && filters.tier === "all", { status: "in_review" })}
           {tile("Approved", counts.approved, filters.status === "approved" && filters.tier === "all", { status: "approved" })}
           {tile("High tier", counts.highTier, filters.tier === "high_or_prohibited" && filters.status === "all", { tier: "high_or_prohibited" })}
+          {tile("Needs information", statusCount("needs_info"), filters.status === "needs_info" && filters.tier === "all", { status: "needs_info" })}
         </div>
         <section className={r.analytics} aria-label="Use-case portfolio overview">
           <Card title="Lifecycle overview">
@@ -173,14 +174,6 @@ export default function UseCasesPage() {
                 })}
               </div>
             ) : <p className={v.faint}>Portfolio breakdown appears when the registry has loaded.</p>}
-          </Card>
-          <Card title="Portfolio risk & review">
-            <div className={r.analyticsSummary}>
-              <div><strong>{summary ? counts.highTier : "—"}</strong><span>High or prohibited tier</span></div>
-              <div><strong>{summary ? counts.underReview : "—"}</strong><span>Under review</span></div>
-              <div><strong>{summary ? counts.approved : "—"}</strong><span>Approved</span></div>
-            </div>
-            <p className={v.faint}>These are registry counts, not a policy-compliance score. Risk tier follows the existing EU AI Act screening.</p>
           </Card>
         </section>
         <Card>
