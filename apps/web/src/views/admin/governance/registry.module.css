@@ -170,7 +170,14 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.registryList [data-fold-step="lg"] :is(th, td) { padding-inline: var(--s1); }
+.registryList [data-fold-step="lg"] th { white-space: normal; }
+.registryList [data-fold-step="lg"] .nameSub {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .registryList [data-fold-step="sm"] table { table-layout: fixed; width: 100%; }
 .registryList [data-fold-step="sm"] .nameCell { max-width: none; }
 .registryList [data-fold-step="sm"] .nameSub { white-space: normal; overflow-wrap: anywhere; }
