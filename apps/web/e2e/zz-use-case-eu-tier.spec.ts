@@ -69,8 +69,8 @@ async function signIn(page: Page, email: string, candidates: string[], settleOn:
  */
 async function registerUseCase(page: Page, f: { name: string; what: string; socialScoring: "yes" | "no" }) {
   await page.goto("/ui/admin/use-cases");
-  await expect(page.getByRole("heading", { name: "AI registry", exact: true })).toBeVisible();
-  await page.getByRole("link", { name: "Register AI use case" }).click();
+  await expect(page.getByRole("heading", { name: "AI Use-Cases", exact: true })).toBeVisible();
+  await page.getByRole("link", { name: "Add use case" }).click();
   await page.getByLabel("Use-case name").fill(f.name);
   await page.getByLabel("What will the system do?").fill(f.what);
   await page.getByRole("button", { name: "Continue" }).click();

@@ -11,7 +11,7 @@ import { useQuery } from "@tanstack/react-query";
 import { pendingQueueQuery, pendingRows, queueTotal } from "../api/approvalQueue";
 import { useSession } from "../session/SessionContext";
 import { useTheme } from "../ui/useTheme";
-import { Lockup } from "../ui/Brand";
+import { Lockup, Wordmark } from "../ui/Brand";
 import { InfoButton } from "../ui/kit";
 import { ADMIN_GROUPS, SUITES, WORKSPACE, SuiteGlyph, suiteHome, shadowedByMoreSpecific, suiteOfPath, type NavEntry } from "./suites";
 import { NavGlyph, RailGlyph } from "./navIcons";
@@ -211,6 +211,7 @@ export default function AppShell(props: { children: ReactNode }) {
   }, [menuOpen]);
 
   const { pathname } = useLocation();
+  const registry = /^\/admin\/(?:governance\/)?use-cases\/?$/.test(pathname);
   const q = filter.trim().toLowerCase();
 
   /**
@@ -279,6 +280,20 @@ export default function AppShell(props: { children: ReactNode }) {
     );
   };
 
+  const suiteSections = activeSuite.sections.map((g) => (
+              <div key={g.group}>
+                {/* a section heading only where it adds information: inside a
+                    suite that presents more than one ADR-0093 section, or the
+                    plain Workspace list a non-admin sees */}
+                {(activeSuite.sections.length > 1 || suites.length === 1) && (
+                  <div className={s.section}>
+                    <span className={s.sectionLabel}>{g.group}</span>
+                  </div>
+                )}
+                {g.items.map(navEntry)}
+              </div>
+            ));
+
   const onRailFocus = (e: FocusEvent<HTMLElement>) => {
     if (isKeyboardFocus(e.target)) setFocusOpen(true);
   };
@@ -296,7 +311,7 @@ export default function AppShell(props: { children: ReactNode }) {
     .toUpperCase();
 
   return (
-    <div className={s.shell} data-rail={railMode}>
+    <div className={s.shell} data-rail={railMode} data-registry={registry || undefined}>
       {/* The first focusable element on the page — before the sidebar — so a
           keyboard user reaches content in one tab rather than tabbing through
           every nav item first. */}
@@ -307,7 +322,7 @@ export default function AppShell(props: { children: ReactNode }) {
         ref={railRef}
         className={[s.side, sideOpen ? s.sideOpen : ""].join(" ")}
         aria-label="Primary navigation"
-        data-expanded={expanded ? "true" : "false"}
+        data-expanded={expanded || registry ? "true" : "false"}
         data-testid="nav-rail"
         onPointerEnter={() => {
           pointerInside.current = true;
@@ -345,7 +360,7 @@ export default function AppShell(props: { children: ReactNode }) {
         {/* The rail follows the theme now (ADR-0169), so the lockup does too:
             "auto" tone takes the theme's ink for the anchor nodes. */}
         <div className={s.brand}>
-          <Lockup descriptor="governed" tone="auto" />
+          <Lockup descriptor={registry ? undefined : "governed"} tone={registry ? "onDark" : "auto"} />
         </div>
         <div className={s.filterWrap}>
           <RailGlyph name="search" className={s.filterIcon} />
@@ -383,7 +398,7 @@ export default function AppShell(props: { children: ReactNode }) {
             {/* the two constant affordances: back to the launcher, and the
                 suite switcher (a native select — keyboard accessible for
                 free, and compact at every width) */}
-            {navEntry({ label: "Home", to: "/" })}
+            {(!registry || !auth?.isAdmin) && navEntry({ label: "Home", to: "/" })}
             {suites.length > 1 && (
               <div className={s.suiteHead}>
                 <span className={s.suiteGlyph} aria-hidden>
@@ -411,19 +426,21 @@ export default function AppShell(props: { children: ReactNode }) {
                 </select>
               </div>
             )}
-            {activeSuite.sections.map((g) => (
-              <div key={g.group}>
-                {/* a section heading only where it adds information: inside a
-                    suite that presents more than one ADR-0093 section, or the
-                    plain Workspace list a non-admin sees */}
-                {(activeSuite.sections.length > 1 || suites.length === 1) && (
-                  <div className={s.section}>
-                    <span className={s.sectionLabel}>{g.group}</span>
-                  </div>
-                )}
-                {g.items.map(navEntry)}
-              </div>
-            ))}
+            {registry && auth?.isAdmin && !q && <div className={s.registryLinks}>
+              {[
+                { label: "Overview", to: "/" },
+                { label: "Posture", to: "/admin/posture" },
+                { label: "AI Use-Cases", to: "/admin/use-cases" },
+                { label: "My Actions", to: "/inbox" },
+                { label: "Inventory", to: "/admin/inventory" },
+                { label: "Governance", to: "/admin/governance/review-policy" },
+                { label: "Reports", to: "/admin/reports" },
+                { label: "Settings", to: "/admin/organization" },
+              ].map(navEntry)}
+            </div>}
+            {registry && auth?.isAdmin ? (
+              <details className={s.registryFullNav}><summary>All destinations</summary>{suiteSections}</details>
+            ) : suiteSections}
           </>
         )}
         <div className={s.railFoot}>
@@ -463,9 +480,11 @@ export default function AppShell(props: { children: ReactNode }) {
               ADR-0173 §4: the search sits at the START of the bar, where the
               page beneath holds its title rather than its actions, so the
               sticky bar never lays a control over a page's own buttons. */}
+          {registry && <><span className={s.registryTitle}>Admin Console</span><span className={s.registryMobileBrand}><Wordmark tone="onDark" /></span></>}
           <button
             type="button"
             className={s.searchBtn}
+            aria-label="Search"
             aria-haspopup="dialog"
             aria-expanded={paletteOpen}
             aria-keyshortcuts="Control+K Meta+K"
@@ -491,13 +510,14 @@ export default function AppShell(props: { children: ReactNode }) {
               ref={userBtnRef}
               className={s.userBtn}
               aria-haspopup="menu"
+              aria-label={registry ? `Account menu for ${displayName}` : undefined}
               aria-expanded={menuOpen}
               onClick={() => setMenuOpen((o) => !o)}
             >
               <span className={s.avatar} aria-hidden>
                 {initials}
               </span>
-              {displayName}
+              <span className={s.userName}>{displayName}</span>
             </button>
             {menuOpen && (
               <div className={s.menu} role="menu">

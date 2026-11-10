@@ -30,7 +30,7 @@ const AGENT = "22222222-2222-4222-8222-222222222222";
 const row = <T extends Record<string, unknown>>(over: T) => ({
   description: "", businessContext: "", ownerUserId: "u", ownerName: "Avery Admin", intendedAgentIds: [], dataSensitivity: "internal",
   complianceTags: [], projectId: null, workflowInstanceId: "instance", euAiActTier: null, euAiActReasons: null, euAiActRulesetVersion: null,
-  decidedAt: null, retiredReason: null, approvedUntil: null, openConditions: 0, ...over,
+  decidedAt: null, retiredReason: null, approvedUntil: null, openConditions: 0, updatedAt: over.createdAt, ...over,
 });
 const useCases = [
   row({ id: USE_CASE, name: "Credit-limit-increase assistant", description: "Recommends credit-limit increases with a human reviewing every recommendation.", status: "under_review", euAiActTier: "high", complianceTags: ["eu-ai-act"], dataSensitivity: "regulated", createdAt: "2026-10-01T09:00:00Z" }),
@@ -141,28 +141,35 @@ test.describe("ADR-0168: one registry, one way in", () => {
   test("the registry: tiles, filters, sortable columns and the preview drawer", async ({ page }) => {
     await mockApi(page);
     await page.goto("/ui/admin/use-cases");
-    await expect(page.getByRole("heading", { level: 1, name: "AI registry" })).toBeVisible();
+    await expect(page.getByRole("heading", { level: 1, name: "AI Use-Cases" })).toBeVisible();
     const table = page.getByRole("table");
     // G11: the last column holds the row's actions (Retire), named for screen readers only
     // the Created header carries the server sort's arrow (ADR-0226)
-    await expect(table.locator("thead th")).toHaveText(["Name", "Status", "Tier", "Owner", /^Created/, "Valid until", "Open conditions", ""]);
+    await expect(table.locator("thead th")).toHaveText(["", "ID", "Use-case name", "Business area", "Risk tier", "Lifecycle", "Owner", "Next action", "Updated", ""]);
     // nothing on the registry creates a use case: no form, no propose button
     await expect(page.getByRole("button", { name: /Propose/ })).toHaveCount(0);
     await expect(page.getByRole("main").locator("form")).toHaveCount(0);
 
     // headline tiles
     const tiles = page.getByRole("group", { name: "Headline counts" });
-    await expect(tiles.getByRole("button")).toHaveText(["Use cases 5", "Approved 2", "In review 3", "High or prohibited 2", "Needs information 1"]);
-    const lifecycle = page.getByRole("region", { name: "Lifecycle overview" });
+    await expect(tiles.getByRole("button")).toHaveText(["Total use cases 5", "Approved 2", "In review 3", "High or prohibited 2", "Needs information 1"]);
+    const lifecycle = page.locator("details").filter({ has: page.getByText("Lifecycle overview", { exact: true }) });
+    await lifecycle.getByText("Lifecycle overview", { exact: true }).click();
     await expect(lifecycle.locator("strong")).toHaveText(["1", "1", "1", "2", "0", "0"]);
     await expect(lifecycle.locator("[aria-hidden=true] > span").first()).toHaveAttribute("style", "width: 20%;");
     await expect(lifecycle.getByRole("button", { name: "Proposed" })).toHaveCount(0);
+    // The original governance columns remain available through the column picker.
+    await page.getByRole("button", { name: "Choose columns for use cases" }).click();
+    const columns = page.getByRole("dialog", { name: "Columns for use cases" });
+    await columns.getByLabel("Valid until", { exact: true }).check();
+    await columns.getByLabel("Open conditions", { exact: true }).check();
+    await columns.getByRole("button", { name: "Done" }).click();
     // valid until: a date after approval, an expired approval called out, a dash before; open conditions counted
     const approved = table.getByRole("link", { name: /^Support ticket summarizer, Approved/ });
     await expect(approved).toContainText("20 Aug 2027");
-    await expect(approved.getByRole("cell").nth(6)).toHaveText("2");
+    await expect(approved.getByRole("cell", { name: "2", exact: true })).toBeVisible();
     await expect(table.getByRole("link", { name: /^Fraud scoring model/ })).toContainText("Expired 1 Sept 2026");
-    await expect(table.getByRole("link", { name: /^Meeting notes drafter/ }).getByRole("cell").nth(5)).toHaveText("—");
+    await expect(table.getByRole("link", { name: /^Meeting notes drafter/ }).getByRole("cell", { name: "—", exact: true }).first()).toBeVisible();
     await checkScreen(page, "Registry", "registry");
 
     // a tile filters; pressing it again clears
@@ -195,7 +202,7 @@ test.describe("ADR-0168: one registry, one way in", () => {
       const url = new URL(request.url());
       return url.pathname === "/v1/use-cases" && url.searchParams.get("sort") === "name" && url.searchParams.get("dir") === "asc";
     });
-    await table.getByRole("button", { name: "Name", exact: true }).click();
+    await table.getByRole("button", { name: "Use-case name", exact: true }).click();
     await sorted;
     await expect(table.getByRole("link").first()).toHaveAccessibleName(/^Credit-limit-increase assistant/);
 
@@ -235,11 +242,11 @@ test.describe("ADR-0168: one registry, one way in", () => {
       await page.setViewportSize({ width, height: 950 });
       await mockApi(page);
       await page.goto("/ui/admin/use-cases");
-      await expect(page.getByRole("link", { name: /^Support ticket summarizer, Approved/ })).toBeVisible();
-      await expect(page.getByRole("button", { name: "Download Excel" })).toBeVisible();
-      const retire = page.getByRole("button", { name: "Retire Support ticket summarizer" });
+      await expect(page.getByRole(width > 1100 ? "link" : "button", { name: /^Support ticket summarizer, Approved/ })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Export to Excel" })).toBeVisible();
+      const retire = page.getByLabel("Actions for Support ticket summarizer");
       const retireBox = await retire.boundingBox();
-      const tableBox = await page.getByRole("table").locator("..").boundingBox();
+      const tableBox = await page.getByRole("region", { name: "Use-case registry" }).boundingBox();
       expect(retireBox).not.toBeNull();
       expect(tableBox).not.toBeNull();
       expect(retireBox!.x + retireBox!.width).toBeLessThanOrEqual(tableBox!.x + tableBox!.width);
@@ -248,6 +255,46 @@ test.describe("ADR-0168: one registry, one way in", () => {
     });
   }
 
+  test("grid view retains registry filters, selection and record preview", async ({ page }) => {
+    await mockApi(page);
+    await page.goto("/ui/admin/use-cases");
+    await page.getByLabel("Status", { exact: true }).selectOption("approved");
+    await expect(page.getByRole("table").getByRole("link")).toHaveCount(2);
+    await page.getByRole("button", { name: "Grid view" }).click();
+    const grid = page.getByRole("list", { name: "Use cases", exact: true });
+    await expect(grid.getByRole("listitem")).toHaveCount(2);
+    await grid.getByRole("checkbox", { name: "Select Support ticket summarizer" }).check();
+    await expect(page.getByRole("status").filter({ hasText: "1 selected" })).toBeVisible();
+    const open = grid.getByRole("button", { name: /^Support ticket summarizer, Approved/ });
+    await open.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("dialog", { name: "Support ticket summarizer" })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(open).toBeFocused();
+    await page.getByRole("button", { name: "List view" }).click();
+    await expect(page.getByRole("table").getByRole("link")).toHaveCount(2);
+    await expect(page.getByRole("checkbox", { name: "Select Support ticket summarizer" })).toBeChecked();
+  });
+
+  test("numbered pages request the existing server offset and reset to page one after filtering", async ({ page }) => {
+    await mockApi(page);
+    const records = Array.from({ length: 15 }, (_, i) => ({
+      ...useCases[i % useCases.length]!,
+      id: `case-${i + 1}`,
+      name: `Registry record ${i + 1}`,
+    }));
+    await page.route(/\/v1\/use-cases\?/, (route) => json(route, useCasesContract(records, new URL(route.request().url()).searchParams)));
+    await page.goto("/ui/admin/use-cases");
+    await expect(page.getByRole("button", { name: "Page 1" })).toHaveAttribute("aria-current", "page");
+    const second = page.waitForRequest((request) => new URL(request.url()).searchParams.get("offset") === "10");
+    await page.getByRole("button", { name: "Page 2" }).click();
+    await second;
+    await expect(page.getByTestId("list-status")).toHaveText("Showing 11–15 of 15 use cases");
+    await page.getByLabel("Search use cases").fill("Registry record 15");
+    await expect(page.getByTestId("list-status")).toHaveText("Showing 1–1 of 1 use cases");
+    await expect(page.getByRole("button", { name: "Page 1" })).toHaveAttribute("aria-current", "page");
+  });
+
   test("export uses the current filters and retirement requires an audit reason", async ({ page }) => {
     const { retired } = await mockApi(page);
     await page.goto("/ui/admin/use-cases");
@@ -255,12 +302,13 @@ test.describe("ADR-0168: one registry, one way in", () => {
     await page.getByLabel("Tier", { exact: true }).selectOption("high");
     await expect(page.getByRole("table").getByRole("link")).toHaveCount(2);
     const exported = page.waitForRequest((request) => new URL(request.url()).pathname === "/v1/use-cases/export.xlsx");
-    await page.getByRole("button", { name: "Download Excel" }).click();
+    await page.getByRole("button", { name: "Export to Excel" }).click();
     const query = new URL((await exported).url()).searchParams;
     expect(query.get("tier")).toBe("high");
     expect(query.get("sort")).toBe("created");
-    expect(query.get("columns")).toBe("name,status,tier,owner,created,validUntil,conditions");
+    expect(query.get("columns")).toBe("name,tier,status,owner");
 
+    await page.getByLabel("Actions for Credit-limit-increase assistant").click();
     await page.getByRole("button", { name: "Retire Credit-limit-increase assistant" }).click();
     const dialog = page.getByRole("dialog", { name: "Retire Credit-limit-increase assistant?" });
     const confirm = dialog.getByRole("button", { name: "Retire use case" });
@@ -283,13 +331,15 @@ test.describe("ADR-0168: one registry, one way in", () => {
     await page.goto("/ui/admin/use-cases");
     try {
       const tiles = page.getByRole("group", { name: "Headline counts" });
-      await expect(tiles.getByRole("button", { name: "Use cases —" })).toBeVisible();
-      await expect(page.getByRole("region", { name: "Lifecycle overview" })).toHaveCount(0);
+      await expect(tiles.getByRole("button", { name: "Total use cases —" })).toBeVisible();
+      if (SHOTS) await page.screenshot({ path: path.join(SHOTS, "registry-state-loading.png"), fullPage: true, animations: "disabled" });
+      await expect(page.locator("details").filter({ has: page.getByText("Lifecycle overview", { exact: true }) })).toHaveCount(0);
     } finally {
       release();
     }
-    await expect(page.getByText("No AI use cases yet")).toBeVisible();
-    await expect(page.getByRole("link", { name: "Register the first use case" })).toHaveAttribute("href", "/ui/admin/governance/intake");
+    await expect(page.getByText("No AI use cases found")).toBeVisible();
+    if (SHOTS) await page.screenshot({ path: path.join(SHOTS, "registry-state-empty.png"), fullPage: true, animations: "disabled" });
+    await expect(page.getByRole("region", { name: "Use-case registry" }).getByRole("link", { name: "Add use case" })).toHaveAttribute("href", "/ui/admin/governance/intake");
   });
 
   test("a registry read failure offers retry and a 403 explains access denial", async ({ page }) => {
@@ -300,14 +350,16 @@ test.describe("ADR-0168: one registry, one way in", () => {
       return route.fallback();
     });
     await page.goto("/ui/admin/use-cases");
-    const failed = page.getByRole("alert").filter({ hasText: "Couldn't load this list" });
+    const failed = page.getByRole("alert").filter({ hasText: "Unable to load AI use-cases" });
     await expect(failed).toBeVisible();
+    if (SHOTS) await page.screenshot({ path: path.join(SHOTS, "registry-state-error.png"), fullPage: true, animations: "disabled" });
     failure = null;
     await failed.getByRole("button", { name: "Retry" }).click();
     await expect(page.getByRole("link", { name: /^Support ticket summarizer, Approved/ })).toBeVisible();
     failure = 403;
     await page.reload();
-    await expect(page.getByRole("alert").filter({ hasText: "You don't have access to this view" })).toBeVisible();
+    await expect(page.getByRole("alert").filter({ hasText: "You don't have access to AI use-cases" })).toBeVisible();
+    if (SHOTS) await page.screenshot({ path: path.join(SHOTS, "registry-state-access-denied.png"), fullPage: true, animations: "disabled" });
     await expect(page.getByRole("link", { name: /^Support ticket summarizer, Approved/ })).toHaveCount(0);
   });
 
@@ -318,15 +370,15 @@ test.describe("ADR-0168: one registry, one way in", () => {
     });
     await mockApi(page, false);
     await page.goto("/ui/admin/use-cases");
-    await expect(page.getByRole("alert").filter({ hasText: "You don't have access to this view" })).toBeVisible();
-    await expect(page.getByRole("link", { name: "Register AI use case", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("alert").filter({ hasText: "You don't have access to AI use-cases" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Add use case", exact: true })).toHaveCount(0);
     expect(listReads).toEqual([]);
   });
 
   test("every way in leads to the intake wizard; the split menu also registers an agent", async ({ page }) => {
     await mockApi(page);
     await page.goto("/ui/admin/use-cases");
-    await page.getByRole("link", { name: "Register AI use case" }).click();
+    await page.getByRole("link", { name: "Add use case" }).click();
     await expect(page).toHaveURL(/\/ui\/admin\/governance\/intake$/);
     await expect(page.getByRole("heading", { level: 1, name: "Register AI use case" })).toBeVisible();
 

@@ -817,7 +817,7 @@ test.describe("ADR-0179: browser Back and leaving the page keep the last edit", 
     // Enter through a real SPA link so Back/Forward are router transitions;
     // document exits are covered separately by the beforeunload checks.
     await page.goto("/ui/admin/use-cases");
-    await page.getByRole("link", { name: "Register AI use case", exact: true }).click();
+    await page.getByRole("link", { name: "Add use case", exact: true }).click();
     const name = page.getByLabel("Use-case name");
     await name.fill("Typed just before Back");
     await page.evaluate(() => history.back());
@@ -839,7 +839,7 @@ test.describe("ADR-0179: browser Back and leaving the page keep the last edit", 
     // POP updates the address before React commits the destination. The
     // reproduced CI trace still shows the intake dialog at this URL: Forward
     // at that point races the outstanding Back. Wait for the actual page.
-    await expect(page.getByRole("heading", { level: 1, name: "AI registry", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { level: 1, name: "AI Use-Cases", exact: true })).toBeVisible();
     await expect(leave).toHaveCount(0);
 
     await page.goForward();

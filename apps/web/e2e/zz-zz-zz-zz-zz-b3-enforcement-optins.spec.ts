@@ -129,7 +129,7 @@ test("intent capture: a proposed use case's intended agents are editable in flig
   });
 
   await page.goto("/ui/admin/use-cases");
-  await expect(page.getByRole("heading", { name: "AI registry", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "AI Use-Cases", exact: true })).toBeVisible();
   // open the registry preview: the capture section is there and editable pre-decision
   await page.getByLabel("Search use cases").fill("b3e2e-intent-capture");
   await page.getByRole("link", { name: /^b3e2e-intent-capture,/ }).click();

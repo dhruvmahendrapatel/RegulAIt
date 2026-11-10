@@ -61,15 +61,15 @@ const rail = (page: Page) => page.getByRole("complementary", { name: "Primary na
 const railWidth = async (page: Page) => (await rail(page).boundingBox())!.width;
 const mainX = async (page: Page) => (await page.locator("#rgMain").boundingBox())!.x;
 
-async function openRegistry(page: Page) {
+async function openGovernance(page: Page) {
   await mockApi(page);
-  await page.goto("/ui/admin/use-cases");
-  await expect(page.getByRole("heading", { level: 1, name: "AI registry" })).toBeVisible();
+  await page.goto("/ui/admin/governance/intake");
+  await expect(page.getByRole("heading", { level: 1, name: "Register AI use case" })).toBeVisible();
 }
 
 test.describe("ADR-0169: the auto-hiding rail", () => {
   test("collapsed by default to an icon strip; every destination keeps its accessible name", async ({ page }) => {
-    await openRegistry(page);
+    await openGovernance(page);
     const nav = rail(page);
     await expect(nav).toHaveAttribute("data-expanded", "false");
     await expect.poll(() => railWidth(page)).toBeLessThanOrEqual(64);
@@ -80,7 +80,7 @@ test.describe("ADR-0169: the auto-hiding rail", () => {
       await expect(link, `${label} stays reachable in the strip`).toBeVisible();
       expect((await link.boundingBox())!.width, `${label} fits the strip`).toBeLessThanOrEqual(56);
     }
-    await expect(nav.getByRole("link", { name: "Use cases", exact: true })).toHaveAttribute("aria-current", "page");
+    await expect(nav.getByRole("link", { name: "AI intake", exact: true })).toHaveAttribute("aria-current", "page");
     await expect(nav.getByLabel("Filter navigation")).toBeVisible();
     await expect(nav.getByLabel("Switch suite")).toHaveValue("ai-governance");
     await expect(nav.getByRole("button", { name: "Pin navigation" })).toHaveAttribute("aria-pressed", "false");
@@ -88,7 +88,7 @@ test.describe("ADR-0169: the auto-hiding rail", () => {
   });
 
   test("a resting pointer opens it over the content; leaving closes it", async ({ page }) => {
-    await openRegistry(page);
+    await openGovernance(page);
     const before = await mainX(page);
     await rail(page).getByRole("link", { name: "Risks", exact: true }).hover();
     await expect(rail(page)).toHaveAttribute("data-expanded", "true");
@@ -102,7 +102,7 @@ test.describe("ADR-0169: the auto-hiding rail", () => {
   });
 
   test("keyboard focus opens it and the content makes room; Enter navigates and closes; Escape closes", async ({ page }) => {
-    await openRegistry(page);
+    await openGovernance(page);
     await page.keyboard.press("Tab"); // the skip link
     await expect(page.getByRole("link", { name: "Skip to main content" })).toBeFocused();
     await page.keyboard.press("Tab"); // first stop inside the rail
@@ -130,7 +130,7 @@ test.describe("ADR-0169: the auto-hiding rail", () => {
   });
 
   test('"/" opens it at the filter; the filter finds destinations across suites', async ({ page }) => {
-    await openRegistry(page);
+    await openGovernance(page);
     await page.keyboard.press("/");
     await expect(rail(page).getByLabel("Filter navigation")).toBeFocused();
     await expect(rail(page)).toHaveAttribute("data-expanded", "true");
@@ -143,7 +143,7 @@ test.describe("ADR-0169: the auto-hiding rail", () => {
   });
 
   test("a chosen destination never leaves the panel over the next click", async ({ page }) => {
-    await openRegistry(page);
+    await openGovernance(page);
     await rail(page).getByRole("link", { name: "Use cases", exact: true }).hover();
     await expect(rail(page)).toHaveAttribute("data-expanded", "true");
     await rail(page).getByRole("link", { name: "AI intake", exact: true }).click();
@@ -158,7 +158,7 @@ test.describe("ADR-0169: the auto-hiding rail", () => {
   });
 
   test("the pin keeps the full rail, survives a reload, and unpins", async ({ page }) => {
-    await openRegistry(page);
+    await openGovernance(page);
     const pin = rail(page).getByRole("button", { name: "Pin navigation" });
     await pin.click();
     await expect(pin).toHaveAttribute("aria-pressed", "true");
@@ -170,7 +170,7 @@ test.describe("ADR-0169: the auto-hiding rail", () => {
     await expectAxeClean(page, "registry, rail pinned");
 
     await page.reload();
-    await expect(page.getByRole("heading", { level: 1, name: "AI registry" })).toBeVisible();
+    await expect(page.getByRole("heading", { level: 1, name: "Register AI use case" })).toBeVisible();
     await expect(rail(page)).toHaveAttribute("data-expanded", "true");
     await expect(rail(page).getByRole("button", { name: "Pin navigation" })).toHaveAttribute("aria-pressed", "true");
     await expect.poll(() => mainX(page)).toBeGreaterThanOrEqual(220);
@@ -191,7 +191,7 @@ test.describe("ADR-0169: the auto-hiding rail", () => {
       };
       Object.defineProperty(window, "localStorage", { configurable: true, get: deny });
     });
-    await openRegistry(page);
+    await openGovernance(page);
     await expect(rail(page)).toHaveAttribute("data-expanded", "false");
     await rail(page).getByRole("button", { name: "Pin navigation" }).click();
     await page.mouse.move(900, 600);
@@ -200,7 +200,7 @@ test.describe("ADR-0169: the auto-hiding rail", () => {
 
   test("phone width: the drawer is unchanged — full labels behind the menu button, no pin", async ({ page }) => {
     await page.setViewportSize({ width: 420, height: 900 });
-    await openRegistry(page);
+    await openGovernance(page);
     const toggle = page.getByRole("button", { name: "Toggle navigation" });
     await expect(toggle).toHaveAttribute("aria-expanded", "false");
     await toggle.click();
@@ -226,7 +226,7 @@ test.describe("ADR-0169: the shaded field", () => {
     test(`canvas and rail text keep AA at the field's worst point (${theme})`, async ({ page }) => {
       for (const pinned of [false, true]) {
         await page.addInitScript((p) => localStorage.setItem("regulait.rail.pinned", p ? "1" : "0"), pinned);
-        await openRegistry(page);
+        await openGovernance(page);
         await setTheme(page, theme);
         await page.addStyleTag({ content: "#rgMain *, header *, aside * { visibility: hidden !important; } .rg-skip-link { display: none !important; }" });
         await page.mouse.move(1300, 900);

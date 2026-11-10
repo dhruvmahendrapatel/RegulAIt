@@ -96,8 +96,8 @@ test("FS-4: a sortable header is reached with Tab and sorts with Enter", async (
     if (u.pathname === "/v1/use-cases" && u.searchParams.get("sort")) asked.push(u);
   });
   await page.goto("/ui/admin/use-cases");
-  await expect(page.getByRole("heading", { level: 1, name: "AI registry" })).toBeVisible();
-  const sortName = page.getByRole("button", { name: "Name", exact: true });
+  await expect(page.getByRole("heading", { level: 1, name: "AI Use-Cases" })).toBeVisible();
+  const sortName = page.getByRole("button", { name: "Use-case name", exact: true });
   const header = page.locator("th", { has: sortName });
   await expect(header).not.toHaveAttribute("aria-sort", /.*/);
   // Tab reaches it: from the control before it, the next Tab stop is the header's button
@@ -128,7 +128,7 @@ test("FS-15: the success toast sits left of an open side drawer, not over its pi
 
 test("FS-15: with no drawer open the toast keeps its corner", async ({ page }) => {
   await page.goto("/ui/admin/use-cases");
-  await expect(page.getByRole("heading", { level: 1, name: "AI registry" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1, name: "AI Use-Cases" })).toBeVisible();
   // the region is the aria-live channel; with nothing to say it is empty, so read its edge from the stylesheet
   const right = await page.locator("[aria-live=polite]").last().evaluate((el) => getComputedStyle(el).right);
   expect(parseFloat(right)).toBeLessThan(64);
