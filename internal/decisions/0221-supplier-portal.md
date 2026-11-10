@@ -156,3 +156,24 @@ defence. No magic-link library fits a Fastify gateway with our own session table
     own entry in the navigation rail. It keeps its route.
   - The supplier page no longer skips the app-wide sign-in check. It makes one `GET /auth/me`, as the other public
     pages do. That call carries no supplier data and gets a 401 for someone with no platform account.
+
+## Addendum (2026-11-10): post-merge security review fixes SUP-01 and SUP-02
+
+Two MEDIUM findings from the independent post-merge review of #629 (`internal/reviews/2026-10-31-postmerge/pr-629.md`
+on `codex/postmerge-security-reviews`).
+
+- **SUP-01, a stale settings update.** `PUT /v1/supplier-portal/settings` decided its step-up on an unlocked read and
+  then wrote both values, so a stale partial update could undo a concurrent tightening without a step-up, with an
+  empty `relaxed` list in the audit. The handler now locks the org row (`FOR UPDATE`, the lock every org-settings
+  writer takes) and re-checks it. If either setting changed after the decision, nothing is written. The request gets
+  409 `changed_concurrently`, and an audit row `supplier-portal-setting-refused` with effect `deny` records it. The
+  write sets only the fields the request names.
+- **SUP-02, an upload in flight during a revoke.** A submission checked its session and grant before awaiting the
+  file scanner, and its transaction never checked them again. Under locks taken in the order the security
+  transitions use (the org row `FOR SHARE`, then the grant, then the session), the transaction now re-checks the
+  portal being on, the session and grant not revoked or expired, the assessment still open and unscanned files still
+  accepted. Any failure writes only an audit row `supplier-submission-refused` with effect `deny`: no answer and no
+  file. A revoke or portal-off either commits first and is seen, or waits for the submission's commit and then
+  closes the answer as before.
+- **Open source.** This is transaction ordering and row locking in our own handlers. No library applies; Postgres
+  row locks are the mechanism.
