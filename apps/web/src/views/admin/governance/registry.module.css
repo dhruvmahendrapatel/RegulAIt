@@ -70,11 +70,17 @@
 /* ---- headline tiles ------------------------------------------------------ */
 .tiles {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: var(--s2);
 }
-@media (max-width: 900px) {
+@media (max-width: 1100px) {
+  .tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 650px) {
   .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 400px) {
+  .tiles { grid-template-columns: minmax(0, 1fr); }
 }
 .tile {
   display: flex;
@@ -291,7 +297,7 @@
 }
 
 /* Combined registry: evidence-backed portfolio summary, not mockup metrics. */
-.analytics { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: var(--s2); }
+.analytics { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s2); }
 .analyticsRows { display: flex; flex-direction: column; gap: var(--s1); }
 .analyticsRow { display: grid; grid-template-columns: minmax(110px, 1fr) minmax(70px, 2fr) 3ch; gap: var(--s2); align-items: center; border: 0; background: transparent; color: var(--text); text-align: left; padding: var(--s0); font: inherit; }
 .analyticsTrack { display: block; height: 9px; border-radius: 999px; overflow: hidden; background: var(--surface-2); }
