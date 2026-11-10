@@ -122,7 +122,7 @@ export default function UseCasesPage() {
   const [rows, setRows] = useState<UseCaseRow[]>([]);
   const onRows = useCallback((pageRows: UseCaseRow[], raw: Record<string, unknown>) => {
     setRows(pageRows);
-    if (raw.summary) setSummary(raw.summary as RegistrySummary);
+    setSummary(raw.summary ? raw.summary as RegistrySummary : null);
   }, []);
   const counts = summary?.headline ?? { total: 0, underReview: 0, approved: 0, highTier: 0 };
   const owners = summary?.owners ?? [];
@@ -135,7 +135,7 @@ export default function UseCasesPage() {
   const statusCount = (value: StatusFilter) => summary?.statusCounts[value] ?? 0;
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["admin", "use-cases"] });
   const tile = (label: string, value: number, pressed: boolean, apply: Partial<RegistryFilters>) => (
-    <button type="button" className={r.tile} aria-pressed={pressed} onClick={() => setFilters(pressed ? NO_FILTERS : { ...NO_FILTERS, ...apply })}>
+    <button type="button" className={r.tile} aria-pressed={pressed} aria-label={`${label}: ${summary ? value : "not loaded"}. ${pressed ? "Clear filter" : "Filter registry"}`} onClick={() => setFilters(pressed ? NO_FILTERS : { ...NO_FILTERS, ...apply })}>
       <span className={r.tileLabel}>{label}</span>{" "}
       <span className={r.tileValue}>{summary ? value : "—"}</span>
     </button>
