@@ -83,6 +83,29 @@ each opt-in per organisation, falling back in a fail-closed way, and logging no 
 - Caching scorer resolution across dispatches (today one egress check per policy resolution when a detector is on).
 - Fairness metrics are P13(a), a separate lane.
 
+## Addendum 2026-11-10: a scorer in use is guarded like the detector (P7R-01)
+
+The post-merge review of #634 (finding P7R-01, HIGH) showed that decision 6 could be bypassed without touching the
+detector: an admin API key could PATCH the scorer an enabled detector uses to another service, run its connection
+test and re-enable it, and the detector then scored with the new service under the same `scorerId`. As built on
+`fix/sec-p7r01-scorer-stepup`:
+
+- **Step-up.** While an enabled trained detector uses a scorer, a PATCH that changes its endpoint, plaintext
+  allowance, adapter, adapter options, claimed kinds or credential needs a `settings_relax` step-up, bound to
+  `externalScorers.<id>.<field>` and the new values (a credential binds only `replaced` or `null`, never its value).
+  Re-enabling it needs the same step-up, bound to the endpoint it now has. Disabling it needs one only when a detector
+  using it falls back to the heuristic on failure; when every one fails closed, disabling is a tightening and stays
+  free. Name and price changes are unchanged. A scorer no enabled detector uses behaves as before.
+- **Serialisation.** Scorer PATCH, enable/disable and delete take the trained-detector advisory lock
+  (`trained-detector-lock.ts`) and re-read the scorer row (`FOR UPDATE`) and the detectors using it. If either moved
+  since the step-up was decided, nothing is written and the answer is `409 changed_concurrently`. The detector PUT
+  takes the same lock and re-reads the scorer it binds, refusing the same way if the scorer moved.
+- **Audit.** Each change is audited in the same transaction, with `inUseBy` and the step-up it carried. Refusals the
+  caller cannot answer (an API key or the bootstrap credential) are audited as `external-scorer-in-use-refused`, and
+  concurrency refusals as `external-scorer-changed-concurrently`. A step-up prompt from a browser session writes no
+  deny row, as with every other protected route (`isStepUpPrompt`).
+- **Regression test:** `apps/gateway/src/zz-p7r01-scorer-stepup.test.ts`.
+
 ## Addendum 2026-11-10 — P7R-02: trained PII inherits the effective PII floor
 
 Post-merge review finding P7R-02 (MEDIUM): the policy resolver forces the heuristic `modes.pii` to `off` (PII has its

@@ -637,3 +637,122 @@ describe("review fixes (functional and security review of #629)", () => {
     expect(both.map((r) => r.statusCode).sort()).toEqual([201, 409]);
   });
 });
+
+describe("post-merge security review of #629 (SUP-01, SUP-02)", () => {
+  const settingsRow = async () => {
+    const r = await db.execute(sql`SELECT supplier_portal_enabled AS enabled, supplier_portal_accept_unscanned_files AS accept FROM org_settings`);
+    return ((r as unknown as { rows?: unknown[] }).rows ?? (r as unknown as unknown[]))[0] as { enabled: boolean; accept: boolean };
+  };
+  /** wait until some other backend is blocked on a row lock whose statement touches `needle` */
+  const waitForLockWaiter = async (needle: string) => {
+    for (let i = 0; i < 200; i++) {
+      const r = (await db.execute(sql`SELECT count(*)::int AS n FROM pg_stat_activity
+        WHERE wait_event_type = 'Lock' AND query ILIKE ${`%${needle}%`} AND pid <> pg_backend_pid()`)) as unknown as { rows?: Array<{ n: number }> } & Array<{ n: number }>;
+      if ((r.rows ?? r)[0]!.n > 0) return;
+      await new Promise((res) => setTimeout(res, 25));
+    }
+    throw new Error(`no request blocked on a lock touching ${needle}`);
+  };
+  /**
+   * Hold the org-settings row lock, send `payload` (a tightening, so no step-up is asked), wait until the request is
+   * blocked on that lock, then commit `concurrent` — a different tightening — and release the request.
+   */
+  const interleave = async (payload: Record<string, boolean>, concurrent: ReturnType<typeof sql>) => {
+    await db.execute(sql`UPDATE org_settings SET supplier_portal_enabled = true, supplier_portal_accept_unscanned_files = true`);
+    let pending!: Promise<Awaited<ReturnType<typeof app.inject>>>;
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT 1 FROM org_settings FOR UPDATE`);
+      pending = app.inject({ method: "PUT", url: "/v1/supplier-portal/settings", headers: admin.auth, payload });
+      await waitForLockWaiter("org_settings");
+      await tx.execute(concurrent);
+    });
+    return pending;
+  };
+
+  it("SUP-01: a stale tightening of the file setting cannot re-enable a portal that was turned off concurrently", async () => {
+    const before = await db.select({ n: sql<number>`count(*)::int` }).from(auditLog).where(eq(auditLog.ruleId, "supplier-portal-setting"));
+    const res = await interleave({ acceptUnscannedFiles: false }, sql`UPDATE org_settings SET supplier_portal_enabled = false`);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error).toBe("changed_concurrently");
+    expect(await settingsRow()).toEqual({ enabled: false, accept: true });
+    const after = await db.select({ n: sql<number>`count(*)::int` }).from(auditLog).where(eq(auditLog.ruleId, "supplier-portal-setting"));
+    expect(after[0]!.n, "nothing was written, so no update is audited").toBe(before[0]!.n);
+    const [refused] = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.ruleId, "supplier-portal-setting-refused"), eq(auditLog.userId, admin.id)))
+      .orderBy(sql`${auditLog.seq} desc`)
+      .limit(1);
+    expect(refused?.effect).toBe("deny");
+  });
+
+  it("SUP-01: a stale portal-disable cannot restore acceptance of unscanned files tightened concurrently", async () => {
+    const res = await interleave({ enabled: false }, sql`UPDATE org_settings SET supplier_portal_accept_unscanned_files = false`);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(await settingsRow()).toEqual({ enabled: true, accept: false });
+  });
+
+  it("SUP-01: a partial update writes only the field it names", async () => {
+    await db.execute(sql`UPDATE org_settings SET supplier_portal_enabled = true, supplier_portal_accept_unscanned_files = true`);
+    const res = await app.inject({ method: "PUT", url: "/v1/supplier-portal/settings", headers: admin.auth, payload: { acceptUnscannedFiles: false } });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(await settingsRow()).toEqual({ enabled: true, accept: false });
+  });
+
+  it("SUP-02: an upload in flight when its grant is revoked leaves no answer, file or submission audit", async () => {
+    await db.execute(sql`UPDATE org_settings SET supplier_portal_enabled = true, supplier_portal_accept_unscanned_files = false`);
+    let reached!: () => void;
+    const atScanner = new Promise<void>((res) => (reached = res));
+    let release!: () => void;
+    const resume = new Promise<void>((res) => (release = res));
+    const paused = buildApp(db, {
+      bootstrapToken: BOOT,
+      dataKey: DATA_KEY,
+      supplierFileScanner: async () => {
+        reached();
+        await resume;
+        return "clean";
+      },
+    });
+    try {
+      const v = await propose("sp-inflight");
+      const g = await grant(v.id);
+      const { cookie } = await signIn(g.token);
+      const upload = paused.inject({
+        method: "POST",
+        url: "/supplier/v1/submissions",
+        headers: { cookie, ...CSRF },
+        payload: { target: { kind: "control", controlRef: CONTROL }, statement: "in flight", file: { name: "evidence.png", base64: PNG.toString("base64") } },
+        remoteAddress: freshIp(),
+      });
+      await atScanner;
+      const revoked = await app.inject({
+        method: "POST",
+        url: `/v1/vendors/${v.id}/supplier-access/${g.accessId}/revoke`,
+        headers: admin.auth,
+        payload: { reason: "leaked link" },
+      });
+      expect(revoked.statusCode, revoked.body).toBe(200);
+      release();
+      const res = await upload;
+      expect(res.statusCode, res.body).toBe(401);
+      expect(res.json()).toEqual(SUPPLIER_SESSION_REFUSAL);
+      const rows = await db.select().from(supplierSubmissions).where(eq(supplierSubmissions.vendorId, v.id));
+      expect(rows, "no answer or file survives").toEqual([]);
+      const received = await db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.ruleId, "supplier-submission-received"), sql`${auditLog.detail}->>'accessId' = ${g.accessId}`));
+      expect(received).toEqual([]);
+      const [refused] = await db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.ruleId, "supplier-submission-refused"), eq(auditLog.objectId, g.accessId)));
+      expect(refused?.effect).toBe("deny");
+    } finally {
+      release();
+      paused.server.closeAllConnections();
+      await paused.close();
+    }
+  });
+});
