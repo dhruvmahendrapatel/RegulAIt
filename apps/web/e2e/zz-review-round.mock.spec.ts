@@ -12,7 +12,7 @@
  *  - resubmit mode of the registration screen: prefilled, return reason on
  *    top, exact PATCH + new questionnaire version, lands on the record, and a
  *    retry never PATCHes twice;
- *  - the registry's Re-review chip and the preview's resubmit action;
+ *  - the registry's Re-review filter and the preview's resubmit action;
  *  - axe (WCAG 2.x A/AA) in BOTH themes, and keyboard paths.
  *
  * Set G2_SHOTS_DIR to also save light + dark screenshots of each screen.
@@ -914,14 +914,14 @@ test.describe("update and resubmit", () => {
 // ---------------------------------------------------------------------------
 
 test.describe("the registry", () => {
-  test("a Re-review chip filters recertifications, which read Re-review", async ({ page }) => {
+  test("the Re-review status filter shows recertifications as Re-review", async ({ page }) => {
     await mockGateway(page);
     await page.goto("/ui/admin/use-cases");
     await expect(page.getByRole("heading", { level: 1, name: "AI registry" })).toBeVisible();
-    const chip = page.getByRole("group", { name: "Status" }).getByRole("button", { name: /^Re-review/ });
-    await expect(chip).toContainText("1");
-    await chip.click();
-    await expect(chip).toHaveAttribute("aria-pressed", "true");
+    const status = page.getByRole("combobox", { name: "Status", exact: true });
+    await expect(status.locator('option[value="recertification"]')).toHaveText("Re-review (1)");
+    await status.selectOption("recertification");
+    await expect(status).toHaveValue("recertification");
     // clickable rows are links named "<name>, <status> — open preview"
     const rows = page.getByRole("link", { name: /— open preview$/ });
     await expect(rows).toHaveCount(1);
@@ -929,10 +929,10 @@ test.describe("the registry", () => {
     await expect(rows.first().getByRole("cell").nth(1)).toHaveText("Re-review");
     await checkScreen(page, "registry re-review filter", "registry-re-review");
     // control: All shows every row, the recertification still reading Re-review
-    await page.getByRole("group", { name: "Status" }).getByRole("button", { name: /^All/ }).click();
+    await status.selectOption("all");
     await expect(rows).toHaveCount(3);
     await expect(page.getByRole("link", { name: `${NAME}, Under review — open preview` })).toBeVisible();
-    await page.getByRole("group", { name: "Status" }).getByRole("button", { name: /^Re-review/ }).click();
+    await status.selectOption("recertification");
     await rows.first().click();
     await expect(page.getByRole("dialog", { name: "Fraud scoring model" })).toContainText("Re-review");
   });
