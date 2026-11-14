@@ -5,7 +5,7 @@
  * ADR-0186 A adds Passkeys.
  */
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
 import { withStepUp } from "../../stepup/stepUp";
@@ -15,7 +15,7 @@ import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, IdChip, Input, Table } from "../../ui/kit";
 import { TotpQrCode } from "../../ui/TotpQrCode";
-import { PREVIEW_ROWS } from "../../ui/ListPreview";
+import { PREVIEW_ROWS, ViewAllLink } from "../../ui/ListPreview";
 import { useToast } from "../../ui/toast";
 import ModelKeysCard from "./ModelKeysCard";
 import { UsernameForm } from "./UsernameForm";
@@ -195,6 +195,12 @@ function AiPoliciesCard(props: { hasUser: boolean }) {
  * sign-out actions, and a link to the full list); on its own page (`preview` false, AccountSubpages) it is every
  * session. Both read the same query, so the audited list read is not repeated.
  */
+const seenAt = (x: OwnSession) => Date.parse(x.lastSeenAt ?? x.createdAt) || 0;
+/** this device first, then the most recently seen */
+export function sortSessions(rows: readonly OwnSession[]): OwnSession[] {
+  return [...rows].sort((a, b) => Number(b.current) - Number(a.current) || seenAt(b) - seenAt(a));
+}
+
 export function SessionsCard(props: { preview?: boolean }) {
   const { toast } = useToast();
   const qc = useQueryClient();
@@ -204,7 +210,9 @@ export function SessionsCard(props: { preview?: boolean }) {
     queryKey: ["account", "sessions"],
     queryFn: () => api.get<{ sessions: OwnSession[] }>("/auth/sessions"),
   });
-  const sessions = q.data?.sessions ?? [];
+  // this device first, then the most recently seen, so a five-row preview never drops the session you are using (the
+  // read has no order of its own)
+  const sessions = sortSessions(q.data?.sessions ?? []);
   const others = sessions.filter((x) => !x.current);
 
   const run = async (fn: () => Promise<unknown>, okMsg: string) => {
@@ -225,17 +233,13 @@ export function SessionsCard(props: { preview?: boolean }) {
     <Card
       title={
         <span className={v.rowTight}>
-          Devices & sessions
-          <Badge>{sessions.length} live</Badge>
+          {/* on its own page the h1 already says "Devices & sessions" */}
+          {props.preview ? "Devices & sessions" : "Every live session"}
+          {/* a count only from a read that answered: a failed or pending read never shows "0 live" */}
+          {q.data ? <Badge>{sessions.length} live</Badge> : q.error ? <Badge tone="warn">count unavailable</Badge> : null}
         </span>
       }
-      actions={
-        props.preview ? (
-          <Link to="/account/sessions" aria-label="View all sessions">
-            View all →
-          </Link>
-        ) : undefined
-      }
+      actions={props.preview ? <ViewAllLink to="/account/sessions" noun="sessions" /> : undefined}
     >
       {error && (
         <div className={v.errLine} role="alert" style={{ marginBottom: "var(--s1)" }}>

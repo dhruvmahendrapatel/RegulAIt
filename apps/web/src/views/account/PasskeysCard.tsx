@@ -9,13 +9,12 @@
  * kept on record (what they signed stays attributable) and never work again.
  */
 import { useState, type FormEvent } from "react";
-import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { startRegistration, type PublicKeyCredentialCreationOptionsJSON } from "@simplewebauthn/browser";
 import { ApiError, codeSentence } from "../../api/client";
 import { ago } from "../../api/format";
 import { Badge, Button, Card, EmptyState, Field, Input, Table } from "../../ui/kit";
-import { PREVIEW_ROWS } from "../../ui/ListPreview";
+import { PREVIEW_ROWS, ViewAllLink } from "../../ui/ListPreview";
 import { RemoveButton } from "../admin/adminKit";
 import { api, withStepUp } from "../../stepup/stepUp";
 import v from "../views.module.css";
@@ -28,6 +27,12 @@ export interface OwnPasskey {
   createdAt: string;
   lastUsedAt: string | null;
   backedUp: boolean;
+}
+
+const at = (iso: string | null) => (iso ? Date.parse(iso) || 0 : 0);
+/** the most recently used first; never-used ones after them, the newest first */
+export function sortPasskeys(rows: readonly OwnPasskey[]): OwnPasskey[] {
+  return [...rows].sort((a, b) => at(b.lastUsedAt) - at(a.lastUsedAt) || at(b.createdAt) - at(a.createdAt));
 }
 
 const PASSKEY_SENTENCES: Readonly<Record<string, string>> = {
@@ -64,7 +69,8 @@ export default function PasskeysCard(props: { preview?: boolean }) {
     queryKey: ["account", "passkeys"],
     queryFn: () => api.get<{ passkeys: OwnPasskey[]; rpConfigured: boolean }>("/v1/auth/passkeys"),
   });
-  const passkeys = q.data?.passkeys ?? [];
+  // the most recently used first (never used last, newest first), so the preview shows the ones in use
+  const passkeys = sortPasskeys(q.data?.passkeys ?? []);
   const rpConfigured = q.data?.rpConfigured !== false;
   const refresh = () => void qc.invalidateQueries({ queryKey: ["account", "passkeys"] });
 
@@ -98,17 +104,17 @@ export default function PasskeysCard(props: { preview?: boolean }) {
     <Card
       title={
         <span className={v.rowTight}>
-          Passkeys
-          {passkeys.length > 0 ? <Badge tone="ok">{passkeys.length} active</Badge> : <Badge>none</Badge>}
+          {/* on its own page the h1 already says "Passkeys" */}
+          {props.preview ? "Passkeys" : "Every passkey"}
+          {/* a count only from a read that answered: a failed or pending read never shows "none" */}
+          {q.data ? (
+            passkeys.length > 0 ? <Badge tone="ok">{passkeys.length} active</Badge> : <Badge>none</Badge>
+          ) : q.error ? (
+            <Badge tone="warn">count unavailable</Badge>
+          ) : null}
         </span>
       }
-      actions={
-        props.preview ? (
-          <Link to="/account/passkeys" aria-label="View all passkeys">
-            View all →
-          </Link>
-        ) : undefined
-      }
+      actions={props.preview ? <ViewAllLink to="/account/passkeys" noun="passkeys" /> : undefined}
       infoLabel="passkeys"
       info={
         <p>

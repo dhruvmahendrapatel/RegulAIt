@@ -33,14 +33,14 @@ const PASSKEYS = Array.from({ length: 8 }, (_, i) => ({ id: `pk-${i}`, label: `P
 
 const ME = { userId: "u-dana", isAdmin: false, user: { id: "u-dana", email: "dana@example.test", displayName: "Dana Developer" } };
 
-async function mockApi(page: Page, opts: { sessionsFail?: boolean } = {}) {
+async function mockApi(page: Page, opts: { sessionsFail?: boolean; passkeysFail?: boolean; sessions?: typeof SESSIONS } = {}) {
   await page.route("**/*", async (route) => {
     const p = new URL(route.request().url()).pathname;
     if (route.request().resourceType() === "document" || (!p.startsWith("/v1") && !p.startsWith("/auth"))) return route.continue();
     if (p === "/auth/me") return json(route, { ...ME, via: "session", mustChangePassword: false, totpEnabled: true, passwordSet: true, mfaSetupRequired: false });
     if (p === "/v1/me") return json(route, ME);
-    if (p === "/auth/sessions") return opts.sessionsFail ? json(route, { error: "internal" }, 500) : json(route, { sessions: SESSIONS });
-    if (p === "/v1/auth/passkeys") return json(route, { passkeys: PASSKEYS, rpConfigured: true });
+    if (p === "/auth/sessions") return opts.sessionsFail ? json(route, { error: "internal" }, 500) : json(route, { sessions: opts.sessions ?? SESSIONS });
+    if (p === "/v1/auth/passkeys") return opts.passkeysFail ? json(route, { error: "internal" }, 500) : json(route, { passkeys: PASSKEYS, rpConfigured: true });
     if (p === "/v1/users/u-dana/model-credentials") return json(route, { credentials: [] });
     if (p === "/v1/me/ai-literacy") return json(route, { required: false, current: true, documents: [], gateMode: "off", exempt: null, noticeDays: 14 });
     return json(route, {});
@@ -68,6 +68,8 @@ const SPLITS = [
     viewAll: "View all sessions",
     page: "/ui/account/sessions",
     pageTitle: "Devices & sessions",
+    // the card under the h1 does not repeat it
+    cardTitle: "Every live session",
     total: 12,
     // the actions the long page carried are still on the preview
     actions: ["Sign out other devices"],
@@ -79,6 +81,7 @@ const SPLITS = [
     viewAll: "View all passkeys",
     page: "/ui/account/passkeys",
     pageTitle: "Passkeys",
+    cardTitle: "Every passkey",
     total: 8,
     actions: ["Add a passkey"],
   },
@@ -98,6 +101,8 @@ for (const P of SPLITS) {
     await expect(page).toHaveURL(new RegExp(`${P.page}$`));
     await expect(page.getByRole("heading", { name: P.pageTitle, level: 1 })).toBeVisible();
     await expect(page.locator("main tbody tr")).toHaveCount(P.total);
+    await expect(page.getByText(P.cardTitle, { exact: true })).toBeVisible();
+    await expect(page.locator("main").getByText(P.pageTitle, { exact: true })).toHaveCount(2); // the h1 and the breadcrumb only
     await expect(page.getByText(P.count, { exact: true })).toBeVisible();
     for (const a of P.actions) await expect(page.getByRole("button", { name: a, exact: true })).toBeVisible();
     await expect(page.getByRole("link", { name: P.viewAll, exact: true })).toHaveCount(0);
@@ -123,4 +128,28 @@ test("Account › Devices & sessions: a failed read is an error with Retry, neve
   const preview = page.locator('[data-preview="/auth/sessions"]');
   await expect(preview.getByRole("button", { name: /Retry/ })).toBeVisible();
   await expect(preview.getByText("No live sessions")).toHaveCount(0);
+  // the title never claims a count the read did not give (review of #654)
+  await expect(page.getByText("count unavailable", { exact: true })).toBeVisible();
+  await expect(page.getByText(/^\d+ live$/)).toHaveCount(0);
+});
+
+test("Account › Passkeys: a failed read says the count is unavailable, never \"none\"", async ({ page }) => {
+  await mockApi(page, { passkeysFail: true });
+  await page.goto("/ui/account");
+  const card = page.getByTestId("account-passkeys");
+  await expect(card.getByRole("button", { name: /Retry/ })).toBeVisible();
+  await expect(card.getByText("count unavailable", { exact: true })).toBeVisible();
+  await expect(card.getByText("none", { exact: true })).toHaveCount(0);
+  await expect(card.getByText(/^\d+ active$/)).toHaveCount(0);
+});
+
+test("Account › Devices & sessions: the preview keeps this device first, whatever order the read returns", async ({ page }) => {
+  // this device is the least recently seen and comes last from the gateway
+  const sessions = SESSIONS.map((x, i) => (i === 0 ? { ...x, lastSeenAt: at(40) } : x)).reverse();
+  await mockApi(page, { sessions });
+  await page.goto("/ui/account");
+  const rows = page.locator('[data-preview="/auth/sessions"] tbody tr');
+  await expect(rows).toHaveCount(5);
+  await expect(rows.first()).toContainText("this device");
+  await expect(rows.nth(1)).toContainText(`${DEVICES[1]} 2`);
 });
