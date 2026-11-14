@@ -2,6 +2,8 @@ module github.com/dhruvmahendrapatel/regulait/deploy/operator
 
 go 1.26.0
 
+toolchain go1.26.11
+
 require (
 	golang.org/x/mod v0.43.0
 	k8s.io/api v0.37.0
