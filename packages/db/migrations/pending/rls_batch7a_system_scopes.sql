@@ -5,10 +5,9 @@
 -- on the non-superuser runtime login batch 7b introduces it would mean "zero rows". Batch 7a gives each of them a
 -- named, closed system reason, so they run as `regulait_app` under the policies from now on, whatever the login.
 --
--- Three reasons are added to the closed registry:
---   system_task      server-side work with no principal: scheduler jobs, boot tasks, the audit anchor and backup-verify
---                    timers, background work, and requests from non-user credentials (engine runners, workload
---                    identities, endpoint agents). users: read; approvals: all (a job's model dispatch may escalate a
+-- Four reasons are added to the closed registry:
+--   system_task      server-side work with no principal and no request: scheduler jobs, boot tasks, the audit anchor
+--                    and backup-verify timers, background work. Never entered from a request path. users: read; approvals: all (a job's model dispatch may escalate a
 --                    budget into an approval; the SLA, spend, recertification and condition sweeps route and reopen
 --                    them); audit_log: read and append. It never writes users or touches auth_mfa_pending, and the
 --                    ledger stays append-only (the app role has no UPDATE or DELETE on audit_log).
@@ -16,13 +15,17 @@
 --                    links, endpoint-agent and third-party ingest, OAuth endpoints, chat events). users: read;
 --                    audit_log: append. Nothing else: these take attacker-shaped input, so they get the narrowest
 --                    reason.
+--   credential_request  a request authenticated by a non-user credential (an engine runner or enrolment token, a PDP
+--                    client, an endpoint agent; #809 review). users: read; audit_log: append. Nothing in approvals and
+--                    no ledger read: the one runner step that supersedes an approval enters approval_maintenance for
+--                    that statement, and a runner's result re-evaluates its workflow stage as the run's own user.
 --   bootstrap_admin  a request authenticated by the bootstrap token, which the gateway already treats as an admin
 --                    with no user row (ADR-0234 batch 2 recorded it as unscoped). It is admitted exactly where an
 --                    active admin principal is, through regulait_rls_is_admin(), and to the users read.
 --
 -- approval_maintenance gains the users read: the chatops and PM webhook paths that decide or route an approval look
--- the deciding user up in the same request. audit_verify gains it too: a ledger reader names the users whose rows it
--- reads (the policy simulator's replay), which a bootstrap-token request, having no principal, could not otherwise do.
+-- the deciding user up in the same request. audit_verify does not: a principal already reads users, and a
+-- bootstrap-token request keeps its admin-equivalent scope for an audit_verify step (rls.ts withinSystemReason).
 
 CREATE OR REPLACE FUNCTION regulait_rls_system_reason() RETURNS text
   LANGUAGE plpgsql STABLE PARALLEL SAFE
@@ -36,7 +39,7 @@ BEGIN
   END IF;
   IF r = ANY (ARRAY['authenticate', 'identity_provisioning', 'audit_chain', 'audit_verify',
                     'approval_maintenance', 'rls_membership', 'migration', 'audit_subject',
-                    'system_task', 'public_ingest', 'bootstrap_admin']) THEN
+                    'system_task', 'public_ingest', 'bootstrap_admin', 'credential_request']) THEN
     RETURN r;
   END IF;
   RAISE EXCEPTION 'regulait: unknown row-level security system context %', pg_catalog.quote_literal(r)
@@ -76,7 +79,8 @@ CREATE POLICY users_select ON users FOR SELECT USING (
   (SELECT regulait_rls_user_id()) IS NOT NULL
   OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['authenticate', 'identity_provisioning', 'rls_membership',
                                                         'migration', 'system_task', 'public_ingest',
-                                                        'bootstrap_admin', 'approval_maintenance', 'audit_verify'])
+                                                        'bootstrap_admin', 'approval_maintenance',
+                                                        'credential_request'])
 );
 --> statement-breakpoint
 

@@ -64,6 +64,7 @@ import {
   runWithAuditActor,
   runWithRlsPrincipal,
   runWithRlsSystem,
+  runAsBootstrapAdmin,
   runWithRlsPrincipalStep,
   runWithoutRlsScope,
   currentRlsScope,
@@ -602,7 +603,7 @@ import { WEB_UI_ROUTES, defaultWebDistDir, registerWebServing } from "./web-serv
 // ADR-0053 — the auth-class sets the two gates below branch on. They live in
 // their own module so the published OpenAPI document derives each route's
 // documented credential requirement from the SAME objects that enforce it.
-import { AUTH_EXEMPT_ROUTES, NON_ADMIN_ROUTES, exemptRouteRlsReason } from "./route-classes.js";
+import { AUTH_EXEMPT_ROUTES, NON_ADMIN_ROUTES, requestRlsScope } from "./route-classes.js";
 import { registerOpenApiRoutes, type RouteInventoryEntry } from "./openapi.js";
 import { registerOnboardingRoutes } from "./onboarding.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
@@ -1149,7 +1150,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // The MCP route stays org-only: scope rules cover the compat surfaces.
   // SURFACE EXPOSURE IS NOT ENTITLEMENT — a rule passing this gate grants
   // nothing; evaluateAgent still gates the dispatch identically.
-  app.addHook("onRequest", async (req, reply) => {
+  // ADR-0234 batch 7a (#809 review): this gate runs before the authentication hook, with no principal yet. Its
+  // credential lookup and policy resolution run under `authenticate`, like the authentication hook's own.
+  const interceptionGate = async (req: FastifyRequest, reply: FastifyReply) => {
     const route = `${req.method} ${req.routeOptions.url ?? ""}`;
     if (!INTERCEPTION_GATED_ROUTES.has(route)) return;
     const settings = await loadInterceptionSettings(db);
@@ -1198,6 +1201,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     if (!enabled) {
       return reply.status(404).send(notFoundBody(req.method, req.url));
     }
+  };
+  app.addHook("onRequest", async (req, reply) => {
+    if (!INTERCEPTION_GATED_ROUTES.has(`${req.method} ${req.routeOptions.url ?? ""}`)) return;
+    return runWithRlsSystem("authenticate", "gateway.interception-gate", () => interceptionGate(req, reply));
   });
 
   // ADR-0025: the session-authenticated auth self-service surface a user may
@@ -1451,23 +1458,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // policies (and works unchanged on the non-superuser runtime login of batch 7b):
   //   - an auth-exempt route: the reason its class needs (route-classes.ts exemptRouteRlsReason);
   //   - the bootstrap token (or a session exchanged for it), which the gateway treats as an admin: bootstrap_admin;
-  //   - a non-user credential (engine runner, workload identity, endpoint agent, PDP): system_task.
+  //   - a non-user credential (engine runner or enrolment token, PDP client, endpoint agent): credential_request,
+  //     which reads users and appends to the ledger and nothing else (#809 review: never system_task, which is for
+  //     principal-less server work and opens every approval and the whole ledger).
   // Only a request with no credential at all (refused by the hook above before any handler) stays unscoped.
   app.addHook("preHandler", (req, _reply, done) => {
-    const ctx = req.authCtx;
-    const userId = ctx?.userId;
-    if (typeof userId === "string" && userId.length > 0) {
-      runWithRlsPrincipal({ userId }, () => done());
-    } else if (AUTH_EXEMPT_ROUTES.has(req.routeOptions.url ?? "")) {
-      const reason = exemptRouteRlsReason(req.routeOptions.url ?? "");
-      runWithRlsSystem(reason, `gateway.exempt.${reason}`, () => done());
-    } else if (ctx?.isAdmin === true) {
-      runWithRlsSystem("bootstrap_admin", "gateway.bootstrap", () => done());
-    } else if (ctx) {
-      runWithRlsSystem("system_task", `gateway.credential.${ctx.via}`, () => done());
-    } else {
-      runWithoutRlsScope(() => done());
-    }
+    const scope = requestRlsScope(req.authCtx, req.routeOptions.url ?? "");
+    if (scope.kind === "principal") runWithRlsPrincipal({ userId: scope.userId }, () => done());
+    else if (scope.kind === "exempt") runWithRlsSystem(scope.reason, `gateway.exempt.${scope.reason}`, () => done());
+    else if (scope.kind === "bootstrap") runAsBootstrapAdmin("gateway.bootstrap", () => done());
+    else if (scope.kind === "credential") runWithRlsSystem("credential_request", `gateway.credential.${scope.via}`, () => done());
+    else runWithoutRlsScope(() => done());
   });
 
   // ADR-0187 — THE ENGINE RUNNER CEILING, both directions: a runner or
