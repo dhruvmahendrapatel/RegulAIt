@@ -534,7 +534,10 @@ export function registerAnthropicCompat(app: FastifyInstance, db: Db, opts: { da
         reply.raw.writeHead(200, {
           "content-type": "text/event-stream",
           "cache-control": "no-cache",
-          connection: "keep-alive",
+          // No `connection` header (ADR-0257): Node keeps the socket alive unless the
+          // client sent `Connection: close`, and then closes it after the stream.
+          // Forcing keep-alive left clients that read an SSE body to EOF (PHP's
+          // stream wrapper, so laravel/ai's Anthropic driver) waiting for a close.
           ...disclosureHeaderPairs(prepared),
         });
         send("message_start", {

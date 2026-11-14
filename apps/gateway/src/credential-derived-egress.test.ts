@@ -39,6 +39,7 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 
 // ADR-0181: this file pins behaviour that is not the strict compiled-egress default (a
 // vendor endpoint answered by a local double) — relaxed explicitly, restored after.
@@ -58,6 +59,7 @@ const FAKE_HOST = "127.0.0.3";
 const RUN = randomUUID().slice(0, 8);
 
 let db: Db;
+let restoreConnectorAttribution: (() => Promise<void>) | undefined;
 let app: ReturnType<typeof buildApp>;
 let userAuth: { authorization: string };
 let userId: string;
@@ -114,6 +116,8 @@ let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0251: these calls pin behaviour other than the attribution mandate, so they relax it by name
+  restoreConnectorAttribution = await relaxGovernanceGatesForTest(db, { connectorAttributionRequired: false });
   restoreStrictAdmission = await relaxStrictAdmissionForTest(db, ["egressCompiledDefaultPolicy"]);
   // ADR-0181: the org PII floor ships at block. This file pins egress adjudication of a
   // connector's login host, not PII handling, so it sets the floor off explicitly.
@@ -142,6 +146,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreConnectorAttribution?.();
   // M-068: remove the allow entry the test created, first, while the app is up; asserted last
   const allowEntry = await removeEgressAllowEntry(app, AUTH, { id: allowEntryId });
   try {

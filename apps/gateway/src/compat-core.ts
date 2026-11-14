@@ -15,6 +15,7 @@
  * translation: request blocks in, response blocks / SSE frames out.
  */
 
+import { engineKeyWorkflowInstance, guardProjectPlanOnly, isPlanSafeMode } from "./plan-only.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { CHANGED_CONCURRENTLY, relaxedAgainst, requireRelaxStepUp } from "./step-up.js";
 
@@ -623,6 +624,26 @@ export async function prepareCompatCall(
         detail: `project ${projectId} is not one this caller may bill to`,
       };
     }
+  }
+
+  // --- ADR-0250 (review P-02): the plan-only gate, FORCED at project level. A
+  // provider wire format names no workflow instance and every compat call is
+  // `execute`, so while any live instance of the attributed project rests in
+  // planning the call is refused (409 `plan_only_stage`, audited on that
+  // instance's trail). An engine run's key working for ANOTHER instance of the
+  // project at an executable stage is the one audited exception.
+  {
+    const planGate = await guardProjectPlanOnly(db, {
+      projectIds: [projectId],
+      userId,
+      surface: "compat",
+      mutating: !isPlanSafeMode(COMPAT_MODE),
+      mode: COMPAT_MODE,
+      what: `an IDE/SDK call (mode '${COMPAT_MODE}')`,
+      detail: { requestedModel: args.requestedModel },
+      engineInstanceId: await engineKeyWorkflowInstance(db, req),
+    });
+    if (!planGate.ok) return { ok: false, status: planGate.status, error: planGate.error, detail: planGate.detail };
   }
 
   // --- model -> agent resolution (ADMIN-SELECTABLE, ADR-0020) ---------------

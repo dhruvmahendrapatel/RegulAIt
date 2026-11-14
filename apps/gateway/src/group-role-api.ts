@@ -32,7 +32,7 @@ import {
 } from "@regulait/db";
 import { scimAssertedGroupsFor } from "./group-roles.js";
 import { approverPoolShiftFacts, isApproverRole, lockApproverRoles, sameApproverPoolShift, type ApproverPoolShift } from "./approval-pool.js";
-import { CHANGED_CONCURRENTLY, requireStepUp, requireStepUps, type StepUpCheckArgs } from "./step-up.js";
+import { CHANGED_CONCURRENTLY, grantMintStepUp, requireStepUp, requireStepUps, rolesHoldingGrants, type StepUpCheckArgs } from "./step-up.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -119,6 +119,11 @@ export function registerGroupRoleMappingRoutes(app: FastifyInstance, db: Db): vo
         ? [{ kind: "settings_relax" as const, facts: { values: { approverRoleGroup: { source: body.source, externalGroup: body.externalGroup, roleId: body.roleId } } } }]
         : []),
       ...(takeover ? [{ kind: "settings_relax" as const, facts: { ...takeover, group: { source: body.source, externalGroup: body.externalGroup } } }] : []),
+      // ADR-0250 (PR #720 review): the role's grants reach every member of the group, which widens default deny like
+      // minting them: the grant_mint step-up, bound to the group and the role
+      ...((await rolesHoldingGrants(db, [body.roleId])).has(body.roleId)
+        ? [grantMintStepUp({ kind: "group_role_mapping", source: body.source, externalGroup: body.externalGroup, roleId: body.roleId })]
+        : []),
     ];
     if (stepUps.length > 0 && !(await requireStepUps(db, req, reply, stepUps))) return reply;
     // ADR-0186 A (Class A): decided again under the approver-role lock (then the routing lock)

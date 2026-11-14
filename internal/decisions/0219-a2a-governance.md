@@ -120,3 +120,19 @@ over the ceiling. The registry is therefore now a second tab on the existing Age
 byte-identical to main's apart from chunk hashes. The page-local link style is in its own CSS module rather than in
 the entry-bundled `admin.module.css`.
 
+
+**Addendum (2026-11-10): post-merge security review fixes A2A-SEC-01 and A2A-SEC-02.**
+- **A2A-SEC-01, a redirect Location was echoed.** A 3xx from the agent was refused, but the refusal text carried the
+  upstream's raw `Location`. An agent that copied its credential into that Location had the credential returned to a
+  non-admin caller and written to `audit_log.reason`. `EgressRedirectError` now has a fixed message
+  (`EGRESS_REDIRECT_REASON`) and does not keep the Location at all. Every caller of `egressRefusal`, and the discovery
+  worker that reads `err.message`, gets that sentence. The A2A call records `outcome: "redirect_refused"`.
+- **A2A-SEC-02, remote JSON had no size bound before parsing.** The guarded fetch takes an optional
+  `maxResponseBytes`. It refuses a declared Content-Length over the bound, then counts the decoded body as it streams
+  (after gzip/deflate/brotli). Past the bound it errors the stream, which cancels the upstream read, with
+  `EgressResponseTooLargeError` (fixed message). A2A sets 256 KiB for the card (`card_too_large`, an audited
+  registration refusal) and 1 MiB for JSON-RPC replies and error bodies (`outcome: "response_too_large"`, audited,
+  nothing charged). Callers that pass no bound behave as before.
+- **Open source checked.** `raw-body` (MIT) bounds Node streams, not the Web `Response` the SDK reads, and undici's
+  `maxResponseSize` is a dispatcher option our pinned transport does not use. The bound is therefore a small
+  `TransformStream` on the platform's Web Streams.

@@ -177,6 +177,8 @@ export const DISCOVERY_STEP_UP_KEYS = Object.freeze({
   retention: "discoveryEndpointRetentionDays",
   /** ADR-0235: turning a wider-source family on (bound to the families being turned on) */
   families: "discoveryWiderSourceFamilies",
+  /** ADR-0259: turning on endpoint MCP client-config discovery through the endpoint agent */
+  endpointMcpConfig: "discoveryEndpointMcpConfig",
 });
 // revealing a pseudonymised name is NOT a settings relaxation: it is the `pseudonym_reveal` step-up kind
 

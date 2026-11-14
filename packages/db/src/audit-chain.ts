@@ -78,7 +78,7 @@ import {
 } from "@regulait/shared";
 import { auditLog } from "./schema.js";
 import { captureDecisionFacts } from "./decision-facts.js";
-import { RLS_SYSTEM_SETTING } from "./rls.js";
+import { RLS_PRINCIPAL_SETTING, RLS_SYSTEM_SETTING, noteInternalSystemReason } from "./rls.js";
 
 /**
  * The advisory-lock key every append serializes on. A single global key,
@@ -265,8 +265,17 @@ export async function appendChainedAuditRows(
   // (`auditChainClock`), `at` never decreases along `seq`. Truncated to milliseconds in SQL (what a `Date`
   // holds), so the value hashed below is the value stored.
   const dbNow = await auditChainClock(tx);
-  // ADR-0234: leave `audit_chain`, back to the caller's context (the insert below runs under it)
-  await tx.execute(sql`select set_config(${RLS_SYSTEM_SETTING}, ${prevRlsContext}, true)`);
+  // ADR-0234: leave `audit_chain`. The INSERT below runs under the caller's context, except (batch 2, 0313) when
+  // the caller is a principal with no system reason and a row names a user other than that principal: audit_log
+  // .user_id is the sponsor or subject (ADR-0188), so such a row is appended under the registered `audit_subject`
+  // reason, for this INSERT only (restored right after it) and counted. Decided in SQL, from the principal the
+  // database itself holds, in the same statement that leaves `audit_chain`.
+  const subjectIds = JSON.stringify([...new Set(values.map((v) => String((v as { userId?: unknown }).userId ?? "").toLowerCase()))]);
+  const left = (await tx.execute(
+    sql`select set_config(${RLS_SYSTEM_SETTING}, case when s.prev = '' and s.uid <> '' and not (s.uid = all(array(select pg_catalog.jsonb_array_elements_text(${subjectIds}::jsonb)))) then 'audit_subject' else s.prev end, true) = 'audit_subject' and s.prev = '' as subject from (select ${prevRlsContext}::text as prev, coalesce(current_setting(${RLS_PRINCIPAL_SETTING}, true), '') as uid) s`,
+  )) as { rows?: Array<{ subject: boolean | null }> };
+  const enteredSubject = left.rows?.[0]?.subject === true;
+  if (enteredSubject) noteInternalSystemReason("audit_subject", "audit-chain.append");
 
   let prevHash = tip[0]?.rowHash ?? AUDIT_GENESIS_PREV_HASH;
   let nextSeq = (tip[0]?.seq ?? AUDIT_GENESIS_SEQ - 1) + 1;
@@ -336,6 +345,8 @@ export async function appendChainedAuditRows(
   let out: unknown = undefined;
   if (returning === undefined) await insert;
   else out = await (returning === ALL_COLUMNS ? insert.returning() : insert.returning(returning));
+  // ADR-0234 batch 2: leave `audit_subject` the moment its one INSERT is done
+  if (enteredSubject) await tx.execute(sql`select set_config(${RLS_SYSTEM_SETTING}, ${prevRlsContext}, true)`);
   // ADR-0189 B2 — every receipt-eligible row gets its capture-status marker and
   // (capture on) its decision facts HERE: in the same transaction, still under
   // the chain lock, from the row exactly as stored. This is the one shared

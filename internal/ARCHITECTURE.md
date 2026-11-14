@@ -21,7 +21,7 @@ flowchart LR
   end
   subgraph Gateway[apps/gateway — Fastify control plane]
     EDGE[Edge: proxy trust, rate limit,<br/>headers, auth, CSRF, MFA]
-    GOV[governedEvaluate<br/>policy-kernel + Cedar ABAC]
+    GOV[Decision: governedEvaluate (MCP)<br/>evaluateAgent / evaluateConnector<br/>A2A route checks]
     APR[Approvals queue]
     COST[Budget gate + usage ledger]
     OPT[optimizer-kernel]
@@ -115,7 +115,24 @@ In hook order in `apps/gateway/src/app.ts`:
 
 ### A governed call
 
-The three governed call types — MCP tool, model/agent, connector — share one decision core and one audit path.
+The four governed call types (MCP tool, model/agent, connector, remote agent over A2A) share one audit chain and the
+budget gate, but **not** one decision core today (corrected 2026-11-07 from the whole-build review, finding P-01; the
+plan to unify them is [ADR-0251](decisions/0251-one-governed-decision-core.md)):
+
+| Control | MCP tool | Model/agent | Connector | A2A |
+|---|---|---|---|---|
+| Decision function | `governedEvaluate` → kernel `evaluate` | kernel `evaluateAgent` | kernel `evaluateConnector` | route checks in `a2a.ts`, no kernel call |
+| Per-user grant, default-deny | yes | yes | yes | yes (`a2a_agent_grants`) |
+| Kill switch and safe modes (`executionGate`) | yes | yes | yes | **no** |
+| AI literacy gate | yes | yes | yes | **no** |
+| Approval rules (`approval_rules`) | yes | **no**: the execution dial's `require_approval` mode becomes a deny | **no**: writes are held only under the execution dial | **no** |
+| Governance rate limits | `rate_limits`, always on | `model_rate_limits`, **off** until an admin enables them | **none** (only the edge HTTP limiter, which in-process calls skip) | **none** |
+| Cedar ABAC | yes | **no** (the actor slot exists, never supplied) | **no** (same) | **no** |
+| Data-scope rules | `data_scope_rules` | n/a | grant `allowedObjects` | n/a |
+| Attribution mandate, on by default | `requireMcpAttribution` | `requireProjectAttribution` (compat), `dispatchAttributionRequired` (native) | **no**: an unattributed call runs | **no**: an unattributed call runs |
+
+The sequence below is the **MCP tool** path. The others reach the same budget gate and audit chain from their own
+route-level decision.
 
 ```mermaid
 sequenceDiagram
@@ -152,20 +169,26 @@ sequenceDiagram
   preflight and circuit breaker, `governedEvaluate` (`governed-evaluate.ts`), outbound credential audience check,
   decision row with the policy re-checked inside the transaction, stdio placement into the executor, MCP mode and
   content-trust gates, project budget gate (`preDispatchProjectGate`), guardrails, approval consumption, the
-  single-attempt upstream call, output PII, usage and provenance rows.
+  single-attempt upstream call, output PII, usage and provenance rows. The grant step reads `loadEntitlements`
+  (`entitlements.ts`): direct, role and (ADR-0236, while `mcp_bundles_enabled`) governed-bundle tool grants, minus
+  the person's revocations; the same loader feeds every tool list (`visibleTools`).
 - **Remote agent (A2A) call** (ADR-0219) — `POST /v1/a2a/agents/:agentId/messages` → `executeGovernedA2aCall` in
   `a2a.ts`, the only sender. It checks, in order: the default-off org setting, the agent and its skill, the lead ceiling
-  (it only narrows), the person's own grant (default-deny), project attribution and the budget gate
-  (`preDispatchProjectGate`), and the project's PII mode. Egress is decided on the MCP posture. The A2A SDK
+  (it only narrows), the person's own grant (default-deny), project attribution when a project is named (an
+  unattributed call runs) and the budget gate (`preDispatchProjectGate`), and the project's PII mode. It never calls the
+  policy kernel, so the kill switch, safe modes and literacy gate do not apply (review finding S-05; `a2aEnabled` is off
+  by default). Egress is decided on the MCP posture. The A2A SDK
   client sends through the guarded fetch, with the credential going only to the registered origin. The usage row and
   the audit row are written in one transaction.
 - **Model/agent call** — `POST /v1/agents/:agentId/invoke` and the IDE compat endpoints (both go through
   `compat-core.ts` into the same primitives): virtual-key allow-list, project attribution, workflow-instance gate,
-  grants and revocations, model policy, `evaluateAgent` with the kill switch; **then** the optimiser (routing,
+  grants and revocations, model policy, `evaluateAgent` with the kill switch (allow or deny only: no approval rules
+  and no ABAC), the model rate limit (`checkModelRateLimit`, off until an admin enables it); **then** the optimiser (routing,
   compaction, semantic cache) runs inside the governed envelope; input PII gate; `executeGovernedDispatch` re-evaluates
   every fallback hop; trace spans.
-- **Connector call** — `POST /v1/connectors/:connectorId/invoke` → `connector-call.ts`: `evaluateConnector`, audit,
-  budget, credential, PII, guardrails, egress guard.
+- **Connector call** — `POST /v1/connectors/:connectorId/invoke` → `connector-call.ts`: `evaluateConnector` (grant,
+  mode, object scope, kill switch, literacy; no approval rules, rate limits or ABAC), audit, budget, credential, PII,
+  guardrails, egress guard.
 - **Approvals** — one `approvals` table. Each approval binds the payload digest and the context digest, so an approved
   call can only replay what was approved; decided at `POST /v1/approvals/:id/decide`, in the review workbench, or by
   ChatOps.

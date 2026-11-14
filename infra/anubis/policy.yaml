@@ -1,0 +1,75 @@
+# RegulAIt — Anubis bot policy for the PUBLIC pages only (ADR-0258, backlog P34).
+#
+# Anubis (TecharoHQ/anubis v1.28.2, MIT) runs in SUBREQUEST mode: Caddy asks it about each request to the public
+# trust centre, auditor portal and supplier portal (infra/caddy/routes.Caddyfile, `regulait_public_gate_on`) and
+# proxies to the gateway itself. Anubis never sees the admin console, the product API or the gateway's model routes,
+# because Caddy never asks it about them.
+#
+# The profile is OFF by default (docs/deployment/ANUBIS.md). Every rule below works air-gapped: no GeoIP or ASN
+# lookups (they need the hosted Thoth service), no DNSBL, no `remote_addresses_url` (it downloads a list), no Open
+# Graph fetches. scripts/anubis-public-pages.test.mjs refuses any of those keys in this file.
+#
+# Rules are evaluated top to bottom; the first match decides.
+bots:
+  # 1. Named auditors and suppliers whose browsers cannot run the JavaScript challenge (locked-down corporate
+  #    browsers, script blockers, assistive setups). An admin lists their egress address ranges in allowlist.yaml;
+  #    those addresses pass without a challenge. The portals still authenticate them by their single-use link.
+  - import: /etc/anubis/allowlist.yaml
+
+  # 2. Known scrapers: denied outright (HTTP 403), whatever they claim to be.
+  #    Pathological clients (headless browsers, Cloudflare Workers, async HTTP libraries, spec violators) ...
+  - import: (data)/bots/_deny-pathological.yaml
+  #    ... and every AI/LLM agent, crawler and training or search fetcher Anubis knows by user agent.
+  - import: (data)/meta/ai-block-aggressive.yaml
+
+  # 3. Good bots (search engines, the Internet Archive), allowed only by an explicit admin choice. Each entry
+  #    pins the operator's published address ranges, so a spoofed user agent alone does not pass. To let search
+  #    engines index the public trust centre, uncomment the next line and record the choice in your deployment
+  #    record (docs/deployment/ANUBIS.md § Allowing good bots).
+  # - import: (data)/crawlers/_allow-good.yaml
+
+  # 4. Everyone else gets the proof-of-work challenge: browsers and non-browser clients alike, so a scraper cannot
+  #    skip it by sending a non-browser user agent. A passed challenge is a signed cookie bound to the client's
+  #    address (JWT_RESTRICTION_HEADER=X-Real-IP), valid for COOKIE_EXPIRATION_TIME (docker-compose.yml).
+  - name: regulait-public-pages-challenge
+    path_regex: ^/.*$
+    action: CHALLENGE
+    challenge:
+      algorithm: fast
+      difficulty: 4
+
+# Subrequest mode reads the HTTP status: Caddy treats any 2xx from the check as "allowed". DENY must therefore be a
+# non-2xx code, or a denied scraper would be let through (Anubis's own subrequest documentation).
+status_codes:
+  CHALLENGE: 200
+  DENY: 403
+
+# The naive honeypot serves generated filler pages under /.within.website/; we serve no content we did not write.
+honeypot:
+  enabled: false
+
+dnsbl: false
+
+openGraph:
+  enabled: false
+  considerHost: false
+  ttl: 24h
+
+# One replica, in memory. Challenge state is lost on restart, so a visitor mid-challenge simply gets a new one.
+store:
+  backend: memory
+  parameters: {}
+
+# Ops log: JSON on stderr, which Docker keeps under a bounded `local` log driver (docker-compose.yml). INFO records
+# each decision ("explicit deny", "new challenge issued", "challenge accepted") with the rule name, and the request
+# context Anubis always attaches: client address, user agent, Accept-Language, host, method and path. The query
+# string is never logged. That is the minimum needed to investigate a scraper; set WARN to stop per-request lines.
+logging:
+  sink: stdio
+  level: INFO
+
+# Prometheus counters per rule and action, with no client address in any label. Bound inside the compose network
+# only: the service publishes no port.
+metrics:
+  bind: ":9090"
+  network: tcp

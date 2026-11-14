@@ -48,7 +48,8 @@ class Scores(unittest.TestCase):
     def test_harm_reports_labels_not_text(self):
         out = core.score_harm("you idiot", lambda w: {"toxic": 0.91, "insult": 0.7, "threat": 0.02})
         self.assertEqual(out["score"], 0.91)
-        self.assertEqual(out["reasons"], ["insult", "toxic"])
+        # ADR-0247: reported under RegulAIt's own harm labels (HARM_LABELS.md), not the model's
+        self.assertEqual(out["reasons"], ["harassment", "toxicity"])
         self.assertNotIn("idiot", repr(out))
 
     def test_pii_counts_each_finding_once_across_overlaps(self):
