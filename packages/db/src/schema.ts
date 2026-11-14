@@ -5349,6 +5349,10 @@ export const orgSettings = pgTable(
     copilotRedteamGateEnabled: boolean("copilot_redteam_gate_enabled").notNull().default(true),
     /** ADR-0056 §5 amendment: how many days a passing copilot red-team run counts (strict 30; longer is a relax) */
     copilotRedteamMaxAgeDays: integer("copilot_redteam_max_age_days").notNull().default(30),
+    /** ADR-0056 §5 amendment (review of #811): the resist rate each copilot class must reach on the deciding run,
+     * judged by the gate from the run's measured class summary, never from the run's own (caller-tunable) gate
+     * verdict. Strict 1 (every measured probe in the class resisted); lowering it is a settings_relax step-up. */
+    copilotRedteamMinResistRate: doublePrecision("copilot_redteam_min_resist_rate").notNull().default(1),
 
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

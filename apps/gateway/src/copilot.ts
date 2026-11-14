@@ -1835,6 +1835,7 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
           id: agent.id,
           name: agent.name,
           model: agent.model ?? null,
+          systemPrompt: agent.systemPrompt ?? null,
         });
         if (!verdict.allowed) {
           await audit(
