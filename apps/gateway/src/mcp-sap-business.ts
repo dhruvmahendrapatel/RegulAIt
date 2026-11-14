@@ -134,11 +134,14 @@ async function seededDefaults(db: Db, serverId: string): Promise<{ approvalRuleI
 /**
  * The seeded rows still at (or stricter than) the defaults, for a re-mark to reuse. Read inside the marking
  * transaction, under the server row's lock. A rule with a lower quorum or `tool` scope, or a limit with more calls or
- * a shorter window, is not reused: the new seeded row then applies beside it (strictest wins).
+ * a shorter window, is not reused: the new seeded row then applies beside it (strictest wins). Neither is a row scoped
+ * to a deploy mode (it binds only some calls), nor a rule whose approver pool differs from the one this request names
+ * (security review #798).
  */
 async function seededDefaultRows(
   tx: Db,
   serverId: string,
+  approvers: { approverUserId: string; approverRoleId: string },
 ): Promise<{ approvalRule: typeof approvalRules.$inferSelect | null; rateLimit: typeof rateLimits.$inferSelect | null }> {
   const [rule] = await tx
     .select()
@@ -152,6 +155,11 @@ async function seededDefaultRows(
         eq(approvalRules.writeOnly, true),
         eq(approvalRules.approvalScope, "action"),
         gte(approvalRules.quorum, SAP_BUSINESS_DEFAULTS.quorum),
+        // security review #798: a deploy-mode-scoped rule binds only some calls, so it is never reused as the default
+        isNull(approvalRules.deployMode),
+        // ...and a rule is reused only with the approver pool this request names, so the audit tells the truth
+        eq(approvalRules.approverUserId, approvers.approverUserId),
+        eq(approvalRules.approverRoleId, approvers.approverRoleId),
       ),
     )
     .limit(1);
@@ -167,6 +175,7 @@ async function seededDefaultRows(
         eq(rateLimits.writeOnly, true),
         lte(rateLimits.maxCalls, SAP_BUSINESS_DEFAULTS.maxCalls),
         gte(rateLimits.windowSeconds, SAP_BUSINESS_DEFAULTS.windowSeconds),
+        isNull(rateLimits.deployMode),
       ),
     )
     .limit(1);
@@ -225,7 +234,7 @@ export function registerMcpSapBusinessRoutes(app: FastifyInstance, db: Db): void
         await tx.update(mcpServers).set({ systemClass: "sap_business" }).where(eq(mcpServers.id, serverId));
         // review #798: a re-mark (mark, unmark, mark) reuses the rows the first mark seeded while they still hold the
         // defaults, instead of seeding a second pair; a row someone relaxed since is not reused, so the new one is seeded
-        const kept = await seededDefaultRows(tx, serverId);
+        const kept = await seededDefaultRows(tx, serverId, { approverUserId: adminId, approverRoleId: body.approverRoleId });
         const approval = kept.approvalRule ?? (await createApprovalRuleRow(tx, rule));
         const limit =
           kept.rateLimit ??
@@ -256,7 +265,9 @@ export function registerMcpSapBusinessRoutes(app: FastifyInstance, db: Db): void
             approvalRuleId: approval.id,
             approvalRuleReused: kept.approvalRule !== null,
             rateLimitReused: kept.rateLimit !== null,
-            approverRoleId: body.approverRoleId,
+            // the approver pool of the rule actually in force (reused only when it matches this request)
+            approverUserId: approval.approverUserId,
+            approverRoleId: approval.approverRoleId,
             rateLimitId: limit!.id,
             quorum: SAP_BUSINESS_DEFAULTS.quorum,
             maxCalls: SAP_BUSINESS_DEFAULTS.maxCalls,

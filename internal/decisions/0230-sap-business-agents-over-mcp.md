@@ -391,7 +391,9 @@ answer is a data change, not a code change).
   - **The project requirement runs after the entitlement decision.** A caller the kernel refuses gets that refusal
     and learns nothing about the server's class.
   - **A re-mark reuses the seeded rows** while they still hold the defaults (quorum at least 2 and `action` scope;
-    at most 10 calls in at least an hour). A relaxed row is not reused, so a new seeded row applies beside it.
+    at most 10 calls in at least an hour), are not scoped to a deploy mode, and (for the rule) name the approver pool
+    this request names. Any other row is not reused, so a new seeded row applies beside it, and the audit records the
+    approver pool of the rule actually in force (security review #798).
   - **An approver role that does not exist** is refused by the ADR-0186 pool guard with a 4xx, and nothing changes.
 - **Not built here**: `identity_release`, `subject_token_retention`, the `approved_pending_execution` state and option
   (b)'s SAP-trust key need slice A0 (owner-blocked). The HMAC idempotency key and the A3 audit and usage detail are the
