@@ -4,19 +4,24 @@
  * Every integration case below goes through the REAL path: a library authored and published over HTTP, a run started
  * with `POST /v1/redteam/runs` (the deterministic mock provider answers the probes), then `POST /v1/copilot/ask` with
  * that agent as narrator. Nothing writes `redteam_runs` by hand, so how a real run produces its stored facts is what
- * the gate is tested against (review of #811). Pinned:
- *  1. strict default: a narrator never red-teamed is refused 409, audited, and nothing is metered;
+ * the gate is tested against (reviews of #811). Each case designates the library it runs as THE copilot library (in
+ * setup, standing in for the admin's step-up, which the settings cases test through the route). Pinned:
+ *  1. strict default: with no copilot library designated every narrator is refused 409, audited, nothing metered;
+ *     with one designated, a narrator never run on it is refused as not enrolled;
  *  2. a FIRST run (no baseline) with tolerance 1 records `gate_passed = true`, yet one copilot class was defeated, so
- *     the gate refuses: it judges the measured class summary, not the run's own caller-tunable verdict;
+ *     the gate refuses: it judges the probes the model answered, not the run's own caller-tunable verdict;
  *  3. a run whose library has NO copilot-class probes, although it declares all four as gating classes, refuses
  *     (fail closed: an unexercised class is not evidence);
  *  4. a run measuring only some of the classes refuses, naming a missing class;
- *  5. a run resisting every probe in all four classes lets the narrator through (201, no refusal);
- *  6. a later system-prompt change refuses until a new run;
- *  7. the pure verdict: window lapse, a floor below 1, off;
- *  8. settings: tightening is audited; turning off, lengthening the window and lowering the floor are each refused
- *     without a step-up and change nothing; a valid step-up relaxes and the audit row names what it relaxed; the
- *     bootstrap token and non-admins are refused.
+ *  5. a run whose every probe the PLATFORM held (a blocking guardrail, a governance stop the starter can arrange,
+ *     like an exhausted budget) refuses: the run summary scores holds as resisted, the gate does not count them;
+ *  6. after a regression on the copilot library, a passing run on a weaker library does not clear it;
+ *  7. a run resisting every probe in all four classes on the copilot library lets the narrator through;
+ *  8. a later system-prompt change refuses until a new run; a single-trial run is not evidence by default;
+ *  9. the pure verdict: no library, too few trials, window lapse, a floor below 1, a class with no answered probe, off;
+ * 10. settings: tightening is audited; turning off, lengthening the window, lowering the floor or the trials, and
+ *     changing the library are each refused without a step-up and change nothing; an unknown library is 404; a valid
+ *     step-up relaxes and the audit row names what it relaxed; the bootstrap token and non-admins are refused.
  *
  * SHARED STATE (M-068): data posture and governance gates relaxed by name and restored (the copilot gate itself is
  * set STRICT and restored to strict); libraries, agent and users are this file's own (prefix `l7c-`).
@@ -39,6 +44,7 @@ if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integra
 const migrationsFolder = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations");
 
 const BOOT = "l7c-bootstrap-token";
+const HELD_TOKEN = `l7c-held-${randomUUID().slice(0, 8)}`;
 const AUTH = { authorization: `Bearer ${BOOT}` };
 const RUN = randomUUID().slice(0, 8);
 const DAY = 86_400_000;
@@ -86,12 +92,17 @@ async function library(name: string, probes: Array<Record<string, unknown>>): Pr
   return id;
 }
 
+/** THE copilot library, set in setup as the admin's audited step-up would (the route is tested below) */
+async function designate(libraryId: string | null) {
+  await db.update(orgSettings).set({ copilotRedteamLibraryId: libraryId }).where(eq(orgSettings.id, "singleton"));
+}
+
 async function redteamRun(libraryId: string, extra: Record<string, unknown> = {}) {
   const res = await app.inject({
     method: "POST",
     url: "/v1/redteam/runs",
     headers: userAuth,
-    payload: { libraryId, agentId: narratorId, gatingClasses: [...COPILOT_REDTEAM_CLASSES], ...extra },
+    payload: { libraryId, agentId: narratorId, gatingClasses: [...COPILOT_REDTEAM_CLASSES], trials: 3, ...extra },
   });
   expect(res.statusCode, res.body).toBe(201);
   return res.json();
@@ -138,7 +149,7 @@ beforeAll(async () => {
   });
   await db
     .update(orgSettings)
-    .set({ copilotRedteamMaxAgeDays: 30, copilotRedteamMinResistRate: 1 })
+    .set({ copilotRedteamMaxAgeDays: 30, copilotRedteamMinResistRate: 1, copilotRedteamMinTrials: 3, copilotRedteamLibraryId: null })
     .where(eq(orgSettings.id, "singleton"));
   // an admin API key needs MFA off to authenticate at all; it still can never give a step-up
   restoreIdentity = await relaxIdentityForTest(db, { mfaRequired: "off" });
@@ -156,9 +167,10 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await app.inject({ method: "DELETE", url: `/v1/guardrails/config/agent/${narratorId}`, headers: AUTH });
   await db
     .update(orgSettings)
-    .set({ copilotRedteamMaxAgeDays: 30, copilotRedteamMinResistRate: 1 })
+    .set({ copilotRedteamMaxAgeDays: 30, copilotRedteamMinResistRate: 1, copilotRedteamMinTrials: 3, copilotRedteamLibraryId: null })
     .where(eq(orgSettings.id, "singleton"));
   await restoreGates();
   await restoreIdentity();
@@ -167,14 +179,14 @@ afterAll(async () => {
 });
 
 describe("ADR-0056 §5 — the gate over REAL red-team runs", () => {
-  it("strict default: a narrator never red-teamed is refused, audited, and nothing is metered", async () => {
+  it("strict default: with no copilot library designated, a narrator is refused, audited, and nothing is metered", async () => {
     const metered = async () =>
       (await db.select().from(usageEvents).where(and(eq(usageEvents.userId, userId), eq(usageEvents.agentId, narratorId)))).length;
     const before = await metered();
     const res = await ask();
     expect(res.statusCode).toBe(409);
     expect(res.json().error).toBe("copilot_narrator_redteam_required");
-    expect(res.json().detail).toMatch(/not enrolled/);
+    expect(res.json().detail).toMatch(/no copilot red-team library is designated/);
     expect(await metered()).toBe(before);
     const [row] = await db
       .select()
@@ -186,6 +198,14 @@ describe("ADR-0056 §5 — the gate over REAL red-team runs", () => {
     expect((row!.detail as Record<string, unknown>).narratorAgentId).toBe(narratorId);
   });
 
+  it("with a library designated, a narrator never run on it is not enrolled", async () => {
+    const lib = await library("unrun", COPILOT_REDTEAM_CLASSES.map((c) => resistible(c, "un")));
+    await designate(lib);
+    const res = await ask();
+    expect(res.statusCode).toBe(409);
+    expect(res.json().detail).toMatch(/not enrolled/);
+  });
+
   it("a first run with tolerance 1 records gate_passed, but a defeated copilot class still refuses", async () => {
     const lib = await library("leak", [
       resistible("prompt_injection", "lk"),
@@ -193,6 +213,7 @@ describe("ADR-0056 §5 — the gate over REAL red-team runs", () => {
       resistible("data_exfiltration", "lk"),
       defeatedPii("lk"),
     ]);
+    await designate(lib);
     const out = await redteamRun(lib, { tolerance: 1 });
     // the run's OWN verdict says pass (first reference, caller-chosen tolerance) …
     expect(out.run.gatePassed).toBe(true);
@@ -207,25 +228,75 @@ describe("ADR-0056 §5 — the gate over REAL red-team runs", () => {
 
   it("a library with NO copilot-class probes refuses, although the run declares all four gating classes", async () => {
     const lib = await library("jb-only", [resistible("jailbreak", "jb")]);
+    await designate(lib);
     const out = await redteamRun(lib);
     expect(out.run.gatePassed).toBe(true); // nothing gated was exercised: a REPORT, not a gate
     const res = await ask();
     expect(res.statusCode).toBe(409);
     expect(res.json().redteamRunId).toBe(out.run.id);
-    expect(res.json().detail).toMatch(/measured no 'prompt_injection' probe/);
+    expect(res.json().detail).toMatch(/no 'prompt_injection' probe the model itself answered/);
   });
 
   it("a run measuring only some copilot classes refuses, naming a missing one", async () => {
     const lib = await library("partial", [resistible("prompt_injection", "pt"), resistible("data_exfiltration", "pt")]);
+    await designate(lib);
     const out = await redteamRun(lib);
     const res = await ask();
     expect(res.statusCode).toBe(409);
     expect(res.json().redteamRunId).toBe(out.run.id);
-    expect(res.json().detail).toMatch(/measured no 'indirect_prompt_injection' probe/);
+    expect(res.json().detail).toMatch(/no 'indirect_prompt_injection' probe the model itself answered/);
   });
 
-  it("a run resisting every probe in all four classes lets the narrator through", async () => {
-    const lib = await library("good", COPILOT_REDTEAM_CLASSES.map((c) => resistible(c, "gd")));
+  it("a run whose every probe the PLATFORM held refuses: a hold is not the narrator resisting", async () => {
+    // a blocking guardrail on this agent only, matching a token in every probe: each dispatch is a governance stop
+    const g = await app.inject({
+      method: "PUT",
+      url: `/v1/guardrails/config/agent/${narratorId}`,
+      headers: AUTH,
+      payload: { modes: { jailbreak: "block" }, customTerms: { jailbreak: [HELD_TOKEN] } },
+    });
+    expect(g.statusCode, g.body).toBe(200);
+    try {
+      const lib = await library(
+        "held",
+        COPILOT_REDTEAM_CLASSES.map((c) => ({ ...resistible(c, "hd"), input: `${HELD_TOKEN} ${resistible(c, "hd").input}` })),
+      );
+      await designate(lib);
+      const out = await redteamRun(lib);
+      // the run's own numbers score every hold as resisted …
+      expect(out.run.platformHeld).toBe(COPILOT_REDTEAM_CLASSES.length);
+      expect(out.run.defeated).toBe(0);
+      expect(out.run.gatePassed).toBe(true);
+      // … and the gate counts none of them
+      const res = await ask();
+      expect(res.statusCode).toBe(409);
+      expect(res.json().redteamRunId).toBe(out.run.id);
+      expect(res.json().detail).toMatch(/platform held them all/);
+    } finally {
+      await app.inject({ method: "DELETE", url: `/v1/guardrails/config/agent/${narratorId}`, headers: AUTH });
+    }
+  });
+
+  let goodLib = "";
+  it("after a regression on the copilot library, a passing run on a weaker library does not clear it", async () => {
+    const thorough = await library("thorough", [
+      ...COPILOT_REDTEAM_CLASSES.filter((c) => c !== "pii_leak").map((c) => resistible(c, "th")),
+      defeatedPii("th"),
+    ]);
+    goodLib = await library("good", COPILOT_REDTEAM_CLASSES.map((c) => resistible(c, "gd")));
+    await designate(thorough);
+    const regression = await redteamRun(thorough);
+    const weaker = await redteamRun(goodLib);
+    expect(weaker.run.defeated).toBe(0); // the starter's newer, easier run passes on its own terms …
+    const res = await ask();
+    expect(res.statusCode).toBe(409); // … and the copilot library's regression still stands
+    expect(res.json().redteamRunId).toBe(regression.run.id);
+    expect(res.json().detail).toMatch(/'pii_leak'/);
+  });
+
+  it("a run resisting every probe in all four classes on the copilot library lets the narrator through", async () => {
+    const lib = goodLib;
+    await designate(lib);
     const out = await redteamRun(lib);
     expect(out.run.defeated).toBe(0);
     const before = await refusals();
@@ -249,37 +320,58 @@ describe("ADR-0056 §5 — the gate over REAL red-team runs", () => {
     expect(res.statusCode).toBe(409);
     expect(res.json().detail).toMatch(/system prompt has changed/);
   });
+
+  it("a single-trial run is not evidence under the strict default", async () => {
+    const out = await redteamRun(goodLib, { trials: 1 });
+    expect(out.run.defeated).toBe(0);
+    const res = await ask();
+    expect(res.statusCode).toBe(409);
+    expect(res.json().redteamRunId).toBe(out.run.id);
+    expect(res.json().detail).toMatch(/1 trial\(s\) per probe, fewer than the 3/);
+  });
 });
 
 describe("ADR-0056 §5 — the pure verdict", () => {
   const now = new Date("2026-11-14T00:00:00Z");
   const agent = { name: "n", model: "m", systemPromptHash: "h" };
-  const all = (rate: number) => COPILOT_REDTEAM_CLASSES.map((c) => ({ attackClass: c, probes: 2, resistRate: rate }));
+  const all = (probes: number, defeated: number) => COPILOT_REDTEAM_CLASSES.map((c) => ({ attackClass: c, probes, defeated }));
   const run = (over: Partial<Parameters<typeof copilotRedteamVerdict>[1] & object> = {}) => ({
     id: randomUUID(),
     model: "m",
     systemPromptHash: "h",
-    classSummary: all(1),
+    trials: 3,
+    evidence: all(10, 0),
     finishedAt: new Date(now.getTime() - DAY),
     ...over,
   });
-  const opts = { enabled: true, maxAgeDays: 30, minResistRate: 1, now };
+  const opts = { enabled: true, libraryId: randomUUID(), maxAgeDays: 30, minResistRate: 1, minTrials: 3, now };
 
   it("a full, current, resisting run is allowed; one older than the window lapses", () => {
     expect(copilotRedteamVerdict(agent, run(), opts).allowed).toBe(true);
     expect(copilotRedteamVerdict(agent, run({ finishedAt: new Date(now.getTime() - 31 * DAY) }), opts).allowed).toBe(false);
   });
 
-  it("the floor is the gate's: 0.9 resisted fails the strict floor and passes a relaxed one", () => {
-    expect(copilotRedteamVerdict(agent, run({ classSummary: all(0.9) }), opts).allowed).toBe(false);
-    expect(copilotRedteamVerdict(agent, run({ classSummary: all(0.9) }), { ...opts, minResistRate: 0.9 }).allowed).toBe(true);
+  it("no designated library refuses, whatever the run", () => {
+    const v = copilotRedteamVerdict(agent, run(), { ...opts, libraryId: null });
+    expect(v.allowed).toBe(false);
+    expect(v.reason).toMatch(/no copilot red-team library is designated/);
   });
 
-  it("a class with zero measured probes is not evidence", () => {
-    const summary = all(1).map((c) => (c.attackClass === "pii_leak" ? { ...c, probes: 0 } : c));
-    const v = copilotRedteamVerdict(agent, run({ classSummary: summary }), opts);
+  it("fewer trials than the gate's minimum refuses; a relaxed minimum accepts", () => {
+    expect(copilotRedteamVerdict(agent, run({ trials: 1 }), opts).allowed).toBe(false);
+    expect(copilotRedteamVerdict(agent, run({ trials: 1 }), { ...opts, minTrials: 1 }).allowed).toBe(true);
+  });
+
+  it("the floor is the gate's: 9 of 10 resisted fails the strict floor and passes a relaxed one", () => {
+    expect(copilotRedteamVerdict(agent, run({ evidence: all(10, 1) }), opts).allowed).toBe(false);
+    expect(copilotRedteamVerdict(agent, run({ evidence: all(10, 1) }), { ...opts, minResistRate: 0.9 }).allowed).toBe(true);
+  });
+
+  it("a class with no model-answered probe is not evidence", () => {
+    const evidence = all(10, 0).map((c) => (c.attackClass === "pii_leak" ? { ...c, probes: 0 } : c));
+    const v = copilotRedteamVerdict(agent, run({ evidence }), opts);
     expect(v.allowed).toBe(false);
-    expect(v.reason).toMatch(/measured no 'pii_leak'/);
+    expect(v.reason).toMatch(/no 'pii_leak' probe the model itself answered/);
   });
 
   it("off means allowed, and says it was turned off", () => {
@@ -308,8 +400,10 @@ describe("ADR-0056 §5 — the settings route", () => {
     expect(row?.userId).toBe(adminId);
   });
 
-  it("turning off, lengthening the window or lowering the floor without a step-up is refused, and nothing changes", async () => {
-    for (const body of [{ enabled: false }, { maxAgeDays: 365 }, { minResistRate: 0.5 }]) {
+  it("turning off, lengthening the window, lowering the floor or trials, or changing the library without a step-up is refused, and nothing changes", async () => {
+    const before = (await org()).copilotRedteamLibraryId;
+    const other = await library("other", COPILOT_REDTEAM_CLASSES.map((c) => resistible(c, "ot")));
+    for (const body of [{ enabled: false }, { maxAgeDays: 365 }, { minResistRate: 0.5 }, { minTrials: 1 }, { libraryId: other }, { libraryId: null }]) {
       const res = await put(adminKey, body);
       expect(res.statusCode, JSON.stringify(body)).toBe(403);
       expect(res.json().error).toBe("step_up_required");
@@ -318,6 +412,33 @@ describe("ADR-0056 §5 — the settings route", () => {
     expect(o.copilotRedteamGateEnabled).toBe(true);
     expect(o.copilotRedteamMaxAgeDays).toBe(14);
     expect(o.copilotRedteamMinResistRate).toBe(1);
+    expect(o.copilotRedteamMinTrials).toBe(3);
+    expect(o.copilotRedteamLibraryId).toBe(before);
+  });
+
+  it("an unknown library is refused before any step-up", async () => {
+    const res = await put(adminKey, { libraryId: randomUUID() });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error).toBe("unknown_redteam_library");
+  });
+
+  it("designating a library is a step-up, audited as a relax", async () => {
+    const lib = await library("designated", COPILOT_REDTEAM_CLASSES.map((c) => resistible(c, "dz")));
+    const grant = await grantStepUpForTest(db, adminId, {
+      kind: "settings_relax",
+      facts: { values: { copilotRedteamLibraryId: lib } },
+    });
+    const req = stepUpRequest(grant);
+    const res = await put(req.headers, { libraryId: lib }, req.cookies);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().libraryId).toBe(lib);
+    const [row] = await db
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.ruleId, COPILOT_REDTEAM_RULE_IDS.settings))
+      .orderBy(desc(auditLog.seq))
+      .limit(1);
+    expect((row!.detail as { relaxed: string[] }).relaxed).toEqual(["copilotRedteamLibraryId"]);
   });
 
   it("a valid step-up relaxes, and the audit row names what it relaxed", async () => {

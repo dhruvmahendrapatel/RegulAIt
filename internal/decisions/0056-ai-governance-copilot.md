@@ -1060,36 +1060,63 @@ amendment, limit 6; L6 residual in PENDING). As built (`apps/gateway/src/copilot
   probes go through the governed dispatch, the ADR-0064 sweep repeats the pair, and the ADR-0217 re-test repeats it
   after a model change.
 - **The promotion gate.** `POST /v1/copilot/ask` with a `narratorAgentId` checks, after the entitlement check and
-  before any provider work, the agent's DECIDING RUN: its most recent finished red-team run that gated on, or
-  measured a probe in, any copilot class. That run must have measured at least one probe in each of the four classes
-  (a class with no probe, or whose probes were all `not_run`, is not evidence: fail closed), must reach
-  `copilotRedteamMinResistRate` (strict 1) in each, must have been run against the model AND the system prompt the
-  agent serves now (`redteam_runs.system_prompt_hash`), and must be younger than `copilotRedteamMaxAgeDays`. A later
-  run touching a copilot class replaces an earlier one, which is the promotion block. A refusal is
+  before any provider work, the agent's DECIDING RUN: its most recent finished red-team run on THE copilot red-team
+  library (`copilotRedteamLibraryId`, below). That run must have used at least `copilotRedteamMinTrials` trials per
+  probe (strict 3), must have at least one probe THE MODEL ANSWERED in each of the four classes (a class with no
+  such probe is not evidence: fail closed), must reach `copilotRedteamMinResistRate` (strict 1) in each over those
+  probes, must have been run against the model AND the system prompt the agent serves now
+  (`redteam_runs.system_prompt_hash`), and must be younger than `copilotRedteamMaxAgeDays`. A later run on the
+  copilot library replaces an earlier one, which is the promotion block. A refusal is
   `409 copilot_narrator_redteam_required`, audited as `copilot-narrator-redteam-required` with the deciding run. The
   grounded, count-derived answer path (no model) is not gated.
 - **Why the run's own verdict is not used (review of #811).** `redteam_runs.gate_passed` is set under parameters the
   run's starter chooses (tolerance up to 1, floors, whether a baseline is required), a first run passes as a
-  reference, and a gating class with no probes adds no verdict. The gate therefore judges the stored, measured class
-  summary against floors it owns. The lookup is one SQL query with `LIMIT 1` over the existing
-  `(agent_id, started_at)` index.
+  reference, and a gating class with no probes adds no verdict. The gate therefore judges the run's evidence against
+  floors it owns. The lookup is one SQL query with `LIMIT 1` over the existing `(agent_id, started_at)` index, plus
+  one grouped query over the run's `redteam_probe_trials` rows (`(run_id, probe_key)` index).
+- **What counts as evidence: only probes the model answered (second review of #811).** ADR-0072 scores a probe the
+  PLATFORM held (a governance stop: an exhausted budget, a virtual-key limit, a blocking guardrail, the PII floor)
+  as a resist, which is right for the red-team report: the defence held. It is wrong for this gate, which asks
+  whether the NARRATOR resists, and a run's starter can arrange a hold (attribute the run to a project whose budget
+  is spent). So the gate does not read `class_summary`. It counts, per class, the distinct probes with at least one
+  trial the model answered (`error IS NULL` and `adjudication.platformHeld` not true), and the ones defeated in any
+  such trial. Held and errored trials are out of numerator and denominator. Under the strict data posture a class can
+  be scored entirely on holds; the gate then refuses, and the admin's remedy is a copilot library whose probes reach
+  the model, not a looser gate.
+- **Whose library decides: the gate's (second review of #811).** A run's starter picks `libraryId` and `trials`, so
+  "the newest run touching a copilot class" let a regression on a thorough library be cleared by a newer run on a
+  library with one easy probe per class. The trust decision: the gate owns the suite. `copilotRedteamLibraryId`
+  names one published library version; only runs on it decide. None is designated by default, and the gate then
+  refuses every narrator. Designating, changing or clearing it is a `settings_relax` step-up (a different library
+  can be a weaker one, and the first designation is what lets any narrator through), audited. A newer library
+  VERSION is a different row, so moving to it is the same audited step. `copilotRedteamMinTrials` (strict 3, 1–25)
+  is gate-owned for the same reason: `trials` defaults to 1 and a single-trial run is `single-trial`
+  measurement quality, not evidence. The rejected alternative, the worst result per class across every run in the
+  window, still lets the starter choose which probes "the same class" means, and cannot say when a failure is
+  cleared.
 - **Prompt drift, scope.** The run records the hash of the agent's `system_prompt` column, so a change there refuses
   until a new run. A prompt served through an ADR-0048 config version is covered by ADR-0217's re-test of the agent,
   not by this hash; matching on the full measured configuration hash is a named follow-up.
 - **Settings.** `org_settings.copilot_redteam_gate_enabled` (strict default true),
-  `copilot_redteam_max_age_days` (strict default 30, 1–365) and `copilot_redteam_min_resist_rate` (strict default 1),
+  `copilot_redteam_max_age_days` (strict default 30, 1–365), `copilot_redteam_min_resist_rate` (strict default 1),
+  `copilot_redteam_library_id` (default NULL = none designated, refuses; FK, cleared if the library is deleted) and
+  `copilot_redteam_min_trials` (strict default 3, 1–25),
   migration `pending/copilot_redteam_gate.sql`, numbered at merge. Changes are made by a named person only (the
   bootstrap token is refused). `GET /v1/copilot/redteam-gate[?agentId=]` (settings and one agent's verdict) and
-  `PUT /v1/copilot/redteam-gate` (admin). Turning the gate off, lengthening the window or lowering the floor needs
-  the `settings_relax` step-up. Every change is audited (`copilot-redteam-gate-settings`) with its transitions. Both routes are API-only,
+  `PUT /v1/copilot/redteam-gate` (admin). Turning the gate off, lengthening the window, lowering the floor or the
+  trials, or any change of library needs the `settings_relax` step-up; an unknown library is 404 and an unpublished
+  one 409. Every change is audited (`copilot-redteam-gate-settings`) with its transitions. Both routes are API-only,
   listed as known UI gaps on #453.
 - **Not verified.** As with every ADR-0057 run here, the probes are answered by the deterministic mock until a
   provider is connected (P1). The gate's mechanism is proven; a real model's resistance is not.
 - **Tests.** `zz-adr0056-copilot-redteam.test.ts` drives REAL runs (libraries authored and published over HTTP,
-  `POST /v1/redteam/runs`, the mock provider) into `POST /v1/copilot/ask`: never red-teamed refused; a first run at
-  tolerance 1 that records `gate_passed = true` but lost a `pii_leak` probe refused; a library with no copilot-class
-  probes (all four declared as gating) refused; a partial class set refused; a fully resisting run allowed; a
-  system-prompt change refused. Plus the pure verdict (window, floor, zero probes, off) and the settings route
-  (tightening audited; off, longer window and lower floor each refused without a step-up; a step-up relax audited
-  with what it relaxed; bootstrap and non-admins refused). Nine of its fourteen cases fail against the gate as first
-  pushed.
+  `POST /v1/redteam/runs`, the mock provider) into `POST /v1/copilot/ask`: no library designated refused; never run
+  on the designated library refused; a first run at tolerance 1 that records `gate_passed = true` but lost a
+  `pii_leak` probe refused; a library with no copilot-class probes (all four declared as gating) refused; a partial
+  class set refused; a run whose every probe a blocking guardrail held (`platform_held` 4, `gate_passed` true)
+  refused; a regression on the copilot library not cleared by a newer passing run on a weaker library; a fully
+  resisting run on the copilot library allowed; a system-prompt change refused; a single-trial run refused. Plus
+  the pure verdict (no library, trials, window, floor, no answered probe, off) and the settings route (tightening
+  audited; off, longer window, lower floor, fewer trials and any library change each refused without a step-up; an
+  unknown library 404; a step-up designation audited as a relax; bootstrap and non-admins refused). Fourteen of its
+  twenty-two cases fail against the gate as pushed for the first review.

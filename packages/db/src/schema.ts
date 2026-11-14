@@ -5359,9 +5359,20 @@ export const orgSettings = pgTable(
     /** ADR-0056 §5 amendment: how many days a passing copilot red-team run counts (strict 30; longer is a relax) */
     copilotRedteamMaxAgeDays: integer("copilot_redteam_max_age_days").notNull().default(30),
     /** ADR-0056 §5 amendment (review of #811): the resist rate each copilot class must reach on the deciding run,
-     * judged by the gate from the run's measured class summary, never from the run's own (caller-tunable) gate
-     * verdict. Strict 1 (every measured probe in the class resisted); lowering it is a settings_relax step-up. */
+     * judged by the gate from the probes the MODEL answered (platform-held and errored trials excluded), never from
+     * the run's own (caller-tunable) gate verdict. Strict 1 (every model-answered probe in the class resisted);
+     * lowering it is a settings_relax step-up. */
     copilotRedteamMinResistRate: doublePrecision("copilot_redteam_min_resist_rate").notNull().default(1),
+    /** ADR-0056 §5 amendment (second review of #811): THE copilot red-team library. Only a run against this library
+     * version decides, so a run's starter cannot pick a weaker library after a regression. NULL (the default) means
+     * none is designated, and the gate refuses every narrator: fail closed. Any change is a settings_relax step-up,
+     * audited (swapping libraries can weaken the suite). Deleting the library clears it, which refuses again. */
+    copilotRedteamLibraryId: uuid("copilot_redteam_library_id").references(() => redteamLibraries.id, {
+      onDelete: "set null",
+    }),
+    /** ADR-0056 §5 amendment (second review of #811): the trials per probe the deciding run must have used (strict 3;
+     * a single-trial run is not evidence by default). Lowering it is a settings_relax step-up. */
+    copilotRedteamMinTrials: integer("copilot_redteam_min_trials").notNull().default(3),
 
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -5369,6 +5380,7 @@ export const orgSettings = pgTable(
   },
   (t) => [
     check("org_settings_singleton", sql`${t.id} = 'singleton'`),
+    check("org_settings_copilot_redteam_min_trials_check", sql`${t.copilotRedteamMinTrials} BETWEEN 1 AND 25`),
     check(
       "org_settings_mrm_expiry_warn_days_check",
       sql`${t.mrmExpiryWarnDays} >= 0 AND ${t.mrmExpiryWarnDays} <= 3650`,
