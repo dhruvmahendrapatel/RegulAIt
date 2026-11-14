@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { endpointMcpUrl, launches, linkIdentity, linkScope, NO_FILTERS } from "./endpointMcpModel";
+import { endpointMcpUrl, isLinkable, launches, linkIdentity, linkScope, NO_FILTERS } from "./endpointMcpModel";
 
 describe("endpoint MCP inventory model", () => {
   it("builds a bounded page URL with only the filters set and the keyset cursor", () => {
@@ -26,5 +26,11 @@ describe("endpoint MCP inventory model", () => {
   it("warns that a command link approves everything that command launches", () => {
     expect(linkScope("command", "docker")).toMatch(/every server any device launches with 'docker' is approved/);
     expect(linkScope("host", "mcp.example.test")).not.toMatch(/every server any device launches/);
+  });
+
+  it("offers only admitted servers as link targets: an allow-list of clean and cleared", () => {
+    for (const ok of ["clean", "cleared"]) expect(isLinkable({ admissionState: ok })).toBe(true);
+    for (const no of ["unscanned", "held", "grandfathered", "refused", "admitted", ""]) expect(isLinkable({ admissionState: no })).toBe(false);
+    expect(isLinkable({})).toBe(false);
   });
 });

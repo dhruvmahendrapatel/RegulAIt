@@ -75,3 +75,14 @@ export function linkScope(kind: EndpointMcpLinkKind, identity: string): string {
     ? `This links by command: every server any device launches with '${identity}' is approved by this one link, whatever it runs.`
     : `Every device whose config names the ${kind} '${identity}' is covered by this link.`;
 }
+
+/**
+ * The registry admission states a link may target: an allow-list, never a deny-list (secure by default). The gateway's
+ * states are grandfathered | unscanned | clean | held | cleared. Only a server that passed its scan (clean) or was
+ * cleared by an admin after a hold is offered; unscanned (every new registration) and held are not, and grandfathered
+ * (servers that predate admission scanning) is excluded too until it has been scanned.
+ */
+export const LINKABLE_ADMISSION_STATES: readonly string[] = ["clean", "cleared"];
+export function isLinkable(s: { admissionState?: string }): boolean {
+  return !!s.admissionState && LINKABLE_ADMISSION_STATES.includes(s.admissionState);
+}

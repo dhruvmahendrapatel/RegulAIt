@@ -10,11 +10,12 @@ import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { McpServer } from "../../../api/adminTypes";
 import { fmtDateTime, humanize, providerLabel } from "../../../api/format";
-import { Badge, Button, Card, ConfirmModal, EmptyState, Field, IdChip, RowActions, Select, Table } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, Field, IdChip, RowActions, Select, SkeletonBlock, Table } from "../../../ui/kit";
 import { adminKeys, useAction } from "../adminKit";
 import v from "../../views.module.css";
 import {
   endpointMcpUrl,
+  isLinkable,
   launches,
   linkIdentity,
   linkScope,
@@ -38,9 +39,9 @@ export function EndpointMcpServersCard() {
     initialPageParam: null as string | null,
     getNextPageParam: (p) => p.nextCursor ?? undefined,
   });
-  // the registry, read only once a link is being chosen; held or refused servers are not approved
+  // the registry, read only once a link is being chosen; only admitted (scanned clean or cleared) servers are offered
   const servers = useQuery({ queryKey: adminKeys.servers, queryFn: () => api.get<{ servers: McpServer[] }>("/v1/servers"), enabled: !!linking });
-  const approved = (servers.data?.servers ?? []).filter((s) => s.admissionState !== "held" && s.admissionState !== "refused");
+  const approved = (servers.data?.servers ?? []).filter(isLinkable);
   const first = list.data?.pages[0];
   const rows = list.data?.pages.flatMap((p) => p.items ?? []);
   const filtered = f.status !== "" || f.risky || f.secrets || !!f.deviceId;
@@ -68,8 +69,8 @@ export function EndpointMcpServersCard() {
 
   return (
     <Card title="MCP servers on employee machines" actions={<Badge tone="info">Links audited</Badge>} contain>
-      <div className={v.stack}>
-        <p data-testid="endpoint-mcp-posture">{first?.posture ?? "—"}</p>
+      <div className={v.stack} data-testid="endpoint-mcp-card">
+        {first ? <p data-testid="endpoint-mcp-posture">{first.posture}</p> : list.isPending ? <SkeletonBlock lines={1} /> : null}
         <div className={v.row}>
           <Field label="Registry state">
             <Select value={f.status} onChange={(e) => setF({ ...f, status: e.target.value as EndpointMcpFilters["status"] })}>
@@ -104,7 +105,7 @@ export function EndpointMcpServersCard() {
               header: "Server",
               render: (r) => (
                 <>
-                  <strong>{r.serverName}</strong> {r.disabled && <Badge>disabled</Badge>}
+                  <strong>{r.serverName}</strong> {r.disabled && <Badge>Disabled</Badge>}
                   <div className={v.faint}>{humanize(r.transport)}</div>
                   <div className={v.mono}>{launches(r)}</div>
                 </>

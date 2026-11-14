@@ -134,6 +134,7 @@ export const ALLOWED_LINES = [
   { file: "apps/gateway/src/compat-anthropic.ts", contains: "roles are valid in the Anthropic Messages shape;", names: ["Anthropic"], why: WIRE },
   { file: "apps/gateway/src/compat-anthropic.ts", contains: 'rejectUnsupportedFields(raw, ANTHROPIC_SUPPORTED_FIELDS, "Anthropic")', names: ["Anthropic"], why: WIRE },
   { file: "apps/gateway/src/compat-openai.ts", contains: 'rejectUnsupportedFields(raw, OPENAI_SUPPORTED_FIELDS, "OpenAI")', names: ["OpenAI"], why: WIRE },
+  { file: "apps/gateway/src/compat-responses.ts", contains: 'rejectUnsupportedFields(raw, RESPONSES_SUPPORTED_FIELDS, "OpenAI Responses")', names: ["OpenAI"], why: WIRE },
 
   { file: "apps/gateway/src/builder-catalog.ts", contains: 'C("huggingface", "Hugging Face",', names: ["Hugging Face"], why: CATALOGUE },
   { file: "apps/gateway/src/builder-catalog.ts", contains: 'C("perplexity", "Perplexity",', names: ["Perplexity"], why: CATALOGUE },

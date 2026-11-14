@@ -18,6 +18,8 @@ const DEVICE_A = uuid("61000000", 1);
 const DEVICE_B = uuid("61000000", 2);
 const APPROVED = uuid("62000000", 1);
 const HELD = uuid("62000000", 2);
+const UNSCANNED = uuid("62000000", 3);
+const CLEARED = uuid("62000000", 4);
 const FINDING = uuid("63000000", 1);
 const ON = "Endpoint MCP config discovery is on: enrolled endpoint agents read the MCP host configs the signed collection pack names, read-only.";
 const OFF = "Endpoint MCP config discovery is off: no endpoint agent reads MCP host configs, and any such fact a device sends is refused, not stored.";
@@ -117,7 +119,7 @@ async function mockApi(page: Page, opts: Opts = {}) {
       if (!links.delete(`${b.identityKind}\0${b.identity}`)) return json(route, { error: "link_not_found", detail: "that identity is not linked to any server" }, 404);
       return json(route, { identityKind: b.identityKind, identity: b.identity, removed: true });
     }
-    if (p === "/v1/servers") return json(route, { servers: [{ id: APPROVED, name: "Acme approved files", url: "https://mcp.example.test", admissionState: "admitted" }, { id: HELD, name: "Acme held server", url: "https://held.example.test", admissionState: "held" }] });
+    if (p === "/v1/servers") return json(route, { servers: [{ id: APPROVED, name: "Acme approved files", url: "https://mcp.example.test", admissionState: "clean" }, { id: HELD, name: "Acme held server", url: "https://held.example.test", admissionState: "held" }, { id: UNSCANNED, name: "Acme unscanned server", url: "https://new.example.test", admissionState: "unscanned" }, { id: CLEARED, name: "Acme cleared server", url: "https://cleared.example.test", admissionState: "cleared" }] });
     if (p === "/v1/discovery/settings" && method === "PUT") {
       const b = body as { endpointMcpConfig?: boolean };
       if (b.endpointMcpConfig !== undefined) enabled = b.endpointMcpConfig;
@@ -134,7 +136,7 @@ async function mockApi(page: Page, opts: Opts = {}) {
 }
 
 const PAGE = "/ui/admin/shadow-ai/discovery-sources";
-const card = (page: Page) => page.getByTestId("endpoint-mcp-posture").locator("xpath=ancestor::section[@data-rg-card][1]");
+const card = (page: Page) => page.getByTestId("endpoint-mcp-card").locator("xpath=ancestor::section[@data-rg-card][1]");
 const inventoryCalls = (calls: Awaited<ReturnType<typeof mockApi>>) => calls.filter((c) => c.path === "/v1/discovery/endpoint-mcp-servers");
 
 test.use({ viewport: { width: 1440, height: 900 } });
@@ -189,9 +191,12 @@ test("link by command warns it approves everything that command launches; unlink
   const dialog = page.getByRole("dialog", { name: "Link acme-shell to an approved server" });
   await expect(dialog).toContainText("every server any device launches with 'acme-runner' is approved by this one link");
   await expect(dialog).toContainText("Wide link");
-  // nothing pre-selected, and a held server is not offered
+  // nothing pre-selected; only admitted (clean, cleared) servers are offered, never held or unscanned
   await expect(dialog.getByLabel("Approved server")).toHaveValue("");
+  await expect(dialog.getByRole("option", { name: "Acme approved files" })).toHaveCount(1);
+  await expect(dialog.getByRole("option", { name: "Acme cleared server" })).toHaveCount(1);
   await expect(dialog.getByRole("option", { name: "Acme held server" })).toHaveCount(0);
+  await expect(dialog.getByRole("option", { name: "Acme unscanned server" })).toHaveCount(0);
   await dialog.getByRole("button", { name: "Link" }).click();
   await expect(dialog).toContainText("Choose the approved server to link it to.");
   await expectAxeClean(page, "MCP servers on employee machines: the link dialog");
