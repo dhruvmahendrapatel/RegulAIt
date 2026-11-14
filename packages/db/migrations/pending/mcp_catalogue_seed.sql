@@ -5,13 +5,14 @@
 --    'offline_bundle'). Every existing row is an ADR-0101 registry pull, which is what the defaults say. Vetting is
 --    derived from listing_kind (community = unvetted), never stored per entry.
 -- 2. `mcp_catalogue_items`: one row per server as the catalogue understands it, keyed by the dedupe key
---    (`repo:github.com/owner/repo`, else `name:<upstream name>`). Source rows stay in `mcp_registry_entries`, one per
+--    (`repo:github.com/owner/repo[/<subfolder>]`, else `name:<upstream name>`). Source rows stay in `mcp_registry_entries`, one per
 --    source, so provenance is never merged away.
 -- 3. `mcp_catalogue_snapshots`: one APPEND-ONLY row per successful refresh of a source (a pull or a bundle import):
 --    what was asserted, when, by whom, its content digest and, for a bundle, the key that signed it. Evidence:
 --    UPDATE, DELETE and TRUNCATE are refused (0185's pattern, functions pin search_path).
--- 4. `mcp_registry_entries` gains `catalogue_item_id`, `paid_signal` and `last_snapshot_id`. Nothing is backfilled:
---    a row from before this migration is linked by the next refresh of its source (NULL until then).
+-- 4. `mcp_registry_entries` gains `catalogue_item_id`, `paid_signal`, `last_snapshot_id` and `repository_subfolder`
+--    (the server's folder in a monorepo, part of the dedupe key). Nothing is backfilled: a row from before this
+--    migration is linked by the next refresh of its source (NULL until then).
 --
 -- No row is inserted. A fresh install still has zero sources; seeding is an admin act (ADR-0180).
 
@@ -46,7 +47,7 @@ CREATE TABLE IF NOT EXISTS "mcp_catalogue_snapshots" (
   "actor_user_id" uuid,
   "entry_count" integer NOT NULL,
   "truncated" boolean NOT NULL,
-  -- sha256 over the sorted per-entry release digests the refresh saw
+  -- sha256 over the sorted per-entry content digests the refresh saw (each over every normalised field of the entry)
   "content_digest" text NOT NULL,
   -- a bundle import only: the trusted key id, the sha256 of the signed bytes and the bundle's own createdAt
   "bundle_key_id" text,
@@ -83,6 +84,8 @@ CREATE TRIGGER "mcp_catalogue_snapshots_no_truncate" BEFORE TRUNCATE ON public."
 ALTER TABLE "mcp_registry_entries" ADD COLUMN IF NOT EXISTS "catalogue_item_id" uuid REFERENCES "mcp_catalogue_items"("id") ON DELETE RESTRICT;
 --> statement-breakpoint
 ALTER TABLE "mcp_registry_entries" ADD COLUMN IF NOT EXISTS "paid_signal" text;
+--> statement-breakpoint
+ALTER TABLE "mcp_registry_entries" ADD COLUMN IF NOT EXISTS "repository_subfolder" text;
 --> statement-breakpoint
 ALTER TABLE "mcp_registry_entries" ADD COLUMN IF NOT EXISTS "last_snapshot_id" uuid REFERENCES "mcp_catalogue_snapshots"("id") ON DELETE RESTRICT;
 --> statement-breakpoint

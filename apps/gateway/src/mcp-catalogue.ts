@@ -43,6 +43,7 @@ import {
   bundleEntriesUsable,
   MCP_CATALOGUE_BUNDLE_FORMAT,
   MCP_CATALOGUE_BUNDLE_MAX_BYTES,
+  MCP_CATALOGUE_BUNDLE_MAX_ENTRIES,
   MCP_CATALOGUE_PRESET_IDS,
   MCP_CATALOGUE_PRESETS,
   mcpCatalogueBundleSchema,
@@ -57,7 +58,7 @@ import {
   mcpRegistryRuleIds,
   recordCatalogueSnapshot,
   refuseRegistryWrite,
-  registryEntryDigest,
+  catalogueEntryDigest,
   upsertEntry,
   type McpRegistryDeps,
 } from "./mcp-registry.js";
@@ -72,6 +73,14 @@ async function dbNow(db: Db): Promise<Date> {
 }
 
 export const MCP_CATALOGUE_BUNDLE_KEYS_ENV = "REGULAIT_MCP_CATALOGUE_BUNDLE_KEYS";
+/**
+ * How far a bundle's `createdAt` may run ahead of this database's clock. Imports must be strictly newer than the last
+ * one, so an unbounded future date (a signer's clock error) would lock its source out for good: sources cannot be
+ * deleted and snapshots are append-only. Five minutes covers ordinary clock skew between two installs.
+ */
+export const MCP_CATALOGUE_BUNDLE_MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
+/** the import body carries the bundle as a JSON string; escaping (`"` and `\\`) at most doubles it */
+export const MCP_CATALOGUE_BUNDLE_BODY_LIMIT = MCP_CATALOGUE_BUNDLE_MAX_BYTES * 2 + 64 * 1024;
 export const MCP_CATALOGUE_BUNDLE_KEYS_FILE_ENV = "REGULAIT_MCP_CATALOGUE_BUNDLE_KEYS_FILE";
 
 // ---------------------------------------------------------------------------
@@ -226,6 +235,13 @@ export async function importCatalogueBundle(
 
   return db.transaction(async (tx) => {
     const t = tx as unknown as Db;
+    // one clock for the pass: the database's, so the skew check, `last_synced_at` and the snapshot agree (M-075)
+    const now = await dbNow(t);
+    if (createdAt.getTime() > now.getTime() + MCP_CATALOGUE_BUNDLE_MAX_CLOCK_SKEW_MS) {
+      const detail = `the bundle is dated ${bundle.createdAt}, later than this install's clock (${now.toISOString()}) allows; a future-dated bundle would refuse every later one`;
+      await auditBundleRefused(t, opts.actorUserId, "future_bundle", detail, { keyId, digest });
+      return { ok: false as const, status: 409, body: { error: "bundle_refused", code: "future_bundle", detail } };
+    }
     const [existing] = await t.select().from(mcpRegistries).where(eq(mcpRegistries.name, bundle.source.name)).for("update");
     if (existing && existing.delivery !== "offline_bundle") {
       const detail = `source '${bundle.source.name}' is a pulled source; a bundle never overwrites one`;
@@ -250,6 +266,8 @@ export async function importCatalogueBundle(
         return { ok: false as const, status: 409, body: { error: "bundle_refused", code: "stale_bundle", detail } };
       }
     }
+    // `FOR UPDATE` locks nothing when the row does not exist yet, so a concurrent first import of the same source is
+    // settled by the unique name: the loser inserts nothing and gets an audited 409, never a unique-violation 500
     const registry =
       existing ??
       (
@@ -262,16 +280,20 @@ export async function importCatalogueBundle(
             listingKind: bundle.source.listingKind,
             delivery: "offline_bundle",
           })
+          .onConflictDoNothing({ target: mcpRegistries.name })
           .returning()
-      )[0]!;
+      )[0];
+    if (!registry) {
+      const detail = `source '${bundle.source.name}' was created by a concurrent request; retry the import`;
+      await auditBundleRefused(t, opts.actorUserId, "concurrent_import", detail, { keyId, digest });
+      return { ok: false as const, status: 409, body: { error: "bundle_refused", code: "concurrent_import", detail } };
+    }
 
-    // one clock for the pass: the database's, so `last_synced_at` and the snapshot agree (M-075)
-    const now = await dbNow(t);
     const usable = bundleEntriesUsable(bundle.entries);
     const counts = { created: 0, updated: 0, conflicts: 0 };
     const digests: string[] = [];
     for (const entry of usable.entries) {
-      digests.push(registryEntryDigest({ registryId: registry.id, ...entry }));
+      digests.push(catalogueEntryDigest(entry));
       const p = await upsertEntry(t, registry.id, entry, now);
       if (p.created) counts.created += 1;
       else counts.updated += 1;
@@ -335,14 +357,32 @@ export async function importCatalogueBundle(
 // bundle export (unsigned; signed offline)
 // ---------------------------------------------------------------------------
 
-export async function exportCatalogueBundle(db: Db, registryId: string, now: Date): Promise<string | null> {
+export type BundleExportOutcome =
+  | { ok: true; text: string }
+  | { ok: false; code: "unknown_registry" }
+  | { ok: false; code: "bundle_too_large"; detail: string };
+
+/**
+ * Export a source as an unsigned bundle. The same limits as the import apply HERE, so a source too large to import is
+ * refused before anyone signs it offline.
+ */
+export async function exportCatalogueBundle(db: Db, registryId: string, now: Date): Promise<BundleExportOutcome> {
   const [registry] = await db.select().from(mcpRegistries).where(eq(mcpRegistries.id, registryId));
-  if (!registry) return null;
-  const rows = await db
-    .select()
-    .from(mcpRegistryEntries)
-    .where(eq(mcpRegistryEntries.registryId, registryId))
-    .orderBy(asc(mcpRegistryEntries.upstreamName));
+  if (!registry) return { ok: false, code: "unknown_registry" };
+  const rows = (
+    await db
+      .select()
+      .from(mcpRegistryEntries)
+      .where(eq(mcpRegistryEntries.registryId, registryId))
+      .orderBy(asc(mcpRegistryEntries.upstreamName))
+  ).filter((r) => r.missingSince === null);
+  if (rows.length > MCP_CATALOGUE_BUNDLE_MAX_ENTRIES) {
+    return {
+      ok: false,
+      code: "bundle_too_large",
+      detail: `source '${registry.name}' has ${rows.length} entries; a bundle holds at most ${MCP_CATALOGUE_BUNDLE_MAX_ENTRIES}`,
+    };
+  }
   const preset = Object.values(MCP_CATALOGUE_PRESETS).find((p) => p.url === registry.url);
   const bundle: McpCatalogueBundle = {
     format: MCP_CATALOGUE_BUNDLE_FORMAT,
@@ -354,14 +394,13 @@ export async function exportCatalogueBundle(db: Db, registryId: string, now: Dat
       dataLicence: preset?.dataLicence ?? "unstated",
     },
     truncated: Boolean((registry.lastSyncDetail as { truncated?: boolean } | null)?.truncated),
-    entries: rows
-      .filter((r) => r.missingSince === null)
-      .map((r) => ({
+    entries: rows.map((r) => ({
         upstreamName: r.upstreamName,
         upstreamVersion: r.upstreamVersion,
         title: r.title,
         description: r.description,
         repositoryUrl: r.repositoryUrl,
+        repositorySubfolder: r.repositorySubfolder,
         websiteUrl: r.websiteUrl,
         kind: r.kind,
         remoteUrl: r.remoteUrl,
@@ -375,7 +414,16 @@ export async function exportCatalogueBundle(db: Db, registryId: string, now: Dat
         paidSignal: r.paidSignal,
       })),
   };
-  return JSON.stringify(bundle);
+  const text = JSON.stringify(bundle);
+  const bytes = Buffer.byteLength(text, "utf8");
+  if (bytes > MCP_CATALOGUE_BUNDLE_MAX_BYTES) {
+    return {
+      ok: false,
+      code: "bundle_too_large",
+      detail: `the bundle for '${registry.name}' is ${bytes} bytes; a bundle holds at most ${MCP_CATALOGUE_BUNDLE_MAX_BYTES}`,
+    };
+  }
+  return { ok: true, text };
 }
 
 // ---------------------------------------------------------------------------
@@ -403,10 +451,13 @@ export async function listCatalogue(db: Db, query: z.infer<typeof catalogueQuery
   const matching = pattern
     ? sql`${mcpCatalogueItems.id} in (select ${mcpRegistryEntries.catalogueItemId} from ${mcpRegistryEntries} where ${mcpRegistryEntries.upstreamName} ilike ${pattern} or coalesce(${mcpRegistryEntries.title}, '') ilike ${pattern})`
     : undefined;
+  // an item is listed only while some source row still points at it: an item with nothing behind it (every row
+  // re-keyed elsewhere) would otherwise show as an "unvetted" server no source lists
+  const linked = sql`exists (select 1 from ${mcpRegistryEntries} where ${mcpRegistryEntries.catalogueItemId} = ${mcpCatalogueItems.id})`;
   const items = await db
     .select({ id: mcpCatalogueItems.id, dedupeKey: mcpCatalogueItems.dedupeKey })
     .from(mcpCatalogueItems)
-    .where(pattern ? sql`(${mcpCatalogueItems.dedupeKey} ilike ${pattern} or ${matching})` : undefined)
+    .where(pattern ? sql`${linked} and (${mcpCatalogueItems.dedupeKey} ilike ${pattern} or ${matching})` : linked)
     .orderBy(asc(mcpCatalogueItems.dedupeKey))
     .limit(query.limit + 1)
     .offset(query.offset);
@@ -444,13 +495,17 @@ export async function listCatalogue(db: Db, query: z.infer<typeof catalogueQuery
   return {
     items: page.map((item) => {
       const mine = sources.filter((s) => s.itemId === item.id);
+      // what sources say TODAY: a row its source no longer lists (`missingSince`) stays visible as provenance, but
+      // no longer vouches for the item or flags it
+      const current = mine.filter((s) => s.missingSince === null);
       const admissions = mine.map((s) => admissionOf(s.serverId ? s.serverAdmission : null));
       return {
         id: item.id,
         dedupeKey: item.dedupeKey,
-        // listed by the registry anywhere = registry_listed; only community sources = unvetted
-        vetting: mine.some((s) => s.listingKind === "registry") ? "registry_listed" : "unvetted",
-        paid: mine.find((s) => s.paidSignal === "x402")?.paidSignal ?? mine.find((s) => s.paidSignal)?.paidSignal ?? null,
+        // currently listed by the registry anywhere = registry_listed; otherwise unvetted
+        vetting: current.some((s) => s.listingKind === "registry") ? "registry_listed" : "unvetted",
+        listedNow: current.length > 0,
+        paid: current.find((s) => s.paidSignal === "x402")?.paidSignal ?? current.find((s) => s.paidSignal)?.paidSignal ?? null,
         admission: admissions.includes("imported_admitted")
           ? "imported_admitted"
           : admissions.includes("imported_not_admitted")
@@ -480,8 +535,6 @@ export function registerMcpCatalogueRoutes(app: FastifyInstance, db: Db, deps: M
   app.post("/v1/mcp-catalogue/presets/:preset", async (req, reply) => {
     const { preset } = presetParam.parse(req.params);
     const p = MCP_CATALOGUE_PRESETS[preset];
-    const [taken] = await db.select({ id: mcpRegistries.id }).from(mcpRegistries).where(eq(mcpRegistries.name, p.name));
-    if (taken) return reply.status(409).send({ error: "conflict", detail: `a source named '${p.name}' already exists`, registryId: taken.id });
     // the same write-time egress check as any registry: the host must already be allow-listed (default-deny holds)
     const refusal = await refuseRegistryWrite(db, {
       url: p.url,
@@ -491,14 +544,31 @@ export function registerMcpCatalogueRoutes(app: FastifyInstance, db: Db, deps: M
       deps,
     });
     if (refusal) return reply.status(400).send(refusal);
+    // insert-or-nothing on the unique name: two concurrent seeds give one 201 and one audited 409, never a 500
     const [row] = await db
       .insert(mcpRegistries)
       .values({ name: p.name, url: p.url, enabled: false, allowPrivateRanges: null, listingKind: p.listingKind })
+      .onConflictDoNothing({ target: mcpRegistries.name })
       .returning();
+    if (!row) {
+      const [taken] = await db.select({ id: mcpRegistries.id }).from(mcpRegistries).where(eq(mcpRegistries.name, p.name));
+      const detail = `a source named '${p.name}' already exists`;
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId ?? NIL_USER,
+        objectType: "mcp_server",
+        objectId: taken?.id ?? null,
+        detail: { phase: "catalogue-seed", preset, name: p.name, code: "name_taken" },
+        effect: "deny",
+        ruleId: mcpRegistryRuleIds.seeded,
+        ruleChain: [],
+        reason: `MCP catalogue preset '${preset}' not seeded: ${detail}`,
+      });
+      return reply.status(409).send({ error: "conflict", detail, registryId: taken?.id ?? null });
+    }
     await db.insert(auditLog).values({
       userId: req.authCtx.userId ?? NIL_USER,
       objectType: "mcp_server",
-      objectId: row!.id,
+      objectId: row.id,
       detail: { phase: "catalogue-seed", preset, name: p.name, url: p.url, listingKind: p.listingKind, dataLicence: p.dataLicence, enabled: false },
       effect: "allow",
       ruleId: mcpRegistryRuleIds.seeded,
@@ -510,7 +580,7 @@ export function registerMcpCatalogueRoutes(app: FastifyInstance, db: Db, deps: M
     return reply.status(201).send(row);
   });
 
-  app.post("/v1/mcp-catalogue/bundles", { bodyLimit: MCP_CATALOGUE_BUNDLE_MAX_BYTES + 64 * 1024 }, async (req, reply) => {
+  app.post("/v1/mcp-catalogue/bundles", { bodyLimit: MCP_CATALOGUE_BUNDLE_BODY_LIMIT }, async (req, reply) => {
     const body = importBundleBodySchema.parse(req.body);
     const out = await importCatalogueBundle(db, body, { actorUserId: req.authCtx.userId ?? null });
     if (!out.ok) return reply.status(out.status).send(out.body);
@@ -519,9 +589,10 @@ export function registerMcpCatalogueRoutes(app: FastifyInstance, db: Db, deps: M
 
   app.get("/v1/mcp-catalogue/bundle", async (req, reply) => {
     const { registryId } = bundleQuery.parse(req.query);
-    const text = await exportCatalogueBundle(db, registryId, await dbNow(db));
-    if (text === null) return reply.status(404).send({ error: "unknown_registry" });
-    return reply.header("content-type", "application/json; charset=utf-8").send(text);
+    const out = await exportCatalogueBundle(db, registryId, await dbNow(db));
+    if (!out.ok && out.code === "unknown_registry") return reply.status(404).send({ error: "unknown_registry" });
+    if (!out.ok) return reply.status(409).send({ error: "bundle_too_large", detail: out.detail });
+    return reply.header("content-type", "application/json; charset=utf-8").send(out.text);
   });
 
   app.get("/v1/mcp-catalogue", async (req) => listCatalogue(db, catalogueQuerySchema.parse(req.query)));

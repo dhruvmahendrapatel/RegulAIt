@@ -5,14 +5,18 @@
  * awesome-list README. Nothing here touches the public network. The claims are the governance ones:
  *
  *   - a community list yields only catalogue-only, UNVETTED entries, flagged when paid or x402;
- *   - the same repository from two sources is ONE item with TWO provenance rows;
+ *   - the same repository from two sources is ONE item with TWO provenance rows, and two servers in one monorepo are
+ *     two items (the subfolder is part of the key);
  *   - every refresh writes one APPEND-ONLY snapshot and every asserted row points at it;
- *   - an offline bundle is refused with no keyring, with a wrong key or signature, and when it is not newer than the
- *     last one; a verified bundle lands, and its source is never dialled by a sync or a sweep;
+ *   - an offline bundle is refused with no keyring, with a wrong key or signature, when it is malformed, when it is not
+ *     newer than the last one and when it is dated in the future; a verified bundle lands, and its source is never
+ *     dialled by a sync or a sweep;
+ *   - every route is admin-only; a preset is created disabled, behind the egress check, once even under a race;
  *   - a community pull is refused on an air-gapped deployment, while a bundle import is the supported motion there;
  *   - nothing here creates a server or a grant: every entry is "available, not admitted".
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import Fastify from "fastify";
 import http from "node:http";
 import path from "node:path";
 import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
@@ -33,10 +37,17 @@ import {
   sql,
   type Db,
 } from "@regulait/db";
-import { MCP_CATALOGUE_BUNDLE_FORMAT, type McpCatalogueBundle } from "@regulait/shared";
+import { MCP_CATALOGUE_BUNDLE_FORMAT, MCP_CATALOGUE_PRESETS, type McpCatalogueBundle, type NormalizedRegistryEntry } from "@regulait/shared";
 import { buildApp } from "./app.js";
-import { importCatalogueBundle, loadBundleKeyring, MCP_CATALOGUE_BUNDLE_KEYS_ENV, verifyBundle } from "./mcp-catalogue.js";
-import { mcpRegistryRuleIds, runMcpRegistrySync, syncRegistry, type RegistryRow } from "./mcp-registry.js";
+import {
+  importCatalogueBundle,
+  loadBundleKeyring,
+  MCP_CATALOGUE_BUNDLE_KEYS_ENV,
+  registerMcpCatalogueRoutes,
+  verifyBundle,
+} from "./mcp-catalogue.js";
+import { catalogueEntryDigest, mcpRegistryRuleIds, runMcpRegistrySync, syncRegistry, type RegistryRow } from "./mcp-registry.js";
+import { trackEgressAllowHosts } from "./testing/egress-allow-cleanup.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -56,12 +67,16 @@ const registryIds: string[] = [];
 const REPO = `github.com/acme-${SUITE}/weather`;
 const COMMUNITY_ONLY = `github.com/solo-${SUITE}/thing`;
 const X402 = `github.com/pay-${SUITE}/x402-tools`;
+/** one monorepo holding two unrelated servers */
+const MONO = `github.com/mono-${SUITE}/servers`;
 
 const README = [
   "# Awesome MCP Servers",
   `- [acme/weather](https://${REPO}) 📇 ☁️ - Forecasts for anywhere.`,
   `- [solo/thing](https://${COMMUNITY_ONLY}) 🐍 🏠 - Only a community list knows this one.`,
   `- [pay/x402-tools](https://${X402}) 📇 ☁️ - Pay-per-call x402 market data.`,
+  `- [mono/alpha](https://${MONO}/tree/main/src/alpha) 📇 - Alpha, one server of a monorepo.`,
+  `- [mono/beta](https://${MONO}/tree/main/src/beta) 📇 - Beta, another server of the same monorepo.`,
 ].join("\n");
 
 const REGISTRY_PAGE = {
@@ -76,8 +91,17 @@ const REGISTRY_PAGE = {
       },
       _meta: { "io.modelcontextprotocol.registry/official": { status: "active" } },
     },
+    ...["alpha", "beta"].map((n) => ({
+      server: {
+        name: `io.github.mono-${SUITE}/${n}`,
+        description: `${n} server`,
+        version: "0.1.0",
+        repository: { url: `https://${MONO}`, subfolder: `src/${n}` },
+        packages: [{ registryType: "npm", identifier: `@mono/${n}` }],
+      },
+    })),
   ],
-  metadata: { count: 1 },
+  metadata: { count: 3 },
 };
 
 async function startFake() {
@@ -136,8 +160,8 @@ describe("ADR-0256 community list and cross-source dedupe", () => {
     community = row;
     const out = await syncRegistry(db, row, { deps: { deployMode: "hosted" } });
     expect(out.outcome).toBe("ok");
-    expect(out.entriesSeen).toBe(3);
-    expect(out.catalogueOnly).toBe(3);
+    expect(out.entriesSeen).toBe(5);
+    expect(out.catalogueOnly).toBe(5);
     expect(out.snapshotId).toBeTruthy();
 
     const entries = await db.select().from(mcpRegistryEntries).where(eq(mcpRegistryEntries.registryId, row.id));
@@ -146,7 +170,7 @@ describe("ADR-0256 community list and cross-source dedupe", () => {
     expect(entries.find((e) => e.upstreamName === X402)!.paidSignal).toBe("x402");
 
     const [snap] = await db.select().from(mcpCatalogueSnapshots).where(eq(mcpCatalogueSnapshots.id, out.snapshotId!));
-    expect(snap).toMatchObject({ listingKind: "community", delivery: "pull", entryCount: 3, truncated: false, bundleKeyId: null });
+    expect(snap).toMatchObject({ listingKind: "community", delivery: "pull", entryCount: 5, truncated: false, bundleKeyId: null });
     expect(await counts()).toEqual(before);
   });
 
@@ -173,6 +197,32 @@ describe("ADR-0256 community list and cross-source dedupe", () => {
     expect(shared).toMatchObject({ vetting: "registry_listed", admission: "available_not_admitted" });
     expect(body.items.find((i) => i.dedupeKey === `repo:${COMMUNITY_ONLY}`)).toMatchObject({ vetting: "unvetted", admission: "available_not_admitted" });
     expect(body.items.find((i) => i.dedupeKey === `repo:${X402}`)!.paid).toBe("x402");
+  });
+
+  it("keeps two servers of one monorepo apart, each matched across the registry and the list by its subfolder", async () => {
+    for (const n of ["alpha", "beta"]) {
+      const [item] = await db.select().from(mcpCatalogueItems).where(eq(mcpCatalogueItems.dedupeKey, `repo:${MONO}/src/${n}`));
+      expect(item).toBeTruthy();
+      const rows = await db.select().from(mcpRegistryEntries).where(eq(mcpRegistryEntries.catalogueItemId, item!.id));
+      expect(rows.map((r) => r.registryId).sort()).toEqual([community.id, official.id].sort());
+      expect(rows.every((r) => r.repositorySubfolder === `src/${n}`)).toBe(true);
+    }
+    // nothing collapsed into the bare repository
+    expect(await db.select().from(mcpCatalogueItems).where(eq(mcpCatalogueItems.dedupeKey, `repo:${MONO}`))).toHaveLength(0);
+  });
+
+  it("lists no item that no source row points at", async () => {
+    await db.insert(mcpCatalogueItems).values({ dedupeKey: `name:orphan-${SUITE}` });
+    const res = await app.inject({ method: "GET", url: `/v1/mcp-catalogue?q=${encodeURIComponent(`orphan-${SUITE}`)}`, headers: AUTH });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as { items: unknown[] }).items).toHaveLength(0);
+  });
+
+  it("digests what a source said, not only its name and version", () => {
+    const e = { upstreamName: "n", upstreamVersion: "listed", title: "t", description: "one", repositoryUrl: null, repositorySubfolder: null, websiteUrl: null, kind: "catalogue_only", remoteUrl: null, remoteTransport: null, catalogueReason: "community_listing", upstreamStatus: null, publishedAt: null, updatedAt: null, packageCount: 0, remoteCount: 0, paidSignal: null } satisfies NormalizedRegistryEntry;
+    expect(catalogueEntryDigest({ ...e, description: "two" })).not.toBe(catalogueEntryDigest(e));
+    expect(catalogueEntryDigest({ ...e, paidSignal: "paid" })).not.toBe(catalogueEntryDigest(e));
+    expect(catalogueEntryDigest({ ...e })).toBe(catalogueEntryDigest(e));
   });
 
   it("refuses a community pull on an air-gapped deployment, before any socket", async () => {
@@ -208,6 +258,7 @@ describe("ADR-0256 signed offline bundles", () => {
     title: null,
     description: null,
     repositoryUrl: null,
+    repositorySubfolder: null,
     websiteUrl: null,
     kind: "remote" as const,
     remoteUrl: "https://mcp.example.invalid/mcp",
@@ -264,6 +315,29 @@ describe("ADR-0256 signed offline bundles", () => {
     // a complete bundle that no longer lists the entry marks it missing, and deletes nothing
     const [entry] = await db.select().from(mcpRegistryEntries).where(eq(mcpRegistryEntries.upstreamName, remote.upstreamName));
     expect(entry!.missingSince).not.toBeNull();
+    // a row its source no longer lists stays as provenance, but no longer vouches for the item
+    const res = await app.inject({ method: "GET", url: `/v1/mcp-catalogue?q=${encodeURIComponent(remote.upstreamName)}`, headers: AUTH });
+    const item = (res.json() as { items: Array<{ vetting: string; listedNow: boolean; sources: unknown[] }> }).items[0]!;
+    expect(item).toMatchObject({ vetting: "unvetted", listedNow: false });
+    expect(item.sources).toHaveLength(1);
+  });
+
+  it("refuses a future-dated bundle, so a signer's clock error cannot lock the source out", async () => {
+    const future = await importCatalogueBundle(db, signed(bundleOf("2099-01-01T00:00:00Z", [])), { actorUserId: null, keyring });
+    expect(future).toMatchObject({ ok: false, status: 409, body: { code: "future_bundle" } });
+    // nothing was recorded for it: the next ordinary bundle still lands
+    const next = await importCatalogueBundle(db, signed(bundleOf("2026-11-08T06:00:00Z", [])), { actorUserId: null, keyring });
+    expect(next.ok).toBe(true);
+  });
+
+  it("refuses a validly signed bundle that is not JSON, or not the format", async () => {
+    const before = (await db.select({ id: auditLog.id }).from(auditLog).where(eq(auditLog.ruleId, mcpRegistryRuleIds.bundleRefused))).length;
+    for (const text of ["not json", JSON.stringify({ format: MCP_CATALOGUE_BUNDLE_FORMAT, createdAt: "2026-11-09T00:00:00Z" })]) {
+      const out = await importCatalogueBundle(db, signed(text), { actorUserId: null, keyring });
+      expect(out).toMatchObject({ ok: false, status: 400, body: { code: "malformed" } });
+    }
+    const after = (await db.select({ id: auditLog.id }).from(auditLog).where(eq(auditLog.ruleId, mcpRegistryRuleIds.bundleRefused))).length;
+    expect(after - before).toBeGreaterThanOrEqual(2);
   });
 
   it("never lets a bundle overwrite a pulled source of the same name", async () => {
@@ -282,7 +356,7 @@ describe("ADR-0256 signed offline bundles", () => {
     const sweep = await runMcpRegistrySync(db, { limit: 50, deps: { deployMode: "hosted" } });
     expect(JSON.stringify(sweep)).not.toContain(src!.id);
     await db.update(mcpRegistries).set({ enabled: false }).where(eq(mcpRegistries.id, src!.id));
-    expect(fake.hits.length).toBeGreaterThanOrEqual(hitsBefore);
+    expect(fake.hits.length).toBe(hitsBefore);
     const servers = await db.select({ id: mcpServers.id }).from(mcpServers).where(eq(mcpServers.name, remote.upstreamName));
     expect(servers).toHaveLength(0);
   });
@@ -298,14 +372,70 @@ describe("ADR-0256 signed offline bundles", () => {
 });
 
 describe("ADR-0256 presets", () => {
+  const perTest = trackEgressAllowHosts();
+  afterEach(async () => (await perTest.removeAll(app, AUTH)).assertRemoved());
+
   it("refuses a preset whose host is not allow-listed: seeding never opens egress", async () => {
-    // a unique name check runs first; the official preset may exist from another run, so only assert no success
     const res = await app.inject({ method: "POST", url: "/v1/mcp-catalogue/presets/awesome-mcp-servers", headers: AUTH });
-    expect([400, 409]).toContain(res.statusCode);
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ error: "egress_blocked", code: "host_not_allowlisted" });
+    expect(await db.select().from(mcpRegistries).where(eq(mcpRegistries.name, MCP_CATALOGUE_PRESETS["awesome-mcp-servers"].name))).toHaveLength(0);
   });
 
   it("refuses an unknown preset", async () => {
     const res = await app.inject({ method: "POST", url: "/v1/mcp-catalogue/presets/everything", headers: AUTH });
     expect(res.statusCode).toBe(400);
+  });
+
+  it("seeds an allow-listed preset once, disabled and audited, even when two requests race", async () => {
+    const p = MCP_CATALOGUE_PRESETS.official;
+    const host = new URL(p.url).hostname;
+    // a leftover from an aborted run (no snapshot, so deletable) must not decide this test
+    await db.delete(mcpRegistries).where(eq(mcpRegistries.name, p.name));
+    const allow = await app.inject({ method: "POST", url: "/v1/egress-allow-hosts", headers: AUTH, payload: { host: perTest.trackHost(host), note: "adr256 preset test" } });
+    expect(allow.statusCode).toBeLessThan(300);
+    // the same routes on a bare app, with a DNS double, so nothing leaves this box
+    const mini = Fastify();
+    mini.decorateRequest("authCtx");
+    mini.addHook("onRequest", async (req) => {
+      (req as unknown as { authCtx: unknown }).authCtx = { userId: null, isAdmin: true, via: "api-key" };
+    });
+    registerMcpCatalogueRoutes(mini, db, { resolve: async () => [{ address: "93.184.216.34", family: 4 }] });
+    await mini.ready();
+    try {
+      const [a, b] = await Promise.all([
+        mini.inject({ method: "POST", url: "/v1/mcp-catalogue/presets/official" }),
+        mini.inject({ method: "POST", url: "/v1/mcp-catalogue/presets/official" }),
+      ]);
+      expect([a.statusCode, b.statusCode].sort()).toEqual([201, 409]);
+      const created = (a.statusCode === 201 ? a : b).json() as { id: string };
+      const [row] = await db.select().from(mcpRegistries).where(eq(mcpRegistries.id, created.id));
+      expect(row).toMatchObject({ name: p.name, url: p.url, enabled: false, listingKind: "registry", delivery: "pull" });
+      const audits = await db.select().from(auditLog).where(and(eq(auditLog.objectId, created.id), eq(auditLog.ruleId, mcpRegistryRuleIds.seeded)));
+      expect(audits.map((x) => x.effect).sort()).toEqual(["allow", "deny"]);
+    } finally {
+      await mini.close();
+      // never synced, so no snapshot holds it
+      await db.delete(mcpRegistries).where(eq(mcpRegistries.name, p.name));
+    }
+  });
+});
+
+describe("ADR-0256 routes are admin-only", () => {
+  it("refuses a non-admin on every catalogue route", async () => {
+    const u = await app.inject({ method: "POST", url: "/v1/users", headers: AUTH, payload: { email: `adr256-${SUITE}@example.com`, displayName: "ADR256 member" } });
+    expect(u.statusCode).toBe(201);
+    const k = await app.inject({ method: "POST", url: `/v1/users/${u.json().id}/keys`, headers: AUTH, payload: { name: "adr256" } });
+    const member = { authorization: `Bearer ${k.json().token}` };
+    const routes = [
+      { method: "POST" as const, url: "/v1/mcp-catalogue/presets/official" },
+      { method: "POST" as const, url: "/v1/mcp-catalogue/bundles", payload: { bundle: "{}", signature: "AA==", keyId: "k1" } },
+      { method: "GET" as const, url: `/v1/mcp-catalogue/bundle?registryId=${randomUUID()}` },
+      { method: "GET" as const, url: "/v1/mcp-catalogue" },
+    ];
+    for (const r of routes) {
+      const res = await app.inject({ ...r, headers: member });
+      expect(res.statusCode, `${r.method} ${r.url}`).toBe(403);
+    }
   });
 });

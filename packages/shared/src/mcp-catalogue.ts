@@ -18,6 +18,7 @@ import {
   MCP_REGISTRY_ENTRY_KINDS,
   MCP_REGISTRY_UPSTREAM_STATUSES,
   MCP_REMOTE_TRANSPORT_TYPES,
+  normalizeRepositorySubfolder,
   paidSignalFor,
   usableRemoteUrl,
   type NormalizedRegistryEntry,
@@ -71,10 +72,11 @@ export const MCP_CATALOGUE_PRESET_IDS = Object.keys(MCP_CATALOGUE_PRESETS) as Mc
 // ---------------------------------------------------------------------------
 
 /**
- * `github.com/owner/repo` (lower-case, no scheme, no `.git`, no trailing path) for a GitHub repository url, else
- * null. Parsed with `URL`, never a regex (M-074).
+ * Where a GitHub url points: `repo` is `github.com/owner/repo` (lower-case, no scheme, no `.git`), and `subfolder` is
+ * the path after `/tree/<ref>/` or `/blob/<ref>/` when the url names one (normalised), else null. Null for anything
+ * that is not a GitHub repository url. Parsed with `URL`, never a regex (M-074).
  */
-export function githubRepoKey(raw: string | null | undefined): string | null {
+export function githubRepoLocation(raw: string | null | undefined): { repo: string; subfolder: string | null } | null {
   if (!raw) return null;
   let u: URL;
   try {
@@ -91,18 +93,29 @@ export function githubRepoKey(raw: string | null | undefined): string | null {
   let repo = parts[1]!.toLowerCase();
   if (repo.endsWith(".git")) repo = repo.slice(0, -4);
   if (owner === "" || repo === "") return null;
-  return `github.com/${owner}/${repo}`;
+  // `/tree/<ref>/<path>` (a folder) or `/blob/<ref>/<path>` (a file in it): the path is the server's folder
+  const subfolder = (parts[2] === "tree" || parts[2] === "blob") && parts.length > 4 ? normalizeRepositorySubfolder(parts.slice(4).join("/")) : null;
+  return { repo: `github.com/${owner}/${repo}`, subfolder };
+}
+
+/** `github.com/owner/repo` for a GitHub repository url, else null (the repository only, never its path) */
+export function githubRepoKey(raw: string | null | undefined): string | null {
+  return githubRepoLocation(raw)?.repo ?? null;
 }
 
 /**
  * The key that says "these source rows describe one server". A GitHub repository is the only identifier the official
- * registry and a community list share, so it wins; otherwise the upstream name, lower-cased. Two sources that agree
- * on neither stay two items: a wrong merge would show one source's provenance on another's server, which is worse
- * than a duplicate an operator can see.
+ * registry and a community list share, so it wins; otherwise the upstream name, lower-cased. The repository's
+ * SUBFOLDER is part of the key (the registry's `repository.subfolder`, else the path in the url), because one monorepo
+ * (`modelcontextprotocol/servers`, `awslabs/mcp`) holds many unrelated servers. Two sources that agree on neither stay
+ * two items: a wrong merge would show one source's provenance on another's server, which is worse than a duplicate an
+ * operator can see.
  */
-export function catalogueDedupeKey(e: { upstreamName: string; repositoryUrl: string | null }): string {
-  const repo = githubRepoKey(e.repositoryUrl);
-  return repo ? `repo:${repo}` : `name:${e.upstreamName.toLowerCase()}`;
+export function catalogueDedupeKey(e: { upstreamName: string; repositoryUrl: string | null; repositorySubfolder?: string | null }): string {
+  const loc = githubRepoLocation(e.repositoryUrl);
+  if (!loc) return `name:${e.upstreamName.toLowerCase()}`;
+  const sub = normalizeRepositorySubfolder(e.repositorySubfolder) ?? loc.subfolder;
+  return sub ? `repo:${loc.repo}/${sub}` : `repo:${loc.repo}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -125,7 +138,8 @@ const clip = (v: string): string | null => {
  * An entry is a top-level bullet whose FIRST token is a markdown link to a GitHub repository:
  * `- [owner/repo](https://github.com/owner/repo) <badges and legend emoji> - description`. Anything else (headings,
  * prose, links to other hosts, nested bullets) is skipped and counted. Each line is read with `indexOf` and `URL`, so
- * the cost is linear in the document (M-074). The same repository listed twice keeps its first listing.
+ * the cost is linear in the document (M-074). A link to a folder of a monorepo (`.../tree/<ref>/src/weather`) is its
+ * own server. The same server listed twice keeps its first listing; the repeat is counted as skipped.
  *
  * Every entry is `catalogue_only` / `community_listing`: the list names a repository, and this codebase does not
  * invent an endpoint for it (ADR-0101).
@@ -149,28 +163,34 @@ export function parseCommunityList(markdown: string): { entries: NormalizedRegis
       continue;
     }
     const href = line.slice(textEnd + 2, urlEnd);
-    const repo = githubRepoKey(href);
-    if (!repo) {
+    const loc = githubRepoLocation(href);
+    if (!loc) {
       skipped += 1;
       continue;
     }
-    if (seen.has(repo)) continue;
+    const serverKey = loc.subfolder ? `${loc.repo}/${loc.subfolder}` : loc.repo;
+    if (seen.has(serverKey)) {
+      skipped += 1;
+      continue;
+    }
     if (entries.length >= MCP_COMMUNITY_LIST_MAX_ENTRIES) {
       capped = true;
       break;
     }
-    seen.add(repo);
+    seen.add(serverKey);
     const label = clip(line.slice(3, textEnd));
     const rest = line.slice(urlEnd + 1);
     const dash = rest.indexOf(" - ");
     const description = dash >= 0 ? clip(rest.slice(dash + 3)) : null;
     entries.push({
-      upstreamName: repo,
+      upstreamName: serverKey,
       // a list has no versions; the snapshot digest is the version of what it said
       upstreamVersion: "listed",
       title: label,
       description,
-      repositoryUrl: `https://${repo}`,
+      // rebuilt from the normalised key, never copied from the list's text
+      repositoryUrl: `https://${loc.repo}`,
+      repositorySubfolder: loc.subfolder,
       websiteUrl: null,
       kind: "catalogue_only",
       remoteUrl: null,
@@ -181,7 +201,7 @@ export function parseCommunityList(markdown: string): { entries: NormalizedRegis
       updatedAt: null,
       packageCount: 0,
       remoteCount: 0,
-      paidSignal: paidSignalFor({ texts: [repo, label, description], describing: [label, description] }),
+      paidSignal: paidSignalFor({ texts: [serverKey, label, description], describing: [label, description] }),
     });
   }
   return { entries, skipped, capped };
@@ -208,6 +228,7 @@ export const mcpCatalogueBundleEntrySchema = z
     title: optText,
     description: optText,
     repositoryUrl: optText,
+    repositorySubfolder: optText,
     websiteUrl: optText,
     kind: z.enum(MCP_REGISTRY_ENTRY_KINDS),
     remoteUrl: capped(2000).nullable(),

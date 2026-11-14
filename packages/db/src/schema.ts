@@ -1194,6 +1194,8 @@ export const mcpRegistryEntries = pgTable(
     title: text("title"),
     description: text("description"),
     repositoryUrl: text("repository_url"),
+    /** ADR-0256: the server's folder inside `repository_url` (a monorepo), normalised; part of the dedupe key */
+    repositorySubfolder: text("repository_subfolder"),
     websiteUrl: text("website_url"),
     kind: text("kind", { enum: ["remote", "catalogue_only"] }).notNull(),
     remoteUrl: text("remote_url"),

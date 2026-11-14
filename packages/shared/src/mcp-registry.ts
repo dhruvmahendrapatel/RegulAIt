@@ -152,7 +152,7 @@ const serverJsonSchema = z
     title: z.string().optional(),
     version: z.string().optional(),
     websiteUrl: z.string().optional(),
-    repository: z.object({ url: z.string().optional() }).passthrough().optional(),
+    repository: z.object({ url: z.string().optional(), subfolder: z.string().optional() }).passthrough().optional(),
     packages: z.array(packageSchema).nullish(),
     remotes: z.array(transportSchema).nullish(),
   })
@@ -213,6 +213,9 @@ export interface NormalizedRegistryEntry {
   title: string | null;
   description: string | null;
   repositoryUrl: string | null;
+  /** ADR-0256: the server's folder inside `repositoryUrl` (server.json `repository.subfolder`), normalised by
+   * `normalizeRepositorySubfolder`; part of the dedupe key, so two servers in one monorepo never merge */
+  repositorySubfolder: string | null;
   websiteUrl: string | null;
   kind: McpRegistryEntryKind;
   /** set iff kind === 'remote' */
@@ -229,6 +232,20 @@ export interface NormalizedRegistryEntry {
   /** ADR-0256: what the listing itself says about payment (`x402`, or `paid`), or null. A heuristic FLAG for an
    * operator, never a verdict; see `paidSignalFor`. */
   paidSignal: McpPaidSignal | null;
+}
+
+/**
+ * ADR-0256: a repository subfolder as a stable key part: lower-case, `/`-separated, with empty and `.` segments
+ * dropped (so `./src/Weather/` and `src/weather` agree), capped. Null when nothing is left.
+ */
+export function normalizeRepositorySubfolder(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  const parts = v
+    .split("/")
+    .map((p) => p.trim().toLowerCase())
+    .filter((p) => p !== "" && p !== ".");
+  if (parts.length === 0) return null;
+  return parts.join("/").slice(0, TEXT_CAP);
 }
 
 /** ADR-0256: the payment signals a catalogue entry can carry */
@@ -401,6 +418,7 @@ export function normalizeRegistryPage(payload: unknown): NormalizedRegistryPage 
       title: clip(server.title),
       description: clip(server.description),
       repositoryUrl: clip(server.repository?.url),
+      repositorySubfolder: normalizeRepositorySubfolder(server.repository?.subfolder),
       websiteUrl: clip(server.websiteUrl),
       ...classified,
       upstreamStatus,

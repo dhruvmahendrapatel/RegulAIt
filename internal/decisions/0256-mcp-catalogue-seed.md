@@ -72,19 +72,28 @@ path.
 3. **Imports are snapshots, never request-time fetches.** A source is refreshed only by the scheduled sweep or an
    admin's manual sync (both through ADR-0043's guarded fetch, refused outright when air-gapped), or by a bundle
    import. The catalogue read (`GET /v1/mcp-catalogue`) reads the database only. Each successful refresh writes one
-   **append-only** `mcp_catalogue_snapshots` row (count, truncated, sha256 over the sorted release digests, actor, and
-   for a bundle the key id, the signed-bytes digest and the bundle's `createdAt`). Every row the refresh asserted gets
+   **append-only** `mcp_catalogue_snapshots` row (count, truncated, a content digest, actor, and for a bundle the key
+   id, the signed-bytes digest and the bundle's `createdAt`). The content digest is sha256 over the sorted per-entry
+   digests, each over every field of the normalised entry (name, version, title, description, repository and
+   subfolder, classification, endpoint, status, dates, counts, paid flag), so a changed description or flag changes it. Every row the refresh asserted gets
    `last_snapshot_id`. UPDATE, DELETE and TRUNCATE on snapshots are refused by triggers (0185's pattern).
 
 4. **Community lists.** A `community` source's URL is the document itself. The parser keeps top-level bullets whose
-   first link is a GitHub repository, once per repository, capped at 20,000 entries and 4,000 characters a line. Every
+   first link is a GitHub repository, once per server, capped at 20,000 entries and 4,000 characters a line. A link
+   to a folder of a monorepo (`/tree/<ref>/<path>`) is its own server; a repeated server is counted as skipped. The
+   repository link is rebuilt from the normalised key, never copied from the list's text. Every
    entry is `catalogue_only` with the new reason `community_listing`, so ADR-0101's import refuses it: a list names a
    repository, and this codebase does not invent an endpoint.
 
 5. **Dedupe with provenance per source.** `mcp_catalogue_items` holds one row per server, keyed
-   `repo:github.com/owner/repo` when a source names a GitHub repository, else `name:<upstream name>`. Each source keeps
+   `repo:github.com/owner/repo[/<subfolder>]` when a source names a GitHub repository, else `name:<upstream name>`.
+   The subfolder is the registry's `repository.subfolder` (stored as `mcp_registry_entries.repository_subfolder`) or
+   the path after `/tree/<ref>/` in a list's link, normalised; one monorepo (`modelcontextprotocol/servers`,
+   `awslabs/mcp`) holds many unrelated servers, and they must never merge. Each source keeps
    its own `mcp_registry_entries` row (`catalogue_item_id`), so the deduped view lists every source with its own
-   version, first-seen, last-synced, snapshot and vetting. Sources that agree on neither key stay separate; a wrong
+   version, first-seen, last-synced, snapshot and vetting. An item is listed only while some source row points at it,
+   and a row its source no longer lists (`missing_since`) stays visible as provenance but no longer counts towards
+   the item's vetting or paid flag (`listedNow` says whether any source lists it today). Sources that agree on neither key stay separate; a wrong
    merge would show one source's provenance on another's server.
 
 6. **Paid and x402 are flagged.** `mcp_registry_entries.paid_signal` is `x402` when `x402` appears in the name, title,
@@ -99,7 +108,11 @@ path.
    `REGULAIT_MCP_CATALOGUE_BUNDLE_KEYS` (or `…_FILE`): public Ed25519 keys only, rotatable by listing the new key beside
    the old. A bad keyring is refused whole. **With no keyring, every bundle is refused.** The format is strict, and each
    entry is re-checked (a remote must have a dialable URL, a catalogue-only entry must not claim one). A bundle not
-   newer than the last one imported for its source is refused (rollback and replay protection). A bundle never
+   newer than the last one imported for its source is refused (rollback and replay protection), and so is one dated
+   more than five minutes after the database clock, because a future date would refuse every later bundle for a
+   source that can never be deleted. Export applies the import's entry and byte limits, so nothing is signed that
+   import would refuse, and the import route's body limit allows for the bundle's JSON escaping. A first import that
+   races another for the same new source gets an audited 409, as does a preset seeded twice. A bundle never
    overwrites a pulled source of the same name. A bundle source is never dialled: a sync returns `skipped` and the
    sweep does not select it, and its URL is provenance that PATCH refuses to edit. The import is one transaction on the
    database clock.
@@ -123,7 +136,8 @@ path.
 - The catalogue tables are org-wide admin tables, like `mcp_registries`, so they are not in an ADR-0234 RLS batch.
 - An exported bundle does not carry `packages[]` (the catalogue never stored it), so `packageCount` is 0 in a bundle.
   Classification is carried as-is.
-- The dedupe is conservative: an official entry with no `repository.url` does not merge with its community listing.
+- The dedupe is conservative: an official entry with no `repository.url` does not merge with its community listing,
+  and a monorepo entry whose registry record omits `repository.subfolder` stays keyed on the bare repository.
 - The paid flag is a heuristic over text the publisher wrote. It can miss a paid server and can flag a free one that
   mentions pricing.
 - The community list is read from `main`, not a pinned commit. Each snapshot's content digest records what it said.

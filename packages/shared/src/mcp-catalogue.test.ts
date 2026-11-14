@@ -3,6 +3,7 @@ import {
   bundleEntriesUsable,
   catalogueDedupeKey,
   githubRepoKey,
+  githubRepoLocation,
   MCP_CATALOGUE_PRESETS,
   mcpCatalogueBundleSchema,
   parseCommunityList,
@@ -18,6 +19,9 @@ const LIST = [
   "- [402signalhq/402signal](https://github.com/402signalhq/402signal) 🐍 ☁️ - Checks and validates live x402 payment routes.",
   "- [Acme/Weather.git](https://github.com/Acme/Weather.git) 📇 ☁️ - Forecasts; a paid plan unlocks history.",
   "- [dup](https://github.com/inth3shadows/terse/tree/main) - the same repository again",
+  "- [mcp/fetch](https://github.com/modelcontextprotocol/servers/tree/main/src/fetch) - Fetches web pages.",
+  "- [mcp/git](https://github.com/modelcontextprotocol/servers/tree/main/src/git) - Reads git repositories.",
+  "- [mcp/fetch again](https://github.com/ModelContextProtocol/servers/tree/main/src/fetch/) - listed twice",
   "- [elsewhere](https://gitlab.com/a/b) - not a GitHub repository",
   "- [broken](https://github.com/only-owner) - no repository segment",
   "  - [nested](https://github.com/x/y) - nested bullets are not entries",
@@ -26,14 +30,25 @@ const LIST = [
 describe("ADR-0256 community list parser", () => {
   const parsed = parseCommunityList(LIST);
 
-  it("keeps top-level GitHub entries once each, and counts what it skipped", () => {
+  it("keeps top-level GitHub entries once each, and counts what it skipped, repeats included", () => {
     expect(parsed.entries.map((e) => e.upstreamName)).toEqual([
       "github.com/inth3shadows/terse",
       "github.com/402signalhq/402signal",
       "github.com/acme/weather",
+      "github.com/modelcontextprotocol/servers/src/fetch",
+      "github.com/modelcontextprotocol/servers/src/git",
     ]);
-    expect(parsed.skipped).toBe(2);
+    // gitlab, owner-only, the terse repeat and the fetch repeat
+    expect(parsed.skipped).toBe(4);
     expect(parsed.capped).toBe(false);
+  });
+
+  it("keeps two servers from one monorepo apart, with the repository url rebuilt from the key", () => {
+    const fetch = parsed.entries.find((e) => e.upstreamName.endsWith("/src/fetch"))!;
+    const git = parsed.entries.find((e) => e.upstreamName.endsWith("/src/git"))!;
+    expect(fetch).toMatchObject({ repositoryUrl: "https://github.com/modelcontextprotocol/servers", repositorySubfolder: "src/fetch" });
+    expect(git.repositorySubfolder).toBe("src/git");
+    expect(catalogueDedupeKey(fetch)).not.toBe(catalogueDedupeKey(git));
   });
 
   it("makes every entry catalogue-only: a list names a repository, never an endpoint", () => {
@@ -44,7 +59,7 @@ describe("ADR-0256 community list parser", () => {
   });
 
   it("flags x402 and paid listings, and leaves the rest unflagged", () => {
-    expect(parsed.entries.map((e) => e.paidSignal)).toEqual([null, "x402", "paid"]);
+    expect(parsed.entries.map((e) => e.paidSignal)).toEqual([null, "x402", "paid", null, null]);
   });
 
 });
@@ -53,6 +68,9 @@ describe("ADR-0256 dedupe and vetting", () => {
   it("normalises GitHub repository urls and refuses everything else", () => {
     expect(githubRepoKey("https://github.com/Owner/Repo.git")).toBe("github.com/owner/repo");
     expect(githubRepoKey("https://www.github.com/owner/repo/tree/main/x")).toBe("github.com/owner/repo");
+    expect(githubRepoLocation("https://github.com/Owner/Repo/tree/main/src/Weather/")).toEqual({ repo: "github.com/owner/repo", subfolder: "src/weather" });
+    expect(githubRepoLocation("https://github.com/owner/repo/tree/main")).toEqual({ repo: "github.com/owner/repo", subfolder: null });
+    expect(githubRepoLocation("https://github.com/owner/repo/issues/1")).toEqual({ repo: "github.com/owner/repo", subfolder: null });
     expect(githubRepoKey("https://gitlab.com/owner/repo")).toBeNull();
     expect(githubRepoKey("ftp://github.com/owner/repo")).toBeNull();
     expect(githubRepoKey("not a url")).toBeNull();
@@ -66,6 +84,22 @@ describe("ADR-0256 dedupe and vetting", () => {
       "repo:github.com/acme/weather",
     );
     expect(catalogueDedupeKey({ upstreamName: "IO.Example/Thing", repositoryUrl: null })).toBe("name:io.example/thing");
+  });
+
+  it("keys a monorepo server by its subfolder, so the registry and a community list agree and siblings never merge", () => {
+    const page = normalizeRegistryPage({
+      servers: [
+        { server: { name: "io.github.mcp/fetch", version: "1.0.0", repository: { url: "https://github.com/modelcontextprotocol/servers", subfolder: "./src/fetch/" } } },
+        { server: { name: "io.github.mcp/git", version: "1.0.0", repository: { url: "https://github.com/modelcontextprotocol/servers", subfolder: "src/git" } } },
+      ],
+    });
+    const [fetch, git] = page.entries;
+    expect(fetch!.repositorySubfolder).toBe("src/fetch");
+    expect(catalogueDedupeKey(fetch!)).toBe("repo:github.com/modelcontextprotocol/servers/src/fetch");
+    expect(catalogueDedupeKey(git!)).toBe("repo:github.com/modelcontextprotocol/servers/src/git");
+    // the community listing of the same folder lands on the same item
+    const listed = parseCommunityList("- [fetch](https://github.com/modelcontextprotocol/servers/tree/main/src/fetch) - x").entries[0]!;
+    expect(catalogueDedupeKey(listed)).toBe(catalogueDedupeKey(fetch!));
   });
 
   it("calls a community source unvetted and a registry source registry-listed, never admitted", () => {
@@ -111,6 +145,7 @@ describe("ADR-0256 offline bundle format", () => {
     title: null,
     description: null,
     repositoryUrl: null,
+    repositorySubfolder: null,
     websiteUrl: null,
     kind: "remote" as const,
     remoteUrl: "https://mcp.example/mcp",

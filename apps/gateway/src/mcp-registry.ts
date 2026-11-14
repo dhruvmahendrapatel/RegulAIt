@@ -495,7 +495,7 @@ export async function syncRegistry(
     for (const entry of entries) {
       counts.entriesSeen += 1;
       seenNames.push(entry.upstreamName);
-      seenDigests.push(registryEntryDigest({ registryId: registry.id, ...entry }));
+      seenDigests.push(catalogueEntryDigest(entry));
       if (entry.kind === "remote") counts.remote += 1;
       else counts.catalogueOnly += 1;
       const persisted = await upsertEntry(db, registry.id, entry, now);
@@ -611,7 +611,21 @@ export async function syncRegistry(
   return { ...(await finish("ok", reason, counts)), snapshotId };
 }
 
-/** ADR-0256: sha256 over the sorted release digests a refresh saw — the same set always gives the same digest */
+/**
+ * ADR-0256: the digest of WHAT a source said about one entry: every field of the normalised entry, in a fixed order,
+ * so a changed description, title, paid flag or classification changes it (a community entry's version is always
+ * "listed"). Distinct from `registryEntryDigest`, which is the ADR-0175 A5 release identity and must stay narrow.
+ */
+export function catalogueEntryDigest(e: NormalizedRegistryEntry): string {
+  const fields: (keyof NormalizedRegistryEntry)[] = [
+    "upstreamName", "upstreamVersion", "title", "description", "repositoryUrl", "repositorySubfolder", "websiteUrl",
+    "kind", "remoteUrl", "remoteTransport", "catalogueReason", "upstreamStatus", "publishedAt", "updatedAt",
+    "packageCount", "remoteCount", "paidSignal",
+  ];
+  return createHash("sha256").update(JSON.stringify(fields.map((f) => e[f] ?? null)), "utf8").digest("hex");
+}
+
+/** ADR-0256: sha256 over the sorted per-entry content digests a refresh saw — the same listing always gives the same digest */
 export function snapshotContentDigest(digests: readonly string[]): string {
   return createHash("sha256").update([...digests].sort().join("\n"), "utf8").digest("hex");
 }
@@ -699,6 +713,7 @@ export async function upsertEntry(
     title: entry.title,
     description: entry.description,
     repositoryUrl: entry.repositoryUrl,
+    repositorySubfolder: entry.repositorySubfolder,
     websiteUrl: entry.websiteUrl,
     kind: entry.kind,
     remoteTransport: entry.remoteTransport,
