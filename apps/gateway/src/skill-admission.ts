@@ -85,6 +85,7 @@ import {
   type SkillAdmissionState,
 } from "@regulait/shared";
 import { minReleaseAgeDays, quarantineDetail, recordSighting, skillReleaseStatus } from "./release-age.js";
+import { engineHoldFindings, skillEngineHold } from "./admission-engine-scans.js";
 import { agentEvidenceHoldRefused, EVIDENCE_HOLD_REFUSED, withAgentEvidenceHold } from "./agent-evidence-hold.js"; // D4 DFX2 (D4G-05): Art. 73(6) evidence hold
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
@@ -278,6 +279,20 @@ export async function skillAttachRefusal(db: Db, row: BuilderSkillRow): Promise<
         (s.admissionState === "held" ? " — an admin must admit it before it can be attached." : " — edit the skill to fix it."),
     };
   }
+  // ADR-0242: with the skillscanner engine on, a skill it has not passed at this digest is held (fail closed);
+  // an admin's admission of the digest stands
+  if (s.admissionState !== "admitted") {
+    const engine = await skillEngineHold(db, s.id, s.contentDigest);
+    if (engine) {
+      return {
+        error: "skill_held",
+        skillId: s.id,
+        detail:
+          `skill '${s.name}' is held by the skillscanner engine (${engine.status}) ` +
+          `[${admissionFindingSummary(engineHoldFindings("skillscanner", engine))}] — it cannot be attached until the engine passes it or an admin admits it.`,
+      };
+    }
+  }
   const minDays = await minReleaseAgeDays(db);
   if (minDays > 0) {
     const status = await skillReleaseStatus(db, s.id, s.contentDigest, minDays);
@@ -322,6 +337,8 @@ export async function pinnedBodyWithheld(
   minDays: number,
 ): Promise<"held" | "refused" | "quarantined" | null> {
   if (att.snapshotAdmissionState === "held" || att.snapshotAdmissionState === "refused") return att.snapshotAdmissionState;
+  // ADR-0242: the engine's live say on the pinned body's own digest (an admitted copy stands)
+  if (att.snapshotAdmissionState !== "admitted" && att.snapshotDigest && (await skillEngineHold(db, att.skillId, att.snapshotDigest))) return "held";
   if (minDays > 0 && att.snapshotDigest) {
     const status = await skillReleaseStatus(db, att.skillId, att.snapshotDigest, minDays);
     if (status.quarantined) return "quarantined";

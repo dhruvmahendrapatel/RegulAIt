@@ -1,0 +1,17 @@
+{
+    "name": "regulait/client-compat-laravel-ai",
+    "description": "ADR-0257: the Laravel AI SDK (laravel/ai) pointed at the RegulAIt gateway. Test-only; never shipped.",
+    "type": "project",
+    "license": "proprietary",
+    "require": {
+        "php": "^8.4",
+        "laravel/ai": "1.3.0",
+        "orchestra/testbench": "^10.6"
+    },
+    "config": {
+        "platform": { "php": "8.4.13" },
+        "sort-packages": true,
+        "allow-plugins": false
+    },
+    "minimum-stability": "stable"
+}

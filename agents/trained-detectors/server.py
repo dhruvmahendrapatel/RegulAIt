@@ -4,8 +4,8 @@ Speaks the ADR-0088 external-scorer contract on ``POST /score`` for the three
 guardrail kinds, and answers ``GET /healthz`` with the kinds it serves. Every
 model is read from /opt/models, baked into the image at build time and
 verified against models.lock.json; nothing is downloaded at run time
-(HF_HUB_OFFLINE and TRANSFORMERS_OFFLINE are set, and every load is
-``local_files_only``).
+(HF_HUB_OFFLINE and TRANSFORMERS_OFFLINE are set, and the classifiers
+are ONNX graphs exported and parity-checked at build time, ADR-0247).
 
 Logging carries the method, path, status and duration only. Request and
 reply bodies are never logged.
@@ -56,29 +56,37 @@ def load_models(wanted: list[str]) -> dict:
     so the pure core and its tests need none of these packages."""
     models: dict = {}
     if "prompt_injection" in wanted or "harm" in wanted:
-        import torch
-        from transformers import AutoModelForSequenceClassification, AutoTokenizer
+        # ADR-0247: ONNX Runtime and the Rust tokenizer, no PyTorch. Each model
+        # directory holds what export_onnx.py wrote and parity-checked at build
+        # time: model.onnx, tokenizer.json and labels.json.
+        import onnxruntime as ort
+        from tokenizers import Tokenizer
 
-        torch.set_num_threads(int(os.environ.get("DETECTOR_THREADS", "2")))
+        threads = int(os.environ.get("DETECTOR_THREADS", "2"))
 
-        def classifier(path: str, multi_label: bool):
-            tok = AutoTokenizer.from_pretrained(path, local_files_only=True)
-            model = AutoModelForSequenceClassification.from_pretrained(path, local_files_only=True).eval()
-            labels = model.config.id2label
+        def classifier(path: str):
+            with open(os.path.join(path, "labels.json")) as f:
+                meta = json.load(f)
+            tok = Tokenizer.from_file(os.path.join(path, "tokenizer.json"))
+            tok.enable_truncation(max_length=512)
+            tok.no_padding()
+            opts = ort.SessionOptions()
+            opts.intra_op_num_threads = threads
+            opts.inter_op_num_threads = 1
+            sess = ort.InferenceSession(os.path.join(path, "model.onnx"), sess_options=opts, providers=["CPUExecutionProvider"])
 
-            def classify(text: str) -> dict:
-                with torch.inference_mode():
-                    enc = tok(text, truncation=True, max_length=512, return_tensors="pt")
-                    logits = model(**enc).logits[0]
-                    probs = torch.sigmoid(logits) if multi_label else torch.softmax(logits, dim=-1)
-                return {labels[i]: float(p) for i, p in enumerate(probs)}
+            def encode(text: str):
+                enc = tok.encode(text)
+                return enc.ids, enc.attention_mask
 
-            return classify
+            return core.make_classifier(
+                encode, lambda ids, mask: core.run_onnx(sess, ids, mask), meta["labels"], bool(meta["multiLabel"])
+            )
 
         if "prompt_injection" in wanted:
-            models["prompt_injection"] = classifier(os.path.join(MODELS_DIR, "prompt-injection"), multi_label=False)
+            models["prompt_injection"] = classifier(os.path.join(MODELS_DIR, "prompt-injection"))
         if "harm" in wanted:
-            models["harm"] = classifier(os.path.join(MODELS_DIR, "harm"), multi_label=True)
+            models["harm"] = classifier(os.path.join(MODELS_DIR, "harm"))
 
     if "pii" in wanted:
         import tldextract

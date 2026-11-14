@@ -1,0 +1,1 @@
+{"schema": "regulait.admission-scan.v1", "engine": "skillscanner", "engineVersion": "2.3.2", "status": "failed", "error": "no SKILL.md", "rulesSha256": "1fce40df3c101daf610b3ff5cd4007bb0ce0ef32b9fdf42938566e22b183e1bd"}

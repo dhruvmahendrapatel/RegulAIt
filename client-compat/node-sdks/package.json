@@ -1,0 +1,11 @@
+{
+  "name": "regulait-client-compat-node-sdks",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "description": "ADR-0257: the official OpenAI and Anthropic SDKs pointed at the RegulAIt gateway. Test-only; never shipped.",
+  "dependencies": {
+    "@anthropic-ai/sdk": "1.3.0",
+    "openai": "7.43.0"
+  }
+}
