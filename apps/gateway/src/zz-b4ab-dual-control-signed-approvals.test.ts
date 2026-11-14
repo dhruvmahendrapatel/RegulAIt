@@ -67,6 +67,7 @@ import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { createApprovalRuleRow } from "./rule-creates.js";
 import { ApprovalRuleWriteRefusedError } from "./approval-pool.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { drainBackgroundWork } from "./background-work.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -300,7 +301,8 @@ beforeAll(async () => {
   for (const name of TOOLS) {
     const t = await withKey(AUTH, "POST", `/v1/servers/${serverId}/tools`, { name, kind: "write" });
     expect([200, 201]).toContain(t.statusCode);
-    const g = await withKey(AUTH, "POST", "/v1/grants/tools", { userId: P.caller.id, serverId, toolName: name });
+    // ADR-0250: a grant mint is a step-up; this file's own steppable admin means the bootstrap credential needs this
+    const g = await relaxStepUpAround(db, () => withKey(AUTH, "POST", "/v1/grants/tools", { userId: P.caller.id, serverId, toolName: name }));
     expect([200, 201]).toContain(g.statusCode);
   }
 }, 180_000);
@@ -828,7 +830,7 @@ describe("B — the execution recheck", () => {
     const tool = nextTool();
     expect((await rule(tool, { quorum: 1 })).statusCode).toBe(201);
     const fresh = async () => {
-      const id = await queued(tool, { text: `facts-${randomBytes(2).toString("hex")}` });
+      const id = await queued(tool, { text: `facts-${randomBytes(6).toString("hex")}` });
       expect((await signAndDecide(P.a, id)).json()).toMatchObject({ status: "approved" });
       return row(id);
     };

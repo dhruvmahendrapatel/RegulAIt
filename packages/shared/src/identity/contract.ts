@@ -299,6 +299,9 @@ export const REPLAY_NAMESPACES = [
   "delegation_authz",
   // ADR-0190 I3: the executor channel's one-use request proofs (migration 0187 widens the CHECK)
   "executor_channel",
+  // ADR-0238: an upstream access token obtained by token exchange (its SHA-256, never the token), so a token an upstream
+  // authorization server hands out twice (to this person or another) is never attached a second time
+  "upstream_exchanged_token",
 ] as const;
 export type ReplayNamespace = (typeof REPLAY_NAMESPACES)[number];
 
@@ -1282,6 +1285,8 @@ export const IDENTITY_ROUTES: ReadonlyArray<{ method: "GET" | "POST" | "PUT" | "
   { method: "POST", path: OAUTH_INTROSPECTION_PATH, cls: "public", slice: "S5" },
   { method: "POST", path: "/v1/delegations/proofs", cls: "user", slice: "S5" },
   { method: "GET", path: "/v1/workload-identities", cls: "admin", slice: "S4" },
+  // ADR-0226: the identity list's Excel export
+  { method: "GET", path: "/v1/workload-identities/export.xlsx", cls: "admin", slice: "S4" },
   { method: "POST", path: "/v1/workload-identities", cls: "admin", slice: "S6" },
   { method: "GET", path: "/v1/workload-identities/:identityId", cls: "admin", slice: "S4" },
   { method: "PATCH", path: "/v1/workload-identities/:identityId", cls: "admin", slice: "S4" },

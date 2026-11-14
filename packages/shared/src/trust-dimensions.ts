@@ -55,6 +55,18 @@ export const CONTROL_DIMENSION_OVERRIDES: Readonly<Record<string, TrustDimension
   "isaca-ai-agents:item-05-sandbox-segmentation": "security",
   "isaca-ai-agents:item-08-memory-isolation-retention": "privacy",
   "isaca-ai-agents:item-12-pinning-sbom-signing": "security",
+  // ADR-0243 (P24): OWASP packs — the attestation-only controls, and the MCP
+  // audit trails that evidence access control rather than record-keeping
+  "owasp-mcp-top-10:secrets-and-tokens": "security",
+  "owasp-mcp-top-10:permission-creep": "security",
+  "owasp-mcp-top-10:server-supply-chain": "security",
+  "owasp-mcp-top-10:caller-authentication": "security",
+  "owasp-mcp-top-10:unregistered-servers": "security",
+  "owasp-mcp-top-10:context-oversharing": "privacy",
+  "owasp-llm-top-10:agent-overreach": "security",
+  "owasp-llm-top-10:training-data-poisoning": "security",
+  "owasp-llm-top-10:retrieval-store-weakness": "security",
+  "owasp-llm-top-10:unsafe-output-use": "security",
 };
 
 export interface ControlForDimension {

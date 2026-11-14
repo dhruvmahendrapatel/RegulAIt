@@ -39,11 +39,29 @@ on:
       # harness starts is built from. A bump that touches nothing under the
       # paths above still changes that gateway, so it runs this gate too.
       - "pnpm-lock.yaml"
+      # ADR-0262, PR trim: a Markdown file under packages/** or apps/gateway/src/** changes no code
+      - "!**/*.md"
+  # ADR-0252: part of the full suite at merge time. `merge_group` takes no path filter, so every merge group runs it;
+  # so does each push to main (#721 review finding 3).
+  merge_group:
+    types: [checks_requested]
+  push:
+    branches: [main]
 
 # Least privilege for GITHUB_TOKEN (CodeQL "workflow does not contain permissions"): every job here only
 # checks out code and uploads artifacts; nothing writes to the repository, issues, PRs or packages.
+# Cancel a superseded run on a PR branch only; a push, dispatch or merge-group run always completes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
+
+# ADR-0252: CI databases are disposable, so migrations merged but not yet numbered (packages/db/migrations/pending/)
+# are applied in their provisional order. A long-lived database refuses them (packages/db/src/pending-migrations.ts).
+env:
+  REGULAIT_MIGRATIONS_UNASSIGNED: apply
 
 jobs:
   # ADR-0179 (AER-028, AER-036): the plugin's decision logic with `kong`
@@ -96,9 +114,24 @@ jobs:
       - name: Install busted and its rocks at the pinned versions
         # C rocks (luafilesystem, luasystem, lua-term) build against LuaJIT's
         # own headers, so what is loaded is what was compiled for it.
+        # lua-term's source comes from GitHub's archive host, which fails now and
+        # then. LuaRocks has a --timeout flag but no retry, so the build is tried
+        # at most 3 times (10 s, then 30 s apart) and fails on the third failure.
+        # Rocks already installed are kept, and the pin check below still runs.
         run: |
-          luarocks --lua-version=5.1 --tree "$ROCKS_TREE" --only-server https://luarocks.org \
-            build --only-deps "$ROCKSPEC" LUA_INCDIR=/usr/include/luajit-2.1
+          for attempt in 1 2 3; do
+            if luarocks --lua-version=5.1 --tree "$ROCKS_TREE" --only-server https://luarocks.org \
+                build --only-deps "$ROCKSPEC" LUA_INCDIR=/usr/include/luajit-2.1; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::luarocks build failed 3 times"
+              exit 1
+            fi
+            delay=$([ "$attempt" -eq 1 ] && echo 10 || echo 30)
+            echo "::warning::luarocks build failed (attempt $attempt of 3); retrying in ${delay}s"
+            sleep "$delay"
+          done
 
       - name: Fail if the installed rocks differ from the pin list
         # One list: the rockspec. Any rock it does not name, or a version it
@@ -182,7 +215,7 @@ jobs:
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .node-version
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile

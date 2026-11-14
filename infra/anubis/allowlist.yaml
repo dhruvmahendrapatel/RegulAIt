@@ -1,0 +1,24 @@
+# RegulAIt — Anubis allow-list for named auditors and suppliers (ADR-0258, docs/deployment/ANUBIS.md).
+#
+# Imported first by policy.yaml. A request from an address listed here skips the proof-of-work challenge on the public
+# pages. Use it for a named auditor or supplier whose browser cannot run JavaScript; it does NOT replace their sign-in
+# link, which the portal still checks.
+#
+# Rules:
+#   - one entry per organisation, named after it, with action ALLOW;
+#   - list the narrowest egress ranges they give you (a /32 or /128 where possible), never a cloud provider's range;
+#   - record who asked, when, and until when in your deployment record, and remove the entry when the engagement ends;
+#   - point REGULAIT_ANUBIS_ALLOWLIST_FILE at your own copy instead of editing this file in the checkout.
+#
+# Example:
+#   - name: auditor-example-llp
+#     action: ALLOW
+#     remote_addresses:
+#       - 203.0.113.10/32
+#
+# The entry below matches only 192.0.2.1, an address reserved for documentation (RFC 5737), which never reaches a real
+# deployment. It is here because Anubis needs at least one rule in an imported file.
+- name: placeholder-documentation-address
+  action: ALLOW
+  remote_addresses:
+    - 192.0.2.1/32

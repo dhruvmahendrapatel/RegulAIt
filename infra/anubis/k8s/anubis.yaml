@@ -1,0 +1,103 @@
+# RegulAIt — Anubis for a BYOC Kubernetes deployment (ADR-0258, backlog P34). OPTIONAL and OFF unless applied.
+#
+# A hook, not a full chart: RegulAIt ships no Kubernetes manifests of its own yet, so this is the piece you add beside
+# your own ingress. It runs Anubis in subrequest mode (TARGET " "), exactly as the compose profile does. Your ingress
+# or gateway then asks it about the PUBLIC pages only and nothing else (docs/deployment/ANUBIS.md § Your own proxy or
+# Kubernetes):
+#   /ui/trust, /ui/audit, /ui/supplier (and below), /v1/trust-center, /v1/auditor/*, /v1/supplier/*
+# and routes /.within.website/* to this Service.
+#
+# Before applying:
+#   kubectl -n <ns> create configmap regulait-anubis-policy \
+#     --from-file=policy.yaml=infra/anubis/policy.yaml \
+#     --from-file=allowlist.yaml=<your allow-list, from infra/anubis/allowlist.yaml>
+#   and replace regulait.example.com below with your public host.
+#
+# One replica: the challenge store is in memory and the signing key is generated at start. For more replicas, give
+# every pod the same ED25519_PRIVATE_KEY_HEX_FILE (from a Secret) and a shared store (Anubis docs, "Storage
+# backends"), and record that in your deployment record.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: regulait-anubis
+  labels: { app.kubernetes.io/name: regulait-anubis, app.kubernetes.io/part-of: regulait }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: regulait-anubis }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: regulait-anubis, app.kubernetes.io/part-of: regulait }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: anubis
+          # pinned: v1.28.2 (MIT), the same digest as docker-compose.yml. infra/THIRD_PARTY.md.
+          image: ghcr.io/techarohq/anubis:v1.28.2@sha256:5fcbce70ee6168be5b226d19bec90111d0acd0daf13028fa06b044cf3ebbbd5f
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: TARGET, value: " " }
+            - { name: BIND, value: ":8923" }
+            - { name: POLICY_FNAME, value: /etc/anubis/policy.yaml }
+            # your public host ONLY: unset, Anubis would redirect a passed visitor to any host
+            - { name: REDIRECT_DOMAINS, value: regulait.example.com }
+            - { name: COOKIE_HTTP_ONLY, value: "true" }
+            - { name: COOKIE_SECURE, value: "true" }
+            - { name: COOKIE_SAME_SITE, value: Lax }
+            - { name: COOKIE_EXPIRATION_TIME, value: 12h }
+            - { name: JWT_RESTRICTION_HEADER, value: X-Real-IP }
+            - { name: SERVE_ROBOTS_TXT, value: "false" }
+            - { name: OG_PASSTHROUGH, value: "false" }
+          ports:
+            - { name: http, containerPort: 8923 }
+            - { name: metrics, containerPort: 9090 }
+          volumeMounts:
+            - { name: policy, mountPath: /etc/anubis, readOnly: true }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { memory: 128Mi }
+      volumes:
+        - name: policy
+          configMap: { name: regulait-anubis-policy }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: regulait-anubis
+  labels: { app.kubernetes.io/name: regulait-anubis, app.kubernetes.io/part-of: regulait }
+spec:
+  # cluster-internal only: your ingress reaches it, the internet does not
+  type: ClusterIP
+  selector: { app.kubernetes.io/name: regulait-anubis }
+  ports:
+    - { name: http, port: 8923, targetPort: http }
+---
+# Only your ingress may reach Anubis, and only on its HTTP port: the metrics port (9090) stays unreachable from other
+# pods. Label your ingress or gateway pods `regulait.io/anubis-client: "true"` (any namespace). A Prometheus that should
+# scrape 9090 needs its own rule, which you add deliberately.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: regulait-anubis
+  labels: { app.kubernetes.io/name: regulait-anubis, app.kubernetes.io/part-of: regulait }
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: regulait-anubis }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels: { regulait.io/anubis-client: "true" }
+      ports:
+        - { protocol: TCP, port: 8923 }
+  # Anubis makes no outbound call in this policy (air-gapped: no GeoIP, DNSBL or remote lists), so no egress is allowed.
+  egress: []

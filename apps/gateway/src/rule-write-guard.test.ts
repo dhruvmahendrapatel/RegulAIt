@@ -140,6 +140,14 @@ const AUDITED_WRITERS: AuditedWriter[] = [
     why: "POST /v1/rules/rate-limits — CREATE ONLY, identical reasoning to the approvals insert above.",
   },
   {
+    file: "mcp-high-risk.ts",
+    method: "insert",
+    expr: "rateLimits",
+    why:
+      "POST /v1/servers/:serverId/high-risk-policy (ADR-0246 addendum) — CREATE ONLY of the template's fleet rate " +
+      "limit, in the same transaction as its audit row; a new row has no versions, so nothing is discarded at dispatch.",
+  },
+  {
     file: "projects.ts",
     method: "insert",
     expr: "complianceProfiles",

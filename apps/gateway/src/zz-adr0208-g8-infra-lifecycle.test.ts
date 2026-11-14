@@ -309,7 +309,7 @@ describe("ADR-0208 G8 — editing a policy", () => {
     ["clearing the backup retention", BASE, { backupRetentionDays: null }],
     ["a smaller cert-rotation lead", BASE, { certRotationDaysBeforeExpiry: 3 }],
   ])("%s asks for a step-up bound to the policy and the loosened values", async (_label, base, edit) => {
-    const r = await createResource(`loosen-${randomBytes(2).toString("hex")}`);
+    const r = await createResource(`loosen-${randomBytes(6).toString("hex")}`);
     const p = (await createPolicy({ resourceId: r.id, ...base })).json();
     // a field with no order (the backup schedule) rides along without joining the step-up's facts
     const done = await throughStepUp("PATCH", `/v1/infra/policies/${p.id}`, { ...edit, backupSchedule: "hourly" }, {

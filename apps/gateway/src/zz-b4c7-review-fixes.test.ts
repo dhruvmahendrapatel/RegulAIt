@@ -96,7 +96,7 @@ async function mkSession(userId: string): Promise<Session> {
 }
 
 async function mkUser(label: string, isAdmin = false): Promise<{ id: string; s: Session }> {
-  const u = await withKey(AUTH, "POST", "/v1/users", { email: `b4c7-${label}-${randomBytes(2).toString("hex")}-${RUN}@example.com`, displayName: `b4c7 ${label}`, isAdmin });
+  const u = await withKey(AUTH, "POST", "/v1/users", { email: `b4c7-${label}-${randomBytes(6).toString("hex")}-${RUN}@example.com`, displayName: `b4c7 ${label}`, isAdmin });
   expect(u.statusCode, u.body).toBe(201);
   const id = u.json().id as string;
   return { id, s: await mkSession(id) };

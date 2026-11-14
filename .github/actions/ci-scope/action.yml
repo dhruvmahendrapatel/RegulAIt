@@ -1,0 +1,38 @@
+# ADR-0262 (owner decision 2026-11-07): fast checks on a PR, the full suite at merge time.
+#
+# Decides what a run must cover. On a merge group, a push to main, the nightly schedule or a manual run, the answer is
+# always everything (`full`). On a pull request it reads the PR's own diff from GitHub's merge commit (check out with
+# fetch-depth: 2), renames counted at both paths, and fails closed: if the diff cannot be read the run is full.
+#
+# Jobs gate on these outputs with a job-level `if:`, never with a workflow-level path filter: a job skipped by `if:`
+# still reports its check (as skipped, which branch protection counts as passing), so a required check never goes
+# missing on a docs-only PR. A required aggregate decides for itself whether a skip was allowed.
+name: CI scope
+description: Whether this run is a full run, and on a PR which parts of the repository it changes
+outputs:
+  full:
+    description: "'true' on merge_group, push, schedule and workflow_dispatch"
+    value: ${{ steps.scope.outputs.full }}
+  code:
+    description: "'true' unless every changed file is documentation (internal/**, docs/**, *.md, .gitignore, LICENSE)"
+    value: ${{ steps.scope.outputs.code }}
+  web:
+    description: "'true' when the web app or what it is built from changed (always on a full run)"
+    value: ${{ steps.scope.outputs.web }}
+  image:
+    description: "'true' when an input of the root Dockerfile image or of its Trivy gate (allow-list, gate scripts) changed"
+    value: ${{ steps.scope.outputs.image }}
+  engines:
+    description: "'true' when an engine's own input changed: engines/**, any Dockerfile, the lockfile, the engine allow-lists and gate scripts, the image workflows (not packages/ or apps/, which the shim stage also copies)"
+    value: ${{ steps.scope.outputs.engines }}
+runs:
+  using: composite
+  steps:
+    # scripts/ci-scope.mjs (tested by scripts/ci-scope.test.mjs): renames count at both paths, and anything it cannot
+    # read (no merge commit, a shallow clone missing the base, a git error, an empty diff) means a FULL run, and so does a
+    # change to the scope rules themselves.
+    - id: scope
+      shell: bash
+      env:
+        GITHUB_EVENT_NAME: ${{ github.event_name }}
+      run: node scripts/ci-scope.mjs

@@ -4,9 +4,9 @@
 # engine-images workflows do. ADR-0190 "As built: engine task images";
 # reproducible builds: ADR-0187 addendum 2026-10-21.
 #
-#   scripts/build-engine-image.sh <promptfoo|modelscan|garak> build
-#   scripts/build-engine-image.sh <promptfoo|modelscan|garak> repro <out.json>
-#   scripts/build-engine-image.sh <promptfoo|modelscan|garak> push <ghcr.io/owner/regulait-engine-x> <out.json>
+#   scripts/build-engine-image.sh <promptfoo|modelscan|garak|mcpscanner|skillscanner> build
+#   scripts/build-engine-image.sh <promptfoo|modelscan|garak|mcpscanner|skillscanner> repro <out.json>
+#   scripts/build-engine-image.sh <promptfoo|modelscan|garak|mcpscanner|skillscanner> push <ghcr.io/owner/regulait-engine-x> <out.json>
 #
 # `build` builds the working tree for linux/amd64 and keeps it only in the
 # build cache (nothing is loaded, tagged or pushed): a quick local check. It
@@ -49,8 +49,8 @@ set -euo pipefail
 
 engine="${1:-}"
 mode="${2:-}"
-case "$engine" in promptfoo | modelscan | garak) ;; *)
-  echo "usage: $0 <promptfoo|modelscan|garak> build | repro <out.json> | push <repository> <out.json>" >&2
+case "$engine" in promptfoo | modelscan | garak | mcpscanner | skillscanner | spikee) ;; *)
+  echo "usage: $0 <promptfoo|modelscan|garak|mcpscanner|skillscanner|spikee> build | repro <out.json> | push <repository> <out.json>" >&2
   exit 2
   ;;
 esac
@@ -110,6 +110,8 @@ repro)
   repro_build "type=image,name=regulait-engine-${engine}:repro,push=false" "$out" "{}"
   ;;
 push)
+  # ADR-0242: mcpscanner and skillscanner are built and compared, never published, until phase 2
+  case "$engine" in mcpscanner | skillscanner) echo "${engine} is not published yet (ADR-0242 phase 2)" >&2; exit 2 ;; esac
   repo="${3:-}"
   out="${4:-}"
   if ! printf '%s' "$repo" | grep -Eq "^ghcr\.io/[a-z0-9][a-z0-9-]{0,38}/regulait-engine-${engine}\$"; then
@@ -121,7 +123,7 @@ push)
   repro_build "type=image,name=${repo}:sha-${commit},push=true" "$out" "{\"repository\":\"${repo}\"}"
   ;;
 *)
-  echo "usage: $0 <promptfoo|modelscan|garak> build | repro <out.json> | push <repository> <out.json>" >&2
+  echo "usage: $0 <promptfoo|modelscan|garak|mcpscanner|skillscanner> build | repro <out.json> | push <repository> <out.json>" >&2
   exit 2
   ;;
 esac
