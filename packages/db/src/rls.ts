@@ -79,11 +79,16 @@ export const RLS_SYSTEM_REASONS = [
    * admitted wherever an active admin principal is (regulait_rls_is_admin()), and to the users read
    */
   "bootstrap_admin",
+  /**
+   * batch 7b: the audit retention prune on the OWNER connection: audit_log (read, delete). Never a caller reason: the
+   * prune sets it inside its own owner transaction, and the app role has no DELETE on audit_log anyway.
+   */
+  "audit_retention",
 ] as const;
 export type RlsSystemReason = (typeof RLS_SYSTEM_REASONS)[number];
 
 /** reasons a caller may pass to `withSystemContext`; `rls_membership` belongs to the SQL helpers alone */
-export type RlsCallerSystemReason = Exclude<RlsSystemReason, "rls_membership" | "migration" | "audit_subject">;
+export type RlsCallerSystemReason = Exclude<RlsSystemReason, "rls_membership" | "migration" | "audit_subject" | "audit_retention">;
 
 export interface RlsPrincipal {
   /** the authenticated user's id (`users.id`) */
@@ -109,7 +114,7 @@ export class RlsContextError extends Error {
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const PATH_RE = /^[a-z0-9][a-z0-9_.:/-]{0,79}$/;
 const CALLER_REASONS: ReadonlySet<string> = new Set(
-  RLS_SYSTEM_REASONS.filter((r) => r !== "rls_membership" && r !== "migration" && r !== "audit_subject"),
+  RLS_SYSTEM_REASONS.filter((r) => r !== "rls_membership" && r !== "migration" && r !== "audit_subject" && r !== "audit_retention"),
 );
 
 /** The structural shape the wrappers need: a top-level drizzle handle with `transaction`. */

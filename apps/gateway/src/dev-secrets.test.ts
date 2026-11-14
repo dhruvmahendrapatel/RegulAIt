@@ -156,7 +156,7 @@ async function boot(
 ) {
   const log: string[] = [];
   // a CLEAN env: the suite's own process.env must not decide the outcome
-  const env = { PATH: process.env.PATH, VITEST: "1", ...extraEnv } as NodeJS.ProcessEnv;
+  const env = { PATH: process.env.PATH, VITEST: "1", REGULAIT_DEV_PRIVILEGED_DB_LOGIN: "1", ...extraEnv } as NodeJS.ProcessEnv;
   port = await freePort();
   try {
     const started = await startGateway({ db: target, migrationsFolder, port, host: "127.0.0.1", ...opts, log: (l) => log.push(l), env });

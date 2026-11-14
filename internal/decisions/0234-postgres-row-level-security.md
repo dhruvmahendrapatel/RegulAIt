@@ -475,6 +475,66 @@ under `system_task`. The batch 2 bootstrap probe now expects `bootstrap_admin`. 
 affected suites (auth, SAML, OIDC, SCIM, scheduler, chat, PM, prune, boot, portals, engine runner, workload, OAuth,
 builder resume, approvals; 730 tests) pass.
 
+## As built (batch 7b): the runtime login cut-over (2026-11-14)
+
+**The runtime login.** Requests are served on a login that is a member of `regulait_app` and is not a superuser,
+BYPASSRLS or the owner of an RLS table (`runtimeLoginProblems`, `packages/db/src/runtime-login.ts`). Such a login
+cannot step out of the policies:
+- it cannot disable RLS, because it does not own the tables;
+- it cannot bypass RLS (no BYPASSRLS);
+- `SET ROLE` back to the owner is not open to it.
+
+It is resolved in this order (`apps/gateway/src/runtime-login.ts`):
+1. `REGULAIT_RUNTIME_DATABASE_URL`, operator-managed (a secrets manager, a Kubernetes secret).
+2. The install-generated login. With `REGULAIT_INSTALL_SECRETS_DIR` set, the first boot claims
+   `<dir>/runtime-database-url` (create-exclusive, 0600). It then creates `regulait_runtime` through the owner
+   connection: LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION INHERIT, a member of
+   `regulait_app`, and CONNECT on the database. The password is generated and never logged. Later boots read the
+   file. If creation fails, the file is removed, so the next boot tries again. The compose stack and the installer
+   already set the directory.
+3. Neither: requests are served on the owner connection itself.
+
+**Boot.**
+- The migrations run on the owner (`DATABASE_URL`). The runtime login is then resolved and inspected, before an app
+  or a socket exists.
+- Boot refuses a login that is not fit, whichever way it was resolved (`RuntimeLoginBootError`, which names the fix).
+  Secure by default (ADR-0180).
+- A local or CI database's login is a superuser, so `REGULAIT_DEV_PRIVILEGED_DB_LOGIN=1` starts anyway, loudly and
+  audited: a banner, one `runtime-db-login-privileged` audit row per boot, and the posture line says RLS does not bind
+  requests. The gateway test suite sets it in `vitest.config.ts`, and the few boot tests with their own env set it
+  explicitly. The batch 7b suite tests the refusal with it unset.
+- The posture block gains `db login:`, which names the login and whether RLS binds it.
+
+**The owner keeps the ledger prune.** `audit_log` had no DELETE policy, and FORCE binds the owner too. The pending
+migration `rls_batch7b_runtime_cutover` therefore adds:
+- the closed reason `audit_retention`;
+- `audit_log_delete` (`audit_retention` or `migration`);
+- `audit_retention` on the ledger read.
+
+`runAuditPruneOnce` runs on the owner handle behind the runtime one (`owner-db.ts`; boot registers the pair) and sets
+the reason inside its own transaction. It is never a caller reason, and the app role has no DELETE on the ledger, so
+no request path can use it.
+
+**CI on the runtime login.** The demo workflow's gateway now boots with the install secrets directory, so the
+Playwright journeys run on `regulait_runtime`. The start step fails unless the posture line says RLS is enforced.
+
+**Tests and checks.**
+- `zz-adr0234-rls-batch7b.test.ts` (6):
+  - the refusal, and the opt-in;
+  - the generated login and its file, fit;
+  - RLS binding it (zero unscoped rows, its own as a principal, all as a job, no `ALTER TABLE`);
+  - the real boot on it, with no opt-in, serving a bootstrap request;
+  - `audit_retention` deleting only for a role with DELETE, and never for the runtime login.
+- A local `main.js` boot on a `demo:prepare`d database:
+  - posture `'regulait_runtime' (install-generated) … row-level security enforced`;
+  - bootstrap reads of users, approvals, audit, posture and projects return 200;
+  - a persona's password sign-in and session work.
+
+**Not in 7b.** The seed, first-admin and demo scripts still run as the migrator, which must be a superuser or table
+owner with RLS satisfied. On a non-superuser owner they need the `identity_provisioning` / `migration` scopes, which
+is recorded as a follow-up. CI's unit shards keep the superuser login with the opt-in; the demo job is the end-to-end
+check on the runtime login.
+
 ## Appendix: the inventory (2026-11-06, migrated head)
 
 - **User-owned (49):** a2a_agent_grants, agent_grants, agent_revocations, agents, ai_incident_actions, ai_incidents,
