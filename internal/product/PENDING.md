@@ -299,7 +299,7 @@ caught on read. **The sweeps buy timeliness, never correctness.**
   a chat turn inherit the full entitlement set of the bound user, or a narrower one? Until those are
   answered this stays queued — building it first would decide them by accident.
 
-- **S17 — GitHub Copilot is invisible to shadow-AI discovery (opened 2026-09-19).** Measured:
+- ~~**S17 — GitHub Copilot is invisible to shadow-AI discovery (opened 2026-09-19).**~~ **CLOSED 2026-11-14 (lane L10):** catalogue v2 already carried the Copilot API, proxy, origin-tracker and telemetry hosts (verified 2026-10-17); they were re-checked against the Copilot allow-list reference on 2026-11-14 and still match it, and `SHADOW_AI_CATALOG_V3` adds the documented cloud-session WebSocket hosts (`production-copilot-host*.webpubsub.azure.com`). Detection only, as below. Measured:
   `packages/shared/src/shadow-discovery.ts` carries **37 endpoint signatures**, and the only Copilot
   entry is `ep-microsoft-copilot-web` → `copilot.microsoft.com`, annotated in our own code as
   *"Browser usage, not an API integration."* **There is no GitHub Copilot signature at all**, so the
