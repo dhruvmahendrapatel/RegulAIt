@@ -26,7 +26,14 @@
  *
  * ADMIN. Registration, the card refresh, the credential and the grants are admin-only (the default gate) and audited in
  * the same transaction as the write. Registration reads the agent card through the guarded fetch and refuses a card
- * whose JSON-RPC interface is on another origin than the registered url. A private-range opt-in and every credential
+ * whose JSON-RPC or HTTP+JSON interface is on another origin than the registered url, or speaks a protocol version
+ * other than 0.3.x or 1.x.
+ *
+ * BINDINGS (ADR-0231 §3, slice B1). The gateway speaks the JSON-RPC and the HTTP+JSON (REST) bindings, each in A2A 1.x
+ * and in the legacy 0.3.x that SAP's Agent Gateway speaks. A 0.3 card (no `supportedInterfaces`) is converted to the
+ * 1.0 shape by the SDK's own compatibility layer at read time, and every converted interface carries version '0.3'.
+ * Which transport a call uses is decided from the STORED card's interface version, never from anything the remote
+ * sends at call time. We write no transport: the SDK's factories, with `legacyCompat`, pick the 0.3 or 1.0 one. A private-range opt-in and every credential
  * write need a `settings_relax` step-up. The secret is the data-key envelope and no read returns it.
  *
  * Open source first (ADR-0176): the A2A wire protocol is the A2A project's own SDK (`@a2a-js/sdk`, Apache-2.0, pinned,
@@ -37,7 +44,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { AgentCard, Role, type Message, type Part, type Task } from "@a2a-js/sdk";
-import { ClientFactory, DefaultAgentCardResolver, JsonRpcTransportFactory } from "@a2a-js/sdk/client";
+import { ClientFactory, DefaultAgentCardResolver, JsonRpcTransportFactory, RestTransportFactory } from "@a2a-js/sdk/client";
 import {
   a2aAgentCredentials,
   a2aAgentGrants,
@@ -66,8 +73,12 @@ import { loadExecutionDial, postureOf } from "./execution-posture.js";
 import { literacySlot } from "./ai-literacy.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
-/** the JSON-RPC binding is the one transport this gateway speaks to a remote agent */
+/** the two bindings this gateway speaks to a remote agent (ADR-0231 §3); gRPC and anything else is filtered out */
 const JSONRPC = "JSONRPC";
+const HTTP_JSON = "HTTP+JSON";
+export const A2A_BINDINGS: readonly string[] = Object.freeze([JSONRPC, HTTP_JSON]);
+/** the SDK's v0.3 compatibility layer, on in the card resolver and both transport factories */
+const LEGACY_COMPAT = { legacyCompat: { enabled: true } } as const;
 /** a stored card is at most this many bytes of JSON (the 0253 CHECK allows a little more for jsonb overhead) */
 export const A2A_CARD_MAX_BYTES = 60_000;
 /** what a caller may send and what we hand back, in characters */
@@ -82,7 +93,7 @@ export const A2A_REPLY_MAX_CHARS = 64_000;
 export const A2A_CARD_RESPONSE_MAX_BYTES = 256 * 1024;
 export const A2A_RPC_RESPONSE_MAX_BYTES = 1024 * 1024;
 /** headers the A2A transport sets itself, so a credential may never name them */
-const A2A_RESERVED_HEADERS = ["a2a-version", "a2a-extensions"];
+const A2A_RESERVED_HEADERS = ["a2a-version", "a2a-extensions", "x-a2a-extensions"];
 
 export const A2A_RULE_IDS = Object.freeze({
   registered: "a2a-agent-registered",
@@ -151,25 +162,56 @@ const originOf = (raw: string): string | null => {
 };
 
 /**
- * Why `card` cannot be registered at `registeredUrl`, or null. It needs a JSON-RPC interface, and every JSON-RPC
- * interface must be on the registered origin: the card is the remote party's own claim, so it may not move our calls
- * (or the credential) to another host.
+ * ADR-0231 §3: the protocol versions the gateway speaks, 0.3.x (the legacy wire, through the SDK's compatibility
+ * transports) and 1.x. Anything else, an empty version included, is refused rather than guessed: the SDK would treat an
+ * empty version as 0.3, and a version we never tested is not one we send a person's message over.
+ */
+export function a2aProtocolVersionSupported(version: string | undefined): boolean {
+  if (typeof version !== "string") return false;
+  return /^0\.3(\.\d{1,4})?$/.test(version) || /^1(\.\d{1,4}){0,2}$/.test(version);
+}
+/** 0.3.x is the legacy wire; the version comes from the stored card, never from the remote at call time */
+export const isLegacyA2aVersion = (version: string | undefined): boolean => typeof version === "string" && /^0\.3(\.|$)/.test(version);
+
+/** the interfaces a card offers in a binding the gateway speaks */
+const spokenInterfaces = (card: AgentCard) => card.supportedInterfaces.filter((i) => A2A_BINDINGS.includes(i.protocolBinding));
+
+/**
+ * Why `card` cannot be registered at `registeredUrl`, or null. It needs a JSON-RPC or HTTP+JSON interface; every such
+ * interface must be on the registered origin, because the card is the remote party's own claim and may not move our
+ * calls (or the credential) to another host; and each must speak a supported protocol version. Interfaces in other
+ * bindings (gRPC) are ignored: the client is never built with them.
  */
 export function cardProblem(card: AgentCard, registeredUrl: string): string | null {
   const origin = originOf(registeredUrl);
-  const rpc = card.supportedInterfaces.filter((i) => i.protocolBinding === JSONRPC);
-  if (rpc.length === 0) return "the agent card offers no JSON-RPC interface, the one transport the gateway uses";
-  const elsewhere = rpc.find((i) => originOf(i.url) !== origin);
-  if (elsewhere) return `the agent card names a JSON-RPC interface on another origin (${originOf(elsewhere.url) ?? "an invalid url"}) than the registered url`;
+  const spoken = spokenInterfaces(card);
+  if (spoken.length === 0) return "the agent card offers no JSON-RPC or HTTP+JSON interface, the transports the gateway uses";
+  const elsewhere = spoken.find((i) => originOf(i.url) !== origin);
+  if (elsewhere) return `the agent card names a ${elsewhere.protocolBinding} interface on another origin (${originOf(elsewhere.url) ?? "an invalid url"}) than the registered url`;
+  const unsupported = spoken.find((i) => !a2aProtocolVersionSupported(i.protocolVersion));
+  if (unsupported) return `the agent card names a ${unsupported.protocolBinding} interface with protocol version '${(unsupported.protocolVersion ?? "").slice(0, 32)}'; the gateway speaks 0.3.x and 1.x only`;
   if (Buffer.byteLength(JSON.stringify(AgentCard.toJSON(card)), "utf8") > A2A_CARD_MAX_BYTES) return `the agent card is larger than ${A2A_CARD_MAX_BYTES} bytes`;
   return null;
 }
 
-/** the card the client is built from: only the JSON-RPC interfaces on the registered origin */
+/** the bindings and versions a stored card offers to the gateway, for the admin view and the trail (bounded) */
+export function cardBindings(stored: Record<string, unknown>): Array<{ binding: string; protocolVersion: string; legacy: boolean }> {
+  let card: AgentCard;
+  try {
+    card = AgentCard.fromJSON(stored);
+  } catch {
+    return [];
+  }
+  return spokenInterfaces(card)
+    .slice(0, 20)
+    .map((i) => ({ binding: i.protocolBinding, protocolVersion: (i.protocolVersion ?? "").slice(0, 32), legacy: isLegacyA2aVersion(i.protocolVersion) }));
+}
+
+/** the card the client is built from: only the JSON-RPC and HTTP+JSON interfaces on the registered origin, in a supported version */
 function clientCard(stored: Record<string, unknown>, registeredUrl: string): AgentCard {
   const card = AgentCard.fromJSON(stored);
   const origin = originOf(registeredUrl);
-  return { ...card, supportedInterfaces: card.supportedInterfaces.filter((i) => i.protocolBinding === JSONRPC && originOf(i.url) === origin) };
+  return { ...card, supportedInterfaces: spokenInterfaces(card).filter((i) => originOf(i.url) === origin && a2aProtocolVersionSupported(i.protocolVersion)) };
 }
 
 // ---------------------------------------------------------------------------
@@ -225,7 +267,7 @@ export function a2aCredentialView(row: A2aAgentCredentialRow | undefined | null)
 async function fetchCard(db: Db, url: string, allowPrivateRanges: boolean | null, deps: A2aDeps): Promise<{ ok: true; card: AgentCard } | { ok: false; code: string; detail: string }> {
   const fetchImpl = await agentFetch(db, { url, allowPrivateRanges }, null, A2A_CARD_RESPONSE_MAX_BYTES, deps);
   try {
-    const card = await new DefaultAgentCardResolver({ fetchImpl }).resolve(url);
+    const card = await new DefaultAgentCardResolver({ fetchImpl, ...LEGACY_COMPAT }).resolve(url);
     const problem = cardProblem(card, url);
     return problem ? { ok: false, code: "card_refused", detail: problem } : { ok: true, card };
   } catch (err) {
@@ -389,7 +431,12 @@ export async function executeGovernedA2aCall(db: Db, args: GovernedA2aCallArgs, 
   let result: Message | Task;
   try {
     const fetchImpl = await agentFetch(db, agent, opened.credential, A2A_RPC_RESPONSE_MAX_BYTES, deps);
-    const client = await new ClientFactory({ transports: [new JsonRpcTransportFactory({ fetchImpl })], preferredTransports: [JSONRPC] }).createFromAgentCard(clientCard(agent.card, agent.url));
+    // ADR-0231 §3: both bindings, JSON-RPC preferred; with `legacyCompat` each factory picks the SDK's 0.3 transport
+    // when the STORED interface's version is 0.3.x, and the 1.0 one otherwise
+    const client = await new ClientFactory({
+      transports: [new JsonRpcTransportFactory({ fetchImpl, ...LEGACY_COMPAT }), new RestTransportFactory({ fetchImpl, ...LEGACY_COMPAT })],
+      preferredTransports: [JSONRPC, HTTP_JSON],
+    }).createFromAgentCard(clientCard(agent.card, agent.url));
     result = await client.sendMessage(
       {
         tenant: "",
@@ -463,6 +510,7 @@ export function a2aAgentView(row: A2aAgentRow, credential: A2aAgentCredentialRow
     cardDescription: typeof card.description === "string" ? card.description.slice(0, 2000) : "",
     cardVersion: typeof card.version === "string" ? card.version.slice(0, 64) : "",
     skills: cardSkills(card),
+    bindings: cardBindings(card),
     cardFetchedAt: row.cardFetchedAt.toISOString(),
     allowPrivateRanges: row.allowPrivateRanges,
     pricePerCallUsd: row.pricePerCallUsd,
@@ -530,6 +578,7 @@ export function registerA2aRoutes(app: FastifyInstance, db: Db, opts: { dataKey?
         allowPrivateRanges,
         pricePerCallUsd: created.pricePerCallUsd,
         skills: cardSkills(card).map((s) => s.id),
+        bindings: cardBindings(card),
         ...(allowPrivateRanges === true ? { relaxation: true } : {}),
       });
       return created;
@@ -553,7 +602,7 @@ export function registerA2aRoutes(app: FastifyInstance, db: Db, opts: { dataKey?
       if (!updated) return null;
       const before = cardSkills(agent.card).map((s) => s.id);
       const after = cardSkills(card).map((s) => s.id);
-      await audit(tx as unknown as Db, req, agentId, A2A_RULE_IDS.cardRefreshed, "allow", `Remote agent '${agent.name}': card refreshed (${after.length} skill(s))`, { phase: "card-refresh", skillsBefore: before, skillsAfter: after });
+      await audit(tx as unknown as Db, req, agentId, A2A_RULE_IDS.cardRefreshed, "allow", `Remote agent '${agent.name}': card refreshed (${after.length} skill(s))`, { phase: "card-refresh", skillsBefore: before, skillsAfter: after, bindingsBefore: cardBindings(agent.card), bindingsAfter: cardBindings(card) });
       return updated;
     });
     if (!row) return reply.status(404).send({ error: "unknown_agent" });
