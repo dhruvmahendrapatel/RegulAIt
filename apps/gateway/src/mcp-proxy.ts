@@ -38,6 +38,7 @@ import { selectTools } from "@regulait/optimizer-kernel";
 import type { ModelToolDef } from "@regulait/model-provider";
 import {
   APPROVAL_SIGNATURE_RECHECK_FAILED_RULE,
+  approvalArgumentsDigest,
   approvalArgumentsPreview,
   setToolPriceSchema,
   guardrailCategoryList,
@@ -111,7 +112,7 @@ import {
 } from "./mcp-admission.js";
 import { definitionPinRefusal, recordDefinitionPins } from "./mcp-definition-pins.js";
 import { highRiskRefusal, recordRiskClassification } from "./mcp-high-risk.js";
-import { sapWriteRefusal } from "./mcp-sap-business.js";
+import { prepareSapWrite, readSapOutcome, recordSapOutcome, sapWriteRefusal, type SapCallFacts } from "./mcp-sap-business.js";
 import { loadEntitlements } from "./entitlements.js";
 // ADR-0185 G3 — the non-tool MCP methods
 import {
@@ -980,6 +981,28 @@ async function executeGovernedToolCallInner(
       if (upstream) await operationSucceeded();
       return { kind: "denied", decision: { effect: "deny", ruleId: sapRefusal.ruleId, ruleChain: [], reason: sapRefusal.reason } };
     }
+    // ADR-0230 A3: an SAP business write carries a caller key, replaced here by the derived stored key before the
+    // decision, so the approval's payload binding covers it; a key already used with other arguments is refused
+    let sapFacts: SapCallFacts | null = null;
+    {
+      const sapPrep = await prepareSapWrite(db, dataKey, {
+        userId,
+        server: { id: serverId, url: serverRow.url, name: serverRow.name, systemClass: serverRow.systemClass },
+        toolName,
+        toolKind: kind,
+        projectId: projectId ?? null,
+        arguments: args.arguments,
+        argumentsDigestOf: (a) => approvalArgumentsDigest({ projectId: projectId ?? null, arguments: a }),
+      });
+      if (sapPrep.kind === "refused") {
+        if (upstream) await operationSucceeded();
+        return { kind: "denied", decision: { effect: "deny", ruleId: sapPrep.ruleId, ruleChain: [], reason: sapPrep.reason } };
+      }
+      if (sapPrep.kind === "prepared") {
+        sapFacts = sapPrep.facts;
+        args = { ...args, arguments: sapPrep.arguments, detail: { ...(args.detail ?? {}), sap: sapPrep.facts } };
+      }
+    }
 
     // The generation was read before the server/tool snapshot above. A first
     // manifest sync changes it; redacted callers retry using that stored schema.
@@ -1044,7 +1067,7 @@ async function executeGovernedToolCallInner(
       // AER-039: bind the consent to the row this call connects with
       approvalTargetForServer(serverId, serverRow),
       // ADR-0188 S4: a delegated call is decided with the stored chain, read now; a person's own call is `null`
-      { actor: delegatedActor },
+      { actor: delegatedActor, bindArguments: sapFacts !== null },
     );
     // ADR-0188 S4 (decision 30): when the delegation's scope refuses a call the PERSON could not make either,
     // the reason shown is the person's own (their grant, or the §5.1 lead ceiling folded into the worker's
@@ -1053,7 +1076,7 @@ async function executeGovernedToolCallInner(
     if (delegatedActor && evaluated.effect === "deny" && evaluated.ruleId === "delegation-scope") {
       const own = await governedEvaluate(
         db, userId, serverId, { serverId, name: toolName, kind }, args.arguments, args.ceilingTools ?? null, projectId,
-        args.principal, undefined, preparedPii, approvalTargetForServer(serverId, serverRow), { actor: null },
+        args.principal, undefined, preparedPii, approvalTargetForServer(serverId, serverRow), { actor: null, bindArguments: sapFacts !== null },
       );
       if (own.decision.effect === "deny") decision = own.decision;
     }
@@ -1651,6 +1674,10 @@ async function executeGovernedToolCallInner(
     // gate filter on projectId. Unpriced server → null, never an invented
     // figure. Denied calls and upstream failures still bill nothing.
     // ADR-0188 S4: stamped with the acting agent; settled along its chain in the same transaction
+    // ADR-0230 A3: an SAP business call's outcome (document number, replay, SAP error code), from the raw result
+    const sapOutcome = sapFacts ? readSapOutcome(sapFacts, content) : null;
+    // an idempotent replay returned an earlier result and did no new work: recorded, not charged
+    const chargedUsd = sapOutcome?.replayed ? 0 : pricePerCallUsd;
     const toolUsageWrite = (h: Db) => h.insert(usageEvents).values({
       ...actorColumns(),
       userId,
@@ -1659,12 +1686,13 @@ async function executeGovernedToolCallInner(
       // (as it carries the operation on connector rows) and the server id
       // rides the detail jsonb.
       operation: toolName,
-      // O10: tool-first price, server-flat fallback (resolved above)
-      costUsd: pricePerCallUsd,
+      // O10: tool-first price, server-flat fallback (resolved above); ADR-0230 A3: a replay is not charged
+      costUsd: chargedUsd,
       projectId,
       detail: {
         serverId,
         toolName,
+        ...(sapOutcome ? { sap: sapOutcome } : {}),
         // §8.4 COUNTS ONLY — never the matched substrings
         ...(pii ? { pii: { mode: pii.mode, action: pii.action, inputHits, outputHits } } : {}),
         // ADR-0042 COUNTS ONLY, same contract
@@ -1683,10 +1711,13 @@ async function executeGovernedToolCallInner(
     if (toolGrantId) {
       await db.transaction(async (tx) => {
         const [u] = await toolUsageWrite(tx as unknown as Db);
-        if (u) await settleDelegationCharge(tx, { usageEventId: u.id, leafGrantId: toolGrantId, amountMicros: usdToMicros(pricePerCallUsd) });
+        if (u) await settleDelegationCharge(tx, { usageEventId: u.id, leafGrantId: toolGrantId, amountMicros: usdToMicros(chargedUsd) });
       });
     } else {
       await toolUsageWrite(db);
+    }
+    if (sapOutcome) {
+      await recordSapOutcome(db, { userId, serverId, toolName, projectId: projectId ?? null, approvalId: approvedApprovalId ?? null, decisionAuditId }, sapOutcome);
     }
     if (mgOutput) {
       const outcome = guardrailOutcome(mgOutput);

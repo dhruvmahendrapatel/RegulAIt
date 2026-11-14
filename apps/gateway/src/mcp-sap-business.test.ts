@@ -16,11 +16,13 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
   and,
   approvalRules,
+  approvals,
   auditLog,
   createDb,
   desc,
@@ -39,7 +41,7 @@ import {
 import { BATCH4_STRICT_DEFAULTS } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
-import { SAP_BUSINESS_DEFAULTS, SAP_BUSINESS_RULE_IDS } from "./mcp-sap-business.js";
+import { deriveSapIdempotencyKey, SAP_BUSINESS_DEFAULTS, SAP_BUSINESS_RULE_IDS } from "./mcp-sap-business.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
@@ -54,6 +56,8 @@ const boot = { authorization: `Bearer ${BOOT}` };
 const WRITE = "create_sales_order";
 const READ = "read_sales_order";
 const LATE_WRITE = "change_sales_order";
+/** 64-hex test-fixture key, the shape secrets.ts asserts. Not a secret. */
+const DATA_KEY = "c".repeat(64);
 
 let db: Db;
 let app: ReturnType<typeof buildApp>;
@@ -64,6 +68,8 @@ let approverB: string;
 let roleId: string;
 const restores: Array<() => Promise<void>> = [];
 const upstreamHits = { tool: 0 };
+/** what the double's write tool last received, and what its next result says about the business document */
+const upstream = { lastArgs: null as Record<string, unknown> | null, nextDocument: null as Record<string, unknown> | null };
 let closeUpstream: () => Promise<void> = async () => {};
 let upstreamUrl = "";
 
@@ -75,10 +81,16 @@ async function startUpstream(): Promise<void> {
       void (async () => {
         const server = new McpServer({ name: "sap-double", version: "0.0.1" });
         for (const [name, readOnly] of [[WRITE, false], [READ, true], [LATE_WRITE, false]] as const) {
-          server.registerTool(name, { description: name, inputSchema: {}, annotations: { readOnlyHint: readOnly } }, async () => {
-            upstreamHits.tool++;
-            return { content: [{ type: "text", text: `${name} ran` }] };
-          });
+          server.registerTool(
+            name,
+            { description: name, inputSchema: { idempotencyKey: z.string().optional(), quantity: z.number().optional() }, annotations: { readOnlyHint: readOnly } },
+            async (a: Record<string, unknown>) => {
+              upstreamHits.tool++;
+              upstream.lastArgs = a;
+              const doc = upstream.nextDocument;
+              return { content: [{ type: "text", text: `${name} ran` }], ...(doc ? { structuredContent: { businessDocument: doc } } : {}) };
+            },
+          );
         }
         const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
         await server.connect(transport);
@@ -148,7 +160,7 @@ beforeAll(async () => {
     await db.update(orgSettings).set({ stepUpMode: before!.mode, stepUpActions: before!.actions }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   });
   await startUpstream();
-  app = buildApp(db, { bootstrapToken: BOOT, retry: { maxAttempts: 1 }, timeouts: { mcpConnectMs: 2000, mcpListToolsMs: 2000, mcpCallToolMs: 2000 } });
+  app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY, retry: { maxAttempts: 1 }, timeouts: { mcpConnectMs: 2000, mcpListToolsMs: 2000, mcpCallToolMs: 2000 } });
   restores.push(await relaxGovernanceGatesForTest(db, { requireMcpAttribution: false }));
   await app.ready();
   adminId = await mkUser("admin");
@@ -217,7 +229,7 @@ describe("ADR-0230 A2: an SAP business server is approve-first", () => {
   it("an unattributed write is refused before the upstream, audited and not costed", async () => {
     const hits = upstreamHits.tool;
     const usage = await usageCount(serverId);
-    const out = await executeGovernedToolCall(db, undefined, { userId: callerId, serverId, toolName: WRITE, arguments: {} });
+    const out = await executeGovernedToolCall(db, DATA_KEY, { userId: callerId, serverId, toolName: WRITE, arguments: {} });
     expect(out.kind).toBe("denied");
     if (out.kind === "denied") expect(out.decision.ruleId).toBe(SAP_BUSINESS_RULE_IDS.needsProject);
     expect(upstreamHits.tool).toBe(hits);
@@ -227,7 +239,7 @@ describe("ADR-0230 A2: an SAP business server is approve-first", () => {
 
   it("a write attributed to an unbudgeted project is refused too", async () => {
     const projectId = await mkProject(null);
-    const out = await executeGovernedToolCall(db, undefined, { userId: callerId, serverId, toolName: WRITE, projectId, arguments: {} });
+    const out = await executeGovernedToolCall(db, DATA_KEY, { userId: callerId, serverId, toolName: WRITE, projectId, arguments: {} });
     expect(out.kind).toBe("denied");
     if (out.kind === "denied") {
       expect(out.decision.ruleId).toBe(SAP_BUSINESS_RULE_IDS.needsProject);
@@ -238,14 +250,14 @@ describe("ADR-0230 A2: an SAP business server is approve-first", () => {
   it("a budgeted write goes to the kernel and is queued for the quorum approval; the upstream is not called", async () => {
     const projectId = await mkProject(100);
     const hits = upstreamHits.tool;
-    const out = await executeGovernedToolCall(db, undefined, { userId: callerId, serverId, toolName: WRITE, projectId, arguments: {} });
+    const out = await executeGovernedToolCall(db, DATA_KEY, { userId: callerId, serverId, toolName: WRITE, projectId, arguments: { idempotencyKey: crypto.randomUUID() } });
     expect(out.kind).toBe("approval_required");
     expect(upstreamHits.tool).toBe(hits);
   });
 
   it("a read is touched by neither the project requirement nor the write-only rules", async () => {
     const hits = upstreamHits.tool;
-    const out = await executeGovernedToolCall(db, undefined, { userId: callerId, serverId, toolName: READ, arguments: {} });
+    const out = await executeGovernedToolCall(db, DATA_KEY, { userId: callerId, serverId, toolName: READ, arguments: {} });
     expect(out.kind, JSON.stringify(out)).toBe("allowed");
     expect(upstreamHits.tool).toBe(hits + 1);
   });
@@ -271,23 +283,138 @@ describe("ADR-0230 A2: a write-only rate limit", () => {
     await db.insert(rateLimits).values({ scope: "fleet", serverScope: "server", serverId, toolName: null, writeOnly: true, maxCalls: 1, windowSeconds: 3600 });
     // reads are neither limited nor counted
     for (let i = 0; i < 3; i++) {
-      const read = await executeGovernedToolCall(db, undefined, { userId: callerId, serverId, toolName: READ, arguments: {} });
+      const read = await executeGovernedToolCall(db, DATA_KEY, { userId: callerId, serverId, toolName: READ, arguments: {} });
       expect(read.kind, JSON.stringify(read)).toBe("allowed");
     }
-    const first = await executeGovernedToolCall(db, undefined, { userId: callerId, serverId, toolName: WRITE, arguments: {} });
+    const first = await executeGovernedToolCall(db, DATA_KEY, { userId: callerId, serverId, toolName: WRITE, arguments: {} });
     expect(first.kind, JSON.stringify(first)).toBe("allowed");
-    const second = await executeGovernedToolCall(db, undefined, { userId: callerId, serverId, toolName: WRITE, arguments: {} });
+    const second = await executeGovernedToolCall(db, DATA_KEY, { userId: callerId, serverId, toolName: WRITE, arguments: {} });
     expect(second.kind).toBe("denied");
     if (second.kind === "denied") expect(second.decision.reason).toContain("rate limit exhausted");
     // a write tool added after the limit was written is covered by the same row
     const t = await app.inject({ method: "POST", url: `/v1/servers/${serverId}/tools`, headers: boot, payload: { name: LATE_WRITE, kind: "write" } });
     expect(t.statusCode, t.body).toBeLessThan(300);
     await app.inject({ method: "POST", url: "/v1/grants/tools", headers: boot, payload: { userId: callerId, serverId, toolName: LATE_WRITE } });
-    const late = await executeGovernedToolCall(db, undefined, { userId: callerId, serverId, toolName: LATE_WRITE, arguments: {} });
+    const late = await executeGovernedToolCall(db, DATA_KEY, { userId: callerId, serverId, toolName: LATE_WRITE, arguments: {} });
     expect(late.kind).toBe("denied");
     if (late.kind === "denied") expect(late.decision.reason).toContain("rate limit exhausted");
     // and a read still runs
-    const read = await executeGovernedToolCall(db, undefined, { userId: callerId, serverId, toolName: READ, arguments: {} });
+    const read = await executeGovernedToolCall(db, DATA_KEY, { userId: callerId, serverId, toolName: READ, arguments: {} });
     expect(read.kind).toBe("allowed");
+  });
+});
+
+/** decide an approval through the API as one approver, stepping up when asked */
+async function decide(approvalId: string, approverId: string): Promise<void> {
+  const url = `/v1/approvals/${approvalId}/decide`;
+  const g0 = await grantStepUpForTest(db, approverId, { kind: "approval_decide", facts: { approvalId, decision: "approved" } });
+  const r = await app.inject({ method: "POST", url, ...stepUpRequest(g0), payload: { decision: "approved" } });
+  if (r.statusCode === 403 && r.json().error === "step_up_required") {
+    const g = await grantStepUpForTest(db, approverId, r.json().action);
+    const again = await app.inject({ method: "POST", url, ...stepUpRequest(g), payload: { decision: "approved" } });
+    expect(again.statusCode, again.body).toBeLessThan(300);
+    return;
+  }
+  expect(r.statusCode, r.body).toBeLessThan(300);
+}
+
+describe("ADR-0230 A3: the idempotency key, its approval binding, and the business audit detail", () => {
+  let serverId: string;
+  let projectId: string;
+  const call = (args: Record<string, unknown>) =>
+    executeGovernedToolCall(db, DATA_KEY, { userId: callerId, serverId, toolName: WRITE, projectId, arguments: args });
+
+  beforeAll(async () => {
+    serverId = await mkServer("a3");
+    const marked = await app.inject({ method: "POST", url: `/v1/servers/${serverId}/system-class`, headers: adminKey, payload: { systemClass: "sap_business", approverRoleId: roleId } });
+    expect(marked.statusCode, marked.body).toBe(201);
+    projectId = await mkProject(100);
+  });
+
+  it("two principals with the same caller key get different stored keys; neither is the caller's", () => {
+    const k = crypto.randomUUID();
+    const server = { id: crypto.randomUUID(), url: "https://sap-mcp.example.test/mcp" };
+    const a = deriveSapIdempotencyKey(DATA_KEY, server, crypto.randomUUID(), k);
+    const b = deriveSapIdempotencyKey(DATA_KEY, server, crypto.randomUUID(), k);
+    expect(a).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    expect(a).not.toBe(b);
+    expect(a).not.toBe(k);
+    expect(deriveSapIdempotencyKey(undefined, server, crypto.randomUUID(), k)).toBeNull();
+  });
+
+  it("a write without a UUID idempotency key is refused before the upstream, audited", async () => {
+    const hits = upstreamHits.tool;
+    for (const args of [{}, { idempotencyKey: "order-1" }]) {
+      const out = await call(args);
+      expect(out.kind).toBe("denied");
+      if (out.kind === "denied") expect(out.decision.ruleId).toBe(SAP_BUSINESS_RULE_IDS.keyRequired);
+    }
+    expect(upstreamHits.tool).toBe(hits);
+    expect((await lastAudit(SAP_BUSINESS_RULE_IDS.keyRequired, serverId))?.effect).toBe("deny");
+  });
+
+  it("an approval for one key cannot authorise another, even under a tool-scoped rule", async () => {
+    // relax the seeded rule to 'tool' scope behind the product's back: the SAP binding must hold anyway
+    await db.update(approvalRules).set({ approvalScope: "tool" }).where(eq(approvalRules.serverId, serverId));
+    const k1 = crypto.randomUUID();
+    const queued = await call({ idempotencyKey: k1, quantity: 1 });
+    expect(queued.kind, JSON.stringify(queued)).toBe("approval_required");
+    if (queued.kind !== "approval_required") return;
+    const [row] = await db.select().from(approvals).where(eq(approvals.id, queued.approvalId));
+    // the approver sees, and the consent binds, the STORED key; the caller's never reaches the queue
+    expect(JSON.stringify(row!.argumentsPreview)).not.toContain(k1);
+    await decide(queued.approvalId, adminId);
+    await decide(queued.approvalId, approverB);
+    // the same fields under another key are not authorised by it
+    const other = await call({ idempotencyKey: crypto.randomUUID(), quantity: 1 });
+    expect(other.kind, JSON.stringify(other)).toBe("approval_required");
+    // the approved key runs, once; the upstream receives the stored key, never the caller's
+    upstream.nextDocument = { documentNumber: "4711", replayed: false };
+    const hits = upstreamHits.tool;
+    const ran = await call({ idempotencyKey: k1, quantity: 1 });
+    expect(ran.kind, JSON.stringify(ran)).toBe("allowed");
+    expect(upstreamHits.tool).toBe(hits + 1);
+    const sent = upstream.lastArgs?.idempotencyKey as string;
+    expect(sent).not.toBe(k1);
+    expect(sent).toBe(deriveSapIdempotencyKey(DATA_KEY, { id: serverId, url: upstreamUrl }, callerId, k1));
+    // the outcome row: service, entity set, the stored key, the approval, the document number
+    const outcome = await lastAudit(SAP_BUSINESS_RULE_IDS.outcome, serverId);
+    expect(outcome?.detail).toMatchObject({
+      approvalId: queued.approvalId,
+      sap: { service: "API_SALES_ORDER_SRV", entitySet: "A_SalesOrder", idempotencyKey: sent, documentNumber: "4711", replayed: false, errorCode: null },
+    });
+    const [usage] = await db.select().from(usageEvents).where(and(eq(usageEvents.userId, callerId), eq(usageEvents.operation, WRITE))).orderBy(desc(usageEvents.at)).limit(1);
+    expect(usage!.costUsd).toBe(0.01);
+    expect(usage!.detail).toMatchObject({ sap: { documentNumber: "4711", replayed: false } });
+  });
+
+  it("a key reused with other fields is refused; a replay is recorded and not charged; SAP error text is never kept", async () => {
+    // the approval rule is not what this case is about: removed here so the calls run straight through
+    await db.delete(approvalRules).where(eq(approvalRules.serverId, serverId));
+    const k = crypto.randomUUID();
+    upstream.nextDocument = { documentNumber: "4712", replayed: false };
+    expect((await call({ idempotencyKey: k, quantity: 2 })).kind).toBe("allowed");
+    const hits = upstreamHits.tool;
+    const reused = await call({ idempotencyKey: k, quantity: 3 });
+    expect(reused.kind).toBe("denied");
+    if (reused.kind === "denied") expect(reused.decision.ruleId).toBe(SAP_BUSINESS_RULE_IDS.keyReused);
+    expect(upstreamHits.tool).toBe(hits);
+    // the server answers the same key and fields from its store: a replay
+    upstream.nextDocument = { documentNumber: "4712", replayed: true };
+    expect((await call({ idempotencyKey: k, quantity: 2 })).kind).toBe("allowed");
+    const [usage] = await db.select().from(usageEvents).where(and(eq(usageEvents.userId, callerId), eq(usageEvents.operation, WRITE))).orderBy(desc(usageEvents.at)).limit(1);
+    expect(usage!.costUsd).toBe(0);
+    expect(usage!.detail).toMatchObject({ sap: { replayed: true, documentNumber: "4712" } });
+    expect((await lastAudit(SAP_BUSINESS_RULE_IDS.outcome, serverId))?.detail).toMatchObject({ sap: { replayed: true } });
+    // an SAP error: the code is kept if it is a code; free text in it is dropped
+    upstream.nextDocument = { errorCode: "V1/320", message: "Sold-to party 4711 Main St is blocked" };
+    expect((await call({ idempotencyKey: crypto.randomUUID(), quantity: 4 })).kind).toBe("allowed");
+    const failed = await lastAudit(SAP_BUSINESS_RULE_IDS.outcome, serverId);
+    expect(JSON.stringify(failed?.detail)).not.toContain("Main St");
+    expect(failed?.detail).toMatchObject({ sap: { errorCode: null, documentNumber: null } });
+    upstream.nextDocument = { errorCode: "V1_320" };
+    expect((await call({ idempotencyKey: crypto.randomUUID(), quantity: 5 })).kind).toBe("allowed");
+    expect((await lastAudit(SAP_BUSINESS_RULE_IDS.outcome, serverId))?.detail).toMatchObject({ sap: { errorCode: "V1_320" } });
+    upstream.nextDocument = null;
   });
 });
