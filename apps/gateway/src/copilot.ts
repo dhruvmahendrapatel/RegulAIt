@@ -166,6 +166,7 @@ import {
   type ToolRef,
 } from "@regulait/policy-kernel";
 import { executeGovernedDispatch, type AgentRow } from "./agents-connectors.js";
+import { COPILOT_REDTEAM_RULE_IDS, copilotNarratorRedteamGate } from "./copilot-redteam-gate.js";
 import {
   loadAgentRevocations,
   loadConnectorRevocations,
@@ -1824,6 +1825,35 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
         return reply
           .status(403)
           .send({ error: policyRefusal ? MODEL_NOT_ALLOWED_FOR_FEATURE : "narrator_not_entitled", detail: decision.reason, ruleId: decision.ruleId });
+      }
+      // ADR-0056 §5 amendment (lane L7): ENROLLED IN RED-TEAMING WITH A PROMOTION GATE. Only a model whose latest
+      // copilot red-team run passed against the model it serves now may narrate; a regression blocks it. Checked
+      // after entitlement (an unentitled caller learns nothing about the model's red-team record) and before any
+      // provider work, for every narrator (an injected test narrator included: the gate is about the agent row).
+      {
+        const verdict = await copilotNarratorRedteamGate(db, {
+          id: agent.id,
+          name: agent.name,
+          model: agent.model ?? null,
+          systemPrompt: agent.systemPrompt ?? null,
+        });
+        if (!verdict.allowed) {
+          await audit(
+            userId,
+            "copilot_query",
+            null,
+            COPILOT_REDTEAM_RULE_IDS.refused,
+            `refused a copilot narration: ${verdict.reason}`,
+            { narratorAgentId: agent.id, redteamRunId: verdict.runId },
+            "deny",
+          );
+          return reply.status(409).send({
+            error: "copilot_narrator_redteam_required",
+            detail: verdict.reason,
+            ruleId: COPILOT_REDTEAM_RULE_IDS.refused,
+            redteamRunId: verdict.runId,
+          });
+        }
       }
       const narrator =
         opts.narrator ??

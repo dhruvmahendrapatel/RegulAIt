@@ -151,7 +151,7 @@ beforeAll(async () => {
   // explicitly and hands the shared database back strict in afterAll (M-068).
   restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   app = buildApp(db, { bootstrapToken: BOOT });
-  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, copilotRedteamGateEnabled: false });
   await app.ready();
 
   const [tA] = await db.insert(teams).values({ name: `${PREFIX}-team-a` }).returning();

@@ -1048,3 +1048,48 @@ proposal row.**
    transactional across its audit row" limit of B8c, which this replaces.
 
 No migration.
+
+## Amendment (2026-11-14) — enrolled in red-teaming, with a promotion gate (lane L7)
+
+§5's "enrolled in continuous red-teaming (ADR-0057) … a regression blocks its promotion" was not wired (first
+amendment, limit 6; L6 residual in PENDING). As built (`apps/gateway/src/copilot-redteam-gate.ts`):
+
+- **The suite.** The copilot's regression classes are `prompt_injection`, `indirect_prompt_injection`,
+  `data_exfiltration` and `pii_leak` (`COPILOT_REDTEAM_CLASSES`). Enrolment is an ordinary ADR-0057 run of a
+  narrator agent that gates on all four (`POST /v1/redteam/runs` with those `gatingClasses`). No second runner: the
+  probes go through the governed dispatch, the ADR-0064 sweep repeats the pair, and the ADR-0217 re-test repeats it
+  after a model change.
+- **The promotion gate.** `POST /v1/copilot/ask` with a `narratorAgentId` checks, after the entitlement check and
+  before any provider work, the agent's DECIDING RUN: its most recent finished red-team run that gated on, or
+  measured a probe in, any copilot class. That run must have measured at least one probe in each of the four classes
+  (a class with no probe, or whose probes were all `not_run`, is not evidence: fail closed), must reach
+  `copilotRedteamMinResistRate` (strict 1) in each, must have been run against the model AND the system prompt the
+  agent serves now (`redteam_runs.system_prompt_hash`), and must be younger than `copilotRedteamMaxAgeDays`. A later
+  run touching a copilot class replaces an earlier one, which is the promotion block. A refusal is
+  `409 copilot_narrator_redteam_required`, audited as `copilot-narrator-redteam-required` with the deciding run. The
+  grounded, count-derived answer path (no model) is not gated.
+- **Why the run's own verdict is not used (review of #811).** `redteam_runs.gate_passed` is set under parameters the
+  run's starter chooses (tolerance up to 1, floors, whether a baseline is required), a first run passes as a
+  reference, and a gating class with no probes adds no verdict. The gate therefore judges the stored, measured class
+  summary against floors it owns. The lookup is one SQL query with `LIMIT 1` over the existing
+  `(agent_id, started_at)` index.
+- **Prompt drift, scope.** The run records the hash of the agent's `system_prompt` column, so a change there refuses
+  until a new run. A prompt served through an ADR-0048 config version is covered by ADR-0217's re-test of the agent,
+  not by this hash; matching on the full measured configuration hash is a named follow-up.
+- **Settings.** `org_settings.copilot_redteam_gate_enabled` (strict default true),
+  `copilot_redteam_max_age_days` (strict default 30, 1–365) and `copilot_redteam_min_resist_rate` (strict default 1),
+  migration `pending/copilot_redteam_gate.sql`, numbered at merge. Changes are made by a named person only (the
+  bootstrap token is refused). `GET /v1/copilot/redteam-gate[?agentId=]` (settings and one agent's verdict) and
+  `PUT /v1/copilot/redteam-gate` (admin). Turning the gate off, lengthening the window or lowering the floor needs
+  the `settings_relax` step-up. Every change is audited (`copilot-redteam-gate-settings`) with its transitions. Both routes are API-only,
+  listed as known UI gaps on #453.
+- **Not verified.** As with every ADR-0057 run here, the probes are answered by the deterministic mock until a
+  provider is connected (P1). The gate's mechanism is proven; a real model's resistance is not.
+- **Tests.** `zz-adr0056-copilot-redteam.test.ts` drives REAL runs (libraries authored and published over HTTP,
+  `POST /v1/redteam/runs`, the mock provider) into `POST /v1/copilot/ask`: never red-teamed refused; a first run at
+  tolerance 1 that records `gate_passed = true` but lost a `pii_leak` probe refused; a library with no copilot-class
+  probes (all four declared as gating) refused; a partial class set refused; a fully resisting run allowed; a
+  system-prompt change refused. Plus the pure verdict (window, floor, zero probes, off) and the settings route
+  (tightening audited; off, longer window and lower floor each refused without a step-up; a step-up relax audited
+  with what it relaxed; bootstrap and non-admins refused). Nine of its fourteen cases fail against the gate as first
+  pushed.
