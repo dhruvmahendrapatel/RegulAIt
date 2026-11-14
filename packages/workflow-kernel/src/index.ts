@@ -255,11 +255,14 @@ export const workflowDefinitionSchema = z
         });
       }
       // ADR-0283: a retry policy only means something on a stage the gateway
-      // executes; anywhere else it is a promise nothing keeps — refused loudly
-      if (s.retry !== undefined && !isExecutedStage(s)) {
+      // executes; anywhere else it is a promise nothing keeps — refused loudly.
+      // A deployment is executed but never retried unattended: its failures
+      // are manual hand-offs (blocked_on_deploy), and an automatic re-deploy
+      // (to production above all) is a decision for a person.
+      if (s.retry !== undefined && (!isExecutedStage(s) || s.type === "deployment")) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: `stage '${s.id}' (${s.type}) cannot carry retry — only a stage that completes through execution can (git_operation, deployment, automated_build with a run, automated_check with named checks)`,
+          message: `stage '${s.id}' (${s.type}) cannot carry retry — only git_operation, automated_build with a run and automated_check with named checks can (a deployment is never re-deployed unattended)`,
         });
       }
       if (s.type === "artifact_generation" && !s.output) {
