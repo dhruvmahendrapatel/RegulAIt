@@ -17,6 +17,7 @@ import { useSearchParams } from "react-router-dom";
 import { McpCoverage, StdioArguments } from "./Batch3Mcp";
 import { IntegrationOwnership } from "./IntegrationOwnership";
 import { ExecutionProfileSelector, PersonStdioRelaxationControl } from "./isolation/IsolationPanel";
+import { McpTokenExchangeCard } from "./TokenExchange";
 import { McpRegistriesPanel } from "./McpRegistriesPanel";
 import { McpAdmissionClearButton, McpServerNextSteps, McpSyncToolsButton, McpVisibleToolsCard } from "./McpServerAdmission";
 import { IdentityPropagationCell, McpIdentityAssertionCard } from "./McpIdentityPropagation";
@@ -166,6 +167,7 @@ function McpServersTab() {
             server={(servers.data?.servers ?? []).find((s) => s.id === selectedId)!}
           />
         )}
+        {selectedId && <McpTokenExchangeCard server={(servers.data?.servers ?? []).find((s) => s.id === selectedId)} />}
 
         <RegisterToolCard servers={servers.data?.servers ?? []} />
 

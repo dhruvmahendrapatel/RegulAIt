@@ -6,6 +6,7 @@
  */
 import { useState } from "react";
 import { IntegrationOwnership } from "./IntegrationOwnership";
+import { ConnectorTokenExchangeCard } from "./TokenExchange";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
@@ -119,6 +120,7 @@ export default function ConnectorsPage() {
 
         <CreateConnectorCard />
         <CredentialCard connectors={connectors.data?.connectors ?? []} />
+        <ConnectorTokenExchangeCard connectors={connectors.data?.connectors ?? []} />
 
         <Card title="Grant — mode + data scope">
           <GrantForm connectors={connectors.data?.connectors ?? []} users={users} />
