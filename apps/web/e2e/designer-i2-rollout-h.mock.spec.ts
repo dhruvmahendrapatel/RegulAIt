@@ -9,6 +9,8 @@
  *  - the panels stay mounted, so a half-typed allow-list or agent id survives a tab switch;
  *  - the tablist moves by arrow keys (and Home/End);
  *  - a settings read that fails is an error with Retry, never a status row of defaults;
+ *  - "relaxed" follows the gateway's strictness registry: the semantic cache counts, the model judge does not;
+ *  - at phone width the tablist scrolls inside itself and the page never scrolls sideways;
  *  - axe (WCAG 2.x A/AA, light and dark) through the shared helper.
  */
 import { expect, test, type Page, type Route } from "@playwright/test";
@@ -45,7 +47,7 @@ const SETTINGS: Record<string, unknown> = {
 };
 
 /** `failSettings` answers the settings read with a 500 until it is set back to false */
-async function mockApi(page: Page, opts: { failSettings?: boolean } = {}) {
+async function mockApi(page: Page, opts: { failSettings?: boolean; settings?: Record<string, unknown> } = {}) {
   const state = { failSettings: opts.failSettings ?? false, settingsReads: 0 };
   await page.route("**/*", async (route) => {
     const req = route.request();
@@ -56,7 +58,7 @@ async function mockApi(page: Page, opts: { failSettings?: boolean } = {}) {
     if (p === "/v1/org/settings" && req.method() === "GET") {
       state.settingsReads += 1;
       if (state.failSettings) return json(route, { error: "internal", message: "The settings store did not answer" }, 500);
-      return json(route, { settings: SETTINGS });
+      return json(route, { settings: { ...SETTINGS, ...opts.settings } });
     }
     return json(route, {});
   });
@@ -199,6 +201,39 @@ test.describe("I-2 rollout H: Organisation keeps its status above the tabs", () 
     await expect(page.getByRole("tablist", { name: "Organisation settings" }).getByRole("tab")).toHaveText(TABS);
     await expect(error).toHaveCount(0);
   });
+
+  test("relaxed follows the gateway's registry: semantic cache always counts, the exempt model judge does not", async ({ page }) => {
+    await mockApi(page, { settings: { semanticCachePolicy: "always", budgetHardBlockPct: 120, recommendationJudgeEnabled: true } });
+    await page.goto("/ui/admin/organization");
+    const status = page.getByRole("group", { name: "Organisation status" });
+    await expect(status.getByText("Relaxed from the default: 5")).toBeVisible();
+    const tablist = page.getByRole("tablist", { name: "Organisation settings" });
+    await expect(tablist.getByRole("tab", { name: "Cost & limits · 2 relaxed", exact: true })).toBeVisible();
+    await expect(tablist.getByRole("tab", { name: "Assisted features", exact: true })).toBeVisible();
+    await status.getByRole("button", { name: "What is the relaxation count?" }).click();
+    const note = status.getByRole("note");
+    await expect(note).toContainText("Semantic cache: on (Cost & limits)");
+    await expect(note).toContainText("Budget hard block: above 100% or never (Cost & limits)");
+    await expect(note).not.toContainText("Model-judged annotations");
+  });
+
+  for (const width of [390, 375]) {
+    test(`at ${width}px the page never scrolls sideways; the tablist scrolls inside itself`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 844 });
+      await mockApi(page);
+      await page.goto("/ui/admin/organization");
+      const tablist = page.getByRole("tablist", { name: "Organisation settings" });
+      await expect(tablist.getByRole("tab")).toHaveText(TABS);
+      const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+      expect(overflow, "horizontal page overflow in px").toBeLessThanOrEqual(0);
+      // the last tab is reachable: the keyboard brings it into view inside the tablist
+      await tablist.getByRole("tab", { name: "Cost & limits" }).focus();
+      await page.keyboard.press("End");
+      const last = tablist.getByRole("tab", { name: "Themes" });
+      await expect(last).toBeFocused();
+      await expect(last).toBeInViewport();
+    });
+  }
 
   test("axe is clean in light and dark, on the first tab and with the status row's (i) open", async ({ page }) => {
     await mockApi(page);

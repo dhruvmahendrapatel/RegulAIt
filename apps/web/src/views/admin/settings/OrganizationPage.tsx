@@ -36,6 +36,7 @@ import v from "../../views.module.css";
 import { api as stepUpApi, putOrgSettings, withStepUp } from "../../../stepup/stepUp";
 import { OrgSettingsCard } from "./OrgSettingsCard";
 import { specsFor, storedValue } from "./orgSettingSpecs";
+import { isOff, ORG_PAGE_RULES, ORG_PAGE_SPEC_TABS, type OrgTab } from "./orgPageRelaxed";
 import { PALETTES } from "../../../theme/palette";
 import { CardBoundary } from "../../../ui/CardBoundary";
 
@@ -45,7 +46,6 @@ const ThemesCard = lazy(() => import("./ThemesCard"));
 const CLEAR = "__clear__";
 
 /** I-2: the page's settings in tabs, each a group of the numbered sections (the numbers stay, so a pointer to "5b" still finds it) */
-type OrgTab = "costs" | "data" | "network" | "gates" | "assist" | "themes";
 const ORG_TABS: ReadonlyArray<{ id: OrgTab; label: string }> = [
   { id: "costs", label: "Cost & limits" },
   { id: "data", label: "Data & audit" },
@@ -56,48 +56,13 @@ const ORG_TABS: ReadonlyArray<{ id: OrgTab; label: string }> = [
 ];
 const relaxedLabel = (label: string, n: number) => (n > 0 ? `${label} · ${n.toLocaleString()} relaxed` : label);
 
-const isOn = (val: unknown) => val === true || val === "true";
-const isOff = (val: unknown) => val === false || val === "false";
-const isOneOf = (...vals: string[]) => (val: unknown) => typeof val === "string" && vals.includes(val);
-
-/**
- * I-2: each setting on this page whose saved value is looser than the default its own form names, with the tab it is
- * on. A value that is missing reads as its default (as the forms below do), so it is never counted as relaxed.
- */
-const RELAXED_WHEN: ReadonlyArray<{ tab: OrgTab; key: string; label: string; relaxed: (val: unknown) => boolean }> = [
-  { tab: "costs", key: "compactionFailureMode", label: "Compaction failure: fail open", relaxed: isOneOf("fail_open") },
-  { tab: "costs", key: "budgetEnforcement", label: "Project budgets: warn only", relaxed: isOneOf("warn_only") },
-  { tab: "data", key: "defaultPiiMode", label: "Default PII mode below block", relaxed: isOneOf("none", "log", "warn") },
-  { tab: "data", key: "envKeyFallbackEnabled", label: "Env-var key fallback: enabled", relaxed: isOn },
-  { tab: "data", key: "contentCredentialGuard", label: "Credential guard for content: off", relaxed: isOff },
-  { tab: "network", key: "customModelProvidersEnabled", label: "Custom LLM providers: enabled", relaxed: isOn },
-  { tab: "network", key: "mcpPrivateRangesDefault", label: "MCP private ranges: open", relaxed: isOn },
-  { tab: "network", key: "a2aEnabled", label: "Calls to remote agents: on", relaxed: isOn },
-  { tab: "network", key: "egressCompiledDefaultPolicy", label: "Compiled vendor endpoints: inherit", relaxed: isOneOf("inherit") },
-  { tab: "gates", key: "approvalQuorum", label: "Human-approval quorum: any one approver", relaxed: isOneOf("any") },
-  { tab: "gates", key: "approvalDelegationEnabled", label: "Approver delegation: enabled", relaxed: isOn },
-  { tab: "gates", key: "useCaseGateMode", label: "Use-case dispatch gate not enforcing", relaxed: isOneOf("warn", "off") },
-  { tab: "gates", key: "assuranceGateMode", label: "Continuous-assurance gate not enforcing", relaxed: isOneOf("warn", "off") },
-  { tab: "gates", key: "riskTreatmentsEnabled", label: "Transferred and avoided treatments: on", relaxed: isOn },
-  { tab: "gates", key: "dispatchAttributionRequired", label: "Project attribution: optional", relaxed: isOff },
-  { tab: "gates", key: "checkReportsAllowUnbound", label: "Check reports without a round: allowed", relaxed: isOn },
-  { tab: "assist", key: "recommendationJudgeEnabled", label: "Model-judged annotations: on", relaxed: isOn },
-  { tab: "assist", key: "frameworkImportsEnabled", label: "Framework imports: on", relaxed: isOn },
-  { tab: "assist", key: "vendorDraftAssistEnabled", label: "Vendor questionnaire drafts: on", relaxed: isOn },
-];
-/** the two settings cards on this page, judged by their own specs (the same strict/relaxed pill each row shows) */
-const SPEC_TABS: ReadonlyArray<{ tab: OrgTab; keys: readonly string[] }> = [
-  { tab: "data", keys: ["piiInternationalCategories"] },
-  { tab: "gates", keys: ["approvalSignatureMode", "toolApprovalSensitiveQuorum", "approvalTtlHours", "approvalBulkMaxItems", "approvalBulkSensitiveBlocked"] },
-];
-
 interface Relaxed {
   tab: OrgTab;
   label: string;
 }
 function relaxedSettings(settings: Record<string, unknown>): Relaxed[] {
-  const out: Relaxed[] = RELAXED_WHEN.filter((r) => r.relaxed(settings[r.key])).map((r) => ({ tab: r.tab, label: r.label }));
-  for (const group of SPEC_TABS) {
+  const out: Relaxed[] = ORG_PAGE_RULES.filter((r) => settings[r.key] !== undefined && r.relaxed(settings[r.key])).map((r) => ({ tab: r.tab, label: r.label }));
+  for (const group of ORG_PAGE_SPEC_TABS) {
     for (const spec of specsFor(group.keys)) {
       const stored = storedValue(spec, settings[spec.key]);
       if (stored !== undefined && spec.isRelaxed(stored)) out.push({ tab: group.tab, label: spec.label });
