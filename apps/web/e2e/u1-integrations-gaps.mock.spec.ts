@@ -728,6 +728,9 @@ test.describe("regulAIt-LLM — add rows, validate, poll (ADR-0065)", () => {
       ["GET", /^\/v1\/llm\/artifacts$/, () => ({ body: { artifacts: [], note: "" } })],
     ]);
     await page.goto("/ui/admin/regulait-llm");
+    // I-2: the datasets live on the stepper's Training data step, the jobs on its Training jobs step
+    const steps = page.getByRole("list", { name: "Custom-model steps" });
+    await steps.getByRole("button", { name: /^\d?Training data/ }).click({ timeout: 30_000 });
     await page.getByRole("cell", { name: "faq", exact: true }).click({ timeout: 30_000 });
     const add = page.getByRole("form", { name: "Add rows to faq v1" });
     await add.getByLabel("Rows to add (JSON Lines)").fill('{"input":"ok"}\n{"output":"no input"}');
@@ -751,6 +754,7 @@ test.describe("regulAIt-LLM — add rows, validate, poll (ADR-0065)", () => {
     expect(sent(calls, "POST", `/v1/llm/datasets/${DS.id}/validate`)).toEqual([{ method: "retrieval_index", backend: "local", hyperparameters: { topK: 5 } }]);
     await expectAxeClean(page, "llm dataset tools");
 
+    await steps.getByRole("button", { name: /^\d?Training jobs/ }).click();
     await page.getByRole("button", { name: "Poll faq-index now" }).click();
     await expect(page.getByRole("alert").filter({ hasText: "not running any more" }).first()).toBeVisible();
   });

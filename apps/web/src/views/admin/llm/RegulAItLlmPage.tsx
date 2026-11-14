@@ -26,7 +26,7 @@
  *    inference mints an agent AND a model card, and the screen links straight
  *    to both, plus to an evaluation of it (ADR-0044).
  */
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { TrainingJobDetail } from "./TrainingJobDetail";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
@@ -51,6 +51,7 @@ import { KV, OutcomePanel, QueryGate, RemoveButton, Stat, agentOpts, optionEls, 
 import { DataList } from "../../../ui/DataList";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+import { Stepper } from "../../../ui/Stepper";
 import { SpdxFieldsPanel } from "../governance/SpdxFieldsPanel";
 import { AddRowsForm, PollJobButton, ValidateDatasetForm } from "./LlmDatasetTools";
 
@@ -332,6 +333,73 @@ export default function RegulAItLlmPage() {
     return out;
   }
 
+  // I-2 (#453): the four acts (backend, data, training, artifact) as the kit stepper, each step stating its own
+  // status. It opens on the first unfinished step; a chosen step stays chosen. The stepper waits for all three reads
+  // (review of #690), so no step reads "0" while the artifacts load and the opening step never jumps once they arrive.
+  type Step = "backends" | "data" | "jobs" | "artifacts";
+  const backendRows = backends.data?.backends ?? [];
+  const usable = backendRows.filter((b) => !b.requiresCredential || (b.hasCredential && b.configEnabled)).length;
+  const refusing = backendRows.length - usable;
+  const datasetRows = datasets.data?.datasets ?? [];
+  const notClean = datasetRows.filter((d) => d.piiVerdict !== "clean").length;
+  const jobsStarted = datasetRows.reduce((n, d) => n + d.jobCount, 0);
+  const artifactRows = artifacts.data?.artifacts ?? [];
+  const registered = artifactRows.filter((x) => x.agentId).length;
+  const steps: Array<{ id: Step; label: string; done: boolean; status: ReactNode }> = [
+    {
+      id: "backends",
+      label: "Backends",
+      done: Boolean(backends.data?.enabled) && usable > 0,
+      status: (
+        <span className={v.row}>
+          {!backends.data?.enabled && <Badge tone="warn">Custom-model creation off</Badge>}
+          <Badge tone={usable > 0 ? "ok" : "warn"}>{`${usable} usable`}</Badge>
+          {refusing > 0 && <Badge tone="warn">{`${refusing} will refuse`}</Badge>}
+        </span>
+      ),
+    },
+    {
+      id: "data",
+      label: "Training data",
+      done: datasetRows.length > 0,
+      status: (
+        <span className={v.row}>
+          {datasetRows.length === 0 ? (
+            <Badge tone="neutral">none yet</Badge>
+          ) : (
+            <Badge tone="info">{`${datasetRows.length} version${datasetRows.length === 1 ? "" : "s"}`}</Badge>
+          )}
+          {notClean > 0 && <Badge tone="warn">{`${notClean} flagged by the ingest scan`}</Badge>}
+        </span>
+      ),
+    },
+    {
+      id: "jobs",
+      label: "Training jobs",
+      done: artifactRows.length > 0,
+      status: jobsStarted === 0 ? <Badge tone="neutral">none yet</Badge> : <Badge tone="info">{`${jobsStarted} started`}</Badge>,
+    },
+    {
+      id: "artifacts",
+      label: "Model artifacts",
+      done: registered > 0,
+      status: artifacts.isError ? (
+        <Badge tone="danger">Couldn't load</Badge>
+      ) : (
+        <Badge tone={artifactRows.length === 0 ? "neutral" : registered > 0 ? "ok" : "info"}>
+          {`${artifactRows.length} artifact${artifactRows.length === 1 ? "" : "s"} · ${registered} registered`}
+        </Badge>
+      ),
+    },
+  ];
+  const firstOpen: Step = steps.find((x) => !x.done)?.id ?? "artifacts";
+  const [chosenStep, setStep] = useState<Step | null>(null);
+  const step: Step = chosenStep ?? firstOpen;
+  const openArtifact = (id: string) => {
+    setSelectedArtifact(id);
+    setStep("artifacts");
+  };
+
   return (
     <>
       <PageHeader
@@ -349,29 +417,35 @@ export default function RegulAItLlmPage() {
       />
       <div className={v.stack}>
         <QueryGate
-          loading={backends.isLoading || datasets.isLoading}
+          loading={backends.isLoading || datasets.isLoading || artifacts.isLoading}
           error={backends.error ?? datasets.error}
           onRetry={() => {
             void backends.refetch();
             void datasets.refetch();
           }}
         >
+          {/* the page-wide state stays above the stepper, so no step hides it */}
+          <div className={v.row}>
+            <Stat
+              value={backends.data?.enabled ? "on" : "off"}
+              label="Custom-model creation"
+            />
+            <Stat
+              value={`$${(backends.data?.approvalThresholdUsd ?? 0).toFixed(2)}`}
+              label="Approval threshold (estimated cost)"
+            />
+          </div>
+
+          {/* no info buttons here: the status sits inside the step's own button; the step's cards explain it */}
+          <Stepper label="Custom-model steps" steps={steps} current={step} onSelect={setStep} />
+
           {/* ---------------- backends ---------------- */}
+          {step === "backends" && (
           <Card
             title="Training backends, and what each one cannot do"
             info={backends.data?.note ? <p>{backends.data.note}</p> : undefined}
             infoLabel="training backends"
           >
-            <div className={v.row} style={{ marginBottom: "var(--s2)" }}>
-              <Stat
-                value={backends.data?.enabled ? "on" : "off"}
-                label="Custom-model creation"
-              />
-              <Stat
-                value={`$${(backends.data?.approvalThresholdUsd ?? 0).toFixed(2)}`}
-                label="Approval threshold (estimated cost)"
-              />
-            </div>
             <Table
               rows={backends.data?.backends ?? []}
               rowKey={(r) => r.kind}
@@ -431,7 +505,10 @@ export default function RegulAItLlmPage() {
               />
             )}
           </Card>
+          )}
 
+          {step === "data" && (
+          <>
           {/* ---------------- upload ---------------- */}
           <Card
             title="Upload training data"
@@ -687,6 +764,8 @@ export default function RegulAItLlmPage() {
                       hyperparameters,
                     });
                     setJobName("");
+                    // the job is now on the Training jobs step, where its progress shows
+                    setStep("jobs");
                     await jobs.refetch();
                     await artifacts.refetch();
                     await datasets.refetch();
@@ -773,7 +852,11 @@ export default function RegulAItLlmPage() {
               </form>
             </Card>
           )}
+          </>
+          )}
 
+          {step === "jobs" && (
+          <>
           {openJob && <TrainingJobDetail key={openJob} jobId={openJob} onClose={() => setOpenJob(null)} />}
           {/* ---------------- jobs ---------------- */}
           <Card title="Training jobs" contain>
@@ -786,7 +869,7 @@ export default function RegulAItLlmPage() {
               legacyKey="jobs"
               defaultSort={{ key: "when", dir: "desc" }}
               rowKey={(r) => r.id}
-              empty={<EmptyState title="No training jobs yet" body="Start a job from a dataset above." />}
+              empty={<EmptyState title="No training jobs yet" body="Start a job from a dataset on the Training data step." />}
               columns={[
                 {
                   key: "name",
@@ -868,7 +951,7 @@ export default function RegulAItLlmPage() {
                   sortable: true,
                   render: (r) =>
                     r.artifactId ? (
-                      <Button size="sm" onClick={() => setSelectedArtifact(r.artifactId!)}>
+                      <Button size="sm" onClick={() => openArtifact(r.artifactId!)}>
                         Open
                       </Button>
                     ) : (
@@ -928,7 +1011,11 @@ export default function RegulAItLlmPage() {
               </Button>
             </div>
           </Card>
+          </>
+          )}
 
+          {step === "artifacts" && (
+          <>
           {/* ---------------- artifacts ---------------- */}
           <Card title="Model artifacts" info={artifacts.data?.note ? <p>{artifacts.data.note}</p> : undefined}>
             <Table
@@ -1145,6 +1232,8 @@ export default function RegulAItLlmPage() {
                 </div>
               )}
             </Card>
+          )}
+          </>
           )}
         </QueryGate>
       </div>

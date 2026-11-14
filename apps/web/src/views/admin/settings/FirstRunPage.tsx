@@ -33,8 +33,7 @@ import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, Field, InfoButton, Meter, Select, Textarea } from "../../../ui/kit";
 import { QueryGate } from "../adminKit";
 import v from "../../views.module.css";
-// I-2 (#453): the Billing set-up stepper's own styles, reused as they are rather than copied
-import bl from "../cost/billing.module.css";
+import { Stepper } from "../../../ui/Stepper";
 import { GroupRoleImportCard, ImportHistoryCard } from "./OnboardingImportsCards";
 
 interface WizardStep {
@@ -175,24 +174,26 @@ export default function FirstRunPage() {
             </Card>
 
             {d.steps.length > 0 && (
-              <ol className={bl.steps} aria-label="First-run steps">
-                {d.steps.map((x, i) => {
-                  const done = x.status === "done" || x.status === "skipped";
-                  return (
-                    <li key={x.key} className={x.key === step ? bl.stepOn : done && !x.drift ? bl.stepDone : undefined}>
-                      <button type="button" aria-current={x.key === step ? "step" : undefined} onClick={() => setStep(x.key)}>
-                        <span className={bl.stepNum} aria-hidden>{done && !x.drift && x.key !== step ? "✓" : i + 1}</span>
-                        <span>{x.title}</span>
-                        {/* no info buttons here: the status sits inside the step's own button; the step's panel explains it */}
-                        <Badge tone={tone(x)}>{humanize(x.status)}</Badge>
-                        <Badge tone={x.satisfied ? "ok" : "neutral"}>{x.satisfied ? "Verified live" : "Not verified"}</Badge>
-                        {x.drift && <Badge tone="danger">Drift</Badge>}
-                        {x.blockedBy.length > 0 && <Badge tone="warn">Blocked</Badge>}
-                      </button>
-                    </li>
-                  );
-                })}
-              </ol>
+              <Stepper
+                label="First-run steps"
+                current={step}
+                onSelect={setStep}
+                steps={d.steps.map((x) => ({
+                  id: x.key,
+                  label: x.title,
+                  // a drifted step is never shown as finished
+                  done: (x.status === "done" || x.status === "skipped") && !x.drift,
+                  // no info buttons here: the status sits inside the step's own button; the step's panel explains it
+                  status: (
+                    <>
+                      <Badge tone={tone(x)}>{humanize(x.status)}</Badge>
+                      <Badge tone={x.satisfied ? "ok" : "neutral"}>{x.satisfied ? "Verified live" : "Not verified"}</Badge>
+                      {x.drift && <Badge tone="danger">Drift</Badge>}
+                      {x.blockedBy.length > 0 && <Badge tone="warn">Blocked</Badge>}
+                    </>
+                  ),
+                }))}
+              />
             )}
 
             {d.steps.filter((s) => s.key === step).map((s) => {
