@@ -64,6 +64,16 @@ pg-boss. The prototype is in `spikes/workflow-p30/` (default off); there is no p
 - Jira/monday URL-token rotation is #605's G6 rotate route (HOLD; its ADR is not yet on `main`); #605 must drop its own copy of the legacy fallback when it rebases.
 - #717 review (21:09): Jira, monday, Azure DevOps and Asana must also carry an in-body creation time no older than 7 days (below the 30-day record retention), so a replay after the prune is refused; concurrent-duplicate test added ([ADR-0010 amendment (b)](../decisions/0010-pm-inbound-sync-webhooks-plus-read-through.md)).
 
+**2026-11-07 - S-02 closed: published dev secrets need loopback or an opt-in; the bootstrap credential retires (PR #728, [ADR-0167 amendment](../decisions/0167-security-review-batch.md)).**
+- The published `dev-bootstrap` token and 64×`a` data key boot only on a loopback-only listener with no deploy signal, or
+  with `REGULAIT_ALLOW_DEV_SECRETS=1` (a boot banner and a `dev-secrets-opt-in` audit row). Every compose bring-up now
+  needs the opt-in in `.env` or real values; the README quickstart says so.
+- An https non-loopback `REGULAIT_PUBLIC_URL` is a deploy signal; the base compose forwards `REGULAIT_HSTS` (no default).
+- The bootstrap token answers 401 `bootstrap_retired` once an enabled admin has signed in with their own credential
+  (audited once per process). `REGULAIT_BOOTSTRAP_AFTER_ADMIN=1` relaxes it; the gateway suite, the e2e harness and
+  the demo workflow set it, and the in-process `seed`/`demo:*` tools pass it in code.
+- Minting an API key for another user is an `identity_manage` step-up; the admin Users page wraps it in `withStepUp`.
+
 **2026-10-29 - the customer demo moves to one date, Saturday 2026-10-31 (owner, #453 c6508111468).**
 - **Date:** the internal run-through on Sun 11-01 and the external demo on Tue 11-03 are dropped; there is one run, on
   10-31. LIVE is never re-prepared, so every beat, state-changing ones included, runs on LIVE once, at the demo; the

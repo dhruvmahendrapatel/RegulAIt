@@ -69,9 +69,10 @@ docker compose logs -f caddy          # watch for "certificate obtained successf
 defaults — `REGULAIT_BOOTSTRAP_TOKEN=dev-bootstrap` is a full-admin credential printed in this
 repository, and the default `REGULAIT_DATA_KEY` opens every stored secret. Put real values in
 `.env` (or run `scripts/install.sh`, which generates them). The gateway prints `secrets: DEV-GRADE`
-in its boot posture block whenever the defaults are in use, and refuses to start on them once
-`REGULAIT_DEPLOY_MODE` or `REGULAIT_HSTS` is set; a `--profile tls` bring-up sets neither, so
-check `docker compose logs gateway | grep secrets:` yourself.
+in its boot posture block whenever the defaults are in use, and refuses to start on them in a
+container unless `REGULAIT_ALLOW_DEV_SECRETS=1` is set (ADR-0167 amendment, S-02). Never set that
+opt-in on a box that publishes :443; if `docker compose logs gateway` shows `DEV SECRETS ACCEPTED`,
+remove it and set real values.
 
 Terraform's user-data already does this on first boot, including deriving `REGULAIT_TLS_HOST`
 from IMDS and writing it into `docker-compose.override.yml`.

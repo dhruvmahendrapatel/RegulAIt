@@ -84,6 +84,13 @@ export default async function globalSetup() {
     REGULAIT_BOOTSTRAP_TOKEN: BOOT,
     REGULAIT_DATA_KEY: DATA_KEY,
     PORT: String(PORT),
+    // ADR-0167 amendment (S-02): the fixture data key has no entropy, so the
+    // gateway accepts it only on a loopback-only listener. The suite reaches it
+    // on 127.0.0.1 anyway.
+    HOST: "127.0.0.1",
+    // S-02: the bootstrap token retires once an admin signs in; specs keep
+    // using BOOT after personas sign in, so the suite relaxes it explicitly.
+    REGULAIT_BOOTSTRAP_AFTER_ADMIN: "1",
     // Every spec performs a REAL UI sign-in against the same gateway from the
     // same IP. The production default for the credential bucket (10 per 300s)
     // was already at the suite tail's edge — the 112th spec tipped zz-vendors

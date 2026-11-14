@@ -164,6 +164,9 @@ jobs:
 
       - name: Start the gateway
         run: |
+          # ADR-0167 amendment (S-02): loopback-only, so the fixture data key is accepted; the
+          # journey keeps using the bootstrap token after personas sign in, so its retirement is relaxed
+          HOST=127.0.0.1 REGULAIT_BOOTSTRAP_AFTER_ADMIN=1 \
           PORT=3105 REGULAIT_AUTH_RATE_LIMIT_MAX=1000 REGULAIT_RATE_LIMIT_MAX=20000 \
             nohup node apps/gateway/dist/main.js > "$RUNNER_TEMP/gateway.log" 2>&1 &
           for i in $(seq 1 30); do curl -sf http://127.0.0.1:3105/health && exit 0; sleep 1; done

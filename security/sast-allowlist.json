@@ -11,24 +11,6 @@
       "expires": "2027-01-04"
     },
     {
-      "id": "js/clear-text-storage-of-sensitive-data",
-      "path": "apps/gateway/src/auth.ts",
-      "fingerprint": "9988dd1078e54e23:1",
-      "line": 1223,
-      "reason": "False positive (PR #117 triage, d0feaf8). The pending-MFA cookie carries only an opaque server-generated handle (randomBytes(32)); the database row stores sha256(handle), the cookie is HttpOnly and Secure on TLS, single-use and short-lived. token-hash.test.ts fails if the handle loses entropy or the cookie loses HttpOnly.",
-      "reviewedOn": "2026-10-06",
-      "expires": "2027-01-04"
-    },
-    {
-      "id": "js/clear-text-storage-of-sensitive-data",
-      "path": "apps/gateway/src/saml.ts",
-      "fingerprint": "30c0099eb145a7a0:1",
-      "line": 912,
-      "reason": "False positive (PR #117 triage, d0feaf8). The pending-MFA cookie carries only an opaque server-generated handle (randomBytes(32)); the database row stores sha256(handle), the cookie is HttpOnly and Secure on TLS, single-use and short-lived. token-hash.test.ts fails if the handle loses entropy or the cookie loses HttpOnly.",
-      "reviewedOn": "2026-10-06",
-      "expires": "2027-01-04"
-    },
-    {
       "id": "js/insufficient-password-hash",
       "path": "apps/gateway/src/token-hash.ts",
       "fingerprint": "67ad4bdd8a2d5ed0:1",

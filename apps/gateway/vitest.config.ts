@@ -52,6 +52,13 @@ export default defineConfig({
       // the loop construct a Scheduler directly; scheduler.test.ts asserts the
       // empty-environment default is on.
       REGULAIT_SCHEDULER: "off",
+      // ADR-0167 amendment (S-02): the bootstrap token RETIRES once an active
+      // admin exists. Hundreds of files build an app with BOOT, create users,
+      // and keep using BOOT, so the suite relaxes it EXPLICITLY here, as it
+      // does the rate limiter. dev-secrets-s02.test.ts builds apps with
+      // `bootstrapAfterAdmin: false` and asserts the empty-environment default
+      // retires the token, so the shipping posture is still covered.
+      REGULAIT_BOOTSTRAP_AFTER_ADMIN: "1",
       // REGULAIT_DATABASE_SSL is deliberately NOT set here: its default is
       // `require`, and the environment that points the suite at a Postgres
       // without TLS (CI, the local gate) says `disable` itself.
