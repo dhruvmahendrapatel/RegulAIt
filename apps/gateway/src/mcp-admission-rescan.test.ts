@@ -65,8 +65,10 @@ import {
   eq,
   gte,
   inArray,
+  isNull,
   mcpServers,
   mcpTools,
+  ne,
   runMigrations,
   users,
   type Db,
@@ -650,6 +652,11 @@ describe("ADR-0100 §5 — one audited fact per pass, with real counts", () => {
     await setMode("enforce");
     await grandfather(honestServerId);
     await grandfather(clearedServerId);
+    // a DISABLED grandfathered leftover (this file's own, standing in for any other suite's) sorts in the
+    // worst-provenance band; it must not consume the one-server budget, or the pass would examine nothing
+    const leftoverId = await registerServer(`adr100-leftover-${randomUUID().slice(0, 8)}`, "http://127.0.0.1:1/");
+    await grandfather(leftoverId);
+    await db.update(mcpServers).set({ disabledAt: new Date() }).where(eq(mcpServers.id, leftoverId));
 
     const out = await runMcpAdmissionRescan(db, { actorUserId: null, limit: 1 });
 
@@ -659,6 +666,48 @@ describe("ADR-0100 §5 — one audited fact per pass, with real counts", () => {
     // ordering is worst-known-provenance first, so a capped pass spends its
     // budget on the blind spot rather than on the best-understood servers
     expect(out.adjudicated + out.unreachable).toBe(1);
+    expect(out.unreachableServerIds).not.toContain(leftoverId);
+  });
+
+  it("a DISABLED server is neither counted as eligible nor examined, and files no deny row", async () => {
+    await setMode("enforce");
+    const disabledUpstream = await startUpstream("poisoned");
+    try {
+      const disabledId = await registerServer(`adr100-disabled-${randomUUID().slice(0, 8)}`, disabledUpstream.url);
+      await grandfather(disabledId);
+      await db.update(mcpServers).set({ disabledAt: new Date() }).where(eq(mcpServers.id, disabledId));
+      const requestsBefore = disabledUpstream.requests;
+      const since = new Date();
+
+      // eligible is the candidate set WITHOUT disabled servers: the same predicate, counted just before the pass
+      // (the pass itself moves servers it holds out of the eligible states)
+      const eligibleWhere = and(
+        inArray(mcpServers.admissionState, [...MCP_RESCAN_ELIGIBLE_STATES]),
+        ne(mcpServers.transport, "stdio"),
+      );
+      const enabled = await db.select({ id: mcpServers.id }).from(mcpServers).where(and(eligibleWhere, isNull(mcpServers.disabledAt)));
+      const all = await db.select({ id: mcpServers.id }).from(mcpServers).where(eligibleWhere);
+
+      const out = await runMcpAdmissionRescan(db, { actorUserId: null, limit: WIDE });
+
+      expect(all.map((r) => r.id)).toContain(disabledId);
+      expect(enabled.map((r) => r.id)).not.toContain(disabledId);
+      expect(out.eligible).toBe(enabled.length);
+      expect(out.examined).toBeLessThanOrEqual(enabled.length);
+      expect(out.heldServerIds).not.toContain(disabledId);
+      expect(out.unreachableServerIds).not.toContain(disabledId);
+
+      // never contacted, and nothing at all was filed against it, a deny row least of all
+      expect(disabledUpstream.requests).toBe(requestsBefore);
+      const rows = (await db.select().from(auditLog).where(gte(auditLog.at, since))).filter((r) => r.serverId === disabledId);
+      expect(rows.filter((r) => r.effect === "deny")).toEqual([]);
+      expect(rows).toEqual([]);
+      const row = await serverRow(disabledId);
+      expect(row.admissionState).toBe("grandfathered");
+      expect(row.admissionScannedAt).toBeNull();
+    } finally {
+      await disabledUpstream.close();
+    }
   });
 
   it("an unreachable server is NOT a verdict — its state is untouched", async () => {
