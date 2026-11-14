@@ -18,12 +18,13 @@
  * APPROVED use-case intent: aligned / overreach / undershoot — claims about
  * grant rows and the register, never about observed traffic).
  */
-import { useState } from "react";
+import { createContext, useContext, useEffect, useState } from "react";
+import inv from "./inventoryOverview.module.css";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Table, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Table, type TableProps, type Tone } from "../../../ui/kit";
 import { QueryGate } from "../adminKit";
 import { DataList } from "../../../ui/DataList";
 import v from "../../views.module.css";
@@ -167,9 +168,33 @@ function FeedList(props: { title: string; edges: FeedEdgeView[]; direction: "out
   );
 }
 
+/**
+ * The summary tiles count exactly the rows the table is showing. The table reports what it renders, so a failed
+ * read clears the counts (they show "—", never the previous page's numbers) and an emptied list counts zero.
+ */
+const ShownRowsContext = createContext<(rows: InventoryAgent[] | null) => void>(() => undefined);
+function ReportingTable(props: TableProps<InventoryAgent>) {
+  const report = useContext(ShownRowsContext);
+  const rows = props.error ? null : props.loading ? null : (props.rows ?? null);
+  useEffect(() => report(rows), [report, rows]);
+  return <Table {...props} />;
+}
+
+function summaryOf(rows: InventoryAgent[]) {
+  return {
+    agents: rows.length,
+    active: rows.filter((a) => a.lifecycle.status === "active").length,
+    unowned: rows.filter((a) => a.ownership !== "owned").length,
+    overreach: rows.filter((a) => a.alignment?.overreach).length,
+    openRisks: rows.reduce((n, a) => n + a.links.openRisks, 0),
+  };
+}
+
 export default function InventoryPage() {
   // ADR-0226: the registered agents page on the server; the window comes with each page
   const [days, setDays] = useState(90);
+  const [shownAgents, setShownAgents] = useState<InventoryAgent[] | null>(null);
+  const summary = shownAgents ? summaryOf(shownAgents) : null;
   const [openId, setOpenId] = useState<string | null>(null);
   const detail = useQuery({
     queryKey: ["admin", "inventory", openId],
@@ -193,8 +218,28 @@ export default function InventoryPage() {
         }
       />
       <div className={v.stack}>
+        <section aria-label="Summary of the agents on this page" className={inv.overview} data-testid="inventory-summary">
+          {([
+            ["agents", "Agents on this page"],
+            ["active", "Active on this page"],
+            ["unowned", "Unowned or orphaned on this page"],
+            ["overreach", "Grant overreach on this page"],
+            ["openRisks", "Open linked risks on this page"],
+          ] as const).map(([key, label]) => (
+            <div key={key} className={inv.tile}>
+              <span>{label}</span>
+              <strong>{summary ? summary[key] : "—"}</strong>
+            </div>
+          ))}
+        </section>
+        <p className={v.faint} data-testid="inventory-summary-scope">
+          These figures count only the agents shown in the table below, not the whole inventory. Lifecycle, grants and
+          observed usage stay distinct.
+        </p>
           <Card title="Registered agents" flush>
+            <ShownRowsContext.Provider value={setShownAgents}>
               <DataList<InventoryAgent>
+                table={ReportingTable}
                 listId="inventory-agents"
                 noun="agents"
                 endpoint="/v1/inventory/agents"
@@ -334,6 +379,7 @@ export default function InventoryPage() {
                   },
                 ]}
               />
+            </ShownRowsContext.Provider>
           </Card>
 
         {openId && (
