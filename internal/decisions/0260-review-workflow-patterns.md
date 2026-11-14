@@ -109,3 +109,28 @@ The engine already has two machine-decided check kinds: an eval-bound check (ADR
   `apps/gateway/src/workflow-review-checks.test.ts` (pure contract tests and real-Postgres integration with a
   recording provider).
 - Attribution: `apps/gateway/THIRD_PARTY.md` row and `apps/gateway/third-party-notices/oneredoak-claude-code-workflows.md`.
+
+### As built — review rounds on #732 (2026-11-14)
+
+Decisions 7, 9 and 10 above are kept; these details changed in review and are recorded here rather than by
+editing them.
+
+- **Evidence escaping.** No tag is stripped. Every `<`, `>` and every non-ASCII character in the evidence JSON is
+  written as its JSON `\u` escape, so the block is ASCII inside and no tag or look-alike delimiter can form in it.
+  The delimiter tag is per dispatch (`change_evidence_<random>`).
+- **Fail closed without the reviewed artifact.** A code or security review needs the diff and a design review a
+  capture of the running UI; neither is in the evidence yet. A review-bound check therefore **fails without
+  dispatching** (`review_evidence_insufficient`) unless its binding sets `allowEvidenceOnly: true`, the template's
+  versioned relaxation (ADR-0180). Such a result is labelled `evidence-only review (no diff read; not a code
+  review)` and carries `evidenceOnly: true`. The gallery shapes do not set it.
+- **Truncated evidence fails.** Evidence over the 60,000-character limit is not reviewed: the check fails
+  (`review_evidence_truncated`), never passes on a partial review.
+- **Reuse is bound to a fingerprint.** A pass is reused inside a waiting episode only when its round and its
+  fingerprint match: sha256 of the evidence, the binding (check, agent, profile, `failOn`, `maxTokens`,
+  `allowEvidenceOnly`), the agent's configuration (provider plus the eval runner's `agentConfigHash`: model, tier,
+  custom provider, active or canary system prompt) and `REVIEW_BRIEF_VERSION`.
+- **Evidence is compared again at commit.** Under the row lock the executor reloads the evidence; if it changed
+  while the reviews ran, the verdict is discarded like a stale executor's and the stage is evaluated again.
+- **The gallery placeholder is never a reviewer.** Template creation refuses `reviewer-agent` with
+  `422 reviewer_agent_placeholder`, even when an agent has that name.
+- **Follow-up (PENDING P36):** when the diff read lands, the PR head SHA joins the evidence and so the fingerprint.

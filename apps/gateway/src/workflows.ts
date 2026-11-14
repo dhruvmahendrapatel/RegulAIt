@@ -46,7 +46,14 @@ import {
   evalDatasets,
 } from "@regulait/db";
 import { evalDatasetNamesBoundBy, evalDatasetRetiredDetail, retiredEvalDatasetNames, runEvalSuite } from "./evals.js";
-import { loadReviewEvidence, reviewFingerprint, runStageReviewChecks, type ReviewCheckOutcome } from "./workflow-review-checks.js";
+import {
+  evidenceDigest,
+  loadReviewEvidence,
+  REVIEWER_PLACEHOLDER,
+  reviewFingerprints,
+  runStageReviewChecks,
+  type ReviewCheckOutcome,
+} from "./workflow-review-checks.js";
 import {
   resolveProvider,
   gitDefaultBaseUrl,
@@ -1492,9 +1499,9 @@ async function runGitExecutions(
         reviewBound.size > 0
           ? await loadReviewEvidence(db, { ...instance, round: guard.round, context }, stage, def)
           : undefined;
-      const reviewFingerprints = new Map(
-        reviewEvidence ? (stage.reviews ?? []).map((b) => [b.check, reviewFingerprint(reviewEvidence, b)] as const) : [],
-      );
+      const currentFingerprints = reviewEvidence
+        ? await reviewFingerprints(db, reviewEvidence, stage.reviews ?? [])
+        : new Map<string, string>();
       if (typeof context[waitKey] === "string" && Array.isArray(context[`checks:${stage.id}`])) {
         for (const r of context[`checks:${stage.id}`] as EvaluatedCheck[]) {
           if (r && evalBound.has(r.check) && r.status === "passed" && r.eval) {
@@ -1509,7 +1516,7 @@ async function runGitExecutions(
             r.review &&
             r.review.round === guard.round &&
             typeof r.review.fingerprint === "string" &&
-            r.review.fingerprint === reviewFingerprints.get(r.check)
+            r.review.fingerprint === currentFingerprints.get(r.check)
           ) {
             episodeReviews.set(r.check, { check: r.check, status: "passed", severity: r.severity, detail: r.detail, review: r.review });
           }
@@ -1687,6 +1694,22 @@ async function runGitExecutions(
         },
         undefined,
         claimed.guardAtCommit ? completionGuard : undefined,
+        // review fix [5]: the reviews read evidence outside this transaction; if
+        // it changed before the commit (a new requirements version, a new PR
+        // reference), the verdict is about evidence that is no longer current
+        reviewEvidence
+          ? async (tx, row) => {
+              const now = await loadReviewEvidence(
+                tx as unknown as Db,
+                { ...instance, round: guard.round, context: row.context as Record<string, unknown> },
+                stage,
+                def,
+              );
+              return evidenceDigest(now) === evidenceDigest(reviewEvidence)
+                ? null
+                : "the review evidence changed while the reviews ran (a new requirements version or PR reference); the stage is evaluated again";
+            }
+          : undefined,
       );
       if (!r.committed) {
         await reevaluateIfReportsArrived();
@@ -2446,6 +2469,11 @@ async function commitStageResult(
    * it refuses is not applied — the verdict and the refusal are recorded, and
    * the instance stays at the stage */
   completionGuard?: TransitionGuard,
+  /** ADR-0260 review fix [5]: a last check made inside the transaction, under
+   * the row lock, after the stale checks. A non-null reason discards the
+   * result exactly as a stale executor's is discarded (the claim is released
+   * and the stage is evaluated again). */
+  recheck?: (tx: DbOrTx, row: InstanceRow) => Promise<string | null>,
 ): Promise<StageCommit> {
   if (workflowTestHooks.beforeStageCommit) {
     await workflowTestHooks.beforeStageCommit({ instanceId: guard.instanceId, stageId: guard.stageId });
@@ -2458,7 +2486,7 @@ async function commitStageResult(
       .for("update");
     if (!row) return { committed: false, reason: "the instance no longer exists" };
     const fresh = { ...(row.context as Record<string, unknown>) };
-    const stale = staleExecutorReason(row, guard);
+    const stale = staleExecutorReason(row, guard) ?? (recheck ? await recheck(tx, row) : null);
     if (stale) {
       // DISCARD — the verdict and the transition are dropped, but an external
       // effect this executor already PERFORMED (a deploy, a branch, a PR, a
@@ -2633,6 +2661,18 @@ export async function createWorkflowTemplateValidated(
   // ADR-0260: a review-bound check names its reviewer; a template must never
   // promise a review by an agent that is not in the registry
   const reviewAgents = [...new Set(definition.stages.flatMap((st) => (st.reviews ?? []).map((r) => r.agent)))];
+  // review fix [4]: the gallery's placeholder is never a reviewer, even if an
+  // agent with that literal name exists
+  if (reviewAgents.includes(REVIEWER_PLACEHOLDER)) {
+    return {
+      ok: false,
+      status: 422,
+      body: {
+        error: "reviewer_agent_placeholder",
+        detail: `'${REVIEWER_PLACEHOLDER}' is the gallery's placeholder, not a reviewer: name the registry agent that reviews`,
+      },
+    };
+  }
   if (reviewAgents.length > 0) {
     const found = await db.select({ name: agents.name }).from(agents).where(inArray(agents.name, reviewAgents));
     const known = new Set(found.map((r) => r.name));

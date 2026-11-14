@@ -201,6 +201,12 @@ const stageSchema = z.object({
         failOn: z.enum(REVIEW_FAIL_ON).optional(),
         /** the reviewer's answer budget, in output tokens. Default 4096. */
         maxTokens: z.number().int().min(256).max(16_384).optional(),
+        /** ADR-0260 review fix: a code or security review needs the diff, and a
+         * design review a capture of the running UI. Until the evidence carries
+         * them the check FAILS without dispatching (ADR-0180). `true` is the
+         * template's explicit, versioned relaxation: the review runs on the
+         * evidence the instance holds and its result is labelled evidence-only. */
+        allowEvidenceOnly: z.boolean().optional(),
       }),
     )
     .max(10)

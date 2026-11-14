@@ -883,6 +883,14 @@ describe("ADR-0260 review bindings", () => {
     expect(parsed.success).toBe(false);
   });
 
+  it("accepts the evidence-only opt-in only as a boolean", () => {
+    const at = (allowEvidenceOnly: unknown) =>
+      ok({ checks: ["r"], reviews: [{ check: "r", agent: "a", profile: "code_review", allowEvidenceOnly }] });
+    expect(at(true)).toBe(true);
+    expect(at(false)).toBe(true);
+    expect(at("yes")).toBe(false);
+  });
+
   it("bounds the answer budget", () => {
     const at = (maxTokens: number) => ok({ checks: ["r"], reviews: [{ check: "r", agent: "a", profile: "code_review", maxTokens }] });
     expect(at(4096)).toBe(true);

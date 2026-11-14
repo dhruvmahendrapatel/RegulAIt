@@ -40,6 +40,7 @@ import { createFromGallerySchema } from "@regulait/shared";
 import { z } from "zod";
 import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects.js";
 import { createWorkflowTemplateValidated } from "./workflows.js";
+import { REVIEWER_PLACEHOLDER } from "./workflow-review-checks.js";
 import { isIntakeTemplateName } from "@regulait/shared";
 import { writeIntakeTemplateGated } from "./decision-regression.js";
 
@@ -52,7 +53,12 @@ const APPROVER_PLACEHOLDER = "requesting_user";
 /** ADR-0260: the reviewer placeholder a review-check shape carries. "Create
  * from gallery" must name a registry agent in its place (`reviewerAgent`); the
  * creation path refuses a review by an agent that is not in the registry. */
-export const REVIEWER_PLACEHOLDER = "reviewer-agent";
+export { REVIEWER_PLACEHOLDER };
+
+/** ADR-0260 review fix [2]: what every review shape says about the missing diff read */
+const EVIDENCE_ONLY_NOTE =
+  "Until the diff read is built the review has no diff to read, so the check fails closed unless you set " +
+  "allowEvidenceOnly on the binding, which runs it on the change and requirements alone and labels the result evidence-only.";
 
 /** ADR-0260 (P36): the three review checks, each a stage of its own so an
  * assignment rule can add any of them to a matching change. Off until an admin
@@ -223,7 +229,7 @@ export function builtInShapes(): Array<
         "One automated check: a governed agent reviews the change (architecture, correctness, security, " +
         "maintainability, tests, performance, dependencies) and files numbered findings; any finding above a nit fails it. " +
         "Assign it with a rule to add the check to matching changes; merged into another template it runs after that template's stages. " +
-        "Name the reviewer agent when you create it.",
+        "Name the reviewer agent when you create it. " + EVIDENCE_ONLY_NOTE,
       definition: { workflow: "code-review-check", stages: [{ id: "intake", type: "trigger" }, reviewCheckStage("code-review", "code_review", "code_review")] },
     },
     {
@@ -232,7 +238,7 @@ export function builtInShapes(): Array<
       description:
         "One automated check: a governed agent reviews the change against the OWASP Top 10 and files numbered findings; " +
         "any finding above a nit fails it. Assign it with a rule (for example to changes under /auth/ or to restricted data). " +
-        "Name the reviewer agent when you create it.",
+        "Name the reviewer agent when you create it. " + EVIDENCE_ONLY_NOTE,
       definition: {
         workflow: "security-review-check",
         stages: [{ id: "intake", type: "trigger" }, reviewCheckStage("security-review", "security_review", "security_review")],
@@ -244,7 +250,7 @@ export function builtInShapes(): Array<
       description:
         "One automated check: a governed agent reviews a user-interface change (flow, responsiveness, visual polish, " +
         "WCAG 2.1 AA accessibility, robustness, content) and files numbered findings; any finding above a nit fails it. " +
-        "Assign it with a rule to frontend changes. Name the reviewer agent when you create it.",
+        "Assign it with a rule to frontend changes. Name the reviewer agent when you create it. " + EVIDENCE_ONLY_NOTE,
       definition: {
         workflow: "design-review-check",
         stages: [{ id: "intake", type: "trigger" }, reviewCheckStage("design-review-check", "design_review", "design_review")],
@@ -255,7 +261,7 @@ export function builtInShapes(): Array<
       title: "Plan, build & review",
       description:
         "Standard change plus a scoped build and one check stage that runs a code review and a security review " +
-        "before the merge sign-off. Name the reviewer agent when you create it.",
+        "before the merge sign-off. Name the reviewer agent when you create it. " + EVIDENCE_ONLY_NOTE,
       definition: {
         workflow: "build-and-review",
         stages: [
