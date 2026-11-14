@@ -190,6 +190,9 @@ importers:
       jose:
         specifier: 6.2.14
         version: 6.2.14
+      js-yaml:
+        specifier: 4.3.2
+        version: 4.3.2
       ml-distance:
         specifier: 5.0.0
         version: 5.0.0
@@ -239,6 +242,9 @@ importers:
       '@regulait/mcp-vuln-fixtures':
         specifier: workspace:*
         version: link:../../packages/mcp-vuln-fixtures
+      '@types/js-yaml':
+        specifier: 4.0.9
+        version: 4.0.9
       '@types/node':
         specifier: 26.6.6
         version: 26.6.6

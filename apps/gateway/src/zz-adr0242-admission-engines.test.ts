@@ -142,12 +142,41 @@ describe("ADR-0242 mcpscanner on an MCP server (enforce)", () => {
     await expect(assertAdmitted(k.db, id)).rejects.toBeInstanceOf(McpAdmissionHeldError);
   });
 
-  it("an admin's clearance of the digest stands; a held server with its own findings stays held on an engine pass", async () => {
-    const cleared = await server("cleared");
-    await recordAdmissionEngineScan(k.db, { subject: { kind: "mcp_server", id: cleared, digest: DIGEST_A }, report: report("mcpscanner-bad") });
-    expect((await serverRow(cleared)).admissionState).toBe("cleared");
-    await expect(assertAdmitted(k.db, cleared)).resolves.toBeUndefined();
+  it("owner question 2 (secure default): a later fail revokes a clearance given before it; a fail the admin saw does not", async () => {
+    // cleared before any engine verdict existed: the engine's fail is new evidence, so the clearance is revoked
+    const early = await server("cleared");
+    await k.db.update(mcpServers).set({ admissionClearedBy: owner.id, admissionClearedAt: new Date(), admissionClearReason: "reviewed" }).where(eq(mcpServers.id, early));
+    const revoked = await recordAdmissionEngineScan(k.db, { subject: { kind: "mcp_server", id: early, digest: DIGEST_A }, report: report("mcpscanner-bad") });
+    expect(revoked).toMatchObject({ verdict: "fail", state: "held", revokedClearance: true });
+    const earlyRow = await serverRow(early);
+    expect(earlyRow).toMatchObject({ admissionState: "held", admissionClearedBy: null, admissionClearedAt: null, admissionClearReason: null });
+    await expect(assertAdmitted(k.db, early)).rejects.toBeInstanceOf(McpAdmissionHeldError);
+    const audit = await k.db.select().from(auditLog).where(and(eq(auditLog.objectId, early), eq(auditLog.ruleId, "admission-engine-clearance-revoked")));
+    expect(audit).toHaveLength(1);
+    expect(audit[0]!.detail).toMatchObject({ revokedClearance: true, previousState: "cleared", admissionState: "held" });
 
+    // the admin cleared it AFTER seeing that same fail: the re-scan repeats it and the clearance stands
+    const seen = await server("held");
+    await recordAdmissionEngineScan(k.db, { subject: { kind: "mcp_server", id: seen, digest: DIGEST_A }, report: report("mcpscanner-bad") });
+    await k.db
+      .update(mcpServers)
+      .set({ admissionState: "cleared", admissionClearedBy: owner.id, admissionClearedAt: new Date(Date.now() + 1000), admissionClearReason: "reviewed the engine's flag" })
+      .where(eq(mcpServers.id, seen));
+    const again = await recordAdmissionEngineScan(k.db, { subject: { kind: "mcp_server", id: seen, digest: DIGEST_A }, report: report("mcpscanner-bad") });
+    expect(again).toMatchObject({ verdict: "fail", state: "cleared", revokedClearance: false });
+    await expect(assertAdmitted(k.db, seen)).resolves.toBeUndefined();
+
+    // an engine error is not evidence: it revokes nothing
+    const crashed = await server("cleared");
+    await k.db.update(mcpServers).set({ admissionClearedBy: owner.id, admissionClearedAt: new Date() }).where(eq(mcpServers.id, crashed));
+    expect(await recordAdmissionEngineScan(k.db, { subject: { kind: "mcp_server", id: crashed, digest: DIGEST_A }, report: report("mcpscanner-crash") })).toMatchObject({
+      verdict: "unknown",
+      state: "cleared",
+      revokedClearance: false,
+    });
+  });
+
+  it("a held server with its own findings stays held on an engine pass", async () => {
     const held = await server("held");
     const own: McpAdmissionFinding = { rule: "mcp.tool_order.before_other_tool", severity: "high", tool: "add", where: "description", count: 1 };
     await k.db.update(mcpServers).set({ admissionFindings: [own], admissionSeverity: "high" }).where(eq(mcpServers.id, held));
@@ -197,5 +226,18 @@ describe("ADR-0242 skillscanner on a builder skill", () => {
     const crash = await skill("Line up the table.");
     const failed = await recordAdmissionEngineScan(k.db, { subject: { kind: "builder_skill", id: crash.id, digest: crash.contentDigest }, report: report("skillscanner-crash") });
     expect(failed).toMatchObject({ verdict: "unknown", state: "held" });
+  });
+
+  it("owner question 2 (secure default): a later fail revokes a skill's admission and its pinned admitted copies", async () => {
+    const s = await skill("Pad the rows of the table.");
+    await k.db
+      .update(builderSkills)
+      .set({ admissionState: "admitted", admittedBy: owner.id, admittedAt: new Date(), admitReason: "reviewed", admittedDigest: s.contentDigest })
+      .where(eq(builderSkills.id, s.id));
+    const out = await recordAdmissionEngineScan(k.db, { subject: { kind: "builder_skill", id: s.id, digest: s.contentDigest }, report: report("skillscanner-bad") });
+    expect(out).toMatchObject({ verdict: "fail", state: "held", revokedClearance: true });
+    const row = (await k.db.select().from(builderSkills).where(eq(builderSkills.id, s.id)))[0]!;
+    expect(row).toMatchObject({ admissionState: "held", admittedBy: null, admittedAt: null, admitReason: null, admittedDigest: null });
+    expect(await skillAttachRefusal(k.db, row)).toMatchObject({ error: "skill_held" });
   });
 });

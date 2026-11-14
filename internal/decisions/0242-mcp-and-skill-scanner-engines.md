@@ -296,3 +296,43 @@ and nothing changes. The engine's say reaches the existing states in two places:
    Accept them as listed, or prune skill-scanner's Office-document check (and with it oletools)?
 5. **The hold line for skill bundles with scripts.** On the `anthropics/skills` corpus, 10 of 19 full bundles hold at
    `medium` (§7.1). Keep `medium` for bundles, or raise it and tune rules first?
+
+## Amendment — lane L4, phase 2 and the §7 follow-ups (2026-11-14)
+
+Built by lane L4 (backend only) in sequential PRs. The five open questions above are still the owner's. Lane L4 builds
+with the secure default for each one it touches, and records it here; nothing above is edited.
+
+### L4.1 SKILL.md frontmatter validation at import (§7.3)
+
+`POST /v1/builder/skills/import` now runs `validateSkillMarkdown` (`apps/gateway/src/skill-frontmatter.ts`) before
+anything is saved, and the lenient `parseSkillMarkdown` line parser in `@regulait/shared` is removed (it had no other
+caller).
+
+- **Format.** The Agent Skills SKILL.md format: a `---` frontmatter that closes within 8 KiB, parsed as YAML with
+  js-yaml 4.3.2's `CORE_SCHEMA` (MIT; already in the shipped closure, now a direct exact pin; duplicate keys and
+  custom tags are errors). Allowed fields: `name` (1–64 lowercase letters, digits and single hyphens), `description`
+  (1–1024, required), and the optional `license`, `compatibility` (≤ 500), `metadata` (string to string, ≤ 32) and
+  `allowed-tools`. Any other field is refused.
+- **Progressive-loading layout.** The body is at most 500 lines, and every relative file it links stays inside the
+  skill (no absolute path, `..`, backslash or `file:` URL). Bundled files are not accepted yet, so a reference is
+  checked for shape only.
+- **Errors.** `skill_frontmatter_missing`, `skill_frontmatter_too_large`, `skill_frontmatter_invalid` and
+  `skill_layout_invalid` (all 422), with fixed text that never echoes the file.
+- **Open source first.** No maintained Node validator for the format exists (the reference `skills-ref` is Python).
+  The YAML parse is js-yaml and the field rules are a zod schema; only the format's rules are ours.
+- **Effect on names.** A skill imported from a SKILL.md now has a format-conformant name (`evidence-summary`, not
+  `Evidence summary`). The other save doors (create, update, template seeding, bundle import) are unchanged: they are
+  the product's own forms, not SKILL.md files.
+
+### L4.2 Owner question 2: a later fail revokes an earlier clearance (secure default)
+
+`recordAdmissionEngineScan` now re-holds an admin's `cleared` MCP server or `admitted` skill when the engine reports
+`fail` for the cleared digest **and the admin had not already seen that fail**: no `fail` scan of the same digest
+under the same rule set (`rules_sha256`) was recorded at or before the clearance. So a re-scan that repeats the flag
+the admin reviewed leaves the clearance alone, while a fail on a digest cleared before any engine verdict, or a fail
+from a new rule set, revokes it.
+
+- The clearance fields are cleared with it (as a drift re-hold already does), the skill's pinned copies that were
+  `admitted` at that digest become `held`, and the audit row is `admission-engine-clearance-revoked` (effect deny).
+- An `unknown` (an engine error) is not evidence and revokes nothing.
+- **Owner question open:** the owner may still choose the builder's original default (the person's decision stands).

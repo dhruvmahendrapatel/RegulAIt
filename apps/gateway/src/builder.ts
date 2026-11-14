@@ -90,7 +90,6 @@ import {
   builderUpdateThreadSchema,
   builderUsageQuerySchema,
   nextScheduleRun,
-  parseSkillMarkdown,
   type BuilderBundle,
   type BuilderCadenceValue,
 } from "@regulait/shared";
@@ -140,6 +139,7 @@ import {
   skillDigest,
   skillRefusalBody,
 } from "./skill-admission.js";
+import { validateSkillMarkdown } from "./skill-frontmatter.js";
 import { minReleaseAgeDays, skillReleaseStatus } from "./release-age.js";
 import { skillNameProblem, type McpAdmissionFinding } from "@regulait/shared";
 import { settingTransitions } from "./setting-transitions.js";
@@ -1927,13 +1927,10 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     const viewer = viewerOf(req, reply);
     if (!viewer) return;
     const { markdown } = builderImportSkillSchema.parse(req.body ?? {});
-    const parsed = parseSkillMarkdown(markdown);
-    if (!parsed) {
-      return reply.status(422).send({
-        error: "skill_frontmatter_missing",
-        detail: "a SKILL.md starts with a --- block that names the skill (name: …) and describes it (description: …)",
-      });
-    }
+    // ADR-0242 §7.3 (lane L4): a strict, size-capped SKILL.md frontmatter and layout check before anything is saved
+    const checked = validateSkillMarkdown(markdown);
+    if (!checked.ok) return reply.status(422).send({ error: checked.error, detail: checked.detail });
+    const parsed = checked.skill;
     if (parsed.body.length > 20_000) return reply.status(422).send({ error: "skill_body_too_long" });
     const out = await createSkill(viewer, { ...parsed, visibility: "private" }, "builder-skill-imported", "import");
     if (!out.ok) return reply.status(out.status).send(out.body);
