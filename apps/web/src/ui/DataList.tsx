@@ -15,6 +15,7 @@
  * page renders in a row, or the export's row-limit alert, still keeps the card open.
  */
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { useInfiniteQuery, useQuery, keepPreviousData } from "@tanstack/react-query";
 import { api } from "../api/client";
 import { downloadCsv } from "../views/admin/adminKit";
@@ -65,6 +66,8 @@ export interface DataListProps<T> {
   endpoint: string;
   /** the gateway's Excel export of the same list, e.g. `/v1/runs/export.xlsx` */
   exportPath: string;
+  /** A page header can host the same filtered export button instead of showing it in the list toolbar. */
+  exportTarget?: HTMLElement | null;
   /** the query-cache prefix, so a page's existing invalidation refreshes the list */
   queryKey: readonly unknown[];
   /** the route's older response key (`runs`, `incidents`, `users`) */
@@ -369,6 +372,11 @@ export function DataList<T>(props: DataListProps<T>) {
       ? loadedText(shownCount, total, estimate)
       : rangeText(page * limit, shownCount, total, estimate, more);
   const Tbl = props.table ?? Table;
+  const exportButton = (
+    <Button size="sm" onClick={() => void download()} aria-disabled={exporting || undefined}>
+      {exporting ? "Preparing Excel…" : "Download Excel"}
+    </Button>
+  );
 
   return (
     <div className={d.list} data-list={listId}>
@@ -394,9 +402,7 @@ export function DataList<T>(props: DataListProps<T>) {
         <IconButton label={`Choose columns for ${props.noun}`} onClick={() => setPickerOpen(true)}>
           <GearIcon />
         </IconButton>
-        <Button size="sm" onClick={() => void download()} aria-disabled={exporting || undefined}>
-          {exporting ? "Preparing Excel…" : "Download Excel"}
-        </Button>
+        {props.exportTarget ? createPortal(exportButton, props.exportTarget) : exportButton}
       </div>
       {capNote && (
         <p className={d.capNote} role="alert">

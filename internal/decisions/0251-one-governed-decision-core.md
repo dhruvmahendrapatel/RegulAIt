@@ -244,3 +244,41 @@ merge.
 5. **Latency bench size.** `zz-adr0251-core-latency.test.ts` measures 0 rules, then 10 matching rules (5 approval
    rules and 5 rate limits under their limit). Each binding rate limit adds one concurrent count query, so the cost
    grows with the number of limits that bind one subject and resource, not with traffic.
+
+### P-01 remainder, slice 3: hard (reserved) rate-limit windows (2026-11-14)
+
+Closes review #715 finding 2 for the connector and A2A limits (`resource_rate_limits`): concurrent calls can no longer
+overshoot a limit.
+
+- **A slot per allowed call, taken under a lock.** When a limit binds a call that would otherwise be allowed,
+  `governedEvaluateResource` decides it in one transaction: `pg_advisory_xact_lock` on (user, resource type), then
+  the window count (its own statement, so its READ COMMITTED snapshot is taken after the lock), then the composed
+  decision, then, if allowed, one `resource_rate_reservations` row. Two calls of one subject decided at the same
+  moment are counted one after the other. The key is per type because a type-wide limit counts across that type's
+  resources.
+- **What a window counts.** For each limit, two sources that never overlap: allowed decision rows in `audit_log`
+  dated before the limit was created (so a new limit still counts the calls already in its window), plus the
+  reservation rows since. A call decided just before an admin adds a limit, whose audit row lands just after, is the
+  one case neither sees; it is bounded by the calls in flight at that moment. Each source is read up to `maxCalls`
+  rows, so a count costs O(maxCalls), never O(traffic), and a refusal reports at most `maxCalls/maxCalls`.
+- **What takes no slot and no lock.** A call no limit binds (no write, no lock: the no-rules latency is unchanged), and
+  a call that would be held or refused anyway (its window is counted without the lock, still before the approval
+  step, so a call over its limit is refused before anyone is asked to sign it off).
+- **Fixed on the way (pre-existing).** The connector window counted the call's `connector-egress-call` row
+  (`phase: "call"`) as a second slot, so every executed connector call spent two. The connector predicate is now "no
+  phase" (its decision row); A2A keeps `phase: "call"` (its call rows).
+- **Data.** Migration `resource_rate_reservations` (pending): the table (FKs to users, connectors, A2A agents, a CHECK
+  that the one resource key matches the type) and the index (user, type, at). Rows older than the longest window
+  (30 days) are pruned by the reserving statement. Not RLS-scoped yet, like its sibling rule tables; it joins the
+  ADR-0234 batches.
+- **Latency, measured** (`REGULAIT_BENCH=1`, local Postgres 16, warm, 2,000 iterations after 200 warm-up, three
+  runs): no rules p95 1.7 to 2.0 ms (unchanged from main's 1.7 to 2.3 ms on the same machine); ten matching rules
+  (approval-held, five limits under their limit) p95 4.7 to 5.1 ms (main 3.9 ms; within the +6 ms budget); five
+  binding limits on an allowed call that reserves p95 7.4 to 7.7 ms. The bench asserts a new budget of 9 ms for the
+  reserving path.
+- **Not in this slice.** Model limits (`model_rate_limits`, counted from `usage_events`) and the MCP tool path's
+  `rate_limits` remain soft under concurrency; a follow-up on the same pattern (PENDING fragment).
+- **Tests.** `zz-adr0251-connector-core.test.ts`: twenty concurrent decisions against a limit of five allow exactly
+  five and take exactly five slots; a call with no limit writes no slot, yet a limit added later counts it; a refused
+  call takes no slot; the third call over a limit of two is refused; audit side rows never take a slot.
+  `zz-adr0251-a2a-core.test.ts` fills the window with a reservation.
