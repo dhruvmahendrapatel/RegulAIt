@@ -106,6 +106,17 @@ refuse "operator image without a digest"   --set operator.image.digest=
 refuse "no bundle ConfigMap"               --set bundle.configMapName=
 refuse "operator image outside registries" --set operator.image.repository=docker.io/regulait/operator
 refuse "air_gapped with a public DNS CIDR" -f ci/air-gapped-values.yaml --set egress.allowPublicEgress=false --set 'egress.dns.cidrs={8.8.8.8/32}'
+# ADR-0180 (#813 review): no list reaches a link-local range or a cloud metadata address, in any mode.
+refuse "metadata host in allowedCIDRs"     --set 'egress.allowedCIDRs={169.254.169.254/32}'
+refuse "metadata host in air_gapped"       -f ci/air-gapped-values.yaml --set egress.allowPublicEgress=false --set 'egress.allowedCIDRs={169.254.169.254/32}'
+refuse "everything in allowedCIDRs"        --set 'egress.allowedCIDRs={0.0.0.0/0}'
+refuse "a supernet of 169.254/16"          --set 'egress.databaseCIDRs={168.0.0.0/7}'
+refuse "all of IPv6"                       --set 'egress.allowedCIDRs={::/0}'
+refuse "IPv6 link-local"                   --set 'egress.allowedCIDRs={fe80::/10}'
+refuse "AWS IPv6 metadata block"           --set 'egress.allowedCIDRs={fd00:ec2::/48}'
+refuse "DNS to everything"                 --set 'egress.dns.cidrs={0.0.0.0/0}'
+refuse "DNS to a public resolver (byoc)"   --set 'egress.dns.cidrs={8.8.8.8/32}'
+refuse "DNS to the metadata host"          --set 'egress.dns.cidrs={169.254.169.254/32}'
 refuse "upgrade with no known installed version" --is-upgrade
 refuse "malformed installed version"       --set bundle.installedVersion=latest
 
@@ -113,6 +124,21 @@ refuse "malformed installed version"       --set bundle.installedVersion=latest
 if "$HELM" template t . -f ci/byoc-values.yaml --is-upgrade --set bundle.installedVersion=0.9.0 2>/dev/null \
     | grep -q -- "--installed-version=0.9.0"; then ok "upgrade checks the downgrade against bundle.installedVersion"
 else bad "upgrade does not pass bundle.installedVersion to verify-bundle"; fi
+
+# Accepted: NodeLocal DNSCache's link-local address (both modes), and a public CIDR in byoc (reported in NOTES).
+"$HELM" template t . -f ci/byoc-values.yaml --set 'egress.dns.cidrs={169.254.20.10/32}' >/dev/null 2>&1 \
+  && ok "NodeLocal DNSCache address accepted (byoc)" || bad "NodeLocal DNSCache address refused (byoc)"
+"$HELM" template t . -f ci/air-gapped-values.yaml --set egress.allowPublicEgress=false --set 'egress.dns.cidrs={169.254.20.10/32}' >/dev/null 2>&1 \
+  && ok "NodeLocal DNSCache address accepted (air_gapped)" || bad "NodeLocal DNSCache address refused (air_gapped)"
+# NOTES.txt says what the signature does not cover and lists public egress. helm template skips NOTES.txt, so render
+# a copy under another name (its output is not YAML, hence --debug and the parse error are expected).
+notes_dir="$(mktemp -d)"; cp -r . "$notes_dir/chart"; mv "$notes_dir/chart/templates/NOTES.txt" "$notes_dir/chart/templates/notes-render.txt"
+notes="$("$HELM" template t "$notes_dir/chart" -f ci/byoc-values.yaml --set 'egress.allowedCIDRs={203.0.113.0/24}' \
+  --show-only templates/notes-render.txt --debug 2>&1 || true)"
+rm -rf "$notes_dir"
+if grep -q "does not cover" <<<"$notes" && grep -q -- "- 203.0.113.0/24" <<<"$notes" && grep -q "allowPublicEgress" <<<"$notes"; then
+  ok "NOTES report the unsigned digest and public egress"
+else bad "NOTES do not report the unsigned digest and public egress"; fi
 
 # The chart's copies of the operator's generated files.
 cmp -s files/crd.yaml ../../operator/config/crd/deploy.regulait.ai_regulaitinstallations.yaml \

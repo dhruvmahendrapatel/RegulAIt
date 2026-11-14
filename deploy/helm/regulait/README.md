@@ -47,7 +47,16 @@ of a digest, `hosted` mode and a malformed version. The templates refuse:
 - an image registry that is not in `image.allowedRegistries` (when the list is set);
 - `air_gapped` without `image.allowedRegistries`, with `egress.allowPublicEgress`, or with any CIDR outside the
   private ranges;
-- `operator.enabled` without an operator image digest.
+- `operator.enabled` without an operator image digest;
+- in any mode, an egress entry that overlaps `169.254.0.0/16` or a cloud metadata address, an IPv6 entry that is not
+  a unique-local range of /48 or longer, or one inside `fd00:ec2::/32` (templates cannot do IPv6 containment, so the
+  chart is stricter than the operator here: public IPv6 opens only through `allowPublicEgress`);
+- a DNS entry that is neither a private range nor one link-local address (NodeLocal DNSCache).
+
+After install, `NOTES.txt` states that the signature covers the version and not the image digest. It names the
+registries the digest is limited to, or warns that any registry is allowed. It also lists every public egress hole,
+and warns when the signing-key claim uses the default StorageClass. Until a bundle schema binds the digest, the right
+to change this release's values is the right to run any allowed image with the database URL and data key.
 
 The migration hook verifies the signed manifest before every install and upgrade, with the release keyring compiled
 into the operator binary. Until the bundle schema carries image digests, the signature gates the version label, not the

@@ -211,6 +211,9 @@ touches a cloud account.
   - Until schema `/2`, edit rights on a `RegulaitInstallation` equal deploy rights with the data key.
   - Downgrade protection trusts `status.installedVersion`, so `regulaitinstallations/status` patch rights belong to
     the operator alone.
+- The chart applies the same egress rules at render time. Templates cannot do IPv6 containment, so an IPv6 entry must
+  be a unique-local /48 or longer outside `fd00:ec2::/32`, which is stricter than the operator. `NOTES.txt` reports
+  the unsigned image digest, the registry limit, and any public egress after every install and upgrade.
 - Versions are compared with `golang.org/x/mod/semver`. Unlike the shell verifier, it orders a pre-release below its
   release, so `1.0.0-rc.1` after `1.0.0` is a downgrade. That is stricter, and it is deliberate.
 - The gateway gains `migrate-job.ts`, a thin entrypoint over a testable `migrate-job-run.ts`. It refuses to run without

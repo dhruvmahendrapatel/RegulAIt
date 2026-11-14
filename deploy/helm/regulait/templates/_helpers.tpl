@@ -41,10 +41,70 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
       (and (regexMatch "^172\\.(1[6-9]|2[0-9]|3[01])\\." $a) (ge $bits 12))
       (and (regexMatch "^192\\.168\\." $a) (ge $bits 16))
       (and (regexMatch "^100\\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\\." $a) (ge $bits 10))
-      (and (regexMatch "^169\\.254\\." $a) (ge $bits 16))
       (and (regexMatch "^(?i)f[cd][0-9a-f]{2}:" $a) (ge $bits 7)) -}}
 true
 {{- end -}}
+{{- end -}}
+
+{{/* "true" when an IPv4 CIDR overlaps 169.254.0.0/16 (link-local: the cloud instance metadata endpoints). */}}
+{{- define "regulait.v4LinkLocal" -}}
+{{- $parts := splitList "/" . -}}
+{{- $o := splitList "." (index $parts 0) -}}
+{{- $bits := 32 -}}
+{{- if eq (len $parts) 2 -}}{{- $bits = atoi (index $parts 1) -}}{{- end -}}
+{{- if ge $bits 16 -}}
+{{- if and (eq (index $o 0) "169") (eq (index $o 1) "254") -}}true{{- end -}}
+{{- else -}}
+{{- $d := 1 -}}
+{{- range until (int (sub 16 $bits)) -}}{{- $d = mul $d 2 -}}{{- end -}}
+{{- $hi := add (mul (atoi (index $o 0)) 256) (atoi (index $o 1)) -}}
+{{- if eq (div $hi $d) (div (add (mul 169 256) 254) $d) -}}true{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+ADR-0180, as in the operator's validate.go: no egress entry may reach a link-local range or a cloud metadata address,
+in any mode. Templates cannot do IPv6 containment, so an IPv6 entry must be a unique-local range of /48 or longer
+outside fd00:ec2::/32 (the AWS IPv6 metadata block); public IPv6 is opened with allowPublicEgress only. The DNS list
+also takes one link-local IPv4 address (NodeLocal DNSCache), never a metadata one. Prints the refusal, or nothing.
+*/}}
+{{- define "regulait.egressRefusal" -}}
+{{- $field := index . 0 -}}{{- $c := index . 1 -}}
+{{- $parts := splitList "/" $c -}}
+{{- $bits := -1 -}}
+{{- if eq (len $parts) 2 -}}{{- $bits = atoi (index $parts 1) -}}{{- end -}}
+{{- $addr := index $parts 0 -}}
+{{- if contains ":" $addr -}}
+{{- if not (and (regexMatch "^(?i)f[cd][0-9a-f]{2}:" $addr) (ge $bits 48) (le $bits 128)) -}}
+{{ $field }} entry {{ $c | quote }}: an IPv6 entry must be a unique-local range of /48 or longer
+{{- else if regexMatch "^(?i)fd00:0*ec2:" $addr -}}
+{{ $field }} entry {{ $c | quote }} reaches a cloud instance metadata address
+{{- end -}}
+{{- else if not (regexMatch "^([0-9]{1,3}\\.){3}[0-9]{1,3}$" $addr) -}}
+{{ $field }} entry {{ $c | quote }} is not a CIDR
+{{- else if or (lt $bits 0) (gt $bits 32) -}}
+{{ $field }} entry {{ $c | quote }} is not a CIDR
+{{- else if has $addr (list "169.254.169.254" "169.254.170.2" "169.254.170.23") -}}
+{{ $field }} entry {{ $c | quote }} reaches a cloud instance metadata address
+{{- else if eq (include "regulait.v4LinkLocal" $c) "true" -}}
+{{- if not (and (eq $field "egress.dns.cidrs") (eq $bits 32)) -}}
+{{ $field }} entry {{ $c | quote }} overlaps 169.254.0.0/16, where the cloud metadata endpoints are
+{{- end -}}
+{{- else if and (eq $field "egress.dns.cidrs") (ne (include "regulait.privateCIDR" $c) "true") -}}
+{{ $field }} entry {{ $c | quote }} must be a private range or one link-local address
+{{- end -}}
+{{- end -}}
+
+{{/* What the values open beyond private ranges, one line each (reported in NOTES.txt). */}}
+{{- define "regulait.publicEgress" -}}
+{{- if .Values.egress.allowPublicEgress }}
+- egress.allowPublicEgress (public addresses on 443)
+{{- end }}
+{{- range concat .Values.egress.allowedCIDRs .Values.egress.databaseCIDRs }}
+{{- if and (not (contains ":" .)) (ne (include "regulait.privateCIDR" .) "true") }}
+- {{ . }}
+{{- end }}
+{{- end }}
 {{- end -}}
 
 {{- define "regulait.validate" -}}
@@ -58,11 +118,18 @@ true
 {{- fail (printf "image registry %q is not in image.allowedRegistries" $host) -}}
 {{- end -}}
 {{- end -}}
+{{- range $f := list (list "egress.allowedCIDRs" $v.egress.allowedCIDRs) (list "egress.databaseCIDRs" $v.egress.databaseCIDRs) (list "egress.dns.cidrs" ($v.egress.dns.cidrs | default list)) -}}
+{{- range (index $f 1) -}}
+{{- $why := include "regulait.egressRefusal" (list (index $f 0) .) | trim -}}
+{{- if $why -}}{{- fail $why -}}{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- if eq $v.mode "air_gapped" -}}
 {{- if $v.egress.allowPublicEgress -}}
 {{- fail "air_gapped refuses egress.allowPublicEgress" -}}
 {{- end -}}
-{{- range concat $v.egress.allowedCIDRs $v.egress.databaseCIDRs ($v.egress.dns.cidrs | default list) -}}
+{{- /* egress.dns.cidrs is checked above: private ranges or one link-local address, in every mode. */ -}}
+{{- range concat $v.egress.allowedCIDRs $v.egress.databaseCIDRs -}}
 {{- if ne (include "regulait.privateCIDR" .) "true" -}}
 {{- fail (printf "air_gapped allows only private ranges; %q is not one" .) -}}
 {{- end -}}

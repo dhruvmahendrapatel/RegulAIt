@@ -318,8 +318,10 @@ spec:
                 description: Sources allowed to reach port 3000. Empty means nothing
                   can.
                 items:
-                  description: IngressPeer is one source allowed to reach the gateway's
-                    port.
+                  description: |-
+                    IngressPeer is one source allowed to reach the gateway's port. It names at least one selector, since the API server
+                    refuses an empty peer.
+                  minProperties: 1
                   properties:
                     namespaceSelector:
                       description: |-
