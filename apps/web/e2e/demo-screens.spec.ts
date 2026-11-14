@@ -388,7 +388,7 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
   let recordId: string | null = null;
   await test.step("G1 the use-case registry and record", async () => {
     await ada.goto("/ui/admin/use-cases");
-    await expect(ada.getByRole("heading", { name: "AI Use-Cases" })).toBeVisible();
+    await expect(ada.getByRole("heading", { name: "AI registry" })).toBeVisible();
     await capture(ada, ADA, "ds-g1a-registry");
     const list = (await (await ada.request.get("/v1/use-cases")).json()) as { useCases: Array<{ id: string; name: string }> };
     const record = list.useCases.find((u) => u.name.startsWith("Govern ")) ?? list.useCases[0];

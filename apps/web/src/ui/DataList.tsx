@@ -68,8 +68,6 @@ export interface DataListProps<T> {
   exportPath: string;
   /** A page header can host the same filtered export button instead of showing it in the list toolbar. */
   exportTarget?: HTMLElement | null;
-  /** Render the list controls below the results in a compact registry layout. */
-  footerControls?: boolean;
   /** the query-cache prefix, so a page's existing invalidation refreshes the list */
   queryKey: readonly unknown[];
   /** the route's older response key (`runs`, `incidents`, `users`) */
@@ -375,22 +373,14 @@ export function DataList<T>(props: DataListProps<T>) {
       : rangeText(page * limit, shownCount, total, estimate, more);
   const Tbl = props.table ?? Table;
   const exportButton = (
-    <Button size="sm" onClick={() => void download()} aria-disabled={exporting || undefined} aria-label={props.footerControls && !exporting ? "Export to Excel" : undefined}>
-      {props.footerControls ? <>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M5 16v5h14v-5" /></svg>
-        <span>{exporting ? "Preparing Excel…" : "Export"}</span>
-      </> : exporting ? "Preparing Excel…" : "Download Excel"}
+    <Button size="sm" onClick={() => void download()} aria-disabled={exporting || undefined}>
+      {exporting ? "Preparing Excel…" : "Download Excel"}
     </Button>
   );
 
-  // Very large or approximate results keep cursor-based Previous/Next.
-  const pageCount = props.footerControls && total !== null && total <= 100_000 && !estimate ? Math.max(1, Math.ceil(total / limit)) : 0;
-  const firstNumber = Math.max(1, Math.min(page - 2, pageCount - 6));
-  const numbers = pageCount <= 7
-    ? Array.from({ length: pageCount }, (_, index) => index)
-    : [0, ...Array.from({ length: 5 }, (_, index) => firstNumber + index), pageCount - 1];
-  // The compact registry puts these controls after the results in both visual and keyboard order.
-  const toolbar = (
+  return (
+    <div className={d.list} data-list={listId}>
+      {/* data-list-view: the page size and the column picker change only how the list shows, so a folding card keeps its fold */}
       <div className={d.toolbar} data-list-view="">
         <label className={d.sizeLabel}>
           <span>Rows per page</span>
@@ -403,7 +393,7 @@ export function DataList<T>(props: DataListProps<T>) {
           </Select>
         </label>
         <p className={d.status} role="status" aria-live="polite" data-testid="list-status">
-          {props.footerControls && status ? `Showing ${status} ${props.noun}` : status}
+          {status}
         </p>
         <span className={d.grow} />
         <IconButton label={`Refresh ${props.noun}`} onClick={refresh} busy={q.isFetching}>
@@ -414,10 +404,6 @@ export function DataList<T>(props: DataListProps<T>) {
         </IconButton>
         {props.exportTarget ? createPortal(exportButton, props.exportTarget) : exportButton}
       </div>
-  );
-  return (
-    <div className={d.list} data-list={listId} data-footer-controls={props.footerControls || undefined}>
-      {!props.footerControls && toolbar}
       {capNote && (
         <p className={d.capNote} role="alert">
           {capNote}
@@ -435,7 +421,6 @@ export function DataList<T>(props: DataListProps<T>) {
         empty={props.empty}
         sort={tableSort}
       />
-      {props.footerControls && toolbar}
       {all ? (
         <div className={d.pager} ref={sentinel}>
           {hasNextPage && (
@@ -446,17 +431,11 @@ export function DataList<T>(props: DataListProps<T>) {
         </div>
       ) : (
         <div className={d.pager}>
-          <Button size="sm" aria-label="Previous" aria-disabled={page === 0 || undefined} onClick={() => page > 0 && setPage((p) => p - 1)}>
-            {props.footerControls ? "‹" : "Previous"}
+          <Button size="sm" aria-disabled={page === 0 || undefined} onClick={() => page > 0 && setPage((p) => p - 1)}>
+            Previous
           </Button>
-          {props.footerControls && (numbers.length ? numbers.map((index, position) => (
-            <span key={index} className={d.pageNumber}>
-              {position > 0 && index > numbers[position - 1]! + 1 && <span aria-hidden="true">…</span>}
-              <Button size="sm" className={index === page ? d.currentPage : undefined} aria-label={`Page ${index + 1}`} aria-current={index === page ? "page" : undefined} onClick={() => setPage(index)}>{index + 1}</Button>
-            </span>
-          )) : <span className={d.currentPage} aria-label={`Page ${page + 1}`}>{page + 1}</span>)}
-          <Button size="sm" aria-label="Next" aria-disabled={!more || paged.isPlaceholderData || undefined} onClick={() => more && !paged.isPlaceholderData && setPage((p) => p + 1)}>
-            {props.footerControls ? "›" : "Next"}
+          <Button size="sm" aria-disabled={!more || paged.isPlaceholderData || undefined} onClick={() => more && !paged.isPlaceholderData && setPage((p) => p + 1)}>
+            Next
           </Button>
         </div>
       )}

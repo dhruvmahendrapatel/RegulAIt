@@ -917,7 +917,7 @@ test.describe("the registry", () => {
   test("the Re-review status filter shows recertifications as Re-review", async ({ page }) => {
     await mockGateway(page);
     await page.goto("/ui/admin/use-cases");
-    await expect(page.getByRole("heading", { level: 1, name: "AI Use-Cases" })).toBeVisible();
+    await expect(page.getByRole("heading", { level: 1, name: "AI registry" })).toBeVisible();
     const status = page.getByRole("combobox", { name: "Status", exact: true });
     await expect(status.locator('option[value="recertification"]')).toHaveText("Re-review (1)");
     await status.selectOption("recertification");
@@ -926,7 +926,7 @@ test.describe("the registry", () => {
     const rows = page.getByRole("link", { name: /— open preview$/ });
     await expect(rows).toHaveCount(1);
     await expect(rows.first()).toHaveAccessibleName("Fraud scoring model, Re-review — open preview");
-    await expect(rows.first().getByRole("cell", { name: "Re-review", exact: true })).toBeVisible();
+    await expect(rows.first().getByRole("cell").nth(1)).toHaveText("Re-review");
     await checkScreen(page, "registry re-review filter", "registry-re-review");
     // control: All shows every row, the recertification still reading Re-review
     await status.selectOption("all");

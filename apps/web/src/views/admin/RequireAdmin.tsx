@@ -3,12 +3,9 @@
  * only the guard and not the rest of adminKit, which every admin screen loads in its own lazy chunk. It stays a
  * static import: the guard renders before any admin screen is fetched. adminKit re-exports it.
  */
-import { lazy, Suspense, type ReactNode } from "react";
-import { useLocation } from "react-router-dom";
+import type { ReactNode } from "react";
 import { useSession } from "../../session/SessionContext";
 import { Card, ErrorState, SkeletonBlock } from "../../ui/kit";
-
-const RegistryState = lazy(() => import("./governance/RegistryPresentation").then((module) => ({ default: module.RegistryState })));
 
 /**
  * The admin boundary. Default-deny, and it says so.
@@ -23,10 +20,8 @@ const RegistryState = lazy(() => import("./governance/RegistryPresentation").the
  */
 export function RequireAdmin(props: { children: ReactNode }) {
   const { auth } = useSession();
-  const registry = /^\/admin\/(?:governance\/)?use-cases\/?$/.test(useLocation().pathname);
   if (auth === undefined) return <SkeletonBlock lines={4} />;
   if (!auth?.isAdmin) {
-    if (registry) return <Suspense fallback={<SkeletonBlock lines={2} />}><RegistryState kind="denied" title="You don't have access to AI use-cases"><p>Contact your administrator for access to this page.</p></RegistryState></Suspense>;
     return (
       <Card>
         <ErrorState
