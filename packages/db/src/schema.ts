@@ -920,6 +920,12 @@ export const mcpServers = pgTable("mcp_servers", {
    * ON DELETE SET NULL: the server reads `unowned`/`orphaned`, it is never
    * deleted with its owner. */
   ownerUserId: uuid("owner_user_id").references(() => users.id, { onDelete: "set null" }),
+  /** ADR-0207 (migration `mcp_server_disable`): NULL = enabled. Disabling refuses every tool call on the server, for agents and people; it is audited and
+   * needs a reason (10 to 1000 characters, CHECK); enabling again is a stepped-up relaxation. A delete is
+   * allowed only while disabled. */
+  disabledAt: timestamp("disabled_at", { withTimezone: true }),
+  disabledReason: text("disabled_reason"),
+  disabledBy: uuid("disabled_by").references(() => users.id, { onDelete: "set null" }),
   /** ADR-0190 decision 7 item 5 (migration 0194): the execution profile VERSION a stdio server's sandbox runs
    * under. Stdio servers only (a remote server runs on its own host: `external`, never a class). NULL = the
    * shipped default. */
@@ -3089,6 +3095,12 @@ export const connectors = pgTable("connectors", {
   /** ADR-0185 I9 (migration 0169) — the accountable owner; default the
    * registering admin. ON DELETE SET NULL, like mcp_servers.owner_user_id. */
   ownerUserId: uuid("owner_user_id").references(() => users.id, { onDelete: "set null" }),
+  /** ADR-0207 (migration `connector_disable`): NULL = enabled. Disabling refuses every governed call to the connector; it is audited and
+   * needs a reason (10 to 1000 characters, CHECK); enabling again is a stepped-up relaxation. A delete is
+   * allowed only while disabled. */
+  disabledAt: timestamp("disabled_at", { withTimezone: true }),
+  disabledReason: text("disabled_reason"),
+  disabledBy: uuid("disabled_by").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -3555,6 +3567,11 @@ export const pmConnections = pgTable("pm_connections", {
   })
     .notNull()
     .default("manual"),
+  /** ADR-0207 (migration `pm_webhook_secret_rotation`): the previous webhook secret after a rotation, accepted until
+   * `previousWebhookSecretValidUntil` (database clock, 24 h after the rotation). All three set together or all NULL. */
+  previousWebhookSecretHash: text("previous_webhook_secret_hash"),
+  previousWebhookSecretCiphertext: text("previous_webhook_secret_ciphertext"),
+  previousWebhookSecretValidUntil: timestamp("previous_webhook_secret_valid_until", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -4002,6 +4019,11 @@ export const complianceProfiles = pgTable("compliance_profiles", {
    * isolable call of a project carrying its tag. Composed MAX across a project's profiles (like
    * `guardrailModes`), so a tag can only raise the requirement. NULL = no isolation opinion. */
   minIsolationClass: text("min_isolation_class", { enum: ["hardened_container", "user_space_kernel", "microvm"] }),
+  /** ADR-0045 amendment 2026-11-14 (migration compliance_profile_mrm_required): this framework REQUIRES model risk management (ADR-0045).
+   * Composed OR across a project's profiles: one true makes the ADR-0045 dispatch gate enforce on that project's
+   * dispatches even where an admin relaxed the org-wide `mrmEnforced` (the ADR-0021 ceiling). false and NULL are
+   * both "no requirement" and can never relax the org setting. */
+  mrmRequired: boolean("mrm_required"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   /** ADR-0208 (migration 0223): a retired profile is read-only — no new version, no new carrier. Retire is refused
    * while any project, pending project, team or infra resource carries the tag. DB CHECK ties retired_* to status. */
@@ -16382,6 +16404,38 @@ export const thirdPartyIngestRecordFindings = pgTable(
       .references(() => shadowAiFindings.id, { onDelete: "cascade" }),
   },
   (t) => [primaryKey({ columns: [t.recordId, t.findingId] }), index("third_party_ingest_record_findings_finding_idx").on(t.findingId)],
+);
+
+/**
+ * ADR-0251 (P-01 remainder, lane L1; migration resource_rate_reservations) — HARD rate-limit windows for the governed
+ * core's connector and A2A calls. One row is one slot a call took in the window: written in the same transaction as
+ * the recount, under a per-(user, resource type) advisory lock, only when a `resource_rate_limits` row binds the call
+ * and the core's decision is allow. The windows count these rows (not audit rows, which are written after the call
+ * runs), so calls decided at the same moment can no longer each see the same count.
+ *
+ * 3NF exception, deliberate: a slot is a point-in-time fact of its own (the counter the limit is enforced against),
+ * not a copy of the audit row, which remains the evidence of the decision. Rows older than the longest window
+ * (30 days) carry no information and are pruned by the reserving transaction.
+ */
+export const resourceRateReservations = pgTable(
+  "resource_rate_reservations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    resourceType: text("resource_type", { enum: ["connector", "a2a"] }).notNull(),
+    connectorId: uuid("connector_id").references(() => connectors.id, { onDelete: "cascade" }),
+    a2aAgentId: uuid("a2a_agent_id").references(() => a2aAgents.id, { onDelete: "cascade" }),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("resource_rate_reservations_window_idx").on(t.userId, t.resourceType, t.at),
+    check(
+      "resource_rate_reservations_type_check",
+      sql`CASE ${t.resourceType} WHEN 'connector' THEN ${t.connectorId} IS NOT NULL AND ${t.a2aAgentId} IS NULL WHEN 'a2a' THEN ${t.a2aAgentId} IS NOT NULL AND ${t.connectorId} IS NULL ELSE false END`,
+    ),
+  ],
 );
 
 // ---------------------------------------------------------------------------

@@ -660,10 +660,10 @@ export interface EvaluationInput {
   approvalRules?: readonly ApprovalRule[];
   rateLimits?: readonly RateLimit[];
   /**
-   * ADR-0239 — which engine answers the rate-limit step. Absent/null = `legacyRateLimitEvaluator`, the hand-written
-   * predicate below, so every caller that does not pass one is unchanged. The gateway passes the Cedar evaluator
-   * (`@regulait/policy-kernel/rate-limit-cedar`) unless `REGULAIT_RATE_LIMIT_EVALUATOR=legacy` keeps the old one
-   * for this release. An evaluator that errors or throws DENIES the call.
+   * ADR-0239 — which engine answers the rate-limit step: the Cedar evaluator
+   * (`@regulait/policy-kernel/rate-limit-cedar`), which the gateway passes. Absent/null with any rate limit present
+   * DENIES the call (`rate-limit-engine-error`): the hand-written default was removed (ADR-0239 decision 4). An
+   * evaluator that errors or throws DENIES the call too.
    */
   rateLimitEvaluator?: RateLimitEvaluator | null;
   dataScopeRules?: readonly DataScopeRule[];
@@ -974,23 +974,15 @@ export function matchingApprovalRules(
 }
 
 /**
- * ADR-0239 — the hand-written rate-limit predicate, kept behind `REGULAIT_RATE_LIMIT_EVALUATOR=legacy` for one
- * release after the Cedar evaluator became the gateway default. The differential test
- * (`rate-limit-cedar.test.ts`) holds the two to the same answer. Delete it with the switch.
+ * ADR-0239 decision 4 (removed 2026-11-14, ADR-0251 lane L1): the hand-written rate-limit predicate
+ * (`legacyRateLimitEvaluator`) and its `REGULAIT_RATE_LIMIT_EVALUATOR=legacy` switch are gone. Rate limits are matched
+ * by the injected evaluator only (Cedar in the gateway, `@regulait/policy-kernel/rate-limit-cedar`). With limits and
+ * NO evaluator the kernel refuses the call (`rate-limit-engine-error`): an unconfigured engine is never an allow. The
+ * differential test keeps an independent transcription of the old predicate as its oracle.
  */
-export const legacyRateLimitEvaluator: RateLimitEvaluator = {
-  engine: "legacy",
-  firstExhausted(limits, ctx) {
-    const hit = limits.find(
-      (l) =>
-        ruleAppliesToSubject(l, ctx.userId) &&
-        ruleAppliesToServer(l, ctx.serverId) &&
-        ruleAppliesToDeployMode(l, ctx.deployContext) &&
-        matchesScope(l.toolName, ctx.toolName) &&
-        l.currentCount >= l.maxCalls,
-    );
-    return hit ? { kind: "exhausted", limit: hit } : { kind: "none" };
-  },
+const NO_RATE_LIMIT_EVALUATOR: RateLimitEvaluator = {
+  engine: "none",
+  firstExhausted: () => ({ kind: "error", message: "no rate-limit evaluator is configured" }),
 };
 
 /**
@@ -1286,7 +1278,7 @@ function evaluateTool(input: EvaluationInput): Decision {
   const limits = input.rateLimits ?? [];
   let verdict: RateLimitVerdict = { kind: "none" };
   if (limits.length > 0) {
-    const evaluator = input.rateLimitEvaluator ?? legacyRateLimitEvaluator;
+    const evaluator = input.rateLimitEvaluator ?? NO_RATE_LIMIT_EVALUATOR;
     try {
       verdict = evaluator.firstExhausted(limits, {
         userId,
