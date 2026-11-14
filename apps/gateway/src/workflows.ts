@@ -86,7 +86,7 @@ import {
 } from "./shadow-ai-remediation.js";
 import { APPROVER_ADMIN_NOT_INITIATOR, adminsOtherThan, secondApproverMissing } from "./workflow-approvers.js";
 import { networkFacingSignal } from "./dev-secrets.js";
-import { configureStageQueue, enqueueStageRetry, stageRetryAttempt, type StageRetryJob, type StageRetryOutcome } from "./workflows-queue.js";
+import { configureStageQueue, enqueueStageRetry, fanOut, stageCheckConcurrency, stageRetryAttempt, type StageRetryJob, type StageRetryOutcome } from "./workflows-queue.js";
 import { finishTrace, recordSpan, traceForRoot } from "./tracing.js";
 import { activeDelegatorsFor } from "./delegations.js";
 import { idempotentReplay, readIdempotencyKey, requestDigestOf, withIdempotencyKey } from "./request-idempotency.js";
@@ -317,7 +317,7 @@ async function applyEvent(
       const attempt = stageRetryAttempt.getStore();
       if (failing?.retry && !attempt) {
         const job: StageRetryJob = { instanceId: instance.id, stageId: failing.id, round, entry: stageEntry };
-        const sent = await enqueueStageRetry(tx, job, failing.retry);
+        const sent = await enqueueStageRetry(tx, job, failing.retry, instance.projectId ?? null);
         await tx.insert(auditLog).values({
           userId: auditUserId,
           objectType: "workflow",
@@ -1164,97 +1164,104 @@ async function runStageEvalChecks(
   const bindings = stage.evals ?? [];
   if (bindings.length === 0) return out;
   const declared = new Set(stage.checks ?? []);
-  for (const binding of bindings) {
-    if (!declared.has(binding.check)) continue;
-    const fail = (detail: string, extra?: Record<string, unknown>): void => {
-      out.set(binding.check, {
-        check: binding.check,
-        status: "failed",
-        severity: "high",
-        detail,
-        eval: { dataset: binding.dataset, agent: binding.agent, ...(extra ?? {}) },
-      });
-    };
-    // resolve the PINNED dataset version: an explicit `version`, else the
-    // highest existing one at the moment the stage runs
-    const versions = await db
-      .select()
-      .from(evalDatasets)
-      .where(eq(evalDatasets.name, binding.dataset))
-      .orderBy(desc(evalDatasets.version));
-    const dataset = binding.version
-      ? versions.find((d) => d.version === binding.version)
-      : versions[0];
-    if (!dataset) {
-      fail(
-        `eval dataset '${binding.dataset}'${binding.version ? ` v${binding.version}` : ""} does not exist — the quality gate could not run, so it does not pass`,
-      );
-      continue;
-    }
-    // ADR-0208 G9: a gate that still names a retired dataset fails closed (the runner refuses it too)
-    if (versions.some((d) => d.retiredAt !== null)) {
-      fail(`${evalDatasetRetiredDetail(binding.dataset)} — the quality gate could not run, so it does not pass`, { error: "eval_dataset_retired" });
-      continue;
-    }
-    const [agentRow] = await db.select().from(agents).where(eq(agents.name, binding.agent));
-    if (!agentRow) {
-      fail(`eval agent '${binding.agent}' is not in the registry — the quality gate could not run, so it does not pass`);
-      continue;
-    }
-    let judgeAgentId: string | null = null;
-    if (binding.judgeAgent) {
-      const [judgeRow] = await db.select().from(agents).where(eq(agents.name, binding.judgeAgent));
-      if (!judgeRow) {
-        fail(`eval judge agent '${binding.judgeAgent}' is not in the registry`);
-        continue;
-      }
-      judgeAgentId = judgeRow.id;
-    }
-    try {
-      const outcome = await runEvalSuite(db, dataKey, {
-        datasetId: dataset.id,
-        agentId: agentRow.id,
-        userId: instance.initiatorUserId,
-        trigger: "workflow",
-        judgeAgentId,
-        projectId: instance.projectId,
-        tolerance: binding.tolerance ?? 0.05,
-        minScore: binding.minScore ?? null,
-        minPassRate: binding.minPassRate ?? null,
-        requireBaseline: binding.requireBaseline ?? false,
-        workflow: { instanceId: instance.id, stageId: stage.id, checkName: binding.check },
-      });
-      if (!outcome.ok) {
+  // ADR-0285 — IN-STAGE FAN-OUT. The stage's eval-bound checks run at once,
+  // at most `stageCheckConcurrency(stage)` of them and at most the process-wide
+  // limit across every stage (ADR-0286), instead of one after another. Each
+  // one still runs as the initiator and still fails closed; the verdicts are
+  // gathered in declared order and committed as ONE transition by the caller.
+  const results = await fanOut(bindings.filter((b) => declared.has(b.check)), stageCheckConcurrency(stage), async (binding) => {
+      let result: CheckOutcome | undefined;
+      const fail = (detail: string, extra?: Record<string, unknown>): void => {
+        result = {
+          check: binding.check,
+          status: "failed",
+          severity: "high",
+          detail,
+          eval: { dataset: binding.dataset, agent: binding.agent, ...(extra ?? {}) },
+        };
+      };
+      // resolve the PINNED dataset version: an explicit `version`, else the
+      // highest existing one at the moment the stage runs
+      const versions = await db
+        .select()
+        .from(evalDatasets)
+        .where(eq(evalDatasets.name, binding.dataset))
+        .orderBy(desc(evalDatasets.version));
+      const dataset = binding.version
+        ? versions.find((d) => d.version === binding.version)
+        : versions[0];
+      if (!dataset) {
         fail(
-          `eval '${binding.dataset}' could not run against '${binding.agent}': ${outcome.error}${outcome.detail ? ` — ${outcome.detail}` : ""}`,
-          { error: outcome.error },
+          `eval dataset '${binding.dataset}'${binding.version ? ` v${binding.version}` : ""} does not exist — the quality gate could not run, so it does not pass`,
         );
-        continue;
+        return result;
       }
-      out.set(binding.check, {
-        check: binding.check,
-        status: outcome.gate.passed ? "passed" : "failed",
-        severity: outcome.gate.passed ? null : outcome.gate.regression ? "high" : "medium",
-        detail: `${binding.dataset} v${dataset.version} on '${binding.agent}': ${outcome.gate.reason}`,
-        eval: {
-          runId: outcome.run.id,
-          dataset: dataset.name,
-          datasetVersion: dataset.version,
-          agent: agentRow.name,
-          model: agentRow.model,
-          meanScore: outcome.aggregate.meanScore,
-          passRate: outcome.aggregate.passRate,
-          cases: outcome.aggregate.cases,
-          scoreDelta: outcome.gate.scoreDelta,
-          baselineRunId: outcome.baseline?.id ?? null,
-          regression: outcome.gate.regression,
-          costUsd: outcome.run.costUsd,
-        },
-      });
-    } catch (e) {
-      fail(`eval '${binding.dataset}' errored: ${errMessage(e)}`);
-    }
-  }
+      // ADR-0208 G9: a gate that still names a retired dataset fails closed (the runner refuses it too)
+      if (versions.some((d) => d.retiredAt !== null)) {
+        fail(`${evalDatasetRetiredDetail(binding.dataset)} — the quality gate could not run, so it does not pass`, { error: "eval_dataset_retired" });
+        return result;
+      }
+      const [agentRow] = await db.select().from(agents).where(eq(agents.name, binding.agent));
+      if (!agentRow) {
+        fail(`eval agent '${binding.agent}' is not in the registry — the quality gate could not run, so it does not pass`);
+        return result;
+      }
+      let judgeAgentId: string | null = null;
+      if (binding.judgeAgent) {
+        const [judgeRow] = await db.select().from(agents).where(eq(agents.name, binding.judgeAgent));
+        if (!judgeRow) {
+          fail(`eval judge agent '${binding.judgeAgent}' is not in the registry`);
+          return result;
+        }
+        judgeAgentId = judgeRow.id;
+      }
+      try {
+        const outcome = await runEvalSuite(db, dataKey, {
+          datasetId: dataset.id,
+          agentId: agentRow.id,
+          userId: instance.initiatorUserId,
+          trigger: "workflow",
+          judgeAgentId,
+          projectId: instance.projectId,
+          tolerance: binding.tolerance ?? 0.05,
+          minScore: binding.minScore ?? null,
+          minPassRate: binding.minPassRate ?? null,
+          requireBaseline: binding.requireBaseline ?? false,
+          workflow: { instanceId: instance.id, stageId: stage.id, checkName: binding.check },
+        });
+        if (!outcome.ok) {
+          fail(
+            `eval '${binding.dataset}' could not run against '${binding.agent}': ${outcome.error}${outcome.detail ? ` — ${outcome.detail}` : ""}`,
+            { error: outcome.error },
+          );
+          return result;
+        }
+        result = {
+          check: binding.check,
+          status: outcome.gate.passed ? "passed" : "failed",
+          severity: outcome.gate.passed ? null : outcome.gate.regression ? "high" : "medium",
+          detail: `${binding.dataset} v${dataset.version} on '${binding.agent}': ${outcome.gate.reason}`,
+          eval: {
+            runId: outcome.run.id,
+            dataset: dataset.name,
+            datasetVersion: dataset.version,
+            agent: agentRow.name,
+            model: agentRow.model,
+            meanScore: outcome.aggregate.meanScore,
+            passRate: outcome.aggregate.passRate,
+            cases: outcome.aggregate.cases,
+            scoreDelta: outcome.gate.scoreDelta,
+            baselineRunId: outcome.baseline?.id ?? null,
+            regression: outcome.gate.regression,
+            costUsd: outcome.run.costUsd,
+          },
+        };
+      } catch (e) {
+        fail(`eval '${binding.dataset}' errored: ${errMessage(e)}`);
+      }
+    return result;
+  });
+  for (const r of results) if (r) out.set(r.check, r);
   return out;
 }
 

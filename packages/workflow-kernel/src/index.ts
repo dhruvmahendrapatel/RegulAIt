@@ -164,6 +164,12 @@ const stageSchema = z.object({
       }),
     )
     .optional(),
+  /** ADR-0285 (P30): how many of this check stage's eval-bound checks run AT
+   * ONCE (in-stage fan-out). Absent = the gateway's default
+   * (REGULAIT_WORKFLOW_CHECK_CONCURRENCY, 4). 1 runs them one after another,
+   * as before P30. Every verdict still commits as ONE transition. Only valid
+   * on an automated_check stage with named checks. */
+  checkConcurrency: z.number().int().min(1).max(16).optional(),
   /** ADR-0283 (P30): automatic retry with backoff after a retryable
    * `execution_failed` on an EXECUTED stage (git_operation, deployment, a
    * build with a nested run, a check stage with named checks; never a
@@ -239,6 +245,13 @@ export const workflowDefinitionSchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: `stage '${s.id}' (${s.type}) cannot carry offlineAutoPass — only an automated_check stage with named checks can`,
+        });
+      }
+      // ADR-0285: fan-out width is a check-executor setting, like offlineAutoPass
+      if (s.checkConcurrency !== undefined && (s.type !== "automated_check" || (s.checks?.length ?? 0) === 0)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `stage '${s.id}' (${s.type}) cannot carry checkConcurrency — only an automated_check stage with named checks can`,
         });
       }
       // ADR-0283: a retry policy only means something on a stage the gateway

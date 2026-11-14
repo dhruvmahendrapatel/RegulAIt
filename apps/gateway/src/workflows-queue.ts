@@ -19,9 +19,10 @@
  * What is ours is the stage policy, the key and the audit rows.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
+import fastq from "fastq";
 import { PgBoss, fromDrizzle, type Db as PgBossDb, type DrizzleSqlTagLike, type DrizzleTransactionLike, type JobWithMetadata } from "pg-boss";
 import { sql, type Db } from "@regulait/db";
-import type { StageRetryPolicy } from "@regulait/workflow-kernel";
+import type { Stage, StageRetryPolicy } from "@regulait/workflow-kernel";
 import { errLine } from "./err-serializer.js";
 
 export const WORKFLOW_QUEUE_SCHEMA = "regulait_queue";
@@ -35,6 +36,67 @@ export interface StageRetryJob {
   stageId: string;
   round: number;
   entry: number;
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0286 — CONCURRENCY LIMITS. Each is bounded, has a default, and is read
+// from the environment when it is used (so an operator change needs no code).
+// ---------------------------------------------------------------------------
+
+/** retry jobs one gateway process runs at once (pg-boss `localConcurrency`) */
+export const RETRY_CONCURRENCY_ENV = "REGULAIT_WORKFLOW_RETRY_CONCURRENCY";
+/** retry jobs of ONE project running at once across every process (pg-boss `groupConcurrency`, database-tracked) */
+export const RETRY_PROJECT_CONCURRENCY_ENV = "REGULAIT_WORKFLOW_RETRY_PROJECT_CONCURRENCY";
+/** a check stage's default fan-out width when its template sets no `checkConcurrency` (ADR-0285) */
+export const CHECK_CONCURRENCY_ENV = "REGULAIT_WORKFLOW_CHECK_CONCURRENCY";
+/** eval-bound checks running at once across every stage in one process */
+export const CHECK_PROCESS_CONCURRENCY_ENV = "REGULAIT_WORKFLOW_CHECK_PROCESS_CONCURRENCY";
+
+export const CONCURRENCY_LIMITS = {
+  [RETRY_CONCURRENCY_ENV]: { default: 2, min: 1, max: 16 },
+  [RETRY_PROJECT_CONCURRENCY_ENV]: { default: 1, min: 1, max: 16 },
+  [CHECK_CONCURRENCY_ENV]: { default: 4, min: 1, max: 16 },
+  [CHECK_PROCESS_CONCURRENCY_ENV]: { default: 8, min: 1, max: 64 },
+} as const;
+
+/** a limit's value: the environment's when it is an integer in bounds, else the default (never unbounded) */
+export function concurrencyLimit(name: keyof typeof CONCURRENCY_LIMITS, env: NodeJS.ProcessEnv = process.env): number {
+  const { default: fallback, min, max } = CONCURRENCY_LIMITS[name];
+  const raw = env[name]?.trim();
+  if (!raw || !/^\d+$/.test(raw)) return fallback;
+  const n = Number(raw);
+  return n >= min && n <= max ? n : fallback;
+}
+
+/** ADR-0285: the fan-out width of a check stage — its template's `checkConcurrency`, else the deployment default */
+export function stageCheckConcurrency(stage: Pick<Stage, "checkConcurrency">, env: NodeJS.ProcessEnv = process.env): number {
+  return stage.checkConcurrency ?? concurrencyLimit(CHECK_CONCURRENCY_ENV, env);
+}
+
+/** the retry job's pg-boss group: its instance's project, so one project's failing stages cannot starve another's */
+export function stageRetryGroup(projectId: string | null): { id: string } {
+  return { id: projectId ?? "no-project" };
+}
+
+type Task = () => Promise<unknown>;
+let processChecks: fastq.queueAsPromised<Task, unknown> | null = null;
+let processChecksWidth = 0;
+
+/**
+ * ADR-0285 / ADR-0286 — run `run` over `items` with at most `width` at once for this caller and at most the
+ * process-wide check limit across every caller, and return the results in the ORDER OF `items`. Bounded queues from
+ * fastq (already in the tree through fastify); nothing here is a scheduler of its own.
+ */
+export async function fanOut<T, R>(items: readonly T[], width: number, run: (item: T) => Promise<R>): Promise<R[]> {
+  const processWidth = concurrencyLimit(CHECK_PROCESS_CONCURRENCY_ENV);
+  if (!processChecks || processChecksWidth !== processWidth) {
+    // a changed limit takes effect for new work; work already queued keeps the queue it is on
+    processChecks = fastq.promise((task: Task) => task(), processWidth);
+    processChecksWidth = processWidth;
+  }
+  const shared = processChecks;
+  const local = fastq.promise((i: number) => shared.push(() => run(items[i]!)), Math.max(1, Math.floor(width)));
+  return (await Promise.all(items.map((_, i) => local.push(i)))) as R[];
 }
 
 /** ADR-0284: the idempotency key of one stage execution (an entry of a stage in a round) */
@@ -115,7 +177,12 @@ export type StageRetryEnqueue =
  * The job's own options carry the stage's policy: the first run after `delaySeconds`, then pg-boss's jittered
  * exponential backoff up to `maxDelaySeconds`, for `maxAttempts` attempts in all.
  */
-export async function enqueueStageRetry(tx: DrizzleTransactionLike, job: StageRetryJob, policy: StageRetryPolicy): Promise<StageRetryEnqueue> {
+export async function enqueueStageRetry(
+  tx: DrizzleTransactionLike,
+  job: StageRetryJob,
+  policy: StageRetryPolicy,
+  projectId: string | null,
+): Promise<StageRetryEnqueue> {
   const key = stageExecutionKey(job);
   if (!senderDb) return { scheduled: false, key, reason: "queue_not_configured" };
   const boss = await sender(senderDb);
@@ -127,6 +194,8 @@ export async function enqueueStageRetry(tx: DrizzleTransactionLike, job: StageRe
     retryDelay: policy.delaySeconds,
     retryBackoff: policy.backoff,
     retryDelayMax: policy.maxDelaySeconds,
+    // ADR-0286: the per-project limit the worker applies
+    group: stageRetryGroup(projectId),
   });
   return jobId ? { scheduled: true, jobId, key, firstDelaySeconds: policy.delaySeconds } : { scheduled: false, key, reason: "already_scheduled" };
 }
@@ -175,7 +244,9 @@ export async function startStageRetryWorker(
     {
       includeMetadata: true as const,
       batchSize: 1,
-      localConcurrency: opts.localConcurrency ?? 2,
+      // ADR-0286: per process, and per project across every process
+      localConcurrency: opts.localConcurrency ?? concurrencyLimit(RETRY_CONCURRENCY_ENV),
+      groupConcurrency: concurrencyLimit(RETRY_PROJECT_CONCURRENCY_ENV),
       pollingIntervalSeconds: opts.pollingIntervalSeconds ?? 5,
     },
     async ([job]: JobWithMetadata<StageRetryJob>[]): Promise<{ outcome: StageRetryOutcome } | undefined> => {

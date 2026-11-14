@@ -909,3 +909,20 @@ describe("ADR-0283: a stage retry policy is an executed-stage-only, bounded opt-
     expect(() => retryDelaySeconds(p, 0)).toThrow(RangeError);
   });
 });
+
+describe("ADR-0285: checkConcurrency is a check-stage-only, bounded setting", () => {
+  const base = [{ id: "intake", type: "trigger" }] as const;
+  it("is kept on an automated_check stage with named checks and absent by default", () => {
+    const def = validateDefinition({ workflow: "fan", stages: [...base, { id: "checks", type: "automated_check", checks: ["a", "b"], checkConcurrency: 3 }] });
+    expect(def.stages[1]!.checkConcurrency).toBe(3);
+    const none = validateDefinition({ workflow: "seq", stages: [...base, { id: "checks", type: "automated_check", checks: ["a"] }] });
+    expect(none.stages[1]!.checkConcurrency).toBeUndefined();
+  });
+  it.each([[0], [17], [1.5], ["4"]])("refuses %j", (n) => {
+    expect(() => validateDefinition({ workflow: "bad", stages: [...base, { id: "checks", type: "automated_check", checks: ["a"], checkConcurrency: n }] })).toThrow();
+  });
+  it("is refused on any other stage", () => {
+    expect(() => validateDefinition({ workflow: "bad", stages: [...base, { id: "checks", type: "automated_check", checkConcurrency: 2 }] })).toThrow(/cannot carry checkConcurrency/);
+    expect(() => validateDefinition({ workflow: "bad", stages: [...base, { id: "plan", type: "planning", checkConcurrency: 2 }] })).toThrow(/cannot carry checkConcurrency/);
+  });
+});
