@@ -10,7 +10,7 @@ describe("SHADOW_AI_CATALOG_V3 (ADR-0195 decision 15; L10)", () => {
     expect(SHADOW_AI_CATALOG_V3_VERSION).toBe(3);
     expect(SHADOW_AI_CATALOG_V3).toHaveLength(205);
     const hash = createHash("sha256").update(JSON.stringify(SHADOW_AI_CATALOG_V3)).digest("hex");
-    expect(hash).toBe("192fa285d884be58cdd2ac7ed1e0161a825f0964565f909582c4a165ec5a50b4");
+    expect(hash).toBe("f1c50c5e017f4f1d39b50a2eb8d484a2c06d0625d5516c0a6dea9ba5587c68dd");
     expect(Object.isFrozen(SHADOW_AI_CATALOG_V3)).toBe(true);
     expect(Object.isFrozen(additions[0])).toBe(true);
   });
@@ -51,6 +51,10 @@ describe("SHADOW_AI_CATALOG_V3 (ADR-0195 decision 15; L10)", () => {
     expect(m("index-1.svc.us-east1.pinecone.io")).toBeNull();
     expect(m("production-copilot-host-westus3.webpubsub.azure.com")).toBe("ep-github-copilot-cloud-session");
     expect(m("other.webpubsub.azure.com")).toBeNull();
+    // the "*" sits inside one label: it cannot cross a dot out of webpubsub.azure.com
+    expect(m("production-copilot-host.evil.example")).toBeNull();
+    expect(m("production-copilot-host.evil.example.webpubsub.azure.com.attacker.test")).toBeNull();
+    expect(m("x.production-copilot-host-1.webpubsub.azure.com")).toBeNull();
     // v2 results are unchanged
     expect(m("api.business.githubcopilot.com")).toBe("ep-github-copilot-api");
     expect(m("api.x.ai")).toBe(matchCatalogV2Endpoint("api.x.ai")?.id);

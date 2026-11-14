@@ -7,8 +7,10 @@
  *
  * WHAT IS NEW IN V3 (2026-11-14, lane L10; PENDING P35 follow-up and S17)
  *   - AI provider and AI-builder hosts from the PatronAI comparison (ADR-0259 §7): each one cross-checked against
- *     the pinned PatronAI data (Apache-2.0, licence re-checked 2026-11-14) and then confirmed against the vendor's
- *     own current documentation or site on the date in its `verified` field. Candidates the vendor no longer
+ *     the pinned PatronAI data (Apache-2.0, licence re-checked 2026-11-14, no NOTICE file) and then confirmed at
+ *     the vendor on the date in its `verified` field: API hosts against the vendor's documentation, and browser-only
+ *     products (Bolt, Grok, Suno, Pika, NotebookLM, Flowise Cloud) against the product's own site, which is its own
+ *     evidence that the host serves it. Candidates the vendor no longer
  *     documents (a shut-down service, a rebrand, a legacy host) were left out, and wildcards that would also match a
  *     vendor's marketing and docs sites (`*.pinecone.io`, `*.trychroma.com`) were narrowed to the API host.
  *     Generic hosting platforms (Vercel, Render, Railway, Fly) are not AI signals on their own and are left out.
@@ -73,7 +75,7 @@ export const SHADOW_AI_CATALOG_V3: ReadonlyArray<ShadowCatalogV2Entry> = deepFre
   // --- consumer and builder web apps (browser usage, not API integrations) ---
   P("ep-google-ai-studio", "aistudio.google.com", "google", "Google AI Studio web app. Browser usage, not an API integration.", "https://ai.google.dev/gemini-api/docs/api-key"),
   P("ep-notebooklm", "notebooklm.google.com", "google", "NotebookLM web app: documents uploaded for AI summarisation. Browser usage.", "https://notebooklm.google.com/"),
-  P("ep-google-opal", "opal.google", "google", "Google Opal AI mini-app builder. Browser usage; the product leaves Labs on 2026-11-17, re-check the host.", "https://developers.google.com/opal"),
+  P("ep-google-opal", "opal.google", "google", "Google Opal AI mini-app builder. Browser usage.", "https://developers.google.com/opal"),
   P("ep-google-opal-com", "opal.google.com", "google", "Google Opal AI mini-app builder on its google.com host. Browser usage.", "https://developers.google.com/opal"),
   P("ep-v0-app", "v0.app", "vercel-v0", "Vercel v0 AI app builder web app. Browser usage.", "https://v0.app/docs/api/v1"),
   P("ep-manus-app", "manus.im", "manus", "Manus agent web app. Browser usage.", "https://open.manus.ai/docs/v2/introduction"),
