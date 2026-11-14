@@ -368,6 +368,8 @@ export const INDIRECT_UI_CALLS = new Map([
  * until the entry is deleted, and KNOWN_UI_GAPS_MAX is lowered to match.
  */
 export const KNOWN_UI_GAPS = new Map([
+  ["POST /v1/model-artifacts/:artifactId/lineage", { does: "records how a model file was derived from its parent file(s): repackaged, converted, fine-tuned, quantized or merged (once per file, audited)", tracking: "Lane L7 (P14 + P16): the brief is API-only; the lineage panel on the model-artifact screen is for the design builder on #453. RAISED for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["GET /v1/model-artifacts/:artifactId/lineage", { does: "shows a model file's parents, ancestors and children (relatives the caller cannot see as a count)", tracking: "Lane L7 (P14 + P16): the brief is API-only; the lineage panel on the model-artifact screen is for the design builder on #453. RAISED for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["GET /v1/usage-extractors", { does: "reads the org switch and every agent's active usage-mapping version", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["PUT /v1/usage-extractors/enabled", { does: "turns the usage extractor on (settings_relax step-up) or off", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["GET /v1/agents/:agentId/usage-extractor/versions", { does: "lists an agent's usage-mapping versions with each one's latest sample test", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
@@ -456,7 +458,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 46; // main's 44 + ADR-0255 (P31) 2, master decision on #753 2026-11-14
+export const KNOWN_UI_GAPS_MAX = 48; // main's 44 + ADR-0255 (P31) 2, master decision on #753 2026-11-14; + lane L7 (P14 + P16) 2 model-file lineage routes
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 
