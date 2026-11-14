@@ -2,7 +2,7 @@
 
 - **Status**: Accepted (lane L12 brief, 2026-11-14: the queue is built in parallel; owner questions are listed below)
 - **Date**: 2026-11-14
-- **Index**: **Self-install on Kubernetes (P22, the Helm row): a controller-runtime operator with a `RegulaitInstallation` CRD (version, mode, data-key Secret reference, backup policy, egress posture) that rolls out only a version whose signed update-bundle manifest verifies (ADR-0041), plus a Helm chart and a migration Job.** Kubebuilder layout and controller-runtime (Apache-2.0). Secure defaults: non-root, read-only root filesystem, every capability dropped, NetworkPolicy default-deny, images by digest only, no secret values in the CR or in Helm values, and no Secret read permission for the operator. Air-gapped refuses a public egress range and a registry outside the customer's.
+- **Index**: **Self-install on Kubernetes (P22, the Helm row): a controller-runtime operator with a `RegulaitInstallation` CRD (version, mode, data-key Secret reference, backup policy, egress posture) that rolls out only a version whose signed update-bundle manifest verifies (ADR-0041), plus a Helm chart and a migration Job.** Kubebuilder layout and controller-runtime (Apache-2.0). Secure defaults: non-root, read-only root filesystem, every capability dropped, NetworkPolicy default-deny, images by digest only, no secret values in the CR or in Helm values, a namespaced Role with no direct Secret permission, and the release keyring compiled into the operator. Air-gapped refuses a public egress range and a registry outside the customer's.
 - **Backlog item**: [PENDING.md](../product/PENDING.md) P22 and the "Helm chart / k8s install for RegulAIt itself" row
 - **Built in**: lane L12, three PRs (this ADR; the operator in `deploy/operator/`; the chart in `deploy/helm/regulait/`)
 - **Migration**: none (no database change; the migration Job runs the existing migrations)
@@ -58,13 +58,13 @@ Facts that shape the design, read from the code:
 | `spec.image.repository`, `spec.image.digest` | The gateway image | Both required. The digest must be `sha256:` + 64 hex; a tag is never accepted. The pod pulls `repository@digest`. |
 | `spec.image.allowedRegistries` | Registries the repository may live in | Required in `air_gapped` (at least one); the repository's registry host must be in it. |
 | `spec.updateBundle.manifestConfigMapRef` | ConfigMap holding `manifest.json` and `manifest.json.sig` | Required. |
-| `spec.updateBundle.keyringConfigMapRef` | ConfigMap of pinned public keys, one `<keyId>.pub` entry each | Required. |
+| `spec.updateBundle.extraKeyringConfigMapRef` | ConfigMap of **additional** public keys, one `<keyId>.pub` entry each | Optional, off by default. The trust anchor is the release keyring embedded in the operator binary (§2a). An extra keyring is an explicit opt-in, reported as a `Warning` event and the `ExtraKeyringInUse` reason on `BundleVerified` every reconcile. It can add key ids but never replace an embedded one. |
 | `spec.dataKeySecretRef` | `{name, key}` of the Secret holding `REGULAIT_DATA_KEY` | Required. The value is never in the CR. |
 | `spec.databaseUrlSecretRef` | `{name, key}` of the Secret holding the database URL | Required. |
 | `spec.bootstrapTokenSecretRef` | `{name, key}` of the Secret holding `REGULAIT_BOOTSTRAP_TOKEN` | Required. |
 | `spec.installSecretsClaimName` | PVC mounted at `/app/install-secrets` | Optional. When empty, the operator creates a 1 GiB `ReadWriteOnce` claim **without** an owner reference, so deleting the CR never deletes the keys. |
 | `spec.backup` | `schedule` (cron), `retentionDays`, `destinationClaimName`, `image` (by digest), `disabled` | `schedule` defaults to `17 2 * * *`, `retentionDays` to 14. Without a destination the installation is not `Ready` (condition `BackupConfigured=False`). Turning backup off takes `disabled: true`, which the operator records as a `Warning` event and a condition every reconcile. |
-| `spec.egress` | `allowedCIDRs`, `databaseCIDRs`, `allowPublicEgress` | NetworkPolicy is always default-deny for ingress and egress. Egress opens only DNS to `kube-system`, the database CIDRs on 5432, and `allowedCIDRs`. `allowPublicEgress` (default `false`) is what a `byoc` install sets to reach model vendors; it is refused in `air_gapped`, as is any `allowedCIDRs` entry that is not a private range. |
+| `spec.egress` | `allowedCIDRs`, `databaseCIDRs`, `allowPublicEgress` | NetworkPolicy is always default-deny for ingress and egress. Egress opens only DNS to the cluster DNS pods (`k8s-app: kube-dns` in `kube-system`) on 53/UDP and 53/TCP, the database CIDRs on 5432, and `allowedCIDRs`. `allowPublicEgress` (default `false`) is what a `byoc` install sets to reach model vendors: `0.0.0.0/0` and `::/0` on 443 only, with `except` for `169.254.0.0/16` (instance metadata), the RFC 1918 ranges, `100.64.0.0/10` and the IPv6 private and link-local ranges. NetworkPolicy so backs up the gateway's own egress guard. A private destination is reached only through `allowedCIDRs`. Public egress is refused in `air_gapped`, as is any `allowedCIDRs` entry that is not a private range. |
 | `spec.ingressFrom` | Namespace and pod selectors allowed to reach port 3000 | Default: nothing. The installation answers no one until the operator's user names the ingress controller. |
 | `spec.replicas` | Gateway replicas | Default 1, maximum 1 in v1alpha1 (see 4). |
 
@@ -80,8 +80,8 @@ running workloads):
    `air_gapped`). The CRD schema carries the enum, pattern and required rules, so the API server refuses most bad
    specs before the operator sees them.
 2. **Verify the bundle manifest** with the same rules as `scripts/verify-update-bundle.sh`: schema
-   `regulait.update-bundle/1`, product `regulait`, a key id matching `^[A-Za-z0-9._-]+$`, a key present in the keyring
-   ConfigMap, an Ed25519 signature over the exact manifest bytes (RSA or ECDSA over SHA-256 accepted, as in the
+   `regulait.update-bundle/1`, product `regulait`, a key id matching `^[A-Za-z0-9._-]+$`, a key present in the
+   embedded release keyring (§2a), or in the opted-in extra keyring, an Ed25519 signature over the exact manifest bytes (RSA or ECDSA over SHA-256 accepted, as in the
    script), `version == spec.version`, and no downgrade below `status.installedVersion` or below the manifest's
    `minInstalledVersion`. The operator verifies the manifest only; the payload files stay the installer's concern.
 3. **Converge the owned objects**: ServiceAccount (no token automount), Service, NetworkPolicy, the install-secrets
@@ -93,6 +93,18 @@ running workloads):
    Deployment's image only after that Job succeeds. A failed Job leaves the old version running (`Migrated=False`).
 5. Record `installedVersion` once the new Deployment is available.
 
+### 2a. The trust anchor is compiled into the operator
+
+The release public keys (`infra/release-keys/*.pub`, the set `scripts/verify-update-bundle.sh` pins) are embedded in
+the operator binary with `go:embed`. A CI check fails when the embedded copy differs from `infra/release-keys/`. A key
+held in a ConfigMap would let anyone who can edit that ConfigMap install their own key and sign any manifest. The check
+would then stop accidents but not someone with write access to the namespace. A key rotation ships a new operator
+build, the same channel as the shell verifier's keyring.
+
+A customer that signs its own bundles can name an extra keyring (`extraKeyringConfigMapRef`). That is an explicit
+opt-in, reported on every reconcile. It adds key ids and never replaces an embedded key: a ConfigMap entry whose id
+matches an embedded key with different content is refused.
+
 ### 3. Secure defaults on every pod the operator or chart creates
 
 `runAsNonRoot`, the image's own uid (1000), `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, every
@@ -100,8 +112,23 @@ capability dropped, `seccompProfile: RuntimeDefault`, `automountServiceAccountTo
 resource requests and limits, and `imagePullPolicy: IfNotPresent` on a digest. The operator's own Deployment follows the
 same rules. Its metrics endpoint is off by default; its health probes listen on a port no Service exposes.
 
-**The operator cannot read Secrets.** Its RBAC grants nothing on `secrets`; the gateway pod reads them through
-`secretKeyRef`. A missing Secret surfaces as the pod failing to start, which the operator reports through `Available`.
+This covers the Helm migration hook Job too. It carries the same pod and container security context and reads the
+database URL only through `secretKeyRef`.
+
+**RBAC scope: one namespace, a namespaced Role.** The operator watches and acts only in its own installation namespace
+(`WATCH_NAMESPACE`, required at start; the manager's cache is restricted to it). All of its rights sit in a namespaced
+`Role` and `RoleBinding`. Only the CRD itself is cluster-scoped, and it is installed by the administrator, not by the
+operator. Watching the whole cluster is not offered in v1alpha1. If it is added later, it is an explicit opt-in with
+its own ADR.
+
+**The operator holds no direct Secret permissions.** Its RBAC grants nothing on `secrets`, and the gateway pod reads
+them through `secretKeyRef`. This does not stop Secret access. The operator can create Deployments, Jobs and CronJobs,
+and whoever can create a pod in a namespace can mount and read every Secret there. So the operator's workload rights
+imply read access to the Secrets of the one namespace it manages, and the namespaced Role is what bounds that. A missing
+Secret surfaces as the pod failing to start, which the operator reports through `Available`.
+
+The operator's own image is pinned by digest in its Deployment (`config/manager`) and in the chart's `operator.enabled`
+path, which refuses to render without a `sha256:` digest.
 
 ### 4. One replica until P2 lands
 
@@ -144,6 +171,12 @@ touches a cloud account.
 
 - Kubernetes customers get a declarative install that refuses an unsigned or downgraded version and puts drifted
   objects back.
+- **What the signature gates today.** Schema `/1` names files, not image digests. Until schema `/2` (owner question 1)
+  binds `spec.image.digest` into the signed manifest, the signature gates the **version label**, not the code that
+  runs. Someone who can edit the RegulaitInstallation can point a verified version at any digest in an allowed
+  registry. `allowedRegistries` and the namespace's RBAC are the controls until then.
+- The release keyring lives in two places: `infra/release-keys/` and the operator's embedded copy. CI keeps them
+  equal, and a key rotation needs a new operator build.
 - The repo gains a second Go module (`deploy/operator/`) with its own CI workflow and `THIRD_PARTY.md`, following the
   endpoint agent's pattern (linked modules must be listed).
 - Two install paths (Compose and Kubernetes) must stay equivalent. The chart and the operator render the same pod

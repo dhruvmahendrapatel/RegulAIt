@@ -4,5 +4,6 @@
   that rolls out only a version whose signed update-bundle manifest verifies (ADR-0041), migrates by Job before the
   image changes, corrects drift and reports it; and a Helm chart (`deploy/helm/regulait/`) with a migration hook Job.
 - **Defaults:** non-root, read-only root filesystem, capabilities dropped, NetworkPolicy default-deny, images by digest
-  only, Secret names only (the operator has no Secret RBAC), one replica until P2, air-gapped refuses public egress.
+  only, Secret names only, a namespaced Role with no direct Secret permission, the release keyring compiled into
+  the operator (an extra ConfigMap keyring is an evented opt-in), one replica until P2, air-gapped refuses public egress.
 - **Open (owner):** image digests in the bundle (schema /2), the API group domain, the backup target, distribution.
