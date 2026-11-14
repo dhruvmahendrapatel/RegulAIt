@@ -122,16 +122,10 @@ function readable_refusal(Throwable $e, int $status): array
     expect_true($cause instanceof RequestException, 'expected an HTTP refusal, got '.get_class($e).': '.$e->getMessage());
     expect_true($cause->response->status() === $status, "expected {$status}, got ".$cause->response->status());
     $body = $cause->response->json();
-    if ($status === 401) {
-        // The gateway's shared auth hook answers every surface with its own
-        // `{"error": "<code>"}` before the compat shim runs (ADR-0257 finding 2),
-        // so a 401 carries the RegulAIt code rather than the provider envelope.
-        $message = $body['error']['message'] ?? $body['error'] ?? null;
-        expect_true(is_string($message) && $message !== '', 'empty 401 body: '.$cause->response->body());
-    } else {
-        $message = $body['error']['message'] ?? null;
-        expect_true(is_string($message) && strlen($message) > 10, 'unreadable error body: '.$cause->response->body());
-    }
+    // ADR-0288: a 401 on a compat surface is in the provider's envelope too, so
+    // every refusal carries a readable `error.message`.
+    $message = $body['error']['message'] ?? null;
+    expect_true(is_string($message) && strlen($message) > 10, 'unreadable error body: '.$cause->response->body());
 
     return ['status' => $status, 'type' => $body['error']['type'] ?? null, 'message' => substr($message, 0, 200)];
 }
