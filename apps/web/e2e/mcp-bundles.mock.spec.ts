@@ -251,7 +251,7 @@ test.describe("MCP bundles (#453)", () => {
     expect(sent(calls, "PUT", `/v1/mcp-tools/${T_READ}/dangerous`)).toEqual([{ dangerous: true }]);
     // clearing relaxes: a step-up
     const su = await requireStepUpOn(page, { method: "PUT", path: `/v1/mcp-tools/${T_DEL}/dangerous`, kind: "settings_relax" });
-    await form.getByRole("button", { name: "Clear dangerous flag: delete_branch" }).click();
+    await form.getByRole("button", { name: "Clear flag: delete_branch" }).click();
     await confirmStepUp(page);
     await su.expectResentOnce();
     expect(su.attempts[1]!.body).toEqual({ dangerous: false });
@@ -281,7 +281,7 @@ test.describe("MCP bundles (#453)", () => {
     await edit.getByRole("button", { name: "Save version 3" }).click();
     const refused = edit.getByRole("alert");
     await expect(refused).toContainText("the bundle is at version 3, not 2");
-    await expect(refused).toContainText("Reload the bundle and make your change again.");
+    await expect(refused).toContainText("Nothing was saved.");
     await expectAxeClean(page, "MCP bundles: a stale version");
     await refused.getByRole("button", { name: "Reload the bundle" }).click();
     const t3 = card(page, "Tools in version 3");
@@ -328,7 +328,7 @@ test.describe("MCP bundles (#453)", () => {
     await form.getByLabel("Up to", { exact: true }).selectOption("dangerous");
     await form.getByRole("button", { name: "Grant" }).click();
     await expect(form.getByRole("alert")).toContainText("needs the bundle to name an approver");
-    await expect(form.getByRole("alert")).toContainText("Name an approver under Details first.");
+    await expect(form.getByRole("alert")).toContainText("Nothing was saved.");
     await expectAxeClean(page, "MCP bundles: approver required");
 
     const su = await requireStepUpOn(page, { method: "PATCH", path: `/v1/mcp-bundles/${B1}`, kind: "settings_relax" });
@@ -346,6 +346,9 @@ test.describe("MCP bundles (#453)", () => {
     await expect(held.getByRole("row").filter({ hasText: "Reviewers (role)" })).toContainText("All tools, dangerous ones with approval");
     expect(sent(calls, "POST", `/v1/mcp-bundles/${B1}/grants`).at(-1)).toEqual({ roleId: ROLE, maxTier: "dangerous" });
 
+    // revoke: destructive, so it is never in the primary slot, which stays empty (X7)
+    const revokeBtn = held.getByRole("button", { name: "Revoke bo@example.test's grant of repo-readers" });
+    expect(await revokeBtn.evaluate((el) => el.parentElement!.previousElementSibling?.previousElementSibling?.childElementCount)).toBe(0);
     // revoke: the confirmation names the grantee and what they lose
     await held.getByRole("button", { name: "Revoke bo@example.test's grant of repo-readers" }).click();
     const dialog = page.getByRole("dialog", { name: "Revoke bo@example.test's grant of repo-readers?" });
@@ -364,5 +367,53 @@ test.describe("MCP bundles (#453)", () => {
     await expect(page.getByRole("form", { name: "Grant this bundle" })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Change tools" })).toHaveCount(0);
     expect(calls.some((c) => c.method === "DELETE" && c.path === `/v1/mcp-bundles/${B1}`)).toBe(true);
+  });
+
+  test("one bundle while the setting is off: says so, offers no change or grant, and Save details is unavailable with the reason", async ({ page }) => {
+    const { calls } = await mockApi(page, { enabled: false });
+    await page.goto(`/ui/admin/mcp-servers/bundles/${B1}`);
+    await expect(page.getByRole("heading", { name: "Bundle: repo-readers" })).toBeVisible();
+    await expect(page.getByTestId("bundles-off")).toContainText("MCP bundles are off");
+    await expect(page.getByRole("button", { name: "Change tools" })).toHaveCount(0);
+    await expect(page.getByRole("form", { name: "Grant this bundle" })).toHaveCount(0);
+    const save = page.getByRole("form", { name: "Bundle details" }).getByRole("button", { name: "Save details" });
+    await expect(save).toHaveAttribute("aria-disabled", "true");
+    await expect(save).toHaveAccessibleDescription("Off while MCP bundles are off.");
+    await save.click({ force: true });
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+    // revoking narrows, so it stays available
+    await expect(card(page, "Held by").getByRole("button", { name: /^Revoke / })).toBeVisible();
+    await expectAxeClean(page, "MCP bundles: one bundle, off");
+  });
+
+  test("an unknown bundle id says there is no such bundle, without Retry", async ({ page }) => {
+    await mockApi(page);
+    await page.goto("/ui/admin/mcp-servers/bundles/e0000000-0000-4000-8000-0000000000ff");
+    await expect(page.getByRole("alert")).toContainText("No such bundle");
+    await expect(page.getByRole("button", { name: "Retry" })).toHaveCount(0);
+  });
+
+  test("at 375 px nothing is clipped: the tool picker and the grants table stay inside their cards", async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 900 });
+    await mockApi(page);
+    const inside = async (c: ReturnType<typeof card>) => {
+      const box = (await c.first().boundingBox())!;
+      for (const b of await c.first().getByRole("button").all()) {
+        if (!(await b.isVisible())) continue;
+        const r = (await b.boundingBox())!;
+        expect(r.x + r.width, `${await b.textContent()} inside the card`).toBeLessThanOrEqual(box.x + box.width + 0.5);
+        // no clipped label: a text button's text fits it (the icon-only (i) buttons have no label to clip)
+        const label = (await b.textContent())?.trim();
+        if (label) expect(await b.evaluate((el) => el.scrollWidth <= el.clientWidth + 1), `${label} not clipped`).toBe(true);
+      }
+    };
+    await page.goto(`/ui/admin/mcp-servers/bundles/${B1}`);
+    await expect(card(page, "Held by").getByRole("row").filter({ hasText: "bo@example.test" })).toContainText("Ada Admin");
+    await inside(card(page, "Held by"));
+    await page.goto("/ui/admin/mcp-servers/bundles");
+    await page.getByRole("form", { name: "New bundle" }).getByLabel("Add tools from server", { exact: true }).selectOption(SRV);
+    await expect(page.getByRole("button", { name: "Flag dangerous: read_file" })).toBeVisible();
+    await inside(card(page, "New bundle"));
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   });
 });

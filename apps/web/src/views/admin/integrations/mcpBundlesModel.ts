@@ -102,12 +102,6 @@ export function holderOf(g: BundleGrant): { kind: SubjectKind; label: string } {
 /** the POST body: exactly one subject, and the tier */
 export const grantBody = (kind: SubjectKind, id: string, maxTier: Tier) => ({ [`${kind}Id`]: id, maxTier });
 
-/** the refusal codes the screen answers with its own next step; the rest show the gateway's sentence */
-export const REFUSAL_HINT: Readonly<Record<string, string>> = {
-  version_conflict: "Reload the bundle and make your change again.",
-  approver_required: "Name an approver under Details first.",
-};
-
 /** the gateway's `error` code on a refused call, or null */
 export function refusalCode(e: unknown): string | null {
   const p = (e as { payload?: { error?: unknown } } | null)?.payload;

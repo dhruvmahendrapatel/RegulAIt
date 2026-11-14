@@ -11,13 +11,15 @@ import { api } from "../../../api/client";
 import { fmtAt, plural } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
-import { Badge, Button, Card, ConfirmModal, EmptyState, Field, IdChip, Input, RowActions, Select, Table, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, Field, IdChip, Input, RecordError, RowActions, Select, Table, type Tone } from "../../../ui/kit";
+import { FoldTable } from "../../../ui/fold";
 import { SubpageTrail } from "../../../ui/ListPreview";
+import { RefusalNotice } from "../../../ui/RefusalNotice";
+import type { RefusalGuidance } from "../../../api/refusals";
 import { optionEls, QueryGate, roleOpts, serverOpts, teamOpts, useAction, useRoles, useServers, useServerTools, useTeams, useUsers, userOpts } from "../adminKit";
 import { OrgSettingsCard } from "../settings/OrgSettingsCard";
 import {
   MAX_ITEMS,
-  REFUSAL_HINT,
   TIERS,
   diffItems,
   grantBody,
@@ -55,15 +57,22 @@ function useCodedAction() {
   return { ...act, code, run };
 }
 
-function Refused(props: { act: { error: string | null; code?: string | null }; children?: ReactNode }) {
-  if (!props.act.error) return null;
-  return (
+/** a refusal the person resolves elsewhere is the kit RefusalNotice; any other shows the gateway's own sentence inline */
+function Refused(props: { act: { error: string | null; guidance: RefusalGuidance | null }; children?: ReactNode }) {
+  if (props.act.guidance) return <RefusalNotice guidance={props.act.guidance} />;
+  return props.act.error ? (
     <div className={v.errLine} role="alert">
-      {props.act.error} {props.act.code && REFUSAL_HINT[props.act.code]}
-      {props.children}
+      {props.act.error} {props.children}
     </div>
-  );
+  ) : null;
 }
+
+/** the org setting is off: informational, not an error */
+const OffNote = (p: { children: ReactNode }) => (
+  <p role="note" className={v.hint} data-testid="bundles-off">
+    MCP bundles are off: {p.children}
+  </p>
+);
 
 function useNames() {
   const users = useUsers();
@@ -81,7 +90,7 @@ function Confirm(props: { label: string; title: string; body: string; onConfirm:
   const [open, setOpen] = useState(false);
   return (
     <>
-      <Button size="sm" variant="ghost" aria-label={props.title.slice(0, -1)} disabled={act.busy} onClick={() => setOpen(true)}>
+      <Button size="sm" variant="ghost" aria-label={props.title.slice(0, -1)} aria-disabled={act.busy} onClick={() => !act.busy && setOpen(true)}>
         {props.label}
       </Button>
       <Refused act={act} />
@@ -100,19 +109,17 @@ function Confirm(props: { label: string; title: string; body: string; onConfirm:
 
 // ---- the list ----------------------------------------------------------------
 
+const listFn = () => api.get<BundleList>("/v1/mcp-bundles");
+
 export function McpBundlesPage() {
-  const list = useQuery({ queryKey: KEY, queryFn: () => api.get<BundleList>("/v1/mcp-bundles") });
+  const list = useQuery({ queryKey: KEY, queryFn: listFn });
   return (
     <>
       <SubpageTrail parent="MCP servers" parentTo="/admin/mcp-servers" current="MCP bundles" />
       <PageHeader title="MCP bundles" sub="Exact tools granted to a person, role or team as one unit." />
       <div className={v.stack}>
         <QueryGate loading={list.isLoading} error={list.error} onRetry={() => void list.refetch()}>
-          {list.data && !list.data.enabled && (
-            <p role="note" className={v.errLine} data-testid="bundles-off">
-              MCP bundles are off: nothing can be created or granted, and no bundle grant gives a tool.
-            </p>
-          )}
+          {list.data && !list.data.enabled && <OffNote>nothing can be created or granted, and no bundle grant gives a tool.</OffNote>}
           <Card title="Bundles">
             <Table
               columns={[
@@ -152,6 +159,7 @@ function NewBundleCard() {
         className={v.stack}
         onSubmit={(e) => {
           e.preventDefault();
+          if (act.busy) return;
           let id = "";
           void act
             .run(async () => {
@@ -168,7 +176,7 @@ function NewBundleCard() {
         </div>
         <ToolPicker items={items} onChange={setItems} names={names} />
         <div className={v.row}>
-          <Button type="submit" variant="primary" disabled={act.busy}>
+          <Button type="submit" variant="primary" aria-disabled={act.busy}>
             Create bundle
           </Button>
           <Refused act={act} />
@@ -201,7 +209,7 @@ function ToolPicker(props: { items: BundleItem[]; onChange: (items: BundleItem[]
         </Select>
       </Field>
       {serverId && (
-        <Table<InventoryTool>
+        <FoldTable<InventoryTool>
           columns={[
             {
               key: "pick",
@@ -212,6 +220,8 @@ function ToolPicker(props: { items: BundleItem[]; onChange: (items: BundleItem[]
                 return (
                   <input
                     type="checkbox"
+                    // a native box (the kit has none), sized to the 24 px target
+                    className={a.check}
                     aria-label={`Include ${t.name}`}
                     checked={on}
                     disabled={!on && props.items.length >= MAX_ITEMS}
@@ -221,7 +231,7 @@ function ToolPicker(props: { items: BundleItem[]; onChange: (items: BundleItem[]
               },
             },
             { key: "name", header: "Tool", render: (t) => <span className={v.mono}>{t.name}</span> },
-            { key: "tier", header: "Scope tier", render: (t) => <DangerCell tool={t} /> },
+            { key: "tier", header: "Scope tier", fold: { sm: "name" }, render: (t) => <DangerCell tool={t} /> },
           ]}
           rows={tools.data?.tools as InventoryTool[] | undefined}
           rowKey={(t) => t.name}
@@ -255,10 +265,11 @@ function DangerCell(props: { tool: InventoryTool }) {
         size="sm"
         variant="ghost"
         type="button"
-        disabled={act.busy}
-        aria-label={`${d ? "Clear dangerous flag" : "Flag dangerous"}: ${props.tool.name}`}
+        aria-disabled={act.busy}
+        // the name starts with the visible label (WCAG 2.5.3)
+        aria-label={`${d ? "Clear flag" : "Flag dangerous"}: ${props.tool.name}`}
         // flagging tightens; clearing relaxes, so the gateway asks for a step-up
-        onClick={() => void act.run(() => withStepUp((h) => stepUpApi.put(`/v1/mcp-tools/${props.tool.id}/dangerous`, { dangerous: !d }, h)), `${props.tool.name} saved`)}
+        onClick={() => !act.busy && void act.run(() => withStepUp((h) => stepUpApi.put(`/v1/mcp-tools/${props.tool.id}/dangerous`, { dangerous: !d }, h)), `${props.tool.name} saved`)}
      >
         {d ? "Clear flag" : "Flag dangerous"}
       </Button>
@@ -298,6 +309,8 @@ function ItemsTable(props: { items: Array<BundleItem & { serverName?: string | n
 export function McpBundlePage() {
   const id = useParams().bundleId ?? "";
   const q = useQuery({ queryKey: [...KEY, id], queryFn: () => api.get<BundleDetail>(`/v1/mcp-bundles/${id}`) });
+  // the list read carries the org setting; the same query key, so a list already loaded is not read again
+  const off = useQuery({ queryKey: KEY, queryFn: listFn }).data?.enabled === false;
   const names = useNames();
   const [viewing, setViewing] = useState<number | null>(null);
   const b = q.data;
@@ -319,11 +332,14 @@ export function McpBundlePage() {
         }
       />
       <div className={v.stack}>
-        <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+        {/* a 404 is "No such bundle" with no Retry, a 403 the access message (RecordError) */}
+        {q.error && <RecordError noun="bundle" error={q.error} onRetry={() => void q.refetch()} />}
+        <QueryGate loading={q.isLoading} error={null} onRetry={() => void q.refetch()}>
           {b && (
             <>
-              <DetailsCard key={b.updatedAt} b={b} names={names} />
-              <ToolsCard key={b.currentVersion} b={b} names={names} onReload={() => void q.refetch()} />
+              {off && <OffNote>nothing can be changed or granted; revoking and archiving still work.</OffNote>}
+              <DetailsCard key={b.updatedAt} b={b} names={names} off={off} />
+              <ToolsCard key={b.currentVersion} b={b} names={names} off={off} onReload={() => void q.refetch()} />
               <Card title="Version history">
                 <Table
                   columns={[
@@ -337,7 +353,7 @@ export function McpBundlePage() {
                 />
                 {viewing != null && <VersionView id={id} n={viewing} names={names} />}
               </Card>
-              <GrantsCard b={b} names={names} />
+              <GrantsCard b={b} names={names} off={off} />
             </>
           )}
         </QueryGate>
@@ -346,8 +362,9 @@ export function McpBundlePage() {
   );
 }
 
-function DetailsCard(props: { b: BundleDetail; names: Names }) {
+function DetailsCard(props: { b: BundleDetail; names: Names; off: boolean }) {
   const act = useCodedAction();
+  const blocked = !!props.b.archivedAt || props.off;
   const [description, setDescription] = useState(props.b.description ?? "");
   const [approver, setApprover] = useState(props.b.approverUserId ?? "");
   return (
@@ -366,6 +383,7 @@ function DetailsCard(props: { b: BundleDetail; names: Names }) {
         className={a.formRow}
         onSubmit={(e) => {
           e.preventDefault();
+          if (act.busy || blocked) return;
           // naming a different approver relaxes the bundle: the gateway asks for a step-up
           void act.run(
             () => withStepUp((h) => stepUpApi.patch(`/v1/mcp-bundles/${props.b.id}`, { description: description || null, approverUserId: approver || null }, h)),
@@ -377,16 +395,21 @@ function DetailsCard(props: { b: BundleDetail; names: Names }) {
           <Input maxLength={1000} value={description} onChange={(e) => setDescription(e.target.value)} />
         </Field>
         <ApproverField value={approver} onChange={setApprover} names={props.names} />
-        <Button type="submit" size="sm" disabled={act.busy || !!props.b.archivedAt}>
+        <Button type="submit" size="sm" aria-disabled={act.busy || blocked} aria-describedby={props.off ? "bundle-off-why" : undefined}>
           Save details
         </Button>
+        {props.off && (
+          <span id="bundle-off-why" className={v.hint}>
+            Off while MCP bundles are off.
+          </span>
+        )}
         <Refused act={act} />
       </form>
     </Card>
   );
 }
 
-function ToolsCard(props: { b: BundleDetail; names: Names; onReload: () => void }) {
+function ToolsCard(props: { b: BundleDetail; names: Names; off: boolean; onReload: () => void }) {
   const act = useCodedAction();
   const [draft, setDraft] = useState<BundleItem[] | null>(null);
   const { b } = props;
@@ -395,7 +418,7 @@ function ToolsCard(props: { b: BundleDetail; names: Names; onReload: () => void 
   return (
     <Card
       title={`Tools in version ${b.currentVersion}`}
-      actions={!draft && !b.archivedAt && <Button size="sm" onClick={() => setDraft(b.items.map(({ serverId, toolName }) => ({ serverId, toolName })))}>Change tools</Button>}
+      actions={!draft && !b.archivedAt && !props.off && <Button size="sm" onClick={() => setDraft(b.items.map(({ serverId, toolName }) => ({ serverId, toolName })))}>Change tools</Button>}
    >
       {draft ? (
         <form
@@ -403,6 +426,7 @@ function ToolsCard(props: { b: BundleDetail; names: Names; onReload: () => void 
           className={v.stack}
           onSubmit={(e) => {
             e.preventDefault();
+            if (act.busy) return;
             void act.run(
               () => withStepUp((h) => stepUpApi.put(`/v1/mcp-bundles/${b.id}/items`, { expectedVersion: b.currentVersion, items: draft }, h)),
               `Version ${next} saved`,
@@ -415,7 +439,7 @@ function ToolsCard(props: { b: BundleDetail; names: Names; onReload: () => void 
             {d.added > 0 && " Adding asks for a step-up."}
           </p>
           <div className={v.row}>
-            <Button type="submit" variant="primary" disabled={act.busy || d.added + d.removed === 0}>
+            <Button type="submit" variant="primary" aria-disabled={act.busy} disabled={d.added + d.removed === 0}>
               Save version {next}
             </Button>
             <Button type="button" onClick={() => setDraft(null)}>
@@ -449,7 +473,7 @@ function VersionView(props: { id: string; n: number; names: Names }) {
   );
 }
 
-function GrantsCard(props: { b: BundleDetail; names: Names }) {
+function GrantsCard(props: { b: BundleDetail; names: Names; off: boolean }) {
   const id = props.b.id;
   const grants = useQuery({ queryKey: [...KEY, id, "grants"], queryFn: () => api.get<{ grants: BundleGrant[] }>(`/v1/mcp-bundles/${id}/grants`) });
   const roles = useRoles();
@@ -462,12 +486,13 @@ function GrantsCard(props: { b: BundleDetail; names: Names }) {
   const opts = kind === "user" ? userOpts(props.names.users.data?.users) : kind === "role" ? roleOpts(roles.data?.roles) : teamOpts(teams.data?.teams);
   return (
     <Card title="Held by" info={<p>Each person's own revocations still apply.</p>}>
-      {!props.b.archivedAt && (
+      {!props.b.archivedAt && !props.off && (
         <form
           aria-label="Grant this bundle"
           className={a.formRow}
           onSubmit={(e) => {
             e.preventDefault();
+            if (act.busy) return;
             void act.run(() => api.post(`/v1/mcp-bundles/${id}/grants`, grantBody(kind, subject, tier)), "Bundle granted").then((ok) => ok && setSubject(""));
           }}
        >
@@ -492,25 +517,27 @@ function GrantsCard(props: { b: BundleDetail; names: Names }) {
               {optionEls([...TIERS])}
             </Select>
           </Field>
-          <Button type="submit" size="sm" disabled={act.busy}>
+          <Button type="submit" size="sm" aria-disabled={act.busy}>
             Grant
           </Button>
           <Refused act={act} />
         </form>
       )}
-      <Table
+      <FoldTable
         columns={[
           { key: "holder", header: "Holder", render: (g) => `${holderOf(g).label} (${KIND[holderOf(g).kind].toLowerCase()})` },
-          { key: "tier", header: "Up to", render: (g) => <Badge tone={TIER_TONE[g.maxTier]}>{tierLabel(g.maxTier)}</Badge> },
-          { key: "by", header: "Granted by", render: (g) => props.names.user(g.grantedBy) },
-          { key: "at", header: "Granted", render: (g) => fmtAt(g.createdAt) },
+          { key: "tier", header: "Up to", fold: { sm: "holder" }, render: (g) => <Badge tone={TIER_TONE[g.maxTier]}>{tierLabel(g.maxTier)}</Badge> },
+          { key: "by", header: "Granted by", fold: { md: "holder" }, render: (g) => props.names.user(g.grantedBy) },
+          { key: "at", header: "Granted", fold: { md: "holder" }, render: (g) => fmtAt(g.createdAt) },
           {
             key: "actions",
             header: "",
             srHeader: "Actions",
             render: (g) => (
+              // X7: a destructive action never takes the primary slot, which stays empty
               <RowActions
-                primary={
+                slot="0"
+                rest={
                   <Confirm
                     label="Revoke"
                     title={`Revoke ${holderOf(g).label}'s grant of ${props.b.name}?`}
