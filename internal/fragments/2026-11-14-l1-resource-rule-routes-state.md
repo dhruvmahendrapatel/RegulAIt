@@ -1,0 +1,2 @@
+<!-- fold: state-recap -->
+**2026-11-14 - P-01 remainder, slice 2: admin routes for the governed core's resource rules ([ADR-0251](../decisions/0251-one-governed-decision-core.md) "As built", lane L1; no migration).** `GET/POST /v1/rules/resource/approval-rules` and `/v1/rules/resource/rate-limits`, plus PATCH and DELETE on each: admin only, a `settings_relax` step-up for every removal or loosening, audited old and new in the same transaction. API-first: eight known UI gaps on #453 for the design builder.

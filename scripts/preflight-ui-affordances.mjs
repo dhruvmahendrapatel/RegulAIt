@@ -50,6 +50,10 @@ export const DELIBERATELY_API_ONLY = new Map([
   // two entries are deleted when it does (KNOWN_UI_GAPS in preflight-ui-route-census.mjs holds the same routes).
   ["/v1/mcp-bundles/:x", "archiving an MCP bundle: API-only until the bundle screen on #453 (owner decision 2026-11-07, #697)"],
   ["/v1/mcp-bundles/:x/grants/:x", "revoking an MCP bundle grant: API-only until the bundle screen on #453 (owner decision 2026-11-07, #697)"],
+  // ADR-0251 (P-01, lane L1, orchestrator brief 2026-11-14): API-first until the design builder's screen on #453
+  // (KNOWN_UI_GAPS in preflight-ui-route-census.mjs holds the same routes).
+  ["/v1/rules/resource/approval-rules/:x", "removing a governed-core approval rule (settings_relax step-up): API-only until the screen on #453"],
+  ["/v1/rules/resource/rate-limits/:x", "removing a governed-core rate limit (settings_relax step-up): API-only until the screen on #453"],
 ]);
 
 /**
