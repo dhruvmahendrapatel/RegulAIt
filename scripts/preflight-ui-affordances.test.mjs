@@ -101,6 +101,9 @@ describe("affordance census: a notBuilt route counts only when the file defines 
       "/v1/mcp/authorised-targets/:x",
       "/v1/mcp-bundles/:x",
       "/v1/mcp-bundles/:x/grants/:x",
+      // lane L2 (ADR-0219 follow-up): remote-agent role grant and revocation removal, until the controls on #453
+      "/v1/a2a/agents/:x/role-grants/:x",
+      "/v1/a2a/agents/:x/revocations/:x",
     ]);
   });
 });
