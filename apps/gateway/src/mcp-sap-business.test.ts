@@ -296,6 +296,29 @@ describe("ADR-0230 A2: an SAP business server is approve-first", () => {
     expect((await lastAudit(SAP_BUSINESS_RULE_IDS.marked, serverId))?.detail).toMatchObject({ approvalRuleReused: true, rateLimitReused: true });
   });
 
+  it("security review #798: a deploy-mode-scoped row is never reused as the default; a fresh unscoped pair is seeded", async () => {
+    const scoped = await mkServer("scoped");
+    await db.insert(approvalRules).values({ scope: "fleet", serverScope: "server", serverId: scoped, toolName: null, writeOnly: true, approvalScope: "action", approverUserId: adminId, approverRoleId: roleId, quorum: 2, deployMode: "byoc" });
+    await db.insert(rateLimits).values({ scope: "fleet", serverScope: "server", serverId: scoped, toolName: null, writeOnly: true, maxCalls: 10, windowSeconds: 3600, deployMode: "byoc" });
+    const r = await app.inject({ method: "POST", url: `/v1/servers/${scoped}/system-class`, headers: adminKey, payload: { systemClass: "sap_business", approverRoleId: roleId } });
+    expect(r.statusCode, r.body).toBe(201);
+    expect(r.json().approvalRule.deployMode).toBeNull();
+    expect(r.json().rateLimit.deployMode).toBeNull();
+    expect((await lastAudit(SAP_BUSINESS_RULE_IDS.marked, scoped))?.detail).toMatchObject({ approvalRuleReused: false, rateLimitReused: false });
+  });
+
+  it("security review #798: a re-mark naming another approver role seeds a fresh rule, and the audit names the pool in force", async () => {
+    const [other] = await db.insert(roles).values({ name: `sap approvers 2 ${RUN}` }).returning({ id: roles.id });
+    for (const u of [approverB]) await db.insert(roleAssignments).values({ userId: u, roleId: other!.id });
+    const off = await app.inject({ method: "DELETE", url: `/v1/servers/${serverId}/system-class`, ...stepUpRequest(await grantStepUpForTest(db, adminId, { kind: "settings_relax", facts: { serverId, values: { mcpSystemClass: null } } })) });
+    expect(off.statusCode, off.body).toBe(200);
+    const r = await app.inject({ method: "POST", url: `/v1/servers/${serverId}/system-class`, headers: adminKey, payload: { systemClass: "sap_business", approverRoleId: other!.id } });
+    expect(r.statusCode, r.body).toBe(201);
+    expect(r.json().approvalRule.approverRoleId).toBe(other!.id);
+    const audit = await lastAudit(SAP_BUSINESS_RULE_IDS.marked, serverId);
+    expect(audit?.detail).toMatchObject({ approvalRuleReused: false, rateLimitReused: true, approverRoleId: other!.id, approverUserId: adminId });
+  });
+
   it("review #798: an approver role that does not exist is a clean 4xx, and nothing changes", async () => {
     const other = await mkServer("norole");
     const r = await app.inject({ method: "POST", url: `/v1/servers/${other}/system-class`, headers: adminKey, payload: { systemClass: "sap_business", approverRoleId: crypto.randomUUID() } });
