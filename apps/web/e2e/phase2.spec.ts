@@ -665,8 +665,12 @@ test("infrastructure: posture, set approver, propose a governed remediation", as
 test("organization: the six-section org settings form saves partially", async () => {
   await nav("Organization", "Organization");
   await expect(page.getByText("1 · Optimisation", { exact: false })).toBeVisible();
+  // the sections sit in tabs (I-2): each save is on its own tab
+  const tabs = page.getByRole("tablist", { name: "Organisation settings" });
+  await tabs.getByRole("tab", { name: /^Approvals & gates/ }).click();
   await page.getByRole("button", { name: "Save approval policy" }).click();
   await expect(page.getByText("Approval policy saved", { exact: false }).first()).toBeVisible();
+  await tabs.getByRole("tab", { name: /^Cost & limits/ }).click();
   await page.getByRole("button", { name: "Save optimization settings" }).click();
   await expect(page.getByText("Optimization settings saved", { exact: false }).first()).toBeVisible();
   await shot(page, "phase2-27-organization");
