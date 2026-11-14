@@ -15,10 +15,13 @@
  *      person can call one until an admin grants it (the existing default-deny).
  *   2. UNMARKING (`DELETE`) drops the project requirement below: a settings_relax step-up bound to the server, audited.
  *      The seeded rows stay; they are ordinary rules.
- *   3. THE PROJECT REQUIREMENT (`sapWriteRefusal`, called by the proxy before the kernel decision): a write to an SAP
+ *   3. THE PROJECT REQUIREMENT (`sapWriteRefusal`, called by the proxy after the entitlement decision): a write to an SAP
  *      business server must be attributed to a live project with a budget. Unattributed, unknown, archived or
  *      unbudgeted is refused (`sap-write-needs-project`), audited, and not costed. The existing project budget gate
  *      then applies to the attributed call as to any other.
+ *
+ * On an SAP business server every tool is a write (the proxy ignores the upstream's `readOnlyHint`, review #798), so
+ * the rule, the limit and the requirement below cannot be skipped by a manifest that calls a posting tool read-only.
  *
  * Out of this slice (ADR-0230 A2, blocked on slice A0): identity release, subject-token retention and the
  * confirm-by-fresh-step-up execution state.
@@ -26,7 +29,7 @@
 import { createHmac, hkdfSync } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { and, approvalRules, auditLog, eq, gte, isNull, mcpServers, projects, rateLimits, sql, type Db } from "@regulait/db";
+import { and, approvalRules, auditLog, eq, gte, isNull, lte, mcpServers, projects, rateLimits, sql, type Db } from "@regulait/db";
 import { canonicalMcpAudience, createApprovalRuleSchema } from "@regulait/shared";
 import { pairwiseSubject } from "./delegated-token.js";
 import { identitySecretsFor } from "./oauth/common.js";
@@ -135,6 +138,48 @@ async function seededDefaults(db: Db, serverId: string): Promise<{ approvalRuleI
   return { approvalRuleIds: rules.map((r) => r.id), rateLimitIds: limits.map((l) => l.id) };
 }
 
+/**
+ * The seeded rows still at (or stricter than) the defaults, for a re-mark to reuse. Read inside the marking
+ * transaction, under the server row's lock. A rule with a lower quorum or `tool` scope, or a limit with more calls or
+ * a shorter window, is not reused: the new seeded row then applies beside it (strictest wins).
+ */
+async function seededDefaultRows(
+  tx: Db,
+  serverId: string,
+): Promise<{ approvalRule: typeof approvalRules.$inferSelect | null; rateLimit: typeof rateLimits.$inferSelect | null }> {
+  const [rule] = await tx
+    .select()
+    .from(approvalRules)
+    .where(
+      and(
+        eq(approvalRules.serverId, serverId),
+        eq(approvalRules.serverScope, "server"),
+        eq(approvalRules.scope, "fleet"),
+        isNull(approvalRules.toolName),
+        eq(approvalRules.writeOnly, true),
+        eq(approvalRules.approvalScope, "action"),
+        gte(approvalRules.quorum, SAP_BUSINESS_DEFAULTS.quorum),
+      ),
+    )
+    .limit(1);
+  const [limit] = await tx
+    .select()
+    .from(rateLimits)
+    .where(
+      and(
+        eq(rateLimits.serverId, serverId),
+        eq(rateLimits.serverScope, "server"),
+        eq(rateLimits.scope, "fleet"),
+        isNull(rateLimits.toolName),
+        eq(rateLimits.writeOnly, true),
+        lte(rateLimits.maxCalls, SAP_BUSINESS_DEFAULTS.maxCalls),
+        gte(rateLimits.windowSeconds, SAP_BUSINESS_DEFAULTS.windowSeconds),
+      ),
+    )
+    .limit(1);
+  return { approvalRule: rule ?? null, rateLimit: limit ?? null };
+}
+
 const serverParam = z.object({ serverId: z.string().uuid() }).strict();
 export const markSapBusinessSchema = z
   .object({
@@ -185,19 +230,26 @@ export function registerMcpSapBusinessRoutes(app: FastifyInstance, db: Db): void
         if (!server) return null;
         if (server.systemClass === "sap_business") throw new AlreadyMarked(server.name);
         await tx.update(mcpServers).set({ systemClass: "sap_business" }).where(eq(mcpServers.id, serverId));
-        const approval = await createApprovalRuleRow(tx, rule);
-        const [limit] = await tx
-          .insert(rateLimits)
-          .values({
-            scope: "fleet",
-            serverScope: "server",
-            serverId,
-            toolName: null,
-            writeOnly: true,
-            maxCalls: SAP_BUSINESS_DEFAULTS.maxCalls,
-            windowSeconds: SAP_BUSINESS_DEFAULTS.windowSeconds,
-          })
-          .returning();
+        // review #798: a re-mark (mark, unmark, mark) reuses the rows the first mark seeded while they still hold the
+        // defaults, instead of seeding a second pair; a row someone relaxed since is not reused, so the new one is seeded
+        const kept = await seededDefaultRows(tx, serverId);
+        const approval = kept.approvalRule ?? (await createApprovalRuleRow(tx, rule));
+        const limit =
+          kept.rateLimit ??
+          (
+            await tx
+              .insert(rateLimits)
+              .values({
+                scope: "fleet",
+                serverScope: "server",
+                serverId,
+                toolName: null,
+                writeOnly: true,
+                maxCalls: SAP_BUSINESS_DEFAULTS.maxCalls,
+                windowSeconds: SAP_BUSINESS_DEFAULTS.windowSeconds,
+              })
+              .returning()
+          )[0];
         await tx.insert(auditLog).values({
           userId: adminId,
           serverId,
@@ -209,6 +261,8 @@ export function registerMcpSapBusinessRoutes(app: FastifyInstance, db: Db): void
             via: req.authCtx.via,
             systemClass: "sap_business",
             approvalRuleId: approval.id,
+            approvalRuleReused: kept.approvalRule !== null,
+            rateLimitReused: kept.rateLimit !== null,
             approverRoleId: body.approverRoleId,
             rateLimitId: limit!.id,
             quorum: SAP_BUSINESS_DEFAULTS.quorum,
@@ -328,12 +382,31 @@ export interface SapCallFacts {
 export type SapWritePreparation =
   | { kind: "not_sap" }
   | { kind: "prepared"; arguments: Record<string, unknown>; facts: SapCallFacts }
-  | { kind: "refused"; ruleId: string; reason: string };
+  | { kind: "refused"; ruleId: string; reason: string; detail: Record<string, unknown> };
+
+/** The audit row of a held SAP preparation refusal, written when it is the call's answer. */
+export async function recordSapRefusal(
+  db: Db,
+  call: { userId: string; serverId: string; toolName: string; toolKind: "read" | "write"; projectId: string | null },
+  refusal: { ruleId: string; reason: string; detail: Record<string, unknown> },
+): Promise<void> {
+  await db.insert(auditLog).values({
+    userId: call.userId,
+    serverId: call.serverId,
+    toolName: call.toolName,
+    detail: { phase: "sap-business", toolKind: call.toolKind, projectId: call.projectId, receiptClass: "decision", ...refusal.detail },
+    effect: "deny",
+    ruleId: refusal.ruleId,
+    ruleChain: [],
+    reason: refusal.reason,
+  });
+}
 
 /**
  * Before the decision: an SAP business write must carry a UUID `idempotencyKey`. The gateway replaces it with the
  * stored key, so the approval's payload binding (ADR-0104) covers the stored key and the upstream never sees the
- * caller's. A stored key used before (within the retention) with OTHER arguments is refused. Every refusal is audited.
+ * caller's. A stored key used before (within the retention) with OTHER arguments is refused. A refusal is returned for
+ * the proxy to hold until after the entitlement decision, then audited (`recordSapRefusal`).
  */
 export async function prepareSapWrite(
   db: Db,
@@ -349,19 +422,14 @@ export async function prepareSapWrite(
   },
 ): Promise<SapWritePreparation> {
   if (call.server.systemClass !== "sap_business" || call.toolKind !== "write") return { kind: "not_sap" };
-  const refuse = async (ruleId: string, reason: string, extra: Record<string, unknown> = {}): Promise<SapWritePreparation> => {
-    await db.insert(auditLog).values({
-      userId: call.userId,
-      serverId: call.server.id,
-      toolName: call.toolName,
-      detail: { phase: "sap-business", toolKind: call.toolKind, projectId: call.projectId, receiptClass: "decision", ...extra },
-      effect: "deny",
-      ruleId,
-      ruleChain: [],
-      reason,
-    });
-    return { kind: "refused", ruleId, reason };
-  };
+  // the refusal is returned, not audited: the proxy holds it until after the entitlement decision (review #798) and
+  // audits it with `recordSapRefusal` only if it is the call's answer
+  const refuse = async (ruleId: string, reason: string, extra: Record<string, unknown> = {}): Promise<SapWritePreparation> => ({
+    kind: "refused",
+    ruleId,
+    reason,
+    detail: extra,
+  });
   const callerKey = call.arguments?.[SAP_IDEMPOTENCY_ARGUMENT];
   if (typeof callerKey !== "string" || !UUID_RE.test(callerKey)) {
     return refuse(

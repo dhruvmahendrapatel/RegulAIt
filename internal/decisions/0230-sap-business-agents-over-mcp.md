@@ -381,6 +381,18 @@ answer is a data change, not a code change).
   to an SAP business server with no project, an unknown or archived project, or a project with no budget is refused
   `sap-write-needs-project`, audited, and never reaches the upstream or the usage ledger. The existing project budget
   gate then applies to the attributed call.
+- **Review of #798 (code review, request changes):**
+  - **The upstream's `readOnlyHint` is ignored on an SAP business server.** Every tool on a marked server is a write
+    at call time (the proxy), and in the write-only window count, so a posting tool annotated read-only still needs
+    the project, the quorum approval and the rate limit. A per-server, admin-confirmed read allow-list (adding an entry
+    a stepped-up loosening) is the follow-up that lets genuine SAP reads skip them. ADR-0246 definition pinning is not
+    required for this: flipping the hint changes nothing on a marked server. Pinning still blocks other changed
+    definitions under its own mode.
+  - **The project requirement runs after the entitlement decision.** A caller the kernel refuses gets that refusal
+    and learns nothing about the server's class.
+  - **A re-mark reuses the seeded rows** while they still hold the defaults (quorum at least 2 and `action` scope;
+    at most 10 calls in at least an hour). A relaxed row is not reused, so a new seeded row applies beside it.
+  - **An approver role that does not exist** is refused by the ADR-0186 pool guard with a 4xx, and nothing changes.
 - **Not built here**: `identity_release`, `subject_token_retention`, the `approved_pending_execution` state and option
   (b)'s SAP-trust key need slice A0 (owner-blocked). The HMAC idempotency key and the A3 audit and usage detail are the
   lane's second PR.
@@ -406,6 +418,8 @@ answer is a data change, not a code change).
   result contract `structuredContent.businessDocument`. Each field is shape-checked and anything else is dropped, so
   SAP's error text, prices and addresses never reach the audit. Service and entity set come from a gateway table for
   known tools (`create_sales_order` → `API_SALES_ORDER_SRV` / `A_SalesOrder`), else from the result.
+- **Refusals after entitlement**: a key refusal is held and returned only after the entitlement decision, as the
+  project requirement is (review #798), and audited only when it is the call's answer.
 - **Replays are not charged**: a result with `replayed: true` writes its usage row with cost 0 (and settles 0 along a
   delegation chain).
 - **Contract for slice A1** (regulAIt-ABAP): return `structuredContent.businessDocument` with `documentNumber`,

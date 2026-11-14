@@ -730,10 +730,11 @@ export async function governedEvaluate(
     if (l.toolName) conditions.push(eq(auditLog.toolName, l.toolName));
     // ADR-0230 A2: a write-only limit counts write calls only. A row counts unless its tool is known to be a READ
     // tool on that server: a tool missing from the inventory counts, the conservative reading (an unannotated tool
-    // is a write, mcp-proxy.ts `toolKind`).
+    // is a write, mcp-proxy.ts `toolKind`), and so does every tool of an SAP business server.
     if (l.writeOnly) {
       conditions.push(
-        sql`NOT EXISTS (SELECT 1 FROM ${mcpTools} WHERE ${mcpTools.serverId} = ${auditLog.serverId} AND ${mcpTools.name} = ${auditLog.toolName} AND ${mcpTools.kind} = 'read')`,
+        // ADR-0230 (review #798): a tool on an SAP business server is a write whatever its row says, as at call time
+        sql`NOT EXISTS (SELECT 1 FROM ${mcpTools} JOIN ${mcpServers} ON ${mcpServers.id} = ${mcpTools.serverId} WHERE ${mcpTools.serverId} = ${auditLog.serverId} AND ${mcpTools.name} = ${auditLog.toolName} AND ${mcpTools.kind} = 'read' AND ${mcpServers.systemClass} IS DISTINCT FROM 'sap_business')`,
       );
     }
     const [row] = await db
