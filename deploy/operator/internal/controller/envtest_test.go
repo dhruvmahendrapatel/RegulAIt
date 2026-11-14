@@ -333,6 +333,16 @@ func TestInstallUpgradeDriftAndRefusals(t *testing.T) {
 	if c := cond(getInst(t, name), v1alpha1.ConditionBackupConfigured); c.Reason != "BackupDisabled" {
 		t.Fatalf("disabled backup is not reported: %+v", c)
 	}
+	// The sample names no StorageClass: reported on every reconcile, but not a reason to hold Ready.
+	if c := cond(getInst(t, name), v1alpha1.ConditionStorageClassNamed); c == nil || c.Status != metav1.ConditionFalse || c.Reason != "DefaultStorageClass" {
+		t.Fatalf("default StorageClass is not reported: %+v", c)
+	}
+	updateInst(t, name, func(in *v1alpha1.RegulaitInstallation) { in.Spec.InstallSecretsStorageClassName = "encrypted-gp3" })
+	// The claim already exists on the default class and a claim's class is immutable: the mismatch is reported.
+	eventually(t, "ClaimClassDiffers", func() bool {
+		c := cond(getInst(t, name), v1alpha1.ConditionStorageClassNamed)
+		return c != nil && c.Status == metav1.ConditionFalse && c.Reason == "ClaimClassDiffers"
+	})
 
 	// Drift: someone swaps the image and adds a privileged flag; the operator puts both back and counts it.
 	d := &appsv1.Deployment{}

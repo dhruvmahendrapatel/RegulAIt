@@ -175,6 +175,9 @@ const (
 	ConditionEgressRestricted = "EgressRestricted"
 	ConditionAvailable        = "Available"
 	ConditionReady            = "Ready"
+	// ConditionStorageClassNamed is informational and not part of Ready: False when the operator creates the
+	// install-secrets claim on the cluster's default StorageClass, whose encryption at rest the operator cannot see.
+	ConditionStorageClassNamed = "StorageClassNamed"
 )
 
 // RegulaitInstallationStatus is the observed state.

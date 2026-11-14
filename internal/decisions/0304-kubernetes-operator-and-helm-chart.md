@@ -196,6 +196,10 @@ touches a cloud account.
 - Events go through the `events.k8s.io/v1` recorder, and the Role grants `events.k8s.io` rather than core events.
 - Bundle parsing refuses a manifest that repeats a top-level key. The shell verifier reads the first occurrence and
   `encoding/json` the last, so a duplicated `version` could otherwise mean two things.
+- An informational `StorageClassNamed` condition (not part of `Ready`) and a `Warning` event on every reconcile report
+  an install-secrets claim on the cluster's default StorageClass, or one created on a class other than the one now
+  named. This follows the security review's note on #792, so an unencrypted default class is visible, not only
+  documented.
 - Versions are compared with `golang.org/x/mod/semver`. Unlike the shell verifier, it orders a pre-release below its
   release, so `1.0.0-rc.1` after `1.0.0` is a downgrade. That is stricter, and it is deliberate.
 - The gateway gains `migrate-job.ts`, a thin entrypoint over a testable `migrate-job-run.ts`. It refuses to run without
