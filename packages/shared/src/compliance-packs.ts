@@ -55,6 +55,8 @@ import { z } from "zod";
 import { ISACA_AI_AGENTS_PACK, ISACA_AI_AGENTS_PACK_V2 } from "./isaca-pack.js";
 // ADR-0243 (P24): the OWASP MCP and LLM Top 10 packs (`owasp-packs.ts`, type-only imports back)
 import { OWASP_PACKS } from "./owasp-packs.js";
+// ADR-0295 (P18 B4): ISO/IEC 42001@2, 23894@1 and 42005@1, ID-only (`iso-packs.ts`, type-only imports back)
+import { ISO_PACKS } from "./iso-packs.js";
 // ADR-0296 part 2 (P18 B2): GDPR, CCPA, DPDP and LGPD privacy packs (`privacy-packs.ts`, type-only imports back)
 import { PRIVACY_PACKS } from "./privacy-packs.js";
 // batch B1 — a pack's cascade PRESET is validated with the SAME check every
@@ -86,6 +88,9 @@ export const COMPLIANCE_PACK_FRAMEWORKS = [
   // ADR-0243 (P24): the OWASP MCP Top 10 and the OWASP Top 10 for LLM Applications (`owasp-packs.ts`)
   "owasp-mcp-top-10",
   "owasp-llm-top-10",
+  // ADR-0295 (P18 B4): ISO/IEC 23894 and 42005, ID-only (`iso-packs.ts`)
+  "iso-23894",
+  "iso-42005",
   // ADR-0296 part 2 (P18 B2): privacy laws on the ADR-0224 machinery (`privacy-packs.ts`)
   "gdpr",
   "ccpa",
@@ -1807,6 +1812,8 @@ DEFAULT_COMPLIANCE_PACKS.push(
   ISACA_AI_AGENTS_PACK_V2,
   // ADR-0243 (P24): owasp-mcp-top-10@1, owasp-llm-top-10@1 (2025 edition) and @2 (2026 edition)
   ...OWASP_PACKS,
+  // ADR-0295 (P18 B4): iso-42001@2 (every clause and Annex A), iso-23894@1, iso-42005@1
+  ...ISO_PACKS,
   // ADR-0296 part 2 (P18 B2): gdpr@1, ccpa@1, dpdp@1, lgpd@1
   ...PRIVACY_PACKS,
 );

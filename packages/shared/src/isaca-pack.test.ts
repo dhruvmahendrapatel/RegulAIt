@@ -52,9 +52,10 @@ describe("every pack version published before S5 is unchanged (content hash)", (
   it("the new versions are exactly isaca-ai-agents@1, nist-ai-rmf@4 and eu-ai-act@3 (plus I4's isaca-ai-agents@2), and each parses", () => {
     const all = DEFAULT_COMPLIANCE_PACKS.map((p) => `${p.framework}@${p.version}`);
     // ADR-0243 (P24) adds the OWASP packs, pinned in owasp-packs.test.ts
+    // ADR-0295 (P18 B4) adds iso-42001@2, iso-23894@1 and iso-42005@1, pinned in iso-packs.test.ts;
     // ADR-0296 part 2 (P18 B2) adds gdpr@1, ccpa@1, dpdp@1 and lgpd@1, pinned in privacy-packs.test.ts
-    const privacy = new Set(["gdpr@1", "ccpa@1", "dpdp@1", "lgpd@1"]);
-    expect(all.filter((k) => !(k in PINNED) && !k.startsWith("owasp-") && !privacy.has(k)).sort()).toEqual(["eu-ai-act@3", "isaca-ai-agents@1", "isaca-ai-agents@2", "nist-ai-rmf@4"]);
+    const added = new Set(["iso-42001@2", "iso-23894@1", "iso-42005@1", "gdpr@1", "ccpa@1", "dpdp@1", "lgpd@1"]);
+    expect(all.filter((k) => !(k in PINNED) && !k.startsWith("owasp-") && !added.has(k)).sort()).toEqual(["eu-ai-act@3", "isaca-ai-agents@1", "isaca-ai-agents@2", "nist-ai-rmf@4"]);
     for (const k of ["eu-ai-act@3", "isaca-ai-agents@1", "nist-ai-rmf@4"]) {
       const [fw, v] = k.split("@");
       const res = createCompliancePackSchema.safeParse(pack(fw!, Number(v)));
