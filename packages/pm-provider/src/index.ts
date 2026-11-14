@@ -443,6 +443,34 @@ export class AzureDevOpsProvider implements PmProvider {
       comments: [],
     };
   }
+
+  /** ADR-0289: WIQL over the route's project (the `@project` macro, so the
+   * project name is never spliced into the query), ids above the cursor in
+   * ascending order, then one batch read for the types. The cursor is the
+   * last id served. */
+  async listWorkItems(project: string, page: { cursor?: string | undefined; limit: number }): Promise<WorkItemPage> {
+    const after = page.cursor === undefined ? 0 : Number(page.cursor);
+    if (!Number.isSafeInteger(after) || after < 0) throw new PmProviderError(`invalid cursor '${page.cursor}'`, 400);
+    const p = encodeURIComponent(project);
+    const found = (await this.request("POST", `/${p}/_apis/wit/wiql?$top=${page.limit}&api-version=7.1`, {
+      query: `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND [System.Id] > ${after} ORDER BY [System.Id] ASC`,
+    })) as { workItems?: Array<{ id: number }> };
+    const ids = (found.workItems ?? []).map((w) => w.id).slice(0, page.limit);
+    if (ids.length === 0) return { items: [], nextCursor: null };
+    const batch = (await this.request(
+      "GET",
+      `/${p}/_apis/wit/workitems?ids=${ids.join(",")}&fields=System.WorkItemType&api-version=7.1`,
+    )) as { value?: Array<{ id: number; fields?: Record<string, unknown> }> };
+    const typeById = new Map((batch.value ?? []).map((v) => [v.id, String(v.fields?.["System.WorkItemType"] ?? "")]));
+    return {
+      items: ids.map((id) => ({
+        id: String(id),
+        type: typeById.get(id) || "Work Item",
+        url: `${this.base}/${p}/_workitems/edit/${id}`,
+      })),
+      nextCursor: ids.length === page.limit ? String(ids[ids.length - 1]) : null,
+    };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -577,6 +605,28 @@ export class JiraProvider implements PmProvider {
         issue.fields.comment?.comments?.map((c) =>
           this.api === 3 ? adfToText(c.body) : typeof c.body === "string" ? c.body : "",
         ) ?? [],
+    };
+  }
+
+  /** ADR-0289: the enhanced JQL search (`/search/jql`, token-paged), only the
+   * issue type requested. The project key is quoted for JQL, never spliced raw. */
+  async listWorkItems(project: string, page: { cursor?: string | undefined; limit: number }): Promise<WorkItemPage> {
+    const jql = `project = "${project.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}" ORDER BY id ASC`;
+    const qs = new URLSearchParams({ jql, fields: "issuetype", maxResults: String(page.limit) });
+    if (page.cursor !== undefined) qs.set("nextPageToken", page.cursor);
+    const res = (await this.request("GET", `/rest/api/${this.api}/search/jql?${qs.toString()}`)) as {
+      issues?: Array<{ id: string; key: string; fields?: { issuetype?: { name?: string } } }>;
+      nextPageToken?: string | null;
+      isLast?: boolean;
+    };
+    const issues = res.issues ?? [];
+    return {
+      items: issues.map((i) => ({
+        id: String(i.id),
+        type: i.fields?.issuetype?.name || "Issue",
+        url: `${this.base}/browse/${i.key}`,
+      })),
+      nextCursor: res.isLast === false && res.nextPageToken ? res.nextPageToken : null,
     };
   }
 }
@@ -740,6 +790,25 @@ export class LinearProvider implements PmProvider {
       comments: data.issue.comments.nodes.map((c) => c.body),
     };
   }
+
+  /** ADR-0289: the team's issues, Relay-paged (`after` = the previous page's
+   * endCursor). Linear issues carry no native type, so every item is "Issue". */
+  async listWorkItems(project: string, page: { cursor?: string | undefined; limit: number }): Promise<WorkItemPage> {
+    const teamId = await this.teamId(project);
+    const data = await this.gql<{
+      team: { issues: { nodes: Array<{ id: string; url: string }>; pageInfo: { hasNextPage: boolean; endCursor: string | null } } };
+    }>(
+      `query TeamIssues($teamId: String!, $first: Int!, $after: String) {
+        team(id: $teamId) { issues(first: $first, after: $after) { nodes { id url } pageInfo { hasNextPage endCursor } } }
+      }`,
+      { teamId, first: page.limit, after: page.cursor ?? null },
+    );
+    const issues = data.team.issues;
+    return {
+      items: issues.nodes.map((n) => ({ id: n.id, url: n.url, type: "Issue" })),
+      nextCursor: issues.pageInfo.hasNextPage && issues.pageInfo.endCursor ? issues.pageInfo.endCursor : null,
+    };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -865,6 +934,33 @@ export class AsanaProvider implements PmProvider {
       comments: stories
         .filter((s) => s.resource_subtype === "comment_added" || s.type === "comment")
         .map((s) => s.text ?? ""),
+    };
+  }
+
+  /** ADR-0289: the project's tasks, offset-paged (Asana's `next_page.offset`,
+   * at most 100 per page). A milestone is reported as such; everything else is a Task. */
+  async listWorkItems(project: string, page: { cursor?: string | undefined; limit: number }): Promise<WorkItemPage> {
+    const qs = new URLSearchParams({ limit: String(Math.min(page.limit, 100)), opt_fields: "permalink_url,resource_subtype" });
+    if (page.cursor !== undefined) qs.set("offset", page.cursor);
+    const path = `/projects/${encodeURIComponent(project)}/tasks?${qs.toString()}`;
+    const res = await this.fetchImpl(`${this.base}${path}`, {
+      method: "GET",
+      headers: { authorization: this.auth, accept: "application/json" },
+    });
+    if (res.status >= 400) {
+      throw new PmProviderError(`asana GET ${path} failed: ${scrubSecrets(await res.text(), [this.token])}`, res.status);
+    }
+    const body = JSON.parse((await res.text()) || "{}") as {
+      data?: Array<{ gid: string; permalink_url?: string; resource_subtype?: string }>;
+      next_page?: { offset?: string } | null;
+    };
+    return {
+      items: (body.data ?? []).map((t) => ({
+        id: String(t.gid),
+        url: t.permalink_url ?? `https://app.asana.com/0/${project}/${t.gid}`,
+        type: t.resource_subtype === "milestone" ? "Milestone" : "Task",
+      })),
+      nextCursor: body.next_page?.offset ?? null,
     };
   }
 }
@@ -1050,6 +1146,34 @@ export class MondayProvider implements PmProvider {
       fields,
       comments: item.updates.map((u) => u.text_body ?? ""),
     };
+  }
+
+  /** ADR-0289: the board's items through `items_page` / `next_items_page`
+   * (cursor-paged, at most 500 per page). monday items carry no native type. */
+  async listWorkItems(project: string, page: { cursor?: string | undefined; limit: number }): Promise<WorkItemPage> {
+    const limit = Math.min(page.limit, 500);
+    type Page = { cursor: string | null; items: Array<{ id: string; url?: string | null }> };
+    let result: Page | undefined;
+    if (page.cursor === undefined) {
+      const data = await this.gql<{ boards: Array<{ items_page: Page }> }>(
+        `query BoardItems($board: ID!, $limit: Int!) { boards(ids: [$board]) { items_page(limit: $limit) { cursor items { id url } } } }`,
+        { board: project, limit },
+      );
+      result = data.boards?.[0]?.items_page;
+      if (!result) throw new PmProviderError(`monday board '${project}' not found`, 404);
+    } else {
+      const data = await this.gql<{ next_items_page: Page }>(
+        `query NextItems($cursor: String!, $limit: Int!) { next_items_page(cursor: $cursor, limit: $limit) { cursor items { id url } } }`,
+        { cursor: page.cursor, limit },
+      );
+      result = data.next_items_page;
+    }
+    const items: WorkItemSummary[] = [];
+    for (const i of result.items) {
+      const id = String(i.id);
+      items.push({ id, type: "Item", url: i.url ?? `${await this.boardUrl(project)}/pulses/${id}` });
+    }
+    return { items, nextCursor: result.cursor || null };
   }
 }
 

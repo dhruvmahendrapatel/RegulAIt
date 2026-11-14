@@ -60,3 +60,21 @@ evidence logic is RegulAIt's own governance surface, so it is the "genuinely Reg
   for the master's review.
 - The new tables are not under row-level security, like the other PM tables (`pm_links`, `pm_webhook_deliveries`).
   The RLS slices have not reached the PM surface.
+
+## As built, slice 4b (2026-11-14): the five vendor adapters list
+
+Each `listWorkItems` reads through the adapter's existing request path, so it uses the same injected guarded fetch, the
+same credential scrub and the same egress posture as every other call.
+
+| Adapter | Read | Paging | `type` |
+|---|---|---|---|
+| Jira | `GET /rest/api/{2,3}/search/jql`, `fields=issuetype` | `nextPageToken` / `isLast` | issue type name |
+| Azure DevOps | WIQL `[System.TeamProject] = @project AND [System.Id] > <cursor>` ordered by id, `$top`; then one batch read of `System.WorkItemType` | the last id (an integer, checked before use) | work item type |
+| Linear | `team.issues(first, after)` | Relay `endCursor` | `Issue` (no native type) |
+| Asana | `GET /projects/<gid>/tasks?opt_fields=permalink_url,resource_subtype` | `next_page.offset`, at most 100 per page | `Milestone` or `Task` |
+| monday | `items_page(limit)`, then `next_items_page(cursor)` | monday cursor, at most 500 per page | `Item` (no native type) |
+
+The project value never reaches a query language raw. Jira quotes it in JQL, escaping `\` and `"`. ADO uses the
+`@project` macro, with the project only in the URL path (percent-encoded). Linear and monday pass it as GraphQL
+variables. Asana percent-encodes the gid. A Jira site still on the legacy `/search` endpoint (Data Center) answers the
+listing with an error, which the importer records as a `pm_provider_error` refusal; nothing is guessed.

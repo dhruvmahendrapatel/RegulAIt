@@ -1,0 +1,2 @@
+<!-- fold: state-recap -->
+**2026-11-14 - ADR-0289 slice 4b: the PM importer lists Jira, Azure DevOps, Linear, Asana and monday (builder lane L6).** Each adapter pages its project's work items through its existing governed request path (JQL `search/jql`, WIQL with `@project`, Linear Relay, Asana offset, monday `items_page`), with the project value never spliced raw into a query language. Linkage only, as slice 4a. No migration.

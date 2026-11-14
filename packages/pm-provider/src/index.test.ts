@@ -962,3 +962,114 @@ describe("listWorkItems (ADR-0289, the importer's read)", () => {
     await expect(bad.listWorkItems("p", { limit: 50 })).rejects.toBeInstanceOf(PmProviderError);
   });
 });
+
+describe("vendor listWorkItems (ADR-0289 slice 4b, injectable fetch, no network)", () => {
+  type Call = { url: string; method: string; body: string | undefined };
+  /** answers each call with the next queued JSON body, recording the request */
+  function stub(responses: unknown[]) {
+    const calls: Call[] = [];
+    const fetchImpl = async (url: string, init?: { method?: string; body?: string }) => {
+      calls.push({ url, method: init?.method ?? "GET", body: init?.body });
+      const body = responses.shift();
+      return { status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+    };
+    return { calls, fetchImpl };
+  }
+
+  it("jira: enhanced JQL search, quoted project key, token paging", async () => {
+    const { calls, fetchImpl } = stub([
+      { issues: [{ id: "10001", key: "AB-1", fields: { issuetype: { name: "Bug" } } }], nextPageToken: "t2", isLast: false },
+      { issues: [{ id: "10002", key: "AB-2", fields: {} }], isLast: true },
+    ]);
+    const j = new JiraProvider({ token: "e:t", baseUrl: "https://x.atlassian.net", fetchImpl });
+    const p1 = await j.listWorkItems('A"B', { limit: 50 });
+    expect(p1).toEqual({ items: [{ id: "10001", type: "Bug", url: "https://x.atlassian.net/browse/AB-1" }], nextCursor: "t2" });
+    const u1 = new URL(calls[0]!.url);
+    expect(u1.pathname).toBe("/rest/api/2/search/jql");
+    expect(u1.searchParams.get("jql")).toBe('project = "A\\"B" ORDER BY id ASC');
+    expect(u1.searchParams.get("maxResults")).toBe("50");
+    const p2 = await j.listWorkItems("AB", { cursor: "t2", limit: 50 });
+    expect(new URL(calls[1]!.url).searchParams.get("nextPageToken")).toBe("t2");
+    expect(p2.nextCursor).toBeNull();
+    expect(p2.items[0]!.type).toBe("Issue");
+  });
+
+  it("azure devops: WIQL with @project and an id cursor, then one batch type read", async () => {
+    const { calls, fetchImpl } = stub([
+      { workItems: [{ id: 5 }, { id: 9 }] },
+      { value: [{ id: 5, fields: { "System.WorkItemType": "Bug" } }, { id: 9, fields: { "System.WorkItemType": "Task" } }] },
+      { workItems: [] },
+    ]);
+    const a = new AzureDevOpsProvider({ token: "pat", baseUrl: "https://dev.azure.com/org", fetchImpl });
+    const p1 = await a.listWorkItems("My Proj", { limit: 2 });
+    expect(calls[0]!.method).toBe("POST");
+    expect(calls[0]!.url).toBe("https://dev.azure.com/org/My%20Proj/_apis/wit/wiql?$top=2&api-version=7.1");
+    const q = JSON.parse(calls[0]!.body!).query as string;
+    expect(q).toContain("[System.TeamProject] = @project");
+    expect(q).toContain("[System.Id] > 0");
+    expect(q).not.toContain("My Proj");
+    expect(calls[1]!.url).toContain("ids=5,9");
+    expect(p1).toEqual({
+      items: [
+        { id: "5", type: "Bug", url: "https://dev.azure.com/org/My%20Proj/_workitems/edit/5" },
+        { id: "9", type: "Task", url: "https://dev.azure.com/org/My%20Proj/_workitems/edit/9" },
+      ],
+      nextCursor: "9",
+    });
+    const p2 = await a.listWorkItems("My Proj", { cursor: "9", limit: 2 });
+    expect(JSON.parse(calls[2]!.body!).query).toContain("[System.Id] > 9");
+    expect(p2).toEqual({ items: [], nextCursor: null });
+    await expect(a.listWorkItems("p", { cursor: "1 OR 1=1", limit: 2 })).rejects.toBeInstanceOf(PmProviderError);
+  });
+
+  it("linear: team issues, Relay paging", async () => {
+    const { calls, fetchImpl } = stub([
+      { data: { teams: { nodes: [{ id: "team-1" }] } } },
+      { data: { team: { issues: { nodes: [{ id: "i1", url: "https://linear.app/x/issue/ENG-1" }], pageInfo: { hasNextPage: true, endCursor: "c1" } } } } },
+      { data: { team: { issues: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } },
+    ]);
+    const l = new LinearProvider({ token: "k", fetchImpl });
+    const p1 = await l.listWorkItems("ENG", { limit: 50 });
+    expect(p1).toEqual({ items: [{ id: "i1", url: "https://linear.app/x/issue/ENG-1", type: "Issue" }], nextCursor: "c1" });
+    expect(JSON.parse(calls[1]!.body!).variables).toEqual({ teamId: "team-1", first: 50, after: null });
+    const p2 = await l.listWorkItems("ENG", { cursor: "c1", limit: 50 });
+    expect(JSON.parse(calls[2]!.body!).variables.after).toBe("c1");
+    expect(p2.nextCursor).toBeNull();
+  });
+
+  it("asana: project tasks, offset paging, at most 100 per page", async () => {
+    const { calls, fetchImpl } = stub([
+      { data: [{ gid: "1", permalink_url: "https://app.asana.com/0/p/1" }, { gid: "2", resource_subtype: "milestone" }], next_page: { offset: "o2" } },
+      { data: [], next_page: null },
+    ]);
+    const a = new AsanaProvider({ token: "pat", fetchImpl });
+    const p1 = await a.listWorkItems("123", { limit: 500 });
+    const u = new URL(calls[0]!.url);
+    expect(u.pathname).toBe("/api/1.0/projects/123/tasks");
+    expect(u.searchParams.get("limit")).toBe("100");
+    expect(p1).toEqual({
+      items: [
+        { id: "1", url: "https://app.asana.com/0/p/1", type: "Task" },
+        { id: "2", url: "https://app.asana.com/0/123/2", type: "Milestone" },
+      ],
+      nextCursor: "o2",
+    });
+    const p2 = await a.listWorkItems("123", { cursor: "o2", limit: 100 });
+    expect(new URL(calls[1]!.url).searchParams.get("offset")).toBe("o2");
+    expect(p2.nextCursor).toBeNull();
+  });
+
+  it("monday: items_page then next_items_page", async () => {
+    const { calls, fetchImpl } = stub([
+      { data: { boards: [{ items_page: { cursor: "m2", items: [{ id: "77", url: "https://x.monday.com/boards/1/pulses/77" }] } }] } },
+      { data: { next_items_page: { cursor: null, items: [] } } },
+    ]);
+    const m = new MondayProvider({ token: "t", fetchImpl });
+    const p1 = await m.listWorkItems("1", { limit: 1000 });
+    expect(JSON.parse(calls[0]!.body!).variables).toEqual({ board: "1", limit: 500 });
+    expect(p1).toEqual({ items: [{ id: "77", type: "Item", url: "https://x.monday.com/boards/1/pulses/77" }], nextCursor: "m2" });
+    const p2 = await m.listWorkItems("1", { cursor: "m2", limit: 100 });
+    expect(JSON.parse(calls[1]!.body!).query).toContain("next_items_page");
+    expect(p2).toEqual({ items: [], nextCursor: null });
+  });
+});
