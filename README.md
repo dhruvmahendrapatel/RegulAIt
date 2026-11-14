@@ -294,6 +294,26 @@ non-deterministic on an all-green run, closed by
 [ADR-0106](internal/decisions/0106-mock-socket-net-contract.md). Do not read the
 "N passed" line and stop; read `echo $?`.
 
+### Third-party client compatibility (ADR-0257)
+
+The official OpenAI and Anthropic SDKs, the Laravel AI SDK (`laravel/ai`) and `dart_mcp` are run, unmodified, against
+a real gateway: auth, a governed allow and deny, streaming, tool calls, and the cost and audit rows the calls leave.
+Each client is a digest-pinned image with its dependencies fetched at image build; at test time the containers sit on an
+`--internal` docker network whose only reachable host is the gateway. CI runs it as its own job
+([`client-compat.yml`](.github/workflows/client-compat.yml)) on changes to the compat or MCP surfaces, and nightly.
+Locally (docker and a Postgres on `DATABASE_URL`):
+
+```bash
+for c in node-sdks laravel-ai dart-mcp; do
+  docker build -t "regulait-client-compat/$c:local" "client-compat/$c"
+done
+pnpm --filter "@regulait/gateway..." build
+cd apps/gateway && REGULAIT_MIGRATIONS_UNASSIGNED=apply pnpm exec vitest run --config client-compat/vitest.config.ts
+```
+
+Behind a TLS-intercepting proxy, pass its CA to the build only: `--secret id=extra_ca,src=<ca.pem>` (plus the usual
+proxy build args). The secret is used in a discarded build stage and never reaches the image.
+
 ### Tamper-evident audit anchoring (no cloud account needed)
 
 The compose stack brings up **SeaweedFS with a real S3 Object Lock bucket in

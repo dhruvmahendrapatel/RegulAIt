@@ -110,9 +110,9 @@ async function groupRule(scope: "role" | "team", groupId: string, approver: stri
 }
 
 const mkRole = async (label: string) =>
-  (await db.insert(roles).values({ name: `p668 ${label} ${RUN}-${randomBytes(2).toString("hex")}` }).returning({ id: roles.id }))[0]!.id;
+  (await db.insert(roles).values({ name: `p668 ${label} ${RUN}-${randomBytes(6).toString("hex")}` }).returning({ id: roles.id }))[0]!.id;
 const mkTeam = async (label: string) =>
-  (await db.insert(teams).values({ name: `p668 ${label} ${RUN}-${randomBytes(2).toString("hex")}` }).returning({ id: teams.id }))[0]!.id;
+  (await db.insert(teams).values({ name: `p668 ${label} ${RUN}-${randomBytes(6).toString("hex")}` }).returning({ id: teams.id }))[0]!.id;
 
 /** run `body` with a fresh fleet rule F, removed afterwards so the next test's facts name only its own */
 async function withFleet(body: (fleetId: string) => Promise<void>) {

@@ -107,6 +107,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   // for the release-age cooldown: free prose typed beside a review decision
   [s.builderSkills, ["admitReason"]],
   [s.releaseOverrides, ["reason"]],
+  // ADR-0246 addendum: the note an admin types beside an authorised target for high-risk MCP servers
+  [s.mcpAuthorisedTargets, ["note"]],
   // ADR-0216 — an admin's reason for relaxing a model file's supply-chain check
   [s.modelArtifactSupplyChainRelaxations, ["reason"]],
   // ADR-0175 A15 — the admin's note on where an energy factor came from
@@ -240,6 +242,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.webauthnCredentials, ["label", "revokeReason"]],
   // ADR-0202 decision 4 (migration 0213): an admin's reason for switching a demo beat to or from its fallback
   [s.demoBeatFallbacks, ["reason"]],
+  // ADR-0206 G1 (migration `project_archive`): an admin's reason for archiving a project, shown in the project header
+  [s.projects, ["archivedReason"]],
   // ADR-0208 G8 (migration 0224): the reason an admin typed when retiring an infra resource or policy
   [s.infraResources, ["retiredReason"]],
   [s.infraPolicies, ["retiredReason"]],

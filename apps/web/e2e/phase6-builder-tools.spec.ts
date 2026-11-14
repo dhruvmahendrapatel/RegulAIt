@@ -164,7 +164,8 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
     [repo.id, "list_branches"],
     [wh.id, "list_schemas"],
   ]) {
-    const g = await admin.request.post("/v1/grants/tools", { headers: CSRF, data: { userId: d.userId, serverId, toolName } });
+    // ADR-0250: a grant mint is a settings_relax step-up, answered from Ada's signed-in page
+    const g = await steppedUpAs(admin.request, ADMIN_EMAIL, "POST", "/v1/grants/tools", { userId: d.userId, serverId, toolName });
     expect(g.status(), await g.text()).toBeLessThan(300);
   }
   // B4S-03: Dana works on the seeded hipaa-project (an in-app-only data

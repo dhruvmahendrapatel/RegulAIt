@@ -69,63 +69,63 @@
     },
     "trained_prompt_injection": {
       "gated": false,
-      "measuredWith": "agents/trained-detectors/eval_baselines.py: protectai/deberta-v3-base-prompt-injection-v2@90c9989b1a342275dd0d1a95aad283c04e075671 through server.load_models and detector_core.score_injection (1,500-character windows, max score), CPU. Offline: the image is not built in CI.",
+      "measuredWith": "agents/trained-detectors/eval_baselines.py: leolee99/PIGuard@dd78b24e330193a22d2293ac66922dd4f982f563 through server.load_models and detector_core.score_injection (1,500-character windows, max score), CPU. Offline: the image is not built in CI.",
       "threshold": 0.5,
       "datasets": {
         "notinject": {
           "tp": 0,
-          "fp": 147,
+          "fp": 39,
           "fn": 0,
-          "tn": 192,
+          "tn": 300,
           "precision": 0.0,
           "recall": null,
-          "fpr": 0.4336
+          "fpr": 0.115
         },
         "injecagent": {
-          "tp": 253,
+          "tp": 240,
           "fp": 0,
-          "fn": 47,
+          "fn": 60,
           "tn": 0,
           "precision": 1.0,
-          "recall": 0.8433,
+          "recall": 0.8,
           "fpr": null
         },
         "agentdojo": {
-          "tp": 98,
-          "fp": 3,
-          "fn": 37,
-          "tn": 94,
-          "precision": 0.9703,
-          "recall": 0.7259,
-          "fpr": 0.0309
+          "tp": 103,
+          "fp": 11,
+          "fn": 32,
+          "tn": 86,
+          "precision": 0.9035,
+          "recall": 0.763,
+          "fpr": 0.1134
         },
         "jailbreakbench": {
-          "tp": 113,
-          "fp": 1,
-          "fn": 37,
-          "tn": 99,
-          "precision": 0.9912,
-          "recall": 0.7533,
-          "fpr": 0.01
+          "tp": 125,
+          "fp": 26,
+          "fn": 25,
+          "tn": 74,
+          "precision": 0.8278,
+          "recall": 0.8333,
+          "fpr": 0.26
         },
         "regulait-web-agent": {
-          "tp": 30,
-          "fp": 25,
-          "fn": 20,
-          "tn": 25,
-          "precision": 0.5455,
-          "recall": 0.6,
-          "fpr": 0.5
+          "tp": 36,
+          "fp": 36,
+          "fn": 14,
+          "tn": 14,
+          "precision": 0.5,
+          "recall": 0.72,
+          "fpr": 0.72
         }
       },
       "pooled": {
-        "tp": 494,
-        "fp": 176,
-        "fn": 141,
-        "tn": 410,
-        "precision": 0.7373,
-        "recall": 0.778,
-        "fpr": 0.3003
+        "tp": 504,
+        "fp": 112,
+        "fn": 131,
+        "tn": 474,
+        "precision": 0.8182,
+        "recall": 0.7937,
+        "fpr": 0.1911
       }
     }
   }

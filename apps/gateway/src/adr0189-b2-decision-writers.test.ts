@@ -41,6 +41,7 @@ const DECISION_WRITERS = [
   "governed-core.ts", // ADR-0251: a model dispatch refused by the governed core (insert(auditLog), chained handle)
   "governed-evaluate.ts", // the `governance-policy-changed` refusal row of the MCP tool, MCP protocol and connector paths
   "guardrails.ts",
+  "mcp-high-risk.ts", // ADR-0246 addendum: a call to a high-risk MCP server refused (or passed on) by the target gate
   "mcp-identity-assertion.ts", // ADR-0188 S8: an opted-in server's call refused because no identity assertion can be made
   "mcp-protocol.ts", // MCP protocol methods
   "model-supply-chain.ts", // ADR-0216: a dispatch refused because a cited model file fails the supply-chain check
@@ -50,6 +51,7 @@ const DECISION_WRITERS = [
   "playground.ts",
   "privacy-ops.ts", // ADR-0224: the processing limit's dispatch refusal
   "redteam.ts",
+  "upstream-token-exchange.ts", // ADR-0238: a call refused because no down-scoped upstream token can be obtained (insert(auditLog), chained handle)
   "usage-extractors.ts", // ADR-0241: a dispatch whose usage mapping could not read the response, kept on built-in counts (insert(auditLog) on the chained handle)
   "use-case-gate.ts",
   "use-cases.ts",

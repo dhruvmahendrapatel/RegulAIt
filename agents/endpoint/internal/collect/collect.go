@@ -36,6 +36,11 @@ const (
 	GapDisabledByOrgPolicy   = "disabled_by_org_policy"
 	GapDisabledByLocalPolicy = "disabled_by_local_policy"
 	GapListingTruncated      = "listing_truncated"
+	// GapMCPConfigUnparsed: an MCP host config that is not plain JSON (JSONC with comments, TOML). No maintained
+	// JSONC or TOML parser passes ADR-0176 yet (ADR-0259), so its servers are not read.
+	GapMCPConfigUnparsed = "mcp_config_unparsed"
+	// GapMCPServersTruncated: a config listed more servers than one fact set may carry.
+	GapMCPServersTruncated = "mcp_servers_truncated"
 )
 
 // Env is what the collectors may read. Tests build one over fstest.MapFS fixtures.
@@ -139,6 +144,7 @@ func Collect(env *Env, col *pack.Collection, disabled map[contract.Kind]string) 
 		contract.KindAssistantConfig:  c.assistantConfigs,
 		contract.KindCLI:              c.clis,
 		contract.KindEnvName:          c.envNames,
+		contract.KindMCPConfig:        c.mcpConfigs,
 	}
 	for _, k := range contract.Kinds {
 		entries := byKind[k]
@@ -163,7 +169,12 @@ func Collect(env *Env, col *pack.Collection, disabled map[contract.Kind]string) 
 }
 
 func factKey(f contract.Fact) string {
-	return strings.Join([]string{string(f.Kind), f.SignatureID, string(f.Location.Root), f.Location.Path, f.MatchedOn, f.Identifier, itoa(f.Port)}, "\x00")
+	parts := []string{string(f.Kind), f.SignatureID, string(f.Location.Root), f.Location.Path, f.MatchedOn, f.Identifier, itoa(f.Port)}
+	if s := f.Server; s != nil {
+		// one fact per configured server; two "(unnamed)" entries running the same thing collapse into one
+		parts = append(parts, s.Name, s.Command, s.Package, s.Host)
+	}
+	return strings.Join(parts, "\x00")
 }
 
 func itoa(n int) string {

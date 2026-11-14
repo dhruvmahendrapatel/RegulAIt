@@ -13,13 +13,14 @@ name: Engine images (build only)
 # same manifest digest and image id, and reports them per engine in the step
 # summary. workflow_dispatch runs the same check on any branch.
 # On a pull request it runs only when an engine's own files change; a merge group and the nightly schedule run it
-# always (ADR-0252 addendum).
+# always (ADR-0262).
 
 on:
   pull_request:
     paths:
       - engines/**
       - packages/engine-garak/**
+      - packages/engine-spikee/**
       - packages/engine-modelscan/**
       - packages/engine-promptfoo/**
       - packages/engine-runner/**
@@ -29,14 +30,14 @@ on:
       - scripts/engine-images-repro.mjs
       - .github/workflows/engine-images.yml
       - .github/workflows/engine-images-build.yml
-      # ADR-0252 addendum, PR trim: every engine image COPYs the workspace lockfile, and a Dockerfile anywhere is an
+      # ADR-0262, PR trim: every engine image COPYs the workspace lockfile, and a Dockerfile anywhere is an
       # image input (the same rule as ci-scope's `engines`)
       - pnpm-lock.yaml
       - '**/Dockerfile'
       # a lock or signature change (the lock-update bot's PR) builds nothing new
       - '!engines/images.lock.json'
       - '!engines/signatures/**'
-  # ADR-0252 addendum (owner decision 2026-11-07): the engine build-and-compare is part of the FULL suite, so a merge
+  # ADR-0262 (owner decision 2026-11-07): the engine build-and-compare is part of the FULL suite, so a merge
   # group and the nightly schedule run it for every engine whatever changed (`merge_group` takes no path filter).
   merge_group:
     types: [checks_requested]
@@ -59,7 +60,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        engine: [promptfoo, modelscan, garak, mcpscanner, skillscanner]
+        engine: [promptfoo, modelscan, garak, mcpscanner, skillscanner, spikee]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -81,7 +82,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        engine: [promptfoo, modelscan, garak, mcpscanner, skillscanner]
+        engine: [promptfoo, modelscan, garak, mcpscanner, skillscanner, spikee]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

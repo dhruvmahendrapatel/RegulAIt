@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// ADR-0252 addendum: what a CI run must cover (.github/actions/ci-scope runs this).
+// ADR-0262: what a CI run must cover (.github/actions/ci-scope runs this).
 //
 // FAIL CLOSED. Anything other than a pull_request is a full run. On a pull_request the PR's files are read from
 // GitHub's merge commit (HEAD^1 is the base, HEAD^2 the PR head), with renames OFF so a moved file counts at both
