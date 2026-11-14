@@ -595,6 +595,7 @@ import { applyEngineRunApprovalDecision, lockEngineRunOfApprovalTx, registerEngi
 import { registerEngineRunnerScopeHook, engineCredentialRoutes } from "./engine-runner-auth.js";
 import { registerModelArtifactRoutes, type ArtifactStore } from "./model-artifacts.js";
 import { registerModelSupplyChainRoutes } from "./model-supply-chain.js";
+import { registerModelLineageRoutes } from "./model-lineage.js";
 import { schedulerJobRegistry } from "./scheduler-jobs.js";
 import { registerDataKeyRoutes } from "./data-key.js";
 import { registerDataKeyReencryptionRoutes } from "./data-key-reencrypt.js";
@@ -6276,6 +6277,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerModelArtifactRoutes(app, db, opts.artifactStore === undefined ? {} : { artifactStore: opts.artifactStore });
   // ADR-0216: signing keys (admin), signatures (uploader or admin), supply-chain relaxations (admin, step-up)
   registerModelSupplyChainRoutes(app, db);
+  // lane L7 (P14 + P16): model-file lineage
+  registerModelLineageRoutes(app, db);
   // ADR-0224 (P13 c): records of processing and data-subject requests (admin-only, the default gate)
   registerPrivacyOpsRoutes(app, db, { dataKey: opts.dataKey });
 

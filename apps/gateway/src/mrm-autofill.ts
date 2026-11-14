@@ -77,6 +77,7 @@ import {
 import { GROUNDEDNESS_SCORER_KINDS } from "./risks.js";
 import { overrideInForce } from "./guardrails.js";
 import { INVENTORY_WINDOW_DAYS } from "./inventory.js";
+import { lineageDriftCount } from "./model-lineage-drift.js";
 
 /** the ADR-0081/0082 evidence window, reused so "recent" means the same thing
  * on a model card as it does on the inventory and the risk register */
@@ -617,8 +618,9 @@ export function summarizeAutofillForSnapshot(a: CardAutofill): Record<string, un
  *    defaults are not per-card drift.
  *  - `configChanges`: the subject's dispatch configuration moved — an
  *    agent_config or system-prompt version activated, promoted, rolled back
- *    or canaried, an unversioned agent-config edit, or a custom-provider
- *    endpoint edit.
+ *    or canaried, an unversioned agent-config edit, a custom-provider
+ *    endpoint edit, or (lane L7, P16) a fine-tune, merge or quantization
+ *    recorded from a model file the card cites (model-lineage-drift.ts).
  *  - `cardEdits`: the card itself edited after it was signed.
  *
  * NOT drift: passing or merely completed eval and red-team runs, errored or
@@ -1100,6 +1102,8 @@ async function computeCardStalenessUnscoped(
   const { evalRegressions, redteamRegressions } = countRunRegressions(runComparisons);
 
   const risks = await classifyRiskChanges(db, agentIds, since, sequential);
+  // Lane L7 (P16): a fine-tune, merge or quantization recorded from a file this card cites is a new model version
+  const lineageChanges = await lineageDriftCount(db, card.id, since);
   const changes = {
     evalRuns: evalsSince[0]?.n ?? 0,
     redteamRuns: rtSince[0]?.n ?? 0,
@@ -1115,7 +1119,10 @@ async function computeCardStalenessUnscoped(
     riskChanges: risks.counted,
     guardrailRelaxations: guardrailWrites.filter((w) => isGuardrailRelaxation(w.ruleId ?? "", w.detail)).length,
     configChanges:
-      (activationsSince[0]?.n ?? 0) + (agentConfigEditsSince[0]?.n ?? 0) + (providerEditsSince[0]?.n ?? 0),
+      (activationsSince[0]?.n ?? 0) +
+      (agentConfigEditsSince[0]?.n ?? 0) +
+      (providerEditsSince[0]?.n ?? 0) +
+      lineageChanges,
     cardEdits: cardEditsSince[0]?.n ?? 0,
   };
   const driftEvents = Object.values(drift).reduce((a, b) => a + b, 0);

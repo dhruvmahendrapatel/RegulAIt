@@ -16349,3 +16349,45 @@ export const thirdPartyIngestRecordFindings = pgTable(
   },
   (t) => [primaryKey({ columns: [t.recordId, t.findingId] }), index("third_party_ingest_record_findings_finding_idx").on(t.findingId)],
 );
+
+// ---------------------------------------------------------------------------
+// Lane L7 (P14 + P16 lineage; ADR-0216 / ADR-0217 amendments, migration model_artifact_lineage)
+// ---------------------------------------------------------------------------
+
+/** how a model file was derived from its parent file(s); `merged` takes two or more parents, the rest exactly one */
+export const MODEL_LINEAGE_RELATIONS = ["repackaged", "converted", "fine_tuned", "merged", "quantized"] as const;
+export type ModelLineageRelation = (typeof MODEL_LINEAGE_RELATIONS)[number];
+
+/**
+ * One parent edge of a derived model file: the child was made from the parent by `relation`. A JOIN TABLE (a merge
+ * has several parents), recorded once per child and never edited: a second derivation for the same child is refused
+ * in the handler, and an edit would rewrite provenance. Rows go with either artifact when it is deleted; the audit row
+ * written with them (`model-artifact-lineage-recorded`) keeps the record, with both sha256s.
+ */
+export const modelArtifactLineage = pgTable(
+  "model_artifact_lineage",
+  {
+    childArtifactId: uuid("child_artifact_id")
+      .notNull()
+      .references(() => modelArtifacts.id, { onDelete: "cascade" }),
+    parentArtifactId: uuid("parent_artifact_id")
+      .notNull()
+      .references(() => modelArtifacts.id, { onDelete: "cascade" }),
+    relation: text("relation", { enum: MODEL_LINEAGE_RELATIONS }).notNull(),
+    /** free text the person recorded, e.g. "GPTQ 4-bit" or "TIES merge, density 0.5" (bounded) */
+    method: text("method"),
+    recordedByUserId: uuid("recorded_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.childArtifactId, t.parentArtifactId] }),
+    check("model_artifact_lineage_no_self_check", sql`${t.childArtifactId} <> ${t.parentArtifactId}`),
+    check(
+      "model_artifact_lineage_relation_check",
+      sql`${t.relation} IN ('repackaged', 'converted', 'fine_tuned', 'merged', 'quantized')`,
+    ),
+    check("model_artifact_lineage_method_check", sql`${t.method} IS NULL OR length(${t.method}) BETWEEN 1 AND 200`),
+    index("model_artifact_lineage_parent_idx").on(t.parentArtifactId),
+  ],
+);
+export type ModelArtifactLineageRow = typeof modelArtifactLineage.$inferSelect;

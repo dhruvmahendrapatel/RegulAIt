@@ -873,6 +873,10 @@ export const NON_ADMIN_ROUTES = new Set([
   "DELETE /v1/model-artifacts/:artifactId",
   // ADR-0216: the uploader attaches a signature to their own artifact (an admin to any), checked in-handler
   "POST /v1/model-artifacts/:artifactId/signature",
+  // lane L7 (P14 + P16): the child's uploader records its derivation (an admin any); reads under the same rule.
+  // Checked in-handler; a relative the caller cannot see is a count, never an id
+  "POST /v1/model-artifacts/:artifactId/lineage",
+  "GET /v1/model-artifacts/:artifactId/lineage",
 
   // ADR-0188 (batch 6 item 1) — the public identity surface (auth-exempt above
   // too): the JWKS and the token endpoint family.
