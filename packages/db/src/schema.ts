@@ -16386,7 +16386,8 @@ export const thirdPartyIngestRecordFindings = pgTable(
   (t) => [primaryKey({ columns: [t.recordId, t.findingId] }), index("third_party_ingest_record_findings_finding_idx").on(t.findingId)],
 );
 
-// ===== ADR-0303 (lane L11): SIEM delivery of the audit chain ==============================================export const SIEM_DESTINATION_KINDS = ["webhook"] as const;
+// ===== ADR-0303 (lane L11): SIEM delivery of the audit chain =====================================================
+export const SIEM_DESTINATION_KINDS = ["webhook"] as const;
 export const SIEM_DESTINATION_STATES = ["active", "backoff", "dead_letter"] as const;
 
 /**
@@ -16426,7 +16427,6 @@ export const siemDestinations = pgTable(
 );
 export type SiemDestinationRow = typeof siemDestinations.$inferSelect;
 // ===== end ADR-0303 =================================================================================================
-=======
 /**
  * ADR-0251 (P-01 remainder, lane L1; migration resource_rate_reservations) — HARD rate-limit windows for the governed
  * core's connector and A2A calls. One row is one slot a call took in the window: written in the same transaction as
