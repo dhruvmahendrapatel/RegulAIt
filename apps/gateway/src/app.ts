@@ -450,6 +450,7 @@ import {
 } from "./compat-core.js";
 import { registerAnthropicCompat } from "./compat-anthropic.js";
 import { registerOpenAiCompat } from "./compat-openai.js";
+import { registerResponsesCompat } from "./compat-responses.js";
 import { registerModelsDiscovery } from "./compat-models.js";
 import { registerVirtualKeyRoutes, routesForPurpose } from "./virtual-keys.js";
 import { registerModelPolicyRoutes } from "./model-policy.js";
@@ -6189,6 +6190,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   app.addHook("onClose", async () => drainBackgroundWork(db));
   registerAnthropicCompat(app, db, { dataKey: opts.dataKey });
   registerOpenAiCompat(app, db, { dataKey: opts.dataKey });
+  registerResponsesCompat(app, db, { dataKey: opts.dataKey });
   // ADR-0066 §1 — `GET /v1/models`. Gated by the same onRequest hook as the two
   // shims (on EITHER being enabled), and entitlement-filtered per caller inside
   // the handler, so what a client can list is exactly what it can call.

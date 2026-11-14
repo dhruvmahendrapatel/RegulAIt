@@ -32,7 +32,8 @@ in `spikes/workflow-p30/`.
 official OpenAI and Anthropic SDKs, the Laravel AI SDK and dart_mcp run, each in a digest-pinned image with its
 dependencies vendored at build, against a real gateway (auth, governed allow and deny, streaming, tool calls, cost
 attribution, audit); CI job `client-compat.yml` on compat/MCP paths plus nightly. Fixed on the way: the SSE shims forced
-`Connection: keep-alive`. Follow-ups: a governed `/v1/responses` shim (laravel/ai's default `openai` driver needs it);
+`Connection: keep-alive`. Follow-ups: ~~a governed `/v1/responses` shim (laravel/ai's default `openai` driver needs it)~~ **built
+2026-11-14 ([ADR-0287](../decisions/0287-responses-api-compat-shim.md)): stateless, so clients send `store: false`**;
 provider-shaped 401s on compat routes (the shared auth hook answers `{"error":"unauthenticated"}`); dart_mcp has no HTTP
 transport of its own.
 

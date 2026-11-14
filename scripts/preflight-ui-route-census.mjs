@@ -87,6 +87,7 @@ export const MACHINE_ONLY = new Map([
 
   // ---- the data plane: what the gateway proxies and governs -------------------
   ["POST /v1/chat/completions", "data plane: OpenAI-compatible proxy (ADR-0020); called by vendor SDKs, governed per call"],
+  ["POST /v1/responses", "data plane: OpenAI Responses-compatible proxy (ADR-0287); called by vendor SDKs, governed per call"],
   ["POST /v1/messages", "data plane: Anthropic-compatible proxy (ADR-0024); called by vendor SDKs, governed per call"],
   ["GET /v1/models", "data plane: OpenAI-compatible model list for vendor SDKs"],
   ["POST /mcp/:serverId", "data plane: the governed MCP proxy endpoint MCP clients connect to"],

@@ -180,7 +180,8 @@ sequenceDiagram
   by default). Egress is decided on the MCP posture. The A2A SDK
   client sends through the guarded fetch, with the credential going only to the registered origin. The usage row and
   the audit row are written in one transaction.
-- **Model/agent call** — `POST /v1/agents/:agentId/invoke` and the IDE compat endpoints (both go through
+- **Model/agent call** — `POST /v1/agents/:agentId/invoke` and the IDE compat endpoints (`/v1/messages`,
+  `/v1/chat/completions`, and the stateless `/v1/responses` of ADR-0287; all go through
   `compat-core.ts` into the same primitives): virtual-key allow-list, project attribution, workflow-instance gate,
   grants and revocations, model policy, `evaluateAgent` with the kill switch (allow or deny only: no approval rules
   and no ABAC), the model rate limit (`checkModelRateLimit`, off until an admin enables it); **then** the optimiser (routing,
