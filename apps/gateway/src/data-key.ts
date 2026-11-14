@@ -141,6 +141,9 @@
 import { constantTimeEqual } from "@regulait/shared";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { wantsListContract, type ListSpec } from "./list-contract.js";
+import { answerListExport, answerListPage, type ContractList } from "./list-contract-route.js";
+import { getTableColumns } from "@regulait/db";
 import {
   DATA_KEY_ATTESTATION_METHODS,
   auditLog,
@@ -290,6 +293,7 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   { table: "federation_signing_keys", column: "private_key_ciphertext", what: "federation signing private keys" },
   // ADR-0204 (migration 0214): the static credential an admin attached to an MCP server (sent upstream, never returned)
   { table: "mcp_server_upstream_credentials", column: "secret_ciphertext", what: "MCP server upstream credentials" },
+  { table: "upstream_token_exchanges", column: "client_secret_ciphertext", what: "token-exchange client secrets (ADR-0238)" },
   // ADR-0222 (migration 0271): a fairness evaluation dataset's kept columns (label, prediction, protected
   // attributes), set to NULL at the retention date or on delete
   { table: "fairness_datasets", column: "rows_ciphertext", what: "fairness evaluation datasets" },
@@ -1019,7 +1023,34 @@ export function registerDataKeyRoutes(
     };
   });
 
-  app.get("/v1/security/data-key/attestations", async () => {
+  // ADR-0226: with any of sort/dir/cursor/offset/count the attestation
+  // history answers the shared list contract for the same key (the running
+  // key, or the recorded one); with none of them, the whole-history response.
+  const attestationsList: ContractList<typeof dataKeyAttestations.$inferSelect, Record<string, never>> = {
+    spec: DATA_KEY_ATTESTATIONS_LIST,
+    filters: z.object({}).strict() as unknown as z.ZodType<Record<string, never>>,
+    reader: {
+      fetch: (q) =>
+        db
+          .select({ ...getTableColumns(dataKeyAttestations), _cursorAt: q.cursorAt })
+          .from(dataKeyAttestations)
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset),
+      countable: (where) => db.select({ one: sql`1` }).from(dataKeyAttestations).where(where),
+      idOf: (r) => r.id,
+    },
+    where: async () => {
+      const posture = await dataKeyPosture(db, opts.dataKey);
+      const target = posture.fingerprint ?? posture.recordedFingerprint;
+      // no key: no row can match (the old route answered an empty list)
+      return target ? eq(dataKeyAttestations.fingerprint, target) : sql`false`;
+    },
+  };
+  app.get("/v1/security/data-key/attestations/export.xlsx", async (req, reply) => answerListExport(db, req, reply, attestationsList));
+  app.get("/v1/security/data-key/attestations", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, attestationsList);
     const posture = await dataKeyPosture(db, opts.dataKey);
     const target = posture.fingerprint ?? posture.recordedFingerprint;
     const rows = target
@@ -1112,3 +1143,26 @@ export function registerDataKeyRoutes(
     });
   });
 }
+
+/** ADR-0226: data-key custody attestations under the shared list contract (claims only; never key material) */
+export const DATA_KEY_ATTESTATIONS_LIST: ListSpec<typeof dataKeyAttestations.$inferSelect> = {
+  id: "data-key-attestations",
+  sorts: {
+    at: { expr: dataKeyAttestations.attestedAt, keysetAt: dataKeyAttestations.attestedAt },
+    who: { expr: sql`lower(${dataKeyAttestations.attestedByLabel})` },
+    how: { expr: dataKeyAttestations.method },
+    where: { expr: dataKeyAttestations.locationHint },
+    fp: { expr: dataKeyAttestations.fingerprint },
+  },
+  columns: {
+    at: { label: "When", value: (r) => r.attestedAt },
+    who: { label: "Who", value: (r) => r.attestedByLabel },
+    how: { label: "Method", value: (r) => r.method },
+    where: { label: "Pointer", value: (r) => r.locationHint },
+    fp: { label: "Fingerprint", value: (r) => r.fingerprint },
+    note: { label: "Note", value: (r) => r.note },
+  },
+  filters: [],
+  defaultSort: { col: "at", dir: "desc" },
+  idCol: dataKeyAttestations.id,
+};

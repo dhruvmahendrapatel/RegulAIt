@@ -6,7 +6,7 @@ import { and, desc, eq, isNull, mrmRetestRuns, type Db, type MrmRetestRunRow } f
 
 export const MRM_AUTO_RETEST_NOTE =
   "After a model, prompt or endpoint change on a certified model, the tests already chosen for it (its pinned " +
-  "eval baselines and the red-team libraries it has been probed with) are re-run against the change, as the " +
+  "eval baselines, the red-team libraries it has been probed with and the red-team engine runs made against it) are re-run against the change, as the " +
   "person who ran each before and billed to the same project, and the results are attached to the " +
   "re-certification request. It adds evidence; it never signs off, and the model stays refused until a person does.";
 
@@ -36,6 +36,7 @@ export async function retestsForCard(db: Db, cardId: string, approvalIds: string
     summary: r.summary,
     evalRunId: r.evalRunId,
     redteamRunId: r.redteamRunId,
+    engineRunId: r.engineRunId,
     createdAt: r.createdAt,
     finishedAt: r.finishedAt,
   });

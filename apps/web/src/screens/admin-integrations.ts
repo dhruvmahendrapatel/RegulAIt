@@ -15,3 +15,7 @@ export { default as WebhooksPage } from "../views/admin/integrations/WebhooksPag
 // P3 (#453): the agents area (Agents page + full catalogue and stewardship lists) as one lazy chunk reached through
 // this screen; its module owns the nested <Routes> and keeps the #agent- deep-link redirect (see App.tsx).
 export { AgentsArea } from "../views/admin/integrations/AgentCatalogPage";
+// P3 (#453): each long area is one lazy chunk whose module owns its nested <Routes> (overview at the index, each full
+// list on its own page), reached through this screen so the sub-pages add nothing to the entry bundle.
+export { McpServersArea } from "../views/admin/integrations/McpRegistrySubpages";
+export { EnginesArea } from "../views/admin/integrations/EnginesSubpages";

@@ -3,45 +3,40 @@
  * cascade-derived floors, operational policies, the severity-sorted findings
  * inbox with governed remediation (owned confirm modals, persisted org
  * approver), and the cert / patch / backup ledgers whose governed verbs all
- * funnel into the one Approvals queue.
+ * funnel into the one Approvals queue. Each ledger is a five-row preview here
+ * and a full list on its own page (InfraLedgerPages.tsx).
  */
 import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
-import type {
-  InfraBackup,
-  InfraCert,
-  InfraFinding,
-  InfraPatch,
-  InfraPolicy,
-  InfraPosture,
-  InfraResource,
-  OrgSettingsResponse,
-} from "../../../api/adminTypes";
-import { ago } from "../../../api/format";
+import type { InfraPolicy, InfraPosture, InfraResource, OrgSettingsResponse } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, ConfirmModal, EmptyState, Field, InfoButton, Input, Select, Table, type Tone } from "../../../ui/kit";
-import { Stat, optionEls, useAction, useComplianceProfiles, useUsers, userOpts } from "../adminKit";
+import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Select, Table, Tabs, tabIds } from "../../../ui/kit";
+import { Stat, optionEls, useAction, useComplianceProfiles } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
-import { CertRotationsCard } from "./CertRotations";
-import { putOrgSettings } from "../../../stepup/stepUp";
 import { OrgSettingsCard } from "../settings/OrgSettingsCard";
-import { PolicyActions, ResourceActions } from "./InfraRowActions";
-
-const SEV_TONE: Record<string, Tone> = { critical: "danger", high: "danger", medium: "warn", low: "ok" };
-const STATUS_TONE: Record<string, Tone> = {
-  open: "warn",
-  remediation_proposed: "warn",
-  auto_remediated: "ok",
-  approved: "ok",
-  remediated: "ok",
-  accepted_risk: "danger",
-};
+import type { DataColumn } from "../../../ui/DataList";
+import { ListPreview } from "../../../ui/ListPreview";
+import {
+  LEDGERS,
+  PROPOSAL_NOTE,
+  backupColumns,
+  tlsLedgerColumns,
+  findingColumns,
+  ledgerPath,
+  ledgerQueryKey,
+  patchColumns,
+  resourceColumns,
+  useInfraProposals,
+  type LedgerId,
+} from "./infraLedgers";
+import { PolicyActions } from "./InfraRowActions";
 
 export default function InfrastructurePage() {
-  const users = useUsers();
   const act = useAction();
+  const proposals = useInfraProposals();
   const posture = useQuery({
     queryKey: ["admin", "infra-posture"],
     queryFn: () => api.get<InfraPosture>("/v1/infra/posture"),
@@ -54,50 +49,50 @@ export default function InfrastructurePage() {
     queryKey: ["admin", "infra-policies"],
     queryFn: () => api.get<{ policies: InfraPolicy[] }>("/v1/infra/policies"),
   });
-  const findings = useQuery({
-    queryKey: ["admin", "infra-findings"],
-    queryFn: () => api.get<{ findings: InfraFinding[] }>("/v1/infra/findings"),
-  });
-  const certs = useQuery({
-    queryKey: ["admin", "infra-certs"],
-    queryFn: () => api.get<{ certs: InfraCert[] }>("/v1/infra/certs"),
-  });
-  const patches = useQuery({
-    queryKey: ["admin", "infra-patches"],
-    queryFn: () => api.get<{ patches: InfraPatch[] }>("/v1/infra/patches"),
-  });
-  const backups = useQuery({
-    queryKey: ["admin", "infra-backups"],
-    queryFn: () => api.get<{ backups: InfraBackup[] }>("/v1/infra/backups"),
-  });
-  const org = useQuery({
-    queryKey: ["admin", "org-settings"],
-    queryFn: () => api.get<OrgSettingsResponse>("/v1/org/settings"),
-  });
 
-  const [approver, setApprover] = useState<string | null>(null);
-  // ADR-0017: one certificate's rotation ledger
-  const [historyCert, setHistoryCert] = useState<InfraCert | null>(null);
-  const effectiveApprover =
-    approver ?? String(org.data?.settings.infraApproverUserId ?? "") ?? "";
-  const [proposal, setProposal] = useState<{
-    title: string;
-    body: string;
-    url: string;
-  } | null>(null);
+  const org = useQuery({ queryKey: ["admin", "org-settings"], queryFn: () => api.get<OrgSettingsResponse>("/v1/org/settings") });
+
+  // P3: the ledgers and the set-up (register, policies, approver, backup verification) as two tabs. The set-up tab
+  // says in its label when no approver is set or scheduled backup verification is off.
+  const [params, setParams] = useSearchParams();
+  const tab = params.get("tab") === "setup" ? "setup" : "ledgers";
+  const panel = tabIds("infra", tab);
+  const setTab = (id: string) =>
+    setParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (id === "ledgers") next.delete("tab");
+      else next.set("tab", id);
+      return next;
+    });
+  const settings = org.data?.settings;
+  const setupNotes = settings
+    ? [!proposals.effectiveApprover ? "no approver" : null, settings.backupVerifyEnabled === false ? "backup verification off" : null].filter(Boolean)
+    : [];
 
   const p = posture.data ?? {};
   const inline = (obj: Record<string, number>) =>
     Object.entries(obj)
       .map(([k, n]) => `${k} ${n}`)
       .join(" · ") || "—";
-
-  const propose = (title: string, body: string, url: string) => {
-    if (!effectiveApprover) {
-      act.setError("Pick a remediation approver first — every governed verb names one explicitly.");
-      return;
-    }
-    setProposal({ title, body, url });
+  // P3 (#453 c6527514889): each ledger keeps five rows here, worst first, and moves whole to its own page. The
+  // ledgers have no status filter, so what needs attention is counted from the posture read this page already makes.
+  const preview = (id: LedgerId, columns: Array<DataColumn<never>>, attention: Array<{ label: string; count: number | null; failed?: boolean }> = []) => {
+    const l = LEDGERS[id];
+    return (
+      <ListPreview<never>
+        title={l.title}
+        noun={l.noun}
+        endpoint={l.endpoint}
+        legacyKey={l.legacyKey}
+        queryKey={ledgerQueryKey(l)}
+        sort={l.previewSort}
+        attention={attention}
+        columns={columns.filter((c) => c.main)}
+        rowKey={(r: { id: string }) => r.id}
+        viewAll={ledgerPath(id)}
+        empty={<EmptyState title={`No ${l.noun} tracked`} />}
+      />
+    );
   };
 
   return (
@@ -157,310 +152,44 @@ export default function InfrastructurePage() {
           </div>
         </Card>
 
-        <RegisterResourceCard />
+        <Tabs
+          tabs={[
+            { id: "ledgers", label: "Ledgers" },
+            { id: "setup", label: ["Set up", ...setupNotes].join(" · ") },
+          ]}
+          active={tab}
+          idPrefix="infra"
+          label="Infrastructure sections"
+          onChange={setTab}
+        />
+        <div role="tabpanel" id={panel.panel} aria-labelledby={panel.tab} className={v.stack}>
+          {tab === "ledgers" ? (
+            <>
+                {preview("findings", findingColumns() as Array<DataColumn<never>>, [{ label: "open", count: posture.data ? (p.open ?? 0) : null, failed: posture.isError }])}
+                {preview("certificates", tlsLedgerColumns() as Array<DataColumn<never>>)}
+                {preview("patches", patchColumns() as Array<DataColumn<never>>)}
 
-        <Card flush title="Resources — with cascade-derived floors">
-          <Table<InfraResource>
-            columns={[
-              {
-                key: "name",
-                header: "Name",
-                render: (r) => (
-                  <span className={v.row}>
-                    {r.name}
-                    {r.status === "retired" && <Badge tone="neutral">retired</Badge>}
-                  </span>
-                ),
-              },
-              { key: "kind", header: "Kind", render: (r) => r.kind },
-              { key: "provider", header: "Provider", render: (r) => r.provider },
-              {
-                key: "classifications",
-                header: "Classifications",
-                render: (r) => (r.classifications ?? []).join(", ") || "—",
-              },
-              {
-                key: "auto",
-                header: "Auto ceiling",
-                render: (r) => r.effectivePolicy?.autoRemediateMaxSeverity ?? "never",
-              },
-              {
-                key: "backupFloor",
-                header: "Backup floor (d)",
-                align: "right",
-                render: (r) => r.effectivePolicy?.backupRetentionDaysFloor ?? "—",
-              },
-              {
-                key: "patchCeiling",
-                header: "Patch ceiling (d)",
-                align: "right",
-                render: (r) => r.effectivePolicy?.patchCadenceDaysCeiling ?? "—",
-              },
-              { key: "actions", header: "Actions", render: (r) => <ResourceActions resource={r} /> },
-            ]}
-            rows={resources.data?.resources ?? []}
-            rowKey={(r) => r.id}
-            loading={resources.isLoading}
-            error={resources.error}
-            onRetry={() => void resources.refetch()}
-            empty={<EmptyState title="No monitored resources" body="Register one above — mock scans deterministically." />}
-          />
-        </Card>
-
-        <PolicyCard resources={resources.data?.resources ?? []} policies={policies.data?.policies ?? []} loading={policies.isLoading} />
-
-        <Card title="Findings — severity-sorted posture inbox">
-          <div className={a.formRow} style={{ marginBottom: "var(--s2)" }}>
-            <Field label="Remediation approver (persisted org default)" grow>
-              <Select
-                value={effectiveApprover}
-                onChange={(e) => setApprover(e.target.value)}
-              >
-                {optionEls(userOpts(users.data?.users), "— select an approver —")}
-              </Select>
-            </Field>
-            <Button
-              size="sm"
-              disabled={!effectiveApprover || act.busy}
-              onClick={() =>
-                void act.run(
-                  () => putOrgSettings({ infraApproverUserId: effectiveApprover }),
-                  "Default remediation approver saved (org setting, audited)",
-                )
-              }
-            >
-              Set approver
-            </Button>
-          </div>
-          {act.error && (
-            <div className={v.errLine} role="alert">
-              {act.error}
-            </div>
-          )}
-          <p className={v.faint}>
-            Each “propose remediation” / “rotate” / “patch” / “restore” names the approver explicitly and
-            lands in the Approvals queue (objectType infra_operation). Auto-remediated findings are already
-            fixed; only 'open' findings can be proposed.
-          </p>
-          <Table<InfraFinding>
-            columns={[
-              { key: "resource", header: "Governs", render: (f) => f.resourceName ?? "—" },
-              { key: "kind", header: "Kind", render: (f) => f.kind },
-              {
-                key: "severity",
-                header: "Severity",
-                sort: (f) => ["critical", "high", "medium", "low"].indexOf(f.severity),
-                render: (f) => (
-                  <Badge tone={SEV_TONE[f.severity] ?? "neutral"} title={`severity: ${f.severity}`}>
-                    {f.severity}
-                  </Badge>
-                ),
-              },
-              {
-                key: "status",
-                header: "Status",
-                sort: (f) => f.status,
-                render: (f) => (
-                  <Badge tone={STATUS_TONE[f.status] ?? "neutral"} title={`status: ${f.status}`}>
-                    {f.status.replaceAll("_", " ")}
-                  </Badge>
-                ),
-              },
-              { key: "summary", header: "Summary", render: (f) => f.detail?.summary ?? "" },
-              { key: "detected", header: "Detected", sort: (f) => f.detectedAt, render: (f) => ago(f.detectedAt) },
-              {
-                key: "actions",
-                header: "",
-                srHeader: "Actions",
-                align: "right",
-                render: (f) =>
-                  f.status === "open" ? (
-                    <Button
-                      size="sm"
-                      variant="primary"
-                      onClick={() =>
-                        propose(
-                          "Propose remediation?",
-                          `“${f.detail?.summary ?? f.kind}” on ${f.resourceName ?? "resource"} — the named approver decides in the Approvals queue before anything mutates.`,
-                          `/v1/infra/findings/${f.id}/remediate`,
-                        )
-                      }
-                    >
-                      propose remediation
-                    </Button>
-                  ) : (
-                    <span className={v.faint}>{f.status.replaceAll("_", " ")}</span>
-                  ),
-              },
-            ]}
-            rows={findings.data?.findings ?? []}
-            rowKey={(f) => f.id}
-            loading={findings.isLoading}
-            error={findings.error}
-            onRetry={() => void findings.refetch()}
-            empty={<EmptyState title="No findings" body="Run a scan to detect drift, cert expiry, missed backups and CVEs." />}
-          />
-        </Card>
-
-        <Card title="Certificates — rotation ledger">
-          <Table<InfraCert>
-            columns={[
-              { key: "resource", header: "Governs", render: (c) => c.resourceName ?? "—" },
-              { key: "cn", header: "Common name", render: (c) => <span className={v.mono}>{c.commonName}</span> },
-              { key: "notAfter", header: "Not after", render: (c) => String(c.notAfter).slice(0, 10) },
-              { key: "status", header: "Status", render: (c) => <Badge>{c.status}</Badge> },
-              { key: "serial", header: "Serial", render: (c) => c.serial ?? "—" },
-              {
-                key: "actions",
-                header: "",
-                srHeader: "Actions",
-                align: "right",
-                render: (c) => (
-                  <div className={v.rowTight} style={{ justifyContent: "flex-end" }}>
-                    <Button size="sm" aria-label={`Rotation history of ${c.commonName}`} onClick={() => setHistoryCert(historyCert?.id === c.id ? null : c)}>
-                      history
-                    </Button>
-                    {c.status === "active" ? (
-                      <Button
-                        size="sm"
-                        variant="primary"
-                        onClick={() =>
-                          propose(
-                            "Propose certificate rotation?",
-                            `Rotating ${c.commonName} advances not-after / last-rotated and writes a cert_rotations outcome row — only after the named approver approves.`,
-                            `/v1/infra/certs/${c.id}/rotate`,
-                          )
-                        }
-                      >
-                        propose rotation
-                      </Button>
-                    ) : (
-                      <span className={v.faint}>{c.status}</span>
-                    )}
+                {preview("backups", backupColumns() as Array<DataColumn<never>>, [{ label: "missed", count: posture.data ? (p.backup?.missed ?? 0) : null, failed: posture.isError }])}
+                {preview("resources", resourceColumns() as Array<DataColumn<never>>)}
+            </>
+          ) : (
+            <>
+                <RegisterResourceCard />
+                <PolicyCard resources={resources.data?.resources ?? []} policies={policies.data?.policies ?? []} loading={policies.isLoading} />
+                <Card title="Remediation approver">
+                  <div className={v.stack}>
+                    {proposals.approverField}
+                    {proposals.errorLine}
+                    <p className={v.faint}>{PROPOSAL_NOTE}</p>
                   </div>
-                ),
-              },
-            ]}
-            rows={certs.data?.certs ?? []}
-            rowKey={(c) => c.id}
-            loading={certs.isLoading}
-            error={certs.error}
-            onRetry={() => void certs.refetch()}
-            empty={<EmptyState title="No certificates tracked" />}
-          />
-        </Card>
-        {historyCert ? (
-          <CertRotationsCard key={historyCert.id} certId={historyCert.id} commonName={historyCert.commonName} onClose={() => setHistoryCert(null)} />
-        ) : null}
+                </Card>
+                {/* O5 (migration 0045): scheduled backup verification, on by default (ADR-0181) */}
+                <OrgSettingsCard title="Backup verification" keys={["backupVerifyEnabled", "backupVerifyIntervalHours"]} testId="backup-verify-settings" />
 
-        <Card title="CVE patches — remediation ledger">
-          <Table<InfraPatch>
-            columns={[
-              { key: "resource", header: "Governs", render: (x) => x.resourceName ?? "—" },
-              { key: "cve", header: "CVE", render: (x) => <span className={v.mono}>{x.cve}</span> },
-              {
-                key: "severity",
-                header: "Severity",
-                render: (x) => <Badge tone={SEV_TONE[x.severity] ?? "neutral"}>{x.severity}</Badge>,
-              },
-              { key: "package", header: "Package", render: (x) => x.package ?? "—" },
-              { key: "fixed", header: "Fixed version", render: (x) => x.fixedVersion ?? "—" },
-              { key: "status", header: "Status", render: (x) => <Badge>{x.status}</Badge> },
-              {
-                key: "actions",
-                header: "",
-                srHeader: "Actions",
-                align: "right",
-                render: (x) =>
-                  x.status === "open" ? (
-                    <Button
-                      size="sm"
-                      variant="primary"
-                      onClick={() =>
-                        propose(
-                          "Propose CVE patch?",
-                          `Applying ${x.cve} marks it patched only after approval; denying it records accepted risk.`,
-                          `/v1/infra/patches/${x.id}/apply`,
-                        )
-                      }
-                    >
-                      propose patch
-                    </Button>
-                  ) : (
-                    <span className={v.faint}>{x.status}</span>
-                  ),
-              },
-            ]}
-            rows={patches.data?.patches ?? []}
-            rowKey={(x) => x.id}
-            loading={patches.isLoading}
-            error={patches.error}
-            onRetry={() => void patches.refetch()}
-            empty={<EmptyState title="No CVE patches tracked" />}
-          />
-        </Card>
-
-        {/* O5 (migration 0045): scheduled backup verification, on by default (ADR-0181) */}
-        <OrgSettingsCard title="Backup verification" keys={["backupVerifyEnabled", "backupVerifyIntervalHours"]} testId="backup-verify-settings" />
-
-        <Card title="Backups — run / restore ledger">
-          <Table<InfraBackup>
-            columns={[
-              { key: "resource", header: "Governs", render: (b) => b.resourceName ?? "—" },
-              { key: "kind", header: "Kind", render: (b) => b.kind },
-              { key: "status", header: "Status", render: (b) => <Badge>{b.status}</Badge> },
-              { key: "retention", header: "Retention until", render: (b) => (b.retentionUntil ? String(b.retentionUntil).slice(0, 10) : "—") },
-              {
-                key: "actions",
-                header: "",
-                srHeader: "Actions",
-                align: "right",
-                render: (b) =>
-                  b.status === "missed" ? (
-                    <Button
-                      size="sm"
-                      variant="primary"
-                      onClick={() =>
-                        propose(
-                          "Propose restore?",
-                          "A governed restore appends a kind=restore, status=restored run — only after approval.",
-                          `/v1/infra/backups/${b.id}/restore`,
-                        )
-                      }
-                    >
-                      propose restore
-                    </Button>
-                  ) : (
-                    <span className={v.faint}>{b.status}</span>
-                  ),
-              },
-            ]}
-            rows={backups.data?.backups ?? []}
-            rowKey={(b) => b.id}
-            loading={backups.isLoading}
-            error={backups.error}
-            onRetry={() => void backups.refetch()}
-            empty={<EmptyState title="No backup runs tracked" />}
-          />
-        </Card>
+            </>
+          )}
+        </div>
       </div>
-
-      <ConfirmModal
-        open={proposal !== null}
-        title={proposal?.title ?? ""}
-        body={proposal?.body}
-        confirmLabel="Propose"
-        onCancel={() => setProposal(null)}
-        onConfirm={() => {
-          const pr = proposal;
-          setProposal(null);
-          if (pr)
-            void act.run(
-              () => api.post(pr.url, { approverUserId: effectiveApprover }),
-              "Proposed — awaiting the named approver in the Approvals queue",
-            );
-        }}
-      />
     </>
   );
 }

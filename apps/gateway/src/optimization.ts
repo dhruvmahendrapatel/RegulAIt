@@ -1,9 +1,12 @@
 import type { FastifyInstance } from "fastify";
-import { and, connectors, costEvents, count, desc, eq, gte, lt, sql, usageEvents, type Db, type SQL } from "@regulait/db";
+import { and, connectors, costEvents, count, desc, eq, getTableColumns, gte, lt, sql, usageEvents, users, type Db, type SQL } from "@regulait/db";
+import { answerListExport, answerListPage, type ContractList } from "./list-contract-route.js";
 import { z } from "zod";
 import { streamUsageEventsCsv } from "./projects.js";
 import { resolveCsvWindow } from "./csv-export.js";
 import { USAGE_SUMMARY_DEFAULT_DAYS, usageSummaryQuery } from "./list-queries.js";
+import { filterParams, parseListExport, parseListPage, runListPage, sendListError, sendListExport, wantsListContract, type ListSpec } from "./list-contract.js";
+import { USAGE_EVENTS_LIST, usageEventsFilterQuery, usageEventsReader, usageEventsWhere } from "./usage-events-list.js";
 
 const listQuery = z.object({
   userId: z.string().uuid().optional(),
@@ -19,7 +22,38 @@ const listQuery = z.object({
  * dashboard will roll these up later; until then this endpoint is the
  * dashboard-ready source of truth (per-technique totals + raw events). */
 export function registerOptimizationRoutes(app: FastifyInstance, db: Db) {
+  // ADR-0226: with any of sort/dir/cursor/offset/count the raw ledger answers
+  // the shared list contract; with none of them, exactly the response below
+  // (the per-technique totals and the newest `limit` events). The same
+  // visibility rule: a non-admin's userId is forced to their own.
+  const costEventsList: ContractList<CostEventListRow, { userId?: string; technique?: string }> = {
+    spec: COST_EVENTS_LIST,
+    filters: z.object({ userId: z.string().uuid().optional(), technique: z.string().min(1).max(64).optional() }).strict(),
+    reader: {
+      fetch: (q) =>
+        db
+          .select({ ...getTableColumns(costEvents), userName: COST_EVENT_USER, _cursorAt: q.cursorAt })
+          .from(costEvents)
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset),
+      countable: (where) => db.select({ one: sql`1` }).from(costEvents).where(where),
+      idOf: (r) => r.id,
+    },
+    where: (req, f) => {
+      const userId = req.authCtx.isAdmin ? f.userId : req.authCtx.userId;
+      if (!req.authCtx.isAdmin && !userId) return null;
+      const conds: SQL[] = [];
+      if (userId) conds.push(eq(costEvents.userId, userId));
+      if (f.technique) conds.push(eq(costEvents.technique, f.technique as never));
+      return conds.length ? sql.join(conds, sql` and `) : undefined;
+    },
+    refusal: { status: 403, body: { error: "bootstrap_has_no_cost_history" } },
+  };
+  app.get("/v1/cost-events/export.xlsx", async (req, reply) => answerListExport(db, req, reply, costEventsList));
   app.get("/v1/cost-events", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, costEventsList);
     const q = listQuery.parse(req.query);
     // Non-admins see only their own cost history; the userId filter is
     // forced to self rather than trusted from the query string.
@@ -51,9 +85,38 @@ export function registerOptimizationRoutes(app: FastifyInstance, db: Db) {
     return { events, totals };
   });
 
+  // ADR-0226: with any of sort/dir/cursor/offset/count the usage ledger
+  // answers the shared list contract (usage-events-list.ts), with the same
+  // visibility rule; with none of them, exactly the response below.
+  app.get("/v1/usage-events/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const filters = usageEventsFilterQuery.parse(filterParams(q));
+      const ex = parseListExport(USAGE_EVENTS_LIST, q);
+      const where = usageEventsWhere(req, filters);
+      if (where === null) return reply.status(403).send({ error: "bootstrap_has_no_usage_history" });
+      await sendListExport(db, req, reply, USAGE_EVENTS_LIST, usageEventsReader(db), where, ex, filters);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+
   // PILLAR 5 actuals: the measured-spend ledger written by real dispatches.
   // Same visibility rule as cost-events — non-admins see only themselves.
   app.get("/v1/usage-events", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      try {
+        const q = req.query as Record<string, unknown>;
+        const filters = usageEventsFilterQuery.parse(filterParams(q));
+        const page = parseListPage(USAGE_EVENTS_LIST, q);
+        const where = usageEventsWhere(req, filters);
+        if (where === null) return reply.status(403).send({ error: "bootstrap_has_no_usage_history" });
+        return await runListPage(db, USAGE_EVENTS_LIST, usageEventsReader(db), where, page);
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
     const q = listQuery.parse(req.query);
     const userId = req.authCtx.isAdmin ? q.userId : req.authCtx.userId;
     if (!req.authCtx.isAdmin && !userId) {
@@ -191,5 +254,38 @@ export function registerOptimizationRoutes(app: FastifyInstance, db: Db) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// ADR-0226: the raw cost-events ledger under the shared list contract
+// ---------------------------------------------------------------------------
+
+type CostEventListRow = typeof costEvents.$inferSelect & { userName: string | null };
+const COST_EVENT_USER = sql<string | null>`(select coalesce(nullif(${users.displayName}, ''), ${users.email}) from ${users} where ${users.id} = ${costEvents.userId})`;
+
+export const COST_EVENTS_LIST: ListSpec<CostEventListRow> = {
+  id: "cost-events",
+  sorts: {
+    at: { expr: costEvents.at, keysetAt: costEvents.at },
+    user: { expr: sql`lower(${COST_EVENT_USER})` },
+    technique: { expr: costEvents.technique },
+    tokens: { expr: costEvents.estimatedTokensSaved },
+    usd: { expr: costEvents.estimatedCostSavedUsd },
+    object: { expr: costEvents.objectType },
+    basis: { expr: costEvents.estimationBasis },
+    project: { expr: costEvents.projectId },
+  },
+  columns: {
+    at: { label: "At", value: (r) => r.at },
+    user: { label: "User", value: (r) => r.userName },
+    technique: { label: "Technique", value: (r) => r.technique },
+    tokens: { label: "Tokens saved", value: (r) => r.estimatedTokensSaved },
+    usd: { label: "Est. saved", value: (r) => r.estimatedCostSavedUsd },
+    object: { label: "Object", value: (r) => r.objectType },
+    basis: { label: "Estimation basis", value: (r) => r.estimationBasis },
+    project: { label: "Project", value: (r) => r.projectId },
+  },
+  filters: ["userId", "technique"],
+  defaultSort: { col: "at", dir: "desc" },
+  idCol: costEvents.id,
+};
 /** the object types that have a breakdown of their own (`groupBy=agent|connector|mcp_tool`) */
 const TYPED_BREAKDOWNS: ReadonlySet<string> = new Set(["agent", "connector", "mcp_tool"]);

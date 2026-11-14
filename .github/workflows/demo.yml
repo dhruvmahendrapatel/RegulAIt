@@ -13,35 +13,27 @@ name: Demo journey
 # The `changes` job (one billed minute) therefore diffs THIS push against the
 # previous head and the journey runs only when demo code changed in it; it
 # always runs on `workflow_dispatch`.
+# ADR-0262 (owner decision 2026-11-07): the demo journeys are part of the FULL suite, run at merge time
+# (merge group), on each push to main and nightly; a pull request no longer runs them. Before 2026-11-07 they ran on
+# a PR touching apps/web/**, the demo and governance paths of the gateway, packages/shared/src/** or packages/db/**.
 on:
-  pull_request:
-    paths:
-      - 'apps/web/**'
-      - 'apps/gateway/src/demo-*'
-      - 'apps/gateway/src/use-cases.ts'
-      - 'apps/gateway/src/governance-monitor.ts'
-      - 'apps/gateway/src/remediation.ts'
-      - 'apps/gateway/src/deploy-gate.ts'
-      - 'apps/gateway/src/shadow-ai.ts'
-      # #522 finding 21: the Shadow AI remediation, discovery and workflow-engine paths
-      - 'apps/gateway/src/shadow-ai-remediation.ts'
-      - 'apps/gateway/src/discovery-*.ts'
-      - 'apps/gateway/src/workflows.ts'
-      # AER-040: the consent-binding path and the signed-export path (beat 3E)
-      - 'apps/gateway/src/app.ts'
-      - 'apps/gateway/src/mcp-proxy.ts'
-      - 'apps/gateway/src/governed-evaluate.ts'
-      - 'apps/gateway/src/export-bundle.ts'
-      - 'apps/gateway/src/reporting.ts'
-      - 'packages/shared/src/**'
-      - 'packages/db/**'
-      - '.github/workflows/demo.yml'
+  merge_group:
+    types: [checks_requested]
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 3 * * *'
   workflow_dispatch:
 
 # Least privilege for GITHUB_TOKEN (CodeQL "workflow does not contain permissions"): every job here only
 # checks out code and uploads artifacts; nothing writes to the repository, issues, PRs or packages.
 permissions:
   contents: read
+
+# ADR-0252: CI databases are disposable, so migrations merged but not yet numbered (packages/db/migrations/pending/)
+# are applied in their provisional order. A long-lived database refuses them (packages/db/src/pending-migrations.ts).
+env:
+  REGULAIT_MIGRATIONS_UNASSIGNED: apply
 
 jobs:
   changes:
@@ -84,8 +76,8 @@ jobs:
     # board check-ins) never enters this group, so it cannot cancel a journey
     # that is already running; a later push that runs it does
     concurrency:
-      group: demo-journey-${{ github.event.pull_request.number || github.ref }}
-      cancel-in-progress: true
+      group: demo-journey-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
     # 12, down from 30 (ADR-0183 2.4). Measured 2026-10-06 (ADR-0182, D4 specs):
     # the job reached 20m02s, of which the serial mocked suite was 16.0 min
@@ -136,7 +128,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .node-version
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
@@ -301,8 +293,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.demo == 'true'
     concurrency:
-      group: demo-live-${{ github.event.pull_request.number || github.ref }}
-      cancel-in-progress: true
+      group: demo-live-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 12
 
@@ -339,7 +331,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .node-version
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
@@ -438,8 +430,8 @@ jobs:
     needs: changes
     if: github.event_name == 'workflow_dispatch'
     concurrency:
-      group: demo-rehearsal-${{ github.ref }}
-      cancel-in-progress: true
+      group: demo-rehearsal-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
 
@@ -477,7 +469,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .node-version
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
@@ -574,8 +566,8 @@ jobs:
     needs: changes
     if: github.event_name == 'workflow_dispatch' && needs.changes.outputs.demo == 'true'
     concurrency:
-      group: demo-mock-${{ github.event.pull_request.number || github.ref }}
-      cancel-in-progress: true
+      group: demo-mock-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     uses: ./.github/workflows/mock-ui-shards.yml
     with:
       artifact-prefix: demo-mock
@@ -588,8 +580,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.review == 'true'
     concurrency:
-      group: approval-review-${{ github.event.pull_request.number || github.ref }}
-      cancel-in-progress: true
+      group: approval-review-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
 
@@ -626,7 +618,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .node-version
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile

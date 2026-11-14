@@ -39,6 +39,7 @@ import {
   OAUTH_INTROSPECTION_PATH,
   OAUTH_REVOCATION_PATH,
   OAUTH_TOKEN_PATH,
+  DEFENSECLAW_INGEST_PATH,
 } from "@regulait/shared";
 
 /** ADR-0187: the routes only an engine runner credential reaches */
@@ -179,6 +180,9 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // and refuse everything while the endpoint agent source is disabled (the strict default). Listed in
   // NON_ADMIN_ROUTES too, so `public`. The agent's other routes take its DPoP-bound self token only.
   ...ENDPOINT_AGENT_ENROLMENT_PATHS,
+  // ADR-0261 (P37): a DefenseClaw exporter holds no RegulAIt session or API key; the route authenticates IN-ROUTE on
+  // the source's write-only `rgti_` token (hash lookup), and that token reaches nothing else.
+  DEFENSECLAW_INGEST_PATH,
 ]);
 
 export const NON_ADMIN_ROUTES = new Set([
@@ -229,6 +233,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/builder/agents/:id/export",
   "POST /v1/builder/agents/:id/chat",
   "GET /v1/builder/threads",
+  // ADR-0226: the list's Excel export, under the same scope as the list
+  "GET /v1/builder/threads/export.xlsx",
   "GET /v1/builder/threads/:id",
   "PATCH /v1/builder/threads/:id",
   "POST /v1/builder/threads/:id/steps/:stepId/confirm",
@@ -372,6 +378,10 @@ export const NON_ADMIN_ROUTES = new Set([
   // act and stays admin — and there is no status-writing PATCH at all
   // (transitions are their own audited endpoint, acceptance its own record).
   "POST /v1/risks",
+  // ADR-0214 amendment — per-asset posture scores: any user, scoped in the handler to the assets the caller can
+  // already read (an agent they steward, a use case they own or may read; everything for an admin)
+  "GET /v1/reports/posture/assets",
+  "GET /v1/reports/posture/assets/:kind/:assetId",
   "GET /v1/risks",
   "GET /v1/risks/library",
   // G2/X8: the scenario library — same class as the risk library
@@ -409,6 +419,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/workflows/instances/:instanceId/abort",
   "GET /v1/workflows/instances/:instanceId",
   "GET /v1/approvals",
+  // ADR-0226: the queue's Excel export, read through the same visibility as the list (never wider)
+  "GET /v1/approvals/export.xlsx",
   // ADR-0046 — the review workbench's REVIEWER-facing surface. Each of these
   // is a non-admin route for the same reason deciding an approval is: the
   // person doing the reviewing is not an admin. Every one of them still
@@ -450,7 +462,11 @@ export const NON_ADMIN_ROUTES = new Set([
   "DELETE /v1/traces/:traceId/tags/:key",
   "POST /v1/traces/tags",
   "GET /v1/cost-events",
+  // ADR-0226: the list's Excel export, under the same scope as the list
+  "GET /v1/cost-events/export.xlsx",
   "GET /v1/usage-events",
+  // ADR-0226: the ledger's Excel export, with the identical self-scoping (userId forced to self)
+  "GET /v1/usage-events/export.xlsx",
   // the windowed by-agent / by-connector aggregate of the same ledger; the
   // handler applies the identical self-scoping (userId forced to self)
   "GET /v1/usage-events/summary",
@@ -463,6 +479,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // board report contains, and who receives it, stays admin.
   "POST /v1/reports/definitions/:id/generate",
   "GET /v1/reports/runs",
+  // ADR-0226: the list's Excel export, under the same scope as the list
+  "GET /v1/reports/runs/export.xlsx",
   "GET /v1/reports/runs/:id",
   "GET /v1/reports/runs/:id/export",
   // ADR-0059: running and reading a BLAST-RADIUS PREVIEW. Non-admin for the
@@ -486,6 +504,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // organisation's behalf that an organisational control is met, stays admin.
   "POST /v1/compliance/packs/:id/evaluate",
   "GET /v1/compliance/pack-reports",
+  // ADR-0226: the list's Excel export, under the same scope as the list
+  "GET /v1/compliance/pack-reports/export.xlsx",
   "GET /v1/compliance/pack-reports/:id",
   // ADR-0056: the governance copilot. NON-ADMIN ON PURPOSE — the compliance
   // officer asking "who accessed PII last quarter" is exactly the person this
@@ -515,6 +535,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // reading every project's ledger to find out, stays admin.
   "GET /v1/spend/forecast",
   "GET /v1/spend/anomalies",
+  // ADR-0226: the list's Excel export, under the same scope as the list
+  "GET /v1/spend/anomalies/export.xlsx",
   // ADR-0051: a team lead cutting and reading THEIR OWN team's billing view.
   // Same mechanism as ADR-0047/0049 — `evaluateReportAccess` resolves the
   // caller to a CONCRETE project-id set and every usage_events query is built
@@ -525,6 +547,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // conspicuously NOT here: deciding what a customer owes stays admin.
   "POST /v1/billing/periods/:id/statements",
   "GET /v1/billing/statements",
+  // ADR-0226: the list's Excel export, under the same scope as the list
+  "GET /v1/billing/statements/export.xlsx",
   "GET /v1/billing/statements/:id",
   "GET /v1/billing/statements/:id/export",
   "POST /v1/billing/statements/:id/reconcile",
@@ -605,6 +629,9 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /auth/sessions",
   "POST /auth/sessions/:sessionId/revoke",
   "POST /auth/sessions/revoke-others",
+  // ADR-0218: a person's OWN palette and mode — the row is keyed by the caller's user id alone (no id in the
+  // path or body), like change-password above. Whether a palette is allowed is the org's lock, read in the handler.
+  "PUT /auth/appearance",
   "GET /auth/oidc/providers",
   "GET /auth/oidc/:providerId/start",
   "GET /auth/oidc/callback",
@@ -644,6 +671,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // ADR-0226: the Excel export of the same list, under the same scope (a non-admin gets only their own runs)
   "GET /v1/runs/export.xlsx",
   "GET /v1/workflows/instances",
+  // ADR-0226: the list's Excel export, under the same scope as the list
+  "GET /v1/workflows/instances/export.xlsx",
   "GET /v1/projects",
   "GET /v1/users/directory",
   // ADR-0061: see the AUTH_EXEMPT note above. The admin gate keys on a USER's
@@ -823,16 +852,22 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/engines/:engineId",
   "POST /v1/engine-runs",
   "GET /v1/engine-runs",
+  // ADR-0226: the list's Excel export, under the same scope as the list
+  "GET /v1/engine-runs/export.xlsx",
   "GET /v1/engine-runs/:runId",
   "POST /v1/engine-runs/:runId/cancel",
   "POST /v1/engine-schedules",
   "GET /v1/engine-schedules",
+  // ADR-0226: the list's Excel export, under the same scope as the list
+  "GET /v1/engine-schedules/export.xlsx",
   "PATCH /v1/engine-schedules/:scheduleId",
   // ADR-0208 G9: soft delete by the schedule's owner or an admin, checked in-handler
   "DELETE /v1/engine-schedules/:scheduleId",
   "POST /v1/model-artifacts",
   // B5-M: the caller's own uploads (an admin sees all), checked in-handler
   "GET /v1/model-artifacts",
+  // ADR-0226: the list's Excel export, under the same scope as the list
+  "GET /v1/model-artifacts/export.xlsx",
   "GET /v1/model-artifacts/:artifactId",
   // ADR-0187 decision 127: the uploader deletes their own (an admin any), with a step-up, checked in-handler
   "DELETE /v1/model-artifacts/:artifactId",
@@ -859,6 +894,8 @@ export const NON_ADMIN_ROUTES = new Set([
   ...EXECUTOR_CHANNEL_ROUTES,
   // ADR-0195 SD4b — the endpoint agent's enrolment (auth-exempt above too; in-route bulk token or device ticket)
   ...ENDPOINT_AGENT_ENROLMENT_PATHS.map((p) => `POST ${p}`),
+  // ADR-0261 (P37): the third-party exporter route (authenticated in-route by its source token)
+  `POST ${DEFENSECLAW_INGEST_PATH}`,
 
   // ADR-0189 slice B4 — the Decision BOM and AI BOM reads, bundles and the
   // online verifier. The gate is `bom_export_roles` (§7, §9), checked IN THE

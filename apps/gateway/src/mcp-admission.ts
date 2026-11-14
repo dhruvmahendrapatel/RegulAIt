@@ -45,6 +45,9 @@
  */
 
 import type { FastifyInstance } from "fastify";
+import { wantsListContract, type ListSpec } from "./list-contract.js";
+import { answerListExport, answerListPage, type ContractList } from "./list-contract-route.js";
+import { getTableColumns } from "@regulait/db";
 import {
   and,
   auditLog,
@@ -88,6 +91,7 @@ import {
   serverReleaseStatus,
 } from "./release-age.js";
 import { registerSkillAdmissionRoutes } from "./skill-admission.js";
+import { engineAdmissionFor, engineHoldFindings, withEngineMcpFindings } from "./admission-engine-scans.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 
@@ -331,15 +335,25 @@ export async function assertAdmitted(db: Db, serverId: string): Promise<void> {
       admissionState: mcpServers.admissionState,
       admissionFindings: mcpServers.admissionFindings,
       admissionSeverity: mcpServers.admissionSeverity,
+      admissionManifestDigest: mcpServers.admissionManifestDigest,
     })
     .from(mcpServers)
     .where(eq(mcpServers.id, serverId));
   if (!row) return; // an unknown server is the caller's own 404, not ours
-  if (row.admissionState !== "held") {
+  // ADR-0242: a server whose stored state admits is still held while the mcpscanner engine is on and has not
+  // passed its current manifest digest (an admin's clearance for the digest stands; an unknown digest is the
+  // sync's to scan, so nothing is held before the first manifest is read)
+  const engineHold =
+    row.admissionState !== "held" && row.admissionState !== "cleared" && row.admissionManifestDigest
+      ? await engineAdmissionFor(db, { kind: "mcp_server", id: serverId, digest: row.admissionManifestDigest })
+      : null;
+  if (row.admissionState !== "held" && !engineHold?.holds) {
     if (org.minReleaseAgeDays > 0) await assertReleaseAged(db, serverId, org.minReleaseAgeDays);
     return;
   }
-  const findings = (row.admissionFindings as McpAdmissionFinding[] | null) ?? [];
+  const findings = engineHold?.holds
+    ? engineHoldFindings(engineHold.engineId, engineHold)
+    : ((row.admissionFindings as McpAdmissionFinding[] | null) ?? []);
   const detail =
     `MCP server '${row.name}' is HELD by admission scanning (severity ` +
     `${row.admissionSeverity ?? "unknown"}, hold threshold ${MCP_ADMISSION_HOLD_AT}): ` +
@@ -355,6 +369,7 @@ export async function assertAdmitted(db: Db, serverId: string): Promise<void> {
       phase: "connect",
       admissionState: row.admissionState,
       severity: row.admissionSeverity,
+      engine: engineHold?.holds ? { engineId: engineHold.engineId, status: engineHold.status } : null,
       findingCount: findings.length,
       scannerVersion: MCP_ADMISSION_SCANNER_VERSION,
     },
@@ -433,10 +448,12 @@ async function scanAndPersistManifest(
     .where(eq(mcpServers.id, serverId));
   if (!before) return { mode, scan: null, state: null };
 
-  const scan = withVendoredMcpFindings(
-    withReservedNameFindings(scanMcpManifest(tools), tools),
-    tools,
-    org.vendoredDetectionPacks,
+  // ADR-0242: with the mcpscanner engine on, its verdict on THIS digest joins the scan (no scan yet, an engine
+  // error or a flag all hold, fail closed); with it off (the default) this is the scan unchanged
+  const scan = await withEngineMcpFindings(
+    db,
+    serverId,
+    withVendoredMcpFindings(withReservedNameFindings(scanMcpManifest(tools), tools), tools, org.vendoredDetectionPacks),
   );
   const reserved = scan.findings.some((f) => f.rule === MCP_RESERVED_PREFIX_RULE);
   const state = reserved
@@ -538,11 +555,16 @@ export async function admissionHidesTools(db: Db, serverId: string): Promise<boo
       admissionState: mcpServers.admissionState,
       releaseDigest: mcpServers.releaseDigest,
       releaseSeenAt: mcpServers.releaseSeenAt,
+      admissionManifestDigest: mcpServers.admissionManifestDigest,
     })
     .from(mcpServers)
     .where(eq(mcpServers.id, serverId));
   if (!row) return false;
   if (org.mcpAdmissionMode === "enforce" && row.admissionState === "held") return true;
+  // ADR-0242: the engine's live say, as in assertAdmitted
+  if (org.mcpAdmissionMode === "enforce" && row.admissionState !== "cleared" && row.admissionManifestDigest) {
+    if ((await engineAdmissionFor(db, { kind: "mcp_server", id: serverId, digest: row.admissionManifestDigest })).holds) return true;
+  }
   // ADR-0175 A5: a server in release-age quarantine contributes no tools either
   if (org.minReleaseAgeDays > 0) return (await serverReleaseStatus(db, row, org.minReleaseAgeDays)).quarantined;
   return false;
@@ -566,7 +588,34 @@ export function registerMcpAdmissionRoutes(app: FastifyInstance, db: Db) {
    * can see WHAT is held, WHY, and under which scanner version, without
    * needing a second tool.
    */
-  app.get("/v1/mcp/admission", async () => {
+  // ADR-0226: with any of sort/dir/cursor/offset/count the review queue
+  // answers the shared list contract (`state` narrows, e.g. `held`); with
+  // none of them, exactly the response below. Never the server URL: the
+  // held list does not show it, and a URL can carry a credential.
+  const heldList: ContractList<HeldServerRow, { state?: string }> = {
+    spec: MCP_ADMISSION_LIST,
+    filters: z.object({ state: z.string().min(1).max(32).optional() }).strict(),
+    reader: {
+      fetch: (q) =>
+        db
+          .select({ ...HELD_SERVER_COLUMNS, _cursorAt: q.cursorAt })
+          .from(mcpServers)
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset),
+      countable: (where) => db.select({ one: sql`1` }).from(mcpServers).where(where),
+      idOf: (r) => r.id,
+    },
+    where: (_req, f) => and(ne(mcpServers.admissionState, "clean"), f.state ? eq(mcpServers.admissionState, f.state as never) : undefined),
+    extra: async () => {
+      const mode = await loadAdmissionMode(db);
+      return { mode, enforcing: mode === "enforce", holdAt: MCP_ADMISSION_HOLD_AT, scannerVersion: MCP_ADMISSION_SCANNER_VERSION };
+    },
+  };
+  app.get("/v1/mcp/admission/export.xlsx", async (req, reply) => answerListExport(db, req, reply, heldList));
+  app.get("/v1/mcp/admission", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, heldList);
     const mode = await loadAdmissionMode(db);
     const rows = await db
       .select({
@@ -699,3 +748,45 @@ export function registerMcpAdmissionRoutes(app: FastifyInstance, db: Db) {
     return reply.send({ ...cleared.row, ...(aiBomSnapshotWarning ? { aiBomSnapshotWarning } : {}) });
   });
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0226: the MCP admission queue under the shared list contract
+// ---------------------------------------------------------------------------
+
+const HELD_SERVER_COLUMNS = {
+  id: mcpServers.id,
+  name: mcpServers.name,
+  admissionState: mcpServers.admissionState,
+  admissionSeverity: mcpServers.admissionSeverity,
+  admissionScannedAt: mcpServers.admissionScannedAt,
+  admissionFindings: mcpServers.admissionFindings,
+  admissionScannerVersion: mcpServers.admissionScannerVersion,
+};
+type HeldServerRow = Pick<typeof mcpServers.$inferSelect, keyof typeof HELD_SERVER_COLUMNS>;
+const heldFindingText = (f: unknown): string => {
+  const list = Array.isArray(f) ? (f as Array<{ rule?: unknown; where?: unknown; severity?: unknown; count?: unknown }>) : [];
+  return list.length ? list.map((x) => `${String(x.rule)} in ${String(x.where)} (${String(x.severity)}, ×${String(x.count)})`).join("; ") : "no findings recorded";
+};
+
+export const MCP_ADMISSION_LIST: ListSpec<HeldServerRow> = {
+  id: "mcp-admission",
+  sorts: {
+    name: { expr: sql`lower(${mcpServers.name})` },
+    sev: { expr: mcpServers.admissionSeverity },
+    findings: { expr: sql`jsonb_array_length(coalesce(${mcpServers.admissionFindings}, '[]'::jsonb))` },
+    state: { expr: mcpServers.admissionState },
+    scanned: { expr: mcpServers.admissionScannedAt },
+    scanner: { expr: mcpServers.admissionScannerVersion },
+  },
+  columns: {
+    name: { label: "Server", value: (r) => r.name },
+    sev: { label: "Severity", value: (r) => r.admissionSeverity },
+    findings: { label: "Findings", value: (r) => heldFindingText(r.admissionFindings) },
+    state: { label: "State", value: (r) => r.admissionState },
+    scanned: { label: "Scanned", value: (r) => r.admissionScannedAt },
+    scanner: { label: "Scanner version", value: (r) => r.admissionScannerVersion },
+  },
+  filters: ["state"],
+  defaultSort: { col: "scanned", dir: "desc" },
+  idCol: mcpServers.id,
+};

@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-label="Illustrative Executive command centre regulAIt interface mockup">
+<rect x="0" y="0" width="1440" height="900" rx="0" fill="#090F1A"/>
+<rect x="0" y="0" width="245" height="900" rx="0" fill="#0C1624"/>
+<text x="30" y="57" font-family="Arial,sans-serif" font-size="29" font-weight="700" fill="#FFFFFF">regulAIt</text>
+<text x="30" y="84" font-family="Arial,sans-serif" font-size="12" font-weight="500" fill="#BFC9E2">AI governance workspace</text>
+<text x="38" y="165" font-family="Arial,sans-serif" font-size="17" font-weight="500" fill="#22D3EE">Home</text>
+<text x="38" y="225" font-family="Arial,sans-serif" font-size="17" font-weight="500" fill="#C9D2E6">My actions</text>
+<text x="38" y="285" font-family="Arial,sans-serif" font-size="17" font-weight="500" fill="#C9D2E6">Use cases</text>
+<text x="38" y="345" font-family="Arial,sans-serif" font-size="17" font-weight="500" fill="#C9D2E6">Approvals</text>
+<text x="38" y="405" font-family="Arial,sans-serif" font-size="17" font-weight="500" fill="#C9D2E6">Risk &amp; controls</text>
+<text x="38" y="465" font-family="Arial,sans-serif" font-size="17" font-weight="500" fill="#C9D2E6">Evidence</text>
+<text x="38" y="525" font-family="Arial,sans-serif" font-size="17" font-weight="500" fill="#C9D2E6">Monitoring</text>
+<text x="38" y="585" font-family="Arial,sans-serif" font-size="17" font-weight="500" fill="#C9D2E6">Reports</text>
+<rect x="270" y="18" width="900" height="48" rx="14" fill="#172433"/>
+<text x="296" y="49" font-family="Arial,sans-serif" font-size="16" font-weight="500" fill="#A8BACB">Search use cases, risks, evidence and controls</text>
+<text x="1280" y="49" font-family="Arial,sans-serif" font-size="15" font-weight="700" fill="#22D3EE">Concept</text>
+<text x="282" y="133" font-family="Arial,sans-serif" font-size="35" font-weight="700" fill="#F8FAFC">Executive command centre</text>
+<text x="282" y="167" font-family="Arial,sans-serif" font-size="17" font-weight="500" fill="#A8BACB">Enterprise AI risk, decisions and control health</text>
+<rect x="282" y="205" width="267" height="152" rx="14" fill="#172433"/>
+<text x="302" y="241" font-family="Arial,sans-serif" font-size="16" font-weight="500" fill="#A8BACB">Open risks</text>
+<text x="302" y="302" font-family="Arial,sans-serif" font-size="38" font-weight="700" fill="#F8FAFC">18</text>
+<text x="302" y="330" font-family="Arial,sans-serif" font-size="14" font-weight="500" fill="#A8BACB">4 need attention</text>
+<rect x="567" y="205" width="267" height="152" rx="14" fill="#172433"/>
+<text x="587" y="241" font-family="Arial,sans-serif" font-size="16" font-weight="500" fill="#A8BACB">Pending approvals</text>
+<text x="587" y="302" font-family="Arial,sans-serif" font-size="38" font-weight="700" fill="#F8FAFC">12</text>
+<text x="587" y="330" font-family="Arial,sans-serif" font-size="14" font-weight="500" fill="#A8BACB">3 past target</text>
+<rect x="852" y="205" width="267" height="152" rx="14" fill="#172433"/>
+<text x="872" y="241" font-family="Arial,sans-serif" font-size="16" font-weight="500" fill="#A8BACB">Evidence coverage</text>
+<text x="872" y="302" font-family="Arial,sans-serif" font-size="38" font-weight="700" fill="#F8FAFC">82%</text>
+<text x="872" y="330" font-family="Arial,sans-serif" font-size="14" font-weight="500" fill="#A8BACB">Measured controls</text>
+<rect x="1137" y="205" width="267" height="152" rx="14" fill="#172433"/>
+<text x="1157" y="241" font-family="Arial,sans-serif" font-size="16" font-weight="500" fill="#A8BACB">AI spend (estimate)</text>
+<text x="1157" y="302" font-family="Arial,sans-serif" font-size="38" font-weight="700" fill="#F8FAFC">$48.2k</text>
+<text x="1157" y="330" font-family="Arial,sans-serif" font-size="14" font-weight="500" fill="#A8BACB">Current period</text>
+<rect x="282" y="380" width="738" height="418" rx="14" fill="#172433"/>
+<text x="309" y="425" font-family="Arial,sans-serif" font-size="23" font-weight="700" fill="#F8FAFC">Risk and governance overview</text>
+<text x="309" y="458" font-family="Arial,sans-serif" font-size="15" font-weight="500" fill="#A8BACB">Source-linked, time-bounded metrics</text>
+<rect x="315" y="508" width="410" height="18" rx="7" fill="#27394C"/>
+<rect x="315" y="508" width="90" height="18" rx="7" fill="#22D3EE"/>
+<text x="752" y="524" font-family="Arial,sans-serif" font-size="16" font-weight="500" fill="#F8FAFC">High risk · 12</text>
+<rect x="315" y="573" width="410" height="18" rx="7" fill="#27394C"/>
+<rect x="315" y="573" width="200" height="18" rx="7" fill="#A78BFA"/>
+<text x="752" y="589" font-family="Arial,sans-serif" font-size="16" font-weight="500" fill="#F8FAFC">Medium risk · 34</text>
+<rect x="315" y="638" width="410" height="18" rx="7" fill="#27394C"/>
+<rect x="315" y="638" width="340" height="18" rx="7" fill="#059669"/>
+<text x="752" y="654" font-family="Arial,sans-serif" font-size="16" font-weight="500" fill="#F8FAFC">Low risk · 68</text>
+<rect x="315" y="703" width="410" height="18" rx="7" fill="#27394C"/>
+<rect x="315" y="703" width="75" height="18" rx="7" fill="#94A3B8"/>
+<text x="752" y="719" font-family="Arial,sans-serif" font-size="16" font-weight="500" fill="#F8FAFC">Not assessed · 14</text>
+<rect x="1040" y="380" width="370" height="418" rx="14" fill="#172433"/>
+<text x="1063" y="425" font-family="Arial,sans-serif" font-size="23" font-weight="700" fill="#F8FAFC">Needs attention</text>
+<rect x="1055" y="456" width="340" height="66" rx="9" fill="#223246"/>
+<text x="1070" y="481" font-family="Arial,sans-serif" font-size="14" font-weight="600" fill="#F8FAFC">Critical risk awaiting treatment</text>
+<text x="1070" y="505" font-family="Arial,sans-serif" font-size="12" font-weight="500" fill="#A8BACB">High priority</text>
+<rect x="1055" y="535" width="340" height="66" rx="9" fill="#223246"/>
+<text x="1070" y="481" font-family="Arial,sans-serif" font-size="14" font-weight="600" fill="#F8FAFC">Use-case approval awaiting review</text>
+<text x="1070" y="505" font-family="Arial,sans-serif" font-size="12" font-weight="500" fill="#A8BACB">Pending review</text>
+<rect x="1055" y="614" width="340" height="66" rx="9" fill="#223246"/>
+<text x="1070" y="481" font-family="Arial,sans-serif" font-size="14" font-weight="600" fill="#F8FAFC">Missing evidence for control</text>
+<text x="1070" y="505" font-family="Arial,sans-serif" font-size="12" font-weight="500" fill="#A8BACB">Evidence gap</text>
+<rect x="1055" y="693" width="340" height="66" rx="9" fill="#223246"/>
+<text x="1070" y="481" font-family="Arial,sans-serif" font-size="14" font-weight="600" fill="#F8FAFC">Risk treatment due soon</text>
+<text x="1070" y="505" font-family="Arial,sans-serif" font-size="12" font-weight="500" fill="#A8BACB">Due soon</text>
+<text x="282" y="866" font-family="Arial,sans-serif" font-size="13" font-weight="700" fill="#A8BACB">ILLUSTRATIVE MOCKUP · NOT LIVE PRODUCT DATA</text>
+</svg>

@@ -7,11 +7,11 @@
 - **Driver**: [GAP_ANALYSIS_CREDO_AI_2026-08.md](../product/GAP_ANALYSIS_CREDO_AI_2026-08.md)
   gap **L1** — "a pre-build use-case intake and approval front-door", named there as *"the
   highest-leverage Credo-shaped gap … buildable now, on existing rails."*
-- **Extends**: [ADR-0018](0018-workflow-engine-slice.md) (the pillar-2 kernel the intake runs
+- **Extends**: [ADR-0018](0018-six-dimension-assignment-matching.md) (the pillar-2 kernel the intake runs
   on), [ADR-0077](0077-cascade-demo-headline-template-gallery.md) (the gallery the intake shape
   joins, and the derive-never-duplicate rule the cascade card copies),
   [ADR-0079](0079-plan-only-stage-enforcement.md) (the resting plan stage the intake uses as its
-  refinement step), [ADR-0021](0021-shared-approvals-queue.md)/[ADR-0045](0045-model-risk-management.md)
+  refinement step), ADR-0021/[ADR-0045](0045-model-risk-management.md)
   (the one approvals queue and the decide-hook pattern the lifecycle join follows).
 
 ## Context

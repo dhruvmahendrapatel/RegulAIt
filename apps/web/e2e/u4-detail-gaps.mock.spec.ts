@@ -72,6 +72,11 @@ async function mockApi(page: Page, routes: Record<string, Handler | unknown>): P
   return m;
 }
 const calls = (m: Mock, method: string, path: string) => m.calls.filter((c) => c.method === method && c.path === path);
+/** the last GET of a list, its params sorted (the list control sends them in its own order) */
+const lastQuery = (m: Mock, path: string) => {
+  const q = new URLSearchParams(calls(m, "GET", path).at(-1)?.search ?? "");
+  return [...q.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${k}=${v}`).join("&");
+};
 
 async function expectAxeClean(page: Page, label: string, scope?: string | Locator) {
   let include = typeof scope === "string" ? scope : undefined;
@@ -215,12 +220,14 @@ test.describe("U4: imported cost batch", () => {
       },
       [`GET /v1/cost-imports/${U(41)}`]: { status: 404, body: { error: "unknown_import" } },
     });
-    await page.goto("/ui/admin/cost-consolidation");
+    // P3: the full import history (with Open) is on its own page; the overview keeps a preview
+    await page.goto("/ui/admin/cost-consolidation/imports");
     await page.getByRole("button", { name: /Open the acme-ai import/ }).first().click();
     const dialog = page.getByRole("dialog", { name: "Imported cost batch" });
     await expect(dialog.getByText("IMPORTED cost is what a vendor file says.")).toBeVisible();
     await expect(dialog.getByText("ghost@vendor.test")).toBeVisible();
-    await expect(dialog.getByText("unattributed")).toBeVisible();
+    await expect(dialog.getByText("unattributed", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("Imported lines · 2 lines · 1 unattributed")).toBeVisible();
     await expectAxeClean(page, "import batch dialog", '[role="dialog"]');
     await dialog.getByRole("button", { name: "Close" }).click();
     await page.getByRole("button", { name: /Open the acme-ai import/ }).nth(1).click();
@@ -432,7 +439,8 @@ test.describe("U4: initiative detail", () => {
       "GET /v1/energy/factors": { factors: [], region: null, notes: { shipped: "none shipped", unknown: "unknown" } },
       [`GET /v1/initiatives/${U(20)}`]: { initiative: { id: U(20), name: "Platform", costCenter: "CC-1", createdAt: T }, projects: [{ id: U(30), name: "Atlas", spentUsd: 0 }, { id: U(31), name: "Beacon", spentUsd: 12.5 }], projectCount: 2, spentUsd: 12.5 },
     });
-    await page.goto("/ui/admin/cost");
+    // P3: initiatives are on the cost dashboard's set-up tab
+    await page.goto("/ui/admin/cost?tab=setup");
     await page.getByRole("button", { name: "Open initiative Platform" }).click();
     const dialog = page.getByRole("dialog", { name: "Initiative — Platform" });
     await expect(dialog.getByRole("link", { name: "Beacon" })).toBeVisible();
@@ -511,7 +519,7 @@ test.describe("U4: billing details and history", () => {
     await expect(page.getByRole("dialog").getByText(/outside what you can see/)).toBeVisible();
   });
 
-  test("full history: statements by period with the route's limit, periods, every rate card", async ({ page }) => {
+  test("full history: statements by period, paged by the list control, periods, every rate card", async ({ page }) => {
     const m = await mockApi(page, {
       "GET /v1/billing/overview": OVERVIEW,
       "GET /v1/billing/periods": { periods: [{ id: U(81), scopeKind: "org", scopeKey: "org", periodStart: "2026-09-01T00:00:00.000Z", periodEnd: "2026-10-01T00:00:00.000Z", status: "open", closedAt: null }], note: "" },
@@ -520,12 +528,12 @@ test.describe("U4: billing details and history", () => {
     });
     await page.goto("/ui/admin/billing");
     await expect(page.getByText("Full billing history")).toBeVisible();
-    await expect.poll(() => calls(m, "GET", "/v1/billing/statements").at(-1)?.search).toBe("?limit=50");
+    await expect.poll(() => lastQuery(m, "/v1/billing/statements")).toBe("count=exact&dir=desc&limit=10&sort=g");
     await page.getByRole("tab", { name: "Periods" }).click();
     await page.getByRole("button", { name: "Statements for 2026-09-01 – 2026-10-01 (org)" }).click();
-    await expect.poll(() => calls(m, "GET", "/v1/billing/statements").at(-1)?.search).toBe(`?limit=50&periodId=${U(81)}`);
-    await page.getByLabel("Show at most").selectOption("200");
-    await expect.poll(() => calls(m, "GET", "/v1/billing/statements").at(-1)?.search).toBe(`?limit=200&periodId=${U(81)}`);
+    await expect.poll(() => lastQuery(m, "/v1/billing/statements")).toBe(`count=exact&dir=desc&limit=10&periodId=${U(81)}&sort=g`);
+    await page.locator('[data-list="billing-statements"]').getByLabel("Rows per page").selectOption("100");
+    await expect.poll(() => lastQuery(m, "/v1/billing/statements")).toBe(`count=exact&dir=desc&limit=100&periodId=${U(81)}&sort=g`);
     await page.getByRole("tab", { name: "Rate cards" }).click();
     await expect.poll(() => calls(m, "GET", "/v1/billing/rate-cards").length).toBe(1);
     await expectAxeClean(page, "billing history", page.locator("[data-rg-card]").filter({ hasText: "Full billing history" }).first());
@@ -570,9 +578,9 @@ test.describe("U4: report definition, run and run history", () => {
     await expect(page.getByRole("button", { name: "Details of Exec summary" })).toBeFocused();
 
     await expect(page.getByText("Run history")).toBeVisible();
-    await expect.poll(() => calls(m, "GET", "/v1/reports/runs").at(-1)?.search).toBe("?limit=50");
+    await expect.poll(() => lastQuery(m, "/v1/reports/runs")).toBe("count=exact&dir=desc&limit=10&sort=g");
     await page.getByLabel("Definition", { exact: true }).last().selectOption(DEF);
-    await expect.poll(() => calls(m, "GET", "/v1/reports/runs").at(-1)?.search).toBe(`?limit=50&definitionId=${DEF}`);
+    await expect.poll(() => lastQuery(m, "/v1/reports/runs")).toBe(`count=exact&definitionId=${DEF}&dir=desc&limit=10&sort=g`);
     await expectAxeClean(page, "run history", page.locator("[data-rg-card]").filter({ hasText: "Run history" }).first());
   });
 
@@ -637,11 +645,11 @@ test.describe("U4: boot schedulers and spend history", () => {
     await expect(page.getByText("A signal for human review.")).toBeVisible();
     await page.getByLabel("Signal status").selectOption("acknowledged");
     await page.getByLabel("Signal project").selectOption(U(30));
-    await expect.poll(() => calls(m, "GET", "/v1/spend/anomalies").at(-1)?.search).toBe(`?limit=50&projectId=${U(30)}&status=acknowledged`);
+    await expect.poll(() => lastQuery(m, "/v1/spend/anomalies")).toBe(`count=exact&dir=desc&limit=10&projectId=${U(30)}&sort=d&status=acknowledged`);
     await page.getByRole("button", { name: "Show all changes" }).click();
     await expect(page.getByText("new team onboards")).toBeVisible();
     await page.getByLabel("Change project").selectOption(U(31));
-    await expect.poll(() => calls(m, "GET", "/v1/spend/scheduled-changes").at(-1)?.search).toBe(`?projectId=${U(31)}`);
+    await expect.poll(() => lastQuery(m, "/v1/spend/scheduled-changes")).toBe(`count=exact&dir=desc&limit=10&projectId=${U(31)}&sort=e`);
     await expectAxeClean(page, "spend history", "main");
   });
 });

@@ -40,6 +40,7 @@ import {
   desc,
   discoveryCredentials,
   discoveryPseudonyms,
+  discoveryPseudonymKeys,
   discoveryRuns,
   discoverySettings,
   discoverySources,
@@ -164,6 +165,15 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   restores.push(await relaxIdentityForTest(db, { mfaRequired: "off" }));
+  // the per-tenant pseudonym key is wrapped under the first data key that asks for it, and a gateway shard runs
+  // several suites with different data keys on one database: set the existing key aside, put it back afterwards
+  // (as zz-adr0259-endpoint-mcp-config.test.ts does)
+  const priorPseudonymKeys = await db.select().from(discoveryPseudonymKeys);
+  await db.delete(discoveryPseudonymKeys);
+  restores.push(async () => {
+    await db.delete(discoveryPseudonymKeys);
+    if (priorPseudonymKeys.length) await db.insert(discoveryPseudonymKeys).values(priorPseudonymKeys);
+  });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY, discoveryScanners: REGISTRY });
   bare = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   const admin = await mkUser("admin", true);

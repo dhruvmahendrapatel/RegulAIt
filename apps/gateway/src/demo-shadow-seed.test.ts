@@ -159,6 +159,19 @@ describe("ADR-0197 decision 7: the fallback Shadow-AI discovery dataset", () => 
     expect(dry.statusCode, dry.body).toBe(200);
     expect(dry.json()).toMatchObject({ mode: "dry_run", matched: 1 });
     expect(dry.json().findings.map((f: { provider: string }) => f.provider)).toEqual([D.importExample.provider]);
+    // what `seed` does in the same first-admin-setup window (ADR-0250): Dana exists, and her read grant on the policy
+    // library is minted while the bootstrap credential can still pass a grant mint's step-up
+    const dana = await app.inject({ method: "POST", url: "/v1/users", headers: AUTH, payload: { email: "dana@regulait.local", displayName: "Dana Developer" } });
+    expect(dana.statusCode, dana.body).toBe(201);
+    const library = ((await get("/v1/connectors")).body.connectors as Array<{ id: string; name: string }>).find((c) => c.name === D.contentTrust.connectorName);
+    expect(library, "the setup phase created the policy library").toBeTruthy();
+    const danaGrant = await app.inject({
+      method: "POST",
+      url: "/v1/grants/connectors",
+      headers: AUTH,
+      payload: { userId: dana.json().id, connectorId: library!.id, mode: "read" },
+    });
+    expect(danaGrant.statusCode, danaGrant.body).toBe(201);
     // what `seed` does next, in the same first-admin-setup window: Ada and the security lead, both admins, MFA enrolled
     const ids: string[] = [];
     for (const [email, displayName] of [["admin@regulait.local", "Ada Admin"], [DEMO_SECURITY_LEAD.email, DEMO_SECURITY_LEAD.displayName]]) {

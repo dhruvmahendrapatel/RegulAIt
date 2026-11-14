@@ -18,6 +18,8 @@
  */
 import { expect, test, type Page } from "@playwright/test";
 import { passTotp } from "./totp-sign-in";
+import { steppedUpAs } from "./demo-credentials";
+import { ADMIN_EMAIL } from "./admin-api";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -78,6 +80,8 @@ async function mkAgent(page: Page, name: string) {
 test("an N-way set and a pattern rule declared on the page are enforced at the mint — full set refused, N-1 subset free", async ({
   page,
 }) => {
+  // ADR-0250: the sign-in and each grant mint's step-up spend a TOTP step (each may wait a 30 s window)
+  test.setTimeout(240_000);
   await signIn(page, "admin@regulait.local", [ADMIN_PASSWORD, state.passwords.admin], ADMIN_PASSWORD);
 
   // --- seed via the bootstrap API ------------------------------------------
@@ -114,13 +118,15 @@ test("an N-way set and a pattern rule declared on the page are enforced at the m
   await expect(threeWayRow.getByText(/agent 'zzz-ops-a'.*agent 'zzz-ops-b'.*agent 'zzz-ops-c'/)).toBeVisible();
 
   // --- the boundary, against the gateway's own mint endpoints --------------
-  const g1 = await page.request.post("/v1/grants/agents", { headers: BOOT, data: { userId: holderId, agentId: agentA } });
+  // ADR-0250: a grant mint is a settings_relax step-up the bootstrap token cannot give, so Ada mints from her
+  // signed-in page with her authenticator (the SoD refusal answers 409 before any step-up is asked)
+  const g1 = await steppedUpAs(page.request, ADMIN_EMAIL, "POST", "/v1/grants/agents", { userId: holderId, agentId: agentA });
   expect(g1.status()).toBe(201);
   // holding 1 of 3: the second side mints FREELY (any N-1 subset is fine)
-  const g2 = await page.request.post("/v1/grants/agents", { headers: BOOT, data: { userId: holderId, agentId: agentB } });
+  const g2 = await steppedUpAs(page.request, ADMIN_EMAIL, "POST", "/v1/grants/agents", { userId: holderId, agentId: agentB });
   expect(g2.status()).toBe(201);
   // the COMPLETING mint is the refusal, and it says the boundary out loud
-  const g3 = await page.request.post("/v1/grants/agents", { headers: BOOT, data: { userId: holderId, agentId: agentC } });
+  const g3 = await steppedUpAs(page.request, ADMIN_EMAIL, "POST", "/v1/grants/agents", { userId: holderId, agentId: agentC });
   expect(g3.status()).toBe(409);
   const refusal = await g3.json();
   expect(refusal.error).toBe("sod_conflict");
@@ -141,12 +147,9 @@ test("an N-way set and a pattern rule declared on the page are enforced at the m
   await expect(patternRow.getByText(/any connector \(readwrite\).*agent 'zzz-ops-q'/)).toBeVisible();
 
   // a readwrite connector holding on ANY connector completes the pair
-  const cg = await page.request.post("/v1/grants/connectors", {
-    headers: BOOT,
-    data: { userId: modeHolderId, connectorId, mode: "readwrite" },
-  });
+  const cg = await steppedUpAs(page.request, ADMIN_EMAIL, "POST", "/v1/grants/connectors", { userId: modeHolderId, connectorId, mode: "readwrite" });
   expect(cg.status()).toBe(201);
-  const gq = await page.request.post("/v1/grants/agents", { headers: BOOT, data: { userId: modeHolderId, agentId: agentQ } });
+  const gq = await steppedUpAs(page.request, ADMIN_EMAIL, "POST", "/v1/grants/agents", { userId: modeHolderId, agentId: agentQ });
   expect(gq.status()).toBe(409);
   const patternRefusal = await gq.json();
   expect(patternRefusal.ruleName).toBe("zzz-ops-any-rw");
@@ -156,13 +159,15 @@ test("an N-way set and a pattern rule declared on the page are enforced at the m
 test("a campaign review is reassigned through the page — and NEVER to the grant's holder, refused verbatim", async ({
   page,
 }) => {
+  // ADR-0250: the sign-in and the grant mint's step-up each spend a TOTP step
+  test.setTimeout(120_000);
   await signIn(page, "admin@regulait.local", [ADMIN_PASSWORD, state.passwords.admin], ADMIN_PASSWORD);
 
   // --- seed: a holder with one agent grant, and the reassignment target ----
   const holderId = await mkUser(page, "zzz-ops-cert-holder@example.com", "zzz ops cert holder");
   await mkUser(page, "zzz-ops-reviewer@example.com", "zzz ops reviewer");
   const agentId = await mkAgent(page, "zzz-ops-cert-agent");
-  const g = await page.request.post("/v1/grants/agents", { headers: BOOT, data: { userId: holderId, agentId } });
+  const g = await steppedUpAs(page.request, ADMIN_EMAIL, "POST", "/v1/grants/agents", { userId: holderId, agentId });
   expect(g.status()).toBe(201);
 
   // --- open the campaign through the page ----------------------------------

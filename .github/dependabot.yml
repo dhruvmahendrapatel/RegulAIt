@@ -1,7 +1,12 @@
 # Dependabot version updates (owner decision 2026-10-22, issue #453).
 # Security alerts and security-fix PRs do not depend on this file.
-# Minor and patch bumps are grouped per ecosystem so each week yields at most one
-# PR per entry; major bumps arrive one per PR. Engine manifests are image inputs:
+# Patch and minor bumps are grouped separately per ecosystem; major bumps arrive one per PR.
+# Owner decision 2026-11-07 (#738, amendment 5): a semver-PATCH group of the root workspace or of the
+# GitHub Actions is merged automatically once every required check is green
+# (.github/workflows/dependabot-auto-merge.yml); minor and major bumps go to a reviewer. The npm and
+# actions entries wait 7 days after a release before proposing it (`cooldown`). pnpm's
+# `minimumReleaseAge` is not used: `pnpm deploy` in the engine image builds re-resolves and would refuse a
+# locked version younger than the limit, a security fix included. Engine manifests are image inputs:
 # merging a bump there republishes the engine images (publish gate, lock PR).
 # Not covered on purpose: infra/demo-fixtures/** (seeded demo data) and spikes/**.
 # The two pip entries open security-fix PRs only (see below).
@@ -15,11 +20,16 @@ updates:
       time: "06:00"
       timezone: "Etc/UTC"
     open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: "chore(deps)"
     groups:
-      workspace-minor-patch:
-        update-types: ["minor", "patch"]
+      # separate groups so a patch-only PR can be auto-merged and a minor one waits for a reviewer
+      workspace-patch:
+        update-types: ["patch"]
+      workspace-minor:
+        update-types: ["minor"]
 
   - package-ecosystem: "npm" # promptfoo engine image
     directory: "/engines/promptfoo"
@@ -29,6 +39,8 @@ updates:
       time: "06:00"
       timezone: "Etc/UTC"
     open-pull-requests-limit: 2
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: "chore(engines)"
     groups:
@@ -54,6 +66,20 @@ updates:
       garak-minor-patch:
         update-types: ["minor", "patch"]
 
+  - package-ecosystem: "pip" # spikee engine image (hash-pinned requirements, ADR-0245)
+    directory: "/engines/spikee"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 0
+    commit-message:
+      prefix: "chore(engines)"
+    groups:
+      spikee-minor-patch:
+        update-types: ["minor", "patch"]
+
   - package-ecosystem: "pip" # modelscan engine image
     directory: "/engines/modelscan"
     schedule:
@@ -76,11 +102,15 @@ updates:
       time: "06:00"
       timezone: "Etc/UTC"
     open-pull-requests-limit: 2
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: "ci"
     groups:
-      actions-minor-patch:
-        update-types: ["minor", "patch"]
+      actions-patch:
+        update-types: ["patch"]
+      actions-minor:
+        update-types: ["minor"]
 
   # Base-image digests (owner decision 2026-10-23, #453). Every FROM is pinned by
   # digest. One entry across all Dockerfile directories with group-by
@@ -98,6 +128,7 @@ updates:
       - "/packages/sandbox-executor"
       - "/packages/sandbox-executor/stdio-base"
       - "/engines/garak"
+      - "/engines/spikee"
       - "/engines/promptfoo"
       - "/engines/modelscan"
     schedule:
