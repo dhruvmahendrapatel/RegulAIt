@@ -37,7 +37,7 @@ import { ListPreview } from "../../../ui/ListPreview";
 import { ExpandableTable } from "../../../ui/ExpandableTable";
 import { normalisePage, pageUrl } from "../../../ui/listState";
 import { api } from "../../../api/client";
-import { ago, fmtUsd, shortId } from "../../../api/format";
+import { ago, fmtUsd, plural, shortId } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import {
   Badge,
@@ -69,6 +69,14 @@ import {
 } from "../adminKit";
 import { IMPORTS_ENDPOINT, IMPORTS_PATH, IMPORTS_QUERY_KEY, IMPORTS_SORT, IMPORT_COLUMNS, type ImportBatch } from "./costImports";
 import a from "../admin.module.css";
+
+/** the import's billing kinds (`COST_BILLING_KINDS` in @regulait/shared) in words, never the raw code */
+const BILLING_KIND_LABEL: Readonly<Record<string, string>> = {
+  seat: "seats",
+  usage: "usage",
+  commit: "committed spend",
+  other: "other",
+};
 import v from "../../views.module.css";
 import cc from "./costConsolidation.module.css";
 
@@ -1242,7 +1250,7 @@ export default function CostConsolidationPage() {
                                     <p className={v.faint}>
                                       Imported by kind:{" "}
                                       {x.imported.byBillingKind
-                                        .map((k) => `${k.billingKind} ${k.amount.toFixed(2)} ${k.currency}`)
+                                        .map((k) => `${BILLING_KIND_LABEL[k.billingKind] ?? k.billingKind} ${k.amount.toFixed(2)} ${k.currency}`)
                                         .join(", ")}
                                     </p>
                                   )}
@@ -1252,7 +1260,8 @@ export default function CostConsolidationPage() {
                             columns={[
                               {
                                 key: "subject",
-                                header: by === "cost_center" ? "Cost centre" : "Person",
+                                // the header follows the rows on screen, not the selector, so a refetch never relabels the old rows
+                                header: consolidated.data?.groupedBy === "cost_center" ? "Cost centre" : "Person",
                                 render: (x) => (
                                   // the unattributed warning stays on the row, so a closed row never hides it
                                   <span className={v.row}>
@@ -1271,7 +1280,7 @@ export default function CostConsolidationPage() {
                                 render: (x) => (
                                   <span className={v.row}>
                                     <span className={v.num}>{fmtUsd(x.metered.usd)}</span>
-                                    <span className={v.faint}>{`metered · ${x.metered.events} call(s)`}</span>
+                                    <span className={v.faint}>{`metered · ${plural(x.metered.events, "call")}`}</span>
                                     {x.metered.unpricedEvents > 0 && (
                                       <Badge tone="warn">{`${x.metered.unpricedEvents} unpriced, never valued at zero`}</Badge>
                                     )}
@@ -1284,7 +1293,7 @@ export default function CostConsolidationPage() {
                                 render: (x) => (
                                   <span className={v.row}>
                                     <span className={v.num}>{x.imported.usd === null ? "no single figure" : fmtUsd(x.imported.usd)}</span>
-                                    <span className={v.faint}>{`imported · ${x.imported.lines} line(s)`}</span>
+                                    <span className={v.faint}>{`imported · ${plural(x.imported.lines, "line")}`}</span>
                                   </span>
                                 ),
                               },

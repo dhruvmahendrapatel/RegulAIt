@@ -123,13 +123,14 @@ import {
   asc,
   auditLog,
   inArray,
+  isNull,
   mcpServers,
   ne,
   sql,
   type Db,
 } from "@regulait/db";
 import type { McpAdmissionMode, McpAdmissionState, McpUpstreamTransport } from "@regulait/shared";
-import { loadAdmissionMode, McpAdmissionHeldError } from "./mcp-admission.js";
+import { loadAdmissionMode, McpAdmissionHeldError, McpServerDisabledError } from "./mcp-admission.js";
 import { connectUpstream, syncUpstreamTools } from "./mcp-proxy.js";
 import { runSkillAdmissionRescan, type SkillRescanResult } from "./skill-admission.js";
 
@@ -273,7 +274,16 @@ export async function runMcpAdmissionRescan(
     })
     .from(mcpServers)
     // ADR-0190 I4: stdio servers are skipped here, before any connect (no placement, no refusal row): see EligibleRow
-    .where(and(inArray(mcpServers.admissionState, [...MCP_RESCAN_ELIGIBLE_STATES]), ne(mcpServers.transport, "stdio")))
+    // ADR-0207 (G4): a disabled server is not a candidate at all, so it is neither counted as eligible nor examined,
+    // and never reaches the connect gate that would write a deny row for it. The in-loop `continue` below stays for
+    // a server disabled mid-pass.
+    .where(
+      and(
+        inArray(mcpServers.admissionState, [...MCP_RESCAN_ELIGIBLE_STATES]),
+        ne(mcpServers.transport, "stdio"),
+        isNull(mcpServers.disabledAt),
+      ),
+    )
     .orderBy(priority, sql`${mcpServers.admissionScannedAt} asc nulls first`, asc(mcpServers.id))) as EligibleRow[];
 
   const eligible = candidates.length;
@@ -304,6 +314,9 @@ export async function runMcpAdmissionRescan(
         await client.close().catch(() => {});
       }
     } catch (err) {
+      // ADR-0207 (G4): a disabled server is refused at the connect gate before anything is fetched. That is neither a
+      // verdict nor an outage: the admission columns stay as they were and the pass moves on.
+      if (err instanceof McpServerDisabledError) continue;
       if (err instanceof McpAdmissionHeldError) {
         // Under `enforce` a dirty manifest makes `syncUpstreamTools` throw
         // AFTER `recordManifestScan` has already persisted the hold. That is

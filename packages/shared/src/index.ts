@@ -1558,6 +1558,12 @@ export const connectorProviderKindSchema = z.enum([
   "snowflake",
   "generic",
   "mock",
+  // ADR-0255 (P31): the curated connector-catalogue pieces (@regulait/connector-provider PIECE_PROVIDER_KINDS)
+  "piece_slack",
+  "piece_jira_cloud",
+  "piece_github",
+  "piece_google_sheets",
+  "piece_gmail",
 ]);
 
 export const createConnectorSchema = z.object({
@@ -2010,6 +2016,57 @@ export const createPmConnectionSchema = z
 
 export const pmSyncSchema = z.object({ connectionName: z.string().min(1) });
 
+// ---------------------------------------------------------------------------
+// ADR-0207 — lifecycle for integrations (G3–G6). Every body is `.strict()`, so a field the contract does not name
+// (a new name, a provider, a secret in the wrong slot) is a 400 rather than silently ignored.
+// ---------------------------------------------------------------------------
+
+/** the reason a lifecycle act records: required to disable, 10 to 1000 characters (the database CHECK repeats it) */
+export const lifecycleReasonSchema = z.string().trim().min(10).max(1000);
+
+/** `POST /v1/connectors/:connectorId/enabled` and `POST /v1/servers/:serverId/enabled`. Disabling needs a reason;
+ * enabling again is a relaxation, answered with a settings_relax step-up, and takes an optional reason. */
+export const setIntegrationEnabledSchema = z
+  .object({ enabled: z.boolean(), reason: lifecycleReasonSchema.optional() })
+  .strict()
+  .superRefine((body, ctx) => {
+    if (!body.enabled && body.reason === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a reason is required to disable", path: ["reason"] });
+    }
+  });
+
+/** `PATCH /v1/git/connections/:name`: only the base URL. The name and provider are fixed (stages name the
+ * connection). `null` returns to the provider default. A CHANGED base URL moves the token to another host, so it
+ * needs `token` (the new host's token, replacing the stored one) and a step-up (ADR-0207, review of #605). */
+export const updateGitConnectionSchema = z
+  .object({ baseUrl: z.string().url().max(2048).nullable(), token: z.string().min(1).max(512).optional() })
+  .strict();
+
+/** `POST /v1/git/connections/:name/token` and `POST /v1/pm/connections/:name/token`: replaced in place, never returned */
+export const replaceConnectionTokenSchema = z.object({ token: z.string().min(1).max(512) }).strict();
+
+/** `PATCH /v1/pm/connections/:name`: the name (part of the webhook address) and the provider are fixed */
+export const updatePmConnectionSchema = z
+  .object({
+    project: z.string().min(1).max(256).optional(),
+    baseUrl: z.string().url().max(2048).nullable().optional(),
+    /** jira only, as on create: 2 or 3, or null for the provider default */
+    apiVersion: z.coerce.number().int().nullable().optional(),
+    driftResolution: z.enum(["manual", "prefer_pm", "prefer_regulait"]).optional(),
+    /** required with a changed `baseUrl`: the new host's token, replacing the stored one (ADR-0207, review of #605) */
+    token: z.string().min(1).max(512).optional(),
+  })
+  .strict()
+  .superRefine((body, ctx) => {
+    if (body.apiVersion != null && body.apiVersion !== 2 && body.apiVersion !== 3) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "apiVersion must be 2 or 3", path: ["apiVersion"] });
+    }
+  });
+
+/** `POST /v1/pm/connections/:name/webhook-secret/rotate`. The previous secret keeps working for 24 hours unless
+ * `immediate`; a second rotation inside that window is refused unless `immediate`. */
+export const rotatePmWebhookSecretSchema = z.object({ immediate: z.boolean().optional() }).strict();
+
 // EPIC-06 §4 decision records. The decision maker is the authenticated
 // caller — never a body field.
 export const createDecisionSchema = z.object({
@@ -2065,6 +2122,10 @@ export const upsertComplianceProfileSchema = z.object({
    * project carrying its tag (L1 to L3, never L0). MAX-composed, so it can only raise the requirement; lowering or
    * dropping it on an existing profile is a loosening (step-up, rule-loosening.ts). */
   minIsolationClass: z.enum(["hardened_container", "user_space_kernel", "microvm"]).nullable().optional(),
+  /** ADR-0045 amendment 2026-11-14: the framework REQUIRES model risk management. OR-composed across a project's profiles; true makes the
+   * ADR-0045 dispatch gate enforce on the project even where the org relaxed `mrmEnforced`. Clearing it on an
+   * existing profile is a loosening (step-up, rule-loosening.ts). */
+  mrmRequired: z.boolean().nullable().optional(),
 });
 
 // PILLAR 3 (§8.2): the governed infrastructure-operations layer.
@@ -4393,7 +4454,6 @@ export {
   builderUpdateThreadSchema,
   builderUsageQuerySchema,
   nextScheduleRun,
-  parseSkillMarkdown,
   type BuilderAgentColor,
   type BuilderBundle,
   type BuilderCadenceValue,
@@ -4868,6 +4928,8 @@ export * from "./feedback.js";
 export * from "./ai-literacy.js";
 export * from "./alert-ownership.js";
 export * from "./isaca-pack.js";
+// ADR-0295 (P18 B4): the ISO/IEC ID-only packs
+export * from "./iso-packs.js";
 // ADR-0243 (P24): the OWASP MCP and LLM Top 10 packs
 export * from "./owasp-packs.js";
 // ADR-0212 (P12 b): modality pricing
@@ -4941,6 +5003,7 @@ export * from "./privacy-ops.js";
 
 // ===== ADR-0215 (P5) — framework content imports and the imported regulatory feed =====
 export * from "./framework-imports.js";
+export * from "./atlas-redteam-map.js";
 
 // ===== ADR-0221 (PENDING P4) — the supplier portal =========================
 export * from "./supplier-portal.js";

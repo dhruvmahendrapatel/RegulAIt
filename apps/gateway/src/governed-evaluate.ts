@@ -856,7 +856,7 @@ export async function governedEvaluate(
         approverName: nameOf.get(r.approverUserId) ?? null,
       })),
       rateLimits: limitRows,
-      // ADR-0239: Cedar by default; REGULAIT_RATE_LIMIT_EVALUATOR=legacy keeps the hand-written one for a release
+      // ADR-0239: Cedar is the only rate-limit engine (decision 4 removed the hand-written one)
       rateLimitEvaluator: activeRateLimitEvaluator(),
       dataScopeRules: scopes,
       args: evaluatedArgs,

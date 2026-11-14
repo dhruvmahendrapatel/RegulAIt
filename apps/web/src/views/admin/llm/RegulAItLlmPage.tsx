@@ -51,8 +51,7 @@ import { KV, OutcomePanel, QueryGate, RemoveButton, Stat, agentOpts, optionEls, 
 import { DataList } from "../../../ui/DataList";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
-// I-2 (#453): the Billing set-up stepper's own styles, reused as they are rather than copied
-import bl from "../cost/billing.module.css";
+import { Stepper } from "../../../ui/Stepper";
 import { SpdxFieldsPanel } from "../governance/SpdxFieldsPanel";
 import { AddRowsForm, PollJobButton, ValidateDatasetForm } from "./LlmDatasetTools";
 
@@ -334,8 +333,9 @@ export default function RegulAItLlmPage() {
     return out;
   }
 
-  // I-2 (#453): the four acts (backend, data, training, artifact) as the Billing stepper, each step stating its own
-  // status. It opens on the first unfinished step; a chosen step stays chosen.
+  // I-2 (#453): the four acts (backend, data, training, artifact) as the kit stepper, each step stating its own
+  // status. It opens on the first unfinished step; a chosen step stays chosen. The stepper waits for all three reads
+  // (review of #690), so no step reads "0" while the artifacts load and the opening step never jumps once they arrive.
   type Step = "backends" | "data" | "jobs" | "artifacts";
   const backendRows = backends.data?.backends ?? [];
   const usable = backendRows.filter((b) => !b.requiresCredential || (b.hasCredential && b.configEnabled)).length;
@@ -417,7 +417,7 @@ export default function RegulAItLlmPage() {
       />
       <div className={v.stack}>
         <QueryGate
-          loading={backends.isLoading || datasets.isLoading}
+          loading={backends.isLoading || datasets.isLoading || artifacts.isLoading}
           error={backends.error ?? datasets.error}
           onRetry={() => {
             void backends.refetch();
@@ -436,18 +436,8 @@ export default function RegulAItLlmPage() {
             />
           </div>
 
-          <ol className={bl.steps} aria-label="Custom-model steps">
-            {steps.map((x, i) => (
-              <li key={x.id} className={x.id === step ? bl.stepOn : x.done ? bl.stepDone : undefined}>
-                <button type="button" aria-current={x.id === step ? "step" : undefined} onClick={() => setStep(x.id)}>
-                  <span className={bl.stepNum} aria-hidden>{x.done && x.id !== step ? "✓" : i + 1}</span>
-                  <span>{x.label}</span>
-                  {/* no info buttons here: the status sits inside the step's own button; the step's cards explain it */}
-                  {x.status}
-                </button>
-              </li>
-            ))}
-          </ol>
+          {/* no info buttons here: the status sits inside the step's own button; the step's cards explain it */}
+          <Stepper label="Custom-model steps" steps={steps} current={step} onSelect={setStep} />
 
           {/* ---------------- backends ---------------- */}
           {step === "backends" && (
