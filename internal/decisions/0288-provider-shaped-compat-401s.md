@@ -27,7 +27,7 @@ hook is the framework's own mechanism for it. No library applies.
    the existing `onSend` hook, the same place that adds the MCP route's RFC 9728 challenge.
 2. **Scope.**
    - Only status 401. A 403 is an entitlement answer the shims already shape.
-   - Only the compat routes, each with its dialect: `POST /v1/chat/completions` and `POST /v1/responses` (ADR-0287)
+   - Only the compat routes, each with its dialect: `POST /v1/chat/completions` and `POST /v1/responses` (the Responses shim, a separate P33 follow-up PR)
      are OpenAI; `POST /v1/messages` is Anthropic; `GET /v1/models` follows the `anthropic-version` header, as its
      handler does.
    - Only a RegulAIt refusal body (`error` is a string). A body that is already provider-shaped, or not JSON, passes
