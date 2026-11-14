@@ -27,6 +27,10 @@ is rejected too. What it would take: keep the existing runner and add in-stage f
 with backoff over graphile-worker (MIT) or pg-boss (MIT). Keep the audit row in the transition's transaction, and
 borrow wait-for-token, idempotency keys and per-queue concurrency limits. Each part gets its own ADR. The prototype is
 in `spikes/workflow-p30/`.
+**Built (lane L5, 2026-11-14, ADR-0282 to ADR-0286):** pg-boss 12.38.2 under the runner in schema `regulait_queue`;
+per-stage retry with backoff (template opt-in), scheduled in the failure's transaction; stage execution keys; fan-out
+of eval-bound checks committed as one transition; retry and fan-out concurrency limits; the plan-gate partial index.
+Open: whether git stages get a default retry policy (owner).
 
 **P33 — Third-party client compatibility (SDK and platform review, owner 2026-11-07).** **Built (ADR-0257):** the
 official OpenAI and Anthropic SDKs, the Laravel AI SDK and dart_mcp run, each in a digest-pinned image with its
