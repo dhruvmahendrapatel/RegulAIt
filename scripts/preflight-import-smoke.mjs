@@ -66,6 +66,7 @@ export const ENTRY_POINTS = new Map([
   ["demo-traffic.js", "generates demo traffic against a gateway"],
   ["openapi-client-gen.js", "generates the API client (writes files)"],
   ["testing/mock-socket-contract.js", "test helper that runs its contract at top level"],
+  ["testing/bootstrap-grant-mint.js", "vitest setup file: vi.mock at top level needs vitest's mocker (ADR-0250)"],
 ]);
 
 const CHILD = [

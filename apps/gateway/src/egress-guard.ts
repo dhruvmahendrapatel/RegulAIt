@@ -676,13 +676,72 @@ export async function assertEgressAllowed(
 // the guarded fetch
 // ---------------------------------------------------------------------------
 
+/**
+ * A 3xx the guarded fetch refused. The message is FIXED and the Location is deliberately not kept (A2A-SEC-01,
+ * 2026-11-10): the Location is chosen by the upstream, and an upstream that reflects the credential it was sent into
+ * its redirect target would otherwise have it echoed to a caller who may not read that credential, and persisted in
+ * `audit_log.reason`. Every caller of `egressRefusal` / `err.message` therefore gets this sentence and nothing else.
+ */
+export const EGRESS_REDIRECT_REASON = "the upstream returned a redirect; redirects are refused";
 export class EgressRedirectError extends Error {
-  constructor(readonly location: string | null) {
-    super(
-      `upstream returned a redirect to '${location ?? "(no Location)"}' — redirects are refused on custom-provider egress`,
-    );
+  constructor() {
+    super(EGRESS_REDIRECT_REASON);
     this.name = "EgressRedirectError";
   }
+}
+
+/**
+ * A response body larger than the caller's `maxResponseBytes` (A2A-SEC-02, 2026-11-10). Raised while the body
+ * streams, counting the bytes AFTER content decoding, so neither a missing Content-Length nor a gzip expansion gets
+ * past it. The message is fixed: nothing of the upstream body is repeated.
+ */
+export class EgressResponseTooLargeError extends Error {
+  constructor(readonly maxBytes: number) {
+    super(`the upstream response was larger than ${maxBytes} bytes, so it was refused`);
+    this.name = "EgressResponseTooLargeError";
+  }
+}
+
+/** the over-size refusal anywhere in a (bounded) cause chain, or null — SDKs wrap what a body read rejects with */
+export function egressResponseTooLarge(err: unknown): EgressResponseTooLargeError | null {
+  let cur: unknown = err;
+  for (let i = 0; i < 8 && cur; i += 1) {
+    if (cur instanceof EgressResponseTooLargeError) return cur;
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return null;
+}
+
+/** true when the refusal in the cause chain is a redirect (a fixed reason, never the Location) */
+export function egressRedirectRefused(err: unknown): boolean {
+  let cur: unknown = err;
+  for (let i = 0; i < 8 && cur; i += 1) {
+    if (cur instanceof EgressRedirectError) return true;
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+/** `res` with its body capped at `max` decoded bytes: the declared length first, then every chunk as it arrives */
+function boundResponse(res: Response, max: number): Response {
+  const declared = Number(res.headers.get("content-length") ?? "NaN");
+  if (Number.isFinite(declared) && declared > max) {
+    void res.body?.cancel().catch(() => {});
+    throw new EgressResponseTooLargeError(max);
+  }
+  if (!res.body) return res;
+  let total = 0;
+  const counted = res.body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        total += chunk.byteLength;
+        // erroring the stream cancels the upstream read, so the rest is never pulled off the socket
+        if (total > max) controller.error(new EgressResponseTooLargeError(max));
+        else controller.enqueue(chunk);
+      },
+    }),
+  );
+  return new Response(counted, { status: res.status, statusText: res.statusText, headers: res.headers });
 }
 
 /**
@@ -724,6 +783,12 @@ export interface GuardedFetchOptions extends EgressCheckOptions {
   fetchImpl?: typeof fetch;
   /** ADR-0188 S9 follow-up: the caller's own server authentication for https (see `PinnedTarget.tls`); absent = Web PKI */
   tls?: PinnedTls;
+  /**
+   * A2A-SEC-02: the most body bytes (after content decoding) this fetch hands back. Over it, the read rejects with
+   * `EgressResponseTooLargeError` and the upstream stream is cancelled. Absent = unbounded (the existing callers,
+   * which bound their own reads).
+   */
+  maxResponseBytes?: number;
 }
 
 /**
@@ -812,9 +877,11 @@ export function createGuardedFetch(opts: GuardedFetchOptions): typeof fetch {
     }
 
     if (res.status >= 300 && res.status < 400) {
-      throw new EgressRedirectError(res.headers.get("location"));
+      // the Location is the upstream's text: it is not read, kept or repeated (A2A-SEC-01)
+      void res.body?.cancel().catch(() => {});
+      throw new EgressRedirectError();
     }
-    return res;
+    return opts.maxResponseBytes !== undefined ? boundResponse(res, opts.maxResponseBytes) : res;
   };
   return guarded as typeof fetch;
 }

@@ -368,7 +368,7 @@ function RoleGrantsPanel(props: { roleId: string }) {
             onSubmit={(e) => {
               e.preventDefault();
               void act.run(
-                () => api.post(`/v1/roles/${props.roleId}/grants/agents`, { agentId }),
+                () => withStepUp((h) => api.postWithHeaders(`/v1/roles/${props.roleId}/grants/agents`, { agentId }, h)),
                 "Agent granted",
               );
             }}
@@ -388,13 +388,19 @@ function RoleGrantsPanel(props: { roleId: string }) {
               e.preventDefault();
               void act.run(
                 () =>
-                  api.post(`/v1/roles/${props.roleId}/grants/connectors`, {
-                    connectorId,
-                    mode: connMode,
-                    ...(connObjects
-                      ? { allowedObjects: connObjects.split(",").map((s) => s.trim()).filter(Boolean) }
-                      : {}),
-                  }),
+                  withStepUp((h) =>
+                    api.postWithHeaders(
+                      `/v1/roles/${props.roleId}/grants/connectors`,
+                      {
+                        connectorId,
+                        mode: connMode,
+                        ...(connObjects
+                          ? { allowedObjects: connObjects.split(",").map((s) => s.trim()).filter(Boolean) }
+                          : {}),
+                      },
+                      h,
+                    ),
+                  ),
                 "Connector granted",
               );
             }}
@@ -423,7 +429,7 @@ function RoleGrantsPanel(props: { roleId: string }) {
               e.preventDefault();
               void act.run(
                 () =>
-                  api.post(`/v1/roles/${props.roleId}/grants/tools`, { serverId: toolServerId, toolName }),
+                  withStepUp((h) => api.postWithHeaders(`/v1/roles/${props.roleId}/grants/tools`, { serverId: toolServerId, toolName }, h)),
                 "Tool granted",
               );
             }}
@@ -451,14 +457,20 @@ function RoleGrantsPanel(props: { roleId: string }) {
               e.preventDefault();
               void act.run(
                 () =>
-                  api.post(`/v1/roles/${props.roleId}/grants/servers`, {
-                    serverId: srvId,
-                    // A server grant IS a read-all grant: the kernel only ever
-                    // matches one for read-kind tools. readOnlyAll:false is
-                    // refused by the gateway because it would store a row that
-                    // lists as a grant while granting nothing.
-                    readOnlyAll: true,
-                  }),
+                  withStepUp((h) =>
+                    api.postWithHeaders(
+                      `/v1/roles/${props.roleId}/grants/servers`,
+                      {
+                        serverId: srvId,
+                        // A server grant IS a read-all grant: the kernel only ever
+                        // matches one for read-kind tools. readOnlyAll:false is
+                        // refused by the gateway because it would store a row that
+                        // lists as a grant while granting nothing.
+                        readOnlyAll: true,
+                      },
+                      h,
+                    ),
+                  ),
                 "Server granted",
               );
             }}

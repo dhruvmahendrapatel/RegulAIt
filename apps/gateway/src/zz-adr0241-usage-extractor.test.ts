@@ -38,6 +38,7 @@ import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { drainBackgroundWork } from "./background-work.js";
 
 declare global {
@@ -235,7 +236,8 @@ beforeAll(async () => {
   });
   expect(a.statusCode, a.body).toBe(201);
   agentId = a.json().id as string;
-  const g = await app.inject({ method: "POST", url: "/v1/grants/agents", headers: AUTH, payload: { userId: caller.id, agentId } });
+  // ADR-0250: a grant mint is a step-up; this file's own steppable admin means the bootstrap credential needs this
+  const g = await relaxStepUpAround(db, () => app.inject({ method: "POST", url: "/v1/grants/agents", headers: AUTH, payload: { userId: caller.id, agentId } }));
   expect(g.statusCode, g.body).toBeLessThan(300);
   const mp = await viaKey("PUT", `/v1/agents/${agentId}/modality-pricing`, { costPerMTokImageIn: 10, costPerMTokAudioOut: 40 });
   expect(mp.statusCode, mp.body).toBe(200);

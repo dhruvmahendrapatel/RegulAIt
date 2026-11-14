@@ -1,0 +1,16 @@
+{
+  "name": "regulait-workflow-p30-spike",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "workflow build --target standalone",
+    "test": "node --test --test-concurrency=1 spike.test.mjs"
+  },
+  "dependencies": {
+    "workflow": "5.4.0",
+    "@workflow/world-postgres": "5.1.1",
+    "fastify": "5.12.6",
+    "pg": "8.20.0"
+  }
+}
