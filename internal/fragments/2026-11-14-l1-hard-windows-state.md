@@ -1,0 +1,2 @@
+<!-- fold: state-recap -->
+**2026-11-14 - P-01 remainder, slice 3: hard rate-limit windows for connector and A2A calls ([ADR-0251](../decisions/0251-one-governed-decision-core.md) "As built", lane L1, migration `resource_rate_reservations` (pending, numbered at merge)).** A call a limit binds is decided and takes its slot in one transaction under a per-(user, resource type) advisory lock, so concurrent calls cannot overshoot; calls with no limit pay nothing. Also fixed: an executed connector call spent two slots (its egress row was counted).
