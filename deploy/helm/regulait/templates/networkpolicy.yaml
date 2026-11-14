@@ -2,17 +2,13 @@
 ADR-0304 §2b: one NetworkPolicy per workload plus a namespace-wide deny-all baseline. Policies add up, so the baseline
 denies everything the other two do not open.
 
-All three are hooks at weight -10, below the migration Job's 0, so they exist before the first migration pod starts;
-before-hook-creation replaces them on each upgrade. Helm does not delete hook resources on uninstall, so they outlive
-the release; deny-all policies with no matching pods are harmless (the README says how to remove them).
+The three policies are ordinary release resources, so an upgrade never removes them from the running gateway and
+`helm uninstall` deletes them. Hooks run before release resources exist, so on a first install the migration Job would
+start with no policy: `<release>-hook-database-clients`, a hook at weight -10 (below the Job's 0), covers it for the
+duration of the hook phase. Helm applies hook-succeeded deletion only after every hook in the phase has finished. After
+a failed hook phase the copy can remain until the next attempt replaces it (before-hook-creation); it only restricts.
 */ -}}
 {{- $v := .Values -}}
-{{- define "regulait.npHook" -}}
-annotations:
-  helm.sh/hook: pre-install,pre-upgrade
-  helm.sh/hook-weight: "-10"
-  helm.sh/hook-delete-policy: before-hook-creation
-{{- end -}}
 {{- define "regulait.dnsRule" -}}
 {{- $dns := .Values.egress.dns -}}
 - to:
@@ -58,7 +54,6 @@ metadata:
   name: {{ printf "%s-baseline" .Release.Name | trunc 63 | trimSuffix "-" }}
   labels:
     {{- include "regulait.labels" . | nindent 4 }}
-  {{- include "regulait.npHook" . | nindent 2 }}
 spec:
   podSelector: {}
   policyTypes: [Ingress, Egress]
@@ -71,7 +66,6 @@ metadata:
   name: {{ printf "%s-gateway" .Release.Name | trunc 63 | trimSuffix "-" }}
   labels:
     {{- include "regulait.labels" . | nindent 4 }}
-  {{- include "regulait.npHook" . | nindent 2 }}
 spec:
   podSelector:
     matchLabels:
@@ -107,14 +101,36 @@ spec:
         - { protocol: TCP, port: 443 }
     {{- end }}
 ---
-# The migration hook Job: it holds the database URL, so it reaches DNS and the database and nothing else.
+# The migration Job and any backup pod hold the database URL, so they reach DNS and the database and nothing else.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: {{ printf "%s-database-clients" .Release.Name | trunc 63 | trimSuffix "-" }}
   labels:
     {{- include "regulait.labels" . | nindent 4 }}
-  {{- include "regulait.npHook" . | nindent 2 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "regulait.selector" . | nindent 6 }}
+    matchExpressions:
+      - { key: app.kubernetes.io/component, operator: In, values: [migrate, backup] }
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    {{- include "regulait.dnsRule" . | nindent 4 }}
+    {{- include "regulait.databaseRule" . | nindent 4 }}
+---
+# The same policy for the hook phase, when the release's own policies do not exist yet (first install).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-hook-database-clients" .Release.Name | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "regulait.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded,hook-failed
 spec:
   podSelector:
     matchLabels:

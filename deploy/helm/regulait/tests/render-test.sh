@@ -54,11 +54,20 @@ if "k8s-app: kube-dns" not in text:
 if "169.254.0.0/16" not in text and "allowPublicEgress: true" in open(sys.argv[2]).read():
     problems.append("public egress does not exclude the instance metadata range")
 policies = {re.search(r"^  name: (\S+)", d, re.M).group(1): d for d in docs if re.search(r"^kind: NetworkPolicy", d, re.M)}
+# The release's policies are ordinary resources: an upgrade must never delete them from under the running gateway.
 for want in ("t-baseline", "t-gateway", "t-database-clients"):
     if want not in policies:
         problems.append(f"missing NetworkPolicy {want}")
-    elif 'helm.sh/hook-weight: "-10"' not in policies[want]:
-        problems.append(f"{want} is not a hook at weight -10 (it must exist before the migration Job)")
+    elif "helm.sh/hook" in policies[want]:
+        problems.append(f"{want} is a hook; hook policies are deleted and recreated on every upgrade")
+# The hook copy covers the migration Job before the release's policies exist (first install), and is cleaned up.
+hk = policies.get("t-hook-database-clients", "")
+if not hk:
+    problems.append("missing NetworkPolicy t-hook-database-clients")
+elif 'helm.sh/hook-weight: "-10"' not in hk or "hook-succeeded" not in hk or "pre-install" not in hk:
+    problems.append("t-hook-database-clients is not a pre-install hook at weight -10 deleted on success")
+elif hk.split("spec:", 1)[1] != policies.get("t-database-clients", "").split("spec:", 1)[-1]:
+    problems.append("t-hook-database-clients differs from t-database-clients")
 if "t-baseline" in policies and "podSelector: {}" not in policies["t-baseline"]:
     problems.append("the baseline policy must select every pod in the namespace")
 dbc = policies.get("t-database-clients", "")
@@ -96,7 +105,14 @@ refuse "air_gapped with a private-looking supernet" -f ci/air-gapped-values.yaml
 refuse "operator image without a digest"   --set operator.image.digest=
 refuse "no bundle ConfigMap"               --set bundle.configMapName=
 refuse "operator image outside registries" --set operator.image.repository=docker.io/regulait/operator
-refuse "air_gapped with a public DNS CIDR" -f ci/air-gapped-values.yaml --set egress.allowPublicEgress=false --set 'egress.dns.cidrs={8.8.8.8/32}' 
+refuse "air_gapped with a public DNS CIDR" -f ci/air-gapped-values.yaml --set egress.allowPublicEgress=false --set 'egress.dns.cidrs={8.8.8.8/32}'
+refuse "upgrade with no known installed version" --is-upgrade
+refuse "malformed installed version"       --set bundle.installedVersion=latest
+
+# An upgrade with bundle.installedVersion renders the downgrade check against it.
+if "$HELM" template t . -f ci/byoc-values.yaml --is-upgrade --set bundle.installedVersion=0.9.0 2>/dev/null \
+    | grep -q -- "--installed-version=0.9.0"; then ok "upgrade checks the downgrade against bundle.installedVersion"
+else bad "upgrade does not pass bundle.installedVersion to verify-bundle"; fi
 
 # The chart's copies of the operator's generated files.
 cmp -s files/crd.yaml ../../operator/config/crd/deploy.regulait.ai_regulaitinstallations.yaml \

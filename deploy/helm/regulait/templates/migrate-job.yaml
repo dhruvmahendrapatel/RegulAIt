@@ -5,13 +5,20 @@ install (hooks run before release resources), so the Job uses the namespace defa
 
 Before migrating, an init container runs the operator binary's `verify-bundle` (same build, same compiled-in release
 keyring) against the signed manifest in `bundle.configMapName`, so the plain-Helm path refuses an unsigned or
-downgraded version too (ADR-0180). On an upgrade the installed version is read from the running Deployment with
-`lookup`; `helm template` has no cluster, so it renders the first-install form.
+downgraded version too (ADR-0180). The installed version is `bundle.installedVersion` when set (the stronger source:
+a value in the release, not a label anyone with namespace write can change), else the running Deployment's version
+label read with `lookup`. An upgrade with neither fails the render rather than skip the downgrade check: `lookup` is
+empty under `helm template --is-upgrade`, `--dry-run` and GitOps renderers.
 */ -}}
-{{- $installed := "" -}}
+{{- $installed := .Values.bundle.installedVersion | default "" -}}
+{{- if not $installed -}}
 {{- $live := lookup "apps/v1" "Deployment" .Release.Namespace (include "regulait.name" .) -}}
 {{- if $live -}}
 {{- $installed = index ($live.metadata.labels | default dict) "app.kubernetes.io/version" | default "" -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Release.IsUpgrade (not $installed) -}}
+{{- fail "upgrade: the installed version is unknown (no bundle.installedVersion and no running gateway Deployment found with lookup); set bundle.installedVersion so the downgrade check runs" -}}
 {{- end -}}
 apiVersion: batch/v1
 kind: Job

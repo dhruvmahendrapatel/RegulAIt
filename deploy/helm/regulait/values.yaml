@@ -29,6 +29,10 @@ secrets:
 #   kubectl create configmap regulait-bundle-1.0.0 --from-file=manifest.json --from-file=manifest.json.sig
 bundle:
   configMapName: ""
+  # The version running now, for the downgrade check on upgrade. Empty reads the running gateway Deployment's version
+  # label with `lookup`; set it when rendering without cluster access (GitOps, --dry-run), where an upgrade with
+  # neither is refused.
+  installedVersion: ""
 
 # The volume for install-generated signing keys and audit anchors. The keys are stored unencrypted on it, so set
 # storageClassName to an encrypted class. The chart's own claim is kept on uninstall

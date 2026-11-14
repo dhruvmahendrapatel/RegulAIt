@@ -205,9 +205,15 @@ touches a cloud account.
 
 - `deploy/helm/regulait/` has a `values.schema.json` with `additionalProperties: false` at every level, so a secret
   value cannot be passed as a value. `mode`, `version`, the image and `secrets.name` have no default.
-- The NetworkPolicy is a `pre-install,pre-upgrade` hook (weight -10, `before-hook-creation`), so it exists before the
-  migration Job (weight 0). Otherwise the first migration would run with open egress. The cost: Helm leaves hook
-  objects after uninstall. A default-deny policy with no pods is harmless, and the README says so.
+- The three NetworkPolicies of §2b are ordinary release resources, not hooks as §2b and §5 first said. Hook resources
+  are deleted and recreated on every upgrade (`before-hook-creation`), which would leave the running gateway briefly
+  un-isolated, and they outlive `helm uninstall`. Only a copy of the database-clients policy,
+  `<release>-hook-database-clients`, is a `pre-install,pre-upgrade` hook at weight -10, so the first migration Job
+  (weight 0) never runs unpoliced; it is deleted once the hook phase succeeds. This follows the code review on #792.
+- The downgrade check reads the installed version from `bundle.installedVersion` when set, else the running
+  Deployment's version label through `lookup`. An upgrade with neither (`helm template --is-upgrade`, `--dry-run`,
+  GitOps renderers, where `lookup` is empty) fails the render rather than skip the check. The explicit value is the
+  stronger source, since the label is writable by anyone with write access to the namespace (security review on #792).
 - The migration Job uses the namespace's default ServiceAccount with no token mounted, because the release's own
   ServiceAccount does not exist while pre-install hooks run.
 - `operator.enabled` renders the CRD and the Role from `files/crd.yaml` and `files/role.yaml`. These are copies of the
