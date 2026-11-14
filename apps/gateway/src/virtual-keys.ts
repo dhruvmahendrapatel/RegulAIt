@@ -64,6 +64,10 @@ export const COMPAT_MODELS_ROUTE = "GET /v1/models";
  */
 export const VIRTUAL_KEY_ALLOWED_ROUTES: ReadonlySet<string> = new Set([
   "POST /v1/chat/completions",
+  // ADR-0287: the Responses dialect runs the same governed dispatch core, so a
+  // dispatch key reaches it under the same ceiling. Engine keys and delegated
+  // workload tokens do not (their allow-lists are unchanged).
+  "POST /v1/responses",
   "POST /v1/messages",
   COMPAT_MODELS_ROUTE,
   "POST /v1/agents/:agentId/invoke",

@@ -443,7 +443,7 @@ export async function recordGuardrailDecision(
   db: Pick<Db, "insert">,
   args: {
     userId: string;
-    objectType: "agent" | "connector" | "mcp_server";
+    objectType: "agent" | "connector" | "mcp_server" | "a2a_agent";
     objectId: string | null;
     projectId?: string | null | undefined;
     evaluation: GuardrailEvaluation;
