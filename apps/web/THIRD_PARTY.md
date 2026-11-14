@@ -28,3 +28,15 @@ them, so they are not bundled into the shipped web build (checked: no match for 
 | `size-limit`, `@size-limit/file` | 14.3.0 | MIT | Enforces the JS and CSS bundle-size ceilings in `.size-limit.json` on the production build (ADR-0196), gzip sizes per entry and lazy chunk. Chosen under ADR-0176 over a hand-written gzip script; the `file` plugin only reads built files (no bundler, no network). Transitive: `lilconfig` (MIT), `nanospinner` (MIT), `picocolors` (ISC). Released 2026-10-07. |
 | `parseBytes` from `size-limit` 14.2.0 `bytes.js` (copied code) | 14.2.0 | MIT, (c) Andrey Sitnik | Ten lines copied into `scripts/ui-enterprise-baseline.mjs` so the bundle-ceiling guard reads a `limit` exactly as size-limit enforces it (kB = 1000 B). size-limit's `exports` map does not expose `bytes.js`, and `bytes` reads kB as 1024 (ADR-0176 §4 exception). A drift test in `scripts/ui-enterprise-harness.test.mjs` compares the copy with the installed size-limit's own function. |
 | `postcss` | 8.5.32 | MIT | Parses `src/**/*.css` for the design-token ratchet (`scripts/preflight-ui-tokens.mjs`, ADR-0196). Already in the tree as vite's CSS parser; pinned here as a direct dev dependency at the same version. Chosen under ADR-0176 over a regex scan of CSS. `stylelint` 17.16.0 was tried first and dropped: its globbing dependencies bring in `braces` 3.0.3 (GHSA-vfj7-8cjw-p6xm, high, no fixed release). Transitive: `nanoid` (MIT), `picocolors` (ISC), `source-map-js` (BSD-3-Clause). |
+
+## Build tools (never shipped)
+
+These run only during `vite build` and the dev server. The production image installs `--prod` dependencies alone,
+and `scripts/security-runtime-contents.mjs` fails the image scan if any of them is in its store.
+
+| Package | Version | Licence | Why |
+|---|---|---|---|
+| `vite` | 8.3.6 | MIT | Builds and serves the SPA (`vite.config.ts`). Since vite 8 it bundles with `rolldown` instead of rollup and esbuild. Its only output is our own code, split into hashed chunks under `dist/assets`. |
+| `@vitejs/plugin-react` | 6.2.1 | MIT | The JSX transform and React Fast Refresh for vite 8 (the 4.x line does not support vite 8). |
+| `rolldown` | 1.2.16 | MIT | vite 8's bundler. It ships native bindings (`@rolldown/binding-*`, MIT), and only the binding for the build host's platform is installed. Transitive: `@oxc-project/runtime`, `@oxc-project/types`, `@rolldown/pluginutils` (all MIT). |
+| `lightningcss` | 1.33.0 | MPL-2.0 | vite 8's default CSS minifier. Exception: MPL-2.0 is not on the shipped-code allow-list. It is accepted here because it is a build-time tool and none of its source files are copied into `dist`. Its output is our own CSS, minified. It would lower `light-dark()` to `--lightningcss-light`/`--lightningcss-dark` custom properties for older browsers, but nothing in our CSS uses `light-dark()` today (theming uses `prefers-color-scheme` and `data-theme`). It ships native bindings (`lightningcss-<platform>`, MPL-2.0). |

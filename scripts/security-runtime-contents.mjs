@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 
 // Package directories under node_modules/.pnpm are named `<name>@<version>…`,
 // with `/` in a scope written as `+`. These are build/test tooling only.
-export const BUILD_TOOL = /^(esbuild|@esbuild\+[^@]+|vite|vitest|@vitest\+[^@]+|typescript|tsx|drizzle-kit|playwright|playwright-core|@playwright\+[^@]+|rollup|@rollup\+[^@]+|@vitejs\+[^@]+)@/;
+export const BUILD_TOOL = /^(esbuild|@esbuild\+[^@]+|vite|vitest|@vitest\+[^@]+|typescript|tsx|drizzle-kit|playwright|playwright-core|@playwright\+[^@]+|rollup|@rollup\+[^@]+|rolldown|@rolldown\+[^@]+|lightningcss|lightningcss-[^@]+|@vitejs\+[^@]+)@/;
 
 export function findBuildTools(root, { system = false } = {}) {
   const store = path.join(root, "node_modules", ".pnpm");
