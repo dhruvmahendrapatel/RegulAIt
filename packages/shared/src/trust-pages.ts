@@ -19,6 +19,8 @@ import { z } from "zod";
 /** THE STRICT DEFAULT. The column default of migration 0247. */
 export const TRUST_PAGES_STRICT_DEFAULTS = Object.freeze({
   trustPagesEnabled: false as boolean,
+  /** ADR-0240 (pending migration external_portal_mfa): an auditor proves a TOTP code after the link, before any session */
+  trustAuditorMfaRequired: true as boolean,
 });
 export type TrustPagesSettings = { -readonly [K in keyof typeof TRUST_PAGES_STRICT_DEFAULTS]: (typeof TRUST_PAGES_STRICT_DEFAULTS)[K] };
 export type TrustPagesSettingKey = keyof TrustPagesSettings;
@@ -34,17 +36,25 @@ export const TRUST_PAGES_SETTING_COPY: Readonly<Record<TrustPagesSettingKey, { l
       "read, and give a named auditor time-limited, read-only access to chosen items. Each publication and each " +
       "auditor view is audited.",
   },
+  trustAuditorMfaRequired: {
+    label: "Second factor for auditors",
+    strict: "On: after the single-use link, an auditor enrols an authenticator app on first use and enters a code to open every session.",
+    relaxed: "Off lets the single-use link alone open an auditor session, so anyone holding a forwarded link can read the granted items.",
+  },
 };
 
 /** Is `value` a relaxation of the strict default? */
 export function trustPagesSettingRelaxed<K extends TrustPagesSettingKey>(key: K, value: TrustPagesSettings[K]): boolean {
-  return key === "trustPagesEnabled" && value === true;
+  if (key === "trustPagesEnabled") return value === true;
+  return key === "trustAuditorMfaRequired" && value === false;
 }
 
 /** The fields of `PUT /v1/org/settings` (spread into `updateOrgSettingsSchema`). */
 export const trustPagesOrgSettingsFields = {
   /** strict false; true relaxes it (public pages and auditor access, built and shipped off) */
   trustPagesEnabled: z.boolean().optional(),
+  /** ADR-0240: strict true; false relaxes it (the single-use link alone opens an auditor session) */
+  trustAuditorMfaRequired: z.boolean().optional(),
 };
 
 // ---------------------------------------------------------------------------

@@ -6242,7 +6242,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerIncidentRoutes(app, db, { dataKey: opts.dataKey });
   registerFeedbackRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0225 (P13 d): the public trust centre, AI system cards and the auditor portal (shipped off)
-  registerTrustPagesRoutes(app, db);
+  registerTrustPagesRoutes(app, db, { dataKey: opts.dataKey });
   registerAiLiteracyRoutes(app, db);
   registerAlertOwnershipRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0186 (batch 4, AgentCoordination §4.9). A: passkeys and step-up (self

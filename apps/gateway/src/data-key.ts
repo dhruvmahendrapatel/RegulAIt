@@ -299,6 +299,8 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   { table: "fairness_datasets", column: "rows_ciphertext", what: "fairness evaluation datasets" },
   // ADR-0221 (migration 0257): an evidence file a supplier uploaded through the portal (download is admin-only)
   { table: "supplier_submissions", column: "file_ciphertext", what: "supplier evidence files" },
+  // ADR-0240: the TOTP secrets of supplier and auditor second factors
+  { table: "external_mfa_factors", column: "secret_ciphertext", what: "external portal TOTP secrets" },
   // ADR-0219 (migration 0253): the static credential an admin attached to a remote A2A agent (sent, never returned)
   { table: "a2a_agent_credentials", column: "secret_ciphertext", what: "remote A2A agent credentials" },
 ];

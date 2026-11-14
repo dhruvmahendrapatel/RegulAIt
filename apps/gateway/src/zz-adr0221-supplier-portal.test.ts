@@ -153,11 +153,13 @@ beforeAll(async () => {
     attestationRequired: true,
     ownerNote: null,
   } as never);
+  // ADR-0240: this suite pins the link-to-session flow; the second factor is pinned in zz-adr0240-external-portal-mfa
+  await db.execute(sql`UPDATE org_settings SET supplier_portal_mfa_required = false`);
 }, 120_000);
 
 afterAll(async () => {
   await restoreStepUp?.();
-  await db.execute(sql`UPDATE org_settings SET supplier_portal_enabled = false, supplier_portal_accept_unscanned_files = false`);
+  await db.execute(sql`UPDATE org_settings SET supplier_portal_enabled = false, supplier_portal_accept_unscanned_files = false, supplier_portal_mfa_required = true`);
   await restoreIdentity?.();
   if (vendorIds.length) await db.delete(aiVendors).where(inArray(aiVendors.id, vendorIds));
   await db.delete(supplierQuestionnaires).where(sql`${supplierQuestionnaires.name} like ${`sp-q-${RUN}%`}`);

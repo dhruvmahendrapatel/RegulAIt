@@ -67,6 +67,13 @@ import {
   contentFieldsFor,
   contentSchemaFor,
   createAuditorGrantSchema,
+  EXTERNAL_MFA_CHALLENGE_REFUSAL,
+  EXTERNAL_MFA_CODE_REFUSAL,
+  EXTERNAL_MFA_COOKIE,
+  EXTERNAL_MFA_LIMITS,
+  EXTERNAL_MFA_LOCKED,
+  EXTERNAL_MFA_UNAVAILABLE,
+  externalMfaVerifySchema,
   draftFromControlSchema,
   draftFromUseCaseSchema,
   newAuditorLinkSchema,
@@ -80,6 +87,15 @@ import {
 } from "@regulait/shared";
 import { CSRF_HEADER, readCookie, requestIsSecure } from "./auth.js";
 import { evaluatePack } from "./compliance-packs.js";
+import {
+  challengeCookie,
+  challengeCookieFor,
+  externalMfaLimiter,
+  loadFactorView,
+  resetFactor,
+  startChallenge,
+  verifyChallenge,
+} from "./external-mfa.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { POSTURE_WINDOW_DAYS } from "./posture.js";
 import { requireStepUp } from "./step-up.js";
@@ -104,6 +120,12 @@ export const TRUST_RULE_IDS = {
   itemViewed: "auditor-item-viewed",
   viewRefused: "auditor-item-view-refused",
   signedOut: "auditor-signed-out",
+  // ADR-0240: the auditor's second factor
+  mfaChallenge: "auditor-mfa-challenge",
+  mfaLockedRefused: "auditor-mfa-locked-refused",
+  mfaCodeRejected: "auditor-mfa-code-rejected",
+  mfaLockout: "auditor-mfa-lockout",
+  mfaReset: "auditor-mfa-reset",
 } as const;
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
@@ -353,6 +375,7 @@ function trustLimiter(app: FastifyInstance): (req: FastifyRequest, reply: Fastif
 
 const idParams = z.object({ publicationId: z.string().uuid() });
 const grantParams = z.object({ grantId: z.string().uuid() });
+const mfaResetSchema = z.object({ reason: z.string().trim().min(1).max(500) }).strict();
 const slugParams = z.object({ slug: z.string().max(80) });
 const listQuery = z
   .object({ status: z.enum(TRUST_PUBLICATION_STATUSES).optional(), kind: z.enum(TRUST_PUBLICATION_KINDS).optional() })
@@ -384,14 +407,18 @@ const notFoundBody = { error: "not_found" } as const;
  *   GET    /v1/trust/auditor-grants/:grantId              admin (items and the audited views)
  *   POST   /v1/trust/auditor-grants/:grantId/links        admin + step-up (earlier unused links revoked)
  *   POST   /v1/trust/auditor-grants/:grantId/revoke       admin
+ *   GET    /v1/trust/auditor-grants/:grantId/mfa          admin (ADR-0240: the grant's second factor, no secret)
+ *   POST   /v1/trust/auditor-grants/:grantId/mfa/reset    admin + step-up (ADR-0240: the only recovery)
  *   GET    /v1/trust-center                               PUBLIC (404 while off)
- *   POST   /v1/auditor/session                            PUBLIC (redeems a link; sets the session cookie)
+ *   POST   /v1/auditor/session                            PUBLIC (redeems a link; a session, or the ADR-0240 challenge)
+ *   POST   /v1/auditor/session/mfa                        PUBLIC (challenge cookie + TOTP code; sets the session cookie)
  *   GET    /v1/auditor/session                            PUBLIC (cookie; the grant's items, audited)
  *   DELETE /v1/auditor/session                            PUBLIC (cookie; signs out)
  *   GET    /v1/auditor/items/:slug                        PUBLIC (cookie; one selected item, audited)
  */
-export function registerTrustPagesRoutes(app: FastifyInstance, db: Db): void {
+export function registerTrustPagesRoutes(app: FastifyInstance, db: Db, opts: { dataKey?: string } = {}): void {
   const limitPublic = trustLimiter(app);
+  const limitMfa = externalMfaLimiter(app);
 
   async function loadPublication(reply: FastifyReply, id: string): Promise<TrustPublicationRow | null> {
     const [p] = await db.select().from(trustPublications).where(eq(trustPublications.id, id));
@@ -973,6 +1000,46 @@ export function registerTrustPagesRoutes(app: FastifyInstance, db: Db): void {
     return { id: grantId, revokedAt: now.toISOString(), changed: true };
   });
 
+  // ---- ADR-0240: the grant's second factor (state, and the inviting admin's reset: the only recovery) ----
+  app.get("/v1/trust/auditor-grants/:grantId/mfa", async (req, reply) => {
+    const { grantId } = grantParams.parse(req.params);
+    const [g] = await db.select({ id: auditorGrants.id }).from(auditorGrants).where(eq(auditorGrants.id, grantId));
+    if (!g) return reply.status(404).send(notFoundBody);
+    return { grantId, ...(await loadFactorView(db, "auditor", grantId)) };
+  });
+
+  app.post("/v1/trust/auditor-grants/:grantId/mfa/reset", async (req, reply) => {
+    const { grantId } = grantParams.parse(req.params);
+    const body = mfaResetSchema.parse(req.body);
+    const [g] = await db.select().from(auditorGrants).where(eq(auditorGrants.id, grantId));
+    if (!g) return reply.status(404).send(notFoundBody);
+    const stepUp = await requireStepUp(db, req, reply, { kind: "identity_manage", facts: { op: "auditor_mfa_reset", grantId } });
+    if (!stepUp.ok) return reply;
+    const now = new Date();
+    const out = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      const gone = await resetFactor(tx, "auditor", grantId);
+      // a reset answers a lost or compromised authenticator: any session the factor opened ends with it
+      const sessions = await tx
+        .update(auditorSessions)
+        .set({ revokedAt: now })
+        .where(and(eq(auditorSessions.grantId, grantId), isNull(auditorSessions.revokedAt)))
+        .returning({ id: auditorSessions.id });
+      await audit(tx, {
+        userId: req.authCtx.userId,
+        objectType: "auditor_grant",
+        objectId: grantId,
+        ruleId: TRUST_RULE_IDS.mfaReset,
+        reason:
+          `second factor of auditor ${g.auditorName} reset by an admin (${gone ? (gone.lockedAt ? "it was locked" : "it was enrolled") : "none was enrolled"}; ` +
+          `${sessions.length} open session(s) ended); the next sign-in link enrols again: ${body.reason}`,
+        detail: { hadFactor: Boolean(gone), wasLocked: Boolean(gone?.lockedAt), sessionsEnded: sessions.length, reason: body.reason, stepUp: stepUp.method },
+      });
+      return { hadFactor: Boolean(gone), sessionsEnded: sessions.length };
+    });
+    return { grantId, reset: true, ...out, notice: "Issue a new sign-in link: the auditor enrols a new authenticator with it." };
+  });
+
   // ---- PUBLIC: the trust centre ------------------------------------------------
   app.get("/v1/trust-center", async (req, reply) => {
     const settings = await loadOrgSettings(db);
@@ -1073,12 +1140,13 @@ export function registerTrustPagesRoutes(app: FastifyInstance, db: Db): void {
           : gone,
       );
     }
-    const expiresAt = new Date(Math.min(now.getTime() + AUDITOR_SESSION_MINUTES * 60_000, row.grant.expiresAt.getTime()));
-    const session = generateAuditorSessionToken();
-    const ok = await db.transaction(async (rawTx) => {
+    // ADR-0240: required (the shipped default) means a spent link opens a challenge, never a session by itself
+    const mfaRequired = settings.trustAuditorMfaRequired;
+    if (mfaRequired && !opts.dataKey) return reply.status(503).send(EXTERNAL_MFA_UNAVAILABLE);
+    const out = await db.transaction(async (rawTx) => {
       const tx = rawTx as unknown as Db;
       // review M1: no session commits after the pages were turned off under this request
-      if (!(await trustPagesStillOn(tx))) return false;
+      if (!(await trustPagesStillOn(tx))) return { kind: "refused" as const };
       // single use: only the first redemption of a live link wins
       const [spent] = await tx
         .update(auditorLinks)
@@ -1092,22 +1160,128 @@ export function registerTrustPagesRoutes(app: FastifyInstance, db: Db): void {
           ),
         )
         .returning({ id: auditorLinks.id });
-      if (!spent) return false;
-      await tx.insert(auditorSessions).values({ grantId: row.grant.id, linkId: row.link.id, tokenHash: session.tokenHash, expiresAt, createdAt: now });
-      await audit(tx, {
-        userId: null,
-        objectType: "auditor_grant",
-        objectId: row.grant.id,
-        ruleId: TRUST_RULE_IDS.linkRedeemed,
-        reason: `auditor ${row.grant.auditorName} signed in with a single-use link; the session ends ${expiresAt.toISOString()}`,
-        detail: { linkId: row.link.id, sessionExpiresAt: expiresAt.toISOString(), clientIp: req.ip ?? null },
-      });
-      return true;
+      if (!spent) return { kind: "refused" as const };
+      if (mfaRequired) {
+        const started = await startChallenge(tx, { portal: "auditor", grantId: row.grant.id, linkId: row.link.id }, opts.dataKey!, row.grant.auditorEmail);
+        if (started.kind === "locked") {
+          await audit(tx, {
+            userId: null,
+            objectType: "auditor_grant",
+            objectId: row.grant.id,
+            ruleId: TRUST_RULE_IDS.mfaLockedRefused,
+            effect: "deny",
+            reason: `auditor ${row.grant.auditorName} presented a sign-in link while the second factor is locked; an admin must reset it`,
+            detail: { linkId: row.link.id, factorId: started.factorId, clientIp: req.ip ?? null },
+          });
+          return { kind: "locked" as const };
+        }
+        await audit(tx, {
+          userId: null,
+          objectType: "auditor_grant",
+          objectId: row.grant.id,
+          ruleId: TRUST_RULE_IDS.mfaChallenge,
+          reason: started.enrol
+            ? `auditor ${row.grant.auditorName} spent a sign-in link and is enrolling a second factor (first use)`
+            : `auditor ${row.grant.auditorName} spent a sign-in link; a second-factor code is required`,
+          detail: { linkId: row.link.id, factorId: started.factorId, phase: started.enrol ? "mfa-enrol" : "mfa-verify", clientIp: req.ip ?? null },
+        });
+        return { kind: "mfa" as const, started };
+      }
+      return { kind: "session" as const, opened: await openAuditorSession(tx, req, row.grant, row.link.id, now, "not_required") };
     });
-    if (!ok) return reply.status(401).send(gone);
-    const maxAge = Math.max(1, Math.floor((expiresAt.getTime() - now.getTime()) / 1000));
-    void reply.header("set-cookie", auditorCookie(session.token, requestIsSecure(req), maxAge));
-    return reply.status(201).send({ sessionExpiresAt: expiresAt.toISOString() });
+    if (out.kind === "refused") return reply.status(401).send(gone);
+    if (out.kind === "locked") return reply.status(423).send(EXTERNAL_MFA_LOCKED);
+    if (out.kind === "mfa") {
+      const { started } = out;
+      void reply.header("set-cookie", challengeCookieFor("auditor", started.token, started.expiresAt, requestIsSecure(req)));
+      return reply.status(200).send(
+        started.enrol
+          ? { mfa: "enrol", secret: started.enrol.secret, otpauthUri: started.enrol.otpauthUri, challengeExpiresAt: started.expiresAt.toISOString() }
+          : { mfa: "verify", challengeExpiresAt: started.expiresAt.toISOString() },
+      );
+    }
+    void reply.header("set-cookie", auditorCookie(out.opened.token, requestIsSecure(req), out.opened.maxAge));
+    return reply.status(201).send({ sessionExpiresAt: out.opened.expiresAt.toISOString() });
+  });
+
+  /** open the session a spent link (or a proved second factor) earned, audited, inside the caller's transaction */
+  async function openAuditorSession(
+    tx: Db,
+    req: FastifyRequest,
+    grant: AuditorGrantRow,
+    linkId: string,
+    now: Date,
+    mfa: "totp" | "totp-enrolled" | "not_required",
+  ) {
+    const expiresAt = new Date(Math.min(now.getTime() + AUDITOR_SESSION_MINUTES * 60_000, grant.expiresAt.getTime()));
+    const session = generateAuditorSessionToken();
+    await tx.insert(auditorSessions).values({ grantId: grant.id, linkId, tokenHash: session.tokenHash, expiresAt, createdAt: now });
+    await audit(tx, {
+      userId: null,
+      objectType: "auditor_grant",
+      objectId: grant.id,
+      ruleId: TRUST_RULE_IDS.linkRedeemed,
+      reason:
+        `auditor ${grant.auditorName} signed in with a single-use link` +
+        (mfa === "not_required" ? " (second factor not required: relaxed by an admin)" : mfa === "totp-enrolled" ? " after enrolling a second factor" : " and a second factor") +
+        `; the session ends ${expiresAt.toISOString()}`,
+      detail: { linkId, sessionExpiresAt: expiresAt.toISOString(), clientIp: req.ip ?? null, mfa },
+    });
+    return { token: session.token, expiresAt, maxAge: Math.max(1, Math.floor((expiresAt.getTime() - now.getTime()) / 1000)) };
+  }
+
+  // ADR-0240: the code that turns a challenge into a session (enrolment is proved by the same first code)
+  app.post("/v1/auditor/session/mfa", { bodyLimit: 1024 }, async (req, reply) => {
+    noStore(reply);
+    const settings = await loadOrgSettings(db);
+    if (!settings.trustPagesEnabled) return reply.status(404).send(notFoundBody);
+    if (await limitPublic(req, reply, `trust:addr:${req.ip}`)) return reply;
+    if (req.headers[CSRF_HEADER] !== "1") {
+      return reply.status(403).send({ error: "csrf_header_required", detail: `requests must carry ${CSRF_HEADER}: 1` });
+    }
+    const clear = challengeCookie("auditor", "", requestIsSecure(req), 0);
+    const challengeToken = readCookie(req.headers.cookie, EXTERNAL_MFA_COOKIE);
+    if (!challengeToken || !opts.dataKey) return reply.status(401).header("set-cookie", clear).send(EXTERNAL_MFA_CHALLENGE_REFUSAL);
+    if (await limitMfa(req, reply, challengeToken)) return reply;
+    const parsed = externalMfaVerifySchema.safeParse(req.body);
+    if (!parsed.success) return reply.status(401).send(EXTERNAL_MFA_CODE_REFUSAL);
+    const dataKey = opts.dataKey;
+    const now = new Date();
+    const out = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      const v = await verifyChallenge(tx, "auditor", challengeToken, parsed.data.code, dataKey);
+      if (!v.ok && v.reason === "challenge") return { kind: "challenge" as const };
+      const grantId = v.factor.auditorGrantId!;
+      if (!v.ok) {
+        const lockedNow = v.reason === "code" && v.lockedNow;
+        await audit(tx, {
+          userId: null,
+          objectType: "auditor_grant",
+          objectId: grantId,
+          ruleId: lockedNow ? TRUST_RULE_IDS.mfaLockout : TRUST_RULE_IDS.mfaCodeRejected,
+          effect: "deny",
+          reason:
+            v.reason === "locked"
+              ? "an auditor second-factor code was presented while the factor is locked"
+              : v.lockedNow
+                ? `auditor second factor LOCKED after ${v.failures} wrong or replayed codes; only an admin reset recovers it`
+                : `an auditor presented a wrong or replayed second-factor code (${v.failures} of ${EXTERNAL_MFA_LIMITS.failuresBeforeLock})`,
+          detail: { factorId: v.factor.id, failures: v.factor.failedAttempts, clientIp: req.ip ?? null },
+        });
+        if (v.reason === "locked" || v.lockedNow) return { kind: "locked" as const };
+        return { kind: "code" as const };
+      }
+      // the pages must still be on and the grant still active (revoked or ended since the link was spent)
+      if (!(await trustPagesStillOn(tx))) return { kind: "challenge" as const };
+      const [g] = await tx.select().from(auditorGrants).where(eq(auditorGrants.id, grantId));
+      if (!g || grantState(g, now) !== "active") return { kind: "challenge" as const };
+      return { kind: "session" as const, opened: await openAuditorSession(tx, req, g, v.challenge.auditorLinkId!, now, v.enrolled ? "totp-enrolled" : "totp") };
+    });
+    if (out.kind === "challenge") return reply.status(401).header("set-cookie", clear).send(EXTERNAL_MFA_CHALLENGE_REFUSAL);
+    if (out.kind === "locked") return reply.status(423).header("set-cookie", clear).send(EXTERNAL_MFA_LOCKED);
+    if (out.kind === "code") return reply.status(401).send(EXTERNAL_MFA_CODE_REFUSAL);
+    void reply.header("set-cookie", [clear, auditorCookie(out.opened.token, requestIsSecure(req), out.opened.maxAge)]);
+    return reply.status(201).send({ sessionExpiresAt: out.opened.expiresAt.toISOString() });
   });
 
   app.get("/v1/auditor/session", async (req, reply) => {
