@@ -23,6 +23,8 @@
  */
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import { passTotp } from "./totp-sign-in";
+import { ADMIN_EMAIL } from "./admin-api";
+import { steppedUpAs } from "./demo-credentials";
 import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -178,11 +180,9 @@ test.describe("ADR-0073 — a rule canary measures without enforcing, and the sc
       data: { name: toolName, kind: "write" },
     });
     expect(tl.status()).toBe(201);
-    const grant = await page.request.post("/v1/grants/tools", {
-      headers: CSRF,
-      data: { userId, serverId, toolName },
-    });
-    expect(grant.status()).toBe(201);
+    // ADR-0250: a grant mint is a settings_relax step-up, answered with Ada's authenticator
+    const grant = await steppedUpAs(page.request, ADMIN_EMAIL, "POST", "/v1/grants/tools", { userId, serverId, toolName });
+    expect(grant.status(), await grant.text()).toBe(201);
 
     const before = await page.request.post("/v1/evaluate", {
       headers: CSRF,

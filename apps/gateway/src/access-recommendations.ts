@@ -41,7 +41,7 @@
  *     request (default 90), is echoed into every finding's evidence, and a
  *     grant younger than the window is simply not judged.
  */
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   agentGrants,
   agentRevocations,
@@ -93,6 +93,8 @@ import {
   type RecommendationJudgedState,
 } from "@regulait/shared";
 import { z } from "zod";
+import { ACCESS_RECOMMENDATION_RULE_IDS } from "@regulait/shared";
+import { exportInMemory, filterParams, pageInMemory, sendListError, wantsListContract, type MemoryListSpec } from "./list-memory.js";
 import {
   agentProviderToken,
   configuredProviders,
@@ -1158,13 +1160,89 @@ export interface AccessRecommendationRouteOptions {
   judge?: RecommendationJudge | null | undefined;
 }
 
+/** ADR-0226 (P2 batch D): one rule's findings under the shared list contract (computed in memory, paged by offset) */
+const evidenceLine = (e: Record<string, unknown>): string =>
+  Object.entries(e)
+    .filter(([, val]) => val !== null && typeof val !== "object")
+    .map(([k, val]) => `${k}: ${String(val)}`)
+    .join(" · ");
+const grantLabel = (f: RecommendationFinding): string | null =>
+  f.object?.label ?? (f.grants ? f.grants.map((g) => `${g.side}: ${g.object.label}`).join(" + ") : null);
+export const RECOMMENDATION_FINDINGS_LIST: MemoryListSpec<RecommendationFinding> = {
+  id: "access-recommendation-findings",
+  sorts: {
+    holder: { value: (f) => f.holder.label.toLowerCase() },
+    object: { value: (f) => grantLabel(f)?.toLowerCase() ?? null },
+    why: { value: (f) => f.rationale.toLowerCase() },
+    // no `judged` sort: the list pages the DETERMINISTIC findings (see the route), so it holds no verdict to sort by
+  },
+  columns: {
+    holder: { label: "Holder", value: (f) => f.holder.label },
+    object: { label: "Grant", value: (f) => grantLabel(f) },
+    why: { label: "Why", value: (f) => f.rationale },
+    evidence: { label: "Evidence", value: (f) => evidenceLine(f.evidence) },
+    judged: {
+      label: "Model-judged (advisory)",
+      value: (f) => (f.judged ? `${f.judged.method}: ${f.judged.verdict}. ${f.judged.note}` : null),
+    },
+  },
+  filters: ["rule", "windowDays", "projectId"],
+  defaultSort: { col: "holder", dir: "asc" },
+  idOf: (f) => f.key,
+};
+const findingsFilterQuery = querySchema
+  .extend({ rule: z.enum(ACCESS_RECOMMENDATION_RULE_IDS) })
+  .strict();
+
 export function registerAccessRecommendationRoutes(
   app: FastifyInstance,
   db: Db,
   opts: AccessRecommendationRouteOptions = {},
 ): void {
-  app.get("/v1/recommendations/access", async (req) => {
-    const { windowDays, projectId } = querySchema.parse(req.query);
+  // ADR-0226: with any of sort/dir/cursor/offset/count (and `rule`) the route
+  // answers one rule's findings under the shared list contract; with none of
+  // them, exactly the report. Admin only, like the report.
+  //
+  // The list pages the DETERMINISTIC findings only and never dispatches the
+  // judge (#681 review): the page mounts one list per flagged rule and re-reads
+  // it on every sort, page and refocus, so judging there billed one dispatch per
+  // read and could show verdicts that disagree with the report the page is drawn
+  // from. The page overlays the verdicts from its one report read, by key. The
+  // export, a single download the admin asks for, still carries the judged
+  // layer exactly as the report does.
+  app.get("/v1/recommendations/access/export.xlsx", async (req, reply) => {
+    try {
+      const filters = findingsFilterQuery.parse(filterParams(req.query));
+      const report = await accessReport(req, filters);
+      const rule = report.rules.find((r) => r.id === filters.rule);
+      await exportInMemory(db, req, reply, rule?.findings ?? [], req.query, RECOMMENDATION_FINDINGS_LIST, filters);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+  app.get("/v1/recommendations/access", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      try {
+        const filters = findingsFilterQuery.parse(filterParams(req.query));
+        const report = await computeAccessRecommendations(db, filters.windowDays !== undefined ? { windowDays: filters.windowDays } : {});
+        const rule = report.rules.find((r) => r.id === filters.rule);
+        return {
+          ...pageInMemory(rule?.findings ?? [], req.query, RECOMMENDATION_FINDINGS_LIST),
+          rule: filters.rule,
+          // said outright, so no one reads a missing verdict here as "not judged"
+          judgedFrom: "report",
+        };
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
+    return accessReport(req, querySchema.parse(req.query));
+  });
+  async function accessReport(
+    req: FastifyRequest,
+    { windowDays, projectId }: z.infer<typeof querySchema>,
+  ): Promise<AccessRecommendationsReport> {
     // THE DETERMINISTIC REPORT, COMPUTED FIRST AND UNCONDITIONALLY. Whatever
     // the judged layer does or fails to do below, this is what it does it to.
     const report = await computeAccessRecommendations(
@@ -1184,5 +1262,5 @@ export function registerAccessRecommendationRoutes(
       return report;
     }
     return annotateReportWithJudge(report, resolved.judge);
-  });
+  }
 }

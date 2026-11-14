@@ -972,6 +972,66 @@ export const mcpServerUpstreamCredentials = pgTable(
 export type McpServerUpstreamCredentialRow = typeof mcpServerUpstreamCredentials.$inferSelect;
 
 /**
+ * ADR-0238 (P12(d), migration `upstream_token_exchange`, pending) — RFC 8693 token exchange for DOWN-SCOPED upstream credentials. At most one row
+ * per MCP server or per connector (exactly one foreign key set). No row, or `enabled` false (the default), exchanges
+ * nothing. Written only by the admin routes (settings_relax step-up), each write audited in its transaction. The
+ * client secret is the data-key envelope (CIPHERTEXT_COLUMNS); `secretSetAt` is stamped by `regulait_stamp_secret_set`.
+ * Admin-owned configuration: no ADR-0234 RLS batch.
+ */
+export const upstreamTokenExchanges = pgTable(
+  "upstream_token_exchanges",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    mcpServerId: uuid("mcp_server_id").references(() => mcpServers.id, { onDelete: "cascade" }),
+    connectorId: uuid("connector_id").references(() => connectors.id, { onDelete: "cascade" }),
+    enabled: boolean("enabled").notNull().default(false),
+    tokenEndpoint: text("token_endpoint").notNull(),
+    /** the `aud` of the subject token we present (the upstream authorization server's identifier) */
+    subjectTokenAudience: text("subject_token_audience").notNull(),
+    /** RFC 8693 `audience` of the issued token: pinned here, never taken from a call */
+    audience: text("audience").notNull(),
+    /** RFC 8707 `resource`, when wanted */
+    resource: text("resource"),
+    clientId: text("client_id").notNull(),
+    clientSecretCiphertext: text("client_secret_ciphertext").notNull(),
+    clientSecretLast4: text("client_secret_last4").notNull(),
+    maxTokenTtlSeconds: integer("max_token_ttl_seconds").notNull().default(300),
+    /** connectors only: the origin the exchange was configured for (null = the adapter's compiled default); a call to any other is refused */
+    connectorDestination: text("connector_destination"),
+    setBy: uuid("set_by").references(() => users.id, { onDelete: "set null" }),
+    secretSetAt: timestamp("secret_set_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("upstream_token_exchanges_server_uq").on(t.mcpServerId),
+    unique("upstream_token_exchanges_connector_uq").on(t.connectorId),
+    check("upstream_token_exchanges_target_check", sql`(${t.mcpServerId} IS NULL) <> (${t.connectorId} IS NULL)`),
+    check("upstream_token_exchanges_ttl_check", sql`${t.maxTokenTtlSeconds} BETWEEN 30 AND 900`),
+    check(
+      "upstream_token_exchanges_destination_check",
+      sql`${t.connectorDestination} IS NULL OR (${t.mcpServerId} IS NULL AND char_length(${t.connectorDestination}) <= 2048)`,
+    ),
+    check("upstream_token_exchanges_last4_check", sql`char_length(${t.clientSecretLast4}) = 4`),
+  ],
+);
+export type UpstreamTokenExchangeRow = typeof upstreamTokenExchanges.$inferSelect;
+
+/** ADR-0238: the per-action scope map (one row per configuration, action and scope; an unmapped action is refused) */
+export const upstreamTokenExchangeScopes = pgTable(
+  "upstream_token_exchange_scopes",
+  {
+    exchangeId: uuid("exchange_id")
+      .notNull()
+      .references(() => upstreamTokenExchanges.id, { onDelete: "cascade" }),
+    /** an MCP tool name, an MCP JSON-RPC method, or a connector operation */
+    action: text("action").notNull(),
+    scope: text("scope").notNull(),
+  },
+  (t) => [primaryKey({ name: "upstream_token_exchange_scopes_pk", columns: [t.exchangeId, t.action, t.scope] })],
+);
+
+/**
  * ADR-0219 (P10, migration 0253) — A REMOTE AGENT reached over the agent-to-agent (A2A) protocol. Registered by an
  * admin only while `org_settings.a2a_enabled`; its card was read through the guarded fetch and is kept as a bounded
  * snapshot. Every call goes through `executeGovernedA2aCall` (a2a.ts): the person's grant (default-deny), the lead
@@ -3801,10 +3861,21 @@ export const projects = pgTable("projects", {
    * fact does not resolve: `policy_unresolved`). Set only by `PUT /v1/execution-project-sensitivities/:projectId`
    * (a `settings_relax` step-up, audited). */
   isolationSensitivity: text("isolation_sensitivity"),
+  /** ADR-0206 G1 (migration `project_archive`): set when an admin archives the project. An archived project keeps its spend,
+   * approvals, context and audit history readable, but takes no new members, context or attributed calls (the
+   * pre-dispatch gate refuses `project_archived`, so engine keys pinned to it stop working). NULL = active. Written
+   * only by the archive/unarchive routes; the CHECK keeps the three columns together. */
+  archivedAt: timestamp("archived_at", { withTimezone: true }),
+  archivedReason: text("archived_reason"),
+  archivedByUserId: uuid("archived_by_user_id").references(() => users.id, { onDelete: "set null" }),
 }, (t) => [
   check(
     "projects_isolation_sensitivity_check",
     sql`${t.isolationSensitivity} IS NULL OR ${t.isolationSensitivity} IN ('public', 'internal', 'confidential', 'regulated')`,
+  ),
+  check(
+    "projects_archived_reason_check",
+    sql`(${t.archivedAt} IS NULL AND ${t.archivedReason} IS NULL AND ${t.archivedByUserId} IS NULL) OR (${t.archivedAt} IS NOT NULL AND ${t.archivedReason} IS NOT NULL AND char_length(btrim(${t.archivedReason})) BETWEEN 10 AND 500)`,
   ),
 ]);
 
@@ -4224,8 +4295,8 @@ export const certRotations = pgTable("cert_rotations", {
   certId: uuid("cert_id")
     .notNull()
     .references(() => certInventory.id, { onDelete: "cascade" }),
-  findingId: uuid("finding_id"),
-  approvalId: uuid("approval_id"),
+  findingId: uuid("finding_id").references((): AnyPgColumn => infraFindings.id, { onDelete: "set null" }),
+  approvalId: uuid("approval_id").references((): AnyPgColumn => approvals.id, { onDelete: "set null" }),
   oldSerial: text("old_serial"),
   newSerial: text("new_serial"),
   newNotAfter: timestamp("new_not_after", { withTimezone: true }),
@@ -4247,7 +4318,7 @@ export const patchRecords = pgTable(
     resourceId: uuid("resource_id")
       .notNull()
       .references(() => infraResources.id, { onDelete: "cascade" }),
-    findingId: uuid("finding_id"),
+    findingId: uuid("finding_id").references((): AnyPgColumn => infraFindings.id, { onDelete: "set null" }),
     cve: text("cve").notNull(),
     package: text("package"),
     installedVersion: text("installed_version"),
@@ -4275,7 +4346,7 @@ export const backupRuns = pgTable(
     resourceId: uuid("resource_id")
       .notNull()
       .references(() => infraResources.id, { onDelete: "cascade" }),
-    findingId: uuid("finding_id"),
+    findingId: uuid("finding_id").references((): AnyPgColumn => infraFindings.id, { onDelete: "set null" }),
     kind: text("kind", { enum: ["backup", "restore"] }).notNull().default("backup"),
     // success | failed | missed | restore_proposed | restored
     status: text("status", {
@@ -4701,7 +4772,7 @@ export const orgSettings = pgTable(
     /** fixed_agent only: the agent every compaction summarization runs on. It
      * must still be in the caller's own entitled+dispatchable roster — a fixed
      * pick can never widen entitlement, only pin a choice inside it. */
-    summarizerAgentId: uuid("summarizer_agent_id"),
+    summarizerAgentId: uuid("summarizer_agent_id").references((): AnyPgColumn => agents.id, { onDelete: "set null" }),
 
     // --- governance / compliance behavioural defaults ----------------------
     /** effective piiMode for a project whose classifications resolve to none.
@@ -4766,7 +4837,7 @@ export const orgSettings = pgTable(
      * approver. Persisted so the Infrastructure page's approver pick survives
      * reloads and admins; each propose call still names its approver
      * explicitly (this is the prefill/default, never a hidden actor). */
-    infraApproverUserId: uuid("infra_approver_user_id"),
+    infraApproverUserId: uuid("infra_approver_user_id").references((): AnyPgColumn => users.id, { onDelete: "set null" }),
 
     // --- audit retention ----------------------------------------------------
     autoPruneEnabled: boolean("auto_prune_enabled").notNull().default(false),
@@ -5097,7 +5168,7 @@ export const orgSettings = pgTable(
      * caller's own entitled, dispatchable roster — naming one here can pin a
      * choice, never widen entitlement. NULL while enabled = `judged:
      * unavailable` with `judge_required`, never a silent no-annotation run. */
-    recommendationJudgeAgentId: uuid("recommendation_judge_agent_id"),
+    recommendationJudgeAgentId: uuid("recommendation_judge_agent_id").references((): AnyPgColumn => agents.id, { onDelete: "set null" }),
     /** ADR-0215 (migration 0248): may an admin import vendored framework content as new
      * draft pack versions, and accept imported regulatory feed entries? false (default) =
      * the import routes refuse and the feed is the hand-curated list only. */
@@ -5653,10 +5724,10 @@ export const promptPromotions = pgTable(
     requestedByUserId: uuid("requested_by_user_id")
       .notNull()
       .references(() => users.id, { onDelete: "restrict" }),
-    approverUserId: uuid("approver_user_id").notNull(),
+    approverUserId: uuid("approver_user_id").notNull().references((): AnyPgColumn => users.id, { onDelete: "restrict" }),
     approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
     status: text("status", { enum: PROMPT_PROMOTION_STATUSES }).notNull().default("pending_approval"),
-    decidedByUserId: uuid("decided_by_user_id"),
+    decidedByUserId: uuid("decided_by_user_id").references((): AnyPgColumn => users.id, { onDelete: "restrict" }),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
     result: jsonb("result").$type<Record<string, unknown>>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -6467,7 +6538,8 @@ export const modelCardEvidence = pgTable(
  * `running`) before its suite runs, unique on (card, drift key, kind, source), so a drift is re-tested at most
  * once per suite however often the sweep runs. `card_approval_id` is the re-certification request the result
  * is attached to: set when the request is created, or at once when one is already pending. */
-export const MRM_RETEST_KINDS = ["eval", "redteam"] as const;
+// ADR-0245 (pending migration spikee_engine_and_engine_retest): `engine` re-runs a red-team engine run a person already ran against the agent
+export const MRM_RETEST_KINDS = ["eval", "redteam", "engine"] as const;
 /** `reported`: the suite ran but its runner gave no gate verdict (e.g. no gating class exercised) — never a pass */
 export const MRM_RETEST_STATUSES = ["running", "passed", "failed_gate", "reported", "refused", "skipped"] as const;
 export const mrmRetestRuns = pgTable(
@@ -6480,13 +6552,15 @@ export const mrmRetestRuns = pgTable(
     /** the certification and configuration-change count this re-test answers */
     driftKey: text("drift_key").notNull(),
     kind: text("kind", { enum: MRM_RETEST_KINDS }).notNull(),
-    /** the eval dataset (kind eval) or red-team library (kind redteam) re-run */
+    /** the eval dataset (kind eval), red-team library (kind redteam) or engine run (kind engine) re-run */
     sourceId: uuid("source_id").notNull(),
     sourceName: text("source_name").notNull(),
     runAsUserId: uuid("run_as_user_id").references(() => users.id, { onDelete: "set null" }),
     projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
     evalRunId: uuid("eval_run_id").references(() => evalRuns.id, { onDelete: "set null" }),
     redteamRunId: uuid("redteam_run_id").references((): AnyPgColumn => redteamRuns.id, { onDelete: "set null" }),
+    /** ADR-0245 (migration spikee_engine_and_engine_retest): kind engine — the engine run this re-test started (`source_id` is the run repeated) */
+    engineRunId: uuid("engine_run_id").references((): AnyPgColumn => engineRuns.id, { onDelete: "set null" }),
     status: text("status", { enum: MRM_RETEST_STATUSES }).notNull(),
     reason: text("reason"),
     /** the measured figures, copied at completion: gatePassed, regression, meanScore, passRate, asr */
@@ -6496,7 +6570,9 @@ export const mrmRetestRuns = pgTable(
     finishedAt: timestamp("finished_at", { withTimezone: true }),
   },
   (t) => [
-    check("mrm_retest_runs_kind_check", sql`${t.kind} IN ('eval','redteam')`),
+    check("mrm_retest_runs_kind_check", sql`${t.kind} IN ('eval','redteam','engine')`),
+    check("mrm_retest_runs_engine_run_check", sql`${t.engineRunId} IS NULL OR ${t.kind} = 'engine'`),
+    uniqueIndex("mrm_retest_runs_engine_run_uq").on(t.engineRunId).where(sql`${t.engineRunId} IS NOT NULL`),
     check(
       "mrm_retest_runs_status_check",
       sql`${t.status} IN ('running','passed','failed_gate','reported','refused','skipped')`,
@@ -6826,7 +6902,7 @@ export const reportDefinitions = pgTable(
      * fallback set — which now says, in its own note, that it is a fallback and
      * that a pack should be attached. Set, and the section is computed from the
      * pack's controls against the real ledgers, stamped with the pack version. */
-    packId: uuid("pack_id"),
+    packId: uuid("pack_id").references((): AnyPgColumn => compliancePacks.id, { onDelete: "set null" }),
     createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -13993,7 +14069,7 @@ export const engineEnrollmentTokens = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     usedAt: timestamp("used_at", { withTimezone: true }),
-    runnerId: uuid("runner_id"),
+    runnerId: uuid("runner_id").references((): AnyPgColumn => engineRunners.id, { onDelete: "set null" }),
   },
   (t) => [check("engine_enrollment_tokens_expiry_check", sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} <= ${t.createdAt} + interval '60 minutes'`)],
 );
@@ -14097,7 +14173,7 @@ export const engineSchedules = pgTable(
     intervalHours: integer("interval_hours").notNull(),
     nextRunAt: timestamp("next_run_at", { withTimezone: true }).notNull(),
     enabled: boolean("enabled").notNull().default(true),
-    lastRunId: uuid("last_run_id"),
+    lastRunId: uuid("last_run_id").references((): AnyPgColumn => engineRuns.id, { onDelete: "set null" }),
     lastSkip: text("last_skip"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

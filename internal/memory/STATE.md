@@ -22,6 +22,22 @@ roadmap: ../product/ROADMAP.md
 ## Where we are (read this paragraph first)
 <!-- fold:state-recap newest-first -->
 
+**2026-11-07 - P30 spike: `vercel/workflow` rejected for pillar 2 ([ADR-0254](../decisions/0254-workflow-durable-execution-spike.md)).**
+The existing stage runner stays the engine. Retry/backoff and in-stage fan-out are follow-ups over graphile-worker or
+pg-boss. The prototype is in `spikes/workflow-p30/` (default off); there is no product or migration change.
+
+**2026-11-07 - backlog P26 built on `builder/p26-spikee-pyrit-engines` ([ADR-0245](../decisions/0245-spikee-pyrit-redteam-engines.md)):** Spikee joins garak and promptfoo as a sidecar red-team engine (off until its first signed image publish), the ADR-0217 automatic re-test now repeats red-team engine runs, and PyRIT is designed but its build is deferred (two builder attempts were stopped by a content-safety filter).
+
+**2026-11-07 - backlog P33: third-party client compatibility tests ([ADR-0257](../decisions/0257-third-party-client-compat-tests.md), builder lane, branch `builder/p33-client-compat-tests`).**
+- **Built:** `apps/gateway/client-compat/` (the harness) and `client-compat/` (the client images) run the official
+  `openai` 7.43.0 and `@anthropic-ai/sdk` 1.3.0, `laravel/ai` v1.3.0 (its `openai-compatible` and `anthropic` drivers)
+  and `dart_mcp` 0.5.2, each in a digest-pinned image with dependencies vendored at build, against a real gateway on an
+  `--internal` network. Checks: auth, governed allow, governed deny, streaming, tool calls, cost attribution and audit.
+  Own workflow `client-compat.yml` (compat/MCP paths, nightly 03:37 UTC, on demand).
+- **Fixed (trivial):** the SSE shims forced `Connection: keep-alive`, which hung laravel/ai's Anthropic stream.
+- **Follow-ups (PENDING P33):** a governed `/v1/responses` shim; provider-shaped 401s on compat routes; dart_mcp has
+  no HTTP transport of its own. No migration.
+
 **2026-11-07 - backlog P27 built on `builder/p27-mcp-pinning-fixtures` ([ADR-0246](../decisions/0246-mcp-definition-pinning-and-vuln-fixtures.md), the `mcp_definition_pins` migration (numbered at merge)):** MCP rug-pull detection (per-item definition pins at admission, compared on every manifest fetch, a changed item blocked by default until an admin re-approves it against an RFC 6902 diff) and the test-only clean-room `@regulait/mcp-vuln-fixtures` (eight attack classes, kept out of the image). Addendum (owner, same day): offensive tool servers are classified high-risk, and every call needs a policy template (quorum approval, rate limit), an authorised target and a redacted-argument audit. API only; the review UI goes to #453.
 
 **2026-11-08 - P37 built (builder lane, [ADR-0261](../decisions/0261-defenseclaw-telemetry-ingest.md)): a DefenseClaw audit-export ingest adapter.** API and backend only; the six admin routes are known UI gaps tracked on #453 (owner decision 2026-11-07). Migration `pending/third_party_ingest.sql`, numbered at merge. P1 on-device enforcement stays a post-demo clean-room build informed by the DefenseClaw report.
@@ -5713,6 +5729,62 @@ the screen is tracked on #453. Open:
 - the PatronAI-derived catalogue additions;
 - JSONC/TOML configs, a gap until a maintained parser passes ADR-0176;
 - the agent config route serving the opt-in once the SD4 pack signer lands.
+
+**ADR-0247 (builder, 2026-11-07/08): a permissively licensed injection and harm classifier, served as ONNX (P28).** `agents/trained-detectors/` bakes `leolee99/PIGuard` (MIT) as the default injection classifier and keeps `protectai/deberta-v3-base-prompt-injection-v2` as `--build-arg INJECTION_MODEL=protectai`; harm stays `unitary/toxic-bert` with reasons mapped to our own labels (`HARM_LABELS.md`). A new `export` build stage (hash-locked `export-requirements.txt`) writes ONNX graphs offline from stock Transformers classes and fails unless they match PyTorch (same token ids, |dp| < 1e-4); the runtime closure is ONNX Runtime + tokenizers + Presidio/spaCy, no PyTorch. `injection-baselines.expected.json` now records PIGuard (threshold 0.5): NotInject FPR 11.5%, InjecAgent recall 80.0%, AgentDojo 76.3% / 11.3%, JailbreakBench 83.3% / 26.0%, web-agent 72.0% / 72.0%, pooled 79.4% / 19.1% (ProtectAI: 43.4%, 84.3%, 72.6% / 3.1%, 75.3% / 1.0%, 60.0% / 50.0%, 77.8% / 30.0%). No candidate meets a 15% benign-FPR bar on every set. Owner decisions open: the default model; PIGuard's CC BY-NC 4.0 training sources (Alpaca, no_robots); or a fine-tune on permissive agent-style data. The image stays outside the shipped product (ADR-0220 §8).
+
+**ADR-0243 (builder, 2026-11-07): OWASP MCP Top 10 pack and the OWASP LLM Top 10 2026 edition (PENDING P24).**
+Three new seed pack versions in `packages/shared/src/owasp-packs.ts`: `owasp-mcp-top-10@1` (2025 beta list, mapped onto
+MCP admission, grant recertification, release quarantine, sandbox placements, the injection detector, identity
+assertions, the MCP tool ledger, shadow-AI discovery and content trust), `owasp-llm-top-10@1` (2025) and `@2` (2026; v1
+untouched). Both sources are share-alike (MCP also non-commercial), so items are cited by OWASP identifier only. Control
+refs are risk slugs, not numbers, because 2026 reuses numbers for different risks; the v1→v2 diff is ten title changes
+and one description change. No CSA AICM pack (licence). No migration. Open: the MCP list is a beta; the evaluator
+catalog's `owasp:llm:NN` ids stay on 2025 numbering; console labels (UI, #453).
+
+**ADR-0245 (builder, 2026-11-07): Spikee and PyRIT as sidecar red-team engines (backlog P26).** Spikee 0.9.4
+(Apache-2.0, indirect prompt injection in documents) is built as an ADR-0187 / ADR-0190 I5 engine: a pinned,
+hash-locked, licence-gated image built in CI, a gateway-only workspace target, off and `not_built` until its first
+signed publish (a null lock entry, so nothing can enable it before then). Its unused `datasets` requirement and the 18
+packages only it needs are left out of the image (fsspec CVE-2026-104851), removed rather than allow-listed. PyRIT
+1.1.0 is designed in the ADR (attacker and scorer = the run's judge through the gateway, every attack `offensive`) but
+NOT built: two builder attempts were stopped by a content-safety filter; the partial work is on
+`builder/p26-pyrit-wip`, and `pyrit` is in no runtime list. The pending migration `spikee_engine_and_engine_retest`
+widens `engines_id_check`, seeds spikee and gives the ADR-0217 auto re-test a third kind, `engine`
+(`mrm_retest_runs.engine_run_id`), which repeats a person's red-team engine runs of any engine after a model change and
+settles in the transaction that ends the run. The lock reader treats an engine missing from an older base lock as never
+published. The agentic_security coverage diff added nothing (multimodal recorded as the one gap). Open: finishing
+PyRIT, owner confirmation of the eight reused licence acceptances, Spikee's LLM judge through the gateway, a governed
+multimodal route, and the UI (#453).
+
+**ADR-0238 (builder, 2026-11-07, Proposed): down-scoped upstream credentials by RFC 8693 token exchange (backlog
+P12(d)).** Step 1 found the `/oauth/token` exchange (ADR-0188 S5) is inbound only: the gateway is its authorization
+server and only resource. Added the gateway as an RFC 8693 client of an upstream's own authorization server, per MCP
+server or connector (pending migration `upstream_token_exchange`: `upstream_token_exchanges` plus the `upstream_token_exchange_scopes` join table;
+replay namespace `upstream_exchanged_token`). Off by default; every write is a `settings_relax` step-up; a url move
+turns it off. After the governed decision, the action's mapped scopes (unmapped = refused) are requested with a 60 s
+ES256 assertion for the person, through `oauth4webapi` over the egress-guarded fetch; the answer must stay within
+scope, the pinned audience and a ≤ 900 s lifetime, is claimed against replay, audited without the token, attached to
+that one call only and never cached. UI needs posted on #453. Follow-ups in the ADR (connector base_url move, reverse
+conflict refusals, private_key_jwt, ADR-0231 jwt-bearer profile, and MCP-spec OAuth 2.1/DCR on our own MCP
+endpoint, out of scope per ADR-0097). Design reference cited (ideas only): loglux/authmcp-gateway (MIT).
+
+**ADR-0254 (builder, 2026-11-07, Accepted spike verdict): `vercel/workflow` does not fit as pillar 2's engine (P30).**
+A time-boxed spike ran one real pillar-2 sequence on `workflow` 5.4.0 + `@workflow/world-postgres` 5.1.1 inside fastify
+through the standalone build: requirements, then a sign-off hook that resumes across a host restart, then three fan-out
+checks, with the real kernel `transition()` in durable steps. 7/7 tests passed twice in a loopback-only network
+namespace. Verdict "none fits" (ADR-0176):
+- the `workflow`/`workflow_drizzle`/`graphile_worker` schemas are hard-coded and bring their own 30-migration journal
+  (no RLS, plaintext step data);
+- about 14–16 ms per step against 0.7–0.9 ms for the current transaction;
+- 178 versions since 4.0, with 5.0 on 2026-09-30;
+- an unauthenticated loopback delivery route;
+- audit that cannot share the event's transaction;
+- zod and undici pinned at vulnerable versions.
+
+The existing runner stays; retry/backoff and in-stage fan-out go to it over graphile-worker or pg-boss, each in its own
+ADR. trigger.dev is rejected too (owner input, 2026-11-07); its wait-for-token, idempotency-key and per-queue
+concurrency patterns are borrowed. Prototype `spikes/workflow-p30/` behind `REGULAIT_WORKFLOW_DURABLE_P30` (default
+off). No migration; reserved 0309 released. PENDING P30.
 
 <!-- fold:state-decisions -->
 

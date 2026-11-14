@@ -41,7 +41,7 @@ describe("ADR-0190 I5 follow-up: engines in compose", () => {
     expect(t).not.toMatch(/volumes:|ports:|networks:|environment:|cap_add:|privileged:/);
   });
 
-  it.each(["promptfoo", "modelscan", "garak"])("%s: one build-only image service from its Dockerfile", (engine) => {
+  it.each(["promptfoo", "modelscan", "garak", "spikee"])("%s: one build-only image service from its Dockerfile", (engine) => {
     const svc = block(`engine-${engine}-image`);
     expect(svc).toMatch(/\n {4}<<: \*engine-image\n/);
     expect(svc).toMatch(new RegExp(`\\n {6}dockerfile: engines/${engine}/Dockerfile\\n`));

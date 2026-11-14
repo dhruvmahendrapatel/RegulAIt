@@ -332,6 +332,31 @@ export const INDIRECT_UI_CALLS = new Map([
       reason: "the Decision BOM names its bundle href; bomModel.ts checks it equals this route, then the download fetches it",
     },
   ],
+  // ADR-0226 P2 batch D: the usage ledger, the golden cases and the findings per rule
+  ...[
+    ["GET /v1/usage-events/export.xlsx", "apps/web/src/views/admin/cost/OptimizationPage.tsx"],
+    ["GET /v1/governance/decision-regression/cases/export.xlsx", "apps/web/src/views/admin/governance/DecisionRegressionPage.tsx"],
+    ["GET /v1/recommendations/access/export.xlsx", "apps/web/src/views/admin/governance/RecommendationsPage.tsx"],
+    // the Inbox's "Recently decided" (owner decision, 2026-11-06)
+    ["GET /v1/approvals/export.xlsx", "apps/web/src/views/inbox/InboxPage.tsx"],
+  ].map(([r, page]) => [
+    r,
+    {
+      file: "apps/web/src/ui/DataList.tsx",
+      evidence: "exportUrl(props.exportPath",
+      pathIn: page,
+      reason: "the page passes the export path to DataList, whose Download Excel button fetches it",
+    },
+  ]),
+  ...[["GET /v1/governance/decision-regression/cases", "apps/web/src/views/admin/governance/DecisionRegressionPage.tsx"]].map(([r, page]) => [
+    r,
+    {
+      file: "apps/web/src/ui/DataList.tsx",
+      evidence: "pageUrl(endpoint",
+      pathIn: page,
+      reason: "the page passes the list route to DataList, which reads it page by page",
+    },
+  ]),
 ]);
 
 /**
@@ -391,7 +416,12 @@ export const KNOWN_UI_GAPS = new Map([
   [
     "POST /v1/discovery/endpoint-mcp-server-links/remove",
     { does: "ADR-0259: remove that link, audited", tracking: "#453" },
-  ],
+  ],  ["GET /v1/servers/:serverId/token-exchange", { does: "reads an MCP server's upstream token-exchange configuration and per-action scope map (never the secret)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
+  ["PUT /v1/servers/:serverId/token-exchange", { does: "sets or changes an MCP server's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
+  ["DELETE /v1/servers/:serverId/token-exchange", { does: "removes an MCP server's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
+  ["GET /v1/connectors/:connectorId/token-exchange", { does: "reads a connector's upstream token-exchange configuration and per-action scope map (never the secret)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
+  ["PUT /v1/connectors/:connectorId/token-exchange", { does: "sets or changes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
+  ["DELETE /v1/connectors/:connectorId/token-exchange", { does: "removes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
 ]);
 
 /**
@@ -402,7 +432,7 @@ export const KNOWN_UI_GAPS = new Map([
  * usage-extractor routes are called by the Agents page's usage-counts card
  * (owner-approved on #453, 2026-11-07).
  */
-export const KNOWN_UI_GAPS_MAX = 31;
+export const KNOWN_UI_GAPS_MAX = 37;
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 

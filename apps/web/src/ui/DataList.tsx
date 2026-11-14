@@ -9,6 +9,10 @@
  * cannot sort says so in its (i) rather than being sorted in the browser.
  *
  * Its own module, loaded only with the screens that use it: the entry bundle does not grow.
+ *
+ * Its toolbar and column picker carry the kit's list-view mark (`data-list-view`), so a contained `Card` may still fold
+ * over the list (X6b): the page-size select is not a draft. Nothing else in the list carries the mark, so a form control a
+ * page renders in a row, or the export's row-limit alert, still keeps the card open.
  */
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { useInfiniteQuery, useQuery, keepPreviousData } from "@tanstack/react-query";

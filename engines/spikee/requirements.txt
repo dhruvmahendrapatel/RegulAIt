@@ -1,0 +1,122 @@
+# ADR-0245 — the spikee image's Python closure, pinned by version AND sha256 (our lockfile).
+# Resolved 2026-11-07 with `uv pip compile` (uv 0.11.32) from the single input `spikee==0.9.4` (NO extras: no
+# azure, bedrock, groq, ollama or local-inference providers, no torch), for CPython 3.12 on x86_64-manylinux_2_28
+# with `--only-binary :all:`. spikee pins most of its direct dependencies exactly (tqdm, rich, any-llm-sdk, tabulate,
+# flask, jinja2, pandas, python-dotenv, InquirerPy, requests, markdown, tiktoken); every other pin is the
+# resolver's. Each pin's exact distribution was then chosen by `pip download --only-binary :all: --no-deps` inside the
+# base image (python:3.12-slim-trixie, pinned by digest in the Dockerfile, glibc 2.41): one sha256 per package, the
+# exact file pip installs there.
+# Installed with: pip install --require-hashes --no-deps --only-binary :all: -r requirements.txt
+# What of this closure ever runs is narrower than what is installed: spikee's CLI imports its viewer (flask), list
+# (datasets) and provider (any-llm, openai, anthropic) modules at import time, but this build's only target is its own
+# workspace module (packages/engine-spikee/src/target-module.ts, the standard library), so no provider client is ever
+# constructed (packages/shared/src/engines/spikee.ts).
+# packages/engine-spikee/src/image.test.ts keeps this file, the Dockerfile and the manifest in lockstep; the licence
+# gate (licence-gate.mjs) runs on what this installs.
+# 2026-11-07 (fsspec CVE-2026-104851, HIGH): spikee's declared `datasets==4.8.4` is NOT installed, nor the 18 packages
+# only it pulls in (aiohttp and its stack, attrs, dill, filelock, fsspec, hf-xet, huggingface-hub, multiprocess,
+# packaging, pyarrow, pyyaml, xxhash). No module spikee runs imports `datasets` (its only importers are the Hub fetch
+# scripts prune-data.py removes), and datasets 4.8.4 caps fsspec at the vulnerable 2026.2.0. The image drops the
+# requirement from spikee's installed metadata (drop-unused-requirement.py) so `pip check` stays strict.
+annotated-types==0.8.0 \
+    --hash=sha256:f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0
+anthropic==0.125.0 \
+    --hash=sha256:3486013602eca76d8b12540764e53654f02cf4951110bca86cf06e67428a9f21
+any-llm-sdk==1.43.0 \
+    --hash=sha256:92760c8432676c35628d77767c06796d75947aef4c23ebb80f4c87752b920f74
+anyio==4.16.0 \
+    --hash=sha256:c66ae634e0b8228396b801741beb3294326d4b6102f7bba4041c0dfb58c29026
+blinker==1.9.0 \
+    --hash=sha256:ba0efaa9080b619ff2f3459d1d500c57bddea4a6b424b60a91141db6fd2f08bc
+certifi==2026.10.23 \
+    --hash=sha256:e9b54de76e530bb6cf0ccd036787103acb58fd42ba930ea8bf948ddbaa2f61d1
+charset-normalizer==3.5.2 \
+    --hash=sha256:3d31298449090ab8d47b7b1b2a555ff73cac7ed438a08b7ac160980c7ebed649
+click==8.5.1 \
+    --hash=sha256:8bb5376d2006950386f8c6427613334a2acadc5f559cb80e638d00b4df957e37
+distro==1.9.0 \
+    --hash=sha256:7bffd925d65168f85027d8da9af6bddab658135b840670a223589bc0c8ef02b2
+docstring-parser==0.18.0 \
+    --hash=sha256:b3fcbed555c47d8479be0796ef7e19c2670d428d72e96da63f3a40122860374b
+flask==3.1.3 \
+    --hash=sha256:f4bcbefc124291925f1a26446da31a5178f9483862233b23c0c96a20701f670c
+h11==0.16.0 \
+    --hash=sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86
+httpcore==1.0.9 \
+    --hash=sha256:2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55
+httpcore2==2.16.0 \
+    --hash=sha256:5c4358319f2602d984ad93182c9fee5160f22e9da7babdda870a5e7c4e2dc34f
+httpx==0.28.1 \
+    --hash=sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad
+httpx2==2.16.0 \
+    --hash=sha256:fd2c5d7909e8d86fe92d53020c310ca0e4e431b838c207c5754b9bbf0308d49a
+idna==3.20 \
+    --hash=sha256:ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c
+inquirerpy==0.3.4 \
+    --hash=sha256:c65fdfbac1fa00e3ee4fb10679f4d3ed7a012abf4833910e63c295827fe2a7d4
+itsdangerous==2.2.0 \
+    --hash=sha256:c6242fc49e35958c8b15141343aa660db5fc54d4f13a1db01a3f5891b98700ef
+jinja2==3.1.6 \
+    --hash=sha256:85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67
+jiter==0.19.0 \
+    --hash=sha256:0956b5f58b804221dfb929c120e6d4032138fed20c1cc0ef683a2d1326255e46
+markdown==3.10.2 \
+    --hash=sha256:e91464b71ae3ee7afd3017d9f358ef0baf158fd9a298db92f1d4761133824c36
+markdown-it-py==4.2.0 \
+    --hash=sha256:9f7ebbcd14fe59494226453aed97c1070d83f8d24b6fc3a3bcf9a38092641c4a
+markupsafe==3.0.4 \
+    --hash=sha256:8e124f974786f831d6043728e38296969d3579db8896fe004682f5758e613581
+mdurl==0.1.2 \
+    --hash=sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8
+numpy==2.5.4 \
+    --hash=sha256:fbde6962867ee75b48b0ee29b2b9372ec5d617799dbaf38e82dc0596f2f7738a
+openai==3.46.0 \
+    --hash=sha256:7b650117e9bf539029bf880c2eff94a26f281394f6572284efa5d068d4b1c98e
+openresponses-types==2.4.0 \
+    --hash=sha256:186406592bc115bf12d9ee88320f8051ab1ade0a8fa8941fd1e44b0be16684f1
+pandas==3.0.1 \
+    --hash=sha256:532527a701281b9dd371e2f582ed9094f4c12dd9ffb82c0c54ee28d8ac9520c4
+pfzy==0.3.4 \
+    --hash=sha256:5f50d5b2b3207fa72e7ec0ef08372ef652685470974a107d0d4999fc5a903a96
+prompt-toolkit==3.0.53 \
+    --hash=sha256:01c0891d7f9237d5e339f7d3e42cdae80b7534abb1c7c0e3352efba6231492f2
+pydantic==2.14.3 \
+    --hash=sha256:3f7b347782ab7e4cf4c798496ae3a82787d9f21ec12676a9c564355eeef8daa8
+pydantic-core==2.50.4 \
+    --hash=sha256:c81d98e27d9d9261909dcccab1ba5d6ea1c98b0bb9470e368604614fd1d36ddd
+pygments==2.21.0 \
+    --hash=sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9
+python-dateutil==4.0.0 \
+    --hash=sha256:a5e246f79eb80475e691bf93862cead98decd8a498cf53ba0516fcdc0f50dc1c
+python-dotenv==1.2.2 \
+    --hash=sha256:1d8214789a24de455a8b8bd8ae6fe3c6b69a5e3d64aa8a8e5d68e694bbcb285a
+regex==2026.11.7 \
+    --hash=sha256:36f1bff9b25e6fe78ad664aacf0cf99ccba6927b32ba31de42a3ca21f9fb15a8
+requests==2.33.0 \
+    --hash=sha256:3324635456fa185245e24865e810cecec7b4caf933d7eb133dcde67d48cee69b
+rich==14.3.3 \
+    --hash=sha256:793431c1f8619afa7d3b52b2cdec859562b950ea0d4b6b505397612db8d5362d
+sniffio==1.3.1 \
+    --hash=sha256:2f6da418d1f1e0fddd844478f41680e794e6051915791a034ff65e5f100525a2
+spikee==0.9.4 \
+    --hash=sha256:3768463052de5d89f94ec4a4c4dd11c492c6e2f7b31e09b45eade9e57ffaa3d6
+tabulate==0.9.0 \
+    --hash=sha256:024ca478df22e9340661486f85298cff5f6dcdba14f3813e8830015b9ed1948f
+tiktoken==0.12.0 \
+    --hash=sha256:edde1ec917dfd21c1f2f8046b86348b0f54a2c0547f68149d8600859598769ad
+tqdm==4.67.3 \
+    --hash=sha256:ee1e4c0e59148062281c49d80b25b67771a127c85fc9676d3be5f243206826bf
+truststore==0.10.5 \
+    --hash=sha256:9aaaedaefaf06d8b206278cf8b5012bc897f485a874503501e12d776df78951c
+typing-extensions==4.16.0 \
+    --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
+typing-inspection==0.4.5 \
+    --hash=sha256:bc210535442b39e1bf2805e0c7a17dfd6a4ace760c84c7f7d16245d23a6b1c39
+tzdata==2026.6 \
+    --hash=sha256:0a10eec6e13ef16b627fabed9a5f2ba61a62b1c67f327305f4e7e412a70b4aec
+urllib3==2.8.0 \
+    --hash=sha256:0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3
+wcwidth==0.9.4 \
+    --hash=sha256:b185c8b927b23af2721be1783499d1cfa5c028b098b0858951b4ae224477f1c2
+werkzeug==3.1.9 \
+    --hash=sha256:6392e50c78460ba618e5b21f08a71f59c99ce99cdc6cf6e3dd7e6ccca8754fab

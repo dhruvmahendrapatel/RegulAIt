@@ -1,6 +1,7 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import { passTotp } from "./totp-sign-in";
-import { asSteppedUpAdmin } from "./admin-api";
+import { ADMIN_EMAIL, adminContext, asSteppedUpAdmin } from "./admin-api";
+import { steppedUpAs } from "./demo-credentials";
 import { readFileSync } from "node:fs";
 import http from "node:http";
 import { createRequire } from "node:module";
@@ -38,6 +39,15 @@ let savedMinReleaseAgeDays: number | null = null;
 async function putSettings(payload: Record<string, unknown>) {
   const response = await asSteppedUpAdmin(base, state.passwords.admin, "PUT", "/v1/org/settings", payload);
   expect(response.ok(), `PUT /v1/org/settings: ${response.status()} ${response.bodyText}`).toBe(true);
+}
+
+/** ADR-0250: minting a grant is a settings_relax step-up the bootstrap token cannot give once Ada can step up.
+ * One signed-in Ada context serves every fixture's grant (each mint still spends one TOTP step-up). */
+let adminCtx: APIRequestContext | null = null;
+async function grantTool(userId: string, toolServerId: string, toolName: string) {
+  adminCtx ??= await adminContext(base, state.passwords.admin);
+  const response = await steppedUpAs(adminCtx, ADMIN_EMAIL, "POST", "/v1/grants/tools", { userId, serverId: toolServerId, toolName });
+  expect(response.ok(), `POST /v1/grants/tools: ${response.status()} ${await response.text()}`).toBe(true);
 }
 
 async function api(route: string, payload?: unknown) {
@@ -110,6 +120,7 @@ test.afterAll(async () => {
   test.setTimeout(120_000);
   if (savedMinReleaseAgeDays !== null) await putSettings({ minReleaseAgeDays: savedMinReleaseAgeDays });
   await putSettings({ approvalSignatureMode: "passkey" });
+  await adminCtx?.dispose();
   upstream?.closeAllConnections();
   if (upstream) await new Promise<void>((resolve) => upstream.close(() => resolve()));
   await db.$client.end();
@@ -121,7 +132,9 @@ async function fixture(redacted = true, args: Record<string, unknown> = { text: 
   manifest.push({ name, inputSchema, annotations: { readOnlyHint: true } });
   await api(`/v1/servers/${serverId}/tools`, { name, kind: "read" });
   await db.update(mcpTools).set({ inputSchema }).where(and(eq(mcpTools.serverId, serverId), eq(mcpTools.name, name)));
-  await api("/v1/grants/tools", { userId: callerId, serverId, toolName: name });
+  // the grant's step-up spends a TOTP step on top of the page's sign-in, which may wait out a 30 s window
+  test.setTimeout(120_000);
+  await grantTool(callerId, serverId, name);
   await api("/v1/rules/approvals", { userId: callerId, serverId, toolName: name, approverUserId: approverId, approvalScope: "tool" });
   await api("/v1/compliance/profiles", { tag: name, piiMode: "warn" });
   // Dark-mode fixture only: public configuration continues to reject redact.

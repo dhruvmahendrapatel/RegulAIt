@@ -283,7 +283,7 @@ async function seedDemoIntakeRun(
   }
 
   // --- project (pack evidence is collected per project) ---------------------------------
-  const projects: Json[] = (await call("GET", "/v1/projects")).body.projects ?? [];
+  const projects: Json[] = (await call("GET", "/v1/projects?archived=include")).body.projects ?? [];
   const demoProject = projects.find((p) => p.name === "demo-project");
 
   // --- use cases -------------------------------------------------------------------------
@@ -905,7 +905,7 @@ async function seedRequiredTestRuns(
   // gets a project of its own: billing it to demo-project would exhaust that
   // project's deliberately small budget before demo:traffic, and the monitor
   // reports this project's calls honestly as traffic no use case covers.
-  const projects: Json[] = (await call("GET", "/v1/projects", undefined, auth)).body.projects ?? [];
+  const projects: Json[] = (await call("GET", "/v1/projects?archived=include", undefined, auth)).body.projects ?? [];
   let projectId = projects.find((p) => p.name === DEMO_ASSURANCE_PROJECT)?.id as string | undefined;
   if (!projectId) {
     const p = await call("POST", "/v1/projects", { name: DEMO_ASSURANCE_PROJECT, costCenter: "CC-0003" }, auth);
