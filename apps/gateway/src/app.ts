@@ -424,6 +424,7 @@ export interface BuildAppOptions {
 import { z } from "zod";
 import { boundTargetsForApprovals, registerMcpProxy } from "./mcp-proxy.js";
 import { clearUpstreamCredentialOnUrlMove, registerMcpUpstreamCredentialRoutes } from "./mcp-upstream-credential.js";
+import { disableUpstreamExchangeOnUrlMove, registerUpstreamTokenExchangeRoutes } from "./upstream-token-exchange.js";
 import { registerA2aRoutes } from "./a2a.js";
 import { registerMcpBundleRoutes } from "./mcp-bundles.js";
 import { registerPrivacyOpsRoutes } from "./privacy-ops.js";
@@ -562,7 +563,7 @@ import { registerSchedulerRoutes } from "./scheduler-api.js";
 // ADR-0186 (batch 4) — the foundation registers every §4.9 route; each module
 // answers 501 not_built until its slice lands (A/B Claude, R/S/V Codex)
 import { registerPasskeyRoutes } from "./passkeys.js";
-import { approvalRuleStepUp, CHANGED_CONCURRENTLY, checkStepUp, ownerChangeStepUpArgs, registerStepUpRoutes, requireStepUp, requireStepUps, revocationLiftStepUp, type StepUpCheckArgs } from "./step-up.js";
+import { approvalRuleStepUp, CHANGED_CONCURRENTLY, checkStepUp, ownerChangeStepUpArgs, registerStepUpRoutes, requireStepUp, requireStepUps, revocationLiftStepUp, grantMintStepUp, rolesHoldingGrants, type StepUpCheckArgs } from "./step-up.js";
 import { ApprovalRuleWriteRefusedError, approverPoolShiftFacts, isApproverRole, lockApprovalRuleRouting, lockApproverRoles, namedApproverSeatExists, sameApproverPoolShift, type ApproverPoolShift } from "./approval-pool.js";
 import {
   decisionView,
@@ -2528,6 +2529,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             toUrl: written.url,
             userId: req.authCtx.userId ?? null,
           });
+          // ADR-0238: and turns its token exchange off (a token audienced to the old upstream never follows the url)
+          await disableUpstreamExchangeOnUrlMove(tx as unknown as Db, {
+            serverId,
+            label,
+            fromUrl: before.url,
+            toUrl: written.url,
+            userId: req.authCtx.userId ?? null,
+          });
         }
         // a url move that keeps it on writes no identity column, and is still a relaxation on the trail
         if (identity.write !== null || identity.relaxed) {
@@ -2656,6 +2665,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
+    // ADR-0250 (review S-04): minting widens default deny — a fresh step-up bound to exactly this grant
+    const toolMint = grantMintStepUp({ kind: "tool", userId: body.userId, serverId: body.serverId, toolName: body.toolName });
+    if (!(await requireStepUp(db, req, reply, toolMint)).ok) return reply;
     // PR #181 review: a minted grant relaxes this person's default deny, so the
     // success is on the trail (actor, grantee, server, grant name) in the same
     // transaction as the row — not only the refused SoD mints
@@ -2688,6 +2700,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
+    // ADR-0250 (review S-04): minting widens default deny — a fresh step-up bound to exactly this grant
+    const serverMint = grantMintStepUp({ kind: "server", userId: body.userId, serverId: body.serverId, readOnlyAll: body.readOnlyAll });
+    if (!(await requireStepUp(db, req, reply, serverMint)).ok) return reply;
     // a server read-only grant relaxes this person's default deny on every read tool, present and future, so it is
     // on the trail in the same transaction as the row, exactly like a tool grant (PR #181 review)
     const row = await db.transaction(async (tx) => {
@@ -2752,6 +2767,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
+    // ADR-0250 (review S-04): a role grant widens default deny for every holder — a fresh step-up bound to it
+    if (!(await requireStepUp(db, req, reply, grantMintStepUp({ kind: "role_tool", roleId, serverId: body.serverId, toolName: body.toolName }))).ok) return reply;
     // PR #339 review: the role's row FOR NO KEY UPDATE first, serialized with the workload-identity steward check
     // review follow-up: a missing role is refused by name (404, audited), not by the foreign key
     const rows = await insertRoleGrantLocked(db, roleId, { actorUserId: req.authCtx.userId, via: "POST /v1/roles/:roleId/grants/tools" }, (tx) =>
@@ -2772,6 +2789,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
+    // ADR-0250 (review S-04): a role grant widens default deny for every holder — a fresh step-up bound to it
+    if (!(await requireStepUp(db, req, reply, grantMintStepUp({ kind: "role_server", roleId, serverId: body.serverId, readOnlyAll: body.readOnlyAll }))).ok) return reply;
     // PR #339 review: the role's row FOR NO KEY UPDATE first, serialized with the workload-identity steward check
     // review follow-up: a missing role is refused by name (404, audited), not by the foreign key
     const rows = await insertRoleGrantLocked(db, roleId, { actorUserId: req.authCtx.userId, via: "POST /v1/roles/:roleId/grants/servers" }, (tx) =>
@@ -2793,6 +2812,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
+    // ADR-0250 (review S-04): a role grant widens default deny for every holder — a fresh step-up bound to it
+    if (!(await requireStepUp(db, req, reply, grantMintStepUp({ kind: "role_agent", roleId, agentId: body.agentId, allowedModes: body.allowedModes ?? null }))).ok) return reply;
     // PR #339 review: the role's row FOR NO KEY UPDATE first, serialized with the workload-identity steward check
     // review follow-up: a missing role is refused by name (404, audited), not by the foreign key
     const rows = await insertRoleGrantLocked(db, roleId, { actorUserId: req.authCtx.userId, via: "POST /v1/roles/:roleId/grants/agents" }, (tx) =>
@@ -2812,6 +2833,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
+    // ADR-0250 (review S-04): a role grant widens default deny for every holder — a fresh step-up bound to it
+    if (!(await requireStepUp(db, req, reply, grantMintStepUp({ kind: "role_connector", roleId, connectorId: body.connectorId, mode: body.mode, allowedObjects: body.allowedObjects ?? null }))).ok) return reply;
     // PR #339 review: the role's row FOR NO KEY UPDATE first, serialized with the workload-identity steward check
     // review follow-up: a missing role is refused by name (404, audited), not by the foreign key
     const rows = await insertRoleGrantLocked(db, roleId, { actorUserId: req.authCtx.userId, via: "POST /v1/roles/:roleId/grants/connectors" }, (tx) =>
@@ -2923,9 +2946,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // rule with a narrower pool, who signs moves to a wider pool: the same step-up, bound to the takeover facts
     const shift: ApproverPoolShift = { change: "member-add", objectType: "role", objectId: body.roleId, userId };
     const takeover = await approverPoolShiftFacts(db, shift);
+    // ADR-0250 (PR #720 review): a role that holds grants confers them, which widens default deny like minting them
+    const confersGrants = (await rolesHoldingGrants(db, [body.roleId])).has(body.roleId);
     const stepUps: StepUpCheckArgs[] = [
       ...(approverRole ? [{ kind: "settings_relax" as const, facts: { userId, values: { approverRoleId: body.roleId } } }] : []),
       ...(takeover ? [{ kind: "settings_relax" as const, facts: takeover }] : []),
+      ...(confersGrants ? [grantMintStepUp({ kind: "role_assignment", userId, roleId: body.roleId })] : []),
     ];
     if (stepUps.length > 0 && !(await requireStepUps(db, req, reply, stepUps))) return reply;
     // ADR-0186 A (Class A): decided again under the approver-role lock — a role that
@@ -5980,6 +6006,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0204 — a server's static upstream credential: set, rotate, clear (admin-only through the default gate, each a
   // settings_relax step-up, audited); reads show only whether one is set, its header and last four characters
   registerMcpUpstreamCredentialRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0238: RFC 8693 token exchange for down-scoped upstream credentials (admin, settings_relax step-up)
+  registerUpstreamTokenExchangeRoutes(app, db, { dataKey: opts.dataKey });
   registerA2aRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0236 (P11) — governed MCP bundles: admin-only through the default gate, default-off, audited; enforcement is
   // the kernel's bundle-tool-allow-list rule, fed by loadEntitlements at the existing MCP interception point
