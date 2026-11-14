@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import {
   ORG_PAGE_EXEMPT,
   ORG_PAGE_OWN_ENDPOINT,
@@ -13,8 +13,13 @@ import { ALL_SPECS } from "./orgSettingSpecs";
 // the gateway's strictness registry is the one source of "relaxed" (review of #699); the SPA mirrors it and this fails
 // on any drift. It loads the gateway source, which resolves @regulait/shared through the workspace (built first).
 const registryFile = new URL("../../../../../gateway/src/org-setting-strictness.ts", import.meta.url).pathname;
-const registry = async (): Promise<Record<string, any>> =>
-  (await import(/* @vite-ignore */ registryFile)).ORG_SETTING_STRICTNESS;
+// the first import transforms the gateway module and @regulait/shared on demand, which can take longer than a test's
+// 5 s default on a busy runner, so it is loaded once, up front, with its own timeout; the tests then read it
+let loaded: Record<string, any> = {};
+beforeAll(async () => {
+  loaded = (await import(/* @vite-ignore */ registryFile)).ORG_SETTING_STRICTNESS;
+}, 60_000);
+const registry = async (): Promise<Record<string, any>> => loaded;
 const pageSource = readFileSync(new URL("./OrganizationPage.tsx", import.meta.url), "utf8");
 
 const listed = (): Set<string> =>
