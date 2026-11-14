@@ -4874,6 +4874,8 @@ export * from "./feedback.js";
 export * from "./ai-literacy.js";
 export * from "./alert-ownership.js";
 export * from "./isaca-pack.js";
+// ADR-0295 (P18 B4): the ISO/IEC ID-only packs
+export * from "./iso-packs.js";
 // ADR-0243 (P24): the OWASP MCP and LLM Top 10 packs
 export * from "./owasp-packs.js";
 // ADR-0212 (P12 b): modality pricing
