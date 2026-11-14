@@ -193,6 +193,9 @@ test("MCP server: loading, then set up with the step-up; the secret is sent once
   await expect(page.getByText(/Client secret ending wxyz, set by Ada Admin on/)).toBeVisible();
   await expect(f.getByLabel("Rotate secret (optional)")).toHaveValue("");
   await expect(page.getByText(SECRET)).toHaveCount(0);
+  // the secret never lands in browser storage
+  const inStorage = await page.evaluate(() => JSON.stringify({ ...localStorage }) + JSON.stringify({ ...sessionStorage }));
+  expect(inStorage).not.toContain(SECRET);
   // the switch is never pre-ticked, even while exchange is on
   await expect(f.getByRole("checkbox", { name: /it is on now: tick to keep it on/ })).not.toBeChecked();
   await expectFormAxeClean(page, SERVER.name);
@@ -209,6 +212,7 @@ test("MCP server: each 409 refusal and the 400 fixed sentence are shown inline",
     await openServer(page);
     const f = form(page);
     await expect(f.getByLabel("Client id")).toHaveValue("regulait-gw");
+    await f.getByRole("checkbox", { name: /tick to keep it on/ }).check();
     await f.getByRole("button", { name: "Save token exchange" }).click();
     await expect(f.getByRole("alert").filter({ hasText: words })).toBeVisible();
     // the stored secret is kept: no secret typed, none sent
@@ -220,7 +224,14 @@ test("MCP server: each 409 refusal and the 400 fixed sentence are shown inline",
   await openServer(page);
   const f = form(page);
   await f.getByLabel("Audience (pinned)").fill("send-a-bad-body");
+  // the box is left unticked, so saving would turn exchange off: the page asks first; cancelling sends nothing
   await f.getByRole("button", { name: "Save token exchange" }).click();
+  const off = page.getByRole("dialog", { name: `Turn token exchange off for ${SERVER.name}?` });
+  await expect(off).toBeVisible();
+  await off.getByRole("button", { name: "Cancel" }).click();
+  await expect(off).toHaveCount(0);
+  await f.getByRole("button", { name: "Save token exchange" }).click();
+  await page.getByRole("dialog", { name: `Turn token exchange off for ${SERVER.name}?` }).getByRole("button", { name: "Save and turn off" }).click();
   await confirmStepUp(page);
   await expect(f.getByRole("alert").filter({ hasText: "with RFC 6749 scope tokens" })).toBeVisible();
 });

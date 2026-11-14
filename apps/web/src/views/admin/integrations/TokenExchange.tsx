@@ -31,6 +31,8 @@ const FIELDS = [
 const BOX = { width: "var(--s3)", height: "var(--s3)", margin: "var(--s0) 0" } as const;
 type Write = (h: Record<string, string>, body?: Record<string, unknown>) => Promise<unknown>;
 interface Target {
+  /** which gateway object the id names; part of the query key so a server and a connector never share a cache entry */
+  kind: "server" | "connector";
   id: string;
   name: string;
   load: () => Promise<Read>;
@@ -49,6 +51,7 @@ export function McpTokenExchangeCard(props: { server: McpServer | undefined }) {
       <TokenExchange
         key={s.id}
         t={{
+          kind: "server",
           id: s.id,
           name: s.name,
           load: () => api.get<Read>(`/v1/servers/${s.id}/token-exchange`),
@@ -76,6 +79,7 @@ export function ConnectorTokenExchangeCard(props: { connectors: Connector[] }) {
         <TokenExchange
           key={c.id}
           t={{
+            kind: "connector",
             id: c.id,
             name: c.name,
             load: () => api.get<Read>(`/v1/connectors/${c.id}/token-exchange`),
@@ -91,13 +95,14 @@ export function ConnectorTokenExchangeCard(props: { connectors: Connector[] }) {
 }
 
 function TokenExchange({ t }: { t: Target }) {
-  const q = useQuery({ queryKey: ["admin", "token-exchange", t.id], queryFn: t.load });
+  const q = useQuery({ queryKey: ["admin", "token-exchange", t.kind, t.id], queryFn: t.load });
   const users = useUsers();
   const act = useAction();
   const view = q.data?.tokenExchange;
   const [f, setF] = useState<TokenExchangeForm>(() => formOf(view));
   const [checked, setChecked] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [confirmOff, setConfirmOff] = useState(false);
   // prefilled when the read lands and after each save; the secret stays empty and the switch off
   useEffect(() => setF(formOf(view)), [view]);
   const set = (patch: Partial<TokenExchangeForm>) => setF((x) => ({ ...x, ...patch }));
@@ -115,9 +120,11 @@ function TokenExchange({ t }: { t: Target }) {
   const problems = checked ? formProblems(f, configured) : {};
   const setter = (users.data?.users ?? []).find((u) => u.id === view.setBy)?.displayName;
   const list = `tx-${t.id}`;
-  const save = () => {
+  const save = (turnOffConfirmed = false) => {
     setChecked(true);
     if (Object.keys(formProblems(f, configured)).length) return;
+    // saving an "on" config without the box ticked turns exchange off: say so before it happens
+    if (view.enabled && !f.enabled && !turnOffConfirmed) return setConfirmOff(true);
     void act.run(() => send(t.save, bodyOf(f)), `Token exchange for ${t.name} saved`).then(() => {
       // the secret is never kept in the page once it has been sent, saved or not
       set({ clientSecret: "" });
@@ -206,6 +213,18 @@ function TokenExchange({ t }: { t: Target }) {
         )}
         <RefusalNotice guidance={act.guidance} />
       </form>
+      <ConfirmModal
+        open={confirmOff}
+        danger
+        title={`Turn token exchange off for ${t.name}?`}
+        confirmLabel="Save and turn off"
+        body={<p>The box to keep it on is not ticked, so saving turns token exchange off. Calls stop receiving an exchanged token until it is turned on again.</p>}
+        onCancel={() => setConfirmOff(false)}
+        onConfirm={() => {
+          setConfirmOff(false);
+          save(true);
+        }}
+      />
       <ConfirmModal
         open={confirmClear}
         danger

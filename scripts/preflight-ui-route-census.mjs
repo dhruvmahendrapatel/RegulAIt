@@ -87,6 +87,7 @@ export const MACHINE_ONLY = new Map([
 
   // ---- the data plane: what the gateway proxies and governs -------------------
   ["POST /v1/chat/completions", "data plane: OpenAI-compatible proxy (ADR-0020); called by vendor SDKs, governed per call"],
+  ["POST /v1/responses", "data plane: OpenAI Responses-compatible proxy (ADR-0287); called by vendor SDKs, governed per call"],
   ["POST /v1/messages", "data plane: Anthropic-compatible proxy (ADR-0024); called by vendor SDKs, governed per call"],
   ["GET /v1/models", "data plane: OpenAI-compatible model list for vendor SDKs"],
   ["POST /mcp/:serverId", "data plane: the governed MCP proxy endpoint MCP clients connect to"],
@@ -405,6 +406,24 @@ export const KNOWN_UI_GAPS = new Map([
   ["POST /v1/third-party-ingest/sources/:sourceId/credential", { does: "issues or replaces the source's write-only rgti_ token, shown once (step-up, audited)", tracking: "#453" }],
   ["POST /v1/third-party-ingest/sources/:sourceId/credential/revoke", { does: "revokes the source's ingest token (audited)", tracking: "#453" }],
   ["GET /v1/third-party-ingest/sources/:sourceId/records", { does: "the newest third-party evidence a source delivered, each marked third-party with its linked findings", tracking: "#453" }],
+  // EXCEPTION (ADR-0255, P31, 2026-11-07): the P31 brief is "API and backend only; post the catalogue UI need on
+  // #453 for the Governed Designer", so these two routes ship with their screen owned by that lane. These two
+  // raise the cap by 2, visibly; the Designer's catalogue screen deletes both entries and lowers it by 2. Decided on #753
+  // (2026-11-14): keep the temporary gap; lane UI-C builds the catalogue screen after merge and lowers the cap.
+  [
+    "GET /v1/connector-catalogue",
+    {
+      does: "lists the curated catalogue pieces (status, actions, upstream) and the community pieces available, not enabled (paginated, q filter)",
+      tracking: "ADR-0255 / P31: catalogue screen for the Governed Designer, requested on #453",
+    },
+  ],
+  [
+    "POST /v1/connector-catalogue/:pieceKey/enablement",
+    {
+      does: "enables (admin, step-up) or disables a curated piece, with a reason, audited",
+      tracking: "ADR-0255 / P31: catalogue screen for the Governed Designer, requested on #453",
+    },
+  ],
   ["GET /v1/reports/posture/assets", { does: "pages per-asset posture scores (agents or use cases) the caller can read, each with objectives and ranked actions", tracking: "ADR-0214 amendment (P3): the brief is API-only; the per-asset score screen is posted on #453 (c6703277931) for the Governed Designer, and the owner chose the temporary gap on #705 (2026-11-07)" }],
   ["GET /v1/reports/posture/assets/:kind/:assetId", { does: "one agent's or use case's posture score, with its objectives, not-applicable list and ranked actions", tracking: "ADR-0214 amendment (P3): the brief is API-only; the per-asset score screen is posted on #453 (c6703277931) for the Governed Designer, and the owner chose the temporary gap on #705 (2026-11-07)" }],
   // ADR-0259 (P35): owner decision on #733 (2026-11-07, option c): the backend landed before its screen; the UI
@@ -432,7 +451,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 38;
+export const KNOWN_UI_GAPS_MAX = 40; // main's 44 + ADR-0255 (P31) 2 − 6 token-exchange routes (#837), master decision on #753 2026-11-14
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 

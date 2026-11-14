@@ -1,7 +1,7 @@
 /**
  * ADR-0244 (P25) — PINNED, OFFLINE BASELINES FOR THE PROMPT-INJECTION DETECTORS.
  *
- * Three MIT-licensed public benchmarks are vendored as normalised snapshots
+ * MIT-licensed public benchmarks are vendored as normalised snapshots
  * under `vendor/injection-baselines/` (written by
  * `scripts/refresh-injection-eval-snapshots.py`, never downloaded at run time;
  * upstream commit, licence, sampling seed and per-file sha256 in
@@ -14,6 +14,12 @@
  *               so FPR is n/a)
  *   agentdojo   135 injection texts (27 goals x 5 task-independent attacks)
  *               and the 97 benign user-task prompts of benchmark v1
+ *   agentdojo-task-dependent  (2026-11-14 amendment) 81 goals in the attacks
+ *               that name the user and the attacked model, or list the
+ *               injection task's tool calls (tool_knowledge), 3 of 6 per goal,
+ *               seeded; and 39 injections rendered inside the environment
+ *               field AgentDojo places them in (one per injection vector),
+ *               with 38 benign copies of those fields at their defaults
  *   jailbreakbench  150 adversarial jailbreak prompts (30 per attack method,
  *               seeded, deduplicated; responses never vendored) and the 100
  *               benign JBB-Behaviors. These are jailbreaks, not injections, so
@@ -46,7 +52,14 @@ import { z } from "zod";
 /** relative to `packages/shared/src/eval-datasets/` */
 export const INJECTION_BASELINE_VENDOR_DIR = "vendor/injection-baselines";
 
-export const INJECTION_BASELINE_DATASET_IDS = ["notinject", "injecagent", "agentdojo", "jailbreakbench", "regulait-web-agent"] as const;
+export const INJECTION_BASELINE_DATASET_IDS = [
+  "notinject",
+  "injecagent",
+  "agentdojo",
+  "agentdojo-task-dependent",
+  "jailbreakbench",
+  "regulait-web-agent",
+] as const;
 export type InjectionBaselineDatasetId = (typeof INJECTION_BASELINE_DATASET_IDS)[number];
 
 /** the snapshot pins; `MANIFEST.json` carries the same values and the test keeps them equal */
@@ -76,6 +89,15 @@ export const INJECTION_BASELINE_FILES: Record<
     cases: 232,
     injection: 135,
     benign: 97,
+    commit: "089ed468cf3ed0322acc66b0211f26d9d90dbf60",
+  },
+  /** 2026-11-14 amendment: the same AgentDojo checkout and licence file as `agentdojo` */
+  "agentdojo-task-dependent": {
+    file: "agentdojo-task-dependent.json",
+    sha256: "d3db94a47e1584a85f2ae44c33cb412c3d9bbbc9c673261d2664635007151a88",
+    cases: 158,
+    injection: 120,
+    benign: 38,
     commit: "089ed468cf3ed0322acc66b0211f26d9d90dbf60",
   },
   jailbreakbench: {
@@ -214,8 +236,11 @@ const detectorBaselineSchema = z
     measuredWith: z.string().min(1).max(500),
     /** the threshold the verdict used, for a scored detector (null for the heuristic, which has none) */
     threshold: z.number().min(0).max(1).nullable(),
-    datasets: z.record(z.enum(INJECTION_BASELINE_DATASET_IDS), metricsSchema),
+    /** partial: an offline-measured detector may not have been re-run on a set added since (see `notYetMeasured`) */
+    datasets: z.partialRecord(z.enum(INJECTION_BASELINE_DATASET_IDS), metricsSchema),
     pooled: metricsSchema,
+    /** datasets added after this detector's last offline run; the test requires every dataset to be measured or listed here */
+    notYetMeasured: z.array(z.enum(INJECTION_BASELINE_DATASET_IDS)).max(INJECTION_BASELINE_DATASET_IDS.length).optional(),
   })
   .strict();
 
@@ -276,7 +301,7 @@ export function formatInjectionBaselineDeltas(detector: string, deltas: readonly
   const lines = [`${detector}: scope metric pinned -> measured (delta)`];
   for (const d of deltas) {
     const delta = d.delta === null ? "shape changed" : `${d.delta >= 0 ? "+" : ""}${(d.delta * 100).toFixed(1)} pt`;
-    lines.push(`  ${d.scope.padEnd(18)} ${d.metric.padEnd(9)} ${pct(d.pinned).padStart(6)} -> ${pct(d.measured).padStart(6)} (${delta})${d.regression ? "  REGRESSION" : ""}`);
+    lines.push(`  ${d.scope.padEnd(24)} ${d.metric.padEnd(9)} ${pct(d.pinned).padStart(6)} -> ${pct(d.measured).padStart(6)} (${delta})${d.regression ? "  REGRESSION" : ""}`);
   }
   return lines.join("\n");
 }

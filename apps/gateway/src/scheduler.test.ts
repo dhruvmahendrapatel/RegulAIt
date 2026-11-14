@@ -806,6 +806,9 @@ describe("every sweep is registered", () => {
         SCHEDULER_JOB_NAMES.spiffeBundleRefresh,
         // ADR-0222 (P13(a)): fairness dataset rows past retention; driven end to end in zz-adr0222-fairness.test.ts
         SCHEDULER_JOB_NAMES.fairnessDatasetRetentionSweep,
+        // ADR-0302: third-party ingest evidence past the audit floor; driven end to end in
+        // zz-adr0302-evidence-retention.test.ts (with no floor configured it deletes nothing)
+        SCHEDULER_JOB_NAMES.thirdPartyEvidenceRetentionSweep,
       ].sort(),
     );
     const discovery = registry.get(SCHEDULER_JOB_NAMES.discoveryScanSweep)!;

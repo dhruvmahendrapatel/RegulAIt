@@ -16,7 +16,8 @@ import (
 const mcpCollection = `{"schema":"regulait.endpoint-collection/1","entries":[
  {"signatureId":"sig.mcp.desktop","kind":"mcp_config","provider":"example","files":[{"os":"linux","root":"home","path":".config/ExampleDesktop/mcp_config.json"}]},
  {"signatureId":"sig.mcp.editor","kind":"mcp_config","provider":"example","files":[{"os":"linux","root":"home","path":".config/ExampleEditor/User/*.json"}]},
- {"signatureId":"sig.mcp.cli","kind":"mcp_config","provider":"example","files":[{"os":"linux","root":"home","path":".example-cli.json"}]}
+ {"signatureId":"sig.mcp.cli","kind":"mcp_config","provider":"example","files":[{"os":"linux","root":"home","path":".example-cli.json"}]},
+ {"signatureId":"sig.mcp.toml","kind":"mcp_config","provider":"example","files":[{"os":"linux","root":"home","path":".example-toml/config.toml"}]}
 ]}`
 
 // githubPAT builds a key-shaped value at run time (gitleaks runs over the repo).
@@ -42,10 +43,37 @@ func mcpHome() fstest.MapFS {
 	}}`
 	cli := `{"projects":{"/home/alice/work/secret-project":{"mcpServers":{"proj":{"command":"cmd","args":["/c","npx","@example/server@1.4.2"],"autoApprove":["deleteRepo","listIssues"]}}}},
 	  "mcpServers":{"gem":{"command":"pnpm","args":["dlx","example-mcp"],"trust":true}}}`
+	// JSONC (ADR-0259 amendment 2026-11-14): line and block comments, trailing commas, and a "//" inside a
+	// string that must survive
+	settings := `// comments make this JSONC
+{
+  /* a block comment */
+  "mcp": {"servers": {
+    "jsonc": {"type": "http", "url": "https://jsonc.example.invalid/mcp",}, // trailing comma
+  },},
+}`
+	// TOML in the Codex config.toml shape (developers.openai.com/codex/config-file/config-reference)
+	codex := `model = "example"
+[mcp_servers.toml_docs]
+command = "npx"
+args = ["-y", "@example/docs-mcp@1.0.0"]
+enabled = false
+[mcp_servers.toml_docs.env]
+API_KEY = "` + githubPAT() + `"
+[mcp_servers.toml_remote]
+url = "https://toml.example.invalid/mcp?k=v"
+bearer_token_env_var = "REMOTE_TOKEN"
+[mcp_servers.toml_remote.http_headers]
+X-Api-Key = "literal-header-secret"
+[mcp_servers.toml_remote.env_http_headers]
+X-Other = "OTHER_ENV"
+`
 	return fstest.MapFS{
 		".config/ExampleDesktop/mcp_config.json":   {Data: []byte(desktop)},
 		".config/ExampleEditor/User/mcp.json":      {Data: []byte(editor)},
-		".config/ExampleEditor/User/settings.json": {Data: []byte("// comments make this JSONC\n{\"mcp\":{\"servers\":{}}}")},
+		".config/ExampleEditor/User/settings.json": {Data: []byte(settings)},
+		".config/ExampleEditor/User/broken.json":   {Data: []byte(`{"mcpServers": {"x": `)},
+		".example-toml/config.toml":                {Data: []byte(codex)},
 		".example-cli.json":                        {Data: []byte(cli)},
 	}
 }
@@ -97,7 +125,12 @@ func TestMCPConfigServers(t *testing.T) {
 		"creds":  {Name: "creds", Transport: "http", Host: "private.example.invalid", Keys: []contract.KeyFound{{KeyName: "(url)", RuleID: RuleURLUserinfo, Present: true}}},
 		"proj": {Name: "proj", Transport: "stdio", Command: "npx", Package: "@example/server", PackageVersion: "1.4.2", AutoApprovedTools: 2, RiskyTools: []string{"deleteRepo"},
 			Risks: []string{contract.MCPRiskRiskyToolAutoApproved}},
-		"gem": {Name: "gem", Transport: "stdio", Command: "pnpm", Package: "example-mcp", Risks: []string{contract.MCPRiskUnpinnedPackage, contract.MCPRiskAutoApproveAll}},
+		"gem":   {Name: "gem", Transport: "stdio", Command: "pnpm", Package: "example-mcp", Risks: []string{contract.MCPRiskUnpinnedPackage, contract.MCPRiskAutoApproveAll}},
+		"jsonc": {Name: "jsonc", Transport: "http", Host: "jsonc.example.invalid"},
+		"toml_docs": {Name: "toml_docs", Transport: "stdio", Command: "npx", Package: "@example/docs-mcp", PackageVersion: "1.0.0", Disabled: true,
+			Keys: []contract.KeyFound{{KeyName: "API_KEY", RuleID: "dlp.secret.provider_token", Present: true}}},
+		"toml_remote": {Name: "toml_remote", Transport: "http", Host: "toml.example.invalid",
+			Keys: []contract.KeyFound{{KeyName: "X-Api-Key", RuleID: RuleNamedLiteral, Present: true}}},
 	}
 	for name, w := range want {
 		g, ok := got[name]
@@ -113,7 +146,7 @@ func TestMCPConfigServers(t *testing.T) {
 		t.Errorf("got %d servers, want %d: %v", len(got), len(want), got)
 	}
 	if !hasGap(gaps, contract.KindMCPConfig, GapMCPConfigUnparsed) {
-		t.Errorf("the JSONC settings file is not reported as unparsed: %+v", gaps)
+		t.Errorf("the damaged config is not reported as unparsed: %+v", gaps)
 	}
 }
 
@@ -127,7 +160,8 @@ func TestMCPConfigCarriesNoValues(t *testing.T) {
 	}
 	s := string(body)
 	for _, bad := range []string{githubPAT(), fakeKey(), "hunter2", "literal-credential-value", "pa55", "bob", "session=abc", "/v1/mcp",
-		"secret-project", "alice", "Alice", "curl", "example.invalid/x", "LOG_LEVEL", "debug", "fetchToken", "/host", "--privileged", "-y"} {
+		"secret-project", "alice", "Alice", "curl", "example.invalid/x", "LOG_LEVEL", "debug", "fetchToken", "/host", "--privileged", "-y",
+		"literal-header-secret", "REMOTE_TOKEN", "OTHER_ENV", "k=v", "block comment"} {
 		if strings.Contains(s, bad) {
 			t.Errorf("a report would carry %q", bad)
 		}
@@ -200,6 +234,30 @@ func TestRiskyToolName(t *testing.T) {
 	} {
 		if got := riskyToolName(name); got != want {
 			t.Errorf("riskyToolName(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// A file that is not an object in its format is unparsed, not empty: TOML read as TOML only by its extension.
+func TestMCPConfigFormats(t *testing.T) {
+	for _, c := range []struct {
+		name, body string
+		parsed     bool
+		servers    int
+	}{
+		{"a.json", `{"mcpServers":{"s":{"command":"npx","args":["x@1.0.0"]}}}`, true, 1},
+		{"a.json", "{\"mcpServers\":{\"s\":{\"url\":\"https://h.example.invalid//x\"}},} // c", true, 1},
+		{"a.json", `[1,2]`, false, 0},
+		{"a.json", `[mcp_servers.s]` + "\ncommand = \"npx\"", false, 0},
+		{"a.toml", "[mcp_servers.s]\ncommand = \"npx\"\n", true, 1},
+		{"a.TOML", "[mcp_servers.s]\nurl = \"https://h.example.invalid/mcp\"\n", true, 1},
+		{"a.toml", `{"mcpServers":{}}`, false, 0},
+		{"a.toml", "[mcp_servers.s\n", false, 0},
+		{"a.toml", "", true, 0},
+	} {
+		got, parsed := mcpServersIn(c.name, []byte(c.body))
+		if parsed != c.parsed || len(got) != c.servers {
+			t.Errorf("%s %q: parsed=%v servers=%d, want %v %d", c.name, c.body, parsed, len(got), c.parsed, c.servers)
 		}
 	}
 }
