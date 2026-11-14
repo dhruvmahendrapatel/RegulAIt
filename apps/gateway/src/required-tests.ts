@@ -64,6 +64,7 @@ import {
   effectiveRequiredTests,
   evaluateRequiredTests,
   owaspMeasurability,
+  owaspTestClassInfo,
   requiredTestConditionsFor as sharedRequiredTestConditionsFor,
   requiredTestPolicyProblems,
   requiredTestPolicySchema,
@@ -347,7 +348,8 @@ async function view(db: Db) {
     updatedByName = u ? u.displayName || u.email : null;
   }
   const catalog = owaspMeasurability();
-  const name = new Map(catalog.map((m) => [m.id, m.name]));
+  // ADR-0297: owaspTestClassInfo resolves 2025 ids (aliases) as well as the catalog's 2026 ids
+  const name = { get: (id: string) => owaspTestClassInfo(id)?.name };
   const describe = (t: ReviewPolicyTierKey) => {
     const eff = effectiveRequiredTests(t, policy);
     return {

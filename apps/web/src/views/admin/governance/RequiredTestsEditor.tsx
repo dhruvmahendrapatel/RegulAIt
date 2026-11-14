@@ -58,8 +58,11 @@ export interface RequiredTestsView {
 export const REQUIRED_TESTS_PATH = "/v1/governance/review-policy/required-tests";
 const KEY = ["review-policy", "required-tests"] as const;
 
-/** a short display form of an OWASP id: `owasp:llm:01` → `LLM01`, `owasp:agentic:asi02` → `ASI02` */
+/** a short display form of an OWASP id: `owasp:llm:2026:03` → `LLM03:2026` (ADR-0297), `owasp:llm:01` → `LLM01`,
+ * `owasp:agentic:asi02` → `ASI02` */
 export function owaspShort(id: string): string {
+  const e = /^owasp:llm:(\d{4}):(\d\d)$/.exec(id);
+  if (e) return `LLM${e[2]}:${e[1]}`;
   const m = /^owasp:(llm|agentic):(.+)$/.exec(id);
   if (!m) return id;
   return m[1] === "llm" ? `LLM${m[2]}` : m[2]!.toUpperCase();
