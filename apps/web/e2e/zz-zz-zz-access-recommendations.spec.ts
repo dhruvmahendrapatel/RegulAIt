@@ -87,8 +87,9 @@ test("unused + orphaned grants render with evidence, and the campaign opened fro
   const agentOrphan = await mkAgent("zz-rec-agent-orphan");
 
   const grant = async (agentId: string) => {
-    const g = await page.request.post("/v1/grants/agents", { headers: BOOT, data: { userId: holderId, agentId } });
-    expect(g.status()).toBe(201);
+    // ADR-0250: a grant mint is a settings_relax step-up the bootstrap token cannot give; Ada's page answers it
+    const g = await steppedUpAs(page.request, ADMIN_EMAIL, "POST", "/v1/grants/agents", { userId: holderId, agentId });
+    expect(g.status(), await g.text()).toBe(201);
     return (await g.json()).id as string;
   };
   const grantUnusedId = await grant(agentUnused);

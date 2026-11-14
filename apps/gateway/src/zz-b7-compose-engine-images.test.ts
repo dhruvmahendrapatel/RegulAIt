@@ -41,7 +41,7 @@ describe("ADR-0190 I5 follow-up: engines in compose", () => {
     expect(t).not.toMatch(/volumes:|ports:|networks:|environment:|cap_add:|privileged:/);
   });
 
-  it.each(["promptfoo", "modelscan", "garak"])("%s: one build-only image service from its Dockerfile", (engine) => {
+  it.each(["promptfoo", "modelscan", "garak", "spikee"])("%s: one build-only image service from its Dockerfile", (engine) => {
     const svc = block(`engine-${engine}-image`);
     expect(svc).toMatch(/\n {4}<<: \*engine-image\n/);
     expect(svc).toMatch(new RegExp(`\\n {6}dockerfile: engines/${engine}/Dockerfile\\n`));
@@ -127,7 +127,7 @@ describe("ADR-0190 I5 follow-up: engines in compose", () => {
   it("air-gapped: the bundle saves the digest and the plain tag; the install runs the tag and checks its image id", () => {
     const bundle = readFileSync(path.join(root, "scripts/build-image-bundle.sh"), "utf8");
     expect(bundle).toMatch(/\ndocker tag "\$CADDY_IMAGE" "\$CADDY_TAG"\n/);
-    expect(bundle).toMatch(/\ndocker save -o "\$OUT" "\$GATEWAY_IMAGE" postgres:16 "\$CADDY_IMAGE" "\$CADDY_TAG"( \$\{ENGINE_REFS\[@\]\+"\$\{ENGINE_REFS\[@\]\}"\})?\n/);
+    expect(bundle).toMatch(/\ndocker save -o "\$OUT" "\$GATEWAY_IMAGE" postgres:16 "\$CADDY_IMAGE" "\$CADDY_TAG"( \$\{ENGINE_REFS\[@\]\+"\$\{ENGINE_REFS\[@\]\}"\})?( \$\{ANUBIS_REFS\[@\]\+"\$\{ANUBIS_REFS\[@\]\}"\})?\n/);
     const install = readFileSync(path.join(root, "scripts/install.sh"), "utf8");
     // the preflight looks for the tag and refuses an unpinned image id; the load step checks it again
     expect(install).toMatch(/for img in "\$GATEWAY_IMAGE" postgres:16 "\$CADDY_TAG"; do/);

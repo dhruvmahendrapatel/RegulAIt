@@ -63,6 +63,7 @@ import {
 import { attachLinkedStdioSession, placeStdioSession, type StdioPlacementInput, type StdioSessionFailure } from "./executor-stdio.js";
 import { observeUpstream, type MetricUpstreamOutcome } from "./metrics.js";
 import { identityAssertionMiddleware, type OutboundIdentity } from "./mcp-identity-assertion.js";
+import { upstreamExchangeMiddleware, type UpstreamExchangeHolder } from "./upstream-token-exchange.js";
 import { openUpstreamCredential, upstreamCredentialMiddleware } from "./mcp-upstream-credential.js";
 import { loadEgressAllowList } from "./custom-providers.js";
 import { loadOrgSettings } from "./org-settings.js";
@@ -87,6 +88,11 @@ export interface McpEgressDeps {
    * the egress guard already allowed; absent = byte-identical to before.
    */
   outboundIdentity?: OutboundIdentity | null;
+  /**
+   * ADR-0238: the call's down-scoped token holder (unarmed until the call is allowed and the exchange succeeded). Its
+   * middleware sits between the static credential and the assertion, so an exchanged token is the Authorization value.
+   */
+  upstreamExchange?: UpstreamExchangeHolder | null;
   /**
    * ADR-0190 I4: who a stdio connect runs for — the person, the project the
    * call is attributed to, the agent and the delegation grant — the inputs of
@@ -592,7 +598,9 @@ export async function guardedMcpConnect(
       // ADR-0188 S8: an assertion's "issued" row is written once the destination is allowed, before it leaves
       ...(deps.outboundIdentity ? { beforeSend: (init?: RequestInit) => deps.outboundIdentity!.beforeSend(init) } : {}),
     });
-    const asserted = deps.outboundIdentity ? (identityAssertionMiddleware(deps.outboundIdentity)(guarded) as typeof fetch) : guarded;
+    const assertedOnly = deps.outboundIdentity ? (identityAssertionMiddleware(deps.outboundIdentity)(guarded) as typeof fetch) : guarded;
+    // ADR-0238: the exchanged token replaces any Authorization set further out (an ADR-0204 Bearer credential)
+    const asserted = deps.upstreamExchange ? (upstreamExchangeMiddleware(deps.upstreamExchange)(assertedOnly) as typeof fetch) : assertedOnly;
     launch = {
       transport: dest.transport,
       url: dest.row.url,

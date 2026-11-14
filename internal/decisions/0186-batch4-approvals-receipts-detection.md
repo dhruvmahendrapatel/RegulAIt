@@ -969,3 +969,11 @@ version other than 2.8.8.
   the detection-content and Ajv-backed gateway tests pass (builder report and independent review on #589).
 - **Rule kept:** the converter stays pinned to one exact re2js version. Any later bump repeats this review of the
   program layout before the guard moves.
+
+## Amendment — 2026-11-07: `grant_mint`, a `settings_relax` op ([ADR-0250](0250-grant-mint-step-up-and-forced-plan-gate.md))
+
+Whole-build review finding S-04: the eight grant-mint POSTs (person and role grants of MCP tools, MCP servers' read
+tools, agents and connectors) widened default deny with no step-up, while smaller relaxations needed one. Each now
+takes a `settings_relax` step-up bound to `{op: "grant_mint", grant}` (`grantMintStepUp`), so an admin API key, which
+can never step up, can no longer mint a grant. No new action kind and no migration: `STEP_UP_ACTION_KINDS` stays at
+nine. Deleting a grant needs no step-up.

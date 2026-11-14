@@ -25,8 +25,8 @@ overstate what it knows. It would sit directly against:
   about the model-backed judge, which shipped wired-and-unverified and said so;
 - [ADR-0045](0045-model-risk-management.md)'s "bias/fairness here is a RECORDED DECLARATION, not a
   measurement";
-- [ADR-0050](0050-data-lineage.md)'s refusal to claim intra-model attribution;
-- [ADR-0034](0034-custom-llm-providers.md)'s posture of refusing honestly when nothing is
+- [ADR-0050](0050-data-lineage-provenance.md)'s refusal to claim intra-model attribution;
+- [ADR-0034](0034-custom-llm-providers-egress-guard.md)'s posture of refusing honestly when nothing is
   configured, rather than degrading to something that looks like it worked.
 
 So the question is not "how do we fake training". It is: **what part of custom-model creation can
@@ -87,7 +87,7 @@ inspectable and honest. Neither is a custom LLM.
 `huggingface`, `together`, `bedrock` and `vertex` are implemented as one adapter driven by a
 per-vendor table of the documented request shape, status path, cancel path, payload builder and
 status mapping. Every HTTP call goes through an **injected** `fetchImpl`, which the gateway supplies
-as the [ADR-0034](0034-custom-llm-providers.md)/[ADR-0062](0062-mode-scoped-egress.md)
+as the [ADR-0034](0034-custom-llm-providers-egress-guard.md)/[ADR-0062](0062-mode-scoped-egress.md)
 egress-guarded fetch — so a training backend's base URL is adjudicated by exactly the guard that
 adjudicates a BYO inference endpoint, on every use, not once at registration.
 

@@ -5,15 +5,18 @@
  * The lines are IMPORTED cost (a file somebody exported), never metered, and
  * the gateway's own basis statement is printed with them. A revoked batch has
  * no lines (they were withdrawn) and says so rather than showing an empty
- * table as if the file had been empty. The gateway returns at most 500 lines;
- * when it says it stopped there, the dialog says so too.
+ * table as if the file had been empty. The dialog shows the first five lines with a count; every line, with the
+ * list control, is on the batch's own page (P3, #453 c6527514889).
  */
+import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { fmtAt, fmtUsd, shortId } from "../../../api/format";
 import { Badge, EmptyState } from "../../../ui/kit";
-import { DataList } from "../../../ui/DataList";
+import type { DataColumn } from "../../../ui/DataList";
+import { ListPreview } from "../../../ui/ListPreview";
 import { KV, useNameMaps } from "../adminKit";
+import { IMPORTS_PATH, importStatusTone } from "./costImports";
 import { DetailDialog } from "../DetailDialog";
 import v from "../../views.module.css";
 
@@ -35,7 +38,7 @@ export interface ImportedLine {
   quantity: number | null;
   supersededAt?: string | null;
 }
-interface ImportDetail {
+export interface ImportDetail {
   import: {
     id: string;
     adapter: string;
@@ -70,87 +73,121 @@ const METHOD_WORDS: Record<ImportedLine["resolutionMethod"], string> = {
 
 const amountText = (l: ImportedLine) => (l.currency === "USD" ? fmtUsd(l.amount) : `${l.amount.toLocaleString()} ${l.currency}`);
 
+export const importDetailKey = (importId: string) => ["admin", "cost-import", importId] as const;
+export const linesEndpoint = (importId: string) => `/v1/cost-imports/${encodeURIComponent(importId)}`;
+export const linesPath = (importId: string) => `${IMPORTS_PATH}/${encodeURIComponent(importId)}`;
+export const LINES_SORT = { key: "row", dir: "asc" } as const;
+
+/** the batch read (its header; the gateway also answers up to 500 lines, which the list control pages instead) */
+export function useImportDetail(importId: string) {
+  return useQuery({
+    queryKey: importDetailKey(importId),
+    retry: false,
+    queryFn: () => api.get<ImportDetail>(linesEndpoint(importId)),
+  });
+}
+
+export const IMPORT_REFUSALS = { unknown_import: "There is no import batch with this ID. Reload Import history; it lists every batch, including refused and revoked ones." };
+
+export function ImportBatchSummary(props: { detail: ImportDetail }) {
+  const d = props.detail;
+  return (
+    <>
+      <p className={v.dim}>{d.basisStatement}</p>
+      <KV
+        rows={[
+          ["Vendor", d.import.vendor],
+          ["Adapter", <code>{d.import.adapter}</code>],
+          ["Status", <Badge tone={importStatusTone(d.import.status)}>{d.import.status}</Badge>],
+          ["Mode", d.import.mode],
+          ["Format", d.import.format],
+          ["Source", d.import.source ?? "not stated"],
+          ["Rows parsed / accepted / refused", <span className={v.num}>{d.import.rowsParsed} / {d.import.rowsAccepted} / {d.import.rowsRefused}</span>],
+          ["Period", d.import.periodStart && d.import.periodEnd ? `${fmtAt(d.import.periodStart)} – ${fmtAt(d.import.periodEnd)}` : "not stated"],
+          ["Imported total", d.import.totalUsd === null ? "no single USD figure" : fmtUsd(d.import.totalUsd)],
+          ["File SHA-256", <code style={{ wordBreak: "break-all" }}>{d.import.payloadSha256}</code>],
+          ["Imported", fmtAt(d.import.createdAt)],
+          ["Revoked", d.import.revokedAt ? fmtAt(d.import.revokedAt) : "no"],
+          ["Outcome", d.import.reason],
+        ]}
+      />
+    </>
+  );
+}
+
+/** why a batch holds no lines, in words, rather than an empty table that reads as an empty file */
+export function noLinesState(d: ImportDetail): ReactNode {
+  return (
+    <EmptyState
+      title="No lines held for this batch"
+      body={
+        d.import.status === "revoked"
+          ? "This batch was revoked: its lines were withdrawn and the batch row is kept as the record."
+          : d.import.status === "refused" || d.import.mode === "dry_run"
+            ? "A refused import or a dry run stores no lines; the counts above are what the parse found."
+            : "The gateway holds no lines for this batch."
+      }
+    />
+  );
+}
+
+/** the batch read carries up to 500 lines: their unattributed count, said as such when the batch is longer */
+export function unattributedAttention(d: ImportDetail): { label: string; count: number } {
+  return {
+    label: d.linesTruncated ? "unattributed in the first 500" : "unattributed",
+    count: d.lines.filter((l) => !l.resolvedUserId).length,
+  };
+}
+
+/** the import lines' columns, in screen order */
+export function lineColumns(userName: ReadonlyMap<string, string>): Array<DataColumn<ImportedLine>> {
+  return [
+    { key: "row", header: "File line", main: true, sortable: true, render: (l) => <span className={v.num}>{l.sourceRow}</span> },
+    { key: "acct", header: "Vendor account", main: true, sortable: true, render: (l) => <code>{l.accountRef}</code> },
+    {
+      key: "who",
+      header: "Attributed to",
+      main: true,
+      sortable: true,
+      required: "Whether a line is attributed is always shown",
+      render: (l) =>
+        l.resolvedUserId ? (
+          <span title={l.resolutionDetail}>
+            {userName.get(l.resolvedUserId) ?? shortId(l.resolvedUserId)} <span className={v.faint}>({METHOD_WORDS[l.resolutionMethod] ?? l.resolutionMethod})</span>
+          </span>
+        ) : (
+          <Badge tone="warn" title={l.resolutionDetail}>
+            unattributed
+          </Badge>
+        ),
+    },
+    { key: "svc", header: "Service", main: true, sortable: true, render: (l) => l.service ?? l.description ?? "—" },
+    { key: "kind", header: "Kind", sortable: true, render: (l) => l.billingKind },
+    { key: "amt", header: "Imported amount", main: true, sortable: true, align: "right", render: (l) => <span className={v.num}>{amountText(l)}</span> },
+    { key: "cc", header: "Cost center", main: true, sortable: true, render: (l) => l.costCenter ?? "—" },
+  ];
+}
+
 export function CostImportDetail(props: { importId: string; onClose: () => void }) {
   const names = useNameMaps();
-  const q = useQuery({
-    queryKey: ["admin", "cost-import", props.importId],
-    retry: false,
-    queryFn: () => api.get<ImportDetail>(`/v1/cost-imports/${encodeURIComponent(props.importId)}`),
-  });
+  const q = useImportDetail(props.importId);
   return (
-    <DetailDialog
-      title="Imported cost batch"
-      noun="import batch"
-      query={q}
-      refusals={{ unknown_import: "There is no import batch with this ID. Reload Import history; it lists every batch, including refused and revoked ones." }}
-      onClose={props.onClose}
-    >
+    <DetailDialog title="Imported cost batch" noun="import batch" query={q} refusals={IMPORT_REFUSALS} onClose={props.onClose}>
       {(d) => (
         <div className={v.stack}>
-          <p className={v.dim}>{d.basisStatement}</p>
-          <KV
-            rows={[
-              ["Vendor", d.import.vendor],
-              ["Adapter", <code>{d.import.adapter}</code>],
-              ["Status", <Badge tone={d.import.status === "applied" ? "ok" : d.import.status === "refused" ? "danger" : d.import.status === "revoked" ? "warn" : "neutral"}>{d.import.status}</Badge>],
-              ["Mode", d.import.mode],
-              ["Format", d.import.format],
-              ["Source", d.import.source ?? "not stated"],
-              ["Rows parsed / accepted / refused", <span className={v.num}>{d.import.rowsParsed} / {d.import.rowsAccepted} / {d.import.rowsRefused}</span>],
-              ["Period", d.import.periodStart && d.import.periodEnd ? `${fmtAt(d.import.periodStart)} – ${fmtAt(d.import.periodEnd)}` : "not stated"],
-              ["Imported total", d.import.totalUsd === null ? "no single USD figure" : fmtUsd(d.import.totalUsd)],
-              ["File SHA-256", <code style={{ wordBreak: "break-all" }}>{d.import.payloadSha256}</code>],
-              ["Imported", fmtAt(d.import.createdAt)],
-              ["Revoked", d.import.revokedAt ? fmtAt(d.import.revokedAt) : "no"],
-              ["Outcome", d.import.reason],
-            ]}
-          />
-          <DataList<ImportedLine>
-            listId="cost-import-lines"
-            noun="imported lines"
-            endpoint={`/v1/cost-imports/${encodeURIComponent(props.importId)}`}
-            exportPath={`/v1/cost-imports/${encodeURIComponent(props.importId)}/export.xlsx`}
-            queryKey={["admin", "cost-import", props.importId, "lines"]}
+          <ImportBatchSummary detail={d} />
+          <ListPreview<ImportedLine>
+            title="Imported lines"
+            noun="lines"
+            endpoint={linesEndpoint(props.importId)}
             legacyKey="lines"
-            defaultSort={{ key: "row", dir: "asc" }}
+            queryKey={[...importDetailKey(props.importId), "lines"]}
+            sort={LINES_SORT}
+            attention={[unattributedAttention(d)]}
+            columns={lineColumns(names.userName).filter((c) => c.main)}
             rowKey={(l) => l.id}
-            empty={
-              <EmptyState
-                title="No lines held for this batch"
-                body={
-                  d.import.status === "revoked"
-                    ? "This batch was revoked: its lines were withdrawn and the batch row is kept as the record."
-                    : d.import.status === "refused" || d.import.mode === "dry_run"
-                      ? "A refused import or a dry run stores no lines; the counts above are what the parse found."
-                      : "The gateway holds no lines for this batch."
-                }
-              />
-            }
-            columns={[
-              { key: "row", header: "File line", main: true, sortable: true, render: (l) => <span className={v.num}>{l.sourceRow}</span> },
-              { key: "acct", header: "Vendor account", main: true, sortable: true, render: (l) => <code>{l.accountRef}</code> },
-              {
-                key: "who",
-                header: "Attributed to",
-                main: true,
-                sortable: true,
-                required: "Whether a line is attributed is always shown",
-                render: (l) =>
-                  l.resolvedUserId ? (
-                    <span title={l.resolutionDetail}>
-                      {names.userName.get(l.resolvedUserId) ?? shortId(l.resolvedUserId)} <span className={v.faint}>({METHOD_WORDS[l.resolutionMethod] ?? l.resolutionMethod})</span>
-                    </span>
-                  ) : (
-                    <Badge tone="warn" title={l.resolutionDetail}>
-                      unattributed
-                    </Badge>
-                  ),
-              },
-              { key: "svc", header: "Service", main: true, sortable: true, render: (l) => l.service ?? l.description ?? "—" },
-              { key: "kind", header: "Kind", sortable: true, render: (l) => l.billingKind },
-              { key: "amt", header: "Imported amount", main: true, sortable: true, align: "right", render: (l) => <span className={v.num}>{amountText(l)}</span> },
-              { key: "cc", header: "Cost center", main: true, sortable: true, render: (l) => l.costCenter ?? "—" },
-            ]}
+            viewAll={linesPath(props.importId)}
+            empty={noLinesState(d)}
           />
         </div>
       )}

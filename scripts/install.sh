@@ -132,6 +132,16 @@ First admin (ADR-0194)
   Without the file a non-interactive install skips the step; see the summary
   for the manual path. A deployment that already has an admin skips it too.
 
+Public-page bot check (ADR-0258, OFF by default)
+  --anubis                         Put Anubis (proof-of-work bot check) in front
+                                   of the public trust centre, auditor portal and
+                                   supplier portal only. Needs --tls letsencrypt
+                                   or internal. Real auditors and suppliers on
+                                   locked-down browsers can fail its JavaScript
+                                   challenge: record the choice and keep the
+                                   allow-list (docs/deployment/ANUBIS.md).
+  --no-anubis                      Turn it off again (kept across re-runs).
+
 Air-gapped
   --image-bundle <path.tar>        `docker load` this image bundle before
                                    bringing the stack up. Required on an
@@ -162,6 +172,8 @@ TLS=""
 ACME_EMAIL=""
 OIDC_ISSUER=""
 SEED_DEMO=""
+# ADR-0258: on|off; empty = the prior install's choice, else off
+ANUBIS=""
 VERSION=""
 # Three variables whose UNSET state is meaningfully different from their EMPTY
 # state, so they are only ever written when an operator actually chose a value.
@@ -204,6 +216,8 @@ while [ $# -gt 0 ]; do
     --oidc-issuer)   OIDC_ISSUER="${2:-}"; shift 2 ;;
     --seed-demo)     SEED_DEMO=1; shift ;;
     --no-seed-demo)  SEED_DEMO=0; shift ;;
+    --anubis)        ANUBIS=on; shift ;;
+    --no-anubis)     ANUBIS=off; shift ;;
     --version)       VERSION="${2:-}"; shift 2 ;;
     --hsts)          HSTS="${2:-}"; shift 2 ;;
     --saml-entity-id)  SAML_ENTITY_ID="${2:-}"; shift 2 ;;
@@ -376,6 +390,13 @@ volume_exists() {
 # scripts/build-image-bundle.sh together.
 CADDY_IMAGE="caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f"
 CADDY_TAG="caddy:2.11.7-alpine"
+# ADR-0258: the Anubis image (profile `anubis`, only with --anubis), carried the same way as Caddy. Ids read from the
+# ghcr.io registry API on 2026-11-07 for the v1.28.2 index sha256:5fcbce70...: config digests linux/amd64
+# sha256:77ec8a8d..., linux/arm64 sha256:b2840ef9... (classic store); the index digest, and the platform manifests
+# linux/amd64 sha256:7be540e7..., linux/arm64 sha256:4dc4d936... (containerd store). Re-pin with docker-compose.yml
+# and scripts/build-image-bundle.sh together.
+ANUBIS_TAG="ghcr.io/techarohq/anubis:v1.28.2"
+ANUBIS_IMAGE_IDS="sha256:77ec8a8d7915eef8a9a8633d5918d221ca99b1cc18e3820e1fcffc2fdf5c730c sha256:b2840ef91910b533ab4d10db28196ca1a5e6c7f1f286127e08f20e2634e6bccb sha256:5fcbce70ee6168be5b226d19bec90111d0acd0daf13028fa06b044cf3ebbbd5f sha256:7be540e764715f583f2c6a429e94075a79942b935c2a96c462111c380bd12c21 sha256:4dc4d9361874eb9aca785979ad6100836746dcd3772052388047b4ed1b43153d"
 CADDY_IMAGE_IDS="sha256:f77f856a30f0004200b36b322d61da17fade31e24875699d77fb968399b9eb77 sha256:f6a2207268b0f0914df9d3569e1824d6adcfa7b59fbffe0f3cbc5d2d60423f71 sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f sha256:173b26306d711395accaeba8b67afcaad2a085ccb1e6bf26010bfe8c095a5229 sha256:84058f1a0e5beb97664a9b79dcfd267b594c033d5bb88d8463cdfb59c0779197"
 
 image_present() {
@@ -389,6 +410,15 @@ caddy_image_id_ok() {
   docker_up || return 1
   id="$(docker image inspect --format '{{.Id}}' "$CADDY_TAG" 2>/dev/null)" || return 1
   case " $CADDY_IMAGE_IDS " in *" $id "*) return 0 ;; esac
+  return 1
+}
+
+# the loaded Anubis tag is the pinned image (ADR-0258; air-gapped with --anubis)
+anubis_image_id_ok() {
+  local id
+  docker_up || return 1
+  id="$(docker image inspect --format '{{.Id}}' "$ANUBIS_TAG" 2>/dev/null)" || return 1
+  case " $ANUBIS_IMAGE_IDS " in *" $id "*) return 0 ;; esac
   return 1
 }
 
@@ -453,6 +483,7 @@ if [ -f "$ENV_FILE" ]; then
   [ -n "$MODE" ]         || MODE="$PRIOR_MODE"
   [ -n "$DOMAIN" ]       || DOMAIN="$PRIOR_DOMAIN"
   [ -n "$OIDC_ISSUER" ]  || OIDC_ISSUER="$PRIOR_OIDC"
+  [ -n "$ANUBIS" ]       || ANUBIS="$(env_get "$ENV_FILE" REGULAIT_ANUBIS)"
   # ADR-0181 FX3: a prior SEED_DEMO=1 is NOT carried over (it was the old hosted
   # default, not necessarily a choice); re-running keeps the demo only with --seed-demo
   if [ -z "$SEED_DEMO" ] && [ "$PRIOR_SEED" = "1" ]; then
@@ -534,6 +565,16 @@ if [ "$TLS" != "letsencrypt" ] && [ -n "$ACME_EMAIL" ]; then
 fi
 if [ "$TLS" != "none" ] && [ -z "$DOMAIN" ]; then
   die "--tls $TLS needs a --domain: Caddy's site address is the hostname it serves and (for letsencrypt) issues for."
+fi
+# ADR-0258: the public-page bot check. Off unless chosen; it lives in Caddy's routes, so it needs Caddy.
+ANUBIS="${ANUBIS:-off}"
+case "$ANUBIS" in
+  on|off) ;;
+  *) die "REGULAIT_ANUBIS in $ENV_FILE is '$ANUBIS'; it must be on or off (or pass --anubis / --no-anubis)." ;;
+esac
+if [ "$ANUBIS" = "on" ] && [ "$TLS" = "none" ]; then
+  die "--anubis needs Caddy in front (--tls letsencrypt or internal). Behind your own TLS proxy, run Anubis there:
+  docs/deployment/ANUBIS.md § Your own proxy or Kubernetes."
 fi
 # ADR-0188 S7: engine runners and PDP clients take DPoP-bound self tokens whose issuer is
 # REGULAIT_PUBLIC_URL; with it unset the token endpoint refuses (503) and none of them can
@@ -818,6 +859,10 @@ if [ "$MODE" = "air_gapped" ]; then
     if image_present "$CADDY_TAG" && ! caddy_image_id_ok; then
       missing="$missing $CADDY_TAG(image-id-not-pinned)"
     fi
+    if [ "$ANUBIS" = "on" ]; then
+      if ! image_present "$ANUBIS_TAG"; then missing="$missing $ANUBIS_TAG"
+      elif ! anubis_image_id_ok; then missing="$missing $ANUBIS_TAG(image-id-not-pinned)"; fi
+    fi
     # In --check mode this is a finding, not a refusal: the point of check mode
     # is to exercise preflight + render, and an operator planning an air-gapped
     # install on a connected workstation legitimately has no images yet.
@@ -954,6 +999,12 @@ REGULAIT_TLS_ISSUER=$TLS_ISSUER
 REGULAIT_TLS_EMAIL_DIRECTIVE=$TLS_EMAIL_DIRECTIVE
 REGULAIT_TLS_UPSTREAM=gateway:3000
 
+# ---- public-page bot check (ADR-0258) --------------------------------------
+# on = Anubis checks visitors to the trust centre, auditor portal and supplier
+# portal (and the installer starts its compose profile). off = the default.
+# Turning it on is your deployment choice: record it (docs/deployment/ANUBIS.md).
+REGULAIT_ANUBIS=$ANUBIS
+
 # ---- identity --------------------------------------------------------------
 # INFORMATIONAL ONLY — no gateway code reads this. OIDC/SAML providers are
 # database rows created through the admin API; the post-install summary prints
@@ -1054,6 +1105,16 @@ YML
   executor-front-ca:
     image: $CADDY_TAG
     pull_policy: never
+YML
+    if [ "$ANUBIS" = "on" ]; then
+      cat <<YML
+  # ADR-0258: the bundle's plain tag (scripts/build-image-bundle.sh --with-anubis)
+  anubis:
+    image: $ANUBIS_TAG
+    pull_policy: never
+YML
+    fi
+    cat <<YML
   # ENG-IMG: the engine runners (profile engines) run the bundle's fixed tags; the task images are the same images,
   # which the executor starts by image id. Without a bundle that carries them (--with-engines), nothing is found.
   engine-promptfoo:
@@ -1091,6 +1152,7 @@ chmod 644 "$VERSION_FILE"
 
 COMPOSE_ARGS=(-p "$PROJECT" -f "$COMPOSE_FILE" -f "$OVERRIDE_FILE" --env-file "$ENV_FILE" --project-directory "$REPO_ROOT")
 if [ "$TLS" != "none" ]; then COMPOSE_ARGS+=(--profile tls); fi
+if [ "$ANUBIS" = "on" ]; then COMPOSE_ARGS+=(--profile anubis); fi
 
 if [ "$DAEMON_OK" = "1" ]; then
   if docker compose "${COMPOSE_ARGS[@]}" config >/dev/null 2>"$INSTALL_DIR/.compose-config.err"; then
@@ -1121,6 +1183,10 @@ if [ -n "$IMAGE_BUNDLE" ]; then
   if [ "$MODE" = "air_gapped" ]; then
     caddy_image_id_ok || die "the bundle's $CADDY_TAG is missing or is not the pinned image (allowed ids: $CADDY_IMAGE_IDS)"
     ok "$CADDY_TAG is the pinned image"
+    if [ "$ANUBIS" = "on" ]; then
+      anubis_image_id_ok || die "--anubis: the bundle's $ANUBIS_TAG is missing or is not the pinned image (build the bundle with --with-anubis; allowed ids: $ANUBIS_IMAGE_IDS)"
+      ok "$ANUBIS_TAG is the pinned image"
+    fi
     for engine in $ENGINE_IDS; do
       image_present "regulait/engine-$engine:bundled" || continue
       engine_bundled_id_ok "$engine" || die "the bundle's regulait/engine-$engine:bundled is not the image engines/images.lock.json records for $engine"

@@ -161,7 +161,7 @@ export async function runEnforceBeat(opts: EnforceBeatOptions): Promise<EnforceB
     return { exitCode: 0, outcome: "simulated", lines };
   }
 
-  const project = ((await api("GET", "/v1/projects")).body.projects as Json[] | undefined)?.find((p) => p.name === o.projectName);
+  const project = ((await api("GET", "/v1/projects?archived=include")).body.projects as Json[] | undefined)?.find((p) => p.name === o.projectName);
   if (!project) return fail("setup_error", `no project '${o.projectName}'`);
 
   const minted = await api("POST", `/v1/users/${requester.id}/keys`, {

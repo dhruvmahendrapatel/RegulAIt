@@ -4,12 +4,13 @@
  * Deleting a held role answers 409 with the holders named; force-delete
  * requires a recorded, audited reason.
  */
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api, ApiError } from "../../../api/client";
 import { withStepUp } from "../../../stepup/stepUp";
 import type { Role, RoleAssignment, RoleGrants } from "../../../api/adminTypes";
 import { ago } from "../../../api/format";
+import { DataList } from "../../../ui/DataList";
 import { PageHeader } from "../../../shell/AppShell";
 import {
   Badge,
@@ -19,6 +20,7 @@ import {
   EmptyState,
   Field,
   Input,
+  RowActions,
   Select,
   Table,
 } from "../../../ui/kit";
@@ -42,6 +44,9 @@ import {
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
+// G10 (ADR-0206): the rename dialog is its own chunk, loaded when an admin opens it
+const RenameModal = lazy(() => import("./RenameModal").then((m) => ({ default: m.RenameModal })));
+
 export default function RolesPage() {
   const roles = useRoles();
   const users = useUsers();
@@ -55,6 +60,7 @@ export default function RolesPage() {
   const [activeRoleId, setActiveRoleId] = useState("");
 
   const [confirmDelete, setConfirmDelete] = useState<Role | null>(null);
+  const [renameTarget, setRenameTarget] = useState<Role | null>(null);
   const [forceDelete, setForceDelete] = useState<{ role: Role; holders: string[] } | null>(null);
 
   const deleteRole = async (role: Role) => {
@@ -151,16 +157,33 @@ export default function RolesPage() {
                 srHeader: "Actions",
                 align: "right",
                 render: (r) => (
-                  <Button
-                    size="sm"
-                    variant="danger"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setConfirmDelete(r);
-                    }}
-                  >
-                    delete
-                  </Button>
+                  <RowActions
+                    slot="0"
+                    secondary={
+                      <Button
+                        size="sm"
+                        aria-label={`Rename role ${r.name}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setRenameTarget(r);
+                        }}
+                      >
+                        Rename
+                      </Button>
+                    }
+                    rest={
+                      <Button
+                        size="sm"
+                        variant="danger"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setConfirmDelete(r);
+                        }}
+                      >
+                        delete
+                      </Button>
+                    }
+                  />
                 ),
               },
             ]}
@@ -187,6 +210,11 @@ export default function RolesPage() {
         )}
       </div>
 
+      {renameTarget && (
+        <Suspense fallback={null}>
+          <RenameModal noun="role" target={renameTarget} onClose={() => setRenameTarget(null)} />
+        </Suspense>
+      )}
       <ConfirmModal
         open={confirmDelete !== null}
         title={`Delete role “${confirmDelete?.name}”?`}
@@ -263,10 +291,6 @@ function RoleGrantsPanel(props: { roleId: string }) {
     queryKey: ["admin", "role-grants", props.roleId],
     queryFn: () => api.get<RoleGrants>(`/v1/roles/${props.roleId}/grants`),
   });
-  const assignments = useQuery({
-    queryKey: ["admin", "role-assignments", props.roleId],
-    queryFn: () => api.get<{ assignments: RoleAssignment[] }>(`/v1/roles/${props.roleId}/assignments`),
-  });
 
   const [agentId, setAgentId] = useState("");
   const [connectorId, setConnectorId] = useState("");
@@ -287,33 +311,44 @@ function RoleGrantsPanel(props: { roleId: string }) {
 
   return (
     <QueryGate
-      loading={grants.isLoading || assignments.isLoading}
-      error={grants.error ?? assignments.error}
-      onRetry={() => {
-        void grants.refetch();
-        void assignments.refetch();
-      }}
+      loading={grants.isLoading}
+      error={grants.error}
+      onRetry={() => void grants.refetch()}
     >
       <Card title="Held by">
-        <Table<RoleAssignment>
+        <DataList<RoleAssignment>
+          listId="role-holders"
+          noun="role holders"
+          endpoint={`/v1/roles/${props.roleId}/assignments`}
+          exportPath={`/v1/roles/${props.roleId}/assignments/export.xlsx`}
+          queryKey={["admin", "role-assignments", props.roleId, "list"]}
+          legacyKey="assignments"
+          defaultSort={{ key: "assigned", dir: "desc" }}
           columns={[
+            { key: "user", header: "User", main: true, sortable: true, render: (x) => x.displayName || x.email },
+            { key: "email", header: "Email", main: true, sortable: true, render: (x) => x.email },
             {
-              key: "user",
-              header: "User",
-              render: (x) => (
-                <span>
-                  {x.displayName || x.email}
-                  {x.disabledAt && <Badge tone="danger"> disabled</Badge>}
-                </span>
-              ),
+              key: "account",
+              header: "Account",
+              main: true,
+              sortable: true,
+              required: "A disabled holder is a warning, so the account state is always shown",
+              render: (x) => (x.disabledAt ? <Badge tone="danger">disabled</Badge> : <Badge tone="ok">active</Badge>),
             },
-            { key: "email", header: "Email", render: (x) => x.email },
-            { key: "assigned", header: "Assigned", render: (x) => ago(x.assignedAt) },
+            {
+              key: "origin",
+              header: "Held through",
+              main: true,
+              sortable: true,
+              render: (x) => (x.origin === "group" ? "identity-provider group" : "direct assignment"),
+            },
+            { key: "assigned", header: "Assigned", main: true, sortable: true, render: (x) => ago(x.assignedAt) },
             {
               key: "actions",
               header: "",
               srHeader: "Actions",
               align: "right",
+              action: true,
               render: (x) => (
                 <Button size="sm" variant="ghost" onClick={() => setUnassign(x)}>
                   unassign
@@ -321,8 +356,7 @@ function RoleGrantsPanel(props: { roleId: string }) {
               ),
             },
           ]}
-          rows={assignments.data?.assignments ?? []}
-          rowKey={(x) => x.userId}
+          rowKey={(x) => x.id ?? `${x.userId}:${x.origin ?? ""}`}
           empty={<EmptyState title="Nobody holds this role yet" />}
         />
       </Card>
@@ -334,7 +368,7 @@ function RoleGrantsPanel(props: { roleId: string }) {
             onSubmit={(e) => {
               e.preventDefault();
               void act.run(
-                () => api.post(`/v1/roles/${props.roleId}/grants/agents`, { agentId }),
+                () => withStepUp((h) => api.postWithHeaders(`/v1/roles/${props.roleId}/grants/agents`, { agentId }, h)),
                 "Agent granted",
               );
             }}
@@ -354,13 +388,19 @@ function RoleGrantsPanel(props: { roleId: string }) {
               e.preventDefault();
               void act.run(
                 () =>
-                  api.post(`/v1/roles/${props.roleId}/grants/connectors`, {
-                    connectorId,
-                    mode: connMode,
-                    ...(connObjects
-                      ? { allowedObjects: connObjects.split(",").map((s) => s.trim()).filter(Boolean) }
-                      : {}),
-                  }),
+                  withStepUp((h) =>
+                    api.postWithHeaders(
+                      `/v1/roles/${props.roleId}/grants/connectors`,
+                      {
+                        connectorId,
+                        mode: connMode,
+                        ...(connObjects
+                          ? { allowedObjects: connObjects.split(",").map((s) => s.trim()).filter(Boolean) }
+                          : {}),
+                      },
+                      h,
+                    ),
+                  ),
                 "Connector granted",
               );
             }}
@@ -389,7 +429,7 @@ function RoleGrantsPanel(props: { roleId: string }) {
               e.preventDefault();
               void act.run(
                 () =>
-                  api.post(`/v1/roles/${props.roleId}/grants/tools`, { serverId: toolServerId, toolName }),
+                  withStepUp((h) => api.postWithHeaders(`/v1/roles/${props.roleId}/grants/tools`, { serverId: toolServerId, toolName }, h)),
                 "Tool granted",
               );
             }}
@@ -417,14 +457,20 @@ function RoleGrantsPanel(props: { roleId: string }) {
               e.preventDefault();
               void act.run(
                 () =>
-                  api.post(`/v1/roles/${props.roleId}/grants/servers`, {
-                    serverId: srvId,
-                    // A server grant IS a read-all grant: the kernel only ever
-                    // matches one for read-kind tools. readOnlyAll:false is
-                    // refused by the gateway because it would store a row that
-                    // lists as a grant while granting nothing.
-                    readOnlyAll: true,
-                  }),
+                  withStepUp((h) =>
+                    api.postWithHeaders(
+                      `/v1/roles/${props.roleId}/grants/servers`,
+                      {
+                        serverId: srvId,
+                        // A server grant IS a read-all grant: the kernel only ever
+                        // matches one for read-kind tools. readOnlyAll:false is
+                        // refused by the gateway because it would store a row that
+                        // lists as a grant while granting nothing.
+                        readOnlyAll: true,
+                      },
+                      h,
+                    ),
+                  ),
                 "Server granted",
               );
             }}
