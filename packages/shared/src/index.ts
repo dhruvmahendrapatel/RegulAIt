@@ -9,6 +9,35 @@ import { RED_TEAM_ATTACK_CLASSES } from "./redteam.js";
 // ADR-0097: the admission-mode enum is DEFINED in mcp-admission.ts and used by
 // updateOrgSettingsSchema below, so it is imported as well as re-exported.
 import { MCP_ADMISSION_MODES } from "./mcp-admission.js";
+import { MCP_DEFINITION_PIN_MODES } from "./mcp-definition-pins.js";
+import { MCP_HIGH_RISK_MODES } from "./mcp-offensive-tools.js";
+
+// ADR-0246 addendum — offensive MCP tool servers as high-risk: classification, targets, redaction
+export {
+  applyHighRiskPolicySchema,
+  AUTHORISED_TARGET_KINDS,
+  checkTargets,
+  classifyOffensiveTools,
+  createAuthorisedTargetSchema,
+  extractTargets,
+  looksLikeNetworkTarget,
+  markServerHighRiskSchema,
+  MCP_HIGH_RISK_MODES,
+  normaliseAuthorisedTarget,
+  normaliseTarget,
+  OFFENSIVE_CLASSIFIER_VERSION,
+  OFFENSIVE_TOOL_CATEGORIES,
+  OFFENSIVE_TOOL_RULES,
+  redactArgumentsForAudit,
+  TARGET_ARGUMENT_KEYS,
+  type AuthorisedTarget,
+  type AuthorisedTargetKind,
+  type ExtractedTargets,
+  type McpHighRiskMode,
+  type OffensiveClassification,
+  type OffensiveToolCategory,
+  type OffensiveToolFinding,
+} from "./mcp-offensive-tools.js";
 // ADR-0104: the approval-scope vocabulary is needed IN SCOPE here (not merely
 // re-exported below) so `createApprovalRuleSchema` validates against the one
 // authoritative list rather than a second copy of the two strings.
@@ -585,6 +614,30 @@ export {
   type McpAdmissionScan,
   type ScannableTool,
 } from "./mcp-admission.js";
+
+// ADR-0246 — MCP definition pinning (rug-pull detection): digests, the observation plan, the derived status, the diff
+export {
+  approveMcpDefinitionPinsSchema,
+  definitionDiff,
+  definitionPinStatus,
+  MCP_DEFINITION_KEY_MAX,
+  MCP_DEFINITION_KINDS,
+  MCP_DEFINITION_PIN_LIMIT_PER_KIND,
+  MCP_DEFINITION_PIN_MODES,
+  MCP_DEFINITION_PINNED_FIELDS,
+  pinnableDefinition,
+  pinnableDefinitions,
+  planDefinitionPins,
+  type ApproveMcpDefinitionPins,
+  type DefinitionPinPlan,
+  type McpDefinitionKind,
+  type McpDefinitionPinMode,
+  type McpDefinitionPinStatus,
+  type McpServedDefinitions,
+  type PinnableDefinition,
+  type PinnableSet,
+  type StoredDefinitionPin,
+} from "./mcp-definition-pins.js";
 
 // ADR-0175 A6 — admission scanning for builder skills (the ADR-0097 rule set
 // through `scanAdmissionUnits`, plus confusable and exfiltration-URL detectors).
@@ -2344,6 +2397,13 @@ export const updateOrgSettingsSchema = z
     mcpPrivateRangesDefault: z.boolean().optional(),
     /** ADR-0219 (P10): calls to remote agents over A2A. Strict false; true relaxes it (settings_relax step-up). */
     a2aEnabled: z.boolean().optional(),
+    /** ADR-0236 (P11): governed MCP bundles. Strict false; true relaxes it (settings_relax step-up). */
+    mcpBundlesEnabled: z.boolean().optional(),
+    /** ADR-0251 (migration governed_core_resource_rules): must a connector call name a project? true (the ADR-0180 default) = an unattributed
+     * connector call is refused `attribution-required`; false (an audited admin relaxation) = it runs, metered Unattributed. */
+    connectorAttributionRequired: z.boolean().optional(),
+    /** ADR-0251 (migration governed_core_resource_rules): the same mandate for calls to remote agents over A2A. */
+    a2aAttributionRequired: z.boolean().optional(),
     /** ADR-0097: the MCP ADMISSION posture ('enforce' is the strict default since ADR-0181). 'off' = no manifest
      * scan runs at all and behaviour is byte-identical to pre-0097. 'log' =
      * every manifest sync is scanned and the verdict/findings are recorded on
@@ -2352,6 +2412,13 @@ export const updateOrgSettingsSchema = z
      * contributes no tools to discovery, until an admin clears it with a
      * reason. */
     mcpAdmissionMode: z.enum(MCP_ADMISSION_MODES).optional(),
+    /** ADR-0246: what a tool, prompt or resource that changed since approval does. 'block' (the strict default)
+     * refuses it until an admin re-approves it against the diff; 'warn' serves it and audits the change. Relaxing
+     * to 'warn' needs a settings_relax step-up and is audited. */
+    mcpDefinitionPinMode: z.enum(MCP_DEFINITION_PIN_MODES).optional(),
+    /** ADR-0246 addendum: 'enforce' (strict default) gates every call to a server classified high-risk (offensive
+     * tooling) on the policy template and the authorised-targets list; 'off' is a step-up, audited relaxation. */
+    mcpHighRiskMode: z.enum(MCP_HIGH_RISK_MODES).optional(),
     /** ADR-0175 A5: the release-age cooldown in days. 0 (default) = off. While
      * on, a newly registered MCP server, a changed manifest, a federated import
      * and a new skill version stay in quarantine until this deployment has
@@ -4826,6 +4893,8 @@ export * from "./feedback.js";
 export * from "./ai-literacy.js";
 export * from "./alert-ownership.js";
 export * from "./isaca-pack.js";
+// ADR-0243 (P24): the OWASP MCP and LLM Top 10 packs
+export * from "./owasp-packs.js";
 // ADR-0212 (P12 b): modality pricing
 export * from "./modality-pricing.js";
 
@@ -4885,9 +4954,13 @@ export * from "./endpoint-discovery/index.js";
 export * from "./provenance/index.js";
 // ADR-0204: a static upstream credential per MCP server (header refusals, the write contract, the read view)
 export * from "./mcp-upstream-credential.js";
+// ADR-0206: G1 project archive and G10 rename roles and teams (bodies, refusal codes, the archive-impact view)
+export * from "./project-archive-rename.js";
 export * from "./library-lifecycle.js";
 // ADR-0220: trained runtime detectors (PII recogniser, injection classifier, harm model) behind the external-scorer contract
 export * from "./trained-detectors.js";
+// ADR-0237: native adapters for third-party guardrail providers (OpenAI Moderation, Azure AI Content Safety, Lakera Guard)
+export * from "./guardrail-vendor-adapters.js";
 // ADR-0224 (P13 c): privacy operations — records of processing, data-subject requests, the processing limit
 export * from "./privacy-ops.js";
 
@@ -4898,3 +4971,5 @@ export * from "./framework-imports.js";
 export * from "./supplier-portal.js";
 // ADR-0222 (P13(a)): fairness testing — the group metrics, thresholds and outcome (pure)
 export * from "./fairness.js";
+// ADR-0261 (P37): third-party security telemetry ingest — the DefenseClaw JSONL parser and mapping (pure)
+export * from "./third-party-ingest/index.js";

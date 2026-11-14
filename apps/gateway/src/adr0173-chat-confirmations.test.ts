@@ -268,7 +268,7 @@ let restorePiiFloor: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   process.env.REGULAIT_TEAMS_BOT_JWKS_COOLDOWN_SECONDS = "0";
   k = await builderKit("p2bl-chat");
-  restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false, connectorAttributionRequired: false });
   // ADR-0181: the strict PII floor withholds a model output that carries an
   // identifier, tool calls included. This file pins the Ask-first pause and
   // its chat buttons, not PII handling, so it sets the floor off explicitly.

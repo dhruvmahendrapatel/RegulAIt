@@ -17,8 +17,9 @@ import v from "../views.module.css";
 export default function ContextIndexPage() {
   const navigate = useNavigate();
   const projectsQ = useQuery({
-    queryKey: ["projects"],
-    queryFn: () => api.get<{ projects: Project[] }>("/v1/projects"),
+    // ADR-0206 G1: archived projects too; their context stays readable (writes are refused on the project page)
+    queryKey: ["projects", "with-archived"],
+    queryFn: () => api.get<{ projects: Project[] }>("/v1/projects?archived=include"),
   });
   const projects = projectsQ.data?.projects ?? [];
 

@@ -1,0 +1,12 @@
+# Third-party components — `@regulait/engine-spikee`
+
+Open-source components this package ships or uses in its tests (ADR-0176 admission rules: MIT, Apache-2.0, BSD or
+ISC; maintained; pinned; works air-gapped). npm dependencies are pinned exactly through `pnpm-lock.yaml`.
+
+| Component | Version | Licence | Used for, and why |
+|---|---|---|---|
+| `zod` (npm, github.com/colinhacks/zod, © Colin McDonnell) | `4.6.7` (exact; ADR-0192) | MIT | Strict runtime schemas for the spikee job, done-file and selection manifest and self-test payloads (`src/exchange.ts`, `src/selftest.ts`). |
+| `@types/node` (npm, github.com/DefinitelyTyped/DefinitelyTyped) | `26.6.6` (exact devDependency) | MIT | Type definitions for the Node.js standard library used by the sources and tests; test/build-only, never in a shipped bundle. |
+| `vitest` (npm, github.com/vitest-dev/vitest, © Anthony Fu and contributors) | `4.1.11` (exact devDependency) | MIT | Test runner for the `*.test.ts` files in `src/`; test-only, never in a shipped bundle. |
+
+The engine itself (spikee 0.9.4, Apache-2.0, WithSecure) and its Python closure are not npm dependencies of this package: they ship in the image and are listed in `engines/spikee/THIRD_PARTY.md`. This package runs spikee's own CLI (`spikee.cli:main`) and writes only the governance parts: the plan, the gateway-only invariant, the workspace target module (Python standard library only), the selection, the mapper and the exchange (ADR-0176: open source first).

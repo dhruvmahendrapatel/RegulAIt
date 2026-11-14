@@ -37,8 +37,12 @@
  * and this reuses it rather than inventing a second, softer one.
  */
 import {
+  and,
   auditLog,
+  engineRuns,
   eq,
+  notInArray,
+  virtualKeys,
   workflowInstances,
   type Db,
 } from "@regulait/db";
@@ -217,4 +221,165 @@ export async function guardInstanceAttributedCall(
     return { ok: false, status: refusal.status, error: refusal.error, detail: refusal.detail };
   }
   return { ok: true, instance };
+}
+
+/**
+ * ADR-0250 (review P-02) — THE PLAN-ONLY GATE AT PROJECT LEVEL.
+ *
+ * ADR-0079 made the gate enforceable only for a call that NAMED its workflow
+ * instance, so the same `execute` without an `instanceId` (and every IDE call
+ * through the compat shims and every MCP tool call, which have no way to name
+ * one) went through while the change sat in planning. Pillar 2 says the
+ * plan-only stage is FORCED, so the gate now keys on the PROJECT: while any
+ * live workflow instance of the project the call is attributed to rests at a
+ * planning stage, a mutating call is refused on every surface, audited on that
+ * instance's own trail, whether or not the caller names the instance.
+ *
+ * - `mutating` is the surface's own judgement: `!isPlanSafeMode(mode)` on the
+ *   invoke, runs and compat paths (compat is always `execute`), and a
+ *   WRITE-classified tool on the MCP path. A plan-safe call takes no query.
+ * - No project = nothing to key on. Compat and MCP require attribution by
+ *   default (ADR-0181), so an unattributed call there is already refused; an
+ *   unattributed invoke is a disclosed limit in ADR-0250.
+ * - THE ONE EXCEPTION (ADR-0250, audited): the workflow engine's own work for
+ *   an instance at an executable stage — a nested build-stage run, or a call
+ *   made with an engine run's key — is not stopped by ANOTHER instance of the
+ *   same project resting in planning. It is still refused when its OWN
+ *   instance is in planning. Each pass under the exception writes an `allow`
+ *   row `workflow-plan-only-engine-exception` on the planning instance's trail.
+ */
+export type PlanOnlySurface = "invoke" | "runs" | "compat" | "mcp";
+
+export interface ProjectPlanOnlyRefusal {
+  ok: false;
+  status: 409;
+  error: "plan_only_stage";
+  detail: string;
+  stageId: string;
+  instanceId: string;
+}
+
+/** the instance statuses that can never rest at a stage again (mirrors `currentPlanningStage`) */
+const TERMINAL_INSTANCE_STATUSES = ["completed", "aborted", "denied", "rolled_back"] as const;
+
+/** live instances of a project that rest at a planning stage, oldest first */
+export async function projectPlanningInstances(
+  db: Db,
+  projectId: string,
+): Promise<Array<{ instance: InstanceRow; stage: Stage }>> {
+  const rows = await db
+    .select()
+    .from(workflowInstances)
+    .where(
+      and(
+        eq(workflowInstances.projectId, projectId),
+        notInArray(workflowInstances.status, [...TERMINAL_INSTANCE_STATUSES]),
+      ),
+    )
+    .orderBy(workflowInstances.createdAt);
+  const out: Array<{ instance: InstanceRow; stage: Stage }> = [];
+  for (const instance of rows) {
+    const stage = planOnlyStage(instance);
+    if (stage) out.push({ instance, stage });
+  }
+  return out;
+}
+
+/**
+ * The workflow instance an ENGINE run's key works for, or null for any other
+ * credential (ADR-0187: an engine key is minted for one engine run, and that
+ * run belongs to at most one instance).
+ */
+export async function engineKeyWorkflowInstance(
+  db: Db,
+  req: { authCtx: { via: string; virtualKeyId?: string; virtualKeyPurpose?: string } },
+): Promise<string | null> {
+  if (req.authCtx.via !== "virtual-key" || req.authCtx.virtualKeyPurpose !== "engine" || !req.authCtx.virtualKeyId) {
+    return null;
+  }
+  const [row] = await db
+    .select({ instanceId: engineRuns.workflowInstanceId })
+    .from(virtualKeys)
+    .innerJoin(engineRuns, eq(engineRuns.id, virtualKeys.engineRunId))
+    .where(eq(virtualKeys.id, req.authCtx.virtualKeyId));
+  return row?.instanceId ?? null;
+}
+
+export async function guardProjectPlanOnly(
+  db: Db,
+  args: {
+    /** every project the call is attributed to (nulls and duplicates ignored) */
+    projectIds: ReadonlyArray<string | null | undefined>;
+    userId: string;
+    surface: PlanOnlySurface;
+    /** the surface's own judgement: does this call mutate? (false = no query) */
+    mutating: boolean;
+    /** the declared mode, for the audit detail and the message */
+    mode: string;
+    /** phrase naming the refused thing, e.g. "write tool 'git.push'" */
+    what?: string;
+    /** correlation for the audit detail (agent id, server, tool) */
+    detail?: Record<string, unknown>;
+    /** the workflow engine's own instance, when the call IS the engine's work (the ADR-0250 exception) */
+    engineInstanceId?: string | null;
+    serverId?: string;
+    toolName?: string;
+  },
+): Promise<{ ok: true } | ProjectPlanOnlyRefusal> {
+  if (!args.mutating) return { ok: true };
+  const projects = [...new Set(args.projectIds.filter((p): p is string => typeof p === "string" && p.length > 0))];
+  const what = args.what ?? `mode '${args.mode}'`;
+  for (const projectId of projects) {
+    for (const { instance, stage } of await projectPlanningInstances(db, projectId)) {
+      const excepted = !!args.engineInstanceId && args.engineInstanceId !== instance.id;
+      const detail = {
+        ...(args.detail ?? {}),
+        phase: "plan-only",
+        enforcement: "project",
+        surface: args.surface,
+        projectId,
+        mode: args.mode,
+        planOnlyStageId: stage.id,
+        instanceStatus: instance.status,
+        ...(args.engineInstanceId ? { engineInstanceId: args.engineInstanceId } : {}),
+      };
+      if (excepted) {
+        await db.insert(auditLog).values({
+          userId: args.userId,
+          objectType: "workflow",
+          objectId: instance.id,
+          ...(args.serverId ? { serverId: args.serverId } : {}),
+          ...(args.toolName ? { toolName: args.toolName } : {}),
+          detail,
+          effect: "allow",
+          ruleId: "workflow-plan-only-engine-exception",
+          ruleChain: [],
+          reason:
+            `${what} allowed while workflow instance '${instance.id}' rests at plan-only stage '${stage.id}': ` +
+            `it is the workflow engine's own work for instance '${args.engineInstanceId}' (ADR-0250 exception)`,
+        });
+        continue;
+      }
+      const message =
+        `project '${projectId}' has workflow instance '${instance.id}' at plan-only stage '${stage.id}' — ` +
+        `${what} mutates and is refused on every surface while it plans (§2 stage 2: planning-only reasoning ` +
+        `first; ADR-0250). Plan/read modes (${PLAN_SAFE_MODES.join(", ")}) and read tools are allowed now; ` +
+        `to build, leave plan-only first: POST /v1/workflows/instances/${instance.id}/advance ` +
+        `{"stageId":"${stage.id}"}.`;
+      await db.insert(auditLog).values({
+        userId: args.userId,
+        objectType: "workflow",
+        objectId: instance.id,
+        ...(args.serverId ? { serverId: args.serverId } : {}),
+        ...(args.toolName ? { toolName: args.toolName } : {}),
+        detail,
+        effect: "deny",
+        ruleId: "workflow-plan-only-stage",
+        ruleChain: [],
+        reason: message,
+      });
+      return { ok: false, status: 409, error: "plan_only_stage", detail: message, stageId: stage.id, instanceId: instance.id };
+    }
+  }
+  return { ok: true };
 }

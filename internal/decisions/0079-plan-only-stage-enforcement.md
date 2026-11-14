@@ -8,7 +8,7 @@
 - **Driver**: the "Known follow-ups" entry in `internal/memory/STATE.md`: *"`planning` is a
   vocabulary item, not a control (pillar 2 §2 stage 2)"*. Closing it was explicitly a feature,
   not a fix.
-- **Changes semantics of**: [ADR-0018](0018-workflow-engine-slice.md)'s kernel (the `planning`
+- **Changes semantics of**: [ADR-0018](0018-six-dimension-assignment-matching.md)'s kernel (the `planning`
   stage type). **Extends**: [ADR-0011](0011-shared-projects-on-one-project-entity.md) (the
   `assertProjectAttribution` refusal idiom this copies),
   [ADR-0016](0016-transitive-per-node-budget-ceiling.md) (the run-plan path it also guards).
@@ -177,3 +177,14 @@ Green on the reverted tree: 10/10.
 - **A pre-ADR-0079 instance persisted mid-flow keeps its stored state.** Any instance already
   past a planning stage stays past it (`currentPlanningStage` reads the current index, so a
   completed planning stage is simply not current). Nothing is retroactively parked.
+
+## Amendment — 2026-11-07: the gate is forced at project level ([ADR-0250](0250-grant-mint-step-up-and-forced-plan-gate.md))
+
+The whole-build review (finding P-02) found the "opt-in" limit above in conflict with ADR-0180 and the pillar's
+"forced" text. ADR-0250 withdraws it: while any live instance of the project a call is attributed to rests at a
+planning stage, a mutating call is refused on invoke, runs, compat and MCP (write tools), whether or not it names the
+instance, and audited on that instance's trail (`detail.enforcement: "project"`). The instance-attributed gate above
+is unchanged and still runs first. The regression test in `plan-only.test.ts` that pinned the opt-in behaviour is
+replaced by one asserting the refusal. The "other dispatch surfaces" limit is closed for attributed calls; the
+remaining limits (no project, an instance without a project) are listed in ADR-0250. The text above is kept as
+written.
