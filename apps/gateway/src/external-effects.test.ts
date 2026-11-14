@@ -103,7 +103,7 @@ describe("external provider mutation admission", () => {
     { adapter: "deploy", module: path.join(here, "deploy.ts"), source: path.join(here, "deploy.ts"), iface: "DeployProvider", reads: [] as string[] },
     { adapter: "git", module: "@regulait/git-provider", source: path.join(PACKAGES, "git-provider/src/types.ts"), iface: "GitProvider", reads: ["getPullRequest", "listChecks"] },
     { adapter: "infra", module: "@regulait/infra-provider", source: path.join(PACKAGES, "infra-provider/src/index.ts"), iface: "InfraProvider", reads: ["scan"] },
-    { adapter: "pm", module: "@regulait/pm-provider", source: path.join(PACKAGES, "pm-provider/src/index.ts"), iface: "PmProvider", reads: ["getWorkItem"] },
+    { adapter: "pm", module: "@regulait/pm-provider", source: path.join(PACKAGES, "pm-provider/src/index.ts"), iface: "PmProvider", reads: ["getWorkItem", "listWorkItems"] },
   ] as const;
   type Contract = (typeof CONTRACTS)[number];
 

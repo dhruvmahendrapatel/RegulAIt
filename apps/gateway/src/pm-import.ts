@@ -227,18 +227,23 @@ async function listAll(
   conn: { provider: string; project: string },
   maxItems: number,
 ): Promise<WorkItemSummary[]> {
-  if (!provider.listWorkItems) {
-    throw new ImportRefusal(
-      422,
-      "pm_import_unsupported_provider",
-      `the ${conn.provider} adapter cannot list a project's work items yet, so it cannot be imported`,
-    );
-  }
   const out: WorkItemSummary[] = [];
   const seenCursors = new Set<string>();
   let cursor: string | undefined;
   for (;;) {
-    const page = await provider.listWorkItems(conn.project, { cursor, limit: PM_IMPORT_PAGE_SIZE });
+    let page;
+    try {
+      page = await provider.listWorkItems(conn.project, { cursor, limit: PM_IMPORT_PAGE_SIZE });
+    } catch (err) {
+      if (err instanceof PmProviderError && err.status === 501) {
+        throw new ImportRefusal(
+          422,
+          "pm_import_unsupported_provider",
+          `the ${conn.provider} adapter cannot list a project's work items yet, so it cannot be imported`,
+        );
+      }
+      throw err;
+    }
     out.push(...page.items);
     if (out.length > maxItems) {
       throw new ImportRefusal(
