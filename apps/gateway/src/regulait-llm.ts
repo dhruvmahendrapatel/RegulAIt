@@ -73,6 +73,9 @@
 import crypto from "node:crypto";
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
+import { wantsListContract, type ListSpec } from "./list-contract.js";
+import { answerListExport, answerListPage, type ContractList } from "./list-contract-route.js";
+import { getTableColumns } from "@regulait/db";
 import {
   agents,
   agentGrants,
@@ -1529,7 +1532,31 @@ export function registerRegulAItLlmRoutes(app: FastifyInstance, db: Db, opts: Re
 
   // --- jobs ---------------------------------------------------------------
 
-  app.get("/v1/llm/jobs", async (req) => {
+  // ADR-0226: with any of sort/dir/cursor/offset/count the training jobs
+  // answer the shared list contract; with none of them, exactly the
+  // newest-`limit` response below (the dataset detail reads its own).
+  const jobsList: ContractList<JobListRow, { status?: string }> = {
+    spec: TRAINING_JOBS_LIST,
+    filters: z.object({ status: z.string().min(1).max(32).optional() }).strict(),
+    reader: {
+      fetch: async (q) => {
+        const rows = await db
+          .select({ ...getTableColumns(trainingJobs), datasetName: JOB_DATASET_NAME, artifactId: JOB_ARTIFACT_ID, _cursorAt: q.cursorAt })
+          .from(trainingJobs)
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset);
+        return rows.map((j) => ({ ...j, inProcess: isInProcessMethod(j.method as TrainingMethod) }));
+      },
+      countable: (where) => db.select({ one: sql`1` }).from(trainingJobs).where(where),
+      idOf: (r) => r.id,
+    },
+    where: (_req, f) => (f.status ? eq(trainingJobs.status, f.status as never) : undefined),
+  };
+  app.get("/v1/llm/jobs/export.xlsx", async (req, reply) => answerListExport(db, req, reply, jobsList));
+  app.get("/v1/llm/jobs", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, jobsList);
     const q = z
       .object({ limit: z.coerce.number().int().min(1).max(200).default(50), status: z.string().optional() })
       .parse(req.query ?? {});
@@ -2245,3 +2272,46 @@ export async function setLlmTrainingSettings(
     })
     .where(eq(orgSettings.id, ORG_SETTINGS_ID));
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0226: training jobs under the shared list contract (never hyperparameters or external ids)
+// ---------------------------------------------------------------------------
+
+type JobListRow = TrainingJobRow & { datasetName: string | null; artifactId: string | null; inProcess: boolean };
+const JOB_DATASET_NAME = sql<string | null>`(select ${trainingDatasets.name} from ${trainingDatasets} where ${trainingDatasets.id} = ${trainingJobs.datasetId})`;
+// explicit qualifiers: drizzle renders a column bare in a single-table select, and a bare "id" here would bind
+// to training_artifacts.id rather than the outer job row
+const JOB_ARTIFACT_ID = sql<string | null>`(select "training_artifacts"."id"::text from "training_artifacts" where "training_artifacts"."job_id" = "training_jobs"."id" limit 1)`;
+
+export const TRAINING_JOBS_LIST: ListSpec<JobListRow> = {
+  id: "training-jobs",
+  sorts: {
+    name: { expr: sql`lower(${trainingJobs.name})` },
+    dataset: { expr: sql`lower(${JOB_DATASET_NAME})` },
+    backend: { expr: trainingJobs.backend },
+    method: { expr: trainingJobs.method },
+    status: { expr: trainingJobs.status },
+    progress: { expr: trainingJobs.progress },
+    cost: { expr: sql`coalesce(${trainingJobs.costUsd}, ${trainingJobs.estimatedCostUsd})` },
+    approval: { expr: sql`(${trainingJobs.approvalId} is not null)` },
+    artifact: { expr: sql`(${JOB_ARTIFACT_ID} is not null)` },
+    when: { expr: trainingJobs.createdAt, keysetAt: trainingJobs.createdAt },
+    finished: { expr: trainingJobs.finishedAt },
+  },
+  columns: {
+    name: { label: "Job", value: (r) => r.name },
+    dataset: { label: "Trained on", value: (r) => `${r.datasetName ?? "?"} v${r.datasetVersion}` },
+    backend: { label: "Backend", value: (r) => r.backend },
+    method: { label: "Method", value: (r) => r.method },
+    status: { label: "Status", value: (r) => r.status },
+    progress: { label: "Progress", value: (r) => r.progress },
+    cost: { label: "Cost", value: (r) => (r.costUsd == null ? `est. ${r.estimatedCostUsd}` : r.costUsd) },
+    approval: { label: "Approval", value: (r) => (r.approvalId ? "queued" : null) },
+    artifact: { label: "Artifact", value: (r) => r.artifactId },
+    when: { label: "Started", value: (r) => r.createdAt },
+    finished: { label: "Finished", value: (r) => r.finishedAt },
+  },
+  filters: ["status"],
+  defaultSort: { col: "when", dir: "desc" },
+  idCol: trainingJobs.id,
+};

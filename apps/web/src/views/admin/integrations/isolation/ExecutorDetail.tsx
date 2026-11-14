@@ -16,7 +16,9 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../../api/client";
 import { fmtAt } from "../../../../api/format";
 import { api as stepUpApi, withStepUp } from "../../../../stepup/stepUp";
-import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Select, Table } from "../../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Select } from "../../../../ui/kit";
+import type { DataColumn } from "../../../../ui/DataList";
+import { ListPreview } from "../../../../ui/ListPreview";
 import { KV, useAction } from "../../adminKit";
 import {
   CLASSES,
@@ -27,7 +29,7 @@ import {
   executorActs,
   executorReading,
   executorRefusal,
-  parseAttestationHistory,
+  parseAttestationRecord,
   parseExecutor,
   type AttestationRecord,
   type Executor,
@@ -40,13 +42,70 @@ export const executorKeys = {
   attestations: (id: string) => ["admin", "isolation", "executor", id, "attestations"] as const,
 };
 
+export const attestationsEndpoint = (id: string) => `/v1/executors/${encodeURIComponent(id)}/attestations`;
+export const attestationsPath = (id: string) => `/admin/engines/executors/${encodeURIComponent(id)}/attestations`;
+export const ATTESTATIONS_SORT = { key: "at", dir: "desc" } as const;
+export const attestationKey = (raw: unknown) => (raw && typeof raw === "object" && typeof (raw as { id?: unknown }).id === "string" ? (raw as { id: string }).id : JSON.stringify(raw));
+export const ATTESTATIONS_NOTE =
+  "Every report this executor has sent. Each is software-attested by the executor on its own host. A pass counts only for a class its backend can attest, and only until it expires. A record this console cannot read is shown as unreadable, never guessed.";
+
+/** the self-test history's columns, in screen order: shared by the executor's preview and its own page */
+export function attestationColumns(executor: Executor, now: number): Array<DataColumn<unknown>> {
+  return [
+      {
+        key: "at",
+        header: "Observed",
+        main: true,
+        sortable: true,
+        render: (raw) => {
+          const r = parseAttestationRecord(raw);
+          return r ? fmtAt(new Date(r.observedAt).toISOString()) : "Unreadable record";
+        },
+      },
+      { key: "class", header: "Class", main: true, sortable: true, render: (raw) => classText(parseAttestationRecord(raw)?.isolationClass ?? null) },
+      {
+        key: "verdict",
+        header: "Verdict",
+        main: true,
+        sortable: true,
+        required: "The verdict is always shown",
+        render: (raw) => {
+          const r = parseAttestationRecord(raw);
+          if (!r) return <Badge tone="neutral">Unmeasured</Badge>;
+          const t = attestationRecordText(r, executor.backend, now);
+          return <Badge tone={t.tone}>{t.label}</Badge>;
+        },
+      },
+      {
+        key: "expires",
+        header: "Expires",
+        main: true,
+        sortable: true,
+        render: (raw) => {
+          const r = parseAttestationRecord(raw);
+          return r ? fmtAt(new Date(r.expiresAt).toISOString()) : "—";
+        },
+      },
+      {
+        key: "report",
+        header: "Report SHA-256",
+        main: true,
+        sortable: true,
+        render: (raw) => {
+          const r = parseAttestationRecord(raw);
+          return r ? <code title={r.reportSha256}>{r.reportSha256.slice(0, 12)}…</code> : "—";
+        },
+      },
+      { key: "profile", header: "Profile digest", sortable: true, render: (raw) => (raw && typeof raw === "object" ? <code>{String((raw as { profileDigest?: unknown }).profileDigest ?? "—").slice(0, 12)}</code> : "—") },
+  ];
+}
+
 type Pending = null | { kind: "quarantine" | "reenable" } | { kind: "revoke" } | { kind: "declared"; value: string };
 
 export function ExecutorDetail(props: { executorId: string; onClose: () => void }) {
   const id = props.executorId;
   const qc = useQueryClient();
   const detail = useQuery({ queryKey: executorKeys.detail(id), retry: false, queryFn: () => api.get<unknown>(`/v1/executors/${encodeURIComponent(id)}`) });
-  const history = useQuery({ queryKey: executorKeys.attestations(id), retry: false, queryFn: () => api.get<unknown>(`/v1/executors/${encodeURIComponent(id)}/attestations`) });
   const act = useAction();
   const [pending, setPending] = useState<Pending>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -57,7 +116,6 @@ export function ExecutorDetail(props: { executorId: string; onClose: () => void 
 
   const executor = detail.data === undefined ? null : parseExecutor(detail.data);
   const raw = (detail.data ?? {}) as Record<string, unknown>;
-  const rows = history.data === undefined ? null : parseAttestationHistory(history.data);
 
   const run = (fn: () => Promise<unknown>, ok: string) =>
     act.run(async () => {
@@ -124,38 +182,19 @@ export function ExecutorDetail(props: { executorId: string; onClose: () => void 
           </p>
         )}
 
-        <h3 className={v.sectionTitle}>Self-test history</h3>
-        <p className={v.dim}>
-          The newest 100 reports. Each is software-attested by the executor on its own host. A pass counts only for a class its backend can attest,
-          and only until it expires.
-        </p>
-        {history.isError ? (
-          <EmptyState title="History unavailable" body={executorRefusal(history.error) ?? (history.error instanceof Error ? history.error.message : "The request failed.")} />
-        ) : rows === null && !history.isPending ? (
-          <EmptyState title="History unavailable" body="The gateway sent a history this console cannot read. Nothing is shown rather than a guess." />
-        ) : (
-          <Table<AttestationRecord | { unreadable: true; index: number }>
-            rows={rows ?? []}
-            loading={history.isPending}
-            rowKey={(r) => ("unreadable" in r ? `u-${r.index}` : r.id)}
-            empty={<EmptyState title="No self-test reports" body="This executor has not reported a self-test, so none of its classes count." />}
-            columns={[
-              { key: "at", header: "Observed", render: (r) => ("unreadable" in r ? "Unreadable record" : fmtAt(new Date(r.observedAt).toISOString())) },
-              { key: "class", header: "Class", render: (r) => ("unreadable" in r ? "Not reported" : classText(r.isolationClass)) },
-              {
-                key: "verdict",
-                header: "Verdict",
-                render: (r) => {
-                  if ("unreadable" in r) return <Badge tone="neutral">Unmeasured</Badge>;
-                  const t = attestationRecordText(r, executor.backend, now);
-                  return <Badge tone={t.tone}>{t.label}</Badge>;
-                },
-              },
-              { key: "expires", header: "Expires", render: (r) => ("unreadable" in r ? "—" : fmtAt(new Date(r.expiresAt).toISOString())) },
-              { key: "report", header: "Report SHA-256", render: (r) => ("unreadable" in r ? "—" : <code title={r.reportSha256}>{r.reportSha256.slice(0, 12)}…</code>) },
-            ]}
-          />
-        )}
+        <ListPreview<unknown>
+          title="Self-test history"
+          noun="self-test reports"
+          endpoint={attestationsEndpoint(id)}
+          legacyKey="attestations"
+          queryKey={[...executorKeys.attestations(id), "list"]}
+          sort={ATTESTATIONS_SORT}
+          rowKey={attestationKey}
+          viewAll={attestationsPath(id)}
+          info={<p>{ATTESTATIONS_NOTE}</p>}
+          empty={<EmptyState title="No self-test reports" body="This executor has not reported a self-test, so none of its classes count." />}
+          columns={attestationColumns(executor, now).filter((c) => c.main)}
+        />
       </div>
 
       <ConfirmModal

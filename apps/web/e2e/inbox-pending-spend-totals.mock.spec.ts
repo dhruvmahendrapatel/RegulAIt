@@ -2,8 +2,8 @@
  * Two data bugs, against a mocked gateway:
  *  - the Inbox, the Review workbench and the nav badge read the pending queue from the server
  *    (`status=pending&order=asc`), oldest first, and say so when it holds more than one page
- *    ("Showing the oldest 100 of 342 pending · narrow with filters"); "Recently decided" is its own query;
- *    nothing reads the unfiltered, newest-first queue any more;
+ *    ("Showing the oldest 100 of 342 pending · narrow with filters"); "Recently decided" is its own list, read
+ *    only once its folded section is opened; nothing reads the unfiltered, newest-first queue any more;
  *  - Spend by agent and by connector come from the server's windowed aggregate, labelled with the window,
  *    and "Recent invocations" says it is the newest 50.
  */
@@ -91,10 +91,15 @@ test.describe("the pending queue keeps every pending approval", () => {
     // oldest first
     await expect(rows.first()).toContainText("Budget overage 1");
     await expect(rows.last()).toContainText("Budget overage 100");
-    // the decided card comes from its own query, never from the pending page
+    // the decided card is its own list, never the pending page, and it is not read while folded (first load)
     await expect(page.getByText("Recently decided")).toBeVisible();
     expect(seen).toContain("/v1/approvals?status=pending&order=asc");
-    expect(seen).toContain("/v1/approvals?status=approved,denied,returned,consumed,superseded");
+    const decidedReads = () => seen.filter((s) => s.startsWith("/v1/approvals?") && new URL(s, "http://x").searchParams.get("status") === "approved,denied,returned,consumed,superseded");
+    expect(decidedReads()).toEqual([]);
+    await page.getByRole("button", { name: /^Recently decided/ }).click();
+    await expect(page.locator("section[data-rg-card]").filter({ hasText: "Recently decided" }).getByText("Decided overage")).toBeVisible();
+    expect(decidedReads().length).toBeGreaterThan(0);
+    expect(new URL(decidedReads()[0]!, "http://x").searchParams.get("sort")).toBe("decided");
     expect(unfiltered(seen)).toEqual([]);
     // the nav badge counts the server's total, not the page
     await expect(page.getByRole("link", { name: /Inbox, 99\+ pending approvals/ })).toBeVisible();

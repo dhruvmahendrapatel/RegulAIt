@@ -60,6 +60,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.agents, ["name"]],
   [s.a2aAgents, ["name"]],
   [s.a2aAgentCredentials, ["headerName"]],
+  // ADR-0236 (P11): governed MCP bundles
+  [s.mcpBundles, ["name", "description"]],
   [s.builderAgents, ["name", "description"]],
   [s.builderAgentSubagents, ["name", "description"]],
   [s.builderAgentSchedules, ["name"]],
@@ -103,6 +105,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.webhookSubscriptions, ["name"]],
   [s.deployTargets, ["name"]],
   [s.discoverySources, ["name"]],
+  // ADR-0261 (P37): a third-party ingest source an admin names
+  [s.thirdPartyIngestSources, ["name"]],
   [s.engineRunners, ["name"]],
   [s.executors, ["name"]],
   [s.externalScorers, ["name"]],
@@ -149,6 +153,8 @@ export const CONTENT_GUARD_EXCLUSION_REASONS: Readonly<Record<ContentGuardExclus
 
 /** DELIBERATELY NOT GUARDED — named, with a category, so the inventory test can tell a decision from an oversight. */
 export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclusion>> = {
+  // ADR-0261: an event identifier the sending product chose (a linear lower-case identifier check bounds it)
+  "third_party_ingest_records.event_name": "ingested",
   "ai_incident_actions.title": "prose_owned_by_adr0102",
   "ai_incidents.summary": "prose_owned_by_adr0102",
   "ai_incidents.title": "prose_owned_by_adr0102",
@@ -160,6 +166,7 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   "data_scope_rules.tool_name": "tool_reference",
   "grant_certification_items.tool_name": "tool_reference",
   "identity_tool_grants.tool_name": "tool_reference",
+  "mcp_bundle_version_items.tool_name": "tool_reference",
   "policy_simulation_flips.tool_name": "tool_reference",
   "rate_limits.tool_name": "tool_reference",
   "revocations.tool_name": "tool_reference",
@@ -182,6 +189,7 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   "scheduler_runs.job_name": "platform_copy",
   "use_case_decision_records.intake_template_name": "platform_copy",
   "cert_inventory.common_name": "ingested",
+  "endpoint_mcp_servers.server_name": "ingested",
   "imported_cost_lines.description": "ingested",
   "infra_resources.name": "ingested",
   "mcp_registry_entries.description": "ingested",
@@ -189,6 +197,7 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   "mcp_registry_entries.upstream_name": "ingested",
   "mcp_tools.description": "ingested",
   "mcp_tools.name": "ingested",
+  "mcp_definition_pins.name": "ingested",
   "scim_groups.display_name": "ingested",
   "trace_scores.name": "ingested",
   "users.display_name": "ingested",

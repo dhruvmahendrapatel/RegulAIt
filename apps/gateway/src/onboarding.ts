@@ -62,6 +62,9 @@
 import { createHash } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { wantsListContract, type ListSpec } from "./list-contract.js";
+import { answerListExport, answerListPage, type ContractList } from "./list-contract-route.js";
+import { getTableColumns } from "@regulait/db";
 import {
   and,
   auditLog,
@@ -105,7 +108,7 @@ import { envFallbackAllowed, loadOrgSettings } from "./org-settings.js";
 import { refuseIfSeatCapReached } from "./licensing.js";
 import { reconcileGroupRoles } from "./group-roles.js";
 import { isApproverRole, lockApproverRoles } from "./approval-pool.js";
-import { approvalRuleStepUp, CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
+import { approvalRuleStepUp, CHANGED_CONCURRENTLY, grantMintStepUp, requireStepUps, rolesHoldingGrants, type StepUpCheckArgs } from "./step-up.js";
 // ADR-0074: a pack RE-APPLY over an existing profile is an edit of twelve
 // versioned fields, so it goes through the one choke point.
 import { applyRuleEdit, isRuleEditRefusal } from "./rule-writes.js";
@@ -903,9 +906,23 @@ export function registerOnboardingRoutes(
       approverMappings.sort((a, b) =>
         `${a.source}\u0000${a.externalGroup}\u0000${a.roleId}`.localeCompare(`${b.source}\u0000${b.externalGroup}\u0000${b.roleId}`),
       );
-      const facts = { values: { approverRoleGroups: approverMappings } };
-      if (!(await requireStepUp(db, req, reply, { kind: "settings_relax", facts })).ok) return reply;
     }
+    // ADR-0250 (PR #720 review): a mapping to a role that holds grants confers them on every member of the group,
+    // which widens default deny like minting them: one grant_mint step-up, bound to every such mapping this import
+    // creates (sorted, so the same file asks for the same grant)
+    const createEntries = plan.entries
+      .filter((e) => e.action === "create")
+      .map((e) => ({ source: e.source, externalGroup: e.externalGroup, roleId: roleByName.get(e.roleName.toLowerCase())!.id }));
+    const granting = await rolesHoldingGrants(db, createEntries.map((m) => m.roleId));
+    const grantingMappings = createEntries
+      .filter((m) => granting.has(m.roleId))
+      .sort((a, b) => `${a.source}\u0000${a.externalGroup}\u0000${a.roleId}`.localeCompare(`${b.source}\u0000${b.externalGroup}\u0000${b.roleId}`));
+    // both are checked before either is spent (requireStepUps), so a missing one never consumes the other
+    const stepUps: StepUpCheckArgs[] = [
+      ...(approverMappings.length > 0 ? [{ kind: "settings_relax" as const, facts: { values: { approverRoleGroups: approverMappings } } }] : []),
+      ...(grantingMappings.length > 0 ? [grantMintStepUp({ kind: "group_role_mappings", mappings: grantingMappings })] : []),
+    ];
+    if (stepUps.length > 0 && !(await requireStepUps(db, req, reply, stepUps))) return reply;
     // ADR-0186 A (Class A): the mappings are written under the approver-role lock, and a
     // role that became an approver role since the step-up was decided refuses the import
     const createIds = plan.entries.filter((e) => e.action === "create").map((e) => roleByName.get(e.roleName.toLowerCase())!.id);
@@ -950,7 +967,31 @@ export function registerOnboardingRoutes(
   });
 
   // ---- GET /v1/onboarding/imports ---------------------------------------
-  app.get("/v1/onboarding/imports", async (req) => {
+  // ADR-0226: with any of sort/dir/cursor/offset/count the import history
+  // answers the shared list contract; with none of them, exactly the
+  // newest-`limit` response below. The plan and result blobs are never in
+  // the Excel file: the list shows only the outcome.
+  const importsList: ContractList<typeof onboardingImports.$inferSelect, { kind?: "users" | "group_roles"; status?: "planned" | "applied" | "refused" }> = {
+    spec: ONBOARDING_IMPORTS_LIST,
+    filters: z.object({ kind: z.enum(["users", "group_roles"]).optional(), status: z.enum(["planned", "applied", "refused"]).optional() }).strict(),
+    reader: {
+      fetch: (q) =>
+        db
+          .select({ ...getTableColumns(onboardingImports), _cursorAt: q.cursorAt })
+          .from(onboardingImports)
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset),
+      countable: (where) => db.select({ one: sql`1` }).from(onboardingImports).where(where),
+      idOf: (r) => r.id,
+    },
+    where: (_req, f) => and(f.kind ? eq(onboardingImports.kind, f.kind) : undefined, f.status ? eq(onboardingImports.status, f.status) : undefined),
+    extra: () => ({ includesRefusals: true }),
+  };
+  app.get("/v1/onboarding/imports/export.xlsx", async (req, reply) => answerListExport(db, req, reply, importsList));
+  app.get("/v1/onboarding/imports", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, importsList);
     const q = z
       .object({
         kind: z.enum(["users", "group_roles"]).optional(),
@@ -1023,3 +1064,30 @@ export function registerOnboardingRoutes(
 
 /** exported for the seed/test paths that want the same live view */
 export { sql as _sql };
+
+const ONBOARDING_KIND_TEXT: Record<string, string> = { users: "Users", group_roles: "Group → role mappings" };
+/** ADR-0226: onboarding import history under the shared list contract */
+export const ONBOARDING_IMPORTS_LIST: ListSpec<typeof onboardingImports.$inferSelect> = {
+  id: "onboarding-imports",
+  sorts: {
+    at: { expr: onboardingImports.createdAt, keysetAt: onboardingImports.createdAt },
+    kind: { expr: onboardingImports.kind },
+    mode: { expr: onboardingImports.mode },
+    status: { expr: onboardingImports.status },
+    rows: { expr: onboardingImports.rowCount },
+    why: { expr: onboardingImports.reason },
+    applied: { expr: onboardingImports.appliedAt },
+  },
+  columns: {
+    at: { label: "When", value: (r) => r.createdAt },
+    kind: { label: "Kind", value: (r) => ONBOARDING_KIND_TEXT[r.kind] ?? r.kind },
+    mode: { label: "Mode", value: (r) => (r.mode === "dry_run" ? "Preview" : r.mode === "apply" ? "Apply" : r.mode) },
+    status: { label: "Status", value: (r) => r.status },
+    rows: { label: "Rows", value: (r) => r.rowCount },
+    why: { label: "What happened", value: (r) => r.reason },
+    applied: { label: "Applied", value: (r) => r.appliedAt },
+  },
+  filters: ["kind", "status"],
+  defaultSort: { col: "at", dir: "desc" },
+  idCol: onboardingImports.id,
+};

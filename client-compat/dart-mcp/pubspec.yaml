@@ -1,0 +1,9 @@
+name: regulait_client_compat_dart_mcp
+description: "ADR-0257: dart_mcp pointed at the RegulAIt gateway's governed MCP endpoint. Test-only; never shipped."
+publish_to: none
+environment:
+  sdk: ^3.9.0
+dependencies:
+  dart_mcp: 0.5.2
+  json_rpc_2: 4.1.0
+  stream_channel: ^2.1.4

@@ -88,7 +88,7 @@ import { notFoundBody } from "./compat-core.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { deploymentBaseUrl } from "./public-url.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
-import { requireStepUp } from "./step-up.js";
+import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
 import { hashToken } from "./token-hash.js";
 import { recordVendorAttestation } from "./vendors.js";
 
@@ -327,11 +327,45 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
       });
       if (!su.ok) return reply;
     }
-    await db.transaction(async (rawTx) => {
+    // SUP-01 (post-merge review of #629): the step-up above was decided on an unlocked read. Under the org row lock
+    // (the lock every org-settings writer takes) the decision is re-checked: when either setting moved since, nothing
+    // is written and the refusal is audited, so a stale request never undoes a concurrent tightening without the
+    // step-up that change back would need. Only the fields the request names are written.
+    const out = await db.transaction(async (rawTx) => {
       const tx = rawTx as unknown as Db;
+      const [locked] = await tx
+        .select({ enabled: orgSettings.supplierPortalEnabled, acceptUnscannedFiles: orgSettings.supplierPortalAcceptUnscannedFiles })
+        .from(orgSettings)
+        .where(eq(orgSettings.id, ORG_SETTINGS_ID))
+        .for("update");
+      if (
+        !locked ||
+        locked.enabled !== current.supplierPortalEnabled ||
+        locked.acceptUnscannedFiles !== current.supplierPortalAcceptUnscannedFiles
+      ) {
+        await audit(tx, {
+          userId: req.authCtx.userId,
+          objectType: "org_settings",
+          objectId: null,
+          ruleId: "supplier-portal-setting-refused",
+          effect: "deny",
+          reason: "supplier portal settings changed while this update was being checked, so nothing was written",
+          detail: {
+            phase: "changed-concurrently",
+            requested: body,
+            decidedOn: { enabled: current.supplierPortalEnabled, acceptUnscannedFiles: current.supplierPortalAcceptUnscannedFiles },
+            current: locked ?? null,
+            relaxed,
+          },
+        });
+        return CHANGED_CONCURRENTLY;
+      }
       await tx
         .update(orgSettings)
-        .set({ supplierPortalEnabled: next.enabled, supplierPortalAcceptUnscannedFiles: next.acceptUnscannedFiles })
+        .set({
+          ...(body.enabled !== undefined ? { supplierPortalEnabled: body.enabled } : {}),
+          ...(body.acceptUnscannedFiles !== undefined ? { supplierPortalAcceptUnscannedFiles: body.acceptUnscannedFiles } : {}),
+        })
         .where(eq(orgSettings.id, ORG_SETTINGS_ID));
       let revokedSessions = 0;
       let revokedLinks = 0;
@@ -375,7 +409,9 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
           revokedLinks,
         },
       });
+      return null;
     });
+    if (out) return reply.status(out.status).send(out.body);
     return { ...next, changed: true };
   });
 
@@ -1203,8 +1239,63 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
         : and(eq(supplierSubmissions.questionId, body.target.questionId), eq(supplierSubmissions.questionnaireId, questionnaireId!));
     const saved = await db.transaction(async (rawTx) => {
       const tx = rawTx as unknown as Db;
+      // SUP-02 (post-merge review of #629): everything this request was checked against before the scanner await is
+      // checked again here, under locks taken in the order the security transitions take them (the org row, then the
+      // grant, then the session), so a revoke or a portal-off either committed before this check and is seen, or
+      // waits for this commit and then closes the answer. A refusal writes only its audit row: no answer, no file.
+      const [org] = await tx
+        .select({ enabled: orgSettings.supplierPortalEnabled, acceptUnscannedFiles: orgSettings.supplierPortalAcceptUnscannedFiles })
+        .from(orgSettings)
+        .where(eq(orgSettings.id, ORG_SETTINGS_ID))
+        .for("share");
       // one grant's submissions are serialised here, so the caps below cannot be raced past
       await tx.select({ id: supplierAccess.id }).from(supplierAccess).where(eq(supplierAccess.id, a.id)).for("update");
+      const [live] = await tx
+        .select({ sessionId: supplierSessions.id, vendorStatus: aiVendors.status })
+        .from(supplierSessions)
+        .innerJoin(supplierAccess, eq(supplierAccess.id, supplierSessions.accessId))
+        .innerJoin(aiVendors, eq(aiVendors.id, supplierAccess.vendorId))
+        .where(
+          and(
+            eq(supplierSessions.id, row.session.id),
+            eq(supplierAccess.id, a.id),
+            isNull(supplierSessions.revokedAt),
+            isNull(supplierAccess.revokedAt),
+            gt(supplierSessions.expiresAt, sql`now()`),
+            gt(supplierAccess.expiresAt, sql`now()`),
+          ),
+        )
+        .for("update", { of: supplierSessions });
+      const stale: { why: string; refusal: Refusal } | null = !org?.enabled
+        ? { why: "portal_disabled", refusal: new Refusal(404, notFoundBody(req.method, req.url) as Record<string, unknown>) }
+        : !live
+          ? { why: "session_or_access_ended", refusal: new Refusal(401, SUPPLIER_SESSION_REFUSAL as unknown as Record<string, unknown>) }
+          : live.vendorStatus !== "proposed" && live.vendorStatus !== "under_assessment"
+            ? {
+                why: "assessment_closed",
+                refusal: new Refusal(409, { error: "assessment_closed", detail: "This assessment has been decided and no longer takes answers." }),
+              }
+            : file && file.scan === "not_scanned" && !org.acceptUnscannedFiles
+              ? {
+                  why: "files_not_accepted",
+                  refusal: new Refusal(422, {
+                    error: "files_not_accepted",
+                    detail: "Files cannot be attached to answers here. Submit your answer without one, and send the document to your contact.",
+                  }),
+                }
+              : null;
+      if (stale) {
+        await audit(tx, {
+          userId: null,
+          objectType: "supplier_access",
+          objectId: a.id,
+          ruleId: "supplier-submission-refused",
+          effect: "deny",
+          reason: `a supplier answer in flight was refused at commit (${stale.why}); no answer or file was kept`,
+          detail: { phase: "submission-refused", vendorId: a.vendorId, why: stale.why, withFile: Boolean(file), actor: "supplier" },
+        });
+        return stale.refusal;
+      }
       const [{ n }] = (await tx
         .select({ n: sql<number>`count(*)::int` })
         .from(supplierSubmissions)
@@ -1282,7 +1373,10 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
       if (e instanceof Refusal) return e;
       throw e;
     });
-    if (saved instanceof Refusal) return reply.status(saved.status).send(saved.body);
+    if (saved instanceof Refusal) {
+      if (saved.status === 401) reply.header("set-cookie", clearCookie(req));
+      return reply.status(saved.status).send(saved.body);
+    }
     return reply.status(201).send(submissionView(saved));
     },
   );

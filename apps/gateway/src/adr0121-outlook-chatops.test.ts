@@ -35,6 +35,7 @@ import { trackEgressAllowHosts } from "./testing/egress-allow-cleanup.js";
 import { CHATOPS_OUTBOUND_PROVIDERS } from "./chatops.js";
 import { COMPILED_DEFAULT_RULE_ID, decideCompiledDefault } from "./compiled-egress.js";
 import type { EgressAllowEntry } from "./egress-guard.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 
 /**
  * ADR-0121 — OUTLOOK IS A SEND-ONLY CHATOPS PROVIDER, AND THE STORAGE AGREES.
@@ -119,6 +120,7 @@ const OUTLOOK_CONNECTION = `adr0121-outlook-${RUN}`;
 const SLACK_CONNECTION = `adr0121-slack-${RUN}`;
 
 let db: Db;
+let restoreConnectorAttribution: (() => Promise<void>) | undefined;
 let app: ReturnType<typeof buildApp>;
 let outlookConnectorId = "";
 let slackConnectorId = "";
@@ -141,6 +143,8 @@ beforeAll(async () => {
   process.env.REGULAIT_PUBLIC_URL = "https://regulait.example.test";
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0251: these calls pin behaviour other than the attribution mandate, so they relax it by name
+  restoreConnectorAttribution = await relaxGovernanceGatesForTest(db, { connectorAttributionRequired: false });
   // ADR-0181: the org PII floor ships at block. This file pins behaviour unrelated to
   // PII handling, so it sets the floor off explicitly; restored in afterAll.
   restoreSb1Posture = await relaxDataPostureForTest(db, { org: { defaultPiiMode: "none" }, interception: false, guardrails: false });
@@ -179,6 +183,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreConnectorAttribution?.();
   if (priorPublicUrl === undefined) delete process.env.REGULAIT_PUBLIC_URL;
   else process.env.REGULAIT_PUBLIC_URL = priorPublicUrl;
   await restoreSb1Posture?.();

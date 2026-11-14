@@ -121,7 +121,7 @@ test.describe("ADR-0173: an organisation approval waits in the approvals queue",
 
     await page.goto("/ui/builder/inbox");
     const th = st.threads[0]!;
-    const row = page.getByRole("list", { name: "Threads" }).getByRole("button", { name: new RegExp(th.title) });
+    const row = page.locator('[data-list="builder-threads"]').getByRole("link", { name: new RegExp(th.title) });
     await expect(row).toContainText("Awaiting approval");
     await row.click();
     await expect(page.getByRole("status").filter({ hasText: "Waiting for approval by Riley Reviewer" })).toBeVisible();

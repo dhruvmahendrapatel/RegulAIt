@@ -191,6 +191,15 @@ async function withStepUpOff(call) {
   }
 }
 
+// ADR-0250 (S-04): minting a grant is a `settings_relax` step-up too, refused to the bootstrap credential for the
+// same reason. The harness's grant mints run under the same switch, and a mint that still fails stops the run here
+// instead of surfacing later as a vacuous case.
+async function mintGrant(base, payload, headers) {
+  const r = await withStepUpOff(() => api("POST", `${base}/v1/grants/tools`, payload, headers));
+  if (r.status !== 201 && r.status !== 409) throw new Error(`grant mint failed ${r.status}: ${JSON.stringify(r.json).slice(0, 200)}`);
+  return r;
+}
+
 // ---- ADR-0188 S7: the PDP client's credential, exercised from OUTSIDE Kong ----
 //
 // The plugin asks with its own key's DPoP-bound self token. When the Kong run
@@ -539,8 +548,7 @@ async function main() {
   if (!stranger) throw new Error("the seed has only one user — the spoof case needs two");
 
   // give the entitled user exactly this tool, and make sure the stranger has nothing
-  await api("POST", `${base}/v1/grants/tools`,
-    { userId: entitled.id, serverId: server.id, toolName: tool.name }, boot);
+  await mintGrant(base, { userId: entitled.id, serverId: server.id, toolName: tool.name }, boot);
 
   // A PURPOSE-SCOPED PDP CREDENTIAL (AER-027), not an administrator key.
   //
@@ -602,7 +610,7 @@ async function main() {
     await api("POST", `${base}/v1/users`, { email: `kong-pending-${Date.now()}@kong.example`, displayName: "Kong pending" }, boot)
   ).json;
   if (!pending?.id) throw new Error(`could not create the approval-required subject: ${JSON.stringify(pending).slice(0, 200)}`);
-  await api("POST", `${base}/v1/grants/tools`, { userId: pending.id, serverId: server.id, toolName: tool.name }, boot);
+  await mintGrant(base, { userId: pending.id, serverId: server.id, toolName: tool.name }, boot);
   const rule = await api(
     "POST",
     `${base}/v1/rules/approvals`,
@@ -630,7 +638,7 @@ async function main() {
     await api("POST", `${base}/v1/users`, { email: `kong-disabled-${Date.now()}@kong.example`, displayName: "Kong disabled" }, boot)
   ).json;
   if (!disabled?.id) throw new Error(`could not create the deactivated subject: ${JSON.stringify(disabled).slice(0, 200)}`);
-  await api("POST", `${base}/v1/grants/tools`, { userId: disabled.id, serverId: server.id, toolName: tool.name }, boot);
+  await mintGrant(base, { userId: disabled.id, serverId: server.id, toolName: tool.name }, boot);
   const deactivated = await api("POST", `${base}/v1/users/${disabled.id}/deactivate`, { reason: "kong harness" }, boot);
   if (deactivated.status !== 200) {
     throw new Error(`could not deactivate the subject: ${deactivated.status} ${JSON.stringify(deactivated.json).slice(0, 200)}`);
@@ -667,7 +675,7 @@ async function main() {
     await api("POST", `${base}/v1/users`, { email: `kong-other-${Date.now()}@kong.example`, displayName: "Kong other" }, boot)
   ).json;
   if (!other?.id) throw new Error(`could not create the second route's subject: ${JSON.stringify(other).slice(0, 200)}`);
-  await api("POST", `${base}/v1/grants/tools`, { userId: other.id, serverId: serverB.id, toolName: toolB.name }, boot);
+  await mintGrant(base, { userId: other.id, serverId: serverB.id, toolName: toolB.name }, boot);
 
   // AER-026 — THE USER THE ANONYMOUS FALLBACK IS MAPPED TO, entitled to tool A.
   //
@@ -682,7 +690,7 @@ async function main() {
     await api("POST", `${base}/v1/users`, { email: `kong-fallback-${Date.now()}@kong.example`, displayName: "Kong anonymous fallback" }, boot)
   ).json;
   if (!fallback?.id) throw new Error(`could not create the anonymous fallback's user: ${JSON.stringify(fallback).slice(0, 200)}`);
-  await api("POST", `${base}/v1/grants/tools`, { userId: fallback.id, serverId: server.id, toolName: tool.name }, boot);
+  await mintGrant(base, { userId: fallback.id, serverId: server.id, toolName: tool.name }, boot);
   {
     // NON-VACUITY, asked of the PDP directly: this user IS allowed the tool,
     // so a refusal on the anonymous route cannot be an entitlement refusal.

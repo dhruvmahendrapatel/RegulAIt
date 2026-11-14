@@ -8,7 +8,7 @@
  *      - the cost dashboard shows the split, with unsplit spend as its own line, and the
  *        chargeback CSV carries the three modality columns;
  *      - the modality-price write is admin-only and audited old -> new.
- *  (c) - per-model limits are off by default: a limit binds nothing until enforcement is on;
+ *  (c) - per-model limits are ON by default since ADR-0251 (ADR-0212 shipped them off); off, a limit binds nothing;
  *      - turning enforcement on (and off) needs a settings_relax step-up and is audited;
  *      - a limit is hit (429 model_rate_limited, audited deny row, no usage row), and resets
  *        once the window passes; another model is not affected;
@@ -40,6 +40,7 @@ import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { drainBackgroundWork } from "./background-work.js";
 
 declare global {
@@ -169,7 +170,8 @@ async function mkAgent(name: string, grantees: string[]) {
   expect(a.statusCode, a.body).toBe(201);
   const id = a.json().id as string;
   for (const g of grantees) {
-    const r = await app.inject({ method: "POST", url: "/v1/grants/agents", headers: AUTH, payload: { userId: g, agentId: id } });
+    // ADR-0250: a grant mint is a step-up; this file's own steppable admin means the bootstrap credential needs this
+    const r = await relaxStepUpAround(db, () => app.inject({ method: "POST", url: "/v1/grants/agents", headers: AUTH, payload: { userId: g, agentId: id } }));
     expect(r.statusCode, r.body).toBeLessThan(300);
   }
   return id;
@@ -379,9 +381,13 @@ describe("ADR-0212 (c): rate limits per model", () => {
     expect(row?.effect).toBe("allow");
   });
 
-  it("is off by default: a limit binds nothing until enforcement is turned on", async () => {
+  // ADR-0251 (migration governed_core_resource_rules) changed this default: enforcement is ON by default (ADR-0180), where ADR-0212 shipped
+  // it off. The off-state coverage stays: an admin turns it off (step-up) and then no limit binds.
+  it("is ON by default (ADR-0251); once an admin turns it off, a limit binds nothing", async () => {
     const list = await viaKey("GET", "/v1/rules/model-rate-limits");
-    expect(list.json().enforcementEnabled).toBe(false);
+    expect(list.json().enforcementEnabled).toBe(true);
+    await withProvenStepUp("PUT", "/v1/rules/model-rate-limits/enforcement", { enabled: false }, { modelRateLimitsEnabled: false });
+    expect((await viaKey("GET", "/v1/rules/model-rate-limits")).json().enforcementEnabled).toBe(false);
     for (let i = 0; i < 3; i++) {
       const r = await invoke(caller.auth, limitedAgent);
       expect(r.statusCode, r.body).toBe(200);

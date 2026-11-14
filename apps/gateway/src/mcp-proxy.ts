@@ -1,3 +1,4 @@
+import { engineKeyWorkflowInstance, guardProjectPlanOnly } from "./plan-only.js";
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -46,6 +47,7 @@ import {
   type PiiHit,
   type PreparedPiiApproval,
   type ScannableTool,
+  type McpServedDefinitions,
   type McpUpstreamTransport,
   CONTENT_TRUST_REFUSAL_CODE,
   CONTENT_TRUST_RULE_ID,
@@ -81,6 +83,7 @@ import { isStdioSessionLostError } from "./stdio-session-loss.js";
 import { PROJECT_HEADER } from "./project-header.js";
 import { stdioRefusalSentence } from "./mcp-egress.js";
 import { armOutboundIdentity, IdentityAssertionRefusedError, outboundIdentityFor, type OutboundIdentity } from "./mcp-identity-assertion.js";
+import { armUpstreamExchange, UpstreamExchangeHolder } from "./upstream-token-exchange.js";
 import { timeouts } from "./timeouts.js";
 import {
   attemptsForToolKind,
@@ -106,6 +109,8 @@ import {
   recordManifestScan,
   type McpAdmissionTrigger,
 } from "./mcp-admission.js";
+import { definitionPinRefusal, recordDefinitionPins } from "./mcp-definition-pins.js";
+import { highRiskRefusal, recordRiskClassification } from "./mcp-high-risk.js";
 import { loadEntitlements } from "./entitlements.js";
 // ADR-0185 G3 — the non-tool MCP methods
 import {
@@ -252,7 +257,15 @@ export const MCP_STDIO_NO_ENTITLEMENT_RULE_ID = "mcp-stdio-no-entitlement";
 
 export async function holdsAnyEntitlement(db: Db, userId: string, serverId: string): Promise<boolean> {
   const e = await loadEntitlements(db, userId, serverId);
-  return e.toolGrants.length + e.serverGrants.length + (e.roleToolGrants?.length ?? 0) + (e.roleServerGrants?.length ?? 0) > 0;
+  return (
+    e.toolGrants.length +
+      e.serverGrants.length +
+      (e.roleToolGrants?.length ?? 0) +
+      (e.roleServerGrants?.length ?? 0) +
+      // ADR-0236: a tool held through a governed MCP bundle is an entitlement on this server too
+      (e.bundleToolGrants?.length ?? 0) >
+    0
+  );
 }
 
 /** the refusal (one deny audit row) for a stdio pre-decision connect by a caller with no entitlement */
@@ -285,6 +298,8 @@ export async function connectUpstream(
     retry?: RetryReport;
     retryAttempts?: number;
     outboundIdentity?: OutboundIdentity | null;
+    /** ADR-0238: the call's down-scoped token holder (unarmed until the call is allowed) */
+    upstreamExchange?: UpstreamExchangeHolder | null;
     /**
      * ADR-0190 I4: the call a stdio connect serves (person, project, delegation grant), the inputs of the
      * isolation placement. Absent = no project: a stdio connect is refused `policy_unresolved` (fail closed).
@@ -327,6 +342,7 @@ export async function connectUpstream(
           : {}),
         // ADR-0188 S8: an opted-in server's identity holder (unarmed until the call is allowed)
         ...(opts.outboundIdentity ? { outboundIdentity: opts.outboundIdentity } : {}),
+        ...(opts.upstreamExchange ? { upstreamExchange: opts.upstreamExchange } : {}),
       });
     },
     {
@@ -660,6 +676,13 @@ export async function executeGovernedToolCall(
      * the gateway cannot see (the direct proxy route): its result is still recorded (P0), and nothing is gated.
      */
     contextId?: string | null | undefined;
+    /**
+     * ADR-0250 (review P-02) — the project-level plan-only gate. Set by the MCP proxy route (an IDE's tool call
+     * names no workflow instance): a WRITE tool on an attributed project any of whose live instances rests in
+     * planning is refused. `engineInstanceId` is the instance an engine run's key works for (the audited
+     * exception). Absent = a caller gated elsewhere (a run's worker loop: its run was gated when it was planned).
+     */
+    planGate?: { engineInstanceId: string | null } | undefined;
   },
 ): Promise<GovernedToolCallOutcome> {
   // ADR-0070 — the tool span. Wrapped exactly like the dispatch core's: the
@@ -785,6 +808,8 @@ async function executeGovernedToolCallInner(
   let upstream: Client | null = null;
   // ADR-0188 S8: an opted-in server's identity holder, on every connect of this call; armed only once allowed
   const outboundIdentity = outboundIdentityFor(serverRow);
+  // ADR-0238: this call's down-scoped token holder (never shared with another call); armed only once allowed
+  const upstreamExchange = new UpstreamExchangeHolder(serverRow.url);
   const redactActive = piiMode === "redact";
   const closeUpstream = async () => {
     if (upstream) {
@@ -885,7 +910,20 @@ async function executeGovernedToolCallInner(
       : errMessage(err));
   };
 
+  // ADR-0246: a tool that changed since approval is refused before any connect (under 'block')
+  const refuseChangedDefinition = async (): Promise<GovernedToolCallOutcome | null> => {
+    const pinned = await definitionPinRefusal(db, serverId, "tool", toolName);
+    if (!pinned) return null;
+    const decision: Decision = { effect: "deny", ruleId: pinned.ruleId, ruleChain: [], reason: pinned.reason };
+    await db.insert(auditLog).values({ userId, serverId, toolName, ...decision, detail: { projectId, phase: "definition-pins", status: pinned.status, receiptClass: "decision" } });
+    return { kind: "denied", decision };
+  };
+
   try {
+    if (kind) {
+      const pinned = await refuseChangedDefinition();
+      if (pinned) return pinned;
+    }
     if (!kind) {
       // B3S-01: this sync is a connect BEFORE any decision; for stdio it
       // starts a process, so it needs an entitlement on the server first
@@ -902,7 +940,7 @@ async function executeGovernedToolCallInner(
       try {
         // ADR-0190 I4 (review M1): for stdio this is an UNLINKED placement (`placeStdioSession`): there is no tool
         // decision yet, so its placement row is keyed to its own audit row and is outside the I4/I8 decision contract
-        upstream = await connectUpstream(db, serverRow, { outboundIdentity, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, principal: args.principal ?? null } });
+        upstream = await connectUpstream(db, serverRow, { outboundIdentity, upstreamExchange, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, principal: args.principal ?? null } });
         upstreamTools = await syncUpstreamTools(db, serverId, upstream, "sync", serverRow.transport);
       } catch (err) {
         await operationFailed(err);
@@ -912,9 +950,18 @@ async function executeGovernedToolCallInner(
       const found = upstreamTools.find((t) => t.name === toolName);
       if (!found) {
         await operationSucceeded();
-        return { kind: "unknown_tool" };
+        return (await refuseChangedDefinition()) ?? { kind: "unknown_tool" };
       }
+      // (a tool this sync found is approved: under 'block' syncUpstreamTools returns no other)
       kind = toolKind(found);
+    }
+
+    // ADR-0246 addendum: a high-risk (offensive) server needs its policy template and an authorised target, and
+    // every call's arguments are audited, redacted; refused here before the kernel decision and any tool call
+    const highRisk = await highRiskRefusal(db, { userId, serverId, toolName, arguments: args.arguments, projectId: projectId ?? null });
+    if (highRisk) {
+      if (upstream) await operationSucceeded();
+      return { kind: "denied", decision: { effect: "deny", ruleId: highRisk.ruleId, ruleChain: [], reason: highRisk.reason } };
     }
 
     // The generation was read before the server/tool snapshot above. A first
@@ -1133,6 +1180,31 @@ async function executeGovernedToolCallInner(
 
     if (decision.effect === "deny") return { kind: "denied", decision };
 
+    // ADR-0250 (review P-02) — THE PLAN-ONLY GATE, FORCED AT PROJECT LEVEL. A write tool on a project whose live
+    // workflow instance rests at a planning stage is refused here, before any approval is queued and before the
+    // upstream is contacted (audited on the instance's own trail); a read tool is plan-safe and passes. Like the
+    // read_only posture below it is categorical, so it beats approval.
+    if (args.planGate && projectId) {
+      const planGate = await guardProjectPlanOnly(db, {
+        projectIds: [projectId],
+        userId,
+        surface: "mcp",
+        mutating: kind === "write",
+        mode: kind === "write" ? "write" : "read",
+        what: `write tool '${toolName}' on MCP server '${serverRow.name}'`,
+        detail: { ...(args.detail ?? {}), toolKind: kind, receiptClass: "decision" },
+        engineInstanceId: args.planGate.engineInstanceId,
+        serverId,
+        toolName,
+      });
+      if (!planGate.ok) {
+        return {
+          kind: "denied",
+          decision: { effect: "deny", ruleId: "workflow-plan-only-stage", ruleChain: [], reason: planGate.detail },
+        };
+      }
+    }
+
     // ADR-0023 — §8.3 mcpDefaultMode ENFORCEMENT. An ATTRIBUTED call whose
     // project's compliance cascade tightens to read_only may not execute a
     // WRITE-classified tool: denied HERE, strictly before any approval is
@@ -1337,7 +1409,7 @@ async function executeGovernedToolCallInner(
     // OUTPUT is exactly the surface the ADR names as in-scope. Both phases run
     // here — arguments in, tool result out — with PII excluded (its dedicated
     // path is directly above).
-    const mcpGuardrails = await resolveGuardrailPolicy(db, { projectId });
+    const mcpGuardrails = await resolveGuardrailPolicy(db, { projectId, userId });
     let mgInput: Awaited<ReturnType<typeof runGuardrailsAsync>> | null = null;
     if (mcpGuardrails.active) {
       mgInput = await runGuardrailsAsync(mcpGuardrails, "input", JSON.stringify(args.arguments ?? null));
@@ -1383,11 +1455,25 @@ async function executeGovernedToolCallInner(
       });
       if (!armed.ok) return { kind: "denied", decision: armed.decision };
     }
+    // ADR-0238: a server with token exchange on receives only a token obtained for THIS tool's mapped scopes. After
+    // the decision and before the connect or any approval is consumed, so a refusal contacts nothing and spends nothing.
+    {
+      const exchanged = await armUpstreamExchange(upstreamExchange, {
+        db,
+        dataKey,
+        server: serverRow,
+        sponsorUserId: userId,
+        actors: delegatedActor ? delegatedActor.chain.actors : null,
+        action: toolName,
+        projectId,
+      });
+      if (!exchanged.ok) return { kind: "denied", decision: exchanged.decision };
+    }
     if (!upstream) {
       const refused = await breakerRefusesUpstream();
       if (refused) return refused;
       try {
-        upstream = await connectUpstream(db, serverRow, { outboundIdentity, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, linkedOfferId, principal: args.principal ?? null } });
+        upstream = await connectUpstream(db, serverRow, { outboundIdentity, upstreamExchange, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, linkedOfferId, principal: args.principal ?? null } });
       } catch (err) {
         await operationFailed(err);
         if (redactActive) throw new Error("MCP upstream connection failed under PII redaction");
@@ -1974,6 +2060,33 @@ export async function consumeApprovalOrRetire(
  * a manifest, adjudicate it, store what is admissible". `trigger` only labels
  * the audit row the adjudication writes — it changes no threshold, no state
  * rule and no order of operations. */
+/**
+ * The prompts, resources and resource templates the upstream serves, for the kinds it advertises. First page only
+ * (the pin cap is per kind anyway). A list that fails is `null` (not observed): its stored pins are left alone, so
+ * a flaky `prompts/list` never reads as "every prompt was removed".
+ */
+async function observeServedDefinitions(
+  client: Client,
+  tools: readonly unknown[],
+  /** the same `/metrics` labels the manifest read uses, so each list request is counted once (ADR-0185 G5) */
+  observe: { serverId: string; transport?: McpUpstreamTransport | null | undefined },
+): Promise<McpServedDefinitions> {
+  const caps = client.getServerCapabilities() ?? {};
+  const list = async <T>(fetch: (timeout: number) => Promise<T>): Promise<T | null> => {
+    try {
+      return await withUpstreamRetry(({ deadlineMs }) => fetch(deadlineMs), { budgetMs: timeouts().mcpListToolsMs, observe });
+    } catch {
+      return null;
+    }
+  };
+  const prompts = caps.prompts ? await list(async (timeout) => (await client.listPrompts(undefined, { timeout })).prompts) : [];
+  const resources = caps.resources ? await list(async (timeout) => (await client.listResources(undefined, { timeout })).resources) : [];
+  const resourceTemplates = caps.resources
+    ? await list(async (timeout) => (await client.listResourceTemplates(undefined, { timeout })).resourceTemplates)
+    : [];
+  return { tools, prompts, resources, resourceTemplates };
+}
+
 export async function syncUpstreamTools(
   db: Db,
   serverId: string,
@@ -2009,9 +2122,18 @@ export async function syncUpstreamTools(
         `and no tool from it was returned. An admin must review and clear the server.`,
     );
   }
+  // ADR-0246 — DEFINITION PINNING. The prompts and resources lists are read on this same connection (only for a
+  // capability the server advertises), before the transaction; the comparison, its audit row and the manifest
+  // upsert then commit together. Under 'block' a tool that changed since approval is neither stored nor returned.
+  const served = await observeServedDefinitions(client, tools, { serverId, transport });
+  let returned: Tool[] = tools;
   await db.transaction(async (rawTx) => {
     const tx = rawTx as unknown as Db;
-    for (const tool of tools) {
+    const pins = await recordDefinitionPins(tx, serverId, served, trigger);
+    // ADR-0246 addendum: offensive tooling makes the server high-risk (over the whole served manifest)
+    await recordRiskClassification(tx, serverId, tools, trigger);
+    returned = pins.blockedTools.size > 0 ? tools.filter((t) => !pins.blockedTools.has(t.name)) : tools;
+    for (const tool of returned) {
       await tx
         .insert(mcpTools)
         .values({
@@ -2026,9 +2148,9 @@ export async function syncUpstreamTools(
           set: { kind: toolKind(tool), description: tool.description ?? null, inputSchema: tool.inputSchema },
         });
     }
-    if (onStored) await onStored(tx, tools);
+    if (onStored) await onStored(tx, returned);
   });
-  return tools;
+  return returned;
 }
 
 
@@ -2301,6 +2423,10 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
         });
       }
     }
+
+    // ADR-0250: the instance an engine run's key works for (the plan gate's one audited exception), read once
+    // per MCP session, before the reply is hijacked
+    const planGateEngineInstance = await engineKeyWorkflowInstance(db, req);
 
     // ADR-0043: the connect-time egress verdict surfaces HERE, before the
     // reply is hijacked into an MCP transport, as the route's ordinary
@@ -2613,6 +2739,7 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
       // The proxy route is now a thin governance-to-MCP-error mapper over the
       // shared primitive; the identical logic serves the worker loop too.
       const outcome = await executeGovernedToolCall(db, opts.dataKey, {
+        planGate: { engineInstanceId: planGateEngineInstance },
         userId,
         serverId,
         toolName,
