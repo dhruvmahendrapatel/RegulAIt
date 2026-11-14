@@ -1674,6 +1674,8 @@ export const advanceStageSchema = z.object({
 export const createFromGallerySchema = z.object({
   name: z.string().min(1).max(200),
   approverUserId: z.string().uuid().optional(),
+  /** ADR-0260: the registry agent that runs a review-check shape's reviews */
+  reviewerAgent: z.string().trim().min(1).max(200).optional(),
 });
 
 /** §2 report per-check outcomes into an automated_check stage. A real CI posts

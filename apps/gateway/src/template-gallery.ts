@@ -40,6 +40,7 @@ import { createFromGallerySchema } from "@regulait/shared";
 import { z } from "zod";
 import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects.js";
 import { createWorkflowTemplateValidated } from "./workflows.js";
+import { REVIEWER_PLACEHOLDER } from "./workflow-review-checks.js";
 import { isIntakeTemplateName } from "@regulait/shared";
 import { writeIntakeTemplateGated } from "./decision-regression.js";
 
@@ -48,6 +49,23 @@ const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 /** kernel-supported approver placeholder, resolved per instance to the
  * initiating user; "create from gallery" may substitute a concrete user id */
 const APPROVER_PLACEHOLDER = "requesting_user";
+
+/** ADR-0260: the reviewer placeholder a review-check shape carries. "Create
+ * from gallery" must name a registry agent in its place (`reviewerAgent`); the
+ * creation path refuses a review by an agent that is not in the registry. */
+export { REVIEWER_PLACEHOLDER };
+
+/** ADR-0260 review fix [2]: what every review shape says about the missing diff read */
+const EVIDENCE_ONLY_NOTE =
+  "Until the diff read is built the review has no diff to read, so the check fails closed unless you set " +
+  "allowEvidenceOnly on the binding, which runs it on the change and requirements alone and labels the result evidence-only.";
+
+/** ADR-0260 (P36): the three review checks, each a stage of its own so an
+ * assignment rule can add any of them to a matching change. Off until an admin
+ * creates a template from a shape and assigns it. */
+function reviewCheckStage(id: string, check: string, profile: "code_review" | "security_review" | "design_review"): Stage {
+  return { id, type: "automated_check", checks: [check], reviews: [{ check, agent: REVIEWER_PLACEHOLDER, profile }] };
+}
 
 export interface GalleryStageAnnotation {
   stageId: string;
@@ -205,6 +223,64 @@ export function builtInShapes(): Array<
       definition: vendorAiAssessmentDefinition(),
     },
     {
+      galleryId: "code-review-check",
+      title: "Code review check (add-on)",
+      description:
+        "One automated check: a governed agent reviews the change (architecture, correctness, security, " +
+        "maintainability, tests, performance, dependencies) and files numbered findings; any finding above a nit fails it. " +
+        "Assign it with a rule to add the check to matching changes; merged into another template it runs after that template's stages. " +
+        "Name the reviewer agent when you create it. " + EVIDENCE_ONLY_NOTE,
+      definition: { workflow: "code-review-check", stages: [{ id: "intake", type: "trigger" }, reviewCheckStage("code-review", "code_review", "code_review")] },
+    },
+    {
+      galleryId: "security-review-check",
+      title: "Security review check (add-on)",
+      description:
+        "One automated check: a governed agent reviews the change against the OWASP Top 10 and files numbered findings; " +
+        "any finding above a nit fails it. Assign it with a rule (for example to changes under /auth/ or to restricted data). " +
+        "Name the reviewer agent when you create it. " + EVIDENCE_ONLY_NOTE,
+      definition: {
+        workflow: "security-review-check",
+        stages: [{ id: "intake", type: "trigger" }, reviewCheckStage("security-review", "security_review", "security_review")],
+      },
+    },
+    {
+      galleryId: "design-review-check",
+      title: "Design review check (add-on)",
+      description:
+        "One automated check: a governed agent reviews a user-interface change (flow, responsiveness, visual polish, " +
+        "WCAG 2.1 AA accessibility, robustness, content) and files numbered findings; any finding above a nit fails it. " +
+        "Assign it with a rule to frontend changes. Name the reviewer agent when you create it. " + EVIDENCE_ONLY_NOTE,
+      definition: {
+        workflow: "design-review-check",
+        stages: [{ id: "intake", type: "trigger" }, reviewCheckStage("design-review-check", "design_review", "design_review")],
+      },
+    },
+    {
+      galleryId: "build-and-review",
+      title: "Plan, build & review",
+      description:
+        "Standard change plus a scoped build and one check stage that runs a code review and a security review " +
+        "before the merge sign-off. Name the reviewer agent when you create it. " + EVIDENCE_ONLY_NOTE,
+      definition: {
+        workflow: "build-and-review",
+        stages: [
+          ...standardStages,
+          { id: "build", type: "automated_build", scope: "requirements_file" },
+          {
+            id: "reviews",
+            type: "automated_check",
+            checks: ["code_review", "security_review"],
+            reviews: [
+              { check: "code_review", agent: REVIEWER_PLACEHOLDER, profile: "code_review" },
+              { check: "security_review", agent: REVIEWER_PLACEHOLDER, profile: "security_review" },
+            ],
+          },
+          { id: "merge-signoff", type: "human_approval", approvers: [APPROVER_PLACEHOLDER] },
+        ],
+      },
+    },
+    {
       galleryId: "hotfix",
       title: "Hotfix (fast path)",
       description:
@@ -328,6 +404,22 @@ export function galleryDefinitionWithApprover(definition: WorkflowDefinition, ap
   };
 }
 
+/** ADR-0260: substitute the reviewer placeholder with the named registry agent */
+export function galleryDefinitionWithReviewer(definition: WorkflowDefinition, reviewerAgent: string | undefined): WorkflowDefinition {
+  if (!reviewerAgent) return definition;
+  return {
+    ...definition,
+    stages: definition.stages.map((s) =>
+      s.reviews ? { ...s, reviews: s.reviews.map((r) => (r.agent === REVIEWER_PLACEHOLDER ? { ...r, agent: reviewerAgent } : r)) } : s,
+    ),
+  };
+}
+
+/** true when a shape still carries the reviewer placeholder */
+export function galleryNeedsReviewer(definition: WorkflowDefinition): boolean {
+  return definition.stages.some((s) => (s.reviews ?? []).some((r) => r.agent === REVIEWER_PLACEHOLDER));
+}
+
 export function registerTemplateGalleryRoutes(app: FastifyInstance, db: Db): void {
   // admin-gated by the default route class (not in NON_ADMIN_ROUTES)
   app.get("/v1/workflows/template-gallery", async () => {
@@ -347,6 +439,13 @@ export function registerTemplateGalleryRoutes(app: FastifyInstance, db: Db): voi
     const gallery = await buildTemplateGallery(db);
     const entry = gallery.entries.find((e) => e.galleryId === galleryId);
     if (!entry) return reply.status(404).send({ error: "unknown_gallery_entry" });
+    // ADR-0260: a review-check shape needs a named reviewer; the placeholder is never stored
+    if (galleryNeedsReviewer(entry.definition) && !body.reviewerAgent) {
+      return reply.status(422).send({
+        error: "reviewer_agent_required",
+        detail: `gallery shape '${galleryId}' runs governed reviews: name the registry agent that reviews (reviewerAgent)`,
+      });
+    }
 
     const audit = (w: Db, row: typeof workflowTemplates.$inferSelect) =>
       w.insert(auditLog).values({
@@ -372,7 +471,10 @@ export function registerTemplateGalleryRoutes(app: FastifyInstance, db: Db): voi
     if (!isIntakeTemplateName(body.name)) {
       // substitute the requesting_user placeholder with the named approver (if
       // any); resolution/validation happens in the ONE creation path below
-      const definition: WorkflowDefinition = galleryDefinitionWithApprover(entry.definition, body.approverUserId);
+      const definition: WorkflowDefinition = galleryDefinitionWithReviewer(
+        galleryDefinitionWithApprover(entry.definition, body.approverUserId),
+        body.reviewerAgent,
+      );
       const result = await createWorkflowTemplateValidated(db, { name: body.name, definition });
       if (!result.ok) return reply.status(result.status).send(result.body);
       await audit(db, result.row);

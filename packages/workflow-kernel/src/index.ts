@@ -34,6 +34,17 @@ export type GitAction = (typeof GIT_ACTIONS)[number];
 
 export type StageType = (typeof EXECUTABLE_STAGE_TYPES)[number];
 
+/** ADR-0260 (P36): the review profiles a review-bound check can run */
+export const REVIEW_PROFILES = ["code_review", "security_review", "design_review"] as const;
+export type ReviewProfile = (typeof REVIEW_PROFILES)[number];
+/** ADR-0260: the triage a reviewer files each finding under, most severe first
+ * (the source methodology's Blocker / High / Medium / Nit matrix) */
+export const REVIEW_SEVERITIES = ["blocker", "high", "medium", "nit"] as const;
+export type ReviewSeverity = (typeof REVIEW_SEVERITIES)[number];
+/** a nit never fails a check — it is by definition optional polish */
+export const REVIEW_FAIL_ON = ["blocker", "high", "medium"] as const;
+export type ReviewFailOn = (typeof REVIEW_FAIL_ON)[number];
+
 const stageSchema = z.object({
   id: z.string().min(1),
   type: z.enum(EXECUTABLE_STAGE_TYPES),
@@ -163,6 +174,42 @@ const stageSchema = z.object({
         budgetUsd: z.number().positive().max(10_000).optional(),
       }),
     )
+    .optional(),
+  /** automated_check (ADR-0260, P36): bind a NAMED CHECK to a governed
+   * REVIEW by a registry agent — a code review, a security review against the
+   * OWASP Top 10, or a design/UI review (patterns adapted from
+   * OneRedOak/claude-code-workflows, MIT). On stage entry the gateway
+   * dispatches the reviewer through the governed dispatch core AS THE INSTANCE
+   * INITIATOR on the instance's project (entitlements, model policy, cost,
+   * audit), with the change's evidence as delimited, untrusted data. The agent
+   * must answer with structured findings; the gateway numbers them. The check
+   * FAILS when any finding is at or above `failOn`, and when the review could
+   * not run or its answer is unusable. Never reported (POST .../checks refuses
+   * it) and never auto-passed. */
+  reviews: z
+    .array(
+      z.object({
+        /** the declared check this review decides */
+        check: z.string().min(1),
+        /** the reviewer, by registry NAME */
+        agent: z.string().min(1).max(200),
+        profile: z.enum(REVIEW_PROFILES),
+        /** the lowest finding severity that fails the check. Default "medium"
+         * (ADR-0180: the strict value — only a nit passes); an admin may relax
+         * it to "high" or "blocker" in the template, which is versioned and
+         * audited like every template change. */
+        failOn: z.enum(REVIEW_FAIL_ON).optional(),
+        /** the reviewer's answer budget, in output tokens. Default 4096. */
+        maxTokens: z.number().int().min(256).max(16_384).optional(),
+        /** ADR-0260 review fix: a code or security review needs the diff, and a
+         * design review a capture of the running UI. Until the evidence carries
+         * them the check FAILS without dispatching (ADR-0180). `true` is the
+         * template's explicit, versioned relaxation: the review runs on the
+         * evidence the instance holds and its result is labelled evidence-only. */
+        allowEvidenceOnly: z.boolean().optional(),
+      }),
+    )
+    .max(10)
     .optional(),
   /** ADR-0285 (P30): how many of this check stage's eval-bound checks run AT
    * ONCE (in-stage fan-out). Absent = the gateway's default
@@ -374,6 +421,35 @@ export const workflowDefinitionSchema = z
               });
             }
             seen.add(e.check);
+          }
+        }
+      }
+      // ADR-0260: review bindings follow the same rules — a declared check, one
+      // decider per check (an eval, an engine run OR a review, never two).
+      if (s.reviews?.length) {
+        if (s.type !== "automated_check") {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `stage '${s.id}' (${s.type}) cannot carry review bindings — only an automated_check stage can`,
+          });
+        } else {
+          const declared = new Set(s.checks ?? []);
+          const otherBound = new Set([...(s.evals ?? []), ...(s.engines ?? [])].map((e) => e.check));
+          const seen = new Set<string>();
+          for (const r of s.reviews) {
+            if (!declared.has(r.check)) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: `check stage '${s.id}' binds a review to check '${r.check}', which the stage does not declare`,
+              });
+            }
+            if (seen.has(r.check) || otherBound.has(r.check)) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: `check stage '${s.id}' binds check '${r.check}' more than once (an eval, engine or review binding each)`,
+              });
+            }
+            seen.add(r.check);
           }
         }
       }

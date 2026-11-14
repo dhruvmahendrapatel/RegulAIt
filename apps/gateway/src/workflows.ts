@@ -47,6 +47,14 @@ import {
 } from "@regulait/db";
 import { evalDatasetNamesBoundBy, evalDatasetRetiredDetail, retiredEvalDatasetNames, runEvalSuite } from "./evals.js";
 import {
+  evidenceDigest,
+  loadReviewEvidence,
+  REVIEWER_PLACEHOLDER,
+  reviewFingerprints,
+  runStageReviewChecks,
+  type ReviewCheckOutcome,
+} from "./workflow-review-checks.js";
+import {
   resolveProvider,
   gitDefaultBaseUrl,
   GitProviderError,
@@ -810,7 +818,11 @@ export function checkStageGuardsAtClaim(
   ctx: Record<string, unknown>,
   round: number,
 ): boolean {
-  const bound = new Set([...(stage.evals ?? []).map((e) => e.check), ...(stage.engines ?? []).map((e) => e.check)]);
+  const bound = new Set([
+    ...(stage.evals ?? []).map((e) => e.check),
+    ...(stage.engines ?? []).map((e) => e.check),
+    ...(stage.reviews ?? []).map((e) => e.check),
+  ]);
   const reported = new Map(
     normalizeCheckReports(ctx[`reported:${stage.id}`])
       .filter((r) => r.round === undefined || r.round === round)
@@ -1115,6 +1127,8 @@ type EvaluatedCheck = {
   eval?: Record<string, unknown>;
   /** ADR-0187: present only for engine-bound checks — the run, its status and verdict */
   engine?: Record<string, unknown>;
+  /** ADR-0260: present only for review-bound checks — the reviewer, the numbered findings and the verdict */
+  review?: Record<string, unknown>;
 };
 
 /** the shape one named check resolves to inside the check executor */
@@ -1508,6 +1522,9 @@ async function runGitExecutions(
       // which then flows into the SAME check_failed event every other failing
       // check uses; there is no second failure path.
       const evalBound = new Set((stage.evals ?? []).map((e) => e.check));
+      // ADR-0260: review-bound checks are decided the same way — by a governed
+      // review dispatch, once per stage entry, never reported or auto-passed
+      const reviewBound = new Set((stage.reviews ?? []).map((e) => e.check));
       const refusal = stage.offlineAutoPass === true ? offlineAutoPassRefusal(process.env) : null;
       const autoPassHonoured = stage.offlineAutoPass === true && refusal === null;
       // The evals run ONCE per stage entry, as they did before AER-047, not
@@ -1521,10 +1538,33 @@ async function runGitExecutions(
       // episode and re-runs them, and a re-open clears the episode.
       const waitKey = `awaitingReport:${stage.id}`;
       const episodeEvals = new Map<string, CheckOutcome>();
+      const episodeReviews = new Map<string, ReviewCheckOutcome>();
+      // the evidence the reviews would read NOW, and each binding's fingerprint
+      // of it, loaded before any reuse decision (review fix: a stale pass)
+      const reviewEvidence =
+        reviewBound.size > 0
+          ? await loadReviewEvidence(db, { ...instance, round: guard.round, context }, stage, def)
+          : undefined;
+      const currentFingerprints = reviewEvidence
+        ? await reviewFingerprints(db, reviewEvidence, stage.reviews ?? [])
+        : new Map<string, string>();
       if (typeof context[waitKey] === "string" && Array.isArray(context[`checks:${stage.id}`])) {
         for (const r of context[`checks:${stage.id}`] as EvaluatedCheck[]) {
           if (r && evalBound.has(r.check) && r.status === "passed" && r.eval) {
             episodeEvals.set(r.check, { check: r.check, status: "passed", severity: r.severity, detail: r.detail, eval: r.eval });
+          }
+          // ADR-0260 review fix: a pass is reused only while it is bound to the
+          // same round, evidence and binding (fingerprint) as this evaluation
+          if (
+            r &&
+            reviewBound.has(r.check) &&
+            r.status === "passed" &&
+            r.review &&
+            r.review.round === guard.round &&
+            typeof r.review.fingerprint === "string" &&
+            r.review.fingerprint === currentFingerprints.get(r.check)
+          ) {
+            episodeReviews.set(r.check, { check: r.check, status: "passed", severity: r.severity, detail: r.detail, review: r.review });
           }
         }
       }
@@ -1535,6 +1575,18 @@ async function runGitExecutions(
         declaredEvals.length > 0 && declaredEvals.every((n) => episodeEvals.has(n))
           ? episodeEvals
           : await runStageEvalChecks(db, instance, stage, dataKey);
+      const declaredReviews = declaredChecks.filter((n) => reviewBound.has(n));
+      const reviewOutcomes =
+        declaredReviews.length > 0 && declaredReviews.every((n) => episodeReviews.has(n))
+          ? episodeReviews
+          : await runStageReviewChecks(
+              db,
+              dataKey,
+              { ...instance, round: guard.round, context },
+              stage,
+              def,
+              reviewEvidence,
+            );
       // ADR-0187: engine-bound checks are decided by a sidecar engine run, started
       // here on first sight as the instance initiator on the instance's project
       // and read back on every evaluation: pending while it runs, failed when it
@@ -1566,6 +1618,11 @@ async function runGitExecutions(
           const results: EvaluatedCheck[] = declaredChecks.map((name): EvaluatedCheck => {
             const ev = evalOutcomes.get(name);
             if (ev) return ev;
+            const rv = reviewOutcomes.get(name);
+            if (rv) return rv;
+            if (reviewBound.has(name)) {
+              return { check: name, status: "failed", severity: "high", detail: "the review produced no outcome — the check could not run, so it does not pass" };
+            }
             const en = engineOutcomes.get(name);
             if (en) return { check: name, status: en.status, severity: en.severity, detail: en.detail, engine: en.engine };
             if (engineBound.has(name)) {
@@ -1683,6 +1740,22 @@ async function runGitExecutions(
         },
         undefined,
         claimed.guardAtCommit ? completionGuard : undefined,
+        // review fix [5]: the reviews read evidence outside this transaction; if
+        // it changed before the commit (a new requirements version, a new PR
+        // reference), the verdict is about evidence that is no longer current
+        reviewEvidence
+          ? async (tx, row) => {
+              const now = await loadReviewEvidence(
+                tx as unknown as Db,
+                { ...instance, round: guard.round, context: row.context as Record<string, unknown> },
+                stage,
+                def,
+              );
+              return evidenceDigest(now) === evidenceDigest(reviewEvidence)
+                ? null
+                : "the review evidence changed while the reviews ran (a new requirements version or PR reference); the stage is evaluated again";
+            }
+          : undefined,
       );
       if (!r.committed) {
         await reevaluateIfReportsArrived();
@@ -2442,6 +2515,11 @@ async function commitStageResult(
    * it refuses is not applied — the verdict and the refusal are recorded, and
    * the instance stays at the stage */
   completionGuard?: TransitionGuard,
+  /** ADR-0260 review fix [5]: a last check made inside the transaction, under
+   * the row lock, after the stale checks. A non-null reason discards the
+   * result exactly as a stale executor's is discarded (the claim is released
+   * and the stage is evaluated again). */
+  recheck?: (tx: DbOrTx, row: InstanceRow) => Promise<string | null>,
 ): Promise<StageCommit> {
   if (workflowTestHooks.beforeStageCommit) {
     await workflowTestHooks.beforeStageCommit({ instanceId: guard.instanceId, stageId: guard.stageId });
@@ -2454,7 +2532,7 @@ async function commitStageResult(
       .for("update");
     if (!row) return { committed: false, reason: "the instance no longer exists" };
     const fresh = { ...(row.context as Record<string, unknown>) };
-    const stale = staleExecutorReason(row, guard);
+    const stale = staleExecutorReason(row, guard) ?? (recheck ? await recheck(tx, row) : null);
     if (stale) {
       // DISCARD — the verdict and the transition are dropped, but an external
       // effect this executor already PERFORMED (a deploy, a branch, a PR, a
@@ -2702,6 +2780,37 @@ export async function createWorkflowTemplateValidated(
         datasets: retiredBound,
       },
     };
+  }
+  // ADR-0260: a review-bound check names its reviewer; a template must never
+  // promise a review by an agent that is not in the registry
+  const reviewAgents = [...new Set(definition.stages.flatMap((st) => (st.reviews ?? []).map((r) => r.agent)))];
+  // review fix [4]: the gallery's placeholder is never a reviewer, even if an
+  // agent with that literal name exists
+  if (reviewAgents.includes(REVIEWER_PLACEHOLDER)) {
+    return {
+      ok: false,
+      status: 422,
+      body: {
+        error: "reviewer_agent_placeholder",
+        detail: `'${REVIEWER_PLACEHOLDER}' is the gallery's placeholder, not a reviewer: name the registry agent that reviews`,
+      },
+    };
+  }
+  if (reviewAgents.length > 0) {
+    const found = await db.select({ name: agents.name }).from(agents).where(inArray(agents.name, reviewAgents));
+    const known = new Set(found.map((r) => r.name));
+    const unknown = reviewAgents.filter((n) => !known.has(n));
+    if (unknown.length > 0) {
+      return {
+        ok: false,
+        status: 422,
+        body: {
+          error: "unknown_review_agent",
+          detail: `the review check(s) name agent(s) ${unknown.map((n) => `'${n}'`).join(", ")}, which are not in the registry`,
+          agents: unknown,
+        },
+      };
+    }
   }
   const named = definition.stages
     .flatMap((st) => st.approvers ?? [])
@@ -3582,6 +3691,15 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       return reply.status(422).send({
         error: "eval_check_cannot_be_reported",
         detail: `check(s) ${usurped.join(", ")} are decided by running their eval dataset; a reported result cannot stand in for one`,
+      });
+    }
+    // ADR-0260: the same for a check bound to a governed review
+    const reviewBoundChecks = new Set((stage.reviews ?? []).map((e) => e.check));
+    const usurpedReview = body.results.filter((r) => reviewBoundChecks.has(r.check)).map((r) => r.check);
+    if (usurpedReview.length > 0) {
+      return reply.status(422).send({
+        error: "review_check_cannot_be_reported",
+        detail: `check(s) ${usurpedReview.join(", ")} are decided by a governed review; a reported result cannot stand in for one`,
       });
     }
     // ADR-0187: the same for a check bound to a sidecar engine run
