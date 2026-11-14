@@ -357,6 +357,7 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
 
   "POST /v1/messages": { summary: "Anthropic-shaped compatibility surface (ADR-0020). Off-the-shelf Anthropic clients point here unchanged." },
   "POST /v1/chat/completions": { summary: "OpenAI-shaped compatibility surface (ADR-0024). Off-the-shelf OpenAI clients point here unchanged." },
+  "POST /v1/responses": { summary: "Responses-API-shaped compatibility surface (ADR-0287), on the same switch as /v1/chat/completions. Stateless: send store:false and the full history in input." },
   "POST /mcp/:serverId": { summary: "The governed MCP proxy. Speaks the MCP wire protocol; every tool call is entitlement-checked." },
   "POST /v1/runs": { summary: "Start a multi-agent orchestration run (pillar 7)." },
   "GET /v1/runs": { summary: "Orchestration runs, newest first. Bounded: `limit` (default 200, max 1000); `status` narrows. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226)." },

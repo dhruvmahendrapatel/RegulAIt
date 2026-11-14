@@ -4,7 +4,7 @@ import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
 import { plural } from "../../../api/format";
 import { Button, EmptyState, InfoButton, SeverityBadge } from "../../../ui/kit";
-import { QueryGate } from "../adminKit";
+import { NotAvailableToYou, QueryGate, isRefusal } from "../adminKit";
 import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
 
@@ -88,6 +88,10 @@ export function DependencyGraphPanel({ useCaseId }: { useCaseId?: string }) {
         <span className={v.grow} />
         <Button size="sm" variant="ghost" onClick={() => void graph.refetch()}>Refresh graph</Button>
       </div>
+      {/* #453 (2026-11-07): the record opens to its owner; the organisation-wide graph stays the server's call */}
+      {isRefusal(graph.error) ? (
+        <NotAvailableToYou what="The dependency graph" />
+      ) : (
       <QueryGate loading={graph.isLoading} error={graph.error} onRetry={() => void graph.refetch()}>
         {!graph.data || graph.data.nodes.length === 0 ? (
           <EmptyState title="No governed dependencies found" body="Link an agent, model, vendor, MCP server, or connector to make the dependency chain visible." />
@@ -164,6 +168,7 @@ export function DependencyGraphPanel({ useCaseId }: { useCaseId?: string }) {
           </>
         )}
       </QueryGate>
+      )}
     </div>
   );
 }

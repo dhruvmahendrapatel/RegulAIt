@@ -46,7 +46,7 @@ export interface IncidentListResponse {
 
 export interface IncidentClock {
   id: string;
-  regime: "eu-ai-act" | "hipaa";
+  regime: IncidentClockRegimeId;
   clockId: string;
   paragraph: string;
   quote: string | null;
@@ -115,10 +115,16 @@ export const CRITERIA: Array<{ id: string; label: string; cite: string }> = [
   { id: "property_environment", label: "Serious harm to property or the environment", cite: "Art. 3(49)(d)" },
   { id: "widespread_infringement", label: "Widespread infringement", cite: "Art. 73(3)" },
   { id: "phi_breach", label: "Breach of unsecured protected health information", cite: "45 CFR 164.402" },
+  // ADR-0296: the facts that start the GDPR, NIS2, DORA and CRA clocks (none is serious under the EU AI Act)
+  { id: "personal_data_breach", label: "Personal data breach", cite: "GDPR Art. 4(12)" },
+  { id: "significant_cyber_incident", label: "Significant incident (NIS2)", cite: "NIS2 Art. 23(3)" },
+  { id: "major_ict_incident", label: "Major ICT-related incident (DORA)", cite: "DORA Art. 18" },
+  { id: "exploited_vulnerability", label: "Actively exploited vulnerability in a product", cite: "CRA Art. 14(1)" },
+  { id: "severe_product_incident", label: "Severe incident affecting a product's security", cite: "CRA Art. 14(3)" },
 ];
 export const CRITERION_LABEL: Record<string, string> = Object.fromEntries(CRITERIA.map((c) => [c.id, c.label]));
-/** the criteria that make an incident serious under the EU AI Act (everything but phi_breach) */
-export const EU_CRITERIA = CRITERIA.filter((c) => c.id !== "phi_breach").map((c) => c.id);
+/** the criteria that make an incident serious under the EU AI Act: Art. 3(49) and Art. 73(3) only */
+export const EU_CRITERIA = CRITERIA.filter((c) => c.cite.startsWith("Art. ")).map((c) => c.id);
 
 export const DETECTION_SOURCES: Array<{ id: string; label: string }> = [
   { id: "manual", label: "Reported by a person" },
@@ -184,13 +190,19 @@ export const INCIDENT_SETTING_COPY = {
   incidentClockRegimes: {
     label: "Incident notification clocks",
     strict:
-      "Both regimes: a serious incident starts the EU AI Act clocks and a PHI breach starts the HIPAA clocks. Each clock is a reminder computed from the recorded awareness time, not legal advice.",
+      "Every regime: a serious incident starts the EU AI Act clocks, a PHI breach the HIPAA clocks, a personal data breach the GDPR clocks, a significant incident the NIS2 clocks, a major ICT incident the DORA clocks, and an exploited vulnerability or severe product incident the CRA clocks. Each clock is a reminder computed from the recorded awareness time, not legal advice.",
     relaxed: "Removing a regime stops its clocks from being created for new incidents; existing clocks are kept.",
   },
 } as const;
-export const REGIMES: Array<{ id: "eu-ai-act" | "hipaa"; label: string }> = [
+/** mirrors `INCIDENT_CLOCK_REGIMES` in @regulait/shared (ADR-0296 added the last four) */
+export type IncidentClockRegimeId = "eu-ai-act" | "hipaa" | "gdpr" | "nis2" | "dora" | "cra";
+export const REGIMES: Array<{ id: IncidentClockRegimeId; label: string }> = [
   { id: "eu-ai-act", label: "EU AI Act (Regulation (EU) 2024/1689)" },
   { id: "hipaa", label: "HIPAA breach notification (45 CFR 164.404–164.410)" },
+  { id: "gdpr", label: "GDPR breach notification (Regulation (EU) 2016/679, Art. 33–34)" },
+  { id: "nis2", label: "NIS2 incident reporting (Directive (EU) 2022/2555, Art. 23)" },
+  { id: "dora", label: "DORA major ICT incident reporting (Regulation (EU) 2022/2554, Art. 19)" },
+  { id: "cra", label: "Cyber Resilience Act reporting (Regulation (EU) 2024/2847, Art. 14)" },
 ];
 
 /** a timestamp the way the register shows it: UTC, to the minute */
@@ -263,10 +275,10 @@ export function eventSentence(e: { kind: string; detail: Record<string, unknown>
 export interface IncidentSettings {
   incidentGateMode: GateMode;
   incidentEvidenceHold: boolean;
-  incidentClockRegimes: Array<"eu-ai-act" | "hipaa">;
+  incidentClockRegimes: IncidentClockRegimeId[];
 }
 export function settingRelaxed(key: keyof IncidentSettings, value: IncidentSettings[keyof IncidentSettings]): boolean {
   if (key === "incidentGateMode") return value !== "enforce";
   if (key === "incidentEvidenceHold") return value === false;
-  return !(["eu-ai-act", "hipaa"] as const).every((r) => (value as string[]).includes(r));
+  return !REGIMES.every((r) => (value as string[]).includes(r.id));
 }

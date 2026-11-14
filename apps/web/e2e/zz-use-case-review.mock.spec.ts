@@ -167,7 +167,7 @@ async function openReview(page: Page) {
 test.describe("the use-case record", () => {
   test("header band, lifecycle tracker derived from the record, conditions and Mark met", async ({ page }) => {
     const state = await mockGateway(page, { status: "approved", approvedUntil: "2027-04-02T11:00:00Z" });
-    await page.goto(`/ui/admin/governance/use-cases/${UC}`);
+    await page.goto(`/ui/admin/governance/use-cases/${UC}?tab=overview`);
     await expect(page.getByRole("heading", { level: 1, name: "Credit-limit-increase assistant" })).toBeVisible();
     const band = page.getByRole("list", { name: "Record status" });
     await expect(band).toContainText("Approved");
@@ -254,7 +254,7 @@ test.describe("the use-case record", () => {
   test("Mark met follows the server's answer for this viewer: no button where it would refuse; an after-go-live one closes without a note", async ({ page }) => {
     // the proposer, here an admin who proposed it: the server says someone else confirms the before-go-live condition
     const state = await mockGateway(page, { persona: PROPOSER, status: "approved", approvedUntil: "2027-04-02T11:00:00Z", blockingRefused: true, approvals: [] });
-    await page.goto(`/ui/admin/governance/use-cases/${UC}`);
+    await page.goto(`/ui/admin/governance/use-cases/${UC}?tab=overview`);
     await expect(page.getByRole("heading", { level: 1, name: "Credit-limit-increase assistant" })).toBeVisible();
     const conds = page.locator("section", { has: page.getByText("Conditions of approval", { exact: true }) });
     const blocking = conds.getByRole("row").filter({ hasText: "Run the bias test" });
@@ -271,7 +271,7 @@ test.describe("the use-case record", () => {
 
   test("a use case sent back reads Needs information; an expired approval asks for re-review", async ({ page }) => {
     await mockGateway(page, { status: "needs_info" });
-    await page.goto(`/ui/admin/governance/use-cases/${UC}`);
+    await page.goto(`/ui/admin/governance/use-cases/${UC}?tab=overview`);
     await expect(page.getByRole("list", { name: "Record status" })).toContainText("Needs information");
     await expect(page.getByRole("list", { name: "Lifecycle" }).locator('[aria-current="step"]')).toContainText("Under review");
     const tracker = page.locator("section", { has: page.getByText("Lifecycle tracker", { exact: true }) });
@@ -283,7 +283,7 @@ test.describe("the use-case record", () => {
 
     await page.unrouteAll({ behavior: "ignoreErrors" });
     await mockGateway(page, { status: "approved", approvedUntil: "2026-09-01T00:00:00Z", approvalExpired: true, conditionMet: true });
-    await page.goto(`/ui/admin/governance/use-cases/${UC}`);
+    await page.goto(`/ui/admin/governance/use-cases/${UC}?tab=overview`);
     await expect(page.getByRole("list", { name: "Record status" })).toContainText("Approval expired 1 Sept 2026");
     await expect(page.getByText(/The approval expired on 1 Sept 2026/)).toBeVisible();
     await expect(page.getByText("Approval expired — re-review required")).toBeVisible();
@@ -536,7 +536,7 @@ test.describe("ADR-0171: what the record and the review task say", () => {
     test(`AER-055: an approved record whose detail read fails (${failure.status}) never says "approved without conditions"; Retry shows the real conditions`, async ({ page }) => {
       // the query client retries a 500 once and never a 403: enough failures to leave the read failed
       const state = await mockGateway(page, { status: "approved", approvedUntil: "2027-04-02T11:00:00Z", detailFailures: failure.status === 500 ? [failure, failure] : [failure] });
-      await page.goto(`/ui/admin/governance/use-cases/${UC}`);
+      await page.goto(`/ui/admin/governance/use-cases/${UC}?tab=overview`);
       await expect(page.getByRole("heading", { level: 1, name: "Credit-limit-increase assistant" })).toBeVisible();
       const tracker = page.locator("section", { has: page.getByText("Lifecycle tracker", { exact: true }) });
       const conds = page.locator("section", { has: page.getByText("Conditions of approval", { exact: true }) });
@@ -561,7 +561,7 @@ test.describe("ADR-0171: what the record and the review task say", () => {
     let release: () => void = () => undefined;
     const held = new Promise<void>((resolve) => { release = resolve; });
     await page.route(`**/v1/use-cases/${UC}`, async (route) => { await held; await route.fallback(); });
-    await page.goto(`/ui/admin/governance/use-cases/${UC}`);
+    await page.goto(`/ui/admin/governance/use-cases/${UC}?tab=overview`);
     await expect(page.getByRole("heading", { level: 1, name: "Credit-limit-increase assistant" })).toBeVisible();
     await expect(page.getByText("Loading conditions…")).toBeVisible();
     await expect(page.getByText("This use case was approved without conditions.")).toHaveCount(0);
@@ -576,7 +576,7 @@ test.describe("ADR-0171: what the record and the review task say", () => {
       detailFailures: [{ status: 500, error: "internal" }, { status: 500, error: "internal" }],
       detailExtra: { resubmission: { allowed: true, screeningAnswers: null, questionnaire: null, returnReason: "Add the DPIA reference.", returnedByName: "Avery Approver" } },
     });
-    await page.goto(`/ui/admin/governance/use-cases/${UC}`);
+    await page.goto(`/ui/admin/governance/use-cases/${UC}?tab=overview`);
     const tracker = page.locator("section", { has: page.getByText("Lifecycle tracker", { exact: true }) });
     await expect(tracker.getByRole("alert")).toBeVisible();
     await expect(page.getByRole("link", { name: "Update and resubmit" })).toHaveCount(0);
@@ -591,7 +591,7 @@ test.describe("ADR-0171: what the record and the review task say", () => {
       screeningUnsure: ["profilesNaturalPersons", "euNexus"],
     };
     await mockGateway(page, { detailExtra: extra });
-    await page.goto(`/ui/admin/governance/use-cases/${UC}`);
+    await page.goto(`/ui/admin/governance/use-cases/${UC}?tab=overview`);
     await expect(page.getByText("Customers in Germany use it, and it decides on access to credit.")).toBeVisible();
     await expect(page.locator("p").filter({ hasText: "Owner unsure about:" })).toContainText("Profiles natural persons, Has an EU nexus");
     await expectNoAxeViolations(page, "use-case record (rationale and unsure answers)");
