@@ -10,7 +10,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { Webhook } from "standardwebhooks";
-import { and, auditLog, createDb, desc, eq, egressAllowHosts, runMigrations, siemDestinations, sql, type Db } from "@regulait/db";
+import { and, auditLog, createDb, desc, eq, runMigrations, siemDestinations, sql, type Db } from "@regulait/db";
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
+import { trackEgressAllowHosts } from "./testing/egress-allow-cleanup.js";
 import { buildApp } from "./app.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { grantStepUpForTest, sessionRequest, stepUpRequest } from "./testing/step-up-grant.js";
@@ -44,6 +46,7 @@ let KEY: { authorization: string };
 let destId: string;
 let secret: string;
 const restores: Array<() => Promise<void>> = [];
+const allowed = trackEgressAllowHosts();
 
 interface Got {
   url: string;
@@ -90,11 +93,12 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   restores.push(await relaxIdentityForTest(db, { mfaRequired: "off" }));
-  await db.insert(egressAllowHosts).values({ host: HOST, allowPrivateRanges: false, allowPlaintextHttp: false });
-  restores.push(async () => {
-    await db.delete(egressAllowHosts).where(eq(egressAllowHosts.host, HOST));
-  });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  // M-068: added through the audited route and removed through the helper in afterAll
+  const allow = await relaxStepUpAround(db, () =>
+    app.inject({ method: "POST", url: "/v1/egress-allow-hosts", headers: AUTH, payload: { host: allowed.trackHost(HOST), allowPrivateRanges: false, allowPlaintextHttp: false, note: `adr0303 ${RUN}` } }),
+  );
+  expect(allow.statusCode, allow.body).toBe(201);
   const created = await app.inject({ method: "POST", url: "/v1/users", headers: AUTH, payload: { email: `adr0303-admin-${RUN}@example.com`, displayName: "siem admin", isAdmin: true } });
   expect(created.statusCode, created.body).toBe(201);
   adminId = created.json().id;
@@ -103,10 +107,15 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  // a destination left enabled would deliver from another file's sweep: turn this file's off
-  await db.update(siemDestinations).set({ enabled: false }).where(sql`${siemDestinations.name} like ${`adr0303-${RUN}%`}`);
-  for (const r of restores.reverse()) await r();
-  await app?.close();
+  const entries = await allowed.removeAll(app, AUTH);
+  try {
+    // a destination left enabled would deliver from another file's sweep: turn this file's off
+    await db.update(siemDestinations).set({ enabled: false }).where(sql`${siemDestinations.name} like ${`adr0303-${RUN}%`}`);
+    for (const r of restores.reverse()) await r();
+    await app?.close();
+  } finally {
+    entries.assertRemoved();
+  }
 });
 
 describe("ADR-0303 destinations: off by default, enabling is a step-up", () => {
