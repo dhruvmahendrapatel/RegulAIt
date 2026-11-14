@@ -1857,6 +1857,9 @@ export const auditLog = pgTable(
         "supplier_access",
         "supplier_submission",
         "supplier_questionnaire",
+        // ADR-0223 amendment 1: a drift monitor's write-only ingestion credential (issued, rotated, revoked, or
+        // refused on use). Plain text column — no DDL needed.
+        "model_drift_ingest_credential",
         "ai_policy_document",
         "ai_policy_acknowledgement",
         // ADR-0185 I3: memory retention. A conversation purged by the sweep or
@@ -16186,6 +16189,43 @@ export const modelDriftMonitors = pgTable(
 );
 export type ModelDriftMonitorRow = typeof modelDriftMonitors.$inferSelect;
 
+/**
+ * ADR-0223 amendment 1 (pending migration `drift_ingest_credentials`): a write-only ingestion credential bound to ONE drift monitor. It opens only
+ * `POST /v1/model-drift/ingest/:monitorId/reports` for that monitor. Only the SHA-256 of the `rgldi_` token is
+ * stored; it always expires (at most 365 days, CHECK-capped) and is revoked by `revoked_at`. Rotation is a new row
+ * (`replacesId`) plus the old row's revocation, so `createdAt` is when the secret was set.
+ */
+export const modelDriftIngestCredentials = pgTable(
+  "model_drift_ingest_credentials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    monitorId: uuid("monitor_id")
+      .notNull()
+      .references(() => modelDriftMonitors.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    tokenHash: text("token_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    replacesId: uuid("replaces_id").references((): AnyPgColumn => modelDriftIngestCredentials.id, { onDelete: "set null" }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: uuid("revoked_by").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    unique("model_drift_ingest_credentials_token_hash_uq").on(t.tokenHash),
+    check("model_drift_ingest_credentials_name_check", sql`char_length(btrim(${t.name})) BETWEEN 1 AND 120`),
+    check("model_drift_ingest_credentials_hash_check", sql`${t.tokenHash} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "model_drift_ingest_credentials_expiry_check",
+      sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} <= ${t.createdAt} + interval '365 days'`,
+    ),
+    check("model_drift_ingest_credentials_revoked_check", sql`${t.revokedAt} IS NULL OR ${t.revokedAt} >= ${t.createdAt}`),
+    index("model_drift_ingest_credentials_monitor_idx").on(t.monitorId, t.createdAt.desc()),
+  ],
+);
+export type ModelDriftIngestCredentialRow = typeof modelDriftIngestCredentials.$inferSelect;
+
 export const MODEL_DRIFT_REPORT_SOURCES = ["push", "upload"] as const;
 export const MODEL_DRIFT_STATUSES = ["within", "warn", "drift", "insufficient"] as const;
 /** where a report's or artefact's `model_version` came from: the card's pin at write time, or the submission */
@@ -16211,9 +16251,15 @@ export const modelDriftReports = pgTable(
     modelVersion: text("model_version").notNull(),
     modelVersionSource: text("model_version_source", { enum: MODEL_VERSION_SOURCES }).notNull(),
     submittedBy: uuid("submitted_by").references(() => users.id, { onDelete: "set null" }),
+    /** pending migration drift_ingest_credentials: the ingestion credential that pushed this summary; NULL for an admin's upload or push */
+    ingestCredentialId: uuid("ingest_credential_id").references(() => modelDriftIngestCredentials.id, { onDelete: "set null" }),
+    /** pending migration drift_ingest_credentials: the replay guard on a credential push; one key records one report per monitor */
+    idempotencyKey: text("idempotency_key"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    check("model_drift_reports_idempotency_check", sql`${t.idempotencyKey} IS NULL OR char_length(${t.idempotencyKey}) BETWEEN 16 AND 128`),
+    uniqueIndex("model_drift_reports_idempotency_uq").on(t.monitorId, t.idempotencyKey).where(sql`${t.idempotencyKey} IS NOT NULL`),
     check("model_drift_reports_source_check", sql`${t.source} IN ('push', 'upload')`),
     check("model_drift_reports_window_check", sql`${t.windowEnd} > ${t.windowStart}`),
     check("model_drift_reports_samples_check", sql`${t.sampleCount} > 0`),

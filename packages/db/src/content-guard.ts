@@ -88,6 +88,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.apiKeys, ["name"]],
   [s.virtualKeys, ["name"]],
   [s.scimTokens, ["name"]],
+  // ADR-0223 amendment 1: the drift monitor's write-only ingestion credential label
+  [s.modelDriftIngestCredentials, ["name"]],
   [s.auditorGrants, ["auditorName"]],
   [s.oidcProviders, ["name"]],
   [s.modelSigningKeys, ["name"]],

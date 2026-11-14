@@ -190,6 +190,7 @@ import { registerEvalRoutes } from "./evals.js";
 import { applyModelCardApprovalDecision, registerMrmRoutes } from "./mrm.js";
 import { registerFairnessRoutes } from "./fairness.js";
 import { registerClassicalDriftRoutes } from "./classical-drift.js";
+import { registerDriftIngestCredentialRoutes } from "./drift-ingest-credentials.js";
 import { AiBomError } from "./ai-bom.js";
 import { runAiBomSignoffs, type AiBomSignoff } from "./ai-bom-signoff.js";
 import { registerRedTeamRoutes } from "./redteam.js";
@@ -5734,6 +5735,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerFairnessRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0223 (P13b): drift and explainability for classical models, on the model register; off by default
   registerClassicalDriftRoutes(app, db);
+  // ADR-0223 amendment 1: the per-monitor write-only ingestion credential and its one route
+  registerDriftIngestCredentialRoutes(app, db);
   // ADR-0057 — CONTINUOUS RED-TEAMING. Versioned attack libraries, the shipped
   // corpus, and runs — every one of which is an ADR-0044 eval run underneath,
   // so probes take the same governed dispatch, the same metering and the same

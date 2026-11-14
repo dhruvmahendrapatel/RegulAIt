@@ -64,6 +64,13 @@ pg-boss. The prototype is in `spikes/workflow-p30/` (default off); there is no p
 - Jira/monday URL-token rotation is #605's G6 rotate route (HOLD; its ADR is not yet on `main`); #605 must drop its own copy of the legacy fallback when it rebases.
 - #717 review (21:09): Jira, monday, Azure DevOps and Asana must also carry an in-body creation time no older than 7 days (below the 30-day record retention), so a replay after the prune is refused; concurrent-duplicate test added ([ADR-0010 amendment (b)](../decisions/0010-pm-inbound-sync-webhooks-plus-read-through.md)).
 
+**2026-11-07 - drift ingestion credential (builder lane, [ADR-0223 amendment 1](../decisions/0223-classical-model-drift-explainability.md), pending migration `drift_ingest_credentials`).**
+- The #628 follow-up: each drift monitor can hold a write-only `rgldi_` credential that opens only
+  `POST /v1/model-drift/ingest/:monitorId/reports` for that monitor. Hash-only, always expiring (90 days default, 365
+  CHECK-capped), revoked at once; issue, rotate and revoke need an `identity_manage` step-up and are audited in the
+  same transaction; replay-safe through an Idempotency-Key. Branch `builder/p13b-ingest-credential`, draft PR held for
+  review. The admin panel is posted on #453 for the designer session.
+
 **2026-10-29 - the customer demo moves to one date, Saturday 2026-10-31 (owner, #453 c6508111468).**
 - **Date:** the internal run-through on Sun 11-01 and the external demo on Tue 11-03 are dropped; there is one run, on
   10-31. LIVE is never re-prepared, so every beat, state-changing ones included, runs on LIVE once, at the demo; the
