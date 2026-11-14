@@ -22,8 +22,8 @@ BEGIN
   END IF;
   IF r = ANY (ARRAY['authenticate', 'identity_provisioning', 'audit_chain', 'audit_verify',
                     'approval_maintenance', 'rls_membership', 'migration', 'audit_subject',
-                    'system_task', 'public_ingest', 'bootstrap_admin', 'credential_request',
-                    'audit_retention']) THEN
+                    'system_task', 'public_ingest', 'bootstrap_admin', 'audit_retention',
+                    'credential_request']) THEN
     RETURN r;
   END IF;
   RAISE EXCEPTION 'regulait: unknown row-level security system context %', pg_catalog.quote_literal(r)
