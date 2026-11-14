@@ -1,6 +1,10 @@
 /**
  * ADR-0239 slice 1 — the Cedar rate-limit evaluator against the hand-written one.
  *
+ * ADR-0239 decision 4 (2026-11-14): the hand-written evaluator is removed from the kernel. Its predicate lives on HERE,
+ * transcribed independently, as the differential oracle (`referenceRateLimitEvaluator`), so the Cedar evaluator is
+ * still held to the exact answers the kernel gave before the move.
+ *
  * The differential properties generate limits and calls from small pools (so matches, near-misses and every scope
  * shape occur often) and require the two evaluators to agree: on the raw verdict, and on the whole kernel Decision.
  */
@@ -9,7 +13,6 @@ import fc from "fast-check";
 import * as cedar from "@cedar-policy/cedar-wasm/nodejs";
 import {
   evaluate,
-  legacyRateLimitEvaluator,
   RATE_LIMIT_ENGINE_ERROR_RULE_ID,
   type EvaluationInput,
   type RateLimit,
@@ -22,6 +25,28 @@ import {
   rateLimitCedarCallCount,
   rateLimitPolicySet,
 } from "./rate-limit-cedar.js";
+
+/**
+ * THE ORACLE: the pre-Cedar kernel predicate, transcribed (subject: a user-scoped or unscoped rule binds its own user
+ * only, role/team/fleet were pre-filtered by the gateway; server: `all` or this server; deploy mode: unscoped (null
+ * or absent), or in the call's context; tool: null or this tool; exhausted: count >= max), first in input order.
+ */
+const referenceRateLimitEvaluator: RateLimitEvaluator = {
+  engine: "reference",
+  firstExhausted(limits, ctx) {
+    const hit = limits.find(
+      (l) =>
+        ((l.scope ?? "user") === "user" ? l.userId === ctx.userId : true) &&
+        ((l.serverScope ?? "server") === "all" ? true : l.serverId === ctx.serverId) &&
+        (l.deployMode == null ? true : (ctx.deployContext ?? []).includes(l.deployMode)) &&
+        // exactly the old `matchesScope`: only null is "every tool" (an absent toolName matches no tool)
+        (l.toolName === null || l.toolName === ctx.toolName) &&
+        l.currentCount >= l.maxCalls,
+    );
+    return hit ? { kind: "exhausted", limit: hit } : { kind: "none" };
+  },
+};
+const legacyRateLimitEvaluator = referenceRateLimitEvaluator;
 
 const USERS = ["u-1", "u-2", 'u-"3'];
 const SERVERS = ["s-1", "s-2"];
@@ -180,6 +205,13 @@ describe("ADR-0239 — default-deny holds when the rate-limit evaluator fails", 
     windowSeconds: 60,
     currentCount: 1.5,
   };
+
+  it("with limits and no evaluator, the kernel refuses (the hand-written default is gone: never an allow)", () => {
+    const d = evaluate(inputFor(call, [{ ...limit, currentCount: 0 }], undefined as unknown as RateLimitEvaluator));
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe(RATE_LIMIT_ENGINE_ERROR_RULE_ID);
+    expect(d.reason).toMatch(/no rate-limit evaluator is configured/);
+  });
 
   it("denies when Cedar cannot represent a count (the legacy evaluator would allow)", () => {
     expect(evaluate(inputFor(call, [limit], legacyRateLimitEvaluator)).effect).toBe("allow");

@@ -10,7 +10,7 @@
  * Global state (M-068): org settings and rule rows are restored in afterAll / per test.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { a2aAgentGrants, a2aAgents, auditLog, eq, orgSettings, ORG_SETTINGS_ID, resourceApprovalRules, resourceRateLimits, type Db } from "@regulait/db";
+import { a2aAgentGrants, a2aAgents, auditLog, eq, orgSettings, ORG_SETTINGS_ID, resourceApprovalRules, resourceRateLimits, resourceRateReservations, type Db } from "@regulait/db";
 import { RESOURCE_RULE_IDS } from "@regulait/policy-kernel";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { A2A_RULE_IDS, executeGovernedA2aCall } from "./a2a.js";
@@ -103,8 +103,8 @@ describe("ADR-0251 slice 3: A2A rate limits and approval rules (P-01)", () => {
   it("a limit refuses the call once the window holds as many allowed calls as it permits (429)", async () => {
     const [limit] = await k.db.insert(resourceRateLimits).values({ resourceType: "a2a", a2aAgentId: agentId, scope: "user", userId: caller.id, maxCalls: 1, windowSeconds: 3600 }).returning();
     try {
-      // one allowed A2A decision already in the window (what a replied call writes)
-      await k.db.insert(auditLog).values({ userId: caller.id, objectType: "a2a_agent", objectId: agentId, detail: { outcome: "replied", receiptClass: "decision" }, effect: "allow", ruleId: A2A_RULE_IDS.callAllowed, ruleChain: [], reason: "adr0251 fixture: a prior allowed call" });
+      // one slot already taken in the window (what an allowed call reserves, hard windows)
+      await k.db.insert(resourceRateReservations).values({ userId: caller.id, resourceType: "a2a", a2aAgentId: agentId });
       expect(await call(caller)).toMatchObject({ kind: "denied", status: 429, error: "rate_limited", ruleId: limit!.id });
     } finally {
       await k.db.delete(resourceRateLimits).where(eq(resourceRateLimits.id, limit!.id));
