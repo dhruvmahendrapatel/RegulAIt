@@ -4870,6 +4870,7 @@ export * from "./alert-ownership.js";
 export * from "./isaca-pack.js";
 // ADR-0243 (P24): the OWASP MCP and LLM Top 10 packs
 export * from "./owasp-packs.js";
+export * from "./nist-ai-600-1-pack.js";
 // ADR-0212 (P12 b): modality pricing
 export * from "./modality-pricing.js";
 

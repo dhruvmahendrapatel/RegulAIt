@@ -52,7 +52,8 @@ describe("every pack version published before S5 is unchanged (content hash)", (
   it("the new versions are exactly isaca-ai-agents@1, nist-ai-rmf@4 and eu-ai-act@3 (plus I4's isaca-ai-agents@2), and each parses", () => {
     const all = DEFAULT_COMPLIANCE_PACKS.map((p) => `${p.framework}@${p.version}`);
     // ADR-0243 (P24) adds the OWASP packs, pinned in owasp-packs.test.ts
-    expect(all.filter((k) => !(k in PINNED) && !k.startsWith("owasp-")).sort()).toEqual(["eu-ai-act@3", "isaca-ai-agents@1", "isaca-ai-agents@2", "nist-ai-rmf@4"]);
+    // ADR-0294 (P18 B5) adds nist-ai-600-1@1, pinned in nist-ai-600-1-pack.test.ts
+    expect(all.filter((k) => !(k in PINNED) && !k.startsWith("owasp-") && !k.startsWith("nist-ai-600-1@")).sort()).toEqual(["eu-ai-act@3", "isaca-ai-agents@1", "isaca-ai-agents@2", "nist-ai-rmf@4"]);
     for (const k of ["eu-ai-act@3", "isaca-ai-agents@1", "nist-ai-rmf@4"]) {
       const [fw, v] = k.split("@");
       const res = createCompliancePackSchema.safeParse(pack(fw!, Number(v)));

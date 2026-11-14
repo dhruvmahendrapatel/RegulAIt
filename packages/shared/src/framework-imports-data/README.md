@@ -11,8 +11,9 @@ upstream code is vendored or run.
 | File | Source | Revision | Licence | What is stored |
 |---|---|---|---|---|
 | `mitre-atlas.json` | MITRE ATLAS data release `dist/v6/ATLAS-2026.10.yaml`, github.com/mitre-atlas/atlas-data, © 2021-2026 MITRE | commit `f56c1468731d6428e5bf875263b4643b46d67437`, release 2026.10 | Apache-2.0 (`LICENSE-mitre-atlas`, kept verbatim per §4) | 44 mitigations: id, name, description (markdown links reduced to their text), and the ids of the techniques each mitigates. Changes made: whitespace collapsed, long text clipped with "…". |
-| `nist-ai-rmf-oscal.json` | NIST AI RMF 1.0 (AI 100-1) OSCAL catalog, github.com/usnistgov/oscal-content | commit `f0de6d8d8c059d374f15e0ae07508d82e370fc1d`, catalog version 1.0.0 | US government work, public domain; CC0-1.0 worldwide (`LICENSE-nist-oscal-content.md`) | 72 subcategories: id and statement. |
+| `nist-ai-rmf-oscal.json` | NIST AI RMF 1.0 (AI 100-1) OSCAL catalog, github.com/usnistgov/oscal-content | commit `f0de6d8d8c059d374f15e0ae07508d82e370fc1d`, catalog version 1.0.0 | US government work, public domain; CC0-1.0 worldwide (`LICENSE-nist-oscal-content.md`) | 72 subcategories: id and statement; since ADR-0294 each description is the subcategory's suggested actions from the NIST AI RMF Playbook (`airc.nist.gov/docs/playbook.json`, last modified 2026-06-11, sha256 `aecbee3d…5bba`, recorded in `source.supplements`; the Playbook's reference lists are not stored). |
 | `nist-csf-2-oscal.json` | NIST Cybersecurity Framework 2.0 OSCAL catalog, same repository | same commit, catalog version 1.2.1 | as above | 106 subcategories in force (withdrawn ones left out): id and statement. |
+| `nist-ai-600-1.json` | NIST AI 600-1, Generative AI Profile (July 2024), `nvlpubs.nist.gov/nistpubs/ai/NIST.AI.600-1.pdf` (ADR-0294) | PDF last modified 2025-03-24, sha256 `6e73620a…9b6a` | US government work, public domain (17 U.S.C. 105) | 212 suggested actions: id, action text, the GAI risks each is tagged with and its AI RMF subcategory. NIST publishes no machine-readable form, so the refresh script reads the PDF with poppler's `pdftotext -raw` (a developer tool only) and `normaliseNistAi600Text` parses that text; the id printed as `GV4.3--001` is repaired to `GV-4.3-001`. |
 | `us-federal-register-ai.json` | Federal Register API search (`federalregister.gov/api/v1`), Office of the Federal Register | search of 2026-10-30, documents published since 2025-10-30 | US government work, public domain (17 U.S.C. 105) | Rules, proposed rules and presidential documents about AI: number, title, abstract, dates, agencies, link. |
 
 ## Licence rules applied
@@ -24,8 +25,6 @@ upstream code is vendored or run.
 
 ## Considered and not vendored
 
-- **NIST AI RMF Playbook JSON** (public domain): the suggested actions are long guidance text, not control statements;
-  the OSCAL catalog above is NIST's own machine-readable form of the same subcategories.
 - **NIST SP 800-53 Rev. 5 OSCAL catalog** (public domain): over 1,000 controls, above the 500-control pack limit; it can
   be added later as a profile-resolved baseline.
 - **US state AI laws**: no permissively licensed machine-readable source was found; state statutes are cited by the
