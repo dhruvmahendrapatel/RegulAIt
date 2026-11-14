@@ -1,6 +1,6 @@
 // ADR-0257 — the official OpenAI and Anthropic SDKs, unmodified, pointed at the
 // RegulAIt gateway's provider-compatible surfaces (`/v1/chat/completions`,
-// `/v1/messages`). Each check prints one JSON line; the harness asserts them and
+// `/v1/responses` (ADR-0287), `/v1/messages`). Each check prints one JSON line; the harness asserts them and
 // then checks the ledger and audit rows itself. Nothing here talks to a real
 // provider: the gateway's agent is the `mock` provider.
 import OpenAI from "openai";
@@ -90,6 +90,65 @@ await check("openai.tools", async () => {
   assert(r.choices[0]?.finish_reason === "tool_calls", `finish_reason ${r.choices[0]?.finish_reason}`);
   assert(call?.function?.name === TOOL, `tool call ${JSON.stringify(call)}`);
   return { tool: call.function.name };
+});
+
+// ------------------------------------------------- OpenAI SDK, Responses API
+// ADR-0287: the gateway keeps no conversation state, so the tool loop sends
+// `store: false` and replays the prior output items in `input`.
+const oaResponses = oa(env("RESPONSES_ALLOW_KEY"));
+const responsesTool = { type: "function", name: TOOL, description: "look up a record", parameters: { type: "object", properties: {} }, strict: false };
+
+await check("responses.auth", async () => {
+  try {
+    await oa("rgk_not-a-real-key").responses.create({ model: MODEL, input: "hi", store: false });
+  } catch (e) {
+    return readableRefusal(e, 401, OpenAI.AuthenticationError);
+  }
+  throw new Error("an invalid key was accepted");
+});
+await check("responses.allow", async () => {
+  const r = await oaResponses.responses.create({ model: MODEL, instructions: "You are terse.", input: "p33 responses allow", store: false });
+  assert(r.object === "response" && r.status === "completed", `status ${r.status}`);
+  assert(r.output_text.length > 0, "empty output_text");
+  assert(r.usage && r.usage.total_tokens > 0, "no usage block");
+  return { text: r.output_text.slice(0, 80), usage: r.usage };
+});
+await check("responses.deny", async () => {
+  try {
+    await oa(env("RESPONSES_DENY_KEY")).responses.create({ model: MODEL, input: "p33 responses deny", store: false });
+  } catch (e) {
+    return readableRefusal(e, 403, OpenAI.PermissionDeniedError);
+  }
+  throw new Error("an ungranted caller was allowed");
+});
+await check("responses.stream", async () => {
+  const stream = await oaResponses.responses.create({ model: MODEL, input: "p33 responses stream", stream: true, store: false });
+  let deltas = 0;
+  let text = "";
+  let completed = false;
+  for await (const ev of stream) {
+    if (ev.type === "response.output_text.delta") {
+      deltas += 1;
+      text += ev.delta;
+    }
+    if (ev.type === "response.completed") completed = true;
+  }
+  assert(deltas > 0 && text.length > 0 && completed, `stream produced ${deltas} deltas, completed ${completed}`);
+  return { deltas, text: text.slice(0, 80) };
+});
+await check("responses.tools", async () => {
+  const input = [{ role: "user", content: `look it up <<use-tool:${TOOL}>>` }];
+  const first = await oaResponses.responses.create({ model: MODEL, input, tools: [responsesTool], store: false });
+  const call = first.output.find((o) => o.type === "function_call");
+  assert(call?.name === TOOL, `tool call ${JSON.stringify(first.output)}`);
+  const second = await oaResponses.responses.create({
+    model: MODEL,
+    input: [...input, ...first.output, { type: "function_call_output", call_id: call.call_id, output: "record: p33" }],
+    tools: [responsesTool],
+    store: false,
+  });
+  assert(second.status === "completed", `second turn status ${second.status}`);
+  return { tool: call.name, final: second.output_text.slice(0, 80) };
 });
 
 // ------------------------------------------------------------- Anthropic SDK

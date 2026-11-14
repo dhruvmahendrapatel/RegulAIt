@@ -65,7 +65,7 @@ builds on its own.
 | `db` | Drizzle schema (`schema.ts`), migrations and migrator, the chained audit writer (`audit-chain.ts`), decision facts, the deferred-unique preflight, the prose scrub, the content-credential guard (ADR-0233). |
 | `shared` | Zod schemas and pure logic shared by gateway and SPA (approval digests, placement, forecasting, guardrails, demo seeds). |
 | `model-provider` | Real model dispatch behind the agent registry. |
-| `connector-provider` | Connector execution and the actual-spend ledger. |
+| `connector-provider` | Connector execution and the actual-spend ledger; the curated connector-catalogue pieces (clean-room, ADR-0255). |
 | `git-provider` | Provider-agnostic git (four providers). |
 | `pm-provider` | Pillar-8 PM adapters and inbound sync. |
 | `infra-provider` | Pillar-3 drift, CVE and certificate detection and remediation across three clouds. |
@@ -180,7 +180,8 @@ sequenceDiagram
   by default). Egress is decided on the MCP posture. The A2A SDK
   client sends through the guarded fetch, with the credential going only to the registered origin. The usage row and
   the audit row are written in one transaction.
-- **Model/agent call** — `POST /v1/agents/:agentId/invoke` and the IDE compat endpoints (both go through
+- **Model/agent call** — `POST /v1/agents/:agentId/invoke` and the IDE compat endpoints (`/v1/messages`,
+  `/v1/chat/completions`, and the stateless `/v1/responses` of ADR-0287; all go through
   `compat-core.ts` into the same primitives): virtual-key allow-list, project attribution, workflow-instance gate,
   grants and revocations, model policy, `evaluateAgent` with the kill switch (allow or deny only: no approval rules
   and no ABAC), the model rate limit (`checkModelRateLimit`, off until an admin enables it); **then** the optimiser (routing,
@@ -219,6 +220,7 @@ runtime [0125](decisions/0125-shared-enforcement-counters.md),
 | Store | Use |
 |---|---|
 | **Postgres 16** (compose `db`, pinned by digest) | Everything: config, decisions, approvals, usage, audit. Drizzle ORM over `pg`. Shared enforcement counters live here (no Redis). |
+| **Postgres schema `regulait_queue`** | pg-boss's job queue under pillar 2's stage runner (ADR-0282): automatic stage retries (ADR-0283). Installed by our journal from the pinned version's `getConstructionPlans`; jobs carry ids only. The worker runs on the boot path unless `REGULAIT_WORKFLOW_RETRY_WORKER=off`. The `public`-schema rules below (search_path pinning, refused TRUNCATE) do not apply to it. |
 | **Object Lock bucket** (compose `objectstore`, SeaweedFS) | Audit-chain anchors only; the gateway runs if it is down. |
 | **Nightly `pg_dump` to S3** | Backups (`infra/scripts/pg-backup.sh`). The data key is deliberately not in the backup. |
 | **Engine volumes** | Per-engine state, jobs and results. |

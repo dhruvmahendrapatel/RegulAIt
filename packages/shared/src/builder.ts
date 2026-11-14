@@ -274,29 +274,6 @@ export const builderImportAgentSchema = z
   .strict();
 
 /**
- * Parse a SKILL.md: YAML-ish frontmatter between `---` fences carrying `name`
- * and `description` (plain `key: value` lines; surrounding quotes stripped).
- * The body is everything after the closing fence. Returns null when the
- * frontmatter is missing or names no skill.
- */
-export function parseSkillMarkdown(markdown: string): { name: string; description: string; body: string } | null {
-  const text = markdown.replace(/^﻿/, "").replace(/\r\n/g, "\n");
-  const m = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(text);
-  if (!m) return null;
-  const fields: Record<string, string> = {};
-  for (const line of m[1]!.split("\n")) {
-    const kv = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(line.trim());
-    if (!kv) continue;
-    let v = kv[2]!.trim();
-    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
-    fields[kv[1]!.toLowerCase()] = v;
-  }
-  const name = (fields["name"] ?? "").trim();
-  if (!name) return null;
-  return { name: name.slice(0, 120), description: (fields["description"] ?? "").slice(0, 1000), body: m[2]!.trim() };
-}
-
-/**
  * The next time a schedule is due strictly after `after`, in UTC.
  *  - hourly: every hour at the given minute (the hour part is ignored)
  *  - daily: every day at HH:MM

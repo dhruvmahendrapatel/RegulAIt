@@ -247,6 +247,11 @@ function ApplicationRoutes() {
         <Route path="/incidents/:incidentId" element={<IncidentDetailPage />} />
         <Route path="/feedback" element={<FeedbackPage />} />
         <Route path="/feedback/:useCaseId" element={<FeedbackFormPage />} />
+        {/* #453 (owner, 2026-11-07): outside RequireAdmin — the use-case record opens to its OWNER (and the
+            reviewers of its intake sign-off) read only. Same URL as before, so every link and ?tab= deep link
+            still works. The SERVER decides: GET /v1/use-cases/:id/overview answers 403/404 to anyone
+            `canReadUseCase` refuses, and the page renders that refusal under its own heading */}
+        <Route path="/admin/governance/use-cases/:id" element={<UseCaseOverviewPage />} />
         <Route
           path="/admin/*"
           element={
@@ -286,7 +291,6 @@ function ApplicationRoutes() {
                 <Route path="governance/intake" element={<IntakeWizardPage />} />
                 <Route path="governance/review-policy" element={<ReviewPolicyPage />} />
                 <Route path="governance/trust" element={<TrustDashboardPage />} />
-                <Route path="governance/use-cases/:id" element={<UseCaseOverviewPage />} />
                 <Route path="governance/use-cases" element={<Navigate to="/admin/use-cases" replace />} />
                 <Route path="governance/alerts" element={<GovernanceAlertsPage />} />
                 <Route path="governance/graph" element={<DependencyGraphPage />} />

@@ -5,7 +5,6 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { and, auditLog, builderAgents, eq } from "@regulait/db";
-import { parseSkillMarkdown } from "@regulait/shared";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { buildSystemPrompt } from "./builder-runtime.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
@@ -82,11 +81,11 @@ describe("skills library", () => {
   });
 
   it("imports a SKILL.md by its frontmatter, and refuses one without it", async () => {
-    const md = `---\nname: "Evidence summary ${k.RUN}"\ndescription: Summarise control evidence for an auditor\n---\n# Evidence summary\n\nList found and missing evidence.\n`;
+    const md = `---\nname: "evidence-summary-${k.RUN}"\ndescription: Summarise control evidence for an auditor\n---\n# Evidence summary\n\nList found and missing evidence.\n`;
     const r = await k.req("POST", "/v1/builder/skills/import", owner.auth, { markdown: md });
     expect(r.statusCode, r.body).toBe(201);
     expect(r.json().skill).toMatchObject({
-      name: `Evidence summary ${k.RUN}`,
+      name: `evidence-summary-${k.RUN}`,
       description: "Summarise control evidence for an auditor",
       visibility: "private",
       body: "# Evidence summary\n\nList found and missing evidence.",
@@ -94,7 +93,9 @@ describe("skills library", () => {
     const bad = await k.req("POST", "/v1/builder/skills/import", owner.auth, { markdown: "# no frontmatter" });
     expect(bad.statusCode).toBe(422);
     expect(bad.json().error).toBe("skill_frontmatter_missing");
-    expect(parseSkillMarkdown("---\ndescription: no name\n---\nbody")).toBeNull();
+    const noName = await k.req("POST", "/v1/builder/skills/import", owner.auth, { markdown: "---\ndescription: no name\n---\nbody" });
+    expect(noName.statusCode).toBe(422);
+    expect(noName.json().error).toBe("skill_frontmatter_invalid");
   });
 
   it("attaching counts usage, refuses a skill the editor cannot see, and feeds the runtime prompt until archived", async () => {

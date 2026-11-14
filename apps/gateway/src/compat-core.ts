@@ -145,6 +145,9 @@ export async function liveEngineRunGrant(db: Db, engineRunId: string): Promise<s
 
 export const COMPAT_ANTHROPIC_ROUTE = "POST /v1/messages";
 export const COMPAT_OPENAI_ROUTE = "POST /v1/chat/completions";
+/** ADR-0287 — the OpenAI Responses dialect. Same vendor surface as Chat
+ * Completions, so it rides `openaiCompatEnabled` (and its scope rules). */
+export const COMPAT_RESPONSES_ROUTE = "POST /v1/responses";
 export const MCP_PROXY_ROUTE = "POST /mcp/:serverId";
 /** ADR-0066 §1 — the discovery endpoint both provider SDKs call at setup.
  * ONE route serving TWO envelopes, chosen by the `anthropic-version` header. */
@@ -171,6 +174,7 @@ export const API_KEY_HEADER_ROUTES: ReadonlySet<string> = new Set([
 export const INTERCEPTION_GATED_ROUTES: ReadonlySet<string> = new Set([
   COMPAT_ANTHROPIC_ROUTE,
   COMPAT_OPENAI_ROUTE,
+  COMPAT_RESPONSES_ROUTE,
   COMPAT_MODELS_ROUTE,
   MCP_PROXY_ROUTE,
 ]);
@@ -215,7 +219,7 @@ export async function interceptionSurfaceEnabled(db: Db, route: string): Promise
   if (!INTERCEPTION_GATED_ROUTES.has(route)) return null;
   const s = await loadInterceptionSettings(db);
   if (route === COMPAT_ANTHROPIC_ROUTE) return s.anthropicCompatEnabled;
-  if (route === COMPAT_OPENAI_ROUTE) return s.openaiCompatEnabled;
+  if (route === COMPAT_OPENAI_ROUTE || route === COMPAT_RESPONSES_ROUTE) return s.openaiCompatEnabled;
   return s.mcpInterceptionEnabled;
 }
 
@@ -970,7 +974,7 @@ export async function executeCompatCall(
   dataKey: string | undefined,
   prepared: CompatPrepared,
   args: {
-    surface: "anthropic" | "openai";
+    surface: "anthropic" | "openai" | "openai_responses";
     messages: ModelChatMessage[];
     system?: string | undefined;
     /** pillar-6 prompt caching, mapped from an Anthropic `cache_control`
