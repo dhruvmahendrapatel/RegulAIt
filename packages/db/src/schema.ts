@@ -5399,7 +5399,7 @@ export const orgSettings = pgTable(
     check("org_settings_incident_gate_mode_check", sql`${t.incidentGateMode} IN ('off', 'warn', 'enforce')`),
     check(
       "org_settings_incident_clock_regimes_check",
-      sql`jsonb_typeof(${t.incidentClockRegimes}) = 'array' AND ${t.incidentClockRegimes} <@ '["eu-ai-act", "hipaa"]'::jsonb`,
+      sql`jsonb_typeof(${t.incidentClockRegimes}) = 'array' AND ${t.incidentClockRegimes} <@ '["eu-ai-act", "hipaa", "gdpr", "nis2", "dora", "cra"]'::jsonb`,
     ),
     check(
       "org_settings_feedback_sla_check",
@@ -13007,7 +13007,7 @@ export const aiIncidents = pgTable(
     ),
     check(
       "ai_incidents_serious_criteria_check",
-      sql`jsonb_typeof(${t.seriousCriteria}) = 'array' AND ${t.seriousCriteria} <@ '["death", "health", "critical_infrastructure", "fundamental_rights", "property_environment", "widespread_infringement", "phi_breach"]'::jsonb`,
+      sql`jsonb_typeof(${t.seriousCriteria}) = 'array' AND ${t.seriousCriteria} <@ '["death", "health", "critical_infrastructure", "fundamental_rights", "property_environment", "widespread_infringement", "phi_breach", "personal_data_breach", "significant_cyber_incident", "major_ict_incident", "exploited_vulnerability", "severe_product_incident"]'::jsonb`,
     ),
     check(
       "ai_incidents_phi_individuals_check",
@@ -13126,7 +13126,7 @@ export const aiIncidentNotifications = pgTable(
   },
   (t) => [
     unique("ai_incident_notifications_clock_uq").on(t.incidentId, t.clockId),
-    check("ai_incident_notifications_regime_check", sql`${t.regime} IN ('eu-ai-act', 'hipaa')`),
+    check("ai_incident_notifications_regime_check", sql`${t.regime} IN ('eu-ai-act', 'hipaa', 'gdpr', 'nis2', 'dora', 'cra')`),
     check(
       "ai_incident_notifications_status_check",
       sql`${t.status} IN ('pending', 'sent_initial', 'sent_complete', 'not_required', 'tolled')`,
