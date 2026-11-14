@@ -86,7 +86,6 @@ export const ABAC_AGENT_SCHEMA_VERSIONS: readonly AbacSchemaVersion[] = ["v4", "
  */
 export const ABAC_GOVERNED_ACTIONS = ["ModelInvoke", "ConnectorCall", "A2aMessage"] as const;
 export type AbacGovernedAction = (typeof ABAC_GOVERNED_ACTIONS)[number];
-export type AbacAction = typeof ABAC_ACTION | AbacGovernedAction;
 /** the schema versions that declare the governed actions (v5 and later) */
 export const ABAC_GOVERNED_ACTION_SCHEMA_VERSIONS: readonly AbacSchemaVersion[] = ["v5"];
 
@@ -515,14 +514,8 @@ export const ABAC_ACTION_OF_RESOURCE: Readonly<Record<AbacGovernedResourceAttrs[
   RemoteAgent: "A2aMessage",
 };
 
-export interface AbacRequest {
+interface AbacRequestCommon {
   principal: AbacPrincipalAttrs;
-  /**
-   * ADR-0251 slice 4: when set, this request is a model, connector or A2A call — action `ModelInvoke`,
-   * `ConnectorCall` or `A2aMessage` on this resource — evaluated against v5 (and later) policies only. `resource`
-   * (the MCP tool) is then not read. Absent = an MCP tool call, exactly as before.
-   */
-  governed?: AbacGovernedResourceAttrs | null | undefined;
   /**
    * ADR-0188 S2 (decision 18): when set, THIS request is evaluated with the `Agent` as principal, against v4
    * policies only, and the sponsor's attributes are not part of it at all. Absent = the sponsor as `User`,
@@ -531,12 +524,21 @@ export interface AbacRequest {
   agent?: AbacAgentAttrs | null | undefined;
   /** v4 context; absent = no chain (`actorChain` empty, `delegationDepth` 0). Never reaches a v1–v3 group. */
   delegation?: AbacDelegationContext | null | undefined;
-  /** the MCP tool (action `McpToolCall`); not read when `governed` is set */
-  resource: AbacResourceAttrs;
   context: AbacContextAttrs;
   /** the instant to evaluate time-of-day at; defaults to now */
   at?: Date;
 }
+
+/**
+ * One Cedar request: an MCP tool call (`resource`, action `McpToolCall`), or (ADR-0251 slice 4) a model, connector or
+ * A2A call (`governed`, action `ModelInvoke`, `ConnectorCall` or `A2aMessage`), evaluated against v5 (and later)
+ * policies only. Exactly one of the two is present.
+ */
+export type AbacRequest = AbacRequestCommon &
+  (
+    | { governed?: null | undefined; /** the MCP tool (action `McpToolCall`) */ resource: AbacResourceAttrs }
+    | { governed: AbacGovernedResourceAttrs; resource?: undefined }
+  );
 
 export interface AbacValidationIssue {
   message: string;
@@ -816,6 +818,106 @@ function withV5Help(issue: AbacValidationIssue, schemaVersion: string): AbacVali
   return { message: m, help: issue.help ? `${issue.help} ${ABAC_V5_RESOURCE_HELP}` : ABAC_V5_RESOURCE_HELP };
 }
 
+/**
+ * ADR-0251 slice 4, review #836 (ADR-0180) — the request facts the governed core does not yet supply for a model,
+ * connector or A2A call. It decides below the routes, so it has no session (`sessionOrigin`, `mfaCompleted`,
+ * `clientIp`), no delegation chain (`actorChain`, `delegationDepth`), no rate-consumption figure
+ * (`rateLimitUsagePct`), and it evaluates the sponsor as `User`, never an `Agent`. A forbid conditioned on any of
+ * these would validate and then never refuse such a call, so a v5 policy that can reach a governed action and reads
+ * one is refused at write time (`governedReachIssue`). Remove an entry only in the change that threads the fact
+ * through `assembleGovernedAbacRequest`.
+ */
+export const ABAC_GOVERNED_UNSUPPLIED_FACTS: Readonly<{ principal: readonly string[]; context: readonly string[] }> = {
+  principal: ["sessionOrigin", "mfaCompleted"],
+  context: ["clientIp", "actorChain", "delegationDepth", "rateLimitUsagePct"],
+};
+
+type EstEntity = { type?: string; id?: string; __entity?: { type: string; id: string } };
+type EstScope = { op: string; entity?: EstEntity; entities?: EstEntity[]; entity_type?: string; in?: { entity?: EstEntity } };
+type EstPolicy = { principal: EstScope; action: EstScope; resource: EstScope; conditions?: Array<{ body: unknown }> };
+
+const entityOf = (e: EstEntity | undefined): { type: string; id: string } | null =>
+  e?.__entity ?? (e?.type && e.id !== undefined ? { type: e.type, id: e.id } : null);
+
+/** can this policy (Cedar JSON) apply to `ModelInvoke`, `ConnectorCall` or `A2aMessage`? Conservative: an unscoped
+ * action counts unless the resource scope pins it to an MCP tool. */
+function reachesGovernedAction(p: EstPolicy): boolean {
+  const governed = new Set<string>(ABAC_GOVERNED_ACTIONS);
+  const isGoverned = (e: EstEntity | undefined) => {
+    const u = entityOf(e);
+    return u !== null && u.type === `${ABAC_NAMESPACE}::Action` && governed.has(u.id);
+  };
+  const a = p.action;
+  if (a.op === "==") return isGoverned(a.entity);
+  if (a.op === "in") return [...(a.entities ?? []), ...(a.entity ? [a.entity] : [])].some(isGoverned);
+  const r = p.resource;
+  const toolType = `${ABAC_NAMESPACE}::Tool`;
+  if (r.op === "is" && r.entity_type === toolType) return false;
+  if ((r.op === "==" || r.op === "in") && entityOf(r.entity)?.type === toolType) return false;
+  return true;
+}
+
+/** every `principal.x` / `context.x` the policy reads (attribute access or `has`), and whether it names an Agent */
+function factsRead(p: EstPolicy): { principal: Set<string>; context: Set<string>; namesAgent: boolean } {
+  const out = { principal: new Set<string>(), context: new Set<string>(), namesAgent: false };
+  const agentType = `${ABAC_NAMESPACE}::Agent`;
+  const walk = (n: unknown): void => {
+    if (Array.isArray(n)) return n.forEach(walk);
+    if (!n || typeof n !== "object") return;
+    for (const [k, v] of Object.entries(n as Record<string, unknown>)) {
+      if ((k === "." || k === "has") && v && typeof v === "object") {
+        const { left, attr } = v as { left?: { Var?: string }; attr?: string };
+        if (left?.Var === "principal" && attr) out.principal.add(attr);
+        if (left?.Var === "context" && attr) out.context.add(attr);
+      }
+      if (v === agentType) out.namesAgent = true;
+      walk(v);
+    }
+  };
+  walk(p.conditions ?? []);
+  walk(p.principal);
+  return out;
+}
+
+/**
+ * ADR-0251 slice 4, review #836: the issue for a v5 policy that can reach a governed action but reads a fact the
+ * governed core does not supply (or is about an Agent principal), so it would silently never refuse such a call.
+ * Null when the policy cannot reach a governed action or reads only supplied facts.
+ */
+function governedReachIssue(p: EstPolicy): AbacValidationIssue | null {
+  if (!reachesGovernedAction(p)) return null;
+  const read = factsRead(p);
+  const missing = [
+    ...ABAC_GOVERNED_UNSUPPLIED_FACTS.principal.filter((a) => read.principal.has(a)).map((a) => `principal.${a}`),
+    ...ABAC_GOVERNED_UNSUPPLIED_FACTS.context.filter((a) => read.context.has(a)).map((a) => `context.${a}`),
+    ...(read.namesAgent ? ["an Agent principal"] : []),
+  ];
+  if (missing.length === 0) return null;
+  return {
+    message:
+      `this policy can apply to model, connector or A2A calls and reads ${missing.map((m) => (m.includes(".") ? `\`${m}\`` : m)).join(", ")}, ` +
+      "which the governed core does not supply for those calls yet, so it would never refuse one",
+    help:
+      'Scope it to MCP tool calls (`action == RegulAIt::Action::"McpToolCall"`), where these facts are known, or ' +
+      "drop the condition. For model, connector and A2A calls the core supplies the sponsor's roles, teams, admin " +
+      "flag and AI-training status, the deploy context, and the resource's own attributes.",
+  };
+}
+
+/**
+ * ADR-0251 slice 4, review #836: can this stored policy apply to a model, connector or A2A call? True only for a v5
+ * (or later) policy whose scope can reach `ModelInvoke`, `ConnectorCall` or `A2aMessage`. The policy simulation uses it
+ * to say that its replay (recorded MCP tool decisions only) does not preview those calls. A source that does not
+ * parse reads as reaching (the strict answer for a disclosure).
+ */
+export function abacPolicyReachesGovernedActions(source: string, schemaVersion: string): boolean {
+  if (!hasGovernedActions(schemaVersion)) return false;
+  const parts = cedar.policySetTextToParts(source);
+  if (parts.type === "failure" || parts.policies.length !== 1) return true;
+  const json = cedar.policyToJson(parts.policies[0]!);
+  return json.type !== "success" || reachesGovernedAction(json.json as unknown as EstPolicy);
+}
+
 function withV4Help(issue: AbacValidationIssue, schemaVersion: string): AbacValidationIssue {
   if (!hasAgentPrincipal(schemaVersion)) return issue;
   const m = issue.message;
@@ -916,6 +1018,12 @@ class CedarAbacEngine implements AbacEngine {
       ...answer.validationWarnings.map((w) => detail(w.error)),
       ...answer.otherWarnings.map(detail),
     ];
+    // 5. ADR-0251 slice 4 (review #836): a v5 policy that can reach a model, connector or A2A call must not read a
+    //    fact the governed core does not supply there, or it validates and then never refuses such a call
+    if (hasGovernedActions(schemaVersion) && json.type === "success") {
+      const issue = governedReachIssue(json.json as unknown as EstPolicy);
+      if (issue) return { ok: false, errors: [issue], warnings };
+    }
     if (mode && !ABAC_POLICY_MODES.includes(mode)) {
       return { ok: false, errors: [{ message: `unknown policy mode '${mode}'`, help: null }], warnings };
     }

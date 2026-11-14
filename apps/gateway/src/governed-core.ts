@@ -282,25 +282,8 @@ export async function governedEvaluateResource(db: Db, input: GovernedResourceIn
       const counts = await countWindows(db, input.userId, input.resource, r.rateLimits);
       return compose(r.rateLimits.map((l, i) => ({ ...l, currentCount: counts[i]! })));
     };
-    // ADR-0251 slice 4: an ABAC `require_approval` verdict on a model, connector or A2A call REFUSES (fail closed).
-    // These paths bind consent to approval rules and the execution dial only, so an ABAC hold could otherwise be
-    // released by a rule's approver or queued with no consent bound to the policy. Until a consent binds the policy
-    // version (as the MCP path's does), the hold refuses; a forbid or another deny (an exhausted window included) stays
-    // what it is. A refused call takes no rate slot, so its window is counted without the lock.
-    const abac = r.abacDecision;
-    if (abac?.effect === "require_approval") {
-      const decision = r.rateLimits.length === 0 || input.resource.type === "model" ? compose(r.rateLimits) : await counted();
-      if (decision.effect === "deny") return decision;
-      return {
-        effect: "deny",
-        ruleId: abac.policyId ?? RESOURCE_RULE_IDS.abacApproval,
-        reason:
-          `policy ${abac.policyName ? `'${abac.policyName}'` : (abac.policyId ?? "")} requires approval for this ${input.resource.type} call, ` +
-          "and an ABAC approval hold cannot be queued on this call type yet; nothing was sent",
-        ruleChain: decision.ruleChain,
-        matchedApprovalRuleIds: decision.matchedApprovalRuleIds,
-      };
-    }
+    // ADR-0251 slice 4: an ABAC `require_approval` verdict REFUSES here too; the kernel (composeResourceDecision)
+    // decides it, so the path below counts the window without the lock and a refused call takes no slot.
     // HARD WINDOWS. No limit binds: composed as before, no lock, no write. A limit binds and the call would otherwise
     // be allowed: the window is counted under the rate lock and the call takes its slot in the same transaction. A call
     // that would be held or refused anyway takes no slot, so its window is counted without the lock (the count still
@@ -328,8 +311,8 @@ export interface ModelGateRefusal {
  * ADR-0251 slice 2 — the core's restriction layer on a MODEL dispatch, run once in the shared dispatch core after
  * the caller's own `evaluateAgent` allowed (so `base` is that allow; a deny never reaches here). Steps: the model
  * rate limit (ADR-0212's `checkModelRateLimit`, its 429 and audit row unchanged; enforced by default since migration governed_core_resource_rules),
- * then approval rules. A model call has no per-call approval queue yet, so a matching rule REFUSES (403
- * `approval_required`) rather than sending. The attribution mandate on this path stays where it was (compat
+ * then approval rules. A model call has no per-call approval queue yet, so a matching rule (or an ABAC hold) REFUSES
+ * (403 `approval_required`) rather than sending; an ABAC forbid refuses with 403 `forbidden`. The attribution mandate on this path stays where it was (compat
  * `requireProjectAttribution`, native `dispatchAttributionRequired`). Error is deny.
  */
 export async function governedModelGate(
@@ -372,10 +355,12 @@ export async function governedModelGate(
       reason: decision.reason,
     })
     .returning({ id: auditLog.id });
+  // review #836: an ABAC forbid is a policy refusal, not a missing approval
+  const forbidden = decision.ruleChain.some((t) => t.rule === RESOURCE_RULE_IDS.abacForbid && t.outcome === "deny");
   return {
     ok: false,
     status: coreError ? 503 : 403,
-    error: coreError ? "governed_core_error" : "approval_required",
+    error: coreError ? "governed_core_error" : forbidden ? "forbidden" : "approval_required",
     detail: decision.reason,
     ruleId: decision.ruleId,
     auditLogId: row?.id ?? null,

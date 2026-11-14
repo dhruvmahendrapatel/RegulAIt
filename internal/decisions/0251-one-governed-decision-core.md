@@ -318,3 +318,36 @@ overshoot a limit.
 - **With hard windows (slice 3).** An ABAC `require_approval` refusal takes no rate slot: the window is counted
   without the lock, an exhausted window still refuses as the rate limit (it comes first in the order), and otherwise
   the call refuses as the ABAC hold.
+
+#### Review #836 (2026-11-14)
+
+1. **A v5 forbid that validates can no longer silently never fire (blocking, ADR-0180).** The governed core decides
+   below the routes, so it does not supply `principal.sessionOrigin`, `principal.mfaCompleted`, `context.clientIp`,
+   `context.actorChain`, `context.delegationDepth` or `context.rateLimitUsagePct`, and it evaluates the sponsor as
+   `User`, never an `Agent`. Strict validation of a v5 policy now refuses it when its scope can reach `ModelInvoke`,
+   `ConnectorCall` or `A2aMessage` (conservatively: an unscoped action counts unless the resource is pinned to
+   `Tool`) and it reads one of those facts or names an `Agent` principal. The list is
+   `ABAC_GOVERNED_UNSUPPLIED_FACTS` in the kernel; an entry leaves it only in the change that threads the fact
+   through `assembleGovernedAbacRequest`. The help says to scope such a policy to `McpToolCall`, where the facts are
+   known. Versions are immutable and validated at write, and v5 shipped with this branch, so no stored version predates
+   the check.
+2. **The fix commit has tests.** A read that fails (the verdict's, a sibling's, or a sibling's first and the
+   verdict's after) denies with `governed-core-error` and no unhandled rejection; removing the `.catch` fails the
+   second case. An engine error on a governed call (a v5 policy stored past validation that errors at evaluation)
+   denies as `abac-engine-error`.
+3. **The contradicting test comment is fixed**, and `require_approval` on a queueable `ConnectorCall` has its own
+   test: it refuses, and a consent passed for the call does not release it.
+4. **The fail-closed rule for ABAC holds is in the kernel.** `composeResourceDecision` refuses an ABAC
+   `require_approval` itself, after the rate limits and the ABAC forbid, before approval rules; the chain records
+   `abac-require-approval: deny`, never `satisfied-by-approval`. The gateway wrapper is gone; the hard-window path
+   already counts a refused call's window without the lock.
+5. **No duplicate assembly.** `sponsorAndProjectFacts` reads the sponsor's principal bag and the project facts once
+   for both `assembleAbacRequest` and `assembleGovernedAbacRequest`. `AbacRequest` is a union: an MCP tool request
+   carries `resource`, a governed request carries `governed` and no placeholder tool.
+6. **The unused `AbacAction` export is removed.**
+7. **A model's price tier has its own reader** (`modelPriceTierOf`, from the per-million-input-token price), apart
+   from `priceTierOf`'s per-call price. The tiers are unchanged (unpriced, free, metered).
+8. **Preview and error code.** A policy simulation of a v5 version that can reach a governed call is never reported
+   exact: its fidelity carries the caveat that the replay re-decides recorded MCP tool decisions only, so its effect
+   on model, connector and A2A calls is not previewed. An ABAC forbid on a model dispatch answers 403 `forbidden`; a
+   rule or an ABAC hold still answers `approval_required`.

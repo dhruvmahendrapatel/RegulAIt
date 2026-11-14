@@ -56,7 +56,7 @@ const sponsor = (over: Partial<AbacRequest> = {}): AbacRequest => ({
   },
   context: { deployModes: [], environments: ["production"], rateLimitUsagePct: 0 },
   ...over,
-});
+}) as AbacRequest;
 const asAgent = (a: AbacAgentAttrs = AGENT, over: Partial<AbacRequest> = {}) =>
   sponsor({ agent: a, delegation: { actorChain: [a.id], delegationDepth: 1 }, ...over });
 
