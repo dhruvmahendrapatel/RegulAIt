@@ -15,6 +15,7 @@ import { pendingQueueQuery, pendingRows } from "../../api/approvalQueue";
 import { DECIDED_STATUSES, pendingCapNote } from "../../api/approvalQueuePages";
 import { QuestionnaireView } from "../admin/governance/UseCaseQuestionnaire";
 import { drawerEvidenceState, mergeGateParts } from "./inboxEvidence";
+import { inboxSummary } from "./inboxSummary";
 import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
 import {
@@ -96,16 +97,15 @@ export default function InboxPage() {
   const annotationsFailed = annotations.isError && !(annotations.error instanceof ApiError && (annotations.error.status === 403 || annotations.error.status === 404));
   const pending = pendingRows(q.data);
   const capNote = pendingCapNote(q.data, pending.length);
-  // Derived only from the visible, server-filtered queue; never present as a global SLA total.
-  const now = Date.now();
-  const assignedDue = pending.filter((a) => a.assignment?.dueAt && Number.isFinite(Date.parse(a.assignment.dueAt)));
-  const overdueVisible = assignedDue.filter((a) => Date.parse(a.assignment!.dueAt!) < now).length;
-  const dueSoonVisible = assignedDue.filter((a) => {
-    const due = Date.parse(a.assignment!.dueAt!);
-    return due >= now && due < now + 7 * 24 * 60 * 60 * 1000;
-  }).length;
-  const intakeVisible = pending.filter(isIntakeSignoff).length;
-  const toolVisible = pending.filter(isToolCallApproval).length;
+  // Derived only from the loaded, server-filtered queue; never an organisation-wide total. The approvals list has
+  // no server overdue flag, so due counts use this device's clock, say so, and recompute every minute.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
+  const summary = useMemo(() => inboxSummary(pending, now, isIntakeSignoff, isToolCallApproval), [pending, now]);
+  const shown = capNote ? " (shown)" : "";
   // L1: a decided item leaves the list, taking its drawer and the Review button that opened it, so focus moves to
   // the next item's Review button (the one before it when it was last), or to the page heading when none is left
   useEffect(() => {
@@ -295,20 +295,24 @@ export default function InboxPage() {
   return (
     <>
       <PageHeader
-        title="My Actions (Inbox)"
+        title="Inbox"
         info={<p>Review your assigned sign-offs, escalations, governed tool calls, budget overages and context conflicts. Each action retains its own decision and evidence safeguards.</p>}
         // only the items this person can decide are waiting on them; their own requests awaiting someone else are not
         actions={decidable > 0 ? <Badge tone="info">{`${decidable} waiting on you`}</Badge> : undefined}
       />
       <div className={v.stack}>
-        <section className={ib.overview} aria-label="Visible action queue summary">
-          <div className={ib.overviewTile}><span>Pending in visible queue</span><strong>{q.isLoading ? "—" : pending.length}</strong></div>
-          <div className={ib.overviewTile}><span>Use-case sign-offs</span><strong>{q.isLoading ? "—" : intakeVisible}</strong></div>
-          <div className={ib.overviewTile}><span>Governed tool decisions</span><strong>{q.isLoading ? "—" : toolVisible}</strong></div>
-          <div className={ib.overviewTile}><span>Due within 7 days</span><strong>{q.isLoading ? "—" : dueSoonVisible}</strong></div>
-          <div className={ib.overviewTile}><span>Past due</span><strong>{q.isLoading ? "—" : overdueVisible}</strong></div>
+        <section className={ib.overview} aria-label="Queue summary" data-testid="inbox-summary">
+          <div className={ib.overviewTile}><span>{`Pending${shown}`}</span><strong>{summary.pending}</strong></div>
+          <div className={ib.overviewTile}><span>{`Use-case sign-offs${shown}`}</span><strong>{summary.intake}</strong></div>
+          <div className={ib.overviewTile}><span>{`Governed tool decisions${shown}`}</span><strong>{summary.tool}</strong></div>
+          <div className={ib.overviewTile}><span>{`Due within 7 days${shown}`}</span><strong>{summary.dueSoon}</strong><small>by this device's clock</small></div>
+          <div className={ib.overviewTile}><span>{`Past due${shown}`}</span><strong>{summary.overdue}</strong><small>by this device's clock</small></div>
         </section>
-        <p className={v.faint}>Summary counts reflect the visible, server-filtered pending queue only; due dates appear only when assigned. They are not organisation-wide totals.</p>
+        <p className={v.faint} data-testid="inbox-summary-scope">
+          {capNote
+            ? `These counts cover the ${pending.length} items shown, a subset of your queue. They are not organisation-wide totals.`
+            : "These counts cover your pending queue only, not organisation-wide totals. Due dates count only when one is assigned."}
+        </p>
         <Card>
           {capNote && <p className={v.faint} data-testid="inbox-cap-note">{capNote}</p>}
           <div ref={list}>
