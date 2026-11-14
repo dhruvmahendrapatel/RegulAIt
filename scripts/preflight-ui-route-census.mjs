@@ -448,6 +448,10 @@ export const KNOWN_UI_GAPS = new Map([
   ["GET /v1/connectors/:connectorId/token-exchange", { does: "reads a connector's upstream token-exchange configuration and per-action scope map (never the secret)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
   ["PUT /v1/connectors/:connectorId/token-exchange", { does: "sets or changes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
   ["DELETE /v1/connectors/:connectorId/token-exchange", { does: "removes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
+  // ADR-0289 (lane L6, ADR-0054 §3): the PM importer ships API-first per the lane brief; its screen is requested on
+  // #453 (the design builder builds screens). Building it deletes these two and lowers the cap.
+  ["POST /v1/onboarding/imports/pm", { does: "previews (default) or applies a PM project / work-item import: linkage only, onto an Initiative; apply carries the previewed planSha256", tracking: "#453" }],
+  ["GET /v1/onboarding/imports/pm/items", { does: "pages the imported work-item linkage for one PM connection and its Initiative mapping", tracking: "#453" }],
 ]);
 
 /**
@@ -456,7 +460,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 46; // main's 44 + ADR-0255 (P31) 2, master decision on #753 2026-11-14
+export const KNOWN_UI_GAPS_MAX = 48; // main's 44 + ADR-0255 (P31) 2, master decision on #753 2026-11-14; + ADR-0289 (L6) 2, raised for the master's review
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 

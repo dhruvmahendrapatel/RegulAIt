@@ -607,6 +607,7 @@ import { WEB_UI_ROUTES, defaultWebDistDir, registerWebServing } from "./web-serv
 import { AUTH_EXEMPT_ROUTES, NON_ADMIN_ROUTES } from "./route-classes.js";
 import { registerOpenApiRoutes, type RouteInventoryEntry } from "./openapi.js";
 import { registerOnboardingRoutes } from "./onboarding.js";
+import { registerPmImportRoutes } from "./pm-import.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
 import { registerDiscoveryRoutes } from "./discovery-routes.js";
 import { registerContentTrustRoutes } from "./content-trust-routes.js";
@@ -6080,6 +6081,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // exactly the authority a non-admin must not reach. None appear in
   // NON_ADMIN_ROUTES.
   registerOnboardingRoutes(app, db, { dataKey: opts.dataKey });
+  registerPmImportRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0055 — SHADOW-AI DISCOVERY. Admin-only by default (nothing here is in
   // NON_ADMIN_ROUTES): uploading a customer's proxy export, editing the
   // detection catalogue and dispositioning findings are all operator authority.

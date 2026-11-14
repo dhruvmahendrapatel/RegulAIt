@@ -971,9 +971,9 @@ export function registerOnboardingRoutes(
   // answers the shared list contract; with none of them, exactly the
   // newest-`limit` response below. The plan and result blobs are never in
   // the Excel file: the list shows only the outcome.
-  const importsList: ContractList<typeof onboardingImports.$inferSelect, { kind?: "users" | "group_roles"; status?: "planned" | "applied" | "refused" }> = {
+  const importsList: ContractList<typeof onboardingImports.$inferSelect, { kind?: "users" | "group_roles" | "pm_work_items"; status?: "planned" | "applied" | "refused" }> = {
     spec: ONBOARDING_IMPORTS_LIST,
-    filters: z.object({ kind: z.enum(["users", "group_roles"]).optional(), status: z.enum(["planned", "applied", "refused"]).optional() }).strict(),
+    filters: z.object({ kind: z.enum(["users", "group_roles", "pm_work_items"]).optional(), status: z.enum(["planned", "applied", "refused"]).optional() }).strict(),
     reader: {
       fetch: (q) =>
         db
@@ -994,7 +994,7 @@ export function registerOnboardingRoutes(
     if (wantsListContract(req.query)) return answerListPage(db, req, reply, importsList);
     const q = z
       .object({
-        kind: z.enum(["users", "group_roles"]).optional(),
+        kind: z.enum(["users", "group_roles", "pm_work_items"]).optional(),
         status: z.enum(["planned", "applied", "refused"]).optional(),
         limit: z.coerce.number().int().min(1).max(200).default(50),
       })
