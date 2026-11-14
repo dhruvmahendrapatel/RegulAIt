@@ -21,7 +21,7 @@ import type { AdminAgent } from "../../../api/adminTypes";
 import type { UsageExtractorState, UsageExtractorTestResult, UsageExtractorVersion, UsageExtractorVersions, UsageField } from "../../../api/types";
 import { fmtDay } from "../../../api/format";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
-import { Badge, Button, Card, EmptyState, ErrorState, Field, Fieldset, InfoButton, Input, Select, Skeleton, SkeletonBlock, Table, Textarea } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, ErrorState, Field, Fieldset, InfoButton, Input, RowActions, Select, Skeleton, SkeletonBlock, Switch, Table, Textarea } from "../../../ui/kit";
 import { agentOpts, optionEls, useApiAction, useUsers, type ApiOutcome } from "../adminKit";
 import {
   FIELD_LABEL,
@@ -34,11 +34,14 @@ import {
   buildMapping,
   buildTestBody,
   draftFrom,
+  emptyList,
+  failureText,
   fieldsMappedLabel,
   mappedFields,
   mappingErrors,
   refusalText,
   testRows,
+  type ListDraft,
   type MappingDraft,
 } from "./usageMappingModel";
 import u from "./usageMapping.module.css";
@@ -65,8 +68,8 @@ function Refusal(props: { outcome: ApiOutcome | null; version?: number; lead?: s
       <strong>{props.lead ?? "Refused."}</strong> {errors.length ? null : o.reason}
       {errors.length > 0 && (
         <ul>
-          {errors.map((e) => (
-            <li key={e}>{e}</li>
+          {errors.map((e, i) => (
+            <li key={`${i}-${e}`}>{e}</li>
           ))}
         </ul>
       )}
@@ -130,16 +133,7 @@ export function UsageMappingCard(props: { agents: AdminAgent[] }) {
     <div className={u.switchBox}>
       <div className={u.switchRow}>
         <span id="usage-switch-label">Use custom mappings</span>
-        <button
-          type="button"
-          role="switch"
-          className={u.switch}
-          aria-checked={enabled}
-          aria-labelledby="usage-switch-label"
-          aria-describedby="usage-switch-note"
-          disabled={switchAct.busy}
-          onClick={() => setSwitch(!enabled)}
-        />
+        <Switch checked={enabled} onChange={setSwitch} labelledBy="usage-switch-label" describedBy="usage-switch-note" busy={switchAct.busy} />
       </div>
       <p id="usage-switch-note" className={u.switchNote}>
         {enabled
@@ -206,7 +200,7 @@ export function UsageMappingCard(props: { agents: AdminAgent[] }) {
                       </span>
                     ) : (
                       <span>
-                        <Badge tone="danger">✕ Failed</Badge> {x.latestTest.failure ?? ""}
+                        <Badge tone="danger">✕ Failed</Badge> {failureText(x.latestTest.failure)}
                       </span>
                     ),
                 },
@@ -221,26 +215,35 @@ export function UsageMappingCard(props: { agents: AdminAgent[] }) {
                     const whyId = `usage-why-${x.id}`;
                     return (
                       <div className={u.actions}>
-                        <div className={u.actionButtons}>
-                          <Button size="sm" onClick={() => (setTestingId(x.id), setEditing(false))} aria-label={`${x.latestTest ? "Test again" : "Run a sample test"}: version ${x.version}`}>
-                            {x.latestTest ? "Test again" : "Run a sample test"}
-                          </Button>
-                          {x.id === activeId ? (
-                            <Button size="sm" variant="danger" disabled={rowAct.busy} onClick={deactivate} aria-label={`Deactivate version ${x.version}`}>
-                              Deactivate
+                        {/* the kit's fixed slots (X7): Activate always in the primary slot, Deactivate in the last */}
+                        <RowActions
+                          slot="6rem"
+                          primary={
+                            x.id === activeId ? null : (
+                              <Button
+                                size="sm"
+                                busy={!gate.allowed || rowAct.busy}
+                                aria-describedby={gate.reason ? whyId : undefined}
+                                aria-label={`Activate version ${x.version}`}
+                                onClick={() => activate(x)}
+                              >
+                                Activate
+                              </Button>
+                            )
+                          }
+                          secondary={
+                            <Button size="sm" onClick={() => (setTestingId(x.id), setEditing(false))} aria-label={`${x.latestTest ? "Test again" : "Run a sample test"}: version ${x.version}`}>
+                              {x.latestTest ? "Test again" : "Run a sample test"}
                             </Button>
-                          ) : (
-                            <Button
-                              size="sm"
-                              disabled={!gate.allowed || rowAct.busy}
-                              aria-describedby={gate.reason ? whyId : undefined}
-                              aria-label={`Activate version ${x.version}`}
-                              onClick={() => activate(x)}
-                            >
-                              Activate
-                            </Button>
-                          )}
-                        </div>
+                          }
+                          rest={
+                            x.id === activeId ? (
+                              <Button size="sm" variant="danger" busy={rowAct.busy} onClick={deactivate} aria-label={`Deactivate version ${x.version}`}>
+                                Deactivate
+                              </Button>
+                            ) : null
+                          }
+                        />
                         {x.id !== activeId && gate.reason && (
                           <span id={whyId} className={u.why}>
                             {gate.reason}
@@ -257,7 +260,8 @@ export function UsageMappingCard(props: { agents: AdminAgent[] }) {
         <Refusal outcome={rowAct.outcome} version={rowVersion} />
         {!editing && (
           <div className={u.footRow}>
-            <Button variant="primary" onClick={() => (setEditing(true), setTestingId(null))}>
+            {/* one primary at a time: while a test panel is open its "Activate version N…" is the primary action */}
+            <Button variant={testing ? "default" : "primary"} onClick={() => (setEditing(true), setTestingId(null))}>
               New version
             </Button>
             <span className={u.lead}>Activating a version needs a step-up (re-enter your second factor) and is recorded in the audit log.</span>
@@ -388,7 +392,10 @@ function MappingEditor(props: {
   const [problems, setProblems] = useState<string[]>([]);
   const save = useApiAction();
   const setSource = (f: UsageField, value: string) => setDraft((d) => ({ ...d, sources: { ...d.sources, [f]: value } }));
-  const setList = (patch: Partial<MappingDraft["list"]>) => setDraft((d) => ({ ...d, list: { ...d.list, ...patch } }));
+  const setList = (i: number, patch: Partial<ListDraft>) =>
+    setDraft((d) => ({ ...d, lists: d.lists.map((l, j) => (j === i ? { ...l, ...patch } : l)) }));
+  const addList = () => setDraft((d) => ({ ...d, lists: [...d.lists, emptyList()] }));
+  const removeList = (i: number) => setDraft((d) => ({ ...d, lists: d.lists.length > 1 ? d.lists.filter((_, j) => j !== i) : [emptyList()] }));
   const fieldInput = (f: UsageField) => (
     <Field key={f} label={`${FIELD_LABEL[f]}${REQUIRED_FIELDS.includes(f) ? " (required)" : ""}`}>
       <Input className={u.mono} value={draft.sources[f]} placeholder="not reported" spellCheck={false} onChange={(e) => setSource(f, e.target.value)} />
@@ -428,48 +435,63 @@ function MappingEditor(props: {
                 <option value="text_only">Text only (image and audio are added)</option>
               </Select>
             </Field>
-            <Fieldset legend="Sum over a list">
-              <p className={u.lead}>For usage reported as a list by modality: pick the list, the value pointer, and which entries count.</p>
-              <div className={u.countGrid}>
-                <Field label="Count it gives">
-                  <Select value={draft.list.field} onChange={(e) => setList({ field: e.target.value as UsageField | "" })}>
-                    <option value="">— none —</option>
-                    {USAGE_FIELDS.map((f) => (
-                      <option key={f} value={f}>
-                        {FIELD_LABEL[f]}
-                      </option>
-                    ))}
-                  </Select>
-                </Field>
-                <Field label="List pointer">
-                  <Input className={u.mono} value={draft.list.array} spellCheck={false} onChange={(e) => setList({ array: e.target.value })} />
-                </Field>
-                <Field label="Value pointer (in each entry)">
-                  <Input className={u.mono} value={draft.list.value} spellCheck={false} onChange={(e) => setList({ value: e.target.value })} />
-                </Field>
-                <Field label="Only entries where (pointer)">
-                  <Input className={u.mono} value={draft.list.wherePointer} spellCheck={false} onChange={(e) => setList({ wherePointer: e.target.value })} />
-                </Field>
-                <Field label="equals one of (comma-separated)">
-                  <Input value={draft.list.equals} spellCheck={false} onChange={(e) => setList({ equals: e.target.value })} />
-                </Field>
-              </div>
-            </Fieldset>
+            <p className={u.lead}>For usage reported as a list by modality: pick the list, the value pointer, and which entries count. Each count can have its own sum.</p>
+            {draft.lists.map((l, i) => {
+              const legend = draft.lists.length > 1 ? `Sum over a list ${i + 1}` : "Sum over a list";
+              return (
+                <Fieldset key={i} legend={legend}>
+                  <div className={u.countGrid}>
+                    <Field label="Count it gives">
+                      <Select value={l.field} onChange={(e) => setList(i, { field: e.target.value as UsageField | "" })}>
+                        <option value="">— none —</option>
+                        {USAGE_FIELDS.map((f) => (
+                          <option key={f} value={f}>
+                            {FIELD_LABEL[f]}
+                          </option>
+                        ))}
+                      </Select>
+                    </Field>
+                    <Field label="List pointer">
+                      <Input className={u.mono} value={l.array} spellCheck={false} onChange={(e) => setList(i, { array: e.target.value })} />
+                    </Field>
+                    <Field label="Value pointer (in each entry)">
+                      <Input className={u.mono} value={l.value} spellCheck={false} onChange={(e) => setList(i, { value: e.target.value })} />
+                    </Field>
+                    <Field label="Only entries where (pointer)">
+                      <Input className={u.mono} value={l.wherePointer} spellCheck={false} onChange={(e) => setList(i, { wherePointer: e.target.value })} />
+                    </Field>
+                    <Field label="equals one of (comma-separated)">
+                      <Input value={l.equals} spellCheck={false} onChange={(e) => setList(i, { equals: e.target.value })} />
+                    </Field>
+                  </div>
+                  {draft.lists.length > 1 && (
+                    <Button size="sm" variant="ghost" onClick={() => removeList(i)} aria-label={`Remove ${legend.toLowerCase()}`}>
+                      Remove this sum
+                    </Button>
+                  )}
+                </Fieldset>
+              );
+            })}
+            <div>
+              <Button size="sm" onClick={addList}>
+                Add a sum over a list
+              </Button>
+            </div>
           </div>
         </details>
         {problems.length > 0 && (
           <div className={`${u.notice} ${u.danger}`} role="alert">
             <strong>Cannot save yet:</strong>
             <ul>
-              {problems.map((p) => (
-                <li key={p}>{p}</li>
+              {problems.map((p, i) => (
+                <li key={`${i}-${p}`}>{p}</li>
               ))}
             </ul>
           </div>
         )}
         <Refusal outcome={save.outcome} lead="Cannot save yet:" />
         <div className={u.footRow}>
-          <Button type="submit" variant="primary" disabled={save.busy}>
+          <Button type="submit" variant="primary" busy={save.busy}>
             Save version {props.version}
           </Button>
           <Button onClick={props.onCancel}>Cancel</Button>
@@ -540,7 +562,7 @@ function TestPanel(props: { agentId: string; version: UsageExtractorVersion; isA
         )}
         <Refusal outcome={test.outcome} lead="Not tested." />
         <div className={u.footRow}>
-          <Button type="submit" disabled={test.busy}>
+          <Button type="submit" busy={test.busy}>
             Run test
           </Button>
           <Button variant="ghost" onClick={props.onClose}>
@@ -555,7 +577,7 @@ function TestPanel(props: { agentId: string; version: UsageExtractorVersion; isA
               ? props.isActive
                 ? `✓ Passed — version ${v.version} is the active version`
                 : `✓ Passed — version ${v.version} can be activated`
-              : `✕ Failed — ${result.failure ?? "the counts differ"}`}
+              : `✕ Failed — ${failureText(result.failure) || "the counts differ"}`}
           </p>
           <Table
             rows={rows}
@@ -573,7 +595,7 @@ function TestPanel(props: { agentId: string; version: UsageExtractorVersion; isA
         <div className={u.footRow}>
           <Button
             variant="primary"
-            disabled={act.busy}
+            busy={act.busy}
             onClick={() =>
               void act.run(
                 () => withStepUp((h) => stepUpApi.post(`/v1/agents/${props.agentId}/usage-extractor/versions/${v.id}/activate`, {}, h)),

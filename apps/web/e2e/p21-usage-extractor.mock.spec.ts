@@ -193,8 +193,12 @@ test.describe("ADR-0241 (P21): usage counts — custom mapping", () => {
     await expect(v1).toContainText("Not tested");
     await expect(v1.getByRole("button", { name: "Run a sample test: version 1" })).toBeVisible();
 
-    // Activate is disabled until the version's latest test passed, and says why beside it
-    await expect(card.getByRole("button", { name: "Activate version 2" })).toBeDisabled();
+    // Activate is not allowed until the version's latest test passed, and says why beside it; it stays focusable
+    // (aria-disabled, review of #744) and a click does nothing
+    await expect(card.getByRole("button", { name: "Activate version 2" })).toHaveAttribute("aria-disabled", "true");
+    await expect(card.getByRole("button", { name: "Activate version 2" })).not.toHaveAttribute("disabled", "");
+    await card.getByRole("button", { name: "Activate version 2" }).click({ force: true });
+    expect(calls.some((c) => c.path.endsWith("/activate"))).toBe(false);
     await expect(card.getByRole("button", { name: "Activate version 2" })).toHaveAccessibleDescription("Activates only after its latest test passed");
     await expect(v2.getByText("Activates only after its latest test passed")).toBeVisible();
 
@@ -262,11 +266,13 @@ test.describe("ADR-0241 (P21): usage counts — custom mapping", () => {
     await panel.getByLabel("Cache read").fill("600");
     await panel.getByRole("button", { name: "Run test" }).click();
     const result = panel.getByRole("status");
-    await expect(result).toContainText("✕ Failed — the mapping's counts differ from the expected counts for: outputTokens");
+    // the gateway's field name reads in the card's words (review of #744)
+    await expect(result).toContainText("✕ Failed — the mapping's counts differ from the expected counts for: text out");
+    await expect(result).not.toContainText("outputTokens");
     await expect(result.getByRole("row").filter({ hasText: "Text out" })).toContainText("200");
     await expect(result.getByRole("row").filter({ hasText: "Text out" })).toContainText("212");
     await expect(result.getByRole("row").filter({ hasText: "Text out" })).toContainText("✕ differs");
-    await expect(card.getByRole("button", { name: "Activate version 3", exact: true })).toBeDisabled();
+    await expect(card.getByRole("button", { name: "Activate version 3", exact: true })).toHaveAttribute("aria-disabled", "true");
     await expect(panel.getByRole("button", { name: /^Activate version 3…/ })).toHaveCount(0);
 
     // the exact counts pass, and the version can now be activated
@@ -278,7 +284,9 @@ test.describe("ADR-0241 (P21): usage counts — custom mapping", () => {
       await expect(row).toContainText(n);
       await expect(row).toContainText("✓ match");
     }
-    await expect(card.getByRole("button", { name: "Activate version 3", exact: true })).toBeEnabled();
+    await expect(card.getByRole("button", { name: "Activate version 3", exact: true })).not.toHaveAttribute("aria-disabled", "true");
+    // one primary action at a time: with the test panel open, "New version" steps back
+    await expect(card.getByRole("button", { name: "New version" })).not.toHaveClass(/Primary/);
     const sent = calls.filter((c) => c.path.endsWith("/test")).at(-1)!.body as { expected: unknown };
     expect(sent.expected).toEqual({ inputTokens: 1840, outputTokens: 212, cacheReadInputTokens: 600 });
     await expectAxeClean(page, "Usage counts: a passed test");
@@ -301,7 +309,7 @@ test.describe("ADR-0241 (P21): usage counts — custom mapping", () => {
     expect(calls.some((c) => c.method === "POST" && c.path === `/v1/agents/${TRIAGE}/usage-extractor/deactivate`)).toBe(true);
   });
 
-  test("a 409 on activate says the step-up was not used; a 413 names the sample bound", async ({ page }) => {
+  test("a 409 on activate says the latest test has not passed; a 413 names the sample bound", async ({ page }) => {
     const { calls, versions } = await mockApi(page, { activate409: true, sample413: true });
     // the list says version 2 passed, but the gateway's own check refuses it (the latest test changed meanwhile)
     versions[0]!.latestTest = { id: "t-2b", versionId: V2, passed: true, failure: null, testedAt: NOW };
@@ -310,7 +318,7 @@ test.describe("ADR-0241 (P21): usage counts — custom mapping", () => {
     await card.getByRole("button", { name: "Activate version 2" }).click();
     await expect(card.getByText("Not activated.")).toBeVisible();
     await expect(card.getByRole("alert").filter({ hasText: "Not activated." })).toContainText(
-      "Version 2's latest test did not pass. Run a passing test first; your step-up was not used.",
+      "Version 2's latest test has not passed. Run a passing test, then activate it again.",
     );
     // so no prompt was opened and no grant was asked for
     await expect(page.getByRole("dialog", { name: "Confirm it's you" })).toHaveCount(0);
@@ -326,6 +334,50 @@ test.describe("ADR-0241 (P21): usage counts — custom mapping", () => {
     await expect(panel.getByRole("alert")).toContainText("Sample too large. A sample is at most 1 MB of JSON.");
     expect(calls.filter((c) => c.path.endsWith("/test"))).toHaveLength(1);
     await expectAxeClean(page, "Usage counts: refusals");
+  });
+
+  test("review of #744: two counts each read as a sum over the same list are both saved", async ({ page }) => {
+    const { calls } = await mockApi(page);
+    const card = await openTriage(page);
+    await card.getByRole("button", { name: "New version" }).click();
+    const editor = card.getByRole("region", { name: /Where the counts are — version 3/ });
+    await editor.getByLabel("Text in (required)").fill("/usage/promptTokenCount");
+    await editor.getByLabel("Text out (required)").fill("/usage/candidatesTokenCount");
+    await editor.getByText("Image out, audio out, and sums over a list").click();
+    const first = editor.getByRole("group", { name: "Sum over a list" });
+    await first.getByLabel("Count it gives").selectOption("imageInputTokens");
+    await first.getByLabel("List pointer").fill("/usage/promptTokensDetails");
+    await first.getByLabel("Value pointer (in each entry)").fill("/tokenCount");
+    await first.getByLabel("Only entries where (pointer)").fill("/modality");
+    await first.getByLabel("equals one of (comma-separated)").fill("IMAGE");
+    await editor.getByRole("button", { name: "Add a sum over a list" }).click();
+    const second = editor.getByRole("group", { name: "Sum over a list 2" });
+    await second.getByLabel("Count it gives").selectOption("audioInputTokens");
+    await second.getByLabel("List pointer").fill("/usage/promptTokensDetails");
+    await second.getByLabel("Value pointer (in each entry)").fill("/tokenCount");
+    await second.getByLabel("Only entries where (pointer)").fill("/modality");
+    await second.getByLabel("equals one of (comma-separated)").fill("AUDIO");
+    await expectAxeClean(page, "Usage counts: two sums over a list");
+    await editor.getByRole("button", { name: "Save version 3" }).click();
+    await expect(card.getByRole("region", { name: /Test version 3 against a sample response/ })).toBeVisible();
+    const saved = calls.filter((c) => c.method === "POST" && c.path.endsWith("/usage-extractor/versions")).at(-1)!.body as {
+      mapping: { fields: Record<string, unknown> };
+    };
+    expect(saved.mapping.fields.imageInputTokens).toEqual({
+      arraySum: { array: "/usage/promptTokensDetails", value: "/tokenCount", where: { pointer: "/modality", equals: ["IMAGE"] } },
+    });
+    expect(saved.mapping.fields.audioInputTokens).toEqual({
+      arraySum: { array: "/usage/promptTokensDetails", value: "/tokenCount", where: { pointer: "/modality", equals: ["AUDIO"] } },
+    });
+  });
+
+  test("review of #744: at 390px the card with its versions table never scrolls the page sideways", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockApi(page);
+    const card = await openTriage(page);
+    await expect(card.getByRole("button", { name: "Activate version 2" })).toBeVisible();
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    expect(overflow, "horizontal page overflow in px").toBeLessThanOrEqual(0);
   });
 
   test("a failed read shows the error with Retry; an agent with no versions shows the empty state", async ({ page }) => {

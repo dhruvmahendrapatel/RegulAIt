@@ -40,21 +40,37 @@ export const MORE_FIELDS: readonly UsageField[] = ["imageOutputTokens", "audioOu
 /** the gateway's sample bound (SAMPLE_MAX_BYTES), for the copy only: the server decides */
 export const SAMPLE_MAX_LABEL = "1 MB";
 
+/** one count read as a sum over a list (e.g. usage reported per modality) */
+export interface ListDraft {
+  field: UsageField | "";
+  array: string;
+  value: string;
+  wherePointer: string;
+  equals: string;
+}
+
 export interface MappingDraft {
   /** one text box per count: a pointer, or pointers joined by " + " */
   sources: Record<UsageField, string>;
   totalsInclude: "all" | "text_only";
-  /** one count read as a sum over a list (e.g. usage reported per modality) */
-  list: { field: UsageField | ""; array: string; value: string; wherePointer: string; equals: string };
+  /**
+   * The sums over a list, one per count (review of #744): the gateway allows an `arraySum` on each field, and a
+   * per-modality usage list needs one per modality (image in and audio in sum the same list with a different `where`).
+   */
+  lists: ListDraft[];
 }
+
+export const emptyList = (): ListDraft => ({ field: "", array: "", value: "", wherePointer: "", equals: "" });
 
 export function emptyDraft(): MappingDraft {
   return {
     sources: Object.fromEntries(USAGE_FIELDS.map((f) => [f, ""])) as Record<UsageField, string>,
     totalsInclude: "all",
-    list: { field: "", array: "", value: "", wherePointer: "", equals: "" },
+    lists: [emptyList()],
   };
 }
+
+const listUsed = (l: ListDraft) => l.field !== "" || [l.array, l.value, l.wherePointer, l.equals].some((x) => x.trim() !== "");
 
 /** a text box's source: empty = not reported; " + " between pointers = their sum; else one pointer, as typed */
 export function sourceOf(raw: string): UsageSource | undefined {
@@ -84,21 +100,25 @@ export function buildMapping(draft: MappingDraft): { mapping: UsageMapping } | {
     const src = sourceOf(draft.sources[f]);
     if (src) fields[f] = src;
   }
-  const l = draft.list;
-  const listUsed = l.field !== "" || [l.array, l.value, l.wherePointer, l.equals].some((x) => x.trim() !== "");
-  if (listUsed) {
-    if (l.field === "") errors.push("Sum over a list: choose the count it gives.");
-    if (l.array.trim() === "") errors.push("Sum over a list: enter the pointer to the list.");
-    if (l.value.trim() === "") errors.push("Sum over a list: enter the pointer to each entry's value.");
+  const listFields = new Set<UsageField>();
+  draft.lists.forEach((l, i) => {
+    if (!listUsed(l)) return;
+    const name = draft.lists.filter(listUsed).length > 1 ? `Sum over a list ${i + 1}` : "Sum over a list";
+    const before = errors.length;
+    if (l.field === "") errors.push(`${name}: choose the count it gives.`);
+    if (l.array.trim() === "") errors.push(`${name}: enter the pointer to the list.`);
+    if (l.value.trim() === "") errors.push(`${name}: enter the pointer to each entry's value.`);
     const equals = l.equals
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean);
     if ((l.wherePointer.trim() === "") !== (equals.length === 0)) {
-      errors.push("Sum over a list: to count only some entries, enter both the pointer and the values it must equal.");
+      errors.push(`${name}: to count only some entries, enter both the pointer and the values it must equal.`);
     }
-    if (l.field !== "" && fields[l.field]) errors.push(`${FIELD_LABEL[l.field]} has a pointer and a sum over a list: keep one.`);
-    if (l.field !== "" && errors.length === 0) {
+    if (l.field !== "" && fields[l.field] && !listFields.has(l.field)) errors.push(`${FIELD_LABEL[l.field]} has a pointer and a sum over a list: keep one.`);
+    if (l.field !== "" && listFields.has(l.field)) errors.push(`${FIELD_LABEL[l.field]} has two sums over a list: keep one.`);
+    if (l.field !== "" && errors.length === before) {
+      listFields.add(l.field);
       fields[l.field] = {
         arraySum: {
           array: l.array.trim(),
@@ -107,8 +127,8 @@ export function buildMapping(draft: MappingDraft): { mapping: UsageMapping } | {
         },
       };
     }
-  }
-  for (const f of REQUIRED_FIELDS) if (!fields[f] && l.field !== f) errors.push(`${FIELD_LABEL[f]} is required.`);
+  });
+  for (const f of REQUIRED_FIELDS) if (!fields[f] && !draft.lists.some((l) => l.field === f)) errors.push(`${FIELD_LABEL[f]} is required.`);
   if (errors.length) return { errors };
   return {
     mapping: {
@@ -124,19 +144,22 @@ export function draftFrom(mapping: UsageMapping | null | undefined): MappingDraf
   const d = emptyDraft();
   if (!mapping?.fields) return d;
   d.totalsInclude = mapping.totalsInclude === "text_only" ? "text_only" : "all";
+  const lists: ListDraft[] = [];
   for (const f of USAGE_FIELDS) {
     const src = mapping.fields[f];
     if (!src) continue;
     if ("arraySum" in src) {
-      d.list = {
+      // every list sum is kept, one row each: none is dropped (a dropped count would test as 0 and go unpriced)
+      lists.push({
         field: f,
         array: src.arraySum.array,
         value: src.arraySum.value,
         wherePointer: src.arraySum.where?.pointer ?? "",
         equals: src.arraySum.where?.equals.join(", ") ?? "",
-      };
+      });
     } else d.sources[f] = sourceText(src);
   }
+  if (lists.length) d.lists = lists;
   return d;
 }
 
@@ -170,7 +193,10 @@ export function buildTestBody(
   const expected: Partial<Record<UsageField, number>> = {};
   const asked = USAGE_FIELDS.filter((f) => fields.includes(f) || REQUIRED_FIELDS.includes(f));
   for (const f of asked) {
-    const raw = (expectedText[f] ?? "").trim().replaceAll(",", "");
+    const typed = (expectedText[f] ?? "").trim();
+    // commas only as thousands separators ("1,840"); "1,8,4,0" is not a count
+    if (typed.includes(",") && !/^\d{1,3}(,\d{3})+$/.test(typed)) return { error: `${FIELD_LABEL[f]}: a count is a whole number of tokens.` };
+    const raw = typed.replaceAll(",", "");
     if (raw === "") {
       if (REQUIRED_FIELDS.includes(f)) return { error: `Enter the ${FIELD_LABEL[f].toLowerCase()} count the sample should give.` };
       continue;
@@ -208,16 +234,20 @@ export function activation(version: Pick<UsageExtractorVersion, "latestTest">): 
   return version.latestTest?.passed ? { allowed: true, reason: null } : { allowed: false, reason: "Activates only after its latest test passed" };
 }
 
-/** a server refusal from the card's writes, in the card's words; `null` = show the gateway's own sentence */
+/**
+ * A server refusal from the card's writes, in the card's words; `null` = show the gateway's own sentence. Matched on
+ * the gateway's `code` only (review of #744): the activate route also answers `sample_test_required` from its
+ * re-check under the row lock, after the step-up was used, so the words never say whether the grant was spent.
+ */
 export function refusalText(
   code: string | null,
   status: number | null,
   ctx: { version?: number } = {},
 ): { title: string; body: string } | null {
-  if (code === "sample_test_required" || (status === 409 && ctx.version !== undefined)) {
+  if (code === "sample_test_required") {
     return {
       title: "Not activated.",
-      body: `${ctx.version !== undefined ? `Version ${ctx.version}'s` : "This version's"} latest test did not pass. Run a passing test first; your step-up was not used.`,
+      body: `${ctx.version !== undefined ? `Version ${ctx.version}'s` : "This version's"} latest test has not passed. Run a passing test, then activate it again.`,
     };
   }
   if (code === "sample_too_large" || status === 413) {
@@ -230,4 +260,13 @@ export function refusalText(
 export function mappingErrors(payload: Record<string, unknown> | null | undefined): string[] {
   const errs = payload?.errors;
   return Array.isArray(errs) ? errs.filter((e): e is string => typeof e === "string") : [];
+}
+
+/**
+ * The gateway's failure sentence with its field names in the card's words ("expected counts for: outputTokens" reads
+ * "expected counts for: text out"), so no raw field name reaches the copy
+ */
+export function failureText(failure: string | null | undefined): string {
+  if (!failure) return "";
+  return USAGE_FIELDS.reduce((text, f) => text.replace(new RegExp(`\\b${f}\\b`, "g"), FIELD_LABEL[f].toLowerCase()), failure);
 }
