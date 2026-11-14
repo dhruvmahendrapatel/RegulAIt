@@ -60,6 +60,7 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.agents, ["name"]],
   [s.a2aAgents, ["name"]],
   [s.a2aAgentCredentials, ["headerName"]],
+  [s.a2aGatewayConnections, ["name"]],
   // ADR-0236 (P11): governed MCP bundles
   [s.mcpBundles, ["name", "description"]],
   [s.builderAgents, ["name", "description"]],

@@ -435,6 +435,15 @@ export const KNOWN_UI_GAPS = new Map([
   ["GET /v1/a2a/agents/:agentId/revocations", { does: "lists the people whose role-derived access to a remote agent is revoked", tracking: "Lane L2 (ADR-0219 follow-up, P10): the brief is API-only; the remote-agent role-grant and revocation controls are posted on #453 for the design builder" }],
   ["POST /v1/a2a/agents/:agentId/revocations", { does: "revokes one person's role-derived access to a remote agent (audited)", tracking: "Lane L2 (ADR-0219 follow-up, P10): the brief is API-only; the remote-agent role-grant and revocation controls are posted on #453 for the design builder" }],
   ["DELETE /v1/a2a/agents/:agentId/revocations/:userId", { does: "lifts a revocation (settings_relax step-up, audited)", tracking: "Lane L2 (ADR-0219 follow-up, P10): the brief is API-only; the remote-agent role-grant and revocation controls are posted on #453 for the design builder" }],
+  ["GET /v1/a2a/gateway-connections", { does: "lists the agent gateway connections (never the client secret)", tracking: "Lane L2 (ADR-0231 B3): the brief is API-only; the Connect SAP Agent Gateway panel and import picker are slice B5, posted on #453 for the design builder" }],
+  ["POST /v1/a2a/gateway-connections", { does: "connects an agent gateway (SAP Agent Gateway; settings_relax step-up, audited)", tracking: "Lane L2 (ADR-0231 B3): the brief is API-only; the Connect SAP Agent Gateway panel and import picker are slice B5, posted on #453 for the design builder" }],
+  ["PATCH /v1/a2a/gateway-connections/:connectionId", { does: "turns a connection on or off, or rotates its client secret (step-up to widen, audited)", tracking: "Lane L2 (ADR-0231 B3): the brief is API-only; the Connect SAP Agent Gateway panel and import picker are slice B5, posted on #453 for the design builder" }],
+  ["DELETE /v1/a2a/gateway-connections/:connectionId", { does: "removes a connection and turns its imported agents off (step-up, audited)", tracking: "Lane L2 (ADR-0231 B3): the brief is API-only; the Connect SAP Agent Gateway panel and import picker are slice B5, posted on #453 for the design builder" }],
+  ["POST /v1/a2a/gateway-connections/:connectionId/import", { does: "reads the gateway's ARD catalogue and lists the A2A agents it offers; registers nothing", tracking: "Lane L2 (ADR-0231 B3): the brief is API-only; the Connect SAP Agent Gateway panel and import picker are slice B5, posted on #453 for the design builder" }],
+  ["POST /v1/a2a/gateway-connections/:connectionId/agents", { does: "registers one catalogue agent the admin picked (audited; nobody may call it until granted)", tracking: "Lane L2 (ADR-0231 B3): the brief is API-only; the Connect SAP Agent Gateway panel and import picker are slice B5, posted on #453 for the design builder" }],
+  ["POST /v1/a2a/gateway-connections/:connectionId/refresh", { does: "re-reads the catalogue: a changed card is held for review, a gone agent is turned off", tracking: "Lane L2 (ADR-0231 B3): the brief is API-only; the Connect SAP Agent Gateway panel and import picker are slice B5, posted on #453 for the design builder" }],
+  ["POST /v1/a2a/agents/:agentId/pending-card/accept", { does: "accepts a changed card (settings_relax step-up when it widens, audited)", tracking: "Lane L2 (ADR-0231 B3): the brief is API-only; the Connect SAP Agent Gateway panel and import picker are slice B5, posted on #453 for the design builder" }],
+  ["DELETE /v1/a2a/agents/:agentId/pending-card", { does: "rejects a changed card; the stored card stays (audited)", tracking: "Lane L2 (ADR-0231 B3): the brief is API-only; the Connect SAP Agent Gateway panel and import picker are slice B5, posted on #453 for the design builder" }],
 ]);
 
 /**
@@ -443,7 +452,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 50;
+export const KNOWN_UI_GAPS_MAX = 59;
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 
