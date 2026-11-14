@@ -171,12 +171,18 @@ function FeedList(props: { title: string; edges: FeedEdgeView[]; direction: "out
 /**
  * The summary tiles count exactly the rows the table is showing. The table reports what it renders, so a failed
  * read clears the counts (they show "—", never the previous page's numbers) and an emptied list counts zero.
+ * DataList rebuilds its rows array on every render in "All" mode, so the report is keyed on the counts themselves
+ * (a string), never on the array reference: an unchanged summary never sets state again (#780 review).
  */
-const ShownRowsContext = createContext<(rows: InventoryAgent[] | null) => void>(() => undefined);
+type InventorySummary = ReturnType<typeof summaryOf>;
+const ShownSummaryContext = createContext<(summary: InventorySummary | null) => void>(() => undefined);
 function ReportingTable(props: TableProps<InventoryAgent>) {
-  const report = useContext(ShownRowsContext);
-  const rows = props.error ? null : props.loading ? null : (props.rows ?? null);
-  useEffect(() => report(rows), [report, rows]);
+  const report = useContext(ShownSummaryContext);
+  const rows = props.error || props.loading ? null : (props.rows ?? null);
+  const summary = rows ? summaryOf(rows) : null;
+  const key = summary ? JSON.stringify(summary) : "";
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the counts, see above
+  useEffect(() => report(summary), [report, key]);
   return <Table {...props} />;
 }
 
@@ -184,7 +190,7 @@ function summaryOf(rows: InventoryAgent[]) {
   return {
     agents: rows.length,
     active: rows.filter((a) => a.lifecycle.status === "active").length,
-    unowned: rows.filter((a) => a.ownership !== "owned").length,
+    unowned: rows.filter((a) => a.ownership === "unowned" || a.ownership === "orphaned").length,
     overreach: rows.filter((a) => a.alignment?.overreach).length,
     openRisks: rows.reduce((n, a) => n + a.links.openRisks, 0),
   };
@@ -193,8 +199,7 @@ function summaryOf(rows: InventoryAgent[]) {
 export default function InventoryPage() {
   // ADR-0226: the registered agents page on the server; the window comes with each page
   const [days, setDays] = useState(90);
-  const [shownAgents, setShownAgents] = useState<InventoryAgent[] | null>(null);
-  const summary = shownAgents ? summaryOf(shownAgents) : null;
+  const [summary, setSummary] = useState<InventorySummary | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
   const detail = useQuery({
     queryKey: ["admin", "inventory", openId],
@@ -218,7 +223,8 @@ export default function InventoryPage() {
         }
       />
       <div className={v.stack}>
-        <section aria-label="Summary of the agents on this page" className={inv.overview} data-testid="inventory-summary">
+        <section aria-label="Summary of the agents on this page" data-testid="inventory-summary">
+          <dl className={inv.overview}>
           {([
             ["agents", "Agents on this page"],
             ["active", "Active on this page"],
@@ -227,17 +233,18 @@ export default function InventoryPage() {
             ["openRisks", "Open linked risks on this page"],
           ] as const).map(([key, label]) => (
             <div key={key} className={inv.tile}>
-              <span>{label}</span>
-              <strong>{summary ? summary[key] : "—"}</strong>
+              <dt>{label}</dt>
+              <dd>{summary ? summary[key] : "—"}</dd>
             </div>
           ))}
+          </dl>
         </section>
         <p className={v.faint} data-testid="inventory-summary-scope">
           These figures count only the agents shown in the table below, not the whole inventory. Lifecycle, grants and
           observed usage stay distinct.
         </p>
           <Card title="Registered agents" flush>
-            <ShownRowsContext.Provider value={setShownAgents}>
+            <ShownSummaryContext.Provider value={setSummary}>
               <DataList<InventoryAgent>
                 table={ReportingTable}
                 listId="inventory-agents"
@@ -379,7 +386,7 @@ export default function InventoryPage() {
                   },
                 ]}
               />
-            </ShownRowsContext.Provider>
+            </ShownSummaryContext.Provider>
           </Card>
 
         {openId && (

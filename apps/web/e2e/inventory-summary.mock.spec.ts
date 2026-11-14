@@ -54,7 +54,7 @@ const tile = (page: Page, label: string) => summary(page).locator("div").filter(
 
 async function expectCounts(page: Page, counts: [number | string, number | string, number | string, number | string, number | string]) {
   const labels = ["Agents on this page", "Active on this page", "Unowned or orphaned on this page", "Grant overreach on this page", "Open linked risks on this page"];
-  for (let i = 0; i < labels.length; i++) await expect(tile(page, labels[i]!).locator("strong")).toHaveText(String(counts[i]));
+  for (let i = 0; i < labels.length; i++) await expect(tile(page, labels[i]!).locator("dd")).toHaveText(String(counts[i]));
 }
 
 test.describe("agent inventory summary tiles", () => {
@@ -97,6 +97,33 @@ test.describe("agent inventory summary tiles", () => {
     await expectCounts(page, ["—", "—", "—", "—", "—"]);
   });
 
+  test("\"All\" rows per page counts every loaded row without a render loop", async ({ page }) => {
+    const errors: string[] = [];
+    page.on("console", (m) => { if (m.type() === "error") errors.push(m.text()); });
+    page.on("pageerror", (e) => errors.push(e.message));
+    let reads = 0;
+    await mockApi(page, (url) => {
+      reads++;
+      return {
+        status: 200,
+        body: url.searchParams.get("cursor") === "p2" ? { agents: PAGE2 } : { agents: PAGE1, nextCursor: "p2" },
+      };
+    });
+    await page.goto("/ui/admin/inventory");
+    await expectCounts(page, [4, 3, 2, 1, 3]);
+    await page.getByRole("combobox").filter({ has: page.locator("option[value='all']") }).selectOption("all");
+    // both chunks load (the second through the scroll sentinel or the fallback button)
+    const more = page.getByRole("button", { name: /^Load next/ });
+    if (await more.isVisible().catch(() => false)) await more.click();
+    await expectCounts(page, [5, 3, 2, 1, 3]);
+    // still responsive: the heading is reachable and no further reads are queued by re-renders
+    const settled = reads;
+    await page.waitForTimeout(500);
+    await expect(page.getByRole("heading", { level: 1, name: "Agent inventory", exact: true })).toBeVisible();
+    expect(reads).toBe(settled);
+    expect(errors.filter((e) => /Maximum update depth|Too many re-renders/.test(e))).toEqual([]);
+  });
+
   test("an empty inventory counts zero", async ({ page }) => {
     await mockApi(page, () => ({ status: 200, body: { agents: [] } }));
     await page.goto("/ui/admin/inventory");
@@ -122,7 +149,7 @@ test.describe("agent inventory summary tiles", () => {
       await page.goto("/ui/admin/inventory");
       await expectCounts(page, [4, 3, 2, 1, 3]);
       expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(0);
-      const tiles = summary(page).locator(":scope > div");
+      const tiles = summary(page).locator("dl > div");
       for (let i = 0; i < 5; i++) {
         const box = await tiles.nth(i).boundingBox();
         expect(box && box.x >= 0 && box.x + box.width <= width + 0.5, `tile ${i} inside ${width} px`).toBe(true);
