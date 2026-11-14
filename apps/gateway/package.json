@@ -89,6 +89,7 @@
     "otpauth": "9.5.2",
     "pino": "10.4.0",
     "pkijs": "3.4.1",
+    "protobufjs": "8.8.1",
     "re2js": "2.8.8",
     "standardwebhooks": "1.1.1",
     "write-excel-file": "4.1.1",

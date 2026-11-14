@@ -290,6 +290,125 @@ export function parseDefenseClawJsonl(body: Uint8Array, sha256: (bytes: Uint8Arr
   return { records, rejects, lines };
 }
 
+// ---- ADR-0302 decision 2: OTLP logs intake ----------------------------------------------------------------------
+
+/** the OTLP/HTTP logs path under the DefenseClaw ingest (an exporter's endpoint is `.../defenseclaw/otlp`) */
+export const DEFENSECLAW_OTLP_LOGS_PATH = "/v1/third-party-ingest/defenseclaw/otlp/v1/logs";
+
+/** an OTLP `AnyValue` as protobufjs `toObject` (longs as strings) or the OTLP/JSON encoding gives it */
+interface OtlpAnyValue {
+  stringValue?: unknown;
+  boolValue?: unknown;
+  intValue?: unknown;
+  doubleValue?: unknown;
+  arrayValue?: { values?: unknown };
+}
+interface OtlpKeyValue {
+  key?: unknown;
+  value?: OtlpAnyValue;
+}
+
+const MAX_ATTRIBUTES_PER_RECORD = 64;
+
+/** a scalar only (an array element); nested arrays, kvlists and bytes are dropped without being walked */
+function otlpScalar(v: OtlpAnyValue | undefined): string | number | boolean | undefined {
+  if (!v || typeof v !== "object") return undefined;
+  if (typeof v.stringValue === "string") return v.stringValue;
+  if (typeof v.boolValue === "boolean") return v.boolValue;
+  if (typeof v.intValue === "string" || typeof v.intValue === "number") {
+    const n = Number(v.intValue);
+    return Number.isSafeInteger(n) ? n : undefined;
+  }
+  if (typeof v.doubleValue === "number") return v.doubleValue;
+  return undefined;
+}
+
+/** a scalar, or a flat array of scalars (rule ids); kvlist and bytes values are dropped, never carried */
+function otlpValue(v: OtlpAnyValue | undefined): string | number | boolean | Array<string | number | boolean> | undefined {
+  if (!v || typeof v !== "object") return undefined;
+  if (typeof v.stringValue === "string") return v.stringValue;
+  if (typeof v.boolValue === "boolean") return v.boolValue;
+  if (typeof v.intValue === "string" || typeof v.intValue === "number") {
+    const n = Number(v.intValue);
+    return Number.isSafeInteger(n) ? n : undefined;
+  }
+  if (typeof v.doubleValue === "number") return v.doubleValue;
+  const arr = v.arrayValue?.values;
+  if (Array.isArray(arr)) {
+    const out: Array<string | number | boolean> = [];
+    for (const item of arr.slice(0, MAX_RULE_IDS + 1)) {
+      const x = otlpScalar(item as OtlpAnyValue);
+      if (x !== undefined) out.push(x);
+    }
+    return out;
+  }
+  return undefined;
+}
+
+function otlpAttributes(list: unknown, into: Record<string, unknown>): void {
+  if (!Array.isArray(list)) return;
+  for (const kv of list.slice(0, MAX_ATTRIBUTES_PER_RECORD) as OtlpKeyValue[]) {
+    if (!kv || typeof kv.key !== "string" || kv.key.length === 0 || kv.key.length > 128) continue;
+    if (kv.key in into) continue;
+    const v = otlpValue(kv.value);
+    if (v !== undefined) into[kv.key] = v;
+  }
+}
+
+/** nanoseconds since the epoch (a decimal string or number) as an ISO instant with millisecond precision */
+function nanosToIso(v: unknown): string | undefined {
+  const s = typeof v === "number" ? String(Math.trunc(v)) : typeof v === "string" ? v : "";
+  if (s.length === 0 || s.length > 20) return undefined;
+  for (const c of s) if (c < "0" || c > "9") return undefined;
+  const ms = Number(s.length > 6 ? s.slice(0, s.length - 6) : "0");
+  if (!Number.isSafeInteger(ms) || ms <= 0) return undefined;
+  const d = new Date(ms);
+  return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
+}
+
+/**
+ * ADR-0302 decision 2 — an OTLP `ExportLogsServiceRequest` (already decoded from protobuf or OTLP/JSON) as the JSONL
+ * body `parseDefenseClawJsonl` takes: one line per log record, so every check, bound and minimisation of the JSONL
+ * path applies unchanged and a reject's `line` is the record's position in the request (1-based).
+ *
+ * Per record: its attributes as flat or dotted names (the same documented names the JSONL schema accepts; unknown
+ * ones are dropped by that schema), then `host.name` from the resource if the record has none, `timestamp` from
+ * `timeUnixNano` (else `observedTimeUnixNano`) if absent, and `severity` from `severityText` if absent. The record
+ * BODY is never read: it is where a log carries prompts and payloads. The `record_sha256` kept for an OTLP record is
+ * over this canonical line, not over wire bytes (protobuf has no per-record byte range worth pinning).
+ */
+export function otlpLogsRequestToJsonl(request: unknown): Uint8Array {
+  const lines: string[] = [];
+  const resourceLogs = (request as { resourceLogs?: unknown })?.resourceLogs;
+  if (Array.isArray(resourceLogs)) {
+    outer: for (const rl of resourceLogs as Array<{ resource?: { attributes?: unknown }; scopeLogs?: unknown }>) {
+      const resource: Record<string, unknown> = {};
+      otlpAttributes(rl?.resource?.attributes, resource);
+      if (!Array.isArray(rl?.scopeLogs)) continue;
+      for (const sl of rl.scopeLogs as Array<{ logRecords?: unknown }>) {
+        if (!Array.isArray(sl?.logRecords)) continue;
+        for (const lr of sl.logRecords as Array<Record<string, unknown>>) {
+          const flat: Record<string, unknown> = {};
+          otlpAttributes(lr?.attributes, flat);
+          if (flat["host.name"] === undefined && typeof resource["host.name"] === "string") flat["host.name"] = resource["host.name"];
+          if (flat.timestamp === undefined) {
+            const ts = nanosToIso(lr?.timeUnixNano) ?? nanosToIso(lr?.observedTimeUnixNano);
+            if (ts) flat.timestamp = ts;
+          }
+          if (flat.severity === undefined && typeof lr?.severityText === "string") {
+            const sev = lr.severityText.trim().toUpperCase();
+            if ((DEFENSECLAW_SEVERITIES as readonly string[]).includes(sev)) flat.severity = sev;
+          }
+          lines.push(JSON.stringify(flat));
+          // one past the cap is enough for the parser to refuse the batch as too large
+          if (lines.length > THIRD_PARTY_INGEST_MAX_RECORDS) break outer;
+        }
+      }
+    }
+  }
+  return new TextEncoder().encode(lines.join("\n"));
+}
+
 /** the window check, against a clock the caller supplies (the database's: M-075) */
 export function recordFreshness(observedAt: Date, now: Date): "fresh" | "stale" | "future" {
   const delta = (now.getTime() - observedAt.getTime()) / 1000;
