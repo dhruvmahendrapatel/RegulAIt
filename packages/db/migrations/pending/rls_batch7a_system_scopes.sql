@@ -178,3 +178,19 @@ CREATE POLICY audit_log_select ON audit_log FOR SELECT USING (
   OR (SELECT regulait_rls_is_admin())
   OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['audit_chain', 'audit_verify', 'audit_subject', 'migration', 'system_task'])
 );
+--> statement-breakpoint
+
+-- The anchor timer (system_task) and the admin's timestamp retry (a principal or bootstrap_admin) now run as the app
+-- role, which 0272 gave no UPDATE on audit_anchors. An anchor row's evidence (which head it anchors, where, when) stays
+-- immutable for the app role; its delivery and timestamp state is what those paths record. The grant is by column,
+-- so a column added later is not updatable until its migration grants it (the 0272 approvals rule).
+DO $$
+DECLARE cols text;
+BEGIN
+  SELECT pg_catalog.string_agg(pg_catalog.quote_ident(a.attname), ', ' ORDER BY a.attnum) INTO cols
+    FROM pg_catalog.pg_attribute a
+   WHERE a.attrelid = 'public.audit_anchors'::regclass AND a.attnum > 0 AND NOT a.attisdropped
+     AND a.attname NOT IN ('id', 'seq', 'row_hash', 'head_at', 'algorithm', 'destination', 'deploy_mode', 'created_at');
+  EXECUTE pg_catalog.format('GRANT UPDATE (%s) ON public.audit_anchors TO regulait_app', cols);
+END
+$$;

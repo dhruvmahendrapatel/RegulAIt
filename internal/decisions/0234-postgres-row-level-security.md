@@ -466,6 +466,11 @@ scope here runs under FORCE row-level security today, on the superuser login CI 
   the caller's reason may append but not read the ledger (`authenticate`, `identity_provisioning`,
   `approval_maintenance`, `public_ingest`), so the writer's RETURNING of the row it appended is visible.
 
+**Anchor state.** The anchor timer and the admin's timestamp retry now run as the app role, which 0272 gave no
+UPDATE on `audit_anchors`. 7a grants UPDATE on the delivery and timestamp columns only (by column, closed for columns
+added later); the anchored evidence (`id`, `seq`, `row_hash`, `head_at`, `algorithm`, `destination`, `deploy_mode`,
+`created_at`) stays immutable for the app role.
+
 **Still unscoped, for 7b.** `runMigrations` (owner), the audit prune (owner), the rate-limit and PM-delivery prune
 timers (their tables have no RLS), and the seed, first-admin and demo scripts (they run as the migrator).
 
