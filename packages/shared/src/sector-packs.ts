@@ -1,9 +1,12 @@
 /**
  * ADR-0297 (P18 B6) — SECTOR PACKS: authored data.
  *
- *  - `sr-11-7@1`: the US banking supervisors' model risk management guidance (Federal Reserve SR 11-7 with OCC
- *    Bulletin 2011-12, "Supervisory Guidance on Model Risk Management", 4 April 2011), mapped onto the ADR-0045 model
- *    risk registry (model cards, approvals and their recertification) and the evaluation evidence.
+ *  - `sr-11-7@1`: a HISTORICAL mapping of the US banking supervisors' model risk management guidance (Federal Reserve
+ *    SR 11-7 with OCC Bulletin 2011-12, "Supervisory Guidance on Model Risk Management", 4 April 2011) onto the
+ *    ADR-0045 model risk registry (model cards, approvals and their recertification) and the evaluation evidence.
+ *    SR 11-7 was superseded on 17 April 2026 by SR 26-2, "Revised Guidance on Model Risk Management" (Federal
+ *    Reserve, OCC and FDIC), whose footnote 3 puts generative and agentic AI models outside its scope. The pack is
+ *    kept, and labelled, for organisations that still map to the 2011 text; it is not current guidance.
  *  - `nyc-ll144@1`: New York City Local Law 144 of 2021 on automated employment decision tools (NYC Admin. Code
  *    §§ 20-870 to 20-874) with its rules (6 RCNY §§ 5-300 to 5-304), mapped onto the ADR-0222 fairness runs, which
  *    compute each group's selection rate and the impact ratio the rules define.
@@ -50,6 +53,13 @@ const NOTE =
   "Cited by section; titles and notes are regulAIt's own words. Not legal or supervisory advice and not a statement " +
   "of compliance.";
 
+/** ADR-0297: SR 11-7 is superseded; the label travels with the pack so no reader takes it for current guidance */
+export const SR_11_7_SUPERSESSION_NOTE =
+  "SUPERSEDED: SR 11-7 (with OCC 2011-12) was superseded and replaced on 17 April 2026 by SR 26-2, \"Revised " +
+  "Guidance on Model Risk Management\" (Federal Reserve, OCC and FDIC). This pack is a historical mapping of the 2011 " +
+  "text. SR 26-2 states that generative AI and agentic AI models are not within its scope, so neither this pack nor " +
+  "the revised guidance should be read as supervisory model risk guidance for LLMs or agents.";
+
 // ===========================================================================
 // SR 11-7 / OCC 2011-12 — model risk management
 // ===========================================================================
@@ -67,7 +77,7 @@ export const SR_11_7_CONTROLS: Control[] = [
     note: "Re-running evaluations and the served-model drift check catch change; monitoring of the business outcome is the organisation's.",
   }),
   att(sr("v-outcomes-analysis"), "V.3 — Compare model outputs with actual outcomes", "partial", "Partly supported: evaluation and fairness runs compare predictions with labelled outcomes the organisation supplies. Attest back-testing done elsewhere."),
-  ev(sr("v-effective-challenge"), "V — Have models challenged and approved by people independent of their development", {
+  ev(sr("v-effective-challenge"), "III, V — Have models challenged and approved by people independent of their development", {
     coverage: "partial",
     collector: "model_cards_approved",
     evidence: "approved, unexpired model cards.",
@@ -79,16 +89,19 @@ export const SR_11_7_CONTROLS: Control[] = [
     evidence: "approved model cards in the registry.",
     note: "The registry covers models reached through the platform. Models used outside it are the organisation's to inventory.",
   }),
-  ev(sr("vi-periodic-review"), "VI — Review each model at least once a year", {
-    coverage: "enforced",
+  ev(sr("v-periodic-review"), "V — Review each model at least once a year", {
+    coverage: "partial",
     collector: "model_cards_approved",
-    evidence: "unexpired model card approvals (an approval expires, which forces re-approval).",
-    note: "Recertification is enforced by expiry, and the optional dispatch gate refuses a model whose approval lapsed.",
+    evidence: "unexpired model card approvals, including approvals recorded as never expiring.",
+    note:
+      "The review frequency follows each approver's recertification date (validUntil): nothing caps it at a year, and " +
+      "an approval can be recorded as never expiring, which still counts here. The dispatch gate (on by default, " +
+      "ADR-0181) refuses a model whose approval has lapsed. Attest that every recertification date is within a year.",
   }),
   att(sr("vi-policies-procedures"), "VI — Set model risk policies and procedures", "unaddressed", "Organisational: the platform does not address this. Attest the model risk management policy."),
   att(sr("vi-roles-responsibilities"), "VI — Assign model owners, developers, validators and users", "partial", "Partly supported: model cards name an owner and approvers. Attest the role definitions and the board's oversight."),
   att(sr("vi-internal-audit"), "VI — Have internal audit assess the model risk framework", "partial", "Partly supported: time-boxed auditor access and signed evidence exports serve an audit. Attest the audit and its findings."),
-  ev(sr("vi-vendor-models"), "VI — Bring vendor and third-party models into the same framework", {
+  ev(sr("v-vendor-models"), "V — Bring vendor and third-party models into the same framework", {
     coverage: "partial",
     collector: "model_cards_approved",
     evidence: "approved model cards, which include third-party models and providers.",
@@ -100,16 +113,17 @@ export const SR_11_7_CONTROLS: Control[] = [
 export const SR_11_7_PACK: CreateCompliancePackInput = {
   framework: "sr-11-7",
   version: 1,
-  title: "SR 11-7 / OCC 2011-12 — model risk management (control mapping)",
+  title: "SR 11-7 / OCC 2011-12 — model risk management (historical mapping; superseded by SR 26-2)",
   description:
-    "Maps the supervisory guidance on model risk management onto the model risk registry: model cards, their approval " +
-    "and recertification, and evaluation evidence. A mapping is not a supervisory finding.",
+    "Historical mapping of the 2011 supervisory guidance on model risk management, superseded on 17 April 2026 by " +
+    "SR 26-2, onto the model risk registry: model cards, their approval and recertification, and evaluation evidence. " +
+    "SR 26-2 puts generative and agentic AI models out of its scope. A mapping is not a supervisory finding.",
   provenance: {
     source: "Board of Governors of the Federal Reserve System SR 11-7 and OCC Bulletin 2011-12",
-    catalogueRevision: "4 April 2011",
+    catalogueRevision: "4 April 2011 (superseded 17 April 2026 by SR 26-2)",
     reviewedBy: null,
     reviewedOn: null,
-    note: NOTE,
+    note: `${SR_11_7_SUPERSESSION_NOTE} ${NOTE}`,
   },
   cascadeTag: null,
   controls: SR_11_7_CONTROLS,
@@ -125,23 +139,27 @@ export const NYC_LL144_CONTROLS: Control[] = [
   ev(ll("bias-audit"), "§ 20-871(a)(1) — Have the tool bias-audited within the year before it is used", {
     coverage: "partial",
     collector: "model_card_fairness",
-    evidence: "model cards documenting a completed fairness assessment.",
+    evidence: "model cards recording a fairness assessment as assessed (a documented assessment, of any date).",
     note:
-      "A fairness run computes the selection rate of each group and the impact ratio from the organisation's labelled " +
-      "data. The law requires the audit to be done by an independent auditor and repeated within a year; attest both.",
+      "The evidence is an assessment documented on the model card; the platform does not grade it, and the count has " +
+      "no time window, so an old assessment still counts. The law requires the audit to be done by an independent " +
+      "auditor within the year before use; attest both, and the audit date.",
   }),
   att(
     ll("impact-ratios"),
     "6 RCNY § 5-301 — Report impact ratios by sex, by race and ethnicity, and for their intersections",
     "partial",
-    "Partly supported: fairness runs compute impact ratios for every attribute in the dataset, including a combined " +
-      "sex-by-race attribute; groups below the minimum size are suppressed. Attest that the audit covered the required " +
-      "categories and how small categories were handled.",
+    "Partly supported: fairness runs report each group's selection rate for binary predictions, from which each " +
+      "category's impact ratio (its rate over the most-selected category's) follows; they report one min/max ratio " +
+      "per attribute, not the per-category table. A combined sex-by-race attribute gives the intersections. Tools that " +
+      "output a score need the median-based scoring rate, which runs do not compute. Runs drop groups under 30 rows " +
+      "from every count, which differs from the rule's optional exclusion of categories under 2% and changes the " +
+      "reported counts. Attest the audit's per-category ratios and how small categories were handled.",
   ),
   att(ll("published-summary"), "§ 20-871(a)(2) — Publish a summary of the latest bias audit and the tool's distribution date", "unaddressed", "Not addressed by the platform: publication is on the employer's website. Attest the published summary and its date."),
-  att(ll("candidate-notice"), "§ 20-871(b)(1) — Tell candidates and employees that the tool is used, ahead of its use", "unaddressed", "Not addressed by the platform. Attest the notice, its timing and the alternative process offered."),
-  att(ll("qualifications-notice"), "§ 20-871(b)(2) — Tell candidates which qualifications and characteristics the tool assesses", "unaddressed", "Not addressed by the platform. Attest the notice."),
-  att(ll("data-notice"), "§ 20-871(b)(3) — Disclose the type and source of data collected and the retention policy", "partial", "Partly supported: a record of processing holds the data categories and retention for the tool. Attest the disclosure made to candidates."),
+  att(ll("candidate-notice"), "§ 20-871(b)(1) — Tell candidates and employees who reside in the city that the tool is used, at least ten business days before use", "unaddressed", "Not addressed by the platform. Attest the notice, its timing and the alternative process offered."),
+  att(ll("qualifications-notice"), "§ 20-871(b)(2) — Tell candidates which qualifications and characteristics the tool assesses, at least ten business days before use", "unaddressed", "Not addressed by the platform. Attest the notice."),
+  att(ll("data-notice"), "§ 20-871(b)(3) — Disclose the type and source of data collected and the retention policy, on the website or within 30 days of a written request", "partial", "Partly supported: a record of processing holds the data categories and retention for the tool. Attest the disclosure made to candidates."),
   ev(ll("tool-registered"), "§ 20-870 — Know which tools are automated employment decision tools", {
     coverage: "partial",
     collector: "model_cards_approved",
