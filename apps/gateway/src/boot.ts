@@ -40,7 +40,7 @@ import { errLine, errSerializer } from "./err-serializer.js";
 import { runAuditV2Cutover } from "@regulait/db";
 import { AUDIT_V2_CUTOVER_ENV, assertAuditChainWritable } from "./audit-v2-cutover.js";
 import { ensureInternalIdentities } from "./in-process-delegation.js";
-import { runMigrations, type Db } from "@regulait/db";
+import { runMigrations, runWithRlsSystem, type Db } from "@regulait/db";
 import { buildApp, type BuildAppOptions } from "./app.js";
 import { RATE_LIMIT_COUNTER_RETENTION_MS, pruneRateLimitCounters } from "./rate-limit-store.js";
 import { prunePmWebhookDeliveries } from "./pm.js";
@@ -144,11 +144,14 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // (a drained rolling deploy): `REGULAIT_AUDIT_V2_CUTOVER=run` on the boot that performs it. The
   // database trigger `audit_log_v2_floor` (migration 0184) refuses a v1 row past the boundary from any
   // writer that was not drained.
+  // ADR-0234 batch 7a: the boot tasks below have no principal; they run under the named `system_task` reason (users
+  // read, approvals, audit read and append), as regulait_app under the policies, not as whatever the login is.
+  const asBootTask = <T>(label: string, fn: () => Promise<T>): Promise<T> => runWithRlsSystem("system_task", `boot.${label}`, fn);
   try {
-    await assertReceiptEmitterBootable(db);
-    await assertAuditChainWritable(db);
+    await asBootTask("receipt-emitter", () => assertReceiptEmitterBootable(db));
+    await asBootTask("audit-chain-writable", () => assertAuditChainWritable(db));
     if (env[AUDIT_V2_CUTOVER_ENV]?.trim() === "run") {
-      const cut = await runAuditV2Cutover(db, { setBy: null });
+      const cut = await asBootTask("audit-v2-cutover", () => runAuditV2Cutover(db, { setBy: null }));
       log(`[regulait] audit chain v2 cutover: ${cut.created ? `recorded from seq ${cut.fromSeq}` : `already at v2 from seq ${cut.fromSeq}`}`);
     }
   } catch (err) {
@@ -161,7 +164,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // grants of its own (OWNER DECISION 1; ADR-0180, nothing is grandfathered). Never fatal: a subject
   // missed here is given its identity at first use.
   try {
-    const ensured = await ensureInternalIdentities(db);
+    const ensured = await asBootTask("internal-identities", () => ensureInternalIdentities(db));
     if (ensured.created > 0) log(`[regulait] created ${ensured.created} internal workload identit${ensured.created === 1 ? "y" : "ies"} (no grants; an admin grants them)`);
   } catch (err) {
     log(`[regulait] internal workload identities not ensured at boot: ${errLine(err)}`);
@@ -177,7 +180,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // does not abort it; that row is left unverified and fails closed.)
   let digestRepin: ManifestDigestRepinResult;
   try {
-    digestRepin = await repinManifestDigests(db);
+    digestRepin = await asBootTask("manifest-digest-repin", () => repinManifestDigests(db));
   } catch (err) {
     await app.close().catch(() => {});
     throw new ManifestDigestRepinBootError(err);
@@ -187,7 +190,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // box without its key came up healthy and failed every decryption silently.
   let dataKey: DataKeyBootResult;
   try {
-    dataKey = await verifyDataKeyOnBoot(db, appOpts.dataKey, env);
+    dataKey = await asBootTask("data-key", () => verifyDataKeyOnBoot(db, appOpts.dataKey, env));
   } catch (err) {
     // Do not leave a constructed-but-never-started Fastify instance holding
     // plugin resources behind on the way out.
@@ -202,7 +205,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   const secrets = assessDevSecrets(env, {
     bootstrapToken: appOpts.bootstrapToken,
     dataKey: appOpts.dataKey,
-    realAdminExists: await realAdminExists(db).catch(() => false),
+    realAdminExists: await asBootTask("real-admin-exists", () => realAdminExists(db)).catch(() => false),
   });
   if (secrets.refuse) {
     await app.close().catch(() => {});
@@ -216,7 +219,8 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   let otlpBackfill: "enveloped" | "nothing" = "nothing";
   if (appOpts.dataKey) {
     try {
-      otlpBackfill = await backfillOtlpHeaderCiphertext(db, appOpts.dataKey);
+      const key = appOpts.dataKey;
+      otlpBackfill = await asBootTask("otlp-backfill", () => backfillOtlpHeaderCiphertext(db, key));
     } catch (err) {
       log(`[regulait] OTLP header envelope backfill failed: ${errLine(err)}`);
     }
@@ -226,7 +230,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // verified) from the pinned vendored files. Idempotent, starts no run, and
   // never fatal: a drifted file is audited and its datasets refuse to run.
   try {
-    const seeded = await seedBuiltinEvalDatasets(db);
+    const seeded = await asBootTask("eval-datasets", () => seedBuiltinEvalDatasets(db));
     const by = (o: string) => seeded.datasets.filter((d) => d.outcome === o).length;
     log(
       `[regulait] built-in eval datasets: ${by("seeded")} seeded, ${by("unchanged")} unchanged, ` +
@@ -320,14 +324,17 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
     // that drops rather than refuses) used to leave a capture hanging and the
     // interval kept starting another one every 15 minutes on top of it.
     anchorTimer = setInterval(
-      withoutOverlap(async () => {
-        try {
-          await captureAnchor(db, anchorSink, null);
-          await flushPendingAnchors(db, anchorSink);
-        } catch (err) {
-          app.log.warn({ err }, "audit anchor capture failed — the hash chain is unaffected");
-        }
-      }),
+      withoutOverlap(() =>
+        // ADR-0234 batch 7a: the anchor reads the chain head and appends its own audit row, with no principal
+        runWithRlsSystem("system_task", "timer.audit-anchor", async () => {
+          try {
+            await captureAnchor(db, anchorSink, null);
+            await flushPendingAnchors(db, anchorSink);
+          } catch (err) {
+            app.log.warn({ err }, "audit anchor capture failed — the hash chain is unaffected");
+          }
+        }),
+      ),
       anchorEveryMs,
     );
     anchorTimer.unref();

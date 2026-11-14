@@ -69,6 +69,8 @@ import {
   virtualKeys,
   workflowInstances,
   withinSystemReason,
+  currentRlsScope,
+  runWithRlsPrincipal,
   type Db,
   type EngineRunRow,
 } from "@regulait/db";
@@ -828,7 +830,12 @@ export async function endActiveRunsOfEngineTx(tx: Tx, engineId: EngineId, reason
       ),
     );
     if (run.approvalId) {
-      await tx.update(approvals).set({ status: "superseded" }).where(and(eq(approvals.id, run.approvalId), eq(approvals.status, "pending")));
+      // ADR-0234 batch 7a (#809 review): reached from a runner's self-test report (credential_request, which opens no
+      // approval) as well as from an admin's switch-off; superseding the ended run's approval is routing
+      const approvalId = run.approvalId;
+      await withinSystemReason(tx, "approval_maintenance", "engine-runs.end-active-supersede", () =>
+        tx.update(approvals).set({ status: "superseded" }).where(and(eq(approvals.id, approvalId), eq(approvals.status, "pending"))),
+      );
     }
   }
   return ended;
@@ -952,7 +959,17 @@ async function notifyWorkflowOfEngineRun(db: Db, run: Pick<EngineRunRow, "id" | 
   try {
     engineRunTestHooks.beforeWorkflowNotify?.(run.id);
     const wf = await import("./workflows.js");
-    await wf.reevaluateCheckStage(db, run.workflowInstanceId, run.workflowStageId, runtime.dataKey);
+    const reevaluate = () => wf.reevaluateCheckStage(db, run.workflowInstanceId!, run.workflowStageId!, runtime.dataKey);
+    // ADR-0234 batch 7a (#809 review): a runner's result (credential_request) re-evaluates the stage as the run's
+    // own user (the instance initiator it ran as), never with a wider scope than that person's
+    const scope = currentRlsScope();
+    if (scope?.kind === "system" && scope.reason === "credential_request") {
+      const [owner] = await db.select({ userId: engineRuns.runAsUserId }).from(engineRuns).where(eq(engineRuns.id, run.id));
+      if (!owner?.userId) return false; // retried by the sweep
+      await runWithRlsPrincipal({ userId: owner.userId }, reevaluate);
+    } else {
+      await reevaluate();
+    }
   } catch {
     return false; // retried by the sweep
   }
