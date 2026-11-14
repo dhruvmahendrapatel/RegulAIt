@@ -1,7 +1,7 @@
 /**
  * ADR-0226 — the AI registry's list contract as a mocked gateway answers it (`GET /v1/use-cases` with any of sort,
- * dir, cursor, offset or count): the server-side filters (search, status chip, tier, owner), the sort, the page and
- * the `summary` (headline and chip counts, owner choices) across every row. Shared by the registry mock specs.
+ * dir, cursor, offset or count): the server-side filters (search, status, tier, owner), the sort, the page and
+ * the `summary` (headline and status counts, owner choices) across every row. Shared by the registry mock specs.
  */
 type Row = Record<string, unknown> & {
   id: string;

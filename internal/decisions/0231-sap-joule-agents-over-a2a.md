@@ -326,3 +326,26 @@ ships it.
 4. **Pricing**: flat price per call from SAP's commercial terms, or leave unpriced until known?
 5. **Trial tenant for B0/B6**: which SAP tenant and who registers it in SAP for Me?
 6. **Reverse path**: put it on the roadmap now, or wait for SAP's outbound A2A to ship?
+
+## Amendment 2026-11-14: slice B1 built (the HTTP+JSON binding and legacy 0.3 cards)
+
+- **Built** in `apps/gateway/src/a2a.ts`: the gateway accepts `HTTP+JSON` interfaces beside `JSONRPC`, under the same
+  rule (only on the registered origin, everything else filtered out before the client is built). gRPC and other
+  bindings are ignored; a card with no JSON-RPC or HTTP+JSON interface is refused.
+- **Simpler than §3 planned.** At the pinned `@a2a-js/sdk` 1.3.0 no glue factory is needed. The card resolver and both
+  transport factories take `legacyCompat: { enabled: true }`. The resolver then converts a 0.3 card (the SDK's own
+  `isLegacyAgentCard` and `parseLegacyAgentCard`) and stamps the card's `protocolVersion` on every interface. Each
+  factory picks the SDK's `LegacyRestTransport` or `LegacyJsonRpcTransport` when the matched interface's version is in
+  `[0.3, 1.0)`. The stored, normalised card therefore carries the version per interface, and the transport is chosen
+  from it, never from anything the remote sends at call time.
+- **Version gate.** An interface whose version is not 0.3.x or 1.x is refused at registration and refresh and filtered
+  out at call time. An empty version is refused too, because the SDK would treat it as 0.3.
+- **Deferred to B3:** the `card_protocol_version` and raw-card hash columns. They belong with `pending_card` and the
+  ARD refresh diff, which need a migration anyway; B1 has no migration.
+- **Admin view and trail:** the agent view and the registration and refresh audit rows list each spoken interface's
+  binding, version and whether it is legacy.
+- **Tests:** `zz-adr0231-a2a-bindings.test.ts` runs the SDK's own 1.0 REST handler and v0.3 REST router on loopback. A
+  REST-only 1.0 card and a 0.3 SAP-shaped card both register and are called. The credential reaches the registered
+  origin only. Legacy cards whose `url` or `additionalInterfaces` point elsewhere are refused. gRPC-only cards,
+  unsupported versions and empty versions are refused.
+- Not yet exercised against SAP itself (B0 and B6 are owner-blocked).
