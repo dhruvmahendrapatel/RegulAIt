@@ -151,7 +151,7 @@ async function mockApi(page: Page, opts: { asOwner?: boolean } = {}): Promise<Ca
   const shown = opts.asOwner
     ? { ...detail, permissions: { canEdit: true, canClose: false, closeNeedsAdmin: true, isAdmin: false } }
     : detail;
-  let settings = { incidentGateMode: "enforce", incidentEvidenceHold: true, incidentClockRegimes: ["eu-ai-act", "hipaa"] };
+  let settings = { incidentGateMode: "enforce", incidentEvidenceHold: true, incidentClockRegimes: ["eu-ai-act", "hipaa", "gdpr", "nis2", "dora", "cra"] };
   await page.route("**/*", async (route) => {
     const req = route.request();
     const p = new URL(req.url()).pathname;

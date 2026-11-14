@@ -450,6 +450,7 @@ import {
 } from "./compat-core.js";
 import { registerAnthropicCompat } from "./compat-anthropic.js";
 import { registerOpenAiCompat } from "./compat-openai.js";
+import { registerResponsesCompat } from "./compat-responses.js";
 import { registerModelsDiscovery } from "./compat-models.js";
 import { registerVirtualKeyRoutes, routesForPurpose } from "./virtual-keys.js";
 import { registerModelPolicyRoutes } from "./model-policy.js";
@@ -548,6 +549,7 @@ import { registerUsageExtractorRoutes } from "./usage-extractors.js";
 import { registerDemoBeatRoutes } from "./demo-beats.js";
 import { registerProjectArchiveRoutes } from "./project-archive.js";
 import { registerRoleTeamRenameRoutes } from "./role-team-rename.js";
+import { registerConnectorCatalogueRoutes } from "./connector-catalogue.js";
 // ADR-0185 G5 — request metrics (a no-op seam until the meter lands)
 import { registerMetricsHooks } from "./metrics.js";
 import {
@@ -6049,6 +6051,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0206: G1 project archive and G10 rename roles and teams (admin-only)
   registerProjectArchiveRoutes(app, db);
   registerRoleTeamRenameRoutes(app, db);
+  // ADR-0255 (P31) — the governed connector catalogue; admin-only (not in NON_ADMIN_ROUTES), enablement audited
+  registerConnectorCatalogueRoutes(app, db);
   registerPosturePresetRoutes(app, db, { sink: anchorSink, bootstrapConfigured: Boolean(opts.bootstrapToken) });
   // ADR-0124 — the kill switch and safe modes
   registerExecutionControlRoutes(app, db);
@@ -6188,6 +6192,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   app.addHook("onClose", async () => drainBackgroundWork(db));
   registerAnthropicCompat(app, db, { dataKey: opts.dataKey });
   registerOpenAiCompat(app, db, { dataKey: opts.dataKey });
+  registerResponsesCompat(app, db, { dataKey: opts.dataKey });
   // ADR-0066 §1 — `GET /v1/models`. Gated by the same onRequest hook as the two
   // shims (on EITHER being enabled), and entitlement-filtered per caller inside
   // the handler, so what a client can list is exactly what it can call.

@@ -3114,6 +3114,42 @@
         }
       }
     },
+    "/v1/responses": {
+      "post": {
+        "operationId": "postV1Responses",
+        "summary": "Responses-API-shaped compatibility surface (ADR-0287), on the same switch as /v1/chat/completions. Stateless: send store:false and the full history in input.",
+        "tags": [
+          "chat"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "x-regulait-stability": "public-beta",
+        "x-regulait-auth": "user",
+        "x-regulait-guarantee": "in the published spec and clients, but may change within the major with notice; the deprecation window is 90 days, not 12 months",
+        "x-regulait-compat-surface": "https://platform.openai.com/docs/api-reference/responses",
+        "description": "Responses-API-shaped compatibility surface (ADR-0287), on the same switch as /v1/chat/completions. Stateless: send store:false and the full history in input. Request and response bodies conform to the upstream vendor schema at https://platform.openai.com/docs/api-reference/responses; RegulAIt deliberately does not re-specify a shape it does not own.",
+        "responses": {
+          "400": {
+            "description": "Request body failed schema validation."
+          },
+          "401": {
+            "description": "Missing, invalid, or revoked credential."
+          },
+          "403": {
+            "description": "Refused. Among the reasons: `mfa_enrollment_required`, when the organization requires MFA for the credential's owner, who has not enrolled TOTP (ADR-0181). Audited."
+          },
+          "429": {
+            "description": "Rate limited. Retry after the `retry-after` header."
+          },
+          "2XX": {
+            "description": "Success."
+          }
+        }
+      }
+    },
     "/v1/models": {
       "get": {
         "operationId": "getV1Models",
