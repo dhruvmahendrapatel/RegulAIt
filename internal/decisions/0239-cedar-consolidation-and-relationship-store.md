@@ -175,3 +175,27 @@ an entity parent or a context fact; Cedar and the kernel still decide. SpiceDB i
 - New rule id `rate-limit-engine-error`. Audit consumers that alert on rate-limit denials should include it.
 - New boot-refusal case: an unrecognised `REGULAIT_RATE_LIMIT_EVALUATOR`.
 - No new dependency: `@cedar-policy/cedar-wasm` 4.14.0 is already pinned and listed in `THIRD_PARTY.md`.
+
+## As built: slice 2, the approval-rule match on Cedar (2026-11-14, ADR-0251 lane L1)
+
+- `packages/policy-kernel/src/approval-rule-cedar.ts` (`@regulait/policy-kernel/approval-rule-cedar`): each MCP
+  approval rule is a `RegulAIt::ApprovalRule` entity with its fields, and one `forbid` policy per rule names it by
+  position only (no stored value reaches policy text). Schema-validated, preparsed per size up to 256 rules. Cedar
+  answers WHICH rules bind the call; ADR-0229 precedence and the ADR-0104 strictest-scope roll-up stay TypeScript.
+- **Kernel:** `ApprovalRuleEvaluator`, `matchingApprovalRulesWith(evaluator, rules, ctx)` and
+  `EvaluationInput.approvalRuleEvaluator`. An evaluator error or throw denies (`approval-rule-engine-error`); an error
+  never reads as "no rule binds". With no evaluator the kernel keeps the hand-written `matchingApprovalRules` for one
+  release, as decision 4 did for rate limits.
+- **Gateway:** `governedEvaluate` injects the Cedar evaluator into the kernel call AND uses it for its own reads of the
+  matched rules (the consent's approval scope, and the queue's quorum in `servedApprovalRules`), so the gateway and the
+  kernel cannot disagree about which rules govern a call. The queue-quorum read fails closed on an engine error; the
+  scope read falls back to the strict default while the kernel refuses the call on the same error.
+- **Batching, measured against the plan.** The plan was to ride approval rules on the rate-limit request. It is not
+  needed: the rate-limit evaluator makes no wasm call unless a limit is exhausted (and then the call is refused before
+  the approval step), so in practice each call makes at most one wasm call either way. The approval evaluator
+  pre-filters rules bound to another server or to another user (conjuncts of every policy), so a call with no rule
+  that could bind it makes no wasm call.
+- **Proof of agreement.** `approval-rule-cedar.test.ts`: 5,000 generated matched-set comparisons in precedence order
+  (filtered and unfiltered evaluators), 2,000 full kernel `Decision` comparisons, 10 runs past the cache size, the
+  pre-filter's zero-wasm case, fail-closed on error and on throw, and schema validation with no stored value in policy
+  text.
