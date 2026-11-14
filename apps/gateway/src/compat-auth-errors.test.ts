@@ -95,6 +95,13 @@ describe("compat routes answer a bad credential in their own dialect", () => {
     expect(Number(r.headers["content-length"])).toBe(Buffer.byteLength(r.body));
   });
 
+  it("POST /v1/responses (ADR-0287) -> OpenAI envelope", async () => {
+    const r = await app.inject({ method: "POST", url: "/v1/responses", headers: BAD, payload: { model: "x", input: "hi", store: false } });
+    expect(r.statusCode).toBe(401);
+    expect(r.json().error.type).toBe("authentication_error");
+    expect(r.json().error.regulait_code).toBe("unauthenticated");
+  });
+
   it("POST /v1/chat/completions with no credential at all -> OpenAI envelope", async () => {
     const r = await app.inject({ method: "POST", url: "/v1/chat/completions", payload: { model: "x", messages: [] } });
     expect(r.statusCode).toBe(401);

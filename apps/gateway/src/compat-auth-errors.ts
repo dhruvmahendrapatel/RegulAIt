@@ -32,8 +32,7 @@ export type CompatDialect = "openai" | "anthropic";
 
 /** The compat routes and their wire dialect. `GET /v1/models` serves both and
  * picks by the `anthropic-version` header, exactly as its handler does.
- * `POST /v1/responses` is ADR-0287's surface; until that route is registered
- * the entry never matches. */
+ * `POST /v1/responses` is ADR-0287's Responses API shim. */
 const COMPAT_401_DIALECT: Readonly<Record<string, CompatDialect | ((req: FastifyRequest) => CompatDialect)>> = {
   "POST /v1/messages": "anthropic",
   "POST /v1/chat/completions": "openai",
