@@ -805,20 +805,32 @@ export const CAMPAIGN_DEADLINE_NOTIFIED_RULE_ID = "campaign-deadline-notified";
 
 /** one notice to one reviewer: ids, counts and times only (no campaign name, grant, holder or object label) */
 export interface CampaignDeadlineNotice {
-  campaignId: string;
-  kind: "due_soon" | "expired";
-  dueAt: Date;
   reviewerUserId: string;
   /** undecided items on this campaign that name this reviewer */
   undecidedForReviewer: number;
-  /** undecided items on the whole campaign */
-  undecidedTotal: number;
 }
-/** delivers one campaign's notices; returns how many posts succeeded and failed (the courier audits each) */
+/**
+ * One campaign's deadline delivery. Every notice belongs to `campaign`; the courier never mixes campaigns.
+ * `done` holds the delivery targets that already reached a final outcome for this campaign and kind, so the courier
+ * skips them: `<connectionId>:channel` for a channel notice, `<connectionId>:reviewer:<userId>` for a reviewer mail.
+ */
+export interface CampaignDeadlineDelivery {
+  campaign: { id: string; kind: "due_soon" | "expired"; dueAt: Date; undecidedTotal: number };
+  notices: CampaignDeadlineNotice[];
+  done: ReadonlySet<string>;
+}
+/**
+ * The outcome of one delivery target. `posted` and `terminal` are final, and the target is never tried again.
+ * `terminal` is a refusal that a retry cannot fix (the reviewer has no active account or email:
+ * `no_named_recipient`). `transient` is anything else: a provider 5xx, a network error, or a missing public URL. The
+ * next sweep retries it.
+ */
+export type CampaignDeadlineOutcome = "posted" | "terminal" | "transient";
+/** delivers one campaign's notices and reports each target's outcome (the courier audits every post) */
 export type CampaignDeadlineCourier = (
-  notices: CampaignDeadlineNotice[],
+  delivery: CampaignDeadlineDelivery,
   actorUserId: string | null,
-) => Promise<{ posted: number; failed: number; workspaces: number }>;
+) => Promise<{ workspaces: number; results: Array<{ target: string; outcome: CampaignDeadlineOutcome }> }>;
 const deadlineCouriers = new WeakMap<object, CampaignDeadlineCourier>();
 export function registerCampaignDeadlineCourier(db: Db, courier: CampaignDeadlineCourier): void {
   deadlineCouriers.set(db as object, courier);
@@ -826,9 +838,37 @@ export function registerCampaignDeadlineCourier(db: Db, courier: CampaignDeadlin
 
 export interface CampaignDeadlineSweepResult {
   courier: boolean;
-  notified: Array<{ campaignId: string; kind: "due_soon" | "expired"; reviewers: number; posted: number; failed: number }>;
+  notified: Array<{ campaignId: string; kind: "due_soon" | "expired"; reviewers: number; posted: number; failed: number; retrying: number }>;
 }
 
+/** the targets already delivered (or terminally refused) for one campaign and kind, read from the marker rows */
+async function deliveredTargets(db: Db, campaignId: string, kind: "due_soon" | "expired"): Promise<Set<string>> {
+  const rows = await db
+    .select({ detail: auditLog.detail })
+    .from(auditLog)
+    .where(
+      and(
+        eq(auditLog.ruleId, CAMPAIGN_DEADLINE_NOTIFIED_RULE_ID),
+        eq(auditLog.objectId, campaignId),
+        sql`${auditLog.detail} ->> 'kind' = ${kind}`,
+      ),
+    );
+  const done = new Set<string>();
+  for (const r of rows) {
+    const targets = (r.detail as { targets?: unknown } | null)?.targets;
+    if (Array.isArray(targets)) for (const t of targets) if (typeof t === "string") done.add(t);
+  }
+  return done;
+}
+
+/**
+ * Once-only delivery holds per TARGET: a marker row lists the targets that reached a final outcome, and a target
+ * whose post failed transiently is not listed, so the next hourly run retries it (review of #825). Each target is
+ * delivered once, and a failing workspace never blocks or repeats another. The read-then-send-then-insert is not
+ * atomic. What makes it once-only is the ADR-0064 scheduler lease: the scheduled tick and `POST
+ * /v1/scheduler/jobs/:name/run` both run this job under that one lease, so two copies never overlap. A
+ * transaction-level advisory lock would have to be held across the network sends, which this deliberately avoids.
+ */
 export async function runCampaignDeadlineNotifySweep(
   db: Db,
   opts: { actorUserId: string | null; now?: Date } = { actorUserId: null },
@@ -842,19 +882,8 @@ export async function runCampaignDeadlineNotifySweep(
     const pastDue = campaignPastDue(campaign, now);
     const dueSoon = !pastDue && campaign.dueAt.getTime() - now.getTime() <= CAMPAIGN_DEADLINE_REMINDER_HOURS * 3600_000;
     if (!pastDue && !dueSoon) continue;
+    // a campaign first seen past due gets only the expiry notice, never a late reminder
     const kind = pastDue ? "expired" : "due_soon";
-    // once per campaign and kind, ever: the audit row is the marker (as the expiry sweep's)
-    const [already] = await db
-      .select({ n: count() })
-      .from(auditLog)
-      .where(
-        and(
-          eq(auditLog.ruleId, CAMPAIGN_DEADLINE_NOTIFIED_RULE_ID),
-          eq(auditLog.objectId, campaign.id),
-          sql`${auditLog.detail} ->> 'kind' = ${kind}`,
-        ),
-      );
-    if ((already?.n ?? 0) > 0) continue;
     const perReviewer = await db
       .select({ reviewerUserId: grantCertificationItems.reviewerUserId, n: count() })
       .from(grantCertificationItems)
@@ -862,45 +891,48 @@ export async function runCampaignDeadlineNotifySweep(
       .groupBy(grantCertificationItems.reviewerUserId);
     const undecidedTotal = perReviewer.reduce((t, r) => t + r.n, 0);
     if (undecidedTotal === 0) continue;
-    const notices: CampaignDeadlineNotice[] = perReviewer.map((r) => ({
-      campaignId: campaign.id,
-      kind,
-      dueAt: campaign.dueAt,
-      reviewerUserId: r.reviewerUserId,
-      undecidedForReviewer: r.n,
-      undecidedTotal,
-    }));
-    let sent = { posted: 0, failed: 0, workspaces: 0 };
+    const done = await deliveredTargets(db, campaign.id, kind);
+    const notices: CampaignDeadlineNotice[] = perReviewer.map((r) => ({ reviewerUserId: r.reviewerUserId, undecidedForReviewer: r.n }));
+    let sent: Awaited<ReturnType<CampaignDeadlineCourier>>;
     try {
-      sent = await courier(notices, opts.actorUserId);
+      sent = await courier({ campaign: { id: campaign.id, kind, dueAt: campaign.dueAt, undecidedTotal }, notices, done }, opts.actorUserId);
     } catch {
-      sent = { posted: 0, failed: notices.length, workspaces: 0 };
+      // the courier itself failed (e.g. the connection read): nothing is final, the next run retries everything
+      sent = { workspaces: 0, results: [] };
     }
-    // no workspace opted in: nothing was attempted, so nothing is marked (a later opt-in still gets this notice)
-    if (sent.workspaces === 0) continue;
+    // no workspace opted in, or nothing left to send: nothing attempted, nothing marked
+    if (sent.workspaces === 0 || sent.results.length === 0) continue;
+    const posted = sent.results.filter((r) => r.outcome === "posted").length;
+    const terminal = sent.results.filter((r) => r.outcome === "terminal").length;
+    const retrying = sent.results.length - posted - terminal;
+    const finalTargets = sent.results.filter((r) => r.outcome !== "transient").map((r) => r.target);
+    out.notified.push({ campaignId: campaign.id, kind, reviewers: notices.length, posted, failed: terminal + retrying, retrying });
+    // every attempt failed transiently: no marker, so the whole delivery is retried next run
+    if (finalTargets.length === 0) continue;
     await db.insert(auditLog).values({
       userId: opts.actorUserId ?? campaign.openedByUserId,
       objectType: "certification_campaign",
       objectId: campaign.id,
+      // evidence row (ADR-0200 exception): `targets` is the point-in-time list this run delivered, ids only
       detail: {
         phase: "deadline_notice",
         kind,
         dueAt: campaign.dueAt.toISOString(),
         undecidedItems: undecidedTotal,
         reviewers: notices.length,
-        posted: sent.posted,
-        failed: sent.failed,
-        workspaces: sent.workspaces,
+        posted,
+        terminal,
+        retrying,
+        targets: finalTargets,
       },
       effect: "allow",
       ruleId: CAMPAIGN_DEADLINE_NOTIFIED_RULE_ID,
       ruleChain: [],
       reason:
         `certification campaign ${campaign.id}: ${kind === "expired" ? "expiry" : "due-soon"} notice for ` +
-        `${undecidedTotal} undecided item(s) across ${notices.length} reviewer(s), ${sent.posted} post(s) sent, ` +
-        `${sent.failed} failed; sent once, decides nothing`,
+        `${undecidedTotal} undecided item(s): ${posted} post(s) sent, ${terminal} refused for good, ` +
+        `${retrying} to retry; each target is sent once, decides nothing`,
     });
-    out.notified.push({ campaignId: campaign.id, kind, reviewers: notices.length, posted: sent.posted, failed: sent.failed });
   }
   return out;
 }

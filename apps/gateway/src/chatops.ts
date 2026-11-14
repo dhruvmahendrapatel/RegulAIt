@@ -149,7 +149,7 @@ import { verifyTeamsBotToken } from "./teams-bot-auth.js";
 // ADR-0182 S5 (PF-14): the alert-SLA sweep posts through this file's courier
 import { registerAlertSlaCourier } from "./alert-ownership.js";
 // ADR-0090 amendment (lane L11): the certification deadline sweep posts through this file's courier
-import { registerCampaignDeadlineCourier, type CampaignDeadlineNotice } from "./grant-certification.js";
+import { registerCampaignDeadlineCourier, type CampaignDeadlineNotice, type CampaignDeadlineOutcome } from "./grant-certification.js";
 import { errMessage } from "./err-serializer.js";
 import { SharedRateLimitStore } from "./rate-limit-store.js";
 import { wantsListContract } from "./list-contract.js";
@@ -1247,40 +1247,45 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
   // ADR-0090 amendment (lane L11): certification-campaign deadline notices to the workspaces opted in. A resend
   // workspace mails each notice to its named reviewer; any other provider posts ONE channel notice per campaign (the
   // campaign total), never a per-reviewer message to a shared channel. Nothing operator-typed is in either.
-  registerCampaignDeadlineCourier(db, async (notices, actorUserId) => {
-    const out = { posted: 0, failed: 0, workspaces: 0 };
+  registerCampaignDeadlineCourier(db, async ({ campaign, notices, done }, actorUserId) => {
+    const out: { workspaces: number; results: Array<{ target: string; outcome: CampaignDeadlineOutcome }> } = { workspaces: 0, results: [] };
     if (notices.length === 0) return out;
     const conns = await db
       .select()
       .from(chatopsConnections)
       .where(and(eq(chatopsConnections.enabled, true), eq(chatopsConnections.notifyCampaignDeadlines, true)));
     out.workspaces = conns.length;
-    const first = notices[0]!;
     for (const conn of conns) {
       const isMail = MAIL_PROVIDERS.includes(conn.provider as ChatOpsProvider);
       const pub = isMail ? mailPublicUrl() : null;
-      const targets: Array<{ notice: CampaignDeadlineNotice | null; audience: "reviewer" | "channel" }> =
-        conn.provider === "resend" ? notices.map((n) => ({ notice: n, audience: "reviewer" as const })) : [{ notice: null, audience: "channel" as const }];
+      const targets: Array<{ key: string; notice: CampaignDeadlineNotice | null; audience: "reviewer" | "channel" }> =
+        conn.provider === "resend"
+          ? notices.map((n) => ({ key: `${conn.id}:reviewer:${n.reviewerUserId}`, notice: n, audience: "reviewer" as const }))
+          : [{ key: `${conn.id}:channel`, notice: null, audience: "channel" as const }];
       for (const t of targets) {
+        if (done.has(t.key)) continue;
         const path = t.audience === "reviewer" ? "/inbox" : "/admin/certification";
         const input = {
-          campaignId: first.campaignId,
-          kind: first.kind,
-          dueAt: first.dueAt,
-          undecided: t.notice ? t.notice.undecidedForReviewer : first.undecidedTotal,
+          campaignId: campaign.id,
+          kind: campaign.kind,
+          dueAt: campaign.dueAt,
+          undecided: t.notice ? t.notice.undecidedForReviewer : campaign.undecidedTotal,
           audience: t.audience,
           portalUrl: pub?.ok ? joinPublicUrl(pub.url, `/ui${path}`) : `/ui${path}`,
         };
         const namedRecipient = t.notice ? await activeUserEmail(t.notice.reviewerUserId) : null;
         const channel = conn.provider === "resend" ? (namedRecipient ?? RESEND_RECIPIENT_MODE) : conn.defaultChannel;
         let posted: Awaited<ReturnType<typeof postCard>>;
+        // only "this reviewer has no active account or email" is final; every other failure is retried next run
+        let terminal = false;
         try {
-          posted =
-            pub && !pub.ok
-              ? pub
-              : conn.provider === "resend" && !namedRecipient
-                ? { ok: false, status: 422, body: { error: "no_named_recipient" } }
-                : await postCard(conn, channel, composeCampaignDeadlineCard(input), actorUserId, "campaign-deadline", outlookMessageForCampaignDeadline(input), namedRecipient);
+          if (pub && !pub.ok) posted = pub;
+          else if (conn.provider === "resend" && !namedRecipient) {
+            posted = { ok: false, status: 422, body: { error: "no_named_recipient" } };
+            terminal = true;
+          } else {
+            posted = await postCard(conn, channel, composeCampaignDeadlineCard(input), actorUserId, "campaign-deadline", outlookMessageForCampaignDeadline(input), namedRecipient);
+          }
         } catch (err) {
           posted = { ok: false, status: 502, body: { error: errMessage(err) } };
         }
@@ -1291,12 +1296,18 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
           posted.ok ? CHATOPS_RULE_IDS.campaignNoticePosted : CHATOPS_RULE_IDS.campaignNoticePostFailed,
           posted.ok ? "allow" : "deny",
           posted.ok
-            ? `certification campaign ${first.campaignId} ${first.kind} notice sent through '${conn.name}' (${conn.provider})`
-            : `certification campaign ${first.campaignId} ${first.kind} notice NOT sent through '${conn.name}': ${String(posted.body.error ?? posted.status)}`,
-          { campaignId: first.campaignId, kind: first.kind, audience: t.audience, ...(t.notice ? { reviewerUserId: t.notice.reviewerUserId } : {}), ...(posted.ok ? {} : { status: posted.status }) },
+            ? `certification campaign ${campaign.id} ${campaign.kind} notice sent through '${conn.name}' (${conn.provider})`
+            : `certification campaign ${campaign.id} ${campaign.kind} notice NOT sent through '${conn.name}': ${String(posted.body.error ?? posted.status)}` +
+              (terminal ? " (final, not retried)" : " (retried next run)"),
+          {
+            campaignId: campaign.id,
+            kind: campaign.kind,
+            audience: t.audience,
+            ...(t.notice ? { reviewerUserId: t.notice.reviewerUserId } : {}),
+            ...(posted.ok ? {} : { status: posted.status, retry: !terminal }),
+          },
         );
-        if (posted.ok) out.posted += 1;
-        else out.failed += 1;
+        out.results.push({ target: t.key, outcome: posted.ok ? "posted" : terminal ? "terminal" : "transient" });
       }
     }
     return out;

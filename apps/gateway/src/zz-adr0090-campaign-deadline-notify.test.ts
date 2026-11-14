@@ -8,7 +8,11 @@
  *  2. opted in: a due-soon reminder mails each NAMED REVIEWER their own count, once; nothing operator-typed (campaign
  *     name, holder or object label) is in the mail; one audit marker per campaign and kind;
  *  3. at expiry, one expiry notice, once; a campaign due later than 48 h gets nothing;
- *  4. the toggle is audited.
+ *  4. the toggle is audited;
+ *  5. (review of #825) delivery is marked per target: a transient failure is NOT marked and the next run retries it;
+ *     a reviewer with no active account is a final `no_named_recipient`, audited and never retried; a non-resend
+ *     workspace gets exactly one channel notice carrying the campaign total; a campaign first seen past due gets only
+ *     the expiry notice.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import http from "node:http";
@@ -28,6 +32,7 @@ import {
   inArray,
   runMigrations,
   sql,
+  users,
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
@@ -60,6 +65,12 @@ let app: ReturnType<typeof buildApp>;
 let server: http.Server;
 let base = "";
 const hits: Array<{ to: string[]; subject: string; html: string }> = [];
+/** posts the fake Slack side of the same server received (chat.postMessage) */
+const slackPosts: Array<{ channel?: string; text?: string }> = [];
+/** while true the fake answers every send with a 503 (a transient provider failure) */
+let failSends = false;
+const SLACK_CONNECTION = `cdn-slack-${RUN}`;
+let slackConnectorId = "";
 let connectorId = "";
 let connectionId = "";
 let openerId = "";
@@ -112,6 +123,21 @@ beforeAll(async () => {
     let body = "";
     req.on("data", (c) => (body += c));
     req.on("end", () => {
+      if (failSends) {
+        res.writeHead(503, { "content-type": "application/json" });
+        res.end(JSON.stringify({ message: "unavailable" }));
+        return;
+      }
+      if ((req.url ?? "").includes("chat.postMessage")) {
+        try {
+          slackPosts.push(JSON.parse(body || "{}"));
+        } catch {
+          /* not a post */
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true, ts: `1785.${slackPosts.length}` }));
+        return;
+      }
       try {
         hits.push(JSON.parse(body));
       } catch {
@@ -163,10 +189,10 @@ afterAll(async () => {
     if (campaignIds.length) {
       await db.update(grantCertificationCampaigns).set({ status: "cancelled", cancelledAt: new Date(), cancelledReason: "test cleanup" } as never).where(inArray(grantCertificationCampaigns.id, campaignIds));
     }
-    await db.delete(chatopsConnections).where(eq(chatopsConnections.name, CONNECTION));
-    if (connectorId) {
-      await db.delete(connectorCredentials).where(eq(connectorCredentials.connectorId, connectorId));
-      await db.delete(connectors).where(eq(connectors.id, connectorId));
+    await db.delete(chatopsConnections).where(inArray(chatopsConnections.name, [CONNECTION, SLACK_CONNECTION]));
+    for (const id of [connectorId, slackConnectorId].filter(Boolean)) {
+      await db.delete(connectorCredentials).where(eq(connectorCredentials.connectorId, id));
+      await db.delete(connectors).where(eq(connectors.id, id));
     }
     app.server.closeAllConnections();
     await app.close();
@@ -214,7 +240,7 @@ describe("ADR-0090 amendment: campaign deadline notices", () => {
     expect(await markers(soon)).toHaveLength(1);
   });
 
-  it("a campaign due later than 48 h gets nothing; at expiry one expiry notice goes out, once", async () => {
+  it("a campaign due later than 48 h gets nothing; first seen past due, it gets only the expiry notice, once", async () => {
     const later = await makeCampaign(24 * 7, [{ reviewer: reviewerA }]);
     await runCampaignDeadlineNotifySweep(db, { actorUserId: null });
     expect(hits.filter((m) => m.html.includes(later))).toHaveLength(0);
@@ -229,12 +255,98 @@ describe("ADR-0090 amendment: campaign deadline notices", () => {
     await runCampaignDeadlineNotifySweep(db, { actorUserId: null, now });
     expect(mailsFor(emails[reviewerA]!).filter((m) => m.html.includes(later))).toHaveLength(1);
     const ms = await markers(later);
+    // never a late due-soon reminder
     expect(ms.map((m) => (m.detail as Record<string, unknown>).kind)).toEqual(["expired"]);
+    expect(mailsFor(emails[reviewerA]!).filter((m) => m.html.includes(later) && /due soon/.test(m.subject))).toHaveLength(0);
   });
 
   it("each send is audited on the workspace, and the API key never appears in an audit row", async () => {
     const rows = await db.select().from(auditLog).where(and(eq(auditLog.objectId, connectionId), eq(auditLog.ruleId, CHATOPS_RULE_IDS.campaignNoticePosted)));
     expect(rows.length).toBeGreaterThanOrEqual(3);
     expect(JSON.stringify(rows)).not.toContain(API_KEY);
+  });
+
+  it("a transient failure is not marked: nothing is recorded as sent, and the next run retries and delivers", async () => {
+    const c = await makeCampaign(10, [{ reviewer: reviewerA }]);
+    failSends = true;
+    try {
+      const out = await runCampaignDeadlineNotifySweep(db, { actorUserId: null });
+      expect(out.notified.find((n) => n.campaignId === c)).toMatchObject({ kind: "due_soon", posted: 0, retrying: 1 });
+    } finally {
+      failSends = false;
+    }
+    expect(await markers(c)).toHaveLength(0);
+    const failed = await db.select().from(auditLog).where(and(eq(auditLog.objectId, connectionId), eq(auditLog.ruleId, CHATOPS_RULE_IDS.campaignNoticePostFailed)));
+    const mine = failed.filter((r) => (r.detail as Record<string, unknown>).campaignId === c);
+    expect(mine).toHaveLength(1);
+    expect((mine[0]!.detail as Record<string, unknown>).retry).toBe(true);
+
+    const out = await runCampaignDeadlineNotifySweep(db, { actorUserId: null });
+    expect(out.notified.find((n) => n.campaignId === c)).toMatchObject({ posted: 1, retrying: 0 });
+    expect(mailsFor(emails[reviewerA]!).filter((m) => m.html.includes(c))).toHaveLength(1);
+    const ms = await markers(c);
+    expect(ms).toHaveLength(1);
+    expect((ms[0]!.detail as { targets: string[] }).targets).toEqual([`${connectionId}:reviewer:${reviewerA}`]);
+    // delivered: a third run sends nothing more
+    await runCampaignDeadlineNotifySweep(db, { actorUserId: null });
+    expect(mailsFor(emails[reviewerA]!).filter((m) => m.html.includes(c))).toHaveLength(1);
+  });
+
+  it("a deactivated reviewer is a final no_named_recipient: audited as failed, marked, and never retried", async () => {
+    const email = `cdn-gone-${RUN}@example.com`;
+    const res = await inject("POST", "/v1/users", { email, displayName: "cdn gone" });
+    expect(res.statusCode, res.body).toBe(201);
+    const gone = res.json().id as string;
+    await db.update(users).set({ disabledAt: new Date() } as never).where(eq(users.id, gone));
+    const c = await makeCampaign(10, [{ reviewer: reviewerA }, { reviewer: gone }]);
+    const out = await runCampaignDeadlineNotifySweep(db, { actorUserId: null });
+    expect(out.notified.find((n) => n.campaignId === c)).toMatchObject({ reviewers: 2, posted: 1, failed: 1, retrying: 0 });
+    expect(mailsFor(emails[reviewerA]!).filter((m) => m.html.includes(c))).toHaveLength(1);
+    expect(hits.filter((m) => m.to.includes(email))).toHaveLength(0);
+    const failedFor = async () =>
+      (await db.select().from(auditLog).where(and(eq(auditLog.objectId, connectionId), eq(auditLog.ruleId, CHATOPS_RULE_IDS.campaignNoticePostFailed)))).filter(
+        (r) => (r.detail as Record<string, unknown>).campaignId === c,
+      );
+    const failed = await failedFor();
+    expect(failed).toHaveLength(1);
+    expect(failed[0]!.detail).toMatchObject({ reviewerUserId: gone, status: 422, retry: false });
+    expect(failed[0]!.reason).toContain("no_named_recipient");
+    const [m] = await markers(c);
+    expect((m!.detail as { targets: string[] }).targets.sort()).toEqual([`${connectionId}:reviewer:${gone}`, `${connectionId}:reviewer:${reviewerA}`].sort());
+    await runCampaignDeadlineNotifySweep(db, { actorUserId: null });
+    expect(await failedFor()).toHaveLength(1);
+    expect(mailsFor(emails[reviewerA]!).filter((m) => m.html.includes(c))).toHaveLength(1);
+  });
+
+  it("a non-resend workspace gets exactly one channel notice with the campaign total, never per-reviewer counts", async () => {
+    const conn = await inject("POST", "/v1/connectors", { name: `cdn-slack-connector-${RUN}`, kind: "chat", providerKind: "slack", baseUrl: base });
+    expect(conn.statusCode, conn.body).toBe(201);
+    slackConnectorId = conn.json().id;
+    const cred = await inject("POST", `/v1/connectors/${slackConnectorId}/credential`, { token: `xoxb-cdn-${RUN}` });
+    expect([200, 201]).toContain(cred.statusCode);
+    const ws = await inject("POST", "/v1/chatops/connections", {
+      name: SLACK_CONNECTION,
+      provider: "slack",
+      connectorId: slackConnectorId,
+      signingSecret: `cdn-signing-${RUN}`,
+      defaultChannel: "#access-reviews",
+      notifyCampaignDeadlines: true,
+    });
+    expect(ws.statusCode, ws.body).toBe(201);
+    const slackId = ws.json().id as string;
+    const c = await makeCampaign(10, [{ reviewer: reviewerA }, { reviewer: reviewerA }, { reviewer: reviewerB }]);
+    await runCampaignDeadlineNotifySweep(db, { actorUserId: null });
+    const mine = slackPosts.filter((p) => (p.text ?? "").includes(c));
+    expect(mine).toHaveLength(1);
+    expect(mine[0]!.channel).toBe("#access-reviews");
+    expect(mine[0]!.text).toContain("3 undecided items");
+    expect(mine[0]!.text).not.toContain("assigned to you");
+    expect(mine[0]!.text).not.toContain(SECRET_NAME);
+    // the resend workspace still mails each reviewer their own count; the two workspaces are marked independently
+    expect(mailsFor(emails[reviewerA]!).filter((m) => m.html.includes(c))[0]!.html).toContain("2 undecided items assigned to you");
+    const targets = (await markers(c)).flatMap((m) => (m.detail as { targets: string[] }).targets);
+    expect(targets).toContain(`${slackId}:channel`);
+    await runCampaignDeadlineNotifySweep(db, { actorUserId: null });
+    expect(slackPosts.filter((p) => (p.text ?? "").includes(c))).toHaveLength(1);
   });
 });

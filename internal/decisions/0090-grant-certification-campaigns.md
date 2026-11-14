@@ -219,9 +219,26 @@ are unchanged and remain decider-barred from self-certification.
 The "no notifications" limit is closed, in the same narrow shape as the B2a sweep.
 
 - **What is sent.** A *due-soon* reminder once a campaign with undecided items is within 48 hours of its due time, and
-  an *expiry* notice once it is past due. Each goes out **once per campaign**; the audit row
-  `campaign-deadline-notified` (detail `kind: due_soon | expired`) is the marker, as `campaign-expired-incomplete` is
-  for the B2a sweep.
+  an *expiry* notice once it is past due. A campaign first seen already past due gets only the expiry notice, never a
+  late reminder.
+- **Once per delivery target, retried until final (review of #825).** A target is one workspace's channel notice
+  (`<connection>:channel`), or on a Resend workspace one reviewer's mail (`<connection>:reviewer:<user>`). The audit row
+  `campaign-deadline-notified` (detail `kind`, and `targets`, the ids this run delivered) is the marker. A target is
+  listed only when its outcome is final:
+  - **posted**;
+  - **terminal**: only `no_named_recipient` (422), where the reviewer has no active account or no usable email, so a
+    retry cannot help. It is audited as a failed post with `retry: false` and is not tried again.
+  - Anything else is **transient** and is not listed, so the next hourly run retries it: a provider 5xx, a network
+    error, a missing public URL, or a 429.
+
+  So a failing workspace never blocks or repeats another, and a reviewer already mailed is not mailed again. Each run
+  writes at most one marker row per campaign and kind, and only when at least one target became final. A transient
+  target stops being retried when its notice window ends: a due-soon reminder stops once the campaign is past due, and
+  an expiry notice stops once the campaign is no longer open.
+- **Once-only rests on the scheduler lease.** Reading the markers, sending and writing the marker is not one
+  transaction. The ADR-0064 lease guarantees a single copy: the scheduled tick and the manual
+  `POST /v1/scheduler/jobs/:name/run` both run this job under that one lease. An advisory lock would have to be held
+  across the network sends, which is deliberately avoided.
 - **To whom, and through what.** Through the existing ChatOps courier (egress guard, the connector's own credential,
   per-workspace rate limits), only to workspaces that opted in with the new `chatops_connections.notify_campaign_deadlines`
   flag. It is off by default (ADR-0180), and changing it is admin-only and audited (`chatops-campaign-notice-settings-changed`).
