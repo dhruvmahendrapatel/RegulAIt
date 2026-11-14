@@ -11,8 +11,8 @@ import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, api } from "../../api/client";
 import type { Approval, WorkflowDetailResponse } from "../../api/types";
 import { ago, approvalStageLabel, humanize, plural } from "../../api/format";
-import { pendingQueueQuery, pendingRows, queueTotal } from "../../api/approvalQueue";
-import { decidedQueueQuery, decidedRows, pendingCapNote } from "../../api/approvalQueuePages";
+import { pendingQueueQuery, pendingRows } from "../../api/approvalQueue";
+import { DECIDED_STATUSES, pendingCapNote } from "../../api/approvalQueuePages";
 import { QuestionnaireView } from "../admin/governance/UseCaseQuestionnaire";
 import { drawerEvidenceState, mergeGateParts } from "./inboxEvidence";
 import { useSession } from "../../session/SessionContext";
@@ -32,6 +32,7 @@ import {
 } from "../../ui/kit";
 import { focusFirst, foldButtonOf } from "../../ui/focus";
 import { DetailDrawer, DrawerActions } from "../../ui/DetailDrawer";
+import { DataList, type DataColumn } from "../../ui/DataList";
 import { useToast } from "../../ui/toast";
 import { McpActionReview } from "../approvals/McpActionReview";
 import { inspectApprovalAction, isBoundAction } from "../approvals/approvalReview";
@@ -78,10 +79,11 @@ export default function InboxPage() {
   const decidedFrom = useRef<{ id: string; index: number } | null>(null);
   const list = useRef<HTMLDivElement>(null);
 
-  // the pending queue, oldest first, filtered by the server; "Recently decided" is its own query, so decided rows
+  // the pending queue, oldest first, filtered by the server; "Recently decided" is its own list, so decided rows
   // can never push a pending one out of the capped page
   const q = useQuery(pendingQueueQuery());
-  const decidedQ = useQuery(decidedQueueQuery());
+  // ADR-0226: the decided list's total, once its folded card has been opened and the list read (null until then)
+  const [decidedTotal, setDecidedTotal] = useState<number | null>(null);
   // ADR-0173 batch 2c (Q): annotation items waiting on me as a named reviewer.
   // Content-free; the card shows only when there is something to review.
   const annotations = useQuery({
@@ -94,9 +96,6 @@ export default function InboxPage() {
   const annotationsFailed = annotations.isError && !(annotations.error instanceof ApiError && (annotations.error.status === 403 || annotations.error.status === 404));
   const pending = pendingRows(q.data);
   const capNote = pendingCapNote(q.data, pending.length);
-  const decidedAll = decidedRows(decidedQ.data);
-  const decidedTotal = queueTotal(decidedQ.data, decidedAll.length);
-  const decided = decidedAll.slice(0, 12);
   // L1: a decided item leaves the list, taking its drawer and the Review button that opened it, so focus moves to
   // the next item's Review button (the one before it when it was last), or to the page heading when none is left
   useEffect(() => {
@@ -388,38 +387,63 @@ export default function InboxPage() {
             <Button size="sm" onClick={() => void annotations.refetch()}>Retry</Button>
           </p>
         )}
-        {decidedQ.isError && (
-          <p className={v.errLine} role="alert" data-testid="inbox-decided-failed">
-            Recently decided items could not be loaded.{" "}
-            <Button size="sm" onClick={() => void decidedQ.refetch()}>Retry</Button>
-          </p>
-        )}
-        {decided.length > 0 && (
-          // the list shows the newest 12, so a full list reads "12+" rather than as the whole history
-          <Card title="Recently decided" contain foldable startCollapsed count={decided.length} countIsLimit={decidedTotal > decided.length} countNoun={["decision", "decisions"]}>
-            {decided.map((a) => (
-              <div key={a.id} className={v.listRow} style={{ alignItems: "center" }}>
-                <div className={v.grow}>
-                  <div style={{ fontSize: "var(--text-sm)" }}>
-                    {approvalLabel(a)}
-                    {a.objectLabel && <span className={v.faint}> · {isIntakeSignoff(a) ? intakeUseCaseName(a) : a.objectLabel}</span>}
-                  </div>
-                  <div className={v.faint}>
-                    requested by {a.requestedByName ?? "unknown"} · decided by {a.decidedByName ?? "—"}
-                    {a.decidedAt ? ` ${ago(a.decidedAt)}` : ""}
-                    {a.decisionReason ? ` · “${a.decisionReason}”` : ""}
-                  </div>
-                </div>
-                {a.status === "returned" ? <Badge tone="warn">sent back</Badge> : <StatusBadge status={a.status} />}
-                {isBoundAction(a) && <McpActionReview approval={a} />}
-              </div>
-            ))}
-          </Card>
-        )}
+        {/* owner decision, 2026-11-06: the decided history is the shared list control, paged, sorted and exported by
+            the server under the queue's visibility. A secondary section, so it starts folded (X6b); `listControl` lets
+            it fold over the list's own controls, and the list is read only once the section is opened. A failed read
+            shows the list's ErrorState with Retry, which keeps the section open */}
+        <Card title="Recently decided" contain foldable listControl startCollapsed count={decidedTotal} countNoun={["decision", "decisions"]}>
+          <DataList<Approval>
+            listId="approvals-decided"
+            noun="decisions"
+            endpoint="/v1/approvals"
+            exportPath="/v1/approvals/export.xlsx"
+            queryKey={["approvals", "decided-list"]}
+            legacyKey="approvals"
+            filters={DECIDED_FILTERS}
+            defaultSort={{ key: "decided", dir: "desc" }}
+            rowKey={(a) => a.id}
+            columns={DECIDED_COLUMNS}
+            onRows={(rows, raw) => setDecidedTotal(typeof raw.total === "number" ? raw.total : rows.length)}
+            empty={<EmptyState title="No decisions yet" body="Approvals decided in your queue appear here." />}
+          />
+        </Card>
       </div>
     </>
   );
 }
+
+const DECIDED_FILTERS = { status: DECIDED_STATUSES.join(",") };
+/** ADR-0226: the decided list's columns; the ids and sortable ones match the gateway's APPROVALS_LIST */
+const DECIDED_COLUMNS: Array<DataColumn<Approval>> = [
+  {
+    key: "item",
+    header: "Item",
+    main: true,
+    render: (a) => (
+      <>
+        {approvalLabel(a)}
+        {a.objectLabel && <span className={v.faint}> · {isIntakeSignoff(a) ? intakeUseCaseName(a) : a.objectLabel}</span>}
+      </>
+    ),
+  },
+  {
+    key: "status",
+    header: "Status",
+    main: true,
+    sortable: true,
+    required: "The outcome of each decision is always shown",
+    render: (a) => (a.status === "returned" ? <Badge tone="warn">sent back</Badge> : <StatusBadge status={a.status} />),
+  },
+  { key: "requester", header: "Requested by", main: true, sortable: true, render: (a) => a.requestedByName ?? "unknown" },
+  { key: "decider", header: "Decided by", main: true, sortable: true, render: (a) => a.decidedByName ?? "—" },
+  { key: "decided", header: "Decided", main: true, sortable: true, render: (a) => (a.decidedAt ? ago(a.decidedAt) : "—") },
+  { key: "reason", header: "Reason", main: true, render: (a) => (a.decisionReason ? `“${a.decisionReason}”` : "—") },
+  { key: "kind", header: "Kind", sortable: true, render: (a) => humanize(a.objectType) },
+  { key: "approver", header: "Approver", sortable: true, render: (a) => a.approverName ?? "—" },
+  { key: "requested", header: "Requested", sortable: true, render: (a) => ago(a.requestedAt) },
+  // an MCP action keeps its own review dialog, read-only once decided
+  { key: "review", header: "", srHeader: "Review", action: true, render: (a) => (isBoundAction(a) ? <McpActionReview approval={a} /> : null) },
+];
 
 interface ItemView {
   delegated: boolean;

@@ -62,10 +62,17 @@ const (
 	KindAssistantConfig  Kind = "assistant_config"
 	KindCLI              Kind = "cli"
 	KindEnvName          Kind = "env_name"
+	// KindMCPConfig is an MCP host's client config (Claude Desktop, Cursor, VS Code, …): one fact per configured
+	// server, described by MCPServer (ADR-0259). Off unless the org turns it on; the gateway refuses it otherwise.
+	KindMCPConfig Kind = "mcp_config"
 )
 
+// OptInKinds are collected only when the org policy names them in EnabledOptInKinds (ADR-0259: default off per
+// org). A signed manifest listing one is not enough on its own.
+var OptInKinds = []Kind{KindMCPConfig}
+
 // Kinds is the closed set; a manifest naming any other kind is refused.
-var Kinds = []Kind{KindDesktopApp, KindIDEExtension, KindBrowserExtension, KindLocalRuntime, KindAssistantConfig, KindCLI, KindEnvName}
+var Kinds = []Kind{KindDesktopApp, KindIDEExtension, KindBrowserExtension, KindLocalRuntime, KindAssistantConfig, KindCLI, KindEnvName, KindMCPConfig}
 
 // Root names the base a reported path is relative to. Absolute paths never leave the device.
 type Root string
@@ -157,6 +164,9 @@ type OrgPolicy struct {
 	IntervalSeconds int `json:"intervalSeconds"`
 	// DisabledKinds turns collectors off for the org (narrowing only).
 	DisabledKinds []Kind `json:"disabledKinds"`
+	// EnabledOptInKinds turns on the OptInKinds the org enabled (ADR-0259). An opt-in kind it does not name is
+	// off, so a policy that omits the field, or an older gateway, keeps them off.
+	EnabledOptInKinds []Kind `json:"enabledOptInKinds,omitempty"`
 }
 
 // Report is POST /v1/endpoint-agent/reports: one snapshot of the decision-18 facts. Idempotent on SnapshotID.
@@ -194,6 +204,59 @@ type Fact struct {
 	// PortOnly marks a listener whose owning process could not be read (another user's), so only the port matched.
 	PortOnly bool       `json:"portOnly,omitempty"`
 	Keys     []KeyFound `json:"keys,omitempty"`
+	// Server is set on an mcp_config fact only (MatchedOn "mcpServer"): one configured MCP server, never its
+	// arguments, environment values, header values or URL path (ADR-0259).
+	Server *MCPServer `json:"server,omitempty"`
+}
+
+// MCP transports a server entry can declare.
+const (
+	MCPTransportStdio   = "stdio"
+	MCPTransportHTTP    = "http"
+	MCPTransportSSE     = "sse"
+	MCPTransportUnknown = "unknown"
+)
+
+// MCP risk flags (ADR-0259). A closed set of compiled checks over the server entry; the inputs are dropped on
+// the device and only the flag is sent.
+const (
+	MCPRiskShellLauncher         = "shell_launcher"           // the command is a shell given a command string (sh -c, …)
+	MCPRiskContainerPrivileged   = "container_privileged"     // docker/podman run with --privileged, host pid/network or added capabilities
+	MCPRiskHostRootMount         = "host_root_mount"          // an argument or bind mount names the filesystem or home root
+	MCPRiskUnpinnedPackage       = "unpinned_package"         // npx/uvx/… runs a package with no version, or a moving one (latest)
+	MCPRiskSecretInArgs          = "secret_in_args"           // an argument holds a key-shaped value
+	MCPRiskPlaintextRemote       = "plaintext_remote"         // a remote server over http:// to a host that is not loopback
+	MCPRiskAutoApproveAll        = "auto_approve_all"         // every tool runs without the user confirming it
+	MCPRiskRiskyToolAutoApproved = "risky_tool_auto_approved" // an auto-approved tool's name says it writes, runs or deletes
+)
+
+// MCPRiskFlags is the closed set, in report order.
+var MCPRiskFlags = []string{MCPRiskShellLauncher, MCPRiskContainerPrivileged, MCPRiskHostRootMount, MCPRiskUnpinnedPackage,
+	MCPRiskSecretInArgs, MCPRiskPlaintextRemote, MCPRiskAutoApproveAll, MCPRiskRiskyToolAutoApproved}
+
+// MCPServer is one server entry of an MCP host config. Every string in it passed a shape check on the device;
+// anything that failed is dropped or reported as "(unnamed)".
+type MCPServer struct {
+	// Name is the entry's key when it is identifier-shaped (at most 64 of [A-Za-z0-9._-]); otherwise "(unnamed)".
+	Name      string `json:"name"`
+	Transport string `json:"transport"`
+	// Command is the launch command's base name (stdio), when identifier-shaped. Never its arguments.
+	Command string `json:"command,omitempty"`
+	// Package is what npx, uvx, pipx, bunx, docker or podman runs (`@scope/name`, `name`, `registry/image`),
+	// without a version; PackageVersion is its pinned version or tag, when it has one.
+	Package        string `json:"package,omitempty"`
+	PackageVersion string `json:"packageVersion,omitempty"`
+	// Host is a remote server's host (and port when not the scheme's default), lower-case. Never the path,
+	// query or credentials of its URL.
+	Host     string   `json:"host,omitempty"`
+	Disabled bool     `json:"disabled,omitempty"`
+	Risks    []string `json:"risks,omitempty"`
+	// RiskyTools are auto-approved tool names whose name says they write, run or delete (at most 20).
+	RiskyTools []string `json:"riskyTools,omitempty"`
+	// AutoApprovedTools counts every auto-approved tool name, risky or not.
+	AutoApprovedTools int `json:"autoApprovedTools,omitempty"`
+	// Keys are the env and header entries holding a key: presence and rule id only (never a value).
+	Keys []KeyFound `json:"keys,omitempty"`
 }
 
 // Location is where a fact was seen, relative to a Root.

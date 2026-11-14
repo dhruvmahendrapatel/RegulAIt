@@ -2,15 +2,15 @@
 
 - **Status**: Accepted
 - **Date**: 2026-09-06
-- **Relates to**: [ADR-0060](0060-audit-tamper-evidence.md) (the hash chain, and the
+- **Relates to**: [ADR-0060](0060-tamper-evident-audit.md) (the hash chain, and the
   `createDb` interception point this reuses — the ordering constraint below is entirely about
   not breaking it), [ADR-0042](0042-guardrail-engine.md) (the `dlp.secret.*` credential-material
   rules, which are the detector this borrows rather than a second copy),
   [ADR-0055](0055-shadow-ai-discovery.md) (`redactKeyFragment` — "a finding is a pointer to a
   secret, never a copy of one", the bargain this generalizes),
-  [ADR-0061](0061-chatops.md) (the ChatOps sensitivity fence — the other place this codebase
+  [ADR-0061](0061-chatops-approvals.md) (the ChatOps sensitivity fence — the other place this codebase
   decides what may leave a record), [ADR-0021](0021-org-settings-configurability-layer.md)
-  (`redactSettings`, the OTLP-header precedent), [ADR-0019](0019-pii-handling.md) (PII stored as
+  (`redactSettings`, the OTLP-header precedent), [ADR-0019](0019-per-user-revocation-and-full-attribution.md) (PII stored as
   counts, never as matched substrings — the same counts-only discipline)
 - **Migration**: none. This changes what is written into existing columns; no DDL.
 

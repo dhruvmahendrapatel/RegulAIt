@@ -9,6 +9,10 @@
  * cannot sort says so in its (i) rather than being sorted in the browser.
  *
  * Its own module, loaded only with the screens that use it: the entry bundle does not grow.
+ *
+ * Its toolbar and column picker carry the kit's list-view mark (`data-list-view`), so a contained `Card` may still fold
+ * over the list (X6b): the page-size select is not a draft. Nothing else in the list carries the mark, so a form control a
+ * page renders in a row, or the export's row-limit alert, still keeps the card open.
  */
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { useInfiniteQuery, useQuery, keepPreviousData } from "@tanstack/react-query";
@@ -76,6 +80,8 @@ export interface DataListProps<T> {
   empty?: ReactNode;
   /** the table to render: the kit Table, or FoldTable where columns fold on narrow widths */
   table?: (props: TableProps<T>) => ReactNode;
+  /** a fixed sentence shown in place of the read's own error (the server's detail never reaches the screen) */
+  errorMessage?: string;
   /** each time rows arrive: the rows on screen and the last response body (for a page's own extras) */
   onRows?: (rows: T[], raw: Record<string, unknown>) => void;
 }
@@ -402,7 +408,7 @@ export function DataList<T>(props: DataListProps<T>) {
         rows={rows}
         rowKey={props.rowKey}
         loading={q.isLoading}
-        error={q.error}
+        error={q.error && props.errorMessage ? new Error(props.errorMessage) : q.error}
         onRetry={refresh}
         onRowClick={props.onRowClick}
         rowLabel={props.rowLabel}

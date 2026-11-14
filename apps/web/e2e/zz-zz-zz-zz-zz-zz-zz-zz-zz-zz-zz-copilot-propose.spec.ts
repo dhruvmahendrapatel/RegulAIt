@@ -31,6 +31,7 @@
  */
 import { expect, test, type Page } from "@playwright/test";
 import { passTotp } from "./totp-sign-in";
+import { confirmStepUp } from "./admin-api";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -70,6 +71,8 @@ async function signIn(page: Page, email: string, candidates: string[], settleOn:
 }
 
 test("the propose form builds an applicable diff, shows it, and still bows to consent", async ({ page }) => {
+  // ADR-0250: the sign-in and the grant's step-up each spend a TOTP step (may wait a 30 s window)
+  test.setTimeout(120_000);
   await signIn(page, "admin@regulait.local", [ADMIN_PASSWORD, state.passwords.admin], ADMIN_PASSWORD);
 
   // ---- a fixture grant to propose the revocation OF -----------------------
@@ -86,10 +89,16 @@ test("the propose form builds an applicable diff, shows it, and still bows to co
   expect(agentId, "the seeded deployment has at least one agent").toBeTruthy();
   await grantForm.getByLabel("User").selectOption(userId!);
   await grantForm.getByLabel("Agent").selectOption(agentId!);
+  // ADR-0250: a grant mint is a step-up — the first POST is refused 403 step_up_required, the app asks
+  // "Confirm it's you" and resends it with the grant. Wait for the POST that is not that refusal, answering
+  // the dialog when it asks (a 409 answered before any step-up never opens it).
   const granted = page.waitForResponse(
-    (r) => r.url().includes("/v1/grants/agents") && r.request().method() === "POST",
+    (r) => r.url().includes("/v1/grants/agents") && r.request().method() === "POST" && r.status() !== 403,
   );
   await grantForm.getByRole("button", { name: "Grant" }).click();
+  const stepUpDialog = page.getByTestId("step-up-dialog");
+  await Promise.race([granted, stepUpDialog.waitFor({ state: "visible" })]);
+  if (await stepUpDialog.isVisible()) await confirmStepUp(page);
   // 201, or 409 if this user already holds it — either way it exists after this
   expect([200, 201, 409]).toContain((await granted).status());
 
