@@ -4,24 +4,122 @@
  * rest. Every default equals the shipped behaviour, so an untouched page IS
  * the previous release. Sign-in & sessions lives in Identity & Access → SSO &
  * sessions.
+ *
+ * I-2 (#453, pattern 1): the numbered sections sit in six tabs, each paired
+ * with its tabpanel and kept mounted so a draft survives a switch; a status row
+ * above the tabs keeps the relaxed settings, the credential guard, the IP
+ * policies and the theme lock in view whichever tab is open.
  */
 import { lazy, Suspense, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../../api/client";
 import type { OrgSettingsResponse } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
-import { Button, Card, ConfirmModal, Field, InfoButton, Input, Select, SkeletonBlock, Textarea } from "../../../ui/kit";
-import { QueryGate, agentOpts, optionEls, useAction, useAgents } from "../adminKit";
+import {
+  Badge,
+  Button,
+  Card,
+  ConfirmModal,
+  ErrorState,
+  Field,
+  InfoButton,
+  Input,
+  Select,
+  SkeletonBlock,
+  TabPanel,
+  Tabs,
+  Textarea,
+} from "../../../ui/kit";
+import { agentOpts, optionEls, useAction, useAgents } from "../adminKit";
 import { useToast } from "../../../ui/toast";
 import v from "../../views.module.css";
 import { api as stepUpApi, putOrgSettings, withStepUp } from "../../../stepup/stepUp";
 import { OrgSettingsCard } from "./OrgSettingsCard";
+import { specsFor, storedValue } from "./orgSettingSpecs";
+import { isOff, ORG_PAGE_RULES, ORG_PAGE_SPEC_TABS, type OrgTab } from "./orgPageRelaxed";
+import { PALETTES } from "../../../theme/palette";
 import { CardBoundary } from "../../../ui/CardBoundary";
 
 // ADR-0218: the organisation default theme and lock, loaded only when this page opens
 const ThemesCard = lazy(() => import("./ThemesCard"));
 
 const CLEAR = "__clear__";
+
+/** I-2: the page's settings in tabs, each a group of the numbered sections (the numbers stay, so a pointer to "5b" still finds it) */
+const ORG_TABS: ReadonlyArray<{ id: OrgTab; label: string }> = [
+  { id: "costs", label: "Cost & limits" },
+  { id: "data", label: "Data & audit" },
+  { id: "network", label: "Providers & network" },
+  { id: "gates", label: "Approvals & gates" },
+  { id: "assist", label: "Assisted features" },
+  { id: "themes", label: "Themes" },
+];
+const relaxedLabel = (label: string, n: number) => (n > 0 ? `${label} · ${n.toLocaleString()} relaxed` : label);
+
+interface Relaxed {
+  tab: OrgTab;
+  label: string;
+}
+function relaxedSettings(settings: Record<string, unknown>): Relaxed[] {
+  const out: Relaxed[] = ORG_PAGE_RULES.filter((r) => settings[r.key] !== undefined && r.relaxed(settings[r.key])).map((r) => ({ tab: r.tab, label: r.label }));
+  for (const group of ORG_PAGE_SPEC_TABS) {
+    for (const spec of specsFor(group.keys)) {
+      const stored = storedValue(spec, settings[spec.key]);
+      if (stored !== undefined && spec.isRelaxed(stored)) out.push({ tab: group.tab, label: spec.label });
+    }
+  }
+  const order = ORG_TABS.map((t) => t.id);
+  return out.sort((a, b) => order.indexOf(a.tab) - order.indexOf(b.tab));
+}
+
+const IP_POLICY: Record<string, string> = {
+  off: "off",
+  enforce_at_login: "enforced at sign-in",
+  enforce_continuous: "enforced on every request",
+};
+
+/**
+ * I-2: what no tab may hide, from the saved settings: how many settings are relaxed (and which, behind the (i)),
+ * the credential guard when it is off, both IP policies, and the theme lock with its accessibility exception.
+ */
+function OrgStatus(props: { settings: Record<string, unknown>; relaxed: Relaxed[] }) {
+  const s = props.settings;
+  const n = props.relaxed.length;
+  const palette = PALETTES.find((p) => p.id === s.themeDefaultPalette)?.name ?? "the organisation default";
+  return (
+    <div className={v.row} role="group" aria-label="Organisation status">
+      <Badge
+        tone={n > 0 ? "warn" : "ok"}
+        infoLabel="the relaxation count"
+        info={
+          n > 0 ? (
+            <ul>
+              {props.relaxed.map((r) => (
+                <li key={r.label}>
+                  {r.label} ({ORG_TABS.find((t) => t.id === r.tab)?.label})
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p>Every setting on this page that has a stricter default is at it. Each relaxation is audited.</p>
+          )
+        }
+      >
+        {n > 0 ? `Relaxed from the default: ${n.toLocaleString()}` : "Nothing relaxed from the default"}
+      </Badge>
+      {isOff(s.contentCredentialGuard) && <Badge tone="danger">Credential guard for content: off</Badge>}
+      <Badge tone="neutral">{`Sign-in IP policy: ${IP_POLICY[String(s.sessionIpPolicy ?? "off")] ?? String(s.sessionIpPolicy)}`}</Badge>
+      <Badge tone="neutral">{`API-key IP policy: ${IP_POLICY[String(s.apiKeyIpPolicy ?? "off")] ?? String(s.apiKeyIpPolicy)}`}</Badge>
+      <Badge
+        tone="neutral"
+        infoLabel="the theme lock"
+        info={<p>High contrast always stays available to anyone, locked or not, for accessibility. Each person's light or dark mode is never locked.</p>}
+      >
+        {s.themeLocked === true ? `Theme: everyone uses ${palette}` : "Theme: each person chooses"}
+      </Badge>
+    </div>
+  );
+}
 
 export default function OrganizationPage() {
   const q = useQuery({
@@ -35,9 +133,20 @@ export default function OrganizationPage() {
         sub="Org-wide functional defaults."
         info={<p>Org-wide functional defaults. Everything here used to be a hardcoded constant; now it is your choice. Org settings are CEILINGS: they only ever narrow what happens below them. Every save is audited with exactly which keys changed.</p>}
       />
-      <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
-        {q.data && <Loaded settings={q.data.settings} />}
-      </QueryGate>
+      {/* I-2: the settings read feeds the status row too, so a failed read is an error with Retry, never a row of defaults */}
+      {q.data ? (
+        <Loaded settings={q.data.settings} />
+      ) : q.error ? (
+        <ErrorState
+          title="Couldn't load the organisation settings"
+          message={q.error instanceof Error ? q.error.message : String(q.error)}
+          onRetry={() => void q.refetch()}
+        />
+      ) : (
+        <Card>
+          <SkeletonBlock lines={5} />
+        </Card>
+      )}
     </>
   );
 }
@@ -291,6 +400,10 @@ function Loaded(props: { settings: Record<string, unknown> }) {
     defaultAuditRetentionDays: s.defaultAuditRetentionDays == null ? "0" : String(s.defaultAuditRetentionDays),
   });
 
+  // --- I-2: tabs, and what is relaxed from its default (read from the saved settings, not the drafts) ---
+  const [tab, setTab] = useState<OrgTab>("costs");
+  const relaxed = relaxedSettings(s);
+
   const numField = (
     section: ReturnType<typeof useSection>,
     label: string,
@@ -311,825 +424,855 @@ function Loaded(props: { settings: Record<string, unknown> }) {
 
   return (
     <div className={v.stack}>
-      <Card title="1 · Optimisation techniques (organisation-wide ceilings)">
-        <SectionShell
-          title="Technique toggles"
-          busy={opt.act.busy}
-          error={opt.act.error}
-          submitLabel="Save optimization settings"
-          onSubmit={() =>
-            void opt.act.run(
-              () =>
-                put({
-                  routingEnabled: asBool(opt.f.routingEnabled!),
-                  compactionEnabled: asBool(opt.f.compactionEnabled!),
-                  promptCachingEnabled: asBool(opt.f.promptCachingEnabled!),
-                  editVsRewriteEnabled: asBool(opt.f.editVsRewriteEnabled!),
-                  filePreprocessingEnabled: asBool(opt.f.filePreprocessingEnabled!),
-                  lazyToolLoadingEnabled: asBool(opt.f.lazyToolLoadingEnabled!),
-                  defaultRoutingMode: opt.f.defaultRoutingMode,
-                  semanticCachePolicy: opt.f.semanticCachePolicy,
-                  semanticCacheTtlSeconds: Number(opt.f.semanticCacheTtlSeconds),
-                  compactionFailureMode: opt.f.compactionFailureMode,
-                  summarizerSelection: opt.f.summarizerSelection,
-                  ...(opt.f.summarizerAgentId
-                    ? { summarizerAgentId: opt.f.summarizerAgentId === CLEAR ? null : opt.f.summarizerAgentId }
-                    : {}),
-                  compactionThresholdTokens: Number(opt.f.compactionThresholdTokens),
-                  compactionRecentWindow: Number(opt.f.compactionRecentWindow),
-                  minCacheableTokens: Number(opt.f.minCacheableTokens),
-                  cacheReadDiscount: Number(opt.f.cacheReadDiscount),
-                  maxToolsInManifest: Number(opt.f.maxToolsInManifest),
-                  minEditableBaselineTokens: Number(opt.f.minEditableBaselineTokens),
-                  batchOverheadTokens: Number(opt.f.batchOverheadTokens),
-                  minPreprocessTokens: Number(opt.f.minPreprocessTokens),
-                }),
-              "Optimization settings saved (audited)",
-            )
-          }
-          help={
-            <>
-              <p>Each toggle is the org CEILING for one cost-optimization technique: disabled means it never runs for anyone. Enabled (the default — today's behaviour) defers to each user's own routing mode; a user's explicit passthrough always wins. Semantic cache 'off' beats a caller's semanticCache:true. Compaction 'fail closed' refuses the turn when summarization fails. A fixed summarizer must still be in the calling user's own entitled roster — it can never widen entitlement.</p>
-              <p>The numeric dials are the formerly-hardcoded kernel constants (compact past 1600 tokens keeping 4 messages verbatim; cache 1024+ token prefixes at a 0.9 read discount; at most 20 lazy-loaded tools; diff edits over 200-token baselines).</p>
-            </>
-          }
-        >
-          {(
-            [
-              ["Model routing", "routingEnabled"],
-              ["Context compaction", "compactionEnabled"],
-              ["Prompt caching", "promptCachingEnabled"],
-              ["Edit vs rewrite", "editVsRewriteEnabled"],
-              ["File preprocessing", "filePreprocessingEnabled"],
-              ["Lazy tool loading", "lazyToolLoadingEnabled"],
-            ] as const
-          ).map(([label, k]) => (
-            <Field key={k} label={label}>
-              <Select value={opt.f[k]} onChange={(e) => opt.set(k, e.target.value)}>
-                {ON_OFF}
-              </Select>
-            </Field>
-          ))}
-          <Field label="Default for unset users">
-            <Select value={opt.f.defaultRoutingMode} onChange={(e) => opt.set("defaultRoutingMode", e.target.value)}>
-              <option value="automatic">automatic (optimize)</option>
-              <option value="passthrough">passthrough (never optimize)</option>
-            </Select>
-          </Field>
-          <Field label="Semantic cache">
-            <Select value={opt.f.semanticCachePolicy} onChange={(e) => opt.set("semanticCachePolicy", e.target.value)}>
-              <option value="opt_in">opt-in (caller asks)</option>
-              <option value="off">off (even if the caller asks — default)</option>
-              <option value="always">always (every eligible dispatch)</option>
-            </Select>
-          </Field>
-          {numField(opt, "Cache TTL seconds", "semanticCacheTtlSeconds")}
-          <Field label="Compaction failure">
-            <Select value={opt.f.compactionFailureMode} onChange={(e) => opt.set("compactionFailureMode", e.target.value)}>
-              <option value="fail_open">fail open (turn proceeds, full history)</option>
-              <option value="fail_closed">fail closed (turn is refused — default)</option>
-            </Select>
-          </Field>
-          <Field label="Summarizer">
-            <Select value={opt.f.summarizerSelection} onChange={(e) => opt.set("summarizerSelection", e.target.value)}>
-              <option value="cheapest">cheapest entitled agent (default)</option>
-              <option value="fixed_agent">a fixed agent</option>
-            </Select>
-          </Field>
-          <Field label="Fixed summarizer agent">
-            <Select value={opt.f.summarizerAgentId} onChange={(e) => opt.set("summarizerAgentId", e.target.value)}>
-              {optionEls(
-                [{ v: CLEAR, l: "— clear (use cheapest) —" }, ...agentOpts(agents.data?.agents)],
-                "— leave unchanged —",
-              )}
-            </Select>
-          </Field>
-          {numField(opt, "Compaction threshold (tokens)", "compactionThresholdTokens")}
-          {numField(opt, "Verbatim window (messages)", "compactionRecentWindow")}
-          {numField(opt, "Min cacheable prefix (tokens)", "minCacheableTokens")}
-          {numField(opt, "Cache read discount (0..1)", "cacheReadDiscount")}
-          {numField(opt, "Max tools in manifest", "maxToolsInManifest")}
-          {numField(opt, "Min editable baseline (tokens)", "minEditableBaselineTokens")}
-          {numField(opt, "Batch overhead (tokens)", "batchOverheadTokens")}
-          {numField(opt, "Min preprocess size (tokens)", "minPreprocessTokens")}
-        </SectionShell>
-      </Card>
-
-      <Card title="2 · Compliance defaults">
-        <SectionShell
-          title="PII + env-key fallback"
-          busy={comp.act.busy}
-          error={comp.act.error}
-          submitLabel="Save compliance defaults"
-          onSubmit={() =>
-            void comp.act.run(
-              () =>
-                put({
-                  defaultPiiMode: comp.f.defaultPiiMode,
-                  envKeyFallbackEnabled: asBool(comp.f.envKeyFallbackEnabled!),
-                  ...(envProviders.length ? { envFallbackProviders: envProviders } : {}),
-                }),
-              "Compliance defaults saved (audited)",
-            )
-          }
-          help={
-            <>
-              <p>Default PII mode is the DEPLOYMENT-WIDE FLOOR: it applies wherever no compliance framework governs — an unclassified project, tags matching no profile, and calls attributed to NO project at all (model, connector, MCP, cached replays, streams and training ingest alike), so omitting the project is not an exit from enforcement. A classified project's own cascade always wins — the floor fills gaps under the frameworks, it never overrides one.</p>
-              <p>The env-var fallback lets a dispatch use provider API-key server env vars when no credential is stored. It is OFF by default, so every key goes through the encrypted store (Model Credentials); turning it on is an audited relaxation, and you can narrow which providers may use it.</p>
-            </>
-          }
-        >
-          <Field label="Default PII mode (the floor: unclassified projects + unattributed calls)">
-            <Select value={comp.f.defaultPiiMode} onChange={(e) => comp.set("defaultPiiMode", e.target.value)}>
-              <option value="none">none — no enforcement</option>
-              <option value="log">log — record category counts</option>
-              <option value="warn">warn — proceed with warning</option>
-              <option value="block">block — deny / withhold (default)</option>
-            </Select>
-          </Field>
-          <Field label="Env-var key fallback">
-            <Select value={comp.f.envKeyFallbackEnabled} onChange={(e) => comp.set("envKeyFallbackEnabled", e.target.value)}>
-              {ON_OFF}
-            </Select>
-          </Field>
-          <Field label="Providers allowed to fall back (ctrl/cmd-click; empty = keep stored)">
-            <Select
-              multiple
-              size={4}
-              value={envProviders}
-              onChange={(e) => setEnvProviders(Array.from(e.target.selectedOptions).map((o) => o.value))}
-            >
-              {["anthropic", "openai", "google", "xai"].map((p) => (
-                <option key={p} value={p}>
-                  {p}
-                </option>
-              ))}
-            </Select>
-          </Field>
-        </SectionShell>
-      </Card>
-
-      {/* ADR-0117: which international national identifiers are detected (ships empty) */}
-      <OrgSettingsCard title="2a · International identifiers" keys={["piiInternationalCategories"]} testId="org-pii-international" />
-
-      <Card title="3 · Custom LLM providers">
-        <SectionShell
-          title="Master switch"
-          busy={custom.act.busy}
-          error={custom.act.error}
-          submitLabel="Save custom-provider switch"
-          onSubmit={() =>
-            void custom.act.run(
-              () => put({ customModelProvidersEnabled: asBool(custom.f.customModelProvidersEnabled!) }),
-              "Custom-provider switch saved (audited)",
-            )
-          }
-          help={
-            <>
-              <p>The 'remove the capability entirely' switch for admin-registered endpoints (a local model server, an internal gateway). It is NOT the thing standing between this org and an open proxy — the capability is already default-deny four separate ways beneath it: registration is admin-only, the egress allow-list starts empty, a provider stays disabled until a connection test passes, and a user still needs the ordinary per-agent grant.</p>
-              <p>Off refuses registration and enablement and stops every custom dispatch with a 409 before any request leaves the box; the Integrations → Custom LLM providers page then says so plainly instead of appearing broken.</p>
-            </>
-          }
-        >
-          <Field label="Custom LLM providers">
-            <Select
-              value={custom.f.customModelProvidersEnabled}
-              onChange={(e) => custom.set("customModelProvidersEnabled", e.target.value)}
-            >
-              <option value="true">enabled (admins may register endpoints)</option>
-              <option value="false">disabled (capability removed org-wide — default)</option>
-            </Select>
-          </Field>
-        </SectionShell>
-      </Card>
-
-      <Card title="3b · MCP egress posture">
-        <SectionShell
-          title="Private ranges for MCP servers"
-          busy={mcpEgress.act.busy}
-          error={mcpEgress.act.error}
-          submitLabel="Save MCP egress posture"
-          onSubmit={() =>
-            void mcpEgress.act.run(
-              () => put({ mcpPrivateRangesDefault: asBool(mcpEgress.f.mcpPrivateRangesDefault!) }),
-              "MCP egress posture saved (audited)",
-            )
-          }
-          help={
-            <>
-              <p>The default for MCP servers that never took an explicit per-server decision (their flag is 'inherit'). Strict (default) = every server needs its own explicit allow-private-ranges flag (set on the MCP servers page) or an egress allow entry with the private-range opt-in. Open = a self-hosted MCP server on a private address (http://mcp.internal:9000, http://localhost:3000) works with zero ceremony; choosing it relaxes the strict default and is audited.</p>
-              <p>Either way, link-local / instance-metadata (169.254.0.0/16) and the other never-legitimate ranges stay unconditionally blocked, and a public-internet MCP URL still requires an egress allow entry.</p>
-            </>
-          }
-        >
-          <Field label="Private-range default for MCP servers">
-            <Select
-              value={mcpEgress.f.mcpPrivateRangesDefault}
-              onChange={(e) => mcpEgress.set("mcpPrivateRangesDefault", e.target.value)}
-            >
-              <option value="false">strict (default — each server needs an explicit opt-in)</option>
-              <option value="true">open (private-LAN MCP servers just work — relaxed)</option>
-            </Select>
-          </Field>
-        </SectionShell>
-      </Card>
-
-      <Card title="3b1 · Remote agents (A2A)">
-        <SectionShell
-          title="Calls to remote agents"
-          busy={a2a.act.busy}
-          error={a2a.act.error}
-          submitLabel="Save remote agent setting"
-          onSubmit={() =>
-            void a2a.act.run(() => put({ a2aEnabled: asBool(a2a.f.a2aEnabled!) }), "Remote agent setting saved (audited)")
-          }
-          help={
-            <>
-              <p>Off (default) = no remote agent can be registered or called. On = admins may register remote agents on the Agents page, in its Remote agents (A2A) tab; turning it on loosens a security setting, so you will be asked to confirm it's you, and it is audited.</p>
-              <p>Even when on, nobody may call a remote agent until an admin gives them access, and every call is checked, costed and recorded. Remote agents are reached under the same network rules as MCP servers.</p>
-            </>
-          }
-        >
-          <Field label="Calls to remote agents">
-            <Select value={a2a.f.a2aEnabled} onChange={(e) => a2a.set("a2aEnabled", e.target.value)}>
-              <option value="false">off (default — no remote agent can be registered or called)</option>
-              <option value="true">on (admins may register remote agents — relaxed)</option>
-            </Select>
-          </Field>
-        </SectionShell>
-      </Card>
-
-      <Card title="3c · Compiled vendor endpoints">
-        <SectionShell
-          title="Deployment egress posture"
-          busy={compiledEgress.act.busy}
-          error={compiledEgress.act.error}
-          submitLabel="Save egress posture"
-          onSubmit={() =>
-            void compiledEgress.act.run(
-              () =>
-                put({
-                  egressCompiledDefaultPolicy: compiledEgress.f
-                    .egressCompiledDefaultPolicy as "inherit" | "strict",
-                }),
-              "Deployment egress posture saved (audited)",
-            )
-          }
-          help={
-            <>
-              <p>The egress guard has always adjudicated URLs a human typed. It did not adjudicate the endpoint a built-in adapter falls back to with no baseUrl override — slack.com, api.github.com and friends — because nobody can type a constant. That is a complete answer to SSRF and no answer at all to 'may this installation reach that vendor'.</p>
-            </>
-          }
-          details={
-            <>
-              <p>This dial can only TIGHTEN: the deployment-wide posture comes from the server's REGULAIT_DEPLOY_MODE (air_gapped is always strict, and nothing here can loosen it, because 'is this box air-gapped' is not something a portal toggle can know). Strict (default) = a dispatch that would run on a compiled vendor endpoint is refused with a 403 and audited unless that host is in Egress Allow Hosts; a self-hosted model on a private address keeps working once allow-listed. Inherit = the deploy mode decides, which on a hosted or BYOC box means compiled endpoints are not adjudicated; choosing it relaxes the strict default and is audited.</p>
-            </>
-          }
-        >
-          <Field label="Compiled vendor endpoints">
-            <Select
-              value={compiledEgress.f.egressCompiledDefaultPolicy}
-              onChange={(e) => compiledEgress.set("egressCompiledDefaultPolicy", e.target.value)}
-            >
-              <option value="strict">strict (default — adjudicate them on every deployment)</option>
-              <option value="inherit">inherit (the server's deploy mode decides — relaxed)</option>
-            </Select>
-          </Field>
-        </SectionShell>
-      </Card>
-
-      <Card title="4 · Budgets & limits">
-        <SectionShell
-          title="Budget enforcement + worker/size ceilings"
-          busy={budget.act.busy}
-          error={budget.act.error}
-          submitLabel="Save budgets & limits"
-          onSubmit={() =>
-            void budget.act.run(
-              () =>
-                put({
-                  budgetEnforcement: budget.f.budgetEnforcement,
-                  budgetHardBlockPct: Number(budget.f.budgetHardBlockPct),
-                  defaultWorkerMaxTurns: Number(budget.f.defaultWorkerMaxTurns),
-                  maxWorkerTurns: Number(budget.f.maxWorkerTurns),
-                  maxAttachmentsPerDispatch: Number(budget.f.maxAttachmentsPerDispatch),
-                  maxAttachmentBytes: Number(budget.f.maxAttachmentBytes),
-                  imageTokenEstimateTokens: Number(budget.f.imageTokenEstimateTokens),
-                  sharedContextMaxChars: Number(budget.f.sharedContextMaxChars),
-                  nodeOutputMaxChars: Number(budget.f.nodeOutputMaxChars),
-                }),
-              "Budgets & limits saved (audited)",
-            )
-          }
-          help={
-            <>
-              <p>'Block' (default) refuses attributed dispatches once measured spend reaches the hard-block threshold, until the named approver sanctions the overage. 'Warn only' still files the overage into the Approvals queue and audits every crossing, but lets the calls run — showback without enforcement.</p>
-              <p>Worker caps bound the tool-using agent loop; the size ceilings narrow below their API walls (at most 8 attachments of 6 MiB, a flat 1200-token estimate per image, 100k-char node instructions, 20k chars of stored node output).</p>
-            </>
-          }
-        >
-          <Field label="Project budget enforcement">
-            <Select value={budget.f.budgetEnforcement} onChange={(e) => budget.set("budgetEnforcement", e.target.value)}>
-              <option value="block">block (409 past the threshold — default)</option>
-              <option value="warn_only">warn only (escalate + audit, let it run)</option>
-            </Select>
-          </Field>
-          {numField(budget, "Hard-block at % of budget", "budgetHardBlockPct")}
-          {numField(budget, "Worker default max turns", "defaultWorkerMaxTurns")}
-          {numField(budget, "Worker hard turn ceiling", "maxWorkerTurns")}
-          {numField(budget, "Max attachments / dispatch", "maxAttachmentsPerDispatch")}
-          {numField(budget, "Max attachment bytes", "maxAttachmentBytes")}
-          {numField(budget, "Image token estimate", "imageTokenEstimateTokens")}
-          {numField(budget, "Node instruction max chars", "sharedContextMaxChars")}
-          {numField(budget, "Stored node output max chars", "nodeOutputMaxChars")}
-        </SectionShell>
-      </Card>
-
-      <Card title="5 · Approvals">
-        <SectionShell
-          title="Quorum + delegation"
-          busy={approvals.act.busy}
-          error={approvals.act.error}
-          submitLabel="Save approval policy"
-          onSubmit={() =>
-            void approvals.act.run(
-              () =>
-                put({
-                  approvalQuorum: approvals.f.approvalQuorum,
-                  approvalDelegationEnabled: asBool(approvals.f.approvalDelegationEnabled!),
-                }),
-              "Approval policy saved (audited)",
-            )
-          }
-          help={
-            <>
-              <p>Applies to workflow human_approval stages. 'All' (default — today's behaviour): the stage advances only when every named approver has approved; any denial denies it. 'Any': the first approval advances the stage and the remaining pending approvals are superseded so no dead gate lingers.</p>
-              <p>Approver delegation: when disabled, creating delegation windows is refused and existing windows stop applying immediately — for orgs whose control posture forbids deciding in another's name.</p>
-            </>
-          }
-        >
-          <Field label="Human-approval quorum">
-            <Select value={approvals.f.approvalQuorum} onChange={(e) => approvals.set("approvalQuorum", e.target.value)}>
-              <option value="all">all named approvers (default)</option>
-              <option value="any">any one approver advances</option>
-            </Select>
-          </Field>
-          <Field label="Approver delegation">
-            <Select
-              value={approvals.f.approvalDelegationEnabled}
-              onChange={(e) => approvals.set("approvalDelegationEnabled", e.target.value)}
-            >
-              <option value="true">enabled (delegation windows apply)</option>
-              <option value="false">disabled (strict separation of duties — default)</option>
-            </Select>
-          </Field>
-        </SectionShell>
-      </Card>
-
-      {/* ADR-0186 / ADR-0105 / ADR-0046: how tool-call approvals are signed, counted, how long they stay spendable, and the bulk fences */}
-      <OrgSettingsCard
-        title="5a · Approval safeguards"
-        keys={["approvalSignatureMode", "toolApprovalSensitiveQuorum", "approvalTtlHours", "approvalBulkMaxItems", "approvalBulkSensitiveBlocked"]}
-        testId="org-approval-safeguards"
+      {/* I-2: the standing facts stay above the tabs, so no tab hides a relaxation, the credential guard or the theme lock */}
+      <OrgStatus settings={s} relaxed={relaxed} />
+      <Tabs
+        label="Organisation settings"
+        idPrefix="org"
+        tabs={ORG_TABS.map((t) => ({ id: t.id, label: relaxedLabel(t.label, relaxed.filter((r) => r.tab === t.id).length) }))}
+        active={tab}
+        onChange={(id) => setTab(id as OrgTab)}
       />
-
-      <Card title="5b · AI use-case dispatch gate">
-        <SectionShell
-          title="Approved-use-case requirement for governed dispatch"
-          busy={useCaseGate.act.busy}
-          error={useCaseGate.act.error}
-          submitLabel="Save use-case gate"
-          onSubmit={() =>
-            void useCaseGate.act.run(
-              () => put({ useCaseGateMode: useCaseGate.f.useCaseGateMode as "off" | "warn" | "enforce" }),
-              "Use-case gate saved (audited)",
-            )
-          }
-          help={
-            <>
-              <p>The AI use-case registry's approval used to register intent and gate nothing — that honest limit is now a choice. This applies to a governed dispatch ATTRIBUTED TO A PROJECT THAT AT LEAST ONE USE CASE NAMES (the use case's optional project link is the only join there is): 'enforce' (the strict default) refuses it with a named 409 before any provider work until a linked use case is approved on the Approvals queue; 'off' lets approval register intent and gate nothing; 'warn' lets such a dispatch run when no linked use case is approved, but audits the fact and annotates the response, so you can see what enforce would refuse.</p>
-            </>
-          }
-          details={
-            <>
-              <p>A project no use case links — and a dispatch attributed to no project — is untouched in every mode: this gate holds registered intent to its approval, it does not require every call to have a use case. A retired use case no longer satisfies it. Every change is audited with the old and the new value.</p>
-            </>
-          }
-        >
-          <Field label="Use-case dispatch gate">
-            <Select
-              value={useCaseGate.f.useCaseGateMode}
-              onChange={(e) => useCaseGate.set("useCaseGateMode", e.target.value)}
+      {/* every panel stays mounted (hidden when not selected), so a half-typed dial, allow-list or agent id survives a tab switch */}
+      <TabPanel idPrefix="org" id="costs" active={tab}>
+        <div className={v.stack}>
+          <Card title="1 · Optimisation techniques (organisation-wide ceilings)">
+            <SectionShell
+              title="Technique toggles"
+              busy={opt.act.busy}
+              error={opt.act.error}
+              submitLabel="Save optimization settings"
+              onSubmit={() =>
+                void opt.act.run(
+                  () =>
+                    put({
+                      routingEnabled: asBool(opt.f.routingEnabled!),
+                      compactionEnabled: asBool(opt.f.compactionEnabled!),
+                      promptCachingEnabled: asBool(opt.f.promptCachingEnabled!),
+                      editVsRewriteEnabled: asBool(opt.f.editVsRewriteEnabled!),
+                      filePreprocessingEnabled: asBool(opt.f.filePreprocessingEnabled!),
+                      lazyToolLoadingEnabled: asBool(opt.f.lazyToolLoadingEnabled!),
+                      defaultRoutingMode: opt.f.defaultRoutingMode,
+                      semanticCachePolicy: opt.f.semanticCachePolicy,
+                      semanticCacheTtlSeconds: Number(opt.f.semanticCacheTtlSeconds),
+                      compactionFailureMode: opt.f.compactionFailureMode,
+                      summarizerSelection: opt.f.summarizerSelection,
+                      ...(opt.f.summarizerAgentId
+                        ? { summarizerAgentId: opt.f.summarizerAgentId === CLEAR ? null : opt.f.summarizerAgentId }
+                        : {}),
+                      compactionThresholdTokens: Number(opt.f.compactionThresholdTokens),
+                      compactionRecentWindow: Number(opt.f.compactionRecentWindow),
+                      minCacheableTokens: Number(opt.f.minCacheableTokens),
+                      cacheReadDiscount: Number(opt.f.cacheReadDiscount),
+                      maxToolsInManifest: Number(opt.f.maxToolsInManifest),
+                      minEditableBaselineTokens: Number(opt.f.minEditableBaselineTokens),
+                      batchOverheadTokens: Number(opt.f.batchOverheadTokens),
+                      minPreprocessTokens: Number(opt.f.minPreprocessTokens),
+                    }),
+                  "Optimization settings saved (audited)",
+                )
+              }
+              help={
+                <>
+                  <p>Each toggle is the org CEILING for one cost-optimization technique: disabled means it never runs for anyone. Enabled (the default — today's behaviour) defers to each user's own routing mode; a user's explicit passthrough always wins. Semantic cache 'off' beats a caller's semanticCache:true. Compaction 'fail closed' refuses the turn when summarization fails. A fixed summarizer must still be in the calling user's own entitled roster — it can never widen entitlement.</p>
+                  <p>The numeric dials are the formerly-hardcoded kernel constants (compact past 1600 tokens keeping 4 messages verbatim; cache 1024+ token prefixes at a 0.9 read discount; at most 20 lazy-loaded tools; diff edits over 200-token baselines).</p>
+                </>
+              }
             >
-              <option value="enforce">enforce — 409 for use-case-linked projects with no approved use case (strict default)</option>
-              <option value="warn">warn — record + annotate what enforce would refuse</option>
-              <option value="off">off — approval registers intent, nothing is refused</option>
-            </Select>
-          </Field>
-        </SectionShell>
-      </Card>
+              {(
+                [
+                  ["Model routing", "routingEnabled"],
+                  ["Context compaction", "compactionEnabled"],
+                  ["Prompt caching", "promptCachingEnabled"],
+                  ["Edit vs rewrite", "editVsRewriteEnabled"],
+                  ["File preprocessing", "filePreprocessingEnabled"],
+                  ["Lazy tool loading", "lazyToolLoadingEnabled"],
+                ] as const
+              ).map(([label, k]) => (
+                <Field key={k} label={label}>
+                  <Select value={opt.f[k]} onChange={(e) => opt.set(k, e.target.value)}>
+                    {ON_OFF}
+                  </Select>
+                </Field>
+              ))}
+              <Field label="Default for unset users">
+                <Select value={opt.f.defaultRoutingMode} onChange={(e) => opt.set("defaultRoutingMode", e.target.value)}>
+                  <option value="automatic">automatic (optimize)</option>
+                  <option value="passthrough">passthrough (never optimize)</option>
+                </Select>
+              </Field>
+              <Field label="Semantic cache">
+                <Select value={opt.f.semanticCachePolicy} onChange={(e) => opt.set("semanticCachePolicy", e.target.value)}>
+                  <option value="opt_in">opt-in (caller asks)</option>
+                  <option value="off">off (even if the caller asks — default)</option>
+                  <option value="always">always (every eligible dispatch)</option>
+                </Select>
+              </Field>
+              {numField(opt, "Cache TTL seconds", "semanticCacheTtlSeconds")}
+              <Field label="Compaction failure">
+                <Select value={opt.f.compactionFailureMode} onChange={(e) => opt.set("compactionFailureMode", e.target.value)}>
+                  <option value="fail_open">fail open (turn proceeds, full history)</option>
+                  <option value="fail_closed">fail closed (turn is refused — default)</option>
+                </Select>
+              </Field>
+              <Field label="Summarizer">
+                <Select value={opt.f.summarizerSelection} onChange={(e) => opt.set("summarizerSelection", e.target.value)}>
+                  <option value="cheapest">cheapest entitled agent (default)</option>
+                  <option value="fixed_agent">a fixed agent</option>
+                </Select>
+              </Field>
+              <Field label="Fixed summarizer agent">
+                <Select value={opt.f.summarizerAgentId} onChange={(e) => opt.set("summarizerAgentId", e.target.value)}>
+                  {optionEls(
+                    [{ v: CLEAR, l: "— clear (use cheapest) —" }, ...agentOpts(agents.data?.agents)],
+                    "— leave unchanged —",
+                  )}
+                </Select>
+              </Field>
+              {numField(opt, "Compaction threshold (tokens)", "compactionThresholdTokens")}
+              {numField(opt, "Verbatim window (messages)", "compactionRecentWindow")}
+              {numField(opt, "Min cacheable prefix (tokens)", "minCacheableTokens")}
+              {numField(opt, "Cache read discount (0..1)", "cacheReadDiscount")}
+              {numField(opt, "Max tools in manifest", "maxToolsInManifest")}
+              {numField(opt, "Min editable baseline (tokens)", "minEditableBaselineTokens")}
+              {numField(opt, "Batch overhead (tokens)", "batchOverheadTokens")}
+              {numField(opt, "Min preprocess size (tokens)", "minPreprocessTokens")}
+            </SectionShell>
+          </Card>
 
-      <Card title="5b1 · Continuous-assurance deploy gate">
-        <SectionShell
-          title="Do the deploy gate's continuous-assurance checks hold a release?"
-          helpLabel="the assurance gate"
-          busy={assuranceGate.act.busy}
-          error={assuranceGate.act.error}
-          submitLabel="Save assurance gate"
-          onSubmit={() =>
-            void assuranceGate.act.run(
-              () =>
-                withStepUp((h) => stepUpApi.put("/v1/org/settings/assurance-gate-mode", {
-                  mode: assuranceGate.f.assuranceGateMode as "off" | "warn" | "enforce",
-                }, h)),
-              "Assurance gate saved (audited)",
-            )
-          }
-          help={
-            <>
-              <p>The strict default is enforce. The deploy gate then holds a release when a measured approval condition is failing, a required AI test is missing, stale or failing, an agent's autonomy floor is not met, or a residual risk is above tolerance with no valid acceptance. The checks run live against every use case.</p>
-              <p>'warn' reports them on the gate without holding; 'off' skips them, and the gate response says they were skipped. Every change is audited with the old and the new value.</p>
-            </>
-          }
-        >
-          <Field label="Continuous-assurance gate">
-            <Select
-              value={assuranceGate.f.assuranceGateMode}
-              onChange={(e) => assuranceGate.set("assuranceGateMode", e.target.value)}
+          <Card title="4 · Budgets & limits">
+            <SectionShell
+              title="Budget enforcement + worker/size ceilings"
+              busy={budget.act.busy}
+              error={budget.act.error}
+              submitLabel="Save budgets & limits"
+              onSubmit={() =>
+                void budget.act.run(
+                  () =>
+                    put({
+                      budgetEnforcement: budget.f.budgetEnforcement,
+                      budgetHardBlockPct: Number(budget.f.budgetHardBlockPct),
+                      defaultWorkerMaxTurns: Number(budget.f.defaultWorkerMaxTurns),
+                      maxWorkerTurns: Number(budget.f.maxWorkerTurns),
+                      maxAttachmentsPerDispatch: Number(budget.f.maxAttachmentsPerDispatch),
+                      maxAttachmentBytes: Number(budget.f.maxAttachmentBytes),
+                      imageTokenEstimateTokens: Number(budget.f.imageTokenEstimateTokens),
+                      sharedContextMaxChars: Number(budget.f.sharedContextMaxChars),
+                      nodeOutputMaxChars: Number(budget.f.nodeOutputMaxChars),
+                    }),
+                  "Budgets & limits saved (audited)",
+                )
+              }
+              help={
+                <>
+                  <p>'Block' (default) refuses attributed dispatches once measured spend reaches the hard-block threshold, until the named approver sanctions the overage. 'Warn only' still files the overage into the Approvals queue and audits every crossing, but lets the calls run — showback without enforcement.</p>
+                  <p>Worker caps bound the tool-using agent loop; the size ceilings narrow below their API walls (at most 8 attachments of 6 MiB, a flat 1200-token estimate per image, 100k-char node instructions, 20k chars of stored node output).</p>
+                </>
+              }
             >
-              <option value="enforce">enforce — hold the release (strict default)</option>
-              <option value="warn">warn — report the checks, do not hold</option>
-              <option value="off">off — skip the checks (the gate says so)</option>
-            </Select>
-          </Field>
-        </SectionShell>
-      </Card>
+              <Field label="Project budget enforcement">
+                <Select value={budget.f.budgetEnforcement} onChange={(e) => budget.set("budgetEnforcement", e.target.value)}>
+                  <option value="block">block (409 past the threshold — default)</option>
+                  <option value="warn_only">warn only (escalate + audit, let it run)</option>
+                </Select>
+              </Field>
+              {numField(budget, "Hard-block at % of budget", "budgetHardBlockPct")}
+              {numField(budget, "Worker default max turns", "defaultWorkerMaxTurns")}
+              {numField(budget, "Worker hard turn ceiling", "maxWorkerTurns")}
+              {numField(budget, "Max attachments / dispatch", "maxAttachmentsPerDispatch")}
+              {numField(budget, "Max attachment bytes", "maxAttachmentBytes")}
+              {numField(budget, "Image token estimate", "imageTokenEstimateTokens")}
+              {numField(budget, "Node instruction max chars", "sharedContextMaxChars")}
+              {numField(budget, "Stored node output max chars", "nodeOutputMaxChars")}
+            </SectionShell>
+          </Card>
+        </div>
+      </TabPanel>
+      <TabPanel idPrefix="org" id="data" active={tab}>
+        <div className={v.stack}>
+          <Card title="2 · Compliance defaults">
+            <SectionShell
+              title="PII + env-key fallback"
+              busy={comp.act.busy}
+              error={comp.act.error}
+              submitLabel="Save compliance defaults"
+              onSubmit={() =>
+                void comp.act.run(
+                  () =>
+                    put({
+                      defaultPiiMode: comp.f.defaultPiiMode,
+                      envKeyFallbackEnabled: asBool(comp.f.envKeyFallbackEnabled!),
+                      ...(envProviders.length ? { envFallbackProviders: envProviders } : {}),
+                    }),
+                  "Compliance defaults saved (audited)",
+                )
+              }
+              help={
+                <>
+                  <p>Default PII mode is the DEPLOYMENT-WIDE FLOOR: it applies wherever no compliance framework governs — an unclassified project, tags matching no profile, and calls attributed to NO project at all (model, connector, MCP, cached replays, streams and training ingest alike), so omitting the project is not an exit from enforcement. A classified project's own cascade always wins — the floor fills gaps under the frameworks, it never overrides one.</p>
+                  <p>The env-var fallback lets a dispatch use provider API-key server env vars when no credential is stored. It is OFF by default, so every key goes through the encrypted store (Model Credentials); turning it on is an audited relaxation, and you can narrow which providers may use it.</p>
+                </>
+              }
+            >
+              <Field label="Default PII mode (the floor: unclassified projects + unattributed calls)">
+                <Select value={comp.f.defaultPiiMode} onChange={(e) => comp.set("defaultPiiMode", e.target.value)}>
+                  <option value="none">none — no enforcement</option>
+                  <option value="log">log — record category counts</option>
+                  <option value="warn">warn — proceed with warning</option>
+                  <option value="block">block — deny / withhold (default)</option>
+                </Select>
+              </Field>
+              <Field label="Env-var key fallback">
+                <Select value={comp.f.envKeyFallbackEnabled} onChange={(e) => comp.set("envKeyFallbackEnabled", e.target.value)}>
+                  {ON_OFF}
+                </Select>
+              </Field>
+              <Field label="Providers allowed to fall back (ctrl/cmd-click; empty = keep stored)">
+                <Select
+                  multiple
+                  size={4}
+                  value={envProviders}
+                  onChange={(e) => setEnvProviders(Array.from(e.target.selectedOptions).map((o) => o.value))}
+                >
+                  {["anthropic", "openai", "google", "xai"].map((p) => (
+                    <option key={p} value={p}>
+                      {p}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            </SectionShell>
+          </Card>
 
-      <Card title="5b1a · Risk treatments: transferred and avoided">
-        <SectionShell
-          title="May a risk be recorded as transferred or avoided?"
-          helpLabel="risk treatments"
-          busy={riskTreatments.act.busy}
-          error={riskTreatments.act.error}
-          submitLabel="Save risk treatments"
-          onSubmit={() =>
-            void riskTreatments.act.run(
-              () =>
-                withStepUp((h) => stepUpApi.put("/v1/org/settings/risk-treatments", {
-                  enabled: riskTreatments.f.riskTreatmentsEnabled === "true",
-                }, h)),
-              "Risk treatments saved (audited)",
-            )
-          }
-          help={
-            <>
-              <p>The strict default is off: a risk is open, mitigating, accepted or closed. Turned on, a risk's owner or an admin can also record it as transferred (to an insurer or a supplier contract) or avoided (the use stopped). Each needs its evidence and an owner, and each is on the audit trail.</p>
-              <p>A transferred risk keeps its rating and stays in the tolerance check. An avoided risk leaves the ratings. Turning this on asks you to confirm it's you; turning it off leaves recorded treatments as they are.</p>
-            </>
-          }
-        >
-          <Field label="Transferred and avoided treatments">
-            <Select
-              value={riskTreatments.f.riskTreatmentsEnabled}
-              onChange={(e) => riskTreatments.set("riskTreatmentsEnabled", e.target.value)}
-            >
-              <option value="false">off — open, mitigating, accepted or closed only (strict default)</option>
-              <option value="true">on — owners and admins may record a transfer or an avoidance</option>
-            </Select>
-          </Field>
-        </SectionShell>
-      </Card>
+          {/* ADR-0117: which international national identifiers are detected (ships empty) */}
+          <OrgSettingsCard title="2a · International identifiers" keys={["piiInternationalCategories"]} testId="org-pii-international" />
 
-      <Card title="5b2 · Project attribution mandate">
-        <SectionShell
-          title="Must every governed dispatch name a project?"
-          helpLabel="the attribution mandate"
-          busy={attribution.act.busy}
-          error={attribution.act.error}
-          submitLabel="Save attribution mandate"
-          onSubmit={() =>
-            void attribution.act.run(
-              () =>
-                put({
-                  dispatchAttributionRequired: asBool(
-                    attribution.f.dispatchAttributionRequired!,
-                  ),
-                }),
-              "Attribution mandate saved (audited)",
-            )
-          }
-          help={
-            <>
-              <p>Attribution is required by default: a governed model dispatch that names no project is refused — a named 409 (attribution_required), audited, before anything reaches a provider and before anything is billed. That keeps chargeback complete and keeps the use-case gate above honest: that gate can only see a dispatch that NAMES a project, so without this a caller can walk past it by omitting the project.</p>
-            </>
-          }
-          details={
-            <>
-              <p>Relax it to 'optional' and a call that names no project runs, and its cost lands in the explicit 'Unattributed' bucket on the cost dashboard rather than disappearing. The two settings are independent — either can be on without the other — and this one only ever looks at calls naming NO project, so it never changes what happens to an attributed one. Two related settings live elsewhere and are not replaced by this: 'Require project attribution (compat)' on Client Access refuses a header-less IDE/compat call at that edge, and its MCP twin does the same for tool calls. Every change is audited with the old and the new value.</p>
-            </>
-          }
-        >
-          <Field label="Require project attribution (governed dispatch)">
-            <Select
-              value={attribution.f.dispatchAttributionRequired}
-              onChange={(e) => attribution.set("dispatchAttributionRequired", e.target.value)}
+          <Card title="5f · Credentials in names and descriptions">
+            <SectionShell
+              title="Refuse credentials typed into names, titles and descriptions"
+              busy={contentGuard.act.busy}
+              error={contentGuard.act.error}
+              submitLabel="Save content guard setting"
+              onSubmit={() =>
+                void contentGuard.act.run(
+                  () => put({ contentCredentialGuard: asBool(contentGuard.f.contentCredentialGuard!) }),
+                  "Content guard setting saved (audited)",
+                )
+              }
+              help={
+                <p>On (default): a save that puts an API key, token or other credential into a name, title, description, summary or body is refused, naming the field. Off: such text is stored as typed. Turning it off needs step-up; audited.</p>
+              }
             >
-              <option value="true">
-                required (strict default) — refuse a dispatch that names no project (409 attribution_required)
-              </option>
-              <option value="false">
-                optional — an unattributed dispatch runs, cost lands in Unattributed
-              </option>
-            </Select>
-          </Field>
-        </SectionShell>
-      </Card>
+              <Field label="Credential guard for content">
+                <Select
+                  value={contentGuard.f.contentCredentialGuard}
+                  onChange={(e) => contentGuard.set("contentCredentialGuard", e.target.value)}
+                >
+                  <option value="true">on — refuse (default)</option>
+                  <option value="false">off — store as typed</option>
+                </Select>
+              </Field>
+            </SectionShell>
+            {str(s, "contentCredentialGuard") === "false" ? (
+              <p className={v.errLine}>
+                The guard is off for the whole organisation and stays off until someone turns it back on. Credentials typed into names and descriptions are being stored as typed.
+              </p>
+            ) : null}
+            <ContentCredentialReport />
+          </Card>
 
-      <Card title="5b3 · Workflow check reports">
-        <SectionShell
-          title="Must a CI name the workflow round its check results belong to?"
-          helpLabel="check-report rounds"
-          busy={checkRounds.act.busy}
-          error={checkRounds.act.error}
-          submitLabel="Save check-report setting"
-          onSubmit={() =>
-            void checkRounds.act.run(
-              () =>
-                put({
-                  checkReportsAllowUnbound: asBool(checkRounds.f.checkReportsAllowUnbound!),
-                }),
-              "Check-report setting saved (audited)",
-            )
-          }
-          help={
-            <>
-              <p>Every workflow instance has a round, which moves on whenever the change is re-opened (a new artifact version, a sign-off sent back). A check result belongs to the round it was produced for: a result for an earlier round is always refused (409 stale_check_report), so a CI run against the old artifact can never pass the new one.</p>
-            </>
-          }
-          details={
-            <>
-              <p>By default a CI (anything reporting with an API key) must also NAME the round — it is in the PR body as 'regulait-round:' and on the instance — and a report that names none is refused (422 round_required). Allowing unbound reports restores the older behaviour for CI integrations that cannot send it yet: such a report is taken for whatever round is current when it arrives, which is exactly the gap the round closes. People reporting from this console are bound to the round on their screen either way.</p>
-            </>
-          }
-        >
-          <Field label="Check reports without a round">
-            <Select
-              value={checkRounds.f.checkReportsAllowUnbound}
-              onChange={(e) => checkRounds.set("checkReportsAllowUnbound", e.target.value)}
+          <Card title="6 · Audit retention">
+            <SectionShell
+              title="Scheduled auto-prune + org default retention"
+              busy={retention.act.busy}
+              error={retention.act.error}
+              submitLabel="Save retention policy"
+              onSubmit={() =>
+                void retention.act.run(
+                  () =>
+                    put({
+                      autoPruneEnabled: asBool(retention.f.autoPruneEnabled!),
+                      pruneIntervalHours: Number(retention.f.pruneIntervalHours),
+                      defaultAuditRetentionDays:
+                        Number(retention.f.defaultAuditRetentionDays) === 0
+                          ? null
+                          : Number(retention.f.defaultAuditRetentionDays),
+                    }),
+                  "Retention policy saved (audited)",
+                )
+              }
+              help={
+                <>
+                  <p>Off by default: pruning only happens when an admin presses the button on the Audit log page. When on, the gateway prunes on the configured interval under the SAME floor the manual button uses.</p>
+                  <p>The org default retention only fills the gap when no compliance profile sets one — a profile floor always wins upward, so this can never shorten a framework's audit trail. Enter 0 to clear the org default (never prune without a profile floor). Every prune, manual or scheduled, is itself audited.</p>
+                </>
+              }
             >
-              <option value="false">refused (default) — a CI must name the round (422 round_required)</option>
-              <option value="true">allowed — an unbound report binds to the current round</option>
-            </Select>
-          </Field>
-        </SectionShell>
-      </Card>
+              <Field label="Scheduled auto-prune">
+                <Select value={retention.f.autoPruneEnabled} onChange={(e) => retention.set("autoPruneEnabled", e.target.value)}>
+                  <option value="false">off (manual prune only — default)</option>
+                  <option value="true">on (prune on a schedule)</option>
+                </Select>
+              </Field>
+              {numField(retention, "Prune interval (hours)", "pruneIntervalHours")}
+              {numField(retention, "Org default retention (days, 0 = none)", "defaultAuditRetentionDays")}
+            </SectionShell>
+          </Card>
+        </div>
+      </TabPanel>
+      <TabPanel idPrefix="org" id="network" active={tab}>
+        <div className={v.stack}>
+          <Card title="3 · Custom LLM providers">
+            <SectionShell
+              title="Master switch"
+              busy={custom.act.busy}
+              error={custom.act.error}
+              submitLabel="Save custom-provider switch"
+              onSubmit={() =>
+                void custom.act.run(
+                  () => put({ customModelProvidersEnabled: asBool(custom.f.customModelProvidersEnabled!) }),
+                  "Custom-provider switch saved (audited)",
+                )
+              }
+              help={
+                <>
+                  <p>The 'remove the capability entirely' switch for admin-registered endpoints (a local model server, an internal gateway). It is NOT the thing standing between this org and an open proxy — the capability is already default-deny four separate ways beneath it: registration is admin-only, the egress allow-list starts empty, a provider stays disabled until a connection test passes, and a user still needs the ordinary per-agent grant.</p>
+                  <p>Off refuses registration and enablement and stops every custom dispatch with a 409 before any request leaves the box; the Integrations → Custom LLM providers page then says so plainly instead of appearing broken.</p>
+                </>
+              }
+            >
+              <Field label="Custom LLM providers">
+                <Select
+                  value={custom.f.customModelProvidersEnabled}
+                  onChange={(e) => custom.set("customModelProvidersEnabled", e.target.value)}
+                >
+                  <option value="true">enabled (admins may register endpoints)</option>
+                  <option value="false">disabled (capability removed org-wide — default)</option>
+                </Select>
+              </Field>
+            </SectionShell>
+          </Card>
 
-      <Card title="5c · Model-judged access recommendations">
-        <SectionShell
-          title="Advisory model annotations on the deterministic recommendation rules"
-          busy={recJudge.act.busy}
-          error={recJudge.act.error}
-          submitLabel="Save judged-recommendation setting"
-          onSubmit={() =>
-            void recJudge.act.run(
-              () =>
-                put({
-                  recommendationJudgeEnabled: asBool(recJudge.f.recommendationJudgeEnabled!),
-                  recommendationJudgeAgentId: recJudge.f.recommendationJudgeAgentId
-                    ? String(recJudge.f.recommendationJudgeAgentId)
-                    : null,
-                }),
-              "Judged-recommendation setting saved (audited)",
-            )
-          }
-          help={
-            <>
-              <p>Access recommendations are six DETERMINISTIC rules over this deployment's ledgers, each re-derivable by hand — that is what makes them trustworthy, and this switch does not change them. OFF (default) means the report is those rules and nothing else. ON means each finding the rules ALREADY made may additionally carry an advisory annotation from a model judge, labelled <code>model-judged</code> and rendered separately: it cannot create a finding, cannot remove one, cannot change any evidence value or severity, and does not clear a grant — only a named human's decision does.</p>
-            </>
-          }
-          details={
-            <>
-              <p>The judge is an ordinary registry agent dispatched with the CALLING USER's entitlements and budget, so its tokens are metered and audited like any other call. If no judge agent is named, or the named one has no reachable model credential, the report is returned UNCHANGED and says <code>judged: unavailable</code> — an unannotated report from a working judge and one from a missing judge are different facts, and the page never blurs them.</p>
-            </>
-          }
-        >
-          <Field label="Model-judged annotations">
-            <Select
-              value={recJudge.f.recommendationJudgeEnabled}
-              onChange={(e) => recJudge.set("recommendationJudgeEnabled", e.target.value)}
+          <Card title="3b · MCP egress posture">
+            <SectionShell
+              title="Private ranges for MCP servers"
+              busy={mcpEgress.act.busy}
+              error={mcpEgress.act.error}
+              submitLabel="Save MCP egress posture"
+              onSubmit={() =>
+                void mcpEgress.act.run(
+                  () => put({ mcpPrivateRangesDefault: asBool(mcpEgress.f.mcpPrivateRangesDefault!) }),
+                  "MCP egress posture saved (audited)",
+                )
+              }
+              help={
+                <>
+                  <p>The default for MCP servers that never took an explicit per-server decision (their flag is 'inherit'). Strict (default) = every server needs its own explicit allow-private-ranges flag (set on the MCP servers page) or an egress allow entry with the private-range opt-in. Open = a self-hosted MCP server on a private address (http://mcp.internal:9000, http://localhost:3000) works with zero ceremony; choosing it relaxes the strict default and is audited.</p>
+                  <p>Either way, link-local / instance-metadata (169.254.0.0/16) and the other never-legitimate ranges stay unconditionally blocked, and a public-internet MCP URL still requires an egress allow entry.</p>
+                </>
+              }
             >
-              <option value="false">off — deterministic rules only (default)</option>
-              <option value="true">on — allow advisory model-judged annotations</option>
-            </Select>
-          </Field>
-          <Field label="Judge agent id">
-            <Input
-              value={recJudge.f.recommendationJudgeAgentId}
-              placeholder="registry agent uuid (blank = judged: unavailable)"
-              onChange={(e) => recJudge.set("recommendationJudgeAgentId", e.target.value)}
+              <Field label="Private-range default for MCP servers">
+                <Select
+                  value={mcpEgress.f.mcpPrivateRangesDefault}
+                  onChange={(e) => mcpEgress.set("mcpPrivateRangesDefault", e.target.value)}
+                >
+                  <option value="false">strict (default — each server needs an explicit opt-in)</option>
+                  <option value="true">open (private-LAN MCP servers just work — relaxed)</option>
+                </Select>
+              </Field>
+            </SectionShell>
+          </Card>
+
+          <Card title="3b1 · Remote agents (A2A)">
+            <SectionShell
+              title="Calls to remote agents"
+              busy={a2a.act.busy}
+              error={a2a.act.error}
+              submitLabel="Save remote agent setting"
+              onSubmit={() =>
+                void a2a.act.run(() => put({ a2aEnabled: asBool(a2a.f.a2aEnabled!) }), "Remote agent setting saved (audited)")
+              }
+              help={
+                <>
+                  <p>Off (default) = no remote agent can be registered or called. On = admins may register remote agents on the Agents page, in its Remote agents (A2A) tab; turning it on loosens a security setting, so you will be asked to confirm it's you, and it is audited.</p>
+                  <p>Even when on, nobody may call a remote agent until an admin gives them access, and every call is checked, costed and recorded. Remote agents are reached under the same network rules as MCP servers.</p>
+                </>
+              }
+            >
+              <Field label="Calls to remote agents">
+                <Select value={a2a.f.a2aEnabled} onChange={(e) => a2a.set("a2aEnabled", e.target.value)}>
+                  <option value="false">off (default — no remote agent can be registered or called)</option>
+                  <option value="true">on (admins may register remote agents — relaxed)</option>
+                </Select>
+              </Field>
+            </SectionShell>
+          </Card>
+
+          <Card title="3c · Compiled vendor endpoints">
+            <SectionShell
+              title="Deployment egress posture"
+              busy={compiledEgress.act.busy}
+              error={compiledEgress.act.error}
+              submitLabel="Save egress posture"
+              onSubmit={() =>
+                void compiledEgress.act.run(
+                  () =>
+                    put({
+                      egressCompiledDefaultPolicy: compiledEgress.f
+                        .egressCompiledDefaultPolicy as "inherit" | "strict",
+                    }),
+                  "Deployment egress posture saved (audited)",
+                )
+              }
+              help={
+                <>
+                  <p>The egress guard has always adjudicated URLs a human typed. It did not adjudicate the endpoint a built-in adapter falls back to with no baseUrl override — slack.com, api.github.com and friends — because nobody can type a constant. That is a complete answer to SSRF and no answer at all to 'may this installation reach that vendor'.</p>
+                </>
+              }
+              details={
+                <>
+                  <p>This dial can only TIGHTEN: the deployment-wide posture comes from the server's REGULAIT_DEPLOY_MODE (air_gapped is always strict, and nothing here can loosen it, because 'is this box air-gapped' is not something a portal toggle can know). Strict (default) = a dispatch that would run on a compiled vendor endpoint is refused with a 403 and audited unless that host is in Egress Allow Hosts; a self-hosted model on a private address keeps working once allow-listed. Inherit = the deploy mode decides, which on a hosted or BYOC box means compiled endpoints are not adjudicated; choosing it relaxes the strict default and is audited.</p>
+                </>
+              }
+            >
+              <Field label="Compiled vendor endpoints">
+                <Select
+                  value={compiledEgress.f.egressCompiledDefaultPolicy}
+                  onChange={(e) => compiledEgress.set("egressCompiledDefaultPolicy", e.target.value)}
+                >
+                  <option value="strict">strict (default — adjudicate them on every deployment)</option>
+                  <option value="inherit">inherit (the server's deploy mode decides — relaxed)</option>
+                </Select>
+              </Field>
+            </SectionShell>
+          </Card>
+
+          <Card title="7 · Network access — IP allow-listing">
+            <SectionShell
+              title="Trusted-network policy"
+              busy={netBusy}
+              error={netError}
+              submitLabel="Save network access policy"
+              onSubmit={() => void saveNet(false)}
+              help={
+                <>
+                  <p>Confine sign-ins to your corporate networks by CIDR (IPv4 + IPv6, one block per line; empty = no restriction — the upgrade-safe default). The HUMAN knob governs password/SSO sessions: 'enforce at login' refuses new sign-ins from outside the list (existing sessions untouched); 'enforce continuously' also checks every request and force-signs-out a session the moment it leaves the envelope (fail-closed: an undeterminable client IP counts as outside).</p>
+                </>
+              }
+              details={
+                <>
+                  <p>The API-KEY knob is a deliberately SEPARATE choice for automation (CI runners, IDEs, key-exchanged sessions) over the same list — so 'humans confined, CI not' is a visible chosen state, and tightening one path never silently locks out the other. The deploy-time bootstrap token is never IP-restricted (break-glass recovery). Malformed CIDR blocks are refused at save time; saving a continuous policy that excludes your own current IP demands an explicit confirmation. Behind a TLS-terminating proxy the gateway must trust it (REGULAIT_TRUSTED_PROXIES) or the observed client IP is the proxy's. Every denial and forced sign-out is audited with the IP and the policy that fired.</p>
+                </>
+              }
+            >
+              <Field label="Human session policy">
+                <Select
+                  value={netForm.sessionIpPolicy}
+                  onChange={(e) => setNetForm((f) => ({ ...f, sessionIpPolicy: e.target.value }))}
+                >
+                  <option value="off">off — no IP restriction (default)</option>
+                  <option value="enforce_at_login">enforce at login — new sign-ins only</option>
+                  <option value="enforce_continuous">enforce continuously — force sign-out when outside</option>
+                </Select>
+              </Field>
+              <Field label="API-key policy (separate knob)">
+                <Select
+                  value={netForm.apiKeyIpPolicy}
+                  onChange={(e) => setNetForm((f) => ({ ...f, apiKeyIpPolicy: e.target.value }))}
+                >
+                  <option value="off">off — automation unrestricted (default)</option>
+                  <option value="enforce_at_login">enforce at key-exchange sign-in</option>
+                  <option value="enforce_continuous">enforce continuously — every request</option>
+                </Select>
+              </Field>
+              <Field label="Allowed CIDR blocks (one per line)">
+                <Textarea
+                  rows={4}
+                  value={ipAllowlistText}
+                  onChange={(e) => setIpAllowlistText(e.target.value)}
+                  placeholder={"10.0.0.0/8\n203.0.113.0/24\n2001:db8::/32"}
+                />
+              </Field>
+            </SectionShell>
+            <ConfirmModal
+              open={lockoutPrompt !== null}
+              title="This policy would lock YOU out"
+              body={lockoutPrompt ?? ""}
+              danger
+              confirmLabel="Save anyway (sign me out)"
+              onCancel={() => setLockoutPrompt(null)}
+              onConfirm={() => void saveNet(true)}
             />
-          </Field>
-        </SectionShell>
-      </Card>
-
-      <Card title="5d · Framework imports">
-        <SectionShell
-          title="Import published framework content and regulatory notices"
-          busy={frameworkImports.act.busy}
-          error={frameworkImports.act.error}
-          submitLabel="Save framework-import setting"
-          onSubmit={() =>
-            void frameworkImports.act.run(
-              () => put({ frameworkImportsEnabled: asBool(frameworkImports.f.frameworkImportsEnabled!) }),
-              "Framework-import setting saved (audited)",
-            )
-          }
-          help={
-            <>
-              <p>OFF (default) means compliance pack control text is only what admins write, and the regulatory feed is the hand-checked entries only. ON lets an admin review published framework content and regulatory notices that ship with RegulAIt (nothing is downloaded) and accept them: a framework becomes a new draft pack version, and accepted notices join the regulatory feed. Turning it on asks you to confirm your identity again.</p>
-            </>
-          }
-          details={
-            <>
-              <p>Every proposal shows its changes before anything is written. An import never overwrites control text an admin changed unless the admin chooses to for that control, never changes how a control is evidenced, and never activates a pack. Each proposal, acceptance and rejection is recorded in the audit log.</p>
-            </>
-          }
-        >
-          <Field label="Framework imports">
-            <Select
-              value={frameworkImports.f.frameworkImportsEnabled}
-              onChange={(e) => frameworkImports.set("frameworkImportsEnabled", e.target.value)}
+          </Card>
+        </div>
+      </TabPanel>
+      <TabPanel idPrefix="org" id="gates" active={tab}>
+        <div className={v.stack}>
+          <Card title="5 · Approvals">
+            <SectionShell
+              title="Quorum + delegation"
+              busy={approvals.act.busy}
+              error={approvals.act.error}
+              submitLabel="Save approval policy"
+              onSubmit={() =>
+                void approvals.act.run(
+                  () =>
+                    put({
+                      approvalQuorum: approvals.f.approvalQuorum,
+                      approvalDelegationEnabled: asBool(approvals.f.approvalDelegationEnabled!),
+                    }),
+                  "Approval policy saved (audited)",
+                )
+              }
+              help={
+                <>
+                  <p>Applies to workflow human_approval stages. 'All' (default — today's behaviour): the stage advances only when every named approver has approved; any denial denies it. 'Any': the first approval advances the stage and the remaining pending approvals are superseded so no dead gate lingers.</p>
+                  <p>Approver delegation: when disabled, creating delegation windows is refused and existing windows stop applying immediately — for orgs whose control posture forbids deciding in another's name.</p>
+                </>
+              }
             >
-              <option value="false">off — admin-written control text only (default)</option>
-              <option value="true">on — allow reviewed imports</option>
-            </Select>
-          </Field>
-        </SectionShell>
-      </Card>
+              <Field label="Human-approval quorum">
+                <Select value={approvals.f.approvalQuorum} onChange={(e) => approvals.set("approvalQuorum", e.target.value)}>
+                  <option value="all">all named approvers (default)</option>
+                  <option value="any">any one approver advances</option>
+                </Select>
+              </Field>
+              <Field label="Approver delegation">
+                <Select
+                  value={approvals.f.approvalDelegationEnabled}
+                  onChange={(e) => approvals.set("approvalDelegationEnabled", e.target.value)}
+                >
+                  <option value="true">enabled (delegation windows apply)</option>
+                  <option value="false">disabled (strict separation of duties — default)</option>
+                </Select>
+              </Field>
+            </SectionShell>
+          </Card>
 
-      <Card title="5e · Vendor questionnaire drafts">
-        <SectionShell
-          title="Drafted answers for vendor assessment questionnaires"
-          busy={vendorDraft.act.busy}
-          error={vendorDraft.act.error}
-          submitLabel="Save vendor draft setting"
-          onSubmit={() =>
-            void vendorDraft.act.run(
-              () => put({ vendorDraftAssistEnabled: asBool(vendorDraft.f.vendorDraftAssistEnabled!) }),
-              "Vendor draft setting saved (audited)",
-            )
-          }
-          help={
-            <p>Off (default): filled in by hand. On: assessors can ask for drafts labelled with their sources; nothing is submitted until a person does it. Needs step-up; audited.</p>
-          }
-        >
-          <Field label="Vendor questionnaire drafts">
-            <Select
-              value={vendorDraft.f.vendorDraftAssistEnabled}
-              onChange={(e) => vendorDraft.set("vendorDraftAssistEnabled", e.target.value)}
+          {/* ADR-0186 / ADR-0105 / ADR-0046: how tool-call approvals are signed, counted, how long they stay spendable, and the bulk fences */}
+          <OrgSettingsCard
+            title="5a · Approval safeguards"
+            keys={["approvalSignatureMode", "toolApprovalSensitiveQuorum", "approvalTtlHours", "approvalBulkMaxItems", "approvalBulkSensitiveBlocked"]}
+            testId="org-approval-safeguards"
+          />
+
+          <Card title="5b · AI use-case dispatch gate">
+            <SectionShell
+              title="Approved-use-case requirement for governed dispatch"
+              busy={useCaseGate.act.busy}
+              error={useCaseGate.act.error}
+              submitLabel="Save use-case gate"
+              onSubmit={() =>
+                void useCaseGate.act.run(
+                  () => put({ useCaseGateMode: useCaseGate.f.useCaseGateMode as "off" | "warn" | "enforce" }),
+                  "Use-case gate saved (audited)",
+                )
+              }
+              help={
+                <>
+                  <p>The AI use-case registry's approval used to register intent and gate nothing — that honest limit is now a choice. This applies to a governed dispatch ATTRIBUTED TO A PROJECT THAT AT LEAST ONE USE CASE NAMES (the use case's optional project link is the only join there is): 'enforce' (the strict default) refuses it with a named 409 before any provider work until a linked use case is approved on the Approvals queue; 'off' lets approval register intent and gate nothing; 'warn' lets such a dispatch run when no linked use case is approved, but audits the fact and annotates the response, so you can see what enforce would refuse.</p>
+                </>
+              }
+              details={
+                <>
+                  <p>A project no use case links — and a dispatch attributed to no project — is untouched in every mode: this gate holds registered intent to its approval, it does not require every call to have a use case. A retired use case no longer satisfies it. Every change is audited with the old and the new value.</p>
+                </>
+              }
             >
-              <option value="false">off (default)</option>
-              <option value="true">on — offer labelled drafts</option>
-            </Select>
-          </Field>
-        </SectionShell>
-      </Card>
+              <Field label="Use-case dispatch gate">
+                <Select
+                  value={useCaseGate.f.useCaseGateMode}
+                  onChange={(e) => useCaseGate.set("useCaseGateMode", e.target.value)}
+                >
+                  <option value="enforce">enforce — 409 for use-case-linked projects with no approved use case (strict default)</option>
+                  <option value="warn">warn — record + annotate what enforce would refuse</option>
+                  <option value="off">off — approval registers intent, nothing is refused</option>
+                </Select>
+              </Field>
+            </SectionShell>
+          </Card>
 
-      <Card title="5f · Credentials in names and descriptions">
-        <SectionShell
-          title="Refuse credentials typed into names, titles and descriptions"
-          busy={contentGuard.act.busy}
-          error={contentGuard.act.error}
-          submitLabel="Save content guard setting"
-          onSubmit={() =>
-            void contentGuard.act.run(
-              () => put({ contentCredentialGuard: asBool(contentGuard.f.contentCredentialGuard!) }),
-              "Content guard setting saved (audited)",
-            )
-          }
-          help={
-            <p>On (default): a save that puts an API key, token or other credential into a name, title, description, summary or body is refused, naming the field. Off: such text is stored as typed. Turning it off needs step-up; audited.</p>
-          }
-        >
-          <Field label="Credential guard for content">
-            <Select
-              value={contentGuard.f.contentCredentialGuard}
-              onChange={(e) => contentGuard.set("contentCredentialGuard", e.target.value)}
+          <Card title="5b1 · Continuous-assurance deploy gate">
+            <SectionShell
+              title="Do the deploy gate's continuous-assurance checks hold a release?"
+              helpLabel="the assurance gate"
+              busy={assuranceGate.act.busy}
+              error={assuranceGate.act.error}
+              submitLabel="Save assurance gate"
+              onSubmit={() =>
+                void assuranceGate.act.run(
+                  () =>
+                    withStepUp((h) => stepUpApi.put("/v1/org/settings/assurance-gate-mode", {
+                      mode: assuranceGate.f.assuranceGateMode as "off" | "warn" | "enforce",
+                    }, h)),
+                  "Assurance gate saved (audited)",
+                )
+              }
+              help={
+                <>
+                  <p>The strict default is enforce. The deploy gate then holds a release when a measured approval condition is failing, a required AI test is missing, stale or failing, an agent's autonomy floor is not met, or a residual risk is above tolerance with no valid acceptance. The checks run live against every use case.</p>
+                  <p>'warn' reports them on the gate without holding; 'off' skips them, and the gate response says they were skipped. Every change is audited with the old and the new value.</p>
+                </>
+              }
             >
-              <option value="true">on — refuse (default)</option>
-              <option value="false">off — store as typed</option>
-            </Select>
-          </Field>
-        </SectionShell>
-        {str(s, "contentCredentialGuard") === "false" ? (
-          <p className={v.errLine}>
-            The guard is off for the whole organisation and stays off until someone turns it back on. Credentials typed into names and descriptions are being stored as typed.
-          </p>
-        ) : null}
-        <ContentCredentialReport />
-      </Card>
+              <Field label="Continuous-assurance gate">
+                <Select
+                  value={assuranceGate.f.assuranceGateMode}
+                  onChange={(e) => assuranceGate.set("assuranceGateMode", e.target.value)}
+                >
+                  <option value="enforce">enforce — hold the release (strict default)</option>
+                  <option value="warn">warn — report the checks, do not hold</option>
+                  <option value="off">off — skip the checks (the gate says so)</option>
+                </Select>
+              </Field>
+            </SectionShell>
+          </Card>
 
-      <Card title="6 · Audit retention">
-        <SectionShell
-          title="Scheduled auto-prune + org default retention"
-          busy={retention.act.busy}
-          error={retention.act.error}
-          submitLabel="Save retention policy"
-          onSubmit={() =>
-            void retention.act.run(
-              () =>
-                put({
-                  autoPruneEnabled: asBool(retention.f.autoPruneEnabled!),
-                  pruneIntervalHours: Number(retention.f.pruneIntervalHours),
-                  defaultAuditRetentionDays:
-                    Number(retention.f.defaultAuditRetentionDays) === 0
-                      ? null
-                      : Number(retention.f.defaultAuditRetentionDays),
-                }),
-              "Retention policy saved (audited)",
-            )
-          }
-          help={
-            <>
-              <p>Off by default: pruning only happens when an admin presses the button on the Audit log page. When on, the gateway prunes on the configured interval under the SAME floor the manual button uses.</p>
-              <p>The org default retention only fills the gap when no compliance profile sets one — a profile floor always wins upward, so this can never shorten a framework's audit trail. Enter 0 to clear the org default (never prune without a profile floor). Every prune, manual or scheduled, is itself audited.</p>
-            </>
-          }
-        >
-          <Field label="Scheduled auto-prune">
-            <Select value={retention.f.autoPruneEnabled} onChange={(e) => retention.set("autoPruneEnabled", e.target.value)}>
-              <option value="false">off (manual prune only — default)</option>
-              <option value="true">on (prune on a schedule)</option>
-            </Select>
-          </Field>
-          {numField(retention, "Prune interval (hours)", "pruneIntervalHours")}
-          {numField(retention, "Org default retention (days, 0 = none)", "defaultAuditRetentionDays")}
-        </SectionShell>
-      </Card>
-
-      <Card title="7 · Network access — IP allow-listing">
-        <SectionShell
-          title="Trusted-network policy"
-          busy={netBusy}
-          error={netError}
-          submitLabel="Save network access policy"
-          onSubmit={() => void saveNet(false)}
-          help={
-            <>
-              <p>Confine sign-ins to your corporate networks by CIDR (IPv4 + IPv6, one block per line; empty = no restriction — the upgrade-safe default). The HUMAN knob governs password/SSO sessions: 'enforce at login' refuses new sign-ins from outside the list (existing sessions untouched); 'enforce continuously' also checks every request and force-signs-out a session the moment it leaves the envelope (fail-closed: an undeterminable client IP counts as outside).</p>
-            </>
-          }
-          details={
-            <>
-              <p>The API-KEY knob is a deliberately SEPARATE choice for automation (CI runners, IDEs, key-exchanged sessions) over the same list — so 'humans confined, CI not' is a visible chosen state, and tightening one path never silently locks out the other. The deploy-time bootstrap token is never IP-restricted (break-glass recovery). Malformed CIDR blocks are refused at save time; saving a continuous policy that excludes your own current IP demands an explicit confirmation. Behind a TLS-terminating proxy the gateway must trust it (REGULAIT_TRUSTED_PROXIES) or the observed client IP is the proxy's. Every denial and forced sign-out is audited with the IP and the policy that fired.</p>
-            </>
-          }
-        >
-          <Field label="Human session policy">
-            <Select
-              value={netForm.sessionIpPolicy}
-              onChange={(e) => setNetForm((f) => ({ ...f, sessionIpPolicy: e.target.value }))}
+          <Card title="5b1a · Risk treatments: transferred and avoided">
+            <SectionShell
+              title="May a risk be recorded as transferred or avoided?"
+              helpLabel="risk treatments"
+              busy={riskTreatments.act.busy}
+              error={riskTreatments.act.error}
+              submitLabel="Save risk treatments"
+              onSubmit={() =>
+                void riskTreatments.act.run(
+                  () =>
+                    withStepUp((h) => stepUpApi.put("/v1/org/settings/risk-treatments", {
+                      enabled: riskTreatments.f.riskTreatmentsEnabled === "true",
+                    }, h)),
+                  "Risk treatments saved (audited)",
+                )
+              }
+              help={
+                <>
+                  <p>The strict default is off: a risk is open, mitigating, accepted or closed. Turned on, a risk's owner or an admin can also record it as transferred (to an insurer or a supplier contract) or avoided (the use stopped). Each needs its evidence and an owner, and each is on the audit trail.</p>
+                  <p>A transferred risk keeps its rating and stays in the tolerance check. An avoided risk leaves the ratings. Turning this on asks you to confirm it's you; turning it off leaves recorded treatments as they are.</p>
+                </>
+              }
             >
-              <option value="off">off — no IP restriction (default)</option>
-              <option value="enforce_at_login">enforce at login — new sign-ins only</option>
-              <option value="enforce_continuous">enforce continuously — force sign-out when outside</option>
-            </Select>
-          </Field>
-          <Field label="API-key policy (separate knob)">
-            <Select
-              value={netForm.apiKeyIpPolicy}
-              onChange={(e) => setNetForm((f) => ({ ...f, apiKeyIpPolicy: e.target.value }))}
-            >
-              <option value="off">off — automation unrestricted (default)</option>
-              <option value="enforce_at_login">enforce at key-exchange sign-in</option>
-              <option value="enforce_continuous">enforce continuously — every request</option>
-            </Select>
-          </Field>
-          <Field label="Allowed CIDR blocks (one per line)">
-            <Textarea
-              rows={4}
-              value={ipAllowlistText}
-              onChange={(e) => setIpAllowlistText(e.target.value)}
-              placeholder={"10.0.0.0/8\n203.0.113.0/24\n2001:db8::/32"}
-            />
-          </Field>
-        </SectionShell>
-        <ConfirmModal
-          open={lockoutPrompt !== null}
-          title="This policy would lock YOU out"
-          body={lockoutPrompt ?? ""}
-          danger
-          confirmLabel="Save anyway (sign me out)"
-          onCancel={() => setLockoutPrompt(null)}
-          onConfirm={() => void saveNet(true)}
-        />
-      </Card>
+              <Field label="Transferred and avoided treatments">
+                <Select
+                  value={riskTreatments.f.riskTreatmentsEnabled}
+                  onChange={(e) => riskTreatments.set("riskTreatmentsEnabled", e.target.value)}
+                >
+                  <option value="false">off — open, mitigating, accepted or closed only (strict default)</option>
+                  <option value="true">on — owners and admins may record a transfer or an avoidance</option>
+                </Select>
+              </Field>
+            </SectionShell>
+          </Card>
 
-      <CardBoundary title="8 · Themes">
-        <Suspense fallback={<SkeletonBlock lines={3} />}>
-          <ThemesCard settings={s} />
-        </Suspense>
-      </CardBoundary>
+          <Card title="5b2 · Project attribution mandate">
+            <SectionShell
+              title="Must every governed dispatch name a project?"
+              helpLabel="the attribution mandate"
+              busy={attribution.act.busy}
+              error={attribution.act.error}
+              submitLabel="Save attribution mandate"
+              onSubmit={() =>
+                void attribution.act.run(
+                  () =>
+                    put({
+                      dispatchAttributionRequired: asBool(
+                        attribution.f.dispatchAttributionRequired!,
+                      ),
+                    }),
+                  "Attribution mandate saved (audited)",
+                )
+              }
+              help={
+                <>
+                  <p>Attribution is required by default: a governed model dispatch that names no project is refused — a named 409 (attribution_required), audited, before anything reaches a provider and before anything is billed. That keeps chargeback complete and keeps the use-case gate above honest: that gate can only see a dispatch that NAMES a project, so without this a caller can walk past it by omitting the project.</p>
+                </>
+              }
+              details={
+                <>
+                  <p>Relax it to 'optional' and a call that names no project runs, and its cost lands in the explicit 'Unattributed' bucket on the cost dashboard rather than disappearing. The two settings are independent — either can be on without the other — and this one only ever looks at calls naming NO project, so it never changes what happens to an attributed one. Two related settings live elsewhere and are not replaced by this: 'Require project attribution (compat)' on Client Access refuses a header-less IDE/compat call at that edge, and its MCP twin does the same for tool calls. Every change is audited with the old and the new value.</p>
+                </>
+              }
+            >
+              <Field label="Require project attribution (governed dispatch)">
+                <Select
+                  value={attribution.f.dispatchAttributionRequired}
+                  onChange={(e) => attribution.set("dispatchAttributionRequired", e.target.value)}
+                >
+                  <option value="true">
+                    required (strict default) — refuse a dispatch that names no project (409 attribution_required)
+                  </option>
+                  <option value="false">
+                    optional — an unattributed dispatch runs, cost lands in Unattributed
+                  </option>
+                </Select>
+              </Field>
+            </SectionShell>
+          </Card>
+
+          <Card title="5b3 · Workflow check reports">
+            <SectionShell
+              title="Must a CI name the workflow round its check results belong to?"
+              helpLabel="check-report rounds"
+              busy={checkRounds.act.busy}
+              error={checkRounds.act.error}
+              submitLabel="Save check-report setting"
+              onSubmit={() =>
+                void checkRounds.act.run(
+                  () =>
+                    put({
+                      checkReportsAllowUnbound: asBool(checkRounds.f.checkReportsAllowUnbound!),
+                    }),
+                  "Check-report setting saved (audited)",
+                )
+              }
+              help={
+                <>
+                  <p>Every workflow instance has a round, which moves on whenever the change is re-opened (a new artifact version, a sign-off sent back). A check result belongs to the round it was produced for: a result for an earlier round is always refused (409 stale_check_report), so a CI run against the old artifact can never pass the new one.</p>
+                </>
+              }
+              details={
+                <>
+                  <p>By default a CI (anything reporting with an API key) must also NAME the round — it is in the PR body as 'regulait-round:' and on the instance — and a report that names none is refused (422 round_required). Allowing unbound reports restores the older behaviour for CI integrations that cannot send it yet: such a report is taken for whatever round is current when it arrives, which is exactly the gap the round closes. People reporting from this console are bound to the round on their screen either way.</p>
+                </>
+              }
+            >
+              <Field label="Check reports without a round">
+                <Select
+                  value={checkRounds.f.checkReportsAllowUnbound}
+                  onChange={(e) => checkRounds.set("checkReportsAllowUnbound", e.target.value)}
+                >
+                  <option value="false">refused (default) — a CI must name the round (422 round_required)</option>
+                  <option value="true">allowed — an unbound report binds to the current round</option>
+                </Select>
+              </Field>
+            </SectionShell>
+          </Card>
+        </div>
+      </TabPanel>
+      <TabPanel idPrefix="org" id="assist" active={tab}>
+        <div className={v.stack}>
+          <Card title="5c · Model-judged access recommendations">
+            <SectionShell
+              title="Advisory model annotations on the deterministic recommendation rules"
+              busy={recJudge.act.busy}
+              error={recJudge.act.error}
+              submitLabel="Save judged-recommendation setting"
+              onSubmit={() =>
+                void recJudge.act.run(
+                  () =>
+                    put({
+                      recommendationJudgeEnabled: asBool(recJudge.f.recommendationJudgeEnabled!),
+                      recommendationJudgeAgentId: recJudge.f.recommendationJudgeAgentId
+                        ? String(recJudge.f.recommendationJudgeAgentId)
+                        : null,
+                    }),
+                  "Judged-recommendation setting saved (audited)",
+                )
+              }
+              help={
+                <>
+                  <p>Access recommendations are six DETERMINISTIC rules over this deployment's ledgers, each re-derivable by hand — that is what makes them trustworthy, and this switch does not change them. OFF (default) means the report is those rules and nothing else. ON means each finding the rules ALREADY made may additionally carry an advisory annotation from a model judge, labelled <code>model-judged</code> and rendered separately: it cannot create a finding, cannot remove one, cannot change any evidence value or severity, and does not clear a grant — only a named human's decision does.</p>
+                </>
+              }
+              details={
+                <>
+                  <p>The judge is an ordinary registry agent dispatched with the CALLING USER's entitlements and budget, so its tokens are metered and audited like any other call. If no judge agent is named, or the named one has no reachable model credential, the report is returned UNCHANGED and says <code>judged: unavailable</code> — an unannotated report from a working judge and one from a missing judge are different facts, and the page never blurs them.</p>
+                </>
+              }
+            >
+              <Field label="Model-judged annotations">
+                <Select
+                  value={recJudge.f.recommendationJudgeEnabled}
+                  onChange={(e) => recJudge.set("recommendationJudgeEnabled", e.target.value)}
+                >
+                  <option value="false">off — deterministic rules only (default)</option>
+                  <option value="true">on — allow advisory model-judged annotations</option>
+                </Select>
+              </Field>
+              <Field label="Judge agent id">
+                <Input
+                  value={recJudge.f.recommendationJudgeAgentId}
+                  placeholder="registry agent uuid (blank = judged: unavailable)"
+                  onChange={(e) => recJudge.set("recommendationJudgeAgentId", e.target.value)}
+                />
+              </Field>
+            </SectionShell>
+          </Card>
+
+          <Card title="5d · Framework imports">
+            <SectionShell
+              title="Import published framework content and regulatory notices"
+              busy={frameworkImports.act.busy}
+              error={frameworkImports.act.error}
+              submitLabel="Save framework-import setting"
+              onSubmit={() =>
+                void frameworkImports.act.run(
+                  () => put({ frameworkImportsEnabled: asBool(frameworkImports.f.frameworkImportsEnabled!) }),
+                  "Framework-import setting saved (audited)",
+                )
+              }
+              help={
+                <>
+                  <p>OFF (default) means compliance pack control text is only what admins write, and the regulatory feed is the hand-checked entries only. ON lets an admin review published framework content and regulatory notices that ship with RegulAIt (nothing is downloaded) and accept them: a framework becomes a new draft pack version, and accepted notices join the regulatory feed. Turning it on asks you to confirm your identity again.</p>
+                </>
+              }
+              details={
+                <>
+                  <p>Every proposal shows its changes before anything is written. An import never overwrites control text an admin changed unless the admin chooses to for that control, never changes how a control is evidenced, and never activates a pack. Each proposal, acceptance and rejection is recorded in the audit log.</p>
+                </>
+              }
+            >
+              <Field label="Framework imports">
+                <Select
+                  value={frameworkImports.f.frameworkImportsEnabled}
+                  onChange={(e) => frameworkImports.set("frameworkImportsEnabled", e.target.value)}
+                >
+                  <option value="false">off — admin-written control text only (default)</option>
+                  <option value="true">on — allow reviewed imports</option>
+                </Select>
+              </Field>
+            </SectionShell>
+          </Card>
+
+          <Card title="5e · Vendor questionnaire drafts">
+            <SectionShell
+              title="Drafted answers for vendor assessment questionnaires"
+              busy={vendorDraft.act.busy}
+              error={vendorDraft.act.error}
+              submitLabel="Save vendor draft setting"
+              onSubmit={() =>
+                void vendorDraft.act.run(
+                  () => put({ vendorDraftAssistEnabled: asBool(vendorDraft.f.vendorDraftAssistEnabled!) }),
+                  "Vendor draft setting saved (audited)",
+                )
+              }
+              help={
+                <p>Off (default): filled in by hand. On: assessors can ask for drafts labelled with their sources; nothing is submitted until a person does it. Needs step-up; audited.</p>
+              }
+            >
+              <Field label="Vendor questionnaire drafts">
+                <Select
+                  value={vendorDraft.f.vendorDraftAssistEnabled}
+                  onChange={(e) => vendorDraft.set("vendorDraftAssistEnabled", e.target.value)}
+                >
+                  <option value="false">off (default)</option>
+                  <option value="true">on — offer labelled drafts</option>
+                </Select>
+              </Field>
+            </SectionShell>
+          </Card>
+        </div>
+      </TabPanel>
+      <TabPanel idPrefix="org" id="themes" active={tab}>
+        <div className={v.stack}>
+          <CardBoundary title="8 · Themes">
+            <Suspense fallback={<SkeletonBlock lines={3} />}>
+              <ThemesCard settings={s} />
+            </Suspense>
+          </CardBoundary>
+
+        </div>
+      </TabPanel>
     </div>
   );
 }
