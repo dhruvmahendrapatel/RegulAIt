@@ -57,6 +57,8 @@ import { ISACA_AI_AGENTS_PACK, ISACA_AI_AGENTS_PACK_V2 } from "./isaca-pack.js";
 import { OWASP_PACKS } from "./owasp-packs.js";
 // ADR-0295 (P18 B4): ISO/IEC 42001@2, 23894@1 and 42005@1, ID-only (`iso-packs.ts`, type-only imports back)
 import { ISO_PACKS } from "./iso-packs.js";
+// ADR-0297 (P18 B6): SR 11-7 and NYC Local Law 144 sector packs (`sector-packs.ts`, type-only imports back)
+import { SECTOR_PACKS } from "./sector-packs.js";
 // batch B1 — a pack's cascade PRESET is validated with the SAME check every
 // compliance-profile version body passes: only enforcing profile columns,
 // correctly typed, selection (`tag`) refused. One validator, not two.
@@ -89,6 +91,9 @@ export const COMPLIANCE_PACK_FRAMEWORKS = [
   // ADR-0295 (P18 B4): ISO/IEC 23894 and 42005, ID-only (`iso-packs.ts`)
   "iso-23894",
   "iso-42005",
+  // ADR-0297 (P18 B6): sector packs (`sector-packs.ts`)
+  "sr-11-7",
+  "nyc-ll144",
   "custom",
 ] as const;
 export type CompliancePackFramework = (typeof COMPLIANCE_PACK_FRAMEWORKS)[number];
@@ -1807,4 +1812,6 @@ DEFAULT_COMPLIANCE_PACKS.push(
   ...OWASP_PACKS,
   // ADR-0295 (P18 B4): iso-42001@2 (every clause and Annex A), iso-23894@1, iso-42005@1
   ...ISO_PACKS,
+  // ADR-0297 (P18 B6): sr-11-7@1 and nyc-ll144@1
+  ...SECTOR_PACKS,
 );
