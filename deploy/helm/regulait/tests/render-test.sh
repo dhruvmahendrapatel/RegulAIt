@@ -49,6 +49,10 @@ for d in docs:
         m = re.search(rf"- name: {var}\n(\s+)(\S+)", d)
         if m and m.group(2) != "valueFrom:":
             problems.append(f"{kind}/{name}: {var} is not read from a Secret")
+if "k8s-app: kube-dns" not in text:
+    problems.append("DNS egress is not limited to the cluster DNS pods")
+if "169.254.0.0/16" not in text and "allowPublicEgress: true" in open(sys.argv[2]).read():
+    problems.append("public egress does not exclude the instance metadata range")
 if "policyTypes: [Ingress, Egress]" not in text:
     problems.append("no default-deny NetworkPolicy")
 for p in problems:

@@ -10,7 +10,7 @@ operator in [`deploy/operator`](../../operator/README.md) is the declarative pat
 | Object | Notes |
 |---|---|
 | Migration Job (hook) | `pre-install,pre-upgrade`. Runs `node apps/gateway/dist/migrate-job.js` from the new image before the Deployment changes. A failed Job fails the release, so the old version keeps running. |
-| NetworkPolicy (hook) | Default-deny ingress and egress for every pod of the release. It is created before the migration Job runs. Egress opens DNS to `kube-system`, `egress.databaseCIDRs` on 5432, `egress.allowedCIDRs`, and, in byoc with `egress.allowPublicEgress`, public addresses on 443. Ingress opens port 3000 to `ingressFrom` only. Helm keeps hook objects after uninstall, so delete it by hand if you remove the release. |
+| NetworkPolicy (hook) | Default-deny ingress and egress for every pod of the release. It is created before the migration Job runs. Egress opens DNS to the cluster DNS pods (`k8s-app: kube-dns` in `kube-system`) only, `egress.databaseCIDRs` on 5432, `egress.allowedCIDRs`, and, in byoc with `egress.allowPublicEgress`, public addresses on 443 (with `169.254.0.0/16`, used for instance metadata, and the private ranges excluded). Ingress opens port 3000 to `ingressFrom` only. Helm keeps hook objects after uninstall, so delete it by hand if you remove the release. |
 | Deployment | One replica with `Recreate` (one gateway at a time until P2). Non-root (uid 1000), read-only root filesystem, every capability dropped, RuntimeDefault seccomp, no service-account token. The image is pulled by digest. |
 | Service, ServiceAccount | ClusterIP on 3000. The ServiceAccount does not mount a token. |
 | PersistentVolumeClaim | Holds `/app/install-secrets` and `/app/audit-anchors`. It carries `helm.sh/resource-policy: keep`, because losing it loses the receipt and identity signing keys. |
@@ -45,7 +45,11 @@ of a digest, `hosted` mode and a malformed version. The templates refuse:
 - `operator.enabled` without an operator image digest.
 
 Verify the update bundle (`scripts/verify-update-bundle.sh`) before you change `version` and `image.digest`. Helm
-itself does not check the signature; the operator does.
+itself does not check the signature. The operator does, against the release keyring compiled into its binary. Until
+the bundle schema carries image digests, the signature gates the version label, not the image that runs.
+
+The migration hook Job carries the same pod and container security context as the gateway, and reads the database URL
+only through `secretKeyRef`.
 
 ## Test
 
