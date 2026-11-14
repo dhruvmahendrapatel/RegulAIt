@@ -136,3 +136,22 @@ the entry-bundled `admin.module.css`.
 - **Open source checked.** `raw-body` (MIT) bounds Node streams, not the Web `Response` the SDK reads, and undici's
   `maxResponseSize` is a dispatcher option our pinned transport does not use. The bound is therefore a small
   `TransformStream` on the platform's Web Streams.
+
+## Amendment 2026-11-14: guardrails on the message, PII and guardrails on the reply (P10 follow-up, lane L2)
+
+- **The message.** After the PII check and before the egress decision, the message runs the ADR-0042 guardrails. The
+  policy is the org default, MAX-composed with the attributed project's compliance floor. A remote agent has no
+  per-object override scope yet. A block refuses the call, sends nothing, charges nothing, and writes one audit row
+  (`guardrail-blocked`, in the `guardrail` detail shape, so the violations view lists it). Warn and log are recorded
+  with `recordGuardrailDecision`, whose `objectType` now also accepts `a2a_agent`.
+- **The reply.** The remote agent's text is untrusted. It is checked before anyone sees it:
+  - first the project's PII mode on the reply, then the output guardrails;
+  - a block replaces the reply with the existing counts-only marker (`piiWithheldMarker` or `guardrailWithheldMarker`);
+  - the call is still charged, because the remote agent did the work. This is bill-and-withhold, as on the connector and
+    model paths.
+- **The record.** The usage row and the call's audit row carry `replyPii`, `guardrails` and `withheld`, as counts only
+  and never the text. The audit outcome is `replied_withheld`. The reply's guardrail decision row is written in the
+  same transaction as the spend.
+- **The response.** The route adds `withheld`, plus `pii` and `guardrails` when they found anything.
+- Redact mode still refuses before sending, as before: no A2A redaction path exists.
+- Tests: `zz-adr0231-a2a-bindings.test.ts`, the "P10 follow-up" block.

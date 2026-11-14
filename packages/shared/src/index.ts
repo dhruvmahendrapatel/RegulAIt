@@ -1558,6 +1558,12 @@ export const connectorProviderKindSchema = z.enum([
   "snowflake",
   "generic",
   "mock",
+  // ADR-0255 (P31): the curated connector-catalogue pieces (@regulait/connector-provider PIECE_PROVIDER_KINDS)
+  "piece_slack",
+  "piece_jira_cloud",
+  "piece_github",
+  "piece_google_sheets",
+  "piece_gmail",
 ]);
 
 export const createConnectorSchema = z.object({
@@ -4871,6 +4877,8 @@ export * from "./feedback.js";
 export * from "./ai-literacy.js";
 export * from "./alert-ownership.js";
 export * from "./isaca-pack.js";
+// ADR-0295 (P18 B4): the ISO/IEC ID-only packs
+export * from "./iso-packs.js";
 // ADR-0243 (P24): the OWASP MCP and LLM Top 10 packs
 export * from "./owasp-packs.js";
 // ADR-0212 (P12 b): modality pricing
@@ -4944,6 +4952,7 @@ export * from "./privacy-ops.js";
 
 // ===== ADR-0215 (P5) — framework content imports and the imported regulatory feed =====
 export * from "./framework-imports.js";
+export * from "./atlas-redteam-map.js";
 
 // ===== ADR-0221 (PENDING P4) — the supplier portal =========================
 export * from "./supplier-portal.js";

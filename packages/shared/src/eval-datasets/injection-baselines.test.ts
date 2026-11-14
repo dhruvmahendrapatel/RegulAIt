@@ -83,6 +83,7 @@ describe("vendored injection snapshots (pins, licences, manifest)", () => {
     expect(manifest.seed).toBe(20261107);
     expect(manifest.sources.find((s) => s.id === "injecagent")?.sampling).toMatchObject({ seed: 20261107 });
     expect(manifest.sources.find((s) => s.id === "jailbreakbench")?.sampling).toMatchObject({ seed: 20261107 });
+    expect(manifest.sources.find((s) => s.id === "agentdojo-task-dependent")?.sampling).toMatchObject({ seed: 20261107 });
     expect(manifest.excluded.map((e) => e.id)).toEqual(["wasp", "hackaprompt"]);
   });
 
@@ -93,6 +94,31 @@ describe("vendored injection snapshots (pins, licences, manifest)", () => {
     const strata = new Set(cases.map((c) => c.stratum));
     for (const k of categories) for (const v of carriers) expect(strata.has(`${k}/${v}`), `${k}/${v}`).toBe(true);
     for (const v of carriers) expect(cases.filter((c) => c.stratum === `lookalike/${v}` && c.label === "benign").length).toBe(10);
+  });
+
+  it("AgentDojo task-dependent: every named attack and every carrier suite is present, same upstream commit and licence", () => {
+    const cases = parseInjectionBaselineSnapshot("agentdojo-task-dependent", read(INJECTION_BASELINE_FILES["agentdojo-task-dependent"].file));
+    const strata = new Set(cases.map((c) => c.stratum.split("/")[0]));
+    for (const a of [
+      "important_instructions",
+      "important_instructions_no_model_name",
+      "important_instructions_no_user_name",
+      "important_instructions_wrong_model_name",
+      "important_instructions_wrong_user_name",
+      "tool_knowledge",
+    ]) {
+      expect(strata.has(a), a).toBe(true);
+    }
+    for (const suite of ["banking", "slack", "travel", "workspace"]) {
+      expect(cases.some((c) => c.stratum === `carrier/${suite}` && c.label === "injection"), suite).toBe(true);
+      expect(cases.some((c) => c.stratum === `carrier_default/${suite}` && c.label === "benign"), suite).toBe(true);
+    }
+    // labels follow the stratum: only a carrier at its default is benign
+    for (const c of cases) expect(c.label === "benign", c.id).toBe(c.stratum.startsWith("carrier_default/"));
+    const td = manifest.sources.find((s) => s.id === "agentdojo-task-dependent");
+    const base = manifest.sources.find((s) => s.id === "agentdojo");
+    expect(td?.commit).toBe(base?.commit);
+    expect(td?.licenceFile).toBe(base?.licenceFile);
   });
 
   it("refuses a snapshot whose bytes drifted, before parsing it", () => {
@@ -132,6 +158,9 @@ describe("heuristic prompt_injection detector against the pinned baseline (gated
     const measured = { datasets, pooled: poolMetrics(Object.values(datasets)) };
     const pinned = expected.detectors.heuristic_prompt_injection;
     expect(pinned.gated).toBe(true);
+    // the gated detector is pinned on every dataset
+    expect(pinned.notYetMeasured ?? []).toEqual([]);
+    expect(Object.keys(pinned.datasets).sort()).toEqual([...INJECTION_BASELINE_DATASET_IDS].sort());
     const deltas = compareInjectionBaseline(pinned, measured, expected.tolerance);
     const table = formatInjectionBaselineDeltas("heuristic_prompt_injection", deltas);
     console.info(table);
@@ -142,9 +171,16 @@ describe("heuristic prompt_injection detector against the pinned baseline (gated
     const trained = expected.detectors.trained_prompt_injection;
     expect(trained.gated).toBe(false);
     expect(trained.threshold).toBe(0.5);
+    const pending = new Set(trained.notYetMeasured ?? []);
     for (const id of INJECTION_BASELINE_DATASET_IDS) {
       const m = trained.datasets[id];
-      expect(m.tp + m.fp + m.fn + m.tn).toBe(INJECTION_BASELINE_FILES[id].cases);
+      if (pending.has(id)) {
+        // added after the last offline run: listed, not invented
+        expect(m, id).toBeUndefined();
+        continue;
+      }
+      expect(m, id).toBeDefined();
+      expect(m!.tp + m!.fp + m!.fn + m!.tn).toBe(INJECTION_BASELINE_FILES[id].cases);
     }
   });
 });
