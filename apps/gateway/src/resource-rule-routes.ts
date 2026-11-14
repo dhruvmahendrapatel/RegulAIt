@@ -12,7 +12,7 @@
  *
  * Admin only through the global gate, like every /v1/rules write. Every removal or loosening needs a `settings_relax`
  * step-up bound to the exact change; tightening needs none. Every write is audited in the SAME transaction as the
- * write, with the row before and after (`objectType: restriction_rule`, `receiptClass: configuration`), so the log can
+ * write, with the row before and after (object type restriction_rule, receipt class "configuration"), so the log can
  * never disagree with the table. A rule's subject and resource binding are its identity: they are not editable
  * (delete it and create a new one), as for the MCP rule kinds (ADR-0073 §2).
  *
