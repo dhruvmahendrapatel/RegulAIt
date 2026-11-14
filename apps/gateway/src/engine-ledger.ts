@@ -73,6 +73,8 @@ export async function writeEngineRunLedgers(
 ): Promise<{ evalRunId: string | null; redteamRunId: string | null }> {
   const { run, normalised, kind, finishedAt } = args;
   if (run.targetKind !== "agent" || !run.targetAgentId || kind === "model_scan") return { evalRunId: null, redteamRunId: null };
+  // an agent run is never trigger `admission` (engine_runs_target_check, ADR-0242 L4.3: that is a subject run's only)
+  const trigger = run.trigger as Exclude<typeof run.trigger, "admission">;
   const [agent] = await tx.select().from(agents).where(eq(agents.id, run.targetAgentId));
   if (!agent) return { evalRunId: null, redteamRunId: null };
   const anchors = await ensureEngineAnchors(tx, run.engineId, run.engineVersion);
@@ -97,7 +99,7 @@ export async function writeEngineRunLedgers(
       systemPromptHash: promptHash,
       judgeAgentId: run.judgeAgentId,
       judgeImpl: `engine:${run.engineId}@${run.engineVersion}`,
-      trigger: run.trigger,
+      trigger,
       status: "completed",
       mode: "execute",
       initiatedByUserId: run.runAsUserId,
@@ -145,7 +147,7 @@ export async function writeEngineRunLedgers(
       systemPromptHash: promptHash,
       initiatedByUserId: run.runAsUserId,
       projectId: run.projectId,
-      trigger: run.trigger,
+      trigger,
       probes: measured.length,
       resisted: measured.length - defeatedProbes,
       defeated: defeatedProbes,

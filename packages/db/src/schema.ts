@@ -14236,6 +14236,17 @@ export const engineRuns = pgTable(
     targetAgentId: uuid("target_agent_id").references(() => agents.id, { onDelete: "set null" }),
     judgeAgentId: uuid("judge_agent_id").references(() => agents.id, { onDelete: "set null" }),
     targetArtifactId: uuid("target_artifact_id").references(() => modelArtifacts.id, { onDelete: "set null" }),
+    /** ADR-0242 L4.3: a `subject` run's MCP server (mcpscanner) */
+    targetMcpServerId: uuid("target_mcp_server_id").references(() => mcpServers.id, { onDelete: "set null" }),
+    /** ADR-0242 L4.3: a `subject` run's builder skill (skillscanner) */
+    targetBuilderSkillId: uuid("target_builder_skill_id").references(() => builderSkills.id, { onDelete: "set null" }),
+    /** ADR-0242 L4.3: the subject digest the run scans (sha256 hex) */
+    targetSubjectDigest: text("target_subject_digest"),
+    /**
+     * ADR-0200 exception: a temporary verbatim external payload. The MCP manifest snapshot an admission scan reads,
+     * encrypted under the data key, cleared when the run ends; never returned by any route (ADR-0242 L4.3).
+     */
+    targetSubjectInputCiphertext: text("target_subject_input_ciphertext"),
     config: jsonb("config").$type<EngineRunConfig>().notNull(),
     configHash: text("config_hash").notNull(),
     /** the target agent's configuration hash when the run was made (A3 compares it) */
@@ -14282,9 +14293,10 @@ export const engineRuns = pgTable(
   },
   (t) => [
     uniqueIndex("engine_runs_task_placement_uq").on(t.taskPlacementId).where(sql`${t.taskPlacementId} IS NOT NULL`),
+    // ADR-0242 L4.3 (pending migration `admission_scan_subject_target`); the trigger and target-kind CHECKs live in SQL only
     check(
       "engine_runs_target_check",
-      sql`(${t.targetKind} = 'agent' AND ${t.targetArtifactId} IS NULL) OR (${t.targetKind} = 'artifact' AND ${t.targetAgentId} IS NULL AND ${t.judgeAgentId} IS NULL)`,
+      sql`(${t.targetKind} IN ('agent', 'artifact') AND ${t.trigger} <> 'admission' AND ${t.targetMcpServerId} IS NULL AND ${t.targetBuilderSkillId} IS NULL AND ${t.targetSubjectDigest} IS NULL AND ${t.targetSubjectInputCiphertext} IS NULL AND ((${t.targetKind} = 'agent' AND ${t.targetArtifactId} IS NULL) OR (${t.targetKind} = 'artifact' AND ${t.targetAgentId} IS NULL AND ${t.judgeAgentId} IS NULL))) OR (${t.targetKind} = 'subject' AND ${t.trigger} = 'admission' AND ${t.targetAgentId} IS NULL AND ${t.judgeAgentId} IS NULL AND ${t.targetArtifactId} IS NULL AND ${t.runAsUserId} IS NULL AND ${t.projectId} IS NULL AND num_nonnulls(${t.targetMcpServerId}, ${t.targetBuilderSkillId}) <= 1 AND (${t.targetMcpServerId} IS NULL OR ${t.engineId} = 'mcpscanner') AND (${t.targetBuilderSkillId} IS NULL OR ${t.engineId} = 'skillscanner') AND ${t.targetSubjectDigest} IS NOT NULL AND ${t.targetSubjectDigest} ~ '^[0-9a-f]{64}$' AND (${t.targetSubjectInputCiphertext} IS NULL OR ${t.engineId} = 'mcpscanner'))`,
     ),
     check("engine_runs_trials_check", sql`${t.trials} BETWEEN 1 AND 25`),
     check("engine_runs_budget_check", sql`${t.budgetUsd} > 0`),
@@ -14297,6 +14309,13 @@ export const engineRuns = pgTable(
       .on(t.workflowInstanceId, t.workflowStageId, t.workflowCheckName, t.workflowRound)
       .where(sql`${t.workflowInstanceId} IS NOT NULL`),
     uniqueIndex("engine_runs_runner_lease_request_unique").on(t.runnerId, t.leaseRequestId).where(sql`${t.leaseRequestId} IS NOT NULL`),
+    // ADR-0242 L4.3: one live (queued or leased) admission run per engine, subject and digest
+    uniqueIndex("engine_runs_subject_mcp_live_uq")
+      .on(t.engineId, t.targetMcpServerId, t.targetSubjectDigest)
+      .where(sql`${t.targetMcpServerId} IS NOT NULL AND ${t.status} IN ('queued', 'leased')`),
+    uniqueIndex("engine_runs_subject_skill_live_uq")
+      .on(t.engineId, t.targetBuilderSkillId, t.targetSubjectDigest)
+      .where(sql`${t.targetBuilderSkillId} IS NOT NULL AND ${t.status} IN ('queued', 'leased')`),
   ],
 );
 export type EngineRunRow = typeof engineRuns.$inferSelect;

@@ -117,11 +117,13 @@ export async function startEngineTaskRig(o: EngineTaskRigOptions): Promise<Engin
     const [run] = await o.db.select().from(engineRuns).where(eq(engineRuns.id, runId));
     if (!run || run.status !== "leased" || !run.runnerId) return null;
     if (run.taskPlacementId) return run.taskPlacementId;
-    await ensureProject(run);
+    // ADR-0242 L4.3: a subject run belongs to no project (its placement names its own sensitivity)
+    if (run.targetKind !== "subject") await ensureProject(run);
     const m = manifest()[run.engineId as EngineId];
     const body = {
       files: [{ path: `${runId}/job.json`, data: Buffer.from(JSON.stringify({ runId })).toString("base64") }],
       artifact: run.targetKind === "artifact" ? { path: `${runId}/artifact.pkl` } : null,
+      subject: run.targetKind === "subject" ? { path: `${runId}/${run.engineId === "mcpscanner" ? "tools.json" : "SKILL.md"}` } : null,
       secret: m.needsModelAccess ? `rig-${createHash("sha256").update(runId).digest("hex").slice(0, 24)}` : null,
     };
     setEngineTaskPlacementAffinityForTest([executorId]);

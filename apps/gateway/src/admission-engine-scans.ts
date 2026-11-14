@@ -157,10 +157,22 @@ export async function recordAdmissionEngineScan(
   db: Db,
   input: { subject: AdmissionScanSubject; report: unknown; engineRunId?: string | null },
 ): Promise<RecordedAdmissionScan> {
+  return db.transaction((tx) => recordAdmissionEngineScanTx(tx, input));
+}
+
+/**
+ * The same, inside the caller's transaction (ADR-0242 L4.3: a `subject` run's end records its scan in the run's own
+ * transaction). The subject row is locked FOR NO KEY UPDATE, which does not wait on the key-share lock a concurrent
+ * run insert takes through its foreign key, so the run-then-subject lock order cannot deadlock with a queueing.
+ */
+export async function recordAdmissionEngineScanTx(
+  tx: Tx,
+  input: { subject: AdmissionScanSubject; report: unknown; engineRunId?: string | null },
+): Promise<RecordedAdmissionScan> {
   const engineId = admissionScanEngineFor(input.subject.kind);
   const spec = ADMISSION_SCAN_ENGINES[engineId];
   const r = interpretAdmissionScanReport(input.report, { engine: engineId });
-  return db.transaction(async (tx) => {
+  {
     const subject = input.subject;
     const [row] = await tx
       .insert(admissionEngineScans)
@@ -195,7 +207,7 @@ export async function recordAdmissionEngineScan(
         })
         .from(mcpServers)
         .where(eq(mcpServers.id, subject.id))
-        .for("update");
+        .for("no key update");
       if (s) {
         name = s.name;
         previous = s.state;
@@ -235,7 +247,7 @@ export async function recordAdmissionEngineScan(
         })
         .from(builderSkills)
         .where(eq(builderSkills.id, subject.id))
-        .for("update");
+        .for("no key update");
       if (s) {
         name = s.name;
         previous = s.state;
@@ -313,5 +325,5 @@ export async function recordAdmissionEngineScan(
         (revokedClearance ? "; the admin's earlier clearance of this digest is revoked: the engine's flag is new since it was given" : ""),
     });
     return { id: row!.id, verdict: r.verdict, state, current, revokedClearance };
-  });
+  }
 }

@@ -63,7 +63,8 @@ export const ENGINE_RESULT_STATUSES = ENGINE_TERMINAL_RUN_STATUSES;
 export type EngineResultStatus = EngineTerminalRunStatus;
 
 /** how a run was started (`engine_runs.trigger`); owner decision 4: all three */
-export const ENGINE_RUN_TRIGGERS = ["manual", "workflow", "scheduled"] as const;
+export const ENGINE_RUN_TRIGGERS = ["manual", "workflow", "scheduled", "admission"] as const;
+/** ADR-0242 L4.3: `admission` = started by the gateway's own admission gate (a `subject` run), never by a person */
 export type EngineRunTrigger = (typeof ENGINE_RUN_TRIGGERS)[number];
 
 /** one item's verdict. Only `pass` is clean; `unknown` and `not_run` never are. */
@@ -90,7 +91,11 @@ export const ARTIFACT_SCAN_VERDICTS = ["clean", "no_known_unsafe", "unsafe", "un
 export type ArtifactScanVerdict = (typeof ARTIFACT_SCAN_VERDICTS)[number];
 
 /** what a run targets (`engine_runs.target_kind`) */
-export const ENGINE_TARGET_KINDS = ["agent", "artifact"] as const;
+export const ENGINE_TARGET_KINDS = ["agent", "artifact", "subject"] as const;
+/**
+ * ADR-0242 L4.3: a `subject` run scans an admission subject (an MCP server's manifest or a builder skill at one
+ * digest). Only the gateway starts one (trigger `admission`), never POST /v1/engine-runs or a schedule.
+ */
 export type EngineTargetKind = (typeof ENGINE_TARGET_KINDS)[number];
 
 /** a runner's heartbeat phase */
@@ -436,6 +441,11 @@ export interface EngineLease {
   /** the judge behind the gateway (same key), or null */
   judge: { model: string; headers: Record<string, string> } | null;
   artifacts: Array<{ id: string; sha256: string; size: number }>;
+  /**
+   * ADR-0242 L4.3: a subject run's one input file (`tools.json` or `SKILL.md`), as the gateway will place it. Names and
+   * sizes only: the gateway writes the bytes into the task input itself (never through the runner). Null otherwise.
+   */
+  subject?: { file: string; sha256: string; size: number } | null | undefined;
   deadlineAt: string;
   budgetUsd: number | null;
 }
@@ -466,6 +476,7 @@ export const engineLeaseResponseSchema = z.object({
   target: z.object({ baseUrl: z.string().min(1), model: z.string().min(1), apiKey: z.string().min(1), headers: headerMap }).nullable(),
   judge: z.object({ model: z.string().min(1), headers: headerMap }).nullable(),
   artifacts: z.array(z.object({ id: z.string().uuid(), sha256: z.string(), size: z.number().int().nonnegative() })),
+  subject: z.object({ file: z.string().min(1), sha256: z.string(), size: z.number().int().nonnegative() }).nullable().optional(),
   deadlineAt: z.string().datetime({ offset: true }),
   budgetUsd: z.number().nonnegative().nullable(),
 });

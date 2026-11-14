@@ -78,6 +78,7 @@ import {
   ENGINE_QUEUE_TTL_SECONDS,
   ENGINE_RESULT_LIMITS,
   ENGINE_RUN_STATUSES,
+  ENGINE_TARGET_KINDS,
   ENGINE_VIRTUAL_KEY_PURPOSE,
   cancelEngineRunSchema,
   canonicalJson,
@@ -114,6 +115,7 @@ import { artifactAccessible, artifactStoreFromEnv, recordArtifactScanTx } from "
 import { ENGINE_TASK_ISOLATION_UNAVAILABLE, ENGINE_TASK_NOT_PLACED, engineTaskPlacedTx, engineTaskRefusalOf, registerEngineTaskRoutes } from "./engine-tasks.js";
 import { engineWorkerAttestationBasis } from "./engine-worker-attestation.js";
 import { writeEngineRunLedgers } from "./engine-ledger.js";
+import { admissionReportOf, recordSubjectRunEndTx, setAdmissionScanRuntime, subjectInputTx } from "./admission-scan-runs.js";
 import { agentConfigHash, buildAgentDecider } from "./evals.js";
 import { assertProjectAttribution } from "./projects.js";
 import { loadOrgSettings } from "./org-settings.js";
@@ -139,6 +141,8 @@ type AgentRow = typeof agents.$inferSelect;
 let runtime: EngineOptions = {};
 export function setEngineRuntime(opts: EngineOptions): void {
   runtime = opts;
+  // ADR-0242 L4.3: the admission-scan runs encrypt their MCP manifest snapshot under the same data key
+  setAdmissionScanRuntime({ dataKey: opts.dataKey });
 }
 export function engineRuntime(): EngineOptions {
   return runtime;
@@ -329,6 +333,15 @@ export async function validateEngineRunRequest(
   if (!engine) return { ok: false, status: 404, error: "engine_not_found" };
   // PR #205 review round 13 [95]: an outdated replica creates (and validates) nothing for this engine
   if (engineManifestOutdated(engine, manifest)) return { ok: false, status: 409, ...engineManifestOutdatedRefusal(manifest.id, engine, manifest) };
+  // ADR-0242 L4.3: an admission-scan engine runs only on the gateway's own `subject` target, never one a person names
+  if (manifest.kind === "admission_scan") {
+    return {
+      ok: false,
+      status: 422,
+      error: "engine_target_mismatch",
+      detail: "this engine scans an admission subject; only the gateway's admission gate starts its runs",
+    };
+  }
   // PR #205 review round 4 [66]: an engine-specific shape check (a promptfoo strategy rewrites a
   // plugin's test cases, so a plan of strategies alone would run nothing)
   // B5-G (decision 149): garak takes no run params, so nothing can reach its config unseen
@@ -551,6 +564,8 @@ export interface FinishArgs {
    * a result that no placed sandbox produced is never ingested.
    */
   requirePlacedTask?: boolean;
+  /** ADR-0242 L4.3: a `subject` run's engine report (the decoded raw report), recorded at the run's end */
+  admissionReport?: unknown;
 }
 
 /**
@@ -640,6 +655,8 @@ async function endLockedRun(tx: Tx, locked: EngineRunRow, given: FinishArgs, now
       finishedAt: now,
       costUsd,
       summary,
+      // ADR-0242 L4.3: a subject run's manifest snapshot lives only as long as the run
+      ...(locked.targetSubjectInputCiphertext !== null ? { targetSubjectInputCiphertext: null } : {}),
       ...(args.rawReport
         ? {
             rawReportSha256: args.rawReport.sha256,
@@ -674,6 +691,21 @@ async function endLockedRun(tx: Tx, locked: EngineRunRow, given: FinishArgs, now
   // B5-M: an artifact run's scan record is written in this same transaction, whatever ended the run
   // (the verdict is the gateway's, from the format it detected at upload)
   if (!unplaced) await recordArtifactScanTx(tx, locked, args.status, args.normalised);
+  // ADR-0242 L4.3: a subject run's verdict on its subject, in this same transaction (only a run an engine ran)
+  const admission =
+    locked.targetKind === "subject"
+      ? await recordSubjectRunEndTx(tx, locked, {
+          status: args.status,
+          placed: !unplaced && locked.taskPlacementId !== null,
+          report: args.admissionReport ?? null,
+        })
+      : null;
+  if (admission) {
+    await tx
+      .update(engineRuns)
+      .set({ summary: { ...summary, verdict: admission.verdict === "pass" ? "pass" : admission.verdict === "fail" ? "fail" : "unknown", admission } })
+      .where(eq(engineRuns.id, runId));
+  }
   let ledgers: { evalRunId: string | null; redteamRunId: string | null } = { evalRunId: null, redteamRunId: null };
   if (args.status === "completed") {
     const kind = manifestOf(opts)[locked.engineId as EngineId].kind;
@@ -1305,7 +1337,8 @@ const listQuery = z.object({
 });
 
 function publicRun(run: EngineRunRow) {
-  const { rawReportCiphertext, ...rest } = run;
+  // ADR-0242 L4.3: a subject run's manifest snapshot never leaves the gateway
+  const { rawReportCiphertext, targetSubjectInputCiphertext: _snapshot, ...rest } = run;
   return { ...rest, rawReportStored: rawReportCiphertext !== null };
 }
 
@@ -1945,6 +1978,22 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
         .limit(1)
         .for("update", { skipLocked: true });
       if (!run) return { kind: "none" as const };
+      // ADR-0242 L4.3: a subject run has no person: its subject must still be there at the run's digest, and its
+      // one input file is built and checked now (a refusal ends it not_run, keyless, audited)
+      let subjectFile: { file: string; sha256: string; size: number } | null = null;
+      if (run.targetKind === "subject") {
+        const input = await subjectInputTx(tx, run);
+        if (!input.ok) {
+          const ended = await endLockedRun(
+            tx,
+            run,
+            { status: "not_run", errorCode: input.code, normalised: noResult("not_run"), cause: input.code, actorUserId: NO_IDENTITY },
+            now,
+          );
+          return { kind: "refused" as const, ended };
+        }
+        subjectFile = { file: input.file, sha256: input.sha256, size: input.bytes.length };
+      }
       // the person it runs as, re-checked now: gone or no longer entitled ends it, with the reason stated
       const [person] = run.runAsUserId
         ? await tx.select({ id: users.id, disabledAt: users.disabledAt, isAdmin: users.isAdmin }).from(users).where(eq(users.id, run.runAsUserId))
@@ -1952,7 +2001,8 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
       let refusal: string | null = null;
       let target: AgentRow | null = null;
       let judge: AgentRow | null = null;
-      if (!person || person.disabledAt) refusal = "run_as_gone";
+      if (run.targetKind === "subject") refusal = null;
+      else if (!person || person.disabledAt) refusal = "run_as_gone";
       else if (run.targetKind === "agent") {
         const decide = await buildAgentDecider(tx as unknown as Db, person.id);
         const [t] = run.targetAgentId ? await tx.select().from(agents).where(eq(agents.id, run.targetAgentId)) : [];
@@ -2073,7 +2123,7 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
         ruleChain: [],
         reason: `${engineId} run ${run.id} leased by runner ${runnerId} until ${deadlineAt.toISOString()}`,
       });
-      return { kind: "leased" as const, run: updated!, apiKey, target, judge };
+      return { kind: "leased" as const, run: updated!, apiKey, target, judge, subjectFile };
     });
     if (leased.kind === "revoked") {
       return reply.status(401).send({ error: "engine_runner_revoked", next: "revoked" satisfies EngineRunnerNext, detail: "this runner was revoked: its token authenticates nothing" });
@@ -2103,6 +2153,7 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
           : null,
       judge: leased.apiKey && leased.judge ? { model: leased.judge.model!, headers: headers(leased.judge.id) } : null,
       artifacts: artifact ? [{ id: artifact.id, sha256: artifact.sha256, size: artifact.sizeBytes }] : [],
+      subject: leased.subjectFile,
       deadlineAt: run.deadlineAt!.toISOString(),
       budgetUsd: leased.apiKey ? run.budgetUsd : null,
     };
@@ -2251,6 +2302,8 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
         actorUserId: run.runAsUserId ?? NO_IDENTITY,
         envelope,
         rawReport,
+        // ADR-0242 L4.3: a subject run's report is the engine's admission-scan report (untrusted; parsed strictly later)
+        ...(run.targetKind === "subject" ? { admissionReport: admissionReportOf(envelope!.rawReport?.contentBase64) } : {}),
         requireLive: true,
         requirePlacedTask: true,
       });
@@ -2291,7 +2344,7 @@ const engineRunsFilterQuery = z
     engineId: z.enum(ENGINE_IDS).optional(),
     status: z.enum(ENGINE_RUN_STATUSES).optional(),
     /** the agent runs list leaves out the artifact scans, which the model-artifacts tab lists */
-    targetKind: z.enum(["agent", "artifact"]).optional(),
+    targetKind: z.enum(ENGINE_TARGET_KINDS).optional(),
   })
   .strict();
 type EngineRunListRow = ReturnType<typeof publicRun> & { targetAgentName: string | null };
