@@ -32,7 +32,12 @@ import v from "../../views.module.css";
  * strict egress posture, so a kind this list offers is always one the egress
  * guard can name (AER-015: teams and outlook used to be creatable only by API).
  */
-export const PROVIDER_KINDS = ["", "http", "webhook", "slack", "teams", "outlook", "resend", "github", "jira", "snowflake", "generic", "mock"];
+// ADR-0255: the piece_* kinds are the curated connector-catalogue pieces; creating one needs the piece enabled first
+// (the catalogue screen itself belongs to the Governed Designer, #453)
+export const PROVIDER_KINDS = [
+  "", "http", "webhook", "slack", "teams", "outlook", "resend", "github", "jira", "snowflake", "generic", "mock",
+  "piece_slack", "piece_jira_cloud", "piece_github", "piece_google_sheets", "piece_gmail",
+];
 
 /**
  * The adapters whose platform credential is a JSON document rather than a bare
