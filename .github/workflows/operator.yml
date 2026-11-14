@@ -1,0 +1,66 @@
+name: Operator
+
+# ADR-0304: the Kubernetes operator in deploy/operator (outside the pnpm workspace).
+#
+#   test   gofmt, vet, generated code and manifests are current, unit tests and envtest (a local kube-apiserver and
+#          etcd; never a real cluster) with -race, govulncheck, and the linked-module licence check.
+#   image  builds the operator image without pushing it.
+
+on:
+  pull_request:
+    paths:
+      - 'deploy/operator/**'
+      - '.github/workflows/operator.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/operator/**'
+      - '.github/workflows/operator.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: operator-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+    working-directory: deploy/operator
+
+jobs:
+  test:
+    name: operator / test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: deploy/operator/go.mod
+          cache-dependency-path: deploy/operator/go.sum
+      - name: Generated code and manifests are current
+        run: |
+          make generate manifests
+          if ! git diff --exit-code -- .; then echo "::error::run 'make generate manifests' and commit the result"; exit 1; fi
+      - name: gofmt, vet, unit tests and envtest (-race)
+        run: make test
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+      - name: Linked modules are listed in THIRD_PARTY.md
+        run: make licences
+
+  image:
+    name: operator / image (build only, no push)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: docker build
+        run: docker build -t regulait-operator:ci .

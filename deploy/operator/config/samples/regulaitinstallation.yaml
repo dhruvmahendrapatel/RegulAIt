@@ -1,0 +1,35 @@
+# A byoc installation. Create the Secret and the two ConfigMaps first:
+#   kubectl -n regulait-system create secret generic regulait \
+#     --from-literal=data-key="$(openssl rand -hex 32)" --from-literal=database-url=... --from-literal=bootstrap-token=...
+#   kubectl -n regulait-system create configmap regulait-bundle-1.0.0 \
+#     --from-file=manifest.json --from-file=manifest.json.sig      # from the signed update bundle, unchanged
+#   kubectl -n regulait-system create configmap regulait-release-keys --from-file=infra/release-keys/
+apiVersion: deploy.regulait.ai/v1alpha1
+kind: RegulaitInstallation
+metadata:
+  name: regulait
+  namespace: regulait-system
+spec:
+  version: 1.0.0
+  mode: byoc
+  image:
+    repository: registry.example.internal/regulait/gateway
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+    allowedRegistries: [registry.example.internal]
+  updateBundle:
+    manifestConfigMapRef: { name: regulait-bundle-1.0.0 }
+    keyringConfigMapRef: { name: regulait-release-keys }
+  dataKeySecretRef: { name: regulait, key: data-key }
+  databaseUrlSecretRef: { name: regulait, key: database-url }
+  bootstrapTokenSecretRef: { name: regulait, key: bootstrap-token }
+  backup:
+    destinationClaimName: regulait-backups
+    image:
+      repository: registry.example.internal/library/postgres
+      digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  egress:
+    databaseCIDRs: [10.20.0.0/16]
+    allowPublicEgress: true   # byoc reaches model vendors on 443; refused in air_gapped
+  ingressFrom:
+    - namespaceSelector:
+        matchLabels: { kubernetes.io/metadata.name: ingress-nginx }
