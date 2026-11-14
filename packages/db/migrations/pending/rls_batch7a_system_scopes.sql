@@ -21,7 +21,8 @@
 --                    active admin principal is, through regulait_rls_is_admin(), and to the users read.
 --
 -- approval_maintenance gains the users read: the chatops and PM webhook paths that decide or route an approval look
--- the deciding user up in the same request.
+-- the deciding user up in the same request. audit_verify gains it too: a ledger reader names the users whose rows it
+-- reads (the policy simulator's replay), which a bootstrap-token request, having no principal, could not otherwise do.
 
 CREATE OR REPLACE FUNCTION regulait_rls_system_reason() RETURNS text
   LANGUAGE plpgsql STABLE PARALLEL SAFE
@@ -75,7 +76,7 @@ CREATE POLICY users_select ON users FOR SELECT USING (
   (SELECT regulait_rls_user_id()) IS NOT NULL
   OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['authenticate', 'identity_provisioning', 'rls_membership',
                                                         'migration', 'system_task', 'public_ingest',
-                                                        'bootstrap_admin', 'approval_maintenance'])
+                                                        'bootstrap_admin', 'approval_maintenance', 'audit_verify'])
 );
 --> statement-breakpoint
 
