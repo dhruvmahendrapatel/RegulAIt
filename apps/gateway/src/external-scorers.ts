@@ -29,8 +29,8 @@
  * ADR-0062's strict posture demands of an outbound provider.
  */
 
-import type { FastifyInstance } from "fastify";
-import { and, auditLog, eq, externalScorers, guardrailTrainedDetectors, type Db, type ExternalScorerRow } from "@regulait/db";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { auditLog, eq, externalScorers, type Db, type ExternalScorerRow } from "@regulait/db";
 import {
   createExternalScorerSchema,
   isVendorAdapter,
@@ -54,7 +54,8 @@ import {
 } from "./egress-guard.js";
 import { errMessage } from "./err-serializer.js";
 import { resolveDeployMode } from "./deploy-posture.js";
-import { requireRelaxStepUp } from "./step-up.js";
+import { CHANGED_CONCURRENTLY, checkStepUp, isStepUpPrompt } from "./step-up.js";
+import { enabledDetectorsUsingScorer, lockTrainedDetectorBindings } from "./trained-detector-lock.js";
 import type { VendorCallAttribution } from "./guardrail-vendor-adapters.js";
 
 /**
@@ -247,8 +248,9 @@ export function registerExternalScorerRoutes(
     reason: string,
     detail: Record<string, unknown>,
     effect: "allow" | "deny" = "allow",
+    exec: Db = db,
   ) {
-    await db.insert(auditLog).values({
+    await exec.insert(auditLog).values({
       userId,
       objectType: "external_scorer",
       objectId,
@@ -258,6 +260,55 @@ export function registerExternalScorerRoutes(
       ruleChain: [],
       reason,
     });
+  }
+
+  /**
+   * P7R-01 (ADR-0220 decision 6). An enabled trained detector calls this scorer at every enforcement site, so changing
+   * what the scorer is (endpoint, transport, dialect, credential, claimed kinds, enablement) changes the detector's
+   * instrument without touching the detector. That is the relaxation the detector's own PUT guards when its scorer is
+   * swapped, so it needs the same settings_relax step-up, bound to this scorer and the new values (ADR-0180). An API
+   * key or the bootstrap credential can never give one. A refusal the caller cannot answer is audited; a prompt is the
+   * normal first half of the ceremony and writes nothing (`isStepUpPrompt`).
+   */
+  async function requireInUseStepUp(
+    req: FastifyRequest,
+    reply: FastifyReply,
+    scorerId: string,
+    name: string,
+    phase: "update" | "enablement",
+    inUse: ReadonlyArray<{ kind: string }>,
+    values: Record<string, unknown>,
+  ): Promise<boolean> {
+    if (Object.keys(values).length === 0) return true;
+    const relaxed: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(values)) relaxed[`externalScorers.${scorerId}.${k}`] = v;
+    const out = await checkStepUp(db, req, { kind: "settings_relax", facts: { values: relaxed } }, { spend: true });
+    if (out.ok) return true;
+    if (!isStepUpPrompt(out.body)) {
+      await audit(
+        actor(req),
+        scorerId,
+        "external-scorer-in-use-refused",
+        `external scorer '${name}' ${phase} refused: ${inUse.length > 0 ? `the enabled trained detector(s) ${inUse.map((d) => d.kind).join(", ")} use it, and ` : ""}` +
+          `the change needs a settings_relax step-up the caller did not give (${String(out.body.error)})`,
+        { phase, detectors: inUse.map((d) => d.kind), fields: Object.keys(values), code: out.body.error },
+        "deny",
+      );
+    }
+    await reply.status(out.status).send(out.body);
+    return false;
+  }
+
+  /** P7R-01: a write whose step-up was decided on an unlocked read, refused because that read moved */
+  async function refuseChanged(req: { authCtx: { userId?: string | null } }, scorerId: string, name: string, phase: string) {
+    await audit(
+      actor(req),
+      scorerId,
+      "external-scorer-changed-concurrently",
+      `external scorer '${name}' ${phase} refused: the scorer or a trained detector using it changed while the request was checked`,
+      { phase, code: CHANGED_CONCURRENTLY.body.error },
+      "deny",
+    );
   }
 
   async function preflight(baseUrl: string, providerAllowsPlaintextHttp: boolean) {
@@ -396,6 +447,23 @@ export function registerExternalScorerRoutes(
       nextAdapter !== row.adapter ||
       JSON.stringify(nextOptions ?? null) !== JSON.stringify(row.adapterOptions ?? null) ||
       (isVendorAdapter(nextAdapter) && body.apiKey !== undefined);
+    // P7R-01: the fields that change the instrument an enabled trained detector calls (the key's value is never
+    // bound into the step-up facts; only that it is replaced or cleared)
+    const nextKinds = body.scorerKinds ?? ((row.scorerKinds as string[]) ?? []);
+    const instrumentChanges: Record<string, unknown> = {
+      ...(nextBaseUrl !== row.baseUrl ? { baseUrl: nextBaseUrl } : {}),
+      ...(nextPlaintext !== row.allowPlaintextHttp ? { allowPlaintextHttp: nextPlaintext } : {}),
+      ...(nextAdapter !== row.adapter ? { adapter: nextAdapter } : {}),
+      ...(JSON.stringify(nextOptions ?? null) !== JSON.stringify(row.adapterOptions ?? null) ? { adapterOptions: nextOptions ?? null } : {}),
+      ...(JSON.stringify([...nextKinds].sort()) !== JSON.stringify([...((row.scorerKinds as string[]) ?? [])].sort())
+        ? { scorerKinds: [...nextKinds].sort() }
+        : {}),
+      ...(body.apiKey !== undefined ? { apiKey: body.apiKey === null ? null : "replaced" } : {}),
+    };
+    const inUse = await enabledDetectorsUsingScorer(db, scorerId);
+    if (inUse.length > 0 && !(await requireInUseStepUp(req, reply, scorerId, row.name, "update", inUse, instrumentChanges))) {
+      return reply;
+    }
     if (endpointMoved) {
       const decision = await preflight(nextBaseUrl, nextPlaintext);
       if (!decision.ok) {
@@ -410,7 +478,15 @@ export function registerExternalScorerRoutes(
         return reply.status(400).send({ error: "egress_blocked", code: decision.code, detail: decision.reason });
       }
     }
-    const [updated] = await db
+    const steppedUp = inUse.length > 0 && Object.keys(instrumentChanges).length > 0;
+    const updated = await db.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Db;
+      // P7R-01: serialised against trained-detector binds; the step-up above was decided on `row` and `inUse`
+      await lockTrainedDetectorBindings(tx);
+      const [rowNow] = await tx.select().from(externalScorers).where(eq(externalScorers.id, scorerId)).for("update");
+      const inUseNow = await enabledDetectorsUsingScorer(tx, scorerId);
+      if (JSON.stringify(rowNow ?? null) !== JSON.stringify(row) || JSON.stringify(inUseNow) !== JSON.stringify(inUse)) return null;
+      const [saved] = await tx
       .update(externalScorers)
       .set({
         ...(body.name !== undefined ? { name: body.name } : {}),
@@ -431,14 +507,30 @@ export function registerExternalScorerRoutes(
       })
       .where(eq(externalScorers.id, scorerId))
       .returning();
-    await audit(
-      actor(req),
-      scorerId,
-      "external-scorer-updated",
-      `external scorer '${updated!.name}' updated${endpointMoved ? " — endpoint changed, disabled pending a fresh connection test" : ""}`,
-      { phase: "update", changed: Object.keys(body), endpointMoved, baseUrl: updated!.baseUrl },
-    );
-    return publicRow(updated!);
+      await audit(
+        actor(req),
+        scorerId,
+        "external-scorer-updated",
+        `external scorer '${saved!.name}' updated${endpointMoved ? " — endpoint changed, disabled pending a fresh connection test" : ""}` +
+          (steppedUp ? ` — used by enabled trained detector(s) ${inUse.map((d) => d.kind).join(", ")} (step-up verified)` : ""),
+        {
+          phase: "update",
+          changed: Object.keys(body),
+          endpointMoved,
+          baseUrl: saved!.baseUrl,
+          ...(inUse.length > 0 ? { inUseBy: inUse.map((d) => d.kind) } : {}),
+          ...(steppedUp ? { stepUp: "settings_relax", relaxed: Object.keys(instrumentChanges) } : {}),
+        },
+        "allow",
+        tx,
+      );
+      return saved!;
+    });
+    if (!updated) {
+      await refuseChanged(req, scorerId, row.name, "update");
+      return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
+    }
+    return publicRow(updated);
   });
 
   /**
@@ -526,65 +618,102 @@ export function registerExternalScorerRoutes(
     if (body.enabled && vendor) {
       const airGap = vendorAdapterAirGapRefusal(row.adapter);
       if (airGap) return reply.status(403).send({ error: "air_gapped", detail: airGap });
-      // ADR-0237: enabling a vendor adapter lets scanned text leave for a third party — a relaxation, so a
-      // settings_relax step-up bound to this scorer and adapter (ADR-0180). Turning it off is tightening.
-      if (!row.enabled) {
-        const ok = await requireRelaxStepUp(db, req, reply, {
-          [`externalScorers.${scorerId}.enabled`]: true,
-          [`externalScorers.${scorerId}.adapter`]: row.adapter,
-        });
-        if (!ok) return reply;
-      }
     }
-    const [updated] = await db
-      .update(externalScorers)
-      .set({ enabled: body.enabled })
-      .where(eq(externalScorers.id, scorerId))
-      .returning();
-    await audit(
-      actor(req),
-      scorerId,
-      body.enabled ? "external-scorer-enabled" : "external-scorer-disabled",
-      `external scorer '${row.name}' ${body.enabled ? "ENABLED" : "disabled"}`,
-      {
-        phase: "enablement",
-        enabled: body.enabled,
-        baseUrl: row.baseUrl,
-        adapter: row.adapter,
-        ...(body.enabled && vendor && !row.enabled ? { stepUp: "settings_relax" } : {}),
-      },
-    );
-    return publicRow(updated!);
+    const inUse = await enabledDetectorsUsingScorer(db, scorerId);
+    const relax: Record<string, unknown> = {};
+    // ADR-0237: enabling a vendor adapter lets scanned text leave for a third party — a relaxation, so a
+    // settings_relax step-up bound to this scorer and adapter (ADR-0180). Turning it off is tightening.
+    if (body.enabled && vendor && !row.enabled) Object.assign(relax, { enabled: true, adapter: row.adapter });
+    // P7R-01: re-enabling a scorer an enabled trained detector uses puts an instrument back under that detector
+    // (after a PATCH moved it, or a race bound it while disabled) — bound to the endpoint it now has
+    if (body.enabled && !row.enabled && inUse.length > 0) {
+      Object.assign(relax, { enabled: true, adapter: row.adapter, baseUrl: row.baseUrl });
+    }
+    // P7R-01: disabling it is a relaxation when a detector using it falls back to the heuristic on failure (the
+    // trained check silently stops); when every such detector fails closed it is a tightening and stays free
+    if (!body.enabled && row.enabled && inUse.some((d) => d.onFailure === "heuristic")) Object.assign(relax, { enabled: false });
+    if (!(await requireInUseStepUp(req, reply, scorerId, row.name, "enablement", inUse, relax))) return reply;
+    const steppedUp = Object.keys(relax).length > 0;
+    const updated = await db.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Db;
+      await lockTrainedDetectorBindings(tx);
+      const [rowNow] = await tx.select().from(externalScorers).where(eq(externalScorers.id, scorerId)).for("update");
+      const inUseNow = await enabledDetectorsUsingScorer(tx, scorerId);
+      if (JSON.stringify(rowNow ?? null) !== JSON.stringify(row) || JSON.stringify(inUseNow) !== JSON.stringify(inUse)) return null;
+      const [saved] = await tx
+        .update(externalScorers)
+        .set({ enabled: body.enabled })
+        .where(eq(externalScorers.id, scorerId))
+        .returning();
+      await audit(
+        actor(req),
+        scorerId,
+        body.enabled ? "external-scorer-enabled" : "external-scorer-disabled",
+        `external scorer '${row.name}' ${body.enabled ? "ENABLED" : "disabled"}` +
+          (inUse.length > 0 ? ` — used by enabled trained detector(s) ${inUse.map((d) => d.kind).join(", ")}` : ""),
+        {
+          phase: "enablement",
+          enabled: body.enabled,
+          baseUrl: row.baseUrl,
+          adapter: row.adapter,
+          ...(inUse.length > 0 ? { inUseBy: inUse.map((d) => d.kind) } : {}),
+          ...(steppedUp ? { stepUp: "settings_relax" } : {}),
+        },
+        "allow",
+        tx,
+      );
+      return saved!;
+    });
+    if (!updated) {
+      await refuseChanged(req, scorerId, row.name, "enablement");
+      return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
+    }
+    return publicRow(updated);
   });
 
   app.delete("/v1/external-scorers/:scorerId", async (req, reply) => {
     const { scorerId } = idParam.parse(req.params);
     // ADR-0220: an enabled trained detector calls this scorer at every
-    // enforcement site; turn the detector off first (a step-up relaxation)
-    const [inUse] = await db
-      .select({ kind: guardrailTrainedDetectors.kind })
-      .from(guardrailTrainedDetectors)
-      .where(and(eq(guardrailTrainedDetectors.scorerId, scorerId), eq(guardrailTrainedDetectors.enabled, true)));
-    if (inUse) {
+    // enforcement site; turn the detector off first (a step-up relaxation).
+    // P7R-01: the check and the delete hold the trained-detector lock, so a
+    // concurrent bind cannot slip between them.
+    const out = await db.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Db;
+      await lockTrainedDetectorBindings(tx);
+      const [first] = await enabledDetectorsUsingScorer(tx, scorerId);
+      if (first) return { tag: "in_use", inUse: first } as const;
+      const [removed] = await tx.delete(externalScorers).where(eq(externalScorers.id, scorerId)).returning();
+      if (!removed) return { tag: "missing" } as const;
+      // Scorer configs reference this row by NAME (jsonb), so there is no FK to
+      // block this delete. That is honest, not lax: a dataset that still names
+      // the deleted scorer refuses its next run with 422 external_scorer_unknown
+      // — the ADR-0067 semantics — rather than silently scoring another way.
+      await audit(
+        actor(req),
+        scorerId,
+        "external-scorer-removed",
+        `external scorer '${removed.name}' removed`,
+        { phase: "removal", name: removed.name, baseUrl: removed.baseUrl },
+        "allow",
+        tx,
+      );
+      return { tag: "removed" } as const;
+    });
+    if (out.tag === "in_use") {
+      await audit(
+        actor(req),
+        scorerId,
+        "external-scorer-in-use-refused",
+        `external scorer removal refused: the enabled trained detector ${out.inUse.kind} uses it`,
+        { phase: "removal", detectors: [out.inUse.kind] },
+        "deny",
+      );
       return reply.status(409).send({
         error: "external_scorer_in_use",
-        detail: `an enabled trained detector (${inUse.kind}) uses this scorer — turn it off on the Guardrails page first`,
+        detail: `an enabled trained detector (${out.inUse.kind}) uses this scorer — turn it off on the Guardrails page first`,
       });
     }
-    const [removed] = await db
-      .delete(externalScorers)
-      .where(eq(externalScorers.id, scorerId))
-      .returning();
-    if (!removed) return reply.status(404).send({ error: "unknown_external_scorer" });
-    // Scorer configs reference this row by NAME (jsonb), so there is no FK to
-    // block this delete. That is honest, not lax: a dataset that still names
-    // the deleted scorer refuses its next run with 422 external_scorer_unknown
-    // — the ADR-0067 semantics — rather than silently scoring another way.
-    await audit(actor(req), scorerId, "external-scorer-removed", `external scorer '${removed.name}' removed`, {
-      phase: "removal",
-      name: removed.name,
-      baseUrl: removed.baseUrl,
-    });
+    if (out.tag === "missing") return reply.status(404).send({ error: "unknown_external_scorer" });
     return { removed: true };
   });
 }
