@@ -53,6 +53,22 @@ if "k8s-app: kube-dns" not in text:
     problems.append("DNS egress is not limited to the cluster DNS pods")
 if "169.254.0.0/16" not in text and "allowPublicEgress: true" in open(sys.argv[2]).read():
     problems.append("public egress does not exclude the instance metadata range")
+policies = {re.search(r"^  name: (\S+)", d, re.M).group(1): d for d in docs if re.search(r"^kind: NetworkPolicy", d, re.M)}
+for want in ("t-baseline", "t-gateway", "t-database-clients"):
+    if want not in policies:
+        problems.append(f"missing NetworkPolicy {want}")
+    elif 'helm.sh/hook-weight: "-10"' not in policies[want]:
+        problems.append(f"{want} is not a hook at weight -10 (it must exist before the migration Job)")
+if "t-baseline" in policies and "podSelector: {}" not in policies["t-baseline"]:
+    problems.append("the baseline policy must select every pod in the namespace")
+dbc = policies.get("t-database-clients", "")
+if "443" in dbc or "0.0.0.0/0" in dbc or "172.20.0.0/16" in dbc or "ingress: []" not in dbc:
+    problems.append("database-clients policy opens more than DNS and the database")
+job = next((d for d in docs if re.search(r"^kind: Job", d, re.M)), "")
+if "- name: verify-bundle" not in job or job.index("initContainers:") > job.index("containers:\n        - name: migrate"):
+    problems.append("the migration Job does not verify the signed bundle in an init container before migrating")
+if "--version=1.0.0" not in job:
+    problems.append("verify-bundle is not pinned to .Values.version")
 if "policyTypes: [Ingress, Egress]" not in text:
     problems.append("no default-deny NetworkPolicy")
 for p in problems:
@@ -77,7 +93,10 @@ refuse "registry not allowed"              --set image.repository=docker.io/libr
 refuse "air_gapped with public egress"     --set mode=air_gapped
 refuse "air_gapped with a public CIDR"     -f ci/air-gapped-values.yaml --set egress.allowPublicEgress=false --set 'egress.allowedCIDRs={8.8.8.0/24}'
 refuse "air_gapped with a private-looking supernet" -f ci/air-gapped-values.yaml --set egress.allowPublicEgress=false --set 'egress.databaseCIDRs={10.0.0.0/7}'
-refuse "operator without a digest"         --set operator.enabled=true
+refuse "operator image without a digest"   --set operator.image.digest=
+refuse "no bundle ConfigMap"               --set bundle.configMapName=
+refuse "operator image outside registries" --set operator.image.repository=docker.io/regulait/operator
+refuse "air_gapped with a public DNS CIDR" -f ci/air-gapped-values.yaml --set egress.allowPublicEgress=false --set 'egress.dns.cidrs={8.8.8.8/32}' 
 
 # The chart's copies of the operator's generated files.
 cmp -s files/crd.yaml ../../operator/config/crd/deploy.regulait.ai_regulaitinstallations.yaml \

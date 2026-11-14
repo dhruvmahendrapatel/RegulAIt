@@ -12,3 +12,9 @@ egress:
 ingressFrom:
   - namespaceSelector:
       matchLabels: { kubernetes.io/metadata.name: ingress-nginx }
+bundle:
+  configMapName: regulait-bundle-1.0.0
+operator:
+  image:
+    repository: registry.example.internal/regulait/operator
+    digest: sha256:2222222222222222222222222222222222222222222222222222222222222222

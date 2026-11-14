@@ -2,7 +2,17 @@
 The migration Job (ADR-0304 §5): runs the new image's migrations before the Deployment moves to it. A failed Job fails
 the install or upgrade, so the old version keeps running. The release's ServiceAccount does not exist yet on a first
 install (hooks run before release resources), so the Job uses the namespace default with no token mounted.
+
+Before migrating, an init container runs the operator binary's `verify-bundle` (same build, same compiled-in release
+keyring) against the signed manifest in `bundle.configMapName`, so the plain-Helm path refuses an unsigned or
+downgraded version too (ADR-0180). On an upgrade the installed version is read from the running Deployment with
+`lookup`; `helm template` has no cluster, so it renders the first-install form.
 */ -}}
+{{- $installed := "" -}}
+{{- $live := lookup "apps/v1" "Deployment" .Release.Namespace (include "regulait.name" .) -}}
+{{- if $live -}}
+{{- $installed = index ($live.metadata.labels | default dict) "app.kubernetes.io/version" | default "" -}}
+{{- end -}}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -28,6 +38,25 @@ spec:
       enableServiceLinks: false
       securityContext:
         {{- include "regulait.podSecurity" . | nindent 8 }}
+      initContainers:
+        - name: verify-bundle
+          image: {{ printf "%s@%s" .Values.operator.image.repository .Values.operator.image.digest }}
+          imagePullPolicy: IfNotPresent
+          command: ["/manager", "verify-bundle"]
+          args:
+            - --manifest=/bundle/manifest.json
+            - --signature=/bundle/manifest.json.sig
+            - --version={{ .Values.version }}
+            {{- with $installed }}
+            - --installed-version={{ . }}
+            {{- end }}
+          securityContext:
+            {{- include "regulait.containerSecurity" . | nindent 12 }}
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 200m, memory: 64Mi }
+          volumeMounts:
+            - { name: bundle, mountPath: /bundle, readOnly: true }
       containers:
         - name: migrate
           image: {{ include "regulait.image" . }}
@@ -47,5 +76,11 @@ spec:
           volumeMounts:
             - { name: tmp, mountPath: /tmp }
       volumes:
+        - name: bundle
+          configMap:
+            name: {{ .Values.bundle.configMapName | quote }}
+            items:
+              - { key: manifest.json, path: manifest.json }
+              - { key: manifest.json.sig, path: manifest.json.sig }
         - name: tmp
           emptyDir: { sizeLimit: 256Mi }

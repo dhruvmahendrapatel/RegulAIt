@@ -9,8 +9,8 @@ operator in [`deploy/operator`](../../operator/README.md) is the declarative pat
 
 | Object | Notes |
 |---|---|
-| Migration Job (hook) | `pre-install,pre-upgrade`. Runs `node apps/gateway/dist/migrate-job.js` from the new image before the Deployment changes. A failed Job fails the release, so the old version keeps running. |
-| NetworkPolicy (hook) | Default-deny ingress and egress for every pod of the release. It is created before the migration Job runs. Egress opens DNS to the cluster DNS pods (`k8s-app: kube-dns` in `kube-system`) only, `egress.databaseCIDRs` on 5432, `egress.allowedCIDRs`, and, in byoc with `egress.allowPublicEgress`, public addresses on 443 (with `169.254.0.0/16`, used for instance metadata, and the private ranges excluded). Ingress opens port 3000 to `ingressFrom` only. Helm keeps hook objects after uninstall, so delete it by hand if you remove the release. |
+| Migration Job (hook) | `pre-install,pre-upgrade`, weight 0. An init container first runs the operator binary's `verify-bundle` against the signed manifest in `bundle.configMapName`, using the same compiled-in release keyring. It refuses an unsigned or tampered manifest, a version other than `version`, and a downgrade from the running version (read with `lookup`). Then `node apps/gateway/dist/migrate-job.js` runs from the new image. A failed check or migration fails the release, so the old version keeps running. |
+| NetworkPolicies (hooks) | Weight -10, so they exist before the Job's pod starts. `<release>-baseline` denies all ingress and egress for every pod in the namespace. `<release>-gateway` opens DNS, `egress.databaseCIDRs` on 5432, `egress.allowedCIDRs`, and, in byoc with `egress.allowPublicEgress`, public 443 (excluding `169.254.0.0/16` and the private ranges); ingress is port 3000 from `ingressFrom` only. `<release>-database-clients` (the migration Job) opens DNS and the database only. DNS defaults to the `k8s-app: kube-dns` pods. Set `egress.dns` for NodeLocal DNSCache or a renamed CoreDNS. Helm keeps hook objects after uninstall, so delete these by hand if you remove the release. |
 | Deployment | One replica with `Recreate` (one gateway at a time until P2). Non-root (uid 1000), read-only root filesystem, every capability dropped, RuntimeDefault seccomp, no service-account token. The image is pulled by digest. |
 | Service, ServiceAccount | ClusterIP on 3000. The ServiceAccount does not mount a token. |
 | PersistentVolumeClaim | Holds `/app/install-secrets` and `/app/audit-anchors`. It carries `helm.sh/resource-policy: keep`, because losing it loses the receipt and identity signing keys. |
@@ -20,6 +20,8 @@ operator in [`deploy/operator`](../../operator/README.md) is the declarative pat
 ```sh
 kubectl create namespace regulait
 kubectl label namespace regulait pod-security.kubernetes.io/enforce=restricted
+kubectl -n regulait create configmap regulait-bundle-1.0.0 \
+  --from-file=manifest.json --from-file=manifest.json.sig      # from the signed update bundle, unchanged
 kubectl -n regulait create secret generic regulait \
   --from-literal=data-key="$(openssl rand -hex 32)" \
   --from-literal=database-url='postgres://…?sslmode=verify-full' \
@@ -30,7 +32,9 @@ helm install regulait deploy/helm/regulait -n regulait -f my-values.yaml
 Record the data key somewhere outside the cluster. Without it, a restore leaves every stored credential undecryptable
 (ADR-0035).
 
-`my-values.yaml` needs at least `mode`, `version`, `image.repository`, `image.digest`, `secrets.name`, the database CIDRs
+`my-values.yaml` needs at least `mode`, `version`, `image.repository`, `image.digest`, `secrets.name`,
+`bundle.configMapName`, `operator.image` (by digest; the hook's verifier), `installSecrets.storageClassName` (an
+encrypted class: the claim holds signing keys unencrypted), the database CIDRs
 and `ingressFrom`. See [`ci/byoc-values.yaml`](ci/byoc-values.yaml) and
 [`ci/air-gapped-values.yaml`](ci/air-gapped-values.yaml).
 
@@ -44,9 +48,9 @@ of a digest, `hosted` mode and a malformed version. The templates refuse:
   private ranges;
 - `operator.enabled` without an operator image digest.
 
-Verify the update bundle (`scripts/verify-update-bundle.sh`) before you change `version` and `image.digest`. Helm
-itself does not check the signature. The operator does, against the release keyring compiled into its binary. Until
-the bundle schema carries image digests, the signature gates the version label, not the image that runs.
+The migration hook verifies the signed manifest before every install and upgrade, with the release keyring compiled
+into the operator binary. Until the bundle schema carries image digests, the signature gates the version label, not the
+image that runs: `image.allowedRegistries` and the namespace's RBAC are the controls for the digest.
 
 The migration hook Job carries the same pod and container security context as the gateway, and reads the database URL
 only through `secretKeyRef`.

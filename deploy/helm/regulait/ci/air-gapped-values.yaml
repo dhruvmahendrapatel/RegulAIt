@@ -9,8 +9,12 @@ secrets:
 egress:
   databaseCIDRs: [10.20.0.0/16]
   allowedCIDRs: [172.20.0.0/16, "fd00:1::/64"]
+  dns:
+    cidrs: [169.254.20.10/32]
 operator:
   enabled: true
   image:
     repository: registry.example.internal/regulait/operator
     digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
+bundle:
+  configMapName: regulait-bundle-1.0.0

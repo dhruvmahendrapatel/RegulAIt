@@ -41,6 +41,7 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
       (and (regexMatch "^172\\.(1[6-9]|2[0-9]|3[01])\\." $a) (ge $bits 12))
       (and (regexMatch "^192\\.168\\." $a) (ge $bits 16))
       (and (regexMatch "^100\\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\\." $a) (ge $bits 10))
+      (and (regexMatch "^169\\.254\\." $a) (ge $bits 16))
       (and (regexMatch "^(?i)f[cd][0-9a-f]{2}:" $a) (ge $bits 7)) -}}
 true
 {{- end -}}
@@ -61,14 +62,20 @@ true
 {{- if $v.egress.allowPublicEgress -}}
 {{- fail "air_gapped refuses egress.allowPublicEgress" -}}
 {{- end -}}
-{{- range concat $v.egress.allowedCIDRs $v.egress.databaseCIDRs -}}
+{{- range concat $v.egress.allowedCIDRs $v.egress.databaseCIDRs ($v.egress.dns.cidrs | default list) -}}
 {{- if ne (include "regulait.privateCIDR" .) "true" -}}
 {{- fail (printf "air_gapped allows only private ranges; %q is not one" .) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
-{{- if and $v.operator.enabled (not (regexMatch "^sha256:[0-9a-f]{64}$" $v.operator.image.digest)) -}}
-{{- fail "operator.enabled requires operator.image.repository and a sha256 operator.image.digest" -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" $v.operator.image.digest) -}}
+{{- fail "operator.image (repository and sha256 digest) is required: the migration hook verifies the signed bundle with it" -}}
+{{- end -}}
+{{- if $v.image.allowedRegistries -}}
+{{- $ohost := include "regulait.registry" $v.operator.image.repository -}}
+{{- if not (has $ohost $v.image.allowedRegistries) -}}
+{{- fail (printf "operator image registry %q is not in image.allowedRegistries" $ohost) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 
