@@ -65,7 +65,7 @@ builds on its own.
 | `db` | Drizzle schema (`schema.ts`), migrations and migrator, the chained audit writer (`audit-chain.ts`), decision facts, the deferred-unique preflight, the prose scrub, the content-credential guard (ADR-0233). |
 | `shared` | Zod schemas and pure logic shared by gateway and SPA (approval digests, placement, forecasting, guardrails, demo seeds). |
 | `model-provider` | Real model dispatch behind the agent registry. |
-| `connector-provider` | Connector execution and the actual-spend ledger. |
+| `connector-provider` | Connector execution and the actual-spend ledger; the curated connector-catalogue pieces (clean-room, ADR-0255). |
 | `git-provider` | Provider-agnostic git (four providers). |
 | `pm-provider` | Pillar-8 PM adapters and inbound sync. |
 | `infra-provider` | Pillar-3 drift, CVE and certificate detection and remediation across three clouds. |
@@ -180,7 +180,8 @@ sequenceDiagram
   by default). Egress is decided on the MCP posture. The A2A SDK
   client sends through the guarded fetch, with the credential going only to the registered origin. The usage row and
   the audit row are written in one transaction.
-- **Model/agent call** — `POST /v1/agents/:agentId/invoke` and the IDE compat endpoints (both go through
+- **Model/agent call** — `POST /v1/agents/:agentId/invoke` and the IDE compat endpoints (`/v1/messages`,
+  `/v1/chat/completions`, and the stateless `/v1/responses` of ADR-0287; all go through
   `compat-core.ts` into the same primitives): virtual-key allow-list, project attribution, workflow-instance gate,
   grants and revocations, model policy, `evaluateAgent` with the kill switch (allow or deny only: no approval rules
   and no ABAC), the model rate limit (`checkModelRateLimit`, off until an admin enables it); **then** the optimiser (routing,

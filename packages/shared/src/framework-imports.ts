@@ -304,6 +304,60 @@ export function normaliseAtlasRelease(doc: unknown, opts: { framework: string; l
   return applyPolicy(out, opts.licence);
 }
 
+/**
+ * ADR-0293 — the MITRE ATLAS release (YAML, already parsed) to imported
+ * entries for its TACTICS and TECHNIQUES (sub-techniques included). These are
+ * threats, not controls: the pack built from them is a threat register an
+ * admin maps to evidence (which red-team runs exercised the technique), and
+ * the mitigations stay in the `mitre-atlas` source. A tactic's title is marked
+ * "(tactic)"; a technique's description ends with the tactics it achieves and,
+ * for a sub-technique, its parent. Order-independent and deterministic.
+ */
+export function normaliseAtlasTechniques(doc: unknown, opts: { framework: string; licence: string }): ImportedControl[] {
+  type Entry = { id?: string; name?: string; description?: string };
+  type Rel = { target?: string };
+  const d = doc as {
+    tactics?: Record<string, Entry>;
+    techniques?: Record<string, Entry>;
+    relationships?: Record<string, { achieves?: Rel[]; specializes?: Rel[] }>;
+  };
+  if (!d.tactics || typeof d.tactics !== "object" || !d.techniques || typeof d.techniques !== "object") {
+    throw new Error("not an ATLAS release document");
+  }
+  /** link text kept; ATLAS's `[[reference-key]]` citation markers dropped (the references are not vendored) */
+  const prose = (s: string | undefined) => unlink(s ?? "").replace(/\[\[[^\]]*\]\]/g, "");
+  const out: ImportedControl[] = [];
+  const tacticName = new Map<string, string>();
+  for (const [key, t] of Object.entries(d.tactics)) {
+    const id = t.id ?? key;
+    tacticName.set(id, t.name ?? id);
+    const body = prose(t.description);
+    out.push({
+      controlRef: `${opts.framework}:${id}`,
+      title: clip(`${id} — ${t.name ?? id} (tactic)`, 400),
+      description: body ? clip(body, 4000) : null,
+    });
+  }
+  const targets = (rels: Rel[] | undefined) =>
+    [...new Set((rels ?? []).map((r) => r.target).filter((t): t is string => !!t))].sort();
+  for (const [key, t] of Object.entries(d.techniques)) {
+    const id = t.id ?? key;
+    const rel = d.relationships?.[id];
+    const tactics = targets(rel?.achieves).map((ta) => `${ta} (${tacticName.get(ta) ?? ta})`);
+    const parents = targets(rel?.specializes);
+    const tail =
+      (tactics.length ? ` ATLAS tactics: ${tactics.join(", ")}.` : "") +
+      (parents.length ? ` Sub-technique of ${parents.join(", ")}.` : "");
+    const body = prose(t.description);
+    out.push({
+      controlRef: `${opts.framework}:${id}`,
+      title: clip(`${id} — ${t.name ?? id}`, 400),
+      description: body || tail ? clip(`${clip(body, 4000 - tail.length)}${tail}`, 4000) : null,
+    });
+  }
+  return applyPolicy(out, opts.licence);
+}
+
 interface FederalRegisterDoc {
   document_number?: string;
   title?: string;

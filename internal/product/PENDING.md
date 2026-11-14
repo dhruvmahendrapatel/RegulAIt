@@ -32,7 +32,8 @@ in `spikes/workflow-p30/`.
 official OpenAI and Anthropic SDKs, the Laravel AI SDK and dart_mcp run, each in a digest-pinned image with its
 dependencies vendored at build, against a real gateway (auth, governed allow and deny, streaming, tool calls, cost
 attribution, audit); CI job `client-compat.yml` on compat/MCP paths plus nightly. Fixed on the way: the SSE shims forced
-`Connection: keep-alive`. Follow-ups: a governed `/v1/responses` shim (laravel/ai's default `openai` driver needs it);
+`Connection: keep-alive`. Follow-ups: ~~a governed `/v1/responses` shim (laravel/ai's default `openai` driver needs it)~~ **built
+2026-11-14 ([ADR-0287](../decisions/0287-responses-api-compat-shim.md)): stateless, so clients send `store: false`**;
 provider-shaped 401s on compat routes (the shared auth hook answers `{"error":"unauthenticated"}`); dart_mcp has no HTTP
 transport of its own.
 
@@ -50,7 +51,7 @@ transport of its own.
 - the UI (#453; the three routes are temporary KNOWN_UI_GAPS);
 - the owner's call on browser and shell history markers (#453);
 - PatronAI-derived catalogue additions;
-- JSONC/TOML configs, a reported gap;
+- ~~JSONC/TOML configs, a reported gap~~ parsed since the ADR-0259 amendment of 2026-11-14 (`tidwall/jsonc`, `pelletier/go-toml/v2`; Codex `mcp_servers`);
 - the agent config route serving the opt-in once the SD4 pack signer lands.
 
 **P34 — Anubis in front of the public pages (from the security and infra review, owner 2026-11-07).** An optional proof-of-work bot and AI-scraper check for the trust centre, auditor portal and supplier portal only, never the API, admin console or gateway. **Built as config, PROPOSED in [ADR-0258](../decisions/0258-anubis-public-pages.md)**, off by default (`install.sh --anubis`). Open: a live run of Caddy and Anubis before the first deployment that turns it on, and the #453 UI item for a pass cookie that expires mid-page.
@@ -101,7 +102,7 @@ The owner put these on the backlog after RegulAIt was compared with a governance
 
 | # | Gap | What it would take |
 |---|---|---|
-| **P1** | **On-device enforcement.** Endpoint coverage only discovers: the agentless MDM/EDR inventory import and a read-only endpoint agent ([ADR-0195](../decisions/0195-shadow-ai-active-discovery.md), [ADR-0197](../decisions/0197-demo-2026-11-01-plan-and-owner-decisions.md)). Nothing on an employee's machine blocks an unapproved model endpoint or MCP server. Calls through the gateway are governed; calls that bypass it are only discovered. | A signed, MDM-deployable client that enforces the same per-user policy locally: block unapproved model hosts and MCP servers, and steer AI tools to the gateway's single governed endpoint. It needs signed policy pulled from the control plane, tamper reporting into the audit chain, and an honest offline mode. Search for open-source endpoint-policy components first (ADR-0176). **Plan (owner, 2026-11-07):** a clean-room build in `agents/endpoint/`, informed by the [DefenseClaw comparison](../reviews/2026-11-07-defenseclaw-comparison.md) (option (c)); DefenseClaw itself is not embedded. Its ADR comes first. Until then, P37 ingests DefenseClaw for customers who already run it. |
+| **P1** | **On-device enforcement.** Endpoint coverage only discovers: the agentless MDM/EDR inventory import and a read-only endpoint agent ([ADR-0195](../decisions/0195-shadow-ai-active-discovery.md), [ADR-0197](../decisions/0197-demo-2026-11-01-plan-and-owner-decisions.md)). Nothing on an employee's machine blocks an unapproved model endpoint or MCP server. Calls through the gateway are governed; calls that bypass it are only discovered. | A signed, MDM-deployable client that enforces the same per-user policy locally: block unapproved model hosts and MCP servers, and steer AI tools to the gateway's single governed endpoint. It needs signed policy pulled from the control plane, tamper reporting into the audit chain, and an honest offline mode. Search for open-source endpoint-policy components first (ADR-0176). **Plan (owner, 2026-11-07):** a clean-room build in `agents/endpoint/`, informed by the [DefenseClaw comparison](../reviews/2026-11-07-defenseclaw-comparison.md) (option (c)); DefenseClaw itself is not embedded. Its ADR comes first. Until then, P37 ingests DefenseClaw for customers who already run it. **Slice 1 built, default off ([ADR-0298](../decisions/0298-on-device-enforcement.md), 2026-11-14):** a Claude Code `PreToolUse` hook (`regulait-agent hook claude-code`) that allows MCP tool calls only to policy-approved servers from accepted definition sources, from an Ed25519-signed, time-bounded policy, and fails closed. The policy keyring is empty until the SD4 signer lands. Next: decision audit, tamper reporting, more agents, and a proxy slice for model hosts. |
 | **P2** | **A live, synced context graph.** Shared Projects ([ADR-0011](../decisions/0011-shared-projects-on-one-project-entity.md), pillar 4) hold a governed context store with provenance, but nothing continuously ingests people, customers, tickets and documents from the source systems into one graph that agents can query. | Incremental sync from the existing connectors and PM, git and identity integrations into a graph. Every node and edge carries its source's access control, and queries are filtered by the caller's per-user entitlements, so a graph never widens what a user could already read. Provenance and retention follow the compliance cascade. Use an existing open-source graph or index store rather than a hand-built one (ADR-0176). |
 
 
@@ -305,8 +306,10 @@ caught on read. **The sweeps buy timeliness, never correctness.**
   rather than inheriting a guess; a wrong signature is worse than none, because it reports clean.
   Detection only — it does not make Copilot governable (see S18 and the enforcement ladder).
 
-- **S18 — document the Copilot-via-MCP path in `IDE_INTEGRATION.md` as a supported configuration
-  (opened 2026-09-19).** **No new code — this is documenting a capability that already ships.**
+- ~~**S18 — document the Copilot-via-MCP path in `IDE_INTEGRATION.md` as a supported configuration
+  (opened 2026-09-19).**~~ **CLOSED 2026-11-14 (lane L10):** written up as "GitHub Copilot (tool calls only,
+  through MCP)" in `docs/product/IDE_INTEGRATION.md`, with the coverage-matrix row corrected. The framing below
+  is kept, and GitHub's own enterprise MCP allowlist is described as GitHub's control, not ours. **No new code — this is documenting a capability that already ships.**
   `POST /mcp/:serverId` is a standard streamable-HTTP MCP endpoint, and GitHub Copilot supports MCP
   servers; pointing its MCP config at our proxy puts every tool call it makes through entitlement
   checks, data scope, approvals (ADR-0104/0105), project budget (ADR-0103), PII/guardrails and the
