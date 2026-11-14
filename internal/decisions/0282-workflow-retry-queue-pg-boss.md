@@ -7,9 +7,9 @@
 - **Builds on**: [ADR-0254](0254-workflow-durable-execution-spike.md) (the spike: keep the runner, add a queue under it),
   ADR-0176 (open source first), ADR-0180 (secure by default), ADR-0200 (security checklist), ADR-0252 (migrations
   numbered at merge), ADR-0064 (the in-process scheduler, which this does not replace).
-- **Follow-ups in this lane**: ADR-0283 (retry with backoff), ADR-0284 (idempotency keys and wait-for-token),
-  ADR-0285 (in-stage fan-out of named checks), ADR-0286 (per-queue concurrency limits).
-- **Migration**: none in this PR (dependency only). The schema install lands with ADR-0283 as a pending migration.
+- **Follow-ups in this lane**: one ADR each for retry with backoff, idempotency keys and wait-for-token, in-stage
+  fan-out of named checks, and per-queue concurrency limits (the lane's reserved numbers follow this one).
+- **Migration**: none in this PR (dependency only). The schema install lands with the retry ADR as a pending migration.
 
 ## Context
 
@@ -50,9 +50,9 @@ lands alone, in its own small PR, so the lockfile change does not collide with o
    pinned version, so the install is a pending migration (ADR-0252) and pg-boss starts with `migrate: false`. This is
    the criterion ADR-0254 failed `vercel/workflow` on (criterion 3): the schema name is ours and its migrations run from
    our journal. An upgrade is a lockfile PR plus a migration from `getMigrationPlans`; a test fails when the pinned
-   version and the installed schema disagree (ADR-0283).
+   version and the installed schema disagree (the retry ADR's test).
 
-## How it is used (binding on ADR-0283 to ADR-0286)
+## How it is used (binding on the lane's follow-up ADRs)
 
 - **The runner stays the engine.** pg-boss is a queue under it, never an execution engine. Every stage outcome is still
   one kernel `transition()` committed by `applyEvent` / `commitStageResult`, with the audit row in that transaction.
