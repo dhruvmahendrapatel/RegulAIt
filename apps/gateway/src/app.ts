@@ -612,6 +612,7 @@ import { registerFederationRoutes } from "./federation-routes.js";
 import { registerMcpIdentityOidcRoutes } from "./mcp-identity-oidc-routes.js";
 import { registerEndpointImportRoutes } from "./endpoint-import-routes.js";
 import { registerThirdPartyIngestRoutes } from "./third-party-ingest-routes.js";
+import { registerSiemDeliveryRoutes } from "./siem-delivery.js";
 import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
 import { registerEndpointMcpConfigRoutes } from "./endpoint-mcp-config.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
@@ -6107,6 +6108,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // lifecycle (admin-only by default; enabling and issuing the write-only credential are step-ups, audited) and the
   // exporter's route, authenticated in-route by the source's `rgti_` token. Records are attributed third-party evidence.
   registerThirdPartyIngestRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0303: SIEM delivery of the audit chain (admin-only through the default gate)
+  registerSiemDeliveryRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0195 SD4b — the RegulAIt endpoint agent: ticket redemption and registration (authenticated in-route by the
   // bulk token or the device ticket), the agent's own routes (its DPoP-bound self token only), and the admin's
   // enrolment-token and device routes (admin-only by default). Nothing works until an endpoint agent source is enabled.

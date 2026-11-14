@@ -1,0 +1,2 @@
+<!-- fold: pending -->
+**P18 C6 — SIEM delivery: built 2026-11-14 ([ADR-0303](../decisions/0303-siem-delivery-of-the-audit-chain.md)).** Open: the admin screen for the five `/v1/siem/destinations` routes (#453); vendor adapters (Azure Monitor Logs Ingestion, AWS Security Lake OCSF/Parquet, Splunk HEC, Sentinel), each with its own receiver contract test before it is claimed; owner question whether the envelope should carry the acting user or agent id; ADR-0135's outbound secret gate (still proposed).

@@ -405,6 +405,12 @@ export const KNOWN_UI_GAPS = new Map([
   ["POST /v1/third-party-ingest/sources/:sourceId/credential", { does: "issues or replaces the source's write-only rgti_ token, shown once (step-up, audited)", tracking: "#453" }],
   ["POST /v1/third-party-ingest/sources/:sourceId/credential/revoke", { does: "revokes the source's ingest token (audited)", tracking: "#453" }],
   ["GET /v1/third-party-ingest/sources/:sourceId/records", { does: "the newest third-party evidence a source delivered, each marked third-party with its linked findings", tracking: "#453" }],
+  // ADR-0303 (lane L11, P18 C6): five API-only SIEM destination routes; the admin screen is posted on #453.
+  ["GET /v1/siem/destinations", { does: "lists SIEM destinations, their state, cursor and lag (never the secret)", tracking: "#453" }],
+  ["POST /v1/siem/destinations", { does: "creates a SIEM destination, off by default; the Standard Webhooks secret is shown once", tracking: "#453" }],
+  ["PUT /v1/siem/destinations/:destinationId/enabled", { does: "turns a SIEM destination on (step-up, audited as a relaxation) or off (audited)", tracking: "#453" }],
+  ["POST /v1/siem/destinations/:destinationId/rotate-secret", { does: "rotates a SIEM destination's signing secret, shown once (step-up, audited)", tracking: "#453" }],
+  ["POST /v1/siem/destinations/:destinationId/recover", { does: "returns a dead-lettered or backing-off SIEM destination to delivery now (audited)", tracking: "#453" }],
   ["GET /v1/reports/posture/assets", { does: "pages per-asset posture scores (agents or use cases) the caller can read, each with objectives and ranked actions", tracking: "ADR-0214 amendment (P3): the brief is API-only; the per-asset score screen is posted on #453 (c6703277931) for the Governed Designer, and the owner chose the temporary gap on #705 (2026-11-07)" }],
   ["GET /v1/reports/posture/assets/:kind/:assetId", { does: "one agent's or use case's posture score, with its objectives, not-applicable list and ranked actions", tracking: "ADR-0214 amendment (P3): the brief is API-only; the per-asset score screen is posted on #453 (c6703277931) for the Governed Designer, and the owner chose the temporary gap on #705 (2026-11-07)" }],
   // ADR-0259 (P35): owner decision on #733 (2026-11-07, option c): the backend landed before its screen; the UI
@@ -437,7 +443,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 44;
+export const KNOWN_UI_GAPS_MAX = 49;
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 
