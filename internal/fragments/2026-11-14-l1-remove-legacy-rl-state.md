@@ -1,0 +1,2 @@
+<!-- fold: state-recap -->
+**2026-11-14 - ADR-0239 decision 4 executed: the hand-written rate-limit evaluator is removed ([ADR-0239](../decisions/0239-cedar-consolidation-and-relationship-store.md) "As built", lane L1; no migration).** Cedar is the only rate-limit engine; with no engine the kernel refuses, and `REGULAIT_RATE_LIMIT_EVALUATOR=legacy` refuses the boot. The differential test keeps the old predicate as its oracle.
