@@ -21,8 +21,11 @@
  * gateway — never as 0% and never as 100%.
  */
 import type { TrustDimension } from "./risks.js";
+import { SECTOR_PACK_DIMENSIONS } from "./sector-packs.js";
 
 export const CONTROL_DIMENSION_OVERRIDES: Readonly<Record<string, TrustDimension>> = {
+  // ADR-0297 (P18 B6): SR 11-7 and NYC LL144 controls (classified in sector-packs.ts)
+  ...SECTOR_PACK_DIMENSIONS,
   // EU AI Act — attestation-only
   "eu-ai-act:art-72-post-market-monitoring": "reliability",
   "eu-ai-act:art-4-ai-literacy": "compliance",

@@ -4868,6 +4868,8 @@ export * from "./feedback.js";
 export * from "./ai-literacy.js";
 export * from "./alert-ownership.js";
 export * from "./isaca-pack.js";
+// ADR-0297 (P18 B6): SR 11-7 and NYC Local Law 144 sector packs
+export * from "./sector-packs.js";
 // ADR-0243 (P24): the OWASP MCP and LLM Top 10 packs
 export * from "./owasp-packs.js";
 // ADR-0212 (P12 b): modality pricing
