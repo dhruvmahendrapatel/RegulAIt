@@ -876,13 +876,15 @@ describe("ADR-0283: a stage retry policy is an executed-stage-only, bounded opt-
     [{ id: "checks", type: "automated_check" }],
     [{ id: "build", type: "automated_build", scope: "x" }],
     [{ id: "plan", type: "planning" }],
-  ])("is refused on a stage that does not complete through execution: %j", (stage) => {
+    // executed, but never re-deployed unattended (#808 review)
+    [{ id: "deploy", type: "deployment", connection: "t", environment: "production" }],
+  ])("is refused on a stage that does not complete through execution, and on a deployment: %j", (stage) => {
     expect(() =>
       validateDefinition({ workflow: "bad", stages: [...base, { ...stage, retry: { maxAttempts: 2 } }] }),
     ).toThrow(/cannot carry retry/);
   });
 
-  it("is accepted on a check stage with named checks and on a deployment", () => {
+  it("is accepted on a check stage with named checks", () => {
     const def = validateDefinition({
       workflow: "ok",
       stages: [
