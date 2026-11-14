@@ -24,17 +24,34 @@ import {
   Modal,
   Select,
   Table,
+  Tabs,
   Textarea,
+  TabPanel,
 } from "../../../ui/kit";
-import { QueryGate, optionEls, roleOpts, useAction, useRoles, useUsers } from "../adminKit";
+import { QueryGate, optionEls, orgSettingsQuery, roleOpts, useAction, useRoles, useUsers } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 import { putOrgSettings, withStepUp } from "../../../stepup/stepUp";
 import { OrgSettingsCard } from "../settings/OrgSettingsCard";
+import { orgSettingsUnresolved, tabLabel, type Unresolved } from "../settings/postureTabs";
 import { fmtDateTime } from "../../../api/format";
-import { DataList } from "../../../ui/DataList";
+import { ListPreview } from "../../../ui/ListPreview";
+
+const PENDING = { status: "pending" };
+const STEP_UP_KEYS = ["stepUpMode", "stepUpMaxAgeSeconds", "stepUpActions"];
 
 export default function SsoPage() {
+  const [tab, setTab] = useState("oidc");
+  // what a hidden tab holds that needs review, from the same reads its cards use
+  const saml = useQuery({ queryKey: ["admin", "saml-providers"], queryFn: () => api.get<{ providers: SamlProvider[] }>("/v1/auth/saml-providers") });
+  // review of #642: a failed read counts as unknown and a pending one shows the bare name (postureTabs, ADR-0180)
+  const samlUnresolved: Unresolved | null = saml.isError
+    ? { unknown: 1, warnings: 0 }
+    : saml.data
+      ? { unknown: 0, warnings: (saml.data.providers ?? []).filter((p) => !(p.allowedEmailDomains && p.allowedEmailDomains.length > 0) || p.allowIdpInitiated).length }
+      : null;
+  const settings = useQuery(orgSettingsQuery<OrgSettingsResponse>());
+  const stepUpUnresolved = orgSettingsUnresolved(STEP_UP_KEYS, { data: settings.data, failed: settings.isError });
   return (
     <>
       <PageHeader
@@ -43,12 +60,58 @@ export default function SsoPage() {
         info={<p>OIDC and SAML 2.0 single sign-on providers (secrets write-only, signatures verified against pinned certificates) and the browser sign-in / session policy. API keys and the bootstrap token are machine credentials — none of this touches them.</p>}
       />
       <div className={v.stack}>
-        <OidcCard />
-        <SamlCard />
-        <LinkRequestsCard />
-        <SessionsPolicyCard />
-        {/* ADR-0186 A: which actions need a fresh second proof, and how long one lasts */}
-        <OrgSettingsCard title="Step-up for sensitive actions" keys={["stepUpMode", "stepUpMaxAgeSeconds", "stepUpActions"]} testId="sso-step-up-settings" helpInInfo />
+        {/* P3: the growing list is a preview; the full list and its decisions have their own page */}
+        <ListPreview<LinkRequest>
+          title="Account-link requests"
+          noun="pending"
+          endpoint="/v1/auth/link-requests"
+          legacyKey="requests"
+          queryKey={["admin", "link-requests"]}
+          sort={{ key: "when", dir: "desc" }}
+          filters={PENDING}
+          columns={[
+            {
+              key: "account",
+              header: "Existing account",
+              render: (r) => (
+                <span>
+                  {r.userDisplayName} <span className={v.faint}>{r.userEmail}</span>
+                </span>
+              ),
+            },
+            { key: "provider", header: "Identity provider", render: (r) => `${r.provider} (${r.protocol.toUpperCase()})` },
+            { key: "mfa", header: "MFA", render: (r) => (r.idpMfa ? <Badge tone="ok">asserted</Badge> : <Badge>not asserted</Badge>) },
+            { key: "when", header: "Requested", render: (r) => fmtDateTime(r.createdAt) },
+            { key: "status", header: "Status", render: (r) => (r.expired ? <Badge tone="warn">expired</Badge> : <Badge>{r.status}</Badge>) },
+          ]}
+          rowKey={(r) => r.id}
+          viewAll="/admin/sso/link-requests"
+          empty={<EmptyState title="No pending link requests" body="A federated identity that matches an account with its own password waits here; it is never linked silently." />}
+        />
+        {/* P3: the providers and the session policy are settings, in tabs; a hidden tab counts what needs review */}
+        <Tabs
+          tabs={[
+            { id: "oidc", label: "OIDC providers" },
+            { id: "saml", label: tabLabel("SAML providers", samlUnresolved) },
+            { id: "sessions", label: tabLabel("Sessions & step-up", stepUpUnresolved) },
+          ]}
+          active={tab}
+          onChange={setTab}
+          idPrefix="sso"
+          label="SSO settings"
+        />
+        {/* the kit panels stay mounted while hidden, so a half-filled provider form survives a tab switch (review of #642) */}
+        <TabPanel idPrefix="sso" id="oidc" active={tab}><div className={v.stack}>
+          <OidcCard />
+        </div></TabPanel>
+        <TabPanel idPrefix="sso" id="saml" active={tab}><div className={v.stack}>
+          <SamlCard />
+        </div></TabPanel>
+        <TabPanel idPrefix="sso" id="sessions" active={tab}><div className={v.stack}>
+          <SessionsPolicyCard />
+          {/* ADR-0186 A: which actions need a fresh second proof, and how long one lasts */}
+          <OrgSettingsCard title="Step-up for sensitive actions" keys={STEP_UP_KEYS} testId="sso-step-up-settings" helpInInfo />
+        </div></TabPanel>
       </div>
     </>
   );
@@ -787,127 +850,3 @@ function SessionsPolicyForm(props: { settings: Record<string, unknown> }) {
   );
 }
 
-// ---- ADR-0174 §5: account-link requests ------------------------------------
-
-/**
- * A federated identity that matched an account holding its own password never
- * links silently: the person proves the account at sign-in, or an admin
- * approves here. Approving re-points nothing that belongs to somebody else
- * (the gateway refuses), and nobody can approve a link to their own account.
- */
-function LinkRequestsCard() {
-  const act = useAction();
-  const [status, setStatus] = useState("pending");
-  const filters = useMemo(() => ({ status }), [status]);
-  return (
-    <Card title="Account-link requests">
-      {act.error && (
-        <div className={v.errLine} role="alert">
-          {act.error}
-        </div>
-      )}
-      <Field label="Show">
-        <Select value={status} onChange={(e) => setStatus(e.target.value)}>
-          <option value="pending">pending</option>
-          <option value="approved">approved</option>
-          <option value="linked">linked</option>
-          <option value="denied">denied</option>
-          <option value="all">all</option>
-        </Select>
-      </Field>
-      <DataList<LinkRequest>
-        listId="link-requests"
-        noun="link requests"
-        endpoint="/v1/auth/link-requests"
-        exportPath="/v1/auth/link-requests/export.xlsx"
-        queryKey={["admin", "link-requests", "list"]}
-        legacyKey="requests"
-        filters={filters}
-        defaultSort={{ key: "when", dir: "desc" }}
-        columns={[
-          {
-            key: "account",
-            header: "Existing account",
-            main: true,
-            sortable: true,
-            render: (r) => (
-              <span>
-                {r.userDisplayName} <span className={v.faint}>{r.userEmail}</span>
-              </span>
-            ),
-          },
-          { key: "provider", header: "Identity provider", main: true, sortable: true, render: (r) => `${r.provider} (${r.protocol.toUpperCase()})` },
-          { key: "email", header: "Asserted email", main: true, sortable: true, render: (r) => <span className={v.mono}>{r.email}</span> },
-          {
-            key: "mfa",
-            header: "MFA",
-            main: true,
-            sortable: true,
-            required: "Whether the identity provider asserted MFA is a warning, so it is always shown",
-            render: (r) => (r.idpMfa ? <Badge tone="ok">asserted</Badge> : <Badge>not asserted</Badge>),
-          },
-          { key: "when", header: "Requested", main: true, sortable: true, render: (r) => fmtDateTime(r.createdAt) },
-          {
-            key: "approvals",
-            header: "Approvals",
-            main: true,
-            sortable: true,
-            render: (r) => `${r.approvals ?? 0} of ${r.requiredApprovals ?? 1}`,
-          },
-          {
-            key: "status",
-            header: "Status",
-            sortable: true,
-            required: "Status is always shown",
-            render: (r) => (r.expired ? <Badge tone="warn">expired</Badge> : <Badge>{r.status ?? "pending"}</Badge>),
-          },
-          { key: "expires", header: "Expires", sortable: true, render: (r) => (r.expiresAt ? fmtDateTime(r.expiresAt) : "—") },
-          {
-            key: "actions",
-            header: "",
-            srHeader: "Actions",
-            align: "right",
-            action: true,
-            render: (r) =>
-              r.expired || (r.status && r.status !== "pending") ? null : (
-                <span className={v.rowTight}>
-                  <Button
-                    size="sm"
-                    onClick={() =>
-                      void act.run(async () => {
-                        const res = await api.post<{ status: string; approvals?: number; requiredApprovals?: number }>(
-                          `/v1/auth/link-requests/${r.id}/approve`,
-                          {},
-                        );
-                        return res.status === "pending"
-                          ? `Approval ${res.approvals ?? 1} of ${res.requiredApprovals ?? 2} recorded — another administrator must also approve (audited)`
-                          : "Link approved (audited)";
-                      })
-                    }
-                  >
-                    approve
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="danger"
-                    onClick={() =>
-                      void act.run(() => api.post(`/v1/auth/link-requests/${r.id}/deny`, {}), "Link denied (audited)")
-                    }
-                  >
-                    deny
-                  </Button>
-                </span>
-              ),
-          },
-        ]}
-        rowKey={(r) => r.id}
-        empty={
-          <EmptyState
-            title={status === "pending" ? "No pending link requests" : "No link requests"}
-            body="When someone signs in with an identity provider whose email matches an account that has its own password, the link waits here (or for them to prove the account) — it is never made silently."
-          />
-        }
-      />
-    </Card>
-  );
-}

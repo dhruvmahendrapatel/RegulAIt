@@ -111,6 +111,8 @@ test.describe("ADR-0174 security review: the SSO admin page", () => {
     await expect.poll(() => cap.oidc.length).toBe(1);
     expect(cap.oidc[0]).toMatchObject({ name: "keycloak", brokerEnforcesMfa: true });
 
+    // P3: the SAML providers have their own tab
+    await page.getByRole("tab", { name: /^SAML providers/ }).click();
     const saml = page.locator("section[data-rg-card]").filter({ hasText: "Single sign-on — SAML 2.0 providers" }).first();
     await saml.getByLabel("Name", { exact: true }).fill("adfs");
     await saml.getByLabel("IdP entity id (Issuer)").fill("http://idp.example.test/adfs/services/trust");
@@ -124,7 +126,8 @@ test.describe("ADR-0174 security review: the SSO admin page", () => {
 
   test("a link request to an admin account shows 0 of 2, and a first approval asks for a second administrator", async ({ page }) => {
     const cap = await mockApi(page);
-    await page.goto("/ui/admin/sso");
+    // P3: the requests and their decisions are on their own page
+    await page.goto("/ui/admin/sso/link-requests");
     await expect(page.getByRole("cell", { name: "0 of 2" })).toBeVisible();
     await expectAxeClean(page, "sso admin");
     await page.getByRole("button", { name: "approve" }).click();
@@ -138,6 +141,8 @@ test("ADR-0186 A: saving the sign-in policy asks to confirm it's you and resends
   await mockApi(page);
   const su = await requireStepUpOn(page, { method: "PUT", path: "/v1/org/settings", kind: "break_glass" });
   await page.goto("/ui/admin/sso");
+  // P3: the sign-in policy is on the Sessions & step-up tab
+  await page.getByRole("tab", { name: /^Sessions & step-up/ }).click();
   // ADR-0180: the requirements for "SSO only" and "Email sign-in" stay visible beside the selects, not only in the fold
   const reqs = page.getByTestId("sso-policy-requirements");
   await expect(reqs).toBeVisible();

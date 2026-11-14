@@ -41,10 +41,13 @@ for (const state of ["disabled", "removed"] as const) {
     const reads = st.reads;
     // Saving another card performs the normal admin-catalog invalidation,
     // exactly as a real catalogue change/refetch would; it preserves this draft.
+    // P3: the prompt card is in its own tab; the registration draft stays in its (mounted, hidden) tab meanwhile
+    await page.getByRole("tab", { name: "Pricing & prompts" }).click();
     const prompt = page.locator("section").filter({ has: page.getByText("System prompt — admin base (governance artifact)", { exact: true }) });
     await prompt.getByLabel("Agent", { exact: true }).selectOption(AGENT);
     await prompt.getByRole("button", { name: "Save prompt", exact: true }).click();
     await expect.poll(() => st.reads).toBeGreaterThan(reads);
+    await page.getByRole("tab", { name: "Register" }).click();
     const card = registration(page);
     const endpoint = card.getByTestId("agent-custom-endpoint");
     await expect(endpoint).toHaveValue(ENDPOINT);

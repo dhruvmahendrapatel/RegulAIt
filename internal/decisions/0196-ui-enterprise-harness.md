@@ -637,6 +637,20 @@ one `CEILING_EXCEPTIONS` row.
   raise fits ADR-0198's freeze-week allowance of at most +1 kB of entry raises.
 - After the demo the entry is trimmed back under 138.5 kB and this ceiling restored.
 
+## Addendum / As built (2026-10-31) — the P3 identity-and-access long-page split adds ~0 to the entry bundle
+
+The P3 split (the SSO, workload-identities, ChatOps, agents and licensing pages keep a preview and move each full list to
+its own page) first declared every sub-page as its own lazy route in `App.tsx`, which left almost no headroom under the
+138.5 kB entry ceiling once the other lanes are counted.
+
+- Each area is now **one** lazy route with a splat (`sso/*`, `workload-identities/*`, `chatops/*`, `agents/*`,
+  `licensing/*`). The area's module owns a nested `<Routes>` — the overview at the index, each full list on its own
+  nested route — reached through the section's existing screen barrel, so `App.tsx` adds no new import specifier and no
+  new entry chunk reference. Every URL, the `#agent-<id>` deep-link redirect, every access gate and breadcrumb is
+  unchanged.
+- Entry JS measured 138,266 B before and 137,998 B after on the same lockfile; all JS fell to 1,066,609 B. No ceiling
+  changes; entry stays well under 138.5 kB.
+
 ## Addendum / As built (2026-10-31) — the P3 operations/cost long-page split adds ~0 to the entry bundle
 
 The P3 split (the long cost-consolidation, Engines, MCP servers and Infrastructure pages keep a five-row preview and
