@@ -43,7 +43,7 @@
  */
 import {
   EVIDENCE_MAX_ROWS,
-  SHADOW_AI_CATALOG_V2,
+  SHADOW_AI_CATALOG_V3,
   analyseRepo,
   isEnvName,
   type ArtifactSignatureKind,
@@ -157,7 +157,7 @@ export class RepoScanError extends Error {
 }
 
 const ASSISTANT_PATTERN_BY_ID: ReadonlyMap<string, string> = new Map(
-  SHADOW_AI_CATALOG_V2.filter((e) => e.kind === "assistant_config").map((e) => [e.id, e.pattern]),
+  SHADOW_AI_CATALOG_V3.filter((e) => e.kind === "assistant_config").map((e) => [e.id, e.pattern]),
 );
 
 /** SD0's name rule: a letter or `_`, then up to 127 of `[A-Za-z0-9_.-]` (checked without a regex) */

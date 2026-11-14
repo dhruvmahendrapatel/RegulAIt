@@ -13,7 +13,9 @@ import {
   desc,
   eq,
   inArray,
+  isNull,
   ne,
+  notInArray,
   sql,
   workflowArtifacts,
   workflowAssignmentRules,
@@ -66,6 +68,8 @@ import {
 import { refuseIfFeatureNotLicensed } from "./licensing.js";
 import { decryptSecret, encryptSecret as encryptTokenOnce } from "./secrets.js";
 import { guardConnectionCall, refuseConnectionEgressWrite } from "./connection-egress.js";
+import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
+import { connectionMoveStepUp, connectionTokenStepUp, TOKEN_REQUIRED_FOR_MOVE } from "./integration-lifecycle.js";
 // ADR-0062 — the compiled git endpoint, adjudicated under a strict posture.
 import {
   auditCompiledDefaultDenied,
@@ -86,7 +90,19 @@ import {
 } from "./shadow-ai-remediation.js";
 import { APPROVER_ADMIN_NOT_INITIATOR, adminsOtherThan, secondApproverMissing } from "./workflow-approvers.js";
 import { networkFacingSignal } from "./dev-secrets.js";
-import { configureStageQueue, enqueueStageRetry, fanOut, stageCheckConcurrency, stageRetryAttempt, type StageRetryJob, type StageRetryOutcome } from "./workflows-queue.js";
+import {
+  configureStageQueue,
+  enqueueStageRetry,
+  fanOut,
+  stageCheckConcurrency,
+  stageExecutionKey,
+  stageRetryAttempt,
+  stageRetryChainLive,
+  type StageRetryAttemptContext,
+  type StageRetryEnqueue,
+  type StageRetryJob,
+  type StageRetryOutcome,
+} from "./workflows-queue.js";
 import { finishTrace, recordSpan, traceForRoot } from "./tracing.js";
 import { activeDelegatorsFor } from "./delegations.js";
 import { idempotentReplay, readIdempotencyKey, requestDigestOf, withIdempotencyKey } from "./request-idempotency.js";
@@ -96,6 +112,8 @@ import {
   createDeployTargetSchema,
   deployTargetProviderConfig,
   createGitConnectionSchema,
+  replaceConnectionTokenSchema,
+  updateGitConnectionSchema,
   createWorkflowTemplateSchema,
   deployOverrideSchema,
   recheckSchema,
@@ -176,6 +194,7 @@ async function applyEvent(
   // re-opens, and aborts serialize instead of racing read-modify-write. When
   // the caller already holds a transaction (the decide endpoint), this nests
   // as a savepoint so the whole flow commits or rolls back together.
+  let ownMark: { ctx: StageRetryAttemptContext; value: "failed" | "moved" } | null = null;
   const applied = await inTransaction(db, async (tx) => {
     const [instance] = await tx
       .select()
@@ -283,6 +302,15 @@ async function applyEvent(
     // the change through — it audits as the refusal it is.
     const isReturn = event.kind === "approval_returned";
     const systemActor = actorUserId === null && opts?.systemActor ? opts.systemActor : null;
+    // ADR-0283 / ADR-0284: the stage execution this event belongs to (the stage the instance was at, before any
+    // re-open or entry bump), and the retry attempt running it, if the attempt is for THIS execution. An attempt's
+    // executor that runs on into a downstream stage has another key there: that stage schedules and audits normally.
+    const priorStage = def.stages[prior.currentStageIndex];
+    const ownExecutionKey = priorStage
+      ? stageExecutionKey({ instanceId: instance.id, stageId: priorStage.id, round: instance.round, entry: instance.stageEntry })
+      : null;
+    const retryCtx = stageRetryAttempt.getStore();
+    const ownAttempt: StageRetryAttemptContext | undefined = retryCtx && retryCtx.key === ownExecutionKey ? retryCtx : undefined;
     const auditUserId = actorUserId ?? (systemActor ? SYSTEM_IDENTITY : instance.initiatorUserId);
     await tx.insert(auditLog).values({
       userId: auditUserId,
@@ -296,7 +324,7 @@ async function applyEvent(
         ...(isReopen ? { round } : {}),
         ...(bumpEntry ? { stageEntry } : {}),
         // ADR-0283: the automatic retry attempt this event was committed by
-        ...(stageRetryAttempt.getStore() ? { retryAttempt: stageRetryAttempt.getStore() } : {}),
+        ...(ownAttempt ? { retryAttempt: { key: ownAttempt.key, attempt: ownAttempt.attempt, maxAttempts: ownAttempt.maxAttempts } } : {}),
       },
       effect: isDenial || isReturn ? "deny" : "allow",
       ruleId: `workflow:${event.kind}`,
@@ -309,38 +337,60 @@ async function applyEvent(
     // ADR-0283: a retryable execution failure on a stage whose template opts
     // into retry schedules its automatic retries HERE, in the transition's
     // transaction, beside the audit row: the job exists if and only if the
-    // failure committed. A failure committed BY a retry attempt schedules
-    // nothing (the queue retries that job with its own backoff), and the
-    // stage execution's key (ADR-0284) keeps one chain per stage entry.
-    if (event.kind === "execution_failed") {
-      const failing = def.stages[prior.currentStageIndex];
-      const attempt = stageRetryAttempt.getStore();
-      if (failing?.retry && !attempt) {
-        const job: StageRetryJob = { instanceId: instance.id, stageId: failing.id, round, entry: stageEntry };
-        const sent = await enqueueStageRetry(tx, job, failing.retry, instance.projectId ?? null);
-        await tx.insert(auditLog).values({
-          userId: auditUserId,
-          objectType: "workflow",
-          objectId: instance.id,
-          detail: {
-            stageId: failing.id,
-            executionKey: sent.key,
-            maxAttempts: failing.retry.maxAttempts,
-            delaySeconds: failing.retry.delaySeconds,
-            backoff: failing.retry.backoff,
-            maxDelaySeconds: failing.retry.maxDelaySeconds,
-            ...(sent.scheduled ? { jobId: sent.jobId } : { notScheduled: sent.reason }),
-          },
-          effect: "allow",
-          ruleId: sent.scheduled ? "workflow:stage-retry-scheduled" : "workflow:stage-retry-not-scheduled",
-          ruleChain: [],
-          reason: sent.scheduled
-            ? `stage '${failing.id}' failed; up to ${failing.retry.maxAttempts} automatic retr${failing.retry.maxAttempts === 1 ? "y" : "ies"} scheduled, the first in ${failing.retry.delaySeconds} s (the template's retry policy)`
-            : sent.reason === "already_scheduled"
-              ? `stage '${failing.id}' failed; its automatic retries are already scheduled for this stage entry (${sent.key})`
-              : `stage '${failing.id}' failed; no automatic retry was scheduled because the queue is not configured in this process — the stage waits for /advance`,
-        });
-      }
+    // failure committed. A failure committed BY this execution's own retry
+    // attempt schedules nothing (the queue retries that job with its own
+    // backoff). One execution (ADR-0284 key) gets ONE chain, ever: the
+    // `stage-retry-scheduled` audit row is the permanent record of it (the
+    // queue's own rows are deleted after a week), so a later failure of the
+    // same execution (a nested run aborting after its attempt handed off, a
+    // manual /advance after exhaustion) audits `exhausted` and waits for a
+    // human. A queue error never keeps the failure from committing.
+    if (ownAttempt) ownMark = { ctx: ownAttempt, value: event.kind === "execution_failed" ? "failed" : "moved" };
+    if (event.kind === "execution_failed" && priorStage?.retry && !ownAttempt) {
+      const policy = priorStage.retry;
+      const job: StageRetryJob = { instanceId: instance.id, stageId: priorStage.id, round, entry: stageEntry };
+      const key = stageExecutionKey(job);
+      const [chain] = await tx
+        .select({ id: auditLog.id })
+        .from(auditLog)
+        .where(
+          and(
+            eq(auditLog.objectType, "workflow"),
+            eq(auditLog.objectId, instance.id),
+            eq(auditLog.ruleId, "workflow:stage-retry-scheduled"),
+            sql`${auditLog.detail}->>'executionKey' = ${key}`,
+          ),
+        )
+        .limit(1);
+      const sent: StageRetryEnqueue = chain
+        ? { scheduled: false, key, reason: (await stageRetryChainLive(tx as unknown as Db, key)) ? "already_scheduled" : "exhausted" }
+        : await enqueueStageRetry(tx as unknown as Db, job, policy, instance.projectId ?? null);
+      const why: Record<string, string> = {
+        already_scheduled: `its automatic retries are already scheduled for this stage execution (${key})`,
+        exhausted: `this stage execution (${key}) already had its automatic retries; it waits for /advance (a re-open or a new entry into the stage gets new ones)`,
+        queue_not_configured: "the queue is not configured in this process; it waits for /advance",
+        queue_unavailable: "the queue could not take the job; it waits for /advance",
+      };
+      await tx.insert(auditLog).values({
+        userId: auditUserId,
+        objectType: "workflow",
+        objectId: instance.id,
+        detail: {
+          stageId: priorStage.id,
+          executionKey: key,
+          maxAttempts: policy.maxAttempts,
+          delaySeconds: policy.delaySeconds,
+          backoff: policy.backoff,
+          maxDelaySeconds: policy.maxDelaySeconds,
+          ...(sent.scheduled ? { jobId: sent.jobId } : { notScheduled: sent.reason, ...(sent.error ? { error: sent.error } : {}) }),
+        },
+        effect: sent.scheduled ? "allow" : sent.reason === "queue_unavailable" ? "deny" : "allow",
+        ruleId: sent.scheduled ? "workflow:stage-retry-scheduled" : "workflow:stage-retry-not-scheduled",
+        ruleChain: [],
+        reason: sent.scheduled
+          ? `stage '${priorStage.id}' failed; up to ${policy.maxAttempts} automatic retr${policy.maxAttempts === 1 ? "y" : "ies"} scheduled, the first in ${policy.delaySeconds} s (the template's retry policy)`
+          : `stage '${priorStage.id}' failed; no automatic retry was scheduled: ${why[sent.reason]}`,
+      });
     }
     // AER-049: the archive is on the trail with the values — what an earlier
     // round shipped stays traceable from the audit alone.
@@ -433,6 +483,9 @@ async function applyEvent(
       },
     };
   });
+  // ADR-0283: the retry attempt learns what was committed for its execution only once it is committed
+  const mark = ownMark as { ctx: StageRetryAttemptContext; value: "failed" | "moved" } | null;
+  if (mark) mark.ctx.committed = mark.value;
   if (opts?.deferSpan) return { ...applied, deferredSpan: { instanceId, event, applied } };
   await recordWorkflowStageSpan(db, instanceId, event, applied);
   return applied;
@@ -2606,11 +2659,19 @@ async function commitStageResult(
  *    that execution (it succeeded through /advance, was re-opened, aborted or
  *    moved on), the attempt does nothing and the job completes. A redelivered
  *    job therefore never runs a stage twice.
- *  - FAILED AGAIN. The executor committed `execution_failed` (with no new job:
- *    the attempt context suppresses it). With attempts left this throws, and
- *    the queue retries the job after its backoff; on the last attempt the
- *    exhaustion is audited and the stage waits for /advance, as before P30.
+ *  - FAILED AGAIN. The executor committed `execution_failed` for this
+ *    execution (with no new job: the attempt context suppresses it). With
+ *    attempts left this throws, and the queue retries the job after its
+ *    backoff; on the last attempt the exhaustion is audited and the stage
+ *    waits for /advance, as before P30. An attempt that throws for any other
+ *    reason on its last try is audited as exhausted too.
+ *  - HANDED OFF. The executor committed nothing for this execution (a check
+ *    stage waiting for its reports, a build handed to a nested run): the job
+ *    completes, and a later failure of the same execution is not retried.
  *  - REFUSED. A governance refusal is final and never retried.
+ *
+ * The outcome is what `applyEvent` recorded for this execution's key in the
+ * attempt context, never leftover instance context.
  */
 export async function runStageRetryJob(
   db: Db,
@@ -2637,34 +2698,53 @@ export async function runStageRetryJob(
       ruleChain: [],
       reason,
     });
+  const last = attempt.attempt >= attempt.maxAttempts;
+  const retries = `${attempt.maxAttempts} automatic retr${attempt.maxAttempts === 1 ? "y" : "ies"}`;
+  const exhausted = async (extra: Record<string, unknown>) => {
+    await audit("workflow:stage-retry-exhausted", "deny", `stage '${job.stageId}' still failed after ${retries}; it waits for /advance`, extra);
+    return "exhausted" as const;
+  };
+  // the attempt row opens the attempt; every attempt that then runs nothing closes it with a superseded row
   await audit(
     "workflow:stage-retry-attempt",
     "allow",
     `automatic retry ${attempt.attempt} of ${attempt.maxAttempts} of stage '${job.stageId}' (the template's retry policy)`,
   );
+  const ctx: StageRetryAttemptContext = { ...attempt };
   let outcome: ExecutorOutcome;
   try {
-    outcome = await stageRetryAttempt.run(attempt, () =>
+    outcome = await stageRetryAttempt.run(ctx, () =>
       runGitExecutions(db, job.instanceId, [{ kind: "execute_stage", stageId: job.stageId }], null, dataKey, 0, hooks),
     );
   } catch (err) {
     // another executor holds the stage, or it stopped being executable between
     // the read above and the claim: whoever holds it owns the outcome now
-    if (err instanceof StageClaimHeldError || err instanceof WorkflowStateError) return "superseded";
+    if (ctx.committed === undefined && (err instanceof StageClaimHeldError || err instanceof WorkflowStateError)) {
+      await audit(
+        "workflow:stage-retry-superseded",
+        "allow",
+        `automatic retry ${attempt.attempt} of stage '${job.stageId}' ran nothing: another executor holds the stage, or it moved on before the claim`,
+        { error: errLine(err) },
+      );
+      return "superseded";
+    }
+    if (ctx.committed === "moved") return "succeeded";
+    if (last) return exhausted({ error: errLine(err) });
     throw err;
   }
   if (outcome.refused) return "refused";
-  const after = await awaiting();
-  const lastError = after ? (after.context as Record<string, unknown>).lastError : undefined;
-  if (!after || typeof lastError !== "string" || !lastError.startsWith(`${job.stageId}:`)) return "succeeded";
-  if (attempt.attempt >= attempt.maxAttempts) {
+  if (ctx.committed === "moved") return "succeeded";
+  if (ctx.committed === undefined) {
     await audit(
-      "workflow:stage-retry-exhausted",
-      "deny",
-      `stage '${job.stageId}' still failed after ${attempt.maxAttempts} automatic retr${attempt.maxAttempts === 1 ? "y" : "ies"}; it waits for /advance`,
-      { lastError },
+      "workflow:stage-retry-handed-off",
+      "allow",
+      `automatic retry ${attempt.attempt} of stage '${job.stageId}' committed no outcome: the stage waits on its reports or a nested run, and a later failure of this execution is not retried`,
     );
-    return "exhausted";
+    return "handed_off";
+  }
+  if (last) {
+    const after = await awaiting();
+    return exhausted({ lastError: after ? (after.context as Record<string, unknown>).lastError : undefined });
   }
   // the queue retries this job after its backoff
   throw new Error(`automatic retry ${attempt.attempt} of ${attempt.maxAttempts} of stage '${job.stageId}' failed`);
@@ -2869,6 +2949,31 @@ export async function startWorkflowInstanceWithTemplates(
   return { ok: true, instance: { id: instance!.id, status: fresh!.status, state: fresh!.state }, executorRefusal: executed.refused };
 }
 
+/** ADR-0207 (G5): the workflow statuses after which an instance never runs another stage */
+const TERMINAL_INSTANCE_STATUSES = ["completed", "aborted", "denied", "rolled_back"] as const;
+/** a git stage naming the connection `$name`, anywhere in a definition's stage list */
+const GIT_STAGE_NAMING = '$.stages[*] ? (@.type == "git_operation" && @.connection == $name)';
+
+/** ADR-0207 (G5): the active templates and unfinished instances whose git stages name this connection (counts exact,
+ * at most 20 ids of each) */
+export async function gitConnectionUse(
+  db: Db,
+  name: string,
+): Promise<{ templates: number; instances: number; templateNames: string[]; instanceIds: string[] }> {
+  const naming = (col: unknown) => sql`jsonb_path_exists(${col}, ${GIT_STAGE_NAMING}::jsonpath, jsonb_build_object('name', ${name}::text))`;
+  const tpl = await db
+    .select({ name: workflowTemplates.name })
+    .from(workflowTemplates)
+    .where(and(isNull(workflowTemplates.retiredAt), naming(workflowTemplates.definition)))
+    .orderBy(workflowTemplates.name);
+  const inst = await db
+    .select({ id: workflowInstances.id })
+    .from(workflowInstances)
+    .where(and(notInArray(workflowInstances.status, [...TERMINAL_INSTANCE_STATUSES]), naming(workflowInstances.definition)))
+    .orderBy(workflowInstances.id);
+  return { templates: tpl.length, instances: inst.length, templateNames: tpl.slice(0, 20).map((t) => t.name), instanceIds: inst.slice(0, 20).map((i) => i.id) };
+}
+
 export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: WorkflowRouteOptions = {}) {
   // ADR-0189 R25 item 13 prevention: every executor a route runs gets the same
   // completion guard the route's own transition does (the strict default when
@@ -2957,10 +3062,119 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       })
       .from(gitConnections),
   }));
+  // ADR-0207 (G5): edit the base URL and replace the token in place. The name and provider are fixed: workflow stages
+  // name the connection. A new base URL is adjudicated by the egress guard again, exactly as on create. Review of #605:
+  // a base URL change would send the stored token to another host, so it needs the new host's token in the same request
+  // (the stored one is replaced, never sent there) and a `settings_relax` step-up bound to the connection and both URLs;
+  // replacing the token needs one bound to the connection. Each change is audited in the same transaction as the write.
+  const gitName = z.object({ name: z.string().min(1).max(256) });
+  app.patch("/v1/git/connections/:name", async (req, reply) => {
+    const { name } = gitName.parse(req.params);
+    const parsed = updateGitConnectionSchema.safeParse(req.body);
+    // the body may hold a token, and a zod issue list could echo it: a fixed sentence instead
+    if (!parsed.success) return reply.status(400).send({ error: "invalid_request", detail: "expected { baseUrl, token? }" });
+    const body = parsed.data;
+    const [before] = await db.select({ id: gitConnections.id, provider: gitConnections.provider, baseUrl: gitConnections.baseUrl }).from(gitConnections).where(eq(gitConnections.name, name));
+    if (!before) return reply.status(404).send({ error: "unknown_connection" });
+    const moves = body.baseUrl !== before.baseUrl;
+    if (moves && body.token === undefined) return reply.status(422).send(TOKEN_REQUIRED_FOR_MOVE);
+    if (!moves && body.token !== undefined) {
+      return reply.status(400).send({ error: "invalid_request", detail: "the base URL is unchanged: replace the token with POST /v1/git/connections/:name/token" });
+    }
+    if (moves && !opts.dataKey) return reply.status(503).send({ error: "no_data_key", detail: "set REGULAIT_DATA_KEY" });
+    if (body.baseUrl) {
+      const refusal = await refuseConnectionEgressWrite(db, {
+        surface: "git_connection",
+        baseUrl: body.baseUrl,
+        userId: req.authCtx.userId ?? null,
+        phase: "git_connection_write",
+        label: `git connection '${name}' baseUrl`,
+        detail: { name, provider: before.provider },
+      });
+      if (refusal) return reply.status(400).send(refusal);
+    }
+    let stepUp: string | null = null;
+    if (moves) {
+      const su = await requireStepUp(db, req, reply, connectionMoveStepUp("git_connection", before.id, before.baseUrl, body.baseUrl));
+      if (!su.ok) return reply;
+      stepUp = su.method;
+    }
+    const dataKey = opts.dataKey;
+    const row = await db.transaction(async (tx) => {
+      const [r] = await tx
+        .update(gitConnections)
+        .set({ baseUrl: body.baseUrl, ...(moves && dataKey && body.token !== undefined ? { tokenCiphertext: encryptTokenOnce(dataKey, body.token) } : {}) })
+        // compare-and-set: the audit row's "before" is the value this write replaced
+        .where(and(eq(gitConnections.id, before.id), before.baseUrl === null ? isNull(gitConnections.baseUrl) : eq(gitConnections.baseUrl, before.baseUrl)))
+        .returning({ id: gitConnections.id, name: gitConnections.name, provider: gitConnections.provider, baseUrl: gitConnections.baseUrl, createdAt: gitConnections.createdAt });
+      if (!r) return null;
+      await tx.insert(auditLog).values({
+        userId: req.authCtx.userId ?? SYSTEM_IDENTITY,
+        objectType: "git_connection",
+        objectId: r.id,
+        detail: { phase: "updated", name, provider: r.provider, from: { baseUrl: before.baseUrl }, to: { baseUrl: r.baseUrl }, ...(moves ? { tokenReplaced: true, stepUp } : {}) },
+        effect: "allow",
+        ruleId: "git-connection-updated",
+        ruleChain: [],
+        reason:
+          `git connection '${name}' base URL ${before.baseUrl ?? "(provider default)"} → ${r.baseUrl ?? "(provider default)"}` +
+          (moves ? "; the token was replaced with the new host's (the previous one was never sent there)" : ""),
+      });
+      return r;
+    });
+    if (!row) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
+    return row;
+  });
+
+  app.post("/v1/git/connections/:name/token", async (req, reply) => {
+    const { name } = gitName.parse(req.params);
+    const parsed = replaceConnectionTokenSchema.safeParse(req.body);
+    // the zod issue list could echo the body back, and the body holds the token: a fixed sentence instead
+    if (!parsed.success) return reply.status(400).send({ error: "invalid_request", detail: "expected { token } (1 to 512 characters)" });
+    if (!opts.dataKey) return reply.status(503).send({ error: "no_data_key", detail: "set REGULAIT_DATA_KEY" });
+    const dataKey = opts.dataKey;
+    const [target] = await db.select({ id: gitConnections.id }).from(gitConnections).where(eq(gitConnections.name, name));
+    if (!target) return reply.status(404).send({ error: "unknown_connection" });
+    // review of #605: a credential change, so a step-up bound to this connection (ADR-0204's credential routes)
+    const su = await requireStepUp(db, req, reply, connectionTokenStepUp("git_connection", target.id));
+    if (!su.ok) return reply;
+    const row = await db.transaction(async (tx) => {
+      const [r] = await tx
+        .update(gitConnections)
+        .set({ tokenCiphertext: encryptTokenOnce(dataKey, parsed.data.token) })
+        .where(eq(gitConnections.id, target.id))
+        .returning({ id: gitConnections.id, provider: gitConnections.provider, secretSetAt: gitConnections.secretSetAt });
+      if (!r) return null;
+      await tx.insert(auditLog).values({
+        userId: req.authCtx.userId ?? SYSTEM_IDENTITY,
+        objectType: "git_connection",
+        objectId: r.id,
+        detail: { phase: "token-rotated", name, provider: r.provider, stepUp: su.method },
+        effect: "allow",
+        ruleId: "git-connection-token-rotated",
+        ruleChain: [],
+        reason: `git connection '${name}': token replaced; the previous token was destroyed here (revoke it on the git host)`,
+      });
+      return r;
+    });
+    if (!row) return reply.status(404).send({ error: "unknown_connection" });
+    return { replaced: true, secretSetAt: row.secretSetAt };
+  });
+
   // #453: a connection holding a wrong token is replaced by deleting it and creating it again. Deleting only removes
   // access, so it needs no step-up; the removal is on the record in the same transaction as the delete.
+  // ADR-0207 (G5): refused while an active template or an unfinished workflow instance has a git stage naming it, so a
+  // delete never turns into a stage that fails at run time.
   app.delete("/v1/git/connections/:name", async (req, reply) => {
-    const { name } = z.object({ name: z.string().min(1) }).parse(req.params);
+    const { name } = gitName.parse(req.params);
+    const inUse = await gitConnectionUse(db, name);
+    if (inUse.templates + inUse.instances > 0) {
+      return reply.status(409).send({
+        error: "git_connection_in_use",
+        detail: "workflow stages name this connection; retire those templates or finish those instances first",
+        ...inUse,
+      });
+    }
     const deleted = await db.transaction(async (tx) => {
       const rows = await tx
         .delete(gitConnections)

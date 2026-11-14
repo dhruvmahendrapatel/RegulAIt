@@ -2043,6 +2043,57 @@ export const createPmConnectionSchema = z
 
 export const pmSyncSchema = z.object({ connectionName: z.string().min(1) });
 
+// ---------------------------------------------------------------------------
+// ADR-0207 — lifecycle for integrations (G3–G6). Every body is `.strict()`, so a field the contract does not name
+// (a new name, a provider, a secret in the wrong slot) is a 400 rather than silently ignored.
+// ---------------------------------------------------------------------------
+
+/** the reason a lifecycle act records: required to disable, 10 to 1000 characters (the database CHECK repeats it) */
+export const lifecycleReasonSchema = z.string().trim().min(10).max(1000);
+
+/** `POST /v1/connectors/:connectorId/enabled` and `POST /v1/servers/:serverId/enabled`. Disabling needs a reason;
+ * enabling again is a relaxation, answered with a settings_relax step-up, and takes an optional reason. */
+export const setIntegrationEnabledSchema = z
+  .object({ enabled: z.boolean(), reason: lifecycleReasonSchema.optional() })
+  .strict()
+  .superRefine((body, ctx) => {
+    if (!body.enabled && body.reason === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a reason is required to disable", path: ["reason"] });
+    }
+  });
+
+/** `PATCH /v1/git/connections/:name`: only the base URL. The name and provider are fixed (stages name the
+ * connection). `null` returns to the provider default. A CHANGED base URL moves the token to another host, so it
+ * needs `token` (the new host's token, replacing the stored one) and a step-up (ADR-0207, review of #605). */
+export const updateGitConnectionSchema = z
+  .object({ baseUrl: z.string().url().max(2048).nullable(), token: z.string().min(1).max(512).optional() })
+  .strict();
+
+/** `POST /v1/git/connections/:name/token` and `POST /v1/pm/connections/:name/token`: replaced in place, never returned */
+export const replaceConnectionTokenSchema = z.object({ token: z.string().min(1).max(512) }).strict();
+
+/** `PATCH /v1/pm/connections/:name`: the name (part of the webhook address) and the provider are fixed */
+export const updatePmConnectionSchema = z
+  .object({
+    project: z.string().min(1).max(256).optional(),
+    baseUrl: z.string().url().max(2048).nullable().optional(),
+    /** jira only, as on create: 2 or 3, or null for the provider default */
+    apiVersion: z.coerce.number().int().nullable().optional(),
+    driftResolution: z.enum(["manual", "prefer_pm", "prefer_regulait"]).optional(),
+    /** required with a changed `baseUrl`: the new host's token, replacing the stored one (ADR-0207, review of #605) */
+    token: z.string().min(1).max(512).optional(),
+  })
+  .strict()
+  .superRefine((body, ctx) => {
+    if (body.apiVersion != null && body.apiVersion !== 2 && body.apiVersion !== 3) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "apiVersion must be 2 or 3", path: ["apiVersion"] });
+    }
+  });
+
+/** `POST /v1/pm/connections/:name/webhook-secret/rotate`. The previous secret keeps working for 24 hours unless
+ * `immediate`; a second rotation inside that window is refused unless `immediate`. */
+export const rotatePmWebhookSecretSchema = z.object({ immediate: z.boolean().optional() }).strict();
+
 // EPIC-06 §4 decision records. The decision maker is the authenticated
 // caller — never a body field.
 export const createDecisionSchema = z.object({
@@ -2098,6 +2149,10 @@ export const upsertComplianceProfileSchema = z.object({
    * project carrying its tag (L1 to L3, never L0). MAX-composed, so it can only raise the requirement; lowering or
    * dropping it on an existing profile is a loosening (step-up, rule-loosening.ts). */
   minIsolationClass: z.enum(["hardened_container", "user_space_kernel", "microvm"]).nullable().optional(),
+  /** ADR-0045 amendment 2026-11-14: the framework REQUIRES model risk management. OR-composed across a project's profiles; true makes the
+   * ADR-0045 dispatch gate enforce on the project even where the org relaxed `mrmEnforced`. Clearing it on an
+   * existing profile is a loosening (step-up, rule-loosening.ts). */
+  mrmRequired: z.boolean().nullable().optional(),
 });
 
 // PILLAR 3 (§8.2): the governed infrastructure-operations layer.
@@ -4426,7 +4481,6 @@ export {
   builderUpdateThreadSchema,
   builderUsageQuerySchema,
   nextScheduleRun,
-  parseSkillMarkdown,
   type BuilderAgentColor,
   type BuilderBundle,
   type BuilderCadenceValue,
@@ -4954,6 +5008,8 @@ export * from "./eval-datasets/injection-baselines.js";
 export * from "./public-url.js";
 // ADR-0195 SD1: the v2 shadow-AI catalogue (v1 frozen inside it), seed rows, and the pure repo analyser
 export * from "./shadow-catalog-v2.js";
+// L10 (2026-11-14): v3 = v2 unchanged + vendor-verified PatronAI-derived hosts and the S17 Copilot re-check
+export * from "./shadow-catalog-v3.js";
 export * from "./repo-manifests.js";
 export * from "./repo-analysis.js";
 // ADR-0195 SD0: shadow-AI active discovery (sources, credentials, runs, evidence kinds)

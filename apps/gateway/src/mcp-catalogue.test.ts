@@ -232,6 +232,14 @@ describe("ADR-0256 community list and cross-source dedupe", () => {
     expect(fake.hits.length).toBe(hitsBefore);
   });
 
+  it("refuses to delete a refreshed source: its snapshots are evidence, so it stays, disabled", async () => {
+    await db.update(mcpRegistries).set({ enabled: false }).where(eq(mcpRegistries.id, community.id));
+    const res = await app.inject({ method: "DELETE", url: `/v1/mcp-registries/${community.id}`, headers: AUTH });
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ error: "mcp_registry_has_snapshots" });
+    expect(await db.select().from(mcpRegistries).where(eq(mcpRegistries.id, community.id))).toHaveLength(1);
+  });
+
   it("keeps snapshots append-only: UPDATE, DELETE and TRUNCATE are refused", async () => {
     await expect(db.execute(sql`update mcp_catalogue_snapshots set entry_count = 0`)).rejects.toThrow();
     await expect(db.execute(sql`delete from mcp_catalogue_snapshots`)).rejects.toThrow();

@@ -160,6 +160,7 @@ import {
   type ConversationContext,
 } from "./conversations.js";
 import { ownerChangeGate, resolveRegistrationOwner, withOwnership } from "./ownership.js";
+import { withLifecycle } from "./integration-lifecycle.js";
 import { CHANGED_CONCURRENTLY, checkStepUp, grantMintStepUp, requireStepUp } from "./step-up.js";
 import { governedModelGate } from "./governed-core.js";
 import { resolveDispatchUsage } from "./usage-extractors.js";
@@ -5244,7 +5245,7 @@ export function registerAgentConnectorRoutes(
     return reply.status(201).send(row);
   });
 
-  app.get("/v1/connectors", async () => ({ connectors: await withOwnership(db, await db.select().from(connectors)) }));
+  app.get("/v1/connectors", async () => ({ connectors: await withLifecycle(db, await withOwnership(db, await db.select().from(connectors))) }));
 
   // --- connector credentials (admin-only via the global gate) ---
   // One platform credential per connector, encrypted at rest, never returned —

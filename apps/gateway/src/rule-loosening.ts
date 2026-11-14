@@ -173,6 +173,12 @@ export const COMPLIANCE_PROFILE_LOOSENING: Classified<typeof complianceProfiles.
     looser: rankLowered({ hardened_container: 1, user_space_kernel: 2, microvm: 3 }),
     why: "a lower (or no) isolation class floor",
   },
+  // ADR-0045 amendment 2026-11-14: true -> false/null stops the framework forcing the ADR-0045 dispatch gate on its projects
+  mrmRequired: {
+    kind: "compare",
+    looser: (b, a) => b === true && a !== true,
+    why: "the framework no longer requires model risk management sign-off",
+  },
 };
 
 const BY_KIND: Readonly<Record<string, Readonly<Record<string, FieldClass>>>> = {

@@ -19,6 +19,7 @@ import { fmtAt } from "../../../api/format";
 import { Badge, Button, Card, CodeBlock, EmptyState, Field, Input, Table, type Tone } from "../../../ui/kit";
 import { QueryGate, RemoveButton, useAction } from "../adminKit";
 import { FeedbackDetail, FeedbackList } from "../../feedback/feedbackKit";
+import { useSession } from "../../../session/SessionContext";
 import v from "../../views.module.css";
 
 interface LinkRow {
@@ -82,6 +83,8 @@ function SignedLinks(props: { useCaseId: string }) {
   const [days, setDays] = useState("14");
   const [uses, setUses] = useState("50");
   const [minted, setMinted] = useState<{ url: string; expiresAt: string } | null>(null);
+  // creating and revoking links stays with admins on this record (#745 review); the owner reads the list
+  const isAdmin = Boolean(useSession().auth?.isAdmin);
   const q = useQuery({
     queryKey: ["feedback", "links", props.useCaseId],
     queryFn: () => api.get<{ enabled: boolean; links: LinkRow[] }>(`/v1/use-cases/${props.useCaseId}/feedback-links`),
@@ -127,7 +130,8 @@ function SignedLinks(props: { useCaseId: string }) {
                 admin can turn them on in the <Link to="/feedback">feedback settings</Link>.
               </p>
             )}
-            {q.data.enabled && (
+            {q.data.enabled && !isAdmin && <p className={v.faint}>Only an admin creates or revokes links on this record.</p>}
+            {q.data.enabled && isAdmin && (
               <div className={v.row}>
                 <Field label="Days valid (1–30)">
                   <Input type="number" min={1} max={30} value={days} onChange={(e) => setDays(e.target.value)} />
@@ -165,7 +169,7 @@ function SignedLinks(props: { useCaseId: string }) {
                   header: "",
                   srHeader: "Actions",
                   render: (l) =>
-                    l.state === "revoked" ? null : (
+                    l.state === "revoked" || !isAdmin ? null : (
                       <RemoveButton
                         label="Revoke"
                         what={`the link created ${fmtAt(l.createdAt)}`}

@@ -86,7 +86,7 @@ const subject = (i: number, attributed: boolean) => ({
   imported: { basis: "imported", usd: 80 + i * 4, lines: 4 + i, byCurrency: [{ currency: "USD", amount: 80 + i * 4, lines: 4 + i }], byVendor: [{ vendor: "acme-ai", currency: "USD", amount: 80 + i * 4, lines: 4 + i }], byBillingKind: [{ billingKind: "seat", currency: "USD", amount: 80 + i * 4, lines: 4 + i }], usdNote: null },
   coverage: "Metered and imported figures are shown side by side and never added.",
 });
-const CONSOLIDATED = {
+export const CONSOLIDATED = {
   window: { from: at(720), to: at(0) },
   groupedBy: "user",
   subjects: [subject(0, true), subject(1, true), subject(2, true), subject(3, true), subject(4, false)],

@@ -129,7 +129,8 @@ path.
 
 ## Consequences
 
-- A refreshed source can no longer be deleted (its snapshots restrict it). There is no delete route; the ADR-0101 test
+- A refreshed source can no longer be deleted (its snapshots restrict it). `DELETE /v1/mcp-registries/:registryId`
+  answers 409 `mcp_registry_has_snapshots` for one; a source never refreshed can still be deleted. The ADR-0101 test
   suite now disables its sources instead of deleting them.
 - `catalogue_item_id` is NULL for a row synced before this migration until its source is refreshed again; nothing is backfilled.
   The deduped view only lists linked rows.

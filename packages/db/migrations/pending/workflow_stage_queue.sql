@@ -510,12 +510,32 @@ SELECT regulait_queue.create_queue(
   '{"policy":"exclusive","retryLimit":0,"expireInSeconds":900,"retentionSeconds":1209600,"deleteAfterSeconds":604800}'::jsonb
 );
 
+-- 4. Least privilege for `regulait_app`: what sending, working and supervising jobs need, nothing that creates,
+--    deletes or reconfigures a queue or the schema. The jobs (job and its partitions) are read and written; the queue
+--    and version rows are read, with UPDATE only on pg-boss's own bookkeeping columns (counts, timestamps), never a
+--    policy, retry setting, table name or the version itself; the worker registers its instance. Functions are not
+--    executable by PUBLIC; the app may run only `job_now()`. Default privileges cover a job partition a later
+--    migration creates (create_queue with partition, run by the migrator).
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA regulait_queue FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES IN SCHEMA regulait_queue REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'regulait_app') THEN
     GRANT USAGE ON SCHEMA regulait_queue TO regulait_app;
-    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA regulait_queue TO regulait_app;
-    GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA regulait_queue TO regulait_app;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON regulait_queue.job, regulait_queue.job_common TO regulait_app;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON regulait_queue.instance TO regulait_app;
+    GRANT SELECT, DELETE ON regulait_queue.job_dependency TO regulait_app;
+    GRANT SELECT ON regulait_queue.queue, regulait_queue.version, regulait_queue.bam TO regulait_app;
+    GRANT UPDATE (
+      deferred_count, blocked_count, queued_count, ready_count, warning_queued, active_count, failed_count, total_count,
+      retained_count, retained_on, created_delta, completed_delta, failed_delta, delta_on, delta_seconds, wait_bins,
+      run_bins, ready_oldest_seconds, ready_history, heartbeat_seconds, singletons_active, monitor_claim_on, monitor_on,
+      maintain_on, updated_on
+    ) ON regulait_queue.queue TO regulait_app;
+    GRANT UPDATE (cron_on, bam_on, flow_on, reindex_on, monitor_backoff_on) ON regulait_queue.version TO regulait_app;
+    GRANT EXECUTE ON FUNCTION regulait_queue.job_now() TO regulait_app;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA regulait_queue GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO regulait_app;
   END IF;
 END
 $$;

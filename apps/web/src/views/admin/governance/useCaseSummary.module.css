@@ -1,0 +1,255 @@
+/* The use-case DECISION SUMMARY (owner, #453, 2026-11-07; design thread #743). Layout only: every colour is one of
+   today's Aurora tokens, so the summary reads the same as the rest of the record in light and dark. */
+
+/* ---- the decision panel in the record's dark band (status only) ---- */
+.decision {
+  min-width: 0;
+  padding: var(--s1-5) var(--s2);
+  border: 1px solid var(--rg-dark-line);
+  border-radius: var(--rg-r-card);
+  background: var(--rg-dark-raised);
+  color: var(--rg-dark-ink);
+}
+.decisionCaption {
+  margin: 0;
+  color: var(--rg-dark-muted);
+  font-size: var(--text-xs, 0.75rem);
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.decisionTitle {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  margin: var(--s0-5) 0 0;
+  font-size: var(--text-lg, 1.05rem);
+  font-weight: 650;
+}
+.decisionTitle::before {
+  content: "";
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--rg-dark-muted);
+}
+.decision-ok::before { background: var(--rg-positive); }
+.decision-info::before { background: var(--rg-signal-400); }
+.decision-warn::before { background: var(--rg-medium); }
+.decision-danger::before { background: var(--rg-critical); }
+.decisionMeta {
+  margin: var(--s0-5) 0 0;
+  color: var(--rg-dark-muted);
+  font-size: var(--text-sm);
+}
+.decisionLink {
+  display: inline-block;
+  margin-top: var(--s1);
+  color: var(--rg-dark-ink);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-color: var(--rg-signal-400);
+  text-underline-offset: 3px;
+}
+.decisionLink:focus-visible {
+  outline: 2px solid var(--rg-signal-400);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+.bandSide {
+  flex: none;
+  width: min(100%, 22rem);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--s1-5);
+  min-width: 0;
+}
+
+/* ---- the four figures ---- */
+.figures {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr));
+  gap: var(--s2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.figure {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s0-5);
+  min-width: 0;
+  padding: var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  /* the kit Card's own surface, so a figure reads as a card in both themes */
+  background: var(--rg-glass);
+}
+.figureHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s1);
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.figureValue {
+  margin: 0;
+  color: var(--rg-ink);
+  font-size: var(--text-2xl);
+  font-weight: 650;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+.figureMuted {
+  color: var(--text-dim);
+  font-size: var(--text-lg, 1.05rem);
+}
+.figureDetail {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+
+/* ---- the one Next action ---- */
+.next {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s1-5) var(--s3);
+  padding: var(--s2) var(--s2-5);
+  border: 1px solid var(--rg-signal);
+  border-radius: var(--rg-r-card);
+  background: var(--rg-signal-tint);
+  color: var(--rg-ink);
+}
+.nextText {
+  flex: 1 1 18rem;
+  min-width: 0;
+}
+.nextTitle {
+  margin: 0;
+  font-weight: 650;
+}
+.nextBody {
+  margin: var(--s0-5) 0 0;
+  color: var(--rg-ink-body);
+  font-size: var(--text-sm);
+}
+
+/* ---- the cards: two columns and a side column; one column on a phone ---- */
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: var(--s2);
+  align-items: start;
+}
+.main {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+  gap: var(--s2);
+  align-items: start;
+}
+.side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  min-width: 0;
+}
+@media (max-width: 1100px) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.reason {
+  margin: 0 0 var(--s1-5);
+  color: var(--rg-ink-body);
+}
+.checks,
+.list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.checks li,
+.list li {
+  display: flex;
+  gap: var(--s1);
+  align-items: baseline;
+  padding: var(--s1) 0;
+  border-top: 1px solid var(--border);
+}
+.checks li:first-child,
+.list li:first-child {
+  border-top: 0;
+}
+.mark {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 1.3em;
+  height: 1.3em;
+  border-radius: 50%;
+  font-size: var(--text-xs, 0.75rem);
+  font-weight: 700;
+}
+.markOk {
+  background: var(--rg-positive-tint);
+  color: var(--rg-positive-deep);
+}
+.markOpen {
+  background: var(--rg-medium-tint);
+  color: var(--rg-medium-deep);
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: minmax(6rem, 2fr) minmax(0, 3fr);
+  margin: 0;
+}
+.facts dt,
+.facts dd {
+  margin: 0;
+  padding: var(--s1) 0;
+  border-top: 1px solid var(--border);
+}
+.facts dt {
+  color: var(--text-dim);
+}
+.facts dt:first-of-type,
+.facts dt:first-of-type + dd {
+  border-top: 0;
+}
+.facts dd {
+  overflow-wrap: anywhere;
+}
+
+.condGroup {
+  margin: var(--s1-5) 0 var(--s0-5);
+  color: var(--text-dim);
+  font-size: var(--text-xs, 0.75rem);
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.condGroup:first-child {
+  margin-top: 0;
+}
+.list li.cond {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s0-5);
+}
+.condMeta {
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+.related a {
+  font-weight: 600;
+}
