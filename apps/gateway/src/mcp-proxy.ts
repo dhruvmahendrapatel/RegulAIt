@@ -536,7 +536,8 @@ export function signatureRecheckDenial(approvalId: string): Decision {
  * audit row then sits on the connector instead of an MCP tool.
  */
 export async function supersedeStaleConsent(
-  db: Db,
+  // a handle or a transaction: the model-call hold and replay retire stale consents inside their own transaction
+  db: Pick<Db, "update" | "insert">,
   rows: readonly RetiredApproval[],
   ctx:
     | { userId: string; serverId: string; toolName: string; projectId: string | null; connector?: undefined; agent?: undefined }

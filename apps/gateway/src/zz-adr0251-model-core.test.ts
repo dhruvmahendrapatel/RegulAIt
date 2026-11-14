@@ -31,6 +31,9 @@ import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { relaxApprovalSigningForTest } from "./testing/approval-signing-posture.js";
 import { AGENT_HEADER, loadInterceptionSettings, PROJECT_HEADER } from "./compat-core.js";
 import { governedModelGate } from "./governed-core.js";
+import { spendModelConsents, type ModelConsentState } from "./model-call-consent.js";
+import { sql } from "@regulait/db";
+import type { GovernedResourceDecision } from "@regulait/policy-kernel";
 import { checkModelRateLimit } from "./model-rate-limits.js";
 
 let restoreGates: () => Promise<void> = async () => {};
@@ -200,6 +203,140 @@ describe("ADR-0251 P-01: the model-call approval queue and replay", () => {
       expect(rows.map((x) => x.status)).toEqual(["consumed", "consumed"]);
     } finally {
       await k.db.delete(resourceApprovalRules).where(inArray(resourceApprovalRules.id, [r1.id, r2.id]));
+    }
+  });
+
+  // review #807 item 1: a multi-approver replay is ALL OR NOTHING
+  it("a replay whose second consent fails spends neither: the first stays approved, the second is retired, the refusal is audited", async () => {
+    const second = await k.person("approver-atomic");
+    const r1 = await rule(caller, approver.id);
+    const r2 = await rule(caller, second.id);
+    try {
+      const input = `atomic-${k.RUN}`;
+      const before = await usage(caller.id, MODEL);
+      const a1 = (await ask(caller, input)).json().approvalId as string;
+      const row1 = (await k.db.select().from(approvals).where(eq(approvals.id, a1)))[0]!;
+      const p1 = row1.approverUserId === approver.id ? approver : second;
+      expect((await decide(a1, p1)).statusCode).toBeLessThan(300);
+      const a2 = (await ask(caller, input)).json().approvalId as string;
+      const row2 = (await k.db.select().from(approvals).where(eq(approvals.id, a2)))[0]!;
+      expect((await decide(a2, p1 === approver ? second : approver)).statusCode).toBeLessThan(300);
+      const consentOf = (r: typeof row1) => ({
+        approverUserId: r.approverUserId!,
+        ruleIds: [],
+        argumentsDigest: r.argumentsDigest!,
+        argumentsPreview: null,
+        contextDigest: r.contextDigest!,
+        approvedApprovalId: r.id,
+        retired: [],
+      });
+      // both consents were read as fresh (the state the gate decided on) ...
+      const state: ModelConsentState = { bindings: [consentOf(row1), consentOf(row2)], allConsented: true, missing: null };
+      const decision = { effect: "allow", ruleId: "agent-entitlement", reason: "", ruleChain: [], matchedApprovalRuleIds: [r1.id, r2.id] } as unknown as GovernedResourceDecision;
+      const target = { agentId: MODEL, agentName: "held", provider: null, model: null };
+      const spend = () => spendModelConsents(k.db, { userId: caller.id, target, projectId: caller.projectId, mode: "chat", state, decision });
+      // ... then the second lapses before the spend
+      await k.db.update(approvals).set({ expiresAt: new Date(Date.now() - 1_000) }).where(eq(approvals.id, a2));
+      const refused = await spend();
+      expect(refused).toMatchObject({ status: 409, error: "approval_expired", approvalId: a2 });
+      const after = await k.db.select().from(approvals).where(inArray(approvals.id, [a1, a2]));
+      expect(Object.fromEntries(after.map((x) => [x.id, x.status]))).toEqual({ [a1]: "approved", [a2]: "superseded" });
+      // the refusal's decision row was written with the retirement, naming the failing consent
+      const [deny] = await k.db.select().from(auditLog).where(eq(auditLog.id, refused!.auditLogId!));
+      expect(deny).toMatchObject({ effect: "deny", ruleId: "approval-expired" });
+      expect(deny!.detail).toMatchObject({ approvalId: a2 });
+      expect(await usage(caller.id, MODEL)).toBe(before);
+      // a lost race spends nothing either: the other consent was already used
+      await k.db.update(approvals).set({ status: "consumed" }).where(eq(approvals.id, a2));
+      const raced = await spend();
+      expect(raced).toMatchObject({ status: 409, error: "approval_consumed_race", approvalId: a2 });
+      expect((await k.db.select().from(approvals).where(eq(approvals.id, a1)))[0]).toMatchObject({ status: "approved" });
+      // the surviving consent still counts: the next identical call asks only the approver whose consent is missing
+      const next = await ask(caller, input);
+      expect(next.statusCode, next.body).toBe(202);
+      const a3 = next.json().approvalId as string;
+      expect((await k.db.select().from(approvals).where(eq(approvals.id, a3)))[0]!.approverUserId).toBe(row2.approverUserId);
+    } finally {
+      await k.db.delete(resourceApprovalRules).where(inArray(resourceApprovalRules.id, [r1.id, r2.id]));
+    }
+  });
+
+  // review #807 item 2: the hold's queue row and its decision row commit together
+  it("a hold whose decision row cannot be written queues nothing (no approvable row without its audit)", async () => {
+    const r = await rule(caller, approver.id);
+    const fn = `t807_reject_hold_${k.RUN.replace(/[^a-z0-9]/g, "")}`;
+    try {
+      await k.db.execute(
+        sql.raw(`create function ${fn}() returns trigger language plpgsql as $$
+          begin
+            if new.effect = 'require_approval' and new.object_id = '${MODEL}' then raise exception 't807 injected audit failure'; end if;
+            return new;
+          end $$`),
+      );
+      await k.db.execute(sql.raw(`create trigger ${fn} before insert on audit_log for each row execute function ${fn}()`));
+      const input = `hold-atomic-${k.RUN}`;
+      const res = await ask(caller, input);
+      expect(res.statusCode, res.body).toBe(503);
+      const leaked = await k.db
+        .select({ id: approvals.id })
+        .from(approvals)
+        .where(and(eq(approvals.userId, caller.id), eq(approvals.agentId, MODEL), sql`${approvals.argumentsPreview}::text like ${`%${input}%`}`));
+      expect(leaked).toEqual([]);
+      // the same call, once the audit write works, IS queued and found by that query (so the check above is not vacuous)
+      await k.db.execute(sql.raw(`drop trigger if exists ${fn} on audit_log`));
+      const held = await ask(caller, input);
+      expect(held.statusCode, held.body).toBe(202);
+      const found = await k.db
+        .select({ id: approvals.id })
+        .from(approvals)
+        .where(and(eq(approvals.userId, caller.id), eq(approvals.agentId, MODEL), sql`${approvals.argumentsPreview}::text like ${`%${input}%`}`));
+      expect(found.map((f) => f.id)).toEqual([held.json().approvalId]);
+    } finally {
+      await k.db.execute(sql.raw(`drop trigger if exists ${fn} on audit_log`));
+      await k.db.execute(sql.raw(`drop function if exists ${fn}()`));
+      await k.db.delete(resourceApprovalRules).where(eq(resourceApprovalRules.id, r.id));
+    }
+  });
+
+  // review #807 item 3: identical calls at the same moment share one pending row
+  it("concurrent identical calls are held under ONE pending approval", async () => {
+    const r = await rule(caller, approver.id);
+    try {
+      const input = `concurrent-${k.RUN}`;
+      const results = await Promise.all(Array.from({ length: 6 }, () => ask(caller, input)));
+      for (const res of results) expect(res.statusCode, res.body).toBe(202);
+      const ids = new Set(results.map((res) => res.json().approvalId as string));
+      expect(ids.size).toBe(1);
+      const pending = await k.db
+        .select({ id: approvals.id })
+        .from(approvals)
+        .where(and(eq(approvals.userId, caller.id), eq(approvals.agentId, MODEL), eq(approvals.status, "pending"), eq(approvals.id, [...ids][0]!)));
+      expect(pending).toHaveLength(1);
+    } finally {
+      await k.db.delete(resourceApprovalRules).where(eq(resourceApprovalRules.id, r.id));
+    }
+  });
+
+  // security review #807 (non-blocking): separation of duties, pinned on the model-call kind
+  it("a requester named as the approver of their own call can never release it", async () => {
+    const r = await rule(caller, caller.id);
+    try {
+      const input = `sod-${k.RUN}`;
+      const before = await usage(caller.id, MODEL);
+      const held = await ask(caller, input);
+      if (held.statusCode === 202) {
+        const approvalId = held.json().approvalId as string;
+        expect((await decide(approvalId, caller)).statusCode).toBeGreaterThanOrEqual(400);
+        expect((await k.db.select().from(approvals).where(eq(approvals.id, approvalId)))[0]).toMatchObject({ status: "pending" });
+      } else {
+        // a pool that can only be the caller is unsatisfiable: refused and audited at queue time, nothing queued
+        expect(held.statusCode, held.body).toBe(403);
+        expect(held.json()).toMatchObject({ error: "approval_quorum_unsatisfiable" });
+      }
+      expect((await ask(caller, input)).statusCode).not.toBe(200);
+      expect(await usage(caller.id, MODEL)).toBe(before);
+    } finally {
+      await k.db.delete(resourceApprovalRules).where(eq(resourceApprovalRules.id, r.id));
     }
   });
 

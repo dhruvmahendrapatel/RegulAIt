@@ -324,3 +324,31 @@ Supersedes the interim in slice 2 and in "Consequences" ("approval rules on mode
 - **Not in this slice.** The approvals screen's kind filter (`ApprovalsAdminPage.tsx` mirrors the kind list) does not
   list `model_call` yet; the rows are in the queue and decidable, only not filterable by kind. Tracked for the UI
   builder on #453.
+
+#### Review #807 (2026-11-14)
+
+- **The replay is all or nothing (item 1).** `spendModelConsents` runs ONE transaction: it holds the policy-epoch row
+  shared, locks every consent row `FOR UPDATE` in id order (two replays cannot deadlock), checks each one (still
+  approved, unexpired on the database clock, the same payload and context, the signature recheck) and only then marks
+  them all consumed. If any check fails, no consent is spent: the failing ones are superseded and audited, the others
+  stay approved for the next identical call (which then asks only the approver whose consent is missing), and the
+  refusal's `deny` decision row is written in the same transaction.
+- **The hold is atomic (item 2).** `queueModelConsent` retires stale consents, queues (or reuses) the row and writes
+  the `require_approval` decision row in ONE transaction, so an approvable row never exists without the decision that
+  raised it. An unsatisfiable quorum is audited in that transaction too.
+- **One pending row per identical call (item 3).** The transaction takes an advisory lock on (caller, model, payload
+  digest, context digest) around the reuse lookup and the insert.
+- **What the binding covers (item 4).** Every field the dispatch core sends a provider (`GovernedDispatchArgs`) is in
+  `ModelInvocation`. No dispatch path carries sampling or stop parameters: the compat surfaces accept `temperature`
+  and drop it (`COMPAT_IGNORED_FIELDS`, disclosed on the response and the audit row), and top-p, stop sequences and
+  seed are not accepted at all. A field added to the dispatch later must join `ModelInvocation` in the same change.
+- **Rule versions (item 5).** The context digest binds the matched rule ids with `activeVersionId: null`, because
+  resource approval rules are not versioned. When they are, bind the active version here as the MCP path does.
+- **Consent spent before a later refusal (security review, non-blocking).** The consent is spent in the governed gate,
+  before the virtual-key ceiling and the budget gates. A replay that one of those then refuses has used its consent
+  and must be approved again. This fails closed (nothing runs, nothing is billed); moving those checks ahead of the
+  spend is left for a later change, so the gate keeps one place in the dispatch order.
+- **Tests added.** `zz-adr0251-model-core.test.ts`: a second consent that lapses before the spend (and, separately,
+  one already used by another call) leaves the first approved and writes the refusal; a hold whose decision row
+  cannot be written (injected audit failure) queues nothing; six identical concurrent calls share one pending row;
+  a requester named as the approver of their own call can never release it.

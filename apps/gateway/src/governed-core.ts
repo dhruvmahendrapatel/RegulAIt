@@ -350,29 +350,8 @@ export async function governedModelGate(
     if (decision.effect === "allow") {
       // THE REPLAY: every required consent is spent once, before any provider work
       if (!consent?.allConsented) return null;
-      const refused = await spendModelConsents(db, { userId: args.userId, target, projectId: args.projectId, mode: args.mode, state: consent });
-      if (!refused) return null;
-      const [row] = await db
-        .insert(auditLog)
-        .values({
-          userId: args.userId,
-          objectType: "agent",
-          objectId: args.agentId,
-          detail: {
-            phase: "governed-core",
-            mode: args.mode,
-            approvalId: refused.approvalId ?? null,
-            ...(args.projectId ? { projectId: args.projectId } : {}),
-            matchedApprovalRuleIds: decision.matchedApprovalRuleIds,
-            receiptClass: "decision",
-          },
-          effect: "deny",
-          ruleId: refused.ruleId,
-          ruleChain: decision.ruleChain,
-          reason: refused.detail,
-        })
-        .returning({ id: auditLog.id });
-      return { ...refused, auditLogId: row?.id ?? null };
+      // all or nothing, and a refusal is audited in the same transaction as any consent it retires
+      return await spendModelConsents(db, { userId: args.userId, target, projectId: args.projectId, mode: args.mode, state: consent, decision });
     }
     if (decision.effect === "require_approval" && consent?.missing) {
       // THE HOLD: the approver whose consent is still missing is asked (each named approver in turn)
