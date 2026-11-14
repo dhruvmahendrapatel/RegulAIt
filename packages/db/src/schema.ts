@@ -1128,8 +1128,56 @@ export const mcpRegistries = pgTable("mcp_registries", {
     enum: ["ok", "failed", "refused", "skipped"],
   }),
   lastSyncDetail: jsonb("last_sync_detail"),
+  /** ADR-0256 (the `mcp_catalogue_seed` migration): a curated registry, or a community list whose entries are UNVETTED */
+  listingKind: text("listing_kind", { enum: ["registry", "community"] }).notNull().default("registry"),
+  /** ADR-0256: refreshed by an egress-guarded pull, or only by a signed offline bundle (never dialled) */
+  delivery: text("delivery", { enum: ["pull", "offline_bundle"] }).notNull().default("pull"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * ADR-0256 (the `mcp_catalogue_seed` migration) — one server as the catalogue understands it, across sources. The dedupe key is
+ * `repo:github.com/owner/repo` when a source names a GitHub repository, else `name:<upstream name>`. Each source keeps
+ * its own `mcp_registry_entries` row pointing here, so provenance is per source and never merged away.
+ */
+export const mcpCatalogueItems = pgTable(
+  "mcp_catalogue_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    dedupeKey: text("dedupe_key").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("mcp_catalogue_items_dedupe_key_uq").on(t.dedupeKey)],
+);
+
+/**
+ * ADR-0256 (the `mcp_catalogue_seed` migration) — APPEND-ONLY evidence of one successful refresh of a source: what it asserted (count and
+ * content digest), when, by whom and, for an offline bundle, which trusted key signed it. UPDATE, DELETE and TRUNCATE
+ * are refused by triggers.
+ */
+export const mcpCatalogueSnapshots = pgTable(
+  "mcp_catalogue_snapshots",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    registryId: uuid("registry_id")
+      .notNull()
+      .references(() => mcpRegistries.id, { onDelete: "restrict" }),
+    /** point-in-time copy of the source's listing kind when refreshed (evidence exception, ADR-0200 addendum) */
+    listingKind: text("listing_kind", { enum: ["registry", "community"] }).notNull(),
+    /** point-in-time copy of the source's delivery when refreshed (evidence exception, ADR-0200 addendum) */
+    delivery: text("delivery", { enum: ["pull", "offline_bundle"] }).notNull(),
+    /** the admin who triggered it, NULL for the scheduler; evidence, so deliberately no foreign key */
+    actorUserId: uuid("actor_user_id"),
+    entryCount: integer("entry_count").notNull(),
+    truncated: boolean("truncated").notNull(),
+    contentDigest: text("content_digest").notNull(),
+    bundleKeyId: text("bundle_key_id"),
+    bundleDigest: text("bundle_digest"),
+    bundleCreatedAt: timestamp("bundle_created_at", { withTimezone: true }),
+    takenAt: timestamp("taken_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("mcp_catalogue_snapshots_registry_idx").on(t.registryId, t.takenAt)],
+);
 
 /**
  * ADR-0101 — THE CATALOGUE. The only table a sync writes.
@@ -1152,6 +1200,8 @@ export const mcpRegistryEntries = pgTable(
     title: text("title"),
     description: text("description"),
     repositoryUrl: text("repository_url"),
+    /** ADR-0256: the server's folder inside `repository_url` (a monorepo), normalised; part of the dedupe key */
+    repositorySubfolder: text("repository_subfolder"),
     websiteUrl: text("website_url"),
     kind: text("kind", { enum: ["remote", "catalogue_only"] }).notNull(),
     remoteUrl: text("remote_url"),
@@ -1180,9 +1230,18 @@ export const mcpRegistryEntries = pgTable(
      * this entry — "beyond the page cap" and "gone" are different facts. It
      * never deletes, disables or un-grants the local server. */
     missingSince: timestamp("missing_since", { withTimezone: true }),
+    /** ADR-0256 (the `mcp_catalogue_seed` migration): the deduped item this source row describes; NULL only for a row from before that migration,
+     * until its source is next refreshed */
+    catalogueItemId: uuid("catalogue_item_id").references(() => mcpCatalogueItems.id, { onDelete: "restrict" }),
+    /** ADR-0256: what this source's listing says about payment (`x402` or `paid`), a flag for an operator */
+    paidSignal: text("paid_signal", { enum: ["x402", "paid"] }),
+    /** ADR-0256: the refresh that last asserted this row (its provenance) */
+    lastSnapshotId: uuid("last_snapshot_id").references(() => mcpCatalogueSnapshots.id, { onDelete: "restrict" }),
   },
   (t) => [
     uniqueIndex("mcp_registry_entries_registry_name_uq").on(t.registryId, t.upstreamName),
+    index("mcp_registry_entries_item_idx").on(t.catalogueItemId),
+    index("mcp_registry_entries_snapshot_idx").on(t.lastSnapshotId),
     index("mcp_registry_entries_kind_idx").on(t.registryId, t.kind),
     index("mcp_registry_entries_server_idx").on(t.serverId),
   ],
