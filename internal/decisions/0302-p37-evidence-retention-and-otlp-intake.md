@@ -38,9 +38,40 @@ The links in `third_party_ingest_record_findings` go with their record (existing
 themselves follow endpoint retention, as before. The batch audit row a record names may already be pruned by the
 audit prune under the same floor; `audit_log` carries no foreign keys by design.
 
-## Decision 2: OTLP intake (slice 2b)
+## Decision 2: OTLP/HTTP logs intake (slice 2b)
 
-Built in a follow-up PR under this ADR; its decision is recorded there.
+DefenseClaw's documented OTLP exporter speaks `grpc` or `http/protobuf` (ADR-0261). We accept **OTLP/HTTP logs**, in
+protobuf or OTLP/JSON, on `POST /v1/third-party-ingest/defenseclaw/otlp/v1/logs`. The exporter's endpoint is set to
+`.../defenseclaw/otlp` and the standard signal path is appended. gRPC is not offered: it would need an HTTP/2 listener
+of its own.
+
+1. **The same pipeline, not a second one.** The OTLP route shares the JSONL route's handler: the in-route `rgti_`
+   token, source on, kind check, hourly rate limit, the 1 MiB body cap, the 512-record cap, the database-clock replay
+   window, the `(source, record_id)` dedup (across both routes), device pseudonyms, findings and the batch audit row
+   (now with `wire: jsonl | otlp`). Only the decoding and the success response differ.
+2. **Decode, then hand every record to the JSONL parser.** `otlpLogsRequestToJsonl` (`@regulait/shared`, pure) turns
+   each log record into one JSONL line:
+   - its attributes, under the same documented flat or dotted names;
+   - `host.name` from the resource when the record has none;
+   - `timestamp` from `timeUnixNano` (else `observedTimeUnixNano`);
+   - `severity` from `severityText` when it is one of the documented values.
+
+   The JSONL schema then keeps only the allow-listed fields. The record **body is never read**: it is where a log
+   carries prompts and payloads. Map and bytes attribute values are dropped. A record's `record_sha256` is over this
+   canonical line, not the wire bytes.
+3. **Open source first (ADR-0176).** Decoding is `protobufjs` 8.8.1 (BSD-3-Clause, pinned) over the OpenTelemetry
+   project's own `.proto` files (`opentelemetry-proto` v1.9.0, Apache-2.0), vendored verbatim as strings so nothing is
+   fetched at run time. `@opentelemetry/otlp-transformer` was checked: it exports serializers and response readers,
+   not a request decoder.
+4. **The OTLP response contract.** A success answers an `ExportLogsServiceResponse` in the request's encoding. When
+   any record was rejected it carries `partialSuccess.rejectedLogRecords`, and its `errorMessage` lists the first
+   twenty `position:code` pairs (codes only, never content). Refusals keep the JSONL route's status codes: 401/403/413/415/400
+   are not retried by an exporter, while 429 (with `Retry-After`) and 503 are retried.
+5. **Each route takes its own encodings.** The OTLP route refuses anything but `application/x-protobuf` and
+   `application/json` (415). The JSONL route refuses `application/x-protobuf` and names the OTLP path.
+
+The attribute mapping is written from the docs, like ADR-0261's JSONL mapping, and is pinned by synthetic exports.
+Checking it against a real captured DefenseClaw OTLP export before a customer install stays open, as it does for JSONL.
 
 ## Consequences
 
