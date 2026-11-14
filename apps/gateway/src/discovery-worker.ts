@@ -50,6 +50,7 @@ import {
   type Db,
   type DiscoveryRunRow,
   type DiscoverySourceRow,
+  runWithRlsSystem,
 } from "@regulait/db";
 import {
   classifyObservation,
@@ -658,7 +659,8 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
     if (!held) leaseGone.abort(new Error("the run's lease was lost"));
     return held;
   };
-  const renewTimer = setInterval(() => void renew(), Math.max(200, Math.floor((opts.leaseSeconds * 1000) / 3)));
+  // ADR-0234 batch 7a (#809 review): the renewal is server-side work, not the scope of whatever started the run
+  const renewTimer = setInterval(() => void runWithRlsSystem("system_task", "timer.discovery-lease", renew), Math.max(200, Math.floor((opts.leaseSeconds * 1000) / 3)));
   renewTimer.unref?.();
   const guarded = createGuardedFetch({
     allowList: await loadEgressAllowList(db),

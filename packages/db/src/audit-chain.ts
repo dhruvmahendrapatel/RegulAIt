@@ -95,7 +95,7 @@ import { RLS_PRINCIPAL_SETTING, RLS_SYSTEM_SETTING, noteInternalSystemReason } f
  * `audit_subject` for its INSERT alone under these, so the RETURNING of the row it appended is visible.
  */
 const AUDIT_APPEND_ONLY_REASONS_SQL = sql.raw(
-  "array['authenticate','identity_provisioning','approval_maintenance','public_ingest']",
+  "array['authenticate','identity_provisioning','approval_maintenance','public_ingest','credential_request']",
 );
 
 export const AUDIT_CHAIN_LOCK_KEY = 6_000_000_060;

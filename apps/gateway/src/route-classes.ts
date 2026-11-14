@@ -968,6 +968,35 @@ export function exemptRouteRlsReason(url: string): ExemptRouteRlsReason {
   return "public_ingest";
 }
 
+/**
+ * ADR-0234 batch 7a: the RLS scope a request runs under once authentication has resolved (or not), in order:
+ *   - a user id (a person, an API key, a session, a workload identity's sponsor): that principal, never a system scope;
+ *   - an auth-exempt route: the reason its class needs (`exemptRouteRlsReason`), before any credential branch, so an
+ *     exempt route never lands in `bootstrap_admin` or `credential_request`;
+ *   - the bootstrap token (an admin with no user row): `bootstrap_admin`;
+ *   - any other credential (engine runner or enrolment token, PDP client, endpoint agent): `credential_request`,
+ *     which reads users and appends to the ledger and nothing else (#809 review);
+ *   - no credential at all: no scope (the authentication hook has already refused it).
+ */
+export type RequestRlsScope =
+  | { kind: "principal"; userId: string }
+  | { kind: "exempt"; reason: ExemptRouteRlsReason }
+  | { kind: "bootstrap" }
+  | { kind: "credential"; via: string }
+  | { kind: "none" };
+
+export function requestRlsScope(
+  ctx: { userId: string | null; isAdmin: boolean; via: string } | undefined,
+  routeUrl: string,
+): RequestRlsScope {
+  const userId = ctx?.userId;
+  if (typeof userId === "string" && userId.length > 0) return { kind: "principal", userId };
+  if (AUTH_EXEMPT_ROUTES.has(routeUrl)) return { kind: "exempt", reason: exemptRouteRlsReason(routeUrl) };
+  if (ctx?.isAdmin === true) return { kind: "bootstrap" };
+  if (ctx) return { kind: "credential", via: ctx.via };
+  return { kind: "none" };
+}
+
 export function routeAuthClass(method: string, url: string): RouteAuthClass {
   if (SCIM_ROUTE_SET.has(url)) return "scim-token";
   const key = `${method.toUpperCase()} ${url}`;

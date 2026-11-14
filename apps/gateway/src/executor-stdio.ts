@@ -42,7 +42,7 @@ import { deserializeMessage, serializeMessage } from "@modelcontextprotocol/sdk/
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:crypto";
 import { z } from "zod";
-import { delegationGrants, eq, workloadIdentities, type Db, type ExecutorRow } from "@regulait/db";
+import { delegationGrants, eq, workloadIdentities, runWithRlsSystem, type Db, type ExecutorRow } from "@regulait/db";
 import {
   EXECUTOR_CHANNEL_PREFIX,
   EXECUTOR_STREAM_WINDOW,
@@ -387,7 +387,8 @@ const windowWaiters = new Map<string, Set<() => void>>();
 export function useRelayDb(db: Db): void {
   relayDb = db;
   if (relayTimer === null) {
-    relayTimer = setInterval(() => void runRelay(), STDIO_RELAY_POLL_MS);
+    // ADR-0234 batch 7a (#809 review): a server-side loop, not the request that happened to start it
+    relayTimer = setInterval(() => void runWithRlsSystem("system_task", "timer.stdio-relay", runRelay), STDIO_RELAY_POLL_MS);
     relayTimer.unref?.();
   }
 }

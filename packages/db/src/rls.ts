@@ -63,9 +63,10 @@ export const RLS_SYSTEM_REASONS = [
    */
   "audit_subject",
   /**
-   * batch 7a: server-side work with no principal (scheduler jobs, boot tasks, the audit anchor and backup-verify
-   * timers, background work) and requests from non-user credentials (engine runners, workload identities, endpoint
-   * agents): users (read), approvals (all), audit_log (read and append). Never users writes or auth_mfa_pending.
+   * batch 7a: server-side work with no principal and no request (scheduler jobs, boot tasks, the audit anchor and
+   * backup-verify timers, background work): users (read), approvals (all), audit_log (read and append). Never users
+   * writes or auth_mfa_pending, and never entered from a request path (#809 review: a request with a non-user
+   * credential runs under `credential_request`).
    */
   "system_task",
   /**
@@ -76,14 +77,23 @@ export const RLS_SYSTEM_REASONS = [
   "public_ingest",
   /**
    * batch 7a: a request authenticated by the bootstrap token, which the gateway treats as an admin with no user row:
-   * admitted wherever an active admin principal is (regulait_rls_is_admin()), and to the users read
+   * admitted wherever an active admin principal is (regulait_rls_is_admin()), and to the users read. NOT a caller
+   * reason: only the gateway's scope hook enters it, through `runAsBootstrapAdmin` (#809 review).
    */
   "bootstrap_admin",
+  /**
+   * batch 7a (#809 review): a request authenticated by a non-user credential (an engine runner or enrolment token,
+   * a PDP client, an endpoint agent): users (read), audit_log (append). Nothing in approvals and no ledger read; the
+   * one runner step that supersedes an approval enters approval_maintenance for that statement only.
+   */
+  "credential_request",
 ] as const;
 export type RlsSystemReason = (typeof RLS_SYSTEM_REASONS)[number];
 
 /** reasons a caller may pass to `withSystemContext`; `rls_membership` belongs to the SQL helpers alone */
-export type RlsCallerSystemReason = Exclude<RlsSystemReason, "rls_membership" | "migration" | "audit_subject">;
+export type RlsCallerSystemReason = Exclude<RlsSystemReason, "rls_membership" | "migration" | "audit_subject" | "bootstrap_admin">;
+/** what a request or job scope may carry: a caller reason, or the bootstrap token's (entered by `runAsBootstrapAdmin` only) */
+export type RlsScopeSystemReason = RlsCallerSystemReason | "bootstrap_admin";
 
 export interface RlsPrincipal {
   /** the authenticated user's id (`users.id`) */
@@ -92,7 +102,7 @@ export interface RlsPrincipal {
 
 /** one entry into a system context, for the audit sink */
 export interface RlsSystemContextEntry {
-  reason: RlsCallerSystemReason | "audit_subject";
+  reason: RlsScopeSystemReason | "audit_subject";
   /** a short, static label for the code path (never user input) */
   path: string;
   at: Date;
@@ -108,9 +118,18 @@ export class RlsContextError extends Error {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const PATH_RE = /^[a-z0-9][a-z0-9_.:/-]{0,79}$/;
-const CALLER_REASONS: ReadonlySet<string> = new Set(
-  RLS_SYSTEM_REASONS.filter((r) => r !== "rls_membership" && r !== "migration" && r !== "audit_subject"),
-);
+/** the reasons not a caller's: the SQL helpers', migrations', the chain writer's and the bootstrap hook's */
+export const RLS_NON_CALLER_REASONS: ReadonlySet<RlsSystemReason> = new Set<RlsSystemReason>([
+  "rls_membership",
+  "migration",
+  "audit_subject",
+  "bootstrap_admin",
+]);
+const CALLER_REASONS: ReadonlySet<string> = new Set(RLS_SYSTEM_REASONS.filter((r) => !RLS_NON_CALLER_REASONS.has(r)));
+/** the caller reasons whose every table an admin (and so bootstrap_admin) is already admitted to */
+const ADMIN_COVERED_REASONS: ReadonlySet<string> = new Set(["audit_verify", "approval_maintenance"]);
+/** what a scope statement may set: a caller reason, or bootstrap_admin (only `runAsBootstrapAdmin` builds that scope) */
+const SCOPE_REASONS: ReadonlySet<string> = new Set([...CALLER_REASONS, "bootstrap_admin"]);
 
 /** The structural shape the wrappers need: a top-level drizzle handle with `transaction`. */
 export interface RlsCapableDb<Tx> {
@@ -208,6 +227,11 @@ export async function withinSystemReason<T>(
   if (typeof path !== "string" || !PATH_RE.test(path)) {
     throw new RlsContextError("withinSystemReason: path must be a short static label; nothing was run");
   }
+  // #809 review: a bootstrap-token request is admin-equivalent, which already covers every table these reasons open
+  // (approvals; the audit_log read). Swapping its reason out would drop the users read it also needs (the policy
+  // simulator names the subjects it replays), so the step runs on the bootstrap scope unchanged.
+  const scope = rlsScope.getStore();
+  if (scope?.kind === "system" && scope.reason === "bootstrap_admin" && ADMIN_COVERED_REASONS.has(reason)) return fn();
   systemContextCounts.set(reason, (systemContextCounts.get(reason) ?? 0) + 1);
   systemContextSink?.({ reason, path, at: new Date() });
   return inSystemReason(tx, reason, fn);
@@ -256,7 +280,7 @@ export async function inSystemReason<T>(tx: ExecTx, reason: RlsSystemReason, fn:
 /** the scope a statement runs under */
 export type RlsScope =
   | { kind: "principal"; userId: string; reason?: RlsCallerSystemReason; path?: string }
-  | { kind: "system"; reason: RlsCallerSystemReason; path: string };
+  | { kind: "system"; reason: RlsScopeSystemReason; path: string };
 
 const rlsScope = new AsyncLocalStorage<RlsScope>();
 
@@ -339,6 +363,21 @@ export function runWithRlsSystem<T>(reason: RlsCallerSystemReason, path: string,
   return runInScope({ kind: "system", reason, path }, fn);
 }
 
+/**
+ * #809 review: the bootstrap token's scope. `bootstrap_admin` is admin-equivalent at the database (every policy that
+ * admits an active admin admits it), so it is not a caller reason: no step helper can lift a principal into it, and
+ * only the gateway's scope hook (a request whose credential is the bootstrap token, or a session exchanged for it)
+ * imports this.
+ */
+export function runAsBootstrapAdmin<T>(path: string, fn: () => T): T {
+  if (typeof path !== "string" || !PATH_RE.test(path)) {
+    throw new RlsContextError("runAsBootstrapAdmin: path must be a short static label; nothing was run");
+  }
+  systemContextCounts.set("bootstrap_admin", (systemContextCounts.get("bootstrap_admin") ?? 0) + 1);
+  systemContextSink?.({ reason: "bootstrap_admin", path, at: new Date() });
+  return runInScope({ kind: "system", reason: "bootstrap_admin", path }, fn);
+}
+
 /** Run `fn` with NO RLS scope (a request that resolved no principal leaves the `authenticate` scope this way). */
 export function runWithoutRlsScope<T>(fn: () => T): T {
   return runInScope(undefined, fn);
@@ -361,7 +400,7 @@ function scopeStatement(scope: RlsScope): string {
             })();
     return `SELECT pg_catalog.set_config('role', '${RLS_APP_ROLE}', true), pg_catalog.set_config('${RLS_PRINCIPAL_SETTING}', '${scope.userId}', true)${step}`;
   }
-  if (!CALLER_REASONS.has(scope.reason)) throw new RlsContextError("rls scope: invalid system reason");
+  if (!SCOPE_REASONS.has(scope.reason)) throw new RlsContextError("rls scope: invalid system reason");
   return `SELECT pg_catalog.set_config('role', '${RLS_APP_ROLE}', true), pg_catalog.set_config('${RLS_SYSTEM_SETTING}', '${scope.reason}', true)`;
 }
 
