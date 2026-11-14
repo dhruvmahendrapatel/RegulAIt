@@ -58,10 +58,8 @@ AS $$
     false)
 $$;
 --> statement-breakpoint
-REVOKE EXECUTE ON FUNCTION regulait_rls_principal_is_admin() FROM PUBLIC;
---> statement-breakpoint
-GRANT EXECUTE ON FUNCTION regulait_rls_principal_is_admin() TO regulait_app;
---> statement-breakpoint
+-- No REVOKE: every role that evaluates a policy calls this (the app role, the owner, a migrator), and it answers only
+-- whether the CALLER is an active admin, as the 0272 helper it replaces did.
 CREATE OR REPLACE FUNCTION regulait_rls_is_admin() RETURNS boolean
   LANGUAGE sql STABLE
   SET search_path = pg_catalog, public, pg_temp
