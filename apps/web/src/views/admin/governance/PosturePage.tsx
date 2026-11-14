@@ -367,7 +367,7 @@ export default function PosturePage() {
         info={<p>The one-page executive read of everything the operator pages hold: pack coverage, open risks, red-team posture, spend vs budget, governance activity, audit anchoring and the use-case pipeline. The posture estimate at the top weighs seven objectives by published formulae and ranks what to fix first; it is an estimate, never a compliance verdict. Every number is computed from the real ledgers at the moment this page loads — nothing is a stored rollup — and where a ledger is empty the page says unmeasured, never zero-implies-good. Print this page for the meeting: the browser's print view drops the app chrome.</p>}
         actions={
           <span className={`${p.noPrint} ${ed.actions}`}>
-            <Button variant="ghost" onClick={() => void q.refetch()} aria-disabled={q.isFetching || undefined}>
+            <Button variant="ghost" onClick={() => { if (!q.isFetching) void q.refetch(); }} aria-disabled={q.isFetching || undefined}>
               {q.isFetching ? "Refreshing…" : "Refresh"}
             </Button>
             <Button variant="ghost" onClick={() => window.print()}>
