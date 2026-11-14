@@ -33,9 +33,22 @@ rules define, so no new metric code is needed.
 
 ### Part 2 — OWASP LLM 2026 ids in the evaluator catalog (second PR)
 
-Recorded with that PR.
+4. **Edition-qualified ids.** The catalog cites the LLM Top 10 as `owasp:llm:2026:NN`. A bare 2026 number would collide
+   with the 2025 ids the vendored promptfoo table uses (`owasp:llm:03` is Supply Chain in 2025 and Excessive Agency
+   is LLM03 in 2026), and those ids are already stored in required-test policies and decision-regression goldens. The
+   crosswalk is `OWASP_LLM_EDITIONS`, the same one `owasp-llm-top-10@2` records (ADR-0243); names come from the
+   vendored 2025 table through the 2025 id of the same risk. The vendored table is not edited.
+5. **2025 ids stay valid as aliases.** `canonicalOwaspId` maps a 2025 LLM id to its 2026 id. Required-test
+   measurability is keyed by both, so a stored policy, the strict defaults (kept on their 2025 ids so the goldens do
+   not move) and the deploy gate measure exactly as before; listing a 2025 id and its 2026 id together is a duplicate.
+   `catalogRefMatchesControl` matches across the two numberings, so a custom pack control named by a 2025 id keeps
+   its "tested by". The required-tests view names a 2025 id through the alias; the classes it offers for a new policy
+   are the 2026 ids. The console's short form shows `LLM03:2026`.
+6. **Not done:** the strict defaults and goldens still say `owasp:llm:01`, `:02`, `:06`; moving them is a golden change
+   for its own reviewed PR. The 2026 edition's own risk names are not vendored (OWASP's text is CC BY-SA, cited by ID).
 
 ## Consequences
 
 - Financial model risk and hiring move from partial to mapped; the bias axis of the trust radar gains two controls.
 - Not done: PRA SS1/23, consumer protection (CFPB, FTC s. 5, Colorado) and medical devices (B6's later items).
+- P24's last open item (evaluator ids on 2025 numbering) is closed by part 2.

@@ -33,6 +33,7 @@ import { GUARDRAIL_DETECTOR_IDS, type GuardrailDetectorId } from "./guardrails.j
 import { RED_TEAM_ATTACK_CLASSES, redTeamAttackClassRegistry, type RedTeamAttackClass } from "./redteam.js";
 import { DEFAULT_COMPLIANCE_PACKS } from "./compliance-packs.js";
 import { isNistAiRmfSubcategory, normaliseNistAiRmfId } from "./nist-ai-rmf-subcategories.js";
+import { OWASP_LLM_EDITIONS } from "./owasp-packs.js";
 import {
   OWASP_AGENTIC_NAMES,
   OWASP_AGENTIC_TOP_10_MAPPING,
@@ -51,7 +52,8 @@ export interface EvaluatorRefs {
   iso42001: readonly string[];
   /** EU AI Act pack control refs, e.g. `eu-ai-act:art-15-accuracy-robustness` */
   euAiAct: readonly string[];
-  /** vendored OWASP ids, e.g. `owasp:llm:01`, `owasp:agentic:asi02` */
+  /** OWASP ids: the LLM Top 10 on its 2026 numbering (`owasp:llm:2026:03`, ADR-0297) and the agentic list
+   * (`owasp:agentic:asi02`). The 2025 ids (`owasp:llm:06`) still resolve, as aliases, wherever an id is read. */
   owasp: readonly string[];
 }
 
@@ -94,7 +96,7 @@ export const SCORER_REFS: Readonly<Record<EvalScorerKind, EvaluatorRefs>> = {
   contains: QUALITY,
   regex: QUALITY,
   // a schema check is the measurable half of "the output is safe to hand on"
-  json_schema: refs({ ...QUALITY, owasp: ["owasp:llm:05"] }),
+  json_schema: refs({ ...QUALITY, owasp: ["owasp:llm:2026:10"] }),
   numeric: QUALITY,
   rubric: QUALITY,
   llm_as_judge: refs({ nistAiRmf: ["MEASURE-2.5", "MEASURE-2.13"], iso42001: [ISO_MEASURE], euAiAct: [EU_ACCURACY] }),
@@ -103,32 +105,32 @@ export const SCORER_REFS: Readonly<Record<EvalScorerKind, EvaluatorRefs>> = {
     nistAiRmf: ["MEASURE-2.5", "MEASURE-2.9"],
     iso42001: [ISO_MEASURE],
     euAiAct: [EU_ACCURACY],
-    owasp: ["owasp:llm:09"],
+    owasp: ["owasp:llm:2026:07"],
   }),
   // retrieval quality is the RAG weakness OWASP files under vector/embedding
-  context_precision: refs({ nistAiRmf: ["MEASURE-2.5"], iso42001: [ISO_MEASURE], owasp: ["owasp:llm:08"] }),
-  context_recall: refs({ nistAiRmf: ["MEASURE-2.5"], iso42001: [ISO_MEASURE], owasp: ["owasp:llm:08"] }),
+  context_precision: refs({ nistAiRmf: ["MEASURE-2.5"], iso42001: [ISO_MEASURE], owasp: ["owasp:llm:2026:09"] }),
+  context_recall: refs({ nistAiRmf: ["MEASURE-2.5"], iso42001: [ISO_MEASURE], owasp: ["owasp:llm:2026:09"] }),
   answer_relevance: refs({ nistAiRmf: ["MEASURE-2.5"], iso42001: [ISO_MEASURE], euAiAct: [EU_ACCURACY] }),
   groundedness_judge: refs({
     nistAiRmf: ["MEASURE-2.5", "MEASURE-2.9"],
     iso42001: [ISO_MEASURE],
     euAiAct: [EU_ACCURACY],
-    owasp: ["owasp:llm:09", "owasp:agentic:asi08"],
+    owasp: ["owasp:llm:2026:07", "owasp:agentic:asi08"],
   }),
   answer_relevance_judge: refs({ nistAiRmf: ["MEASURE-2.5"], iso42001: [ISO_MEASURE], euAiAct: [EU_ACCURACY] }),
 };
 
 export const DETECTOR_REFS: Readonly<Record<GuardrailDetectorId, EvaluatorRefs>> = {
-  pii: refs({ nistAiRmf: ["MEASURE-2.10"], iso42001: [ISO_MEASURE], euAiAct: [EU_MONITORING], owasp: ["owasp:llm:02"] }),
+  pii: refs({ nistAiRmf: ["MEASURE-2.10"], iso42001: [ISO_MEASURE], euAiAct: [EU_MONITORING], owasp: ["owasp:llm:2026:02"] }),
   prompt_injection: refs({
     nistAiRmf: ["MEASURE-2.7"],
     iso42001: [ISO_MEASURE],
     euAiAct: [EU_ACCURACY],
-    owasp: ["owasp:llm:01", "owasp:agentic:asi01"],
+    owasp: ["owasp:llm:2026:01", "owasp:agentic:asi01"],
   }),
-  jailbreak: refs({ nistAiRmf: ["MEASURE-2.6", "MEASURE-2.7"], iso42001: [ISO_MEASURE], euAiAct: [EU_ACCURACY], owasp: ["owasp:llm:01"] }),
+  jailbreak: refs({ nistAiRmf: ["MEASURE-2.6", "MEASURE-2.7"], iso42001: [ISO_MEASURE], euAiAct: [EU_ACCURACY], owasp: ["owasp:llm:2026:01"] }),
   toxicity: refs({ nistAiRmf: ["MEASURE-2.6"], iso42001: [ISO_MEASURE], euAiAct: [EU_MONITORING] }),
-  semantic_dlp: refs({ nistAiRmf: ["MEASURE-2.7", "MEASURE-2.10"], iso42001: [ISO_MEASURE], owasp: ["owasp:llm:02"] }),
+  semantic_dlp: refs({ nistAiRmf: ["MEASURE-2.7", "MEASURE-2.10"], iso42001: [ISO_MEASURE], owasp: ["owasp:llm:2026:02"] }),
 };
 
 export const REDTEAM_CLASS_REFS: Readonly<Record<RedTeamAttackClass, EvaluatorRefs>> = {
@@ -136,37 +138,37 @@ export const REDTEAM_CLASS_REFS: Readonly<Record<RedTeamAttackClass, EvaluatorRe
     nistAiRmf: ["MEASURE-2.7"],
     iso42001: [ISO_LIFECYCLE],
     euAiAct: [EU_ACCURACY],
-    owasp: ["owasp:llm:01", "owasp:agentic:asi01"],
+    owasp: ["owasp:llm:2026:01", "owasp:agentic:asi01"],
   }),
-  jailbreak: refs({ nistAiRmf: ["MEASURE-2.6", "MEASURE-2.7"], iso42001: [ISO_LIFECYCLE], euAiAct: [EU_ACCURACY], owasp: ["owasp:llm:01"] }),
+  jailbreak: refs({ nistAiRmf: ["MEASURE-2.6", "MEASURE-2.7"], iso42001: [ISO_LIFECYCLE], euAiAct: [EU_ACCURACY], owasp: ["owasp:llm:2026:01"] }),
   data_exfiltration: refs({
     nistAiRmf: ["MEASURE-2.7", "MEASURE-2.10"],
     iso42001: [ISO_LIFECYCLE],
     euAiAct: [EU_ACCURACY],
-    owasp: ["owasp:llm:02", "owasp:llm:07"],
+    owasp: ["owasp:llm:2026:02", "owasp:llm:2026:08"],
   }),
-  pii_leak: refs({ nistAiRmf: ["MEASURE-2.10"], iso42001: [ISO_LIFECYCLE], owasp: ["owasp:llm:02"] }),
+  pii_leak: refs({ nistAiRmf: ["MEASURE-2.10"], iso42001: [ISO_LIFECYCLE], owasp: ["owasp:llm:2026:02"] }),
   bias: refs({ nistAiRmf: ["MEASURE-2.11"], iso42001: [ISO_LIFECYCLE], euAiAct: [EU_BIAS] }),
   indirect_prompt_injection: refs({
     nistAiRmf: ["MEASURE-2.7"],
     iso42001: [ISO_LIFECYCLE],
     euAiAct: [EU_ACCURACY],
-    owasp: ["owasp:llm:01", "owasp:agentic:asi01", "owasp:agentic:asi06"],
+    owasp: ["owasp:llm:2026:01", "owasp:agentic:asi01", "owasp:agentic:asi06"],
   }),
   tool_abuse: refs({
     nistAiRmf: ["MEASURE-2.7"],
     iso42001: [ISO_LIFECYCLE],
     euAiAct: [EU_OVERSIGHT],
-    owasp: ["owasp:llm:06", "owasp:agentic:asi02"],
+    owasp: ["owasp:llm:2026:03", "owasp:agentic:asi02"],
   }),
   excessive_agency: refs({
     nistAiRmf: ["MEASURE-2.7", "MANAGE-2.4"],
     iso42001: [ISO_LIFECYCLE],
     euAiAct: [EU_OVERSIGHT],
-    owasp: ["owasp:llm:06", "owasp:agentic:asi10"],
+    owasp: ["owasp:llm:2026:03", "owasp:agentic:asi10"],
   }),
-  system_prompt_extraction: refs({ nistAiRmf: ["MEASURE-2.7"], iso42001: [ISO_LIFECYCLE], owasp: ["owasp:llm:07"] }),
-  encoding_evasion: refs({ nistAiRmf: ["MEASURE-2.7"], iso42001: [ISO_LIFECYCLE], euAiAct: [EU_ACCURACY], owasp: ["owasp:llm:01"] }),
+  system_prompt_extraction: refs({ nistAiRmf: ["MEASURE-2.7"], iso42001: [ISO_LIFECYCLE], owasp: ["owasp:llm:2026:08"] }),
+  encoding_evasion: refs({ nistAiRmf: ["MEASURE-2.7"], iso42001: [ISO_LIFECYCLE], euAiAct: [EU_ACCURACY], owasp: ["owasp:llm:2026:01"] }),
 };
 
 /**
@@ -288,15 +290,42 @@ export interface OwaspRef {
   id: string;
   list: "owasp-llm-top-10" | "owasp-agentic-top-10";
   name: string;
+  /** ADR-0297: an LLM id's edition (2026) and the 2025 id of the same risk, which still resolves */
+  edition?: 2026;
+  legacyId?: string;
 }
 
-/** every OWASP id the catalog may cite, with its name, from the vendored tables */
+/**
+ * ADR-0297 (P24): THE LLM TOP 10 ON ITS 2026 NUMBERING. The 2026 edition renumbers the list (Excessive Agency moves
+ * from LLM06 to LLM03; LLM03 was Supply Chain), so an id that only says `owasp:llm:03` would mean different risks in
+ * the two editions. The catalog therefore cites edition-qualified ids, `owasp:llm:2026:NN`, and the 2025 ids the
+ * vendored promptfoo table uses (`owasp:llm:NN`) are kept as aliases of the same risk: a required-test policy or a
+ * golden case stored with a 2025 id keeps its meaning. The crosswalk is `OWASP_LLM_EDITIONS` (ADR-0243).
+ */
+export const OWASP_LLM_2026_PREFIX = "owasp:llm:2026:";
+const LLM_2025_TO_2026: ReadonlyMap<string, string> = new Map(
+  Object.values(OWASP_LLM_EDITIONS).map((e) => [`owasp:llm:${e[2025].slice(3)}`, `${OWASP_LLM_2026_PREFIX}${e[2026].slice(3)}`]),
+);
+const LLM_2026_TO_2025: ReadonlyMap<string, string> = new Map([...LLM_2025_TO_2026].map(([a, b]) => [b, a]));
+
+/** the canonical (2026, edition-qualified) form of an OWASP id: a 2025 LLM id maps to its 2026 id; others unchanged */
+export function canonicalOwaspId(id: string): string {
+  return LLM_2025_TO_2026.get(id) ?? id;
+}
+
+/** every OWASP id the catalog may cite, with its name: the LLM Top 10 by its 2026 number, then the agentic list */
 export function owaspReferences(): OwaspRef[] {
-  const llm = Object.keys(OWASP_LLM_TOP_10_MAPPING).map((id, i) => ({
-    id,
-    list: "owasp-llm-top-10" as const,
-    name: OWASP_LLM_TOP_10_NAMES[i] ?? id,
-  }));
+  // names come from the vendored (2025-ordered) promptfoo table, found through the 2025 id of the same risk
+  const names2025 = new Map(Object.keys(OWASP_LLM_TOP_10_MAPPING).map((id, i) => [id, OWASP_LLM_TOP_10_NAMES[i] ?? id]));
+  const llm = [...LLM_2026_TO_2025.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([id, legacyId]) => ({
+      id,
+      list: "owasp-llm-top-10" as const,
+      name: names2025.get(legacyId) ?? id,
+      edition: 2026 as const,
+      legacyId,
+    }));
   const agentic = Object.keys(OWASP_AGENTIC_TOP_10_MAPPING).map((id, i) => ({
     id,
     list: "owasp-agentic-top-10" as const,
@@ -346,13 +375,16 @@ export function evaluatorRefList(e: Pick<CatalogEvaluator, "refs">): string[] {
 
 /**
  * Does a catalog reference cite this pack control? NIST is matched on the
- * normalised subcategory (`MEASURE-2.5` ↔ `nist-ai-rmf:MEASURE-2.5`); every
- * other framework on the exact control ref.
+ * normalised subcategory (`MEASURE-2.5` ↔ `nist-ai-rmf:MEASURE-2.5`); an OWASP
+ * LLM id on either edition's numbering (ADR-0297); every other framework on
+ * the exact control ref.
  */
 export function catalogRefMatchesControl(ref: string, controlRef: string): boolean {
   if (controlRef.startsWith("nist-ai-rmf:")) {
     return isNistAiRmfSubcategory(ref) && normaliseNistAiRmfId(ref) === normaliseNistAiRmfId(controlRef);
   }
+  // ADR-0297: a control named by a 2025 OWASP LLM id is the same risk as the catalog's 2026 id
+  if (controlRef.startsWith("owasp:llm:")) return canonicalOwaspId(ref) === canonicalOwaspId(controlRef);
   return ref === controlRef;
 }
 
@@ -391,7 +423,8 @@ export function evaluatorTestStatus(runs: number, passedRuns: number): Evaluator
 
 export const EVALUATOR_CATALOG_NOTE =
   "Every evaluator cites the controls it is evidence for: NIST AI RMF subcategories, ISO/IEC 42001 and EU AI Act " +
-  "pack controls, and OWASP ids (vendored from promptfoo's MIT framework tables, release " +
+  "pack controls, and OWASP ids (the LLM Top 10 on its 2026 numbering, `owasp:llm:2026:NN`, with 2025 ids still " +
+  "accepted; names from promptfoo's MIT framework tables, release " +
   `${PROMPTFOO_FRAMEWORKS_SOURCE.release}). The mapping is RegulAIt's, authored against the public catalogues — a ` +
   "starting point, not legal advice. A control counts as TESTED only from a completed run that passed in the " +
   "period; an evaluator that did not run is 'not run', never passed.";

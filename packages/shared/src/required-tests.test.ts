@@ -15,8 +15,10 @@
  *   - the gate passes ONLY `satisfied` (an unknown state holds).
  */
 import { describe, expect, it } from "vitest";
+import { canonicalOwaspId } from "./evaluator-catalog.js";
 import { OWASP_AGENTIC_TOP_10_MAPPING, OWASP_LLM_TOP_10_MAPPING } from "./owasp-framework-mappings.js";
 import {
+  owaspTestClassInfo,
   DEFAULT_REQUIRED_MAX_ASR_PCT,
   REQUIRED_TEST_DEFAULTS,
   REQUIRED_TEST_EVIDENCE_BAR,
@@ -57,22 +59,38 @@ const agentB = { id: "b", name: "Agent B", configHash: "h-b" };
 describe("ADR-0180 A3 measurability: every id is from the vendored table", () => {
   const vendored = new Set([...Object.keys(OWASP_LLM_TOP_10_MAPPING), ...Object.keys(OWASP_AGENTIC_TOP_10_MAPPING)]);
 
-  it("lists exactly the vendored ids, and marks supply chain and data poisoning unmeasurable", () => {
+  it("lists the catalog's ids (LLM on 2026 numbering, ADR-0297), and marks supply chain and data poisoning unmeasurable", () => {
     const m = owaspMeasurability();
-    expect(new Set(m.map((x) => x.id))).toEqual(vendored);
+    expect(new Set(m.map((x) => canonicalOwaspId(x.id)))).toEqual(new Set([...vendored].map(canonicalOwaspId)));
+    expect(m.some((x) => /^owasp:llm:\d\d$/.test(x.id))).toBe(false);
     const by = new Map(m.map((x) => [x.id, x]));
-    expect(by.get("owasp:llm:03")!.measurable).toBe(false); // supply chain
-    expect(by.get("owasp:llm:04")!.measurable).toBe(false); // data and model poisoning
-    expect(by.get(PI)!.redteamClasses).toContain("prompt_injection");
-    expect(by.get("owasp:llm:09")!.scorerKinds.length).toBeGreaterThan(0); // misinformation: eval-measured
+    expect(by.get("owasp:llm:2026:04")!.measurable).toBe(false); // supply chain (2025 LLM03)
+    expect(by.get("owasp:llm:2026:05")!.measurable).toBe(false); // data and model poisoning (2025 LLM04)
+    expect(by.get("owasp:llm:2026:01")!.redteamClasses).toContain("prompt_injection");
+    expect(by.get("owasp:llm:2026:07")!.scorerKinds.length).toBeGreaterThan(0); // misinformation: eval-measured
+  });
+
+  it("ADR-0297: a 2025 id is an alias of its 2026 id — measured identically, and never listed alongside it", () => {
+    for (const legacy of vendored) {
+      if (!legacy.startsWith("owasp:llm:")) continue;
+      const a = owaspTestClassInfo(legacy)!;
+      const b = owaspTestClassInfo(canonicalOwaspId(legacy))!;
+      expect(a.id).toBe(legacy);
+      expect({ ...a, id: "" }).toEqual({ ...b, id: "" });
+    }
+    const both = { high: { freshnessDays: 30, classes: [{ testClass: "owasp:llm:06" }, { testClass: "owasp:llm:2026:03" }] } };
+    expect(requiredTestPolicyProblems(both as never).map((p) => p.code)).toContain("duplicate_test_class");
+    // a stored 2025 id still validates
+    const legacyOnly = { high: { freshnessDays: 30, classes: [{ testClass: PI }] } };
+    expect(requiredTestPolicyProblems(legacyOnly as never)).toEqual([]);
   });
 
   it("every default class is a vendored, measurable id (never invented)", () => {
-    const by = new Map(owaspMeasurability().map((x) => [x.id, x]));
     for (const t of REVIEW_POLICY_TIER_KEYS) {
       for (const c of REQUIRED_TEST_DEFAULTS[t].classes) {
+        // ADR-0297: the defaults keep their vendored 2025 ids, which resolve as aliases
         expect(vendored.has(c.testClass), c.testClass).toBe(true);
-        expect(by.get(c.testClass)!.measurable, c.testClass).toBe(true);
+        expect(owaspTestClassInfo(c.testClass)!.measurable, c.testClass).toBe(true);
       }
     }
   });

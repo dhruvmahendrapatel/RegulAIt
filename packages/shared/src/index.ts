@@ -4541,6 +4541,8 @@ export {
   externalEvaluatorId,
   externalScorerCatalogEntry,
   owaspReferences,
+  canonicalOwaspId,
+  OWASP_LLM_2026_PREFIX,
   redteamEvaluatorId,
   scorerEvaluatorId,
   type CatalogEvaluator,

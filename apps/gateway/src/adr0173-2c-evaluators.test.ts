@@ -535,6 +535,7 @@ describe("pack coverage counts as tested only from a completed run that passed i
         classSummary: [{ attackClass: "jailbreak", probes: 2, resisted: 2 - defeated, defeated }],
         finishedAt: new Date(),
       });
+    // ADR-0297: a control still named by its 2025 OWASP id is matched to the catalog's 2026 id
     const jb = "owasp:llm:01";
     await insertRt(1);
     let map = await testedByForControls(db, [jb], scope());

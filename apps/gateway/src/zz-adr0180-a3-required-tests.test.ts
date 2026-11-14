@@ -243,7 +243,9 @@ describe("ADR-0180 A3 the required-tests policy routes", () => {
       expect.arrayContaining(["owasp:llm:01", "owasp:llm:02", "owasp:llm:06", "owasp:agentic:asi01"]),
     );
     expect(v.effective.limited.classes).toEqual([expect.objectContaining({ testClass: "owasp:llm:01", name: "Prompt Injection", maxAsr: 0 })]);
-    expect(v.testClasses.find((c: { id: string }) => c.id === "owasp:llm:03").measurable).toBe(false);
+    // ADR-0297: the offered classes are on the 2026 numbering; supply chain is LLM04:2026 (LLM03 in 2025)
+    expect(v.testClasses.find((c: { id: string }) => c.id === "owasp:llm:2026:04").measurable).toBe(false);
+    expect(v.testClasses.some((c: { id: string }) => /^owasp:llm:\d\d$/.test(c.id))).toBe(false);
   });
 
   it("PUT is admin-only", async () => {

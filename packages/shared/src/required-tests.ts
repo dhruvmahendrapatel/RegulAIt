@@ -32,7 +32,7 @@
  */
 import { z } from "zod";
 import { ASSURANCE_DEFAULTS, type MeasuredConditionInput, type RequiredTestClass, type RequiredTestPolicy, type RequiredTestStatus, type RequiredTestTierPolicy } from "./assurance.js";
-import { REDTEAM_CLASS_REFS, SCORER_REFS, owaspReferences } from "./evaluator-catalog.js";
+import { REDTEAM_CLASS_REFS, SCORER_REFS, canonicalOwaspId, owaspReferences } from "./evaluator-catalog.js";
 import { REVIEW_POLICY_TIER_KEYS, type ReviewPolicyTierKey } from "./review-policy.js";
 import type { RedTeamAttackClass } from "./redteam.js";
 import type { EvalScorerKind } from "./evals.js";
@@ -71,7 +71,18 @@ export function owaspMeasurability(): OwaspMeasurability[] {
   });
 }
 
-const MEASURABILITY = new Map(owaspMeasurability().map((m) => [m.id, m]));
+/**
+ * Keyed by every id a policy may hold: the catalog ids, and (ADR-0297) the 2025 LLM ids as aliases of the same risk,
+ * so a policy or golden case stored before the catalog moved to 2026 numbering is measured exactly as before. An
+ * alias entry carries its own id and the same classes, scorers and name.
+ */
+const LEGACY_ID = new Map(owaspReferences().map((o) => [o.id, o.legacyId]));
+const MEASURABILITY = new Map<string, OwaspMeasurability>(
+  owaspMeasurability().flatMap((m) => {
+    const legacy = LEGACY_ID.get(m.id);
+    return legacy ? [[m.id, m] as const, [legacy, { ...m, id: legacy }] as const] : [[m.id, m] as const];
+  }),
+);
 
 export function owaspTestClassInfo(id: string): OwaspMeasurability | undefined {
   return MEASURABILITY.get(id);
@@ -131,6 +142,8 @@ export const REQUIRED_TEST_EVIDENCE_BAR: Readonly<{
   minResultsPerScorer: 5,
 };
 
+// ADR-0297: the strict defaults keep their 2025 ids (aliases of the 2026 ones), so the decision-regression goldens
+// and policies already stored read the same; a new policy picks 2026 ids from the catalog
 const PROMPT_INJECTION = "owasp:llm:01";
 const SENSITIVE_INFORMATION_DISCLOSURE = "owasp:llm:02";
 const EXCESSIVE_AGENCY = "owasp:llm:06";
@@ -259,17 +272,19 @@ export function requiredTestPolicyProblems(policy: RequiredTestPolicy): Required
     const seen = new Set<string>();
     for (const c of t.classes) {
       const m = MEASURABILITY.get(c.testClass);
-      if (seen.has(c.testClass)) {
+      // ADR-0297: a 2025 id and its 2026 id are one risk, so listing both is a duplicate too
+      const canonical = canonicalOwaspId(c.testClass);
+      if (seen.has(canonical)) {
         out.push({ tier, testClass: c.testClass, code: "duplicate_test_class", detail: `${c.testClass} is listed twice for the ${tier} tier` });
         continue;
       }
-      seen.add(c.testClass);
+      seen.add(canonical);
       if (!m) {
         out.push({
           tier,
           testClass: c.testClass,
           code: "unknown_test_class",
-          detail: `'${c.testClass}' is not an OWASP LLM or agentic id (expected e.g. owasp:llm:01 or owasp:agentic:asi01)`,
+          detail: `'${c.testClass}' is not an OWASP LLM or agentic id (expected e.g. owasp:llm:2026:01 or owasp:agentic:asi01)`,
         });
         continue;
       }

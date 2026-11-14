@@ -12,6 +12,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  canonicalOwaspId,
   DETECTOR_TESTED_BY,
   catalogRefMatchesControl,
   catalogReferenceProblems,
@@ -66,7 +67,8 @@ describe("every catalog reference resolves", () => {
   it("an external scorer inherits the (resolving) references of the metrics it claims", () => {
     const ext = externalScorerCatalogEntry({ name: "acme-grader", scorerKinds: ["groundedness_judge", "not_a_kind"] });
     expect(ext.id).toBe("external:acme-grader");
-    expect(ext.refs.owasp).toContain("owasp:llm:09");
+    // ADR-0297: misinformation is LLM09 in 2025 and LLM07 in 2026
+    expect(ext.refs.owasp).toContain("owasp:llm:2026:07");
     expect(catalogReferenceProblems([ext])).toEqual([]);
   });
 
@@ -101,6 +103,10 @@ describe("matching catalog references to pack controls", () => {
   it("a bare NIST id matches the pack's prefixed control ref; other frameworks match exactly", () => {
     expect(catalogRefMatchesControl("MEASURE-2.7", "nist-ai-rmf:MEASURE-2.7")).toBe(true);
     expect(catalogRefMatchesControl("MEASURE-2.7", "nist-ai-rmf:MEASURE-2.6")).toBe(false);
+    // ADR-0297: OWASP LLM ids match across the 2025 and 2026 numbering, never across risks
+    expect(catalogRefMatchesControl("owasp:llm:2026:03", "owasp:llm:06")).toBe(true);
+    expect(catalogRefMatchesControl("owasp:llm:2026:03", "owasp:llm:03")).toBe(false);
+    expect(catalogRefMatchesControl("owasp:llm:2026:03", "owasp:llm:2026:03")).toBe(true);
     expect(catalogRefMatchesControl("eu-ai-act:art-15-accuracy-robustness", "eu-ai-act:art-15-accuracy-robustness")).toBe(true);
     expect(catalogRefMatchesControl("eu-ai-act:art-15-accuracy-robustness", "eu-ai-act:art-14-human-oversight")).toBe(false);
   });
@@ -137,7 +143,20 @@ describe("the vendored OWASP data", () => {
       Array.from({ length: 10 }, (_, i) => `owasp:agentic:asi${String(i + 1).padStart(2, "0")}`),
     );
     const refs = owaspReferences();
-    expect(refs.find((r) => r.id === "owasp:llm:01")?.name).toBe("Prompt Injection");
+    // ADR-0297: the catalog cites the LLM list by its 2026 numbering; names come through the 2025 id of the same risk
+    expect(refs.find((r) => r.id === "owasp:llm:2026:01")?.name).toBe("Prompt Injection");
+    expect(refs.find((r) => r.id === "owasp:llm:2026:03")).toMatchObject({ name: "Excessive Agency", legacyId: "owasp:llm:06", edition: 2026 });
+    expect(refs.some((r) => /^owasp:llm:\d\d$/.test(r.id))).toBe(false);
+    expect(refs.filter((r) => r.list === "owasp-llm-top-10").map((r) => r.id)).toEqual(
+      Array.from({ length: 10 }, (_, i) => `owasp:llm:2026:${String(i + 1).padStart(2, "0")}`),
+    );
+    // the crosswalk is the one the owasp-llm-top-10@2 pack records (ADR-0243)
+    expect(canonicalOwaspId("owasp:llm:06")).toBe("owasp:llm:2026:03");
+    expect(canonicalOwaspId("owasp:llm:03")).toBe("owasp:llm:2026:04");
+    expect(canonicalOwaspId("owasp:llm:2026:03")).toBe("owasp:llm:2026:03");
+    expect(canonicalOwaspId("owasp:agentic:asi02")).toBe("owasp:agentic:asi02");
+    // no catalog entry cites a 2025 LLM id any more
+    expect(evaluatorCatalog().flatMap((e) => e.refs.owasp).filter((id) => /^owasp:llm:\d\d$/.test(id))).toEqual([]);
     expect(refs.find((r) => r.id === "owasp:agentic:asi02")?.name).toBe("ASI02: Tool Misuse and Exploitation");
   });
 
