@@ -857,6 +857,9 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/copilot/queries/export.xlsx": "internal",
   "POST /v1/copilot/proposals": "internal",
   "GET /v1/copilot/proposals": "internal",
+  // ADR-0056 §5 amendment (lane L7)
+  "GET /v1/copilot/redteam-gate": "internal",
+  "PUT /v1/copilot/redteam-gate": "internal",
   "GET /v1/copilot/proposals/export.xlsx": "internal",
   // L6b — the consent-gated applier. Internal for the same reason the rest of
   // the copilot is: it names governance objects and is an admin surface.
@@ -2196,6 +2199,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/copilot/queries/export.xlsx": "copilot",
   "POST /v1/copilot/proposals": "copilot",
   "GET /v1/copilot/proposals": "copilot",
+  "GET /v1/copilot/redteam-gate": "copilot",
+  "PUT /v1/copilot/redteam-gate": "copilot",
   "GET /v1/copilot/proposals/export.xlsx": "copilot",
   "POST /v1/copilot/proposals/:proposalId/apply": "copilot",
   "GET /v1/compliance/packs": "compliance-packs",

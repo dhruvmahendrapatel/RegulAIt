@@ -1048,3 +1048,33 @@ proposal row.**
    transactional across its audit row" limit of B8c, which this replaces.
 
 No migration.
+
+## Amendment (2026-11-14) — enrolled in red-teaming, with a promotion gate (lane L7)
+
+§5's "enrolled in continuous red-teaming (ADR-0057) … a regression blocks its promotion" was not wired (first
+amendment, limit 6; L6 residual in PENDING). As built (`apps/gateway/src/copilot-redteam-gate.ts`):
+
+- **The suite.** The copilot's regression classes are `prompt_injection`, `indirect_prompt_injection`,
+  `data_exfiltration` and `pii_leak` (`COPILOT_REDTEAM_CLASSES`). Enrolment is an ordinary ADR-0057 run of a
+  narrator agent that gates on all four (`POST /v1/redteam/runs` with those `gatingClasses`). No second runner: the
+  probes go through the governed dispatch, the ADR-0064 sweep repeats the pair, and the ADR-0217 re-test repeats it
+  after a model change.
+- **The promotion gate.** `POST /v1/copilot/ask` with a `narratorAgentId` checks, after the entitlement check and
+  before any provider work, the agent's most recent finished red-team run that gated on all four classes. It must
+  have been run against the model the agent serves now, must have passed its gate, and must be younger than
+  `copilotRedteamMaxAgeDays`. A later failed or regressed run replaces an earlier pass, which is the promotion block.
+  A refusal is `409 copilot_narrator_redteam_required`, audited as `copilot-narrator-redteam-required` with the
+  deciding run. The grounded, count-derived answer path (no model) is not gated.
+- **Settings.** `org_settings.copilot_redteam_gate_enabled` (strict default true) and
+  `copilot_redteam_max_age_days` (strict default 30, 1–365), migration `pending/copilot_redteam_gate.sql`, numbered
+  at merge. `GET /v1/copilot/redteam-gate[?agentId=]` (settings and one agent's verdict) and
+  `PUT /v1/copilot/redteam-gate` (admin). Turning the gate off or lengthening the window needs the `settings_relax`
+  step-up. Every change is audited (`copilot-redteam-gate-settings`) with its transitions. Both routes are API-only,
+  listed as known UI gaps on #453.
+- **Not verified.** As with every ADR-0057 run here, the probes are answered by the deterministic mock until a
+  provider is connected (P1). The gate's mechanism is proven; a real model's resistance is not.
+- **Tests.** `zz-adr0056-copilot-redteam.test.ts` covers the strict-default refusal (audited, nothing metered), a
+  passing run that lets the narrator through, a later failed run blocking it again, a pass against a different
+  model not counting, window lapse, missing classes, and the settings route: tightening is audited, relaxing is
+  refused without a step-up, and non-admins are refused. Three of its cases fail against `copilot.ts` as it is on
+  `main`.

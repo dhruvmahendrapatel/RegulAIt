@@ -5343,6 +5343,13 @@ export const orgSettings = pgTable(
     /** ADR-0222: an uploaded evaluation dataset's rows are deleted this many days after upload (strict 30) */
     fairnessDatasetRetentionDays: integer("fairness_dataset_retention_days").notNull().default(30),
 
+    /** ADR-0056 §5 amendment (lane L7, migration copilot_redteam_gate): a model may narrate a copilot answer only
+     * while its latest copilot red-team run passed against the model it serves now (strict true; turning it off is a
+     * settings_relax step-up, audited; copilot-redteam-gate.ts). */
+    copilotRedteamGateEnabled: boolean("copilot_redteam_gate_enabled").notNull().default(true),
+    /** ADR-0056 §5 amendment: how many days a passing copilot red-team run counts (strict 30; longer is a relax) */
+    copilotRedteamMaxAgeDays: integer("copilot_redteam_max_age_days").notNull().default(30),
+
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

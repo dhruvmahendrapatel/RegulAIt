@@ -620,6 +620,7 @@ import { registerCostReconciliationRoutes } from "./cost-reconcile.js";
 import { registerTracingRoutes } from "./tracing.js";
 import { registerCompliancePackRoutes } from "./compliance-packs.js";
 import { registerCopilotRoutes } from "./copilot.js";
+import { registerCopilotRedteamGateRoutes } from "./copilot-redteam-gate.js";
 import { registerBuilderRoutes } from "./builder.js";
 // ADR-0180 (D3) — continuous assurance: P0's gate-mode setting and each item owner's routes
 import { registerAssuranceSettingsRoutes } from "./assurance-settings.js";
@@ -6159,6 +6160,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // treated as UNTRUSTED INPUT through ADR-0042's guardrails; and it has no
   // mutating tools at all — its only route to a change is a proposal that opens
   // an ordinary Approvals-Queue item for a named human.
+  // ADR-0056 §5 amendment: the copilot narrator red-team gate settings
+  registerCopilotRedteamGateRoutes(app, db);
   registerCopilotRoutes(app, db, {
     dataKey: opts.dataKey,
     narrator: opts.copilotNarrator ?? null,
