@@ -46,7 +46,7 @@ import {
   evalDatasets,
 } from "@regulait/db";
 import { evalDatasetNamesBoundBy, evalDatasetRetiredDetail, retiredEvalDatasetNames, runEvalSuite } from "./evals.js";
-import { runStageReviewChecks, type ReviewCheckOutcome } from "./workflow-review-checks.js";
+import { loadReviewEvidence, reviewFingerprint, runStageReviewChecks, type ReviewCheckOutcome } from "./workflow-review-checks.js";
 import {
   resolveProvider,
   gitDefaultBaseUrl,
@@ -1486,12 +1486,31 @@ async function runGitExecutions(
       const waitKey = `awaitingReport:${stage.id}`;
       const episodeEvals = new Map<string, CheckOutcome>();
       const episodeReviews = new Map<string, ReviewCheckOutcome>();
+      // the evidence the reviews would read NOW, and each binding's fingerprint
+      // of it, loaded before any reuse decision (review fix: a stale pass)
+      const reviewEvidence =
+        reviewBound.size > 0
+          ? await loadReviewEvidence(db, { ...instance, round: guard.round, context }, stage, def)
+          : undefined;
+      const reviewFingerprints = new Map(
+        reviewEvidence ? (stage.reviews ?? []).map((b) => [b.check, reviewFingerprint(reviewEvidence, b)] as const) : [],
+      );
       if (typeof context[waitKey] === "string" && Array.isArray(context[`checks:${stage.id}`])) {
         for (const r of context[`checks:${stage.id}`] as EvaluatedCheck[]) {
           if (r && evalBound.has(r.check) && r.status === "passed" && r.eval) {
             episodeEvals.set(r.check, { check: r.check, status: "passed", severity: r.severity, detail: r.detail, eval: r.eval });
           }
-          if (r && reviewBound.has(r.check) && r.status === "passed" && r.review) {
+          // ADR-0260 review fix: a pass is reused only while it is bound to the
+          // same round, evidence and binding (fingerprint) as this evaluation
+          if (
+            r &&
+            reviewBound.has(r.check) &&
+            r.status === "passed" &&
+            r.review &&
+            r.review.round === guard.round &&
+            typeof r.review.fingerprint === "string" &&
+            r.review.fingerprint === reviewFingerprints.get(r.check)
+          ) {
             episodeReviews.set(r.check, { check: r.check, status: "passed", severity: r.severity, detail: r.detail, review: r.review });
           }
         }
@@ -1513,6 +1532,7 @@ async function runGitExecutions(
               { ...instance, round: guard.round, context },
               stage,
               def,
+              reviewEvidence,
             );
       // ADR-0187: engine-bound checks are decided by a sidecar engine run, started
       // here on first sight as the instance initiator on the instance's project
