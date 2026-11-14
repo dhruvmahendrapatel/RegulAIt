@@ -746,7 +746,9 @@ halves closed 2026-08-22 (batch B2a/B2b, ADR-0090 amendment)**: an off-by-defaul
 job records one audited `campaign-expired-incomplete` fact per past-due campaign (it decides
 NOTHING — expiry stays breach-on-read), and admin item reassignment exists (audited,
 reason-required, riding ADR-0046's one approver-moving write, never to the grant's holder);
-**still open from that line**: notifications (nobody is emailed at a deadline) and periodic
+**still open from that line**: ~~notifications (nobody is emailed at a deadline)~~ (**closed 2026-11-14,
+ADR-0090 amendment, lane L11**: once-per-campaign due-soon and expiry notices through opted-in ChatOps workspaces,
+named reviewers mailed, nothing operator-typed in the message) and periodic
 auto-campaigns (deliberately refused in the ADR), while review DELEGATION was always ADR-0022's
 existing mechanism, unchanged; ~~drift-forces-recertification
 (0086)~~ — **closed 2026-08-22 (batch B3b, ADR-0086 amendment, migration 0098)**: org opt-in

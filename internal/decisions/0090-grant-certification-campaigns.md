@@ -213,3 +213,49 @@ the last-sorting Playwright spec drives a reassignment and the holder refusal en
 **Still true, restated:** no notifications (nobody is emailed at the deadline — the sweep
 writes an audit fact, not an outbox); no periodic auto-campaigns; ADR-0022 delegation windows
 are unchanged and remain decider-barred from self-certification.
+
+## Amendment (2026-11-14, lane L11) — deadline notices (still decides nothing)
+
+The "no notifications" limit is closed, in the same narrow shape as the B2a sweep.
+
+- **What is sent.** A *due-soon* reminder once a campaign with undecided items is within 48 hours of its due time, and
+  an *expiry* notice once it is past due. A campaign first seen already past due gets only the expiry notice, never a
+  late reminder.
+- **Once per delivery target, retried until final (review of #825).** A target is one workspace's channel notice
+  (`<connection>:channel`), or on a Resend workspace one reviewer's mail (`<connection>:reviewer:<user>`). The audit row
+  `campaign-deadline-notified` (detail `kind`, and `targets`, the ids this run delivered) is the marker. A target is
+  listed only when its outcome is final:
+  - **posted**;
+  - **terminal**: only `no_named_recipient` (422), where the reviewer has no active account or no usable email, so a
+    retry cannot help. It is audited as a failed post with `retry: false` and is not tried again.
+  - Anything else is **transient** and is not listed, so the next hourly run retries it: a provider 5xx, a network
+    error, a missing public URL, or a 429.
+
+  So a failing workspace never blocks or repeats another, and a reviewer already mailed is not mailed again. Each run
+  writes at most one marker row per campaign and kind, and only when at least one target became final. A transient
+  target stops being retried when its notice window ends: a due-soon reminder stops once the campaign is past due, and
+  an expiry notice stops once the campaign is no longer open.
+- **Once-only rests on the scheduler lease.** Reading the markers, sending and writing the marker is not one
+  transaction. The ADR-0064 lease guarantees a single copy: the scheduled tick and the manual
+  `POST /v1/scheduler/jobs/:name/run` both run this job under that one lease. An advisory lock would have to be held
+  across the network sends, which is deliberately avoided.
+- **To whom, and through what.** Through the existing ChatOps courier (egress guard, the connector's own credential,
+  per-workspace rate limits), only to workspaces that opted in with the new `chatops_connections.notify_campaign_deadlines`
+  flag. It is off by default (ADR-0180), and changing it is admin-only and audited (`chatops-campaign-notice-settings-changed`).
+  A Resend workspace mails each **named reviewer** of undecided items their own count (ADR-0202's named-recipient
+  rule; the reviewer is the item's `reviewer_user_id`). Every other provider posts **one** channel notice per campaign
+  with the campaign total, never a per-reviewer message to a shared channel. Each send is audited on the workspace
+  (`chatops-campaign-notice-posted` / `-post-failed`).
+- **What a notice carries.** The campaign id, due time, undecided count, reminder or expiry, and a portal link
+  (`/inbox` for a reviewer, `/admin/certification` for a channel). It carries **nothing operator-typed**: no campaign
+  name, grant, holder or object label.
+- **Decides nothing.** No status changes, nothing is kept or revoked, undecided stays undecided, and expiry stays
+  computed on read. A deployment with no workspace opted in sends nothing and records nothing, so turning a workspace
+  on later still delivers the notice that is due.
+- **Job.** `certification-deadline-notify-sweep` (ADR-0064 scheduler, hourly). Migration
+  `pending/chatops_campaign_deadline_notify.sql` (numbered at merge, ADR-0252). Test:
+  `zz-adr0090-campaign-deadline-notify.test.ts`.
+
+Owner question open: whether the 48-hour reminder window should be an org setting. It is a constant here.
+
+**Still true:** no periodic auto-campaigns, and ADR-0022 delegation is unchanged.

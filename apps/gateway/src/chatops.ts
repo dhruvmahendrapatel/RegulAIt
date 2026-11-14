@@ -93,6 +93,8 @@ import {
   MONITOR_RULES,
   alertMeetsThreshold,
   composeAlertCard,
+  composeCampaignDeadlineCard,
+  outlookMessageForCampaignDeadline,
   chatContentFenced,
   chatDecidable,
   composeApprovalCard,
@@ -146,6 +148,8 @@ import { projectPiiMode } from "./projects.js";
 import { verifyTeamsBotToken } from "./teams-bot-auth.js";
 // ADR-0182 S5 (PF-14): the alert-SLA sweep posts through this file's courier
 import { registerAlertSlaCourier } from "./alert-ownership.js";
+// ADR-0090 amendment (lane L11): the certification deadline sweep posts through this file's courier
+import { registerCampaignDeadlineCourier, type CampaignDeadlineNotice, type CampaignDeadlineOutcome } from "./grant-certification.js";
 import { errMessage } from "./err-serializer.js";
 import { SharedRateLimitStore } from "./rate-limit-store.js";
 import { wantsListContract } from "./list-contract.js";
@@ -234,6 +238,10 @@ export const CHATOPS_RULE_IDS = {
   alertPosted: "chatops-alert-posted",
   alertPostFailed: "chatops-alert-post-failed",
   alertSettingsChanged: "chatops-alert-settings-changed",
+  /** ADR-0090 amendment (lane L11) — certification-campaign deadline notices */
+  campaignNoticePosted: "chatops-campaign-notice-posted",
+  campaignNoticePostFailed: "chatops-campaign-notice-post-failed",
+  campaignNoticeSettingsChanged: "chatops-campaign-notice-settings-changed",
   /** ADR-0173 batch 2b — the Teams Bot Framework endpoint */
   botSettingsChanged: "chatops-bot-settings-changed",
   botRefusedTenant: "chatops-bot-refused-tenant",
@@ -354,6 +362,8 @@ const createConnectionSchema = z
     allowFencedDecide: z.boolean().default(false),
     /** ADR-0162 — opt-in; null/absent = governance alerts are not posted here */
     notifyAlertMinSeverity: z.enum(["medium", "high"]).nullable().optional(),
+    /** ADR-0090 amendment (lane L11) — opt-in; absent = no certification-campaign deadline notices here */
+    notifyCampaignDeadlines: z.boolean().optional(),
     enabled: z.boolean().default(true),
     ...botFields,
     /** ADR-0173 batch 2b review — optional, slack only: the one workspace accepted */
@@ -466,6 +476,8 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         enabled: r.enabled,
         // ADR-0162 — the alert threshold, so a saved selection survives reload
         notifyAlertMinSeverity: r.notifyAlertMinSeverity,
+        // ADR-0090 amendment (lane L11)
+        notifyCampaignDeadlines: r.notifyCampaignDeadlines,
         createdAt: r.createdAt,
         // the signing secret is NEVER returned: a reader who could see it could
         // forge callbacks, which is strictly worse than reading a bot token
@@ -651,6 +663,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         defaultChannel: body.defaultChannel,
         allowFencedDecide: body.allowFencedDecide,
         notifyAlertMinSeverity: body.notifyAlertMinSeverity ?? null,
+        notifyCampaignDeadlines: body.notifyCampaignDeadlines ?? false,
         enabled: body.enabled,
         botAppId: body.botAppId ?? null,
         botTenantId: body.botTenantId ?? null,
@@ -1231,6 +1244,75 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
   // ADR-0182 S5 (PF-14): the SLA sweep's breach and unowned escalations, to
   // the same opted-in workspaces, with the sweep's own PII-free text in place
   // of the alert's title
+  // ADR-0090 amendment (lane L11): certification-campaign deadline notices to the workspaces opted in. A resend
+  // workspace mails each notice to its named reviewer; any other provider posts ONE channel notice per campaign (the
+  // campaign total), never a per-reviewer message to a shared channel. Nothing operator-typed is in either.
+  registerCampaignDeadlineCourier(db, async ({ campaign, notices, done }, actorUserId) => {
+    const out: { workspaces: number; results: Array<{ target: string; outcome: CampaignDeadlineOutcome }> } = { workspaces: 0, results: [] };
+    if (notices.length === 0) return out;
+    const conns = await db
+      .select()
+      .from(chatopsConnections)
+      .where(and(eq(chatopsConnections.enabled, true), eq(chatopsConnections.notifyCampaignDeadlines, true)));
+    out.workspaces = conns.length;
+    for (const conn of conns) {
+      const isMail = MAIL_PROVIDERS.includes(conn.provider as ChatOpsProvider);
+      const pub = isMail ? mailPublicUrl() : null;
+      const targets: Array<{ key: string; notice: CampaignDeadlineNotice | null; audience: "reviewer" | "channel" }> =
+        conn.provider === "resend"
+          ? notices.map((n) => ({ key: `${conn.id}:reviewer:${n.reviewerUserId}`, notice: n, audience: "reviewer" as const }))
+          : [{ key: `${conn.id}:channel`, notice: null, audience: "channel" as const }];
+      for (const t of targets) {
+        if (done.has(t.key)) continue;
+        const path = t.audience === "reviewer" ? "/inbox" : "/admin/certification";
+        const input = {
+          campaignId: campaign.id,
+          kind: campaign.kind,
+          dueAt: campaign.dueAt,
+          undecided: t.notice ? t.notice.undecidedForReviewer : campaign.undecidedTotal,
+          audience: t.audience,
+          portalUrl: pub?.ok ? joinPublicUrl(pub.url, `/ui${path}`) : `/ui${path}`,
+        };
+        const namedRecipient = t.notice ? await activeUserEmail(t.notice.reviewerUserId) : null;
+        const channel = conn.provider === "resend" ? (namedRecipient ?? RESEND_RECIPIENT_MODE) : conn.defaultChannel;
+        let posted: Awaited<ReturnType<typeof postCard>>;
+        // only "this reviewer has no active account or email" is final; every other failure is retried next run
+        let terminal = false;
+        try {
+          if (pub && !pub.ok) posted = pub;
+          else if (conn.provider === "resend" && !namedRecipient) {
+            posted = { ok: false, status: 422, body: { error: "no_named_recipient" } };
+            terminal = true;
+          } else {
+            posted = await postCard(conn, channel, composeCampaignDeadlineCard(input), actorUserId, "campaign-deadline", outlookMessageForCampaignDeadline(input), namedRecipient);
+          }
+        } catch (err) {
+          posted = { ok: false, status: 502, body: { error: errMessage(err) } };
+        }
+        await audit(
+          actorUserId,
+          "chatops_connection",
+          conn.id,
+          posted.ok ? CHATOPS_RULE_IDS.campaignNoticePosted : CHATOPS_RULE_IDS.campaignNoticePostFailed,
+          posted.ok ? "allow" : "deny",
+          posted.ok
+            ? `certification campaign ${campaign.id} ${campaign.kind} notice sent through '${conn.name}' (${conn.provider})`
+            : `certification campaign ${campaign.id} ${campaign.kind} notice NOT sent through '${conn.name}': ${String(posted.body.error ?? posted.status)}` +
+              (terminal ? " (final, not retried)" : " (retried next run)"),
+          {
+            campaignId: campaign.id,
+            kind: campaign.kind,
+            audience: t.audience,
+            ...(t.notice ? { reviewerUserId: t.notice.reviewerUserId } : {}),
+            ...(posted.ok ? {} : { status: posted.status, retry: !terminal }),
+          },
+        );
+        out.results.push({ target: t.key, outcome: posted.ok ? "posted" : terminal ? "terminal" : "transient" });
+      }
+    }
+    return out;
+  });
+
   registerAlertSlaCourier(db, async (message, actorUserId) => {
     const out = { posted: 0, failed: 0 };
     const conns = await db
@@ -1253,6 +1335,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
     const body = z
       .object({
         notifyAlertMinSeverity: z.enum(["medium", "high"]).nullable().optional(),
+        notifyCampaignDeadlines: z.boolean().optional(),
         ...botFields,
         slackTeamId: slackTeamIdField,
         // ADR-0185 — further exact recipient mailboxes for an outlook workspace
@@ -1307,6 +1390,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
       .update(chatopsConnections)
       .set({
         ...(body.notifyAlertMinSeverity !== undefined ? { notifyAlertMinSeverity: body.notifyAlertMinSeverity } : {}),
+        ...(body.notifyCampaignDeadlines !== undefined ? { notifyCampaignDeadlines: body.notifyCampaignDeadlines } : {}),
         ...(botChange ? bot : {}),
         ...(body.slackTeamId !== undefined ? { slackTeamId: body.slackTeamId } : {}),
         ...(recipients !== undefined ? { outlookRecipientAllowList: recipients } : {}),
@@ -1340,6 +1424,11 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
       await audit(req.authCtx.userId, "chatops_connection", connectionId, CHATOPS_RULE_IDS.alertSettingsChanged, "allow",
         `governance alerts to '${before.name}': ${before.notifyAlertMinSeverity ?? "off"} → ${body.notifyAlertMinSeverity ?? "off"}`,
         { from: before.notifyAlertMinSeverity, to: body.notifyAlertMinSeverity });
+    }
+    if (body.notifyCampaignDeadlines !== undefined && body.notifyCampaignDeadlines !== before.notifyCampaignDeadlines) {
+      await audit(req.authCtx.userId, "chatops_connection", connectionId, CHATOPS_RULE_IDS.campaignNoticeSettingsChanged, "allow",
+        `certification-campaign deadline notices to '${before.name}': ${before.notifyCampaignDeadlines ? "on" : "off"} → ${body.notifyCampaignDeadlines ? "on" : "off"}`,
+        { from: before.notifyCampaignDeadlines, to: body.notifyCampaignDeadlines });
     }
     if (botChange) {
       await audit(req.authCtx.userId, "chatops_connection", connectionId, CHATOPS_RULE_IDS.botSettingsChanged, "allow",

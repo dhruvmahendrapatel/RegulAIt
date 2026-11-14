@@ -8445,6 +8445,8 @@ export const chatopsConnections = pgTable("chatops_connections", {
   /** ADR-0162 (migration 0127) — minimum governance-alert severity posted to
    * this workspace; null = alerts are not posted (opt-in) */
   notifyAlertMinSeverity: text("notify_alert_min_severity", { enum: ["medium", "high"] }),
+  /** ADR-0090 amendment (lane L11) — opt-in; false = certification-campaign deadline notices are not sent here */
+  notifyCampaignDeadlines: boolean("notify_campaign_deadlines").notNull().default(false),
   enabled: boolean("enabled").notNull().default(true),
   /** ADR-0173 batch 2b (migration 0144) — Microsoft Teams Bot Framework. The
    * bot's app id is the audience its tokens must carry; null = the bot

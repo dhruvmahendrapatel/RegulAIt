@@ -41,7 +41,7 @@ import { runEvalDriftSweep } from "./evals.js";
 import { runScheduledRedTeamSweep } from "./redteam.js";
 import { runTrainingJobPollSweep } from "./regulait-llm.js";
 import { runCostReconciliation } from "./cost-reconcile.js";
-import { runCampaignExpirySweep } from "./grant-certification.js";
+import { runCampaignDeadlineNotifySweep, runCampaignExpirySweep } from "./grant-certification.js";
 import { runCanaryObservationPrune } from "./config-versions.js";
 import { runMcpAdmissionRescan } from "./mcp-admission-rescan.js";
 import { runMcpRegistrySync } from "./mcp-registry.js";
@@ -82,6 +82,8 @@ export const SCHEDULER_JOB_NAMES = {
   trainingPoll: "training-job-poll-sweep",
   costReconciliation: "cost-reconciliation-sweep",
   certificationExpiry: "certification-expiry-sweep",
+  // ADR-0090 amendment (lane L11): due-soon and expiry notices through ChatOps
+  certificationDeadlineNotify: "certification-deadline-notify-sweep",
   canaryObservationPrune: "canary-observation-prune-sweep",
   mcpAdmissionRescan: "mcp-admission-rescan-sweep",
   mcpRegistrySync: "mcp-registry-sync-sweep",
@@ -360,6 +362,21 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
       run: async (ctx) => {
         const out = await runCampaignExpirySweep(ctx.db, { actorUserId: ctx.actorUserId, now: ctx.now });
         return { itemsProcessed: out.observed, detail: { observed: out.observed, campaignIds: out.campaignIds } };
+      },
+    },
+    {
+      // ADR-0090 amendment (lane L11): a due-soon reminder (48 h before) and an expiry notice, each ONCE per campaign,
+      // to the reviewers named on undecided items, through the ChatOps workspaces opted in to campaign deadlines.
+      // Decides nothing. With no workspace opted in it sends and records nothing.
+      name: SCHEDULER_JOB_NAMES.certificationDeadlineNotify,
+      description:
+        "Notify the reviewers of undecided certification items 48 hours before a campaign's due date and once when it " +
+        "expires, through ChatOps workspaces opted in to campaign deadlines. Sent once each; decides nothing.",
+      adr: "ADR-0090",
+      defaultIntervalSeconds: HOUR,
+      run: async (ctx) => {
+        const out = await runCampaignDeadlineNotifySweep(ctx.db, { actorUserId: ctx.actorUserId, now: ctx.now });
+        return { itemsProcessed: out.notified.length, detail: { courier: out.courier, notified: out.notified } };
       },
     },
     {

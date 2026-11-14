@@ -694,6 +694,70 @@ export function composeAlertCard(input: {
   };
 }
 
+/**
+ * ADR-0090 amendment (lane L11) — an access-certification deadline notice. Information only, like the alert card:
+ * no action, a link, and NOTHING operator-typed: no campaign name, no grant, holder or object label. It carries the
+ * campaign id, the due time, the count of undecided items and whether this is a reminder or the expiry. `audience`
+ * is "reviewer" when the message goes to the reviewer named on the items (a resend mail), "channel" otherwise.
+ * Pure: no clock, no network, no db.
+ */
+export interface CampaignDeadlineNoticeInput {
+  campaignId: string;
+  kind: "due_soon" | "expired";
+  dueAt: Date;
+  undecided: number;
+  audience: "reviewer" | "channel";
+  portalUrl: string;
+}
+
+function campaignDeadlineSentence(input: CampaignDeadlineNoticeInput): string {
+  const n = Math.max(0, Math.floor(input.undecided));
+  const items = `${n} undecided item${n === 1 ? "" : "s"}`;
+  const whose = input.audience === "reviewer" ? `${items} assigned to you` : items;
+  const due = input.dueAt.toISOString().replace(/\.\d{3}Z$/, "Z");
+  return input.kind === "due_soon"
+    ? `An access certification campaign is due ${due} with ${whose}.`
+    : `An access certification campaign passed its due date (${due}) with ${whose}. They stay undecided: nothing is kept or revoked automatically.`;
+}
+
+export function composeCampaignDeadlineCard(input: CampaignDeadlineNoticeInput): ApprovalCard {
+  const icon = input.kind === "expired" ? "🔴" : "🟠";
+  const head = input.kind === "expired" ? "Certification campaign expired" : "Certification campaign due soon";
+  const sentence = campaignDeadlineSentence(input);
+  const ref = `campaign ${input.campaignId}`;
+  const text = `${icon} *${head}*\n${escapeSlackText(sentence)} (${escapeSlackText(ref)})`;
+  const teamsText = `${icon} **${head}**\n\n${escapeAdaptiveMarkdown(sentence)} (${escapeAdaptiveMarkdown(ref)})`;
+  const href = input.portalUrl.replace(/[<>|]/g, encodeURIComponent);
+  return {
+    text,
+    blocks: [
+      { type: "section", text: { type: "mrkdwn", text } },
+      { type: "section", text: { type: "mrkdwn", text: `<${href}|Open in RegulAIt>` } },
+    ],
+    redacted: false,
+    portalUrl: input.portalUrl,
+    actions: [],
+    inAppOnlyNote: null,
+    teamsText,
+  };
+}
+
+export function outlookMessageForCampaignDeadline(input: CampaignDeadlineNoticeInput): OutlookMessagePayload {
+  const head = input.kind === "expired" ? "Certification campaign expired" : "Certification campaign due soon";
+  return {
+    subject: `RegulAIt: ${head.toLowerCase()}`,
+    body: {
+      contentType: "HTML",
+      content: [
+        `<p><strong>${escapeHtml(head)}</strong></p>`,
+        `<p>${escapeHtml(campaignDeadlineSentence(input))} (campaign ${escapeHtml(input.campaignId)})</p>`,
+        outlookPortalLine(input.portalUrl, input.audience === "reviewer" ? "Open your reviews in RegulAIt" : "Open the campaign in RegulAIt"),
+        "<p><small>Reviews are decided in RegulAIt, never by replying to this message. Replies are not read.</small></p>",
+      ].join("\n"),
+    },
+  };
+}
+
 /** does a workspace with this threshold receive an alert of this severity? */
 export function alertMeetsThreshold(severity: string, threshold: "medium" | "high" | null): boolean {
   if (!threshold) return false;
