@@ -1915,6 +1915,9 @@ export const auditLog = pgTable(
         // ADR-0261 (P37): a third-party ingest source (created, enabled, disabled, its write-only credential issued or
         // revoked) and each accepted or refused batch of third-party evidence. Plain text column — no DDL.
         "third_party_ingest_source",
+        // ADR-0303: a SIEM destination (created, enabled, disabled, secret rotated, dead-lettered, recovered). Plain
+        // text column — no DDL.
+        "siem_destination",
         // ADR-0193 (I4): a content provenance record (objectId = the record) and a trust-tier change (a source's
         // tier, or the write floor). Plain text column — no DDL.
         "content_provenance",
@@ -16383,6 +16386,47 @@ export const thirdPartyIngestRecordFindings = pgTable(
   (t) => [primaryKey({ columns: [t.recordId, t.findingId] }), index("third_party_ingest_record_findings_finding_idx").on(t.findingId)],
 );
 
+// ===== ADR-0303 (lane L11): SIEM delivery of the audit chain =====================================================
+export const SIEM_DESTINATION_KINDS = ["webhook"] as const;
+export const SIEM_DESTINATION_STATES = ["active", "backoff", "dead_letter"] as const;
+
+/**
+ * One SIEM destination: an outbox cursor over `audit_log.seq` (ADR-0135's proposed delivery contract). The cursor moves
+ * only after the receiver acknowledges a batch (2xx), so delivery is at least once and in chain order. New
+ * destinations are off; enabling one is a step-up relaxation (ADR-0180). The signing secret is a Standard Webhooks
+ * `whsec_` value under REGULAIT_DATA_KEY. `last_error_code` is one of a fixed set of codes, never receiver text.
+ */
+export const siemDestinations = pgTable(
+  "siem_destinations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    kind: text("kind", { enum: SIEM_DESTINATION_KINDS }).notNull().default("webhook"),
+    url: text("url").notNull(),
+    allowPlaintextHttp: boolean("allow_plaintext_http").notNull().default(false),
+    enabled: boolean("enabled").notNull().default(false),
+    secretCiphertext: text("secret_ciphertext").notNull(),
+    secretRotatedAt: timestamp("secret_rotated_at", { withTimezone: true }).notNull().defaultNow(),
+    /** the highest `audit_log.seq` the receiver acknowledged */
+    cursorSeq: bigint("cursor_seq", { mode: "number" }).notNull(),
+    state: text("state", { enum: SIEM_DESTINATION_STATES }).notNull().default("active"),
+    consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }),
+    leaseUntil: timestamp("lease_until", { withTimezone: true }),
+    /** the claiming pass's token: every write after a claim is conditional on it */
+    leaseToken: uuid("lease_token"),
+    lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
+    lastSuccessAt: timestamp("last_success_at", { withTimezone: true }),
+    lastErrorCode: text("last_error_code"),
+    deliveredEvents: bigint("delivered_events", { mode: "number" }).notNull().default(0),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("siem_destinations_name_uq").on(sql`lower(${t.name})`), index("siem_destinations_due_idx").on(t.enabled, t.nextAttemptAt)],
+);
+export type SiemDestinationRow = typeof siemDestinations.$inferSelect;
+// ===== end ADR-0303 =================================================================================================
 /**
  * ADR-0251 (P-01 remainder, lane L1; migration resource_rate_reservations) — HARD rate-limit windows for the governed
  * core's connector and A2A calls. One row is one slot a call took in the window: written in the same transaction as

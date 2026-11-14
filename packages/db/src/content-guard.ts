@@ -107,6 +107,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.discoverySources, ["name"]],
   // ADR-0261 (P37): a third-party ingest source an admin names
   [s.thirdPartyIngestSources, ["name"]],
+  // ADR-0303: a SIEM destination an admin names
+  [s.siemDestinations, ["name"]],
   [s.engineRunners, ["name"]],
   [s.executors, ["name"]],
   [s.externalScorers, ["name"]],
