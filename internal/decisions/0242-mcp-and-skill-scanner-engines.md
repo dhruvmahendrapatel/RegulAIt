@@ -336,3 +336,47 @@ from a new rule set, revokes it.
   `admitted` at that digest become `held`, and the audit row is `admission-engine-clearance-revoked` (effect deny).
 - An `unknown` (an engine error) is not evidence and revokes nothing.
 - **Owner question open:** the owner may still choose the builder's original default (the person's decision stands).
+
+### L4.3 Subject target and queueing (§6 items 1 and 2)
+
+The gateway can now run the two admission-scan engines itself. Pending migration `admission_scan_subject_target`.
+
+- **The `subject` target.** `engine_runs.target_kind` gains `subject` and `trigger` gains `admission`. A subject run
+  names one MCP server (`target_mcp_server_id`, mcpscanner only) or one builder skill (`target_builder_skill_id`,
+  skillscanner only), both real foreign keys, plus the digest it scans. The widened `engine_runs_target_check` makes a
+  subject run person-less and project-less (no agent, judge, artifact, run-as or project), always trigger
+  `admission`, and keeps every other run free of subject columns. Two partial unique indexes keep one live (queued or
+  leased) run per engine, subject and digest.
+- **No person starts one.** `POST /v1/engine-runs` (and so a schedule or a workflow) answers 422
+  `engine_target_mismatch` for an admission-scan engine.
+- **Queueing** (`apps/gateway/src/admission-scan-runs.ts`, `enqueueAdmissionScanRun`), only while the engine is on;
+  with it off (the shipped default) nothing is queued:
+  - at every skill save door, through `sightSkill`, which create, import, update, template seeding and bundle import
+    all call;
+  - at every MCP manifest scan (`scanAndPersistManifest`), which serves live sync and the ADR-0100 re-scan;
+  - in the skill re-scan sweep, for each examined current and pinned digest.
+
+  A subject that already has a `pass` or `fail` at the digest under the shipped rule set is not queued again, so a
+  rules upgrade (a new `rulesSha256`) re-scans everything.
+- **The MCP snapshot.** A held manifest is never stored in `mcp_tools`, so the canonical tool list the digest covers
+  is captured when the run is queued. It is stored encrypted under the data key in `target_subject_input_ciphertext`
+  (an ADR-0200 exception, commented on the column), cleared at the run's end, and never returned by a route. With no
+  data key, no run is queued, the refusal is audited (`admission-scan-not-queued`), and the server stays held.
+- **Lease and task start.** The gateway builds the run's one input file from its own records: `tools.json` from the
+  snapshot, or `SKILL.md` from the stored name and body or a pinned copy with that digest. It checks the file against
+  the run's digest. The lease names it (`subject: {file, sha256, size}`) and carries no key. The task input places it
+  inline, so the runner never supplies its bytes. A subject that is gone, whose digest is superseded, or whose
+  snapshot is missing ends the run `not_run` (`subject_gone`, `subject_superseded`, `subject_input_gone`).
+- **Placement.** A subject run has no project, so its placement names its own sensitivity: `confidential`, the floor
+  whose shipped class is the gVisor sandbox §6.1 asks for. The org's floors still decide the class
+  (`PlacementRequest.sensitivity`, read only when there is no project). **Builder's default; the owner may raise it.**
+- **The result.** The runner posts the driver's `regulait.admission-scan.v1` report as the envelope's raw report.
+  `recordAdmissionEngineScanTx` records it in the run's own end transaction, linked to the run.
+  - A completed run records its report. A failed or timed-out run records `unknown`, which holds.
+  - A cancelled, refused or expired run, or one whose task was never placed, records nothing; the subject stays
+    pending, which also holds.
+  - The subject row is locked `FOR NO KEY UPDATE`, so the run-then-subject lock order cannot deadlock with a
+    queueing.
+- **Left for later L4 slices:** the Node shim per image and the sandbox-limit proof (§6.1 and §6.4), publishing and
+  locking the images (§6.3), and re-queueing MCP servers held only by a pending engine scan whose run expired. The
+  ADR-0100 MCP sweep skips `held` servers; today a new live sync re-queues them.

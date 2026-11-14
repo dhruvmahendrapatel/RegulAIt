@@ -86,6 +86,7 @@ import {
 } from "@regulait/shared";
 import { minReleaseAgeDays, quarantineDetail, recordSighting, skillReleaseStatus } from "./release-age.js";
 import { engineHoldFindings, skillEngineHold } from "./admission-engine-scans.js";
+import { admissionScanEngineOn, enqueueAdmissionScanRun } from "./admission-scan-runs.js";
 import { agentEvidenceHoldRefused, EVIDENCE_HOLD_REFUSED, withAgentEvidenceHold } from "./agent-evidence-hold.js"; // D4 DFX2 (D4G-05): Art. 73(6) evidence hold
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
@@ -179,6 +180,9 @@ export async function auditSkillAdmission(
  * at this digest (the clock is per skill, never shared across skills) */
 export async function sightSkill(db: Db, skillId: string, digest: string): Promise<void> {
   await recordSighting(db, "skill", digest, new Date(), skillId);
+  // ADR-0242 L4.3: every save door sights the new digest here, so every save queues the engine scan (a no-op while
+  // the skillscanner engine is off, the default)
+  await enqueueAdmissionScanRun(db, { kind: "builder_skill", id: skillId, digest });
 }
 
 /**
@@ -374,9 +378,13 @@ export async function runSkillAdmissionRescan(db: Db, opts: { limit?: number } =
     .where(and(isNull(builderSkills.archivedAt), inArray(builderSkills.admissionState, RESCAN_ELIGIBLE)))
     .orderBy(sql`${builderSkills.admissionScannedAt} asc nulls first`, asc(builderSkills.id))
     .limit(limit);
+  // ADR-0242 L4.3: with the skillscanner engine on, the sweep also queues an engine scan of every digest it examined
+  // (current and pinned) that has no decisive scan under the shipped rules yet (a rules change re-scans everything)
+  const engineOn = await admissionScanEngineOn(db, "skillscanner");
   for (const s of rows) {
     out.examined++;
     const a = admitSkillText(s, s.admittedDigest);
+    if (engineOn && a.state !== "refused") await enqueueAdmissionScanRun(db, { kind: "builder_skill", id: s.id, digest: a.digest });
     // conditional on the text this verdict is for (a concurrent edit wins)
     await db
       .update(builderSkills)
@@ -426,6 +434,7 @@ export async function runSkillAdmissionRescan(db: Db, opts: { limit?: number } =
       { name: pinnedName, description: att.description, body: att.body },
       [att.admittedDigest, att.state === "admitted" ? att.snapshotDigest : null],
     );
+    if (engineOn && a.state !== "refused") await enqueueAdmissionScanRun(db, { kind: "builder_skill", id: att.skillId, digest: a.digest });
     await db
       .update(builderAgentSkills)
       .set({ snapshotAdmissionState: a.state, snapshotDigest: a.digest, snapshotScannedAt: new Date() })

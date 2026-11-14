@@ -65,6 +65,7 @@ import {
   mcpAdmissionRuleIds,
   MCP_ADMISSION_HOLD_AT,
   MCP_ADMISSION_SCANNER_VERSION,
+  manifestCanonicalJson,
   manifestDigest,
   maxSeverity,
   nextAdmissionState,
@@ -92,6 +93,7 @@ import {
 } from "./release-age.js";
 import { registerSkillAdmissionRoutes } from "./skill-admission.js";
 import { engineAdmissionFor, engineHoldFindings, withEngineMcpFindings } from "./admission-engine-scans.js";
+import { enqueueAdmissionScanRun } from "./admission-scan-runs.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 
@@ -490,6 +492,11 @@ async function scanAndPersistManifest(
         : {}),
     })
     .where(eq(mcpServers.id, serverId));
+
+  // ADR-0242 L4.3: with the mcpscanner engine on, this digest is queued for the engine's scan (live sync and the
+  // ADR-0100 re-scan both come through here); the snapshot is the canonical tool list the digest covers. A no-op
+  // while the engine is off (the default)
+  await enqueueAdmissionScanRun(db, { kind: "mcp_server", id: serverId, digest: scan.digest }, { toolsCanonicalJson: manifestCanonicalJson(tools) });
 
   if (state === "held" || reopened) {
     await db.insert(auditLog).values({
