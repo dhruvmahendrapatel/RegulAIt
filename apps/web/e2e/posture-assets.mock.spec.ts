@@ -244,14 +244,14 @@ test.describe("per-asset posture scores", () => {
 
     await page.unrouteAll({ behavior: "ignoreErrors" });
     await mockApi(page, { detailStatus: 403 });
-    await page.goto(`/ui/admin/governance/use-cases/${UC}`);
+    await page.goto(`/ui/admin/governance/use-cases/${UC}?tab=overview`);
     const card = page.locator("[data-rg-card]").filter({ has: page.getByText("Posture score", { exact: true }) });
     await expect(card.getByText("You don't have access to this asset")).toBeVisible();
   });
 
   test("the use-case page carries the use case's score card", async ({ page }) => {
     const { calls } = await mockApi(page);
-    await page.goto(`/ui/admin/governance/use-cases/${UC}`);
+    await page.goto(`/ui/admin/governance/use-cases/${UC}?tab=overview`);
     const card = page.locator("[data-rg-card]").filter({ has: page.getByText("Posture score", { exact: true }) });
     await expect(card.getByText("43", { exact: true })).toBeVisible();
     await expect(card.getByText("Estimate", { exact: true })).toBeVisible();

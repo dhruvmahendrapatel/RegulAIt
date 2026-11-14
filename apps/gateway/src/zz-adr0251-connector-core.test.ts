@@ -12,7 +12,7 @@ import http from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
-import { and, approvals, auditLog, desc, eq, orgSettings, ORG_SETTINGS_ID, resourceApprovalRules, resourceRateLimits, type Db } from "@regulait/db";
+import { and, approvals, auditLog, desc, eq, orgSettings, ORG_SETTINGS_ID, resourceApprovalRules, resourceRateLimits, resourceRateReservations, type Db } from "@regulait/db";
 import { evaluateConnector, RESOURCE_RULE_IDS, type ExecutionMode } from "@regulait/policy-kernel";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
@@ -249,7 +249,7 @@ describe("ADR-0251 review #715 finding 1: every named approver signs", () => {
 });
 
 describe("ADR-0251 review #715 finding 3: a call's side rows do not spend a second rate-limit slot", () => {
-  it("counts the call's own decision row once, not its PII-warning or guardrail rows", async () => {
+  it("only the call's reservation takes a slot; its decision, PII-warning and guardrail audit rows never do", async () => {
     const [limit] = await k.db
       .insert(resourceRateLimits)
       .values({ resourceType: "connector", connectorId, scope: "user", userId: other.id, maxCalls: 100, windowSeconds: 3600 })
@@ -265,7 +265,92 @@ describe("ADR-0251 review #715 finding 3: a call's side rows do not spend a seco
       await row({ operation: "read", receiptClass: "decision" }, "g1");
       await row({ phase: "pii", pii: { mode: "warn" }, operation: "read", receiptClass: "decision" }, "pii-warned");
       await row({ phase: "guardrail", receiptClass: "decision" }, "guardrail-warned");
+      // audit rows are evidence, not the counter (hard windows): none of them takes a slot
+      expect(await count()).toBe(base);
+      // one allowed call takes exactly one slot
+      const d = await governedEvaluateResource(k.db, {
+        userId: other.id,
+        resource: { type: "connector", id: connectorId, operation: "read" },
+        projectId: other.projectId,
+        base: { effect: "allow", ruleId: "g", reason: "granted", ruleChain: [] },
+        canQueue: true,
+      });
+      expect(d.effect).toBe("allow");
       expect(await count()).toBe(base + 1);
+    } finally {
+      await k.db.delete(resourceRateLimits).where(eq(resourceRateLimits.id, limit!.id));
+    }
+  });
+});
+
+describe("ADR-0251 hard windows: concurrent calls never overshoot a limit", () => {
+  it("twenty calls decided at the same moment against a limit of five: exactly five are allowed and five slots taken", async () => {
+    const solo = await k.person("hard-window");
+    const [limit] = await k.db
+      .insert(resourceRateLimits)
+      .values({ resourceType: "connector", connectorId, scope: "user", userId: solo.id, maxCalls: 5, windowSeconds: 3600 })
+      .returning();
+    try {
+      const decide = () =>
+        governedEvaluateResource(k.db, {
+          userId: solo.id,
+          resource: { type: "connector", id: connectorId, operation: "read" },
+          projectId: solo.projectId,
+          base: { effect: "allow", ruleId: "g", reason: "granted", ruleChain: [] },
+          canQueue: true,
+        });
+      const out = await Promise.all(Array.from({ length: 20 }, decide));
+      expect(out.filter((d) => d.effect === "allow").length).toBe(5);
+      const refused = out.filter((d) => d.effect === "deny");
+      expect(refused.length).toBe(15);
+      for (const d of refused) {
+        expect(d.ruleId).toBe(limit!.id);
+        expect(d.reason).toMatch(/rate limit reached .* 5\/5 calls in 3600s/);
+      }
+      const slots = await k.db.select().from(resourceRateReservations).where(eq(resourceRateReservations.userId, solo.id));
+      expect(slots.length).toBe(5);
+      expect(slots.every((r) => r.connectorId === connectorId && r.resourceType === "connector")).toBe(true);
+    } finally {
+      await k.db.delete(resourceRateLimits).where(eq(resourceRateLimits.id, limit!.id));
+    }
+  });
+
+  it("a call with no binding limit writes no slot, yet a limit added later still counts it; a refused call takes no slot", async () => {
+    const solo = await k.person("no-slot");
+    const g = await k.req("POST", "/v1/grants/connectors", k.BOOT, { userId: solo.id, connectorId, mode: "readwrite" });
+    expect(g.statusCode, g.body).toBeLessThan(300);
+    const slots = async () => (await k.db.select().from(resourceRateReservations).where(eq(resourceRateReservations.userId, solo.id))).length;
+    // a real call with no limit: one allowed decision row, no slot, no lock
+    expect((await invoke(solo, "read")).statusCode).toBe(200);
+    expect(await slots()).toBe(0);
+    const [limit] = await k.db
+      .insert(resourceRateLimits)
+      .values({ resourceType: "connector", connectorId, scope: "user", userId: solo.id, maxCalls: 2, windowSeconds: 3600 })
+      .returning();
+    try {
+      const count = async () =>
+        (await loadResourceRestrictions(k.db, { userId: solo.id, resource: { type: "connector", id: connectorId, operation: "read" } })).rateLimits.find(
+          (l) => l.id === limit!.id,
+        )!.currentCount;
+      // the limit added after the call counts it (from the audit trail, before the limit existed)
+      expect(await count()).toBe(1);
+      // refused by the attribution mandate before the rate step: no slot
+      const refused = await governedEvaluateResource(k.db, {
+        userId: solo.id,
+        resource: { type: "connector", id: connectorId, operation: "read" },
+        projectId: null,
+        base: { effect: "allow", ruleId: "g", reason: "granted", ruleChain: [] },
+        canQueue: true,
+      });
+      expect(refused.effect).toBe("deny");
+      expect(await slots()).toBe(0);
+      // the second call takes the last slot (reserved, and its decision row is not counted twice); the third is refused
+      expect((await invoke(solo, "read")).statusCode).toBe(200);
+      expect(await slots()).toBe(1);
+      expect(await count()).toBe(2);
+      const third = await invoke(solo, "read");
+      expect(third.statusCode, third.body).toBe(403);
+      expect(third.json().decision).toMatchObject({ effect: "deny", ruleId: limit!.id });
     } finally {
       await k.db.delete(resourceRateLimits).where(eq(resourceRateLimits.id, limit!.id));
     }

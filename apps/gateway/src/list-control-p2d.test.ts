@@ -282,6 +282,9 @@ describe("P2d: the usage ledger", () => {
     expect(Object.keys(body).sort()).toEqual(["events", "totals"]);
     expect(body.events).toHaveLength(5);
     expect(body.totals.events).toBe(A_USAGE);
+    // the seeded rows carry no project and none is refused: the flagged counts cover every row, not the page
+    expect(body.totals.unattributed).toBe(A_USAGE);
+    expect(body.totals.refused).toBe(0);
   });
 });
 
