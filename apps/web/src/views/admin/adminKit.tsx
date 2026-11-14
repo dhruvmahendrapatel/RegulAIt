@@ -527,6 +527,21 @@ export function RefusalList(props: { refusals: RowRefusal[] | undefined; truncat
 
 // ---- loading / error wrappers ---------------------------------------------
 
+/** a 403 on one part of a page the viewer may otherwise open: the server refused that one read for this account */
+export const isRefusal = (error: unknown): boolean => error instanceof ApiError && error.status === 403;
+
+/**
+ * The honest "not available to you" state (owner, #453, 2026-11-07): a section whose read the server refuses this
+ * viewer says so in words, never as a broken error, and never offers a Retry that cannot succeed.
+ */
+export function NotAvailableToYou(props: { what: string }) {
+  return (
+    <p className={v.hint} role="note" data-testid="not-available-to-you">
+      {props.what} is not available to you. The server refused this read for your account; it opens it to administrators and the people it names.
+    </p>
+  );
+}
+
 export function QueryGate(props: {
   loading: boolean;
   error: unknown;
