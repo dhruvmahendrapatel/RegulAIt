@@ -62,6 +62,7 @@ export const NO_REMOVE_BY_DESIGN = new Map([
   ["/v1/decisions", "signed approval decisions are evidence; a decision is superseded by a later one, never deleted"],
   ["/v1/runs", "a run is an execution record the audit trail and cost ledger point at"],
   ["/v1/evals/runs", "an evaluation run is a result record that model-risk sign-offs cite"],
+  ["/v1/model-artifacts/:x/lineage", "a model file's derivation is provenance evidence, recorded once and never edited or removed; it goes with the file when the file is deleted, and its audit row keeps the record (lane L7, P14)"],
   ["/v1/engine-runner/runs/:x/task/frames", "frames are the runner's output stream for one run, append-only"],
   ["/v1/governance/alerts/:x/remediation", "a remediation plan is part of the alert's record; the alert closes, the plan stays"],
   ["/v1/security/data-key/attestations", "key attestations are append-only evidence of who held the data key when"],
