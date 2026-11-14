@@ -426,7 +426,7 @@ test("zero live risks and unmeasured residual ratings do not imply assurance or 
       }),
     });
   });
-  await page.goto(`/ui/admin/governance/use-cases/${ID}`);
+  await page.goto(`/ui/admin/governance/use-cases/${ID}?tab=overview`);
   // ADR-0168: the lifecycle tracker derives the risks activity — an unrated residual is never "Complete"
   const risksActivity = page.getByRole("row").filter({ hasText: "Risks and safeguards" });
   await expect(risksActivity).toContainText("residual rated for 0 of 1");

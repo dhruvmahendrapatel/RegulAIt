@@ -148,6 +148,9 @@ export function registerOptimizationRoutes(app: FastifyInstance, db: Db) {
           outputTokens: sql<number>`coalesce(sum(${usageEvents.outputTokens}), 0)::int`,
           costUsd: sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8`,
           measuredCostSavedUsd: sql<number>`coalesce(sum(${usageEvents.measuredCostSavedUsd}), 0)::float8`,
+          // the rows the ledger flags (no project, refused), counted over every row so a folded list can still say so
+          unattributed: sql<number>`(count(*) filter (where ${usageEvents.projectId} is null))::int`,
+          refused: sql<number>`(count(*) filter (where ${usageEvents.refusal}))::int`,
         })
         .from(usageEvents)
         .where(where),
