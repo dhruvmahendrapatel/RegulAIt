@@ -19,7 +19,7 @@ import { TrainedDetectorsPanel } from "./TrainedDetectorsPanel";
  *    query over the same table every other governed decision lands in, and it
  *    carries counts only — never the matched content.
  */
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
@@ -34,8 +34,8 @@ import {
   Select,
   Table,
   Tabs,
+  TabPanel,
   Textarea,
-  tabIds,
 } from "../../../ui/kit";
 import { tabLabel, type Unresolved } from "../settings/postureTabs";
 import { QueryGate, optionEls, useAction, useAgents, useConnectors, useProjects } from "../adminKit";
@@ -112,7 +112,7 @@ const modeTone = (m: Mode) =>
   m === "block" ? "danger" : m === "warn" ? "warn" : m === "log" ? "info" : "neutral";
 
 /** I-2 (#453, pattern 5): one matrix row per configurable detector, joined to its resolved provenance */
-type Source = "floor" | "override" | "default" | "shipped";
+type Source = "floor" | "override" | "default" | "fallback" | "shipped";
 interface MatrixRow {
   detector: Detector;
   prov: Provenance | undefined;
@@ -122,6 +122,7 @@ const SOURCE_WORDS: Record<Source, string> = {
   floor: "Compliance floor of the project",
   override: "Override for the agent",
   default: "Deployment default",
+  fallback: "Fallback mode (the deployment default leaves this detector unset)",
   shipped: "Shipped default (no deployment default set)",
 };
 const PHASE_WORDS: Record<string, string> = { input: "a prompt on the way in", output: "a completion on the way out" };
@@ -139,15 +140,6 @@ function detectionContentUnresolved(q: { data?: { packs?: unknown; outboundAudie
   const u: Unresolved = { unknown: q.data.outboundAudienceEnforced === undefined ? 1 : 0, warnings: q.data.outboundAudienceEnforced === false ? 1 : 0 };
   for (const pack of packs) if (!pack.enabled || pack.rules === 0) u.warnings += 1;
   return u;
-}
-
-function GuardrailsPanel(props: { id: string; tab: string; children: ReactNode }) {
-  const ids = tabIds("guardrails", props.id);
-  return (
-    <div role="tabpanel" id={ids.panel} aria-labelledby={ids.tab} hidden={props.tab !== props.id}>
-      {props.children}
-    </div>
-  );
 }
 
 export default function GuardrailsPage() {
@@ -200,6 +192,12 @@ export default function GuardrailsPage() {
   const gateOpen = !info.isLoading && !config.isLoading && !(info.error ?? config.error);
   const overrideCount = (config.data?.overrides ?? []).length;
   const blockingByDefault = configurable.filter((d) => config.data?.orgModes?.[d.id] === "block").length;
+  // review of #692: the shipped posture is what the gateway reports (ADR-0181's GUARDRAIL_DEFAULT_MODES), never assumed
+  const shipped = config.data?.shippedDefaults ?? {};
+  const shippedRefusesNothing = !configurable.some((d) => shipped[d.id] === "block");
+  const shippedWords = `No deployment default has been set, so the shipped posture applies: ${configurable
+    .map((d) => `${d.id.replace(/_/g, " ")} ${shipped[d.id] ?? "not reported"}`)
+    .join(", ")}.${shippedRefusesNothing ? " Nothing is refused until a layer is turned up." : ""} Changing a layer is a deliberate act.`;
   const trained = useQuery({
     queryKey: ["admin", "guardrail-trained-detectors"],
     queryFn: () => api.get<{ detectors: unknown[] }>("/v1/guardrails/trained-detectors"),
@@ -220,9 +218,11 @@ export default function GuardrailsPage() {
             ? "floor"
             : prov.override && prov.effective === prov.override
               ? "override"
-              : config.data?.org
-                ? "default"
-                : "shipped";
+              : !config.data?.org
+                ? "shipped"
+                : config.data.org.modes?.[d.id] === undefined
+                  ? "fallback"
+                  : "default";
         return { detector: d, prov, source };
       })
     : undefined;
@@ -231,7 +231,7 @@ export default function GuardrailsPage() {
     <>
       <PageHeader
         title="Guardrails"
-        info={<p>Content-safety detectors evaluated at the same interception point, and with the same block / warn / log verbs, as PII enforcement — on the way in AND on the way out. Every detector shipped today is a deterministic local rule set, not a model: it catches literal phrasings, misses novel ones, and will occasionally fire on benign text. That is why the shipped posture is 'log', and why this page shows each detector's limits next to its switch.</p>}
+        info={<p>Content-safety detectors evaluated at the same interception point, and with the same block / warn / log verbs, as PII enforcement — on the way in AND on the way out. Every detector shipped today is a deterministic local rule set, not a model: it catches literal phrasings, misses novel ones, and will occasionally fire on benign text. The posture line below says what the shipped posture refuses, and this page shows each detector's limits next to its switch.</p>}
       />
       <div className={v.stack}>
         {/* while the settings have not loaded, the vendored content still shows, as it did above them before I-2 */}
@@ -249,14 +249,12 @@ export default function GuardrailsPage() {
             {config.data?.org ? (
               <Badge tone="ok">Deployment defaults set</Badge>
             ) : (
-              <Badge
-                tone="warn"
-                info="No deployment default has been set, so the shipped posture applies: every added layer observes in 'log' mode and refuses nothing. Turning a layer up is a deliberate act."
-              >
-                Shipped posture · nothing refused
+              <Badge tone={shippedRefusesNothing ? "warn" : "info"} info={shippedWords} infoLabel="the shipped posture">
+                {shippedRefusesNothing ? "Shipped posture · nothing refused" : "Shipped posture applies"}
               </Badge>
             )}
-            <Badge tone={blockingByDefault > 0 ? "danger" : "neutral"}>
+            {/* blocking is the secure state, so it is never shown as the bad one (review of #692) */}
+            <Badge tone={blockingByDefault > 0 ? "ok" : "warn"}>
               {`Blocking by default: ${blockingByDefault} of ${configurable.length}`}
             </Badge>
             <Badge tone="neutral">{`Overrides: ${overrideCount}`}</Badge>
@@ -274,24 +272,24 @@ export default function GuardrailsPage() {
             }
           >
             <div className={v.stack}>
-      <div className={a.formRow}>
-                    <Field label="Project (supplies the compliance floor)">
-                      <Select value={effProject} onChange={(e) => setEffProject(e.target.value)}>
-                        {optionEls(
-                          (projects.data?.projects ?? []).map((p) => ({ v: p.id, l: p.name })),
-                          "— unattributed —",
-                        )}
-                      </Select>
-                    </Field>
-                    <Field label="Agent (supplies any override)">
-                      <Select value={effAgent} onChange={(e) => setEffAgent(e.target.value)}>
-                        {optionEls(
-                          (agents.data?.agents ?? []).map((x) => ({ v: x.id, l: x.name })),
-                          "— none —",
-                        )}
-                      </Select>
-                    </Field>
-                  </div>
+              <div className={a.formRow}>
+                <Field label="Project (supplies the compliance floor)">
+                  <Select value={effProject} onChange={(e) => setEffProject(e.target.value)}>
+                    {optionEls(
+                      (projects.data?.projects ?? []).map((p) => ({ v: p.id, l: p.name })),
+                      "— unattributed —",
+                    )}
+                  </Select>
+                </Field>
+                <Field label="Agent (supplies any override)">
+                  <Select value={effAgent} onChange={(e) => setEffAgent(e.target.value)}>
+                    {optionEls(
+                      (agents.data?.agents ?? []).map((x) => ({ v: x.id, l: x.name })),
+                      "— none —",
+                    )}
+                  </Select>
+                </Field>
+              </div>
               {effective.error && !effective.data ? (
                 <ErrorState
                   title="Couldn't resolve what applies"
@@ -375,7 +373,7 @@ export default function GuardrailsPage() {
             label="Guardrail settings"
             idPrefix="guardrails"
             tabs={[
-              { id: "defaults", label: tabLabel("Deployment defaults", { unknown: 0, warnings: config.data?.org ? 0 : 1 }) },
+              { id: "defaults", label: tabLabel("Deployment defaults", { unknown: 0, warnings: !config.data?.org && shippedRefusesNothing ? 1 : 0 }) },
               { id: "overrides", label: `Overrides (${overrideCount})` },
               { id: "trained", label: tabLabel("Trained detectors", trainedUnresolved) },
               { id: "content", label: tabLabel("Detection content", contentUnresolved) },
@@ -386,14 +384,14 @@ export default function GuardrailsPage() {
             onChange={setTab}
           />
           {/* every panel stays mounted (hidden when not selected), so a draft default, override or sample survives a tab switch */}
-          <GuardrailsPanel id="defaults" tab={tab}>
+          <TabPanel idPrefix="guardrails" id="defaults" active={tab}>
             <Card title="Deployment defaults">
               <div className={v.faint} style={{ marginBottom: "var(--s2)" }}>
                 {config.data?.org ? (
                   "These apply to every governed call unless an override or a compliance profile says otherwise."
                 ) : (
                   // the chip itself is in the posture line above the tabs; its explanation is spelt out here
-                  "No deployment default has been set, so the shipped posture applies: every added layer observes in 'log' mode and refuses nothing. Turning a layer up is a deliberate act."
+                  shippedWords
                 )}
               </div>
               <form
@@ -475,9 +473,9 @@ export default function GuardrailsPage() {
                 )}
               </form>
             </Card>
-          </GuardrailsPanel>
+          </TabPanel>
 
-          <GuardrailsPanel id="overrides" tab={tab}>
+          <TabPanel idPrefix="guardrails" id="overrides" active={tab}>
             <Card title="Per-agent / per-connector overrides">
               <form
                 className={v.stack}
@@ -579,18 +577,18 @@ export default function GuardrailsPage() {
                 />
               )}
             </Card>
-          </GuardrailsPanel>
+          </TabPanel>
 
           {/* ---------------- trained detectors (ADR-0220) ---------------- */}
-          <GuardrailsPanel id="trained" tab={tab}>
+          <TabPanel idPrefix="guardrails" id="trained" active={tab}>
             <TrainedDetectorsPanel />
-          </GuardrailsPanel>
+          </TabPanel>
 
-          <GuardrailsPanel id="content" tab={tab}>
+          <TabPanel idPrefix="guardrails" id="content" active={tab}>
             <DetectionContentPanel />
-          </GuardrailsPanel>
+          </TabPanel>
 
-          <GuardrailsPanel id="sample" tab={tab}>
+          <TabPanel idPrefix="guardrails" id="sample" active={tab}>
             <Card
               title="Try a sample"
               info={
@@ -637,9 +635,9 @@ export default function GuardrailsPage() {
                 </div>
               </div>
             </Card>
-          </GuardrailsPanel>
+          </TabPanel>
 
-          <GuardrailsPanel id="decisions" tab={tab}>
+          <TabPanel idPrefix="guardrails" id="decisions" active={tab}>
             <Card title="Recent guardrail decisions">
               <div className={v.row} style={{ marginBottom: "var(--s2)" }}>
                 <Field label="Outcome">
@@ -703,7 +701,7 @@ export default function GuardrailsPage() {
                   ]}
                 />
             </Card>
-          </GuardrailsPanel>
+          </TabPanel>
         </QueryGate>
       </div>
     </>

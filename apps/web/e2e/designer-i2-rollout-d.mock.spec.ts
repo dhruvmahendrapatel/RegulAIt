@@ -55,25 +55,27 @@ const DETECTORS = {
   detectors: [
     { id: "prompt_injection", tier: "rules", phases: ["input"], summary: "Prompt injection phrasings", limits: "Literal phrasings only.", ruleCount: 12, configurable: true },
     { id: "jailbreak", tier: "rules", phases: ["input"], summary: "Jailbreak phrasings", limits: "Misses novel jailbreaks.", ruleCount: 9, configurable: true },
-    { id: "harmful_output", tier: "rules", phases: ["output"], summary: "Harmful completions", limits: "Fires on some benign text.", ruleCount: 7, configurable: true },
+    { id: "toxicity", tier: "rules", phases: ["output"], summary: "Toxic completions", limits: "Fires on some benign text.", ruleCount: 7, configurable: true },
   ],
-  shippedDefaults: { prompt_injection: "log", jailbreak: "log", harmful_output: "log" },
+  // the gateway's shipped posture (ADR-0181 GUARDRAIL_DEFAULT_MODES), as the real API returns it (review of #692)
+  shippedDefaults: { prompt_injection: "block", jailbreak: "block", toxicity: "warn" },
   note: "",
 };
 const CONFIG = {
   org: null,
-  orgModes: { prompt_injection: "log", jailbreak: "log", harmful_output: "log" },
-  shippedDefaults: { prompt_injection: "log", jailbreak: "log", harmful_output: "log" },
+  // with no deployment default, the gateway reports the shipped modes as orgModes (apps/gateway/src/guardrails.ts)
+  orgModes: { prompt_injection: "block", jailbreak: "block", toxicity: "warn" },
+  shippedDefaults: { prompt_injection: "block", jailbreak: "block", toxicity: "warn" },
   overrides: [
     { id: U(3), scope: "agent", scopeId: AGENT.id, modes: { prompt_injection: "warn" }, targetName: AGENT.name, customTerms: {}, updatedAt: T },
   ],
 };
 const EFFECTIVE = {
-  modes: { prompt_injection: "warn", jailbreak: "block", harmful_output: "log" },
+  modes: { prompt_injection: "warn", jailbreak: "block", toxicity: "block" },
   provenance: [
-    { detector: "prompt_injection", orgDefault: "log", override: "warn", complianceFloor: null, effective: "warn" },
-    { detector: "jailbreak", orgDefault: "log", override: null, complianceFloor: "block", effective: "block" },
-    { detector: "harmful_output", orgDefault: "log", override: null, complianceFloor: null, effective: "log" },
+    { detector: "prompt_injection", orgDefault: "block", override: "warn", complianceFloor: null, effective: "warn" },
+    { detector: "jailbreak", orgDefault: "block", override: null, complianceFloor: null, effective: "block" },
+    { detector: "toxicity", orgDefault: "warn", override: null, complianceFloor: "block", effective: "block" },
   ],
   active: true,
   blocksInput: true,
@@ -101,8 +103,13 @@ test.describe("I-2 rollout D: Guardrails", () => {
     await page.goto("/ui/admin/guardrails");
     await expect(page.getByRole("heading", { name: "Guardrails", level: 1 })).toBeVisible();
     const posture = page.getByRole("group", { name: "Guardrail posture" });
-    await expect(posture.getByText("Shipped posture · nothing refused")).toBeVisible();
-    await expect(posture.getByText("Blocking by default: 0 of 3")).toBeVisible();
+    // the posture follows the gateway's shipped modes: two detectors refuse by default (review of #692)
+    await expect(posture.getByText("Shipped posture applies")).toBeVisible();
+    await expect(posture.getByText("nothing refused")).toHaveCount(0);
+    await expect(posture.getByText("Blocking by default: 2 of 3")).toBeVisible();
+    await posture.getByRole("button", { name: /the shipped posture/ }).click();
+    await expect(page.getByText("the shipped posture applies: prompt injection block, jailbreak block, toxicity warn.", { exact: false }).first()).toBeVisible();
+    await page.keyboard.press("Escape");
     await expect(posture.getByText("Overrides: 1")).toBeVisible();
 
     const matrix = page.locator("[data-rg-card]").filter({ hasText: "What actually applies (and why)" });
@@ -111,18 +118,20 @@ test.describe("I-2 rollout D: Guardrails", () => {
     await expect(pi.getByText("warn", { exact: true })).toBeVisible();
     await expect(pi.getByText("Override for the agent")).toBeVisible();
     await expect(pi.getByText("A prompt on the way in that it matches.", { exact: false })).toBeVisible();
+    const tx = matrix.getByRole("row").filter({ hasText: "toxicity" });
+    await expect(tx.getByText("block", { exact: true })).toBeVisible();
+    await expect(tx.getByText("Compliance floor of the project")).toBeVisible();
+    await expect(tx.getByText(/Nothing on this page can lower it/)).toBeVisible();
     const jb = matrix.getByRole("row").filter({ hasText: "jailbreak" });
     await expect(jb.getByText("block", { exact: true })).toBeVisible();
-    await expect(jb.getByText("Compliance floor of the project")).toBeVisible();
-    await expect(jb.getByText(/Nothing on this page can lower it/)).toBeVisible();
-    const ho = matrix.getByRole("row").filter({ hasText: "harmful output" });
-    await expect(ho.getByText("Shipped default (no deployment default set)")).toBeVisible();
+    await expect(jb.getByText("Shipped default (no deployment default set)")).toBeVisible();
     // each detector's limits stay one (i) away, in the matrix as well as next to its switch
     await expect(matrix.getByRole("button", { name: /the limits of jailbreak/ })).toBeVisible();
     await expect(matrix.getByText(EFFECTIVE.streamingNote)).toBeVisible();
 
     // a tab label names what is unresolved inside it
-    await expect(page.getByRole("tab", { name: "Deployment defaults · 1 warning" })).toBeVisible();
+    // the shipped posture refuses two detectors, so an unset default is not a warning
+    await expect(page.getByRole("tab", { name: "Deployment defaults", exact: true })).toBeVisible();
     await expect(page.getByRole("tab", { name: "Detection content · 1 warning" })).toBeVisible();
     await expect(page.getByRole("tab", { name: "Overrides (1)" })).toBeVisible();
 
@@ -171,6 +180,47 @@ test.describe("I-2 rollout D: Guardrails", () => {
     await page.goto("/ui/admin/guardrails");
     await expect(page.getByRole("tab", { name: "Detection content · 1 unknown" })).toBeVisible();
   });
+
+  test("a shipped posture that refuses nothing says so, and the defaults tab warns (review of #692)", async ({ page }) => {
+    const LOG = { prompt_injection: "log", jailbreak: "log", toxicity: "log" };
+    await mockApi(page, {
+      ...GUARDRAILS,
+      "GET /v1/guardrails/detectors": { ...DETECTORS, shippedDefaults: LOG },
+      "GET /v1/guardrails/config": { ...CONFIG, orgModes: LOG, shippedDefaults: LOG },
+    });
+    await page.goto("/ui/admin/guardrails");
+    const posture = page.getByRole("group", { name: "Guardrail posture" });
+    await expect(posture.getByText("Shipped posture · nothing refused")).toBeVisible();
+    await expect(posture.getByText("Blocking by default: 0 of 3")).toBeVisible();
+    await expect(page.getByRole("tab", { name: "Deployment defaults · 1 warning" })).toBeVisible();
+  });
+
+  test("a detector the deployment default leaves unset is named as the fallback, not the default (review of #692)", async ({ page }) => {
+    await mockApi(page, {
+      ...GUARDRAILS,
+      "GET /v1/guardrails/config": {
+        ...CONFIG,
+        org: { id: U(4), scope: "org", scopeId: null, modes: { prompt_injection: "block", toxicity: "warn" }, customTerms: {}, updatedAt: T },
+      },
+    });
+    await page.goto("/ui/admin/guardrails");
+    const matrix = page.locator("[data-rg-card]").filter({ hasText: "What actually applies (and why)" });
+    // jailbreak is absent from the deployment default's modes, so it runs on the fallback mode
+    await expect(matrix.getByRole("row").filter({ hasText: "jailbreak" }).getByText("Fallback mode (the deployment default leaves this detector unset)")).toBeVisible();
+    await expect(matrix.getByRole("row").filter({ hasText: "toxicity" }).getByText("Compliance floor of the project")).toBeVisible();
+    await expect(page.getByRole("group", { name: "Guardrail posture" }).getByText("Deployment defaults set")).toBeVisible();
+  });
+
+  for (const width of [390, 375]) {
+    test(`the matrix adds no horizontal page scroll at ${width} px (review of #692)`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 800 });
+      await mockApi(page, GUARDRAILS);
+      await page.goto("/ui/admin/guardrails");
+      await expect(page.getByText(EFFECTIVE.streamingNote)).toBeVisible();
+      const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+      expect(overflow).toBeLessThanOrEqual(0);
+    });
+  }
 
   test("height at 1440 px", async ({ page }, info) => {
     await mockApi(page, GUARDRAILS);
