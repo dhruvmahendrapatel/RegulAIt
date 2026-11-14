@@ -1,0 +1,26 @@
+/* Executive dashboard (approved #453 mockup, on /admin/posture): the five-tile headline row,
+ * the header action group and the display-only "use cases by status" bars. Tokens only. */
+.actions { display: inline-flex; flex-wrap: wrap; gap: var(--s1); }
+.kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--s2); }
+.kpis > * { min-width: 0; }
+/* tablet: 3 + 2, each row full width */
+@media (max-width: 1100px) {
+  .kpis { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+  .kpis > * { grid-column: span 2; }
+  .kpis > :nth-child(n + 4) { grid-column: span 3; }
+}
+@media (max-width: 600px) {
+  .kpis { grid-template-columns: minmax(0, 1fr); }
+  .kpis > *, .kpis > :nth-child(n + 4) { grid-column: auto; }
+}
+@media print { .kpis { grid-template-columns: repeat(5, minmax(0, 1fr)); } .kpis > * { grid-column: auto; } }
+
+.bars { list-style: none; margin: var(--s2) 0 0; padding: 0; display: grid; gap: var(--s1); }
+.barRow { display: grid; grid-template-columns: 7.5rem minmax(0, 1fr) 2.5rem; align-items: center; gap: var(--s1); }
+.barLabel { color: var(--text-dim); font-size: var(--text-sm); }
+.barValue { text-align: right; font-variant-numeric: tabular-nums; }
+.barTrack { display: block; height: 0.5rem; border-radius: var(--radius-sm); background: var(--surface-2); overflow: hidden; }
+.barFill { display: block; height: 100%; background: var(--primary); }
+.barFill[data-stage="approved"] { background: var(--ok); }
+.barFill[data-stage="rejected"] { background: var(--danger); }
+.barFill[data-stage="retired"] { background: var(--border-strong); }
