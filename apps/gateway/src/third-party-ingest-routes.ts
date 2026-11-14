@@ -327,6 +327,12 @@ export function registerThirdPartyIngestRoutes(app: FastifyInstance, db: Db, opt
     const ingest = async (req: FastifyRequest, reply: FastifyReply, wire: "jsonl" | "otlp") => {
       const deny = (objectId: string | null, code: string, detail: Record<string, unknown> = {}) =>
         audit(db, NIL_UUID, objectId, THIRD_PARTY_INGEST_RULE_IDS.batchRefused, "deny", `a third-party evidence batch was refused: ${code} (ADR-0261)`, { code, attribution: "third_party", wire, ...detail });
+      // a compressed body is refused by name, not decoded as garbage (review of #835): exporters default to gzip,
+      // and a plain 400 would drop their batch silently. OTLP exporters set `compression: none` (ADR-0302).
+      const contentEncoding = String(req.headers["content-encoding"] ?? "identity").trim().toLowerCase();
+      if (contentEncoding !== "identity") {
+        return refuse(reply, 415, "unsupported_content_encoding", "send the body uncompressed (exporter setting compression: none)");
+      }
       // each route takes only its own encodings
       const otlpEncoding = otlpEncodingOf(req.headers["content-type"]);
       if (wire === "otlp" && !otlpEncoding) {
@@ -382,7 +388,7 @@ export function registerThirdPartyIngestRoutes(app: FastifyInstance, db: Db, opt
       } catch (e) {
         if (e instanceof ThirdPartyBatchRefused) {
           await deny(source.id, e.code, { batchSha256 });
-          return refuse(reply, e.code === "too_many_records" ? 413 : 400, e.code);
+          return refuse(reply, e.code === "too_many_records" || e.code === "batch_too_large" ? 413 : 400, e.code);
         }
         throw e;
       }

@@ -163,7 +163,7 @@ export interface ParsedThirdPartyBatch {
 }
 
 export class ThirdPartyBatchRefused extends Error {
-  constructor(readonly code: "too_many_records" | "empty_batch" | "invalid_encoding") {
+  constructor(readonly code: "too_many_records" | "batch_too_large" | "empty_batch" | "invalid_encoding") {
     super(code);
   }
 }
@@ -309,11 +309,24 @@ interface OtlpKeyValue {
 }
 
 const MAX_ATTRIBUTES_PER_RECORD = 64;
+/**
+ * The longest string attribute an OTLP record may carry: the longest string the JSONL schema accepts
+ * (`defenseclaw.guardrail.reason`). A longer value is dropped here, before it is copied or serialised, so one huge
+ * attribute never inflates the decoded batch (security review of #835).
+ */
+export const OTLP_MAX_STRING_CHARS = 4096;
+/** the schema's `host.name` bound: a resource's host name is copied into each record only within it */
+const OTLP_MAX_HOST_NAME_CHARS = 253;
+/**
+ * The decoded JSONL may be at most this large: twice the wire limit, which leaves room for JSON's key and quoting
+ * overhead over protobuf and still bounds any amplification near the request size.
+ */
+export const OTLP_MAX_DECODED_BYTES = 2 * THIRD_PARTY_INGEST_MAX_BODY_BYTES;
 
 /** a scalar only (an array element); nested arrays, kvlists and bytes are dropped without being walked */
 function otlpScalar(v: OtlpAnyValue | undefined): string | number | boolean | undefined {
   if (!v || typeof v !== "object") return undefined;
-  if (typeof v.stringValue === "string") return v.stringValue;
+  if (typeof v.stringValue === "string") return v.stringValue.length <= OTLP_MAX_STRING_CHARS ? v.stringValue : undefined;
   if (typeof v.boolValue === "boolean") return v.boolValue;
   if (typeof v.intValue === "string" || typeof v.intValue === "number") {
     const n = Number(v.intValue);
@@ -326,7 +339,7 @@ function otlpScalar(v: OtlpAnyValue | undefined): string | number | boolean | un
 /** a scalar, or a flat array of scalars (rule ids); kvlist and bytes values are dropped, never carried */
 function otlpValue(v: OtlpAnyValue | undefined): string | number | boolean | Array<string | number | boolean> | undefined {
   if (!v || typeof v !== "object") return undefined;
-  if (typeof v.stringValue === "string") return v.stringValue;
+  if (typeof v.stringValue === "string") return v.stringValue.length <= OTLP_MAX_STRING_CHARS ? v.stringValue : undefined;
   if (typeof v.boolValue === "boolean") return v.boolValue;
   if (typeof v.intValue === "string" || typeof v.intValue === "number") {
     const n = Number(v.intValue);
@@ -349,7 +362,7 @@ function otlpAttributes(list: unknown, into: Record<string, unknown>): void {
   if (!Array.isArray(list)) return;
   for (const kv of list.slice(0, MAX_ATTRIBUTES_PER_RECORD) as OtlpKeyValue[]) {
     if (!kv || typeof kv.key !== "string" || kv.key.length === 0 || kv.key.length > 128) continue;
-    if (kv.key in into) continue;
+    if (Object.hasOwn(into, kv.key)) continue;
     const v = otlpValue(kv.value);
     if (v !== undefined) into[kv.key] = v;
   }
@@ -378,19 +391,25 @@ function nanosToIso(v: unknown): string | undefined {
  * over this canonical line, not over wire bytes (protobuf has no per-record byte range worth pinning).
  */
 export function otlpLogsRequestToJsonl(request: unknown): Uint8Array {
-  const lines: string[] = [];
+  const encoder = new TextEncoder();
+  const lines: Uint8Array[] = [];
+  let decodedBytes = 0;
   const resourceLogs = (request as { resourceLogs?: unknown })?.resourceLogs;
   if (Array.isArray(resourceLogs)) {
     outer: for (const rl of resourceLogs as Array<{ resource?: { attributes?: unknown }; scopeLogs?: unknown }>) {
-      const resource: Record<string, unknown> = {};
+      // null-prototype maps: an attribute named `__proto__` is an ordinary key, never the object's prototype
+      const resource: Record<string, unknown> = Object.create(null);
       otlpAttributes(rl?.resource?.attributes, resource);
       if (!Array.isArray(rl?.scopeLogs)) continue;
       for (const sl of rl.scopeLogs as Array<{ logRecords?: unknown }>) {
         if (!Array.isArray(sl?.logRecords)) continue;
         for (const lr of sl.logRecords as Array<Record<string, unknown>>) {
-          const flat: Record<string, unknown> = {};
+          const flat: Record<string, unknown> = Object.create(null);
           otlpAttributes(lr?.attributes, flat);
-          if (flat["host.name"] === undefined && typeof resource["host.name"] === "string") flat["host.name"] = resource["host.name"];
+          const resourceHost = resource["host.name"];
+          if (flat["host.name"] === undefined && typeof resourceHost === "string" && resourceHost.length <= OTLP_MAX_HOST_NAME_CHARS) {
+            flat["host.name"] = resourceHost;
+          }
           if (flat.timestamp === undefined) {
             const ts = nanosToIso(lr?.timeUnixNano) ?? nanosToIso(lr?.observedTimeUnixNano);
             if (ts) flat.timestamp = ts;
@@ -399,14 +418,25 @@ export function otlpLogsRequestToJsonl(request: unknown): Uint8Array {
             const sev = lr.severityText.trim().toUpperCase();
             if ((DEFENSECLAW_SEVERITIES as readonly string[]).includes(sev)) flat.severity = sev;
           }
-          lines.push(JSON.stringify(flat));
+          const line = encoder.encode(JSON.stringify(flat));
+          decodedBytes += line.length + 1;
+          // the decoded batch stays near the wire batch: past the bound the whole batch is refused (413)
+          if (decodedBytes > OTLP_MAX_DECODED_BYTES) throw new ThirdPartyBatchRefused("batch_too_large");
+          lines.push(line);
           // one past the cap is enough for the parser to refuse the batch as too large
           if (lines.length > THIRD_PARTY_INGEST_MAX_RECORDS) break outer;
         }
       }
     }
   }
-  return new TextEncoder().encode(lines.join("\n"));
+  const out = new Uint8Array(Math.max(0, decodedBytes - 1));
+  let at = 0;
+  for (const [i, line] of lines.entries()) {
+    if (i > 0) out[at++] = 0x0a;
+    out.set(line, at);
+    at += line.length;
+  }
+  return out;
 }
 
 /** the window check, against a clock the caller supplies (the database's: M-075) */

@@ -6,7 +6,14 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { auditLog, createDb, desc, discoveryPseudonymKeys, eq, runMigrations, thirdPartyIngestRecords, type Db } from "@regulait/db";
-import { DEFENSECLAW_INGEST_PATH, DEFENSECLAW_OTLP_LOGS_PATH, otlpLogsRequestToJsonl } from "@regulait/shared";
+import {
+  DEFENSECLAW_INGEST_PATH,
+  DEFENSECLAW_OTLP_LOGS_PATH,
+  OTLP_MAX_DECODED_BYTES,
+  OTLP_MAX_STRING_CHARS,
+  ThirdPartyBatchRefused,
+  otlpLogsRequestToJsonl,
+} from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { grantStepUpForTest, stepUpRequest } from "./testing/step-up-grant.js";
@@ -104,6 +111,47 @@ describe("ADR-0302 OTLP intake: the mapping", () => {
   });
 });
 
+describe("ADR-0302 OTLP intake: the decoded batch is bounded (security review of #835)", () => {
+  it("a huge resource host.name is not copied into every record: the output stays near the input size", () => {
+    const huge = "h".repeat(900_000);
+    const req = { resourceLogs: [{ resource: { attributes: [str("host.name", huge)] }, scopeLogs: [{ logRecords: Array.from({ length: 600 }, () => ({})) }] }] };
+    const wire = Buffer.byteLength(JSON.stringify(req));
+    const out = otlpLogsRequestToJsonl(req);
+    expect(out.byteLength).toBeLessThan(wire / 10);
+    expect(new TextDecoder().decode(out)).not.toContain("hhhh");
+  });
+
+  it("an attribute string past the longest schema string is dropped before it is copied", () => {
+    const out = new TextDecoder().decode(otlpLogsRequestToJsonl(request([logRecord("long", { attributes: [str("defenseclaw.guardrail.reason", "r".repeat(OTLP_MAX_STRING_CHARS + 1))] })])));
+    expect(JSON.parse(out)).not.toHaveProperty("defenseclaw.guardrail.reason");
+    const ok = new TextDecoder().decode(otlpLogsRequestToJsonl(request([logRecord("ok", { attributes: [str("defenseclaw.guardrail.reason", "r".repeat(OTLP_MAX_STRING_CHARS))] })])));
+    expect(JSON.parse(ok)["defenseclaw.guardrail.reason"]).toHaveLength(OTLP_MAX_STRING_CHARS);
+  });
+
+  it("a batch that would decode past twice the wire limit is refused as batch_too_large", () => {
+    const big = "x".repeat(OTLP_MAX_STRING_CHARS);
+    const many = Array.from({ length: 512 }, (_, i) => ({ attributes: [str("record_id", `r${i}`), str("defenseclaw.guardrail.reason", big)] }));
+    let refused: unknown;
+    try {
+      otlpLogsRequestToJsonl({ resourceLogs: [{ scopeLogs: [{ logRecords: many }] }] });
+    } catch (e) {
+      refused = e;
+    }
+    expect(refused).toBeInstanceOf(ThirdPartyBatchRefused);
+    expect((refused as ThirdPartyBatchRefused).code).toBe("batch_too_large");
+    expect(OTLP_MAX_DECODED_BYTES).toBe(2 * 1024 * 1024);
+  });
+
+  it("an attribute named __proto__ is an ordinary key, never a prototype", () => {
+    const out = new TextDecoder().decode(
+      otlpLogsRequestToJsonl(request([logRecord("proto", { attributes: [{ key: "__proto__", value: { arrayValue: { values: [{ stringValue: "x" }] } } }] })])),
+    );
+    const line = JSON.parse(out);
+    expect(line.record_id).toBe("proto");
+    expect(Object.getPrototypeOf({})).toBe(Object.prototype);
+  });
+});
+
 describe("ADR-0302 OTLP intake: the route", () => {
   it("takes only the source's token", async () => {
     const res = await post(DEFENSECLAW_OTLP_LOGS_PATH, protobufBody([logRecord(rid("auth"))]), "application/x-protobuf", "rgti_" + "0".repeat(64));
@@ -158,13 +206,48 @@ describe("ADR-0302 OTLP intake: the route", () => {
     let deep: Record<string, unknown> = { stringValue: "leaf" };
     for (let i = 0; i < 30; i += 1) deep = { arrayValue: { values: [deep] } };
     const res = await post(DEFENSECLAW_OTLP_LOGS_PATH, protobufBody([logRecord(rid("deep"), { attributes: [{ key: "x", value: deep }] })]), "application/x-protobuf");
-    expect([200, 400]).toContain(res.statusCode);
-    if (res.statusCode === 200) expect(await db.select().from(thirdPartyIngestRecords).where(eq(thirdPartyIngestRecords.recordId, rid("deep")))).toHaveLength(1);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(await db.select().from(thirdPartyIngestRecords).where(eq(thirdPartyIngestRecords.recordId, rid("deep")))).toHaveLength(1);
+  });
+
+  it("nesting past the decoder's recursion limit is refused as invalid_encoding", async () => {
+    // protobufjs will not ENCODE this deep, so the wire bytes are written by hand (field numbers from the vendored
+    // v1.9.0 protos: AnyValue.array_value = 5, ArrayValue.values = 1, KeyValue.key = 1 / value = 2,
+    // LogRecord.attributes = 6, ScopeLogs.log_records = 2, ResourceLogs.scope_logs = 2, request.resource_logs = 1)
+    const varint = (n: number) => {
+      const out: number[] = [];
+      while (n > 0x7f) {
+        out.push((n & 0x7f) | 0x80);
+        n >>>= 7;
+      }
+      out.push(n);
+      return out;
+    };
+    const field = (tag: number, body: number[]) => [tag, ...varint(body.length), ...body];
+    let any = field(0x0a, [...Buffer.from("leaf")]); // AnyValue{string_value}
+    for (let i = 0; i < 80; i += 1) any = field(0x2a, field(0x0a, any)); // AnyValue{array_value{values: any}}
+    const kv = [...field(0x0a, [...Buffer.from("x")]), ...field(0x12, any)];
+    const wire = Buffer.from(field(0x0a, field(0x12, field(0x12, field(0x32, kv)))));
+    const res = await post(DEFENSECLAW_OTLP_LOGS_PATH, wire, "application/x-protobuf");
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("invalid_encoding");
+  });
+
+  it("a compressed body is refused by name (415), never decoded", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: DEFENSECLAW_OTLP_LOGS_PATH,
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/x-protobuf", "content-encoding": "gzip" },
+      payload: protobufBody([logRecord(rid("gz"))]),
+    });
+    expect(res.statusCode).toBe(415);
+    expect(res.json().error).toBe("unsupported_content_encoding");
   });
 
   it("more than 512 records in one export is refused as too large", async () => {
     const many = Array.from({ length: 513 }, (_, i) => logRecord(rid(`m${i}`)));
     const res = await post(DEFENSECLAW_OTLP_LOGS_PATH, protobufBody(many), "application/x-protobuf");
     expect(res.statusCode).toBe(413);
+    expect(res.json().error).toBe("too_many_records");
   });
 });

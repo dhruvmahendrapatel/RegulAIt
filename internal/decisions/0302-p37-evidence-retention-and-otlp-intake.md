@@ -69,6 +69,20 @@ of its own.
    are not retried by an exporter, while 429 (with `Retry-After`) and 503 are retried.
 5. **Each route takes its own encodings.** The OTLP route refuses anything but `application/x-protobuf` and
    `application/json` (415). The JSONL route refuses `application/x-protobuf` and names the OTLP path.
+6. **Uncompressed bodies only.** Both routes refuse any `Content-Encoding` other than `identity` with 415
+   `unsupported_content_encoding`, instead of decoding a gzipped body into a misleading 400. Exporters must be set to
+   `compression: none`.
+7. **The decoded batch is bounded, not only the wire batch (security review of #835).** OTLP lets one resource
+   attribute apply to every record, so a 900 KB resource `host.name` copied into 600 records once decoded to about
+   460 MB. Three bounds now apply before anything is copied or serialised:
+   - an attribute string longer than 4096 characters, the longest string the JSONL schema accepts, is dropped;
+   - a resource `host.name` is copied into a record only when it is within the schema's 253 characters;
+   - the decoded JSONL may total at most twice the 1 MiB wire limit, and past that the whole batch is refused with
+     413 `batch_too_large`.
+
+   The attribute maps have no prototype, so an attribute named `__proto__` is an ordinary key.
+   Open, non-blocking: batches refused this way don't count toward the per-source hourly limit, which counts stored
+   records only.
 
 The attribute mapping is written from the docs, like ADR-0261's JSONL mapping, and is pinned by synthetic exports.
 Checking it against a real captured DefenseClaw OTLP export before a customer install stays open, as it does for JSONL.
