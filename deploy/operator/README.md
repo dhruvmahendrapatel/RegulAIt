@@ -33,6 +33,16 @@ reconcile, when the operator's install-secrets claim uses the cluster's default 
 or was created on a class other than the one now named (`ClaimClassDiffers`). The claim holds signing keys
 unencrypted.
 
+The other informational conditions (none of them hold `Ready`):
+
+| Condition | Meaning |
+|---|---|
+| `PublicEgress` | `True` (`PublicEgressOpen`), with a `Warning` event on every reconcile, while `egress.allowPublicEgress` or a non-private `allowedCIDRs`/`databaseCIDRs` entry is in use. |
+| `ImageProvenance` | `False` (`DigestNotSigned`) until a bundle schema signs the image digest. The message names what limits the digest instead: `image.allowedRegistries` and who may edit the resource. An empty allow-list also raises a `NoRegistryAllowList` warning. |
+| `ReleaseKeyring` | `False` (`DevelopmentKeysOnly`) while every compiled-in key is a development key (`*-dev-*`). |
+
+Condition and event messages are cut at 1024 bytes, because manifest strings are untrusted.
+
 ## Security defaults
 
 - Every pod runs non-root with a read-only root filesystem, every capability dropped, `RuntimeDefault` seccomp, no
@@ -43,7 +53,15 @@ unencrypted.
 - The operator holds **no direct Secret permission**; the gateway reads Secrets through `secretKeyRef`. Because it can
   create pods, its workload rights still imply read access to the Secrets in the one namespace it manages.
 - Until the bundle schema carries image digests (ADR-0304 owner question 1), the signature gates the version label,
-  not the image that runs. `allowedRegistries` and the namespace's RBAC are the controls for the digest.
+  not the image that runs. `allowedRegistries` and the namespace's RBAC are the controls for the digest. Until then,
+  **the right to edit a `RegulaitInstallation` is the right to deploy any image from an allowed registry with the
+  gateway's database URL and data key**: grant it as such. `Ready` and `ImageProvenance` say this in their messages.
+- Egress (ADR-0180): no list may overlap a link-local range or a cloud metadata address (`169.254.0.0/16`,
+  `fe80::/10`, `fd00:ec2::254`), in any mode. `egress.dns.cidrs` takes private ranges and single link-local
+  addresses only (NodeLocal DNSCache), since it opens port 53 alone. `air_gapped` takes private ranges only. Public
+  egress in `byoc` is allowed but reported (`PublicEgress`).
+- Downgrade protection compares against `status.installedVersion`. Anyone who can patch
+  `regulaitinstallations/status` can clear it, so that right belongs to the operator alone.
 - Metrics are off unless `--metrics-bind-address` is set, and then they are served over HTTPS behind authentication and
   authorization. Turning them on needs a ClusterRole for `tokenreviews` and `subjectaccessreviews`, which is not shipped.
 - One gateway replica until P2 (HA) lands; the schema refuses more.

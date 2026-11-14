@@ -85,7 +85,11 @@ spec:
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
     # The API server's address is cluster-specific; narrow this to it (for example the kubernetes Service
-    # endpoints) where your CNI supports it.
+    # endpoints) where your CNI supports it, for example:
+    #   - to:
+    #       - ipBlock: { cidr: 10.0.0.1/32 }      # `kubectl get endpoints kubernetes -n default`
+    #     ports:
+    #       - { protocol: TCP, port: 6443 }
     - ports:
         - { protocol: TCP, port: 443 }
         - { protocol: TCP, port: 6443 }

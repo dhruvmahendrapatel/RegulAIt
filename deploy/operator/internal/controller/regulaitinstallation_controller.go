@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -44,7 +46,8 @@ type Reconciler struct {
 // +kubebuilder:rbac:groups=deploy.regulait.ai,namespace=regulait-system,resources=regulaitinstallations,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=deploy.regulait.ai,namespace=regulait-system,resources=regulaitinstallations/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=apps,namespace=regulait-system,resources=deployments,verbs=get;list;watch;create;update;patch
-// +kubebuilder:rbac:groups=batch,namespace=regulait-system,resources=jobs;cronjobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=batch,namespace=regulait-system,resources=jobs,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=batch,namespace=regulait-system,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,namespace=regulait-system,resources=networkpolicies,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",namespace=regulait-system,resources=services;serviceaccounts,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",namespace=regulait-system,resources=persistentvolumeclaims,verbs=get;list;watch;create
@@ -65,7 +68,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	in.Status.ObservedGeneration = in.Generation
 	ready := metav1.ConditionTrue
-	reason, msg := "Converged", "the installation runs the verified version"
+	// Honest about what the signature covers: bundle schema /1 signs the version, not the image digest.
+	reason, msg := "Converged", fmt.Sprintf("version %s runs; its manifest signature is verified, but bundle schema /1 does not sign the image digest (see %s)", in.Status.InstalledVersion, v1alpha1.ConditionImageProvenance)
 	for _, t := range []string{v1alpha1.ConditionSpecValid, v1alpha1.ConditionBundleVerified, v1alpha1.ConditionEgressRestricted, v1alpha1.ConditionMigrated, v1alpha1.ConditionBackupConfigured, v1alpha1.ConditionAvailable} {
 		c := meta.FindStatusCondition(in.Status.Conditions, t)
 		if c == nil || c.Status != metav1.ConditionTrue {
@@ -88,18 +92,69 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 }
 
 func (r *Reconciler) setCondition(in *v1alpha1.RegulaitInstallation, t string, s metav1.ConditionStatus, reason, msg string) {
-	meta.SetStatusCondition(&in.Status.Conditions, metav1.Condition{Type: t, Status: s, Reason: reason, Message: msg, ObservedGeneration: in.Generation})
+	meta.SetStatusCondition(&in.Status.Conditions, metav1.Condition{Type: t, Status: s, Reason: reason, Message: truncateMessage(msg), ObservedGeneration: in.Generation})
+}
+
+// maxMessage bounds condition and event messages: manifest strings are untrusted, and a condition message over the
+// API server's 32768-character limit would make every status patch fail.
+const maxMessage = 1024
+
+func truncateMessage(msg string) string {
+	if len(msg) <= maxMessage {
+		return msg
+	}
+	cut := maxMessage
+	for cut > 0 && !utf8.RuneStart(msg[cut]) {
+		cut--
+	}
+	return msg[:cut] + "…"
+}
+
+// reportRelaxations reports, on every reconcile, what a valid spec relaxes or cannot prove (ADR-0180): public egress,
+// an image digest the bundle signature does not cover, no registry allow-list, a development-only keyring. These are
+// informational conditions, not part of Ready.
+func (r *Reconciler) reportRelaxations(in *v1alpha1.RegulaitInstallation) {
+	if open := PublicEgress(in); len(open) > 0 {
+		msg := "egress beyond private ranges is open: " + strings.Join(open, ", ")
+		r.setCondition(in, v1alpha1.ConditionPublicEgress, metav1.ConditionTrue, "PublicEgressOpen", msg)
+		r.warn(in, "PublicEgressOpen", "Reconcile", msg)
+	} else {
+		r.setCondition(in, v1alpha1.ConditionPublicEgress, metav1.ConditionFalse, "PrivateOnly", "egress reaches private ranges and cluster DNS only")
+	}
+
+	registries := "any registry (image.allowedRegistries is empty)"
+	if regs := in.Spec.Image.AllowedRegistries; len(regs) > 0 {
+		registries = "the registries " + strings.Join(regs, ", ")
+	} else {
+		r.warn(in, "NoRegistryAllowList", "Reconcile", "image.allowedRegistries is empty: any registry's image may run; name the registries the images come from")
+	}
+	r.setCondition(in, v1alpha1.ConditionImageProvenance, metav1.ConditionFalse, "DigestNotSigned",
+		fmt.Sprintf("bundle schema /1 signs version %s, not the image digest %s; the digest is limited to %s and by who may edit this resource",
+			in.Spec.Version, in.Spec.Image.Digest, registries))
+
+	dev := len(r.Keyring) > 0
+	for id := range r.Keyring {
+		if !strings.Contains(id, "-dev-") {
+			dev = false
+		}
+	}
+	if dev {
+		r.setCondition(in, v1alpha1.ConditionReleaseKeyring, metav1.ConditionFalse, "DevelopmentKeysOnly",
+			"every compiled-in release key is a development key; a release build must carry the production key")
+	} else {
+		r.setCondition(in, v1alpha1.ConditionReleaseKeyring, metav1.ConditionTrue, "ReleaseKey", "the compiled-in keyring holds a release key")
+	}
 }
 
 func (r *Reconciler) warn(in *v1alpha1.RegulaitInstallation, reason, action, msg string) {
 	if r.Recorder != nil {
-		r.Recorder.Eventf(in, nil, corev1.EventTypeWarning, reason, action, "%s", msg)
+		r.Recorder.Eventf(in, nil, corev1.EventTypeWarning, reason, action, "%s", truncateMessage(msg))
 	}
 }
 
 func (r *Reconciler) normal(in *v1alpha1.RegulaitInstallation, reason, action, msg string) {
 	if r.Recorder != nil {
-		r.Recorder.Eventf(in, nil, corev1.EventTypeNormal, reason, action, "%s", msg)
+		r.Recorder.Eventf(in, nil, corev1.EventTypeNormal, reason, action, "%s", truncateMessage(msg))
 	}
 }
 
@@ -111,7 +166,7 @@ func (r *Reconciler) reconcile(ctx context.Context, in *v1alpha1.RegulaitInstall
 		return ctrl.Result{}, nil
 	}
 	r.setCondition(in, v1alpha1.ConditionSpecValid, metav1.ConditionTrue, "Valid", "the spec passes the operator's checks")
-	r.setCondition(in, v1alpha1.ConditionEgressRestricted, metav1.ConditionTrue, "DefaultDeny", "NetworkPolicy is default-deny; only the spec's holes are open")
+	r.reportRelaxations(in)
 
 	// 2. The signed manifest for spec.version.
 	res, err := r.verifyBundle(ctx, in)
@@ -132,7 +187,7 @@ func (r *Reconciler) reconcile(ctx context.Context, in *v1alpha1.RegulaitInstall
 		r.warn(in, "ExtraKeyringInUse", "VerifyBundle", msg)
 	} else {
 		r.setCondition(in, v1alpha1.ConditionBundleVerified, metav1.ConditionTrue, "SignatureVerified",
-			fmt.Sprintf("manifest %s signed by compiled-in release key %s", res.Manifest.Version, res.Manifest.SigningKeyID))
+			fmt.Sprintf("manifest %s signed by compiled-in release key %s; the signature covers the version, not the image digest", res.Manifest.Version, res.Manifest.SigningKeyID))
 	}
 	in.Status.VerifiedManifestSHA256 = res.SHA256
 
@@ -146,6 +201,8 @@ func (r *Reconciler) reconcile(ctx context.Context, in *v1alpha1.RegulaitInstall
 			return ctrl.Result{}, err
 		}
 	}
+	r.setCondition(in, v1alpha1.ConditionEgressRestricted, metav1.ConditionTrue, "DefaultDeny",
+		"the NetworkPolicies are applied: default-deny, with only the spec's holes open; enforcement needs a CNI that implements NetworkPolicy")
 	if err := r.ensureInstallSecretsClaim(ctx, in); err != nil {
 		return ctrl.Result{}, err
 	}

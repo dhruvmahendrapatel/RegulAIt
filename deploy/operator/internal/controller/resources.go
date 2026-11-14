@@ -29,9 +29,16 @@ const (
 	BackupUID = int64(999)
 )
 
-// privateRanges are the address ranges a byoc install's public-egress rule excludes, and the only ranges an
-// air_gapped install may open.
-var privateRanges = []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16", "fc00::/7", "fe80::/10"}
+// privateRanges are the only ranges an air_gapped install may open, and the ranges an egress list may name without a
+// PublicEgress warning.
+var privateRanges = []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "fc00::/7"}
+
+// linkLocalRanges hold the cloud instance metadata endpoints (169.254.169.254, fd00:ec2::254 sits inside fc00::/7 and
+// is refused on its own in validate.go). No egress list may overlap them; the public-egress rule excludes them.
+var linkLocalRanges = []string{"169.254.0.0/16", "fe80::/10"}
+
+// publicEgressExcept is what the public 443 rule never reaches: every private and link-local range.
+var publicEgressExcept = append(append([]string{}, privateRanges...), linkLocalRanges...)
 
 func labels(in *v1alpha1.RegulaitInstallation, component string) map[string]string {
 	l := map[string]string{
@@ -222,8 +229,8 @@ func GatewayPolicy(in *v1alpha1.RegulaitInstallation) *networkingv1.NetworkPolic
 	if in.Spec.Egress.AllowPublicEgress && in.Spec.Mode != v1alpha1.ModeAirGapped {
 		egress = append(egress, networkingv1.NetworkPolicyEgressRule{
 			To: []networkingv1.NetworkPolicyPeer{
-				{IPBlock: &networkingv1.IPBlock{CIDR: "0.0.0.0/0", Except: v4(privateRanges)}},
-				{IPBlock: &networkingv1.IPBlock{CIDR: "::/0", Except: v6(privateRanges)}},
+				{IPBlock: &networkingv1.IPBlock{CIDR: "0.0.0.0/0", Except: v4(publicEgressExcept)}},
+				{IPBlock: &networkingv1.IPBlock{CIDR: "::/0", Except: v6(publicEgressExcept)}},
 			},
 			Ports: []networkingv1.NetworkPolicyPort{npPort(corev1.ProtocolTCP, 443)},
 		})

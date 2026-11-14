@@ -49,10 +49,20 @@ rules:
   - batch
   resources:
   - cronjobs
-  - jobs
   verbs:
   - create
   - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
   - get
   - list
   - patch

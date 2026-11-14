@@ -258,6 +258,8 @@ func TestSchemaRefusesInsecureSpecs(t *testing.T) {
 			in.Spec.Image.AllowedRegistries = []string{"registry.example.internal"}
 			in.Spec.Egress.AllowPublicEgress = true
 		},
+		// The API server refuses a NetworkPolicy peer with neither selector; the CRD refuses it first.
+		"empty ingress peer": func(in *v1alpha1.RegulaitInstallation) { in.Spec.IngressFrom = []v1alpha1.IngressPeer{{}} },
 	}
 	i := 0
 	for name, mut := range cases {
@@ -333,6 +335,30 @@ func TestInstallUpgradeDriftAndRefusals(t *testing.T) {
 	if c := cond(getInst(t, name), v1alpha1.ConditionBackupConfigured); c.Reason != "BackupDisabled" {
 		t.Fatalf("disabled backup is not reported: %+v", c)
 	}
+	// What the signature does not cover is said, not implied (#813 review): the image digest is not signed, and with
+	// no registry allow-list any registry's image may run. Neither holds Ready.
+	got = getInst(t, name)
+	if c := cond(got, v1alpha1.ConditionReady); !strings.Contains(c.Message, "does not sign the image digest") {
+		t.Fatalf("Ready claims more than the signature covers: %+v", c)
+	}
+	if c := cond(got, v1alpha1.ConditionImageProvenance); c == nil || c.Status != metav1.ConditionFalse || c.Reason != "DigestNotSigned" || !strings.Contains(c.Message, "any registry") {
+		t.Fatalf("image provenance: %+v", c)
+	}
+	if c := cond(got, v1alpha1.ConditionEgressRestricted); c == nil || c.Status != metav1.ConditionTrue || !strings.Contains(c.Message, "CNI") {
+		t.Fatalf("egress restricted: %+v", c)
+	}
+	if c := cond(got, v1alpha1.ConditionPublicEgress); c == nil || c.Status != metav1.ConditionFalse || c.Reason != "PrivateOnly" {
+		t.Fatalf("public egress: %+v", c)
+	}
+	if c := cond(got, v1alpha1.ConditionReleaseKeyring); c == nil || c.Status != metav1.ConditionTrue {
+		t.Fatalf("release keyring: %+v", c)
+	}
+	// A public CIDR in byoc is valid but reported on every reconcile.
+	updateInst(t, name, func(in *v1alpha1.RegulaitInstallation) { in.Spec.Egress.AllowedCIDRs = []string{"203.0.113.0/24"} })
+	eventually(t, "PublicEgress=True", func() bool {
+		c := cond(getInst(t, name), v1alpha1.ConditionPublicEgress)
+		return c != nil && c.Status == metav1.ConditionTrue && c.Reason == "PublicEgressOpen" && strings.Contains(c.Message, "203.0.113.0/24")
+	})
 	// The sample names no StorageClass: reported on every reconcile, but not a reason to hold Ready.
 	if c := cond(getInst(t, name), v1alpha1.ConditionStorageClassNamed); c == nil || c.Status != metav1.ConditionFalse || c.Reason != "DefaultStorageClass" {
 		t.Fatalf("default StorageClass is not reported: %+v", c)
@@ -453,6 +479,12 @@ func TestBackupCronJobAndAirGappedValidation(t *testing.T) {
 	if err := k8s.Get(ctx, client.ObjectKey{Namespace: testNS, Name: migrateJobName(in)}, &batchv1.Job{}); !apierrors.IsNotFound(err) {
 		t.Fatal("an invalid spec started a migration")
 	}
+	// The metadata endpoint is link-local, not private: refused in air_gapped too (#813 review).
+	updateInst(t, name, func(in *v1alpha1.RegulaitInstallation) { in.Spec.Egress.AllowedCIDRs = []string{"169.254.169.254/32"} })
+	eventually(t, "SpecValid=False MetadataEgressRefused", func() bool {
+		c := cond(getInst(t, name), v1alpha1.ConditionSpecValid)
+		return c != nil && c.Reason == "MetadataEgressRefused"
+	})
 
 	updateInst(t, name, func(in *v1alpha1.RegulaitInstallation) {
 		in.Spec.Egress.AllowedCIDRs = []string{"10.30.0.0/16"}
