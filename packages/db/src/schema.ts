@@ -901,6 +901,10 @@ export const mcpServers = pgTable("mcp_servers", {
   /** Point-in-time evidence (ADR-0200 exception, like `admission_findings`): the classifier verdict that made the
    * server high-risk, counts and locations only (tool, category, rule, where), never matched text. */
   riskFindings: jsonb("risk_findings"),
+  /** ADR-0230 A2 (the pending `sap_business_servers` migration): null = an ordinary MCP server. `sap_business` = its
+   * write tools post business documents into SAP; marking it seeds the strict defaults (mcp-sap-business.ts) and every
+   * write must be attributed to a budgeted project. Unmarking is a settings_relax step-up. */
+  systemClass: text("system_class", { enum: ["sap_business"] }),
   /** ADR-0185 G4 (migration 0169) — how the gateway reaches this upstream.
    * `streamable_http` (the default, so every pre-0169 row keeps what it used)
    * and `sse` connect to `url` through the egress guard; `stdio` starts
@@ -2219,6 +2223,9 @@ export const rateLimits = pgTable(
     toolName: text("tool_name"),
     maxCalls: integer("max_calls").notNull(),
     windowSeconds: integer("window_seconds").notNull(),
+    /** ADR-0230 A2 (the pending `sap_business_servers` migration): true = the limit applies to, and counts, write-kind
+     * tools only (the read/write classification `approval_rules.write_only` uses). False = every call (the default). */
+    writeOnly: boolean("write_only").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

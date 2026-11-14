@@ -91,6 +91,7 @@ export const RATE_LIMIT_LOOSENING: Classified<typeof rateLimits.$inferSelect> = 
   deployMode: DEPLOY_MODE,
   maxCalls: { kind: "compare", looser: (b, a) => Number(a) > Number(b), why: "more calls per window" },
   windowSeconds: { kind: "compare", looser: (b, a) => Number(a) < Number(b), why: "the same calls in a shorter window" },
+  writeOnly: { kind: "compare", looser: (b, a) => b !== true && a === true, why: "true = only write calls are limited (ADR-0230)" },
 };
 
 export const DATA_SCOPE_RULE_LOOSENING: Classified<typeof dataScopeRules.$inferSelect> = {

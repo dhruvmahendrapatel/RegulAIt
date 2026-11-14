@@ -383,6 +383,9 @@ export const KNOWN_UI_GAPS = new Map([
   ["GET /v1/mcp/authorised-targets", { does: "lists the authorised targets of high-risk MCP servers", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["POST /v1/mcp/authorised-targets", { does: "adds an authorised target (settings_relax step-up)", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["DELETE /v1/mcp/authorised-targets/:id", { does: "removes an authorised target", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["GET /v1/servers/:serverId/system-class", { does: "shows whether a server is marked SAP business and which seeded approval rule and rate limit are in force", tracking: "ADR-0230 A2 (P19, Lane L3): API-only; the SAP business server screen is built by the design builder on #453" }],
+  ["POST /v1/servers/:serverId/system-class", { does: "marks a server SAP business and seeds its write-only quorum approval rule and rate limit", tracking: "ADR-0230 A2 (P19, Lane L3): API-only; the SAP business server screen is built by the design builder on #453" }],
+  ["DELETE /v1/servers/:serverId/system-class", { does: "unmarks an SAP business server (settings_relax step-up)", tracking: "ADR-0230 A2 (P19, Lane L3): API-only; the SAP business server screen is built by the design builder on #453" }],
   // batch U4 (ui-gaps-details) closed the last 22. The entries below are the ADR-0236 (P11) MCP bundle routes:
   // the owner decided on 2026-11-07 (#697) to ship them API-first while the Governed Designer builds the bundle
   // screen requested on #453. Building that screen closes these and lowers KNOWN_UI_GAPS_MAX back to 0.
@@ -437,7 +440,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 44;
+export const KNOWN_UI_GAPS_MAX = 47;
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 

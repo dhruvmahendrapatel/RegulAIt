@@ -1,0 +1,3 @@
+<!-- fold: state-recap -->
+
+**2026-11-14 - P19 Lane L3, first PR: SAP business MCP servers are approve-first ([ADR-0230 amendment](../decisions/0230-sap-business-agents-over-mcp.md), migration `sap_business_servers` (pending, numbered at merge)).** `mcp_servers.system_class = 'sap_business'` is set by `POST /v1/servers/:serverId/system-class`, which seeds a write-only quorum-2 fleet approval rule and a write-only fleet rate limit (10 per hour, new `rate_limits.write_only`) in one audited transaction; every SAP write needs a live budgeted project (`sap-write-needs-project`). Unmarking is a settings_relax step-up. API only (three routes, #453). Identity release and subject tokens wait for slice A0; the HMAC idempotency key and A3 audit detail are the lane's second PR.
