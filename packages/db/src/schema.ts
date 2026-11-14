@@ -16349,3 +16349,35 @@ export const thirdPartyIngestRecordFindings = pgTable(
   },
   (t) => [primaryKey({ columns: [t.recordId, t.findingId] }), index("third_party_ingest_record_findings_finding_idx").on(t.findingId)],
 );
+
+/**
+ * ADR-0251 (P-01 remainder, lane L1; migration resource_rate_reservations) — HARD rate-limit windows for the governed
+ * core's connector and A2A calls. One row is one slot a call took in the window: written in the same transaction as
+ * the recount, under a per-(user, resource type) advisory lock, only when a `resource_rate_limits` row binds the call
+ * and the core's decision is allow. The windows count these rows (not audit rows, which are written after the call
+ * runs), so calls decided at the same moment can no longer each see the same count.
+ *
+ * 3NF exception, deliberate: a slot is a point-in-time fact of its own (the counter the limit is enforced against),
+ * not a copy of the audit row, which remains the evidence of the decision. Rows older than the longest window
+ * (30 days) carry no information and are pruned by the reserving transaction.
+ */
+export const resourceRateReservations = pgTable(
+  "resource_rate_reservations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    resourceType: text("resource_type", { enum: ["connector", "a2a"] }).notNull(),
+    connectorId: uuid("connector_id").references(() => connectors.id, { onDelete: "cascade" }),
+    a2aAgentId: uuid("a2a_agent_id").references(() => a2aAgents.id, { onDelete: "cascade" }),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("resource_rate_reservations_window_idx").on(t.userId, t.resourceType, t.at),
+    check(
+      "resource_rate_reservations_type_check",
+      sql`CASE ${t.resourceType} WHEN 'connector' THEN ${t.connectorId} IS NOT NULL AND ${t.a2aAgentId} IS NULL WHEN 'a2a' THEN ${t.a2aAgentId} IS NOT NULL AND ${t.connectorId} IS NULL ELSE false END`,
+    ),
+  ],
+);
