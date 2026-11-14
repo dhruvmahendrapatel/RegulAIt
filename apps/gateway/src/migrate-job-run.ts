@@ -3,6 +3,8 @@
  * gateway's image moves to a new version. It connects, applies the migrations exactly as boot does, and exits.
  * It never falls back to a default database URL: a Job without one fails rather than migrating something else.
  */
+import { errLine } from "./err-serializer.js";
+
 export interface MigrateJobDeps {
   connect: (url: string) => { close: () => Promise<void> };
   migrate: (handle: unknown) => Promise<void>;
@@ -21,9 +23,9 @@ export async function runMigrateJob(env: NodeJS.ProcessEnv, deps: MigrateJobDeps
     deps.log("migrate-job: migrations applied");
     return 0;
   } catch (err) {
-    // The cause carries the database's own reason (a TLS refusal, a lock timeout); drizzle's message is only the query.
-    const cause = err instanceof Error && err.cause instanceof Error ? ` (cause: ${err.cause.message})` : "";
-    deps.log(`migrate-job: migration failed: ${err instanceof Error ? err.message : String(err)}${cause}`);
+    // errLine (ADR-0167 N8 R1): a failed query's message carries its bound values, so it is withheld; the line keeps
+    // the error and cause types and the SQLSTATE, which name the database's reason (a TLS refusal, a lock timeout).
+    deps.log(`migrate-job: migration failed: ${errLine(err)}`);
     return 1;
   } finally {
     await handle.close();
