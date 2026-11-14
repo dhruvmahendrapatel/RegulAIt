@@ -50,7 +50,7 @@ import { describeEgressPosture, resolveDeployMode } from "./deploy-posture.js";
 import { describePublicUrl, resolvePublicUrl } from "./public-url.js";
 import { describeDataKey, verifyDataKeyOnBoot, type DataKeyBootResult } from "./data-key.js";
 import { Scheduler, resolveSchedulerConfig, syncSchedulerJobs } from "./scheduler.js";
-import { startStageRetryWorker, stageRetryWorkerEnabled, type StageRetryWorker } from "./workflows-queue.js";
+import { startStageRetryWorker, stageRetryWorkerEnabled, warmStageQueueSender, type StageRetryWorker } from "./workflows-queue.js";
 import { schedulerJobRegistry } from "./scheduler-jobs.js";
 import { captureAnchor, flushPendingAnchors, resolveAnchorSink } from "./audit-chain.js";
 import { backfillOtlpHeaderCiphertext, loadOrgSettings } from "./org-settings.js";
@@ -408,6 +408,9 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
       console.error(`[regulait] workflow retry worker did not start: ${errLine(err)}`);
     }
   }
+  // The sender starts here, not inside the first failing stage's transaction. Best-effort: a send that still finds no
+  // sender commits the failure with `stage-retry-not-scheduled: queue_unavailable`.
+  await warmStageQueueSender().catch((err: unknown) => console.error(`[regulait] workflow retry sender did not start: ${errLine(err)}`));
 
   log(`regulait gateway listening on ${address}`);
   // ADR-0033: /ui is the whole product surface; /app and /admin are only
