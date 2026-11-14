@@ -457,7 +457,7 @@ export async function executeGovernedConnectorCall(
     let coreError: unknown = null;
     try {
       // the window is counted once, under the rate lock, by governedEvaluateResource below (hard windows)
-      coreRestrictions = await loadResourceRestrictions(db, { userId, resource: coreResource, counts: false });
+      coreRestrictions = await loadResourceRestrictions(db, { userId, resource: coreResource, projectId, counts: false });
     } catch (err) {
       coreError = err;
     }

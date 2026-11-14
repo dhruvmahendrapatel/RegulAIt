@@ -52,7 +52,7 @@ const request = (aiTrainingCurrent?: boolean): AbacRequest => ({
 
 describe("ADR-0182 A14: Cedar schema v3", () => {
   it("v3 exists, and v1/v2 are still offered (ADR-0188 S2 moved the current version on to v4)", () => {
-    expect(ABAC_SCHEMA_VERSIONS).toEqual(["v1", "v2", "v3", "v4"]);
+    expect(ABAC_SCHEMA_VERSIONS).toEqual(["v1", "v2", "v3", "v4", "v5"]);
     expect(ABAC_CURRENT_SCHEMA_VERSION).toBe("v4");
     expect(abacSchemaText("v3")).toContain("aiTrainingCurrent");
     expect(abacSchemaText("v2")).not.toContain("aiTrainingCurrent");

@@ -69,9 +69,10 @@ const ADMINS_ONLY_PERSON = `forbid (principal is RegulAIt::User, action == Regul
 
 describe("ADR-0188 S2 — Cedar schema v4", () => {
   it("v4 is offered and is the default for new policies; only v4 evaluates agents", () => {
-    expect(ABAC_SCHEMA_VERSIONS).toEqual(["v1", "v2", "v3", "v4"]);
+    // ADR-0251 slice 4 added v5 (opt-in; it carries the v4 principals, so it evaluates agents too)
+    expect(ABAC_SCHEMA_VERSIONS).toEqual(["v1", "v2", "v3", "v4", "v5"]);
     expect(ABAC_CURRENT_SCHEMA_VERSION).toBe("v4");
-    expect(ABAC_AGENT_SCHEMA_VERSIONS).toEqual(["v4"]);
+    expect(ABAC_AGENT_SCHEMA_VERSIONS).toEqual(["v4", "v5"]);
     const text = abacSchemaText("v4")!;
     expect(text).toContain("entity Agent");
     expect(text).toContain("delegationDepth");

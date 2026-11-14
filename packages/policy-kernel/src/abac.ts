@@ -52,6 +52,9 @@ export const ABAC_DEFAULT_TIMEZONE = "UTC";
  * present-but-unwired: a policy that names them fails VALIDATION at write time,
  * so an admin can never author a policy that silently enforces nothing. Adding
  * them is a schema-version bump plus wiring, not a redesign.
+ *
+ * ADR-0251 slice 4 did exactly that: schema v5 declares `ModelInvoke`, `ConnectorCall` and `A2aMessage` (see
+ * SCHEMA_V5), wired at the governed core (`governedEvaluateResource`). v1–v4 still declare `McpToolCall` only.
  */
 
 // ---------------------------------------------------------------------------
@@ -67,8 +70,8 @@ export const ABAC_DEFAULT_TIMEZONE = "UTC";
  * arrival of v2; it simply keeps meaning what it meant. That is the entire
  * reason this field is versioned rather than global.
  */
-export type AbacSchemaVersion = "v1" | "v2" | "v3" | "v4";
-export const ABAC_SCHEMA_VERSIONS: readonly AbacSchemaVersion[] = ["v1", "v2", "v3", "v4"];
+export type AbacSchemaVersion = "v1" | "v2" | "v3" | "v4" | "v5";
+export const ABAC_SCHEMA_VERSIONS: readonly AbacSchemaVersion[] = ["v1", "v2", "v3", "v4", "v5"];
 /**
  * ADR-0188 S2 (decision 18; ruling of 2026-10-10): new policies are stamped v4, so an author can write about
  * agent principals and the delegation chain. v1–v3 policies keep evaluating for the human sponsor, unchanged.
@@ -76,7 +79,16 @@ export const ABAC_SCHEMA_VERSIONS: readonly AbacSchemaVersion[] = ["v1", "v2", "
  */
 export const ABAC_CURRENT_SCHEMA_VERSION: AbacSchemaVersion = "v4";
 /** ADR-0188 decision 18: the only schema versions an `Agent` principal is evaluated against */
-export const ABAC_AGENT_SCHEMA_VERSIONS: readonly AbacSchemaVersion[] = ["v4"];
+export const ABAC_AGENT_SCHEMA_VERSIONS: readonly AbacSchemaVersion[] = ["v4", "v5"];
+/**
+ * ADR-0251 slice 4 — the actions of the governed core's other call types. Only a v5 (or later) policy can name them,
+ * and only a v5 (or later) policy is evaluated for them: every v1–v4 policy was written for `McpToolCall`.
+ */
+export const ABAC_GOVERNED_ACTIONS = ["ModelInvoke", "ConnectorCall", "A2aMessage"] as const;
+export type AbacGovernedAction = (typeof ABAC_GOVERNED_ACTIONS)[number];
+export type AbacAction = typeof ABAC_ACTION | AbacGovernedAction;
+/** the schema versions that declare the governed actions (v5 and later) */
+export const ABAC_GOVERNED_ACTION_SCHEMA_VERSIONS: readonly AbacSchemaVersion[] = ["v5"];
 
 /**
  * v1 of the Cedar schema. It is code, not data, on purpose: the attributes a
@@ -286,7 +298,87 @@ const SCHEMA_V4 = (() => {
   return base;
 })();
 
-const SCHEMAS: Record<AbacSchemaVersion, unknown> = { v1: SCHEMA_V1, v2: SCHEMA_V2, v3: SCHEMA_V3, v4: SCHEMA_V4 };
+/**
+ * v5 = v4 plus the governed core's other call types (ADR-0251 slice 4): three actions, each on its own resource type,
+ * with the same principals (`User` or `Agent`) and the same context as `McpToolCall` under v4.
+ *
+ *  - `ModelInvoke` on `Model`: a model (agent registry entry) dispatch. `mode` is the dispatch mode (chat, execute, …).
+ *  - `ConnectorCall` on `Connector`: a governed connector call. `operation` is "read" or "write".
+ *  - `A2aMessage` on `RemoteAgent`: a message to a remote agent over A2A, with the requested skill when one was named.
+ *
+ * Every resource carries the call's pillar-5 attribution (`projectId`, `projectName`, both optional), the project's
+ * §8.3 `classifications` and `dataSensitivity`, and a coarse `priceTier`, the same facts a `Tool` carries, so one
+ * "no sensitive data to unpriced resources" policy reads the same on every type.
+ *
+ * WHAT AN AUTHOR MUST NOW WRITE. Under v5 an unscoped `resource` may be any of four types, so strict validation
+ * refuses a policy that reads a type-specific attribute (`resource.toolName`, `resource.model`) without narrowing:
+ * `action == RegulAIt::Action::"ModelInvoke"` or `resource is RegulAIt::Model`. A policy about the shared attributes
+ * (`resource.classifications`, `resource has projectId`) can stay unscoped and then applies to every call type —
+ * which is the point. `validate` adds help that says this. v1–v4 policies are untouched: they stay scoped to
+ * `McpToolCall` by their schema, so none of them starts matching a model, connector or A2A call.
+ */
+const SCHEMA_V5 = (() => {
+  const base = structuredClone(SCHEMA_V4) as unknown as {
+    [ABAC_NAMESPACE]: {
+      entityTypes: Record<string, unknown>;
+      actions: Record<string, { appliesTo: { principalTypes: string[]; resourceTypes: string[]; context: unknown } }>;
+    };
+  };
+  const ns = base[ABAC_NAMESPACE];
+  const shared = {
+    name: { type: "String" as const },
+    priceTier: { type: "String" as const },
+    projectId: { type: "String" as const, required: false },
+    projectName: { type: "String" as const, required: false },
+    classifications: { type: "Set" as const, element: { type: "String" as const } },
+    dataSensitivity: { type: "String" as const, required: false },
+  };
+  ns.entityTypes.Model = {
+    shape: {
+      type: "Record" as const,
+      attributes: {
+        ...shared,
+        provider: { type: "String" as const },
+        model: { type: "String" as const },
+        mode: { type: "String" as const },
+      },
+    },
+  };
+  ns.entityTypes.Connector = {
+    shape: {
+      type: "Record" as const,
+      attributes: {
+        ...shared,
+        providerKind: { type: "String" as const },
+        operation: { type: "String" as const },
+      },
+    },
+  };
+  ns.entityTypes.RemoteAgent = {
+    shape: {
+      type: "Record" as const,
+      attributes: {
+        ...shared,
+        skillId: { type: "String" as const, required: false },
+      },
+    },
+  };
+  const tool = ns.actions[ABAC_ACTION]!;
+  const actionFor = (resourceType: string) => ({
+    appliesTo: { principalTypes: [...tool.appliesTo.principalTypes], resourceTypes: [resourceType], context: structuredClone(tool.appliesTo.context) },
+  });
+  ns.actions.ModelInvoke = actionFor("Model");
+  ns.actions.ConnectorCall = actionFor("Connector");
+  ns.actions.A2aMessage = actionFor("RemoteAgent");
+  return base;
+})();
+
+const SCHEMAS: Record<AbacSchemaVersion, unknown> = { v1: SCHEMA_V1, v2: SCHEMA_V2, v3: SCHEMA_V3, v4: SCHEMA_V4, v5: SCHEMA_V5 };
+
+/** does this schema version declare the governed core's other actions? (v5 and later) */
+export function hasGovernedActions(schemaVersion: string): boolean {
+  return (ABAC_GOVERNED_ACTION_SCHEMA_VERSIONS as readonly string[]).includes(schemaVersion);
+}
 
 /** does this schema version carry `principal.aiTrainingCurrent`? (v3 and later) */
 function hasAiTrainingAttribute(schemaVersion: string): boolean {
@@ -399,8 +491,38 @@ export interface AbacDelegationContext {
   delegationDepth: number;
 }
 
+/**
+ * ADR-0251 slice 4 — the resource of a model, connector or A2A call (schema v5). `id` is the Cedar entity id: the
+ * agent, connector or remote-agent id.
+ */
+export type AbacGovernedResourceAttrs = {
+  id: string;
+  name: string;
+  priceTier: string;
+  projectId?: string | null;
+  projectName?: string | null;
+  classifications: readonly string[];
+  dataSensitivity?: string | null;
+} & (
+  | { type: "Model"; provider: string; model: string; mode: string }
+  | { type: "Connector"; providerKind: string; operation: string }
+  | { type: "RemoteAgent"; skillId?: string | null }
+);
+
+export const ABAC_ACTION_OF_RESOURCE: Readonly<Record<AbacGovernedResourceAttrs["type"], AbacGovernedAction>> = {
+  Model: "ModelInvoke",
+  Connector: "ConnectorCall",
+  RemoteAgent: "A2aMessage",
+};
+
 export interface AbacRequest {
   principal: AbacPrincipalAttrs;
+  /**
+   * ADR-0251 slice 4: when set, this request is a model, connector or A2A call — action `ModelInvoke`,
+   * `ConnectorCall` or `A2aMessage` on this resource — evaluated against v5 (and later) policies only. `resource`
+   * (the MCP tool) is then not read. Absent = an MCP tool call, exactly as before.
+   */
+  governed?: AbacGovernedResourceAttrs | null | undefined;
   /**
    * ADR-0188 S2 (decision 18): when set, THIS request is evaluated with the `Agent` as principal, against v4
    * policies only, and the sponsor's attributes are not part of it at all. Absent = the sponsor as `User`,
@@ -409,6 +531,7 @@ export interface AbacRequest {
   agent?: AbacAgentAttrs | null | undefined;
   /** v4 context; absent = no chain (`actorChain` empty, `delegationDepth` 0). Never reaches a v1–v3 group. */
   delegation?: AbacDelegationContext | null | undefined;
+  /** the MCP tool (action `McpToolCall`); not read when `governed` is set */
   resource: AbacResourceAttrs;
   context: AbacContextAttrs;
   /** the instant to evaluate time-of-day at; defaults to now */
@@ -516,6 +639,7 @@ function compact(attrs: Record<string, unknown>): Record<string, cedar.CedarValu
  * evaluation closed. v3 and later get it, defaulting to false when the caller did not supply it.
  */
 function entitiesFor(req: AbacRequest, schemaVersion: string): cedar.Entities {
+  if (req.governed) return [principalEntity(req, schemaVersion), governedEntity(req.governed)];
   return [
     principalEntity(req, schemaVersion),
     {
@@ -534,6 +658,25 @@ function entitiesFor(req: AbacRequest, schemaVersion: string): cedar.Entities {
       parents: [],
     },
   ];
+}
+
+/** ADR-0251 slice 4: a model, connector or remote-agent resource entity (schema v5) */
+function governedEntity(g: AbacGovernedResourceAttrs): cedar.EntityJson {
+  const shared = {
+    name: g.name,
+    priceTier: g.priceTier,
+    projectId: g.projectId,
+    projectName: g.projectName,
+    classifications: [...g.classifications],
+    dataSensitivity: g.dataSensitivity,
+  };
+  const own =
+    g.type === "Model"
+      ? { provider: g.provider, model: g.model, mode: g.mode }
+      : g.type === "Connector"
+        ? { providerKind: g.providerKind, operation: g.operation }
+        : { skillId: g.skillId };
+  return { uid: entityUid(g.type, g.id), attrs: compact({ ...shared, ...own }), parents: [] };
 }
 
 /** the principal's entity: the `Agent` when the request names one (v4), otherwise the sponsor as `User` */
@@ -655,6 +798,24 @@ const PRINCIPAL_ONLY_ATTRIBUTES = [
   "roles", "roleIds", "teams", "isAdmin", "sessionOrigin", "mfaCompleted", "aiTrainingCurrent",
   "kind", "identifier", "environments", "stewards", "autonomyClass",
 ];
+/** ADR-0251 slice 4 — the help for the one new way a v5 policy fails validation (an unscoped multi-type resource) */
+export const ABAC_V5_RESOURCE_HELP =
+  "Schema v5: `resource` may be an MCP tool (RegulAIt::Tool), a model (RegulAIt::Model), a connector " +
+  "(RegulAIt::Connector) or a remote agent (RegulAIt::RemoteAgent), and each has its own attributes. Narrow the " +
+  'policy with an action (`action == RegulAIt::Action::"ModelInvoke"`, "ConnectorCall", "A2aMessage" or ' +
+  '"McpToolCall") or a type test (`resource is RegulAIt::Model`) to use type-specific attributes. The shared ones ' +
+  "(name, priceTier, projectId, projectName, classifications, dataSensitivity) apply to every type except where a " +
+  "Tool names them differently (a Tool has serverName and toolName, not name).";
+const RESOURCE_TYPE_ATTRIBUTES = ["toolName", "serverId", "serverName", "kind", "provider", "model", "mode", "providerKind", "operation", "skillId", "name"];
+function withV5Help(issue: AbacValidationIssue, schemaVersion: string): AbacValidationIssue {
+  if (!hasGovernedActions(schemaVersion)) return issue;
+  const m = issue.message;
+  const aboutResource =
+    /RegulAIt::(Tool|Model|Connector|RemoteAgent)/.test(m) || RESOURCE_TYPE_ATTRIBUTES.some((a) => m.includes(`\`${a}\``));
+  if (!aboutResource) return issue;
+  return { message: m, help: issue.help ? `${issue.help} ${ABAC_V5_RESOURCE_HELP}` : ABAC_V5_RESOURCE_HELP };
+}
+
 function withV4Help(issue: AbacValidationIssue, schemaVersion: string): AbacValidationIssue {
   if (!hasAgentPrincipal(schemaVersion)) return issue;
   const m = issue.message;
@@ -747,7 +908,7 @@ class CedarAbacEngine implements AbacEngine {
     if (answer.validationErrors.length > 0) {
       return {
         ok: false,
-        errors: answer.validationErrors.map((e) => withV4Help(detail(e.error), schemaVersion)),
+        errors: answer.validationErrors.map((e) => withV5Help(withV4Help(detail(e.error), schemaVersion), schemaVersion)),
         warnings: answer.validationWarnings.map((w) => detail(w.error)),
       };
     }
@@ -764,7 +925,10 @@ class CedarAbacEngine implements AbacEngine {
   evaluate(allPolicies: readonly AbacPolicy[], request: AbacRequest): AbacDecision {
     // ADR-0188 decision 18: an `Agent` is evaluated against v4 policies ONLY. Legacy v1–v3 policies were written
     // for people and are never run for an agent; with no v4 policy, agent evaluation is neutral (grants decide).
-    const policies = request.agent ? allPolicies.filter((p) => hasAgentPrincipal(p.schemaVersion)) : allPolicies;
+    // ADR-0251 slice 4: a model, connector or A2A call is evaluated against v5 (and later) policies only; every
+    // v1–v4 policy was written for `McpToolCall`, whose schema does not even declare the other actions.
+    const byAction = request.governed ? allPolicies.filter((p) => hasGovernedActions(p.schemaVersion)) : allPolicies;
+    const policies = request.agent ? byAction.filter((p) => hasAgentPrincipal(p.schemaVersion)) : byAction;
     if (policies.length === 0) return { effect: "permit" };
 
     // Group by DECLARED timezone: each group is evaluated against its own
@@ -794,8 +958,8 @@ class CedarAbacEngine implements AbacEngine {
         for (const p of subset) staticPolicies[p.id] = p.source;
         const answer = cedar.isAuthorized({
           principal: request.agent ? entityUid("Agent", request.agent.id) : entityUid("User", request.principal.id),
-          action: { type: `${ABAC_NAMESPACE}::Action`, id: ABAC_ACTION },
-          resource: entityUid("Tool", request.resource.id),
+          action: { type: `${ABAC_NAMESPACE}::Action`, id: request.governed ? ABAC_ACTION_OF_RESOURCE[request.governed.type] : ABAC_ACTION },
+          resource: request.governed ? entityUid(request.governed.type, request.governed.id) : entityUid("Tool", request.resource.id),
           context: contextFor(request, tz, schemaVersion),
           schema: schema as cedar.Schema,
           validateRequest: true,
