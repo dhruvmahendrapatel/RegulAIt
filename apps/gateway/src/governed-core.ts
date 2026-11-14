@@ -114,6 +114,10 @@ export async function loadResourceRestrictions(
             : { type: "a2a", id: resource.id, skillId: resource.skillId },
     }),
   );
+  // The verdict runs beside the reads below. When one of those reads rejects first, nothing awaits the verdict, so
+  // its own failure would surface as an unhandled rejection. Mark it handled here; the `await` at the end still
+  // throws it, and either failure reaches the caller and denies the call.
+  void abacVerdict.catch(() => undefined);
   const idCol =
     resource.type === "connector" ? resourceApprovalRules.connectorId : resource.type === "a2a" ? resourceApprovalRules.a2aAgentId : resourceApprovalRules.agentId;
   const [ruleRows, limitRows, [org]] = await Promise.all([
