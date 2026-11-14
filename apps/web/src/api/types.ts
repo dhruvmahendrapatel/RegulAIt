@@ -36,6 +36,22 @@ export interface AuthMeResponse {
    * posture a fresh org_settings row has. Reading one's username is never
    * gated; this governs the edit affordance only. */
   usernameSelfService?: boolean;
+  /** ADR-0218: the palette and mode saved to this account, and the organisation default and lock. Absent on an older
+   * gateway, which reads as "kept in this browser" (the phase 1 behaviour). */
+  appearance?: AccountAppearance;
+}
+
+/** ADR-0218: what `/auth/me` and `PUT /auth/appearance` say about this person's theme */
+export interface AccountAppearance {
+  /** the saved palette; null = none saved (the organisation default applies) */
+  palette: string | null;
+  /** the saved mode; null = none saved (this browser decides) */
+  mode: "light" | "dark" | "system" | null;
+  /** the palette to paint now: the saved one unless the organisation's lock overrides it */
+  effectivePalette: string;
+  org: { defaultPalette: string; locked: boolean };
+  /** false = no account to save to (the bootstrap operator): the choice stays in this browser */
+  saved: boolean;
 }
 
 /**
@@ -495,6 +511,24 @@ export interface Project {
   budgetUsd?: number | null;
   spentUsd?: number;
   classifications?: string[];
+  /** G1 (ADR-0206): set once an admin archives the project; spend and history stay readable */
+  archivedAt?: string | null;
+  archivedReason?: string | null;
+  archivedByName?: string | null;
+}
+
+/** G1 (ADR-0206): GET /v1/projects/:projectId/archive-impact — what the archive dialog lists before confirming */
+export interface ProjectArchiveImpact {
+  projectId: string;
+  archived: boolean;
+  pinnedEngineKeys: Array<{ id: string; name: string; engineRunId: string | null; expiresAt: string | null }>;
+  pinnedEngineKeyCount: number;
+  openApprovals: Array<{ id: string }>;
+  openApprovalCount: number;
+  runningWork: Array<{ id: string; kind: "workflow" | "orchestration" | "engine_run"; status: string }>;
+  runningWorkCount: number;
+  openDelegations: Array<{ id: string }>;
+  openDelegationCount: number;
 }
 
 export interface ProjectMember {

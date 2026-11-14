@@ -27,6 +27,10 @@ on [company-owned devices / devices enrolled in [MDM name]]:
 - AI command-line tools and local AI model software, and the network ports that software listens on;
 - the **names** of AI-related settings (for example, that a setting named after an AI service's key exists, never what it holds), and whether AI
   assistant configuration files exist.
+- [only if MCP config discovery is turned on] which AI tool servers (MCP servers) your AI applications are set up to
+  use: the server's name, the program or package that runs it or the address it connects to, whether a password or
+  key is written into its settings (only that one is there and what kind, never the key itself), and settings that
+  make it riskier, such as tools allowed to run without asking you.
 
 **What we do not collect.** We do not collect the contents of files, the value of any setting or key, what you type,
 screenshots, your clipboard, your browsing history, or anything you write to or receive from an AI tool.
@@ -52,7 +56,8 @@ name or role, email.]
 ## Before you send it
 
 - Check that the list under "What we check" matches what you actually enabled. If you import only an MDM or EDR
-  software inventory, remove the lines your inventory does not contain.
+  software inventory, remove the lines your inventory does not contain. Keep the MCP line only if an admin turned on
+  endpoint MCP config discovery (ADR-0259); it is off by default.
 - Make sure the retention period matches your RegulAIt setting (90 days by default; a longer period is an audited
   relaxation).
 - Keep a record of when and how the notice was given.

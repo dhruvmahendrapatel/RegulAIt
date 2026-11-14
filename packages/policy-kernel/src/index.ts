@@ -1,5 +1,7 @@
 // ADR-0188 S2 — the actor chain types and scope algebra (dependency-free; see actor.ts)
 export * from "./actor.js";
+// ADR-0251 — the restriction layer of the one governed decision core (model, connector, A2A)
+export * from "./resource.js";
 import {
   checkActorChain,
   scopeCovers,
@@ -360,6 +362,50 @@ export interface RoleToolGrant {
   toolName: string;
 }
 
+/**
+ * ADR-0236 (P11) — a tool granted through a governed MCP bundle. The gateway pre-filters these to the bundles the
+ * evaluated user holds (directly, through an assigned role or through a team) at the bundle's CURRENT version, and
+ * only while the org setting is on. Exact (server, tool) pairs: a bundle has no wildcard and no read-only-all form.
+ * A bundle grant sits at the ROLE tier: a per-user revocation subtracts from it exactly as from a role grant, so a
+ * bundle can never hand back what a person's own override took away, and every restriction after the grant step
+ * (lead ceiling, ABAC, data scope, rate limits, approvals, the actor intersection) still applies to it.
+ */
+export interface BundleToolGrant {
+  /** the mcp_bundle_grants row that put the bundle in reach — the audit's grant id */
+  id: string;
+  bundleId: string;
+  /** optional display name — reason prose only */
+  bundleName?: string | null;
+  /** the bundle version the item comes from */
+  version: number;
+  /** how the user holds the bundle */
+  via: "user" | "role" | "team";
+  serverId: string;
+  toolName: string;
+  /** the tool's scope tier from the inventory (`mcp_tools.kind`, or 'dangerous' when flagged); absent = read */
+  toolTier?: BundleScopeTier;
+  /** the highest tier this grant reaches; absent = read (the strict default) */
+  maxTier?: BundleScopeTier;
+  /** who signs off a call to a dangerous tool through this bundle; null = such a call is refused (fail closed) */
+  approverUserId?: string | null;
+  approverName?: string | null;
+}
+
+/** ADR-0236 scope tiers, in order. Design reference: the read/write/dangerous scopes of the Gravitee APIM MCP server
+ * (ideas only; no code taken). */
+export const BUNDLE_SCOPE_TIERS = ["read", "write", "dangerous"] as const;
+export type BundleScopeTier = (typeof BUNDLE_SCOPE_TIERS)[number];
+const tierRank = (t: BundleScopeTier | undefined): number => BUNDLE_SCOPE_TIERS.indexOf(t ?? "read");
+
+/**
+ * The tier a bundle grant must reach for this call: the higher of the inventory's tier and the call's own ToolRef
+ * kind, so a disagreement between the two can only make the check stricter.
+ */
+function bundleCallTier(grant: BundleToolGrant, tool: ToolRef): BundleScopeTier {
+  const fromRef: BundleScopeTier = tool.kind === "write" ? "write" : "read";
+  return tierRank(grant.toolTier) >= tierRank(fromRef) ? (grant.toolTier ?? "read") : fromRef;
+}
+
 export interface RoleServerGrant {
   id: string;
   roleId: string;
@@ -489,6 +535,32 @@ export interface RateLimit {
   currentCount: number;
 }
 
+/** ADR-0239 — the call facts a rate limit is matched against. */
+export interface RateLimitMatchContext {
+  userId: string;
+  serverId: string;
+  toolName: string;
+  deployContext: readonly string[] | null | undefined;
+}
+
+/** ADR-0239 — a rate-limit engine's answer. `error` is a DENY in the kernel, never an allow. */
+export type RateLimitVerdict =
+  | { kind: "none" }
+  | { kind: "exhausted"; limit: RateLimit }
+  | { kind: "error"; message: string };
+
+/**
+ * ADR-0239 — a rate-limit engine. Given the limits and the call, name the FIRST limit (in input order) that matches
+ * the call and is exhausted. Pure and synchronous, like the kernel.
+ */
+export interface RateLimitEvaluator {
+  readonly engine: string;
+  firstExhausted(limits: readonly RateLimit[], ctx: RateLimitMatchContext): RateLimitVerdict;
+}
+
+/** ADR-0239 rule id of the deny an erroring rate-limit evaluator produces. */
+export const RATE_LIMIT_ENGINE_ERROR_RULE_ID = "rate-limit-engine-error";
+
 export interface ToolRef {
   serverId: string;
   name: string;
@@ -582,9 +654,18 @@ export interface EvaluationInput {
   /** role-derived grants, pre-filtered by the gateway to the user's assigned roles */
   roleToolGrants?: readonly RoleToolGrant[];
   roleServerGrants?: readonly RoleServerGrant[];
+  /** ADR-0236 — bundle-derived grants, pre-filtered by the gateway to the user's bundles; absent/empty = none */
+  bundleToolGrants?: readonly BundleToolGrant[];
   revocations?: readonly Revocation[];
   approvalRules?: readonly ApprovalRule[];
   rateLimits?: readonly RateLimit[];
+  /**
+   * ADR-0239 — which engine answers the rate-limit step. Absent/null = `legacyRateLimitEvaluator`, the hand-written
+   * predicate below, so every caller that does not pass one is unchanged. The gateway passes the Cedar evaluator
+   * (`@regulait/policy-kernel/rate-limit-cedar`) unless `REGULAIT_RATE_LIMIT_EVALUATOR=legacy` keeps the old one
+   * for this release. An evaluator that errors or throws DENIES the call.
+   */
+  rateLimitEvaluator?: RateLimitEvaluator | null;
   dataScopeRules?: readonly DataScopeRule[];
   /** the call's arguments — required for data-scope rules to be checkable */
   args?: Record<string, unknown>;
@@ -672,6 +753,8 @@ export type RuleName =
   | "role-tool-allow-list"
   | "server-read-only-all"
   | "role-server-read-only-all"
+  /** ADR-0236 — a tool granted through a governed MCP bundle (role tier: revocations subtract from it) */
+  | "bundle-tool-allow-list"
   | "data-scope"
   | "rate-limit"
   | "approval-required"
@@ -691,6 +774,8 @@ export type RuleName =
   | "default-deny";
 
 export const DEFAULT_DENY_RULE_ID = "default-deny";
+/** ADR-0236: the rule id of the hold (or fail-closed refusal) on a dangerous tool reached through an MCP bundle */
+export const BUNDLE_DANGEROUS_RULE_ID = "bundle-dangerous-tool";
 
 /**
  * Reference label for reason strings: "'name' (id8…)" when the caller passed
@@ -889,6 +974,26 @@ export function matchingApprovalRules(
 }
 
 /**
+ * ADR-0239 — the hand-written rate-limit predicate, kept behind `REGULAIT_RATE_LIMIT_EVALUATOR=legacy` for one
+ * release after the Cedar evaluator became the gateway default. The differential test
+ * (`rate-limit-cedar.test.ts`) holds the two to the same answer. Delete it with the switch.
+ */
+export const legacyRateLimitEvaluator: RateLimitEvaluator = {
+  engine: "legacy",
+  firstExhausted(limits, ctx) {
+    const hit = limits.find(
+      (l) =>
+        ruleAppliesToSubject(l, ctx.userId) &&
+        ruleAppliesToServer(l, ctx.serverId) &&
+        ruleAppliesToDeployMode(l, ctx.deployContext) &&
+        matchesScope(l.toolName, ctx.toolName) &&
+        l.currentCount >= l.maxCalls,
+    );
+    return hit ? { kind: "exhausted", limit: hit } : { kind: "none" };
+  },
+};
+
+/**
  * AER-017 — the deployment-wide approval HOLD, evaluated after entitlement.
  *
  * Returns the descriptor when the dial is set to `require_approval`, or null.
@@ -956,6 +1061,8 @@ function evaluateTool(input: EvaluationInput): Decision {
 
   let grantId: string | undefined;
   let grantReason = "";
+  /** ADR-0236: set when the call is granted ONLY through a bundle and the tool is in the dangerous tier */
+  let dangerousBundleGrant: BundleToolGrant | undefined;
 
   // A revocation only ever suppresses ROLE-DERIVED entitlements (§5): direct
   // user grants are themselves per-user overrides and always survive.
@@ -1008,6 +1115,36 @@ function evaluateTool(input: EvaluationInput): Decision {
       }
     } else {
       chain.push({ rule: "role-tool-allow-list", outcome: "no-match" });
+    }
+
+    // ADR-0236 — a governed MCP bundle, at the role tier: consulted only when no direct or role tool grant matched,
+    // and a per-user revocation suppresses it exactly as it suppresses a role grant. Absent/empty input pushes
+    // NOTHING, so every decision without a bundle is byte-identical to the pre-0236 kernel.
+    // ADR-0236 scope tiers: a grant reaches the tool only when the tool's tier is within the grant's max tier.
+    const bundleGrants = input.bundleToolGrants ?? [];
+    if (!grantId && bundleGrants.length > 0) {
+      const bundleToolGrant = bundleGrants.find(
+        (g) =>
+          g.serverId === serverId &&
+          g.toolName === tool.name &&
+          tierRank(bundleCallTier(g, tool)) <= tierRank(g.maxTier),
+      );
+      if (!bundleToolGrant) {
+        chain.push({ rule: "bundle-tool-allow-list", outcome: "no-match" });
+      } else {
+        const revocation = revocationFor(tool.name);
+        if (revocation) {
+          chain.push({ rule: "bundle-tool-allow-list", outcome: "revoked", grantId: revocation.id });
+        } else {
+          chain.push({ rule: "bundle-tool-allow-list", outcome: "allow", grantId: bundleToolGrant.id });
+          grantId = bundleToolGrant.id;
+          if (bundleCallTier(bundleToolGrant, tool) === "dangerous") dangerousBundleGrant = bundleToolGrant;
+          grantReason =
+            `tool '${tool.name}' on server ${serverRef} is in MCP bundle ` +
+            `${refLabel(bundleToolGrant.bundleId, bundleToolGrant.bundleName)} v${bundleToolGrant.version}, ` +
+            `held ${bundleToolGrant.via === "user" ? "directly" : `through a ${bundleToolGrant.via}`}`;
+        }
+      }
     }
   }
 
@@ -1143,14 +1280,34 @@ function evaluateTool(input: EvaluationInput): Decision {
   // PILLAR 1: widened rate limits each keep their own per-subject count/window
   // (the gateway counts each independently). The first exhausted one denies —
   // tightest-wins with no summing and no cross-scope relaxation.
-  const exhaustedLimit = (input.rateLimits ?? []).find(
-    (l) =>
-      ruleAppliesToSubject(l, userId) &&
-      ruleAppliesToServer(l, serverId) &&
-      ruleAppliesToDeployMode(l, input.deployContext) &&
-      matchesScope(l.toolName, tool.name) &&
-      l.currentCount >= l.maxCalls,
-  );
+  //
+  // ADR-0239: the match runs on the injected evaluator (Cedar in the gateway), with the hand-written predicate as
+  // the default. No limits = no evaluator call. An evaluator that errors or throws denies: default-deny holds.
+  const limits = input.rateLimits ?? [];
+  let verdict: RateLimitVerdict = { kind: "none" };
+  if (limits.length > 0) {
+    const evaluator = input.rateLimitEvaluator ?? legacyRateLimitEvaluator;
+    try {
+      verdict = evaluator.firstExhausted(limits, {
+        userId,
+        serverId,
+        toolName: tool.name,
+        deployContext: input.deployContext,
+      });
+    } catch (e) {
+      verdict = { kind: "error", message: e instanceof Error ? e.message : String(e) };
+    }
+  }
+  if (verdict.kind === "error") {
+    chain.push({ rule: "rate-limit", outcome: "deny", grantId: RATE_LIMIT_ENGINE_ERROR_RULE_ID });
+    return {
+      effect: "deny",
+      ruleId: RATE_LIMIT_ENGINE_ERROR_RULE_ID,
+      ruleChain: chain,
+      reason: `rate-limit evaluation failed, so the call is refused: ${verdict.message}`,
+    };
+  }
+  const exhaustedLimit = verdict.kind === "exhausted" ? verdict.limit : undefined;
   if (exhaustedLimit) {
     chain.push({ rule: "rate-limit", outcome: "deny", grantId: exhaustedLimit.id });
     return {
@@ -1209,6 +1366,54 @@ function evaluateTool(input: EvaluationInput): Decision {
           `${toolLabel}. Nothing runs unattended while this mode is set; the call is queued, ` +
           "not refused.",
         approverUserId: executionHold.approverUserId,
+      };
+    }
+  }
+
+  // ADR-0236: a DANGEROUS tool reached only through an MCP bundle always pauses for the bundle's approver, whatever
+  // else applies; it is satisfied by the same already-approved queue entry. FAIL CLOSED with no approver.
+  if (dangerousBundleGrant) {
+    const g = dangerousBundleGrant;
+    if (!g.approverUserId) {
+      chain.push({ rule: "bundle-tool-allow-list", outcome: "deny", grantId: g.id });
+      return {
+        effect: "deny",
+        ruleId: BUNDLE_DANGEROUS_RULE_ID,
+        ruleChain: chain,
+        reason:
+          `'${tool.name}' on server ${serverRef} is a dangerous tool held through MCP bundle ` +
+          `${refLabel(g.bundleId, g.bundleName)}, which names no approver — failing closed`,
+      };
+    }
+    if (g.approverUserId === userId) {
+      // review of #697 (security): four eyes. The bundle's approver may not sign off their own dangerous call (they
+      // could name themselves approver and hold the bundle, or simply also be a holder), so it fails closed, approved
+      // or not. Another approver must be named on the bundle for them to use the tool.
+      chain.push({ rule: "bundle-tool-allow-list", outcome: "deny", grantId: g.id });
+      return {
+        effect: "deny",
+        ruleId: BUNDLE_DANGEROUS_RULE_ID,
+        ruleChain: chain,
+        reason:
+          `'${tool.name}' on server ${serverRef} is a dangerous tool held through MCP bundle ` +
+          `${refLabel(g.bundleId, g.bundleName)}, whose approver is the caller; a dangerous call needs a different ` +
+          `person to sign it off — failing closed`,
+      };
+    }
+    if (input.approvedApprovalId) {
+      chain.push({ rule: "bundle-tool-allow-list", outcome: "satisfied-by-approval", grantId: input.approvedApprovalId });
+    } else {
+      chain.push({ rule: "bundle-tool-allow-list", outcome: "require-approval", grantId: g.id });
+      return {
+        effect: "require_approval",
+        ruleId: BUNDLE_DANGEROUS_RULE_ID,
+        ruleChain: chain,
+        reason:
+          `'${tool.name}' on server ${serverRef} is a dangerous tool held through MCP bundle ` +
+          `${refLabel(g.bundleId, g.bundleName)}: every call needs sign-off by approver ` +
+          refLabel(g.approverUserId, g.approverName),
+        approverUserId: g.approverUserId,
+        ...(g.approverName ? { approverName: g.approverName } : {}),
       };
     }
   }
@@ -1314,6 +1519,8 @@ export interface Entitlements {
   serverGrants: readonly ServerGrant[];
   roleToolGrants?: readonly RoleToolGrant[];
   roleServerGrants?: readonly RoleServerGrant[];
+  /** ADR-0236 — bundle-derived grants (see BundleToolGrant) */
+  bundleToolGrants?: readonly BundleToolGrant[];
   revocations?: readonly Revocation[];
 }
 

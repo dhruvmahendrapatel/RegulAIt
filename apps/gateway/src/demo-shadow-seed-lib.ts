@@ -32,7 +32,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { calculateJwkThumbprint, exportJWK, generateKeyPair, SignJWT, type CryptoKey, type JWK } from "jose";
-import { and, contentProvenanceRecords, eq, type Db } from "@regulait/db";
+import { and, asc, contentProvenanceRecords, eq, projectMembers, projects, type Db } from "@regulait/db";
 import { DISCOVERY_SCHEDULE_MAX_SECONDS, type DemoShadowDiscoveryDataset } from "@regulait/shared";
 import type { RepoReader, RepoTree } from "@regulait/git-provider";
 import { DISCOVERY_SCANNERS, scannerRegistry, type Scanner, type ScanResult } from "./discovery-scanners.js";
@@ -828,11 +828,34 @@ async function ensureProvenance(h: Harness, db: Db, data: DemoShadowDiscoveryDat
     h.report.skipped.push(`provenance records of '${data.contentTrust.connectorName}'`);
     return;
   }
+  // ADR-0250 (S-04): a grant mint is a step-up, which the bootstrap credential cannot give after `seed` enrolled Ada;
+  // `seed` mints this grant during first-admin setup, so here a bootstrap refusal is noted and the reads go ahead
   const grant = await h.call("POST", "/v1/grants/connectors", { userId: dana.id, connectorId, mode: "read" });
-  if (!h.ok(grant.status) && grant.status !== 409) return h.fail(`Dana's read grant on '${data.contentTrust.connectorName}'`, grant);
+  if (h.stepUpRefused(grant)) h.report.notes.push(`Dana's read grant on '${data.contentTrust.connectorName}' is minted by \`seed\`; re-minting it ${STEP_UP_NOTE}`);
+  else if (!h.ok(grant.status) && grant.status !== 409) return h.fail(`Dana's read grant on '${data.contentTrust.connectorName}'`, grant);
+  // ADR-0251: a connector call must name a project by default. Dana's reads are attributed to `seed`'s demo-project
+  // (she owns it); without `seed`, to her oldest project, and a project of her own is created when she has none.
+  const [named] = await db.select({ id: projects.id }).from(projects).where(eq(projects.name, "demo-project")).limit(1);
+  const [member] = named
+    ? [named]
+    : await db
+        .select({ id: projectMembers.projectId })
+        .from(projectMembers)
+        .where(eq(projectMembers.userId, dana.id))
+        .orderBy(asc(projectMembers.projectId))
+        .limit(1);
+  let projectId = member?.id ?? null;
+  if (!projectId) {
+    // created by the seed's own admin credential (project creation is admin-only), then Dana is made its owner
+    const created = await h.call("POST", "/v1/projects", { name: "dana-policy-reads" });
+    if (!h.ok(created.status) || typeof created.body.id !== "string") return h.fail(`a project for Dana's '${data.contentTrust.connectorName}' reads`, created);
+    const joined = await h.call("POST", `/v1/projects/${created.body.id}/members`, { userId: dana.id, role: "owner" });
+    if (!h.ok(joined.status) && joined.status !== 409) return h.fail(`Dana's membership of 'dana-policy-reads'`, joined);
+    projectId = created.body.id;
+  }
   let n = 0;
   for (const object of data.contentTrust.objects) {
-    const r = await h.call("POST", `/v1/connectors/${connectorId}/invoke`, { operation: "read", object }, dana.auth);
+    const r = await h.call("POST", `/v1/connectors/${connectorId}/invoke`, { operation: "read", object, projectId }, dana.auth);
     if (h.ok(r.status)) n++;
     else h.fail(`read '${object}' from '${data.contentTrust.connectorName}'`, r);
   }

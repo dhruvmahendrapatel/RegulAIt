@@ -1,0 +1,11 @@
+# ADR-0247: the BUILD-TIME export stage's direct dependencies (export_onnx.py). export-requirements.txt is the
+# hash-locked closure; the export stage installs only from it, and none of it reaches the runtime image.
+torch
+transformers
+safetensors
+sentencepiece
+protobuf
+onnx
+onnxruntime
+tokenizers
+numpy

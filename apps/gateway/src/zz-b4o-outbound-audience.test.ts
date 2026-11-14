@@ -200,6 +200,7 @@ beforeAll(async () => {
   restoreGates = await relaxGovernanceGatesForTest(db, {
     mrmEnforced: false,
     dispatchAttributionRequired: false,
+    connectorAttributionRequired: false,
     requireMcpAttribution: false,
     keyCustodyEnforced: false,
   });

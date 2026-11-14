@@ -558,6 +558,7 @@ describe("6. the covered / NOT-covered inventory", () => {
     "imported_cost_lines.superseded_reason",
     "interception_scope_rules.note",
     "license_verifications.reason",
+    "mcp_authorised_targets.note",
     "mcp_registry_entries.catalogue_reason",
     "mcp_servers.admission_clear_reason",
     "model_card_approvals.decision_reason",
@@ -629,6 +630,8 @@ describe("6. the covered / NOT-covered inventory", () => {
     "webauthn_credentials.revoke_reason",
     // ADR-0202 decision 4 (migration 0213)
     "demo_beat_fallbacks.reason",
+    // ADR-0206 G1 (migration `project_archive`)
+    "projects.archived_reason",
     // ADR-0208 G8 (migration 0224)
     "infra_resources.retired_reason",
     "infra_policies.retired_reason",

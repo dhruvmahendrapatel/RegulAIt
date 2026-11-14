@@ -1,0 +1,18 @@
+# P30 spike run, 2026-11-07, Node v22.23.4, Postgres 16, inside 'unshare -n' (loopback only, no route out)
+# command: unshare -n sh -c 'lo up && P30_ADMIN_URL=postgres://...?host=/var/run/postgresql npm test'
+ok 1 - the switch is off by default and strict about its value
+ok 2 - the World's tables live in schemas it hard-codes
+ok 3 - flow route refuses non-loopback callers
+# P30 audit: stored [{"type":"hook_created","n":1},{"type":"hook_received","n":1},{"type":"run_completed","n":1},{"type":"run_created","n":1},{"type":"run_started","n":1},{"type":"step_completed","n":8},{"type":"step_created","n":8},{"type":"step_started","n":8}] audited [{"event_type":"hook_created","n":1},{"event_type":"hook_received","n":1},{"event_type":"run_completed","n":1},{"event_type":"run_created","n":1},{"event_type":"run_started","n":3},{"event_type":"step_completed","n":8},{"event_type":"step_started","n":8}]
+ok 4 - sign-off stage: durable steps, pause on hook, resume after a restart, fan-out checks
+ok 5 - governance can refuse a step: the run fails and a deny decision is recorded
+# P30 overhead: 50 steps, 15.93 ms/step on vercel/workflow (153 events), 0.78 ms/transition baseline
+ok 6 - overhead per durable step (printed; recorded in ADR-0254)
+ok 7 - egress: every connection and lookup the process made was local
+# tests 7
+# pass 7
+# fail 0
+
+# offline build (same namespace): npx workflow build --target standalone
+✓ Compiled workflows in 6.3s (22 steps, 2 workflows)
+Build completed successfully!

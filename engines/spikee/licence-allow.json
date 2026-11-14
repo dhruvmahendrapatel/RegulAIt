@@ -1,0 +1,52 @@
+[
+  {
+    "subject": "python",
+    "licence": "PSF-2.0",
+    "decision": "reused from ADR-0187 decision 193 for spikee; owner to confirm (ADR-0245)",
+    "why": "the CPython runtime of the base image (the same pinned python:3.12-slim-trixie as garak's); PSF-2.0, permissive, not on the ADR-0176 list. Accepted for garak on 2026-10-10 (ADR-0187 decision 193)."
+  },
+  {
+    "subject": "typing_extensions",
+    "licence": "PSF-2.0",
+    "decision": "reused from ADR-0187 decision 193 for spikee; owner to confirm (ADR-0245)",
+    "why": "a typing backport used throughout the closure (pydantic, openai, anthropic); PSF-2.0, permissive, not on the list. Accepted for garak (ADR-0187 decision 193)."
+  },
+  {
+    "subject": "certifi",
+    "licence": "MPL-2.0",
+    "decision": "reused from ADR-0187 decision 193 for spikee; owner to confirm (ADR-0245)",
+    "why": "the CA bundle (requests, httpx); MPL-2.0 is file-level copyleft with obligations only if its files are modified. Admitted only while unmodified: the gate checks every file against its wheel RECORD hash (ADR-0187 decision 194). Accepted for garak (decision 193).",
+    "condition": "unmodified"
+  },
+  {
+    "subject": "tqdm",
+    "licence": "MPL-2.0",
+    "decision": "reused from ADR-0187 decision 193 for spikee; owner to confirm (ADR-0245)",
+    "why": "spikee's progress bars (a direct dependency, pinned by spikee at 4.67.3); MPL-2.0 AND MIT per its LICENCE file, unmodified. Admitted only while unmodified (decision 194). Accepted for garak (decision 193).",
+    "condition": "unmodified"
+  },
+  {
+    "subject": "regex",
+    "licence": "CNRI-Python",
+    "decision": "reused from ADR-0187 decision 193 for spikee; owner to confirm (ADR-0245)",
+    "why": "tiktoken's regular-expression engine; Apache-2.0 AND CNRI-Python (the parts derived from CPython's re), permissive. Accepted for garak (decision 193)."
+  },
+  {
+    "subject": "numpy",
+    "licence": "Zlib",
+    "decision": "reused from ADR-0187 decision 106 for spikee; owner to confirm (ADR-0245)",
+    "why": "pandas' and pyarrow's array library; Zlib is a permissive licence on code numpy ships. Accepted for modelscan and reused for garak (ADR-0187 decision 106)."
+  },
+  {
+    "subject": "numpy.libs/libgfortran",
+    "licence": "GPL-3.0-or-later WITH GCC-exception-3.1",
+    "decision": "reused from ADR-0187 decision 106 for spikee; owner to confirm (ADR-0245)",
+    "why": "the GCC runtime library under the GCC Runtime Library Exception, shipped unmodified inside numpy's wheel (ADR-0187 decision 106)."
+  },
+  {
+    "subject": "numpy.libs/libquadmath",
+    "licence": "LGPL-2.1-or-later",
+    "decision": "reused from ADR-0187 decision 106 for spikee; owner to confirm (ADR-0245)",
+    "why": "an unmodified, dynamically linked LGPL library shipped as its own shared object inside numpy's wheel (ADR-0187 decision 106)."
+  }
+]

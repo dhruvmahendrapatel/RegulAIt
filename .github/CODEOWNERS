@@ -38,3 +38,8 @@
 /scripts/ui-spa-routes.mjs                        @dhruvmahendrapatel
 /scripts/ui-tokens.baseline.json                  @dhruvmahendrapatel
 /scripts/preflight-ui-tokens.mjs                  @dhruvmahendrapatel
+# #738 Lane A (CONTRIBUTING §4.8): the CI scope decides which jobs a PR runs, CodeQL and Trivy included, so
+# a PR must not change it without the owner. A change to it is already a full CI run (SELF_RE in the script).
+/.github/actions/                                 @dhruvmahendrapatel
+/scripts/ci-scope.mjs                             @dhruvmahendrapatel
+/scripts/ci-scope.test.mjs                        @dhruvmahendrapatel
