@@ -48,7 +48,7 @@ export default function SsoPage() {
   const samlUnresolved: Unresolved | null = saml.isError
     ? { unknown: 1, warnings: 0 }
     : saml.data
-      ? { unknown: 0, warnings: saml.data.providers.filter((p) => !(p.allowedEmailDomains && p.allowedEmailDomains.length > 0) || p.allowIdpInitiated).length }
+      ? { unknown: 0, warnings: (saml.data.providers ?? []).filter((p) => !(p.allowedEmailDomains && p.allowedEmailDomains.length > 0) || p.allowIdpInitiated).length }
       : null;
   const settings = useQuery(orgSettingsQuery<OrgSettingsResponse>());
   const stepUpUnresolved = orgSettingsUnresolved(STEP_UP_KEYS, { data: settings.data, failed: settings.isError });
