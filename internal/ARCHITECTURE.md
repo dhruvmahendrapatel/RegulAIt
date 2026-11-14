@@ -65,7 +65,7 @@ builds on its own.
 | `db` | Drizzle schema (`schema.ts`), migrations and migrator, the chained audit writer (`audit-chain.ts`), decision facts, the deferred-unique preflight, the prose scrub, the content-credential guard (ADR-0233). |
 | `shared` | Zod schemas and pure logic shared by gateway and SPA (approval digests, placement, forecasting, guardrails, demo seeds). |
 | `model-provider` | Real model dispatch behind the agent registry. |
-| `connector-provider` | Connector execution and the actual-spend ledger. |
+| `connector-provider` | Connector execution and the actual-spend ledger; the curated connector-catalogue pieces (clean-room, ADR-0255). |
 | `git-provider` | Provider-agnostic git (four providers). |
 | `pm-provider` | Pillar-8 PM adapters and inbound sync. |
 | `infra-provider` | Pillar-3 drift, CVE and certificate detection and remediation across three clouds. |
