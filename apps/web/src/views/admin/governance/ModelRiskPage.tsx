@@ -24,7 +24,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Tabs, Textarea, tabIds } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, ErrorState, Field, Input, Select, Table, Tabs, Textarea, tabIds } from "../../../ui/kit";
 import { DataList, type DataColumn } from "../../../ui/DataList";
 import {
   QueryGate,
@@ -287,13 +287,18 @@ export default function ModelRiskPage() {
       status.refetch(),
       queryClient.invalidateQueries({ queryKey: ["admin", "mrm-cards"] }),
       queryClient.invalidateQueries({ queryKey: ["admin", "mrm-expiring"] }),
-      cardDetail.refetch(),
+      // invalidate, not refetch(): react-query skips a disabled query, so with no card open nothing is read
+      // (refetch() ignores `enabled` and asked for /v1/mrm/cards/null)
+      queryClient.invalidateQueries({ queryKey: ["admin", "mrm-card"] }),
     ]);
   };
 
   const detail = pageCards.find((c) => c.id === openCard) ?? null;
-  const autofill = openCard === cardDetail.data?.card.id ? cardDetail.data.card.autofill : null;
-  const staleness = openCard === cardDetail.data?.card.id ? cardDetail.data.card.staleness : null;
+  const detailCard = cardDetail.data?.card;
+  const autofill = detailCard && openCard === detailCard.id ? detailCard.autofill : null;
+  const staleness = detailCard && openCard === detailCard.id ? detailCard.staleness : null;
+  // a detail read that answered without its card is a failed read (shown with Retry), never a crash or a silent blank
+  const detailMissing = openCard !== null && cardDetail.isSuccess && !detailCard;
 
   // I-2 (#453, pattern 4): one empty state while nothing exists. The posture read already counts every card in the
   // org, so no extra request is made. Only an answered zero counts: a failed read stays the QueryGate's error with
@@ -731,6 +736,14 @@ export default function ModelRiskPage() {
                   id={tabIds(`mrm-${detail.id}`, "card").panel}
                   aria-labelledby={tabIds(`mrm-${detail.id}`, "card").tab}
                 >
+
+                {detailMissing && (
+                  <ErrorState
+                    title="Couldn't load this model card"
+                    message="The card's computed sections and staleness did not come back. Try again."
+                    onRetry={() => void cardDetail.refetch()}
+                  />
+                )}
 
                 {/* ADR-0086 — staleness first: a certified card whose world
                     moved says so before anything else on the card */}
