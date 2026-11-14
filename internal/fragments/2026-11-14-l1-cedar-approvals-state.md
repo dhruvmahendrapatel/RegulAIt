@@ -1,0 +1,2 @@
+<!-- fold: state-recap -->
+**2026-11-14 - ADR-0239 slice 2: MCP approval rules are matched on Cedar ([ADR-0239](../decisions/0239-cedar-consolidation-and-relationship-store.md) "As built", lane L1; no migration).** The gateway injects one Cedar evaluator into the kernel and its own matched-rule reads (consent scope, queue quorum); an engine error refuses the call. A fast-check differential holds it to the hand-written predicate, which stays as the kernel's default for one release.

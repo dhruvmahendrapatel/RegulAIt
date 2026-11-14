@@ -561,6 +561,31 @@ export interface RateLimitEvaluator {
 /** ADR-0239 rule id of the deny an erroring rate-limit evaluator produces. */
 export const RATE_LIMIT_ENGINE_ERROR_RULE_ID = "rate-limit-engine-error";
 
+/** ADR-0239 slice 2 — the facts an approval-rule match reads */
+export interface ApprovalRuleMatchContext {
+  userId: string;
+  serverId: string;
+  toolName: string;
+  toolKind: ToolKind;
+  deployContext?: readonly string[] | null | undefined;
+}
+
+/** ADR-0239 slice 2 — an approval-rule engine's answer: the matching rules (any order), or an error (a DENY). */
+export type ApprovalRuleVerdict = { kind: "matched"; rules: ApprovalRule[] } | { kind: "error"; message: string };
+
+/**
+ * ADR-0239 slice 2 — an approval-rule MATCH engine (Cedar in the gateway, `@regulait/policy-kernel/approval-rule-cedar`).
+ * It answers only WHICH rules bind the call; the ADR-0229 precedence and the ADR-0104 strictest-scope roll-up stay
+ * here, in TypeScript, because Cedar returns an unordered set.
+ */
+export interface ApprovalRuleEvaluator {
+  readonly engine: string;
+  matching(rules: readonly ApprovalRule[], ctx: ApprovalRuleMatchContext): ApprovalRuleVerdict;
+}
+
+/** ADR-0239 slice 2 rule id of the deny an erroring approval-rule evaluator produces. */
+export const APPROVAL_RULE_ENGINE_ERROR_RULE_ID = "approval-rule-engine-error";
+
 export interface ToolRef {
   serverId: string;
   name: string;
@@ -658,6 +683,12 @@ export interface EvaluationInput {
   bundleToolGrants?: readonly BundleToolGrant[];
   revocations?: readonly Revocation[];
   approvalRules?: readonly ApprovalRule[];
+  /**
+   * ADR-0239 slice 2 — which engine matches approval rules. The gateway passes the Cedar evaluator; absent/null = the
+   * hand-written predicate (`matchingApprovalRules`), kept for one release as ADR-0239 decision 4 did for rate limits.
+   * An evaluator that errors or throws DENIES the call (`approval-rule-engine-error`).
+   */
+  approvalRuleEvaluator?: ApprovalRuleEvaluator | null;
   rateLimits?: readonly RateLimit[];
   /**
    * ADR-0239 — which engine answers the rate-limit step: the Cedar evaluator
@@ -971,6 +1002,32 @@ export function matchingApprovalRules(
       matchesScope(r.toolName, ctx.tool.name) &&
       (!r.writeOnly || ctx.tool.kind === "write"),
   ).sort(compareApprovalRulePrecedence);
+}
+
+/**
+ * ADR-0239 slice 2 — the approval-rule match on an injected engine, in ADR-0229 precedence order (the first element
+ * names the approver). No engine = the hand-written `matchingApprovalRules`. An engine error or throw is returned as
+ * an error verdict, never as "nothing matched": the kernel turns it into a deny, and a gateway caller must not read
+ * an error as "no rule binds this call".
+ */
+export function matchingApprovalRulesWith(
+  evaluator: ApprovalRuleEvaluator | null | undefined,
+  rules: readonly ApprovalRule[],
+  ctx: { userId: string; serverId: string; tool: ToolRef; deployContext?: readonly string[] | null | undefined },
+): ApprovalRuleVerdict {
+  if (!evaluator || rules.length === 0) return { kind: "matched", rules: matchingApprovalRules(rules, ctx) };
+  try {
+    const v = evaluator.matching(rules, {
+      userId: ctx.userId,
+      serverId: ctx.serverId,
+      toolName: ctx.tool.name,
+      toolKind: ctx.tool.kind,
+      deployContext: ctx.deployContext ?? null,
+    });
+    return v.kind === "error" ? v : { kind: "matched", rules: [...v.rules].sort(compareApprovalRulePrecedence) };
+  } catch (e) {
+    return { kind: "error", message: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 /**
@@ -1464,12 +1521,22 @@ function evaluateTool(input: EvaluationInput): Decision {
   // needs the same predicate outside the kernel, to read the strictest
   // `approvalScope` off exactly the rules that bound this call. Two copies of
   // that predicate could drift into governing different rule sets.
-  const approvalRule = matchingApprovalRules(input.approvalRules ?? [], {
+  const approvalVerdict = matchingApprovalRulesWith(input.approvalRuleEvaluator, input.approvalRules ?? [], {
     userId,
     serverId,
     tool,
     deployContext: input.deployContext,
-  })[0];
+  });
+  if (approvalVerdict.kind === "error") {
+    chain.push({ rule: "approval-required", outcome: "deny", grantId: APPROVAL_RULE_ENGINE_ERROR_RULE_ID });
+    return {
+      effect: "deny",
+      ruleId: APPROVAL_RULE_ENGINE_ERROR_RULE_ID,
+      ruleChain: chain,
+      reason: `approval-rule evaluation failed, so the call is refused: ${approvalVerdict.message}`,
+    };
+  }
+  const approvalRule = approvalVerdict.rules[0];
   if (approvalRule) {
     if (input.approvedApprovalId) {
       chain.push({
