@@ -447,7 +447,16 @@ export const KNOWN_UI_GAPS = new Map([
   ["DELETE /v1/servers/:serverId/token-exchange", { does: "removes an MCP server's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
   ["GET /v1/connectors/:connectorId/token-exchange", { does: "reads a connector's upstream token-exchange configuration and per-action scope map (never the secret)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
   ["PUT /v1/connectors/:connectorId/token-exchange", { does: "sets or changes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
-  ["DELETE /v1/connectors/:connectorId/token-exchange", { does: "removes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
+  ["DELETE /v1/connectors/:connectorId/token-exchange", { does: "removes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],  // ADR-0251 (P-01, lane L1): the governed core's resource-rule admin routes ship API-first (orchestrator brief
+  // 2026-11-14: the UI is built by the design builder on #453).
+  ["GET /v1/rules/resource/approval-rules", { does: "lists the governed core's approval rules for model, connector and A2A calls (keyset-paginated)", tracking: "#453" }],
+  ["GET /v1/rules/resource/rate-limits", { does: "lists the governed core's rate limits for connector and A2A calls (keyset-paginated)", tracking: "#453" }],
+  ["POST /v1/rules/resource/approval-rules", { does: "adds an approval rule for model, connector or A2A calls (audited)", tracking: "#453" }],
+  ["PATCH /v1/rules/resource/approval-rules/:ruleId", { does: "changes a rule's approver or writeOnly (a loosening is a settings_relax step-up, audited)", tracking: "#453" }],
+  ["DELETE /v1/rules/resource/approval-rules/:ruleId", { does: "removes an approval rule (settings_relax step-up, audited)", tracking: "#453" }],
+  ["POST /v1/rules/resource/rate-limits", { does: "adds a rate limit for connector or A2A calls (audited)", tracking: "#453" }],
+  ["PATCH /v1/rules/resource/rate-limits/:ruleId", { does: "changes a limit's calls or window (a loosening is a settings_relax step-up, audited)", tracking: "#453" }],
+  ["DELETE /v1/rules/resource/rate-limits/:ruleId", { does: "removes a rate limit (settings_relax step-up, audited)", tracking: "#453" }],
 ]);
 
 /**
@@ -456,7 +465,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 46; // main's 44 + ADR-0255 (P31) 2, master decision on #753 2026-11-14
+export const KNOWN_UI_GAPS_MAX = 54; // main's 46 + ADR-0251 (P-01, lane L1) 8 resource-rule admin routes, orchestrator brief 2026-11-14 (#453)
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 

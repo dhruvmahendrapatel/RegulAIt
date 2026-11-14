@@ -282,3 +282,36 @@ overshoot a limit.
   five and take exactly five slots; a call with no limit writes no slot, yet a limit added later counts it; a refused
   call takes no slot; the third call over a limit of two is refused; audit side rows never take a slot.
   `zz-adr0251-a2a-core.test.ts` fills the window with a reservation.
+
+### P-01 remainder, slice 2: admin routes for the resource rules (2026-11-14)
+
+Closes review #715 finding 4 ("no admin routes yet"). `apps/gateway/src/resource-rule-routes.ts`:
+
+| Route | Step-up |
+|---|---|
+| `GET /v1/rules/resource/approval-rules`, `GET /v1/rules/resource/rate-limits` | none (read; keyset-paginated by id, `limit` 1 to 200, optional `resourceType`) |
+| `POST /v1/rules/resource/approval-rules`, `POST /v1/rules/resource/rate-limits` | none: adding a rule or a limit only ever restricts |
+| `PATCH /v1/rules/resource/approval-rules/:ruleId` (`writeOnly`, `approverUserId`) | `settings_relax` when `writeOnly` turns on (fewer calls held) or the approver changes (who releases calls can only be judged by a person); none when `writeOnly` turns off |
+| `PATCH /v1/rules/resource/rate-limits/:ruleId` (`maxCalls`, `windowSeconds`) | `settings_relax` when more calls are allowed or the rate rises (`rateLimitChangeRelaxes`: more calls over a longer window is ambiguous and takes the step-up); none when it only tightens |
+| `DELETE` on either | `settings_relax` |
+
+- **Admin only** through the global gate (not in `NON_ADMIN_ROUTES`). The step-up is bound to the exact change
+  (`resourceApprovalRuleChanged`, `resourceApprovalRuleRemoved`, `resourceRateLimitChanged`, `resourceRateLimitRemoved`
+  with the rule id and the new values).
+- **Audit in the same transaction** as the write, on `objectType: restriction_rule`, `receiptClass: configuration`:
+  the created or deleted row, or the `{from, to}` transitions, with `relaxed` and the step-up method on a loosening.
+  A PATCH re-reads the row under `FOR UPDATE`; an edit judged a tightening that a concurrent change turned into a
+  loosening is refused (409 `rule_changed`), never applied without its step-up.
+- **Identity is not editable.** The subject and the resource binding select which calls a rule applies to; changing
+  them is a new rule (delete and create), as for the MCP rule kinds (ADR-0073 §2).
+- **Refused with a reason, never stored:** an unknown resource, subject or approver (422); a disabled approver (422
+  `approver_disabled`); an approver who is the rule's own user subject (422 `approver_is_subject`: the caller is never
+  in their own approval pool, ADR-0186 A, so the rule could only refuse); a write-only model rule and a model rate limit
+  (400: a model call never writes, and model limits stay in `model_rate_limits`, one fact in one place).
+- **Path.** Under `/v1/rules/resource/…` rather than `/v1/rules/resource-…`, so the SPA's generic one-segment
+  `/v1/rules/${kind}` calls are not read by the route census as reaching these routes.
+- **UI.** No screen in this lane: the six writes and two lists are `KNOWN_UI_GAPS` (cap 44 → 52) and the two removals
+  are `DELIBERATELY_API_ONLY`, all tracked on #453 for the design builder.
+- **Tests.** `zz-adr0251-resource-rule-routes.test.ts` (admin only; create, list, tighten, loosen and delete with the
+  step-up refusal naming the exact change; every refusal reason; the core loads what the routes wrote and stops
+  loading a deleted limit); `resource-rules.test.ts` (the loosening predicate and the request shapes).
