@@ -21,7 +21,8 @@
 --                    active admin principal is, through regulait_rls_is_admin(), and to the users read.
 --
 -- approval_maintenance gains the users read: the chatops and PM webhook paths that decide or route an approval look
--- the deciding user up in the same request.
+-- the deciding user up in the same request. audit_verify gains it too: a ledger reader names the users whose rows it
+-- reads (the policy simulator's replay), which a bootstrap-token request, having no principal, could not otherwise do.
 
 CREATE OR REPLACE FUNCTION regulait_rls_system_reason() RETURNS text
   LANGUAGE plpgsql STABLE PARALLEL SAFE
@@ -75,7 +76,7 @@ CREATE POLICY users_select ON users FOR SELECT USING (
   (SELECT regulait_rls_user_id()) IS NOT NULL
   OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['authenticate', 'identity_provisioning', 'rls_membership',
                                                         'migration', 'system_task', 'public_ingest',
-                                                        'bootstrap_admin', 'approval_maintenance'])
+                                                        'bootstrap_admin', 'approval_maintenance', 'audit_verify'])
 );
 --> statement-breakpoint
 
@@ -178,3 +179,19 @@ CREATE POLICY audit_log_select ON audit_log FOR SELECT USING (
   OR (SELECT regulait_rls_is_admin())
   OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['audit_chain', 'audit_verify', 'audit_subject', 'migration', 'system_task'])
 );
+--> statement-breakpoint
+
+-- The anchor timer (system_task) and the admin's timestamp retry (a principal or bootstrap_admin) now run as the app
+-- role, which 0272 gave no UPDATE on audit_anchors. An anchor row's evidence (which head it anchors, where, when) stays
+-- immutable for the app role; its delivery and timestamp state is what those paths record. The grant is by column,
+-- so a column added later is not updatable until its migration grants it (the 0272 approvals rule).
+DO $$
+DECLARE cols text;
+BEGIN
+  SELECT pg_catalog.string_agg(pg_catalog.quote_ident(a.attname), ', ' ORDER BY a.attnum) INTO cols
+    FROM pg_catalog.pg_attribute a
+   WHERE a.attrelid = 'public.audit_anchors'::regclass AND a.attnum > 0 AND NOT a.attisdropped
+     AND a.attname NOT IN ('id', 'seq', 'row_hash', 'head_at', 'algorithm', 'destination', 'deploy_mode', 'created_at');
+  EXECUTE pg_catalog.format('GRANT UPDATE (%s) ON public.audit_anchors TO regulait_app', cols);
+END
+$$;

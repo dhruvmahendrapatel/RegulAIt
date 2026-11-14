@@ -466,6 +466,16 @@ scope here runs under FORCE row-level security today, on the superuser login CI 
   the caller's reason may append but not read the ledger (`authenticate`, `identity_provisioning`,
   `approval_maintenance`, `public_ingest`), so the writer's RETURNING of the row it appended is visible.
 
+**Anchor state.** The anchor timer and the admin's timestamp retry now run as the app role, which 0272 gave no
+UPDATE on `audit_anchors`. 7a grants UPDATE on the delivery and timestamp columns only (by column, closed for columns
+added later); the anchored evidence (`id`, `seq`, `row_hash`, `head_at`, `algorithm`, `destination`, `deploy_mode`,
+`created_at`) stays immutable for the app role.
+
+**Ledger reads under a narrow reason.** Two found by the full suite: the SSO callback's sign-in-history and pre-0139
+backfill lookups (`federated-identity.ts`) read the ledger under `audit_verify` rather than the callback's
+`identity_provisioning`; and `audit_verify` gains the users read, so the policy simulator's replay names users for a
+bootstrap-token request too.
+
 **Still unscoped, for 7b.** `runMigrations` (owner), the audit prune (owner), the rate-limit and PM-delivery prune
 timers (their tables have no RLS), and the seed, first-admin and demo scripts (they run as the migrator).
 
