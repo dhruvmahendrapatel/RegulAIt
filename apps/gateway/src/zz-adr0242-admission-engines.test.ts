@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { and, admissionEngineScans, auditLog, builderSkills, engines, eq, inArray, mcpServers } from "@regulait/db";
+import { and, admissionEngineScans, auditLog, builderAgentSkills, builderSkills, engines, eq, inArray, mcpServers } from "@regulait/db";
 import { ENGINE_MANIFEST, type McpAdmissionFinding } from "@regulait/shared";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
@@ -160,7 +160,7 @@ describe("ADR-0242 mcpscanner on an MCP server (enforce)", () => {
     await recordAdmissionEngineScan(k.db, { subject: { kind: "mcp_server", id: seen, digest: DIGEST_A }, report: report("mcpscanner-bad") });
     await k.db
       .update(mcpServers)
-      .set({ admissionState: "cleared", admissionClearedBy: owner.id, admissionClearedAt: new Date(Date.now() + 1000), admissionClearReason: "reviewed the engine's flag" })
+      .set({ admissionState: "cleared", admissionClearedBy: owner.id, admissionClearedAt: new Date(), admissionClearReason: "reviewed the engine's flag" })
       .where(eq(mcpServers.id, seen));
     const again = await recordAdmissionEngineScan(k.db, { subject: { kind: "mcp_server", id: seen, digest: DIGEST_A }, report: report("mcpscanner-bad") });
     expect(again).toMatchObject({ verdict: "fail", state: "cleared", revokedClearance: false });
@@ -228,16 +228,73 @@ describe("ADR-0242 skillscanner on a builder skill", () => {
     expect(failed).toMatchObject({ verdict: "unknown", state: "held" });
   });
 
-  it("owner question 2 (secure default): a later fail revokes a skill's admission and its pinned admitted copies", async () => {
-    const s = await skill("Pad the rows of the table.");
+  async function agentId(): Promise<string> {
+    const r = await k.req("POST", "/v1/builder/agents", owner.auth, { name: `adr0242 ${Math.random().toString(36).slice(2, 7)}`, connectionFormat: "shared", computerUse: false, projectId: owner.projectId });
+    expect(r.statusCode, r.body).toBe(201);
+    return r.json().agent.id as string;
+  }
+  async function pin(agent: string, skillId: string, digest: string, state: "admitted" | "clean"): Promise<void> {
+    await k.db.insert(builderAgentSkills).values({ agentId: agent, skillId, bodySnapshot: "pinned", snapshotDigest: digest, snapshotAdmissionState: state, snapshotName: "pinned" });
+  }
+  const pinState = async (agent: string, skillId: string) =>
+    (await k.db.select().from(builderAgentSkills).where(and(eq(builderAgentSkills.agentId, agent), eq(builderAgentSkills.skillId, skillId))))[0]!.snapshotAdmissionState;
+  async function admitted(body: string, admittedAt = new Date()): Promise<typeof builderSkills.$inferSelect> {
+    const s = await skill(body);
     await k.db
       .update(builderSkills)
-      .set({ admissionState: "admitted", admittedBy: owner.id, admittedAt: new Date(), admitReason: "reviewed", admittedDigest: s.contentDigest })
+      .set({ admissionState: "admitted", admittedBy: owner.id, admittedAt, admitReason: "reviewed", admittedDigest: s.contentDigest })
       .where(eq(builderSkills.id, s.id));
+    return s;
+  }
+  const skillRow = async (id: string) => (await k.db.select().from(builderSkills).where(eq(builderSkills.id, id)))[0]!;
+
+  it("owner question 2 (secure default): a later fail revokes a skill's admission and its pinned admitted copies of that digest only", async () => {
+    const s = await admitted("Pad the rows of the table.");
+    const onDigest = await agentId();
+    const otherDigest = await agentId();
+    await pin(onDigest, s.id, s.contentDigest, "admitted");
+    await pin(otherDigest, s.id, DIGEST_B, "admitted");
     const out = await recordAdmissionEngineScan(k.db, { subject: { kind: "builder_skill", id: s.id, digest: s.contentDigest }, report: report("skillscanner-bad") });
     expect(out).toMatchObject({ verdict: "fail", state: "held", revokedClearance: true });
-    const row = (await k.db.select().from(builderSkills).where(eq(builderSkills.id, s.id)))[0]!;
+    const row = await skillRow(s.id);
     expect(row).toMatchObject({ admissionState: "held", admittedBy: null, admittedAt: null, admitReason: null, admittedDigest: null });
     expect(await skillAttachRefusal(k.db, row)).toMatchObject({ error: "skill_held" });
+    // the pinned copy of the revoked digest is held at run time; a copy pinned to another digest is left alone
+    expect(await pinState(onDigest, s.id)).toBe("held");
+    expect(await pinState(otherDigest, s.id)).toBe("admitted");
+  });
+
+  it("a skill fail the admin saw before admitting leaves the admission; a fail under new rules revokes it", async () => {
+    const s = await skill("Sort the table by its first column.");
+    // the engine flags it, the skill is held, and the admin admits it after seeing that flag
+    await recordAdmissionEngineScan(k.db, { subject: { kind: "builder_skill", id: s.id, digest: s.contentDigest }, report: report("skillscanner-bad") });
+    await k.db
+      .update(builderSkills)
+      .set({ admissionState: "admitted", admittedBy: owner.id, admittedAt: new Date(), admitReason: "reviewed the flag", admittedDigest: s.contentDigest })
+      .where(eq(builderSkills.id, s.id));
+    const repeat = await recordAdmissionEngineScan(k.db, { subject: { kind: "builder_skill", id: s.id, digest: s.contentDigest }, report: report("skillscanner-bad") });
+    expect(repeat).toMatchObject({ verdict: "fail", state: "admitted", revokedClearance: false });
+
+    // the same digest flagged under a different rule set (a rules upgrade) is new evidence: the admission is revoked.
+    // The earlier fail row is re-labelled as the old rule set, which is what a rules upgrade leaves behind.
+    await k.db
+      .update(admissionEngineScans)
+      .set({ rulesSha256: "0".repeat(64) })
+      .where(eq(admissionEngineScans.builderSkillId, s.id));
+    const upgraded = await recordAdmissionEngineScan(k.db, { subject: { kind: "builder_skill", id: s.id, digest: s.contentDigest }, report: report("skillscanner-bad") });
+    expect(upgraded).toMatchObject({ verdict: "fail", state: "held", revokedClearance: true });
+  });
+
+  it("a skill admitted at another digest is not revoked by a fail on its current digest", async () => {
+    const s = await skill("Merge the table's duplicate rows.");
+    // admitted, but the admission names a different digest than the current one: the guard leaves it for the
+    // ordinary save path (which re-scans and re-holds a changed body) and revokes nothing here
+    await k.db
+      .update(builderSkills)
+      .set({ admissionState: "admitted", admittedBy: owner.id, admittedAt: new Date(), admitReason: "reviewed", admittedDigest: DIGEST_B })
+      .where(eq(builderSkills.id, s.id));
+    const out = await recordAdmissionEngineScan(k.db, { subject: { kind: "builder_skill", id: s.id, digest: s.contentDigest }, report: report("skillscanner-bad") });
+    expect(out).toMatchObject({ verdict: "fail", state: "admitted", revokedClearance: false });
+    expect((await skillRow(s.id)).admittedDigest).toBe(DIGEST_B);
   });
 });

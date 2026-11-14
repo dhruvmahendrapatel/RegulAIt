@@ -13,6 +13,8 @@
  *   - only the format's fields are allowed: `name` (1–64 lowercase letters, digits and single hyphens, neither
  *     first nor last), `description` (1–1024 characters, required), and the optional `license`, `compatibility`
  *     (≤ 500), `metadata` (string to string, ≤ 32 entries) and `allowed-tools`. An unknown field is refused;
+ *   - the body is at most SKILL_BODY_MAX_CHARS characters (the stored body's cap), checked before anything else
+ *     reads it;
  *   - the progressive-loading layout: the body (the level-2 instructions) is at most SKILL_BODY_MAX_LINES lines,
  *     and every relative file it points at stays inside the skill (no absolute path, no `..`, no backslash, no
  *     `file:` URL). Bundled files are not accepted yet (ADR-0242 Context), so a reference is checked for shape only.
@@ -25,14 +27,18 @@ import { z } from "zod";
 
 export const SKILL_FRONTMATTER_MAX_BYTES = 8 * 1024;
 export const SKILL_BODY_MAX_LINES = 500;
+/** the stored body's own cap (builderCreateSkillSchema), checked here with the import's other limits */
+export const SKILL_BODY_MAX_CHARS = 20_000;
 
 const NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+/** one line of text: no line breaks, tabs or other control characters (surrounding whitespace, e.g. the newline a
+ * YAML `>` block ends with, is trimmed first) — these fields are shown on one line */
 const oneLine = (max: number) =>
   z
     .string()
     .max(max)
     .refine((v) => v.trim().length > 0, "must not be empty")
-    .refine((v) => !/[\u0000-\u0008\u000b-\u001f\u007f]/.test(v), "must not contain control characters");
+    .refine((v) => !/[\u0000-\u001f\u007f]/.test(v.trim()), "must be one line with no control characters");
 
 const frontmatterSchema = z
   .object({
@@ -52,7 +58,8 @@ export type SkillMarkdownError =
   | "skill_frontmatter_missing"
   | "skill_frontmatter_too_large"
   | "skill_frontmatter_invalid"
-  | "skill_layout_invalid";
+  | "skill_layout_invalid"
+  | "skill_body_too_long";
 
 export type SkillMarkdownResult =
   | { ok: true; skill: { name: string; description: string; body: string } }
@@ -122,12 +129,15 @@ export function validateSkillMarkdown(markdown: string): SkillMarkdownResult {
       issue.code === "unrecognized_keys"
         ? `the frontmatter has a field the SKILL.md format does not define (allowed: ${known.join(", ")})`
         : field && known.includes(field)
-          ? `the frontmatter's '${field}' field is invalid: ${field === "name" ? "1–64 lowercase letters, digits and single hyphens, neither first nor last" : field === "metadata" ? "a mapping of at most 32 short string keys to string values" : "a non-empty single string within its length limit"}`
+          ? `the frontmatter's '${field}' field is invalid: ${field === "name" ? "1–64 lowercase letters, digits and single hyphens, neither first nor last" : field === "metadata" ? "a mapping of at most 32 short string keys to string values" : "a non-empty single line within its length limit"}`
           : "the frontmatter is invalid",
     );
   }
 
   const body = text.slice(close + 4).replace(/^\n/, "").trim();
+  if (body.length > SKILL_BODY_MAX_CHARS) {
+    return refuse("skill_body_too_long", `the SKILL.md body is longer than ${SKILL_BODY_MAX_CHARS} characters`);
+  }
   if (body.split("\n").length > SKILL_BODY_MAX_LINES) {
     return refuse("skill_layout_invalid", `the SKILL.md body is longer than ${SKILL_BODY_MAX_LINES} lines; move detail into referenced files`);
   }

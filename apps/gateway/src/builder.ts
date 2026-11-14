@@ -1931,7 +1931,6 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     const checked = validateSkillMarkdown(markdown);
     if (!checked.ok) return reply.status(422).send({ error: checked.error, detail: checked.detail });
     const parsed = checked.skill;
-    if (parsed.body.length > 20_000) return reply.status(422).send({ error: "skill_body_too_long" });
     const out = await createSkill(viewer, { ...parsed, visibility: "private" }, "builder-skill-imported", "import");
     if (!out.ok) return reply.status(out.status).send(out.body);
     return reply.status(201).send({ skill: out.skill });

@@ -323,6 +323,12 @@ caller).
 - **Effect on names.** A skill imported from a SKILL.md now has a format-conformant name (`evidence-summary`, not
   `Evidence summary`). The other save doors (create, update, template seeding, bundle import) are unchanged: they are
   the product's own forms, not SKILL.md files.
+- **Re-imports.** A SKILL.md the old lenient parser accepted can now be refused with 422: a name such as `My Skill`, a
+  field the format does not define, or a multi-line `description`. This is intended (ADR-0180: secure by default, no
+  grandfathering); the file is fixed and imported again. Skills already stored are untouched.
+- **One-line fields.** `description`, `license`, `compatibility` and `allowed-tools` are single lines: a line break,
+  tab or other control character is refused (a YAML `>` block's trailing newline is trimmed first). The body cap
+  (20,000 characters) is checked inside the validator, before the layout scan reads the body.
 
 ### L4.2 Owner question 2: a later fail revokes an earlier clearance (secure default)
 

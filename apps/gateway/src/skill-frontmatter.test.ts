@@ -2,7 +2,7 @@
  * ADR-0242 §7.3 (lane L4): the strict SKILL.md frontmatter and layout check at import. Pure: no database.
  */
 import { describe, expect, it } from "vitest";
-import { SKILL_BODY_MAX_LINES, SKILL_FRONTMATTER_MAX_BYTES, validateSkillMarkdown } from "./skill-frontmatter.js";
+import { SKILL_BODY_MAX_CHARS, SKILL_BODY_MAX_LINES, SKILL_FRONTMATTER_MAX_BYTES, validateSkillMarkdown } from "./skill-frontmatter.js";
 
 const md = (front: string, body = "# Title\n\nDo the thing.\n") => `---\n${front}\n---\n${body}`;
 const errorOf = (text: string) => {
@@ -67,6 +67,18 @@ describe("validateSkillMarkdown", () => {
     expect(errorOf(md(`name: a\ndescription: ${"d".repeat(1025)}`))).toBe("skill_frontmatter_invalid");
     expect(errorOf(md("name: 7\ndescription: d"))).toBe("skill_frontmatter_invalid");
     expect(errorOf(md('name: a\ndescription: "line\\u0007bell"'))).toBe("skill_frontmatter_invalid");
+  });
+
+  it("one-line fields refuse line breaks and tabs; a folded block's trailing newline is trimmed", () => {
+    expect(errorOf(md("name: a\ndescription: |\n  line one\n  line two"))).toBe("skill_frontmatter_invalid");
+    expect(errorOf(md('name: a\ndescription: "tab\\there"'))).toBe("skill_frontmatter_invalid");
+    expect(errorOf(md("name: a\ndescription: d\nlicense: |\n  MIT\n  and more"))).toBe("skill_frontmatter_invalid");
+    expect(validateSkillMarkdown(md("name: a\ndescription: >\n  folded onto\n  one line"))).toMatchObject({ ok: true, skill: { description: "folded onto one line" } });
+  });
+
+  it("refuses a body over the stored cap before reading it", () => {
+    expect(errorOf(md("name: a\ndescription: d", "x".repeat(SKILL_BODY_MAX_CHARS + 1)))).toBe("skill_body_too_long");
+    expect(errorOf(md("name: a\ndescription: d", "x".repeat(SKILL_BODY_MAX_CHARS)))).toBeNull();
   });
 
   it("refuses a field the format does not define, and a bad optional field", () => {
