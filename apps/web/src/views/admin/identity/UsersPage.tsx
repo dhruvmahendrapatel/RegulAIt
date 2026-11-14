@@ -37,6 +37,7 @@ import {
   Input,
   IdChip,
   Select,
+  TabPanel,
   Tabs,
 } from "../../../ui/kit";
 import { DataList, type DataColumn } from "../../../ui/DataList";
@@ -392,6 +393,14 @@ function UserDetail(props: {
         </span>
       }
     >
+      {/* I-2: the person's standing facts stay above the tabs, so no tab hides a deactivation or the last-admin guard */}
+      <div className={v.row} role="group" aria-label="User status" style={{ marginBottom: "var(--s2)" }}>
+        {user.isAdmin ? <Badge tone="primary">admin</Badge> : <Badge>member</Badge>}
+        {user.disabledAt ? <Badge tone="danger">disabled</Badge> : <Badge tone="ok">active</Badge>}
+        <Badge tone="neutral">{`Sign-in: ${user.hasPassword ? (user.mustChangePassword ? "one-time password" : "password") : "no password"}`}</Badge>
+        <Badge tone="neutral">{user.totpEnabled ? "MFA: TOTP" : "MFA: not enrolled"}</Badge>
+        {lastAdmin && <Badge tone="warn">Last active admin: cannot be demoted or deactivated</Badge>}
+      </div>
       <Tabs
         tabs={[
           { id: "lifecycle", label: "Lifecycle" },
@@ -402,9 +411,12 @@ function UserDetail(props: {
         ]}
         active={tab}
         onChange={setTab}
+        idPrefix="user-detail"
+        label={`${user.displayName || user.email}: details`}
       />
+      {/* I-2: each tab names its panel; an opened panel stays mounted, so a half-typed name, username or revocation reason survives a switch */}
       <div style={{ marginTop: "var(--s2)" }}>
-        {tab === "lifecycle" && (
+        <TabPanel idPrefix="user-detail" id="lifecycle" active={tab} lazy>
           <div className={v.stack}>
             <RefusalNotice guidance={props.refusal} />
             <div className={v.row}>
@@ -472,11 +484,19 @@ function UserDetail(props: {
               }}
             />
           </div>
-        )}
-        {tab === "sessions" && <SessionsPanel userId={user.id} />}
-        {tab === "passkeys" && <UserPasskeysPanel userId={user.id} userName={user.displayName || user.email} />}
-        {tab === "roles" && <UserRoleProvenancePanel userId={user.id} />}
-        {tab === "overrides" && <OverridesPanel userId={user.id} />}
+        </TabPanel>
+        <TabPanel idPrefix="user-detail" id="sessions" active={tab} lazy>
+          <SessionsPanel userId={user.id} />
+        </TabPanel>
+        <TabPanel idPrefix="user-detail" id="passkeys" active={tab} lazy>
+          <UserPasskeysPanel userId={user.id} userName={user.displayName || user.email} />
+        </TabPanel>
+        <TabPanel idPrefix="user-detail" id="roles" active={tab} lazy>
+          <UserRoleProvenancePanel userId={user.id} />
+        </TabPanel>
+        <TabPanel idPrefix="user-detail" id="overrides" active={tab} lazy>
+          <OverridesPanel userId={user.id} />
+        </TabPanel>
       </div>
     </Card>
   );

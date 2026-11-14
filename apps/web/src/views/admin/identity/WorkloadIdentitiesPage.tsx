@@ -18,7 +18,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, InfoButton, Input, Modal, Select, SkeletonBlock, Table, Tabs, Textarea, tabIds } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, InfoButton, Input, Modal, Select, SkeletonBlock, Table, TabPanel, Tabs, Textarea } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
 import { useAgents, useConnectors, useRoles, useServers, useServerTools, useUserPicker } from "../adminKit";
 import {
@@ -294,21 +294,7 @@ export default function WorkloadIdentitiesPage() {
           />
         )}
 
-        {/* P3: the settings are in tabs; delegation (and its warnings) opens first, and the trust tab counts what needs review */}
-        <Tabs
-          tabs={[
-            { id: "delegation", label: "Delegation" },
-            { id: "settings", label: settingsToReview > 0 ? `Settings · ${settingsToReview} to review` : "Settings" },
-            { id: "trust", label: trustToReview > 0 ? `Signing & trust · ${trustToReview} to review` : "Signing & trust" },
-          ]}
-          active={tab}
-          onChange={setTab}
-          idPrefix="identity-settings"
-          label="Identity settings"
-        />
-        <div role="tabpanel" id={tabIds("identity-settings", tab).panel} aria-labelledby={tabIds("identity-settings", tab).tab} className={s.stack}>
-          {tab === "delegation" ? (
-            <>
+        {/* I-2: the standing delegation refusal stays above the tabs, so the Settings and Signing & trust tabs never hide it */}
         <Card
           title="Delegation safeguards"
           info={
@@ -339,24 +325,34 @@ export default function WorkloadIdentitiesPage() {
           </div>
         </Card>
 
-
+        {/* P3: the settings are in tabs; delegation (and its warnings) opens first, and the trust tab counts what needs review */}
+        <Tabs
+          tabs={[
+            { id: "delegation", label: "Delegation" },
+            { id: "settings", label: settingsToReview > 0 ? `Settings · ${settingsToReview} to review` : "Settings" },
+            { id: "trust", label: trustToReview > 0 ? `Signing & trust · ${trustToReview} to review` : "Signing & trust" },
+          ]}
+          active={tab}
+          onChange={setTab}
+          idPrefix="identity-settings"
+          label="Identity settings"
+        />
+        {/* I-2: every panel stays mounted (hidden when not selected), so a picked run, an unsaved setting or a half-added bundle survives a tab switch */}
+        <TabPanel idPrefix="identity-settings" id="delegation" active={tab}><div className={s.stack}>
         <RunDelegationTree busy={write.busy} personLabel={personLabel} identities={seen} ask={ask} />
-            </>
-          ) : tab === "settings" ? (
-            // ADR-0188 decision 10: least privilege, token lifetime, chain depth, workload sign-in and the root-grant limits
-            <OrgSettingsCard title="Agent identity and delegation settings" keys={IDENTITY_SETTING_KEYS} testId="identity-delegation-settings" helpInInfo />
-          ) : (
-            <>
+        </div></TabPanel>
+        <TabPanel idPrefix="identity-settings" id="settings" active={tab}><div className={s.stack}>
+          {/* ADR-0188 decision 10: least privilege, token lifetime, chain depth, workload sign-in and the root-grant limits */}
+          <OrgSettingsCard title="Agent identity and delegation settings" keys={IDENTITY_SETTING_KEYS} testId="identity-delegation-settings" helpInInfo />
+        </div></TabPanel>
+        <TabPanel idPrefix="identity-settings" id="trust" active={tab}><div className={s.stack}>
         <IssuerSigningKeysCard busy={write.busy} ask={ask} />
 
         {/* ADR-0188 S9: the SPIFFE trust bundles, in audited storage */}
         <SpiffeTrustBundlesCard busy={write.busy} ask={ask} />
         {/* ADR-0188 S9 follow-up: where a domain's bundle is fetched from (off until set) */}
         <SpiffeBundleEndpointsCard busy={write.busy} ask={ask} />
-
-            </>
-          )}
-        </div>
+        </div></TabPanel>
       </div>
 
       {editing && (
