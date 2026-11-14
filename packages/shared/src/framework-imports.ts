@@ -207,7 +207,8 @@ function clip(text: string, max: number): string {
 }
 
 /** markdown links to their text: upstream links are relative to the publisher's site */
-const unlink = (s: string) => s.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1");
+// the link text and target exclude their own delimiters, so a scan never re-enters itself (no super-linear backtracking)
+const unlink = (s: string) => s.replace(/\[([^[\]]+)\]\([^()]*\)/g, "$1");
 
 const byRef = (a: { controlRef: string }, b: { controlRef: string }) =>
   a.controlRef < b.controlRef ? -1 : a.controlRef > b.controlRef ? 1 : 0;
@@ -436,10 +437,21 @@ export function normaliseNistAi600Text(text: string, opts: { framework: string; 
     .replace(/\f/g, "\n")
     .replace(/^GV4\.3--001$/m, "GV-4.3-001");
   const names = [...NIST_AI_600_1_RISKS, ...Object.keys(AI_600_1_TAG_ALIASES), ...AI_600_1_EXTRA_TAGS].sort((a, b) => b.length - a.length);
-  const tag = `(?:${names.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+")).join("|")})`;
-  const tagRe = new RegExp(tag, "g");
-  const suffixRe = new RegExp(`(?:\\s*${tag}\\s*[;,]?)+\\s*$`);
-  const idRe = /^((GV|MP|MS|MG)-\d+\.\d+-\d{3})(?:\s+(.*))?$/;
+  // one trailing tag, matched on whitespace-normalised text: literal names, one optional separator, no nested
+  // quantifier, so the match is linear (the whole suffix is peeled one tag at a time by `splitRiskSuffix`)
+  const tag = `(?:${names.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`;
+  const lastTagRe = new RegExp(`(?:^|[ ;,])(${tag})[;,]?$`);
+  const splitRiskSuffix = (text: string): { action: string; risks: string[] } | null => {
+    let rest = text.replace(/\s+/g, " ").trim();
+    const found: string[] = [];
+    for (let m = lastTagRe.exec(rest); m; m = lastTagRe.exec(rest)) {
+      found.unshift(m[1]!);
+      rest = rest.slice(0, m.index).trimEnd();
+      if (rest.endsWith(";") || rest.endsWith(",")) rest = rest.slice(0, -1).trimEnd();
+    }
+    return found.length ? { action: rest, risks: found } : null;
+  };
+  const idRe = /^((GV|MP|MS|MG)-\d+\.\d+-\d{3})(?: (\S.*))?$/;
   const stopRe = /^(AI Actor Tasks|AI Actors:|Action ID Suggested Action|(GOVERN|MAP|MEASURE|MANAGE) \d+\.\d+:)/;
   const rows: Array<{ id: string; text: string }> = [];
   let cur: { id: string; buf: string[] } | null = null;
@@ -448,7 +460,7 @@ export function normaliseNistAi600Text(text: string, opts: { framework: string; 
     cur = null;
   };
   for (const raw of clean.split("\n")) {
-    const line = raw.trim();
+    const line = raw.replace(/\s+/g, " ").trim();
     const m = idRe.exec(line);
     if (m) {
       flush();
@@ -463,7 +475,7 @@ export function normaliseNistAi600Text(text: string, opts: { framework: string; 
     if (!line) continue;
     if (/^\d{1,3}$/.test(line)) {
       // a page number or footnote mark: once the row has its risk tags, what follows is a footnote
-      if (suffixRe.test((cur as { buf: string[] }).buf.join(" "))) flush();
+      if (splitRiskSuffix((cur as { buf: string[] }).buf.join(" "))) flush();
       continue;
     }
     (cur as { buf: string[] }).buf.push(line);
@@ -474,12 +486,10 @@ export function normaliseNistAi600Text(text: string, opts: { framework: string; 
   for (const r of rows) {
     if (seen.has(r.id)) throw new Error(`AI 600-1 action ${r.id} appears twice`);
     seen.add(r.id);
-    const s = suffixRe.exec(r.text);
-    if (!s || s.index === 0) throw new Error(`AI 600-1 action ${r.id} has no GAI risk tag`);
-    const action = r.text.slice(0, s.index).replace(/\s+/g, " ").trim();
-    const risks = [
-      ...new Set((s[0].match(tagRe) ?? []).map((t) => t.replace(/\s+/g, " ")).map((t) => AI_600_1_TAG_ALIASES[t] ?? t)),
-    ];
+    const split = splitRiskSuffix(r.text);
+    if (!split || !split.action) throw new Error(`AI 600-1 action ${r.id} has no GAI risk tag`);
+    const action = split.action;
+    const risks = [...new Set(split.risks.map((t) => AI_600_1_TAG_ALIASES[t] ?? t))];
     const [fn, sub] = /^(GV|MP|MS|MG)-(\d+\.\d+)-/.exec(r.id)!.slice(1);
     const tail = ` GAI risks: ${risks.join("; ")}. AI RMF subcategory: ${AI_600_1_FN_NAME[fn!]} ${sub}.`;
     out.push({
