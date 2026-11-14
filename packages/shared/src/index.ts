@@ -4981,6 +4981,8 @@ export * from "./eval-datasets/injection-baselines.js";
 export * from "./public-url.js";
 // ADR-0195 SD1: the v2 shadow-AI catalogue (v1 frozen inside it), seed rows, and the pure repo analyser
 export * from "./shadow-catalog-v2.js";
+// L10 (2026-11-14): v3 = v2 unchanged + vendor-verified PatronAI-derived hosts and the S17 Copilot re-check
+export * from "./shadow-catalog-v3.js";
 export * from "./repo-manifests.js";
 export * from "./repo-analysis.js";
 // ADR-0195 SD0: shadow-AI active discovery (sources, credentials, runs, evidence kinds)
