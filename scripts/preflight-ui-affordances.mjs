@@ -50,6 +50,10 @@ export const DELIBERATELY_API_ONLY = new Map([
   // two entries are deleted when it does (KNOWN_UI_GAPS in preflight-ui-route-census.mjs holds the same routes).
   ["/v1/mcp-bundles/:x", "archiving an MCP bundle: API-only until the bundle screen on #453 (owner decision 2026-11-07, #697)"],
   ["/v1/mcp-bundles/:x/grants/:x", "revoking an MCP bundle grant: API-only until the bundle screen on #453 (owner decision 2026-11-07, #697)"],
+  // Lane L2 (ADR-0219 follow-up, P10): API-only brief; the role-grant and revocation controls are posted on #453 (route
+  // census KNOWN_UI_GAPS). RAISED for the master's review on the PR: delete these entries when the controls land
+  ["/v1/a2a/agents/:x/role-grants/:x", "removing a role's access to a remote agent: API-only until the controls on #453 (lane L2 brief)"],
+  ["/v1/a2a/agents/:x/revocations/:x", "lifting a person's revocation on a remote agent: API-only until the controls on #453 (lane L2 brief)"],
 ]);
 
 /**
