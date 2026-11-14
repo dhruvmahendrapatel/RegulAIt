@@ -26,7 +26,7 @@ import {
   Meter,
 } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
-import { ProjectChrome, useProjectChrome } from "./projectChrome";
+import { ARCHIVED_REASON, ArchivedNote, ProjectChrome, useProjectChrome } from "./projectChrome";
 import { ProjectEditForm } from "./projectForms";
 import type { Initiative } from "../../api/adminTypes";
 import v from "../views.module.css";
@@ -45,7 +45,7 @@ export default function ProjectDetailPage() {
   const me = auth?.userId ?? null;
 
   const chrome = useProjectChrome(projectId);
-  const { projectsQ, membersQ, members, project, myRole } = chrome;
+  const { projectsQ, membersQ, members, project, myRole, archived } = chrome;
   const costsQ = useQuery({
     queryKey: ["project-costs", projectId],
     enabled: Boolean(projectId),
@@ -322,8 +322,8 @@ export default function ProjectDetailPage() {
                         aria-label={`Role for ${mem.userName ?? mem.userId}`}
                         style={{ width: 130 }}
                         value={mem.role}
-                        disabled={soleOwner}
-                        title={soleOwner ? "promote another owner before changing the sole owner" : undefined}
+                        disabled={soleOwner || archived}
+                        title={archived ? ARCHIVED_REASON : soleOwner ? "promote another owner before changing the sole owner" : undefined}
                         onChange={(e) => {
                           const role = e.target.value;
                           void (async () => {
@@ -346,8 +346,8 @@ export default function ProjectDetailPage() {
                       <Button
                         size="sm"
                         variant="ghost"
-                        disabled={soleOwner}
-                        title={soleOwner ? "promote another owner before removing the sole owner" : undefined}
+                        disabled={soleOwner || archived}
+                        title={archived ? ARCHIVED_REASON : soleOwner ? "promote another owner before removing the sole owner" : undefined}
                         onClick={() => setRemoveTarget(mem)}
                       >
                         Remove
@@ -367,7 +367,9 @@ export default function ProjectDetailPage() {
               {memberError}
             </div>
           )}
+          {archived && <ArchivedNote />}
           {myRole === "owner" &&
+            !archived &&
             (nonMembers.length === 0 ? (
               <div className={v.faint} style={{ marginTop: "var(--s1)" }}>
                 everyone in the directory is already a member

@@ -89,7 +89,6 @@ export const NO_REMOVE_BY_DESIGN = new Map([
  * appears, the entry is reported stale and has to be deleted here.
  */
 export const KNOWN_REMOVE_GAPS = new Map([
-  ["/v1/projects", "G1 project archive (#604)"],
   ["/v1/llm/datasets", "not yet proposed: fine-tuning datasets have no retire; raise on #453"],
 ]);
 

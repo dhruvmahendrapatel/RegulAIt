@@ -122,7 +122,7 @@ import {
 import { privacyDispatchGate } from "./privacy-ops.js";
 // ADR-0079: pillar 2 §2 stage 2 — the invoke→instance join point and the
 // plan-only refusal it makes possible.
-import { guardInstanceAttributedCall } from "./plan-only.js";
+import { engineKeyWorkflowInstance, guardInstanceAttributedCall, guardProjectPlanOnly, isPlanSafeMode } from "./plan-only.js";
 import { auditDelegatedAgentRefusal, evaluateDelegatedAgentCall } from "./delegated-evaluate.js";
 import { settleDelegationCharge } from "./delegation.js";
 import { actorColumns, usdToMicros } from "./in-process-delegation.js";
@@ -139,6 +139,7 @@ import {
 import { z } from "zod";
 import { listLimitQuery } from "./list-limit.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
+import { disableConnectorExchangeOnDestinationChange } from "./upstream-token-exchange.js";
 import {
   assertProjectAttribution,
   enforcePII,
@@ -157,7 +158,7 @@ import {
 } from "./conversations.js";
 import { ownerChangeGate, resolveRegistrationOwner, withOwnership } from "./ownership.js";
 import { withLifecycle } from "./integration-lifecycle.js";
-import { CHANGED_CONCURRENTLY, checkStepUp, requireStepUp } from "./step-up.js";
+import { CHANGED_CONCURRENTLY, checkStepUp, grantMintStepUp, requireStepUp } from "./step-up.js";
 import { governedModelGate } from "./governed-core.js";
 import { resolveDispatchUsage } from "./usage-extractors.js";
 import {
@@ -3794,6 +3795,8 @@ export function registerAgentConnectorRoutes(
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
+    // ADR-0250 (review S-04): minting widens default deny — a fresh step-up bound to exactly this grant
+    if (!(await requireStepUp(db, req, reply, grantMintStepUp({ kind: "agent", userId: body.userId, agentId: body.agentId, allowedModes: body.allowedModes ?? null }))).ok) return reply;
     const [row] = await db
       .insert(agentGrants)
       .values({
@@ -4034,8 +4037,8 @@ export function registerAgentConnectorRoutes(
     // unauthorized instance REFUSES rather than being ignored. When the named
     // instance rests at a `planning` stage, a mutating mode is refused here —
     // before any dispatch, cache lookup or billing — and a plan/read mode is
-    // allowed through untouched. Naming no instance is unconstrained, exactly
-    // as before: this is opt-in attribution, and the ADR says so plainly.
+    // allowed through untouched.
+    let attributedInstanceProject: string | null = null;
     if (body.instanceId) {
       const gate = await guardInstanceAttributedCall(db, {
         instanceId: body.instanceId,
@@ -4045,6 +4048,24 @@ export function registerAgentConnectorRoutes(
         detail: { phase: "invoke", agentId: agent.id, agentName: agent.name },
       });
       if (!gate.ok) return reply.status(gate.status).send({ error: gate.error, detail: gate.detail });
+      attributedInstanceProject = gate.instance.projectId ?? null;
+    }
+    // ADR-0250 (review P-02): the gate is FORCED, not opt-in — a mutating mode
+    // on a project any of whose live instances rests in planning is refused
+    // whether or not the call names that instance (audited on its trail).
+    {
+      const planGate = await guardProjectPlanOnly(db, {
+        projectIds: [projectId, attributedInstanceProject],
+        userId,
+        surface: "invoke",
+        mutating: !isPlanSafeMode(body.mode),
+        mode: body.mode,
+        detail: { agentId: agent.id, agentName: agent.name },
+        engineInstanceId: await engineKeyWorkflowInstance(db, req),
+      });
+      if (!planGate.ok) {
+        return reply.status(planGate.status).send({ error: planGate.error, detail: planGate.detail, instanceId: planGate.instanceId, stageId: planGate.stageId });
+      }
     }
 
     // §8.4 STREAMING SUPPRESSION (ADR-0019, closing the recorded known limit).
@@ -5315,6 +5336,14 @@ export function registerAgentConnectorRoutes(
         ruleChain: [],
         reason: `connector '${connector.name}' credential ${prior ? "replaced" : "stored"}`,
       });
+      // ADR-0238: a new destination turns the connector's token exchange off (audited), so a token pinned to the
+      // old audience is never sent to the new host
+      await disableConnectorExchangeOnDestinationChange(tx as unknown as Db, {
+        connectorId,
+        label: `connector '${connector.name}'`,
+        userId: req.authCtx.userId ?? null,
+        cause: prior ? "credential_replaced" : "credential_stored",
+      });
       return stored!;
     });
     return reply.status(201).send(row);
@@ -5348,6 +5377,13 @@ export function registerAgentConnectorRoutes(
           ruleChain: [],
           reason: `connector credential removed`,
         });
+        // ADR-0238: the connector falls back to its own destination, which may differ: same rule as a replacement
+        await disableConnectorExchangeOnDestinationChange(tx as unknown as Db, {
+          connectorId,
+          label: `connector ${connectorId}`,
+          userId: req.authCtx.userId ?? null,
+          cause: "credential_removed",
+        });
       }
       return rows;
     });
@@ -5364,6 +5400,8 @@ export function registerAgentConnectorRoutes(
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
+    // ADR-0250 (review S-04): minting widens default deny — a fresh step-up bound to exactly this grant
+    if (!(await requireStepUp(db, req, reply, grantMintStepUp({ kind: "connector", userId: body.userId, connectorId: body.connectorId, mode: body.mode, allowedObjects: body.allowedObjects ?? null }))).ok) return reply;
     const [row] = await db
       .insert(connectorGrants)
       .values({

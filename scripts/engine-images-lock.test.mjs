@@ -156,6 +156,22 @@ describe("ENG-IMG engine image lock", () => {
       expect(seen).toEqual([["show", "origin/main:engines/images.lock.json"]]);
     });
 
+    it("ADR-0245: a base lock from before an engine joined reads that engine as never published, and nothing else", () => {
+      const old = blank();
+      delete old.engines.spikee;
+      expect(() => validateLock(old)).toThrow(LockError);
+      const base = readLockAt("origin/main", { git: () => JSON.stringify(old) });
+      expect(base).toEqual(blank());
+      // an engine this build does not know still fails, and a present entry is never rewritten
+      const extra = blank();
+      extra.engines.unknown = blank().engines.garak;
+      expect(() => readLockAt("origin/main", { git: () => JSON.stringify(extra) })).toThrow(LockError);
+      const bad = blank();
+      delete bad.engines.garak;
+      bad.engines.spikee.publishGeneration = 3;
+      expect(() => readLockAt("origin/main", { git: () => JSON.stringify(bad) })).toThrow(LockError);
+    });
+
     it("#427 review F2: the CLI's --check --base reads the base lock, so a base it cannot read fails the check", () => {
       const script = path.join(path.dirname(PATHS.lock), "..", "scripts", "engine-images-lock.mjs");
       const run = spawnSync(process.execPath, [script, "--check", "--base", "refs/does-not-exist"], { encoding: "utf8" });

@@ -745,7 +745,7 @@ function ToolGrantForm(props: { users: ReturnType<typeof useUsers>; servers: Mcp
       className={a.formRow}
       onSubmit={(e) => {
         e.preventDefault();
-        void act.run(() => api.post("/v1/grants/tools", { userId, serverId, toolName }), "Tool granted");
+        void act.run(() => withStepUp((h) => stepUpApi.post("/v1/grants/tools", { userId, serverId, toolName }, h)), "Tool granted");
       }}
     >
       <Field label="User">
@@ -798,7 +798,7 @@ function ServerGrantForm(props: { users: ReturnType<typeof useUsers>; servers: M
           // readOnlyAll is always true: a server grant IS a read-all grant, and
           // the gateway refuses `false` rather than store a grant that grants
           // nothing. Scope below read-all is expressed with tool grants.
-          () => api.post("/v1/grants/servers", { userId, serverId, readOnlyAll: true }),
+          () => withStepUp((h) => stepUpApi.post("/v1/grants/servers", { userId, serverId, readOnlyAll: true }, h)),
           "Server granted",
         );
       }}

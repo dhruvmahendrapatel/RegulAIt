@@ -326,6 +326,7 @@ import {
 } from "./identity-lists.js";
 import { DELEGATIONS_LIST, delegationsFilterQuery, delegationsReader, delegationsWhere, userNameSql } from "./delegations-list.js";
 import { evaluateIpEnvelope } from "./net-policy.js";
+import { APPROVALS_LIST, type ApprovalListRow } from "./approvals-list.js";
 import { activeDelegatorsFor, activeDelegationFrom } from "./delegations.js";
 
 declare module "fastify" {
@@ -423,6 +424,7 @@ import { z } from "zod";
 import { boundTargetsForApprovals, registerMcpProxy } from "./mcp-proxy.js";
 import { clearUpstreamCredentialOnUrlMove, registerMcpUpstreamCredentialRoutes } from "./mcp-upstream-credential.js";
 import { registerIntegrationLifecycleRoutes, withLifecycle } from "./integration-lifecycle.js";
+import { disableUpstreamExchangeOnUrlMove, registerUpstreamTokenExchangeRoutes } from "./upstream-token-exchange.js";
 import { registerA2aRoutes } from "./a2a.js";
 import { registerMcpBundleRoutes } from "./mcp-bundles.js";
 import { registerPrivacyOpsRoutes } from "./privacy-ops.js";
@@ -545,6 +547,8 @@ import { registerModelRateLimitRoutes } from "./model-rate-limits.js";
 import { registerUsageExtractorRoutes } from "./usage-extractors.js";
 // ADR-0202 decision 4 — the per-beat simulated fallback for the hosted demo (admin-only, audited)
 import { registerDemoBeatRoutes } from "./demo-beats.js";
+import { registerProjectArchiveRoutes } from "./project-archive.js";
+import { registerRoleTeamRenameRoutes } from "./role-team-rename.js";
 // ADR-0185 G5 — request metrics (a no-op seam until the meter lands)
 import { registerMetricsHooks } from "./metrics.js";
 import {
@@ -559,7 +563,7 @@ import { registerSchedulerRoutes } from "./scheduler-api.js";
 // ADR-0186 (batch 4) — the foundation registers every §4.9 route; each module
 // answers 501 not_built until its slice lands (A/B Claude, R/S/V Codex)
 import { registerPasskeyRoutes } from "./passkeys.js";
-import { approvalRuleStepUp, CHANGED_CONCURRENTLY, checkStepUp, ownerChangeStepUpArgs, registerStepUpRoutes, requireStepUp, requireStepUps, revocationLiftStepUp, type StepUpCheckArgs } from "./step-up.js";
+import { approvalRuleStepUp, CHANGED_CONCURRENTLY, checkStepUp, ownerChangeStepUpArgs, registerStepUpRoutes, requireStepUp, requireStepUps, revocationLiftStepUp, grantMintStepUp, rolesHoldingGrants, type StepUpCheckArgs } from "./step-up.js";
 import { ApprovalRuleWriteRefusedError, approverPoolShiftFacts, isApproverRole, lockApprovalRuleRouting, lockApproverRoles, namedApproverSeatExists, sameApproverPoolShift, type ApproverPoolShift } from "./approval-pool.js";
 import {
   decisionView,
@@ -2546,6 +2550,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             toUrl: written.url,
             userId: req.authCtx.userId ?? null,
           });
+          // ADR-0238: and turns its token exchange off (a token audienced to the old upstream never follows the url)
+          await disableUpstreamExchangeOnUrlMove(tx as unknown as Db, {
+            serverId,
+            label,
+            fromUrl: before.url,
+            toUrl: written.url,
+            userId: req.authCtx.userId ?? null,
+          });
         }
         // a url move that keeps it on writes no identity column, and is still a relaxation on the trail
         if (identity.write !== null || identity.relaxed) {
@@ -2674,6 +2686,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
+    // ADR-0250 (review S-04): minting widens default deny — a fresh step-up bound to exactly this grant
+    const toolMint = grantMintStepUp({ kind: "tool", userId: body.userId, serverId: body.serverId, toolName: body.toolName });
+    if (!(await requireStepUp(db, req, reply, toolMint)).ok) return reply;
     // PR #181 review: a minted grant relaxes this person's default deny, so the
     // success is on the trail (actor, grantee, server, grant name) in the same
     // transaction as the row — not only the refused SoD mints
@@ -2706,6 +2721,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
+    // ADR-0250 (review S-04): minting widens default deny — a fresh step-up bound to exactly this grant
+    const serverMint = grantMintStepUp({ kind: "server", userId: body.userId, serverId: body.serverId, readOnlyAll: body.readOnlyAll });
+    if (!(await requireStepUp(db, req, reply, serverMint)).ok) return reply;
     // a server read-only grant relaxes this person's default deny on every read tool, present and future, so it is
     // on the trail in the same transaction as the row, exactly like a tool grant (PR #181 review)
     const row = await db.transaction(async (tx) => {
@@ -2770,6 +2788,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
+    // ADR-0250 (review S-04): a role grant widens default deny for every holder — a fresh step-up bound to it
+    if (!(await requireStepUp(db, req, reply, grantMintStepUp({ kind: "role_tool", roleId, serverId: body.serverId, toolName: body.toolName }))).ok) return reply;
     // PR #339 review: the role's row FOR NO KEY UPDATE first, serialized with the workload-identity steward check
     // review follow-up: a missing role is refused by name (404, audited), not by the foreign key
     const rows = await insertRoleGrantLocked(db, roleId, { actorUserId: req.authCtx.userId, via: "POST /v1/roles/:roleId/grants/tools" }, (tx) =>
@@ -2790,6 +2810,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
+    // ADR-0250 (review S-04): a role grant widens default deny for every holder — a fresh step-up bound to it
+    if (!(await requireStepUp(db, req, reply, grantMintStepUp({ kind: "role_server", roleId, serverId: body.serverId, readOnlyAll: body.readOnlyAll }))).ok) return reply;
     // PR #339 review: the role's row FOR NO KEY UPDATE first, serialized with the workload-identity steward check
     // review follow-up: a missing role is refused by name (404, audited), not by the foreign key
     const rows = await insertRoleGrantLocked(db, roleId, { actorUserId: req.authCtx.userId, via: "POST /v1/roles/:roleId/grants/servers" }, (tx) =>
@@ -2811,6 +2833,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
+    // ADR-0250 (review S-04): a role grant widens default deny for every holder — a fresh step-up bound to it
+    if (!(await requireStepUp(db, req, reply, grantMintStepUp({ kind: "role_agent", roleId, agentId: body.agentId, allowedModes: body.allowedModes ?? null }))).ok) return reply;
     // PR #339 review: the role's row FOR NO KEY UPDATE first, serialized with the workload-identity steward check
     // review follow-up: a missing role is refused by name (404, audited), not by the foreign key
     const rows = await insertRoleGrantLocked(db, roleId, { actorUserId: req.authCtx.userId, via: "POST /v1/roles/:roleId/grants/agents" }, (tx) =>
@@ -2830,6 +2854,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
+    // ADR-0250 (review S-04): a role grant widens default deny for every holder — a fresh step-up bound to it
+    if (!(await requireStepUp(db, req, reply, grantMintStepUp({ kind: "role_connector", roleId, connectorId: body.connectorId, mode: body.mode, allowedObjects: body.allowedObjects ?? null }))).ok) return reply;
     // PR #339 review: the role's row FOR NO KEY UPDATE first, serialized with the workload-identity steward check
     // review follow-up: a missing role is refused by name (404, audited), not by the foreign key
     const rows = await insertRoleGrantLocked(db, roleId, { actorUserId: req.authCtx.userId, via: "POST /v1/roles/:roleId/grants/connectors" }, (tx) =>
@@ -2941,9 +2967,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // rule with a narrower pool, who signs moves to a wider pool: the same step-up, bound to the takeover facts
     const shift: ApproverPoolShift = { change: "member-add", objectType: "role", objectId: body.roleId, userId };
     const takeover = await approverPoolShiftFacts(db, shift);
+    // ADR-0250 (PR #720 review): a role that holds grants confers them, which widens default deny like minting them
+    const confersGrants = (await rolesHoldingGrants(db, [body.roleId])).has(body.roleId);
     const stepUps: StepUpCheckArgs[] = [
       ...(approverRole ? [{ kind: "settings_relax" as const, facts: { userId, values: { approverRoleId: body.roleId } } }] : []),
       ...(takeover ? [{ kind: "settings_relax" as const, facts: takeover }] : []),
+      ...(confersGrants ? [grantMintStepUp({ kind: "role_assignment", userId, roleId: body.roleId })] : []),
     ];
     if (stepUps.length > 0 && !(await requireStepUps(db, req, reply, stepUps))) return reply;
     // ADR-0186 A (Class A): decided again under the approver-role lock — a role that
@@ -4086,7 +4115,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // a non-admin sees exactly the approvals naming them as approver — PLUS,
   // while a delegation window to them is active (ADR-0022), the pending
   // approvals of their delegator(s), marked delegatedFrom.
-  app.get("/v1/approvals", async (req) => {
+  // §6 Approvals Queue — the visibility of one read, shared by the page, its
+  // count and the Excel export (ADR-0226), so the three cannot disagree.
+  const approvalsScope = async (
+    req: FastifyRequest,
+    { status, objectType, approverUserId }: Omit<z.infer<typeof approvalsListQuery>, "order">,
+  ) => {
     // B9b — THREE server-side filters, not one.
     //
     // The queue is fleet-wide and capped at 100 rows, which is what makes this
@@ -4110,7 +4144,6 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // `asc`, because the oldest waiting decision is the one that matters most.
     // `total` and `hasMore` say how many rows the SAME filters and scope match,
     // so a capped page is never mistaken for the whole queue.
-    const { status, objectType, approverUserId, order } = approvalsListQuery.parse(req.query);
     // ADR-0022 delegation widening: a non-admin sees their own rows PLUS the
     // PENDING rows of anyone actively delegating to them (pending only — a
     // delegate covers live decisions, they don't inherit the archive).
@@ -4192,21 +4225,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       scopeCondition,
     ].filter((c) => c !== undefined);
     const listWhere = conditions.length > 0 ? and(...conditions) : undefined;
-    // `id` breaks requested_at ties so the page boundary is stable in either order
-    const [rows, [counted]] = await Promise.all([
-      db
-        .select()
-        .from(approvals)
-        .where(listWhere)
-        .orderBy(
-          ...(order === "asc"
-            ? [asc(approvals.requestedAt), asc(approvals.id)]
-            : [desc(approvals.requestedAt), desc(approvals.id)]),
-        )
-        .limit(APPROVALS_PAGE_LIMIT),
-      db.select({ n: sql<number>`count(*)::int` }).from(approvals).where(listWhere),
-    ]);
-    const total = counted?.n ?? rows.length;
+    return { listWhere, me, delegators };
+  };
+  /** each queue row with its names, labels, decisions and routing sidecar, as the queue shows it */
+  const enrichApprovals = async (rows: Array<typeof approvals.$inferSelect>, me: string, delegators: string[]) => {
     // ADR-0186 A/B: each tool-call row's per-principal decisions (never the assertion)
     const toolCallRowIds = rows.filter((r) => isToolCallApproval(r)).map((r) => r.id);
     const decisionRows = toolCallRowIds.length
@@ -4558,96 +4580,163 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         },
       };
     };
-    return {
-      approvals: rows.map((r) => ({
-        ...r,
-        // ADR-0186 A/B (§4.9): the dual-control and signature view of a tool-call row
-        ...(isToolCallApproval(r)
-          ? (() => {
-              const ds = decisionsByApproval.get(r.id) ?? [];
-              const mine = ds.find((d) => d.deciderUserId === me) ?? null;
+    return rows.map((r) => ({
+      ...r,
+      // ADR-0186 A/B (§4.9): the dual-control and signature view of a tool-call row
+      ...(isToolCallApproval(r)
+        ? (() => {
+            const ds = decisionsByApproval.get(r.id) ?? [];
+            const mine = ds.find((d) => d.deciderUserId === me) ?? null;
+            return {
+              approvalsCount: principalCountFor.get(r.id) ?? 0,
+              myDecision: mine ? mine.decision : null,
+              decisions: ds.map((d) => ({
+                ...decisionView(d),
+                principalName: d.principalUserId ? (nameOf.get(d.principalUserId) ?? null) : null,
+                deciderName: d.deciderUserId ? (nameOf.get(d.deciderUserId) ?? null) : null,
+              })),
+            };
+          })()
+        : {}),
+      serverName: r.serverId ? approvalServerLabel.get(r.serverId) ?? null : null,
+      projectName: r.projectId ? projectLabel.get(r.projectId) ?? null : null,
+      useCaseId:
+        r.objectType === "workflow" && r.instanceId ? (useCaseForInstance.get(r.instanceId) ?? null) : null,
+      // ADR-0168 amendment: the reviewer role this row is the required review of
+      reviewRole: r.reviewRoleId ? { id: r.reviewRoleId, name: r.reviewRoleName } : null,
+      // AER-039: host + posture + manifest digest only — never the URL
+      ...(r.objectType === "mcp_tool" ? { boundTarget: boundTargetFor.get(r.id) ?? null } : {}),
+      // Finding-6 separation-of-duties surface: the person who would sign
+      // IS the user who triggered the governed action — the UI badges it,
+      // deciding it requires a recorded reason. Three ways that happens,
+      // matching the decide-time test in `decideOneApproval`:
+      //   · the template named the requester as the approver outright;
+      //   · it is ALREADY decided and the requester is who signed it —
+      //     historical fact, so an admin or auditor reading the row back
+      //     sees the badge too, not just the person who did it;
+      //   · it is still pending and reached THIS viewer, who is the
+      //     requester, through a delegation from the named approver.
+      // The last one is viewer-relative on purpose: the same row is an
+      // ordinary arm's-length gate in everyone else's inbox.
+      selfReview:
+        r.userId === r.approverUserId ||
+        (r.decidedBy !== null && r.decidedBy === r.userId) ||
+        (r.status === "pending" && r.userId === me && delegatedFor.has(r.approverUserId)),
+      requestedByName: nameOf.get(r.userId) ?? null,
+      approverName: nameOf.get(r.approverUserId) ?? null,
+      decidedByName: r.decidedBy ? (nameOf.get(r.decidedBy) ?? null) : null,
+      objectLabel:
+        (r.instanceId ? instanceLabel.get(r.instanceId) : null) ??
+        (r.runId ? runLabel.get(r.runId) : null) ??
+        (r.projectId ? projectLabel.get(r.projectId) : null) ??
+        (r.objectType === "infra_operation" ? infraLabelFor(r.stageId) : null) ??
+        (r.objectType === "model_card" ? modelCardLabelFor(r.stageId) : null) ??
+        (r.objectType === "grant_certification" ? grantCertLabelFor(r.stageId) : null) ??
+        (r.objectType === "sod_override" ? sodOverrideLabelFor(r.stageId) : null) ??
+        (r.objectType === "remediation" ? governanceRemediationLabelFor(r.stageId) : null) ??
+        (r.objectType === "compliance_profile" ? complianceVersionLabelFor(r.stageId) : null) ??
+        r.toolName ??
+        null,
+      // ADR-0022: this row reached the caller via an active delegation —
+      // the UI badges it and the decide endpoint records on-behalf-of.
+      ...(r.approverUserId !== me && delegatedFor.has(r.approverUserId)
+        ? { delegatedFrom: nameOf.get(r.approverUserId) ?? r.approverUserId }
+        : {}),
+      // ADR-0046: the routing + SLA sidecar, purely additive. Absent when no
+      // routing rule is enabled, so a pre-0058 client sees the identical shape.
+      ...(assignmentFor.has(r.id)
+        ? {
+            assignment: (() => {
+              const a = assignmentFor.get(r.id)!;
               return {
-                approvalsCount: principalCountFor.get(r.id) ?? 0,
-                myDecision: mine ? mine.decision : null,
-                decisions: ds.map((d) => ({
-                  ...decisionView(d),
-                  principalName: d.principalUserId ? (nameOf.get(d.principalUserId) ?? null) : null,
-                  deciderName: d.deciderUserId ? (nameOf.get(d.deciderUserId) ?? null) : null,
-                })),
+                assigneeKind: a.assigneeKind,
+                assigneeId: a.assigneeId,
+                ruleId: a.ruleId,
+                quorum: a.quorum,
+                claimedByUserId: a.claimedByUserId,
+                claimable:
+                  a.assigneeKind !== "user" && a.claimedByUserId === null && r.status === "pending",
+                slaState: a.slaState,
+                warnAt: a.warnAt,
+                dueAt: a.dueAt,
+                breachedAt: a.breachedAt,
+                escalatedAt: a.escalatedAt,
+                escalationAssigneeKind: a.escalationAssigneeKind,
+                escalationAssigneeId: a.escalationAssigneeId,
               };
-            })()
-          : {}),
-        serverName: r.serverId ? approvalServerLabel.get(r.serverId) ?? null : null,
-        projectName: r.projectId ? projectLabel.get(r.projectId) ?? null : null,
-        useCaseId:
-          r.objectType === "workflow" && r.instanceId ? (useCaseForInstance.get(r.instanceId) ?? null) : null,
-        // ADR-0168 amendment: the reviewer role this row is the required review of
-        reviewRole: r.reviewRoleId ? { id: r.reviewRoleId, name: r.reviewRoleName } : null,
-        // AER-039: host + posture + manifest digest only — never the URL
-        ...(r.objectType === "mcp_tool" ? { boundTarget: boundTargetFor.get(r.id) ?? null } : {}),
-        // Finding-6 separation-of-duties surface: the person who would sign
-        // IS the user who triggered the governed action — the UI badges it,
-        // deciding it requires a recorded reason. Three ways that happens,
-        // matching the decide-time test in `decideOneApproval`:
-        //   · the template named the requester as the approver outright;
-        //   · it is ALREADY decided and the requester is who signed it —
-        //     historical fact, so an admin or auditor reading the row back
-        //     sees the badge too, not just the person who did it;
-        //   · it is still pending and reached THIS viewer, who is the
-        //     requester, through a delegation from the named approver.
-        // The last one is viewer-relative on purpose: the same row is an
-        // ordinary arm's-length gate in everyone else's inbox.
-        selfReview:
-          r.userId === r.approverUserId ||
-          (r.decidedBy !== null && r.decidedBy === r.userId) ||
-          (r.status === "pending" && r.userId === me && delegatedFor.has(r.approverUserId)),
-        requestedByName: nameOf.get(r.userId) ?? null,
-        approverName: nameOf.get(r.approverUserId) ?? null,
-        decidedByName: r.decidedBy ? (nameOf.get(r.decidedBy) ?? null) : null,
-        objectLabel:
-          (r.instanceId ? instanceLabel.get(r.instanceId) : null) ??
-          (r.runId ? runLabel.get(r.runId) : null) ??
-          (r.projectId ? projectLabel.get(r.projectId) : null) ??
-          (r.objectType === "infra_operation" ? infraLabelFor(r.stageId) : null) ??
-          (r.objectType === "model_card" ? modelCardLabelFor(r.stageId) : null) ??
-          (r.objectType === "grant_certification" ? grantCertLabelFor(r.stageId) : null) ??
-          (r.objectType === "sod_override" ? sodOverrideLabelFor(r.stageId) : null) ??
-          (r.objectType === "remediation" ? governanceRemediationLabelFor(r.stageId) : null) ??
-          (r.objectType === "compliance_profile" ? complianceVersionLabelFor(r.stageId) : null) ??
-          r.toolName ??
-          null,
-        // ADR-0022: this row reached the caller via an active delegation —
-        // the UI badges it and the decide endpoint records on-behalf-of.
-        ...(r.approverUserId !== me && delegatedFor.has(r.approverUserId)
-          ? { delegatedFrom: nameOf.get(r.approverUserId) ?? r.approverUserId }
-          : {}),
-        // ADR-0046: the routing + SLA sidecar, purely additive. Absent when no
-        // routing rule is enabled, so a pre-0058 client sees the identical shape.
-        ...(assignmentFor.has(r.id)
-          ? {
-              assignment: (() => {
-                const a = assignmentFor.get(r.id)!;
-                return {
-                  assigneeKind: a.assigneeKind,
-                  assigneeId: a.assigneeId,
-                  ruleId: a.ruleId,
-                  quorum: a.quorum,
-                  claimedByUserId: a.claimedByUserId,
-                  claimable:
-                    a.assigneeKind !== "user" && a.claimedByUserId === null && r.status === "pending",
-                  slaState: a.slaState,
-                  warnAt: a.warnAt,
-                  dueAt: a.dueAt,
-                  breachedAt: a.breachedAt,
-                  escalatedAt: a.escalatedAt,
-                  escalationAssigneeKind: a.escalationAssigneeKind,
-                  escalationAssigneeId: a.escalationAssigneeId,
-                };
-              })(),
-            }
-          : {}),
-        ...contextConflictFor(r),
-      })),
+            })(),
+          }
+        : {}),
+      ...contextConflictFor(r),
+    }));
+  };
+  // ADR-0226: with any of sort/dir/cursor/offset/count the queue answers the
+  // shared list contract (the same visibility and filters; `order` is the
+  // legacy page's own and is refused there); with none of them, exactly the
+  // capped, oldest- or newest-first page below. GET /v1/approvals/export.xlsx
+  // is the Inbox list control's download: the same scope, filters and audit row.
+  const approvalsFilterQuery = approvalsListQuery.omit({ order: true }).strict();
+  const approvalsReader = (me: string, delegators: string[]): ListReader<ApprovalListRow> => ({
+    fetch: async (q) => {
+      const rows = await db
+        .select({ a: approvals, _cursorAt: q.cursorAt })
+        .from(approvals)
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset);
+      const enriched = await enrichApprovals(rows.map((r) => r.a), me, delegators);
+      return enriched.map((r, i) => ({ ...r, _cursorAt: rows[i]!._cursorAt }));
+    },
+    countable: (where) => db.select({ one: sql`1` }).from(approvals).where(where),
+    idOf: (r) => r.id,
+  });
+  // ADR-0226: the queue as an Excel file, read through approvalsScope (the
+  // visibility a non-admin's page has, never wider) and audited before the first
+  // byte by sendListExport (the list-export-xlsx row every list export writes).
+  app.get("/v1/approvals/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const filters = approvalsFilterQuery.parse(filterParams(q));
+      const ex = parseListExport(APPROVALS_LIST, q);
+      const { listWhere, me, delegators } = await approvalsScope(req, filters);
+      await sendListExport(db, req, reply, APPROVALS_LIST, approvalsReader(me, delegators), listWhere, ex, filters);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+  app.get("/v1/approvals", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      try {
+        const q = req.query as Record<string, unknown>;
+        const filters = approvalsFilterQuery.parse(filterParams(q));
+        const page = parseListPage(APPROVALS_LIST, q);
+        const { listWhere, me, delegators } = await approvalsScope(req, filters);
+        return await runListPage(db, APPROVALS_LIST, approvalsReader(me, delegators), listWhere, page);
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
+    const { status, objectType, approverUserId, order } = approvalsListQuery.parse(req.query);
+    const { listWhere, me, delegators } = await approvalsScope(req, { status, objectType, approverUserId });
+    // `id` breaks requested_at ties so the page boundary is stable in either order
+    const [rows, [counted]] = await Promise.all([
+      db
+        .select()
+        .from(approvals)
+        .where(listWhere)
+        .orderBy(
+          ...(order === "asc"
+            ? [asc(approvals.requestedAt), asc(approvals.id)]
+            : [desc(approvals.requestedAt), desc(approvals.id)]),
+        )
+        .limit(APPROVALS_PAGE_LIMIT),
+      db.select({ n: sql<number>`count(*)::int` }).from(approvals).where(listWhere),
+    ]);
+    const total = counted?.n ?? rows.length;
+    return {
+      approvals: await enrichApprovals(rows, me, delegators),
       total,
       hasMore: total > rows.length,
       limit: APPROVALS_PAGE_LIMIT,
@@ -5938,6 +6027,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerMcpUpstreamCredentialRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0207: disable, enable and delete connectors and MCP servers; delete MCP registries
   registerIntegrationLifecycleRoutes(app, db);
+  // ADR-0238: RFC 8693 token exchange for down-scoped upstream credentials (admin, settings_relax step-up)
+  registerUpstreamTokenExchangeRoutes(app, db, { dataKey: opts.dataKey });
   registerA2aRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0236 (P11) — governed MCP bundles: admin-only through the default gate, default-off, audited; enforcement is
   // the kernel's bundle-tool-allow-list rule, fed by loadEntitlements at the existing MCP interception point
@@ -5977,6 +6068,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerUsageExtractorRoutes(app, db);
   // ADR-0202 decision 4 — the demo beats' simulated fallback; admin-only (not in NON_ADMIN_ROUTES), audited
   registerDemoBeatRoutes(app, db);
+  // ADR-0206: G1 project archive and G10 rename roles and teams (admin-only)
+  registerProjectArchiveRoutes(app, db);
+  registerRoleTeamRenameRoutes(app, db);
   registerPosturePresetRoutes(app, db, { sink: anchorSink, bootstrapConfigured: Boolean(opts.bootstrapToken) });
   // ADR-0124 — the kill switch and safe modes
   registerExecutionControlRoutes(app, db);
