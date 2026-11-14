@@ -18,7 +18,7 @@ export default function LicenceVerificationsPage() {
   const filters = useMemo(() => ({ ok: ok || undefined }), [ok]);
   return (
     <>
-      <SubpageTrail parent="Licensing & seats" parentTo="/admin/licensing" current="Verification trail" />
+      <SubpageTrail parent="Licensing & seats" parentTo="/admin/licensing?tab=history" current="Verification trail" />
       <PageHeader title="Verification trail" sub="Every install, operator-driven check and refusal on this deployment." />
       <Card flush>
         <div className={v.row} style={{ padding: "var(--s1) var(--s2) 0" }}>
