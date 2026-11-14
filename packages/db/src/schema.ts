@@ -1502,6 +1502,9 @@ export const auditLog = pgTable(
         // ADR-0202 decision 4: an admin switching one demo beat between live and
         // its simulated fallback (demo_beat_fallbacks). Plain text column.
         "demo_beat",
+        // ADR-0255 (P31): an admin enabling or disabling a connector-catalogue piece
+        // (connector_piece_enablements). Plain text column — no DDL needed.
+        "connector_piece",
         // ADR-0224 (P13 c): records of processing and data-subject requests. Plain text column.
         "processing_record",
         "data_subject_request",
@@ -3348,7 +3351,13 @@ export const workflowInstances = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("workflow_instances_status_idx").on(t.status)],
+  (t) => [
+    index("workflow_instances_status_idx").on(t.status),
+    // ADR-0283: built CONCURRENTLY by runMigrations (CONCURRENT_INDEXES), not by a migration statement
+    index("workflow_instances_project_open_idx")
+      .on(t.projectId)
+      .where(sql`${t.status} NOT IN ('completed', 'aborted', 'denied', 'rolled_back')`),
+  ],
 );
 
 // Append-only per-instance history (§5 dashboard: full history, who, when).
@@ -5458,7 +5467,7 @@ export const orgSettings = pgTable(
     check("org_settings_incident_gate_mode_check", sql`${t.incidentGateMode} IN ('off', 'warn', 'enforce')`),
     check(
       "org_settings_incident_clock_regimes_check",
-      sql`jsonb_typeof(${t.incidentClockRegimes}) = 'array' AND ${t.incidentClockRegimes} <@ '["eu-ai-act", "hipaa"]'::jsonb`,
+      sql`jsonb_typeof(${t.incidentClockRegimes}) = 'array' AND ${t.incidentClockRegimes} <@ '["eu-ai-act", "hipaa", "gdpr", "nis2", "dora", "cra"]'::jsonb`,
     ),
     check(
       "org_settings_feedback_sla_check",
@@ -13066,7 +13075,7 @@ export const aiIncidents = pgTable(
     ),
     check(
       "ai_incidents_serious_criteria_check",
-      sql`jsonb_typeof(${t.seriousCriteria}) = 'array' AND ${t.seriousCriteria} <@ '["death", "health", "critical_infrastructure", "fundamental_rights", "property_environment", "widespread_infringement", "phi_breach"]'::jsonb`,
+      sql`jsonb_typeof(${t.seriousCriteria}) = 'array' AND ${t.seriousCriteria} <@ '["death", "health", "critical_infrastructure", "fundamental_rights", "property_environment", "widespread_infringement", "phi_breach", "personal_data_breach", "significant_cyber_incident", "major_ict_incident", "exploited_vulnerability", "severe_product_incident"]'::jsonb`,
     ),
     check(
       "ai_incidents_phi_individuals_check",
@@ -13185,7 +13194,7 @@ export const aiIncidentNotifications = pgTable(
   },
   (t) => [
     unique("ai_incident_notifications_clock_uq").on(t.incidentId, t.clockId),
-    check("ai_incident_notifications_regime_check", sql`${t.regime} IN ('eu-ai-act', 'hipaa')`),
+    check("ai_incident_notifications_regime_check", sql`${t.regime} IN ('eu-ai-act', 'hipaa', 'gdpr', 'nis2', 'dora', 'cra')`),
     check(
       "ai_incident_notifications_status_check",
       sql`${t.status} IN ('pending', 'sent_initial', 'sent_complete', 'not_required', 'tolled')`,
@@ -16325,6 +16334,30 @@ export const modelExplainabilityArtefacts = pgTable(
 );
 export type ModelExplainabilityArtefactRow = typeof modelExplainabilityArtefacts.$inferSelect;
 
+/**
+ * ADR-0255 (P31, pending migration connector_catalogue) — THE CONNECTOR CATALOGUE: which curated Activepieces pieces an admin has ENABLED.
+ * Secure by default (ADR-0180): no row means not enabled, and a connector of a piece kind can be neither created nor
+ * invoked until its row exists. Enabling (POST /v1/connector-catalogue/:pieceKey/enablement, admin, step-up) inserts the
+ * row and its audit row in one transaction; disabling deletes it, also audited. The CHECK repeats CURATED_PIECES'
+ * keys (@regulait/connector-provider), so a row cannot name a piece with no RegulAIt adapter. 3NF: the admin is a
+ * foreign key, never a copied name or email.
+ */
+export const connectorPieceEnablements = pgTable(
+  "connector_piece_enablements",
+  {
+    pieceKey: text("piece_key").primaryKey(),
+    enabledByUserId: uuid("enabled_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    enabledAt: timestamp("enabled_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "connector_piece_enablements_piece_key_check",
+      sql`${t.pieceKey} IN ('slack', 'jira-cloud', 'github', 'google-sheets', 'gmail')`,
+    ),
+  ],
+);
+export type ConnectorPieceEnablementRow = typeof connectorPieceEnablements.$inferSelect;
+
 // ===========================================================================
 // ADR-0261 (P37, migration pending/third_party_ingest) — THIRD-PARTY SECURITY TELEMETRY INGEST
 //
@@ -16407,4 +16440,36 @@ export const thirdPartyIngestRecordFindings = pgTable(
       .references(() => shadowAiFindings.id, { onDelete: "cascade" }),
   },
   (t) => [primaryKey({ columns: [t.recordId, t.findingId] }), index("third_party_ingest_record_findings_finding_idx").on(t.findingId)],
+);
+
+/**
+ * ADR-0251 (P-01 remainder, lane L1; migration resource_rate_reservations) — HARD rate-limit windows for the governed
+ * core's connector and A2A calls. One row is one slot a call took in the window: written in the same transaction as
+ * the recount, under a per-(user, resource type) advisory lock, only when a `resource_rate_limits` row binds the call
+ * and the core's decision is allow. The windows count these rows (not audit rows, which are written after the call
+ * runs), so calls decided at the same moment can no longer each see the same count.
+ *
+ * 3NF exception, deliberate: a slot is a point-in-time fact of its own (the counter the limit is enforced against),
+ * not a copy of the audit row, which remains the evidence of the decision. Rows older than the longest window
+ * (30 days) carry no information and are pruned by the reserving transaction.
+ */
+export const resourceRateReservations = pgTable(
+  "resource_rate_reservations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    resourceType: text("resource_type", { enum: ["connector", "a2a"] }).notNull(),
+    connectorId: uuid("connector_id").references(() => connectors.id, { onDelete: "cascade" }),
+    a2aAgentId: uuid("a2a_agent_id").references(() => a2aAgents.id, { onDelete: "cascade" }),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("resource_rate_reservations_window_idx").on(t.userId, t.resourceType, t.at),
+    check(
+      "resource_rate_reservations_type_check",
+      sql`CASE ${t.resourceType} WHEN 'connector' THEN ${t.connectorId} IS NOT NULL AND ${t.a2aAgentId} IS NULL WHEN 'a2a' THEN ${t.a2aAgentId} IS NOT NULL AND ${t.connectorId} IS NULL ELSE false END`,
+    ),
+  ],
 );
