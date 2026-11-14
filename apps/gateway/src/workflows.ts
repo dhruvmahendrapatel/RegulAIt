@@ -94,6 +94,7 @@ import {
 } from "./shadow-ai-remediation.js";
 import { APPROVER_ADMIN_NOT_INITIATOR, adminsOtherThan, secondApproverMissing } from "./workflow-approvers.js";
 import { networkFacingSignal } from "./dev-secrets.js";
+import { configureStageQueue, enqueueStageRetry, fanOut, stageCheckConcurrency, stageRetryAttempt, type StageRetryJob, type StageRetryOutcome } from "./workflows-queue.js";
 import { finishTrace, recordSpan, traceForRoot } from "./tracing.js";
 import { activeDelegatorsFor } from "./delegations.js";
 import { idempotentReplay, readIdempotencyKey, requestDigestOf, withIdempotencyKey } from "./request-idempotency.js";
@@ -302,6 +303,8 @@ async function applyEvent(
         ...(staleRunStages.length > 0 ? { staleRunIdsCleared: staleRunStages } : {}),
         ...(isReopen ? { round } : {}),
         ...(bumpEntry ? { stageEntry } : {}),
+        // ADR-0283: the automatic retry attempt this event was committed by
+        ...(stageRetryAttempt.getStore() ? { retryAttempt: stageRetryAttempt.getStore() } : {}),
       },
       effect: isDenial || isReturn ? "deny" : "allow",
       ruleId: `workflow:${event.kind}`,
@@ -311,6 +314,42 @@ async function applyEvent(
       // stays null (unknown/not-applicable — honestly un-backfillable).
       deployMode: deployMode ?? null,
     });
+    // ADR-0283: a retryable execution failure on a stage whose template opts
+    // into retry schedules its automatic retries HERE, in the transition's
+    // transaction, beside the audit row: the job exists if and only if the
+    // failure committed. A failure committed BY a retry attempt schedules
+    // nothing (the queue retries that job with its own backoff), and the
+    // stage execution's key (ADR-0284) keeps one chain per stage entry.
+    if (event.kind === "execution_failed") {
+      const failing = def.stages[prior.currentStageIndex];
+      const attempt = stageRetryAttempt.getStore();
+      if (failing?.retry && !attempt) {
+        const job: StageRetryJob = { instanceId: instance.id, stageId: failing.id, round, entry: stageEntry };
+        const sent = await enqueueStageRetry(tx, job, failing.retry, instance.projectId ?? null);
+        await tx.insert(auditLog).values({
+          userId: auditUserId,
+          objectType: "workflow",
+          objectId: instance.id,
+          detail: {
+            stageId: failing.id,
+            executionKey: sent.key,
+            maxAttempts: failing.retry.maxAttempts,
+            delaySeconds: failing.retry.delaySeconds,
+            backoff: failing.retry.backoff,
+            maxDelaySeconds: failing.retry.maxDelaySeconds,
+            ...(sent.scheduled ? { jobId: sent.jobId } : { notScheduled: sent.reason }),
+          },
+          effect: "allow",
+          ruleId: sent.scheduled ? "workflow:stage-retry-scheduled" : "workflow:stage-retry-not-scheduled",
+          ruleChain: [],
+          reason: sent.scheduled
+            ? `stage '${failing.id}' failed; up to ${failing.retry.maxAttempts} automatic retr${failing.retry.maxAttempts === 1 ? "y" : "ies"} scheduled, the first in ${failing.retry.delaySeconds} s (the template's retry policy)`
+            : sent.reason === "already_scheduled"
+              ? `stage '${failing.id}' failed; its automatic retries are already scheduled for this stage entry (${sent.key})`
+              : `stage '${failing.id}' failed; no automatic retry was scheduled because the queue is not configured in this process — the stage waits for /advance`,
+        });
+      }
+    }
     // AER-049: the archive is on the trail with the values — what an earlier
     // round shipped stays traceable from the audit alone.
     if (archivedEffects.length > 0) {
@@ -1139,97 +1178,104 @@ async function runStageEvalChecks(
   const bindings = stage.evals ?? [];
   if (bindings.length === 0) return out;
   const declared = new Set(stage.checks ?? []);
-  for (const binding of bindings) {
-    if (!declared.has(binding.check)) continue;
-    const fail = (detail: string, extra?: Record<string, unknown>): void => {
-      out.set(binding.check, {
-        check: binding.check,
-        status: "failed",
-        severity: "high",
-        detail,
-        eval: { dataset: binding.dataset, agent: binding.agent, ...(extra ?? {}) },
-      });
-    };
-    // resolve the PINNED dataset version: an explicit `version`, else the
-    // highest existing one at the moment the stage runs
-    const versions = await db
-      .select()
-      .from(evalDatasets)
-      .where(eq(evalDatasets.name, binding.dataset))
-      .orderBy(desc(evalDatasets.version));
-    const dataset = binding.version
-      ? versions.find((d) => d.version === binding.version)
-      : versions[0];
-    if (!dataset) {
-      fail(
-        `eval dataset '${binding.dataset}'${binding.version ? ` v${binding.version}` : ""} does not exist — the quality gate could not run, so it does not pass`,
-      );
-      continue;
-    }
-    // ADR-0208 G9: a gate that still names a retired dataset fails closed (the runner refuses it too)
-    if (versions.some((d) => d.retiredAt !== null)) {
-      fail(`${evalDatasetRetiredDetail(binding.dataset)} — the quality gate could not run, so it does not pass`, { error: "eval_dataset_retired" });
-      continue;
-    }
-    const [agentRow] = await db.select().from(agents).where(eq(agents.name, binding.agent));
-    if (!agentRow) {
-      fail(`eval agent '${binding.agent}' is not in the registry — the quality gate could not run, so it does not pass`);
-      continue;
-    }
-    let judgeAgentId: string | null = null;
-    if (binding.judgeAgent) {
-      const [judgeRow] = await db.select().from(agents).where(eq(agents.name, binding.judgeAgent));
-      if (!judgeRow) {
-        fail(`eval judge agent '${binding.judgeAgent}' is not in the registry`);
-        continue;
-      }
-      judgeAgentId = judgeRow.id;
-    }
-    try {
-      const outcome = await runEvalSuite(db, dataKey, {
-        datasetId: dataset.id,
-        agentId: agentRow.id,
-        userId: instance.initiatorUserId,
-        trigger: "workflow",
-        judgeAgentId,
-        projectId: instance.projectId,
-        tolerance: binding.tolerance ?? 0.05,
-        minScore: binding.minScore ?? null,
-        minPassRate: binding.minPassRate ?? null,
-        requireBaseline: binding.requireBaseline ?? false,
-        workflow: { instanceId: instance.id, stageId: stage.id, checkName: binding.check },
-      });
-      if (!outcome.ok) {
+  // ADR-0285 — IN-STAGE FAN-OUT. The stage's eval-bound checks run at once,
+  // at most `stageCheckConcurrency(stage)` of them and at most the process-wide
+  // limit across every stage (ADR-0286), instead of one after another. Each
+  // one still runs as the initiator and still fails closed; the verdicts are
+  // gathered in declared order and committed as ONE transition by the caller.
+  const results = await fanOut(bindings.filter((b) => declared.has(b.check)), stageCheckConcurrency(stage), async (binding) => {
+      let result: CheckOutcome | undefined;
+      const fail = (detail: string, extra?: Record<string, unknown>): void => {
+        result = {
+          check: binding.check,
+          status: "failed",
+          severity: "high",
+          detail,
+          eval: { dataset: binding.dataset, agent: binding.agent, ...(extra ?? {}) },
+        };
+      };
+      // resolve the PINNED dataset version: an explicit `version`, else the
+      // highest existing one at the moment the stage runs
+      const versions = await db
+        .select()
+        .from(evalDatasets)
+        .where(eq(evalDatasets.name, binding.dataset))
+        .orderBy(desc(evalDatasets.version));
+      const dataset = binding.version
+        ? versions.find((d) => d.version === binding.version)
+        : versions[0];
+      if (!dataset) {
         fail(
-          `eval '${binding.dataset}' could not run against '${binding.agent}': ${outcome.error}${outcome.detail ? ` — ${outcome.detail}` : ""}`,
-          { error: outcome.error },
+          `eval dataset '${binding.dataset}'${binding.version ? ` v${binding.version}` : ""} does not exist — the quality gate could not run, so it does not pass`,
         );
-        continue;
+        return result;
       }
-      out.set(binding.check, {
-        check: binding.check,
-        status: outcome.gate.passed ? "passed" : "failed",
-        severity: outcome.gate.passed ? null : outcome.gate.regression ? "high" : "medium",
-        detail: `${binding.dataset} v${dataset.version} on '${binding.agent}': ${outcome.gate.reason}`,
-        eval: {
-          runId: outcome.run.id,
-          dataset: dataset.name,
-          datasetVersion: dataset.version,
-          agent: agentRow.name,
-          model: agentRow.model,
-          meanScore: outcome.aggregate.meanScore,
-          passRate: outcome.aggregate.passRate,
-          cases: outcome.aggregate.cases,
-          scoreDelta: outcome.gate.scoreDelta,
-          baselineRunId: outcome.baseline?.id ?? null,
-          regression: outcome.gate.regression,
-          costUsd: outcome.run.costUsd,
-        },
-      });
-    } catch (e) {
-      fail(`eval '${binding.dataset}' errored: ${errMessage(e)}`);
-    }
-  }
+      // ADR-0208 G9: a gate that still names a retired dataset fails closed (the runner refuses it too)
+      if (versions.some((d) => d.retiredAt !== null)) {
+        fail(`${evalDatasetRetiredDetail(binding.dataset)} — the quality gate could not run, so it does not pass`, { error: "eval_dataset_retired" });
+        return result;
+      }
+      const [agentRow] = await db.select().from(agents).where(eq(agents.name, binding.agent));
+      if (!agentRow) {
+        fail(`eval agent '${binding.agent}' is not in the registry — the quality gate could not run, so it does not pass`);
+        return result;
+      }
+      let judgeAgentId: string | null = null;
+      if (binding.judgeAgent) {
+        const [judgeRow] = await db.select().from(agents).where(eq(agents.name, binding.judgeAgent));
+        if (!judgeRow) {
+          fail(`eval judge agent '${binding.judgeAgent}' is not in the registry`);
+          return result;
+        }
+        judgeAgentId = judgeRow.id;
+      }
+      try {
+        const outcome = await runEvalSuite(db, dataKey, {
+          datasetId: dataset.id,
+          agentId: agentRow.id,
+          userId: instance.initiatorUserId,
+          trigger: "workflow",
+          judgeAgentId,
+          projectId: instance.projectId,
+          tolerance: binding.tolerance ?? 0.05,
+          minScore: binding.minScore ?? null,
+          minPassRate: binding.minPassRate ?? null,
+          requireBaseline: binding.requireBaseline ?? false,
+          workflow: { instanceId: instance.id, stageId: stage.id, checkName: binding.check },
+        });
+        if (!outcome.ok) {
+          fail(
+            `eval '${binding.dataset}' could not run against '${binding.agent}': ${outcome.error}${outcome.detail ? ` — ${outcome.detail}` : ""}`,
+            { error: outcome.error },
+          );
+          return result;
+        }
+        result = {
+          check: binding.check,
+          status: outcome.gate.passed ? "passed" : "failed",
+          severity: outcome.gate.passed ? null : outcome.gate.regression ? "high" : "medium",
+          detail: `${binding.dataset} v${dataset.version} on '${binding.agent}': ${outcome.gate.reason}`,
+          eval: {
+            runId: outcome.run.id,
+            dataset: dataset.name,
+            datasetVersion: dataset.version,
+            agent: agentRow.name,
+            model: agentRow.model,
+            meanScore: outcome.aggregate.meanScore,
+            passRate: outcome.aggregate.passRate,
+            cases: outcome.aggregate.cases,
+            scoreDelta: outcome.gate.scoreDelta,
+            baselineRunId: outcome.baseline?.id ?? null,
+            regression: outcome.gate.regression,
+            costUsd: outcome.run.costUsd,
+          },
+        };
+      } catch (e) {
+        fail(`eval '${binding.dataset}' errored: ${errMessage(e)}`);
+      }
+    return result;
+  });
+  for (const r of results) if (r) out.set(r.check, r);
   return out;
 }
 
@@ -2626,6 +2672,83 @@ async function commitStageResult(
 }
 
 /**
+ * ADR-0283 — ONE AUTOMATIC RETRY ATTEMPT of a failed stage execution, run by
+ * the retry worker (`workflows-queue.ts`) inside `stageRetryAttempt`.
+ *
+ * The attempt is the ordinary executor (`runGitExecutions`): the same claim,
+ * the same governance guard at claim and commit, the same one-transaction
+ * transition and audit. What this adds is only the bookkeeping around it:
+ *
+ *  - SUPERSEDED. The job names the stage execution it answers (instance, stage,
+ *    round, entry: the ADR-0284 key). If the instance is no longer awaiting
+ *    that execution (it succeeded through /advance, was re-opened, aborted or
+ *    moved on), the attempt does nothing and the job completes. A redelivered
+ *    job therefore never runs a stage twice.
+ *  - FAILED AGAIN. The executor committed `execution_failed` (with no new job:
+ *    the attempt context suppresses it). With attempts left this throws, and
+ *    the queue retries the job after its backoff; on the last attempt the
+ *    exhaustion is audited and the stage waits for /advance, as before P30.
+ *  - REFUSED. A governance refusal is final and never retried.
+ */
+export async function runStageRetryJob(
+  db: Db,
+  job: StageRetryJob,
+  attempt: { attempt: number; maxAttempts: number; key: string },
+  dataKey: string | undefined,
+  hooks: ExecutorHooks = {},
+): Promise<StageRetryOutcome> {
+  const awaiting = async () => {
+    const [row] = await db.select().from(workflowInstances).where(eq(workflowInstances.id, job.instanceId));
+    if (!row || row.status !== "awaiting_execution" || row.round !== job.round || row.stageEntry !== job.entry) return null;
+    const current = (row.definition as WorkflowDefinition).stages[(row.state as InstanceState).currentStageIndex];
+    return current?.id === job.stageId ? row : null;
+  };
+  if (!(await awaiting())) return "superseded";
+  const audit = (ruleId: string, effect: "allow" | "deny", reason: string, extra: Record<string, unknown> = {}) =>
+    db.insert(auditLog).values({
+      userId: SYSTEM_IDENTITY,
+      objectType: "workflow",
+      objectId: job.instanceId,
+      detail: { actor: "workflow-retry", stageId: job.stageId, executionKey: attempt.key, attempt: attempt.attempt, maxAttempts: attempt.maxAttempts, ...extra },
+      effect,
+      ruleId,
+      ruleChain: [],
+      reason,
+    });
+  await audit(
+    "workflow:stage-retry-attempt",
+    "allow",
+    `automatic retry ${attempt.attempt} of ${attempt.maxAttempts} of stage '${job.stageId}' (the template's retry policy)`,
+  );
+  let outcome: ExecutorOutcome;
+  try {
+    outcome = await stageRetryAttempt.run(attempt, () =>
+      runGitExecutions(db, job.instanceId, [{ kind: "execute_stage", stageId: job.stageId }], null, dataKey, 0, hooks),
+    );
+  } catch (err) {
+    // another executor holds the stage, or it stopped being executable between
+    // the read above and the claim: whoever holds it owns the outcome now
+    if (err instanceof StageClaimHeldError || err instanceof WorkflowStateError) return "superseded";
+    throw err;
+  }
+  if (outcome.refused) return "refused";
+  const after = await awaiting();
+  const lastError = after ? (after.context as Record<string, unknown>).lastError : undefined;
+  if (!after || typeof lastError !== "string" || !lastError.startsWith(`${job.stageId}:`)) return "succeeded";
+  if (attempt.attempt >= attempt.maxAttempts) {
+    await audit(
+      "workflow:stage-retry-exhausted",
+      "deny",
+      `stage '${job.stageId}' still failed after ${attempt.maxAttempts} automatic retr${attempt.maxAttempts === 1 ? "y" : "ies"}; it waits for /advance`,
+      { lastError },
+    );
+    return "exhausted";
+  }
+  // the queue retries this job after its backoff
+  throw new Error(`automatic retry ${attempt.attempt} of ${attempt.maxAttempts} of stage '${job.stageId}' failed`);
+}
+
+/**
  * ADR-0077 — THE ONE TEMPLATE-CREATION PATH.
  *
  * Extracted verbatim from `POST /v1/workflows/templates` so the gallery's
@@ -2860,6 +2983,12 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
   // completion guard the route's own transition does (the strict default when
   // none is given), and a refusal is answered as `executorRefusal`
   const executorHooks: ExecutorHooks = opts.assertTransitionAllowed ? { assertTransitionAllowed: opts.assertTransitionAllowed } : {};
+  // ADR-0283: the retry worker (started by the boot path) runs its attempts
+  // through this app's executor, with the same completion guard as the routes
+  app.addHook(
+    "onClose",
+    configureStageQueue(db, (job, attempt) => runStageRetryJob(db, job, attempt, opts.dataKey, executorHooks)),
+  );
   const runExecutors = (instanceId: string, effects: Effect[], actorUserId: string): Promise<ExecutorOutcome> =>
     runGitExecutions(db, instanceId, effects, actorUserId, opts.dataKey, 0, executorHooks);
   const refusalField = (o: ExecutorOutcome | null) => (o?.refused ? { executorRefusal: o.refused } : {});

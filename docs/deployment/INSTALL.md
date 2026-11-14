@@ -516,7 +516,7 @@ stale-credential alerts on. Each is relaxable by an admin, and every change is a
 | `REGULAIT_METRICS_LISTEN` | unset (no `/metrics` anywhere) | `host:port` or a port (e.g. `127.0.0.1:9464`): a **separate** listener that serves only `GET /metrics` (Prometheus text). Keep it on a private network. |
 | `REGULAIT_METRICS_TOKEN` | unset | Required (at least 32 characters, no whitespace) whenever either metrics variable is on, or the gateway **refuses to start**. Scrapers send it as `Authorization: Bearer <token>`; a wrong or missing token is a 401 `metrics_unauthorized`, counted rather than audited. |
 | `REGULAIT_METRICS_ON_MAIN_LISTENER` | off | `1`/`true`/`on` also mounts `GET /metrics` on the public listener, with the same token check. Any other value than on/off refuses boot. |
-| `REGULAIT_RATE_LIMIT_EVALUATOR` | `cedar` | Which engine evaluates rate limits (ADR-0239). `legacy` keeps the previous hand-written evaluator for one release as a rollback; the boot log names the one in use. Any other value refuses boot. |
+| `REGULAIT_RATE_LIMIT_EVALUATOR` | `cedar` | Which engine evaluates rate limits (ADR-0239). Cedar is the only engine; the boot log names it. `legacy` (the removed hand-written evaluator) and any other value refuse boot. |
 
 Metric labels carry no user, project, email, tool name, URL or URI.
 

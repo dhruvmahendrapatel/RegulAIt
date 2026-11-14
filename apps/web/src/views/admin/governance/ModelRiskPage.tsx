@@ -295,6 +295,104 @@ export default function ModelRiskPage() {
   const autofill = openCard === cardDetail.data?.card.id ? cardDetail.data.card.autofill : null;
   const staleness = openCard === cardDetail.data?.card.id ? cardDetail.data.card.staleness : null;
 
+  // I-2 (#453, pattern 4): one empty state while nothing exists. The posture read already counts every card in the
+  // org, so no extra request is made. Only an answered zero counts: a failed read stays the QueryGate's error with
+  // Retry, never "nothing", and a missing count is never read as zero.
+  const nothingYet = status.isSuccess && status.data?.cards === 0;
+
+  // the author form is the page's primary action; while nothing exists it carries the page's one empty state
+  const authorCard = (
+      <Card title="Author a model card">
+        <form
+          className={v.stack}
+          onSubmit={(e) => {
+            e.preventDefault();
+            void act.run(async () => {
+              await api.post("/v1/mrm/cards", {
+                agentId: newAgent,
+                intendedUse: newUse,
+                ...(newLimits ? { limitations: newLimits } : {}),
+                ...(newClaims ? { dataClaims: JSON.parse(newClaims) as Record<string, unknown> } : {}),
+                ...(newRefs
+                  ? { standardRefs: newRefs.split(",").map((s) => s.trim()).filter(Boolean) }
+                  : {}),
+              });
+              setNewUse("");
+              setNewLimits("");
+              setNewClaims("");
+              setNewRefs("");
+              await refreshAll();
+            }, "Model card created — it enforces nothing until it carries an approved sign-off");
+          }}
+        >
+          <div className={a.formRow}>
+            <Field label="Agent">
+              <Select value={newAgent} onChange={(e) => setNewAgent(e.target.value)} required>
+                {optionEls(agentOpts(agents.data?.agents), "select an agent")}
+              </Select>
+            </Field>
+            <Field label="Intended use" grow>
+              <Input
+                value={newUse}
+                onChange={(e) => setNewUse(e.target.value)}
+                placeholder="summarize customer tickets"
+                required
+              />
+            </Field>
+          </div>
+          <Field label="Known limitations">
+            <Textarea
+              rows={2}
+              value={newLimits}
+              onChange={(e) => setNewLimits(e.target.value)}
+              placeholder="not for legal or medical advice; degrades on non-English input"
+            />
+          </Field>
+          <div className={a.formRow}>
+            <Field label="Provider data claims (JSON)" grow>
+              <Textarea
+                rows={2}
+                value={newClaims}
+                onChange={(e) => setNewClaims(e.target.value)}
+                placeholder='{"training":"vendor-stated; no customer data","retention":"30 days"}'
+              />
+            </Field>
+            <Field
+              label="Standard refs (comma separated)"
+              grow
+              help="Referencing a NIST AI RMF / ISO 42001 control id helps an auditor follow the mapping. It does not make this deployment, or its customer, certified against anything."
+            >
+              <Input
+                value={newRefs}
+                onChange={(e) => setNewRefs(e.target.value)}
+                placeholder="nist-ai-rmf:MEASURE-2.11, iso-42001:8.3"
+              />
+            </Field>
+          </div>
+          <div>
+            <Badge tone="neutral">Mapping, not certification</Badge>
+          </div>
+          <div>
+            <Button type="submit" disabled={!newAgent || !newUse}>
+              Create card
+            </Button>
+          </div>
+        </form>
+        {nothingYet && (
+          <EmptyState
+            title="No model cards yet"
+            body={
+              <>
+                An empty registry enforces nothing, whatever the toggle says. Cards are human work — the platform can
+                require them and expire them, it cannot write them. Author the first one above; the registry and the
+                expiring sign-offs list appear here once it exists.
+              </>
+            }
+          />
+        )}
+      </Card>
+  );
+
   return (
     <>
       <PageHeader
@@ -443,12 +541,17 @@ export default function ModelRiskPage() {
             </div>
           </Card>
 
+          {/* I-2: while no card exists, the primary action and its one empty state come straight after the posture */}
+          {nothingYet && authorCard}
+
           {/* the warn window, writable through PUT /v1/org/settings (U3) */}
           <OrgSettingsCard title="Expiry warning window" keys={["mrmExpiryWarnDays"]} testId="mrm-expiry-warn" />
           {/* beside the recertification controls: re-runs a changed model's tests and attaches the results to its
               re-certification request; off by default, and turning it on asks for a step-up */}
           <OrgSettingsCard title="Re-test after a model change" keys={["mrmAutoRetestEnabled"]} testId="mrm-auto-retest" />
 
+          {!nothingYet && (
+          <>
           {/* ---------------- expiring work ---------------- */}
           <Card title="Expiring and lapsed sign-offs">
             <DataList<ExpiringRow>
@@ -470,84 +573,7 @@ export default function ModelRiskPage() {
             />
           </Card>
 
-          {/* ---------------- author a card ---------------- */}
-          <Card title="Author a model card">
-            <form
-              className={v.stack}
-              onSubmit={(e) => {
-                e.preventDefault();
-                void act.run(async () => {
-                  await api.post("/v1/mrm/cards", {
-                    agentId: newAgent,
-                    intendedUse: newUse,
-                    ...(newLimits ? { limitations: newLimits } : {}),
-                    ...(newClaims ? { dataClaims: JSON.parse(newClaims) as Record<string, unknown> } : {}),
-                    ...(newRefs
-                      ? { standardRefs: newRefs.split(",").map((s) => s.trim()).filter(Boolean) }
-                      : {}),
-                  });
-                  setNewUse("");
-                  setNewLimits("");
-                  setNewClaims("");
-                  setNewRefs("");
-                  await refreshAll();
-                }, "Model card created — it enforces nothing until it carries an approved sign-off");
-              }}
-            >
-              <div className={a.formRow}>
-                <Field label="Agent">
-                  <Select value={newAgent} onChange={(e) => setNewAgent(e.target.value)} required>
-                    {optionEls(agentOpts(agents.data?.agents), "select an agent")}
-                  </Select>
-                </Field>
-                <Field label="Intended use" grow>
-                  <Input
-                    value={newUse}
-                    onChange={(e) => setNewUse(e.target.value)}
-                    placeholder="summarize customer tickets"
-                    required
-                  />
-                </Field>
-              </div>
-              <Field label="Known limitations">
-                <Textarea
-                  rows={2}
-                  value={newLimits}
-                  onChange={(e) => setNewLimits(e.target.value)}
-                  placeholder="not for legal or medical advice; degrades on non-English input"
-                />
-              </Field>
-              <div className={a.formRow}>
-                <Field label="Provider data claims (JSON)" grow>
-                  <Textarea
-                    rows={2}
-                    value={newClaims}
-                    onChange={(e) => setNewClaims(e.target.value)}
-                    placeholder='{"training":"vendor-stated; no customer data","retention":"30 days"}'
-                  />
-                </Field>
-                <Field
-                  label="Standard refs (comma separated)"
-                  grow
-                  help="Referencing a NIST AI RMF / ISO 42001 control id helps an auditor follow the mapping. It does not make this deployment, or its customer, certified against anything."
-                >
-                  <Input
-                    value={newRefs}
-                    onChange={(e) => setNewRefs(e.target.value)}
-                    placeholder="nist-ai-rmf:MEASURE-2.11, iso-42001:8.3"
-                  />
-                </Field>
-              </div>
-              <div>
-                <Badge tone="neutral">Mapping, not certification</Badge>
-              </div>
-              <div>
-                <Button type="submit" disabled={!newAgent || !newUse}>
-                  Create card
-                </Button>
-              </div>
-            </form>
-          </Card>
+          {authorCard}
 
           {/* ---------------- the registry ---------------- */}
           <Card title="Model cards">
@@ -1057,6 +1083,8 @@ export default function ModelRiskPage() {
                 </div>
               </div>
             </Card>
+          )}
+          </>
           )}
         </QueryGate>
       </div>

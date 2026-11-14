@@ -12,7 +12,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
-import { RemoveButton, useAction } from "../adminKit";
+import { NotAvailableToYou, RemoveButton, isRefusal, useAction } from "../adminKit";
 import v from "../../views.module.css";
 import { putOrgSettings } from "../../../stepup/stepUp";
 
@@ -107,7 +107,7 @@ export function EnergyEstimatePanel(props: { projectId?: string; useCaseId?: str
         </Select>
       </div>
       {q.isLoading && <span className={v.dim}>Loading estimate…</span>}
-      {q.error ? <span className={v.errLine}>{q.error instanceof Error ? q.error.message : String(q.error)}</span> : null}
+      {isRefusal(q.error) ? <NotAvailableToYou what="The energy estimate" /> : q.error ? <span className={v.errLine}>{q.error instanceof Error ? q.error.message : String(q.error)}</span> : null}
       {q.data && !e && <span className={v.dim}>{q.data.note ?? "Energy is unknown for this scope."}</span>}
       {e && (
         <>

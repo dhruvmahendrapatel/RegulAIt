@@ -48,6 +48,21 @@ const PACK_SOURCES = [
     normalise: (doc, s) => fi.normaliseAtlasRelease(doc, { framework: s.framework, licence: s.licence }),
   },
   {
+    // ADR-0293: the same pinned release, read for its tactics and techniques
+    sourceId: "mitre-atlas-techniques",
+    framework: "mitre-atlas-techniques",
+    title: "MITRE ATLAS tactics and techniques",
+    publisher: "The MITRE Corporation",
+    licence: "Apache-2.0",
+    licenceUrl: "https://github.com/mitre-atlas/atlas-data/blob/main/LICENSE",
+    repo: "mitre-atlas/atlas-data",
+    revision: "f56c1468731d6428e5bf875263b4643b46d67437",
+    file: "dist/v6/ATLAS-2026.10.yaml",
+    parse: (bytes) => yaml.load(bytes.toString("utf8"), { schema: yaml.JSON_SCHEMA }),
+    version: (doc) => String(doc.collection?.version ?? "unknown"),
+    normalise: (doc, s) => fi.normaliseAtlasTechniques(doc, { framework: s.framework, licence: s.licence }),
+  },
+  {
     sourceId: "nist-ai-rmf-oscal",
     framework: "nist-ai-rmf",
     title: "NIST AI RMF 1.0 (AI 100-1) subcategories",

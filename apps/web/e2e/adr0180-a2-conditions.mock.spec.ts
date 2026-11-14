@@ -201,7 +201,7 @@ test.describe("ADR-0180 A2: measured conditions", () => {
 
   test("the record shows the last value, state, evidence and waivers; an admin evaluates now and waives with a reason", async ({ page }) => {
     const state = await mockGateway(page);
-    await page.goto(`/ui/admin/governance/use-cases/${UC}`);
+    await page.goto(`/ui/admin/governance/use-cases/${UC}?tab=overview`);
     const card = page.locator("section", { has: page.getByText("Conditions of approval", { exact: true }) });
     const measured = card.getByRole("row").filter({ hasText: "Error rate below 5 %" }).first();
     await expect(measured).toContainText("Too few samples");
