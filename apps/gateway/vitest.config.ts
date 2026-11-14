@@ -36,6 +36,10 @@ export default defineConfig({
       // yet numbered (packages/db/migrations/pending/) are applied in their provisional order. A long-lived database
       // refuses them.
       REGULAIT_MIGRATIONS_UNASSIGNED: "apply",
+      // ADR-0234 batch 7b: the suite's database login is a superuser, which the boot refuses as the runtime login.
+      // A test that boots the real gateway (startGateway) takes the loud, audited dev opt-in; the runtime-login suite
+      // tests the refusal itself with this unset.
+      REGULAIT_DEV_PRIVILEGED_DB_LOGIN: "1",
       // ADR-0031 item 4: the HTTP rate limiter is ON by default in a real
       // deployment (see rate-limit.ts). The suite drives thousands of requests
       // from one address in seconds — auth.test.ts alone deliberately fails

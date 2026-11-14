@@ -303,9 +303,12 @@ describe("the gateway hooks scope every authenticated request", () => {
     expect(r.json()).toEqual({ scope: { kind: "principal", userId: ids.alice }, ids: [ids.aliceApproval] });
   });
 
-  it("the bootstrap token resolves no user: the request runs unscoped, exactly as before batch 2", async () => {
+  it("the bootstrap token resolves no user: batch 7a runs it under `bootstrap_admin`, which sees what an admin sees", async () => {
     const r = await app.inject({ method: "GET", url: "/v1/__rls0234b2_probe", headers: { authorization: `Bearer ${BOOT}` } });
     expect(r.statusCode).toBe(200);
-    expect(r.json()).toEqual({ scope: null, ids: [ids.aliceApproval, ids.bobApproval].sort() });
+    expect(r.json()).toEqual({
+      scope: { kind: "system", reason: "bootstrap_admin", path: "gateway.bootstrap" },
+      ids: [ids.aliceApproval, ids.bobApproval].sort(),
+    });
   });
 });

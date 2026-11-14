@@ -35,6 +35,7 @@ import {
   type SessionOrigin,
   webauthnChallenges,
   webauthnCredentials,
+  runWithRlsSystem,
 } from "@regulait/db";
 import {
   BROKER_IDP_VALUES,
@@ -1131,13 +1132,17 @@ export async function beginSamlTotpStepUp(
   samlProviderId: string,
 ): Promise<{ token: string; maxAgeSeconds: number }> {
   const { token, tokenHash } = generateSessionToken();
-  await db.delete(authMfaPending).where(eq(authMfaPending.userId, userId));
-  await db.insert(authMfaPending).values({
-    tokenHash,
-    userId,
-    origin: "saml",
+  // ADR-0234 batch 7a: the SAML ACS runs under `identity_provisioning`; parking the login at the TOTP step is a
+  // sign-in step, so it writes the challenge under `authenticate`, the one reason auth_mfa_pending admits
+  await runWithRlsSystem("authenticate", "auth.saml-totp-step-up", async () => {
+    await db.delete(authMfaPending).where(eq(authMfaPending.userId, userId));
+    await db.insert(authMfaPending).values({
+      tokenHash,
+      userId,
+      origin: "saml",
     samlProviderId,
-    expiresAt: new Date(Date.now() + MFA_PENDING_MINUTES * 60_000),
+      expiresAt: new Date(Date.now() + MFA_PENDING_MINUTES * 60_000),
+    });
   });
   return { token, maxAgeSeconds: MFA_PENDING_MINUTES * 60 };
 }

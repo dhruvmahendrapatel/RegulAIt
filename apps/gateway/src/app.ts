@@ -602,7 +602,7 @@ import { WEB_UI_ROUTES, defaultWebDistDir, registerWebServing } from "./web-serv
 // ADR-0053 — the auth-class sets the two gates below branch on. They live in
 // their own module so the published OpenAPI document derives each route's
 // documented credential requirement from the SAME objects that enforce it.
-import { AUTH_EXEMPT_ROUTES, NON_ADMIN_ROUTES } from "./route-classes.js";
+import { AUTH_EXEMPT_ROUTES, NON_ADMIN_ROUTES, exemptRouteRlsReason } from "./route-classes.js";
 import { registerOpenApiRoutes, type RouteInventoryEntry } from "./openapi.js";
 import { registerOnboardingRoutes } from "./onboarding.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
@@ -1447,12 +1447,24 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   // ADR-0234 batch 2: from here to the end of the request every statement on the slice-1 tables runs as the
   // authenticated principal (role regulait_app, FORCE row-level security), whatever the route forgets to filter.
-  // A request with no user (an exempt route, the bootstrap token) leaves the `authenticate` scope and runs
-  // unscoped, exactly as before this batch; ADR-0234 records those paths for the runtime cut-over (batch 7).
+  // Batch 7a: a request with no user runs under a named system reason instead of no scope, so it is also under the
+  // policies (and works unchanged on the non-superuser runtime login of batch 7b):
+  //   - an auth-exempt route: the reason its class needs (route-classes.ts exemptRouteRlsReason);
+  //   - the bootstrap token (or a session exchanged for it), which the gateway treats as an admin: bootstrap_admin;
+  //   - a non-user credential (engine runner, workload identity, endpoint agent, PDP): system_task.
+  // Only a request with no credential at all (refused by the hook above before any handler) stays unscoped.
   app.addHook("preHandler", (req, _reply, done) => {
-    const userId = req.authCtx?.userId;
+    const ctx = req.authCtx;
+    const userId = ctx?.userId;
     if (typeof userId === "string" && userId.length > 0) {
       runWithRlsPrincipal({ userId }, () => done());
+    } else if (AUTH_EXEMPT_ROUTES.has(req.routeOptions.url ?? "")) {
+      const reason = exemptRouteRlsReason(req.routeOptions.url ?? "");
+      runWithRlsSystem(reason, `gateway.exempt.${reason}`, () => done());
+    } else if (ctx?.isAdmin === true) {
+      runWithRlsSystem("bootstrap_admin", "gateway.bootstrap", () => done());
+    } else if (ctx) {
+      runWithRlsSystem("system_task", `gateway.credential.${ctx.via}`, () => done());
     } else {
       runWithoutRlsScope(() => done());
     }
@@ -4737,7 +4749,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   ): Promise<void> {
     const waiting = await builderStepsAwaitingApproval(d, updated.id);
     if (!waiting.length) return;
-    scheduleBackgroundWork(d, async () => {
+    // ADR-0234 batch 7a: the paused steps are the requester's, so the resumed turn runs as the requester
+    scheduleBackgroundWork(d, () => runWithRlsPrincipal({ userId: updated.userId }, async () => {
       try {
         await resumeBuilderAfterApproval(d, opts.dataKey, updated, binaryDecision, deciderUserId);
       } catch (err) {
@@ -4757,7 +4770,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             .slice(0, 1000),
         });
       }
-    }, app.log);
+    }), app.log);
   }
 
   /**

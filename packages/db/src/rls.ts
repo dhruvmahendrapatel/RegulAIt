@@ -43,7 +43,7 @@ export const RLS_APP_ROLE = "regulait_app";
  * blanket bypass: `authenticate` can read users and MFA challenges, and nothing in approvals or audit_log.
  */
 export const RLS_SYSTEM_REASONS = [
-  /** sign-in and session resolution, before a principal exists: users (read; no write until ADR-0234 batch 2), auth_mfa_pending */
+  /** sign-in and session resolution, before a principal exists: users (read; update outside the guarded columns), auth_mfa_pending */
   "authenticate",
   /** SCIM and the seed: users (all) */
   "identity_provisioning",
@@ -51,7 +51,7 @@ export const RLS_SYSTEM_REASONS = [
   "audit_chain",
   /** chain verification, anchoring and export jobs: audit_log (read) */
   "audit_verify",
-  /** expiry, SLA and routing sweeps that act on every approval: approvals (all) */
+  /** expiry, SLA and routing sweeps that act on every approval: approvals (all), users (read, batch 7a) */
   "approval_maintenance",
   /** entered only by the SET clause of the 0272 helper functions: users (read) */
   "rls_membership",
@@ -62,11 +62,33 @@ export const RLS_SYSTEM_REASONS = [
    * the principal (audit_log.user_id is the sponsor or subject, ADR-0188): audit_log (append, and read its own row)
    */
   "audit_subject",
+  /**
+   * batch 7a: server-side work with no principal (scheduler jobs, boot tasks, the audit anchor and backup-verify
+   * timers, background work) and requests from non-user credentials (engine runners, workload identities, endpoint
+   * agents): users (read), approvals (all), audit_log (read and append). Never users writes or auth_mfa_pending.
+   */
+  "system_task",
+  /**
+   * batch 7a: the unauthenticated portal, ingest and webhook routes (trust pages, supplier portal, feedback links,
+   * agent and third-party ingest, OAuth endpoints, chat events): users (read), audit_log (append). The narrowest
+   * reason, because these take attacker-shaped input.
+   */
+  "public_ingest",
+  /**
+   * batch 7a: a request authenticated by the bootstrap token, which the gateway treats as an admin with no user row:
+   * admitted wherever an active admin principal is (regulait_rls_is_admin()), and to the users read
+   */
+  "bootstrap_admin",
+  /**
+   * batch 7b: the audit retention prune on the OWNER connection: audit_log (read, delete). Never a caller reason: the
+   * prune sets it inside its own owner transaction, and the app role has no DELETE on audit_log anyway.
+   */
+  "audit_retention",
 ] as const;
 export type RlsSystemReason = (typeof RLS_SYSTEM_REASONS)[number];
 
 /** reasons a caller may pass to `withSystemContext`; `rls_membership` belongs to the SQL helpers alone */
-export type RlsCallerSystemReason = Exclude<RlsSystemReason, "rls_membership" | "migration" | "audit_subject">;
+export type RlsCallerSystemReason = Exclude<RlsSystemReason, "rls_membership" | "migration" | "audit_subject" | "audit_retention">;
 
 export interface RlsPrincipal {
   /** the authenticated user's id (`users.id`) */
@@ -92,7 +114,7 @@ export class RlsContextError extends Error {
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const PATH_RE = /^[a-z0-9][a-z0-9_.:/-]{0,79}$/;
 const CALLER_REASONS: ReadonlySet<string> = new Set(
-  RLS_SYSTEM_REASONS.filter((r) => r !== "rls_membership" && r !== "migration" && r !== "audit_subject"),
+  RLS_SYSTEM_REASONS.filter((r) => r !== "rls_membership" && r !== "migration" && r !== "audit_subject" && r !== "audit_retention"),
 );
 
 /** The structural shape the wrappers need: a top-level drizzle handle with `transaction`. */

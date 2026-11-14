@@ -18,6 +18,7 @@ export {
   CONCURRENT_INDEX_LOCK_TIMEOUT_MS,
   ConcurrentIndexBlockedError,
 } from "./migrate.js";
+export { RUNTIME_LOGIN_ROLE, inspectRuntimeLogin, provisionRuntimeLogin, runtimeLoginProblems, type RuntimeLoginFacts } from "./runtime-login.js";
 export { PENDING_DIR, UNASSIGNED_ENV, UnassignedMigrationsError, assignPending, pendingFiles } from "./pending-migrations.js";
 export { and, asc, count, desc, eq, getTableColumns, gt, gte, inArray, isNotNull, isNull, lt, lte, ne, notInArray, or, sql } from "drizzle-orm";
 // Types consumers need to build reusable predicates without taking a direct

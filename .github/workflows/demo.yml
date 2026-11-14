@@ -166,10 +166,20 @@ jobs:
         run: |
           PORT=3105 REGULAIT_AUTH_RATE_LIMIT_MAX=1000 REGULAIT_RATE_LIMIT_MAX=20000 \
             nohup node apps/gateway/dist/main.js > "$RUNNER_TEMP/gateway.log" 2>&1 &
-          for i in $(seq 1 30); do curl -sf http://127.0.0.1:3105/health && exit 0; sleep 1; done
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:3105/health; then
+              # ADR-0234 batch 7b: the journeys must run on the runtime login, never on the privileged opt-in
+              grep -q "row-level security enforced" "$RUNNER_TEMP/gateway.log" && exit 0
+              echo "::error::the gateway is not serving on the runtime login"; cat "$RUNNER_TEMP/gateway.log"; exit 1
+            fi
+            sleep 1
+          done
           cat "$RUNNER_TEMP/gateway.log"; exit 1
         env:
           REGULAIT_LICENSE_KEYRING: ${{ runner.temp }}/license-keys
+          # ADR-0234 batch 7b: the first boot creates the regulait_runtime login through the owner connection and
+          # serves every request on it, so the journeys below run with row-level security binding the gateway
+          REGULAIT_INSTALL_SECRETS_DIR: ${{ runner.temp }}/install-secrets
 
       # Playwright browsers cached per OS/arch + the exact installed Playwright version
       # (#453; see ci.yml header item 6). Hit: only the apt system packages install.

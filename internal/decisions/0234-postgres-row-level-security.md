@@ -414,6 +414,127 @@ approver-role member (`regulait_rls_delegator_groups()`, ADR-0022 x ADR-0046).
 - The slice-1 file was updated for the 0313 policies and the extended migration guard (29 tests).
 - The full gateway suite runs in CI's shards.
 
+## As built (batch 7a): a named scope for every path with no principal (2026-11-14)
+
+Batch 7 (the runtime cut-over) is split in two PRs so each stays reviewable. **7a** (this one) gives every path that
+ran with no scope a named, closed reason. **7b** does the cut-over itself: a separate runtime login that is a member
+of `regulait_app`, the owner credential for the migrator and the audit prune only, the boot refusal of a superuser or
+BYPASSRLS runtime login (with a loud, audited dev opt-in), the posture read, and CI's gateway shards on the runtime
+login.
+
+Why 7a is enforced already: a scoped statement switches to `regulait_app` whatever the login is, so a path given a
+scope here runs under FORCE row-level security today, on the superuser login CI uses.
+
+**Reasons added** (pending migration `rls_batch7a_system_scopes`, and `RLS_SYSTEM_REASONS`):
+
+| Reason | Who runs under it | users | approvals | audit_log | auth_mfa_pending |
+|---|---|---|---|---|---|
+| `system_task` | scheduler jobs (tick and run-now), boot tasks, the audit anchor and backup-verify timers, background work, requests from non-user credentials (engine runner, workload identity, endpoint agent, PDP) | read | all | read, append | none |
+| `public_ingest` | the unauthenticated portal, ingest and webhook routes (health, trust pages, supplier portal, feedback links, agent and third-party ingest, OAuth endpoints, chat events) | read | none | append | none |
+| `bootstrap_admin` | a bootstrap-token request, or a session exchanged for it | read | as an admin | as an admin | none |
+
+- `system_task` is broad on purpose. A scheduler job acts on every row by design, and the per-job trace showed that
+  model dispatch (eval drift, red team, auto-retest, builder schedules) can escalate a budget into an approval and
+  count audit rows, and that several sweeps route, reopen or read approvals and the ledger. It still never writes
+  `users` or touches `auth_mfa_pending`, and the ledger stays append-only (the app role has no UPDATE or DELETE on
+  `audit_log`). What RLS guards is the request paths, which run as their principal or under a narrow reason.
+- `public_ingest` is the narrowest, because these routes take attacker-shaped input.
+- `bootstrap_admin` is admitted through `regulait_rls_is_admin()`, which now has no SET clause and reads the caller's
+  reason; the principal-is-admin read moved to `regulait_rls_principal_is_admin()` (still under `rls_membership`). So
+  every policy that already admitted an admin admits the bootstrap token without being re-created.
+- `approval_maintenance` gains the users read, for the chat and PM callbacks that look up the deciding user.
+
+**Wiring.**
+- **Requests** (`app.ts`): a request with no user runs under `exemptRouteRlsReason(url)` for an auth-exempt route
+  (`route-classes.ts`: SCIM and the identity callbacks `identity_provisioning`; other `/auth/*` routes
+  `authenticate`; the PM webhook and the chat approval callback `approval_maintenance`; everything else
+  `public_ingest`), `bootstrap_admin` for the bootstrap token, `system_task` for a non-user credential. Only a request
+  with no credential at all, refused before any handler, stays unscoped.
+- **SAML TOTP park:** the ACS runs under `identity_provisioning`, and parking the login at the TOTP step writes its
+  challenge under `authenticate`.
+- **Scheduler** (`scheduler.ts`): `runSchedulerJob` runs its ledger and the job under `system_task`
+  (`scheduler.<job>`), whoever triggered it.
+- **Boot** (`boot.ts`): every boot task after the migrations runs under `system_task` (`boot.<task>`).
+  `runMigrations` stays on the owner login.
+- **Timers:** the audit anchor and backup-verify timers run under `system_task`.
+- **Background work** runs under `system_task` instead of no scope. A channel turn and a builder step resumed after
+  an approval run as their person (the chat user's linked person, the approval's requester), not as the background.
+- **Audit prune:** it deletes ledger rows and the app role has no DELETE on `audit_log`, so `runAuditPruneOnce` always
+  leaves the caller's scope (the admin's POST used to run it in the admin's principal scope, which the app role
+  cannot do). 7b moves it to the owner connection.
+- **Chain writer:** the batch 2 `audit_subject` window (the INSERT alone, restored right after) is also entered when
+  the caller's reason may append but not read the ledger (`authenticate`, `identity_provisioning`,
+  `approval_maintenance`, `public_ingest`), so the writer's RETURNING of the row it appended is visible.
+
+**Still unscoped, for 7b.** `runMigrations` (owner), the audit prune (owner), the rate-limit and PM-delivery prune
+timers (their tables have no RLS), and the seed, first-admin and demo scripts (they run as the migrator).
+
+**Tests.** `zz-adr0234-rls-batch7a.test.ts` (9): what each new reason reaches with no application filter, RETURNING
+under an append-only reason with the reason restored, every exempt route mapped, the scheduler and background work
+under `system_task`. The batch 2 bootstrap probe now expects `bootstrap_admin`. Locally: the three RLS files and 42
+affected suites (auth, SAML, OIDC, SCIM, scheduler, chat, PM, prune, boot, portals, engine runner, workload, OAuth,
+builder resume, approvals; 730 tests) pass.
+
+## As built (batch 7b): the runtime login cut-over (2026-11-14)
+
+**The runtime login.** Requests are served on a login that is a member of `regulait_app` and is not a superuser,
+BYPASSRLS or the owner of an RLS table (`runtimeLoginProblems`, `packages/db/src/runtime-login.ts`). Such a login
+cannot step out of the policies:
+- it cannot disable RLS, because it does not own the tables;
+- it cannot bypass RLS (no BYPASSRLS);
+- `SET ROLE` back to the owner is not open to it.
+
+It is resolved in this order (`apps/gateway/src/runtime-login.ts`):
+1. `REGULAIT_RUNTIME_DATABASE_URL`, operator-managed (a secrets manager, a Kubernetes secret).
+2. The install-generated login. With `REGULAIT_INSTALL_SECRETS_DIR` set, the first boot claims
+   `<dir>/runtime-database-url` (create-exclusive, 0600). It then creates `regulait_runtime` through the owner
+   connection: LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION INHERIT, a member of
+   `regulait_app`, and CONNECT on the database. The password is generated and never logged. Later boots read the
+   file. If creation fails, the file is removed, so the next boot tries again. The compose stack and the installer
+   already set the directory.
+3. Neither: requests are served on the owner connection itself.
+
+**Boot.**
+- The migrations run on the owner (`DATABASE_URL`). The runtime login is then resolved and inspected, before an app
+  or a socket exists.
+- Boot refuses a login that is not fit, whichever way it was resolved (`RuntimeLoginBootError`, which names the fix).
+  Secure by default (ADR-0180).
+- A local or CI database's login is a superuser, so `REGULAIT_DEV_PRIVILEGED_DB_LOGIN=1` starts anyway, loudly and
+  audited: a banner, one `runtime-db-login-privileged` audit row per boot, and the posture line says RLS does not bind
+  requests. The gateway test suite sets it in `vitest.config.ts`, and the few boot tests with their own env set it
+  explicitly. The batch 7b suite tests the refusal with it unset.
+- The posture block gains `db login:`, which names the login and whether RLS binds it.
+
+**The owner keeps the ledger prune.** `audit_log` had no DELETE policy, and FORCE binds the owner too. The pending
+migration `rls_batch7b_runtime_cutover` therefore adds:
+- the closed reason `audit_retention`;
+- `audit_log_delete` (`audit_retention` or `migration`);
+- `audit_retention` on the ledger read.
+
+`runAuditPruneOnce` runs on the owner handle behind the runtime one (`owner-db.ts`; boot registers the pair) and sets
+the reason inside its own transaction. It is never a caller reason, and the app role has no DELETE on the ledger, so
+no request path can use it.
+
+**CI on the runtime login.** The demo workflow's gateway now boots with the install secrets directory, so the
+Playwright journeys run on `regulait_runtime`. The start step fails unless the posture line says RLS is enforced.
+
+**Tests and checks.**
+- `zz-adr0234-rls-batch7b.test.ts` (6):
+  - the refusal, and the opt-in;
+  - the generated login and its file, fit;
+  - RLS binding it (zero unscoped rows, its own as a principal, all as a job, no `ALTER TABLE`);
+  - the real boot on it, with no opt-in, serving a bootstrap request;
+  - `audit_retention` deleting only for a role with DELETE, and never for the runtime login.
+- A local `main.js` boot on a `demo:prepare`d database:
+  - posture `'regulait_runtime' (install-generated) … row-level security enforced`;
+  - bootstrap reads of users, approvals, audit, posture and projects return 200;
+  - a persona's password sign-in and session work.
+
+**Not in 7b.** The seed, first-admin and demo scripts still run as the migrator, which must be a superuser or table
+owner with RLS satisfied. On a non-superuser owner they need the `identity_provisioning` / `migration` scopes, which
+is recorded as a follow-up. CI's unit shards keep the superuser login with the opt-in; the demo job is the end-to-end
+check on the runtime login.
+
 ## Appendix: the inventory (2026-11-06, migrated head)
 
 - **User-owned (49):** a2a_agent_grants, agent_grants, agent_revocations, agents, ai_incident_actions, ai_incidents,
