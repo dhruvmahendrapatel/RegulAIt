@@ -43,7 +43,7 @@ export const RLS_APP_ROLE = "regulait_app";
  * blanket bypass: `authenticate` can read users and MFA challenges, and nothing in approvals or audit_log.
  */
 export const RLS_SYSTEM_REASONS = [
-  /** sign-in and session resolution, before a principal exists: users (read; no write until ADR-0234 batch 2), auth_mfa_pending */
+  /** sign-in and session resolution, before a principal exists: users (read; update outside the guarded columns), auth_mfa_pending */
   "authenticate",
   /** SCIM and the seed: users (all) */
   "identity_provisioning",
@@ -51,7 +51,7 @@ export const RLS_SYSTEM_REASONS = [
   "audit_chain",
   /** chain verification, anchoring and export jobs: audit_log (read) */
   "audit_verify",
-  /** expiry, SLA and routing sweeps that act on every approval: approvals (all) */
+  /** expiry, SLA and routing sweeps that act on every approval: approvals (all), users (read, batch 7a) */
   "approval_maintenance",
   /** entered only by the SET clause of the 0272 helper functions: users (read) */
   "rls_membership",
@@ -62,6 +62,16 @@ export const RLS_SYSTEM_REASONS = [
    * the principal (audit_log.user_id is the sponsor or subject, ADR-0188): audit_log (append, and read its own row)
    */
   "audit_subject",
+  /**
+   * batch 7a: scheduler jobs, boot tasks, the audit anchor and backup-verify timers, background work and the public
+   * ingest routes (portals, agents, OAuth endpoints): users (read), audit_log (append)
+   */
+  "system_task",
+  /**
+   * batch 7a: a request authenticated by the bootstrap token, which the gateway treats as an admin with no user row:
+   * admitted wherever an active admin principal is (regulait_rls_is_admin()), and to the users read
+   */
+  "bootstrap_admin",
 ] as const;
 export type RlsSystemReason = (typeof RLS_SYSTEM_REASONS)[number];
 

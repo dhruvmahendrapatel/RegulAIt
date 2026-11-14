@@ -84,6 +84,7 @@ import {
   desc,
   eq,
   gt,
+  runWithRlsSystem,
   schedulerJobs,
   schedulerRuns,
   sql,
@@ -143,8 +144,17 @@ export interface SchedulerJobDefinition {
    * this in three years */
   adr: string;
   defaultIntervalSeconds: number;
+  /**
+   * ADR-0234 batch 7a: the RLS system reason the job's own work runs under. Default `system_task` (users read, audit
+   * append). A job that acts on approvals declares `approval_maintenance`; one that reads the audit ledger declares
+   * `audit_verify`. A job that acts as a person enters that person's principal scope itself.
+   */
+  rlsReason?: SchedulerJobRlsReason;
   run: (ctx: SchedulerJobContext) => Promise<SchedulerJobResult>;
 }
+
+/** the reasons a scheduler job may declare (a subset of the closed RLS registry) */
+export type SchedulerJobRlsReason = "system_task" | "approval_maintenance" | "audit_verify";
 
 export type SchedulerJobRegistry = ReadonlyMap<string, SchedulerJobDefinition>;
 
@@ -548,6 +558,17 @@ export async function runSchedulerJob(
   def: SchedulerJobDefinition,
   opts: RunJobOptions,
 ): Promise<JobRunOutcome> {
+  // ADR-0234 batch 7a: a job is not a request and has no principal. Its bookkeeping (claim, release, the scheduler's
+  // own audit rows, the actor lookup) runs under `system_task`, whoever triggered it (a tick or an admin's run-now);
+  // the job's work runs under the reason it declares.
+  return runWithRlsSystem("system_task", "scheduler.ledger", () => runSchedulerJobScoped(db, def, opts));
+}
+
+async function runSchedulerJobScoped(
+  db: Db,
+  def: SchedulerJobDefinition,
+  opts: RunJobOptions,
+): Promise<JobRunOutcome> {
   const now = opts.now ?? new Date();
   const claim = await claimJob(db, def.name, {
     instanceId: opts.instanceId,
@@ -598,13 +619,15 @@ export async function runSchedulerJob(
   });
 
   try {
-    const result = await def.run({
-      db,
-      actorUserId: opts.actorUserId ?? null,
-      now,
-      clockInjected: opts.clockInjected ?? opts.now !== undefined,
-      runId: run.id,
-    });
+    const result = await runWithRlsSystem(def.rlsReason ?? "system_task", "scheduler.job", () =>
+      def.run({
+        db,
+        actorUserId: opts.actorUserId ?? null,
+        now,
+        clockInjected: opts.clockInjected ?? opts.now !== undefined,
+        runId: run.id,
+      }),
+    );
     const items = result.itemsProcessed ?? 0;
     const detail = result.detail ?? {};
     await releaseJob(db, def.name, run.id, "ok", {

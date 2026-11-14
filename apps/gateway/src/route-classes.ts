@@ -936,6 +936,37 @@ export type RouteAuthClass = "public" | "scim-token" | "engine-runner" | "user" 
 
 const SCIM_ROUTE_SET: ReadonlySet<string> = new Set<string>(SCIM_ROUTES);
 
+/** ADR-0234 batch 7a: the exempt routes that create or link a user from an identity provider's assertion */
+const IDENTITY_PROVISIONING_EXEMPT: ReadonlySet<string> = new Set<string>([
+  "/auth/oidc/callback",
+  "/auth/link/confirm",
+  "/auth/saml/:providerId/acs",
+]);
+/** ADR-0234 batch 7a: the exempt routes that route or decide an approval (signed in-route by the platform) */
+const APPROVAL_EXEMPT: ReadonlySet<string> = new Set<string>([
+  "/v1/pm/webhooks/:connectionName",
+  "/v1/chatops/:connectionName/interactions",
+]);
+
+/** the closed set of reasons an auth-exempt route may run under (a subset of RLS_SYSTEM_REASONS) */
+export type ExemptRouteRlsReason = "authenticate" | "identity_provisioning" | "approval_maintenance" | "system_task";
+
+/**
+ * ADR-0234 batch 7a: the named RLS system reason an auth-exempt route runs under. Such a route resolves no principal,
+ * so it used to run with no scope at all (every row on a superuser login, zero rows on a non-superuser one). Each now
+ * runs under the narrowest registered reason that fits what it does:
+ *   - SCIM, and the sign-in callbacks that create or link a user: `identity_provisioning`;
+ *   - every other `/auth/*` route (login, MFA, logout, provider lists): `authenticate`;
+ *   - the PM webhook and the chat approval callback: `approval_maintenance`;
+ *   - everything else (health, portals, ingest, agents, OAuth endpoints, chat events): `system_task`.
+ */
+export function exemptRouteRlsReason(url: string): ExemptRouteRlsReason {
+  if (SCIM_ROUTE_SET.has(url) || IDENTITY_PROVISIONING_EXEMPT.has(url)) return "identity_provisioning";
+  if (url.startsWith("/auth/")) return "authenticate";
+  if (APPROVAL_EXEMPT.has(url)) return "approval_maintenance";
+  return "system_task";
+}
+
 export function routeAuthClass(method: string, url: string): RouteAuthClass {
   if (SCIM_ROUTE_SET.has(url)) return "scim-token";
   const key = `${method.toUpperCase()} ${url}`;

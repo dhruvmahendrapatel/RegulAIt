@@ -89,6 +89,7 @@ import {
   type BuilderAgentRow,
   type ChatOpsConnectionRow,
   type Db,
+  runWithRlsPrincipal,
 } from "@regulait/db";
 import {
   chatContentFenced,
@@ -486,7 +487,8 @@ export async function acceptInboundMessage(
     `${conn.provider} message from ${person.email} accepted for builder agent '${agent.name}'; the turn runs as them`,
     { ...baseDetail, retryNum, routedExactly: exactRoute });
 
-  const work = async () => {
+  // ADR-0234 batch 7a: background work runs as system_task; this turn is the person's, so it enters their scope
+  const work = () => runWithRlsPrincipal({ userId: person.id }, async () => {
     // an existing conversation continues only while its builder thread does
     let threadId: string | undefined;
     if (mapped) {
@@ -558,7 +560,7 @@ export async function acceptInboundMessage(
       builderThreadId,
       turn: outcome.ok ? "ok" : outcome.error,
     }, confirm);
-  };
+  });
 
   return {
     ack: isTeams
@@ -899,7 +901,8 @@ export async function acceptStepInteraction(
   // The message is rewritten AFTER the resume, with what really happened
   // (ADR-0173 batch 2b review): rewriting it first said "Approved" for an
   // answer the resume could still refuse.
-  const work = async () => {
+  // ADR-0234 batch 7a: background work runs as system_task; this turn is the person's, so it enters their scope
+  const work = () => runWithRlsPrincipal({ userId: person.id }, async () => {
     let out: TurnOutcome;
     try {
       out = await resumeBuilderStep(db, deps.dataKey, {
@@ -932,7 +935,7 @@ export async function acceptStepInteraction(
     if (now && now.status !== "pending_confirmation") {
       await retire(`${verb} by ${by}, but the turn did not resume (${out.error}). This step is ${now.status.replace(/_/g, " ")}.`)();
     }
-  };
+  });
   return { ack: { status: 200, body: { ok: true, answer: click.answer } }, work };
 }
 
