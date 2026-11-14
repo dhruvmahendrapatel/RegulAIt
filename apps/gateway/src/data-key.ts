@@ -281,6 +281,9 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   // ADR-0187 (migration 0173): an engine's raw report (it can quote model
   // text), kept for the raw-report retention window, then deleted.
   { table: "engine_runs", column: "raw_report_ciphertext", what: "raw engine reports" },
+  // ADR-0242 L4.3 (the pending `admission_scan_subject_target` migration): the MCP manifest snapshot an admission
+  // scan run carries from queueing to its task input (hostile upstream text), cleared when the run ends
+  { table: "engine_runs", column: "target_subject_input_ciphertext", what: "admission-scan MCP manifest snapshots" },
   // ADR-0195 SD0 (migration 0202): a discovery source's static scanner secret (never returned), the per-tenant
   // pseudonym HMAC key, and the display names behind pseudonyms
   { table: "discovery_credentials", column: "secret_ciphertext", what: "discovery scanner credentials" },
