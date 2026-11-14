@@ -56,13 +56,17 @@ func TestEveryPodIsRestricted(t *testing.T) {
 
 func TestNetworkPolicyPublicEgress(t *testing.T) {
 	in := sample()
+	dns := NetworkPolicy(in).Spec.Egress[0].To[0]
+	if dns.PodSelector == nil || dns.PodSelector.MatchLabels["k8s-app"] != "kube-dns" || dns.NamespaceSelector == nil {
+		t.Fatalf("DNS egress must target the cluster DNS pods only: %+v", dns)
+	}
 	if n := len(NetworkPolicy(in).Spec.Egress); n != 2 { // DNS + database
 		t.Fatalf("byoc without allowPublicEgress: %d egress rules", n)
 	}
 	in.Spec.Egress.AllowPublicEgress = true
 	rules := NetworkPolicy(in).Spec.Egress
 	last := rules[len(rules)-1]
-	if last.To[0].IPBlock.CIDR != "0.0.0.0/0" || len(last.To[0].IPBlock.Except) == 0 || last.Ports[0].Port.IntValue() != 443 {
+	if last.To[0].IPBlock.CIDR != "0.0.0.0/0" || !strings.Contains(strings.Join(last.To[0].IPBlock.Except, ","), "169.254.0.0/16") || last.Ports[0].Port.IntValue() != 443 {
 		t.Fatalf("public egress rule: %+v", last)
 	}
 	in.Spec.Mode = v1alpha1.ModeAirGapped

@@ -21,6 +21,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	v1alpha1 "github.com/dhruvmahendrapatel/regulait/deploy/operator/api/v1alpha1"
+	"github.com/dhruvmahendrapatel/regulait/deploy/operator/internal/bundle"
 	"github.com/dhruvmahendrapatel/regulait/deploy/operator/internal/controller"
 )
 
@@ -70,6 +71,7 @@ func main() {
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		Recorder: mgr.GetEventRecorder("regulait-operator"),
+		Keyring:  bundle.EmbeddedKeyring(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller")
 		os.Exit(1)
@@ -83,6 +85,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	if len(bundle.EmbeddedKeyring()) == 0 {
+		fmt.Fprintln(os.Stderr, "no release key is compiled in: nothing could verify, refusing to start")
+		os.Exit(2)
+	}
 	setupLog.Info("starting manager", "namespace", ns)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "manager exited")

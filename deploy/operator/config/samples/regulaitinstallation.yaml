@@ -3,7 +3,6 @@
 #     --from-literal=data-key="$(openssl rand -hex 32)" --from-literal=database-url=... --from-literal=bootstrap-token=...
 #   kubectl -n regulait-system create configmap regulait-bundle-1.0.0 \
 #     --from-file=manifest.json --from-file=manifest.json.sig      # from the signed update bundle, unchanged
-#   kubectl -n regulait-system create configmap regulait-release-keys --from-file=infra/release-keys/
 apiVersion: deploy.regulait.ai/v1alpha1
 kind: RegulaitInstallation
 metadata:
@@ -18,7 +17,8 @@ spec:
     allowedRegistries: [registry.example.internal]
   updateBundle:
     manifestConfigMapRef: { name: regulait-bundle-1.0.0 }
-    keyringConfigMapRef: { name: regulait-release-keys }
+    # The release keys are compiled into the operator. Only a customer that signs its own bundles names an extra
+    # keyring here (extraKeyringConfigMapRef); that opt-in is reported on every reconcile.
   dataKeySecretRef: { name: regulait, key: data-key }
   databaseUrlSecretRef: { name: regulait, key: database-url }
   bootstrapTokenSecretRef: { name: regulait, key: bootstrap-token }
