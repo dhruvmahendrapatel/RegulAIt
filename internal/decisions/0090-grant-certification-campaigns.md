@@ -213,3 +213,32 @@ the last-sorting Playwright spec drives a reassignment and the holder refusal en
 **Still true, restated:** no notifications (nobody is emailed at the deadline — the sweep
 writes an audit fact, not an outbox); no periodic auto-campaigns; ADR-0022 delegation windows
 are unchanged and remain decider-barred from self-certification.
+
+## Amendment (2026-11-14, lane L11) — deadline notices (still decides nothing)
+
+The "no notifications" limit is closed, in the same narrow shape as the B2a sweep.
+
+- **What is sent.** A *due-soon* reminder once a campaign with undecided items is within 48 hours of its due time, and
+  an *expiry* notice once it is past due. Each goes out **once per campaign**; the audit row
+  `campaign-deadline-notified` (detail `kind: due_soon | expired`) is the marker, as `campaign-expired-incomplete` is
+  for the B2a sweep.
+- **To whom, and through what.** Through the existing ChatOps courier (egress guard, the connector's own credential,
+  per-workspace rate limits), only to workspaces that opted in with the new `chatops_connections.notify_campaign_deadlines`
+  flag. It is off by default (ADR-0180), and changing it is admin-only and audited (`chatops-campaign-notice-settings-changed`).
+  A Resend workspace mails each **named reviewer** of undecided items their own count (ADR-0202's named-recipient
+  rule; the reviewer is the item's `reviewer_user_id`). Every other provider posts **one** channel notice per campaign
+  with the campaign total, never a per-reviewer message to a shared channel. Each send is audited on the workspace
+  (`chatops-campaign-notice-posted` / `-post-failed`).
+- **What a notice carries.** The campaign id, due time, undecided count, reminder or expiry, and a portal link
+  (`/inbox` for a reviewer, `/admin/certification` for a channel). It carries **nothing operator-typed**: no campaign
+  name, grant, holder or object label.
+- **Decides nothing.** No status changes, nothing is kept or revoked, undecided stays undecided, and expiry stays
+  computed on read. A deployment with no workspace opted in sends nothing and records nothing, so turning a workspace
+  on later still delivers the notice that is due.
+- **Job.** `certification-deadline-notify-sweep` (ADR-0064 scheduler, hourly). Migration
+  `pending/chatops_campaign_deadline_notify.sql` (numbered at merge, ADR-0252). Test:
+  `zz-adr0090-campaign-deadline-notify.test.ts`.
+
+Owner question open: whether the 48-hour reminder window should be an org setting. It is a constant here.
+
+**Still true:** no periodic auto-campaigns, and ADR-0022 delegation is unchanged.

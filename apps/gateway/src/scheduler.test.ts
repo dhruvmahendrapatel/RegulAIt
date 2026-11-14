@@ -806,6 +806,9 @@ describe("every sweep is registered", () => {
         SCHEDULER_JOB_NAMES.spiffeBundleRefresh,
         // ADR-0222 (P13(a)): fairness dataset rows past retention; driven end to end in zz-adr0222-fairness.test.ts
         SCHEDULER_JOB_NAMES.fairnessDatasetRetentionSweep,
+        // ADR-0090 amendment (lane L11): campaign deadline notices; driven end to end in
+        // zz-adr0090-campaign-deadline-notify.test.ts (with no workspace opted in it sends nothing)
+        SCHEDULER_JOB_NAMES.certificationDeadlineNotify,
       ].sort(),
     );
     const discovery = registry.get(SCHEDULER_JOB_NAMES.discoveryScanSweep)!;

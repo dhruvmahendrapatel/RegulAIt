@@ -791,6 +791,121 @@ export async function runCampaignExpirySweep(
 }
 
 // ---------------------------------------------------------------------------
+// ADR-0090 amendment (lane L11): deadline notices. A reminder before the due
+// time and a notice at expiry, each sent ONCE per campaign, through the ChatOps
+// courier (chatops.ts registers it). Like the expiry sweep this DECIDES
+// NOTHING: no status, no keep, no revoke. A deployment without ChatOps, or
+// with no workspace opted in, sends nothing and records nothing, so a notice
+// can still go out once a workspace is opted in.
+// ---------------------------------------------------------------------------
+
+/** a reminder is sent once a campaign with undecided items is within this many hours of its due time */
+export const CAMPAIGN_DEADLINE_REMINDER_HOURS = 48;
+export const CAMPAIGN_DEADLINE_NOTIFIED_RULE_ID = "campaign-deadline-notified";
+
+/** one notice to one reviewer: ids, counts and times only (no campaign name, grant, holder or object label) */
+export interface CampaignDeadlineNotice {
+  campaignId: string;
+  kind: "due_soon" | "expired";
+  dueAt: Date;
+  reviewerUserId: string;
+  /** undecided items on this campaign that name this reviewer */
+  undecidedForReviewer: number;
+  /** undecided items on the whole campaign */
+  undecidedTotal: number;
+}
+/** delivers one campaign's notices; returns how many posts succeeded and failed (the courier audits each) */
+export type CampaignDeadlineCourier = (
+  notices: CampaignDeadlineNotice[],
+  actorUserId: string | null,
+) => Promise<{ posted: number; failed: number; workspaces: number }>;
+const deadlineCouriers = new WeakMap<object, CampaignDeadlineCourier>();
+export function registerCampaignDeadlineCourier(db: Db, courier: CampaignDeadlineCourier): void {
+  deadlineCouriers.set(db as object, courier);
+}
+
+export interface CampaignDeadlineSweepResult {
+  courier: boolean;
+  notified: Array<{ campaignId: string; kind: "due_soon" | "expired"; reviewers: number; posted: number; failed: number }>;
+}
+
+export async function runCampaignDeadlineNotifySweep(
+  db: Db,
+  opts: { actorUserId: string | null; now?: Date } = { actorUserId: null },
+): Promise<CampaignDeadlineSweepResult> {
+  const now = opts.now ?? new Date();
+  const courier = deadlineCouriers.get(db as object);
+  const out: CampaignDeadlineSweepResult = { courier: Boolean(courier), notified: [] };
+  if (!courier) return out;
+  const open = await db.select().from(grantCertificationCampaigns).where(eq(grantCertificationCampaigns.status, "open"));
+  for (const campaign of open) {
+    const pastDue = campaignPastDue(campaign, now);
+    const dueSoon = !pastDue && campaign.dueAt.getTime() - now.getTime() <= CAMPAIGN_DEADLINE_REMINDER_HOURS * 3600_000;
+    if (!pastDue && !dueSoon) continue;
+    const kind = pastDue ? "expired" : "due_soon";
+    // once per campaign and kind, ever: the audit row is the marker (as the expiry sweep's)
+    const [already] = await db
+      .select({ n: count() })
+      .from(auditLog)
+      .where(
+        and(
+          eq(auditLog.ruleId, CAMPAIGN_DEADLINE_NOTIFIED_RULE_ID),
+          eq(auditLog.objectId, campaign.id),
+          sql`${auditLog.detail} ->> 'kind' = ${kind}`,
+        ),
+      );
+    if ((already?.n ?? 0) > 0) continue;
+    const perReviewer = await db
+      .select({ reviewerUserId: grantCertificationItems.reviewerUserId, n: count() })
+      .from(grantCertificationItems)
+      .where(and(eq(grantCertificationItems.campaignId, campaign.id), isNull(grantCertificationItems.decision)))
+      .groupBy(grantCertificationItems.reviewerUserId);
+    const undecidedTotal = perReviewer.reduce((t, r) => t + r.n, 0);
+    if (undecidedTotal === 0) continue;
+    const notices: CampaignDeadlineNotice[] = perReviewer.map((r) => ({
+      campaignId: campaign.id,
+      kind,
+      dueAt: campaign.dueAt,
+      reviewerUserId: r.reviewerUserId,
+      undecidedForReviewer: r.n,
+      undecidedTotal,
+    }));
+    let sent = { posted: 0, failed: 0, workspaces: 0 };
+    try {
+      sent = await courier(notices, opts.actorUserId);
+    } catch {
+      sent = { posted: 0, failed: notices.length, workspaces: 0 };
+    }
+    // no workspace opted in: nothing was attempted, so nothing is marked (a later opt-in still gets this notice)
+    if (sent.workspaces === 0) continue;
+    await db.insert(auditLog).values({
+      userId: opts.actorUserId ?? campaign.openedByUserId,
+      objectType: "certification_campaign",
+      objectId: campaign.id,
+      detail: {
+        phase: "deadline_notice",
+        kind,
+        dueAt: campaign.dueAt.toISOString(),
+        undecidedItems: undecidedTotal,
+        reviewers: notices.length,
+        posted: sent.posted,
+        failed: sent.failed,
+        workspaces: sent.workspaces,
+      },
+      effect: "allow",
+      ruleId: CAMPAIGN_DEADLINE_NOTIFIED_RULE_ID,
+      ruleChain: [],
+      reason:
+        `certification campaign ${campaign.id}: ${kind === "expired" ? "expiry" : "due-soon"} notice for ` +
+        `${undecidedTotal} undecided item(s) across ${notices.length} reviewer(s), ${sent.posted} post(s) sent, ` +
+        `${sent.failed} failed; sent once, decides nothing`,
+    });
+    out.notified.push({ campaignId: campaign.id, kind, reviewers: notices.length, posted: sent.posted, failed: sent.failed });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Routes (admin-only via the default gate — opening a review of the org's
 // grant rows and reading who holds what is the same class of record as the
 // inventory). Reviewer DECISIONS deliberately have no route here: they ride
