@@ -36,8 +36,8 @@ const (
 	GapDisabledByOrgPolicy   = "disabled_by_org_policy"
 	GapDisabledByLocalPolicy = "disabled_by_local_policy"
 	GapListingTruncated      = "listing_truncated"
-	// GapMCPConfigUnparsed: an MCP host config that is not plain JSON (JSONC with comments, TOML). No maintained
-	// JSONC or TOML parser passes ADR-0176 yet (ADR-0259), so its servers are not read.
+	// GapMCPConfigUnparsed: an MCP host config that is not an object in its format (damaged JSON, JSONC or TOML),
+	// so its servers are not read. JSONC and TOML are parsed since the ADR-0259 amendment of 2026-11-14.
 	GapMCPConfigUnparsed = "mcp_config_unparsed"
 	// GapMCPServersTruncated: a config listed more servers than one fact set may carry.
 	GapMCPServersTruncated = "mcp_servers_truncated"

@@ -7,7 +7,9 @@ toolchain go1.27.3
 require (
 	github.com/go-jose/go-jose/v4 v4.1.6
 	github.com/google/go-tpm v0.9.8
+	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/shirou/gopsutil/v4 v4.26.9
+	github.com/tidwall/jsonc v0.3.3
 	golang.org/x/sys v0.49.0
 )
 

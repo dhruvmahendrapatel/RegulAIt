@@ -2,7 +2,7 @@
  * ADR-0239 slice 1 — RATE LIMITS EVALUATED ON CEDAR.
  *
  * The kernel's rate-limit step asks one question: "which configured limit, if any, does this call exhaust?". Until
- * ADR-0239 the answer was a hand-written `Array.prototype.find` in `index.ts` (now `legacyRateLimitEvaluator`). This
+ * ADR-0239 the answer was a hand-written `Array.prototype.find` in `index.ts` (`legacyRateLimitEvaluator`, removed by ADR-0239 decision 4 on 2026-11-14). This
  * module answers the same question with the Cedar engine ABAC already runs on (ADR-0040), so the match predicate is a
  * Cedar policy rather than JavaScript.
  *
