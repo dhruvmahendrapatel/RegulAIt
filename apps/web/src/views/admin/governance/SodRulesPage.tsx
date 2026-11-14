@@ -25,8 +25,9 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Select, Table, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Select, SkeletonBlock, Table, type Tone } from "../../../ui/kit";
 import { DataList, type DataColumn } from "../../../ui/DataList";
+import { normalisePage } from "../../../ui/listState";
 import {
   QueryGate,
   agentOpts,
@@ -264,6 +265,18 @@ export default function SodRulesPage() {
     queryFn: () => api.get<{ rules: SodRule[]; notes: { enforcement: string } }>("/v1/sod/rules"),
   });
   const queryClient = useQueryClient();
+  // I-2 (#453, pattern 4): one empty state while nothing exists. Has any override ever been requested? One row is
+  // enough to know (its key sits under the overrides list's, so every refresh that reloads the list reloads this too).
+  const anyOverride = useQuery({
+    queryKey: ["admin", "sod", "overrides", "any"],
+    queryFn: () => api.get<unknown>("/v1/sod/overrides?limit=1").then((b) => normalisePage<OverrideRow>(b, "overrides")),
+  });
+  const overrideRows = anyOverride.data?.items ?? null;
+  const noRules = rules.isSuccess && (rules.data?.rules ?? []).length === 0;
+  // only the first answer is waited for: a later refetch never flips the page back to loading. A failed read falls
+  // through to the page as it is, where the overrides list says it failed, with Retry.
+  const settling = noRules && anyOverride.dataUpdatedAt === 0 && anyOverride.errorUpdatedAt === 0;
+  const nothingYet = noRules && anyOverride.isSuccess && (overrideRows ?? []).length === 0;
 
   // ---- create-rule form (2..8 sides, concrete and/or pattern — B2c) ----
   const [name, setName] = useState("");
@@ -399,7 +412,25 @@ export default function SodRulesPage() {
         {/* ---------------- rules ---------------- */}
         <QueryGate loading={rules.isLoading} error={rules.error} onRetry={() => void rules.refetch()}>
           <Card title="Rules" info={rules.data ? <p>{rules.data.notes.enforcement}</p> : undefined}>
-            {(rules.data?.rules ?? []).length === 0 ? (
+            {settling ? (
+              <SkeletonBlock lines={3} />
+            ) : nothingYet ? (
+              <EmptyState
+                title="No SoD rule is defined"
+                body={
+                  <>
+                    No capability combination is declared toxic, so no mint is refused and no override has been
+                    requested. Declare one above: it is enforced wherever grants are minted from then on, and it strips
+                    nobody who already holds the set.{" "}
+                    <InfoButton label="escalating a refusal">
+                      Once a rule refuses a mint, the refusal can be escalated here to the one approvals queue for an
+                      arm&apos;s-length override, and each request is listed with its decision. A mint no enabled rule
+                      refuses cannot be escalated.
+                    </InfoButton>
+                  </>
+                }
+              />
+            ) : (rules.data?.rules ?? []).length === 0 ? (
               <EmptyState
                 title="No SoD rule is defined"
                 body="No capability combination is declared toxic. Declare one above."
@@ -489,6 +520,8 @@ export default function SodRulesPage() {
           </Card>
         </QueryGate>
 
+        {!settling && !nothingYet && (
+        <>
         {/* ---------------- escalate ---------------- */}
         <Card title="Escalate a refused mint">
           <form
@@ -590,6 +623,8 @@ export default function SodRulesPage() {
             empty={<EmptyState title="No override has been requested" body="A refused mint escalated above appears here with its queue decision." />}
           />
         </Card>
+        </>
+        )}
       </div>
     </>
   );
