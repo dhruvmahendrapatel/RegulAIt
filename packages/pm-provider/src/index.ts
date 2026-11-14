@@ -61,8 +61,27 @@ export interface WorkItem extends WorkItemRef {
   comments: string[];
 }
 
+/** ADR-0289: what the importer records about an existing work item — LINKAGE
+ * only (pillar 8: the PM tool stays the source of truth; title, state and
+ * fields are read through live, never copied). */
+export interface WorkItemSummary {
+  id: string;
+  url: string;
+  type: string;
+}
+
+/** One page of a project's work items. `nextCursor` null = the last page. */
+export interface WorkItemPage {
+  items: WorkItemSummary[];
+  nextCursor: string | null;
+}
+
 export interface PmProvider {
   readonly kind: PmProviderKind;
+  /** ADR-0289: one page of the project's existing work items, for the importer.
+   * Optional: an adapter without it is refused by the importer, by name —
+   * never a silently empty import. */
+  listWorkItems?(project: string, page: { cursor?: string | undefined; limit: number }): Promise<WorkItemPage>;
   createWorkItem(
     project: string,
     type: string,
@@ -1040,7 +1059,9 @@ export class MondayProvider implements PmProvider {
 // customer-defined HTTP receiver: every method POSTs one JSON envelope
 // { event, timestamp, project, payload } to the connection's baseUrl, with
 // events work_item.create / work_item.update / work_item.transition /
-// comment.add / work_item.get — the outbound mirror of ADR-0010's normalized
+// comment.add / work_item.get / work_item.list (ADR-0289, the importer's
+// read: { cursor, limit } -> { items: [{ id, url, type }], nextCursor }) —
+// the outbound mirror of ADR-0010's normalized
 // inbound webhook shape. The connection token is a shared secret used ONLY
 // to sign the exact request body (HMAC-SHA256, sent as
 // `x-regulait-signature: sha256=<hex>`) — it never travels raw.
@@ -1074,6 +1095,18 @@ const webhookWorkItemSchema = z.object({
   state: z.string().nullable().default(null),
   fields: z.record(z.string(), z.unknown()).default({}),
   comments: z.array(z.string()).default([]),
+});
+
+/** work_item.list read shape (ADR-0289): a page of linkage, cursor opaque to RegulAIt. */
+const webhookWorkItemPageSchema = z.object({
+  items: z.array(
+    z.object({
+      id: z.union([z.string().min(1), z.number()]).transform(String),
+      url: z.string().default(""),
+      type: z.string().default("task"),
+    }),
+  ),
+  nextCursor: z.string().min(1).nullable().default(null),
 });
 
 export class GenericWebhookProvider implements PmProvider {
@@ -1159,6 +1192,19 @@ export class GenericWebhookProvider implements PmProvider {
     if (!parsed.success) {
       throw new PmProviderError(
         `generic_webhook receiver returned a malformed work item for '${id}' (expected { id, url, type, state, fields, comments })`,
+      );
+    }
+    return parsed.data;
+  }
+
+  /** ADR-0289: `work_item.list` with { cursor, limit }; the receiver answers
+   * { items: [{ id, url, type }], nextCursor }. A malformed page fails loud. */
+  async listWorkItems(project: string, page: { cursor?: string | undefined; limit: number }): Promise<WorkItemPage> {
+    const res = await this.post("work_item.list", project, { cursor: page.cursor ?? null, limit: page.limit });
+    const parsed = webhookWorkItemPageSchema.safeParse(res);
+    if (!parsed.success) {
+      throw new PmProviderError(
+        "generic_webhook receiver returned a malformed work item page (expected { items: [{ id, url, type }], nextCursor })",
       );
     }
     return parsed.data;
@@ -1267,6 +1313,20 @@ export class MockPmProvider implements PmProvider {
     const item = this.project(project).get(id);
     if (!item) throw new PmProviderError(`unknown work item '${id}'`, 404);
     return { ...item, url: `mock-pm://${project}/items/${item.id}` };
+  }
+
+  /** ADR-0289: pages in ascending numeric id order; the cursor is the last id served. */
+  async listWorkItems(project: string, page: { cursor?: string | undefined; limit: number }): Promise<WorkItemPage> {
+    this.assertInput(project);
+    const all = [...this.project(project).values()].sort((a, b) => Number(a.id) - Number(b.id) || a.id.localeCompare(b.id));
+    const start = page.cursor === undefined ? 0 : all.findIndex((i) => i.id === page.cursor) + 1;
+    if (page.cursor !== undefined && start === 0) throw new PmProviderError(`unknown cursor '${page.cursor}'`, 400);
+    const slice = all.slice(start, start + page.limit);
+    const more = start + page.limit < all.length;
+    return {
+      items: slice.map((i) => ({ id: i.id, type: i.type, url: `mock-pm://${project}/items/${i.id}` })),
+      nextCursor: more && slice.length > 0 ? slice[slice.length - 1]!.id : null,
+    };
   }
 
   /** Mock-only capability: simulate the customer deleting the item in their

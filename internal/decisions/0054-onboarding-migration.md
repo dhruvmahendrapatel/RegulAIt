@@ -259,3 +259,10 @@ against a real signed license; every import applied leaving `isAdmin === false` 
   document.
 - Which frameworks ship as first-party packs beyond the four here (HIPAA, PCI-DSS, SOC 2, GDPR), and
   who owns keeping their numbers current as the frameworks move.
+
+### Amendment 2026-11-14: the PM importer is being built (ADR-0289)
+
+Deviation 3's missing bulk/dry-run/reconcile layer is [ADR-0289](0289-pm-work-item-importer.md):
+`POST /v1/onboarding/imports/pm` (dry run by default; apply carries the previewed `planSha256`) and
+`GET /v1/onboarding/imports/pm/items`. Linkage only, onto an Initiative, recorded as `onboarding_imports` kind
+`pm_work_items`. Slice 4a lists through the mock and generic-webhook adapters; slice 4b adds the five vendor adapters.

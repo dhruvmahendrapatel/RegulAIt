@@ -116,7 +116,7 @@ const CONNECTION_COLUMNS = {
  * `CompiledDefaultEgressBlockedError`, which both pm-sync endpoints turn into
  * the same honest 403 the guarded path produces.
  */
-async function providerFor(
+export async function providerFor(
   db: Db,
   conn: {
     id: string;
@@ -182,6 +182,8 @@ async function providerFor(
   return {
     kind: provider.kind,
     getWorkItem: (...args) => provider.getWorkItem(...args),
+    // ADR-0289: a read, like getWorkItem (the generic contract's work_item.list is a POST that changes nothing)
+    ...(provider.listWorkItems ? { listWorkItems: provider.listWorkItems.bind(provider) } : {}),
     createWorkItem: (...args) => runExternalWrite(db, "pm.create_work_item", () => provider.createWorkItem(...args)),
     updateFields: (...args) => runExternalWrite(db, "pm.update_fields", () => provider.updateFields(...args)),
     transitionState: (...args) => runExternalWrite(db, "pm.transition_state", () => provider.transitionState(...args)),
