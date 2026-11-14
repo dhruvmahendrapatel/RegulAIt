@@ -4399,7 +4399,6 @@ export {
   builderUpdateThreadSchema,
   builderUsageQuerySchema,
   nextScheduleRun,
-  parseSkillMarkdown,
   type BuilderAgentColor,
   type BuilderBundle,
   type BuilderCadenceValue,
