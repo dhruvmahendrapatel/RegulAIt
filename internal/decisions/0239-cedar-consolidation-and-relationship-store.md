@@ -176,6 +176,21 @@ an entity parent or a context fact; Cedar and the kernel still decide. SpiceDB i
 - New boot-refusal case: an unrecognised `REGULAIT_RATE_LIMIT_EVALUATOR`.
 - No new dependency: `@cedar-policy/cedar-wasm` 4.14.0 is already pinned and listed in `THIRD_PARTY.md`.
 
+## As built: decision 4 executed (2026-11-14, ADR-0251 lane L1)
+
+The release after slice 1, as decision 4 scheduled:
+
+- `legacyRateLimitEvaluator` is deleted from `packages/policy-kernel/src/index.ts`. With rate limits and **no**
+  evaluator the kernel now refuses the call (`rate-limit-engine-error`, "no rate-limit evaluator is configured"):
+  an unconfigured engine is never an allow (ADR-0180). The only production caller (`governedEvaluate`) always passes
+  the Cedar evaluator; kernel and gateway tests that call `evaluate` directly inject it.
+- `REGULAIT_RATE_LIMIT_EVALUATOR=legacy` now **refuses the boot**, naming the removal; unset or `cedar` is the only
+  accepted value (`docs/deployment/INSTALL.md` updated). The boot log line names the Cedar engine.
+- **The differential test stays.** `rate-limit-cedar.test.ts` keeps an independent transcription of the old predicate
+  as its oracle (`referenceRateLimitEvaluator`), so the 5,000-verdict, 2,000-Decision and past-the-cache properties
+  still hold the Cedar evaluator to the exact pre-move answers. Writing it out caught one subtlety worth recording:
+  the old `matchesScope` treats only a `null` tool name as "every tool"; an absent (`undefined`) one matched no tool.
+
 ## As built: slice 2, the approval-rule match on Cedar (2026-11-14, ADR-0251 lane L1)
 
 - `packages/policy-kernel/src/approval-rule-cedar.ts` (`@regulait/policy-kernel/approval-rule-cedar`): each MCP
