@@ -204,7 +204,8 @@ describe("the launch packs are honest data", () => {
     const frameworks = [...new Set(DEFAULT_COMPLIANCE_PACKS.map((p) => p.framework))].sort();
     // ADR-0182 S5: the ISACA AI agents checklist joins the launch set
     // ADR-0243 (P24): the OWASP MCP Top 10 and LLM Top 10 packs join it
-    expect(frameworks).toEqual(["eu-ai-act", "finra", "hipaa", "isaca-ai-agents", "iso-27001", "iso-42001", "nist-ai-rmf", "owasp-llm-top-10", "owasp-mcp-top-10", "pci-dss", "soc-2"]);
+    // ADR-0296 part 2 (P18 B2): GDPR, CCPA, DPDP and LGPD join it
+    expect(frameworks).toEqual(["ccpa", "dpdp", "eu-ai-act", "finra", "gdpr", "hipaa", "isaca-ai-agents", "iso-27001", "iso-42001", "lgpd", "nist-ai-rmf", "owasp-llm-top-10", "owasp-mcp-top-10", "pci-dss", "soc-2"]);
     // ADR-0150: two frameworks ship a second version (bias/safety controls); ADR-0190 I4: the ISACA pack a
     // second (item 5 evidenced by sandbox placements)
     const versions = DEFAULT_COMPLIANCE_PACKS.map((p) => `${p.framework}@${p.version}`).sort();

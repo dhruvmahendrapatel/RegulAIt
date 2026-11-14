@@ -55,6 +55,8 @@ import { z } from "zod";
 import { ISACA_AI_AGENTS_PACK, ISACA_AI_AGENTS_PACK_V2 } from "./isaca-pack.js";
 // ADR-0243 (P24): the OWASP MCP and LLM Top 10 packs (`owasp-packs.ts`, type-only imports back)
 import { OWASP_PACKS } from "./owasp-packs.js";
+// ADR-0296 part 2 (P18 B2): GDPR, CCPA, DPDP and LGPD privacy packs (`privacy-packs.ts`, type-only imports back)
+import { PRIVACY_PACKS } from "./privacy-packs.js";
 // batch B1 — a pack's cascade PRESET is validated with the SAME check every
 // compliance-profile version body passes: only enforcing profile columns,
 // correctly typed, selection (`tag`) refused. One validator, not two.
@@ -84,6 +86,11 @@ export const COMPLIANCE_PACK_FRAMEWORKS = [
   // ADR-0243 (P24): the OWASP MCP Top 10 and the OWASP Top 10 for LLM Applications (`owasp-packs.ts`)
   "owasp-mcp-top-10",
   "owasp-llm-top-10",
+  // ADR-0296 part 2 (P18 B2): privacy laws on the ADR-0224 machinery (`privacy-packs.ts`)
+  "gdpr",
+  "ccpa",
+  "dpdp",
+  "lgpd",
   "custom",
 ] as const;
 export type CompliancePackFramework = (typeof COMPLIANCE_PACK_FRAMEWORKS)[number];
@@ -1800,4 +1807,6 @@ DEFAULT_COMPLIANCE_PACKS.push(
   ISACA_AI_AGENTS_PACK_V2,
   // ADR-0243 (P24): owasp-mcp-top-10@1, owasp-llm-top-10@1 (2025 edition) and @2 (2026 edition)
   ...OWASP_PACKS,
+  // ADR-0296 part 2 (P18 B2): gdpr@1, ccpa@1, dpdp@1, lgpd@1
+  ...PRIVACY_PACKS,
 );
