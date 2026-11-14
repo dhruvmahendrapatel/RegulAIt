@@ -128,6 +128,8 @@ describe("the remaining rows follow the gateway's strictness registry", () => {
     expect(CORE_SPECS.canaryObservationRetentionDays!.strictDefault).toBe(90);
     expect(CORE_SPECS.approvalBulkMaxItems!.strictDefault).toBe(25);
     expect(CORE_SPECS.approvalBulkSensitiveBlocked!.strictDefault).toBe(true);
+    expect(CORE_SPECS.mcpBundlesEnabled!.strictDefault).toBe(false);
+    expect(CORE_SPECS.mcpBundlesEnabled!.isRelaxed(true)).toBe(true);
   });
   it("null (never expires / no ceiling) is a relaxation; a shorter lifetime is not", () => {
     for (const key of ["approvalTtlHours", "apiKeyDefaultTtlDays", "apiKeyMaxTtlDays"]) {

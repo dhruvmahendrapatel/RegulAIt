@@ -13,7 +13,7 @@
  * takes name+url only), so it is shown rather than pretended to be editable.
  */
 import { useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { McpCoverage, StdioArguments } from "./Batch3Mcp";
 import { IntegrationOwnership } from "./IntegrationOwnership";
 import { ExecutionProfileSelector, PersonStdioRelaxationControl } from "./isolation/IsolationPanel";
@@ -67,6 +67,7 @@ export default function McpServersPage() {
       <PageHeader
         title="MCP servers"
         info={<p>Register the servers the governed MCP proxy fronts, build their tool inventory (with per-tool call pricing), and hand out tool-level allow-list grants — default-deny has nothing to govern until a server exists.</p>}
+        actions={<Link to="/admin/mcp-servers/bundles">MCP bundles</Link>}
       />
       <Tabs
         tabs={MCP_TABS}
