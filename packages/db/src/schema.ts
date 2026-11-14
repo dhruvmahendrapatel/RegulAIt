@@ -16414,3 +16414,51 @@ export const resourceRateReservations = pgTable(
     ),
   ],
 );
+
+// ---------------------------------------------------------------------------
+// Lane L2 (ADR-0219 follow-up, P10): A2A role grants and per-person revocations. Migration `pending/a2a_role_grants`.
+// ---------------------------------------------------------------------------
+
+/**
+ * A role's access to a remote agent: the same shape as a direct `a2a_agent_grants` row (whole agent, or one skill),
+ * so a role grant can never exceed a direct one. Additive with direct grants, and bounded by `a2a_agent_revocations`
+ * (ADR-0019's rule: a revocation subtracts role-derived access only, never a direct grant).
+ */
+export const a2aAgentRoleGrants = pgTable(
+  "a2a_agent_role_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => a2aAgents.id, { onDelete: "cascade" }),
+    roleId: uuid("role_id")
+      .notNull()
+      .references(() => roles.id, { onDelete: "cascade" }),
+    skillId: text("skill_id"),
+    grantedBy: uuid("granted_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("a2a_agent_role_grants_uq").on(t.agentId, t.roleId, sql`COALESCE(${t.skillId}, '')`),
+    index("a2a_agent_role_grants_role_idx").on(t.roleId, t.agentId),
+  ],
+);
+export type A2aAgentRoleGrantRow = typeof a2aAgentRoleGrants.$inferSelect;
+
+/** one person's role-derived access to one remote agent, taken away without unassigning the role (ADR-0019) */
+export const a2aAgentRevocations = pgTable(
+  "a2a_agent_revocations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => a2aAgents.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    revokedBy: uuid("revoked_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("a2a_agent_revocations_uq").on(t.agentId, t.userId), index("a2a_agent_revocations_user_idx").on(t.userId, t.agentId)],
+);
+export type A2aAgentRevocationRow = typeof a2aAgentRevocations.$inferSelect;

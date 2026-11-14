@@ -155,3 +155,23 @@ the entry-bundled `admin.module.css`.
 - **The response.** The route adds `withheld`, plus `pii` and `guardrails` when they found anything.
 - Redact mode still refuses before sending, as before: no A2A redaction path exists.
 - Tests: `zz-adr0231-a2a-bindings.test.ts`, the "P10 follow-up" block.
+
+## Amendment 2026-11-14: role grants and per-person revocations (lane L2)
+
+- **Two new tables** (migration `pending/a2a_role_grants`, numbered at merge):
+  - `a2a_agent_role_grants` gives a role access to a remote agent. It has the same shape as a direct grant (the whole
+    agent, or one skill), so a role grant can never reach further than a direct grant could.
+  - `a2a_agent_revocations` takes one person's role-derived access to one agent away without unassigning the role
+    (ADR-0019).
+- **At call time** `a2aGrantsFor` builds the grant list the kernel's `evaluateA2a` reads:
+  - direct grants come first;
+  - then grants to roles the person currently holds (direct or IdP-group origin, ADR-0038), unless that person has a
+    revocation on the agent.
+  - A revocation never subtracts a direct grant. The kernel is unchanged.
+  - The call's audit row now records `grantSource` (`direct` or `role`).
+- **Admin routes**, admin-only and audited with the write:
+  - `GET`, `POST` and `DELETE /v1/a2a/agents/:agentId/role-grants[/:grantId]`;
+  - `GET`, `POST` and `DELETE /v1/a2a/agents/:agentId/revocations[/:userId]`.
+  - Lifting a revocation widens access, so it is a `settings_relax` step-up.
+  - The routes are known UI gaps on #453.
+- Grants to an agent identity (as opposed to a person or a role) remain out of scope.

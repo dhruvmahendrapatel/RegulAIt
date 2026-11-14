@@ -13,6 +13,8 @@
  * And the P10 follow-up, reply-side checks (the same harness): the message passes the guardrails before it leaves, and
  * the remote agent's REPLY passes the project's PII mode and the guardrails before anyone sees it. A block on the reply
  * withholds it behind a counts-only marker and the call is still charged (bill-and-withhold).
+ * And role grants: a role's grant lets everyone holding the role call, never past the role's skill; a per-person
+ * revocation takes role-derived access away without touching a direct grant; lifting it is a step-up.
  * Scoped to the rows this file creates (M-008).
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -25,7 +27,7 @@ import { AgentCard, Role, type Message } from "@a2a-js/sdk";
 import { AgentEvent, DefaultRequestHandler, InMemoryTaskStore, type AgentExecutor } from "@a2a-js/sdk/server";
 import { restHandler, UserBuilder } from "@a2a-js/sdk/server/express";
 import { legacyRestRouter } from "@a2a-js/sdk/compat/v0_3/server/express";
-import { a2aAgentGrants, a2aAgents, and, auditLog, createDb, desc, eq, inArray, ORG_SETTINGS_ID, orgSettings, runMigrations, usageEvents, type Db } from "@regulait/db";
+import { a2aAgentGrants, a2aAgents, and, auditLog, roles, createDb, desc, eq, inArray, ORG_SETTINGS_ID, orgSettings, runMigrations, usageEvents, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { A2A_RULE_IDS, a2aProtocolVersionSupported } from "./a2a.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
@@ -60,6 +62,7 @@ let db: Db;
 let app: ReturnType<typeof buildApp>;
 const restores: Array<() => Promise<void>> = [];
 const agentIds: string[] = [];
+const roleIds: string[] = [];
 let userId: string;
 let userKey: Record<string, string>;
 
@@ -201,6 +204,7 @@ beforeAll(async () => {
 afterAll(async () => {
   try {
     if (agentIds.length > 0) await db.delete(a2aAgents).where(inArray(a2aAgents.id, agentIds));
+    if (roleIds.length > 0) await db.delete(roles).where(inArray(roles.id, roleIds));
     for (const r of restores.reverse()) await r();
   } finally {
     for (const a of up) await a.close();
@@ -402,5 +406,88 @@ describe("P10 follow-up: guardrails on the message, PII and guardrails on the re
     expect(c.statusCode, c.body).toBe(200);
     expect(c.json()).toMatchObject({ reply: "echo: what is the status of order 42", withheld: false });
     expect(c.json().pii).toBeUndefined();
+  });
+});
+
+describe("ADR-0219 follow-up: role grants and per-person revocations", () => {
+  let agent: Awaited<ReturnType<typeof startAgent>>;
+  let agentId: string;
+  let roleId: string;
+  let member: { id: string; key: Record<string, string> };
+  let outsider: { id: string; key: Record<string, string> };
+
+  async function person(tag: string, isAdmin = false) {
+    const u = await req("POST", "/v1/users", { email: `b1-${tag}-${RUN}@example.com`, displayName: `b1 ${tag} ${RUN}`, ...(isAdmin ? { isAdmin: true } : {}) });
+    expect(u.statusCode, u.body).toBe(201);
+    const id = u.json().id as string;
+    return { id, key: { authorization: `Bearer ${(await req("POST", `/v1/users/${id}/keys`, { name: "b1" })).json().token}` } };
+  }
+  const call = (who: { key: Record<string, string> }, skillId?: string) => req("POST", `/v1/a2a/agents/${agentId}/messages`, { text: "via role", ...(skillId ? { skillId } : {}) }, who.key);
+
+  beforeAll(async () => {
+    agent = await start((base) =>
+      legacyCard(`${base}/legacy`, { skills: [...SKILLS, { id: "shout", name: "Shout", description: "loud", tags: ["test"] }] }),
+    );
+    const r = await register(`b1-roles-${RUN}`, agent.base);
+    expect(r.statusCode, r.body).toBe(201);
+    agentId = r.json().id;
+    const role = await req("POST", "/v1/roles", { name: `b1-a2a-role-${RUN}` });
+    expect(role.statusCode, role.body).toBe(201);
+    roleId = role.json().id;
+    roleIds.push(roleId);
+    member = await person("member");
+    outsider = await person("outsider");
+    const a = await req("POST", `/v1/users/${member.id}/roles`, { roleId });
+    expect([200, 201], a.body).toContain(a.statusCode);
+  });
+
+  it("is default-deny until the role is granted; a skill-scoped role grant does not reach another skill", async () => {
+    expect((await call(member)).statusCode).toBe(403);
+    const g = await req("POST", `/v1/a2a/agents/${agentId}/role-grants`, { roleId, skillId: "echo" });
+    expect(g.statusCode, g.body).toBe(201);
+    const granted = (await db.select().from(auditLog).where(and(eq(auditLog.objectId, agentId), eq(auditLog.ruleId, A2A_RULE_IDS.roleGranted))))[0];
+    expect(granted?.detail).toMatchObject({ grantSource: "role", roleId, skillId: "echo", holdersAtGrant: 1 });
+
+    const ok = await call(member, "echo");
+    expect(ok.statusCode, ok.body).toBe(200);
+    const [row] = await db.select().from(auditLog).where(eq(auditLog.id, ok.json().auditId));
+    expect(row?.detail).toMatchObject({ grantId: g.json().id, grantSource: "role" });
+    expect((await call(member, "shout")).statusCode).toBe(403);
+    expect((await call(member)).statusCode).toBe(403);
+    // not holding the role confers nothing
+    expect((await call(outsider, "echo")).statusCode).toBe(403);
+    expect((await req("GET", `/v1/a2a/agents/${agentId}/role-grants`)).json().roleGrants).toEqual([expect.objectContaining({ roleId, skillId: "echo" })]);
+  });
+
+  it("a revocation takes role-derived access away from one person; a direct grant still applies; lifting is a step-up", async () => {
+    const v = await req("POST", `/v1/a2a/agents/${agentId}/revocations`, { userId: member.id });
+    expect(v.statusCode, v.body).toBe(201);
+    expect((await call(member, "echo")).statusCode).toBe(403);
+    expect((await req("POST", `/v1/a2a/agents/${agentId}/revocations`, { userId: member.id })).statusCode).toBe(409);
+
+    // ADR-0019: a revocation subtracts role-derived access only
+    const d = await req("POST", `/v1/a2a/agents/${agentId}/grants`, { userId: member.id, skillId: "shout" });
+    expect(d.statusCode, d.body).toBe(201);
+    const direct = await call(member, "shout");
+    expect(direct.statusCode, direct.body).toBe(200);
+    const [row] = await db.select().from(auditLog).where(eq(auditLog.id, direct.json().auditId));
+    expect(row?.detail).toMatchObject({ grantSource: "direct" });
+    expect((await call(member, "echo")).statusCode).toBe(403);
+
+    // an API key is asked for a step-up to lift it; the bootstrap token passes
+    const admin = await person("admin", true);
+    const asked = await req("DELETE", `/v1/a2a/agents/${agentId}/revocations/${member.id}`, undefined, admin.key);
+    expect(asked.statusCode, asked.body).toBe(403);
+    expect(asked.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax" });
+    const lifted = await req("DELETE", `/v1/a2a/agents/${agentId}/revocations/${member.id}`);
+    expect(lifted.statusCode, lifted.body).toBe(204);
+    expect((await call(member, "echo")).statusCode).toBe(200);
+  });
+
+  it("removing the role grant stops the next call", async () => {
+    const [g] = (await req("GET", `/v1/a2a/agents/${agentId}/role-grants`)).json().roleGrants as Array<{ id: string }>;
+    expect((await req("DELETE", `/v1/a2a/agents/${agentId}/role-grants/${g!.id}`)).statusCode).toBe(204);
+    expect((await call(member, "echo")).statusCode).toBe(403);
+    expect((await req("DELETE", `/v1/a2a/agents/${agentId}/role-grants/${g!.id}`)).statusCode).toBe(404);
   });
 });
