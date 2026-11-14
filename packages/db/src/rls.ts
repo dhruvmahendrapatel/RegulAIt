@@ -63,10 +63,17 @@ export const RLS_SYSTEM_REASONS = [
    */
   "audit_subject",
   /**
-   * batch 7a: scheduler jobs, boot tasks, the audit anchor and backup-verify timers, background work and the public
-   * ingest routes (portals, agents, OAuth endpoints): users (read), audit_log (append)
+   * batch 7a: server-side work with no principal (scheduler jobs, boot tasks, the audit anchor and backup-verify
+   * timers, background work) and requests from non-user credentials (engine runners, workload identities, endpoint
+   * agents): users (read), approvals (all), audit_log (read and append). Never users writes or auth_mfa_pending.
    */
   "system_task",
+  /**
+   * batch 7a: the unauthenticated portal, ingest and webhook routes (trust pages, supplier portal, feedback links,
+   * agent and third-party ingest, OAuth endpoints, chat events): users (read), audit_log (append). The narrowest
+   * reason, because these take attacker-shaped input.
+   */
+  "public_ingest",
   /**
    * batch 7a: a request authenticated by the bootstrap token, which the gateway treats as an admin with no user row:
    * admitted wherever an active admin principal is (regulait_rls_is_admin()), and to the users read

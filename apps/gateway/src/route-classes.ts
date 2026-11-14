@@ -949,7 +949,7 @@ const APPROVAL_EXEMPT: ReadonlySet<string> = new Set<string>([
 ]);
 
 /** the closed set of reasons an auth-exempt route may run under (a subset of RLS_SYSTEM_REASONS) */
-export type ExemptRouteRlsReason = "authenticate" | "identity_provisioning" | "approval_maintenance" | "system_task";
+export type ExemptRouteRlsReason = "authenticate" | "identity_provisioning" | "approval_maintenance" | "public_ingest";
 
 /**
  * ADR-0234 batch 7a: the named RLS system reason an auth-exempt route runs under. Such a route resolves no principal,
@@ -958,13 +958,14 @@ export type ExemptRouteRlsReason = "authenticate" | "identity_provisioning" | "a
  *   - SCIM, and the sign-in callbacks that create or link a user: `identity_provisioning`;
  *   - every other `/auth/*` route (login, MFA, logout, provider lists): `authenticate`;
  *   - the PM webhook and the chat approval callback: `approval_maintenance`;
- *   - everything else (health, portals, ingest, agents, OAuth endpoints, chat events): `system_task`.
+ *   - everything else (health, portals, ingest, agents, OAuth endpoints, chat events): `public_ingest`, the
+ *     narrowest reason (users read, audit append), because these take attacker-shaped input.
  */
 export function exemptRouteRlsReason(url: string): ExemptRouteRlsReason {
   if (SCIM_ROUTE_SET.has(url) || IDENTITY_PROVISIONING_EXEMPT.has(url)) return "identity_provisioning";
   if (url.startsWith("/auth/")) return "authenticate";
   if (APPROVAL_EXEMPT.has(url)) return "approval_maintenance";
-  return "system_task";
+  return "public_ingest";
 }
 
 export function routeAuthClass(method: string, url: string): RouteAuthClass {

@@ -5,11 +5,17 @@
 -- on the non-superuser runtime login batch 7b introduces it would mean "zero rows". Batch 7a gives each of them a
 -- named, closed system reason, so they run as `regulait_app` under the policies from now on, whatever the login.
 --
--- Two reasons are added to the closed registry:
---   system_task      scheduler jobs, boot tasks, the audit anchor and backup-verify timers, background work and the
---                    public ingest routes (portals, agents, OAuth endpoints). users: read (actor lookups);
---                    audit_log: append (any registered reason may append; slice 1). Nothing in approvals: a job that
---                    acts on approvals runs under approval_maintenance instead.
+-- Three reasons are added to the closed registry:
+--   system_task      server-side work with no principal: scheduler jobs, boot tasks, the audit anchor and backup-verify
+--                    timers, background work, and requests from non-user credentials (engine runners, workload
+--                    identities, endpoint agents). users: read; approvals: all (a job's model dispatch may escalate a
+--                    budget into an approval; the SLA, spend, recertification and condition sweeps route and reopen
+--                    them); audit_log: read and append. It never writes users or touches auth_mfa_pending, and the
+--                    ledger stays append-only (the app role has no UPDATE or DELETE on audit_log).
+--   public_ingest    the unauthenticated portal, ingest and webhook routes (trust pages, supplier portal, feedback
+--                    links, endpoint-agent and third-party ingest, OAuth endpoints, chat events). users: read;
+--                    audit_log: append. Nothing else: these take attacker-shaped input, so they get the narrowest
+--                    reason.
 --   bootstrap_admin  a request authenticated by the bootstrap token, which the gateway already treats as an admin
 --                    with no user row (ADR-0234 batch 2 recorded it as unscoped). It is admitted exactly where an
 --                    active admin principal is, through regulait_rls_is_admin(), and to the users read.
@@ -29,7 +35,7 @@ BEGIN
   END IF;
   IF r = ANY (ARRAY['authenticate', 'identity_provisioning', 'audit_chain', 'audit_verify',
                     'approval_maintenance', 'rls_membership', 'migration', 'audit_subject',
-                    'system_task', 'bootstrap_admin']) THEN
+                    'system_task', 'public_ingest', 'bootstrap_admin']) THEN
     RETURN r;
   END IF;
   RAISE EXCEPTION 'regulait: unknown row-level security system context %', pg_catalog.quote_literal(r)
@@ -70,6 +76,107 @@ DROP POLICY users_select ON users;
 CREATE POLICY users_select ON users FOR SELECT USING (
   (SELECT regulait_rls_user_id()) IS NOT NULL
   OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['authenticate', 'identity_provisioning', 'rls_membership',
-                                                        'migration', 'system_task', 'bootstrap_admin',
-                                                        'approval_maintenance'])
+                                                        'migration', 'system_task', 'public_ingest',
+                                                        'bootstrap_admin', 'approval_maintenance'])
+);
+--> statement-breakpoint
+
+-- system_task acts on every approval (a job's model dispatch may escalate a budget into an approval; the SLA, spend,
+-- recertification and condition sweeps route and reopen them) and reads the audit ledger (rate-limit counts,
+-- idempotency markers, required-test evidence, anchors). The policies below are the 0272 / 0313 ones with
+-- 'system_task' added to their system branch, and nothing else changed.
+DROP POLICY approvals_select ON approvals;
+--> statement-breakpoint
+CREATE POLICY approvals_select ON approvals FOR SELECT USING (
+  (SELECT regulait_rls_system_reason()) = ANY (ARRAY['approval_maintenance', 'migration', 'system_task'])
+  OR (SELECT regulait_rls_is_admin())
+  OR user_id = (SELECT regulait_rls_user_id())
+  OR approver_user_id = (SELECT regulait_rls_user_id())
+  OR named_approver_user_id = (SELECT regulait_rls_user_id())
+  OR decided_by = (SELECT regulait_rls_user_id())
+  OR (review_role_id IS NOT NULL AND (SELECT regulait_rls_user_id()) IS NOT NULL)
+  OR approver_role_id = ANY ((SELECT regulait_rls_principal_groups())::uuid[])
+  OR approver_user_id = ANY ((SELECT regulait_rls_principal_delegators())::uuid[])
+  OR approver_role_id = ANY ((SELECT regulait_rls_delegator_groups())::uuid[])
+  OR named_approver_user_id = ANY ((SELECT regulait_rls_principal_delegators())::uuid[])
+  OR id IN (
+    SELECT aa.approval_id FROM approval_assignments aa
+     WHERE aa.assignee_id = (SELECT regulait_rls_user_id())
+        OR aa.escalation_assignee_id = (SELECT regulait_rls_user_id())
+        OR aa.assignee_id = ANY ((SELECT regulait_rls_principal_groups())::uuid[])
+        OR aa.escalation_assignee_id = ANY ((SELECT regulait_rls_principal_groups())::uuid[])
+    UNION ALL
+    SELECT ad.approval_id FROM approval_decisions ad WHERE ad.decider_user_id = (SELECT regulait_rls_user_id()))
+);
+--> statement-breakpoint
+DROP POLICY approvals_insert ON approvals;
+--> statement-breakpoint
+CREATE POLICY approvals_insert ON approvals FOR INSERT WITH CHECK (
+  user_id = (SELECT regulait_rls_user_id())
+  OR (SELECT regulait_rls_is_admin())
+  OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['approval_maintenance', 'migration', 'system_task'])
+);
+--> statement-breakpoint
+DROP POLICY approvals_update ON approvals;
+--> statement-breakpoint
+CREATE POLICY approvals_update ON approvals FOR UPDATE
+  -- #682 review: no review-role branch here (seeing a review-role row is not a right to write it); a principal
+  -- writes only rows it takes part in, and the NEW row must still be one it takes part in. The routing identity
+  -- columns are not updatable by the app role at all (0272 column privileges).
+  USING (
+    (SELECT regulait_rls_system_reason()) = ANY (ARRAY['approval_maintenance', 'migration', 'system_task'])
+    OR (SELECT regulait_rls_is_admin())
+    OR user_id = (SELECT regulait_rls_user_id())
+    OR approver_user_id = (SELECT regulait_rls_user_id())
+    OR named_approver_user_id = (SELECT regulait_rls_user_id())
+    OR decided_by = (SELECT regulait_rls_user_id())
+    OR approver_role_id = ANY ((SELECT regulait_rls_principal_groups())::uuid[])
+    OR approver_user_id = ANY ((SELECT regulait_rls_principal_delegators())::uuid[])
+    OR approver_role_id = ANY ((SELECT regulait_rls_delegator_groups())::uuid[])
+    OR named_approver_user_id = ANY ((SELECT regulait_rls_principal_delegators())::uuid[])
+    OR id IN (
+      SELECT aa.approval_id FROM approval_assignments aa
+       WHERE aa.assignee_id = (SELECT regulait_rls_user_id())
+          OR aa.escalation_assignee_id = (SELECT regulait_rls_user_id())
+          OR aa.assignee_id = ANY ((SELECT regulait_rls_principal_groups())::uuid[])
+          OR aa.escalation_assignee_id = ANY ((SELECT regulait_rls_principal_groups())::uuid[])
+      UNION ALL
+      SELECT ad.approval_id FROM approval_decisions ad WHERE ad.decider_user_id = (SELECT regulait_rls_user_id()))
+  )
+  WITH CHECK (
+    (SELECT regulait_rls_system_reason()) = ANY (ARRAY['approval_maintenance', 'migration', 'system_task'])
+    OR (SELECT regulait_rls_is_admin())
+    OR (
+        user_id = (SELECT regulait_rls_user_id())
+      OR approver_user_id = (SELECT regulait_rls_user_id())
+      OR named_approver_user_id = (SELECT regulait_rls_user_id())
+      OR decided_by = (SELECT regulait_rls_user_id())
+      OR approver_role_id = ANY ((SELECT regulait_rls_principal_groups())::uuid[])
+      OR approver_user_id = ANY ((SELECT regulait_rls_principal_delegators())::uuid[])
+      OR approver_role_id = ANY ((SELECT regulait_rls_delegator_groups())::uuid[])
+      OR named_approver_user_id = ANY ((SELECT regulait_rls_principal_delegators())::uuid[])
+      OR id IN (
+        SELECT aa.approval_id FROM approval_assignments aa
+         WHERE aa.assignee_id = (SELECT regulait_rls_user_id())
+            OR aa.escalation_assignee_id = (SELECT regulait_rls_user_id())
+            OR aa.assignee_id = ANY ((SELECT regulait_rls_principal_groups())::uuid[])
+            OR aa.escalation_assignee_id = ANY ((SELECT regulait_rls_principal_groups())::uuid[])
+        UNION ALL
+        SELECT ad.approval_id FROM approval_decisions ad WHERE ad.decider_user_id = (SELECT regulait_rls_user_id()))
+    )
+  );
+--> statement-breakpoint
+DROP POLICY approvals_delete ON approvals;
+--> statement-breakpoint
+CREATE POLICY approvals_delete ON approvals FOR DELETE USING (
+  (SELECT regulait_rls_is_admin())
+  OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['approval_maintenance', 'migration', 'system_task'])
+);
+--> statement-breakpoint
+DROP POLICY audit_log_select ON audit_log;
+--> statement-breakpoint
+CREATE POLICY audit_log_select ON audit_log FOR SELECT USING (
+  user_id = (SELECT regulait_rls_user_id())
+  OR (SELECT regulait_rls_is_admin())
+  OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['audit_chain', 'audit_verify', 'audit_subject', 'migration', 'system_task'])
 );
