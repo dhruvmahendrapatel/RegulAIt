@@ -956,6 +956,10 @@ async function executeGovernedToolCallInner(
       // (a tool this sync found is approved: under 'block' syncUpstreamTools returns no other)
       kind = toolKind(found);
     }
+    // ADR-0230 A2 (review #798): on an SAP business server a tool's kind is NOT taken from the upstream's own
+    // `readOnlyHint`. Every tool is a write, so the approval rule, the write-only rate limit and the project
+    // requirement cannot be skipped by a manifest that annotates a posting tool as read-only.
+    if (serverRow.systemClass === "sap_business") kind = "write";
 
     // ADR-0246 addendum: a high-risk (offensive) server needs its policy template and an authorised target, and
     // every call's arguments are audited, redacted; refused here before the kernel decision and any tool call
@@ -963,22 +967,6 @@ async function executeGovernedToolCallInner(
     if (highRisk) {
       if (upstream) await operationSucceeded();
       return { kind: "denied", decision: { effect: "deny", ruleId: highRisk.ruleId, ruleChain: [], reason: highRisk.reason } };
-    }
-
-    // ADR-0230 A2: a write to an SAP business server must be attributed to a live, budgeted project; refused here,
-    // audited and never costed, before the kernel decision and any tool call
-    const sapRefusal = await sapWriteRefusal(db, {
-      userId,
-      serverId,
-      serverName: serverRow.name,
-      systemClass: serverRow.systemClass,
-      toolName,
-      toolKind: kind,
-      projectId: projectId ?? null,
-    });
-    if (sapRefusal) {
-      if (upstream) await operationSucceeded();
-      return { kind: "denied", decision: { effect: "deny", ruleId: sapRefusal.ruleId, ruleChain: [], reason: sapRefusal.reason } };
     }
 
     // The generation was read before the server/tool snapshot above. A first
@@ -1056,6 +1044,26 @@ async function executeGovernedToolCallInner(
         args.principal, undefined, preparedPii, approvalTargetForServer(serverId, serverRow), { actor: null },
       );
       if (own.decision.effect === "deny") decision = own.decision;
+    }
+
+    // ADR-0230 A2: a write to an SAP business server must be attributed to a live, budgeted project. Checked AFTER the
+    // entitlement decision (review #798): a caller the kernel refuses gets that refusal, so the requirement never tells
+    // an unentitled caller that the server is SAP business. Refused before the decision row, any approval is queued
+    // or any tool call; audited and never costed.
+    if (decision.effect !== "deny") {
+      const sapRefusal = await sapWriteRefusal(db, {
+        userId,
+        serverId,
+        serverName: serverRow.name,
+        systemClass: serverRow.systemClass,
+        toolName,
+        toolKind: kind,
+        projectId: projectId ?? null,
+      });
+      if (sapRefusal) {
+        if (upstream) await operationSucceeded();
+        return { kind: "denied", decision: { effect: "deny", ruleId: sapRefusal.ruleId, ruleChain: [], reason: sapRefusal.reason } };
+      }
     }
 
     if (preparedPii && preparationGeneration?.epoch !== policyEpoch) {

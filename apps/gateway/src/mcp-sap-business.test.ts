@@ -5,8 +5,8 @@
  *    the marking admin plus a named role) and a write-only fleet rate limit (10 per user per hour); a second mark is
  *    refused;
  *  - a write to an SAP business server with no project, or an unbudgeted one, is refused (`sap-write-needs-project`),
- *    audited, never reaches the upstream and is never costed; a read is not touched by the requirement or the
- *    seeded rules; a budgeted write goes to the kernel and is queued for the quorum approval;
+ *    audited, never reaches the upstream and is never costed; a budgeted write goes to the kernel and is queued for the
+ *    quorum approval; a tool the upstream annotates read-only is still a write on a marked server (review #798);
  *  - a write-only rate limit counts and limits write tools only, including a write tool added after the limit;
  *  - unmarking is a settings_relax step-up, audited.
  *
@@ -243,11 +243,23 @@ describe("ADR-0230 A2: an SAP business server is approve-first", () => {
     expect(upstreamHits.tool).toBe(hits);
   });
 
-  it("a read is touched by neither the project requirement nor the write-only rules", async () => {
+  it("review #798: a tool the upstream annotates readOnlyHint=true is still a write on an SAP business server", async () => {
+    // READ is annotated read-only by the upstream and stored as kind 'read'; on a marked server that hint is ignored
     const hits = upstreamHits.tool;
-    const out = await executeGovernedToolCall(db, undefined, { userId: callerId, serverId, toolName: READ, arguments: {} });
-    expect(out.kind, JSON.stringify(out)).toBe("allowed");
-    expect(upstreamHits.tool).toBe(hits + 1);
+    const unattributed = await executeGovernedToolCall(db, undefined, { userId: callerId, serverId, toolName: READ, arguments: {} });
+    expect(unattributed.kind).toBe("denied");
+    if (unattributed.kind === "denied") expect(unattributed.decision.ruleId).toBe(SAP_BUSINESS_RULE_IDS.needsProject);
+    const projectId = await mkProject(100);
+    const queued = await executeGovernedToolCall(db, undefined, { userId: callerId, serverId, toolName: READ, projectId, arguments: {} });
+    expect(queued.kind, JSON.stringify(queued)).toBe("approval_required");
+    expect(upstreamHits.tool).toBe(hits);
+  });
+
+  it("review #798: a caller with no grant gets the kernel's refusal, not the SAP project requirement", async () => {
+    const stranger = await mkUser(`stranger-${crypto.randomUUID().slice(0, 6)}`);
+    const out = await executeGovernedToolCall(db, undefined, { userId: stranger, serverId, toolName: WRITE, arguments: {} });
+    expect(out.kind).toBe("denied");
+    if (out.kind === "denied") expect(out.decision.ruleId).not.toBe(SAP_BUSINESS_RULE_IDS.needsProject);
   });
 
   it("unmarking is a settings_relax step-up, audited", async () => {
@@ -262,6 +274,24 @@ describe("ADR-0230 A2: an SAP business server is approve-first", () => {
     expect((await lastAudit(SAP_BUSINESS_RULE_IDS.unmarked, serverId))?.effect).toBe("allow");
     // the seeded rows stay: they are ordinary rules
     expect((await db.select().from(rateLimits).where(eq(rateLimits.serverId, serverId))).length).toBe(1);
+  });
+
+  it("review #798: re-marking reuses the seeded rows still at the defaults instead of seeding a second pair", async () => {
+    const again = await app.inject({ method: "POST", url: `/v1/servers/${serverId}/system-class`, headers: adminKey, payload: { systemClass: "sap_business", approverRoleId: roleId } });
+    expect(again.statusCode, again.body).toBe(201);
+    expect((await db.select().from(approvalRules).where(eq(approvalRules.serverId, serverId))).length).toBe(1);
+    expect((await db.select().from(rateLimits).where(eq(rateLimits.serverId, serverId))).length).toBe(1);
+    expect((await lastAudit(SAP_BUSINESS_RULE_IDS.marked, serverId))?.detail).toMatchObject({ approvalRuleReused: true, rateLimitReused: true });
+  });
+
+  it("review #798: an approver role that does not exist is a clean 4xx, and nothing changes", async () => {
+    const other = await mkServer("norole");
+    const r = await app.inject({ method: "POST", url: `/v1/servers/${other}/system-class`, headers: adminKey, payload: { systemClass: "sap_business", approverRoleId: crypto.randomUUID() } });
+    expect(r.statusCode, r.body).toBeGreaterThanOrEqual(400);
+    expect(r.statusCode, r.body).toBeLessThan(500);
+    const [row] = await db.select({ systemClass: mcpServers.systemClass }).from(mcpServers).where(eq(mcpServers.id, other));
+    expect(row!.systemClass).toBeNull();
+    expect((await db.select().from(approvalRules).where(eq(approvalRules.serverId, other))).length).toBe(0);
   });
 });
 
