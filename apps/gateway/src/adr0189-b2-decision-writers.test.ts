@@ -46,6 +46,7 @@ const DECISION_WRITERS = [
   "mcp-protocol.ts", // MCP protocol methods
   "model-supply-chain.ts", // ADR-0216: a dispatch refused because a cited model file fails the supply-chain check
   "mcp-proxy.ts", // MCP tool calls (governed-evaluate.ts decides; its callers write the decision row)
+  "model-call-consent.ts", // ADR-0251: a model call held for approval (insert(auditLog) on the chained handle)
   "model-rate-limits.ts", // ADR-0212: a dispatch refused by a per-model rate limit (insert(auditLog) on the chained handle)
   "outbound-audience.ts",
   "playground.ts",
