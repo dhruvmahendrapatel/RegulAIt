@@ -1,5 +1,5 @@
 /**
- * ADR-0290 — PER-PROJECT MODEL RISK MANAGEMENT THROUGH THE §8.3 COMPLIANCE CASCADE, and the compliance-pack red-team
+ * ADR-0045 amendment 2026-11-14 — PER-PROJECT MODEL RISK MANAGEMENT THROUGH THE §8.3 COMPLIANCE CASCADE, and the compliance-pack red-team
  * preset hook.
  *
  * ADR-0045 §4's last sentence: "where a compliance classification requires MRM, the cascade sets this toggle and it
@@ -11,7 +11,9 @@
  *  3. the same user, same agent, attributed to an UNCLASSIFIED project still dispatches (per-project, not org-wide);
  *  4. a profile with `mrmRequired: false` requires nothing (false cannot relax and does not enforce);
  *  5. clearing `mrmRequired` on a profile is a LOOSENING (step-up path in rule-loosening.ts);
- *  6. the pack hook: a pack whose `cascadePreset` carries `mrmRequired` and red-team gating presets seeds a profile
+ *  6. the WHOLE gate runs under the cascade, not only the base sign-off: with an approved card the same dispatch
+ *     passes, then a fairness hold and a staleness recertification each refuse it with `enforcedBy` recorded;
+ *  7. the pack hook: a pack whose `cascadePreset` carries `mrmRequired` and red-team gating presets seeds a profile
  *     that drives BOTH the dispatch gate and `resolveRedTeamPreset`; a preset naming an attack class outside the
  *     closed vocabulary is refused at pack creation.
  *
@@ -23,13 +25,19 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import {
+  agents,
   auditLog,
   compliancePacks,
   complianceProfiles,
   createDb,
   desc,
   eq,
+  fairnessDatasets,
+  fairnessRuns,
   inArray,
+  modelCardApprovals,
+  modelCards,
+  orgSettings,
   projects,
   runMigrations,
   type Db,
@@ -129,7 +137,7 @@ afterAll(async () => {
   await app.close();
 });
 
-describe("ADR-0290 — the cascade enforces the MRM gate per project", () => {
+describe("ADR-0045 amendment 2026-11-14 — the cascade enforces the MRM gate per project", () => {
   it("negative control: org relaxed, no requiring profile -> a card-less model dispatches", async () => {
     const res = await invoke(null);
     expect(res.statusCode).toBe(200);
@@ -173,7 +181,7 @@ describe("ADR-0290 — the cascade enforces the MRM gate per project", () => {
   });
 });
 
-describe("ADR-0290 — the compliance-pack red-team preset hook", () => {
+describe("ADR-0045 amendment 2026-11-14 — the compliance-pack red-team preset hook", () => {
   const pack = (framework: string, cascadeTag: string, cascadePreset: Record<string, unknown>) => ({
     framework,
     version: 1,
@@ -229,5 +237,149 @@ describe("ADR-0290 — the compliance-pack red-team preset hook", () => {
     expect(preset!.gatingClasses).toContain("prompt_injection");
     expect(preset!.minTrials).toBe(3);
     expect(preset!.failOnSeverity).toBe("high");
+  });
+});
+
+describe("ADR-0045 amendment 2026-11-14 — the whole gate runs under the cascade (fairness hold, staleness)", () => {
+  const DAY = 86_400_000;
+  let agent2: string;
+  let cardId: string;
+  let datasetId: string;
+  let projectId: string;
+  let priorOrg: Record<string, unknown> | null = null;
+  let user2Auth: { authorization: string };
+
+  const invoke2 = () =>
+    app.inject({
+      method: "POST",
+      url: `/v1/agents/${agent2}/invoke`,
+      headers: user2Auth,
+      payload: { mode: "execute", input: "l7 mrm cascade full gate", dispatch: true, projectId },
+    });
+  const lastDeny = async (ruleId: string) => {
+    const [row] = await db
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.ruleId, ruleId))
+      .orderBy(desc(auditLog.seq))
+      .limit(1);
+    return row;
+  };
+
+  beforeAll(async () => {
+    const [org] = await db.select().from(orgSettings).where(eq(orgSettings.id, "singleton"));
+    priorOrg = {
+      mrmStalenessRecertEnabled: org!.mrmStalenessRecertEnabled,
+      mrmStalenessRecertThreshold: org!.mrmStalenessRecertThreshold,
+      fairnessTestingEnabled: org!.fairnessTestingEnabled,
+      fairnessBlockOnFail: org!.fairnessBlockOnFail,
+    };
+    const a = await app.inject({
+      method: "POST",
+      url: "/v1/agents",
+      headers: AUTH,
+      payload: { name: `l7m-agent2-${RUN}`, provider: "mock", tier: 1, costPerMTokIn: 3, costPerMTokOut: 15, model: "mock-balanced" },
+    });
+    expect(a.statusCode).toBe(201);
+    agent2 = a.json().id;
+    // its OWN user, granted ONLY this agent: pillar-6 routing serves among a user's entitled agents, so a user who
+    // also holds the card-less agent could be served that one (the mrm.test.ts discipline)
+    const u2 = await app.inject({
+      method: "POST",
+      url: "/v1/users",
+      headers: AUTH,
+      payload: { email: `l7m-u2-${RUN}@example.com`, displayName: "L7 Mrm User Two" },
+    });
+    expect(u2.statusCode).toBe(201);
+    const userId = u2.json().id as string;
+    const k2 = await app.inject({ method: "POST", url: `/v1/users/${userId}/keys`, headers: AUTH, payload: { name: "l7m2" } });
+    user2Auth = { authorization: `Bearer ${k2.json().token}` };
+    await app.inject({ method: "POST", url: "/v1/grants/agents", headers: AUTH, payload: { userId, agentId: agent2 } });
+    // an APPROVED, unexpired sign-off, certified a day ago, so the base gate passes
+    const [card] = await db.insert(modelCards).values({ agentId: agent2, intendedUse: `l7m full gate ${RUN}` }).returning();
+    cardId = card!.id;
+    await db.insert(modelCardApprovals).values({
+      cardId,
+      status: "approved",
+      approverUserId: userId,
+      decidedBy: userId,
+      decidedAt: new Date(Date.now() - DAY),
+      validUntil: new Date(Date.now() + 90 * DAY),
+    });
+    projectId = await project(`l7m-full-proj-${RUN}`, [TAG_REQ]);
+  });
+
+  afterAll(async () => {
+    if (priorOrg) await db.update(orgSettings).set(priorOrg).where(eq(orgSettings.id, "singleton"));
+    if (cardId) await db.delete(modelCards).where(eq(modelCards.id, cardId));
+    if (datasetId) await db.delete(fairnessDatasets).where(eq(fairnessDatasets.id, datasetId));
+    if (agent2) await db.delete(agents).where(eq(agents.id, agent2));
+  });
+
+  it("positive control: with an approved card the requiring project dispatches", async () => {
+    expect((await invoke2()).statusCode).toBe(200);
+  });
+
+  it("a failing fairness run holds the dispatch, with the cascade named as the cause", async () => {
+    await db
+      .update(orgSettings)
+      .set({ fairnessTestingEnabled: true, fairnessBlockOnFail: true })
+      .where(eq(orgSettings.id, "singleton"));
+    const [ds] = await db
+      .insert(fairnessDatasets)
+      .values({
+        name: `l7m-ds-${RUN}`,
+        labelColumn: "y",
+        predictionColumn: "p",
+        favourableLabel: "1",
+        protectedAttributes: ["g"],
+        rowCount: 60,
+        csvBytes: 600,
+        csvSha256: "a".repeat(64),
+        rowsCiphertext: "x",
+        expiresAt: new Date(Date.now() + DAY),
+      })
+      .returning();
+    datasetId = ds!.id;
+    await db.insert(fairnessRuns).values({
+      cardId,
+      datasetId,
+      datasetSha256: "a".repeat(64),
+      metricsVersion: "l7-test",
+      thresholds: {},
+      minGroupSize: 30,
+      result: {},
+      outcome: "fail",
+    });
+    const res = await invoke2();
+    expect(res.statusCode).toBe(409);
+    const row = await lastDeny("fairness-dispatch-held");
+    const d = row!.detail as Record<string, unknown>;
+    expect(d.agentId).toBe(agent2);
+    expect(d.enforcedBy).toBe("compliance_cascade");
+    expect(d.mrmRequiredBy).toEqual([TAG_REQ]);
+    await db.update(orgSettings).set({ fairnessTestingEnabled: false }).where(eq(orgSettings.id, "singleton"));
+    expect((await invoke2()).statusCode).toBe(200);
+  });
+
+  it("a card edit since certification forces recertification, with the cascade named as the cause", async () => {
+    await db
+      .update(orgSettings)
+      .set({ mrmStalenessRecertEnabled: true, mrmStalenessRecertThreshold: 1 })
+      .where(eq(orgSettings.id, "singleton"));
+    const edit = await app.inject({
+      method: "PATCH",
+      url: `/v1/mrm/cards/${cardId}`,
+      headers: AUTH,
+      payload: { limitations: "l7m: an edit after certification" },
+    });
+    expect(edit.statusCode, edit.body).toBeLessThan(300);
+    const res = await invoke2();
+    expect(res.statusCode).toBe(409);
+    const row = await lastDeny("mrm-staleness-recert-required");
+    const d = row!.detail as Record<string, unknown>;
+    expect(d.agentId).toBe(agent2);
+    expect(d.enforcedBy).toBe("compliance_cascade");
+    expect(d.mrmRequiredBy).toEqual([TAG_REQ]);
   });
 });

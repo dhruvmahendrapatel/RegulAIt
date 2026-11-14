@@ -228,7 +228,7 @@ export async function mrmDispatchGate(
   const supplyChain = await supplyChainDispatchGate(db, ctx, now);
   if (supplyChain) return supplyChain;
   const org = await loadOrgSettings(db);
-  // ADR-0290 (ADR-0045 §4, last sentence): where the project's compliance classification requires model risk
+  // ADR-0045 §4, last sentence (amendment 2026-11-14): where the project's compliance classification requires model risk
   // management, the cascade enforces this gate for that project's dispatches even though an admin relaxed the
   // org-wide toggle. The org setting can only widen enforcement, never relax it below what a classification demands
   // (the ADR-0021 ceiling). With the org toggle on, the cascade adds nothing and is not read.
@@ -275,7 +275,7 @@ export async function mrmDispatchGate(
             fairnessOutcome: hold.outcome,
             fairnessStale: hold.stale,
             ...(ctx.projectId ? { projectId: ctx.projectId } : {}),
-          ...enforcedBy,
+            ...enforcedBy,
           },
           effect: "deny",
           ruleId: FAIRNESS_RULE_IDS.dispatchHeld,
@@ -370,7 +370,7 @@ export async function mrmDispatchGate(
           summary: staleness.summary,
         },
         ...(ctx.projectId ? { projectId: ctx.projectId } : {}),
-          ...enforcedBy,
+        ...enforcedBy,
       },
       effect: "deny",
       ruleId: "mrm-staleness-recert-required",
@@ -402,7 +402,7 @@ export async function mrmDispatchGate(
       modelCardApprovalId: decision.approvalId,
       validUntil: decision.validUntil,
       ...(ctx.projectId ? { projectId: ctx.projectId } : {}),
-          ...enforcedBy,
+      ...enforcedBy,
     },
     effect: "deny",
     ruleId: decision.ruleId,

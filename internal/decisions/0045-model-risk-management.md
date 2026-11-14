@@ -351,7 +351,13 @@ relaxed below what the classification demands") did not ship; deviation 6 and th
   reads profiles through the one cascade funnel (`complianceProfilesForTags`), so a versioned profile's ACTIVE
   version governs red-team runs, as it already did PII, MCP and guardrail floors. The launch packs' presets (Lane L8
   content) are unchanged; they can now carry `mrmRequired` and red-team presets.
-- **Tests.** `apps/gateway/src/zz-adr0290-mrm-cascade.test.ts` (negative control with no requiring profile; the
+- **Tests.** `apps/gateway/src/zz-adr0045-mrm-cascade.test.ts` (negative control with no requiring profile; the
   same dispatch refused on a requiring project, audited; an unclassified project and a `false` profile still
-  dispatch; loosening; a pack preset driving both the dispatch gate and the red-team preset; an unknown class
-  refused). Two of its cases fail against the gate as it was on `main`.
+  dispatch; loosening; with an approved card on a requiring project, a failing fairness run and a card edit since
+  certification each refuse with `enforcedBy` recorded, so the whole gate runs under the cascade, not only the base
+  sign-off; a pack preset driving both the dispatch gate and the red-team preset; an unknown class refused). Four of
+  its cases fail against the gate as it was on `main`.
+- **Cost (named follow-up).** With the org toggle relaxed, an attributed dispatch resolves the project's profiles
+  once for this gate and again for its PII mode (`projectPiiMode`, later in the same dispatch). Both go through the
+  one `profilesForTags` funnel; sharing one resolution per dispatch is left for a dispatch-path refactor. With the
+  toggle on (the default) this gate adds no query.

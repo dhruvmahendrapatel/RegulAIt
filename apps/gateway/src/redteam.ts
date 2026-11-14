@@ -449,7 +449,7 @@ export async function resolveRedTeamPreset(db: Db, projectId: string | null | un
   if (!project) return null;
   const tags = (project.classifications ?? []) as string[];
   if (tags.length === 0) return null;
-  // ADR-0290: through the ONE cascade funnel, so the profile's ACTIVE VERSION governs (ADR-0073). Reading the table
+  // ADR-0045 amendment 2026-11-14: through the ONE cascade funnel, so the profile's ACTIVE VERSION governs (ADR-0073). Reading the table
   // row directly ignored a versioned tightening, and a pack-seeded preset edited through versions never reached a run.
   const matching = await complianceProfilesForTags(db, tags);
   if (matching.length === 0) return null;

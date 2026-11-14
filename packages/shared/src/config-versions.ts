@@ -427,7 +427,7 @@ export const VERSIONED_RULE_FIELDS: Partial<Record<ConfigArtifactType, readonly 
     "redteamFailOnSeverity",
     // ADR-0190 decision 7 item 3
     "minIsolationClass",
-    // ADR-0290
+    // ADR-0045 amendment 2026-11-14
     "mrmRequired",
   ],
 };
@@ -506,7 +506,7 @@ const RULE_BODY_SCHEMAS: Partial<Record<ConfigArtifactType, z.ZodTypeAny>> = {
     maxProjectBudgetUsd: z.number().nonnegative().nullish(),
     budgetEnforcement: z.enum(["block", "warn_only"]).nullish(),
     guardrailModes: z.record(z.string(), z.string()).nullish(),
-    // ADR-0290 (the compliance-pack red-team preset hook): the closed attack-class vocabulary and the same bounds the
+    // ADR-0045 amendment 2026-11-14 (the compliance-pack red-team preset hook): the closed attack-class vocabulary and the same bounds the
     // profile route enforces, so a pack's `cascadePreset` (validated here) can only seed a preset a run can apply
     redteamGatingClasses: z.array(z.enum(RED_TEAM_ATTACK_CLASSES)).max(16).nullish(),
     redteamMinTrials: z.number().int().min(1).max(25).nullish(),
