@@ -167,3 +167,17 @@ touches a cloud account.
   release, so `1.0.0-rc.1` after `1.0.0` is a downgrade. That is stricter, and it is deliberate.
 - The gateway gains `migrate-job.ts`, a thin entrypoint over a testable `migrate-job-run.ts`. It refuses to run without
   `DATABASE_URL` instead of falling back to a default database, and it never logs the URL.
+
+## As built (Helm chart, lane L12 PR 3)
+
+- `deploy/helm/regulait/` has a `values.schema.json` with `additionalProperties: false` at every level, so a secret
+  value cannot be passed as a value. `mode`, `version`, the image and `secrets.name` have no default.
+- The NetworkPolicy is a `pre-install,pre-upgrade` hook (weight -10, `before-hook-creation`), so it exists before the
+  migration Job (weight 0). Otherwise the first migration would run with open egress. The cost: Helm leaves hook
+  objects after uninstall. A default-deny policy with no pods is harmless, and the README says so.
+- The migration Job uses the namespace's default ServiceAccount with no token mounted, because the release's own
+  ServiceAccount does not exist while pre-install hooks run.
+- `operator.enabled` renders the CRD and the Role from `files/crd.yaml` and `files/role.yaml`. These are copies of the
+  operator's generated files, and `tests/render-test.sh` fails when they differ.
+- In the templates, the air-gapped private-range check is prefix-pattern based (10/8, 172.16/12, 192.168/16,
+  100.64/10, fc00::/7, each with a minimum prefix length). The operator does the exact `netip` containment check.

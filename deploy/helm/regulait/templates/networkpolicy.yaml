@@ -1,0 +1,62 @@
+{{- /*
+Default-deny for every pod of the release, the migration Job's included. It is a hook with a weight below the Job's,
+so it exists before the first migration runs; before-hook-creation replaces it on each upgrade. Helm does not delete
+hook resources on uninstall, so it outlives the release: a default-deny policy with no pods is harmless.
+*/ -}}
+{{- $v := .Values -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-default-deny" .Release.Name | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "regulait.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "regulait.selector" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    {{- if $v.ingressFrom }}
+    - from:
+        {{- toYaml $v.ingressFrom | nindent 8 }}
+      ports:
+        - { protocol: TCP, port: 3000 }
+    {{- else }} []
+    {{- end }}
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    {{- with $v.egress.databaseCIDRs }}
+    - to:
+        {{- range . }}
+        - ipBlock: { cidr: {{ . | quote }} }
+        {{- end }}
+      ports:
+        - { protocol: TCP, port: 5432 }
+    {{- end }}
+    {{- with $v.egress.allowedCIDRs }}
+    - to:
+        {{- range . }}
+        - ipBlock: { cidr: {{ . | quote }} }
+        {{- end }}
+    {{- end }}
+    {{- if and $v.egress.allowPublicEgress (ne $v.mode "air_gapped") }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16]
+        - ipBlock:
+            cidr: ::/0
+            except: ["fc00::/7", "fe80::/10"]
+      ports:
+        - { protocol: TCP, port: 443 }
+    {{- end }}

@@ -1,0 +1,61 @@
+# RegulAIt Helm chart values (ADR-0304). Every default is the strict one; values.schema.json refuses unknown keys.
+# There is no field for a secret VALUE: the chart takes the NAME of a Secret you create, and the pods read it through
+# secretKeyRef. Required values have no default, so `helm install` without a decision fails.
+
+# Required: byoc or air_gapped (REGULAIT_DEPLOY_MODE, ADR-0062). hosted is not a self-install.
+mode: ""
+# Required: the RegulAIt version this image is.
+version: ""
+
+image:
+  # Required: repository without tag, for example registry.example.internal/regulait/gateway.
+  repository: ""
+  # Required: sha256:<64 hex>. A tag is never used.
+  digest: ""
+  # Registry hosts the image may come from. Required in air_gapped mode.
+  allowedRegistries: []
+
+# Required: the Secret holding the three values below, created before install, for example:
+#   kubectl create secret generic regulait --from-literal=data-key="$(openssl rand -hex 32)" \
+#     --from-literal=database-url=... --from-literal=bootstrap-token=...
+secrets:
+  name: ""
+  dataKeyKey: data-key
+  databaseUrlKey: database-url
+  bootstrapTokenKey: bootstrap-token
+
+# The volume for install-generated signing keys and audit anchors. The chart's own claim is kept on uninstall
+# (helm.sh/resource-policy: keep), because losing it loses the receipt and identity keys.
+installSecrets:
+  existingClaim: ""
+  size: 1Gi
+  storageClassName: ""
+
+# NetworkPolicy is always default-deny for ingress and egress. These only open holes.
+egress:
+  # Database CIDRs, opened on 5432.
+  databaseCIDRs: []
+  # Other CIDRs the gateway may reach on any port. Private ranges only in air_gapped mode.
+  allowedCIDRs: []
+  # byoc only: public addresses on 443 (to reach model vendors). Refused in air_gapped mode.
+  allowPublicEgress: false
+
+# Sources allowed to reach port 3000, as NetworkPolicy peers ({namespaceSelector: ..., podSelector: ...}).
+# Empty means nothing can reach the gateway.
+ingressFrom: []
+
+resources:
+  requests: { cpu: 250m, memory: 512Mi }
+  limits: { cpu: "2", memory: 2Gi }
+
+migration:
+  # The pre-install/pre-upgrade Job that runs the migrations before the new image starts.
+  activeDeadlineSeconds: 1800
+  backoffLimit: 2
+
+# Optional: also install the operator's CRD and controller (deploy/operator). Off by default.
+operator:
+  enabled: false
+  image:
+    repository: ""
+    digest: ""

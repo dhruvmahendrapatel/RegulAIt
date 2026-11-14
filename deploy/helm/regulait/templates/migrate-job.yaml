@@ -1,0 +1,51 @@
+{{- /*
+The migration Job (ADR-0304 §5): runs the new image's migrations before the Deployment moves to it. A failed Job fails
+the install or upgrade, so the old version keeps running. The release's ServiceAccount does not exist yet on a first
+install (hooks run before release resources), so the Job uses the namespace default with no token mounted.
+*/ -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-migrate-%d" .Release.Name .Release.Revision | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "regulait.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migration.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.migration.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "regulait.labels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        {{- include "regulait.podSecurity" . | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "regulait.image" . }}
+          imagePullPolicy: IfNotPresent
+          command: ["node", "apps/gateway/dist/migrate-job.js"]
+          env:
+            - name: REGULAIT_DEPLOY_MODE
+              value: {{ .Values.mode | quote }}
+            - name: NODE_ENV
+              value: production
+            {{- include "regulait.secretEnv" . | nindent 12 }}
+          securityContext:
+            {{- include "regulait.containerSecurity" . | nindent 12 }}
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: "1", memory: 1Gi }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: { sizeLimit: 256Mi }
