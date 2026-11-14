@@ -88,11 +88,9 @@ test("declare a rule, get refused at the real grant form, escalate, arm's-length
   };
   const agentPay = await mkAgent("zz-sod-pay");
   const agentVendor = await mkAgent("zz-sod-vendor");
-  const g = await page.request.post("/v1/grants/agents", {
-    headers: BOOT,
-    data: { userId: holderId, agentId: agentPay },
-  });
-  expect(g.status()).toBe(201);
+  // ADR-0250: a grant mint is a settings_relax step-up the bootstrap token cannot give; Ada's page answers it
+  const g = await steppedUpAs(page.request, ADMIN_EMAIL, "POST", "/v1/grants/agents", { userId: holderId, agentId: agentPay });
+  expect(g.status(), await g.text()).toBe(201);
 
   // an arm's-length approver: a SECOND admin with a real password
   const approverRes = await page.request.post("/v1/users", {

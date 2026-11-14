@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb, runMigrations, workflowInstances, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { genericInbound } from "./testing/pm-webhook.js";
 
 /**
  * SLICE-8 ADVERSARIAL PROBE — compliance cascade, infra ops and BYOC, at the
@@ -215,8 +216,7 @@ describe("PM webhook inbound path vs the cascade's one choke point", () => {
     // the matched event, end to end through the webhook route
     const hit = await app.inject({
       method: "POST", url: "/v1/pm/webhooks/s8-pm",
-      headers: { "x-regulait-webhook-secret": secret },
-      payload: { externalId, event: "updated", state: "Done" },
+      ...genericInbound(secret, { externalId, event: "updated", state: "Done" }),
     });
     expect(hit.statusCode).toBe(202);
     expect(hit.json().matched).toBe(true);
@@ -224,8 +224,7 @@ describe("PM webhook inbound path vs the cascade's one choke point", () => {
     // an unmatched event too — the other processing branch
     const miss = await app.inject({
       method: "POST", url: "/v1/pm/webhooks/s8-pm",
-      headers: { "x-regulait-webhook-secret": secret },
-      payload: { externalId: "S8-GHOST-1", event: "updated", state: "Done" },
+      ...genericInbound(secret, { externalId: "S8-GHOST-1", event: "updated", state: "Done" }),
     });
     expect(miss.statusCode).toBe(202);
     expect(miss.json().matched).toBe(false);

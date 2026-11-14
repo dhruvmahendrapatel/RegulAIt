@@ -3,9 +3,9 @@
 - **Status**: Partially superseded by [ADR-0129](0129-mcp-operation-admission-and-single-attempt-tools.md): every tool call is now single-attempt, including read-hinted tools. Connect/list retry policy remains accepted.
 - **Date**: 2026-09-28
 - **Relates to**: [ADR-0126](0126-upstream-deadlines-and-circuit-breaker.md) (the deadlines this
-  spends and the breaker this reports to), [ADR-0043](0043-mcp-egress-guard.md) and
-  [ADR-0097](0097-mcp-admission-control.md) (the two refusals that must never be retried),
-  [ADR-0021](0021-admin-configurable-policy.md) (the configurability debt this inherits from
+  spends and the breaker this reports to), [ADR-0043](0043-mcp-oidc-egress-guard.md) and
+  [ADR-0097](0097-mcp-admission-scanning-and-auth-discovery.md) (the two refusals that must never be retried),
+  [ADR-0021](0021-org-settings-configurability-layer.md) (the configurability debt this inherits from
   `timeouts.ts`), [ROADMAP §8](../product/ROADMAP.md) G2
 - **Migration**: none — the policy is stateless. It reads `mcp_tools.kind`, which the initial migration
   already stores (`0000_organic_thanos.sql`, `mcp_tools.kind`).

@@ -54,6 +54,7 @@ import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { removeEgressAllowEntry, trackEgressAllowHosts } from "./testing/egress-allow-cleanup.js";
 import { encryptSecret } from "./secrets.js";
 import { checkConnectionBaseUrl } from "./connection-egress.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -73,6 +74,7 @@ const IMDS = "http://169.254.169.254/latest/meta-data/iam/security-credentials/"
 const CANARY = "PATIENT-SSN-078-05-1120";
 
 let db: Db;
+let restoreConnectorAttribution: (() => Promise<void>) | undefined;
 let app: ReturnType<typeof buildApp>;
 /** the attacker's collector: a REAL, LISTENING, willing receiver */
 let collector: http.Server;
@@ -160,6 +162,8 @@ let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0251: these calls pin behaviour other than the attribution mandate, so they relax it by name
+  restoreConnectorAttribution = await relaxGovernanceGatesForTest(db, { connectorAttributionRequired: false });
   // ADR-0181: the org PII floor ships at block. This file pins behaviour unrelated to
   // PII handling, so it sets the floor off explicitly; restored in afterAll.
   restoreSb1Posture = await relaxDataPostureForTest(db, { org: { defaultPiiMode: "none" }, interception: false, guardrails: false });
@@ -237,6 +241,7 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
+  await restoreConnectorAttribution?.();
   await restoreSb1Posture?.();
   await db.delete(egressAllowHosts);
   collector.closeAllConnections();
