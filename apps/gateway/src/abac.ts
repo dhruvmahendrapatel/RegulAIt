@@ -31,12 +31,15 @@
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import {
+  a2aAgents,
   abacPolicies,
   abacPolicyVersions,
+  agents,
   and,
   asc,
   auditLog,
   builderAgents,
+  connectors,
   deployTargets,
   desc,
   eq,
@@ -64,8 +67,10 @@ import {
   abacSchemaText,
   evaluateAbac,
   hasAgentPrincipal,
+  hasGovernedActions,
   isValidTimezone,
   type AbacAgentAttrs,
+  type AbacGovernedResourceAttrs,
   type AbacDelegationContext,
   type AbacPolicy,
   type AbacRequest,
@@ -308,6 +313,106 @@ export async function assembleAbacRequest(db: Db, ctx: AbacToolContext): Promise
     ...(ctx.delegation ? { delegation: ctx.delegation } : {}),
     ...(ctx.at ? { at: ctx.at } : {}),
   };
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0251 slice 4 — schema v5: model, connector and A2A calls
+// ---------------------------------------------------------------------------
+
+/** a model, connector or A2A call, as the governed core sees it */
+export type GovernedAbacTarget =
+  | { type: "model"; id: string; mode: string }
+  | { type: "connector"; id: string; operation: "read" | "write" }
+  | { type: "a2a"; id: string; skillId: string | null };
+
+/**
+ * ADR-0251 slice 4 — the Cedar request for a model, connector or A2A call (actions `ModelInvoke`, `ConnectorCall`,
+ * `A2aMessage`, schema v5). The principal bag and the context are built exactly as `assembleAbacRequest` builds them
+ * for a tool call. The session facts of the request (`sessionOrigin`, `mfaCompleted`, `clientIp`) are not known to
+ * the governed core, which decides from below the routes: they read as unknown, false and absent, the strict values,
+ * so a policy that requires MFA refuses these calls rather than trusting an unchecked claim. The delegation context is
+ * empty (the sponsor is evaluated as `User`).
+ */
+export async function assembleGovernedAbacRequest(
+  db: Db,
+  args: { userId: string; target: GovernedAbacTarget; projectId: string | null; at?: Date },
+): Promise<AbacRequest> {
+  const { userId, target, projectId } = args;
+  const [userRow, assignments, memberships, projectRow, derived, aiTrainingCurrent, resourceRow] = await Promise.all([
+    db.select({ id: users.id, isAdmin: users.isAdmin }).from(users).where(eq(users.id, userId)),
+    db
+      .select({ roleId: roleAssignments.roleId, roleName: roles.name })
+      .from(roleAssignments)
+      .innerJoin(roles, eq(roles.id, roleAssignments.roleId))
+      .where(eq(roleAssignments.userId, userId)),
+    db
+      .select({ teamName: teams.name })
+      .from(teamMembers)
+      .innerJoin(teams, eq(teams.id, teamMembers.teamId))
+      .where(eq(teamMembers.userId, userId)),
+    projectId ? db.select({ id: projects.id, name: projects.name }).from(projects).where(eq(projects.id, projectId)) : Promise.resolve([]),
+    deriveAbacDeployContext(db, projectId),
+    aiTrainingCurrentFor(db, userId),
+    target.type === "model"
+      ? db
+          .select({ name: agents.name, provider: agents.provider, model: agents.model, price: agents.costPerMTokIn })
+          .from(agents)
+          .where(eq(agents.id, target.id))
+      : target.type === "connector"
+        ? db
+            .select({ name: connectors.name, providerKind: connectors.providerKind, price: connectors.pricePerCallUsd })
+            .from(connectors)
+            .where(eq(connectors.id, target.id))
+        : db.select({ name: a2aAgents.name, price: a2aAgents.pricePerCallUsd }).from(a2aAgents).where(eq(a2aAgents.id, target.id)),
+  ]);
+  const classifications = projectId ? await projectClassifications(db, projectId) : [];
+  const row = (resourceRow[0] ?? {}) as { name?: string; provider?: string | null; model?: string | null; providerKind?: string | null; price?: number | null };
+  const shared = {
+    id: target.id,
+    name: row.name ?? "",
+    priceTier: priceTierOf(row.price ?? null),
+    projectId: projectRow[0]?.id ?? null,
+    projectName: projectRow[0]?.name ?? null,
+    classifications,
+    dataSensitivity: classifications.length > 0 ? [...classifications].sort()[0]! : null,
+  };
+  const governed: AbacGovernedResourceAttrs =
+    target.type === "model"
+      ? { ...shared, type: "Model", provider: row.provider ?? "", model: row.model ?? "", mode: target.mode }
+      : target.type === "connector"
+        ? { ...shared, type: "Connector", providerKind: row.providerKind ?? "", operation: target.operation }
+        : { ...shared, type: "RemoteAgent", skillId: target.skillId };
+  return {
+    principal: {
+      id: userId,
+      roles: [...new Set(assignments.map((a) => a.roleName))],
+      roleIds: [...new Set(assignments.map((a) => a.roleId))],
+      teams: [...new Set(memberships.map((m) => m.teamName))],
+      isAdmin: userRow[0]?.isAdmin ?? false,
+      sessionOrigin: "unknown",
+      mfaCompleted: false,
+      aiTrainingCurrent,
+    },
+    governed,
+    // not read for a governed call (the engine builds the resource from `governed`); kept for the request's shape
+    resource: { id: target.id, serverId: "", serverName: "", toolName: "", kind: "", priceTier: shared.priceTier, classifications },
+    context: { deployModes: derived.deployModes, environments: derived.environments, rateLimitUsagePct: 0, clientIp: null },
+    ...(args.at ? { at: args.at } : {}),
+  };
+}
+
+/**
+ * ADR-0251 slice 4 — the ABAC verdict for a model, connector or A2A call: null when no active policy can apply to one
+ * (no active v5 policy), so an install without such policies pays only the policy load. Pure evaluation errors fail
+ * closed inside the engine (`abac-engine-error`).
+ */
+export async function evaluateAbacForGovernedCall(
+  db: Db,
+  args: { userId: string; target: GovernedAbacTarget; projectId: string | null },
+): Promise<AbacDecision | null> {
+  const policies = (await loadActiveAbacPolicies(db)).filter((p) => hasGovernedActions(p.schemaVersion));
+  if (policies.length === 0) return null;
+  return evaluateAbac(policies, await assembleGovernedAbacRequest(db, args));
 }
 
 // ---------------------------------------------------------------------------

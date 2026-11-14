@@ -1,0 +1,2 @@
+<!-- fold: state-recap -->
+**2026-11-14 - P-01 remainder, slice 4a: ABAC v5 actions ([ADR-0251](../decisions/0251-one-governed-decision-core.md) "As built", lane L1; no migration).** Cedar schema v5 adds `ModelInvoke`, `ConnectorCall` and `A2aMessage` on `Model`, `Connector` and `RemoteAgent`, evaluated by the governed core; v1–v4 policies never apply to those calls. v5 is opt-in until the editor's action picker lands (#453). An ABAC approval hold on these call types refuses for now.

@@ -244,3 +244,36 @@ merge.
 5. **Latency bench size.** `zz-adr0251-core-latency.test.ts` measures 0 rules, then 10 matching rules (5 approval
    rules and 5 rate limits under their limit). Each binding rate limit adds one concurrent count query, so the cost
    grows with the number of limits that bind one subject and resource, not with traffic.
+
+### P-01 remainder, slice 4a: ABAC v5 actions (2026-11-14)
+
+- **Schema v5** (`packages/policy-kernel/src/abac.ts`, `SCHEMA_V5`) = v4 plus three actions, each on its own resource
+  type: `ModelInvoke` on `Model` (`provider`, `model`, `mode`), `ConnectorCall` on `Connector` (`providerKind`,
+  `operation`), `A2aMessage` on `RemoteAgent` (optional `skillId`). Every resource also carries `name`, `priceTier`,
+  optional `projectId`/`projectName`, `classifications` and optional `dataSensitivity`, so one policy about sensitive
+  data reads the same on every type. Principals and context are v4's (`User` or `Agent`; the v4 context).
+- **v1–v4 are untouched and never run for these actions.** The engine evaluates a governed call against v5 (and
+  later) policies only; their schemas do not declare the new actions. v5 policies still run for `McpToolCall`.
+- **Opt-in.** `ABAC_CURRENT_SCHEMA_VERSION` stays v4, because under v5 an unscoped `resource` may be any of four types
+  and strict validation refuses a type-specific attribute without narrowing (`action == …` or `resource is …`);
+  `validate` adds help that says so (`ABAC_V5_RESOURCE_HELP`). An author picks v5 explicitly (`schemaVersion: "v5"`
+  on the existing routes). Making v5 the default waits for the editor's action picker (#453, UI builder).
+- **Wiring.** `loadResourceRestrictions` evaluates the call's v5 action (`evaluateAbacForGovernedCall` in
+  `apps/gateway/src/abac.ts`, imported lazily: no new import cycle) concurrently with the rule loads; with no active
+  v5 policy it is one policy load and the slot is null. `composeResourceDecision` already applied ABAC in the fixed
+  order (rate limit, ABAC forbid, approval).
+- **What the core cannot know.** The request's session facts (`sessionOrigin`, `mfaCompleted`, `clientIp`) read as
+  unknown, false and absent (the strict values), and the delegation context is empty (the sponsor is evaluated as
+  `User`). Threading them from the routes is a follow-up (PENDING fragment).
+- **ABAC `require_approval` on these call types refuses** (fail closed). Their consent binds approval rules and the
+  execution dial only, so an ABAC hold could otherwise be released by a rule's approver, or queued with no consent
+  bound to the policy version. Queueing it needs the policy version in the consent's context digest, as the MCP path
+  has (follow-up).
+- **Latency** (`REGULAIT_BENCH=1`): no rules p95 2.4 ms, ten rules 4.6 ms, within the budget; the added cost with no
+  v5 policy is one concurrent policy load.
+- **Tests.** `abac-v5.test.ts` (kernel, 8): the schema, write-time refusal of a governed action under v4, the
+  narrowing help, each action decided by its own policies, v4 never running for a governed call, a shared-attribute
+  policy applying to every type, an `Agent` principal, an absent optional attribute. `zz-adr0251-abac-v5.test.ts`
+  (gateway, own scratch database): null slot with no v5 policy, a v5 `ModelInvoke` forbid refusing a real dispatch
+  for its principal only (audited, no usage row), a `ConnectorCall` forbid on writes only, and a `require_approval`
+  refusing.

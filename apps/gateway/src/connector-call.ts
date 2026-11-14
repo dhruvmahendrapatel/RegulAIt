@@ -455,7 +455,7 @@ export async function executeGovernedConnectorCall(
     let coreRestrictions: ResourceRestrictions | null = null;
     let coreError: unknown = null;
     try {
-      coreRestrictions = await loadResourceRestrictions(db, { userId, resource: coreResource });
+      coreRestrictions = await loadResourceRestrictions(db, { userId, resource: coreResource, projectId });
     } catch (err) {
       coreError = err;
     }

@@ -46,7 +46,8 @@ export interface ResourceRestrictions {
   approvalRules: ResourceApprovalRule[];
   rateLimits: ResourceRateLimit[];
   attributionRequired: boolean;
-  /** ADR-0251 slice 4: the v5 Cedar actions land after #707; until then no policy can target these actions */
+  /** ADR-0251 slice 4: the Cedar verdict for the call's v5 action (`ModelInvoke`, `ConnectorCall`, `A2aMessage`);
+   * null = no active v5 policy, so nothing can apply */
   abacDecision: AbacDecision | null;
 }
 
@@ -89,8 +90,30 @@ async function countAllowed(db: Db, userId: string, resource: GovernedResource, 
   return Number(row?.n ?? 0);
 }
 
-export async function loadResourceRestrictions(db: Db, args: { userId: string; resource: GovernedResource }): Promise<ResourceRestrictions> {
+export async function loadResourceRestrictions(
+  db: Db,
+  args: {
+    userId: string;
+    resource: GovernedResource;
+    /** the call's attribution; the ABAC v5 resource bag carries it (ADR-0251 slice 4). Absent = unattributed. */
+    projectId?: string | null;
+  },
+): Promise<ResourceRestrictions> {
   const { userId, resource } = args;
+  // ADR-0251 slice 4: the Cedar verdict for the call's v5 action, null when no active v5 policy exists. Loaded lazily
+  // (abac.js pulls in the simulation surface; a static edge would close an import cycle through the dispatch core).
+  const abacVerdict = import("./abac.js").then(({ evaluateAbacForGovernedCall }) =>
+    evaluateAbacForGovernedCall(db, {
+      userId,
+      projectId: args.projectId ?? null,
+      target:
+        resource.type === "model"
+          ? { type: "model", id: resource.id, mode: resource.mode }
+          : resource.type === "connector"
+            ? { type: "connector", id: resource.id, operation: resource.operation }
+            : { type: "a2a", id: resource.id, skillId: resource.skillId },
+    }),
+  );
   const idCol =
     resource.type === "connector" ? resourceApprovalRules.connectorId : resource.type === "a2a" ? resourceApprovalRules.a2aAgentId : resourceApprovalRules.agentId;
   const [ruleRows, limitRows, [org]] = await Promise.all([
@@ -150,7 +173,7 @@ export async function loadResourceRestrictions(db: Db, args: { userId: string; r
   );
   // no org row reads as the strict default (ADR-0180), never as a relaxation
   const attributionRequired = resource.type === "connector" ? org?.connector !== false : resource.type === "a2a" ? org?.a2a !== false : false;
-  return { approvalRules, rateLimits, attributionRequired, abacDecision: null };
+  return { approvalRules, rateLimits, attributionRequired, abacDecision: await abacVerdict };
 }
 
 export interface GovernedResourceInput {
@@ -168,8 +191,8 @@ export interface GovernedResourceInput {
 /** ADR-0251 — the core's decision for a model, connector or A2A call. Never throws; an error is a deny. */
 export async function governedEvaluateResource(db: Db, input: GovernedResourceInput): Promise<GovernedResourceDecision> {
   try {
-    const r = input.restrictions ?? (await loadResourceRestrictions(db, { userId: input.userId, resource: input.resource }));
-    return composeResourceDecision({
+    const r = input.restrictions ?? (await loadResourceRestrictions(db, { userId: input.userId, resource: input.resource, projectId: input.projectId }));
+    const decision = composeResourceDecision({
       resource: input.resource,
       base: input.base,
       projectId: input.projectId,
@@ -180,6 +203,23 @@ export async function governedEvaluateResource(db: Db, input: GovernedResourceIn
       approvedApprovalId: input.approvedApprovalId ?? null,
       canQueue: input.canQueue,
     });
+    // ADR-0251 slice 4: an ABAC `require_approval` verdict on a model, connector or A2A call REFUSES (fail closed).
+    // These paths bind consent to approval rules and the execution dial only, so an ABAC hold could otherwise be
+    // released by a rule's approver or queued with no consent bound to the policy. Until a consent binds the policy
+    // version (as the MCP path's does), the hold refuses; a forbid or another deny stays what it is.
+    const abac = r.abacDecision;
+    if (abac?.effect === "require_approval" && decision.effect !== "deny") {
+      return {
+        effect: "deny",
+        ruleId: abac.policyId ?? RESOURCE_RULE_IDS.abacApproval,
+        reason:
+          `policy ${abac.policyName ? `'${abac.policyName}'` : (abac.policyId ?? "")} requires approval for this ${input.resource.type} call, ` +
+          "and an ABAC approval hold cannot be queued on this call type yet; nothing was sent",
+        ruleChain: decision.ruleChain,
+        matchedApprovalRuleIds: decision.matchedApprovalRuleIds,
+      };
+    }
+    return decision;
   } catch (err) {
     return governedCoreErrorDecision(input.resource, err);
   }
