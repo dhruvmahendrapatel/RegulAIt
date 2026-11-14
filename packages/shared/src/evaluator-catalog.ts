@@ -32,6 +32,7 @@ import { EVAL_SCORER_KINDS, evalScorerRegistry, isDeterministicScorer, type Eval
 import { GUARDRAIL_DETECTOR_IDS, type GuardrailDetectorId } from "./guardrails.js";
 import { RED_TEAM_ATTACK_CLASSES, redTeamAttackClassRegistry, type RedTeamAttackClass } from "./redteam.js";
 import { DEFAULT_COMPLIANCE_PACKS } from "./compliance-packs.js";
+import { ATLAS_TECHNIQUES_RELEASE, REDTEAM_CLASS_ATLAS_TECHNIQUES, atlasTechniqueRef } from "./atlas-redteam-map.js";
 import { isNistAiRmfSubcategory, normaliseNistAiRmfId } from "./nist-ai-rmf-subcategories.js";
 import {
   OWASP_AGENTIC_NAMES,
@@ -53,6 +54,9 @@ export interface EvaluatorRefs {
   euAiAct: readonly string[];
   /** vendored OWASP ids, e.g. `owasp:llm:01`, `owasp:agentic:asi02` */
   owasp: readonly string[];
+  /** ADR-0293: MITRE ATLAS technique controls of the `mitre-atlas-techniques` import,
+   * e.g. `mitre-atlas-techniques:AML.T0051`. Red-team classes only, from `atlas-redteam-map.ts`. */
+  mitreAtlas: readonly string[];
 }
 
 export interface CatalogEvaluator {
@@ -84,6 +88,7 @@ const refs = (r: Partial<EvaluatorRefs>): EvaluatorRefs => ({
   iso42001: r.iso42001 ?? [],
   euAiAct: r.euAiAct ?? [],
   owasp: r.owasp ?? [],
+  mitreAtlas: r.mitreAtlas ?? [],
 });
 
 /** quality scorers: validity and reliability, measured against a test set */
@@ -255,7 +260,7 @@ export function evaluatorCatalog(): CatalogEvaluator[] {
     limits: c.limits,
     deterministic: false,
     runnableOn: ["redteam"],
-    refs: REDTEAM_CLASS_REFS[c.id],
+    refs: { ...REDTEAM_CLASS_REFS[c.id], mitreAtlas: REDTEAM_CLASS_ATLAS_TECHNIQUES[c.id].map(atlasTechniqueRef) },
   }));
   return [...scorers, ...detectors, ...classes];
 }
@@ -276,7 +281,13 @@ export function externalScorerCatalogEntry(scorer: { name: string; scorerKinds: 
       "The vendor's opinion, governed and recorded but not validated by this platform. It inherits the references of the metrics it claims to serve.",
     deterministic: false,
     runnableOn: ["dataset"],
-    refs: { nistAiRmf: pick("nistAiRmf"), iso42001: pick("iso42001"), euAiAct: pick("euAiAct"), owasp: pick("owasp") },
+    refs: {
+      nistAiRmf: pick("nistAiRmf"),
+      iso42001: pick("iso42001"),
+      euAiAct: pick("euAiAct"),
+      owasp: pick("owasp"),
+      mitreAtlas: pick("mitreAtlas"),
+    },
   };
 }
 
@@ -335,13 +346,17 @@ export function catalogReferenceProblems(entries: readonly CatalogEvaluator[] = 
     for (const r of e.refs.owasp) {
       if (!owasp.has(r)) out.push(`${e.id}: '${r}' is not a vendored OWASP id`);
     }
+    // the ids themselves are checked against the vendored ATLAS release by atlas-redteam-map.test.ts
+    for (const r of e.refs.mitreAtlas) {
+      if (!/^mitre-atlas-techniques:AML\.T\d{4}(\.\d{3})?$/.test(r)) out.push(`${e.id}: '${r}' is not an ATLAS technique ref`);
+    }
   }
   return out;
 }
 
 /** all of an evaluator's references as one list of control-shaped strings */
 export function evaluatorRefList(e: Pick<CatalogEvaluator, "refs">): string[] {
-  return [...e.refs.nistAiRmf, ...e.refs.iso42001, ...e.refs.euAiAct, ...e.refs.owasp];
+  return [...e.refs.nistAiRmf, ...e.refs.iso42001, ...e.refs.euAiAct, ...e.refs.owasp, ...e.refs.mitreAtlas];
 }
 
 /**
@@ -391,7 +406,8 @@ export function evaluatorTestStatus(runs: number, passedRuns: number): Evaluator
 
 export const EVALUATOR_CATALOG_NOTE =
   "Every evaluator cites the controls it is evidence for: NIST AI RMF subcategories, ISO/IEC 42001 and EU AI Act " +
-  "pack controls, and OWASP ids (vendored from promptfoo's MIT framework tables, release " +
-  `${PROMPTFOO_FRAMEWORKS_SOURCE.release}). The mapping is RegulAIt's, authored against the public catalogues — a ` +
+  "pack controls, OWASP ids (vendored from promptfoo's MIT framework tables, release " +
+  `${PROMPTFOO_FRAMEWORKS_SOURCE.release}) and, for red-team classes, MITRE ATLAS techniques (release ` +
+  `${ATLAS_TECHNIQUES_RELEASE}). The mapping is RegulAIt's, authored against the public catalogues — a ` +
   "starting point, not legal advice. A control counts as TESTED only from a completed run that passed in the " +
   "period; an evaluator that did not run is 'not run', never passed.";

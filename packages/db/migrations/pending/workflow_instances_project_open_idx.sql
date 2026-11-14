@@ -1,0 +1,13 @@
+-- ADR-0283 (lane L5; the plan-gate index fragment of ADR-0250, PR #720 review finding 4). Hand-authored (never
+-- drizzle-kit generate). This file runs nothing that changes the schema, and no row is read or written.
+--
+-- The index is
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS "workflow_instances_project_open_idx" ON "workflow_instances" ("project_id")
+--     WHERE "status" NOT IN ('completed', 'aborted', 'denied', 'rolled_back')
+-- and it serves `guardProjectPlanOnly`, which reads a project's non-terminal instances on every mutating invoke, run
+-- and compat call and every MCP write tool, and the retry worker's open-instance reads.
+--
+-- Like 0210, it is built CONCURRENTLY so a build never blocks workflow writes, which the migrator's one transaction
+-- cannot do. The statement lives in `CONCURRENT_INDEXES` in `packages/db/src/migrate.ts`, and `runMigrations` builds it
+-- after `migrate`, outside any transaction, once this file's slug (or, after assign-at-merge, its tag) is journalled.
+SELECT 1;
