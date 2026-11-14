@@ -38,7 +38,8 @@ dependencies vendored at build, against a real gateway (auth, governed allow and
 attribution, audit); CI job `client-compat.yml` on compat/MCP paths plus nightly. Fixed on the way: the SSE shims forced
 `Connection: keep-alive`. Follow-ups: ~~a governed `/v1/responses` shim (laravel/ai's default `openai` driver needs it)~~ **built
 2026-11-14 ([ADR-0287](../decisions/0287-responses-api-compat-shim.md)): stateless, so clients send `store: false`**;
-provider-shaped 401s on compat routes (the shared auth hook answers `{"error":"unauthenticated"}`); dart_mcp has no HTTP
+~~provider-shaped 401s on compat routes (the shared auth hook answers `{"error":"unauthenticated"}`)~~ **built
+2026-11-14 ([ADR-0288](../decisions/0288-provider-shaped-compat-401s.md)): re-enveloped in `onSend`, auth hook untouched**; dart_mcp has no HTTP
 transport of its own.
 
 **P28 — A permissively licensed injection and harm classifier. Built (ADR-0247); two owner decisions open.** Llama Guard and Prompt Guard are excluded by the Llama licence (ADR-0176/0177). PIGuard (MIT) is the default injection classifier and ProtectAI v2 a build-time alternative; toxic-bert stays for harm with our own labels; both are served as parity-checked ONNX with no PyTorch at run time. On the five ADR-0244 sets PIGuard has pooled recall 79.4% and benign FPR 19.1% (ProtectAI 77.8% / 30.0%), but no model meets a 15% benign-FPR bar on every set (web-agent: PIGuard 72%, ProtectAI 50%). Open: (1) which model is the default; (2) PIGuard's CC BY-NC training sources, or (c) a fine-tune of deberta-v3-base on permissively licensed agent-style data (needs a GPU).
@@ -299,7 +300,7 @@ caught on read. **The sweeps buy timeliness, never correctness.**
   a chat turn inherit the full entitlement set of the bound user, or a narrower one? Until those are
   answered this stays queued — building it first would decide them by accident.
 
-- **S17 — GitHub Copilot is invisible to shadow-AI discovery (opened 2026-09-19).** Measured:
+- ~~**S17 — GitHub Copilot is invisible to shadow-AI discovery (opened 2026-09-19).**~~ **CLOSED 2026-11-14 (lane L10):** catalogue v2 already carried the Copilot API, proxy, origin-tracker and telemetry hosts (verified 2026-10-17); they were re-checked against the Copilot allow-list reference on 2026-11-14 and still match it, and `SHADOW_AI_CATALOG_V3` adds the documented cloud-session WebSocket hosts (`production-copilot-host*.webpubsub.azure.com`). Detection only, as below. Measured:
   `packages/shared/src/shadow-discovery.ts` carries **37 endpoint signatures**, and the only Copilot
   entry is `ep-microsoft-copilot-web` → `copilot.microsoft.com`, annotated in our own code as
   *"Browser usage, not an API integration."* **There is no GitHub Copilot signature at all**, so the

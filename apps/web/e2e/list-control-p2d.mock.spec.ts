@@ -6,7 +6,9 @@
  *  - the golden cases (GET /v1/governance/decision-regression/cases, built in memory on the server);
  *  - access recommendations' findings per rule (GET /v1/recommendations/access?rule=…, built in memory);
  *  - the Inbox's "Recently decided" (GET /v1/approvals with the decided statuses), which starts folded, is not read
- *    until it is opened, and folds again over the list's own controls (the kit's `listControl`, owner 2026-11-06).
+ *    until it is opened, and folds again over the list's own controls (the kit's `listControl`, owner 2026-11-06);
+ *  - the Optimization page's usage events card, which folds the same way, with its count and its unattributed and
+ *    refused flags from the page's totals read, so nothing that warns is folded away.
  *
  * For each: rows per page 10, 50, 100 and All; a header click asks the server for the sort; the gear hides an
  * optional column and keeps a required one; Download Excel asks for the columns on screen, in order, with the same
@@ -38,6 +40,14 @@ const USAGE = Array.from({ length: 212 }, (_, i) => ({
   projectId: i % 5 === 0 ? null : "p1",
   refusal: i % 17 === 0,
 }));
+// the totals read (limit=1) counts every row, flagged ones included
+const USAGE_TOTALS = {
+  events: USAGE.length,
+  costUsd: 12.5,
+  measuredCostSavedUsd: 0.4,
+  unattributed: USAGE.filter((u) => u.projectId == null).length,
+  refused: USAGE.filter((u) => u.refusal).length,
+};
 const outcome = (tier: string) => ({ tier, reasons: [], frameworks: [], requiredRoles: [], requiredTests: [], suggestedControls: [], approverRouting: "standard" });
 const CASES = Array.from({ length: 64 }, (_, i) => ({
   id: `22222222-2222-4222-8222-${String(i).padStart(12, "0")}`,
@@ -201,7 +211,7 @@ async function mockApi(page: Page): Promise<Capture> {
       return json(route, contract(p, url.searchParams));
     }
     // the legacy reads each page still makes beside its list
-    if (p === "/v1/usage-events") return json(route, { events: USAGE.slice(0, 100), totals: { events: USAGE.length, costUsd: 12.5, measuredCostSavedUsd: 0.4 } });
+    if (p === "/v1/usage-events") return json(route, { events: USAGE.slice(0, 1), totals: USAGE_TOTALS });
     if (p === "/v1/cost-events") return json(route, { events: [], totals: [] });
     if (p === "/v1/recommendations/access") return json(route, REPORT);
     if (p === "/v1/governance/decision-regression/cases") return json(route, { cases: CASES, versions: { euAiActRulesetVersion: 1, intakeAssistVersion: "2026-10-06.1" }, outcomeFields: [] });
@@ -218,7 +228,8 @@ async function mockApi(page: Page): Promise<Capture> {
 
 /** a secondary card folds only once its content is long enough to need it: open it when it is folded */
 async function unfold(page: Page, title: string) {
-  await expect(page.getByText(title, { exact: true }).first()).toBeVisible();
+  // a folded header carries its count and flags beside the title, so the title is matched as a prefix
+  await expect(page.getByText(new RegExp(`^${title}`)).first()).toBeVisible();
   const fold = page.getByRole("button", { name: new RegExp(`^${title}`) });
   if ((await fold.count()) && (await fold.getAttribute("aria-expanded")) === "false") await fold.click();
 }
@@ -538,5 +549,76 @@ test.describe("the Inbox's Recently decided folds over the list control (X6b, li
     await expect(status(page)).toHaveText(/^1–10 of /);
     expect(decidedReads(cap).length).toBeGreaterThan(0);
     await expect(page.getByRole("button", { name: /^Recently decided/ })).toHaveAttribute("aria-expanded", "true");
+  });
+});
+
+test.describe("Optimization's usage events fold over the list control (X6b, listControl)", () => {
+  const TITLE = "Usage events — measured actuals";
+  const usageReads = (cap: Capture) => cap.lists.filter((u) => u.pathname === "/v1/usage-events");
+  const fold = (page: Page) => page.getByRole("button", { name: new RegExp(`^${TITLE}`) });
+
+  test("starts folded with the totals' count and flags, reads nothing until opened, and is axe clean", async ({ page }) => {
+    const cap = await mockApi(page);
+    await page.goto("/ui/admin/optimization");
+    await expect(fold(page)).toHaveAttribute("aria-expanded", "false");
+    // the count and the flags come from the totals read, which covers every row: nothing that warns is folded away
+    await expect(fold(page)).toContainText(`${USAGE_TOTALS.events} events`);
+    await expect(fold(page)).toContainText(`${USAGE_TOTALS.unattributed} unattributed`);
+    await expect(fold(page)).toContainText(`${USAGE_TOTALS.refused} refused`);
+    // the cost events list beside it loads; the usage events list is never read while folded
+    await expect(page.locator('[data-list="cost-events"]')).toBeVisible();
+    expect(usageReads(cap)).toEqual([]);
+    await expect(page.locator('[data-list="usage-events"]')).toHaveCount(0);
+    await expectAxeClean(page, "Optimization, usage events folded");
+
+    await fold(page).click();
+    await expect(fold(page)).toHaveAttribute("aria-expanded", "true");
+    const usage = page.locator('[data-list="usage-events"]');
+    await expect(usage.getByTestId("list-status")).toHaveText(`1–10 of ${n(USAGE.length)}`);
+    expect(usageReads(cap).length).toBeGreaterThan(0);
+    // the row-level badges are still there once open
+    await expect(usage.getByText("unattributed", { exact: true }).first()).toBeVisible();
+    await expectAxeClean(page, "Optimization, usage events open");
+  });
+
+  test("the fold is remembered across navigation, and a folded return reads nothing", async ({ page }) => {
+    const cap = await mockApi(page);
+    await page.goto("/ui/admin/optimization");
+    await fold(page).click();
+    await expect(page.locator('[data-list="usage-events"]').getByTestId("list-status")).toHaveText(/^1–10 of /);
+    await page.goto("/ui/inbox");
+    await expect(page.getByRole("heading", { name: "Inbox" })).toBeVisible();
+    await page.goto("/ui/admin/optimization");
+    await expect(fold(page)).toHaveAttribute("aria-expanded", "true");
+    await expect(page.locator('[data-list="usage-events"]').getByTestId("list-status")).toHaveText(/^1–10 of /);
+
+    await fold(page).click();
+    await expect(fold(page)).toHaveAttribute("aria-expanded", "false");
+    await page.goto("/ui/inbox");
+    await expect(page.getByRole("heading", { name: "Inbox" })).toBeVisible();
+    const before = usageReads(cap).length;
+    await page.goto("/ui/admin/optimization");
+    await expect(fold(page)).toHaveAttribute("aria-expanded", "false");
+    await expect(page.locator('[data-list="cost-events"]')).toBeVisible();
+    expect(usageReads(cap).length).toBe(before);
+  });
+
+  test("a failed totals read is said outside the fold with Retry, and the count is unknown, never 0", async ({ page }) => {
+    let fail = true;
+    await mockApi(page);
+    await page.route(
+      (u) => u.pathname === "/v1/usage-events" && !u.searchParams.get("sort") && u.searchParams.get("format") !== "csv",
+      (route) => (fail ? json(route, { error: "unavailable" }, 503) : route.fallback()),
+    );
+    await page.goto("/ui/admin/optimization");
+    const alert = page.getByRole("alert").filter({ hasText: "Couldn't load the usage totals" });
+    await expect(alert).toBeVisible({ timeout: 15_000 });
+    await expect(fold(page)).toHaveAttribute("aria-expanded", "false");
+    await expect(fold(page)).not.toContainText(/\d+ events?/);
+    await expectAxeClean(page, "Optimization, usage totals failed");
+    fail = false;
+    await alert.getByRole("button", { name: "Retry" }).click();
+    await expect(fold(page)).toContainText(`${USAGE_TOTALS.events} events`);
+    await expect(alert).toHaveCount(0);
   });
 });
