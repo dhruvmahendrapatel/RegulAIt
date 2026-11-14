@@ -11,7 +11,7 @@ import { DataList, type DataColumn } from "../../../ui/DataList";
 import type { UsageEventsResponse } from "../../../api/types";
 import { fmtUsd } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Select, Table } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, ErrorState, Field, Select, Table } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
 import { BarChart, Stat, downloadCsv, optionEls, useNameMaps, useUsers, userOpts } from "../adminKit";
 import a from "../admin.module.css";
@@ -42,6 +42,15 @@ export default function OptimizationPage() {
 
   const costFilters = useMemo(() => ({ userId: userId || undefined }), [userId]);
   const usageFilters = useMemo(() => ({ userId: userId || undefined }), [userId]);
+  const unattributed = usage.data?.totals?.unattributed ?? 0;
+  const refused = usage.data?.totals?.refused ?? 0;
+  const usageAttention =
+    unattributed > 0 || refused > 0 ? (
+      <>
+        {unattributed > 0 && <Badge tone="warn">{unattributed} unattributed</Badge>}
+        {refused > 0 && <Badge tone="danger">{refused} refused</Badge>}
+      </>
+    ) : undefined;
 
   return (
     <>
@@ -143,7 +152,30 @@ export default function OptimizationPage() {
           />
         </Card>
 
-        <Card title="Usage events — measured actuals" contain count={measured.events ?? 0} countNoun={["event", "events"]}>
+        {/* the folded header cannot count what the totals read could not see: the failure is said outside the fold */}
+        {usage.isError && (
+          <ErrorState
+            title="Couldn't load the usage totals"
+            message="Unattributed and refused calls are not counted while the totals are unavailable. Open the usage events to see each event."
+            onRetry={() => void usage.refetch()}
+          />
+        )}
+
+        {/* A secondary section, so it starts folded (X6b) with the Inbox's "Recently decided" opt-in: `listControl` lets
+            it fold over the list's own controls, and the list is read only once the section is opened. The count and
+            the flags come from the totals read above, which covers every row, so the header never says 0 for unknown
+            and unattributed or refused calls stay in view while it is folded. A failed list read shows the list's
+            ErrorState with Retry, which keeps the section open */}
+        <Card
+          title="Usage events — measured actuals"
+          contain
+          foldable
+          listControl
+          startCollapsed
+          count={usage.data?.totals?.events ?? null}
+          countNoun={["event", "events"]}
+          attention={usageAttention}
+        >
           {/* ADR-0226: every event, paged, sorted and exported by the server under the same per-user filter */}
           <DataList<UsageRow>
             listId="usage-events"
