@@ -15,7 +15,14 @@ describe("ADR-0304 migrate-job", () => {
         },
         migrate: async () => {
           calls.push("migrate");
-          if (fail) throw new Error("Failed query: x", { cause: new Error("lock timeout") });
+          if (fail) {
+            // drizzle's shape: the message quotes the query and every bound value; the cause carries the SQLSTATE
+            const cause = Object.assign(new Error("canceling statement due to lock timeout"), { code: "55P03", severity: "ERROR" });
+            throw Object.assign(new Error("Failed query: insert into t values ($1)\nparams: secret-value", { cause }), {
+              query: "insert into t values ($1)",
+              params: ["secret-value"],
+            });
+          }
         },
         log: (l: string) => void lines.push(l),
       },
@@ -38,7 +45,12 @@ describe("ADR-0304 migrate-job", () => {
     const h = harness(true);
     expect(await runMigrateJob({ DATABASE_URL: "postgres://x" }, h.deps)).toBe(1);
     expect(h.calls).toEqual(["connect postgres://x", "migrate", "close"]);
-    expect(h.lines.join("\n")).toContain("cause: lock timeout");
-    expect(h.lines.join("\n")).not.toContain("postgres://x");
+    const out = h.lines.join("\n");
+    // ADR-0167 N8 R1: the SQLSTATE names the reason; the query and its bound values never reach the line.
+    expect(out).toContain("migrate-job: migration failed");
+    expect(out).toContain("SQLSTATE 55P03");
+    expect(out).not.toContain("secret-value");
+    expect(out).not.toContain("Failed query");
+    expect(out).not.toContain("postgres://x");
   });
 });
