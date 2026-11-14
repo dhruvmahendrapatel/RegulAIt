@@ -164,8 +164,31 @@ const stageSchema = z.object({
       }),
     )
     .optional(),
+  /** ADR-0283 (P30): automatic retry with backoff after a retryable
+   * `execution_failed` on an EXECUTED stage (git_operation, deployment, a
+   * build with a nested run, a check stage with named checks; never a
+   * rollback, whose failure is an operator situation).
+   * Absent = no automatic retry (the strict default, ADR-0180): the stage
+   * waits at awaiting_execution for `/advance`, as before. A failed CHECK is
+   * never retried — `check_failed` is a verdict, not an execution error.
+   * Bounded so a template cannot turn a broken stage into a hot loop. */
+  retry: z
+    .object({
+      /** automatic attempts after the first failure */
+      maxAttempts: z.number().int().min(1).max(10),
+      /** delay before the first retry */
+      delaySeconds: z.number().int().min(5).max(3600).default(30),
+      /** exponential backoff (with jitter) between attempts */
+      backoff: z.boolean().default(true),
+      /** the ceiling backoff never passes */
+      maxDelaySeconds: z.number().int().min(5).max(86_400).default(3600),
+    })
+    .strict()
+    .refine((r) => r.maxDelaySeconds >= r.delaySeconds, { message: "retry.maxDelaySeconds must be at least retry.delaySeconds" })
+    .optional(),
 });
 export type Stage = z.infer<typeof stageSchema>;
+export type StageRetryPolicy = NonNullable<Stage["retry"]>;
 
 /** OPTIMIZATION §9: workflow-level bias for pillar 6's optimizer. Strictness
  * order (strictest last): cost-sensitive < standard < quality-sensitive. */
@@ -216,6 +239,14 @@ export const workflowDefinitionSchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: `stage '${s.id}' (${s.type}) cannot carry offlineAutoPass — only an automated_check stage with named checks can`,
+        });
+      }
+      // ADR-0283: a retry policy only means something on a stage the gateway
+      // executes; anywhere else it is a promise nothing keeps — refused loudly
+      if (s.retry !== undefined && !isExecutedStage(s)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `stage '${s.id}' (${s.type}) cannot carry retry — only a stage that completes through execution can (git_operation, deployment, automated_build with a run, automated_check with named checks)`,
         });
       }
       if (s.type === "artifact_generation" && !s.output) {
@@ -622,6 +653,36 @@ function stageAt(def: WorkflowDefinition, index: number): Stage | undefined {
 }
 
 /**
+ * The stages that complete through `execution_succeeded` / `execution_failed`
+ * (the gateway executes them). One definition, shared by the transition guard,
+ * the retry-policy validation (ADR-0283) and the gateway. A rollback stage is
+ * executed too but ends through `rolled_back`; a rollback that fails is an
+ * operator situation (it waits for `/advance`) and is never retried
+ * automatically.
+ */
+export function isExecutedStage(stage: Stage): boolean {
+  return (
+    stage.type === "git_operation" ||
+    stage.type === "deployment" ||
+    (stage.type === "automated_build" && stage.run !== undefined) ||
+    (stage.type === "automated_check" && (stage.checks?.length ?? 0) > 0)
+  );
+}
+
+/**
+ * ADR-0283: the delay before automatic retry number `attempt` (1-based), in
+ * seconds, without jitter: `delaySeconds` for the first, then doubling when
+ * `backoff` is on, never above `maxDelaySeconds`. The queue applies its own
+ * jittered backoff between attempts (pg-boss `retryBackoff`); this is the
+ * deterministic bound the gateway reports and tests against.
+ */
+export function retryDelaySeconds(policy: StageRetryPolicy, attempt: number): number {
+  if (attempt < 1) throw new RangeError("attempt is 1-based");
+  const base = policy.backoff ? policy.delaySeconds * 2 ** Math.min(attempt - 1, 16) : policy.delaySeconds;
+  return Math.min(base, policy.maxDelaySeconds);
+}
+
+/**
  * §2 stage 2 (ADR-0079) — THE PLAN-ONLY PREDICATE, owned by the kernel.
  *
  * Returns the `planning` stage an instance is currently RESTING at, or null.
@@ -919,12 +980,7 @@ export function transition(
   }
 
   if (event.kind === "execution_succeeded" || event.kind === "execution_failed") {
-    const executable =
-      current?.type === "git_operation" ||
-      current?.type === "deployment" ||
-      (current?.type === "automated_build" && current.run !== undefined) ||
-      (current?.type === "automated_check" && (current.checks?.length ?? 0) > 0);
-    if (!current || current.id !== event.stageId || !executable) {
+    if (!current || current.id !== event.stageId || !isExecutedStage(current)) {
       throw new WorkflowStateError(`instance is not executing stage '${event.stageId}'`);
     }
     if (event.kind === "execution_failed") {

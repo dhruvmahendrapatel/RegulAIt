@@ -3289,7 +3289,13 @@ export const workflowInstances = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("workflow_instances_status_idx").on(t.status)],
+  (t) => [
+    index("workflow_instances_status_idx").on(t.status),
+    // ADR-0283: built CONCURRENTLY by runMigrations (CONCURRENT_INDEXES), not by a migration statement
+    index("workflow_instances_project_open_idx")
+      .on(t.projectId)
+      .where(sql`${t.status} NOT IN ('completed', 'aborted', 'denied', 'rolled_back')`),
+  ],
 );
 
 // Append-only per-instance history (§5 dashboard: full history, who, when).

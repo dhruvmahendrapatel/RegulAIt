@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   currentPlanningStage,
   initialState,
+  isExecutedStage,
   matchTemplates,
+  retryDelaySeconds,
   mergeDefinitions,
   transition,
   validateDefinition,
@@ -841,5 +843,69 @@ describe("ADR-0187 engine bindings (PR #203 review [14])", () => {
     expect(workflowDefinitionSchema.safeParse(def("promptfoo")).success).toBe(true);
     expect(workflowDefinitionSchema.safeParse(def("garak")).success).toBe(true);
     expect(workflowDefinitionSchema.safeParse(def("modelscan")).success).toBe(false);
+  });
+});
+
+describe("ADR-0283: a stage retry policy is an executed-stage-only, bounded opt-in", () => {
+  const base = [{ id: "intake", type: "trigger" }] as const;
+  const git = { id: "branch", type: "git_operation", action: "create_branch", connection: "gh", repo: "acme/app" } as const;
+
+  it("is absent by default — no automatic retry unless the template opts in", () => {
+    const def = validateDefinition({ workflow: "default", stages: [...base, git] });
+    expect(def.stages[1]!.retry).toBeUndefined();
+  });
+
+  it("fills the delay defaults and keeps the attempts the template set", () => {
+    const def = validateDefinition({ workflow: "r", stages: [...base, { ...git, retry: { maxAttempts: 3 } }] });
+    expect(def.stages[1]!.retry).toEqual({ maxAttempts: 3, delaySeconds: 30, backoff: true, maxDelaySeconds: 3600 });
+  });
+
+  it.each([
+    [{ maxAttempts: 0 }],
+    [{ maxAttempts: 11 }],
+    [{ maxAttempts: 2, delaySeconds: 1 }],
+    [{ maxAttempts: 2, delaySeconds: 600, maxDelaySeconds: 60 }],
+    [{ maxAttempts: 2, jitter: true }],
+    [{ maxAttempts: "3" }],
+  ])("refuses an out-of-bounds or unknown policy %j", (retry) => {
+    expect(() => validateDefinition({ workflow: "bad", stages: [...base, { ...git, retry }] })).toThrow();
+  });
+
+  it.each([
+    [{ id: "approve", type: "human_approval", approvers: ["requesting_user"] }],
+    [{ id: "checks", type: "automated_check" }],
+    [{ id: "build", type: "automated_build", scope: "x" }],
+    [{ id: "plan", type: "planning" }],
+  ])("is refused on a stage that does not complete through execution: %j", (stage) => {
+    expect(() =>
+      validateDefinition({ workflow: "bad", stages: [...base, { ...stage, retry: { maxAttempts: 2 } }] }),
+    ).toThrow(/cannot carry retry/);
+  });
+
+  it("is accepted on a check stage with named checks and on a deployment", () => {
+    const def = validateDefinition({
+      workflow: "ok",
+      stages: [
+        ...base,
+        { id: "checks", type: "automated_check", checks: ["unit"], retry: { maxAttempts: 2 } },
+      ],
+    });
+    expect(isExecutedStage(def.stages[1]!)).toBe(true);
+  });
+
+  it("execution_failed still leaves the stage awaiting execution (the retry is the gateway's, never the kernel's)", () => {
+    const def = validateDefinition({ workflow: "r", stages: [...base, { ...git, retry: { maxAttempts: 2 } }] });
+    const started = transition(def, initialState(def), { kind: "start" });
+    expect(started.state.status).toBe("awaiting_execution");
+    const failed = transition(def, started.state, { kind: "execution_failed", stageId: "branch", error: "boom" });
+    expect(failed.state.status).toBe("awaiting_execution");
+    expect(failed.effects).toEqual([]);
+  });
+
+  it("retryDelaySeconds doubles from the base delay and never passes the ceiling", () => {
+    const p = { maxAttempts: 10, delaySeconds: 30, backoff: true, maxDelaySeconds: 300 };
+    expect([1, 2, 3, 4, 5, 6].map((n) => retryDelaySeconds(p, n))).toEqual([30, 60, 120, 240, 300, 300]);
+    expect(retryDelaySeconds({ ...p, backoff: false }, 5)).toBe(30);
+    expect(() => retryDelaySeconds(p, 0)).toThrow(RangeError);
   });
 });
