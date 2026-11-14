@@ -33,7 +33,7 @@ const SPLITS = [
     listId: "workload-identities",
     total: 27,
     back: "Workload identities",
-    warnings: ["External child delegation unavailable", "Settings · 1 to review"],
+    warnings: ["External child delegation unavailable", "Settings · 1 warning"],
   },
   {
     name: "SSO",
@@ -46,7 +46,7 @@ const SPLITS = [
     listId: "link-requests",
     total: 12,
     back: "SSO & sessions",
-    warnings: ["SAML providers · 1 to review", "expired", "not asserted"],
+    warnings: ["SAML providers · 1 warning", "expired", "not asserted"],
   },
   {
     name: "Agents",
@@ -166,13 +166,50 @@ test("Workload identities: grant proposals preview on request and open their own
   await expect(page.getByRole("heading", { name: "spiffe://example.test/regulait/agent/credit-limit-00" })).toBeVisible();
 });
 
-test("the settings tabs: a hidden tab says what it holds that needs review, and opening it shows it", async ({ page }) => {
+test("the settings tabs: a hidden tab says what it holds that needs review (postureTabs), and opening it shows it", async ({ page }) => {
   await mockApi(page);
   await page.goto("/ui/admin/sso");
-  await page.getByRole("tab", { name: "SAML providers · 1 to review" }).click();
+  await page.getByRole("tab", { name: "SAML providers · 1 warning" }).click();
   await expect(page.getByText("any", { exact: true }).first()).toBeVisible();
   await page.goto("/ui/admin/workload-identities");
-  await page.getByRole("tab", { name: "Settings · 1 to review" }).click();
+  await page.getByRole("tab", { name: "Settings · 1 warning" }).click();
   await expect(page.getByText("relaxed (audited)").first()).toBeVisible();
   await expectAxeClean(page, "identity settings tab");
+});
+
+// review of #642: a failed read is unknown, never a clean tab; the kit panels keep a half-filled form across a tab switch
+test("a failed read counts as unknown on its tab, never as nothing to review", async ({ page }) => {
+  await mockApi(page);
+  const fail = (route: import("@playwright/test").Route) => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "unavailable" }) });
+  await page.route((u) => u.pathname === "/v1/auth/saml-providers", fail);
+  await page.route((u) => u.pathname === "/v1/org/settings", fail);
+  await page.goto("/ui/admin/sso");
+  await expect(page.getByRole("tab", { name: "SAML providers · 1 unknown" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /^Sessions & step-up · \d+ unknown$/ })).toBeVisible();
+  await page.goto("/ui/admin/workload-identities");
+  await expect(page.getByRole("tab", { name: /^Settings · \d+ unknown$/ })).toBeVisible();
+});
+
+test("a half-filled provider form survives a tab switch (kit TabPanel, review of #642)", async ({ page }) => {
+  await mockApi(page);
+  await page.goto("/ui/admin/sso");
+  const oidc = page.getByRole("tabpanel", { name: "OIDC providers" });
+  const field = oidc.getByRole("textbox").first();
+  await field.fill("half-typed");
+  await page.getByRole("tab", { name: /^SAML providers/ }).click();
+  await expect(oidc).toBeHidden();
+  await page.getByRole("tab", { name: "OIDC providers" }).click();
+  await expect(oidc.getByRole("textbox").first()).toHaveValue("half-typed");
+});
+
+test("a failed workspaces read on the identity-links page is an error with Retry, not an empty select (review of #642)", async ({ page }) => {
+  await mockApi(page);
+  await page.route(
+    (u) => u.pathname === "/v1/chatops/connections",
+    (route) => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "unavailable" }) }),
+  );
+  await page.goto("/ui/admin/chatops/identity-links");
+  await expect(page.getByText("Couldn't load the chat workspaces")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry" }).first()).toBeVisible();
+  await expect(page.getByLabel("Workspace")).toBeDisabled();
 });

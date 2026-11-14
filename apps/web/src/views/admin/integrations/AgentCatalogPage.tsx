@@ -4,7 +4,7 @@
  * on the server). The agents overview keeps a five-row preview with the disabled count in its heading.
  */
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
-import { Route, Routes, useLocation } from "react-router-dom";
+import { Link, Route, Routes, useLocation } from "react-router-dom";
 import AgentsScreen from "./AgentsScreen";
 import AgentStewardshipPage from "./AgentStewardshipPage";
 import type { AdminAgent } from "../../../api/adminTypes";
@@ -68,7 +68,7 @@ export default function AgentCatalogPage() {
       <PageHeader title="Agent catalog" sub="Every registered agent; registering one grants nobody anything." />
       <div className={v.stack}>
         <Card flush title="Catalog">
-          <div className={a.formRow} style={{ padding: "var(--s1) var(--s2) 0" }}>
+          <div className={`${a.formRow} ${v.cardToolbar}`}>
             {narrowed ? (
               <>
                 <span className={v.dim}>Showing the linked agent only.</span>
@@ -191,7 +191,7 @@ export default function AgentCatalogPage() {
               },
             ]}
             rowKey={(x) => x.id}
-            empty={<EmptyState title="No agents registered" body="Register the first agent below." />}
+            empty={<EmptyState title="No agents registered" body="Register the first agent in the Register tab of Agents." action={<Link to="/admin/agents">Go to Agents</Link>} />}
           />
         </Card>
 

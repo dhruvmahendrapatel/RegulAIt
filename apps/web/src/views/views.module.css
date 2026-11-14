@@ -213,3 +213,7 @@
 .flushBottom {
   margin-bottom: 0;
 }
+/* a filter or action row at the top of a list card, inset to the card's own padding (review of #642: no inline style) */
+.cardToolbar {
+  padding: var(--s1) var(--s2) 0;
+}

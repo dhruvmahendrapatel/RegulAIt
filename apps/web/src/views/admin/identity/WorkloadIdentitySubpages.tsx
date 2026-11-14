@@ -17,6 +17,7 @@ import { workloadKindLabels, type WorkloadIdentityView } from "./workloadIdentit
 import { GrantProposals, IdentityConfirm, StatusBadge, useIdentityWrite, type Confirmation } from "./WorkloadIdentitiesPage";
 import { fmtDateTime } from "../../../api/format";
 import s from "./workloadIdentities.module.css";
+import v from "../../views.module.css";
 
 type WorkloadIdentityRow = WorkloadIdentityView & { stewardNames?: string | null };
 
@@ -29,7 +30,7 @@ export function WorkloadIdentitiesListPage() {
       <SubpageTrail parent="Workload identities" parentTo="/admin/workload-identities" current="Identities" />
       <PageHeader title="Identities" sub="Every agent principal's own identity, its stewards, environments and status." />
       <Card flush>
-        <div className={s.actions} style={{ padding: "var(--s1) var(--s2) 0" }}>
+        <div className={`${s.actions} ${v.cardToolbar}`}>
           <Field label="Status">
             <Select value={status} onChange={(e) => setStatus(e.target.value)}>
               <option value="">Any</option>

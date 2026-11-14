@@ -26,14 +26,14 @@ import {
   Table,
   Tabs,
   Textarea,
-  tabIds,
+  TabPanel,
 } from "../../../ui/kit";
-import { QueryGate, optionEls, roleOpts, useAction, useRoles, useUsers } from "../adminKit";
+import { QueryGate, optionEls, orgSettingsQuery, roleOpts, useAction, useRoles, useUsers } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 import { putOrgSettings, withStepUp } from "../../../stepup/stepUp";
 import { OrgSettingsCard } from "../settings/OrgSettingsCard";
-import { useSettingsToReview } from "../settings/orgSettingsReview";
+import { orgSettingsUnresolved, tabLabel, type Unresolved } from "../settings/postureTabs";
 import { fmtDateTime } from "../../../api/format";
 import { ListPreview } from "../../../ui/ListPreview";
 
@@ -44,8 +44,14 @@ export default function SsoPage() {
   const [tab, setTab] = useState("oidc");
   // what a hidden tab holds that needs review, from the same reads its cards use
   const saml = useQuery({ queryKey: ["admin", "saml-providers"], queryFn: () => api.get<{ providers: SamlProvider[] }>("/v1/auth/saml-providers") });
-  const samlToReview = (saml.data?.providers ?? []).filter((p) => !(p.allowedEmailDomains && p.allowedEmailDomains.length > 0) || p.allowIdpInitiated).length;
-  const stepUpToReview = useSettingsToReview(STEP_UP_KEYS);
+  // review of #642: a failed read counts as unknown and a pending one shows the bare name (postureTabs, ADR-0180)
+  const samlUnresolved: Unresolved | null = saml.isError
+    ? { unknown: 1, warnings: 0 }
+    : saml.data
+      ? { unknown: 0, warnings: saml.data.providers.filter((p) => !(p.allowedEmailDomains && p.allowedEmailDomains.length > 0) || p.allowIdpInitiated).length }
+      : null;
+  const settings = useQuery(orgSettingsQuery<OrgSettingsResponse>());
+  const stepUpUnresolved = orgSettingsUnresolved(STEP_UP_KEYS, { data: settings.data, failed: settings.isError });
   return (
     <>
       <PageHeader
@@ -86,27 +92,26 @@ export default function SsoPage() {
         <Tabs
           tabs={[
             { id: "oidc", label: "OIDC providers" },
-            { id: "saml", label: samlToReview > 0 ? `SAML providers · ${samlToReview} to review` : "SAML providers" },
-            { id: "sessions", label: stepUpToReview > 0 ? `Sessions & step-up · ${stepUpToReview} to review` : "Sessions & step-up" },
+            { id: "saml", label: tabLabel("SAML providers", samlUnresolved) },
+            { id: "sessions", label: tabLabel("Sessions & step-up", stepUpUnresolved) },
           ]}
           active={tab}
           onChange={setTab}
           idPrefix="sso"
           label="SSO settings"
         />
-        <div role="tabpanel" id={tabIds("sso", tab).panel} aria-labelledby={tabIds("sso", tab).tab} className={v.stack}>
-          {tab === "oidc" ? (
-            <OidcCard />
-          ) : tab === "saml" ? (
-            <SamlCard />
-          ) : (
-            <>
-              <SessionsPolicyCard />
-              {/* ADR-0186 A: which actions need a fresh second proof, and how long one lasts */}
-              <OrgSettingsCard title="Step-up for sensitive actions" keys={STEP_UP_KEYS} testId="sso-step-up-settings" helpInInfo />
-            </>
-          )}
-        </div>
+        {/* the kit panels stay mounted while hidden, so a half-filled provider form survives a tab switch (review of #642) */}
+        <TabPanel idPrefix="sso" id="oidc" active={tab}><div className={v.stack}>
+          <OidcCard />
+        </div></TabPanel>
+        <TabPanel idPrefix="sso" id="saml" active={tab}><div className={v.stack}>
+          <SamlCard />
+        </div></TabPanel>
+        <TabPanel idPrefix="sso" id="sessions" active={tab}><div className={v.stack}>
+          <SessionsPolicyCard />
+          {/* ADR-0186 A: which actions need a fresh second proof, and how long one lasts */}
+          <OrgSettingsCard title="Step-up for sensitive actions" keys={STEP_UP_KEYS} testId="sso-step-up-settings" helpInInfo />
+        </div></TabPanel>
       </div>
     </>
   );

@@ -21,7 +21,7 @@ export default function LicenceVerificationsPage() {
       <SubpageTrail parent="Licensing & seats" parentTo="/admin/licensing" current="Verification trail" />
       <PageHeader title="Verification trail" sub="Every install, operator-driven check and refusal on this deployment." />
       <Card flush>
-        <div className={v.row} style={{ padding: "var(--s1) var(--s2) 0" }}>
+        <div className={`${v.row} ${v.cardToolbar}`}>
           <Field label="Outcome">
             <Select value={ok} onChange={(e) => setOk(e.target.value)}>
               <option value="">Any</option>
