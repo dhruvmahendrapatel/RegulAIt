@@ -113,8 +113,12 @@ test.describe("agent inventory summary tiles", () => {
     await expectCounts(page, [4, 3, 2, 1, 3]);
     await page.getByRole("combobox").filter({ has: page.locator("option[value='all']") }).selectOption("all");
     // both chunks load (the second through the scroll sentinel or the fallback button)
+    // the sentinel may load it on its own and remove the button first, so a click is best-effort
     const more = page.getByRole("button", { name: /^Load next/ });
-    if (await more.isVisible().catch(() => false)) await more.click();
+    await expect(async () => {
+      if (await more.isVisible()) await more.click({ timeout: 1_000 }).catch(() => undefined);
+      await expect(tile(page, "Agents on this page").locator("dd")).toHaveText("5", { timeout: 1_000 });
+    }).toPass({ timeout: 20_000 });
     await expectCounts(page, [5, 3, 2, 1, 3]);
     // still responsive: the heading is reachable and no further reads are queued by re-renders
     const settled = reads;
