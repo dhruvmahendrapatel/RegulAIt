@@ -149,6 +149,9 @@ func (r *Reconciler) reconcile(ctx context.Context, in *v1alpha1.RegulaitInstall
 	if err := r.ensureInstallSecretsClaim(ctx, in); err != nil {
 		return ctrl.Result{}, err
 	}
+	if err := r.reportStorageClass(ctx, in); err != nil {
+		return ctrl.Result{}, err
+	}
 	if err := r.reconcileBackup(ctx, in, specChanged); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -300,6 +303,41 @@ func (r *Reconciler) ensureInstallSecretsClaim(ctx context.Context, in *v1alpha1
 		return client.IgnoreAlreadyExists(r.Create(ctx, pvc))
 	}
 	return err
+}
+
+// reportStorageClass makes an unnamed or mismatched StorageClass for the signing-key claim visible on every
+// reconcile (ADR-0304 §3): the claim holds keys unencrypted, so its protection at rest is the class's.
+func (r *Reconciler) reportStorageClass(ctx context.Context, in *v1alpha1.RegulaitInstallation) error {
+	if in.Spec.InstallSecretsClaimName != "" {
+		r.setCondition(in, v1alpha1.ConditionStorageClassNamed, metav1.ConditionTrue, "CustomerClaim",
+			"the install-secrets claim is the customer's own; its StorageClass is the customer's choice")
+		return nil
+	}
+	want := in.Spec.InstallSecretsStorageClassName
+	if want == "" {
+		msg := "the install-secrets claim (signing keys, unencrypted) uses the cluster's default StorageClass; set installSecretsStorageClassName to an encrypted class"
+		r.setCondition(in, v1alpha1.ConditionStorageClassNamed, metav1.ConditionFalse, "DefaultStorageClass", msg)
+		r.warn(in, "DefaultStorageClass", "Reconcile", msg)
+		return nil
+	}
+	live := &corev1.PersistentVolumeClaim{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(InstallSecretsClaim(in)), live); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if got := live.Spec.StorageClassName; got == nil || *got != want {
+		// A claim's class is immutable: the existing claim keeps the class it was created with.
+		have := "the cluster default"
+		if got != nil {
+			have = *got
+		}
+		msg := fmt.Sprintf("installSecretsStorageClassName is %s, but the existing install-secrets claim was created on %s; move the keys to a claim on the named class", want, have)
+		r.setCondition(in, v1alpha1.ConditionStorageClassNamed, metav1.ConditionFalse, "ClaimClassDiffers", msg)
+		r.warn(in, "ClaimClassDiffers", "Reconcile", msg)
+		return nil
+	}
+	r.setCondition(in, v1alpha1.ConditionStorageClassNamed, metav1.ConditionTrue, "Named",
+		fmt.Sprintf("the install-secrets claim uses StorageClass %s", want))
+	return nil
 }
 
 func (r *Reconciler) reconcileBackup(ctx context.Context, in *v1alpha1.RegulaitInstallation, specChanged bool) error {

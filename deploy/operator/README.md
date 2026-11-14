@@ -28,6 +28,10 @@ data key, database URL and bootstrap token, the backup policy, and the egress po
 5. It records `status.installedVersion` once the Deployment is available.
 
 Conditions: `SpecValid`, `BundleVerified`, `EgressRestricted`, `Migrated`, `BackupConfigured`, `Available`, `Ready`.
+`StorageClassNamed` is informational and not part of `Ready`. It is `False`, with a `Warning` event on every
+reconcile, when the operator's install-secrets claim uses the cluster's default StorageClass (`DefaultStorageClass`)
+or was created on a class other than the one now named (`ClaimClassDiffers`). The claim holds signing keys
+unencrypted.
 
 ## Security defaults
 
