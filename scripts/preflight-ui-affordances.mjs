@@ -54,6 +54,9 @@ export const DELIBERATELY_API_ONLY = new Map([
   // census KNOWN_UI_GAPS). RAISED for the master's review on the PR: delete these entries when the controls land
   ["/v1/a2a/agents/:x/role-grants/:x", "removing a role's access to a remote agent: API-only until the controls on #453 (lane L2 brief)"],
   ["/v1/a2a/agents/:x/revocations/:x", "lifting a person's revocation on a remote agent: API-only until the controls on #453 (lane L2 brief)"],
+  // Lane L2 (ADR-0231 B3): the Connect SAP Agent Gateway panel is slice B5 on #453
+  ["/v1/a2a/gateway-connections/:x", "removing an agent gateway connection (step-up): API-only until the B5 panel on #453 (lane L2 brief)"],
+  ["/v1/a2a/agents/:x/pending-card", "rejecting a changed remote-agent card: API-only until the B5 panel on #453 (lane L2 brief)"],
 ]);
 
 /**

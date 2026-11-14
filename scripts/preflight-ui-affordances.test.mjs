@@ -104,6 +104,9 @@ describe("affordance census: a notBuilt route counts only when the file defines 
       // lane L2 (ADR-0219 follow-up): remote-agent role grant and revocation removal, until the controls on #453
       "/v1/a2a/agents/:x/role-grants/:x",
       "/v1/a2a/agents/:x/revocations/:x",
+      // lane L2 (ADR-0231 B3): gateway connection removal and pending-card rejection, until the B5 panel on #453
+      "/v1/a2a/gateway-connections/:x",
+      "/v1/a2a/agents/:x/pending-card",
     ]);
   });
 });
