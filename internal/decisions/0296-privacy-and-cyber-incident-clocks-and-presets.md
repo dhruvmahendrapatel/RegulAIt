@@ -4,7 +4,7 @@
 - **Date**: 2026-11-14
 - **Index**: GDPR, NIS2, DORA and CRA incident clocks; GDPR, CCPA, DPDP and LGPD presets (P18 B2, B3)
 - **Backlog**: [PENDING, P18](../product/PENDING.md); audit [2026-11-07 P18 coverage](../reviews/2026-11-07-p18-framework-coverage.md) lanes B2, B3
-- **Migration**: `pending/incident_clock_regimes_gdpr_nis2_dora_cra.sql` (numbered at merge, ADR-0252)
+- **Migration**: `pending/incident_clock_regimes_gdpr_nis2_dora_cra.sql` (part 1, numbered at merge, ADR-0252); part 2 has none
 
 ## Context
 
@@ -48,9 +48,26 @@ model neither), so the catalogue stays data.
    record), NIS2 Art. 23(4)(c) and (e) (on request; ongoing incidents) and DORA Art. 5(4) (a weekend extension, never
    earlier).
 
-### Part 2 — privacy-law presets (second PR)
+### Part 2 — privacy-law presets and packs (second PR)
 
-GDPR, CCPA/CPRA, DPDP and LGPD as presets on the ADR-0224 DSR and RoPA machinery. Recorded with that PR.
+7. **Presets, not new machinery** (`privacy-packs.ts`). For the GDPR, the CCPA as amended by the CPRA, India's DPDP Act
+   2023 and Brazil's LGPD, a preset names the org settings the law suggests on the ADR-0224 machinery: the
+   data-subject request period (`dsrSlaDays`: the statute's period or the strict default of 30 days, whichever is
+   shorter — GDPR one month (Art. 12(3)), CCPA 45 days (§ 1798.130(a)(2)), DPDP left to rules (s. 13(2)), LGPD 15
+   days (Art. 19, II)), the national identifiers the PII detector looks for (EU: BSN, codice fiscale, DNI/NIE, NIR,
+   Steuer-ID; India: Aadhaar; Brazil: CPF) and the processing limit. `privacyPresetPatch` combines several laws to the
+   strictest and only ever tightens: it never lengthens the period, removes an identifier or turns the limit off. An
+   admin applies the patch through the existing `PUT /v1/org/settings`, which audits it; there is no new route.
+8. **One pack per law** (`gdpr@1`, `ccpa@1`, `dpdp@1`, `lgpd@1`), cited by article or section in our own words, on
+   evidence the gateway already writes: records of processing (`processing-record-*`), closed requests and erasures
+   (`data-subject-request-*`), refusals by the processing limit (`processing-not-permitted`), the PII cascade and the
+   incident register. A test reads the gateway's privacy source to prove each rule-id filter is written. What the
+   platform does not do (DPIAs, which wait for lane C1; CCPA correction and opt-out; consent collection; transfers) is
+   attestation-required and says so. Every privacy control is on the privacy trust dimension.
+9. **Not encoded:** breach clocks for the CCPA, DPDP and LGPD (their deadlines are in state law, rules and an ANPD
+   resolution, partly in working days, which the clock arithmetic does not model); the LGPD's ten legal bases and the
+   DPDP's grounds as record-of-processing bases (the six GDPR bases stay; the presets say how to map them); request
+   kinds beyond access, erasure and objection.
 
 ## Consequences
 

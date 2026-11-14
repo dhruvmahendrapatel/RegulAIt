@@ -22,10 +22,13 @@
  */
 import type { TrustDimension } from "./risks.js";
 import { ISO_PACK_DIMENSIONS } from "./iso-packs.js";
+import { PRIVACY_PACK_DIMENSIONS } from "./privacy-packs.js";
 
 export const CONTROL_DIMENSION_OVERRIDES: Readonly<Record<string, TrustDimension>> = {
   // ADR-0295 (P18 B4): the attestation-only ISO/IEC 42001@2, 23894 and 42005 controls (classified in iso-packs.ts)
   ...ISO_PACK_DIMENSIONS,
+  // ADR-0296 part 2 (P18 B2): every GDPR, CCPA, DPDP and LGPD control is a privacy control (classified in privacy-packs.ts)
+  ...PRIVACY_PACK_DIMENSIONS,
   // EU AI Act — attestation-only
   "eu-ai-act:art-72-post-market-monitoring": "reliability",
   "eu-ai-act:art-4-ai-literacy": "compliance",
