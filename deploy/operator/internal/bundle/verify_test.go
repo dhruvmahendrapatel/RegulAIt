@@ -203,3 +203,33 @@ func TestInteropWithOpenSSL(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestEmbeddedKeyringMatchesTheReleaseKeys(t *testing.T) {
+	got := EmbeddedKeyring()
+	files, err := filepath.Glob(filepath.Join("..", "..", "..", "..", "infra", "release-keys", "*.pub"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no release keys found: %v", err)
+	}
+	if len(got) != len(files) {
+		t.Fatalf("embedded %d keys, infra/release-keys has %d", len(got), len(files))
+	}
+	for _, f := range files {
+		b, _ := os.ReadFile(f)
+		if got[filepath.Base(f)] != string(b) {
+			t.Errorf("%s differs from the embedded copy", filepath.Base(f))
+		}
+		if _, err := parsePublicKey(string(b)); err != nil {
+			t.Errorf("%s: %v", f, err)
+		}
+	}
+}
+
+func TestMergeKeyrings(t *testing.T) {
+	pinned := map[string]string{"rel.pub": "A\n"}
+	m, err := MergeKeyrings(pinned, map[string]string{"rel.pub": "A", "cust.pub": "B"})
+	if err != nil || len(m) != 2 || m["rel.pub"] != "A\n" {
+		t.Fatalf("merge: %v %v", m, err)
+	}
+	_, err = MergeKeyrings(pinned, map[string]string{"rel.pub": "Z"})
+	wantRefusal(t, err, "KeyIDShadowsPinned")
+}

@@ -10,11 +10,13 @@ on:
   pull_request:
     paths:
       - 'deploy/operator/**'
+      - 'infra/release-keys/**'
       - '.github/workflows/operator.yml'
   push:
     branches: [main]
     paths:
       - 'deploy/operator/**'
+      - 'infra/release-keys/**'
       - '.github/workflows/operator.yml'
   workflow_dispatch:
 

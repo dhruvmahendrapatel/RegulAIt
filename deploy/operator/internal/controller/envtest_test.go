@@ -68,6 +68,11 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	signKey = priv
+	der, _ := x509.MarshalPKIXPublicKey(pub)
+	pubPEM = string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
+
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:  scheme,
 		Cache:   cache.Options{DefaultNamespaces: map[string]cache.Config{testNS: {}}},
@@ -76,7 +81,7 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
-	if err := (&Reconciler{Client: mgr.GetClient(), Scheme: scheme, Recorder: mgr.GetEventRecorder("regulait-operator")}).SetupWithManager(mgr); err != nil {
+	if err := (&Reconciler{Client: mgr.GetClient(), Scheme: scheme, Recorder: mgr.GetEventRecorder("regulait-operator"), Keyring: map[string]string{"rel-test.pub": pubPEM}}).SetupWithManager(mgr); err != nil {
 		panic(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -85,11 +90,6 @@ func TestMain(m *testing.M) {
 			panic(err)
 		}
 	}()
-
-	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	signKey = priv
-	der, _ := x509.MarshalPKIXPublicKey(pub)
-	pubPEM = string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
 
 	code := m.Run()
 	cancel()
@@ -156,7 +156,6 @@ func newInstallation(name, version string, d byte) *v1alpha1.RegulaitInstallatio
 			Image:   v1alpha1.ImageSpec{Repository: "registry.example.internal/regulait/gateway", Digest: digest(d)},
 			UpdateBundle: v1alpha1.UpdateBundleSpec{
 				ManifestConfigMapRef: v1alpha1.LocalObjectRef{Name: name + "-manifest"},
-				KeyringConfigMapRef:  v1alpha1.LocalObjectRef{Name: name + "-keyring"},
 			},
 			DataKeySecretRef:        v1alpha1.SecretKeyRef{Name: "regulait", Key: "data-key"},
 			DatabaseURLSecretRef:    v1alpha1.SecretKeyRef{Name: "regulait", Key: "database-url"},
@@ -456,4 +455,73 @@ func TestBackupCronJobAndAirGappedValidation(t *testing.T) {
 	if cj.Spec.Schedule != "17 2 * * *" || cj.Spec.ConcurrencyPolicy != batchv1.ForbidConcurrent {
 		t.Fatalf("backup cronjob: %+v", cj.Spec)
 	}
+}
+
+// TestKeyringConfigMapIsNotTheTrustAnchor: a key placed in a namespace ConfigMap is not trusted unless the spec opts in
+// to an extra keyring; the opt-in is reported; and it can never replace a compiled-in key id.
+func TestKeyringConfigMapIsNotTheTrustAnchor(t *testing.T) {
+	needEnv(t)
+	ctx := context.Background()
+	name := "rogue"
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	der, _ := x509.MarshalPKIXPublicKey(pub)
+	roguePEM := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
+	sign := func(keyID string) {
+		m := strings.Replace(bundleManifest("3.0.0"), "rel-test", keyID, 1)
+		sig := base64.StdEncoding.EncodeToString(ed25519.Sign(priv, []byte(m)))
+		cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name + "-manifest", Namespace: testNS}}
+		_ = k8s.Delete(ctx, cm)
+		eventually(t, "manifest cm gone", func() bool {
+			return apierrors.IsNotFound(k8s.Get(ctx, client.ObjectKeyFromObject(cm), &corev1.ConfigMap{}))
+		})
+		cm.Data = map[string]string{"manifest.json": m, "manifest.json.sig": sig}
+		if err := k8s.Create(ctx, cm); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keyring := func(data map[string]string) {
+		cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name + "-extra", Namespace: testNS}}
+		_ = k8s.Delete(ctx, cm)
+		eventually(t, "keyring cm gone", func() bool {
+			return apierrors.IsNotFound(k8s.Get(ctx, client.ObjectKeyFromObject(cm), &corev1.ConfigMap{}))
+		})
+		cm.Data = data
+		if err := k8s.Create(ctx, cm); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A rogue key in a ConfigMap the spec does not name: refused.
+	keyring(map[string]string{"rogue.pub": roguePEM})
+	sign("rogue")
+	in := newInstallation(name, "3.0.0", '9')
+	if err := k8s.Create(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "UnknownSigningKey", func() bool {
+		c := cond(getInst(t, name), v1alpha1.ConditionBundleVerified)
+		return c != nil && c.Reason == "UnknownSigningKey"
+	})
+
+	// A ConfigMap entry that reuses the pinned id with another key: refused, even with the opt-in.
+	keyring(map[string]string{"rel-test.pub": roguePEM})
+	sign("rel-test")
+	updateInst(t, name, func(in *v1alpha1.RegulaitInstallation) {
+		in.Spec.UpdateBundle.ExtraKeyringConfigMapRef = &v1alpha1.LocalObjectRef{Name: name + "-extra"}
+	})
+	eventually(t, "KeyIDShadowsPinned", func() bool {
+		c := cond(getInst(t, name), v1alpha1.ConditionBundleVerified)
+		return c != nil && c.Reason == "KeyIDShadowsPinned"
+	})
+	if err := k8s.Get(ctx, client.ObjectKey{Namespace: testNS, Name: migrateJobName(in)}, &batchv1.Job{}); !apierrors.IsNotFound(err) {
+		t.Fatal("a manifest signed by a shadowing key started a migration")
+	}
+
+	// The explicit opt-in with a new key id verifies, and says so.
+	keyring(map[string]string{"customer.pub": roguePEM})
+	sign("customer")
+	eventually(t, "ExtraKeyringInUse", func() bool {
+		c := cond(getInst(t, name), v1alpha1.ConditionBundleVerified)
+		return c != nil && c.Status == metav1.ConditionTrue && c.Reason == "ExtraKeyringInUse"
+	})
 }

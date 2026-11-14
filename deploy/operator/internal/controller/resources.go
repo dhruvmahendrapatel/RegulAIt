@@ -161,10 +161,11 @@ func NetworkPolicy(in *v1alpha1.RegulaitInstallation) *networkingv1.NetworkPolic
 	}
 
 	egress := []networkingv1.NetworkPolicyEgressRule{{
-		// DNS to kube-system only.
-		To: []networkingv1.NetworkPolicyPeer{{NamespaceSelector: &metav1.LabelSelector{
-			MatchLabels: map[string]string{"kubernetes.io/metadata.name": "kube-system"},
-		}}},
+		// DNS to the cluster DNS pods only, not all of kube-system.
+		To: []networkingv1.NetworkPolicyPeer{{
+			NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"kubernetes.io/metadata.name": "kube-system"}},
+			PodSelector:       &metav1.LabelSelector{MatchLabels: map[string]string{"k8s-app": "kube-dns"}},
+		}},
 		Ports: []networkingv1.NetworkPolicyPort{port(udp, 53), port(tcp, 53)},
 	}}
 	if cidrs := in.Spec.Egress.DatabaseCIDRs; len(cidrs) > 0 {

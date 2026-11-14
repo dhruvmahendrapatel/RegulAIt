@@ -36,6 +36,8 @@ type Reconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder events.EventRecorder
+	// Keyring is the pinned release keyring: bundle.EmbeddedKeyring() in the binary, a test key in tests.
+	Keyring map[string]string
 }
 
 // The operator gets no permission on Secrets: the gateway pod reads them through secretKeyRef (ADR-0304 §3).
@@ -122,8 +124,16 @@ func (r *Reconciler) reconcile(ctx context.Context, in *v1alpha1.RegulaitInstall
 		}
 		return ctrl.Result{}, err
 	}
-	r.setCondition(in, v1alpha1.ConditionBundleVerified, metav1.ConditionTrue, "SignatureVerified",
-		fmt.Sprintf("manifest %s signed by pinned key %s", res.Manifest.Version, res.Manifest.SigningKeyID))
+	if in.Spec.UpdateBundle.ExtraKeyringConfigMapRef != nil {
+		// The opt-in is reported on every reconcile, whichever key signed this manifest.
+		msg := fmt.Sprintf("manifest %s signed by key %s; an extra keyring (%s) is trusted besides the compiled-in release keys",
+			res.Manifest.Version, res.Manifest.SigningKeyID, in.Spec.UpdateBundle.ExtraKeyringConfigMapRef.Name)
+		r.setCondition(in, v1alpha1.ConditionBundleVerified, metav1.ConditionTrue, "ExtraKeyringInUse", msg)
+		r.warn(in, "ExtraKeyringInUse", "VerifyBundle", msg)
+	} else {
+		r.setCondition(in, v1alpha1.ConditionBundleVerified, metav1.ConditionTrue, "SignatureVerified",
+			fmt.Sprintf("manifest %s signed by compiled-in release key %s", res.Manifest.Version, res.Manifest.SigningKeyID))
+	}
 	in.Status.VerifiedManifestSHA256 = res.SHA256
 
 	// 3. Owned objects, with drift counted.
@@ -207,17 +217,25 @@ func (r *Reconciler) verifyBundle(ctx context.Context, in *v1alpha1.RegulaitInst
 		}
 		return nil, err
 	}
-	kcm := &corev1.ConfigMap{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: ns, Name: in.Spec.UpdateBundle.KeyringConfigMapRef.Name}, kcm); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, &bundle.Refusal{Reason: "KeyringMissing", Message: "the keyring ConfigMap does not exist; nothing is pinned, so nothing verifies"}
+	keyring := r.Keyring
+	if ref := in.Spec.UpdateBundle.ExtraKeyringConfigMapRef; ref != nil {
+		kcm := &corev1.ConfigMap{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: ns, Name: ref.Name}, kcm); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil, &bundle.Refusal{Reason: "ExtraKeyringMissing", Message: "the extra keyring ConfigMap named in the spec does not exist"}
+			}
+			return nil, err
 		}
-		return nil, err
+		merged, err := bundle.MergeKeyrings(r.Keyring, kcm.Data)
+		if err != nil {
+			return nil, err
+		}
+		keyring = merged
 	}
 	return bundle.Verify(bundle.Input{
 		Manifest:         []byte(cmValue(mcm, "manifest.json")),
 		Signature:        []byte(cmValue(mcm, "manifest.json.sig")),
-		Keyring:          kcm.Data,
+		Keyring:          keyring,
 		WantVersion:      in.Spec.Version,
 		InstalledVersion: in.Status.InstalledVersion,
 	})
@@ -362,7 +380,7 @@ func (r *Reconciler) forConfigMap(ctx context.Context, obj client.Object) []reco
 	var out []reconcile.Request
 	for _, in := range list.Items {
 		b := in.Spec.UpdateBundle
-		if b.ManifestConfigMapRef.Name == obj.GetName() || b.KeyringConfigMapRef.Name == obj.GetName() {
+		if b.ManifestConfigMapRef.Name == obj.GetName() || (b.ExtraKeyringConfigMapRef != nil && b.ExtraKeyringConfigMapRef.Name == obj.GetName()) {
 			out = append(out, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&in)})
 		}
 	}

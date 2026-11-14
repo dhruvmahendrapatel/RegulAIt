@@ -51,8 +51,11 @@ type ImageSpec struct {
 type UpdateBundleSpec struct {
 	// ConfigMap with the keys `manifest.json` and `manifest.json.sig`, copied byte for byte from the bundle.
 	ManifestConfigMapRef LocalObjectRef `json:"manifestConfigMapRef"`
-	// ConfigMap of pinned public keys, one `<keyId>.pub` entry (PEM) per key.
-	KeyringConfigMapRef LocalObjectRef `json:"keyringConfigMapRef"`
+	// Optional ConfigMap of ADDITIONAL public keys, one `<keyId>.pub` entry (PEM) per key. The trust anchor is the
+	// release keyring compiled into the operator; this opt-in can add key ids (a customer signing its own bundles) but
+	// never replace a compiled-in one, and it is reported on every reconcile (ADR-0304 §2a).
+	// +optional
+	ExtraKeyringConfigMapRef *LocalObjectRef `json:"extraKeyringConfigMapRef,omitempty"`
 }
 
 // BackupSpec is the backup policy. Without a destination the installation is not Ready, unless backup is disabled
