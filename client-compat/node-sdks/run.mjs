@@ -46,6 +46,8 @@ await check("openai.auth", async () => {
   try {
     await oa("rgk_not-a-real-key").chat.completions.create({ model: MODEL, messages: [{ role: "user", content: "hi" }] });
   } catch (e) {
+    // ADR-0288: the 401 is OpenAI-shaped, so the SDK surfaces the RegulAIt code as `code`
+    assert(e?.code === "unauthenticated", `401 code ${JSON.stringify(e?.code)}`);
     return readableRefusal(e, 401, OpenAI.AuthenticationError);
   }
   throw new Error("an invalid key was accepted");
@@ -160,6 +162,8 @@ await check("anthropic.auth", async () => {
   try {
     await an("rgk_not-a-real-key").messages.create({ model: MODEL, max_tokens: 64, messages: [{ role: "user", content: "hi" }] });
   } catch (e) {
+    // ADR-0288: the 401 is Anthropic-shaped (`{type:"error", error:{type:"authentication_error"}}`)
+    assert(e?.error?.type === "error" && e?.error?.error?.type === "authentication_error", `401 body ${JSON.stringify(e?.error)}`);
     return readableRefusal(e, 401, Anthropic.AuthenticationError);
   }
   throw new Error("an invalid key was accepted");

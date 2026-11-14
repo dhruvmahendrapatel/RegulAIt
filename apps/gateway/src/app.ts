@@ -450,6 +450,7 @@ import {
 } from "./compat-core.js";
 import { registerAnthropicCompat } from "./compat-anthropic.js";
 import { registerOpenAiCompat } from "./compat-openai.js";
+import { compatDialectFor, reshapeCompat401 } from "./compat-auth-errors.js";
 import { registerResponsesCompat } from "./compat-responses.js";
 import { registerModelsDiscovery } from "./compat-models.js";
 import { registerVirtualKeyRoutes, routesForPurpose } from "./virtual-keys.js";
@@ -1112,6 +1113,20 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             typeof req.headers.authorization === "string" && req.headers.authorization.length > 0,
         }),
       );
+    }
+    // ADR-0288 — a 401 on a COMPAT surface is re-enveloped in that surface's
+    // provider dialect so an off-the-shelf SDK can read it. The auth hook still
+    // decides every refusal; this only changes the body's shape (the code is
+    // kept as regulait_code), and a body that is already provider-shaped passes.
+    if (reply.statusCode === 401) {
+      const dialect = compatDialectFor(req);
+      if (dialect) {
+        const reshaped = reshapeCompat401(payload, dialect);
+        if (reshaped !== null) {
+          reply.header("content-length", Buffer.byteLength(reshaped));
+          return reshaped;
+        }
+      }
     }
     return payload;
   });
