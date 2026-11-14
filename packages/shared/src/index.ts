@@ -2071,6 +2071,10 @@ export const upsertComplianceProfileSchema = z.object({
    * project carrying its tag (L1 to L3, never L0). MAX-composed, so it can only raise the requirement; lowering or
    * dropping it on an existing profile is a loosening (step-up, rule-loosening.ts). */
   minIsolationClass: z.enum(["hardened_container", "user_space_kernel", "microvm"]).nullable().optional(),
+  /** ADR-0045 amendment 2026-11-14: the framework REQUIRES model risk management. OR-composed across a project's profiles; true makes the
+   * ADR-0045 dispatch gate enforce on the project even where the org relaxed `mrmEnforced`. Clearing it on an
+   * existing profile is a loosening (step-up, rule-loosening.ts). */
+  mrmRequired: z.boolean().nullable().optional(),
 });
 
 // PILLAR 3 (§8.2): the governed infrastructure-operations layer.
