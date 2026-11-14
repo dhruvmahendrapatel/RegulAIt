@@ -40,7 +40,7 @@ import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { trackEgressAllowHosts } from "./testing/egress-allow-cleanup.js";
 import { setOrgSettingsForTest } from "./testing/strict-data-posture.js";
 import { CHATOPS_RULE_IDS, RESEND_RECIPIENT_MODE } from "./chatops.js";
-import { CAMPAIGN_DEADLINE_NOTIFIED_RULE_ID, runCampaignDeadlineNotifySweep } from "./grant-certification.js";
+import { CAMPAIGN_DEADLINE_NOTIFIED_RULE_ID, CAMPAIGN_EXPIRY_NOTICE_WINDOW_HOURS, runCampaignDeadlineNotifySweep } from "./grant-certification.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -67,8 +67,11 @@ let base = "";
 const hits: Array<{ to: string[]; subject: string; html: string }> = [];
 /** posts the fake Slack side of the same server received (chat.postMessage) */
 const slackPosts: Array<{ channel?: string; text?: string }> = [];
-/** while true the fake answers every send with a 503 (a transient provider failure) */
+/** while true the fake answers every send with `failStatus` (503 by default: a transient provider failure) */
 let failSends = false;
+let failStatus = 503;
+/** when set, only mails to this address fail (with 503) */
+let failOnlyFor: string | null = null;
 const SLACK_CONNECTION = `cdn-slack-${RUN}`;
 let slackConnectorId = "";
 let connectorId = "";
@@ -123,8 +126,9 @@ beforeAll(async () => {
     let body = "";
     req.on("data", (c) => (body += c));
     req.on("end", () => {
-      if (failSends) {
-        res.writeHead(503, { "content-type": "application/json" });
+      const toFailing = failOnlyFor !== null && body.includes(failOnlyFor);
+      if (failSends || toFailing) {
+        res.writeHead(toFailing ? 503 : failStatus, { "content-type": "application/json" });
         res.end(JSON.stringify({ message: "unavailable" }));
         return;
       }
@@ -348,5 +352,74 @@ describe("ADR-0090 amendment: campaign deadline notices", () => {
     expect(targets).toContain(`${slackId}:channel`);
     await runCampaignDeadlineNotifySweep(db, { actorUserId: null });
     expect(slackPosts.filter((p) => (p.text ?? "").includes(c))).toHaveLength(1);
+  });
+
+  // ---- second review of #825 -----------------------------------------------------------------------------------
+
+  const failedRowsFor = async (campaignId: string) =>
+    (await db.select().from(auditLog).where(and(eq(auditLog.objectId, connectionId), eq(auditLog.ruleId, CHATOPS_RULE_IDS.campaignNoticePostFailed)))).filter(
+      (r) => (r.detail as Record<string, unknown>).campaignId === campaignId,
+    );
+
+  it("a permanent 4xx (e.g. a revoked credential) is final: audited once, marked, and never retried", async () => {
+    const c = await makeCampaign(10, [{ reviewer: reviewerA }]);
+    failSends = true;
+    failStatus = 401;
+    try {
+      const out = await runCampaignDeadlineNotifySweep(db, { actorUserId: null });
+      expect(out.notified.find((n) => n.campaignId === c)).toMatchObject({ posted: 0, retrying: 0 }); // both workspaces refused for good
+    } finally {
+      failSends = false;
+      failStatus = 503;
+    }
+    const failed = await failedRowsFor(c);
+    expect(failed).toHaveLength(1);
+    expect(failed[0]!.detail).toMatchObject({ upstreamStatus: 401, retry: false });
+    expect(((await markers(c))[0]!.detail as { targets: string[] }).targets).toContain(`${connectionId}:reviewer:${reviewerA}`);
+    // the provider is fine again, but a final outcome is not retried
+    await runCampaignDeadlineNotifySweep(db, { actorUserId: null });
+    expect(await failedRowsFor(c)).toHaveLength(1);
+    expect(mailsFor(emails[reviewerA]!).filter((m) => m.html.includes(c))).toHaveLength(0);
+  });
+
+  it("in one run, a transient failure is left unmarked while the target that posted is marked, and only it is retried", async () => {
+    const c = await makeCampaign(10, [{ reviewer: reviewerA }, { reviewer: reviewerB }]);
+    failOnlyFor = emails[reviewerB]!;
+    try {
+      const out = await runCampaignDeadlineNotifySweep(db, { actorUserId: null });
+      expect(out.notified.find((n) => n.campaignId === c)).toMatchObject({ retrying: 1 }); // reviewer B only (A and the Slack channel posted)
+    } finally {
+      failOnlyFor = null;
+    }
+    const first = await markers(c);
+    expect(first).toHaveLength(1);
+    // (the Slack workspace from the test above is opted in too; only the resend workspace's targets are checked)
+    const mine = (targets: string[]) => targets.filter((t) => t.startsWith(`${connectionId}:`));
+    expect(mine((first[0]!.detail as { targets: string[] }).targets)).toEqual([`${connectionId}:reviewer:${reviewerA}`]);
+    await runCampaignDeadlineNotifySweep(db, { actorUserId: null });
+    expect(mailsFor(emails[reviewerA]!).filter((m) => m.html.includes(c))).toHaveLength(1);
+    expect(mailsFor(emails[reviewerB]!).filter((m) => m.html.includes(c))).toHaveLength(1);
+    const all = mine((await markers(c)).flatMap((m) => (m.detail as { targets: string[] }).targets));
+    expect(all.sort()).toEqual([`${connectionId}:reviewer:${reviewerA}`, `${connectionId}:reviewer:${reviewerB}`].sort());
+  });
+
+  it("one campaign gets the due-soon reminder and then, after the due time, the expiry notice: each once", async () => {
+    const c = await makeCampaign(5, [{ reviewer: reviewerA }]);
+    await runCampaignDeadlineNotifySweep(db, { actorUserId: null });
+    const afterDue = new Date(Date.now() + 6 * 3600_000);
+    await runCampaignDeadlineNotifySweep(db, { actorUserId: null, now: afterDue });
+    await runCampaignDeadlineNotifySweep(db, { actorUserId: null, now: afterDue });
+    const mails = mailsFor(emails[reviewerA]!).filter((m) => m.html.includes(c));
+    expect(mails.map((m) => (/expired/.test(m.subject) ? "expired" : "due_soon"))).toEqual(["due_soon", "expired"]);
+    expect((await markers(c)).map((m) => (m.detail as Record<string, unknown>).kind).sort()).toEqual(["due_soon", "expired"]);
+  });
+
+  it("past the expiry window nothing is sent: an old campaign is never announced late", async () => {
+    const c = await makeCampaign(10, [{ reviewer: reviewerA }]);
+    const longAfter = new Date(Date.now() + (10 + CAMPAIGN_EXPIRY_NOTICE_WINDOW_HOURS + 1) * 3600_000);
+    const out = await runCampaignDeadlineNotifySweep(db, { actorUserId: null, now: longAfter });
+    expect(out.notified.find((n) => n.campaignId === c)).toBeUndefined();
+    expect(hits.filter((m) => m.html.includes(c))).toHaveLength(0);
+    expect(await markers(c)).toHaveLength(0);
   });
 });

@@ -226,15 +226,27 @@ The "no notifications" limit is closed, in the same narrow shape as the B2a swee
   `campaign-deadline-notified` (detail `kind`, and `targets`, the ids this run delivered) is the marker. A target is
   listed only when its outcome is final:
   - **posted**;
-  - **terminal**: only `no_named_recipient` (422), where the reviewer has no active account or no usable email, so a
-    retry cannot help. It is audited as a failed post with `retry: false` and is not tried again.
-  - Anything else is **transient** and is not listed, so the next hourly run retries it: a provider 5xx, a network
-    error, a missing public URL, or a 429.
+  - **terminal**: a refusal a retry cannot fix, which is any 4xx other than 408 and 429, judged on the provider's own
+    status where the courier reports one (`upstreamStatus`). This covers `no_named_recipient`, a missing or deleted
+    credential, an unsupported provider, a revoked token (401/403), and a missing public URL (422). It is audited as
+    a failed post with `retry: false` and is not tried again.
+  - Anything else is **transient** and is not listed, so the next hourly run retries it: a 5xx, a network error, a
+    408 or a 429.
 
   So a failing workspace never blocks or repeats another, and a reviewer already mailed is not mailed again. Each run
-  writes at most one marker row per campaign and kind, and only when at least one target became final. A transient
-  target stops being retried when its notice window ends: a due-soon reminder stops once the campaign is past due, and
-  an expiry notice stops once the campaign is no longer open.
+  writes at most one marker row per campaign and kind, and only when at least one target became final.
+- **Bounded in time and per run (second review of #825).** An expired-incomplete campaign stays `open`, so the
+  expiry notice has a window: it is sent, or retried, only within 72 hours after the due time
+  (`CAMPAIGN_EXPIRY_NOTICE_WINDOW_HOURS`). A workspace opted in later is never told about old campaigns, and a
+  transient failure is never retried forever. A due-soon reminder stops at the due time. A run makes at most 200
+  delivery attempts (`CAMPAIGN_DEADLINE_MAX_SENDS_PER_RUN`); the rest wait, unmarked, for the next run, which keeps
+  a run well inside its lease. The marker lookup has its own partial index,
+  `audit_log_campaign_deadline_marker_idx`, so it never scans the trail.
+- **Open: the RLS runtime cut-over (ADR-0234 batch 7).** The sweep reads `audit_log` (its markers) and `users`
+  (`activeUserEmail`). Both have FORCE RLS, and today scheduler jobs run outside any RLS scope. When the runtime moves
+  to `regulait_app`, this job needs a registered system reason. Without one, the marker read sees no rows, so every
+  target is resent hourly, and every reviewer looks like `no_named_recipient`. It is listed for the cut-over in
+  PENDING by this PR's fragment. ADR-0234 belongs to its own lane and is not edited here.
 - **Once-only rests on the scheduler lease.** Reading the markers, sending and writing the marker is not one
   transaction. The ADR-0064 lease guarantees a single copy: the scheduled tick and the manual
   `POST /v1/scheduler/jobs/:name/run` both run this job under that one lease. An advisory lock would have to be held

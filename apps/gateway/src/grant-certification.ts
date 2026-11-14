@@ -801,6 +801,15 @@ export async function runCampaignExpirySweep(
 
 /** a reminder is sent once a campaign with undecided items is within this many hours of its due time */
 export const CAMPAIGN_DEADLINE_REMINDER_HOURS = 48;
+/**
+ * An expiry notice is sent only this long after the due time (review of #825). An expired-incomplete campaign stays
+ * `open` (expiry is computed on read), so without a window a workspace opted in months later would be told about
+ * every old campaign, and a target that keeps failing transiently would be retried forever. Past the window nothing
+ * more is sent or retried for that campaign.
+ */
+export const CAMPAIGN_EXPIRY_NOTICE_WINDOW_HOURS = 72;
+/** at most this many delivery attempts per sweep run; the rest wait for the next hourly run (review of #825) */
+export const CAMPAIGN_DEADLINE_MAX_SENDS_PER_RUN = 200;
 export const CAMPAIGN_DEADLINE_NOTIFIED_RULE_ID = "campaign-deadline-notified";
 
 /** one notice to one reviewer: ids, counts and times only (no campaign name, grant, holder or object label) */
@@ -818,12 +827,16 @@ export interface CampaignDeadlineDelivery {
   campaign: { id: string; kind: "due_soon" | "expired"; dueAt: Date; undecidedTotal: number };
   notices: CampaignDeadlineNotice[];
   done: ReadonlySet<string>;
+  /** the most delivery attempts this call may make; targets past it are left for the next run */
+  maxSends: number;
 }
 /**
  * The outcome of one delivery target. `posted` and `terminal` are final, and the target is never tried again.
- * `terminal` is a refusal that a retry cannot fix (the reviewer has no active account or email:
- * `no_named_recipient`). `transient` is anything else: a provider 5xx, a network error, or a missing public URL. The
- * next sweep retries it.
+ * `terminal` is a refusal a retry cannot fix: any 4xx other than 408 and 429. That covers `no_named_recipient`, a
+ * missing or deleted credential, an unsupported provider, a revoked token (401/403), a missing public URL (422), and
+ * so on (review of #825). `transient` is a 5xx, a network error, a 408 or a 429. The next sweep retries it, but only
+ * while the notice's window is open: until the due time for a reminder, and `CAMPAIGN_EXPIRY_NOTICE_WINDOW_HOURS`
+ * after it for an expiry notice.
  */
 export type CampaignDeadlineOutcome = "posted" | "terminal" | "transient";
 /** delivers one campaign's notices and reports each target's outcome (the courier audits every post) */
@@ -878,10 +891,14 @@ export async function runCampaignDeadlineNotifySweep(
   const out: CampaignDeadlineSweepResult = { courier: Boolean(courier), notified: [] };
   if (!courier) return out;
   const open = await db.select().from(grantCertificationCampaigns).where(eq(grantCertificationCampaigns.status, "open"));
+  let budget = CAMPAIGN_DEADLINE_MAX_SENDS_PER_RUN;
   for (const campaign of open) {
+    if (budget <= 0) break;
     const pastDue = campaignPastDue(campaign, now);
     const dueSoon = !pastDue && campaign.dueAt.getTime() - now.getTime() <= CAMPAIGN_DEADLINE_REMINDER_HOURS * 3600_000;
     if (!pastDue && !dueSoon) continue;
+    // an expiry notice only within its window after the due time: old campaigns are never announced late
+    if (pastDue && now.getTime() - campaign.dueAt.getTime() > CAMPAIGN_EXPIRY_NOTICE_WINDOW_HOURS * 3600_000) continue;
     // a campaign first seen past due gets only the expiry notice, never a late reminder
     const kind = pastDue ? "expired" : "due_soon";
     const perReviewer = await db
@@ -895,13 +912,14 @@ export async function runCampaignDeadlineNotifySweep(
     const notices: CampaignDeadlineNotice[] = perReviewer.map((r) => ({ reviewerUserId: r.reviewerUserId, undecidedForReviewer: r.n }));
     let sent: Awaited<ReturnType<CampaignDeadlineCourier>>;
     try {
-      sent = await courier({ campaign: { id: campaign.id, kind, dueAt: campaign.dueAt, undecidedTotal }, notices, done }, opts.actorUserId);
+      sent = await courier({ campaign: { id: campaign.id, kind, dueAt: campaign.dueAt, undecidedTotal }, notices, done, maxSends: budget }, opts.actorUserId);
     } catch {
       // the courier itself failed (e.g. the connection read): nothing is final, the next run retries everything
       sent = { workspaces: 0, results: [] };
     }
     // no workspace opted in, or nothing left to send: nothing attempted, nothing marked
     if (sent.workspaces === 0 || sent.results.length === 0) continue;
+    budget -= sent.results.length;
     const posted = sent.results.filter((r) => r.outcome === "posted").length;
     const terminal = sent.results.filter((r) => r.outcome === "terminal").length;
     const retrying = sent.results.length - posted - terminal;

@@ -2009,6 +2009,11 @@ export const auditLog = pgTable(
     index("audit_log_alert_escalated_idx")
       .on(t.objectId)
       .where(sql`${t.ruleId} = 'governance-alert-escalated'`),
+    // pending/chatops_campaign_deadline_notify.sql (ADR-0090 amendment): the deadline sweep's delivery markers only,
+    // so "already delivered to this target" never scans the trail (review of #825)
+    index("audit_log_campaign_deadline_marker_idx")
+      .on(t.objectId)
+      .where(sql`${t.ruleId} = 'campaign-deadline-notified'`),
     // migration 0155 (ADR-0180 A2): the guardrail hit rows only (the ids
     // guardrails.ts writes as `guardrail-${outcome}`), so the guardrail_hits
     // condition metric never scans the trail

@@ -1241,13 +1241,10 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
     return out;
   });
 
-  // ADR-0182 S5 (PF-14): the SLA sweep's breach and unowned escalations, to
-  // the same opted-in workspaces, with the sweep's own PII-free text in place
-  // of the alert's title
   // ADR-0090 amendment (lane L11): certification-campaign deadline notices to the workspaces opted in. A resend
   // workspace mails each notice to its named reviewer; any other provider posts ONE channel notice per campaign (the
   // campaign total), never a per-reviewer message to a shared channel. Nothing operator-typed is in either.
-  registerCampaignDeadlineCourier(db, async ({ campaign, notices, done }, actorUserId) => {
+  registerCampaignDeadlineCourier(db, async ({ campaign, notices, done, maxSends }, actorUserId) => {
     const out: { workspaces: number; results: Array<{ target: string; outcome: CampaignDeadlineOutcome }> } = { workspaces: 0, results: [] };
     if (notices.length === 0) return out;
     const conns = await db
@@ -1264,6 +1261,8 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
           : [{ key: `${conn.id}:channel`, notice: null, audience: "channel" as const }];
       for (const t of targets) {
         if (done.has(t.key)) continue;
+        // the per-run cap: the rest wait for the next run, unmarked
+        if (out.results.length >= maxSends) return out;
         const path = t.audience === "reviewer" ? "/inbox" : "/admin/certification";
         const input = {
           campaignId: campaign.id,
@@ -1276,19 +1275,19 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         const namedRecipient = t.notice ? await activeUserEmail(t.notice.reviewerUserId) : null;
         const channel = conn.provider === "resend" ? (namedRecipient ?? RESEND_RECIPIENT_MODE) : conn.defaultChannel;
         let posted: Awaited<ReturnType<typeof postCard>>;
-        // only "this reviewer has no active account or email" is final; every other failure is retried next run
-        let terminal = false;
         try {
           if (pub && !pub.ok) posted = pub;
-          else if (conn.provider === "resend" && !namedRecipient) {
-            posted = { ok: false, status: 422, body: { error: "no_named_recipient" } };
-            terminal = true;
-          } else {
-            posted = await postCard(conn, channel, composeCampaignDeadlineCard(input), actorUserId, "campaign-deadline", outlookMessageForCampaignDeadline(input), namedRecipient);
-          }
+          else if (conn.provider === "resend" && !namedRecipient) posted = { ok: false, status: 422, body: { error: "no_named_recipient" } };
+          else posted = await postCard(conn, channel, composeCampaignDeadlineCard(input), actorUserId, "campaign-deadline", outlookMessageForCampaignDeadline(input), namedRecipient);
         } catch (err) {
           posted = { ok: false, status: 502, body: { error: errMessage(err) } };
         }
+        // a 4xx other than 408/429 is a refusal a retry cannot fix (no recipient, credential or provider refused,
+        // config missing): final. A 5xx, a network error, 408 or 429 is retried while the notice's window is open.
+        // A provider's own refusal arrives as a 502 `chatops_post_failed` carrying `upstreamStatus`; judge by that.
+        const upstream = !posted.ok && typeof posted.body.upstreamStatus === "number" ? posted.body.upstreamStatus : null;
+        const effective = posted.ok ? 200 : (upstream ?? posted.status);
+        const terminal = !posted.ok && effective >= 400 && effective < 500 && effective !== 408 && effective !== 429;
         await audit(
           actorUserId,
           "chatops_connection",
@@ -1304,7 +1303,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
             kind: campaign.kind,
             audience: t.audience,
             ...(t.notice ? { reviewerUserId: t.notice.reviewerUserId } : {}),
-            ...(posted.ok ? {} : { status: posted.status, retry: !terminal }),
+            ...(posted.ok ? {} : { status: posted.status, ...(upstream !== null ? { upstreamStatus: upstream } : {}), retry: !terminal }),
           },
         );
         out.results.push({ target: t.key, outcome: posted.ok ? "posted" : terminal ? "terminal" : "transient" });
@@ -1313,6 +1312,9 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
     return out;
   });
 
+  // ADR-0182 S5 (PF-14): the SLA sweep's breach and unowned escalations, to
+  // the same opted-in workspaces, with the sweep's own PII-free text in place
+  // of the alert's title
   registerAlertSlaCourier(db, async (message, actorUserId) => {
     const out = { posted: 0, failed: 0 };
     const conns = await db
