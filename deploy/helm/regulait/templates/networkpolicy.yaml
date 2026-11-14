@@ -1,0 +1,144 @@
+{{- /*
+ADR-0304 §2b: one NetworkPolicy per workload plus a namespace-wide deny-all baseline. Policies add up, so the baseline
+denies everything the other two do not open.
+
+The three policies are ordinary release resources, so an upgrade never removes them from the running gateway and
+`helm uninstall` deletes them. Hooks run before release resources exist, so on a first install the migration Job would
+start with no policy: `<release>-hook-database-clients`, a hook at weight -10 (below the Job's 0), covers it for the
+duration of the hook phase. Helm applies hook-succeeded deletion only after every hook in the phase has finished. After
+a failed hook phase the copy can remain until the next attempt replaces it (before-hook-creation); it only restricts.
+*/ -}}
+{{- $v := .Values -}}
+{{- define "regulait.dnsRule" -}}
+{{- $dns := .Values.egress.dns -}}
+- to:
+  {{- if or $dns.namespaceSelector $dns.podSelector $dns.cidrs }}
+  {{- if or $dns.namespaceSelector $dns.podSelector }}
+    - {{- with $dns.namespaceSelector }}
+      namespaceSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $dns.podSelector }}
+      podSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- end }}
+  {{- range $dns.cidrs }}
+    - ipBlock: { cidr: {{ . | quote }} }
+  {{- end }}
+  {{- else }}
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+  {{- end }}
+  ports:
+    - { protocol: UDP, port: 53 }
+    - { protocol: TCP, port: 53 }
+{{- end -}}
+{{- define "regulait.databaseRule" -}}
+{{- with .Values.egress.databaseCIDRs }}
+- to:
+  {{- range . }}
+    - ipBlock: { cidr: {{ . | quote }} }
+  {{- end }}
+  ports:
+    - { protocol: TCP, port: 5432 }
+{{- end }}
+{{- end -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-baseline" .Release.Name | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "regulait.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-gateway" .Release.Name | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "regulait.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "regulait.selector" . | nindent 6 }}
+      app.kubernetes.io/component: gateway
+  policyTypes: [Ingress, Egress]
+  ingress:
+    {{- if $v.ingressFrom }}
+    - from:
+        {{- toYaml $v.ingressFrom | nindent 8 }}
+      ports:
+        - { protocol: TCP, port: 3000 }
+    {{- else }} []
+    {{- end }}
+  egress:
+    {{- include "regulait.dnsRule" . | nindent 4 }}
+    {{- include "regulait.databaseRule" . | nindent 4 }}
+    {{- with $v.egress.allowedCIDRs }}
+    - to:
+        {{- range . }}
+        - ipBlock: { cidr: {{ . | quote }} }
+        {{- end }}
+    {{- end }}
+    {{- if and $v.egress.allowPublicEgress (ne $v.mode "air_gapped") }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16]
+        - ipBlock:
+            cidr: ::/0
+            except: ["fc00::/7", "fe80::/10"]
+      ports:
+        - { protocol: TCP, port: 443 }
+    {{- end }}
+---
+# The migration Job and any backup pod hold the database URL, so they reach DNS and the database and nothing else.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-database-clients" .Release.Name | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "regulait.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "regulait.selector" . | nindent 6 }}
+    matchExpressions:
+      - { key: app.kubernetes.io/component, operator: In, values: [migrate, backup] }
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    {{- include "regulait.dnsRule" . | nindent 4 }}
+    {{- include "regulait.databaseRule" . | nindent 4 }}
+---
+# The same policy for the hook phase, when the release's own policies do not exist yet (first install).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-hook-database-clients" .Release.Name | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "regulait.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded,hook-failed
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "regulait.selector" . | nindent 6 }}
+    matchExpressions:
+      - { key: app.kubernetes.io/component, operator: In, values: [migrate, backup] }
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    {{- include "regulait.dnsRule" . | nindent 4 }}
+    {{- include "regulait.databaseRule" . | nindent 4 }}

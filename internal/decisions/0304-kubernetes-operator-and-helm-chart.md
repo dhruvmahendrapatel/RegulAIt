@@ -214,3 +214,41 @@ touches a cloud account.
 - **Data at rest on claims.** The install-secrets claim (signing keys) and the backup claim (dumps whose non-data-key
   columns are plain) are protected only by their StorageClass. The docs and the sample name an encrypted class.
 - Not built here: multi-replica HA (P2), image publication and signing, OLM packaging, and the bundle schema `/2`.
+
+## As built (operator, lane L12 PR 2)
+
+- `deploy/operator/` uses controller-runtime v0.25.2 and k8s.io/* v0.37.0, with Go 1.26. Envtest runs kube-apiserver
+  and etcd 1.37.0. `govulncheck` is clean after `golang.org/x/net`, `grpc`, `otel` and `cel-go` were raised to their
+  fixed versions.
+- Two details beyond §1: `spec.egress.allowPublicEgress` opens public addresses on **443 only** (private ranges
+  excluded), and `status.installedImage` (repository@digest) sits next to `installedVersion`. A new digest therefore
+  always migrates, even at the same version. A `SpecValid` condition carries the operator-side validation result.
+- Drift is detected by server-side apply under the field manager `regulait-operator`. A write that changes an owned
+  object while the spec and the installed image are unchanged counts as drift.
+- Events go through the `events.k8s.io/v1` recorder, and the Role grants `events.k8s.io` rather than core events.
+- Bundle parsing refuses a manifest that repeats a top-level key. The shell verifier reads the first occurrence and
+  `encoding/json` the last, so a duplicated `version` could otherwise mean two things.
+- Versions are compared with `golang.org/x/mod/semver`. Unlike the shell verifier, it orders a pre-release below its
+  release, so `1.0.0-rc.1` after `1.0.0` is a downgrade. That is stricter, and it is deliberate.
+- The gateway gains `migrate-job.ts`, a thin entrypoint over a testable `migrate-job-run.ts`. It refuses to run without
+  `DATABASE_URL` instead of falling back to a default database, and it never logs the URL.
+
+## As built (Helm chart, lane L12 PR 3)
+
+- `deploy/helm/regulait/` has a `values.schema.json` with `additionalProperties: false` at every level, so a secret
+  value cannot be passed as a value. `mode`, `version`, the image and `secrets.name` have no default.
+- The three NetworkPolicies of §2b are ordinary release resources, not hooks as §2b and §5 first said. Hook resources
+  are deleted and recreated on every upgrade (`before-hook-creation`), which would leave the running gateway briefly
+  un-isolated, and they outlive `helm uninstall`. Only a copy of the database-clients policy,
+  `<release>-hook-database-clients`, is a `pre-install,pre-upgrade` hook at weight -10, so the first migration Job
+  (weight 0) never runs unpoliced; it is deleted once the hook phase succeeds. This follows the code review on #792.
+- The downgrade check reads the installed version from `bundle.installedVersion` when set, else the running
+  Deployment's version label through `lookup`. An upgrade with neither (`helm template --is-upgrade`, `--dry-run`,
+  GitOps renderers, where `lookup` is empty) fails the render rather than skip the check. The explicit value is the
+  stronger source, since the label is writable by anyone with write access to the namespace (security review on #792).
+- The migration Job uses the namespace's default ServiceAccount with no token mounted, because the release's own
+  ServiceAccount does not exist while pre-install hooks run.
+- `operator.enabled` renders the CRD and the Role from `files/crd.yaml` and `files/role.yaml`. These are copies of the
+  operator's generated files, and `tests/render-test.sh` fails when they differ.
+- In the templates, the air-gapped private-range check is prefix-pattern based (10/8, 172.16/12, 192.168/16,
+  100.64/10, fc00::/7, each with a minimum prefix length). The operator does the exact `netip` containment check.

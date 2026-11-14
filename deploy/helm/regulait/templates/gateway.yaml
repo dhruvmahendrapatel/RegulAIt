@@ -1,0 +1,127 @@
+{{- include "regulait.validate" . -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "regulait.name" . }}
+  labels:
+    {{- include "regulait.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "regulait.name" . }}
+  labels:
+    {{- include "regulait.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "regulait.selector" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+      protocol: TCP
+{{- if not .Values.installSecrets.existingClaim }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "regulait.claim" . }}
+  labels:
+    {{- include "regulait.labels" . | nindent 4 }}
+  annotations:
+    # Losing this claim loses the install-generated receipt and identity keys.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with .Values.installSecrets.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.installSecrets.size }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "regulait.name" . }}
+  labels:
+    {{- include "regulait.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  # One replica until P2 (HA): the gateway migrates at boot and keeps per-process state (ADR-0304 §4).
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "regulait.selector" . | nindent 6 }}
+      app.kubernetes.io/component: gateway
+  template:
+    metadata:
+      labels:
+        {{- include "regulait.labels" . | nindent 8 }}
+        app.kubernetes.io/component: gateway
+    spec:
+      serviceAccountName: {{ include "regulait.name" . }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        {{- include "regulait.podSecurity" . | nindent 8 }}
+      containers:
+        - name: gateway
+          image: {{ include "regulait.image" . }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          env:
+            - name: REGULAIT_DEPLOY_MODE
+              value: {{ .Values.mode | quote }}
+            - name: REGULAIT_VERSION
+              value: {{ .Values.version | quote }}
+            - name: SEED_DEMO
+              value: "0"
+            - name: NODE_ENV
+              value: production
+            - name: REGULAIT_INSTALL_SECRETS_DIR
+              value: /app/install-secrets
+            {{- include "regulait.secretEnv" . | nindent 12 }}
+            - name: REGULAIT_DATA_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.secrets.name | quote }}, key: {{ .Values.secrets.dataKeyKey | quote }} }
+            - name: REGULAIT_BOOTSTRAP_TOKEN
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.secrets.name | quote }}, key: {{ .Values.secrets.bootstrapTokenKey | quote }} }
+          securityContext:
+            {{- include "regulait.containerSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: install-secrets, mountPath: /app/install-secrets, subPath: install-secrets }
+            - { name: install-secrets, mountPath: /app/audit-anchors, subPath: audit-anchors }
+          # /health checks the database, so it gates traffic, not restarts.
+          readinessProbe:
+            httpGet: { path: /health, port: 3000 }
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: 3000 }
+            periodSeconds: 20
+            timeoutSeconds: 5
+          startupProbe:
+            tcpSocket: { port: 3000 }
+            periodSeconds: 10
+            failureThreshold: 60
+      volumes:
+        - name: tmp
+          emptyDir: { sizeLimit: 256Mi }
+        - name: install-secrets
+          persistentVolumeClaim:
+            claimName: {{ include "regulait.claim" . }}

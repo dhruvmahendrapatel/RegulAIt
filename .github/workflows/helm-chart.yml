@@ -1,0 +1,54 @@
+name: Helm chart
+
+# ADR-0304: render-time tests for deploy/helm/regulait. Lint, template, kubeconform, restricted-pod checks, the
+# refusals of insecure values, and the CRD/Role copies matching deploy/operator. Never talks to a cluster.
+
+on:
+  pull_request:
+    paths:
+      - 'deploy/helm/**'
+      - 'deploy/operator/config/**'
+      - '.github/workflows/helm-chart.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/helm/**'
+      - 'deploy/operator/config/**'
+      - '.github/workflows/helm-chart.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: helm-chart-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    name: helm chart / render tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      HELM_VERSION: v3.22.1
+      HELM_SHA256: 896cf63684a42a723d61c980369d6e588330927deb13676ca0d85006dd6da0ea
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: deploy/operator/go.mod
+          cache: false
+      - name: Install helm (pinned version, checksum verified)
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSLO "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  helm-${HELM_VERSION}-linux-amd64.tar.gz" | sha256sum -c -
+          tar xzf "helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "$RUNNER_TEMP/linux-amd64" >> "$GITHUB_PATH"
+      - name: Install kubeconform (pinned)
+        run: GOBIN="$RUNNER_TEMP/bin" go install github.com/yannh/kubeconform/cmd/kubeconform@v0.8.0
+      - name: Render tests
+        run: KUBECONFORM="$RUNNER_TEMP/bin/kubeconform" bash deploy/helm/regulait/tests/render-test.sh helm

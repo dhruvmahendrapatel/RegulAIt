@@ -1,0 +1,7 @@
+apiVersion: v2
+name: regulait
+description: Self-installed RegulAIt (byoc or air_gapped) on Kubernetes, with a migration Job and secure defaults (ADR-0304).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.30.0-0"

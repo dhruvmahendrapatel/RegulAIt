@@ -1,0 +1,20 @@
+mode: byoc
+version: 1.0.0
+image:
+  repository: registry.example.internal/regulait/gateway
+  digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
+  allowedRegistries: [registry.example.internal]
+secrets:
+  name: regulait
+egress:
+  databaseCIDRs: [10.20.0.0/16]
+  allowPublicEgress: true
+ingressFrom:
+  - namespaceSelector:
+      matchLabels: { kubernetes.io/metadata.name: ingress-nginx }
+bundle:
+  configMapName: regulait-bundle-1.0.0
+operator:
+  image:
+    repository: registry.example.internal/regulait/operator
+    digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
