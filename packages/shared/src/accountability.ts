@@ -35,8 +35,9 @@ import { aiPolicyHref } from "./ai-literacy.js";
 export const ACCOUNTABILITY_GATE_MODES = ["off", "warn", "enforce"] as const;
 export type AccountabilityGateMode = (typeof ACCOUNTABILITY_GATE_MODES)[number];
 
-/** the regulatory regimes whose incident-notification clocks A12 encodes */
-export const INCIDENT_CLOCK_REGIMES = ["eu-ai-act", "hipaa"] as const;
+/** the regulatory regimes whose incident-notification clocks A12 encodes;
+ * ADR-0296 (P18 B2, B3) adds GDPR breach notification, NIS2, DORA and the CRA */
+export const INCIDENT_CLOCK_REGIMES = ["eu-ai-act", "hipaa", "gdpr", "nis2", "dora", "cra"] as const;
 export type IncidentClockRegime = (typeof INCIDENT_CLOCK_REGIMES)[number];
 
 /** `alert_ticket_mode`: `manual` files a PM work item only when a person asks;
@@ -70,7 +71,8 @@ export const ACCOUNTABILITY_STRICT_DEFAULTS = Object.freeze({
   decisionRegressionMaxAgeMinutes: 60,
   incidentGateMode: "enforce" as AccountabilityGateMode,
   incidentEvidenceHold: true,
-  incidentClockRegimes: ["eu-ai-act", "hipaa"] as IncidentClockRegime[],
+  // ADR-0296: every regime on (secure by default, ADR-0180); an admin turns off the ones that do not apply, audited
+  incidentClockRegimes: [...INCIDENT_CLOCK_REGIMES] as IncidentClockRegime[],
   feedbackSignedLinksEnabled: false,
   feedbackAckSlaHours: 72,
   feedbackResolveSlaDays: 30,
@@ -127,8 +129,10 @@ export const ACCOUNTABILITY_SETTING_COPY: Readonly<
   incidentClockRegimes: {
     label: "Incident notification clocks",
     strict:
-      "Both regimes: a serious incident starts the EU AI Act clocks and a PHI breach starts the HIPAA clocks. Each " +
-      "clock is a reminder computed from the recorded awareness time, not legal advice.",
+      "Every regime: a serious incident starts the EU AI Act clocks, a PHI breach the HIPAA clocks, a personal data " +
+      "breach the GDPR clocks, a significant incident the NIS2 clocks, a major ICT incident the DORA clocks, and an " +
+      "exploited vulnerability or severe product incident the CRA clocks. Each clock is a reminder computed from the " +
+      "recorded awareness time, not legal advice.",
     relaxed: "Removing a regime stops its clocks from being created for new incidents; existing clocks are kept.",
   },
   feedbackSignedLinksEnabled: {
@@ -414,6 +418,18 @@ export const SERIOUS_INCIDENT_CRITERIA = [
   "property_environment",
   "widespread_infringement",
   "phi_breach",
+  // ADR-0296: the facts that start the GDPR, NIS2, DORA and CRA clocks. None of them is an
+  // Art. 3(49) criterion, so none marks an incident serious under the EU AI Act.
+  /** GDPR Art. 4(12): a personal data breach */
+  "personal_data_breach",
+  /** NIS2 Art. 23(3): a significant incident */
+  "significant_cyber_incident",
+  /** DORA Art. 3(10), classified under Art. 18: a major ICT-related incident */
+  "major_ict_incident",
+  /** CRA Art. 14(1): an actively exploited vulnerability in a product with digital elements */
+  "exploited_vulnerability",
+  /** CRA Art. 14(3), (5): a severe incident having an impact on the security of a product with digital elements */
+  "severe_product_incident",
 ] as const;
 export type SeriousIncidentCriterion = (typeof SERIOUS_INCIDENT_CRITERIA)[number];
 export const INCIDENT_EVENT_KINDS = ["note", "status", "containment", "notification", "link", "action"] as const;
@@ -454,7 +470,13 @@ export type IncidentClockDue =
   /** "contemporaneously with" another clock: due when that clock is due */
   | { kind: "with_clock"; clockId: string }
   /** N days after the end of the calendar year the clock started in */
-  | { kind: "after_calendar_year"; days: number };
+  | { kind: "after_calendar_year"; days: number }
+  /** ADR-0296: `dueAt = start + hours × 1 h` (a period the text states in hours) */
+  | { kind: "hours"; hours: number }
+  /** ADR-0296: `dueAt = start + months` calendar months (UTC). A later report the text counts from an earlier one
+   * ("one month after the submission of the incident notification") is counted from the start: the earliest it can
+   * fall due, since the earlier report may be sent at once (the strict reading). */
+  | { kind: "months"; months: number };
 
 /** the facts a clock's applicability is decided from */
 export interface IncidentClockFacts {
