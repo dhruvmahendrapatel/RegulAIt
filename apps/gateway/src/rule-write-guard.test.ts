@@ -148,6 +148,14 @@ const AUDITED_WRITERS: AuditedWriter[] = [
       "limit, in the same transaction as its audit row; a new row has no versions, so nothing is discarded at dispatch.",
   },
   {
+    file: "mcp-sap-business.ts",
+    method: "insert",
+    expr: "rateLimits",
+    why:
+      "POST /v1/servers/:serverId/system-class (ADR-0230 A2) — CREATE ONLY of the seeded write-only fleet rate limit, in " +
+      "the same transaction as the class change and its audit row; a new row has no versions, so nothing is discarded.",
+  },
+  {
     file: "projects.ts",
     method: "insert",
     expr: "complianceProfiles",

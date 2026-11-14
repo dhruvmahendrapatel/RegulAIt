@@ -357,3 +357,30 @@ return an empty `to_Item`, so the tool reads back after creating. This is confir
    helper of our own. If it does not (it runs only on SAP's own platform), the Cloud SDK is the better fit.
 8. **Which SAP identity attribute by default** when an admin turns release on: login name, e-mail or IdP user UUID?
    Proposed: no default, so the admin must choose.
+
+## Amendment (2026-11-14): slice A2, gateway part, as built (Lane L3, first PR)
+
+Built with the proposed defaults while owner questions 1, 2, 3 and 6 stay open (they are ordinary rows, so a different
+answer is a data change, not a code change).
+
+- **`mcp_servers.system_class`** (null or `sap_business`, CHECK-bound) and **`rate_limits.write_only`** (default false),
+  in the pending migration `sap_business_servers`.
+- **Marking** is `POST /v1/servers/:serverId/system-class` (`mcp-sap-business.ts`), not a field on registration: one
+  transaction locks the server row, sets the class, seeds the §5 approval rule (fleet, that server, `write_only`,
+  `action` scope, quorum 2, the marking admin plus the role the request must name, through `createApprovalRuleRow` so
+  the ADR-0186 pool guard refuses a pool that cannot reach the quorum) and the write-only fleet rate limit (10 per
+  hour), and writes the audit row `mcp-server-sap-business`. A second mark is refused (409). Marking tightens, so it
+  needs no step-up. Relaxing a seeded row goes through the existing rule paths, which already need the settings_relax
+  step-up (loosening and deletion). **Unmarking** (`DELETE`) drops the project requirement: a settings_relax step-up
+  bound to the server, audited `mcp-server-sap-business-unmarked`; the seeded rows stay.
+- **The write-only rate limit**: the kernel is unchanged. `governedEvaluate` does not load a write-only limit for a
+  read tool, and counts a write-only limit's window over calls whose tool is not a known read tool on that server (an
+  unknown tool counts, the conservative reading). A policy replay counts every call for such a limit, so a simulation can
+  only read stricter. `rule-loosening.ts` classifies `writeOnly` true as the looser value.
+- **The project requirement** (`sapWriteRefusal`, in the proxy after the high-risk gate and before the kernel): a write
+  to an SAP business server with no project, an unknown or archived project, or a project with no budget is refused
+  `sap-write-needs-project`, audited, and never reaches the upstream or the usage ledger. The existing project budget
+  gate then applies to the attributed call.
+- **Not built here**: `identity_release`, `subject_token_retention`, the `approved_pending_execution` state and option
+  (b)'s SAP-trust key need slice A0 (owner-blocked). The HMAC idempotency key and the A3 audit and usage detail are the
+  lane's second PR.

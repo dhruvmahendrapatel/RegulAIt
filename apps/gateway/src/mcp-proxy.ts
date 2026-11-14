@@ -111,6 +111,7 @@ import {
 } from "./mcp-admission.js";
 import { definitionPinRefusal, recordDefinitionPins } from "./mcp-definition-pins.js";
 import { highRiskRefusal, recordRiskClassification } from "./mcp-high-risk.js";
+import { sapWriteRefusal } from "./mcp-sap-business.js";
 import { loadEntitlements } from "./entitlements.js";
 // ADR-0185 G3 — the non-tool MCP methods
 import {
@@ -962,6 +963,22 @@ async function executeGovernedToolCallInner(
     if (highRisk) {
       if (upstream) await operationSucceeded();
       return { kind: "denied", decision: { effect: "deny", ruleId: highRisk.ruleId, ruleChain: [], reason: highRisk.reason } };
+    }
+
+    // ADR-0230 A2: a write to an SAP business server must be attributed to a live, budgeted project; refused here,
+    // audited and never costed, before the kernel decision and any tool call
+    const sapRefusal = await sapWriteRefusal(db, {
+      userId,
+      serverId,
+      serverName: serverRow.name,
+      systemClass: serverRow.systemClass,
+      toolName,
+      toolKind: kind,
+      projectId: projectId ?? null,
+    });
+    if (sapRefusal) {
+      if (upstream) await operationSucceeded();
+      return { kind: "denied", decision: { effect: "deny", ruleId: sapRefusal.ruleId, ruleChain: [], reason: sapRefusal.reason } };
     }
 
     // The generation was read before the server/tool snapshot above. A first

@@ -477,6 +477,7 @@ import {
 import { registerMcpToolSyncRoutes } from "./mcp-tool-sync.js";
 import { registerMcpDefinitionPinRoutes } from "./mcp-definition-pins.js";
 import { registerMcpHighRiskRoutes } from "./mcp-high-risk.js";
+import { registerMcpSapBusinessRoutes } from "./mcp-sap-business.js";
 // ADR-0101 — federated MCP registries. Admin-only through the default gate;
 // a sync writes only the catalogue and an import is an explicit operator act.
 import { privateRangesRelaxation, registerMcpRegistryRoutes } from "./mcp-registry.js";
@@ -6020,6 +6021,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerMcpDefinitionPinRoutes(app, db);
   // ADR-0246 addendum: offensive MCP servers as high-risk — the policy template and the authorised-targets list
   registerMcpHighRiskRoutes(app, db);
+  registerMcpSapBusinessRoutes(app, db);
   // ADR-0101 — configure an upstream MCP registry, pull its catalogue, and
   // import ONE entry as a federated `mcp_servers` row that is `unscanned`,
   // ungranted and subject to the same ADR-0097 admission and ADR-0043 egress
