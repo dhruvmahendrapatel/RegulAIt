@@ -84,6 +84,7 @@ import {
   desc,
   eq,
   gt,
+  runWithRlsSystem,
   schedulerJobs,
   schedulerRuns,
   sql,
@@ -544,6 +545,18 @@ export interface RunJobOptions {
  * gateway — or the next job on the same tick — down with it.
  */
 export async function runSchedulerJob(
+  db: Db,
+  def: SchedulerJobDefinition,
+  opts: RunJobOptions,
+): Promise<JobRunOutcome> {
+  // ADR-0234 batch 7a: a job is not a request and has no principal. It runs under `system_task`, whoever triggered it
+  // (a tick or an admin's run-now): a job acts on every row by design (sweeps, escalations, routing), and a job that
+  // acts as a person resolves that person and enters their scope itself.
+  const label = /^[a-z0-9][a-z0-9_.:/-]{0,69}$/.test(def.name) ? `scheduler.${def.name}` : "scheduler.job";
+  return runWithRlsSystem("system_task", label, () => runSchedulerJobScoped(db, def, opts));
+}
+
+async function runSchedulerJobScoped(
   db: Db,
   def: SchedulerJobDefinition,
   opts: RunJobOptions,
