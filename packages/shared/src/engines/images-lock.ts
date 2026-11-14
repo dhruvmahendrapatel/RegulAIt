@@ -16,7 +16,7 @@ export interface EngineImageLockEntry {
   publishedAt: string | null;
 }
 
-export const ENGINE_IMAGES_LOCK: Readonly<Record<"promptfoo" | "modelscan" | "garak", Readonly<EngineImageLockEntry>>> = Object.freeze({
+export const ENGINE_IMAGES_LOCK: Readonly<Record<"promptfoo" | "modelscan" | "garak" | "spikee", Readonly<EngineImageLockEntry>>> = Object.freeze({
   promptfoo: Object.freeze({
     repository: "ghcr.io/dhruvmahendrapatel/regulait-engine-promptfoo",
     manifestDigest: "sha256:c54fe2d821a46cd7a6ed68c09cac2b3713d99ae2cf705d4f6957c99c29db0be2",
@@ -40,5 +40,13 @@ export const ENGINE_IMAGES_LOCK: Readonly<Record<"promptfoo" | "modelscan" | "ga
     publishGeneration: 9,
     sourceCommit: "4ae0eebcb170abf65840baafe9bec834ac4ea4a4",
     publishedAt: "2026-10-24T22:26:31.270Z",
+  }),
+  spikee: Object.freeze({
+    repository: null,
+    manifestDigest: null,
+    imageId: null,
+    publishGeneration: 0,
+    sourceCommit: null,
+    publishedAt: null,
   }),
 });

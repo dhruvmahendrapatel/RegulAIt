@@ -83,7 +83,7 @@ import {
   mergeTrainedOutcomes,
   planTrainedDetectors,
 } from "@regulait/shared";
-import { complianceProfilesForTags, projectClassifications } from "./projects.js";
+import { complianceProfilesForTags, projectClassifications, projectPiiMode, type PiiMode } from "./projects.js";
 import { loadTrainedDetectorRuntime, runTrainedCalls, type TrainedDetectorRuntime } from "./trained-detectors.js";
 import { settingTransitions } from "./setting-transitions.js";
 
@@ -165,6 +165,26 @@ export interface GuardrailPolicy {
    * the default). Read by `runGuardrailsAsync`; the sync `runGuardrails`
    * ignores it, so only the enforcement sites call the scorers. */
   trained?: TrainedDetectorRuntime | undefined;
+  /** P7R-02: the modes the TRAINED planner composes with. Identical to
+   * `modes` except `pii`, which is the effective PII floor (the project's
+   * compliance cascade, else the org default; ADR-0181 strict = block) rather
+   * than the heuristic's forced 'off' — so a trained PII finding is never
+   * weaker than the floor. Set whenever `trained` is. */
+  trainedModes?: GuardrailModes | undefined;
+}
+
+/** P7R-02: the cascade's PII mode in the guardrail vocabulary. A trained
+ * finding is counts-only (no spans), so 'redact' cannot be honoured and
+ * fails closed to 'block'; null (the audited 'none' relaxation) is no floor. */
+export function trainedPiiFloor(mode: PiiMode | null): GuardrailMode {
+  if (mode === null) return "off";
+  return mode === "redact" ? "block" : mode;
+}
+
+/** the trained planner's modes for a policy; a policy without `trainedModes`
+ * (hand-built) fails closed to a block PII floor */
+function trainedModesOf(policy: Pick<GuardrailPolicy, "modes" | "trainedModes">): GuardrailModes {
+  return policy.trainedModes ?? { ...policy.modes, pii: "block" };
 }
 
 /** The org-default row, or undefined when an admin has never touched the
@@ -341,6 +361,12 @@ export async function resolveGuardrailPolicy(
   // PII is never configured here — its mode is the cascade's piiMode, enforced
   // on its own dedicated path. Force 'off' so nothing can double-enforce it.
   modes.pii = "off";
+  // P7R-02: the trained planner keeps the heuristic exclusion above separate
+  // and MAX-composes its PII recogniser with the effective PII floor instead.
+  // Read only when a trained detector is on, so default-off costs nothing.
+  const trainedModes: GuardrailModes | undefined = trained
+    ? { ...modes, pii: trainedPiiFloor(await projectPiiMode(db, args.projectId ?? null)) }
+    : undefined;
 
   const terms = composeGuardrailTerms(
     orgRow?.customTerms ?? null,
@@ -360,7 +386,7 @@ export async function resolveGuardrailPolicy(
     registry.some((d) => d.phases.includes(phase) && modes[d.id] === "block") ||
     // a trained detector at block (or failing closed at block) must also see
     // the whole text before any of it is delivered
-    planTrainedDetectors(trained?.settings ?? [], phase, modes).some((p) => p.mode === "block");
+    planTrainedDetectors(trained?.settings ?? [], phase, trainedModes ?? modes).some((p) => p.mode === "block");
 
   return {
     modes,
@@ -370,7 +396,7 @@ export async function resolveGuardrailPolicy(
     blocksInput: atBlock("input"),
     blocksOutput: atBlock("output"),
     vendoredPacks: packsRow?.packs,
-    ...(trained ? { trained } : {}),
+    ...(trained ? { trained, trainedModes } : {}),
   };
 }
 
@@ -501,7 +527,7 @@ export async function runGuardrailsAsync(
 ): Promise<GuardrailEvaluation> {
   const base = runGuardrails(policy, phase, text);
   if (!policy.trained) return base;
-  const plans = planTrainedDetectors(policy.trained.settings, phase, policy.modes);
+  const plans = planTrainedDetectors(policy.trained.settings, phase, trainedModesOf(policy));
   if (plans.length === 0) return base;
   return mergeTrainedOutcomes(base, await runTrainedCalls(policy.trained, plans, phase, text));
 }

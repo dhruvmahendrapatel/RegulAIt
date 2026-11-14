@@ -55,6 +55,7 @@ import {
 } from "@regulait/shared";
 import { auditExecutor } from "./executor-channel.js";
 import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
+import { refuseIfArchived } from "./project-archive.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 const scopeParam = z.object({ scopeKind: z.enum(PERSON_STDIO_RELAXATION_SCOPES), scopeId: z.string().uuid() });
@@ -396,6 +397,10 @@ export function registerIsolationSubjectRoutes(app: FastifyInstance, db: Db): vo
     if (!b.success) return reply.status(400).send({ error: "invalid_body", issues: b.error.issues });
     const [before] = await projectSensitivityViews(p.data.projectId);
     if (!before) return reply.status(404).send({ error: "project_not_found" });
+    // ADR-0206 G1 decision 4: an archived project takes no settings edit, this one included (refused before the
+    // step-up, so no grant is spent on it)
+    const [archivedRow] = await db.select({ name: projects.name, archivedAt: projects.archivedAt }).from(projects).where(eq(projects.id, before.projectId));
+    if (await refuseIfArchived(reply, archivedRow)) return reply;
     const next = b.data.sensitivity;
     if (next === before.adminSensitivity) return reply.send({ project: before, changed: false });
     // owner decision D: every change to the field is audited and needs a fresh step-up (`settings_relax`)
@@ -412,7 +417,14 @@ export function registerIsolationSubjectRoutes(app: FastifyInstance, db: Db): vo
       const moved = await tx
         .update(projects)
         .set({ isolationSensitivity: next })
-        .where(and(eq(projects.id, before.projectId), before.adminSensitivity === null ? isNull(projects.isolationSensitivity) : eq(projects.isolationSensitivity, before.adminSensitivity)))
+        .where(
+          and(
+            eq(projects.id, before.projectId),
+            // an archive that lands between the read above and this write leaves the field alone
+            isNull(projects.archivedAt),
+            before.adminSensitivity === null ? isNull(projects.isolationSensitivity) : eq(projects.isolationSensitivity, before.adminSensitivity),
+          ),
+        )
         .returning({ id: projects.id });
       if (moved.length === 0) return false;
       await auditExecutor(tx as unknown as Db, {

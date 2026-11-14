@@ -15,6 +15,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import http from "node:http";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
+import { gzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 import { AgentCard, Role, type Message } from "@a2a-js/sdk";
 import { AgentEvent, DefaultRequestHandler, InMemoryTaskStore, JsonRpcTransportHandler, ServerCallContext, type AgentExecutor } from "@a2a-js/sdk/server";
@@ -53,7 +54,20 @@ interface Seen {
 }
 
 /** an A2A agent with one `echo` skill; `rpcOrigin` lets a test publish a card whose interface is elsewhere */
-async function startAgent(rpcOrigin?: string, opts: { redirectRpcTo?: () => string } = {}) {
+/** a raw upstream reply: written in 64 KiB chunks with NO Content-Length (chunked), gzip-encoded when asked */
+interface RawReply {
+  status: number;
+  body: string;
+  gzip?: boolean;
+}
+function writeRaw(res: http.ServerResponse, raw: RawReply) {
+  const bytes = raw.gzip ? gzipSync(Buffer.from(raw.body, "utf8")) : Buffer.from(raw.body, "utf8");
+  res.writeHead(raw.status, { "content-type": "application/json", ...(raw.gzip ? { "content-encoding": "gzip" } : {}) });
+  for (let i = 0; i < bytes.length; i += 65_536) res.write(bytes.subarray(i, i + 65_536));
+  res.end();
+}
+
+async function startAgent(rpcOrigin?: string, opts: { redirectRpcTo?: () => string; cardPadBytes?: number; cardGzip?: boolean; rpcRaw?: () => RawReply } = {}) {
   const seen: Seen[] = [];
   let base = "";
   const card = () =>
@@ -96,7 +110,15 @@ async function startAgent(rpcOrigin?: string, opts: { redirectRpcTo?: () => stri
       void (async () => {
         seen.push({ method: req.method ?? "", path: req.url ?? "", headers: { ...req.headers }, body });
         if (req.method === "GET" && req.url === "/.well-known/agent-card.json") {
-          res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(AgentCard.toJSON(card())));
+          const json = AgentCard.toJSON(card()) as Record<string, unknown>;
+          // an unknown field: the SDK drops it on normalisation, so only a transport bound can see its size
+          if (opts.cardPadBytes) json.padding = "x".repeat(opts.cardPadBytes);
+          if (opts.cardPadBytes || opts.cardGzip) writeRaw(res, { status: 200, body: JSON.stringify(json), gzip: opts.cardGzip === true });
+          else res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(json));
+          return;
+        }
+        if (req.method === "POST" && req.url === "/rpc" && opts.rpcRaw) {
+          writeRaw(res, opts.rpcRaw());
           return;
         }
         if (req.method === "POST" && req.url === "/rpc" && opts.redirectRpcTo) {
@@ -413,11 +435,102 @@ describe("A2A: the credential", () => {
     }
   });
 
+  it("A2A-SEC-01: a redirect Location carrying the credential is never echoed to the caller or into the audit trail", async () => {
+    // the upstream reflects the credential it was sent into its redirect target
+    const hop = await startAgent(undefined, { redirectRpcTo: () => `${elsewhereUp.base}/rpc?credential=${SECRET}` });
+    try {
+      const reg = await register(`p10-reflect-${RUN}`, hop.base);
+      expect(reg.statusCode, reg.body).toBe(201);
+      const hopId = reg.json().id as string;
+      expect((await req("PUT", `/v1/a2a/agents/${hopId}/credential`, { scheme: "bearer", secret: SECRET })).statusCode).toBe(201);
+      expect((await req("POST", `/v1/a2a/agents/${hopId}/grants`, { userId })).statusCode).toBe(201);
+      const r = await req("POST", `/v1/a2a/agents/${hopId}/messages`, { text: "reflect" }, userKey);
+      expect(r.statusCode, r.body).toBe(502);
+      expect(r.body).not.toContain(SECRET);
+      expect(r.body).not.toContain(elsewhereUp.base);
+      expect(r.json()).toMatchObject({ error: "a2a_upstream_error" });
+      const rows = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, A2A_RULE_IDS.upstreamError), eq(auditLog.objectId, hopId)));
+      expect(rows).toHaveLength(1);
+      expect(JSON.stringify(rows[0])).not.toContain(SECRET);
+      expect(rows[0]!.reason).toContain("redirect");
+      expect(rows[0]!.detail).toMatchObject({ outcome: "redirect_refused" });
+    } finally {
+      await hop.close();
+    }
+  });
+
   it("clears", async () => {
     const r = await req("DELETE", url());
     expect(r.statusCode, r.body).toBe(200);
     expect(r.json().credential).toMatchObject({ set: false });
   });
+});
+
+describe("A2A-SEC-02: upstream responses are bounded while they stream", () => {
+  const big = 2 * 1024 * 1024;
+
+  it("refuses an over-size card sent chunked with no Content-Length, audited, and saves nothing", async () => {
+    const fat = await startAgent(undefined, { cardPadBytes: big });
+    try {
+      const name = `p10-fatcard-${RUN}`;
+      const r = await register(name, fat.base);
+      expect(r.statusCode, r.body).toBe(502);
+      expect(r.json()).toMatchObject({ error: "a2a_registration_refused", code: "card_too_large" });
+      expect(await db.select().from(a2aAgents).where(eq(a2aAgents.name, name))).toHaveLength(0);
+      const a = await lastAudit(A2A_RULE_IDS.registrationRefused);
+      expect(a?.detail).toMatchObject({ code: "card_too_large" });
+    } finally {
+      await fat.close();
+    }
+  });
+
+  it("counts the decompressed bytes: a small gzip card that expands past the bound is refused", async () => {
+    const bomb = await startAgent(undefined, { cardPadBytes: big, cardGzip: true });
+    try {
+      const r = await register(`p10-gzcard-${RUN}`, bomb.base);
+      expect(r.statusCode, r.body).toBe(502);
+      expect(r.json()).toMatchObject({ code: "card_too_large" });
+    } finally {
+      await bomb.close();
+    }
+  });
+
+  it("a normal gzip card still registers", async () => {
+    const gz = await startAgent(undefined, { cardGzip: true });
+    try {
+      const r = await register(`p10-gzok-${RUN}`, gz.base);
+      expect(r.statusCode, r.body).toBe(201);
+    } finally {
+      await gz.close();
+    }
+  });
+
+  const rpcCases: Array<[string, () => RawReply]> = [
+    ["an over-size JSON-RPC reply (chunked, unknown fields)", () => ({ status: 200, body: JSON.stringify({ jsonrpc: "2.0", id: 1, result: { padding: "y".repeat(big) } }) })],
+    ["an over-size reply that is small on the wire but expands under gzip", () => ({ status: 200, body: JSON.stringify({ jsonrpc: "2.0", id: 1, result: { padding: "y".repeat(big) } }), gzip: true })],
+    ["an over-size non-2xx error body", () => ({ status: 500, body: JSON.stringify({ error: "z".repeat(big) }) })],
+  ];
+  for (const [what, raw] of rpcCases) {
+    it(`refuses ${what}: a fixed reason, audited, nothing charged`, async () => {
+      const fat = await startAgent(undefined, { rpcRaw: raw });
+      try {
+        const reg = await register(`p10-fatrpc-${RUN}-${rpcCases.findIndex((c) => c[0] === what)}`, fat.base);
+        expect(reg.statusCode, reg.body).toBe(201);
+        const id = reg.json().id as string;
+        expect((await req("POST", `/v1/a2a/agents/${id}/grants`, { userId })).statusCode).toBe(201);
+        const r = await req("POST", `/v1/a2a/agents/${id}/messages`, { text: "fat" }, userKey);
+        expect(r.statusCode, r.body).toBe(502);
+        expect(r.json()).toMatchObject({ error: "a2a_upstream_error" });
+        expect(r.json().detail).toMatch(/larger than/);
+        const rows = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, A2A_RULE_IDS.upstreamError), eq(auditLog.objectId, id)));
+        expect(rows).toHaveLength(1);
+        expect(rows[0]!.detail).toMatchObject({ outcome: "response_too_large" });
+        expect(await db.select().from(usageEvents).where(eq(usageEvents.userId, userId)).then((u) => u.filter((e) => (e.detail as { a2aAgentId?: string })?.a2aAgentId === id))).toHaveLength(0);
+      } finally {
+        await fat.close();
+      }
+    });
+  }
 });
 
 describe("A2A: removal", () => {

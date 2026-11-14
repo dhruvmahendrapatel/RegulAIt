@@ -378,6 +378,10 @@ export const NON_ADMIN_ROUTES = new Set([
   // act and stays admin — and there is no status-writing PATCH at all
   // (transitions are their own audited endpoint, acceptance its own record).
   "POST /v1/risks",
+  // ADR-0214 amendment — per-asset posture scores: any user, scoped in the handler to the assets the caller can
+  // already read (an agent they steward, a use case they own or may read; everything for an admin)
+  "GET /v1/reports/posture/assets",
+  "GET /v1/reports/posture/assets/:kind/:assetId",
   "GET /v1/risks",
   "GET /v1/risks/library",
   // G2/X8: the scenario library — same class as the risk library
@@ -415,6 +419,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/workflows/instances/:instanceId/abort",
   "GET /v1/workflows/instances/:instanceId",
   "GET /v1/approvals",
+  // ADR-0226: the queue's Excel export, read through the same visibility as the list (never wider)
+  "GET /v1/approvals/export.xlsx",
   // ADR-0046 — the review workbench's REVIEWER-facing surface. Each of these
   // is a non-admin route for the same reason deciding an approval is: the
   // person doing the reviewing is not an admin. Every one of them still
@@ -459,6 +465,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // ADR-0226: the list's Excel export, under the same scope as the list
   "GET /v1/cost-events/export.xlsx",
   "GET /v1/usage-events",
+  // ADR-0226: the ledger's Excel export, with the identical self-scoping (userId forced to self)
+  "GET /v1/usage-events/export.xlsx",
   // the windowed by-agent / by-connector aggregate of the same ledger; the
   // handler applies the identical self-scoping (userId forced to self)
   "GET /v1/usage-events/summary",

@@ -63,6 +63,7 @@ import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { drainBackgroundWork } from "./background-work.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -142,7 +143,7 @@ async function enrol(s: Session): Promise<SoftAuthenticator> {
 }
 
 async function mkUser(label: string, isAdmin = false): Promise<User> {
-  const u = await withKey(AUTH, "POST", "/v1/users", { email: `b4c6-${label}-${randomBytes(2).toString("hex")}-${RUN}@example.com`, displayName: `b4c6 ${label}`, isAdmin });
+  const u = await withKey(AUTH, "POST", "/v1/users", { email: `b4c6-${label}-${randomBytes(6).toString("hex")}-${RUN}@example.com`, displayName: `b4c6 ${label}`, isAdmin });
   expect(u.statusCode, u.body).toBe(201);
   const id = u.json().id as string;
   const key = await withKey(AUTH, "POST", `/v1/users/${id}/keys`, { name: "b4c6" });
@@ -246,7 +247,8 @@ beforeAll(async () => {
   for (const name of TOOLS) {
     const t = await withKey(AUTH, "POST", `/v1/servers/${serverId}/tools`, { name, kind: "write" });
     expect([200, 201]).toContain(t.statusCode);
-    const g = await withKey(AUTH, "POST", "/v1/grants/tools", { userId: P.caller.id, serverId, toolName: name });
+    // ADR-0250: a grant mint is a step-up; this file's own steppable admin means the bootstrap credential needs this
+    const g = await relaxStepUpAround(db, () => withKey(AUTH, "POST", "/v1/grants/tools", { userId: P.caller.id, serverId, toolName: name }));
     expect([200, 201]).toContain(g.statusCode);
   }
   // inserted directly: creating a SAML provider through the API is license-gated (ADR-0052), not this suite's subject

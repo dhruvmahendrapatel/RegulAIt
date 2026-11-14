@@ -28,11 +28,12 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { calculateJwkThumbprint, exportJWK, generateKeyPair, SignJWT, type CryptoKey, type JWK } from "jose";
+import { SignJWT, type JWK } from "jose";
 import {
   aiEndpointSignatures,
   auditLog,
   createDb,
+  discoveryPseudonymKeys,
   discoveryRuns,
   discoverySources,
   endpointAgentIdentities,
@@ -49,12 +50,12 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
-import { deriveIdentitySecrets, issueDpopNonce } from "./delegated-token.js";
-import { contentDigestOf, ENDPOINT_REPORT_MAX_BYTES } from "./endpoint-agent.js";
+import { ENDPOINT_REPORT_MAX_BYTES } from "./endpoint-agent.js";
 import { enrolmentTokenLongExpiryStepUp, runEndpointAgentIngest } from "./endpoint-agent-routes.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { grantSpent, grantStepUpForTest, sessionRequest, stepUpRequest } from "./testing/step-up-grant.js";
 import { useTestIssuerKey } from "./testing/workload-client.js";
+import { endpointAgentKeys } from "./testing/endpoint-agent-client.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -85,96 +86,10 @@ let signatureId: string;
 type Method = "GET" | "POST";
 const inject = (method: Method, url: string, headers: Record<string, string>, payload?: unknown) =>
   app.inject({ method, url, headers, ...(payload === undefined ? {} : { payload: payload as object }) });
-const nonce = () => issueDpopNonce(deriveIdentitySecrets(DATA_KEY).nonceKey);
 const b64sha = (v: string) => createHash("sha256").update(v).digest("base64url");
 
-/** a device key the test holds: P-256, made at run time, as the agent's TPM/DPAPI key is */
-class AgentKey {
-  private access: string | null = null;
-  private constructor(
-    readonly privateKey: CryptoKey,
-    readonly jwk: { kty: "EC"; crv: "P-256"; x: string; y: string },
-    readonly jkt: string,
-  ) {}
-  static async make(): Promise<AgentKey> {
-    const { privateKey, publicKey } = await generateKeyPair("ES256", { extractable: true });
-    const j = (await exportJWK(publicKey)) as { x: string; y: string };
-    const jwk = { kty: "EC" as const, crv: "P-256" as const, x: j.x, y: j.y };
-    return new AgentKey(privateKey, jwk, await calculateJwkThumbprint(jwk as JWK, "sha256"));
-  }
-  get clientId() {
-    return `urn:ietf:params:oauth:jwk-thumbprint:sha-256:${this.jkt}`;
-  }
-  async proof(method: string, url: string, ath?: string) {
-    const p: Record<string, unknown> = { htm: method, htu: url, iat: Math.floor(Date.now() / 1000), jti: randomUUID(), nonce: nonce() };
-    if (ath) p.ath = ath;
-    return new SignJWT(p).setProtectedHeader({ alg: "ES256", typ: "dpop+jwt", jwk: this.jwk as JWK }).sign(this.privateKey);
-  }
-  async tokenRequest() {
-    const iat = Math.floor(Date.now() / 1000);
-    const assertion = await new SignJWT({})
-      .setProtectedHeader({ alg: "ES256", typ: "JWT", kid: this.jkt })
-      .setIssuer(this.clientId)
-      .setSubject(this.clientId)
-      .setAudience(`${ORIGIN}/oauth/token`)
-      .setJti(randomUUID())
-      .setIssuedAt(iat)
-      .setExpirationTime(iat + 60)
-      .sign(this.privateKey);
-    const form = {
-      grant_type: "client_credentials",
-      client_id: this.clientId,
-      client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
-      client_assertion: assertion,
-      resource: `${ORIGIN}/v1/endpoint-agent`,
-    };
-    return app.inject({
-      method: "POST",
-      url: "/oauth/token",
-      headers: { "content-type": "application/x-www-form-urlencoded", dpop: await this.proof("POST", `${ORIGIN}/oauth/token`) },
-      payload: new URLSearchParams(form).toString(),
-    });
-  }
-  async token() {
-    if (this.access) return this.access;
-    const r = await this.tokenRequest();
-    expect(r.statusCode, r.body).toBe(200);
-    this.access = (r.json() as { access_token: string }).access_token;
-    return this.access;
-  }
-  reset() {
-    this.access = null;
-  }
-  async headers(method: Method, p: string) {
-    const t = await this.token();
-    return { authorization: `DPoP ${t}`, dpop: await this.proof(method, `${ORIGIN}${p}`, b64sha(t)) };
-  }
-  async reportSignature(body: string, o: { snapshotId: string; jti?: string; iat?: number; key?: AgentKey }) {
-    const k = o.key ?? this;
-    return new SignJWT({ snapshotId: o.snapshotId, contentDigest: contentDigestOf(Buffer.from(body)) })
-      .setProtectedHeader({ alg: "ES256", typ: "regulait-endpoint-report+jwt", kid: k.jkt })
-      .setIssuer(k.clientId)
-      .setAudience(`${ORIGIN}/v1/endpoint-agent/reports`)
-      .setIssuedAt(o.iat ?? Math.floor(Date.now() / 1000))
-      .setJti(o.jti ?? randomUUID())
-      .sign(k.privateKey);
-  }
-  /** POST a report; `signature` overrides the signature header (null: none) */
-  async report(body: string, snapshotId: string, o: { signature?: string | null } = {}) {
-    const sig = o.signature === undefined ? await this.reportSignature(body, { snapshotId }) : o.signature;
-    return app.inject({
-      method: "POST",
-      url: "/v1/endpoint-agent/reports",
-      headers: {
-        ...(await this.headers("POST", "/v1/endpoint-agent/reports")),
-        "content-type": "application/json",
-        "content-digest": contentDigestOf(Buffer.from(body)),
-        ...(sig ? { "regulait-report-signature": sig } : {}),
-      },
-      payload: body,
-    });
-  }
-}
+const AgentKey = endpointAgentKeys(() => app, DATA_KEY, ORIGIN);
+type AgentKey = InstanceType<typeof AgentKey>;
 
 const reportBody = (o: { snapshotId: string; collectedAt?: string; os?: string; facts?: unknown[] }) =>
   JSON.stringify({
@@ -254,6 +169,15 @@ beforeAll(async () => {
   await runMigrations(db, migrationsFolder);
   restores.push(await relaxIdentityForTest(db, { mfaRequired: "off" }));
   restores.push(await useTestIssuerKey(db));
+  // the per-tenant pseudonym key is wrapped under the first data key that asks for it, and a gateway shard runs
+  // several suites with different data keys on one database: set the existing key aside, put it back afterwards
+  // (as zz-adr0259-endpoint-mcp-config.test.ts does)
+  const priorPseudonymKeys = await db.select().from(discoveryPseudonymKeys);
+  await db.delete(discoveryPseudonymKeys);
+  restores.push(async () => {
+    await db.delete(discoveryPseudonymKeys);
+    if (priorPseudonymKeys.length) await db.insert(discoveryPseudonymKeys).values(priorPseudonymKeys);
+  });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   await app.ready();
   const u = await inject("POST", "/v1/users", AUTH, { email: `sd4b-member-${RUN}@example.com`, displayName: "sd4b member" });

@@ -169,7 +169,9 @@ sequenceDiagram
   preflight and circuit breaker, `governedEvaluate` (`governed-evaluate.ts`), outbound credential audience check,
   decision row with the policy re-checked inside the transaction, stdio placement into the executor, MCP mode and
   content-trust gates, project budget gate (`preDispatchProjectGate`), guardrails, approval consumption, the
-  single-attempt upstream call, output PII, usage and provenance rows.
+  single-attempt upstream call, output PII, usage and provenance rows. The grant step reads `loadEntitlements`
+  (`entitlements.ts`): direct, role and (ADR-0236, while `mcp_bundles_enabled`) governed-bundle tool grants, minus
+  the person's revocations; the same loader feeds every tool list (`visibleTools`).
 - **Remote agent (A2A) call** (ADR-0219) — `POST /v1/a2a/agents/:agentId/messages` → `executeGovernedA2aCall` in
   `a2a.ts`, the only sender. It checks, in order: the default-off org setting, the agent and its skill, the lead ceiling
   (it only narrows), the person's own grant (default-deny), project attribution when a project is named (an

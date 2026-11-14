@@ -1419,7 +1419,11 @@ async function runGitExecutions(
           break;
         }
       }
-      const planned = await planRun(db, instance.initiatorUserId, stage.run, instance.id, instance.projectId ?? null, dataKey);
+      // ADR-0250: the nested build-stage run is the engine's own work for THIS instance (at an executable stage), so
+      // another instance of the project resting in planning does not stop it (audited exception)
+      const planned = await planRun(db, instance.initiatorUserId, stage.run, instance.id, instance.projectId ?? null, dataKey, {
+        engineInstanceId: instance.id,
+      });
       if (!planned.ok) {
         const error = `nested run rejected: ${JSON.stringify(planned.body)}`;
         context.lastError = `${stage.id}: ${error}`;
