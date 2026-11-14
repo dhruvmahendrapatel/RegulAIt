@@ -20,9 +20,15 @@
  *     record it, and redact refuses because no A2A redaction path exists yet (fail closed);
  *  7. the egress decision on the CURRENT posture (the MCP allow-list and private-range default), then the guarded
  *     fetch for every request (re-validated, pinned, redirect-refused);
+ *  6b. the ADR-0042 guardrails on the message (the org default, MAX-composed with the project's compliance floor): a
+ *     block refuses and nothing is sent; warn and log are recorded;
+ *  7. the egress decision on the CURRENT posture (see below);
  *  8. the credential, opened at send time and sent only to the registered origin.
+ * THE REPLY (ADR-0219 follow-up, P10): the remote agent's text is checked before anyone sees it, with the same PII mode
+ * and guardrail policy. A block WITHHOLDS the reply (a marker naming the categories, never the text) and the call is
+ * still charged, because the remote agent did the work: bill-and-withhold, as on the connector and model paths.
  * The outcome is written in ONE transaction: the pillar-5 `usage_events` row (`object_type` 'a2a_agent', the agent's
- * flat price, the project) and the audit row.
+ * flat price, the project) and the audit row, both with the PII and guardrail COUNTS only.
  *
  * ADMIN. Registration, the card refresh, the credential and the grants are admin-only (the default gate) and audited in
  * the same transaction as the write. Registration reads the agent card through the guarded fetch and refuses a card
@@ -63,7 +69,9 @@ import { mcpUpstreamHeaderNameProblem, mcpUpstreamSecretProblem, setMcpUpstreamC
 import { createGuardedFetch, EGRESS_REDIRECT_REASON, egressRedirectRefused, egressRefusal, egressResponseTooLarge } from "./egress-guard.js";
 import { checkMcpServerUrl, loadMcpEgressPosture } from "./mcp-egress.js";
 import { loadOrgSettings, piiInternationalCategories } from "./org-settings.js";
-import { assertProjectAttribution, enforcePII, piiCategoryList, preDispatchProjectGate, projectPiiMode } from "./projects.js";
+import { assertProjectAttribution, enforcePII, piiCategoryList, piiWithheldMarker, preDispatchProjectGate, projectPiiMode } from "./projects.js";
+import { guardrailCategoryList, guardrailWithheldMarker } from "@regulait/shared";
+import { flattenFindings, guardrailOutcome, recordGuardrailDecision, resolveGuardrailPolicy, runGuardrailsAsync, type DispatchGuardrails } from "./guardrails.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { checkStepUp, requireStepUp } from "./step-up.js";
 import { timeouts } from "./timeouts.js";
@@ -121,6 +129,7 @@ export const A2A_RULE_IDS = Object.freeze({
   projectBudget: "project-budget-cap",
   piiBlocked: "pii-blocked",
   piiUnsupported: "a2a-pii-unsupported",
+  guardrailBlocked: "guardrail-blocked",
 });
 
 // ---------------------------------------------------------------------------
@@ -307,7 +316,19 @@ export interface GovernedA2aCallArgs {
 }
 
 export type GovernedA2aCallOutcome =
-  | { kind: "allowed"; reply: string; taskState: string | null; costUsd: number | null; usageEventId: string; auditId: string }
+  | {
+      kind: "allowed";
+      reply: string;
+      taskState: string | null;
+      costUsd: number | null;
+      usageEventId: string;
+      auditId: string;
+      /** true when the reply was replaced by a marker because a PII or guardrail check on it blocked */
+      withheld: boolean;
+      /** COUNTS ONLY, when the reply's checks found anything */
+      pii: { mode: string; action: string; outputHits: unknown[] } | null;
+      guardrails: DispatchGuardrails | null;
+    }
   | { kind: "denied"; status: number; error: string; ruleId: string; reason: string; auditId: string }
   | { kind: "upstream_error"; status: 502; error: "a2a_upstream_error"; reason: string; auditId: string };
 
@@ -419,6 +440,23 @@ export async function executeGovernedA2aCall(db: Db, args: GovernedA2aCallArgs, 
     if (chk.action === "block") return deny(403, "pii_blocked", A2A_RULE_IDS.piiBlocked, `the message contains PII (${piiCategoryList(chk.hits)})`, label, { pii: piiDetail });
   }
 
+  // 6b. the ADR-0042 guardrails on the message (PII has its own path above, so the detectors exclude it). There is no
+  //     per-agent override scope for a remote agent yet: the org default, MAX-composed with the project's floor.
+  const guardrailPolicy = await resolveGuardrailPolicy(db, { projectId, userId: args.userId });
+  let guardrailInput: Awaited<ReturnType<typeof runGuardrailsAsync>> | null = null;
+  if (guardrailPolicy.active) {
+    guardrailInput = await runGuardrailsAsync(guardrailPolicy, "input", args.text);
+    if (guardrailInput.action === "block") {
+      // the one audit row is the refusal itself, with the counts; the guardrail rule id so one query finds every block
+      return deny(403, "guardrail_blocked", A2A_RULE_IDS.guardrailBlocked, `the message was blocked by a guardrail (${guardrailCategoryList(guardrailInput.blocking)})`, label, {
+        // the shape `recordGuardrailDecision` writes, so the guardrail violations view lists this refusal too
+        guardrail: { phase: "input", outcome: "blocked", action: "block", findings: flattenFindings(guardrailInput.findings) },
+      });
+    }
+    const outcome = guardrailOutcome(guardrailInput);
+    if (outcome) await recordGuardrailDecision(db, { userId: args.userId, objectType: "a2a_agent", objectId: agent.id, projectId, evaluation: guardrailInput, outcome, detail: { skillId } });
+  }
+
   // 7. the egress decision on the current posture
   const { decision } = await checkMcpServerUrl(db, agent.url, agent.allowPrivateRanges);
   if (!decision.ok) return deny(403, "egress_blocked", A2A_RULE_IDS.egress, decision.reason, label, { code: decision.code });
@@ -463,21 +501,58 @@ export async function executeGovernedA2aCall(db: Db, args: GovernedA2aCallArgs, 
     return { kind: "upstream_error", status: 502, error: "a2a_upstream_error", reason, auditId: row!.id };
   }
 
-  const { text, taskState } = replyText(result);
+  const { text: rawReply, taskState } = replyText(result);
+  // THE REPLY'S CHECKS (bill-and-withhold): the remote agent's text is untrusted content; nobody sees it until it passes
+  let text = rawReply;
+  let withheld = false;
+  let replyPii: { mode: string; action: string; outputHits: ReturnType<typeof enforcePII>["hits"] } | null = null;
+  if (piiMode) {
+    const chk = enforcePII(piiMode, { output: rawReply }, await piiInternationalCategories(db));
+    if (chk.hits.length) replyPii = { mode: piiMode, action: chk.action, outputHits: chk.hits };
+    if (chk.action === "block") {
+      withheld = true;
+      text = piiWithheldMarker(chk.hits);
+    }
+  }
+  let guardrailOutput: Awaited<ReturnType<typeof runGuardrailsAsync>> | null = null;
+  if (guardrailPolicy.active && !withheld) {
+    guardrailOutput = await runGuardrailsAsync(guardrailPolicy, "output", rawReply);
+    if (guardrailOutput.action === "block") {
+      withheld = true;
+      text = guardrailWithheldMarker(guardrailOutput.blocking);
+    }
+  }
+  const guardrailFindings = [...(guardrailInput?.findings ?? []), ...(guardrailOutput?.findings ?? [])];
+  const guardrailView: DispatchGuardrails | null = guardrailFindings.length
+    ? {
+        action: guardrailOutput?.action === "block" ? "block" : guardrailFindings.some((f) => f.action === "warn") ? "warn" : "log",
+        phase: guardrailOutput?.findings.length ? "output" : "input",
+        findings: flattenFindings(guardrailFindings),
+        withheld: guardrailOutput?.action === "block",
+      }
+    : null;
+  const checks = {
+    ...(replyPii ? { replyPii: { mode: replyPii.mode, action: replyPii.action, outputHits: replyPii.outputHits } } : {}),
+    ...(guardrailView ? { guardrails: { action: guardrailView.action, findings: guardrailView.findings, withheld: guardrailView.withheld } } : {}),
+    ...(withheld ? { withheld: true } : {}),
+  };
   const costUsd = agent.pricePerCallUsd;
   // the spend and the decision, together
   const written = await db.transaction(async (tx) => {
     const [usage] = await tx
       .insert(usageEvents)
-      .values({ userId: args.userId, objectType: "a2a_agent", operation: skillId ?? "message", costUsd, projectId, detail: { a2aAgentId: agent.id, agentName: agent.name, taskState } })
+      .values({ userId: args.userId, objectType: "a2a_agent", operation: skillId ?? "message", costUsd, projectId, detail: { a2aAgentId: agent.id, agentName: agent.name, taskState, ...checks } })
       .returning({ id: usageEvents.id });
     const [audit] = await tx
       .insert(auditLog)
-      .values({ userId: args.userId, objectType: "a2a_agent", objectId: agent.id, toolName: skillId, detail: { ...grantDetail, outcome: "replied", taskState, usageEventId: usage!.id, costUsd, replyChars: text.length, receiptClass: "decision" }, effect: "allow", ruleId: A2A_RULE_IDS.callAllowed, ruleChain: [A2A_RULE_IDS.callAllowed], reason: `${label}: message sent${skillId ? ` for skill '${skillId}'` : ""} and a reply received` })
+      .values({ userId: args.userId, objectType: "a2a_agent", objectId: agent.id, toolName: skillId, detail: { ...grantDetail, ...checks, outcome: withheld ? "replied_withheld" : "replied", taskState, usageEventId: usage!.id, costUsd, replyChars: rawReply.length, receiptClass: "decision" }, effect: "allow", ruleId: A2A_RULE_IDS.callAllowed, ruleChain: [A2A_RULE_IDS.callAllowed], reason: `${label}: message sent${skillId ? ` for skill '${skillId}'` : ""} and a reply received${withheld ? `, but the reply was withheld (${replyPii?.action === "block" ? `PII: ${piiCategoryList(replyPii.outputHits)}` : `guardrail: ${guardrailCategoryList(guardrailOutput?.blocking ?? [])}`}); the call was charged` : ""}` })
       .returning({ id: auditLog.id });
+    // the reply's guardrail finding, in the same transaction as the spend it rode on
+    const outcome = guardrailOutput ? guardrailOutcome(guardrailOutput) : null;
+    if (guardrailOutput && outcome) await recordGuardrailDecision(tx, { userId: args.userId, objectType: "a2a_agent", objectId: agent.id, projectId, evaluation: guardrailOutput, outcome, detail: { skillId, usageEventId: usage!.id } });
     return { usageEventId: usage!.id, auditId: audit!.id };
   });
-  return { kind: "allowed", reply: text, taskState, costUsd, ...written };
+  return { kind: "allowed", reply: text, taskState, costUsd, ...written, withheld, pii: replyPii, guardrails: guardrailView };
 }
 
 // ---------------------------------------------------------------------------
@@ -788,7 +863,8 @@ export function registerA2aRoutes(app: FastifyInstance, db: Db, opts: { dataKey?
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "forbidden", detail: "a remote agent is called as a person; this credential has none" });
     const out = await executeGovernedA2aCall(db, { userId, agentId, skillId: parsed.data.skillId ?? null, text: parsed.data.text, projectId: parsed.data.projectId ?? null, callerIsAdmin: req.authCtx.isAdmin === true }, deps);
-    if (out.kind === "allowed") return { reply: out.reply, taskState: out.taskState, costUsd: out.costUsd, auditId: out.auditId };
+    if (out.kind === "allowed")
+      return { reply: out.reply, taskState: out.taskState, costUsd: out.costUsd, auditId: out.auditId, withheld: out.withheld, ...(out.pii ? { pii: out.pii } : {}), ...(out.guardrails ? { guardrails: out.guardrails } : {}) };
     return reply.status(out.status).send({ error: out.error, detail: out.reason, auditId: out.auditId, ...(out.kind === "denied" ? { ruleId: out.ruleId } : {}) });
   });
 }
