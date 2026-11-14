@@ -21,6 +21,8 @@ import { McpRegistriesPanel } from "./McpRegistriesPanel";
 import { McpAdmissionClearButton, McpServerNextSteps, McpSyncToolsButton, McpVisibleToolsCard } from "./McpServerAdmission";
 import { IdentityPropagationCell, McpIdentityAssertionCard } from "./McpIdentityPropagation";
 import { McpUpstreamCredentialCard } from "./McpUpstreamCredential";
+import { McpChangedSinceApprovalCard } from "./McpDefinitionPins";
+import { McpAuthorisedTargetsCard, McpHighRiskCard } from "./McpHighRisk";
 import { api } from "../../../api/client";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import type { McpServer, McpTool } from "../../../api/adminTypes";
@@ -153,12 +155,15 @@ function McpServersTab() {
           />
         </Card>
 
+        <McpChangedSinceApprovalCard />
+
         <IntegrationOwnership kind="servers" rows={servers.data?.servers ?? []} />
         <McpCoverage servers={servers.data?.servers ?? []} />
 
         {selectedId && <McpExecutionCard server={(servers.data?.servers ?? []).find((s) => s.id === selectedId)} />}
         {selectedId && <McpIdentityAssertionCard server={(servers.data?.servers ?? []).find((s) => s.id === selectedId)} />}
         {selectedId && <McpUpstreamCredentialCard server={(servers.data?.servers ?? []).find((s) => s.id === selectedId)} />}
+        {selectedId && <McpHighRiskCard server={(servers.data?.servers ?? []).find((s) => s.id === selectedId)} />}
 
         {selectedId && (
           <ToolsCard
@@ -177,6 +182,7 @@ function McpServersTab() {
 
         <McpEntitlementCard users={users} servers={servers.data?.servers ?? []} />
         <McpVisibleToolsCard users={users} servers={servers.data?.servers ?? []} />
+        <McpAuthorisedTargetsCard />
       </div>
     </>
   );

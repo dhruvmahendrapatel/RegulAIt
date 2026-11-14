@@ -4,6 +4,7 @@
  */
 import { Navigate, Route, Routes, useParams } from "react-router-dom";
 import McpServersPage from "./McpServersPage";
+import McpDefinitionPinsPage from "./McpDefinitionPins";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
@@ -52,6 +53,7 @@ export function McpServersArea() {
     <Routes>
       <Route index element={<McpServersPage />} />
       <Route path="registries/:registryId/entries" element={<McpRegistryEntriesPage />} />
+      <Route path="definition-pins/:serverId" element={<McpDefinitionPinsPage />} />
       {/* an unknown sub-path goes back to the area's own page, never a blank page */}
       <Route path="*" element={<Navigate to="/admin/mcp-servers" replace />} />
     </Routes>
