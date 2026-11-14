@@ -116,7 +116,9 @@ type DNSEgress struct {
 	CIDRs []string `json:"cidrs,omitempty"`
 }
 
-// IngressPeer is one source allowed to reach the gateway's port.
+// IngressPeer is one source allowed to reach the gateway's port. It names at least one selector, since the API server
+// refuses an empty peer.
+// +kubebuilder:validation:MinProperties=1
 type IngressPeer struct {
 	// +optional
 	NamespaceSelector *metav1.LabelSelector `json:"namespaceSelector,omitempty"`
@@ -178,6 +180,15 @@ const (
 	// ConditionStorageClassNamed is informational and not part of Ready: False when the operator creates the
 	// install-secrets claim on the cluster's default StorageClass, whose encryption at rest the operator cannot see.
 	ConditionStorageClassNamed = "StorageClassNamed"
+	// ConditionPublicEgress is informational and not part of Ready: True, with a Warning event on every reconcile,
+	// while the spec opens anything beyond private ranges (allowPublicEgress or a public CIDR).
+	ConditionPublicEgress = "PublicEgress"
+	// ConditionImageProvenance is informational and not part of Ready: bundle schema /1 signs the version, not the
+	// image digest, so it stays False (DigestNotSigned) until a schema binds the digest (ADR-0304 owner question 1).
+	ConditionImageProvenance = "ImageProvenance"
+	// ConditionReleaseKeyring is informational and not part of Ready: False while every compiled-in key is a
+	// development key (a key id containing "-dev-").
+	ConditionReleaseKeyring = "ReleaseKeyring"
 )
 
 // RegulaitInstallationStatus is the observed state.

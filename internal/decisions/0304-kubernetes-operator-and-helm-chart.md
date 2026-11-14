@@ -200,6 +200,17 @@ touches a cloud account.
   an install-secrets claim on the cluster's default StorageClass, or one created on a class other than the one now
   named. This follows the security review's note on #792, so an unencrypted default class is visible, not only
   documented.
+- Code review on #813 (ADR-0180):
+  - No egress list may overlap a link-local range or a cloud metadata address (`169.254.0.0/16`, `fe80::/10`,
+    `fd00:ec2::254`), in any mode. Link-local is no longer counted as private for `air_gapped`.
+  - `egress.dns.cidrs` takes private ranges and single link-local addresses (NodeLocal DNSCache) only.
+  - The informational conditions `PublicEgress`, `ImageProvenance` and `ReleaseKeyring` report public egress, the
+    unsigned image digest, and a development-only keyring on every reconcile.
+  - `Ready` no longer calls the running image "verified".
+- Threat model notes:
+  - Until schema `/2`, edit rights on a `RegulaitInstallation` equal deploy rights with the data key.
+  - Downgrade protection trusts `status.installedVersion`, so `regulaitinstallations/status` patch rights belong to
+    the operator alone.
 - Versions are compared with `golang.org/x/mod/semver`. Unlike the shell verifier, it orders a pre-release below its
   release, so `1.0.0-rc.1` after `1.0.0` is a downgrade. That is stricter, and it is deliberate.
 - The gateway gains `migrate-job.ts`, a thin entrypoint over a testable `migrate-job-run.ts`. It refuses to run without

@@ -3,6 +3,7 @@ package controller
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -137,8 +138,37 @@ func TestValidate(t *testing.T) {
 		{"public cidr in air_gapped", func(in *v1alpha1.RegulaitInstallation) {
 			in.Spec.Mode = v1alpha1.ModeAirGapped
 			in.Spec.Image.AllowedRegistries = []string{"registry.example.internal"}
-			in.Spec.Egress.AllowedCIDRs = []string{"0.0.0.0/0"}
+			in.Spec.Egress.AllowedCIDRs = []string{"203.0.113.0/24"}
 		}, "PublicEgressRefused"},
+		// ADR-0180 (#813 review): no list reaches the cloud metadata endpoints or a link-local range, in any mode.
+		{"metadata host in air_gapped", func(in *v1alpha1.RegulaitInstallation) {
+			in.Spec.Mode = v1alpha1.ModeAirGapped
+			in.Spec.Image.AllowedRegistries = []string{"registry.example.internal"}
+			in.Spec.Egress.AllowedCIDRs = []string{"169.254.169.254/32"}
+		}, "MetadataEgressRefused"},
+		{"everything in byoc", func(in *v1alpha1.RegulaitInstallation) { in.Spec.Egress.AllowedCIDRs = []string{"0.0.0.0/0"} }, "MetadataEgressRefused"},
+		{"all of IPv6 in byoc", func(in *v1alpha1.RegulaitInstallation) { in.Spec.Egress.AllowedCIDRs = []string{"::/0"} }, "MetadataEgressRefused"},
+		{"link-local range in byoc", func(in *v1alpha1.RegulaitInstallation) { in.Spec.Egress.AllowedCIDRs = []string{"169.254.0.0/16"} }, "MetadataEgressRefused"},
+		{"IPv6 link-local in byoc", func(in *v1alpha1.RegulaitInstallation) { in.Spec.Egress.DatabaseCIDRs = []string{"fe80::/10"} }, "MetadataEgressRefused"},
+		{"AWS IPv6 metadata inside fc00::/7", func(in *v1alpha1.RegulaitInstallation) {
+			in.Spec.Egress.AllowedCIDRs = []string{"fd00:ec2::/64"}
+		}, "MetadataEgressRefused"},
+		{"dns to everything", func(in *v1alpha1.RegulaitInstallation) {
+			in.Spec.Egress.DNS = &v1alpha1.DNSEgress{CIDRs: []string{"0.0.0.0/0"}}
+		}, "MetadataEgressRefused"},
+		{"dns to a public resolver in byoc", func(in *v1alpha1.RegulaitInstallation) {
+			in.Spec.Egress.DNS = &v1alpha1.DNSEgress{CIDRs: []string{"8.8.8.8/32"}}
+		}, "PublicEgressRefused"},
+		{"dns to the link-local range", func(in *v1alpha1.RegulaitInstallation) {
+			in.Spec.Egress.DNS = &v1alpha1.DNSEgress{CIDRs: []string{"169.254.0.0/16"}}
+		}, "MetadataEgressRefused"},
+		{"dns to the metadata host", func(in *v1alpha1.RegulaitInstallation) {
+			in.Spec.Egress.DNS = &v1alpha1.DNSEgress{CIDRs: []string{"169.254.169.254/32"}}
+		}, "MetadataEgressRefused"},
+		{"dns to NodeLocal DNSCache", func(in *v1alpha1.RegulaitInstallation) {
+			in.Spec.Egress.DNS = &v1alpha1.DNSEgress{CIDRs: []string{"169.254.20.10/32"}}
+		}, ""},
+		{"public cidr in byoc is valid (and reported)", func(in *v1alpha1.RegulaitInstallation) { in.Spec.Egress.AllowedCIDRs = []string{"203.0.113.0/24"} }, ""},
 		{"private supernet trick in air_gapped", func(in *v1alpha1.RegulaitInstallation) {
 			in.Spec.Mode = v1alpha1.ModeAirGapped
 			in.Spec.Image.AllowedRegistries = []string{"registry.example.internal"}
@@ -174,5 +204,31 @@ func TestMigrateJobNameFitsAndChangesWithDigest(t *testing.T) {
 	b := migrateJobName(in)
 	if len(a) > 63 || len(b) > 63 || a == b {
 		t.Fatalf("job names %q %q", a, b)
+	}
+}
+
+func TestPublicEgressIsReported(t *testing.T) {
+	in := sample()
+	in.Spec.Egress.AllowPublicEgress = false
+	in.Spec.Egress.AllowedCIDRs = []string{"10.40.0.0/16"}
+	in.Spec.Egress.DatabaseCIDRs = []string{"10.0.5.0/24"}
+	if got := PublicEgress(in); len(got) != 0 {
+		t.Fatalf("private-only spec reported as public: %v", got)
+	}
+	in.Spec.Egress.AllowPublicEgress = true
+	in.Spec.Egress.AllowedCIDRs = []string{"10.40.0.0/16", "203.0.113.0/24"}
+	got := strings.Join(PublicEgress(in), "; ")
+	if !strings.Contains(got, "allowPublicEgress") || !strings.Contains(got, "egress.allowedCIDRs 203.0.113.0/24") || strings.Contains(got, "10.40.0.0/16") {
+		t.Fatalf("public egress report: %q", got)
+	}
+}
+
+func TestConditionMessagesAreBounded(t *testing.T) {
+	long := strings.Repeat("é", 4000)
+	if got := truncateMessage(long); len(got) > maxMessage+len("…") || !utf8.ValidString(got) {
+		t.Fatalf("truncated message is %d bytes or not valid UTF-8", len(got))
+	}
+	if truncateMessage("short") != "short" {
+		t.Fatal("a short message must be unchanged")
 	}
 }
