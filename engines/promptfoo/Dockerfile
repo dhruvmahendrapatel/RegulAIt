@@ -80,6 +80,15 @@ LABEL org.opencontainers.image.title="regulait-engine-promptfoo" \
       org.regulait.engine="promptfoo" \
       org.regulait.engine-version="0.125.1" \
       org.regulait.patches="telemetry-disabled-sends-nothing"
+# ADR-0184 / ADR-0200 (patch, never allow-list): CVE-2026-76844 and CVE-2026-85091 (zlib1g, HIGH).
+# The pinned base digest is still the newest published one and ships 1:1.3.dfsg+really1.3.1-1+b1;
+# the fix is in Debian trixie-security. Upgrade exactly that package to exactly the fixed version,
+# then drop what apt and dpkg wrote with wall-clock content (the lists, their logs and ldconfig's
+# aux-cache), so the layer stays byte-reproducible (ADR-0187 addendum 2026-10-21: build and rebuild
+# must match). Remove this when a rebuilt base digest already carries the fix.
+RUN apt-get update \
+ && apt-get install -y --only-upgrade --no-install-recommends zlib1g=1:1.3.dfsg+really1.3.1-1+deb13u1 \
+ && rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log /var/cache/ldconfig/aux-cache
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
            /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 COPY --from=promptfoo /opt/promptfoo /opt/promptfoo

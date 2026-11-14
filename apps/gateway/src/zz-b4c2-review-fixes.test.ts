@@ -63,6 +63,7 @@ import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { drainBackgroundWork } from "./background-work.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -126,7 +127,7 @@ async function enrol(s: Session): Promise<SoftAuthenticator> {
   const opt = await as(s, "POST", "/v1/auth/passkeys/registration-options", {});
   expect(opt.statusCode, opt.body).toBe(200);
   const auth = new SoftAuthenticator({ origin: ORIGIN });
-  const reg = await as(s, "POST", "/v1/auth/passkeys", { challengeId: opt.json().challengeId, response: auth.register(opt.json().options), label: `b4c-${randomBytes(2).toString("hex")}` });
+  const reg = await as(s, "POST", "/v1/auth/passkeys", { challengeId: opt.json().challengeId, response: auth.register(opt.json().options), label: `b4c-${randomBytes(6).toString("hex")}` });
   expect(reg.statusCode, reg.body).toBe(201);
   return auth;
 }
@@ -144,7 +145,7 @@ async function mkPerson(label: string, isAdmin = false): Promise<Person> {
   const u = await mkUser(label, isAdmin);
   return { ...u, auth: await enrol(u.s) };
 }
-const person = (label: string) => mkPerson(`${label}-${randomBytes(2).toString("hex")}`);
+const person = (label: string) => mkPerson(`${label}-${randomBytes(6).toString("hex")}`);
 
 async function startUpstream(): Promise<{ url: string; close: () => Promise<void> }> {
   const httpServer = http.createServer((req, res) => {
@@ -268,7 +269,8 @@ beforeAll(async () => {
   for (const name of TOOLS) {
     const t = await withKey(AUTH, "POST", `/v1/servers/${serverId}/tools`, { name, kind: "write" });
     expect([200, 201]).toContain(t.statusCode);
-    const g = await withKey(AUTH, "POST", "/v1/grants/tools", { userId: P.caller.id, serverId, toolName: name });
+    // ADR-0250: a grant mint is a step-up; this file's own steppable admin means the bootstrap credential needs this
+    const g = await relaxStepUpAround(db, () => withKey(AUTH, "POST", "/v1/grants/tools", { userId: P.caller.id, serverId, toolName: name }));
     expect([200, 201]).toContain(g.statusCode);
   }
 }, 180_000);

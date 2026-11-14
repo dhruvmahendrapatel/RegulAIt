@@ -68,6 +68,7 @@ import {
   users,
   virtualKeys,
   workflowInstances,
+  withinSystemReason,
   type Db,
   type EngineRunRow,
 } from "@regulait/db";
@@ -93,6 +94,7 @@ import {
   isTerminalEngineRunStatus,
   normaliseEngineResult,
   garakConfigProblem,
+  spikeeConfigProblem,
   promptfooConfigProblem,
   updateEngineScheduleSchema,
   type CreateEngineRunInput,
@@ -123,6 +125,7 @@ import { DelegationRefusedError, revokeDelegationGrant } from "./delegation.js";
 import { databaseNow, databaseWallNow } from "./db-clock.js";
 import { agentScopeItem, ensureIdentityFor, startInProcessChain, usdToMicros } from "./in-process-delegation.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
+import { settleEngineRetestTx } from "./mrm-retest-engine.js";
 import { errMessage } from "./err-serializer.js";
 
 export type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
@@ -330,7 +333,14 @@ export async function validateEngineRunRequest(
   // plugin's test cases, so a plan of strategies alone would run nothing)
   // B5-G (decision 149): garak takes no run params, so nothing can reach its config unseen
   const configProblem =
-    input.engineId === "promptfoo" ? promptfooConfigProblem(input.config.sets) : input.engineId === "garak" ? garakConfigProblem(input.config) : null;
+    input.engineId === "promptfoo"
+      ? promptfooConfigProblem(input.config.sets)
+      : input.engineId === "garak"
+        ? garakConfigProblem(input.config)
+        : // ADR-0245: spikee needs a dataset
+          input.engineId === "spikee"
+          ? spikeeConfigProblem(input.config)
+          : null;
   if (configProblem) return { ok: false, status: 422, error: "engine_config_invalid", detail: configProblem };
   if (!engine.enabled) {
     return { ok: false, status: 409, error: "engine_disabled", detail: `engine ${input.engineId} is off; an admin enables it after its runner self-test passes` };
@@ -470,7 +480,9 @@ export async function createEngineRun(db: Db, input: CreateEngineRunInput, ctx: 
       .returning();
     let approvalId: string | null = null;
     if (needsApproval) {
-      const [a] = await tx
+      // ADR-0234 batch 2: the run's approval is the run-as user's request, often created by someone else (an
+      // approver whose decision started the workflow check that queued it): routing, under approval_maintenance
+      const [a] = await withinSystemReason(tx, "approval_maintenance", "engine-runs.run-approval", () => tx
         .insert(approvals)
         .values({
           userId: ctx.runAsUserId,
@@ -483,7 +495,7 @@ export async function createEngineRun(db: Db, input: CreateEngineRunInput, ctx: 
           stageId: `__engine_run__:${run!.id}`,
           status: "pending",
         })
-        .returning({ id: approvals.id });
+        .returning({ id: approvals.id }));
       approvalId = a!.id;
       await tx.update(engineRuns).set({ approvalId }).where(eq(engineRuns.id, run!.id));
     }
@@ -670,6 +682,17 @@ async function endLockedRun(tx: Tx, locked: EngineRunRow, given: FinishArgs, now
       await tx.update(engineRuns).set({ evalRunId: ledgers.evalRunId, redteamRunId: ledgers.redteamRunId }).where(eq(engineRuns.id, runId));
     }
   }
+  // ADR-0245: an automatic re-test (ADR-0217) waiting on this run settles with it, from the gateway's own verdict
+  await settleEngineRetestTx(tx, {
+    engineRunId: runId,
+    engineId: locked.engineId,
+    status: args.status,
+    errorCode: args.errorCode,
+    verdict: args.normalised.verdict,
+    measured: args.normalised.counts.pass + args.normalised.counts.fail,
+    asr: args.normalised.asr,
+    ...ledgers,
+  });
   await tx.insert(auditLog).values({
     userId: args.actorUserId,
     objectType: "engine_run",
@@ -861,6 +884,8 @@ export async function applyEngineRunApprovalDecision(
     .update(engineRuns)
     .set({ status: "not_run", errorCode: "approval_denied", finishedAt: now, summary: runSummary(n, "approval_denied") })
     .where(eq(engineRuns.id, run.id));
+  // ADR-0245: a refused re-test run settles its re-test as refused
+  await settleEngineRetestTx(tx, { engineRunId: run.id, engineId: run.engineId, status: "not_run", errorCode: "approval_denied", verdict: null, measured: 0, asr: null, redteamRunId: null, evalRunId: null });
   await tx.insert(auditLog).values({
     userId: deciderUserId,
     objectType: "engine_run",

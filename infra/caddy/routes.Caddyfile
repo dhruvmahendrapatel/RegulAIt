@@ -73,30 +73,119 @@
 		respond 404
 	}
 
+	# --- public-page bot check (ADR-0258, optional) ---------------------------
+	# REGULAIT_ANUBIS picks one of the two snippets below: `off` (the default) or
+	# `on`. Any other value names a snippet that does not exist, so Caddy refuses
+	# to start rather than guess. `on` puts Anubis in front of the public trust
+	# centre, auditor portal and supplier portal ONLY (docs/deployment/ANUBIS.md).
+	import regulait_public_gate_{$REGULAIT_ANUBIS:off} {args[0]} {args[1]}
+
 	# --- reverse proxy ---------------------------------------------------------
 	handle {
-		# `gateway:3000` is the compose service name + its in-container port. The
-		# gateway publishes 3000 to host LOOPBACK ONLY (ADR-0029), so a front is
-		# the only route in from off-box.
-		#
-		# The gateway's requestIsSecure() reads x-forwarded-proto straight off the
-		# raw headers, so the session cookie's `Secure` flag activates behind this.
-		#
-		# We override X-Forwarded-For with <client-ip> instead of letting Caddy
-		# append: overwriting discards any client-supplied X-Forwarded-For, so the
-		# left-most entry the gateway sees is always the address the front vouches
-		# for and cannot be spoofed. That is what makes Fastify's `trustProxy` safe
-		# to enable.
-		reverse_proxy {$REGULAIT_TLS_UPSTREAM:gateway:3000} {
+		import regulait_gateway_proxy {args[0]} {args[1]}
+	}
+}
+
+(regulait_gateway_proxy) {
+	# `gateway:3000` is the compose service name + its in-container port. The
+	# gateway publishes 3000 to host LOOPBACK ONLY (ADR-0029), so a front is
+	# the only route in from off-box.
+	#
+	# The gateway's requestIsSecure() reads x-forwarded-proto straight off the
+	# raw headers, so the session cookie's `Secure` flag activates behind this.
+	#
+	# We override X-Forwarded-For with <client-ip> instead of letting Caddy
+	# append: overwriting discards any client-supplied X-Forwarded-For, so the
+	# left-most entry the gateway sees is always the address the front vouches
+	# for and cannot be spoofed. That is what makes Fastify's `trustProxy` safe
+	# to enable.
+	reverse_proxy {$REGULAIT_TLS_UPSTREAM:gateway:3000} {
+		header_up X-Forwarded-For {args[0]}
+		header_up X-Real-IP {args[0]}
+		header_up X-Forwarded-Proto {args[1]}
+		header_up X-Forwarded-Host {host}
+		header_up -CF-Connecting-IP
+
+		# The gateway streams SSE (playground / run output). Disable response
+		# buffering so tokens reach the browser as they are produced.
+		flush_interval -1
+	}
+}
+
+# Anubis off (the shipped default): the public pages go straight to the gateway,
+# which rate-limits them per address (ADR-0221, ADR-0225). Anubis's own path
+# answers 404, so nothing under it reaches the gateway's SPA fallback.
+(regulait_public_gate_off) {
+	handle /.within.website/* {
+		respond 404
+	}
+}
+
+# Anubis on (ADR-0258): Caddy asks Anubis about each request to a public page
+# (forward_auth, Anubis's "subrequest" mode) and, when Anubis says yes, proxies
+# to the gateway itself. So the gateway still sees only this front's fixed
+# address (ADR-0031) and the client address the front vouches for, and Anubis
+# never needs a route to the gateway.
+#
+# Covered: the trust centre (/ui/trust, /v1/trust-center), the auditor portal
+# (/ui/audit, /v1/auditor/*) and the supplier portal (/ui/supplier,
+# /v1/supplier/*). NOT covered, by design: the admin console and the rest of
+# /ui, every other /v1 route, the gateway's model and MCP routes, /idp. Those
+# are authenticated surfaces; a challenge there would break API clients.
+(regulait_public_gate_on) {
+	# Anubis's own pages: the challenge, its scripts and images, and the
+	# pass-challenge endpoint that sets the pass cookie.
+	handle /.within.website/* {
+		# The auditor and supplier sign-in links carry their single-use token in
+		# the URL fragment (ADR-0221, ADR-0225), which no server ever receives.
+		# Anubis's challenge script returns the visitor to the page they asked
+		# for by sending that full address, fragment included, as a query
+		# parameter of pass-challenge. Do not write that request to the access
+		# log. Anubis itself logs the path only, never the query.
+		log_skip /.within.website/x/cmd/anubis/api/pass-challenge
+		# Anubis sets no Content-Security-Policy, and these pages share the portals'
+		# origin. This is the strictest CSP Anubis documents as working (v1.28.2,
+		# docs/admin/configuration/content-security-policy): its inline loader and
+		# critical CSS need 'unsafe-inline'; every other source is 'self' or none.
+		# `>` = set on the response, replacing anything upstream sent.
+		header >Content-Security-Policy "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+		reverse_proxy {$REGULAIT_ANUBIS_UPSTREAM:anubis:8923} {
 			header_up X-Forwarded-For {args[0]}
 			header_up X-Real-IP {args[0]}
 			header_up X-Forwarded-Proto {args[1]}
 			header_up X-Forwarded-Host {host}
 			header_up -CF-Connecting-IP
+			header_up -X-Original-Uri
+		}
+	}
 
-			# The gateway streams SSE (playground / run output). Disable response
-			# buffering so tokens reach the browser as they are produced.
-			flush_interval -1
+	@regulait_public_pages path /ui/trust /ui/trust/* /ui/audit /ui/audit/* /ui/supplier /ui/supplier/* /v1/trust-center /v1/trust-center/* /v1/auditor/* /v1/supplier/*
+	handle @regulait_public_pages {
+		# Anubis's own deny page (403) comes back on this path through
+		# forward_auth. `?` sets the same CSP only when the response has none, so
+		# the gateway's own CSP on every allowed response is left as it is.
+		header ?Content-Security-Policy "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+		route {
+			forward_auth {$REGULAIT_ANUBIS_UPSTREAM:anubis:8923} {
+				uri /.within.website/x/cmd/anubis/api/check
+				# The address Anubis binds a pass to and matches the allow-list
+				# against: the one the front vouches for, never a client header.
+				header_up X-Forwarded-For {args[0]}
+				header_up X-Real-IP {args[0]}
+				header_up X-Forwarded-Proto {args[1]}
+				header_up -CF-Connecting-IP
+				# Anubis reads the path from X-Original-Uri before X-Forwarded-Uri
+				# (which forward_auth sets); a client must not choose it.
+				header_up -X-Original-Uri
+				# 401 = "challenge this client": send the browser to the challenge,
+				# which returns it here once passed. Any other non-2xx answer (403
+				# for a denied scraper) goes back to the client as it is.
+				@anubis_challenge status 401
+				handle_response @anubis_challenge {
+					redir * /.within.website/?redir={uri} 307
+				}
+			}
+			import regulait_gateway_proxy {args[0]} {args[1]}
 		}
 	}
 }

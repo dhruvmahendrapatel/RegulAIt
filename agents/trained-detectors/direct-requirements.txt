@@ -1,9 +1,8 @@
-# ADR-0220: the trained-detector service's direct dependencies. requirements.txt is the hash-locked closure
-# (uv pip compile --generate-hashes, linux x86_64, CPython 3.12); the image installs ONLY from it.
+# ADR-0220, ADR-0247: the trained-detector service's RUNTIME direct dependencies. requirements.txt is the hash-locked
+# closure (uv pip compile --generate-hashes, linux x86_64, CPython 3.12); the runtime image installs ONLY from it.
+# No PyTorch and no Transformers at run time: the classifiers are ONNX graphs (export-requirements.txt builds them).
 presidio-analyzer
 spacy
-torch
-transformers
-safetensors
-sentencepiece
-protobuf
+onnxruntime
+tokenizers
+numpy

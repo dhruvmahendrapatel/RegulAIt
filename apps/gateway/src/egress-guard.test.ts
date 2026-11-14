@@ -20,6 +20,9 @@ import {
   createGuardedFetch,
   EgressBlockedError,
   EgressRedirectError,
+  EgressResponseTooLargeError,
+  egressRefusal,
+  egressResponseTooLarge,
   hasBlockedHostSuffix,
   normalizeHost,
   type EgressAllowEntry,
@@ -372,6 +375,17 @@ describe("the guarded fetch: redirects and per-request re-validation", () => {
     await expect(guarded("https://api.example.com/v1")).rejects.toBeInstanceOf(EgressRedirectError);
   });
 
+  it("A2A-SEC-01: the refusal never carries the upstream's Location", async () => {
+    const fetchImpl = (async () =>
+      new Response(null, { status: 302, headers: { location: "https://elsewhere.test/cb?token=SECRET-IN-LOCATION" } })) as unknown as typeof fetch;
+    const guarded = createGuardedFetch({ allowList: allow("api.example.com", { allowPlaintextHttp: false }), resolve: publicResolver, fetchImpl });
+    const err = await guarded("https://api.example.com/v1").then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(EgressRedirectError);
+    expect(String((err as Error).message)).not.toContain("SECRET-IN-LOCATION");
+    expect(egressRefusal(err)).not.toContain("SECRET-IN-LOCATION");
+    expect(JSON.stringify(err)).not.toContain("SECRET-IN-LOCATION");
+  });
+
   it("re-validates on EVERY request — a host that starts public and is re-pointed is blocked on the next call", async () => {
     let answer = "93.184.216.34";
     const guarded = createGuardedFetch({
@@ -453,5 +467,43 @@ describe("REL-12: a guarded fetch always has a deadline", () => {
     expect(settled).toBe(false);
     ac.abort(new Error("caller cancelled"));
     await expect(pending).rejects.toThrow("caller cancelled");
+  });
+});
+
+describe("the guarded fetch: maxResponseBytes (A2A-SEC-02)", () => {
+  const chunked = (total: number, headers: Record<string, string> = {}) => {
+    let sent = 0;
+    let pulls = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(c) {
+        pulls += 1;
+        if (sent >= total) return c.close();
+        const n = Math.min(16_384, total - sent);
+        sent += n;
+        c.enqueue(new Uint8Array(n).fill(120));
+      },
+    });
+    return { res: new Response(body, { status: 200, headers }), pulled: () => pulls };
+  };
+  const guardedWith = (res: Response, max: number) =>
+    createGuardedFetch({ allowList: allow("api.example.com", { allowPlaintextHttp: false }), resolve: publicResolver, fetchImpl: (async () => res) as unknown as typeof fetch, maxResponseBytes: max });
+
+  it("rejects a chunked body (no Content-Length) once it passes the bound, and stops reading", async () => {
+    const up = chunked(1_000_000);
+    const res = await guardedWith(up.res, 50_000)("https://api.example.com/v1");
+    const err = await res.text().then(() => null, (e: unknown) => e);
+    expect(egressResponseTooLarge(err)).toBeInstanceOf(EgressResponseTooLargeError);
+    expect(up.pulled()).toBeLessThan(20);
+  });
+
+  it("rejects a declared Content-Length over the bound before reading", async () => {
+    const up = chunked(10, { "content-length": "999999" });
+    await expect(guardedWith(up.res, 50_000)("https://api.example.com/v1")).rejects.toBeInstanceOf(EgressResponseTooLargeError);
+  });
+
+  it("passes a body within the bound untouched, status included", async () => {
+    const res = await guardedWith(new Response("{\"ok\":true}", { status: 500 }), 50_000)("https://api.example.com/v1");
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ ok: true });
   });
 });

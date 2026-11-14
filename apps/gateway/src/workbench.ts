@@ -61,6 +61,7 @@ import {
   workflowInstances,
   type ApprovalAssignmentRow,
   type ApprovalSlaPolicyRow,
+  runWithRlsPrincipalStep,
   type Db,
 } from "@regulait/db";
 import {
@@ -938,7 +939,13 @@ export function registerWorkbenchRoutes(app: FastifyInstance, db: Db, opts: Work
 
     const batchId = crypto.randomUUID();
     const unique = [...new Set(body.approvalIds)];
-    const rows = await db.select().from(approvals).where(inArray(approvals.id, unique));
+    // ADR-0234 batch 2: the pre-read feeds the SAME decide path's own authorization (decideOneApproval), which
+    // runs under approval_maintenance as the principal; reading here under the principal alone would turn the
+    // queue's 403 for someone else's item into a 404 before that path is reached
+    const rows = await runWithRlsPrincipalStep({ userId: me }, "approval_maintenance", "approvals.bulk-decide", async () =>
+      // awaited INSIDE the callback: a drizzle builder runs when awaited, and the scope is the callback's
+      await db.select().from(approvals).where(inArray(approvals.id, unique)),
+    );
     const byId = new Map(rows.map((r) => [r.id, r]));
 
     const results: Array<{

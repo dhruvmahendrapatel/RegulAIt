@@ -14,7 +14,7 @@ export default defineConfig({
     //
     // ADR-0189 R25: the suite holds a receipt signing key, as a deployment does,
     // so a sign-off is not refused for want of one (read that file first).
-    setupFiles: ["./src/testing/mock-socket-contract.ts", "./src/testing/receipt-signing-key.ts"],
+    setupFiles: ["./src/testing/mock-socket-contract.ts", "./src/testing/receipt-signing-key.ts", "./src/testing/bootstrap-grant-mint.ts"],
 
     // Vitest's default is 5s. Nearly every test here is a real HTTP round trip
     // against a real Postgres — build an app, run a migration-checked schema,
@@ -32,6 +32,10 @@ export default defineConfig({
     testTimeout: 20_000,
     hookTimeout: 30_000,
     env: {
+      // ADR-0252: the suite's databases are disposable (dropped and recreated, M-009), so migrations merged but not
+      // yet numbered (packages/db/migrations/pending/) are applied in their provisional order. A long-lived database
+      // refuses them.
+      REGULAIT_MIGRATIONS_UNASSIGNED: "apply",
       // ADR-0031 item 4: the HTTP rate limiter is ON by default in a real
       // deployment (see rate-limit.ts). The suite drives thousands of requests
       // from one address in seconds — auth.test.ts alone deliberately fails

@@ -50,6 +50,7 @@ import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { drainBackgroundWork } from "./background-work.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -122,7 +123,7 @@ async function enrol(s: Session, existing?: SoftAuthenticator): Promise<SoftAuth
   const opt = await as(s, "POST", "/v1/auth/passkeys/registration-options", {}, headers);
   expect(opt.statusCode, opt.body).toBe(200);
   const auth = new SoftAuthenticator({ origin: ORIGIN });
-  const reg = await as(s, "POST", "/v1/auth/passkeys", { challengeId: opt.json().challengeId, response: auth.register(opt.json().options), label: `b4s1-${randomBytes(2).toString("hex")}` });
+  const reg = await as(s, "POST", "/v1/auth/passkeys", { challengeId: opt.json().challengeId, response: auth.register(opt.json().options), label: `b4s1-${randomBytes(6).toString("hex")}` });
   expect(reg.statusCode, reg.body).toBe(201);
   return auth;
 }
@@ -207,7 +208,7 @@ async function signAndDecide(p: { s: Session; auth: SoftAuthenticator }, approva
 }
 
 /** a fresh account (an old one, for the "existed before" cases) with a session and a passkey */
-const person = (label: string) => mkPerson(`${label}-${randomBytes(2).toString("hex")}`);
+const person = (label: string) => mkPerson(`${label}-${randomBytes(6).toString("hex")}`);
 const addToRole = (userId: string) => db.insert(roleAssignments).values({ userId, roleId });
 const delegate = (fromUserId: string, toUserId: string) =>
   db
@@ -276,7 +277,8 @@ beforeAll(async () => {
   for (const name of TOOLS) {
     const t = await withKey(AUTH, "POST", `/v1/servers/${serverId}/tools`, { name, kind: "write" });
     expect([200, 201]).toContain(t.statusCode);
-    const g = await withKey(AUTH, "POST", "/v1/grants/tools", { userId: P.caller.id, serverId, toolName: name });
+    // ADR-0250: a grant mint is a step-up; this file's own steppable admin means the bootstrap credential needs this
+    const g = await relaxStepUpAround(db, () => withKey(AUTH, "POST", "/v1/grants/tools", { userId: P.caller.id, serverId, toolName: name }));
     expect([200, 201]).toContain(g.statusCode);
   }
 }, 180_000);
@@ -437,7 +439,7 @@ describe("B4S-02: the writes that can pad an approver pool need settings_relax (
   });
 
   it("creating an account that is already an admin needs it, bound to the email; a member account does not", async () => {
-    const email = `b4s3-new-admin-${randomBytes(2).toString("hex")}-${RUN}@example.com`;
+    const email = `b4s3-new-admin-${randomBytes(6).toString("hex")}-${RUN}@example.com`;
     const created = await provesStepUp("POST", "/v1/users", { email, displayName: "b4s3 new admin", isAdmin: true }, { email, values: { isAdmin: true } }, 201);
     expect(created.json()).toMatchObject({ email, isAdmin: true });
     // the bootstrap credential is past first-admin setup here (P.adm has a passkey), so it is refused too
@@ -445,7 +447,7 @@ describe("B4S-02: the writes that can pad an approver pool need settings_relax (
     expect(boot.statusCode, boot.body).toBe(403);
     expect(boot.json()).toMatchObject({ error: "step_up_required", credential: "bootstrap" });
     // a grant made for one email is refused for another
-    const other = `b4s3-other-${randomBytes(2).toString("hex")}-${RUN}@example.com`;
+    const other = `b4s3-other-${randomBytes(6).toString("hex")}-${RUN}@example.com`;
     const token = await grantFor(P.adm, { kind: "settings_relax", body: { email, values: { isAdmin: true } } });
     const swapped = await as(P.adm.s, "POST", "/v1/users", { email: other, displayName: "b4s3 swapped", isAdmin: true }, { [STEP_UP_HEADER]: token });
     expect(swapped.statusCode, swapped.body).toBe(403);

@@ -6,6 +6,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { changedInputs, CONTEXT_EXCLUDED, GateError, GENERATED_LOCK_MODULE, inputCommit, inputPathspecs, plan, readWorkspace, ROOT, ROOT_INPUTS, workspaceClosure } from "./engine-images-gate.mjs";
 import { ENGINE_IDS } from "./engine-images-lock.mjs";
+import { inputPathspecs as specsFor, UNPUBLISHED_ENGINE_IDS } from "./engine-images-gate.mjs";
 
 const repoGit = (args) => execFileSync("git", args, { cwd: ROOT, encoding: "utf8" });
 
@@ -13,7 +14,7 @@ describe("ENG-IMG publish gate: the input set of the real repository", () => {
   const pkgs = readWorkspace();
 
   it("each engine's closure is its package, the runner and shared (the shim stage builds exactly these)", () => {
-    for (const id of ENGINE_IDS) expect(workspaceClosure(id, pkgs)).toEqual([`packages/engine-${id}`, "packages/engine-runner", "packages/shared"]);
+    for (const id of ENGINE_IDS) expect(workspaceClosure(id, pkgs)).toEqual([`packages/engine-${id}`, "packages/engine-runner", "packages/shared"].sort());
   });
 
   it("an engine's inputs never include another engine's directory, the lock, the signatures or the generated module", () => {
@@ -160,7 +161,7 @@ describe("ENG-IMG publish gate: the decision, on a throwaway repository", () => 
 
   it("force publishes every engine; a never-published engine publishes", () => {
     expect(decide(base, { force: true }).publish).toEqual(ENGINE_IDS);
-    const r = plan({ engines: { promptfoo: { sourceCommit: null }, modelscan: { sourceCommit: base }, garak: { sourceCommit: base } } }, { changed: () => [] });
+    const r = plan({ engines: { promptfoo: { sourceCommit: null }, modelscan: { sourceCommit: base }, garak: { sourceCommit: base }, spikee: { sourceCommit: base } } }, { changed: () => [] });
     expect(r.publish).toEqual(["promptfoo"]);
     expect(r.engines.promptfoo.reason).toBe("never published");
   });
@@ -200,5 +201,17 @@ describe("ENG-IMG publish gate: the decision, on a throwaway repository", () => 
     const got = inputCommit(specs, { git });
     expect(got.commit).toBe(feature);
     expect(changedInputs(got.commit, "HEAD", specs, { git })).toEqual([]);
+  });
+});
+
+describe("ADR-0242 unpublished engines", () => {
+  it("have image inputs (their own directory, no workspace package) but are never planned for publish", () => {
+    expect(UNPUBLISHED_ENGINE_IDS).toEqual(["mcpscanner", "skillscanner"]);
+    for (const id of UNPUBLISHED_ENGINE_IDS) {
+      const specs = specsFor(id);
+      expect(specs).toContain(`engines/${id}`);
+      expect(specs.some((s) => s.startsWith("packages/"))).toBe(false);
+      expect(ENGINE_IDS).not.toContain(id);
+    }
   });
 });

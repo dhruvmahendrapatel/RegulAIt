@@ -60,6 +60,8 @@ import {
   sql,
   usageEvents,
   users,
+  runAsPrincipalStepIfScoped,
+  withinSystemReason,
   type Db,
   type ModelCardApprovalRow,
   type ModelCardRow,
@@ -917,6 +919,22 @@ export async function computeCardStaleness(
   chain: Array<Pick<ModelCardApprovalRow, "status" | "decidedAt">>,
   now: Date = new Date(),
   opts: LedgerReadOptions = {},
+): Promise<CardStaleness> {
+  // ADR-0234 batch 2: staleness is a governance decision over the WHOLE ledger (any admin's or risk acceptor's
+  // change can stale a card), not the caller's own rows, so its audit reads run under audit_verify, as the
+  // principal. Inside a caller's transaction the reason is entered on that transaction for this step only.
+  const run = () => computeCardStalenessUnscoped(db, card, chain, now, opts);
+  return opts.inTransaction === true
+    ? withinSystemReason(db as never, "audit_verify", "mrm.card-staleness", run)
+    : runAsPrincipalStepIfScoped("audit_verify", "mrm.card-staleness", run);
+}
+
+async function computeCardStalenessUnscoped(
+  db: Db,
+  card: CardSubject,
+  chain: Array<Pick<ModelCardApprovalRow, "status" | "decidedAt">>,
+  now: Date,
+  opts: LedgerReadOptions,
 ): Promise<CardStaleness> {
   const sequential = opts.inTransaction === true;
   const certifications = chain
