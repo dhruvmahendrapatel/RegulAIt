@@ -305,8 +305,10 @@ caught on read. **The sweeps buy timeliness, never correctness.**
   rather than inheriting a guess; a wrong signature is worse than none, because it reports clean.
   Detection only — it does not make Copilot governable (see S18 and the enforcement ladder).
 
-- **S18 — document the Copilot-via-MCP path in `IDE_INTEGRATION.md` as a supported configuration
-  (opened 2026-09-19).** **No new code — this is documenting a capability that already ships.**
+- ~~**S18 — document the Copilot-via-MCP path in `IDE_INTEGRATION.md` as a supported configuration
+  (opened 2026-09-19).**~~ **CLOSED 2026-11-14 (lane L10):** written up as "GitHub Copilot (tool calls only,
+  through MCP)" in `docs/product/IDE_INTEGRATION.md`, with the coverage-matrix row corrected. The framing below
+  is kept, and GitHub's own enterprise MCP allowlist is described as GitHub's control, not ours. **No new code — this is documenting a capability that already ships.**
   `POST /mcp/:serverId` is a standard streamable-HTTP MCP endpoint, and GitHub Copilot supports MCP
   servers; pointing its MCP config at our proxy puts every tool call it makes through entitlement
   checks, data scope, approvals (ADR-0104/0105), project budget (ADR-0103), PII/guardrails and the
