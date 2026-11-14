@@ -16,6 +16,7 @@ import ix from "./intakeHelp.module.css";
 import { resubmitPath } from "./registryModel";
 import { detailRationales, detailUnsure, questionLabel } from "./registrationModel";
 import { DependencyGraphPanel } from "./DependencyGraphPanel";
+import { AssetScoreCard } from "./AssetScore";
 import { RiskLibraryPicker } from "./RiskLibraryPicker";
 import { AgentStewardshipLine } from "../integrations/AgentStewardship";
 import type { AgentStewardship } from "../integrations/agentStewardshipModel";
@@ -385,6 +386,7 @@ function OverviewTab(props: {
         onRetryDetail={props.onRetryDetail}
         onRefresh={props.onRefresh}
       />
+      <AssetScoreCard kind="use_case" assetId={data.useCase.id} />
       <div className={s.dashboardGrid}>
         <Card title="Purpose and context">
           <div className={v.stack}>

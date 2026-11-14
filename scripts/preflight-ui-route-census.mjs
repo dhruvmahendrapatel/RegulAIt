@@ -424,8 +424,6 @@ export const KNOWN_UI_GAPS = new Map([
       tracking: "ADR-0255 / P31: catalogue screen for the Governed Designer, requested on #453",
     },
   ],
-  ["GET /v1/reports/posture/assets", { does: "pages per-asset posture scores (agents or use cases) the caller can read, each with objectives and ranked actions", tracking: "ADR-0214 amendment (P3): the brief is API-only; the per-asset score screen is posted on #453 (c6703277931) for the Governed Designer, and the owner chose the temporary gap on #705 (2026-11-07)" }],
-  ["GET /v1/reports/posture/assets/:kind/:assetId", { does: "one agent's or use case's posture score, with its objectives, not-applicable list and ranked actions", tracking: "ADR-0214 amendment (P3): the brief is API-only; the per-asset score screen is posted on #453 (c6703277931) for the Governed Designer, and the owner chose the temporary gap on #705 (2026-11-07)" }],
   // ADR-0259 (P35): owner decision on #733 (2026-11-07, option c): the backend landed before its screen; the UI
   // lane builds it on #453, then deletes these three.
   [
@@ -456,7 +454,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 46; // main's 44 + ADR-0255 (P31) 2, master decision on #753 2026-11-14
+export const KNOWN_UI_GAPS_MAX = 44; // main's 46 − 2 per-asset posture routes closed by #831
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 
