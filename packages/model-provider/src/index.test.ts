@@ -564,7 +564,7 @@ describe("OpenAiProvider (injectable fetch, no network)", () => {
   });
 });
 
-describe("GoogleProvider (raw injectable fetch, no network)", () => {
+describe("GoogleProvider (AI SDK, injectable fetch, no network)", () => {
   const geminiResponse = {
     responseId: "resp-g1",
     candidates: [
@@ -1668,7 +1668,7 @@ describe("Google tool-use mapping (functionDeclarations / functionCall / functio
     return { box, provider };
   };
 
-  it("translates a nested JSON schema (objects/arrays/enum/required) into Gemini's dialect", async () => {
+  it("passes a nested JSON schema through verbatim as parametersJsonSchema (ADR-0253)", async () => {
     const { box, provider } = capture();
     await provider.dispatch({
       model: "gemini-2.5-pro",
@@ -1709,28 +1709,37 @@ describe("Google tool-use mapping (functionDeclarations / functionCall / functio
     // Gemini's dialect: uppercase type enums, required preserved, unknown
     // keywords ($schema, additionalProperties) dropped so proto parsing
     // cannot 400 — at every nesting level
-    expect(decls[0]!.parameters).toEqual({
-      type: "OBJECT",
-      required: ["title", "attendees"],
-      properties: {
-        title: { type: "STRING", description: "Meeting title" },
-        attendees: {
-          type: "ARRAY",
-          minItems: 1,
-          items: {
-            type: "OBJECT",
-            required: ["email"],
-            properties: {
-              email: { type: "STRING", format: "email" },
-              role: { type: "STRING", enum: ["organizer", "guest"] },
+    // ADR-0253: Gemini's `parametersJsonSchema` takes JSON Schema as-is, so the
+    // lossy dialect translation is gone — the schema arrives exactly as declared,
+    // at every nesting level, and the legacy `parameters` field is not sent
+    expect(decls[0]!.parametersJsonSchema).toEqual(
+      {
+        $schema: "http://json-schema.org/draft-07/schema#",
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          title: { type: "string", description: "Meeting title" },
+          attendees: {
+            type: "array",
+            minItems: 1,
+            items: {
+              type: "object",
+              properties: {
+                email: { type: "string", format: "email" },
+                role: { type: "string", enum: ["organizer", "guest"] },
+              },
+              required: ["email"],
+              additionalProperties: false,
             },
           },
         },
+        required: ["title", "attendees"],
       },
-    });
+    );
+    expect("parameters" in decls[0]!).toBe(false);
   });
 
-  it("handles nullable, const, and oneOf: union-with-null becomes nullable, const becomes enum, oneOf becomes anyOf", async () => {
+  it("keeps nullable unions, const and oneOf exactly as JSON Schema states them", async () => {
     const { box, provider } = capture();
     await provider.dispatch({
       model: "gemini-2.5-pro",
@@ -1752,13 +1761,15 @@ describe("Google tool-use mapping (functionDeclarations / functionCall / functio
     });
     const decl = (box.body!.tools as Array<{ functionDeclarations: Array<Record<string, unknown>> }>)[0]!
       .functionDeclarations[0]!;
-    const props = (decl.parameters as { properties: Record<string, unknown> }).properties;
-    expect(props.note).toEqual({ type: "STRING", nullable: true });
-    expect(props.mode).toEqual({ type: "STRING", enum: ["fast"] });
-    expect(props.limit).toEqual({ anyOf: [{ type: "INTEGER" }, { nullable: true }] });
+    // JSON Schema's own nullable / const / oneOf reach Gemini unchanged — no
+    // approximation (oneOf is no longer widened to anyOf)
+    const props = (decl.parametersJsonSchema as { properties: Record<string, unknown> }).properties;
+    expect(props.note).toEqual({ type: ["string", "null"] });
+    expect(props.mode).toEqual({ type: "string", const: "fast" });
+    expect(props.limit).toEqual({ oneOf: [{ type: "integer" }, { type: "null" }] });
   });
 
-  it("a no-arg tool omits `parameters` entirely — Gemini rejects an empty OBJECT schema", async () => {
+  it("a no-arg tool sends an empty parametersJsonSchema and never the legacy `parameters`", async () => {
     const { box, provider } = capture();
     await provider.dispatch({
       model: "gemini-2.5-pro",
@@ -1767,7 +1778,13 @@ describe("Google tool-use mapping (functionDeclarations / functionCall / functio
     });
     const decl = (box.body!.tools as Array<{ functionDeclarations: Array<Record<string, unknown>> }>)[0]!
       .functionDeclarations[0]!;
-    expect(decl).toEqual({ name: "get_time", description: "Returns the time" });
+    // the empty-OBJECT rejection applied to the legacy `parameters` (OpenAPI)
+    // field; `parametersJsonSchema` accepts an empty object schema
+    expect(decl).toEqual({
+      name: "get_time",
+      description: "Returns the time",
+      parametersJsonSchema: { type: "object", properties: {} },
+    });
     expect("parameters" in decl).toBe(false);
   });
 
@@ -1800,8 +1817,9 @@ describe("Google tool-use mapping (functionDeclarations / functionCall / functio
       role: "model",
       parts: [
         { text: "checking" },
-        { functionCall: { name: "get_time", args: { tz: "utc" } } },
-        { functionCall: { name: "get_time", args: {} } },
+        // the call id rides along so Gemini pairs the response by id as well as name
+        { functionCall: { id: "fc-0", name: "get_time", args: { tz: "utc" } } },
+        { functionCall: { id: "fc-1", name: "get_time", args: {} } },
       ],
     });
   });
@@ -1835,8 +1853,8 @@ describe("Google tool-use mapping (functionDeclarations / functionCall / functio
     expect(contents[2]).toEqual({
       role: "user",
       parts: [
-        { functionResponse: { name: "get_weather", response: { output: "rainy" } } },
-        { functionResponse: { name: "get_time", response: { output: "12:00" } } },
+        { functionResponse: { id: "resp-1-fc-0", name: "get_weather", response: { name: "get_weather", content: "rainy" } } },
+        { functionResponse: { id: "resp-1-fc-1", name: "get_time", response: { name: "get_time", content: "12:00" } } },
       ],
     });
   });
@@ -1854,7 +1872,7 @@ describe("Google tool-use mapping (functionDeclarations / functionCall / functio
     });
     const contents = box.body!.contents as Array<{ role: string; parts: unknown[] }>;
     expect(contents[2]!.parts).toEqual([
-      { functionResponse: { name: "lookup", response: { error: "boom: upstream 500" } } },
+      { functionResponse: { id: "c1", name: "lookup", response: { name: "lookup", error: "boom: upstream 500" } } },
     ]);
   });
 
@@ -1869,7 +1887,7 @@ describe("Google tool-use mapping (functionDeclarations / functionCall / functio
     });
     const contents = box.body!.contents as Array<{ role: string; parts: unknown[] }>;
     expect(contents[0]!.parts).toEqual([
-      { functionResponse: { name: "orphan-1", response: { output: "data" } } },
+      { functionResponse: { id: "orphan-1", name: "orphan-1", response: { name: "orphan-1", content: "data" } } },
     ]);
   });
 
@@ -1933,8 +1951,19 @@ describe("Google tool-use mapping (functionDeclarations / functionCall / functio
     });
     expect(box.body!.contents).toEqual([
       { role: "user", parts: [{ text: "what's the weather in Oslo?" }] },
-      { role: "model", parts: [{ functionCall: { name: "get_weather", args: { city: "Oslo" } } }] },
-      { role: "user", parts: [{ functionResponse: { name: "get_weather", response: { output: "rainy" } } }] },
+      { role: "model", parts: [{ functionCall: { id: "resp-rt1-fc-0", name: "get_weather", args: { city: "Oslo" } } }] },
+      {
+        role: "user",
+        parts: [
+          {
+            functionResponse: {
+              id: "resp-rt1-fc-0",
+              name: "get_weather",
+              response: { name: "get_weather", content: "rainy" },
+            },
+          },
+        ],
+      },
     ]);
     expect(box.body!.systemInstruction).toEqual({ parts: [{ text: "be brief" }] });
     // the follow-up finalizes as plain text — a normal end_turn answer
@@ -2359,9 +2388,10 @@ describe("responseFormat wire mappings (ADR-0020 long tail)", () => {
     const cfg = captured!.generationConfig as Record<string, unknown>;
     expect(cfg.responseMimeType).toBe("application/json");
     expect(cfg.responseSchema).toBeUndefined();
+    expect(cfg.responseJsonSchema).toBeUndefined();
   });
 
-  it("google: json_schema additionally maps the schema into Gemini's dialect", async () => {
+  it("google: json_schema additionally pins the shape through responseJsonSchema", async () => {
     let captured: Record<string, unknown> | null = null;
     const provider = new GoogleProvider({
       apiKey: "k",
@@ -2384,12 +2414,13 @@ describe("responseFormat wire mappings (ADR-0020 long tail)", () => {
     });
     const cfg = captured!.generationConfig as Record<string, unknown>;
     expect(cfg.responseMimeType).toBe("application/json");
-    // translated to the Gemini Schema dialect (uppercase types), exactly as
-    // tool input schemas are
-    expect(cfg.responseSchema).toEqual({
-      type: "OBJECT",
+    // ADR-0253: Gemini's `responseJsonSchema` takes JSON Schema natively, so the
+    // shape is pinned without the lossy dialect translation
+    expect(cfg.responseSchema).toBeUndefined();
+    expect(cfg.responseJsonSchema).toMatchObject({
+      type: "object",
       required: ["a"],
-      properties: { a: { type: "NUMBER" } },
+      properties: { a: { type: "number" } },
     });
   });
 
@@ -2985,18 +3016,25 @@ describe("AER-021 — every provider kind observes the configured model deadline
     });
   });
 
-  it("NEGATIVE CONTROL: the same unbounded fetch, unwrapped, stays pending", async () => {
+  it("NEGATIVE CONTROL: the dead fetch, given no signal at all, stays pending", async () => {
     // Without this the tests above could be passing because the injected fetch
-    // rejects on its own. Constructing the adapter DIRECTLY bypasses
-    // `resolveModelProvider`, which is the only place the deadline is bound — so
-    // this is also a precise statement of where the binding lives.
+    // rejects on its own. It only ever settles through a signal it is handed.
+    const settled = await Promise.race([
+      deadFetch("https://example.invalid/").then(() => "settled").catch(() => "settled"),
+      new Promise<string>((r) => setTimeout(() => r("pending"), PINNED_MS * 6)),
+    ]);
+    expect(settled, "an unsignalled dead fetch has no deadline of its own").toBe("pending");
+  });
+
+  it("ADR-0253: the Gemini adapter bounds the WHOLE dispatch, even built directly without resolveModelProvider", async () => {
+    // Since the AI SDK continues long Gemini outputs over several HTTP hops, the per-fetch
+    // binding alone could let one dispatch run N x the deadline; the adapter now arms one
+    // dispatch-level signal of its own.
     await withDeadline(PINNED_MS, async () => {
-      const unbounded = new GoogleProvider({ apiKey: "k", baseUrl: null, fetchImpl: deadFetch });
-      const settled = await Promise.race([
-        unbounded.dispatch(req).then(() => "settled").catch(() => "settled"),
-        new Promise<string>((r) => setTimeout(() => r("pending"), PINNED_MS * 6)),
-      ]);
-      expect(settled, "an unwrapped raw fetch has no deadline of its own").toBe("pending");
+      const direct = new GoogleProvider({ apiKey: "k", baseUrl: null, fetchImpl: deadFetch });
+      const err = await direct.dispatch(req).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ModelProviderError);
+      expect((err as ModelProviderError).status).toBe(504);
     });
   });
 

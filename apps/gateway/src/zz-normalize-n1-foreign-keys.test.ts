@@ -7,13 +7,14 @@
  * owner (ADR-0234), because the file enters the `migration` system context first. A RESTRICT orphan fails it loudly.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { cpSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { createDb, runMigrations, sql, type Db } from "@regulait/db";
 import { dropScratchDatabase } from "./testing/scratch-db.js";
+import { readMigration, removeMigration } from "./testing/migration-by-slug.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -98,7 +99,7 @@ describe("`normalize_n1_foreign_keys`: the N1 foreign keys", () => {
 
 /** the `normalize_n1_foreign_keys` statements, as the migrator splits them; `withoutContext` drops the set_config lines (the defect) */
 function n1Statements(withoutContext = false): string[] {
-  const text = readFileSync(path.join(migrationsFolder, "pending", `${N1_FILE}.sql`), "utf8");
+  const text = readMigration(migrationsFolder, N1_FILE);
   return text
     .split("--> statement-breakpoint")
     .map((x) => x.trim())
@@ -127,10 +128,11 @@ describe("`normalize_n1_foreign_keys` on a populated database (review of #683)",
   ];
 
   beforeAll(async () => {
-    // a copy of the migrations folder without this pending migration (ADR-0252: it has no journal entry until merge)
+    // a copy of the migrations folder without this migration: its pending file, or (once assign-at-merge numbered it,
+    // ADR-0252) its numbered file and journal entry
     preFolder = mkdtempSync(path.join(os.tmpdir(), "n1fk-pre-"));
     cpSync(migrationsFolder, preFolder, { recursive: true });
-    rmSync(path.join(preFolder, "pending", `${N1_FILE}.sql`));
+    removeMigration(preFolder, N1_FILE);
 
     await admin.execute(sql.raw(`DROP DATABASE IF EXISTS ${PRE_DB} WITH (FORCE)`));
     await admin.execute(sql.raw(`CREATE DATABASE ${PRE_DB}`));

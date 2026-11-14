@@ -126,6 +126,7 @@ import { beginTrace, finishTrace, recordSpan, type TraceContext } from "./tracin
 import { recordDecision } from "./metrics.js";
 import { classifyScannedContent, contentTrustGate, recordContentProvenance } from "./content-provenance.js";
 import { CREDENTIAL_AUDIENCE_ERROR, CREDENTIAL_AUDIENCE_RULE_ID, refuseOutboundCredentialAudience } from "./outbound-audience.js";
+import { exchangeUpstreamToken, loadUpstreamExchange } from "./upstream-token-exchange.js";
 
 /**
  * ADR-0186 decision 32 — every host a connector call can reach, as the egress
@@ -909,7 +910,8 @@ export async function executeGovernedConnectorCall(
       }
       token = decryptSecret(dataKey, cred.tokenCiphertext);
       if (cred.baseUrl) baseUrl = cred.baseUrl;
-    } else if (!keylessKinds.has(connector.providerKind)) {
+    } else if (!keylessKinds.has(connector.providerKind) && !(await loadUpstreamExchange(db, { kind: "connector", id: connectorId }))?.row.enabled) {
+      // ADR-0238: a connector with token exchange on gets its token per call below, so it needs no stored credential
       return out.status(409).send({
         decision,
         error: "no_connector_credential",
@@ -1153,6 +1155,32 @@ export async function executeGovernedConnectorCall(
           detail: `connector '${connector.name}': ${compiled.reason}`,
         });
       }
+    }
+
+    // ADR-0238: a connector with token exchange on receives only a token obtained for THIS operation's mapped scopes,
+    // in place of any stored credential. Last before the call: every gate above has passed, nothing held has been
+    // spent, and a refusal contacts the provider not at all. The token lives in this invocation only (never cached).
+    {
+      const exchanged = await exchangeUpstreamToken({
+        db,
+        dataKey,
+        target: { kind: "connector", id: connectorId },
+        sponsorUserId: userId,
+        actors: delegatedActor ? delegatedActor.chain.actors : null,
+        action: body.operation,
+        projectId: projectId ?? null,
+        // the destination this call is about to use: a token is obtained only for the one it was configured for
+        destination: baseUrl,
+      });
+      if (exchanged.kind === "refused") {
+        return out.status(403).send({
+          decision: exchanged.decision,
+          error: "upstream_token_exchange_refused",
+          code: exchanged.code,
+          detail: exchanged.decision.reason,
+        });
+      }
+      if (exchanged.kind === "token") token = exchanged.token;
     }
 
     // Execute. A FAILED call (ConnectorProviderError) bills NOTHING and

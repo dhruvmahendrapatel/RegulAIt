@@ -33,6 +33,7 @@ import {
   aiEndpointSignatures,
   auditLog,
   createDb,
+  discoveryPseudonymKeys,
   discoveryRuns,
   discoverySources,
   endpointAgentIdentities,
@@ -47,7 +48,6 @@ import {
   sql,
   users,
   type Db,
-  discoveryPseudonymKeys,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { ENDPOINT_REPORT_MAX_BYTES } from "./endpoint-agent.js";
@@ -171,6 +171,7 @@ beforeAll(async () => {
   restores.push(await useTestIssuerKey(db));
   // the per-tenant pseudonym key is wrapped under the first data key that asks for it, and a gateway shard runs
   // several suites with different data keys on one database: set the existing key aside, put it back afterwards
+  // (as zz-adr0259-endpoint-mcp-config.test.ts does)
   const priorPseudonymKeys = await db.select().from(discoveryPseudonymKeys);
   await db.delete(discoveryPseudonymKeys);
   restores.push(async () => {

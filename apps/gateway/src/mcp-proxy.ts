@@ -1,3 +1,4 @@
+import { engineKeyWorkflowInstance, guardProjectPlanOnly } from "./plan-only.js";
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -82,6 +83,7 @@ import { isStdioSessionLostError } from "./stdio-session-loss.js";
 import { PROJECT_HEADER } from "./project-header.js";
 import { stdioRefusalSentence } from "./mcp-egress.js";
 import { armOutboundIdentity, IdentityAssertionRefusedError, outboundIdentityFor, type OutboundIdentity } from "./mcp-identity-assertion.js";
+import { armUpstreamExchange, UpstreamExchangeHolder } from "./upstream-token-exchange.js";
 import { timeouts } from "./timeouts.js";
 import {
   attemptsForToolKind,
@@ -296,6 +298,8 @@ export async function connectUpstream(
     retry?: RetryReport;
     retryAttempts?: number;
     outboundIdentity?: OutboundIdentity | null;
+    /** ADR-0238: the call's down-scoped token holder (unarmed until the call is allowed) */
+    upstreamExchange?: UpstreamExchangeHolder | null;
     /**
      * ADR-0190 I4: the call a stdio connect serves (person, project, delegation grant), the inputs of the
      * isolation placement. Absent = no project: a stdio connect is refused `policy_unresolved` (fail closed).
@@ -338,6 +342,7 @@ export async function connectUpstream(
           : {}),
         // ADR-0188 S8: an opted-in server's identity holder (unarmed until the call is allowed)
         ...(opts.outboundIdentity ? { outboundIdentity: opts.outboundIdentity } : {}),
+        ...(opts.upstreamExchange ? { upstreamExchange: opts.upstreamExchange } : {}),
       });
     },
     {
@@ -671,6 +676,13 @@ export async function executeGovernedToolCall(
      * the gateway cannot see (the direct proxy route): its result is still recorded (P0), and nothing is gated.
      */
     contextId?: string | null | undefined;
+    /**
+     * ADR-0250 (review P-02) — the project-level plan-only gate. Set by the MCP proxy route (an IDE's tool call
+     * names no workflow instance): a WRITE tool on an attributed project any of whose live instances rests in
+     * planning is refused. `engineInstanceId` is the instance an engine run's key works for (the audited
+     * exception). Absent = a caller gated elsewhere (a run's worker loop: its run was gated when it was planned).
+     */
+    planGate?: { engineInstanceId: string | null } | undefined;
   },
 ): Promise<GovernedToolCallOutcome> {
   // ADR-0070 — the tool span. Wrapped exactly like the dispatch core's: the
@@ -796,6 +808,8 @@ async function executeGovernedToolCallInner(
   let upstream: Client | null = null;
   // ADR-0188 S8: an opted-in server's identity holder, on every connect of this call; armed only once allowed
   const outboundIdentity = outboundIdentityFor(serverRow);
+  // ADR-0238: this call's down-scoped token holder (never shared with another call); armed only once allowed
+  const upstreamExchange = new UpstreamExchangeHolder(serverRow.url);
   const redactActive = piiMode === "redact";
   const closeUpstream = async () => {
     if (upstream) {
@@ -926,7 +940,7 @@ async function executeGovernedToolCallInner(
       try {
         // ADR-0190 I4 (review M1): for stdio this is an UNLINKED placement (`placeStdioSession`): there is no tool
         // decision yet, so its placement row is keyed to its own audit row and is outside the I4/I8 decision contract
-        upstream = await connectUpstream(db, serverRow, { outboundIdentity, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, principal: args.principal ?? null } });
+        upstream = await connectUpstream(db, serverRow, { outboundIdentity, upstreamExchange, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, principal: args.principal ?? null } });
         upstreamTools = await syncUpstreamTools(db, serverId, upstream, "sync", serverRow.transport);
       } catch (err) {
         await operationFailed(err);
@@ -1165,6 +1179,31 @@ async function executeGovernedToolCallInner(
     }
 
     if (decision.effect === "deny") return { kind: "denied", decision };
+
+    // ADR-0250 (review P-02) — THE PLAN-ONLY GATE, FORCED AT PROJECT LEVEL. A write tool on a project whose live
+    // workflow instance rests at a planning stage is refused here, before any approval is queued and before the
+    // upstream is contacted (audited on the instance's own trail); a read tool is plan-safe and passes. Like the
+    // read_only posture below it is categorical, so it beats approval.
+    if (args.planGate && projectId) {
+      const planGate = await guardProjectPlanOnly(db, {
+        projectIds: [projectId],
+        userId,
+        surface: "mcp",
+        mutating: kind === "write",
+        mode: kind === "write" ? "write" : "read",
+        what: `write tool '${toolName}' on MCP server '${serverRow.name}'`,
+        detail: { ...(args.detail ?? {}), toolKind: kind, receiptClass: "decision" },
+        engineInstanceId: args.planGate.engineInstanceId,
+        serverId,
+        toolName,
+      });
+      if (!planGate.ok) {
+        return {
+          kind: "denied",
+          decision: { effect: "deny", ruleId: "workflow-plan-only-stage", ruleChain: [], reason: planGate.detail },
+        };
+      }
+    }
 
     // ADR-0023 — §8.3 mcpDefaultMode ENFORCEMENT. An ATTRIBUTED call whose
     // project's compliance cascade tightens to read_only may not execute a
@@ -1416,11 +1455,25 @@ async function executeGovernedToolCallInner(
       });
       if (!armed.ok) return { kind: "denied", decision: armed.decision };
     }
+    // ADR-0238: a server with token exchange on receives only a token obtained for THIS tool's mapped scopes. After
+    // the decision and before the connect or any approval is consumed, so a refusal contacts nothing and spends nothing.
+    {
+      const exchanged = await armUpstreamExchange(upstreamExchange, {
+        db,
+        dataKey,
+        server: serverRow,
+        sponsorUserId: userId,
+        actors: delegatedActor ? delegatedActor.chain.actors : null,
+        action: toolName,
+        projectId,
+      });
+      if (!exchanged.ok) return { kind: "denied", decision: exchanged.decision };
+    }
     if (!upstream) {
       const refused = await breakerRefusesUpstream();
       if (refused) return refused;
       try {
-        upstream = await connectUpstream(db, serverRow, { outboundIdentity, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, linkedOfferId, principal: args.principal ?? null } });
+        upstream = await connectUpstream(db, serverRow, { outboundIdentity, upstreamExchange, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, linkedOfferId, principal: args.principal ?? null } });
       } catch (err) {
         await operationFailed(err);
         if (redactActive) throw new Error("MCP upstream connection failed under PII redaction");
@@ -2371,6 +2424,10 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
       }
     }
 
+    // ADR-0250: the instance an engine run's key works for (the plan gate's one audited exception), read once
+    // per MCP session, before the reply is hijacked
+    const planGateEngineInstance = await engineKeyWorkflowInstance(db, req);
+
     // ADR-0043: the connect-time egress verdict surfaces HERE, before the
     // reply is hijacked into an MCP transport, as the route's ordinary
     // pre-hijack refusal shape — a plain 403 naming the real reason. The
@@ -2682,6 +2739,7 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
       // The proxy route is now a thin governance-to-MCP-error mapper over the
       // shared primitive; the identical logic serves the worker loop too.
       const outcome = await executeGovernedToolCall(db, opts.dataKey, {
+        planGate: { engineInstanceId: planGateEngineInstance },
         userId,
         serverId,
         toolName,

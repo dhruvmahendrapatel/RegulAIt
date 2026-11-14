@@ -3,6 +3,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, auditLog, createDb, eq, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { guardProjectPlanOnly } from "./plan-only.js";
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
@@ -28,8 +30,12 @@ let restoreSb2Gates: () => Promise<void> = async () => {};
  *  4. the SAME call succeeds once planning is explicitly finished — the control
  *     (M-002), so a refusal proves the gate rather than general breakage;
  *  5. an unknown / someone-else's instance REFUSES rather than being ignored;
- *  6. an invoke naming NO instance is unchanged — attribution is opt-in, and
- *     this file states that limit as a test rather than hiding it.
+ *  6. ADR-0250 (review P-02): the gate is FORCED at project level — an
+ *     `execute` naming NO instance is refused while any live instance of the
+ *     project it bills to rests in planning, on the invoke and run paths alike,
+ *     and the workflow engine's own work for another instance is the one
+ *     audited exception. (The compat and MCP surfaces are pinned in
+ *     adr0250-plan-gate-surfaces.test.ts.)
  *
  * Shares one DB with the other gateway suites (fileParallelism off); everything
  * here is prefixed po-.
@@ -54,6 +60,7 @@ let malloryId: string;
 let malloryAuth: { authorization: string };
 let anaId: string;
 let agentId: string;
+let projectId: string;
 
 async function makeUser(email: string) {
   const user = await app.inject({
@@ -73,12 +80,13 @@ async function makeUser(email: string) {
 }
 
 /** a fresh instance of the plan-first template, resting at plan-only */
-async function startInstance(auth = piaAuth) {
+async function startInstance(auth = piaAuth, project?: string) {
   const started = await app.inject({
     method: "POST",
     headers: auth,
     url: "/v1/workflows/instances",
     payload: {
+      ...(project ? { projectId: project } : {}),
       change: {
         description: "po change",
         paths: ["src/po.ts"],
@@ -159,14 +167,29 @@ beforeAll(async () => {
   expect(agent.statusCode).toBe(201);
   agentId = agent.json().id;
   for (const userId of [piaId, malloryId]) {
-    const g = await app.inject({
-      method: "POST",
-      headers: AUTH,
-      url: "/v1/grants/agents",
-      payload: { userId, agentId },
-    });
+    // ADR-0250 (S-04): a grant mint is a step-up action; this suite does not test step-up, so it is relaxed for the call
+    const g = await relaxStepUpAround(db, () =>
+      app.inject({
+        method: "POST",
+        headers: AUTH,
+        url: "/v1/grants/agents",
+        payload: { userId, agentId },
+      }),
+    );
     expect(g.statusCode).toBe(201);
   }
+
+  // ADR-0250: a project Pia bills to, for the project-level gate
+  const project = await app.inject({ method: "POST", headers: AUTH, url: "/v1/projects", payload: { name: "po-project" } });
+  expect(project.statusCode).toBe(201);
+  projectId = project.json().id;
+  const member = await app.inject({
+    method: "POST",
+    headers: AUTH,
+    url: `/v1/projects/${projectId}/members`,
+    payload: { userId: piaId, role: "contributor" },
+  });
+  expect(member.statusCode, member.body).toBe(201);
 
   const tpl = await app.inject({
     method: "POST",
@@ -302,21 +325,68 @@ describe("the plan-only gate on a direct agent invoke", () => {
     expect((await auditFor(instanceId, "workflow-instance-attributed")).length).toBe(0);
   });
 
-  it("REGRESSION: an invoke naming NO instance is unconstrained, exactly as before", async () => {
-    const instanceId = await startInstance();
-    // the same execute call that the gate refuses WITH the instanceId…
-    expect((await invoke({ mode: "execute", instanceId })).statusCode).toBe(409);
-    // …is untouched without it, even while that instance sits in plan-only
-    const bare = await invoke({ mode: "execute" });
-    expect(bare.statusCode).toBe(200);
-    expect(bare.json().decision.effect).toBe("allow");
-    // and a real dispatch is equally unaffected
-    const dispatched = await invoke({ mode: "execute", dispatch: true });
-    expect(dispatched.statusCode).toBe(200);
-    expect(dispatched.json().dispatch?.outputText).toBeTruthy();
-    // this is the honest limit ADR-0079 records: opt-in attribution constrains
-    // only the calls that opt in. Exactly one deny exists for this instance.
+  it("ADR-0250 (P-02): FORCED — an execute naming NO instance is refused while the project's instance plans", async () => {
+    const instanceId = await startInstance(piaAuth, projectId);
+    // the call that used to pass: execute, a real dispatch, no instanceId — only the project it bills to
+    const bare = await invoke({ mode: "execute", dispatch: true, projectId });
+    expect(bare.statusCode, bare.body).toBe(409);
+    expect(bare.json().error).toBe("plan_only_stage");
+    expect(bare.json().instanceId).toBe(instanceId);
+    expect(bare.json().detail as string).toContain(`project '${projectId}'`);
+    expect(bare.json().detail as string).toContain(`/v1/workflows/instances/${instanceId}/advance`);
+    // audited on the planning instance's own trail, marked as the project-level enforcement
+    const denies = await auditFor(instanceId, "workflow-plan-only-stage");
+    expect(denies.length).toBe(1);
+    expect(denies[0]!.effect).toBe("deny");
+    expect(denies[0]!.detail).toMatchObject({ enforcement: "project", surface: "invoke", projectId, mode: "execute" });
+    // a plan/read mode on the same project is untouched
+    const plan = await invoke({ mode: "plan", projectId });
+    expect(plan.statusCode).toBe(200);
+    // the control (M-002): the same call passes once planning is explicitly finished
+    await leavePlanOnly(instanceId);
+    const after = await invoke({ mode: "execute", dispatch: true, projectId });
+    expect(after.statusCode, after.body).toBe(200);
+    expect(after.json().dispatch?.outputText).toBeTruthy();
     expect((await auditFor(instanceId, "workflow-plan-only-stage")).length).toBe(1);
+  });
+
+  it("ADR-0250: naming ANOTHER instance of the project does not get round a planning one", async () => {
+    const building = await startInstance(piaAuth, projectId);
+    await leavePlanOnly(building);
+    const planning = await startInstance(piaAuth, projectId);
+    const res = await invoke({ mode: "execute", instanceId: building, projectId });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().instanceId).toBe(planning);
+    await leavePlanOnly(planning);
+    expect((await invoke({ mode: "execute", instanceId: building, projectId })).statusCode).toBe(200);
+  });
+
+  it("ADR-0250 exception: the engine's own work for another instance passes, audited; its own planning instance refuses", async () => {
+    const planning = await startInstance(piaAuth, projectId);
+    const other = "00000000-0000-4000-8000-0000000000ee";
+    const passed = await guardProjectPlanOnly(db, {
+      projectIds: [projectId],
+      userId: piaId,
+      surface: "runs",
+      mutating: true,
+      mode: "execute",
+      engineInstanceId: other,
+    });
+    expect(passed.ok).toBe(true);
+    const exceptions = await auditFor(planning, "workflow-plan-only-engine-exception");
+    expect(exceptions.length).toBe(1);
+    expect(exceptions[0]!.effect).toBe("allow");
+    expect(exceptions[0]!.detail).toMatchObject({ engineInstanceId: other, surface: "runs" });
+    const own = await guardProjectPlanOnly(db, {
+      projectIds: [projectId],
+      userId: piaId,
+      surface: "runs",
+      mutating: true,
+      mode: "execute",
+      engineInstanceId: planning,
+    });
+    expect(own.ok).toBe(false);
+    await leavePlanOnly(planning);
   });
 });
 
@@ -366,6 +436,37 @@ describe("the plan-only gate on the run-plan path", () => {
       payload: { graph: graph("po-run-exec-ok", "execute"), workflowInstanceId: instanceId },
     });
     expect(after.statusCode).toBe(201);
+  });
+
+  it("ADR-0250 (P-02): a mutating run naming NO instance is refused while the project's instance plans", async () => {
+    const instanceId = await startInstance(piaAuth, projectId);
+    const res = await app.inject({
+      method: "POST",
+      headers: piaAuth,
+      url: "/v1/runs",
+      payload: { graph: graph("po-run-proj-exec", "execute"), projectId },
+    });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error).toBe("plan_only_stage");
+    expect(res.json().instanceId).toBe(instanceId);
+    expect(res.json().detail as string).toContain("node 'w' (mode 'execute')");
+    const denies = await auditFor(instanceId, "workflow-plan-only-stage");
+    expect(denies.at(-1)!.detail).toMatchObject({ enforcement: "project", surface: "runs" });
+    const safe = await app.inject({
+      method: "POST",
+      headers: piaAuth,
+      url: "/v1/runs",
+      payload: { graph: graph("po-run-proj-plan", "plan"), projectId },
+    });
+    expect(safe.statusCode, safe.body).toBe(201);
+    await leavePlanOnly(instanceId);
+    const after = await app.inject({
+      method: "POST",
+      headers: piaAuth,
+      url: "/v1/runs",
+      payload: { graph: graph("po-run-proj-exec-ok", "execute"), projectId },
+    });
+    expect(after.statusCode, after.body).toBe(201);
   });
 
   it("the run path validates the instance link too: unknown refuses instead of failing on a foreign key", async () => {

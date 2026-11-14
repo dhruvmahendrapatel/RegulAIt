@@ -1,7 +1,7 @@
 import { useId, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
-import { putOrgSettings } from "../../../stepup/stepUp";
+import { api as stepUpApi, putOrgSettings, withStepUp } from "../../../stepup/stepUp";
 import type { McpServer, OrgSettingsResponse } from "../../../api/adminTypes";
 import { Button, Card, ConfirmModal, Field, InfoButton, Input, Select } from "../../../ui/kit";
 import { adminKeys, optionEls, QueryGate, readCurrentOrgSettings, reconfirmNeeded, serverOpts, StaleAfterWrite, useAction, useSettleAfterWrite, useSingleFlight, useUserPicker, userOpts } from "../adminKit";
@@ -145,7 +145,7 @@ function ProtocolGrantForm({ servers }: { servers: McpServer[] }) {
       try {
         // a create form's baseline is empty: after a grant is added the choices
         // are cleared, so a second click cannot mint the same grant again
-        if (await act.run(() => api.post("/v1/grants/tools", { userId, serverId, toolName: grant }), "Protocol grant added")) {
+        if (await act.run(() => withStepUp((h) => stepUpApi.post("/v1/grants/tools", { userId, serverId, toolName: grant }, h)), "Protocol grant added")) {
           setUserId(""); setServerId(""); setGrant(MCP_PROTOCOL_GRANT_NAMES[0]);
         }
       } finally {

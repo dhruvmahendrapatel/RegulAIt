@@ -40,6 +40,7 @@ import {
   desc,
   discoveryCredentials,
   discoveryPseudonyms,
+  discoveryPseudonymKeys,
   discoveryRuns,
   discoverySettings,
   discoverySources,
@@ -52,7 +53,6 @@ import {
   stepUpGrants,
   users,
   type Db,
-  discoveryPseudonymKeys,
 } from "@regulait/db";
 import { DISCOVERY_STEP_UP_KEYS, stepUpActionDigest } from "@regulait/shared";
 import { buildApp } from "./app.js";
@@ -167,6 +167,7 @@ beforeAll(async () => {
   restores.push(await relaxIdentityForTest(db, { mfaRequired: "off" }));
   // the per-tenant pseudonym key is wrapped under the first data key that asks for it, and a gateway shard runs
   // several suites with different data keys on one database: set the existing key aside, put it back afterwards
+  // (as zz-adr0259-endpoint-mcp-config.test.ts does)
   const priorPseudonymKeys = await db.select().from(discoveryPseudonymKeys);
   await db.delete(discoveryPseudonymKeys);
   restores.push(async () => {
