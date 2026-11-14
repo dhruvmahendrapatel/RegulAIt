@@ -1,7 +1,8 @@
 /*
- * I-2: the Billing set-up stepper (rate, period, statement). Its own module rather than admin.module.css, whose
- * class map rides in the entry bundle, so only the Billing page carries it (#453, 2026-10-31). Completed steps stay
- * clickable to go back; the current one is marked; each step's button states its own status.
+ * I-2: the kit stepper (`ui/Stepper.tsx`), used by Billing set-up, First-run and regulAIt-LLM. Its own module rather
+ * than kit.module.css, whose class map rides in the entry bundle, so only the pages with a stepper carry it (#453,
+ * 2026-10-31; moved into the kit in the review of #690). Completed steps stay clickable to go back; the current one is
+ * marked; each step's button states its own status.
  */
 .steps {
   display: flex; flex-wrap: wrap; gap: var(--s0);
@@ -26,3 +27,7 @@
 .stepOn .stepNum { background: var(--rg-signal); color: var(--rg-ink-invert); }
 .stepDone .stepNum { background: var(--rg-positive-tint); color: var(--rg-positive-deep); }
 .stepDone button { color: var(--text); }
+.srOnly {
+  position: absolute; inline-size: 1px; block-size: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}

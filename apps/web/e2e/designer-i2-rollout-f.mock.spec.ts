@@ -10,6 +10,8 @@
  *    returns focus; the unattributed warning and both bases stay on the closed row, and no total column exists.
  *  - Webhooks (one empty state): with nothing set up, one empty state and the add form first; a failed allow-list read
  *    is an error with Retry, never "the allow-list is empty".
+ *  - Review of #690: the stepper waits for the artifacts (no "0" while loading, no jump), a finished step says "done" to a
+ *    screen reader, counts use plural(), the billing kind is in words, and the subject header follows the rows.
  *  - axe (WCAG 2.x A/AA, light and dark) on each, through the shared helper.
  */
 import { expect, test } from "@playwright/test";
@@ -40,6 +42,9 @@ test.describe("I-2 rollout F: regulAIt-LLM as a stepper", () => {
 
     // opens on the first unfinished step: nothing is registered for inference yet
     await expect(step("Model artifacts")).toHaveAttribute("aria-current", "step");
+    // the ✓ is decorative, so a finished step also says "done" to a screen reader (review of #690)
+    await expect(step("Training data")).toHaveAccessibleName(/^Training data \(done\)/);
+    await expect(step("Model artifacts")).not.toHaveAccessibleName(/\(done\)/);
     await expect(page.getByText("Training backends, and what each one cannot do")).toHaveCount(0);
     await expect(page.getByRole("cell", { name: "faq-index", exact: true })).toBeVisible();
     await expectAxeClean(page, "regulAIt-LLM, stepper");
@@ -69,6 +74,29 @@ test.describe("I-2 rollout F: regulAIt-LLM as a stepper", () => {
     await page.getByRole("cell", { name: "faq-index", exact: true }).click();
     await expect(page.getByText("Artifact — faq-index")).toBeVisible();
     await expect(page.getByText("Bench — ask the model something")).toBeVisible();
+  });
+
+  test("while the artifacts load, no step reads zero and the opening step never jumps (review of #690)", async ({ page }) => {
+    await mockLlm(page);
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    await page.route(
+      (u) => u.pathname === "/v1/llm/artifacts",
+      async (route) => {
+        await held;
+        await route.fallback();
+      },
+    );
+    await page.goto("/ui/admin/regulait-llm");
+    await expect(page.getByRole("heading", { name: "regulAIt-LLM", level: 1 })).toBeVisible();
+    // backends and datasets are in, the artifacts are not: no stepper yet, so nothing reads "0 artifacts"
+    await expect(page.getByText("Custom-model creation")).toHaveCount(0);
+    await expect(page.getByRole("list", { name: "Custom-model steps" })).toHaveCount(0);
+    await expect(page.getByText(/0 artifacts/)).toHaveCount(0);
+    release();
+    const steps = page.getByRole("list", { name: "Custom-model steps" });
+    await expect(steps.getByRole("button", { name: /^Model artifacts/ })).toHaveAttribute("aria-current", "step");
+    await expect(steps.getByRole("button", { name: /^Model artifacts/ })).toContainText("1 artifact · 0 registered");
   });
 
   test("a failed read shows an error with Retry, never an empty stepper", async ({ page }) => {
@@ -101,8 +129,8 @@ test.describe("I-2 rollout F: the consolidated view expands in place", () => {
     // the unattributed warning is on the closed row
     const row = view.getByRole("row").filter({ hasText: UNATTRIBUTED });
     await expect(row.getByText("unattributed", { exact: true })).toBeVisible();
-    await expect(row).toContainText("metered · 304 call(s)");
-    await expect(row).toContainText("imported · 8 line(s)");
+    await expect(row).toContainText("metered · 304 calls");
+    await expect(row).toContainText("imported · 8 lines");
 
     // open from the keyboard: the detail takes focus as a named region
     const toggle = view.getByRole("button", { name: `Details: ${UNATTRIBUTED}` });
@@ -118,7 +146,8 @@ test.describe("I-2 rollout F: the consolidated view expands in place", () => {
     await expect(region).toContainText("metered — regulAIt observed and priced these calls");
     await expect(region).toContainText("imported — restated from a file you supplied");
     await expect(region).toContainText("Metered and imported figures are shown side by side and never added.");
-    await expect(region).toContainText("Imported by kind: seat 96.00 USD");
+    // the billing kind in words, never its raw code (review of #690)
+    await expect(region).toContainText("Imported by kind: seats 96.00 USD");
     await expectAxeClean(page, "consolidated view, a subject open");
 
     // Esc closes it and returns focus to its button
@@ -126,6 +155,16 @@ test.describe("I-2 rollout F: the consolidated view expands in place", () => {
     await expect(toggle).toHaveAttribute("aria-expanded", "false");
     await expect(toggle).toBeFocused();
     await expect(region).toHaveCount(0);
+  });
+
+  test("the subject column is named from the rows' own grouping, not the selector (review of #690)", async ({ page }) => {
+    await mockOps(page);
+    await page.route(
+      (u) => u.pathname === "/v1/cost-consolidated",
+      (route) => route.fulfill({ json: { ...CONSOLIDATED, groupedBy: "cost_center" } }),
+    );
+    await page.goto("/ui/admin/cost-consolidation?tab=consolidated");
+    await expect(page.getByTestId("cc-subjects").locator("thead th").nth(1)).toHaveText("Cost centre");
   });
 
   test("a failed consolidated read is an error with Retry, never an empty view", async ({ page }) => {
