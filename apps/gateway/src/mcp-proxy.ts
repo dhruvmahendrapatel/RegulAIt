@@ -453,7 +453,7 @@ export async function spendBoundApproval(
     argumentsDigest: string;
     contextDigest: string;
     /** ADR-0186 B: the target and tool of the call being run (the signed payload's other facts) */
-    call?: { serverId?: string | null; connectorId?: string | null; toolName: string } | undefined;
+    call?: { serverId?: string | null; connectorId?: string | null; agentId?: string | null; toolName: string } | undefined;
   },
 ): Promise<BoundApprovalSpend> {
   return db.transaction(async (tx) => {
@@ -539,10 +539,12 @@ export async function supersedeStaleConsent(
   db: Db,
   rows: readonly RetiredApproval[],
   ctx:
-    | { userId: string; serverId: string; toolName: string; projectId: string | null; connector?: undefined }
-    | { userId: string; connector: { id: string; name: string }; projectId: string | null; serverId?: undefined; toolName?: undefined },
+    | { userId: string; serverId: string; toolName: string; projectId: string | null; connector?: undefined; agent?: undefined }
+    | { userId: string; connector: { id: string; name: string }; projectId: string | null; serverId?: undefined; toolName?: undefined; agent?: undefined }
+    // ADR-0251: a model-call consent, audited on the agent
+    | { userId: string; agent: { id: string; name: string }; projectId: string | null; serverId?: undefined; toolName?: undefined; connector?: undefined },
 ): Promise<string[]> {
-  const subject = ctx.connector ? `connector '${ctx.connector.name}'` : `tool '${ctx.toolName}'`;
+  const subject = ctx.connector ? `connector '${ctx.connector.name}'` : ctx.agent ? `model '${ctx.agent.name}'` : `tool '${ctx.toolName}'`;
   const retired: string[] = [];
   for (const row of rows) {
     const moved = await db
@@ -562,7 +564,9 @@ export async function supersedeStaleConsent(
       userId: ctx.userId,
       ...(ctx.connector
         ? { objectType: "connector" as const, objectId: ctx.connector.id }
-        : { serverId: ctx.serverId, toolName: ctx.toolName }),
+        : ctx.agent
+          ? { objectType: "agent" as const, objectId: ctx.agent.id }
+          : { serverId: ctx.serverId, toolName: ctx.toolName }),
       // the approval id rides in `detail.approvalId`, exactly as ADR-0046's
       // `approval-routed` / `approval-sla-breached` rows do, so "what happened
       // to this approval" stays ONE query on one objectType.

@@ -423,6 +423,8 @@ export type DispatchOutcome =
       trace?: DispatchTraceRef;
       /** ADR-0188 S4: the kernel rule that refused a DELEGATED dispatch (`error: "delegation_denied"`) */
       ruleId?: string;
+      /** ADR-0251: the model-call approval a hold (202 `approval_pending`) or a failed replay names */
+      approvalId?: string;
     };
 
 /** ADR-0070 — the trace coordinates of one dispatch attempt. */
@@ -1409,6 +1411,19 @@ async function dispatchAttempt(
     agentName: served.name,
     mode: args.mode ?? "execute",
     projectId: args.projectId ?? null,
+    provider: served.provider ?? null,
+    model: served.model ?? null,
+    // P-01: a model approval rule holds the call; its consent is bound to exactly this request (ADR-0104)
+    invocation: {
+      input: args.input,
+      messages: args.messages,
+      system: args.system,
+      tools: args.tools,
+      toolChoice: args.toolChoice,
+      responseFormat: args.responseFormat,
+      thinking: args.thinking,
+      maxTokens: args.maxTokens,
+    },
   });
   if (coreRefusal) {
     if (coreRefusal.auditLogId) sink.auditLogId = coreRefusal.auditLogId;
@@ -4299,6 +4314,7 @@ export function registerAgentConnectorRoutes(
                 decision,
                 error: governed.error,
                 ...(governed.detail ? { detail: governed.detail } : {}),
+                ...(governed.approvalId ? { approvalId: governed.approvalId } : {}),
                 ...(governed.pii ? { pii: governed.pii } : {}),
                 ...(governed.guardrails ? { guardrails: governed.guardrails } : {}),
                 ...suppressionFlag,
@@ -5034,6 +5050,7 @@ export function registerAgentConnectorRoutes(
             routing,
             error: outcome.error,
             ...(outcome.detail ? { detail: outcome.detail } : {}),
+            ...(outcome.approvalId ? { approvalId: outcome.approvalId } : {}),
             ...(outcome.pii ? { pii: outcome.pii } : {}),
             ...(outcome.guardrails ? { guardrails: outcome.guardrails } : {}),
           });
@@ -5157,6 +5174,8 @@ export function registerAgentConnectorRoutes(
         routing,
         error: dispatchOutcome.error,
         ...(dispatchOutcome.detail ? { detail: dispatchOutcome.detail } : {}),
+        // ADR-0251: a held model call (202 `approval_pending`) names the approval to re-submit against
+        ...(dispatchOutcome.approvalId ? { approvalId: dispatchOutcome.approvalId } : {}),
         ...(dispatchOutcome.pii ? { pii: dispatchOutcome.pii } : {}),
         ...(dispatchOutcome.guardrails ? { guardrails: dispatchOutcome.guardrails } : {}),
         // ADR-0066 §4: an EXHAUSTED chain must be as visible as a successful

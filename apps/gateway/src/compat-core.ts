@@ -1112,7 +1112,7 @@ export async function executeCompatCall(
         onThinking: undefined,
         cachedResponse: hit,
       });
-      if (!governed.ok) return governed;
+      if (!governed.ok) return compatHoldStatus(governed);
       // A streaming caller still gets a stream: the cached answer is emitted
       // as one delta, so the wire contract is unchanged and an IDE cannot tell
       // a hit from a very fast model.
@@ -1238,7 +1238,17 @@ export async function executeCompatCall(
     }
   }
 
-  return outcome;
+  return compatHoldStatus(outcome);
+}
+
+/**
+ * ADR-0251 — a model call held for approval is a 202 on the native surfaces, but an OpenAI- or Anthropic-shaped
+ * client treats any 2xx as a completion and would try to parse the error body as one. On the compat surfaces the
+ * hold is answered 403 `approval_pending` (an error those SDKs do not retry), with the approval id in the message.
+ */
+function compatHoldStatus(outcome: DispatchOutcome): DispatchOutcome {
+  if (outcome.ok || outcome.status !== 202) return outcome;
+  return { ...outcome, status: 403 };
 }
 
 /** Disclosure headers every compat response carries, in BOTH shapes. The body
