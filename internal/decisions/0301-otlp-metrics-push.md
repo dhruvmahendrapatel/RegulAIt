@@ -57,3 +57,18 @@ migration or admin route. The egress allow-list stays the admin's control over w
 - OTLP/protobuf and gRPC are not offered; OTLP/JSON over HTTP is part of the OTLP specification and every mainstream
   collector accepts it.
 - Not covered here: the declared-but-unwritten span kinds named in the same PENDING row.
+
+## As built after review (2026-11-14, code review round 1 on #803)
+
+1. **The push reader is registered only when an endpoint is configured.** In `@opentelemetry/sdk-metrics` every
+   collection by one reader stashes a snapshot for every other registered reader (`TemporalMetricProcessor`), and a
+   stash drains only when its own reader collects. An always-registered push reader that never collects (OTLP off,
+   the shipped default) would grow by one snapshot per instrument on every Prometheus scrape. The boot calls
+   `enableOtlpPushReader()` before anything records, and only with an endpoint; a test pins that the reader is absent
+   otherwise. **With both readers on, both must collect regularly**: an install that pushes OTLP and also enables
+   `/metrics` must scrape it, or leave the scrape listener off, or the Prometheus reader's stash grows instead.
+2. **The endpoint may not carry a query string**, since it is logged at boot and on outcome changes. Credentials go in
+   `REGULAIT_METRICS_OTLP_HEADERS`.
+3. **A graceful stop sends one final push**, bounded at 5 s, so a restart does not lose the last interval.
+4. The three variables are documented in `docs/deployment/INSTALL.md`, including that header values are secrets held in
+   the environment.

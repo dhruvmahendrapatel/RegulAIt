@@ -2,7 +2,7 @@
  * ADR-0301 — OTLP metrics push. No database: the allow-list, resolver and
  * receiver are injected, so each test pins one rule of the push path.
  */
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createOtlpMetricsPusher,
   describeOtlpMetricsPosture,
@@ -10,7 +10,7 @@ import {
   resolveOtlpMetricsConfig,
   type OtlpMetricsConfig,
 } from "./metrics-otlp.js";
-import { MetricsBootError, recordDecision, scrapeMetricsText } from "./metrics.js";
+import { MetricsBootError, otlpPushReaderRegistered, recordDecision, scrapeMetricsText } from "./metrics.js";
 import type { EgressAllowEntry } from "./egress-guard.js";
 
 const ENDPOINT = "https://collector.example.com/v1/metrics";
@@ -76,6 +76,7 @@ describe("ADR-0301 config: off by default, a bad setting refuses the boot", () =
     [{ REGULAIT_METRICS_OTLP_ENDPOINT: "not a url" }],
     [{ REGULAIT_METRICS_OTLP_ENDPOINT: "ftp://collector.example.com/x" }],
     [{ REGULAIT_METRICS_OTLP_ENDPOINT: "https://user:pw@collector.example.com/v1/metrics" }],
+    [{ REGULAIT_METRICS_OTLP_ENDPOINT: "https://collector.example.com/v1/metrics?api_key=secret" }],
     [{ REGULAIT_METRICS_OTLP_ENDPOINT: ENDPOINT, REGULAIT_METRICS_OTLP_INTERVAL_SECONDS: "5" }],
     [{ REGULAIT_METRICS_OTLP_ENDPOINT: ENDPOINT, REGULAIT_METRICS_OTLP_INTERVAL_SECONDS: "1e3" }],
     [{ REGULAIT_METRICS_OTLP_ENDPOINT: ENDPOINT, REGULAIT_METRICS_OTLP_HEADERS: "Host=evil" }],
@@ -95,6 +96,25 @@ describe("ADR-0301 config: off by default, a bad setting refuses the boot", () =
     } catch (e) {
       expect((e as Error).message).not.toContain("abcdefghij");
     }
+  });
+});
+
+// review item 1: runs FIRST in this file (module state is per file), before any pusher registers the reader
+describe("ADR-0301 the push reader exists only when a push is configured", () => {
+  it("with no pusher the meter has only the Prometheus reader, and repeated scrapes work", async () => {
+    expect(otlpPushReaderRegistered()).toBe(false);
+    for (let i = 0; i < 50; i += 1) {
+      recordDecision({ surface: "agent", effect: "allow" });
+      await scrapeMetricsText();
+    }
+    expect(otlpPushReaderRegistered()).toBe(false);
+  });
+
+  it("creating a pusher registers it (the meter is rebuilt once, empty), and recording and scraping still work", async () => {
+    createOtlpMetricsPusher(null, cfg(), { loadAllowList: async () => [] });
+    expect(otlpPushReaderRegistered()).toBe(true);
+    recordDecision({ surface: "agent", effect: "allow" });
+    expect(await scrapeMetricsText()).toContain("regulait_governance_decisions_total");
   });
 });
 
@@ -185,5 +205,35 @@ describe("ADR-0301 push: the same series as /metrics, through the egress guard",
     expect(await a).toBe("ok");
     expect(await b).toBe("ok");
     expect(calls).toBe(1);
+  });
+});
+
+describe("ADR-0301 the timer and a graceful stop", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("pushes on each interval, and stop() sends one bounded final push", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const { fetchImpl, seen } = receiver(200);
+    const p = createOtlpMetricsPusher(null, cfg({ intervalMs: 10_000 }), { loadAllowList: async () => allow, resolve, fetchImpl, start: true });
+    expect(seen).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.waitFor(() => expect(seen).toHaveLength(1));
+    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.waitFor(() => expect(seen).toHaveLength(2));
+    await p.stop();
+    expect(seen).toHaveLength(3);
+    // stopped: no more ticks, and a second stop() sends nothing
+    await vi.advanceTimersByTimeAsync(30_000);
+    await p.stop();
+    expect(seen).toHaveLength(3);
+  });
+
+  it("a pusher that was never started sends no final push", async () => {
+    const { fetchImpl, seen } = receiver(200);
+    const p = createOtlpMetricsPusher(null, cfg(), { loadAllowList: async () => allow, resolve, fetchImpl });
+    await p.stop();
+    expect(seen).toHaveLength(0);
   });
 });

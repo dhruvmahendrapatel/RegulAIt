@@ -270,11 +270,35 @@ interface Meter {
   breakerTransitions: Counter;
   jobRuns: Counter;
   unauthorized: Counter;
-  pushReader: OtlpPushReader;
+  /** present only when an OTLP endpoint was configured before the meter was built (ADR-0301 review item 1) */
+  pushReader: OtlpPushReader | null;
   otlpPushes: Counter;
 }
 
 let meter: Meter | null = null;
+
+/**
+ * ADR-0301 review item 1 — the push reader is registered ONLY when an OTLP endpoint is configured. In sdk-metrics
+ * every collection by one reader stashes a snapshot for every OTHER registered reader, and a stash is drained only
+ * when its own reader collects. A reader that never collects (OTLP off) would therefore grow by one snapshot per
+ * instrument on every Prometheus scrape, forever. Boot calls this before anything records; if the meter was already
+ * built without the reader, it is rebuilt once (counts since start-up are lost, which at boot is nothing).
+ */
+let otlpPushWanted = false;
+export function enableOtlpPushReader(): void {
+  if (otlpPushWanted) return;
+  otlpPushWanted = true;
+  if (meter && !meter.pushReader) {
+    const old = meter;
+    meter = null;
+    void old.provider.shutdown().catch(() => {});
+  }
+}
+
+/** whether the meter has an OTLP push reader (tests, and the boot posture) */
+export function otlpPushReaderRegistered(): boolean {
+  return getMeter().pushReader !== null;
+}
 
 function buildMeter(): Meter {
   const exporter = new PrometheusExporter({
@@ -289,9 +313,9 @@ function buildMeter(): Meter {
     attributesProcessors: [createAllowListAttributesProcessor([...keys])],
     aggregationCardinalityLimit: METRIC_CARDINALITY_LIMIT,
   }));
-  const pushReader = new OtlpPushReader();
+  const pushReader = otlpPushWanted ? new OtlpPushReader() : null;
   const provider = new MeterProvider({
-    readers: [exporter, pushReader],
+    readers: pushReader ? [exporter, pushReader] : [exporter],
     views,
     // replaces the SDK's default resource (which names the SDK and runtime);
     // the Prometheus side drops it anyway (`withoutTargetInfo`)
@@ -395,7 +419,9 @@ export function recordBreakerTransition(serverId: string, to: MetricBreakerState
 
 /** ADR-0301: collect every series for one OTLP push (metrics-otlp.ts) */
 export function collectForOtlpPush(): Promise<CollectionResult> {
-  return getMeter().pushReader.collect();
+  const reader = getMeter().pushReader;
+  if (!reader) return Promise.reject(new Error("OTLP push reader not registered: call enableOtlpPushReader() first"));
+  return reader.collect();
 }
 
 /** ADR-0301: count one OTLP push by how it ended */

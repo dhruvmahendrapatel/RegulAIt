@@ -43,7 +43,7 @@
  */
 import type { Db } from "@regulait/db";
 import { JsonMetricsSerializer } from "@opentelemetry/otlp-transformer";
-import { collectForOtlpPush, MetricsBootError, recordOtlpPush, type MetricOtlpPushOutcome } from "./metrics.js";
+import { collectForOtlpPush, enableOtlpPushReader, MetricsBootError, recordOtlpPush, type MetricOtlpPushOutcome } from "./metrics.js";
 import { createGuardedFetch, EgressBlockedError, type EgressAllowEntry } from "./egress-guard.js";
 import { loadEgressAllowList } from "./custom-providers.js";
 import { errMessage } from "./err-serializer.js";
@@ -63,6 +63,8 @@ export const OTLP_METRICS_LIMITS = {
   maxHeaders: 10,
   maxHeaderValueLength: 4096,
   maxEndpointLength: 2048,
+  /** the one push `stop()` sends on a graceful shutdown waits at most this long (review item 3) */
+  finalPushTimeoutMs: 5_000,
 } as const;
 
 /** headers the operator may not set: the transport owns them */
@@ -128,6 +130,11 @@ function parseEndpoint(raw: string): string {
     throw new MetricsBootError(`${name} must not carry credentials; put them in ${OTLP_METRICS_ENV.headers}.`);
   }
   if (url.hash !== "") throw new MetricsBootError(`${name} must not carry a fragment.`);
+  // review item 2: the endpoint is logged at boot and on outcome changes, and some collectors take `?api_key=`;
+  // a credential belongs in the headers, so a query string is refused rather than risk logging one
+  if (url.search !== "") {
+    throw new MetricsBootError(`${name} must not carry a query string; put credentials in ${OTLP_METRICS_ENV.headers}.`);
+  }
   return url.toString();
 }
 
@@ -201,7 +208,11 @@ export interface OtlpMetricsPushDeps {
 export interface OtlpMetricsPusher {
   /** one push now; resolves to how it ended (never throws) */
   pushOnce(): Promise<MetricOtlpPushOutcome>;
-  /** stop the timer and wait for a push in flight */
+  /**
+   * Stop the timer and wait for a push in flight. A pusher that was started (`start: true`) then sends ONE final
+   * push, bounded by `finalPushTimeoutMs`, so a graceful restart does not lose the last interval's counts
+   * (review item 3). Never throws.
+   */
   stop(): Promise<void>;
 }
 
@@ -214,6 +225,8 @@ export function createOtlpMetricsPusher(
   cfg: OtlpMetricsConfig,
   deps: OtlpMetricsPushDeps & { start?: boolean } = {},
 ): OtlpMetricsPusher {
+  // review item 1: the push reader exists only once a pusher is wanted (boot also calls this before anything records)
+  enableOtlpPushReader();
   const loadAllowList = deps.loadAllowList ?? (() => loadEgressAllowList(db as Db));
   const log = deps.log ?? (() => {});
   const timeoutMs = Math.min(cfg.intervalMs, OTLP_METRICS_LIMITS.maxTimeoutMs);
@@ -234,7 +247,7 @@ export function createOtlpMetricsPusher(
     return outcome;
   };
 
-  const attempt = async (): Promise<MetricOtlpPushOutcome> => {
+  const attempt = async (deadlineMs: number = timeoutMs): Promise<MetricOtlpPushOutcome> => {
     let allowList: EgressAllowEntry[];
     try {
       allowList = await loadAllowList();
@@ -255,7 +268,7 @@ export function createOtlpMetricsPusher(
         method: "POST",
         headers: { ...cfg.headers, "content-type": "application/json" },
         body,
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: AbortSignal.timeout(deadlineMs),
       });
       // the body is the collector's (partial-success) reply; nothing here needs it
       await res.body?.cancel().catch(() => {});
@@ -267,9 +280,9 @@ export function createOtlpMetricsPusher(
     }
   };
 
-  const pushOnce = (): Promise<MetricOtlpPushOutcome> => {
+  const pushOnce = (deadlineMs?: number): Promise<MetricOtlpPushOutcome> => {
     if (inFlight) return inFlight;
-    inFlight = attempt()
+    inFlight = attempt(deadlineMs)
       .catch((e: unknown) => note("failed", errMessage(e)))
       .finally(() => {
         inFlight = null;
@@ -284,12 +297,17 @@ export function createOtlpMetricsPusher(
     timer.unref();
   }
 
+  let stopped = false;
   return {
-    pushOnce,
+    pushOnce: () => pushOnce(),
     async stop() {
+      if (stopped) return;
+      stopped = true;
+      const wasStarted = timer !== null;
       if (timer) clearInterval(timer);
       timer = null;
       if (inFlight) await inFlight;
+      if (wasStarted) await pushOnce(Math.min(timeoutMs, OTLP_METRICS_LIMITS.finalPushTimeoutMs));
     },
   };
 }
