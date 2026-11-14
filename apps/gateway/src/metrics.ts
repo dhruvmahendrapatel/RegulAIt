@@ -38,9 +38,12 @@ import type { DecisionEffect } from "@regulait/policy-kernel";
 import { constantTimeEqual, type McpUpstreamTransport } from "@regulait/shared";
 import {
   MeterProvider,
+  MetricReader,
   createAllowListAttributesProcessor,
+  type CollectionResult,
   type ViewOptions,
 } from "@opentelemetry/sdk-metrics";
+import { resourceFromAttributes } from "@opentelemetry/resources";
 import { PrometheusExporter, PrometheusSerializer } from "@opentelemetry/exporter-prometheus";
 import type { Counter, Gauge, Histogram } from "@opentelemetry/api";
 
@@ -92,6 +95,9 @@ const HTTP_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"
 const DECISION_EFFECTS = ["allow", "deny", "require_approval"] as const satisfies readonly DecisionEffect[];
 const UPSTREAM_TRANSPORTS = ["streamable_http", "sse", "stdio"] as const satisfies readonly McpUpstreamTransport[];
 const JOB_OUTCOMES = ["ok", "failed", "skipped"] as const;
+/** how one ADR-0301 OTLP metrics push ended */
+export const METRIC_OTLP_PUSH_OUTCOMES = ["ok", "rejected", "failed", "egress_blocked"] as const;
+export type MetricOtlpPushOutcome = (typeof METRIC_OTLP_PUSH_OUTCOMES)[number];
 const LISTENERS = ["separate", "main"] as const;
 /** a server id is a uuid — never a name, never a URL */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -123,7 +129,8 @@ export type MetricLabelKind =
   | "breaker_state"
   | "job"
   | "job_outcome"
-  | "listener";
+  | "listener"
+  | "push_outcome";
 
 function oneOf<T extends string>(vocab: readonly T[], value: unknown, fallback: string): string {
   return typeof value === "string" && (vocab as readonly string[]).includes(value) ? value : fallback;
@@ -159,6 +166,8 @@ export function safeLabel(kind: MetricLabelKind, value: unknown): string {
       return oneOf(JOB_OUTCOMES, value, "other");
     case "listener":
       return oneOf(LISTENERS, value, "other");
+    case "push_outcome":
+      return oneOf(METRIC_OTLP_PUSH_OUTCOMES, value, "other");
   }
 }
 
@@ -230,7 +239,24 @@ const INSTRUMENT_KEYS = {
   regulait_mcp_breaker_transitions_total: ["to"],
   regulait_scheduler_job_runs_total: ["job", "outcome"],
   regulait_metrics_unauthorized_total: ["listener"],
+  regulait_metrics_otlp_pushes_total: ["outcome"],
 } as const;
+
+/**
+ * ADR-0301 — the OTLP push path's reader. A second reader on the SAME provider,
+ * so a push carries exactly the series (and the same Views, allow-lists and
+ * cardinality caps) a scrape does. It never collects on its own: the push loop
+ * (`metrics-otlp.ts`) calls `collect()` on its interval, and only when an
+ * operator configured an endpoint. Cumulative temporality (the reader default),
+ * so a lost push loses no counts: the next one carries the running totals.
+ */
+class OtlpPushReader extends MetricReader {
+  protected override async onForceFlush(): Promise<void> {}
+  protected override async onShutdown(): Promise<void> {}
+}
+
+/** the one resource attribute a push carries: no host, process or SDK detail */
+export const OTLP_METRICS_SERVICE_NAME = "regulait-gateway";
 
 interface Meter {
   provider: MeterProvider;
@@ -244,9 +270,35 @@ interface Meter {
   breakerTransitions: Counter;
   jobRuns: Counter;
   unauthorized: Counter;
+  /** present only when an OTLP endpoint was configured before the meter was built (ADR-0301 review item 1) */
+  pushReader: OtlpPushReader | null;
+  otlpPushes: Counter;
 }
 
 let meter: Meter | null = null;
+
+/**
+ * ADR-0301 review item 1 — the push reader is registered ONLY when an OTLP endpoint is configured. In sdk-metrics
+ * every collection by one reader stashes a snapshot for every OTHER registered reader, and a stash is drained only
+ * when its own reader collects. A reader that never collects (OTLP off) would therefore grow by one snapshot per
+ * instrument on every Prometheus scrape, forever. Boot calls this before anything records; if the meter was already
+ * built without the reader, it is rebuilt once (counts since start-up are lost, which at boot is nothing).
+ */
+let otlpPushWanted = false;
+export function enableOtlpPushReader(): void {
+  if (otlpPushWanted) return;
+  otlpPushWanted = true;
+  if (meter && !meter.pushReader) {
+    const old = meter;
+    meter = null;
+    void old.provider.shutdown().catch(() => {});
+  }
+}
+
+/** whether the meter has an OTLP push reader (tests, and the boot posture) */
+export function otlpPushReaderRegistered(): boolean {
+  return getMeter().pushReader !== null;
+}
 
 function buildMeter(): Meter {
   const exporter = new PrometheusExporter({
@@ -261,11 +313,19 @@ function buildMeter(): Meter {
     attributesProcessors: [createAllowListAttributesProcessor([...keys])],
     aggregationCardinalityLimit: METRIC_CARDINALITY_LIMIT,
   }));
-  const provider = new MeterProvider({ readers: [exporter], views });
+  const pushReader = otlpPushWanted ? new OtlpPushReader() : null;
+  const provider = new MeterProvider({
+    readers: pushReader ? [exporter, pushReader] : [exporter],
+    views,
+    // replaces the SDK's default resource (which names the SDK and runtime);
+    // the Prometheus side drops it anyway (`withoutTargetInfo`)
+    resource: resourceFromAttributes({ "service.name": OTLP_METRICS_SERVICE_NAME }),
+  });
   const m = provider.getMeter("regulait-gateway");
   return {
     provider,
     exporter,
+    pushReader,
     httpRequests: m.createCounter("regulait_http_requests_total", {
       description: "HTTP requests served, by route template and status class",
     }),
@@ -296,6 +356,9 @@ function buildMeter(): Meter {
     }),
     unauthorized: m.createCounter("regulait_metrics_unauthorized_total", {
       description: "Scrapes refused for a missing or wrong bearer token, by listener",
+    }),
+    otlpPushes: m.createCounter("regulait_metrics_otlp_pushes_total", {
+      description: "OTLP metrics pushes (ADR-0301), by outcome",
     }),
   };
 }
@@ -352,6 +415,18 @@ export function setBreakerState(serverId: string, state: MetricBreakerState): vo
 export function recordBreakerTransition(serverId: string, to: MetricBreakerState): void {
   setBreakerState(serverId, to);
   getMeter().breakerTransitions.add(1, { to: safeLabel("breaker_state", to) });
+}
+
+/** ADR-0301: collect every series for one OTLP push (metrics-otlp.ts) */
+export function collectForOtlpPush(): Promise<CollectionResult> {
+  const reader = getMeter().pushReader;
+  if (!reader) return Promise.reject(new Error("OTLP push reader not registered: call enableOtlpPushReader() first"));
+  return reader.collect();
+}
+
+/** ADR-0301: count one OTLP push by how it ended */
+export function recordOtlpPush(outcome: MetricOtlpPushOutcome): void {
+  getMeter().otlpPushes.add(1, { outcome: safeLabel("push_outcome", outcome) });
 }
 
 /** one scheduler job run (scheduler.ts) */
