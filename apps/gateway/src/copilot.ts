@@ -111,6 +111,7 @@ import {
   virtualKeys,
   workflowInstances,
   workflowTemplates,
+  runAsPrincipalStepIfScoped,
   type Db,
 } from "@regulait/db";
 import {
@@ -1072,6 +1073,18 @@ export async function retrieveEvidence(
   scope: CopilotScope,
   now: Date,
 ): Promise<CopilotEvidence> {
+  // ADR-0234 batch 2: the copilot answers over the ledger within the caller's COPILOT scope (resolveCopilotScope:
+  // the projects and MCP tools the kernel lets them see), not only the rows about themselves, so its ledger reads
+  // run as the principal plus audit_verify; the scope filters below remain the authorization.
+  return runAsPrincipalStepIfScoped("audit_verify", "copilot.evidence", () => retrieveEvidenceUnscoped(db, plan, scope, now));
+}
+
+async function retrieveEvidenceUnscoped(
+  db: Db,
+  plan: CopilotQueryPlan,
+  scope: CopilotScope,
+  now: Date,
+): Promise<CopilotEvidence> {
   const { start, end, label } = resolveCopilotTimeframe(plan.timeframe, now);
   const base: CopilotEvidence = {
     tool: plan.tool,
@@ -1756,7 +1769,7 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
     // attacker may have influenced. They are evaluated as PHASE INPUT before
     // they reach a model or an answer; a block WITHHOLDS the samples. The
     // grounded answer is composed from counts, so it survives intact.
-    const policy = await resolveGuardrailPolicy(db, { projectId: body.projectId ?? null });
+    const policy = await resolveGuardrailPolicy(db, { projectId: body.projectId ?? null, userId });
     const sampleText = evidence.samples.map((s) => s.text).join("\n");
     // ADR-0220: the same runner as every other enforcement site, so a trained
     // injection classifier an org has turned on also scans this evidence

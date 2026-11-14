@@ -43,9 +43,13 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  * somebody reviews.
  */
 export const DELIBERATELY_API_ONLY = new Map([
-  // (none today). A DELETE that is still a 501 `notBuilt` stub needs no entry:
-  // a stub deletes nothing, so the census skips it until it becomes a real
-  // handler, and an entry for one is reported stale (see staleExemptions).
+  // A DELETE that is still a 501 `notBuilt` stub needs no entry: a stub deletes nothing, so the census skips it until
+  // it becomes a real handler, and an entry for one is reported stale (see staleExemptions).
+  ["/v1/mcp/authorised-targets/:x", "ADR-0246 (P27): API-only brief; the authorised-targets screen is posted on #453 (route census KNOWN_UI_GAPS). RAISED for the master's review on the PR: delete this entry when the screen lands"],
+  // ADR-0236 (P11), owner decision 2026-11-07 (#697): API-first until the bundle screen requested on #453 lands; these
+  // two entries are deleted when it does (KNOWN_UI_GAPS in preflight-ui-route-census.mjs holds the same routes).
+  ["/v1/mcp-bundles/:x", "archiving an MCP bundle: API-only until the bundle screen on #453 (owner decision 2026-11-07, #697)"],
+  ["/v1/mcp-bundles/:x/grants/:x", "revoking an MCP bundle grant: API-only until the bundle screen on #453 (owner decision 2026-11-07, #697)"],
 ]);
 
 /**
@@ -73,7 +77,9 @@ export const NO_REMOVE_BY_DESIGN = new Map([
   ["/v1/ai-bom/:x/:x/snapshots", "a frozen AI BOM snapshot is the point-in-time record drift is measured against; a newer snapshot supersedes it"],
   ["/v1/agents/setup-assist", "not a collection: the POST returns a suggested agent draft and stores nothing but an audit row"],
   ["/v1/privacy/processing-records", "a record of processing is retired with PATCH status \"retired\", not deleted, so past dispatch decisions stay traceable to it"],
+  ["/v1/servers/:x/high-risk-policy", "ADR-0246: not a collection of its own; applying the template writes an ordinary approval rule and rate limit, each removed with DELETE /v1/rules/:kind/:ruleId (audited)"],
   ["/v1/servers/:x/tools", "tools come from the server's manifest; a tool is stopped with halt, and the server's own lifecycle is G4"],
+  ["/v1/agents/:x/usage-extractor/versions", "ADR-0241: a usage-mapping version is immutable evidence of how a usage row's counts were read (usage_events names it); a newer version supersedes it and POST .../usage-extractor/deactivate stops it, it is never deleted"],
   ["/v1/model-drift/monitors/:x/reports", "a drift report is the point-in-time comparison its alerts cite; reports go only with their monitor (DELETE /v1/model-drift/monitors/:id, audited with the count removed)"],
 ]);
 
@@ -83,7 +89,6 @@ export const NO_REMOVE_BY_DESIGN = new Map([
  * appears, the entry is reported stale and has to be deleted here.
  */
 export const KNOWN_REMOVE_GAPS = new Map([
-  ["/v1/projects", "G1 project archive (#604)"],
   ["/v1/connectors", "G3 connector disable and delete (#605)"],
   ["/v1/servers", "G4 MCP server disable and delete (#605)"],
   ["/v1/mcp-registries", "G9 MCP registry remove (#606)"],

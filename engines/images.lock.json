@@ -24,6 +24,14 @@
       "publishGeneration": 9,
       "sourceCommit": "4ae0eebcb170abf65840baafe9bec834ac4ea4a4",
       "publishedAt": "2026-10-24T22:26:31.270Z"
+    },
+    "spikee": {
+      "repository": null,
+      "manifestDigest": null,
+      "imageId": null,
+      "publishGeneration": 0,
+      "sourceCommit": null,
+      "publishedAt": null
     }
   }
 }

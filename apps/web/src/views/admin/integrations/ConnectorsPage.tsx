@@ -8,6 +8,7 @@ import { useState } from "react";
 import { IntegrationOwnership } from "./IntegrationOwnership";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
+import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import type { Connector, ConnectorCredentialInfo } from "../../../api/adminTypes";
 import { ago, fmtUsd } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
@@ -366,7 +367,7 @@ function GrantForm(props: { connectors: Connector[]; users: ReturnType<typeof us
       onSubmit={(e) => {
         e.preventDefault();
         void act.run(
-          () => api.post("/v1/grants/connectors", { userId, connectorId, mode }),
+          () => withStepUp((h) => stepUpApi.post("/v1/grants/connectors", { userId, connectorId, mode }, h)),
           "Connector granted",
         );
       }}

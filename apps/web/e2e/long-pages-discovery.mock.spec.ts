@@ -42,7 +42,8 @@ const RUNS = Array.from({ length: 23 }, (_, i) => ({
 }));
 const TOKENS = Array.from({ length: 7 }, (_, i) => ({
   id: id("53000000", i), sourceId: SOURCE_AGENT, label: `MDM group ${i + 1}`, deviceCap: 50, devicesEnrolled: i * 3, createdAt: ago(100 + i),
-  expiresAt: i === 6 ? ago(1) : ahead(200), revokedAt: i === 5 ? ago(2) : null, expiryRelaxed: false, devicesActive: i * 2,
+  // far ahead: the mock counts "expired" against the real clock, and NOW + 200h passed on 2026-11-07
+  expiresAt: i === 6 ? ago(1) : ahead(24 * 365 * 10), revokedAt: i === 5 ? ago(2) : null, expiryRelaxed: false, devicesActive: i * 2,
 }));
 const DEVICES = Array.from({ length: 12 }, (_, i) => ({
   id: id("54000000", i), tokenId: TOKENS[0]!.id, devicePseudonym: `psn:dev${String(i).padStart(20, "0")}`, os: "linux", arch: "amd64", agentVersion: "1.2.0",
@@ -89,7 +90,7 @@ async function mockApi(p: Page): Promise<Capture> {
     }
     if (path === `/v1/discovery/sources/${SOURCE_AGENT}/enrolment-tokens`) {
       cap.lists.push(url);
-      const expired = TOKENS.filter((t) => !t.revokedAt && Date.parse(t.expiresAt) <= Date.now()).length;
+      const expired = TOKENS.filter((t) => !t.revokedAt && Date.parse(t.expiresAt) <= NOW).length;
       return json(route, page(TOKENS, q, { created: "createdAt", expires: "expiresAt", label: "label" }, { summary: { tokens: TOKENS.length, expired, revoked: TOKENS.filter((t) => t.revokedAt).length } }));
     }
     if (path === `/v1/discovery/sources/${SOURCE_AGENT}/endpoint-devices`) {

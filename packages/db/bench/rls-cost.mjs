@@ -9,7 +9,7 @@
 // statements three ways: the superuser login (no RLS: today's runtime), a non-admin principal, and an admin
 // principal. Each timing is the median of RUNS runs after WARM warm-ups. It also times the wrapper itself
 // (BEGIN + one set_config statement + COMMIT) against a bare statement.
-import { createDb, runMigrations, withPrincipal, sql } from "../dist/index.js";
+import { createDb, runMigrations, withPrincipal, runWithRlsPrincipal, sql } from "../dist/index.js";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -82,11 +82,19 @@ for (const [name, q] of Object.entries(statements)) {
   const base = await time(() => db.execute(q));
   const user = await time(() => withPrincipal(db, { userId: viewer }, (tx) => tx.execute(q)));
   const adm = await time(() => withPrincipal(db, { userId: admin }, (tx) => tx.execute(q)));
-  rows.push({ statement: name, "superuser ms": base.toFixed(2), "principal ms": user.toFixed(2), "admin ms": adm.toFixed(2) });
+  // batch 2: the request scope (AsyncLocalStorage + the scoped pool), as the gateway now runs every request
+  const scoped = await time(() => runWithRlsPrincipal({ userId: viewer }, () => db.execute(q)));
+  rows.push({ statement: name, "superuser ms": base.toFixed(2), "principal ms": user.toFixed(2), "request scope ms": scoped.toFixed(2), "admin ms": adm.toFixed(2) });
 }
 const bare = await time(() => db.execute(sql`select 1`));
 const wrapped = await time(() => withPrincipal(db, { userId: viewer }, (tx) => tx.execute(sql`select 1`)));
-rows.push({ statement: "wrapper only: select 1", "superuser ms": bare.toFixed(2), "principal ms": wrapped.toFixed(2), "admin ms": "-" });
+const scopedBare = await time(() => runWithRlsPrincipal({ userId: viewer }, () => db.execute(sql`select 1`)));
+rows.push({ statement: "wrapper only: select 1", "superuser ms": bare.toFixed(2), "principal ms": wrapped.toFixed(2), "request scope ms": scopedBare.toFixed(2), "admin ms": "-" });
+// batch 2: a request-shaped burst, 20 point reads in one scope (what a typical route does)
+const burst = async () => { for (let i = 0; i < 20; i++) await db.execute(statements["approvals: by primary key"]); };
+const burstBase = await time(burst);
+const burstScoped = await time(() => runWithRlsPrincipal({ userId: viewer }, burst));
+rows.push({ statement: "request burst: 20 point reads", "superuser ms": burstBase.toFixed(2), "principal ms": "-", "request scope ms": burstScoped.toFixed(2), "admin ms": "-" });
 
 console.log(`USERS=${USERS} APPROVALS=${APPROVALS} AUDIT=${AUDIT} RUNS=${RUNS} (median)`);
 console.table(rows);

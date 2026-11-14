@@ -235,14 +235,16 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
       "409 `mfa_enrollment_required` when the organization requires MFA for the target user and they have not " +
       "enrolled TOTP: no key is issued (audited; ADR-0181). A lifetime beyond the org ceiling is refused by name (audited).",
   },
-  "GET /v1/keys": { summary: "List API keys (metadata only — never the token)." },
+  "GET /v1/keys": { summary: "List API keys (metadata only — never the token). With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226), with `userId` and `state` filters." },
+  "GET /v1/keys/export.xlsx": { summary: "The API keys list as an Excel file: names, holders, dates and state, never a token, hash or prefix. Admin only; audited." },
   "POST /v1/keys/:keyId/revoke": { summary: "Revoke an API key immediately." },
 
   "GET /v1/roles": { summary: "List roles." },
   "POST /v1/roles": { summary: "Create a role.", body: createRoleSchema },
   "DELETE /v1/roles/:roleId": { summary: "Delete a role and every grant it carried." },
   "GET /v1/roles/:roleId/grants": { summary: "Every grant a role confers — tools, servers, agents and connectors." },
-  "GET /v1/roles/:roleId/assignments": { summary: "The users currently holding a role." },
+  "GET /v1/roles/:roleId/assignments": { summary: "The users currently holding a role. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226)." },
+  "GET /v1/roles/:roleId/assignments/export.xlsx": { summary: "A role's holders as an Excel file. Admin only; audited." },
   "POST /v1/users/:userId/roles": { summary: "Assign a role to a user.", body: assignRoleSchema },
   "DELETE /v1/users/:userId/roles/:roleId": { summary: "Remove a role assignment." },
   "GET /v1/users/:userId/agents": { summary: "The agents this user is entitled to dispatch." },
@@ -260,8 +262,10 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
     responseNote:
       "At most 100 rows, newest first by `requestedAt` unless `order=asc`. `status` takes one status or a " +
       "comma-separated list. `total` counts every row the same filters and visibility match, and `hasMore` is " +
-      "true when `total` exceeds the rows returned.",
+      "true when `total` exceeds the rows returned. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the " +
+      "shared list contract (ADR-0226) under the same visibility and filters (`order` is then refused).",
   },
+  "GET /v1/approvals/export.xlsx": { summary: "The approvals queue as an Excel file: every approval the caller may see (the same visibility as the queue) that matches the filters, in the requested sort, with the requested `columns` in order. Audited." },
   "POST /v1/approvals/:approvalId/decide": {
     summary: "Approve or deny a pending request. Non-admin by design — the named approver is usually not an admin.",
     // ADR-0180 A2: the decide body also accepts measured conditions
@@ -275,7 +279,8 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
   "GET /v1/projects/:projectId/costs": { summary: "Per-project AI spend, attributed at the point of every gateway call (pillar 5)." },
   "GET /v1/projects/:projectId/costs.csv": { summary: "The same ledger as a streamed CSV export." },
   "GET /v1/cost-events": { summary: "The raw cost ledger, one row per priced gateway call." },
-  "GET /v1/usage-events": { summary: "The raw usage ledger, one row per governed call (priced or not)." },
+  "GET /v1/usage-events": { summary: "The raw usage ledger, one row per governed call (priced or not). With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226), with `userId`, `objectType` and `excludeObjectType` filters." },
+  "GET /v1/usage-events/export.xlsx": { summary: "The usage ledger as an Excel file: every event the caller may see (a non-admin: their own) that matches the filters, in the requested sort, with the requested `columns` in order. Audited." },
   "GET /v1/usage-events/summary": {
     summary:
       "Spend by agent, connector, MCP tool, project or UTC day, aggregated over every usage event in a window " +
@@ -343,7 +348,10 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
 
   "POST /v1/agents/:agentId/invoke": { summary: "Dispatch an agent. Governed, metered and audited like every other gateway call.", body: invokeAgentSchema },
   "POST /v1/connectors/:connectorId/invoke": { summary: "Invoke a connector.", body: invokeConnectorSchema },
-  "GET /v1/agents": { summary: "Registered agents/models. Bounded: `limit` (default 1000, max 5000)." },
+  "GET /v1/agents": { summary: "Registered agents/models. Bounded: `limit` (default 1000, max 5000). With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226), with `q`, `id` and `enabled` filters and an honest total." },
+  "GET /v1/virtual-keys": { summary: "Virtual keys the caller may see (an admin every key, anyone else their own); never a token. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226)." },
+  "GET /v1/virtual-keys/:keyId/usage": { summary: "A virtual key's spend from the usage ledger. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226) over the ledger rows that reference the key, newest first." },
+  "GET /v1/agents/export.xlsx": { summary: "The agent catalog as an Excel file (the system prompt by its length only). Admin only; audited." },
   "GET /v1/connectors": { summary: "Registered connectors." },
   "GET /v1/servers": { summary: "Registered MCP servers." },
 
