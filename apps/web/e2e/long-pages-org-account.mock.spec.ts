@@ -101,7 +101,8 @@ for (const P of SPLITS) {
     await expect(page).toHaveURL(new RegExp(`${P.page}$`));
     await expect(page.getByRole("heading", { name: P.pageTitle, level: 1 })).toBeVisible();
     await expect(page.locator("main tbody tr")).toHaveCount(P.total);
-    await expect(page.getByText(P.cardTitle, { exact: true })).toBeVisible();
+    // the card title and its count, not the page sub-title that starts the same way
+    await expect(page.getByText(new RegExp(`^${P.cardTitle}\\s*${P.count}$`))).toBeVisible();
     await expect(page.locator("main").getByText(P.pageTitle, { exact: true })).toHaveCount(2); // the h1 and the breadcrumb only
     await expect(page.getByText(P.count, { exact: true })).toBeVisible();
     for (const a of P.actions) await expect(page.getByRole("button", { name: a, exact: true })).toBeVisible();
