@@ -4747,7 +4747,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           userId: deciderUserId,
           ...(updated.objectType === "connector_call"
             ? { objectType: "connector" as const, objectId: updated.connectorId }
-            : { objectType: "mcp_tool" as const, objectId: null, serverId: updated.serverId, toolName: updated.toolName }),
+            : updated.objectType === "model_call"
+              ? { objectType: "agent" as const, objectId: updated.agentId }
+              : { objectType: "mcp_tool" as const, objectId: null, serverId: updated.serverId, toolName: updated.toolName }),
           detail: { approvalId: updated.id, phase: "builder-resume", receiptClass: "excluded" },
           effect: "deny",
           ruleId: "builder-tool-step-resume-failed",

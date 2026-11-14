@@ -1840,6 +1840,9 @@ export const auditLog = pgTable(
         // ADR-0173 batch 2b: a decision on a held connector write (the
         // approvals queue's object type rides the audit row). Plain text — no DDL.
         "connector_call",
+        // ADR-0251: a decision on a held model call (the approvals queue's object
+        // type rides the audit row). Plain text — no DDL.
+        "model_call",
         // ADR-0173 batch 2c (Q): an annotation queue created / changed /
         // removed or exported (objectId = the queue), and an annotation item
         // queued, read, reviewed, removed or past its deadline (objectId = the
@@ -2510,6 +2513,9 @@ export const approvals = pgTable(
     // ADR-0173 batch 2b (migration 0144) — a 'connector_call' approval: the
     // connector the consent may be spent against. NULL on every other kind.
     connectorId: uuid("connector_id").references(() => connectors.id, { onDelete: "cascade" }),
+    // ADR-0251 (migration model_call_approvals) — a 'model_call' approval: the agent (model) the consent may be spent
+    // against. NULL on every other kind.
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
     // ADR-0186 A/B (migration 0170) — SNAPSHOTTED AT QUEUE TIME. Consulted for
     // the tool-call kinds (`mcp_tool`, `connector_call`) only. Every pre-0170
     // row took quorum 1 and the strict `passkey` mode (no grandfathering).
@@ -2555,6 +2561,10 @@ export const approvals = pgTable(
     index("approvals_connector_binding_idx")
       .on(t.userId, t.connectorId, t.status, t.argumentsDigest)
       .where(sql`${t.connectorId} IS NOT NULL`),
+    // ADR-0251: the model-call consent lookup (user, model, status, payload)
+    index("approvals_agent_binding_idx")
+      .on(t.userId, t.agentId, t.status, t.argumentsDigest)
+      .where(sql`${t.agentId} IS NOT NULL`),
   ],
 );
 

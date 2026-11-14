@@ -33,6 +33,7 @@ import {
 import {
   composeResourceDecision,
   governedCoreErrorDecision,
+  matchingResourceApprovalRules,
   RESOURCE_RULE_IDS,
   type AbacDecision,
   type EntitlementDecision,
@@ -43,6 +44,14 @@ import {
 } from "@regulait/policy-kernel";
 import { NOT_ADVISORY_SQL } from "@regulait/shared";
 import { checkModelRateLimit } from "./model-rate-limits.js";
+import {
+  modelConsentState,
+  queueModelConsent,
+  spendModelConsents,
+  type ModelCallTarget,
+  type ModelConsentState,
+  type ModelInvocation,
+} from "./model-call-consent.js";
 
 export interface ResourceRestrictions {
   approvalRules: ResourceApprovalRule[];
@@ -280,37 +289,79 @@ export interface ModelGateRefusal {
   detail: string;
   ruleId: string;
   retryAfterSeconds?: number;
+  /** ADR-0251: the queued (202 `approval_pending`) or failing consent this answer names */
+  approvalId?: string;
   auditLogId?: string | null;
 }
 
 /**
  * ADR-0251 slice 2 — the core's restriction layer on a MODEL dispatch, run once in the shared dispatch core after
  * the caller's own `evaluateAgent` allowed (so `base` is that allow; a deny never reaches here). Steps: the model
- * rate limit (ADR-0212's `checkModelRateLimit`, its 429 and audit row unchanged; enforced by default since migration governed_core_resource_rules),
- * then approval rules. A model call has no per-call approval queue yet, so a matching rule REFUSES (403
- * `approval_required`) rather than sending. The attribution mandate on this path stays where it was (compat
- * `requireProjectAttribution`, native `dispatchAttributionRequired`). Error is deny.
+ * rate limit (ADR-0212's `checkModelRateLimit`, its 429 and audit row unchanged; enforced by default since migration
+ * governed_core_resource_rules), then approval rules.
+ *
+ * P-01 remainder: a matching approval rule HOLDS the call in the one approvals queue (202 `approval_pending`, a
+ * `model_call` approval per required approver, `model-call-consent.ts`), and the identical re-submitted call is
+ * released once every consent is approved, spending each exactly once before any provider work. The attribution
+ * mandate on this path stays where it was (compat `requireProjectAttribution`, native `dispatchAttributionRequired`).
+ * Error is deny.
  */
 export async function governedModelGate(
   db: Db,
-  args: { userId: string; agentId: string; agentName: string; mode: string; projectId: string | null },
+  args: {
+    userId: string;
+    agentId: string;
+    agentName: string;
+    mode: string;
+    projectId: string | null;
+    /** the request the consent is bound to; absent = the bare mode (an internal caller with no payload) */
+    invocation?: Omit<ModelInvocation, "mode"> | undefined;
+    provider?: string | null | undefined;
+    model?: string | null | undefined;
+  },
 ): Promise<ModelGateRefusal | null> {
   const resource: GovernedResource = { type: "model", id: args.agentId, name: args.agentName, mode: args.mode };
+  const target: ModelCallTarget = { agentId: args.agentId, agentName: args.agentName, provider: args.provider ?? null, model: args.model ?? null };
   let decision: GovernedResourceDecision;
+  let consent: ModelConsentState | null = null;
   try {
     const limited = await checkModelRateLimit(db, { userId: args.userId, agentId: args.agentId, agentName: args.agentName, projectId: args.projectId });
     if (limited) return limited;
+    const restrictions = await loadResourceRestrictions(db, { userId: args.userId, resource });
+    const matched = matchingResourceApprovalRules(resource, restrictions.approvalRules);
+    if (matched.length) {
+      consent = await modelConsentState(db, {
+        userId: args.userId,
+        target,
+        projectId: args.projectId,
+        invocation: { input: "", ...args.invocation, mode: args.mode },
+        matchedRules: matched,
+      });
+    }
     decision = await governedEvaluateResource(db, {
       userId: args.userId,
       resource,
       projectId: args.projectId,
       base: { effect: "allow", ruleId: "agent-entitlement", reason: `model '${args.agentName}' allowed by its entitlement decision`, ruleChain: [] },
-      canQueue: false,
+      approvedApprovalId: consent?.allConsented ? consent.bindings[0]!.approvedApprovalId : null,
+      canQueue: true,
+      restrictions,
     });
+    if (decision.effect === "allow") {
+      // THE REPLAY: every required consent is spent once, before any provider work
+      if (!consent?.allConsented) return null;
+      // all or nothing, and a refusal is audited in the same transaction as any consent it retires
+      return await spendModelConsents(db, { userId: args.userId, target, projectId: args.projectId, mode: args.mode, state: consent, decision });
+    }
+    if (decision.effect === "require_approval" && consent?.missing) {
+      // THE HOLD: the approver whose consent is still missing is asked (each named approver in turn)
+      const held = { ...decision, approverUserId: consent.missing.approverUserId };
+      return await queueModelConsent(db, { userId: args.userId, target, projectId: args.projectId, mode: args.mode, decision: held, state: consent });
+    }
   } catch (err) {
     decision = governedCoreErrorDecision(resource, err);
   }
-  if (decision.effect === "allow") return null;
+  // a deny (or a hold with nothing this path can queue: fail closed) is refused and audited
   const coreError = decision.ruleId === RESOURCE_RULE_IDS.coreError;
   const [row] = await db
     .insert(auditLog)
@@ -334,7 +385,7 @@ export async function governedModelGate(
   return {
     ok: false,
     status: coreError ? 503 : 403,
-    error: coreError ? "governed_core_error" : "approval_required",
+    error: coreError ? "governed_core_error" : decision.effect === "require_approval" ? "approval_required" : "forbidden",
     detail: decision.reason,
     ruleId: decision.ruleId,
     auditLogId: row?.id ?? null,

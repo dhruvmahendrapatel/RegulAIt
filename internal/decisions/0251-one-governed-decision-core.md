@@ -282,3 +282,73 @@ overshoot a limit.
   five and take exactly five slots; a call with no limit writes no slot, yet a limit added later counts it; a refused
   call takes no slot; the third call over a limit of two is refused; audit side rows never take a slot.
   `zz-adr0251-a2a-core.test.ts` fills the window with a reservation.
+
+### P-01 remainder, slice 1: the model-call approval queue and replay (2026-11-14)
+
+Supersedes the interim in slice 2 and in "Consequences" ("approval rules on model calls refuse with
+`approval_required` until model calls can be queued and replayed"): model calls are now queued and replayed.
+
+- **Hold.** A model dispatch matched by a model approval rule is held in the one approvals queue as a new approval
+  kind, `model_call` (`APPROVAL_OBJECT_TYPES`, and a tool-call kind in `TOOL_CALL_APPROVAL_OBJECT_TYPES`, so quorum,
+  separation of duties, delegation and the signature mode apply exactly as for `mcp_tool` and `connector_call`).
+  The caller gets **202 `approval_pending`** with the `approvalId`; nothing is sent to a provider, no usage row is
+  written, and one decision row (`effect: require_approval`, `phase: governed-core`, the approval id and the matched
+  rule ids) is audited. An identical pending call reuses its row. A pool that can never reach its quorum is a denied,
+  audited call (403 `approval_quorum_unsatisfiable`), as on the other two kinds.
+- **Binding.** One consent per distinct required approver (review #715 finding 1 applies to models too). Each binds
+  the RAW request (ADR-0104 `argumentsDigest` over the project and `{agentId, mode, input, messages, system, tools,
+  toolChoice, responseFormat, thinking, maxTokens}`) and its policy context (ADR-0105 `contextDigest`: the matched
+  rule ids, the named approver, the org's signature mode and sensitive quorum, and a new `model` target of agent id,
+  provider and configured model). Repointing the agent at another provider or model makes the consent stale.
+- **Signature.** The ADR-0186 B signed payload gains a third target, `agentId`, exclusive with `serverId` and
+  `connectorId`. MCP and connector payloads carry no new key, so their bytes and every stored signature are unchanged.
+- **Replay.** The identical re-submitted call finds an approved, fresh consent for every required approver; the core
+  then allows, and `governedModelGate` spends each consent once (`spendBoundApproval`: policy epoch, payload, context,
+  expiry and the signature recheck under a row lock) before any provider work. A lapsed or stale consent is superseded
+  and audited (409 `approval_expired` / `approval_context_stale`); losing the spend race runs nothing (409
+  `approval_consumed_race`). A consumed consent is never reused: the next identical call is held afresh.
+- **Surfaces.** Every dispatch path inherits it through `dispatchAttempt`. The native invoke route returns the
+  `approvalId` field. The OpenAI- and Anthropic-shaped compat surfaces answer the hold **403 `approval_pending`**
+  instead of 202, because their SDKs read any 2xx as a completion; the approval id is in the message.
+- **Data.** Migration `model_call_approvals` (pending): `approvals.agent_id` (FK to `agents`, cascade) and the partial
+  index `approvals_agent_binding_idx` on (user, agent, status, arguments digest). `approvals.object_type` and
+  `audit_log.object_type` have no DB CHECK, so the new kind needs no other DDL.
+- **Reuse.** `apps/gateway/src/model-call-consent.ts` is the consent machinery (bindings, hold, spend). The A2A lane
+  reuses its shape for remote-agent calls; the target union is the extension point. It imports `mcp-proxy.js` lazily so
+  no import cycle is added (`scripts/preflight-import-cycles.mjs`).
+- **Tests.** `zz-adr0251-model-core.test.ts`: hold (202, approval row, audit row, no usage), dedup of an identical
+  pending call, a different payload is a different consent, the caller cannot approve their own call, the replay runs
+  once and the next identical call is held afresh, a denied consent releases nothing, two approvers both sign and both
+  consents are spent, a consent from a changed policy context is superseded, and the compat surface answers 403.
+  `batch4.test.ts` pins the signed payload's new target and that MCP and connector payloads are unchanged.
+- **Not in this slice.** The approvals screen's kind filter (`ApprovalsAdminPage.tsx` mirrors the kind list) does not
+  list `model_call` yet; the rows are in the queue and decidable, only not filterable by kind. Tracked for the UI
+  builder on #453.
+
+#### Review #807 (2026-11-14)
+
+- **The replay is all or nothing (item 1).** `spendModelConsents` runs ONE transaction: it holds the policy-epoch row
+  shared, locks every consent row `FOR UPDATE` in id order (two replays cannot deadlock), checks each one (still
+  approved, unexpired on the database clock, the same payload and context, the signature recheck) and only then marks
+  them all consumed. If any check fails, no consent is spent: the failing ones are superseded and audited, the others
+  stay approved for the next identical call (which then asks only the approver whose consent is missing), and the
+  refusal's `deny` decision row is written in the same transaction.
+- **The hold is atomic (item 2).** `queueModelConsent` retires stale consents, queues (or reuses) the row and writes
+  the `require_approval` decision row in ONE transaction, so an approvable row never exists without the decision that
+  raised it. An unsatisfiable quorum is audited in that transaction too.
+- **One pending row per identical call (item 3).** The transaction takes an advisory lock on (caller, model, payload
+  digest, context digest) around the reuse lookup and the insert.
+- **What the binding covers (item 4).** Every field the dispatch core sends a provider (`GovernedDispatchArgs`) is in
+  `ModelInvocation`. No dispatch path carries sampling or stop parameters: the compat surfaces accept `temperature`
+  and drop it (`COMPAT_IGNORED_FIELDS`, disclosed on the response and the audit row), and top-p, stop sequences and
+  seed are not accepted at all. A field added to the dispatch later must join `ModelInvocation` in the same change.
+- **Rule versions (item 5).** The context digest binds the matched rule ids with `activeVersionId: null`, because
+  resource approval rules are not versioned. When they are, bind the active version here as the MCP path does.
+- **Consent spent before a later refusal (security review, non-blocking).** The consent is spent in the governed gate,
+  before the virtual-key ceiling and the budget gates. A replay that one of those then refuses has used its consent
+  and must be approved again. This fails closed (nothing runs, nothing is billed); moving those checks ahead of the
+  spend is left for a later change, so the gate keeps one place in the dispatch order.
+- **Tests added.** `zz-adr0251-model-core.test.ts`: a second consent that lapses before the spend (and, separately,
+  one already used by another call) leaves the first approved and writes the refusal; a hold whose decision row
+  cannot be written (injected audit failure) queues nothing; six identical concurrent calls share one pending row;
+  a requester named as the approver of their own call can never release it.

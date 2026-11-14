@@ -116,20 +116,25 @@ In hook order in `apps/gateway/src/app.ts`:
 ### A governed call
 
 The four governed call types (MCP tool, model/agent, connector, remote agent over A2A) share one audit chain and the
-budget gate, but **not** one decision core today (corrected 2026-11-07 from the whole-build review, finding P-01; the
-plan to unify them is [ADR-0251](decisions/0251-one-governed-decision-core.md)):
+budget gate. Since [ADR-0251](decisions/0251-one-governed-decision-core.md) (#715 and its P-01 follow-ups) the model,
+connector and A2A paths also share one restriction layer, `governedEvaluateResource` (`apps/gateway/src/governed-core.ts`
+over the kernel's `composeResourceDecision`); the MCP tool path keeps `governedEvaluate`, which already met the contract:
 
 | Control | MCP tool | Model/agent | Connector | A2A |
 |---|---|---|---|---|
-| Decision function | `governedEvaluate` → kernel `evaluate` | kernel `evaluateAgent` | kernel `evaluateConnector` | route checks in `a2a.ts`, no kernel call |
+| Entitlement (kernel) | `evaluate` | `evaluateAgent` | `evaluateConnector` | `evaluateA2a` |
+| Restriction layer | `governedEvaluate` | `governedModelGate` → `governedEvaluateResource` | `governedEvaluateResource` | `governedEvaluateResource` |
 | Per-user grant, default-deny | yes | yes | yes | yes (`a2a_agent_grants`) |
-| Kill switch and safe modes (`executionGate`) | yes | yes | yes | **no** |
-| AI literacy gate | yes | yes | yes | **no** |
-| Approval rules (`approval_rules`) | yes | **no**: the execution dial's `require_approval` mode becomes a deny | **no**: writes are held only under the execution dial | **no** |
-| Governance rate limits | `rate_limits`, always on | `model_rate_limits`, **off** until an admin enables them | **none** (only the edge HTTP limiter, which in-process calls skip) | **none** |
-| Cedar ABAC | yes | **no** (the actor slot exists, never supplied) | **no** (same) | **no** |
+| Kill switch and safe modes (`executionGate`) | yes | yes | yes | yes |
+| AI literacy gate | yes | yes | yes | yes |
+| Approval rules | `approval_rules`, queued | `resource_approval_rules`, queued as `model_call` (202; 403 on the compat surfaces) and replayed once | `resource_approval_rules` and the execution dial, queued (202) | `resource_approval_rules`, **refused** (no queue yet) |
+| Governance rate limits | `rate_limits` | `model_rate_limits`, on by default | `resource_rate_limits` | `resource_rate_limits` |
+| Cedar ABAC | yes | **not yet** (v5 actions pending) | **not yet** | **not yet** |
 | Data-scope rules | `data_scope_rules` | n/a | grant `allowedObjects` | n/a |
-| Attribution mandate, on by default | `requireMcpAttribution` | `requireProjectAttribution` (compat), `dispatchAttributionRequired` (native) | **no**: an unattributed call runs | **no**: an unattributed call runs |
+| Attribution mandate, on by default | `requireMcpAttribution` | `requireProjectAttribution` (compat), `dispatchAttributionRequired` (native) | `connector_attribution_required` | `a2a_attribution_required` |
+
+Rate-limit windows are counted when the call is decided, so they are soft under concurrency (bounded by the calls in
+flight for one subject and resource); hard windows are an ADR-0251 follow-up.
 
 The sequence below is the **MCP tool** path. The others reach the same budget gate and audit chain from their own
 route-level decision.
