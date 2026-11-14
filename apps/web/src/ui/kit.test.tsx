@@ -5,7 +5,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../api/client";
-import { Badge, Card, EmptyState, Field, Fieldset, InfoButton, Input, LIST_CONTROL_ATTR, RecordError, RowActions, Table, Tabs, foldPattern, holdsKeepVisible, tabIds } from "./kit";
+import { Badge, Button, Card, EmptyState, Field, Fieldset, InfoButton, Input, LIST_CONTROL_ATTR, RecordError, RowActions, Switch, Table, Tabs, foldPattern, holdsKeepVisible, tabIds } from "./kit";
 import { FoldTable, foldHosts } from "./fold";
 // Digest lives with the BOM evidence panel; it is tested here with the other shared primitives
 import { Digest } from "../views/admin/governance/BomEvidencePanel";
@@ -424,6 +424,26 @@ describe("contained Card — a DataList's own view controls may fold, every othe
     expect(open).toContain('aria-expanded="true"');
     expect(open).toContain("BODY");
     expect(open).toContain(">7 decisions<");
+  });
+});
+
+describe("Button busy and Switch: busy stays focusable (aria-disabled plus a guard, review of #744)", () => {
+  it("a busy button is aria-disabled, never disabled, so focus stays on it", () => {
+    const html = renderToStaticMarkup(<Button busy>Activate</Button>);
+    expect(html).toContain('aria-disabled="true"');
+    expect(html).not.toMatch(/\sdisabled(=|\s|>)/);
+    expect(renderToStaticMarkup(<Button>Activate</Button>)).not.toContain("aria-disabled");
+  });
+
+  it("the switch is a named role=switch, aria-disabled while busy", () => {
+    const html = renderToStaticMarkup(<Switch checked onChange={() => undefined} labelledBy="lbl" describedBy="note" busy />);
+    expect(html).toContain('role="switch"');
+    expect(html).toContain('aria-checked="true"');
+    expect(html).toContain('aria-labelledby="lbl"');
+    expect(html).toContain('aria-describedby="note"');
+    expect(html).toContain('aria-disabled="true"');
+    expect(html).not.toMatch(/\sdisabled(=|\s|>)/);
+    expect(renderToStaticMarkup(<Switch checked={false} onChange={() => undefined} label="Use it" />)).toContain('aria-label="Use it"');
   });
 });
 

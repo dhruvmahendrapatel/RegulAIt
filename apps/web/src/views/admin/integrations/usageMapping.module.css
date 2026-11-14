@@ -1,0 +1,196 @@
+/* ADR-0241 (P21): the "Usage counts — custom mapping" card. Tokens only, so both themes follow. */
+
+.head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  align-items: flex-start;
+  justify-content: space-between;
+}
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+.nowrap {
+  white-space: nowrap;
+}
+.head > .lead {
+  flex: 1 1 28rem;
+}
+.lead {
+  margin: 0;
+  max-width: 68ch;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+
+.switchBox {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--s0);
+  flex: 0 1 26rem;
+}
+.switchRow {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  font-weight: 600;
+}
+.switchNote {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+  text-align: right;
+}
+.pickRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  align-items: flex-end;
+}
+.pickRow > :first-child {
+  flex: 1 1 18rem;
+  max-width: 28rem;
+}
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-half);
+  padding: var(--s1) var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  min-width: 12rem;
+}
+.tileLabel {
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+.tileValue {
+  font-weight: 600;
+}
+.tileValue span {
+  font-weight: 400;
+  color: var(--text-dim);
+}
+
+.versions {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.versionsHead {
+  margin: 0;
+  padding: var(--s1) var(--s2);
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+}
+.versionsHead span {
+  font-weight: 400;
+  color: var(--text-dim);
+}
+.actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--s0);
+}
+.why {
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+
+.footRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.editor {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr));
+  gap: var(--s2);
+  align-items: start;
+}
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  min-width: 0;
+}
+.panelTitle {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+.mono input,
+.mono textarea,
+input.mono,
+textarea.mono {
+  font-family: var(--font-mono);
+}
+.countGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
+  gap: var(--s1);
+}
+.more summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.more[open] summary {
+  margin-bottom: var(--s1);
+}
+
+.notice {
+  margin: 0;
+  padding: var(--s1) var(--s2);
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+}
+.notice ul {
+  margin: var(--s0) 0 0;
+  padding-left: var(--s3);
+}
+.danger {
+  background: var(--danger-soft);
+  color: var(--danger-soft-text);
+}
+.warn {
+  background: var(--warn-soft);
+  color: var(--warn-soft-text);
+}
+
+.result {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.resultHead {
+  margin: 0;
+  padding: var(--s1) var(--s2);
+  font-weight: 600;
+}
+.resultPass {
+  background: var(--ok-soft);
+  color: var(--ok-soft-text);
+}
+.resultFail {
+  background: var(--danger-soft);
+  color: var(--danger-soft-text);
+}
+
+/* a panel's layout without its box, for a form or block that already sits inside one */
+.panelBare {
+  padding: 0;
+  border: 0;
+  background: none;
+}
