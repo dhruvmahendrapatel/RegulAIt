@@ -203,6 +203,8 @@ export interface OtlpMetricsPushDeps {
   fetchImpl?: typeof fetch;
   resolve?: Parameters<typeof createGuardedFetch>[0]["resolve"];
   log?: (line: string) => void;
+  /** a push's deadline in ms (default: the interval, at most 30 s); tests shorten it */
+  timeoutMs?: number;
 }
 
 export interface OtlpMetricsPusher {
@@ -220,6 +222,25 @@ export interface OtlpMetricsPusher {
  * Build the pusher. `start: true` also starts the unref'd interval timer
  * (boot.ts); tests drive `pushOnce` directly.
  */
+/** `p`, or a rejection as soon as `signal` aborts (the allow-list load has no signal of its own) */
+function untilAborted<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    p.then(
+      (v) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(v);
+      },
+      (e: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(e);
+      },
+    );
+  });
+}
+
 export function createOtlpMetricsPusher(
   db: Db | null,
   cfg: OtlpMetricsConfig,
@@ -229,7 +250,9 @@ export function createOtlpMetricsPusher(
   enableOtlpPushReader();
   const loadAllowList = deps.loadAllowList ?? (() => loadEgressAllowList(db as Db));
   const log = deps.log ?? (() => {});
-  const timeoutMs = Math.min(cfg.intervalMs, OTLP_METRICS_LIMITS.maxTimeoutMs);
+  const timeoutMs = deps.timeoutMs ?? Math.min(cfg.intervalMs, OTLP_METRICS_LIMITS.maxTimeoutMs);
+  // second review, item 2: stop() aborts a push in flight instead of waiting out its deadline
+  const stopping = new AbortController();
   let inFlight: Promise<MetricOtlpPushOutcome> | null = null;
   let lastOutcome: MetricOtlpPushOutcome | null = null;
   let timer: NodeJS.Timeout | null = null;
@@ -247,15 +270,19 @@ export function createOtlpMetricsPusher(
     return outcome;
   };
 
-  const attempt = async (deadlineMs: number = timeoutMs): Promise<MetricOtlpPushOutcome> => {
+  const attempt = async (deadlineMs: number = timeoutMs, abortable = true): Promise<MetricOtlpPushOutcome> => {
+    // the whole attempt, allow-list load included, is bounded by its deadline (second review, item 2)
+    const signal = abortable ? AbortSignal.any([AbortSignal.timeout(deadlineMs), stopping.signal]) : AbortSignal.timeout(deadlineMs);
+    // collect FIRST (second review, item 3): the push reader drains on every attempt, so a failing allow-list
+    // load (a database outage) never leaves its snapshots piling up while /metrics scrapes keep adding to them
+    const { resourceMetrics, errors } = await collectForOtlpPush();
+    if (errors.length > 0) log(`[regulait] metrics: ${errors.length} collection error(s) before an OTLP push`);
     let allowList: EgressAllowEntry[];
     try {
-      allowList = await loadAllowList();
+      allowList = await untilAborted(loadAllowList(), signal);
     } catch (e) {
       return note("failed", `could not load the egress allow-list: ${errMessage(e)}`);
     }
-    const { resourceMetrics, errors } = await collectForOtlpPush();
-    if (errors.length > 0) log(`[regulait] metrics: ${errors.length} collection error(s) before an OTLP push`);
     const body = JsonMetricsSerializer.serializeRequest(resourceMetrics);
     if (!body) return note("failed", "the OTLP serializer produced no body");
     const guarded = createGuardedFetch({
@@ -268,7 +295,7 @@ export function createOtlpMetricsPusher(
         method: "POST",
         headers: { ...cfg.headers, "content-type": "application/json" },
         body,
-        signal: AbortSignal.timeout(deadlineMs),
+        signal,
       });
       // the body is the collector's (partial-success) reply; nothing here needs it
       await res.body?.cancel().catch(() => {});
@@ -280,9 +307,9 @@ export function createOtlpMetricsPusher(
     }
   };
 
-  const pushOnce = (deadlineMs?: number): Promise<MetricOtlpPushOutcome> => {
+  const pushOnce = (deadlineMs?: number, abortable = true): Promise<MetricOtlpPushOutcome> => {
     if (inFlight) return inFlight;
-    inFlight = attempt(deadlineMs)
+    inFlight = attempt(deadlineMs, abortable)
       .catch((e: unknown) => note("failed", errMessage(e)))
       .finally(() => {
         inFlight = null;
@@ -306,8 +333,11 @@ export function createOtlpMetricsPusher(
       const wasStarted = timer !== null;
       if (timer) clearInterval(timer);
       timer = null;
+      // abort a push in flight (a hung collector must not hold the shutdown), then send ONE final push whose whole
+      // attempt, allow-list load included, is bounded by finalPushTimeoutMs
+      stopping.abort();
       if (inFlight) await inFlight;
-      if (wasStarted) await pushOnce(Math.min(timeoutMs, OTLP_METRICS_LIMITS.finalPushTimeoutMs));
+      if (wasStarted) await pushOnce(Math.min(timeoutMs, OTLP_METRICS_LIMITS.finalPushTimeoutMs), false);
     },
   };
 }

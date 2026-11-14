@@ -60,7 +60,7 @@ import { checkReceiptSigningKey } from "./receipt-signing-key.js";
 import { ensureInstallIdentityKey, identitySigningKeyConfiguration } from "./identity-signing-keys.js";
 import { describeGatewayLogger, resolveGatewayLogger } from "./gateway-logger.js";
 import { databaseTlsBootWarning, describeDbPool, resolveDbPoolConfig } from "@regulait/db";
-import { describeMetricsPosture, enableOtlpPushReader, resolveMetricsConfig, startMetricsListener } from "./metrics.js";
+import { describeMetricsPosture, disablePrometheusReader, enableOtlpPushReader, resolveMetricsConfig, startMetricsListener } from "./metrics.js";
 import { createOtlpMetricsPusher, describeOtlpMetricsPosture, resolveOtlpMetricsConfig } from "./metrics-otlp.js";
 import { configureRateLimitEvaluator, describeRateLimitEvaluator } from "./rate-limit-evaluator.js";
 import { seedBuiltinEvalDatasets } from "./eval-builtin-datasets.js";
@@ -114,6 +114,8 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   const otlpMetricsConfig = resolveOtlpMetricsConfig(env);
   // ADR-0301 review item 1: the push reader is registered before anything records, and only when it is wanted
   if (otlpMetricsConfig) enableOtlpPushReader();
+  // ADR-0301 second review: the Prometheus reader likewise exists only when a scrape surface is on
+  if (!metricsConfig.listen && !metricsConfig.onMainListener) disablePrometheusReader();
   // ADR-0239: an unrecognised REGULAIT_RATE_LIMIT_EVALUATOR refuses the boot here, before anything exists.
   const rateLimitEvaluator = configureRateLimitEvaluator(env);
   // ADR-0189 R25 item 12: FIRST BOOT creates the install-generated receipt signing key when no key is

@@ -2,7 +2,7 @@
  * ADR-0301 — OTLP metrics push. No database: the allow-list, resolver and
  * receiver are injected, so each test pins one rule of the push path.
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import {
   createOtlpMetricsPusher,
   describeOtlpMetricsPosture,
@@ -10,7 +10,15 @@ import {
   resolveOtlpMetricsConfig,
   type OtlpMetricsConfig,
 } from "./metrics-otlp.js";
-import { MetricsBootError, otlpPushReaderRegistered, recordDecision, scrapeMetricsText } from "./metrics.js";
+import {
+  MetricsBootError,
+  disablePrometheusReader,
+  otlpPushReaderRegistered,
+  prometheusReaderRegistered,
+  recordDecision,
+  resetMetricReadersForTest,
+  scrapeMetricsText,
+} from "./metrics.js";
 import type { EgressAllowEntry } from "./egress-guard.js";
 
 const ENDPOINT = "https://collector.example.com/v1/metrics";
@@ -133,6 +141,18 @@ describe("ADR-0301 push: the same series as /metrics, through the egress guard",
     expect(rm.resource.attributes).toEqual([{ key: "service.name", value: { stringValue: "regulait-gateway" } }]);
     const names = rm.scopeMetrics.flatMap((s: { metrics: Array<{ name: string }> }) => s.metrics.map((m) => m.name));
     expect(names).toContain("regulait_governance_decisions_total");
+    // second review, item 4: a real data point, cumulative, carrying only allow-listed attribute keys
+    type Pt = { asInt?: string | number; asDouble?: number; attributes: Array<{ key: string; value: { stringValue?: string } }> };
+    const decisions = rm.scopeMetrics
+      .flatMap((s: { metrics: Array<{ name: string; sum?: { aggregationTemporality: number; isMonotonic: boolean; dataPoints: Pt[] } }> }) => s.metrics)
+      .find((m: { name: string }) => m.name === "regulait_governance_decisions_total")!;
+    expect(decisions.sum!.aggregationTemporality).toBe(2); // AGGREGATION_TEMPORALITY_CUMULATIVE
+    expect(decisions.sum!.isMonotonic).toBe(true);
+    const deny = decisions.sum!.dataPoints.find((p: Pt) => p.attributes.some((a) => a.key === "effect" && a.value.stringValue === "deny"))!;
+    expect(Number(deny.asInt ?? deny.asDouble)).toBeGreaterThanOrEqual(1);
+    for (const p of decisions.sum!.dataPoints) {
+      expect(p.attributes.map((a: { key: string }) => a.key).sort()).toEqual(["effect", "surface"]);
+    }
     await p.stop();
   });
 
@@ -236,4 +256,91 @@ describe("ADR-0301 the timer and a graceful stop", () => {
     await p.stop();
     expect(seen).toHaveLength(0);
   });
+});
+
+describe("ADR-0301 second review: no reader that never collects, and a bounded shutdown", () => {
+  afterAll(() => {
+    vi.useRealTimers();
+    // review item 5: the reader flags are process-wide; hand the next test file a clean meter
+    resetMetricReadersForTest();
+  });
+
+  it("OTLP only: with no scrape surface the Prometheus reader is absent, however many pushes run", async () => {
+    disablePrometheusReader();
+    const { fetchImpl, seen } = receiver(200);
+    const p = createOtlpMetricsPusher(null, cfg(), { loadAllowList: async () => allow, resolve, fetchImpl });
+    for (let i = 0; i < 25; i += 1) {
+      recordDecision({ surface: "agent", effect: "allow" });
+      expect(await p.pushOnce()).toBe("ok");
+    }
+    expect(seen).toHaveLength(25);
+    expect(prometheusReaderRegistered()).toBe(false);
+    expect(otlpPushReaderRegistered()).toBe(true);
+    await p.stop();
+  });
+
+  it("the meter is collected before the allow-list loads, so a database outage still drains the push reader", async () => {
+    const order: string[] = [];
+    const p = createOtlpMetricsPusher(null, cfg(), {
+      loadAllowList: async () => {
+        order.push("allow-list");
+        throw new Error("db down");
+      },
+    });
+    recordDecision({ surface: "agent", effect: "allow" });
+    expect(await p.pushOnce()).toBe("failed");
+    expect(order).toEqual(["allow-list"]);
+  });
+
+  it("a hung collector is cut off at the push deadline", async () => {
+    const hang = (async (_u: unknown, init?: RequestInit) =>
+      new Promise<Response>((_res, rej) => init?.signal?.addEventListener("abort", () => rej(init.signal!.reason)))) as typeof fetch;
+    const p = createOtlpMetricsPusher(null, cfg(), { loadAllowList: async () => allow, resolve, fetchImpl: hang, timeoutMs: 50 });
+    const t0 = Date.now();
+    expect(await p.pushOnce()).toBe("failed");
+    expect(Date.now() - t0).toBeLessThan(2_000);
+  });
+
+  it("stop() aborts a push in flight instead of waiting out its deadline, then sends the final push", async () => {
+    let calls = 0;
+    let atCollector!: () => void;
+    const reached = new Promise<void>((r) => (atCollector = r));
+    const fetchImpl = (async (_u: unknown, init?: RequestInit) => {
+      calls += 1;
+      if (calls === 1) {
+        atCollector();
+        return new Promise<Response>((_res, rej) => init?.signal?.addEventListener("abort", () => rej(init.signal!.reason)));
+      }
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    // a 30 s deadline: without the abort, stop() would wait the whole of it
+    const p = createOtlpMetricsPusher(null, cfg(), { loadAllowList: async () => allow, resolve, fetchImpl, timeoutMs: 30_000, start: true });
+    const first = p.pushOnce();
+    await reached; // the first push is at the (hung) collector
+    const t0 = Date.now();
+    await p.stop();
+    expect(Date.now() - t0).toBeLessThan(5_000);
+    expect(await first).toBe("failed");
+    expect(calls).toBe(2);
+  });
+
+  it("the final push is bounded as a whole, including a hung allow-list load", async () => {
+    let loads = 0;
+    const p = createOtlpMetricsPusher(null, cfg(), {
+      loadAllowList: () => {
+        loads += 1;
+        return loads === 1 ? Promise.resolve(allow) : new Promise<EgressAllowEntry[]>(() => {});
+      },
+      resolve,
+      fetchImpl: receiver(200).fetchImpl,
+      start: true,
+    });
+    expect(await p.pushOnce()).toBe("ok");
+    // real time: AbortSignal.timeout runs on Node's own timers, which fake timers do not drive
+    const t0 = Date.now();
+    await p.stop();
+    const took = Date.now() - t0;
+    expect(took).toBeGreaterThanOrEqual(4_500);
+    expect(took).toBeLessThan(7_000);
+  }, 15_000);
 });

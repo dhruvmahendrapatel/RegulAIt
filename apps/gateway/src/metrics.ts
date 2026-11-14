@@ -260,7 +260,6 @@ export const OTLP_METRICS_SERVICE_NAME = "regulait-gateway";
 
 interface Meter {
   provider: MeterProvider;
-  exporter: PrometheusExporter;
   httpRequests: Counter;
   httpDuration: Histogram;
   decisions: Counter;
@@ -272,6 +271,8 @@ interface Meter {
   unauthorized: Counter;
   /** present only when an OTLP endpoint was configured before the meter was built (ADR-0301 review item 1) */
   pushReader: OtlpPushReader | null;
+  /** present only when a scrape surface is on, or something scraped (ADR-0301 second review, item 1) */
+  exporter: PrometheusExporter | null;
   otlpPushes: Counter;
 }
 
@@ -288,11 +289,50 @@ let otlpPushWanted = false;
 export function enableOtlpPushReader(): void {
   if (otlpPushWanted) return;
   otlpPushWanted = true;
-  if (meter && !meter.pushReader) {
-    const old = meter;
-    meter = null;
-    void old.provider.shutdown().catch(() => {});
-  }
+  if (meter && !meter.pushReader) rebuildMeter();
+}
+
+/**
+ * ADR-0301 second review, item 1: the same rule for the Prometheus reader. Boot calls `disablePrometheusReader()`
+ * before anything records when no scrape surface is on (neither `REGULAIT_METRICS_LISTEN` nor
+ * `REGULAIT_METRICS_ON_MAIN_LISTENER`). An OTLP-only install therefore has no reader that never collects, and its
+ * pushes leave no snapshot behind. With neither reader the instruments record into nothing. Outside boot (tests, a
+ * library use) the reader is on by default, and anything that scrapes turns it back on.
+ */
+let prometheusWanted = true;
+export function enablePrometheusReader(): void {
+  if (prometheusWanted) return;
+  prometheusWanted = true;
+  if (meter && !meter.exporter) rebuildMeter();
+}
+export function disablePrometheusReader(): void {
+  if (!prometheusWanted) return;
+  prometheusWanted = false;
+  if (meter && meter.exporter) rebuildMeter();
+}
+
+/** a reader added after the meter was built: rebuild once (counts since start-up are lost, which at boot is nothing) */
+function rebuildMeter(): void {
+  const old = meter;
+  meter = null;
+  void old?.provider.shutdown().catch(() => {});
+}
+
+/** test-only: forget which readers were wanted, so one test file's pusher does not leak a reader into the next */
+export function resetMetricReadersForTest(): void {
+  otlpPushWanted = false;
+  prometheusWanted = true;
+  rebuildMeter();
+}
+
+/** whether the meter has a Prometheus reader (tests, and the boot posture) */
+export function prometheusReaderRegistered(): boolean {
+  return getMeter().exporter !== null;
+}
+
+function scrapeExporter(): PrometheusExporter {
+  enablePrometheusReader();
+  return getMeter().exporter!;
 }
 
 /** whether the meter has an OTLP push reader (tests, and the boot posture) */
@@ -301,13 +341,15 @@ export function otlpPushReaderRegistered(): boolean {
 }
 
 function buildMeter(): Meter {
-  const exporter = new PrometheusExporter({
-    preventServerStart: true,
-    // no resource labels (host, process) and no scope labels: the series
-    // carry exactly the keys listed above
-    withoutTargetInfo: true,
-    withoutScopeInfo: true,
-  });
+  const exporter = prometheusWanted
+    ? new PrometheusExporter({
+        preventServerStart: true,
+        // no resource labels (host, process) and no scope labels: the series
+        // carry exactly the keys listed above
+        withoutTargetInfo: true,
+        withoutScopeInfo: true,
+      })
+    : null;
   const views: ViewOptions[] = Object.entries(INSTRUMENT_KEYS).map(([name, keys]) => ({
     instrumentName: name,
     attributesProcessors: [createAllowListAttributesProcessor([...keys])],
@@ -315,7 +357,7 @@ function buildMeter(): Meter {
   }));
   const pushReader = otlpPushWanted ? new OtlpPushReader() : null;
   const provider = new MeterProvider({
-    readers: pushReader ? [exporter, pushReader] : [exporter],
+    readers: [exporter, pushReader].filter((r): r is NonNullable<typeof r> => r !== null),
     views,
     // replaces the SDK's default resource (which names the SDK and runtime);
     // the Prometheus side drops it anyway (`withoutTargetInfo`)
@@ -616,7 +658,7 @@ export function serveMetrics(
     return;
   }
   res.setHeader("cache-control", "no-store");
-  getMeter().exporter.getMetricsRequestHandler(req, res);
+  scrapeExporter().getMetricsRequestHandler(req, res);
 }
 
 /**
@@ -710,6 +752,8 @@ export function registerMetricsHooks(app: FastifyInstance, opts: MetricsHookOpti
     });
     return;
   }
+  // the scrape surface is on: the Prometheus reader exists from the start, so no counts are lost to a late rebuild
+  enablePrometheusReader();
   app.get(METRICS_PATH, async (req, reply) => {
     if (!metricsAuthorized(req.headers.authorization, token!)) {
       getMeter().unauthorized.add(1, { listener: "main" });
@@ -739,6 +783,6 @@ function serializeMetrics(rm: Parameters<PrometheusSerializer["serialize"]>[0]):
 
 /** the current exposition text (tests) */
 export async function scrapeMetricsText(): Promise<string> {
-  const { resourceMetrics } = await getMeter().exporter.collect();
+  const { resourceMetrics } = await scrapeExporter().collect();
   return serializeMetrics(resourceMetrics);
 }

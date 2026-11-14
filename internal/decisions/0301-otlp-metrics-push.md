@@ -32,7 +32,7 @@ included.
    the transport for the one unmet requirement above. Re-check when the exporter accepts a caller-supplied fetch or
    agent with the guarantees above.
 3. **Off by default, set by the operator (ADR-0180, ADR-0041).** `REGULAIT_METRICS_OTLP_ENDPOINT` (https, or http only
-   where the allow entry permits plaintext; no credentials or fragment in the URL), `REGULAIT_METRICS_OTLP_INTERVAL_SECONDS`
+   where the allow entry permits plaintext; no credentials, query string or fragment in the URL), `REGULAIT_METRICS_OTLP_INTERVAL_SECONDS`
    (10 to 3600, default 60) and `REGULAIT_METRICS_OTLP_HEADERS` (`name=value,…`, at most 10, transport headers
    refused). The ambient `OTEL_EXPORTER_OTLP_*` variables are deliberately not read, so a variable meant for another
    process cannot open a connection from this one. A setting that is present but unusable refuses the boot
@@ -66,9 +66,25 @@ migration or admin route. The egress allow-list stays the admin's control over w
    the shipped default) would grow by one snapshot per instrument on every Prometheus scrape. The boot calls
    `enableOtlpPushReader()` before anything records, and only with an endpoint; a test pins that the reader is absent
    otherwise. **With both readers on, both must collect regularly**: an install that pushes OTLP and also enables
-   `/metrics` must scrape it, or leave the scrape listener off, or the Prometheus reader's stash grows instead.
+   `/metrics` must scrape it, or the Prometheus reader's stash grows instead. (Round 2 corrects the earlier advice
+   here: leaving the scrape listener off did not help, because the Prometheus reader was registered anyway.)
 2. **The endpoint may not carry a query string**, since it is logged at boot and on outcome changes. Credentials go in
    `REGULAIT_METRICS_OTLP_HEADERS`.
 3. **A graceful stop sends one final push**, bounded at 5 s, so a restart does not lose the last interval.
 4. The three variables are documented in `docs/deployment/INSTALL.md`, including that header values are secrets held in
    the environment.
+
+## As built after review (2026-11-14, code review round 2 on #803)
+
+1. **The Prometheus reader follows the same rule.** It used to be registered always, so an OTLP-only install grew
+   its stash by one snapshot per instrument on every push. Boot now calls `disablePrometheusReader()` before
+   anything records when no scrape surface is on (neither `REGULAIT_METRICS_LISTEN` nor
+   `REGULAIT_METRICS_ON_MAIN_LISTENER`), and the main-listener mount re-enables it. Every reader that exists is
+   therefore one that collects: an OTLP-only install has only the push reader, a scrape-only install only the
+   Prometheus reader. A test pins this with 25 OTLP-only pushes.
+2. **`stop()` cannot outlast the shutdown grace.** It aborts a push in flight, so a hung collector no longer holds
+   the shutdown for up to 30 s. The final push's whole attempt is bounded at 5 s, allow-list load included.
+3. **Collect before loading the allow-list**, so a database outage still drains the push reader on every attempt.
+4. A test-only `resetMetricReadersForTest()` clears the process-wide reader flags between test files. The tests also
+   cover a cumulative data point with only allow-listed attributes, a hung collector, and `stop()` during a push.
+
