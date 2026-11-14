@@ -4941,6 +4941,7 @@ export * from "./privacy-ops.js";
 
 // ===== ADR-0215 (P5) — framework content imports and the imported regulatory feed =====
 export * from "./framework-imports.js";
+export * from "./atlas-redteam-map.js";
 
 // ===== ADR-0221 (PENDING P4) — the supplier portal =========================
 export * from "./supplier-portal.js";
