@@ -18,7 +18,8 @@ export interface StepperStep<K extends string> {
 export function Stepper<K extends string>(props: {
   label: string;
   steps: ReadonlyArray<StepperStep<K>>;
-  current: K;
+  /** the open step; null marks none (a page whose steps have not loaded yet) */
+  current: K | null;
   onSelect: (id: K) => void;
 }) {
   return (
