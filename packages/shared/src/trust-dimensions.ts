@@ -21,9 +21,12 @@
  * gateway — never as 0% and never as 100%.
  */
 import type { TrustDimension } from "./risks.js";
+import { ISO_PACK_DIMENSIONS } from "./iso-packs.js";
 import { SECTOR_PACK_DIMENSIONS } from "./sector-packs.js";
 
 export const CONTROL_DIMENSION_OVERRIDES: Readonly<Record<string, TrustDimension>> = {
+  // ADR-0295 (P18 B4): the attestation-only ISO/IEC 42001@2, 23894 and 42005 controls (classified in iso-packs.ts)
+  ...ISO_PACK_DIMENSIONS,
   // ADR-0297 (P18 B6): SR 11-7 and NYC LL144 controls (classified in sector-packs.ts)
   ...SECTOR_PACK_DIMENSIONS,
   // EU AI Act — attestation-only
