@@ -50,6 +50,7 @@ import { describeEgressPosture, resolveDeployMode } from "./deploy-posture.js";
 import { describePublicUrl, resolvePublicUrl } from "./public-url.js";
 import { describeDataKey, verifyDataKeyOnBoot, type DataKeyBootResult } from "./data-key.js";
 import { Scheduler, resolveSchedulerConfig, syncSchedulerJobs } from "./scheduler.js";
+import { startStageRetryWorker, stageRetryWorkerEnabled, type StageRetryWorker } from "./workflows-queue.js";
 import { schedulerJobRegistry } from "./scheduler-jobs.js";
 import { captureAnchor, flushPendingAnchors, resolveAnchorSink } from "./audit-chain.js";
 import { backfillOtlpHeaderCiphertext, loadOrgSettings } from "./org-settings.js";
@@ -254,6 +255,11 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   app.addHook("onClose", async () => {
     if (scheduler) await scheduler.stop();
   });
+  // ADR-0283: the workflow retry worker, registered before listen for the same reason
+  let retryWorker: StageRetryWorker | null = null;
+  app.addHook("onClose", async () => {
+    if (retryWorker) await retryWorker.stop();
+  });
 
   // Audit anchoring is DEFAULT-ON and deliberately does NOT ride the ADR-0064
   // scheduler. Two reasons, both load-bearing:
@@ -392,6 +398,15 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
     // Shutdown is the app's: closing the gateway stops the loop and WAITS for
     // an in-flight job rather than abandoning it mid-sweep (see Scheduler.stop).
     // The hook itself is registered above, before listen — see the note there.
+  }
+  // ADR-0283: automatic stage retries. On unless REGULAIT_WORKFLOW_RETRY_WORKER=off (forced off under vitest). A
+  // failure to start is a degradation, not an outage: a failed stage stays retryable through /advance.
+  if (stageRetryWorkerEnabled(env)) {
+    try {
+      retryWorker = await startStageRetryWorker(db);
+    } catch (err) {
+      console.error(`[regulait] workflow retry worker did not start: ${errLine(err)}`);
+    }
   }
 
   log(`regulait gateway listening on ${address}`);
