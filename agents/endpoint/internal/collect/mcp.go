@@ -4,7 +4,7 @@ package collect
 //
 // The signed manifest names the config files (detection is data); this file holds only format knowledge (where
 // each host keeps its server map) and a closed set of compiled risk checks. It is read-only: a config is read
-// as bytes, parsed as plain JSON and dropped, and no configured server is ever started, contacted or resolved.
+// as bytes, parsed (JSON, JSONC or TOML) and dropped, and no configured server is ever started, contacted or resolved.
 //
 // What leaves the device for each server: an identifier-shaped entry name, the transport, the launch command's
 // base name, the package or image it runs (without arguments), a remote server's host, a disabled flag, risk
@@ -13,14 +13,22 @@ package collect
 //
 // Design reference only (not a dependency, ADR-0176): apisec-inc/mcp-audit (MIT) for the hosts' config paths and
 // its secret and risk categories. See ADR-0259 for why it is not run or vendored.
+//
+// Parsers (ADR-0176; ADR-0259 amendment 2026-11-14): `tidwall/jsonc` (MIT) blanks JSONC comments and trailing
+// commas before the standard JSON decoder runs (VS Code settings.json, Zed settings); `pelletier/go-toml/v2`
+// (MIT) decodes TOML (Codex config.toml). Both are pure functions over the bounded bytes already read.
 
 import (
 	"bytes"
 	"encoding/json"
 	"net"
 	"net/url"
+	"path"
 	"sort"
 	"strings"
+
+	"github.com/pelletier/go-toml/v2"
+	"github.com/tidwall/jsonc"
 
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/contract"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/pack"
@@ -55,7 +63,7 @@ func (c *collector) mcpConfigs(entries []pack.Entry) {
 				if !ok {
 					continue
 				}
-				servers, parsed := mcpServersIn(raw)
+				servers, parsed := mcpServersIn(name, raw)
 				if !parsed {
 					c.gap(k, GapMCPConfigUnparsed)
 					continue
@@ -74,15 +82,13 @@ func (c *collector) mcpConfigs(entries []pack.Entry) {
 	}
 }
 
-// mcpServersIn parses a config as plain JSON and describes every server entry under the keys MCP hosts use.
-// parsed is false when the file is not a JSON object (JSONC with comments, TOML, or damaged JSON).
-func mcpServersIn(raw []byte) (out []contract.MCPServer, parsed bool) {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 || trimmed[0] != '{' {
-		return nil, false
-	}
-	var doc map[string]any
-	if json.Unmarshal(trimmed, &doc) != nil {
+// mcpServersIn parses a config and describes every server entry under the keys MCP hosts use. A `.toml` file is
+// read as TOML; anything else as JSON, with JSONC comments and trailing commas blanked first (plain JSON is
+// unchanged by that step). parsed is false when the file is not an object in its format (damaged, or another
+// format).
+func mcpServersIn(name string, raw []byte) (out []contract.MCPServer, parsed bool) {
+	doc, ok := parseConfig(name, raw)
+	if !ok {
 		return nil, false
 	}
 	for _, m := range serverMaps(doc) {
@@ -102,10 +108,31 @@ func mcpServersIn(raw []byte) (out []contract.MCPServer, parsed bool) {
 	return out, true
 }
 
+// parseConfig decodes a config to a generic document. TOML tables decode to map[string]any and arrays to []any,
+// the same shapes encoding/json produces, so one describer serves both.
+func parseConfig(name string, raw []byte) (map[string]any, bool) {
+	var doc map[string]any
+	if strings.EqualFold(path.Ext(name), ".toml") {
+		if toml.Unmarshal(raw, &doc) != nil || doc == nil {
+			return nil, false
+		}
+		return doc, true
+	}
+	cleaned := bytes.TrimSpace(jsonc.ToJSON(raw))
+	if len(cleaned) == 0 || cleaned[0] != '{' {
+		return nil, false
+	}
+	if json.Unmarshal(cleaned, &doc) != nil {
+		return nil, false
+	}
+	return doc, true
+}
+
 // serverMaps returns the server maps of a parsed config, in a fixed order:
 //   - `mcpServers` (Claude Desktop, Cursor, Windsurf, Cline, Gemini CLI, a project's .mcp.json)
 //   - `servers` (VS Code mcp.json) and `mcp.servers` (VS Code settings.json)
 //   - `context_servers` (Zed)
+//   - `mcp_servers` (Codex config.toml; developers.openai.com/codex/config-file/config-reference)
 //   - `projects.<project>.mcpServers` (Claude Code's per-project servers; the project key, a path, is never kept)
 func serverMaps(doc map[string]any) []map[string]any {
 	var out []map[string]any
@@ -120,6 +147,7 @@ func serverMaps(doc map[string]any) []map[string]any {
 		pick(mcp["servers"])
 	}
 	pick(doc["context_servers"])
+	pick(doc["mcp_servers"])
 	if projects, ok := doc["projects"].(map[string]any); ok {
 		keys := make([]string, 0, len(projects))
 		for p := range projects {
@@ -227,6 +255,9 @@ func describeServer(name string, e map[string]any) contract.MCPServer {
 	}
 	keys = append(keys, envKeys(e["env"])...)
 	keys = append(keys, headerKeys(e["headers"])...)
+	// Codex: `http_headers` holds static header values (`env_http_headers` and `bearer_token_env_var` name
+	// environment variables, which are references, not secrets)
+	keys = append(keys, headerKeys(e["http_headers"])...)
 	s.Keys = mergeKeys(keys)
 
 	if b, ok := e["disabled"].(bool); ok && b {

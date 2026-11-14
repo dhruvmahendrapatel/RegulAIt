@@ -213,6 +213,27 @@ SD1 and SD2. The owner asked for three comparisons:
   (section 7); the owner's call on history markers; the UI (on #453); P23's server scanner can take the `unregistered` inventory as its queue; re-check
   mcp-audit and a JSONC/TOML parser at the next ADR-0176 review.
 
+## Amendment 2026-11-14: JSONC and TOML configs are parsed (P35 follow-up, lane L10)
+
+The ADR-0176 re-check this ADR asked for found two parsers that pass (MIT, a tagged release in the last 12 months,
+pinned in `go.mod`/`go.sum`, no dependencies, no network), so the `mcp_config_unparsed` gap no longer covers JSONC
+or TOML:
+
+- **JSONC:** `github.com/tidwall/jsonc` v0.3.3 (2026-03-10). It blanks comments and trailing commas in place
+  (offsets kept) and the standard `encoding/json` decoder then reads the result; plain JSON passes through
+  unchanged. v0.3.4 (2026-11-12) was under two weeks old and is not pinned. `tailscale/hujson` still has no tagged
+  release.
+- **TOML:** `github.com/pelletier/go-toml/v2` v2.4.3 (2026-07-05). A file is read as TOML only when its name ends
+  in `.toml`; the document decodes to the same map and list shapes as JSON, so the describer is unchanged.
+- **Codex** (`config.toml`): its server map is `mcp_servers.<id>`, with `command`, `args`, `env`, `url`, `enabled`
+  and `http_headers` (static header values, checked like `headers`), as the Codex configuration reference
+  (developers.openai.com/codex/config-file/config-reference) documents. `env_http_headers` and
+  `bearer_token_env_var` name environment variables, so they are references and never reported as secrets.
+  `http_headers_helper` names a command and is never run.
+- `mcp_config_unparsed` now means a config that is damaged or not an object in its format.
+- Unchanged: which files are read is still data in the signed manifest, and the agent config route still serves no
+  pack until the SD4 signer lands.
+
 ## Numbering
 
 ADR 0259 was assigned by the master session for P35. The migration was first claimed as 0312; under ADR-0252 it is

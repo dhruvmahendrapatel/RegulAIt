@@ -43,6 +43,14 @@ export const CONCURRENT_INDEXES: ReadonlyArray<{ migration: string; name: string
     name: "audit_log_object_at_idx",
     create: `CREATE INDEX CONCURRENTLY IF NOT EXISTS "audit_log_object_at_idx" ON "audit_log" ("object_type", "object_id", "at" DESC)`,
   },
+  {
+    // ADR-0283 (the ADR-0250 plan-gate fragment): `guardProjectPlanOnly`'s read of a project's open instances
+    migration: "workflow_instances_project_open_idx",
+    name: "workflow_instances_project_open_idx",
+    create:
+      `CREATE INDEX CONCURRENTLY IF NOT EXISTS "workflow_instances_project_open_idx" ON "workflow_instances" ("project_id") ` +
+      `WHERE "status" NOT IN ('completed', 'aborted', 'denied', 'rolled_back')`,
+  },
 ];
 
 /**
