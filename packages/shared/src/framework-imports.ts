@@ -96,6 +96,30 @@ export const importSourceSchema = z
     upstreamRevision: z.string().min(1).max(100),
     upstreamSha256: sha,
     retrievedOn: ymd,
+    /**
+     * ADR-0294: further upstream documents whose text the snapshot also carries
+     * (the AI RMF Playbook's suggested actions on the AI RMF subcategories). Each
+     * is pinned by its own sha256 and must be under a licence that allows text.
+     */
+    supplements: z
+      .array(
+        z
+          .object({
+            title: z.string().min(1).max(300),
+            publisher: z.string().min(1).max(200),
+            licence: z.string().min(1).max(64),
+            licenceUrl: httpsUrl,
+            upstreamUrl: httpsUrl,
+            upstreamRevision: z.string().min(1).max(100),
+            upstreamSha256: sha,
+            retrievedOn: ymd,
+          })
+          .strict()
+          .refine((x) => importTextPolicy(x.licence) === "text", { message: "a supplement's licence must allow text" }),
+      )
+      .min(1)
+      .max(5)
+      .optional(),
   })
   .strict();
 export type ImportSource = z.infer<typeof importSourceSchema>;
@@ -183,7 +207,8 @@ function clip(text: string, max: number): string {
 }
 
 /** markdown links to their text: upstream links are relative to the publisher's site */
-const unlink = (s: string) => s.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1");
+// the link text and target exclude their own delimiters, so a scan never re-enters itself (no super-linear backtracking)
+const unlink = (s: string) => s.replace(/\[([^[\]]+)\]\([^()]*\)/g, "$1");
 
 const byRef = (a: { controlRef: string }, b: { controlRef: string }) =>
   a.controlRef < b.controlRef ? -1 : a.controlRef > b.controlRef ? 1 : 0;
@@ -390,6 +415,147 @@ export function normaliseFederalRegister(results: unknown, opts: { retrievedOn: 
   return [...out.values()].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 }
 
+/**
+ * ADR-0294 — the NIST AI RMF Playbook (its published JSON: one entry per AI RMF
+ * subcategory) onto imported AI RMF controls: each control whose subcategory
+ * the Playbook covers gets the Playbook's suggested actions as its
+ * description. Only the "suggested actions" section is taken; the references
+ * section cites third-party works and is not stored. Markdown bullets become
+ * "; "-joined sentences. Refuses a Playbook that leaves a control uncovered,
+ * so a refresh cannot silently drop text.
+ */
+export function withPlaybookActions(controls: ImportedControl[], playbook: unknown, opts: { framework: string }): ImportedControl[] {
+  if (!Array.isArray(playbook)) throw new Error("expected the AI RMF Playbook array");
+  const actions = new Map<string, string>();
+  for (const e of playbook as Array<{ title?: unknown; section_actions?: unknown }>) {
+    if (typeof e.title !== "string" || typeof e.section_actions !== "string") continue;
+    const m = /^(GOVERN|MAP|MEASURE|MANAGE)\s+(\d+\.\d+)$/.exec(e.title.trim());
+    if (!m) continue;
+    const items = e.section_actions
+      .split(/\n/)
+      .map((l) => unlink(l).replace(/^\s*[-*]\s*/, "").trim())
+      .filter(Boolean);
+    if (items.length) actions.set(`${opts.framework}:${m[1]}-${m[2]}`, items.join(" "));
+  }
+  const missing = controls.filter((c) => !actions.has(c.controlRef)).map((c) => c.controlRef);
+  if (missing.length) throw new Error(`the Playbook has no suggested actions for ${missing.join(", ")}`);
+  return controls.map((c) => ({ ...c, description: clip(`Suggested actions (NIST AI RMF Playbook): ${actions.get(c.controlRef)}`, 4000) }));
+}
+
+/** the twelve GAI risks of NIST AI 600-1 §2, as its action tables tag them */
+export const NIST_AI_600_1_RISKS = [
+  "CBRN Information or Capabilities",
+  "Confabulation",
+  "Dangerous, Violent, or Hateful Content",
+  "Data Privacy",
+  "Environmental Impacts",
+  "Harmful Bias and Homogenization",
+  "Human-AI Configuration",
+  "Information Integrity",
+  "Information Security",
+  "Intellectual Property",
+  "Obscene, Degrading, and/or Abusive Content",
+  "Value Chain and Component Integration",
+] as const;
+
+/**
+ * Spellings the publication's tables use for a risk, to the §2 name. One table
+ * tag ("Civil Rights violations", GV-1.4-002) names no §2 risk and is kept as
+ * written.
+ */
+const AI_600_1_TAG_ALIASES: Readonly<Record<string, string>> = {
+  "CBRN Information and Capability": "CBRN Information or Capabilities",
+  Environmental: "Environmental Impacts",
+  "Human AI Configuration": "Human-AI Configuration",
+};
+const AI_600_1_EXTRA_TAGS = ["Civil Rights violations"] as const;
+const AI_600_1_FN_NAME: Record<string, string> = { GV: "GOVERN", MP: "MAP", MS: "MEASURE", MG: "MANAGE" };
+
+/**
+ * ADR-0294 — NIST AI 600-1 (the Generative AI Profile) to imported entries, one
+ * per suggested action (`GV-1.1-001` …). NIST publishes the profile only as a
+ * PDF, so the input is that PDF's text as `pdftotext -raw` gives it (the
+ * refresh script runs it); this function is pure over that text. Each action's
+ * text runs from its id to the next id or table boundary; the GAI risk tags are
+ * the trailing run of known risk names. Footnote text after a page number is
+ * dropped. A known extraction defect (`GV4.3--001` for GV-4.3-001) is repaired.
+ * Throws if an action has no risk tag or an id repeats, so a changed layout
+ * fails the refresh instead of storing bad text.
+ */
+export function normaliseNistAi600Text(text: string, opts: { framework: string; licence: string }): ImportedControl[] {
+  const clean = text
+    .replace(/\uFB01/g, "fi")
+    .replace(/\uFB02/g, "fl")
+    .replace(/\uFB00/g, "ff")
+    .replace(/\uFB03/g, "ffi")
+    .replace(/\f/g, "\n")
+    .replace(/^GV4\.3--001$/m, "GV-4.3-001");
+  const names = [...NIST_AI_600_1_RISKS, ...Object.keys(AI_600_1_TAG_ALIASES), ...AI_600_1_EXTRA_TAGS].sort((a, b) => b.length - a.length);
+  // one trailing tag, matched on whitespace-normalised text: literal names, one optional separator, no nested
+  // quantifier, so the match is linear (the whole suffix is peeled one tag at a time by `splitRiskSuffix`)
+  const tag = `(?:${names.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`;
+  const lastTagRe = new RegExp(`(?:^|[ ;,])(${tag})[;,]?$`);
+  const splitRiskSuffix = (text: string): { action: string; risks: string[] } | null => {
+    let rest = text.replace(/\s+/g, " ").trim();
+    const found: string[] = [];
+    for (let m = lastTagRe.exec(rest); m; m = lastTagRe.exec(rest)) {
+      found.unshift(m[1]!);
+      rest = rest.slice(0, m.index).trimEnd();
+      if (rest.endsWith(";") || rest.endsWith(",")) rest = rest.slice(0, -1).trimEnd();
+    }
+    return found.length ? { action: rest, risks: found } : null;
+  };
+  const idRe = /^((GV|MP|MS|MG)-\d+\.\d+-\d{3})(?: (\S.*))?$/;
+  const stopRe = /^(AI Actor Tasks|AI Actors:|Action ID Suggested Action|(GOVERN|MAP|MEASURE|MANAGE) \d+\.\d+:)/;
+  const rows: Array<{ id: string; text: string }> = [];
+  let cur: { id: string; buf: string[] } | null = null;
+  const flush = () => {
+    if (cur) rows.push({ id: cur.id, text: cur.buf.join(" ") });
+    cur = null;
+  };
+  for (const raw of clean.split("\n")) {
+    const line = raw.replace(/\s+/g, " ").trim();
+    const m = idRe.exec(line);
+    if (m) {
+      flush();
+      cur = { id: m[1]!, buf: m[3] ? [m[3]] : [] };
+      continue;
+    }
+    if (!cur) continue;
+    if (stopRe.test(line)) {
+      flush();
+      continue;
+    }
+    if (!line) continue;
+    if (/^\d{1,3}$/.test(line)) {
+      // a page number or footnote mark: once the row has its risk tags, what follows is a footnote
+      if (splitRiskSuffix((cur as { buf: string[] }).buf.join(" "))) flush();
+      continue;
+    }
+    (cur as { buf: string[] }).buf.push(line);
+  }
+  flush();
+  const seen = new Set<string>();
+  const out: ImportedControl[] = [];
+  for (const r of rows) {
+    if (seen.has(r.id)) throw new Error(`AI 600-1 action ${r.id} appears twice`);
+    seen.add(r.id);
+    const split = splitRiskSuffix(r.text);
+    if (!split || !split.action) throw new Error(`AI 600-1 action ${r.id} has no GAI risk tag`);
+    const action = split.action;
+    const risks = [...new Set(split.risks.map((t) => AI_600_1_TAG_ALIASES[t] ?? t))];
+    const [fn, sub] = /^(GV|MP|MS|MG)-(\d+\.\d+)-/.exec(r.id)!.slice(1);
+    const tail = ` GAI risks: ${risks.join("; ")}. AI RMF subcategory: ${AI_600_1_FN_NAME[fn!]} ${sub}.`;
+    out.push({
+      controlRef: `${opts.framework}:${r.id}`,
+      title: clip(`${r.id} — ${action}`, 400),
+      description: clip(`${clip(action, 4000 - tail.length)}${tail}`, 4000),
+    });
+  }
+  if (out.length === 0) throw new Error("no AI 600-1 suggested actions found in the text");
+  return applyPolicy(out, opts.licence);
+}
+
 // ---------------------------------------------------------------------------
 // The three-way merge
 // ---------------------------------------------------------------------------
@@ -544,7 +710,10 @@ export function planFrameworkImport(args: {
       reviewedOn: null,
       note: clip(
         `Imported from ${s.upstreamUrl} under ${s.licence} (${s.licenceUrl}), retrieved ${s.retrievedOn}, ` +
-          `upstream sha256 ${s.upstreamSha256}, content sha256 ${contentSha256}.`,
+          `upstream sha256 ${s.upstreamSha256}, content sha256 ${contentSha256}.` +
+          (s.supplements ?? [])
+            .map((x) => ` With ${x.title} from ${x.upstreamUrl} under ${x.licence}, sha256 ${x.upstreamSha256}.`)
+            .join(""),
         2000,
       ),
     },

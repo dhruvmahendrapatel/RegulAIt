@@ -70,6 +70,11 @@ export const CONTROL_DIMENSION_OVERRIDES: Readonly<Record<string, TrustDimension
   "owasp-llm-top-10:training-data-poisoning": "security",
   "owasp-llm-top-10:retrieval-store-weakness": "security",
   "owasp-llm-top-10:unsafe-output-use": "security",
+  // ADR-0294 (P18 B5): NIST AI 600-1 — the attestation-only GAI risks
+  "nist-ai-600-1:risk-cbrn-information": "safety",
+  "nist-ai-600-1:risk-information-integrity": "reliability",
+  "nist-ai-600-1:risk-intellectual-property": "compliance",
+  "nist-ai-600-1:risk-obscene-degrading-abusive": "safety",
 };
 
 export interface ControlForDimension {
