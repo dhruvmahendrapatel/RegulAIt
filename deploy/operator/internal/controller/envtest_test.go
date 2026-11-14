@@ -290,12 +290,14 @@ func TestInstallUpgradeDriftAndRefusals(t *testing.T) {
 	}
 
 	// Default-deny NetworkPolicy, the unowned install-secrets claim, a token-less ServiceAccount.
-	np := &networkingv1.NetworkPolicy{}
-	if err := k8s.Get(ctx, client.ObjectKey{Namespace: testNS, Name: name + "-default-deny"}, np); err != nil {
-		t.Fatal(err)
-	}
-	if len(np.Spec.PolicyTypes) != 2 || len(np.Spec.Ingress) != 0 {
-		t.Fatalf("network policy is not default-deny: %+v", np.Spec)
+	for _, suffix := range []string{"-baseline", "-gateway", "-database-clients"} {
+		np := &networkingv1.NetworkPolicy{}
+		if err := k8s.Get(ctx, client.ObjectKey{Namespace: testNS, Name: name + suffix}, np); err != nil {
+			t.Fatalf("network policy %s: %v", suffix, err)
+		}
+		if len(np.Spec.PolicyTypes) != 2 || len(np.Spec.Ingress) != 0 {
+			t.Fatalf("network policy %s is not default-deny for ingress: %+v", suffix, np.Spec)
+		}
 	}
 	pvc := &corev1.PersistentVolumeClaim{}
 	if err := k8s.Get(ctx, client.ObjectKey{Namespace: testNS, Name: name + "-install-secrets"}, pvc); err != nil {

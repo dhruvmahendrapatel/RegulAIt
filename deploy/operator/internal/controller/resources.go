@@ -144,33 +144,78 @@ func Service(in *v1alpha1.RegulaitInstallation) *corev1.Service {
 	}
 }
 
-// NetworkPolicy is default-deny in both directions for every pod of the installation; the spec only opens holes.
-func NetworkPolicy(in *v1alpha1.RegulaitInstallation) *networkingv1.NetworkPolicy {
-	tcp, udp := corev1.ProtocolTCP, corev1.ProtocolUDP
-	port := func(p corev1.Protocol, n int32) networkingv1.NetworkPolicyPort {
-		return networkingv1.NetworkPolicyPort{Protocol: &p, Port: ptr.To(intstr.FromInt32(n))}
-	}
+func npPort(p corev1.Protocol, n int32) networkingv1.NetworkPolicyPort {
+	return networkingv1.NetworkPolicyPort{Protocol: &p, Port: ptr.To(intstr.FromInt32(n))}
+}
 
-	ingress := []networkingv1.NetworkPolicyIngressRule{}
+// dnsRule opens DNS only: by default to the cluster DNS pods (k8s-app: kube-dns in kube-system), or to the selector or
+// CIDRs in spec.egress.dns (NodeLocal DNSCache, a renamed CoreDNS).
+func dnsRule(in *v1alpha1.RegulaitInstallation) networkingv1.NetworkPolicyEgressRule {
+	tcp, udp := corev1.ProtocolTCP, corev1.ProtocolUDP
+	var to []networkingv1.NetworkPolicyPeer
+	if d := in.Spec.Egress.DNS; d != nil && (d.NamespaceSelector != nil || d.PodSelector != nil || len(d.CIDRs) > 0) {
+		if d.NamespaceSelector != nil || d.PodSelector != nil {
+			to = append(to, networkingv1.NetworkPolicyPeer{NamespaceSelector: d.NamespaceSelector, PodSelector: d.PodSelector})
+		}
+		to = append(to, ipBlocks(d.CIDRs)...)
+	} else {
+		to = []networkingv1.NetworkPolicyPeer{{
+			NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"kubernetes.io/metadata.name": "kube-system"}},
+			PodSelector:       &metav1.LabelSelector{MatchLabels: map[string]string{"k8s-app": "kube-dns"}},
+		}}
+	}
+	return networkingv1.NetworkPolicyEgressRule{To: to, Ports: []networkingv1.NetworkPolicyPort{npPort(udp, 53), npPort(tcp, 53)}}
+}
+
+func databaseRules(in *v1alpha1.RegulaitInstallation) []networkingv1.NetworkPolicyEgressRule {
+	if cidrs := in.Spec.Egress.DatabaseCIDRs; len(cidrs) > 0 {
+		return []networkingv1.NetworkPolicyEgressRule{{To: ipBlocks(cidrs), Ports: []networkingv1.NetworkPolicyPort{npPort(corev1.ProtocolTCP, 5432)}}}
+	}
+	return nil
+}
+
+func policy(in *v1alpha1.RegulaitInstallation, name string, sel metav1.LabelSelector, ingress []networkingv1.NetworkPolicyIngressRule, egress []networkingv1.NetworkPolicyEgressRule) *networkingv1.NetworkPolicy {
+	if ingress == nil {
+		ingress = []networkingv1.NetworkPolicyIngressRule{}
+	}
+	if egress == nil {
+		egress = []networkingv1.NetworkPolicyEgressRule{}
+	}
+	return &networkingv1.NetworkPolicy{
+		TypeMeta:   typeMeta("NetworkPolicy", "networking.k8s.io/v1"),
+		ObjectMeta: objectMeta(in, name, ""),
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: sel,
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress},
+			Ingress:     ingress,
+			Egress:      egress,
+		},
+	}
+}
+
+// NetworkPolicies are the per-workload policies of ADR-0304 §2b. Policies add up, so the namespace-wide baseline
+// denies everything the other two do not open.
+func NetworkPolicies(in *v1alpha1.RegulaitInstallation) []*networkingv1.NetworkPolicy {
+	return []*networkingv1.NetworkPolicy{BaselinePolicy(in), GatewayPolicy(in), DatabaseClientsPolicy(in)}
+}
+
+// BaselinePolicy selects every pod in the namespace and allows nothing.
+func BaselinePolicy(in *v1alpha1.RegulaitInstallation) *networkingv1.NetworkPolicy {
+	return policy(in, in.Name+"-baseline", metav1.LabelSelector{}, nil, nil)
+}
+
+// GatewayPolicy: ingress on 3000 from spec.ingressFrom only; egress DNS, the database, allowedCIDRs and (byoc only)
+// public 443 outside the private and metadata ranges.
+func GatewayPolicy(in *v1alpha1.RegulaitInstallation) *networkingv1.NetworkPolicy {
+	var ingress []networkingv1.NetworkPolicyIngressRule
 	if len(in.Spec.IngressFrom) > 0 {
 		peers := make([]networkingv1.NetworkPolicyPeer, 0, len(in.Spec.IngressFrom))
 		for _, p := range in.Spec.IngressFrom {
 			peers = append(peers, networkingv1.NetworkPolicyPeer{NamespaceSelector: p.NamespaceSelector, PodSelector: p.PodSelector})
 		}
-		ingress = append(ingress, networkingv1.NetworkPolicyIngressRule{From: peers, Ports: []networkingv1.NetworkPolicyPort{port(tcp, GatewayPort)}})
+		ingress = append(ingress, networkingv1.NetworkPolicyIngressRule{From: peers, Ports: []networkingv1.NetworkPolicyPort{npPort(corev1.ProtocolTCP, GatewayPort)}})
 	}
-
-	egress := []networkingv1.NetworkPolicyEgressRule{{
-		// DNS to the cluster DNS pods only, not all of kube-system.
-		To: []networkingv1.NetworkPolicyPeer{{
-			NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"kubernetes.io/metadata.name": "kube-system"}},
-			PodSelector:       &metav1.LabelSelector{MatchLabels: map[string]string{"k8s-app": "kube-dns"}},
-		}},
-		Ports: []networkingv1.NetworkPolicyPort{port(udp, 53), port(tcp, 53)},
-	}}
-	if cidrs := in.Spec.Egress.DatabaseCIDRs; len(cidrs) > 0 {
-		egress = append(egress, networkingv1.NetworkPolicyEgressRule{To: ipBlocks(cidrs), Ports: []networkingv1.NetworkPolicyPort{port(tcp, 5432)}})
-	}
+	egress := append([]networkingv1.NetworkPolicyEgressRule{dnsRule(in)}, databaseRules(in)...)
 	if cidrs := in.Spec.Egress.AllowedCIDRs; len(cidrs) > 0 {
 		egress = append(egress, networkingv1.NetworkPolicyEgressRule{To: ipBlocks(cidrs)})
 	}
@@ -180,20 +225,25 @@ func NetworkPolicy(in *v1alpha1.RegulaitInstallation) *networkingv1.NetworkPolic
 				{IPBlock: &networkingv1.IPBlock{CIDR: "0.0.0.0/0", Except: v4(privateRanges)}},
 				{IPBlock: &networkingv1.IPBlock{CIDR: "::/0", Except: v6(privateRanges)}},
 			},
-			Ports: []networkingv1.NetworkPolicyPort{port(tcp, 443)},
+			Ports: []networkingv1.NetworkPolicyPort{npPort(corev1.ProtocolTCP, 443)},
 		})
 	}
+	sel := instanceSelector(in)
+	sel["app.kubernetes.io/component"] = "gateway"
+	return policy(in, in.Name+"-gateway", metav1.LabelSelector{MatchLabels: sel}, ingress, egress)
+}
 
-	return &networkingv1.NetworkPolicy{
-		TypeMeta:   typeMeta("NetworkPolicy", "networking.k8s.io/v1"),
-		ObjectMeta: objectMeta(in, in.Name+"-default-deny", ""),
-		Spec: networkingv1.NetworkPolicySpec{
-			PodSelector: metav1.LabelSelector{MatchLabels: instanceSelector(in)},
-			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress},
-			Ingress:     ingress,
-			Egress:      egress,
-		},
+// DatabaseClientsPolicy covers the migration Job and the backup CronJob: they hold the database URL, so they reach DNS
+// and the database and nothing else, and accept no ingress.
+func DatabaseClientsPolicy(in *v1alpha1.RegulaitInstallation) *networkingv1.NetworkPolicy {
+	sel := metav1.LabelSelector{
+		MatchLabels: instanceSelector(in),
+		MatchExpressions: []metav1.LabelSelectorRequirement{{
+			Key: "app.kubernetes.io/component", Operator: metav1.LabelSelectorOpIn, Values: []string{"migrate", "backup"},
+		}},
 	}
+	egress := append([]networkingv1.NetworkPolicyEgressRule{dnsRule(in)}, databaseRules(in)...)
+	return policy(in, in.Name+"-database-clients", sel, nil, egress)
 }
 
 func ipBlocks(cidrs []string) []networkingv1.NetworkPolicyPeer {
@@ -230,10 +280,18 @@ func InstallSecretsClaim(in *v1alpha1.RegulaitInstallation) *corev1.PersistentVo
 		TypeMeta:   typeMeta("PersistentVolumeClaim", "v1"),
 		ObjectMeta: objectMeta(in, installSecretsClaim(in), "gateway"),
 		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-			Resources:   corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")}},
+			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			StorageClassName: storageClass(in.Spec.InstallSecretsStorageClassName),
+			Resources:        corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")}},
 		},
 	}
+}
+
+func storageClass(name string) *string {
+	if name == "" {
+		return nil
+	}
+	return &name
 }
 
 func gatewayEnv(in *v1alpha1.RegulaitInstallation) []corev1.EnvVar {

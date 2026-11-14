@@ -137,7 +137,11 @@ func (r *Reconciler) reconcile(ctx context.Context, in *v1alpha1.RegulaitInstall
 	in.Status.VerifiedManifestSHA256 = res.SHA256
 
 	// 3. Owned objects, with drift counted.
-	for _, obj := range []client.Object{ServiceAccount(in), Service(in), NetworkPolicy(in)} {
+	owned := []client.Object{ServiceAccount(in), Service(in)}
+	for _, np := range NetworkPolicies(in) {
+		owned = append(owned, np)
+	}
+	for _, obj := range owned {
 		if err := r.apply(ctx, in, obj, specChanged); err != nil {
 			return ctrl.Result{}, err
 		}

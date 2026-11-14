@@ -45,7 +45,11 @@ func Validate(in *v1alpha1.RegulaitInstallation) (reason, msg string, ok bool) {
 		return "PublicEgressRefused", "air_gapped refuses egress.allowPublicEgress", false
 	}
 
-	for field, list := range map[string][]string{"egress.allowedCIDRs": s.Egress.AllowedCIDRs, "egress.databaseCIDRs": s.Egress.DatabaseCIDRs} {
+	var dnsCIDRs []string
+	if s.Egress.DNS != nil {
+		dnsCIDRs = s.Egress.DNS.CIDRs
+	}
+	for field, list := range map[string][]string{"egress.allowedCIDRs": s.Egress.AllowedCIDRs, "egress.databaseCIDRs": s.Egress.DatabaseCIDRs, "egress.dns.cidrs": dnsCIDRs} {
 		for _, c := range list {
 			p, err := netip.ParsePrefix(c)
 			if err != nil || p != p.Masked() {

@@ -28,6 +28,10 @@ import (
 // +kubebuilder:rbac:groups=coordination.k8s.io,namespace=regulait-system,resources=leases,verbs=get;list;watch;create;update;patch;delete
 
 func main() {
+	// `manager verify-bundle ...` is the Helm migration hook's pre-check (ADR-0304 §5): same binary, same keyring.
+	if len(os.Args) > 1 && os.Args[1] == "verify-bundle" {
+		os.Exit(bundle.RunVerifyCommand(os.Args[2:], bundle.EmbeddedKeyring(), os.Stdout, os.Stderr))
+	}
 	var metricsAddr, probeAddr string
 	var leaderElect bool
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", `Metrics address, for example ":8443"; "0" turns metrics off.`)

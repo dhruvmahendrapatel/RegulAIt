@@ -94,10 +94,26 @@ type EgressSpec struct {
 	// +kubebuilder:validation:MaxItems=16
 	// +listType=set
 	DatabaseCIDRs []string `json:"databaseCIDRs,omitempty"`
+	// Where DNS is reached. Defaults to the k8s-app=kube-dns pods in kube-system; a cluster using NodeLocal DNSCache
+	// (a link-local address) or a renamed CoreDNS names its own selector or CIDRs here.
+	// +optional
+	DNS *DNSEgress `json:"dns,omitempty"`
 	// Opens egress to every public address on 443 (not private ranges). What a byoc install sets to reach model
 	// vendors. Refused in air_gapped mode.
 	// +optional
 	AllowPublicEgress bool `json:"allowPublicEgress,omitempty"`
+}
+
+// DNSEgress overrides the DNS destination. Only 53/UDP and 53/TCP are ever opened.
+type DNSEgress struct {
+	// +optional
+	NamespaceSelector *metav1.LabelSelector `json:"namespaceSelector,omitempty"`
+	// +optional
+	PodSelector *metav1.LabelSelector `json:"podSelector,omitempty"`
+	// +optional
+	// +kubebuilder:validation:MaxItems=8
+	// +listType=set
+	CIDRs []string `json:"cidrs,omitempty"`
 }
 
 // IngressPeer is one source allowed to reach the gateway's port.
@@ -127,6 +143,11 @@ type RegulaitInstallationSpec struct {
 	// deleting the installation never deletes the keys.
 	// +optional
 	InstallSecretsClaimName string `json:"installSecretsClaimName,omitempty"`
+	// StorageClass for the claim the operator creates. The claim holds signing keys unencrypted, so name an encrypted
+	// class. Empty uses the cluster default.
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	InstallSecretsStorageClassName string `json:"installSecretsStorageClassName,omitempty"`
 
 	// +optional
 	Backup BackupSpec `json:"backup,omitempty"`
