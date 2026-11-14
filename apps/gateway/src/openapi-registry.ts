@@ -188,6 +188,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/billing/statements/:id/issue": "internal",
   "POST /v1/billing/statements/:id/reconcile": "internal",
   "POST /v1/chat/completions": "public-beta",
+  "POST /v1/responses": "public-beta",
   "GET /v1/compliance/profiles": "internal",
   "POST /v1/compliance/profiles": "internal",
   "POST /v1/compliance/profiles/:id/versions": "internal",
@@ -1411,6 +1412,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
 export const COMPAT_SURFACES: Readonly<Record<string, string>> = {
   "POST /v1/messages": "https://docs.anthropic.com/en/api/messages",
   "POST /v1/chat/completions": "https://platform.openai.com/docs/api-reference/chat",
+  "POST /v1/responses": "https://platform.openai.com/docs/api-reference/responses",
   "POST /mcp/:serverId": "https://modelcontextprotocol.io/specification",
 };
 
@@ -1554,6 +1556,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/billing/statements/:id/issue": "billing",
   "POST /v1/billing/statements/:id/reconcile": "billing",
   "POST /v1/chat/completions": "chat",
+  "POST /v1/responses": "chat",
   "GET /v1/compliance/profiles": "compliance",
   "POST /v1/compliance/profiles": "compliance",
   "POST /v1/compliance/profiles/:id/versions": "compliance",
