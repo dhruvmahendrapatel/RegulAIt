@@ -18,7 +18,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, InfoButton, Input, Modal, Select, SkeletonBlock, Table, Tabs, Textarea, tabIds } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, InfoButton, Input, Modal, Select, SkeletonBlock, Table, TabPanel, Tabs, Textarea } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
 import { useAgents, useConnectors, useRoles, useServers, useServerTools, useUserPicker } from "../adminKit";
 import {
@@ -338,21 +338,21 @@ export default function WorkloadIdentitiesPage() {
           label="Identity settings"
         />
         {/* I-2: every panel stays mounted (hidden when not selected), so a picked run, an unsaved setting or a half-added bundle survives a tab switch */}
-        <IdentityPanel id="delegation" tab={tab}>
+        <TabPanel idPrefix="identity-settings" id="delegation" active={tab}><div className={s.stack}>
         <RunDelegationTree busy={write.busy} personLabel={personLabel} identities={seen} ask={ask} />
-        </IdentityPanel>
-        <IdentityPanel id="settings" tab={tab}>
+        </div></TabPanel>
+        <TabPanel idPrefix="identity-settings" id="settings" active={tab}><div className={s.stack}>
           {/* ADR-0188 decision 10: least privilege, token lifetime, chain depth, workload sign-in and the root-grant limits */}
           <OrgSettingsCard title="Agent identity and delegation settings" keys={IDENTITY_SETTING_KEYS} testId="identity-delegation-settings" helpInInfo />
-        </IdentityPanel>
-        <IdentityPanel id="trust" tab={tab}>
+        </div></TabPanel>
+        <TabPanel idPrefix="identity-settings" id="trust" active={tab}><div className={s.stack}>
         <IssuerSigningKeysCard busy={write.busy} ask={ask} />
 
         {/* ADR-0188 S9: the SPIFFE trust bundles, in audited storage */}
         <SpiffeTrustBundlesCard busy={write.busy} ask={ask} />
         {/* ADR-0188 S9 follow-up: where a domain's bundle is fetched from (off until set) */}
         <SpiffeBundleEndpointsCard busy={write.busy} ask={ask} />
-        </IdentityPanel>
+        </div></TabPanel>
       </div>
 
       {editing && (
@@ -448,16 +448,6 @@ export default function WorkloadIdentitiesPage() {
       )}
       <IdentityConfirm confirmation={confirmation} onClose={() => setConfirmation(null)} write={write} />
     </>
-  );
-}
-
-/** I-2: one settings tab's panel, named by its tab and kept mounted (`hidden`) while another tab is open */
-function IdentityPanel(props: { id: string; tab: string; children: ReactNode }) {
-  const ids = tabIds("identity-settings", props.id);
-  return (
-    <div role="tabpanel" id={ids.panel} aria-labelledby={ids.tab} hidden={props.tab !== props.id}>
-      <div className={s.stack}>{props.children}</div>
-    </div>
   );
 }
 

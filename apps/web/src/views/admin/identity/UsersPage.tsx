@@ -6,7 +6,7 @@
  * reveal, revoke), and the per-user overrides (MCP / agent / connector
  * revocations) that beat every grant.
  */
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
@@ -37,8 +37,8 @@ import {
   Input,
   IdChip,
   Select,
+  TabPanel,
   Tabs,
-  tabIds,
 } from "../../../ui/kit";
 import { DataList, type DataColumn } from "../../../ui/DataList";
 import { normalisePage } from "../../../ui/listState";
@@ -383,12 +383,6 @@ function UserDetail(props: {
   const { user } = props;
   const lastAdmin = user.isAdmin && !user.disabledAt && props.activeAdmins <= 1;
   const [tab, setTab] = useState("lifecycle");
-  // I-2: a panel mounts the first time its tab opens and then stays mounted, so a draft in it survives a tab switch
-  const [opened, setOpened] = useState<ReadonlySet<string>>(() => new Set(["lifecycle"]));
-  const open = (id: string) => {
-    setTab(id);
-    setOpened((cur) => (cur.has(id) ? cur : new Set([...cur, id])));
-  };
   const qc = useQueryClient();
   const invalidate = () => qc.invalidateQueries({ queryKey: ["admin"] });
   return (
@@ -416,13 +410,13 @@ function UserDetail(props: {
           { id: "overrides", label: "Overrides" },
         ]}
         active={tab}
-        onChange={open}
+        onChange={setTab}
         idPrefix="user-detail"
         label={`${user.displayName || user.email}: details`}
       />
       {/* I-2: each tab names its panel; an opened panel stays mounted, so a half-typed name, username or revocation reason survives a switch */}
       <div style={{ marginTop: "var(--s2)" }}>
-        <UserPanel id="lifecycle" tab={tab} opened={opened}>
+        <TabPanel idPrefix="user-detail" id="lifecycle" active={tab} lazy>
           <div className={v.stack}>
             <RefusalNotice guidance={props.refusal} />
             <div className={v.row}>
@@ -490,34 +484,21 @@ function UserDetail(props: {
               }}
             />
           </div>
-        </UserPanel>
-        <UserPanel id="sessions" tab={tab} opened={opened}>
+        </TabPanel>
+        <TabPanel idPrefix="user-detail" id="sessions" active={tab} lazy>
           <SessionsPanel userId={user.id} />
-        </UserPanel>
-        <UserPanel id="passkeys" tab={tab} opened={opened}>
+        </TabPanel>
+        <TabPanel idPrefix="user-detail" id="passkeys" active={tab} lazy>
           <UserPasskeysPanel userId={user.id} userName={user.displayName || user.email} />
-        </UserPanel>
-        <UserPanel id="roles" tab={tab} opened={opened}>
+        </TabPanel>
+        <TabPanel idPrefix="user-detail" id="roles" active={tab} lazy>
           <UserRoleProvenancePanel userId={user.id} />
-        </UserPanel>
-        <UserPanel id="overrides" tab={tab} opened={opened}>
+        </TabPanel>
+        <TabPanel idPrefix="user-detail" id="overrides" active={tab} lazy>
           <OverridesPanel userId={user.id} />
-        </UserPanel>
+        </TabPanel>
       </div>
     </Card>
-  );
-}
-
-/**
- * I-2: one detail tab's panel, named by its tab. Its content mounts the first time the tab opens (so selecting a person
- * reads only Lifecycle) and then stays mounted, `hidden`, while another tab is open
- */
-function UserPanel(props: { id: string; tab: string; opened: ReadonlySet<string>; children: ReactNode }) {
-  const ids = tabIds("user-detail", props.id);
-  return (
-    <div role="tabpanel" id={ids.panel} aria-labelledby={ids.tab} hidden={props.tab !== props.id}>
-      {props.opened.has(props.id) && props.children}
-    </div>
   );
 }
 

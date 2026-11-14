@@ -16,7 +16,7 @@
  *  - **Chat is not a re-authenticated session.** `allowFencedDecide` is shown
  *    per workspace with its consequence spelled out, defaulting off.
  */
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
@@ -24,7 +24,7 @@ import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { ListPreview } from "../../../ui/ListPreview";
 import type { IdentityLink } from "./ChatIdentityLinksPage";
-import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, Input, Select, Table, Tabs, Textarea, tabIds } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, Input, Select, Table, TabPanel, Tabs, Textarea } from "../../../ui/kit";
 import { QueryGate, reconfirmNeeded, StaleAfterWrite, useAction, useConnectors, useSettleAfterWrite, useSingleFlight } from "../adminKit";
 import v from "../../views.module.css";
 import { BuilderRoutesCard, PostApprovalCard } from "./ChatOpsPostAndRoutes";
@@ -279,7 +279,7 @@ export default function ChatOpsPage() {
         label="ChatOps settings"
       />
       {/* I-2: both panels stay mounted (hidden when not selected), so a half-typed workspace, recipient list or route survives a tab switch */}
-      <ChatOpsPanel id="workspaces" tab={tab}>
+      <TabPanel idPrefix="chatops" id="workspaces" active={tab}><div className={v.stack}>
       <Card title="Workspaces">
         <QueryGate loading={connections.isLoading} error={connections.error} onRetry={refresh}>
           {(connections.data?.connections.length ?? 0) === 0 ? (
@@ -541,24 +541,14 @@ export default function ChatOpsPage() {
           </Button>
         </div>
       </Card>
-      </ChatOpsPanel>
-      <ChatOpsPanel id="routes" tab={tab}>
+      </div></TabPanel>
+      <TabPanel idPrefix="chatops" id="routes" active={tab}><div className={v.stack}>
       {/* mirror one approval into a channel; which channel each builder agent answers on */}
       <PostApprovalCard connections={connections.data?.connections ?? []} />
       <BuilderRoutesCard />
-      </ChatOpsPanel>
+      </div></TabPanel>
 
     </>
-  );
-}
-
-/** I-2: one tab's panel, named by its tab and kept mounted (`hidden`) while the other tab is open */
-function ChatOpsPanel(props: { id: string; tab: string; children: ReactNode }) {
-  const ids = tabIds("chatops", props.id);
-  return (
-    <div role="tabpanel" id={ids.panel} aria-labelledby={ids.tab} hidden={props.tab !== props.id}>
-      <div className={v.stack}>{props.children}</div>
-    </div>
   );
 }
 

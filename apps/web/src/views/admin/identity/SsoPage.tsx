@@ -7,7 +7,7 @@
  * sso_only switch below counts them together, so an admin who could only see
  * one of them would be reasoning about the lockout guard with half the facts.
  */
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { LinkRequest, OidcProvider, OrgSettingsResponse, SamlProvider } from "../../../api/adminTypes";
@@ -25,9 +25,9 @@ import {
   Modal,
   Select,
   Table,
+  TabPanel,
   Tabs,
   Textarea,
-  tabIds,
 } from "../../../ui/kit";
 import { QueryGate, optionEls, roleOpts, useAction, useRoles, useUsers } from "../adminKit";
 import a from "../admin.module.css";
@@ -101,29 +101,19 @@ export default function SsoPage() {
           label="SSO settings"
         />
         {/* I-2: every panel stays mounted (hidden when not selected), so a half-typed provider or policy survives a tab switch */}
-        <SsoPanel id="oidc" tab={tab}>
+        <TabPanel idPrefix="sso" id="oidc" active={tab}><div className={v.stack}>
           <OidcCard />
-        </SsoPanel>
-        <SsoPanel id="saml" tab={tab}>
+        </div></TabPanel>
+        <TabPanel idPrefix="sso" id="saml" active={tab}><div className={v.stack}>
           <SamlCard />
-        </SsoPanel>
-        <SsoPanel id="sessions" tab={tab}>
+        </div></TabPanel>
+        <TabPanel idPrefix="sso" id="sessions" active={tab}><div className={v.stack}>
           <SessionsPolicyCard />
           {/* ADR-0186 A: which actions need a fresh second proof, and how long one lasts */}
           <OrgSettingsCard title="Step-up for sensitive actions" keys={STEP_UP_KEYS} testId="sso-step-up-settings" helpInInfo />
-        </SsoPanel>
+        </div></TabPanel>
       </div>
     </>
-  );
-}
-
-/** I-2: one tab's panel, named by its tab and kept mounted (`hidden`) while another tab is open */
-function SsoPanel(props: { id: string; tab: string; children: ReactNode }) {
-  const ids = tabIds("sso", props.id);
-  return (
-    <div role="tabpanel" id={ids.panel} aria-labelledby={ids.tab} hidden={props.tab !== props.id}>
-      <div className={v.stack}>{props.children}</div>
-    </div>
   );
 }
 
@@ -162,8 +152,9 @@ function SignInStatus(props: {
     <div className={v.row} role="group" aria-label="Sign-in status">
       <Badge tone="neutral">{`OIDC: ${oidcOn.toLocaleString()} enabled`}</Badge>
       <Badge tone="neutral">{`SAML: ${samlOn.toLocaleString()} enabled`}</Badge>
-      <Badge tone="neutral">{ssoOnly ? "SSO only: on, password sign-in refused" : "SSO only: off"}</Badge>
-      <Badge tone="neutral">
+      {/* the restrictive states carry a warn tone, as the ChatOps and Users status rows do for theirs (review of #691) */}
+      <Badge tone={ssoOnly ? "warn" : "neutral"}>{ssoOnly ? "SSO only: on, password sign-in refused" : "SSO only: off"}</Badge>
+      <Badge tone={breakGlassOnly ? "warn" : "neutral"}>
         {breakGlassOnly ? "Email sign-in: break-glass admins only" : "Email sign-in: everyone with a password"}
       </Badge>
     </div>

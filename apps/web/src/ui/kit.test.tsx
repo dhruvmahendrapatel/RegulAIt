@@ -5,7 +5,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../api/client";
-import { Badge, Card, EmptyState, Field, Fieldset, InfoButton, Input, LIST_CONTROL_ATTR, RecordError, RowActions, Table, Tabs, foldPattern, holdsKeepVisible, tabIds } from "./kit";
+import { Badge, Card, EmptyState, Field, Fieldset, InfoButton, Input, LIST_CONTROL_ATTR, RecordError, RowActions, Table, TabPanel, Tabs, foldPattern, holdsKeepVisible, tabIds } from "./kit";
 import { FoldTable, foldHosts } from "./fold";
 // Digest lives with the BOM evidence panel; it is tested here with the other shared primitives
 import { Digest } from "../views/admin/governance/BomEvidencePanel";
@@ -424,6 +424,23 @@ describe("contained Card — a DataList's own view controls may fold, every othe
     expect(open).toContain('aria-expanded="true"');
     expect(open).toContain("BODY");
     expect(open).toContain(">7 decisions<");
+  });
+});
+
+describe("TabPanel — one kit panel for every tabbed page (review of #691)", () => {
+  it("names its tab, stays mounted while hidden, and with `lazy` mounts nothing until its tab first opens", () => {
+    const kept = renderToStaticMarkup(<TabPanel idPrefix="sso" id="saml" active="oidc">BODY</TabPanel>);
+    expect(kept).toContain('role="tabpanel"');
+    expect(kept).toContain(`id="${tabIds("sso", "saml").panel}"`);
+    expect(kept).toContain(`aria-labelledby="${tabIds("sso", "saml").tab}"`);
+    expect(kept).toContain("hidden");
+    expect(kept).toContain("BODY");
+    const lazyClosed = renderToStaticMarkup(<TabPanel idPrefix="user-detail" id="roles" active="lifecycle" lazy>BODY</TabPanel>);
+    expect(lazyClosed).toContain('role="tabpanel"');
+    expect(lazyClosed).not.toContain("BODY");
+    const lazyOpen = renderToStaticMarkup(<TabPanel idPrefix="user-detail" id="roles" active="roles" lazy>BODY</TabPanel>);
+    expect(lazyOpen).toContain("BODY");
+    expect(lazyOpen).not.toContain("hidden");
   });
 });
 
