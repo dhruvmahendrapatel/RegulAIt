@@ -3993,6 +3993,11 @@ export const complianceProfiles = pgTable("compliance_profiles", {
    * isolable call of a project carrying its tag. Composed MAX across a project's profiles (like
    * `guardrailModes`), so a tag can only raise the requirement. NULL = no isolation opinion. */
   minIsolationClass: text("min_isolation_class", { enum: ["hardened_container", "user_space_kernel", "microvm"] }),
+  /** ADR-0290 (migration compliance_profile_mrm_required): this framework REQUIRES model risk management (ADR-0045).
+   * Composed OR across a project's profiles: one true makes the ADR-0045 dispatch gate enforce on that project's
+   * dispatches even where an admin relaxed the org-wide `mrmEnforced` (the ADR-0021 ceiling). false and NULL are
+   * both "no requirement" and can never relax the org setting. */
+  mrmRequired: boolean("mrm_required"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   /** ADR-0208 (migration 0223): a retired profile is read-only — no new version, no new carrier. Retire is refused
    * while any project, pending project, team or infra resource carries the tag. DB CHECK ties retired_* to status. */

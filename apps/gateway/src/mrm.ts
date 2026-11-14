@@ -104,6 +104,7 @@ import {
 } from "@regulait/shared";
 import { MRM_AUTO_RETEST_NOTE, attachRetestsToRequest, retestsForCard } from "./mrm-retest-store.js";
 import { loadOrgSettings } from "./org-settings.js";
+import { projectMrmRequiredBy } from "./projects.js";
 import { FAIRNESS_RULE_IDS, fairnessHold } from "./fairness.js";
 import { modelCardSignoffSubjects, prepareAiBomSignoff, runAiBomSignoffs, type AiBomSignoff } from "./ai-bom-signoff.js";
 import { settingTransitions } from "./setting-transitions.js";
@@ -227,7 +228,14 @@ export async function mrmDispatchGate(
   const supplyChain = await supplyChainDispatchGate(db, ctx, now);
   if (supplyChain) return supplyChain;
   const org = await loadOrgSettings(db);
-  if (!org.mrmEnforced) return null;
+  // ADR-0290 (ADR-0045 §4, last sentence): where the project's compliance classification requires model risk
+  // management, the cascade enforces this gate for that project's dispatches even though an admin relaxed the
+  // org-wide toggle. The org setting can only widen enforcement, never relax it below what a classification demands
+  // (the ADR-0021 ceiling). With the org toggle on, the cascade adds nothing and is not read.
+  const cascadeTags = org.mrmEnforced ? [] : await projectMrmRequiredBy(db, ctx.projectId);
+  if (!org.mrmEnforced && cascadeTags.length === 0) return null;
+  /** audit detail naming why a relaxed org still enforced (absent when the org toggle did it) */
+  const enforcedBy = cascadeTags.length > 0 ? { enforcedBy: "compliance_cascade", mrmRequiredBy: cascadeTags } : {};
 
   const cards = await loadCardsForSubject(db, {
     agentId: ctx.agentId,
@@ -267,6 +275,7 @@ export async function mrmDispatchGate(
             fairnessOutcome: hold.outcome,
             fairnessStale: hold.stale,
             ...(ctx.projectId ? { projectId: ctx.projectId } : {}),
+          ...enforcedBy,
           },
           effect: "deny",
           ruleId: FAIRNESS_RULE_IDS.dispatchHeld,
@@ -321,6 +330,7 @@ export async function mrmDispatchGate(
           stalenessThreshold: org.mrmStalenessRecertThreshold,
           staleness: { lastCertifiedAt: staleness.lastCertifiedAt, totalChanges, summary: staleness.summary },
           ...(ctx.projectId ? { projectId: ctx.projectId } : {}),
+          ...enforcedBy,
         },
         effect: "allow",
         ruleId: "mrm-staleness-evaluation-allowed",
@@ -360,6 +370,7 @@ export async function mrmDispatchGate(
           summary: staleness.summary,
         },
         ...(ctx.projectId ? { projectId: ctx.projectId } : {}),
+          ...enforcedBy,
       },
       effect: "deny",
       ruleId: "mrm-staleness-recert-required",
@@ -391,6 +402,7 @@ export async function mrmDispatchGate(
       modelCardApprovalId: decision.approvalId,
       validUntil: decision.validUntil,
       ...(ctx.projectId ? { projectId: ctx.projectId } : {}),
+          ...enforcedBy,
     },
     effect: "deny",
     ruleId: decision.ruleId,

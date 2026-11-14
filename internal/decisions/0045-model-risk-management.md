@@ -320,3 +320,38 @@ Three things about that are worth stating here rather than only in ADR-0064:
 3. **Timeliness is bounded by the box being up.** [ADR-0032](0032-scheduled-power-off-dev-infra.md)
    powers this deployment's infrastructure off nightly; a sweep due inside the off-window does not
    run, is not queued, and is picked up once — late — on the first tick after power-on.
+
+## Amendment (2026-11-14) — per-project enforcement through the §8.3 cascade (lane L7, closes deviation 6)
+
+§4's last sentence ("where a compliance classification requires MRM, the cascade sets this toggle and it cannot be
+relaxed below what the classification demands") did not ship; deviation 6 and the follow-up list said so. As built:
+
+- **Data.** `compliance_profiles.mrm_required` (boolean, nullable; migration `pending/compliance_profile_mrm_required.sql`,
+  numbered at merge). It is a versioned profile field (`VERSIONED_RULE_FIELDS.compliance_profile`), so it is
+  edited through the ADR-0073 choke point, resolved through the profile's active version, and can be seeded by a
+  compliance pack's `cascadePreset` (ADR-0058).
+- **Composition.** OR across a project's profiles (`effectiveCompliancePolicy(...).mrmRequiredBy`, the requiring
+  tags). `true` requires; `false` and NULL both mean "no requirement", and neither can relax the org setting.
+- **Enforcement.** `mrmDispatchGate` reads the org toggle first. With it on, nothing changes and the cascade is not
+  read. With it relaxed, a dispatch attributed to a project whose classification requires MRM goes through the
+  whole gate (base sign-off, fairness hold, staleness recertification) exactly as if the toggle were on. Every
+  refusal's audit detail carries `enforcedBy: "compliance_cascade"` and `mrmRequiredBy: [tags]`; the caller-facing
+  code stays `409 mrm_approval_required`. This is the ADR-0021 ceiling: the org relaxation cannot reach below a
+  classification's demand.
+- **Loosening.** Moving a profile's `mrmRequired` from true to false or null is a loosening (`rule-loosening.ts`),
+  so it needs the `settings_relax` step-up like any other floor lowered.
+- **Not changed.** A dispatch with no project attribution is governed by the org toggle alone; the
+  attribution mandate (ADR-0181) is what makes attribution required.
+- **Owner question open:** whether a compliance profile should require MRM by default. Built as NULL (no opinion),
+  the same as every other cascade column, because the org toggle is already strict by default (ADR-0181) and a
+  default-true column would silently enforce on every classified project of an org that relaxed MRM.
+- **Red-team preset hook (ADR-0058 / ADR-0068 §5).** A pack's `cascadePreset` is validated by the versioned
+  compliance-profile body schema; its red-team fields now take the closed attack-class vocabulary and the same
+  bounds as the profile route (an unknown class used to be stored and then ignored). `resolveRedTeamPreset` now
+  reads profiles through the one cascade funnel (`complianceProfilesForTags`), so a versioned profile's ACTIVE
+  version governs red-team runs, as it already did PII, MCP and guardrail floors. The launch packs' presets (Lane L8
+  content) are unchanged; they can now carry `mrmRequired` and red-team presets.
+- **Tests.** `apps/gateway/src/zz-adr0290-mrm-cascade.test.ts` (negative control with no requiring profile; the
+  same dispatch refused on a requiring project, audited; an unclassified project and a `false` profile still
+  dispatch; loosening; a pack preset driving both the dispatch gate and the red-team preset; an unknown class
+  refused). Two of its cases fail against the gate as it was on `main`.

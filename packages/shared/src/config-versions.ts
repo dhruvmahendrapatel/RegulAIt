@@ -29,6 +29,7 @@
  *   sha256 and silently re-buckets every in-flight canary.
  */
 import { z } from "zod";
+import { RED_TEAM_ATTACK_CLASSES } from "./redteam.js";
 
 // ---------------------------------------------------------------------------
 // Vocabularies
@@ -426,6 +427,8 @@ export const VERSIONED_RULE_FIELDS: Partial<Record<ConfigArtifactType, readonly 
     "redteamFailOnSeverity",
     // ADR-0190 decision 7 item 3
     "minIsolationClass",
+    // ADR-0290
+    "mrmRequired",
   ],
 };
 
@@ -503,10 +506,13 @@ const RULE_BODY_SCHEMAS: Partial<Record<ConfigArtifactType, z.ZodTypeAny>> = {
     maxProjectBudgetUsd: z.number().nonnegative().nullish(),
     budgetEnforcement: z.enum(["block", "warn_only"]).nullish(),
     guardrailModes: z.record(z.string(), z.string()).nullish(),
-    redteamGatingClasses: z.array(z.string()).nullish(),
-    redteamMinTrials: z.number().int().positive().nullish(),
+    // ADR-0290 (the compliance-pack red-team preset hook): the closed attack-class vocabulary and the same bounds the
+    // profile route enforces, so a pack's `cascadePreset` (validated here) can only seed a preset a run can apply
+    redteamGatingClasses: z.array(z.enum(RED_TEAM_ATTACK_CLASSES)).max(16).nullish(),
+    redteamMinTrials: z.number().int().min(1).max(25).nullish(),
     redteamFailOnSeverity: z.enum(["low", "medium", "high", "critical"]).nullish(),
     minIsolationClass: z.enum(["hardened_container", "user_space_kernel", "microvm"]).nullish(),
+    mrmRequired: z.boolean().nullish(),
   }),
 };
 
