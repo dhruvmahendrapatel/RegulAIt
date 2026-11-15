@@ -1999,6 +1999,10 @@ export const auditLog = pgTable(
         "trust_publication",
         "trust_center",
         "auditor_grant",
+        // ADR-0333 (E15): a detection incident (objectId = the incident) and a detection rule pack change (objectId
+        // null). Plain text column — no DDL.
+        "detection_incident",
+        "detection_rule_pack",
       ],
     })
       .notNull()
@@ -16583,3 +16587,128 @@ export const resourceRateReservations = pgTable(
     ),
   ],
 );
+
+// ===== ADR-0333 (lane E15): rule-based detection of risky agent behaviour =========================================
+export const DETECTION_SEVERITIES = ["low", "medium", "high", "critical"] as const;
+export const DETECTION_INCIDENT_STATUSES = ["open", "acknowledged", "closed"] as const;
+export const DETECTION_RESPONSES = ["alert", "suspend_grant", "revoke_credential", "require_approval"] as const;
+export const DETECTION_RESPONSE_STATES = ["none", "done", "failed"] as const;
+
+/**
+ * An admin-edited detection rule pack, one row per version (the active one is the highest version). The built-in
+ * default pack ships in code and has no row. `pack` is a schema-validated configuration document
+ * (`regulait.detection-pack.v1`, ADR-0200 exception: validated config), signed with the installation's receipt key
+ * over its canonical JSON. The engine verifies the signature on every sweep and falls back to the built-in pack when
+ * it does not verify.
+ */
+export const detectionRulePacks = pgTable(
+  "detection_rule_packs",
+  {
+    version: integer("version").primaryKey(),
+    pack: jsonb("pack").notNull(),
+    packDigest: text("pack_digest").notNull(),
+    /** Ed25519 over the canonical pack JSON, base64url */
+    signature: text("signature").notNull(),
+    keyId: text("key_id")
+      .notNull()
+      .references(() => receiptSigningKeys.keyId),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("detection_rule_packs_version_check", sql`${t.version} >= 1`),
+    check("detection_rule_packs_digest_check", sql`${t.packDigest} ~ '^[0-9a-f]{64}$'`),
+    check("detection_rule_packs_signature_check", sql`${t.signature} ~ '^[A-Za-z0-9_-]{86}$'`),
+  ],
+);
+export type DetectionRulePackRow = typeof detectionRulePacks.$inferSelect;
+
+/** The engine's single cursor over `audit_log.seq`, leased per sweep so two replicas never evaluate the same rows. */
+export const detectionEngineState = pgTable(
+  "detection_engine_state",
+  {
+    id: smallint("id").primaryKey().default(1),
+    cursorSeq: bigint("cursor_seq", { mode: "number" }).notNull(),
+    leaseUntil: timestamp("lease_until", { withTimezone: true }),
+    leaseToken: uuid("lease_token"),
+    lastSweepAt: timestamp("last_sweep_at", { withTimezone: true }),
+    /** the stored pack version last reported as unverified, so the audit row is written once per version */
+    unverifiedPackVersion: integer("unverified_pack_version"),
+  },
+  (t) => [check("detection_engine_state_singleton_check", sql`${t.id} = 1`)],
+);
+
+/**
+ * One detection: a rule matched in one group (`grant:<root grant>`, `user:<user>` or `endpoint:<device>`). One row
+ * per (rule, trigger audit row), so a replayed batch cannot raise it twice. `pack_version` NULL means the built-in
+ * default pack.
+ */
+export const detectionIncidents = pgTable(
+  "detection_incidents",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ruleId: text("rule_id").notNull(),
+    packVersion: integer("pack_version").references(() => detectionRulePacks.version, { onDelete: "restrict" }),
+    severity: text("severity", { enum: DETECTION_SEVERITIES }).notNull(),
+    groupKey: text("group_key").notNull(),
+    // Evidence pointer, deliberately FK-free like `decision_receipts.audit_id`: the audit trail is FK-free and its
+    // retention prune must not be blocked or cascade into incident history.
+    triggerAuditId: uuid("trigger_audit_id").notNull(),
+    triggerAuditSeq: bigint("trigger_audit_seq", { mode: "number" }).notNull(),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
+    delegationGrantId: uuid("delegation_grant_id").references(() => delegationGrants.id, { onDelete: "set null" }),
+    actorIdentityId: uuid("actor_identity_id").references(() => workloadIdentities.id, { onDelete: "set null" }),
+    // ADR-0200 exception (evidence snapshot): the trigger row's `actor_chain` as it was when the incident was raised.
+    actorChain: jsonb("actor_chain").$type<string[]>(),
+    status: text("status", { enum: DETECTION_INCIDENT_STATUSES }).notNull().default("open"),
+    statusChangedBy: uuid("status_changed_by").references(() => users.id, { onDelete: "set null" }),
+    statusChangedAt: timestamp("status_changed_at", { withTimezone: true }),
+    response: text("response", { enum: DETECTION_RESPONSES }).notNull().default("alert"),
+    responseState: text("response_state", { enum: DETECTION_RESPONSE_STATES }).notNull().default("none"),
+    responseErrorCode: text("response_error_code"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("detection_incidents_rule_trigger_uq").on(t.ruleId, t.triggerAuditId),
+    index("detection_incidents_status_created_idx").on(t.status, t.createdAt),
+    index("detection_incidents_group_idx").on(t.groupKey, t.createdAt),
+    check("detection_incidents_rule_id_check", sql`${t.ruleId} ~ '^[a-z0-9][a-z0-9-]{0,63}$'`),
+    check(
+      "detection_incidents_group_key_check",
+      sql`${t.groupKey} ~ '^(grant|user|endpoint):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'`,
+    ),
+    check(
+      "detection_incidents_actor_chain_check",
+      sql`${t.actorChain} IS NULL OR (jsonb_typeof(${t.actorChain}) = 'array' AND jsonb_array_length(${t.actorChain}) BETWEEN 1 AND 9)`,
+    ),
+    check("detection_incidents_response_error_check", sql`${t.responseErrorCode} IS NULL OR ${t.responseErrorCode} ~ '^[a-z_]{1,48}$'`),
+    check("detection_incidents_severity_check", sql`${t.severity} IN ('low', 'medium', 'high', 'critical')`),
+    check("detection_incidents_status_check", sql`${t.status} IN ('open', 'acknowledged', 'closed')`),
+    check(
+      "detection_incidents_response_check",
+      sql`${t.response} IN ('alert', 'suspend_grant', 'revoke_credential', 'require_approval')`,
+    ),
+    check("detection_incidents_response_state_check", sql`${t.responseState} IN ('none', 'done', 'failed')`),
+  ],
+);
+export type DetectionIncidentRow = typeof detectionIncidents.$inferSelect;
+
+/** The evidence chain of an incident: the audit rows that matched, in step order (a join table, ADR-0200). */
+export const detectionIncidentEvidence = pgTable(
+  "detection_incident_evidence",
+  {
+    incidentId: uuid("incident_id")
+      .notNull()
+      .references(() => detectionIncidents.id, { onDelete: "cascade" }),
+    // FK-free evidence pointer (see `detection_incidents.trigger_audit_id`); the receipt is joined through
+    // `decision_receipts.audit_id`, never copied.
+    auditId: uuid("audit_id").notNull(),
+    auditSeq: bigint("audit_seq", { mode: "number" }).notNull(),
+    stepIndex: smallint("step_index").notNull(),
+  },
+  (t) => [
+    primaryKey({ name: "detection_incident_evidence_pk", columns: [t.incidentId, t.auditSeq] }),
+    check("detection_incident_evidence_step_check", sql`${t.stepIndex} BETWEEN 0 AND 999`),
+  ],
+);
+// ===== end ADR-0333 =================================================================================================

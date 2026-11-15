@@ -812,6 +812,9 @@ describe("every sweep is registered", () => {
         // ADR-0303: audit-chain delivery to enabled SIEM destinations; driven end to end in
         // zz-adr0303-siem-delivery.test.ts (with no destination enabled it sends nothing)
         SCHEDULER_JOB_NAMES.siemDeliverySweep,
+        // ADR-0333 (E15): evaluates the detection rule pack over new audit-chain rows; driven end-to-end in
+        // zz-adr0333-detection.test.ts; this list pins its registration.
+        SCHEDULER_JOB_NAMES.agentDetectionSweep,
         // ADR-0302: third-party ingest evidence past the audit floor; driven end to end in
         // zz-adr0302-evidence-retention.test.ts (with no floor configured it deletes nothing)
         SCHEDULER_JOB_NAMES.thirdPartyEvidenceRetentionSweep,

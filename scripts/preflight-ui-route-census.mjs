@@ -417,6 +417,11 @@ export const KNOWN_UI_GAPS = new Map([
   ["PUT /v1/siem/destinations/:destinationId/enabled", { does: "turns a SIEM destination on (step-up, audited as a relaxation) or off (audited)", tracking: "#453" }],
   ["POST /v1/siem/destinations/:destinationId/rotate-secret", { does: "rotates a SIEM destination's signing secret, shown once (step-up, audited)", tracking: "#453" }],
   ["POST /v1/siem/destinations/:destinationId/recover", { does: "returns a dead-lettered or backing-off SIEM destination to delivery now (audited)", tracking: "#453" }],
+  ["GET /v1/detection/rule-pack", { does: "reads the active detection rule pack, its version, digest and verification state", tracking: "ADR-0333 (E15) #453" }],
+  ["PUT /v1/detection/rule-pack", { does: "stores a new signed detection rule pack version (audited; a relaxation needs a settings_relax step-up)", tracking: "ADR-0333 (E15) #453" }],
+  ["GET /v1/detection/incidents", { does: "pages detection incidents, newest first, filtered by status", tracking: "ADR-0333 (E15) #453" }],
+  ["GET /v1/detection/incidents/:incidentId", { does: "one detection incident with its evidence chain (audit rows, row hashes, receipts)", tracking: "ADR-0333 (E15) #453" }],
+  ["PUT /v1/detection/incidents/:incidentId/status", { does: "acknowledges or closes a detection incident (audited)", tracking: "ADR-0333 (E15) #453" }],
   // EXCEPTION (ADR-0255, P31, 2026-11-07): the P31 brief is "API and backend only; post the catalogue UI need on
   // #453 for the Governed Designer", so these two routes ship with their screen owned by that lane. These two
   // raise the cap by 2, visibly; the Designer's catalogue screen deletes both entries and lowers it by 2. Decided on #753
@@ -451,7 +456,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 54; // main's 48 (43 + ADR-0303 L11 5 SIEM routes) + ADR-0256 (P32) 4, master decision on #725 2026-11-14; + ADR-0056 §5 amendment (lane L7) 2 copilot red-team gate routes
+export const KNOWN_UI_GAPS_MAX = 59; // + ADR-0333 (E15) 5 detection routes; main's 48 (43 + ADR-0303 L11 5 SIEM routes) + ADR-0256 (P32) 4, master decision on #725 2026-11-14; + ADR-0056 §5 amendment (lane L7) 2 copilot red-team gate routes
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 
