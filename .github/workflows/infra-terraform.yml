@@ -52,7 +52,11 @@ jobs:
           set -euo pipefail
           for m in $MODULES; do
             echo "::group::module $m"
-            (cd "infra/modules/$m" && terraform init -backend=false -input=false && terraform validate && terraform test)
+            # `terraform test` validates the module as part of its plan. A bare
+            # `validate` is not used on modules: it fails on a module that
+            # declares configuration_aliases (github-oidc-role), which only a
+            # calling root can supply.
+            (cd "infra/modules/$m" && terraform init -backend=false -input=false && terraform test)
             echo "::endgroup::"
           done
           for e in $ENVIRONMENTS; do
