@@ -94,6 +94,7 @@ import {
   loadFactorView,
   resetFactor,
   startChallenge,
+  isChallengeHandle,
   verifyChallenge,
 } from "./external-mfa.js";
 import { loadOrgSettings } from "./org-settings.js";
@@ -1025,6 +1026,13 @@ export function registerTrustPagesRoutes(app: FastifyInstance, db: Db, opts: { d
         .set({ revokedAt: now })
         .where(and(eq(auditorSessions.grantId, grantId), isNull(auditorSessions.revokedAt)))
         .returning({ id: auditorSessions.id });
+      // #709 security review: fail closed. With the factor gone, the next link redeemed enrols whoever holds it, so
+      // every link issued before the reset is revoked here; only a link the admin issues after the reset can enrol.
+      const links = await tx
+        .update(auditorLinks)
+        .set({ revokedAt: now })
+        .where(and(eq(auditorLinks.grantId, grantId), isNull(auditorLinks.usedAt), isNull(auditorLinks.revokedAt)))
+        .returning({ id: auditorLinks.id });
       await audit(tx, {
         userId: req.authCtx.userId,
         objectType: "auditor_grant",
@@ -1032,10 +1040,17 @@ export function registerTrustPagesRoutes(app: FastifyInstance, db: Db, opts: { d
         ruleId: TRUST_RULE_IDS.mfaReset,
         reason:
           `second factor of auditor ${g.auditorName} reset by an admin (${gone ? (gone.lockedAt ? "it was locked" : "it was enrolled") : "none was enrolled"}; ` +
-          `${sessions.length} open session(s) ended); the next sign-in link enrols again: ${body.reason}`,
-        detail: { hadFactor: Boolean(gone), wasLocked: Boolean(gone?.lockedAt), sessionsEnded: sessions.length, reason: body.reason, stepUp: stepUp.method },
+          `${sessions.length} open session(s) ended, ${links.length} unused link(s) revoked); only a new sign-in link enrols again: ${body.reason}`,
+        detail: {
+          hadFactor: Boolean(gone),
+          wasLocked: Boolean(gone?.lockedAt),
+          sessionsEnded: sessions.length,
+          linksRevoked: links.length,
+          reason: body.reason,
+          stepUp: stepUp.method,
+        },
       });
-      return { hadFactor: Boolean(gone), sessionsEnded: sessions.length };
+      return { hadFactor: Boolean(gone), sessionsEnded: sessions.length, linksRevoked: links.length };
     });
     return { grantId, reset: true, ...out, notice: "Issue a new sign-in link: the auditor enrols a new authenticator with it." };
   });
@@ -1241,7 +1256,10 @@ export function registerTrustPagesRoutes(app: FastifyInstance, db: Db, opts: { d
     }
     const clear = challengeCookie("auditor", "", requestIsSecure(req), 0);
     const challengeToken = readCookie(req.headers.cookie, PORTAL_STEP_COOKIE);
-    if (!challengeToken || !opts.dataKey) return reply.status(401).header("set-cookie", clear).send(EXTERNAL_MFA_CHALLENGE_REFUSAL);
+    // #709 review: the handle's shape is checked before the per-challenge bucket, so a made-up cookie costs no bucket row
+    if (!challengeToken || !isChallengeHandle(challengeToken) || !opts.dataKey) {
+      return reply.status(401).header("set-cookie", clear).send(EXTERNAL_MFA_CHALLENGE_REFUSAL);
+    }
     if (await limitMfa(req, reply, challengeToken)) return reply;
     const parsed = externalMfaVerifySchema.safeParse(req.body);
     if (!parsed.success) return reply.status(401).send(EXTERNAL_MFA_CODE_REFUSAL);

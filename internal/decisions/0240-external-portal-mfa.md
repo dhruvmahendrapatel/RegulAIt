@@ -120,3 +120,57 @@ THIRD_PARTY.md is unchanged.
   challenge, lockout, admin reset, relaxation with step-up, a missing data key and the rate limit).
 - The ADR-0221 and ADR-0225 suites pin the link-to-session flow with the requirement relaxed in their own setup, and
   put it back to strict afterwards.
+
+## Addendum 2026-11-15: review fixes (#709)
+
+Both reviews of #709 (code and security, at 9588f996) asked for changes. Each item below is resolved in this PR.
+
+**Blocking**
+
+1. **Row-level security on both tables.** The pending migration `external_portal_mfa` now enables and forces RLS on
+   `external_mfa_factors` and `external_mfa_challenges`. The policy has the shape of `auth_mfa_pending` (0272): a row is
+   reachable by an admin principal (the grant view and the reset) or under the `authenticate` reason (and `migration`).
+   A portal request runs under `public_ingest`, which opens neither table. The two pre-session steps (`startChallenge`
+   and `verifyChallenge`) enter `authenticate` through `withinSystemReason` for their own statements only, then return
+   to the request's scope. The `authenticate` entry in `RLS_SYSTEM_REASONS` names the two tables.
+   `zz-adr0240-external-portal-mfa.test.ts` pins that both tables are enabled and forced. It also pins that a plain
+   `regulait_app` connection, and one under `public_ingest`, read no row and cannot insert one, while `authenticate`
+   reads them. The parent portal tables are still not under RLS; that belongs to ADR-0234's portal batch.
+2. **A reset fails closed.** Each reset now also revokes every unused link of that access or grant, in the same
+   transaction. The count is recorded as `linksRevoked` next to `sessionsEnded`. With the factor gone, the next link
+   redeemed would enrol whoever holds it, so a link issued before a compromise must not survive the reset. Only a link
+   the admin issues after the reset can enrol. The tests issue a link, reset the factor, and expect the old link to be
+   refused, with no challenge and no factor created.
+
+**Non-blocking, also done**
+
+3. **Re-tightening ends the relaxed sessions.** Turning `supplierPortalMfaRequired` or `trustAuditorMfaRequired` back
+   on ends every live session of that portal in the settings write's transaction. Any of them may have been opened by
+   a link alone while the factor was relaxed. The supplier side is audited in the `supplier-portal-setting` row, and
+   the auditor side writes `auditor-sessions-revoked-mfa-required`. Links stay valid: redeeming one now opens a
+   challenge.
+4. **The handle is validated before the limiter.** Both verify routes check the handle's shape (`isChallengeHandle`)
+   before the per-challenge bucket, so a made-up cookie costs no shared-store row.
+5. **No referrer on the supplier enrolment answer.** It carries the TOTP secret, so it now sets
+   `referrer-policy: no-referrer` beside `cache-control: no-store`, as the auditor path's `noStore` already did.
+
+**Reuse, written down (repository search)**
+
+- The challenge step is the same pattern as the platform's SAML TOTP step: `auth_mfa_pending`, `mfaPendingCookie`
+  and `beginSamlTotpStepUp` in `auth.ts`. Both are a hashed 256-bit handle in a path-scoped HttpOnly cookie with a
+  minutes-long expiry.
+- A separate table is still needed. `auth_mfa_pending.user_id` is a NOT NULL foreign key to `users`, and an external
+  grant has no user row. The external factor also needs a per-factor lockout counter, which `auth_mfa_pending` lacks.
+- Everything else is reused rather than rebuilt:
+  - TOTP is `totp.ts`, on `otpauth`;
+  - the secret uses the `secrets.ts` envelope and is listed in `CIPHERTEXT_COLUMNS`;
+  - handles go through `hashToken`;
+  - the limiter is `@fastify/rate-limit`;
+  - row security uses ADR-0234's helpers.
+- `serializeStepCookie` is a hand-built `Set-Cookie`, like `sessionCookie`, `linkCookie` and `mfaPendingCookie`.
+  Moving every builder onto `cookie.serialize` (MIT, already in the lockfile) is a separate later batch, so the
+  gateway keeps one way of writing cookies.
+
+**Trust on first use, made explicit.** A link that leaks *before* its first use lets the holder enrol first. The
+remedy is the admin reset, which now also revokes every outstanding link. The admin then issues a fresh link. Telling
+the inviting admin when a factor is enrolled, so a surprise enrolment is noticed, is a follow-up.

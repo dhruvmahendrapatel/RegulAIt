@@ -47,6 +47,30 @@ export async function revokeAuditorAccessOnDisable(tx: Db, userId: string | null
   return { sessions: sessions.length, links: links.length };
 }
 
+/**
+ * ADR-0240 (#709 review): the auditor second factor turned back ON. A session opened while it was relaxed was opened
+ * by a link alone, so every open auditor session ends here, in the settings write's transaction; the next sign-in
+ * presents a code. Links stay: a redemption now opens a challenge, not a session.
+ */
+export async function revokeAuditorSessionsOnMfaRequired(tx: Db, userId: string | null, now = new Date()): Promise<number> {
+  const sessions = await tx
+    .update(auditorSessions)
+    .set({ revokedAt: now })
+    .where(isNull(auditorSessions.revokedAt))
+    .returning({ id: auditorSessions.id });
+  await tx.insert(auditLog).values({
+    userId: userId ?? NO_IDENTITY,
+    objectType: "auditor_grant",
+    objectId: null,
+    detail: { sessionsRevoked: sessions.length },
+    effect: "allow",
+    ruleId: "auditor-sessions-revoked-mfa-required",
+    ruleChain: [],
+    reason: `auditor second factor required again: ${sessions.length} open auditor session(s) ended; the next sign-in needs a code`,
+  });
+  return sessions.length;
+}
+
 /** is the setting still on, read under a share lock on the org row (inside a transaction that creates access) */
 export async function trustPagesStillOn(tx: Db): Promise<boolean> {
   const [row] = await tx

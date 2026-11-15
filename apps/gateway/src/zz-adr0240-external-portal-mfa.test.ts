@@ -33,6 +33,7 @@ import {
   inArray,
   runMigrations,
   sql,
+  auditorSessions,
   supplierSessions,
   trustPublications,
   type Db,
@@ -327,10 +328,21 @@ describe("supplier portal second factor", () => {
     } finally {
       restoreStepUp = await relaxStepUpForTest(db);
     }
+    // #709 security review: a link issued BEFORE the reset (it may have leaked with the authenticator) must not enrol
+    const stale = await newLink();
     const reset = await app.inject({ method: "POST", url: `/v1/vendors/${vendorId}/supplier-access/${accessId}/mfa/reset`, headers: admin.auth, payload: { reason: "lost phone" } });
     expect(reset.statusCode, reset.body).toBe(200);
     expect(reset.json()).toMatchObject({ reset: true, hadFactor: true });
-    expect((await lastAudit("supplier-mfa-reset", accessId))?.detail).toMatchObject({ wasLocked: true, reason: "lost phone" });
+    expect(reset.json().linksRevoked).toBeGreaterThanOrEqual(1);
+    const resetAudit = await lastAudit("supplier-mfa-reset", accessId);
+    expect(resetAudit?.detail).toMatchObject({ wasLocked: true, reason: "lost phone" });
+    expect((resetAudit?.detail as { linksRevoked: number }).linksRevoked).toBe(reset.json().linksRevoked);
+    const staleTry = await signIn(stale);
+    expect(staleTry.statusCode, staleTry.body).not.toBe(200);
+    expect(staleTry.json().mfa).toBeUndefined();
+    expect(cookieNamed(staleTry, PORTAL_STEP_COOKIE)).toBeUndefined();
+    const [noFactor] = await db.select().from(externalMfaFactors).where(eq(externalMfaFactors.supplierAccessId, accessId));
+    expect(noFactor).toBeUndefined();
     const live = await db
       .select()
       .from(supplierSessions)
@@ -377,8 +389,17 @@ describe("supplier portal second factor", () => {
     expect(r.statusCode, r.body).toBe(200);
     expect(r.json().mfa).toBeUndefined();
     expect(cookieNamed(r, SUPPLIER_SESSION_COOKIE)).toBeDefined();
+    const liveBefore = await db.select().from(supplierSessions).where(and(eq(supplierSessions.accessId, accessId), sql`${supplierSessions.revokedAt} IS NULL`));
+    expect(liveBefore.length).toBeGreaterThan(0);
     const on = await app.inject({ method: "PUT", url: "/v1/supplier-portal/settings", headers: admin.auth, payload: { mfaRequired: true } });
     expect(on.statusCode).toBe(200);
+    // #709 review: re-tightening ends the sessions a link alone opened while relaxed
+    const liveAfter = await db.select().from(supplierSessions).where(sql`${supplierSessions.revokedAt} IS NULL`);
+    expect(liveAfter).toHaveLength(0);
+    // and a link again opens a challenge (enrol or verify, whatever state the factor is in), never a session
+    const again = await signIn(await newLink());
+    expect(["enrol", "verify"]).toContain(again.json().mfa);
+    expect(cookieNamed(again, SUPPLIER_SESSION_COOKIE)).toBeUndefined();
   });
 });
 
@@ -493,9 +514,18 @@ describe("auditor portal second factor", () => {
     } finally {
       restoreStepUp = await relaxStepUpForTest(db);
     }
+    // #709 security review: a link issued BEFORE the reset must not enrol after it
+    const stale = await newLink();
     const reset = await app.inject({ method: "POST", url: `/v1/trust/auditor-grants/${grantId}/mfa/reset`, headers: admin.auth, payload: { reason: "new phone" } });
     expect(reset.statusCode, reset.body).toBe(200);
-    expect((await lastAudit("auditor-mfa-reset", grantId))?.detail).toMatchObject({ wasLocked: true });
+    expect(reset.json().linksRevoked).toBeGreaterThanOrEqual(1);
+    expect((await lastAudit("auditor-mfa-reset", grantId))?.detail).toMatchObject({ wasLocked: true, linksRevoked: reset.json().linksRevoked });
+    const staleTry = await redeem(stale);
+    expect(staleTry.statusCode, staleTry.body).not.toBe(201);
+    expect(staleTry.statusCode).not.toBe(200);
+    expect(cookieNamed(staleTry, PORTAL_STEP_COOKIE)).toBeUndefined();
+    const [noFactor] = await db.select().from(externalMfaFactors).where(eq(externalMfaFactors.auditorGrantId, grantId));
+    expect(noFactor).toBeUndefined();
     const again = await redeem(await newLink());
     expect(again.json().mfa).toBe("enrol");
   });
@@ -515,7 +545,65 @@ describe("auditor portal second factor", () => {
     const r = await redeem(await newLink());
     expect(r.statusCode, r.body).toBe(201);
     expect(r.json().mfa).toBeUndefined();
+    const liveBefore = await db.select().from(auditorSessions).where(and(eq(auditorSessions.grantId, grantId), sql`${auditorSessions.revokedAt} IS NULL`));
+    expect(liveBefore.length).toBeGreaterThan(0);
     const on = await app.inject({ method: "PUT", url: "/v1/org/settings", headers: admin.auth, payload: { trustAuditorMfaRequired: true } });
     expect(on.statusCode, on.body).toBe(200);
+    // #709 review: re-tightening ends the sessions a link alone opened while relaxed, audited
+    const liveAfter = await db.select().from(auditorSessions).where(sql`${auditorSessions.revokedAt} IS NULL`);
+    expect(liveAfter).toHaveLength(0);
+    const [retighten] = await db.select().from(auditLog).where(eq(auditLog.ruleId, "auditor-sessions-revoked-mfa-required")).orderBy(desc(auditLog.seq)).limit(1);
+    expect((retighten?.detail as { sessionsRevoked: number }).sessionsRevoked).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// =================================================================================================================
+// row-level security (#709 review): the factor table holds each grant's sealed TOTP secret
+// =================================================================================================================
+
+describe("row-level security on the external MFA tables", () => {
+  const countAs = async (reason: string | null) =>
+    db.transaction(async (tx) => {
+      await tx.execute(sql`select set_config('role', 'regulait_app', true)`);
+      if (reason) await tx.execute(sql`select set_config('regulait.system_context', ${reason}, true)`);
+      const r = await tx.execute(sql`select (select count(*)::int from external_mfa_factors) as f, (select count(*)::int from external_mfa_challenges) as c`);
+      return (r.rows as Array<{ f: number; c: number }>)[0]!;
+    });
+
+  it("both tables have row-level security ENABLED and FORCED", async () => {
+    const r = await db.execute(sql`
+      select relname, relrowsecurity as on, relforcerowsecurity as forced from pg_class
+       where relnamespace = 'public'::regnamespace and relname in ('external_mfa_factors', 'external_mfa_challenges') order by relname`);
+    expect(r.rows).toEqual([
+      { relname: "external_mfa_challenges", on: true, forced: true },
+      { relname: "external_mfa_factors", on: true, forced: true },
+    ]);
+  });
+
+  it("NEGATIVE: a plain regulait_app connection, and the portals' public_ingest scope, see no factor or challenge", async () => {
+    // positive control: the earlier blocks enrolled factors and opened challenges, and the owner login sees them
+    const all = (await db.execute(sql`select (select count(*)::int from external_mfa_factors) as f, (select count(*)::int from external_mfa_challenges) as c`))
+      .rows as Array<{ f: number; c: number }>;
+    expect(all[0]!.f).toBeGreaterThan(0);
+    expect(all[0]!.c).toBeGreaterThan(0);
+    expect(await countAs(null)).toEqual({ f: 0, c: 0 });
+    expect(await countAs("public_ingest")).toEqual({ f: 0, c: 0 });
+    // the pre-session reason the gateway enters for start/verify reaches them
+    expect(await countAs("authenticate")).toEqual(all[0]);
+  });
+
+  it("NEGATIVE: without the reason a regulait_app connection cannot write a factor either", async () => {
+    const [anyGrant] = grantIds;
+    const err = await db
+      .transaction(async (tx) => {
+        await tx.execute(sql`select set_config('role', 'regulait_app', true)`);
+        await tx.execute(sql`insert into external_mfa_factors (auditor_grant_id, secret_ciphertext) values (${anyGrant}, 'x')`);
+      })
+      .then(
+        () => null,
+        (e: unknown) => e as { message?: string; cause?: { message?: string } },
+      );
+    // drizzle wraps the driver error; the policy refusal is its cause
+    expect(String(err?.cause?.message ?? err?.message)).toMatch(/row-level security/);
   });
 });

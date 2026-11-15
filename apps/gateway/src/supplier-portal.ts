@@ -102,6 +102,7 @@ import {
   resetFactor,
   revokePortalChallenges,
   startChallenge,
+  isChallengeHandle,
   verifyChallenge,
 } from "./external-mfa.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
@@ -422,6 +423,12 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
         ).length;
         // ADR-0240: a sign-in step under way ends too, so a later re-enable does not finish it
         await revokePortalChallenges(tx, "supplier");
+      } else if (!current.supplierPortalMfaRequired && next.mfaRequired) {
+        // ADR-0240 (#709 review): re-tightening ends every live supplier session, since a link alone may have opened
+        // it while the factor was relaxed; the next sign-in presents a code. Links stay (a redemption now opens a challenge).
+        revokedSessions = (
+          await tx.update(supplierSessions).set({ revokedAt: sql`now()` }).where(isNull(supplierSessions.revokedAt)).returning({ id: supplierSessions.id })
+        ).length;
       }
       const parts = [
         changed.includes("supplierPortalEnabled")
@@ -436,7 +443,7 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
           : null,
         changed.includes("supplierPortalMfaRequired")
           ? next.mfaRequired
-            ? "a second factor (TOTP) is required again after a supplier sign-in link"
+            ? `a second factor (TOTP) is required again after a supplier sign-in link: ${revokedSessions} live session(s) ended`
             : "the supplier second factor is OFF: a spent sign-in link alone opens a session"
           : null,
       ].filter(Boolean);
@@ -881,6 +888,14 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
         .set({ revokedAt: sql`now()` })
         .where(and(eq(supplierSessions.accessId, accessId), isNull(supplierSessions.revokedAt)))
         .returning({ id: supplierSessions.id });
+      // #709 security review: fail closed. With the factor gone, the next link redeemed enrols whoever holds it, so
+      // every link issued before the reset (one that may have leaked with the authenticator) is revoked here; only
+      // a link the admin issues after the reset can enrol.
+      const links = await tx
+        .update(supplierInvitations)
+        .set({ revokedAt: sql`now()` })
+        .where(and(eq(supplierInvitations.accessId, accessId), isNull(supplierInvitations.usedAt), isNull(supplierInvitations.revokedAt)))
+        .returning({ id: supplierInvitations.id });
       await audit(tx, {
         userId: req.authCtx.userId,
         objectType: "supplier_access",
@@ -888,18 +903,19 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
         ruleId: "supplier-mfa-reset",
         reason:
           `second factor of supplier ${a.supplierEmail} reset by an admin (${gone ? (gone.lockedAt ? "it was locked" : "it was enrolled") : "none was enrolled"}; ` +
-          `${sessions.length} live session(s) ended); the next sign-in link enrols again: ${body.reason}`,
+          `${sessions.length} live session(s) ended, ${links.length} unused link(s) revoked); only a new sign-in link enrols again: ${body.reason}`,
         detail: {
           phase: "mfa-reset",
           vendorId,
           hadFactor: Boolean(gone),
           wasLocked: Boolean(gone?.lockedAt),
           sessionsEnded: sessions.length,
+          linksRevoked: links.length,
           reason: body.reason,
           stepUp: su.method,
         },
       });
-      return { hadFactor: Boolean(gone), sessionsEnded: sessions.length };
+      return { hadFactor: Boolean(gone), sessionsEnded: sessions.length, linksRevoked: links.length };
     });
     return reply.send({ accessId, reset: true, ...out, notice: "Issue a new sign-in link: the supplier enrols a new authenticator with it." });
   });
@@ -1232,6 +1248,8 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
       return reply
         .header("set-cookie", challengeCookieFor("supplier", started.token, started.expiresAt, requestIsSecure(req)))
         .header("cache-control", "no-store")
+        // #709 review: this answer can carry the TOTP secret; match the auditor path's noStore (no referrer either)
+        .header("referrer-policy", "no-referrer")
         .send({
           vendorName: out.vendorName,
           framework: out.access.framework,
@@ -1251,7 +1269,10 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
     if (!(await csrf(req, reply))) return reply;
     const clear = challengeCookie("supplier", "", requestIsSecure(req), 0);
     const challengeToken = readCookie(req.headers.cookie, PORTAL_STEP_COOKIE);
-    if (!challengeToken || !opts.dataKey) return reply.status(401).header("set-cookie", clear).send(EXTERNAL_MFA_CHALLENGE_REFUSAL);
+    // #709 review: the handle's shape is checked before the per-challenge bucket, so a made-up cookie costs no bucket row
+    if (!challengeToken || !isChallengeHandle(challengeToken) || !opts.dataKey) {
+      return reply.status(401).header("set-cookie", clear).send(EXTERNAL_MFA_CHALLENGE_REFUSAL);
+    }
     if (await limitMfa(req, reply, challengeToken)) return reply;
     const parsed = externalMfaVerifySchema.safeParse(req.body);
     if (!parsed.success) return reply.status(401).send(EXTERNAL_MFA_CODE_REFUSAL);

@@ -28,6 +28,7 @@ import {
   type Db,
   type ExternalMfaChallengeRow,
   type ExternalMfaFactorRow,
+  withinSystemReason,
 } from "@regulait/db";
 import {
   EXTERNAL_MFA_LIMITS as L,
@@ -89,6 +90,13 @@ export type StartOutcome =
  * locked factor gets nothing. Any earlier open challenge of the factor is revoked, so one is live at a time.
  */
 export async function startChallenge(tx: Db, ref: ExternalGrantRef, dataKey: string, accountLabel: string): Promise<StartOutcome> {
+  // #709 review: both tables are under FORCE row-level security (pending migration external_portal_mfa). A portal
+  // request runs under `public_ingest`, which opens neither; this pre-session step enters `authenticate` (the reason
+  // the platform's own pending-MFA step uses) for its own statements only and returns to the request's scope after.
+  return withinSystemReason(tx, "authenticate", "external-mfa.start", () => startChallengeScoped(tx, ref, dataKey, accountLabel));
+}
+
+async function startChallengeScoped(tx: Db, ref: ExternalGrantRef, dataKey: string, accountLabel: string): Promise<StartOutcome> {
   const col = grantColumn(ref.portal);
   let [factor] = await tx.select().from(externalMfaFactors).where(eq(col, ref.grantId)).for("update");
   if (factor?.lockedAt) return { kind: "locked", factorId: factor.id };
@@ -140,7 +148,17 @@ export type VerifyOutcome =
  * revokes its open challenges. On success the challenge is spent, the step recorded and the count reset.
  */
 export async function verifyChallenge(tx: Db, portal: ExternalMfaPortal, challengeToken: string, code: string, dataKey: string): Promise<VerifyOutcome> {
-  if (!PORTAL_STEP_HANDLE_RE.test(challengeToken)) return { ok: false, reason: "challenge" };
+  if (!isChallengeHandle(challengeToken)) return { ok: false, reason: "challenge" };
+  // the same pre-session step as startChallenge: `authenticate` for these statements only (#709 review)
+  return withinSystemReason(tx, "authenticate", "external-mfa.verify", () => verifyChallengeScoped(tx, portal, challengeToken, code, dataKey));
+}
+
+/** a well-formed challenge handle (prefix + 64 hex); checked before any bucket, lookup or hash */
+export function isChallengeHandle(value: string): boolean {
+  return PORTAL_STEP_HANDLE_RE.test(value);
+}
+
+async function verifyChallengeScoped(tx: Db, portal: ExternalMfaPortal, challengeToken: string, code: string, dataKey: string): Promise<VerifyOutcome> {
   const [row] = await tx
     .select({ challenge: externalMfaChallenges, factor: externalMfaFactors })
     .from(externalMfaChallenges)

@@ -54,6 +54,43 @@ CREATE TABLE IF NOT EXISTS "external_mfa_challenges" (
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "external_mfa_challenges_factor_idx" ON "external_mfa_challenges" ("factor_id");
 --> statement-breakpoint
+-- 4. Row-level security (#709 review; ADR-0234's shape for `auth_mfa_pending`, 0272). Both tables are read before
+--    any principal exists, so a row is reachable only by an admin principal (the grant view and the reset) or under
+--    the `authenticate` reason, which the gateway enters for the two pre-session steps alone (start a challenge,
+--    check a code). A portal request otherwise runs under `public_ingest`, which opens neither table, and a plain
+--    `regulait_app` connection with no reason sees no row at all.
+ALTER TABLE "external_mfa_factors" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "external_mfa_factors" FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+DROP POLICY IF EXISTS external_mfa_factors_all ON "external_mfa_factors";
+--> statement-breakpoint
+CREATE POLICY external_mfa_factors_all ON "external_mfa_factors" FOR ALL
+  USING (
+    (SELECT regulait_rls_is_admin())
+    OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['authenticate', 'migration'])
+  )
+  WITH CHECK (
+    (SELECT regulait_rls_is_admin())
+    OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['authenticate', 'migration'])
+  );
+--> statement-breakpoint
+ALTER TABLE "external_mfa_challenges" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "external_mfa_challenges" FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+DROP POLICY IF EXISTS external_mfa_challenges_all ON "external_mfa_challenges";
+--> statement-breakpoint
+CREATE POLICY external_mfa_challenges_all ON "external_mfa_challenges" FOR ALL
+  USING (
+    (SELECT regulait_rls_is_admin())
+    OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['authenticate', 'migration'])
+  )
+  WITH CHECK (
+    (SELECT regulait_rls_is_admin())
+    OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['authenticate', 'migration'])
+  );
+--> statement-breakpoint
 INSERT INTO "migration_audit_outbox" ("migration", "object_type", "object_id", "rule_id", "reason", "detail")
 SELECT
   'external_portal_mfa',
