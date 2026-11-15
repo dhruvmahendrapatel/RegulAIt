@@ -105,3 +105,17 @@ test and re-enable it, and the detector then scored with the new service under t
   concurrency refusals as `external-scorer-changed-concurrently`. A step-up prompt from a browser session writes no
   deny row, as with every other protected route (`isStepUpPrompt`).
 - **Regression test:** `apps/gateway/src/zz-p7r01-scorer-stepup.test.ts`.
+
+## Addendum 2026-11-10 — P7R-02: trained PII inherits the effective PII floor
+
+Post-merge review finding P7R-02 (MEDIUM): the policy resolver forces the heuristic `modes.pii` to `off` (PII has its
+own dedicated path), and the trained planner reused that map, so a trained PII recogniser ran at only its own row mode.
+An org on the strict default, or a project whose compliance cascade requires PII block, got a trained person-name
+finding back as warn or log. That fell short of decision 4's inherited mode.
+
+Fix: the policy now carries `trainedModes`, the heuristic modes with `pii` replaced by the effective PII floor
+(`projectPiiMode`: the cascade, else the org default). Trained planning MAX-composes each row with it, and the same
+result decides `blocksInput`/`blocksOutput` (stream buffering). `redact` maps to `block`, because a trained finding has
+no spans to redact. The audited `none` relaxation means no floor, so the row mode governs. The floor is read only when
+a trained detector is on, so a deployment with every detector off still makes no extra query. A hand-built policy
+without `trainedModes` gets a block floor. Regression: `apps/gateway/src/zz-p7r02-trained-pii-floor.test.ts`.

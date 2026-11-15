@@ -21,6 +21,23 @@
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { findSentinel, stripSentinels, trimTrailingPunctuation } from "./sentinels.js";
+import { GoogleProvider } from "./google-ai-sdk.js";
+import {
+  DEFAULT_MAX_TOKENS,
+  GOOGLE_DEFAULT_BASE,
+  ModelProviderError,
+  STREAM_THRESHOLD_TOKENS,
+  cacheUsage,
+  deadlineBoundFetch,
+  geminiModality,
+  isModelDeadlineError,
+  modelDispatchTimeout,
+  openAiChatModality,
+  reportedModel,
+  type GeminiUsageMetadata,
+  type ModalityTokenCounts,
+} from "./core.js";
+export * from "./core.js";
 
 export const MODEL_PROVIDER_KINDS = [
   "anthropic",
@@ -53,20 +70,6 @@ export type ModelProviderKind = (typeof MODEL_PROVIDER_KINDS)[number];
 
 export function isModelProviderKind(value: string): value is ModelProviderKind {
   return (MODEL_PROVIDER_KINDS as readonly string[]).includes(value);
-}
-
-export class ModelProviderError extends Error {
-  constructor(
-    message: string,
-    readonly status?: number,
-    /** ADR-0034: the ORIGINAL failure, preserved. The SDKs flatten a transport
-     * failure to "Connection error.", which would turn an egress-guard refusal
-     * (a governance decision) into an opaque network blip. Callers walk this
-     * chain to report the real reason. */
-    options?: { cause?: unknown },
-  ) {
-    super(message, options);
-  }
 }
 
 /** A tool the model may call during a turn (pillar 7 tool-using workers). The
@@ -253,73 +256,6 @@ export interface ModelDispatchResult {
   servedModel?: string | null;
 }
 
-/** ADR-0212: image/audio token counts out of a provider's usage block (structurally the shared type) */
-export interface ModalityTokenCounts {
-  image?: { inputTokens: number; outputTokens: number };
-  audio?: { inputTokens: number; outputTokens: number };
-}
-
-const positiveCount = (n: unknown): number => (typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.trunc(n) : 0);
-
-/** spread into `usage`: `{ modality }` only when some image or audio count is positive */
-function modalityUsage(m: ModalityTokenCounts): { modality?: ModalityTokenCounts } {
-  const out: ModalityTokenCounts = {};
-  for (const k of ["image", "audio"] as const) {
-    const v = m[k];
-    const inputTokens = positiveCount(v?.inputTokens);
-    const outputTokens = positiveCount(v?.outputTokens);
-    if (inputTokens > 0 || outputTokens > 0) out[k] = { inputTokens, outputTokens };
-  }
-  return out.image || out.audio ? { modality: out } : {};
-}
-
-/** OpenAI chat completions: `prompt_tokens_details` / `completion_tokens_details` carry `audio_tokens`
- * (and, on some compatible endpoints, `image_tokens`) */
-export function openAiChatModality(usage: unknown): { modality?: ModalityTokenCounts } {
-  const u = (usage ?? {}) as {
-    prompt_tokens_details?: { audio_tokens?: unknown; image_tokens?: unknown } | null;
-    completion_tokens_details?: { audio_tokens?: unknown; image_tokens?: unknown } | null;
-  };
-  return modalityUsage({
-    image: {
-      inputTokens: positiveCount(u.prompt_tokens_details?.image_tokens),
-      outputTokens: positiveCount(u.completion_tokens_details?.image_tokens),
-    },
-    audio: {
-      inputTokens: positiveCount(u.prompt_tokens_details?.audio_tokens),
-      outputTokens: positiveCount(u.completion_tokens_details?.audio_tokens),
-    },
-  });
-}
-
-/** Gemini `usageMetadata`: per-modality `promptTokensDetails` / `candidatesTokensDetails` */
-export function geminiModality(meta: GeminiUsageMetadata | undefined): { modality?: ModalityTokenCounts } {
-  const sum = (details: GeminiModalityCount[] | undefined, modality: string) =>
-    (details ?? []).filter((d) => d?.modality === modality).reduce((n, d) => n + positiveCount(d.tokenCount), 0);
-  return modalityUsage({
-    image: {
-      inputTokens: sum(meta?.promptTokensDetails, "IMAGE") + sum(meta?.promptTokensDetails, "VIDEO"),
-      outputTokens: sum(meta?.candidatesTokensDetails, "IMAGE"),
-    },
-    audio: {
-      inputTokens: sum(meta?.promptTokensDetails, "AUDIO"),
-      outputTokens: sum(meta?.candidatesTokensDetails, "AUDIO"),
-    },
-  });
-}
-
-/** the provider's prompt-cache counts, only when positive (see `usage`) */
-function cacheUsage(read: unknown, creation: unknown): { cacheReadInputTokens?: number; cacheCreationInputTokens?: number } {
-  const pos = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
-  return { ...(pos(read) ? { cacheReadInputTokens: read } : {}), ...(pos(creation) ? { cacheCreationInputTokens: creation } : {}) };
-}
-
-/** the provider-reported model id, or null — a blank or non-string value is
- * "not reported", never coerced */
-function reportedModel(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
 export interface ModelProvider {
   readonly kind: ModelProviderKind;
   dispatch(req: ModelDispatchRequest): Promise<ModelDispatchResult>;
@@ -335,10 +271,6 @@ function chatTurns(req: ModelDispatchRequest): ModelChatMessage[] {
     : [{ role: "user", content: req.input }];
 }
 
-const DEFAULT_MAX_TOKENS = 1024;
-/** above this, the Anthropic adapter streams internally even without a
- * caller onText — long generations must not ride a single request timeout */
-const STREAM_THRESHOLD_TOKENS = 16_000;
 
 // ---------------------------------------------------------------------------
 // Anthropic adapter — official SDK, injectable fetch (same testability
@@ -1222,419 +1154,11 @@ export class CustomProvider implements ModelProvider {
 }
 
 // ---------------------------------------------------------------------------
-// Google (Gemini) adapter — RAW fetch, deliberately: the unified
-// @google/genai SDK does not expose injectable fetch, and untestable network
-// code loses to plain REST (the git/pm adapters set this precedent). Same
-// neutral contract and refusal discipline as the SDK-based adapters.
+// Google (Gemini) adapter — on the AI SDK's `@ai-sdk/google` since ADR-0253
+// (P29); see `google-ai-sdk.ts`. Same neutral contract and refusal discipline.
 // ---------------------------------------------------------------------------
 
-export interface GoogleAdapterOptions {
-  apiKey: string;
-  /** override for BYOC/air-gapped bridges; default is the Gemini API */
-  baseUrl?: string | null;
-  fetchImpl?: typeof fetch;
-}
-
-const GOOGLE_DEFAULT_BASE = "https://generativelanguage.googleapis.com/v1beta";
-const GOOGLE_REFUSAL_REASONS = new Set(["SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII"]);
-
-interface GeminiFunctionCall {
-  name: string;
-  args?: Record<string, unknown>;
-}
-interface GeminiPart {
-  text?: string;
-  functionCall?: GeminiFunctionCall;
-}
-interface GeminiChunk {
-  responseId?: string;
-  /** ADR-0175 A4: the model version that served, as Gemini reports it */
-  modelVersion?: string;
-  candidates?: Array<{
-    content?: { parts?: GeminiPart[] };
-    finishReason?: string;
-  }>;
-  promptFeedback?: { blockReason?: string };
-  usageMetadata?: GeminiUsageMetadata;
-}
-
-export interface GeminiModalityCount {
-  modality?: string;
-  tokenCount?: number;
-}
-
-export interface GeminiUsageMetadata {
-  promptTokenCount?: number;
-  candidatesTokenCount?: number;
-  /** ADR-0212: per-modality breakdowns (TEXT, IMAGE, VIDEO, AUDIO) */
-  promptTokensDetails?: GeminiModalityCount[];
-  candidatesTokensDetails?: GeminiModalityCount[];
-}
-
-/** JSON-Schema keywords Gemini's Schema dialect shares verbatim — everything
- * else must be translated or DROPPED, because generateContent's strict proto
- * parsing rejects unknown fields with a 400 (so `additionalProperties`,
- * `$schema`, `$defs`/`$ref`, `allOf`, … cannot pass through). `nullable`,
- * `type`, `const`, and the structural keywords are handled explicitly in
- * googleSchema. */
-const GOOGLE_SCHEMA_PASSTHROUGH_KEYS = [
-  "description",
-  "format",
-  "title",
-  "enum",
-  "required",
-  "minimum",
-  "maximum",
-  "minItems",
-  "maxItems",
-  "minLength",
-  "maxLength",
-  "minProperties",
-  "maxProperties",
-  "pattern",
-  "default",
-  "example",
-  "propertyOrdering",
-] as const;
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-
-/** Translate a JSON-Schema object (the MCP-manifest dialect our ModelToolDef
- * carries) into Gemini's Schema dialect (an OpenAPI-3.0 subset):
- * - `type` becomes the uppercase enum Gemini's proto expects (OBJECT, STRING,
- *   …). A JSON-Schema union type `["string","null"]` — which Gemini cannot
- *   express as a type — becomes the single non-null type plus
- *   `nullable: true`, Gemini's own nullability mechanism; a bare
- *   `type:"null"` degrades to `nullable: true` alone.
- * - `properties` / `items` / `anyOf` recurse; a JSON-Schema tuple `items`
- *   array collapses to its first schema (Gemini has no tuple form); `oneOf`
- *   approximates as `anyOf` (the closest Gemini construct).
- * - `const` becomes a single-value `enum` (Gemini has no const).
- * - `required`, `enum`, and the shared scalar keywords pass through; every
- *   unsupported keyword is dropped so the request cannot 400 on an unknown
- *   field. Caveat: Gemini only supports `enum` on STRING-typed schemas —
- *   values pass through untouched, so non-string enums remain the caller's
- *   responsibility. */
-function googleSchema(schema: unknown): Record<string, unknown> {
-  if (!isRecord(schema)) return {};
-  const out: Record<string, unknown> = {};
-  let type = schema.type;
-  let nullable = schema.nullable === true;
-  if (Array.isArray(type)) {
-    const nonNull = type.filter((t) => t !== "null");
-    if (nonNull.length < type.length) nullable = true;
-    type = nonNull[0];
-  }
-  if (type === "null") {
-    nullable = true;
-  } else if (typeof type === "string") {
-    out.type = type.toUpperCase();
-  }
-  if (nullable) out.nullable = true;
-  for (const k of GOOGLE_SCHEMA_PASSTHROUGH_KEYS) {
-    if (schema[k] !== undefined) out[k] = schema[k];
-  }
-  if (schema.const !== undefined && out.enum === undefined) out.enum = [schema.const];
-  if (isRecord(schema.properties)) {
-    out.properties = Object.fromEntries(
-      Object.entries(schema.properties).map(([k, v]) => [k, googleSchema(v)]),
-    );
-  }
-  if (Array.isArray(schema.items)) {
-    out.items = googleSchema(schema.items[0]);
-  } else if (isRecord(schema.items)) {
-    out.items = googleSchema(schema.items);
-  }
-  const variants = Array.isArray(schema.anyOf)
-    ? schema.anyOf
-    : Array.isArray(schema.oneOf)
-      ? schema.oneOf
-      : null;
-  if (variants) out.anyOf = variants.map(googleSchema);
-  return out;
-}
-
-/** Gemini pairs a functionResponse with its functionCall by the tool NAME
- * (and, for parallel calls, by part order within the turn). Our tool_result
- * block carries only the call id, so the id→name pairing is recovered from
- * the tool_use blocks earlier in the SAME history — the loop contract always
- * replays the assistant's tool_use turn before the tool_result turn. */
-function googleToolNames(turns: ModelChatMessage[]): Map<string, string> {
-  const names = new Map<string, string>();
-  for (const m of turns) {
-    if (!Array.isArray(m.content)) continue;
-    for (const b of m.content) {
-      if (b.type === "tool_use") names.set(b.id, b.name);
-    }
-  }
-  return names;
-}
-
-/** Map our neutral content onto Gemini parts. A string stays one text part
- * (byte-identical to the tool-free path). An assistant turn's tool_use blocks
- * become functionCall parts (role "model" upstream); a user turn's
- * tool_result blocks become functionResponse parts (role "user" upstream —
- * the role Gemini requires function responses to ride in), keyed by the tool
- * NAME resolved via `toolNames`; parallel calls answer as multiple
- * functionResponse parts in the same turn, in call order. The functionResponse
- * body follows Gemini's documented convention: `{output: …}` for a success,
- * `{error: …}` for a failed call. An id with no matching tool_use in history
- * falls back to the raw id as the name (degraded, but never dropped). */
-function googleParts(
-  content: string | ModelContentBlock[],
-  toolNames: Map<string, string>,
-): Record<string, unknown>[] {
-  if (typeof content === "string") return [{ text: content }];
-  return content.flatMap((b): Record<string, unknown>[] => {
-    if (b.type === "text") return [{ text: b.text }];
-    if (b.type === "image" || b.type === "document") return [{ text: attachmentPlaceholder(b) }];
-    // prior-turn thinking blocks are SKIPPED, mirroring the vendors' own
-    // behaviour of stripping replayed thinking (never fed back as prose)
-    if (b.type === "thinking" || b.type === "redacted_thinking") return [];
-    if (b.type === "tool_use") {
-      // Gemini's args is a Struct — always an object, never a scalar/array
-      return [{ functionCall: { name: b.name, args: isRecord(b.input) ? b.input : {} } }];
-    }
-    return [
-      {
-        functionResponse: {
-          name: toolNames.get(b.toolUseId) ?? b.toolUseId,
-          response: b.isError ? { error: b.content } : { output: b.content },
-        },
-      },
-    ];
-  });
-}
-
-/** neutral tool_choice -> Gemini's functionCallingConfig (1:1: AUTO / NONE /
- * ANY, with a forced tool spelled as ANY restricted to one allowed name) */
-function googleFunctionCallingConfig(tc: ModelToolChoice): Record<string, unknown> {
-  if (tc === "auto") return { mode: "AUTO" };
-  if (tc === "none") return { mode: "NONE" };
-  if (tc === "required") return { mode: "ANY" };
-  return { mode: "ANY", allowedFunctionNames: [tc.name] };
-}
-
-function mapGoogleStop(finishReason: string | null | undefined): ModelDispatchResult["stopReason"] {
-  if (finishReason === "STOP") return "end_turn";
-  if (finishReason === "MAX_TOKENS") return "max_tokens";
-  if (finishReason && GOOGLE_REFUSAL_REASONS.has(finishReason)) return "refusal";
-  return "other";
-}
-
-export class GoogleProvider implements ModelProvider {
-  readonly kind = "google" as const;
-  private readonly apiKey: string;
-  private readonly base: string;
-  private readonly fetchImpl: typeof fetch;
-
-  constructor(opts: GoogleAdapterOptions) {
-    this.apiKey = opts.apiKey;
-    this.base = (opts.baseUrl ?? GOOGLE_DEFAULT_BASE).replace(/\/$/, "");
-    this.fetchImpl = opts.fetchImpl ?? fetch;
-  }
-
-  async dispatch(req: ModelDispatchRequest): Promise<ModelDispatchResult> {
-    rejectThinking(req, "google");
-    const maxTokens = req.maxTokens ?? DEFAULT_MAX_TOKENS;
-    const useStream = req.onText !== undefined || maxTokens > STREAM_THRESHOLD_TOKENS;
-    const method = useStream ? "streamGenerateContent?alt=sse" : "generateContent";
-    const res = await this.fetchImpl(
-      `${this.base}/models/${encodeURIComponent(req.model)}:${method}`,
-      {
-        method: "POST",
-        headers: { "x-goog-api-key": this.apiKey, "content-type": "application/json" },
-        body: JSON.stringify({
-          // Gemini's assistant role is "model"; tool_result turns stay role
-          // "user" (the role Gemini requires functionResponse parts to ride
-          // in), with each functionResponse re-keyed by tool NAME via the
-          // id→name pairing recovered from the history's tool_use blocks
-          contents: (() => {
-            const toolNames = googleToolNames(chatTurns(req));
-            return chatTurns(req).map((m) => ({
-              role: m.role === "assistant" ? "model" : "user",
-              parts: googleParts(m.content, toolNames),
-            }));
-          })(),
-          // pillar-6 prompt caching: `req.cacheSystem` is intentionally ignored
-          // here — the Gemini generateContent surface exposes no per-request
-          // ephemeral cache-control breakpoint, so the systemInstruction is sent
-          // unchanged.
-          ...(req.system ? { systemInstruction: { parts: [{ text: req.system }] } } : {}),
-          ...(req.tools
-            ? {
-                tools: [
-                  {
-                    // JSON Schema → Gemini's Schema dialect (see googleSchema).
-                    // Gemini quirk: an OBJECT schema with no properties is
-                    // rejected — a no-arg tool must OMIT `parameters` entirely.
-                    functionDeclarations: req.tools.map((t) => {
-                      const parameters = googleSchema(t.inputSchema);
-                      const noArgs =
-                        parameters.type === "OBJECT" &&
-                        (!isRecord(parameters.properties) ||
-                          Object.keys(parameters.properties).length === 0);
-                      return {
-                        name: t.name,
-                        ...(t.description ? { description: t.description } : {}),
-                        ...(noArgs ? {} : { parameters }),
-                      };
-                    }),
-                  },
-                ],
-              }
-            : {}),
-          // ADR-0020 long tail: tool_choice maps onto Gemini's native
-          // functionCallingConfig (AUTO / NONE / ANY [+allowedFunctionNames])
-          ...(req.toolChoice
-            ? { toolConfig: { functionCallingConfig: googleFunctionCallingConfig(req.toolChoice) } }
-            : {}),
-          generationConfig: {
-            maxOutputTokens: maxTokens,
-            // ADR-0020 long tail: structured outputs map onto Gemini's NATIVE
-            // mechanism — responseMimeType for json_object, plus responseSchema
-            // (translated to the Gemini Schema dialect exactly as tool schemas
-            // are) for json_schema.
-            ...(req.responseFormat
-              ? {
-                  responseMimeType: "application/json",
-                  ...(req.responseFormat.type === "json_schema"
-                    ? { responseSchema: googleSchema(req.responseFormat.schema) }
-                    : {}),
-                }
-              : {}),
-          },
-        }),
-      },
-    ).catch((err: unknown) => {
-      // AER-021: our deadline, not the vendor's failure. `deadlineBoundFetch`
-      // arms an `AbortSignal.timeout`, so a hung endpoint rejects here — and
-      // "we stopped waiting" must not be reported as "google failed", because
-      // the two send an operator to different places.
-      if (isModelDeadlineError(err)) {
-        throw new ModelProviderError(
-          `google dispatch exceeded the ${modelDispatchTimeout()}ms model deadline`,
-          504,
-          { cause: err },
-        );
-      }
-      throw err;
-    });
-    if (!res.ok) {
-      let message = res.statusText;
-      try {
-        const j = (await res.json()) as { error?: { message?: string } };
-        message = j.error?.message ?? message;
-      } catch {
-        /* non-JSON error body */
-      }
-      throw new ModelProviderError(`google dispatch failed: ${message}`, res.status);
-    }
-
-    let text = "";
-    let finishReason: string | null = null;
-    let blockReason: string | null = null;
-    let id: string | null = null;
-    let servedModel: string | null = null;
-    let usage: ModelDispatchResult["usage"] = { inputTokens: 0, outputTokens: 0 };
-    let usageSource: unknown;
-    const toolCalls: Array<{ id: string; name: string; arguments: unknown }> = [];
-    const absorb = (chunk: GeminiChunk) => {
-      id = id ?? chunk.responseId ?? null;
-      servedModel = servedModel ?? reportedModel(chunk.modelVersion);
-      blockReason = blockReason ?? chunk.promptFeedback?.blockReason ?? null;
-      const candidate = chunk.candidates?.[0];
-      const delta = candidate?.content?.parts?.map((p) => p.text ?? "").join("") ?? "";
-      if (delta) {
-        text += delta;
-        req.onText?.(delta);
-      }
-      for (const p of candidate?.content?.parts ?? []) {
-        if (p.functionCall) {
-          toolCalls.push({
-            id: `${id ?? "gemini"}-fc-${toolCalls.length}`,
-            name: p.functionCall.name,
-            arguments: p.functionCall.args ?? {},
-          });
-        }
-      }
-      if (candidate?.finishReason) finishReason = candidate.finishReason;
-      if (chunk.usageMetadata) {
-        usageSource = chunk;
-        usage = {
-          inputTokens: chunk.usageMetadata.promptTokenCount ?? 0,
-          outputTokens: chunk.usageMetadata.candidatesTokenCount ?? 0,
-          ...geminiModality(chunk.usageMetadata),
-        };
-      }
-    };
-
-    // AER-021 — THE BODY IS INSIDE THE DEADLINE TOO, and this is the half a
-    // naive fix misses. Headers arriving is not the end of the wait: the old
-    // code could hang forever in `reader.read()` or `res.json()` on a response
-    // that never finished. Because the signal handed to `fetch` also errors the
-    // response BODY stream, the same deadline covers both — and a timeout here
-    // is named as one rather than surfacing as a parse failure.
-    try {
-      if (useStream) {
-        // incremental SSE parse so onText fires as chunks arrive
-        const reader = res.body?.getReader();
-        if (!reader) throw new ModelProviderError("google dispatch failed: empty stream body");
-        try {
-          const decoder = new TextDecoder();
-          let buffer = "";
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            for (;;) {
-              const nl = buffer.indexOf("\n");
-              if (nl === -1) break;
-              const line = buffer.slice(0, nl).trim();
-              buffer = buffer.slice(nl + 1);
-              if (line.startsWith("data: ")) absorb(JSON.parse(line.slice(6)) as GeminiChunk);
-            }
-          }
-        } finally {
-          // release the stream whether we finished, timed out or threw — a
-          // half-read body left open is a held socket
-          await reader.cancel().catch(() => {});
-        }
-      } else {
-        absorb((await res.json()) as GeminiChunk);
-      }
-    } catch (err) {
-      if (isModelDeadlineError(err)) {
-        throw new ModelProviderError(
-          `google dispatch exceeded the ${modelDispatchTimeout()}ms model deadline while reading the ` +
-            `response body`,
-          504,
-          { cause: err },
-        );
-      }
-      throw err;
-    }
-
-    const refusal = blockReason !== null || mapGoogleStop(finishReason) === "refusal";
-    return {
-      // a refusal's content must never be surfaced as an answer
-      outputText: refusal ? "" : text,
-      stopReason: refusal
-        ? "refusal"
-        : toolCalls.length > 0
-          ? "tool_use"
-          : mapGoogleStop(finishReason),
-      refusal,
-      ...(toolCalls.length > 0 ? { toolCalls } : {}),
-      usage,
-      ...(usageSource !== undefined ? { usageSource } : {}),
-      providerMessageId: id,
-      servedModel,
-    };
-  }
-}
+export { GoogleProvider, type GoogleAdapterOptions } from "./google-ai-sdk.js";
 
 // ---------------------------------------------------------------------------
 // Mock adapter — deterministic, in-memory, for tests and air-gapped
@@ -2607,97 +2131,6 @@ export interface ModelProviderConfig {
   wireProtocol?: CustomWireProtocol | null;
 }
 
-/**
- * ROADMAP G2 — the deadline every real SDK client is constructed with.
- *
- * WHY THIS LIVES HERE AND THE ENV VAR DOES NOT. The number belongs to the
- * package that uses it, so there is one definition; the gateway's `timeouts.ts`
- * IMPORTS this default and is the only thing that reads
- * `REGULAIT_MODEL_TIMEOUT_MS`, then pushes the resolved value in. One number,
- * one env reader, no mirrored constant to drift — this repo has already been
- * bitten once by a hand-maintained mirror (ADR-0121's connector-kind list).
- *
- * WHY IT MATTERS. Both SDKs default to a TEN-MINUTE timeout and both retry
- * twice, so the real worst case for one held request was around half an hour,
- * inherited silently from a vendor default nobody chose. Five minutes is
- * deliberately not aggressive: a long completion is legitimate work and this is
- * a governance layer, not a latency budget.
- */
-export const MODEL_DISPATCH_TIMEOUT_MS_DEFAULT = 300_000;
-
-let modelDispatchTimeoutMs: number = MODEL_DISPATCH_TIMEOUT_MS_DEFAULT;
-
-/** Called by the gateway once at start-up, and by tests that need a short one. */
-export function setModelDispatchTimeoutMs(ms: number): void {
-  modelDispatchTimeoutMs = ms;
-}
-
-export function modelDispatchTimeout(): number {
-  return modelDispatchTimeoutMs;
-}
-
-/** marker so wrapping twice is a no-op rather than two armed signals */
-const DEADLINE_BOUND = Symbol.for("regulait.model.deadlineBoundFetch");
-
-/**
- * AER-021 — THE DEADLINE EVERY RAW-FETCH ADAPTER GETS WHETHER ITS AUTHOR
- * THOUGHT ABOUT IT OR NOT.
- *
- * ADR-0126 bounded model dispatch by passing `modelDispatchTimeout()` to each
- * SDK constructor — which covered Anthropic, OpenAI, xAI and custom, and missed
- * `GoogleProvider` completely, because Google is the one adapter written against
- * raw `fetch`. A hung Gemini endpoint could hold gateway work forever, ignoring
- * the operator's `REGULAIT_MODEL_TIMEOUT_MS` entirely, while the ADR and the
- * roadmap both claimed no unbounded wait remained on any model path.
- *
- * The narrow fix is to add a signal in `GoogleProvider.dispatch`. That was
- * rejected: it leaves the NEXT raw-fetch adapter free to omit it just as
- * silently. This wrapper is applied in `resolveModelProvider`, the single funnel
- * every production dispatch is built through, so a provider added later inherits
- * the bound without its author doing anything — the omission becomes structurally
- * impossible rather than something to remember.
- *
- * ── WHY THE TIMER IS NEVER CLEARED EARLY ───────────────────────────────────
- * `AbortSignal.timeout` is the same primitive `mcp-egress.ts` uses for the MCP
- * connect deadline, and it is the right one here for a reason specific to
- * streaming: aborting the signal a fetch was given **also errors the response
- * BODY stream**, so the deadline stays live through `reader.read()` and
- * `res.json()` — which is exactly where the Google adapter used to hang after
- * headers had already arrived. A wrapper cannot know when the caller has
- * finished reading a body, so there is nothing to clear on; the signal simply
- * expires. `AbortSignal.timeout` does not hold the event loop open, and an abort
- * that lands after a fully-consumed body is a no-op.
- *
- * A caller-supplied signal is PRESERVED and composed with `AbortSignal.any`, so
- * this can never take away a cancellation the caller already arranged.
- */
-export function deadlineBoundFetch(inner: typeof fetch = fetch): typeof fetch {
-  if ((inner as { [DEADLINE_BOUND]?: true })[DEADLINE_BOUND]) return inner;
-  const bound: typeof fetch = (input, init) => {
-    const deadline = AbortSignal.timeout(modelDispatchTimeout());
-    const caller = init?.signal ?? null;
-    return inner(input, {
-      ...init,
-      signal: caller ? AbortSignal.any([caller, deadline]) : deadline,
-    });
-  };
-  Object.defineProperty(bound, DEADLINE_BOUND, { value: true });
-  return bound;
-}
-
-/**
- * Was this failure our model deadline rather than the provider's refusal?
- *
- * `AbortSignal.timeout` rejects with a DOMException named `TimeoutError`; an
- * abort from a composed caller signal is `AbortError`. Both are distinguished
- * from a provider error so the ledger can say "we stopped waiting" rather than
- * "the vendor failed" — they send an operator to different places.
- */
-export function isModelDeadlineError(err: unknown): boolean {
-  const e = err as { name?: string } | null;
-  return e?.name === "TimeoutError" || e?.name === "AbortError";
-}
-
 /** shared mock instance so state persists across resolutions in one process */
 const sharedMock = new MockModelProvider();
 
@@ -2816,7 +2249,7 @@ export function resolveModelProvider(
 export const ANTHROPIC_DEFAULT_BASE = "https://api.anthropic.com";
 /** `openai`'s own default base URL. */
 export const OPENAI_DEFAULT_BASE = "https://api.openai.com/v1";
-export { GOOGLE_DEFAULT_BASE, XAI_DEFAULT_BASE };
+export { XAI_DEFAULT_BASE };
 export * from "./usage-extractor.js";
 
 /**

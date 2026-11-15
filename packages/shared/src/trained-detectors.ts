@@ -189,9 +189,11 @@ export interface TrainedCallPlan {
 }
 
 /**
- * The trained detectors to run for one phase. `modes` is the policy's
- * effective heuristic modes; PII's is 'off' there (it has its own path), so a
- * PII recogniser runs at its own row mode.
+ * The trained detectors to run for one phase, each at MAX(row mode,
+ * `modes[detector]`). The gateway passes its policy's `trainedModes`: the
+ * effective heuristic modes, except that `pii` carries the effective PII floor
+ * (cascade, else org default) — never the heuristic's forced 'off' — so a
+ * trained PII finding is never weaker than that floor (P7R-02).
  */
 export function planTrainedDetectors(
   settings: readonly TrainedDetectorSetting[],

@@ -10,7 +10,7 @@
 // Regenerate with:  REGULAIT_WRITE_API_ARTIFACTS=1 pnpm --filter @regulait/gateway exec vitest run src/openapi.test.ts
 //
 // Spec version: 1.0.0
-// Operations:   74
+// Operations:   75
 //
 // RESPONSES ARE `unknown` BY DESIGN. The gateway's routes declare request
 // schemas but not response schemas, so there is nothing to derive a response
@@ -438,6 +438,15 @@ export class GeneratedRegulAItClient extends BaseClient {
    */
   getV1ReportsRunsById<T = unknown>(id: string, options?: RequestOptions): Promise<T> {
     return this.request<T>("GET", `/v1/reports/runs/${encodeURIComponent(id)}`, undefined, options);
+  }
+
+  /**
+ * Responses-API-shaped compatibility surface (ADR-0287), on the same switch as /v1/chat/completions. Stateless: send store:false and the full history in input.
+ * @stability public-beta — auth: user
+ * @compat body/response shaped by the upstream vendor: https://platform.openai.com/docs/api-reference/responses
+   */
+  postV1Responses<T = unknown>(body: unknown, options?: RequestOptions): Promise<T> {
+    return this.request<T>("POST", `/v1/responses`, body, options);
   }
 
   /**
@@ -926,6 +935,11 @@ export const OPERATIONS: ReadonlyArray<{ id: string; method: string; path: strin
     "id": "getV1ReportsRunsById",
     "method": "GET",
     "path": "/v1/reports/runs/{id}"
+  },
+  {
+    "id": "postV1Responses",
+    "method": "POST",
+    "path": "/v1/responses"
   },
   {
     "id": "getV1Roles",
