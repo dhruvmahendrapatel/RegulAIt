@@ -65,3 +65,7 @@ output "lb_controller_helm_values" {
 output "ingress_manifest" {
   value = module.byoc.ingress_manifest
 }
+
+output "vpc_id" {
+  value = module.byoc.vpc_id
+}

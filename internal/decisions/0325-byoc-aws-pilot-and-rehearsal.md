@@ -77,12 +77,45 @@ named, tagged or designated production.
   goes to the vendor. The product has no channel to us (DATA_BOUNDARY.md §1) and the stack opens none. The brief's
   "metadata only to our control plane" has no counterpart in the product today. Adding one would be a new, opt-in data
   path that needs its own ADR, so it is not built (owner note).
-- **Egress posture (ADR-0062)**: `byoc` mode stays permissive in the app's own matrix. The network layer is strict by
-  default here, and the runbook sets the org tightening (`egressCompiledDefaultPolicy = strict`) during install. Making
-  `byoc` strict in the app itself would change ADR-0062 and the gateway, which is outside this infrastructure lane
-  (owner note).
+- **Egress posture (ADR-0062)**: strict on both layers by default. At the network layer, the firewall allow-list
+  passes only the listed hosts. At the app layer, the org setting `egressCompiledDefaultPolicy` defaults to `strict`
+  (since ADR-0180), so a `byoc` install also checks compiled vendor endpoints against `egress_allow_hosts`. The
+  runbook has the installer confirm it and add the same hosts there.
 - **Preflight** `infra/modules/byoc-aws/preflight/preflight.sh` (read-only): tools, signed-in account, region and
   zones, quotas, Network Firewall and endpoint availability, Bedrock model access, and free names.
+
+### PR 3: the install runbook and the rehearsal workflow
+
+- **[docs/deployment/BYOC_AWS_INSTALL.md](../../docs/deployment/BYOC_AWS_INSTALL.md)** is written for a platform
+  team that does not know RegulAIt. It runs about two hours hands-on plus about 45 minutes of waiting, and covers
+  prerequisites, quotas and Bedrock access, bundle verification, preflight, one `terraform apply`, the chart install
+  (images mirrored into the customer's ECR, secrets generated in place, the data-key warning), the internal ALB, the
+  first admin, Entra ID OIDC, the smoke test, upgrade and rollback, uninstall (the COMPLIANCE bucket is kept as
+  evidence), the support bundle, the data boundary and the known gaps.
+- **`infra/modules/byoc-aws/smoke/smoke-test.sh`** runs its checks from short-lived pods under the gateway's own
+  namespace and service account, using images by digest through the ECR pull-through cache. It checks that:
+  - nodes are Ready;
+  - the pod gets the gateway role through Pod Identity;
+  - the bucket has Object Lock, and (optionally) a delete of a probe object is refused;
+  - one Bedrock Converse call works;
+  - the database accepts TLS and refuses plain connections;
+  - an allow-listed host is reachable and `example.com` is not;
+  - default-deny NetworkPolicy is enforced.
+
+  **`support-bundle.sh`** collects statuses, events and the last 500 log lines, with no secret values and no state,
+  and the installer reviews it before sending.
+- **`.github/workflows/byoc-rehearsal.yml`** runs on manual dispatch, in the `rehearsal` environment, so a reviewer
+  must approve each run. It:
+  - exchanges the job's OIDC token for a three-hour session of the rehearsal role with the AWS CLI (no third-party
+    action);
+  - refuses any account but the one in the role ARN, and masks that account ID in the public logs;
+  - runs the preflight, applies the customer root with `rehearsal.tfvars.example` (Kubernetes API open to the
+    runner's /32 only), and runs the smoke test with the WORM probe;
+  - **always** destroys, after `infra/scripts/byoc-rehearsal-sweep.sh` empties the GOVERNANCE-mode rehearsal bucket
+    and the cache repositories (the sweep refuses any prefix that is not `regulait-rehearsal*`, and any bucket in
+    COMPLIANCE mode);
+  - lists anything still tagged `purpose=rehearsal`, and writes every step's start, duration and result to the run
+    summary, which the lane copies into its PR.
 
 ### Open source first (ADR-0176)
 
