@@ -420,4 +420,12 @@ an admin can change in `PUT /v1/org/settings` (pending migration `sap_business_s
 - **Reads, until the admin-confirmed read allow-list lands:** every tool on a marked server is still a write (review
   #798), so `sapReadsApproveFirst` changes nothing at call time today. It decides whether confirmed reads will be
   approve-first once the allow-list exists, and it is honoured by the seeded rule already.
+- **Unattributed writes and cost:** under `sapUnattributedWritesAllowed` such a write carries no project, so its cost
+  is attributed to no project (pillar 5's dashboard shows it as unattributed). That is the trade the relaxation makes,
+  and why it is stepped up and audited.
+- **Every reader agrees that an SAP tool is a write** (security review #798 at 3bf47251): the stored
+  `mcp_tools.kind` is 'write' for every tool on a marked server (set at mark, at manifest sync and on a manual tool
+  add), and the execution re-check (`approvalRuleQuorumsMatchingNow`) forces 'write' on such a server too, so a raised
+  write-only quorum retires consents given under the old one. Unmarking leaves the stored kinds at 'write' until the
+  next sync restores the upstream's hints.
 - Owner questions 1, 2, 3 and 6 are closed. 4, 5, 7 and 8 stay open.

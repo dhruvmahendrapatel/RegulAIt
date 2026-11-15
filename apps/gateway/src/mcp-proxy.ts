@@ -113,7 +113,7 @@ import {
 } from "./mcp-admission.js";
 import { definitionPinRefusal, recordDefinitionPins } from "./mcp-definition-pins.js";
 import { highRiskRefusal, recordRiskClassification } from "./mcp-high-risk.js";
-import { sapWriteRefusal } from "./mcp-sap-business.js";
+import { sapStoredToolKind, sapWriteRefusal, serverSystemClass } from "./mcp-sap-business.js";
 import { loadEntitlements } from "./entitlements.js";
 // ADR-0185 G3 — the non-tool MCP methods
 import {
@@ -2200,19 +2200,21 @@ export async function syncUpstreamTools(
     // ADR-0246 addendum: offensive tooling makes the server high-risk (over the whole served manifest)
     await recordRiskClassification(tx, serverId, tools, trigger);
     returned = pins.blockedTools.size > 0 ? tools.filter((t) => !pins.blockedTools.has(t.name)) : tools;
+    // security review #798: on an SAP business server every stored kind is 'write', whatever the hint says
+    const systemClass = await serverSystemClass(tx, serverId);
     for (const tool of returned) {
       await tx
         .insert(mcpTools)
         .values({
           serverId,
           name: tool.name,
-          kind: toolKind(tool),
+          kind: sapStoredToolKind(systemClass, toolKind(tool)),
           description: tool.description ?? null,
           inputSchema: tool.inputSchema,
         })
         .onConflictDoUpdate({
           target: [mcpTools.serverId, mcpTools.name],
-          set: { kind: toolKind(tool), description: tool.description ?? null, inputSchema: tool.inputSchema },
+          set: { kind: sapStoredToolKind(systemClass, toolKind(tool)), description: tool.description ?? null, inputSchema: tool.inputSchema },
         });
     }
     if (onStored) await onStored(tx, returned);

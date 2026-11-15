@@ -279,8 +279,12 @@ export async function approvalRuleQuorumsMatchingNow(
   const protocolKinds = Object.values(MCP_PROTOCOL_METHOD_GRANTS)
     .filter((m) => m.grant === call.toolName)
     .map((m) => m.kind);
-  const kind = tool?.kind ?? (protocolKinds.length ? (protocolKinds.includes("write") ? "write" : "read") : null);
-  if (!kind) return null;
+  const storedKind = tool?.kind ?? (protocolKinds.length ? (protocolKinds.includes("write") ? "write" : "read") : null);
+  if (!storedKind) return null;
+  // security review #798 (3bf47251): on an SAP business server every tool is a write, exactly as the proxy decides,
+  // so a write-only rule's raised quorum still binds the execution re-check of a tool the upstream calls read-only
+  const [server] = await db.select({ systemClass: mcpServers.systemClass }).from(mcpServers).where(eq(mcpServers.id, call.serverId));
+  const kind = server?.systemClass === "sap_business" ? "write" : storedKind;
   const { roleIds, teamIds } = await loadScopeMemberships(db, call.userId);
   const rows = await db
     .select()
