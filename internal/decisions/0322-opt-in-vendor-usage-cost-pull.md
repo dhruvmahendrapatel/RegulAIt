@@ -193,3 +193,33 @@ The routes are API only; screens are tracked on #453.
   stated reason and writes nothing; it never maps a field it does not recognise.
 - ADR-0069's "there is no vendor billing-API client in this repository" and ADR-0076's "Still no polling" are no
   longer true for tenants that opt in. Both ADRs' status lines point here.
+
+## As built — slice 2 (2026-11-15): foundation, Anthropic and OpenAI
+
+Migration `pending/vendor_usage_pull.sql` (numbered at merge); code in `apps/gateway/src/vendor-usage-pull.ts` and
+`packages/shared/src/vendor-usage.ts`; proof in `zz-adr0322-vendor-usage-pull.test.ts` (fake vendors only).
+
+- **The policy is its own singleton table** (`vendor_usage_pull_policy`) rather than an `org_settings` column, so it
+  can only be changed through its own route with a required reason, and the generic settings route cannot turn it on.
+- **Credentials** follow ADR-0195's `discovery_credentials` shape: compare-and-set rotation (`replacesCredentialId`),
+  revoke nulls the ciphertext and disables the connector. Both vendors' Admin keys are `write_capable`; storing one
+  without `acknowledgeWriteCapable: true` is a 409.
+- **Step-up** reuses the `settings_relax` kind with distinct facts (policy on, connector enabled, credential stored),
+  as discovery does; no new step-up kind.
+- **Anthropic**: `GET /v1/organizations/cost_report` grouped by `workspace_id` and `description`, called with the
+  guarded fetch (`anthropic-version: 2023-06-01`). Amounts are decimal strings in cents and are converted by moving
+  the decimal point, not by float division. The report has no person or key dimension, so a line resolves to a
+  person only through an admin alias for its workspace, and the metered overlap matches on workspace ids.
+- **OpenAI**: `GET /v1/organization/costs` grouped by `project_id`, `line_item` and `api_key_id`, through the
+  official SDK (`client.admin.organization.usage.costs`). The overlap matches on API key ids and project ids.
+- **Window**: the first pull reads `backfillDays` (default 7, at most 31); later pulls resume at the last pulled day
+  minus two days, which both vendors restate, and never ask for more than 31 days.
+- **Upsert key**: sha-256 of the vendor's own fact identity, unique per connector, so a re-pull updates amounts in
+  place. The fact identity of the Anthropic report includes every grouping field the vendor returns.
+- **Run errors** are one of a fixed set of codes (CHECK) plus a sentence RegulAIt wrote; no vendor body is stored.
+- **Consolidated read**: `overlaps_metered` lines are excluded from the imported side and disclosed as
+  `meteredOverlap` (count and amount by currency). Changing a connector's gateway-id lists re-marks its stored lines.
+- **Not built in this slice**: Claude Code per-user cost (the Claude Code report's API-billed cost is already inside
+  the cost report, so pulling it as spend would double count; it needs an attribution-only design); Anthropic's newer
+  Analytics API (`/v1/organizations/analytics/cost`, beta); the settings screen (#453); live-tenant tests (lane E11).
+

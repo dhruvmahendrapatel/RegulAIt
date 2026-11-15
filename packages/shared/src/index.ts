@@ -5051,3 +5051,5 @@ export * from "./supplier-portal.js";
 export * from "./fairness.js";
 // ADR-0261 (P37): third-party security telemetry ingest — the DefenseClaw JSONL parser and mapping (pure)
 export * from "./third-party-ingest/index.js";
+// ADR-0322: vendor usage/cost pull (catalogue, config and response schemas, normalisers)
+export * from "./vendor-usage.js";

@@ -90,6 +90,8 @@ import {
   eq,
   gte,
   importedCostLines,
+  vendorUsageConnectors,
+  vendorUsagePullPolicy,
   inArray,
   initiatives,
   isNotNull,
@@ -298,13 +300,13 @@ export async function scanCostLines(
 // Identity resolution context, loaded once per import / re-resolution pass
 // ---------------------------------------------------------------------------
 
-interface ResolutionContext {
+export interface ResolutionContext {
   userIdByEmail: Map<string, string>;
   aliases: VendorAliasRow[];
   domainRules: VendorDomainRuleRow[];
 }
 
-async function loadResolutionContext(db: Db): Promise<ResolutionContext> {
+export async function loadResolutionContext(db: Db): Promise<ResolutionContext> {
   const [userRows, aliasRows, ruleRows] = await Promise.all([
     db.select({ id: users.id, email: users.email }).from(users),
     db.select().from(vendorAccountAliases),
@@ -371,9 +373,10 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
     basisStatement: IMPORTED_BASIS_STATEMENT,
     piiPosture: COST_IMPORT_PII_POSTURE,
     posture:
-      "Every adapter here parses a file. NONE of them calls a vendor API: RegulAIt holds no billing-API credential " +
-      "for any vendor, so there is nothing to poll and no scheduled re-import. An import is an operator act with a " +
-      "file attached, and the consolidated view reports how stale each vendor's data is.",
+      "Every adapter here parses a file. NONE of them calls a vendor API, and without the separate, opt-in vendor " +
+      "pull (ADR-0322: off by default, refused when air-gapped, GET /v1/vendor-usage) there is no scheduled re-import. " +
+      "An import is an operator act with a file attached, and the consolidated view reports how stale each vendor's " +
+      "data is.",
   }));
 
   // =======================================================================
@@ -1351,13 +1354,42 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
               lt(importedCostLines.periodStart, window.end),
               eq(importedCostLines.resolvedUserId, onlyUserId),
               isNull(importedCostLines.supersededAt),
+              eq(importedCostLines.overlapsMetered, false),
             )
           : and(
               gte(importedCostLines.periodStart, window.start),
               lt(importedCostLines.periodStart, window.end),
               isNull(importedCostLines.supersededAt),
+              eq(importedCostLines.overlapsMetered, false),
             ),
       );
+
+    // ADR-0322 §5: pulled lines the vendor billed to the gateway's own keys are already in `usage_events`. They are
+    // excluded from the imported side above and disclosed here, by count and by currency, never silently.
+    const overlapRows = await db
+      .select({
+        currency: importedCostLines.currency,
+        n: sql<number>`count(*)::int`,
+        amount: sql<number>`coalesce(sum(${importedCostLines.amount}), 0)::float8`,
+      })
+      .from(importedCostLines)
+      .where(
+        onlyUserId
+          ? and(
+              gte(importedCostLines.periodStart, window.start),
+              lt(importedCostLines.periodStart, window.end),
+              eq(importedCostLines.resolvedUserId, onlyUserId),
+              isNull(importedCostLines.supersededAt),
+              eq(importedCostLines.overlapsMetered, true),
+            )
+          : and(
+              gte(importedCostLines.periodStart, window.start),
+              lt(importedCostLines.periodStart, window.end),
+              isNull(importedCostLines.supersededAt),
+              eq(importedCostLines.overlapsMetered, true),
+            ),
+      )
+      .groupBy(importedCostLines.currency);
 
     const [supersededInWindow] = await db
       .select({ n: sql<number>`count(*)::int` })
@@ -1420,6 +1452,12 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
     // STALENESS, mirroring ADR-0055's coverage scorecard: an operator has to be
     // able to see that nobody has uploaded a Copilot invoice since March, or
     // the imported side quietly becomes a stale number nobody questions.
+    const [pulling] = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(vendorUsageConnectors)
+      .innerJoin(vendorUsagePullPolicy, eq(vendorUsagePullPolicy.enabled, true))
+      .where(eq(vendorUsageConnectors.enabled, true));
+    const pullingConnectors = pulling?.n ?? 0;
     const vendorFreshness = await db
       .select({
         vendor: costImportBatches.vendor,
@@ -1446,6 +1484,13 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
           "They are marked, never deleted: each carries the line that replaced it, the run that decided it and a " +
           "stated reason, and the full list is readable at /v1/cost-imports/reconciliation.",
       },
+      meteredOverlap: {
+        linesExcluded: overlapRows.reduce((n, r) => n + r.n, 0),
+        byCurrency: overlapRows.map((r) => ({ currency: r.currency, lines: r.n, amount: r.amount })),
+        note:
+          "Lines a vendor pull found billed to the gateway's own keys, projects or workspaces are excluded from the " +
+          "imported side above: that spend already appears on the metered side. They are kept, never deleted.",
+      },
       staleness: {
         vendors: vendorFreshness.map((v) => ({
           vendor: v.vendor,
@@ -1457,8 +1502,13 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
               : Math.floor((Date.now() - new Date(v.lastImportedAt).getTime()) / (24 * 3600 * 1000)),
         })),
         note:
-          "There is no scheduled re-import: RegulAIt holds no vendor billing-API credential, so there is nothing to " +
-          "poll. The imported side of every figure above is exactly as fresh as the last file somebody uploaded.",
+          pullingConnectors === 0
+            ? "There is no scheduled re-import: no vendor pull connector is enabled (ADR-0322, off by default), so " +
+              "there is nothing to poll. The imported side of every figure above is exactly as fresh as the last " +
+              "file somebody uploaded."
+            : `${pullingConnectors} vendor pull connector(s) are enabled (ADR-0322): their vendors' imported side is ` +
+              "as fresh as the last successful pull (GET /v1/vendor-usage/connectors/:id/runs); every other vendor's " +
+              "is as fresh as the last file somebody uploaded.",
       },
       note:
         "There is deliberately no combined figure. `metered` was observed and priced by RegulAIt; `imported` was " +

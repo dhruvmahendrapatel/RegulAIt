@@ -375,6 +375,9 @@ export interface BuildAppOptions {
    * both unset, so the real DNS-pinned guarded fetch is used. */
   trainedDetectorResolve?: import("./egress-guard.js").EgressResolver;
   trainedDetectorFetch?: typeof fetch;
+  /** ADR-0322 test seams: the transport the vendor usage pull's guarded fetch sends through, and its pinned DNS */
+  vendorUsageFetch?: typeof fetch;
+  vendorUsageResolve?: import("./egress-guard.js").EgressResolver;
   /** ADR-0031: which peers may speak for the client via X-Forwarded-*.
    * Defaults to REGULAIT_TRUSTED_PROXIES (which itself defaults to trusting
    * nothing). Exposed so a test can assert both directions. */
@@ -623,6 +626,7 @@ import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
 import { registerEndpointMcpConfigRoutes } from "./endpoint-mcp-config.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
 import { registerCostImportRoutes } from "./cost-import.js";
+import { registerVendorUsagePullRoutes } from "./vendor-usage-pull.js";
 import { registerCostReconciliationRoutes } from "./cost-reconcile.js";
 import { registerTracingRoutes } from "./tracing.js";
 import { registerCompliancePackRoutes } from "./compliance-packs.js";
@@ -6193,6 +6197,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // under a CHECK that pins `basis = 'imported'`, so nothing it writes can ever
   // be read back as metered.
   registerCostImportRoutes(app, db);
+  // ADR-0322 — opt-in vendor usage/cost pull (off by default, refused when air-gapped). Admin-only by default (none of
+  // these routes is in NON_ADMIN_ROUTES); credentials are never returned.
+  registerVendorUsagePullRoutes(app, db, {
+    dataKey: opts.dataKey,
+    deps: {
+      ...(opts.vendorUsageFetch ? { fetchImpl: opts.vendorUsageFetch } : {}),
+      ...(opts.vendorUsageResolve ? { resolve: opts.vendorUsageResolve } : {}),
+    },
+  });
   // ADR-0076 — COST RECONCILIATION. Admin-only through the default gate: the
   // "run now" endpoint and the health/report read. Marks (never deletes)
   // cross-batch duplicate imported lines so a consolidated read cannot count

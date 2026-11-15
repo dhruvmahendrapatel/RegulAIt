@@ -367,6 +367,15 @@ export const INDIRECT_UI_CALLS = new Map([
  * until the entry is deleted, and KNOWN_UI_GAPS_MAX is lowered to match.
  */
 export const KNOWN_UI_GAPS = new Map([
+  ["GET /v1/vendor-usage", { does: "reads the vendor usage pull policy, the vendor catalogue and every connector (credentials never returned)", tracking: "ADR-0322 (lane E7): the brief is API-only; the vendor usage pull settings screen is posted on #453. RAISED FOR REVIEW: the master decides on the PR" }],
+  ["PUT /v1/vendor-usage/policy", { does: "turns vendor usage pull on (settings_relax step-up, refused when air-gapped) or off, with a required reason", tracking: "ADR-0322 (lane E7): the brief is API-only; the vendor usage pull settings screen is posted on #453. RAISED FOR REVIEW: the master decides on the PR" }],
+  ["POST /v1/vendor-usage/connectors", { does: "registers a vendor usage connector (disabled) with its schema-validated configuration", tracking: "ADR-0322 (lane E7): the brief is API-only; the vendor usage pull settings screen is posted on #453. RAISED FOR REVIEW: the master decides on the PR" }],
+  ["PUT /v1/vendor-usage/connectors/:connectorId/config", { does: "changes a connector's configuration (backfill, the gateway's own key/project/workspace ids) and re-marks stored lines", tracking: "ADR-0322 (lane E7): the brief is API-only; the vendor usage pull settings screen is posted on #453. RAISED FOR REVIEW: the master decides on the PR" }],
+  ["PUT /v1/vendor-usage/connectors/:connectorId/credential", { does: "stores or rotates a connector's vendor key (step-up, write-capable acknowledgement, encrypted, never returned)", tracking: "ADR-0322 (lane E7): the brief is API-only; the vendor usage pull settings screen is posted on #453. RAISED FOR REVIEW: the master decides on the PR" }],
+  ["DELETE /v1/vendor-usage/connectors/:connectorId/credential", { does: "revokes a connector's vendor key and disables the connector (no step-up)", tracking: "ADR-0322 (lane E7): the brief is API-only; the vendor usage pull settings screen is posted on #453. RAISED FOR REVIEW: the master decides on the PR" }],
+  ["PUT /v1/vendor-usage/connectors/:connectorId/enabled", { does: "enables (step-up, needs a live credential) or disables a connector", tracking: "ADR-0322 (lane E7): the brief is API-only; the vendor usage pull settings screen is posted on #453. RAISED FOR REVIEW: the master decides on the PR" }],
+  ["POST /v1/vendor-usage/connectors/:connectorId/pull", { does: "runs one pull now for a connector", tracking: "ADR-0322 (lane E7): the brief is API-only; the vendor usage pull settings screen is posted on #453. RAISED FOR REVIEW: the master decides on the PR" }],
+  ["GET /v1/vendor-usage/connectors/:connectorId/runs", { does: "lists a connector's last 50 pull runs", tracking: "ADR-0322 (lane E7): the brief is API-only; the vendor usage pull settings screen is posted on #453. RAISED FOR REVIEW: the master decides on the PR" }],
   ["GET /v1/usage-extractors", { does: "reads the org switch and every agent's active usage-mapping version", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["PUT /v1/usage-extractors/enabled", { does: "turns the usage extractor on (settings_relax step-up) or off", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["GET /v1/agents/:agentId/usage-extractor/versions", { does: "lists an agent's usage-mapping versions with each one's latest sample test", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
@@ -449,7 +458,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 52; // main's 48 (43 + ADR-0303 L11 5 SIEM routes) + ADR-0256 (P32) 4, master decision on #725 2026-11-14
+export const KNOWN_UI_GAPS_MAX = 61; // + ADR-0322 (lane E7) 9 vendor usage pull routes, raised for review on the PR; main's 48 (43 + ADR-0303 L11 5 SIEM routes) + ADR-0256 (P32) 4, master decision on #725 2026-11-14
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 

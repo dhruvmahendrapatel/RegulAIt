@@ -1986,6 +1986,12 @@ export const auditLog = pgTable(
         // ADR-0303: a SIEM destination (created, enabled, disabled, secret rotated, dead-lettered, recovered). Plain
         // text column — no DDL.
         "siem_destination",
+        // ADR-0322: the vendor usage pull policy, a connector (created, configured, enabled, disabled), its credential
+        // (stored, replaced, revoked; never the secret) and each pull run. Plain text column — no DDL.
+        "vendor_usage_pull_policy",
+        "vendor_usage_connector",
+        "vendor_usage_credential",
+        "vendor_usage_pull_run",
         // ADR-0193 (I4): a content provenance record (objectId = the record) and a trust-tier change (a source's
         // tier, or the write floor). Plain text column — no DDL.
         "content_provenance",
@@ -10253,8 +10259,12 @@ export const costImportBatches = pgTable(
     appliedAt: timestamp("applied_at", { withTimezone: true }),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     revokedByUserId: uuid("revoked_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** ADR-0322: 'file' for an upload (ADR-0069), 'pull' for a scheduled or manual vendor API pull. Either way the
+     * lines are restated vendor documents, basis 'imported'. */
+    origin: text("origin", { enum: ["file", "pull"] }).notNull().default("file"),
   },
   (t) => [
+    check("cost_import_batches_origin_check", sql`${t.origin} IN ('file', 'pull')`),
     index("cost_import_batches_created_idx").on(t.createdAt),
     index("cost_import_batches_status_idx").on(t.status),
     index("cost_import_batches_vendor_idx").on(t.vendor),
@@ -10334,8 +10344,18 @@ export const importedCostLines = pgTable(
     supersededByLineId: uuid("superseded_by_line_id"),
     supersededRunId: uuid("superseded_run_id"),
     supersededReason: text("superseded_reason"),
+    // --- ADR-0322: pulled lines ---------------------------------------------------------------------------------
+    // A pulled line names its connector and the vendor's own fact identity; the partial unique index below makes a
+    // re-pull of the same window an upsert rather than a second copy. `overlaps_metered` marks spend the vendor
+    // billed to a key, project or workspace the gateway itself holds: that spend is already in `usage_events`, so the
+    // consolidated read excludes the line from the imported side and discloses the exclusion.
+    pullConnectorId: uuid("pull_connector_id").references(() => vendorUsageConnectors.id, { onDelete: "restrict" }),
+    factKey: text("fact_key"),
+    overlapsMetered: boolean("overlaps_metered").notNull().default(false),
   },
   (t) => [
+    check("imported_cost_lines_pull_fact_check", sql`(${t.pullConnectorId} IS NULL) = (${t.factKey} IS NULL)`),
+    uniqueIndex("imported_cost_lines_pull_fact_uq").on(t.pullConnectorId, t.factKey).where(sql`${t.pullConnectorId} IS NOT NULL`),
     index("imported_cost_lines_batch_idx").on(t.batchId),
     index("imported_cost_lines_user_idx").on(t.resolvedUserId, t.periodStart),
     index("imported_cost_lines_period_idx").on(t.periodStart, t.periodEnd),
@@ -16560,3 +16580,143 @@ export const resourceRateReservations = pgTable(
     ),
   ],
 );
+// ===== ADR-0322 (lane E7): opt-in vendor usage/cost pull ==========================================================
+/** The one org-level switch (singleton row). OFF by default; on is a step-up, audited, refused under air_gapped. */
+export const vendorUsagePullPolicy = pgTable(
+  "vendor_usage_pull_policy",
+  {
+    id: text("id").primaryKey().default("singleton"),
+    enabled: boolean("enabled").notNull().default(false),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [check("vendor_usage_pull_policy_singleton_check", sql`${t.id} = 'singleton'`)],
+);
+
+export const VENDOR_USAGE_VENDORS = ["anthropic", "openai", "github_copilot", "cursor", "openai_codex", "aws_cur"] as const;
+
+/**
+ * One vendor account an admin registered for pulling. Disabled when created.
+ *
+ * 3NF exception, deliberate: `public_config` is a schema-validated configuration document (the vendor's
+ * non-secret settings and the list of vendor key/project/workspace ids the gateway itself uses), validated by
+ * `vendorUsagePublicConfigSchema` in @regulait/shared on every write.
+ */
+export const vendorUsageConnectors = pgTable(
+  "vendor_usage_connectors",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    vendor: text("vendor", { enum: VENDOR_USAGE_VENDORS }).notNull(),
+    name: text("name").notNull(),
+    enabled: boolean("enabled").notNull().default(false),
+    publicConfig: jsonb("public_config").$type<Record<string, unknown>>().notNull().default({}),
+    /** the end of the last window pulled successfully; the next pull resumes here */
+    pulledThrough: timestamp("pulled_through", { withTimezone: true }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "vendor_usage_connectors_vendor_check",
+      sql`${t.vendor} IN ('anthropic', 'openai', 'github_copilot', 'cursor', 'openai_codex', 'aws_cur')`,
+    ),
+    check("vendor_usage_connectors_public_config_check", sql`jsonb_typeof(${t.publicConfig}) = 'object'`),
+    check("vendor_usage_connectors_name_check", sql`char_length(${t.name}) BETWEEN 1 AND 120`),
+    uniqueIndex("vendor_usage_connectors_name_uq").on(sql`lower(${t.name})`),
+  ],
+);
+export type VendorUsageConnectorRow = typeof vendorUsageConnectors.$inferSelect;
+
+/** The vendor key, under the data key. Never returned by any route; destroyed (NULL) on revoke. */
+export const vendorUsageCredentials = pgTable(
+  "vendor_usage_credentials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectorId: uuid("connector_id")
+      .notNull()
+      .references(() => vendorUsageConnectors.id, { onDelete: "cascade" }),
+    /** a data-key envelope (CIPHERTEXT_COLUMNS); never returned by any route, destroyed on revoke */
+    secretCiphertext: text("secret_ciphertext"),
+    scopePosture: text("scope_posture", { enum: ["read_only", "write_capable", "unverified"] }).notNull(),
+    writeCapableAcknowledgedAt: timestamp("write_capable_acknowledged_at", { withTimezone: true }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: uuid("revoked_by").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    check("vendor_usage_credentials_scope_check", sql`${t.scopePosture} IN ('read_only', 'write_capable', 'unverified')`),
+    check(
+      "vendor_usage_credentials_ack_check",
+      sql`${t.scopePosture} <> 'write_capable' OR ${t.writeCapableAcknowledgedAt} IS NOT NULL`,
+    ),
+    check("vendor_usage_credentials_live_secret_check", sql`${t.revokedAt} IS NOT NULL OR ${t.secretCiphertext} IS NOT NULL`),
+    check("vendor_usage_credentials_revoked_check", sql`${t.revokedAt} IS NULL OR ${t.secretCiphertext} IS NULL`),
+    uniqueIndex("vendor_usage_credentials_live_uq").on(t.connectorId).where(sql`${t.revokedAt} IS NULL`),
+  ],
+);
+
+export const VENDOR_USAGE_PULL_ERROR_CODES = [
+  "disabled",
+  "air_gapped",
+  "no_credential",
+  "data_key_unavailable",
+  "egress_refused",
+  "unauthorized",
+  "forbidden",
+  "rate_limited",
+  "http_error",
+  "bad_response",
+  "response_too_large",
+  "network_error",
+  "page_limit",
+  "scan_blocked",
+  "internal",
+] as const;
+
+/**
+ * The pull run ledger, open-first like `scheduler_runs`. An error is a fixed code plus RegulAIt-authored detail,
+ * never vendor response text, so no third-party bytes (and no echoed key) can land here.
+ */
+export const vendorUsagePullRuns = pgTable(
+  "vendor_usage_pull_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectorId: uuid("connector_id")
+      .notNull()
+      .references(() => vendorUsageConnectors.id, { onDelete: "cascade" }),
+    trigger: text("trigger", { enum: ["schedule", "manual"] }).notNull(),
+    status: text("status", { enum: ["running", "succeeded", "failed", "refused"] }).notNull().default("running"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    windowStart: timestamp("window_start", { withTimezone: true }),
+    windowEnd: timestamp("window_end", { withTimezone: true }),
+    batchId: uuid("batch_id").references(() => costImportBatches.id, { onDelete: "set null" }),
+    pages: integer("pages").notNull().default(0),
+    linesUpserted: integer("lines_upserted").notNull().default(0),
+    overlapLines: integer("overlap_lines").notNull().default(0),
+    errorCode: text("error_code", { enum: VENDOR_USAGE_PULL_ERROR_CODES }),
+    errorDetail: text("error_detail"),
+    requestedBy: uuid("requested_by").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    check("vendor_usage_pull_runs_trigger_check", sql`${t.trigger} IN ('schedule', 'manual')`),
+    check("vendor_usage_pull_runs_status_check", sql`${t.status} IN ('running', 'succeeded', 'failed', 'refused')`),
+    check(
+      "vendor_usage_pull_runs_error_code_check",
+      sql`${t.errorCode} IS NULL OR ${t.errorCode} IN ('disabled', 'air_gapped', 'no_credential', 'data_key_unavailable', 'egress_refused', 'unauthorized', 'forbidden', 'rate_limited', 'http_error', 'bad_response', 'response_too_large', 'network_error', 'page_limit', 'scan_blocked', 'internal')`,
+    ),
+    check(
+      "vendor_usage_pull_runs_error_detail_check",
+      sql`${t.errorDetail} IS NULL OR char_length(${t.errorDetail}) <= 500`,
+    ),
+    check(
+      "vendor_usage_pull_runs_outcome_check",
+      sql`(${t.status} IN ('failed', 'refused')) = (${t.errorCode} IS NOT NULL)`,
+    ),
+    index("vendor_usage_pull_runs_connector_idx").on(t.connectorId, t.startedAt),
+  ],
+);
+export type VendorUsagePullRunRow = typeof vendorUsagePullRuns.$inferSelect;
+// ===== end ADR-0322 =================================================================================================
