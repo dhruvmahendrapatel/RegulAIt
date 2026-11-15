@@ -1,0 +1,23 @@
+# Copy to customer.tfvars and fill in. Every value not listed takes its secure default.
+account_id = "<your 12-digit AWS account id>"
+region     = "<region, e.g. us-east-1>"
+
+# Your installer and admin roles (SSO roles) that should be cluster-admin.
+cluster_admin_principal_arns = ["arn:aws:iam::<account>:role/aws-reserved/sso.amazonaws.com/<your-admin-role>"]
+
+# Leave empty for a private Kubernetes API (reach it over VPN/bastion). Or list
+# your office or VPN egress CIDRs (never 0.0.0.0/0).
+cluster_endpoint_public_access_cidrs = []
+
+# Bedrock models enabled in your account (Bedrock console > Model access).
+bedrock_model_ids = ["<model or inference-profile id>"]
+
+# Hosts the gateway may reach besides AWS (Entra ID sign-in is needed for SSO).
+# Add your PM tool and Git host here, e.g. "dev.azure.com", ".atlassian.net", "github.com".
+egress_allowed_domains = ["login.microsoftonline.com"]
+
+tags = {
+  project    = "regulait"
+  managed-by = "terraform"
+  owner      = "<team>"
+}
