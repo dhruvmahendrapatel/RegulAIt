@@ -381,6 +381,11 @@ async function startEngineTaskTx(
     if (isSubjectRun !== Boolean(body.subject)) {
       return { kind: "refused_request" as const, status: 422, error: "engine_task_input_invalid", detail: "an admission scan's input places the run's subject file; no other run's does" };
     }
+    // security review of #843: the gateway's subject file is a subject run's ONLY input. The drivers read fixed names
+    // at the input root, so a runner file there (or anywhere) could stand in for, or add to, what is scanned
+    if (isSubjectRun && body.files.length > 0) {
+      return { kind: "refused_request" as const, status: 422, error: "engine_task_input_invalid", detail: "an admission scan's only input is the gateway's subject file; the runner adds no files" };
+    }
     if (m.needsModelAccess !== (body.secret !== null)) {
       return { kind: "refused_request" as const, status: 422, error: "engine_task_input_invalid", detail: "the task secret is the run's key: present exactly when the engine calls models" };
     }
@@ -394,9 +399,9 @@ async function startEngineTaskTx(
     // ADR-0242 L4.3: the subject file, built from the gateway's own records and checked against the run's digest
     const subjectInput = isSubjectRun ? await subjectInputTx(tx, run) : null;
     if (subjectInput?.ok) {
-      const base = body.subject!.path.split("/").pop();
-      if (base !== subjectInput.file) {
-        return { kind: "refused_request" as const, status: 422, error: "engine_task_input_invalid", detail: `the subject file is placed as ${subjectInput.file}` };
+      // exactly the name the driver reads, at the input root: a nested copy would leave the root name to anything else
+      if (body.subject!.path !== subjectInput.file) {
+        return { kind: "refused_request" as const, status: 422, error: "engine_task_input_invalid", detail: `the subject file is placed as ${subjectInput.file}, at the input root` };
       }
       files.push({ meta: { path: body.subject!.path, size: subjectInput.bytes.length, sha256: subjectInput.sha256 }, source: { kind: "inline", bytes: subjectInput.bytes } });
     }

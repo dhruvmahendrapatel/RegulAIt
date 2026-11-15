@@ -33,6 +33,7 @@ import { startEngineTaskRig, type EngineTaskRig } from "./testing/engine-task-ri
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { enqueueAdmissionScanRun, setAdmissionScanRuntime, skillMarkdown } from "./admission-scan-runs.js";
+import { startEngineTask } from "./engine-tasks.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -184,6 +185,30 @@ describe("ADR-0242 L4.3 the subject target", () => {
     expect((await db.select().from(builderSkills).where(eq(builderSkills.id, s.id)))[0]!.admissionState).toBe("held");
     // a decisive scan exists: the same digest is not queued again
     expect(await enqueueAdmissionScanRun(db, { kind: "builder_skill", id: s.id, digest: s.contentDigest })).toEqual({ kind: "already_scanned" });
+  });
+
+  it("#843 security review: the runner adds no input files and places the subject only at the input root", async () => {
+    await setEngine("skillscanner", true);
+    const s = await saveSkill("Sort the table by its last column.");
+    const lease = await client.lease(SK_BUILD);
+    expect(lease).not.toBeNull();
+    const [run] = await db.select().from(engineRuns).where(eq(engineRuns.id, lease!.runId));
+    const deps = { manifest: () => MANIFEST, artifactStore: () => null, endRunTx: async () => null, notifyEnded: async () => undefined };
+    const decoy = Buffer.from("---\nname: decoy\ndescription: benign\n---\nnothing\n").toString("base64");
+    // (b) a runner file next to the subject (a decoy SKILL.md at the root, or any other file) is refused
+    for (const files of [[{ path: "SKILL.md", data: decoy }], [{ path: "notes.txt", data: decoy }]]) {
+      const out = await startEngineTask(db, deps, run!.runnerId!, run!.id, { files, artifact: null, subject: { path: "x/SKILL.md" }, secret: null });
+      expect(out).toMatchObject({ kind: "refused_request", status: 422, error: "engine_task_input_invalid" });
+    }
+    // (a) the subject nested under another directory is refused: the driver reads the root name
+    const nested = await startEngineTask(db, deps, run!.runnerId!, run!.id, { files: [], artifact: null, subject: { path: "x/SKILL.md" }, secret: null });
+    expect(nested).toMatchObject({ kind: "refused_request", status: 422, error: "engine_task_input_invalid" });
+    // nothing was placed by the refusals; the honest placement (root path, no files) still runs
+    expect((await db.select().from(engineRuns).where(eq(engineRuns.id, run!.id)))[0]!.taskPlacementId).toBeNull();
+    expect(await rig!.place(run!.id)).not.toBeNull();
+    // end the run so the next case's lease is not blocked by it
+    expect(await client.result(run!.id, envelope(run!.id, fixture("skillscanner-bad")))).toBe(200);
+    expect((await db.select().from(builderSkills).where(eq(builderSkills.id, s.id)))[0]!.admissionState).toBe("held");
   });
 
   it("a superseded digest ends the run not_run at lease", async () => {

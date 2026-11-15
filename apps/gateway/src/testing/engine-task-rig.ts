@@ -121,9 +121,10 @@ export async function startEngineTaskRig(o: EngineTaskRigOptions): Promise<Engin
     if (run.targetKind !== "subject") await ensureProject(run);
     const m = manifest()[run.engineId as EngineId];
     const body = {
-      files: [{ path: `${runId}/job.json`, data: Buffer.from(JSON.stringify({ runId })).toString("base64") }],
+      // a subject run's only input is the gateway's subject file, at the input root (#843 security review)
+      files: run.targetKind === "subject" ? [] : [{ path: `${runId}/job.json`, data: Buffer.from(JSON.stringify({ runId })).toString("base64") }],
       artifact: run.targetKind === "artifact" ? { path: `${runId}/artifact.pkl` } : null,
-      subject: run.targetKind === "subject" ? { path: `${runId}/${run.engineId === "mcpscanner" ? "tools.json" : "SKILL.md"}` } : null,
+      subject: run.targetKind === "subject" ? { path: run.engineId === "mcpscanner" ? "tools.json" : "SKILL.md" } : null,
       secret: m.needsModelAccess ? `rig-${createHash("sha256").update(runId).digest("hex").slice(0, 24)}` : null,
     };
     setEngineTaskPlacementAffinityForTest([executorId]);

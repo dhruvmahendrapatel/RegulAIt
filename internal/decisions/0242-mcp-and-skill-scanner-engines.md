@@ -373,7 +373,11 @@ The gateway can now run the two admission-scan engines itself. Pending migration
 - **Lease and task start.** The gateway builds the run's one input file from its own records: `tools.json` from the
   snapshot, or `SKILL.md` from the stored name and body or a pinned copy with that digest. It checks the file against
   the run's digest. The lease names it (`subject: {file, sha256, size}`) and carries no key. The task input places it
-  inline, so the runner never supplies its bytes. A subject that is gone, whose digest is superseded, or whose
+  inline, so the runner never supplies its bytes.
+  **Security review of #843 (2026-11-15):** that file is the run's only input. Task start refuses any runner `files`
+  on a subject run, and the subject's path must be exactly `tools.json` or `SKILL.md` at the input root (the names
+  the drivers read), so a runner cannot place a decoy for the scanner to read instead. A driver-echoed input digest
+  checked at result time is left for the runner-shim slice. A subject that is gone, whose digest is superseded, or whose
   snapshot is missing ends the run `not_run` (`subject_gone`, `subject_superseded`, `subject_input_gone`).
 - **Placement.** A subject run has no project, so its placement names its own sensitivity: `confidential`, the floor
   whose shipped class is the gVisor sandbox §6.1 asks for. The org's floors still decide the class
