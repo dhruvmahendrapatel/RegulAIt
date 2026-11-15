@@ -21,6 +21,20 @@ useDefault = true
 # --- Test fixtures: synthetic secrets the scrub/DLP/redaction tests feed in ---
 
 [[allowlists]]
+# ADR-0326: the first commit of the live harness (PR #857) fed these synthetic values to its redaction self-test. The
+# test now builds its fixtures at run time, but the commit stays in the PR's scanned range, so its exact values are
+# listed here for that one file only.
+description = "Synthetic redaction-test inputs in the live harness self-test (ADR-0326)"
+condition = "AND"
+paths = ['''^apps/gateway/live/live-env\.live\.test\.ts$''']
+regexTarget = "secret"
+regexes = [
+  '''^sk-test-123456789$''',
+  '''^abcdefghijkl$''',
+  '''^OnBhdHBhdHBhdA==$''',
+]
+
+[[allowlists]]
 description = "Synthetic test credentials: redaction, DLP and scrub test inputs"
 condition = "AND"
 paths = [
