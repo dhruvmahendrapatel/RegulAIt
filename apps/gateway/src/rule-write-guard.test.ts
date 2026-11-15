@@ -257,6 +257,15 @@ const AUDITED_WRITERS: AuditedWriter[] = [
       "a random id and no ON CONFLICT, which cannot yet have versions.",
   },
   {
+    file: "agent-registry-routes.ts",
+    method: "insert",
+    expr: "agents",
+    why:
+      "ADR-0314 POST /v1/agent-registry/records/:recordId/import — CREATE ONLY: a fresh row with a random id, " +
+      "disabled and `proposed`, no grant rows. Its ON CONFLICT (name) DO NOTHING writes nothing on a clash (the " +
+      "route answers 409), so it never touches an existing agent and a new row cannot yet have versions.",
+  },
+  {
     file: "org-settings.ts",
     method: "update",
     expr: "table",
