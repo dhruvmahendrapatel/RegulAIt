@@ -97,6 +97,8 @@ export const APPROVAL_OBJECT_TYPES = [
   "eval_run",
   // ADR-0208 (G7): a proposed compliance-profile version, applied only when its named reviewer approves
   "compliance_profile",
+  // ADR-0251: a model call held by a model approval rule, released once by the identical re-submitted call
+  "model_call",
 ] as const;
 export type ApprovalObjectType = (typeof APPROVAL_OBJECT_TYPES)[number];
 
@@ -118,6 +120,7 @@ export const APPROVAL_OBJECT_TYPE_LABELS: Record<ApprovalObjectType, string> = {
   engine_run: "engine run (sensitive set or large budget)",
   eval_run: "eval run (offensive built-in dataset)",
   compliance_profile: "compliance profile change",
+  model_call: "model call",
 };
 
 /**
@@ -382,6 +385,16 @@ export type ApprovalTargetRef =
       connectorId: string;
       providerKind: string | null;
       baseUrl: string | null;
+    }
+  /**
+   * ADR-0251 — a model call's target: the agent, its provider and its configured model id. Repointing an agent at
+   * another provider or model under the same id is a new target, so a consent signed for the old one goes stale.
+   */
+  | {
+      kind: "model";
+      agentId: string;
+      provider: string | null;
+      model: string | null;
     };
 
 /** The identity of the POLICY CONTEXT a consent was granted under. */
@@ -465,7 +478,9 @@ export function approvalContextDigest(ref: ApprovalContextRef): string {
               providerKind: ref.target.providerKind ?? null,
               baseUrl: ref.target.baseUrl ?? null,
             }
-          : {
+          : ref.target.kind === "model"
+            ? { kind: ref.target.kind, agentId: ref.target.agentId, provider: ref.target.provider ?? null, model: ref.target.model ?? null }
+            : {
               kind: ref.target.kind,
               serverId: ref.target.serverId,
               url: ref.target.url,

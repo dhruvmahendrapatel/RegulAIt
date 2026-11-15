@@ -1,7 +1,7 @@
 /**
  * ADR-0186 A (dual control) and B (passkey-signed approvals) — slice A2+B.
  *
- * A TOOL-CALL APPROVAL (`mcp_tool`, `connector_call`) is decided here, not by
+ * A TOOL-CALL APPROVAL (`mcp_tool`, `connector_call`, `model_call`) is decided here, not by
  * the generic one-row-one-decision write in `decideOneApproval` (app.ts calls
  * `decideToolCallApproval` for these kinds; every other kind is unchanged).
  *
@@ -26,7 +26,7 @@
  *
  * The WebAuthn challenge is base64url(sha256(canonical approvalSigningPayload
  * {v, approvalId, decision, argumentsDigest, contextDigest, serverId |
- * connectorId, toolName, nonce})), user verification required, RP from
+ * connectorId | agentId, toolName, nonce})), user verification required, RP from
  * `REGULAIT_PUBLIC_URL` (unset → 409 `passkey_rp_unconfigured`, fail closed).
  * The decide (`passkey: {challengeId, response}`) claims the ceremony once,
  * verifies the assertion against one of the decider's unrevoked passkeys with
@@ -123,6 +123,16 @@ type ApprovalRow = typeof approvals.$inferSelect;
 type Q = Pick<Db, "select" | "update" | "insert">;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** the one call target a tool-call approval's signed payload names: an MCP server, a connector or (ADR-0251) a model */
+export function signingTargetOf(
+  objectType: string,
+  ids: { serverId?: string | null; connectorId?: string | null; agentId?: string | null },
+): { serverId?: string | null; connectorId?: string | null; agentId?: string | null } {
+  if (objectType === "connector_call") return { connectorId: ids.connectorId ?? null };
+  if (objectType === "model_call") return { agentId: ids.agentId ?? null };
+  return { serverId: ids.serverId ?? null };
+}
 
 /** is this approval a TOOL-CALL approval (the kinds signatures and quorum apply to)? */
 export function isToolCallApproval(row: { objectType: string }): boolean {
@@ -428,7 +438,7 @@ export async function auditQuorumUnsatisfiableAtQueue(
     userId: string;
     req: ToolApprovalRequirements;
     projectId: string | null;
-    target: { serverId: string; toolName: string } | { connectorId: string; toolName: string };
+    target: { serverId: string; toolName: string } | { connectorId: string; toolName: string } | { agentId: string; toolName: string };
   },
 ): Promise<string> {
   const reason = quorumUnsatisfiableReason(input.req, input.target.toolName);
@@ -436,7 +446,9 @@ export async function auditQuorumUnsatisfiableAtQueue(
     userId: input.userId,
     ...("serverId" in input.target
       ? { objectType: "mcp_tool" as const, serverId: input.target.serverId, toolName: input.target.toolName }
-      : { objectType: "connector" as const, objectId: input.target.connectorId, toolName: input.target.toolName }),
+      : "connectorId" in input.target
+        ? { objectType: "connector" as const, objectId: input.target.connectorId, toolName: input.target.toolName }
+        : { objectType: "agent" as const, objectId: input.target.agentId, toolName: input.target.toolName }),
     detail: {
       phase: "approval-quorum", receiptClass:"decision",
       quorum: input.req.quorum,
@@ -460,7 +472,7 @@ export async function auditQuorumUnsatisfiableAtQueue(
 
 /** the payload an approver signs for `row` (throws when the row cannot be bound: a legacy row) */
 export function signingPayloadForRow(
-  row: Pick<ApprovalRow, "id" | "argumentsDigest" | "contextDigest" | "serverId" | "connectorId" | "toolName" | "objectType" | "approvalScope">,
+  row: Pick<ApprovalRow, "id" | "argumentsDigest" | "contextDigest" | "serverId" | "connectorId" | "agentId" | "toolName" | "objectType" | "approvalScope">,
   decision: "approved" | "denied",
   nonce: string,
 ): ApprovalSigningPayload {
@@ -470,7 +482,7 @@ export function signingPayloadForRow(
     // decision 29 (finding 51): a tool-scoped consent signs the wildcard, not the queueing call's arguments
     argumentsDigest: row.argumentsDigest ? signedArgumentsDigest(row.approvalScope, row.argumentsDigest) : "",
     contextDigest: row.contextDigest ?? "",
-    ...(row.objectType === "connector_call" ? { connectorId: row.connectorId } : { serverId: row.serverId }),
+    ...signingTargetOf(row.objectType, row),
     toolName: row.toolName ?? "",
     nonce,
   });
@@ -1001,6 +1013,8 @@ export interface CallFacts {
   contextDigest: string;
   serverId?: string | null;
   connectorId?: string | null;
+  /** ADR-0251: the model a `model_call` consent is spent against */
+  agentId?: string | null;
   toolName: string;
 }
 
@@ -1189,7 +1203,7 @@ export async function recheckApprovalSignatures(db: Q, row: ApprovalRow, call: C
         // tool (the wildcard); the scope itself is bound by the context digest just below
         argumentsDigest: signedArgumentsDigest(row.approvalScope, call.argumentsDigest),
         contextDigest: call.contextDigest,
-        ...(row.objectType === "connector_call" ? { connectorId: call.connectorId ?? null } : { serverId: call.serverId ?? null }),
+        ...signingTargetOf(row.objectType, call),
         toolName: call.toolName,
         nonce: String(stored.nonce ?? ""),
       });
