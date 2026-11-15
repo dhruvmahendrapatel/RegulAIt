@@ -36,6 +36,7 @@
  *   its prompt/parse halves are unit-tested, but it has never scored a real
  *   model's output. Its judgment is therefore unproven; only its plumbing is.
  */
+import { hashPrompt } from "./prompt-hash.js";
 import crypto from "node:crypto";
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
@@ -154,10 +155,6 @@ const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 /** how much of a model output is retained on a result row */
 const OUTPUT_SNIPPET_MAX = 4000;
 
-function hashPrompt(prompt: string | null): string | null {
-  if (!prompt) return null;
-  return crypto.createHash("sha256").update(prompt).digest("hex").slice(0, 16);
-}
 
 // ---------------------------------------------------------------------------
 // The judge, behind an interface

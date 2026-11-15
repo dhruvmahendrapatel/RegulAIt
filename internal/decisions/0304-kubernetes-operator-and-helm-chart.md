@@ -189,9 +189,11 @@ touches a cloud account.
 2. **API group domain.** `deploy.regulait.ai` follows the domain used elsewhere in the repo; renaming after customers
    install it means a CRD migration.
 3. **Backup target.** The CronJob writes `pg_dump` output to a PVC. ADR-0035's S3 target, and a customer's own object
-   store, need a credential story that belongs with P2.
+   store, need a credential story that belongs with P2. **Closed by [ADR-0305](0305-helm-oci-distribution-and-s3-backups.md)
+   (2026-11-15): S3 in the customer's account, credentials from IRSA or EKS Pod Identity.**
 4. **Distribution.** Where the operator image and the chart are published (ghcr OCI, a bundle payload, both) is a
-   release decision and is not built here.
+   release decision and is not built here. **Closed by [ADR-0305](0305-helm-oci-distribution-and-s3-backups.md) for the
+   chart (2026-11-15): both, a signed OCI artifact and the bundle payload.** The operator image's publication stays open.
 
 ## Consequences
 
@@ -243,7 +245,30 @@ touches a cloud account.
   - Until schema `/2`, edit rights on a `RegulaitInstallation` equal deploy rights with the data key.
   - Downgrade protection trusts `status.installedVersion`, so `regulaitinstallations/status` patch rights belong to
     the operator alone.
+- The chart applies the same egress rules at render time. Templates cannot do IPv6 containment, so an IPv6 entry must
+  be a unique-local /48 or longer outside `fd00:ec2::/32`, which is stricter than the operator. `NOTES.txt` reports
+  the unsigned image digest, the registry limit, and any public egress after every install and upgrade.
 - Versions are compared with `golang.org/x/mod/semver`. Unlike the shell verifier, it orders a pre-release below its
   release, so `1.0.0-rc.1` after `1.0.0` is a downgrade. That is stricter, and it is deliberate.
 - The gateway gains `migrate-job.ts`, a thin entrypoint over a testable `migrate-job-run.ts`. It refuses to run without
   `DATABASE_URL` instead of falling back to a default database, and it never logs the URL.
+
+## As built (Helm chart, lane L12 PR 3)
+
+- `deploy/helm/regulait/` has a `values.schema.json` with `additionalProperties: false` at every level, so a secret
+  value cannot be passed as a value. `mode`, `version`, the image and `secrets.name` have no default.
+- The three NetworkPolicies of §2b are ordinary release resources, not hooks as §2b and §5 first said. Hook resources
+  are deleted and recreated on every upgrade (`before-hook-creation`), which would leave the running gateway briefly
+  un-isolated, and they outlive `helm uninstall`. Only a copy of the database-clients policy,
+  `<release>-hook-database-clients`, is a `pre-install,pre-upgrade` hook at weight -10, so the first migration Job
+  (weight 0) never runs unpoliced; it is deleted once the hook phase succeeds. This follows the code review on #792.
+- The downgrade check reads the installed version from `bundle.installedVersion` when set, else the running
+  Deployment's version label through `lookup`. An upgrade with neither (`helm template --is-upgrade`, `--dry-run`,
+  GitOps renderers, where `lookup` is empty) fails the render rather than skip the check. The explicit value is the
+  stronger source, since the label is writable by anyone with write access to the namespace (security review on #792).
+- The migration Job uses the namespace's default ServiceAccount with no token mounted, because the release's own
+  ServiceAccount does not exist while pre-install hooks run.
+- `operator.enabled` renders the CRD and the Role from `files/crd.yaml` and `files/role.yaml`. These are copies of the
+  operator's generated files, and `tests/render-test.sh` fails when they differ.
+- In the templates, the air-gapped private-range check is prefix-pattern based (10/8, 172.16/12, 192.168/16,
+  100.64/10, fc00::/7, each with a minimum prefix length). The operator does the exact `netip` containment check.

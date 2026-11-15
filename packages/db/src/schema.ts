@@ -1128,8 +1128,56 @@ export const mcpRegistries = pgTable("mcp_registries", {
     enum: ["ok", "failed", "refused", "skipped"],
   }),
   lastSyncDetail: jsonb("last_sync_detail"),
+  /** ADR-0256 (the `mcp_catalogue_seed` migration): a curated registry, or a community list whose entries are UNVETTED */
+  listingKind: text("listing_kind", { enum: ["registry", "community"] }).notNull().default("registry"),
+  /** ADR-0256: refreshed by an egress-guarded pull, or only by a signed offline bundle (never dialled) */
+  delivery: text("delivery", { enum: ["pull", "offline_bundle"] }).notNull().default("pull"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * ADR-0256 (the `mcp_catalogue_seed` migration) — one server as the catalogue understands it, across sources. The dedupe key is
+ * `repo:github.com/owner/repo` when a source names a GitHub repository, else `name:<upstream name>`. Each source keeps
+ * its own `mcp_registry_entries` row pointing here, so provenance is per source and never merged away.
+ */
+export const mcpCatalogueItems = pgTable(
+  "mcp_catalogue_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    dedupeKey: text("dedupe_key").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("mcp_catalogue_items_dedupe_key_uq").on(t.dedupeKey)],
+);
+
+/**
+ * ADR-0256 (the `mcp_catalogue_seed` migration) — APPEND-ONLY evidence of one successful refresh of a source: what it asserted (count and
+ * content digest), when, by whom and, for an offline bundle, which trusted key signed it. UPDATE, DELETE and TRUNCATE
+ * are refused by triggers.
+ */
+export const mcpCatalogueSnapshots = pgTable(
+  "mcp_catalogue_snapshots",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    registryId: uuid("registry_id")
+      .notNull()
+      .references(() => mcpRegistries.id, { onDelete: "restrict" }),
+    /** point-in-time copy of the source's listing kind when refreshed (evidence exception, ADR-0200 addendum) */
+    listingKind: text("listing_kind", { enum: ["registry", "community"] }).notNull(),
+    /** point-in-time copy of the source's delivery when refreshed (evidence exception, ADR-0200 addendum) */
+    delivery: text("delivery", { enum: ["pull", "offline_bundle"] }).notNull(),
+    /** the admin who triggered it, NULL for the scheduler; evidence, so deliberately no foreign key */
+    actorUserId: uuid("actor_user_id"),
+    entryCount: integer("entry_count").notNull(),
+    truncated: boolean("truncated").notNull(),
+    contentDigest: text("content_digest").notNull(),
+    bundleKeyId: text("bundle_key_id"),
+    bundleDigest: text("bundle_digest"),
+    bundleCreatedAt: timestamp("bundle_created_at", { withTimezone: true }),
+    takenAt: timestamp("taken_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("mcp_catalogue_snapshots_registry_idx").on(t.registryId, t.takenAt)],
+);
 
 /**
  * ADR-0101 — THE CATALOGUE. The only table a sync writes.
@@ -1152,6 +1200,8 @@ export const mcpRegistryEntries = pgTable(
     title: text("title"),
     description: text("description"),
     repositoryUrl: text("repository_url"),
+    /** ADR-0256: the server's folder inside `repository_url` (a monorepo), normalised; part of the dedupe key */
+    repositorySubfolder: text("repository_subfolder"),
     websiteUrl: text("website_url"),
     kind: text("kind", { enum: ["remote", "catalogue_only"] }).notNull(),
     remoteUrl: text("remote_url"),
@@ -1180,9 +1230,18 @@ export const mcpRegistryEntries = pgTable(
      * this entry — "beyond the page cap" and "gone" are different facts. It
      * never deletes, disables or un-grants the local server. */
     missingSince: timestamp("missing_since", { withTimezone: true }),
+    /** ADR-0256 (the `mcp_catalogue_seed` migration): the deduped item this source row describes; NULL only for a row from before that migration,
+     * until its source is next refreshed */
+    catalogueItemId: uuid("catalogue_item_id").references(() => mcpCatalogueItems.id, { onDelete: "restrict" }),
+    /** ADR-0256: what this source's listing says about payment (`x402` or `paid`), a flag for an operator */
+    paidSignal: text("paid_signal", { enum: ["x402", "paid"] }),
+    /** ADR-0256: the refresh that last asserted this row (its provenance) */
+    lastSnapshotId: uuid("last_snapshot_id").references(() => mcpCatalogueSnapshots.id, { onDelete: "restrict" }),
   },
   (t) => [
     uniqueIndex("mcp_registry_entries_registry_name_uq").on(t.registryId, t.upstreamName),
+    index("mcp_registry_entries_item_idx").on(t.catalogueItemId),
+    index("mcp_registry_entries_snapshot_idx").on(t.lastSnapshotId),
     index("mcp_registry_entries_kind_idx").on(t.registryId, t.kind),
     index("mcp_registry_entries_server_idx").on(t.serverId),
   ],
@@ -2021,6 +2080,11 @@ export const auditLog = pgTable(
     index("audit_log_alert_escalated_idx")
       .on(t.objectId)
       .where(sql`${t.ruleId} = 'governance-alert-escalated'`),
+    // pending/chatops_campaign_deadline_notify.sql (ADR-0090 amendment): the deadline sweep's delivery markers only,
+    // so "already delivered to this target" never scans the trail (review of #825)
+    index("audit_log_campaign_deadline_marker_idx")
+      .on(t.objectId)
+      .where(sql`${t.ruleId} = 'campaign-deadline-notified'`),
     // migration 0155 (ADR-0180 A2): the guardrail hit rows only (the ids
     // guardrails.ts writes as `guardrail-${outcome}`), so the guardrail_hits
     // condition metric never scans the trail
@@ -5378,6 +5442,9 @@ export const orgSettings = pgTable(
     privacyOpsEnabled: boolean("privacy_ops_enabled").notNull().default(false),
     /** days from a data-subject request's receipt to its due date; 30 is the strict default, shorter is stricter */
     dsrSlaDays: integer("dsr_sla_days").notNull().default(30),
+    /** ADR-0090 amendment (lane L11, owner 2026-11-15): how many hours before a certification campaign's due time its
+     * deadline reminder is sent (1 hour to 14 days; 48 is the default). A change is audited by PUT /v1/org/settings. */
+    certificationReminderHours: integer("certification_reminder_hours").notNull().default(48),
 
     /** ADR-0222 (P13(a), migration 0271): fairness testing. Off by default — turning it on starts storing
      * sensitive attributes, so it needs the `settings_relax` step-up. */
@@ -5387,12 +5454,35 @@ export const orgSettings = pgTable(
     /** ADR-0222: an uploaded evaluation dataset's rows are deleted this many days after upload (strict 30) */
     fairnessDatasetRetentionDays: integer("fairness_dataset_retention_days").notNull().default(30),
 
+    /** ADR-0056 §5 amendment (lane L7, migration copilot_redteam_gate): a model may narrate a copilot answer only
+     * while its latest copilot red-team run passed against the model it serves now (strict true; turning it off is a
+     * settings_relax step-up, audited; copilot-redteam-gate.ts). */
+    copilotRedteamGateEnabled: boolean("copilot_redteam_gate_enabled").notNull().default(true),
+    /** ADR-0056 §5 amendment: how many days a passing copilot red-team run counts (strict 30; longer is a relax) */
+    copilotRedteamMaxAgeDays: integer("copilot_redteam_max_age_days").notNull().default(30),
+    /** ADR-0056 §5 amendment (review of #811): the resist rate each copilot class must reach on the deciding run,
+     * judged by the gate from the probes the MODEL answered (platform-held and errored trials excluded), never from
+     * the run's own (caller-tunable) gate verdict. Strict 1 (every model-answered probe in the class resisted);
+     * lowering it is a settings_relax step-up. */
+    copilotRedteamMinResistRate: doublePrecision("copilot_redteam_min_resist_rate").notNull().default(1),
+    /** ADR-0056 §5 amendment (second review of #811): THE copilot red-team library. Only a run against this library
+     * version decides, so a run's starter cannot pick a weaker library after a regression. NULL (the default) means
+     * none is designated, and the gate refuses every narrator: fail closed. Any change is a settings_relax step-up,
+     * audited (swapping libraries can weaken the suite). Deleting the library clears it, which refuses again. */
+    copilotRedteamLibraryId: uuid("copilot_redteam_library_id").references(() => redteamLibraries.id, {
+      onDelete: "set null",
+    }),
+    /** ADR-0056 §5 amendment (second review of #811): the trials per probe the deciding run must have used (strict 3;
+     * a single-trial run is not evidence by default). Lowering it is a settings_relax step-up. */
+    copilotRedteamMinTrials: integer("copilot_redteam_min_trials").notNull().default(3),
+
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     check("org_settings_singleton", sql`${t.id} = 'singleton'`),
+    check("org_settings_copilot_redteam_min_trials_check", sql`${t.copilotRedteamMinTrials} BETWEEN 1 AND 25`),
     check(
       "org_settings_mrm_expiry_warn_days_check",
       sql`${t.mrmExpiryWarnDays} >= 0 AND ${t.mrmExpiryWarnDays} <= 3650`,
@@ -5453,6 +5543,7 @@ export const orgSettings = pgTable(
     check("org_settings_literacy_gate_mode_check", sql`${t.literacyGateMode} IN ('off', 'warn', 'enforce')`),
     check("org_settings_literacy_validity_check", sql`${t.literacyDefaultValidityDays} BETWEEN 30 AND 730`),
     check("org_settings_dsr_sla_days_check", sql`${t.dsrSlaDays} BETWEEN 1 AND 90`),
+    check("org_settings_certification_reminder_hours_check", sql`${t.certificationReminderHours} BETWEEN 1 AND 336`),
     check(
       "org_settings_alert_sla_hours_check",
       sql`jsonb_typeof(${t.alertSlaHours}) = 'object' AND jsonb_typeof(${t.alertSlaHours} -> 'high') = 'number' AND jsonb_typeof(${t.alertSlaHours} -> 'medium') = 'number' AND jsonb_typeof(${t.alertSlaHours} -> 'low') = 'number' AND (${t.alertSlaHours} ->> 'high')::numeric BETWEEN 1 AND 720 AND (${t.alertSlaHours} ->> 'medium')::numeric BETWEEN 1 AND 720 AND (${t.alertSlaHours} ->> 'low')::numeric BETWEEN 1 AND 720`,
@@ -8480,6 +8571,8 @@ export const chatopsConnections = pgTable("chatops_connections", {
   /** ADR-0162 (migration 0127) — minimum governance-alert severity posted to
    * this workspace; null = alerts are not posted (opt-in) */
   notifyAlertMinSeverity: text("notify_alert_min_severity", { enum: ["medium", "high"] }),
+  /** ADR-0090 amendment (lane L11) — opt-in; false = certification-campaign deadline notices are not sent here */
+  notifyCampaignDeadlines: boolean("notify_campaign_deadlines").notNull().default(false),
   enabled: boolean("enabled").notNull().default(true),
   /** ADR-0173 batch 2b (migration 0144) — Microsoft Teams Bot Framework. The
    * bot's app id is the audience its tokens must carry; null = the bot
@@ -14249,6 +14342,17 @@ export const engineRuns = pgTable(
     targetAgentId: uuid("target_agent_id").references(() => agents.id, { onDelete: "set null" }),
     judgeAgentId: uuid("judge_agent_id").references(() => agents.id, { onDelete: "set null" }),
     targetArtifactId: uuid("target_artifact_id").references(() => modelArtifacts.id, { onDelete: "set null" }),
+    /** ADR-0242 L4.3: a `subject` run's MCP server (mcpscanner) */
+    targetMcpServerId: uuid("target_mcp_server_id").references(() => mcpServers.id, { onDelete: "set null" }),
+    /** ADR-0242 L4.3: a `subject` run's builder skill (skillscanner) */
+    targetBuilderSkillId: uuid("target_builder_skill_id").references(() => builderSkills.id, { onDelete: "set null" }),
+    /** ADR-0242 L4.3: the subject digest the run scans (sha256 hex) */
+    targetSubjectDigest: text("target_subject_digest"),
+    /**
+     * ADR-0200 exception: a temporary verbatim external payload. The MCP manifest snapshot an admission scan reads,
+     * encrypted under the data key, cleared when the run ends; never returned by any route (ADR-0242 L4.3).
+     */
+    targetSubjectInputCiphertext: text("target_subject_input_ciphertext"),
     config: jsonb("config").$type<EngineRunConfig>().notNull(),
     configHash: text("config_hash").notNull(),
     /** the target agent's configuration hash when the run was made (A3 compares it) */
@@ -14295,9 +14399,10 @@ export const engineRuns = pgTable(
   },
   (t) => [
     uniqueIndex("engine_runs_task_placement_uq").on(t.taskPlacementId).where(sql`${t.taskPlacementId} IS NOT NULL`),
+    // ADR-0242 L4.3 (pending migration `admission_scan_subject_target`); the trigger and target-kind CHECKs live in SQL only
     check(
       "engine_runs_target_check",
-      sql`(${t.targetKind} = 'agent' AND ${t.targetArtifactId} IS NULL) OR (${t.targetKind} = 'artifact' AND ${t.targetAgentId} IS NULL AND ${t.judgeAgentId} IS NULL)`,
+      sql`(${t.targetKind} IN ('agent', 'artifact') AND ${t.trigger} <> 'admission' AND ${t.targetMcpServerId} IS NULL AND ${t.targetBuilderSkillId} IS NULL AND ${t.targetSubjectDigest} IS NULL AND ${t.targetSubjectInputCiphertext} IS NULL AND ((${t.targetKind} = 'agent' AND ${t.targetArtifactId} IS NULL) OR (${t.targetKind} = 'artifact' AND ${t.targetAgentId} IS NULL AND ${t.judgeAgentId} IS NULL))) OR (${t.targetKind} = 'subject' AND ${t.trigger} = 'admission' AND ${t.targetAgentId} IS NULL AND ${t.judgeAgentId} IS NULL AND ${t.targetArtifactId} IS NULL AND ${t.runAsUserId} IS NULL AND ${t.projectId} IS NULL AND num_nonnulls(${t.targetMcpServerId}, ${t.targetBuilderSkillId}) <= 1 AND (${t.targetMcpServerId} IS NULL OR ${t.engineId} = 'mcpscanner') AND (${t.targetBuilderSkillId} IS NULL OR ${t.engineId} = 'skillscanner') AND ${t.targetSubjectDigest} IS NOT NULL AND ${t.targetSubjectDigest} ~ '^[0-9a-f]{64}$' AND (${t.targetSubjectInputCiphertext} IS NULL OR ${t.engineId} = 'mcpscanner'))`,
     ),
     check("engine_runs_trials_check", sql`${t.trials} BETWEEN 1 AND 25`),
     check("engine_runs_budget_check", sql`${t.budgetUsd} > 0`),
@@ -14310,6 +14415,13 @@ export const engineRuns = pgTable(
       .on(t.workflowInstanceId, t.workflowStageId, t.workflowCheckName, t.workflowRound)
       .where(sql`${t.workflowInstanceId} IS NOT NULL`),
     uniqueIndex("engine_runs_runner_lease_request_unique").on(t.runnerId, t.leaseRequestId).where(sql`${t.leaseRequestId} IS NOT NULL`),
+    // ADR-0242 L4.3: one live (queued or leased) admission run per engine, subject and digest
+    uniqueIndex("engine_runs_subject_mcp_live_uq")
+      .on(t.engineId, t.targetMcpServerId, t.targetSubjectDigest)
+      .where(sql`${t.targetMcpServerId} IS NOT NULL AND ${t.status} IN ('queued', 'leased')`),
+    uniqueIndex("engine_runs_subject_skill_live_uq")
+      .on(t.engineId, t.targetBuilderSkillId, t.targetSubjectDigest)
+      .where(sql`${t.targetBuilderSkillId} IS NOT NULL AND ${t.status} IN ('queued', 'leased')`),
   ],
 );
 export type EngineRunRow = typeof engineRuns.$inferSelect;
