@@ -21,6 +21,8 @@
  * Imports from `compliance-packs.ts` are TYPE-ONLY: that file imports this one to append the packs.
  */
 import type { CreateCompliancePackInput } from "./compliance-packs.js";
+// #830 review: the shared control builders (one copy, `pack-builders.ts`)
+import { attestedControl as att, evidencedControl as ev } from "./pack-builders.js";
 import type { InternationalPiiCategory } from "./pii-international.js";
 import { DSR_DEFAULT_SLA_DAYS } from "./privacy-ops.js";
 import type { TrustDimension } from "./risks.js";
@@ -132,33 +134,6 @@ const REQUESTS_CLOSED = "data-subject-request-closed";
 const ERASED = "data-subject-request-erased";
 const REQUESTS = "data-subject-request-";
 const LIMIT = "processing-not-permitted";
-
-const ev = (
-  controlRef: string,
-  title: string,
-  e: Pick<Control, "coverage" | "collector"> & Partial<Pick<Control, "collectorParams">> & { evidence: string; note: string },
-): Control => ({
-  controlRef,
-  title,
-  description: `Evidence counted: ${e.evidence}`,
-  coverage: e.coverage,
-  collector: e.collector,
-  collectorParams: e.collectorParams ?? {},
-  minEvidenceCount: 1,
-  attestationRequired: false,
-  ownerNote: e.note,
-});
-
-const att = (controlRef: string, title: string, coverage: Control["coverage"], ownerNote: string): Control => ({
-  controlRef,
-  title,
-  coverage,
-  collector: "none",
-  collectorParams: {},
-  minEvidenceCount: 1,
-  attestationRequired: true,
-  ownerNote,
-});
 
 /** the shared controls every law has, in its own citation */
 /**
