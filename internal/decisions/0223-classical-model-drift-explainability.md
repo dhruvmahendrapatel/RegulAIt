@@ -182,6 +182,11 @@ posted on #453 for the Governed Designer session.
   trigger.
 - Gateway: `drift-ingest-credentials.ts` (the admin routes and the ingest route); `classical-drift.ts` now exposes
   `recordDriftReport`, the one write path both ingestion routes use.
+- Web (2026-11-15): `DriftIngestCredentials.tsx`, an "Ingestion credentials" card under a selected monitor's results in
+  the Drift and explainability tab: the list (state, expiry, last use), issue with the token shown once beside the
+  route and the headers a pipeline sends, rotate, and revoke through `RemoveButton`, each behind `withStepUp`. It
+  replaces the API-only gap request on #453, so the UI route census and affordance checks pass without raising the
+  known-gap cap.
 - Tests: `zz-adr0223-a1-ingest-credential.test.ts` (off unless issued, step-up on every write, hash-only storage,
   wrong monitor, every read refused, replay, revoked, expired, rotation, the feature switch) and the ADR-0175
   inventory fixture.
