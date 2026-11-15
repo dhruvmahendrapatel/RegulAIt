@@ -97,7 +97,7 @@ jobs:
           out="$RUNNER_TEMP/pkg"; mkdir -p "$out/pulled"
           helm package deploy/helm/regulait --destination "$out"
           tgz="$(ls "$out"/regulait-*.tgz)"
-          helm push "$tgz" oci://localhost:5000/charts --plain-http | tee "$out/push.log"
+          helm push "$tgz" oci://localhost:5000/charts --plain-http 2>&1 | tee "$out/push.log"   # helm prints Pushed: and Digest: on stderr
           digest="$(sed -n 's/^Digest: //p' "$out/push.log")"
           case "$digest" in sha256:*) ;; *) echo "::error::helm push printed no digest"; exit 1 ;; esac
           version="$(sed -n 's/^version: //p' deploy/helm/regulait/Chart.yaml)"
@@ -147,7 +147,7 @@ jobs:
           helm package deploy/helm/regulait --destination "$out"
           # the token goes to helm on stdin, never the command line
           printf '%s' "$GH_TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          helm push "$(ls "$out"/regulait-*.tgz)" "oci://ghcr.io/${owner}/charts" | tee "$out/push.log"
+          helm push "$(ls "$out"/regulait-*.tgz)" "oci://ghcr.io/${owner}/charts" 2>&1 | tee "$out/push.log"
           digest="$(sed -n 's/^Digest: //p' "$out/push.log")"
           case "$digest" in sha256:*) ;; *) echo "::error::helm push printed no digest"; exit 1 ;; esac
           echo "ref=ghcr.io/${owner}/charts/regulait@${digest}" >> "$GITHUB_OUTPUT"
