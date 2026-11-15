@@ -59,13 +59,23 @@ export interface CompiledFile {
 
 const SEMVER = /^\d{1,4}\.\d{1,4}\.\d{1,6}$/;
 
+/** The only error the compilers throw: a fixed message naming a registry id, never caller text or a parse error. */
+export class ManagedSettingsCompileError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ManagedSettingsCompileError";
+  }
+}
+
 /** A Codex `[mcp_servers.<id>]` key and a Claude Code server label: `[A-Za-z0-9_-]`, bounded, never empty. */
 export function managedServerKey(name: string, serverId: string): string {
-  const slug = name
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 48);
+  // input bounded first, then one linear pass; trimming '-' with a loop, never `/-+$/` (CodeQL js/polynomial-redos)
+  const mapped = name.slice(0, 256).toLowerCase().replace(/[^a-z0-9_-]/g, "-");
+  let start = 0;
+  let end = mapped.length;
+  while (start < end && mapped.charCodeAt(start) === 45) start++;
+  while (end > start && mapped.charCodeAt(end - 1) === 45) end--;
+  const slug = mapped.slice(start, end).slice(0, 48);
   // the id suffix keeps two registry names that slug alike (`My Docs`, `my-docs`) from colliding
   return `${slug || "server"}-${serverId.replace(/-/g, "").slice(0, 8)}`;
 }
@@ -79,14 +89,14 @@ function normalised(policy: EffectiveMcpPolicy): EffectiveMcpPolicy {
     try {
       u = new URL(s.gatewayUrl);
     } catch {
-      throw new Error(`managed settings: server ${s.serverId} has an unparseable gateway URL`);
+      throw new ManagedSettingsCompileError(`managed settings: server ${s.serverId} has an unparseable gateway URL`);
     }
     // a managed allowlist naming a plain-http or credentialed URL would teach clients to send tokens in the clear
     if (u.protocol !== "https:" && !(u.protocol === "http:" && (u.hostname === "localhost" || u.hostname === "127.0.0.1"))) {
-      throw new Error(`managed settings: gateway URL for server ${s.serverId} must be https`);
+      throw new ManagedSettingsCompileError(`managed settings: gateway URL for server ${s.serverId} must be https`);
     }
     if (u.username || u.password || u.search || u.hash) {
-      throw new Error(`managed settings: gateway URL for server ${s.serverId} must not carry credentials, a query or a fragment`);
+      throw new ManagedSettingsCompileError(`managed settings: gateway URL for server ${s.serverId} must not carry credentials, a query or a fragment`);
     }
   }
   return { subject: policy.subject, servers };
@@ -96,7 +106,7 @@ function normalised(policy: EffectiveMcpPolicy): EffectiveMcpPolicy {
 export function compileClaudeCode(policy: EffectiveMcpPolicy, opts: CompileOptions = {}): Record<string, unknown> {
   const p = normalised(policy);
   if (opts.claudeCodeMinimumVersion !== undefined && !SEMVER.test(opts.claudeCodeMinimumVersion)) {
-    throw new Error("managed settings: claudeCodeMinimumVersion must be x.y.z");
+    throw new ManagedSettingsCompileError("managed settings: claudeCodeMinimumVersion must be x.y.z");
   }
   return {
     $schema: "https://json.schemastore.org/claude-code-settings.json",

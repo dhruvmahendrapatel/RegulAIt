@@ -43,6 +43,7 @@ import {
   canonicalPolicyJson,
   compileManagedSettings,
   MANAGED_SETTINGS_SCHEMA,
+  ManagedSettingsCompileError,
   type EffectiveMcpPolicy,
   type EffectiveMcpServer,
 } from "@regulait/shared";
@@ -188,7 +189,9 @@ export async function exportManagedSettingsBundle(
   try {
     files = compileManagedSettings(policy, { claudeCodeMinimumVersion: opts.claudeCodeMinimumVersion });
   } catch (e) {
-    return { ok: false, status: 422, error: "compile_refused", detail: e instanceof Error ? e.message : "the policy could not be compiled" };
+    // only the compiler's own fixed messages are returned; anything else is a bug and propagates (500, no text)
+    if (e instanceof ManagedSettingsCompileError) return { ok: false, status: 422, error: "compile_refused", detail: e.message };
+    throw e;
   }
   // the digest covers the options too: a new minimum version is a new bundle
   const policyDigest = `sha256:${sha256(`${canonicalPolicyJson(policy)}\n${opts.claudeCodeMinimumVersion ?? ""}`)}`;
