@@ -155,7 +155,8 @@ export default function UsersPage() {
 
   const issueKey = async (u: AdminUser) => {
     await act.run(async () => {
-      const issued = await api.post<{ token: string }>(`/v1/users/${u.id}/keys`, { name: "portal" });
+      // ADR-0167 amendment (S-02): a key for someone else is an identity_manage step-up
+      const issued = await withStepUp((h) => stepUpApi.post<{ token: string }>(`/v1/users/${u.id}/keys`, { name: "portal" }, h));
       setReveal({
         title: `API key for ${u.email}`,
         secret: issued.token,

@@ -285,6 +285,8 @@ and nothing changes. The engine's say reaches the existing states in two places:
 
 ## Open questions for the owner
 
+All five were answered on 2026-11-15: see **Owner decisions (2026-11-15)** at the end of this ADR.
+
 1. **Licences.** May the licence acceptances recorded for garak (ADR-0187 decision 193: PSF-2.0, MPL-2.0, MIT-0,
    CNRI-Python; and decision 106 for numpy) cover the same packages in these two images? The builder applied them.
 2. **Clearance versus a later engine verdict.** Should an admin's `cleared` or `admitted` decision given before the
@@ -341,4 +343,81 @@ from a new rule set, revokes it.
 - The clearance fields are cleared with it (as a drift re-hold already does), the skill's pinned copies that were
   `admitted` at that digest become `held`, and the audit row is `admission-engine-clearance-revoked` (effect deny).
 - An `unknown` (an engine error) is not evidence and revokes nothing.
-- **Owner question open:** the owner may still choose the builder's original default (the person's decision stands).
+- **Superseded on 2026-11-15** by owner decision Q2 below: every later fail re-holds, even one the admin had seen.
+
+### L4.3 Subject target and queueing (§6 items 1 and 2)
+
+The gateway can now run the two admission-scan engines itself. Pending migration `admission_scan_subject_target`.
+
+- **The `subject` target.** `engine_runs.target_kind` gains `subject` and `trigger` gains `admission`. A subject run
+  names one MCP server (`target_mcp_server_id`, mcpscanner only) or one builder skill (`target_builder_skill_id`,
+  skillscanner only), both real foreign keys, plus the digest it scans. The widened `engine_runs_target_check` makes a
+  subject run person-less and project-less (no agent, judge, artifact, run-as or project), always trigger
+  `admission`, and keeps every other run free of subject columns. Two partial unique indexes keep one live (queued or
+  leased) run per engine, subject and digest.
+- **No person starts one.** `POST /v1/engine-runs` (and so a schedule or a workflow) answers 422
+  `engine_target_mismatch` for an admission-scan engine.
+- **Queueing** (`apps/gateway/src/admission-scan-runs.ts`, `enqueueAdmissionScanRun`), only while the engine is on;
+  with it off (the shipped default) nothing is queued:
+  - at every skill save door, through `sightSkill`, which create, import, update, template seeding and bundle import
+    all call;
+  - at every MCP manifest scan (`scanAndPersistManifest`), which serves live sync and the ADR-0100 re-scan;
+  - in the skill re-scan sweep, for each examined current and pinned digest.
+
+  A subject that already has a `pass` or `fail` at the digest under the shipped rule set is not queued again, so a
+  rules upgrade (a new `rulesSha256`) re-scans everything.
+- **The MCP snapshot.** A held manifest is never stored in `mcp_tools`, so the canonical tool list the digest covers
+  is captured when the run is queued. It is stored encrypted under the data key in `target_subject_input_ciphertext`
+  (an ADR-0200 exception, commented on the column), cleared at the run's end, and never returned by a route. With no
+  data key, no run is queued, the refusal is audited (`admission-scan-not-queued`), and the server stays held.
+- **Lease and task start.** The gateway builds the run's one input file from its own records: `tools.json` from the
+  snapshot, or `SKILL.md` from the stored name and body or a pinned copy with that digest. It checks the file against
+  the run's digest. The lease names it (`subject: {file, sha256, size}`) and carries no key. The task input places it
+  inline, so the runner never supplies its bytes.
+  **Security review of #843 (2026-11-15):** that file is the run's only input. Task start refuses any runner `files`
+  on a subject run, and the subject's path must be exactly `tools.json` or `SKILL.md` at the input root (the names
+  the drivers read), so a runner cannot place a decoy for the scanner to read instead. A driver-echoed input digest
+  checked at result time is left for the runner-shim slice. A subject that is gone, whose digest is superseded, or whose
+  snapshot is missing ends the run `not_run` (`subject_gone`, `subject_superseded`, `subject_input_gone`).
+- **Placement.** A subject run has no project, so its placement names its own sensitivity: `confidential`, the floor
+  whose shipped class is the gVisor sandbox §6.1 asks for. The org's floors still decide the class
+  (`PlacementRequest.sensitivity`, read only when there is no project). **Builder's default; the owner may raise it.**
+- **The result.** The runner posts the driver's `regulait.admission-scan.v1` report as the envelope's raw report.
+  `recordAdmissionEngineScanTx` records it in the run's own end transaction, linked to the run.
+  - A completed run records its report. A failed or timed-out run records `unknown`, which holds.
+  - A cancelled, refused or expired run, or one whose task was never placed, records nothing; the subject stays
+    pending, which also holds.
+  - The subject row is locked `FOR NO KEY UPDATE`, so the run-then-subject lock order cannot deadlock with a
+    queueing.
+- **Left for later L4 slices:** the Node shim per image and the sandbox-limit proof (§6.1 and §6.4), publishing and
+  locking the images (§6.3), and re-queueing MCP servers held only by a pending engine scan whose run expired. The
+  ADR-0100 MCP sweep skips `held` servers; today a new live sync re-queues them.
+
+## Owner decisions (2026-11-15)
+
+The owner answered the five open questions and the #843 placement question (relayed by the master orchestrator).
+
+1. **Q1, licences: yes.** The garak acceptances (ADR-0187 decision 193: PSF-2.0, MPL-2.0, MIT-0, CNRI-Python; and
+   decision 106 for numpy) cover the same packages in both scanner images. Both `THIRD_PARTY.md` files cite this.
+2. **Q2, clearance versus a later verdict: re-hold.** This changes the default L4.2 built. Every engine `fail`
+   recorded after an admin's `cleared` (MCP) or `admitted` (skill) decision on the current digest re-holds it. That
+   includes a re-scan that repeats a flag the admin already reviewed, and a fail under the same rule set
+   (`recordAdmissionEngineScan` no longer looks for an earlier fail).
+   - **Notify the admin.** The revocation raises a governance alert (`admission-engine-clearance-revoked`, high,
+     subject `<kind>:<id>`, one open alert per subject), carrying counts and locations only, written in the scan's own
+     transaction. It lands in the admins' governance-alert queue; a chat push for it is not wired yet (a direct
+     import of the chat courier would add a gateway import cycle).
+   - **The audited override is the existing route.** `POST /v1/servers/:id/admission/clear` and the skill admit route
+     need a `settings_relax` step-up, a reason and a signed AI BOM snapshot, and each writes an audit row naming the
+     findings. The override is pinned to the digest and is undone by the next `fail`.
+   - The other rules are unchanged: an `unknown` revokes nothing; the clearance fields are emptied; pinned skill copies
+     at that digest become `held`; the audit row is `admission-engine-clearance-revoked`.
+3. **Q3, yara-x's statically linked crates: accepted.** Apache-2.0 WITH LLVM-exception, Zlib and Unicode-3.0 are
+   owner-accepted exceptions, recorded in `engines/skillscanner/THIRD_PARTY.md` with this decision cited.
+4. **Q4, oletools' `thirdparty/`: accepted.** The public-domain `oledump` and the BSD `tablestream` and `xglob` are
+   owner-accepted exceptions, recorded the same way. skill-scanner's Office check stays.
+5. **Q5, the bundle hold line: keep `medium`.** The noisy rules are tuned against the `anthropics/skills` corpus to cut
+   false holds, with false-hold counts measured before and after (§7.1 measured 10 of 19 full bundles held). That
+   tuning ships with the image work (the L4 runner-shim and publish slice), where the image can be run on the corpus.
+6. **#843 placement: keep `confidential`.** A no-project admission scan is placed at the `confidential` floor
+   (the gVisor class). This is now the owner's decision, not only the builder's default.
