@@ -170,6 +170,7 @@ export const mcpRegistryRuleIds = {
   seeded: "mcp-catalogue-source-seeded",
   bundleImported: "mcp-catalogue-bundle-imported",
   bundleRefused: "mcp-catalogue-bundle-refused",
+  bundleExported: "mcp-catalogue-bundle-exported",
   importConflict: "mcp-registry-import-conflict",
   swept: "mcp-registry-swept",
 } as const;

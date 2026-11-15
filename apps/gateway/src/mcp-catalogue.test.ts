@@ -77,6 +77,8 @@ const README = [
   `- [pay/x402-tools](https://${X402}) 📇 ☁️ - Pay-per-call x402 market data.`,
   `- [mono/alpha](https://${MONO}/tree/main/src/alpha) 📇 - Alpha, one server of a monorepo.`,
   `- [mono/beta](https://${MONO}/tree/main/src/beta) 📇 - Beta, another server of the same monorepo.`,
+  // hostile: a repository name past GitHub's limit would otherwise break the dedupe-key CHECK and fail the whole pull
+  `- [huge](https://github.com/acme-${SUITE}/${"r".repeat(500)}) - oversized`,
 ].join("\n");
 
 const REGISTRY_PAGE = {
@@ -338,6 +340,19 @@ describe("ADR-0256 signed offline bundles", () => {
     expect(next.ok).toBe(true);
   });
 
+  it("drops an endpoint from a community bundle: a community listing is catalogue-only", async () => {
+    const text = JSON.stringify({
+      format: MCP_CATALOGUE_BUNDLE_FORMAT,
+      createdAt: "2026-11-09T00:00:00Z",
+      source: { name: `${name}-community`, listingKind: "community", origin: "https://example.invalid/README.md", dataLicence: "MIT" },
+      truncated: false,
+      entries: [remote],
+    });
+    const out = await importCatalogueBundle(db, signed(text), { actorUserId: null, keyring });
+    expect(out).toMatchObject({ ok: true, result: { entriesSeen: 0, skipped: 1, serversCreated: 0 } });
+    if (out.ok) registryIds.push(out.result.registryId);
+  });
+
   it("refuses a validly signed bundle that is not JSON, or not the format", async () => {
     const before = (await db.select({ id: auditLog.id }).from(auditLog).where(eq(auditLog.ruleId, mcpRegistryRuleIds.bundleRefused))).length;
     for (const text of ["not json", JSON.stringify({ format: MCP_CATALOGUE_BUNDLE_FORMAT, createdAt: "2026-11-09T00:00:00Z" })]) {
@@ -373,6 +388,8 @@ describe("ADR-0256 signed offline bundles", () => {
     const [src] = await db.select().from(mcpRegistries).where(eq(mcpRegistries.name, `adr256-official-${SUITE}`));
     const res = await app.inject({ method: "GET", url: `/v1/mcp-catalogue/bundle?registryId=${src!.id}`, headers: AUTH });
     expect(res.statusCode).toBe(200);
+    const exported = await db.select().from(auditLog).where(and(eq(auditLog.objectId, src!.id), eq(auditLog.ruleId, mcpRegistryRuleIds.bundleExported)));
+    expect(exported.length).toBeGreaterThanOrEqual(1);
     const text = res.body;
     const verdict = verifyBundle(signed(text), keyring);
     expect(verdict.ok).toBe(true);

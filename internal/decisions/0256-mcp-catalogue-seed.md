@@ -81,7 +81,10 @@ path.
 4. **Community lists.** A `community` source's URL is the document itself. The parser keeps top-level bullets whose
    first link is a GitHub repository, once per server, capped at 20,000 entries and 4,000 characters a line. A link
    to a folder of a monorepo (`/tree/<ref>/<path>`) is its own server; a repeated server is counted as skipped. The
-   repository link is rebuilt from the normalised key, never copied from the list's text. Every
+   repository link is rebuilt from the normalised key, never copied from the list's text. A link whose owner or
+   repository is longer than GitHub allows (39 and 100 characters) or whose folder is longer than 200 is skipped and
+   counted, so one hostile line can never break the dedupe-key bound and fail the whole refresh; a registry entry with
+   such a folder loses its repository and is keyed by name. Every
    entry is `catalogue_only` with the new reason `community_listing`, so ADR-0101's import refuses it: a list names a
    repository, and this codebase does not invent an endpoint.
 
@@ -106,8 +109,10 @@ path.
    its exact bytes with Ed25519 (`scripts/mcp-catalogue-bundle-sign.mjs`; the gateway never holds the private key) and
    imported with `POST /v1/mcp-catalogue/bundles`. The gateway verifies **before** it parses, against the keyring in
    `REGULAIT_MCP_CATALOGUE_BUNDLE_KEYS` (or `…_FILE`): public Ed25519 keys only, rotatable by listing the new key beside
-   the old. A bad keyring is refused whole. **With no keyring, every bundle is refused.** The format is strict, and each
-   entry is re-checked (a remote must have a dialable URL, a catalogue-only entry must not claim one). A bundle not
+   the old. A bad keyring is refused whole. Keys are not pinned per source: any listed key may refresh any offline
+   source, so the keyring is the trust boundary for all of them. **With no keyring, every bundle is refused.** The format is strict, and each
+   entry is re-checked (a remote must have a dialable URL, a catalogue-only entry must not claim one, and every entry
+   of a `community` bundle must be `catalogue_only` / `community_listing`, as in a pull). A bundle not
    newer than the last one imported for its source is refused (rollback and replay protection), and so is one dated
    more than five minutes after the database clock, because a future date would refuse every later bundle for a
    source that can never be deleted. Export applies the import's entry and byte limits, so nothing is signed that
@@ -125,7 +130,7 @@ path.
 
 9. **Admin-only and audited.** None of the four new routes is in `NON_ADMIN_ROUTES`. New audit rule ids:
    `mcp-catalogue-source-seeded`, `mcp-catalogue-bundle-imported`, `mcp-catalogue-bundle-refused` (every refusal,
-   including no keyring). Pulls keep `mcp-registry-synced`, whose detail now carries the listing kind and snapshot id.
+   including no keyring) and `mcp-catalogue-bundle-exported` (the byte count and digest of every export). Pulls keep `mcp-registry-synced`, whose detail now carries the listing kind and snapshot id.
 
 ## Consequences
 

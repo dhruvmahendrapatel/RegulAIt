@@ -234,18 +234,28 @@ export interface NormalizedRegistryEntry {
   paidSignal: McpPaidSignal | null;
 }
 
+/** ADR-0256: the longest repository subfolder kept; a longer one is refused, never cut (a cut could merge two) */
+export const MCP_REPOSITORY_SUBFOLDER_MAX = TEXT_CAP;
+
 /**
  * ADR-0256: a repository subfolder as a stable key part: lower-case, `/`-separated, with empty and `.` segments
- * dropped (so `./src/Weather/` and `src/weather` agree), capped. Null when nothing is left.
+ * dropped (so `./src/Weather/` and `src/weather` agree). Null when nothing is left or when it is longer than
+ * `MCP_REPOSITORY_SUBFOLDER_MAX` (untrusted input never grows a key past its column bound).
  */
 export function normalizeRepositorySubfolder(v: unknown): string | null {
-  if (typeof v !== "string") return null;
+  if (typeof v !== "string" || v.length > 4 * MCP_REPOSITORY_SUBFOLDER_MAX) return null;
   const parts = v
     .split("/")
     .map((p) => p.trim().toLowerCase())
     .filter((p) => p !== "" && p !== ".");
   if (parts.length === 0) return null;
-  return parts.join("/").slice(0, TEXT_CAP);
+  const joined = parts.join("/");
+  return joined.length > MCP_REPOSITORY_SUBFOLDER_MAX ? null : joined;
+}
+
+/** true when a subfolder was given but cannot be used as a key part (too long): the entry's repository is then unusable */
+function subfolderRefused(v: unknown): boolean {
+  return typeof v === "string" && v.trim() !== "" && normalizeRepositorySubfolder(v) === null && v.split("/").some((p) => p.trim() !== "" && p.trim() !== ".");
 }
 
 /** ADR-0256: the payment signals a catalogue entry can carry */
@@ -417,7 +427,9 @@ export function normalizeRegistryPage(payload: unknown): NormalizedRegistryPage 
       upstreamVersion: version,
       title: clip(server.title),
       description: clip(server.description),
-      repositoryUrl: clip(server.repository?.url),
+      // a subfolder too long to key on makes the repository unusable for dedupe: drop both rather than merge the
+      // entry into its monorepo's bare item (ADR-0256)
+      repositoryUrl: subfolderRefused(server.repository?.subfolder) ? null : clip(server.repository?.url),
       repositorySubfolder: normalizeRepositorySubfolder(server.repository?.subfolder),
       websiteUrl: clip(server.websiteUrl),
       ...classified,

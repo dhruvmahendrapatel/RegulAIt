@@ -4,6 +4,7 @@ import {
   catalogueDedupeKey,
   githubRepoKey,
   githubRepoLocation,
+  MCP_CATALOGUE_DEDUPE_KEY_MAX,
   MCP_CATALOGUE_PRESETS,
   mcpCatalogueBundleSchema,
   parseCommunityList,
@@ -22,6 +23,9 @@ const LIST = [
   "- [mcp/fetch](https://github.com/modelcontextprotocol/servers/tree/main/src/fetch) - Fetches web pages.",
   "- [mcp/git](https://github.com/modelcontextprotocol/servers/tree/main/src/git) - Reads git repositories.",
   "- [mcp/fetch again](https://github.com/ModelContextProtocol/servers/tree/main/src/fetch/) - listed twice",
+  `- [huge](https://github.com/acme/${"r".repeat(500)}) - a repository name GitHub would not allow`,
+  `- [long owner](https://github.com/${"o".repeat(40)}/x) - an owner GitHub would not allow`,
+  `- [deep](https://github.com/acme/mono/tree/main/${"d/".repeat(150)}x) - a folder past the key bound`,
   "- [elsewhere](https://gitlab.com/a/b) - not a GitHub repository",
   "- [broken](https://github.com/only-owner) - no repository segment",
   "  - [nested](https://github.com/x/y) - nested bullets are not entries",
@@ -38,9 +42,16 @@ describe("ADR-0256 community list parser", () => {
       "github.com/modelcontextprotocol/servers/src/fetch",
       "github.com/modelcontextprotocol/servers/src/git",
     ]);
-    // gitlab, owner-only, the terse repeat and the fetch repeat
-    expect(parsed.skipped).toBe(4);
+    // gitlab, owner-only, the terse repeat, the fetch repeat and the three oversized links
+    expect(parsed.skipped).toBe(7);
     expect(parsed.capped).toBe(false);
+  });
+
+  it("never produces a key past the column bounds, whatever a line holds", () => {
+    for (const e of parsed.entries) expect(catalogueDedupeKey(e).length).toBeLessThanOrEqual(MCP_CATALOGUE_DEDUPE_KEY_MAX);
+    expect(githubRepoLocation(`https://github.com/acme/${"r".repeat(101)}`)).toBeNull();
+    expect(githubRepoLocation(`https://github.com/acme/${"r".repeat(100)}`)).not.toBeNull();
+    expect(githubRepoLocation(`https://github.com/acme/mono/tree/main/${"d".repeat(201)}`)).toBeNull();
   });
 
   it("keeps two servers from one monorepo apart, with the repository url rebuilt from the key", () => {
@@ -97,6 +108,12 @@ describe("ADR-0256 dedupe and vetting", () => {
     expect(fetch!.repositorySubfolder).toBe("src/fetch");
     expect(catalogueDedupeKey(fetch!)).toBe("repo:github.com/modelcontextprotocol/servers/src/fetch");
     expect(catalogueDedupeKey(git!)).toBe("repo:github.com/modelcontextprotocol/servers/src/git");
+    // a registry subfolder too long to key on drops the repository: the entry is keyed by name, never merged
+    const odd = normalizeRegistryPage({
+      servers: [{ server: { name: "io.github.mcp/odd", version: "1", repository: { url: "https://github.com/modelcontextprotocol/servers", subfolder: "x".repeat(300) } } }],
+    }).entries[0]!;
+    expect(odd).toMatchObject({ repositoryUrl: null, repositorySubfolder: null });
+    expect(catalogueDedupeKey(odd)).toBe("name:io.github.mcp/odd");
     // the community listing of the same folder lands on the same item
     const listed = parseCommunityList("- [fetch](https://github.com/modelcontextprotocol/servers/tree/main/src/fetch) - x").entries[0]!;
     expect(catalogueDedupeKey(listed)).toBe(catalogueDedupeKey(fetch!));
@@ -177,8 +194,15 @@ describe("ADR-0256 offline bundle format", () => {
       entry,
       { ...entry, upstreamName: "io.example/templated", remoteUrl: "https://{region}.example/mcp" },
       { ...entry, upstreamName: "io.example/liar", kind: "catalogue_only", catalogueReason: "packages_only" },
-    ]);
+    ], "registry");
     expect(out.entries.map((e) => e.upstreamName)).toEqual(["io.example/remote"]);
+    expect(out.skipped).toBe(2);
+  });
+
+  it("keeps a community bundle catalogue-only: an endpoint in one is dropped", () => {
+    const listed = { ...entry, upstreamName: "github.com/a/b", kind: "catalogue_only" as const, remoteUrl: null, remoteTransport: null, catalogueReason: "community_listing" as const, remoteCount: 0 };
+    const out = bundleEntriesUsable([entry, listed, { ...listed, catalogueReason: "packages_only" as const }], "community");
+    expect(out.entries.map((e) => e.upstreamName)).toEqual(["github.com/a/b"]);
     expect(out.skipped).toBe(2);
   });
 });

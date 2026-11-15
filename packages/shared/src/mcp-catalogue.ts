@@ -71,13 +71,21 @@ export const MCP_CATALOGUE_PRESET_IDS = Object.keys(MCP_CATALOGUE_PRESETS) as Mc
 // dedupe
 // ---------------------------------------------------------------------------
 
+/** GitHub's own limits: an owner is at most 39 characters, a repository at most 100 */
+export const GITHUB_OWNER_MAX = 39;
+export const GITHUB_REPO_MAX = 100;
+/** `mcp_catalogue_items.dedupe_key` is CHECKed at 1..400 characters */
+export const MCP_CATALOGUE_DEDUPE_KEY_MAX = 400;
+
 /**
  * Where a GitHub url points: `repo` is `github.com/owner/repo` (lower-case, no scheme, no `.git`), and `subfolder` is
  * the path after `/tree/<ref>/` or `/blob/<ref>/` when the url names one (normalised), else null. Null for anything
- * that is not a GitHub repository url. Parsed with `URL`, never a regex (M-074).
+ * that is not a GitHub repository url, and null when the owner, repository or folder is longer than GitHub allows
+ * (owner 39, repository 100) or than a key may be (`MCP_REPOSITORY_SUBFOLDER_MAX`), so an untrusted list line can
+ * never produce a key past the column bounds. Parsed with `URL`, never a regex (M-074).
  */
 export function githubRepoLocation(raw: string | null | undefined): { repo: string; subfolder: string | null } | null {
-  if (!raw) return null;
+  if (!raw || raw.length > 2000) return null;
   let u: URL;
   try {
     u = new URL(raw.trim());
@@ -92,9 +100,12 @@ export function githubRepoLocation(raw: string | null | undefined): { repo: stri
   const owner = parts[0]!.toLowerCase();
   let repo = parts[1]!.toLowerCase();
   if (repo.endsWith(".git")) repo = repo.slice(0, -4);
-  if (owner === "" || repo === "") return null;
+  if (owner === "" || repo === "" || owner.length > GITHUB_OWNER_MAX || repo.length > GITHUB_REPO_MAX) return null;
   // `/tree/<ref>/<path>` (a folder) or `/blob/<ref>/<path>` (a file in it): the path is the server's folder
-  const subfolder = (parts[2] === "tree" || parts[2] === "blob") && parts.length > 4 ? normalizeRepositorySubfolder(parts.slice(4).join("/")) : null;
+  const hasPath = (parts[2] === "tree" || parts[2] === "blob") && parts.length > 4;
+  const subfolder = hasPath ? normalizeRepositorySubfolder(parts.slice(4).join("/")) : null;
+  // a folder named but refused (too long) makes the whole location unusable, never the bare repository
+  if (hasPath && subfolder === null && parts.slice(4).some((p) => p !== ".")) return null;
   return { repo: `github.com/${owner}/${repo}`, subfolder };
 }
 
@@ -112,10 +123,13 @@ export function githubRepoKey(raw: string | null | undefined): string | null {
  * operator can see.
  */
 export function catalogueDedupeKey(e: { upstreamName: string; repositoryUrl: string | null; repositorySubfolder?: string | null }): string {
+  const byName = `name:${e.upstreamName.toLowerCase()}`.slice(0, MCP_CATALOGUE_DEDUPE_KEY_MAX);
   const loc = githubRepoLocation(e.repositoryUrl);
-  if (!loc) return `name:${e.upstreamName.toLowerCase()}`;
+  if (!loc) return byName;
   const sub = normalizeRepositorySubfolder(e.repositorySubfolder) ?? loc.subfolder;
-  return sub ? `repo:${loc.repo}/${sub}` : `repo:${loc.repo}`;
+  const key = sub ? `repo:${loc.repo}/${sub}` : `repo:${loc.repo}`;
+  // the bounds above keep this under the column CHECK; the fallback is belt and braces, never a truncated repo key
+  return key.length > MCP_CATALOGUE_DEDUPE_KEY_MAX ? byName : key;
 }
 
 // ---------------------------------------------------------------------------
@@ -223,7 +237,8 @@ const isoish = z.string().max(64).nullable();
 /** one entry, in the normalized shape a connected install already holds. STRICT: an exact format, not a feed. */
 export const mcpCatalogueBundleEntrySchema = z
   .object({
-    upstreamName: z.string().min(1).max(TEXT_CAP),
+    // a community server key (`github.com/owner/repo/<folder>`) can exceed TEXT_CAP; bounded by the key limit
+    upstreamName: z.string().min(1).max(MCP_CATALOGUE_DEDUPE_KEY_MAX),
     upstreamVersion: z.string().min(1).max(TEXT_CAP),
     title: optText,
     description: optText,
@@ -266,12 +281,21 @@ export type McpCatalogueBundle = z.infer<typeof mcpCatalogueBundleSchema>;
 
 /**
  * Re-check what the format cannot: a `remote` entry must carry a url this gateway could dial and a transport, and a
- * `catalogue_only` entry must carry neither. A row that fails is dropped and counted, exactly as a pull would.
+ * `catalogue_only` entry must carry neither, and every entry of a `community` bundle must be `catalogue_only` /
+ * `community_listing`. A row that fails is dropped and counted, exactly as a pull would.
  */
-export function bundleEntriesUsable(entries: McpCatalogueBundle["entries"]): { entries: NormalizedRegistryEntry[]; skipped: number } {
+export function bundleEntriesUsable(
+  entries: McpCatalogueBundle["entries"],
+  listingKind: McpCatalogueListingKind,
+): { entries: NormalizedRegistryEntry[]; skipped: number } {
   const out: NormalizedRegistryEntry[] = [];
   let skipped = 0;
   for (const e of entries) {
+    // a community listing names a repository, never an endpoint, in a bundle exactly as in a pull (ADR-0256 §4)
+    if (listingKind === "community" && (e.kind !== "catalogue_only" || e.catalogueReason !== "community_listing")) {
+      skipped += 1;
+      continue;
+    }
     if (e.kind === "remote") {
       const url = usableRemoteUrl(e.remoteUrl);
       if (!url || !e.remoteTransport || e.catalogueReason !== null) {

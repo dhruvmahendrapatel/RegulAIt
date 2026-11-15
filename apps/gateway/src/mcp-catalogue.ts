@@ -289,7 +289,7 @@ export async function importCatalogueBundle(
       return { ok: false as const, status: 409, body: { error: "bundle_refused", code: "concurrent_import", detail } };
     }
 
-    const usable = bundleEntriesUsable(bundle.entries);
+    const usable = bundleEntriesUsable(bundle.entries, bundle.source.listingKind);
     const counts = { created: 0, updated: 0, conflicts: 0 };
     const digests: string[] = [];
     for (const entry of usable.entries) {
@@ -592,6 +592,21 @@ export function registerMcpCatalogueRoutes(app: FastifyInstance, db: Db, deps: M
     const out = await exportCatalogueBundle(db, registryId, await dbNow(db));
     if (!out.ok && out.code === "unknown_registry") return reply.status(404).send({ error: "unknown_registry" });
     if (!out.ok) return reply.status(409).send({ error: "bundle_too_large", detail: out.detail });
+    // an export hands a whole source's catalogue to be carried off the install: recorded like the imports are
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? NIL_USER,
+      objectType: "mcp_server",
+      objectId: registryId,
+      detail: {
+        phase: "catalogue-bundle-export",
+        bytes: Buffer.byteLength(out.text, "utf8"),
+        digest: createHash("sha256").update(out.text, "utf8").digest("hex"),
+      },
+      effect: "allow",
+      ruleId: mcpRegistryRuleIds.bundleExported,
+      ruleChain: [],
+      reason: "Exported an unsigned MCP catalogue bundle for offline signing; nothing was admitted or changed.",
+    });
     return reply.header("content-type", "application/json; charset=utf-8").send(out.text);
   });
 
