@@ -41,6 +41,15 @@ import { runAuditV2Cutover } from "@regulait/db";
 import { AUDIT_V2_CUTOVER_ENV, assertAuditChainWritable } from "./audit-v2-cutover.js";
 import { ensureInternalIdentities } from "./in-process-delegation.js";
 import { runMigrations, runWithRlsSystem, type Db } from "@regulait/db";
+import {
+  auditPrivilegedRuntimeLogin,
+  checkRuntimeLogin,
+  describeRuntimeLogin,
+  privilegedRuntimeLoginBanner,
+  resolveRuntimeDatabase,
+  type RuntimeLoginCheck,
+} from "./runtime-login.js";
+import { registerOwnerDb } from "./owner-db.js";
 import { buildApp, type BuildAppOptions } from "./app.js";
 import { RATE_LIMIT_COUNTER_RETENTION_MS, pruneRateLimitCounters } from "./rate-limit-store.js";
 import { prunePmWebhookDeliveries } from "./pm.js";
@@ -60,7 +69,8 @@ import { checkReceiptSigningKey } from "./receipt-signing-key.js";
 import { ensureInstallIdentityKey, identitySigningKeyConfiguration } from "./identity-signing-keys.js";
 import { describeGatewayLogger, resolveGatewayLogger } from "./gateway-logger.js";
 import { databaseTlsBootWarning, describeDbPool, resolveDbPoolConfig } from "@regulait/db";
-import { describeMetricsPosture, resolveMetricsConfig, startMetricsListener } from "./metrics.js";
+import { describeMetricsPosture, disablePrometheusReader, enableOtlpPushReader, resolveMetricsConfig, startMetricsListener } from "./metrics.js";
+import { createOtlpMetricsPusher, describeOtlpMetricsPosture, resolveOtlpMetricsConfig } from "./metrics-otlp.js";
 import { configureRateLimitEvaluator, describeRateLimitEvaluator } from "./rate-limit-evaluator.js";
 import { seedBuiltinEvalDatasets } from "./eval-builtin-datasets.js";
 import { assertReceiptEmitterBootable } from "./decision-receipts.js";
@@ -69,7 +79,14 @@ import { assertReceiptEmitterBootable } from "./decision-receipts.js";
 const DEFAULT_ANCHOR_INTERVAL_MS = 15 * 60_000;
 
 export interface StartGatewayOptions extends BuildAppOptions {
+  /**
+   * The OWNER (migrator) connection. ADR-0234 batch 7b: it runs the migrations, provisions the runtime login and runs
+   * the audit prune; requests are served on the runtime login (`resolveRuntimeDatabase`), or on this handle when no
+   * runtime login is configured (refused at boot unless it is fit, or the loud dev opt-in is set).
+   */
   db: Db;
+  /** the owner's connection string, from which the install-generated runtime login's URL is derived */
+  connectionString?: string;
   migrationsFolder: string;
   port?: number;
   host?: string;
@@ -91,6 +108,11 @@ export interface StartedGateway {
   metricsAddress: string | null;
 }
 
+/** end a handle's pool (the drizzle handle exposes it as `$client`) */
+function endPool(db: Db): Promise<void> {
+  return (db as unknown as { $client: { end: () => Promise<void> } }).$client.end();
+}
+
 /**
  * Bring a gateway up, or refuse to.
  *
@@ -99,7 +121,7 @@ export interface StartedGateway {
  * under. Nothing is listening when it throws.
  */
 export async function startGateway(opts: StartGatewayOptions): Promise<StartedGateway> {
-  const { db, migrationsFolder, port = 3000, host = "0.0.0.0", log = console.log, env = process.env, ...appOpts } = opts;
+  const { db: ownerDb, connectionString, migrationsFolder, port = 3000, host = "0.0.0.0", log = console.log, env = process.env, ...appOpts } = opts;
 
   // ADR-0121 amendment: a REGULAIT_PUBLIC_URL that is set but invalid refuses
   // the boot FIRST — before an app, a migration or a socket exists — because
@@ -109,6 +131,12 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // bearer token (or with an unparseable address) refuses the boot here, for
   // the same reason — nothing exists yet to leave behind.
   const metricsConfig = resolveMetricsConfig(env);
+  // ADR-0301: an OTLP metrics setting that is present but unusable refuses here too.
+  const otlpMetricsConfig = resolveOtlpMetricsConfig(env);
+  // ADR-0301 review item 1: the push reader is registered before anything records, and only when it is wanted
+  if (otlpMetricsConfig) enableOtlpPushReader();
+  // ADR-0301 second review: the Prometheus reader likewise exists only when a scrape surface is on
+  if (!metricsConfig.listen && !metricsConfig.onMainListener) disablePrometheusReader();
   // ADR-0239: an unrecognised REGULAIT_RATE_LIMIT_EVALUATOR refuses the boot here, before anything exists.
   const rateLimitEvaluator = configureRateLimitEvaluator(env);
   // ADR-0189 R25 item 12: FIRST BOOT creates the install-generated receipt signing key when no key is
@@ -130,10 +158,37 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // ADR-0060 / AER-012: the sink this process anchors WITH (below) is the sink
   // the app's readers grade — one instance, one observation cache.
   const anchorSink = appOpts.auditAnchorSink !== undefined ? appOpts.auditAnchorSink : resolveAnchorSink(env);
-  const app = buildApp(db, { ...appOpts, logger, auditAnchorSink: anchorSink });
 
-  // migrations are idempotent — booting always converges the schema
-  await runMigrations(db, migrationsFolder);
+  // migrations are idempotent — booting always converges the schema. ADR-0234 batch 7b: on the OWNER login.
+  await runMigrations(ownerDb, migrationsFolder);
+
+  // ADR-0234 batch 7b — THE RUNTIME LOGIN. Requests are served on a login that is a member of regulait_app and is
+  // not a superuser, BYPASSRLS, CREATEROLE or the owner of the RLS tables, nor a member of a role that is, so no
+  // request path can step out of the policies. Resolved after the migrations (the install-generated login is created through the owner, and needs
+  // regulait_app to exist), and refused here, before an app or a socket exists, when it is not fit.
+  const runtime = await resolveRuntimeDatabase(env, ownerDb, connectionString);
+  const db: Db = runtime.db;
+  let runtimeLogin: RuntimeLoginCheck;
+  try {
+    runtimeLogin = await checkRuntimeLogin(db, env);
+  } catch (err) {
+    if (db !== ownerDb) await endPool(db).catch(() => {});
+    throw err;
+  }
+  if (runtimeLogin.privileged) {
+    for (const line of privilegedRuntimeLoginBanner(runtimeLogin)) log(line);
+  }
+  registerOwnerDb(db, ownerDb);
+  const app = buildApp(db, { ...appOpts, logger, auditAnchorSink: anchorSink });
+  if (db !== ownerDb) {
+    app.addHook("onClose", async () => {
+      await endPool(db).catch(() => {});
+    });
+  }
+  if (runtimeLogin.privileged) {
+    // the opt-in is evidence, not a footnote: one audit row per boot that used it
+    await runWithRlsSystem("system_task", "boot.runtime-login", () => auditPrivilegedRuntimeLogin(db, runtimeLogin));
+  }
 
   // ADR-0189 R43: a build that cannot emit v2 receipts with facts refuses to
   // start once a receipt v2 boundary is recorded (a v1 receipt there is
@@ -303,6 +358,14 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
     }
   }
 
+  // ADR-0301 — OTLP metrics push, only when an endpoint is configured. The
+  // first push is one interval after boot; every push re-checks the egress
+  // allow-list. Its close hook goes in before listen, like the ones above.
+  const otlpMetricsPusher = otlpMetricsConfig
+    ? createOtlpMetricsPusher(db, otlpMetricsConfig, { start: !underTest, log })
+    : null;
+  if (otlpMetricsPusher) app.addHook("onClose", async () => otlpMetricsPusher.stop());
+
   const address = await app.listen({ port, host });
 
   // Capture the chain head on a timer. Started AFTER listen so a slow first
@@ -432,6 +495,8 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // belongs in the boot log next to the proxy posture rather than only in a
   // response an operator has to think to look at.
   log(`  hsts:      ${describeHsts(resolveHsts())}`);
+  // ADR-0234 batch 7b: say out loud which database login serves requests, and whether row-level security binds it
+  log(`  db login:  ${describeRuntimeLogin(runtimeLogin, runtime.source)}`);
   // ADR-0062: say out loud what this box will REFUSE to reach. An operator who
   // believes their install is air-gapped and has not set the variable must be
   // able to see that from the boot log rather than from a packet capture.
@@ -498,6 +563,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // from a stale registry screen three months later.
   // ADR-0185 G5: whether /metrics is served, where, and that it needs a token
   log(`  metrics:   ${describeMetricsPosture(metricsConfig, metricsListener?.address ?? null)}`);
+  log(`  metrics:   ${describeOtlpMetricsPosture(otlpMetricsConfig)}`);
   // ADR-0239: which engine evaluates rate limits (Cedar by default; legacy only by explicit setting)
   log(`  rate limits: ${describeRateLimitEvaluator(rateLimitEvaluator)}`);
   log(`  scheduler: ${schedulerConfig.reason}${schedulerConfig.enabled ? `, ${registry.size} job(s)` : ""}`);
@@ -602,7 +668,7 @@ export function installShutdownHandlers(
         log(`[regulait] app.close failed during drain: ${errLine(err)}`);
       }
       try {
-        await (db as unknown as { $client: { end: () => Promise<void> } }).$client.end();
+        await endPool(db);
       } catch (err) {
         log(`[regulait] pool.end failed during drain: ${errLine(err)}`);
       }

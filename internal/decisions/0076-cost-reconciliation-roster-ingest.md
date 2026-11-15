@@ -1,6 +1,6 @@
 # ADR-0076: Scheduled cost reconciliation + roster ingest — defending the pillar-5 wedge
 
-- **Status**: Accepted
+- **Status**: Accepted; amended by ADR-0322 (2026-11-15: opt-in, per-tenant read-only vendor usage/cost pull)
 - **Date**: 2026-08-15
 - **Migration**: 0085
 - **Driver**: [MARKET_ANALYSIS_2026-08.md](../product/MARKET_ANALYSIS_2026-08.md) §4 item 3 —
