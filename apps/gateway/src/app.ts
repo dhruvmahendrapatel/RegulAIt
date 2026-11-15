@@ -485,6 +485,7 @@ import { registerMcpSapBusinessRoutes, sapStoredToolKind, serverSystemClass } fr
 // ADR-0101 — federated MCP registries. Admin-only through the default gate;
 // a sync writes only the catalogue and an import is an explicit operator act.
 import { privateRangesRelaxation, registerMcpRegistryRoutes } from "./mcp-registry.js";
+import { registerMcpCatalogueRoutes } from "./mcp-catalogue.js";
 import {
   MCP_PROXY_ROUTE_URL,
   registerMcpAuthMetadata,
@@ -6086,6 +6087,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ungranted and subject to the same ADR-0097 admission and ADR-0043 egress
   // gates as any hand-registered server.
   registerMcpRegistryRoutes(app, db);
+  // ADR-0256 — seed the catalogue from a preset (official MCP Registry, awesome-mcp-servers), import a signed offline
+  // bundle, and read the deduped catalogue. Every entry is available, not admitted; nothing here creates a server.
+  registerMcpCatalogueRoutes(app, db);
   // ADR-0097 part B — RFC 9728. Both routes are AUTH_EXEMPT by design: a
   // client with no credential is exactly the one that needs to read them.
   registerMcpAuthMetadata(app);

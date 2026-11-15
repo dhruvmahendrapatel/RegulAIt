@@ -219,7 +219,7 @@ test.describe("U3: each page carries its settings", () => {
   /** `tab`: the tab the card lives on, when its page puts its settings in tabs (I-2) */
   const PAGES: Array<{ path: string; card: string; keys: string[]; tab?: RegExp }> = [
     { path: "/ui/admin/organization", card: "org-pii-international", keys: ["piiInternationalCategories"], tab: /^Data & audit/ },
-    { path: "/ui/admin/sso", card: "sso-step-up-settings", keys: ["stepUpMode", "stepUpMaxAgeSeconds", "stepUpActions"] },
+    { path: "/ui/admin/sso", card: "sso-step-up-settings", keys: ["stepUpMode", "stepUpMaxAgeSeconds", "stepUpActions"], tab: /^Sessions & step-up/ },
     { path: "/ui/admin/enforcement-posture", card: "evidence-detection-settings", keys: ["decisionReceiptsMode", "auditAnchorTimestampMode", "vendoredDetectionPacks", "outboundCredentialAudience"] },
     { path: "/ui/admin/retention", card: "audit-evidence-retention", keys: ["modeAuditRetention", "canaryObservationRetentionDays"] },
     { path: "/ui/admin/admission", card: "mcp-admission-mode", keys: ["mcpAdmissionMode"] },
@@ -230,6 +230,7 @@ test.describe("U3: each page carries its settings", () => {
     {
       path: "/ui/admin/workload-identities",
       card: "identity-delegation-settings",
+      tab: /^Settings/,
       keys: ["agentEntitlementMode", "delegatedTokenTtlSeconds", "delegationMaxDepth", "workloadClientAuthMethods", "dpopNonceRequired", "workloadKeyMaxAgeDays", "delegationUncappedRootAllowed", "delegationRootDefaultCapMicros", "delegationRootMaxLifetimeSeconds"],
     },
     { path: "/ui/admin/model-risk", card: "mrm-expiry-warn", keys: ["mrmExpiryWarnDays"] },
@@ -284,6 +285,7 @@ test.describe("U3: each page carries its settings", () => {
   test("step-up actions: unticking one is a relaxation; the list is sent in vocabulary order", async ({ page }) => {
     const st = await mockApi(page);
     await page.goto("/ui/admin/sso");
+    await page.getByRole("tab", { name: /^Sessions & step-up/ }).click();
     const row = page.getByTestId("org-setting-stepUpActions");
     await row.getByLabel("Managing passkeys").uncheck();
     await row.getByRole("button", { name: "Review change" }).click();

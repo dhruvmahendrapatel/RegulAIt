@@ -691,6 +691,10 @@ export {
   usableRemoteUrl,
   pickRemote,
   localServerNameFor,
+  MCP_PAID_SIGNALS,
+  normalizeRepositorySubfolder,
+  paidSignalFor,
+  type McpPaidSignal,
   type McpRemoteTransportType,
   type McpRegistryEntryKind,
   type McpCatalogueReason,
@@ -700,6 +704,29 @@ export {
   type NormalizedRegistryEntry,
   type NormalizedRegistryPage,
 } from "./mcp-registry.js";
+export {
+  MCP_CATALOGUE_LISTING_KINDS,
+  MCP_CATALOGUE_DELIVERIES,
+  MCP_CATALOGUE_PRESETS,
+  MCP_CATALOGUE_PRESET_IDS,
+  MCP_CATALOGUE_BUNDLE_FORMAT,
+  MCP_CATALOGUE_BUNDLE_MAX_ENTRIES,
+  MCP_CATALOGUE_BUNDLE_MAX_BYTES,
+  MCP_COMMUNITY_LIST_MAX_ENTRIES,
+  mcpCatalogueBundleSchema,
+  mcpCatalogueBundleEntrySchema,
+  bundleEntriesUsable,
+  catalogueDedupeKey,
+  githubRepoKey,
+  githubRepoLocation,
+  parseCommunityList,
+  vettingFor,
+  type McpCatalogueListingKind,
+  type McpCatalogueDelivery,
+  type McpCatalogueVetting,
+  type McpCataloguePreset,
+  type McpCatalogueBundle,
+} from "./mcp-catalogue.js";
 
 /** ADR-0097 — the admin CLEAR action on a held MCP server. A reason is
  * REQUIRED and there is no auto-clear: admitting a manifest a scanner flagged
@@ -2513,6 +2540,9 @@ export const updateOrgSettingsSchema = z
     privacyOpsEnabled: z.boolean().optional(),
     /** ADR-0224: days from a data-subject request's receipt to its due date (1–90; 30 is the strict default) */
     dsrSlaDays: z.number().int().min(1).max(90).optional(),
+    /** ADR-0090 amendment (lane L11, owner 2026-11-15): hours before a certification campaign's due time that its
+     * deadline reminder is sent, 1 hour to 14 days (48 is the default) */
+    certificationReminderHours: z.number().int().min(1).max(14 * 24).optional(),
     /** ADR-0092 amendment (migration 0100, L6c): may the deterministic
      * access-recommendation findings carry a MODEL-JUDGED annotation? false
      * (default) = the report is the six deterministic rules and nothing else.
@@ -3495,6 +3525,9 @@ export {
   chatDecidable,
   alertMeetsThreshold,
   composeAlertCard,
+  composeCampaignDeadlineCard,
+  outlookMessageForCampaignDeadline,
+  type CampaignDeadlineNoticeInput,
   escapeAdaptiveMarkdown,
   composeApprovalCard,
   composeDecidedCard,
@@ -4945,6 +4978,7 @@ export * from "./iso-packs.js";
 export * from "./sector-packs.js";
 // ADR-0243 (P24): the OWASP MCP and LLM Top 10 packs
 export * from "./owasp-packs.js";
+export * from "./nist-ai-600-1-pack.js";
 // ADR-0212 (P12 b): modality pricing
 export * from "./modality-pricing.js";
 
