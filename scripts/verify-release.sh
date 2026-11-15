@@ -54,8 +54,9 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 # The development key of ADR-0041, whose private half was never kept. Its only
 # allowed state is "alone, before the first ceremony"; --allow-dev-keyring is
 # for the repository's own CI check and is never accepted for a release.
-DEV_KEY_ID="regulait-release-dev-2026-08"
-DEV_KEY_FP="f2cbda4b1471e4070f7bd75edb69617a48cf58721f34607011935933fa629ff1"
+DEV_PUBLIC_ID="regulait-release-dev-2026-08"
+# The SHA-256 of its DER public key (SPKI): public, and published in infra/release-keys/README.md.
+DEV_PUBLIC_SPKI_SHA256="f2cbda4b1471e4070f7bd75edb69617a48cf58721f34607011935933fa629ff1"
 
 TRUST=""
 BUNDLE=""
@@ -127,10 +128,10 @@ if [ ! -f "$TRUST/keyring.json" ]; then
     shopt -s nullglob
     pubs=("$TRUST"/*.pub)
     shopt -u nullglob
-    [ "${#pubs[@]}" -eq 1 ] && [ "$(basename "${pubs[0]}")" = "$DEV_KEY_ID.pub" ] \
-      && [ "$(kr_fingerprint "${pubs[0]}")" = "$DEV_KEY_FP" ] && [ ! -e "$TRUST/root" ] \
+    [ "${#pubs[@]}" -eq 1 ] && [ "$(basename "${pubs[0]}")" = "$DEV_PUBLIC_ID.pub" ] \
+      && [ "$(kr_fingerprint "${pubs[0]}")" = "$DEV_PUBLIC_SPKI_SHA256" ] && [ ! -e "$TRUST/root" ] \
       || refuse "the keyring has no root-signed statement, and it is not the untouched development keyring" \
-           "Before the first ceremony (ADR-0324) the only allowed key is $DEV_KEY_ID.pub." \
+           "Before the first ceremony (ADR-0324) the only allowed key is $DEV_PUBLIC_ID.pub." \
            "Any other key must arrive through a ceremony: keyring.json signed by the roots."
     note "development keyring: no root keys yet; the release-key ceremony (ADR-0324) is pending"
     note "nothing can be released against this keyring, which is the correct failure direction"
