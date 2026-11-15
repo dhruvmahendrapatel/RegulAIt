@@ -14,3 +14,21 @@ ALTER TABLE "mcp_servers" DROP CONSTRAINT IF EXISTS "mcp_servers_system_class_ch
 ALTER TABLE "mcp_servers" ADD CONSTRAINT "mcp_servers_system_class_check" CHECK ("system_class" IS NULL OR "system_class" IN ('sap_business'));
 --> statement-breakpoint
 ALTER TABLE "rate_limits" ADD COLUMN IF NOT EXISTS "write_only" boolean DEFAULT false NOT NULL;
+--> statement-breakpoint
+-- 3. ADR-0230 owner decision 2026-11-15: the org's SAP business defaults, each at its strict value. The quorum is never
+--    below 1 and the requester never counts towards it; relaxing any of these is a settings_relax step-up, audited.
+ALTER TABLE "org_settings" ADD COLUMN IF NOT EXISTS "sap_approval_quorum" integer DEFAULT 2 NOT NULL;
+--> statement-breakpoint
+ALTER TABLE "org_settings" DROP CONSTRAINT IF EXISTS "org_settings_sap_approval_quorum_check";
+--> statement-breakpoint
+ALTER TABLE "org_settings" ADD CONSTRAINT "org_settings_sap_approval_quorum_check" CHECK ("sap_approval_quorum" BETWEEN 1 AND 10);
+--> statement-breakpoint
+ALTER TABLE "org_settings" ADD COLUMN IF NOT EXISTS "sap_write_rate_per_hour" integer DEFAULT 10 NOT NULL;
+--> statement-breakpoint
+ALTER TABLE "org_settings" DROP CONSTRAINT IF EXISTS "org_settings_sap_write_rate_per_hour_check";
+--> statement-breakpoint
+ALTER TABLE "org_settings" ADD CONSTRAINT "org_settings_sap_write_rate_per_hour_check" CHECK ("sap_write_rate_per_hour" BETWEEN 1 AND 1000);
+--> statement-breakpoint
+ALTER TABLE "org_settings" ADD COLUMN IF NOT EXISTS "sap_unattributed_writes_allowed" boolean DEFAULT false NOT NULL;
+--> statement-breakpoint
+ALTER TABLE "org_settings" ADD COLUMN IF NOT EXISTS "sap_reads_approve_first" boolean DEFAULT false NOT NULL;

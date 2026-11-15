@@ -398,3 +398,26 @@ answer is a data change, not a code change).
 - **Not built here**: `identity_release`, `subject_token_retention`, the `approved_pending_execution` state and option
   (b)'s SAP-trust key need slice A0 (owner-blocked). The HMAC idempotency key and the A3 audit and usage detail are the
   lane's second PR.
+
+## Owner decision (2026-11-15): the SAP defaults are org settings
+
+Owner, relayed by the master orchestrator: "We might need to allow orgs to decide their own settings." This answers
+owner questions 1, 2, 3 and 6. The built values stay as the shipped defaults, and each one becomes an org-level setting
+an admin can change in `PUT /v1/org/settings` (pending migration `sap_business_servers`, `org_settings.sap_*`):
+
+| Setting | Default | Looser (settings_relax step-up, audited) | Applies |
+|---|---|---|---|
+| `sapApprovalQuorum` | 2 | below 2. Never below 1 (zod and a CHECK), and the requester never counts: `approval-signatures.ts` refuses a decision by the caller whatever the quorum | the rule a mark seeds |
+| `sapWriteRatePerHour` | 10 | above 10 (at most 1000) | the write-only limit a mark seeds |
+| `sapUnattributedWritesAllowed` | false | true: an SAP write with no project runs unattributed. A named project must still exist, be live and have a budget | every SAP write, at call time |
+| `sapReadsApproveFirst` | false (reads not approve-first) | turning it off again once on | the rule a mark seeds: true seeds it over every tool (`write_only` false) |
+
+- **Tightening is free** (a higher quorum, a lower rate, approve-first reads): no step-up. Relaxing is judged against
+  the default and the stored value, as for every org setting (`org-setting-strictness.ts`, ADR-0186 decision 26).
+- **The quorum and rate seed the rows of a mark; they do not rewrite existing rows.** Seeded rows are ordinary approval
+  rules and rate limits, and changing them goes through the rule paths (a loosening is stepped up there too). A re-mark
+  reuses a seeded row only while it is at least as strict as the current settings.
+- **Reads, until the admin-confirmed read allow-list lands:** every tool on a marked server is still a write (review
+  #798), so `sapReadsApproveFirst` changes nothing at call time today. It decides whether confirmed reads will be
+  approve-first once the allow-list exists, and it is honoured by the seeded rule already.
+- Owner questions 1, 2, 3 and 6 are closed. 4, 5, 7 and 8 stay open.

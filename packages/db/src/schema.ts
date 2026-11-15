@@ -5032,6 +5032,18 @@ export const orgSettings = pgTable(
      * template (an approval rule with quorum of at least 2 and a rate limit) and the authorised-targets list; 'off'
      * is a settings_relax relaxation, audited. */
     mcpHighRiskMode: text("mcp_high_risk_mode", { enum: ["enforce", "off"] }).notNull().default("enforce"),
+    /** ADR-0230 owner decision 2026-11-15: the org's defaults for an SAP business MCP server (pending migration
+     * sap_business_servers). The quorum and the write rate seed the rows a mark creates; the other two apply on every
+     * SAP call. Each default is the strict value; relaxing one (a quorum below 2, a rate above 10, allowing an
+     * unattributed write) is a settings_relax step-up and audited. The quorum is never below 1 (CHECK), and the
+     * requester never counts towards it (createApprovalRuleRow). */
+    sapApprovalQuorum: integer("sap_approval_quorum").notNull().default(2),
+    /** the seeded write-only limit: SAP writes per user per hour (default 10, CHECK 1..1000) */
+    sapWriteRatePerHour: integer("sap_write_rate_per_hour").notNull().default(10),
+    /** false (default) = an SAP write with no project is refused `sap-write-needs-project`; true = it runs unattributed */
+    sapUnattributedWritesAllowed: boolean("sap_unattributed_writes_allowed").notNull().default(false),
+    /** false (default) = the seeded approval rule covers writes only; true = it covers every tool on the server */
+    sapReadsApproveFirst: boolean("sap_reads_approve_first").notNull().default(false),
     /** ADR-0175 A5 (migration 0140): the release-age cooldown in days. 7
      * (DEFAULT since ADR-0181, migration 0159). 0 = off; an admin may relax
      * it (audited). */
