@@ -17,6 +17,9 @@ import {
   detectionIncidents,
   detectionRulePacks,
   eq,
+  builderAgentSkills,
+  builderAgents,
+  builderSkills,
   mcpServers,
   runAuditV2Cutover,
   runMigrations,
@@ -64,7 +67,8 @@ async function call(toolName: string, over: Partial<typeof auditLog.$inferInsert
 /** move the engine's cursor to the chain head, so each test reads only its own rows */
 async function toHead(): Promise<void> {
   await runDetectionSweep(db, adminId);
-  await db.execute(sql`UPDATE detection_engine_state SET cursor_seq = (SELECT max(seq) FROM audit_log), lease_until = NULL, lease_token = NULL`);
+  // the replay of the shared database's history is not under test here: mark it complete
+  await db.execute(sql`UPDATE detection_engine_state SET cursor_seq = (SELECT max(seq) FROM audit_log), replay_cursor_seq = replay_until_seq, lease_until = NULL, lease_token = NULL`);
 }
 const incidentsFor = (auditId: string) => db.select().from(detectionIncidents).where(eq(detectionIncidents.triggerAuditId, auditId));
 const asSession = async () => sessionRequest(await grantStepUpForTest(db, adminId, { kind: "settings_relax", facts: { unrelated: true } }));
@@ -155,6 +159,50 @@ describe("ADR-0333 sweep: incidents with evidence, exported through the audit ch
     expect((await incidentsFor(denies[9]!)).map((i) => i.ruleId)).toEqual(["denied-call-burst"]);
     expect(await incidentsFor(denies[10]!)).toHaveLength(0);
     await db.delete(mcpServers).where(eq(mcpServers.id, server!.id));
+  });
+
+  it("D1: high-risk-addon-call also fires on a builder agent carrying a High or Critical skill", async () => {
+    await toHead();
+    const [agent] = await db.insert(builderAgents).values({ name: `adr0333-${RUN}`, ownerUserId: adminId, connectionFormat: "shared" }).returning({ id: builderAgents.id });
+    const [skill] = await db.insert(builderSkills).values({ name: `adr0333-${RUN}`, ownerUserId: adminId, admissionSeverity: "high" }).returning({ id: builderSkills.id });
+    await db.insert(builderAgentSkills).values({ agentId: agent!.id, skillId: skill!.id });
+    try {
+      const viaAgent = await call("noop", { objectType: "connector", detail: { builderAgentId: agent!.id } });
+      const malformed = await call("noop", { detail: { builderAgentId: "not-a-uuid" } });
+      await runDetectionSweep(db, adminId);
+      expect((await incidentsFor(viaAgent)).map((i) => i.ruleId)).toEqual(["high-risk-addon-call"]);
+      expect(await incidentsFor(malformed)).toHaveLength(0);
+    } finally {
+      await db.delete(builderAgents).where(eq(builderAgents.id, agent!.id));
+      await db.delete(builderSkills).where(eq(builderSkills.id, skill!.id));
+    }
+  });
+
+  it("D2: the first-run replay covers retained history in checkpointed batches, marks incidents historical, and resumes", async () => {
+    await toHead();
+    const first = await call("vault_get_secret");
+    const replayTrigger = await call("http_fetch");
+    // pretend the engine first ran now: history ends here, the live cursor starts here
+    await db.execute(sql`UPDATE detection_engine_state SET
+      replay_cursor_seq = (SELECT seq - 1 FROM audit_log WHERE id = ${first}::uuid),
+      replay_until_seq = (SELECT max(seq) FROM audit_log), cursor_seq = (SELECT max(seq) FROM audit_log), replay_completed_at = NULL`);
+    const live = await call("read_env");
+    const liveSend = await call("http_post");
+    const out = await runDetectionSweep(db, adminId);
+    expect(out.replayComplete).toBe(false);
+    expect(out.replayed).toBeGreaterThanOrEqual(2);
+    void live;
+    const [historical] = await incidentsFor(replayTrigger);
+    expect(historical).toMatchObject({ ruleId: "secret-read-then-egress", historical: true, response: "alert" });
+    const [current] = await incidentsFor(liveSend);
+    expect(current).toMatchObject({ ruleId: "secret-read-then-egress", historical: false });
+    const [state] = await db.select().from(detectionEngineState);
+    expect(state!.replayCursorSeq).toBe(state!.replayUntilSeq);
+    expect(state!.replayCompletedAt).not.toBeNull();
+    // a further pass replays nothing more and raises nothing twice
+    const again = await runDetectionSweep(db, adminId);
+    expect(again).toMatchObject({ replayComplete: true, replayed: 0 });
+    expect(await incidentsFor(replayTrigger)).toHaveLength(1);
   });
 
   it("a held lease is not claimed by a second pass", async () => {

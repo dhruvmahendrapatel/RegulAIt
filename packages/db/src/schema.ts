@@ -16634,6 +16634,11 @@ export const detectionEngineState = pgTable(
     lastSweepAt: timestamp("last_sweep_at", { withTimezone: true }),
     /** the stored pack version last reported as unverified, so the audit row is written once per version */
     unverifiedPackVersion: integer("unverified_pack_version"),
+    // ADR-0333 D2 (owner, 2026-11-15): the retained history is replayed on first run behind its own checkpoint,
+    // from the first retained row up to the chain head the live cursor started at
+    replayCursorSeq: bigint("replay_cursor_seq", { mode: "number" }).notNull().default(0),
+    replayUntilSeq: bigint("replay_until_seq", { mode: "number" }).notNull().default(0),
+    replayCompletedAt: timestamp("replay_completed_at", { withTimezone: true }),
   },
   (t) => [check("detection_engine_state_singleton_check", sql`${t.id} = 1`)],
 );
@@ -16660,6 +16665,8 @@ export const detectionIncidents = pgTable(
     actorIdentityId: uuid("actor_identity_id").references(() => workloadIdentities.id, { onDelete: "set null" }),
     // ADR-0200 exception (evidence snapshot): the trigger row's `actor_chain` as it was when the incident was raised.
     actorChain: jsonb("actor_chain").$type<string[]>(),
+    /** ADR-0333 D2: raised by the first-run replay of retained history, not live (always alert-only) */
+    historical: boolean("historical").notNull().default(false),
     status: text("status", { enum: DETECTION_INCIDENT_STATUSES }).notNull().default("open"),
     statusChangedBy: uuid("status_changed_by").references(() => users.id, { onDelete: "set null" }),
     statusChangedAt: timestamp("status_changed_at", { withTimezone: true }),
@@ -16689,6 +16696,7 @@ export const detectionIncidents = pgTable(
       sql`${t.response} IN ('alert', 'suspend_grant', 'revoke_credential', 'require_approval')`,
     ),
     check("detection_incidents_response_state_check", sql`${t.responseState} IN ('none', 'done', 'failed')`),
+    check("detection_incidents_historical_alert_check", sql`NOT ${t.historical} OR ${t.response} = 'alert'`),
   ],
 );
 export type DetectionIncidentRow = typeof detectionIncidents.$inferSelect;

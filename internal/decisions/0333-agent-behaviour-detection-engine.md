@@ -38,6 +38,15 @@ They stay as they are. This ADR adds a per-session sequence engine beside them.
 - **Grouping ("session").** An event belongs to the delegation tree it ran under (`grant:<root grant id>`, ADR-0188)
   when it has an actor, and otherwise to the sponsor user (`user:<user id>`). Every rule window is per group.
   `endpoint:<device id>` is a reserved prefix for the hook decisions above.
+- **First run replays history (D2).** On first run the live cursor starts at the chain head. The retained history,
+  from the first retained row up to that head, is replayed behind a second cursor (`replay_cursor_seq` up to
+  `replay_until_seq`):
+  - after the live batches in each pass, so a long history never delays live detection;
+  - at most ten batches of 500 rows per pass;
+  - checkpointed after every batch, so a restart resumes where it stopped, and rows the audit prune already removed
+    are skipped;
+  - its incidents are marked `historical` and are always alert-only (a CHECK enforces it). A response never acts on
+    an agent session from the past.
 
 ### 2. Rules are a closed, signed, versioned document
 
@@ -82,7 +91,7 @@ They stay as they are. This ADR adds a per-session sequence engine beside them.
 |---|---|---|
 | `secret-read-then-egress` | temporal_ordered, 10 min | an allowed `secret_read` tool call, then an allowed `network_egress` call |
 | `sensitive-scope-then-unapproved-write` | temporal_ordered, 15 min | an allowed data-scoped call, then an allowed `write` call to a different server |
-| `high-risk-addon-call` | single | an allowed call to an MCP server whose admission scan found High or Critical |
+| `high-risk-addon-call` | single | an allowed call to an MCP server, or by a builder agent carrying a skill, that the admission scanner rated High or Critical (D1) |
 | `delegation-escalation` | single | a call refused because an agent asked beyond its sponsor's entitlements (`delegation-scope`, `delegation-depth`, `lead-ceiling`, `actor-allow-list`, `delegation-isolation`) |
 | `denied-call-burst` | event_count, 5 min, 10 | ten or more denied calls in one group (probing) |
 
@@ -153,6 +162,20 @@ permissive JS evaluator for Sigma correlation rules appears.
 Detection is **on by default**: it observes and alerts, which is the strict setting (ADR-0180). Turning a rule off is
 a relaxation (section 2). The default response is an alert. Nothing blocks until an admin chooses it with a step-up.
 
+## Owner decisions (2026-11-15, relayed by the master session on #865)
+
+- **D1:** "`high-risk-addon-call` fires on High/Critical MCP servers AND High/Critical builder skills
+  (`builder_skills.admission_severity`)."
+- **D2:** "on first run, detection ALWAYS REPLAYS the retained history (not start-at-chain-head). Make the replay
+  bounded and resumable (batched, checkpointed), so a large history cannot stall the engine; incidents from replay
+  are marked as historical."
+
+As built:
+- **D1.** An event's add-on severity is the higher of two values: its MCP server's admission severity, and the highest
+  severity among the skills attached to the builder agent that made the call (`detail.builderAgentId` →
+  `builder_agent_skills` → `builder_skills.admission_severity`). The rule no longer requires `objectType` `mcp_tool`.
+- **D2.** Section 1, "First run replays history".
+
 ## Consequences
 
 - An admin sees combinations of individually allowed calls as incidents, with the audit rows and receipts that prove
@@ -163,5 +186,3 @@ a relaxation (section 2). The default response is an alert. Nothing blocks until
 - **Follow-ups:** endpoint hook decisions in the audit chain (lane E13, ADR-0298 follow-up); a per-rule suppression
   list for known-good automations; a rule test harness in the admin API (dry-run a pack over a past window).
 
-Owner question open: should `high-risk-addon-call` also fire on a High/Critical builder skill (`builder_skills`), not
-only on an MCP server? It fires on MCP servers only in this build.

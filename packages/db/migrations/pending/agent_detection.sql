@@ -3,7 +3,8 @@
 --
 -- - `detection_rule_packs`: admin-edited, signed rule pack versions (the built-in default pack has no row). `pack` is
 --   a schema-validated configuration document (ADR-0200 exception).
--- - `detection_engine_state`: the engine's one cursor over `audit_log.seq`, leased per sweep.
+-- - `detection_engine_state`: the engine's live cursor over `audit_log.seq` and its first-run history replay
+--   checkpoint (ADR-0333 D2), leased per sweep.
 -- - `detection_incidents` and `detection_incident_evidence`: each detection and the audit rows that prove it. The
 --   audit pointers are FK-free on purpose, like `decision_receipts.audit_id`: the audit trail is FK-free and its
 --   retention prune must not be blocked by, or cascade into, incident history.
@@ -40,6 +41,9 @@ CREATE TABLE IF NOT EXISTS "detection_engine_state" (
   "lease_token" uuid,
   "last_sweep_at" timestamp with time zone,
   "unverified_pack_version" integer,
+  "replay_cursor_seq" bigint DEFAULT 0 NOT NULL,
+  "replay_until_seq" bigint DEFAULT 0 NOT NULL,
+  "replay_completed_at" timestamp with time zone,
   CONSTRAINT "detection_engine_state_singleton_check" CHECK ("id" = 1)
 );
 --> statement-breakpoint
@@ -55,6 +59,7 @@ CREATE TABLE IF NOT EXISTS "detection_incidents" (
   "delegation_grant_id" uuid,
   "actor_identity_id" uuid,
   "actor_chain" jsonb,
+  "historical" boolean DEFAULT false NOT NULL,
   "status" text DEFAULT 'open' NOT NULL,
   "status_changed_by" uuid,
   "status_changed_at" timestamp with time zone,
@@ -69,7 +74,8 @@ CREATE TABLE IF NOT EXISTS "detection_incidents" (
   CONSTRAINT "detection_incidents_severity_check" CHECK ("severity" IN ('low', 'medium', 'high', 'critical')),
   CONSTRAINT "detection_incidents_status_check" CHECK ("status" IN ('open', 'acknowledged', 'closed')),
   CONSTRAINT "detection_incidents_response_check" CHECK ("response" IN ('alert', 'suspend_grant', 'revoke_credential', 'require_approval')),
-  CONSTRAINT "detection_incidents_response_state_check" CHECK ("response_state" IN ('none', 'done', 'failed'))
+  CONSTRAINT "detection_incidents_response_state_check" CHECK ("response_state" IN ('none', 'done', 'failed')),
+  CONSTRAINT "detection_incidents_historical_alert_check" CHECK (NOT "historical" OR "response" = 'alert')
 );
 --> statement-breakpoint
 DO $$ BEGIN

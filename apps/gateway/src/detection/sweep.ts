@@ -101,7 +101,12 @@ interface EventRow {
   userKnown: boolean;
   grantKnown: boolean;
   identityKnown: boolean;
+  /** ADR-0333 D1: the highest admission severity among the acting builder agent's attached skills (0-3) */
+  skillSeverityRank: number | string | null;
 }
+
+const SEVERITY_BY_RANK = ["low", "medium", "high", "critical"] as const;
+const RANK: Record<string, number> = { low: 0, medium: 1, high: 2, critical: 3 };
 
 /** foreign keys the incident row may carry: only ids that still resolve (the audit trail itself is FK-free) */
 export interface DetectionEventRefs {
@@ -111,9 +116,16 @@ export interface DetectionEventRefs {
 }
 type FreshEvent = DetectionEvent & DetectionEventRefs;
 
+/** the add-on severity of an event: the higher of its MCP server's and its builder agent's skills' (ADR-0333 D1) */
+function addonSeverity(server: DetectionEvent["addonSeverity"], skillRank: number | string | null): DetectionEvent["addonSeverity"] {
+  const skill = skillRank === null ? -1 : Number(skillRank);
+  const best = Math.max(server === null ? -1 : RANK[server]!, Number.isInteger(skill) ? skill : -1);
+  return best < 0 ? null : SEVERITY_BY_RANK[best]!;
+}
+
 const toEvent = (r: EventRow): FreshEvent => {
-  const { atMs, ...rest } = r;
-  return { ...rest, seq: Number(r.seq), at: Number(atMs) };
+  const { atMs, skillSeverityRank, ...rest } = r;
+  return { ...rest, seq: Number(r.seq), at: Number(atMs), addonSeverity: addonSeverity(r.addonSeverity, skillSeverityRank) };
 };
 
 /** the event projection: the group key, the data-scope flag and the add-on's admission severity, from one row */
@@ -125,6 +137,10 @@ const EVENT_SELECT = sql`
   a.tool_name AS "toolName", a.server_id AS "serverId", a.detail->>'phase' AS phase,
   (jsonb_typeof(a.rule_chain) = 'array' AND a.rule_chain @> '[{"rule":"data-scope"}]'::jsonb) AS "dataScoped",
   CASE WHEN a.object_type = 'mcp_tool' THEN s.admission_severity ELSE NULL END AS "addonSeverity",
+  (SELECT max(CASE bs.admission_severity WHEN 'critical' THEN 3 WHEN 'high' THEN 2 WHEN 'medium' THEN 1 WHEN 'low' THEN 0 END)
+     FROM builder_agent_skills bas JOIN builder_skills bs ON bs.id = bas.skill_id
+     WHERE bas.agent_id = CASE WHEN (a.detail->>'builderAgentId') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                               THEN (a.detail->>'builderAgentId')::uuid END) AS "skillSeverityRank",
   a.delegation_grant_id AS "delegationGrantId", a.actor_identity_id AS "actorIdentityId", a.actor_chain AS "actorChain",
   (u.id IS NOT NULL) AS "userKnown", (g.id IS NOT NULL) AS "grantKnown", (wi.id IS NOT NULL) AS "identityKnown"`;
 const EVENT_FROM = sql`FROM audit_log a
@@ -145,25 +161,42 @@ export interface DetectionSweepResult {
   incidents: number;
   packVersion: number | null;
   lookbackTruncated: boolean;
+  /** ADR-0333 D2: history rows replayed in this pass, and whether the replay has finished */
+  replayed: number;
+  replayComplete: boolean;
 }
 
-/** Start the cursor at the chain head on first run: detection is forward-looking, history is not replayed. */
+/**
+ * ADR-0333 D2 (owner, 2026-11-15): on first run the live cursor starts at the chain head and the retained history
+ * is REPLAYED behind a second cursor, from the first retained row up to that head. The replay runs after the live
+ * batches in each pass, a bounded number of batches at a time, and checkpoints after every batch, so a long history
+ * never delays live detection and a restart resumes where it stopped.
+ */
 async function ensureState(db: Db): Promise<void> {
   await db.execute(sql`
-    INSERT INTO detection_engine_state (id, cursor_seq)
-    SELECT 1, coalesce((SELECT max(seq) FROM audit_log), 0)
+    INSERT INTO detection_engine_state (id, cursor_seq, replay_cursor_seq, replay_until_seq)
+    SELECT 1, h.head, 0, h.head FROM (SELECT coalesce(max(seq), 0) AS head FROM audit_log) h
     ON CONFLICT (id) DO NOTHING`);
 }
 
-async function claim(db: Db, token: string): Promise<number | null> {
-  const claimed = await rows<{ cursor: number | string }>(
+type SweepMode = "live" | "replay";
+
+interface Claimed {
+  cursor: number;
+  replayCursor: number;
+  replayUntil: number;
+}
+
+async function claim(db: Db, token: string): Promise<Claimed | null> {
+  const claimed = await rows<{ cursor: number | string; replayCursor: number | string; replayUntil: number | string }>(
     db,
     sql`UPDATE detection_engine_state
         SET lease_token = ${token}::uuid, lease_until = now() + make_interval(secs => ${DETECTION_SWEEP_LIMITS.leaseSeconds})
         WHERE id = 1 AND (lease_until IS NULL OR lease_until < now())
-        RETURNING cursor_seq AS cursor`,
+        RETURNING cursor_seq AS cursor, replay_cursor_seq AS "replayCursor", replay_until_seq AS "replayUntil"`,
   );
-  return claimed[0] ? Number(claimed[0].cursor) : null;
+  const c = claimed[0];
+  return c ? { cursor: Number(c.cursor), replayCursor: Number(c.replayCursor), replayUntil: Number(c.replayUntil) } : null;
 }
 
 async function release(db: Db, token: string): Promise<void> {
@@ -198,33 +231,66 @@ export async function runDetectionSweep(db: Db, actorUserId: string | null): Pro
   const token = randomUUID();
   const claimed = await claim(db, token);
   const active = await loadActiveDetectionPack(db);
-  const result: DetectionSweepResult = { outcome: "not_claimed", rowsRead: 0, incidents: 0, packVersion: active.version, lookbackTruncated: false };
+  const result: DetectionSweepResult = {
+    outcome: "not_claimed",
+    rowsRead: 0,
+    incidents: 0,
+    packVersion: active.version,
+    lookbackTruncated: false,
+    replayed: 0,
+    replayComplete: false,
+  };
   if (claimed === null) return result;
-  let cursor: number = claimed;
   result.outcome = "idle";
   try {
     await reportUnverified(db, actorUserId, active);
     const maxSpanSeconds = Math.max(0, ...active.pack.rules.map((r) => (r.type === "single" ? 0 : r.timespanSeconds)));
-    for (let b = 0; b < DETECTION_SWEEP_LIMITS.maxBatchesPerPass; b++) {
-      const batch: EventRow[] = await rows<EventRow>(
-        db,
-        sql`SELECT ${EVENT_SELECT} ${EVENT_FROM} WHERE a.seq > ${cursor} ORDER BY a.seq LIMIT ${DETECTION_SWEEP_LIMITS.batchSize}`,
-      );
-      if (batch.length === 0) break;
-      result.outcome = "evaluated";
-      result.rowsRead += batch.length;
-      const lastSeq: number = Number(batch[batch.length - 1]!.seq);
-      const fresh = batch.filter((r) => !(DETECTION_OWN_OBJECT_TYPES as readonly string[]).includes(r.objectType)).map(toEvent);
-      const matches = await evaluateBatch(db, active, fresh, cursor, maxSpanSeconds, result);
-      const raised = await commitBatch(db, token, active, matches, lastSeq);
-      result.incidents += raised;
-      cursor = lastSeq;
-      if (batch.length < DETECTION_SWEEP_LIMITS.batchSize) break;
+    // live first, so the replay of a long history never delays detection of what is happening now
+    const live = await runRange(db, token, active, "live", claimed.cursor, null, maxSpanSeconds, result);
+    result.rowsRead += live;
+    result.replayComplete = claimed.replayCursor >= claimed.replayUntil;
+    if (!result.replayComplete) {
+      const replayed = await runRange(db, token, active, "replay", claimed.replayCursor, claimed.replayUntil, maxSpanSeconds, result);
+      result.replayed = replayed;
+      result.rowsRead += replayed;
     }
   } finally {
     await release(db, token);
   }
   return result;
+}
+
+/** Evaluate batches over (from, until] in chain order, each committed with its cursor checkpoint. Returns rows read. */
+async function runRange(
+  db: Db,
+  token: string,
+  active: ActivePack,
+  mode: SweepMode,
+  from: number,
+  until: number | null,
+  maxSpanSeconds: number,
+  result: DetectionSweepResult,
+): Promise<number> {
+  let cursor = from;
+  let read = 0;
+  for (let b = 0; b < DETECTION_SWEEP_LIMITS.maxBatchesPerPass; b++) {
+    const bound = until === null ? sql`` : sql`AND a.seq <= ${until}`;
+    const batch: EventRow[] = await rows<EventRow>(
+      db,
+      sql`SELECT ${EVENT_SELECT} ${EVENT_FROM} WHERE a.seq > ${cursor} ${bound} ORDER BY a.seq LIMIT ${DETECTION_SWEEP_LIMITS.batchSize}`,
+    );
+    // a replay whose remaining rows were all pruned still finishes: the checkpoint jumps to its end
+    const lastSeq: number = batch.length > 0 ? Number(batch[batch.length - 1]!.seq) : mode === "replay" && until !== null ? until : cursor;
+    if (lastSeq <= cursor) break;
+    result.outcome = "evaluated";
+    read += batch.length;
+    const fresh = batch.filter((r) => !(DETECTION_OWN_OBJECT_TYPES as readonly string[]).includes(r.objectType)).map(toEvent);
+    const matches = await evaluateBatch(db, active, fresh, cursor, maxSpanSeconds, result);
+    result.incidents += await commitBatch(db, token, active, matches, lastSeq, mode);
+    cursor = lastSeq;
+    if (batch.length < DETECTION_SWEEP_LIMITS.batchSize) break;
+  }
+  return read;
 }
 
 async function evaluateBatch(
@@ -271,7 +337,15 @@ async function evaluateBatch(
 }
 
 /** Incidents, evidence, audit rows and the cursor move commit together, conditional on this pass's lease. */
-async function commitBatch(db: Db, token: string, active: ActivePack, matches: DetectionMatch[], lastSeq: number): Promise<number> {
+async function commitBatch(
+  db: Db,
+  token: string,
+  active: ActivePack,
+  matches: DetectionMatch[],
+  lastSeq: number,
+  mode: SweepMode,
+): Promise<number> {
+  const historical = mode === "replay";
   return db.transaction(async (tx) => {
     let raised = 0;
     for (const m of matches) {
@@ -289,6 +363,7 @@ async function commitBatch(db: Db, token: string, active: ActivePack, matches: D
           delegationGrantId: refs.grantKnown ? m.trigger.delegationGrantId : null,
           actorIdentityId: refs.identityKnown ? m.trigger.actorIdentityId : null,
           actorChain: m.trigger.actorChain,
+          historical,
           response: "alert",
         })
         .onConflictDoNothing()
@@ -312,19 +387,25 @@ async function commitBatch(db: Db, token: string, active: ActivePack, matches: D
           packDigest: active.digest,
           group: m.group,
           evidenceAuditIds: m.evidence.map((e) => e.auditId),
+          historical,
           response: "alert",
         },
         // alert only: the incident records a detection and restricts nothing
         effect: "allow",
         ruleId: `detection:${m.rule.id}`,
         ruleChain: [],
-        reason: `Detection rule ${m.rule.id} matched (${m.rule.severity})`,
+        reason: `Detection rule ${m.rule.id} matched (${m.rule.severity})${historical ? " in the history replay" : ""}`,
       });
     }
     const moved = await rows<{ id: number }>(
       tx,
-      sql`UPDATE detection_engine_state SET cursor_seq = ${lastSeq}, lease_until = now() + make_interval(secs => ${DETECTION_SWEEP_LIMITS.leaseSeconds})
-          WHERE id = 1 AND lease_token = ${token}::uuid AND cursor_seq < ${lastSeq} RETURNING id`,
+      historical
+        ? sql`UPDATE detection_engine_state SET replay_cursor_seq = ${lastSeq},
+                replay_completed_at = CASE WHEN ${lastSeq} >= replay_until_seq THEN now() ELSE NULL END,
+                lease_until = now() + make_interval(secs => ${DETECTION_SWEEP_LIMITS.leaseSeconds})
+              WHERE id = 1 AND lease_token = ${token}::uuid AND replay_cursor_seq < ${lastSeq} RETURNING id`
+        : sql`UPDATE detection_engine_state SET cursor_seq = ${lastSeq}, lease_until = now() + make_interval(secs => ${DETECTION_SWEEP_LIMITS.leaseSeconds})
+              WHERE id = 1 AND lease_token = ${token}::uuid AND cursor_seq < ${lastSeq} RETURNING id`,
     );
     if (moved.length === 0) throw new Error("detection_lease_lost");
     return raised;
@@ -345,7 +426,7 @@ export function detectionJobDefinitions(): SchedulerJobDefinition[] {
         const out = await runDetectionSweep(ctx.db, ctx.actorUserId);
         return {
           itemsProcessed: out.rowsRead,
-          detail: { outcome: out.outcome, incidents: out.incidents, packVersion: out.packVersion, lookbackTruncated: out.lookbackTruncated },
+          detail: { outcome: out.outcome, incidents: out.incidents, replayed: out.replayed, replayComplete: out.replayComplete, packVersion: out.packVersion, lookbackTruncated: out.lookbackTruncated },
         };
       },
     },
