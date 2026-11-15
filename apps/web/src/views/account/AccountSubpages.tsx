@@ -4,7 +4,7 @@
  * own rows, returned whole), so each full page is the list as it is today, just on its own page. The Account page
  * keeps a five-row preview of each, with the full count in its title.
  */
-import { Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes } from "react-router-dom";
 import AccountPage, { SessionsCard } from "./AccountPage";
 import PasskeysCard from "./PasskeysCard";
 import { useSession } from "../../session/SessionContext";
@@ -51,6 +51,8 @@ export default function AccountArea() {
       <Route index element={<AccountPage />} />
       <Route path="sessions" element={<AccountSessionsPage />} />
       <Route path="passkeys" element={<AccountPasskeysPage />} />
+      {/* an unknown sub-path goes back to the area's own page, never a blank page */}
+      <Route path="*" element={<Navigate to="/account" replace />} />
     </Routes>
   );
 }
