@@ -26,13 +26,15 @@ import { PreviewImpactModal, type RegressionAcceptance } from "./DecisionRegress
 
 type Tier = (typeof TIERS)[number]["id"];
 
-interface TestClassInfo {
+export interface TestClassInfo {
   id: string;
   name: string;
   list: "owasp-llm-top-10" | "owasp-agentic-top-10";
   redteamClasses: string[];
   scorerKinds: string[];
   measurable: boolean;
+  /** ADR-0297: an LLM id's 2025 id, which a stored policy (and the strict defaults) may still hold */
+  legacyId?: string;
 }
 interface RequiredClass {
   testClass: string;
@@ -58,11 +60,27 @@ export interface RequiredTestsView {
 export const REQUIRED_TESTS_PATH = "/v1/governance/review-policy/required-tests";
 const KEY = ["review-policy", "required-tests"] as const;
 
-/** a short display form of an OWASP id: `owasp:llm:01` → `LLM01`, `owasp:agentic:asi02` → `ASI02` */
+/** a short display form of an OWASP id: `owasp:llm:2026:03` → `LLM03:2026` (ADR-0297); a bare LLM id is the 2025
+ * edition's, so `owasp:llm:03` → `LLM03:2025` (in 2026, LLM03 is a different risk); `owasp:agentic:asi02` → `ASI02` */
 export function owaspShort(id: string): string {
+  const e = /^owasp:llm:(\d{4}):(\d\d)$/.exec(id);
+  if (e) return `LLM${e[2]}:${e[1]}`;
   const m = /^owasp:(llm|agentic):(.+)$/.exec(id);
   if (!m) return id;
-  return m[1] === "llm" ? `LLM${m[2]}` : m[2]!.toUpperCase();
+  return m[1] === "llm" ? `LLM${m[2]}:2025` : m[2]!.toUpperCase();
+}
+
+/**
+ * The test classes keyed by every id a row may hold: each catalog id, and (ADR-0297) each LLM id's 2025 alias,
+ * mapping to the same entry. A stored 2025 row is therefore looked up, thresholded and de-duplicated as its risk.
+ */
+export function testClassIndex(classes: readonly TestClassInfo[]): Map<string, TestClassInfo> {
+  const out = new Map<string, TestClassInfo>();
+  for (const c of classes) {
+    out.set(c.id, c);
+    if (c.legacyId) out.set(c.legacyId, c);
+  }
+  return out;
 }
 
 interface RowDraft {
@@ -116,7 +134,9 @@ function RequiredTestsForm(props: { view: RequiredTestsView }) {
   const [errors, setErrors] = useState<Partial<Record<Tier, string>>>({});
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const info = new Map(view.testClasses.map((c) => [c.id, c]));
+  const info = testClassIndex(view.testClasses);
+  /** the catalog id a row's id stands for (a 2025 alias resolves to its 2026 id) */
+  const canonical = (id: string) => info.get(id)?.id ?? id;
   const unmeasurable = view.testClasses.filter((c) => !c.measurable);
 
   /** any edit turns a default tier into a stored one, starting from what it showed */
@@ -206,7 +226,7 @@ function RequiredTestsForm(props: { view: RequiredTestsView }) {
         <ul className={p.tiers}>
           {TIERS.map((tier) => {
             const td = draft[tier.id];
-            const used = new Set(td.rows.map((r) => r.testClass));
+            const used = new Set(td.rows.map((r) => canonical(r.testClass)));
             const label = `${tier.label} tier`;
             return (
               <li key={tier.id} className={p.tier} aria-label={`Required AI tests, ${label.toLowerCase()}`}>
