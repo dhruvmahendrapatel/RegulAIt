@@ -57,7 +57,8 @@ export interface ResourceRestrictions {
   approvalRules: ResourceApprovalRule[];
   rateLimits: LoadedRateLimit[];
   attributionRequired: boolean;
-  /** ADR-0251 slice 4: the v5 Cedar actions land after #707; until then no policy can target these actions */
+  /** ADR-0251 slice 4: the Cedar verdict for the call's v5 action (`ModelInvoke`, `ConnectorCall`, `A2aMessage`);
+   * null = no active v5 policy, so nothing can apply */
   abacDecision: AbacDecision | null;
 }
 
@@ -172,12 +173,32 @@ export async function loadResourceRestrictions(
   args: {
     userId: string;
     resource: GovernedResource;
+    /** the call's attribution; the ABAC v5 resource bag carries it (ADR-0251 slice 4). Absent = unattributed. */
+    projectId?: string | null;
     /** false: leave every limit's `currentCount` at 0, because the caller decides through `governedEvaluateResource`,
      * which counts the window once, under the rate lock (hard windows). Default true (a read of the current counts). */
     counts?: boolean;
   },
 ): Promise<ResourceRestrictions> {
   const { userId, resource } = args;
+  // ADR-0251 slice 4: the Cedar verdict for the call's v5 action, null when no active v5 policy exists. Loaded lazily
+  // (abac.js pulls in the simulation surface; a static edge would close an import cycle through the dispatch core).
+  const abacVerdict = import("./abac.js").then(({ evaluateAbacForGovernedCall }) =>
+    evaluateAbacForGovernedCall(db, {
+      userId,
+      projectId: args.projectId ?? null,
+      target:
+        resource.type === "model"
+          ? { type: "model", id: resource.id, mode: resource.mode }
+          : resource.type === "connector"
+            ? { type: "connector", id: resource.id, operation: resource.operation }
+            : { type: "a2a", id: resource.id, skillId: resource.skillId },
+    }),
+  );
+  // The verdict runs beside the reads below. When one of those reads rejects first, nothing awaits the verdict, so
+  // its own failure would surface as an unhandled rejection. Mark it handled here; the `await` at the end still
+  // throws it, and either failure reaches the caller and denies the call.
+  void abacVerdict.catch(() => undefined);
   const idCol =
     resource.type === "connector" ? resourceApprovalRules.connectorId : resource.type === "a2a" ? resourceApprovalRules.a2aAgentId : resourceApprovalRules.agentId;
   const [ruleRows, limitRows, [org]] = await Promise.all([
@@ -235,7 +256,7 @@ export async function loadResourceRestrictions(
   }));
   // no org row reads as the strict default (ADR-0180), never as a relaxation
   const attributionRequired = resource.type === "connector" ? org?.connector !== false : resource.type === "a2a" ? org?.a2a !== false : false;
-  return { approvalRules, rateLimits, attributionRequired, abacDecision: null };
+  return { approvalRules, rateLimits, attributionRequired, abacDecision: await abacVerdict };
 }
 
 export interface GovernedResourceInput {
@@ -253,7 +274,7 @@ export interface GovernedResourceInput {
 /** ADR-0251 — the core's decision for a model, connector or A2A call. Never throws; an error is a deny. */
 export async function governedEvaluateResource(db: Db, input: GovernedResourceInput): Promise<GovernedResourceDecision> {
   try {
-    const r = input.restrictions ?? (await loadResourceRestrictions(db, { userId: input.userId, resource: input.resource, counts: false }));
+    const r = input.restrictions ?? (await loadResourceRestrictions(db, { userId: input.userId, resource: input.resource, projectId: input.projectId, counts: false }));
     const compose = (rateLimits: LoadedRateLimit[]) =>
       composeResourceDecision({
         resource: input.resource,
@@ -266,16 +287,19 @@ export async function governedEvaluateResource(db: Db, input: GovernedResourceIn
         approvedApprovalId: input.approvedApprovalId ?? null,
         canQueue: input.canQueue,
       });
+    const counted = async () => {
+      const counts = await countWindows(db, input.userId, input.resource, r.rateLimits);
+      return compose(r.rateLimits.map((l, i) => ({ ...l, currentCount: counts[i]! })));
+    };
+    // ADR-0251 slice 4: an ABAC `require_approval` verdict REFUSES here too; the kernel (composeResourceDecision)
+    // decides it, so the path below counts the window without the lock and a refused call takes no slot.
     // HARD WINDOWS. No limit binds: composed as before, no lock, no write. A limit binds and the call would otherwise
     // be allowed: the window is counted under the rate lock and the call takes its slot in the same transaction. A call
     // that would be held or refused anyway takes no slot, so its window is counted without the lock (the count still
     // runs first, so a call over its limit is refused before anyone is asked to sign it off).
     if (r.rateLimits.length === 0 || input.resource.type === "model") return compose(r.rateLimits);
     const unlimited = compose(r.rateLimits.map((l) => ({ ...l, currentCount: 0 })));
-    if (unlimited.effect !== "allow") {
-      const counts = await countWindows(db, input.userId, input.resource, r.rateLimits);
-      return compose(r.rateLimits.map((l, i) => ({ ...l, currentCount: counts[i]! })));
-    }
+    if (unlimited.effect !== "allow") return await counted();
     return await decideUnderRateLock(db, { userId: input.userId, resource: input.resource, limits: r.rateLimits, compose });
   } catch (err) {
     return governedCoreErrorDecision(input.resource, err);
@@ -304,7 +328,7 @@ export interface ModelGateRefusal {
  * `model_call` approval per required approver, `model-call-consent.ts`), and the identical re-submitted call is
  * released once every consent is approved, spending each exactly once before any provider work. The attribution
  * mandate on this path stays where it was (compat `requireProjectAttribution`, native `dispatchAttributionRequired`).
- * Error is deny.
+ * An ABAC forbid, or an ABAC hold (which the kernel refuses), answers 403 `forbidden`. Error is deny.
  */
 export async function governedModelGate(
   db: Db,
@@ -327,7 +351,7 @@ export async function governedModelGate(
   try {
     const limited = await checkModelRateLimit(db, { userId: args.userId, agentId: args.agentId, agentName: args.agentName, projectId: args.projectId });
     if (limited) return limited;
-    const restrictions = await loadResourceRestrictions(db, { userId: args.userId, resource });
+    const restrictions = await loadResourceRestrictions(db, { userId: args.userId, resource, projectId: args.projectId });
     const matched = matchingResourceApprovalRules(resource, restrictions.approvalRules);
     if (matched.length) {
       consent = await modelConsentState(db, {
