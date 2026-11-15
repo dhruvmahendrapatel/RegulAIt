@@ -92,5 +92,10 @@ the planner's evaluator is about 80 lines. Globs use node's built-in `path.match
 - A web-only PR can still break a gateway test that reads web files in a way the detector misses (for example a path
   built from variables the patterns do not see). That test still runs at merge time, on `main` and nightly, as with any
   ADR-0262 trim.
+- **A scope output must be declared by the composite action, and the aggregates refuse anything but `true`/`false`.**
+  On #851 the new `gateway` output was written by the script but not declared in `.github/actions/ci-scope/action.yml`,
+  so it read as `''`: the matrix fell back to five shards (fail-closed) but the coverage check was skipped on a full
+  run and `build-and-test` accepted it (fail-open). Now `ok()` fails on any other value, the dry run reads outputs
+  through the action's declarations, and a test pins that every output is declared.
 - The rejected alternative "move cross-tree tests into `build-and-test-base`" is not needed: the subset runs on the
   same database setup as a shard, so DB-backed readers keep working.
