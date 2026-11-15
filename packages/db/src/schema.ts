@@ -16347,8 +16347,8 @@ export type ModelDriftMonitorRow = typeof modelDriftMonitors.$inferSelect;
 
 /**
  * ADR-0223 amendment 1 (pending migration `drift_ingest_credentials`): a write-only ingestion credential bound to ONE drift monitor. It opens only
- * `POST /v1/model-drift/ingest/:monitorId/reports` for that monitor. Only the SHA-256 of the `rgldi_` token is
- * stored; it always expires (at most 365 days, CHECK-capped) and is revoked by `revoked_at`. Rotation is a new row
+ * `POST /v1/model-drift/ingest/:monitorId/reports` for that monitor. Only the `hashToken` hash of the `rgldi_` token
+ * is stored; it always expires (at most 365 days, CHECK-capped) and is revoked by `revoked_at`. Rotation is a new row
  * (`replacesId`) plus the old row's revocation, so `createdAt` is when the secret was set.
  */
 export const modelDriftIngestCredentials = pgTable(

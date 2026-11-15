@@ -130,8 +130,8 @@ limits, replay-safe, off unless issued). Pending migration `drift_ingest_credent
    credential naming a different monitor is 403 `credential_not_for_monitor` and audited as a denial; nothing is
    written there. The monitor comes from the row, never from the request.
 2. **The secret.** 32 random bytes, base64url, behind the `rgldi_` prefix; shown once in the issue or rotate response
-   (`Cache-Control: no-store`) and stored only as its SHA-256 through the shared `hashToken` (no salt or work factor:
-   256 bits of randomness; the same reasoning as SCIM tokens and supplier links). It never appears in a list, an audit
+   (`Cache-Control: no-store`) and stored only as its hash through the shared `hashToken` (the gateway-wide token-hash scheme, the same as
+   SCIM tokens and supplier links). It never appears in a list, an audit
    row or a log line (the `authorization` header is already redacted).
 3. **Lifetime and revocation.** Every credential expires: 90 days by default, 1–365 by choice, with a database CHECK
    capping it at 365 days after issue on the database clock. At most two are live per monitor. Revocation sets

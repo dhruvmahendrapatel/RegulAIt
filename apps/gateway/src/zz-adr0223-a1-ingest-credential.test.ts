@@ -3,7 +3,7 @@
  *
  *  - Off unless issued: with no credential the ingest route answers 401 to everything, an admin API key included.
  *  - Issue, rotate and revoke are admin-only and need an `identity_manage` step-up bound to the exact facts; each is
- *    audited in the same transaction. The token is shown once and stored only as its SHA-256; it always expires.
+ *    audited in the same transaction. The token is shown once and stored only as its `hashToken` hash; it always expires.
  *  - The credential opens exactly one route for exactly one monitor: another monitor is 403 (audited), any read
  *    (its own monitor's reports, the credential list, a GET on the ingest path) is refused.
  *  - Revocation and expiry take effect on the next request (401, audited as a denial). Rotation kills the old secret.
@@ -14,7 +14,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { LightMyRequestResponse } from "fastify";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
+import { hashToken } from "./token-hash.js";
 import {
   and,
   auditLog,
@@ -177,7 +178,7 @@ describe("ADR-0223 amendment 1 — the per-monitor ingestion credential", () => 
     const { id, token } = await issue(monitorA, payload.name, payload.expiresInDays);
     expect(token).toMatch(/^rgldi_[A-Za-z0-9_-]{43}$/);
     const [row] = await db.select().from(modelDriftIngestCredentials).where(eq(modelDriftIngestCredentials.id, id));
-    expect(row!.tokenHash).toBe(createHash("sha256").update(token).digest("hex"));
+    expect(row!.tokenHash).toBe(hashToken(token));
     expect(JSON.stringify(row)).not.toContain(token);
     // it expires: 30 days after issue on the database clock
     const days = (row!.expiresAt.getTime() - row!.createdAt.getTime()) / 86_400_000;

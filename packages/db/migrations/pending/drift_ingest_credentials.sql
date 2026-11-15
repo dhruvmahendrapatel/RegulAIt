@@ -4,8 +4,8 @@
 --
 --   model_drift_ingest_credentials  one credential bound to ONE monitor. It opens exactly one route
 --                                   (POST /v1/model-drift/ingest/:monitorId/reports) for that monitor and nothing
---                                   else. Only the SHA-256 of the `rgldi_` token is stored (the shared `hashToken`
---                                   scheme; 256 bits of randomness, so no salt or work factor). It always expires
+--                                   else. Only the hash of the `rgldi_` token is stored (the shared `hashToken`
+--                                   scheme, 64 hex characters). It always expires
 --                                   (NOT NULL, at most 365 days after issue, CHECK-capped) and is revoked by setting
 --                                   `revoked_at`; nothing else in the row changes after issue except `last_used_at`.
 --                                   Rotation issues a new row (`replaces_id`) and revokes the old one in the same

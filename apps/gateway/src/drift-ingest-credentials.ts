@@ -9,7 +9,7 @@
  *   POST   /v1/model-drift/ingest/:monitorId/reports                                    THE CREDENTIAL'S ONE ROUTE
  *
  * THE PATTERN is the repo's in-route token path (the signed feedback link, the supplier portal, SCIM): an `rgldi_`
- * token of 256 random bits, shown once, stored only as its SHA-256 (`hashToken`); the ingest route is auth-exempt
+ * token of 256 random bits, shown once, stored only as its `hashToken` hash; the ingest route is auth-exempt
  * and non-admin for the platform hooks (`route-classes.ts`), so a platform session or key is never read there, and
  * it authenticates IN-ROUTE on `Authorization: Bearer rgldi_…` only. The token is in `scim_tokens`' position, not
  * `api_keys`', so presenting it on any other route is an ordinary 401: it opens nothing else, reads nothing (the
