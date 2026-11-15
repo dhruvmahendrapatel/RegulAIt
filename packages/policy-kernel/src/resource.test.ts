@@ -67,6 +67,18 @@ describe("ADR-0251 composeResourceDecision", () => {
     expect(d.effect).toBe("deny");
   });
 
+  it("review #836: an ABAC require_approval refuses in the kernel; no consent or queue releases it, and the chain says deny", () => {
+    const hold = { effect: "require_approval" as const, policyId: "pol-h", policyName: "hold", approverUserId: APPROVER };
+    for (const over of [{}, { canQueue: true }, { approvedApprovalId: "appr-1" }, { approvalRules: [rule()], approvedApprovalId: "appr-1", canQueue: true }]) {
+      const d = composeResourceDecision(input({ abacDecision: hold, ...over }));
+      expect(d, JSON.stringify(over)).toMatchObject({ effect: "deny", ruleId: "pol-h" });
+      expect(d.ruleChain.some((t) => t.outcome === "satisfied-by-approval")).toBe(false);
+      expect(d.ruleChain.at(-1)).toEqual({ rule: "abac-require-approval", outcome: "deny", grantId: "pol-h" });
+    }
+    // an exhausted window still refuses first, as a rate limit
+    expect(composeResourceDecision(input({ abacDecision: hold, rateLimits: [limit({ currentCount: 2 })] })).ruleId).toBe("lim-1");
+  });
+
   it("ABAC forbid refuses; ABAC permit changes nothing", () => {
     expect(composeResourceDecision(input({ abacDecision: { effect: "forbid", policyId: "pol-1" } })).ruleId).toBe("pol-1");
     expect(composeResourceDecision(input({ abacDecision: { effect: "permit" } })).effect).toBe("allow");
