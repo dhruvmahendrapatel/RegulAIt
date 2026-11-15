@@ -18,8 +18,10 @@
  * To move to a newer upstream release, change the pinned `revision` (and the
  * path, if the release renamed it) below, run this, and review the diff.
  */
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
@@ -74,8 +76,26 @@ const PACK_SOURCES = [
     file: "nist.gov/AI100-1/ver1/json/NIST_AI-RMF_v1_catalog.json",
     parse: (bytes) => JSON.parse(bytes.toString("utf8")),
     version: (doc) => String(doc.catalog?.metadata?.version ?? "unknown"),
-    normalise: (doc, s) =>
-      fi.normaliseOscalCatalog(doc, { framework: s.framework, classes: ["subcategory"], licence: s.licence }),
+    // ADR-0294: the Playbook's suggested actions become each subcategory's description
+    supplements: [
+      {
+        title: "NIST AI RMF Playbook (suggested actions)",
+        publisher: "National Institute of Standards and Technology",
+        licence: "US-Gov-Public-Domain",
+        licenceUrl: "https://www.nist.gov/oism/copyrights",
+        url: "https://airc.nist.gov/docs/playbook.json",
+        file: "playbook.json",
+        // the AIRC serves no revision id: pin the bytes, and record the server's last-modified date
+        revision: "AIRC playbook.json, last modified 2026-06-11",
+        sha256: "aecbee3d3c8820816d295b11d10fb61324b17c25c2ff39ee95e2aa5654555bba",
+      },
+    ],
+    normalise: (doc, s, supp) =>
+      fi.withPlaybookActions(
+        fi.normaliseOscalCatalog(doc, { framework: s.framework, classes: ["subcategory"], licence: s.licence }),
+        JSON.parse(supp[0].toString("utf8")),
+        { framework: s.framework },
+      ),
   },
   {
     sourceId: "nist-csf-2-oscal",
@@ -91,6 +111,32 @@ const PACK_SOURCES = [
     version: (doc) => String(doc.catalog?.metadata?.version ?? "unknown"),
     normalise: (doc, s) =>
       fi.normaliseOscalCatalog(doc, { framework: s.framework, classes: ["subcategory"], licence: s.licence }),
+  },
+  {
+    // ADR-0294: NIST publishes AI 600-1 only as a PDF; poppler's `pdftotext -raw` (a developer
+    // tool, never a product dependency) gives the text the pure normaliser reads
+    sourceId: "nist-ai-600-1",
+    framework: "nist-ai-600-1",
+    title: "NIST AI 600-1 Generative AI Profile — suggested actions",
+    publisher: "National Institute of Standards and Technology",
+    licence: "US-Gov-Public-Domain",
+    licenceUrl: "https://www.nist.gov/oism/copyrights",
+    url: "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.600-1.pdf",
+    file: "NIST.AI.600-1.pdf",
+    revision: "NIST.AI.600-1 (July 2024), PDF last modified 2025-03-24",
+    sha256: "6e73620ab6b64e90ef2c04bf0e0d6246185a2f4b1b13cab0df494496cff89b6a",
+    parse: (bytes) => {
+      const dir = mkdtempSync(path.join(tmpdir(), "ai600-"));
+      try {
+        writeFileSync(path.join(dir, "in.pdf"), bytes);
+        execFileSync("pdftotext", ["-raw", "-enc", "UTF-8", path.join(dir, "in.pdf"), path.join(dir, "out.txt")]);
+        return readFileSync(path.join(dir, "out.txt"), "utf8");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    version: () => "July 2024",
+    normalise: (text, s) => fi.normaliseNistAi600Text(text, { framework: s.framework, licence: s.licence }),
   },
 ];
 
@@ -136,10 +182,23 @@ const write = (name, value) => {
   console.log(`wrote ${path.relative(root, path.join(outDir, name))}`);
 };
 
+/** a download pinned by sha256 (a source with no revision in its URL): refused if the bytes moved */
+async function pinnedBytes(url, file, expected) {
+  const bytes = fromDir ? readFileSync(path.join(fromDir, file)) : await fetchBytes(url);
+  if (sha256(bytes) !== expected) throw new Error(`${url}: sha256 ${sha256(bytes)} is not the pinned ${expected}; review and re-pin`);
+  return bytes;
+}
+
 for (const s of PACK_SOURCES) {
   if (only && only !== s.sourceId) continue;
-  const upstreamUrl = `https://raw.githubusercontent.com/${s.repo}/${s.revision}/${s.file}`;
-  const bytes = fromDir ? readFileSync(path.join(fromDir, path.basename(s.file))) : await fetchBytes(upstreamUrl);
+  const upstreamUrl = s.url ?? `https://raw.githubusercontent.com/${s.repo}/${s.revision}/${s.file}`;
+  const bytes = s.sha256
+    ? await pinnedBytes(upstreamUrl, s.file, s.sha256)
+    : fromDir
+      ? readFileSync(path.join(fromDir, path.basename(s.file)))
+      : await fetchBytes(upstreamUrl);
+  const supp = [];
+  for (const x of s.supplements ?? []) supp.push(await pinnedBytes(x.url, x.file, x.sha256));
   const doc = s.parse(bytes);
   const snapshot = {
     schema: fi.FRAMEWORK_IMPORT_SCHEMA,
@@ -155,8 +214,22 @@ for (const s of PACK_SOURCES) {
       upstreamRevision: s.revision,
       upstreamSha256: sha256(bytes),
       retrievedOn: today,
+      ...(s.supplements
+        ? {
+            supplements: s.supplements.map((x, i) => ({
+              title: x.title,
+              publisher: x.publisher,
+              licence: x.licence,
+              licenceUrl: x.licenceUrl,
+              upstreamUrl: x.url,
+              upstreamRevision: x.revision,
+              upstreamSha256: sha256(supp[i]),
+              retrievedOn: today,
+            })),
+          }
+        : {}),
     },
-    controls: s.normalise(doc, s),
+    controls: s.normalise(doc, s, supp),
   };
   fi.frameworkImportSnapshotSchema.parse(snapshot);
   write(`${s.sourceId}.json`, snapshot);
