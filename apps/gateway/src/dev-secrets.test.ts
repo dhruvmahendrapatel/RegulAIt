@@ -14,10 +14,12 @@
  * database, because "the gateway refuses to start" is a claim about starting.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createDb, runMigrations, sql, type Db } from "@regulait/db";
+import { createDb, runMigrations, runtimeLoginRoleFor, sql, type Db } from "@regulait/db";
 import { startGateway } from "./boot.js";
 import {
   DEV_SECRETS_OVERRIDE_ENV,
@@ -133,6 +135,7 @@ const scratchUrl = DATABASE_URL.replace(/\/[^/?]+(\?|$)/, `/${SCRATCH_DB}$1`);
 let admin: Db;
 let db: Db;
 let port = 0;
+const installDirs = new Map<string, string>();
 
 async function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -155,11 +158,26 @@ async function boot(
   target: Db = db,
 ) {
   const log: string[] = [];
+  // ADR-0234 batch 7b: a DEPLOYED box refuses the dev privileged-login opt-in, so those boots serve requests on the
+  // install-generated runtime login (one secrets directory per database), as a deployment does
+  const deployed = extraEnv.REGULAIT_DEPLOY_MODE !== undefined;
+  const targetUrl = target === dbReal ? scratchUrlReal : scratchUrl;
+  if (deployed && !installDirs.has(targetUrl)) installDirs.set(targetUrl, mkdtempSync(path.join(os.tmpdir(), "devsecrets-install-")));
+  const login = deployed ? { REGULAIT_INSTALL_SECRETS_DIR: installDirs.get(targetUrl)! } : { REGULAIT_DEV_PRIVILEGED_DB_LOGIN: "1" };
   // a CLEAN env: the suite's own process.env must not decide the outcome
-  const env = { PATH: process.env.PATH, VITEST: "1", REGULAIT_DEV_PRIVILEGED_DB_LOGIN: "1", ...extraEnv } as NodeJS.ProcessEnv;
+  const env = { PATH: process.env.PATH, VITEST: "1", ...login, ...extraEnv } as NodeJS.ProcessEnv;
   port = await freePort();
   try {
-    const started = await startGateway({ db: target, migrationsFolder, port, host: "127.0.0.1", ...opts, log: (l) => log.push(l), env });
+    const started = await startGateway({
+      db: target,
+      ...(deployed ? { connectionString: targetUrl } : {}),
+      migrationsFolder,
+      port,
+      host: "127.0.0.1",
+      ...opts,
+      log: (l) => log.push(l),
+      env,
+    });
     return { app: started.app, log, error: null as unknown };
   } catch (error) {
     return { app: null, log, error };
@@ -196,6 +214,13 @@ afterAll(async () => {
     async () => endPool(dbReal),
     async () => dropScratchDatabase(admin, SCRATCH_DB),
     async () => dropScratchDatabase(admin, SCRATCH_DB_REAL),
+    // roles are cluster-wide: the runtime logins the deployed boots created go with their databases
+    async () => admin.execute(sql.raw(`DROP ROLE IF EXISTS ${runtimeLoginRoleFor(SCRATCH_DB)}`)),
+    async () => admin.execute(sql.raw(`DROP ROLE IF EXISTS ${runtimeLoginRoleFor(SCRATCH_DB_REAL)}`)),
+    async () => {
+      for (const d of installDirs.values()) rmSync(d, { recursive: true, force: true });
+    },
+    async () => admin.$client.end(),
   ]);
 });
 

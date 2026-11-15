@@ -6,9 +6,14 @@
 --
 -- FORCE ROW LEVEL SECURITY binds the owner too, and audit_log had no DELETE policy, so an owner that is not a
 -- superuser could not prune. A closed, owner-only reason is added for it:
---   audit_retention  the retention prune on the owner connection: audit_log (read, delete). The app role every RLS
---                    scope runs as has no DELETE on audit_log (0272), and the gateway never offers this reason to a
---                    caller, so it cannot be used to remove ledger rows from a request path.
+--   audit_retention  the retention prune on the owner connection (the admin's POST /v1/audit/prune and the retention
+--                    timer, both moved onto the owner pool): audit_log (read, delete).
+--
+-- The privilege boundary is the policy's role, not the reason: regulait.system_context is a session setting any login
+-- may set, so a reason is a convention the gateway keeps, never a grant. The DELETE policy is therefore scoped TO the
+-- table's owner (read from the catalogue: the migrator's name is not known to a migration), and the app role every
+-- RLS scope runs as also has no DELETE on audit_log (0272). The runtime login cannot delete a ledger row under any
+-- reason.
 
 CREATE OR REPLACE FUNCTION regulait_rls_system_reason() RETURNS text
   LANGUAGE plpgsql STABLE PARALLEL SAFE
@@ -40,6 +45,11 @@ CREATE POLICY audit_log_select ON audit_log FOR SELECT USING (
                                                         'system_task', 'audit_retention'])
 );
 --> statement-breakpoint
-CREATE POLICY audit_log_delete ON audit_log FOR DELETE USING (
-  (SELECT regulait_rls_system_reason()) = ANY (ARRAY['audit_retention', 'migration'])
-);
+DO $do$
+BEGIN
+  EXECUTE pg_catalog.format(
+    'CREATE POLICY audit_log_delete ON audit_log FOR DELETE TO %I USING ('
+    '(SELECT regulait_rls_system_reason()) = ANY (ARRAY[''audit_retention'', ''migration'']))',
+    (SELECT pg_catalog.pg_get_userbyid(c.relowner) FROM pg_catalog.pg_class c WHERE c.oid = 'public.audit_log'::regclass));
+END
+$do$;
