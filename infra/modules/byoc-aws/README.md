@@ -38,8 +38,8 @@ account and region. Cross-region inference profiles route inside AWS too. HTTPS 
 ## Use with a scoped installer role
 
 If your installer role is limited by [`aws-byoc-deployer-policy`](../aws-byoc-deployer-policy), use the same
-`name_prefix` and pass `iam_permissions_boundary_arn = <its boundary_policy_arn>`. Every role this stack creates then
-carries the boundary.
+`name_prefix` and pass `iam_permissions_boundary_arn = <its workload_boundary_policy_arn>`. Every role this stack
+creates then carries the workload boundary (no IAM writes, nothing in a federated session).
 
 ## Preflight
 

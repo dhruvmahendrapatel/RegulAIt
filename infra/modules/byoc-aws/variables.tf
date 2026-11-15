@@ -218,7 +218,7 @@ variable "ecr_pull_through_ecr_public" {
 ### IAM ###
 
 variable "iam_permissions_boundary_arn" {
-  description = "Permissions boundary for every IAM role this stack creates. Required when the installer role is limited by infra/modules/aws-byoc-deployer-policy (pass its boundary_policy_arn)."
+  description = "Permissions boundary for every IAM role this stack creates. Required when the installer role is limited by infra/modules/aws-byoc-deployer-policy (pass its workload_boundary_policy_arn)."
   type        = string
   default     = null
 }

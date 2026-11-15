@@ -38,7 +38,9 @@ case "$cmd" in
   leftovers)
     left="$(aws resourcegroupstaggingapi get-resources --tag-filters Key=purpose,Values=rehearsal \
       --query 'ResourceTagMappingList[].ResourceARN' --output json |
-      jq -r '.[] | select(test(":role/gh-actions-regulait-rehearsal$|:policy/regulait-rehearsal-byoc-boundary$|:oidc-provider/token.actions.githubusercontent.com$") | not)')"
+      jq -r '.[] | select(test(":role/gh-actions-regulait-rehearsal$|:policy/regulait-rehearsal-byoc-(workload-)?boundary$|:oidc-provider/token.actions.githubusercontent.com$") | not)')"
+    # Roles are global and the tagging API can miss them: list the prefix too.
+    left="$left"$'\n'"$(aws iam list-roles --query "Roles[?starts_with(RoleName, '$prefix-')].Arn" --output text | tr '\t' '\n')"
     # The tagging API keeps deleted resources for a while; confirm a few kinds directly.
     live=""
     for arn in $left; do

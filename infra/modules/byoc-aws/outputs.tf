@@ -84,11 +84,13 @@ output "storage_class_manifest" {
     reclaimPolicy        = "Retain"
     volumeBindingMode    = "WaitForFirstConsumer"
     allowVolumeExpansion = true
-    parameters = {
+    # Volumes carry the stack's tags, so a scope-tag guard (if any) admits
+    # the EBS CSI driver's attach and detach.
+    parameters = merge({
       type      = "gp3"
       encrypted = "true"
       kmsKeyId  = aws_kms_key.data.arn
-    }
+    }, { for i, k in sort(keys(var.tags)) : "tagSpecification_${i + 1}" => "${k}=${var.tags[k]}" })
   })
 }
 

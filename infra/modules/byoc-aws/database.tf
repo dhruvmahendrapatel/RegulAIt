@@ -95,7 +95,12 @@ module "db" {
     { name = "log_disconnections", value = "1" },
   ]
 
-  create_db_option_group = false
+  # The stack's own (empty) option group: the default one is outside the
+  # installer boundary's name guard.
+  create_db_option_group       = true
+  option_group_name            = "${var.name_prefix}-pg"
+  option_group_use_name_prefix = true
+  option_group_description     = "${var.name_prefix} PostgreSQL option group"
 
   tags = var.tags
 }
