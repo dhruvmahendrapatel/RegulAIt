@@ -33,6 +33,8 @@ import {
   FEDERATION_JWKS_PATH,
   MCP_IDENTITY_OIDC_DISCOVERY_PATH,
   MCP_IDENTITY_OIDC_JWKS_PATH,
+  AGENT_CREDENTIAL_DISCOVERY_PATH,
+  AGENT_CREDENTIAL_JWKS_PATH,
   IDENTITY_JWKS_PATH,
   SUPPLIER_ROUTE_PATHS,
   SUPPLIER_ROUTES,
@@ -136,6 +138,11 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // in NON_ADMIN_ROUTES too, so `public`.
   MCP_IDENTITY_OIDC_DISCOVERY_PATH,
   MCP_IDENTITY_OIDC_JWKS_PATH,
+  // ADR-0315 (G7) — the agent credential issuer's discovery document and JWKS: public by definition (a third-party
+  // enforcement point verifies offline, holding no RegulAIt credential). Public keys and metadata only. Listed in
+  // NON_ADMIN_ROUTES too, so `public`.
+  AGENT_CREDENTIAL_DISCOVERY_PATH,
+  AGENT_CREDENTIAL_JWKS_PATH,
   // ADR-0182 (D4) A13 — a PUBLIC SIGNED FEEDBACK LINK: the one D4 exemption.
   // People outside the organisation, who hold no RegulAIt credential, report a
   // problem or appeal a decision through a link a use-case owner minted. The
@@ -888,6 +895,9 @@ export const NON_ADMIN_ROUTES = new Set([
   // ADR-0210 — the OIDC-profile identity assertion issuer's public metadata (auth-exempt above too)
   `GET ${MCP_IDENTITY_OIDC_DISCOVERY_PATH}`,
   `GET ${MCP_IDENTITY_OIDC_JWKS_PATH}`,
+  // ADR-0315 (G7) — the agent credential issuer's public metadata (auth-exempt above too)
+  `GET ${AGENT_CREDENTIAL_DISCOVERY_PATH}`,
+  `GET ${AGENT_CREDENTIAL_JWKS_PATH}`,
   `POST ${OAUTH_TOKEN_PATH}`,
   `POST ${OAUTH_REVOCATION_PATH}`,
   `POST ${OAUTH_INTROSPECTION_PATH}`,

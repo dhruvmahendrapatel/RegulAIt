@@ -42,7 +42,8 @@ The credential only **carries** what a grant already holds; it never widens it.
 - **Keys:** `GET /agent-credentials/.well-known/jwks.json`.
 - The keys are the ES256 keys already managed in `identity_signing_keys`: RFC 7638 thumbprint `kid`, rotation and
   revocation behind a `key_management` step-up, and retired keys published through the overlap window.
-- No new key store. EdDSA is an option an audience can opt into.
+- No new key store. EdDSA is an option an audience can opt into. The JWKS lists the public halves of both
+  algorithms; each audience pins one.
 
 A separate issuer means a verifier configured for agent credentials can never accept the gateway's own `at+jwt`, an
 MCP assertion or a federation token, and the reverse also holds.
@@ -190,9 +191,19 @@ The `regulait_*` claims are private names (RFC 7519 §4.3), held until a standar
   cannot exceed the initiating user's entitlements or the run budget.
 
 **Build slices (one PR each):**
-1. Audience registry, issuance, issuer metadata and JWKS, audit.
-2. Status list, revocation and kill-switch propagation, verifier guide, and a reference verifier test against
-   agentgateway's and Kong's JWT configuration shapes.
+1. **1a (built on `builder/e3-agent-credential`):**
+   - the audience registry (`agent_credential_audiences` plus a 3NF scope map with FKs to servers, connectors and
+     agents; step-up registration, free disable, audited);
+   - the issuer's discovery document and JWKS;
+   - `mintAgentCredential`: the projection, every mint-time check through the delegation's own `loadLiveChain`
+     (which already covers the kill switch and halted agents), the issued-credential record and the audit;
+   - the offline reference verifier `verifyAgentCredential`.
+2. **1b:** the `requested_token_type` branch in `POST /oauth/token`. The caller's own delegated `at+jwt` is the
+   `subject_token`; the request goes through the endpoint's DPoP preflight and replay claims, and the result calls
+   `mintAgentCredential`.
+3. **2:** the status list (`agent_credentials_issued.status_index` is already allocated), revocation and kill-switch
+   propagation to the list, the verifier guide, and a reference verifier test against agentgateway's and Kong's JWT
+   configuration shapes.
 
 **Owner questions (built with the secure default):**
 - Should `sub` default to the directory identifier for audiences inside the customer's own estate? Built pairwise.

@@ -77,6 +77,8 @@ export const MACHINE_ONLY = new Map([
   ["GET /federation/.well-known/jwks.json", "auth plumbing: the cloud federation issuer's RS256 JWKS, fetched by AWS, GCP and Entra"],
   ["GET /mcp-identity/.well-known/openid-configuration", "auth plumbing: the OIDC-profile MCP identity assertion issuer's discovery document, fetched by an upstream's validator (ADR-0210)"],
   ["GET /mcp-identity/.well-known/jwks.json", "auth plumbing: the OIDC-profile MCP identity assertion issuer's ES256 JWKS, fetched by an upstream's validator (ADR-0210)"],
+  ["GET /agent-credentials/.well-known/openid-configuration", "auth plumbing: the agent credential issuer's discovery document, fetched by a third-party enforcement point (ADR-0315)"],
+  ["GET /agent-credentials/.well-known/jwks.json", "auth plumbing: the agent credential issuer's JWKS, fetched by a third-party enforcement point to verify offline (ADR-0315)"],
   ["POST /oauth/token", "auth plumbing: RFC 6749 token endpoint for workload clients"],
   ["POST /oauth/token/revocation", "auth plumbing: RFC 7009 token revocation for workload clients"],
   ["POST /oauth/token/introspection", "auth plumbing: RFC 7662 token introspection for resource servers"],
@@ -429,6 +431,9 @@ export const KNOWN_UI_GAPS = new Map([
   ["GET /v1/connectors/:connectorId/token-exchange", { does: "reads a connector's upstream token-exchange configuration and per-action scope map (never the secret)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
   ["PUT /v1/connectors/:connectorId/token-exchange", { does: "sets or changes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
   ["DELETE /v1/connectors/:connectorId/token-exchange", { does: "removes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
+  ["GET /v1/agent-credentials/audiences", { does: "lists the registered agent credential audiences (third-party enforcement points) and their scope maps", tracking: "ADR-0315 (G7, lane E3): the brief is API-only; the audience registry screen (register, scope map, disable) is posted on #453 for the Governed Designer. RAISED for the master's review" }],
+  ["POST /v1/agent-credentials/audiences", { does: "registers an agent credential audience with its algorithm, binding, lifetime and scope map (settings_relax step-up, audited)", tracking: "ADR-0315 (G7, lane E3): the brief is API-only; the audience registry screen (register, scope map, disable) is posted on #453 for the Governed Designer. RAISED for the master's review" }],
+  ["POST /v1/agent-credentials/audiences/:audienceId/disable", { does: "disables an agent credential audience: no new credential is issued to it (audited)", tracking: "ADR-0315 (G7, lane E3): the brief is API-only; the audience registry screen (register, scope map, disable) is posted on #453 for the Governed Designer. RAISED for the master's review" }],
 ]);
 
 /**
@@ -437,7 +442,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 43; // main's 54 − 11 MCP bundle routes closed by #815
+export const KNOWN_UI_GAPS_MAX = 46; // ADR-0315 (lane E3) +3 agent credential audience routes awaiting #453; main's 54 − 11 MCP bundle routes closed by #815
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 
