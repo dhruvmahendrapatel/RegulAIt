@@ -86,8 +86,9 @@ The manifest is generated from the governed site catalogue at build time and pin
 `POST /v1/browser-extension/policy` returns the policy for the device and the profile account it names. The gateway
 computes it deterministically, in the governed core's order (ADR-0251):
 
-1. **An unknown or disabled person gets nothing** (`user_unknown`): the profile account must match an active RegulAIt
-   user (case-insensitive email).
+1. **A disabled person gets nothing** (`user_disabled`). A profile account that matches no RegulAIt user
+   (case-insensitive email) gets **the org-wide site rules**, account-domain rules included, and every such issue is
+   audited (`browser-policy-unmatched-account`, pseudonym only): owner decision B1.
 2. **The execution posture** (the kernel's `executionGate`, the same kill switch every governed call obeys) can only
    remove access: a halted, read-only or approval-required deployment denies every site (`execution_posture`). A prompt
    sends data out, so it counts as a write, and the browser has no per-call approval queue.
@@ -101,13 +102,22 @@ The policy carries every catalogue site with its decision, the account domains, 
 account domains is blocked (`account_not_allowed`, `account_signed_out`) unless the profile's email is in one of them.
 A sign-in change triggers a refetch.
 
-The policy is signed into the endpoint agent's envelope (one envelope for both on-device enforcement points, so the
-gateway has one signer shape) by **the browser policy key**, a key of its own (one key per purpose, as ADR-0195 decided
-for the endpoint agent): operator-managed (`REGULAIT_BROWSER_POLICY_SIGNING_KEY` and `_KEY_ID`) or install-generated
-in the install secrets directory on first enable, through the shared install-key generator and its strict reader.
-Whether the endpoint agent's enforcement policy is later signed by this key or by the ADR-0195 SD4 key is the endpoint
-lane's decision; the envelope already fits both. No key means no policy, so
-turning governance on fails with `policy_signer_unavailable` rather than leaving extensions closed for good.
+The policy is signed into the endpoint agent's envelope by **the device-policy signer** (`device-policy-signer.ts`,
+owner decision B4): one rotatable signer for every on-device enforcement point, the browser now and the endpoint agent's
+ADR-0298 policy when lane E13 adopts it. It is a key of its own (one key per purpose, ADR-0195):
+
+- **Operator-managed:** `REGULAIT_DEVICE_POLICY_SIGNING_KEY` names a file of 1 to 8 PKCS#8 Ed25519 keys, read by the
+  issuer key file's own reader (`readSigningKeyFile`, factored out of `identity-signing-keys.ts` for this). With one
+  key it signs; with more, `REGULAIT_DEVICE_POLICY_ACTIVE_KEY_ID` names the signer, and a missing or unknown id is
+  `invalid`, never a guess.
+- **Install-generated:** `<REGULAIT_INSTALL_SECRETS_DIR>/device-policy-signing-key.pem`, created on first enable by the
+  shared install-key generator and read by its strict reader.
+- **Rotation without a gap:** every configured key is published (the settings read and the managed config list them,
+  at most 4 in a device's storage), so devices pin the next key before it signs; then the active key id moves to it;
+  then the old key is dropped from the file and from managed storage.
+- The key id is `device-policy-` + 24 hex of SHA-256 over the raw public key (the envelope's key-id shape).
+- No key means no policy, so turning governance on fails with `policy_signer_unavailable` rather than leaving
+  extensions closed for good.
 
 No model is called anywhere on this path. Every permission and governance decision is a data check.
 
@@ -145,9 +155,15 @@ recorded even when the page never loads.
 - Off by default. Turning it on is a `settings_relax` step-up, audited.
 - While it is on, the extension shows a **persistent on-screen notice** on every governed site ("Your organisation
   records prompts on this site"), and the extension refuses to capture unless the signed policy says capture is on.
-- A captured prompt (at most 16,000 characters) is enveloped under the data key, stored append-only with the same
-  attribution as an event, and **read only one at a time with a `pseudonym_reveal` step-up bound to that capture**,
-  audited.
+- A captured prompt (at most 16,000 characters) is enveloped under the data key (and in `CIPHERTEXT_COLUMNS`, so the
+  data-key re-encryption walk covers it), stored append-only with the same attribution as an event, and **read only
+  one at a time with a `pseudonym_reveal` step-up bound to that capture**, audited.
+- **Retention (owner decision B2):** kept `prompt_capture_retention_days`, **30 by default** (1 to 3650); keeping them
+  longer than the current setting is a `settings_relax` step-up, audited; shortening is not. The hourly sweep
+  `browser-prompt-capture-retention-sweep` deletes what is past it, in batches, with one audit row per pass that deletes.
+  The append-only guard admits that DELETE only under the transaction-local cutoff the sweep sets, when the cutoff is
+  in the past by the database clock and the row arrived before it (the ADR-0302 pattern); a forged future cutoff
+  deletes nothing.
 
 ### 8. Every message is authenticated per device and replay-protected: the endpoint agent's identity path
 
@@ -227,10 +243,12 @@ builder: the eleven admin routes are `KNOWN_UI_GAPS` entries pointing at #453.
   detection engine is a follow-up through those lanes' documented contracts.
 - **Turning a DLP rule off** for the browser (a relaxation, audited); today every shared rule is on.
 - **Hardware-bound device keys** through native messaging to the endpoint agent's TPM or Secure Enclave key.
-- **Retention** for `browser_events` and `browser_prompt_captures` (both refuse every DELETE today), and the RLS batch
-  for the new tables (single-tenant register tables, like ADR-0261's).
+- **Retention for `browser_events`** (they hold no prompt text and refuse every DELETE today), and the RLS batch for the
+  new tables (single-tenant register tables, like ADR-0261's).
+- **In-app, audited rotation of the device-policy key** (the issuer key's activate/rotate/revoke lifecycle); today
+  rotation is the operator's file and active key id.
 - **Per-role site rules** (today a rule is org-wide; per-user entitlement comes from the user match and the posture).
-- **Firefox and Safari** builds.
+- **Firefox** is a later slice (owner decision B3; PENDING fragment), and Safari after it.
 - **Browser-driving agents** (surface (b)): their own ADR and PR.
 
 ## Consequences
@@ -243,9 +261,14 @@ builder: the eleven admin routes are `KNOWN_UI_GAPS` entries pointing at #453.
 - The extension's governed sites change only with a new extension version, which is slower than editing a list, and
   is the price of never asking for `<all_urls>`.
 
-## Owner questions (open)
+## Owner decisions (2026-11-15, relayed by the master on #867)
 
-1. Should a profile account that matches no RegulAIt user be blocked everywhere (built, the strict default), or get
-   the org-wide site rules?
-2. Should prompt capture keep captured prompts for a fixed time (and what time), now that retention is a follow-up?
-3. Is Chromium-only acceptable for the first customers, or is Firefox needed early?
+- **B1:** a browser profile signed in with an account that matches no RegulAIt user gets the org-wide site rules, not
+  a block everywhere. It stays audited, and corporate-account rules stay enforced where the org requires them. (Built:
+  section 4. A matched but disabled person still gets nothing.)
+- **B2:** captured prompts are kept 30 days by default, as an admin setting, and deleted automatically after that; a
+  longer period is an audited `settings_relax` with step-up. The deletion is built now, not as a follow-up. (Built:
+  section 7.)
+- **B3:** Chromium-based browsers only for now; Firefox is a later slice, recorded as a PENDING fragment.
+- **B4:** one rotatable device-policy signer signs both browser and endpoint policies; lane E13 adopts it. (Built:
+  section 4, `device-policy-signer.ts`.)

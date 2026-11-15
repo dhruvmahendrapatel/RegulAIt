@@ -2,7 +2,7 @@
 -- Hand-authored (never drizzle-kit generate). Re-runnable: every statement is idempotent.
 --
 -- 1. `browser_governance_settings`: one row (id = 1), strict by default (ADR-0180): off, `enforce`, prompt capture
---    off. Turning it on, `audit` mode and prompt capture are each a `settings_relax` step-up, audited (the routes).
+--    off, captured prompts kept 30 days (owner decision B2; longer is a relaxation). Turning it on, `audit` mode and prompt capture are each a `settings_relax` step-up, audited (the routes).
 -- 2. `browser_site_rules` + `browser_site_account_domains`: an admin's decision per catalogue site, and the account
 --    domains the browser profile must be signed in with (a join table, ADR-0200 3NF). A site with no rule is denied.
 -- 3. `browser_enrolment_tokens`: capped bulk tokens (`rgbe_`), at most 30 days, stored as SHA-256 only.
@@ -11,7 +11,8 @@
 --    `workload_identities`' kind and subject CHECKs are widened here, as 0207 did. Revoked, never deleted.
 -- 5. `browser_events`, `browser_prompt_captures`: APPEND-ONLY EVIDENCE. One guard function refuses UPDATE and DELETE,
 --    and a statement trigger refuses TRUNCATE (the 0185 pattern). The one UPDATE admitted besides a deleted user's
---    SET NULL is the data-key re-encryption walk rewriting a capture's ciphertext. Retention is a recorded follow-up.
+--    SET NULL is the data-key re-encryption walk rewriting a capture's ciphertext. The one DELETE admitted is the
+--    prompt-capture retention sweep's (owner decision B2: 30 days by default). Events are kept (no retention yet).
 --
 -- One new function, pinned to `search_path = pg_catalog, public, pg_temp` (0185). Single-tenant deployment: like the
 -- other register tables (0281) there is no tenant column; 0272's default privileges grant the app role.
@@ -35,10 +36,12 @@ CREATE TABLE IF NOT EXISTS "browser_governance_settings" (
   "enabled" boolean DEFAULT false NOT NULL,
   "mode" text DEFAULT 'enforce' NOT NULL,
   "prompt_capture_enabled" boolean DEFAULT false NOT NULL,
+  "prompt_capture_retention_days" integer DEFAULT 30 NOT NULL,
   "updated_by" uuid REFERENCES "users"("id") ON DELETE SET NULL,
   "updated_at" timestamp with time zone DEFAULT now() NOT NULL,
   CONSTRAINT "browser_governance_settings_singleton" CHECK ("id" = 1),
-  CONSTRAINT "browser_governance_settings_mode_check" CHECK ("mode" IN ('enforce', 'audit'))
+  CONSTRAINT "browser_governance_settings_mode_check" CHECK ("mode" IN ('enforce', 'audit')),
+  CONSTRAINT "browser_governance_settings_retention_check" CHECK ("prompt_capture_retention_days" BETWEEN 1 AND 3650)
 );
 --> statement-breakpoint
 INSERT INTO "browser_governance_settings" ("id") VALUES (1) ON CONFLICT ("id") DO NOTHING;
@@ -167,6 +170,27 @@ BEGIN
      AND coalesce(current_setting('regulait.secret_reencrypt', true), '') = 'on'
      AND (to_jsonb(NEW) - 'text_ciphertext') = (to_jsonb(OLD) - 'text_ciphertext') THEN
     RETURN NEW;
+  END IF;
+  -- owner decision B2: the prompt-capture retention sweep deletes a capture past the admin's retention. It sets the
+  -- transaction-local `regulait.browser_capture_retention_cutoff`; a DELETE is admitted only when the setting parses,
+  -- the cutoff is in the past by the DATABASE clock, and the row arrived before it (the ADR-0302 pattern). Events are
+  -- never deleted this way.
+  IF TG_OP = 'DELETE' AND TG_TABLE_NAME = 'browser_prompt_captures' THEN
+    DECLARE
+      raw text := coalesce(current_setting('regulait.browser_capture_retention_cutoff', true), '');
+      cutoff timestamptz;
+    BEGIN
+      IF raw <> '' THEN
+        BEGIN
+          cutoff := raw::timestamptz;
+        EXCEPTION WHEN others THEN
+          cutoff := NULL;
+        END;
+        IF cutoff IS NOT NULL AND cutoff < now() AND OLD.received_at < cutoff THEN
+          RETURN OLD;
+        END IF;
+      END IF;
+    END;
   END IF;
   RAISE EXCEPTION '% rows are append-only browser governance evidence (ADR-0334)', TG_TABLE_NAME USING ERRCODE = 'check_violation';
 END $$;

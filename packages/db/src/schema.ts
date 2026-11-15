@@ -16602,6 +16602,8 @@ export const browserGovernanceSettings = pgTable(
     /** `audit` (decide and record, never block) is a relaxation of `enforce` */
     mode: text("mode", { enum: BROWSER_GOVERNANCE_MODES }).notNull().default("enforce"),
     promptCaptureEnabled: boolean("prompt_capture_enabled").notNull().default(false),
+    /** owner decision B2: captured prompts older than this are deleted by the retention sweep; longer is a step-up */
+    promptCaptureRetentionDays: integer("prompt_capture_retention_days").notNull().default(30),
     updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

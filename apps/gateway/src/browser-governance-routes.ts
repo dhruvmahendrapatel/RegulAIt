@@ -61,6 +61,9 @@ import {
   BROWSER_REQUEST_MAX_BYTES,
   BROWSER_SITE_CATALOGUE,
   BROWSER_SITE_CATALOGUE_IDS,
+  BROWSER_CAPTURE_RETENTION_DEFAULT_DAYS,
+  BROWSER_CAPTURE_RETENTION_MAX_DAYS,
+  BROWSER_CAPTURE_RETENTION_MIN_DAYS,
   browserEventsRequestSchema,
   browserPolicyRequestSchema,
   browserPromptCaptureRequestSchema,
@@ -73,16 +76,16 @@ import {
 import {
   buildBrowserPolicy,
   conversationRef,
-  resolveBrowserPolicyKey,
-  signBrowserPolicy,
 } from "./browser-governance.js";
 import { databaseNow } from "./db-clock.js";
+import { DEVICE_POLICY_KEY_FILE_ENV, resolveDevicePolicySigner, signDevicePolicy } from "./device-policy-signer.js";
 import { pseudonymise, pseudonymKey } from "./discovery-worker.js";
 import { resolveExecutionPosture } from "./execution-posture.js";
 import { keyRegistered, prepareRunnerKey, runnerKeyThumbprint } from "./engine-runner-keys.js";
 import { resolveTrustDomain } from "./in-process-delegation.js";
 import { deploymentEnvironment, identityIssuer } from "./oauth/common.js";
 import { bindPreparedCredentialTx, IdentityAdminError } from "./oauth/identity-admin.js";
+import { INSTALL_SECRETS_DIR_ENV } from "./receipt-signing-key.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { requireStepUp } from "./step-up.js";
 
@@ -119,7 +122,7 @@ async function audit(
 async function loadSettings(db: Db): Promise<BrowserGovernanceSettingsRow> {
   const [row] = await db.select().from(browserGovernanceSettings).where(eq(browserGovernanceSettings.id, 1));
   // the migration inserts the row; a missing row reads as the strict default
-  return row ?? { id: 1, enabled: false, mode: "enforce", promptCaptureEnabled: false, updatedBy: null, updatedAt: new Date(0) };
+  return row ?? { id: 1, enabled: false, mode: "enforce", promptCaptureEnabled: false, promptCaptureRetentionDays: BROWSER_CAPTURE_RETENTION_DEFAULT_DAYS, updatedBy: null, updatedAt: new Date(0) };
 }
 
 function bearerToken(req: FastifyRequest): string | null {
@@ -298,7 +301,7 @@ export function registerBrowserGovernanceRoutes(app: FastifyInstance, db: Db, op
         await deny(authed.device.id, "invalid_body", route);
         return refuse(reply, 400, "invalid_body");
       }
-      const key = resolveBrowserPolicyKey();
+      const key = await resolveDevicePolicySigner();
       if (key.state !== "ok") {
         await deny(authed.device.id, "policy_signer_unavailable", route);
         return refuse(reply, 503, "policy_signer_unavailable");
@@ -316,7 +319,15 @@ export function registerBrowserGovernanceRoutes(app: FastifyInstance, db: Db, op
         rules,
         nowSeconds: Math.floor((await databaseNow(db)).getTime() / 1000),
       });
-      return reply.status(200).send({ policy: signBrowserPolicy(policy, key.key) });
+      // owner decision B1: an account that matches no RegulAIt user gets the org-wide rules, and that is audited
+      if (email && !user) {
+        await audit(db, NIL_UUID, authed.device.id, "browser-policy-unmatched-account", "allow", "a browser policy was issued with the org-wide site rules for a profile account that matches no RegulAIt user (ADR-0334 B1)", {
+          deviceId: authed.device.id,
+          subject,
+          allowedSites: policy.sites.filter((s) => s.decision === "allow").map((s) => s.siteId),
+        });
+      }
+      return reply.status(200).send({ policy: signDevicePolicy(policy, key.signer) });
     });
 
     // -- breach events --------------------------------------------------------------------------------------------
@@ -432,36 +443,52 @@ export function registerBrowserGovernanceRoutes(app: FastifyInstance, db: Db, op
 
   app.get("/v1/browser-governance", async (_req, reply) => {
     const settings = await loadSettings(db);
-    const key = resolveBrowserPolicyKey();
+    const key = await resolveDevicePolicySigner();
     return reply.send({
       enabled: settings.enabled,
       mode: settings.mode,
       promptCaptureEnabled: settings.promptCaptureEnabled,
+      promptCaptureRetentionDays: settings.promptCaptureRetentionDays,
       updatedAt: settings.updatedAt.toISOString(),
-      policyKey: key.state === "ok" ? { state: "ok", keyId: key.key.keyId, x: key.key.x, source: key.key.source } : { state: key.state },
+      policySigner:
+        key.state === "ok" ? { state: "ok", source: key.signer.source, activeKeyId: key.signer.active.keyId, publishedKeys: key.signer.published } : { state: key.state },
     });
   });
 
   const settingsSchema = z
-    .object({ enabled: z.boolean().optional(), mode: z.enum(["enforce", "audit"]).optional(), promptCaptureEnabled: z.boolean().optional() })
+    .object({
+      enabled: z.boolean().optional(),
+      mode: z.enum(["enforce", "audit"]).optional(),
+      promptCaptureEnabled: z.boolean().optional(),
+      promptCaptureRetentionDays: z.number().int().min(BROWSER_CAPTURE_RETENTION_MIN_DAYS).max(BROWSER_CAPTURE_RETENTION_MAX_DAYS).optional(),
+    })
     .strict()
     .refine((b) => Object.keys(b).length > 0, { message: "change at least one setting" });
 
   app.put("/v1/browser-governance/settings", async (req, reply) => {
     const b = settingsSchema.safeParse(req.body ?? {});
-    if (!b.success) return reply.status(400).send({ error: "invalid_request", detail: "send any of {enabled: boolean, mode: 'enforce' | 'audit', promptCaptureEnabled: boolean}" });
+    if (!b.success) return reply.status(400).send({ error: "invalid_request", detail: `send any of {enabled: boolean, mode: 'enforce' | 'audit', promptCaptureEnabled: boolean, promptCaptureRetentionDays: ${BROWSER_CAPTURE_RETENTION_MIN_DAYS} to ${BROWSER_CAPTURE_RETENTION_MAX_DAYS}}` });
     const before = await loadSettings(db);
     const after = {
       enabled: b.data.enabled ?? before.enabled,
       mode: b.data.mode ?? before.mode,
       promptCaptureEnabled: b.data.promptCaptureEnabled ?? before.promptCaptureEnabled,
+      promptCaptureRetentionDays: b.data.promptCaptureRetentionDays ?? before.promptCaptureRetentionDays,
     };
     const relaxations = [
       ...(after.enabled && !before.enabled ? ["enable"] : []),
       ...(after.mode === "audit" && before.mode !== "audit" ? ["audit_mode"] : []),
       ...(after.promptCaptureEnabled && !before.promptCaptureEnabled ? ["prompt_capture"] : []),
+      // owner decision B2: keeping captured prompts longer is a relaxation (shortening never is)
+      ...(after.promptCaptureRetentionDays > before.promptCaptureRetentionDays ? ["capture_retention"] : []),
     ];
-    if (relaxations.length === 0 && after.enabled === before.enabled && after.mode === before.mode && after.promptCaptureEnabled === before.promptCaptureEnabled) {
+    if (
+      relaxations.length === 0 &&
+      after.enabled === before.enabled &&
+      after.mode === before.mode &&
+      after.promptCaptureEnabled === before.promptCaptureEnabled &&
+      after.promptCaptureRetentionDays === before.promptCaptureRetentionDays
+    ) {
       return reply.send({ ...after, changed: false });
     }
     let stepUp: string | null = null;
@@ -472,8 +499,13 @@ export function registerBrowserGovernanceRoutes(app: FastifyInstance, db: Db, op
     }
     if (after.enabled && !before.enabled) {
       // turning it on makes sure a policy can be signed; without a key the extension would stay closed for good
-      const key = resolveBrowserPolicyKey(process.env, { create: true });
-      if (key.state !== "ok") return reply.status(503).send({ error: "policy_signer_unavailable", detail: "no browser policy signing key is configured or can be created (set REGULAIT_BROWSER_POLICY_SIGNING_KEY and its _KEY_ID, or REGULAIT_INSTALL_SECRETS_DIR)" });
+      const key = await resolveDevicePolicySigner(process.env, { create: true });
+      if (key.state !== "ok") {
+        return reply.status(503).send({
+          error: "policy_signer_unavailable",
+          detail: `no device policy signing key is configured or can be created (set ${DEVICE_POLICY_KEY_FILE_ENV}, or ${INSTALL_SECRETS_DIR_ENV} for an install-generated key)`,
+        });
+      }
     }
     await db.transaction(async (tx) => {
       const t = tx as unknown as Db;
@@ -482,7 +514,7 @@ export function registerBrowserGovernanceRoutes(app: FastifyInstance, db: Db, op
         .values({ id: 1, ...after, updatedBy: req.authCtx.userId ?? null })
         .onConflictDoUpdate({ target: browserGovernanceSettings.id, set: { ...after, updatedBy: req.authCtx.userId ?? null, updatedAt: sql`now()` } });
       await audit(t, actor(req), null, relaxations.length > 0 ? "browser-governance-relaxed" : "browser-governance-settings", "allow", `browser governance settings changed${relaxations.length > 0 ? ` (relaxation: ${relaxations.join(", ")}; step-up ${stepUp})` : ""} (ADR-0334)`, {
-        before: { enabled: before.enabled, mode: before.mode, promptCaptureEnabled: before.promptCaptureEnabled },
+        before: { enabled: before.enabled, mode: before.mode, promptCaptureEnabled: before.promptCaptureEnabled, promptCaptureRetentionDays: before.promptCaptureRetentionDays },
         after,
         relaxations,
         stepUp,
@@ -551,8 +583,8 @@ export function registerBrowserGovernanceRoutes(app: FastifyInstance, db: Db, op
     if (!settings.enabled) return reply.status(409).send({ error: "browser_governance_disabled", detail: "turn browser governance on first (that asks you to confirm it's you, and is audited)" });
     const gatewayUrl = identityIssuer();
     if (!gatewayUrl || !gatewayUrl.startsWith("https://")) return reply.status(503).send({ error: "issuer_not_configured", detail: "the gateway's public https URL is not configured, so extensions could not reach it" });
-    const key = resolveBrowserPolicyKey();
-    if (key.state !== "ok") return reply.status(503).send({ error: "policy_signer_unavailable", detail: "no browser policy signing key is usable" });
+    const key = await resolveDevicePolicySigner();
+    if (key.state !== "ok") return reply.status(503).send({ error: "policy_signer_unavailable", detail: "no device policy signing key is usable" });
     const secret = BROWSER_ENROLMENT_TOKEN_PREFIX + randomBytes(32).toString("hex");
     const row = await db.transaction(async (tx) => {
       const t = tx as unknown as Db;
@@ -576,7 +608,7 @@ export function registerBrowserGovernanceRoutes(app: FastifyInstance, db: Db, op
     return reply.status(201).send({
       token: tokenView(row, 0),
       // shown once: the managed storage value the customer's browser management pushes to the extension
-      managedConfig: { gatewayUrl: trimTrailingSlashes(gatewayUrl), enrolmentToken: secret, policyKeys: [{ keyId: key.key.keyId, x: key.key.x }] },
+      managedConfig: { gatewayUrl: trimTrailingSlashes(gatewayUrl), enrolmentToken: secret, policyKeys: key.signer.published.slice(0, 4) },
     });
   });
 

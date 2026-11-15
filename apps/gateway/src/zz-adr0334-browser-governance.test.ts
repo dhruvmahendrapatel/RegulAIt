@@ -23,20 +23,25 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   auditLog,
+  browserDevices,
   browserEvents,
   browserGovernanceSettings,
   browserPromptCaptures,
   browserSiteAccountDomains,
   browserSiteRules,
   createDb,
+  desc,
   discoveryPseudonymKeys,
   eq,
+  inArray,
   runMigrations,
   sql,
+  users,
   type Db,
 } from "@regulait/db";
 import { BROWSER_EXTENSION_PATHS, browserPolicySchema } from "@regulait/shared";
 import { buildApp } from "./app.js";
+import { runBrowserCaptureRetentionSweep } from "./browser-capture-retention.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { grantStepUpForTest, sessionRequest, stepUpRequest } from "./testing/step-up-grant.js";
 import type { StepUpCheckArgs } from "./step-up.js";
@@ -53,7 +58,7 @@ const DATA_KEY = "d".repeat(64);
 const AUTH = { authorization: `Bearer ${BOOT}` };
 const RUN = Date.now();
 const ADMIN_EMAIL = `adr0334-admin-${RUN}@example.com`;
-const ENV_KEYS = ["REGULAIT_BROWSER_POLICY_SIGNING_KEY", "REGULAIT_BROWSER_POLICY_SIGNING_KEY_ID", "REGULAIT_PUBLIC_URL"] as const;
+const ENV_KEYS = ["REGULAIT_DEVICE_POLICY_SIGNING_KEY", "REGULAIT_DEVICE_POLICY_ACTIVE_KEY_ID", "REGULAIT_PUBLIC_URL"] as const;
 let db: Db;
 let app: ReturnType<typeof buildApp>;
 let adminId: string;
@@ -129,8 +134,8 @@ beforeAll(async () => {
   restores.push(() => rmSync(keyDir, { recursive: true, force: true }));
   const pem = path.join(keyDir, "browser-policy.pem");
   writeFileSync(pem, generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "pem" }));
-  process.env.REGULAIT_BROWSER_POLICY_SIGNING_KEY = pem;
-  process.env.REGULAIT_BROWSER_POLICY_SIGNING_KEY_ID = `adr0334-${RUN}`;
+  process.env.REGULAIT_DEVICE_POLICY_SIGNING_KEY = pem;
+  delete process.env.REGULAIT_DEVICE_POLICY_ACTIVE_KEY_ID;
   process.env.REGULAIT_PUBLIC_URL = ORIGIN;
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   const created = await app.inject({ method: "POST", url: "/v1/users", headers: AUTH, payload: { email: ADMIN_EMAIL, displayName: "browser admin", isAdmin: true } });
@@ -150,7 +155,8 @@ describe("ADR-0334 off by default", () => {
   it("reads as off, enforce, no capture", async () => {
     const res = await app.inject({ method: "GET", url: "/v1/browser-governance", headers: KEY });
     expect(res.statusCode, res.body).toBe(200);
-    expect(res.json()).toMatchObject({ enabled: false, mode: "enforce", promptCaptureEnabled: false, policyKey: { state: "ok", keyId: `adr0334-${RUN}` } });
+    expect(res.json()).toMatchObject({ enabled: false, mode: "enforce", promptCaptureEnabled: false, promptCaptureRetentionDays: 30, policySigner: { state: "ok", source: "operator_managed" } });
+    expect(res.json().policySigner.activeKeyId).toMatch(/^device-policy-[0-9a-f]{24}$/);
   });
 
   it("every extension route refuses while it is off, and an enrolment token cannot be issued", async () => {
@@ -168,7 +174,7 @@ describe("ADR-0334 off by default", () => {
   it("turning it on needs a step-up bound to the change, and is audited as a relaxation", async () => {
     const refused = await app.inject({ method: "PUT", url: "/v1/browser-governance/settings", ...(await plainSession()), payload: { enabled: true } });
     expect([403, 422], refused.body).toContain(refused.statusCode);
-    const facts = { op: "browser_governance_settings", enabled: true, mode: "enforce", promptCaptureEnabled: false, relaxations: ["enable"] };
+    const facts = { op: "browser_governance_settings", enabled: true, mode: "enforce", promptCaptureEnabled: false, promptCaptureRetentionDays: 30, relaxations: ["enable"] };
     const res = await app.inject({ method: "PUT", url: "/v1/browser-governance/settings", ...(await steppedUp("settings_relax", facts)), payload: { enabled: true } });
     expect(res.statusCode, res.body).toBe(200);
     const [row] = await db.select().from(auditLog).where(sql`${auditLog.ruleId} = 'browser-governance-relaxed' and ${auditLog.userId} = ${adminId}`);
@@ -187,7 +193,7 @@ describe("ADR-0334 enrolment and proofs", () => {
     tokenId = res.json().token.tokenId;
     expect(managed.enrolmentToken).toMatch(/^rgbe_[0-9a-f]{64}$/);
     expect(managed.gatewayUrl).toBe(ORIGIN);
-    expect(managed.policyKeys).toEqual([{ keyId: `adr0334-${RUN}`, x: expect.any(String) }]);
+    expect(managed.policyKeys).toEqual([{ keyId: expect.stringMatching(/^device-policy-[0-9a-f]{24}$/), x: expect.any(String) }]);
     const list = await app.inject({ method: "GET", url: "/v1/browser-governance/enrolment-tokens", headers: KEY });
     expect(list.body).not.toContain(managed.enrolmentToken);
     const long = await app.inject({ method: "POST", url: "/v1/browser-governance/enrolment-tokens", headers: KEY, payload: { label: "x", deviceCap: 1, expiresInDays: 31 } });
@@ -237,10 +243,22 @@ describe("ADR-0334 enrolment and proofs", () => {
     const unknown = await signed(a, BROWSER_EXTENSION_PATHS.policy, { profileEmail: `nobody-${RUN}@example.com` });
     const pu = await verifiedPolicy(unknown.json().policy);
     expect(pu.deviceId).toBe(a.id);
-    expect(pu.sites.every((s) => s.denyReason === "user_unknown")).toBe(true);
+    // owner decision B1: an unmatched account gets the org-wide rules (here: no rule yet, so every site is denied)
+    expect(pu.sites.every((s) => s.denyReason === "no_site_rule")).toBe(true);
+    const [issued] = await db.select().from(auditLog).where(sql`${auditLog.ruleId} = 'browser-policy-unmatched-account' and ${auditLog.objectId} = ${a.id}`);
+    expect(issued).toBeDefined();
+    expect(JSON.stringify(issued!.detail)).not.toContain(`nobody-${RUN}`);
     const known = await verifiedPolicy((await signed(a, BROWSER_EXTENSION_PATHS.policy, { profileEmail: ADMIN_EMAIL })).json().policy);
     expect(known.subject).toMatch(/^psn:[0-9a-f]{24}$/);
     expect(known.sites.every((s) => s.denyReason === "no_site_rule")).toBe(true);
+    // a disabled person gets nothing
+    await db.update(users).set({ disabledAt: sql`now()` }).where(eq(users.id, adminId));
+    try {
+      const off = await verifiedPolicy((await signed(a, BROWSER_EXTENSION_PATHS.policy, { profileEmail: ADMIN_EMAIL })).json().policy);
+      expect(off.sites.every((s) => s.denyReason === "user_disabled")).toBe(true);
+    } finally {
+      await db.update(users).set({ disabledAt: null }).where(eq(users.id, adminId));
+    }
   });
 
   it("allowing a site is a step-up bound to the site and its domains; the policy then carries them", async () => {
@@ -252,6 +270,9 @@ describe("ADR-0334 enrolment and proofs", () => {
     expect((await app.inject({ method: "PUT", url: "/v1/browser-governance/sites/not-a-site", headers: KEY, payload: { decision: "deny" } })).statusCode).toBe(404);
     const p = await verifiedPolicy((await signed(dev.a!, BROWSER_EXTENSION_PATHS.policy, { profileEmail: ADMIN_EMAIL })).json().policy);
     expect(p.sites.find((s) => s.siteId === "ep-poe-web")).toEqual({ siteId: "ep-poe-web", decision: "allow", denyReason: null, accountDomains: ["example.com"] });
+    // B1: an unmatched account gets the same org-wide rule, account domains included
+    const u = await verifiedPolicy((await signed(dev.a!, BROWSER_EXTENSION_PATHS.policy, { profileEmail: `nobody-${RUN}@example.com` })).json().policy);
+    expect(u.sites.find((s) => s.siteId === "ep-poe-web")).toEqual({ siteId: "ep-poe-web", decision: "allow", denyReason: null, accountDomains: ["example.com"] });
   });
 
   it("stores a breach event once, attributed, with no path, account name or text in storage, append-only", async () => {
@@ -283,7 +304,7 @@ describe("ADR-0334 enrolment and proofs", () => {
     const text = `adr0334 prompt ${RUN}`;
     const capture = () => ({ captureId: randomUUID(), profileEmail: ADMIN_EMAIL, siteId: "ep-poe-web", path: "/chat/1", text, capturedAt: Math.floor(Date.now() / 1000) });
     expect((await signed(a, BROWSER_EXTENSION_PATHS.promptCaptures, capture())).json()).toEqual({ error: "prompt_capture_disabled" });
-    const facts = { op: "browser_governance_settings", enabled: true, mode: "enforce", promptCaptureEnabled: true, relaxations: ["prompt_capture"] };
+    const facts = { op: "browser_governance_settings", enabled: true, mode: "enforce", promptCaptureEnabled: true, promptCaptureRetentionDays: 30, relaxations: ["prompt_capture"] };
     const on = await app.inject({ method: "PUT", url: "/v1/browser-governance/settings", ...(await steppedUp("settings_relax", facts)), payload: { promptCaptureEnabled: true } });
     expect(on.statusCode, on.body).toBe(200);
     const res = await signed(a, BROWSER_EXTENSION_PATHS.promptCaptures, capture());
@@ -304,6 +325,39 @@ describe("ADR-0334 enrolment and proofs", () => {
     await expect(reenc(sql`text_ciphertext = text_ciphertext || ''`)).resolves.toBe("");
     await expect(reenc(sql`site_id = 'ep-poe-web', text_chars = 1`)).resolves.toMatch(/append-only/);
     await expect(refusal(db.update(browserPromptCaptures).set({ textChars: 1 }).where(eq(browserPromptCaptures.id, row!.id)))).resolves.toMatch(/append-only/);
+  });
+
+  it("B2: captures are kept 30 days by default; longer is a step-up; the sweep deletes only what is past it, audited", async () => {
+    // keeping them longer is a relaxation; shorter is not
+    const longer = { promptCaptureRetentionDays: 90 };
+    const refused = await app.inject({ method: "PUT", url: "/v1/browser-governance/settings", ...(await plainSession()), payload: longer });
+    expect([403, 422], refused.body).toContain(refused.statusCode);
+    const facts = { op: "browser_governance_settings", enabled: true, mode: "enforce", promptCaptureEnabled: true, promptCaptureRetentionDays: 90, relaxations: ["capture_retention"] };
+    expect((await app.inject({ method: "PUT", url: "/v1/browser-governance/settings", ...(await steppedUp("settings_relax", facts)), payload: longer })).statusCode).toBe(200);
+    const shorter = await app.inject({ method: "PUT", url: "/v1/browser-governance/settings", headers: KEY, payload: { promptCaptureRetentionDays: 30 } });
+    expect(shorter.statusCode, shorter.body).toBe(200);
+    expect((await app.inject({ method: "PUT", url: "/v1/browser-governance/settings", headers: KEY, payload: { promptCaptureRetentionDays: 0 } })).statusCode).toBe(400);
+    // an old capture (written as received 31 days ago) and a fresh one
+    const [device] = await db.select().from(browserDevices).limit(1);
+    const old = randomUUID();
+    const fresh = randomUUID();
+    const row = (id: string, receivedAt: ReturnType<typeof sql>) => ({
+      deviceId: device!.id, captureId: id, siteId: "ep-poe-web", subjectPseudonym: "", conversationRef: `cnv:${"0".repeat(32)}`,
+      textCiphertext: "x", textChars: 1, capturedAt: new Date(), receivedAt, auditId: randomUUID(),
+    });
+    await db.insert(browserPromptCaptures).values([row(old, sql`now() - interval '31 days'`), row(fresh, sql`now()`)] as never);
+    // a forged future cutoff deletes nothing
+    await expect(refusal(db.transaction(async (tx) => {
+      await tx.execute(sql`select set_config('regulait.browser_capture_retention_cutoff', ${new Date(Date.now() + 86_400_000).toISOString()}, true)`);
+      await tx.delete(browserPromptCaptures).where(eq(browserPromptCaptures.captureId, fresh));
+    }))).resolves.toMatch(/append-only/);
+    const out = await runBrowserCaptureRetentionSweep(db);
+    expect(out.retainedDays).toBe(30);
+    expect(out.deleted).toBeGreaterThanOrEqual(1);
+    const left = await db.select({ id: browserPromptCaptures.captureId }).from(browserPromptCaptures).where(inArray(browserPromptCaptures.captureId, [old, fresh]));
+    expect(left.map((r) => r.id)).toEqual([fresh]);
+    const [purged] = await db.select().from(auditLog).where(sql`${auditLog.ruleId} = 'browser-prompt-captures-purged'`).orderBy(desc(auditLog.at)).limit(1);
+    expect(purged).toBeDefined();
   });
 
   it("a revoked device is refused from then on", async () => {

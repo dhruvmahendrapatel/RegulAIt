@@ -40,6 +40,10 @@ export const BROWSER_PROMPT_CAPTURE_MAX_CHARS = 16_000;
 /** the extension inspects at most this much of a prompt for DLP (the endpoint agent's MaxValueBytes analogue) */
 export const BROWSER_DLP_MAX_CHARS = 64 * 1024;
 export const BROWSER_PATH_MAX = 512;
+/** owner decision B2 (2026-11-15): captured prompts are kept 30 days by default, then deleted; longer is a relaxation */
+export const BROWSER_CAPTURE_RETENTION_DEFAULT_DAYS = 30;
+export const BROWSER_CAPTURE_RETENTION_MIN_DAYS = 1;
+export const BROWSER_CAPTURE_RETENTION_MAX_DAYS = 3650;
 
 // ---------------------------------------------------------------------------
 // The governed site catalogue
@@ -136,7 +140,7 @@ export const BROWSER_POLICY_MODES = ["enforce", "audit"] as const;
 export type BrowserPolicyMode = (typeof BROWSER_POLICY_MODES)[number];
 export const BROWSER_SITE_DECISIONS = ["allow", "deny"] as const;
 /** why a site is denied: fixed codes the block page explains, never free text */
-export const BROWSER_DENY_REASONS = ["site_denied", "no_site_rule", "execution_posture", "user_unknown"] as const;
+export const BROWSER_DENY_REASONS = ["site_denied", "no_site_rule", "execution_posture", "user_disabled"] as const;
 export type BrowserDenyReason = (typeof BROWSER_DENY_REASONS)[number];
 
 /**
