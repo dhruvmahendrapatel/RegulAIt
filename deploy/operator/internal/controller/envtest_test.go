@@ -499,6 +499,39 @@ func TestBackupCronJobAndAirGappedValidation(t *testing.T) {
 	if cj.Spec.Schedule != "17 2 * * *" || cj.Spec.ConcurrencyPolicy != batchv1.ForbidConcurrent {
 		t.Fatalf("backup cronjob: %+v", cj.Spec)
 	}
+
+	// ADR-0305: the API server refuses a claim and an S3 bucket together (CEL).
+	both := getInst(t, name)
+	withS3(both)
+	both.Spec.Backup.DestinationClaimName = "regulait-backups"
+	if err := k8s.Update(ctx, both); err == nil || !strings.Contains(err.Error(), "not both") {
+		t.Fatalf("claim and s3 together were admitted: %v", err)
+	}
+	// S3 in the customer's account through a private VPC endpoint is valid in air_gapped.
+	updateInst(t, name, func(in *v1alpha1.RegulaitInstallation) {
+		withS3(in)
+		in.Spec.Backup.S3.RoleARN = "arn:aws:iam::111122223333:role/regulait-backup"
+	})
+	eventually(t, "BackupConfigured=ScheduledToS3", func() bool {
+		c := cond(getInst(t, name), v1alpha1.ConditionBackupConfigured)
+		return c != nil && c.Reason == "ScheduledToS3" && strings.Contains(c.Message, "s3://customer-regulait-backups/regulait/")
+	})
+	eventually(t, "cronjob uploads to S3", func() bool {
+		cj := &batchv1.CronJob{}
+		if k8s.Get(ctx, client.ObjectKey{Namespace: testNS, Name: name + "-backup"}, cj) != nil {
+			return false
+		}
+		p := cj.Spec.JobTemplate.Spec.Template.Spec
+		return len(p.InitContainers) == 1 && len(p.Containers) == 1 && p.Containers[0].Name == "upload-s3" && p.ServiceAccountName == name+"-backup"
+	})
+	sa := &corev1.ServiceAccount{}
+	if err := k8s.Get(ctx, client.ObjectKey{Namespace: testNS, Name: name + "-backup"}, sa); err != nil || sa.Annotations[IRSARoleAnnotation] == "" {
+		t.Fatalf("backup ServiceAccount: %v %+v", err, sa.Annotations)
+	}
+	np := &networkingv1.NetworkPolicy{}
+	if err := k8s.Get(ctx, client.ObjectKey{Namespace: testNS, Name: name + "-backup-object-store"}, np); err != nil || len(np.Spec.Egress) != 1 {
+		t.Fatalf("backup object-store policy: %v %+v", err, np.Spec.Egress)
+	}
 }
 
 // TestKeyringConfigMapIsNotTheTrustAnchor: a key placed in a namespace ConfigMap is not trusted unless the spec opts in

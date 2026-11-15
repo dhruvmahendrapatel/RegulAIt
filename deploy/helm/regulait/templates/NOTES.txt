@@ -1,0 +1,13 @@
+RegulAIt {{ .Values.version }} ({{ .Values.mode }}) is installed in namespace {{ .Release.Namespace }}.
+
+The migration hook verified the signed update bundle for version {{ .Values.version }}. Bundle schema /1 signs the
+version, not the image digest: the gateway runs {{ include "regulait.image" . }}, which the signature does not cover.
+Until a schema binds the digest, whoever can change this release's values can run any image
+{{- if .Values.image.allowedRegistries }} from {{ join ", " .Values.image.allowedRegistries }}
+{{- else }} from ANY registry (image.allowedRegistries is empty: name the registries your images come from)
+{{- end }} with the gateway's database URL and data key. Grant that right accordingly.
+{{- with include "regulait.publicEgress" . }}
+
+WARNING: egress beyond private ranges is open:
+{{- . }}
+{{- end }}
