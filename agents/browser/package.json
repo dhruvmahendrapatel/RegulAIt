@@ -1,0 +1,25 @@
+{
+  "name": "@regulait/browser-extension",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "description": "ADR-0334: the managed RegulAIt browser extension (Manifest V3, Chromium-based browsers). Deployed only through the customer's browser management.",
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit && node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --dir test"
+  },
+  "dependencies": {
+    "@regulait/shared": "workspace:*",
+    "jose": "6.2.14",
+    "re2js": "2.8.8"
+  },
+  "devDependencies": {
+    "@types/chrome": "0.3.7",
+    "@types/node": "26.6.6",
+    "esbuild": "0.28.2",
+    "typescript": "^5.8.3",
+    "vitest": "^4.1.11"
+  }
+}

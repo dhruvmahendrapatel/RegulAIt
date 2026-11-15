@@ -1999,6 +1999,9 @@ export const auditLog = pgTable(
         "trust_publication",
         "trust_center",
         "auditor_grant",
+        // ADR-0334 (lane E16): browser governance settings, site rules, enrolment tokens, devices and the breach
+        // events and prompt captures an extension reports. Plain text column — no DDL.
+        "browser_governance",
       ],
     })
       .notNull()
@@ -16583,3 +16586,153 @@ export const resourceRateReservations = pgTable(
     ),
   ],
 );
+
+// ===== ADR-0334 (lane E16): managed browser extension governance ===================================================
+// Migration `pending/browser_governance.sql`. Off until an admin enables it (a `settings_relax` step-up, audited).
+// Single-tenant deployment: like the other register tables (0281 header), no tenant column and no RLS yet (the RLS
+// batches cover new tables in their own slices).
+export const BROWSER_GOVERNANCE_MODES = ["enforce", "audit"] as const;
+
+/** The one settings row (id = 1). Every column defaults to the strict value (ADR-0180). */
+export const browserGovernanceSettings = pgTable(
+  "browser_governance_settings",
+  {
+    id: smallint("id").primaryKey().default(1),
+    enabled: boolean("enabled").notNull().default(false),
+    /** `audit` (decide and record, never block) is a relaxation of `enforce` */
+    mode: text("mode", { enum: BROWSER_GOVERNANCE_MODES }).notNull().default("enforce"),
+    promptCaptureEnabled: boolean("prompt_capture_enabled").notNull().default(false),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [check("browser_governance_settings_singleton", sql`${t.id} = 1`)],
+);
+export type BrowserGovernanceSettingsRow = typeof browserGovernanceSettings.$inferSelect;
+
+/** An admin's decision for one catalogue site. A site with no row is denied (`no_site_rule`). */
+export const browserSiteRules = pgTable("browser_site_rules", {
+  /** a BROWSER_SITE_CATALOGUE_IDS value (a CHECK holds the list) */
+  siteId: text("site_id").primaryKey(),
+  decision: text("decision", { enum: ["allow", "deny"] }).notNull(),
+  setBy: uuid("set_by").references(() => users.id, { onDelete: "set null" }),
+  setAt: timestamp("set_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** The account domains one site requires the browser profile to be signed in with (a join table, ADR-0200 3NF). */
+export const browserSiteAccountDomains = pgTable(
+  "browser_site_account_domains",
+  {
+    siteId: text("site_id")
+      .notNull()
+      .references(() => browserSiteRules.siteId, { onDelete: "cascade" }),
+    domain: text("domain").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.siteId, t.domain] })],
+);
+
+/** A capped bulk enrolment token (`rgbe_`), delivered in the extension's managed storage; only its SHA-256 is kept. */
+export const browserEnrolmentTokens = pgTable(
+  "browser_enrolment_tokens",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    label: text("label").notNull(),
+    tokenHash: text("token_hash").notNull(),
+    deviceCap: integer("device_cap").notNull(),
+    devicesEnrolled: integer("devices_enrolled").notNull().default(0),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("browser_enrolment_tokens_hash_uq").on(t.tokenHash)],
+);
+export type BrowserEnrolmentTokenRow = typeof browserEnrolmentTokens.$inferSelect;
+
+/**
+ * One installed extension: its install-time P-256 key. `public_jwk` is the key as registered (a verbatim external
+ * payload, the ADR-0200 exception: it is verified, never edited). Devices are revoked, never deleted, so the
+ * evidence rows below always name one.
+ */
+export const browserDevices = pgTable(
+  "browser_devices",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tokenId: uuid("token_id")
+      .notNull()
+      .references(() => browserEnrolmentTokens.id, { onDelete: "restrict" }),
+    jwkThumbprint: text("jwk_thumbprint").notNull(),
+    publicJwk: jsonb("public_jwk").notNull(),
+    os: text("os").notNull(),
+    browserMajor: integer("browser_major").notNull(),
+    extensionVersion: text("extension_version").notNull(),
+    registeredAt: timestamp("registered_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: uuid("revoked_by").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [uniqueIndex("browser_devices_thumbprint_uq").on(t.jwkThumbprint), index("browser_devices_token_idx").on(t.tokenId)],
+);
+export type BrowserDeviceRow = typeof browserDevices.$inferSelect;
+
+/**
+ * One policy breach reported by an extension. APPEND-ONLY EVIDENCE (a trigger refuses UPDATE, DELETE and TRUNCATE).
+ * Point-in-time attribution, the ADR-0200 evidence exception: `user_id` is the person the profile account matched
+ * when the event arrived, `subject_pseudonym` the keyed hash of that account, `conversation_ref` the keyed hash of
+ * the site and path, and `rule_ids` the dlp.secret.* ids that matched (code constants, not references). No prompt
+ * text, path or account name is stored.
+ */
+export const browserEvents = pgTable(
+  "browser_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => browserDevices.id, { onDelete: "restrict" }),
+    eventId: uuid("event_id").notNull(),
+    kind: text("kind").notNull(),
+    outcome: text("outcome").notNull(),
+    code: text("code").notNull(),
+    siteId: text("site_id").notNull(),
+    ruleIds: text("rule_ids").array().notNull(),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
+    subjectPseudonym: text("subject_pseudonym").notNull(),
+    conversationRef: text("conversation_ref"),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+    /** the audit-chain row of the batch this event arrived in (`audit_log` carries no FKs by design) */
+    auditId: uuid("audit_id").notNull(),
+  },
+  (t) => [
+    uniqueIndex("browser_events_device_event_uq").on(t.deviceId, t.eventId),
+    index("browser_events_received_idx").on(t.receivedAt),
+    index("browser_events_user_idx").on(t.userId, t.receivedAt),
+  ],
+);
+export type BrowserEventRow = typeof browserEvents.$inferSelect;
+
+/**
+ * One captured prompt, only while an admin has turned prompt capture on (a step-up relaxation, audited) and the
+ * extension shows its notice. APPEND-ONLY EVIDENCE, text enveloped under REGULAIT_DATA_KEY. Point-in-time attribution
+ * as for `browser_events`.
+ */
+export const browserPromptCaptures = pgTable(
+  "browser_prompt_captures",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => browserDevices.id, { onDelete: "restrict" }),
+    captureId: uuid("capture_id").notNull(),
+    siteId: text("site_id").notNull(),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
+    subjectPseudonym: text("subject_pseudonym").notNull(),
+    conversationRef: text("conversation_ref").notNull(),
+    textCiphertext: text("text_ciphertext").notNull(),
+    textChars: integer("text_chars").notNull(),
+    capturedAt: timestamp("captured_at", { withTimezone: true }).notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+    auditId: uuid("audit_id").notNull(),
+  },
+  (t) => [uniqueIndex("browser_prompt_captures_device_capture_uq").on(t.deviceId, t.captureId), index("browser_prompt_captures_received_idx").on(t.receivedAt)],
+);
+// ===== end ADR-0334 =================================================================================================

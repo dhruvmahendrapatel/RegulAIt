@@ -105,6 +105,7 @@ export const MACHINE_ONLY = new Map([
   ["POST /v1/third-party-ingest/defenseclaw/records", "third-party exporter channel: a customer's DefenseClaw HTTP JSONL exporter posts here with its source's write-only rgti_ token, never a person (ADR-0261)"],
   ["POST /v1/third-party-ingest/defenseclaw/otlp/v1/logs", "third-party exporter channel: a customer's DefenseClaw OTLP/HTTP logs exporter (protobuf or JSON) posts here with its source's write-only rgti_ token, never a person (ADR-0302)"],
   ["* /v1/endpoint-agent/*", { reason: "endpoint agent channel: the agent's install step (bulk enrolment token), its registration (device ticket) and its own DPoP-bound self token reach these, never a person (ADR-0195 SD4b)", matches: 5 }],
+  ["* /v1/browser-extension/*", { reason: "browser extension channel: the managed extension's registration (bulk enrolment token) and its device-proof routes (policy, breach events, prompt capture) reach these, never a person (ADR-0334)", matches: 4 }],
   ["* /v1/executor-channel/*", { reason: "executor channel: only an enrolled executor reaches these (ADR-0190; I4 adds the two stdio session routes, I5 the two task input routes)", matches: 11 }],
 
   // ---- inbound callbacks and provisioning -----------------------------------
@@ -443,6 +444,17 @@ export const KNOWN_UI_GAPS = new Map([
   ["GET /v1/connectors/:connectorId/token-exchange", { does: "reads a connector's upstream token-exchange configuration and per-action scope map (never the secret)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
   ["PUT /v1/connectors/:connectorId/token-exchange", { does: "sets or changes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
   ["DELETE /v1/connectors/:connectorId/token-exchange", { does: "removes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
+  ["GET /v1/browser-governance", { does: "reads browser governance settings (on/off, enforce/audit, prompt capture) and the policy key's public half for managed storage", tracking: "ADR-0334 (lane E16): the brief is API-only; the browser governance screens are requested on #453 for the UI builder" }],
+  ["PUT /v1/browser-governance/settings", { does: "turns browser governance on, audit mode or prompt capture (each a settings_relax step-up, audited), or back off", tracking: "ADR-0334 (lane E16): the brief is API-only; the browser governance screens are requested on #453 for the UI builder" }],
+  ["GET /v1/browser-governance/sites", { does: "lists the governed AI sites with each one's rule and required account domains", tracking: "ADR-0334 (lane E16): the brief is API-only; the browser governance screens are requested on #453 for the UI builder" }],
+  ["PUT /v1/browser-governance/sites/:siteId", { does: "allows a site (settings_relax step-up) or denies it, with the account domains the browser profile must use", tracking: "ADR-0334 (lane E16): the brief is API-only; the browser governance screens are requested on #453 for the UI builder" }],
+  ["POST /v1/browser-governance/enrolment-tokens", { does: "issues a capped browser enrolment token and the managed-storage config, shown once", tracking: "ADR-0334 (lane E16): the brief is API-only; the browser governance screens are requested on #453 for the UI builder" }],
+  ["GET /v1/browser-governance/enrolment-tokens", { does: "lists browser enrolment tokens with their caps and enrolled devices (never the token)", tracking: "ADR-0334 (lane E16): the brief is API-only; the browser governance screens are requested on #453 for the UI builder" }],
+  ["POST /v1/browser-governance/enrolment-tokens/:tokenId/revoke", { does: "revokes a browser enrolment token: no new devices register with it", tracking: "ADR-0334 (lane E16): the brief is API-only; the browser governance screens are requested on #453 for the UI builder" }],
+  ["GET /v1/browser-governance/devices", { does: "lists enrolled browser extension devices", tracking: "ADR-0334 (lane E16): the brief is API-only; the browser governance screens are requested on #453 for the UI builder" }],
+  ["POST /v1/browser-governance/devices/:deviceId/revoke", { does: "revokes a browser extension device: its proofs are refused and it blocks every governed site", tracking: "ADR-0334 (lane E16): the brief is API-only; the browser governance screens are requested on #453 for the UI builder" }],
+  ["GET /v1/browser-governance/events", { does: "lists browser policy breach events (site, account and DLP blocks), pseudonymous", tracking: "ADR-0334 (lane E16): the brief is API-only; the browser governance screens are requested on #453 for the UI builder" }],
+  ["GET /v1/browser-governance/prompt-captures/:captureId", { does: "reads one captured prompt (a pseudonym_reveal step-up, audited)", tracking: "ADR-0334 (lane E16): the brief is API-only; the browser governance screens are requested on #453 for the UI builder" }],
 ]);
 
 /**
@@ -451,7 +463,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 54; // main's 48 (43 + ADR-0303 L11 5 SIEM routes) + ADR-0256 (P32) 4, master decision on #725 2026-11-14; + ADR-0056 §5 amendment (lane L7) 2 copilot red-team gate routes
+export const KNOWN_UI_GAPS_MAX = 65; // main's 48 (43 + ADR-0303 L11 5 SIEM routes) + ADR-0256 (P32) 4, master decision on #725 2026-11-14; + ADR-0056 §5 amendment (lane L7) 2 copilot red-team gate routes; + ADR-0334 (lane E16) 11 browser governance admin routes
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 
