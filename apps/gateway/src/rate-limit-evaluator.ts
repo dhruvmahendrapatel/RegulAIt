@@ -1,17 +1,18 @@
 /**
  * ADR-0239 slice 1 — which engine evaluates rate limits.
  *
- * Default: the Cedar evaluator (`@regulait/policy-kernel/rate-limit-cedar`). For ONE release the hand-written
- * evaluator stays available behind `REGULAIT_RATE_LIMIT_EVALUATOR=legacy`, as a rollback if the Cedar path misbehaves
- * in a deployment. Both give the same answers (the kernel's differential test holds them to it); the Cedar one also
- * refuses a call when it cannot evaluate.
+ * The Cedar evaluator (`@regulait/policy-kernel/rate-limit-cedar`) is the only engine. The hand-written one and the
+ * `REGULAIT_RATE_LIMIT_EVALUATOR=legacy` rollback were removed after their one release (ADR-0239 decision 4,
+ * 2026-11-14); the kernel's differential test keeps the old predicate as its oracle. `legacy` now refuses the boot
+ * with that reason, so a deployment that still sets it learns at start-up instead of running on an engine it did not
+ * choose.
  *
  * The choice is made once, at boot, and written to the boot log (`describeRateLimitEvaluator`). Any value other than
- * unset, `cedar` or `legacy` refuses the boot, so a typo cannot pick an engine silently. Outside `boot` (tests, the
+ * unset or `cedar` refuses the boot, so a typo cannot pick an engine silently. Outside `boot` (tests, the
  * simulator) the first call resolves `process.env` the same way; an invalid value there gives an evaluator that
  * errors on every call, which the kernel turns into a deny.
  */
-import { legacyRateLimitEvaluator, type RateLimitEvaluator } from "@regulait/policy-kernel";
+import type { RateLimitEvaluator } from "@regulait/policy-kernel";
 import { cedarRateLimitEvaluator } from "@regulait/policy-kernel/rate-limit-cedar";
 
 export const RATE_LIMIT_EVALUATOR_ENV = "REGULAIT_RATE_LIMIT_EVALUATOR";
@@ -24,9 +25,14 @@ export class RateLimitEvaluatorBootError extends Error {
 export function resolveRateLimitEvaluator(env: NodeJS.ProcessEnv = process.env): RateLimitEvaluator {
   const raw = (env[RATE_LIMIT_EVALUATOR_ENV] ?? "").trim().toLowerCase();
   if (raw === "" || raw === "cedar") return cedarRateLimitEvaluator;
-  if (raw === "legacy") return legacyRateLimitEvaluator;
+  if (raw === "legacy") {
+    throw new RateLimitEvaluatorBootError(
+      `${RATE_LIMIT_EVALUATOR_ENV}=legacy: the hand-written rate-limit evaluator was removed (ADR-0239 decision 4); ` +
+        "unset the variable or set it to 'cedar'.",
+    );
+  }
   throw new RateLimitEvaluatorBootError(
-    `${RATE_LIMIT_EVALUATOR_ENV} is '${env[RATE_LIMIT_EVALUATOR_ENV]}'; use 'cedar' (the default) or 'legacy'.`,
+    `${RATE_LIMIT_EVALUATOR_ENV} is '${env[RATE_LIMIT_EVALUATOR_ENV]}'; use 'cedar' (the default) or leave it unset.`,
   );
 }
 
@@ -59,7 +65,5 @@ export function activeRateLimitEvaluator(): RateLimitEvaluator {
 
 /** The boot-log line. */
 export function describeRateLimitEvaluator(evaluator: RateLimitEvaluator): string {
-  return evaluator === legacyRateLimitEvaluator
-    ? `legacy hand-written evaluator (${RATE_LIMIT_EVALUATOR_ENV}=legacy; kept for one release, ADR-0239)`
-    : `Cedar (${evaluator.engine}, ADR-0239)`;
+  return `Cedar (${evaluator.engine}, ADR-0239)`;
 }

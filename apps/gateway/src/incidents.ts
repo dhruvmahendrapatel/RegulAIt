@@ -111,7 +111,7 @@ import {
 import {
   ART_73_6_PARAGRAPH,
   ART_73_6_QUOTE,
-  EU_AI_ACT_CLOCK_CAVEAT,
+  INCIDENT_CLOCK_REGIME_CAVEAT,
   INCIDENT_CLOCK_DISCLAIMER,
   INCIDENT_CLOCK_RECIPIENT,
   applicableIncidentClocks,
@@ -764,7 +764,8 @@ function clockView(n: typeof aiIncidentNotifications.$inferSelect, now: Date) {
     period: def ? incidentClockDueLabel(def.due) : null,
     immediately: def?.due.kind === "immediately",
     allowsInitialReport: def?.allowsInitialReport ?? false,
-    caveat: n.regime === "eu-ai-act" ? EU_AI_ACT_CLOCK_CAVEAT : null,
+    // ADR-0296: each regime's own caveat (EU AI Act role; GDPR/NIS2/DORA/CRA applicability)
+    caveat: INCIDENT_CLOCK_REGIME_CAVEAT[n.regime as IncidentClockRegime] ?? null,
     recipient: n.recipient,
     clockStart: n.clockStart.toISOString(),
     dueAt: n.dueAt.toISOString(),
