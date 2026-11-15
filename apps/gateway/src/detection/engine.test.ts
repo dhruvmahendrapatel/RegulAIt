@@ -6,7 +6,6 @@ import { generateKeyPairSync } from "node:crypto";
 import { evaluateDetections, raisedKey, type DetectionEvent } from "./engine.js";
 import {
   DEFAULT_DETECTION_PACK,
-  globMatch,
   packChangeIsRelaxation,
   packDigest,
   parseDetectionPack,
@@ -166,13 +165,4 @@ describe("ADR-0333 pack contract", () => {
     expect(packDigest(DEFAULT_DETECTION_PACK)).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  it("globs match literal segments in order", () => {
-    expect(globMatch("*secret*", "vault_read_secret")).toBe(true);
-    expect(globMatch("read_env*", "read_env_var")).toBe(true);
-    expect(globMatch("read_env*", "x_read_env")).toBe(false);
-    expect(globMatch("a*b*c", "abc")).toBe(true);
-    expect(globMatch("a*b*c", "acb")).toBe(false);
-    expect(globMatch("ab*ba", "aba")).toBe(false);
-    expect(globMatch("exact", "exact")).toBe(true);
-  });
 });

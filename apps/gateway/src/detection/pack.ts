@@ -3,8 +3,8 @@
  *
  * Rules are data, never code and never AI (owner scope guard). The vocabulary follows the Sigma correlation
  * specification (`temporal_ordered`, `event_count`) plus `single`. A selector is a conjunction over closed fields, a
- * tool class is a list of lower-case `*` globs over tool names. There are no expressions and no regular expressions,
- * so evaluation is linear and deterministic.
+ * tool class is a list of lower-case `*` globs over tool names. Both are evaluated on Cedar
+ * (`@regulait/policy-kernel/detection-cedar`); there are no expressions and no regular expressions.
  */
 import { createHash, createPublicKey, sign, verify, type KeyObject } from "node:crypto";
 import { z } from "zod";
@@ -24,7 +24,6 @@ export const DETECTION_LIMITS = {
 
 const SEVERITIES = ["low", "medium", "high", "critical"] as const;
 export type DetectionSeverity = (typeof SEVERITIES)[number];
-export const SEVERITY_RANK: Record<DetectionSeverity, number> = { low: 0, medium: 1, high: 2, critical: 3 };
 
 /** `alert` is the default; the others run after the incident commits (responses.ts), and need a step-up (ADR-0333 §5) */
 export const RESPONSES = ["alert", "suspend_grant", "revoke_credential", "require_approval"] as const;
@@ -267,22 +266,4 @@ export function packChangeIsRelaxation(previous: DetectionPack, next: DetectionP
     if (!after || canonicalJson(after) !== canonicalJson(globs)) return true;
   }
   return next.rules.some((r) => r.response !== "alert");
-}
-
-/** `*` glob over a lower-cased tool name: literal segments matched in order, linear in the input */
-export function globMatch(pattern: string, value: string): boolean {
-  const parts = pattern.split("*");
-  if (parts.length === 1) return pattern === value;
-  const first = parts[0]!;
-  const last = parts[parts.length - 1]!;
-  if (!value.startsWith(first)) return false;
-  let pos = first.length;
-  for (let i = 1; i < parts.length - 1; i++) {
-    const part = parts[i]!;
-    if (part === "") continue;
-    const at = value.indexOf(part, pos);
-    if (at < 0) return false;
-    pos = at + part.length;
-  }
-  return value.length - last.length >= pos && value.endsWith(last);
 }
