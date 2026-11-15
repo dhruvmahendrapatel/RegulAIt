@@ -2080,6 +2080,11 @@ export const auditLog = pgTable(
     index("audit_log_alert_escalated_idx")
       .on(t.objectId)
       .where(sql`${t.ruleId} = 'governance-alert-escalated'`),
+    // pending/chatops_campaign_deadline_notify.sql (ADR-0090 amendment): the deadline sweep's delivery markers only,
+    // so "already delivered to this target" never scans the trail (review of #825)
+    index("audit_log_campaign_deadline_marker_idx")
+      .on(t.objectId)
+      .where(sql`${t.ruleId} = 'campaign-deadline-notified'`),
     // migration 0155 (ADR-0180 A2): the guardrail hit rows only (the ids
     // guardrails.ts writes as `guardrail-${outcome}`), so the guardrail_hits
     // condition metric never scans the trail
@@ -5443,6 +5448,9 @@ export const orgSettings = pgTable(
     privacyOpsEnabled: boolean("privacy_ops_enabled").notNull().default(false),
     /** days from a data-subject request's receipt to its due date; 30 is the strict default, shorter is stricter */
     dsrSlaDays: integer("dsr_sla_days").notNull().default(30),
+    /** ADR-0090 amendment (lane L11, owner 2026-11-15): how many hours before a certification campaign's due time its
+     * deadline reminder is sent (1 hour to 14 days; 48 is the default). A change is audited by PUT /v1/org/settings. */
+    certificationReminderHours: integer("certification_reminder_hours").notNull().default(48),
 
     /** ADR-0222 (P13(a), migration 0271): fairness testing. Off by default — turning it on starts storing
      * sensitive attributes, so it needs the `settings_relax` step-up. */
@@ -5452,12 +5460,35 @@ export const orgSettings = pgTable(
     /** ADR-0222: an uploaded evaluation dataset's rows are deleted this many days after upload (strict 30) */
     fairnessDatasetRetentionDays: integer("fairness_dataset_retention_days").notNull().default(30),
 
+    /** ADR-0056 §5 amendment (lane L7, migration copilot_redteam_gate): a model may narrate a copilot answer only
+     * while its latest copilot red-team run passed against the model it serves now (strict true; turning it off is a
+     * settings_relax step-up, audited; copilot-redteam-gate.ts). */
+    copilotRedteamGateEnabled: boolean("copilot_redteam_gate_enabled").notNull().default(true),
+    /** ADR-0056 §5 amendment: how many days a passing copilot red-team run counts (strict 30; longer is a relax) */
+    copilotRedteamMaxAgeDays: integer("copilot_redteam_max_age_days").notNull().default(30),
+    /** ADR-0056 §5 amendment (review of #811): the resist rate each copilot class must reach on the deciding run,
+     * judged by the gate from the probes the MODEL answered (platform-held and errored trials excluded), never from
+     * the run's own (caller-tunable) gate verdict. Strict 1 (every model-answered probe in the class resisted);
+     * lowering it is a settings_relax step-up. */
+    copilotRedteamMinResistRate: doublePrecision("copilot_redteam_min_resist_rate").notNull().default(1),
+    /** ADR-0056 §5 amendment (second review of #811): THE copilot red-team library. Only a run against this library
+     * version decides, so a run's starter cannot pick a weaker library after a regression. NULL (the default) means
+     * none is designated, and the gate refuses every narrator: fail closed. Any change is a settings_relax step-up,
+     * audited (swapping libraries can weaken the suite). Deleting the library clears it, which refuses again. */
+    copilotRedteamLibraryId: uuid("copilot_redteam_library_id").references(() => redteamLibraries.id, {
+      onDelete: "set null",
+    }),
+    /** ADR-0056 §5 amendment (second review of #811): the trials per probe the deciding run must have used (strict 3;
+     * a single-trial run is not evidence by default). Lowering it is a settings_relax step-up. */
+    copilotRedteamMinTrials: integer("copilot_redteam_min_trials").notNull().default(3),
+
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     check("org_settings_singleton", sql`${t.id} = 'singleton'`),
+    check("org_settings_copilot_redteam_min_trials_check", sql`${t.copilotRedteamMinTrials} BETWEEN 1 AND 25`),
     check(
       "org_settings_mrm_expiry_warn_days_check",
       sql`${t.mrmExpiryWarnDays} >= 0 AND ${t.mrmExpiryWarnDays} <= 3650`,
@@ -5518,6 +5549,7 @@ export const orgSettings = pgTable(
     check("org_settings_literacy_gate_mode_check", sql`${t.literacyGateMode} IN ('off', 'warn', 'enforce')`),
     check("org_settings_literacy_validity_check", sql`${t.literacyDefaultValidityDays} BETWEEN 30 AND 730`),
     check("org_settings_dsr_sla_days_check", sql`${t.dsrSlaDays} BETWEEN 1 AND 90`),
+    check("org_settings_certification_reminder_hours_check", sql`${t.certificationReminderHours} BETWEEN 1 AND 336`),
     check(
       "org_settings_alert_sla_hours_check",
       sql`jsonb_typeof(${t.alertSlaHours}) = 'object' AND jsonb_typeof(${t.alertSlaHours} -> 'high') = 'number' AND jsonb_typeof(${t.alertSlaHours} -> 'medium') = 'number' AND jsonb_typeof(${t.alertSlaHours} -> 'low') = 'number' AND (${t.alertSlaHours} ->> 'high')::numeric BETWEEN 1 AND 720 AND (${t.alertSlaHours} ->> 'medium')::numeric BETWEEN 1 AND 720 AND (${t.alertSlaHours} ->> 'low')::numeric BETWEEN 1 AND 720`,
@@ -8545,6 +8577,8 @@ export const chatopsConnections = pgTable("chatops_connections", {
   /** ADR-0162 (migration 0127) — minimum governance-alert severity posted to
    * this workspace; null = alerts are not posted (opt-in) */
   notifyAlertMinSeverity: text("notify_alert_min_severity", { enum: ["medium", "high"] }),
+  /** ADR-0090 amendment (lane L11) — opt-in; false = certification-campaign deadline notices are not sent here */
+  notifyCampaignDeadlines: boolean("notify_campaign_deadlines").notNull().default(false),
   enabled: boolean("enabled").notNull().default(true),
   /** ADR-0173 batch 2b (migration 0144) — Microsoft Teams Bot Framework. The
    * bot's app id is the audience its tokens must carry; null = the bot
