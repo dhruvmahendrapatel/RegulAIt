@@ -295,8 +295,8 @@ func TestBackupToS3(t *testing.T) {
 		t.Errorf("uploader env: %v", env)
 	}
 	for _, v := range p.Volumes {
-		if v.Name == "backup" && (v.EmptyDir == nil || v.PersistentVolumeClaim != nil) {
-			t.Errorf("the S3 path stages the dump in an emptyDir: %+v", v)
+		if v.Name == "backup" && (v.EmptyDir == nil || v.PersistentVolumeClaim != nil || v.EmptyDir.SizeLimit == nil || v.EmptyDir.SizeLimit.String() != "20Gi") {
+			t.Errorf("the S3 path stages the dump in a size-limited emptyDir: %+v", v)
 		}
 	}
 	if sa := BackupServiceAccount(in); sa.Annotations[IRSARoleAnnotation] != in.Spec.Backup.S3.RoleARN || *sa.AutomountServiceAccountToken {
@@ -324,5 +324,18 @@ func TestBackupToS3(t *testing.T) {
 	in.Spec.Backup.Disabled = true
 	if np := BackupObjectStorePolicy(in); len(np.Spec.Egress) != 0 {
 		t.Fatalf("disabled backup must open nothing: %+v", np.Spec.Egress)
+	}
+}
+
+// The public 443 rule never reaches private, link-local or reserved IPv4 ranges (#817 review).
+func TestPublicEgressExceptsReservedRanges(t *testing.T) {
+	in := sample()
+	in.Spec.Egress.AllowPublicEgress = true
+	rules := GatewayPolicy(in).Spec.Egress
+	except := strings.Join(rules[len(rules)-1].To[0].IPBlock.Except, ",")
+	for _, want := range []string{"169.254.0.0/16", "0.0.0.0/8", "127.0.0.0/8", "224.0.0.0/4", "240.0.0.0/4", "10.0.0.0/8"} {
+		if !strings.Contains(except, want) {
+			t.Errorf("public rule does not except %s: %s", want, except)
+		}
 	}
 }

@@ -35,7 +35,8 @@ bundle:
   installedVersion: ""
 
 # The volume for install-generated signing keys and audit anchors. The keys are stored unencrypted on it, so set
-# storageClassName to an encrypted class. The chart's own claim is kept on uninstall
+# storageClassName to an encrypted class (or existingClaim to a claim on encrypted storage). One of the two is required:
+# the cluster's default class is not assumed to be encrypted. The chart's own claim is kept on uninstall
 # (helm.sh/resource-policy: keep), because losing it loses the receipt and identity keys.
 installSecrets:
   existingClaim: ""

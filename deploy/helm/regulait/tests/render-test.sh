@@ -119,6 +119,7 @@ refuse "DNS to a public resolver (byoc)"   --set 'egress.dns.cidrs={8.8.8.8/32}'
 refuse "DNS to the metadata host"          --set 'egress.dns.cidrs={169.254.169.254/32}'
 refuse "upgrade with no known installed version" --is-upgrade
 refuse "malformed installed version"       --set bundle.installedVersion=latest
+refuse "signing keys on the default StorageClass" --set installSecrets.storageClassName=
 
 # An upgrade with bundle.installedVersion renders the downgrade check against it.
 if "$HELM" template t . -f ci/byoc-values.yaml --is-upgrade --set bundle.installedVersion=0.9.0 2>/dev/null \

@@ -11,8 +11,3 @@ Until a schema binds the digest, whoever can change this release's values can ru
 WARNING: egress beyond private ranges is open:
 {{- . }}
 {{- end }}
-{{- if not .Values.installSecrets.storageClassName }}
-
-WARNING: installSecrets.storageClassName is empty, so the claim holding the signing keys (unencrypted) uses the
-cluster's default StorageClass. Name an encrypted class.
-{{- end }}

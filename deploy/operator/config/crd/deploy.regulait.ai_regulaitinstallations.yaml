@@ -151,6 +151,16 @@ spec:
                         maxLength: 2048
                         pattern: ^arn:aws[a-z-]*:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]+$
                         type: string
+                      stagingSizeLimit:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        default: 20Gi
+                        description: |-
+                          Size limit of the pod-local volume that holds the dump until it is uploaded. Set it above the largest expected
+                          dump; a dump that outgrows it fails the backup Job.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
                       uploaderImage:
                         description: Image that provides the AWS CLI, pinned by digest,
                           from the same allowed registries as the other images.

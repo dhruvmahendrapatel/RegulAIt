@@ -9,6 +9,6 @@ are tested on envtest and render tests only; neither has been run on a real clus
 Open, for the owner:
 - image digests in the bundle manifest (schema `/2`);
 - the API group domain;
-- the backup target beyond a PVC (with P2);
-- where the operator image and the chart are published;
+- where the operator image is published (the chart's distribution and the S3 backup target are decided:
+  [ADR-0305](../decisions/0305-helm-oci-distribution-and-s3-backups.md));
 - multi-replica HA (P2).

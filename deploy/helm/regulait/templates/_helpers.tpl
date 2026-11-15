@@ -109,6 +109,11 @@ also takes one link-local IPv4 address (NodeLocal DNSCache), never a metadata on
 
 {{- define "regulait.validate" -}}
 {{- $v := .Values -}}
+{{- /* ADR-0180: the claim holds signing keys unencrypted, and the cluster's default class is often unencrypted (EKS gp2/gp3
+without encrypted: "true"). The chart cannot check a class, so it requires an explicit choice. */ -}}
+{{- if and (not $v.installSecrets.existingClaim) (not $v.installSecrets.storageClassName) -}}
+{{- fail "set installSecrets.storageClassName to an encrypted StorageClass, or installSecrets.existingClaim to a claim on encrypted storage: the claim holds signing keys unencrypted" -}}
+{{- end -}}
 {{- if and (eq $v.mode "air_gapped") (empty $v.image.allowedRegistries) -}}
 {{- fail "air_gapped requires image.allowedRegistries" -}}
 {{- end -}}

@@ -98,8 +98,14 @@ backup:
   --sse-kms-key-id … --expected-bucket-owner …`) never sees the database URL. No AWS key is in the spec or a Secret:
   the pod runs as `<name>-backup`, and its credentials come from IRSA (`roleARN` becomes the
   `eks.amazonaws.com/role-arn` annotation) or an EKS Pod Identity association on that ServiceAccount.
-- The role needs `s3:PutObject` on `arn:aws:s3:::<bucket>/<prefix>*` and `kms:GenerateDataKey` on the key. It needs no
-  read, list or delete: a compromised pod cannot read or remove earlier backups.
+- The role needs `s3:PutObject` on `arn:aws:s3:::<bucket>/<prefix>*`, and `kms:GenerateDataKey` and `kms:Decrypt` on the
+  key, both conditioned on `kms:ViaService = s3.<region>.amazonaws.com` and the bucket's encryption context. Decrypt is
+  required: the CLI uses a multipart upload above 8 MiB, and completing an SSE-KMS multipart upload decrypts the data
+  key. It needs no read, list or delete: a compromised pod cannot read or remove earlier backups.
+- `stagingSizeLimit` (default 20Gi) bounds the `emptyDir` that holds the dump until upload. Set it above the largest
+  expected dump; the node needs that much ephemeral storage.
+- Before go-live, run one backup larger than 8 MiB (`kubectl create job --from=cronjob/<name>-backup …`) and confirm
+  the object in the bucket, so the multipart path is proven.
 - Versioning, retention and lifecycle are the bucket's own rules (the BYOC Terraform module sets them);
   `retentionDays` applies to a claim only.
 - `egressCIDRs` follow the other egress lists: no link-local or metadata address, private ranges only in `air_gapped`,

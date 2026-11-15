@@ -43,8 +43,11 @@ var privateRanges = []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "1
 // is refused on its own in validate.go). No egress list may overlap them; the public-egress rule excludes them.
 var linkLocalRanges = []string{"169.254.0.0/16", "fe80::/10"}
 
-// publicEgressExcept is what the public 443 rule never reaches: every private and link-local range.
-var publicEgressExcept = append(append([]string{}, privateRanges...), linkLocalRanges...)
+// reservedV4 are not routable public addresses (this network, loopback, multicast, reserved); the public rule skips them.
+var reservedV4 = []string{"0.0.0.0/8", "127.0.0.0/8", "224.0.0.0/4", "240.0.0.0/4"}
+
+// publicEgressExcept is what the public 443 rule never reaches: every private, link-local and reserved range.
+var publicEgressExcept = append(append(append([]string{}, privateRanges...), linkLocalRanges...), reservedV4...)
 
 func labels(in *v1alpha1.RegulaitInstallation, component string) map[string]string {
 	l := map[string]string{
@@ -504,7 +507,13 @@ pg_dump --format=custom --no-owner --file="/backup/$n.partial" "$DATABASE_URL"
 mv "/backup/$n.partial" "/backup/$n"
 printf '%s' "$n" > /backup/NAME`}
 		dump.Env = []corev1.EnvVar{secretEnv("DATABASE_URL", in.Spec.DatabaseURLSecretRef)}
-		backupVol.VolumeSource = corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}
+		// The plaintext dump sits on node disk until the upload ends; the limit bounds it (the pod is evicted, and the
+		// Job fails, rather than filling the node).
+		staging := resource.MustParse("20Gi")
+		if s3.StagingSizeLimit != nil {
+			staging = *s3.StagingSizeLimit
+		}
+		backupVol.VolumeSource = corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &staging}}
 		initContainers = []corev1.Container{dump}
 		containers = []corev1.Container{{
 			Name:            "upload-s3",

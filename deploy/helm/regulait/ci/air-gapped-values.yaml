@@ -18,3 +18,5 @@ operator:
     digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
 bundle:
   configMapName: regulait-bundle-1.0.0
+installSecrets:
+  storageClassName: encrypted-ssd

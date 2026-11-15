@@ -277,6 +277,11 @@ func (in *RegulaitInstallationStatus) DeepCopy() *RegulaitInstallationStatus {
 func (in *S3BackupDestination) DeepCopyInto(out *S3BackupDestination) {
 	*out = *in
 	in.UploaderImage.DeepCopyInto(&out.UploaderImage)
+	if in.StagingSizeLimit != nil {
+		in, out := &in.StagingSizeLimit, &out.StagingSizeLimit
+		x := (*in).DeepCopy()
+		*out = &x
+	}
 	if in.EgressCIDRs != nil {
 		in, out := &in.EgressCIDRs, &out.EgressCIDRs
 		*out = make([]string, len(*in))

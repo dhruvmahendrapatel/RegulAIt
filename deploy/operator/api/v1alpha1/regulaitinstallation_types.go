@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -89,7 +90,8 @@ type BackupSpec struct {
 
 // S3BackupDestination uploads each dump with SSE-KMS under the customer's key, and refuses a bucket owned by another
 // account (--expected-bucket-owner). Credentials come from the pod's AWS identity (IRSA or EKS Pod Identity), never from
-// a key in the spec or a Secret. The CronJob needs s3:PutObject on the prefix and kms:GenerateDataKey on the key.
+// a key in the spec or a Secret. The role needs s3:PutObject on the prefix, and kms:GenerateDataKey and kms:Decrypt on
+// the key (a dump over the CLI's 8 MiB multipart threshold needs Decrypt), conditioned on kms:ViaService for S3.
 type S3BackupDestination struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`
 	Bucket string `json:"bucket"`
@@ -120,6 +122,11 @@ type S3BackupDestination struct {
 	// refuses link-local addresses; this exception is reported on every reconcile.
 	// +optional
 	PodIdentity bool `json:"podIdentity,omitempty"`
+	// Size limit of the pod-local volume that holds the dump until it is uploaded. Set it above the largest expected
+	// dump; a dump that outgrows it fails the backup Job.
+	// +kubebuilder:default="20Gi"
+	// +optional
+	StagingSizeLimit *resource.Quantity `json:"stagingSizeLimit,omitempty"`
 	// CIDRs of the S3 and STS endpoints (VPC interface endpoints, or the published S3 ranges), opened on 443 for the
 	// backup pods only. In air_gapped mode every entry must be a private range.
 	// +kubebuilder:validation:MinItems=1

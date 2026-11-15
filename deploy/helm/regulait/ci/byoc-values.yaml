@@ -18,3 +18,5 @@ operator:
   image:
     repository: registry.example.internal/regulait/operator
     digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
+installSecrets:
+  storageClassName: encrypted-ssd

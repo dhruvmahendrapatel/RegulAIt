@@ -42,8 +42,14 @@ needs both: the customer's team installs from a runbook, and all pilot data, bac
 - **No static credentials.** The pod runs as its own ServiceAccount, `<name>-backup` (no API token). Credentials come
   from IRSA (`roleARN` becomes the `eks.amazonaws.com/role-arn` annotation) or an EKS Pod Identity association. The
   gateway never holds the backup role.
-- **Least privilege.** The role needs only `s3:PutObject` on the prefix and `kms:GenerateDataKey` on the key: no read,
-  list or delete, so a compromised backup pod cannot read or destroy earlier backups.
+- **Least privilege.** The role needs `s3:PutObject` on the prefix, and `kms:GenerateDataKey` and `kms:Decrypt` on the
+  key. `kms:Decrypt` is required because the AWS CLI switches to a multipart upload above 8 MiB, and S3 decrypts the
+  SSE-KMS data key to complete one; without it every real-size backup fails with AccessDenied. Both KMS actions are
+  conditioned on `kms:ViaService = s3.<region>.amazonaws.com` and `kms:EncryptionContext:aws:s3:arn` on the bucket ARN,
+  so the role cannot use the key outside S3 uploads to that bucket. There is no `s3:GetObject`, `s3:ListBucket` or
+  `s3:DeleteObject`: a compromised backup pod cannot read or destroy earlier backups.
+- **Staging is bounded.** The dump `emptyDir` has a size limit (`stagingSizeLimit`, default 20Gi); a dump that outgrows
+  it fails the Job instead of filling the node. Plaintext sits on node disk only until the upload ends.
 - **Retention is the bucket's.** Versioning, lifecycle expiry and (optionally) Object Lock are set on the bucket by the
   E10 Terraform module; `retentionDays` applies to the claim path only.
 - **Egress.** A new always-applied NetworkPolicy, `<name>-backup-object-store`, opens 443 to `egressCIDRs` (the S3 and
@@ -56,7 +62,10 @@ needs both: the customer's team installs from a runbook, and all pilot data, bac
 ### Interface for lane E10
 
 E10 keeps to these names: the ServiceAccount `<installation>-backup` in the installation namespace; the IAM actions
-above; the bucket's versioning and lifecycle; the VPC endpoint CIDRs as `egressCIDRs`.
+above (`s3:PutObject`, `kms:GenerateDataKey`, `kms:Decrypt`, with the two conditions); the bucket's versioning and
+lifecycle; the VPC endpoint CIDRs as `egressCIDRs`. The install runbook's acceptance check uploads a dump larger than
+8 MiB through the CronJob (`kubectl create job --from=cronjob/<installation>-backup`) and confirms the object exists
+with `aws s3api head-object` from an operator's own credentials, so the multipart path is proven before go-live.
 
 ## Consequences
 
@@ -69,3 +78,9 @@ above; the bucket's versioning and lifecycle; the VPC endpoint CIDRs as `egressC
 
 - Object Lock (compliance mode) on the pilot bucket, which makes backups undeletable for the retention period.
 - An automated restore rehearsal.
+
+## Follow-ups (tracked, not built here)
+
+- Bundle schema `/2` signing per-image digests, so the hook's verifier binds `image.digest` to the signed manifest
+  (today disclosed by `ImageProvenance=False/DigestNotSigned` and the chart's NOTES).
+- An `operator.apiServerCIDRs` value to narrow the operator's 443/6443 egress where the CNI can express it.

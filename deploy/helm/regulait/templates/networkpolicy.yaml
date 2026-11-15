@@ -5,8 +5,8 @@ denies everything the other two do not open.
 The three policies are ordinary release resources, so an upgrade never removes them from the running gateway and
 `helm uninstall` deletes them. Hooks run before release resources exist, so on a first install the migration Job would
 start with no policy: `<release>-hook-database-clients`, a hook at weight -10 (below the Job's 0), covers it for the
-duration of the hook phase. Helm applies hook-succeeded deletion only after every hook in the phase has finished. After
-a failed hook phase the copy can remain until the next attempt replaces it (before-hook-creation); it only restricts.
+duration of the hook phase. Helm deletes it when the phase ends, whether it succeeded or failed (hook-succeeded,
+hook-failed), and before-hook-creation replaces any copy a crashed client left behind; it only restricts.
 */ -}}
 {{- $v := .Values -}}
 {{- define "regulait.dnsRule" -}}
@@ -93,7 +93,7 @@ spec:
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
-            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16]
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 0.0.0.0/8, 127.0.0.0/8, 224.0.0.0/4, 240.0.0.0/4]
         - ipBlock:
             cidr: ::/0
             except: ["fc00::/7", "fe80::/10"]
