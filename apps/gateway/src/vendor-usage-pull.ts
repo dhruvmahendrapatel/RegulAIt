@@ -29,7 +29,7 @@
  */
 import { createHash } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import OpenAI from "openai";
+import OpenAiSdk from "openai";
 import { z } from "zod";
 import {
   and,
@@ -185,7 +185,7 @@ function classifyError(err: unknown, page: number): PullError {
       return new PullError("response_too_large", `a vendor response exceeded ${VENDOR_USAGE_MAX_RESPONSE_BYTES} bytes`);
     }
   }
-  if (err instanceof OpenAI.APIError && typeof err.status === "number") return statusError(err.status, page);
+  if (err instanceof OpenAiSdk.APIError && typeof err.status === "number") return statusError(err.status, page);
   if (err instanceof VendorUsageResponseError || err instanceof z.ZodError || err instanceof SyntaxError) {
     return new PullError("bad_response", `a vendor response did not match the documented shape on page ${page}`);
   }
@@ -252,7 +252,7 @@ async function fetchOpenAi(
 ): Promise<{ facts: VendorUsageFact[]; pages: number }> {
   // every option that the SDK would otherwise read from the environment is set explicitly, so an environment
   // variable can neither redirect the base URL nor attach an organisation or project header
-  const client = new OpenAI({
+  const client = new OpenAiSdk({
     apiKey: "unused-admin-endpoint",
     adminAPIKey: key,
     organization: null,

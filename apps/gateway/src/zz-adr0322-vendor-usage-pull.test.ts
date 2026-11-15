@@ -271,6 +271,7 @@ describe("ADR-0322: the Anthropic pull", () => {
   });
 
   it("pulls every page into imported lines, marks the gateway workspace as already metered, and upserts on re-pull", async () => {
+    // egress-allow-cleanup: afterAll (tracked host, removed by allowed.removeAll)
     const allow = await relaxStepUpAround(db, () =>
       app.inject({ method: "POST", url: "/v1/egress-allow-hosts", headers: AUTH, payload: { host: allowed.trackHost("api.anthropic.com"), allowPrivateRanges: false, allowPlaintextHttp: false, note: `adr0322 ${RUN}` } }),
     );
@@ -354,6 +355,7 @@ describe("ADR-0322: the OpenAI pull (official SDK, guarded fetch injected)", () 
     const c = await createConnector("openai", { gatewayProjectIds: ["proj_gateway"] });
     expect((await storeKey(c.id, OPENAI_KEY)).statusCode).toBe(201);
     expect((await steppedPut(`/v1/vendor-usage/connectors/${c.id}/enabled`, { enabled: true, reason: "adr0322 suite" })).statusCode).toBe(200);
+    // egress-allow-cleanup: afterAll (tracked host, removed by allowed.removeAll)
     const allow = await relaxStepUpAround(db, () =>
       app.inject({ method: "POST", url: "/v1/egress-allow-hosts", headers: AUTH, payload: { host: allowed.trackHost("api.openai.com"), allowPrivateRanges: false, allowPlaintextHttp: false, note: `adr0322 ${RUN}` } }),
     );
