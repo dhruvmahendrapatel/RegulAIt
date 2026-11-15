@@ -18,7 +18,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { BuilderMessage, BuilderPendingStep, BuilderTemplate, BuilderTool, BuilderToolStep, BuilderToolStepStatus } from "../../api/types";
 import { fmtUsd, fmtDur } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
-import { Badge, Button, Field, Input, Modal, Select, Tabs, Textarea } from "../../ui/kit";
+import { Badge, Button, Field, Input, Modal, Select, Switch as KitSwitch, Tabs, Textarea } from "../../ui/kit";
 import { ModelPicker } from "../../ui/ModelPicker";
 import { Logo, hasLogo } from "../../ui/logos/Logo";
 import { providerLogoKey } from "../../ui/logos/providerLogo";
@@ -190,18 +190,9 @@ export function Segmented<T extends string>(props: {
   );
 }
 
+/** the builder's compact switch is the kit one (review of #744: one switch in the repo) */
 export function Switch(props: { checked: boolean; onChange: (v: boolean) => void; label: string; disabled?: boolean }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={props.checked}
-      aria-label={props.label}
-      className={s.switch}
-      disabled={props.disabled}
-      onClick={() => props.onChange(!props.checked)}
-    />
-  );
+  return <KitSwitch size="sm" checked={props.checked} onChange={props.onChange} label={props.label} disabled={props.disabled} />;
 }
 
 export function Disclosure(props: { label: string; open: boolean; onToggle: () => void; controls: string }) {

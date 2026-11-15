@@ -852,3 +852,16 @@ a.barLabel {
   opacity: 0.5;
   cursor: not-allowed;
 }
+.switchSm {
+  width: 36px;
+  height: 20px;
+}
+.switchSm::after {
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+}
+.switchSm[aria-checked="true"]::after {
+  transform: translateX(16px);
+}

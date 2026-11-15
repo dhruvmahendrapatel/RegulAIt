@@ -22,7 +22,7 @@ import type { UsageExtractorState, UsageExtractorTestResult, UsageExtractorVersi
 import { fmtDay } from "../../../api/format";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { Badge, Button, Card, EmptyState, ErrorState, Field, Fieldset, InfoButton, Input, RowActions, Select, Skeleton, SkeletonBlock, Switch, Table, Textarea } from "../../../ui/kit";
-import { agentOpts, optionEls, useApiAction, useUsers, type ApiOutcome } from "../adminKit";
+import { OutcomePanel, agentOpts, optionEls, useApiAction, useUsers, type ApiOutcome } from "../adminKit";
 import {
   FIELD_LABEL,
   MAIN_FIELDS,
@@ -50,30 +50,34 @@ const KEY = ["admin", "usage-extractors"] as const;
 const versionsKey = (agentId: string) => ["admin", "usage-extractor-versions", agentId] as const;
 const fmtCount = (n: number) => n.toLocaleString("en-GB");
 
-/** a refusal from one of the card's writes, inline beside the action (the toast also says it, but disappears) */
+/**
+ * A refusal from one of the card's writes, inline beside the action (the toast also says it, but disappears). It is
+ * the shared `OutcomePanel` (review of #744, the owner's reuse rule); only the card's own words go in its body.
+ */
 function Refusal(props: { outcome: ApiOutcome | null; version?: number; lead?: string }) {
   const o = props.outcome;
   if (!o || o.ok) return null;
   const known = refusalText(o.code, o.status, props.version !== undefined ? { version: props.version } : {});
   const errors = mappingErrors(o.payload);
-  if (known) {
-    return (
-      <div className={`${u.notice} ${u.warn}`} role="alert">
-        <strong>{known.title}</strong> {known.body}
-      </div>
-    );
-  }
   return (
-    <div className={`${u.notice} ${u.danger}`} role="alert">
-      <strong>{props.lead ?? "Refused."}</strong> {errors.length ? null : o.reason}
-      {errors.length > 0 && (
-        <ul>
-          {errors.map((e, i) => (
-            <li key={`${i}-${e}`}>{e}</li>
-          ))}
-        </ul>
+    <OutcomePanel outcome={o}>
+      {known ? (
+        <p>
+          <strong>{known.title}</strong> {known.body}
+        </p>
+      ) : (
+        errors.length > 0 && (
+          <>
+            {props.lead && <strong>{props.lead}</strong>}
+            <ul>
+              {errors.map((e, i) => (
+                <li key={`${i}-${e}`}>{e}</li>
+              ))}
+            </ul>
+          </>
+        )
       )}
-    </div>
+    </OutcomePanel>
   );
 }
 

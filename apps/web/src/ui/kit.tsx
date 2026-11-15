@@ -59,7 +59,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       type={type ?? "button"}
       className={cls}
       {...rest}
-      aria-disabled={busy || rest["aria-disabled"] || undefined}
+      aria-disabled={busy || rest["aria-disabled"] === true || rest["aria-disabled"] === "true" || undefined}
       onClick={(e) => {
         if (busy) return e.preventDefault();
         onClick?.(e);
@@ -69,8 +69,9 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
 });
 
 /**
- * An on/off switch (`role="switch"`), named by a visible label (`labelledBy`) or `label`. While `busy` it stays
- * focusable (`aria-disabled`) and ignores clicks, so focus does not drop to the page mid-request.
+ * The one on/off switch (`role="switch"`), named by a visible label (`labelledBy`) or `label`. While `busy` or
+ * `disabled` it stays focusable (`aria-disabled`) and ignores clicks, so focus does not drop to the page mid-request.
+ * `size="sm"` is the compact one the agent builder uses (review of #744: one switch in the repo).
  */
 export function Switch(props: {
   checked: boolean;
@@ -79,19 +80,22 @@ export function Switch(props: {
   labelledBy?: string;
   describedBy?: string;
   busy?: boolean;
+  disabled?: boolean;
+  size?: "sm";
 }) {
+  const inert = props.busy || props.disabled;
   return (
     <button
       type="button"
       role="switch"
-      className={s.switch}
+      className={props.size === "sm" ? `${s.switch} ${s.switchSm}` : s.switch}
       aria-checked={props.checked}
       aria-label={props.labelledBy ? undefined : props.label}
       aria-labelledby={props.labelledBy}
       aria-describedby={props.describedBy}
-      aria-disabled={props.busy || undefined}
+      aria-disabled={inert || undefined}
       onClick={() => {
-        if (!props.busy) props.onChange(!props.checked);
+        if (!inert) props.onChange(!props.checked);
       }}
     />
   );

@@ -445,6 +445,20 @@ describe("Button busy and Switch: busy stays focusable (aria-disabled plus a gua
     expect(html).not.toMatch(/\sdisabled(=|\s|>)/);
     expect(renderToStaticMarkup(<Switch checked={false} onChange={() => undefined} label="Use it" />)).toContain('aria-label="Use it"');
   });
+
+  it("one switch for the repo: disabled is aria-disabled (still focusable) and sm is the compact size (review of #744)", () => {
+    const html = renderToStaticMarkup(<Switch checked={false} onChange={() => undefined} label="Use a computer" disabled size="sm" />);
+    expect(html).toContain('aria-disabled="true"');
+    expect(html).not.toMatch(/\sdisabled(=|\s|>)/);
+    expect(html).toMatch(/class="[^"]*switchSm/);
+    expect(renderToStaticMarkup(<Switch checked onChange={() => undefined} label="x" />)).not.toMatch(/switchSm/);
+  });
+
+  it("a caller's aria-disabled=false is not passed through as the string 'false' (review of #744)", () => {
+    expect(renderToStaticMarkup(<Button aria-disabled={false}>Go</Button>)).not.toContain("aria-disabled");
+    expect(renderToStaticMarkup(<Button aria-disabled="false">Go</Button>)).not.toContain("aria-disabled");
+    expect(renderToStaticMarkup(<Button aria-disabled>Go</Button>)).toContain('aria-disabled="true"');
+  });
 });
 
 describe("RowActions — fixed slots keep every row's primary button in one column (X7)", () => {

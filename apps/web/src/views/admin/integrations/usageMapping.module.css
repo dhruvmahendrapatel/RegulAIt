@@ -164,10 +164,6 @@ textarea.mono {
   background: var(--danger-soft);
   color: var(--danger-soft-text);
 }
-.warn {
-  background: var(--warn-soft);
-  color: var(--warn-soft-text);
-}
 
 .result {
   border: 1px solid var(--border);
