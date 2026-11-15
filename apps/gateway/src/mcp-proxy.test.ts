@@ -7615,12 +7615,15 @@ describe("generic webhook pm adapter: signed normalized events end-to-end", () =
           project?: string;
           payload?: Record<string, unknown>;
         };
-        const expected = "sha256=" + createHmac("sha256", TOKEN).update(body).digest("hex");
+        // S-03 follow-up (a): the receiver verifies "<timestamp>.<body>" and applies a window
+        const ts = String(req.headers["x-regulait-timestamp"] ?? "");
+        const fresh = /^\d+$/.test(ts) && Math.abs(Number(ts) - Date.now() / 1000) <= 300;
+        const expected = "sha256=" + createHmac("sha256", TOKEN).update(`${ts}.${body}`).digest("hex");
         events.push({
           event: String(parsed.event ?? ""),
           project: String(parsed.project ?? ""),
           payload: parsed.payload ?? {},
-          signatureValid: req.headers["x-regulait-signature"] === expected,
+          signatureValid: fresh && req.headers["x-regulait-signature"] === expected,
           // the token is a signing secret — it must never travel raw
           rawTokenPresent: req.headers.authorization !== undefined || body.includes(TOKEN),
         });

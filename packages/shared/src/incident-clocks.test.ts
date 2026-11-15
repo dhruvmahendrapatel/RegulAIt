@@ -68,7 +68,8 @@ describe("ADR-0182 A12 incident clocks: each period is pinned to its verbatim qu
 
   it("an 'immediately' clock has no numeric period in its quote, and its quote says 'immediately'", () => {
     for (const c of INCIDENT_CLOCKS.filter((x) => x.due.kind === "immediately")) {
-      expect(c.quote).toMatch(/immediately/);
+      // ADR-0296: GDPR's "without undue delay" with no number is the same strict reading
+      expect(c.quote).toMatch(c.regime === "gdpr" ? /without undue delay/ : /immediately/);
       expect(daysInQuote(c.quote)).toBeNull();
     }
   });
@@ -103,7 +104,8 @@ describe("ADR-0182 A12 incident clocks: each period is pinned to its verbatim qu
 
   it("every clock cites its paragraph, a primary source and the retrieval date; ids are unique", () => {
     expect(new Set(INCIDENT_CLOCKS.map((c) => c.id)).size).toBe(INCIDENT_CLOCKS.length);
-    for (const c of INCIDENT_CLOCKS) {
+    // the ADR-0296 regimes are pinned in incident-clocks-adr0296.test.ts
+    for (const c of INCIDENT_CLOCKS.filter((x) => x.regime === "eu-ai-act" || x.regime === "hipaa")) {
       expect(c.retrievedOn).toBe(INCIDENT_CLOCKS_RETRIEVED_ON);
       expect(INCIDENT_CLOCKS_RETRIEVED_ON).toBe("2026-10-06");
       if (c.regime === "eu-ai-act") {
@@ -115,10 +117,12 @@ describe("ADR-0182 A12 incident clocks: each period is pinned to its verbatim qu
       }
     }
     // Art. 73(5): only the authority reports may start with an incomplete one
+    // ADR-0296: and GDPR Art. 33(4) ("the information may be provided in phases")
     expect(INCIDENT_CLOCKS.filter((c) => c.allowsInitialReport).map((c) => c.id).sort()).toEqual([
       "art73-2-general",
       "art73-3-critical-or-widespread",
       "art73-4-death",
+      "gdpr-33-1-supervisory-authority",
     ]);
   });
 });
