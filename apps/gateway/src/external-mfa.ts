@@ -68,7 +68,12 @@ export async function loadFactorView(db: Db, portal: ExternalMfaPortal, grantId:
   };
 }
 
-/** a challenge handle: 256 random bits, opaque (no grant, factor or code in it); only its sha256 is stored */
+/**
+ * A challenge handle: 256 random bits, opaque (no grant, factor or code in it); only its sha256 is stored.
+ * It is a `hashToken` caller of the same kind as the ones listed in token-hash.ts (`rgls_`, `rglv_`, ...):
+ * randomBytes(32), looked up from the `regulait_ext_step` cookie scoped to the portal's `…/session/mfa` path.
+ * The six-digit TOTP code never reaches `hashToken`; `totp.ts` verifies it. token-hash.test.ts pins the entropy.
+ */
 export function newChallengeToken(): { token: string; tokenHash: string } {
   const token = EXTERNAL_MFA_TOKEN_PREFIX + randomBytes(32).toString("hex");
   return { token, tokenHash: hashToken(token) };
