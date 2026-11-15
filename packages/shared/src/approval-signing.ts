@@ -7,7 +7,7 @@
  *
  *   challenge = base64url( sha256( canonicalJson({
  *     v: "regulait.approval-sign.v1", approvalId, decision,
- *     argumentsDigest, contextDigest, serverId | connectorId, toolName, nonce }) ) )
+ *     argumentsDigest, contextDigest, serverId | connectorId | agentId, toolName, nonce }) ) )
  *
  * `argumentsDigest` is ADR-0104's consent fingerprint over the RAW arguments
  * and `contextDigest` ADR-0105's policy fingerprint, so the signature covers
@@ -60,9 +60,11 @@ export interface ApprovalSigningFacts {
   argumentsDigest: string;
   /** ADR-0105 policy fingerprint (sha256 hex) */
   contextDigest: string;
-  /** exactly one of serverId (an MCP tool call) and connectorId (a connector call) */
+  /** exactly one of serverId (an MCP tool call), connectorId (a connector call) and agentId (a model call, ADR-0251).
+   * A payload names only the one it has, so MCP and connector payloads stay byte-identical to before agentId existed. */
   serverId?: string | null;
   connectorId?: string | null;
+  agentId?: string | null;
   toolName: string;
   /** the server's single-use nonce (base64url, at least 16 bytes of entropy) */
   nonce: string;
@@ -76,6 +78,7 @@ export interface ApprovalSigningPayload {
   contextDigest: string;
   serverId?: string;
   connectorId?: string;
+  agentId?: string;
   toolName: string;
   nonce: string;
 }
@@ -90,8 +93,9 @@ export function approvalSigningPayload(f: ApprovalSigningFacts): ApprovalSigning
   if (!HEX64.test(f.contextDigest)) throw new TypeError("approvalSigningPayload: contextDigest must be sha256 hex");
   const hasServer = typeof f.serverId === "string" && f.serverId.length > 0;
   const hasConnector = typeof f.connectorId === "string" && f.connectorId.length > 0;
-  if (hasServer === hasConnector) {
-    throw new TypeError("approvalSigningPayload: exactly one of serverId and connectorId");
+  const hasAgent = typeof f.agentId === "string" && f.agentId.length > 0;
+  if (Number(hasServer) + Number(hasConnector) + Number(hasAgent) !== 1) {
+    throw new TypeError("approvalSigningPayload: exactly one of serverId, connectorId and agentId");
   }
   if (!f.toolName) throw new TypeError("approvalSigningPayload: toolName is required");
   if (!/^[A-Za-z0-9_-]{22,}$/.test(f.nonce)) {
@@ -103,7 +107,7 @@ export function approvalSigningPayload(f: ApprovalSigningFacts): ApprovalSigning
     decision: f.decision,
     argumentsDigest: f.argumentsDigest,
     contextDigest: f.contextDigest,
-    ...(hasServer ? { serverId: f.serverId! } : { connectorId: f.connectorId! }),
+    ...(hasServer ? { serverId: f.serverId! } : hasConnector ? { connectorId: f.connectorId! } : { agentId: f.agentId! }),
     toolName: f.toolName,
     nonce: f.nonce,
   };

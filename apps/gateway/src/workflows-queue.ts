@@ -104,12 +104,27 @@ export function stageExecutionKey(j: StageRetryJob): string {
   return `${j.instanceId}:${j.stageId}:${j.round}:${j.entry}`;
 }
 
+/** one automatic retry attempt of one stage execution (named by its ADR-0284 key) */
+export interface StageRetryAttemptContext {
+  key: string;
+  attempt: number;
+  maxAttempts: number;
+  /**
+   * What the attempt's executor committed FOR THIS EXECUTION (the stage the key names), set by `applyEvent`:
+   * `failed` for `execution_failed`, `moved` for any other event of that stage. Unset means it committed nothing for
+   * it (a check stage waiting for reports, a build handed to a nested run). The attempt's outcome is decided from this,
+   * never from leftover context.
+   */
+  committed?: "failed" | "moved";
+}
+
 /**
  * The retry attempt the current code runs inside, if any (set by the runner's `runStageRetryJob` around its executor).
- * `applyEvent` reads it: a failure committed BY a retry attempt schedules nothing (the job itself is retried by the
- * queue), and its audit rows name the attempt.
+ * `applyEvent` reads it ONLY for events of the execution the attempt names (`key`): such a failure schedules nothing
+ * (the queue retries that job with its own backoff), and its audit rows name the attempt. A downstream stage the
+ * attempt's executor runs on into has another key, so it schedules and audits as if no attempt were running.
  */
-export const stageRetryAttempt = new AsyncLocalStorage<{ key: string; attempt: number; maxAttempts: number }>();
+export const stageRetryAttempt = new AsyncLocalStorage<StageRetryAttemptContext>();
 
 /** a pg-boss `db` over a drizzle handle (the pool, or the caller's transaction), through pg-boss's own adapter */
 export function queueDb(handle: DrizzleTransactionLike): PgBossDb {
@@ -155,6 +170,17 @@ export function configureStageQueue(db: Db, handler: StageRetryHandler): () => P
   };
 }
 
+/**
+ * Start the sender ahead of the first failure (the boot path calls this), so a send inside a transition's
+ * transaction never waits on pg-boss's start. Best-effort: a sender that cannot start now is started again on the
+ * next send, and that send reports `queue_unavailable` if it still cannot.
+ */
+export async function warmStageQueueSender(): Promise<boolean> {
+  if (!senderDb) return false;
+  await sender(senderDb);
+  return true;
+}
+
 function sender(db: Db): Promise<PgBoss> {
   let started = senders.get(db);
   if (!started) {
@@ -167,37 +193,58 @@ function sender(db: Db): Promise<PgBoss> {
   return started;
 }
 
+/**
+ * Why no retry chain was scheduled for a failure:
+ *  - `already_scheduled`: this execution's chain is still queued, retrying or active (ADR-0284);
+ *  - `exhausted`: this execution already had its one chain, which has ended (ADR-0283: one chain per execution key,
+ *    whatever committed the later failure: a nested run that aborted after its attempt handed off, or a manual
+ *    `/advance`). A re-open or a new entry into the stage is a new key, and gets a new chain;
+ *  - `queue_not_configured` / `queue_unavailable`: the queue is not set up in this process, or failed; the failure
+ *    still commits, and the stage waits for `/advance` as before P30.
+ */
+export type StageRetryNotScheduledReason = "already_scheduled" | "exhausted" | "queue_not_configured" | "queue_unavailable";
+
 export type StageRetryEnqueue =
   | { scheduled: true; jobId: string; key: string; firstDelaySeconds: number }
-  /** a job for this key is already queued, retrying or active: nothing new was sent (ADR-0284) */
-  | { scheduled: false; key: string; reason: "already_scheduled" | "queue_not_configured" };
+  | { scheduled: false; key: string; reason: StageRetryNotScheduledReason; error?: string };
+
+/** is this execution's retry job still queued, retrying or active? (the `exclusive` policy's own range) */
+export async function stageRetryChainLive(tx: Db, key: string): Promise<boolean> {
+  const r = await tx.execute(
+    sql`SELECT 1 FROM regulait_queue.job WHERE name = ${STAGE_RETRY_QUEUE} AND singleton_key = ${key} AND state <= 'active' LIMIT 1`,
+  );
+  return r.rows.length > 0;
+}
 
 /**
  * ADR-0283: schedule the automatic retries of a failed stage execution, inside `tx` (the transition's transaction).
  * The job's own options carry the stage's policy: the first run after `delaySeconds`, then pg-boss's jittered
  * exponential backoff up to `maxDelaySeconds`, for `maxAttempts` attempts in all.
  */
-export async function enqueueStageRetry(
-  tx: DrizzleTransactionLike,
-  job: StageRetryJob,
-  policy: StageRetryPolicy,
-  projectId: string | null,
-): Promise<StageRetryEnqueue> {
+export async function enqueueStageRetry(tx: Db, job: StageRetryJob, policy: StageRetryPolicy, projectId: string | null): Promise<StageRetryEnqueue> {
   const key = stageExecutionKey(job);
   if (!senderDb) return { scheduled: false, key, reason: "queue_not_configured" };
-  const boss = await sender(senderDb);
-  const jobId = await boss.send(STAGE_RETRY_QUEUE, { ...job }, {
-    db: queueDb(tx),
-    singletonKey: key,
-    startAfter: policy.delaySeconds,
-    retryLimit: policy.maxAttempts - 1,
-    retryDelay: policy.delaySeconds,
-    retryBackoff: policy.backoff,
-    retryDelayMax: policy.maxDelaySeconds,
-    // ADR-0286: the per-project limit the worker applies
-    group: stageRetryGroup(projectId),
-  });
-  return jobId ? { scheduled: true, jobId, key, firstDelaySeconds: policy.delaySeconds } : { scheduled: false, key, reason: "already_scheduled" };
+  // A queue failure must never keep the failure itself from committing: the sender starts outside the transaction
+  // (on its own pool connection), and the send runs under a savepoint, so an error rolls back only the send.
+  try {
+    const boss = await sender(senderDb);
+    const jobId = await tx.transaction((sp) =>
+      boss.send(STAGE_RETRY_QUEUE, { ...job }, {
+        db: queueDb(sp as unknown as DrizzleTransactionLike),
+        singletonKey: key,
+        startAfter: policy.delaySeconds,
+        retryLimit: policy.maxAttempts - 1,
+        retryDelay: policy.delaySeconds,
+        retryBackoff: policy.backoff,
+        retryDelayMax: policy.maxDelaySeconds,
+        // ADR-0286: the per-project limit the worker applies
+        group: stageRetryGroup(projectId),
+      }),
+    );
+    return jobId ? { scheduled: true, jobId, key, firstDelaySeconds: policy.delaySeconds } : { scheduled: false, key, reason: "already_scheduled" };
+  } catch (err) {
+    return { scheduled: false, key, reason: "queue_unavailable", error: errLine(err) };
+  }
 }
 
 /** what the runner's handler says one attempt came to */
@@ -207,7 +254,12 @@ export type StageRetryOutcome =
   | "succeeded"
   /** a governance refusal is final: it is never retried */
   | "refused"
-  /** the last attempt failed; the runner audited the exhaustion */
+  /**
+   * the attempt committed nothing for this execution: the stage now waits on something else (reports for a check, a
+   * nested run for a build). The chain ends here; a later failure of the same execution is not retried (ADR-0283)
+   */
+  | "handed_off"
+  /** the last attempt failed (or threw); the runner audited the exhaustion */
   | "exhausted";
 
 export type StageRetryHandler = (

@@ -38,7 +38,8 @@ describe("ADR-0182: the strict defaults", () => {
       decisionRegressionMaxAgeMinutes: 60,
       incidentGateMode: "enforce",
       incidentEvidenceHold: true,
-      incidentClockRegimes: ["eu-ai-act", "hipaa"],
+      // ADR-0296: GDPR, NIS2, DORA and the CRA join the strict set
+      incidentClockRegimes: ["eu-ai-act", "hipaa", "gdpr", "nis2", "dora", "cra"],
       feedbackSignedLinksEnabled: false,
       feedbackAckSlaHours: 72,
       feedbackResolveSlaDays: 30,
@@ -78,6 +79,8 @@ describe("ADR-0182: what counts as a relaxation", () => {
     ["incidentEvidenceHold", false],
     ["incidentClockRegimes", ["hipaa"]],
     ["incidentClockRegimes", []],
+    // ADR-0296: turning off a new regime is a relaxation too
+    ["incidentClockRegimes", ["eu-ai-act", "hipaa", "gdpr", "nis2", "dora"]],
     ["feedbackSignedLinksEnabled", true],
     ["feedbackAckSlaHours", 73],
     ["feedbackResolveSlaDays", 31],
@@ -100,7 +103,7 @@ describe("ADR-0182: what counts as a relaxation", () => {
     ["feedbackResolveSlaDays", 14],
     ["literacyDefaultValidityDays", 180],
     ["alertSlaHours", { high: 4, medium: 24, low: 72 }],
-    ["incidentClockRegimes", ["hipaa", "eu-ai-act"]],
+    ["incidentClockRegimes", ["cra", "hipaa", "dora", "eu-ai-act", "nis2", "gdpr"]],
   ];
   it.each(stricter)("%s = %j is not a relaxation", (k, v) => {
     expect(accountabilitySettingRelaxed(k, v as never)).toBe(false);

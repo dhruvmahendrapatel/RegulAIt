@@ -12,7 +12,7 @@
  * The server flat rate is read-only here: there is no API to set it (creation
  * takes name+url only), so it is shown rather than pretended to be editable.
  */
-import { useState } from "react";
+import { Suspense, lazy, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { McpCoverage, StdioArguments } from "./Batch3Mcp";
 import { IntegrationOwnership } from "./IntegrationOwnership";
@@ -37,6 +37,7 @@ import {
   useUsers,
   userOpts,
 } from "../adminKit";
+import { DisabledBadge, countsText, useLifecycle } from "./LifecycleActions";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -88,10 +89,47 @@ export default function McpServersPage() {
   );
 }
 
+// ADR-0207 (G4): the edit dialog loads only when it is opened
+const EditServerDialog = lazy(() => import("./IntegrationEditDialogs").then((m) => ({ default: m.EditServerDialog })));
+
 function McpServersTab() {
   const servers = useServers();
   const users = useUsers();
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [editing, setEditing] = useState<McpServer | null>(null);
+  // ADR-0207 (G4): Edit, Disable (reason) → Delete; Enable is stepped up
+  const life = useLifecycle({
+    noun: "MCP server",
+    disable: (id, reason) => api.post(`/v1/servers/${encodeURIComponent(id)}/enabled`, { enabled: false, reason }),
+    enable: (id, h) => stepUpApi.post(`/v1/servers/${encodeURIComponent(id)}/enabled`, { enabled: true }, h),
+    remove: (id) => api.del(`/v1/servers/${encodeURIComponent(id)}`),
+    disableBody:
+      "Every call to every tool on this server is refused from now on, for all agents and people. Grants, tools and history are kept. You can enable it again.",
+    enableBody: "Calls to this server's tools are allowed again under their grants. You will be asked to confirm it's you.",
+    deleteBody:
+      "Its tools, grants and revocations are destroyed. Usage and audit history are kept. The removal is recorded in the audit log.",
+    inUseCode: "mcp_server_in_use",
+    stacked: true,
+    inUseText: (p) =>
+      `It can't be deleted while ${countsText([
+        [p.approvals as number, "approval", "approvals"],
+        [p.agentGrants as number, "agent grant", "agent grants"],
+        [p.approvalRules as number, "approval rule", "approval rules"],
+        [p.dataScopeRules as number, "data-scope rule", "data-scope rules"],
+        [p.rateLimits as number, "rate limit", "rate limits"],
+      ])} refer to it. Approvals are audit evidence; remove the agent grants and rules first.`,
+  });
+  const editButton = (s: McpServer) => (
+    <Button
+      size="sm"
+      aria-label={`Edit MCP server ${s.name}`}
+      disabled={s.enabled === false || life.act.busy}
+      title={s.enabled === false ? "Enable it to edit it" : undefined}
+      onClick={() => setEditing(s)}
+    >
+      Edit
+    </Button>
+  );
 
   return (
     <>
@@ -101,7 +139,19 @@ function McpServersTab() {
           <McpServerNextSteps />
           <Table<McpServer>
             columns={[
-              { key: "name", header: "Name", sort: (s) => s.name, render: (s) => s.name },
+              {
+                key: "name",
+                header: "Name",
+                sort: (s) => s.name,
+                render: (s) => (
+                  <span className={v.row} style={{ gap: "var(--s1)" }}>
+                    {s.name}
+                    <DisabledBadge row={s} noun="MCP server" />
+                  </span>
+                ),
+              },
+              // G4: the table is wide, so the row's actions sit next to the name rather than off-screen at the end
+              { key: "actions", header: "Actions", render: (s) => life.actions(s, editButton(s)) },
               { key: "url", header: "Endpoint / command", render: (s) => <span className={v.mono}>{s.transport === "stdio" ? s.stdio?.command ?? "Not reported" : s.url}</span> },
               { key: "transport", header: "Transport", render: (s) => s.transport ?? "Not reported" },
               {
@@ -132,13 +182,26 @@ function McpServersTab() {
               {
                 key: "privateRanges",
                 header: "Private ranges",
-                render: (s) => s.transport === "stdio" ? "Not applicable" : <PrivateRangesCell key={s.id} server={s} />,
+                render: (s) =>
+                  s.transport === "stdio" ? (
+                    "Not applicable"
+                  ) : s.enabled === false ? (
+                    // a disabled server is read-only: its settings are shown, not edited
+                    <span className={v.dim}>{s.allowPrivateRanges == null ? "inherit" : s.allowPrivateRanges ? "allowed" : "refused"}</span>
+                  ) : (
+                    <PrivateRangesCell key={s.id} server={s} />
+                  ),
               },
               {
                 // ADR-0188 S8: off by default; turning it on is a stepped-up, audited relaxation
                 key: "identityPropagation",
                 header: "Identity to upstream",
-                render: (s) => <IdentityPropagationCell key={s.id} server={s} />,
+                render: (s) =>
+                  s.enabled === false ? (
+                    <span className={v.dim}>{s.identityPropagation === "signed_assertion" ? "Signed assertion" : "Send nothing"}</span>
+                  ) : (
+                    <IdentityPropagationCell key={s.id} server={s} />
+                  ),
               },
               { key: "id", header: "Proxy id", render: (s) => <IdChip id={s.id} /> },
             ]}
@@ -178,6 +241,8 @@ function McpServersTab() {
         <McpEntitlementCard users={users} servers={servers.data?.servers ?? []} />
         <McpVisibleToolsCard users={users} servers={servers.data?.servers ?? []} />
       </div>
+      {life.dialogs}
+      <Suspense fallback={null}>{editing && <EditServerDialog server={editing} onClose={() => setEditing(null)} />}</Suspense>
     </>
   );
 }
