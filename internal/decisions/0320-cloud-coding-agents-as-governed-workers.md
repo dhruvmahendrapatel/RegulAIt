@@ -184,7 +184,12 @@ lane's reserved pair. Until then the second number stays unused.
   each provider's GitHub app access to the pinned repositories only. This is written into the admin route's response.
 - Polling costs requests; the interval is bounded and per-dispatch.
 
-## Owner questions open
+## Owner answers (2026-11-15, relayed by the master on #847)
 
-- Which providers to sign up for live tests, and on which accounts.
-- Whether a dispatch should always need an approval (the secure default is the project's normal approval rules).
+- **Approvals.** A dispatch follows the project's normal approval rules, and the execution dial's `require_approval`
+  queues it (§2), as built. No extra always-on approval.
+- **Live tests.** The owner approved sandbox testing in general, but **not** GitHub or Cursor sandbox accounts for this
+  lane. Every coding-agent provider stays on fake servers.
+- **Pace.** A pilot in about two weeks takes CI priority, and outside coding agents are not a pilot success criterion.
+  Slices 2–4 are paused after slice 1 until the master resumes the lane. Lane E3 will publish the portable credential
+  format that the second ADR in this lane's pair builds on (§5).

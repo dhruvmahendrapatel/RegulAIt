@@ -6,5 +6,5 @@ fake servers until live accounts are approved. Slice 1 is the pure kernel module
 prefix; request builders and fail-closed reply parsers for Cursor Cloud Agents v1 and Devin v1 (Copilot coding agent and
 Codex are `contract_unverified` and refused); the dispatch envelope (org flag, provider row and kill switch, execution
 dial, plan sign-off, grant, lead ceiling, repository entitlement, node and run budget); the captured-PR scope check; the
-Devin ACU limit and cost settlement. No migration, no route. Slices 2–4: tables and the gateway choke point, the
+Devin ACU limit and cost settlement. No migration, no route. Slices 2–4 (paused by the master on 2026-11-15, pilot first): tables and the gateway choke point, the
 build-stage wiring and PR capture, then Copilot and Codex.
