@@ -14,10 +14,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { getConstructionPlans } from "pg-boss";
-import { and, auditLog, createDb, eq, orchestrationRuns, runMigrations, sql, workflowInstances, type Db } from "@regulait/db";
+import { and, auditLog, createDb, eq, orchestrationRuns, runMigrations, sql, workflowInstances, workflowTemplates, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
-import { handleNestedRunCompletion, runStageRetryJob } from "./workflows.js";
+import { createWorkflowTemplateValidated, handleNestedRunCompletion, runStageRetryJob } from "./workflows.js";
 import {
   STAGE_RETRY_QUEUE,
   WORKFLOW_QUEUE_SCHEMA,
@@ -260,6 +260,20 @@ describe("ADR-0283: automatic retry with backoff, one chain per stage execution 
     expect(on).toHaveLength(1);
     expect(on[0]!.objectType).toBe("workflow_template");
     expect(on[0]!.detail).toMatchObject({ stages: [{ stageId: "branch", type: "git_operation", retry: { maxAttempts: 3, delaySeconds: 5 } }] });
+  });
+
+  it("a retry-enabled template whose audit row cannot be written is not created (one transaction)", async () => {
+    const name = "l5-retry-audit-atomic";
+    const definition = {
+      workflow: name,
+      stages: [
+        { id: "intake", type: "trigger" },
+        { id: "branch", type: "git_operation", action: "create_branch", connection: `${name}-git`, repo: `${name}/app`, retry: { maxAttempts: 2, delaySeconds: 5 } },
+      ],
+    };
+    // an actor id the audit_log user_id column refuses: the audit insert fails after the template insert
+    await expect(createWorkflowTemplateValidated(db, { name, definition }, "not-a-uuid")).rejects.toThrow();
+    expect(await db.select().from(workflowTemplates).where(eq(workflowTemplates.name, name))).toHaveLength(0);
   });
 
   it("a template with no retry policy schedules nothing (the strict default)", async () => {

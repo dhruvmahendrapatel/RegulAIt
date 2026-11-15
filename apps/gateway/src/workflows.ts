@@ -2933,27 +2933,30 @@ export async function createWorkflowTemplateValidated(
       return { ok: false, status: 422, body: { error: "invalid_approver" } };
     }
   }
-  const [row] = await db
-    .insert(workflowTemplates)
-    .values({ name: body.name, definition })
-    .returning();
   // ADR-0283 owner decision (2026-11-15): no stage retries unless its template
   // says so; a template that turns automatic retry on is audited, by stage and
-  // policy, beside the create (same handle, so inside the caller's transaction).
+  // policy, in ONE transaction with the insert (a savepoint when the caller
+  // already holds one), so a retry-enabled template never exists unaudited.
   const retried = definition.stages.filter((st) => st.retry);
-  if (retried.length > 0) {
-    await db.insert(auditLog).values({
+  const row = await db.transaction(async (tx) => {
+    const [created] = await tx
+      .insert(workflowTemplates)
+      .values({ name: body.name, definition })
+      .returning();
+    if (retried.length === 0) return created!;
+    await tx.insert(auditLog).values({
       userId: actorUserId ?? SYSTEM_IDENTITY,
       objectType: "workflow_template",
-      objectId: row!.id,
+      objectId: created!.id,
       detail: { templateName: body.name, stages: retried.map((st) => ({ stageId: st.id, type: st.type, retry: st.retry })) },
       effect: "allow",
       ruleId: "workflow:template-stage-retry-enabled",
       ruleChain: [],
       reason: `template '${body.name}' turns on automatic retry for ${retried.map((st) => `'${st.id}'`).join(", ")} (capped by each stage's retry policy)`,
     });
-  }
-  return { ok: true, row: row! };
+    return created!;
+  });
+  return { ok: true, row };
 }
 
 /** the refusal when a sign-off owed by someone other than the initiator has nobody to go to */

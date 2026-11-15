@@ -92,8 +92,10 @@ Git stages (push, PR creation, merge) do **not** retry by default: a failure sto
 `awaiting_execution` for a person (`/advance`). An admin may turn on capped retries per workflow template (the stage's
 `retry` policy, at most 10 attempts, bounded delays), and turning it on is audited: creating a template whose stages
 carry `retry` writes `workflow:template-stage-retry-enabled` (object `workflow_template`, the stages and their
-policies, the admin as actor) in the create's own transaction. Main already had no default policy; the audit row is
-what this decision added. Test: `workflows-queue.test.ts` ("a template that turns retry on is audited").
+policies, the admin as actor) in one transaction with the template insert (a savepoint when the caller already holds
+one), on every create door: a retry-enabled template never exists without its audit row. Main already had no default policy; the audit row is
+what this decision added. Tests: `workflows-queue.test.ts` ("a template that turns retry on is audited", and "a retry-enabled template whose audit
+row cannot be written is not created").
 
 ## Consequences
 
