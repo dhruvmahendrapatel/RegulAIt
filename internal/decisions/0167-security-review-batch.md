@@ -569,3 +569,93 @@ Q10 replaces the hand-written error-to-text helpers from #413 (`safeErrorText`, 
    but `err`/`error` is refused, because the serializer covers those two keys only. `err-serializer.test.ts` covers a
    DB error with row data in its message, a fetch error whose URL carries a token, a nested cause, a RAISE, a bare
    error argument, the error id, idempotence and cycles.
+
+## Amendment 2026-11-07 — published secrets need loopback or an opt-in; the bootstrap credential retires (S-02)
+
+Finding S-02 of the [2026-11-07 whole-build review](../reviews/2026-11-07-whole-build-review.md) (high): §5 above refused
+the published `dev-bootstrap` token and `aaaa…` data key only when `REGULAIT_DEPLOY_MODE` or `REGULAIT_HSTS` was set. The
+base compose never forwarded `REGULAIT_HSTS`, so `--profile tls`, `hosted` and `tunnel` booted with both published values.
+The bootstrap credential is a full admin with no expiry that skips MFA and the IP envelope, and it kept working after a
+real admin existed. It could also mint an API key for any user, a TOTP-enrolled admin included, without a step-up. §5's
+last sentence named the compose gap as open; this amendment closes it. Under ADR-0180 the refusal is now the default.
+
+**Decision.**
+
+1. **Refused unless loopback-only or opted in.** The published values (and a data key with fewer than eight distinct hex
+   characters) boot only when the gateway listens on a loopback address and no deploy signal is present, or when
+   `REGULAIT_ALLOW_DEV_SECRETS=1` is set. A container listens on every interface, so the compose stack refuses them even
+   with no profile. The opt-in still overrides a deploy signal, as §5 allowed for a disposable staging box.
+2. **The opt-in is loud and recorded.** A banner in the boot log, plus one audit row per boot (`dev-secrets-opt-in`,
+   effect `allow`), naming what was accepted and why it would have been refused. The row holds no secret value.
+3. **An https public URL is a deploy signal.** `networkFacingSignal` also returns a signal for an `https`
+   `REGULAIT_PUBLIC_URL` on a non-loopback host. The same function gates `REGULAIT_OFFLINE_CHECKS` (AER-047) and the
+   `demo:set-passwords` message, so both are now stricter on such a box.
+4. **The base compose forwards `REGULAIT_HSTS`**, with no default: an empty value means "no header" (hsts.ts), so an unset
+   variable must stay unset. It also forwards `REGULAIT_ALLOW_DEV_SECRETS` and `REGULAIT_BOOTSTRAP_AFTER_ADMIN`, both
+   empty by default.
+5. **The bootstrap credential retires itself.** Once an *active* admin exists, the token authenticates nothing: header
+   use, the key exchange and a bootstrap-exchanged browser session all answer 401 `bootstrap_retired`. Active means
+   enabled, an admin, and signed in with a credential of their own at least once (a session of theirs exists, or a key of
+   theirs has been used). An admin row the token has just created is not yet active, so first-admin setup can still issue
+   that admin's password or key. If every admin is later disabled, the token works again: that lockout is what
+   break-glass is for. The first retired presentation per process is audited (`bootstrap-retired`, deny). Later ones are
+   not, so a scanner cannot fill the chain.
+6. **The relaxation is `REGULAIT_BOOTSTRAP_AFTER_ADMIN=1`.** It is printed at boot. The gateway test suite
+   (`vitest.config.ts`), the e2e harness and the demo workflow set it. The in-process operator tools (`seed`, `demo:*`)
+   pass `bootstrapAfterAdmin: true` in code: they hold `DATABASE_URL`, so the token is not a network credential there.
+7. **Minting an API key for another user is an `identity_manage` step-up.** `POST /v1/users/:userId/keys` for someone
+   other than the caller asks for one. A key for yourself does not. The bootstrap credential passes only while no admin
+   has a way to step up (B4S-06); under the relaxation it keeps its earlier power on this route, as part of what the
+   relaxation relaxes.
+
+**Alternatives rejected.** Detecting the compose profile from inside the container: the gateway cannot see it, and Caddy
+reaches the gateway over the compose network either way. Retiring the token permanently with a stored flag: it needs a
+migration and removes break-glass for a full admin lockout. A new step-up kind for key issue: it needs a migration;
+`identity_manage` already covers "every other identity administration write".
+
+**Consequences.** A bare `docker compose up --build` now needs `REGULAIT_ALLOW_DEV_SECRETS=1` in `.env`, or real values.
+A native `pnpm start` with `HOST=127.0.0.1` (the documented laptop path) is unchanged. No migration. The admin portal's
+"Issue API key" for another user now goes through the step-up prompt (`UsersPage.tsx`, wrapped in `withStepUp`).
+
+**As built.** `apps/gateway/src/dev-secrets.ts` (the decision, `activeAdminExists` (an admin who has signed in; `realAdminExists`, used by first-admin, keeps its meaning), `bootstrapRetired`,
+`recordDevSecretsOptIn`), `auth.ts` (`authenticate`, `resolveSession`, the `bootstrap_retired` refusal), `app.ts` (the
+key route's step-up, `BuildAppOptions.bootstrapAfterAdmin`), `boot.ts` (listen host, banner, audit), `docker-compose.yml`.
+Tests: `dev-secrets-s02.test.ts` (new) and `dev-secrets.test.ts` (updated to the new rule).
+
+### Addendum 2026-11-15: CodeQL alerts on the credential path are fixed in code (S-02, PR #728)
+
+**Owner decision (2026-11-15, standing rule for every CodeQL alert):** restructure the code; never dismiss an alert.
+On PR #728, GitHub's CodeQL check counted pre-existing alerts against the PR because their data flow starts in
+`auth.ts`. Each was fixed rather than allow-listed:
+
+- `js/clear-text-storage-of-sensitive-data` (`auth.ts`, `saml.ts`): `mfaPendingCookie()` writes the cookie name as a
+  literal instead of reading `MFA_PENDING_COOKIE`; `token-hash.test.ts` pins the two together.
+- `js/insufficient-password-hash` (`token-hash.ts`): `hashToken()` is now scrypt (N=2^10, r=8, p=1, 32 bytes) over a
+  fixed, versioned domain salt `regulait:token-hash:v2`. The salt is not per value because the result is the
+  deterministic lookup key a presented token is found by, and every input is 192 to 256 random bits. The cost is about
+  2 ms per call. **Every token hash stored before this change stops resolving**: sessions, API keys, virtual keys,
+  SCIM tokens and one-time handles are re-issued. Nothing is grandfathered (ADR-0180; the product is not live).
+- `js/insufficient-password-hash` (`packages/shared/src/constant-time.ts`): `constantTimeEqual()` derives both inputs
+  with HKDF-SHA256 under a key drawn fresh for each call (the double-HMAC compare), keeping the fixed-length,
+  length-hiding compare.
+
+Five `security/sast-allowlist.json` entries those results matched are removed; none is added.
+**Alternatives rejected.** Dismissing the alerts or keeping the allow-list entries (owner decision). A per-value salt
+with a token-id credential format: correct for passwords, but it changes every credential's format and lookup for no
+gain against 192+ random bits; it can follow if the owner wants it. HMAC-SHA256 with a pepper: CodeQL models
+`createHmac` as the same insufficient hash, and the pepper becomes a key to rotate.
+
+### Addendum 2026-11-15 (2): S-02 code-review fixes (PR #728)
+
+- `REGULAIT_BOOTSTRAP_AFTER_ADMIN=1` is now an audited relaxation (ADR-0180). Each boot that sets it with a bootstrap
+  token writes one `bootstrap-after-admin-relaxed` row, which names the two things it relaxes: retirement, and the
+  `identity_manage` step-up for minting keys for other users. The boot log prints whether the write succeeded.
+- `REGULAIT_ALLOW_DEV_SECRETS=1` covers only a non-loopback listener. It never overrides a deploy signal
+  (`REGULAIT_DEPLOY_MODE`, `REGULAIT_HSTS`, an https non-loopback `REGULAIT_PUBLIC_URL`), so a quickstart `.env` cannot
+  open `--profile tls/hosted/tunnel` to published credentials. The docs now say to set it per command.
+- `GET /v1/org/posture` reports a retired token (`bootstrap.retired`, finding `bootstrap_token_retired`). Reading the
+  posture is not a presentation of the token, so it writes no `bootstrap-retired` row.
+- The scrypt cost on junk bearers is bounded by the pre-auth per-IP tier. That limit is an `onRequest` hook registered
+  before every hook and route that calls `authenticate`, and it is on by default.
+- `demo:enforce` names the relaxation when it meets a retired token. `demo:relax-e` treats a retired token as
+  `needs_admin` and signs in as the admin.
