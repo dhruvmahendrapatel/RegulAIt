@@ -98,14 +98,40 @@ named, tagged or designated production.
   boundary, and the managed-policy size limits. Terraform is installed by `infra/scripts/install-terraform.sh`, pinned to
   1.16.7 (terraform-aws-modules/rds 7.x needs 1.11 or later) with its SHA-256 committed.
 
+### PR 2: the BYOC AWS module
+
+- **`infra/modules/byoc-aws`** builds what the Helm chart runs on, inside the customer's account (details in its
+  README): a VPC over two zones; egress `allow_list` (default: AWS Network Firewall, strict rule order, TLS SNI allow-list
+  of `egress_allowed_domains`, default only `login.microsoftonline.com`, everything else dropped and logged) or `none`;
+  VPC endpoints for every AWS API the stack uses, so AWS traffic never crosses the firewall; EKS (private API
+  endpoint by default, `0.0.0.0/0` refused, access entries only, KMS envelope encryption, control-plane audit logs,
+  IMDSv2 hop limit 1, VPC CNI with NetworkPolicy enforcement on, EBS CSI and Pod Identity add-ons); RDS PostgreSQL 16
+  (stack key, TLS forced, Multi-AZ, 14-day PITR, final snapshot, deletion protection, RDS-managed master secret); one
+  rotating KMS key; the audit-anchor Object Lock bucket in COMPLIANCE mode through `audit-anchor-worm-s3`; a gateway
+  Pod Identity role that may invoke only the listed Bedrock models and write anchors; private ECR repositories
+  (immutable, scanned) and a `public.ecr.aws` pull-through cache.
+- **`infra/environments/byoc-aws`** is the root the customer applies; the rehearsal applies the same root with
+  `rehearsal.tfvars.example`, so the rehearsal exercises the customer's exact path.
+- **Data boundary**: both the control plane and the agent-execution plane run in the customer's account, and nothing
+  goes to the vendor. The product has no channel to us (DATA_BOUNDARY.md §1) and the stack opens none. The brief's
+  "metadata only to our control plane" has no counterpart in the product today. Adding one would be a new, opt-in data
+  path that needs its own ADR, so it is not built (owner note).
+- **Egress posture (ADR-0062)**: strict on both layers by default. At the network layer, the firewall allow-list
+  passes only the listed hosts. At the app layer, the org setting `egressCompiledDefaultPolicy` defaults to `strict`
+  (since ADR-0180), so a `byoc` install also checks compiled vendor endpoints against `egress_allow_hosts`. The
+  runbook has the installer confirm it and add the same hosts there.
+- **Preflight** `infra/modules/byoc-aws/preflight/preflight.sh` (read-only): tools, signed-in account, region and
+  zones, quotas, Network Firewall and endpoint availability, Bedrock model access, and free names.
+
 ### Open source first (ADR-0176)
 
 Searched: `terraform-aws-modules/iam` (Apache-2.0) has `iam-github-oidc-provider` and `iam-github-oidc-role`
 submodules. Its role submodule matches `sub` with `StringLike` and attaches managed policy ARNs; it does not take an
 inline boundary-scoped policy or refuse a wildcard subject. Our module already existed and is ~100 lines, so it is
 extended rather than replaced; the boundary and deployer policy are RegulAIt's governance semantics (what an
-installer may do), which ADR-0176 §4 keeps in house. `terraform-aws-modules` is the first choice for PR 2's VPC, EKS
-and RDS.
+installer may do), which ADR-0176 §4 keeps in house. PR 2 uses `terraform-aws-modules` vpc 6.7.3, eks 21.29.0 and rds 7.2.2 (Apache-2.0) rather than hand-written
+network, cluster and database code. The firewall routing, Pod Identity roles and Bedrock grant are a few resources
+with no maintained module that fits the strict allow-list, so they are written here.
 
 ### Review of #854 (2026-11-15)
 

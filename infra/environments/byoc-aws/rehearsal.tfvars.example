@@ -1,0 +1,30 @@
+# The regulait-dev rehearsal (ADR-0325), passed as -var-file by .github/workflows/byoc-rehearsal.yml,
+# which passes account_id, region, iam_permissions_boundary_arn and the runner's
+# public CIDR as -var flags from the `rehearsal` environment. Non-production:
+# everything is torn down at the end of the run.
+name_prefix = "regulait-rehearsal"
+
+tags = {
+  project    = "regulait"
+  purpose    = "rehearsal"
+  managed-by = "terraform"
+  adr        = "0325"
+}
+
+az_count            = 2
+node_count          = 2
+node_instance_types = ["t3.large"]
+
+db_instance_class        = "db.t4g.medium"
+db_multi_az              = false
+db_backup_retention_days = 1
+db_deletion_protection   = false
+db_skip_final_snapshot   = true
+
+# GOVERNANCE so the rehearsal can delete what it wrote; 1 day so nothing lingers.
+audit_object_lock_mode = "GOVERNANCE"
+audit_retention_days   = 1
+
+log_retention_days = 7
+
+egress_allowed_domains = ["login.microsoftonline.com"]
