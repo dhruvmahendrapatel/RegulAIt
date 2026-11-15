@@ -24,7 +24,7 @@ import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { ListPreview } from "../../../ui/ListPreview";
 import type { IdentityLink } from "./ChatIdentityLinksPage";
-import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Select, Table, Tabs, Textarea, tabIds } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Select, Table, TabPanel, Tabs, Textarea } from "../../../ui/kit";
 import { QueryGate, reconfirmNeeded, StaleAfterWrite, useAction, useConnectors, useSettleAfterWrite, useSingleFlight } from "../adminKit";
 import v from "../../views.module.css";
 import { BuilderRoutesCard, PostApprovalCard } from "./ChatOpsPostAndRoutes";
@@ -178,6 +178,7 @@ export default function ChatOpsPage() {
     queryFn: () => api.get<ConnectionsResponse>("/v1/chatops/connections"),
   });
   const [tab, setTab] = useState("workspaces");
+  const [linkPosture, setLinkPosture] = useState<string | null>(null);
   const connectors = useConnectors();
   const act = useAction();
 
@@ -244,6 +245,9 @@ export default function ChatOpsPage() {
         queryKey={["chatops", "links"]}
         sort={{ key: "created", dir: "desc" }}
         attention={[{ label: "admin-asserted", filters: { verification: "admin_asserted" } }]}
+        // the API's own link-posture sentence, kept with the preview as the full list keeps it (review of #642)
+        info={linkPosture ? <p>{linkPosture}</p> : undefined}
+        onRows={(_rows, raw) => setLinkPosture(typeof raw.posture === "string" ? raw.posture : null)}
         note={
           <div className={v.row}>
             <Badge tone="warn">Unverified identity</Badge>
@@ -276,9 +280,8 @@ export default function ChatOpsPage() {
         idPrefix="chatops"
         label="ChatOps settings"
       />
-      <div role="tabpanel" id={tabIds("chatops", tab).panel} aria-labelledby={tabIds("chatops", tab).tab} className={v.stack}>
-        {tab === "workspaces" ? (
-          <>
+      {/* the kit panels stay mounted while hidden, so a half-filled workspace form survives a tab switch (review of #642) */}
+      <TabPanel idPrefix="chatops" id="workspaces" active={tab}><div className={v.stack}>
       <Card title="Workspaces">
         <QueryGate loading={connections.isLoading} error={connections.error} onRetry={refresh}>
           {(connections.data?.connections.length ?? 0) === 0 ? (
@@ -540,16 +543,12 @@ export default function ChatOpsPage() {
           </Button>
         </div>
       </Card>
-
-          </>
-        ) : (
-          <>
+      </div></TabPanel>
+      <TabPanel idPrefix="chatops" id="routes" active={tab}><div className={v.stack}>
       {/* mirror one approval into a channel; which channel each builder agent answers on */}
       <PostApprovalCard connections={connections.data?.connections ?? []} />
       <BuilderRoutesCard />
-          </>
-        )}
-      </div>
+      </div></TabPanel>
 
     </>
   );

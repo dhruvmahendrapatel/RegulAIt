@@ -414,6 +414,110 @@ approver-role member (`regulait_rls_delegator_groups()`, ADR-0022 x ADR-0046).
 - The slice-1 file was updated for the 0313 policies and the extended migration guard (29 tests).
 - The full gateway suite runs in CI's shards.
 
+## As built (batch 7a): a named scope for every path with no principal (2026-11-14)
+
+Batch 7 (the runtime cut-over) is split in two PRs so each stays reviewable. **7a** (this one) gives every path that
+ran with no scope a named, closed reason. **7b** does the cut-over itself: a separate runtime login that is a member
+of `regulait_app`, the owner credential for the migrator and the audit prune only, the boot refusal of a superuser or
+BYPASSRLS runtime login (with a loud, audited dev opt-in), the posture read, and CI's gateway shards on the runtime
+login.
+
+Why 7a is enforced already: a scoped statement switches to `regulait_app` whatever the login is, so a path given a
+scope here runs under FORCE row-level security today, on the superuser login CI uses.
+
+**Reasons added** (pending migration `rls_batch7a_system_scopes`, and `RLS_SYSTEM_REASONS`):
+
+| Reason | Who runs under it | users | approvals | audit_log | auth_mfa_pending |
+|---|---|---|---|---|---|
+| `system_task` | scheduler jobs (tick and run-now), boot tasks, the audit anchor and backup-verify timers, background work, requests from non-user credentials (engine runner, workload identity, endpoint agent, PDP) | read | all | read, append | none |
+| `public_ingest` | the unauthenticated portal, ingest and webhook routes (health, trust pages, supplier portal, feedback links, agent and third-party ingest, OAuth endpoints, chat events) | read | none | append | none |
+| `bootstrap_admin` | a bootstrap-token request, or a session exchanged for it | read | as an admin | as an admin | none |
+
+- `system_task` is broad on purpose. A scheduler job acts on every row by design, and the per-job trace showed that
+  model dispatch (eval drift, red team, auto-retest, builder schedules) can escalate a budget into an approval and
+  count audit rows, and that several sweeps route, reopen or read approvals and the ledger. It still never writes
+  `users` or touches `auth_mfa_pending`, and the ledger stays append-only (the app role has no UPDATE or DELETE on
+  `audit_log`). What RLS guards is the request paths, which run as their principal or under a narrow reason.
+- `public_ingest` is the narrowest, because these routes take attacker-shaped input.
+- `bootstrap_admin` is admitted through `regulait_rls_is_admin()`, which now has no SET clause and reads the caller's
+  reason; the principal-is-admin read moved to `regulait_rls_principal_is_admin()` (still under `rls_membership`). So
+  every policy that already admitted an admin admits the bootstrap token without being re-created.
+- `approval_maintenance` gains the users read, for the chat and PM callbacks that look up the deciding user.
+
+**Wiring.**
+- **Requests** (`app.ts`): a request with no user runs under `exemptRouteRlsReason(url)` for an auth-exempt route
+  (`route-classes.ts`: SCIM and the identity callbacks `identity_provisioning`; other `/auth/*` routes
+  `authenticate`; the PM webhook and the chat approval callback `approval_maintenance`; everything else
+  `public_ingest`), `bootstrap_admin` for the bootstrap token, `system_task` for a non-user credential. Only a request
+  with no credential at all, refused before any handler, stays unscoped.
+- **SAML TOTP park:** the ACS runs under `identity_provisioning`, and parking the login at the TOTP step writes its
+  challenge under `authenticate`.
+- **Scheduler** (`scheduler.ts`): `runSchedulerJob` runs its ledger and the job under `system_task`
+  (`scheduler.<job>`), whoever triggered it.
+- **Boot** (`boot.ts`): every boot task after the migrations runs under `system_task` (`boot.<task>`).
+  `runMigrations` stays on the owner login.
+- **Timers:** the audit anchor and backup-verify timers run under `system_task`.
+- **Background work** runs under `system_task` instead of no scope. A channel turn and a builder step resumed after
+  an approval run as their person (the chat user's linked person, the approval's requester), not as the background.
+- **Audit prune:** it deletes ledger rows and the app role has no DELETE on `audit_log`, so `runAuditPruneOnce` always
+  leaves the caller's scope (the admin's POST used to run it in the admin's principal scope, which the app role
+  cannot do). 7b moves it to the owner connection.
+- **Chain writer:** the batch 2 `audit_subject` window (the INSERT alone, restored right after) is also entered when
+  the caller's reason may append but not read the ledger (`authenticate`, `identity_provisioning`,
+  `approval_maintenance`, `public_ingest`), so the writer's RETURNING of the row it appended is visible.
+
+**Anchor state.** The anchor timer and the admin's timestamp retry now run as the app role, which 0272 gave no
+UPDATE on `audit_anchors`. 7a grants UPDATE on the delivery and timestamp columns only (by column, closed for columns
+added later); the anchored evidence (`id`, `seq`, `row_hash`, `head_at`, `algorithm`, `destination`, `deploy_mode`,
+`created_at`) stays immutable for the app role.
+
+**Ledger reads under a narrow reason.** Two found by the full suite: the SSO callback's sign-in-history and pre-0139
+backfill lookups (`federated-identity.ts`) read the ledger under `audit_verify` rather than the callback's
+`identity_provisioning`; and `audit_verify` gains the users read, so the policy simulator's replay names users for a
+bootstrap-token request too.
+
+**Still unscoped, for 7b.** `runMigrations` (owner), the audit prune (owner), the rate-limit and PM-delivery prune
+timers (their tables have no RLS), and the seed, first-admin and demo scripts (they run as the migrator).
+
+**Tests.** `zz-adr0234-rls-batch7a.test.ts` (9): what each new reason reaches with no application filter, RETURNING
+under an append-only reason with the reason restored, every exempt route mapped, the scheduler and background work
+under `system_task`. The batch 2 bootstrap probe now expects `bootstrap_admin`. Locally: the three RLS files and 42
+affected suites (auth, SAML, OIDC, SCIM, scheduler, chat, PM, prune, boot, portals, engine runner, workload, OAuth,
+builder resume, approvals; 730 tests) pass.
+
+**Review round 1 (#809, code and security).** Both reviews blocked on one mapping: a request from a non-user
+credential ran under `system_task`, which opens every approval and the whole ledger. Changes:
+
+- **`credential_request`** (new reason) for requests from an engine runner or enrolment token, a PDP client or an
+  endpoint agent: users read, ledger append (with RETURNING, through the chain writer's `audit_subject` window), and
+  nothing in approvals. The one runner path that touches an approval, a failing self-test ending the engine's runs,
+  supersedes each run's approval under `approval_maintenance` for that statement (`withinSystemReason`). A runner's
+  result re-evaluates its workflow stage as the run's own user (`run_as_user_id`), never wider. `system_task` is now
+  for principal-less server work only, never a request path. (A workload identity's request carries its sponsor as the
+  user, so it was always a principal.)
+- **`bootstrap_admin` is not a caller reason.** It is admin-equivalent at the database, so `runWithRlsSystem`,
+  `runWithRlsPrincipalStep`, `runAsPrincipalStepIfScoped`, `withSystemContext` and `withinSystemReason` all refuse it;
+  only the scope hook enters it, through `runAsBootstrapAdmin`. An `audit_verify` or `approval_maintenance` step inside
+  a bootstrap scope keeps the bootstrap scope (an admin already reaches those tables), so `audit_verify` no longer
+  needs, and no longer has, the users read.
+- **The interception gate** (an `onRequest` hook that runs before authentication) resolves its credential and policy
+  under `authenticate`.
+- **Timers started inside a request** (the engine task watchdog, the discovery lease renewal, the stdio relay) run
+  under `system_task` instead of inheriting the starting request's scope.
+- **The scope decision is one pure function**, `requestRlsScope` in `route-classes.ts`, which the hook calls.
+- **Tests** (`zz-adr0234-rls-batch7a.test.ts`, 21): the SQL registry equals the TypeScript one; every step helper
+  refuses `bootstrap_admin`; `bootstrap_admin` still cannot UPDATE or DELETE the ledger; `credential_request` reads no
+  ledger row and cannot read, update, delete or create an approval; `approval_maintenance` reads no ledger row;
+  `audit_verify` reads no users; the scope for each non-user `via`, a user principal never in a system scope, and
+  exempt routes before credentials; a census that every `setInterval` is scoped or on a reasoned allow-list, that
+  `runWithoutRlsScope` has exactly two callers (the hook and the audit prune), and that only the hook enters
+  `bootstrap_admin`.
+- **Deferred, with the reason.** `public_ingest` keeps the users read. The unauthenticated routes that resolve a user
+  (OAuth token and consent endpoints, feedback-link and portal owners, chat event senders) each read different
+  columns, so a column-limited SECURITY DEFINER lookup per route is a change across those handlers. It is tracked for
+  batch 8 (the users-read narrowing), and until then the users read is the only table these routes reach beyond the
+  ledger append.
+
 ## Appendix: the inventory (2026-11-06, migrated head)
 
 - **User-owned (49):** a2a_agent_grants, agent_grants, agent_revocations, agents, ai_incident_actions, ai_incidents,

@@ -12,7 +12,7 @@
  *  - resubmit mode of the registration screen: prefilled, return reason on
  *    top, exact PATCH + new questionnaire version, lands on the record, and a
  *    retry never PATCHes twice;
- *  - the registry's Re-review chip and the preview's resubmit action;
+ *  - the registry's Re-review filter and the preview's resubmit action;
  *  - axe (WCAG 2.x A/AA) in BOTH themes, and keyboard paths.
  *
  * Set G2_SHOTS_DIR to also save light + dark screenshots of each screen.
@@ -585,7 +585,7 @@ test.describe("the review panel in a review round", () => {
 test.describe("the use-case record in a review round", () => {
   test("one sign-off row per required review, and accepted risks read who accepted them and why", async ({ page }) => {
     await mockGateway(page, { acceptedRisk: true });
-    await page.goto(`/ui/admin/governance/use-cases/${UC}`);
+    await page.goto(`/ui/admin/governance/use-cases/${UC}?tab=overview`);
     await expect(page.getByRole("heading", { level: 1, name: NAME })).toBeVisible();
     const tracker = page.locator("section", { has: page.getByText("Lifecycle tracker", { exact: true }) });
     await expect(tracker.getByRole("row").filter({ hasText: "Sign-off:" })).toHaveCount(3);
@@ -614,7 +614,7 @@ test.describe("the use-case record in a review round", () => {
         { roleId: "model-risk", roleName: "Model risk", status: "superseded", deciderName: null, decidedAt: null, approvalId: AP_MR },
       ],
     });
-    await page.goto(`/ui/admin/governance/use-cases/${UC}`);
+    await page.goto(`/ui/admin/governance/use-cases/${UC}?tab=overview`);
     const tracker = page.locator("section", { has: page.getByText("Lifecycle tracker", { exact: true }) });
     const closed = tracker.getByRole("row").filter({ hasText: "Sign-off: Model risk" });
     await expect(closed).toContainText("Closed — another review ended the round · review 3 of 3");
@@ -625,7 +625,7 @@ test.describe("the use-case record in a review round", () => {
 
   test("a recertification reads Re-review with the expiry date on the band and the tracker", async ({ page }) => {
     await mockGateway(page, { recertification: true });
-    await page.goto(`/ui/admin/governance/use-cases/${UC}`);
+    await page.goto(`/ui/admin/governance/use-cases/${UC}?tab=overview`);
     await expect(page.getByRole("list", { name: "Record status" })).toContainText("Re-review: approval expired 1 Sept 2026");
     await expect(page.getByRole("list", { name: "Record status" })).not.toContainText("Approval valid until");
     await expect(page.locator("section", { has: page.getByText("Lifecycle tracker", { exact: true }) }).getByText("Re-review: approval expired 1 Sept 2026")).toBeVisible();
@@ -636,7 +636,7 @@ test.describe("the use-case record in a review round", () => {
 
   test("a use case sent back shows the reason and one primary action: Update and resubmit", async ({ page }) => {
     await mockGateway(page, { status: "needs_info", resubmission: true, reviews: [] });
-    await page.goto(`/ui/admin/governance/use-cases/${UC}`);
+    await page.goto(`/ui/admin/governance/use-cases/${UC}?tab=overview`);
     const resubmit = page.getByRole("link", { name: "Update and resubmit" });
     await expect(resubmit).toHaveAttribute("href", `/ui/admin/governance/intake?resubmit=${UC}`);
     await expect(page.getByRole("note").filter({ hasText: "Sent back for information by Avery Approver." })).toContainText(REASON);
@@ -651,7 +651,7 @@ test.describe("the use-case record in a review round", () => {
 test.describe("update and resubmit", () => {
   test("prefilled from the record, reason on top; PATCHes what changed, posts a new version, lands on the record", async ({ page }) => {
     const state = await mockGateway(page, { status: "needs_info", resubmission: true, reviews: [] });
-    await page.goto(`/ui/admin/governance/use-cases/${UC}`);
+    await page.goto(`/ui/admin/governance/use-cases/${UC}?tab=overview`);
     await page.getByRole("link", { name: "Update and resubmit" }).click();
     await expect(page).toHaveURL(new RegExp(`/ui/admin/governance/intake\\?resubmit=${UC}$`));
     await expect(page.getByRole("heading", { level: 1, name: "Update and resubmit" })).toBeVisible();
@@ -914,14 +914,14 @@ test.describe("update and resubmit", () => {
 // ---------------------------------------------------------------------------
 
 test.describe("the registry", () => {
-  test("a Re-review chip filters recertifications, which read Re-review", async ({ page }) => {
+  test("the Re-review status filter shows recertifications as Re-review", async ({ page }) => {
     await mockGateway(page);
     await page.goto("/ui/admin/use-cases");
     await expect(page.getByRole("heading", { level: 1, name: "AI registry" })).toBeVisible();
-    const chip = page.getByRole("group", { name: "Status" }).getByRole("button", { name: /^Re-review/ });
-    await expect(chip).toContainText("1");
-    await chip.click();
-    await expect(chip).toHaveAttribute("aria-pressed", "true");
+    const status = page.getByRole("combobox", { name: "Status", exact: true });
+    await expect(status.locator('option[value="recertification"]')).toHaveText("Re-review (1)");
+    await status.selectOption("recertification");
+    await expect(status).toHaveValue("recertification");
     // clickable rows are links named "<name>, <status> — open preview"
     const rows = page.getByRole("link", { name: /— open preview$/ });
     await expect(rows).toHaveCount(1);
@@ -929,10 +929,10 @@ test.describe("the registry", () => {
     await expect(rows.first().getByRole("cell").nth(1)).toHaveText("Re-review");
     await checkScreen(page, "registry re-review filter", "registry-re-review");
     // control: All shows every row, the recertification still reading Re-review
-    await page.getByRole("group", { name: "Status" }).getByRole("button", { name: /^All/ }).click();
+    await status.selectOption("all");
     await expect(rows).toHaveCount(3);
     await expect(page.getByRole("link", { name: `${NAME}, Under review — open preview` })).toBeVisible();
-    await page.getByRole("group", { name: "Status" }).getByRole("button", { name: /^Re-review/ }).click();
+    await status.selectOption("recertification");
     await rows.first().click();
     await expect(page.getByRole("dialog", { name: "Fraud scoring model" })).toContainText("Re-review");
   });

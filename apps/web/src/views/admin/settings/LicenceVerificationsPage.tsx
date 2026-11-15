@@ -4,7 +4,7 @@
  * its heading.
  */
 import { useMemo, useState } from "react";
-import { Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes } from "react-router-dom";
 import LicensingPage from "./LicensingPage";
 import { PageHeader } from "../../../shell/AppShell";
 import { Card, Field, Select } from "../../../ui/kit";
@@ -21,7 +21,7 @@ export default function LicenceVerificationsPage() {
       <SubpageTrail parent="Licensing & seats" parentTo="/admin/licensing?tab=history" current="Verification trail" />
       <PageHeader title="Verification trail" sub="Every install, operator-driven check and refusal on this deployment." />
       <Card flush>
-        <div className={v.row} style={{ padding: "var(--s1) var(--s2) 0" }}>
+        <div className={`${v.row} ${v.cardToolbar}`}>
           <Field label="Outcome">
             <Select value={ok} onChange={(e) => setOk(e.target.value)}>
               <option value="">Any</option>
@@ -58,6 +58,8 @@ export function LicensingArea() {
     <Routes>
       <Route index element={<LicensingPage />} />
       <Route path="verifications" element={<LicenceVerificationsPage />} />
+      {/* an unknown sub-path goes back to the area's own page, never a blank page */}
+      <Route path="*" element={<Navigate to="/admin/licensing" replace />} />
     </Routes>
   );
 }

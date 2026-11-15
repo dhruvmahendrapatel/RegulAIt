@@ -42,6 +42,22 @@ function RoleControl(props: { useCaseId: string }) {
     void act
       .run(() => api.put(`/v1/use-cases/${props.useCaseId}/eu-ai-act-role`, { role: next, ...(reason ? { reason } : {}) }), `EU AI Act role set to ${next}`)
       .then(() => void uc.refetch());
+  // read only for anyone but an admin (#745 review): the owner opens this record to read it, not to change it
+  if (!isAdmin) {
+    return (
+      <div className={v.stack}>
+        <p>
+          <strong>EU AI Act role of the organisation for this system:</strong> {uc.isLoading ? "loading…" : ROLE_LABEL[role]}
+        </p>
+        <p className={v.faint}>Only an admin changes this role, with a reason, and the change is audited.</p>
+        {role !== "both" && (
+          <p className={v.faint}>
+            <Badge tone="warn">relaxed</Badge> Fewer clocks start for new incidents on this use case.
+          </p>
+        )}
+      </div>
+    );
+  }
   return (
     <div className={v.stack}>
       <Field
