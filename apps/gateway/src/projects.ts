@@ -15,6 +15,7 @@ import {
   eq,
   gte,
   initiatives,
+  projectContextDistillations,
   projectContextItems,
   projectMembers,
   projects,
@@ -1172,7 +1173,34 @@ export async function applyProjectPatch(
   return { ok: true, row: row!, changed };
 }
 
-export function registerProjectRoutes(app: FastifyInstance, db: Db) {
+/** ADR-0316: the person reading shared context, as the read routes see them */
+export interface ContextReader {
+  userId: string | null;
+  isAdmin: boolean;
+}
+
+/** ADR-0316: returns the ids among `itemIds` this reader may NOT see. A distilled revision is visible only to a
+ * reader who could already read what it was derived from; app.ts injects the real check
+ * (`session-distillation-access.ts`), which this module cannot import without an import cycle. */
+export type ContextReadFilter = (reader: ContextReader, itemIds: readonly string[]) => Promise<ReadonlySet<string>>;
+
+export interface ProjectRouteOptions {
+  contextReadFilter?: ContextReadFilter | undefined;
+}
+
+/** Fail closed when no filter is injected: every distilled revision is withheld; ordinary revisions are not. */
+async function withholdAllDistilled(db: Db, itemIds: readonly string[]): Promise<ReadonlySet<string>> {
+  if (itemIds.length === 0) return new Set();
+  const rows = await db
+    .select({ id: projectContextDistillations.contextItemId })
+    .from(projectContextDistillations)
+    .where(inArray(projectContextDistillations.contextItemId, [...itemIds]));
+  return new Set(rows.map((r) => r.id));
+}
+
+export function registerProjectRoutes(app: FastifyInstance, db: Db, opts: ProjectRouteOptions = {}) {
+  const contextReadFilter: ContextReadFilter =
+    opts.contextReadFilter ?? ((_reader, itemIds) => withholdAllDistilled(db, itemIds));
   /** §9.3: per-user, per-Shared-Project access — viewer reads, contributor+
    * writes, owner administers membership. Admins bypass. Returns the
    * membership row for provenance defaults. */
@@ -1846,6 +1874,9 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       /** ADR-0050: the run/node that produced this write, when declared */
       producedByRunId?: string | undefined;
       producedByNodeId?: string | undefined;
+      /** ADR-0316: runs inside the write's transaction after the revision and its audit row are inserted, so a
+       * distillation's provenance commits (or rolls back) with the revision. A throw aborts the whole write. */
+      onWritten?: ((tx: DbOrTx, written: { itemId: string; revision: number; conflicting: boolean }) => Promise<void>) | undefined;
     },
   ) {
     const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
@@ -1954,6 +1985,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
             ? `revision ${revision} of '${args.key}' is based on stale revision ${args.baseRevision}; retained and routed to the named arbiter — never silently overwritten`
             : `revision ${revision} of '${args.key}' accepted`,
         });
+        if (args.onWritten) await args.onWritten(tx, { itemId: item!.id, revision, conflicting });
         return {
           kind: "created",
           body: {
@@ -2057,11 +2089,14 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       // Each row additively carries its author/team names and, for a retained
       // row, whether its conflict is still pending with the arbiter — so the
       // /app history drawer can say accepted / awaiting arbiter / rejected.
-      const rows = await db
+      const allRows = await db
         .select()
         .from(projectContextItems)
         .where(and(eq(projectContextItems.projectId, projectId), eq(projectContextItems.key, q.key)))
         .orderBy(projectContextItems.revision);
+      // ADR-0316: a distilled revision this reader could not have read the inputs of is withheld (counted, no content)
+      const hiddenIds = await contextReadFilter(req.authCtx, allRows.map((r) => r.id));
+      const rows = allRows.filter((r) => !hiddenIds.has(r.id));
       const [names, pendingMap] = await Promise.all([
         nameMaps(
           rows.map((r) => r.contributedByUserId),
@@ -2079,10 +2114,11 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
           teamName: r.contributedByTeamId ? (names.teamName.get(r.contributedByTeamId) ?? null) : null,
           pendingApprovalId: pendingMap.get(r.id) ?? null,
         })),
+        ...(hiddenIds.size ? { withheldRevisions: allRows.length - rows.length } : {}),
       };
     }
     // current value per key = highest ACCEPTED revision, with provenance
-    const [rows, retained] = await Promise.all([
+    const [allRows, allRetained] = await Promise.all([
       db
         .select()
         .from(projectContextItems)
@@ -2108,8 +2144,19 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         )
         .orderBy(projectContextItems.revision),
     ]);
+    // ADR-0316: withheld distilled revisions never become this reader's "current" value; the key and revision of a
+    // withheld head are listed (no content) so a reader is never shown an older revision as if it were the newest
+    const hiddenIds = await contextReadFilter(req.authCtx, [...allRows, ...allRetained].map((r) => r.id));
+    const rows = allRows.filter((r) => !hiddenIds.has(r.id));
+    const retained = allRetained.filter((r) => !hiddenIds.has(r.id));
     const latest = new Map<string, (typeof rows)[number]>();
     for (const row of rows) latest.set(row.key, row);
+    const headOf = new Map<string, (typeof allRows)[number]>();
+    for (const row of allRows) headOf.set(row.key, row);
+    const withheld = [...headOf.values()]
+      .filter((r) => hiddenIds.has(r.id))
+      .map((r) => ({ key: r.key, revision: r.revision }));
+    for (const w of withheld) latest.delete(w.key);
     const pendingMap = await pendingConflictApprovals(
       projectId,
       retained.map((r) => r.id),
@@ -2146,6 +2193,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         at: r.createdAt,
         approvalId: pendingMap.get(r.id)!,
       })),
+      ...(withheld.length ? { withheld } : {}),
       // for the editor's "this will be sent to <arbiter>" copy
       arbiter: project.arbiterUserId
         ? { userId: project.arbiterUserId, name: names.userName.get(project.arbiterUserId) ?? null }
@@ -2165,11 +2213,14 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     const gate = await requireRole(req, projectId, "viewer");
     if (!gate.ok) return reply.status(gate.status).send({ error: gate.error });
 
-    const rows = await db
+    const allRows = await db
       .select()
       .from(projectContextItems)
       .where(eq(projectContextItems.projectId, projectId))
       .orderBy(projectContextItems.key, projectContextItems.revision);
+    // ADR-0316: withheld distilled revisions are left out of the graph and counted
+    const hiddenIds = await contextReadFilter(req.authCtx, allRows.map((r) => r.id));
+    const rows = allRows.filter((r) => !hiddenIds.has(r.id));
 
     const [names, pendingMap] = await Promise.all([
       nameMaps(
@@ -2184,7 +2235,13 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
 
     // accepted head per key = highest accepted revision (rows are asc by rev)
     const currentByKey = new Map<string, number>();
-    for (const r of rows) if (r.accepted) currentByKey.set(r.key, r.revision);
+    const withheldHeads = new Set<string>();
+    for (const r of allRows) {
+      if (!r.accepted) continue;
+      currentByKey.set(r.key, r.revision);
+      if (hiddenIds.has(r.id)) withheldHeads.add(r.key);
+      else withheldHeads.delete(r.key);
+    }
 
     const PREVIEW_LEN = 240;
     return {
@@ -2211,7 +2268,10 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       keys: [...currentByKey.entries()].map(([key, currentRevision]) => ({
         key,
         currentRevision,
+        // ADR-0316: the current revision is a distilled one this reader may not see (its node is not in `nodes`)
+        ...(withheldHeads.has(key) ? { currentWithheld: true } : {}),
       })),
+      ...(hiddenIds.size ? { withheldRevisions: allRows.length - rows.length } : {}),
     };
   });
 
@@ -2798,4 +2858,8 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       window: resolveCsvWindow(q.from, q.to),
     });
   });
+
+  // ADR-0316: the ONE context write path, handed to the session-distillation routes so a distilled revision goes
+  // through the same role, archive, read-before-write and conflict rules as any other contribution
+  return { writeContextRevision, requireRole };
 }

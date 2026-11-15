@@ -1,0 +1,3 @@
+<!-- fold: pending -->
+
+**E4a — Session distillation follow-ups (ADR-0316, 2026-11-15, lane E4).** (1) Screens on #453: the per-project switch, a "distil" action on a chat thread and the provenance panel. (2) Owner questions: automatic distillation at session end (built: author-triggered only) and the admin read rule (built: admins take the agent check). (3) RLS on the four new tables together with `project_context_items`. (4) The approvals inbox shows a conflicting distilled revision's text to the arbiter; the write refuses a conflict the arbiter could not read, but the inbox does not re-check later entitlement changes.

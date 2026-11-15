@@ -202,6 +202,8 @@ import { registerUseCaseOverviewRoutes } from "./use-case-overview.js";
 import { registerUseCaseDraftRoutes } from "./use-case-drafts.js";
 import { registerAgentCardRoutes } from "./agent-card.js";
 import { registerAgentSetupAssistRoutes } from "./agent-setup-assist.js";
+import { registerSessionDistillationRoutes } from "./session-distillation.js";
+import { distilledContextReadFilter } from "./session-distillation-access.js";
 import { registerDependencyGraphRoutes } from "./dependency-graph.js";
 import { registerRunGraphRoutes } from "./run-graph.js";
 import { registerGovernanceMonitorRoutes } from "./governance-monitor.js";
@@ -5977,7 +5979,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // base agent, checked inside the handler exactly as an invoke would check it.
   registerRegulAItLlmRoutes(app, db, { dataKey: opts.dataKey });
   registerConversationRoutes(app, db);
-  registerProjectRoutes(app, db);
+  // ADR-0316: the project routes withhold distilled context a reader could not have read the inputs of, and hand
+  // their one context write path to the session-distillation routes
+  const projectRouteHandles = registerProjectRoutes(app, db, { contextReadFilter: distilledContextReadFilter(db) });
+  registerSessionDistillationRoutes(app, db, projectRouteHandles, { dataKey: opts.dataKey });
   // ADR-0208 (G7): reviewed compliance-profile versions and retire
   registerComplianceProfileLifecycleRoutes(app, db);
   registerInfraRoutes(app, db, opts.dataKey);

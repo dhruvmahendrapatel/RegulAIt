@@ -436,6 +436,10 @@ export const KNOWN_UI_GAPS = new Map([
   ["GET /v1/connectors/:connectorId/token-exchange", { does: "reads a connector's upstream token-exchange configuration and per-action scope map (never the secret)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
   ["PUT /v1/connectors/:connectorId/token-exchange", { does: "sets or changes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
   ["DELETE /v1/connectors/:connectorId/token-exchange", { does: "removes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
+  ["GET /v1/projects/:projectId/session-distillation", { does: "reads whether members may distil their sessions into this project's shared context (off by default)", tracking: "ADR-0316 (lane E4): the brief is API-only; the session-distillation switch, the distil action on a chat thread and the provenance panel are requested on #453" }],
+  ["PUT /v1/projects/:projectId/session-distillation", { does: "turns session distillation on (admin, settings_relax step-up) or off for one project, audited", tracking: "ADR-0316 (lane E4): the brief is API-only; the session-distillation switch, the distil action on a chat thread and the provenance panel are requested on #453" }],
+  ["POST /v1/conversations/:conversationId/distil", { does: "distils the author's own session since its last checkpoint into a governed, provenance-tagged shared context revision", tracking: "ADR-0316 (lane E4): the brief is API-only; the session-distillation switch, the distil action on a chat thread and the provenance panel are requested on #453" }],
+  ["GET /v1/projects/:projectId/context/items/:itemId/distillation", { does: "reads a distilled revision's provenance (source session, author, agents, turns and context inputs) for a reader who may see it", tracking: "ADR-0316 (lane E4): the brief is API-only; the session-distillation switch, the distil action on a chat thread and the provenance panel are requested on #453" }],
 ]);
 
 /**
@@ -444,7 +448,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 48; // main's 43 (46 incl. ADR-0255 P31 +2, master decision on #753 2026-11-14; − 3 endpoint MCP config routes, #824) + ADR-0303 (lane L11) 5 SIEM destination routes awaiting #453
+export const KNOWN_UI_GAPS_MAX = 52; // main's 43 (46 incl. ADR-0255 P31 +2, master decision on #753 2026-11-14; − 3 endpoint MCP config routes, #824) + ADR-0303 (lane L11) 5 SIEM destination routes awaiting #453 + ADR-0316 (lane E4) 4 session-distillation routes awaiting #453
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 

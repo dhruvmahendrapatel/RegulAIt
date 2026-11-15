@@ -1,0 +1,3 @@
+<!-- fold: state-recap -->
+
+**2026-11-15 - lane E4, gap G8: session distillation into the Shared Project context store ([ADR-0316](../decisions/0316-session-distillation-shared-context.md)).** A person distils their own project-attributed conversation into a revision of `session/<conversationId>` through the one context write path, by one governed dispatch billed to the project. Off by default per project (admin, step-up, audited). A reader sees a distilled revision only while they may use its agents and read its declared context inputs; the check runs on the context list, history, graph and orchestration's supplied context. Migration `pending/session_distillation.sql` (numbered at merge). API only; four routes are known UI gaps on #453.

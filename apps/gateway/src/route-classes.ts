@@ -574,6 +574,11 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/projects/:projectId/context",
   "GET /v1/projects/:projectId/context/graph",
   "POST /v1/projects/:projectId/context/promote",
+  // ADR-0316: session distillation. The GET is project-member scoped and the distil is author-only; both check
+  // in the handler. The PUT (the per-project switch) stays admin-only and is deliberately NOT here.
+  "GET /v1/projects/:projectId/session-distillation",
+  "POST /v1/conversations/:conversationId/distil",
+  "GET /v1/projects/:projectId/context/items/:itemId/distillation",
   "GET /v1/projects/:projectId/compliance",
   "GET /v1/projects/:projectId/costs",
   "GET /v1/projects/:projectId/costs.csv",

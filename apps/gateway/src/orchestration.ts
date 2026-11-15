@@ -110,6 +110,7 @@ import { executeGovernedToolCall, resolveNodeToolContext } from "./mcp-proxy.js"
 import { loadAgentRevocations, loadRoleAgentGrants } from "./entitlements.js";
 import { loadModelPolicy, withModelPolicy, type ModelPolicyGate } from "./model-policy.js";
 import { assertProjectAttribution, projectPiiMode } from "./projects.js";
+import { hiddenDistilledItems } from "./session-distillation-access.js";
 // ADR-0079: the plan-only gate, shared verbatim with the invoke path.
 import { engineKeyWorkflowInstance, guardInstanceAttributedCall, guardProjectPlanOnly, isPlanSafeMode } from "./plan-only.js";
 import { loadInterceptionSettings } from "./compat-core.js";
@@ -527,6 +528,8 @@ async function resolveSuppliedContext(
   db: Db,
   projectId: string | null,
   keys: string[] | undefined,
+  /** ADR-0316: the run's initiating user; a distilled head they could not read is absent, like an unknown key */
+  readerUserId: string,
 ): Promise<{ system?: string; items: Array<{ id: string; key: string; revision: number }> }> {
   if (!projectId || !keys || keys.length === 0) return { items: [] };
   const rows = await db
@@ -544,8 +547,11 @@ async function resolveSuppliedContext(
     const prev = head.get(r.key);
     if (!prev || r.revision > prev.revision) head.set(r.key, r);
   }
+  const withheld = await hiddenDistilledItems(db, { userId: readerUserId, isAdmin: false }, [...head.values()].map((r) => r.id));
   // preserve the caller's declared order so the prompt is deterministic
-  const items = keys.map((k) => head.get(k)).filter((r): r is (typeof rows)[number] => Boolean(r));
+  const items = keys
+    .map((k) => head.get(k))
+    .filter((r): r is (typeof rows)[number] => Boolean(r) && !withheld.has(r!.id));
   if (items.length === 0) return { items: [] };
   // The FIRST LINE names exactly which item VERSIONS were supplied. That is not
   // decoration: it is the same manifest the `flowed_into` edges are built from,
@@ -786,7 +792,7 @@ async function dispatchRunNodeInner(
   // at the version that was actually supplied). An unknown key is silently
   // absent rather than an error — a worker asking for context that does not
   // exist yet is ordinary, and failing the dispatch over it would be worse.
-  const supplied = await resolveSuppliedContext(db, run.projectId ?? null, args.contextKeys);
+  const supplied = await resolveSuppliedContext(db, run.projectId ?? null, args.contextKeys, run.initiatingUserId);
   const systemPrompt = composeSystem(nested?.system, supplied.system);
 
   const [servedAgent] = await db.select().from(agents).where(eq(agents.id, ownerId));

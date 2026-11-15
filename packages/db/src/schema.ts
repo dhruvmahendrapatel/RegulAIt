@@ -16490,3 +16490,92 @@ export const resourceRateReservations = pgTable(
     ),
   ],
 );
+
+// ---------------------------------------------------------------------------
+// ADR-0316 (lane E4, pillar 4): session distillation into the Shared Project context store. A person's governed agent
+// session (a `conversations` thread attributed to a project) is distilled by a governed, metered dispatch into a
+// revision of the EXISTING store (`project_context_items`), written through the same versioned conflict path. These
+// tables only add what that store does not hold: the per-project switch and the provenance of a distilled revision.
+// ---------------------------------------------------------------------------
+
+// The per-project switch. No row = off (ADR-0180): an admin turns it on, audited. One row per project.
+export const projectSessionDistillationPolicies = pgTable("project_session_distillation_policies", {
+  projectId: uuid("project_id")
+    .primaryKey()
+    .references(() => projects.id, { onDelete: "cascade" }),
+  enabled: boolean("enabled").notNull().default(false),
+  updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// One row per distilled context revision: where it came from. The project, the author and the team are the context
+// item's own columns (joined for, never copied). The gateway only ever inserts these rows. Snapshot exception (ADR-0200 addendum): `conversation_id`, `distiller_agent_id` and the message
+// bounds are FK-free point-in-time references, because the conversation is personal data that retention may delete
+// while the shared revision it produced, and its provenance, stay.
+export const projectContextDistillations = pgTable(
+  "project_context_distillations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    contextItemId: uuid("context_item_id")
+      .notNull()
+      .unique()
+      .references(() => projectContextItems.id, { onDelete: "cascade" }),
+    /** snapshot: the source session (FK-free, see above) */
+    conversationId: uuid("conversation_id").notNull(),
+    /** snapshot: the agent that ran the distillation dispatch (FK-free evidence) */
+    distillerAgentId: uuid("distiller_agent_id").notNull(),
+    /** snapshot: the first and last session turn the distillation read (FK-free evidence) */
+    fromMessageId: uuid("from_message_id").notNull(),
+    throughMessageId: uuid("through_message_id").notNull(),
+    sessionStartedAt: timestamp("session_started_at", { withTimezone: true }).notNull(),
+    sessionLastTurnAt: timestamp("session_last_turn_at", { withTimezone: true }).notNull(),
+    distilledAt: timestamp("distilled_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("project_context_distillations_conversation_idx").on(t.conversationId, t.distilledAt)],
+);
+
+// The session turns a distillation read (its inputs). Snapshot exception: message ids are FK-free for the same
+// retention reason as the conversation id above.
+export const projectContextDistillationMessages = pgTable(
+  "project_context_distillation_messages",
+  {
+    distillationId: uuid("distillation_id")
+      .notNull()
+      .references(() => projectContextDistillations.id, { onDelete: "cascade" }),
+    messageId: uuid("message_id").notNull(),
+  },
+  (t) => [primaryKey({ name: "project_context_distillation_messages_pk", columns: [t.distillationId, t.messageId] })],
+);
+
+// The agents whose output the distilled session turns carry (the conversation's agent and every agent that served a
+// turn). A reader sees the distilled revision only while they may use each of these agents themselves. Snapshot
+// exception: agent ids are FK-free evidence, so deleting an agent never widens or erases who could read the revision
+// (an unknown agent fails the read check closed).
+export const projectContextDistillationAgents = pgTable(
+  "project_context_distillation_agents",
+  {
+    distillationId: uuid("distillation_id")
+      .notNull()
+      .references(() => projectContextDistillations.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id").notNull(),
+  },
+  (t) => [primaryKey({ name: "project_context_distillation_agents_pk", columns: [t.distillationId, t.agentId] })],
+);
+
+// Shared context revisions (from any project) the author declared the session drew on. Each was readable by the
+// author at distillation time, and a reader must be able to read each one (viewer on its project) to see the result.
+// Snapshot exception: the item id is FK-free so that deleting the input's project never removes the row and with it
+// the read check; an input that no longer exists fails the check closed.
+export const projectContextDistillationContextInputs = pgTable(
+  "project_context_distillation_context_inputs",
+  {
+    distillationId: uuid("distillation_id")
+      .notNull()
+      .references(() => projectContextDistillations.id, { onDelete: "cascade" }),
+    contextItemId: uuid("context_item_id").notNull(),
+  },
+  (t) => [
+    primaryKey({ name: "project_context_distillation_context_inputs_pk", columns: [t.distillationId, t.contextItemId] }),
+    index("project_context_distillation_context_inputs_item_idx").on(t.contextItemId),
+  ],
+);
