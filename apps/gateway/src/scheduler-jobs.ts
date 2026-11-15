@@ -123,6 +123,8 @@ export const SCHEDULER_JOB_NAMES = {
   spiffeBundleRefresh: "spiffe-bundle-refresh",
   // ADR-0222 (P13(a)): deletes fairness dataset rows past retention (fairness.ts)
   fairnessDatasetRetentionSweep: "fairness-dataset-retention-sweep",
+  // ADR-0303: delivers the audit chain to enabled SIEM destinations (siem-delivery.ts)
+  siemDeliverySweep: "siem-delivery-sweep",
   // ADR-0302 (P37 follow-up): deletes third-party ingest evidence past the audit floor (third-party-ingest-retention.ts)
   thirdPartyEvidenceRetentionSweep: "third-party-evidence-retention-sweep",
 } as const;
@@ -822,6 +824,7 @@ import { discoveryJobDefinitions } from "./discovery-worker.js";
 import { endpointAgentJobDefinitions } from "./endpoint-agent-routes.js";
 import { spiffeBundleRefreshJobDefinitions } from "./oauth/spiffe-bundle-endpoint.js";
 import { fairnessJobDefinitions } from "./fairness.js";
+import { siemJobDefinitions } from "./siem-delivery.js";
 import { thirdPartyIngestJobDefinitions } from "./third-party-ingest-retention.js";
 
 function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
@@ -839,6 +842,7 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...endpointAgentJobDefinitions(), // ADR-0195 SD4b: endpoint-agent-ingest
     ...spiffeBundleRefreshJobDefinitions(), // ADR-0188 S9 follow-up: spiffe-bundle-refresh
     ...fairnessJobDefinitions(), // ADR-0222 (P13(a)): fairness-dataset-retention-sweep
+    ...siemJobDefinitions({ dataKey: opts.dataKey }), // ADR-0303: siem-delivery-sweep
     ...thirdPartyIngestJobDefinitions(), // ADR-0302: third-party-evidence-retention-sweep
   ];
 }
