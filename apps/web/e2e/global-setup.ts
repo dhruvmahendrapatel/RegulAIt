@@ -75,9 +75,16 @@ export default async function globalSetup() {
     receiptKey.REGULAIT_RECEIPT_SIGNING_KEY = file;
     receiptKey.REGULAIT_RECEIPT_SIGNING_KEY_ID = `e2e-receipt-${process.pid}-${Date.now()}`;
   }
+  // ADR-0234 batch 7b: the first boot creates the regulait_runtime login through the owner connection and serves
+  // every request on it, so the specs run with row-level security binding the gateway (never the privileged opt-in)
+  const installSecrets: Record<string, string> = {};
+  if (!process.env.REGULAIT_INSTALL_SECRETS_DIR && !process.env.REGULAIT_RUNTIME_DATABASE_URL) {
+    installSecrets.REGULAIT_INSTALL_SECRETS_DIR = mkdtempSync(path.join(tmpdir(), "regulait-e2e-install-"));
+  }
   const env = {
     ...process.env,
     ...receiptKey,
+    ...installSecrets,
     REGULAIT_EPHEMERAL_LICENSE: "1",
     REGULAIT_LICENSE_KEYRING: licenseKeyring,
     DATABASE_URL,
