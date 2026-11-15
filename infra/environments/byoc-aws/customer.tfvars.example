@@ -16,6 +16,11 @@ bedrock_model_ids = ["<model or inference-profile id>"]
 # Add your PM tool and Git host here, e.g. "dev.azure.com", ".atlassian.net", "github.com".
 egress_allowed_domains = ["login.microsoftonline.com"]
 
+# HTTPS for users (needed for SSO): an internal ALB with your ACM certificate.
+ingress_hostname        = "<regulait.your-company.example>"
+ingress_certificate_arn = "arn:aws:acm:<region>:<account>:certificate/<id>"
+ingress_allowed_cidrs   = ["<your corporate CIDR reaching this VPC>"]
+
 tags = {
   project    = "regulait"
   managed-by = "terraform"

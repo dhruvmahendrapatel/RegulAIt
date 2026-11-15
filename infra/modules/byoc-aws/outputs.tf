@@ -69,7 +69,7 @@ output "egress" {
   description = "The internet path workloads have."
   value = {
     mode            = var.egress_mode
-    allowed_domains = local.allow_list ? var.egress_allowed_domains : []
+    allowed_domains = local.allow_list ? local.firewall_domains : []
     nat_public_ips  = aws_eip.nat[*].public_ip
   }
 }
@@ -135,6 +135,56 @@ output "data_boundary" {
     you mirror into ${aws_ecr_repository.images["gateway"].repository_url}.
     Model calls: Amazon Bedrock in this account through a VPC endpoint
     (${length(var.bedrock_model_ids)} model(s) allowed).
-    Internet: ${local.allow_list ? "HTTPS to ${join(", ", var.egress_allowed_domains)} only, through Network Firewall, logged" : "none"}.
+    Internet: ${local.allow_list ? "HTTPS to ${join(", ", local.firewall_domains)} only, through Network Firewall, logged" : "none"}.
   EOT
+}
+
+output "lb_controller_helm_values" {
+  description = "Values for the aws-load-balancer-controller chart (eks-charts) when ingress_controller is on."
+  value = var.ingress_controller ? yamlencode({
+    clusterName  = module.eks.cluster_name
+    region       = local.region
+    vpcId        = module.vpc.vpc_id
+    enableShield = false
+    enableWaf    = false
+    enableWafv2  = false
+    serviceAccount = {
+      create = true
+      name   = "aws-load-balancer-controller"
+    }
+  }) : null
+}
+
+output "ingress_manifest" {
+  description = "An internal ALB Ingress for the gateway Service (<release>-gateway:3000). kubectl apply -n <namespace> -f - once the controller is running."
+  value = var.ingress_controller && var.ingress_hostname != null && var.ingress_certificate_arn != null ? yamlencode({
+    apiVersion = "networking.k8s.io/v1"
+    kind       = "Ingress"
+    metadata = {
+      name = "regulait"
+      annotations = {
+        "alb.ingress.kubernetes.io/scheme"           = "internal"
+        "alb.ingress.kubernetes.io/target-type"      = "ip"
+        "alb.ingress.kubernetes.io/listen-ports"     = "[{\"HTTPS\":443}]"
+        "alb.ingress.kubernetes.io/certificate-arn"  = var.ingress_certificate_arn
+        "alb.ingress.kubernetes.io/ssl-policy"       = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+        "alb.ingress.kubernetes.io/inbound-cidrs"    = join(",", local.ingress_inbound_cidrs)
+        "alb.ingress.kubernetes.io/healthcheck-path" = "/health"
+        "alb.ingress.kubernetes.io/subnets"          = join(",", local.node_subnet_ids)
+      }
+    }
+    spec = {
+      ingressClassName = "alb"
+      rules = [{
+        host = var.ingress_hostname
+        http = {
+          paths = [{
+            path     = "/"
+            pathType = "Prefix"
+            backend  = { service = { name = var.gateway_service_account, port = { number = 3000 } } }
+          }]
+        }
+      }]
+    }
+  }) : null
 }

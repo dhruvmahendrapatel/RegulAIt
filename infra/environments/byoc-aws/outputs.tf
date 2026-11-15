@@ -57,3 +57,11 @@ output "region" {
 output "kms_key_arn" {
   value = module.byoc.kms_key_arn
 }
+
+output "lb_controller_helm_values" {
+  value = module.byoc.lb_controller_helm_values
+}
+
+output "ingress_manifest" {
+  value = module.byoc.ingress_manifest
+}

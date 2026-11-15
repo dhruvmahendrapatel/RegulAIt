@@ -26,4 +26,8 @@ module "byoc" {
   audit_retention_days                 = var.audit_retention_days
   bedrock_model_ids                    = var.bedrock_model_ids
   iam_permissions_boundary_arn         = var.iam_permissions_boundary_arn
+  ingress_controller                   = var.ingress_controller
+  ingress_allowed_cidrs                = var.ingress_allowed_cidrs
+  ingress_hostname                     = var.ingress_hostname
+  ingress_certificate_arn              = var.ingress_certificate_arn
 }

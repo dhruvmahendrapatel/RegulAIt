@@ -130,7 +130,7 @@ variable "gateway_namespace" {
 }
 
 variable "gateway_service_account" {
-  description = "Service account of the gateway (the chart names it <release>-gateway)."
+  description = "Service account (and Service) name of the gateway: the chart names both <release>-gateway."
   type        = string
   default     = "regulait-gateway"
 }
@@ -219,6 +219,37 @@ variable "ecr_pull_through_ecr_public" {
 
 variable "iam_permissions_boundary_arn" {
   description = "Permissions boundary for every IAM role this stack creates. Required when the installer role is limited by infra/modules/aws-byoc-deployer-policy (pass its boundary_policy_arn)."
+  type        = string
+  default     = null
+}
+
+### Ingress ###
+
+variable "ingress_controller" {
+  description = "Create the AWS Load Balancer Controller's identity (Pod Identity role with the upstream v3.6.3 policy) and the ELB VPC endpoint, so an internal ALB can front the gateway with your ACM certificate. Needed for SSO (users must reach the gateway over HTTPS)."
+  type        = bool
+  default     = true
+}
+
+variable "ingress_allowed_cidrs" {
+  description = "Networks allowed to reach the internal ALB (your corporate ranges over VPN or Direct Connect). Empty = the VPC only."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for c in var.ingress_allowed_cidrs : can(cidrhost(c, 0)) && c != "0.0.0.0/0"])
+    error_message = "Each entry must be a CIDR, and 0.0.0.0/0 is refused (the ALB is internal)."
+  }
+}
+
+variable "ingress_hostname" {
+  description = "Hostname users reach RegulAIt at (REGULAIT_PUBLIC_URL host). Used in the Ingress manifest output."
+  type        = string
+  default     = null
+}
+
+variable "ingress_certificate_arn" {
+  description = "ACM certificate ARN for ingress_hostname, in this region."
   type        = string
   default     = null
 }

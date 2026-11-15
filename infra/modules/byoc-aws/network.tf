@@ -32,6 +32,10 @@ locals {
   endpoint_subnets = [for i in range(var.az_count) : cidrsubnet(var.vpc_cidr, 8, 190 + i)]
 
   cluster_name = "${var.name_prefix}-eks"
+
+  # ACM has no VPC endpoint; the load balancer controller reads certificates
+  # from it, so its regional API host joins the allow-list when ingress is on.
+  firewall_domains = distinct(concat(var.egress_allowed_domains, var.ingress_controller ? ["acm.${local.region}.amazonaws.com"] : []))
 }
 
 resource "aws_cloudwatch_log_group" "flow" {
@@ -137,9 +141,9 @@ module "endpoints" {
         route_table_ids = concat(module.vpc.private_route_table_ids, module.vpc.database_route_table_ids)
       }
     },
-    { for svc in [
+    { for svc in concat([
       "sts", "ecr.api", "ecr.dkr", "ec2", "eks-auth", "logs", "kms", "secretsmanager", "bedrock-runtime",
-      ] : replace(svc, ".", "_") => {
+      ], var.ingress_controller ? ["elasticloadbalancing"] : []) : replace(svc, ".", "_") => {
       service             = svc
       private_dns_enabled = true
     } }
@@ -186,7 +190,7 @@ resource "aws_networkfirewall_rule_group" "egress_domains" {
       rules_source_list {
         generated_rules_type = "ALLOWLIST"
         target_types         = ["TLS_SNI"]
-        targets              = var.egress_allowed_domains
+        targets              = local.firewall_domains
       }
     }
   }

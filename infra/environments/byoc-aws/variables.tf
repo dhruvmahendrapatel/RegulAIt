@@ -117,3 +117,23 @@ variable "iam_permissions_boundary_arn" {
   type    = string
   default = null
 }
+
+variable "ingress_controller" {
+  type    = bool
+  default = true
+}
+
+variable "ingress_allowed_cidrs" {
+  type    = list(string)
+  default = []
+}
+
+variable "ingress_hostname" {
+  type    = string
+  default = null
+}
+
+variable "ingress_certificate_arn" {
+  type    = string
+  default = null
+}
