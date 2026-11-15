@@ -1,0 +1,3 @@
+<!-- fold: state-recap -->
+
+**2026-11-15 - lane E11: pilot readiness audit and live harness ([ADR-0326](../decisions/0326-pilot-readiness-audit-and-live-harness.md)).** `internal/product/PILOT_READINESS.md` traces the four pilot criteria through `main`: criterion 1 (block in all four tools) and 3 (one ADO work item end to end) are not met, 2 (spend and budget alert) is partly met (no Bedrock, Vertex or tool-side spend, no pushed alert), 4 (BYOC) is met on Compose only. A live harness (`apps/gateway/live/`, `live-tests.yml`, dispatch and nightly, `live-tests` environment) runs against test tenants. Fixed: direct Entra OIDC login (`xms_edov` from the tenant's own issuer), audit rows for `model_not_mapped`/`agent_not_resolvable`, the INSTALL.md IdP route. No migration.
