@@ -46,10 +46,6 @@ export const DELIBERATELY_API_ONLY = new Map([
   // A DELETE that is still a 501 `notBuilt` stub needs no entry: a stub deletes nothing, so the census skips it until
   // it becomes a real handler, and an entry for one is reported stale (see staleExemptions).
   ["/v1/mcp/authorised-targets/:x", "ADR-0246 (P27): API-only brief; the authorised-targets screen is posted on #453 (route census KNOWN_UI_GAPS). RAISED for the master's review on the PR: delete this entry when the screen lands"],
-  // ADR-0236 (P11), owner decision 2026-11-07 (#697): API-first until the bundle screen requested on #453 lands; these
-  // two entries are deleted when it does (KNOWN_UI_GAPS in preflight-ui-route-census.mjs holds the same routes).
-  ["/v1/mcp-bundles/:x", "archiving an MCP bundle: API-only until the bundle screen on #453 (owner decision 2026-11-07, #697)"],
-  ["/v1/mcp-bundles/:x/grants/:x", "revoking an MCP bundle grant: API-only until the bundle screen on #453 (owner decision 2026-11-07, #697)"],
   // ADR-0322 (lane E7): the vendor usage pull brief is API-only; the connector screen is posted on #453 (route census
   // KNOWN_UI_GAPS holds the same route). RAISED for the master's review on the PR: delete this entry when the screen lands.
   ["/v1/vendor-usage/connectors/:x/credential", "revoking a vendor usage connector credential: API-only until the vendor usage screen on #453 (ADR-0322, lane E7)"],
