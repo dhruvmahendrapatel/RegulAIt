@@ -246,6 +246,43 @@ describe("the workflows wire the scope fail-closed", () => {
     expect(rule).toContain('(."gateway-coverage" | ok($o.gateway))');
   });
 
+  it("the scope action declares every output the script writes, and every workflow reads only declared ones (#851)", () => {
+    // GitHub drops a composite action's output that is not declared: `needs.scope.outputs.<k>` then reads as ''
+    const action = yaml.load(readFileSync(path.join(repo, ".github/actions/ci-scope/action.yml"), "utf8"));
+    for (const k of OUTPUTS) expect(action.outputs?.[k]?.value, `action output ${k}`).toBe(`\${{ steps.scope.outputs.${k} }}`);
+    const declared = Object.keys(action.outputs);
+    for (const [file, id] of [["ci.yml", "scope"], ["ui-enterprise.yml", "scope"], ["security.yml", "engines"]]) {
+      for (const [k, v] of Object.entries(workflow(file).jobs[id].outputs)) {
+        const m = /^\$\{\{ steps\.scope\.outputs\.([a-z]+) \}\}$/.exec(v);
+        if (m) expect(declared, `${file} ${id}.outputs.${k}`).toContain(m[1]);
+      }
+    }
+  });
+
+  it("the aggregates refuse a scope output that is neither 'true' nor 'false', so an empty one never allows a skip", () => {
+    const parts = (gateway, coverage) => JSON.stringify({
+      scope: { result: "success", outputs: { code: "true", gateway } },
+      "build-and-test-base": { result: "success" }, "gateway-tests": { result: "success" }, "gateway-coverage": { result: coverage },
+    });
+    const rule = workflow("ci.yml").jobs["build-and-test"].steps.at(-1).run;
+    const filter = /jq -e '([\s\S]*?)' > \/dev\/null/.exec(rule)[1];
+    const passes = (input) => {
+      try {
+        execFileSync("jq", ["-e", filter], { input, stdio: ["pipe", "ignore", "ignore"] });
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    expect(passes(parts("true", "success"))).toBe(true);
+    expect(passes(parts("false", "skipped"))).toBe(true);
+    expect(passes(parts("true", "skipped")), "a full run must run the coverage check").toBe(false);
+    expect(passes(parts("", "skipped")), "an undeclared (empty) output must fail, not allow the skip").toBe(false);
+    expect(passes(parts("maybe", "skipped"))).toBe(false);
+    const ui = workflow("ui-enterprise.yml").jobs.all.steps.at(-1).run;
+    expect(ui).toContain('def ok(want): if want == "true" then .result == "success" elif want == "false" then .result == "skipped" else false end;');
+  });
+
   it("every workflow a PR starts cancels a superseded PR run, and only a PR run", () => {
     const PR_ONLY = "${{ github.event_name == 'pull_request' }}";
     for (const f of ["ci.yml", "ui-enterprise.yml", "security.yml", "import-cycles.yml", "integrations.yml", "client-compat.yml",

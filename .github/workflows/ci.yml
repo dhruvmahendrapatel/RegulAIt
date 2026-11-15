@@ -693,13 +693,16 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
+      # ADR-0323: an output that is neither 'true' nor 'false' (empty, because the scope action did not declare it,
+      # or anything else) fails the aggregate. On #851 an undeclared `gateway` read as '' and let the coverage check
+      # skip on a full run; "not true" must never mean "a skip is allowed".
       - name: Every part of build-and-test passed
         env:
           RESULTS: ${{ toJSON(needs) }}
         run: |
           echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
           echo "$RESULTS" | jq -e '
-            def ok(want): if want == "true" then .result == "success" else .result == "skipped" end;
+            def ok(want): if want == "true" then .result == "success" elif want == "false" then .result == "skipped" else false end;
             .scope.outputs as $o |
             length == 4 and .scope.result == "success" and
             (."build-and-test-base" | ok($o.code)) and (."gateway-tests" | ok($o.code)) and (."gateway-coverage" | ok($o.gateway))' > /dev/null

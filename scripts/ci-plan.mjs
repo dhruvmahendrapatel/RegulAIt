@@ -114,17 +114,38 @@ export function evaluate(src, ctx) {
 const usesStatus = (expr) => /\b(cancelled|always|success|failure)\s*\(/.test(String(expr));
 
 // ── one pull_request run ────────────────────────────────────────────────────
-/** the scope step's outputs as the workflows see them: the strings 'true' / 'false' */
-const scopeStrings = (scope) => Object.fromEntries(Object.entries(scope).filter(([k]) => k !== "reason").map(([k, v]) => [k, String(v)]));
+/** the scope action's outputs as a workflow step sees them: the strings 'true' / 'false', and only for the outputs
+ *  .github/actions/ci-scope/action.yml DECLARES. GitHub drops an output the action does not declare, so it reads as
+ *  '' in `needs.scope.outputs`; modelling that is what lets the dry run catch an undeclared output (#851). */
+export function scopeStepOutputs(scope) {
+  const action = yaml.load(readFileSync(path.join(repo, ".github/actions/ci-scope/action.yml"), "utf8"));
+  const out = {};
+  for (const [k, def] of Object.entries(action.outputs ?? {})) {
+    const m = /^\$\{\{\s*steps\.scope\.outputs\.([A-Za-z0-9_-]+)\s*\}\}$/.exec(String(def.value).trim());
+    out[k] = m && m[1] in scope && m[1] !== "reason" ? String(scope[m[1]]) : "";
+  }
+  return out;
+}
+
+/** a job's `outputs:` map, each `${{ steps.scope.outputs.X }}` read from the scope action's step outputs */
+function jobScopeOutputs(job, scope) {
+  const step = scopeStepOutputs(scope);
+  return Object.fromEntries(Object.entries(job.outputs ?? {}).map(([k, v]) => {
+    const m = /^\$\{\{\s*steps\.scope\.outputs\.([A-Za-z0-9_-]+)\s*\}\}$/.exec(String(v).trim());
+    return [k, m ? (step[m[1]] ?? "") : "unknown"];
+  }));
+}
 
 /** the outputs a job writes, for the jobs whose outputs other jobs read */
 function outputsOf(file, id, job, scope) {
-  if (id === "scope") return scopeStrings(scope);
+  if (id === "scope") return jobScopeOutputs(job, scope);
   if (file === "security.yml" && id === "engines") {
     const names = readdirSync(path.join(repo, "engines"), { withFileTypes: true })
       .filter((e) => e.isDirectory() && readdirSync(path.join(repo, "engines", e.name)).includes("Dockerfile"))
       .map((e) => e.name);
-    return { code: String(scope.code), image: String(scope.image), engines: JSON.stringify(scope.engines ? names : []) };
+    const step = scopeStepOutputs(scope);
+    // the find step's rule: only an exact 'false' builds no engine
+    return { ...jobScopeOutputs(job, scope), engines: JSON.stringify(step.engines === "false" ? [] : names) };
   }
   return Object.fromEntries(Object.keys(job.outputs ?? {}).map((k) => [k, "unknown"]));
 }
