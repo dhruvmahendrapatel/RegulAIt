@@ -109,7 +109,7 @@ test.describe("I-2 rollout E: Workload identities", () => {
     await page.goto("/ui/admin/workload-identities");
     await expect(page.getByRole("heading", { name: "Workload identities", level: 1 })).toBeVisible();
 
-    const tablist = await expectPairedTabs(page, "Identity settings", ["Delegation", "Settings · 1 to review", "Signing & trust"], async () => {
+    const tablist = await expectPairedTabs(page, "Identity settings", ["Delegation", "Settings · 1 warning", "Signing & trust"], async () => {
       await expect(page.getByText("External child delegation unavailable")).toBeVisible();
     });
 
@@ -130,7 +130,7 @@ test.describe("I-2 rollout E: SSO & sessions", () => {
     await expect(page.getByRole("heading", { name: "SSO & sessions", level: 1 })).toBeVisible();
     const status = page.getByRole("group", { name: "Sign-in status" });
 
-    const tablist = await expectPairedTabs(page, "SSO settings", ["OIDC providers", "SAML providers · 1 to review", "Sessions & step-up · 3 to review"], async () => {
+    const tablist = await expectPairedTabs(page, "SSO settings", ["OIDC providers", "SAML providers · 1 warning", "Sessions & step-up · 1 unknown · 2 warnings"], async () => {
       // "SSO only" counts OIDC and SAML together, so both counts show whichever family's tab is open
       await expect(status.getByText("OIDC: 0 enabled")).toBeVisible();
       await expect(status.getByText("SAML: 1 enabled")).toBeVisible();
@@ -140,12 +140,12 @@ test.describe("I-2 rollout E: SSO & sessions", () => {
 
     await tablist.getByRole("tab", { name: "OIDC providers" }).click();
     await page.getByRole("tabpanel").getByLabel("Name").fill("okta-prod");
-    await tablist.getByRole("tab", { name: "SAML providers · 1 to review" }).click();
+    await tablist.getByRole("tab", { name: "SAML providers · 1 warning" }).click();
     await tablist.getByRole("tab", { name: "OIDC providers" }).click();
     await expect(page.getByRole("tabpanel").getByLabel("Name")).toHaveValue("okta-prod");
     // the empty state and the policy requirements moved nowhere
     await expect(page.getByRole("tabpanel").getByText("No OIDC providers")).toBeVisible();
-    await tablist.getByRole("tab", { name: "Sessions & step-up · 3 to review" }).click();
+    await tablist.getByRole("tab", { name: "Sessions & step-up · 1 unknown · 2 warnings" }).click();
     await expect(page.getByTestId("sso-policy-requirements")).toBeVisible();
 
     await expectAxeClean(page, "SSO, sessions tab");
