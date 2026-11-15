@@ -21,10 +21,14 @@ variable "allowed_regions" {
 variable "scope_tag" {
   description = <<-EOT
     Tag that marks resources the deployer owns, e.g. { key = "purpose", value = "rehearsal" }.
-    When set, creating the stack's root resources (VPC, EKS cluster, RDS
-    instance, KMS key, Network Firewall) without this tag is denied, and so is
-    deleting one of them that does not carry it. null turns both checks off,
-    for a customer account where tags are governed elsewhere.
+    When set: every create in tagged_create_actions must carry it; KMS keys,
+    EC2 structure (instances, volumes, snapshots, routes, subnets, VPCs,
+    endpoints, gateways) and, for the deployer, security groups can be changed
+    only when they carry it; and the tag cannot be added to an existing EC2
+    resource. Resources with names (RDS, Secrets Manager, Logs, EKS, Network
+    Firewall, S3, ECR, IAM) are limited by name_prefix whether or not this is
+    set. null turns the tag checks off, for an account whose tags are governed
+    elsewhere.
   EOT
   type = object({
     key   = string
@@ -36,13 +40,13 @@ variable "scope_tag" {
 variable "forbidden_tag_patterns" {
   description = "Any action on a resource whose tag (keys below) matches one of these patterns is denied, for the deployer and every role it creates. Keeps a rehearsal or pilot role away from anything marked production."
   type        = list(string)
-  default     = ["prod", "prod-*", "*-prod", "production", "*production*"]
+  default     = ["*prod*"]
 }
 
 variable "forbidden_tag_keys" {
   description = "Tag keys checked against forbidden_tag_patterns."
   type        = list(string)
-  default     = ["environment", "env", "stage", "purpose"]
+  default     = ["environment", "env"]
 }
 
 variable "attachable_managed_policy_arns" {
@@ -61,9 +65,27 @@ variable "attachable_managed_policy_arns" {
 }
 
 variable "protected_role_arns" {
-  description = "Roles no one under this boundary may modify, typically the deployer role itself. The policy's own ARN is always protected."
+  description = "Roles no one under the deployer boundary may modify, typically the deployer role itself. Both boundary policies are always protected."
   type        = list(string)
   default     = []
+}
+
+variable "tagged_create_actions" {
+  description = "Creates the deployer may make only with the scope tag in the request (all of these support tag-on-create). Used when scope_tag is set."
+  type        = list(string)
+  default = [
+    "ec2:CreateVpc", "ec2:CreateSubnet", "ec2:CreateSecurityGroup", "ec2:CreateRouteTable",
+    "ec2:CreateInternetGateway", "ec2:CreateNatGateway", "ec2:AllocateAddress", "ec2:CreateVpcEndpoint",
+    "ec2:CreateFlowLogs", "ec2:CreateLaunchTemplate",
+    "eks:CreateCluster", "eks:CreateNodegroup", "eks:CreateAddon", "eks:CreateAccessEntry",
+    "eks:CreatePodIdentityAssociation",
+    "rds:CreateDBInstance", "rds:CreateDBSubnetGroup", "rds:CreateDBParameterGroup", "rds:CreateOptionGroup",
+    "kms:CreateKey",
+    "network-firewall:CreateFirewall", "network-firewall:CreateFirewallPolicy", "network-firewall:CreateRuleGroup",
+    "logs:CreateLogGroup",
+    "iam:CreateRole", "iam:CreatePolicy", "iam:CreateInstanceProfile",
+    "ecr:CreateRepository",
+  ]
 }
 
 variable "tags" {

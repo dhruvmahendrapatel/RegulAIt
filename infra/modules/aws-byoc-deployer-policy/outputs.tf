@@ -1,6 +1,11 @@
 output "boundary_policy_arn" {
-  description = "Attach as the permissions boundary of the deployer role. Every role the deployer creates must carry it too."
+  description = "Attach as the permissions boundary of the deployer role."
   value       = aws_iam_policy.boundary.arn
+}
+
+output "workload_boundary_policy_arn" {
+  description = "Every role the deployer creates must carry this boundary (pass it to byoc-aws as iam_permissions_boundary_arn)."
+  value       = aws_iam_policy.workload_boundary.arn
 }
 
 output "boundary_policy_name" {

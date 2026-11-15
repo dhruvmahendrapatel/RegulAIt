@@ -7,26 +7,68 @@
   - the GitHub OIDC identity provider (skipped if the account already has one),
   - one IAM role, `gh-actions-regulait-rehearsal`, which only a GitHub Actions job running in this repository's
     `rehearsal` environment can use,
-  - one permissions boundary, `regulait-rehearsal-byoc-boundary`, which limits that role and every role it creates.
+  - two permissions boundaries: `regulait-rehearsal-byoc-boundary` limits that role, and
+    `regulait-rehearsal-byoc-workload-boundary` limits every role it creates.
 - **What it does not do**: it creates no network, server or database, and it costs nothing to keep. It never
   touches the management account or any other account.
 
 ## What the role can and cannot do
 
-It can build and destroy the BYOC test stack in one region: network, Kubernetes (EKS), Postgres (RDS), encryption
-keys, the audit bucket, the egress firewall, a private container registry, and calls to Bedrock. IAM roles,
-IAM policies, S3 buckets and registry repositories must be named
-`regulait-rehearsal-…`; the network, cluster, database, key and firewall must carry the tag `purpose=rehearsal` to be
-created or deleted.
+It can build and destroy the BYOC test stack in one region:
 
-It cannot create users or access keys, remove its own limits, change its own role, act outside the chosen region,
-change Organizations, SSO or billing, or touch anything tagged as production.
+- network;
+- Kubernetes (EKS);
+- Postgres (RDS);
+- encryption keys;
+- the audit bucket;
+- the egress firewall;
+- a private container registry;
+- calls to Bedrock.
+
+**Limited by name** (`regulait-rehearsal-…`): IAM roles, policies and instance profiles, RDS, Secrets Manager
+secrets, CloudWatch log groups, EKS clusters, Network Firewall, S3 buckets and registry repositories. It cannot
+read, change or delete any of these that do not carry the name. That includes another stack's secrets, databases
+and log groups.
+
+**Limited by tag** (`purpose=rehearsal`): KMS keys, and EC2 instances, volumes, snapshots, routes, subnets, VPCs,
+gateways and endpoints. Security groups are limited the same way for the role itself. It cannot add that tag to
+something that does not already have it.
+
+**Every create must carry the tag**, and that includes IAM roles. The clean-up check after each rehearsal therefore
+finds anything left behind.
+
+**Roles it creates are weaker than it is.** They carry the workload boundary, under which:
+
+- no IAM change is possible at all;
+- they cannot touch Secrets Manager, RDS or Network Firewall;
+- they get nothing in an OIDC (web-identity) session. A role left behind with a GitHub trust is useless, so it cannot
+  be used to skip the reviewers.
+
+**It cannot:**
+
+- create IAM users or access keys;
+- edit any role's trust policy;
+- remove or change either boundary;
+- change its own role;
+- act outside the chosen region;
+- change Organizations, SSO or billing;
+- touch anything tagged as production (`environment` or `env` containing "prod").
+
+**What IAM cannot express**, and how it is covered:
+
+- **Trust policy content.** Nothing can check what a new role trusts. The controls are:
+  - roles only under the prefix and only tagged;
+  - no trust edits;
+  - the workload boundary;
+  - CloudTrail, which records every `CreateRole` with its trust.
+- **Security groups and network interfaces made by EKS and the load balancer controller.** They are untagged, so the
+  workload boundary leaves them to those services (ADR-0325).
 
 ## Before you start
 
 You need:
 
-1. The AWS CLI v2 and Terraform 1.9 or later on your computer.
+1. The AWS CLI v2 and Terraform 1.11 or later on your computer (the repository pins 1.16.7).
 2. Your normal Identity Center sign-in to the **regulait-dev** account with the Deploy-Builder permission set, and the
    management-account profile you already use for Terraform state.
 3. Admin access to the GitHub repository's settings.
@@ -38,9 +80,28 @@ In the repository on GitHub: **Settings → Environments → New environment**.
 1. Name it exactly `rehearsal`.
 2. Tick **Required reviewers** and add yourself. Every rehearsal run then waits for your approval before it can reach
    AWS.
-3. Tick **Prevent self-review** if anyone else can start workflows.
+3. **Prevent self-review.** Tick it whenever a second person can approve. With it on, the person who starts a run
+   cannot approve it.
+   - The lane's sessions start runs under your GitHub account. Ticking it while you are the only reviewer would block
+     every run.
+   - While you are the only reviewer, required reviewers is the gate: you approve each run yourself, after reading what
+     it will apply. Add a second reviewer and tick this box as soon as you can.
 4. Under **Deployment branches and tags**, choose **Selected branches and tags** and add `main` and `builder/*`.
 5. Save. Leave the page open; you come back in step 4.
+
+### Step 1b (recommended): pin the repository by its ID
+
+By default the role trusts the repository's owner and name. To make it trust the repository's numeric ID instead, so
+that a renamed, transferred or re-created repository cannot inherit the trust:
+
+```bash
+gh api repos/<owner>/<repo> --jq .id                       # note the number
+gh api -X PUT repos/<owner>/<repo>/actions/oidc/customization/sub \
+  -F use_default=false -f 'include_claim_keys[]=repository_id' -f 'include_claim_keys[]=environment'
+```
+
+Then set `github_repository_id = <the number>` in step 3's `terraform.tfvars`. Do both or neither: if only one is
+done, the role cannot be assumed.
 
 ## Step 2: sign in to AWS (2 minutes)
 
@@ -69,13 +130,25 @@ terraform init -backend-config=backend.hcl
 terraform plan -out rehearsal-role.plan
 ```
 
-Read the plan. It should **add 3 or 4 resources** (provider if new, boundary policy, role, inline policy) and change
-or destroy nothing. If it shows anything else, stop and ask.
+Read the plan:
+
+- It should **add 4 or 5 resources**: the provider (if new), the two boundary policies, the role and its inline
+  policy. It should change or destroy nothing.
+- In the role's `assume_role_policy`, check that the `sub` is exactly
+  `repo:<owner>/<repo>:environment:rehearsal`, or `repository_id:<id>:environment:rehearsal` with step 1b, and that
+  the `aud` is `sts.amazonaws.com`.
+
+If it shows anything else, stop and ask.
 
 ```bash
-terraform apply rehearsal-role.plan
+terraform show -no-color rehearsal-role.plan > rehearsal-role-plan.txt
+terraform apply -no-color rehearsal-role.plan | tee rehearsal-role-apply.txt
 terraform output rehearsal_role_arn
 ```
+
+**Keep the record.** In both text files, replace the 12-digit account number with `<account>`. Then attach both to
+the PR (or the ceremony record) with the date and your name. That is the log of this apply. Every later rehearsal
+writes its own record to its run summary.
 
 Terraform refuses to run if your profile points at any account other than the `workload_account_id` you entered.
 

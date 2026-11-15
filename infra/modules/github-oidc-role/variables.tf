@@ -42,9 +42,9 @@ variable "existing_oidc_provider_arn" {
 }
 
 variable "create_branch_roles" {
-  description = "Create the original plan (pull_request) and deploy (refs/heads/main) roles."
+  description = "Create the original plan (pull_request, reachable from forks) and deploy (refs/heads/main) roles. Off by default (ADR-0180); turn on only with a reason."
   type        = bool
-  default     = true
+  default     = false
 }
 
 variable "permissions_boundary_arn" {
@@ -62,6 +62,19 @@ variable "deploy_role_policy_arns" {
   description = "Managed policy ARNs granting write access for the deploy role."
   type        = list(string)
   default     = []
+}
+
+variable "github_repository_id" {
+  description = <<-EOT
+    Numeric GitHub repository ID. When set, environment roles trust the subject
+    "repository_id:<id>:environment:<name>" instead of
+    "repo:<owner>/<repo>:environment:<name>", so a renamed, transferred or
+    re-created repository with the same name cannot inherit the trust. The
+    repository's OIDC subject template must then be customised to
+    ["repository_id", "environment"] (docs/ops/BYOC_REHEARSAL_ROLE.md).
+  EOT
+  type        = number
+  default     = null
 }
 
 variable "environment_roles" {
