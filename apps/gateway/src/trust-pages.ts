@@ -69,7 +69,7 @@ import {
   createAuditorGrantSchema,
   EXTERNAL_MFA_CHALLENGE_REFUSAL,
   EXTERNAL_MFA_CODE_REFUSAL,
-  EXTERNAL_MFA_COOKIE,
+  PORTAL_STEP_COOKIE,
   EXTERNAL_MFA_LIMITS,
   EXTERNAL_MFA_LOCKED,
   EXTERNAL_MFA_UNAVAILABLE,
@@ -1240,7 +1240,7 @@ export function registerTrustPagesRoutes(app: FastifyInstance, db: Db, opts: { d
       return reply.status(403).send({ error: "csrf_header_required", detail: `requests must carry ${CSRF_HEADER}: 1` });
     }
     const clear = challengeCookie("auditor", "", requestIsSecure(req), 0);
-    const challengeToken = readCookie(req.headers.cookie, EXTERNAL_MFA_COOKIE);
+    const challengeToken = readCookie(req.headers.cookie, PORTAL_STEP_COOKIE);
     if (!challengeToken || !opts.dataKey) return reply.status(401).header("set-cookie", clear).send(EXTERNAL_MFA_CHALLENGE_REFUSAL);
     if (await limitMfa(req, reply, challengeToken)) return reply;
     const parsed = externalMfaVerifySchema.safeParse(req.body);

@@ -37,7 +37,7 @@ import {
   trustPublications,
   type Db,
 } from "@regulait/db";
-import { EXTERNAL_MFA_COOKIE, EXTERNAL_MFA_LIMITS, SUPPLIER_SESSION_COOKIE } from "@regulait/shared";
+import { PORTAL_STEP_COOKIE, EXTERNAL_MFA_LIMITS, SUPPLIER_SESSION_COOKIE } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { routeAuthClass } from "./route-classes.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
@@ -184,7 +184,7 @@ describe("supplier portal second factor", () => {
     const url = r.json().link.url as string;
     return url.slice(url.indexOf("#") + 1);
   }
-  const challengeOf = (r: Res) => pair(cookieNamed(r, EXTERNAL_MFA_COOKIE));
+  const challengeOf = (r: Res) => pair(cookieNamed(r, PORTAL_STEP_COOKIE));
 
   beforeAll(async () => {
     restoreStepUp = await relaxStepUpForTest(db);
@@ -220,7 +220,7 @@ describe("supplier portal second factor", () => {
     expect(body.secret).toMatch(/^[A-Z2-7]+$/);
     expect(body.otpauthUri).toContain(encodeURIComponent(`RegulAIt:xm-${RUN}@supplier.example`));
     secret = body.secret;
-    const c = cookieNamed(r, EXTERNAL_MFA_COOKIE)!;
+    const c = cookieNamed(r, PORTAL_STEP_COOKIE)!;
     expect(c).toMatch(/HttpOnly/);
     expect(c).toMatch(/SameSite=Strict/);
     expect(c).toMatch(/Path=\/supplier\/v1\/session\/mfa/);
@@ -243,7 +243,7 @@ describe("supplier portal second factor", () => {
     const ok = await verify(challengeOf(r), codeNow(secret));
     expect(ok.statusCode, ok.body).toBe(200);
     const session = pair(cookieNamed(ok, SUPPLIER_SESSION_COOKIE));
-    expect(setCookies(ok).some((x) => x.startsWith(`${EXTERNAL_MFA_COOKIE}=;`))).toBe(true);
+    expect(setCookies(ok).some((x) => x.startsWith(`${PORTAL_STEP_COOKIE}=;`))).toBe(true);
     const read = await app.inject({ method: "GET", url: "/supplier/v1/assessment", headers: { cookie: session }, remoteAddress: freshIp() });
     expect(read.statusCode, read.body).toBe(200);
     const [after] = await db.select().from(externalMfaFactors).where(eq(externalMfaFactors.supplierAccessId, accessId));
@@ -261,7 +261,7 @@ describe("supplier portal second factor", () => {
     const reused = await signIn(firstLink);
     expect(reused.statusCode).toBe(401);
     expect(reused.json().error).toBe("link_not_valid");
-    expect(cookieNamed(reused, EXTERNAL_MFA_COOKIE)).toBeUndefined();
+    expect(cookieNamed(reused, PORTAL_STEP_COOKIE)).toBeUndefined();
 
     const r = await signIn(await newLink());
     expect(r.statusCode, r.body).toBe(200);
@@ -394,7 +394,7 @@ describe("auditor portal second factor", () => {
   const redeem = (token: string, a = app) => a.inject({ method: "POST", url: "/v1/auditor/session", headers: CSRF, payload: { token }, remoteAddress: freshIp() }) as Promise<Res>;
   const verify = (challenge: string | undefined, code: string) =>
     app.inject({ method: "POST", url: "/v1/auditor/session/mfa", headers: { ...CSRF, ...(challenge ? { cookie: challenge } : {}) }, payload: { code }, remoteAddress: freshIp() }) as Promise<Res>;
-  const challengeOf = (r: Res) => pair(cookieNamed(r, EXTERNAL_MFA_COOKIE));
+  const challengeOf = (r: Res) => pair(cookieNamed(r, PORTAL_STEP_COOKIE));
   async function newLink(): Promise<string> {
     const r = await app.inject({ method: "POST", url: `/v1/trust/auditor-grants/${grantId}/links`, headers: admin.auth, payload: {} });
     expect(r.statusCode, r.body).toBe(201);
@@ -442,7 +442,7 @@ describe("auditor portal second factor", () => {
     expect(r.statusCode, r.body).toBe(200);
     expect(r.json().mfa).toBe("enrol");
     secret = r.json().secret;
-    const c = cookieNamed(r, EXTERNAL_MFA_COOKIE)!;
+    const c = cookieNamed(r, PORTAL_STEP_COOKIE)!;
     expect(c).toMatch(/Path=\/v1\/auditor\/session\/mfa/);
     expect(c).toMatch(/HttpOnly/);
     expect(cookieNamed(r, "regulait_auditor")).toBeUndefined();
@@ -454,7 +454,7 @@ describe("auditor portal second factor", () => {
 
     const ok = await verify(challengeOf(r), codeNow(secret));
     expect(ok.statusCode, ok.body).toBe(201);
-    const session = setCookies(ok).find((x) => !x.startsWith(`${EXTERNAL_MFA_COOKIE}=`))!;
+    const session = setCookies(ok).find((x) => !x.startsWith(`${PORTAL_STEP_COOKIE}=`))!;
     const portal = await app.inject({ method: "GET", url: "/v1/auditor/session", headers: { cookie: pair(session) } });
     expect(portal.statusCode, portal.body).toBe(200);
     expect(portal.json().items).toHaveLength(1);

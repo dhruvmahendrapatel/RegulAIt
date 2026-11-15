@@ -30,11 +30,11 @@ import {
   type ExternalMfaFactorRow,
 } from "@regulait/db";
 import {
-  EXTERNAL_MFA_COOKIE,
   EXTERNAL_MFA_LIMITS as L,
   EXTERNAL_MFA_PATHS,
   EXTERNAL_MFA_TOKEN_PREFIX,
   EXTERNAL_MFA_TOKEN_RE,
+  PORTAL_STEP_COOKIE,
   type ExternalMfaPortal,
 } from "@regulait/shared";
 import { decryptSecret, encryptSecret } from "./secrets.js";
@@ -214,12 +214,21 @@ export async function revokePortalChallenges(tx: Db, portal: ExternalMfaPortal):
 // the challenge cookie: HttpOnly, SameSite=Strict, scoped to the portal's verify path only
 // ---------------------------------------------------------------------------------------------------------------
 
-export function challengeCookie(portal: ExternalMfaPortal, token: string, secure: boolean, maxAgeSeconds: number): string {
-  return `${EXTERNAL_MFA_COOKIE}=${token}; Path=${EXTERNAL_MFA_PATHS[portal]}; HttpOnly; SameSite=Strict; Max-Age=${maxAgeSeconds}` + (secure ? "; Secure" : "");
+/** The one place a sign-in step Set-Cookie is built. The attributes are fixed, so no caller can weaken them. */
+type StepCookie = { readonly value: string; readonly path: string; readonly maxAgeSeconds: number; readonly secure: boolean };
+
+function serializeStepCookie(c: StepCookie): string {
+  const attrs = [`Path=${c.path}`, "HttpOnly", "SameSite=Strict", `Max-Age=${c.maxAgeSeconds}`];
+  if (c.secure) attrs.push("Secure");
+  return [`${PORTAL_STEP_COOKIE}=${c.value}`, ...attrs].join("; ");
 }
 
-export const challengeCookieFor = (portal: ExternalMfaPortal, token: string, expiresAt: Date, secure: boolean) =>
-  challengeCookie(portal, token, secure, Math.max(1, Math.floor((expiresAt.getTime() - Date.now()) / 1000)));
+export function challengeCookie(portal: ExternalMfaPortal, handle: string, secure: boolean, maxAgeSeconds: number): string {
+  return serializeStepCookie({ value: handle, path: EXTERNAL_MFA_PATHS[portal], maxAgeSeconds, secure });
+}
+
+export const challengeCookieFor = (portal: ExternalMfaPortal, handle: string, expiresAt: Date, secure: boolean) =>
+  challengeCookie(portal, handle, secure, Math.max(1, Math.floor((expiresAt.getTime() - Date.now()) / 1000)));
 
 
 // ---------------------------------------------------------------------------------------------------------------

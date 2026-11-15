@@ -24,7 +24,7 @@ import { generateScimToken } from "./scim.js";
 import { hashToken } from "./token-hash.js";
 import { generateVirtualKeyToken } from "./virtual-keys.js";
 import { challengeCookie, newChallengeToken } from "./external-mfa.js";
-import { EXTERNAL_MFA_COOKIE } from "@regulait/shared";
+import { PORTAL_STEP_COOKIE } from "@regulait/shared";
 
 /** bits of randomness in a token: the random part after its fixed prefix */
 function randomBits(token: string, prefix: string, encoding: "hex" | "base64url"): number {
@@ -76,12 +76,14 @@ describe("the external-portal MFA challenge cookie carries an opaque handle, nev
   it("is HttpOnly, SameSite=Strict, scoped to the portal's verify path, and clears to an empty value", () => {
     const { token } = newChallengeToken();
     expect(challengeCookie("supplier", token, true, 600)).toBe(
-      `${EXTERNAL_MFA_COOKIE}=${token}; Path=/supplier/v1/session/mfa; HttpOnly; SameSite=Strict; Max-Age=600; Secure`,
+      `${PORTAL_STEP_COOKIE}=${token}; Path=/supplier/v1/session/mfa; HttpOnly; SameSite=Strict; Max-Age=600; Secure`,
     );
     expect(challengeCookie("auditor", token, true, 600)).toBe(
-      `${EXTERNAL_MFA_COOKIE}=${token}; Path=/v1/auditor/session/mfa; HttpOnly; SameSite=Strict; Max-Age=600; Secure`,
+      `${PORTAL_STEP_COOKIE}=${token}; Path=/v1/auditor/session/mfa; HttpOnly; SameSite=Strict; Max-Age=600; Secure`,
     );
-    expect(challengeCookie("auditor", "", true, 0)).toBe(`${EXTERNAL_MFA_COOKIE}=; Path=/v1/auditor/session/mfa; HttpOnly; SameSite=Strict; Max-Age=0; Secure`);
+    expect(challengeCookie("auditor", "", true, 0)).toBe(`${PORTAL_STEP_COOKIE}=; Path=/v1/auditor/session/mfa; HttpOnly; SameSite=Strict; Max-Age=0; Secure`);
+    expect(challengeCookie("supplier", token, false, 600)).not.toContain("Secure");
+    expect(PORTAL_STEP_COOKIE).toBe("regulait_ext_step");
     expect(token).toMatch(/^rgxm_[0-9a-f]{64}$/);
   });
 });

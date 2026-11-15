@@ -63,7 +63,7 @@ import {
   AI_VENDOR_ATTESTATION_DISCLAIMER,
   EXTERNAL_MFA_CHALLENGE_REFUSAL,
   EXTERNAL_MFA_CODE_REFUSAL,
-  EXTERNAL_MFA_COOKIE,
+  PORTAL_STEP_COOKIE,
   EXTERNAL_MFA_LIMITS,
   EXTERNAL_MFA_LOCKED,
   EXTERNAL_MFA_UNAVAILABLE,
@@ -1250,7 +1250,7 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
     if (!(await gate(req, reply))) return reply;
     if (!(await csrf(req, reply))) return reply;
     const clear = challengeCookie("supplier", "", requestIsSecure(req), 0);
-    const challengeToken = readCookie(req.headers.cookie, EXTERNAL_MFA_COOKIE);
+    const challengeToken = readCookie(req.headers.cookie, PORTAL_STEP_COOKIE);
     if (!challengeToken || !opts.dataKey) return reply.status(401).header("set-cookie", clear).send(EXTERNAL_MFA_CHALLENGE_REFUSAL);
     if (await limitMfa(req, reply, challengeToken)) return reply;
     const parsed = externalMfaVerifySchema.safeParse(req.body);

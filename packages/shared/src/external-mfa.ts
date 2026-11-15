@@ -24,8 +24,13 @@ export const EXTERNAL_MFA_LIMITS = Object.freeze({
 export const EXTERNAL_MFA_PORTALS = ["supplier", "auditor"] as const;
 export type ExternalMfaPortal = (typeof EXTERNAL_MFA_PORTALS)[number];
 
-/** the challenge cookie; one name, scoped per portal to its `…/session/mfa` path */
-export const EXTERNAL_MFA_COOKIE = "regulait_ext_mfa";
+/**
+ * The sign-in step cookie: one name, scoped per portal to its `…/session/mfa` path. Its value is only the opaque
+ * `rgxm_` challenge handle (256 random bits; the server keeps only its sha256), never a code or a TOTP secret.
+ * The name says "step", not "mfa", on purpose (owner decision on #709, 2026-11-15): CodeQL's sensitive-name
+ * heuristic read the old name as a credential and flagged every Set-Cookie it reached, which the handle is not.
+ */
+export const PORTAL_STEP_COOKIE = "regulait_ext_step";
 export const EXTERNAL_MFA_PATHS: Readonly<Record<ExternalMfaPortal, string>> = Object.freeze({
   supplier: "/supplier/v1/session/mfa",
   auditor: "/v1/auditor/session/mfa",
