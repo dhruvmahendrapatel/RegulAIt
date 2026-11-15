@@ -81,6 +81,24 @@ def use_writable_tempdir(out_path):
         tempfile.tempdir = None
 
 
+MAX_INPUT_FILES = 64
+
+
+def input_digests(in_dir):
+    """every file the scan was given, as [{path, sha256}] sorted by path (#843 security review): the gateway records
+    a verdict only when this is exactly the one file it placed, so the report proves which bytes were scanned"""
+    out = []
+    for root, dirs, files in os.walk(in_dir):
+        dirs.sort()
+        for name in files:
+            p = os.path.join(root, name)
+            if len(out) >= MAX_INPUT_FILES:
+                return None
+            with open(p, "rb") as f:
+                out.append({"path": os.path.relpath(p, in_dir).replace(os.sep, "/")[:256], "sha256": hashlib.sha256(f.read()).hexdigest()})
+    return sorted(out, key=lambda e: e["path"])
+
+
 def slug(text):
     return "".join(c if c.isalnum() else "_" for c in str(text).strip().lower()).strip("_")[:64] or "unnamed"
 
@@ -115,6 +133,12 @@ def main(argv):
             total += os.path.getsize(os.path.join(root, name))
     if total > MAX_INPUT_BYTES:
         failed(out_path, "skill over the input limit", {"rulesSha256": actual})
+    try:
+        given = input_digests(skill_dir)
+    except OSError as e:
+        failed(out_path, f"input unreadable: {type(e).__name__}", {"rulesSha256": actual})
+    if given is None:
+        failed(out_path, "too many input files", {"rulesSha256": actual})
 
     use_writable_tempdir(out_path)
     try:
@@ -144,6 +168,7 @@ def main(argv):
     except Exception as e:  # no to_dict, or it raised: never an empty pass
         failed(out_path, f"scan result did not serialise: {type(e).__name__}", {"rulesSha256": actual})
     report = summarise(data, actual)
+    report["inputs"] = given
     with open(out_path, "w") as f:
         json.dump(report, f)
     sys.exit(0 if report["status"] == "completed" else 2)

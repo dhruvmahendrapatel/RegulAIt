@@ -376,8 +376,15 @@ The gateway can now run the two admission-scan engines itself. Pending migration
   inline, so the runner never supplies its bytes.
   **Security review of #843 (2026-11-15):** that file is the run's only input. Task start refuses any runner `files`
   on a subject run, and the subject's path must be exactly `tools.json` or `SKILL.md` at the input root (the names
-  the drivers read), so a runner cannot place a decoy for the scanner to read instead. A driver-echoed input digest
-  checked at result time is left for the runner-shim slice. A subject that is gone, whose digest is superseded, or whose
+  the drivers read), so a runner cannot place a decoy for the scanner to read instead. **Driver-echoed input
+  (2026-11-15, the follow-up slice):** each driver reports `inputs`, the relative path and sha256 of every file it
+  was given (at most 64, sorted). Task start records the sha256 of the file it placed on the run
+  (`engine_runs.target_subject_input_sha256`, migration `admission_scan_subject_target_input_sha`). The run's end
+  records a verdict only when `inputs` is exactly that one file at that path; anything else, or no recorded
+  expectation, is `unknown`, which holds. This sits on top of the executor's signed input-manifest digest
+  (`input_digest_mismatch`) and proves what the scanner process itself read. The committed report fixtures predate
+  the echo (Docker Hub refused the base-image pull with 429 when they were to be re-recorded), so the tests add the
+  `inputs` field to them; they are re-recorded with the image publish. A subject that is gone, whose digest is superseded, or whose
   snapshot is missing ends the run `not_run` (`subject_gone`, `subject_superseded`, `subject_input_gone`).
 - **Placement.** A subject run has no project, so its placement names its own sensitivity: `confidential`, the floor
   whose shipped class is the gVisor sandbox §6.1 asks for. The org's floors still decide the class
