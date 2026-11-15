@@ -8,6 +8,9 @@
  *  - editing a tier stores it (its badge changes) and saving sends the whole
  *    policy to its OWN route, never the review-policy PUT;
  *  - the gateway's 422 refusal is shown, not swallowed;
+ *  - ADR-0297: the catalog offers 2026 LLM ids while the strict defaults (and stored policies) hold 2025 ids; a 2025
+ *    row is looked up through its alias, so it keeps its name and its attack-success threshold on save, shows its
+ *    edition, and its 2026 option is offered as already required;
  *  - axe (WCAG 2.x A/AA) in light and dark.
  */
 import { AxeBuilder } from "@axe-core/playwright";
@@ -17,26 +20,32 @@ const json = (route: Route, body: unknown, status = 200) =>
   route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
 const TIERS = ["minimal", "limited", "high", "prohibited", "unscreened"] as const;
-const NAMES: Record<string, string> = {
-  "owasp:llm:01": "Prompt Injection",
-  "owasp:llm:02": "Sensitive Information Disclosure",
-  "owasp:llm:03": "Supply Chain",
-  "owasp:llm:04": "Data and Model Poisoning",
-  "owasp:llm:06": "Excessive Agency",
-  "owasp:llm:09": "Misinformation",
-  "owasp:agentic:asi01": "ASI01: Agent Goal Hijack",
-  "owasp:agentic:asi02": "ASI02: Tool Misuse and Exploitation",
-  "owasp:agentic:asi06": "ASI06: Memory and Context Poisoning",
-  "owasp:agentic:asi10": "ASI10: Rogue Agents",
-};
-const testClasses = Object.entries(NAMES).map(([id, name]) => ({
+/** the catalog's ids, as the gateway sends them (ADR-0297): LLM ids on the 2026 numbering, each with its 2025 id */
+const CATALOG: Array<{ id: string; name: string; legacyId?: string }> = [
+  { id: "owasp:llm:2026:01", name: "Prompt Injection", legacyId: "owasp:llm:01" },
+  { id: "owasp:llm:2026:02", name: "Sensitive Information Disclosure", legacyId: "owasp:llm:02" },
+  { id: "owasp:llm:2026:03", name: "Excessive Agency", legacyId: "owasp:llm:06" },
+  { id: "owasp:llm:2026:04", name: "Supply Chain", legacyId: "owasp:llm:03" },
+  { id: "owasp:llm:2026:05", name: "Data and Model Poisoning", legacyId: "owasp:llm:04" },
+  { id: "owasp:llm:2026:07", name: "Misinformation", legacyId: "owasp:llm:09" },
+  { id: "owasp:agentic:asi01", name: "ASI01: Agent Goal Hijack" },
+  { id: "owasp:agentic:asi02", name: "ASI02: Tool Misuse and Exploitation" },
+  { id: "owasp:agentic:asi06", name: "ASI06: Memory and Context Poisoning" },
+  { id: "owasp:agentic:asi10", name: "ASI10: Rogue Agents" },
+];
+/** names by every id a row may hold, 2025 aliases included (the gateway's `effective[].name` resolves both) */
+const NAMES: Record<string, string> = Object.fromEntries(CATALOG.flatMap((c) => [[c.id, c.name], ...(c.legacyId ? [[c.legacyId, c.name]] : [])]));
+const UNMEASURABLE = ["owasp:llm:2026:04", "owasp:llm:2026:05"];
+const testClasses = CATALOG.map(({ id, name, legacyId }) => ({
   id,
   name,
   list: id.includes("agentic") ? "owasp-agentic-top-10" : "owasp-llm-top-10",
-  redteamClasses: ["owasp:llm:03", "owasp:llm:04", "owasp:llm:09"].includes(id) ? [] : ["prompt_injection"],
-  scorerKinds: id === "owasp:llm:09" ? ["claim_support"] : [],
-  measurable: !["owasp:llm:03", "owasp:llm:04"].includes(id),
+  redteamClasses: [...UNMEASURABLE, "owasp:llm:2026:07"].includes(id) ? [] : ["prompt_injection"],
+  scorerKinds: id === "owasp:llm:2026:07" ? ["claim_support"] : [],
+  measurable: !UNMEASURABLE.includes(id),
+  ...(legacyId ? { legacyId } : {}),
 }));
+// the strict defaults hold 2025 ids, as the shipped defaults do
 const HIGH = ["owasp:llm:01", "owasp:llm:02", "owasp:llm:06", "owasp:agentic:asi01", "owasp:agentic:asi02", "owasp:agentic:asi06", "owasp:agentic:asi10"];
 const defaults = Object.fromEntries(
   TIERS.map((t) => [t, { classes: (t === "minimal" || t === "limited" ? ["owasp:llm:01"] : HIGH).map((testClass) => ({ testClass, maxAsr: 0 })), freshnessDays: 30 }]),
@@ -139,17 +148,21 @@ test.describe("ADR-0180 A3: required AI tests per tier", () => {
     await expect(card(page)).toContainText("Not changed yet: every tier uses the strict default.");
     const high = tierRow(page, "high");
     await expect(high.getByText("Strict default")).toBeVisible();
-    for (const id of ["LLM01", "LLM02", "LLM06", "ASI01", "ASI02", "ASI06", "ASI10"]) await expect(high.getByText(id, { exact: true })).toBeVisible();
+    // a 2025 row shows its edition, and its name through the alias (ADR-0297)
+    for (const id of ["LLM01:2025", "LLM02:2025", "LLM06:2025", "ASI01", "ASI02", "ASI06", "ASI10"]) await expect(high.getByText(id, { exact: true })).toBeVisible();
     await expect(high.getByText("Excessive Agency", { exact: true })).toBeVisible();
     const limited = tierRow(page, "limited");
-    await expect(limited.getByText("LLM01", { exact: true })).toBeVisible();
+    await expect(limited.getByText("LLM01:2025", { exact: true })).toBeVisible();
     await expect(limited.getByText("Prompt Injection", { exact: true })).toBeVisible();
     // an unmeasurable id is offered disabled, and the card says why
     const add = high.getByLabel("Add a required test class to the high tier");
-    await expect(add.locator("option", { hasText: "LLM03 Supply Chain (cannot be measured)" })).toBeDisabled();
+    await expect(add.locator("option", { hasText: "LLM04:2026 Supply Chain (cannot be measured)" })).toBeDisabled();
+    // the 2026 id of a risk a 2025 row already requires is offered as required, not as a duplicate to add
+    await expect(add.locator("option", { hasText: "LLM03:2026 Excessive Agency (required)" })).toBeDisabled();
+    await expect(add.locator("option", { hasText: "LLM01:2026 Prompt Injection (required)" })).toBeDisabled();
     await expect(card(page)).toContainText("cannot be required.");
     await card(page).getByRole("button", { name: "What is why some OWASP classes cannot be required?" }).click();
-    await expect(card(page).getByRole("note")).toContainText("LLM03 Supply Chain, LLM04 Data and Model Poisoning: No red-team attack class");
+    await expect(card(page).getByRole("note")).toContainText("LLM04:2026 Supply Chain, LLM05:2026 Data and Model Poisoning: No red-team attack class");
     await expectAxeClean(page, "review policy with required AI tests");
   });
 
@@ -157,11 +170,12 @@ test.describe("ADR-0180 A3: required AI tests per tier", () => {
     const cap = await mockApi(page);
     await page.goto("/ui/admin/governance/review-policy");
     const limited = tierRow(page, "limited");
-    await limited.getByLabel("Limited tier: LLM01 maximum attack success rate (%)").fill("5");
+    // a 2025 row is a red-team class through its alias: its threshold is an attack success rate (ADR-0297)
+    await limited.getByLabel("Limited tier: LLM01:2025 maximum attack success rate (%)").fill("5");
     await expect(limited.getByText("Set by policy")).toBeVisible();
     const high = tierRow(page, "high");
-    await high.getByLabel("Add a required test class to the high tier").selectOption("owasp:llm:09");
-    await expect(high.getByLabel("High tier: LLM09 minimum eval score (0 to 1)")).toHaveValue("0.8");
+    await high.getByLabel("Add a required test class to the high tier").selectOption("owasp:llm:2026:07");
+    await expect(high.getByLabel("High tier: LLM07:2026 minimum eval score (0 to 1)")).toHaveValue("0.8");
     await high.getByLabel("High tier: freshness in days (1 to 90)").fill("14");
     await previewAndSave(page);
     await expect.poll(() => cap.testPuts.length).toBe(1);
@@ -171,7 +185,10 @@ test.describe("ADR-0180 A3: required AI tests per tier", () => {
     expect(body.regressionRunId as unknown).toBe(RUN_ID);
     expect(body.limited).toEqual({ classes: [{ testClass: "owasp:llm:01", maxAsr: 5 }], freshnessDays: 30 });
     expect(body.high!.freshnessDays).toBe(14);
-    expect(body.high!.classes).toContainEqual({ testClass: "owasp:llm:09", minScore: 0.8 });
+    expect(body.high!.classes).toContainEqual({ testClass: "owasp:llm:2026:07", minScore: 0.8 });
+    // the default tier's 2025 rows are saved with maxAsr, which the gateway accepts (ADR-0297 review finding 1)
+    expect(body.high!.classes).toContainEqual({ testClass: "owasp:llm:01", maxAsr: 0 });
+    expect(body.high!.classes).toContainEqual({ testClass: "owasp:llm:06", maxAsr: 0 });
     expect(cap.policyPuts).toEqual([]);
     await expect(card(page)).toContainText("by Avery Admin");
     await expectAxeClean(page, "review policy after saving required tests");
