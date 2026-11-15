@@ -39,6 +39,8 @@
  * `recordDriftReport` with `detail.actor = { type: "drift_ingest_credential", id, name }`.
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { bucketLimiter } from "./bucket-limiter.js";
+import { prefixedBearer } from "./prefixed-bearer.js";
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import { and, auditLog, desc, eq, modelDriftIngestCredentials, modelDriftMonitors, sql, type Db } from "@regulait/db";
@@ -72,8 +74,6 @@ export const DRIFT_INGEST_AUDIT_RULE_IDS = {
   refused: "model-drift-ingest-credential-refused",
 } as const;
 
-/** linear: a fixed prefix and one character class of fixed length (43 = base64url of 32 bytes) */
-const TOKEN_RE = /^rgldi_[A-Za-z0-9_-]{43}$/;
 /** linear: one character class, length-capped */
 const IDEMPOTENCY_KEY_RE = /^[A-Za-z0-9._:-]{16,128}$/;
 
@@ -83,13 +83,7 @@ export function generateDriftIngestToken(): string {
 }
 
 /** the `rgldi_` token on `Authorization: Bearer`, or null; nothing else (no cookie, no x-api-key) is read */
-function presentedToken(req: FastifyRequest): string | null {
-  const h = req.headers.authorization;
-  if (typeof h !== "string" || h.length > 7 + 6 + 43 + 8) return null;
-  if (h.slice(0, 7).toLowerCase() !== "bearer ") return null;
-  const t = h.slice(7).trim();
-  return TOKEN_RE.test(t) ? t : null;
-}
+const presentedToken = (req: FastifyRequest) => prefixedBearer(req, DRIFT_INGEST_TOKEN_PREFIX, 43, "base64url");
 
 const issueBody = z
   .object({
@@ -129,32 +123,13 @@ const stateColumn = () =>
 // rate limits (the feedback-link / supplier-portal pattern: the gateway's @fastify/rate-limit buckets)
 // ---------------------------------------------------------------------------------------------------------------
 
-type Limiter = (req: FastifyRequest) => Promise<{ isExceeded: boolean; max: number; ttlInSeconds: number; timeWindow: number }>;
-const ingestBucket = new WeakMap<FastifyRequest, string>();
-
-function ingestLimiter(app: FastifyInstance) {
-  let limiter: Limiter | null = null;
-  const limits = (key: string) => (key.startsWith("dic:cred:") ? DRIFT_INGEST_RATE_LIMITS.perCredential : DRIFT_INGEST_RATE_LIMITS.perAddress);
-  return async (req: FastifyRequest, reply: FastifyReply, bucket: string): Promise<boolean> => {
-    // REGULAIT_RATE_LIMIT=off turns every HTTP limiter off at once; these buckets follow it
-    if (!app.hasDecorator("createRateLimit")) return false;
-    limiter ??= app.createRateLimit({
-      keyGenerator: (r: FastifyRequest) => ingestBucket.get(r) ?? `dic:addr:${r.ip}`,
-      max: (_r: FastifyRequest, k: string) => limits(k).max,
-      timeWindow: (_r: FastifyRequest, k: string) => limits(k).windowMs,
-      allowList: () => false,
-    }) as unknown as Limiter;
-    ingestBucket.set(req, bucket);
-    const v = await limiter(req);
-    if (!v.isExceeded) return false;
-    await reply.status(429).header("retry-after", String(v.ttlInSeconds)).send({
-      error: "rate_limited",
-      detail: `too many ingestion requests — limit ${v.max} per ${Math.round(v.timeWindow / 60_000)} minutes`,
-      retryAfterSeconds: v.ttlInSeconds,
-    });
-    return true;
-  };
-}
+const ingestLimiter = (app: FastifyInstance) =>
+  bucketLimiter(app, {
+    addressPrefix: "dic:addr:",
+    buckets: [["dic:cred:", DRIFT_INGEST_RATE_LIMITS.perCredential]],
+    fallback: DRIFT_INGEST_RATE_LIMITS.perAddress,
+    message: (v) => `too many ingestion requests — limit ${v.max} per ${Math.round(v.timeWindow / 60_000)} minutes`,
+  });
 
 // ---------------------------------------------------------------------------------------------------------------
 // routes

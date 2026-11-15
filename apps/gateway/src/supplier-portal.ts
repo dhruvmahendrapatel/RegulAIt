@@ -32,6 +32,7 @@
  * compile supplier answers into the questionnaire artifact (the assessor still submits that).
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { bucketLimiter } from "./bucket-limiter.js";
 import { createHash, randomBytes } from "node:crypto";
 import {
   aiVendors,
@@ -221,32 +222,13 @@ function isUniqueViolation(e: unknown): boolean {
 // rate limits (the feedback-link pattern: @fastify/rate-limit buckets the gateway already registers)
 // ---------------------------------------------------------------------------------------------------------------
 
-type Limiter = (req: FastifyRequest) => Promise<{ isExceeded: boolean; max: number; ttlInSeconds: number; timeWindow: number }>;
-const supplierBucket = new WeakMap<FastifyRequest, string>();
-
-function supplierLimiter(app: FastifyInstance) {
-  let limiter: Limiter | null = null;
-  const limits = (key: string) => (key.startsWith("sp:access:") ? L.perAccessSubmissions : L.perAddress);
-  return async (req: FastifyRequest, reply: FastifyReply, bucket: string): Promise<boolean> => {
-    // REGULAIT_RATE_LIMIT=off turns every HTTP limiter off at once; these buckets follow it
-    if (!app.hasDecorator("createRateLimit")) return false;
-    limiter ??= app.createRateLimit({
-      keyGenerator: (r: FastifyRequest) => supplierBucket.get(r) ?? `sp:addr:${r.ip}`,
-      max: (_r: FastifyRequest, k: string) => limits(k).max,
-      timeWindow: (_r: FastifyRequest, k: string) => limits(k).windowMs,
-      allowList: () => false,
-    }) as unknown as Limiter;
-    supplierBucket.set(req, bucket);
-    const v = await limiter(req);
-    if (!v.isExceeded) return false;
-    await reply.status(429).header("retry-after", String(v.ttlInSeconds)).send({
-      error: "rate_limited",
-      detail: `Too many requests. Try again in ${Math.max(1, Math.ceil(v.ttlInSeconds / 60))} minutes.`,
-      retryAfterSeconds: v.ttlInSeconds,
-    });
-    return true;
-  };
-}
+const supplierLimiter = (app: FastifyInstance) =>
+  bucketLimiter(app, {
+    addressPrefix: "sp:addr:",
+    buckets: [["sp:access:", L.perAccessSubmissions]],
+    fallback: L.perAddress,
+    message: (v) => `Too many requests. Try again in ${Math.max(1, Math.ceil(v.ttlInSeconds / 60))} minutes.`,
+  });
 
 // ---------------------------------------------------------------------------------------------------------------
 // routes
