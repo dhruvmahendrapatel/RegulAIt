@@ -79,7 +79,7 @@ beforeAll(async () => {
   await db.delete(detectionIncidents).where(sql`pack_version IS NOT NULL`);
   await db.delete(detectionRulePacks);
   await runDetectionSweep(db, adminId);
-  await db.execute(sql`UPDATE detection_engine_state SET cursor_seq = (SELECT max(seq) FROM audit_log), lease_until = NULL, lease_token = NULL`);
+  await db.execute(sql`UPDATE detection_engine_state SET cursor_seq = (SELECT max(seq) FROM audit_log), replay_cursor_seq = replay_until_seq, lease_until = NULL, lease_token = NULL`);
 });
 
 afterAll(async () => {

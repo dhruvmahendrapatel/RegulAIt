@@ -188,12 +188,13 @@ export const DEFAULT_DETECTION_PACK: DetectionPack = Object.freeze({
     },
     {
       id: "high-risk-addon-call",
-      title: "A tool call reached an add-on the admission scanner rated High or Critical",
+      // ADR-0333 D1 (owner, 2026-11-15): an MCP server or a builder skill the admission scanner rated High/Critical
+      title: "A call used an add-on (MCP server or builder skill) the admission scanner rated High or Critical",
       severity: "high",
       enabled: true,
       response: "alert",
       type: "single",
-      selector: { objectType: ["mcp_tool"], addonSeverityAtLeast: "high", effect: ["allow"] },
+      selector: { addonSeverityAtLeast: "high", effect: ["allow"] },
     },
     {
       id: "delegation-escalation",

@@ -148,6 +148,7 @@ export function registerDetectionRoutes(app: FastifyInstance, db: Db): void {
         status: detectionIncidents.status,
         response: detectionIncidents.response,
         responseState: detectionIncidents.responseState,
+        historical: detectionIncidents.historical,
         userId: detectionIncidents.userId,
         delegationGrantId: detectionIncidents.delegationGrantId,
         triggerAuditId: detectionIncidents.triggerAuditId,
