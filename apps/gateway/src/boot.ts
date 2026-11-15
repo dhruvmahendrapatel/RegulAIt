@@ -108,6 +108,11 @@ export interface StartedGateway {
   metricsAddress: string | null;
 }
 
+/** end a handle's pool (the drizzle handle exposes it as `$client`) */
+function endPool(db: Db): Promise<void> {
+  return (db as unknown as { $client: { end: () => Promise<void> } }).$client.end();
+}
+
 /**
  * Bring a gateway up, or refuse to.
  *
@@ -158,8 +163,8 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   await runMigrations(ownerDb, migrationsFolder);
 
   // ADR-0234 batch 7b — THE RUNTIME LOGIN. Requests are served on a login that is a member of regulait_app and is
-  // not a superuser, not BYPASSRLS and not the owner of the RLS tables, so no request path can step out of the
-  // policies. Resolved after the migrations (the install-generated login is created through the owner, and needs
+  // not a superuser, BYPASSRLS, CREATEROLE or the owner of the RLS tables, nor a member of a role that is, so no
+  // request path can step out of the policies. Resolved after the migrations (the install-generated login is created through the owner, and needs
   // regulait_app to exist), and refused here, before an app or a socket exists, when it is not fit.
   const runtime = await resolveRuntimeDatabase(env, ownerDb, connectionString);
   const db: Db = runtime.db;
@@ -167,7 +172,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   try {
     runtimeLogin = await checkRuntimeLogin(db, env);
   } catch (err) {
-    if (db !== ownerDb) await (db as unknown as { $client: { end: () => Promise<void> } }).$client.end().catch(() => {});
+    if (db !== ownerDb) await endPool(db).catch(() => {});
     throw err;
   }
   if (runtimeLogin.privileged) {
@@ -177,7 +182,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   const app = buildApp(db, { ...appOpts, logger, auditAnchorSink: anchorSink });
   if (db !== ownerDb) {
     app.addHook("onClose", async () => {
-      await (db as unknown as { $client: { end: () => Promise<void> } }).$client.end().catch(() => {});
+      await endPool(db).catch(() => {});
     });
   }
   if (runtimeLogin.privileged) {
@@ -663,7 +668,7 @@ export function installShutdownHandlers(
         log(`[regulait] app.close failed during drain: ${errLine(err)}`);
       }
       try {
-        await (db as unknown as { $client: { end: () => Promise<void> } }).$client.end();
+        await endPool(db);
       } catch (err) {
         log(`[regulait] pool.end failed during drain: ${errLine(err)}`);
       }

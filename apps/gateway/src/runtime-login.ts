@@ -1,35 +1,41 @@
 /**
  * ADR-0234 batch 7b — THE RUNTIME LOGIN.
  *
- * The gateway serves requests on a login that is a member of `regulait_app` and is not a superuser, not BYPASSRLS and
- * not the owner of the row-level-security tables (`runtimeLoginProblems`). Such a login cannot step out of the
- * policies: the request paths run as their principal, and the paths with no principal under a named reason (batch 7a).
+ * The gateway serves requests on a login that is a member of `regulait_app` and that no `SET ROLE` takes out of the
+ * row-level-security policies: not a superuser, not BYPASSRLS, not CREATEROLE, not the owner of an RLS table, and not
+ * a member of a role that is any of those (`runtimeLoginProblems`, which checks `regulait_app` itself the same way).
+ * The request paths run as their principal, and the paths with no principal under a named reason (batch 7a).
  *
  * Where the login comes from, in order:
  *   1. `REGULAIT_RUNTIME_DATABASE_URL`, operator-managed (a secrets manager, a Kubernetes secret);
  *   2. the install-generated login: with `REGULAIT_INSTALL_SECRETS_DIR` set, the first boot creates
- *      `regulait_runtime` through the owner connection with a generated password and keeps its connection string in
- *      `<dir>/runtime-database-url` (0600, create-exclusive, never overwritten). Later boots read it;
+ *      `regulait_runtime_<database>` through the owner connection with a generated password (sent as a SCRAM
+ *      verifier) and only then keeps its connection string in `<dir>/runtime-database-url` (0600, written to a
+ *      temporary file and renamed into place, under an advisory lock so two booting replicas make one login). Later
+ *      boots read it;
  *   3. neither: requests are served on the owner connection itself.
  *
  * Secure by default (ADR-0180): boot REFUSES a login that is not fit, whichever way it was resolved. A superuser or
  * table-owner login is what every local and CI database uses, so a developer may opt in with
  * `REGULAIT_DEV_PRIVILEGED_DB_LOGIN=1`: the boot then prints a loud banner, writes an audit row and the posture line
- * says RLS does not bind requests. The opt-in never applies silently.
+ * says RLS does not bind requests. The opt-in never applies silently, and is itself refused when the environment says
+ * this is a deployment (`REGULAIT_DEPLOY_MODE` or `REGULAIT_HSTS`, the dev-secrets signal).
  */
 import { randomBytes } from "node:crypto";
-import { closeSync, constants as fsConstants, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, constants as fsConstants, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import path from "node:path";
 import {
   auditLog,
   createDb,
   inspectRuntimeLogin,
   provisionRuntimeLogin,
-  RUNTIME_LOGIN_ROLE,
+  RUNTIME_LOGIN_ROLE_PREFIX,
   runtimeLoginProblems,
+  withRuntimeLoginLock,
   type Db,
   type RuntimeLoginFacts,
 } from "@regulait/db";
+import { networkFacingSignal } from "./dev-secrets.js";
 import { errMessage } from "./err-serializer.js";
 import { INSTALL_SECRETS_DIR_ENV } from "./receipt-signing-key.js";
 
@@ -59,6 +65,40 @@ function readUrlFile(file: string): string | null {
   }
 }
 
+/** write `content` to `file` whole or not at all: a 0600 temporary file (exclusive, no symlink) renamed into place */
+function writeFileAtomically(file: string, content: string): void {
+  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${randomBytes(8).toString("hex")}.tmp`);
+  const fd = openSync(tmp, POSIX ? fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW : "wx", 0o600);
+  try {
+    try {
+      writeSync(fd, content);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(tmp, file);
+  } catch (err) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* already renamed or never written */
+    }
+    throw err;
+  }
+}
+
+/** The boot refusal when the install-generated login could not be created, re-keyed or repaired. */
+export class RuntimeLoginProvisionError extends Error {
+  constructor(detail: string) {
+    super(
+      `[regulait] refusing to start: the runtime database login could not be provisioned through the owner connection ` +
+        `(${detail}). The owner login must be able to create roles (a superuser, or CREATEROLE with ADMIN on ` +
+        `regulait_app), or set ${RUNTIME_DATABASE_URL_ENV} to an operator-managed login (ADR-0234).`,
+    );
+    this.name = "RuntimeLoginProvisionError";
+  }
+}
+
 /**
  * The handle requests are served on. `ownerUrl` is the owner's connection string (the install-generated login's URL
  * is the owner's with the user and password replaced); without it no login is generated.
@@ -78,39 +118,28 @@ export async function resolveRuntimeDatabase(
   const existing = readUrlFile(file);
   if (existing) return { db: createDb(existing), source: "install_generated", created: false };
 
-  // First boot: claim the file (create-exclusive, so two booting replicas create one login), then create the login.
-  const password = randomBytes(32).toString("base64url");
-  const url = new URL(ownerUrl);
-  url.username = RUNTIME_LOGIN_ROLE;
-  url.password = password;
+  // First boot: under the advisory lock (two booting replicas make one login), create the login FIRST, and only then
+  // write its connection string, whole, so a file never names a login that does not exist. A boot that dies between
+  // the two leaves a login no file names; the next boot re-keys it.
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  let fd: number;
-  try {
-    fd = openSync(file, POSIX ? fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW : "wx", 0o600);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "EEXIST") {
-      const raced = readUrlFile(file);
-      if (raced) return { db: createDb(raced), source: "install_generated", created: false };
-    }
-    throw err;
-  }
-  try {
-    writeSync(fd, `${url.toString()}\n`);
-  } finally {
-    closeSync(fd);
-  }
-  try {
-    await provisionRuntimeLogin(ownerDb, password);
-  } catch (err) {
-    // a file naming a login that does not exist would fail every later boot; the next boot tries again
+  const url = new URL(ownerUrl);
+  const created = await withRuntimeLoginLock(ownerDb, async (client) => {
+    if (readUrlFile(file)) return false; // another replica finished while this one waited
+    const password = randomBytes(32).toString("base64url");
+    let role: string;
     try {
-      unlinkSync(file);
-    } catch {
-      /* best effort */
+      role = (await provisionRuntimeLogin(client, password)).role;
+    } catch (err) {
+      throw new RuntimeLoginProvisionError(errMessage(err));
     }
-    throw new RuntimeLoginBootError([`could not be created through the owner connection: ${errMessage(err)}`], RUNTIME_LOGIN_ROLE);
-  }
-  return { db: createDb(url.toString()), source: "install_generated", created: true };
+    url.username = role;
+    url.password = password;
+    writeFileAtomically(file, `${url.toString()}\n`);
+    return true;
+  });
+  const final = readUrlFile(file);
+  if (!final) throw new RuntimeLoginProvisionError(`${file} is empty after provisioning`);
+  return { db: createDb(final), source: "install_generated", created };
 }
 
 export interface RuntimeLoginCheck {
@@ -125,13 +154,18 @@ export class RuntimeLoginBootError extends Error {
   constructor(
     readonly problems: string[],
     readonly login: string,
+    /** set when the dev opt-in was given but refused because the environment says this is a deployment */
+    readonly deploySignal: string | null = null,
   ) {
     super(
       `[regulait] refusing to start: the database login that serves requests ('${login}') ${problems.join("; ")}. ` +
         `Row-level security would not bind it (ADR-0234). Set ${INSTALL_SECRETS_DIR_ENV} so the first boot creates the ` +
-        `${RUNTIME_LOGIN_ROLE} login through the owner connection, or set ${RUNTIME_DATABASE_URL_ENV} to a login that is ` +
-        `a member of regulait_app and is not a superuser, BYPASSRLS or the table owner. On a development database only, ` +
-        `${DEV_PRIVILEGED_DB_LOGIN_ENV}=1 starts anyway, loudly and audited.`,
+        `${RUNTIME_LOGIN_ROLE_PREFIX}<database> login through the owner connection, or set ${RUNTIME_DATABASE_URL_ENV} to ` +
+        `a login that is a member of regulait_app and is not a superuser, BYPASSRLS, CREATEROLE or the table owner, nor ` +
+        `a member of such a role. ` +
+        (deploySignal
+          ? `${DEV_PRIVILEGED_DB_LOGIN_ENV}=1 is refused here: ${deploySignal} says this is a deployment, not a development database.`
+          : `On a development database only, ${DEV_PRIVILEGED_DB_LOGIN_ENV}=1 starts anyway, loudly and audited.`),
     );
     this.name = "RuntimeLoginBootError";
   }
@@ -142,7 +176,12 @@ export async function checkRuntimeLogin(db: Db, env: NodeJS.ProcessEnv): Promise
   const facts = await inspectRuntimeLogin(db);
   const problems = runtimeLoginProblems(facts);
   if (problems.length === 0) return { facts, problems, privileged: false };
-  if (env[DEV_PRIVILEGED_DB_LOGIN_ENV]?.trim() === "1") return { facts, problems, privileged: true };
+  if (env[DEV_PRIVILEGED_DB_LOGIN_ENV]?.trim() === "1") {
+    // the opt-in is for development databases: a deployment signal refuses it (the dev-secrets signal, ADR-0180)
+    const deployed = networkFacingSignal(env);
+    if (deployed) throw new RuntimeLoginBootError(problems, facts.login, deployed);
+    return { facts, problems, privileged: true };
+  }
   throw new RuntimeLoginBootError(problems, facts.login);
 }
 
