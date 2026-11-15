@@ -815,6 +815,9 @@ describe("every sweep is registered", () => {
         // ADR-0302: third-party ingest evidence past the audit floor; driven end to end in
         // zz-adr0302-evidence-retention.test.ts (with no floor configured it deletes nothing)
         SCHEDULER_JOB_NAMES.thirdPartyEvidenceRetentionSweep,
+        // ADR-0334 (owner decision B2): captured browser prompts past retention; driven end to end in
+        // zz-adr0334-browser-governance.test.ts (with capture off nothing is stored, so it deletes nothing)
+        SCHEDULER_JOB_NAMES.browserPromptCaptureRetentionSweep,
       ].sort(),
     );
     const discovery = registry.get(SCHEDULER_JOB_NAMES.discoveryScanSweep)!;
