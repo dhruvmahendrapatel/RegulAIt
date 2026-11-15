@@ -59,14 +59,24 @@ rules define, so no new metric code is needed.
    is LLM03 in 2026), and those ids are already stored in required-test policies and decision-regression goldens. The
    crosswalk is `OWASP_LLM_EDITIONS`, the same one `owasp-llm-top-10@2` records (ADR-0243); names come from the
    vendored 2025 table through the 2025 id of the same risk. The vendored table is not edited.
-5. **2025 ids stay valid as aliases.** `canonicalOwaspId` maps a 2025 LLM id to its 2026 id. Required-test
-   measurability is keyed by both, so a stored policy, the strict defaults (kept on their 2025 ids so the goldens do
-   not move) and the deploy gate measure exactly as before; listing a 2025 id and its 2026 id together is a duplicate.
-   `catalogRefMatchesControl` matches across the two numberings, so a custom pack control named by a 2025 id keeps
-   its "tested by". The required-tests view names a 2025 id through the alias; the classes it offers for a new policy
-   are the 2026 ids. The console's short form shows `LLM03:2026`.
+5. **2025 ids stay valid as aliases.**
+   - `canonicalOwaspId` maps a 2025 LLM id to its 2026 id.
+   - Required-test measurability is keyed by both ids. A stored policy, the strict defaults and the deploy gate
+     therefore measure exactly as before; the defaults stay on their 2025 ids so the goldens do not move.
+   - Listing a 2025 id and its 2026 id together is a duplicate.
+   - `catalogRefMatchesControl` matches across the two numberings, so a custom pack control named by a 2025 id keeps
+     its "tested by".
+   - The required-tests view's `testClasses` are the 2026 ids, and each LLM entry carries its `legacyId`. The editor
+     indexes every entry under both ids. A stored 2025 row therefore keeps:
+     - its name;
+     - its threshold kind (an attack success rate for a red-team class, so the save stays valid);
+     - its place in the duplicate check (its 2026 option shows as already required).
+   - The console's short form shows the edition: `LLM03:2026` for a 2026 id, `LLM03:2025` for a bare 2025 id. In the
+     2026 edition LLM03 is a different risk.
 6. **Not done:** the strict defaults and goldens still say `owasp:llm:01`, `:02`, `:06`; moving them is a golden change
-   for its own reviewed PR. The 2026 edition's own risk names are not vendored (OWASP's text is CC BY-SA, cited by ID).
+   for its own reviewed PR. The 2026 edition's own risk names are not vendored (OWASP's text is CC BY-SA, cited by ID). The one risk
+   whose scope the 2026 edition widened, LLM08:2026 (LLM07 in 2025), keeps its 2025 name, labelled "2025 name; widened
+   in 2026", so a 2026 number is never paired with a name that edition does not use.
 
 ## Consequences
 

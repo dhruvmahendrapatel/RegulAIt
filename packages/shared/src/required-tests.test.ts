@@ -68,6 +68,9 @@ describe("ADR-0180 A3 measurability: every id is from the vendored table", () =>
     expect(by.get("owasp:llm:2026:05")!.measurable).toBe(false); // data and model poisoning (2025 LLM04)
     expect(by.get("owasp:llm:2026:01")!.redteamClasses).toContain("prompt_injection");
     expect(by.get("owasp:llm:2026:07")!.scorerKinds.length).toBeGreaterThan(0); // misinformation: eval-measured
+    // each LLM entry carries the 2025 id a stored row may hold, so the editor can resolve it (ADR-0297 review)
+    for (const x of m.filter((y) => y.list === "owasp-llm-top-10")) expect(canonicalOwaspId(x.legacyId!)).toBe(x.id);
+    expect(m.filter((y) => y.list === "owasp-agentic-top-10").every((y) => y.legacyId === undefined)).toBe(true);
   });
 
   it("ADR-0297: a 2025 id is an alias of its 2026 id — measured identically, and never listed alongside it", () => {

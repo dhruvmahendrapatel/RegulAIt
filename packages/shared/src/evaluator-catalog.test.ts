@@ -149,6 +149,9 @@ describe("the vendored OWASP data", () => {
     expect(refs.find((r) => r.id === "owasp:llm:2026:01")?.name).toBe("Prompt Injection");
     expect(refs.find((r) => r.id === "owasp:llm:2026:03")).toMatchObject({ name: "Excessive Agency", legacyId: "owasp:llm:06", edition: 2026 });
     expect(refs.some((r) => /^owasp:llm:\d\d$/.test(r.id))).toBe(false);
+    // LLM08:2026 widened LLM07:2025's scope; it keeps the 2025 name, labelled, never paired bare with a 2026 number
+    expect(refs.find((r) => r.id === "owasp:llm:2026:08")?.name).toBe("System Prompt Leakage (2025 name; widened in 2026)");
+    expect(refs.filter((r) => r.list === "owasp-llm-top-10" && /\(2025 name/.test(r.name)).map((r) => r.id)).toEqual(["owasp:llm:2026:08"]);
     expect(refs.filter((r) => r.list === "owasp-llm-top-10").map((r) => r.id)).toEqual(
       Array.from({ length: 10 }, (_, i) => `owasp:llm:2026:${String(i + 1).padStart(2, "0")}`),
     );

@@ -324,6 +324,16 @@ export function canonicalOwaspId(id: string): string {
   return LLM_2025_TO_2026.get(id) ?? id;
 }
 
+/**
+ * The 2025 ids of the risks whose scope the 2026 edition widened (ADR-0297): LLM07:2025 (system prompt leakage)
+ * became LLM08:2026, which covers all context a user does not see. The 2026 edition's own names are not vendored, so
+ * such a risk keeps its 2025 name, labelled as the 2025 name, rather than pairing a 2026 number with a name that
+ * edition does not use.
+ */
+const LLM_SCOPE_WIDENED_IN_2026: ReadonlySet<string> = new Set(["owasp:llm:07"]);
+const llm2026Name = (legacyId: string, name2025: string) =>
+  LLM_SCOPE_WIDENED_IN_2026.has(legacyId) ? `${name2025} (2025 name; widened in 2026)` : name2025;
+
 /** every OWASP id the catalog may cite, with its name: the LLM Top 10 by its 2026 number, then the agentic list */
 export function owaspReferences(): OwaspRef[] {
   // names come from the vendored (2025-ordered) promptfoo table, found through the 2025 id of the same risk
@@ -333,7 +343,7 @@ export function owaspReferences(): OwaspRef[] {
     .map(([id, legacyId]) => ({
       id,
       list: "owasp-llm-top-10" as const,
-      name: names2025.get(legacyId) ?? id,
+      name: llm2026Name(legacyId, names2025.get(legacyId) ?? id),
       edition: 2026 as const,
       legacyId,
     }));

@@ -50,6 +50,8 @@ export interface OwaspMeasurability {
   /** our eval scorers whose catalog entry cites this id */
   scorerKinds: EvalScorerKind[];
   measurable: boolean;
+  /** ADR-0297: for an LLM id, the 2025 id of the same risk, which a stored policy may still hold */
+  legacyId?: string;
 }
 
 /** Every vendored OWASP id, with what (if anything) can measure it. Runtime
@@ -67,6 +69,7 @@ export function owaspMeasurability(): OwaspMeasurability[] {
       redteamClasses,
       scorerKinds,
       measurable: redteamClasses.length > 0 || scorerKinds.length > 0,
+      ...(o.legacyId ? { legacyId: o.legacyId } : {}),
     };
   });
 }
@@ -76,12 +79,10 @@ export function owaspMeasurability(): OwaspMeasurability[] {
  * so a policy or golden case stored before the catalog moved to 2026 numbering is measured exactly as before. An
  * alias entry carries its own id and the same classes, scorers and name.
  */
-const LEGACY_ID = new Map(owaspReferences().map((o) => [o.id, o.legacyId]));
 const MEASURABILITY = new Map<string, OwaspMeasurability>(
-  owaspMeasurability().flatMap((m) => {
-    const legacy = LEGACY_ID.get(m.id);
-    return legacy ? [[m.id, m] as const, [legacy, { ...m, id: legacy }] as const] : [[m.id, m] as const];
-  }),
+  owaspMeasurability().flatMap((m) =>
+    m.legacyId ? [[m.id, m] as const, [m.legacyId, { ...m, id: m.legacyId }] as const] : [[m.id, m] as const],
+  ),
 );
 
 export function owaspTestClassInfo(id: string): OwaspMeasurability | undefined {

@@ -348,14 +348,14 @@ async function view(db: Db) {
     updatedByName = u ? u.displayName || u.email : null;
   }
   const catalog = owaspMeasurability();
-  // ADR-0297: owaspTestClassInfo resolves 2025 ids (aliases) as well as the catalog's 2026 ids
-  const name = { get: (id: string) => owaspTestClassInfo(id)?.name };
+  // ADR-0297: owaspTestClassInfo resolves 2025 ids (aliases) as well as the catalog's 2026 ids; `testClasses` carries
+  // each LLM id's `legacyId`, so the editor resolves a stored 2025 id the same way
   const describe = (t: ReviewPolicyTierKey) => {
     const eff = effectiveRequiredTests(t, policy);
     return {
       source: eff.source,
       freshnessDays: eff.freshnessDays,
-      classes: eff.classes.map((c) => ({ ...c, name: name.get(c.testClass) ?? c.testClass, ...requiredTestThresholds(c) })),
+      classes: eff.classes.map((c) => ({ ...c, name: owaspTestClassInfo(c.testClass)?.name ?? c.testClass, ...requiredTestThresholds(c) })),
     };
   };
   return {
