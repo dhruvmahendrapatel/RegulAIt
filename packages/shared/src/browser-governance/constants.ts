@@ -3,7 +3,6 @@
  * dependency at all, so the extension's content script and block page bundle only this (the schemas are in
  * index.ts).
  */
-import type { BrowserPolicy } from "./index.js";
 
 // ---------------------------------------------------------------------------
 // Paths, headers, bounds
@@ -151,7 +150,14 @@ export type BrowserSiteVerdict =
   | { effect: "allow" }
   | { effect: "block"; code: BrowserDenyReason | "no_valid_policy" | "site_not_in_policy" | "account_not_allowed" | "account_signed_out" };
 
-export function siteVerdict(policy: BrowserPolicy | null, siteId: BrowserSiteId, profileEmailNow: string, nowSeconds: number): BrowserSiteVerdict {
+/** the parts of a verified policy a verdict reads (the full type, with its schema, is `BrowserPolicy` in index.ts) */
+export interface BrowserPolicyView {
+  issuedAt: number;
+  notAfter: number;
+  sites: readonly { siteId: BrowserSiteId; decision: "allow" | "deny"; denyReason: BrowserDenyReason | null; accountDomains: readonly string[] }[];
+}
+
+export function siteVerdict(policy: BrowserPolicyView | null, siteId: BrowserSiteId, profileEmailNow: string, nowSeconds: number): BrowserSiteVerdict {
   if (!policy || nowSeconds >= policy.notAfter || policy.issuedAt - BROWSER_POLICY_MAX_FUTURE_SKEW_SECONDS > nowSeconds) {
     return { effect: "block", code: "no_valid_policy" };
   }
