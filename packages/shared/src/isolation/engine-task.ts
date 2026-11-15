@@ -117,6 +117,10 @@ export const engineTaskInputManifestSchema = z
   .refine((m) => m.digest === engineTaskInputDigest(m.files), { message: "the digest is not the files' digest" });
 export type EngineTaskInputManifest = z.infer<typeof engineTaskInputManifestSchema>;
 
+type PlacedInput = { files: ReadonlyArray<{ path: string }>; artifact: { path: string } | null; subject?: { path: string } | null | undefined };
+const placedPaths = (u: PlacedInput) => [...u.files, ...(u.artifact ? [u.artifact] : []), ...(u.subject ? [u.subject] : [])];
+const placedCount = (u: PlacedInput) => placedPaths(u).length;
+
 /** POST /v1/engine-runner/runs/:runId/task/input: once per run; the input is immutable after it */
 export const engineTaskInputUploadSchema = z
   .object({
@@ -127,14 +131,20 @@ export const engineTaskInputUploadSchema = z
      * store to the executor (never through the runner), and the runner cannot name any other artifact
      */
     artifact: z.object({ path: taskPath }).strict().nullable(),
+    /**
+     * ADR-0242 L4.3: where a subject run's input file goes (an admission scan only); the gateway writes the bytes
+     * itself from its own records, and the runner cannot name any other subject. Optional: absent = null.
+     */
+    subject: z.object({ path: taskPath }).strict().nullable().optional(),
     /** the task secret (the run's key), or null for a worker that calls nothing (the modelscan scanner) */
     secret: engineTaskSecretSchema.nullable(),
   })
   .strict()
-  .refine((u) => u.files.length + (u.artifact ? 1 : 0) >= 1 && u.files.length + (u.artifact ? 1 : 0) <= ENGINE_TASK_MAX_FILES, {
+  .refine((u) => !(u.artifact && u.subject), { message: "an input places an artifact or a subject, never both" })
+  .refine((u) => placedCount(u) >= 1 && placedCount(u) <= ENGINE_TASK_MAX_FILES, {
     message: `1 to ${ENGINE_TASK_MAX_FILES} files`,
   })
-  .refine((u) => uniquePaths([...u.files, ...(u.artifact ? [u.artifact] : [])]) && noPrefixPaths([...u.files, ...(u.artifact ? [u.artifact] : [])]), {
+  .refine((u) => uniquePaths(placedPaths(u)) && noPrefixPaths(placedPaths(u)), {
     message: "duplicate or nested input path",
   })
   .refine((u) => u.files.reduce((n, f) => n + Math.floor((f.data.length * 3) / 4), 0) <= ENGINE_TASK_INLINE_MAX_BYTES + 3 * ENGINE_TASK_MAX_FILES, {

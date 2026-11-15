@@ -64,7 +64,9 @@ printf '#!/bin/sh\ncd %s && docker compose exec -T gateway node apps/gateway/dis
 
 It runs inside the gateway container with the gateway's own bootstrap token and calls the gateway on its own loopback
 port. At the FALLBACK rehearsal, on the laptop's FALLBACK stack: `pnpm --filter @regulait/gateway demo:enforce` with the same
-environment as the other demo commands. Exit 0: the beat ran as scripted (or printed the simulated decision). Exit 1:
+environment as the other demo commands. Since S-02 (PR #728) the bootstrap token retires once a presenter signs in,
+so the gateway these commands call must run with `REGULAIT_BOOTSTRAP_AFTER_ADMIN=1` (printed and audited at boot);
+without it `demo:enforce` stops on `401 bootstrap_retired` and `demo:relax-e` needs `REGULAIT_DEMO_ADMIN_PASSWORD`. Exit 0: the beat ran as scripted (or printed the simulated decision). Exit 1:
 something answered differently, read the `***` line. Exit 2: a setup error, or a `REFUSED` line. The command refuses to
 call anything unless the gateway shows it is a demo one (lane L's `GET /v1/demo/beats` answers and the seed's four
 personas exist), and when that switch cannot be read; so until lane L's PR #572 is deployed on the stack it refuses.
