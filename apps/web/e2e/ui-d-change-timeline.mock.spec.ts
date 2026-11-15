@@ -6,7 +6,8 @@
  *    checks, merge approval) reads each step's state from the template's own
  *    stages, in words, and a step the template lacks is never "Done";
  *  - a failed links read says it could not tell, never "No work item linked";
- *  - the history lists every recorded event oldest first, en-GB times;
+ *  - a 404 from the links route is "not visible to you", and a rolled-back change never shows Checks done;
+ *  - the history lists every recorded event in the server's order, with who acted;
  *  - axe (WCAG 2.x A/AA) in light and dark, and no sideways scroll at 390 px.
  */
 import { AxeBuilder } from "@axe-core/playwright";
@@ -27,17 +28,18 @@ const STAGES = [
 ];
 
 const EVENTS = [
-  // out of order on purpose: the page sorts oldest first
-  { id: "e3", at: "2026-11-15T10:05:00Z", actorUserId: "avery", event: { kind: "approval_granted", stageId: "plan_signoff" } },
+  // oldest first, as the server returns them
   { id: "e1", at: "2026-11-15T09:00:00Z", actorUserId: "ada", event: { kind: "start" } },
   { id: "e2", at: "2026-11-15T09:30:00Z", actorUserId: "ada", event: { kind: "artifact_submitted", stageId: "requirements" } },
+  { id: "e3", at: "2026-11-15T10:05:00Z", actorUserId: "avery", event: { kind: "approval_granted", stageId: "plan_signoff" } },
   { id: "e4", at: "2026-11-15T10:06:00Z", actorUserId: null, event: { kind: "execute_stage", stageId: "agent_build" } },
 ];
 
 const json = (route: Route, body: unknown, status = 200) =>
   route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
-async function mockGateway(page: Page, opts: { linksFail?: boolean; stages?: typeof STAGES } = {}) {
+type Opts = { linksStatus?: number; stages?: typeof STAGES; instance?: Record<string, unknown> };
+async function mockGateway(page: Page, opts: Opts = {}) {
   const stages = opts.stages ?? STAGES;
   await page.route("**/*", async (route) => {
     const req = route.request();
@@ -58,13 +60,14 @@ async function mockGateway(page: Page, opts: { linksFail?: boolean; stages?: typ
           definition: { stages },
           state: { currentStageIndex: 4, stageStatuses: { 0: "completed", 1: "completed", 2: "completed", 3: "completed", 4: "active" } },
           context: {},
+          ...opts.instance,
         },
         events: EVENTS,
         artifacts: [],
         pendingApprovals: [],
       });
     if (p === "/v1/pm/links") {
-      if (opts.linksFail) return json(route, { error: "upstream_unavailable" }, 503);
+      if (opts.linksStatus) return json(route, { error: opts.linksStatus === 404 ? "not_found" : "upstream_unavailable" }, opts.linksStatus);
       return json(route, {
         links: [{
           id: "l1", connectionId: "c1", connectionName: "boards", objectType: "workflow_instance", objectId: INST, nodeId: null,
@@ -118,24 +121,50 @@ test.describe("UI-D D4: the governed change", () => {
   });
 
   test("a failed links read is not shown as no work item", async ({ page }) => {
-    await mockGateway(page, { linksFail: true });
+    await mockGateway(page, { linksStatus: 503 });
     await page.goto(`/ui/workflows/${INST}`);
     const item = page.getByRole("list", { name: "Governed change steps" }).getByRole("listitem").first();
     await expect(item).toContainText("Could not read the linked work items");
+    await expect(item).toContainText("Unknown");
     await expect(item).not.toContainText("No work item linked");
+    await expect(item.getByRole("button", { name: "Retry" })).toBeVisible();
   });
 
-  test("the history lists every event oldest first", async ({ page }) => {
+  test("a reader the links route does not admit is told the items are not visible, not that the read failed", async ({ page }) => {
+    await mockGateway(page, { linksStatus: 404 });
+    await page.goto(`/ui/workflows/${INST}`);
+    const item = page.getByRole("list", { name: "Governed change steps" }).getByRole("listitem").first();
+    await expect(item).toContainText("The linked work items are not visible to you");
+    await expect(item).not.toContainText("Could not read");
+  });
+
+  test("a rolled-back change never shows Checks as done, though the kernel completed the stage", async ({ page }) => {
+    await mockGateway(page, {
+      instance: {
+        status: "rolled_back",
+        state: { currentStageIndex: 7, stageStatuses: Object.fromEntries(STAGES.map((_, i) => [i, "completed"])) },
+        context: { "checks:ci": [{ check: "smoke", status: "failed" }] },
+      },
+    });
+    await page.goto(`/ui/workflows/${INST}`);
+    const checks = page.getByRole("list", { name: "Governed change steps" }).getByRole("listitem").filter({ hasText: "Checks" });
+    await expect(checks).toContainText("Needs attention");
+    await expect(checks).toContainText("1 check failed");
+    await expect(checks).not.toContainText("Done");
+  });
+
+  test("the history lists every event, and who acted", async ({ page }) => {
     await mockGateway(page);
     await page.goto(`/ui/workflows/${INST}`);
     const history = page.locator("ol").filter({ hasText: "Workflow started" });
     const rows = history.getByRole("listitem");
     await expect(rows).toHaveCount(4);
     await expect(rows.nth(0)).toContainText("Workflow started");
-    await expect(rows.nth(1)).toContainText("Artifact submitted at Requirements");
-    await expect(rows.nth(2)).toContainText("Sign-off granted at Plan sign-off");
-    await expect(rows.nth(3)).toContainText("Stage Agent build started running");
-    await expect(rows.nth(3)).toContainText("by the system");
+    await expect(rows.nth(1)).toContainText("Artifact submitted at requirements");
+    await expect(rows.nth(2)).toContainText("Sign-off granted at plan sign-off");
+    await expect(rows.nth(3)).toContainText("Stage agent build started running");
+    await expect(rows.nth(3)).toContainText("System");
+    await expect(rows.nth(0)).toContainText("Ada Admin");
   });
 
   test("no sideways scroll at phone width", async ({ page }) => {

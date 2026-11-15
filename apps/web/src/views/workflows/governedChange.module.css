@@ -1,98 +1,12 @@
-/* The governed-change chain and history (ChangeTimeline.tsx). Tokens only (ADR-0196). Phone first: one column of
-   steps; from 768 px the steps wrap into a row. State is always in the badge text, never only the border colour. */
+/* The governed-change chain (ChangeTimeline.tsx). The boxes are the Pipeline rail's (workflows.module.css); this
+   file only makes the rail a list and marks a step the template lacks. Tokens only (ADR-0196). */
 .chain {
+  composes: stageRail from "./workflows.module.css";
   list-style: none;
   margin: 0;
   padding: 0;
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: var(--s1);
 }
-@media (min-width: 768px) {
-  .chain {
-    grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr));
-  }
-}
-.step {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  grid-template-areas:
-    "index label"
-    "index badge"
-    "index detail";
-  column-gap: var(--s1);
-  row-gap: var(--s0);
-  align-items: start;
-  border: 1px solid var(--rg-line);
-  border-radius: var(--rg-r-md);
-  padding: var(--s1);
-  background: var(--rg-raised);
-}
-.badge {
-  grid-area: badge;
-  justify-self: start;
-}
-.done {
-  composes: step;
-  border-color: var(--rg-positive-deep);
-}
-.current {
-  composes: step;
-  border-color: var(--rg-signal-700);
-}
-.attention {
-  composes: step;
-  border-color: var(--rg-critical-deep);
-}
-.to_do {
-  composes: step;
-}
-.not_in_template {
-  composes: step;
+.absent {
+  composes: stage from "./workflows.module.css";
   border-style: dashed;
-}
-.index {
-  grid-area: index;
-  font-family: var(--rg-font-mono);
-  font-size: var(--text-xs);
-  color: var(--rg-ink-label);
-}
-.label {
-  grid-area: label;
-  font-weight: 600;
-  color: var(--rg-ink);
-}
-.detail {
-  grid-area: detail;
-  font-size: var(--text-sm);
-  color: var(--rg-ink-label);
-}
-
-.history {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--s0-5);
-}
-.event {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--s1);
-  align-items: baseline;
-}
-.tone_neutral {
-  color: var(--rg-ink);
-}
-.tone_ok {
-  color: var(--rg-ink);
-}
-.tone_warn {
-  color: var(--rg-ink);
-  font-weight: 600;
-}
-.tone_danger {
-  color: var(--rg-critical-deep);
-  font-weight: 600;
 }

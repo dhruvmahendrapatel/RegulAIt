@@ -4,69 +4,73 @@
  * recorded history of the workflow instance, on its detail page.
  *
  * Reads only what is already served: the detail response's `events`, and the
- * PM links query PmLinksCard also makes (same cache key, so one request).
- * The model is governedChange.ts.
+ * PM links through PmLinksCard's own hook (usePmLinks), so the page makes one
+ * links request. The model is governedChange.ts; the stage boxes are the
+ * Pipeline rail's (workflows.module.css), so the two read alike.
  */
-import { useQuery } from "@tanstack/react-query";
-import { api } from "../../api/client";
-import { fmtAt } from "../../api/format";
-import type { PmLink, WorkflowDetailResponse } from "../../api/types";
-import { Badge, Card, EmptyState, type Tone } from "../../ui/kit";
-import {
-  buildChain,
-  CHAIN_STATE_WORDS,
-  type ChainState,
-  eventSentence,
-  eventTone,
-  sortEvents,
-  type WorkflowEventRow,
-} from "./governedChange";
+import { ApiError } from "../../api/client";
+import { actorLabel, fmtAt } from "../../api/format";
+import type { WorkflowDetailResponse } from "../../api/types";
+import { useSession } from "../../session/SessionContext";
+import { Badge, Button, Card, EmptyState, type Tone } from "../../ui/kit";
+import { usePmLinks } from "../pm/PmAndDecisions";
+import { buildChain, CHAIN_STATE_WORDS, type ChainState, eventSentence, type PmLinksRead, type WorkflowEventRow } from "./governedChange";
 import v from "../views.module.css";
-import s from "./governedChange.module.css";
+import s from "./workflows.module.css";
+import g from "./governedChange.module.css";
 
 const STATE_TONE: Record<ChainState, Tone> = {
   done: "ok",
   current: "primary",
   attention: "danger",
   to_do: "neutral",
+  unknown: "neutral",
   not_in_template: "neutral",
+};
+
+/** the Pipeline rail's box for each state, so the chain and the rail look the same */
+const STATE_BOX: Record<ChainState, string | undefined> = {
+  done: s.stageDone,
+  current: s.stageActive,
+  attention: s.stageFailed,
+  to_do: s.stage,
+  unknown: s.stage,
+  not_in_template: g.absent,
 };
 
 export function ChangeTimeline(props: { detail: WorkflowDetailResponse & { events?: WorkflowEventRow[] } }) {
   const { detail } = props;
-  const instanceId = detail.instance.id;
-  // the same key PmLinksCard uses for its non-live read, so the two share one request
-  const links = useQuery({
-    queryKey: ["pm-links", "workflow_instance", instanceId, false],
-    queryFn: () => api.get<{ links: PmLink[] }>(`/v1/pm/links?instanceId=${instanceId}`),
-    retry: false,
-  });
-  // a failed links read is not "no work item": the chain says it could not tell
-  const chain = buildChain(detail, {
-    count: links.data?.links?.length ?? 0,
-    loaded: links.isSuccess,
-  }).map((step) =>
-    step.id === "work_item" && links.isError ? { ...step, detail: "Could not read the linked work items" } : step,
-  );
-  const events = sortEvents(detail.events ?? []);
+  const { me } = useSession();
+  const links = usePmLinks({ objectType: "workflow_instance", objectId: detail.instance.id });
+  // the links route answers 404 to a reader it does not admit (a past approver): not visible, not an error
+  const pm: PmLinksRead = links.isPending
+    ? { state: "loading" }
+    : links.isError
+      ? links.error instanceof ApiError && links.error.status === 404
+        ? { state: "hidden" }
+        : { state: "error" }
+      : { state: "ok", links: links.data?.links ?? [] };
+  const chain = buildChain(detail, pm);
+  // the server returns the events oldest first (workflows.ts); kept as sent
+  const events = detail.events ?? [];
+  const names = new Map(me?.user ? [[me.user.id, me.user.displayName || me.user.email]] : []);
 
   return (
     <>
-      <Card
-        title="Governed change"
-        info="Each step comes from this change's template. A step the template does not have is shown as such, never as done."
-      >
-        <ol className={s.chain} aria-label="Governed change steps">
-          {chain.map((step, i) => (
-            <li key={step.id} className={s[step.state]} aria-current={step.state === "current" ? "step" : undefined}>
-              <span className={s.index} aria-hidden="true">
-                {i + 1}
-              </span>
-              <span className={s.label}>{step.label}</span>
-              <span className={s.badge}>
+      <Card title="Governed change">
+        <ol className={g.chain} aria-label="Governed change steps">
+          {chain.map((step) => (
+            <li key={step.id} className={STATE_BOX[step.state]} aria-current={step.state === "current" ? "step" : undefined}>
+              <strong>{step.label}</strong>
+              <span>
                 <Badge tone={STATE_TONE[step.state]}>{CHAIN_STATE_WORDS[step.state]}</Badge>
               </span>
-              <span className={s.detail}>{step.detail}</span>
+              <span>{step.detail}</span>
+              {step.id === "work_item" && pm.state === "error" && (
+                <Button variant="ghost" size="sm" onClick={() => void links.refetch()}>
+                  Retry
+                </Button>
+              )}
             </li>
           ))}
         </ol>
@@ -76,14 +80,14 @@ export function ChangeTimeline(props: { detail: WorkflowDetailResponse & { event
         {events.length === 0 ? (
           <EmptyState title="No events recorded yet" body="Events appear here as the change moves through its stages." />
         ) : (
-          <ol className={s.history}>
+          <ol className={v.stackTight}>
             {events.map((e) => (
-              <li key={e.id} className={s.event}>
+              <li key={e.id} className={v.row}>
                 <time className={v.mono} dateTime={e.at}>
                   {fmtAt(e.at)}
                 </time>
-                <span className={s[`tone_${eventTone(e.event.kind)}`]}>{eventSentence(e.event)}</span>
-                <span className={v.faint}>{e.actorUserId ? "by a person" : "by the system"}</span>
+                <span>{eventSentence(e.event)}</span>
+                <span className={v.faint}>{actorLabel(e.actorUserId, names)}</span>
               </li>
             ))}
           </ol>

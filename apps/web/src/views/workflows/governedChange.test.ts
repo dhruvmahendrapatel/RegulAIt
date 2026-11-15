@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from "vitest";
 import type { WorkflowDetailResponse } from "../../api/types";
-import { buildChain, eventSentence, eventTone, sortEvents, stagePhase } from "./governedChange";
+import { buildChain, eventSentence, type PmLinksRead, stagePhase } from "./governedChange";
 
 const STAGES = [
   { id: "intake", type: "trigger" },
@@ -38,7 +38,8 @@ function detail(over: {
 }
 
 const done = (n: number) => Object.fromEntries(Array.from({ length: n }, (_, i) => [i, "completed"]));
-const pmNone = { count: 0, loaded: true };
+const pmNone: PmLinksRead = { state: "ok", links: [] };
+const pmLinks = (n: number) => ({ state: "ok" as const, links: Array.from({ length: n }, () => ({})) });
 
 describe("stagePhase", () => {
   it("splits human approvals into the plan sign-off and the merge approval around the first build", () => {
@@ -54,7 +55,7 @@ describe("stagePhase", () => {
 
 describe("buildChain", () => {
   it("marks steps done only when every stage in them completed", () => {
-    const chain = buildChain(detail({ current: 4, statuses: done(4) }), { count: 1, loaded: true });
+    const chain = buildChain(detail({ current: 4, statuses: done(4) }), pmLinks(1));
     expect(chain.map((c) => [c.id, c.state])).toEqual([
       ["work_item", "done"],
       ["plan", "done"],
@@ -82,20 +83,43 @@ describe("buildChain", () => {
     expect(checks.detail).toBe("Blocked on check");
   });
 
-  it("says no work item is linked, and waits while the links load", () => {
+  it("says no work item is linked, and says it does not know while loading, on error, or when hidden", () => {
     expect(buildChain(detail({}), pmNone)[0]).toMatchObject({ state: "to_do", detail: "No work item linked" });
-    expect(buildChain(detail({}), { count: 0, loaded: false })[0]!.detail).toBe("Loading the linked work items");
-    expect(buildChain(detail({}), { count: 2, loaded: true })[0]).toMatchObject({ state: "done", detail: "2 linked work items" });
+    expect(buildChain(detail({}), pmLinks(2))[0]).toMatchObject({ state: "done", detail: "2 linked work items" });
+    expect(buildChain(detail({}), { state: "loading" })[0]).toMatchObject({ state: "unknown", detail: "Reading the linked work items" });
+    expect(buildChain(detail({}), { state: "error" })[0]).toMatchObject({ state: "unknown", detail: "Could not read the linked work items" });
+    expect(buildChain(detail({}), { state: "hidden" })[0]).toMatchObject({
+      state: "unknown",
+      detail: "The linked work items are not visible to you",
+    });
   });
 
-  it("reports the pull request and the merge from the delivery context", () => {
-    const chain = buildChain(
-      detail({ status: "completed", statuses: done(8), context: { prUrl: "https://example.test/pr/1", mergeSha: "abc" } }),
-      pmNone,
-    );
-    expect(chain.find((c) => c.id === "pull_request")!.detail).toBe("Opened");
-    expect(chain.find((c) => c.id === "merge_approval")!.detail).toBe("Merged");
+  it("does not count an orphaned link as a linked work item", () => {
+    const pm = { state: "ok" as const, links: [{ orphanedAt: "2026-11-15T10:00:00Z" }, {}] };
+    expect(buildChain(detail({}), pm)[0]).toMatchObject({ state: "done", detail: "1 linked work item" });
+    const allGone = { state: "ok" as const, links: [{ orphanedAt: "2026-11-15T10:00:00Z" }] };
+    expect(buildChain(detail({}), allGone)[0]).toMatchObject({ state: "to_do", detail: "No work item linked" });
   });
+
+  it("never shows Checks done when a recorded check failed, even if the kernel completed the stage (rollback)", () => {
+    // the kernel marks a failed post-deploy verify completed before it jumps to rollback
+    const statuses = done(8);
+    const failed = buildChain(
+      detail({ status: "rolled_back", current: 7, statuses, context: { "checks:ci": [{ check: "smoke", status: "failed" }, { check: "lint", status: "passed" }] } }),
+      pmNone,
+    ).find((c) => c.id === "checks")!;
+    expect(failed).toMatchObject({ state: "attention", detail: "1 check failed" });
+    // rolled back with no failed result on record still needs attention
+    const rolled = buildChain(detail({ status: "rolled_back", current: 7, statuses }), pmNone).find((c) => c.id === "checks")!;
+    expect(rolled).toMatchObject({ state: "attention", detail: "The change was rolled back" });
+    // control: every stage completed, every check passed, not rolled back: done
+    const ok = buildChain(
+      detail({ status: "completed", statuses, context: { "checks:ci": [{ check: "lint", status: "passed" }] } }),
+      pmNone,
+    ).find((c) => c.id === "checks")!;
+    expect(ok.state).toBe("done");
+  });
+
 
   it("does not call a terminal instance's last stage in progress", () => {
     const chain = buildChain(detail({ current: 7, status: "completed", statuses: done(7) }), pmNone);
@@ -105,30 +129,15 @@ describe("buildChain", () => {
 
 describe("history", () => {
   it("writes each event as a sentence that only names what the event carries", () => {
-    expect(eventSentence({ kind: "approval_granted", stageId: "plan_signoff" })).toBe("Sign-off granted at Plan sign-off");
-    expect(eventSentence({ kind: "check_failed", stageId: "ci", failures: ["lint", "unit"] })).toBe("Checks failed at Ci (2 checks)");
-    expect(eventSentence({ kind: "execution_failed", stageId: "agent_build" })).toBe("Stage Agent build failed");
-    expect(eventSentence({ kind: "reopen", stageId: "plan_signoff", reason: "recertification" })).toBe(
-      "Reopened to Plan sign-off: recertification",
-    );
+    expect(eventSentence({ kind: "approval_granted", stageId: "plan_signoff" })).toBe("Sign-off granted at plan sign-off");
+    expect(eventSentence({ kind: "check_failed", stageId: "ci", failures: ["lint", "unit"] })).toBe("Checks failed at CI (2 checks)");
+    // ids are lower-cased mid-sentence, and the server's own error and reason text is never shown
+    expect(eventSentence({ kind: "execution_failed", stageId: "agent_build", error: "boom <b>" } as never)).toBe("Stage agent build failed");
+    expect(eventSentence({ kind: "reopen", stageId: "plan_signoff", reason: "recertification" } as never)).toBe("Reopened to plan sign-off");
     expect(eventSentence({ kind: "start" })).toBe("Workflow started");
     // an unknown kind is humanised, never dropped
     expect(eventSentence({ kind: "something_new" })).toBe("Something new");
   });
 
-  it("gives failures and refusals a tone, and leaves the rest neutral", () => {
-    expect(eventTone("check_failed")).toBe("danger");
-    expect(eventTone("approval_returned")).toBe("warn");
-    expect(eventTone("approval_granted")).toBe("ok");
-    expect(eventTone("start")).toBe("neutral");
-  });
 
-  it("orders events oldest first whatever order they arrive in", () => {
-    const rows = [
-      { id: "b", at: "2026-11-15T10:00:00Z", event: { kind: "approval_granted" } },
-      { id: "a", at: "2026-11-15T09:00:00Z", event: { kind: "start" } },
-    ];
-    expect(sortEvents(rows).map((r) => r.id)).toEqual(["a", "b"]);
-    expect(rows[0]!.id).toBe("b"); // the input is not mutated
-  });
 });

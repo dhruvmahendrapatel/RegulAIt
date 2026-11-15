@@ -5,28 +5,41 @@
  * already returns (GET /v1/workflows/instances/:instanceId, its `events`) and
  * the instance's PM links (GET /v1/pm/links?instanceId=…):
  *
- *  - the CHAIN: the pilot's story in seven steps (work item → plan → sign-off →
+ *  - the CHAIN: the change in seven steps (work item → plan → sign-off →
  *    build → pull request → checks → merge approval), each step's state derived
  *    from the template's own stages. A step the template does not contain says
  *    so; it is never shown as done.
  *  - the HISTORY: every recorded workflow event, oldest first, as a sentence.
- *    Sentences only name what the event carries; nothing is invented.
+ *    Sentences only name what the event carries; nothing is invented. The server
+ *    returns the events oldest first (workflows.ts), so the order is kept as sent.
  *
  * Logic only; ChangeTimeline.tsx renders it (ADR-0200 #2).
  */
-import { humanize } from "../../api/format";
-import type { WorkflowDetailResponse, WorkflowStage } from "../../api/types";
+import { humanize, plural } from "../../api/format";
+import type { CheckResult, WorkflowDetailResponse, WorkflowStage } from "../../api/types";
 
 /** one row of `workflow_events`, as the detail endpoint returns it */
 export interface WorkflowEventRow {
   id: string;
   at: string;
   actorUserId?: string | null;
-  event: { kind: string; stageId?: string; error?: string; reason?: string; failures?: string[] };
+  // the server's own error and reason text is deliberately not read: history lines are fixed sentences
+  event: { kind: string; stageId?: string; failures?: string[] };
 }
 
 export type ChainStepId = "work_item" | "plan" | "sign_off" | "build" | "pull_request" | "checks" | "merge_approval";
-export type ChainState = "done" | "current" | "attention" | "to_do" | "not_in_template";
+export type ChainState = "done" | "current" | "attention" | "to_do" | "unknown" | "not_in_template";
+
+/**
+ * What the PM-links read told us. `hidden` is the server's own rule: the links
+ * route admits an admin, the initiator or a pending approver, so a past approver
+ * can open the page but not the links. That is not an error.
+ */
+export type PmLinksRead =
+  | { state: "loading" }
+  | { state: "error" }
+  | { state: "hidden" }
+  | { state: "ok"; links: Array<{ orphanedAt?: string | null }> };
 
 export interface ChainStep {
   id: ChainStepId;
@@ -51,6 +64,7 @@ export const CHAIN_STATE_WORDS: Record<ChainState, string> = {
   current: "In progress",
   attention: "Needs attention",
   to_do: "Not started",
+  unknown: "Unknown",
   not_in_template: "Not in this template",
 };
 
@@ -83,10 +97,11 @@ export function stagePhase(stages: WorkflowStage[], index: number): ChainStepId 
   }
 }
 
-export function buildChain(
-  detail: WorkflowDetailResponse,
-  pm: { count: number; loaded: boolean },
-): ChainStep[] {
+/** a stage's recorded check results, from the context the page already reads */
+const failedChecks = (ctx: Record<string, unknown>, stageId: string) =>
+  ((ctx[`checks:${stageId}`] as CheckResult[] | undefined) ?? []).filter((c) => c.status === "failed").length;
+
+export function buildChain(detail: WorkflowDetailResponse, pm: PmLinksRead): ChainStep[] {
   const { instance } = detail;
   const stages = instance.definition.stages;
   const statuses = instance.state.stageStatuses;
@@ -102,29 +117,42 @@ export function buildChain(
   const stageStep = (id: Exclude<ChainStepId, "work_item">): ChainStep => {
     const idx = byPhase.get(id) ?? [];
     const label = CHAIN_LABELS[id];
-    if (idx.length === 0) return { id, label, state: "not_in_template", detail: "This template has no such stage" };
+    if (idx.length === 0) return { id, label, state: "not_in_template", detail: "No such stage" };
     const done = idx.filter((i) => statuses[i] === "completed").length;
     const holdsCurrent = !terminal && idx.includes(instance.state.currentStageIndex);
     const stuckHere = idx.includes(instance.state.currentStageIndex) && STUCK.has(instance.status);
     let state: ChainState = done === idx.length ? "done" : holdsCurrent ? "current" : "to_do";
     if (stuckHere) state = "attention";
-    let line = `${done} of ${idx.length} ${idx.length === 1 ? "stage" : "stages"} complete`;
+    let line = `${done} of ${plural(idx.length, "stage")} complete`;
     if (stuckHere) line = humanize(instance.status);
-    if (id === "pull_request" && ctx.prUrl) line = state === "done" ? "Opened" : "Opened, not yet complete";
-    if (id === "merge_approval" && ctx.mergeSha) line = "Merged";
+    if (id === "checks") {
+      // A post-deploy verify that fails is marked completed before the kernel jumps to rollback, so
+      // "every stage completed" is not "every check passed": read the recorded results too.
+      const failed = idx.reduce((n, i) => n + failedChecks(ctx, stages[i]!.id), 0);
+      if (failed > 0) {
+        state = "attention";
+        line = `${plural(failed, "check")} failed`;
+      } else if (instance.status === "rolled_back") {
+        state = "attention";
+        line = "The change was rolled back";
+      }
+    }
     return { id, label, state, detail: line };
   };
 
-  const workItem: ChainStep = !pm.loaded
-    ? { id: "work_item", label: CHAIN_LABELS.work_item, state: "to_do", detail: "Loading the linked work items" }
-    : pm.count > 0
-      ? {
-          id: "work_item",
-          label: CHAIN_LABELS.work_item,
-          state: "done",
-          detail: pm.count === 1 ? "1 linked work item" : `${pm.count} linked work items`,
-        }
-      : { id: "work_item", label: CHAIN_LABELS.work_item, state: "to_do", detail: "No work item linked" };
+  const wi = (state: ChainState, detail: string): ChainStep => ({ id: "work_item", label: CHAIN_LABELS.work_item, state, detail });
+  // an orphaned link (its item was deleted or moved in the PM tool) is not a linked work item
+  const live = pm.state === "ok" ? pm.links.filter((l) => !l.orphanedAt).length : 0;
+  const workItem: ChainStep =
+    pm.state === "loading"
+      ? wi("unknown", "Reading the linked work items")
+      : pm.state === "error"
+        ? wi("unknown", "Could not read the linked work items")
+        : pm.state === "hidden"
+          ? wi("unknown", "The linked work items are not visible to you")
+          : live > 0
+            ? wi("done", `${plural(live, "linked work item")}`)
+            : wi("to_do", "No work item linked");
 
   return [
     workItem,
@@ -138,7 +166,8 @@ export function buildChain(
 }
 
 /** the stage's id in words, or "the workflow" when the event names none */
-const stageWords = (stageId: string | undefined) => (stageId ? humanize(stageId) : "the workflow");
+const stageWords = (stageId: string | undefined) =>
+  stageId ? humanize(stageId).replace(/^[A-Z](?=[a-z])/, (c) => c.toLowerCase()) : "the workflow";
 
 /** one history line; only names what the event itself carries */
 export function eventSentence(e: WorkflowEventRow["event"]): string {
@@ -163,37 +192,24 @@ export function eventSentence(e: WorkflowEventRow["event"]): string {
     case "execution_succeeded":
       return `Stage ${at} succeeded`;
     case "execution_failed":
-      return `Stage ${at} failed${e.error ? `: ${e.error}` : ""}`;
+      return `Stage ${at} failed`;
     case "check_failed": {
       const n = e.failures?.length ?? 0;
-      return `Checks failed at ${at}${n ? ` (${n === 1 ? "1 check" : `${n} checks`})` : ""}`;
+      return `Checks failed at ${at}${n ? ` (${plural(n, "check")})` : ""}`;
     }
     case "recheck":
       return `Checks run again at ${at}`;
     case "deploy_blocked":
-      return `Deploy held at ${at}${e.reason ? `: ${e.reason}` : ""}`;
+      return `Deploy held at ${at}`;
     case "deploy_override":
       return `Deploy hold resolved by hand at ${at}`;
     case "rolled_back":
       return `Rolled back at ${at}`;
     case "reopen":
-      return `Reopened to ${at}${e.reason ? `: ${e.reason}` : ""}`;
+      return `Reopened to ${at}`;
     case "abort":
       return "Workflow aborted";
     default:
       return humanize(e.kind);
   }
-}
-
-/** events the tone of a history line follows: failure, refusal, or neither */
-export function eventTone(kind: string): "danger" | "warn" | "ok" | "neutral" {
-  if (kind === "execution_failed" || kind === "check_failed" || kind === "approval_denied" || kind === "abort") return "danger";
-  if (kind === "deploy_blocked" || kind === "approval_returned" || kind === "reopen" || kind === "rolled_back") return "warn";
-  if (kind === "approval_granted" || kind === "execution_succeeded" || kind === "stage_completed") return "ok";
-  return "neutral";
-}
-
-/** the history, oldest first, whatever order the server sent */
-export function sortEvents(events: WorkflowEventRow[]): WorkflowEventRow[] {
-  return [...events].sort((a, b) => Date.parse(a.at) - Date.parse(b.at) || a.id.localeCompare(b.id));
 }
