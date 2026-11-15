@@ -75,7 +75,7 @@ async function mkModel(label: string) {
 
 beforeAll(async () => {
   k = await builderKit("mpol");
-  restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false, useCaseGateMode: "off", requireProjectAttribution: false });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false, useCaseGateMode: "off", requireProjectAttribution: false, copilotRedteamGateEnabled: false });
   // a clean slate: an earlier crashed run of this file must not leave a policy behind
   await k.db.delete(modelPolicyRules);
   admin = await k.person("admin", { admin: true });
