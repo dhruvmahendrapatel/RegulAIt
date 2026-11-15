@@ -104,7 +104,7 @@ export const MACHINE_ONLY = new Map([
   ["* /v1/engine-runner/*", { reason: "runner channel: only an engine runner credential reaches these (ADR-0187, route-classes.ts; ADR-0188 S7 adds the key rotation route; ADR-0190 I5 adds the three task routes; ENG-IMG removes the runner artifact route)", matches: 9 }],
   ["POST /v1/third-party-ingest/defenseclaw/records", "third-party exporter channel: a customer's DefenseClaw HTTP JSONL exporter posts here with its source's write-only rgti_ token, never a person (ADR-0261)"],
   ["POST /v1/third-party-ingest/defenseclaw/otlp/v1/logs", "third-party exporter channel: a customer's DefenseClaw OTLP/HTTP logs exporter (protobuf or JSON) posts here with its source's write-only rgti_ token, never a person (ADR-0302)"],
-  ["* /v1/endpoint-agent/*", { reason: "endpoint agent channel: the agent's install step (bulk enrolment token), its registration (device ticket) and its own DPoP-bound self token reach these, never a person (ADR-0195 SD4b)", matches: 5 }],
+  ["* /v1/endpoint-agent/*", { reason: "endpoint agent channel: the agent's install step (bulk enrolment token), its registration (device ticket) and its own DPoP-bound self token reach these, never a person (ADR-0195 SD4b; ADR-0331 added its signed removal directives and their outcomes)", matches: 7 }],
   ["* /v1/executor-channel/*", { reason: "executor channel: only an enrolled executor reaches these (ADR-0190; I4 adds the two stdio session routes, I5 the two task input routes)", matches: 11 }],
 
   // ---- inbound callbacks and provisioning -----------------------------------
@@ -443,6 +443,13 @@ export const KNOWN_UI_GAPS = new Map([
   ["GET /v1/connectors/:connectorId/token-exchange", { does: "reads a connector's upstream token-exchange configuration and per-action scope map (never the secret)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
   ["PUT /v1/connectors/:connectorId/token-exchange", { does: "sets or changes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
   ["DELETE /v1/connectors/:connectorId/token-exchange", { does: "removes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
+  // ADR-0331 (lane E13): the governed add-on removal admin routes ship API-only ("Not in this slice": the admin screens
+  // for the switch, creating and cancelling removals and per-endpoint outcomes). RAISED BY 4 for the master's review;
+  // the screen deletes these entries and lowers the cap by 4.
+  ["POST /v1/discovery/endpoint-addon-removals", { does: "starts the removal of one flagged MCP server identity from endpoints (endpoint_remediation step-up, audited; off until the org switch is on)", tracking: "ADR-0331; screen requested on #453" }],
+  ["GET /v1/discovery/endpoint-addon-removals", { does: "lists add-on removals, newest first, with their target counts per status", tracking: "ADR-0331; screen requested on #453" }],
+  ["GET /v1/discovery/endpoint-addon-removals/:id", { does: "one add-on removal and its per-endpoint targets with each outcome, code and whether the developer was notified", tracking: "ADR-0331; screen requested on #453" }],
+  ["POST /v1/discovery/endpoint-addon-removals/:id/cancel", { does: "cancels a removal: its undelivered and unreported targets are stopped (audited, no step-up)", tracking: "ADR-0331; screen requested on #453" }],
 ]);
 
 /**
@@ -451,7 +458,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 54; // main's 48 (43 + ADR-0303 L11 5 SIEM routes) + ADR-0256 (P32) 4, master decision on #725 2026-11-14; + ADR-0056 §5 amendment (lane L7) 2 copilot red-team gate routes
+export const KNOWN_UI_GAPS_MAX = 58; // main's 48 (43 + ADR-0303 L11 5 SIEM routes) + ADR-0256 (P32) 4, master decision on #725 2026-11-14; + ADR-0056 §5 amendment (lane L7) 2 copilot red-team gate routes; + ADR-0331 (lane E13) 4 add-on removal admin routes, raised for the master's review (#453)
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 

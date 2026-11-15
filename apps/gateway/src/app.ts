@@ -420,6 +420,10 @@ export interface BuildAppOptions {
   artifactStore?: ArtifactStore | null;
   /** ADR-0195 SD0 TEST SEAM: the discovery scanner registry (default: `DISCOVERY_SCANNERS`, empty in SD0). Code-only. */
   discoveryScanners?: ScannerRegistry;
+  /** ADR-0331 TEST SEAM: the device-policy signer (owner answer B4: one rotatable signer for endpoint and browser
+   * policies, built by the browser lane; wired here when it lands). Absent or null = no signer, which is production
+   * today (the directive route answers 503). Code-only: never env or admin input. */
+  devicePolicySigner?: DevicePolicySigner | null;
 }
 import { z } from "zod";
 import { boundTargetsForApprovals, registerMcpProxy } from "./mcp-proxy.js";
@@ -621,6 +625,7 @@ import { registerThirdPartyIngestRoutes } from "./third-party-ingest-routes.js";
 import { registerSiemDeliveryRoutes } from "./siem-delivery.js";
 import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
 import { registerEndpointMcpConfigRoutes } from "./endpoint-mcp-config.js";
+import { registerEndpointAddonRemovalRoutes, type DevicePolicySigner } from "./endpoint-addon-removal.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
 import { registerCostImportRoutes } from "./cost-import.js";
 import { registerCostReconciliationRoutes } from "./cost-reconcile.js";
@@ -6180,10 +6185,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerEndpointAgentRoutes(app, db, {
     dataKey: opts.dataKey,
     ...(opts.discoveryScanners === undefined ? {} : { registry: opts.discoveryScanners }),
+    devicePolicySigner: opts.devicePolicySigner ?? null,
   });
   // ADR-0259 (P35) — the MCP servers enrolled devices' host configs name, with the registry diff, and the admin's
   // links to approved servers. Admin-only by default; reads what the agent reports, contacts nothing.
   registerEndpointMcpConfigRoutes(app, db);
+  // ADR-0331 — the governed removal of flagged MCP servers from endpoints: create (an `endpoint_remediation` step-up,
+  // off until the org switch is on), list, read and cancel. Admin-only by default (none is in NON_ADMIN_ROUTES).
+  registerEndpointAddonRemovalRoutes(app, db, { signer: opts.devicePolicySigner ?? null });
   // ADR-0069 — CROSS-VENDOR COST CONSOLIDATION. Admin-only by default: the ONLY
   // route here in NON_ADMIN_ROUTES is `GET /v1/users/:userId/cost-consolidated`,
   // which refuses in-handler unless the caller IS that user. Uploading a file

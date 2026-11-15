@@ -84,7 +84,8 @@ export function engineCredentialRoutes(ctx: { via: string }): ReadonlySet<string
   if (ctx.via === "engine-runner") return RUNNER_ROUTE_SET;
   if (ctx.via === "engine-enrollment") return ENROLLMENT_ROUTE_SET;
   if (ctx.via === "pdp") return PDP_CLIENT_ROUTES;
-  // ADR-0195 SD4b: an endpoint agent's self token reaches its config, reports and key rotation only
+  // ADR-0195 SD4b: an endpoint agent's self token reaches its config, reports and key rotation only, and (ADR-0331)
+  // its signed removal directives and their outcomes
   if (ctx.via === "endpoint-agent") return ENDPOINT_AGENT_TOKEN_ROUTES;
   return null;
 }

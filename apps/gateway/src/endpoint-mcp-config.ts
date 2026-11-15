@@ -290,11 +290,13 @@ const listQuery = z
   })
   .strict();
 
+/** an admin-typed server identity: the shapes the agent reports for a package, a host or a command (never free text) */
+export const mcpIdentityInput = z.string().regex(/^[A-Za-z0-9@[][A-Za-z0-9@._~/:+[\]-]{0,254}$/);
+
 const linkBody = z
   .object({
     identityKind: z.enum(ENDPOINT_MCP_LINK_IDENTITY_KINDS),
-    // the shapes the agent reports for a package, a host or a command (never free text)
-    identity: z.string().regex(/^[A-Za-z0-9@[][A-Za-z0-9@._~/:+[\]-]{0,254}$/),
+    identity: mcpIdentityInput,
     mcpServerId: z.string().uuid(),
   })
   .strict();

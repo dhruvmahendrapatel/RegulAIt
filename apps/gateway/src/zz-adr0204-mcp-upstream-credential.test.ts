@@ -187,7 +187,7 @@ beforeAll(async () => {
   restores.push(await relaxIdentityForTest(db, { mfaRequired: "off" }));
   restores.push(await relaxGovernanceGatesForTest(db, { requireMcpAttribution: false }));
   await db.execute(sql`UPDATE org_settings SET step_up_mode = 'required',
-    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management"]'::jsonb
+    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management", "endpoint_remediation"]'::jsonb
     WHERE id = ${ORG_SETTINGS_ID}`);
   // an issuer key, so the identity assertion can ride beside the credential (as the S8 suite configures it)
   keyDir = mkdtempSync(path.join(os.tmpdir(), "uc-issuer-"));

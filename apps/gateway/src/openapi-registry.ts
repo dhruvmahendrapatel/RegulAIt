@@ -994,6 +994,9 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/endpoint-agent/credentials": "internal",
   "GET /v1/endpoint-agent/config": "internal",
   "POST /v1/endpoint-agent/reports": "internal",
+  // ADR-0331: the agent's signed add-on removal directives and their outcomes
+  "GET /v1/endpoint-agent/directives": "internal",
+  "POST /v1/endpoint-agent/directive-outcomes": "internal",
   // ADR-0261 (P37): third-party security telemetry ingest. Internal: an admin surface plus an exporter-shaped route.
   "GET /v1/third-party-ingest/sources": "internal",
   "POST /v1/third-party-ingest/sources": "internal",
@@ -1020,6 +1023,11 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/discovery/endpoint-mcp-servers": "internal",
   "POST /v1/discovery/endpoint-mcp-server-links": "internal",
   "POST /v1/discovery/endpoint-mcp-server-links/remove": "internal",
+  // ADR-0331: the governed removal of flagged MCP servers from endpoints
+  "POST /v1/discovery/endpoint-addon-removals": "internal",
+  "GET /v1/discovery/endpoint-addon-removals": "internal",
+  "GET /v1/discovery/endpoint-addon-removals/:id": "internal",
+  "POST /v1/discovery/endpoint-addon-removals/:id/cancel": "internal",
   // ADR-0193 (I4) P1: content source trust tiers, the write floor, and the P0 provenance evidence view
   "GET /v1/content-trust": "internal",
   "PUT /v1/content-trust/sources/:sourceKind/:sourceId": "internal",
@@ -2311,6 +2319,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/endpoint-agent/credentials": "shadow-ai",
   "GET /v1/endpoint-agent/config": "shadow-ai",
   "POST /v1/endpoint-agent/reports": "shadow-ai",
+  "GET /v1/endpoint-agent/directives": "shadow-ai",
+  "POST /v1/endpoint-agent/directive-outcomes": "shadow-ai",
   "GET /v1/third-party-ingest/sources": "shadow-ai",
   "POST /v1/third-party-ingest/sources": "shadow-ai",
   "PUT /v1/third-party-ingest/sources/:sourceId/enabled": "shadow-ai",
@@ -2327,6 +2337,10 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/discovery/endpoint-mcp-servers": "shadow-ai",
   "POST /v1/discovery/endpoint-mcp-server-links": "shadow-ai",
   "POST /v1/discovery/endpoint-mcp-server-links/remove": "shadow-ai",
+  "POST /v1/discovery/endpoint-addon-removals": "shadow-ai",
+  "GET /v1/discovery/endpoint-addon-removals": "shadow-ai",
+  "GET /v1/discovery/endpoint-addon-removals/:id": "shadow-ai",
+  "POST /v1/discovery/endpoint-addon-removals/:id/cancel": "shadow-ai",
   "GET /v1/discovery/sources/:sourceId/endpoint-devices/export.xlsx": "shadow-ai",
   "POST /v1/discovery/endpoint-devices/:deviceId/revoke": "shadow-ai",
   "GET /v1/content-trust": "content-provenance",
