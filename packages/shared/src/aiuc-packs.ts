@@ -38,9 +38,9 @@
  */
 import type { CreateCompliancePackInput } from "./compliance-packs.js";
 import type { TrustDimension } from "./risks.js";
+import { attestedControl, evidencedControl, type PackControl, type PackEvidence } from "./pack-builders.js";
 
-type Control = CreateCompliancePackInput["controls"][number];
-type Evidence = Pick<Control, "coverage" | "collector"> & Partial<Pick<Control, "collectorParams">> & { note: string };
+type Control = PackControl;
 
 export const AIUC_1_FRAMEWORK = "aiuc-1" as const;
 
@@ -59,27 +59,10 @@ export const AIUC_1_RETIRED = ["C011", "C012", "D002", "E007", "E014"] as const;
 const ref = (id: string, slug: string) => `${AIUC_1_FRAMEWORK}:${id}-${slug}`;
 const t = (id: string, text: string) => `AIUC-1 ${id} — ${text}`;
 
-const ev = (id: string, slug: string, title: string, e: Evidence): Control => ({
-  controlRef: ref(id, slug),
-  title: t(id, title),
-  coverage: e.coverage,
-  collector: e.collector,
-  collectorParams: e.collectorParams ?? {},
-  minEvidenceCount: 1,
-  attestationRequired: false,
-  ownerNote: e.note,
-});
-
-const att = (id: string, slug: string, title: string, coverage: Control["coverage"], ownerNote: string): Control => ({
-  controlRef: ref(id, slug),
-  title: t(id, title),
-  coverage,
-  collector: "none",
-  collectorParams: {},
-  minEvidenceCount: 1,
-  attestationRequired: true,
-  ownerNote,
-});
+// the shared control builders (`pack-builders.ts`, one copy for every authored pack)
+const ev = (id: string, slug: string, title: string, e: PackEvidence): PackControl => evidencedControl(ref(id, slug), t(id, title), e);
+const att = (id: string, slug: string, title: string, coverage: PackControl["coverage"], ownerNote: string): PackControl =>
+  attestedControl(ref(id, slug), t(id, title), coverage, ownerNote);
 
 /** organisational requirements the platform does not touch */
 const ORG = (what: string) => `Organisational: the platform does not address this. Attest ${what}.`;

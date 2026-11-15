@@ -39,6 +39,8 @@ export interface GovernanceGates {
   /** ADR-0251: the attribution mandate on connector and A2A calls */
   connectorAttributionRequired: boolean;
   a2aAttributionRequired: boolean;
+  /** ADR-0056 §5 amendment: a copilot narrator needs a passing copilot red-team run */
+  copilotRedteamGateEnabled: boolean;
 }
 
 /** the ADR-0181 defaults — what `restore()` writes back */
@@ -53,6 +55,7 @@ export const STRICT_GOVERNANCE_GATES: GovernanceGates = {
   requirePreviewBeforeActivate: true,
   connectorAttributionRequired: true,
   a2aAttributionRequired: true,
+  copilotRedteamGateEnabled: true,
 };
 
 /** every SB2 gate relaxed — for suites written before ADR-0181 that pin
@@ -68,6 +71,7 @@ export const LAX_GOVERNANCE_GATES: GovernanceGates = {
   requirePreviewBeforeActivate: false,
   connectorAttributionRequired: false,
   a2aAttributionRequired: false,
+  copilotRedteamGateEnabled: false,
 };
 
 async function write(db: Db, g: Partial<GovernanceGates>): Promise<void> {
@@ -78,6 +82,7 @@ async function write(db: Db, g: Partial<GovernanceGates>): Promise<void> {
     ...(g.mrmStalenessRecertEnabled !== undefined ? { mrmStalenessRecertEnabled: g.mrmStalenessRecertEnabled } : {}),
     ...(g.connectorAttributionRequired !== undefined ? { connectorAttributionRequired: g.connectorAttributionRequired } : {}),
     ...(g.a2aAttributionRequired !== undefined ? { a2aAttributionRequired: g.a2aAttributionRequired } : {}),
+    ...(g.copilotRedteamGateEnabled !== undefined ? { copilotRedteamGateEnabled: g.copilotRedteamGateEnabled } : {}),
   };
   const icp = {
     ...(g.requireProjectAttribution !== undefined ? { requireProjectAttribution: g.requireProjectAttribution } : {}),
