@@ -196,6 +196,7 @@ export function registerAgentRegistryRoutes(app: FastifyInstance, db: Db): void 
           lifecycleStatus: "proposed",
           grants: 0,
           stepUp: su.method,
+          receiptClass: "configuration",
         },
         effect: "allow",
         ruleId: "agent-registry-imported",
