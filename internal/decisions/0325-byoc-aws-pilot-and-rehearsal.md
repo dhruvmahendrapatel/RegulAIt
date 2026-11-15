@@ -57,7 +57,7 @@ named, tagged or designated production.
   ([docs/ops/BYOC_REHEARSAL_ROLE.md](../../docs/ops/BYOC_REHEARSAL_ROLE.md)). No builder session applies it.
 - **CI**: `infra-terraform.yml` runs `fmt`, `validate` and the modules' offline `terraform test` (plan-only, fake
   credentials, account lookups overridden). Terraform is installed by `infra/scripts/install-terraform.sh`, pinned to
-  1.9.8 with its SHA-256 committed.
+  1.16.7 (terraform-aws-modules/rds 7.x needs 1.11 or later) with its SHA-256 committed.
 
 ### Open source first (ADR-0176)
 

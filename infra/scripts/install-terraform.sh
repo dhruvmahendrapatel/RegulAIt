@@ -4,8 +4,8 @@
 # Usage: infra/scripts/install-terraform.sh [install-dir]   (default: $HOME/.local/bin)
 set -euo pipefail
 
-TF_VERSION="1.9.8"
-TF_SHA256_LINUX_AMD64="186e0145f5e5f2eb97cbd785bc78f21bae4ef15119349f6ad4fa535b83b10df8"
+TF_VERSION="1.16.7"
+TF_SHA256_LINUX_AMD64="5454efcf7fc87f0c2113111b9a5c7182f0ca1c6f0f23a1e110a50770a8fe473b"
 
 dest="${1:-$HOME/.local/bin}"
 tmp="$(mktemp -d)"
