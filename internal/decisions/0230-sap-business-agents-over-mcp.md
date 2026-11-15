@@ -429,3 +429,23 @@ an admin can change in `PUT /v1/org/settings` (pending migration `sap_business_s
   write-only quorum retires consents given under the old one. Unmarking leaves the stored kinds at 'write' until the
   next sync restores the upstream's hints.
 - Owner questions 1, 2, 3 and 6 are closed. 4, 5, 7 and 8 stay open.
+
+## Recorded decision (2026-11-14): the three system-class routes ship API-only
+
+The master orchestrator's Lane L3 brief (2026-11-14), which assigned this slice, directs: "New routes go in the route
+census plus a KNOWN_UI_GAPS entry pointing at #453. Do not build screens." The three routes
+`GET|POST|DELETE /v1/servers/:serverId/system-class` (and the four `sap*` org settings) are therefore API-only, and
+raising `KNOWN_UI_GAPS_MAX` by 3 for them cites this section. The screen is built by the design builder on #453, which
+lowers the ceiling again.
+
+## Code review #798 (8b3e264e): one shared server policy template
+
+The SAP mark and the ADR-0246 high-risk policy template now seed and find their rows through one helper pair in
+`rule-creates.ts` (`seedServerPolicyTemplate`, `findServerPolicyTemplate`), parameterised by rule coverage (every tool
+or writes), quorum, argument binding, approver pool and the limit's coverage, calls and window. Two consequences:
+- the high-risk gate no longer accepts a write-only or deploy-mode-scoped row as its template (both bind only some
+  calls on a server whose every call is high-risk);
+- the system-class GET reports only the rows the marks seeded (read from the marks' audit rows), never a rule an admin
+  created by hand on the same server.
+
+A manifest sync reads the server row `FOR SHARE`, so it waits for a mark in progress and stores the kinds the mark set.

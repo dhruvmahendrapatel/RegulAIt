@@ -25,6 +25,7 @@ import {
   type SQL,
   sql,
 } from "@regulait/db";
+import { sapStoredToolKind, serverSystemClass } from "./sap-tool-kind.js";
 import { evaluate, matchingApprovalRulesWith, type Decision, type GovernedActor, type ToolRef } from "@regulait/policy-kernel";
 // ADR-0239 slice 2: approval rules are matched on Cedar, here and in the kernel call below, so the gateway's reads of
 // the matched rules (consent scope, quorum) and the kernel's decision come from ONE engine and cannot disagree
@@ -283,8 +284,7 @@ export async function approvalRuleQuorumsMatchingNow(
   if (!storedKind) return null;
   // security review #798 (3bf47251): on an SAP business server every tool is a write, exactly as the proxy decides,
   // so a write-only rule's raised quorum still binds the execution re-check of a tool the upstream calls read-only
-  const [server] = await db.select({ systemClass: mcpServers.systemClass }).from(mcpServers).where(eq(mcpServers.id, call.serverId));
-  const kind = server?.systemClass === "sap_business" ? "write" : storedKind;
+  const kind = sapStoredToolKind(await serverSystemClass(db, call.serverId), storedKind);
   const { roleIds, teamIds } = await loadScopeMemberships(db, call.userId);
   const rows = await db
     .select()

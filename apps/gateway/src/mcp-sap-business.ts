@@ -30,9 +30,9 @@
  */
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { and, approvalRules, auditLog, eq, gte, isNull, lte, mcpServers, mcpTools, projects, rateLimits, type Db } from "@regulait/db";
+import { and, approvalRules, auditLog, eq, inArray, mcpServers, mcpTools, projects, rateLimits, sql, type Db } from "@regulait/db";
 import { createApprovalRuleSchema } from "@regulait/shared";
-import { createApprovalRuleRow } from "./rule-creates.js";
+import { seedServerPolicyTemplate, type ServerPolicyTemplateMatch } from "./rule-creates.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { requireStepUp } from "./step-up.js";
 
@@ -66,22 +66,6 @@ export interface SapBusinessSettings {
   unattributedWritesAllowed: boolean;
   /** true = the seeded approval rule covers every tool on the server, not only writes (a tightening) */
   readsApproveFirst: boolean;
-}
-
-/**
- * Security review #798 (3bf47251): the stored `mcp_tools.kind` for a tool on an SAP business server is always 'write',
- * whatever the upstream's `readOnlyHint` (or an admin's POST) says, so every reader of the column (the execution
- * re-check, policy simulation, orchestration, autonomy, the builder) agrees with the proxy. Unmarking leaves the
- * stored kinds at 'write' (the stricter reading) until the next manifest sync restores the upstream's hints.
- */
-export function sapStoredToolKind(systemClass: string | null | undefined, kind: "read" | "write"): "read" | "write" {
-  return systemClass === "sap_business" ? "write" : kind;
-}
-
-/** the server's system class, for the writers of `mcp_tools.kind` */
-export async function serverSystemClass(db: Db, serverId: string): Promise<string | null> {
-  const [row] = await db.select({ systemClass: mcpServers.systemClass }).from(mcpServers).where(eq(mcpServers.id, serverId));
-  return row?.systemClass ?? null;
 }
 
 /** The org's SAP business settings (owner decision 2026-11-15), relaxed only through the stepped-up settings PUT. */
@@ -151,90 +135,45 @@ export async function sapWriteRefusal(
   return refusal;
 }
 
-/** The seeded rows still in force on a server: the write-only fleet approval rule and the write-only fleet rate limit. */
+/**
+ * The rows the marks of this server SEEDED and that still exist (code review #798): read from the marks' own audit
+ * rows, so a rule or limit an admin created by hand on the same server (a high-risk template rule, say) is never
+ * reported as a seeded default.
+ */
 async function seededDefaults(db: Db, serverId: string): Promise<{ approvalRuleIds: string[]; rateLimitIds: string[] }> {
-  const rules = await db
-    .select({ id: approvalRules.id })
-    .from(approvalRules)
-    .where(
-      and(
-        eq(approvalRules.serverId, serverId),
-        eq(approvalRules.serverScope, "server"),
-        eq(approvalRules.scope, "fleet"),
-        isNull(approvalRules.toolName),
-        // a rule seeded under sapReadsApproveFirst covers reads too (write_only false); only argument-bound
-        // ('action') rules are reported, as the seed creates (code review #798 at 3bf47251)
-        eq(approvalRules.approvalScope, "action"),
-      ),
-    )
+  const marks = await db
+    .select({ ruleId: sql<string | null>`${auditLog.detail}->>'approvalRuleId'`, limitId: sql<string | null>`${auditLog.detail}->>'rateLimitId'` })
+    .from(auditLog)
+    .where(and(eq(auditLog.ruleId, SAP_BUSINESS_RULE_IDS.marked), eq(auditLog.serverId, serverId)))
     .limit(100);
-  const limits = await db
-    .select({ id: rateLimits.id })
-    .from(rateLimits)
-    .where(
-      and(
-        eq(rateLimits.serverId, serverId),
-        eq(rateLimits.serverScope, "server"),
-        eq(rateLimits.scope, "fleet"),
-        isNull(rateLimits.toolName),
-        eq(rateLimits.writeOnly, true),
-      ),
-    )
-    .limit(100);
+  const ruleIds = [...new Set(marks.map((m) => m.ruleId).filter((x): x is string => !!x))];
+  const limitIds = [...new Set(marks.map((m) => m.limitId).filter((x): x is string => !!x))];
+  const rules = ruleIds.length ? await db.select({ id: approvalRules.id }).from(approvalRules).where(inArray(approvalRules.id, ruleIds)) : [];
+  const limits = limitIds.length ? await db.select({ id: rateLimits.id }).from(rateLimits).where(inArray(rateLimits.id, limitIds)) : [];
   return { approvalRuleIds: rules.map((r) => r.id), rateLimitIds: limits.map((l) => l.id) };
 }
 
 /**
- * The seeded rows still at (or stricter than) the defaults, for a re-mark to reuse. Read inside the marking
- * transaction, under the server row's lock. A rule with a lower quorum or `tool` scope, or a limit with more calls or
- * a shorter window, is not reused: the new seeded row then applies beside it (strictest wins). Neither is a row scoped
- * to a deploy mode (it binds only some calls), nor a rule whose approver pool differs from the one this request names
- * (security review #798).
+ * What a re-mark may reuse (review #798): rows at least as strict as the org's current settings, not scoped to a
+ * deploy mode, and (for the rule) naming the approver pool this request names. Anything else is not reused, so a new
+ * seeded row applies beside it (strictest wins). The shared template finder (rule-creates.ts) does the matching.
  */
-async function seededDefaultRows(
-  tx: Db,
+function sapTemplateMatch(
   serverId: string,
   approvers: { approverUserId: string; approverRoleId: string },
   settings: SapBusinessSettings,
-): Promise<{ approvalRule: typeof approvalRules.$inferSelect | null; rateLimit: typeof rateLimits.$inferSelect | null }> {
-  const [rule] = await tx
-    .select()
-    .from(approvalRules)
-    .where(
-      and(
-        eq(approvalRules.serverId, serverId),
-        eq(approvalRules.serverScope, "server"),
-        eq(approvalRules.scope, "fleet"),
-        isNull(approvalRules.toolName),
-        // a rule covering every tool is at least as strict as a write-only one; under readsApproveFirst only it is
-        ...(settings.readsApproveFirst ? [eq(approvalRules.writeOnly, false)] : []),
-        eq(approvalRules.approvalScope, "action"),
-        gte(approvalRules.quorum, settings.quorum),
-        // security review #798: a deploy-mode-scoped rule binds only some calls, so it is never reused as the default
-        isNull(approvalRules.deployMode),
-        // ...and a rule is reused only with the approver pool this request names, so the audit tells the truth
-        eq(approvalRules.approverUserId, approvers.approverUserId),
-        eq(approvalRules.approverRoleId, approvers.approverRoleId),
-      ),
-    )
-    .limit(1);
-  const [limit] = await tx
-    .select()
-    .from(rateLimits)
-    .where(
-      and(
-        eq(rateLimits.serverId, serverId),
-        eq(rateLimits.serverScope, "server"),
-        eq(rateLimits.scope, "fleet"),
-        isNull(rateLimits.toolName),
-        eq(rateLimits.writeOnly, true),
-        lte(rateLimits.maxCalls, settings.maxCalls),
-        gte(rateLimits.windowSeconds, settings.windowSeconds),
-        isNull(rateLimits.deployMode),
-      ),
-    )
-    .limit(1);
-  return { approvalRule: rule ?? null, rateLimit: limit ?? null };
+): ServerPolicyTemplateMatch {
+  return {
+    serverId,
+    // a rule covering every tool is at least as strict as a write-only one; under readsApproveFirst only it is
+    ruleCovers: settings.readsApproveFirst ? "all" : "writes",
+    minQuorum: settings.quorum,
+    actionScoped: true,
+    approvers,
+    limitCovers: "writes",
+    maxCalls: settings.maxCalls,
+    minWindowSeconds: settings.windowSeconds,
+  };
 }
 
 const serverParam = z.object({ serverId: z.string().uuid() }).strict();
@@ -293,25 +232,15 @@ export function registerMcpSapBusinessRoutes(app: FastifyInstance, db: Db): void
         // transaction, so no reader of mcp_tools.kind sees an upstream-claimed read
         await tx.update(mcpTools).set({ kind: "write" }).where(eq(mcpTools.serverId, serverId));
         // review #798: a re-mark (mark, unmark, mark) reuses the rows the first mark seeded while they still hold the
-        // defaults, instead of seeding a second pair; a row someone relaxed since is not reused, so the new one is seeded
-        const kept = await seededDefaultRows(tx, serverId, { approverUserId: adminId, approverRoleId: body.approverRoleId }, settings);
-        const approval = kept.approvalRule ?? (await createApprovalRuleRow(tx, rule));
-        const limit =
-          kept.rateLimit ??
-          (
-            await tx
-              .insert(rateLimits)
-              .values({
-                scope: "fleet",
-                serverScope: "server",
-                serverId,
-                toolName: null,
-                writeOnly: true,
-                maxCalls: settings.maxCalls,
-                windowSeconds: settings.windowSeconds,
-              })
-              .returning()
-          )[0];
+        // settings, instead of seeding a second pair; one shared template seed with the ADR-0246 high-risk policy
+        const seeded = await seedServerPolicyTemplate(
+          tx,
+          { rule, limit: { serverId, writeOnly: true, maxCalls: settings.maxCalls, windowSeconds: settings.windowSeconds } },
+          sapTemplateMatch(serverId, { approverUserId: adminId, approverRoleId: body.approverRoleId }, settings),
+        );
+        const approval = seeded.approvalRule;
+        const limit = seeded.rateLimit;
+        const kept = { approvalRule: seeded.approvalRuleReused ? approval : null, rateLimit: seeded.rateLimitReused ? limit : null };
         await tx.insert(auditLog).values({
           userId: adminId,
           serverId,
@@ -328,12 +257,12 @@ export function registerMcpSapBusinessRoutes(app: FastifyInstance, db: Db): void
             // the approver pool of the rule actually in force (reused only when it matches this request)
             approverUserId: approval.approverUserId,
             approverRoleId: approval.approverRoleId,
-            rateLimitId: limit!.id,
+            rateLimitId: limit.id,
             // the values of the rows in force (a reused row may be stricter than the settings)
             quorum: approval.quorum,
             writeOnly: approval.writeOnly,
-            maxCalls: limit!.maxCalls,
-            windowSeconds: limit!.windowSeconds,
+            maxCalls: limit.maxCalls,
+            windowSeconds: limit.windowSeconds,
             unattributedWritesAllowed: settings.unattributedWritesAllowed,
           },
           effect: "allow",
@@ -341,7 +270,7 @@ export function registerMcpSapBusinessRoutes(app: FastifyInstance, db: Db): void
           ruleChain: [],
           reason:
             `MCP server '${server.name}' marked SAP business: every ${approval.writeOnly ? "write " : ""}tool needs ${approval.quorum} approval(s) ` +
-            `(requester excluded), at most ${limit!.maxCalls} write calls per user per hour, and ` +
+            `(requester excluded), at most ${limit.maxCalls} write calls per user per hour, and ` +
             (settings.unattributedWritesAllowed ? "a live, budgeted project when one is named" : "a budgeted project"),
         });
         return { approvalRule: approval, rateLimit: limit! };

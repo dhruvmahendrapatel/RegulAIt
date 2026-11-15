@@ -481,7 +481,8 @@ import {
 import { registerMcpToolSyncRoutes } from "./mcp-tool-sync.js";
 import { registerMcpDefinitionPinRoutes } from "./mcp-definition-pins.js";
 import { registerMcpHighRiskRoutes } from "./mcp-high-risk.js";
-import { registerMcpSapBusinessRoutes, sapStoredToolKind, serverSystemClass } from "./mcp-sap-business.js";
+import { registerMcpSapBusinessRoutes } from "./mcp-sap-business.js";
+import { sapStoredToolKind, serverSystemClass } from "./sap-tool-kind.js";
 // ADR-0101 — federated MCP registries. Admin-only through the default gate;
 // a sync writes only the catalogue and an import is an explicit operator act.
 import { privateRangesRelaxation, registerMcpRegistryRoutes } from "./mcp-registry.js";
