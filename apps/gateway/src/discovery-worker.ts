@@ -96,6 +96,7 @@ import { awsPrincipalRoleArn, federationTokenMinter } from "./federation-signing
 import type { SchedulerJobDefinition } from "./scheduler.js";
 import { errMessage } from "./err-serializer.js";
 import { runEndpointMcpRetention } from "./endpoint-mcp-config.js";
+import { RegistryRecordRefused, checkRegistryAgents, stageRegistryRecords } from "./agent-registry-records.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -756,15 +757,27 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
   const nowIso = new Date((await db.execute<{ now: string }>(sql`SELECT now()::text AS now`)).rows[0]!.now).toISOString();
   let observations: Observation[];
   let readOutcomes: DiscoveryReadOutcome[];
+  let registry: ReturnType<typeof checkRegistryAgents>;
   try {
     observations = checkObservations(source.kind, result.observations ?? [], nowIso, classifyCatalogue);
     readOutcomes = checkReadOutcomes(result.readOutcomes, secrets);
+    // ADR-0314: a registry source's agents are shape-checked like observations; a refused record refuses the run
+    registry = checkRegistryAgents(source.kind, result.registryAgents, result.registriesComplete);
   } catch (err) {
-    if (err instanceof ObservationRefused) return fail("observation_refused", err.message);
+    if (err instanceof ObservationRefused || err instanceof RegistryRecordRefused) return fail("observation_refused", err.message);
     throw err;
   }
   const digest = rawSeen ? hash.digest("hex") : createHash("sha256").update(JSON.stringify(observations)).digest("hex");
-  return applyDiscoveryRunObservations(db, run, owner, source, observations, digest, classifyCatalogue, readOutcomes);
+  const stageRegistry =
+    registry.records.length || registry.complete.length
+      ? async (t: Db) => {
+          const staged = await stageRegistryRecords(t, source.id, run.id, registry.records, registry.complete);
+          await audit(t, "discovery_run", run.id, "agent-registry-records-staged", "allow",
+            `discovery run of '${source.name}' staged ${staged.staged} registry agent(s) for import; ${staged.absent} no longer listed`,
+            { sourceId: source.id, kind: source.kind, staged: staged.staged, absent: staged.absent, completeRegistries: registry.complete });
+        }
+      : undefined;
+  return applyDiscoveryRunObservations(db, run, owner, source, observations, digest, classifyCatalogue, readOutcomes, stageRegistry);
 }
 
 /**

@@ -436,6 +436,9 @@ export const KNOWN_UI_GAPS = new Map([
   ["GET /v1/connectors/:connectorId/token-exchange", { does: "reads a connector's upstream token-exchange configuration and per-action scope map (never the secret)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
   ["PUT /v1/connectors/:connectorId/token-exchange", { does: "sets or changes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
   ["DELETE /v1/connectors/:connectorId/token-exchange", { does: "removes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
+  ["GET /v1/agent-registry/records", { does: "pages the agents staged from vendor agent registries (Entra Agent ID, Agent 365, Gemini Enterprise, Bedrock AgentCore), open, imported or absent", tracking: "ADR-0314 (G6, lane E3): the brief is API-only; the registry import screen (staged records, import form) is posted on #453 for the Governed Designer. RAISED for the master's review" }],
+  ["GET /v1/agent-registry/records/:recordId", { does: "one staged registry agent with its provenance (source, run, vendor id) and import state", tracking: "ADR-0314 (G6, lane E3): the brief is API-only; the registry import screen (staged records, import form) is posted on #453 for the Governed Designer. RAISED for the master's review" }],
+  ["POST /v1/agent-registry/records/:recordId/import", { does: "imports a staged registry agent into the inventory, disabled and proposed with no grants (settings_relax step-up, audited)", tracking: "ADR-0314 (G6, lane E3): the brief is API-only; the registry import screen (staged records, import form) is posted on #453 for the Governed Designer. RAISED for the master's review" }],
 ]);
 
 /**
@@ -444,7 +447,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 48; // main's 43 (46 incl. ADR-0255 P31 +2, master decision on #753 2026-11-14; − 3 endpoint MCP config routes, #824) + ADR-0303 (lane L11) 5 SIEM destination routes awaiting #453
+export const KNOWN_UI_GAPS_MAX = 51; // ADR-0314 (lane E3) +3 agent registry routes awaiting #453; main's 43 (46 incl. ADR-0255 P31 +2, master decision on #753 2026-11-14; − 3 endpoint MCP config routes, #824) + ADR-0303 (lane L11) 5 SIEM destination routes awaiting #453
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 
