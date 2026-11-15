@@ -376,6 +376,8 @@ export const KNOWN_UI_GAPS = new Map([
   ["PUT /v1/vendor-usage/connectors/:connectorId/enabled", { does: "enables (step-up, needs a live credential) or disables a connector", tracking: "ADR-0322 (lane E7): the brief is API-only; the vendor usage pull settings screen is posted on #453. RAISED FOR REVIEW: the master decides on the PR" }],
   ["POST /v1/vendor-usage/connectors/:connectorId/pull", { does: "runs one pull now for a connector", tracking: "ADR-0322 (lane E7): the brief is API-only; the vendor usage pull settings screen is posted on #453. RAISED FOR REVIEW: the master decides on the PR" }],
   ["GET /v1/vendor-usage/connectors/:connectorId/runs", { does: "lists a connector's last 50 pull runs", tracking: "ADR-0322 (lane E7): the brief is API-only; the vendor usage pull settings screen is posted on #453. RAISED FOR REVIEW: the master decides on the PR" }],
+  ["GET /v1/copilot/redteam-gate", { does: "reads the copilot narrator red-team gate settings and, for one agent, whether it may narrate and which run decided it", tracking: "ADR-0056 §5 amendment (lane L7): the brief is API-only; the settings card and per-narrator status are for the design builder on #453. RAISED for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["PUT /v1/copilot/redteam-gate", { does: "turns the copilot narrator red-team gate on or off, or changes how long a passing run counts (relaxing is a settings_relax step-up, audited)", tracking: "ADR-0056 §5 amendment (lane L7): the brief is API-only; the settings card is for the design builder on #453. RAISED for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["GET /v1/usage-extractors", { does: "reads the org switch and every agent's active usage-mapping version", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["PUT /v1/usage-extractors/enabled", { does: "turns the usage extractor on (settings_relax step-up) or off", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["GET /v1/agents/:agentId/usage-extractor/versions", { does: "lists an agent's usage-mapping versions with each one's latest sample test", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
@@ -458,7 +460,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 61; // + ADR-0322 (lane E7) 9 vendor usage pull routes, raised for review on the PR; main's 48 (43 + ADR-0303 L11 5 SIEM routes) + ADR-0256 (P32) 4, master decision on #725 2026-11-14
+export const KNOWN_UI_GAPS_MAX = 63; // main's 48 (43 + ADR-0303 L11 5 SIEM routes) + ADR-0256 (P32) 4, master decision on #725 2026-11-14; + ADR-0056 §5 amendment (lane L7) 2 copilot red-team gate routes; + ADR-0322 (lane E7) 9 vendor usage pull routes, raised for review on the PR
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 
