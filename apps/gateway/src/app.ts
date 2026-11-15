@@ -64,6 +64,7 @@ import {
   runWithAuditActor,
   runWithRlsPrincipal,
   runWithRlsSystem,
+  runAsBootstrapAdmin,
   runWithRlsPrincipalStep,
   runWithoutRlsScope,
   currentRlsScope,
@@ -451,6 +452,7 @@ import {
 } from "./compat-core.js";
 import { registerAnthropicCompat } from "./compat-anthropic.js";
 import { registerOpenAiCompat } from "./compat-openai.js";
+import { compatDialectFor, reshapeCompat401 } from "./compat-auth-errors.js";
 import { registerResponsesCompat } from "./compat-responses.js";
 import { registerModelsDiscovery } from "./compat-models.js";
 import { registerVirtualKeyRoutes, routesForPurpose } from "./virtual-keys.js";
@@ -606,7 +608,7 @@ import { WEB_UI_ROUTES, defaultWebDistDir, registerWebServing } from "./web-serv
 // ADR-0053 — the auth-class sets the two gates below branch on. They live in
 // their own module so the published OpenAPI document derives each route's
 // documented credential requirement from the SAME objects that enforce it.
-import { AUTH_EXEMPT_ROUTES, NON_ADMIN_ROUTES } from "./route-classes.js";
+import { AUTH_EXEMPT_ROUTES, NON_ADMIN_ROUTES, requestRlsScope } from "./route-classes.js";
 import { registerOpenApiRoutes, type RouteInventoryEntry } from "./openapi.js";
 import { registerOnboardingRoutes } from "./onboarding.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
@@ -1115,6 +1117,20 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         }),
       );
     }
+    // ADR-0288 — a 401 on a COMPAT surface is re-enveloped in that surface's
+    // provider dialect so an off-the-shelf SDK can read it. The auth hook still
+    // decides every refusal; this only changes the body's shape (the code is
+    // kept as regulait_code), and a body that is already provider-shaped passes.
+    if (reply.statusCode === 401) {
+      const dialect = compatDialectFor(req);
+      if (dialect) {
+        const reshaped = reshapeCompat401(payload, dialect);
+        if (reshaped !== null) {
+          reply.header("content-length", Buffer.byteLength(reshaped));
+          return reshaped;
+        }
+      }
+    }
     return payload;
   });
 
@@ -1153,7 +1169,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // The MCP route stays org-only: scope rules cover the compat surfaces.
   // SURFACE EXPOSURE IS NOT ENTITLEMENT — a rule passing this gate grants
   // nothing; evaluateAgent still gates the dispatch identically.
-  app.addHook("onRequest", async (req, reply) => {
+  // ADR-0234 batch 7a (#809 review): this gate runs before the authentication hook, with no principal yet. Its
+  // credential lookup and policy resolution run under `authenticate`, like the authentication hook's own.
+  const interceptionGate = async (req: FastifyRequest, reply: FastifyReply) => {
     const route = `${req.method} ${req.routeOptions.url ?? ""}`;
     if (!INTERCEPTION_GATED_ROUTES.has(route)) return;
     const settings = await loadInterceptionSettings(db);
@@ -1202,6 +1220,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     if (!enabled) {
       return reply.status(404).send(notFoundBody(req.method, req.url));
     }
+  };
+  app.addHook("onRequest", async (req, reply) => {
+    if (!INTERCEPTION_GATED_ROUTES.has(`${req.method} ${req.routeOptions.url ?? ""}`)) return;
+    return runWithRlsSystem("authenticate", "gateway.interception-gate", () => interceptionGate(req, reply));
   });
 
   // ADR-0025: the session-authenticated auth self-service surface a user may
@@ -1451,15 +1473,21 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   // ADR-0234 batch 2: from here to the end of the request every statement on the slice-1 tables runs as the
   // authenticated principal (role regulait_app, FORCE row-level security), whatever the route forgets to filter.
-  // A request with no user (an exempt route, the bootstrap token) leaves the `authenticate` scope and runs
-  // unscoped, exactly as before this batch; ADR-0234 records those paths for the runtime cut-over (batch 7).
+  // Batch 7a: a request with no user runs under a named system reason instead of no scope, so it is also under the
+  // policies (and works unchanged on the non-superuser runtime login of batch 7b):
+  //   - an auth-exempt route: the reason its class needs (route-classes.ts exemptRouteRlsReason);
+  //   - the bootstrap token (or a session exchanged for it), which the gateway treats as an admin: bootstrap_admin;
+  //   - a non-user credential (engine runner or enrolment token, PDP client, endpoint agent): credential_request,
+  //     which reads users and appends to the ledger and nothing else (#809 review: never system_task, which is for
+  //     principal-less server work and opens every approval and the whole ledger).
+  // Only a request with no credential at all (refused by the hook above before any handler) stays unscoped.
   app.addHook("preHandler", (req, _reply, done) => {
-    const userId = req.authCtx?.userId;
-    if (typeof userId === "string" && userId.length > 0) {
-      runWithRlsPrincipal({ userId }, () => done());
-    } else {
-      runWithoutRlsScope(() => done());
-    }
+    const scope = requestRlsScope(req.authCtx, req.routeOptions.url ?? "");
+    if (scope.kind === "principal") runWithRlsPrincipal({ userId: scope.userId }, () => done());
+    else if (scope.kind === "exempt") runWithRlsSystem(scope.reason, `gateway.exempt.${scope.reason}`, () => done());
+    else if (scope.kind === "bootstrap") runAsBootstrapAdmin("gateway.bootstrap", () => done());
+    else if (scope.kind === "credential") runWithRlsSystem("credential_request", `gateway.credential.${scope.via}`, () => done());
+    else runWithoutRlsScope(() => done());
   });
 
   // ADR-0187 — THE ENGINE RUNNER CEILING, both directions: a runner or
@@ -4762,7 +4790,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   ): Promise<void> {
     const waiting = await builderStepsAwaitingApproval(d, updated.id);
     if (!waiting.length) return;
-    scheduleBackgroundWork(d, async () => {
+    // ADR-0234 batch 7a: the paused steps are the requester's, so the resumed turn runs as the requester
+    scheduleBackgroundWork(d, () => runWithRlsPrincipal({ userId: updated.userId }, async () => {
       try {
         await resumeBuilderAfterApproval(d, opts.dataKey, updated, binaryDecision, deciderUserId);
       } catch (err) {
@@ -4770,7 +4799,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           userId: deciderUserId,
           ...(updated.objectType === "connector_call"
             ? { objectType: "connector" as const, objectId: updated.connectorId }
-            : { objectType: "mcp_tool" as const, objectId: null, serverId: updated.serverId, toolName: updated.toolName }),
+            : updated.objectType === "model_call"
+              ? { objectType: "agent" as const, objectId: updated.agentId }
+              : { objectType: "mcp_tool" as const, objectId: null, serverId: updated.serverId, toolName: updated.toolName }),
           detail: { approvalId: updated.id, phase: "builder-resume", receiptClass: "excluded" },
           effect: "deny",
           ruleId: "builder-tool-step-resume-failed",
@@ -4782,7 +4813,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             .slice(0, 1000),
         });
       }
-    }, app.log);
+    }), app.log);
   }
 
   /**
