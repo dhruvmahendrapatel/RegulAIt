@@ -8,6 +8,8 @@
  *
  *   project_budget_threshold   a project's metered spend in its budget window reached alert_threshold_pct of its budget
  *   user_budget_threshold      a person's metered spend in their window reached the threshold of their spend budget
+ *   user_imported_budget_threshold   a person's IMPORTED spend reached the same threshold: a separate alert, never added
+ *                              to the metered figure (owner decision 2026-11-15, ADR-0069)
  *
  * Both are high at 100%. They are evaluated by the hourly monitor and by a five-minute spend pass
  * (`runSpendBudgetPass`, governance-monitor.ts), so an alert fires within minutes of the spend that crossed it.
@@ -149,12 +151,37 @@ export async function spendBudgetMonitorInput(db: Db, now: Date): Promise<Partia
   const uSpend = new Map([...(await meteredBy(db, "user_id", monthlyU, start)), ...(await meteredBy(db, "user_id", lifetimeU, null))]);
   const uImported = new Map([...(await importedByUser(db, monthlyU, start, now)), ...(await importedByUser(db, lifetimeU, null, now))]);
   const userBreaches: MonitorAssuranceSubject[] = [];
+  const importedBreaches: MonitorAssuranceSubject[] = [];
   for (const u of userRows) {
     const spentUsd = uSpend.get(u.userId) ?? 0;
+    const monthly = u.budgetPeriod === "monthly";
+    const window = monthly ? { period: periodKey(now), from: start.toISOString() } : { period: "lifetime" };
+    const imported = uImported.get(u.userId) ?? { usd: 0, nonUsdLines: 0 };
+    // owner decision 2026-11-15: imported spend is compared with the budget ON ITS OWN, as a separate alert. The two
+    // bases are never summed: a person can be over on either, both or neither.
+    const importedCrossing = budgetCrossing({ spentUsd: imported.usd, budgetUsd: u.budgetUsd, pct: u.alertThresholdPct });
+    if (importedCrossing) {
+      importedBreaches.push({
+        subjectKey: `user:${u.userId}`,
+        severity: importedCrossing.severity,
+        title: `${u.displayName || u.userId}: imported spend at ${Math.floor(importedCrossing.pctOfBudget)}% of their ${usd(u.budgetUsd)} ${monthly ? "monthly" : "lifetime"} spend budget`,
+        detail: {
+          userId: u.userId,
+          basis: "imported",
+          importedUsd: imported.usd,
+          nonUsdLines: imported.nonUsdLines,
+          budgetUsd: u.budgetUsd,
+          alertThresholdPct: u.alertThresholdPct,
+          window,
+          metered: { basis: "metered", usd: spentUsd },
+          note:
+            "imported lines are restated from customer exports and counted whole when their billing period overlaps " +
+            "the window; non-USD lines are not converted and are not in importedUsd. Never added to metered spend.",
+        },
+      });
+    }
     const crossing = budgetCrossing({ spentUsd, budgetUsd: u.budgetUsd, pct: u.alertThresholdPct });
     if (!crossing) continue;
-    const monthly = u.budgetPeriod === "monthly";
-    const imported = uImported.get(u.userId) ?? { usd: 0, nonUsdLines: 0 };
     userBreaches.push({
       subjectKey: `user:${u.userId}`,
       severity: crossing.severity,
@@ -166,9 +193,9 @@ export async function spendBudgetMonitorInput(db: Db, now: Date): Promise<Partia
         meteredUsd: spentUsd,
         budgetUsd: u.budgetUsd,
         alertThresholdPct: u.alertThresholdPct,
-        window: monthly ? { period: periodKey(now), from: start.toISOString() } : { period: "lifetime" },
+        window,
         imported: { basis: "imported", usd: imported.usd, nonUsdLines: imported.nonUsdLines },
-        importedNote: "imported spend is shown beside the metered figure and never added to it (ADR-0069)",
+        importedNote: "imported spend has its own alert (user_imported_budget_threshold) and is never added to this one",
       },
     });
   }
@@ -176,6 +203,7 @@ export async function spendBudgetMonitorInput(db: Db, now: Date): Promise<Partia
   return {
     project_budget_threshold: { breaches: projectBreaches },
     user_budget_threshold: { breaches: userBreaches },
+    user_imported_budget_threshold: { breaches: importedBreaches },
   };
 }
 
@@ -220,7 +248,7 @@ async function viewFor(db: Db, userId: string, now = new Date()) {
     window: since ? { period: periodKey(now), from: since.toISOString() } : { period: "lifetime" },
     metered: { basis: "metered", usd: metered, pctOfBudget: (metered / b.budgetUsd) * 100 },
     imported: { basis: "imported", usd: imported.usd, nonUsdLines: imported.nonUsdLines },
-    note: "The alert compares metered spend with the budget; imported spend is shown beside it and never added.",
+    note: "Metered and imported spend are each compared with the budget, as two separate alerts; they are never added.",
   };
 }
 

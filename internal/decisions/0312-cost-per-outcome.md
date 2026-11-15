@@ -106,14 +106,18 @@ a budget alert firing". Three additions follow.
 
    The joins are provider-agnostic, because pillars 2 and 8 already record these fields for every adapter.
 
-9. **Budget alerts through the existing alerting path.** Two governance-monitor rules, fed by `budget-alerts.ts`:
+9. **Budget alerts through the existing alerting path.** Three governance-monitor rules, fed by `budget-alerts.ts`:
    - `project_budget_threshold`: a project's metered spend in its budget window (the month for a monthly budget,
      otherwise its lifetime) reached `alert_threshold_pct` of its own budget (80% by default);
    - `user_budget_threshold`: a person's metered spend across every model, MCP tool and connector call reached the
-     threshold of their spend budget.
+     threshold of their spend budget;
+   - `user_imported_budget_threshold`: a person's imported spend reached the same threshold (applied, non-superseded
+     USD lines whose billing period overlaps the window, counted whole; seat and usage exports of tools that do not run
+     through the gateway, such as coding assistants). It is a separate alert with its own episode. The two bases are
+     each compared with the budget on their own and never added, so a person can be over on either, both or neither
+     (ADR-0069). Non-USD lines are counted and not converted.
 
-   Both are high once spend reaches the budget, and imported spend is in the alert detail beside the metered figure,
-   never added. Alerts are ordinary monitor episodes: an owner and due time (ADR-0182 S5), chat delivery (ADR-0162),
+   All are high once spend reaches the budget. Each alert shows the other basis in its detail, never summed. Alerts are ordinary monitor episodes: an owner and due time (ADR-0182 S5), chat delivery (ADR-0162),
    the optional ticket and the audit chain (and so the SIEM). The hourly monitor evaluates them. So alerts arrive
    within minutes, a `spend-budget-alerts` scheduler job runs the spend rules alone every five minutes through
    `applyMonitorFindings`, the monitor's one alert-write path, now factored out of `runGovernanceMonitor` without
@@ -131,6 +135,6 @@ a budget alert firing". Three additions follow.
 
     All four are API-only on #453.
 
-- Owner question open: should a person's budget also alert on imported spend (Copilot, Cursor and other seat or usage
-  exports)? Today the alert compares only metered spend. Imported spend is shown beside it, because ADR-0069 forbids a
-  combined figure.
+- Owner decision (2026-11-15, relayed by the master on #848, "C1"): a person's budget ALSO alerts on imported spend
+  (Copilot, Cursor and other seat or usage exports), as a SEPARATE alert, never folded into one combined figure
+  (ADR-0069). Built as `user_imported_budget_threshold` (point 9).

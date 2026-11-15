@@ -257,6 +257,15 @@ export const MONITOR_RULES = {
       "alert threshold of their spend budget (user_spend_budgets). High once spend reaches the budget itself. " +
       "Imported spend (seat and usage exports) is shown beside it, never added. Alert only: no call is refused.",
   },
+  user_imported_budget_threshold: {
+    label: "Person's imported spend crossed their budget alert threshold",
+    severity: "medium",
+    description:
+      "A person's IMPORTED spend (seat and usage exports of tools that do not run through the gateway, such as " +
+      "coding assistants; applied, non-superseded USD lines whose billing period overlaps the window) reached the " +
+      "alert threshold of their spend budget. A separate alert from the metered one, never added to it (ADR-0069): " +
+      "each basis is compared with the budget on its own. High once imported spend reaches the budget. Alert only.",
+  },
   // --- ADR-0223 (P13b): classical-model drift --------------------------------
   classical_model_drift: {
     label: "Classical model drift above threshold",
@@ -506,7 +515,7 @@ export type AccountabilityMonitorRuleId = (typeof ACCOUNTABILITY_MONITOR_RULE_ID
 
 /** ADR-0312 (pilot addendum) — the spend-budget rules, evaluated by the gateway's budget-alerts.ts loader (same
  * shape as `assurance`); an absent rule key = not evaluated */
-export const SPEND_MONITOR_RULE_IDS = ["project_budget_threshold", "user_budget_threshold"] as const;
+export const SPEND_MONITOR_RULE_IDS = ["project_budget_threshold", "user_budget_threshold", "user_imported_budget_threshold"] as const;
 export type SpendMonitorRuleId = (typeof SPEND_MONITOR_RULE_IDS)[number];
 
 /** ADR-0180 — the six continuous-assurance rules. Their evaluation is owned by

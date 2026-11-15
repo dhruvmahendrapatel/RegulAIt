@@ -372,15 +372,37 @@ describe("ADR-0312 budget alerts through the governance monitor", () => {
     expect(set.statusCode, set.body).toBe(200);
     expect(set.json().budget).toMatchObject({ budgetUsd: 10, budgetPeriod: "monthly", alertThresholdPct: 50 });
 
+    // imported spend (a coding-assistant seat export) for the same person, this month: $6 of the $10 budget
+    const batch = randomUUID();
+    await db.insert(costImportBatches).values({
+      id: batch, adapter: "generic_csv", vendor: "adr0312-seat", format: "csv", mode: "apply", status: "applied",
+      payloadSha256: `adr0312-seat-${RUN}`, rowsParsed: 1, rowsAccepted: 1, refusals: [], summary: {}, ruleId: "adr0312",
+      reason: "adr0312 imported fixture",
+    });
+    const monthStart = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1));
+    await db.insert(importedCostLines).values({
+      batchId: batch, vendor: "adr0312-seat", adapter: "generic_csv", sourceRow: 1, accountRef: "seat", accountKey: "seat",
+      resolvedUserId: bob, resolutionMethod: "exact_email", resolutionDetail: "fixture",
+      periodStart: monthStart, periodEnd: new Date(monthStart.getTime() + 86_400_000), amount: 6, billingKind: "seat",
+    });
+
     const out = await runSpendBudgetPass(db);
     expect(out.notEvaluated).toEqual([]);
     const [pa] = await alertsFor(`project:${p}`);
     expect(pa).toMatchObject({ ruleId: "project_budget_threshold", severity: "medium", status: "open" });
     expect(pa!.detail).toMatchObject({ basis: "metered", meteredUsd: 8.5, budgetUsd: 10 });
-    const [ua] = await alertsFor(`user:${bob}`);
+    const [ua] = (await alertsFor(`user:${bob}`)).filter((a) => a.ruleId === "user_budget_threshold");
     expect(ua).toMatchObject({ ruleId: "user_budget_threshold", severity: "medium" });
     expect(ua!.title).not.toContain("@");
     expect((ua!.detail as { imported: { basis: string } }).imported.basis).toBe("imported");
+    // owner decision: imported spend raises its OWN alert, never folded into the metered one
+    const [ia] = await db.select().from(governanceAlerts).where(and(eq(governanceAlerts.ruleId, "user_imported_budget_threshold"),
+      eq(governanceAlerts.subjectKey, `user:${bob}`), ne(governanceAlerts.status, "resolved")));
+    expect(ia).toMatchObject({ severity: "medium", status: "open" });
+    expect(ia!.detail).toMatchObject({ basis: "imported", importedUsd: 6, budgetUsd: 10 });
+    expect(ia!.id).not.toBe(ua!.id);
+    // the metered alert's figure is the metered spend alone (8.5), not metered + imported (14.5)
+    expect((ua!.detail as { meteredUsd: number }).meteredUsd).toBe(8.5);
 
     // crossing the budget itself refreshes the same episode to high
     await db.insert(usageEvents).values({ userId: bob, objectType: "agent", costUsd: 2, projectId: p });
@@ -393,6 +415,7 @@ describe("ADR-0312 budget alerts through the governance monitor", () => {
     await app.inject({ method: "PUT", url: `/v1/users/${bob}/spend-budget`, headers: AUTH, payload: { budgetUsd: 1000 } });
     await runSpendBudgetPass(db);
     expect(await alertsFor(`project:${p}`)).toEqual([]);
+    // both of the person's alerts (metered and imported) resolve
     expect(await alertsFor(`user:${bob}`)).toEqual([]);
   });
 
