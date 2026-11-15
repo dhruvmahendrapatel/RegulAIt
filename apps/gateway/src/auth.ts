@@ -4,6 +4,7 @@ import {
   randomBytes,
   scryptSync,
 } from "node:crypto";
+import { oidcEmailVerifiedVia } from "./oidc-email-verified.js";
 import { deploymentBaseUrl } from "./public-url.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
@@ -2398,7 +2399,9 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     // ADR-0174 (finding 7): ONE normalisation (NFKC, trimmed, case-folded)
     const normalized = normalizeClaimEmail(claims.email);
     const email = normalized?.email ?? null;
-    const emailVerified = claims.email_verified === true;
+    // ADR-0326: Entra ID spells a verified email `xms_edov`, accepted only from its own tenant issuer.
+    const emailVerifiedVia = oidcEmailVerifiedVia(claims as Record<string, unknown>);
+    const emailVerified = emailVerifiedVia !== null;
     if (!normalized || !email || !emailVerified) {
       await auditAuth(db, null, null, "oidc-login-failed", "deny",
         `OIDC login refused: no verified email claim (provider '${provider.name}')`,
