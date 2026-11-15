@@ -188,6 +188,7 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   "policy_simulation_flips.project_name": "platform_copy",
   "redteam_runs.agent_name": "platform_copy",
   "redteam_runs.library_name": "platform_copy",
+  "rule_step_suggestions.step_name": "platform_copy",
   "scheduler_runs.job_name": "platform_copy",
   "use_case_decision_records.intake_template_name": "platform_copy",
   "cert_inventory.common_name": "ingested",

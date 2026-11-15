@@ -5,7 +5,7 @@
 - **Index**: **Rule-like AI step → deterministic rule (pillar 6): find AI steps whose output is an exact-match function of a few input fields (held-out agreement, strict org-tunable floors), suggest a readable rule table with test cases and projected savings, run it in shadow, switch only on an approval, revert in one action; inputs outside the table always fall back to the AI. Off by default.**
 - **Backlog item**: owner direction 2026-11-15 (lane E12, item 1); PENDING fragment `2026-11-15-e12-rule-like-steps-pending.md`
 - **Built in**: lane E12, one PR per slice (slice 1: this ADR and the detector in `packages/optimizer-kernel/src/rule-induction.ts`)
-- **Migration**: none in slice 1; slice 2 adds `pending/rule_step_settings.sql` (settings and suggestions), numbered at merge
+- **Migration**: none in slice 1; slice 2 adds `pending/rule_step_detection.sql` (settings, suggestions and a scan index on `trace_spans`), numbered at merge
 - **Related**: [TOKEN_OPTIMIZATION_SPEC §8, §12](../product/TOKEN_OPTIMIZATION_SPEC.md), ADR-0172 (builder agents),
   ADR-0044 (eval harness), ADR-0176 (open source first), ADR-0180 (secure by default), ADR-0200 (3NF, security
   checklist), ADR-0251 (one governed decision core), ADR-0252 (merge-time numbering), the repetitive-ask lane item (repetitive ask →
@@ -85,3 +85,17 @@ induction over numeric ranges is deferred to a sandboxed engine image with sciki
 - Security review note (not a finding under the scope guard): `workflow-review-checks.ts` lets an LLM review verdict
   fail an `automated_check` stage. It is a quality gate, fails closed and is not an authorisation decision; it stays
   as designed.
+
+## As built (slice 2, lane E12)
+
+- Tables `rule_step_settings` (singleton, absent = off; CHECKs repeat the kernel floors) and `rule_step_suggestions`
+  (one row per agent and span name; `rule` is a point-in-time snapshot, the ADR-0200 exception), plus the partial
+  index `trace_spans_llm_step_started_idx` for the scan. Written only by `apps/gateway/src/rule-steps.ts`.
+- Routes, admin-only through the default gate and listed as known UI gaps for UI-D: `GET`/`PUT /v1/rule-steps/settings`,
+  `POST /v1/rule-steps/scan`, `GET /v1/rule-steps/suggestions`, `POST /v1/rule-steps/suggestions/:id/dismiss`.
+- Decision 2 said "background job"; slice 2 ships an admin-triggered scan instead, bounded to the 10 costliest steps,
+  5 000 runs each and a 30-day window, and spaced 10 minutes apart by a compare-and-set on `last_scan_at` (database
+  clock), so two replicas cannot run it at once. A scheduler entry can call the same function later.
+- Test cases are the rule's own cells (input fields, expected output, support); no extra copy of captured inputs is
+  stored. The saving is `window cost × (30 / 30 days) × structured share × held-out coverage`, labelled an estimate.
+- A dismissed suggestion stays dismissed when a later scan refreshes its evidence.

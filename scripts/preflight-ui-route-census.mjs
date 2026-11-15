@@ -443,6 +443,11 @@ export const KNOWN_UI_GAPS = new Map([
   ["GET /v1/connectors/:connectorId/token-exchange", { does: "reads a connector's upstream token-exchange configuration and per-action scope map (never the secret)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
   ["PUT /v1/connectors/:connectorId/token-exchange", { does: "sets or changes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
   ["DELETE /v1/connectors/:connectorId/token-exchange", { does: "removes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
+  ["GET /v1/rule-steps/settings", { does: "reads the rule-like AI step detection switch and thresholds, with the strict defaults and floors", tracking: "ADR-0327 (lane E12): the brief is API and backend only; the suggestions page (rule, evidence, savings, dismiss) is for UI-D" }],
+  ["PUT /v1/rule-steps/settings", { does: "turns rule-like step detection on or off or changes its thresholds (enabling or lowering one is a settings_relax step-up, audited)", tracking: "ADR-0327 (lane E12): the brief is API and backend only; the suggestions page (rule, evidence, savings, dismiss) is for UI-D" }],
+  ["POST /v1/rule-steps/scan", { does: "scans recent model spans for AI steps that behave like fixed rules and stores suggestions (read-only, spaced 10 minutes, audited)", tracking: "ADR-0327 (lane E12): the brief is API and backend only; the suggestions page (rule, evidence, savings, dismiss) is for UI-D" }],
+  ["GET /v1/rule-steps/suggestions", { does: "lists rule-like step suggestions with the readable rule, test cases from history and projected monthly savings", tracking: "ADR-0327 (lane E12): the brief is API and backend only; the suggestions page (rule, evidence, savings, dismiss) is for UI-D" }],
+  ["POST /v1/rule-steps/suggestions/:id/dismiss", { does: "dismisses a rule-like step suggestion (audited)", tracking: "ADR-0327 (lane E12): the brief is API and backend only; the suggestions page (rule, evidence, savings, dismiss) is for UI-D" }],
 ]);
 
 /**
@@ -451,7 +456,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 54; // main's 48 (43 + ADR-0303 L11 5 SIEM routes) + ADR-0256 (P32) 4, master decision on #725 2026-11-14; + ADR-0056 §5 amendment (lane L7) 2 copilot red-team gate routes
+export const KNOWN_UI_GAPS_MAX = 59; // main's 48 (43 + ADR-0303 L11 5 SIEM routes) + ADR-0256 (P32) 4, master decision on #725 2026-11-14; + ADR-0056 §5 amendment (lane L7) 2 copilot red-team gate routes; + ADR-0327 (lane E12) 5 rule-like step routes
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 
