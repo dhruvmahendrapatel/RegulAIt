@@ -685,6 +685,14 @@ export async function prepareCompatCall(
     via = "agent_header";
     if (!requested) {
       // DEFAULT-DENY. An unknown/disabled named agent is never a pass-through.
+      // ADR-0326: audited, so a model an admin blocks by disabling its agent leaves a record in every coding tool.
+      await auditUnresolvedCompatCall(db, userId, {
+        error: "agent_not_resolvable",
+        agentId: namedAgentId,
+        requestedModel: args.requestedModel,
+        resolutionMode: mode,
+        projectId,
+      });
       return {
         ok: false,
         status: 403,
@@ -711,6 +719,14 @@ export async function prepareCompatCall(
       // THE BATCH-H INVARIANT. An unmapped model is DEFAULT-DENY — never a
       // silent pass-through to the vendor, which is the entire point of
       // intercepting in the first place.
+      // ADR-0326: audited, so an unmapped or disabled model leaves a deny record.
+      await auditUnresolvedCompatCall(db, userId, {
+        error: "model_not_mapped",
+        agentId: null,
+        requestedModel: args.requestedModel,
+        resolutionMode: mode,
+        projectId,
+      });
       return {
         ok: false,
         status: 403,
@@ -1578,5 +1594,42 @@ export function registerInterceptionRoutes(app: FastifyInstance, db: Db) {
         resolutionMode: policy.settings.resolutionMode,
       },
     };
+  });
+}
+
+/**
+ * ADR-0326 (pilot criterion 1): the two resolution refusals (`agent_not_resolvable`, `model_not_mapped`) used to
+ * return 403 with no audit row, so a model an admin "blocked" by disabling or unmapping its agent left no record.
+ * One deny row each, on the agent object (objectId null when no agent was named).
+ */
+async function auditUnresolvedCompatCall(
+  db: Db,
+  userId: string,
+  a: {
+    error: "agent_not_resolvable" | "model_not_mapped";
+    agentId: string | null;
+    requestedModel: string;
+    resolutionMode: string;
+    projectId: string | null | undefined;
+  },
+): Promise<void> {
+  await db.insert(auditLog).values({
+    userId,
+    objectType: "agent",
+    objectId: a.agentId,
+    detail: {
+      surface: "compat",
+      mode: COMPAT_MODE,
+      requestedModel: a.requestedModel,
+      resolutionMode: a.resolutionMode,
+      ...(a.projectId ? { projectId: a.projectId } : {}),
+      receiptClass: "decision",
+    },
+    effect: "deny",
+    ruleId: a.error,
+    ruleChain: [],
+    reason: a.error === "model_not_mapped"
+      ? `model '${a.requestedModel}' maps to no enabled governed agent`
+      : `no enabled governed agent with the named id`,
   });
 }

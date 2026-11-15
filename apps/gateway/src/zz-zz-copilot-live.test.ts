@@ -42,6 +42,7 @@
  * (M-008) — never absolute org-wide counts.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -241,6 +242,7 @@ const latestAuditFor = async (ruleId: string) => {
 };
 
 let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
+let restoreCopilotRedteamGate: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
@@ -251,6 +253,8 @@ beforeAll(async () => {
   restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "e".repeat(64) });
 
+  // ADR-0056 §5 amendment: this file is about grounding, not the narrator red-team gate (zz-adr0056-copilot-redteam)
+  restoreCopilotRedteamGate = await relaxGovernanceGatesForTest(db, { copilotRedteamGateEnabled: false });
   const [before] = await db.select().from(orgSettings);
   priorJudgeEnabled = before?.recommendationJudgeEnabled ?? false;
   priorJudgeAgentId = before?.recommendationJudgeAgentId ?? null;
@@ -334,6 +338,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await restoreAdminKeyMfa?.();
   await restoreStrictAdmission?.();
+  await restoreCopilotRedteamGate?.();
   // M-012: this file flips an org singleton; restore the EXACT prior values
   await db
     .update(orgSettings)
