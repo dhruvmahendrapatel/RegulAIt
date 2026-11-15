@@ -507,6 +507,7 @@ import { registerOptimizationRoutes } from "./optimization.js";
 import { applyRunApprovalDecision, registerOrchestrationRoutes } from "./orchestration.js";
 import { registerDecomposeRoutes } from "./decompose.js";
 import { mirrorApprovalDecision, registerPmRoutes } from "./pm.js";
+import { handleAssignmentEvent, registerPmAssignmentRoutes } from "./pm-assignment.js";
 import { RunStateError } from "@regulait/orchestration-kernel";
 import { applyWorkflowApprovalDecision, registerWorkflowRoutes } from "./workflows.js";
 import { registerTemplateGalleryRoutes } from "./template-gallery.js";
@@ -5984,7 +5985,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerOptimizationRoutes(app, db);
   registerOrchestrationRoutes(app, db, { dataKey: opts.dataKey });
   registerDecomposeRoutes(app, db, { dataKey: opts.dataKey });
-  registerPmRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0317 (G4): an inbound event assigning or mentioning the agent starts the item's workflow as the assigning user
+  registerPmRoutes(app, db, {
+    dataKey: opts.dataKey,
+    onInboundEvent: (conn, event, writeBackComment) =>
+      handleAssignmentEvent(db, conn, event, { dataKey: opts.dataKey, writeBackComment }),
+  });
+  registerPmAssignmentRoutes(app, db);
 
   registerWorkflowRoutes(app, db, {
     dataKey: opts.dataKey,

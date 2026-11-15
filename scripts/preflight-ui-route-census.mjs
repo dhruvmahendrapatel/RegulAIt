@@ -366,6 +366,11 @@ export const INDIRECT_UI_CALLS = new Map([
  * until the entry is deleted, and KNOWN_UI_GAPS_MAX is lowered to match.
  */
 export const KNOWN_UI_GAPS = new Map([
+  ["GET /v1/pm/connections/:name/assignment-trigger", { does: "reads a PM connection's assignment trigger (agent identity, change descriptor, on/off)", tracking: "ADR-0317 (lane L6, G4): the brief is API-only; the assignment-trigger and identity-link screen is requested on #453. RAISED for the master's review" }],
+  ["PUT /v1/pm/connections/:name/assignment-trigger", { does: "sets the assignment trigger; turning it on is a settings_relax step-up", tracking: "ADR-0317 (lane L6, G4): the brief is API-only; the assignment-trigger and identity-link screen is requested on #453. RAISED for the master's review" }],
+  ["GET /v1/pm/connections/:name/identity-links", { does: "lists which PM users are linked to which RegulAIt users on a connection", tracking: "ADR-0317 (lane L6, G4): the brief is API-only; the assignment-trigger and identity-link screen is requested on #453. RAISED for the master's review" }],
+  ["POST /v1/pm/connections/:name/identity-links", { does: "links a PM user to a RegulAIt user (admin-managed, never self-asserted)", tracking: "ADR-0317 (lane L6, G4): the brief is API-only; the assignment-trigger and identity-link screen is requested on #453. RAISED for the master's review" }],
+  ["DELETE /v1/pm/connections/:name/identity-links/:linkId", { does: "removes an identity link; that PM user's assignments start nothing", tracking: "ADR-0317 (lane L6, G4): the brief is API-only; the assignment-trigger and identity-link screen is requested on #453. RAISED for the master's review" }],
   ["GET /v1/usage-extractors", { does: "reads the org switch and every agent's active usage-mapping version", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["PUT /v1/usage-extractors/enabled", { does: "turns the usage extractor on (settings_relax step-up) or off", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["GET /v1/agents/:agentId/usage-extractor/versions", { does: "lists an agent's usage-mapping versions with each one's latest sample test", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
@@ -444,7 +449,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 48; // main's 43 (46 incl. ADR-0255 P31 +2, master decision on #753 2026-11-14; − 3 endpoint MCP config routes, #824) + ADR-0303 (lane L11) 5 SIEM destination routes awaiting #453
+export const KNOWN_UI_GAPS_MAX = 53; // main's 43 (46 incl. ADR-0255 P31 +2, master decision on #753 2026-11-14; − 3 endpoint MCP config routes, #824) + ADR-0303 (lane L11) 5 SIEM destination routes awaiting #453 + ADR-0317 (L6) 5 assignment-trigger and identity-link routes, raised for the master's review
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 

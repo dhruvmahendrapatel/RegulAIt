@@ -154,3 +154,12 @@ still signed the body alone, so a receiver had no signed time and could not appl
   scheme (`webhook-id`/`webhook-timestamp`/`webhook-signature`, base64) was considered and not adopted: the inbound
   contract is already `x-regulait-*` hex, and one contract for both directions matters more than a second header set.
   Moving both directions to Standard Webhooks would be its own decision.
+
+## Amendment, 2026-11-15 (ADR-0317, G4)
+
+- The normalized inbound event gains optional assignment signals (`actor`, `assignee`, `mentions`, `trigger`, `key`),
+  in the tool's own user identifiers. The gateway acts on them only through a connection's enabled assignment
+  trigger ([ADR-0317](0317-assignable-from-jira-and-azure-boards.md)); the drift and orphan processing is unchanged.
+- Jira also accepts `X-Hub-Signature: sha256=<hex HMAC-SHA256 of the raw body>` (webhooks registered through the REST
+  API with a secret) in place of the URL token. A presented signature must verify; it is never ignored. The replay
+  walls are unchanged.

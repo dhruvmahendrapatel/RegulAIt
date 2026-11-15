@@ -561,3 +561,95 @@ describe("parseInboundWebhook registry", () => {
     expect(viaJira.kind).toBe("ignored");
   });
 });
+
+describe("ADR-0317 (G4): assignment signals", () => {
+  const AGENT = "712020:regulait-agent";
+  const ALICE = "5b10ac8d82e05b22cc7d4ef5";
+  const jira = (body: unknown, extra: Partial<InboundWebhookInput> = {}) =>
+    parseJiraInboundWebhook(input({ query: { token: SECRET }, rawBody: JSON.stringify(body), ...extra }));
+  const basic = (pass: string) => `Basic ${Buffer.from(`svc:${pass}`).toString("base64")}`;
+
+  it("jira issue_updated: the assignee is reported only from an assignee changelog item, with the acting user", () => {
+    const res = jira({
+      timestamp: NOW, webhookEvent: "jira:issue_updated", user: { accountId: ALICE },
+      issue: { id: "10042", key: "REG-7", fields: { summary: "Build API", assignee: { accountId: AGENT } } },
+      changelog: { items: [{ field: "assignee", fieldId: "assignee", from: null, to: AGENT }] },
+    });
+    expect(res.kind === "events" && res.events[0]).toMatchObject({ externalId: "10042", actor: ALICE, assignee: AGENT, key: "REG-7" });
+
+    // an unrelated update to an issue that is ALREADY assigned to the agent reports no assignee (no re-trigger)
+    const other = jira({
+      timestamp: NOW, webhookEvent: "jira:issue_updated", user: { accountId: ALICE },
+      issue: { id: "10042", fields: { assignee: { accountId: AGENT } } },
+      changelog: { items: [{ field: "summary", fieldId: "summary", to: "x" }] },
+    });
+    expect(other.kind === "events" && other.events[0]!.assignee).toBeUndefined();
+  });
+
+  it("jira comment: wiki and ADF mentions are reported, the comment author is the actor", () => {
+    const wiki = jira({
+      timestamp: NOW, webhookEvent: "comment_created", issue: { id: "10042" },
+      comment: { body: `please look [~accountid:${AGENT}] thanks`, author: { accountId: ALICE } },
+    });
+    expect(wiki.kind === "events" && wiki.events[0]).toMatchObject({ event: "commented", actor: ALICE, mentions: [AGENT] });
+    const adf = jira({
+      timestamp: NOW, webhookEvent: "comment_created", issue: { id: "10042" },
+      comment: {
+        author: { accountId: ALICE },
+        body: { type: "doc", content: [{ type: "paragraph", content: [{ type: "mention", attrs: { id: AGENT, text: "@RegulAIt" } }] }] },
+      },
+    });
+    expect(adf.kind === "events" && adf.events[0]!.mentions).toEqual([AGENT]);
+  });
+
+  it("jira Automation rule event: an explicit start request with the initiator and the current assignee", () => {
+    const res = jira({
+      timestamp: NOW, webhookEvent: "regulait:assign", user: { accountId: ALICE },
+      issue: { id: "10042", key: "REG-7", fields: { summary: "Build API", assignee: { accountId: AGENT } } },
+    });
+    expect(res.kind === "events" && res.events[0]).toMatchObject({ trigger: "automation", actor: ALICE, assignee: AGENT });
+  });
+
+  it("jira x-hub-signature (REST-registered webhooks): a valid HMAC verifies without the URL token; an invalid one is refused even with the token", () => {
+    const body = JSON.stringify({ timestamp: NOW, webhookEvent: "jira:issue_updated", issue: { id: "1" } });
+    const ok = parseJiraInboundWebhook(input({ rawBody: body, headers: { "x-hub-signature": `sha256=${sig(SECRET, body)}` } }));
+    expect(ok.kind).toBe("events");
+    expect(() =>
+      parseJiraInboundWebhook(input({ rawBody: body, query: { token: SECRET }, headers: { "x-hub-signature": "sha256=00" } })),
+    ).toThrow(PmProviderError);
+  });
+
+  it("azure_devops: AssignedTo changes, the revisedBy actor and comment mentions, as lower-cased identities", () => {
+    const upd = parseAzureDevOpsInboundWebhook(
+      input({
+        headers: { authorization: basic(SECRET) },
+        rawBody: JSON.stringify({
+          id: "d1", createdDate: NOW_ISO, eventType: "workitem.updated",
+          resource: {
+            workItemId: 42, revisedBy: { uniqueName: "Alice@Contoso.com" },
+            fields: { "System.AssignedTo": { oldValue: "", newValue: "RegulAIt Agent <RegulAIt@Contoso.com>" } },
+            revision: { id: 42, fields: { "System.Title": "Build API" } },
+          },
+        }),
+      }),
+    );
+    expect(upd.kind === "events" && upd.events[0]).toMatchObject({ externalId: "42", actor: "alice@contoso.com", assignee: "regulait@contoso.com" });
+
+    const com = parseAzureDevOpsInboundWebhook(
+      input({
+        headers: { authorization: basic(SECRET) },
+        rawBody: JSON.stringify({
+          id: "d2", createdDate: NOW_ISO, eventType: "workitem.commented",
+          resource: {
+            id: 42,
+            fields: {
+              "System.ChangedBy": "Alice <alice@contoso.com>",
+              "System.History": '<div><a href="#" data-vss-mention="version:2.0,AB12CD34-0000-4000-8000-000000000001">@RegulAIt</a> go</div>',
+            },
+          },
+        }),
+      }),
+    );
+    expect(com.kind === "events" && com.events[0]).toMatchObject({ actor: "alice@contoso.com", mentions: ["ab12cd34-0000-4000-8000-000000000001"] });
+  });
+});

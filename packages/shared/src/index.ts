@@ -2085,6 +2085,19 @@ export const pmWebhookSchema = z.object({
   event: z.enum(["updated", "deleted", "commented"]),
   state: z.string().min(1).max(128).optional(),
   fields: z.record(z.string(), z.unknown()).optional(),
+  // ADR-0317 (G4): assignment signals a provider parser can extract. All are the PM tool's own user identifiers
+  // (Jira accountId, Azure DevOps uniqueName lower-cased), never RegulAIt ids; the gateway resolves them through an
+  // admin-managed identity link and ignores them unless the connection's assignment trigger is enabled.
+  /** who performed the change (the assigning or mentioning user) */
+  actor: z.string().min(1).max(256).optional(),
+  /** the item's assignee, present only when this event set or changed it */
+  assignee: z.string().min(1).max(256).optional(),
+  /** users @mentioned in the comment this event carries */
+  mentions: z.array(z.string().min(1).max(256)).max(50).optional(),
+  /** an explicit start request from a tool-side rule (Jira Automation "Send web request") */
+  trigger: z.literal("automation").optional(),
+  /** the item's human key (Jira "REG-7"), for write-back text */
+  key: z.string().min(1).max(256).optional(),
 });
 
 // PILLAR 4 (§9, ADR-0011): teams + Shared-Project membership + context store.

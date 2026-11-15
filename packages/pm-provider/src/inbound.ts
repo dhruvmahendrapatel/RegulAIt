@@ -151,6 +151,7 @@ function normalized(e: {
   event: "updated" | "deleted" | "commented";
   state?: string | null | undefined;
   fields?: Record<string, unknown> | undefined;
+  signals?: AssignmentSignals | undefined;
 }): NormalizedInboundEvent {
   const fields =
     e.fields === undefined
@@ -161,7 +162,98 @@ function normalized(e: {
     event: e.event,
     ...(e.state ? { state: e.state } : {}),
     ...(fields && Object.keys(fields).length > 0 ? { fields } : {}),
+    ...signalFields(e.signals),
   });
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0317 (G4) — assignment signals. A parser reports, in the tool's own user
+// identifiers, who acted, who the item is now assigned to (only when this event
+// set or changed the assignee) and who a comment @mentions. It decides nothing:
+// the gateway compares them with the connection's configured agent identity,
+// and only when that connection's assignment trigger is enabled.
+// ---------------------------------------------------------------------------
+
+export interface AssignmentSignals {
+  actor?: string | undefined;
+  assignee?: string | undefined;
+  mentions?: string[] | undefined;
+  trigger?: "automation" | undefined;
+  key?: string | undefined;
+}
+
+const MAX_SIGNAL_LENGTH = 256;
+const MAX_MENTIONS = 50;
+
+const cleanId = (v: unknown): string | undefined => {
+  if (typeof v !== "string" && typeof v !== "number") return undefined;
+  const s = String(v).trim();
+  return s === "" || s.length > MAX_SIGNAL_LENGTH ? undefined : s;
+};
+
+function signalFields(sig: AssignmentSignals | undefined): Record<string, unknown> {
+  if (!sig) return {};
+  const mentions = [...new Set((sig.mentions ?? []).map(cleanId).filter((m): m is string => m !== undefined))].slice(
+    0,
+    MAX_MENTIONS,
+  );
+  const actor = cleanId(sig.actor);
+  const assignee = cleanId(sig.assignee);
+  // the human key only travels with an assignment signal: it is write-back text, not an event attribute
+  const key = actor || assignee || mentions.length > 0 || sig.trigger ? cleanId(sig.key) : undefined;
+  return {
+    ...(actor ? { actor } : {}),
+    ...(assignee ? { assignee } : {}),
+    ...(mentions.length > 0 ? { mentions } : {}),
+    ...(sig.trigger ? { trigger: sig.trigger } : {}),
+    ...(key ? { key } : {}),
+  };
+}
+
+/** Jira mentions: wiki markup `[~accountid:<id>]` (REST v2 bodies) and ADF `{type:"mention", attrs:{id}}` (v3). */
+export function jiraMentions(body: unknown): string[] {
+  const out: string[] = [];
+  const walk = (node: unknown, depth: number): void => {
+    if (depth > 64 || out.length >= MAX_MENTIONS) return;
+    if (typeof node === "string") {
+      for (const m of node.matchAll(/\[~accountid:([^\]\s]{1,256})\]/gi)) out.push(m[1]!);
+      return;
+    }
+    if (Array.isArray(node)) {
+      for (const n of node) walk(n, depth + 1);
+      return;
+    }
+    if (node !== null && typeof node === "object") {
+      const o = node as Record<string, unknown>;
+      if (o.type === "mention" && o.attrs !== null && typeof o.attrs === "object") {
+        const id = cleanId((o.attrs as Record<string, unknown>).id);
+        if (id) out.push(id);
+      }
+      if (Array.isArray(o.content)) walk(o.content, depth + 1);
+    }
+  };
+  walk(body, 0);
+  return out;
+}
+
+/** Azure DevOps identities arrive as "Display Name <uniqueName>" strings or {uniqueName} objects; the uniqueName,
+ * lower-cased (ADO compares it case-insensitively), is the identifier. */
+export function adoIdentity(v: unknown): string | undefined {
+  if (v !== null && typeof v === "object") {
+    const o = v as Record<string, unknown>;
+    return cleanId(typeof o.uniqueName === "string" ? o.uniqueName.toLowerCase() : undefined);
+  }
+  if (typeof v !== "string") return undefined;
+  const m = /<([^<>]{1,256})>\s*$/.exec(v);
+  return cleanId((m ? m[1]! : v).toLowerCase());
+}
+
+/** Azure DevOps comment mentions: `data-vss-mention="version:2.0,<identity id>"` anchors in System.History HTML. */
+export function adoMentions(html: unknown): string[] {
+  if (typeof html !== "string") return [];
+  const out: string[] = [];
+  for (const m of html.matchAll(/data-vss-mention="version:[0-9.]+,([0-9a-fA-F-]{1,64})"/g)) out.push(m[1]!.toLowerCase());
+  return out.slice(0, MAX_MENTIONS);
 }
 
 // ---------------------------------------------------------------------------
@@ -198,17 +290,66 @@ const jiraPayloadSchema = z
   })
   .passthrough();
 
-function parseJiraVerified(input: InboundWebhookInput): InboundWebhookResult {
+const jiraAccountId = (v: unknown): string | undefined =>
+  v !== null && typeof v === "object" ? cleanId((v as Record<string, unknown>).accountId) : undefined;
+
+/** ADR-0317 (G4): what a Jira delivery says about assignment. `user` is the acting account on issue events;
+ * a comment's author acts on comment events. The assignee is reported only when this event set it: a
+ * `changelog` item for the assignee field, or a created issue that already has one. */
+function jiraSignals(body: Record<string, unknown>, webhookEvent: string): AssignmentSignals {
+  const issue = (body.issue ?? {}) as Record<string, unknown>;
+  const fields = (issue.fields ?? {}) as Record<string, unknown>;
+  const comment = (body.comment ?? undefined) as Record<string, unknown> | undefined;
+  const sig: AssignmentSignals = { key: cleanId(issue.key) };
+  if (webhookEvent.startsWith("comment_")) {
+    sig.actor = jiraAccountId(comment?.updateAuthor) ?? jiraAccountId(comment?.author) ?? jiraAccountId(body.user);
+    sig.mentions = jiraMentions(comment?.body);
+    return sig;
+  }
+  sig.actor = jiraAccountId(body.user);
+  const changelog = (body.changelog ?? {}) as Record<string, unknown>;
+  const items = Array.isArray(changelog.items) ? (changelog.items as Array<Record<string, unknown>>) : [];
+  const assigneeChange = items.find((i) => i.fieldId === "assignee" || i.field === "assignee");
+  if (assigneeChange) sig.assignee = cleanId(assigneeChange.to);
+  else if (webhookEvent === "jira:issue_created" || webhookEvent === JIRA_AUTOMATION_EVENT) {
+    sig.assignee = jiraAccountId(fields.assignee);
+  }
+  if (webhookEvent === JIRA_AUTOMATION_EVENT) sig.trigger = "automation";
+  return sig;
+}
+
+/** The event name a Jira Automation "Send web request" rule sends to start RegulAIt's workflow for the issue
+ * (ADR-0317). Its custom body is documented in the ADR: issue id/key/summary, `user.accountId` from
+ * {{initiator.accountId}} and `timestamp` from {{now.asMillis}}. */
+export const JIRA_AUTOMATION_EVENT = "regulait:assign";
+
+/** Jira Cloud webhooks registered through the REST API with a `secret` sign the raw body:
+ * `X-Hub-Signature: sha256=<hex HMAC-SHA256>`. Manual webhooks and Automation rules cannot, so they keep the URL
+ * token; a presented signature must verify (it is never ignored). */
+function verifyJira(input: InboundWebhookInput): void {
+  const presented = input.headers["x-hub-signature"];
+  if (typeof presented === "string") {
+    if (!constantTimeEqual(presented, `sha256=${hmacHex(input.secret, input.rawBody)}`)) {
+      throw new PmProviderError("jira webhook invalid x-hub-signature", 401);
+    }
+    return;
+  }
   requireUrlToken(input, "jira");
+}
+
+function parseJiraVerified(input: InboundWebhookInput): InboundWebhookResult {
+  verifyJira(input);
   const parsed = jiraPayloadSchema.safeParse(parseJsonBody(input, "jira"));
   if (!parsed.success) {
     throw new PmProviderError("unrecognized jira webhook payload (no webhookEvent)", 400);
   }
   const { webhookEvent, issue, comment } = parsed.data;
+  const raw = parsed.data as Record<string, unknown>;
   const issueEvents: Record<string, "updated" | "deleted"> = {
     "jira:issue_created": "updated",
     "jira:issue_updated": "updated",
     "jira:issue_deleted": "deleted",
+    [JIRA_AUTOMATION_EVENT]: "updated",
   };
   const mappedIssueEvent = issueEvents[webhookEvent];
   if (mappedIssueEvent) {
@@ -224,6 +365,7 @@ function parseJiraVerified(input: InboundWebhookInput): InboundWebhookResult {
             mappedIssueEvent === "updated"
               ? { summary: issue.fields?.summary ?? undefined, description: issue.fields?.description ?? undefined }
               : undefined,
+          signals: mappedIssueEvent === "updated" ? jiraSignals(raw, webhookEvent) : undefined,
         }),
       ],
     };
@@ -237,6 +379,7 @@ function parseJiraVerified(input: InboundWebhookInput): InboundWebhookResult {
           externalId: issue.id,
           event: "commented",
           fields: { comment: comment?.body },
+          signals: jiraSignals(raw, webhookEvent),
         }),
       ],
     };
@@ -581,6 +724,10 @@ function parseAzureDevOpsVerified(input: InboundWebhookInput): InboundWebhookRes
             event: "updated",
             state: adoFieldValue(resource.fields?.["System.State"]),
             fields: { title: adoFieldValue(resource.fields?.["System.Title"]) },
+            signals: {
+              actor: adoIdentity(resource.fields?.["System.CreatedBy"]),
+              assignee: adoIdentity(resource.fields?.["System.AssignedTo"]),
+            },
           }),
         ],
       };
@@ -603,6 +750,13 @@ function parseAzureDevOpsVerified(input: InboundWebhookInput): InboundWebhookRes
                 adoFieldValue(resource.fields?.["System.Title"]) ??
                 adoFieldValue(resource.revision?.fields?.["System.Title"]),
             },
+            signals: {
+              actor:
+                adoIdentity((resource as Record<string, unknown>).revisedBy) ??
+                adoIdentity(resource.revision?.fields?.["System.ChangedBy"]),
+              // only an assignee CHANGE on this update: the {oldValue,newValue} pair for System.AssignedTo
+              assignee: adoIdentity(adoFieldValue(resource.fields?.["System.AssignedTo"])),
+            },
           }),
         ],
       };
@@ -622,6 +776,10 @@ function parseAzureDevOpsVerified(input: InboundWebhookInput): InboundWebhookRes
             externalId: id,
             event: "commented",
             fields: { comment: adoFieldValue(resource.fields?.["System.History"]) },
+            signals: {
+              actor: adoIdentity(resource.fields?.["System.ChangedBy"]),
+              mentions: adoMentions(adoFieldValue(resource.fields?.["System.History"])),
+            },
           }),
         ],
       };

@@ -16490,3 +16490,100 @@ export const resourceRateReservations = pgTable(
     ),
   ],
 );
+
+// ---------------------------------------------------------------------------
+// ADR-0317 (builder lane L6, gap G4) — RegulAIt assignable from Jira and Azure Boards.
+// Migration `pending/pm_assignment_trigger.sql` (numbered at merge).
+// ---------------------------------------------------------------------------
+
+/** A PM connection's assignment trigger: assigning, @mentioning or a tool-side rule addressing RegulAIt's agent
+ * identity starts the pillar-2 workflow for that work item. One row per connection; OFF until an admin enables it
+ * (ADR-0180), and enabling is a step-up relaxation. */
+export const pmAssignmentTriggers = pgTable(
+  "pm_assignment_triggers",
+  {
+    connectionId: uuid("connection_id")
+      .primaryKey()
+      .references(() => pmConnections.id, { onDelete: "cascade" }),
+    enabled: boolean("enabled").notNull().default(false),
+    /** RegulAIt's agent as the PM tool knows it: a Jira accountId, an Azure DevOps uniqueName (lower-cased) or
+     * identity id */
+    agentRef: text("agent_ref").notNull(),
+    /** the change descriptor the started workflow is matched on (workflow assignment rules) */
+    changeType: text("change_type").notNull(),
+    environment: text("environment").notNull(),
+    targetSystem: text("target_system"),
+    /** the project the started instance is attributed to; the assigning user must be able to charge it */
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
+    /** the admin who last changed it; null = the install bootstrap token */
+    updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("pm_assignment_triggers_project_idx").on(t.projectId),
+    index("pm_assignment_triggers_updated_by_idx").on(t.updatedByUserId),
+    check("pm_assignment_triggers_agent_ref_len", sql`char_length(${t.agentRef}) BETWEEN 1 AND 256`),
+    check("pm_assignment_triggers_change_type_len", sql`char_length(${t.changeType}) BETWEEN 1 AND 128`),
+    check("pm_assignment_triggers_environment_len", sql`char_length(${t.environment}) BETWEEN 1 AND 128`),
+    check(
+      "pm_assignment_triggers_target_system_len",
+      sql`${t.targetSystem} IS NULL OR char_length(${t.targetSystem}) BETWEEN 1 AND 128`,
+    ),
+  ],
+);
+
+/** Which RegulAIt user a PM tool user IS, per connection. Admin-managed, never self-asserted (the ChatOps
+ * `chat_identity_links` model): an assignment acts as exactly this user, with this user's entitlements. */
+export const pmIdentityLinks = pgTable(
+  "pm_identity_links",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => pmConnections.id, { onDelete: "cascade" }),
+    /** the PM tool's user id: Jira accountId, Azure DevOps uniqueName (lower-cased) */
+    externalUserId: text("external_user_id").notNull(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    /** the admin who linked it; null = the install bootstrap token */
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("pm_identity_links_conn_external_uq").on(t.connectionId, t.externalUserId),
+    uniqueIndex("pm_identity_links_conn_user_uq").on(t.connectionId, t.userId),
+    index("pm_identity_links_user_idx").on(t.userId),
+    index("pm_identity_links_created_by_idx").on(t.createdByUserId),
+    check("pm_identity_links_external_len", sql`char_length(${t.externalUserId}) BETWEEN 1 AND 256`),
+  ],
+);
+
+/** The one workflow an assignment started for a work item: the claim that makes a repeated assignment, mention or
+ * rule firing start nothing new. Point-in-time evidence of what started it (3NF exception, deliberate: the actor's
+ * PM-side id and the trigger kind are the facts of that moment, not copies of a mutable attribute). */
+export const pmAssignmentStarts = pgTable(
+  "pm_assignment_starts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => pmConnections.id, { onDelete: "cascade" }),
+    externalId: text("external_id").notNull(),
+    workflowInstanceId: uuid("workflow_instance_id").references(() => workflowInstances.id, { onDelete: "set null" }),
+    initiatorUserId: uuid("initiator_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    actorExternalId: text("actor_external_id").notNull(),
+    trigger: text("trigger", { enum: ["assigned", "mentioned", "automation"] }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("pm_assignment_starts_conn_external_uq").on(t.connectionId, t.externalId),
+    index("pm_assignment_starts_instance_idx").on(t.workflowInstanceId),
+    index("pm_assignment_starts_initiator_idx").on(t.initiatorUserId),
+    check("pm_assignment_starts_external_len", sql`char_length(${t.externalId}) BETWEEN 1 AND 256`),
+    check("pm_assignment_starts_actor_len", sql`char_length(${t.actorExternalId}) BETWEEN 1 AND 256`),
+    check("pm_assignment_starts_trigger_check", sql`${t.trigger} IN ('assigned', 'mentioned', 'automation')`),
+  ],
+);

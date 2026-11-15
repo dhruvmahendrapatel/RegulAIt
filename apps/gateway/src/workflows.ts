@@ -32,6 +32,7 @@ import {
   transition,
   validateDefinition,
   WorkflowStateError,
+  type ChangeDescriptor,
   type Effect,
   type InstanceState,
   type WorkflowDefinition,
@@ -2950,6 +2951,48 @@ function secondApproverUnavailable(): Record<string, unknown> {
 }
 
 /**
+ * ADR-0018 §4 / ADR-0019: a change descriptor with its server-authoritative dimensions. The INITIATING user's role
+ * names (the 5th dim) are resolved here, never taken from a client, so a role-scoped assignment rule only ever fires
+ * for a genuine role holder; the data sensitivities (the 6th dim) are the compliance classification tags of the
+ * ATTRIBUTED project, the same source effectiveCompliancePolicy cascades from (no project, or one with no
+ * classifications, yields []: a sensitivity-scoped rule then does not fire). Shared by the start route and by
+ * ADR-0317's PM assignment trigger, so both match templates on the same facts.
+ */
+export async function changeWithServerFacts(
+  db: Db,
+  userId: string,
+  projectId: string | null,
+  clientChange: z.infer<typeof startInstanceSchema>["change"],
+) {
+  const initiatorRoleRows = await db
+    .select({ name: roles.name })
+    .from(roleAssignments)
+    .innerJoin(roles, eq(roles.id, roleAssignments.roleId))
+    .where(eq(roleAssignments.userId, userId));
+  // ADR-0038: distinct — a role held both directly and via an IdP group mapping is two assignment rows and one name
+  const initiatorRoles = [...new Set(initiatorRoleRows.map((r) => r.name))];
+  const dataSensitivities = projectId ? await projectClassifications(db, projectId) : [];
+  // targetSystem is a legitimate client-supplied change attribute; initiatorRoles and dataSensitivities are
+  // authoritative server truth (changeDescriptorSchema accepts neither from a client, but rebuild explicitly)
+  return { ...clientChange, initiatorRoles, dataSensitivities };
+}
+
+/** §4: the templates the workflow assignment rules select for a change (oldest rule first). */
+export async function matchedTemplateIds(db: Db, change: ChangeDescriptor): Promise<string[]> {
+  const rules = await db.select().from(workflowAssignmentRules).orderBy(workflowAssignmentRules.createdAt);
+  return matchTemplates(change, rules);
+}
+
+/** §8.3 cascade, the ENFORCED consumer: a classified project's required templates are unioned in with no manual
+ * per-control setup (and can force a workflow even when no assignment rule matches); the §4 union/strictest merge
+ * keeps every added sign-off stage. */
+export async function withRequiredTemplates(db: Db, projectId: string, templateIds: string[]): Promise<string[]> {
+  const out = [...templateIds];
+  for (const id of await requiredTemplateIdsFor(db, projectId)) if (!out.includes(id)) out.push(id);
+  return out;
+}
+
+/**
  * THE ONE INSTANCE-CREATION PATH, extracted (ADR-0080) so the AI use-case
  * front-door starts its intake instance through EXACTLY the code
  * `POST /v1/workflows/instances` runs — retired-template refusal, ordered
@@ -3544,30 +3587,9 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     // (never from the request body) and passed on the change descriptor so a
     // role-scoped assignment rule can only ever fire for a genuine role holder.
     // The kernel stays subject-free — it just matches these strings.
-    const initiatorRoleRows = await db
-      .select({ name: roles.name })
-      .from(roleAssignments)
-      .innerJoin(roles, eq(roles.id, roleAssignments.roleId))
-      .where(eq(roleAssignments.userId, userId));
-    // ADR-0038: distinct — a role held both directly and via an IdP group
-    // mapping is two assignment rows and one role name.
-    const initiatorRoles = [...new Set(initiatorRoleRows.map((r) => r.name))];
-    // ADR-0018 addendum (ADR-0019) — the 6th dim, resolved SERVER-SIDE like the
-    // 5th: a change's data sensitivity is the set of compliance classification
-    // tags its ATTRIBUTED PROJECT carries, i.e. the exact same source
-    // effectiveCompliancePolicy cascades from. That is the only
-    // server-authoritative sensitivity signal in the model, and it means the
-    // dim cannot be asserted by a client. No project, or a project with no
-    // classifications, yields [] — a sensitivity-scoped rule then simply does
-    // not fire (matches as absent; never an invented sensitivity).
-    const dataSensitivities = body.projectId
-      ? await projectClassifications(db, body.projectId)
-      : [];
-    // targetSystem is a legitimate client-supplied change attribute;
-    // initiatorRoles and dataSensitivities are authoritative server truth.
-    // Neither could ever reach here from a client — changeDescriptorSchema
-    // accepts neither — but rebuild explicitly.
-    const change = { ...body.change, initiatorRoles, dataSensitivities };
+    //
+    // The 5th and 6th dims (initiator roles, data sensitivities) are server truth: changeWithServerFacts.
+    const change = await changeWithServerFacts(db, userId, body.projectId ?? null, body.change);
 
     // ADR-0195 A4: a shadow-AI remediation never starts in the plan's placeholder environment (fail closed), and
     // its strict default workflow is installed the first time one is started (an admin relaxes it by retiring it)
@@ -3610,20 +3632,9 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       }
       templateIds = [body.templateId];
     } else {
-      const rules = await db
-        .select()
-        .from(workflowAssignmentRules)
-        .orderBy(workflowAssignmentRules.createdAt);
-      templateIds = matchTemplates(change, rules);
+      templateIds = await matchedTemplateIds(db, change);
     }
-    // §8.3 cascade — the ENFORCED consumer: a classified project's required
-    // templates are unioned in with no manual per-control setup (and can
-    // force a workflow even when no assignment rule matches). The existing
-    // §4 union/strictest merge keeps every added sign-off stage.
-    if (body.projectId) {
-      const required = await requiredTemplateIdsFor(db, body.projectId);
-      for (const id of required) if (!templateIds.includes(id)) templateIds.push(id);
-    }
+    if (body.projectId) templateIds = await withRequiredTemplates(db, body.projectId, templateIds);
     if (templateIds.length === 0) {
       // no workflow is assigned on an admin's behalf (the one shipped default is ADR-0195 A4's shadow-AI remediation
       // rule, installed above): say who can fix it

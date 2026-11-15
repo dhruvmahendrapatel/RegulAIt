@@ -385,7 +385,22 @@ export async function mirrorApprovalDecision(
   }
 }
 
-export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?: string }) {
+/**
+ * ADR-0317 (G4): a hook run on every verified, de-duplicated inbound event, after the ADR-0010 processing. app.ts
+ * wires pm-assignment's handler here; pm.ts cannot import it (pm-assignment reaches workflows.ts, which reaches back
+ * here: the import-cycle ratchet). `writeBackComment` is the governed PM write, as the given user.
+ */
+export type PmInboundEventHook = (
+  conn: typeof pmConnections.$inferSelect,
+  event: NormalizedInboundEvent,
+  writeBackComment: (userId: string, externalId: string, text: string) => Promise<void>,
+) => Promise<Record<string, unknown> | null>;
+
+export function registerPmRoutes(
+  app: FastifyInstance,
+  db: Db,
+  opts: { dataKey?: string; onInboundEvent?: PmInboundEventHook },
+) {
   // Read-only widening for the PM strip's GETs, mirroring loadRunFor /
   // loadInstanceFor: the named approver of a PENDING approval on a run or
   // workflow instance may read its links/decisions (200 with [] when there is
@@ -1367,10 +1382,20 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
         });
         return reply.status(200).send({ ok: true, duplicate: true });
       }
-      const results: Array<{ matched: false } | { matched: true; drift: boolean }> = [];
+      const results: Array<({ matched: false } | { matched: true; drift: boolean }) & { assignment?: Record<string, unknown> }> = [];
       try {
         for (const event of result.events) {
-          results.push(await processInboundEvent(conn, event));
+          const processed = await processInboundEvent(conn, event);
+          // ADR-0317 (G4): an event that assigns or mentions the connection's agent starts the item's workflow as the
+          // assigning user; null = no trigger configured or the event does not address the agent
+          const assignment = opts.onInboundEvent
+            ? await opts.onInboundEvent(conn, event, async (userId, externalId, text) => {
+                if (!opts.dataKey) throw new Error("no data key: the PM write-back cannot decrypt the connection token");
+                const provider = await providerFor(db, conn, opts.dataKey, { userId, detail: { phase: "assignment-writeback" } });
+                await provider.addComment(conn.project, externalId, text);
+              })
+            : null;
+          results.push(assignment ? { ...processed, assignment } : processed);
         }
       } catch (err) {
         // Known limits (review of #717, findings 4 and 5), accepted and recorded in the ADR-0010 amendment:
