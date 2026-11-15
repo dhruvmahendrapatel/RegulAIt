@@ -82,8 +82,9 @@ the planner's evaluator is about 80 lines. Globs use node's built-in `path.match
 ## Consequences
 
 - **Saved per typical PR** (durations from PR run 43666754137): a web-only PR drops four gateway shards and the
-  coverage check, about 55 runner-minutes down to one runner of about 11 to 13 minutes (setup plus the 78-file subset),
-  so about 42 to 44 runner-minutes and 5 fewer runners. A gateway or docs-only PR is unchanged.
+  coverage check, about 55 runner-minutes down to one runner of about 15 minutes (setup plus the subset, which ran in
+  12.8 minutes against Postgres 16 on a dev container on 2026-11-15: 79 files, 1720 passed, 10 skipped), so about 40
+  runner-minutes and 5 fewer runners. Wall clock is not shorter: the one runner takes about as long as a shard. A gateway or docs-only PR is unchanged.
 - **More on dependency, CI, migration and security-config PRs.** A lockfile or migration PR now runs the full set, about
   51 runners instead of about 35. That is the owner's rule (a change that can reach any suite is tested by every
   suite); it is the largest cost to watch if Dependabot volume rises, and the place to look first if runner time binds
