@@ -809,6 +809,8 @@ describe("every sweep is registered", () => {
         // ADR-0303: audit-chain delivery to enabled SIEM destinations; driven end to end in
         // zz-adr0303-siem-delivery.test.ts (with no destination enabled it sends nothing)
         SCHEDULER_JOB_NAMES.siemDeliverySweep,
+        // ADR-0313: expired paid-call holds; driven end to end in zz-adr0313-paid-call-budgets.test.ts
+        SCHEDULER_JOB_NAMES.paidCallHoldSweeper,
         // ADR-0302: third-party ingest evidence past the audit floor; driven end to end in
         // zz-adr0302-evidence-retention.test.ts (with no floor configured it deletes nothing)
         SCHEDULER_JOB_NAMES.thirdPartyEvidenceRetentionSweep,

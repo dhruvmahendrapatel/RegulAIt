@@ -30,6 +30,7 @@ import {
   usageEvents,
   userAgentPolicies,
   type Db,
+  type PaidCallPriceRow,
 } from "@regulait/db";
 import { scopeCovers, visibleTools, type Decision, type GovernedActor, type ToolRef } from "@regulait/policy-kernel";
 import { actorEntitlementsReach, DelegationRefusedError, settleDelegationCharge } from "./delegation.js";
@@ -145,6 +146,7 @@ import {
 } from "./projects.js";
 import { z } from "zod";
 import { errMessage } from "./err-serializer.js";
+import { paidPriceForMcpTool, releasePaidCall, reportedChargeOf, reservePaidCall, runIdOfCall, settlementAmount, settlePaidCall } from "./paid-calls.js";
 
 const proxyParams = z.object({ serverId: z.string().uuid() });
 /**
@@ -960,6 +962,8 @@ async function executeGovernedToolCallInner(
     await db.insert(auditLog).values({ userId, serverId, toolName, ...decision, detail: { projectId, phase: "definition-pins", status: pinned.status, receiptClass: "decision" } });
     return { kind: "denied", decision };
   };
+  // ADR-0313: this call's paid-call hold, once reserved (settled with the usage row, else released in `finally`)
+  let paidHold: { holdId: string; heldUsd: number; price: PaidCallPriceRow } | null = null;
 
   try {
     if (kind) {
@@ -1552,6 +1556,22 @@ async function executeGovernedToolCallInner(
     // retry can open two pull requests or charge two cards, and it does so
     // precisely when the network is unreliable. AER-038: readOnlyHint is not
     // an idempotency contract either, so every tool receives one attempt.
+    // ADR-0313: a PAID tool reserves its worst-case charge against the call's project budget and run cap before the
+    // upstream is contacted, under the envelopes' locks. Over budget, or no budget at all, is a refusal routed to the
+    // approvals queue: nothing runs and nothing bills. Placed after every other gate, so a refused call holds nothing.
+    const paidPrice = await paidPriceForMcpTool(db, serverId, toolRow?.id ?? null);
+    if (paidPrice) {
+      const reserved = await reservePaidCall(db, {
+        price: paidPrice,
+        userId,
+        projectId: projectId ?? null,
+        runId: runIdOfCall(args),
+        subject: { kind: "mcp_tool", serverId, toolName },
+      });
+      if (!reserved.ok) return { kind: "budget_blocked", status: reserved.status, error: reserved.error, detail: reserved.detail };
+      paidHold = reserved;
+    }
+
     let content: Awaited<ReturnType<typeof upstream.callTool>>;
     try {
       content = await withUpstreamRetry(
@@ -1581,6 +1601,8 @@ async function executeGovernedToolCallInner(
       // rethrows still widens the inferred type to include `undefined`, which
       // no longer satisfies the SDK's `tools/call` handler signature.
       await operationFailed(err);
+      // ADR-0313: a failed call bills nothing, so its hold is released
+      if (paidHold) await releasePaidCall(db, paidHold.holdId, userId, "call_failed");
       if (redactActive) throw new Error("MCP upstream call failed under PII redaction");
       throw err;
     }
@@ -1676,6 +1698,15 @@ async function executeGovernedToolCallInner(
     // gate filter on projectId. Unpriced server → null, never an invented
     // figure. Denied calls and upstream failures still bill nothing.
     // ADR-0188 S4: stamped with the acting agent; settled along its chain in the same transaction
+    // ADR-0313: a paid call bills what it settles at (the upstream-reported charge, never above its hold, else the
+    // quoted price) instead of the flat list price
+    const paidSettlement = paidHold
+      ? settlementAmount(paidHold.price, paidHold.heldUsd, reportedChargeOf(content), { toolError: (content as { isError?: unknown }).isError === true })
+      : null;
+    // ADR-0313 / ADR-0312: a call made inside an orchestration run carries the run id on its usage row, so the run's cap
+    // and its cost per outcome both see the spend
+    const callRunId = runIdOfCall(args);
+    const billedUsd = paidSettlement ? paidSettlement.amountUsd : pricePerCallUsd;
     const toolUsageWrite = (h: Db) => h.insert(usageEvents).values({
       ...actorColumns(),
       userId,
@@ -1684,12 +1715,13 @@ async function executeGovernedToolCallInner(
       // (as it carries the operation on connector rows) and the server id
       // rides the detail jsonb.
       operation: toolName,
-      // O10: tool-first price, server-flat fallback (resolved above)
-      costUsd: pricePerCallUsd,
+      // O10: tool-first price, server-flat fallback (resolved above); ADR-0313: a paid call's settlement
+      costUsd: billedUsd,
       projectId,
       detail: {
         serverId,
         toolName,
+        ...(callRunId ? { runId: callRunId } : {}),
         // §8.4 COUNTS ONLY — never the matched substrings
         ...(pii ? { pii: { mode: pii.mode, action: pii.action, inputHits, outputHits } } : {}),
         // ADR-0042 COUNTS ONLY, same contract
@@ -1705,13 +1737,20 @@ async function executeGovernedToolCallInner(
       },
     }).returning({ id: usageEvents.id });
     const toolGrantId = args.delegationGrantId;
+    let toolUsageId: string | null = null;
     if (toolGrantId) {
       await db.transaction(async (tx) => {
         const [u] = await toolUsageWrite(tx as unknown as Db);
-        if (u) await settleDelegationCharge(tx, { usageEventId: u.id, leafGrantId: toolGrantId, amountMicros: usdToMicros(pricePerCallUsd) });
+        toolUsageId = u?.id ?? null;
+        if (u) await settleDelegationCharge(tx, { usageEventId: u.id, leafGrantId: toolGrantId, amountMicros: usdToMicros(billedUsd) });
       });
     } else {
-      await toolUsageWrite(db);
+      const [u] = await toolUsageWrite(db);
+      toolUsageId = u?.id ?? null;
+    }
+    if (paidHold && paidSettlement) {
+      await settlePaidCall(db, { holdId: paidHold.holdId, userId, amountUsd: paidSettlement.amountUsd, usageEventId: toolUsageId,
+        capped: paidSettlement.capped, reported: paidSettlement.reported });
     }
     if (mgOutput) {
       const outcome = guardrailOutcome(mgOutput);
@@ -1791,10 +1830,13 @@ async function executeGovernedToolCallInner(
       ...(pii ? { pii } : {}),
       ...(mcpGuardrailView ? { guardrails: mcpGuardrailView } : {}),
       // ADR-0024 (O11): every executed call is metered, so the cost is always
-      // reported back — attributed or not. O10: tool-first resolution.
-      costUsd: pricePerCallUsd,
+      // reported back — attributed or not. O10: tool-first resolution. ADR-0313: a paid call's settlement.
+      costUsd: billedUsd,
     };
   } finally {
+    // ADR-0313: a hold neither settled nor released above (an exit that billed nothing) is released here; if even that
+    // fails, the sweeper releases it at its TTL, and until then it still counts (the safe direction)
+    if (paidHold) await releasePaidCall(db, paidHold.holdId, userId, "call_failed").catch(() => undefined);
     await closeUpstream();
   }
 }

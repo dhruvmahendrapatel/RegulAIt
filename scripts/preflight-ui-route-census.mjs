@@ -410,6 +410,11 @@ export const KNOWN_UI_GAPS = new Map([
   ["PUT /v1/siem/destinations/:destinationId/enabled", { does: "turns a SIEM destination on (step-up, audited as a relaxation) or off (audited)", tracking: "#453" }],
   ["POST /v1/siem/destinations/:destinationId/rotate-secret", { does: "rotates a SIEM destination's signing secret, shown once (step-up, audited)", tracking: "#453" }],
   ["POST /v1/siem/destinations/:destinationId/recover", { does: "returns a dead-lettered or backing-off SIEM destination to delivery now (audited)", tracking: "#453" }],
+  // ADR-0313 (lane E2, G9): four API-only paid-call routes; the price and hold screens are posted on #453.
+  ["GET /v1/paid-call-prices", { does: "lists paid-call prices (MCP tool, MCP server or connector): price, reserved maximum and hold TTL", tracking: "#453" }],
+  ["POST /v1/paid-call-prices", { does: "makes a tool, server or connector a paid call that must reserve against a budget (audited)", tracking: "#453" }],
+  ["DELETE /v1/paid-call-prices/:priceId", { does: "removes a paid-call price, a relaxation (settings_relax step-up, audited)", tracking: "#453" }],
+  ["GET /v1/paid-call-holds", { does: "pages paid-call holds: held, settled (with the usage row) or released, and why", tracking: "#453" }],
   // EXCEPTION (ADR-0255, P31, 2026-11-07): the P31 brief is "API and backend only; post the catalogue UI need on
   // #453 for the Governed Designer", so these two routes ship with their screen owned by that lane. These two
   // raise the cap by 2, visibly; the Designer's catalogue screen deletes both entries and lowers it by 2. Decided on #753
@@ -444,7 +449,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 48; // main's 43 (46 incl. ADR-0255 P31 +2, master decision on #753 2026-11-14; − 3 endpoint MCP config routes, #824) + ADR-0303 (lane L11) 5 SIEM destination routes awaiting #453
+export const KNOWN_UI_GAPS_MAX = 52; // main's 43 (46 incl. ADR-0255 P31 +2, master decision on #753 2026-11-14; − 3 endpoint MCP config routes, #824) + ADR-0303 (lane L11) 5 SIEM destination routes awaiting #453 + ADR-0313 (lane E2) 4 paid-call routes awaiting #453
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 

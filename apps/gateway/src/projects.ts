@@ -262,7 +262,7 @@ export function periodStart(now: Date = new Date()): Date {
 }
 
 /** True when a project's budget window is the current calendar month. */
-function isMonthly(project: Pick<ProjectRow, "budgetPeriod">): boolean {
+export function isMonthly(project: Pick<ProjectRow, "budgetPeriod">): boolean {
   return project.budgetPeriod === "monthly";
 }
 
@@ -270,7 +270,7 @@ function isMonthly(project: Pick<ProjectRow, "budgetPeriod">): boolean {
  * lifetime ('none') budget, but under a 'monthly' budget only while the latch's
  * period matches the current one — on a new month the latch is inert and
  * enforcement resumes. */
-function overageActive(project: ProjectRow, periodKey: string): boolean {
+export function overageActive(project: ProjectRow, periodKey: string): boolean {
   if (!project.overageApproved) return false;
   if (!isMonthly(project)) return true;
   return project.overageApprovedPeriod === periodKey;
@@ -279,7 +279,7 @@ function overageActive(project: ProjectRow, periodKey: string): boolean {
 /** Measured spend attributed to a project (pillar 5 actuals). Under a 'monthly'
  * budget only spend within the current calendar-month window counts; otherwise
  * it is lifetime-cumulative (default, back-compat). */
-async function projectSpendUsd(
+export async function projectSpendUsd(
   db: Db,
   projectId: string,
   opts?: { monthly?: boolean; now?: Date },
@@ -295,7 +295,7 @@ async function projectSpendUsd(
   return row?.spent ?? 0;
 }
 
-async function escalateProjectBudget(
+export async function escalateProjectBudget(
   db: Db,
   project: ProjectRow,
   userId: string,
@@ -787,6 +787,24 @@ export type ProjectGate =
   | { ok: true; project: ProjectRow | null; spentUsd: number }
   | { ok: false; status: number; error: string; detail?: string };
 
+/** The project's effective budget: min(project budget, the compliance cascade's ceiling), the ceiling capping an
+ * unbudgeted project too (O2, ADR-0027). Shared by the pre-dispatch gate and the ADR-0313 paid-call reservation. */
+export async function effectiveProjectBudget(
+  db: Db,
+  project: ProjectRow,
+): Promise<{ tags: string[]; cascade: ReturnType<typeof effectiveCompliancePolicy>; ceilingUsd: number | null; effectiveBudgetUsd: number | null }> {
+  const tags = (project.classifications ?? []) as string[];
+  const cascade = effectiveCompliancePolicy(await profilesForTags(db, tags));
+  const ceilingUsd = cascade.maxProjectBudgetUsd ?? null;
+  const effectiveBudgetUsd =
+    project.budgetUsd == null
+      ? ceilingUsd
+      : ceilingUsd == null
+        ? project.budgetUsd
+        : Math.min(project.budgetUsd, ceilingUsd);
+  return { tags, cascade, ceilingUsd, effectiveBudgetUsd };
+}
+
 /** Pre-dispatch gate (pillar 5 enforcement): once a project's MEASURED spend
  * reaches its budget, further attributed dispatches are blocked until the
  * named approver sanctions the overage — same first-crossing-allowed
@@ -834,15 +852,7 @@ export async function preDispatchProjectGate(
   // when the org says warn_only — strictest wins; the org can never be
   // relaxed by a profile. Unclassified projects: cascade is empty, the gate
   // is byte-identical to before.
-  const tags = (project.classifications ?? []) as string[];
-  const cascade = effectiveCompliancePolicy(await profilesForTags(db, tags));
-  const ceilingUsd = cascade.maxProjectBudgetUsd;
-  const effectiveBudgetUsd =
-    project.budgetUsd == null
-      ? ceilingUsd
-      : ceilingUsd == null
-        ? project.budgetUsd
-        : Math.min(project.budgetUsd, ceilingUsd);
+  const { tags, cascade, ceilingUsd, effectiveBudgetUsd } = await effectiveProjectBudget(db, project);
   if (effectiveBudgetUsd == null || overageActive(project, periodKey)) {
     return { ok: true, project, spentUsd: 0 };
   }
