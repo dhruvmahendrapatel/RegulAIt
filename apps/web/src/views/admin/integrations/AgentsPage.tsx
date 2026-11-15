@@ -11,7 +11,7 @@ import { api } from "../../../api/client";
 import type { AdminAgent, CustomModelProvider, UserAgentPolicyView } from "../../../api/adminTypes";
 import { fmtUsd } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Tabs, Textarea, tabIds } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, TabPanel, Tabs, Textarea } from "../../../ui/kit";
 import { ListPreview } from "../../../ui/ListPreview";
 import {
   KV,
@@ -42,6 +42,9 @@ const CLEAR = "__clear__";
 export default function AgentsPage(props: { slot?: AgentsTabSlot }) {
   const agents = useAgents();
   const users = useUsers();
+  // ADR-0034: a custom-endpoint agent shows WHICH endpoint in the preview too, not just "custom" (review of #642)
+  const customProviders = useCustomProviders();
+  const endpointName = new Map((customProviders.data?.providers ?? []).map((p) => [p.id, p.name] as const));
   const [tab, setTab] = useState("register");
   // `#agent-<id>` deep links (dependency graph, governance alerts) land on the agent in the full catalog
   const { hash } = useLocation();
@@ -70,7 +73,18 @@ export default function AgentsPage(props: { slot?: AgentsTabSlot }) {
           attention={[{ label: "disabled", filters: { enabled: "false" } }]}
           columns={[
             { key: "name", header: "Name", render: (x) => x.name },
-            { key: "provider", header: "Provider", render: (x) => x.provider },
+            {
+              key: "provider",
+              header: "Provider",
+              render: (x) =>
+                x.provider === "custom" ? (
+                  <span>
+                    custom · <span className={v.mono}>{x.customProviderId ? (endpointName.get(x.customProviderId) ?? x.customProviderId) : "—"}</span>
+                  </span>
+                ) : (
+                  x.provider
+                ),
+            },
             { key: "model", header: "Model", render: (x) => (x.model ? <span className={v.mono}>{x.model}</span> : "—") },
             {
               key: "price",
@@ -124,18 +138,10 @@ export default function AgentsPage(props: { slot?: AgentsTabSlot }) {
             ],
           ] as const
         ).map(([id, body]) => (
-          <div
-            key={id}
-            role="tabpanel"
-            id={tabIds("agents", id).panel}
-            aria-labelledby={tabIds("agents", id).tab}
-            hidden={tab !== id}
-            // the stack's display would otherwise override the hidden attribute
-            style={tab !== id ? { display: "none" } : undefined}
-            className={v.stack}
-          >
-            {body}
-          </div>
+          // the kit panel (review of #642); the stack sits inside it, so its display never overrides `hidden`
+          <TabPanel key={id} idPrefix="agents" id={id} active={tab}>
+            <div className={v.stack}>{body}</div>
+          </TabPanel>
         ))}
       </div>
     </>

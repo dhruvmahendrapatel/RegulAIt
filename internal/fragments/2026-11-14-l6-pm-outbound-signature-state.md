@@ -1,0 +1,2 @@
+<!-- fold: state-recap -->
+**2026-11-14 - S-03 follow-up (a): the outbound generic PM webhook signs `<ts>.<body>` ([ADR-0010 amendment](../decisions/0010-pm-inbound-sync-webhooks-plus-read-through.md), builder lane L6).** `GenericWebhookProvider` sends `x-regulait-timestamp` and an HMAC over `"<timestamp>.<body>"`, the same contract as inbound, from one shared dependency-free signer (`generic-signature.ts`), so receivers can apply the 300 s window. The body-only signature is removed (no grandfathering). No migration. S-03(b) still waits on #605.

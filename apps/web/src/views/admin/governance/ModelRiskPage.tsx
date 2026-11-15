@@ -24,7 +24,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Tabs, Textarea, tabIds } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, ErrorState, Field, Input, Select, Table, Tabs, Textarea, tabIds } from "../../../ui/kit";
 import { DataList, type DataColumn } from "../../../ui/DataList";
 import {
   QueryGate,
@@ -287,13 +287,116 @@ export default function ModelRiskPage() {
       status.refetch(),
       queryClient.invalidateQueries({ queryKey: ["admin", "mrm-cards"] }),
       queryClient.invalidateQueries({ queryKey: ["admin", "mrm-expiring"] }),
-      cardDetail.refetch(),
+      // invalidate, not refetch(): react-query skips a disabled query, so with no card open nothing is read
+      // (refetch() ignores `enabled` and asked for /v1/mrm/cards/null)
+      queryClient.invalidateQueries({ queryKey: ["admin", "mrm-card"] }),
     ]);
   };
 
   const detail = pageCards.find((c) => c.id === openCard) ?? null;
-  const autofill = openCard === cardDetail.data?.card.id ? cardDetail.data.card.autofill : null;
-  const staleness = openCard === cardDetail.data?.card.id ? cardDetail.data.card.staleness : null;
+  const detailCard = cardDetail.data?.card;
+  const autofill = detailCard && openCard === detailCard.id ? detailCard.autofill : null;
+  const staleness = detailCard && openCard === detailCard.id ? detailCard.staleness : null;
+  // a detail read that answered without its card is a failed read (shown with Retry), never a crash or a silent blank
+  const detailMissing = openCard !== null && cardDetail.isSuccess && !detailCard;
+
+  // I-2 (#453, pattern 4): one empty state while nothing exists. The posture read already counts every card in the
+  // org, so no extra request is made. Only an answered zero counts: a failed read stays the QueryGate's error with
+  // Retry, never "nothing", and a missing count is never read as zero.
+  const nothingYet = status.isSuccess && status.data?.cards === 0;
+
+  // the author form is the page's primary action; while nothing exists it carries the page's one empty state
+  const authorCard = (
+      <Card title="Author a model card">
+        <form
+          className={v.stack}
+          onSubmit={(e) => {
+            e.preventDefault();
+            void act.run(async () => {
+              await api.post("/v1/mrm/cards", {
+                agentId: newAgent,
+                intendedUse: newUse,
+                ...(newLimits ? { limitations: newLimits } : {}),
+                ...(newClaims ? { dataClaims: JSON.parse(newClaims) as Record<string, unknown> } : {}),
+                ...(newRefs
+                  ? { standardRefs: newRefs.split(",").map((s) => s.trim()).filter(Boolean) }
+                  : {}),
+              });
+              setNewUse("");
+              setNewLimits("");
+              setNewClaims("");
+              setNewRefs("");
+              await refreshAll();
+            }, "Model card created — it enforces nothing until it carries an approved sign-off");
+          }}
+        >
+          <div className={a.formRow}>
+            <Field label="Agent">
+              <Select value={newAgent} onChange={(e) => setNewAgent(e.target.value)} required>
+                {optionEls(agentOpts(agents.data?.agents), "select an agent")}
+              </Select>
+            </Field>
+            <Field label="Intended use" grow>
+              <Input
+                value={newUse}
+                onChange={(e) => setNewUse(e.target.value)}
+                placeholder="summarize customer tickets"
+                required
+              />
+            </Field>
+          </div>
+          <Field label="Known limitations">
+            <Textarea
+              rows={2}
+              value={newLimits}
+              onChange={(e) => setNewLimits(e.target.value)}
+              placeholder="not for legal or medical advice; degrades on non-English input"
+            />
+          </Field>
+          <div className={a.formRow}>
+            <Field label="Provider data claims (JSON)" grow>
+              <Textarea
+                rows={2}
+                value={newClaims}
+                onChange={(e) => setNewClaims(e.target.value)}
+                placeholder='{"training":"vendor-stated; no customer data","retention":"30 days"}'
+              />
+            </Field>
+            <Field
+              label="Standard refs (comma separated)"
+              grow
+              help="Referencing a NIST AI RMF / ISO 42001 control id helps an auditor follow the mapping. It does not make this deployment, or its customer, certified against anything."
+            >
+              <Input
+                value={newRefs}
+                onChange={(e) => setNewRefs(e.target.value)}
+                placeholder="nist-ai-rmf:MEASURE-2.11, iso-42001:8.3"
+              />
+            </Field>
+          </div>
+          <div>
+            <Badge tone="neutral">Mapping, not certification</Badge>
+          </div>
+          <div>
+            <Button type="submit" disabled={!newAgent || !newUse}>
+              Create card
+            </Button>
+          </div>
+        </form>
+        {nothingYet && (
+          <EmptyState
+            title="No model cards yet"
+            body={
+              <>
+                An empty registry enforces nothing, whatever the toggle says. Cards are human work — the platform can
+                require them and expire them, it cannot write them. Author the first one above; the registry and the
+                expiring sign-offs list appear here once it exists.
+              </>
+            }
+          />
+        )}
+      </Card>
+  );
 
   return (
     <>
@@ -443,12 +546,17 @@ export default function ModelRiskPage() {
             </div>
           </Card>
 
+          {/* I-2: while no card exists, the primary action and its one empty state come straight after the posture */}
+          {nothingYet && authorCard}
+
           {/* the warn window, writable through PUT /v1/org/settings (U3) */}
           <OrgSettingsCard title="Expiry warning window" keys={["mrmExpiryWarnDays"]} testId="mrm-expiry-warn" />
           {/* beside the recertification controls: re-runs a changed model's tests and attaches the results to its
               re-certification request; off by default, and turning it on asks for a step-up */}
           <OrgSettingsCard title="Re-test after a model change" keys={["mrmAutoRetestEnabled"]} testId="mrm-auto-retest" />
 
+          {!nothingYet && (
+          <>
           {/* ---------------- expiring work ---------------- */}
           <Card title="Expiring and lapsed sign-offs">
             <DataList<ExpiringRow>
@@ -470,84 +578,7 @@ export default function ModelRiskPage() {
             />
           </Card>
 
-          {/* ---------------- author a card ---------------- */}
-          <Card title="Author a model card">
-            <form
-              className={v.stack}
-              onSubmit={(e) => {
-                e.preventDefault();
-                void act.run(async () => {
-                  await api.post("/v1/mrm/cards", {
-                    agentId: newAgent,
-                    intendedUse: newUse,
-                    ...(newLimits ? { limitations: newLimits } : {}),
-                    ...(newClaims ? { dataClaims: JSON.parse(newClaims) as Record<string, unknown> } : {}),
-                    ...(newRefs
-                      ? { standardRefs: newRefs.split(",").map((s) => s.trim()).filter(Boolean) }
-                      : {}),
-                  });
-                  setNewUse("");
-                  setNewLimits("");
-                  setNewClaims("");
-                  setNewRefs("");
-                  await refreshAll();
-                }, "Model card created — it enforces nothing until it carries an approved sign-off");
-              }}
-            >
-              <div className={a.formRow}>
-                <Field label="Agent">
-                  <Select value={newAgent} onChange={(e) => setNewAgent(e.target.value)} required>
-                    {optionEls(agentOpts(agents.data?.agents), "select an agent")}
-                  </Select>
-                </Field>
-                <Field label="Intended use" grow>
-                  <Input
-                    value={newUse}
-                    onChange={(e) => setNewUse(e.target.value)}
-                    placeholder="summarize customer tickets"
-                    required
-                  />
-                </Field>
-              </div>
-              <Field label="Known limitations">
-                <Textarea
-                  rows={2}
-                  value={newLimits}
-                  onChange={(e) => setNewLimits(e.target.value)}
-                  placeholder="not for legal or medical advice; degrades on non-English input"
-                />
-              </Field>
-              <div className={a.formRow}>
-                <Field label="Provider data claims (JSON)" grow>
-                  <Textarea
-                    rows={2}
-                    value={newClaims}
-                    onChange={(e) => setNewClaims(e.target.value)}
-                    placeholder='{"training":"vendor-stated; no customer data","retention":"30 days"}'
-                  />
-                </Field>
-                <Field
-                  label="Standard refs (comma separated)"
-                  grow
-                  help="Referencing a NIST AI RMF / ISO 42001 control id helps an auditor follow the mapping. It does not make this deployment, or its customer, certified against anything."
-                >
-                  <Input
-                    value={newRefs}
-                    onChange={(e) => setNewRefs(e.target.value)}
-                    placeholder="nist-ai-rmf:MEASURE-2.11, iso-42001:8.3"
-                  />
-                </Field>
-              </div>
-              <div>
-                <Badge tone="neutral">Mapping, not certification</Badge>
-              </div>
-              <div>
-                <Button type="submit" disabled={!newAgent || !newUse}>
-                  Create card
-                </Button>
-              </div>
-            </form>
-          </Card>
+          {authorCard}
 
           {/* ---------------- the registry ---------------- */}
           <Card title="Model cards">
@@ -705,6 +736,14 @@ export default function ModelRiskPage() {
                   id={tabIds(`mrm-${detail.id}`, "card").panel}
                   aria-labelledby={tabIds(`mrm-${detail.id}`, "card").tab}
                 >
+
+                {detailMissing && (
+                  <ErrorState
+                    title="Couldn't load this model card"
+                    message="The card's computed sections and staleness did not come back. Try again."
+                    onRetry={() => void cardDetail.refetch()}
+                  />
+                )}
 
                 {/* ADR-0086 — staleness first: a certified card whose world
                     moved says so before anything else on the card */}
@@ -1057,6 +1096,8 @@ export default function ModelRiskPage() {
                 </div>
               </div>
             </Card>
+          )}
+          </>
           )}
         </QueryGate>
       </div>

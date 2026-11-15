@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   currentPlanningStage,
   initialState,
+  isExecutedStage,
   matchTemplates,
+  retryDelaySeconds,
   mergeDefinitions,
   transition,
   validateDefinition,
@@ -841,5 +843,143 @@ describe("ADR-0187 engine bindings (PR #203 review [14])", () => {
     expect(workflowDefinitionSchema.safeParse(def("promptfoo")).success).toBe(true);
     expect(workflowDefinitionSchema.safeParse(def("garak")).success).toBe(true);
     expect(workflowDefinitionSchema.safeParse(def("modelscan")).success).toBe(false);
+  });
+});
+
+describe("ADR-0260 review bindings", () => {
+  const def = (stage: Record<string, unknown>) => ({
+    workflow: "w",
+    stages: [{ id: "i", type: "trigger" }, { id: "c", type: "automated_check", ...stage }],
+  });
+  const ok = (stage: Record<string, unknown>) => workflowDefinitionSchema.safeParse(def(stage)).success;
+
+  it("accepts a review bound to a declared check, for every profile", () => {
+    for (const profile of ["code_review", "security_review", "design_review"]) {
+      expect(ok({ checks: ["r"], reviews: [{ check: "r", agent: "reviewer", profile }] })).toBe(true);
+    }
+  });
+
+  it("refuses an unknown profile, a nit fail-on and an undeclared check", () => {
+    expect(ok({ checks: ["r"], reviews: [{ check: "r", agent: "a", profile: "vibes" }] })).toBe(false);
+    expect(ok({ checks: ["r"], reviews: [{ check: "r", agent: "a", profile: "code_review", failOn: "nit" }] })).toBe(false);
+    expect(ok({ checks: ["x"], reviews: [{ check: "r", agent: "a", profile: "code_review" }] })).toBe(false);
+  });
+
+  it("refuses a check decided twice (two reviews, or a review and an eval/engine)", () => {
+    const review = { check: "r", agent: "a", profile: "code_review" };
+    expect(ok({ checks: ["r"], reviews: [review, review] })).toBe(false);
+    expect(ok({ checks: ["r"], reviews: [review], evals: [{ check: "r", dataset: "d", agent: "a" }] })).toBe(false);
+    expect(
+      ok({ checks: ["r"], reviews: [review], engines: [{ check: "r", engine: "garak", agent: "a", sets: ["s"] }] }),
+    ).toBe(false);
+  });
+
+  it("refuses review bindings on a stage that is not an automated_check", () => {
+    const parsed = workflowDefinitionSchema.safeParse({
+      workflow: "w",
+      stages: [
+        { id: "i", type: "trigger" },
+        { id: "p", type: "planning", reviews: [{ check: "r", agent: "a", profile: "code_review" }] },
+      ],
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it("accepts the evidence-only opt-in only as a boolean", () => {
+    const at = (allowEvidenceOnly: unknown) =>
+      ok({ checks: ["r"], reviews: [{ check: "r", agent: "a", profile: "code_review", allowEvidenceOnly }] });
+    expect(at(true)).toBe(true);
+    expect(at(false)).toBe(true);
+    expect(at("yes")).toBe(false);
+  });
+
+  it("bounds the answer budget", () => {
+    const at = (maxTokens: number) => ok({ checks: ["r"], reviews: [{ check: "r", agent: "a", profile: "code_review", maxTokens }] });
+    expect(at(4096)).toBe(true);
+    expect(at(100)).toBe(false);
+    expect(at(100_000)).toBe(false);
+  });
+});
+
+describe("ADR-0283: a stage retry policy is an executed-stage-only, bounded opt-in", () => {
+  const base = [{ id: "intake", type: "trigger" }] as const;
+  const git = { id: "branch", type: "git_operation", action: "create_branch", connection: "gh", repo: "acme/app" } as const;
+
+  it("is absent by default — no automatic retry unless the template opts in", () => {
+    const def = validateDefinition({ workflow: "default", stages: [...base, git] });
+    expect(def.stages[1]!.retry).toBeUndefined();
+  });
+
+  it("fills the delay defaults and keeps the attempts the template set", () => {
+    const def = validateDefinition({ workflow: "r", stages: [...base, { ...git, retry: { maxAttempts: 3 } }] });
+    expect(def.stages[1]!.retry).toEqual({ maxAttempts: 3, delaySeconds: 30, backoff: true, maxDelaySeconds: 3600 });
+  });
+
+  it.each([
+    [{ maxAttempts: 0 }],
+    [{ maxAttempts: 11 }],
+    [{ maxAttempts: 2, delaySeconds: 1 }],
+    [{ maxAttempts: 2, delaySeconds: 600, maxDelaySeconds: 60 }],
+    [{ maxAttempts: 2, jitter: true }],
+    [{ maxAttempts: "3" }],
+  ])("refuses an out-of-bounds or unknown policy %j", (retry) => {
+    expect(() => validateDefinition({ workflow: "bad", stages: [...base, { ...git, retry }] })).toThrow();
+  });
+
+  it.each([
+    [{ id: "approve", type: "human_approval", approvers: ["requesting_user"] }],
+    [{ id: "checks", type: "automated_check" }],
+    [{ id: "build", type: "automated_build", scope: "x" }],
+    [{ id: "plan", type: "planning" }],
+    // executed, but never re-deployed unattended (#808 review)
+    [{ id: "deploy", type: "deployment", connection: "t", environment: "production" }],
+  ])("is refused on a stage that does not complete through execution, and on a deployment: %j", (stage) => {
+    expect(() =>
+      validateDefinition({ workflow: "bad", stages: [...base, { ...stage, retry: { maxAttempts: 2 } }] }),
+    ).toThrow(/cannot carry retry/);
+  });
+
+  it("is accepted on a check stage with named checks", () => {
+    const def = validateDefinition({
+      workflow: "ok",
+      stages: [
+        ...base,
+        { id: "checks", type: "automated_check", checks: ["unit"], retry: { maxAttempts: 2 } },
+      ],
+    });
+    expect(isExecutedStage(def.stages[1]!)).toBe(true);
+  });
+
+  it("execution_failed still leaves the stage awaiting execution (the retry is the gateway's, never the kernel's)", () => {
+    const def = validateDefinition({ workflow: "r", stages: [...base, { ...git, retry: { maxAttempts: 2 } }] });
+    const started = transition(def, initialState(def), { kind: "start" });
+    expect(started.state.status).toBe("awaiting_execution");
+    const failed = transition(def, started.state, { kind: "execution_failed", stageId: "branch", error: "boom" });
+    expect(failed.state.status).toBe("awaiting_execution");
+    expect(failed.effects).toEqual([]);
+  });
+
+  it("retryDelaySeconds doubles from the base delay and never passes the ceiling", () => {
+    const p = { maxAttempts: 10, delaySeconds: 30, backoff: true, maxDelaySeconds: 300 };
+    expect([1, 2, 3, 4, 5, 6].map((n) => retryDelaySeconds(p, n))).toEqual([30, 60, 120, 240, 300, 300]);
+    expect(retryDelaySeconds({ ...p, backoff: false }, 5)).toBe(30);
+    expect(() => retryDelaySeconds(p, 0)).toThrow(RangeError);
+  });
+});
+
+describe("ADR-0285: checkConcurrency is a check-stage-only, bounded setting", () => {
+  const base = [{ id: "intake", type: "trigger" }] as const;
+  it("is kept on an automated_check stage with named checks and absent by default", () => {
+    const def = validateDefinition({ workflow: "fan", stages: [...base, { id: "checks", type: "automated_check", checks: ["a", "b"], checkConcurrency: 3 }] });
+    expect(def.stages[1]!.checkConcurrency).toBe(3);
+    const none = validateDefinition({ workflow: "seq", stages: [...base, { id: "checks", type: "automated_check", checks: ["a"] }] });
+    expect(none.stages[1]!.checkConcurrency).toBeUndefined();
+  });
+  it.each([[0], [17], [1.5], ["4"]])("refuses %j", (n) => {
+    expect(() => validateDefinition({ workflow: "bad", stages: [...base, { id: "checks", type: "automated_check", checks: ["a"], checkConcurrency: n }] })).toThrow();
+  });
+  it("is refused on any other stage", () => {
+    expect(() => validateDefinition({ workflow: "bad", stages: [...base, { id: "checks", type: "automated_check", checkConcurrency: 2 }] })).toThrow(/cannot carry checkConcurrency/);
+    expect(() => validateDefinition({ workflow: "bad", stages: [...base, { id: "plan", type: "planning", checkConcurrency: 2 }] })).toThrow(/cannot carry checkConcurrency/);
   });
 });

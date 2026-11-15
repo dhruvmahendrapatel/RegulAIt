@@ -85,10 +85,12 @@ describe("every catalog reference resolves", () => {
         iso42001: ["iso-42001:not-a-control"],
         euAiAct: ["eu-ai-act:art-99-nothing", "iso-42001:9.1-monitoring-measurement"],
         owasp: ["owasp:llm:11", "owasp:agentic:asi11"],
+        mitreAtlas: ["mitre-atlas-techniques:AML.TA0005"],
       },
     };
     const problems = catalogReferenceProblems([bad]);
-    expect(problems).toHaveLength(7);
+    expect(problems).toHaveLength(8);
+    expect(problems.join("\n")).toMatch(/not an ATLAS technique ref/);
     expect(problems.join("\n")).toMatch(/not a NIST AI RMF 1\.0 subcategory/);
     expect(problems.join("\n")).toMatch(/must be a bare subcategory id/);
     expect(problems.join("\n")).toMatch(/not an ISO\/IEC 42001 pack control/);

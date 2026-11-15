@@ -67,8 +67,8 @@ export function ListPreview<T>(props: {
   info?: ReactNode;
   /** a standing warning the full list carried, kept on the overview above the rows */
   note?: ReactNode;
-  /** each time the first rows arrive (the page may name things from them) */
-  onRows?: (rows: T[]) => void;
+  /** each time the first rows arrive (the page may name things from them); `raw` is the whole page body, as DataList gives */
+  onRows?: (rows: T[], raw: Record<string, unknown>) => void;
 }) {
   const filters = props.filters ?? {};
   const read = (f: Filters) => () =>
@@ -85,9 +85,10 @@ export function ListPreview<T>(props: {
     ],
   });
   const firstRows = main!.data?.items;
+  const firstRaw = main!.data?.raw;
   const onRows = props.onRows;
   useEffect(() => {
-    if (firstRows) onRows?.(firstRows);
+    if (firstRows) onRows?.(firstRows, firstRaw ?? {});
   }, [firstRows]); // eslint-disable-line react-hooks/exhaustive-deps
   const total = main!.data ? (main!.data.total ?? main!.data.items.length) : null;
   const heading = previewHeading(

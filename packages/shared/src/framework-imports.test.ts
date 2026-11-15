@@ -10,6 +10,7 @@ import {
   importTextPolicy,
   mergeRegulatoryFeeds,
   normaliseAtlasRelease,
+  normaliseAtlasTechniques,
   normaliseFederalRegister,
   normaliseOscalCatalog,
   planFrameworkImport,
@@ -152,6 +153,58 @@ describe("ADR-0215 normalisers are deterministic", () => {
       expect(importContentSha256(parsed)).toBe(importContentSha256(JSON.parse(JSON.stringify(parsed))));
       expect(f).toBe(`${parsed.source.sourceId}.json`);
     }
+  });
+});
+
+describe("ADR-0293 ATLAS tactics and techniques", () => {
+  const release = (order: "asc" | "desc") => {
+    const techniques: Record<string, { id: string; name: string; description: string }> = {
+      "AML.T0051": { id: "AML.T0051", name: "LLM Prompt Injection", description: "See [Jailbreak](/techniques/AML.T0054).[[ref-a]]" },
+      "AML.T0051.001": { id: "AML.T0051.001", name: "Indirect", description: "Via a data channel." },
+    };
+    const entries = Object.entries(techniques);
+    return {
+      tactics: { "AML.TA0005": { id: "AML.TA0005", name: "Execution", description: "Run code." } },
+      techniques: Object.fromEntries(order === "asc" ? entries : entries.reverse()),
+      relationships: {
+        "AML.T0051": { achieves: [{ target: "AML.TA0005" }] },
+        "AML.T0051.001": { achieves: [{ target: "AML.TA0005" }], specializes: [{ target: "AML.T0051" }] },
+      },
+    };
+  };
+
+  it("gives tactics and techniques as sorted entries, links reduced, citations dropped, tactics and parent named", () => {
+    const out = normaliseAtlasTechniques(release("desc"), { framework: "mitre-atlas-techniques", licence: "Apache-2.0" });
+    expect(out).toEqual(normaliseAtlasTechniques(release("asc"), { framework: "mitre-atlas-techniques", licence: "Apache-2.0" }));
+    expect(out.map((c) => c.controlRef)).toEqual([
+      "mitre-atlas-techniques:AML.T0051",
+      "mitre-atlas-techniques:AML.T0051.001",
+      "mitre-atlas-techniques:AML.TA0005",
+    ]);
+    expect(out[0]!.description).toBe("See Jailbreak. ATLAS tactics: AML.TA0005 (Execution).");
+    expect(out[1]!.description).toBe("Via a data channel. ATLAS tactics: AML.TA0005 (Execution). Sub-technique of AML.T0051.");
+    expect(out[2]!.title).toBe("AML.TA0005 — Execution (tactic)");
+  });
+
+  it("refuses a document that is not an ATLAS release, and an id-only licence stores no text", () => {
+    expect(() => normaliseAtlasTechniques({ mitigations: {} }, { framework: "x", licence: "Apache-2.0" })).toThrow(/not an ATLAS/);
+    const idOnly = normaliseAtlasTechniques(release("asc"), { framework: "mitre-atlas-techniques", licence: "CC-BY-SA-4.0" });
+    expect(idOnly.every((c) => c.description === null && !c.title.includes("—"))).toBe(true);
+  });
+
+  it("the vendored snapshot is the pinned 2026.10 release: 16 tactics and every technique", () => {
+    const snap = frameworkImportSnapshotSchema.parse(
+      JSON.parse(readFileSync(path.join(dataDir, "mitre-atlas-techniques.json"), "utf8")),
+    );
+    expect(snap.source.sourceVersion).toBe("2026.10");
+    expect(snap.source.upstreamRevision).toBe("f56c1468731d6428e5bf875263b4643b46d67437");
+    // the same upstream bytes the mitigations snapshot was taken from
+    const mitigations = JSON.parse(readFileSync(path.join(dataDir, "mitre-atlas.json"), "utf8")) as FrameworkImportSnapshot;
+    expect(snap.source.upstreamSha256).toBe(mitigations.source.upstreamSha256);
+    const tactics = snap.controls.filter((c) => /:AML\.TA\d{4}$/.test(c.controlRef));
+    expect(tactics).toHaveLength(16);
+    expect(snap.controls).toHaveLength(237);
+    expect(snap.controls.some((c) => (c.description ?? "").includes("[["))).toBe(false);
   });
 });
 

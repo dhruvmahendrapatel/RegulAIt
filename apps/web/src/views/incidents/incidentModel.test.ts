@@ -13,13 +13,19 @@ describe("incidentModel", () => {
     expect(settingRelaxed("incidentGateMode", "off")).toBe(true);
     expect(settingRelaxed("incidentEvidenceHold", true)).toBe(false);
     expect(settingRelaxed("incidentEvidenceHold", false)).toBe(true);
-    expect(settingRelaxed("incidentClockRegimes", ["hipaa", "eu-ai-act"])).toBe(false);
+    // ADR-0296: every regime on is strict; the old two-regime set is now a relaxation
+    expect(settingRelaxed("incidentClockRegimes", ["cra", "hipaa", "dora", "eu-ai-act", "nis2", "gdpr"])).toBe(false);
+    expect(settingRelaxed("incidentClockRegimes", ["hipaa", "eu-ai-act"])).toBe(true);
     expect(settingRelaxed("incidentClockRegimes", ["eu-ai-act"])).toBe(true);
     expect(settingRelaxed("incidentClockRegimes", [])).toBe(true);
   });
 
   it("an Art. 3(49) criterion makes the incident serious; a PHI breach alone does not", () => {
     expect(EU_CRITERIA).not.toContain("phi_breach");
+    for (const c of ["personal_data_breach", "significant_cyber_incident", "major_ict_incident", "exploited_vulnerability", "severe_product_incident"]) {
+      expect(EU_CRITERIA).not.toContain(c);
+    }
+    expect(EU_CRITERIA).toEqual(["death", "health", "critical_infrastructure", "fundamental_rights", "property_environment", "widespread_infringement"]);
     expect(impliesSerious(["phi_breach"])).toBe(false);
     expect(impliesSerious(["phi_breach", "death"])).toBe(true);
     expect(impliesSerious([])).toBe(false);

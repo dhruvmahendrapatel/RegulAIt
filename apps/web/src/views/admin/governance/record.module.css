@@ -287,6 +287,12 @@
 .groupedTabs [role="tablist"] {
   overflow-x: auto;
   align-items: flex-end;
+  /* #453: the strip scrolls inside its own box on a phone; the page never scrolls sideways */
+  max-inline-size: 100%;
+  overscroll-behavior-x: contain;
+}
+.groupedTabs [role="tab"] {
+  white-space: nowrap;
 }
 .groupedTabs [data-group] {
   position: relative;

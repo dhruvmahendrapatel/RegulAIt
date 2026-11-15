@@ -3,7 +3,7 @@
  * preview of the pending ones; this page has the full list, its status filter, and approve and deny.
  */
 import { useMemo, useState } from "react";
-import { Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes } from "react-router-dom";
 import SsoPage from "./SsoPage";
 import { api } from "../../../api/client";
 import type { LinkRequest } from "../../../api/adminTypes";
@@ -160,6 +160,8 @@ export function SsoArea() {
     <Routes>
       <Route index element={<SsoPage />} />
       <Route path="link-requests" element={<LinkRequestsPage />} />
+      {/* an unknown sub-path goes back to the area's own page, never a blank page */}
+      <Route path="*" element={<Navigate to="/admin/sso" replace />} />
     </Routes>
   );
 }
