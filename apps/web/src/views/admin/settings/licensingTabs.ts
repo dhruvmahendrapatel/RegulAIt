@@ -5,6 +5,7 @@
  * the name until the read settles.
  */
 import { plural } from "../../../api/format";
+import { joinTabLabel as label } from "./postureTabs";
 
 export const LICENSING_TABS = [
   { id: "classes", name: "Action classes" },
@@ -36,11 +37,6 @@ export interface LicensingTabCounts {
   refusedCountFailed?: boolean;
 }
 
-function label(name: string, parts: Array<string | null>): string {
-  const shown = parts.filter((p): p is string => p !== null);
-  return shown.length ? `${name} · ${shown.join(" · ")}` : name;
-}
-
 /** "Action classes · 1 refused", "Seats · cannot provision", "History · 12 refused", or just the name */
 export function licensingTabLabel(id: LicensingTab, c: LicensingTabCounts): string {
   const name = LICENSING_TABS.find((t) => t.id === id)!.name;
@@ -49,7 +45,7 @@ export function licensingTabLabel(id: LicensingTab, c: LicensingTabCounts): stri
     case "classes": {
       if (!s) return name;
       const refused = Object.values(s.actionClasses).filter((d) => !d.allowed).length;
-      return label(name, [refused > 0 ? `${refused.toLocaleString()} refused` : null]);
+      return label(name, [refused > 0 ? `${refused.toLocaleString("en-GB")} refused` : null]);
     }
     case "seats":
       // the panel shows "Can provision a new user: no" and a zero "Remaining" as danger badges
@@ -61,7 +57,7 @@ export function licensingTabLabel(id: LicensingTab, c: LicensingTabCounts): stri
       return label(name, [!s.schedulerPresent ? plural(1, "warning") : null]);
     case "history":
       if (c.refusedCountFailed) return label(name, ["refused count unavailable"]);
-      return label(name, [c.refusedVerifications ? `${c.refusedVerifications.toLocaleString()} refused` : null]);
+      return label(name, [c.refusedVerifications ? `${c.refusedVerifications.toLocaleString("en-GB")} refused` : null]);
     case "features":
       // a closed feature is the licence's terms, not a warning
       return name;

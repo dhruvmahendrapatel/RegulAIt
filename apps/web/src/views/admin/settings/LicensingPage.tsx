@@ -14,16 +14,15 @@
  *  - **Nothing runs on a timer.** `lastVerifiedAt` and `schedulerPresent` are
  *    on the page, so a deployment that never wires the cron sees that.
  */
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { ListPreview } from "../../../ui/ListPreview";
+import { ListPreview, previewCountQuery } from "../../../ui/ListPreview";
 import { VERIFICATION_COLUMNS, VERIFICATIONS_EMPTY, type VerificationRow } from "./licenceVerifications";
-import { Badge, Button, Card, EmptyState, Field, Table, Tabs, tabIds, Textarea } from "../../../ui/kit";
-import { normalisePage, pageUrl } from "../../../ui/listState";
+import { Badge, Button, Card, EmptyState, Field, Table, TabPanel, Tabs, Textarea } from "../../../ui/kit";
 import { LICENSING_TABS, licensingTabFrom, licensingTabLabel, type LicensingTab } from "./licensingTabs";
 import { KV, QueryGate, Stat, useAction } from "../adminKit";
 import a from "../admin.module.css";
@@ -79,6 +78,8 @@ interface LicenseRow {
 }
 
 const VERIFICATION_SORT = { key: "at", dir: "desc" } as const;
+const VERIFICATIONS_KEY = ["admin", "license-verifications"] as const;
+const REFUSED = { ok: "false" };
 
 const stateTone = (s: Status["state"]) =>
   s === "valid" ? "ok" : s === "grace" ? "warn" : s === "absent" ? "neutral" : "danger";
@@ -98,14 +99,16 @@ export default function LicensingPage() {
   // ADR-0226: the verification trail is a DataList under this key; a check or an install refreshes it
   const qc = useQueryClient();
   const checks = { refetch: () => qc.invalidateQueries({ queryKey: ["admin", "license-verifications"] }) };
-  // the History tab's label counts refused verifications: the same read (and cache entry) as the trail preview's count
-  const refused = useQuery({
-    queryKey: ["admin", "license-verifications", "preview-count", { ok: "false" }],
-    queryFn: () =>
-      api
-        .get<unknown>(pageUrl("/v1/licenses/verifications", { limit: 10, sort: VERIFICATION_SORT, filters: { ok: "false" }, count: "exact" }))
-        .then((b) => normalisePage<VerificationRow>(b, "verifications")),
-  });
+  // the History tab's label counts refused verifications: the trail preview's own count read (and cache entry)
+  const refused = useQuery(
+    previewCountQuery<VerificationRow>({
+      endpoint: "/v1/licenses/verifications",
+      legacyKey: "verifications",
+      queryKey: VERIFICATIONS_KEY,
+      sort: VERIFICATION_SORT,
+      filters: REFUSED,
+    }),
+  );
   // the tab lives in ?tab=, so the trail's breadcrumb (and the failure line) can open History directly
   const [params, setParams] = useSearchParams();
   const tab = licensingTabFrom(params.get("tab"));
@@ -185,7 +188,7 @@ export default function LicensingPage() {
             onChange={(id) => setTab(id as LicensingTab)}
           />
           {/* every panel stays mounted (hidden when not selected), so a pasted artifact survives a tab switch */}
-          <LicensingPanel id="classes" tab={tab}>
+          <TabPanel idPrefix="licensing" id="classes" active={tab}><div className={v.stack}>
             <Card title="What still works, and what does not" info={s?.posture ? <p>{s.posture}</p> : undefined}>
               {s && (
                 <Table
@@ -244,9 +247,9 @@ export default function LicensingPage() {
                 />
               )}
             </Card>
-          </LicensingPanel>
+          </div></TabPanel>
 
-          <LicensingPanel id="seats" tab={tab}>
+          <TabPanel idPrefix="licensing" id="seats" active={tab}><div className={v.stack}>
             <Card
               title="Seats"
               info={
@@ -285,9 +288,9 @@ export default function LicensingPage() {
                 </>
               )}
             </Card>
-          </LicensingPanel>
+          </div></TabPanel>
 
-          <LicensingPanel id="features" tab={tab}>
+          <TabPanel idPrefix="licensing" id="features" active={tab}><div className={v.stack}>
             <Card
               title="Tier features"
               info={
@@ -314,9 +317,9 @@ export default function LicensingPage() {
                 />
               )}
             </Card>
-          </LicensingPanel>
+          </div></TabPanel>
 
-          <LicensingPanel id="install" tab={tab}>
+          <TabPanel idPrefix="licensing" id="install" active={tab}><div className={v.stack}>
             <Card
               title="Install a licence"
               info={
@@ -385,9 +388,9 @@ export default function LicensingPage() {
                 <div className={v.faint}>{s?.note}</div>
               </div>
             </Card>
-          </LicensingPanel>
+          </div></TabPanel>
 
-          <LicensingPanel id="history" tab={tab}>
+          <TabPanel idPrefix="licensing" id="history" active={tab}><div className={v.stack}>
             <Card title="Installed licences">
               {(history.data?.licenses.length ?? 0) === 0 ? (
                 <EmptyState title="No licence has ever been installed" body="The history is append-only: installing a new licence supersedes the previous one and deletes nothing." />
@@ -419,28 +422,17 @@ export default function LicensingPage() {
               noun="verifications"
               endpoint="/v1/licenses/verifications"
               legacyKey="verifications"
-              queryKey={["admin", "license-verifications"]}
+              queryKey={VERIFICATIONS_KEY}
               sort={VERIFICATION_SORT}
-              attention={[{ label: "refused", filters: { ok: "false" } }]}
+              attention={[{ label: "refused", filters: REFUSED }]}
               columns={VERIFICATION_COLUMNS}
               rowKey={(c) => c.id}
               viewAll="/admin/licensing/verifications"
               empty={VERIFICATIONS_EMPTY}
             />
-          </LicensingPanel>
+          </div></TabPanel>
         </QueryGate>
       </div>
     </>
-  );
-}
-
-function LicensingPanel(props: { id: LicensingTab; tab: LicensingTab; children: ReactNode }) {
-  const ids = tabIds("licensing", props.id);
-  const shown = props.tab === props.id;
-  return (
-    // the stack's display would otherwise override the hidden attribute
-    <div role="tabpanel" id={ids.panel} aria-labelledby={ids.tab} hidden={!shown} className={shown ? v.stack : undefined}>
-      {props.children}
-    </div>
   );
 }
