@@ -10,7 +10,8 @@
 --    `browser_extension` (ADR-0195 SD4b's endpoint-agent pattern: S6 key binding, S7 DPoP-bound self tokens), so
 --    `workload_identities`' kind and subject CHECKs are widened here, as 0207 did. Revoked, never deleted.
 -- 5. `browser_events`, `browser_prompt_captures`: APPEND-ONLY EVIDENCE. One guard function refuses UPDATE and DELETE,
---    and a statement trigger refuses TRUNCATE (the 0185 pattern). Retention for both is a recorded follow-up.
+--    and a statement trigger refuses TRUNCATE (the 0185 pattern). The one UPDATE admitted besides a deleted user's
+--    SET NULL is the data-key re-encryption walk rewriting a capture's ciphertext. Retention is a recorded follow-up.
 --
 -- One new function, pinned to `search_path = pg_catalog, public, pg_temp` (0185). Single-tenant deployment: like the
 -- other register tables (0281) there is no tenant column; 0272's default privileges grant the app role.
@@ -158,6 +159,13 @@ BEGIN
   -- the one change admitted: a deleted user's ON DELETE SET NULL (an RI action, so a nested trigger), and nothing else
   IF TG_OP = 'UPDATE' AND pg_trigger_depth() > 1 AND OLD.user_id IS NOT NULL AND NEW.user_id IS NULL
      AND (to_jsonb(NEW) - 'user_id') = (to_jsonb(OLD) - 'user_id') THEN
+    RETURN NEW;
+  END IF;
+  -- the data-key re-encryption walk (the 0142 `regulait.secret_reencrypt` setting) rewrites a captured prompt's
+  -- ciphertext under the new key, and nothing else in the row
+  IF TG_OP = 'UPDATE' AND TG_TABLE_NAME = 'browser_prompt_captures'
+     AND coalesce(current_setting('regulait.secret_reencrypt', true), '') = 'on'
+     AND (to_jsonb(NEW) - 'text_ciphertext') = (to_jsonb(OLD) - 'text_ciphertext') THEN
     RETURN NEW;
   END IF;
   RAISE EXCEPTION '% rows are append-only browser governance evidence (ADR-0334)', TG_TABLE_NAME USING ERRCODE = 'check_violation';

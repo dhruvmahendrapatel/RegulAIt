@@ -295,6 +295,15 @@ describe("ADR-0334 enrolment and proofs", () => {
     const read = await app.inject({ method: "GET", url: `/v1/browser-governance/prompt-captures/${row!.id}`, ...(await steppedUp("pseudonym_reveal", { op: "browser_prompt_capture_read", captureId: row!.id })) });
     expect(read.statusCode, read.body).toBe(200);
     expect(read.json().text).toBe(text);
+    // the data-key re-encryption walk may rewrite the ciphertext, and only the ciphertext
+    const reenc = (set: ReturnType<typeof sql>) =>
+      refusal(db.transaction(async (tx) => {
+        await tx.execute(sql`select set_config('regulait.secret_reencrypt', 'on', true)`);
+        await tx.execute(sql`update browser_prompt_captures set ${set} where id = ${row!.id}`);
+      }));
+    await expect(reenc(sql`text_ciphertext = text_ciphertext || ''`)).resolves.toBe("");
+    await expect(reenc(sql`site_id = 'ep-poe-web', text_chars = 1`)).resolves.toMatch(/append-only/);
+    await expect(refusal(db.update(browserPromptCaptures).set({ textChars: 1 }).where(eq(browserPromptCaptures.id, row!.id)))).resolves.toMatch(/append-only/);
   });
 
   it("a revoked device is refused from then on", async () => {

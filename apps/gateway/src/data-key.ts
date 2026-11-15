@@ -303,6 +303,7 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   { table: "supplier_submissions", column: "file_ciphertext", what: "supplier evidence files" },
   // ADR-0219 (migration 0253): the static credential an admin attached to a remote A2A agent (sent, never returned)
   { table: "a2a_agent_credentials", column: "secret_ciphertext", what: "remote A2A agent credentials" },
+  { table: "browser_prompt_captures", column: "text_ciphertext", what: "prompts captured in the browser while an admin has prompt capture on (ADR-0334)" },
 ];
 
 export interface CiphertextProbe {
