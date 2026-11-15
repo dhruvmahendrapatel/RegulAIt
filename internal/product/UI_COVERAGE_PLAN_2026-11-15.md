@@ -32,10 +32,10 @@ Each count is read from the PR's own `KNOWN_UI_GAPS` diff.
 
 | Lane | PR | Routes it adds to `KNOWN_UI_GAPS` | Pilot beat | Screen by |
 |---|---|---|---|---|
-| E2, cost per outcome (ADR-0312) | #848 | 7: `GET /v1/cost-outcomes`, `GET /v1/cost-outcomes/summary`, `POST /v1/cost-outcomes/refresh`; and per-user budgets `GET /v1/user-spend-budgets`, `GET`/`PUT`/`DELETE /v1/users/:userId/spend-budget` | Cost per outcome; cost per user and budget alerts | **UI-D**: D2 takes the 3 outcome routes, D3 the 4 user-budget routes. Both build against #848 and land after it. |
-| E1, managed settings (ADR-0310) | #850 | 3: `POST /v1/managed-settings/bundles`, `GET /v1/managed-settings/bundles`, `GET /v1/managed-settings/bundles/:id/archive` | Coding-tool policy: managed-settings export | **UI-D**: D1 builds against #850 and lands after it |
-| E3, agent registry import (ADR-0314) | #855 | 3: `GET /v1/agent-registry/records`, `GET /v1/agent-registry/records/:recordId`, `POST /v1/agent-registry/records/:recordId/import` | Discovery: agents found in a registry, imported into the inventory | **UI-D**: D5 builds against #855 and lands after it |
-| L6, PM importer (ADR-0289) | #828 | 2: `POST /v1/onboarding/imports/pm`, `GET /v1/onboarding/imports/pm/items` | Onboarding for the Azure DevOps workflow (bringing existing Boards items in); not a demo beat | **UI-D**: D8, after the pilot slices, against #828 |
+| E2, cost per outcome (ADR in #848) | #848 | 7: `GET /v1/cost-outcomes`, `GET /v1/cost-outcomes/summary`, `POST /v1/cost-outcomes/refresh`; and per-user budgets `GET /v1/user-spend-budgets`, `GET`/`PUT`/`DELETE /v1/users/:userId/spend-budget` | Cost per outcome; cost per user and budget alerts | **UI-D**: D2 takes the 3 outcome routes, D3 the 4 user-budget routes. Both build against #848 and land after it. |
+| E1, managed settings (ADR in #850) | #850 | 3: `POST /v1/managed-settings/bundles`, `GET /v1/managed-settings/bundles`, `GET /v1/managed-settings/bundles/:id/archive` | Coding-tool policy: managed-settings export | **UI-D**: D1 builds against #850 and lands after it |
+| E3, agent registry import (ADR in #855) | #855 | 3: `GET /v1/agent-registry/records`, `GET /v1/agent-registry/records/:recordId`, `POST /v1/agent-registry/records/:recordId/import` | Discovery: agents found in a registry, imported into the inventory | **UI-D**: D5 builds against #855 and lands after it |
+| L6, PM importer (ADR in #828) | #828 | 2: `POST /v1/onboarding/imports/pm`, `GET /v1/onboarding/imports/pm/items` | Onboarding for the Azure DevOps workflow (bringing existing Boards items in); not a demo beat | **UI-D**: D8, after the pilot slices, against #828 |
 | E7, vendor usage connectors (ADR-0322) | #845 | none yet (ADR only, slice 1) | Cost across tools (seat tools and vendor APIs) | **UI-D**, once E7 opens a routes slice |
 
 **Not built anywhere yet:** managed-settings *drift*, meaning intended settings compared with what an endpoint reports.
