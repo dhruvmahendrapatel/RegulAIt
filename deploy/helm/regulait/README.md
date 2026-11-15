@@ -16,6 +16,24 @@ operator in [`deploy/operator`](../../operator/README.md) is the declarative pat
 | Service, ServiceAccount | ClusterIP on 3000. The ServiceAccount does not mount a token. |
 | PersistentVolumeClaim | Holds `/app/install-secrets` and `/app/audit-anchors`. It carries `helm.sh/resource-policy: keep`, because losing it loses the receipt and identity signing keys. |
 
+## Get the chart (ADR-0305)
+
+The chart is published as a signed OCI artifact. Verify the signature before installing:
+
+```sh
+cosign verify ghcr.io/<owner>/charts/regulait@sha256:<digest> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity https://github.com/<owner>/<repo>/.github/workflows/helm-chart.yml@refs/heads/main
+helm install regulait oci://ghcr.io/<owner>/charts/regulait --version <chart version> -n regulait -f my-values.yaml
+```
+
+Pin by digest, not by version, in anything automated. The signature is CI keyless signing (Sigstore, the workflow's
+GitHub OIDC identity) until the release-key ceremony replaces it; the ceremony's key will then sign the same digest.
+
+An air-gapped site does not pull from a registry: the chart and the operator's CRD, Role and manager manifests are in
+the signed update bundle (`payload/deploy/helm`, `payload/deploy/operator/config`), covered by the bundle's
+release-key signature. Verify the bundle with `scripts/verify-update-bundle.sh`, then install from the extracted path.
+
 ## Install
 
 ```sh

@@ -19,8 +19,10 @@ data key, database URL and bootstrap token, the backup policy, and the egress po
    can add key ids but never replace a compiled-in one. The rules match
    `scripts/verify-update-bundle.sh`: schema, product, key id shape, signature, `version == spec.version`, no downgrade,
    and `minInstalledVersion`. An unverified version is never rolled out.
-3. It applies the ServiceAccount (no token), the Service, three NetworkPolicies (a namespace-wide deny-all baseline;
-   the gateway's; and one for the migration Job and backup pods, which reach only DNS and the database), the install-secrets claim
+3. It applies the ServiceAccounts (the gateway's and the backup CronJob's own, neither with a token), the Service, four
+   NetworkPolicies (a namespace-wide deny-all baseline; the gateway's; one for the migration Job and backup pods, which
+   reach only DNS and the database; and the backup pods' object-store policy, which opens nothing without
+   `backup.s3`), the install-secrets claim
    (never owned, so deleting the CR keeps the keys) and the backup CronJob. A changed owned object is put back, counted
    in `status.driftCorrections` and reported with a `DriftCorrected` event.
 4. It runs `node apps/gateway/dist/migrate-job.js` as a Job from the new image. The Deployment moves to that image only
@@ -73,11 +75,44 @@ verification with the same compiled-in keyring and no network. The Helm chart's 
 container, so a plain-Helm install refuses an unsigned or downgraded version too. Exit codes: 0 verified, 1 refused,
 2 usage.
 
+## Backups to S3 in the customer's account (ADR-0305)
+
+`spec.backup.s3` sends each dump to a bucket in the customer's own AWS account instead of a claim:
+
+```yaml
+backup:
+  image: { repository: registry.internal.example/postgres, digest: "sha256:…" }   # pg_dump
+  s3:
+    bucket: example-regulait-backups
+    region: eu-west-1
+    prefix: regulait/
+    kmsKeyARN: arn:aws:kms:eu-west-1:111122223333:key/…      # customer-managed key; SSE-KMS on every object
+    expectedBucketOwner: "111122223333"                       # an upload to anyone else's bucket fails
+    uploaderImage: { repository: registry.internal.example/aws-cli, digest: "sha256:…" }
+    roleARN: arn:aws:iam::111122223333:role/regulait-backup   # IRSA; omit with EKS Pod Identity
+    podIdentity: false
+    egressCIDRs: [10.20.30.0/24]                              # the S3 and STS VPC endpoints, 443 only
+```
+
+- `pg_dump` runs as an init container into a pod-local `emptyDir`; the uploader (`aws s3 cp --sse aws:kms
+  --sse-kms-key-id … --expected-bucket-owner …`) never sees the database URL. No AWS key is in the spec or a Secret:
+  the pod runs as `<name>-backup`, and its credentials come from IRSA (`roleARN` becomes the
+  `eks.amazonaws.com/role-arn` annotation) or an EKS Pod Identity association on that ServiceAccount.
+- The role needs `s3:PutObject` on `arn:aws:s3:::<bucket>/<prefix>*` and `kms:GenerateDataKey` on the key. It needs no
+  read, list or delete: a compromised pod cannot read or remove earlier backups.
+- Versioning, retention and lifecycle are the bucket's own rules (the BYOC Terraform module sets them);
+  `retentionDays` applies to a claim only.
+- `egressCIDRs` follow the other egress lists: no link-local or metadata address, private ranges only in `air_gapped`,
+  and a public range is reported by `PublicEgress`. `podIdentity: true` opens TCP 80 to the Pod Identity agent
+  (169.254.170.23, fd00:ec2::23) for the backup pods only, and is reported by `PublicEgress` on every reconcile.
+- The CRD refuses a claim and a bucket together.
+
 ## At rest
 
 The install-secrets claim holds signing keys unencrypted, and the backup claim holds `pg_dump` output in which only
 the data-key-encrypted columns are ciphertext (ADR-0035). Name an encrypted StorageClass for both
-(`spec.installSecretsStorageClassName`, and the class of the backup claim you create).
+(`spec.installSecretsStorageClassName`, and the class of the backup claim you create). With `backup.s3` the dump is
+on the pod's `emptyDir` only until the upload ends, and SSE-KMS with the customer's key encrypts it in the bucket.
 
 ## Develop
 

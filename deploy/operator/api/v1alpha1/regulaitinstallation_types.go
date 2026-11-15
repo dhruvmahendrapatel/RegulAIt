@@ -59,7 +59,9 @@ type UpdateBundleSpec struct {
 }
 
 // BackupSpec is the backup policy. Without a destination the installation is not Ready, unless backup is disabled
-// explicitly, which the operator reports on every reconcile.
+// explicitly, which the operator reports on every reconcile. The destination is a PersistentVolumeClaim or an S3 bucket
+// in the customer's own AWS account (ADR-0305), never both.
+// +kubebuilder:validation:XValidation:rule="!(has(self.destinationClaimName) && has(self.s3))",message="set backup.destinationClaimName or backup.s3, not both"
 type BackupSpec struct {
 	// +kubebuilder:default="17 2 * * *"
 	// +kubebuilder:validation:MaxLength=64
@@ -70,15 +72,60 @@ type BackupSpec struct {
 	// +kubebuilder:validation:Maximum=3650
 	// +optional
 	RetentionDays int32 `json:"retentionDays,omitempty"`
-	// PersistentVolumeClaim that receives the dumps.
+	// PersistentVolumeClaim that receives the dumps. retentionDays prunes it.
 	// +optional
 	DestinationClaimName string `json:"destinationClaimName,omitempty"`
+	// S3 bucket in the customer's AWS account that receives the dumps (ADR-0305). Retention and versioning are the
+	// bucket's own versioning and lifecycle rules; retentionDays does not apply.
+	// +optional
+	S3 *S3BackupDestination `json:"s3,omitempty"`
 	// Image that provides pg_dump, pinned by digest. Required when a destination is set.
 	// +optional
 	Image *ImageSpec `json:"image,omitempty"`
 	// Turns backup off. Recorded as a Warning event and a condition on every reconcile.
 	// +optional
 	Disabled bool `json:"disabled,omitempty"`
+}
+
+// S3BackupDestination uploads each dump with SSE-KMS under the customer's key, and refuses a bucket owned by another
+// account (--expected-bucket-owner). Credentials come from the pod's AWS identity (IRSA or EKS Pod Identity), never from
+// a key in the spec or a Secret. The CronJob needs s3:PutObject on the prefix and kms:GenerateDataKey on the key.
+type S3BackupDestination struct {
+	// +kubebuilder:validation:Pattern=`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`
+	Bucket string `json:"bucket"`
+	// +kubebuilder:validation:Pattern=`^[a-z]{2}(-[a-z]+)+-[0-9]+$`
+	// +kubebuilder:validation:MaxLength=32
+	Region string `json:"region"`
+	// Key prefix, for example `regulait/prod-eu/`. Empty puts dumps at the bucket root.
+	// +kubebuilder:validation:Pattern=`^([A-Za-z0-9!_.*'()-]+/)*$`
+	// +kubebuilder:validation:MaxLength=256
+	// +optional
+	Prefix string `json:"prefix,omitempty"`
+	// Customer-managed KMS key the dumps are encrypted with (SSE-KMS). A key ARN or an alias ARN.
+	// +kubebuilder:validation:Pattern=`^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:(key|alias)/[A-Za-z0-9/_-]+$`
+	// +kubebuilder:validation:MaxLength=2048
+	KMSKeyARN string `json:"kmsKeyARN"`
+	// The 12-digit account that must own the bucket. An upload to a bucket owned by anyone else fails.
+	// +kubebuilder:validation:Pattern=`^[0-9]{12}$`
+	ExpectedBucketOwner string `json:"expectedBucketOwner"`
+	// Image that provides the AWS CLI, pinned by digest, from the same allowed registries as the other images.
+	UploaderImage ImageSpec `json:"uploaderImage"`
+	// IAM role for IRSA: set as the eks.amazonaws.com/role-arn annotation on the backup ServiceAccount. Leave empty
+	// with EKS Pod Identity, whose association names the ServiceAccount instead.
+	// +kubebuilder:validation:Pattern=`^arn:aws[a-z-]*:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]+$`
+	// +kubebuilder:validation:MaxLength=2048
+	// +optional
+	RoleARN string `json:"roleARN,omitempty"`
+	// Opens TCP 80 to the EKS Pod Identity agent (169.254.170.23) for the backup pods only. Every other egress list
+	// refuses link-local addresses; this exception is reported on every reconcile.
+	// +optional
+	PodIdentity bool `json:"podIdentity,omitempty"`
+	// CIDRs of the S3 and STS endpoints (VPC interface endpoints, or the published S3 ranges), opened on 443 for the
+	// backup pods only. In air_gapped mode every entry must be a private range.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=32
+	// +listType=set
+	EgressCIDRs []string `json:"egressCIDRs"`
 }
 
 // EgressSpec is the egress posture. The NetworkPolicy is always default-deny; these fields only open holes.

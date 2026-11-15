@@ -189,9 +189,11 @@ touches a cloud account.
 2. **API group domain.** `deploy.regulait.ai` follows the domain used elsewhere in the repo; renaming after customers
    install it means a CRD migration.
 3. **Backup target.** The CronJob writes `pg_dump` output to a PVC. ADR-0035's S3 target, and a customer's own object
-   store, need a credential story that belongs with P2.
+   store, need a credential story that belongs with P2. **Closed by [ADR-0305](0305-helm-oci-distribution-and-s3-backups.md)
+   (2026-11-15): S3 in the customer's account, credentials from IRSA or EKS Pod Identity.**
 4. **Distribution.** Where the operator image and the chart are published (ghcr OCI, a bundle payload, both) is a
-   release decision and is not built here.
+   release decision and is not built here. **Closed by [ADR-0305](0305-helm-oci-distribution-and-s3-backups.md) for the
+   chart (2026-11-15): both, a signed OCI artifact and the bundle payload.** The operator image's publication stays open.
 
 ## Consequences
 

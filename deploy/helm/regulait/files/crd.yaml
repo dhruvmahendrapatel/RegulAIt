@@ -58,10 +58,12 @@ spec:
               backup:
                 description: |-
                   BackupSpec is the backup policy. Without a destination the installation is not Ready, unless backup is disabled
-                  explicitly, which the operator reports on every reconcile.
+                  explicitly, which the operator reports on every reconcile. The destination is a PersistentVolumeClaim or an S3 bucket
+                  in the customer's own AWS account (ADR-0305), never both.
                 properties:
                   destinationClaimName:
-                    description: PersistentVolumeClaim that receives the dumps.
+                    description: PersistentVolumeClaim that receives the dumps. retentionDays
+                      prunes it.
                     type: string
                   disabled:
                     description: Turns backup off. Recorded as a Warning event and
@@ -98,11 +100,98 @@ spec:
                     maximum: 3650
                     minimum: 1
                     type: integer
+                  s3:
+                    description: |-
+                      S3 bucket in the customer's AWS account that receives the dumps (ADR-0305). Retention and versioning are the
+                      bucket's own versioning and lifecycle rules; retentionDays does not apply.
+                    properties:
+                      bucket:
+                        pattern: ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$
+                        type: string
+                      egressCIDRs:
+                        description: |-
+                          CIDRs of the S3 and STS endpoints (VPC interface endpoints, or the published S3 ranges), opened on 443 for the
+                          backup pods only. In air_gapped mode every entry must be a private range.
+                        items:
+                          type: string
+                        maxItems: 32
+                        minItems: 1
+                        type: array
+                        x-kubernetes-list-type: set
+                      expectedBucketOwner:
+                        description: The 12-digit account that must own the bucket.
+                          An upload to a bucket owned by anyone else fails.
+                        pattern: ^[0-9]{12}$
+                        type: string
+                      kmsKeyARN:
+                        description: Customer-managed KMS key the dumps are encrypted
+                          with (SSE-KMS). A key ARN or an alias ARN.
+                        maxLength: 2048
+                        pattern: ^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:(key|alias)/[A-Za-z0-9/_-]+$
+                        type: string
+                      podIdentity:
+                        description: |-
+                          Opens TCP 80 to the EKS Pod Identity agent (169.254.170.23) for the backup pods only. Every other egress list
+                          refuses link-local addresses; this exception is reported on every reconcile.
+                        type: boolean
+                      prefix:
+                        description: Key prefix, for example `regulait/prod-eu/`.
+                          Empty puts dumps at the bucket root.
+                        maxLength: 256
+                        pattern: ^([A-Za-z0-9!_.*'()-]+/)*$
+                        type: string
+                      region:
+                        maxLength: 32
+                        pattern: ^[a-z]{2}(-[a-z]+)+-[0-9]+$
+                        type: string
+                      roleARN:
+                        description: |-
+                          IAM role for IRSA: set as the eks.amazonaws.com/role-arn annotation on the backup ServiceAccount. Leave empty
+                          with EKS Pod Identity, whose association names the ServiceAccount instead.
+                        maxLength: 2048
+                        pattern: ^arn:aws[a-z-]*:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]+$
+                        type: string
+                      uploaderImage:
+                        description: Image that provides the AWS CLI, pinned by digest,
+                          from the same allowed registries as the other images.
+                        properties:
+                          allowedRegistries:
+                            description: Registry hosts the repository may live in.
+                              Required in air_gapped mode.
+                            items:
+                              type: string
+                            maxItems: 16
+                            type: array
+                            x-kubernetes-list-type: set
+                          digest:
+                            pattern: ^sha256:[0-9a-f]{64}$
+                            type: string
+                          repository:
+                            description: Repository without tag or digest, for example
+                              `registry.internal.example/regulait/gateway`.
+                            maxLength: 255
+                            pattern: ^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)+$
+                            type: string
+                        required:
+                        - digest
+                        - repository
+                        type: object
+                    required:
+                    - bucket
+                    - egressCIDRs
+                    - expectedBucketOwner
+                    - kmsKeyARN
+                    - region
+                    - uploaderImage
+                    type: object
                   schedule:
                     default: 17 2 * * *
                     maxLength: 64
                     type: string
                 type: object
+                x-kubernetes-validations:
+                - message: set backup.destinationClaimName or backup.s3, not both
+                  rule: '!(has(self.destinationClaimName) && has(self.s3))'
               bootstrapTokenSecretRef:
                 description: |-
                   SecretKeyRef names one key of a Secret in the installation's namespace. Only the name is ever in the spec: the

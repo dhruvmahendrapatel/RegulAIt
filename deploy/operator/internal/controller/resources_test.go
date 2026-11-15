@@ -23,9 +23,10 @@ func sample() *v1alpha1.RegulaitInstallation {
 func TestEveryPodIsRestricted(t *testing.T) {
 	in := sample()
 	pods := map[string]corev1.PodSpec{
-		"gateway": Deployment(in, imageRef(in.Spec.Image)).Spec.Template.Spec,
-		"migrate": MigrateJob(in).Spec.Template.Spec,
-		"backup":  BackupCronJob(in).Spec.JobTemplate.Spec.Template.Spec,
+		"gateway":   Deployment(in, imageRef(in.Spec.Image)).Spec.Template.Spec,
+		"migrate":   MigrateJob(in).Spec.Template.Spec,
+		"backup":    BackupCronJob(in).Spec.JobTemplate.Spec.Template.Spec,
+		"backup-s3": BackupCronJob(withS3(sample())).Spec.JobTemplate.Spec.Template.Spec,
 	}
 	for name, p := range pods {
 		if p.SecurityContext == nil || p.SecurityContext.RunAsNonRoot == nil || !*p.SecurityContext.RunAsNonRoot {
@@ -34,7 +35,7 @@ func TestEveryPodIsRestricted(t *testing.T) {
 		if p.AutomountServiceAccountToken == nil || *p.AutomountServiceAccountToken {
 			t.Errorf("%s: service account token is mounted", name)
 		}
-		for _, c := range p.Containers {
+		for _, c := range append(append([]corev1.Container{}, p.InitContainers...), p.Containers...) {
 			sc := c.SecurityContext
 			if sc == nil || !*sc.ReadOnlyRootFilesystem || *sc.AllowPrivilegeEscalation || *sc.Privileged || len(sc.Capabilities.Drop) != 1 || sc.Capabilities.Drop[0] != "ALL" || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
 				t.Errorf("%s/%s: container security context is not restricted: %+v", name, c.Name, sc)
@@ -59,8 +60,11 @@ func TestEveryPodIsRestricted(t *testing.T) {
 func TestNetworkPoliciesPerWorkload(t *testing.T) {
 	in := sample()
 	nps := NetworkPolicies(in)
-	if len(nps) != 3 {
-		t.Fatalf("want baseline, gateway and database-clients policies, got %d", len(nps))
+	if len(nps) != 4 {
+		t.Fatalf("want baseline, gateway, database-clients and backup-object-store policies, got %d", len(nps))
+	}
+	if obj := nps[3]; len(obj.Spec.Egress) != 0 || len(obj.Spec.Ingress) != 0 {
+		t.Fatalf("without backup.s3 the backup-object-store policy must open nothing: %+v", obj.Spec)
 	}
 	base, gw, db := nps[0], nps[1], nps[2]
 	if len(base.Spec.PodSelector.MatchLabels) != 0 || len(base.Spec.PodSelector.MatchExpressions) != 0 || len(base.Spec.Ingress) != 0 || len(base.Spec.Egress) != 0 || len(base.Spec.PolicyTypes) != 2 {
@@ -181,6 +185,22 @@ func TestValidate(t *testing.T) {
 		}, "PublicEgressRefused"},
 		{"non-canonical cidr", func(in *v1alpha1.RegulaitInstallation) { in.Spec.Egress.AllowedCIDRs = []string{"10.1.2.3/8"} }, "InvalidCIDR"},
 		{"backup without image", func(in *v1alpha1.RegulaitInstallation) { in.Spec.Backup.Image = nil }, "BackupImageMissing"},
+		{"s3 backup", func(in *v1alpha1.RegulaitInstallation) { withS3(in) }, ""},
+		{"s3 and claim together", func(in *v1alpha1.RegulaitInstallation) { withS3(in).Spec.Backup.DestinationClaimName = "b" }, "BackupDestinationConflict"},
+		{"s3 without pg_dump image", func(in *v1alpha1.RegulaitInstallation) { withS3(in).Spec.Backup.Image = nil }, "BackupImageMissing"},
+		{"s3 without egress", func(in *v1alpha1.RegulaitInstallation) { withS3(in).Spec.Backup.S3.EgressCIDRs = nil }, "BackupEgressMissing"},
+		{"s3 egress to metadata", func(in *v1alpha1.RegulaitInstallation) {
+			withS3(in).Spec.Backup.S3.EgressCIDRs = []string{"169.254.170.23/32"}
+		}, "MetadataEgressRefused"},
+		{"s3 public egress in air_gapped", func(in *v1alpha1.RegulaitInstallation) {
+			in.Spec.Mode = v1alpha1.ModeAirGapped
+			in.Spec.Image.AllowedRegistries = []string{"registry.example.internal"}
+			withS3(in).Spec.Backup.S3.EgressCIDRs = []string{"52.92.0.0/17"}
+		}, "PublicEgressRefused"},
+		{"uploader image outside allowed registries", func(in *v1alpha1.RegulaitInstallation) {
+			in.Spec.Image.AllowedRegistries = []string{"registry.example.internal"}
+			withS3(in).Spec.Backup.S3.UploaderImage.Repository = "public.ecr.aws/aws-cli/aws-cli"
+		}, "RegistryNotAllowed"},
 		{"backup image outside allowed registries", func(in *v1alpha1.RegulaitInstallation) {
 			in.Spec.Image.AllowedRegistries = []string{"registry.example.internal"}
 			in.Spec.Backup.Image.Repository = "docker.io/library/postgres"
@@ -230,5 +250,79 @@ func TestConditionMessagesAreBounded(t *testing.T) {
 	}
 	if truncateMessage("short") != "short" {
 		t.Fatal("a short message must be unchanged")
+	}
+}
+
+// withS3 turns the sample's claim destination into an S3 destination in a VPC endpoint range.
+func withS3(in *v1alpha1.RegulaitInstallation) *v1alpha1.RegulaitInstallation {
+	in.Spec.Backup.DestinationClaimName = ""
+	in.Spec.Backup.S3 = &v1alpha1.S3BackupDestination{
+		Bucket:              "customer-regulait-backups",
+		Region:              "eu-west-1",
+		Prefix:              "regulait/",
+		KMSKeyARN:           "arn:aws:kms:eu-west-1:111122223333:key/00000000-0000-0000-0000-000000000000",
+		ExpectedBucketOwner: "111122223333",
+		UploaderImage:       v1alpha1.ImageSpec{Repository: "registry.example.internal/aws-cli", Digest: digest('c')},
+		EgressCIDRs:         []string{"10.20.30.0/24"},
+	}
+	return in
+}
+
+// The S3 path: pg_dump (with the database URL) runs as an init container into a pod-local volume; the uploader has no
+// database URL, encrypts with the customer's key and pins the bucket owner; the pod runs as its own ServiceAccount.
+func TestBackupToS3(t *testing.T) {
+	in := withS3(sample())
+	in.Spec.Backup.S3.RoleARN = "arn:aws:iam::111122223333:role/regulait-backup"
+	p := BackupCronJob(in).Spec.JobTemplate.Spec.Template.Spec
+	if p.ServiceAccountName != "unit-backup" || len(p.InitContainers) != 1 || len(p.Containers) != 1 {
+		t.Fatalf("pod shape: sa=%q init=%d containers=%d", p.ServiceAccountName, len(p.InitContainers), len(p.Containers))
+	}
+	up := p.Containers[0]
+	cmd := strings.Join(up.Command, " ")
+	for _, want := range []string{"--sse aws:kms", "--sse-kms-key-id \"$SSE_KMS_ARN\"", "--expected-bucket-owner \"$EXPECTED_BUCKET_OWNER\""} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("uploader command lacks %s: %s", want, cmd)
+		}
+	}
+	env := map[string]string{}
+	for _, e := range up.Env {
+		if e.ValueFrom != nil {
+			t.Errorf("uploader reads %s from a Secret; it must hold no secret", e.Name)
+		}
+		env[e.Name] = e.Value
+	}
+	if env["SSE_KMS_ARN"] != in.Spec.Backup.S3.KMSKeyARN || env["EXPECTED_BUCKET_OWNER"] != "111122223333" || env["HOME"] != "/tmp" || env["AWS_EC2_METADATA_DISABLED"] != "true" {
+		t.Errorf("uploader env: %v", env)
+	}
+	for _, v := range p.Volumes {
+		if v.Name == "backup" && (v.EmptyDir == nil || v.PersistentVolumeClaim != nil) {
+			t.Errorf("the S3 path stages the dump in an emptyDir: %+v", v)
+		}
+	}
+	if sa := BackupServiceAccount(in); sa.Annotations[IRSARoleAnnotation] != in.Spec.Backup.S3.RoleARN || *sa.AutomountServiceAccountToken {
+		t.Errorf("backup ServiceAccount: %+v", sa)
+	}
+	if sa := BackupServiceAccount(sample()); len(sa.Annotations) != 0 {
+		t.Errorf("no S3, no role annotation: %v", sa.Annotations)
+	}
+
+	np := BackupObjectStorePolicy(in)
+	if np.Spec.PodSelector.MatchLabels["app.kubernetes.io/component"] != "backup" || len(np.Spec.Egress) != 1 || np.Spec.Egress[0].To[0].IPBlock.CIDR != "10.20.30.0/24" || np.Spec.Egress[0].Ports[0].Port.IntValue() != 443 {
+		t.Fatalf("object-store policy: %+v", np.Spec)
+	}
+	if got := PublicEgress(in); len(got) != 0 {
+		t.Fatalf("a private VPC endpoint is not public egress: %v", got)
+	}
+	in.Spec.Backup.S3.PodIdentity = true
+	np = BackupObjectStorePolicy(in)
+	if len(np.Spec.Egress) != 2 || np.Spec.Egress[1].To[0].IPBlock.CIDR != "169.254.170.23/32" || np.Spec.Egress[1].Ports[0].Port.IntValue() != 80 {
+		t.Fatalf("pod identity rule: %+v", np.Spec.Egress)
+	}
+	if got := strings.Join(PublicEgress(in), "; "); !strings.Contains(got, "backup.s3.podIdentity") {
+		t.Fatalf("pod identity must be reported: %q", got)
+	}
+	in.Spec.Backup.Disabled = true
+	if np := BackupObjectStorePolicy(in); len(np.Spec.Egress) != 0 {
+		t.Fatalf("disabled backup must open nothing: %+v", np.Spec.Egress)
 	}
 }
