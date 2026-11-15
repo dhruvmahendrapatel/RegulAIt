@@ -78,6 +78,7 @@ const BILLING_KIND_LABEL: Readonly<Record<string, string>> = {
   other: "other",
 };
 import v from "../../views.module.css";
+import cc from "./costConsolidation.module.css";
 
 // ---------------------------------------------------------------------------
 // mirrors of the gateway's read projections
@@ -1341,7 +1342,7 @@ export default function CostConsolidationPage() {
                     )}
                     <p className={v.faint}>{consolidated.data?.staleness.note}</p>
                     {consolidated.data && consolidated.data.reconciliation.supersededLinesExcluded > 0 && (
-                      <p className={v.dim} data-testid="cc-reconciliation-note">
+                      <p className={`${v.dim} ${cc.inlineLinks}`} data-testid="cc-reconciliation-note">
                         {consolidated.data.reconciliation.supersededLinesExcluded} superseded duplicate line(s) are
                         excluded from the imported side above — marked by a reconciliation pass, never deleted. The
                         full list is on the{" "}

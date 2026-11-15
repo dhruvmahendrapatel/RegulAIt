@@ -353,6 +353,76 @@ Supersedes the interim in slice 2 and in "Consequences" ("approval rules on mode
   cannot be written (injected audit failure) queues nothing; six identical concurrent calls share one pending row;
   a requester named as the approver of their own call can never release it.
 
+### P-01 remainder, slice 4a: ABAC v5 actions (2026-11-14)
+
+- **Schema v5** (`packages/policy-kernel/src/abac.ts`, `SCHEMA_V5`) = v4 plus three actions, each on its own resource
+  type: `ModelInvoke` on `Model` (`provider`, `model`, `mode`), `ConnectorCall` on `Connector` (`providerKind`,
+  `operation`), `A2aMessage` on `RemoteAgent` (optional `skillId`). Every resource also carries `name`, `priceTier`,
+  optional `projectId`/`projectName`, `classifications` and optional `dataSensitivity`, so one policy about sensitive
+  data reads the same on every type. Principals and context are v4's (`User` or `Agent`; the v4 context).
+- **v1–v4 are untouched and never run for these actions.** The engine evaluates a governed call against v5 (and
+  later) policies only; their schemas do not declare the new actions. v5 policies still run for `McpToolCall`.
+- **Opt-in.** `ABAC_CURRENT_SCHEMA_VERSION` stays v4, because under v5 an unscoped `resource` may be any of four types
+  and strict validation refuses a type-specific attribute without narrowing (`action == …` or `resource is …`);
+  `validate` adds help that says so (`ABAC_V5_RESOURCE_HELP`). An author picks v5 explicitly (`schemaVersion: "v5"`
+  on the existing routes). Making v5 the default waits for the editor's action picker (#453, UI builder).
+- **Wiring.** `loadResourceRestrictions` evaluates the call's v5 action (`evaluateAbacForGovernedCall` in
+  `apps/gateway/src/abac.ts`, imported lazily: no new import cycle) concurrently with the rule loads; with no active
+  v5 policy it is one policy load and the slot is null. `composeResourceDecision` already applied ABAC in the fixed
+  order (rate limit, ABAC forbid, approval).
+- **What the core cannot know.** The request's session facts (`sessionOrigin`, `mfaCompleted`, `clientIp`) read as
+  unknown, false and absent (the strict values), and the delegation context is empty (the sponsor is evaluated as
+  `User`). Threading them from the routes is a follow-up (PENDING fragment).
+- **ABAC `require_approval` on these call types refuses** (fail closed). Their consent binds approval rules and the
+  execution dial only, so an ABAC hold could otherwise be released by a rule's approver, or queued with no consent
+  bound to the policy version. Queueing it needs the policy version in the consent's context digest, as the MCP path
+  has (follow-up).
+- **Latency** (`REGULAIT_BENCH=1`): no rules p95 2.4 ms, ten rules 4.6 ms, within the budget; the added cost with no
+  v5 policy is one concurrent policy load.
+- **Tests.** `abac-v5.test.ts` (kernel, 8): the schema, write-time refusal of a governed action under v4, the
+  narrowing help, each action decided by its own policies, v4 never running for a governed call, a shared-attribute
+  policy applying to every type, an `Agent` principal, an absent optional attribute. `zz-adr0251-abac-v5.test.ts`
+  (gateway, own scratch database): null slot with no v5 policy, a v5 `ModelInvoke` forbid refusing a real dispatch
+  for its principal only (audited, no usage row), a `ConnectorCall` forbid on writes only, and a `require_approval`
+  refusing.
+- **With hard windows (slice 3).** An ABAC `require_approval` refusal takes no rate slot: the window is counted
+  without the lock, an exhausted window still refuses as the rate limit (it comes first in the order), and otherwise
+  the call refuses as the ABAC hold.
+
+#### Review #836 (2026-11-14)
+
+1. **A v5 forbid that validates can no longer silently never fire (blocking, ADR-0180).** The governed core decides
+   below the routes, so it does not supply `principal.sessionOrigin`, `principal.mfaCompleted`, `context.clientIp`,
+   `context.actorChain`, `context.delegationDepth` or `context.rateLimitUsagePct`, and it evaluates the sponsor as
+   `User`, never an `Agent`. Strict validation of a v5 policy now refuses it when its scope can reach `ModelInvoke`,
+   `ConnectorCall` or `A2aMessage` (conservatively: an unscoped action counts unless the resource is pinned to
+   `Tool`) and it reads one of those facts or names an `Agent` principal. The list is
+   `ABAC_GOVERNED_UNSUPPLIED_FACTS` in the kernel; an entry leaves it only in the change that threads the fact
+   through `assembleGovernedAbacRequest`. The help says to scope such a policy to `McpToolCall`, where the facts are
+   known. Versions are immutable and validated at write, and v5 shipped with this branch, so no stored version predates
+   the check.
+2. **The fix commit has tests.** A read that fails (the verdict's, a sibling's, or a sibling's first and the
+   verdict's after) denies with `governed-core-error` and no unhandled rejection; removing the `.catch` fails the
+   second case. An engine error on a governed call (a v5 policy stored past validation that errors at evaluation)
+   denies as `abac-engine-error`.
+3. **The contradicting test comment is fixed**, and `require_approval` on a queueable `ConnectorCall` has its own
+   test: it refuses, and a consent passed for the call does not release it.
+4. **The fail-closed rule for ABAC holds is in the kernel.** `composeResourceDecision` refuses an ABAC
+   `require_approval` itself, after the rate limits and the ABAC forbid, before approval rules; the chain records
+   `abac-require-approval: deny`, never `satisfied-by-approval`. The gateway wrapper is gone; the hard-window path
+   already counts a refused call's window without the lock.
+5. **No duplicate assembly.** `sponsorAndProjectFacts` reads the sponsor's principal bag and the project facts once
+   for both `assembleAbacRequest` and `assembleGovernedAbacRequest`. `AbacRequest` is a union: an MCP tool request
+   carries `resource`, a governed request carries `governed` and no placeholder tool.
+6. **The unused `AbacAction` export is removed.**
+7. **A model's price tier has its own reader** (`modelPriceTierOf`, from the per-million-input-token price), apart
+   from `priceTierOf`'s per-call price. The tiers are unchanged (unpriced, free, metered).
+8. **Preview and error code.** A policy simulation of a v5 version that can reach a governed call is never reported
+   exact: its fidelity carries the caveat that the replay re-decides recorded MCP tool decisions only, so its effect
+   on model, connector and A2A calls is not previewed. An ABAC forbid or an ABAC hold on a model dispatch answers 403
+   `forbidden` (the kernel refuses the hold as a deny); only an approval-rule hold that cannot be queued answers
+   `approval_required`.
+
 ### P-01 remainder, slice 2: admin routes for the resource rules (2026-11-14)
 
 Closes review #715 finding 4 ("no admin routes yet"). `apps/gateway/src/resource-rule-routes.ts`:
