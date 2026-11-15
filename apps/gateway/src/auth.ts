@@ -4,6 +4,7 @@ import {
   randomBytes,
   scryptSync,
 } from "node:crypto";
+import { oidcEmailVerifiedVia } from "./oidc-email-verified.js";
 import { deploymentBaseUrl } from "./public-url.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
@@ -35,6 +36,7 @@ import {
   type SessionOrigin,
   webauthnChallenges,
   webauthnCredentials,
+  runWithRlsSystem,
 } from "@regulait/db";
 import {
   BROKER_IDP_VALUES,
@@ -1131,13 +1133,17 @@ export async function beginSamlTotpStepUp(
   samlProviderId: string,
 ): Promise<{ token: string; maxAgeSeconds: number }> {
   const { token, tokenHash } = generateSessionToken();
-  await db.delete(authMfaPending).where(eq(authMfaPending.userId, userId));
-  await db.insert(authMfaPending).values({
-    tokenHash,
-    userId,
-    origin: "saml",
+  // ADR-0234 batch 7a: the SAML ACS runs under `identity_provisioning`; parking the login at the TOTP step is a
+  // sign-in step, so it writes the challenge under `authenticate`, the one reason auth_mfa_pending admits
+  await runWithRlsSystem("authenticate", "auth.saml-totp-step-up", async () => {
+    await db.delete(authMfaPending).where(eq(authMfaPending.userId, userId));
+    await db.insert(authMfaPending).values({
+      tokenHash,
+      userId,
+      origin: "saml",
     samlProviderId,
-    expiresAt: new Date(Date.now() + MFA_PENDING_MINUTES * 60_000),
+      expiresAt: new Date(Date.now() + MFA_PENDING_MINUTES * 60_000),
+    });
   });
   return { token, maxAgeSeconds: MFA_PENDING_MINUTES * 60 };
 }
@@ -2393,7 +2399,9 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     // ADR-0174 (finding 7): ONE normalisation (NFKC, trimmed, case-folded)
     const normalized = normalizeClaimEmail(claims.email);
     const email = normalized?.email ?? null;
-    const emailVerified = claims.email_verified === true;
+    // ADR-0326: Entra ID spells a verified email `xms_edov`, accepted only from its own tenant issuer.
+    const emailVerifiedVia = oidcEmailVerifiedVia(claims as Record<string, unknown>);
+    const emailVerified = emailVerifiedVia !== null;
     if (!normalized || !email || !emailVerified) {
       await auditAuth(db, null, null, "oidc-login-failed", "deny",
         `OIDC login refused: no verified email claim (provider '${provider.name}')`,

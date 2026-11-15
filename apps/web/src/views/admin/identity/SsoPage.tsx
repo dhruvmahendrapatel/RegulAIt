@@ -29,27 +29,37 @@ import {
   Tabs,
   Textarea,
 } from "../../../ui/kit";
-import { QueryGate, optionEls, roleOpts, useAction, useRoles, useUsers } from "../adminKit";
+import { QueryGate, optionEls, orgSettingsQuery, roleOpts, useAction, useRoles, useUsers } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 import { putOrgSettings, withStepUp } from "../../../stepup/stepUp";
 import { OrgSettingsCard } from "../settings/OrgSettingsCard";
-import { useSettingsToReview } from "../settings/orgSettingsReview";
+import { orgSettingsUnresolved, tabLabel, type Unresolved } from "../settings/postureTabs";
 import { fmtDateTime } from "../../../api/format";
 import { ListPreview } from "../../../ui/ListPreview";
 
 const PENDING = { status: "pending" };
+
+// review of #642 (N2): one source for what the SAML card flags, so the tab count and the card cannot drift
+const trustsAnyDomain = (p: SamlProvider) => !(p.allowedEmailDomains && p.allowedEmailDomains.length > 0);
+/** a SAML provider the card flags: it trusts any email domain, or it accepts IdP-initiated logins */
+const samlNeedsReview = (p: SamlProvider) => trustsAnyDomain(p) || p.allowIdpInitiated;
 const STEP_UP_KEYS = ["stepUpMode", "stepUpMaxAgeSeconds", "stepUpActions"];
 
 export default function SsoPage() {
   const [tab, setTab] = useState("oidc");
   // what a hidden tab holds that needs review, from the same reads its cards use
   const saml = useQuery({ queryKey: ["admin", "saml-providers"], queryFn: () => api.get<{ providers: SamlProvider[] }>("/v1/auth/saml-providers") });
-  const samlToReview = (saml.data?.providers ?? []).filter((p) => !(p.allowedEmailDomains && p.allowedEmailDomains.length > 0) || p.allowIdpInitiated).length;
-  const stepUpToReview = useSettingsToReview(STEP_UP_KEYS);
+  // review of #642: a failed read counts as unknown and a pending one shows the bare name (postureTabs, ADR-0180)
+  const samlUnresolved: Unresolved | null = saml.isError
+    ? { unknown: 1, warnings: 0 }
+    : saml.data
+      ? { unknown: 0, warnings: (saml.data.providers ?? []).filter(samlNeedsReview).length }
+      : null;
   // I-2: the reads the status row counts, with the cards' own query keys (one fetch each, shared)
   const oidc = useQuery({ queryKey: ["admin", "oidc-providers"], queryFn: () => api.get<{ providers: OidcProvider[] }>("/v1/auth/oidc-providers") });
-  const settings = useQuery({ queryKey: ["admin", "org-settings"], queryFn: () => api.get<OrgSettingsResponse>("/v1/org/settings") });
+  const settings = useQuery(orgSettingsQuery<OrgSettingsResponse>());
+  const stepUpUnresolved = orgSettingsUnresolved(STEP_UP_KEYS, { data: settings.data, failed: settings.isError });
   return (
     <>
       <PageHeader
@@ -61,7 +71,7 @@ export default function SsoPage() {
         {/* P3: the growing list is a preview; the full list and its decisions have their own page */}
         <ListPreview<LinkRequest>
           title="Account-link requests"
-          noun="pending"
+          noun="pending requests"
           endpoint="/v1/auth/link-requests"
           legacyKey="requests"
           queryKey={["admin", "link-requests"]}
@@ -92,15 +102,15 @@ export default function SsoPage() {
         <Tabs
           tabs={[
             { id: "oidc", label: "OIDC providers" },
-            { id: "saml", label: samlToReview > 0 ? `SAML providers · ${samlToReview} to review` : "SAML providers" },
-            { id: "sessions", label: stepUpToReview > 0 ? `Sessions & step-up · ${stepUpToReview} to review` : "Sessions & step-up" },
+            { id: "saml", label: tabLabel("SAML providers", samlUnresolved) },
+            { id: "sessions", label: tabLabel("Sessions & step-up", stepUpUnresolved) },
           ]}
           active={tab}
           onChange={setTab}
           idPrefix="sso"
           label="SSO settings"
         />
-        {/* I-2: every panel stays mounted (hidden when not selected), so a half-typed provider or policy survives a tab switch */}
+        {/* the kit panels stay mounted while hidden, so a half-filled provider form survives a tab switch (review of #642) */}
         <TabPanel idPrefix="sso" id="oidc" active={tab}><div className={v.stack}>
           <OidcCard />
         </div></TabPanel>
@@ -623,8 +633,8 @@ function SamlCard() {
               key: "domains",
               header: "Domains",
               render: (p) =>
-                p.allowedEmailDomains && p.allowedEmailDomains.length > 0 ? (
-                  p.allowedEmailDomains.join(", ")
+                !trustsAnyDomain(p) ? (
+                  (p.allowedEmailDomains ?? []).join(", ")
                 ) : (
                   <Badge tone="warn" infoLabel="any domain" info={<>Every email this IdP asserts is trusted.</>}>
                     any

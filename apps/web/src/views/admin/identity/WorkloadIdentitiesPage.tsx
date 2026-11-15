@@ -20,7 +20,8 @@ import { ApiError } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, InfoButton, Input, Modal, Select, SkeletonBlock, Table, TabPanel, Tabs, Textarea } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
-import { useAgents, useConnectors, useRoles, useServers, useServerTools, useUserPicker } from "../adminKit";
+import { orgSettingsQuery, useAgents, useConnectors, useRoles, useServers, useServerTools, useUserPicker } from "../adminKit";
+import type { OrgSettingsResponse } from "../../../api/adminTypes";
 import {
   addIdentityCredential,
   createWorkloadIdentity,
@@ -95,7 +96,7 @@ import { SpiffeTrustBundlesCard } from "./SpiffeTrustBundles";
 import { SpiffeBundleEndpointsCard } from "./SpiffeBundleEndpoints";
 import s from "./workloadIdentities.module.css";
 import { OrgSettingsCard } from "../settings/OrgSettingsCard";
-import { useSettingsToReview } from "../settings/orgSettingsReview";
+import { orgSettingsUnresolved, tabLabel, type Unresolved } from "../settings/postureTabs";
 import { fmtDateTime } from "../../../api/format";
 import { ListPreview, PREVIEW_ROWS, previewHeading } from "../../../ui/ListPreview";
 import { Link, useSearchParams } from "react-router-dom";
@@ -204,12 +205,21 @@ export default function WorkloadIdentitiesPage() {
   };
 
   const [tab, setTab] = useState("delegation");
-  const settingsToReview = useSettingsToReview(IDENTITY_SETTING_KEYS);
+  // review of #642: a failed read counts as unknown and a pending one shows the bare name (postureTabs, ADR-0180)
+  const orgSettings = useQuery(orgSettingsQuery<OrgSettingsResponse>());
+  const settingsUnresolved = orgSettingsUnresolved(IDENTITY_SETTING_KEYS, { data: orgSettings.data, failed: orgSettings.isError });
   // what the trust tab would show as needing review, read with the cards' own query keys (one fetch, shared)
   const bundles = useQuery({ queryKey: spiffeBundleKeys.list, queryFn: listSpiffeTrustBundles });
   const endpoints = useQuery({ queryKey: spiffeEndpointKeys.list, queryFn: listSpiffeBundleEndpoints });
-  const trustToReview =
-    (bundles.data?.legacyEnvironmentIgnored ? 1 : 0) + (endpoints.data?.items ?? []).filter((x) => x.enabled && x.lastErrorCode).length;
+  // a failed read is unknown, never "nothing to review"; until both reads settle the tab shows its bare name
+  const trustSettled = (bundles.data !== undefined || bundles.isError) && (endpoints.data !== undefined || endpoints.isError);
+  const trustUnresolved: Unresolved | null = trustSettled
+    ? {
+        unknown: (bundles.isError ? 1 : 0) + (endpoints.isError ? 1 : 0),
+        warnings:
+          (bundles.data?.legacyEnvironmentIgnored ? 1 : 0) + (endpoints.data?.items ?? []).filter((x) => x.enabled && x.lastErrorCode).length,
+      }
+    : null;
 
   return (
     <>
@@ -329,15 +339,15 @@ export default function WorkloadIdentitiesPage() {
         <Tabs
           tabs={[
             { id: "delegation", label: "Delegation" },
-            { id: "settings", label: settingsToReview > 0 ? `Settings · ${settingsToReview} to review` : "Settings" },
-            { id: "trust", label: trustToReview > 0 ? `Signing & trust · ${trustToReview} to review` : "Signing & trust" },
+            { id: "settings", label: tabLabel("Settings", settingsUnresolved) },
+            { id: "trust", label: tabLabel("Signing & trust", trustUnresolved) },
           ]}
           active={tab}
           onChange={setTab}
           idPrefix="identity-settings"
           label="Identity settings"
         />
-        {/* I-2: every panel stays mounted (hidden when not selected), so a picked run, an unsaved setting or a half-added bundle survives a tab switch */}
+        {/* the kit panels stay mounted while hidden, so a picked run, an unsaved setting or a half-added bundle survives a tab switch (I-2; review of #642) */}
         <TabPanel idPrefix="identity-settings" id="delegation" active={tab}><div className={s.stack}>
         <RunDelegationTree busy={write.busy} personLabel={personLabel} identities={seen} ask={ask} />
         </div></TabPanel>
@@ -1237,7 +1247,10 @@ export function GrantProposals(props: { identity: WorkloadIdentityDetailView; bu
       <div className={s.heading}>
         <h2>
           Proposed grants from observed use
-          {data ? ` · ${previewHeading(data.proposals.length, "proposals", [{ label: "not held by a steward", count: data.proposals.filter((p) => !p.heldByStewards).length }])}` : ""}
+          {/* a truncated read counts what came back, and says it is a lower bound (review of #642) */}
+          {data
+            ? ` · ${data.truncated ? "at least " : ""}${previewHeading(data.proposals.length, "proposals", [{ label: "not held by a steward", count: data.proposals.filter((p) => !p.heldByStewards).length }])}`
+            : ""}
         </h2>
         {props.preview && data && (
           <Link to={`/admin/workload-identities/${encodeURIComponent(props.identity.id)}/proposals`} aria-label="View all proposals and accept">

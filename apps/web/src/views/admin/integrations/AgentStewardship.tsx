@@ -77,6 +77,10 @@ function personCell(name: string | null | undefined, deactivated: boolean | unde
 /**
  * P3 (#453 c6527514889): the agents overview keeps this preview, at most five agents (those needing attention first)
  * with the orphaned and review-overdue counts in its heading; the full stewardship list has its own page.
+ *
+ * Why this is not the kit `ListPreview` (review of #642): stewardship has no list endpoint. Orphaned and review-overdue
+ * are derived in the client from the agents read the page already holds, so there is no server-side sort, filter or
+ * count for `ListPreview` to page through; the counts here come from the same rows the full page shows.
  */
 export function StewardshipPreview(props: { agents: Row[] | undefined; loading: boolean; failed: boolean }) {
   if (props.failed) return null;

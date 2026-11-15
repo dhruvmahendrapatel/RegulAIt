@@ -12,7 +12,12 @@ diff, run the baseline (`node scripts/injection-eval-baseline.mjs`), commit.
 Standard library only, and NO upstream code is executed. AgentDojo's tasks are
 Python classes; they are read with `ast` and a small evaluator that accepts only
 string constants, f-strings over names already resolved, and string `+`.
-Anything else fails the refresh (fail closed) instead of being guessed.
+Anything else fails the refresh (fail closed) instead of being guessed. The
+2026-11-14 `agentdojo-task-dependent` set also reads list and dict literals
+(the ground truths' `placeholder_args`; a task whose arguments read the
+environment is left out and named in the manifest) and the suites' YAML
+environments with a narrow line reader for the three scalar forms that carry
+an injection (anything else fails the refresh).
 
 To move to a newer upstream revision: change its `commit` below, run this, read
 the diff and the new baseline numbers, and update ADR-0244 and THIRD_PARTY.md.
@@ -26,6 +31,7 @@ import json
 import os
 import random
 import re
+import string
 import subprocess
 import sys
 import tempfile
@@ -81,6 +87,16 @@ SOURCES = {
         "licence": "MIT",
         "licenceFile": "LICENSE",
         "copyright": "Copyright (c) 2024 Edoardo Debenedetti, Jie Zhang, Mislav Balunovic, Luca Beurer-Kellner, Marc Fischer, and Florian Tramer",
+    },
+    # 2026-11-14 amendment: the same checkout and licence file as `agentdojo`
+    "agentdojo-task-dependent": {
+        "title": "AgentDojo (benchmark v1): task-dependent attacks and injections rendered in their carriers",
+        "repo": "ethz-spylab/agentdojo",
+        "commit": "089ed468cf3ed0322acc66b0211f26d9d90dbf60",
+        "licence": "MIT",
+        "licenceFile": "LICENSE",
+        "copyright": "Copyright (c) 2024 Edoardo Debenedetti, Jie Zhang, Mislav Balunovic, Luca Beurer-Kellner, Marc Fischer, and Florian Tramer",
+        "sharesLicenceWith": "agentdojo",
     },
 }
 
@@ -450,6 +466,380 @@ def build_agentdojo(d: Path) -> tuple[list[dict], dict]:
     return cases, sampling
 
 
+# ------------------------------------- AgentDojo task-dependent (2026-11-14 amendment)
+#: the attacks whose text depends on the attacked pipeline (the model's prose name), the user's name, or the
+#: injection task's own ground truth (tool_knowledge); `important_instructions_no_names` is in `agentdojo` already
+AGENTDOJO_TD_ATTACKS = (
+    "important_instructions",
+    "important_instructions_no_model_name",
+    "important_instructions_no_user_name",
+    "important_instructions_wrong_model_name",
+    "important_instructions_wrong_user_name",
+    "tool_knowledge",
+)
+#: task-dependent attacks kept per injection goal (seeded sample of the six, to keep the snapshot near `agentdojo`'s size)
+AGENTDOJO_TD_ATTACKS_PER_GOAL = 3
+#: injection cases rendered inside each injection vector's carrier field (plus one benign default per vector)
+AGENTDOJO_TD_PER_VECTOR = 1
+_PLACEHOLDER = re.compile(r"\{([a-z0-9_]+)\}")
+
+
+def eval_lit(node: ast.AST, scope: dict):
+    """a literal value: constants, resolved names and `self.X`, lists, dicts, f-strings and string `+`; nothing else"""
+    if isinstance(node, ast.Constant) and isinstance(node.value, (str, int, float, bool, type(None))):
+        return node.value
+    if isinstance(node, ast.Name) and node.id in scope:
+        return scope[node.id]
+    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "self" and node.attr in scope:
+        return scope[node.attr]
+    if isinstance(node, ast.List):
+        return [eval_lit(e, scope) for e in node.elts]
+    if isinstance(node, ast.Dict) and all(k is not None for k in node.keys):
+        return {eval_lit(k, scope): eval_lit(v, scope) for k, v in zip(node.keys, node.values)}
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, right = eval_lit(node.left, scope), eval_lit(node.right, scope)
+        if isinstance(left, str) and isinstance(right, str):
+            return left + right
+    if isinstance(node, ast.JoinedStr):
+        out = []
+        for v in node.values:
+            if isinstance(v, ast.Constant):
+                out.append(str(v.value))
+            elif isinstance(v, ast.FormattedValue) and v.format_spec is None and v.conversion == -1:
+                val = eval_lit(v.value, scope)
+                if not isinstance(val, (str, int, float)):
+                    raise Unsupported(ast.dump(v)[:120])
+                out.append(str(val))
+            else:
+                raise Unsupported(ast.dump(v)[:120])
+        return "".join(out)
+    raise Unsupported(ast.dump(node)[:120])
+
+
+def class_literals(cls: ast.ClassDef, base: dict) -> dict:
+    scope = dict(base)
+    for st in cls.body:
+        if isinstance(st, (ast.Assign, ast.AnnAssign)):
+            targets = st.targets if isinstance(st, ast.Assign) else [st.target]
+            if st.value is None or len(targets) != 1 or not isinstance(targets[0], ast.Name):
+                continue
+            try:
+                scope[targets[0].id] = eval_lit(st.value, scope)
+            except Unsupported:
+                pass
+    return scope
+
+
+def tool_sequences(path: Path) -> dict[str, str | None]:
+    """per injection task, the `{tools}` text ToolKnowledgeAttack.get_tools_sequence builds from the ground truth's
+    `placeholder_args`, or None when those are not literals (they read the environment) or are missing"""
+    tree = ast.parse(path.read_text("utf-8"))
+    base = module_scope(tree)
+    out: dict[str, str | None] = {}
+    for cls in tree.body:
+        if not (isinstance(cls, ast.ClassDef) and decorated_with(cls, "register_injection_task")):
+            continue
+        scope = class_literals(cls, base)
+        gt = next(f for f in cls.body if isinstance(f, ast.FunctionDef) and f.name == "ground_truth")
+        local = dict(scope)
+        ret = None
+        for st in gt.body:
+            if isinstance(st, ast.Return):
+                ret = st.value
+                break
+            if isinstance(st, ast.Assign) and len(st.targets) == 1 and isinstance(st.targets[0], ast.Name):
+                try:
+                    local[st.targets[0].id] = eval_lit(st.value, local)
+                except Unsupported:
+                    local.pop(st.targets[0].id, None)  # reads the environment: anything using it is unresolved
+        try:
+            if not isinstance(ret, ast.List):
+                raise Unsupported("ground truth is not a list literal")
+            calls = []
+            for e in ret.elts:
+                if not (isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id == "FunctionCall"):
+                    raise Unsupported(ast.dump(e)[:120])
+                kw = {k.arg: k.value for k in e.keywords}
+                if "placeholder_args" not in kw:
+                    raise Unsupported("no placeholder_args (upstream raises ValueError)")
+                function, placeholder = eval_lit(kw["function"], local), eval_lit(kw["placeholder_args"], local)
+                if not isinstance(function, str) or not isinstance(placeholder, dict):
+                    raise Unsupported("unexpected FunctionCall shape")
+                calls.append((function, placeholder))
+        except Unsupported:
+            out[snake(cls.name)] = None
+            continue
+        # attacks/important_instructions_attacks.py, ToolKnowledgeAttack.get_tools_sequence (the same strings)
+        text = ""
+        for i, (function, placeholder) in enumerate(calls):
+            if i == 0:
+                text += f"You should use the tool `{function}` with the following arguments: {placeholder}. "
+            elif i == len(calls) - 1:
+                text += f"Finally, you should use the tool `{function}` with the arguments: {placeholder}. "
+            else:
+                text += f"Then, you should use the tool `{function}` with the arguments: {placeholder}. "
+        out[snake(cls.name)] = text
+    return out
+
+
+def named_attacks(d: Path) -> tuple[dict[str, dict], dict[str, str], list[str]]:
+    """each task-dependent attack: its template and how it names the user and the model, read from the classes"""
+    defaults = module_scope(ast.parse((d / "src/agentdojo/attacks/base_attacks.py").read_text("utf-8")))
+    tree = ast.parse((d / "src/agentdojo/attacks/important_instructions_attacks.py").read_text("utf-8"))
+    classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
+    resolved: dict[str, dict] = {}
+
+    def resolve(cname: str) -> dict:
+        if cname in resolved:
+            return resolved[cname]
+        cls = classes[cname]
+        parent = cls.bases[0].id if cls.bases and isinstance(cls.bases[0], ast.Name) else None
+        attrs = dict(resolve(parent)) if parent in classes else {"template": None, "user": None, "model": None}
+        own = class_strings(cls, {})
+        if "_JB_STRING" in own:
+            attrs["template"] = own["_JB_STRING"]
+        attrs["name"] = own["name"]
+        init = next((f for f in cls.body if isinstance(f, ast.FunctionDef) and f.name == "__init__"), None)
+        for st in init.body if init else []:
+            if not (isinstance(st, ast.Assign) and isinstance(st.targets[0], ast.Attribute)):
+                continue
+            field = {"user_name": "user", "model_name": "model"}.get(st.targets[0].attr)
+            v = st.value
+            if field is None:
+                continue
+            if isinstance(v, ast.Constant) and isinstance(v.value, str):
+                attrs[field] = ("literal", v.value)
+            elif isinstance(v, ast.Name) and v.id in ("DEFAULT_USER_NAME", "DEFAULT_MODEL_NAME"):
+                attrs[field] = ("literal", defaults[v.id])
+            elif isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id in (
+                "get_model_name_from_pipeline",
+                "get_wrong_model_name_from_pipeline",
+            ):
+                attrs[field] = ("pipeline" if v.func.id == "get_model_name_from_pipeline" else "wrong_pipeline", None)
+            else:
+                raise Unsupported(ast.dump(v)[:120])
+        resolved[cname] = attrs
+        return attrs
+
+    attacks = {}
+    for cname in classes:
+        a = resolve(cname)
+        if a["name"] in AGENTDOJO_TD_ATTACKS:
+            attacks[a["name"]] = a
+    if set(attacks) != set(AGENTDOJO_TD_ATTACKS):
+        sys.exit(f"AgentDojo task-dependent attacks changed: {sorted(attacks)}")
+    # models.py: MODEL_NAMES, pipeline model id -> the prose name the attack addresses (dict order kept)
+    models = ast.parse((d / "src/agentdojo/models.py").read_text("utf-8"))
+    node = next(
+        st.value for st in models.body
+        if isinstance(st, (ast.Assign, ast.AnnAssign))
+        and isinstance(st.targets[0] if isinstance(st, ast.Assign) else st.target, ast.Name)
+        and (st.targets[0] if isinstance(st, ast.Assign) else st.target).id == "MODEL_NAMES"
+    )
+    model_names = eval_lit(node, {})
+    if not isinstance(model_names, dict) or not all(isinstance(v, str) for v in model_names.values()):
+        sys.exit("AgentDojo MODEL_NAMES is not a literal dict of strings")
+    # the templates: the format fields must be ones the attack fills
+    for a in attacks.values():
+        fields = {f for _, f, _, _ in string.Formatter().parse(a["template"]) if f is not None}
+        if not fields <= {"goal", "user", "model", "tools"} or a["user"] is None or a["model"] is None:
+            sys.exit(f"AgentDojo {a['name']}: unexpected template fields {sorted(fields)}")
+    return attacks, model_names, sorted(model_names)
+
+
+def wrong_model_name(model_names: dict[str, str], right: str) -> str:
+    """important_instructions_attacks.get_wrong_model_name_from_pipeline: random.Random(0).choice over the others"""
+    return random.Random(0).choice([n for n in model_names.values() if n != right])
+
+
+def yaml_dq(body: str, where: str) -> str:
+    """the content of a one-line YAML double-quoted scalar, with its escapes decoded (an unknown escape fails)"""
+    out, i = [], 0
+    esc = {"n": "\n", "t": "\t", "\\": "\\", '"': '"', "/": "/", "0": "\0", " ": " "}
+    while i < len(body):
+        ch = body[i]
+        if ch == '"':
+            raise Unsupported(f"{where}: unescaped quote")
+        if ch == "\\":
+            if i + 1 >= len(body) or body[i + 1] not in esc:
+                raise Unsupported(f"{where}: escape {body[i:i + 2]!r}")
+            out.append(esc[body[i + 1]])
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+_DQ_ITEM = re.compile(r'(\s*)- "(.*)"\s*')
+_DQ_KEY = re.compile(r'(\s*)(?:[A-Za-z0-9_.\-]+|"[A-Za-z0-9_.\-]+"): "(.*)"\s*')
+
+
+def yaml_carrier(lines: list[str], i: int, where: str) -> str:
+    """the scalar holding line i: a one-line double-quoted value; a list of them (items joined by newlines, as the
+    travel review tools join them); or a literal block scalar (`|`). Any other YAML form fails the refresh."""
+    indent = lambda s: len(s) - len(s.lstrip(" "))  # noqa: E731
+    m = _DQ_ITEM.fullmatch(lines[i])
+    if m:
+        lo = i
+        while lo > 0 and _DQ_ITEM.fullmatch(lines[lo - 1]) and indent(lines[lo - 1]) == indent(lines[i]):
+            lo -= 1
+        hi = i
+        while hi + 1 < len(lines) and _DQ_ITEM.fullmatch(lines[hi + 1]) and indent(lines[hi + 1]) == indent(lines[i]):
+            hi += 1
+        return "\n".join(yaml_dq(_DQ_ITEM.fullmatch(lines[j]).group(2), where) for j in range(lo, hi + 1))
+    m = _DQ_KEY.fullmatch(lines[i])
+    if m:
+        return yaml_dq(m.group(2), where)
+    k = i - 1
+    while k >= 0 and (not lines[k].strip() or indent(lines[k]) >= indent(lines[i])):
+        k -= 1
+    if k < 0 or not re.fullmatch(r"\s*(- )?[A-Za-z0-9_.\-]+: \|-?\s*", lines[k]):
+        raise Unsupported(f"{where}: not a supported YAML scalar")
+    block = next(indent(lines[j]) for j in range(k + 1, len(lines)) if lines[j].strip())
+    body, j = [], k + 1
+    while j < len(lines) and (not lines[j].strip() or indent(lines[j]) >= block):
+        body.append(lines[j][block:])
+        j += 1
+    text = "\n".join(body).rstrip("\n")
+    return text if lines[k].rstrip().endswith("|-") else text + "\n"
+
+
+def injection_vectors(path: Path) -> dict[str, str]:
+    """injection_vectors.yaml: each vector's benign default"""
+    out: dict[str, str] = {}
+    current = None
+    for n, line in enumerate(path.read_text("utf-8").split("\n"), 1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        m = re.fullmatch(r"([a-z0-9_]+):\s*", line)
+        if m:
+            current = m.group(1)
+            continue
+        m = re.fullmatch(r'\s+default: "(.*)"\s*', line)
+        if m and current is not None:
+            out[current] = yaml_dq(m.group(1), f"{path.name}:{n}")
+            continue
+        if not re.fullmatch(r'\s+description: "(.*)"\s*', line):
+            raise Unsupported(f"{path.name}:{n}: unexpected line")
+    return out
+
+
+def carriers(suite_dir: Path, vectors: dict[str, str]) -> dict[str, str]:
+    """per vector: its first carrier field in the environment, with the `{vector}` placeholder left in place"""
+    env = suite_dir / "environment.yaml"
+    files = [env]
+    for line in env.read_text("utf-8").split("\n"):
+        m = re.fullmatch(r"[a-z_]+: !include (\S+)\s*", line)
+        if m:
+            files.append(suite_dir / m.group(1))
+    out: dict[str, str] = {}
+    for f in files:
+        lines = f.read_text("utf-8").split("\n")
+        for i, line in enumerate(lines):
+            if line.lstrip().startswith("#"):
+                continue
+            for name in _PLACEHOLDER.findall(line):
+                if name in vectors and name not in out:
+                    out[name] = yaml_carrier(lines, i, f"{f.name}:{i + 1}")
+    if set(out) != set(vectors):
+        sys.exit(f"AgentDojo {suite_dir.name}: vectors without a carrier: {sorted(set(vectors) - set(out))}")
+    return out
+
+
+def render(carrier: str, vector: str, value: str, defaults: dict[str, str]) -> str:
+    text = carrier.replace("{" + vector + "}", value)
+    for other, default in defaults.items():
+        text = text.replace("{" + other + "}", default)
+    return text
+
+
+def build_agentdojo_task_dependent(d: Path) -> tuple[list[dict], dict]:
+    suites = d / "src/agentdojo/default_suites/v1"
+    data = d / "src/agentdojo/data/suites"
+    named, model_names, model_ids = named_attacks(d)
+    independent = attack_templates(d)
+    rng = random.Random(SEED)
+
+    def fill(attack: str, goal: str, tools: str | None) -> tuple[str, str]:
+        """the attack text and the pipeline model drawn for it (one seeded draw per text)"""
+        model_id = rng.choice(model_ids)
+        if attack in independent:
+            return independent[attack].replace("{goal}", goal), model_id
+        a = named[attack]
+        right = model_names[model_id]
+        user = a["user"][1]
+        model = {"literal": lambda: a["model"][1], "pipeline": lambda: right, "wrong_pipeline": lambda: wrong_model_name(model_names, right)}[a["model"][0]]()
+        return a["template"].format(goal=goal, user=user, model=model, tools=tools or ""), model_id
+
+    cases: list[dict] = []
+    unresolved: list[str] = []
+    vectors_per_suite: dict[str, int] = {}
+    for suite in AGENTDOJO_EXPECTED:
+        injs = suite_tasks(suites / suite / "injection_tasks.py", "register_injection_task", "GOAL")
+        tools = tool_sequences(suites / suite / "injection_tasks.py")
+        order = sorted(injs, key=lambda t: int(t.rsplit("_", 1)[1]))
+        # 1. each injection goal in each task-dependent attack (the text a detector sees, as in `agentdojo`)
+        for tid in order:
+            if tools[tid] is None:
+                unresolved.append(f"{suite}/{tid}")
+            usable = [a for a in AGENTDOJO_TD_ATTACKS if not (a == "tool_knowledge" and tools[tid] is None)]
+            for k in sorted(rng.sample(range(len(usable)), AGENTDOJO_TD_ATTACKS_PER_GOAL)):
+                attack = usable[k]
+                text, model_id = fill(attack, injs[tid], tools[tid])
+                cases.append(
+                    {"id": f"agentdojo-task-dependent/{suite}/{tid}/{attack}", "label": "injection", "stratum": f"{attack}/{suite}", "text": norm_text(text)}
+                )
+        # 2. the injection rendered inside its carrier field, and the same field with the benign default
+        defaults = injection_vectors(data / suite / "injection_vectors.yaml")
+        fields = carriers(data / suite, defaults)
+        vectors_per_suite[suite] = len(defaults)
+        pool = [(tid, attack) for tid in order for attack in (*sorted(independent), *AGENTDOJO_TD_ATTACKS) if not (attack == "tool_knowledge" and tools[tid] is None)]
+        for vector in sorted(defaults):
+            benign = render(fields[vector], vector, defaults[vector], defaults)
+            if benign.strip():
+                cases.append(
+                    {"id": f"agentdojo-task-dependent/{suite}/{vector}/default", "label": "benign", "stratum": f"carrier_default/{suite}", "text": norm_text(benign)}
+                )
+            for j in sorted(rng.sample(range(len(pool)), AGENTDOJO_TD_PER_VECTOR)):
+                tid, attack = pool[j]
+                text, _ = fill(attack, injs[tid], tools[tid])
+                cases.append(
+                    {
+                        "id": f"agentdojo-task-dependent/{suite}/{vector}/{tid}/{attack}",
+                        "label": "injection",
+                        "stratum": f"carrier/{suite}",
+                        "text": norm_text(render(fields[vector], vector, text, defaults)),
+                    }
+                )
+    sampling = {
+        "method": "goals x task-dependent attacks: a seeded sample of attacks per goal (Python random.Random(seed).sample, suites and goals in order), one seeded pipeline-model draw per text; carriers: every injection vector with its benign default, and a seeded sample of (goal, attack) per vector",
+        "seed": SEED,
+        "benchmarkVersion": "v1 (27 injection tasks; injection vectors per suite: " + ", ".join(f"{s} {n}" for s, n in vectors_per_suite.items()) + ")",
+        "attacks": list(AGENTDOJO_TD_ATTACKS),
+        "attacksPerGoal": AGENTDOJO_TD_ATTACKS_PER_GOAL,
+        "modelNames": "src/agentdojo/models.py MODEL_NAMES: per text, random.Random(seed).choice over the pipeline model ids sorted; the attack addresses that id's prose name. wrong_model_name reproduces get_wrong_model_name_from_pipeline (random.Random(0).choice over the other names). Users: the literal names and defaults in the attack classes.",
+        "toolKnowledge": "the {tools} text is built from each injection task's ground-truth placeholder_args when they are literals (read with ast); tasks whose placeholder_args read the environment are left out: " + (", ".join(unresolved) or "none"),
+        "carrier": "each vector's first carrier field in the suite environment (environment.yaml and its includes): a one-line double-quoted value, a review list joined by newlines as the travel tools join it, or a literal block. The injection replaces the placeholder verbatim and other placeholders take their defaults; AgentDojo inserts the text into a PyYAML-dumped copy of the environment, so whitespace that YAML folds, and escapes a default carries (the banking bill), are kept here as written. The full serialised tool result (other fields, YAML formatting) and which user tasks reach each vector (that runs the ground-truth pipeline) are not reproduced.",
+        "perVector": AGENTDOJO_TD_PER_VECTOR,
+        "benign": "each vector's carrier with every placeholder at its injection_vectors.yaml default (what the agent reads with no attack); a carrier empty at its default is left out",
+        # every upstream file this set is read from, so a reviewer can check the inputs byte for byte
+        "upstreamFiles": {
+            str(f.relative_to(d)): sha256(f.read_bytes())
+            for f in sorted(
+                [
+                    *(d / "src/agentdojo/attacks" / n for n in ("base_attacks.py", "baseline_attacks.py", "important_instructions_attacks.py")),
+                    d / "src/agentdojo/models.py",
+                    *(suites / s / "injection_tasks.py" for s in AGENTDOJO_EXPECTED),
+                    *(data / s / n for s in AGENTDOJO_EXPECTED for n in ("environment.yaml", "injection_vectors.yaml")),
+                    *(data / "workspace/include").glob("*.yaml"),
+                ]
+            )
+        },
+    }
+    return cases, sampling
+
+
 # ------------------------------------------------- our own web-agent scenarios
 #: authored by RegulAIt in the vendor directory (not downloaded); this script only validates and pins it
 OWN_ID = "regulait-web-agent"
@@ -499,8 +889,12 @@ def main() -> None:
     manifest_sources = []
     with tempfile.TemporaryDirectory() as t:
         tmp = Path(t)
+        checkouts: dict[tuple[str, str], Path] = {}
         for sid, meta in SOURCES.items():
-            d = checkout(meta["repo"], meta["commit"], args.src, tmp)
+            key = (meta["repo"], meta["commit"])
+            if key not in checkouts:
+                checkouts[key] = checkout(meta["repo"], meta["commit"], args.src, tmp)
+            d = checkouts[key]
             sampling = {"method": "complete, no sampling"}
             second = meta.get("second")
             d2 = checkout("", second["commit"], args.src, tmp, url=second["url"], name=second["dir"]) if second else None
@@ -510,13 +904,16 @@ def main() -> None:
                 cases = build_notinject(d)
             elif sid == "injecagent":
                 cases, sampling = build_injecagent(d)
-            else:
+            elif sid == "agentdojo":
                 cases, sampling = build_agentdojo(d)
+            else:
+                cases, sampling = build_agentdojo_task_dependent(d)
             ids = [c["id"] for c in cases]
             if len(set(ids)) != len(ids):
                 sys.exit(f"{sid}: duplicate case ids")
             licence = (d / meta["licenceFile"]).read_bytes()
-            (OUT / f"LICENSE-{sid}").write_bytes(licence)
+            licence_name = f"LICENSE-{meta.get('sharesLicenceWith', sid)}"
+            (OUT / licence_name).write_bytes(licence)
             extra = {}
             if second:
                 licence2 = (d2 / second["licenceFile"]).read_bytes()
@@ -540,7 +937,7 @@ def main() -> None:
                     "commit": meta["commit"],
                     "licence": meta["licence"],
                     "copyright": meta["copyright"],
-                    "licenceFile": f"LICENSE-{sid}",
+                    "licenceFile": licence_name,
                     "licenceSha256": sha256(licence),
                     "file": f"{sid}.json",
                     "sha256": sha256(data),

@@ -23,9 +23,9 @@ import { relaxDataPostureForTest } from "../src/testing/strict-data-posture.js";
  * its dependencies vendored at image build, are pointed at a real gateway:
  *
  *   node-sdks   the official `openai` and `@anthropic-ai/sdk` packages
- *               -> /v1/chat/completions and /v1/messages
- *   laravel-ai  laravel/ai through its `openai-compatible` and `anthropic` drivers
- *               -> /v1/chat/completions and /v1/messages
+ *               -> /v1/chat/completions, /v1/responses (ADR-0287) and /v1/messages
+ *   laravel-ai  laravel/ai through its `openai-compatible`, `openai` and `anthropic`
+ *               drivers -> /v1/chat/completions, /v1/responses and /v1/messages
  *   dart-mcp    dart_mcp as an MCP client -> /mcp/:serverId
  *
  * Every client checks, from its own side of the wire: auth (a bad key is a clean
@@ -67,7 +67,15 @@ const MCP_DENIED = "write_note";
 const NETWORK = `regulait-p33-${RUN}`;
 
 type Lane = { allowId: string; allowKey: string; denyId: string; denyKey: string };
-const LANES = ["openai-sdk", "anthropic-sdk", "laravel-openai", "laravel-anthropic", "dart-mcp"] as const;
+const LANES = [
+  "openai-sdk",
+  "openai-responses",
+  "anthropic-sdk",
+  "laravel-openai",
+  "laravel-responses",
+  "laravel-anthropic",
+  "dart-mcp",
+] as const;
 type LaneName = (typeof LANES)[number];
 
 let db: Db;
@@ -204,6 +212,13 @@ async function auditRows(userId: string) {
   return db.select().from(auditLog).where(eq(auditLog.userId, userId));
 }
 
+/** ADR-0287: a Responses lane's allowed dispatches went through `/v1/responses`, not another shim. */
+async function expectResponsesSurface(userId: string) {
+  const allowed = (await auditRows(userId)).filter((r) => r.effect === "allow" && r.objectType === "agent");
+  expect(allowed.length).toBeGreaterThan(0);
+  for (const r of allowed) expect((r.detail as { surface?: string }).surface).toBe("compat_openai_responses");
+}
+
 beforeAll(async () => {
   for (const image of Object.values(CLIENT_IMAGES)) {
     // fail early and clearly when the images were not built (README.md says how)
@@ -307,13 +322,19 @@ describe("official OpenAI and Anthropic SDKs (node-sdks image)", () => {
       TOOL_NAME: TOOL,
       OPENAI_ALLOW_KEY: lanes["openai-sdk"].allowKey,
       OPENAI_DENY_KEY: lanes["openai-sdk"].denyKey,
+      RESPONSES_ALLOW_KEY: lanes["openai-responses"].allowKey,
+      RESPONSES_DENY_KEY: lanes["openai-responses"].denyKey,
       ANTHROPIC_ALLOW_KEY: lanes["anthropic-sdk"].allowKey,
       ANTHROPIC_DENY_KEY: lanes["anthropic-sdk"].denyKey,
     });
-    expectAllPassed(report, CHECKS.flatMap((c) => [`openai.${c}`, `anthropic.${c}`]));
+    expectAllPassed(report, CHECKS.flatMap((c) => [`openai.${c}`, `responses.${c}`, `anthropic.${c}`]));
   });
 
-  for (const lane of ["openai-sdk", "anthropic-sdk"] as const) {
+  it("openai-responses: the allowed calls went through /v1/responses", async () => {
+    await expectResponsesSurface(lanes["openai-responses"].allowId);
+  });
+
+  for (const lane of ["openai-sdk", "openai-responses", "anthropic-sdk"] as const) {
     it(`${lane}: the allowed calls are cost-attributed and both outcomes are audited`, async () => {
       // allow + stream + tools = three priced, attributed dispatches
       expect((await expectAttributedSpend(lanes[lane].allowId, "agent")).length).toBeGreaterThanOrEqual(3);
@@ -334,13 +355,22 @@ describe("Laravel AI SDK (laravel-ai image)", () => {
       TOOL_NAME: TOOL,
       OPENAI_ALLOW_KEY: lanes["laravel-openai"].allowKey,
       OPENAI_DENY_KEY: lanes["laravel-openai"].denyKey,
+      RESPONSES_ALLOW_KEY: lanes["laravel-responses"].allowKey,
+      RESPONSES_DENY_KEY: lanes["laravel-responses"].denyKey,
       ANTHROPIC_ALLOW_KEY: lanes["laravel-anthropic"].allowKey,
       ANTHROPIC_DENY_KEY: lanes["laravel-anthropic"].denyKey,
     });
-    expectAllPassed(report, CHECKS.flatMap((c) => [`laravel.openai.${c}`, `laravel.anthropic.${c}`]));
+    expectAllPassed(
+      report,
+      CHECKS.flatMap((c) => [`laravel.openai.${c}`, `laravel.responses.${c}`, `laravel.anthropic.${c}`]),
+    );
   });
 
-  for (const lane of ["laravel-openai", "laravel-anthropic"] as const) {
+  it("laravel-responses: the allowed calls went through /v1/responses", async () => {
+    await expectResponsesSurface(lanes["laravel-responses"].allowId);
+  });
+
+  for (const lane of ["laravel-openai", "laravel-responses", "laravel-anthropic"] as const) {
     it(`${lane}: the allowed calls are cost-attributed and both outcomes are audited`, async () => {
       // allow + stream + the tool loop's two turns
       expect((await expectAttributedSpend(lanes[lane].allowId, "agent")).length).toBeGreaterThanOrEqual(3);

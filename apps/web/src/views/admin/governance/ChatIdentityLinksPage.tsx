@@ -4,13 +4,13 @@
  * overview keeps a five-row preview with the admin-asserted count in its heading.
  */
 import { useMemo, useState } from "react";
-import { Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes } from "react-router-dom";
 import ChatOpsPage from "./ChatOpsPage";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, ErrorState, Field, Input, Select } from "../../../ui/kit";
 import { DataList } from "../../../ui/DataList";
 import { SubpageTrail } from "../../../ui/ListPreview";
 import { useAction } from "../adminKit";
@@ -100,8 +100,16 @@ export default function ChatIdentityLinksPage() {
           ]}
         />
 
+        {/* a failed workspaces read says so, with Retry, rather than leaving an empty select (review of #642) */}
+        {connections.isError && !connections.data && (
+          <ErrorState
+            title="Couldn't load the chat workspaces"
+            message={connections.error instanceof Error ? connections.error.message : String(connections.error)}
+            onRetry={() => void connections.refetch()}
+          />
+        )}
         <Field label="Workspace">
-          <Select value={linkConnection} onChange={(e) => setLinkConnection(e.target.value)}>
+          <Select value={linkConnection} onChange={(e) => setLinkConnection(e.target.value)} disabled={connections.isError && !connections.data}>
             <option value="">select…</option>
             {(connections.data?.connections ?? []).map((c) => (
               <option key={c.id} value={c.name}>
@@ -147,6 +155,8 @@ export function ChatOpsArea() {
     <Routes>
       <Route index element={<ChatOpsPage />} />
       <Route path="identity-links" element={<ChatIdentityLinksPage />} />
+      {/* an unknown sub-path goes back to the area's own page, never a blank page */}
+      <Route path="*" element={<Navigate to="/admin/chatops" replace />} />
     </Routes>
   );
 }

@@ -4,7 +4,7 @@
  * overview keeps a preview of each, with what needs attention counted in the heading.
  */
 import { useMemo, useState } from "react";
-import { Link, Route, Routes, useParams } from "react-router-dom";
+import { Link, Navigate, Route, Routes, useParams } from "react-router-dom";
 import WorkloadIdentitiesPage from "./WorkloadIdentitiesPage";
 import { useQuery } from "@tanstack/react-query";
 import { PageHeader } from "../../../shell/AppShell";
@@ -17,8 +17,16 @@ import { workloadKindLabels, type WorkloadIdentityView } from "./workloadIdentit
 import { GrantProposals, IdentityConfirm, StatusBadge, useIdentityWrite, type Confirmation } from "./WorkloadIdentitiesPage";
 import { fmtDateTime } from "../../../api/format";
 import s from "./workloadIdentities.module.css";
+import v from "../../views.module.css";
 
 type WorkloadIdentityRow = WorkloadIdentityView & { stewardNames?: string | null };
+
+/**
+ * review of #642 (N1): with no joined names, a sponsor that is recorded but not found (say a deleted user) is still
+ * shown, as on the overview; "No steward recorded" only when none is recorded
+ */
+const stewardsLabel = (i: WorkloadIdentityRow) =>
+  i.stewardNames ?? (i.sponsorUserIds.map((id) => `Not loaded (${id})`).join(", ") || "No steward recorded");
 
 export function WorkloadIdentitiesListPage() {
   const [status, setStatus] = useState("");
@@ -29,7 +37,7 @@ export function WorkloadIdentitiesListPage() {
       <SubpageTrail parent="Workload identities" parentTo="/admin/workload-identities" current="Identities" />
       <PageHeader title="Identities" sub="Every agent principal's own identity, its stewards, environments and status." />
       <Card flush>
-        <div className={s.actions} style={{ padding: "var(--s1) var(--s2) 0" }}>
+        <div className={`${s.actions} ${v.cardToolbar}`}>
           <Field label="Status">
             <Select value={status} onChange={(e) => setStatus(e.target.value)}>
               <option value="">Any</option>
@@ -66,7 +74,7 @@ export function WorkloadIdentitiesListPage() {
           columns={[
             { key: "identifier", header: "Identifier", main: true, sortable: true, render: (i) => <span className={s.identifier}>{i.identifier}</span> },
             { key: "kind", header: "Kind", main: true, sortable: true, render: (i) => workloadKindLabels[i.kind] ?? i.kind },
-            { key: "stewards", header: "Stewards", main: true, sortable: true, render: (i) => i.stewardNames ?? "No steward recorded" },
+            { key: "stewards", header: "Stewards", main: true, sortable: true, render: (i) => stewardsLabel(i) },
             { key: "environments", header: "Environments", main: true, sortable: true, render: (i) => i.environments.join(", ") || "None allowed" },
             { key: "status", header: "Status", main: true, sortable: true, required: "Status is always shown", render: (i) => <StatusBadge status={i.status} /> },
             { key: "created", header: "Created", sortable: true, render: (i) => fmtDateTime(i.createdAt) },
@@ -144,6 +152,8 @@ export function WorkloadIdentitiesArea() {
       <Route index element={<WorkloadIdentitiesPage />} />
       <Route path="identities" element={<WorkloadIdentitiesListPage />} />
       <Route path=":identityId/proposals" element={<GrantProposalsPage />} />
+      {/* an unknown sub-path goes back to the area's own page, never a blank page */}
+      <Route path="*" element={<Navigate to="/admin/workload-identities" replace />} />
     </Routes>
   );
 }

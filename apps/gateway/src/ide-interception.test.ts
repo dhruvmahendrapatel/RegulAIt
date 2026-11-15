@@ -841,6 +841,36 @@ describe("an unresolvable model is DEFAULT-DENY, never a pass-through", () => {
     expect(r.statusCode).toBe(403);
     expect(r.json().error.regulait_code).toBe("agent_not_resolvable");
   });
+
+  // ADR-0326 (pilot criterion 1): a blocked model leaves an audit record on every compat surface.
+  it("both resolution refusals write a deny audit row", async () => {
+    const model = `unmapped-audited-${Date.now()}`;
+    const r = await app.inject({ method: "POST", headers: devAuth, url: "/v1/chat/completions", payload: openaiBody(model) });
+    expect(r.statusCode).toBe(403);
+    const unmapped = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.userId, devId), eq(auditLog.ruleId, "model_not_mapped")));
+    const mine = unmapped.filter((row) => (row.detail as { requestedModel?: string }).requestedModel === model);
+    expect(mine).toHaveLength(1);
+    expect(mine[0]!.effect).toBe("deny");
+    expect(mine[0]!.objectType).toBe("agent");
+
+    const bogus = "00000000-0000-4000-8000-0000000000fe";
+    const r2 = await app.inject({
+      method: "POST",
+      headers: { ...devAuth, [AGENT_HEADER]: bogus },
+      url: "/v1/messages",
+      payload: anthropicBody("ide-premium"),
+    });
+    expect(r2.statusCode).toBe(403);
+    const named = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.userId, devId), eq(auditLog.ruleId, "agent_not_resolvable"), eq(auditLog.objectId, bogus)));
+    expect(named).toHaveLength(1);
+    expect(named[0]!.effect).toBe("deny");
+  });
 });
 
 describe("model to agent resolution is an ADMIN CHOICE — all three modes ship", () => {

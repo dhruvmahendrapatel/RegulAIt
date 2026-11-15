@@ -178,6 +178,7 @@ export default function ChatOpsPage() {
     queryFn: () => api.get<ConnectionsResponse>("/v1/chatops/connections"),
   });
   const [tab, setTab] = useState("workspaces");
+  const [linkPosture, setLinkPosture] = useState<string | null>(null);
   const connectors = useConnectors();
   const act = useAction();
 
@@ -244,6 +245,9 @@ export default function ChatOpsPage() {
         queryKey={["chatops", "links"]}
         sort={{ key: "created", dir: "desc" }}
         attention={[{ label: "admin-asserted", filters: { verification: "admin_asserted" } }]}
+        // the API's own link-posture sentence, kept with the preview as the full list keeps it (review of #642)
+        info={linkPosture ? <p>{linkPosture}</p> : undefined}
+        onRows={(_rows, raw) => setLinkPosture(typeof raw.posture === "string" ? raw.posture : null)}
         note={
           <div className={v.row}>
             <Badge tone="warn">Unverified identity</Badge>
@@ -278,7 +282,7 @@ export default function ChatOpsPage() {
         idPrefix="chatops"
         label="ChatOps settings"
       />
-      {/* I-2: both panels stay mounted (hidden when not selected), so a half-typed workspace, recipient list or route survives a tab switch */}
+      {/* the kit panels stay mounted while hidden, so a half-typed workspace, recipient list or route survives a tab switch (I-2; review of #642) */}
       <TabPanel idPrefix="chatops" id="workspaces" active={tab}><div className={v.stack}>
       <Card title="Workspaces">
         <QueryGate loading={connections.isLoading} error={connections.error} onRetry={refresh}>

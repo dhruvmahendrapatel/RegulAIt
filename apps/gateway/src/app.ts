@@ -64,6 +64,7 @@ import {
   runWithAuditActor,
   runWithRlsPrincipal,
   runWithRlsSystem,
+  runAsBootstrapAdmin,
   runWithRlsPrincipalStep,
   runWithoutRlsScope,
   currentRlsScope,
@@ -423,6 +424,7 @@ export interface BuildAppOptions {
 import { z } from "zod";
 import { boundTargetsForApprovals, registerMcpProxy } from "./mcp-proxy.js";
 import { clearUpstreamCredentialOnUrlMove, registerMcpUpstreamCredentialRoutes } from "./mcp-upstream-credential.js";
+import { registerIntegrationLifecycleRoutes, withLifecycle } from "./integration-lifecycle.js";
 import { disableUpstreamExchangeOnUrlMove, registerUpstreamTokenExchangeRoutes } from "./upstream-token-exchange.js";
 import { registerA2aRoutes } from "./a2a.js";
 import { registerMcpBundleRoutes } from "./mcp-bundles.js";
@@ -450,6 +452,8 @@ import {
 } from "./compat-core.js";
 import { registerAnthropicCompat } from "./compat-anthropic.js";
 import { registerOpenAiCompat } from "./compat-openai.js";
+import { compatDialectFor, reshapeCompat401 } from "./compat-auth-errors.js";
+import { registerResponsesCompat } from "./compat-responses.js";
 import { registerModelsDiscovery } from "./compat-models.js";
 import { registerVirtualKeyRoutes, routesForPurpose } from "./virtual-keys.js";
 import { registerModelPolicyRoutes } from "./model-policy.js";
@@ -480,6 +484,7 @@ import { registerMcpHighRiskRoutes } from "./mcp-high-risk.js";
 // ADR-0101 — federated MCP registries. Admin-only through the default gate;
 // a sync writes only the catalogue and an import is an explicit operator act.
 import { privateRangesRelaxation, registerMcpRegistryRoutes } from "./mcp-registry.js";
+import { registerMcpCatalogueRoutes } from "./mcp-catalogue.js";
 import {
   MCP_PROXY_ROUTE_URL,
   registerMcpAuthMetadata,
@@ -548,6 +553,7 @@ import { registerUsageExtractorRoutes } from "./usage-extractors.js";
 import { registerDemoBeatRoutes } from "./demo-beats.js";
 import { registerProjectArchiveRoutes } from "./project-archive.js";
 import { registerRoleTeamRenameRoutes } from "./role-team-rename.js";
+import { registerConnectorCatalogueRoutes } from "./connector-catalogue.js";
 // ADR-0185 G5 — request metrics (a no-op seam until the meter lands)
 import { registerMetricsHooks } from "./metrics.js";
 import {
@@ -602,7 +608,7 @@ import { WEB_UI_ROUTES, defaultWebDistDir, registerWebServing } from "./web-serv
 // ADR-0053 — the auth-class sets the two gates below branch on. They live in
 // their own module so the published OpenAPI document derives each route's
 // documented credential requirement from the SAME objects that enforce it.
-import { AUTH_EXEMPT_ROUTES, NON_ADMIN_ROUTES } from "./route-classes.js";
+import { AUTH_EXEMPT_ROUTES, NON_ADMIN_ROUTES, requestRlsScope } from "./route-classes.js";
 import { registerOpenApiRoutes, type RouteInventoryEntry } from "./openapi.js";
 import { registerOnboardingRoutes } from "./onboarding.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
@@ -612,6 +618,7 @@ import { registerFederationRoutes } from "./federation-routes.js";
 import { registerMcpIdentityOidcRoutes } from "./mcp-identity-oidc-routes.js";
 import { registerEndpointImportRoutes } from "./endpoint-import-routes.js";
 import { registerThirdPartyIngestRoutes } from "./third-party-ingest-routes.js";
+import { registerSiemDeliveryRoutes } from "./siem-delivery.js";
 import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
 import { registerEndpointMcpConfigRoutes } from "./endpoint-mcp-config.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
@@ -620,6 +627,7 @@ import { registerCostReconciliationRoutes } from "./cost-reconcile.js";
 import { registerTracingRoutes } from "./tracing.js";
 import { registerCompliancePackRoutes } from "./compliance-packs.js";
 import { registerCopilotRoutes } from "./copilot.js";
+import { registerCopilotRedteamGateRoutes } from "./copilot-redteam-gate.js";
 import { registerBuilderRoutes } from "./builder.js";
 // ADR-0180 (D3) — continuous assurance: P0's gate-mode setting and each item owner's routes
 import { registerAssuranceSettingsRoutes } from "./assurance-settings.js";
@@ -1111,6 +1119,20 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         }),
       );
     }
+    // ADR-0288 — a 401 on a COMPAT surface is re-enveloped in that surface's
+    // provider dialect so an off-the-shelf SDK can read it. The auth hook still
+    // decides every refusal; this only changes the body's shape (the code is
+    // kept as regulait_code), and a body that is already provider-shaped passes.
+    if (reply.statusCode === 401) {
+      const dialect = compatDialectFor(req);
+      if (dialect) {
+        const reshaped = reshapeCompat401(payload, dialect);
+        if (reshaped !== null) {
+          reply.header("content-length", Buffer.byteLength(reshaped));
+          return reshaped;
+        }
+      }
+    }
     return payload;
   });
 
@@ -1149,7 +1171,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // The MCP route stays org-only: scope rules cover the compat surfaces.
   // SURFACE EXPOSURE IS NOT ENTITLEMENT — a rule passing this gate grants
   // nothing; evaluateAgent still gates the dispatch identically.
-  app.addHook("onRequest", async (req, reply) => {
+  // ADR-0234 batch 7a (#809 review): this gate runs before the authentication hook, with no principal yet. Its
+  // credential lookup and policy resolution run under `authenticate`, like the authentication hook's own.
+  const interceptionGate = async (req: FastifyRequest, reply: FastifyReply) => {
     const route = `${req.method} ${req.routeOptions.url ?? ""}`;
     if (!INTERCEPTION_GATED_ROUTES.has(route)) return;
     const settings = await loadInterceptionSettings(db);
@@ -1198,6 +1222,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     if (!enabled) {
       return reply.status(404).send(notFoundBody(req.method, req.url));
     }
+  };
+  app.addHook("onRequest", async (req, reply) => {
+    if (!INTERCEPTION_GATED_ROUTES.has(`${req.method} ${req.routeOptions.url ?? ""}`)) return;
+    return runWithRlsSystem("authenticate", "gateway.interception-gate", () => interceptionGate(req, reply));
   });
 
   // ADR-0025: the session-authenticated auth self-service surface a user may
@@ -1447,15 +1475,21 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   // ADR-0234 batch 2: from here to the end of the request every statement on the slice-1 tables runs as the
   // authenticated principal (role regulait_app, FORCE row-level security), whatever the route forgets to filter.
-  // A request with no user (an exempt route, the bootstrap token) leaves the `authenticate` scope and runs
-  // unscoped, exactly as before this batch; ADR-0234 records those paths for the runtime cut-over (batch 7).
+  // Batch 7a: a request with no user runs under a named system reason instead of no scope, so it is also under the
+  // policies (and works unchanged on the non-superuser runtime login of batch 7b):
+  //   - an auth-exempt route: the reason its class needs (route-classes.ts exemptRouteRlsReason);
+  //   - the bootstrap token (or a session exchanged for it), which the gateway treats as an admin: bootstrap_admin;
+  //   - a non-user credential (engine runner or enrolment token, PDP client, endpoint agent): credential_request,
+  //     which reads users and appends to the ledger and nothing else (#809 review: never system_task, which is for
+  //     principal-less server work and opens every approval and the whole ledger).
+  // Only a request with no credential at all (refused by the hook above before any handler) stays unscoped.
   app.addHook("preHandler", (req, _reply, done) => {
-    const userId = req.authCtx?.userId;
-    if (typeof userId === "string" && userId.length > 0) {
-      runWithRlsPrincipal({ userId }, () => done());
-    } else {
-      runWithoutRlsScope(() => done());
-    }
+    const scope = requestRlsScope(req.authCtx, req.routeOptions.url ?? "");
+    if (scope.kind === "principal") runWithRlsPrincipal({ userId: scope.userId }, () => done());
+    else if (scope.kind === "exempt") runWithRlsSystem(scope.reason, `gateway.exempt.${scope.reason}`, () => done());
+    else if (scope.kind === "bootstrap") runAsBootstrapAdmin("gateway.bootstrap", () => done());
+    else if (scope.kind === "credential") runWithRlsSystem("credential_request", `gateway.credential.${scope.via}`, () => done());
+    else runWithoutRlsScope(() => done());
   });
 
   // ADR-0187 — THE ENGINE RUNNER CEILING, both directions: a runner or
@@ -2236,6 +2270,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const body = updateServerSchema.parse(req.body);
     const [before] = await db.select().from(mcpServers).where(eq(mcpServers.id, serverId));
     if (!before) return reply.status(404).send({ error: "unknown_server" });
+    // ADR-0207 (G4): a disabled server is read-only; enable it (a stepped-up relaxation) before changing its settings
+    if (before.disabledAt) {
+      return reply.status(409).send({ error: "mcp_server_disabled", detail: "enable the MCP server before editing it" });
+    }
     const isStdio = before.transport === "stdio";
     // ADR-0185 G4 — a server's transport is fixed at registration; a stdio
     // block applies to a stdio server only, and a stdio server has no url or
@@ -2518,6 +2556,23 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
               (rangesRelaxed ? " — a relaxation of the strict default" : ""),
           });
         }
+        // ADR-0207 (G4): a rename or a url move is on the trail with both values, in this transaction
+        if (written.name !== before.name || written.url !== before.url) {
+          await tx.insert(auditLog).values({
+            userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+            serverId,
+            objectType: "mcp_server",
+            objectId: serverId,
+            detail: { phase: "update", from: { name: before.name, url: before.url }, to: { name: written.name, url: written.url }, receiptClass: "configuration" },
+            effect: "allow",
+            ruleId: "mcp-server-updated",
+            ruleChain: [],
+            reason:
+              `MCP server '${before.name}' updated` +
+              (written.name !== before.name ? `: renamed to '${written.name}'` : "") +
+              (written.url !== before.url ? `${written.name !== before.name ? ";" : ":"} url ${before.url} → ${written.url}` : ""),
+          });
+        }
         // ADR-0204: a url move clears the server's upstream credential (audited here), after the row update above, so
         // the row lock orders it against a concurrent set: the secret never follows the url to a new destination
         if (body.url !== undefined && written.url !== before.url) {
@@ -2621,7 +2676,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   });
 
   app.get("/v1/servers", async () => ({
-    servers: (await withOwnership(db, await db.select().from(mcpServers))).map(mcpServerView),
+    servers: (await withLifecycle(db, await withOwnership(db, await db.select().from(mcpServers)))).map(mcpServerView),
   }));
 
   app.get("/v1/servers/:serverId/tools", async (req) => {
@@ -4737,7 +4792,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   ): Promise<void> {
     const waiting = await builderStepsAwaitingApproval(d, updated.id);
     if (!waiting.length) return;
-    scheduleBackgroundWork(d, async () => {
+    // ADR-0234 batch 7a: the paused steps are the requester's, so the resumed turn runs as the requester
+    scheduleBackgroundWork(d, () => runWithRlsPrincipal({ userId: updated.userId }, async () => {
       try {
         await resumeBuilderAfterApproval(d, opts.dataKey, updated, binaryDecision, deciderUserId);
       } catch (err) {
@@ -4745,7 +4801,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           userId: deciderUserId,
           ...(updated.objectType === "connector_call"
             ? { objectType: "connector" as const, objectId: updated.connectorId }
-            : { objectType: "mcp_tool" as const, objectId: null, serverId: updated.serverId, toolName: updated.toolName }),
+            : updated.objectType === "model_call"
+              ? { objectType: "agent" as const, objectId: updated.agentId }
+              : { objectType: "mcp_tool" as const, objectId: null, serverId: updated.serverId, toolName: updated.toolName }),
           detail: { approvalId: updated.id, phase: "builder-resume", receiptClass: "excluded" },
           effect: "deny",
           ruleId: "builder-tool-step-resume-failed",
@@ -4757,7 +4815,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             .slice(0, 1000),
         });
       }
-    }, app.log);
+    }), app.log);
   }
 
   /**
@@ -6003,6 +6061,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0204 — a server's static upstream credential: set, rotate, clear (admin-only through the default gate, each a
   // settings_relax step-up, audited); reads show only whether one is set, its header and last four characters
   registerMcpUpstreamCredentialRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0207: disable, enable and delete connectors and MCP servers; delete MCP registries
+  registerIntegrationLifecycleRoutes(app, db);
   // ADR-0238: RFC 8693 token exchange for down-scoped upstream credentials (admin, settings_relax step-up)
   registerUpstreamTokenExchangeRoutes(app, db, { dataKey: opts.dataKey });
   registerA2aRoutes(app, db, { dataKey: opts.dataKey });
@@ -6025,6 +6085,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ungranted and subject to the same ADR-0097 admission and ADR-0043 egress
   // gates as any hand-registered server.
   registerMcpRegistryRoutes(app, db);
+  // ADR-0256 — seed the catalogue from a preset (official MCP Registry, awesome-mcp-servers), import a signed offline
+  // bundle, and read the deduped catalogue. Every entry is available, not admitted; nothing here creates a server.
+  registerMcpCatalogueRoutes(app, db);
   // ADR-0097 part B — RFC 9728. Both routes are AUTH_EXEMPT by design: a
   // client with no credential is exactly the one that needs to read them.
   registerMcpAuthMetadata(app);
@@ -6047,6 +6110,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0206: G1 project archive and G10 rename roles and teams (admin-only)
   registerProjectArchiveRoutes(app, db);
   registerRoleTeamRenameRoutes(app, db);
+  // ADR-0255 (P31) — the governed connector catalogue; admin-only (not in NON_ADMIN_ROUTES), enablement audited
+  registerConnectorCatalogueRoutes(app, db);
   registerPosturePresetRoutes(app, db, { sink: anchorSink, bootstrapConfigured: Boolean(opts.bootstrapToken) });
   // ADR-0124 — the kill switch and safe modes
   registerExecutionControlRoutes(app, db);
@@ -6107,6 +6172,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // lifecycle (admin-only by default; enabling and issuing the write-only credential are step-ups, audited) and the
   // exporter's route, authenticated in-route by the source's `rgti_` token. Records are attributed third-party evidence.
   registerThirdPartyIngestRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0303: SIEM delivery of the audit chain (admin-only through the default gate)
+  registerSiemDeliveryRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0195 SD4b — the RegulAIt endpoint agent: ticket redemption and registration (authenticated in-route by the
   // bulk token or the device ticket), the agent's own routes (its DPoP-bound self token only), and the admin's
   // enrolment-token and device routes (admin-only by default). Nothing works until an endpoint agent source is enabled.
@@ -6159,6 +6226,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // treated as UNTRUSTED INPUT through ADR-0042's guardrails; and it has no
   // mutating tools at all — its only route to a change is a proposal that opens
   // an ordinary Approvals-Queue item for a named human.
+  // ADR-0056 §5 amendment: the copilot narrator red-team gate settings
+  registerCopilotRedteamGateRoutes(app, db);
   registerCopilotRoutes(app, db, {
     dataKey: opts.dataKey,
     narrator: opts.copilotNarrator ?? null,
@@ -6186,6 +6255,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   app.addHook("onClose", async () => drainBackgroundWork(db));
   registerAnthropicCompat(app, db, { dataKey: opts.dataKey });
   registerOpenAiCompat(app, db, { dataKey: opts.dataKey });
+  registerResponsesCompat(app, db, { dataKey: opts.dataKey });
   // ADR-0066 §1 — `GET /v1/models`. Gated by the same onRequest hook as the two
   // shims (on EITHER being enabled), and entitlement-filtered per caller inside
   // the handler, so what a client can list is exactly what it can call.

@@ -47,7 +47,9 @@ import {
   type Db,
   type OrgSettingsRow,
   type SQL,
+  runWithoutRlsScope,
 } from "@regulait/db";
+import { ownerDbFor } from "./owner-db.js";
 import { relaxedOrgSettingKeys, type RelaxationFacts, type WritableOrgSettingKey } from "./org-setting-strictness.js";
 import {
   ACCOUNTABILITY_SETTING_KEYS,
@@ -293,17 +295,26 @@ export async function retentionFloor(db: Db): Promise<RetentionFloor> {
 /** One prune pass under the composed floor. Deletes nothing when no floor is
  * set. The prune is itself audited (a meta row newer than every cutoff), with
  * `auto` marking scheduler-driven passes apart from the admin's POST. */
-export async function runAuditPruneOnce(
-  db: Db,
-  actorUserId: string | null,
-  auto: boolean,
-): Promise<{
+export interface AuditPruneResult {
   deleted: number;
   /** ADR-0070: traces removed under the SAME §8.3 floor, in the same pass */
   tracesDeleted: number;
   retainedDays: number | null;
   floorSource: string[];
-}> {
+}
+
+/**
+ * ADR-0234 batch 7a: the prune deletes audit_log rows, and the app role every RLS scope runs as has no DELETE on
+ * audit_log (0272: the ledger is append-only for it). So the pass always leaves the caller's scope (an admin's POST,
+ * a bootstrap-token request, the timer). Batch 7b: it runs on the OWNER (migrator) connection, the only login that
+ * may delete from the ledger, under the owner-only `audit_retention` reason (FORCE row-level security binds the owner
+ * too; the app role cannot use the reason, and has no DELETE).
+ */
+export function runAuditPruneOnce(db: Db, actorUserId: string | null, auto: boolean): Promise<AuditPruneResult> {
+  return runWithoutRlsScope(() => runAuditPruneOnceUnscoped(ownerDbFor(db), actorUserId, auto));
+}
+
+async function runAuditPruneOnceUnscoped(db: Db, actorUserId: string | null, auto: boolean): Promise<AuditPruneResult> {
   const f = await retentionFloor(db);
   if (f.retainedDays == null || f.cutoff == null) {
     return { deleted: 0, tracesDeleted: 0, retainedDays: null, floorSource: [] };
@@ -320,6 +331,8 @@ export async function runAuditPruneOnce(
   const retainedDays = f.retainedDays;
   const deleted = await db.transaction(async (rawTx) => {
     const tx = rawTx as unknown as Db;
+    // ADR-0234 batch 7b: the delete, and the read behind it, under the owner-only retention reason
+    await tx.execute(sql`select pg_catalog.set_config('regulait.system_context', 'audit_retention', true)`);
     const removed = await tx
       .delete(auditLog)
       .where(prunableWhere(cutoff, f.modeOverrides))
