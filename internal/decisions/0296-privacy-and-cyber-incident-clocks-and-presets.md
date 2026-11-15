@@ -75,6 +75,15 @@ model neither), so the catalogue stays data.
 - The web incident model's regime and criterion lists were synced (a model file, no screen change), because enabling
   a regime in the console rebuilt the list from the old two entries and would have dropped the new four. The
   criteria picker and clock cards for the new regimes are UI work (#453).
-- **Owner question open (A5, EU legal text):** these clocks quote short passages of EU acts verbatim, as ADR-0182's EU
-  AI Act clocks already do. If the owner rules that EUR-Lex text may be cited by identifier only, the quotes become
-  paraphrases and the period test reads the number from a separate field.
+- **Owner decision (2026-11-15, A5, EU legal text), for the GDPR pack:**
+  - Each control cites article numbers. No statutory text is copied.
+  - Each cited article has a one-line plain-language summary in our own words (`GDPR_ARTICLE_SUMMARIES`).
+  - Each control's description carries those summaries, marked "not the legal text".
+  - The description links the official EUR-Lex text: the regulation's ELI address,
+    `https://eur-lex.europa.eu/eli/reg/2016/679/oj` (`GDPR_EUR_LEX_URL`).
+  - EUR-Lex refuses automated fetches, so no per-article anchor could be checked and none is guessed; the link is to
+    the whole regulation.
+  - A test checks that every cited article has its summary and that every description carries the link.
+- **Still open for the owner:** the incident clocks (part 1) quote short passages of EU acts verbatim, as ADR-0182's
+  EU AI Act clocks already do. The A5 decision names the GDPR pack only, so the clocks are unchanged. If it is meant
+  to cover them too, their quotes become paraphrases and the period test reads the number from a separate field.

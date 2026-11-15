@@ -13,8 +13,10 @@
  *    data-subject requests, erasures, the processing limit at dispatch, the PII cascade and the incident register.
  *
  * CITATION. Each control cites its article or section number; titles, descriptions and notes are regulAIt's own
- * words. No statutory text is reproduced (the EU legal-text licence question, P18 A5, is the owner's). Nothing here
- * is legal advice or a statement of compliance, and no pack has had a domain review.
+ * words. No statutory text is reproduced. For the GDPR the owner decided (2026-11-15, P18 A5): article numbers, a
+ * one-line plain-language summary of each cited article in regulAIt's own words, and a link to the official EUR-Lex
+ * text (`GDPR_ARTICLE_SUMMARIES`, `GDPR_EUR_LEX_URL`). Nothing here is legal advice or a statement of compliance, and
+ * no pack has had a domain review.
  *
  * Imports from `compliance-packs.ts` are TYPE-ONLY: that file imports this one to append the packs.
  */
@@ -213,7 +215,52 @@ const pack = (framework: PrivacyLaw, title: string, source: string, revision: st
   controls,
 });
 
-export const GDPR_PACK = pack("gdpr", "GDPR — privacy operations (control mapping)", "Regulation (EU) 2016/679", "OJ L 119, 4.5.2016", [
+/** the official text of the GDPR on EUR-Lex (its European Legislation Identifier, the permanent address) */
+export const GDPR_EUR_LEX_URL = "https://eur-lex.europa.eu/eli/reg/2016/679/oj";
+
+/**
+ * Owner decision 2026-11-15 (P18 A5): each GDPR article the pack cites, with a one-line summary in regulAIt's own
+ * plain words. A summary is a pointer to the article, not its text; the official text is at `GDPR_EUR_LEX_URL`.
+ */
+export const GDPR_ARTICLE_SUMMARIES: Readonly<Record<string, string>> = {
+  "Art. 5(1)(b)": "Use personal data only for the clear purposes it was collected for, not for unrelated ones.",
+  "Art. 5(1)(c)": "Use no more personal data than the purpose needs.",
+  "Art. 12(3)": "Answer a person's request about their data within a month, or explain a longer wait for a complex case.",
+  "Art. 15": "A person can learn whether their data is used, get a copy of it and be told how it is used.",
+  "Art. 17": "A person can have their data deleted in the cases the article lists, such as when it is no longer needed.",
+  "Art. 21": "A person can object to some uses of their data, and to direct marketing at any time.",
+  "Art. 25": "Build data protection into systems from the start, and make the most protective settings the default.",
+  "Art. 30": "Keep a written record of how and why personal data is processed.",
+  "Art. 32": "Protect personal data with security suited to the risk.",
+  "Art. 33": "Report a personal data breach to the supervisory authority quickly, normally within 72 hours.",
+  "Art. 34": "Tell the people affected when a breach is likely to put them at high risk.",
+  "Art. 35": "Assess the impact on people before starting processing that is likely to be high risk.",
+  "Art. 44-49": "Send personal data outside the EEA only under an adequacy decision, safeguards or a listed exception.",
+};
+
+/** the articles each GDPR control cites, in the order its title gives them */
+export const GDPR_CONTROL_ARTICLES: Readonly<Record<string, readonly string[]>> = {
+  "gdpr:records-of-processing": ["Art. 30"],
+  "gdpr:access-requests": ["Art. 12(3)", "Art. 15"],
+  "gdpr:erasure": ["Art. 17"],
+  "gdpr:processing-limit": ["Art. 5(1)(b)", "Art. 5(1)(c)"],
+  "gdpr:personal-data-blocking": ["Art. 25", "Art. 32"],
+  "gdpr:objection": ["Art. 21"],
+  "gdpr:breach-notification": ["Art. 33", "Art. 34"],
+  "gdpr:impact-assessment": ["Art. 35"],
+  "gdpr:international-transfers": ["Art. 44-49"],
+};
+
+/** a GDPR control's description gains the plain-language summary of each article it cites and the official link */
+const withGdprArticles = (c: Control): Control => {
+  const arts = GDPR_CONTROL_ARTICLES[c.controlRef];
+  if (!arts) throw new Error(`no GDPR articles recorded for ${c.controlRef}`);
+  const summaries = arts.map((a) => `${a}: ${GDPR_ARTICLE_SUMMARIES[a]}`).join(" ");
+  const cites = `In plain words (not the legal text): ${summaries} Official text: ${GDPR_EUR_LEX_URL}`;
+  return { ...c, description: c.description ? `${c.description} ${cites}` : cites };
+};
+
+const GDPR_BASE_PACK = pack("gdpr", "GDPR — privacy operations (control mapping)", `Regulation (EU) 2016/679, ${GDPR_EUR_LEX_URL}`, "OJ L 119, 4.5.2016", [
   ...common("gdpr", { records: "Art. 30", access: "Art. 12(3), 15", erasure: "Art. 17", minimise: "Art. 5(1)(b)-(c)", security: "Art. 25, 32" }),
   ev("gdpr:objection", "Art. 21 — Stop processing when a person objects", {
     coverage: "partial",
@@ -231,6 +278,15 @@ export const GDPR_PACK = pack("gdpr", "GDPR — privacy operations (control mapp
   att("gdpr:impact-assessment", "Art. 35 — Assess high-risk processing before it starts", "unaddressed", "Not addressed by the platform: there is no impact-assessment record yet (P18 lane C1). Attest the DPIAs carried out."),
   att("gdpr:international-transfers", "Art. 44-49 — Transfer personal data abroad only on a valid basis", "partial", "Partly supported: provider region pinning and BYOC keep data in place. Attest the transfer mechanisms relied on."),
 ]);
+
+export const GDPR_PACK: CreateCompliancePackInput = {
+  ...GDPR_BASE_PACK,
+  provenance: {
+    ...GDPR_BASE_PACK.provenance,
+    note: `${LAW_NOTE} Each control's description summarises its articles in plain words and links the official EUR-Lex text.`,
+  },
+  controls: GDPR_BASE_PACK.controls.map(withGdprArticles),
+};
 
 export const CCPA_PACK = pack("ccpa", "CCPA/CPRA — privacy operations (control mapping)", "Cal. Civ. Code § 1798.100 ff. (CCPA as amended by the CPRA)", "as in force 2026", [
   ...common("ccpa", { records: "§ 1798.100(a)", access: "§ 1798.110, 1798.130", erasure: "§ 1798.105", minimise: "§ 1798.100(c)", security: "§ 1798.100(e)" }),

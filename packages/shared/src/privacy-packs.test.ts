@@ -6,6 +6,8 @@
  *  2. PACKS parse, are seeded once, claim no review or compliance, cite by article or section, and every
  *     `audit_decisions` filter names a rule id the gateway writes (read from its source).
  *  3. Every privacy control is filed under the privacy trust dimension.
+ *  4. GDPR (owner decision 2026-11-15, P18 A5): every cited article has a one-line plain-language summary in our own
+ *     words, each control's description carries its articles' summaries and the official EUR-Lex link.
  */
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -15,7 +17,16 @@ import { describe, expect, it } from "vitest";
 import { COMPLIANCE_PACK_FRAMEWORKS, DEFAULT_COMPLIANCE_PACKS, createCompliancePackSchema } from "./compliance-packs.js";
 import { INTERNATIONAL_PII_CATEGORIES } from "./pii-international.js";
 import { DSR_DEFAULT_SLA_DAYS } from "./privacy-ops.js";
-import { PRIVACY_LAWS, PRIVACY_LAW_PRESETS, PRIVACY_PACKS, privacyPresetPatch } from "./privacy-packs.js";
+import {
+  GDPR_ARTICLE_SUMMARIES,
+  GDPR_CONTROL_ARTICLES,
+  GDPR_EUR_LEX_URL,
+  GDPR_PACK,
+  PRIVACY_LAWS,
+  PRIVACY_LAW_PRESETS,
+  PRIVACY_PACKS,
+  privacyPresetPatch,
+} from "./privacy-packs.js";
 import { dimensionForControl } from "./trust-dimensions.js";
 
 const loose = { dsrSlaDays: 90, piiInternationalCategories: [] as string[], privacyOpsEnabled: false };
@@ -100,9 +111,43 @@ describe("packs", () => {
   });
 });
 
+describe("GDPR: article numbers, a plain-language summary per article, the official EUR-Lex link (owner, 2026-11-15)", () => {
+  it("links the regulation's official EUR-Lex address", () => {
+    expect(GDPR_EUR_LEX_URL).toBe("https://eur-lex.europa.eu/eli/reg/2016/679/oj");
+    expect(GDPR_PACK.provenance.source).toContain(GDPR_EUR_LEX_URL);
+  });
+
+  it("every control's articles are the ones its title cites, and each has a one-line summary", () => {
+    expect(Object.keys(GDPR_CONTROL_ARTICLES).sort()).toEqual(GDPR_PACK.controls.map((c) => c.controlRef).sort());
+    const used = new Set(Object.values(GDPR_CONTROL_ARTICLES).flat());
+    expect([...used].sort()).toEqual(Object.keys(GDPR_ARTICLE_SUMMARIES).sort());
+    // the title's citation, expanded: "Art. 12(3), 15" is two articles; "Art. 5(1)(b)-(c)" is points (b) and (c)
+    const cited = (title: string) =>
+      title
+        .split(" — ")[0]!
+        .replace(/^Art\. /, "")
+        .split(", ")
+        .flatMap((a) => (a === "5(1)(b)-(c)" ? ["5(1)(b)", "5(1)(c)"] : [a]))
+        .map((a) => `Art. ${a}`);
+    for (const c of GDPR_PACK.controls) expect(GDPR_CONTROL_ARTICLES[c.controlRef], c.controlRef).toEqual(cited(c.title));
+    for (const [a, summary] of Object.entries(GDPR_ARTICLE_SUMMARIES)) {
+      expect(summary.length, a).toBeLessThanOrEqual(120);
+      expect(summary, a).toMatch(/^[A-Z][^.]*\.$/); // one sentence
+    }
+  });
+
+  it("each description carries its articles' summaries, says they are not the legal text, and links the official text", () => {
+    for (const c of GDPR_PACK.controls) {
+      for (const a of GDPR_CONTROL_ARTICLES[c.controlRef]!) expect(c.description, c.controlRef).toContain(`${a}: ${GDPR_ARTICLE_SUMMARIES[a]}`);
+      expect(c.description, c.controlRef).toContain("not the legal text");
+      expect(c.description, c.controlRef).toContain(`Official text: ${GDPR_EUR_LEX_URL}`);
+    }
+  });
+});
+
 /** content hashes of the published versions: a change is a new version (ADR-0058) */
 const PINNED: Record<string, string> = {
-  gdpr: "cfa4c4f9430df90fb710729da81c9b572910ed393f0a5ecaabbc959ce47db36b",
+  gdpr: "086a80a23faeb1add32d10152797f0c8d879455afe49e3da58f41836572fa039",
   ccpa: "16f2afb73784ae221fc36b14ed9acb16085e7b31605856288b5081ed729c3ab8",
   dpdp: "43bdb45c13a64adff3ea135cfc60c538f8313215f5d931b40dffe005a2585786",
   lgpd: "c4ea8d6235311e572b8303a2095007117dee289a9a2269cfb9ae86d2a72f5b71",
