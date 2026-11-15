@@ -19,15 +19,16 @@
  * `newly allowed` is labelled as structurally zero (ABAC cannot grant) so the
  * zero reads as a property of the model rather than an absence of evidence.
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { EvaluateDecision, RuleTrace } from "../../../api/adminTypes";
 import { UUID_RE, ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, CodeBlock, EmptyState, Field, IdChip, Input, Select, Table, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, CodeBlock, EmptyState, Field, IdChip, Input, Select, SkeletonBlock, Table, type Tone } from "../../../ui/kit";
 import { optionEls, serverOpts, useAction, useServerTools, useServers, useUsers, userOpts } from "../adminKit";
 import { DataList } from "../../../ui/DataList";
+import { normalisePage } from "../../../ui/listState";
 import { PolicySimulationSettingsCard } from "./PolicySimulationSettingsCard";
 import { POLICY_SIMULATION_REFUSALS } from "./policySimulationModel";
 import { withRefusalCopy } from "./refusalCopy";
@@ -73,6 +74,18 @@ export default function SimulationPage() {
     users.data?.users.find((u) => u.id === userId)?.email ??
     "";
   const serverLabel = servers.data?.servers.find((s) => s.id === serverId)?.name ?? "";
+
+  // I-2 (#453, pattern 4): one empty state while nothing exists. Has any preview ever been kept? One row is enough to
+  // know (its key sits under the history list's, so the refresh after a preview reloads it too). Only the first answer
+  // is waited for; a failed read falls through to the page as it is, where the history list says it failed.
+  const anyPreview = useQuery({
+    queryKey: ["admin", "policy-simulations", "any"],
+    queryFn: () => api.get<unknown>("/v1/policy-simulations?limit=1").then((b) => normalisePage<SimulationRow>(b, "simulations")),
+  });
+  const [previewShown, setPreviewShown] = useState(false);
+  const settling = result === null && !previewShown && anyPreview.dataUpdatedAt === 0 && anyPreview.errorUpdatedAt === 0;
+  const nothingYet = result === null && !previewShown && anyPreview.isSuccess && anyPreview.data.items.length === 0;
+  const keptFidelity = typeof anyPreview.data?.raw.fidelity === "string" ? anyPreview.data.raw.fidelity : null;
 
   return (
     <>
@@ -140,7 +153,7 @@ export default function SimulationPage() {
           )}
         </Card>
 
-        {result === null ? (
+        {result === null && (settling || nothingYet) ? null : result === null ? (
           <Card>
             <EmptyState
               title="Run an evaluation to see the decision"
@@ -151,7 +164,7 @@ export default function SimulationPage() {
           <DecisionView decision={result} label={evaluatedLabel} />
         )}
 
-        <BlastRadiusPanel />
+        <BlastRadiusPanel settling={settling} nothingYet={nothingYet} keptFidelity={keptFidelity} onPreviewShown={setPreviewShown} />
         <PolicySimulationSettingsCard />
       </div>
     </>
@@ -206,7 +219,15 @@ interface IncompleteRun {
   detail: string;
 }
 
-function BlastRadiusPanel() {
+function BlastRadiusPanel(props: {
+  /** I-2: the history's first answer is still awaited, and nothing is on screen */
+  settling: boolean;
+  /** I-2: no decision, no preview on screen and none kept: the page's one empty state shows here */
+  nothingYet: boolean;
+  /** the fidelity statement from the history's first answer, while the list itself is not shown */
+  keptFidelity: string | null;
+  onPreviewShown: (shown: boolean) => void;
+}) {
   const act = useAction();
   const [incomplete, setIncomplete] = useState<IncompleteRun | null>(null);
   const [versionId, setVersionId] = useState("");
@@ -216,12 +237,15 @@ function BlastRadiusPanel() {
   );
   // ADR-0226: the preview history pages on the server; the fidelity statement comes with each page
   const [fidelity, setFidelity] = useState<string | null>(null);
+  const { onPreviewShown } = props;
+  const shown = Boolean(sim || incomplete);
+  useEffect(() => onPreviewShown(shown), [shown, onPreviewShown]);
 
   return (
     <Card
       title="Blast radius — what would a PROPOSED policy version have changed?"
       infoLabel="the blast-radius dry run"
-      info={fidelity ? <p>{fidelity}</p> : undefined}
+      info={(fidelity ?? props.keptFidelity) ? <p>{fidelity ?? props.keptFidelity}</p> : undefined}
     >
       <form
         className={a.formRow}
@@ -342,6 +366,20 @@ function BlastRadiusPanel() {
             ]}
           />
         </>
+      ) : props.settling ? (
+        <SkeletonBlock lines={3} />
+      ) : props.nothingYet ? (
+        <EmptyState
+          title="Nothing previewed yet"
+          body={
+            <>
+              No blast-radius preview has been run, so no proposed policy version has been checked against recorded
+              history. Paste a proposed policy version id above to see who it would newly block, by name; every preview
+              is kept here. To check one call against live policy instead, pick a user, a server and a tool at the top
+              and select Evaluate.
+            </>
+          }
+        />
       ) : (
         <EmptyState
           title="No preview run yet"
@@ -349,6 +387,8 @@ function BlastRadiusPanel() {
         />
       )}
 
+      {!props.settling && !props.nothingYet && (
+      <>
       <div className={v.sectionTitle}>Previous previews</div>
       <DataList<SimulationRow>
         listId="policy-simulations"
@@ -402,6 +442,8 @@ function BlastRadiusPanel() {
           },
         ]}
       />
+      </>
+      )}
     </Card>
   );
 }
