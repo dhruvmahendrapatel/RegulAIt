@@ -189,7 +189,7 @@ describe("REL-02 / OPS-01: a signal drains the gateway", () => {
     const db = createDb(scratchUrl);
     const port = await freePort();
     const lines: string[] = [];
-    const env = { PATH: process.env.PATH, VITEST: "1" } as NodeJS.ProcessEnv;
+    const env = { PATH: process.env.PATH, VITEST: "1", REGULAIT_DEV_PRIVILEGED_DB_LOGIN: "1" } as NodeJS.ProcessEnv;
     const started = await startGateway({
       db,
       migrationsFolder,
@@ -240,7 +240,7 @@ describe("REL-02 / OPS-01: a signal drains the gateway", () => {
   it("a second signal during the drain exits immediately; an unhandled rejection drains with exit 1", async () => {
     const db = createDb(scratchUrl);
     const port = await freePort();
-    const env = { PATH: process.env.PATH, VITEST: "1" } as NodeJS.ProcessEnv;
+    const env = { PATH: process.env.PATH, VITEST: "1", REGULAIT_DEV_PRIVILEGED_DB_LOGIN: "1" } as NodeJS.ProcessEnv;
     const started = await startGateway({ db, migrationsFolder, port, host: "127.0.0.1", dataKey: REAL_KEY, log: () => {}, env });
     const proc = new EventEmitter() as EventEmitter & { exit: (code?: number) => void };
     const exits: number[] = [];
