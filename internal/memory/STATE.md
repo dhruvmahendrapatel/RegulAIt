@@ -65,6 +65,9 @@ pg-boss. The prototype is in `spikes/workflow-p30/` (default off); there is no p
 - #717 review (21:09): Jira, monday, Azure DevOps and Asana must also carry an in-body creation time no older than 7 days (below the 30-day record retention), so a replay after the prune is refused; concurrent-duplicate test added ([ADR-0010 amendment (b)](../decisions/0010-pm-inbound-sync-webhooks-plus-read-through.md)).
 
 **2026-11-07 - S-02 closed: published dev secrets need loopback or an opt-in; the bootstrap credential retires (PR #728, [ADR-0167 amendment](../decisions/0167-security-review-batch.md)).**
+- 2026-11-15 addendum (owner: restructure CodeQL alerts, never dismiss): `hashToken` is now scrypt (N=2^10, r=8)
+  over the domain salt `regulait:token-hash:v2`, so every stored token hash (sessions, keys, handles) stops resolving and
+  is re-issued; `constantTimeEqual` is a random-keyed HKDF compare; five SAST allow-list entries removed.
 - The published `dev-bootstrap` token and 64×`a` data key boot only on a loopback-only listener with no deploy signal, or
   with `REGULAIT_ALLOW_DEV_SECRETS=1` (a boot banner and a `dev-secrets-opt-in` audit row). Every compose bring-up now
   needs the opt-in in `.env` or real values; the README quickstart says so.

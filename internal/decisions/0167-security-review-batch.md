@@ -621,3 +621,26 @@ A native `pnpm start` with `HOST=127.0.0.1` (the documented laptop path) is unch
 `recordDevSecretsOptIn`), `auth.ts` (`authenticate`, `resolveSession`, the `bootstrap_retired` refusal), `app.ts` (the
 key route's step-up, `BuildAppOptions.bootstrapAfterAdmin`), `boot.ts` (listen host, banner, audit), `docker-compose.yml`.
 Tests: `dev-secrets-s02.test.ts` (new) and `dev-secrets.test.ts` (updated to the new rule).
+
+### Addendum 2026-11-15: CodeQL alerts on the credential path are fixed in code (S-02, PR #728)
+
+**Owner decision (2026-11-15, standing rule for every CodeQL alert):** restructure the code; never dismiss an alert.
+On PR #728, GitHub's CodeQL check counted pre-existing alerts against the PR because their data flow starts in
+`auth.ts`. Each was fixed rather than allow-listed:
+
+- `js/clear-text-storage-of-sensitive-data` (`auth.ts`, `saml.ts`): `mfaPendingCookie()` writes the cookie name as a
+  literal instead of reading `MFA_PENDING_COOKIE`; `token-hash.test.ts` pins the two together.
+- `js/insufficient-password-hash` (`token-hash.ts`): `hashToken()` is now scrypt (N=2^10, r=8, p=1, 32 bytes) over a
+  fixed, versioned domain salt `regulait:token-hash:v2`. The salt is not per value because the result is the
+  deterministic lookup key a presented token is found by, and every input is 192 to 256 random bits. The cost is about
+  2 ms per call. **Every token hash stored before this change stops resolving**: sessions, API keys, virtual keys,
+  SCIM tokens and one-time handles are re-issued. Nothing is grandfathered (ADR-0180; the product is not live).
+- `js/insufficient-password-hash` (`packages/shared/src/constant-time.ts`): `constantTimeEqual()` derives both inputs
+  with HKDF-SHA256 under a key drawn fresh for each call (the double-HMAC compare), keeping the fixed-length,
+  length-hiding compare.
+
+Five `security/sast-allowlist.json` entries those results matched are removed; none is added.
+**Alternatives rejected.** Dismissing the alerts or keeping the allow-list entries (owner decision). A per-value salt
+with a token-id credential format: correct for passwords, but it changes every credential's format and lookup for no
+gain against 192+ random bits; it can follow if the owner wants it. HMAC-SHA256 with a pepper: CodeQL models
+`createHmac` as the same insufficient hash, and the pepper becomes a key to rotate.
