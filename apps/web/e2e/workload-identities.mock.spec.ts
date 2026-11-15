@@ -432,6 +432,11 @@ test.describe("ADR-0188 S6: workload identities", () => {
     await openIdentity(page);
     expect(m.calls.some((c) => c.path.endsWith("/grant-proposals"))).toBe(false);
     await page.getByRole("button", { name: "Propose grants from observed use" }).click();
+    // P3: the overview previews them; the selection and Accept are on the proposals' own page
+    await expect(page.getByRole("row", { name: /no steward holds it/ })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Proposed grants from observed use · 3 proposals · 1 not held by a steward" })).toBeVisible();
+    await page.getByRole("link", { name: "View all proposals and accept" }).click();
+    await expect(page.getByRole("heading", { name: "Grant proposals", level: 1 })).toBeVisible();
     await expect(page.getByRole("row", { name: /no steward holds it/ })).toBeVisible();
     await expect(page.getByText("1 observed call(s) cannot become an own grant", { exact: false })).toBeVisible();
     await expectNoAxeViolations(page, "the loaded grant proposals");
@@ -448,6 +453,7 @@ test.describe("ADR-0188 S6: workload identities", () => {
     const su = await requireStepUpOn(page, { method: "PUT", path: `/v1/workload-identities/${IDENTITY.id}/grants`, kind: "identity_manage" });
     await openIdentity(page);
     await page.getByRole("button", { name: "Propose grants from observed use" }).click();
+    await page.getByRole("link", { name: "View all proposals and accept" }).click();
     const allowedBefore = page.getByRole("checkbox", { name: `Include Agent invocation; modes: execute on ${AGENT.name}` });
     const neverRan = page.getByRole("checkbox", { name: `Include Agent invocation; modes: review on ${AGENT.name}` });
     await expect(allowedBefore).toBeChecked();
@@ -480,6 +486,8 @@ test.describe("ADR-0188 S9: SPIFFE trust bundles", () => {
   test("lists bundles, says the retired variable is ignored, and refuses a private key in the browser", async ({ page }) => {
     const m = await mockApi(page, { legacyEnv: true });
     await page.goto("/ui/admin/workload-identities");
+    // P3: signing keys and SPIFFE trust have their own tab
+    await page.getByRole("tab", { name: /^Signing & trust/ }).click();
     const c = card(page);
     await expect(c.getByRole("row", { name: /byoc\.example\.test.*active/ }).first()).toContainText("1 JWT-SVID key(s)");
     await expect(c.getByRole("row", { name: /byoc\.example\.test.*active/ }).first()).toContainText("fetched");
@@ -503,6 +511,8 @@ test.describe("ADR-0188 S9: SPIFFE trust bundles", () => {
     await mockApi(page);
     const su = await requireStepUpOn(page, { method: "POST", path: "/v1/identity/spiffe-trust-bundles", kind: "identity_manage" });
     await page.goto("/ui/admin/workload-identities");
+    // P3: signing keys and SPIFFE trust have their own tab
+    await page.getByRole("tab", { name: /^Signing & trust/ }).click();
     const c = card(page);
     await c.getByLabel("Trust domain", { exact: true }).fill("new.example.test");
     await c.getByLabel("Bundle (SPIFFE JSON or PEM CA certificates)").fill(CA_PEM);
@@ -520,6 +530,8 @@ test.describe("ADR-0188 S9: SPIFFE trust bundles", () => {
     await mockApi(page);
     const su = await requireStepUpOn(page, { method: "POST", path: "/v1/identity/spiffe-trust-bundles", kind: "identity_manage" });
     await page.goto("/ui/admin/workload-identities");
+    // P3: signing keys and SPIFFE trust have their own tab
+    await page.getByRole("tab", { name: /^Signing & trust/ }).click();
     const c = card(page);
     await c.getByRole("button", { name: `Replace the bundle of ${BUNDLE.trustDomain}` }).click();
     await expect(c.getByLabel("Trust domain", { exact: true })).toHaveValue(BUNDLE.trustDomain);
@@ -539,6 +551,8 @@ test.describe("ADR-0188 S9: SPIFFE trust bundles", () => {
     await mockApi(page);
     const su = await requireStepUpOn(page, { method: "POST", path: `/v1/identity/spiffe-trust-bundles/${BUNDLE.id}/revoke`, kind: "identity_manage" });
     await page.goto("/ui/admin/workload-identities");
+    // P3: signing keys and SPIFFE trust have their own tab
+    await page.getByRole("tab", { name: /^Signing & trust/ }).click();
     await card(page).getByRole("button", { name: `Revoke the bundle of ${BUNDLE.trustDomain}` }).click();
     const confirm = page.getByRole("dialog", { name: `Revoke the bundle of ${BUNDLE.trustDomain}?` });
     await expect(confirm).toContainText("cannot be undone");
@@ -566,6 +580,8 @@ test.describe("ADR-0188 S9 follow-up: SPIFFE bundle endpoints", () => {
   test("lists the endpoint with its fetch state, and refuses a non-https URL, a missing server ID and a malformed one in the browser", async ({ page }) => {
     const m = await mockApi(page);
     await page.goto("/ui/admin/workload-identities");
+    // P3: signing keys and SPIFFE trust have their own tab
+    await page.getByRole("tab", { name: /^Signing & trust/ }).click();
     const c = card(page);
     await expect(c.getByRole("row", { name: /byoc\.example\.test/ })).toContainText("fetching");
     await expect(c.getByRole("row", { name: /byoc\.example\.test/ })).toContainText("(https_spiffe spiffe://byoc.example.test/spire/server)");
@@ -593,6 +609,8 @@ test.describe("ADR-0188 S9 follow-up: SPIFFE bundle endpoints", () => {
     await mockApi(page);
     const su = await requireStepUpOn(page, { method: "PUT", path: "/v1/identity/spiffe-bundle-endpoints/new.example.test", kind: "identity_manage" });
     await page.goto("/ui/admin/workload-identities");
+    // P3: signing keys and SPIFFE trust have their own tab
+    await page.getByRole("tab", { name: /^Signing & trust/ }).click();
     const c = card(page);
     await c.getByLabel("Trust domain to fetch").fill("new.example.test");
     await c.getByLabel("Bundle endpoint URL").fill("https://bundle.new.example.test/new");
@@ -613,6 +631,8 @@ test.describe("ADR-0188 S9 follow-up: SPIFFE bundle endpoints", () => {
   test("an active uploaded bundle is pinned: the endpoint row does not show the fetch trust window as its limit", async ({ page }) => {
     await mockApi(page, { pinnedUpload: true });
     await page.goto("/ui/admin/workload-identities");
+    // P3: signing keys and SPIFFE trust have their own tab
+    await page.getByRole("tab", { name: /^Signing & trust/ }).click();
     const row = card(page).getByRole("row", { name: /byoc\.example\.test/ });
     await expect(row).toContainText("uploaded bundle in use (pinned)");
     await expect(row).not.toContainText("trusted until");
@@ -622,6 +642,8 @@ test.describe("ADR-0188 S9 follow-up: SPIFFE bundle endpoints", () => {
     await mockApi(page);
     const su = await requireStepUpOn(page, { method: "PUT", path: `/v1/identity/spiffe-bundle-endpoints/${ENDPOINT.trustDomain}`, kind: "identity_manage" });
     await page.goto("/ui/admin/workload-identities");
+    // P3: signing keys and SPIFFE trust have their own tab
+    await page.getByRole("tab", { name: /^Signing & trust/ }).click();
     await card(page).getByRole("button", { name: `Stop fetching the bundle of ${ENDPOINT.trustDomain}` }).click();
     const confirm = page.getByRole("dialog", { name: `Stop fetching the bundle of ${ENDPOINT.trustDomain}?` });
     await expect(confirm).toContainText("stops authenticating at once");

@@ -1131,7 +1131,8 @@
                 "connector_call",
                 "engine_run",
                 "eval_run",
-                "compliance_profile"
+                "compliance_profile",
+                "model_call"
               ]
             }
           },

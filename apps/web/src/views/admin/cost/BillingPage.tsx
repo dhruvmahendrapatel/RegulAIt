@@ -25,9 +25,9 @@ import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Select, Table } from "../../../ui/kit";
 import { KV, QueryGate, Stat, downloadCsv, optionEls, projectOpts, teamOpts, useAction, useProjects, useTeams } from "../adminKit";
 import { useToast } from "../../../ui/toast";
+import { Stepper } from "../../../ui/Stepper";
 import { BillingHistoryCard, RateCardDetail, StatementDetail } from "./BillingHistory";
 import a from "../admin.module.css";
-import bl from "./billing.module.css";
 import v from "../../views.module.css";
 
 interface RateCardEntry {
@@ -294,17 +294,7 @@ export default function BillingPage() {
             </div>
           </Card>
 
-          <ol className={bl.steps} aria-label="Billing set-up">
-            {steps.map((x, i) => (
-              <li key={x.id} className={x.id === step ? bl.stepOn : x.done ? bl.stepDone : undefined}>
-                <button type="button" aria-current={x.id === step ? "step" : undefined} onClick={() => setStep(x.id)}>
-                  <span className={bl.stepNum} aria-hidden>{x.done && x.id !== step ? "✓" : i + 1}</span>
-                  <span>{x.label}</span>
-                  {x.status}
-                </button>
-              </li>
-            ))}
-          </ol>
+          <Stepper label="Billing set-up" steps={steps} current={step} onSelect={setStep} />
 
           {step === "rate" && (
           <Card

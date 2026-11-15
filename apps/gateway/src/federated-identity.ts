@@ -53,6 +53,7 @@ import {
   type Db,
   type FederatedLinkVia,
   type OrgSettingsRow,
+  runWithRlsSystem,
 } from "@regulait/db";
 import { hashToken } from "./token-hash.js";
 
@@ -234,11 +235,15 @@ export type FederatedResolution =
 export async function hasSignedInBefore(db: Db, userId: string): Promise<boolean> {
   const [s] = await db.select({ id: authSessions.id }).from(authSessions).where(eq(authSessions.userId, userId)).limit(1);
   if (s) return true;
-  const [a] = await db
-    .select({ id: auditLog.id })
-    .from(auditLog)
-    .where(and(eq(auditLog.userId, userId), eq(auditLog.ruleId, "login-succeeded")))
-    .limit(1);
+  // ADR-0234 batch 7a: a sign-in callback runs under `identity_provisioning`, which does not read the ledger; this
+  // one bounded lookup of the account's own sign-in history does, under `audit_verify`
+  const [a] = await runWithRlsSystem("audit_verify", "auth.sign-in-history", () =>
+    db
+      .select({ id: auditLog.id })
+      .from(auditLog)
+      .where(and(eq(auditLog.userId, userId), eq(auditLog.ruleId, "login-succeeded")))
+      .limit(1),
+  );
   return Boolean(a);
 }
 
@@ -268,7 +273,8 @@ export async function priorSsoEvidence(db: Db, ref: ProviderRef, userId: string,
       ? await db.select({ name: oidcProviders.name, createdAt: oidcProviders.createdAt }).from(oidcProviders).where(eq(oidcProviders.id, ref.id))
       : await db.select({ name: samlProviders.name, createdAt: samlProviders.createdAt }).from(samlProviders).where(eq(samlProviders.id, ref.id));
   if (!provider) return null;
-  const [row] = await db
+  // ADR-0234 batch 7a: the backfill evidence is a ledger read, under `audit_verify` (see hasSignedInBefore)
+  const [row] = await runWithRlsSystem("audit_verify", "auth.sso-backfill-evidence", () => db
     .select({ at: auditLog.at })
     .from(auditLog)
     .where(
@@ -283,7 +289,7 @@ export async function priorSsoEvidence(db: Db, ref: ProviderRef, userId: string,
       ),
     )
     .orderBy(desc(auditLog.at))
-    .limit(1);
+    .limit(1));
   return row?.at ?? null;
 }
 
