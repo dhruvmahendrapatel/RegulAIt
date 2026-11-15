@@ -33,9 +33,10 @@ own allowlists, which the vendors' clients enforce.
 1. **Pillar 1 stays the source of truth.** `loadEffectiveMcpPolicy` resolves a subject's servers with the kernel's
    `visibleTools`, the same filter `tools/list` applies. It covers every enabled server whose admission and
    release-age state do not hide its tools, and only un-halted tools. A server goes in when at least one tool is
-   visible. A **user** gets direct, role and bundle grants minus revocations. A disabled user gets nothing. A **role**
-   gets the role's own grants, the baseline every holder receives. Teams reach users through ADR-0236 bundles and are
-   covered by the user compile.
+   visible. A **user** gets direct, role and bundle grants minus revocations. A disabled user gets nothing. A **role** gets the role's own tool and server grants plus the ADR-0236 MCP bundles granted to the
+   role, while `org_settings.mcp_bundles_enabled` is on (owner decision M1, below). That is the baseline every holder
+   receives through the role, and the same set the gateway already allows them. Teams reach users through ADR-0236
+   bundles and are covered by the user compile.
 2. **Name the gateway, never the upstream.** Each entitled server is written as `<REGULAIT_PUBLIC_URL>/mcp/<server id>`.
    The vendor client admits only the governed endpoint, and the gateway still decides every tool call. A bundle
    therefore cannot widen what the gateway allows. Per-tool lists appear only where a vendor can show them (the
@@ -65,6 +66,15 @@ own allowlists, which the vendors' clients enforce.
 8. **Drift (slice 2).** ADR-0259's `endpoint_mcp_servers` rows will be compared with the latest bundles. A configured
    server whose identity is not an exported gateway URL is drift. Devices are pseudonymous, so drift is reported per
    device and identity, not per named user.
+
+## Owner decision
+
+- **M1 (owner, 2026-11-15, relayed by the master on #850):** a role's compiled bundle **includes** the ADR-0236 MCP
+  bundles granted to that role, matching what the gateway already allows a holder of the role. It is built on the same
+  query as the user path (`loadRoleBundleToolGrants`, beside `loadBundleToolGrants` in `entitlements.ts`), so the
+  bundles switch, the current version, archived bundles and the fail-closed inventory join all behave the same way.
+  The owner also asked for the long-term build, with reuse and open source first. The VS Code device policy remains a
+  PENDING item until its encodings are confirmed.
 
 ## Not done, recorded
 

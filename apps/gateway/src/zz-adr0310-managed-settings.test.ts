@@ -4,7 +4,8 @@
  *  - a user's bundle names exactly the servers on which the kernel shows them a tool, by gateway URL; a server with
  *    only a halted tool, a disabled server, a server in release-age quarantine and an ungranted server are absent;
  *  - a user with nothing entitled, and a disabled user, get an explicit deny-all for every vendor;
- *  - a role's bundle carries the role's own grants;
+ *  - a role's bundle carries the role's own grants, plus the ADR-0236 MCP bundles granted to the role while the
+ *    bundles switch is on (owner decision 2026-11-15, M1);
  *  - the manifest is Ed25519-signed with the export key and lists each file's sha256; the archive is byte-stable;
  *  - an unchanged policy returns the same version (200), a changed one takes the next version (201), audited;
  *  - with no signing key, or no public URL, the export is refused (never an unsigned bundle);
@@ -25,7 +26,13 @@ import {
   eq,
   inArray,
   managedSettingsBundles,
+  mcpBundleGrants,
+  mcpBundles,
+  mcpBundleVersionItems,
+  mcpBundleVersions,
   mcpServers,
+  ORG_SETTINGS_ID,
+  orgSettings,
   mcpTools,
   roleAssignments,
   roles,
@@ -70,7 +77,9 @@ let loneId: string;
 let roleId: string;
 const userIds: string[] = [];
 const serverIds: string[] = [];
-const S: Record<"a" | "b" | "halted" | "off" | "fresh", string> = { a: "", b: "", halted: "", off: "", fresh: "" };
+const S: Record<"a" | "b" | "halted" | "off" | "fresh" | "bundled", string> = { a: "", b: "", halted: "", off: "", fresh: "", bundled: "" };
+let bundleId = "";
+let bundlesWereEnabled = false;
 
 const inject = (method: "GET" | "POST", url: string, headers: Record<string, string>, payload?: unknown) =>
   app.inject({ method, url, headers, ...(payload === undefined ? {} : { payload: payload as object }) });
@@ -153,6 +162,16 @@ beforeAll(async () => {
   const [r] = await db.insert(roles).values({ name: `e1-role-${RUN}` }).returning({ id: roles.id });
   roleId = r!.id;
   await db.insert(roleToolGrants).values({ roleId, serverId: S.b, toolName: "search" });
+
+  // ADR-0236: a bundle granted to the role, naming a tool on a server the role has no direct grant on
+  S.bundled = await server("bundled", [{ name: "bundled_tool" }]);
+  const [b] = await db.insert(mcpBundles).values({ name: `e1-bundle-${RUN}`, currentVersion: 1, createdBy: adminId }).returning({ id: mcpBundles.id });
+  bundleId = b!.id;
+  const [v] = await db.insert(mcpBundleVersions).values({ bundleId, version: 1, createdBy: adminId }).returning({ id: mcpBundleVersions.id });
+  await db.insert(mcpBundleVersionItems).values({ versionId: v!.id, serverId: S.bundled, toolName: "bundled_tool" });
+  await db.insert(mcpBundleGrants).values({ bundleId, roleId, maxTier: "read", grantedBy: adminId });
+  const [o] = await db.select({ on: orgSettings.mcpBundlesEnabled }).from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  bundlesWereEnabled = o?.on === true;
 }, 120_000);
 
 let restore: () => Promise<void> = async () => {};
@@ -164,6 +183,9 @@ afterAll(async () => {
     await db.delete(toolGrants).where(inArray(toolGrants.userId, userIds));
     await db.update(users).set({ disabledAt: new Date() }).where(inArray(users.id, userIds));
   }
+  await db.update(orgSettings).set({ mcpBundlesEnabled: bundlesWereEnabled }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  if (bundleId) await db.delete(mcpBundles).where(eq(mcpBundles.id, bundleId));
+  if (roleId) await db.delete(managedSettingsBundles).where(eq(managedSettingsBundles.roleId, roleId));
   if (roleId) await db.delete(roles).where(eq(roles.id, roleId));
   if (serverIds.length) await db.delete(mcpServers).where(inArray(mcpServers.id, serverIds));
   await restore();
@@ -255,11 +277,25 @@ describe("ADR-0310: a user's bundle", () => {
 });
 
 describe("ADR-0310: a role's bundle", () => {
-  it("carries the role's own grants", async () => {
+  const allowedFor = async (id: string) => {
+    const files = untar((await inject("GET", `/v1/managed-settings/bundles/${id}/archive`, adminKey)).rawPayload);
+    return JSON.parse(files.get("claude-code/managed-settings.json")!).allowedMcpServers;
+  };
+
+  it("carries the role's own grants, and no ADR-0236 bundle while the bundles switch is off", async () => {
+    await db.update(orgSettings).set({ mcpBundlesEnabled: false }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
     const r = await exportFor("role", roleId);
     expect(r.statusCode, r.body).toBe(201);
-    const files = untar((await inject("GET", `/v1/managed-settings/bundles/${r.json().id}/archive`, adminKey)).rawPayload);
-    expect(JSON.parse(files.get("claude-code/managed-settings.json")!).allowedMcpServers).toEqual([{ serverUrl: `${ORIGIN}/mcp/${S.b}` }]);
+    expect(await allowedFor(r.json().id)).toEqual([{ serverUrl: `${ORIGIN}/mcp/${S.b}` }]);
+  });
+
+  it("includes the MCP bundles granted to the role once the switch is on (owner decision M1), as a new version", async () => {
+    await db.update(orgSettings).set({ mcpBundlesEnabled: true }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    const r = await exportFor("role", roleId);
+    expect(r.statusCode, r.body).toBe(201);
+    expect(r.json()).toMatchObject({ created: true, serverCount: 2 });
+    const want = [S.b, S.bundled].map((id) => ({ serverUrl: `${ORIGIN}/mcp/${id}` })).sort((x, y) => (x.serverUrl < y.serverUrl ? -1 : 1));
+    expect(await allowedFor(r.json().id)).toEqual(want);
   });
 });
 

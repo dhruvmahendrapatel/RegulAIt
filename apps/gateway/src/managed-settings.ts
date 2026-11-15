@@ -48,7 +48,7 @@ import {
   type EffectiveMcpServer,
 } from "@regulait/shared";
 import { visibleTools, type Entitlements, type ToolRef } from "@regulait/policy-kernel";
-import { loadEntitlements } from "./entitlements.js";
+import { loadEntitlements, loadRoleBundleToolGrants } from "./entitlements.js";
 import { admissionHidesTools } from "./mcp-admission.js";
 import { buildTarGz, resolveExportSigningKey } from "./export-bundle.js";
 import { joinPublicUrl, resolvePublicUrl } from "./public-url.js";
@@ -111,16 +111,20 @@ export async function loadEffectiveMcpPolicy(db: Db, subject: ManagedSubject, pu
     if (subject.kind === "user") {
       visible = visibleTools(subject.id, s.id, refs, await loadEntitlements(db, subject.id, s.id));
     } else {
-      // a role's own grants only: what every holder of the role gets, before their personal grants and revocations
-      const [rt, rs] = await Promise.all([
+      // what every holder of the role gets, before their personal grants and revocations: the role's own tool and
+      // server grants plus the ADR-0236 bundles granted to the role (owner decision 2026-11-15, M1: the same set the
+      // gateway already allows a holder through the role)
+      const [rt, rs, rb] = await Promise.all([
         db.select().from(roleToolGrants).where(and(eq(roleToolGrants.roleId, subject.id), eq(roleToolGrants.serverId, s.id))),
         db.select().from(roleServerGrants).where(and(eq(roleServerGrants.roleId, subject.id), eq(roleServerGrants.serverId, s.id))),
+        loadRoleBundleToolGrants(db, subject.id, s.id),
       ]);
       const ent: Entitlements = {
         toolGrants: [],
         serverGrants: [],
         roleToolGrants: rt.map((g) => ({ ...g, roleName: null })),
         roleServerGrants: rs.map((g) => ({ ...g, roleName: null })),
+        ...(rb.length > 0 ? { bundleToolGrants: rb } : {}),
         revocations: [],
       };
       visible = visibleTools(`role:${subject.id}`, s.id, refs, ent);

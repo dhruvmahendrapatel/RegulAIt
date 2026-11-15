@@ -25,6 +25,7 @@ import {
   toolGrants,
   users,
   type Db,
+  type SQL,
 } from "@regulait/db";
 import type {
   AgentRevocation,
@@ -143,17 +144,35 @@ const BUNDLE_VIA_ORDER = { user: 0, role: 1, team: 2 } as const;
  * grants; this loader only resolves which bundle items are in reach.
  */
 export async function loadBundleToolGrants(db: Db, userId: string, serverId: string): Promise<BundleToolGrant[]> {
-  const [org] = await db
-    .select({ enabled: orgSettings.mcpBundlesEnabled })
-    .from(orgSettings)
-    .where(eq(orgSettings.id, ORG_SETTINGS_ID));
-  if (!org?.enabled) return [];
+  if (!(await mcpBundlesEnabled(db))) return [];
   const { roleIds, teamIds } = await loadScopeMemberships(db, userId);
   const subject = or(
     eq(mcpBundleGrants.userId, userId),
     ...(roleIds.length > 0 ? [inArray(mcpBundleGrants.roleId, roleIds)] : []),
     ...(teamIds.length > 0 ? [inArray(mcpBundleGrants.teamId, teamIds)] : []),
   );
+  return bundleToolGrantsWhere(db, subject!, serverId);
+}
+
+/**
+ * ADR-0310 (owner decision 2026-11-15, M1) — the bundle grants made to ONE role on `serverId`: what every holder of the
+ * role receives through ADR-0236 bundles, before their personal grants and revocations. Same switch, same query and
+ * same fail-closed joins as `loadBundleToolGrants`; only the subject differs.
+ */
+export async function loadRoleBundleToolGrants(db: Db, roleId: string, serverId: string): Promise<BundleToolGrant[]> {
+  if (!(await mcpBundlesEnabled(db))) return [];
+  return bundleToolGrantsWhere(db, eq(mcpBundleGrants.roleId, roleId), serverId);
+}
+
+async function mcpBundlesEnabled(db: Db): Promise<boolean> {
+  const [org] = await db
+    .select({ enabled: orgSettings.mcpBundlesEnabled })
+    .from(orgSettings)
+    .where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  return org?.enabled === true;
+}
+
+async function bundleToolGrantsWhere(db: Db, subject: SQL, serverId: string): Promise<BundleToolGrant[]> {
   const rows = await db
     .select({
       grantId: mcpBundleGrants.id,
