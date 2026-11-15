@@ -662,7 +662,7 @@ import {
 } from "./export-bundle.js";
 import { MergeConflictError, WorkflowStateError, type WorkflowDefinition } from "@regulait/workflow-kernel";
 import { stageExcludesInitiator } from "./workflow-approvers.js";
-import { bootstrapAfterAdminRelaxed, bootstrapRetired } from "./dev-secrets.js";
+import { activeAdminExists, bootstrapAfterAdminRelaxed, bootstrapRetired } from "./dev-secrets.js";
 
 const uuidParam = z.object({ serverId: z.string().uuid() });
 const visibleToolsParams = z.object({
@@ -1953,7 +1953,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // Under REGULAIT_BOOTSTRAP_AFTER_ADMIN=1 (the relaxation the test suite,
     // the e2e harness and the in-process demo tools set) the bootstrap
     // credential keeps its pre-S-02 power here too; that is part of what the
-    // relaxation relaxes, and the boot log and audit row say so.
+    // relaxation relaxes, and the boot log and the boot audit row (rule bootstrap-after-admin-relaxed) say so.
     if (req.authCtx.userId !== userId && !(req.authCtx.via === "bootstrap" && bootstrapAfterAdmin)) {
       const stepUp = await requireStepUp(db, req, reply, {
         kind: "identity_manage",
@@ -6140,7 +6140,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerRoleTeamRenameRoutes(app, db);
   // ADR-0255 (P31) — the governed connector catalogue; admin-only (not in NON_ADMIN_ROUTES), enablement audited
   registerConnectorCatalogueRoutes(app, db);
-  registerPosturePresetRoutes(app, db, { sink: anchorSink, bootstrapConfigured: Boolean(opts.bootstrapToken) });
+  registerPosturePresetRoutes(app, db, {
+    sink: anchorSink,
+    bootstrapConfigured: Boolean(opts.bootstrapToken),
+    // S-02: the posture page says when the token is retired (no audit row: a posture read is not a presentation)
+    bootstrapRetired: async () => !bootstrapAfterAdmin && (await activeAdminExists(db)),
+  });
   // ADR-0124 — the kill switch and safe modes
   registerExecutionControlRoutes(app, db);
 

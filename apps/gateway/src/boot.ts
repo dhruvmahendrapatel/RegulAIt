@@ -63,6 +63,7 @@ import {
   bootstrapAfterAdminRelaxed,
   activeAdminExists,
   recordDevSecretsOptIn,
+  recordBootstrapAfterAdmin,
 } from "./dev-secrets.js";
 import { checkReceiptSigningKey } from "./receipt-signing-key.js";
 import { ensureInstallIdentityKey, identitySigningKeyConfiguration } from "./identity-signing-keys.js";
@@ -212,10 +213,11 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // and on a box that shows a sign of being deployed they REFUSE the boot —
   // before listen, like the data-key gate, so a refused deployment leaves no
   // socket behind. See dev-secrets.ts for exactly what refuses and what warns.
+  const activeAdminAtBoot = await asBootTask("active-admin-exists", () => activeAdminExists(db)).catch(() => false);
   const secrets = assessDevSecrets(env, {
     bootstrapToken: appOpts.bootstrapToken,
     dataKey: appOpts.dataKey,
-    realAdminExists: await asBootTask("active-admin-exists", () => activeAdminExists(db)).catch(() => false),
+    realAdminExists: activeAdminAtBoot,
     listenHost: host,
     bootstrapAfterAdmin,
   });
@@ -230,6 +232,19 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
     optInRecorded = (await recordDevSecretsOptIn(db, secrets)) ? "recorded" : "not_needed";
   } catch {
     optInRecorded = "failed";
+  }
+  // S-02 review: the retirement relaxation is RECORDED too (ADR-0180), never fatal.
+  let relaxationRecorded: "recorded" | "not_needed" | "failed" = "not_needed";
+  try {
+    relaxationRecorded = (await recordBootstrapAfterAdmin(db, {
+      bootstrapAfterAdmin,
+      bootstrapToken: appOpts.bootstrapToken,
+      activeAdmin: activeAdminAtBoot,
+    }))
+      ? "recorded"
+      : "not_needed";
+  } catch {
+    relaxationRecorded = "failed";
   }
 
   // ADR-0167 (SEC-06): a pre-0128 row still holding the OTLP collector
@@ -510,6 +525,9 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   }
   if (bootstrapAfterAdmin && appOpts.bootstrapToken) {
     log(`             (relaxed: ${BOOTSTRAP_AFTER_ADMIN_ENV}=1 keeps the bootstrap token working after an admin signs in)`);
+    log(
+      `             (audit: ${relaxationRecorded === "recorded" ? "recorded (rule bootstrap-after-admin-relaxed)" : "WRITE FAILED - this relaxation is not in the audit log"})`,
+    );
   }
   // ADR-0167 (CFG-08): the pool's bounds and whether the database hop is TLS.
   const dbPool = resolveDbPoolConfig(env);

@@ -17,7 +17,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createDb, runMigrations, sql, type Db } from "@regulait/db";
+import { auditLog, createDb, eq, runMigrations, sql, type Db } from "@regulait/db";
 import { startGateway } from "./boot.js";
 import {
   DEV_SECRETS_OVERRIDE_ENV,
@@ -113,10 +113,21 @@ describe("the decision", () => {
     expect(short.refuse).toBe(false);
   });
 
-  it("the override boots a deployed box anyway, and says so", () => {
+  it("the override never boots a deployed box (S-02 review: a quickstart .env must not open tls/hosted/tunnel)", () => {
     const a = assessDevSecrets({ ...deployed, [DEV_SECRETS_OVERRIDE_ENV]: "1" } as NodeJS.ProcessEnv, {
       bootstrapToken: "dev-bootstrap",
       dataKey: PUBLISHED_DATA_KEY,
+    });
+    expect(a.refuse).toBe(true);
+    expect(a.overridden).toBe(false);
+    expect(a.refusing).toHaveLength(2);
+  });
+
+  it("the override boots a reachable listener on an undeployed box, and says so", () => {
+    const a = assessDevSecrets({ [DEV_SECRETS_OVERRIDE_ENV]: "1" } as NodeJS.ProcessEnv, {
+      bootstrapToken: "dev-bootstrap",
+      dataKey: PUBLISHED_DATA_KEY,
+      listenHost: "0.0.0.0",
     });
     expect(a.refuse).toBe(false);
     expect(a.overridden).toBe(true);
@@ -164,13 +175,14 @@ async function boot(
   opts: { bootstrapToken?: string; dataKey?: string },
   extraEnv: Record<string, string> = {},
   target: Db = db,
+  host = "127.0.0.1",
 ) {
   const log: string[] = [];
   // a CLEAN env: the suite's own process.env must not decide the outcome
   const env = { PATH: process.env.PATH, VITEST: "1", ...extraEnv } as NodeJS.ProcessEnv;
   port = await freePort();
   try {
-    const started = await startGateway({ db: target, migrationsFolder, port, host: "127.0.0.1", ...opts, log: (l) => log.push(l), env });
+    const started = await startGateway({ db: target, migrationsFolder, port, host, ...opts, log: (l) => log.push(l), env });
     return { app: started.app, log, error: null as unknown };
   } catch (error) {
     return { app: null, log, error };
@@ -241,10 +253,21 @@ describe("the real boot", () => {
     expect(reachable).toBe(false);
   });
 
-  it("the override boots the deployed box and the posture block says it is booting anyway", async () => {
+  it("the override does NOT boot a deployed box: it still refuses, with nothing listening", async () => {
     const r = await boot(
       { bootstrapToken: "dev-bootstrap", dataKey: PUBLISHED_DATA_KEY },
       { REGULAIT_DEPLOY_MODE: "hosted", [DEV_SECRETS_OVERRIDE_ENV]: "1" },
+    );
+    expect(r.app).toBeNull();
+    expect(r.error, String(r.error)).toBeInstanceOf(DevSecretsBootError);
+  });
+
+  it("the override boots a reachable listener on an undeployed box, with a banner and an audit row", async () => {
+    const r = await boot(
+      { bootstrapToken: "dev-bootstrap", dataKey: PUBLISHED_DATA_KEY },
+      { [DEV_SECRETS_OVERRIDE_ENV]: "1" },
+      db,
+      "0.0.0.0",
     );
     expect(r.error).toBeNull();
     try {
@@ -254,6 +277,25 @@ describe("the real boot", () => {
     } finally {
       await r.app!.close();
     }
+  });
+
+  it("the retirement relaxation is recorded at boot: a log line naming the audit rule, and the row", async () => {
+    const count = async () =>
+      (await db.select({ id: auditLog.id }).from(auditLog).where(eq(auditLog.ruleId, "bootstrap-after-admin-relaxed"))).length;
+    const before = await count();
+    const r = await boot({ bootstrapToken: "dev-bootstrap", dataKey: PUBLISHED_DATA_KEY }, { REGULAIT_BOOTSTRAP_AFTER_ADMIN: "1" });
+    expect(r.error).toBeNull();
+    try {
+      expect(r.log.find((l) => l.includes("rule bootstrap-after-admin-relaxed"))).toBeTruthy();
+      expect(await count()).toBe(before + 1);
+    } finally {
+      await r.app!.close();
+    }
+    // without the relaxation: no row
+    const plain = await boot({ bootstrapToken: "dev-bootstrap", dataKey: PUBLISHED_DATA_KEY });
+    expect(plain.error).toBeNull();
+    await plain.app!.close();
+    expect(await count()).toBe(before + 1);
   });
 
   it("real secrets on a deployed box boot clean: no DEV-GRADE line at all", async () => {

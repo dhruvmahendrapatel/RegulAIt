@@ -143,7 +143,12 @@ export function assessDevSecrets(
       : loopbackOnly
         ? null
         : `the gateway listens on ${opts.listenHost?.trim() || "every interface"}, not on loopback only`;
-  const overridden = (env[DEV_SECRETS_OVERRIDE_ENV] ?? "").trim() === "1";
+  // The opt-in covers ONE exposure only: a laptop's container listening on
+  // every interface. A deploy signal (REGULAIT_DEPLOY_MODE, REGULAIT_HSTS, an
+  // https non-loopback REGULAIT_PUBLIC_URL) is never overridden: a `.env` that
+  // still carries the opt-in from the quickstart must not boot published
+  // credentials behind `--profile tls`, `hosted` or `tunnel` (S-02 review).
+  const overridden = signal === null && (env[DEV_SECRETS_OVERRIDE_ENV] ?? "").trim() === "1";
   const refuse = refusing.length > 0 && exposure !== null && !overridden;
   const bootstrapLine = !token
     ? "not configured (no break-glass admin — every call carries a real identity)"
@@ -272,6 +277,40 @@ export async function recordDevSecretsOptIn(db: Pick<Db, "insert">, assessment: 
     ruleId: "dev-secrets-opt-in",
     ruleChain: [],
     reason: `the gateway booted with published or no-entropy secrets (${assessment.exposure}) because ${DEV_SECRETS_OVERRIDE_ENV}=1 is set`,
+  });
+  return true;
+}
+
+/**
+ * The retirement relaxation, RECORDED: one audit row per boot that keeps the
+ * bootstrap credential working after an active admin exists
+ * (`REGULAIT_BOOTSTRAP_AFTER_ADMIN=1` with a token configured). Under it the
+ * token also mints keys for other users without an `identity_manage` step-up
+ * (app.ts), so the relaxation is an audited admin decision, not only a log
+ * line (ADR-0180). Written whether or not an admin exists yet, because the
+ * relaxation takes effect the moment one does.
+ */
+export async function recordBootstrapAfterAdmin(
+  db: Pick<Db, "insert">,
+  opts: { bootstrapAfterAdmin: boolean; bootstrapToken?: string | undefined; activeAdmin: boolean },
+): Promise<boolean> {
+  if (!opts.bootstrapAfterAdmin || !opts.bootstrapToken?.trim()) return false;
+  await db.insert(auditLog).values({
+    userId: "00000000-0000-0000-0000-000000000000",
+    objectType: "org_settings",
+    objectId: null,
+    detail: {
+      subsystem: "bootstrap",
+      relaxation: BOOTSTRAP_AFTER_ADMIN_ENV,
+      activeAdminAtBoot: opts.activeAdmin,
+      relaxes: ["bootstrap-retirement", "identity_manage step-up for api_key_issue"],
+    },
+    effect: "allow",
+    ruleId: "bootstrap-after-admin-relaxed",
+    ruleChain: [],
+    reason:
+      `the gateway booted with ${BOOTSTRAP_AFTER_ADMIN_ENV}=1, so the bootstrap credential keeps full-admin power after ` +
+      "an active admin exists and can mint API keys for other users without a step-up",
   });
   return true;
 }

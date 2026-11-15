@@ -644,3 +644,18 @@ Five `security/sast-allowlist.json` entries those results matched are removed; n
 with a token-id credential format: correct for passwords, but it changes every credential's format and lookup for no
 gain against 192+ random bits; it can follow if the owner wants it. HMAC-SHA256 with a pepper: CodeQL models
 `createHmac` as the same insufficient hash, and the pepper becomes a key to rotate.
+
+### Addendum 2026-11-15 (2): S-02 code-review fixes (PR #728)
+
+- `REGULAIT_BOOTSTRAP_AFTER_ADMIN=1` is now an audited relaxation (ADR-0180). Each boot that sets it with a bootstrap
+  token writes one `bootstrap-after-admin-relaxed` row, which names the two things it relaxes: retirement, and the
+  `identity_manage` step-up for minting keys for other users. The boot log prints whether the write succeeded.
+- `REGULAIT_ALLOW_DEV_SECRETS=1` covers only a non-loopback listener. It never overrides a deploy signal
+  (`REGULAIT_DEPLOY_MODE`, `REGULAIT_HSTS`, an https non-loopback `REGULAIT_PUBLIC_URL`), so a quickstart `.env` cannot
+  open `--profile tls/hosted/tunnel` to published credentials. The docs now say to set it per command.
+- `GET /v1/org/posture` reports a retired token (`bootstrap.retired`, finding `bootstrap_token_retired`). Reading the
+  posture is not a presentation of the token, so it writes no `bootstrap-retired` row.
+- The scrypt cost on junk bearers is bounded by the pre-auth per-IP tier. That limit is an `onRequest` hook registered
+  before every hook and route that calls `authenticate`, and it is on by default.
+- `demo:enforce` names the relaxation when it meets a retired token. `demo:relax-e` treats a retired token as
+  `needs_admin` and signs in as the admin.

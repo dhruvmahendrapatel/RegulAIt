@@ -14,7 +14,8 @@
  *      as a deploy signal;
  *   2. the compose file forwards REGULAIT_HSTS (without an empty default) and
  *      ships no opt-in;
- *   3. the opt-in is recorded in the audit log;
+ *   3. the opt-in is recorded in the audit log, never overrides a deploy
+ *      signal, and the retirement relaxation is recorded too;
  *   4. the bootstrap credential retires once an active admin exists (header and
  *      bootstrap session), audited once, and the relaxation keeps it;
  *   5. minting an API key for another user is an `identity_manage` step-up.
@@ -39,6 +40,7 @@ import {
   networkFacingSignal,
   activeAdminExists,
   recordDevSecretsOptIn,
+  recordBootstrapAfterAdmin,
 } from "./dev-secrets.js";
 import { hashToken } from "./token-hash.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
@@ -85,14 +87,28 @@ describe("S-02: published secrets are accepted only on loopback or by explicit o
     }
   });
 
-  it("the explicit opt-in boots a reachable listener and a deployed box, and only the exact value 1 counts", () => {
-    const deployed = { REGULAIT_PUBLIC_URL: "https://regulait.example.com" } as NodeJS.ProcessEnv;
-    const on = assessDevSecrets({ ...deployed, [DEV_SECRETS_OVERRIDE_ENV]: "1" }, { ...published, listenHost: "0.0.0.0" });
+  it("the explicit opt-in boots a reachable listener, and only the exact value 1 counts", () => {
+    const on = assessDevSecrets({ [DEV_SECRETS_OVERRIDE_ENV]: "1" }, { ...published, listenHost: "0.0.0.0" });
     expect(on.refuse).toBe(false);
     expect(on.overridden).toBe(true);
     for (const v of ["", "true", "yes", "0"]) {
-      const off = assessDevSecrets({ ...deployed, [DEV_SECRETS_OVERRIDE_ENV]: v }, { ...published, listenHost: "0.0.0.0" });
+      const off = assessDevSecrets({ [DEV_SECRETS_OVERRIDE_ENV]: v }, { ...published, listenHost: "0.0.0.0" });
       expect(off.refuse, v).toBe(true);
+    }
+  });
+
+  it("the opt-in never overrides a deploy signal (a quickstart .env must not boot published secrets behind tls/hosted/tunnel)", () => {
+    const signals: NodeJS.ProcessEnv[] = [
+      { REGULAIT_PUBLIC_URL: "https://regulait.example.com" },
+      { REGULAIT_HSTS: "max-age=31536000" },
+      { REGULAIT_DEPLOY_MODE: "hosted" },
+    ];
+    for (const env of signals) {
+      for (const listenHost of ["0.0.0.0", "127.0.0.1"]) {
+        const a = assessDevSecrets({ ...env, [DEV_SECRETS_OVERRIDE_ENV]: "1" }, { ...published, listenHost });
+        expect(a.overridden, JSON.stringify(env)).toBe(false);
+        expect(a.refuse, JSON.stringify(env)).toBe(true);
+      }
     }
   });
 
@@ -196,6 +212,23 @@ describe("S-02: the dev opt-in is recorded", () => {
   });
 });
 
+describe("S-02: the retirement relaxation is recorded", () => {
+  it("one boot audit row when the relaxation is set with a token; nothing without either", async () => {
+    const before = await auditCount("bootstrap-after-admin-relaxed");
+    expect(await recordBootstrapAfterAdmin(db, { bootstrapAfterAdmin: true, bootstrapToken: BOOT, activeAdmin: true })).toBe(true);
+    expect(await auditCount("bootstrap-after-admin-relaxed")).toBe(before + 1);
+    const rows = await db.select().from(auditLog).where(eq(auditLog.ruleId, "bootstrap-after-admin-relaxed"));
+    const row = rows[rows.length - 1]!;
+    expect(row.effect).toBe("allow");
+    expect(row.detail).toMatchObject({ relaxation: BOOTSTRAP_AFTER_ADMIN_ENV, activeAdminAtBoot: true });
+    expect(JSON.stringify(row)).not.toContain(BOOT);
+    expect(await recordBootstrapAfterAdmin(db, { bootstrapAfterAdmin: false, bootstrapToken: BOOT, activeAdmin: true })).toBe(false);
+    expect(await recordBootstrapAfterAdmin(db, { bootstrapAfterAdmin: true, bootstrapToken: undefined, activeAdmin: false })).toBe(false);
+    expect(await recordBootstrapAfterAdmin(db, { bootstrapAfterAdmin: true, bootstrapToken: "  ", activeAdmin: false })).toBe(false);
+    expect(await auditCount("bootstrap-after-admin-relaxed")).toBe(before + 1);
+  });
+});
+
 describe("S-02: the bootstrap credential retires once an active admin exists", () => {
   let strict: ReturnType<typeof buildApp>;
   let adminId = "";
@@ -246,6 +279,22 @@ describe("S-02: the bootstrap credential retires once an active admin exists", (
     });
     expect(exchange.statusCode, exchange.body).toBe(401);
     expect(exchange.json().error).toBe("bootstrap_retired");
+  });
+
+  it("the posture page says the token is RETIRED (and the relaxed app says it is live)", async () => {
+    const adminSession = await signInSession(adminId, "password");
+    const cookie = { cookie: `${SESSION_COOKIE}=${adminSession}` };
+    const retiredBefore = await auditCount("bootstrap-retired");
+    const p = await strict.inject({ method: "GET", url: "/v1/org/posture", headers: cookie });
+    expect(p.statusCode, p.body).toBe(200);
+    expect(p.json().bootstrap).toMatchObject({ configured: true, retired: true, passesStepUp: false });
+    expect(p.json().bootstrap.findings.map((f: { code: string }) => f.code)).toEqual(["bootstrap_token_retired"]);
+    // a posture read is not a presentation of the token: no bootstrap-retired row
+    expect(await auditCount("bootstrap-retired")).toBe(retiredBefore);
+    const relaxed = buildApp(db, { bootstrapToken: BOOT, bootstrapAfterAdmin: true, dataKey: DATA_KEY });
+    const q = await relaxed.inject({ method: "GET", url: "/v1/org/posture", headers: cookie });
+    expect(q.statusCode, q.body).toBe(200);
+    expect(q.json().bootstrap).toMatchObject({ configured: true, retired: false });
   });
 
   it("an admin who only used an API key counts as active too", async () => {
