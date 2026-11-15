@@ -26,6 +26,7 @@ import {
   connectorCredentials,
   connectors,
   createDb,
+  desc,
   eq,
   grantCertificationCampaigns,
   grantCertificationItems,
@@ -40,7 +41,12 @@ import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { trackEgressAllowHosts } from "./testing/egress-allow-cleanup.js";
 import { setOrgSettingsForTest } from "./testing/strict-data-posture.js";
 import { CHATOPS_RULE_IDS, RESEND_RECIPIENT_MODE } from "./chatops.js";
-import { CAMPAIGN_DEADLINE_NOTIFIED_RULE_ID, CAMPAIGN_EXPIRY_NOTICE_WINDOW_HOURS, runCampaignDeadlineNotifySweep } from "./grant-certification.js";
+import {
+  CAMPAIGN_DEADLINE_NOTIFIED_RULE_ID,
+  CAMPAIGN_DEADLINE_REMINDER_HOURS,
+  CAMPAIGN_EXPIRY_NOTICE_WINDOW_HOURS,
+  runCampaignDeadlineNotifySweep,
+} from "./grant-certification.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -421,5 +427,34 @@ describe("ADR-0090 amendment: campaign deadline notices", () => {
     expect(out.notified.find((n) => n.campaignId === c)).toBeUndefined();
     expect(hits.filter((m) => m.html.includes(c))).toHaveLength(0);
     expect(await markers(c)).toHaveLength(0);
+  });
+
+  it("the reminder window is an org setting: bounded to 1 h to 14 days, audited, and read by the sweep", async () => {
+    const put = (payload: object) => app.inject({ method: "PUT", url: "/v1/org/settings", headers: AUTH, payload });
+    const before = await app.inject({ method: "GET", url: "/v1/org/settings", headers: AUTH });
+    expect(before.json().settings.certificationReminderHours).toBe(CAMPAIGN_DEADLINE_REMINDER_HOURS);
+    for (const bad of [0, 14 * 24 + 1, 2.5, "48"]) expect((await put({ certificationReminderHours: bad })).statusCode).toBe(400);
+    try {
+      const ok = await put({ certificationReminderHours: 6 });
+      expect(ok.statusCode).toBe(200);
+      const [row] = await db
+        .select()
+        .from(auditLog)
+        .where(eq(auditLog.objectType, "org_settings"))
+        .orderBy(desc(auditLog.at))
+        .limit(1);
+      expect(row!.ruleId).toBe("org-settings-updated");
+      expect((row!.detail as { changed: Record<string, unknown> }).changed).toEqual({ certificationReminderHours: 6 });
+      // due in 10 h is outside a 6 h window; due in 5 h is inside it
+      const outside = await makeCampaign(10, [{ reviewer: reviewerA }]);
+      const inside = await makeCampaign(5, [{ reviewer: reviewerA }]);
+      const out = await runCampaignDeadlineNotifySweep(db, { actorUserId: null });
+      expect(out.notified.find((n) => n.campaignId === outside)).toBeUndefined();
+      expect(out.notified.find((n) => n.campaignId === inside)).toMatchObject({ kind: "due_soon", reviewers: 1 });
+      expect(hits.filter((m) => m.html.includes(outside))).toHaveLength(0);
+      expect(mailsFor(emails[reviewerA]!).filter((m) => m.html.includes(inside))).toHaveLength(1);
+    } finally {
+      expect((await put({ certificationReminderHours: CAMPAIGN_DEADLINE_REMINDER_HOURS })).statusCode).toBe(200);
+    }
   });
 });

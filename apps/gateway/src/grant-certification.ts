@@ -50,6 +50,7 @@ import type { FastifyInstance } from "fastify";
 import {
   AGENT_LIFECYCLE_STATUSES,
   GRANT_CERT_SCOPE_KINDS,
+  ORG_SETTINGS_ID,
   agentGrants,
   agents,
   and,
@@ -65,6 +66,7 @@ import {
   inArray,
   isNull,
   mcpServers,
+  orgSettings,
   roleAgentGrants,
   roleAssignments,
   roleConnectorGrants,
@@ -799,7 +801,10 @@ export async function runCampaignExpirySweep(
 // can still go out once a workspace is opted in.
 // ---------------------------------------------------------------------------
 
-/** a reminder is sent once a campaign with undecided items is within this many hours of its due time */
+/**
+ * A reminder is sent once a campaign with undecided items is within this many hours of its due time. This is the
+ * default; the window is the org setting `certificationReminderHours` (1 hour to 14 days, owner decision 2026-11-15).
+ */
 export const CAMPAIGN_DEADLINE_REMINDER_HOURS = 48;
 /**
  * An expiry notice is sent only this long after the due time (review of #825). An expired-incomplete campaign stays
@@ -890,12 +895,17 @@ export async function runCampaignDeadlineNotifySweep(
   const courier = deadlineCouriers.get(db as object);
   const out: CampaignDeadlineSweepResult = { courier: Boolean(courier), notified: [] };
   if (!courier) return out;
+  const [org] = await db
+    .select({ hours: orgSettings.certificationReminderHours })
+    .from(orgSettings)
+    .where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  const reminderMs = (org?.hours ?? CAMPAIGN_DEADLINE_REMINDER_HOURS) * 3600_000;
   const open = await db.select().from(grantCertificationCampaigns).where(eq(grantCertificationCampaigns.status, "open"));
   let budget = CAMPAIGN_DEADLINE_MAX_SENDS_PER_RUN;
   for (const campaign of open) {
     if (budget <= 0) break;
     const pastDue = campaignPastDue(campaign, now);
-    const dueSoon = !pastDue && campaign.dueAt.getTime() - now.getTime() <= CAMPAIGN_DEADLINE_REMINDER_HOURS * 3600_000;
+    const dueSoon = !pastDue && campaign.dueAt.getTime() - now.getTime() <= reminderMs;
     if (!pastDue && !dueSoon) continue;
     // an expiry notice only within its window after the due time: old campaigns are never announced late
     if (pastDue && now.getTime() - campaign.dueAt.getTime() > CAMPAIGN_EXPIRY_NOTICE_WINDOW_HOURS * 3600_000) continue;

@@ -5383,6 +5383,9 @@ export const orgSettings = pgTable(
     privacyOpsEnabled: boolean("privacy_ops_enabled").notNull().default(false),
     /** days from a data-subject request's receipt to its due date; 30 is the strict default, shorter is stricter */
     dsrSlaDays: integer("dsr_sla_days").notNull().default(30),
+    /** ADR-0090 amendment (lane L11, owner 2026-11-15): how many hours before a certification campaign's due time its
+     * deadline reminder is sent (1 hour to 14 days; 48 is the default). A change is audited by PUT /v1/org/settings. */
+    certificationReminderHours: integer("certification_reminder_hours").notNull().default(48),
 
     /** ADR-0222 (P13(a), migration 0271): fairness testing. Off by default — turning it on starts storing
      * sensitive attributes, so it needs the `settings_relax` step-up. */
@@ -5458,6 +5461,7 @@ export const orgSettings = pgTable(
     check("org_settings_literacy_gate_mode_check", sql`${t.literacyGateMode} IN ('off', 'warn', 'enforce')`),
     check("org_settings_literacy_validity_check", sql`${t.literacyDefaultValidityDays} BETWEEN 30 AND 730`),
     check("org_settings_dsr_sla_days_check", sql`${t.dsrSlaDays} BETWEEN 1 AND 90`),
+    check("org_settings_certification_reminder_hours_check", sql`${t.certificationReminderHours} BETWEEN 1 AND 336`),
     check(
       "org_settings_alert_sla_hours_check",
       sql`jsonb_typeof(${t.alertSlaHours}) = 'object' AND jsonb_typeof(${t.alertSlaHours} -> 'high') = 'number' AND jsonb_typeof(${t.alertSlaHours} -> 'medium') = 'number' AND jsonb_typeof(${t.alertSlaHours} -> 'low') = 'number' AND (${t.alertSlaHours} ->> 'high')::numeric BETWEEN 1 AND 720 AND (${t.alertSlaHours} ->> 'medium')::numeric BETWEEN 1 AND 720 AND (${t.alertSlaHours} ->> 'low')::numeric BETWEEN 1 AND 720`,

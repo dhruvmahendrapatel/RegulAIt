@@ -218,8 +218,8 @@ are unchanged and remain decider-barred from self-certification.
 
 The "no notifications" limit is closed, in the same narrow shape as the B2a sweep.
 
-- **What is sent.** A *due-soon* reminder once a campaign with undecided items is within 48 hours of its due time, and
-  an *expiry* notice once it is past due. A campaign first seen already past due gets only the expiry notice, never a
+- **What is sent.** A *due-soon* reminder once a campaign with undecided items is within the org's reminder window of
+  its due time (`certificationReminderHours`, 48 hours by default; see below), and an *expiry* notice once it is past due. A campaign first seen already past due gets only the expiry notice, never a
   late reminder.
 - **Once per delivery target, retried until final (review of #825).** A target is one workspace's channel notice
   (`<connection>:channel`), or on a Resend workspace one reviewer's mail (`<connection>:reviewer:<user>`). The audit row
@@ -268,6 +268,12 @@ The "no notifications" limit is closed, in the same narrow shape as the B2a swee
   `pending/chatops_campaign_deadline_notify.sql` (numbered at merge, ADR-0252). Test:
   `zz-adr0090-campaign-deadline-notify.test.ts`.
 
-Owner question open: whether the 48-hour reminder window should be an org setting. It is a constant here.
+**Reminder window is an org setting (owner decision, 2026-11-15).** `org_settings.certification_reminder_hours`
+defaults to 48 and is bounded to 1 hour through 14 days (336 hours), by the zod schema on `PUT /v1/org/settings` and by a
+database CHECK. Like every write through that route, a change is admin-only and audited (`org-settings-updated`, with
+the changed key). The strictness registry exempts it: it only decides when a reminder goes out, and the reminder keeps
+and revokes nothing. The sweep reads the setting on every run. The expiry window (72 hours) and the per-run cap (200)
+stay constants. The setting is API-only for now; the Organization settings screen does not show it yet. Test:
+`zz-adr0090-campaign-deadline-notify.test.ts` covers the bounds, the audit row, and a 6-hour window as the sweep sees it.
 
 **Still true:** no periodic auto-campaigns, and ADR-0022 delegation is unchanged.

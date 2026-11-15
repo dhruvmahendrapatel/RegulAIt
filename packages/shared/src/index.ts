@@ -2504,6 +2504,9 @@ export const updateOrgSettingsSchema = z
     privacyOpsEnabled: z.boolean().optional(),
     /** ADR-0224: days from a data-subject request's receipt to its due date (1–90; 30 is the strict default) */
     dsrSlaDays: z.number().int().min(1).max(90).optional(),
+    /** ADR-0090 amendment (lane L11, owner 2026-11-15): hours before a certification campaign's due time that its
+     * deadline reminder is sent, 1 hour to 14 days (48 is the default) */
+    certificationReminderHours: z.number().int().min(1).max(14 * 24).optional(),
     /** ADR-0092 amendment (migration 0100, L6c): may the deterministic
      * access-recommendation findings carry a MODEL-JUDGED annotation? false
      * (default) = the report is the six deterministic rules and nothing else.
