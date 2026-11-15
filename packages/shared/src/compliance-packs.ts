@@ -59,6 +59,8 @@ import { OWASP_PACKS } from "./owasp-packs.js";
 import { NIST_AI_600_1_PACK } from "./nist-ai-600-1-pack.js";
 // ADR-0295 (P18 B4): ISO/IEC 42001@2, 23894@1 and 42005@1, ID-only (`iso-packs.ts`, type-only imports back)
 import { ISO_PACKS } from "./iso-packs.js";
+// ADR-0296 part 2 (P18 B2): GDPR, CCPA, DPDP and LGPD privacy packs (`privacy-packs.ts`, type-only imports back)
+import { PRIVACY_PACKS } from "./privacy-packs.js";
 // ADR-0297 (P18 B6): SR 11-7 and NYC Local Law 144 sector packs (`sector-packs.ts`, type-only imports back)
 import { SECTOR_PACKS } from "./sector-packs.js";
 // batch B1 — a pack's cascade PRESET is validated with the SAME check every
@@ -95,6 +97,11 @@ export const COMPLIANCE_PACK_FRAMEWORKS = [
   // ADR-0295 (P18 B4): ISO/IEC 23894 and 42005, ID-only (`iso-packs.ts`)
   "iso-23894",
   "iso-42005",
+  // ADR-0296 part 2 (P18 B2): privacy laws on the ADR-0224 machinery (`privacy-packs.ts`)
+  "gdpr",
+  "ccpa",
+  "dpdp",
+  "lgpd",
   // ADR-0297 (P18 B6): sector packs (`sector-packs.ts`)
   "sr-11-7",
   "nyc-ll144",
@@ -1817,6 +1824,8 @@ DEFAULT_COMPLIANCE_PACKS.push(
   NIST_AI_600_1_PACK,
   // ADR-0295 (P18 B4): iso-42001@2 (every clause and Annex A), iso-23894@1, iso-42005@1
   ...ISO_PACKS,
+  // ADR-0296 part 2 (P18 B2): gdpr@1, ccpa@1, dpdp@1, lgpd@1
+  ...PRIVACY_PACKS,
   // ADR-0297 (P18 B6): sr-11-7@1 and nyc-ll144@1
   ...SECTOR_PACKS,
 );

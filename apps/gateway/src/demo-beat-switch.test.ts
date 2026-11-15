@@ -43,6 +43,11 @@ describe("readDemoBeat", () => {
     await expect(readDemoBeat("http://gw.test", "t", ENFORCE_IT_BEAT_ID, stub(200, { beats: [] }))).rejects.toThrow(/does not list beat/);
     await expect(readDemoBeat("http://gw.test", "t", ENFORCE_IT_BEAT_ID, stub(200, beats("maybe")))).rejects.toThrow(/does not list beat/);
   });
+  it("401 bootstrap_retired (S-02) throws and names the relaxation the presenter's gateway needs", async () => {
+    await expect(
+      readDemoBeat("http://gw.test", "t", ENFORCE_IT_BEAT_ID, stub(401, { error: "bootstrap_retired" })),
+    ).rejects.toThrow(/-> 401 bootstrap_retired.*REGULAIT_BOOTSTRAP_AFTER_ADMIN=1/);
+  });
   it.each([401, 403, 500, 503])("%i throws: a switch that cannot be read is never assumed", async (status) => {
     await expect(readDemoBeat("http://gw.test", "t", ENFORCE_IT_BEAT_ID, stub(status, { error: "x" }))).rejects.toThrow(
       new RegExp(`-> ${status}`),

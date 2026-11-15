@@ -14,6 +14,7 @@
  * Runs on its OWN scratch database (prefix `b4c7_`), dropped in afterAll, so
  * nothing append-only outlives the run (M-068).
  */
+import { hashToken } from "./token-hash.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -84,7 +85,7 @@ async function mkSession(userId: string): Promise<Session> {
   const [row] = await db
     .insert(authSessions)
     .values({
-      tokenHash: createHash("sha256").update(token).digest("hex"),
+      tokenHash: hashToken(token),
       userId,
       origin: "password",
       expiresAt: new Date(Date.now() + 3_600_000),

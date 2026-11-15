@@ -59,6 +59,7 @@ With no profile, `docker compose up` is still the laptop demo on `http://localho
 | `REGULAIT_CF_TUNNEL_TOKEN` | *(from the dashboard)* | the shell session only | The tunnel's only credential. Keep it in the password manager and set it per session (below). Never put it in a file in the repository, a commit, an issue or a chat. |
 | `REGULAIT_KC_HOSTNAME` | `https://demo.example.com/idp` | `.env` | Only with the `sso` profile: the same name under `/idp`. |
 | `REGULAIT_KC_RELATIVE_PATH` | `/idp` | `.env` | Only with the `sso` profile. |
+| `REGULAIT_BOOTSTRAP_TOKEN`, `REGULAIT_DATA_KEY` | `openssl rand -hex 24` / `-hex 32` | `.env` | Real values. Behind this profile the gateway refuses the published compose defaults (the https `REGULAIT_PUBLIC_URL` is a deploy signal, ADR-0167 amendment S-02). Never set `REGULAIT_ALLOW_DEV_SECRETS=1` here. |
 
 Leave `REGULAIT_TRUSTED_PROXIES` and `REGULAIT_KC_TRUSTED_PROXIES` unset (or `172.28.0.2`). `tunnel-check` refuses
 anything else.

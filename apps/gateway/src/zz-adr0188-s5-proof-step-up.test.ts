@@ -11,6 +11,7 @@
  * the identity posture, strict admission and the active issuer key are put
  * back in afterAll.
  */
+import { hashToken } from "./token-hash.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import os from "node:os";
@@ -107,7 +108,7 @@ beforeAll(async () => {
   expect(u.statusCode, u.body).toBe(201);
   const token = "rgls_" + randomBytes(32).toString("hex");
   await db.insert(authSessions).values({
-    tokenHash: createHash("sha256").update(token).digest("hex"),
+    tokenHash: hashToken(token),
     userId: u.json().id,
     origin: "password",
     expiresAt: new Date(Date.now() + 3_600_000),

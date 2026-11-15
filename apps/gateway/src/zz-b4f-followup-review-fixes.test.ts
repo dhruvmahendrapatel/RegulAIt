@@ -15,6 +15,7 @@
  *
  * Runs on its OWN scratch database (prefix `b4f_`), dropped in afterAll.
  */
+import { hashToken } from "./token-hash.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import http from "node:http";
 import path from "node:path";
@@ -102,7 +103,7 @@ async function mkSession(userId: string): Promise<Session> {
   const [row] = await db
     .insert(authSessions)
     .values({
-      tokenHash: createHash("sha256").update(token).digest("hex"),
+      tokenHash: hashToken(token),
       userId,
       origin: "password",
       expiresAt: new Date(Date.now() + 3_600_000),
@@ -381,7 +382,7 @@ describe("F50: a passkey-backed grant ends with its passkey", () => {
     const [row] = await db
       .select({ usedAt: stepUpGrants.usedAt })
       .from(stepUpGrants)
-      .where(eq(stepUpGrants.tokenHash, createHash("sha256").update(outstanding).digest("hex")));
+      .where(eq(stepUpGrants.tokenHash, hashToken(outstanding)));
     expect(row?.usedAt, "the outstanding grant was ended with the passkey").not.toBeNull();
   });
 });
