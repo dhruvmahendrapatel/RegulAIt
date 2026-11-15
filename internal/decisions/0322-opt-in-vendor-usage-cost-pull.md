@@ -111,7 +111,8 @@ both sides.
 ### 6. Vendors and endpoints
 
 Verified against each vendor's own documentation on 2026-11-15. Each connector re-checks its endpoint shape against a
-recorded fixture in CI; a live tenant run is owner-gated.
+recorded fixture in CI; a live tenant run is owner-gated. Google (Vertex/Gemini) is not in this table yet: it is the
+optional last slice.
 
 | vendor | endpoints (all GET unless stated) | credential and scope | identity for mapping | notes |
 |---|---|---|---|---|
@@ -131,8 +132,10 @@ cursor.com/docs (teams admin-api); docs.aws.amazon.com (iam-principal-cost-alloc
 issues can also change the organisation (manage keys, users, workspaces). Following ADR-0180, such a connector cannot
 be enabled by default. Storing such a key is an extra, separately audited step-up acknowledgement ("this key can
 write; RegulAIt will only call the listed read endpoints"), the posture read shows `write_capable`, and the connector
-only ever calls the read endpoints in this table. Owner question open: accept write-capable admin keys behind that
-acknowledgement, or ship these two vendors as file-import only until the vendor offers a read-only scope.
+only ever calls the read endpoints in this table.
+
+> Owner answer (2026-11-15, relayed by the master on #845): allow Anthropic/OpenAI Admin keys with the audited step-up
+> acknowledgement and the write_capable posture flag, calling only read endpoints (as built).
 
 ### 7. Threat model
 
@@ -153,12 +156,21 @@ acknowledgement, or ship these two vendors as file-import only until the vendor 
 
 ### 8. Slices
 
+Ordered for a pilot with a large tech/SaaS org in about two weeks (owner direction, 2026-11-15, relayed by the master).
+Its coding tools are Copilot, Cursor, Claude Code and Codex; its model providers are Anthropic, OpenAI, AWS Bedrock and
+Google Gemini/Vertex.
+
 1. This ADR (documentation only).
-2. Foundation: the setting, the credential and run tables (migration `pending/vendor_usage_pull.sql`), the admin
-   routes with step-up and audit, the posture read, the scheduler job and the pull engine, with the Anthropic and
-   OpenAI connectors against fake servers.
+2. Foundation, plus the Anthropic (API and Claude Code) and OpenAI connectors: the setting, the credential and run
+   tables (migration `pending/vendor_usage_pull.sql`), the admin routes with step-up and audit, the posture read, the
+   scheduler job, the pull engine and the metered-overlap exclusion.
 3. GitHub Copilot (usage metrics and cost centres) and Cursor connectors.
-4. OpenAI Codex analytics and AWS CUR 2.0 (`line_item_iam_principal`), plus the metered-overlap reconciliation report.
+4. AWS (Bedrock spend through CUR 2.0, `line_item_iam_principal`), then OpenAI Codex analytics.
+5. If time allows: Google (the Cloud Billing export to BigQuery for Vertex/Gemini spend), verified against Google's
+   documentation before it is built.
+
+Every slice is tested against fake servers. Live tests use the owner's low-limit test keys through lane E11 once
+those exist.
 
 The routes are API only; screens are tracked on #453.
 
