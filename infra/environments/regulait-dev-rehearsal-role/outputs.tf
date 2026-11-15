@@ -4,7 +4,13 @@ output "rehearsal_role_arn" {
 }
 
 output "boundary_policy_arn" {
-  value = module.deployer_policy.boundary_policy_arn
+  description = "The deployer role's boundary."
+  value       = module.deployer_policy.boundary_policy_arn
+}
+
+output "workload_boundary_policy_arn" {
+  description = "The boundary every stack role must carry (byoc-aws iam_permissions_boundary_arn)."
+  value       = module.deployer_policy.workload_boundary_policy_arn
 }
 
 output "stack_name_prefix" {

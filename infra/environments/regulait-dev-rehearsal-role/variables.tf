@@ -43,6 +43,17 @@ variable "create_oidc_provider" {
 variable "existing_oidc_provider_arn" {
   type    = string
   default = null
+
+  validation {
+    condition     = var.existing_oidc_provider_arn == null || try(split(":", var.existing_oidc_provider_arn)[4] == var.workload_account_id, false)
+    error_message = "existing_oidc_provider_arn must be a provider in the regulait-dev account (workload_account_id)."
+  }
+}
+
+variable "github_repository_id" {
+  description = "Recommended: the repository's numeric ID, so the role trusts the ID rather than the owner/name (a renamed or re-created repository cannot inherit it). Set the repository's OIDC subject template first (docs/ops/BYOC_REHEARSAL_ROLE.md, step 1b)."
+  type        = number
+  default     = null
 }
 
 variable "max_session_duration_seconds" {

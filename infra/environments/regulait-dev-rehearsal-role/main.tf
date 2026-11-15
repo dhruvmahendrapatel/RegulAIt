@@ -3,9 +3,12 @@
 # One IAM role in regulait-dev that GitHub Actions can assume ONLY from a job
 # running in this repository's `rehearsal` environment (which has required
 # reviewers). It can build and destroy the BYOC stack (infra/modules/byoc-aws)
-# and nothing else: its boundary and policy come from aws-byoc-deployer-policy,
-# limited to resources named "regulait-rehearsal-*" and tagged
-# purpose=rehearsal, and it is denied anything tagged as production.
+# and nothing else: its boundary and policy come from aws-byoc-deployer-policy.
+# IAM, RDS, Secrets Manager, Logs, EKS, Network Firewall, S3 and ECR are limited
+# to resources named "regulait-rehearsal-*", KMS keys and EC2 structure to
+# resources tagged purpose=rehearsal, and every create must carry that tag.
+# Roles it creates carry the workload boundary (no IAM writes, no federated
+# sessions). Anything tagged as production is denied.
 #
 # Non-production only. Never point this at another account.
 
@@ -43,6 +46,7 @@ module "github_oidc" {
   create_oidc_provider       = var.create_oidc_provider
   existing_oidc_provider_arn = var.existing_oidc_provider_arn
   create_branch_roles        = false
+  github_repository_id       = var.github_repository_id
   tags                       = local.tags
 
   environment_roles = {

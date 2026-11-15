@@ -11,7 +11,6 @@ variables {
   github_repo                = "example-repo"
   create_oidc_provider       = false
   existing_oidc_provider_arn = "arn:aws:iam::111111111111:oidc-provider/token.actions.githubusercontent.com"
-  create_branch_roles        = false
   environment_roles = {
     rehearsal = {
       role_name                = "gh-actions-example-rehearsal"
@@ -42,7 +41,20 @@ run "environment_role_trusts_one_repo_and_one_environment_exactly" {
 
   assert {
     condition     = length(aws_iam_role.plan) == 0 && length(aws_iam_role.deploy) == 0 && length(aws_iam_openid_connect_provider.github) == 0
-    error_message = "Branch roles and the provider are skipped when turned off."
+    error_message = "Branch roles are off by default (ADR-0180), and the provider is skipped when reused."
+  }
+}
+
+run "repository_id_subject_when_pinned" {
+  command = plan
+
+  variables {
+    github_repository_id = 123456789
+  }
+
+  assert {
+    condition     = jsondecode(aws_iam_role.environment["rehearsal"].assume_role_policy).Statement[0].Condition.StringEquals["token.actions.githubusercontent.com:sub"] == "repository_id:123456789:environment:rehearsal"
+    error_message = "With a repository id, the trust pins the id and the environment."
   }
 }
 

@@ -31,6 +31,7 @@ resource "aws_iam_openid_connect_provider" "github" {
 locals {
   provider_arn = var.create_oidc_provider ? aws_iam_openid_connect_provider.github[0].arn : var.existing_oidc_provider_arn
   repo_sub     = "repo:${var.github_org}/${var.github_repo}"
+  env_sub      = { for k, r in var.environment_roles : k => var.github_repository_id == null ? "${local.repo_sub}:environment:${r.environment}" : "repository_id:${var.github_repository_id}:environment:${r.environment}" }
 }
 
 ### Plan role — read-only, usable from PR workflows including forks ###
@@ -123,7 +124,7 @@ resource "aws_iam_role" "environment" {
       Condition = {
         StringEquals = {
           "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
-          "token.actions.githubusercontent.com:sub" = "${local.repo_sub}:environment:${each.value.environment}"
+          "token.actions.githubusercontent.com:sub" = local.env_sub[each.key]
         }
       }
     }]
