@@ -133,6 +133,11 @@ if [ "${#INCLUDES[@]}" -eq 0 ]; then
     engines
     # the release SBOM (ADR-0324): written by the release workflow before it builds; absent elsewhere (skipped)
     sbom
+    # ADR-0305: the Helm chart and the operator's manifests (CRD, Role, manager) for a Kubernetes install. Shipping them
+    # here puts them under the bundle's release-key signature, so an air-gapped site installs the chart it verified
+    # rather than one pulled from a registry it cannot reach.
+    deploy/helm
+    deploy/operator/config
   )
 fi
 
