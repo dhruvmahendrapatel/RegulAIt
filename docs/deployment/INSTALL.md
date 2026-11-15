@@ -340,7 +340,7 @@ curl -sS https://your-host/v1/egress/hosts -H "Authorization: Bearer $ADMIN_KEY"
   -H 'Content-Type: application/json' \
   -d '{"host":"keycloak.acme.example","note":"OIDC issuer"}'
 
-curl -sS https://your-host/v1/auth/oidc/providers -H "Authorization: Bearer $ADMIN_KEY" \
+curl -sS https://your-host/v1/auth/oidc-providers -H "Authorization: Bearer $ADMIN_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"issuerUrl":"https://keycloak.acme.example/realms/corp","clientId":"…","clientSecret":"…"}'
 ```
