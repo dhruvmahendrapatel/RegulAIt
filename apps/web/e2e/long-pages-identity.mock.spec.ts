@@ -140,6 +140,8 @@ for (const P of SPLITS) {
       await page.goto(`${P.path}/no-such-page`);
       await expect(page).toHaveURL(new RegExp(`${P.path}$`));
       await expect(page.getByRole("heading", { name: P.back, level: 1 })).toBeVisible();
+      // a tabbed area lands on its first tab; the preview is one click away on its own tab
+      if ("tab" in P) await page.getByRole("tab", { name: P.tab, exact: true }).click();
       await expect(page.getByText(P.heading, { exact: true })).toBeVisible();
     });
   });
