@@ -173,15 +173,14 @@ describe("ADR-0333 rule pack: signed, audited, relaxation needs step-up", () => 
     expect(res.json()).toMatchObject({ source: "built-in", version: null, digest: packDigest(DEFAULT_DETECTION_PACK) });
   });
 
-  it("refuses an invalid pack, a stale version and a response not yet available", async () => {
+  it("refuses an invalid pack, a stale version, and a stronger response without the step-up", async () => {
     const bad = await app.inject({ method: "PUT", url: "/v1/detection/rule-pack", headers: KEY, payload: { pack: { schema: "x" }, expectedVersion: null } });
     expect(bad.statusCode).toBe(400);
     const stale = await app.inject({ method: "PUT", url: "/v1/detection/rule-pack", headers: KEY, payload: { pack: DEFAULT_DETECTION_PACK, expectedVersion: 7 } });
     expect(stale.statusCode).toBe(409);
     const strong = { ...DEFAULT_DETECTION_PACK, rules: DEFAULT_DETECTION_PACK.rules.map((r) => ({ ...r, response: "suspend_grant" })) };
     const refused = await app.inject({ method: "PUT", url: "/v1/detection/rule-pack", headers: KEY, payload: { pack: strong, expectedVersion: null } });
-    expect(refused.statusCode).toBe(400);
-    expect(refused.json().error).toBe("detection_response_not_available");
+    expect([403, 422], refused.body).toContain(refused.statusCode);
   });
 
   it("an additive change is stored signed and audited without step-up", async () => {

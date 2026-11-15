@@ -25,6 +25,7 @@ import type { SchedulerJobDefinition } from "../scheduler.js";
 /** the scheduler's system actor (`SCHEDULER_SYSTEM_ACTOR`), restated to keep this module type-only on the scheduler */
 const SYSTEM_ACTOR = "00000000-0000-0000-0000-000000000000";
 import { evaluateDetections, raisedKey, type DetectionEvent, type DetectionMatch } from "./engine.js";
+import { runDetectionResponse, type DetectionResponseTarget } from "./responses.js";
 import { DEFAULT_DETECTION_PACK, packDigest, parseDetectionPack, verifyDetectionPack, type DetectionPack } from "./pack.js";
 
 export const DETECTION_SWEEP_JOB_NAME = "agent-detection-sweep";
@@ -51,6 +52,8 @@ export interface ActivePack {
   digest: string;
   /** a stored version exists but did not verify, so the built-in pack is in use */
   unverifiedVersion: number | null;
+  /** the admin who stored the active version (null for the built-in pack): the actor of its responses */
+  createdBy: string | null;
 }
 
 /** The pack the engine uses: the latest stored version if it parses and verifies, else the built-in default. */
@@ -63,17 +66,18 @@ export async function loadActiveDetectionPack(db: Pick<Db, "select">): Promise<A
       digest: detectionRulePacks.packDigest,
       publicJwk: receiptSigningKeys.publicJwk,
       retiredAt: receiptSigningKeys.retiredAt,
+      createdBy: detectionRulePacks.createdBy,
     })
     .from(detectionRulePacks)
     .innerJoin(receiptSigningKeys, eq(receiptSigningKeys.keyId, detectionRulePacks.keyId))
     .orderBy(desc(detectionRulePacks.version))
     .limit(1);
-  const builtIn = { pack: DEFAULT_DETECTION_PACK, version: null, digest: packDigest(DEFAULT_DETECTION_PACK) };
+  const builtIn = { pack: DEFAULT_DETECTION_PACK, version: null, digest: packDigest(DEFAULT_DETECTION_PACK), createdBy: null };
   if (!row) return { ...builtIn, unverifiedVersion: null };
   try {
     const pack = parseDetectionPack(row.pack);
     if (packDigest(pack) === row.digest && verifyDetectionPack(pack, row.signature, row.publicJwk)) {
-      return { pack, version: row.version, digest: row.digest, unverifiedVersion: null };
+      return { pack, version: row.version, digest: row.digest, unverifiedVersion: null, createdBy: row.createdBy };
     }
   } catch {
     /* falls through: a stored pack that does not parse is unverified */
@@ -143,6 +147,8 @@ export interface DetectionSweepResult {
   outcome: "not_claimed" | "idle" | "evaluated";
   rowsRead: number;
   incidents: number;
+  /** configured responses run in this pass (done or failed) */
+  responses: number;
   packVersion: number | null;
   lookbackTruncated: boolean;
 }
@@ -198,12 +204,14 @@ export async function runDetectionSweep(db: Db, actorUserId: string | null): Pro
   const token = randomUUID();
   const claimed = await claim(db, token);
   const active = await loadActiveDetectionPack(db);
-  const result: DetectionSweepResult = { outcome: "not_claimed", rowsRead: 0, incidents: 0, packVersion: active.version, lookbackTruncated: false };
+  const result: DetectionSweepResult = { outcome: "not_claimed", rowsRead: 0, incidents: 0, responses: 0, packVersion: active.version, lookbackTruncated: false };
   if (claimed === null) return result;
   let cursor: number = claimed;
   result.outcome = "idle";
   try {
     await reportUnverified(db, actorUserId, active);
+    // a pass that ended between an incident's commit and its response leaves it pending: run it now
+    result.responses += await runPendingResponses(db, actorUserId);
     const maxSpanSeconds = Math.max(0, ...active.pack.rules.map((r) => (r.type === "single" ? 0 : r.timespanSeconds)));
     for (let b = 0; b < DETECTION_SWEEP_LIMITS.maxBatchesPerPass; b++) {
       const batch: EventRow[] = await rows<EventRow>(
@@ -219,6 +227,7 @@ export async function runDetectionSweep(db: Db, actorUserId: string | null): Pro
       const raised = await commitBatch(db, token, active, matches, lastSeq);
       result.incidents += raised;
       cursor = lastSeq;
+      if (raised > 0) result.responses += await runPendingResponses(db, actorUserId);
       if (batch.length < DETECTION_SWEEP_LIMITS.batchSize) break;
     }
   } finally {
@@ -270,6 +279,23 @@ async function evaluateBatch(
   return evaluateDetections(active.pack, events, new Set(fresh.map((e) => e.seq)), raised);
 }
 
+/**
+ * ADR-0333 §5: run every configured response that has not run yet, oldest first, each recorded on its incident. The
+ * actor is the author of the pack version that raised the incident (the admin who passed the step-up).
+ */
+async function runPendingResponses(db: Db, actorUserId: string | null): Promise<number> {
+  const pending = await rows<Omit<DetectionResponseTarget, "auditUserId">>(
+    db,
+    sql`SELECT i.id AS "incidentId", i.rule_id AS "ruleId", i.response AS response, i.group_key AS "groupKey",
+               i.user_id AS "userId", i.actor_identity_id AS "actorIdentityId", p.created_by AS "packAuthor"
+        FROM detection_incidents i LEFT JOIN detection_rule_packs p ON p.version = i.pack_version
+        WHERE i.response <> 'alert' AND i.response_state = 'none'
+        ORDER BY i.created_at, i.id LIMIT 100`,
+  );
+  for (const target of pending) await runDetectionResponse(db, { ...target, auditUserId: actorUserId ?? SYSTEM_ACTOR });
+  return pending.length;
+}
+
 /** Incidents, evidence, audit rows and the cursor move commit together, conditional on this pass's lease. */
 async function commitBatch(db: Db, token: string, active: ActivePack, matches: DetectionMatch[], lastSeq: number): Promise<number> {
   return db.transaction(async (tx) => {
@@ -289,7 +315,7 @@ async function commitBatch(db: Db, token: string, active: ActivePack, matches: D
           delegationGrantId: refs.grantKnown ? m.trigger.delegationGrantId : null,
           actorIdentityId: refs.identityKnown ? m.trigger.actorIdentityId : null,
           actorChain: m.trigger.actorChain,
-          response: "alert",
+          response: m.rule.response,
         })
         .onConflictDoNothing()
         .returning({ id: detectionIncidents.id });
@@ -312,9 +338,9 @@ async function commitBatch(db: Db, token: string, active: ActivePack, matches: D
           packDigest: active.digest,
           group: m.group,
           evidenceAuditIds: m.evidence.map((e) => e.auditId),
-          response: "alert",
+          response: m.rule.response,
         },
-        // alert only: the incident records a detection and restricts nothing
+        // raising the incident restricts nothing; a configured response writes its own row (responses.ts)
         effect: "allow",
         ruleId: `detection:${m.rule.id}`,
         ruleChain: [],
@@ -345,7 +371,7 @@ export function detectionJobDefinitions(): SchedulerJobDefinition[] {
         const out = await runDetectionSweep(ctx.db, ctx.actorUserId);
         return {
           itemsProcessed: out.rowsRead,
-          detail: { outcome: out.outcome, incidents: out.incidents, packVersion: out.packVersion, lookbackTruncated: out.lookbackTruncated },
+          detail: { outcome: out.outcome, incidents: out.incidents, responses: out.responses, packVersion: out.packVersion, lookbackTruncated: out.lookbackTruncated },
         };
       },
     },
