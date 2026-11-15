@@ -7,7 +7,7 @@
 - **Built in**: lane L12, in the Helm chart PR (#817)
 - **Migration**: none
 - **Related**: [ADR-0304](0304-kubernetes-operator-and-helm-chart.md) (operator and chart), [ADR-0041](0041-byoc-primary-motion.md)
-  (signed update bundles), ADR-0035 (`pg_dump` backups and the data key), ADR-0325 (BYOC AWS pilot, lane E10: the
+  (signed update bundles), ADR-0035 (`pg_dump` backups and the data key), the BYOC AWS pilot ADR of lane E10 (PR #854: the
   Terraform module that creates the bucket, key and role), ADR-0176, ADR-0180
 
 ## Context
