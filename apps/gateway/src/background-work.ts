@@ -10,7 +10,7 @@
  * expected to audit its own outcome.
  */
 import type { FastifyBaseLogger } from "fastify";
-import { runWithoutRlsScope, type Db } from "@regulait/db";
+import { runWithRlsSystem, type Db } from "@regulait/db";
 
 const inflight = new WeakMap<object, Set<Promise<void>>>();
 
@@ -23,10 +23,11 @@ export function scheduleBackgroundWork(db: Db, fn: () => Promise<void>, log?: Fa
   }
   const tracked = set;
   // ADR-0234 batch 2: the work is NOT the request's. An AsyncLocalStorage scope would otherwise follow it out of the
-  // request (an approver's decision must not run the resumed builder turn as the approver), so it leaves the RLS
-  // scope and runs as unscoped background work, exactly as before batch 2.
+  // request (an approver's decision must not run the resumed builder turn as the approver), so it leaves the
+  // request's RLS scope. Batch 7a: it runs under the named `system_task` reason rather than no scope; work that acts
+  // as a person (a channel turn, a resumed builder step) enters that person's principal scope itself.
   const p: Promise<void> = new Promise<void>((resolve) => setImmediate(resolve))
-    .then(() => runWithoutRlsScope(fn))
+    .then(() => runWithRlsSystem("system_task", "background-work", fn))
     .catch((err: unknown) => {
       log?.error({ err }, "background work failed");
     })
