@@ -35,6 +35,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { governanceAlertTicket, prunePmWebhookDeliveries } from "./pm.js";
+import { computeCredentialInventory } from "./credential-inventory.js";
 import { dropScratchDatabase } from "./testing/scratch-db.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -209,6 +210,17 @@ describe("the gateway's own entry points under those scopes", () => {
       const ticket = await governanceAlertTicket(db, ids.alert);
       expect(ticket?.externalId).toBe("1");
     });
+  });
+
+  it("the stale-credential inventory still sees PM credentials when a non-admin decision re-runs the monitor", async () => {
+    // #828 re-review: a remediation decided by a non-admin approver re-runs the governance monitor in that approver's
+    // scope; the inventory's pm_connections read must not come back empty there, or open PM episodes would clear.
+    const asAdmin = await runWithRlsPrincipal({ userId: ids.root }, () => computeCredentialInventory(db));
+    const asApprover = await runWithRlsPrincipal({ userId: ids.alice }, () => computeCredentialInventory(db));
+    const pmCount = (inv: Awaited<ReturnType<typeof computeCredentialInventory>>) =>
+      inv.types.find((t) => t.type === "pm_token")?.count ?? 0;
+    expect(pmCount(asAdmin)).toBe(1);
+    expect(pmCount(asApprover)).toBe(pmCount(asAdmin));
   });
 
   it("the delivery prune deletes old records as system_task, and nothing outside its window", async () => {

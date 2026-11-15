@@ -95,7 +95,8 @@ export const RLS_SYSTEM_REASONS = [
   /**
    * PM batch (#828 review, owner decision: RLS on every PM table): the PM mirror and link work a request does on
    * behalf of a principal who need not be an admin (a node status or sign-off decision mirrored to the linked work
-   * item, a run or instance linked to one, a decision record, the links read, the governance-alert ticket lookups).
+   * item, a run or instance linked to one, a decision record, the links read, the governance-alert ticket lookups, and
+   * the stale-credential inventory's connection read when a non-admin decision re-runs the governance monitor).
    * Entered as a principal step, so the principal still writes its own audit rows: pm_connections (read), pm_links
    * (all), pm_sync_events (read, append). Never the webhook delivery records or the import linkage.
    */

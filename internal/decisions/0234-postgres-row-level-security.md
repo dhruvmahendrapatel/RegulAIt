@@ -652,8 +652,16 @@ an admin:
 - the governance-alert ticket lookups.
 
 It is entered as a principal step (`runAsPrincipalStepIfScoped`, through `asPmSync` in `pm.ts`), so the principal
-still writes its own audit rows. In any other scope it changes nothing. The five non-admin PM routes and the exported
-mirror and alert-ticket helpers enter it.
+still writes its own audit rows. In any other scope it changes nothing. These enter it:
+
+- the five non-admin PM routes;
+- the exported mirror and alert-ticket helpers;
+- the stale-credential inventory's connection read. A remediation decided by a non-admin approver re-runs the
+  governance monitor in that approver's scope. Without the step, the PM credentials would vanish from the input and
+  their open episodes would clear (#828 re-review).
+
+The demo live check, a CLI with no principal, reads the connections as `system_task`. The `reencrypt` CLI and
+narrowing the route step to each handler's PM statements are PENDING follow-ups.
 
 **What each reason reaches:**
 
