@@ -50,6 +50,7 @@ import type { FastifyInstance } from "fastify";
 import {
   AGENT_LIFECYCLE_STATUSES,
   GRANT_CERT_SCOPE_KINDS,
+  ORG_SETTINGS_ID,
   agentGrants,
   agents,
   and,
@@ -65,6 +66,7 @@ import {
   inArray,
   isNull,
   mcpServers,
+  orgSettings,
   roleAgentGrants,
   roleAssignments,
   roleConnectorGrants,
@@ -788,6 +790,179 @@ export async function runCampaignExpirySweep(
     campaignIds.push(campaign.id);
   }
   return { observed: campaignIds.length, campaignIds };
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0090 amendment (lane L11): deadline notices. A reminder before the due
+// time and a notice at expiry, each sent ONCE per campaign, through the ChatOps
+// courier (chatops.ts registers it). Like the expiry sweep this DECIDES
+// NOTHING: no status, no keep, no revoke. A deployment without ChatOps, or
+// with no workspace opted in, sends nothing and records nothing, so a notice
+// can still go out once a workspace is opted in.
+// ---------------------------------------------------------------------------
+
+/**
+ * A reminder is sent once a campaign with undecided items is within this many hours of its due time. This is the
+ * default; the window is the org setting `certificationReminderHours` (1 hour to 14 days, owner decision 2026-11-15).
+ */
+export const CAMPAIGN_DEADLINE_REMINDER_HOURS = 48;
+/**
+ * An expiry notice is sent only this long after the due time (review of #825). An expired-incomplete campaign stays
+ * `open` (expiry is computed on read), so without a window a workspace opted in months later would be told about
+ * every old campaign, and a target that keeps failing transiently would be retried forever. Past the window nothing
+ * more is sent or retried for that campaign.
+ */
+export const CAMPAIGN_EXPIRY_NOTICE_WINDOW_HOURS = 72;
+/** at most this many delivery attempts per sweep run; the rest wait for the next hourly run (review of #825) */
+export const CAMPAIGN_DEADLINE_MAX_SENDS_PER_RUN = 200;
+export const CAMPAIGN_DEADLINE_NOTIFIED_RULE_ID = "campaign-deadline-notified";
+
+/** one notice to one reviewer: ids, counts and times only (no campaign name, grant, holder or object label) */
+export interface CampaignDeadlineNotice {
+  reviewerUserId: string;
+  /** undecided items on this campaign that name this reviewer */
+  undecidedForReviewer: number;
+}
+/**
+ * One campaign's deadline delivery. Every notice belongs to `campaign`; the courier never mixes campaigns.
+ * `done` holds the delivery targets that already reached a final outcome for this campaign and kind, so the courier
+ * skips them: `<connectionId>:channel` for a channel notice, `<connectionId>:reviewer:<userId>` for a reviewer mail.
+ */
+export interface CampaignDeadlineDelivery {
+  campaign: { id: string; kind: "due_soon" | "expired"; dueAt: Date; undecidedTotal: number };
+  notices: CampaignDeadlineNotice[];
+  done: ReadonlySet<string>;
+  /** the most delivery attempts this call may make; targets past it are left for the next run */
+  maxSends: number;
+}
+/**
+ * The outcome of one delivery target. `posted` and `terminal` are final, and the target is never tried again.
+ * `terminal` is a refusal a retry cannot fix: any 4xx other than 408 and 429. That covers `no_named_recipient`, a
+ * missing or deleted credential, an unsupported provider, a revoked token (401/403), a missing public URL (422), and
+ * so on (review of #825). `transient` is a 5xx, a network error, a 408 or a 429. The next sweep retries it, but only
+ * while the notice's window is open: until the due time for a reminder, and `CAMPAIGN_EXPIRY_NOTICE_WINDOW_HOURS`
+ * after it for an expiry notice.
+ */
+export type CampaignDeadlineOutcome = "posted" | "terminal" | "transient";
+/** delivers one campaign's notices and reports each target's outcome (the courier audits every post) */
+export type CampaignDeadlineCourier = (
+  delivery: CampaignDeadlineDelivery,
+  actorUserId: string | null,
+) => Promise<{ workspaces: number; results: Array<{ target: string; outcome: CampaignDeadlineOutcome }> }>;
+const deadlineCouriers = new WeakMap<object, CampaignDeadlineCourier>();
+export function registerCampaignDeadlineCourier(db: Db, courier: CampaignDeadlineCourier): void {
+  deadlineCouriers.set(db as object, courier);
+}
+
+export interface CampaignDeadlineSweepResult {
+  courier: boolean;
+  notified: Array<{ campaignId: string; kind: "due_soon" | "expired"; reviewers: number; posted: number; failed: number; retrying: number }>;
+}
+
+/** the targets already delivered (or terminally refused) for one campaign and kind, read from the marker rows */
+async function deliveredTargets(db: Db, campaignId: string, kind: "due_soon" | "expired"): Promise<Set<string>> {
+  const rows = await db
+    .select({ detail: auditLog.detail })
+    .from(auditLog)
+    .where(
+      and(
+        eq(auditLog.ruleId, CAMPAIGN_DEADLINE_NOTIFIED_RULE_ID),
+        eq(auditLog.objectId, campaignId),
+        sql`${auditLog.detail} ->> 'kind' = ${kind}`,
+      ),
+    );
+  const done = new Set<string>();
+  for (const r of rows) {
+    const targets = (r.detail as { targets?: unknown } | null)?.targets;
+    if (Array.isArray(targets)) for (const t of targets) if (typeof t === "string") done.add(t);
+  }
+  return done;
+}
+
+/**
+ * Once-only delivery holds per TARGET: a marker row lists the targets that reached a final outcome, and a target
+ * whose post failed transiently is not listed, so the next hourly run retries it (review of #825). Each target is
+ * delivered once, and a failing workspace never blocks or repeats another. The read-then-send-then-insert is not
+ * atomic. What makes it once-only is the ADR-0064 scheduler lease: the scheduled tick and `POST
+ * /v1/scheduler/jobs/:name/run` both run this job under that one lease, so two copies never overlap. A
+ * transaction-level advisory lock would have to be held across the network sends, which this deliberately avoids.
+ */
+export async function runCampaignDeadlineNotifySweep(
+  db: Db,
+  opts: { actorUserId: string | null; now?: Date } = { actorUserId: null },
+): Promise<CampaignDeadlineSweepResult> {
+  const now = opts.now ?? new Date();
+  const courier = deadlineCouriers.get(db as object);
+  const out: CampaignDeadlineSweepResult = { courier: Boolean(courier), notified: [] };
+  if (!courier) return out;
+  const [org] = await db
+    .select({ hours: orgSettings.certificationReminderHours })
+    .from(orgSettings)
+    .where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  const reminderMs = (org?.hours ?? CAMPAIGN_DEADLINE_REMINDER_HOURS) * 3600_000;
+  const open = await db.select().from(grantCertificationCampaigns).where(eq(grantCertificationCampaigns.status, "open"));
+  let budget = CAMPAIGN_DEADLINE_MAX_SENDS_PER_RUN;
+  for (const campaign of open) {
+    if (budget <= 0) break;
+    const pastDue = campaignPastDue(campaign, now);
+    const dueSoon = !pastDue && campaign.dueAt.getTime() - now.getTime() <= reminderMs;
+    if (!pastDue && !dueSoon) continue;
+    // an expiry notice only within its window after the due time: old campaigns are never announced late
+    if (pastDue && now.getTime() - campaign.dueAt.getTime() > CAMPAIGN_EXPIRY_NOTICE_WINDOW_HOURS * 3600_000) continue;
+    // a campaign first seen past due gets only the expiry notice, never a late reminder
+    const kind = pastDue ? "expired" : "due_soon";
+    const perReviewer = await db
+      .select({ reviewerUserId: grantCertificationItems.reviewerUserId, n: count() })
+      .from(grantCertificationItems)
+      .where(and(eq(grantCertificationItems.campaignId, campaign.id), isNull(grantCertificationItems.decision)))
+      .groupBy(grantCertificationItems.reviewerUserId);
+    const undecidedTotal = perReviewer.reduce((t, r) => t + r.n, 0);
+    if (undecidedTotal === 0) continue;
+    const done = await deliveredTargets(db, campaign.id, kind);
+    const notices: CampaignDeadlineNotice[] = perReviewer.map((r) => ({ reviewerUserId: r.reviewerUserId, undecidedForReviewer: r.n }));
+    let sent: Awaited<ReturnType<CampaignDeadlineCourier>>;
+    try {
+      sent = await courier({ campaign: { id: campaign.id, kind, dueAt: campaign.dueAt, undecidedTotal }, notices, done, maxSends: budget }, opts.actorUserId);
+    } catch {
+      // the courier itself failed (e.g. the connection read): nothing is final, the next run retries everything
+      sent = { workspaces: 0, results: [] };
+    }
+    // no workspace opted in, or nothing left to send: nothing attempted, nothing marked
+    if (sent.workspaces === 0 || sent.results.length === 0) continue;
+    budget -= sent.results.length;
+    const posted = sent.results.filter((r) => r.outcome === "posted").length;
+    const terminal = sent.results.filter((r) => r.outcome === "terminal").length;
+    const retrying = sent.results.length - posted - terminal;
+    const finalTargets = sent.results.filter((r) => r.outcome !== "transient").map((r) => r.target);
+    out.notified.push({ campaignId: campaign.id, kind, reviewers: notices.length, posted, failed: terminal + retrying, retrying });
+    // every attempt failed transiently: no marker, so the whole delivery is retried next run
+    if (finalTargets.length === 0) continue;
+    await db.insert(auditLog).values({
+      userId: opts.actorUserId ?? campaign.openedByUserId,
+      objectType: "certification_campaign",
+      objectId: campaign.id,
+      // evidence row (ADR-0200 exception): `targets` is the point-in-time list this run delivered, ids only
+      detail: {
+        phase: "deadline_notice",
+        kind,
+        dueAt: campaign.dueAt.toISOString(),
+        undecidedItems: undecidedTotal,
+        reviewers: notices.length,
+        posted,
+        terminal,
+        retrying,
+        targets: finalTargets,
+      },
+      effect: "allow",
+      ruleId: CAMPAIGN_DEADLINE_NOTIFIED_RULE_ID,
+      ruleChain: [],
+      reason:
+        `certification campaign ${campaign.id}: ${kind === "expired" ? "expiry" : "due-soon"} notice for ` +
+        `${undecidedTotal} undecided item(s): ${posted} post(s) sent, ${terminal} refused for good, ` +
+        `${retrying} to retry; each target is sent once, decides nothing`,
+    });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
