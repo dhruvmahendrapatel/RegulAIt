@@ -61,9 +61,10 @@ func ParseCopilotPreToolUse(r io.Reader) (Call, error) {
 	default:
 		return Call{}, errors.New("not a preToolUse event")
 	}
-	c := Call{Agent: AgentCopilotCLI, Tool: tool}
+	c := Call{Tool: tool}
 	if !copilotBuiltins[tool] {
-		c.MCP = &MCPCall{Source: SourceCopilotUnattested}
+		// an unattributed call: no server, so Decide denies it in enforce mode
+		c.MCP = &MCPCall{}
 	}
 	return c, nil
 }
@@ -79,19 +80,23 @@ func RenderCopilot(d Decision) (stdout []byte, stderr string, exit int) {
 	if d.Verdict != Deny {
 		return nil, "", 0
 	}
-	return copilotDeny(d.Reason)
+	b, _ := json.Marshal(copilotOutput{PermissionDecision: "deny", PermissionDecisionReason: d.Reason})
+	return b, d.Reason, ExitBlock
 }
 
-func copilotDeny(reason string) ([]byte, string, int) {
-	b, _ := json.Marshal(copilotOutput{PermissionDecision: "deny", PermissionDecisionReason: reason})
-	return b, reason, ExitBlock
-}
-
-// HookCopilot is the whole Copilot CLI hook: parse, decide, render. A parse failure is a deny.
-func HookCopilot(stdin io.Reader, policy *Policy) (stdout []byte, stderr string, exit int) {
-	call, err := ParseCopilotPreToolUse(stdin)
-	if err != nil {
-		return copilotDeny(unreadable(err))
-	}
-	return RenderCopilot(Decide(policy, call))
+var copilotAdapter = Adapter{
+	Name: AgentCopilotCLI,
+	Contract: Contract{
+		Version: "2026-11-15", Event: "preToolUse",
+		AgentVersions: "1.0.57 or later (hook errors deny); checked up to 1.0.112",
+		Docs: []string{"https://docs.github.com/en/copilot/reference/hooks-reference",
+			"https://github.com/github/copilot-cli/blob/main/changelog.md"},
+	},
+	Capabilities: Capabilities{
+		CanBlock: true, MCPServer: ServerNotVisible, MCPProvenance: false,
+		OnError: FailClosed, OnTimeout: FailOpen, ExecForm: true, ManagedLocation: true,
+	},
+	UnattestedSource: SourceCopilotUnattested,
+	Parse:            ParseCopilotPreToolUse,
+	Render:           RenderCopilot,
 }

@@ -130,12 +130,12 @@ func TestClaudeCodeHook(t *testing.T) {
 	mcpIn := `{"session_id":"s","hook_event_name":"PreToolUse","tool_name":"mcp__regulait__search","tool_use_id":"t1",
 	  "tool_input":{"q":"secret-argument"},"mcp_server":{"name":"regulait","source":"managed"},"future_field":true}`
 
-	if out, _, code := HookClaudeCode(in(mcpIn), &p); code != 0 || out != nil {
+	if out, _, code := claudeCodeAdapter.Hook(in(mcpIn), &p); code != 0 || out != nil {
 		t.Errorf("an allowed call is not left to Claude Code's own permission flow: %d %s", code, out)
 	}
 
 	shadow := strings.ReplaceAll(mcpIn, `"regulait"`, `"shadow"`)
-	out, reason, code := HookClaudeCode(in(shadow), &p)
+	out, reason, code := claudeCodeAdapter.Hook(in(shadow), &p)
 	if code != ExitBlock || !strings.Contains(string(out), `"permissionDecision":"deny"`) || !strings.Contains(string(out), `"hookEventName":"PreToolUse"`) || reason == "" {
 		t.Errorf("a denied call does not block: %d %s %q", code, out, reason)
 	}
@@ -143,18 +143,18 @@ func TestClaudeCodeHook(t *testing.T) {
 		t.Error("a tool argument reached the hook output")
 	}
 
-	if _, _, code := HookClaudeCode(in(mcpIn), nil); code != ExitBlock {
+	if _, _, code := claudeCodeAdapter.Hook(in(mcpIn), nil); code != ExitBlock {
 		t.Error("no policy does not fail closed")
 	}
-	if out, _, code := HookClaudeCode(in(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{}}`), nil); code != 0 || out != nil {
+	if out, _, code := claudeCodeAdapter.Hook(in(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{}}`), nil); code != 0 || out != nil {
 		t.Error("a non-MCP tool got a decision")
 	}
 	noProvenance := `{"hook_event_name":"PreToolUse","tool_name":"mcp__regulait__search","tool_input":{}}`
-	if _, _, code := HookClaudeCode(in(noProvenance), &p); code != ExitBlock {
+	if _, _, code := claudeCodeAdapter.Hook(in(noProvenance), &p); code != ExitBlock {
 		t.Error("an MCP call without mcp_server provenance is allowed")
 	}
 	for _, bad := range []string{"", "not json", `{"hook_event_name":"PostToolUse","tool_name":"mcp__a__b"}`, `{"hook_event_name":"PreToolUse"}`} {
-		if _, _, code := HookClaudeCode(in(bad), &p); code != ExitBlock {
+		if _, _, code := claudeCodeAdapter.Hook(in(bad), &p); code != ExitBlock {
 			t.Errorf("unreadable input %q does not block", bad)
 		}
 	}

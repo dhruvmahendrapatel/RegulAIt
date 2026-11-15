@@ -45,7 +45,7 @@ func ParseClaudeCodePreToolUse(r io.Reader) (Call, error) {
 	if in.ToolName == "" {
 		return Call{}, errors.New("no tool_name")
 	}
-	c := Call{Agent: AgentClaudeCode, Tool: in.ToolName}
+	c := Call{Tool: in.ToolName}
 	if in.MCPServer != nil {
 		c.MCP = &MCPCall{Server: in.MCPServer.Name, Source: in.MCPServer.Source}
 	} else if strings.HasPrefix(in.ToolName, "mcp__") {
@@ -120,11 +120,17 @@ func unreadable(err error) string {
 	return "RegulAIt: the enforcement hook could not read this tool call (" + err.Error() + "), so it is blocked."
 }
 
-// HookClaudeCode is the whole hook: parse, decide, render. A parse failure on an MCP-capable hook is a deny.
-func HookClaudeCode(stdin io.Reader, policy *Policy) (stdout []byte, stderr string, exit int) {
-	call, err := ParseClaudeCodePreToolUse(stdin)
-	if err != nil {
-		return renderPreToolUseDeny(Decision{Verdict: Deny, Reason: unreadable(err)})
-	}
-	return RenderClaudeCode(Decide(policy, call))
+var claudeCodeAdapter = Adapter{
+	Name: AgentClaudeCode,
+	Contract: Contract{
+		Version: "2026-11-14", Event: "PreToolUse",
+		AgentVersions: "v2.1.274 or later (mcp_server); v2.1.295 or later (onFailure: block)",
+		Docs:          []string{"https://code.claude.com/docs/en/hooks"},
+	},
+	Capabilities: Capabilities{
+		CanBlock: true, MCPServer: ServerFromField, MCPProvenance: true,
+		OnError: FailClosedIfConfigured, OnTimeout: FailClosedIfConfigured, ExecForm: true, ManagedLocation: true,
+	},
+	Parse:  ParseClaudeCodePreToolUse,
+	Render: RenderClaudeCode,
 }

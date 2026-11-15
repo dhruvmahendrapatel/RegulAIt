@@ -67,7 +67,7 @@ type Policy struct {
 	NotAfter time.Time `json:"notAfter"`
 	MCP      MCPRules  `json:"mcp"`
 	// AgentModes optionally sets the mode for one coding agent (ADR-0330), overriding Mode for that agent only. Keys
-	// are the Agent* names; an unknown key or mode is refused. It exists because the agents' hook contracts differ
+	// are adapter names (Adapters); an unknown key or mode is refused. It exists because the agents' hook contracts differ
 	// in what they can see: an org may enforce on an agent that names MCP servers and only audit on one that cannot.
 	AgentModes map[string]string `json:"agentModes,omitempty"`
 }
@@ -80,26 +80,15 @@ const (
 	AgentCodex      = "codex"
 )
 
-// KnownAgents is the closed set of adapter names, used by the policy's agentModes and the hook subcommand.
-var KnownAgents = []string{AgentClaudeCode, AgentCursor, AgentCopilotCLI, AgentCodex}
-
 // Unattested sources: an agent whose hook input cannot say where an MCP server was defined reports one of these as
-// the call's source. A policy accepts calls from such an agent only by listing its unattested source in
-// allowSources, so trusting a server by name alone is an explicit, signed choice per agent, never a default.
+// the call's source (Adapter.UnattestedSource). A policy accepts calls from such an agent only by listing its
+// unattested source in allowSources, so trusting a server by name alone is an explicit, signed choice per agent,
+// never a default.
 const (
 	SourceCursorUnattested  = "cursor-unattested"
 	SourceCopilotUnattested = "copilot-unattested"
 	SourceCodexUnattested   = "codex-unattested"
 )
-
-func knownAgent(a string) bool {
-	for _, k := range KnownAgents {
-		if k == a {
-			return true
-		}
-	}
-	return false
-}
 
 // modeFor is the mode that applies to one agent's calls.
 func (p *Policy) modeFor(agent string) string {
@@ -193,7 +182,7 @@ func (p *Policy) validate(now time.Time) error {
 	if p.Mode != ModeAudit && p.Mode != ModeEnforce {
 		return refuse("mode %q", p.Mode)
 	}
-	if len(p.AgentModes) > len(KnownAgents) {
+	if len(p.AgentModes) > len(Adapters) {
 		return refuse("agentModes")
 	}
 	for a, m := range p.AgentModes {
@@ -237,7 +226,7 @@ func (p *Policy) validate(now time.Time) error {
 
 // Call is one tool call an agent asks about, in adapter-neutral form.
 type Call struct {
-	// Agent is the adapter that parsed the call (an Agent* name); it selects the policy's per-agent mode.
+	// Agent is the adapter that parsed the call (an adapter name, set by Adapter.Hook); it selects the policy's per-agent mode.
 	Agent string
 	Tool  string
 	// MCP is set only for MCP tool calls.

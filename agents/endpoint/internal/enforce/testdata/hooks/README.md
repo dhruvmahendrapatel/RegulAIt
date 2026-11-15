@@ -1,9 +1,23 @@
-# Hook payload fixtures (ADR-0330)
+# Versioned hook contract fixtures (ADR-0330)
 
-One directory per coding agent. Each file is one hook input as the agent writes it to the hook's stdin, built from
-the vendor's documented field table on the date the contract was checked (2026-11-15). Where the docs give a literal
-example it is used as is: `copilot-cli/builtin-bash.json` is the docs' own test payload. The other vendors document
-the fields only as a template or a table, so their fixtures fill those fields with made-up values. Every fixture but that one
-carries `"secret-argument"` inside the tool arguments, and the tests assert that it never reaches the hook output.
+Layout: `<agent>/<contract-version>/`, one directory per vendor contract as checked. The version is the adapter's
+`Contract.Version` (the date the contract was checked against the vendor's documentation). Each directory holds:
 
-When a vendor's contract changes, add a fixture for the new shape; never edit one in place.
+- one file per hook input, exactly as the agent writes it to the hook's stdin;
+- `cases.json`, which lists every input with the test policy (`enforce`, `audit`, or `none`, meaning no valid policy)
+  and the expected answer: `none` (no output, exit 0), `allow` (an explicit allow, exit 0), or `deny` (the agent's
+  deny JSON and exit 2).
+
+Rules, which the shared tests enforce:
+
+- **Coverage.** Every adapter has a directory for its current contract version, every input file is listed in
+  `cases.json`, and every version has at least one deny and one no-policy case.
+- **No edits in place.** When a vendor's contract changes, add a new version directory and bump the adapter's
+  `Contract.Version`. Never edit an old directory's files. Old directories stay, and they keep passing, so a contract
+  change cannot silently break agents still on the older version.
+- **Arguments stay private.** Inputs carry `"secret-argument"` inside tool arguments (or, for Cursor, inside the stdio
+  launch command), and the tests assert that it never reaches hook output.
+
+**Provenance.** Where a vendor's docs give a literal example, it is used as is. `copilot-cli/2026-11-15/builtin-bash.json`
+is the docs' own test payload, and it carries no argument marker. The other vendors document only a field table or a
+template, so their inputs fill those documented fields with made-up values.

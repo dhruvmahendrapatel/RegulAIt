@@ -12,7 +12,7 @@ package enforce
 //     it, so only the enterprise (MDM) hooks.json location is supported.
 //
 // What Cursor cannot tell us: which mcp.json defined the server (enterprise, project or user). Every call is
-// therefore reported with source SourceCursorUnattested, and a policy accepts Cursor's calls only by listing that
+// therefore reported with the adapter's unattested source, and a policy accepts Cursor's calls only by listing that
 // source. The docs advise treating a missing mcp_server_name as a deny, and this adapter does.
 
 import (
@@ -47,7 +47,7 @@ func ParseCursorBeforeMCP(r io.Reader) (Call, error) {
 		return Call{}, errors.New("no cursor_version")
 	}
 	// a missing mcp_server_name leaves Server empty, which Decide denies
-	return Call{Agent: AgentCursor, Tool: in.ToolName, MCP: &MCPCall{Server: in.MCPServerName, Source: SourceCursorUnattested}}, nil
+	return Call{Tool: in.ToolName, MCP: &MCPCall{Server: in.MCPServerName}}, nil
 }
 
 type cursorOutput struct {
@@ -69,13 +69,18 @@ func RenderCursor(d Decision) (stdout []byte, stderr string, exit int) {
 	return b, "", 0
 }
 
-// HookCursor is the whole Cursor hook: parse, decide, render. A parse failure is a deny.
-func HookCursor(stdin io.Reader, policy *Policy) (stdout []byte, stderr string, exit int) {
-	call, err := ParseCursorBeforeMCP(stdin)
-	if err != nil {
-		reason := unreadable(err)
-		b, _ := json.Marshal(cursorOutput{Permission: "deny", UserMessage: reason, AgentMessage: reason})
-		return b, reason, ExitBlock
-	}
-	return RenderCursor(Decide(policy, call))
+var cursorAdapter = Adapter{
+	Name: AgentCursor,
+	Contract: Contract{
+		Version: "2026-11-15", Event: "beforeMCPExecution",
+		AgentVersions: "hooks as documented on 2026-11-15 (sample cursor_version 1.7.2; no minimum stated)",
+		Docs:          []string{"https://cursor.com/docs/hooks"},
+	},
+	Capabilities: Capabilities{
+		CanBlock: true, MCPServer: ServerFromField, MCPProvenance: false,
+		OnError: FailClosedIfConfigured, OnTimeout: FailClosedIfConfigured, ExecForm: false, ManagedLocation: true,
+	},
+	UnattestedSource: SourceCursorUnattested,
+	Parse:            ParseCursorBeforeMCP,
+	Render:           RenderCursor,
 }

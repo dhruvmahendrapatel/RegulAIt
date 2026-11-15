@@ -9,6 +9,7 @@
 //	regulait-agent hook AGENT -policy FILE          on-device enforcement (ADR-0298, ADR-0330, default off): the
 //	                                                MCP tool-call hook for AGENT = claude-code, cursor, copilot-cli
 //	                                                or codex; reads stdin, never the network
+//	regulait-agent hook-capabilities                print each hook adapter's contract and capability matrix as JSON
 //	regulait-agent version
 package main
 
@@ -32,13 +33,19 @@ import (
 )
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: regulait-agent redeem-ticket [-ticket-gid N] | register | run-once | run | preview -manifest FILE | hook claude-code|cursor|copilot-cli|codex -policy FILE | version")
+	fmt.Fprintln(os.Stderr, "usage: regulait-agent redeem-ticket [-ticket-gid N] | register | run-once | run | preview -manifest FILE | hook claude-code|cursor|copilot-cli|codex -policy FILE | hook-capabilities | version")
 	os.Exit(2)
 }
 
 func main() {
 	if len(os.Args) < 2 {
 		usage()
+	}
+	if os.Args[1] == "hook-capabilities" {
+		// the per-agent capability matrix (ADR-0330), for the admin console and for a customer's own review
+		out, _ := json.MarshalIndent(enforce.Adapters, "", "  ")
+		fmt.Println(string(out))
+		return
 	}
 	if os.Args[1] == "hook" {
 		os.Exit(hook(os.Args[2:]))
@@ -125,7 +132,7 @@ func hook(args []string) int {
 		fmt.Fprintln(os.Stderr, usage)
 		return enforce.ExitBlock
 	}
-	run, ok := enforce.Hooks[args[0]]
+	adapter, ok := enforce.Lookup(args[0])
 	if !ok {
 		fmt.Fprintln(os.Stderr, usage)
 		return enforce.ExitBlock
@@ -142,7 +149,7 @@ func hook(args []string) int {
 		policy, _ = enforce.LoadPolicy(f, enforce.CompiledKeyring, time.Now())
 		_ = f.Close()
 	}
-	stdout, stderr, code := run(os.Stdin, policy)
+	stdout, stderr, code := adapter.Hook(os.Stdin, policy)
 	if len(stdout) > 0 {
 		_, _ = os.Stdout.Write(stdout)
 	}

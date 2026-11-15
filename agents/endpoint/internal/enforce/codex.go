@@ -15,7 +15,7 @@ package enforce
 //     [features].hooks pinned on. The command is a shell string.
 //
 // What Codex cannot tell us: where a server was defined, or anything about it beyond the name inside the tool name.
-// Calls are reported with source SourceCodexUnattested. Codex's own requirements.toml [mcp_servers.<name>] identity
+// Calls are reported with the adapter's unattested source. Codex's own requirements.toml [mcp_servers.<name>] identity
 // allow-list (command or URL) is the stronger, vendor-native control and is recommended alongside this hook.
 
 import (
@@ -42,20 +42,29 @@ func ParseCodexPreToolUse(r io.Reader) (Call, error) {
 	if in.ToolName == "" {
 		return Call{}, errors.New("no tool_name")
 	}
-	c := Call{Agent: AgentCodex, Tool: in.ToolName}
+	c := Call{Tool: in.ToolName}
 	if strings.HasPrefix(in.ToolName, "mcp__") {
 		// a name that does not split into mcp__<server>__<tool> leaves Server empty, which Decide denies
-		c.MCP = &MCPCall{Server: mcpServerFromToolName(in.ToolName), Source: SourceCodexUnattested}
+		c.MCP = &MCPCall{Server: mcpServerFromToolName(in.ToolName)}
 	}
 	return c, nil
 }
 
-// HookCodex is the whole Codex hook: parse, decide, render. An allow is no output (Codex's own approval policy
-// still applies); a deny is the shared hookSpecificOutput JSON and exit 2. A parse failure is a deny.
-func HookCodex(stdin io.Reader, policy *Policy) (stdout []byte, stderr string, exit int) {
-	call, err := ParseCodexPreToolUse(stdin)
-	if err != nil {
-		return renderPreToolUseDeny(Decision{Verdict: Deny, Reason: unreadable(err)})
-	}
-	return renderPreToolUseDeny(Decide(policy, call))
+// An allow is no output (Codex's own approval policy still applies); a deny is the shared hookSpecificOutput JSON
+// and exit 2.
+var codexAdapter = Adapter{
+	Name: AgentCodex,
+	Contract: Contract{
+		Version: "2026-11-15", Event: "PreToolUse",
+		AgentVersions: "rust-v0.114.0 or later (hooks); on by default via [features].hooks",
+		Docs: []string{"https://developers.openai.com/codex/hooks",
+			"https://developers.openai.com/codex/enterprise/managed-configuration"},
+	},
+	Capabilities: Capabilities{
+		CanBlock: true, MCPServer: ServerFromToolName, MCPProvenance: false,
+		OnError: FailOpen, OnTimeout: FailOpen, ExecForm: false, ManagedLocation: true,
+	},
+	UnattestedSource: SourceCodexUnattested,
+	Parse:            ParseCodexPreToolUse,
+	Render:           renderPreToolUseDeny,
 }

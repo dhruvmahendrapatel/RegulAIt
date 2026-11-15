@@ -9,7 +9,9 @@
 ## Context
 
 ADR-0298 left "More agents" as a follow-up: adapters for Cursor, GitHub Copilot CLI and Codex, each written against its own
-documented contract. A pilot needs policy enforced in every coding tool its developers use, not only in Claude Code.
+documented contract. Policy should hold in every coding tool a developer uses, not only in Claude Code, and the set of
+coding agents will keep growing. So this slice also fixes the shape every later adapter takes (owner direction,
+2026-11-15: build the adapter layer for the long term).
 
 The three contracts were checked on **2026-11-15** against first-party documentation only:
 
@@ -24,7 +26,37 @@ agent rather than claiming the same coverage everywhere.
 
 ## Decision
 
-### 1. One decision, one policy, four adapters
+### 1. One stable adapter interface: data plus two thin functions
+
+An agent is supported by one `Adapter` value (`internal/enforce/hooks.go`). It has four parts:
+
+- **`Contract`** (data): the contract version, which is the date it was checked and also names the fixture directory;
+  the hook event; the agent versions the docs describe; and the first-party doc URLs.
+- **`Capabilities`** (data): one row of the capability matrix (section 2).
+- **`UnattestedSource`** (data): the source every call carries when the contract cannot attest provenance
+  (section 3).
+- **`Parse` and `Render`** (code): they turn the agent's input into a neutral `Call`, and a `Decision` into the agent's
+  documented output.
+
+`Adapter.Hook` is the only control flow, the same for every agent:
+
+1. Parse the input. A parse failure is rendered as a deny.
+2. Stamp the call's agent and, where the contract cannot attest provenance, its unattested source. A parser therefore
+   cannot forge provenance.
+3. Run `Decide`.
+4. Render the result.
+
+The policy and `Decide` are never agent-specific. To add an agent, add one `Adapter` to `Adapters` and one versioned
+fixture directory (section 2a). The shared tests then hold it to the same rules as every other adapter:
+
+- every input in its fixtures gives the expected answer;
+- unreadable input is a deny in the agent's own deny shape;
+- `Render` blocks on a deny and only on a deny;
+- no tool argument ever reaches the output;
+- the capability row is consistent with the adapter, so an agent without provenance must have a valid unattested
+  source.
+
+The rest of this section describes the shared core:
 
 - **Shared core.** Every adapter turns its agent's hook input into the same neutral `Call` and answers with ADR-0298's
   single `Decide`, against the same signed `regulait.endpoint-enforcement/1` policy.
@@ -35,7 +67,49 @@ agent rather than claiming the same coverage everywhere.
   which can carry tokens.
 - **Unreadable input.** For every agent it is a deny, written as both the agent's deny JSON and exit 2.
 
-### 2. Per-agent coverage, recorded honestly
+### 2. The per-agent capability matrix
+
+Each adapter's `Capabilities` records what the vendor's documented contract allows enforcement to do:
+
+- **`canBlock`**: the contract has a documented deny.
+- **`mcpServer`**: how a call's server is identified: a documented `field`, the `tool-name` convention, or `none`.
+- **`mcpProvenance`**: the input says where the server was defined.
+- **`onError` and `onTimeout`**: what the agent does when the hook fails: `closed`, `closed-if-configured`, or `open`.
+- **`execForm`**: the hook can be registered without a shell.
+- **`managedLocation`**: the vendor documents an admin location that a user cannot override.
+
+The matrix is part of the agent binary. `regulait-agent hook-capabilities` prints it as JSON, with each adapter's
+contract, so the admin console and a customer's own review read the same claim the code is tested against. A row
+changes only together with a new contract version.
+
+The matrix as built (contract versions 2026-11-14 for Claude Code, 2026-11-15 for the rest):
+
+| | Claude Code | Cursor | Copilot CLI | Codex |
+|---|---|---|---|---|
+| canBlock | yes | yes | yes | yes |
+| mcpServer | field | field | **none** | tool-name |
+| mcpProvenance | yes | **no** | **no** | **no** |
+| onError | closed-if-configured | closed-if-configured | closed | **open** |
+| onTimeout | closed-if-configured | closed-if-configured | **open** | **open** |
+| execForm | yes | no | yes | no |
+| managedLocation | yes | yes | yes | yes |
+
+### 2a. Versioned contract fixtures
+
+Fixtures live in `internal/enforce/testdata/hooks/<agent>/<contract-version>/`. Each directory holds one file per hook
+input and a `cases.json` that maps each input and test policy (`enforce`, `audit` or none) to the expected answer.
+
+The tests enforce four rules:
+
+- every adapter has fixtures for its current version;
+- every input is listed in `cases.json`;
+- every version has at least one deny case and one no-policy case;
+- every version directory, old ones included, keeps passing.
+
+A changed vendor contract is a new directory and a bumped `Contract.Version`. Old directories are never edited, so a
+change for a new agent version cannot silently break devices still on the old one.
+
+### 2b. Per-agent coverage detail
 
 | | Cursor (`beforeMCPExecution`) | Copilot CLI (`preToolUse`) | Codex (`PreToolUse`) |
 |---|---|---|---|
@@ -123,15 +197,19 @@ The README documents each registration.
 - **Cursor cloud agents.** Their `preToolUse` with `MCP:<tool>` names runs off the device. That is not this agent's
   surface.
 - **Decision audit, tamper reporting, policy content and delivery.** These remain ADR-0298 follow-ups.
-- **Admin UI.** Choosing the per-agent mode and showing coverage per agent is a known UI gap tracked on #453.
+- **Admin UI.** Choosing the per-agent mode and showing the capability matrix is a known UI gap tracked on #453.
+- **Matrix to the gateway.** Reporting the device's adapters and contract versions in the agent's report, so the
+  console shows what each device can enforce. This rides with the decision-audit follow-up.
 
 ## Consequences
 
+- **Adding an agent.** It costs one data value, two small functions and a fixture directory. It never touches the
+  policy or the decision.
 - **Coverage.** Four coding agents now have an adapter behind one decision and one policy.
   - Claude Code and Cursor can enforce by server.
   - Codex can enforce by server name, but fails open on errors.
   - Copilot CLI can only audit usefully, until its contract improves.
-- **The table is the claim.** The coverage table in section 2 is what we tell a customer about each agent. Vendor
+- **The matrix is the claim.** The capability matrix in section 2 is what we tell a customer about each agent. Vendor
   contracts change fast, so each adapter file carries the date it was checked. A changed contract gets new fixtures,
   and an old fixture is never edited in place.
 

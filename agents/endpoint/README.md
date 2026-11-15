@@ -36,6 +36,9 @@ bash scripts/package-linux.sh <bin> <out> <version>   # unsigned .deb and .rpm
 Nothing registers it: an admin opts in per agent through that agent's managed location. Until the SD4 signer pins a key,
 no policy verifies, so a registered hook denies every MCP call. ADR-0330 §2 records what each agent's contract can and
 cannot see. In particular, Codex cannot fail closed, and Copilot CLI denies every non-built-in tool in `enforce` mode.
+`regulait-agent hook-capabilities` prints that capability matrix, with each adapter's contract version and docs, as
+JSON. To add an agent, add one `Adapter` (`internal/enforce/hooks.go`) and its versioned fixtures
+(`internal/enforce/testdata/hooks/README.md`).
 
 Registrations (paths are examples; use absolute paths with no shell metacharacters):
 
