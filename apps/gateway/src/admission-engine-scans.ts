@@ -19,13 +19,13 @@
  *      about the subject's current digest: `clean` (or `unscanned`/`grandfathered`) becomes `held` on a `fail` or
  *      `unknown`; a `held` whose ONLY findings were the engine's becomes `clean` again on a `pass`. A `refused`
  *      skill stands.
- *   4. A LATER `fail` REVOKES AN EARLIER CLEARANCE (owner question 2 of ADR-0242, built with the secure default
- *      by lane L4). An admin's `cleared` (MCP) or `admitted` (skill) decision for the current digest is re-held
- *      when the engine flags that digest and the admin had not already seen that same flag: no `fail` scan of the
- *      same digest under the same rule set was recorded at or before the clearance. A re-scan that repeats the
- *      fail the admin reviewed leaves the clearance alone; a fail from new rules (a rules upgrade moves the
- *      digest) or on a digest cleared before any engine verdict revokes it, audited as
- *      `admission-engine-clearance-revoked`. An `unknown` (an engine error) is not evidence and revokes nothing.
+ *   4. A LATER `fail` REVOKES AN EARLIER CLEARANCE (ADR-0242 owner decision Q2, 2026-11-15). An admin's `cleared`
+ *      (MCP) or `admitted` (skill) decision for the current digest is re-held by every engine `fail` recorded after
+ *      it, even one that repeats a flag the admin had already reviewed: the clearance never outlives a fresh
+ *      verdict. The revocation is audited as `admission-engine-clearance-revoked` and raises a governance alert
+ *      (rule `admission-engine-clearance-revoked`, high), which is the admin's notification. The admin can clear or
+ *      admit the digest again through the existing routes (a step-up, a reason and an audit row: the audited
+ *      override). An `unknown` (an engine error) is not evidence and revokes nothing.
  *
  * Engine findings are recognisable by `where` starting `engine:` (counts and locations only, as every admission
  * finding). The status findings (`engine.<id>.pending`, `engine.<id>.unknown`) sit at the subject's hold line.
@@ -39,8 +39,7 @@ import {
   desc,
   eq,
   engines,
-  isNull,
-  lte,
+  governanceAlerts,
   mcpServers,
   type Db,
 } from "@regulait/db";
@@ -58,6 +57,7 @@ import {
   type McpAdmissionFinding,
   type McpAdmissionScan,
 } from "@regulait/shared";
+import { notifyGovernanceAlerts } from "./chatops.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 
@@ -114,30 +114,6 @@ export async function skillEngineHold(db: Db, skillId: string, digest: string): 
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
-/**
- * Did the admin see this same engine flag before clearing? True when a `fail` scan of the subject at this digest,
- * under the same rule set, was recorded at or before the clearance. (Both times come from writes in this database's
- * transactions; the clearance's is the gateway clock, so a scan within clock skew of a clearance counts as seen.)
- */
-async function failSeenBeforeClearance(tx: Tx, subject: AdmissionScanSubject, rulesSha256: string | null, clearedAt: Date | null): Promise<boolean> {
-  if (!clearedAt) return false;
-  const col = subject.kind === "mcp_server" ? admissionEngineScans.mcpServerId : admissionEngineScans.builderSkillId;
-  const [row] = await tx
-    .select({ id: admissionEngineScans.id })
-    .from(admissionEngineScans)
-    .where(
-      and(
-        eq(col, subject.id),
-        eq(admissionEngineScans.subjectDigest, subject.digest),
-        eq(admissionEngineScans.verdict, "fail"),
-        rulesSha256 === null ? isNull(admissionEngineScans.rulesSha256) : eq(admissionEngineScans.rulesSha256, rulesSha256),
-        lte(admissionEngineScans.createdAt, clearedAt),
-      ),
-    )
-    .limit(1);
-  return row !== undefined;
-}
-
 export interface RecordedAdmissionScan {
   id: string;
   verdict: AdmissionScanVerdict;
@@ -147,6 +123,8 @@ export interface RecordedAdmissionScan {
   current: boolean;
   /** true when this scan revoked an admin's clearance of the current digest (a later fail) */
   revokedClearance: boolean;
+  /** the governance alert the revocation raised (null: none, or one for this subject is already open) */
+  alertId: string | null;
 }
 
 /**
@@ -157,7 +135,10 @@ export async function recordAdmissionEngineScan(
   db: Db,
   input: { subject: AdmissionScanSubject; report: unknown; engineRunId?: string | null },
 ): Promise<RecordedAdmissionScan> {
-  return db.transaction((tx) => recordAdmissionEngineScanTx(tx, input));
+  const out = await db.transaction((tx) => recordAdmissionEngineScanTx(tx, input));
+  // the admin's notification reaches chat once the revocation has committed (the alert row is the durable one)
+  if (out.alertId) await notifyGovernanceAlerts(db, [out.alertId], null).catch(() => undefined);
+  return out;
 }
 
 /**
@@ -203,7 +184,6 @@ export async function recordAdmissionEngineScanTx(
           state: mcpServers.admissionState,
           digest: mcpServers.admissionManifestDigest,
           findings: mcpServers.admissionFindings,
-          clearedAt: mcpServers.admissionClearedAt,
         })
         .from(mcpServers)
         .where(eq(mcpServers.id, subject.id))
@@ -219,7 +199,7 @@ export async function recordAdmissionEngineScanTx(
           const baseHolds = severityAtLeast(maxSeverity(base), spec.holdAt);
           if (outcome.holds && (s.state === "clean" || s.state === "unscanned" || s.state === "grandfathered")) state = "held";
           else if (!outcome.holds && s.state === "held" && !baseHolds) state = "clean";
-          else if (r.verdict === "fail" && s.state === "cleared" && !(await failSeenBeforeClearance(tx, subject, r.rulesSha256, s.clearedAt))) {
+          else if (r.verdict === "fail" && s.state === "cleared") {
             state = "held";
             revokedClearance = true;
           }
@@ -242,7 +222,6 @@ export async function recordAdmissionEngineScanTx(
           state: builderSkills.admissionState,
           digest: builderSkills.contentDigest,
           findings: builderSkills.admissionFindings,
-          admittedAt: builderSkills.admittedAt,
           admittedDigest: builderSkills.admittedDigest,
         })
         .from(builderSkills)
@@ -259,12 +238,7 @@ export async function recordAdmissionEngineScanTx(
           const baseHolds = severityAtLeast(maxSeverity(base), spec.holdAt);
           if (outcome.holds && (s.state === "clean" || s.state === "unscanned")) state = "held";
           else if (!outcome.holds && s.state === "held" && !baseHolds) state = "clean";
-          else if (
-            r.verdict === "fail" &&
-            s.state === "admitted" &&
-            s.admittedDigest === subject.digest &&
-            !(await failSeenBeforeClearance(tx, subject, r.rulesSha256, s.admittedAt))
-          ) {
+          else if (r.verdict === "fail" && s.state === "admitted" && s.admittedDigest === subject.digest) {
             state = "held";
             revokedClearance = true;
           }
@@ -294,6 +268,24 @@ export async function recordAdmissionEngineScanTx(
       }
     }
 
+    // owner decision Q2: the admin is told. One open alert per subject (a repeat while it is open adds nothing)
+    let alertId: string | null = null;
+    if (revokedClearance) {
+      const [alert] = await tx
+        .insert(governanceAlerts)
+        .values({
+          ruleId: "admission-engine-clearance-revoked",
+          subjectKey: `${subject.kind}:${subject.id}`,
+          severity: "high",
+          title: `${subject.kind === "mcp_server" ? "MCP server" : "Skill"} '${name || subject.id}' re-held: ${engineId} flagged the digest an admin had cleared`,
+          // counts and locations only, as every admission finding
+          detail: { subjectKind: subject.kind, subjectId: subject.id, engineId, digest: subject.digest, rulesSha256: r.rulesSha256, findings: r.findings },
+        })
+        .onConflictDoNothing()
+        .returning({ id: governanceAlerts.id });
+      alertId = alert?.id ?? null;
+    }
+
     await tx.insert(auditLog).values({
       userId: NIL_USER,
       serverId: subject.kind === "mcp_server" && state !== null ? subject.id : null,
@@ -311,6 +303,7 @@ export async function recordAdmissionEngineScanTx(
         previousState: previous,
         admissionState: state,
         revokedClearance,
+        alertId,
         // COUNTS AND LOCATIONS ONLY, as every admission finding
         findings: r.findings,
       },
@@ -322,8 +315,8 @@ export async function recordAdmissionEngineScanTx(
         `${subject.kind === "mcp_server" ? "MCP server" : "skill"} '${name || subject.id}' at digest ${subject.digest.slice(0, 12)}` +
         (r.verdict === "fail" ? ` — ${admissionFindingSummary(r.findings)}` : r.verdict === "unknown" ? ` — ${r.reason}` : "") +
         (current ? (state !== previous ? ` (${previous} → ${state})` : ` (stays ${state})`) : " (not its current digest: recorded only)") +
-        (revokedClearance ? "; the admin's earlier clearance of this digest is revoked: the engine's flag is new since it was given" : ""),
+        (revokedClearance ? "; the admin's earlier clearance of this digest is revoked by the later engine verdict (an admin can clear it again, audited)" : ""),
     });
-    return { id: row!.id, verdict: r.verdict, state, current, revokedClearance };
+    return { id: row!.id, verdict: r.verdict, state, current, revokedClearance, alertId };
   }
 }

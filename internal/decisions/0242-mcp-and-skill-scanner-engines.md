@@ -285,6 +285,8 @@ and nothing changes. The engine's say reaches the existing states in two places:
 
 ## Open questions for the owner
 
+All five were answered on 2026-11-15: see **Owner decisions (2026-11-15)** at the end of this ADR.
+
 1. **Licences.** May the licence acceptances recorded for garak (ADR-0187 decision 193: PSF-2.0, MPL-2.0, MIT-0,
    CNRI-Python; and decision 106 for numpy) cover the same packages in these two images? The builder applied them.
 2. **Clearance versus a later engine verdict.** Should an admin's `cleared` or `admitted` decision given before the
@@ -341,7 +343,7 @@ from a new rule set, revokes it.
 - The clearance fields are cleared with it (as a drift re-hold already does), the skill's pinned copies that were
   `admitted` at that digest become `held`, and the audit row is `admission-engine-clearance-revoked` (effect deny).
 - An `unknown` (an engine error) is not evidence and revokes nothing.
-- **Owner question open:** the owner may still choose the builder's original default (the person's decision stands).
+- **Superseded on 2026-11-15** by owner decision Q2 below: every later fail re-holds, even one the admin had seen.
 
 ### L4.3 Subject target and queueing (§6 items 1 and 2)
 
@@ -386,3 +388,31 @@ The gateway can now run the two admission-scan engines itself. Pending migration
 - **Left for later L4 slices:** the Node shim per image and the sandbox-limit proof (§6.1 and §6.4), publishing and
   locking the images (§6.3), and re-queueing MCP servers held only by a pending engine scan whose run expired. The
   ADR-0100 MCP sweep skips `held` servers; today a new live sync re-queues them.
+
+## Owner decisions (2026-11-15)
+
+The owner answered the five open questions and the #843 placement question (relayed by the master orchestrator).
+
+1. **Q1, licences: yes.** The garak acceptances (ADR-0187 decision 193: PSF-2.0, MPL-2.0, MIT-0, CNRI-Python; and
+   decision 106 for numpy) cover the same packages in both scanner images. Both `THIRD_PARTY.md` files cite this.
+2. **Q2, clearance versus a later verdict: re-hold.** This changes the default L4.2 built. Every engine `fail`
+   recorded after an admin's `cleared` (MCP) or `admitted` (skill) decision on the current digest re-holds it. That
+   includes a re-scan that repeats a flag the admin already reviewed, and a fail under the same rule set
+   (`recordAdmissionEngineScan` no longer looks for an earlier fail).
+   - **Notify the admin.** The revocation raises a governance alert (`admission-engine-clearance-revoked`, high,
+     subject `<kind>:<id>`, one open alert per subject), carrying counts and locations only. It is pushed to chat
+     through `notifyGovernanceAlerts` after the commit; the alert row is the durable notice.
+   - **The audited override is the existing route.** `POST /v1/servers/:id/admission/clear` and the skill admit route
+     need a `settings_relax` step-up, a reason and a signed AI BOM snapshot, and each writes an audit row naming the
+     findings. The override is pinned to the digest and is undone by the next `fail`.
+   - The other rules are unchanged: an `unknown` revokes nothing; the clearance fields are emptied; pinned skill copies
+     at that digest become `held`; the audit row is `admission-engine-clearance-revoked`.
+3. **Q3, yara-x's statically linked crates: accepted.** Apache-2.0 WITH LLVM-exception, Zlib and Unicode-3.0 are
+   owner-accepted exceptions, recorded in `engines/skillscanner/THIRD_PARTY.md` with this decision cited.
+4. **Q4, oletools' `thirdparty/`: accepted.** The public-domain `oledump` and the BSD `tablestream` and `xglob` are
+   owner-accepted exceptions, recorded the same way. skill-scanner's Office check stays.
+5. **Q5, the bundle hold line: keep `medium`.** The noisy rules are tuned against the `anthropics/skills` corpus to cut
+   false holds, with false-hold counts measured before and after (§7.1 measured 10 of 19 full bundles held). That
+   tuning ships with the image work (the L4 runner-shim and publish slice), where the image can be run on the corpus.
+6. **#843 placement: keep `confidential`.** A no-project admission scan is placed at the `confidential` floor
+   (the gVisor class). This is now the owner's decision, not only the builder's default.
