@@ -121,6 +121,7 @@ const CostConsolidationArea = screen(() => import("./screens/admin-cost-optimiza
 const SpendMonitorPage = screen(() => import("./screens/admin-cost-optimization"), "SpendMonitorPage");
 const BillingPage = screen(() => import("./screens/admin-cost-optimization"), "BillingPage");
 const OptimizationPage = screen(() => import("./screens/admin-cost-optimization"), "OptimizationPage");
+const PersonBudgetsPage = screen(() => import("./screens/admin-cost-optimization"), "PersonBudgetsPage");
 const ComplianceProfilesPage = screen(() => import("./screens/admin-compliance-infra"), "ComplianceProfilesPage");
 const CompliancePacksPage = screen(() => import("./screens/admin-compliance-infra"), "CompliancePacksPage");
 const FrameworkImportsPage = screen(() => import("./screens/admin-compliance-infra"), "FrameworkImportsPage");
@@ -350,6 +351,8 @@ function ApplicationRoutes() {
                 {/* ADR-0187 (X26) */}
                 <Route path="engines/*" element={<EnginesArea />} />
                 <Route path="cost" element={<CostDashboardPage />} />
+                {/* ADR-0312 (UI-D D3) */}
+                <Route path="cost/people" element={<PersonBudgetsPage />} />
                 {/* ADR-0069 */}
                 <Route path="cost-consolidation/*" element={<CostConsolidationArea />} />
                 <Route path="spend-monitor" element={<SpendMonitorPage />} />

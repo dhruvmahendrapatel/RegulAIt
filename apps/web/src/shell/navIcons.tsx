@@ -176,6 +176,7 @@ const BY_ROUTE: Record<string, keyof typeof G> = {
   "/admin/pm-connections": "kanban",
   "/admin/deploy-targets": "cloud",
   "/admin/cost": "dollar",
+  "/admin/cost/people": "person", // ADR-0312 (UI-D D3)
   "/admin/cost-consolidation": "merge",
   "/admin/spend-monitor": "trend",
   "/admin/billing": "receipt",

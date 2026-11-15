@@ -310,6 +310,8 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
     group: "Cost & optimisation",
     items: [
       { label: "Cost dashboard", to: "/admin/cost" },
+      // ADR-0312 (UI-D D3): a person's spend budget and its alerts, next to the project budgets on the dashboard.
+      { label: "Spend by person", to: "/admin/cost/people" },
       // ADR-0069 — directly under the Cost dashboard, because it is the same
       // question asked of money regulAIt never metered: a Copilot seat, a raw
       // vendor key, a cloud AI bill. The two are deliberately adjacent AND
