@@ -66,6 +66,18 @@ type Env struct {
 	// UserRoots are the user-writable roots (home, appdata, localappdata) as os.Root handles. Only the add-on removal
 	// applier (ADR-0331) writes through them; no collector does.
 	UserRoots map[contract.Root]*os.Root
+
+	// opened holds every os.Root NewEnv opened, for Close.
+	opened []*os.Root
+}
+
+// Close releases the roots NewEnv opened. The agent keeps them for the life of the process; tests close them so
+// their temporary directories can be removed (Windows refuses to delete a directory with an open handle).
+func (e *Env) Close() {
+	for _, r := range e.opened {
+		_ = r.Close()
+	}
+	e.opened = nil
 }
 
 // PathDir is one PATH directory: Root is RootHome (Path relative to the home) or RootPath (Path absolute, never

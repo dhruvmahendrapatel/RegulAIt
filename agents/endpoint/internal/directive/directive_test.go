@@ -130,6 +130,7 @@ func newFixture(t *testing.T, rel, content string, locators ...string) *fixture 
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(env.Close)
 	return &fixture{home: home, col: &pack.Collection{Schema: contract.SchemaCollection, Entries: []pack.Entry{e}}, env: env}
 }
 
