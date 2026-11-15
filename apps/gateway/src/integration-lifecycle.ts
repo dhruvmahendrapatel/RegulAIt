@@ -337,6 +337,18 @@ export function registerIntegrationLifecycleRoutes(app: FastifyInstance, db: Db)
       if (r.enabled) {
         return { status: 409, body: { error: "mcp_registry_not_disabled", detail: "disable the registry before deleting it" } };
       }
+      // ADR-0256: a refreshed source has append-only snapshot evidence (RESTRICT), so it is kept, disabled; refuse
+      // here rather than let the foreign key turn the delete into a 500
+      const snapshots = (await countWhere(tx, "mcp_catalogue_snapshots", "registry_id", registryId)).n;
+      if (snapshots > 0) {
+        return {
+          status: 409,
+          body: {
+            error: "mcp_registry_has_snapshots",
+            detail: `this source has ${snapshots} catalogue snapshot(s), which are append-only evidence (ADR-0256); it stays, disabled`,
+          },
+        };
+      }
       const entries = (await countWhere(tx, "mcp_registry_entries", "registry_id", registryId)).n;
       const detached = await tx
         .select({ id: mcpServers.id, name: mcpServers.name })

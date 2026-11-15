@@ -213,3 +213,67 @@ the last-sorting Playwright spec drives a reassignment and the holder refusal en
 **Still true, restated:** no notifications (nobody is emailed at the deadline — the sweep
 writes an audit fact, not an outbox); no periodic auto-campaigns; ADR-0022 delegation windows
 are unchanged and remain decider-barred from self-certification.
+
+## Amendment (2026-11-14, lane L11) — deadline notices (still decides nothing)
+
+The "no notifications" limit is closed, in the same narrow shape as the B2a sweep.
+
+- **What is sent.** A *due-soon* reminder once a campaign with undecided items is within the org's reminder window of
+  its due time (`certificationReminderHours`, 48 hours by default; see below), and an *expiry* notice once it is past due. A campaign first seen already past due gets only the expiry notice, never a
+  late reminder.
+- **Once per delivery target, retried until final (review of #825).** A target is one workspace's channel notice
+  (`<connection>:channel`), or on a Resend workspace one reviewer's mail (`<connection>:reviewer:<user>`). The audit row
+  `campaign-deadline-notified` (detail `kind`, and `targets`, the ids this run delivered) is the marker. A target is
+  listed only when its outcome is final:
+  - **posted**;
+  - **terminal**: a refusal a retry cannot fix, which is any 4xx other than 408 and 429, judged on the provider's own
+    status where the courier reports one (`upstreamStatus`). This covers `no_named_recipient`, a missing or deleted
+    credential, an unsupported provider, a revoked token (401/403), and a missing public URL (422). It is audited as
+    a failed post with `retry: false` and is not tried again.
+  - Anything else is **transient** and is not listed, so the next hourly run retries it: a 5xx, a network error, a
+    408 or a 429.
+
+  So a failing workspace never blocks or repeats another, and a reviewer already mailed is not mailed again. Each run
+  writes at most one marker row per campaign and kind, and only when at least one target became final.
+- **Bounded in time and per run (second review of #825).** An expired-incomplete campaign stays `open`, so the
+  expiry notice has a window: it is sent, or retried, only within 72 hours after the due time
+  (`CAMPAIGN_EXPIRY_NOTICE_WINDOW_HOURS`). A workspace opted in later is never told about old campaigns, and a
+  transient failure is never retried forever. A due-soon reminder stops at the due time. A run makes at most 200
+  delivery attempts (`CAMPAIGN_DEADLINE_MAX_SENDS_PER_RUN`); the rest wait, unmarked, for the next run, which keeps
+  a run well inside its lease. The marker lookup has its own partial index,
+  `audit_log_campaign_deadline_marker_idx`, so it never scans the trail.
+- **Open: the RLS runtime cut-over (ADR-0234 batch 7).** The sweep reads `audit_log` (its markers) and `users`
+  (`activeUserEmail`). Both have FORCE RLS, and today scheduler jobs run outside any RLS scope. When the runtime moves
+  to `regulait_app`, this job needs a registered system reason. Without one, the marker read sees no rows, so every
+  target is resent hourly, and every reviewer looks like `no_named_recipient`. It is listed for the cut-over in
+  PENDING by this PR's fragment. ADR-0234 belongs to its own lane and is not edited here.
+- **Once-only rests on the scheduler lease.** Reading the markers, sending and writing the marker is not one
+  transaction. The ADR-0064 lease guarantees a single copy: the scheduled tick and the manual
+  `POST /v1/scheduler/jobs/:name/run` both run this job under that one lease. An advisory lock would have to be held
+  across the network sends, which is deliberately avoided.
+- **To whom, and through what.** Through the existing ChatOps courier (egress guard, the connector's own credential,
+  per-workspace rate limits), only to workspaces that opted in with the new `chatops_connections.notify_campaign_deadlines`
+  flag. It is off by default (ADR-0180), and changing it is admin-only and audited (`chatops-campaign-notice-settings-changed`).
+  A Resend workspace mails each **named reviewer** of undecided items their own count (ADR-0202's named-recipient
+  rule; the reviewer is the item's `reviewer_user_id`). Every other provider posts **one** channel notice per campaign
+  with the campaign total, never a per-reviewer message to a shared channel. Each send is audited on the workspace
+  (`chatops-campaign-notice-posted` / `-post-failed`).
+- **What a notice carries.** The campaign id, due time, undecided count, reminder or expiry, and a portal link
+  (`/inbox` for a reviewer, `/admin/certification` for a channel). It carries **nothing operator-typed**: no campaign
+  name, grant, holder or object label.
+- **Decides nothing.** No status changes, nothing is kept or revoked, undecided stays undecided, and expiry stays
+  computed on read. A deployment with no workspace opted in sends nothing and records nothing, so turning a workspace
+  on later still delivers the notice that is due.
+- **Job.** `certification-deadline-notify-sweep` (ADR-0064 scheduler, hourly). Migration
+  `pending/chatops_campaign_deadline_notify.sql` (numbered at merge, ADR-0252). Test:
+  `zz-adr0090-campaign-deadline-notify.test.ts`.
+
+**Reminder window is an org setting (owner decision, 2026-11-15).** `org_settings.certification_reminder_hours`
+defaults to 48 and is bounded to 1 hour through 14 days (336 hours), by the zod schema on `PUT /v1/org/settings` and by a
+database CHECK. Like every write through that route, a change is admin-only and audited (`org-settings-updated`, with
+the changed key). The strictness registry exempts it: it only decides when a reminder goes out, and the reminder keeps
+and revokes nothing. The sweep reads the setting on every run. The expiry window (72 hours) and the per-run cap (200)
+stay constants. The setting is API-only for now; the Organization settings screen does not show it yet. Test:
+`zz-adr0090-campaign-deadline-notify.test.ts` covers the bounds, the audit row, and a 6-hour window as the sweep sees it.
+
+**Still true:** no periodic auto-campaigns, and ADR-0022 delegation is unchanged.

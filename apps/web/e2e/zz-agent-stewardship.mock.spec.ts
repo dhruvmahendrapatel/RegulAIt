@@ -107,7 +107,8 @@ async function checkScreen(page: Page, label: string, shot?: string, fullPage = 
 test.describe("ADR-0168 item 6: agent stewardship", () => {
   test("the inventory shows steward, successor, status, next review and the flags, with filter chips", async ({ page }) => {
     await mockApi(page);
-    await page.goto("/ui/admin/agents");
+    // P3: the full stewardship list has its own page
+    await page.goto("/ui/admin/agents/stewardship");
     const card = page.locator("section").filter({ has: page.getByText("Stewardship", { exact: true }) }).first();
     const table = card.getByRole("table");
     await expect(table.locator("thead th")).toHaveText(["Agent", "Steward", "Successor", "Status", "Next review", "Flags", ""]);
@@ -141,7 +142,8 @@ test.describe("ADR-0168 item 6: agent stewardship", () => {
 
   test("the drawer saves only what changed, explains refusals, records a review and returns focus", async ({ page }) => {
     const { sent } = await mockApi(page);
-    await page.goto("/ui/admin/agents");
+    // P3: the full stewardship list has its own page
+    await page.goto("/ui/admin/agents/stewardship");
     const manage = page.getByRole("button", { name: "Manage stewardship of grok" });
     await manage.click();
     const drawer = page.getByRole("dialog", { name: "grok" });
@@ -184,7 +186,8 @@ test.describe("ADR-0168 item 6: agent stewardship", () => {
 
   test("a refusal from the gateway is shown in its own words", async ({ page }) => {
     await mockApi(page, { patchStatus: 403 });
-    await page.goto("/ui/admin/agents");
+    // P3: the full stewardship list has its own page
+    await page.goto("/ui/admin/agents/stewardship");
     await page.getByRole("button", { name: "Manage stewardship of gpt-5" }).click();
     const drawer = page.getByRole("dialog", { name: "gpt-5" });
     await drawer.getByLabel("Successor", { exact: true }).selectOption({ label: "Dana Developer" });
