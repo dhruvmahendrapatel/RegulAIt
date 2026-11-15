@@ -22,10 +22,10 @@
  * never invented.
  */
 
-import { createHmac } from "node:crypto";
 import { z } from "zod";
 import { scrubSecrets } from "@regulait/shared";
 import { adfToText, textToAdf } from "./adf.js";
+import { signGenericWebhook } from "./generic-signature.js";
 
 export const PM_PROVIDER_KINDS = [
   "azure_devops",
@@ -1042,8 +1042,13 @@ export class MondayProvider implements PmProvider {
 // events work_item.create / work_item.update / work_item.transition /
 // comment.add / work_item.get — the outbound mirror of ADR-0010's normalized
 // inbound webhook shape. The connection token is a shared secret used ONLY
-// to sign the exact request body (HMAC-SHA256, sent as
-// `x-regulait-signature: sha256=<hex>`) — it never travels raw.
+// to sign each delivery — it never travels raw. The signature is the same
+// timestamped one the inbound generic contract requires (S-03 follow-up (a)):
+// `x-regulait-timestamp: <unix seconds>` and `x-regulait-signature:
+// sha256=<hex HMAC-SHA256 of "<timestamp>.<exact body>">`, so a receiver can
+// refuse a replayed or stale delivery with the same 300 s window RegulAIt
+// applies inbound. The body-only signature of the first cut is gone (ADR-0180:
+// no grandfathering).
 //
 // Response contract: the receiver must answer 2xx; any non-2xx surfaces as a
 // PmProviderError carrying the status. work_item.create should answer
@@ -1094,9 +1099,11 @@ export class GenericWebhookProvider implements PmProvider {
     project: string,
     payload: Record<string, unknown>,
   ): Promise<unknown> {
+    // one instant for the envelope's ISO timestamp and the signed header
+    const now = new Date();
     const body = JSON.stringify({
       event,
-      timestamp: new Date().toISOString(),
+      timestamp: now.toISOString(),
       project,
       payload,
     });
@@ -1104,7 +1111,7 @@ export class GenericWebhookProvider implements PmProvider {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-regulait-signature": `sha256=${createHmac("sha256", this.token).update(body).digest("hex")}`,
+        ...signGenericWebhook(this.token, body, Math.floor(now.getTime() / 1000)),
       },
       body,
     });
@@ -1322,6 +1329,7 @@ export {
   type InboundWebhookResult,
   type NormalizedInboundEvent,
 } from "./inbound.js";
+export { signGenericWebhook } from "./generic-signature.js";
 
 // ---------------------------------------------------------------------------
 // Registry

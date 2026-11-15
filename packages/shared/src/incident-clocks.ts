@@ -39,6 +39,13 @@
  *    head count (§ 164.406 media, § 164.408 Secretary) starts when the count
  *    is unknown.
  *
+ * ADR-0296 adds GDPR Art. 33/34, NIS2 Art. 23(4), DORA (Delegated Regulation
+ * (EU) 2025/301 Art. 5) and CRA Art. 14 clocks; see the block above their
+ * entries. Not encoded: CRA Art. 14(2)(c) ("14 days after a corrective or
+ * mitigating measure is available", a start the register does not record),
+ * NIS2 Art. 23(4)(c) and (e) (on request; ongoing incidents), and DORA's
+ * weekend extension (Art. 5(4)), which never makes a deadline earlier.
+ *
  * Each clock is a REMINDER computed from the recorded awareness time and the
  * cited text. It is not legal advice.
  *
@@ -113,6 +120,36 @@ function euEligible(facts: IncidentClockFacts): boolean {
 const art73_3 = (f: IncidentClockFacts) => has(f, "critical_infrastructure") || has(f, "widespread_infringement");
 const art73_4 = (f: IncidentClockFacts) => has(f, "death");
 const phi = (f: IncidentClockFacts) => has(f, "phi_breach");
+
+// ---------------------------------------------------------------------------
+// ADR-0296 (P18 B2, B3): GDPR breach notification, NIS2, DORA and the CRA.
+// Each regime's clocks start when the incident lists the criterion that names
+// the regime's trigger. regulAIt does not know whether the organisation is a
+// controller or a processor, an essential or important entity, a financial
+// entity or a manufacturer, so every clock of the regime starts (strictest)
+// and an admin sets aside the ones that do not apply, with a reason.
+// Quotes retrieved 2026-11-14 from the Publications Office (Cellar) text of
+// each act, the same text EUR-Lex serves.
+// ---------------------------------------------------------------------------
+
+/** the date the ADR-0296 quotes were retrieved and checked against their source */
+export const INCIDENT_CLOCKS_ADR0296_RETRIEVED_ON = "2026-11-14";
+const eurlex = (celex: string) => `https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:${celex}`;
+export const GDPR_SOURCE_URL = eurlex("32016R0679");
+export const NIS2_SOURCE_URL = eurlex("32022L2555");
+export const DORA_RTS_SOURCE_URL = eurlex("32025R0301");
+export const CRA_SOURCE_URL = eurlex("32024R2847");
+
+/** what every ADR-0296 clock adds: whether the regime binds the organisation is its own determination */
+export const CYBER_PRIVACY_CLOCK_CAVEAT =
+  "Whether this regime binds you depends on your role under it (controller or processor, essential or important " +
+  "entity, financial entity, manufacturer) and on national law — confirm with counsel and set aside what does not apply.";
+
+const gdpr = (f: IncidentClockFacts) => has(f, "personal_data_breach");
+const nis2 = (f: IncidentClockFacts) => has(f, "significant_cyber_incident");
+const dora = (f: IncidentClockFacts) => has(f, "major_ict_incident");
+const craVuln = (f: IncidentClockFacts) => has(f, "exploited_vulnerability");
+const craIncident = (f: IncidentClockFacts) => has(f, "severe_product_incident");
 
 /** THE CATALOGUE. Order is display order. */
 export const INCIDENT_CLOCKS: readonly IncidentClockDefinition[] = Object.freeze([
@@ -254,6 +291,212 @@ export const INCIDENT_CLOCKS: readonly IncidentClockDefinition[] = Object.freeze
     allowsInitialReport: false,
     applies: phi,
   },
+  // --- GDPR (Regulation (EU) 2016/679) ---------------------------------------
+  {
+    regime: "gdpr",
+    id: "gdpr-33-1-supervisory-authority",
+    paragraph: "Regulation (EU) 2016/679, Article 33(1)",
+    quote:
+      "In the case of a personal data breach, the controller shall without undue delay and, where feasible, not later " +
+      "than 72 hours after having become aware of it, notify the personal data breach to the supervisory authority " +
+      "competent in accordance with Article 55, unless the personal data breach is unlikely to result in a risk to the " +
+      "rights and freedoms of natural persons.",
+    sourceUrl: GDPR_SOURCE_URL,
+    retrievedOn: INCIDENT_CLOCKS_ADR0296_RETRIEVED_ON,
+    start: "aware_at",
+    due: { kind: "hours", hours: 72 },
+    // Art. 33(4): "the information may be provided in phases without undue further delay"
+    allowsInitialReport: true,
+    applies: gdpr,
+  },
+  {
+    regime: "gdpr",
+    id: "gdpr-33-2-processor-to-controller",
+    paragraph: "Regulation (EU) 2016/679, Article 33(2)",
+    quote: "The processor shall notify the controller without undue delay after becoming aware of a personal data breach.",
+    sourceUrl: GDPR_SOURCE_URL,
+    retrievedOn: INCIDENT_CLOCKS_ADR0296_RETRIEVED_ON,
+    start: "aware_at",
+    due: { kind: "immediately" },
+    allowsInitialReport: false,
+    applies: gdpr,
+  },
+  {
+    regime: "gdpr",
+    id: "gdpr-34-1-data-subjects",
+    paragraph: "Regulation (EU) 2016/679, Article 34(1)",
+    quote:
+      "When the personal data breach is likely to result in a high risk to the rights and freedoms of natural persons, " +
+      "the controller shall communicate the personal data breach to the data subject without undue delay.",
+    sourceUrl: GDPR_SOURCE_URL,
+    retrievedOn: INCIDENT_CLOCKS_ADR0296_RETRIEVED_ON,
+    start: "aware_at",
+    due: { kind: "immediately" },
+    allowsInitialReport: false,
+    // the high-risk test is the controller's: it starts, and is set aside with a reason when the risk is not high
+    applies: gdpr,
+  },
+  // --- NIS2 (Directive (EU) 2022/2555) ----------------------------------------
+  {
+    regime: "nis2",
+    id: "nis2-23-4a-early-warning",
+    paragraph: "Directive (EU) 2022/2555, Article 23(4)(a)",
+    quote:
+      "without undue delay and in any event within 24 hours of becoming aware of the significant incident, an early " +
+      "warning, which, where applicable, shall indicate whether the significant incident is suspected of being caused " +
+      "by unlawful or malicious acts or could have a cross-border impact;",
+    sourceUrl: NIS2_SOURCE_URL,
+    retrievedOn: INCIDENT_CLOCKS_ADR0296_RETRIEVED_ON,
+    start: "aware_at",
+    due: { kind: "hours", hours: 24 },
+    allowsInitialReport: false,
+    applies: nis2,
+  },
+  {
+    regime: "nis2",
+    id: "nis2-23-4b-incident-notification",
+    paragraph: "Directive (EU) 2022/2555, Article 23(4)(b)",
+    quote:
+      "without undue delay and in any event within 72 hours of becoming aware of the significant incident, an incident " +
+      "notification, which, where applicable, shall update the information referred to in point (a) and indicate an " +
+      "initial assessment of the significant incident, including its severity and impact, as well as, where available, " +
+      "the indicators of compromise;",
+    sourceUrl: NIS2_SOURCE_URL,
+    retrievedOn: INCIDENT_CLOCKS_ADR0296_RETRIEVED_ON,
+    start: "aware_at",
+    due: { kind: "hours", hours: 72 },
+    allowsInitialReport: false,
+    applies: nis2,
+  },
+  {
+    regime: "nis2",
+    id: "nis2-23-4d-final-report",
+    paragraph: "Directive (EU) 2022/2555, Article 23(4)(d)",
+    quote: "a final report not later than one month after the submission of the incident notification under point (b),",
+    sourceUrl: NIS2_SOURCE_URL,
+    retrievedOn: INCIDENT_CLOCKS_ADR0296_RETRIEVED_ON,
+    start: "aware_at",
+    due: { kind: "months", months: 1 },
+    allowsInitialReport: false,
+    applies: nis2,
+  },
+  // --- DORA (Regulation (EU) 2022/2554, Art. 19; time limits in Delegated Regulation (EU) 2025/301) ---
+  {
+    regime: "dora",
+    id: "dora-rts5-1a-initial-notification",
+    paragraph: "Delegated Regulation (EU) 2025/301, Article 5(1)(a)",
+    quote:
+      "for the initial report: as early as possible, but in any case, within four hours from the classification of the " +
+      "ICT-related incident as a major ICT-related incident and no later than 24 hours from the moment the financial " +
+      "entity has become aware of the ICT-related incident;",
+    sourceUrl: DORA_RTS_SOURCE_URL,
+    retrievedOn: INCIDENT_CLOCKS_ADR0296_RETRIEVED_ON,
+    start: "aware_at",
+    // the strict reading: listing the criterion is the classification, so four hours from it
+    due: { kind: "hours", hours: 4 },
+    allowsInitialReport: false,
+    applies: dora,
+  },
+  {
+    regime: "dora",
+    id: "dora-rts5-1b-intermediate-report",
+    paragraph: "Delegated Regulation (EU) 2025/301, Article 5(1)(b)",
+    quote:
+      "for the intermediate report: at the latest within 72 hours from the submission of the initial notification, even " +
+      "where the status or the handling of the incident have not changed as referred to in Article 19(4), point (b), of " +
+      "Regulation (EU) 2022/2554.",
+    sourceUrl: DORA_RTS_SOURCE_URL,
+    retrievedOn: INCIDENT_CLOCKS_ADR0296_RETRIEVED_ON,
+    start: "aware_at",
+    due: { kind: "hours", hours: 72 },
+    allowsInitialReport: false,
+    applies: dora,
+  },
+  {
+    regime: "dora",
+    id: "dora-rts5-1c-final-report",
+    paragraph: "Delegated Regulation (EU) 2025/301, Article 5(1)(c)",
+    quote:
+      "for the final report: no later than one month after either the submission of the intermediate report, or, where " +
+      "applicable, after the latest updated intermediate report.",
+    sourceUrl: DORA_RTS_SOURCE_URL,
+    retrievedOn: INCIDENT_CLOCKS_ADR0296_RETRIEVED_ON,
+    start: "aware_at",
+    due: { kind: "months", months: 1 },
+    allowsInitialReport: false,
+    applies: dora,
+  },
+  // --- CRA (Regulation (EU) 2024/2847, Art. 14, applying from 11 September 2026) ---
+  {
+    regime: "cra",
+    id: "cra-14-2a-vulnerability-early-warning",
+    paragraph: "Regulation (EU) 2024/2847, Article 14(2)(a)",
+    quote:
+      "an early warning notification of an actively exploited vulnerability, without undue delay and in any event within " +
+      "24 hours of the manufacturer becoming aware of it,",
+    sourceUrl: CRA_SOURCE_URL,
+    retrievedOn: INCIDENT_CLOCKS_ADR0296_RETRIEVED_ON,
+    start: "aware_at",
+    due: { kind: "hours", hours: 24 },
+    allowsInitialReport: false,
+    applies: craVuln,
+  },
+  {
+    regime: "cra",
+    id: "cra-14-2b-vulnerability-notification",
+    paragraph: "Regulation (EU) 2024/2847, Article 14(2)(b)",
+    quote:
+      "unless the relevant information has already been provided, a vulnerability notification, without undue delay and " +
+      "in any event within 72 hours of the manufacturer becoming aware of the actively exploited vulnerability,",
+    sourceUrl: CRA_SOURCE_URL,
+    retrievedOn: INCIDENT_CLOCKS_ADR0296_RETRIEVED_ON,
+    start: "aware_at",
+    due: { kind: "hours", hours: 72 },
+    allowsInitialReport: false,
+    applies: craVuln,
+  },
+  {
+    regime: "cra",
+    id: "cra-14-4a-incident-early-warning",
+    paragraph: "Regulation (EU) 2024/2847, Article 14(4)(a)",
+    quote:
+      "an early warning notification of a severe incident having an impact on the security of the product with digital " +
+      "elements, without undue delay and in any event within 24 hours of the manufacturer becoming aware of it,",
+    sourceUrl: CRA_SOURCE_URL,
+    retrievedOn: INCIDENT_CLOCKS_ADR0296_RETRIEVED_ON,
+    start: "aware_at",
+    due: { kind: "hours", hours: 24 },
+    allowsInitialReport: false,
+    applies: craIncident,
+  },
+  {
+    regime: "cra",
+    id: "cra-14-4b-incident-notification",
+    paragraph: "Regulation (EU) 2024/2847, Article 14(4)(b)",
+    quote:
+      "unless the relevant information has already been provided, an incident notification, without undue delay and in " +
+      "any event within 72 hours of the manufacturer becoming aware of the incident,",
+    sourceUrl: CRA_SOURCE_URL,
+    retrievedOn: INCIDENT_CLOCKS_ADR0296_RETRIEVED_ON,
+    start: "aware_at",
+    due: { kind: "hours", hours: 72 },
+    allowsInitialReport: false,
+    applies: craIncident,
+  },
+  {
+    regime: "cra",
+    id: "cra-14-4c-incident-final-report",
+    paragraph: "Regulation (EU) 2024/2847, Article 14(4)(c)",
+    quote:
+      "unless the relevant information has already been provided, a final report, within one month after the submission " +
+      "of the incident notification under point (b),",
+    sourceUrl: CRA_SOURCE_URL,
+    retrievedOn: INCIDENT_CLOCKS_ADR0296_RETRIEVED_ON,
+    start: "aware_at",
+    due: { kind: "months", months: 1 },
+    allowsInitialReport: false,
+    applies: craIncident,
+  },
 ]);
 
 /** who each clock's notification goes to (a default the person sending it may replace) */
@@ -267,6 +510,30 @@ export const INCIDENT_CLOCK_RECIPIENT: Readonly<Record<string, string>> = {
   "164.408-secretary": "the Secretary of HHS",
   "164.408-secretary-annual": "the Secretary of HHS (annual log)",
   "164.410-ba-to-ce": "the covered entity",
+  "gdpr-33-1-supervisory-authority": "the competent supervisory authority (Article 55)",
+  "gdpr-33-2-processor-to-controller": "the controller",
+  "gdpr-34-1-data-subjects": "each affected data subject",
+  "nis2-23-4a-early-warning": "the CSIRT or, where applicable, the competent authority",
+  "nis2-23-4b-incident-notification": "the CSIRT or, where applicable, the competent authority",
+  "nis2-23-4d-final-report": "the CSIRT or, where applicable, the competent authority",
+  "dora-rts5-1a-initial-notification": "the competent authority",
+  "dora-rts5-1b-intermediate-report": "the competent authority",
+  "dora-rts5-1c-final-report": "the competent authority",
+  "cra-14-2a-vulnerability-early-warning": "the CSIRT designated as coordinator and ENISA, via the single reporting platform",
+  "cra-14-2b-vulnerability-notification": "the CSIRT designated as coordinator and ENISA, via the single reporting platform",
+  "cra-14-4a-incident-early-warning": "the CSIRT designated as coordinator and ENISA, via the single reporting platform",
+  "cra-14-4b-incident-notification": "the CSIRT designated as coordinator and ENISA, via the single reporting platform",
+  "cra-14-4c-incident-final-report": "the CSIRT designated as coordinator and ENISA, via the single reporting platform",
+};
+
+/** the caveat a clock of each regime carries in the UI and the export (null: none beyond the disclaimer) */
+export const INCIDENT_CLOCK_REGIME_CAVEAT: Readonly<Record<IncidentClockRegime, string | null>> = {
+  "eu-ai-act": EU_AI_ACT_CLOCK_CAVEAT,
+  hipaa: null,
+  gdpr: CYBER_PRIVACY_CLOCK_CAVEAT,
+  nis2: CYBER_PRIVACY_CLOCK_CAVEAT,
+  dora: CYBER_PRIVACY_CLOCK_CAVEAT,
+  cra: CYBER_PRIVACY_CLOCK_CAVEAT,
 };
 
 /** the EU clocks whose notification goes to the AUTHORITY (Art. 73): until one
@@ -293,7 +560,8 @@ export function applicableIncidentClocks(
   return INCIDENT_CLOCKS.filter((c) => regimes.includes(c.regime) && c.applies(facts));
 }
 
-const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
 
 /**
  * When a clock falls due, from its start: `start + N × 24 h` (UTC), the start
@@ -316,6 +584,18 @@ export function incidentClockDueAt(due: IncidentClockDue, start: Date, seen: Rea
       const endOfYear = Date.UTC(start.getUTCFullYear() + 1, 0, 1);
       return new Date(endOfYear + due.days * DAY_MS);
     }
+    case "hours":
+      return new Date(start.getTime() + due.hours * HOUR_MS);
+    case "months": {
+      // calendar months in UTC; a day the target month lacks (31 Jan + 1 month) clamps to its last day
+      const d = new Date(start.getTime());
+      const day = d.getUTCDate();
+      d.setUTCDate(1);
+      d.setUTCMonth(d.getUTCMonth() + due.months);
+      const last = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
+      d.setUTCDate(Math.min(day, last));
+      return d;
+    }
   }
 }
 
@@ -330,5 +610,9 @@ export function incidentClockDueLabel(due: IncidentClockDue): string {
       return `at the same time as ${due.clockId}`;
     case "after_calendar_year":
       return `${due.days} days after the end of the calendar year`;
+    case "hours":
+      return `${due.hours} hours`;
+    case "months":
+      return due.months === 1 ? "1 month" : `${due.months} months`;
   }
 }

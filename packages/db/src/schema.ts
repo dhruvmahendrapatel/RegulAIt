@@ -920,6 +920,12 @@ export const mcpServers = pgTable("mcp_servers", {
    * ON DELETE SET NULL: the server reads `unowned`/`orphaned`, it is never
    * deleted with its owner. */
   ownerUserId: uuid("owner_user_id").references(() => users.id, { onDelete: "set null" }),
+  /** ADR-0207 (migration `mcp_server_disable`): NULL = enabled. Disabling refuses every tool call on the server, for agents and people; it is audited and
+   * needs a reason (10 to 1000 characters, CHECK); enabling again is a stepped-up relaxation. A delete is
+   * allowed only while disabled. */
+  disabledAt: timestamp("disabled_at", { withTimezone: true }),
+  disabledReason: text("disabled_reason"),
+  disabledBy: uuid("disabled_by").references(() => users.id, { onDelete: "set null" }),
   /** ADR-0190 decision 7 item 5 (migration 0194): the execution profile VERSION a stdio server's sandbox runs
    * under. Stdio servers only (a remote server runs on its own host: `external`, never a class). NULL = the
    * shipped default. */
@@ -1443,6 +1449,9 @@ export const auditLog = pgTable(
         // ADR-0202 decision 4: an admin switching one demo beat between live and
         // its simulated fallback (demo_beat_fallbacks). Plain text column.
         "demo_beat",
+        // ADR-0255 (P31): an admin enabling or disabling a connector-catalogue piece
+        // (connector_piece_enablements). Plain text column — no DDL needed.
+        "connector_piece",
         // ADR-0224 (P13 c): records of processing and data-subject requests. Plain text column.
         "processing_record",
         "data_subject_request",
@@ -1837,6 +1846,9 @@ export const auditLog = pgTable(
         // ADR-0173 batch 2b: a decision on a held connector write (the
         // approvals queue's object type rides the audit row). Plain text — no DDL.
         "connector_call",
+        // ADR-0251: a decision on a held model call (the approvals queue's object
+        // type rides the audit row). Plain text — no DDL.
+        "model_call",
         // ADR-0173 batch 2c (Q): an annotation queue created / changed /
         // removed or exported (objectId = the queue), and an annotation item
         // queued, read, reviewed, removed or past its deadline (objectId = the
@@ -1912,6 +1924,9 @@ export const auditLog = pgTable(
         // ADR-0261 (P37): a third-party ingest source (created, enabled, disabled, its write-only credential issued or
         // revoked) and each accepted or refused batch of third-party evidence. Plain text column — no DDL.
         "third_party_ingest_source",
+        // ADR-0303: a SIEM destination (created, enabled, disabled, secret rotated, dead-lettered, recovered). Plain
+        // text column — no DDL.
+        "siem_destination",
         // ADR-0193 (I4): a content provenance record (objectId = the record) and a trust-tier change (a source's
         // tier, or the write floor). Plain text column — no DDL.
         "content_provenance",
@@ -2507,6 +2522,9 @@ export const approvals = pgTable(
     // ADR-0173 batch 2b (migration 0144) — a 'connector_call' approval: the
     // connector the consent may be spent against. NULL on every other kind.
     connectorId: uuid("connector_id").references(() => connectors.id, { onDelete: "cascade" }),
+    // ADR-0251 (migration model_call_approvals) — a 'model_call' approval: the agent (model) the consent may be spent
+    // against. NULL on every other kind.
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
     // ADR-0186 A/B (migration 0170) — SNAPSHOTTED AT QUEUE TIME. Consulted for
     // the tool-call kinds (`mcp_tool`, `connector_call`) only. Every pre-0170
     // row took quorum 1 and the strict `passkey` mode (no grandfathering).
@@ -2552,6 +2570,10 @@ export const approvals = pgTable(
     index("approvals_connector_binding_idx")
       .on(t.userId, t.connectorId, t.status, t.argumentsDigest)
       .where(sql`${t.connectorId} IS NOT NULL`),
+    // ADR-0251: the model-call consent lookup (user, model, status, payload)
+    index("approvals_agent_binding_idx")
+      .on(t.userId, t.agentId, t.status, t.argumentsDigest)
+      .where(sql`${t.agentId} IS NOT NULL`),
   ],
 );
 
@@ -3086,6 +3108,12 @@ export const connectors = pgTable("connectors", {
   /** ADR-0185 I9 (migration 0169) — the accountable owner; default the
    * registering admin. ON DELETE SET NULL, like mcp_servers.owner_user_id. */
   ownerUserId: uuid("owner_user_id").references(() => users.id, { onDelete: "set null" }),
+  /** ADR-0207 (migration `connector_disable`): NULL = enabled. Disabling refuses every governed call to the connector; it is audited and
+   * needs a reason (10 to 1000 characters, CHECK); enabling again is a stepped-up relaxation. A delete is
+   * allowed only while disabled. */
+  disabledAt: timestamp("disabled_at", { withTimezone: true }),
+  disabledReason: text("disabled_reason"),
+  disabledBy: uuid("disabled_by").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -3289,7 +3317,13 @@ export const workflowInstances = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("workflow_instances_status_idx").on(t.status)],
+  (t) => [
+    index("workflow_instances_status_idx").on(t.status),
+    // ADR-0283: built CONCURRENTLY by runMigrations (CONCURRENT_INDEXES), not by a migration statement
+    index("workflow_instances_project_open_idx")
+      .on(t.projectId)
+      .where(sql`${t.status} NOT IN ('completed', 'aborted', 'denied', 'rolled_back')`),
+  ],
 );
 
 // Append-only per-instance history (§5 dashboard: full history, who, when).
@@ -3546,6 +3580,11 @@ export const pmConnections = pgTable("pm_connections", {
   })
     .notNull()
     .default("manual"),
+  /** ADR-0207 (migration `pm_webhook_secret_rotation`): the previous webhook secret after a rotation, accepted until
+   * `previousWebhookSecretValidUntil` (database clock, 24 h after the rotation). All three set together or all NULL. */
+  previousWebhookSecretHash: text("previous_webhook_secret_hash"),
+  previousWebhookSecretCiphertext: text("previous_webhook_secret_ciphertext"),
+  previousWebhookSecretValidUntil: timestamp("previous_webhook_secret_valid_until", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -3993,6 +4032,11 @@ export const complianceProfiles = pgTable("compliance_profiles", {
    * isolable call of a project carrying its tag. Composed MAX across a project's profiles (like
    * `guardrailModes`), so a tag can only raise the requirement. NULL = no isolation opinion. */
   minIsolationClass: text("min_isolation_class", { enum: ["hardened_container", "user_space_kernel", "microvm"] }),
+  /** ADR-0045 amendment 2026-11-14 (migration compliance_profile_mrm_required): this framework REQUIRES model risk management (ADR-0045).
+   * Composed OR across a project's profiles: one true makes the ADR-0045 dispatch gate enforce on that project's
+   * dispatches even where an admin relaxed the org-wide `mrmEnforced` (the ADR-0021 ceiling). false and NULL are
+   * both "no requirement" and can never relax the org setting. */
+  mrmRequired: boolean("mrm_required"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   /** ADR-0208 (migration 0223): a retired profile is read-only — no new version, no new carrier. Retire is refused
    * while any project, pending project, team or infra resource carries the tag. DB CHECK ties retired_* to status. */
@@ -5399,7 +5443,7 @@ export const orgSettings = pgTable(
     check("org_settings_incident_gate_mode_check", sql`${t.incidentGateMode} IN ('off', 'warn', 'enforce')`),
     check(
       "org_settings_incident_clock_regimes_check",
-      sql`jsonb_typeof(${t.incidentClockRegimes}) = 'array' AND ${t.incidentClockRegimes} <@ '["eu-ai-act", "hipaa"]'::jsonb`,
+      sql`jsonb_typeof(${t.incidentClockRegimes}) = 'array' AND ${t.incidentClockRegimes} <@ '["eu-ai-act", "hipaa", "gdpr", "nis2", "dora", "cra"]'::jsonb`,
     ),
     check(
       "org_settings_feedback_sla_check",
@@ -13007,7 +13051,7 @@ export const aiIncidents = pgTable(
     ),
     check(
       "ai_incidents_serious_criteria_check",
-      sql`jsonb_typeof(${t.seriousCriteria}) = 'array' AND ${t.seriousCriteria} <@ '["death", "health", "critical_infrastructure", "fundamental_rights", "property_environment", "widespread_infringement", "phi_breach"]'::jsonb`,
+      sql`jsonb_typeof(${t.seriousCriteria}) = 'array' AND ${t.seriousCriteria} <@ '["death", "health", "critical_infrastructure", "fundamental_rights", "property_environment", "widespread_infringement", "phi_breach", "personal_data_breach", "significant_cyber_incident", "major_ict_incident", "exploited_vulnerability", "severe_product_incident"]'::jsonb`,
     ),
     check(
       "ai_incidents_phi_individuals_check",
@@ -13126,7 +13170,7 @@ export const aiIncidentNotifications = pgTable(
   },
   (t) => [
     unique("ai_incident_notifications_clock_uq").on(t.incidentId, t.clockId),
-    check("ai_incident_notifications_regime_check", sql`${t.regime} IN ('eu-ai-act', 'hipaa')`),
+    check("ai_incident_notifications_regime_check", sql`${t.regime} IN ('eu-ai-act', 'hipaa', 'gdpr', 'nis2', 'dora', 'cra')`),
     check(
       "ai_incident_notifications_status_check",
       sql`${t.status} IN ('pending', 'sent_initial', 'sent_complete', 'not_required', 'tolled')`,
@@ -16266,6 +16310,30 @@ export const modelExplainabilityArtefacts = pgTable(
 );
 export type ModelExplainabilityArtefactRow = typeof modelExplainabilityArtefacts.$inferSelect;
 
+/**
+ * ADR-0255 (P31, pending migration connector_catalogue) — THE CONNECTOR CATALOGUE: which curated Activepieces pieces an admin has ENABLED.
+ * Secure by default (ADR-0180): no row means not enabled, and a connector of a piece kind can be neither created nor
+ * invoked until its row exists. Enabling (POST /v1/connector-catalogue/:pieceKey/enablement, admin, step-up) inserts the
+ * row and its audit row in one transaction; disabling deletes it, also audited. The CHECK repeats CURATED_PIECES'
+ * keys (@regulait/connector-provider), so a row cannot name a piece with no RegulAIt adapter. 3NF: the admin is a
+ * foreign key, never a copied name or email.
+ */
+export const connectorPieceEnablements = pgTable(
+  "connector_piece_enablements",
+  {
+    pieceKey: text("piece_key").primaryKey(),
+    enabledByUserId: uuid("enabled_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    enabledAt: timestamp("enabled_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "connector_piece_enablements_piece_key_check",
+      sql`${t.pieceKey} IN ('slack', 'jira-cloud', 'github', 'google-sheets', 'gmail')`,
+    ),
+  ],
+);
+export type ConnectorPieceEnablementRow = typeof connectorPieceEnablements.$inferSelect;
+
 // ===========================================================================
 // ADR-0261 (P37, migration pending/third_party_ingest) — THIRD-PARTY SECURITY TELEMETRY INGEST
 //
@@ -16348,4 +16416,77 @@ export const thirdPartyIngestRecordFindings = pgTable(
       .references(() => shadowAiFindings.id, { onDelete: "cascade" }),
   },
   (t) => [primaryKey({ columns: [t.recordId, t.findingId] }), index("third_party_ingest_record_findings_finding_idx").on(t.findingId)],
+);
+
+// ===== ADR-0303 (lane L11): SIEM delivery of the audit chain =====================================================
+export const SIEM_DESTINATION_KINDS = ["webhook"] as const;
+export const SIEM_DESTINATION_STATES = ["active", "backoff", "dead_letter"] as const;
+
+/**
+ * One SIEM destination: an outbox cursor over `audit_log.seq` (ADR-0135's proposed delivery contract). The cursor moves
+ * only after the receiver acknowledges a batch (2xx), so delivery is at least once and in chain order. New
+ * destinations are off; enabling one is a step-up relaxation (ADR-0180). The signing secret is a Standard Webhooks
+ * `whsec_` value under REGULAIT_DATA_KEY. `last_error_code` is one of a fixed set of codes, never receiver text.
+ */
+export const siemDestinations = pgTable(
+  "siem_destinations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    kind: text("kind", { enum: SIEM_DESTINATION_KINDS }).notNull().default("webhook"),
+    url: text("url").notNull(),
+    allowPlaintextHttp: boolean("allow_plaintext_http").notNull().default(false),
+    enabled: boolean("enabled").notNull().default(false),
+    secretCiphertext: text("secret_ciphertext").notNull(),
+    secretRotatedAt: timestamp("secret_rotated_at", { withTimezone: true }).notNull().defaultNow(),
+    /** the highest `audit_log.seq` the receiver acknowledged */
+    cursorSeq: bigint("cursor_seq", { mode: "number" }).notNull(),
+    state: text("state", { enum: SIEM_DESTINATION_STATES }).notNull().default("active"),
+    consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }),
+    leaseUntil: timestamp("lease_until", { withTimezone: true }),
+    /** the claiming pass's token: every write after a claim is conditional on it */
+    leaseToken: uuid("lease_token"),
+    lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
+    lastSuccessAt: timestamp("last_success_at", { withTimezone: true }),
+    lastErrorCode: text("last_error_code"),
+    deliveredEvents: bigint("delivered_events", { mode: "number" }).notNull().default(0),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("siem_destinations_name_uq").on(sql`lower(${t.name})`), index("siem_destinations_due_idx").on(t.enabled, t.nextAttemptAt)],
+);
+export type SiemDestinationRow = typeof siemDestinations.$inferSelect;
+// ===== end ADR-0303 =================================================================================================
+/**
+ * ADR-0251 (P-01 remainder, lane L1; migration resource_rate_reservations) — HARD rate-limit windows for the governed
+ * core's connector and A2A calls. One row is one slot a call took in the window: written in the same transaction as
+ * the recount, under a per-(user, resource type) advisory lock, only when a `resource_rate_limits` row binds the call
+ * and the core's decision is allow. The windows count these rows (not audit rows, which are written after the call
+ * runs), so calls decided at the same moment can no longer each see the same count.
+ *
+ * 3NF exception, deliberate: a slot is a point-in-time fact of its own (the counter the limit is enforced against),
+ * not a copy of the audit row, which remains the evidence of the decision. Rows older than the longest window
+ * (30 days) carry no information and are pruned by the reserving transaction.
+ */
+export const resourceRateReservations = pgTable(
+  "resource_rate_reservations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    resourceType: text("resource_type", { enum: ["connector", "a2a"] }).notNull(),
+    connectorId: uuid("connector_id").references(() => connectors.id, { onDelete: "cascade" }),
+    a2aAgentId: uuid("a2a_agent_id").references(() => a2aAgents.id, { onDelete: "cascade" }),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("resource_rate_reservations_window_idx").on(t.userId, t.resourceType, t.at),
+    check(
+      "resource_rate_reservations_type_check",
+      sql`CASE ${t.resourceType} WHEN 'connector' THEN ${t.connectorId} IS NOT NULL AND ${t.a2aAgentId} IS NULL WHEN 'a2a' THEN ${t.a2aAgentId} IS NOT NULL AND ${t.connectorId} IS NULL ELSE false END`,
+    ),
+  ],
 );

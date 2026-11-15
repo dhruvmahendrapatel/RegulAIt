@@ -41,6 +41,12 @@ import { createHash, createHmac } from "node:crypto";
 import { z } from "zod";
 import { CHATOPS_REPLAY_WINDOW_SECONDS, constantTimeEqual, pmWebhookSchema } from "@regulait/shared";
 import { PmProviderError, type PmProviderKind } from "./index.js";
+import {
+  GENERIC_SIGNATURE_HEADER,
+  GENERIC_TIMESTAMP_HEADER,
+  genericSignature,
+  signGenericWebhook,
+} from "./generic-signature.js";
 
 /** ADR-0010's normalized inbound event — reused, never re-invented. */
 export type NormalizedInboundEvent = z.infer<typeof pmWebhookSchema>;
@@ -63,9 +69,9 @@ export interface InboundWebhookInput {
 /** The signed-timestamp window, the same 300 s as Slack ChatOps (ADR-0061). */
 export const PM_WEBHOOK_REPLAY_WINDOW_SECONDS = CHATOPS_REPLAY_WINDOW_SECONDS;
 
-/** generic contract headers: unix seconds, and `sha256=<hex HMAC of "<ts>.<raw body>">` */
-export const GENERIC_TIMESTAMP_HEADER = "x-regulait-timestamp";
-export const GENERIC_SIGNATURE_HEADER = "x-regulait-signature";
+/** generic contract headers: unix seconds, and `sha256=<hex HMAC of "<ts>.<raw body>">`
+ * (defined once in generic-signature.ts, shared with the outbound adapter) */
+export { GENERIC_SIGNATURE_HEADER, GENERIC_TIMESTAMP_HEADER };
 
 export type InboundWebhookResult =
   /** a provider verification challenge — answer it, process nothing */
@@ -637,20 +643,13 @@ function parseAzureDevOpsVerified(input: InboundWebhookInput): InboundWebhookRes
 // shape; the mock shares the parser as the tests' e2e vehicle.
 // ---------------------------------------------------------------------------
 
-const genericSignature = (secret: string, timestamp: string, rawBody: string): string =>
-  `sha256=${createHmac("sha256", secret).update(`${timestamp}.${rawBody}`).digest("hex")}`;
-
 /** The headers a sender (a bridge, or a test) attaches to a generic inbound delivery. */
 export function signGenericInboundWebhook(
   secret: string,
   rawBody: string,
   nowSeconds: number = Math.floor(Date.now() / 1000),
 ): Record<string, string> {
-  const timestamp = String(nowSeconds);
-  return {
-    [GENERIC_TIMESTAMP_HEADER]: timestamp,
-    [GENERIC_SIGNATURE_HEADER]: genericSignature(secret, timestamp, rawBody),
-  };
+  return signGenericWebhook(secret, rawBody, nowSeconds);
 }
 
 export function parseGenericInboundWebhook(input: InboundWebhookInput): InboundWebhookResult {
