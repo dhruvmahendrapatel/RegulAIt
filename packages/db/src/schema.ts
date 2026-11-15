@@ -14661,11 +14661,11 @@ export const workloadIdentities = pgTable(
     unique("workload_identities_engine_runner_uq").on(t.engineRunnerId),
     check(
       "workload_identities_kind_check",
-      sql`${t.kind} IN ('agent', 'builder_agent', 'engine_runner', 'worker_runtime', 'pdp', 'endpoint_agent')`,
+      sql`${t.kind} IN ('agent', 'builder_agent', 'engine_runner', 'worker_runtime', 'pdp', 'endpoint_agent', 'browser_extension')`,
     ),
     check(
       "workload_identities_subject_check",
-      sql`(${t.kind} = 'agent' AND ${t.agentId} IS NOT NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NULL) OR (${t.kind} = 'builder_agent' AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NOT NULL AND ${t.engineRunnerId} IS NULL) OR (${t.kind} = 'engine_runner' AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NOT NULL) OR (${t.kind} IN ('worker_runtime', 'pdp', 'endpoint_agent') AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NULL)`,
+      sql`(${t.kind} = 'agent' AND ${t.agentId} IS NOT NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NULL) OR (${t.kind} = 'builder_agent' AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NOT NULL AND ${t.engineRunnerId} IS NULL) OR (${t.kind} = 'engine_runner' AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NOT NULL) OR (${t.kind} IN ('worker_runtime', 'pdp', 'endpoint_agent', 'browser_extension') AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NULL)`,
     ),
     check(
       "workload_identities_identifier_check",
@@ -16649,9 +16649,9 @@ export const browserEnrolmentTokens = pgTable(
 export type BrowserEnrolmentTokenRow = typeof browserEnrolmentTokens.$inferSelect;
 
 /**
- * One installed extension: its install-time P-256 key. `public_jwk` is the key as registered (a verbatim external
- * payload, the ADR-0200 exception: it is verified, never edited). Devices are revoked, never deleted, so the
- * evidence rows below always name one.
+ * One installed extension. Its key and tokens are its workload identity's (kind `browser_extension`, bound through
+ * S6's one-key-one-identity path): this row adds only what the device is and which token enrolled it. Devices are
+ * revoked, never deleted, so the evidence rows below always name one.
  */
 export const browserDevices = pgTable(
   "browser_devices",
@@ -16660,8 +16660,9 @@ export const browserDevices = pgTable(
     tokenId: uuid("token_id")
       .notNull()
       .references(() => browserEnrolmentTokens.id, { onDelete: "restrict" }),
-    jwkThumbprint: text("jwk_thumbprint").notNull(),
-    publicJwk: jsonb("public_jwk").notNull(),
+    identityId: uuid("identity_id")
+      .notNull()
+      .references(() => workloadIdentities.id, { onDelete: "restrict" }),
     os: text("os").notNull(),
     browserMajor: integer("browser_major").notNull(),
     extensionVersion: text("extension_version").notNull(),
@@ -16670,7 +16671,7 @@ export const browserDevices = pgTable(
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     revokedBy: uuid("revoked_by").references(() => users.id, { onDelete: "set null" }),
   },
-  (t) => [uniqueIndex("browser_devices_thumbprint_uq").on(t.jwkThumbprint), index("browser_devices_token_idx").on(t.tokenId)],
+  (t) => [uniqueIndex("browser_devices_identity_uq").on(t.identityId), index("browser_devices_token_idx").on(t.tokenId)],
 );
 export type BrowserDeviceRow = typeof browserDevices.$inferSelect;
 

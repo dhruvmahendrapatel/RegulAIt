@@ -1,17 +1,19 @@
 /**
- * ADR-0334: the credential patterns a prompt is checked against before it leaves the browser.
+ * ADR-0334: the shared `dlp.secret.*` credential rules in RE2 form, for any TypeScript consumer that must match them in
+ * linear time on untrusted input (first: the managed browser extension, which checks a prompt before it leaves the
+ * browser; it bundles this file through the `@regulait/shared/dlp-secret-re2` subpath).
  *
  * One list of "what a key looks like": the shared `dlp.secret.*` rules (packages/shared guardrails.ts,
  * CREDENTIAL_MATERIAL_RULES), in their RE2 form, exactly as the endpoint agent compiles them
  * (agents/endpoint/internal/secrets/secrets.go). RE2 matches in linear time, so a hostile page or prompt cannot make
  * the check hang. The JavaScript lookarounds RE2 lacks are rewritten the same way the Go table rewrites them: an RE2
- * match plus a check in code. test/dlp.test.ts holds this table equal to the shared rules (ids and source digests,
+ * match plus a check in code. dlp-secret-re2.test.ts holds this table equal to the shared rules (ids and source digests,
  * via the endpoint agent's recorded digests) and runs the endpoint agent's vectors through it.
  *
  * A match yields rule ids only. The matched text is never returned, stored, logged or sent.
  */
 import { RE2JS } from "re2js";
-import { BROWSER_DLP_MAX_CHARS, BROWSER_DLP_RULE_IDS, type BrowserDlpRuleId } from "@regulait/shared/browser-governance/constants";
+import { BROWSER_DLP_MAX_CHARS, BROWSER_DLP_RULE_IDS, type BrowserDlpRuleId } from "./browser-governance/constants.js";
 
 interface Rule {
   id: BrowserDlpRuleId;

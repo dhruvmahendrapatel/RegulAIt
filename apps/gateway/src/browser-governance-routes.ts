@@ -5,13 +5,15 @@
  * step-up (audited). While it is off every extension route refuses `browser_governance_disabled`, and an extension
  * with no valid policy blocks every governed site (it fails closed on its own side too).
  *
- * The extension channel (auth-exempt, authenticated IN-ROUTE; raw bodies, at most 64 KiB):
- *   POST /v1/browser-extension/register         the bulk enrolment token (`rgbe_`), compared by SHA-256; capped
- *   POST /v1/browser-extension/policy           device proof; answers the signed per-user policy (EdDSA JWS)
- *   POST /v1/browser-extension/events           device proof; policy breaches (codes and ids, never prompt text)
- *   POST /v1/browser-extension/prompt-captures  device proof; only while prompt capture is on (a step-up relaxation)
- * A device proof is an ES256 JWS by the device's registered key over the method, path, body digest, time and a
- * one-use id (replay store). Every refusal is a fixed code and is audited with ids and the code only.
+ * The extension channel (bodies at most 64 KiB). The device is a workload identity of kind `browser_extension`, the
+ * endpoint agent's pattern (ADR-0195 SD4b): S6 binds its key, S7 mints its DPoP-bound self token at the token
+ * endpoint, and the shared OAuth layer verifies that token, its DPoP proof (one-use `jti`, the gateway nonce) and the
+ * device on every request before a handler runs; the route ceiling keeps the token to the three routes below.
+ *   POST /v1/browser-extension/register         auth-exempt: the bulk enrolment token (`rgbe_`, SHA-256); capped
+ *   POST /v1/browser-extension/policy           self token; answers the signed per-user policy (EdDSA JWS)
+ *   POST /v1/browser-extension/events           self token; policy breaches (codes and ids, never prompt text)
+ *   POST /v1/browser-extension/prompt-captures  self token; only while prompt capture is on (a step-up relaxation)
+ * Every refusal is a fixed code and is audited with ids and the code only.
  *
  * Admin routes (the default admin gate; relaxations are step-ups, every write audited):
  *   GET  /v1/browser-governance                            settings and the policy key's public half
@@ -45,45 +47,42 @@ import {
   lt,
   sql,
   users,
+  workloadIdentities,
   type BrowserDeviceRow,
   type BrowserGovernanceSettingsRow,
   type Db,
 } from "@regulait/db";
 import {
-  BROWSER_DEVICE_HEADER,
   BROWSER_ENROLMENT_TOKEN_MAX_DAYS,
   BROWSER_ENROLMENT_TOKEN_MAX_DEVICES,
   BROWSER_ENROLMENT_TOKEN_PREFIX,
   BROWSER_ENROLMENT_TOKEN_RE,
   BROWSER_EXTENSION_PATHS,
-  BROWSER_PROOF_HEADER,
-  BROWSER_PROOF_MAX_AGE_SECONDS,
-  BROWSER_PROOF_MAX_FUTURE_SECONDS,
   BROWSER_REQUEST_MAX_BYTES,
   BROWSER_SITE_CATALOGUE,
   BROWSER_SITE_CATALOGUE_IDS,
   browserEventsRequestSchema,
   browserPolicyRequestSchema,
   browserPromptCaptureRequestSchema,
-  browserPublicJwkSchema,
   browserRegisterRequestSchema,
-  type BrowserPublicJwk,
   type BrowserRefusalCode,
+  defaultWorkloadIdentifier,
+  JWK_THUMBPRINT_URI_PREFIX,
+  type WorkloadPublicJwk,
 } from "@regulait/shared";
 import {
-  browserBodyDigest,
-  browserJwkThumbprint,
   buildBrowserPolicy,
   conversationRef,
   resolveBrowserPolicyKey,
   signBrowserPolicy,
-  verifyBrowserProof,
 } from "./browser-governance.js";
 import { databaseNow } from "./db-clock.js";
-import { claimReplay } from "./delegated-token.js";
 import { pseudonymise, pseudonymKey } from "./discovery-worker.js";
 import { resolveExecutionPosture } from "./execution-posture.js";
-import { identityIssuer } from "./oauth/common.js";
+import { keyRegistered, prepareRunnerKey, runnerKeyThumbprint } from "./engine-runner-keys.js";
+import { resolveTrustDomain } from "./in-process-delegation.js";
+import { deploymentEnvironment, identityIssuer } from "./oauth/common.js";
+import { bindPreparedCredentialTx, IdentityAdminError } from "./oauth/identity-admin.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { requireStepUp } from "./step-up.js";
 
@@ -171,6 +170,9 @@ export function registerBrowserGovernanceRoutes(app: FastifyInstance, db: Db, op
       audit(db, NIL_UUID, objectId, "browser-extension-refused", "deny", `a browser extension request was refused: ${code} (ADR-0334)`, { code, route });
 
     // -- registration (once per install) ------------------------------------------------------------------------
+    // The key becomes a workload identity of kind `browser_extension` through S6's binding path (one key, one identity,
+    // ever), exactly as the endpoint agent's registration does (ADR-0195 SD4b). Its later requests carry an S7
+    // DPoP-bound self token, verified by the shared OAuth layer before these handlers run.
     scope.post(BROWSER_EXTENSION_PATHS.register, async (req, reply) => {
       const route = "register";
       const token = bearerToken(req);
@@ -183,70 +185,98 @@ export function registerBrowserGovernanceRoutes(app: FastifyInstance, db: Db, op
         await deny(null, "browser_governance_disabled", route);
         return refuse(reply, 403, "browser_governance_disabled");
       }
+      if (!identityIssuer()) return refuse(reply, 503, "issuer_not_configured");
       const body = browserRegisterRequestSchema.safeParse(jsonOf(req.body));
       if (!body.success) {
         await deny(null, "invalid_body", route);
         return refuse(reply, 400, "invalid_body");
       }
-      const thumbprint = await browserJwkThumbprint(body.data.publicJwk);
-      const outcome = await db.transaction(async (tx) => {
-        const t = tx as unknown as Db;
-        const [tok] = await t
-          .select()
-          .from(browserEnrolmentTokens)
-          .where(eq(browserEnrolmentTokens.tokenHash, sha256Hex(token)))
-          .for("update");
-        if (!tok) return { code: "invalid_token" as const, status: 401, tokenId: null };
-        if (tok.revokedAt) return { code: "token_revoked" as const, status: 403, tokenId: tok.id };
-        const now = await databaseNow(t);
-        if (tok.expiresAt.getTime() <= now.getTime()) return { code: "token_expired" as const, status: 410, tokenId: tok.id };
-        const [existing] = await t.select().from(browserDevices).where(eq(browserDevices.jwkThumbprint, thumbprint));
-        if (existing) {
-          if (existing.revokedAt) return { code: "device_revoked" as const, status: 403, tokenId: tok.id };
-          // the same key again (a retried install): idempotent, counted once
-          return { deviceId: existing.id, created: false, tokenId: tok.id };
-        }
-        if (tok.devicesEnrolled >= tok.deviceCap) return { code: "enrolment_cap_reached" as const, status: 409, tokenId: tok.id };
-        const [dev] = await t
-          .insert(browserDevices)
-          .values({
+      const now = await databaseNow(db);
+      const prepared = await prepareRunnerKey(body.data.publicJwk as WorkloadPublicJwk, now);
+      if (prepared instanceof IdentityAdminError) {
+        await deny(null, "invalid_body", route);
+        return refuse(reply, 400, "invalid_body");
+      }
+      const jkt = await runnerKeyThumbprint(prepared);
+      const clientId = `${JWK_THUMBPRINT_URI_PREFIX}${jkt}`;
+      const identityId = randomUUID();
+      type Outcome = { ok: true; deviceId: string; identityId: string; created: boolean } | { ok: false; code: BrowserRefusalCode; status: number; tokenId: string | null };
+      const outcome: Outcome = await db
+        .transaction(async (tx): Promise<Outcome> => {
+          const t = tx as unknown as Db;
+          const [tok] = await t.select().from(browserEnrolmentTokens).where(eq(browserEnrolmentTokens.tokenHash, sha256Hex(token))).for("update");
+          if (!tok) return { ok: false, code: "invalid_token", status: 401, tokenId: null };
+          if (tok.revokedAt) return { ok: false, code: "token_revoked", status: 403, tokenId: tok.id };
+          if (tok.expiresAt.getTime() <= now.getTime()) return { ok: false, code: "token_expired", status: 410, tokenId: tok.id };
+          // idempotent: the same key again (a retried install) answers with the device it already is
+          const existing = await keyRegistered(t, jkt);
+          if (existing) {
+            const [own] = await t.select().from(browserDevices).where(eq(browserDevices.identityId, existing.identityId));
+            if (!own) return { ok: false, code: "credential_already_registered", status: 409, tokenId: tok.id };
+            if (own.revokedAt) return { ok: false, code: "device_revoked", status: 403, tokenId: tok.id };
+            return { ok: true, deviceId: own.id, identityId: own.identityId, created: false };
+          }
+          if (tok.devicesEnrolled >= tok.deviceCap) return { ok: false, code: "enrolment_cap_reached", status: 409, tokenId: tok.id };
+          await t.insert(workloadIdentities).values({
+            id: identityId,
+            kind: "browser_extension",
+            identifier: defaultWorkloadIdentifier(resolveTrustDomain(), "browser_extension", identityId),
+            sponsorUserIds: [tok.createdBy ?? NIL_UUID],
+            environments: [deploymentEnvironment()],
+          });
+          const bound = await bindPreparedCredentialTx(t, identityId, prepared, NIL_UUID, now);
+          if (bound instanceof IdentityAdminError) throw bound;
+          const [dev] = await t
+            .insert(browserDevices)
+            .values({ tokenId: tok.id, identityId, os: body.data.os, browserMajor: body.data.browserMajor, extensionVersion: body.data.extensionVersion })
+            .returning({ id: browserDevices.id });
+          await t
+            .update(browserEnrolmentTokens)
+            .set({ devicesEnrolled: sql`${browserEnrolmentTokens.devicesEnrolled} + 1` })
+            .where(eq(browserEnrolmentTokens.id, tok.id));
+          await audit(t, NIL_UUID, dev!.id, "browser-device-registered", "allow", "a browser extension registered its device key as a workload identity, with no grants (ADR-0334)", {
             tokenId: tok.id,
-            jwkThumbprint: thumbprint,
-            publicJwk: body.data.publicJwk,
+            deviceId: dev!.id,
+            identityId,
+            thumbprint: jkt,
             os: body.data.os,
             browserMajor: body.data.browserMajor,
             extensionVersion: body.data.extensionVersion,
-          })
-          .returning({ id: browserDevices.id });
-        await t
-          .update(browserEnrolmentTokens)
-          .set({ devicesEnrolled: sql`${browserEnrolmentTokens.devicesEnrolled} + 1` })
-          .where(eq(browserEnrolmentTokens.id, tok.id));
-        await audit(t, NIL_UUID, dev!.id, "browser-device-registered", "allow", "a browser extension registered its device key (ADR-0334)", {
-          tokenId: tok.id,
-          deviceId: dev!.id,
-          os: body.data.os,
-          browserMajor: body.data.browserMajor,
-          extensionVersion: body.data.extensionVersion,
+          });
+          return { ok: true, deviceId: dev!.id, identityId, created: true };
+        })
+        .catch((e: unknown): Outcome => {
+          // two registrations of one new key race: the loser is refused by S6's one-key-one-identity rule
+          if (e instanceof IdentityAdminError && e.code === "credential_already_registered") return { ok: false, code: "credential_already_registered", status: 409, tokenId: null };
+          throw e;
         });
-        return { deviceId: dev!.id, created: true, tokenId: tok.id };
-      });
-      if ("code" in outcome && outcome.code) {
+      if (!outcome.ok) {
         await deny(outcome.tokenId, outcome.code, route);
         return refuse(reply, outcome.status, outcome.code);
       }
-      if (!("deviceId" in outcome)) return refuse(reply, 401, "invalid_token");
-      return reply.status(outcome.created ? 201 : 200).send({ deviceId: outcome.deviceId });
+      return reply.status(outcome.created ? 201 : 200).send({ deviceId: outcome.deviceId, identityId: outcome.identityId, clientId });
     });
 
     /**
-     * The device proof check shared by the three signed routes: on, a known live device, a proof by its key over this
-     * path and these exact bytes, fresh by the database clock, its id never seen before. Sends the refusal itself.
+     * The device behind a self token (the shared OAuth layer has already verified the token, its DPoP proof, the
+     * proof's one-use id and nonce, the identity and the device): browser governance must still be on. Sends the
+     * refusal itself.
      */
-    const authenticate = async (req: FastifyRequest, reply: FastifyReply, htu: string, route: string): Promise<{ device: BrowserDeviceRow; json: unknown; settings: BrowserGovernanceSettingsRow } | null> => {
+    const authenticate = async (req: FastifyRequest, reply: FastifyReply, route: string): Promise<{ device: BrowserDeviceRow; json: unknown; settings: BrowserGovernanceSettingsRow } | null> => {
+      const identityId = req.authCtx.workloadIdentityId;
+      if (req.authCtx.via !== "browser-extension" || !identityId) {
+        await refuse(reply, 401, "browser_extension_token_required");
+        return null;
+      }
+      const [device] = await db.select().from(browserDevices).where(eq(browserDevices.identityId, identityId));
+      if (!device || device.revokedAt) {
+        await deny(device?.id ?? null, "device_revoked", route);
+        await refuse(reply, 403, "device_revoked");
+        return null;
+      }
       const settings = await loadSettings(db);
       if (!settings.enabled) {
-        await deny(null, "browser_governance_disabled", route);
+        await deny(device.id, "browser_governance_disabled", route);
         await refuse(reply, 403, "browser_governance_disabled");
         return null;
       }
@@ -254,53 +284,14 @@ export function registerBrowserGovernanceRoutes(app: FastifyInstance, db: Db, op
         await refuse(reply, 503, "data_key_unavailable");
         return null;
       }
-      const deviceHeader = req.headers[BROWSER_DEVICE_HEADER];
-      const proofHeader = req.headers[BROWSER_PROOF_HEADER];
-      const deviceId = typeof deviceHeader === "string" && z.string().uuid().safeParse(deviceHeader).success ? deviceHeader : null;
-      if (!deviceId || typeof proofHeader !== "string") {
-        await deny(null, "invalid_proof", route);
-        await refuse(reply, 401, "invalid_proof");
-        return null;
-      }
-      const [device] = await db.select().from(browserDevices).where(eq(browserDevices.id, deviceId));
-      if (!device) {
-        await deny(null, "unknown_device", route);
-        await refuse(reply, 401, "unknown_device");
-        return null;
-      }
-      if (device.revokedAt) {
-        await deny(device.id, "device_revoked", route);
-        await refuse(reply, 403, "device_revoked");
-        return null;
-      }
-      const jwk = browserPublicJwkSchema.safeParse(device.publicJwk);
-      const raw = Buffer.isBuffer(req.body) ? req.body : null;
-      if (!jwk.success || !raw) {
-        await deny(device.id, "invalid_body", route);
-        await refuse(reply, 400, "invalid_body");
-        return null;
-      }
-      const nowSeconds = Math.floor((await databaseNow(db)).getTime() / 1000);
-      const v = await verifyBrowserProof(proofHeader, jwk.data as BrowserPublicJwk, { htu, bodyDigest: browserBodyDigest(raw) }, nowSeconds);
-      if (!v.ok) {
-        await deny(device.id, v.code, route);
-        await refuse(reply, v.code === "invalid_proof" ? 401 : 400, v.code);
-        return null;
-      }
-      const expires = new Date((v.claims.iat + BROWSER_PROOF_MAX_AGE_SECONDS + BROWSER_PROOF_MAX_FUTURE_SECONDS) * 1000);
-      if (!(await claimReplay(db, "client_assertion", `browser-ext:${device.id}:${v.claims.jti}`, expires))) {
-        await deny(device.id, "proof_replayed", route);
-        await refuse(reply, 400, "proof_replayed");
-        return null;
-      }
       await db.update(browserDevices).set({ lastSeenAt: sql`now()` }).where(eq(browserDevices.id, device.id));
-      return { device, json: jsonOf(raw), settings };
+      return { device, json: jsonOf(req.body), settings };
     };
 
     // -- policy -------------------------------------------------------------------------------------------------------
     scope.post(BROWSER_EXTENSION_PATHS.policy, async (req, reply) => {
       const route = "policy";
-      const authed = await authenticate(req, reply, BROWSER_EXTENSION_PATHS.policy, route);
+      const authed = await authenticate(req, reply, route);
       if (!authed) return reply;
       const body = browserPolicyRequestSchema.safeParse(authed.json);
       if (!body.success) {
@@ -325,13 +316,13 @@ export function registerBrowserGovernanceRoutes(app: FastifyInstance, db: Db, op
         rules,
         nowSeconds: Math.floor((await databaseNow(db)).getTime() / 1000),
       });
-      return reply.status(200).send({ policy: await signBrowserPolicy(policy, key.key) });
+      return reply.status(200).send({ policy: signBrowserPolicy(policy, key.key) });
     });
 
     // -- breach events --------------------------------------------------------------------------------------------
     scope.post(BROWSER_EXTENSION_PATHS.events, async (req, reply) => {
       const route = "events";
-      const authed = await authenticate(req, reply, BROWSER_EXTENSION_PATHS.events, route);
+      const authed = await authenticate(req, reply, route);
       if (!authed) return reply;
       const body = browserEventsRequestSchema.safeParse(authed.json);
       if (!body.success) {
@@ -387,7 +378,7 @@ export function registerBrowserGovernanceRoutes(app: FastifyInstance, db: Db, op
     // -- prompt capture (only while an admin has turned it on) ----------------------------------------------------
     scope.post(BROWSER_EXTENSION_PATHS.promptCaptures, async (req, reply) => {
       const route = "prompt-captures";
-      const authed = await authenticate(req, reply, BROWSER_EXTENSION_PATHS.promptCaptures, route);
+      const authed = await authenticate(req, reply, route);
       if (!authed) return reply;
       if (!authed.settings.promptCaptureEnabled) {
         await deny(authed.device.id, "prompt_capture_disabled", route);

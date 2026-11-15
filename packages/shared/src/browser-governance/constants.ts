@@ -22,15 +22,12 @@ export const BROWSER_ENROLMENT_TOKEN_RE = /^rgbe_[0-9a-f]{64}$/;
 export const BROWSER_ENROLMENT_TOKEN_MAX_DAYS = 30;
 export const BROWSER_ENROLMENT_TOKEN_MAX_DEVICES = 100_000;
 
-export const BROWSER_DEVICE_HEADER = "regulait-browser-device";
-export const BROWSER_PROOF_HEADER = "regulait-browser-proof";
-export const BROWSER_PROOF_TYP = "regulait-browser-proof+jwt";
-/** a proof older than this, or more than the future skew ahead of the database clock, is refused */
-export const BROWSER_PROOF_MAX_AGE_SECONDS = 300;
-export const BROWSER_PROOF_MAX_FUTURE_SECONDS = 60;
-
 export const BROWSER_POLICY_SCHEMA = "regulait.browser-policy/1";
-export const BROWSER_POLICY_TYP = "regulait-browser-policy+jws";
+/**
+ * The signed-policy envelope's key id shape: the endpoint agent's (agents/endpoint/internal/enforce `keyIDShape`), so
+ * one gateway signer and one envelope serve both on-device enforcement points.
+ */
+export const DEVICE_POLICY_KEY_ID_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
 /** a policy is valid for this long after it is issued; the extension refetches well before */
 export const BROWSER_POLICY_TTL_SECONDS = 4 * 3600;
 /** a policy issued further than this in the extension's future is refused (clock skew allowance) */
@@ -199,14 +196,12 @@ export const BROWSER_REFUSAL_CODES = [
   "enrolment_cap_reached",
   "invalid_body",
   "body_too_large",
-  "unknown_device",
   "device_revoked",
-  "invalid_proof",
-  "proof_stale",
-  "proof_replayed",
-  "body_digest_mismatch",
   "policy_signer_unavailable",
   "prompt_capture_disabled",
   "data_key_unavailable",
+  "issuer_not_configured",
+  "credential_already_registered",
+  "browser_extension_token_required",
 ] as const;
 export type BrowserRefusalCode = (typeof BROWSER_REFUSAL_CODES)[number];

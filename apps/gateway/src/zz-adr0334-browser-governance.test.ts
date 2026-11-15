@@ -6,20 +6,20 @@
  *    allowed site and prompt capture are each a `settings_relax` step-up, audited;
  *  - enrolment: a capped bulk token shown once (never in a list), the managed config carries the policy key; a
  *    registration is idempotent for one key, the cap holds, a private key member is refused;
- *  - every later request needs a fresh ES256 proof by the registered key over the exact body: no proof, another key,
- *    another body, a stale time and a replayed id are each refused;
+ *  - the device is a `browser_extension` workload identity: its key is bound through S6, every later request takes
+ *    its S7 DPoP-bound self token (a bearer, another identity's token and a replayed DPoP proof are refused), and that
+ *    token reaches only the three extension routes;
  *  - the policy is per user and fail closed (unknown person, no rule) and verifies under the managed config's key;
  *  - breach events are stored once, tied to the user, a pseudonym and a keyed conversation ref, with no path, account
  *    name or prompt text anywhere in storage, and are append-only;
  *  - prompt capture is refused until enabled; a captured prompt is enveloped and read only with its own step-up;
  *  - a revoked device is refused from then on.
  */
-import { generateKeyPairSync, randomUUID, webcrypto } from "node:crypto";
+import { createPublicKey, generateKeyPairSync, randomUUID, verify } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { CompactSign, compactVerify, exportJWK, importJWK } from "jose";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   auditLog,
@@ -35,18 +35,21 @@ import {
   sql,
   type Db,
 } from "@regulait/db";
-import { BROWSER_EXTENSION_PATHS, BROWSER_PROOF_TYP, browserPolicySchema } from "@regulait/shared";
+import { BROWSER_EXTENSION_PATHS, browserPolicySchema } from "@regulait/shared";
 import { buildApp } from "./app.js";
-import { browserBodyDigest } from "./browser-governance.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { grantStepUpForTest, sessionRequest, stepUpRequest } from "./testing/step-up-grant.js";
 import type { StepUpCheckArgs } from "./step-up.js";
+import { endpointAgentKeys } from "./testing/endpoint-agent-client.js";
+import { useTestIssuerKey } from "./testing/workload-client.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
 const migrationsFolder = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations");
 
 const BOOT = "adr0334-bootstrap-token";
+const ORIGIN = "https://gateway.adr0334.example";
+const DATA_KEY = "d".repeat(64);
 const AUTH = { authorization: `Bearer ${BOOT}` };
 const RUN = Date.now();
 const ADMIN_EMAIL = `adr0334-admin-${RUN}@example.com`;
@@ -63,12 +66,10 @@ const restores: Array<() => Promise<void> | void> = [];
 const steppedUp = async (kind: StepUpCheckArgs["kind"], facts: Record<string, unknown>) => stepUpRequest(await grantStepUpForTest(db, adminId, { kind, facts } as StepUpCheckArgs));
 const plainSession = async () => sessionRequest(await grantStepUpForTest(db, adminId, { kind: "settings_relax", facts: { unrelated: true } }));
 
-async function newDevice() {
-  const pair = (await webcrypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"])) as webcrypto.CryptoKeyPair;
-  const j = await exportJWK(pair.publicKey);
-  return { pair, jwk: { kty: "EC", crv: "P-256", x: j.x!, y: j.y! }, id: "" };
-}
-type Device = Awaited<ReturnType<typeof newDevice>>;
+// the endpoint agent's test client, pointed at the browser extension's self-token resource (one device key each)
+const DeviceKey = endpointAgentKeys(() => app, DATA_KEY, ORIGIN, "/v1/browser-extension");
+type Device = InstanceType<typeof DeviceKey> & { id: string };
+const newDevice = async (): Promise<Device> => Object.assign(await DeviceKey.make(), { id: "" });
 
 const register = (dev: Device, token = managed.enrolmentToken, extra: Record<string, unknown> = {}) =>
   app.inject({
@@ -78,19 +79,8 @@ const register = (dev: Device, token = managed.enrolmentToken, extra: Record<str
     payload: JSON.stringify({ publicJwk: { ...dev.jwk, ...extra }, os: "linux", browserMajor: 140, extensionVersion: "0.1.0" }),
   });
 
-async function proofFor(dev: Device, htu: string, body: string, over: Record<string, unknown> = {}) {
-  const claims = { htm: "POST", htu, iat: Math.floor(Date.now() / 1000), jti: randomUUID(), bd: browserBodyDigest(Buffer.from(body)), ...over };
-  return new CompactSign(new TextEncoder().encode(JSON.stringify(claims))).setProtectedHeader({ alg: "ES256", typ: BROWSER_PROOF_TYP }).sign(dev.pair.privateKey);
-}
-
-async function signed(dev: Device, htu: string, payload: unknown, opts: { proof?: string; deviceId?: string } = {}) {
-  const body = JSON.stringify(payload);
-  return app.inject({
-    method: "POST",
-    url: htu,
-    headers: { "content-type": "application/json", "regulait-browser-device": opts.deviceId ?? dev.id, "regulait-browser-proof": opts.proof ?? (await proofFor(dev, htu, body)) },
-    payload: body,
-  });
+async function signed(dev: Device, p: string, payload: unknown, headers?: Record<string, string>) {
+  return app.inject({ method: "POST", url: p, headers: { ...(headers ?? (await dev.headers("POST", p))), "content-type": "application/json" }, payload: JSON.stringify(payload) });
 }
 
 /** the database's refusal message (drizzle wraps it in `cause`), or "" when the statement was not refused */
@@ -104,15 +94,18 @@ async function refusal(q: PromiseLike<unknown>): Promise<string> {
   }
 }
 
-async function verifiedPolicy(jws: string) {
-  const { payload } = await compactVerify(jws, await importJWK({ kty: "OKP", crv: "Ed25519", x: managed.policyKeys[0]!.x }, "EdDSA"));
-  return browserPolicySchema.parse(JSON.parse(new TextDecoder().decode(payload)));
+async function verifiedPolicy(env: { keyId: string; payload: string; signature: string }) {
+  const key = managed.policyKeys.find((k) => k.keyId === env.keyId)!;
+  const payload = Buffer.from(env.payload, "base64");
+  expect(verify(null, payload, createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: key.x }, format: "jwk" }), Buffer.from(env.signature, "base64"))).toBe(true);
+  return browserPolicySchema.parse(JSON.parse(payload.toString("utf8")));
 }
 
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   restores.push(await relaxIdentityForTest(db, { mfaRequired: "off" }));
+  restores.push(await useTestIssuerKey(db));
   const saved = await db.select().from(discoveryPseudonymKeys);
   await db.delete(discoveryPseudonymKeys);
   restores.push(async () => {
@@ -138,8 +131,8 @@ beforeAll(async () => {
   writeFileSync(pem, generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "pem" }));
   process.env.REGULAIT_BROWSER_POLICY_SIGNING_KEY = pem;
   process.env.REGULAIT_BROWSER_POLICY_SIGNING_KEY_ID = `adr0334-${RUN}`;
-  process.env.REGULAIT_PUBLIC_URL = "https://gateway.adr0334.example";
-  app = buildApp(db, { bootstrapToken: BOOT, dataKey: "d".repeat(64) });
+  process.env.REGULAIT_PUBLIC_URL = ORIGIN;
+  app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   const created = await app.inject({ method: "POST", url: "/v1/users", headers: AUTH, payload: { email: ADMIN_EMAIL, displayName: "browser admin", isAdmin: true } });
   expect(created.statusCode, created.body).toBe(201);
   adminId = created.json().id;
@@ -165,8 +158,9 @@ describe("ADR-0334 off by default", () => {
     const reg = await register(dev, `rgbe_${"a".repeat(64)}`);
     expect(reg.statusCode).toBe(403);
     expect(reg.json()).toEqual({ error: "browser_governance_disabled" });
-    const pol = await signed(dev, BROWSER_EXTENSION_PATHS.policy, { profileEmail: "" }, { deviceId: randomUUID() });
-    expect(pol.json()).toEqual({ error: "browser_governance_disabled" });
+    // no device can exist yet, so the self-token routes refuse at the authentication layer
+    const pol = await signed(dev, BROWSER_EXTENSION_PATHS.policy, { profileEmail: "" }, {});
+    expect(pol.statusCode).toBe(401);
     const issue = await app.inject({ method: "POST", url: "/v1/browser-governance/enrolment-tokens", headers: KEY, payload: { label: "x", deviceCap: 1 } });
     expect(issue.statusCode).toBe(409);
   });
@@ -192,7 +186,7 @@ describe("ADR-0334 enrolment and proofs", () => {
     managed = res.json().managedConfig;
     tokenId = res.json().token.tokenId;
     expect(managed.enrolmentToken).toMatch(/^rgbe_[0-9a-f]{64}$/);
-    expect(managed.gatewayUrl).toBe("https://gateway.adr0334.example");
+    expect(managed.gatewayUrl).toBe(ORIGIN);
     expect(managed.policyKeys).toEqual([{ keyId: `adr0334-${RUN}`, x: expect.any(String) }]);
     const list = await app.inject({ method: "GET", url: "/v1/browser-governance/enrolment-tokens", headers: KEY });
     expect(list.body).not.toContain(managed.enrolmentToken);
@@ -205,6 +199,9 @@ describe("ADR-0334 enrolment and proofs", () => {
     const first = await register(dev.a);
     expect(first.statusCode, first.body).toBe(201);
     dev.a.id = first.json().deviceId;
+    expect(first.json().clientId).toBe(dev.a.clientId);
+    const [identity] = await db.execute(sql`select kind, status from workload_identities where id = ${first.json().identityId}`).then((r) => r.rows);
+    expect(identity).toEqual({ kind: "browser_extension", status: "active" });
     const again = await register(dev.a);
     expect(again.statusCode).toBe(200);
     expect(again.json().deviceId).toBe(dev.a.id);
@@ -216,21 +213,23 @@ describe("ADR-0334 enrolment and proofs", () => {
     expect((await register(dev.b, `rgbe_${"0".repeat(64)}`)).statusCode).toBe(401);
   });
 
-  it("refuses a missing, foreign, stale, replayed or body-mismatched proof", async () => {
+  it("takes only the device's DPoP-bound self token, refuses a replayed proof, and reaches nothing else", async () => {
     const a = dev.a!;
     const body = { profileEmail: "" };
-    const text = JSON.stringify(body);
-    const noProof = await app.inject({ method: "POST", url: BROWSER_EXTENSION_PATHS.policy, headers: { "content-type": "application/json", "regulait-browser-device": a.id }, payload: text });
-    expect(noProof.json()).toEqual({ error: "invalid_proof" });
-    const foreign = await newDevice();
-    expect((await signed(a, BROWSER_EXTENSION_PATHS.policy, body, { proof: await proofFor(foreign, BROWSER_EXTENSION_PATHS.policy, text) })).json()).toEqual({ error: "invalid_proof" });
-    expect((await signed(a, BROWSER_EXTENSION_PATHS.policy, body, { proof: await proofFor(a, BROWSER_EXTENSION_PATHS.policy, text, { iat: Math.floor(Date.now() / 1000) - 600 }) })).json()).toEqual({ error: "proof_stale" });
-    expect((await signed(a, BROWSER_EXTENSION_PATHS.policy, body, { proof: await proofFor(a, BROWSER_EXTENSION_PATHS.policy, "{}") })).json()).toEqual({ error: "body_digest_mismatch" });
-    expect((await signed(a, BROWSER_EXTENSION_PATHS.policy, body, { proof: await proofFor(a, BROWSER_EXTENSION_PATHS.events, text) })).json()).toEqual({ error: "invalid_proof" });
-    const once = await proofFor(a, BROWSER_EXTENSION_PATHS.policy, text);
-    expect((await signed(a, BROWSER_EXTENSION_PATHS.policy, body, { proof: once })).statusCode).toBe(200);
-    expect((await signed(a, BROWSER_EXTENSION_PATHS.policy, body, { proof: once })).json()).toEqual({ error: "proof_replayed" });
-    expect((await signed(a, BROWSER_EXTENSION_PATHS.policy, body, { deviceId: randomUUID() })).json()).toEqual({ error: "unknown_device" });
+    const p = BROWSER_EXTENSION_PATHS.policy;
+    const token = await a.token();
+    expect((await signed(a, p, body, { authorization: `Bearer ${token}` })).statusCode).toBe(401);
+    const h = await a.headers("POST", p);
+    expect((await signed(a, p, body, h)).statusCode).toBe(200);
+    // the same DPoP proof again is a replay
+    expect((await signed(a, p, body, h)).statusCode).toBe(401);
+    // a key that registered nothing gets no token
+    const stranger = await newDevice();
+    expect((await stranger.tokenRequest()).statusCode).not.toBe(200);
+    // the route ceiling: an admin route with the device's token
+    const admin = await app.inject({ method: "GET", url: "/v1/browser-governance", headers: await a.headers("GET", "/v1/browser-governance") });
+    expect(admin.statusCode).toBe(403);
+    expect(admin.json().error).toBe("workload_scope");
   });
 
   it("answers a signed, per-user, fail-closed policy", async () => {
@@ -300,9 +299,19 @@ describe("ADR-0334 enrolment and proofs", () => {
 
   it("a revoked device is refused from then on", async () => {
     const a = dev.a!;
+    a.reset();
+    const before = await a.headers("POST", BROWSER_EXTENSION_PATHS.policy);
     const rev = await app.inject({ method: "POST", url: `/v1/browser-governance/devices/${a.id}/revoke`, headers: KEY });
     expect(rev.statusCode, rev.body).toBe(200);
-    expect((await signed(a, BROWSER_EXTENSION_PATHS.policy, { profileEmail: "" })).json()).toEqual({ error: "device_revoked" });
+    // a token minted before the revocation reads as a revoked device, which the extension treats as final
+    const used = await signed(a, BROWSER_EXTENSION_PATHS.policy, { profileEmail: "" }, before);
+    expect(used.statusCode).toBe(401);
+    expect(used.json().error).toBe("device_revoked");
+    // and no new token is minted for it
+    a.reset();
+    const t = await a.tokenRequest();
+    expect(t.statusCode).toBe(401);
+    expect(t.json().error).toBe("invalid_client");
     expect((await register(a)).json()).toEqual({ error: "device_revoked" });
     const tok = await app.inject({ method: "POST", url: `/v1/browser-governance/enrolment-tokens/${tokenId}/revoke`, headers: KEY });
     expect(tok.statusCode).toBe(200);

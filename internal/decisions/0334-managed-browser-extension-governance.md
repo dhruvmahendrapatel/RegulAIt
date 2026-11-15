@@ -71,9 +71,11 @@ The manifest is generated from the governed site catalogue at build time and pin
   install, the sites stay blocked.
 - **It is switched off only after a verified policy's own rules are in place**, and switched back on *before* those
   rules are removed, so there is no window in which nothing blocks.
-- **A policy is used only when all of these hold:** a compact JWS (`alg` EdDSA, `typ` regulait-browser-policy+jws), a
-  `kid` naming a key pinned in managed storage, a valid Ed25519 signature, a body the shared schema accepts (unknown
-  members refused), this device's id, not issued more than five minutes in the future, and not past `notAfter`. A
+- **A policy is used only when all of these hold:** it arrives in the endpoint agent's signed-policy envelope
+  (ADR-0298: `{keyId, payload, signature}`, Ed25519 over the exact payload bytes, the same key id shape), the `keyId`
+  names a key pinned in managed storage, the signature verifies (WebCrypto), the payload is a browser policy the shared
+  schema accepts (unknown members refused), for this device's id, not issued more than five minutes in the future,
+  and not past `notAfter`. A
   policy lives four hours and is refreshed every 30 minutes. An expired policy is no policy: there is no last-known-good.
 - **The content script is a second layer:** on a governed page it asks the worker for the verdict and, if the page is
   blocked (a single-page app navigation, a rule update race), replaces the page with the block page. If the worker
@@ -99,18 +101,22 @@ The policy carries every catalogue site with its decision, the account domains, 
 account domains is blocked (`account_not_allowed`, `account_signed_out`) unless the profile's email is in one of them.
 A sign-in change triggers a refetch.
 
-The policy is signed by **the browser policy key**, a key of its own (one key per purpose, as ADR-0195 decided for the
-endpoint agent): operator-managed (`REGULAIT_BROWSER_POLICY_SIGNING_KEY` and `_KEY_ID`) or install-generated in the
-install secrets directory on first enable, read through the strict install-key reader. No key means no policy, so
+The policy is signed into the endpoint agent's envelope (one envelope for both on-device enforcement points, so the
+gateway has one signer shape) by **the browser policy key**, a key of its own (one key per purpose, as ADR-0195 decided
+for the endpoint agent): operator-managed (`REGULAIT_BROWSER_POLICY_SIGNING_KEY` and `_KEY_ID`) or install-generated
+in the install secrets directory on first enable, through the shared install-key generator and its strict reader.
+Whether the endpoint agent's enforcement policy is later signed by this key or by the ADR-0195 SD4 key is the endpoint
+lane's decision; the envelope already fits both. No key means no policy, so
 turning governance on fails with `policy_signer_unavailable` rather than leaving extensions closed for good.
 
 No model is called anywhere on this path. Every permission and governance decision is a data check.
 
 ### 5. DLP before the prompt leaves the browser
 
-- **Rules:** only the shared `dlp.secret.*` credential rules (packages/shared `CREDENTIAL_MATERIAL_RULES`), compiled
-  into the extension in their **RE2** form (`re2js`, linear time) exactly as the endpoint agent compiles them in Go,
-  lookarounds rewritten the same way. The policy names which rule ids are on; it never carries a pattern (no regex is
+- **Rules:** only the shared `dlp.secret.*` credential rules (packages/shared `CREDENTIAL_MATERIAL_RULES`), in their
+  **RE2** form (`re2js`, linear time) exactly as the endpoint agent compiles them in Go, lookarounds rewritten the
+  same way. The RE2 table lives in `packages/shared/src/dlp-secret-re2.ts` (subpath `@regulait/shared/dlp-secret-re2`)
+  so any TypeScript consumer reuses it; the extension bundles it. The policy names which rule ids are on; it never carries a pattern (no regex is
   taken from data). A test holds the table equal to the shared rules (ids and source digests) and runs the endpoint
   agent's vectors through it.
 - **When:** at send time, in the capture phase before the page's own handlers: Enter (not Shift+Enter) or Ctrl/Cmd+Enter
@@ -143,21 +149,30 @@ recorded even when the page never loads.
   attribution as an event, and **read only one at a time with a `pseudonym_reveal` step-up bound to that capture**,
   audited.
 
-### 8. Every message is authenticated per device and replay-protected
+### 8. Every message is authenticated per device and replay-protected: the endpoint agent's identity path
 
-- **Registration** (`POST /v1/browser-extension/register`) takes the bulk enrolment token (`rgbe_` + 64 hex, compared by
-  SHA-256, capped by a required device cap, at most 30 days, revocable) and the extension's P-256 public key (public
-  members only). One key is one device, idempotently; the cap holds under a row lock.
+The extension does not get a device scheme of its own. It is a **workload identity of the new kind
+`browser_extension`**, through exactly the path the endpoint agent uses (ADR-0195 SD4b):
+
+- **Registration** (`POST /v1/browser-extension/register`, the only auth-exempt route) takes the bulk enrolment token
+  (`rgbe_` + 64 hex, compared by SHA-256, capped by a required device cap, at most 30 days, revocable) and the
+  extension's P-256 public key. The key is prepared and bound by S6 (`prepareRunnerKey`, `bindPreparedCredentialTx`:
+  one key, one identity, ever) to a new `browser_extension` identity with no grants; the device row names that
+  identity. The same key again is idempotent; the cap holds under a row lock.
 - **The device key** is created by WebCrypto with `extractable: false` and kept as a CryptoKey in IndexedDB: its bytes
   never exist in JavaScript and page script cannot reach the extension's storage. Nothing secret is kept in
-  `chrome.storage` (only the device id, which proves nothing).
-- **Every other request** carries `Regulait-Browser-Device` and `Regulait-Browser-Proof`: a compact JWS (ES256, `typ`
-  regulait-browser-proof+jwt, no embedded key) by the device key over `htm`, `htu` (the exact path), `iat`, a one-use
-  `jti` and `bd` (the SHA-256 of the exact body). The gateway refuses another key, path or body, an `iat` more than five
-  minutes old or one minute ahead of the database clock, and a `jti` seen before (the replay store). Every refusal is
-  a fixed code, audited with ids and the code only.
-- A revoked device is refused from then on, and blocks every site (no policy).
-- Bodies are raw (the digest covers the bytes) and at most 64 KiB.
+  `chrome.storage` (only the device id and client id, which prove nothing).
+- **Every other request** carries an **S7 self token**: `client_credentials` with a `private_key_jwt` assertion by the
+  device key, DPoP-bound to that key (RFC 9449), for the `/v1/browser-extension` resource, and a fresh DPoP proof per
+  request with the gateway's nonce. The shared OAuth layer verifies the token, the proof's one-use `jti` (the replay
+  store), the binding, the identity and the device on every request, before a handler runs; the route ceiling keeps
+  the token to the policy, events and prompt-capture routes (`403 workload_scope` elsewhere).
+- **Body integrity** rests on TLS, as for every DPoP-bound call; the request body is not separately signed. (The
+  endpoint agent adds a report signature on its reports; generalising that into a shared signed-body check is
+  recorded as a follow-up rather than built twice.)
+- A revoked device is refused at the token endpoint and on every route (`device_revoked`, which the extension treats
+  as final), and blocks every site (no policy). Its identity can also be revoked through the S6 identity routes.
+- Bodies are at most 64 KiB.
 
 ### 9. The product UI
 
@@ -168,16 +183,23 @@ builder: the eleven admin routes are `KNOWN_UI_GAPS` entries pointing at #453.
 
 ### 10. Open-source search (ADR-0176, 2026-11-15)
 
-- **Used:** `jose` 6.2.14 (MIT, already pinned) for both JWS formats in the extension and the gateway; `re2js` 2.8.8
-  (MIT, already pinned) for the RE2 DLP table; `zod` (already pinned) for the shared contract; `esbuild` 0.28.2 (MIT,
-  already in the lockfile) to bundle; `@types/chrome` 0.3.7 (MIT) for types. All pinned, all air-gapped at run time.
+- **Repo first (reused, not rebuilt):** the endpoint agent's device identity (S6 key binding, S7 DPoP-bound self
+  tokens, the replay store, revocation, the route ceiling); its signed-policy envelope (ADR-0298); the shared
+  `dlp.secret.*` rules and the endpoint agent's RE2 rewrites and test vectors; SD0's pseudonyms (`pseudonymise`, the
+  pseudonym key); the kernel's `executionGate`; the step-up and audit paths; the install-key generator and reader;
+  the data-key envelope (`encryptSecret`); the endpoint agent's test client (given a resource parameter).
+- **Used (open source):** `jose` 6.2.14 (MIT, already pinned) for the client assertion and DPoP proofs; WebCrypto for
+  Ed25519 verification; `re2js` 2.8.8 (MIT, already pinned) for the RE2 table; `zod` (already pinned) for the shared
+  contract; `esbuild` 0.28.2 (MIT, already in the lockfile) to bundle; `@types/chrome` 0.3.7 (MIT) for types. All
+  pinned, all air-gapped at run time.
 - **webextension-polyfill:** rejected. It is MPL-2.0 (not on our licence list) and not needed: MV3 Chromium APIs return
   promises natively.
 - **WXT and @crxjs/vite-plugin (MIT):** extension build frameworks. Not used: they generate the manifest themselves,
   and ours must be generated from the catalogue and pinned by a test; esbuild bundling three entry points is enough.
 - **@noble/curves (MIT):** not needed; WebCrypto signs and verifies Ed25519 and P-256 through `jose`.
 - **Written here, because it is RegulAIt:** the manifest and rule generation, the policy semantics and the evidence
-  format. The RE2 table is a copy of the endpoint agent's patterns, held equal by test, not a new list.
+  format. The RE2 table mirrors the endpoint agent's Go table, held equal to it and to the shared rules by test; it is
+  in `packages/shared` so it is written once for TypeScript.
 
 ### 11. Threat model, honestly
 

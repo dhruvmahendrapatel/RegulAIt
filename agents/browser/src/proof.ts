@@ -7,11 +7,10 @@
  * there identifies the key, it does not prove anything. Hardware-binding the key (the endpoint agent's TPM or Secure
  * Enclave key, through native messaging) is a recorded follow-up.
  *
- * Every request after registration carries a compact JWS (ES256) over the method, the path, the SHA-256 of the exact
- * body, the time and a fresh one-use id. The gateway refuses a replayed id, a stale time and another body.
+ * The key is the device's workload identity on the gateway (the endpoint agent's pattern): it authenticates the
+ * client at the token endpoint and signs every DPoP proof (src/oauth.ts).
  */
-import { base64url, CompactSign, exportJWK } from "jose";
-import { BROWSER_PROOF_TYP } from "@regulait/shared/browser-governance/constants";
+import { exportJWK } from "jose";
 import type { BrowserPublicJwk } from "@regulait/shared/browser-governance";
 
 export async function generateDeviceKey(): Promise<CryptoKeyPair> {
@@ -22,16 +21,6 @@ export async function publicJwkOf(pair: CryptoKeyPair): Promise<BrowserPublicJwk
   const jwk = await exportJWK(pair.publicKey);
   if (jwk.kty !== "EC" || jwk.crv !== "P-256" || !jwk.x || !jwk.y) throw new Error("not a P-256 public key");
   return { kty: "EC", crv: "P-256", x: jwk.x, y: jwk.y };
-}
-
-export async function bodyDigest(body: string): Promise<string> {
-  return base64url.encode(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body))));
-}
-
-/** the proof for one POST of `body` to `path`; `nowSeconds` is the local clock (the gateway allows a small skew) */
-export async function makeProof(privateKey: CryptoKey, path: string, body: string, nowSeconds: number = Math.floor(Date.now() / 1000)): Promise<string> {
-  const claims = { htm: "POST", htu: path, iat: nowSeconds, jti: crypto.randomUUID(), bd: await bodyDigest(body) };
-  return new CompactSign(new TextEncoder().encode(JSON.stringify(claims))).setProtectedHeader({ alg: "ES256", typ: BROWSER_PROOF_TYP }).sign(privateKey);
 }
 
 // ---- IndexedDB: one store, one record ------------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 /**
- * ADR-0334: the extension's RE2 credential table against the one shared list.
+ * ADR-0334: the shared RE2 credential table against the one shared list.
  *  1. its ids equal the shared `dlp.secret.*` CREDENTIAL_MATERIAL_RULES, in order;
  *  2. the shared rules' source digests equal the endpoint agent's recorded digests (agents/endpoint/internal/secrets/
  *     testdata/rules.json): when a shared rule changes, that file is regenerated only after the RE2 tables (Go and
@@ -11,10 +11,10 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { CREDENTIAL_MATERIAL_RULES } from "@regulait/shared";
-import { dlpRuleIds, matchDlp } from "../src/dlp.js";
+import { CREDENTIAL_MATERIAL_RULES } from "./guardrails.js";
+import { dlpRuleIds, matchDlp } from "./dlp-secret-re2.js";
 
-const testdata = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../endpoint/internal/secrets/testdata");
+const testdata = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../agents/endpoint/internal/secrets/testdata");
 const shared = CREDENTIAL_MATERIAL_RULES.filter((r) => r.id.startsWith("dlp.secret."));
 
 interface Vector { name: string; parts: { lit?: string; rep?: string; n?: number }[]; expect: string[] }

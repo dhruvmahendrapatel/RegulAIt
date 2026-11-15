@@ -257,6 +257,10 @@ async function authenticateSelfRequest(
       ctx: { userId: null, isAdmin: false, via: "engine-runner", engineRunnerId: runner!.id, engineId: runner!.engineId, workloadIdentityId: identity.id, workloadCredentialId: authCredentialId },
     };
   }
+  // ADR-0334: a managed browser extension's self token reaches its policy, events and prompt-capture routes only
+  if (kind === "browser_extension") {
+    return { kind: "ok", ctx: { userId: null, isAdmin: false, via: "browser-extension", workloadIdentityId: identity.id, workloadCredentialId: authCredentialId } };
+  }
   if (kind === "endpoint_agent") {
     return { kind: "ok", ctx: { userId: null, isAdmin: false, via: "endpoint-agent", workloadIdentityId: identity.id, workloadCredentialId: authCredentialId } };
   }

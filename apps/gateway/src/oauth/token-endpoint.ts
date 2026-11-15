@@ -115,6 +115,7 @@ import { presentedClientCertificate } from "./x509.js";
 import { lockSpiffeBundleUnrevoked } from "./spiffe-trust-domains.js";
 import { mintWorkloadSelfToken, selfKindForResource } from "./workload-self.js";
 import { endpointAgentContext } from "../endpoint-agent.js";
+import { browserDeviceLive } from "../browser-device.js";
 
 /** the form parameters the exchange grant reads (everything else is stripped by the provider) */
 export const EXCHANGE_PARAMS = [
@@ -411,6 +412,10 @@ async function selfPreflight(ctx: KoaContextLike, s: RequestState): Promise<Pref
   }
   // ADR-0195 SD4b: an endpoint agent's device must exist and not be revoked
   if (kind === "endpoint_agent" && !(await endpointAgentContext(s.db, client.identity.id)).ok) {
+    throw refuse(new InvalidClientAuth("this device was revoked"), "device_revoked");
+  }
+  // ADR-0334: likewise a browser extension's device
+  if (kind === "browser_extension" && !(await browserDeviceLive(s.db, client.identity.id))) {
     throw refuse(new InvalidClientAuth("this device was revoked"), "device_revoked");
   }
   const dpop = await requestDpop(ctx, s);

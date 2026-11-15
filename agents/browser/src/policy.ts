@@ -1,18 +1,18 @@
 /**
  * ADR-0334: verifying the signed policy and turning it into blocking rules. Pure (the clock and keys are inputs).
  *
- * A policy is used only when ALL hold: a compact JWS, `alg` EdDSA, `typ` regulait-browser-policy+jws, a `kid` naming
- * one of the keys the customer's browser management pinned, a valid Ed25519 signature, a body the shared schema
+ * A policy is used only when ALL hold: the endpoint agent's envelope (ADR-0298) with a `keyId` naming one of the keys
+ * the customer's browser management pinned, a valid Ed25519 signature over the payload bytes, a body the shared schema
  * accepts, this device's id, not issued in the future beyond the skew, and not past `notAfter`. Anything else is no
  * policy, and no policy blocks every governed site. There is no last-known-good: an expired policy is no policy.
  */
-import { compactVerify, decodeProtectedHeader, importJWK } from "jose";
+import { base64url } from "jose";
 import {
   BROWSER_POLICY_MAX_FUTURE_SKEW_SECONDS,
-  BROWSER_POLICY_TYP,
   BROWSER_SITE_CATALOGUE,
   browserManagedConfigSchema,
   browserPolicySchema,
+  devicePolicyEnvelopeSchema,
   siteVerdict,
   type BrowserCatalogueSite,
   type BrowserManagedConfig,
@@ -28,35 +28,48 @@ export function parseManagedConfig(raw: unknown): BrowserManagedConfig | null {
   return r.success ? r.data : null;
 }
 
+function b64ToBytes(b64: string, url = false): Uint8Array<ArrayBuffer> | null {
+  try {
+    if (url) return new Uint8Array(base64url.decode(b64));
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Verify the endpoint agent's signed-policy envelope (ADR-0298): a strict `{keyId, payload, signature}`, a key id
+ * pinned in managed storage, and an Ed25519 signature (WebCrypto) over exactly the payload bytes. Then the payload must
+ * be a browser policy the shared schema accepts, for this device, current by `nowSeconds`.
+ */
 export async function verifyPolicy(
-  jws: string,
+  envelope: unknown,
   config: Pick<BrowserManagedConfig, "policyKeys">,
   deviceId: string,
   nowSeconds: number,
 ): Promise<{ ok: true; policy: BrowserPolicy } | { ok: false; code: PolicyRefusal }> {
-  if (typeof jws !== "string" || jws.length > 65_536) return { ok: false, code: "malformed" };
-  let kid: string;
-  try {
-    const h = decodeProtectedHeader(jws);
-    if (h.alg !== "EdDSA" || h.typ !== BROWSER_POLICY_TYP || typeof h.kid !== "string" || h.jwk || h.jku || h.x5c || h.x5u || h.crit) {
-      return { ok: false, code: "malformed" };
-    }
-    kid = h.kid;
-  } catch {
-    return { ok: false, code: "malformed" };
-  }
-  const pinned = config.policyKeys.find((k) => k.keyId === kid);
+  const env = devicePolicyEnvelopeSchema.safeParse(envelope);
+  if (!env.success) return { ok: false, code: "malformed" };
+  const pinned = config.policyKeys.find((k) => k.keyId === env.data.keyId);
   if (!pinned) return { ok: false, code: "unknown_key" };
-  let payload: Uint8Array;
+  const payload = b64ToBytes(env.data.payload);
+  const signature = b64ToBytes(env.data.signature);
+  const raw = b64ToBytes(pinned.x, true);
+  if (!payload || !signature || !raw || raw.length !== 32 || signature.length !== 64) return { ok: false, code: "malformed" };
+  let valid = false;
   try {
-    const key = await importJWK({ kty: "OKP", crv: "Ed25519", x: pinned.x }, "EdDSA");
-    ({ payload } = await compactVerify(jws, key, { algorithms: ["EdDSA"] }));
+    const key = await crypto.subtle.importKey("raw", raw, { name: "Ed25519" }, false, ["verify"]);
+    valid = await crypto.subtle.verify({ name: "Ed25519" }, key, signature, payload);
   } catch {
-    return { ok: false, code: "bad_signature" };
+    valid = false;
   }
+  if (!valid) return { ok: false, code: "bad_signature" };
   let parsed: ReturnType<typeof browserPolicySchema.safeParse>;
   try {
-    parsed = browserPolicySchema.safeParse(JSON.parse(new TextDecoder().decode(payload)));
+    parsed = browserPolicySchema.safeParse(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(payload)));
   } catch {
     return { ok: false, code: "bad_body" };
   }

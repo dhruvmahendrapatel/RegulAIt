@@ -1,7 +1,6 @@
-import { generateKeyPairSync } from "node:crypto";
-import { CompactSign } from "jose";
+import { generateKeyPairSync, sign as edSign } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { BROWSER_DLP_RULE_IDS, BROWSER_POLICY_SCHEMA, BROWSER_POLICY_TYP, type BrowserPolicy } from "@regulait/shared/browser-governance";
+import { BROWSER_DLP_RULE_IDS, BROWSER_POLICY_SCHEMA, type BrowserPolicy } from "@regulait/shared/browser-governance";
 import { DYNAMIC_RULE_ID_BASE } from "../src/manifest.js";
 import { dynamicRulesFor, parseManagedConfig, verifyPolicy } from "../src/policy.js";
 
@@ -10,7 +9,7 @@ const deviceId = "7d0f6a4e-1c2b-4b6a-9e3f-2a1b3c4d5e6f";
 const kp = generateKeyPairSync("ed25519");
 const other = generateKeyPairSync("ed25519");
 const xOf = (k: typeof kp) => k.publicKey.export({ format: "jwk" }).x!;
-const config = { policyKeys: [{ keyId: "k1", x: xOf(kp) }] };
+const config = { policyKeys: [{ keyId: "gw-key-1", x: xOf(kp) }] };
 
 const policy = (over: Partial<BrowserPolicy> = {}): BrowserPolicy => ({
   schema: BROWSER_POLICY_SCHEMA,
@@ -30,10 +29,11 @@ const policy = (over: Partial<BrowserPolicy> = {}): BrowserPolicy => ({
   ...over,
 });
 
-const sign = (body: unknown, opts: { key?: typeof kp; kid?: string; typ?: string; alg?: string } = {}) =>
-  new CompactSign(new TextEncoder().encode(JSON.stringify(body)))
-    .setProtectedHeader({ alg: (opts.alg ?? "EdDSA") as "EdDSA", typ: opts.typ ?? BROWSER_POLICY_TYP, kid: opts.kid ?? "k1" })
-    .sign((opts.key ?? kp).privateKey);
+/** the endpoint agent's envelope (ADR-0298): Ed25519 over the exact payload bytes */
+const sign = async (body: unknown, opts: { key?: typeof kp; keyId?: string } = {}) => {
+  const payload = Buffer.from(JSON.stringify(body));
+  return { keyId: opts.keyId ?? "gw-key-1", payload: payload.toString("base64"), signature: edSign(null, payload, (opts.key ?? kp).privateKey).toString("base64") };
+};
 
 describe("ADR-0334 policy verification: fail closed", () => {
   it("accepts a policy signed by a pinned key for this device", async () => {
@@ -43,28 +43,28 @@ describe("ADR-0334 policy verification: fail closed", () => {
 
   it.each([
     ["another key under the pinned kid", async () => sign(policy(), { key: other }), "bad_signature"],
-    ["an unpinned kid", async () => sign(policy(), { kid: "k2" }), "unknown_key"],
-    ["another type", async () => sign(policy(), { typ: "JWT" }), "malformed"],
+    ["an unpinned key id", async () => sign(policy(), { keyId: "gw-key-2" }), "unknown_key"],
+    ["an envelope with another member", async () => ({ ...(await sign(policy())), alg: "none" }), "malformed"],
+    ["a compact JWS instead of the envelope", async () => "eyJhbGciOiJFZERTQSJ9.e30.sig", "malformed"],
     ["another device", async () => sign(policy({ deviceId: "00000000-0000-4000-8000-000000000000" })), "wrong_device"],
     ["an expired policy", async () => sign(policy({ issuedAt: now - 7200, notAfter: now })), "expired"],
     ["a policy from the future", async () => sign(policy({ issuedAt: now + 600, notAfter: now + 4000 })), "not_yet_valid"],
     ["an unknown member", async () => sign({ ...policy(), allowAll: true }), "bad_body"],
-    ["not a JWS", async () => "not.a.jws", "malformed"],
+    ["nothing", async () => undefined, "malformed"],
   ])("refuses %s", async (_name, make, code) => {
     const v = await verifyPolicy(await make(), config, deviceId, now);
     expect(v).toEqual({ ok: false, code });
   });
 
   it("refuses a tampered payload", async () => {
-    const jws = await sign(policy());
-    const [h, , s] = jws.split(".");
-    const forged = Buffer.from(JSON.stringify(policy({ sites: [{ siteId: "ep-openai-chatgpt", decision: "allow", denyReason: null, accountDomains: [] }] }))).toString("base64url");
-    expect((await verifyPolicy(`${h}.${forged}.${s}`, config, deviceId, now)).ok).toBe(false);
+    const env = await sign(policy());
+    const forged = Buffer.from(JSON.stringify(policy({ sites: [{ siteId: "ep-openai-chatgpt", decision: "allow", denyReason: null, accountDomains: [] }] }))).toString("base64");
+    expect(await verifyPolicy({ ...env, payload: forged }, config, deviceId, now)).toEqual({ ok: false, code: "bad_signature" });
   });
 
   it("parses managed config strictly", () => {
     expect(parseManagedConfig({})).toBeNull();
-    expect(parseManagedConfig({ gatewayUrl: "https://gw.example.org", enrolmentToken: `rgbe_${"0".repeat(64)}`, policyKeys: [{ keyId: "k1", x: xOf(kp) }] })).not.toBeNull();
+    expect(parseManagedConfig({ gatewayUrl: "https://gw.example.org", enrolmentToken: `rgbe_${"0".repeat(64)}`, policyKeys: [{ keyId: "gw-key-1", x: xOf(kp) }] })).not.toBeNull();
   });
 });
 

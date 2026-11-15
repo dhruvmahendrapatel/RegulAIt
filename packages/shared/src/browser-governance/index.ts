@@ -7,10 +7,12 @@
  * What travels:
  *  - registration: the extension's install-time P-256 public key, under a capped bulk enrolment token (`rgbe_`) that
  *    the customer's browser management delivers in the extension's managed storage;
- *  - every later request: a compact JWS (ES256) by that key over the method, the path, a body digest, a time and a
- *    one-use id (replay protected on the gateway), in the `Regulait-Browser-Proof` header;
- *  - the policy: a compact JWS (EdDSA) by the gateway's browser policy key, verified in the extension against key(s)
- *    pinned in managed storage, valid until `notAfter` and never after (no last-known-good);
+ *  - the key becomes a workload identity of kind `browser_extension` (the endpoint agent's pattern, ADR-0195 SD4b):
+ *    every later request carries an S7 self token, DPoP-bound to that key, with a fresh DPoP proof (one-use `jti`,
+ *    replay-protected by the gateway's DPoP verifier and nonce);
+ *  - the policy: the endpoint agent's signed-policy envelope (Ed25519, ADR-0298) under the gateway's browser policy
+ *    key, verified in the extension against key(s) pinned in managed storage, valid until `notAfter` and never after
+ *    (no last-known-good);
  *  - events: policy breaches as fixed codes and ids, never prompt text. Prompt text travels only on the separate
  *    capture route, only while an admin has turned capture on (a step-up relaxation) and the notice is shown.
  *
@@ -33,6 +35,7 @@ import {
   BROWSER_PROMPT_CAPTURE_MAX_CHARS,
   BROWSER_SITE_CATALOGUE_IDS,
   BROWSER_SITE_DECISIONS,
+  DEVICE_POLICY_KEY_ID_RE,
   BROWSER_HOST_RE,
   BROWSER_VERSION_RE,
 } from "./constants.js";
@@ -45,11 +48,25 @@ export * from "./constants.js";
 // ---------------------------------------------------------------------------
 
 const B64URL_RE = /^[A-Za-z0-9_-]+$/;
-const KEY_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+const B64STD_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+
+/**
+ * The signed policy as delivered: the endpoint agent's envelope (ADR-0298, agents/endpoint/internal/enforce
+ * `Envelope`), unchanged: the policy JSON bytes in standard base64, and an Ed25519 signature over exactly those bytes
+ * under `keyId`. The browser policy is one more payload schema in it (`schema: regulait.browser-policy/1`).
+ */
+export const devicePolicyEnvelopeSchema = z
+  .object({
+    keyId: z.string().regex(DEVICE_POLICY_KEY_ID_RE),
+    payload: z.string().min(4).max(349_528).regex(B64STD_RE),
+    signature: z.string().length(88).regex(B64STD_RE),
+  })
+  .strict();
+export type DevicePolicyEnvelope = z.infer<typeof devicePolicyEnvelopeSchema>;
 
 export const browserPolicyKeySchema = z
   .object({
-    keyId: z.string().regex(KEY_ID_RE),
+    keyId: z.string().regex(DEVICE_POLICY_KEY_ID_RE),
     /** the Ed25519 public key as a JWK `x` (base64url of the 32 raw bytes) */
     x: z.string().length(43).regex(B64URL_RE),
   })
@@ -89,22 +106,11 @@ export const browserRegisterRequestSchema = z
   .strict();
 export type BrowserRegisterRequest = z.infer<typeof browserRegisterRequestSchema>;
 
-// ---------------------------------------------------------------------------
-// Signed requests
-// ---------------------------------------------------------------------------
-
-export const browserProofClaimsSchema = z
-  .object({
-    htm: z.enum(["POST"]),
-    /** the request path, exactly one of BROWSER_EXTENSION_PATHS */
-    htu: z.string().max(128),
-    iat: z.number().int().positive(),
-    jti: z.string().uuid(),
-    /** SHA-256 of the raw request body, base64url */
-    bd: z.string().length(43).regex(B64URL_RE),
-  })
+/** the registration answer: the device and the workload identity (and OAuth client id) its key now names */
+export const browserRegisterResponseSchema = z
+  .object({ deviceId: z.string().uuid(), identityId: z.string().uuid(), clientId: z.string().max(200) })
   .strict();
-export type BrowserProofClaims = z.infer<typeof browserProofClaimsSchema>;
+export type BrowserRegisterResponse = z.infer<typeof browserRegisterResponseSchema>;
 
 /** the profile account the browser is signed in with, as the browser reports it; empty when not signed in */
 const profileEmail = z.union([z.literal(""), z.string().max(320).email()]);

@@ -84,7 +84,7 @@ describe("ADR-0334 browser governance contract", () => {
     const jwk = { kty: "EC", crv: "P-256", x: "A".repeat(43), y: "B".repeat(43) };
     expect(browserRegisterRequestSchema.safeParse({ publicJwk: jwk, os: "mac", browserMajor: 140, extensionVersion: "0.1.0" }).success).toBe(true);
     expect(browserRegisterRequestSchema.safeParse({ publicJwk: { ...jwk, d: "C".repeat(43) }, os: "mac", browserMajor: 140, extensionVersion: "0.1.0" }).success).toBe(false);
-    const cfg = { gatewayUrl: "https://gw.example.org", enrolmentToken: `rgbe_${"a".repeat(64)}`, policyKeys: [{ keyId: "k1", x: "A".repeat(43) }] };
+    const cfg = { gatewayUrl: "https://gw.example.org", enrolmentToken: `rgbe_${"a".repeat(64)}`, policyKeys: [{ keyId: "gw-key-1", x: "A".repeat(43) }] };
     expect(browserManagedConfigSchema.safeParse(cfg).success).toBe(true);
     expect(browserManagedConfigSchema.safeParse({ ...cfg, gatewayUrl: "http://gw.example.org" }).success).toBe(false);
     expect(browserManagedConfigSchema.safeParse({ ...cfg, enrolmentToken: "rgbe_short" }).success).toBe(false);
@@ -98,5 +98,16 @@ describe("ADR-0334 browser governance contract", () => {
     expect(browserEventSchema.safeParse({ ...base, kind: "site_blocked", code: "site_denied", ruleIds: ["dlp.secret.aws_key"] }).success).toBe(false);
     expect(browserEventSchema.safeParse({ ...base, kind: "site_blocked", code: "site_denied", ruleIds: [], path: "/c?q=secret" }).success).toBe(false);
     expect(browserEventSchema.safeParse({ ...base, kind: "site_blocked", code: "site_denied", ruleIds: [], text: "hello" }).success).toBe(false);
+  });
+});
+
+describe("ADR-0334 the signed-policy envelope is the endpoint agent's", () => {
+  it("is exactly {keyId, payload, signature}, standard base64, with the endpoint agent's key id shape", async () => {
+    const { devicePolicyEnvelopeSchema } = await import("./index.js");
+    const env = { keyId: "gw-key-1", payload: Buffer.from("{}").toString("base64"), signature: Buffer.alloc(64, 1).toString("base64") };
+    expect(devicePolicyEnvelopeSchema.safeParse(env).success).toBe(true);
+    expect(devicePolicyEnvelopeSchema.safeParse({ ...env, alg: "none" }).success).toBe(false);
+    expect(devicePolicyEnvelopeSchema.safeParse({ ...env, keyId: "Key_1" }).success).toBe(false);
+    expect(devicePolicyEnvelopeSchema.safeParse({ ...env, signature: Buffer.alloc(64, 1).toString("base64url") + "x" }).success).toBe(false);
   });
 });

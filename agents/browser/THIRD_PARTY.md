@@ -8,8 +8,8 @@ through `pnpm-lock.yaml`; works air-gapped (the built extension fetches nothing 
 
 | Package | Version | Licence | Used for, and why |
 |---|---|---|---|
-| `jose` | `6.2.14` (2026-10-29) | MIT | The device's ES256 request proofs and verifying the EdDSA-signed policy, over WebCrypto (`src/proof.ts`, `src/policy.ts`). Already pinned by the gateway |
-| `re2js` | `2.8.8` (2026-10-17) | MIT | The RE2 (linear-time) DLP table of the shared `dlp.secret.*` rules (`src/dlp.ts`). Already pinned by `@regulait/shared` |
+| `jose` | `6.2.14` (2026-10-29) | MIT | The S7 `private_key_jwt` client assertion and DPoP proofs by the device key (`src/oauth.ts`), and base64url. Already pinned by the gateway. Policy signatures are verified with WebCrypto Ed25519 directly |
+| `re2js` | `2.8.8` (2026-10-17) | MIT | Through `@regulait/shared/dlp-secret-re2`: the RE2 (linear-time) table of the shared `dlp.secret.*` rules. Pinned by `@regulait/shared` |
 | `zod` | `4.6.7` (2026-10-12) | MIT | Through `@regulait/shared/browser-governance`: parsing managed config and the policy in the worker. The content script and block page import the zod-free `constants` subpath |
 
 ## Build only (not shipped)
@@ -26,6 +26,6 @@ through `pnpm-lock.yaml`; works air-gapped (the built extension fetches nothing 
 |---|---|---|
 | `webextension-polyfill` 0.12.0 | MPL-2.0 | Not on the licence list, and not needed: MV3 Chromium APIs return promises |
 | `wxt` 0.21.5, `@crxjs/vite-plugin` 3.0.0 | MIT | Frameworks that generate the manifest themselves; ours is generated from the site catalogue and pinned by a test |
-| `@noble/curves` 2.4.0 | MIT | Not needed: WebCrypto does Ed25519 and P-256 through `jose` |
+| `@noble/curves` 2.4.0 | MIT | Not needed: WebCrypto does Ed25519 and P-256 |
 
 The block page and notices use `apps/web/src/theme/tokens.css` (our own design tokens), copied at build time.

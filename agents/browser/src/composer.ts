@@ -3,7 +3,7 @@
  * page. Deterministic: the shared credential rules only (no model, no remote call before the decision).
  */
 import type { BrowserDlpRuleId } from "@regulait/shared/browser-governance/constants";
-import { matchDlp } from "./dlp.js";
+import { matchDlp } from "@regulait/shared/dlp-secret-re2";
 import type { VerdictReply } from "./messages.js";
 
 export type SendDecision =

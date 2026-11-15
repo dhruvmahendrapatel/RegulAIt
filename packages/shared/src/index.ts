@@ -5053,3 +5053,4 @@ export * from "./fairness.js";
 export * from "./third-party-ingest/index.js";
 // ADR-0334 (lane E16): the managed browser extension's contract (also the `@regulait/shared/browser-governance` subpath)
 export * from "./browser-governance/index.js";
+export { dlpRuleIds, matchDlp } from "./dlp-secret-re2.js";

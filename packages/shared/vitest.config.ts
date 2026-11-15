@@ -38,6 +38,8 @@ export const TIMING_FILES = [
   "src/discovery/presence-signatures-timing.test.ts",
   // ADR-0195 SD1 (review of #402): 9000-dependency manifests located in one pass, bounded at 1 s
   "src/repo-manifests-timing.test.ts",
+  // ADR-0334: the RE2 credential table on a 64 KiB hostile prompt, bounded at 5 s
+  "src/dlp-secret-re2.test.ts",
   // ADR-0205 (review of #611): the setup assistant's reply parser on a 200k hostile reply (CodeQL js/polynomial-redos)
   "src/agent-setup-assist-timing.test.ts",
 ];

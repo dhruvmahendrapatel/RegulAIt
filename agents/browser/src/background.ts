@@ -11,14 +11,13 @@
  * The browser profile's signed-in account is the only identity read (`chrome.identity.getProfileUserInfo`).
  */
 import {
-  BROWSER_DEVICE_HEADER,
   BROWSER_EVENT_CODES,
   BROWSER_SITE_CATALOGUE_IDS,
   BROWSER_EVENTS_PER_REQUEST,
   BROWSER_EXTENSION_PATHS,
   BROWSER_PROMPT_CAPTURE_MAX_CHARS,
-  BROWSER_PROOF_HEADER,
   browserEventSchema,
+  browserRegisterResponseSchema,
   siteForHost,
   siteVerdict,
   type BrowserEvent,
@@ -27,7 +26,8 @@ import {
 } from "@regulait/shared/browser-governance";
 import { BLOCK_PAGE, FAIL_CLOSED_RULESET_ID } from "./manifest.js";
 import { dynamicRulesFor, parseManagedConfig, verifyPolicy } from "./policy.js";
-import { generateDeviceKey, loadDeviceKey, makeProof, publicJwkOf, saveDeviceKey } from "./proof.js";
+import { GatewayClient } from "./oauth.js";
+import { generateDeviceKey, loadDeviceKey, publicJwkOf, saveDeviceKey } from "./proof.js";
 import type { ContentRequest, VerdictReply } from "./messages.js";
 
 const REFRESH_ALARM = "policy-refresh";
@@ -85,43 +85,48 @@ async function apply(next: BrowserPolicy, email: string): Promise<void> {
 
 // ---- the gateway ---------------------------------------------------------------------------------------------------
 
-async function signedPost(config: BrowserManagedConfig, deviceId: string, key: CryptoKey, path: string, body: unknown): Promise<Response> {
-  const text = JSON.stringify(body);
-  return fetch(trimTrailingSlashes(config.gatewayUrl) + path, {
-    method: "POST",
-    headers: { "content-type": "application/json", [BROWSER_DEVICE_HEADER]: deviceId, [BROWSER_PROOF_HEADER]: await makeProof(key, path, text) },
-    body: text,
-    credentials: "omit",
-    cache: "no-store",
-    redirect: "error",
-  });
+/** the registered device: its id, and the gateway client its key authenticates (one per config and key) */
+interface Registered {
+  deviceId: string;
+  client: GatewayClient;
 }
+let registered: { gatewayUrl: string; reg: Registered } | null = null;
 
-/** the device id, registering the install's key the first time (the private key never leaves WebCrypto) */
-async function ensureRegistered(config: BrowserManagedConfig): Promise<{ deviceId: string; key: CryptoKeyPair } | null> {
+/**
+ * The device, registering the install's key the first time (the private key never leaves WebCrypto). The gateway
+ * makes the key a `browser_extension` workload identity and answers its OAuth client id.
+ */
+async function ensureRegistered(config: BrowserManagedConfig): Promise<Registered | null> {
+  const origin = trimTrailingSlashes(config.gatewayUrl);
+  if (registered && registered.gatewayUrl === origin) return registered.reg;
   let key = await loadDeviceKey();
   if (!key) {
     key = await generateDeviceKey();
     await saveDeviceKey(key);
   }
-  const stored = (await chrome.storage.local.get("deviceId")) as { deviceId?: string };
-  if (stored.deviceId) return { deviceId: stored.deviceId, key };
-  const platform = await chrome.runtime.getPlatformInfo();
-  const os = ({ mac: "mac", win: "win", linux: "linux", cros: "cros" } as Record<string, string>)[platform.os] ?? "other";
-  const major = Number(/Chrom(?:e|ium)\/(\d+)/.exec(navigator.userAgent)?.[1] ?? "1");
-  const res = await fetch(trimTrailingSlashes(config.gatewayUrl) + BROWSER_EXTENSION_PATHS.register, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${config.enrolmentToken}` },
-    body: JSON.stringify({ publicJwk: await publicJwkOf(key), os, browserMajor: major, extensionVersion: EXTENSION_VERSION }),
-    credentials: "omit",
-    cache: "no-store",
-    redirect: "error",
-  });
-  if (res.status !== 200 && res.status !== 201) return null;
-  const body = (await res.json()) as { deviceId?: unknown };
-  if (typeof body.deviceId !== "string") return null;
-  await chrome.storage.local.set({ deviceId: body.deviceId });
-  return { deviceId: body.deviceId, key };
+  const publicJwk = await publicJwkOf(key);
+  let stored = (await chrome.storage.local.get(["deviceId", "clientId"])) as { deviceId?: string; clientId?: string };
+  if (!stored.deviceId || !stored.clientId) {
+    const platform = await chrome.runtime.getPlatformInfo();
+    const os = ({ mac: "mac", win: "win", linux: "linux", cros: "cros" } as Record<string, string>)[platform.os] ?? "other";
+    const major = Number(/Chrom(?:e|ium)\/(\d+)/.exec(navigator.userAgent)?.[1] ?? "1");
+    const res = await fetch(origin + BROWSER_EXTENSION_PATHS.register, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${config.enrolmentToken}` },
+      body: JSON.stringify({ publicJwk, os, browserMajor: major, extensionVersion: EXTENSION_VERSION }),
+      credentials: "omit",
+      cache: "no-store",
+      redirect: "error",
+    });
+    if (res.status !== 200 && res.status !== 201) return null;
+    const body = browserRegisterResponseSchema.safeParse(await res.json().catch(() => null));
+    if (!body.success) return null;
+    stored = { deviceId: body.data.deviceId, clientId: body.data.clientId };
+    await chrome.storage.local.set(stored);
+  }
+  const reg = { deviceId: stored.deviceId!, client: new GatewayClient(origin, { privateKey: key.privateKey, publicJwk, clientId: stored.clientId! }) };
+  registered = { gatewayUrl: origin, reg };
+  return reg;
 }
 
 async function refreshOnce(): Promise<void> {
@@ -130,28 +135,21 @@ async function refreshOnce(): Promise<void> {
   const reg = await ensureRegistered(config);
   if (!reg) return failClosed();
   const email = await profileEmail();
-  const res = await signedPost(config, reg.deviceId, reg.key.privateKey, BROWSER_EXTENSION_PATHS.policy, { profileEmail: email });
-  if (res.status === 403) {
-    const body = (await res.json().catch(() => ({}))) as { error?: string };
-    // a revoked or forgotten device registers again only through a new install; it stays closed
-    if (body.error === "device_revoked") await chrome.storage.local.set({ revoked: true });
-    return failClosed();
-  }
-  if (res.status === 401) {
-    const body = (await res.json().catch(() => ({}))) as { error?: string };
-    if (body.error === "unknown_device") await chrome.storage.local.remove("deviceId");
+  const res = await reg.client.post(BROWSER_EXTENSION_PATHS.policy, { profileEmail: email });
+  if (!res || res.status === 401 || res.status === 403) {
+    // refused (a revoked device, governance turned off, no token): closed until a later refresh succeeds
     return failClosed();
   }
   if (res.status !== 200) {
-    // unreachable or refusing: keep a still-valid policy until its own notAfter, never past it
+    // unreachable or failing: keep a still-valid policy until its own notAfter, never past it
     if (!policy || now() >= policy.notAfter) return failClosed();
     return;
   }
-  const body = (await res.json()) as { policy?: unknown };
-  const v = await verifyPolicy(typeof body.policy === "string" ? body.policy : "", config, reg.deviceId, now());
+  const body = (await res.json().catch(() => ({}))) as { policy?: unknown };
+  const v = await verifyPolicy(body.policy, config, reg.deviceId, now());
   if (!v.ok) return failClosed();
   await apply(v.policy, email);
-  await flushEvents(config, reg);
+  await flushEvents(reg);
 }
 
 async function refresh(): Promise<void> {
@@ -169,11 +167,11 @@ async function refresh(): Promise<void> {
 
 // ---- events and capture --------------------------------------------------------------------------------------------
 
-async function flushEvents(config: BrowserManagedConfig, reg: { deviceId: string; key: CryptoKeyPair }): Promise<void> {
+async function flushEvents(reg: Registered): Promise<void> {
   while (queue.length > 0) {
     const batch = queue.slice(0, BROWSER_EVENTS_PER_REQUEST);
-    const res = await signedPost(config, reg.deviceId, reg.key.privateKey, BROWSER_EXTENSION_PATHS.events, { profileEmail: await profileEmail(), events: batch });
-    if (res.status !== 202) break;
+    const res = await reg.client.post(BROWSER_EXTENSION_PATHS.events, { profileEmail: await profileEmail(), events: batch });
+    if (res?.status !== 202) break;
     queue = queue.slice(batch.length);
     await chrome.storage.session.set({ queue });
   }
@@ -184,18 +182,16 @@ async function enqueue(event: BrowserEvent): Promise<void> {
   queue = [...queue, event].slice(-MAX_QUEUED_EVENTS);
   await chrome.storage.session.set({ queue });
   const config = await managedConfig();
-  const stored = (await chrome.storage.local.get("deviceId")) as { deviceId?: string };
-  const key = await loadDeviceKey();
-  if (config && stored.deviceId && key) await flushEvents(config, { deviceId: stored.deviceId, key }).catch(() => undefined);
+  const reg = config ? await ensureRegistered(config).catch(() => null) : null;
+  if (reg) await flushEvents(reg).catch(() => undefined);
 }
 
 async function capture(siteId: BrowserEvent["siteId"], path: string, text: string): Promise<void> {
   if (!policy?.promptCapture.enabled) return;
   const config = await managedConfig();
-  const stored = (await chrome.storage.local.get("deviceId")) as { deviceId?: string };
-  const key = await loadDeviceKey();
-  if (!config || !stored.deviceId || !key) return;
-  await signedPost(config, stored.deviceId, key.privateKey, BROWSER_EXTENSION_PATHS.promptCaptures, {
+  const reg = config ? await ensureRegistered(config).catch(() => null) : null;
+  if (!reg) return;
+  await reg.client.post(BROWSER_EXTENSION_PATHS.promptCaptures, {
     captureId: crypto.randomUUID(),
     profileEmail: await profileEmail(),
     siteId,
@@ -263,7 +259,10 @@ chrome.runtime.onMessage.addListener((msg: ContentRequest, sender, sendResponse)
 chrome.runtime.onInstalled.addListener(() => void refresh());
 chrome.runtime.onStartup.addListener(() => void refresh());
 chrome.storage.onChanged.addListener((_changes, area) => {
-  if (area === "managed") void refresh();
+  if (area === "managed") {
+    registered = null;
+    void refresh();
+  }
 });
 chrome.identity.onSignInChanged.addListener(() => void refresh());
 chrome.alarms.onAlarm.addListener((alarm) => {

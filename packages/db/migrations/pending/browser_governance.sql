@@ -6,13 +6,29 @@
 -- 2. `browser_site_rules` + `browser_site_account_domains`: an admin's decision per catalogue site, and the account
 --    domains the browser profile must be signed in with (a join table, ADR-0200 3NF). A site with no rule is denied.
 -- 3. `browser_enrolment_tokens`: capped bulk tokens (`rgbe_`), at most 30 days, stored as SHA-256 only.
--- 4. `browser_devices`: one row per installed extension and its install-time P-256 key. Revoked, never deleted.
+-- 4. `browser_devices`: one row per installed extension. Its key and tokens are a workload identity of the new kind
+--    `browser_extension` (ADR-0195 SD4b's endpoint-agent pattern: S6 key binding, S7 DPoP-bound self tokens), so
+--    `workload_identities`' kind and subject CHECKs are widened here, as 0207 did. Revoked, never deleted.
 -- 5. `browser_events`, `browser_prompt_captures`: APPEND-ONLY EVIDENCE. One guard function refuses UPDATE and DELETE,
 --    and a statement trigger refuses TRUNCATE (the 0185 pattern). Retention for both is a recorded follow-up.
 --
 -- One new function, pinned to `search_path = pg_catalog, public, pg_temp` (0185). Single-tenant deployment: like the
 -- other register tables (0281) there is no tenant column; 0272's default privileges grant the app role.
 
+ALTER TABLE "workload_identities" DROP CONSTRAINT IF EXISTS "workload_identities_kind_check";
+--> statement-breakpoint
+ALTER TABLE "workload_identities" ADD CONSTRAINT "workload_identities_kind_check"
+  CHECK ("kind" IN ('agent', 'builder_agent', 'engine_runner', 'worker_runtime', 'pdp', 'endpoint_agent', 'browser_extension'));
+--> statement-breakpoint
+ALTER TABLE "workload_identities" DROP CONSTRAINT IF EXISTS "workload_identities_subject_check";
+--> statement-breakpoint
+ALTER TABLE "workload_identities" ADD CONSTRAINT "workload_identities_subject_check" CHECK (
+  ("kind" = 'agent' AND "agent_id" IS NOT NULL AND "builder_agent_id" IS NULL AND "engine_runner_id" IS NULL)
+  OR ("kind" = 'builder_agent' AND "agent_id" IS NULL AND "builder_agent_id" IS NOT NULL AND "engine_runner_id" IS NULL)
+  OR ("kind" = 'engine_runner' AND "agent_id" IS NULL AND "builder_agent_id" IS NULL AND "engine_runner_id" IS NOT NULL)
+  OR ("kind" IN ('worker_runtime', 'pdp', 'endpoint_agent', 'browser_extension') AND "agent_id" IS NULL AND "builder_agent_id" IS NULL AND "engine_runner_id" IS NULL)
+);
+--> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "browser_governance_settings" (
   "id" smallint PRIMARY KEY DEFAULT 1 NOT NULL,
   "enabled" boolean DEFAULT false NOT NULL,
@@ -66,8 +82,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS "browser_enrolment_tokens_hash_uq" ON "browser
 CREATE TABLE IF NOT EXISTS "browser_devices" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
   "token_id" uuid NOT NULL REFERENCES "browser_enrolment_tokens"("id") ON DELETE RESTRICT,
-  "jwk_thumbprint" text NOT NULL,
-  "public_jwk" jsonb NOT NULL,
+  "identity_id" uuid NOT NULL REFERENCES "workload_identities"("id") ON DELETE RESTRICT,
   "os" text NOT NULL,
   "browser_major" integer NOT NULL,
   "extension_version" text NOT NULL,
@@ -75,17 +90,12 @@ CREATE TABLE IF NOT EXISTS "browser_devices" (
   "last_seen_at" timestamp with time zone,
   "revoked_at" timestamp with time zone,
   "revoked_by" uuid REFERENCES "users"("id") ON DELETE SET NULL,
-  CONSTRAINT "browser_devices_thumbprint_check" CHECK ("jwk_thumbprint" ~ '^[A-Za-z0-9_-]{43}$'),
-  CONSTRAINT "browser_devices_jwk_check" CHECK (
-    jsonb_typeof("public_jwk") = 'object' AND "public_jwk" ->> 'kty' = 'EC' AND "public_jwk" ->> 'crv' = 'P-256'
-    AND NOT ("public_jwk" ? 'd')
-  ),
   CONSTRAINT "browser_devices_os_check" CHECK ("os" IN ('mac', 'win', 'linux', 'cros', 'other')),
   CONSTRAINT "browser_devices_major_check" CHECK ("browser_major" BETWEEN 1 AND 10000),
   CONSTRAINT "browser_devices_version_check" CHECK (char_length("extension_version") BETWEEN 1 AND 32)
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX IF NOT EXISTS "browser_devices_thumbprint_uq" ON "browser_devices" ("jwk_thumbprint");
+CREATE UNIQUE INDEX IF NOT EXISTS "browser_devices_identity_uq" ON "browser_devices" ("identity_id");
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "browser_devices_token_idx" ON "browser_devices" ("token_id");
 --> statement-breakpoint

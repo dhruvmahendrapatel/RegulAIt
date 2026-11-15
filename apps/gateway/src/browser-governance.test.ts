@@ -1,67 +1,22 @@
 /**
  * ADR-0334 (lane E16): the browser extension contract's pure gateway side, with no database.
- * Proof verification refuses every forgery the route relies on it for; the per-user policy is fail closed in the
- * governed core's order; a policy is signed under its own key and verifies with the public half alone.
+ * The per-user policy is fail closed in the governed core's order; a policy is signed under its own key and verifies with the public half alone.
  */
-import { generateKeyPairSync, randomUUID, webcrypto } from "node:crypto";
+import { createPublicKey, generateKeyPairSync, randomUUID, verify } from "node:crypto";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { CompactSign, compactVerify, exportJWK, importJWK } from "jose";
 import { afterAll, describe, expect, it } from "vitest";
-import { BROWSER_POLICY_TYP, BROWSER_PROOF_TYP, BROWSER_SITE_CATALOGUE, browserPolicySchema, type BrowserPublicJwk } from "@regulait/shared";
+import { BROWSER_SITE_CATALOGUE, browserPolicySchema, devicePolicyEnvelopeSchema } from "@regulait/shared";
 import {
-  browserBodyDigest,
   buildBrowserPolicy,
   conversationRef,
   resolveBrowserPolicyKey,
   signBrowserPolicy,
-  verifyBrowserProof,
   type BuildPolicyInput,
 } from "./browser-governance.js";
 
 const NOW = 1_800_000_000;
-const HTU = "/v1/browser-extension/policy";
-
-async function deviceKey() {
-  const pair = (await webcrypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"])) as webcrypto.CryptoKeyPair;
-  const j = await exportJWK(pair.publicKey);
-  return { pair, jwk: { kty: "EC", crv: "P-256", x: j.x!, y: j.y! } as BrowserPublicJwk };
-}
-
-async function proof(key: CryptoKey, claims: Record<string, unknown>, header: Record<string, unknown> = {}) {
-  return new CompactSign(new TextEncoder().encode(JSON.stringify(claims))).setProtectedHeader({ alg: "ES256", typ: BROWSER_PROOF_TYP, ...header } as never).sign(key);
-}
-
-describe("ADR-0334 device proofs", () => {
-  const body = Buffer.from(JSON.stringify({ profileEmail: "" }));
-  const claims = () => ({ htm: "POST", htu: HTU, iat: NOW, jti: randomUUID(), bd: browserBodyDigest(body) });
-
-  it("accepts a proof by the registered key over this path and these bytes", async () => {
-    const d = await deviceKey();
-    const v = await verifyBrowserProof(await proof(d.pair.privateKey, claims()), d.jwk, { htu: HTU, bodyDigest: browserBodyDigest(body) }, NOW + 10);
-    expect(v.ok).toBe(true);
-  });
-
-  it("refuses another key, path, body, time, type, algorithm, an embedded key and unknown claims", async () => {
-    const d = await deviceKey();
-    const other = await deviceKey();
-    const exp = { htu: HTU, bodyDigest: browserBodyDigest(body) };
-    const check = async (p: string, e = exp, now = NOW) => (await verifyBrowserProof(p, d.jwk, e, now)) as { ok: boolean; code?: string };
-    expect(await check(await proof(other.pair.privateKey, claims()))).toEqual({ ok: false, code: "invalid_proof" });
-    expect(await check(await proof(d.pair.privateKey, { ...claims(), htu: "/v1/browser-extension/events" }))).toEqual({ ok: false, code: "invalid_proof" });
-    expect(await check(await proof(d.pair.privateKey, claims()), { htu: HTU, bodyDigest: browserBodyDigest(Buffer.from("{}")) })).toEqual({ ok: false, code: "body_digest_mismatch" });
-    expect(await check(await proof(d.pair.privateKey, claims()), exp, NOW + 301)).toEqual({ ok: false, code: "proof_stale" });
-    expect(await check(await proof(d.pair.privateKey, claims()), exp, NOW - 61)).toEqual({ ok: false, code: "proof_stale" });
-    expect(await check(await proof(d.pair.privateKey, claims(), { typ: "JWT" }))).toEqual({ ok: false, code: "invalid_proof" });
-    expect(await check(await proof(d.pair.privateKey, claims(), { jwk: other.jwk }))).toEqual({ ok: false, code: "invalid_proof" });
-    expect(await check(await proof(d.pair.privateKey, { ...claims(), scope: "admin" }))).toEqual({ ok: false, code: "invalid_proof" });
-    expect(await check("not-a-jws")).toEqual({ ok: false, code: "invalid_proof" });
-    const ed = generateKeyPairSync("ed25519");
-    const edProof = await new CompactSign(new TextEncoder().encode(JSON.stringify(claims()))).setProtectedHeader({ alg: "EdDSA", typ: BROWSER_PROOF_TYP }).sign(ed.privateKey);
-    expect(await check(edProof)).toEqual({ ok: false, code: "invalid_proof" });
-  });
-});
 
 describe("ADR-0334 per-user policy", () => {
   const base = (over: Partial<BuildPolicyInput> = {}): BuildPolicyInput => ({
@@ -124,9 +79,10 @@ describe("ADR-0334 the browser policy signing key", () => {
     for (const d of dirs) rmSync(d, { recursive: true, force: true });
   });
 
-  it("is missing until configured, invalid when half configured", () => {
+  it("is missing until configured, invalid when half configured or the key id is not the envelope's shape", () => {
     expect(resolveBrowserPolicyKey({}).state).toBe("missing");
-    expect(resolveBrowserPolicyKey({ REGULAIT_BROWSER_POLICY_SIGNING_KEY_ID: "k1" }).state).toBe("invalid");
+    expect(resolveBrowserPolicyKey({ REGULAIT_BROWSER_POLICY_SIGNING_KEY_ID: "key-1" }).state).toBe("invalid");
+    expect(resolveBrowserPolicyKey({ REGULAIT_BROWSER_POLICY_SIGNING_KEY: "/nonexistent", REGULAIT_BROWSER_POLICY_SIGNING_KEY_ID: "Upper_Case" }).state).toBe("invalid");
   });
 
   it("an operator key signs a policy that verifies with its public half only", async () => {
@@ -134,16 +90,22 @@ describe("ADR-0334 the browser policy signing key", () => {
     dirs.push(dir);
     const file = path.join(dir, "k.pem");
     writeFileSync(file, generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "pem" }));
-    const r = resolveBrowserPolicyKey({ REGULAIT_BROWSER_POLICY_SIGNING_KEY: file, REGULAIT_BROWSER_POLICY_SIGNING_KEY_ID: "ops-1" });
+    const r = resolveBrowserPolicyKey({ REGULAIT_BROWSER_POLICY_SIGNING_KEY: file, REGULAIT_BROWSER_POLICY_SIGNING_KEY_ID: "ops-key-1" });
     expect(r.state).toBe("ok");
     if (r.state !== "ok") return;
     const policy = buildBrowserPolicy({
       deviceId: randomUUID(), subject: "", profileEmail: "", mode: "enforce", promptCaptureEnabled: false, user: null, posture: { mode: "normal" }, rules: [], nowSeconds: NOW,
     });
-    const jws = await signBrowserPolicy(policy, r.key);
-    const { payload, protectedHeader } = await compactVerify(jws, await importJWK({ kty: "OKP", crv: "Ed25519", x: r.key.x }, "EdDSA"));
-    expect(protectedHeader).toEqual({ alg: "EdDSA", typ: BROWSER_POLICY_TYP, kid: "ops-1" });
-    expect(JSON.parse(new TextDecoder().decode(payload))).toEqual(policy);
+    const env = signBrowserPolicy(policy, r.key);
+    // the endpoint agent's envelope, exactly: three members, standard base64, Ed25519 over the payload bytes
+    expect(devicePolicyEnvelopeSchema.parse(env)).toEqual(env);
+    expect(Object.keys(env).sort()).toEqual(["keyId", "payload", "signature"]);
+    expect(env.keyId).toBe("ops-key-1");
+    const pub = createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: r.key.x }, format: "jwk" });
+    const payload = Buffer.from(env.payload, "base64");
+    expect(verify(null, payload, pub, Buffer.from(env.signature, "base64"))).toBe(true);
+    expect(verify(null, Buffer.concat([payload, Buffer.from(" ")]), pub, Buffer.from(env.signature, "base64"))).toBe(false);
+    expect(JSON.parse(payload.toString("utf8"))).toEqual(policy);
   });
 
   it("an RSA or malformed operator key is invalid", () => {
