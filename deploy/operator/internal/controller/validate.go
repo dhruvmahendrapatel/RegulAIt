@@ -77,7 +77,14 @@ func PublicEgress(in *v1alpha1.RegulaitInstallation) []string {
 	if in.Spec.Egress.AllowPublicEgress {
 		out = append(out, "egress.allowPublicEgress (public addresses on 443)")
 	}
-	for field, list := range map[string][]string{"egress.allowedCIDRs": in.Spec.Egress.AllowedCIDRs, "egress.databaseCIDRs": in.Spec.Egress.DatabaseCIDRs} {
+	lists := map[string][]string{"egress.allowedCIDRs": in.Spec.Egress.AllowedCIDRs, "egress.databaseCIDRs": in.Spec.Egress.DatabaseCIDRs}
+	if s3 := in.Spec.Backup.S3; s3 != nil && !in.Spec.Backup.Disabled {
+		lists["backup.s3.egressCIDRs"] = s3.EgressCIDRs
+		if s3.PodIdentity {
+			out = append(out, "backup.s3.podIdentity (backup pods reach the EKS Pod Identity agent 169.254.170.23 on 80)")
+		}
+	}
+	for field, list := range lists {
 		for _, c := range list {
 			if p, err := netip.ParsePrefix(c); err == nil && !isPrivate(p) {
 				out = append(out, fmt.Sprintf("%s %s", field, c))
@@ -120,13 +127,36 @@ func Validate(in *v1alpha1.RegulaitInstallation) (reason, msg string, ok bool) {
 		}
 	}
 
-	if s.Backup.DestinationClaimName != "" && !s.Backup.Disabled {
+	if s.Backup.DestinationClaimName != "" && s.Backup.S3 != nil {
+		return "BackupDestinationConflict", "set backup.destinationClaimName or backup.s3, not both", false
+	}
+	if (s.Backup.DestinationClaimName != "" || s.Backup.S3 != nil) && !s.Backup.Disabled {
 		if s.Backup.Image == nil {
-			return "BackupImageMissing", "backup.destinationClaimName is set but backup.image is not", false
+			return "BackupImageMissing", "a backup destination is set but backup.image is not", false
 		}
-		// The backup image comes from the same registries as the gateway's.
-		if regs := s.Image.AllowedRegistries; len(regs) > 0 && !contains(regs, registryHost(s.Backup.Image.Repository)) {
-			return "RegistryNotAllowed", fmt.Sprintf("backup image registry %q is not in image.allowedRegistries", registryHost(s.Backup.Image.Repository)), false
+		// The backup images come from the same registries as the gateway's.
+		images := map[string]string{"backup.image": s.Backup.Image.Repository}
+		if s.Backup.S3 != nil {
+			images["backup.s3.uploaderImage"] = s.Backup.S3.UploaderImage.Repository
+		}
+		for _, field := range []string{"backup.image", "backup.s3.uploaderImage"} {
+			repo, set := images[field]
+			if !set {
+				continue
+			}
+			if regs := s.Image.AllowedRegistries; len(regs) > 0 && !contains(regs, registryHost(repo)) {
+				return "RegistryNotAllowed", fmt.Sprintf("%s registry %q is not in image.allowedRegistries", field, registryHost(repo)), false
+			}
+		}
+		if s3 := s.Backup.S3; s3 != nil {
+			if len(s3.EgressCIDRs) == 0 {
+				return "BackupEgressMissing", "backup.s3.egressCIDRs must name the S3 and STS endpoints", false
+			}
+			for _, c := range s3.EgressCIDRs {
+				if reason, msg, ok := checkCIDR(s.Mode, "backup.s3.egressCIDRs", c); !ok {
+					return reason, msg, false
+				}
+			}
 		}
 	}
 	return "", "", true

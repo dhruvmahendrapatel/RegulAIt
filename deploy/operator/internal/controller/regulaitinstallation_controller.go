@@ -192,7 +192,7 @@ func (r *Reconciler) reconcile(ctx context.Context, in *v1alpha1.RegulaitInstall
 	in.Status.VerifiedManifestSHA256 = res.SHA256
 
 	// 3. Owned objects, with drift counted.
-	owned := []client.Object{ServiceAccount(in), Service(in)}
+	owned := []client.Object{ServiceAccount(in), BackupServiceAccount(in), Service(in)}
 	for _, np := range NetworkPolicies(in) {
 		owned = append(owned, np)
 	}
@@ -405,12 +405,18 @@ func (r *Reconciler) reconcileBackup(ctx context.Context, in *v1alpha1.RegulaitI
 		r.setCondition(in, v1alpha1.ConditionBackupConfigured, metav1.ConditionTrue, "BackupDisabled", "backup was turned off in the spec (backup.disabled: true)")
 		r.warn(in, "BackupDisabled", "Reconcile", "backup is disabled for this installation")
 		return client.IgnoreNotFound(r.Delete(ctx, cj))
-	case b.DestinationClaimName == "":
-		r.setCondition(in, v1alpha1.ConditionBackupConfigured, metav1.ConditionFalse, "NoDestination", "set backup.destinationClaimName, or turn backup off with backup.disabled")
+	case b.DestinationClaimName == "" && b.S3 == nil:
+		r.setCondition(in, v1alpha1.ConditionBackupConfigured, metav1.ConditionFalse, "NoDestination", "set backup.destinationClaimName or backup.s3, or turn backup off with backup.disabled")
 		return client.IgnoreNotFound(r.Delete(ctx, cj))
 	default:
 		if err := r.apply(ctx, in, BackupCronJob(in), specChanged); err != nil {
 			return err
+		}
+		if s3 := b.S3; s3 != nil {
+			r.setCondition(in, v1alpha1.ConditionBackupConfigured, metav1.ConditionTrue, "ScheduledToS3", fmt.Sprintf(
+				"pg_dump uploads to s3://%s/%s in %s (bucket owner %s), SSE-KMS with %s; retention is the bucket's versioning and lifecycle rules",
+				s3.Bucket, s3.Prefix, s3.Region, s3.ExpectedBucketOwner, s3.KMSKeyARN))
+			return nil
 		}
 		r.setCondition(in, v1alpha1.ConditionBackupConfigured, metav1.ConditionTrue, "Scheduled", "pg_dump runs on the backup schedule")
 		return nil
