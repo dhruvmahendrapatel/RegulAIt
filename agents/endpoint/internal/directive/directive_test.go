@@ -328,3 +328,18 @@ func TestNotifierNeverUsesAShell(t *testing.T) {
 		t.Error("an unusual Windows user name was used as a msg target")
 	}
 }
+
+// The golden payload (internal/contract/testdata/directive-payload.json) is the byte-exact body the gateway signs
+// (ADR-0331 §4); the gateway's test builds the same bytes from the same values. Both sides pin it.
+func TestGoldenPayloadVerifies(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "contract", "testdata", "directive-payload.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, priv := key(t)
+	at := time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC)
+	d, code, err := Verify(envelope(t, priv, bytes.TrimSpace(raw)), keys, identity, at)
+	if err != nil || code != "" || d.Asset.PackageVersion != "2.1.0" || d.NotAfter.Sub(d.IssuedAt) != MaxValidity {
+		t.Fatalf("the golden payload does not verify: %v %q %+v", err, code, d)
+	}
+}
