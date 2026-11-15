@@ -64,15 +64,16 @@ controller-runtime moves. None has an open advisory (`govulncheck` runs in CI).
 | `go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp` | `v0.69.0` | Apache-2.0 | *transitive* (release 2026-05-28) |
 | `go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc` | `v1.45.0` | Apache-2.0 | *transitive* (release 2026-08-03) |
 | `go.opentelemetry.io/otel/exporters/otlp/otlptrace` | `v1.45.0` | Apache-2.0 | *transitive* (release 2026-08-03) |
-| `go.opentelemetry.io/otel/metric` | `v1.45.0` | Apache-2.0 | *transitive* (release 2026-08-03) |
-| `go.opentelemetry.io/otel/sdk` | `v1.45.0` | Apache-2.0 | *transitive* (release 2026-08-03) |
-| `go.opentelemetry.io/otel/trace` | `v1.45.0` | Apache-2.0 | *transitive* (release 2026-08-03) |
-| `go.opentelemetry.io/otel` | `v1.45.0` | Apache-2.0 | *transitive* (release 2026-08-03) |
+| `go.opentelemetry.io/otel/metric` | `v1.47.0` | Apache-2.0 | *transitive* (release 2026-10-02; moves with otel/sdk) |
+| `go.opentelemetry.io/otel/sdk` | `v1.47.0` | Apache-2.0 | *transitive* (release 2026-10-02; raised 2026-11-15 for GHSA-q7gw-24fr-5p69, moderate, fixed in 1.47.0) |
+| `go.opentelemetry.io/otel/trace` | `v1.47.0` | Apache-2.0 | *transitive* (release 2026-10-02; raised 2026-11-15 for GHSA-q7gw-24fr-5p69, moderate, fixed in 1.47.0) |
+| `go.opentelemetry.io/otel` | `v1.47.0` | Apache-2.0 | *transitive* (release 2026-10-02; moves with otel/sdk) |
+| `go.opentelemetry.io/otel/log` | `v1.47.0` | Apache-2.0 | *transitive* (release 2026-10-02; new in the otel/sdk 1.47.0 graph) |
 | `go.opentelemetry.io/proto/otlp` | `v1.11.0` | Apache-2.0 | *transitive* (release 2026-07-22) |
 | `go.uber.org/multierr` | `v1.11.0` | MIT | *transitive* (release 2023-03-29) |
 | `go.uber.org/zap` | `v1.27.1` | MIT | *transitive* (release 2025-11-19) |
 | `go.yaml.in/yaml/v2` | `v2.4.4` | Apache-2.0 | *transitive* (release 2026-03-06) |
-| `go.yaml.in/yaml/v3` | `v3.0.4` | Apache-2.0 | *transitive* (release 2025-06-29) |
+| `go.yaml.in/yaml/v3` | `v3.0.5` | Apache-2.0 | *transitive* (release 2026-07-26; moved by the otel 1.47.0 graph) |
 | `golang.org/x/exp` | `v0.0.0-20260410095643-746e56fc9e2f` | BSD-3-Clause | *transitive* (release 2026-04-10) |
 | `golang.org/x/mod` | `v0.43.0` | BSD-3-Clause | `semver.Compare` for the downgrade and minimum-version checks (no hand-written version compare). (release 2026-11-09) |
 | `golang.org/x/net` | `v0.62.0` | BSD-3-Clause | *transitive* (release 2026-10-27) |
