@@ -59,6 +59,8 @@ import { OWASP_PACKS } from "./owasp-packs.js";
 import { ISO_PACKS } from "./iso-packs.js";
 // ADR-0297 (P18 B6): SR 11-7 and NYC Local Law 144 sector packs (`sector-packs.ts`, type-only imports back)
 import { SECTOR_PACKS } from "./sector-packs.js";
+// ADR-0319 (gap G11): the AIUC-1 AI agent standard, ID-only (`aiuc-packs.ts`, type-only imports back)
+import { AIUC_PACKS } from "./aiuc-packs.js";
 // batch B1 — a pack's cascade PRESET is validated with the SAME check every
 // compliance-profile version body passes: only enforcing profile columns,
 // correctly typed, selection (`tag`) refused. One validator, not two.
@@ -94,6 +96,8 @@ export const COMPLIANCE_PACK_FRAMEWORKS = [
   // ADR-0297 (P18 B6): sector packs (`sector-packs.ts`)
   "sr-11-7",
   "nyc-ll144",
+  // ADR-0319 (gap G11): the AIUC-1 AI agent standard (`aiuc-packs.ts`)
+  "aiuc-1",
   "custom",
 ] as const;
 export type CompliancePackFramework = (typeof COMPLIANCE_PACK_FRAMEWORKS)[number];
@@ -1814,4 +1818,6 @@ DEFAULT_COMPLIANCE_PACKS.push(
   ...ISO_PACKS,
   // ADR-0297 (P18 B6): sr-11-7@1 and nyc-ll144@1
   ...SECTOR_PACKS,
+  // ADR-0319 (gap G11): aiuc-1@1 (15 October 2026 release)
+  ...AIUC_PACKS,
 );
