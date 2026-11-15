@@ -101,6 +101,8 @@ describe("affordance census: a notBuilt route counts only when the file defines 
       "/v1/mcp/authorised-targets/:x",
       "/v1/mcp-bundles/:x",
       "/v1/mcp-bundles/:x/grants/:x",
+      // ADR-0312 (lane E2, pilot addendum): the spend-budget removal, until its #453 screen
+      "/v1/users/:x/spend-budget",
     ]);
   });
 });
