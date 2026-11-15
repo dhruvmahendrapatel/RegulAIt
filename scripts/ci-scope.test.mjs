@@ -7,7 +7,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
 import { afterEach, describe, expect, it } from "vitest";
-import { FULL, OUTPUTS, changedFiles, scopeForEvent, scopeOf } from "./ci-scope.mjs";
+import { planFor, ranJobs, runnerCount } from "./ci-plan.mjs";
+import { ALL_RE, FULL, OUTPUTS, changedFiles, gatewayWebReaders, scopeForEvent, scopeOf } from "./ci-scope.mjs";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const workflow = (name) => yaml.load(readFileSync(path.join(repo, ".github/workflows", name), "utf8"));
@@ -111,7 +112,7 @@ describe("the PR scope's trim rules", () => {
       ".github/workflows/security.yml", ".github/workflows/engine-images-build.yml", ".github/workflows/engine-images.yml"]) {
       expect(scopeOf([f]).engines, f).toBe(true);
     }
-    for (const f of ["apps/gateway/src/a.ts", "apps/web/src/a.tsx", "packages/shared/src/a.ts", "scripts/x.mjs", ".github/workflows/ci.yml"]) {
+    for (const f of ["apps/gateway/src/a.ts", "apps/web/src/a.tsx", "packages/shared/src/a.ts", "scripts/x.mjs"]) {
       expect(scopeOf([f]).engines, f).toBe(false);
     }
     for (const f of ["Dockerfile", ".dockerignore", "pnpm-lock.yaml", "package.json", "apps/gateway/src/a.ts", "apps/web/src/a.tsx",
@@ -119,8 +120,7 @@ describe("the PR scope's trim rules", () => {
       expect(scopeOf([f]).image, f).toBe(true);
     }
     // outside the root image's build context, or dropped by its .dockerignore
-    for (const f of ["scripts/x.mjs", "engines/garak/requirements.txt", "apps/gateway/src/a.test.ts", "apps/web/e2e/a.spec.ts", "infra/x.tf",
-      ".github/workflows/ci.yml"]) {
+    for (const f of ["scripts/x.mjs", "engines/garak/requirements.txt", "apps/gateway/src/a.test.ts", "apps/web/e2e/a.spec.ts", "infra/x.tf"]) {
       expect(scopeOf([f]).image, f).toBe(false);
     }
   });
@@ -130,10 +130,10 @@ describe("the PR scope's trim rules", () => {
       "scripts/security-runtime-contents.mjs", "scripts/security-suppressions.mjs", "scripts/security-cosign-verify.sh"]) {
       expect(scopeOf([f]).image, f).toBe(true);
     }
-    // the gate's tests and the other allow-lists are code (CodeQL runs) but not image inputs
-    for (const f of ["scripts/security-gate.test.mjs", "security/sast-allowlist.json", "security/audit-allowlist.json"]) {
-      expect(scopeOf([f]), f).toMatchObject({ code: true, image: false });
-    }
+    // the gate's tests are code (CodeQL runs) but not image inputs; the other allow-lists are security configuration,
+    // which is a full run (ADR-0323)
+    expect(scopeOf(["scripts/security-gate.test.mjs"])).toMatchObject({ code: true, image: false });
+    for (const f of ["security/sast-allowlist.json", "security/audit-allowlist.json"]) expect(scopeOf([f]), f).toMatchObject({ full: true, image: true });
   });
 
   it("rule 3: an engine's allow-list and the gate scripts its scan runs set `engines`; the root allow-list does not", () => {
@@ -141,21 +141,65 @@ describe("the PR scope's trim rules", () => {
       "scripts/security-suppressions.mjs", "scripts/security-cosign-verify.sh"]) {
       expect(scopeOf([f]).engines, f).toBe(true);
     }
-    for (const f of ["security/image-allowlist.json", "scripts/security-runtime-contents.mjs"]) {
-      expect(scopeOf([f]).engines, f).toBe(false);
+    expect(scopeOf(["scripts/security-runtime-contents.mjs"]).engines).toBe(false);
+  });
+
+  it("rule 4 (ADR-0323): a web-only PR is not a gateway change; anything outside apps/web is", () => {
+    expect(scopeOf(["apps/web/src/views/admin/governance/auditObjectLinks.ts", "apps/web/e2e/a.spec.ts"])).toMatchObject({
+      full: false, code: true, web: true, gateway: false,
+    });
+    for (const f of ["apps/gateway/src/a.ts", "packages/shared/src/a.ts", "packages/policy-kernel/src/a.ts", "scripts/x.mjs", "infra/x.tf",
+      "docker-compose.yml"]) {
+      expect(scopeOf(["apps/web/src/a.tsx", f]).gateway, f).toBe(true);
+    }
+    expect(scopeOf(["docs/a.md"]).gateway).toBe(false);
+  });
+
+  it("rule 4 (ADR-0323): the gateway tests that read apps/web are found from their sources, so a web-only PR still runs them", () => {
+    const readers = gatewayWebReaders(repo);
+    // the tests #737's review named, and the contract tests that read SPA files
+    for (const f of ["src/step-up-posture-guard.test.ts", "src/zz-audit-object-type-0210.test.ts", "src/adr0121-outlook-chatops.test.ts",
+      "src/builder-agents.test.ts", "src/demo-check-g9.test.ts"]) {
+      expect(readers, f).toContain(f);
+    }
+    // a pure gateway unit test is not one of them, and the subset is a small part of the suite
+    expect(readers).not.toContain("src/route-classes.test.ts");
+    expect(readers.length).toBeLessThan(150);
+    // the CI step passes them word-split: no path may contain whitespace
+    for (const f of readers) expect(f).toMatch(/^src\/\S+\.test\.ts$/);
+  });
+
+  it("rule 4 (ADR-0323): any gateway test that names apps/web is a reader, whatever else it does", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ci-scope-readers-"));
+    temps.push(root);
+    const write = (p, t) => {
+      mkdirSync(path.dirname(path.join(root, p)), { recursive: true });
+      writeFileSync(path.join(root, p), t);
+    };
+    write("apps/gateway/src/a.test.ts", 'import x from "../../web/src/x.js";\n');
+    write("apps/gateway/src/sub/b.test.ts", 'const ROOT = path.resolve(here, "../../../.."); readdirSync(ROOT);\n');
+    write("apps/gateway/src/c.test.ts", 'const t = readFileSync(path.join(ROOT, "apps", "web", "x.ts"));\n');
+    write("apps/gateway/src/d.test.ts", 'import { a } from "./a.js"; expect(a).toBe(1);\n');
+    write("apps/gateway/src/e.ts", 'readFileSync("../../web/x");\n'); // not a test file
+    expect(gatewayWebReaders(root)).toEqual(["src/a.test.ts", "src/c.test.ts", "src/sub/b.test.ts"]);
+  });
+
+  it("rule 6 (ADR-0323): dependencies, CI, the schema and migrations, and security configuration are a full run", () => {
+    for (const f of ["pnpm-lock.yaml", "pnpm-workspace.yaml", "package.json", "apps/web/package.json", "packages/db/package.json", ".npmrc",
+      ".node-version", "tsconfig.base.json", ".github/workflows/ci.yml", ".github/workflows/dependabot-auto-merge.yml",
+      ".github/actions/other/action.yml", ".github/CODEOWNERS", ".github/dependabot.yml", "packages/db/src/schema.ts",
+      "packages/db/migrations/pending/x.sql", "packages/db/migrations/meta/_journal.json", "packages/db/drizzle.config.ts",
+      "security/sast-allowlist.json", ".gitleaks.toml"]) {
+      expect(ALL_RE.test(f), f).toBe(true);
+      expect(scopeOf(["docs/a.md", f]), f).toMatchObject({ ...FULL, reason: expect.stringContaining(f) });
+    }
+    for (const f of ["packages/db/src/rls.ts", "apps/web/src/package.ts", "scripts/x.mjs", "packages/db/README.md"]) {
+      expect(scopeOf([f]).full, f).toBe(false);
     }
   });
 
-  it("rule 4: there is no web-only gateway skip, because gateway tests read apps/web sources", () => {
-    expect(OUTPUTS).not.toContain("gateway");
-    expect(scopeOf(["apps/web/src/views/admin/governance/auditObjectLinks.ts"])).toMatchObject({ full: false, code: true, web: true });
-    // the reason: the step-up posture guard (a gateway test) walks every product source under apps/, apps/web included
-    const guard = readFileSync(path.join(repo, "apps/gateway/src/step-up-posture-guard.test.ts"), "utf8");
-    expect(guard).toContain('for (const top of ["apps", "packages"])');
-  });
-
   it("rule 5: a change to the scope rules themselves is a full run", () => {
-    for (const f of ["scripts/ci-scope.mjs", "scripts/ci-scope.test.mjs", ".github/actions/ci-scope/action.yml"]) {
+    for (const f of ["scripts/ci-scope.mjs", "scripts/ci-scope.test.mjs", "scripts/ci-plan.mjs", ".github/actions/ci-scope/action.yml"]) {
       expect(scopeOf(["docs/a.md", f]), f).toMatchObject({ full: true, code: true, image: true, engines: true });
     }
   });
@@ -180,16 +224,36 @@ describe("the workflows wire the scope fail-closed", () => {
     expect(find.run).toContain('elif [ "$ENGINES_CHANGED" = false ]; then');
   });
 
-  it("build-and-test checks each part against `code`: the gateway shards run on every code PR, web-only included", () => {
+  it("build-and-test checks each part: the gateway job on every code PR, its coverage check when `gateway` is set", () => {
     const jobs = workflow("ci.yml").jobs;
     expect(jobs["gateway-tests"].if).toBe("needs.scope.outputs.code == 'true'");
-    expect(jobs["gateway-coverage"].if).toBe("${{ !cancelled() && needs.scope.outputs.code == 'true' }}");
-    expect(jobs.scope.outputs).not.toHaveProperty("gateway");
+    // the one-runner web-only form only on an exact 'false'; an empty or failed output gives the five shards
+    expect(jobs["gateway-tests"].strategy.matrix.shard).toBe(
+      "${{ fromJSON(needs.scope.outputs.gateway == 'false' && '[\"web-readers\"]' || '[1, 2, 3, 4, 5]') }}",
+    );
+    const steps = jobs["gateway-tests"].steps;
+    expect(steps.find((s) => s.name?.startsWith("Gateway suite, shard")).if).toBe("matrix.shard != 'web-readers'");
+    const readers = steps.find((s) => s.name?.startsWith("Gateway tests that read apps/web"));
+    expect(readers.if).toBe("matrix.shard == 'web-readers'");
+    expect(readers.run).toContain("node scripts/ci-scope.mjs --gateway-web-readers");
+    expect(readers.run).toContain('[ -n "$files" ] ||');
+    expect(jobs["gateway-coverage"].if).toBe("${{ !cancelled() && needs.scope.outputs.gateway == 'true' }}");
+    expect(jobs.scope.outputs.gateway).toBe("${{ steps.scope.outputs.gateway }}");
     const rule = jobs["build-and-test"].steps.at(-1).run;
     expect(rule).toContain('.scope.result == "success"');
     expect(rule).toContain('(."build-and-test-base" | ok($o.code))');
     expect(rule).toContain('(."gateway-tests" | ok($o.code))');
-    expect(rule).toContain('(."gateway-coverage" | ok($o.code))');
+    expect(rule).toContain('(."gateway-coverage" | ok($o.gateway))');
+  });
+
+  it("every workflow a PR starts cancels a superseded PR run, and only a PR run", () => {
+    const PR_ONLY = "${{ github.event_name == 'pull_request' }}";
+    for (const f of ["ci.yml", "ui-enterprise.yml", "security.yml", "import-cycles.yml", "integrations.yml", "client-compat.yml",
+      "endpoint-agent.yml", "engine-images-build.yml", "operator.yml"]) {
+      const c = workflow(f).concurrency;
+      expect(c["cancel-in-progress"], f).toBe(PR_ONLY);
+      expect(c.group, f).toContain("github.run_id");
+    }
   });
 
   it("ui enterprise / all requires Chromium on a web PR and the screenshot pack only on a full run", () => {
@@ -209,5 +273,69 @@ describe("the workflows wire the scope fail-closed", () => {
     expect(integ.at(-1)).toBe("!**/*.md");
     const engines = workflow("engine-images-build.yml").on.pull_request.paths;
     expect(engines).toEqual(expect.arrayContaining(["engines/**", "pnpm-lock.yaml", "**/Dockerfile"]));
+  });
+});
+
+// ADR-0323: a dry run over the real workflow files shows which jobs a PR starts for a given change.
+describe("the dry run (scripts/ci-plan.mjs) selects the expected jobs", () => {
+  const REQUIRED = ["ci:build-and-test", "ui-enterprise:all", "security:secrets", "security:dependencies"];
+
+  it("a docs-only PR: only the scope jobs, the aggregates and the untrimmed security gates", () => {
+    const plan = planFor(["docs/guide.md", "internal/memory/STATE.md", "packages/db/README.md"]);
+    expect(ranJobs(plan).sort()).toEqual(
+      ["ci:scope", "ci:build-and-test", "ui-enterprise:scope", "ui-enterprise:all", "security:secrets", "security:dependencies",
+        "security:engines"].sort(),
+    );
+    expect(runnerCount(plan)).toBe(7);
+  });
+
+  it("a UI-only PR: the web suites and the bundle/tokens guard, one gateway runner, no DB shards, no coverage, no import cycles", () => {
+    const plan = planFor(["apps/web/src/views/admin/governance/ChatOpsPage.tsx"]);
+    const ran = ranJobs(plan);
+    expect(ran).toEqual(expect.arrayContaining([...REQUIRED, "ci:build-and-test-base", "ci:gateway-tests", "ci:spa-mock",
+      "ui-enterprise:static", "ui-enterprise:browsers", "security:sast", "security:image"]));
+    for (const j of ["ci:gateway-coverage", "ci:spa-journeys", "ci:docker-build", "ui-enterprise:screenshots", "security:engine-image",
+      "import-cycles:gateway-import-cycles", "integrations:kong-adapter", "client-compat:client-compat"]) {
+      expect(ran, j).not.toContain(j);
+    }
+    const ci = plan.workflows.find((w) => w.file === "ci.yml").jobs;
+    expect(ci["gateway-tests"].runners).toBe(1);
+    expect(plan.workflows.find((w) => w.file === "ui-enterprise.yml").jobs.browsers.runners).toBe(1);
+  });
+
+  it("the bundle-size and tokens guard (ui enterprise static) runs on any PR that touches apps/web or packages/ui", () => {
+    for (const f of ["apps/web/src/a.tsx", "apps/web/src/styles/tokens.css", "packages/ui/src/Button.tsx"]) {
+      expect(ranJobs(planFor([f])), f).toContain("ui-enterprise:static");
+    }
+  });
+
+  it("a gateway-only PR: the five DB shards and their coverage check, no web suites", () => {
+    const plan = planFor(["apps/gateway/src/route-classes.ts"]);
+    const ran = ranJobs(plan);
+    expect(ran).toEqual(expect.arrayContaining([...REQUIRED, "ci:gateway-tests", "ci:gateway-coverage", "import-cycles:gateway-import-cycles"]));
+    expect(ran).not.toContain("ci:spa-mock");
+    expect(ran).not.toContain("ui-enterprise:browsers");
+    expect(plan.workflows.find((w) => w.file === "ci.yml").jobs["gateway-tests"].runners).toBe(5);
+  });
+
+  it("a lockfile PR runs everything a PR can start: the full suite", () => {
+    const plan = planFor(["pnpm-lock.yaml"]);
+    expect(plan.scope.full).toBe(true);
+    const ran = ranJobs(plan);
+    for (const j of [...REQUIRED, "ci:gateway-coverage", "ci:spa-journeys", "ci:docker-build", "ci:spa-mock", "ui-enterprise:screenshots",
+      "security:sast", "security:image", "security:engine-image", "import-cycles:gateway-import-cycles", "engine-images-build:compare"]) {
+      expect(ran, j).toContain(j);
+    }
+    expect(plan.workflows.find((w) => w.file === "ui-enterprise.yml").jobs.browsers.runners).toBe(3);
+    // every ci, ui-enterprise and security job that is not push-only runs
+    for (const w of plan.workflows.filter((x) => ["ci.yml", "ui-enterprise.yml", "security.yml"].includes(x.file))) {
+      for (const [id, j] of Object.entries(w.jobs)) if (!["sign", "engine-sign"].includes(id)) expect(j.ran, `${w.file} ${id}`).toBe(true);
+    }
+  });
+
+  it("the required aggregates and the untrimmed security gates run on every PR shape", () => {
+    for (const files of [["docs/a.md"], ["apps/web/src/a.tsx"], ["apps/gateway/src/a.ts"], ["pnpm-lock.yaml"], ["engines/garak/Dockerfile"]]) {
+      expect(ranJobs(planFor(files)), files[0]).toEqual(expect.arrayContaining(REQUIRED));
+    }
   });
 });

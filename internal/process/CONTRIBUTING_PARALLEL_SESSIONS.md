@@ -232,13 +232,14 @@ a time and over 200 runs queued. Since 2026-11-07 (ADR-0262):
 
 | Event | What runs |
 |---|---|
-| `pull_request`, code changed | `ci.yml`: build, typecheck, package suites, static pre-flights (migration guard, licence gate), and the four gateway shards and their coverage check, web-only PRs included (gateway tests read `apps/web` sources). `security.yml`: CodeQL, gitleaks, dependency audit. `ui-enterprise.yml`: tokens, baseline guard and bundle size. |
+| `pull_request`, code changed | `ci.yml`: build, typecheck, package suites, static pre-flights (migration guard, licence gate), and the five gateway shards and their coverage check. A web-only PR (`gateway=false`, ADR-0323) runs ONE gateway runner instead, with only the tests that read `apps/web` sources or walk the repository (`node scripts/ci-scope.mjs --gateway-web-readers`). `security.yml`: CodeQL, gitleaks, dependency audit. `ui-enterprise.yml`: tokens, baseline guard and bundle size. |
 | `pull_request`, code outside `apps/web/**` changed | also `import-cycles.yml`, and `integrations.yml` when its paths match (both path-filtered; neither reads `apps/web`) |
 | `pull_request`, `apps/web/**` (or `packages/shared/**`, the lockfile) changed (`web`) | also the mocked SPA shards and the Chromium enterprise browser job |
 | `pull_request`, the root image's build context or its Trivy gate changed (`image`) | also Trivy: the root `Dockerfile`, `.dockerignore`, the workspace manifests and lockfile, `apps/**` and `packages/**` (not tests or `apps/web/e2e`), `security.yml`, `security/image-allowlist*.json`, and `scripts/security-{gate,runtime-contents,suppressions}.mjs` and `scripts/security-cosign-verify.sh` |
 | `pull_request`, an engine's own input changed (`engines`) | also the engine image scans and SBOMs, and the engine build-and-compare: `engines/**`, any `Dockerfile`, the lockfile, the engine packages and scripts, `security/image-allowlist.engine-*.json`, the gate scripts the engine scan runs, the image workflows. Not `packages/**` or `apps/**`, which each engine's shim stage also copies: a change there alone builds and compares the engines at merge time. |
 | `pull_request`, docs only | every scope-gated job is skipped by `if:`; `build-and-test` and `ui enterprise / all` still report. gitleaks and the dependency audit still run. |
-| `pull_request`, the scope rules themselves changed | everything, as a full run (`scripts/ci-scope.mjs`, its test, `.github/actions/ci-scope`) |
+| `pull_request`, the scope rules themselves changed | everything, as a full run (`scripts/ci-scope.mjs`, `scripts/ci-plan.mjs`, their test, `.github/actions/ci-scope`) |
+| `pull_request`, a dependency, CI, schema/migration or security-config file changed (ADR-0323) | everything, as a full run: the lockfile, any `package.json`, `pnpm-workspace.yaml`, `.npmrc`, `.node-version`, `tsconfig.base.json`, `.github/workflows/**`, `.github/actions/**`, `CODEOWNERS`, `dependabot.yml`, `packages/db/src/schema.ts`, `packages/db/migrations/**`, `security/**`, `.gitleaks.toml` |
 | `merge_group`, push to `main`, nightly 03:17 UTC (`security.yml` 05:17 UTC) | everything: the above plus the SPA journeys, docker build, every SPA shard, Firefox, WebKit and the screenshot pack, every engine image scan, the demo journeys, gVisor and the engine build-and-compare |
 
 What this means for a builder:
@@ -260,8 +261,10 @@ What this means for a builder:
   path-filtered workflow (`import-cycles`, `integrations`, `endpoint-agent`, `engine-images-build`, `gvisor`, `demo`)
   or a workflow without a `merge_group` trigger.
 - No job is gated by a workflow-level path filter any more where it can be required. Gate a new job on the `scope`
-  job's outputs (`.github/actions/ci-scope`): `full`, `code`, `web`, `image` or `engines`, and add a case
+  job's outputs (`.github/actions/ci-scope`): `full`, `code`, `web`, `image`, `engines` or `gateway`, and add a case
   to `scripts/ci-scope.test.mjs`.
+- **Dry run before you push** (ADR-0323): `node scripts/ci-plan.mjs --base origin/main` prints the scope and every job
+  your branch's PR will start, evaluated from the workflow files themselves.
 - PR trim (owner decision 2026-11-07, measured about 37 check runs per PR before it): a web-only PR runs about 23 jobs
   and a gateway-only PR about 19, against 37 before. The largest remaining items are the five mocked SPA shards and the
   four gateway shards.

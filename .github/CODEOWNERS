@@ -43,3 +43,4 @@
 /.github/actions/                                 @dhruvmahendrapatel
 /scripts/ci-scope.mjs                             @dhruvmahendrapatel
 /scripts/ci-scope.test.mjs                        @dhruvmahendrapatel
+/scripts/ci-plan.mjs                              @dhruvmahendrapatel
