@@ -57,7 +57,6 @@ import {
   type McpAdmissionFinding,
   type McpAdmissionScan,
 } from "@regulait/shared";
-import { notifyGovernanceAlerts } from "./chatops.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 
@@ -135,10 +134,7 @@ export async function recordAdmissionEngineScan(
   db: Db,
   input: { subject: AdmissionScanSubject; report: unknown; engineRunId?: string | null },
 ): Promise<RecordedAdmissionScan> {
-  const out = await db.transaction((tx) => recordAdmissionEngineScanTx(tx, input));
-  // the admin's notification reaches chat once the revocation has committed (the alert row is the durable one)
-  if (out.alertId) await notifyGovernanceAlerts(db, [out.alertId], null).catch(() => undefined);
-  return out;
+  return db.transaction((tx) => recordAdmissionEngineScanTx(tx, input));
 }
 
 /**

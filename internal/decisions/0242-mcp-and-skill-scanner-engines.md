@@ -400,8 +400,9 @@ The owner answered the five open questions and the #843 placement question (rela
    includes a re-scan that repeats a flag the admin already reviewed, and a fail under the same rule set
    (`recordAdmissionEngineScan` no longer looks for an earlier fail).
    - **Notify the admin.** The revocation raises a governance alert (`admission-engine-clearance-revoked`, high,
-     subject `<kind>:<id>`, one open alert per subject), carrying counts and locations only. It is pushed to chat
-     through `notifyGovernanceAlerts` after the commit; the alert row is the durable notice.
+     subject `<kind>:<id>`, one open alert per subject), carrying counts and locations only, written in the scan's own
+     transaction. It lands in the admins' governance-alert queue; a chat push for it is not wired yet (a direct
+     import of the chat courier would add a gateway import cycle).
    - **The audited override is the existing route.** `POST /v1/servers/:id/admission/clear` and the skill admit route
      need a `settings_relax` step-up, a reason and a signed AI BOM snapshot, and each writes an audit row naming the
      findings. The override is pinned to the digest and is undone by the next `fail`.
