@@ -1,4 +1,12 @@
-# Pinned release-signing public keys (ADR-0041)
+# Pinned release-signing public keys (ADR-0041, ADR-0324)
+
+> **ADR-0324 (2026-11-15): this directory becomes a root-signed keyring at the first ceremony.** Offline root keys
+> (2 of 3) sign `keyring.json`, which authorises the release signing key(s), names the one builder workflow and lists
+> revoked keys; `root/` holds the root public keys; `ceremonies/` holds each ceremony's witness log. Releases are
+> verified with `scripts/verify-release.sh` (signature, SBOM, provenance). The step-by-step runbook, including
+> rotation and the compromise drill, is [docs/ops/RELEASE_KEY_CEREMONY.md](../../docs/ops/RELEASE_KEY_CEREMONY.md);
+> it supersedes the "Rotation" section below once `keyring.json` exists. CI requires every `*.pub` here to be a
+> signing key the statement authorises.
 
 Every file here is one **Ed25519 public key in SPKI PEM form**. Together they are the
 *keyring* — the complete set of signers a deployment will accept an update from.
