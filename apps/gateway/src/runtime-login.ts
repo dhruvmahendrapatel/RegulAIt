@@ -30,6 +30,7 @@ import {
   type Db,
   type RuntimeLoginFacts,
 } from "@regulait/db";
+import { errMessage } from "./err-serializer.js";
 import { INSTALL_SECRETS_DIR_ENV } from "./receipt-signing-key.js";
 
 export const RUNTIME_DATABASE_URL_ENV = "REGULAIT_RUNTIME_DATABASE_URL";
@@ -107,7 +108,7 @@ export async function resolveRuntimeDatabase(
     } catch {
       /* best effort */
     }
-    throw new RuntimeLoginBootError([`could not be created through the owner connection: ${(err as Error).message}`], RUNTIME_LOGIN_ROLE);
+    throw new RuntimeLoginBootError([`could not be created through the owner connection: ${errMessage(err)}`], RUNTIME_LOGIN_ROLE);
   }
   return { db: createDb(url.toString()), source: "install_generated", created: true };
 }
