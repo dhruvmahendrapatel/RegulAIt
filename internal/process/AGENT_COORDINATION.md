@@ -31,6 +31,9 @@
 - A Codex review of a Claude lane counts as independent, and so does a Claude review of a Codex lane.
 - An external sign-in surface needs a separate security review ("SECURITY APPROVE at <sha>").
 
+**How to review:** [REVIEW_CHECKLISTS.md](REVIEW_CHECKLISTS.md) (ADR-0260): numbered findings with a severity, the code,
+security (`SECURITY APPROVE at <sha>`) and design checklists, READY and delta-review rules.
+
 **Verdict format:** one PR issue comment starting `APPROVE at <full 40-char sha>` or `REQUEST CHANGES at <full sha>`.
 List blocking findings with file:line and a concrete fix. End with the Claude Code footer if you are Claude, or your own
 attribution line otherwise. Post without waiting for anyone's confirmation.

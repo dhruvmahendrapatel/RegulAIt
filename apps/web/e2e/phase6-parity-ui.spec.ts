@@ -382,6 +382,8 @@ test.describe("ADR-0069 cross-vendor cost consolidation — metered and imported
     await expect(page.getByTestId("cc-subjects")).toBeVisible();
 
     const subjects = page.getByTestId("cc-subjects");
+    // I-2: each subject is an expandable row; its two-basis detail opens in place
+    await subjects.getByRole("button", { name: /^Details: / }).first().click();
     // both basis words are rendered, each labelled with what it MEANS
     await expect(subjects.getByText(/metered — regulAIt observed and priced/).first()).toBeVisible();
     await expect(subjects.getByText(/imported — restated from a file you supplied/).first()).toBeVisible();

@@ -59,6 +59,8 @@ import { OWASP_PACKS } from "./owasp-packs.js";
 import { ISO_PACKS } from "./iso-packs.js";
 // ADR-0296 part 2 (P18 B2): GDPR, CCPA, DPDP and LGPD privacy packs (`privacy-packs.ts`, type-only imports back)
 import { PRIVACY_PACKS } from "./privacy-packs.js";
+// ADR-0297 (P18 B6): SR 11-7 and NYC Local Law 144 sector packs (`sector-packs.ts`, type-only imports back)
+import { SECTOR_PACKS } from "./sector-packs.js";
 // batch B1 — a pack's cascade PRESET is validated with the SAME check every
 // compliance-profile version body passes: only enforcing profile columns,
 // correctly typed, selection (`tag`) refused. One validator, not two.
@@ -96,6 +98,9 @@ export const COMPLIANCE_PACK_FRAMEWORKS = [
   "ccpa",
   "dpdp",
   "lgpd",
+  // ADR-0297 (P18 B6): sector packs (`sector-packs.ts`)
+  "sr-11-7",
+  "nyc-ll144",
   "custom",
 ] as const;
 export type CompliancePackFramework = (typeof COMPLIANCE_PACK_FRAMEWORKS)[number];
@@ -1816,4 +1821,6 @@ DEFAULT_COMPLIANCE_PACKS.push(
   ...ISO_PACKS,
   // ADR-0296 part 2 (P18 B2): gdpr@1, ccpa@1, dpdp@1, lgpd@1
   ...PRIVACY_PACKS,
+  // ADR-0297 (P18 B6): sr-11-7@1 and nyc-ll144@1
+  ...SECTOR_PACKS,
 );
