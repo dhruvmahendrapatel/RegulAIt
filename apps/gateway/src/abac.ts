@@ -31,12 +31,15 @@
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import {
+  a2aAgents,
   abacPolicies,
   abacPolicyVersions,
+  agents,
   and,
   asc,
   auditLog,
   builderAgents,
+  connectors,
   deployTargets,
   desc,
   eq,
@@ -64,8 +67,10 @@ import {
   abacSchemaText,
   evaluateAbac,
   hasAgentPrincipal,
+  hasGovernedActions,
   isValidTimezone,
   type AbacAgentAttrs,
+  type AbacGovernedResourceAttrs,
   type AbacDelegationContext,
   type AbacPolicy,
   type AbacRequest,
@@ -225,47 +230,74 @@ function priceTierOf(pricePerCallUsd: number | null | undefined): string {
   return pricePerCallUsd > 0 ? "metered" : "free";
 }
 
+/** the same three tiers for a model, read from its per-million-input-token price (`agents.cost_per_mtok_in`): no
+ * price recorded = "unpriced", zero = "free", anything above = "metered". Kept apart from `priceTierOf`, whose input
+ * is a per-call price, so neither unit is read as the other (review #836). */
+function modelPriceTierOf(costPerMTokInUsd: number | null | undefined): string {
+  if (costPerMTokInUsd == null) return "unpriced";
+  return costPerMTokInUsd > 0 ? "metered" : "free";
+}
+
+/**
+ * The sponsor's principal bag and the call's project facts, read once for both request builders (a tool call and a
+ * governed model, connector or A2A call), so the two cannot drift. `classifications` follows the project; the scalar
+ * `dataSensitivity` is the first of them (ADR-0018 addendum: the project's compliance classification set is the
+ * server-authoritative source).
+ */
+async function sponsorAndProjectFacts(db: Db, userId: string, projectId: string | null | undefined) {
+  const [userRow, assignments, memberships, projectRow, derived, aiTrainingCurrent] = await Promise.all([
+    db.select({ id: users.id, isAdmin: users.isAdmin }).from(users).where(eq(users.id, userId)),
+    db
+      .select({ roleId: roleAssignments.roleId, roleName: roles.name })
+      .from(roleAssignments)
+      .innerJoin(roles, eq(roles.id, roleAssignments.roleId))
+      .where(eq(roleAssignments.userId, userId)),
+    db
+      .select({ teamName: teams.name })
+      .from(teamMembers)
+      .innerJoin(teams, eq(teams.id, teamMembers.teamId))
+      .where(eq(teamMembers.userId, userId)),
+    projectId ? db.select({ id: projects.id, name: projects.name }).from(projects).where(eq(projects.id, projectId)) : Promise.resolve([]),
+    deriveAbacDeployContext(db, projectId ?? null),
+    // schema v3 (ADR-0182 A14): from the stored AI policies and acknowledgements, here and only here, so the
+    // simulation surface (which calls assembleAbacRequest) builds it exactly as enforcement does
+    aiTrainingCurrentFor(db, userId),
+  ]);
+  const classifications = projectId ? await projectClassifications(db, projectId) : [];
+  return {
+    sponsor: {
+      id: userId,
+      roles: [...new Set(assignments.map((a) => a.roleName))],
+      roleIds: [...new Set(assignments.map((a) => a.roleId))],
+      teams: [...new Set(memberships.map((m) => m.teamName))],
+      isAdmin: userRow[0]?.isAdmin ?? false,
+      aiTrainingCurrent,
+    },
+    project: {
+      projectId: projectRow[0]?.id ?? null,
+      projectName: projectRow[0]?.name ?? null,
+      classifications,
+      dataSensitivity: classifications.length > 0 ? [...classifications].sort()[0]! : null,
+    },
+    derived,
+  };
+}
+
 /** Assemble the full request the Cedar engine evaluates. Exported for tests
  * and for the simulation surface, which must build it EXACTLY as enforcement
  * does or a preview would be a different question than the real one. */
 export async function assembleAbacRequest(db: Db, ctx: AbacToolContext): Promise<AbacRequest> {
-  const [userRow, assignments, memberships, serverRow, toolRow, projectRow, derived, aiTrainingCurrent] =
-    await Promise.all([
-      db
-        .select({ id: users.id, isAdmin: users.isAdmin })
-        .from(users)
-        .where(eq(users.id, ctx.userId)),
-      db
-        .select({ roleId: roleAssignments.roleId, roleName: roles.name })
-        .from(roleAssignments)
-        .innerJoin(roles, eq(roles.id, roleAssignments.roleId))
-        .where(eq(roleAssignments.userId, ctx.userId)),
-      db
-        .select({ teamName: teams.name })
-        .from(teamMembers)
-        .innerJoin(teams, eq(teams.id, teamMembers.teamId))
-        .where(eq(teamMembers.userId, ctx.userId)),
-      db
-        .select({ name: mcpServers.name, price: mcpServers.pricePerCallUsd })
-        .from(mcpServers)
-        .where(eq(mcpServers.id, ctx.serverId)),
-      db
-        .select({ price: mcpTools.pricePerCallUsd })
-        .from(mcpTools)
-        .where(and(eq(mcpTools.serverId, ctx.serverId), eq(mcpTools.name, ctx.toolName))),
-      ctx.projectId
-        ? db
-            .select({ id: projects.id, name: projects.name })
-            .from(projects)
-            .where(eq(projects.id, ctx.projectId))
-        : Promise.resolve([]),
-      deriveAbacDeployContext(db, ctx.projectId),
-      // schema v3 (ADR-0182 A14): from the stored AI policies and acknowledgements, here and only here, so the
-      // simulation surface (which calls this same function) builds it exactly as enforcement does
-      aiTrainingCurrentFor(db, ctx.userId),
-    ]);
-
-  const classifications = ctx.projectId ? await projectClassifications(db, ctx.projectId) : [];
+  const [facts, serverRow, toolRow] = await Promise.all([
+    sponsorAndProjectFacts(db, ctx.userId, ctx.projectId),
+    db
+      .select({ name: mcpServers.name, price: mcpServers.pricePerCallUsd })
+      .from(mcpServers)
+      .where(eq(mcpServers.id, ctx.serverId)),
+    db
+      .select({ price: mcpTools.pricePerCallUsd })
+      .from(mcpTools)
+      .where(and(eq(mcpTools.serverId, ctx.serverId), eq(mcpTools.name, ctx.toolName))),
+  ]);
   const resource: AbacResourceAttrs = {
     id: `${ctx.serverId}/${ctx.toolName}`,
     serverId: ctx.serverId,
@@ -273,31 +305,19 @@ export async function assembleAbacRequest(db: Db, ctx: AbacToolContext): Promise
     toolName: ctx.toolName,
     kind: ctx.toolKind,
     priceTier: priceTierOf(toolRow[0]?.price ?? serverRow[0]?.price ?? null),
-    projectId: projectRow[0]?.id ?? null,
-    projectName: projectRow[0]?.name ?? null,
-    classifications,
-    // The §8.3 cascade's data-sensitivity signal is the project's compliance
-    // classification set (ADR-0018 addendum names exactly this as the
-    // server-authoritative source). Exposed as a single scalar too, because
-    // most policies want "is this sensitive at all" rather than a set walk.
-    dataSensitivity: classifications.length > 0 ? [...classifications].sort()[0]! : null,
+    ...facts.project,
   };
 
   return {
     principal: {
-      id: ctx.userId,
-      roles: [...new Set(assignments.map((a) => a.roleName))],
-      roleIds: [...new Set(assignments.map((a) => a.roleId))],
-      teams: [...new Set(memberships.map((m) => m.teamName))],
-      isAdmin: userRow[0]?.isAdmin ?? false,
+      ...facts.sponsor,
       sessionOrigin: ctx.principal?.sessionOrigin ?? "unknown",
       mfaCompleted: ctx.principal?.mfaCompleted ?? false,
-      aiTrainingCurrent,
     },
     resource,
     context: {
-      deployModes: derived.deployModes,
-      environments: derived.environments,
+      deployModes: facts.derived.deployModes,
+      environments: facts.derived.environments,
       rateLimitUsagePct: ctx.rateLimitUsagePct ?? 0,
       // Schema v2. The engine drops it for a v1 policy group and for anything
       // that does not parse as a literal address, so passing it unconditionally
@@ -308,6 +328,88 @@ export async function assembleAbacRequest(db: Db, ctx: AbacToolContext): Promise
     ...(ctx.delegation ? { delegation: ctx.delegation } : {}),
     ...(ctx.at ? { at: ctx.at } : {}),
   };
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0251 slice 4 — schema v5: model, connector and A2A calls
+// ---------------------------------------------------------------------------
+
+/** a model, connector or A2A call, as the governed core sees it */
+export type GovernedAbacTarget =
+  | { type: "model"; id: string; mode: string }
+  | { type: "connector"; id: string; operation: "read" | "write" }
+  | { type: "a2a"; id: string; skillId: string | null };
+
+/**
+ * ADR-0251 slice 4 — the Cedar request for a model, connector or A2A call (actions `ModelInvoke`, `ConnectorCall`,
+ * `A2aMessage`, schema v5). The sponsor and project facts come from `sponsorAndProjectFacts`, the same reader
+ * `assembleAbacRequest` uses for a tool call. The governed core decides from below the routes, so it does not know the
+ * request's session facts (`sessionOrigin`, `mfaCompleted`, `clientIp`), its delegation chain or its rate
+ * consumption, and it evaluates the sponsor as `User`. Those read as their strict values here, and a v5 policy that can
+ * reach these calls is refused at write time if it reads any of them (review #836), so a forbid can never validate and
+ * then silently never fire.
+ */
+export async function assembleGovernedAbacRequest(
+  db: Db,
+  args: { userId: string; target: GovernedAbacTarget; projectId: string | null; at?: Date },
+): Promise<AbacRequest> {
+  const { userId, target, projectId } = args;
+  const [facts, resourceRow] = await Promise.all([
+    sponsorAndProjectFacts(db, userId, projectId),
+    target.type === "model"
+      ? db
+          .select({ name: agents.name, provider: agents.provider, model: agents.model, costPerMTokIn: agents.costPerMTokIn })
+          .from(agents)
+          .where(eq(agents.id, target.id))
+      : target.type === "connector"
+        ? db
+            .select({ name: connectors.name, providerKind: connectors.providerKind, price: connectors.pricePerCallUsd })
+            .from(connectors)
+            .where(eq(connectors.id, target.id))
+        : db.select({ name: a2aAgents.name, price: a2aAgents.pricePerCallUsd }).from(a2aAgents).where(eq(a2aAgents.id, target.id)),
+  ]);
+  const row = (resourceRow[0] ?? {}) as {
+    name?: string;
+    provider?: string | null;
+    model?: string | null;
+    providerKind?: string | null;
+    price?: number | null;
+    costPerMTokIn?: number | null;
+  };
+  const shared = {
+    id: target.id,
+    name: row.name ?? "",
+    priceTier: target.type === "model" ? modelPriceTierOf(row.costPerMTokIn ?? null) : priceTierOf(row.price ?? null),
+    ...facts.project,
+  };
+  const governed: AbacGovernedResourceAttrs =
+    target.type === "model"
+      ? { ...shared, type: "Model", provider: row.provider ?? "", model: row.model ?? "", mode: target.mode }
+      : target.type === "connector"
+        ? { ...shared, type: "Connector", providerKind: row.providerKind ?? "", operation: target.operation }
+        : { ...shared, type: "RemoteAgent", skillId: target.skillId };
+  return {
+    // the facts the core cannot know read as their strict values; a v5 policy that can reach this call may not read
+    // them at all (kernel ABAC_GOVERNED_UNSUPPLIED_FACTS refuses it at write time), so these never decide anything
+    principal: { ...facts.sponsor, sessionOrigin: "unknown", mfaCompleted: false },
+    governed,
+    context: { deployModes: facts.derived.deployModes, environments: facts.derived.environments, rateLimitUsagePct: 0, clientIp: null },
+    ...(args.at ? { at: args.at } : {}),
+  };
+}
+
+/**
+ * ADR-0251 slice 4 — the ABAC verdict for a model, connector or A2A call: null when no active policy can apply to one
+ * (no active v5 policy), so an install without such policies pays only the policy load. Pure evaluation errors fail
+ * closed inside the engine (`abac-engine-error`).
+ */
+export async function evaluateAbacForGovernedCall(
+  db: Db,
+  args: { userId: string; target: GovernedAbacTarget; projectId: string | null },
+): Promise<AbacDecision | null> {
+  const policies = (await loadActiveAbacPolicies(db)).filter((p) => hasGovernedActions(p.schemaVersion));
+  if (policies.length === 0) return null;
+  return evaluateAbac(policies, await assembleGovernedAbacRequest(db, args));
 }
 
 // ---------------------------------------------------------------------------
