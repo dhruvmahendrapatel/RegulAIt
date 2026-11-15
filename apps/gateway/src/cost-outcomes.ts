@@ -188,6 +188,9 @@ const windowQuery = z.object({
   to: z.string().datetime({ offset: true }).optional(),
 });
 
+/** the refusal for a window resolveOutcomeWindow rejects */
+export const WINDOW_REFUSAL = `send from < to, at most ${COST_OUTCOME_LIMITS.maxWindowDays} days apart`;
+
 export function resolveOutcomeWindow(q: { from?: string | undefined; to?: string | undefined }, now = new Date()): { from: Date; to: Date } {
   const to = q.to ? new Date(q.to) : now;
   const from = q.from ? new Date(q.from) : new Date(to.getTime() - COST_OUTCOME_LIMITS.defaultWindowDays * 86_400_000);
@@ -489,7 +492,7 @@ export function registerCostOutcomeRoutes(app: FastifyInstance, db: Db): void {
     },
     refusal: {
       status: 400,
-      body: { error: "invalid_window", detail: `send from < to, at most ${COST_OUTCOME_LIMITS.maxWindowDays} days apart` },
+      body: { error: "invalid_window", detail: WINDOW_REFUSAL },
     },
     extra: () => ({ basis: "metered", basisStatement: COST_OUTCOME_BASIS_STATEMENT }),
   };
@@ -504,8 +507,9 @@ export function registerCostOutcomeRoutes(app: FastifyInstance, db: Db): void {
     let window;
     try {
       window = resolveOutcomeWindow(parsed.data);
-    } catch (e) {
-      return refuse(reply, 400, "invalid_window", e instanceof Error ? e.message : "invalid window");
+    } catch {
+      // a fixed, server-authored refusal (log-error-text: no raw error message leaves the gateway)
+      return refuse(reply, 400, "invalid_window", WINDOW_REFUSAL);
     }
     const out = await buildCostOutcomeSummary(db, parsed.data, window);
     await auditOutcome(db, req.authCtx.userId, COST_OUTCOME_RULE_IDS.summaryRead,
