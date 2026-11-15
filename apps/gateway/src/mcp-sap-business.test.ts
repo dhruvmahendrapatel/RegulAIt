@@ -28,6 +28,7 @@ import {
   desc,
   eq,
   mcpServers,
+  mcpTools,
   orgSettings,
   ORG_SETTINGS_ID,
   rateLimits,
@@ -41,6 +42,7 @@ import {
 import { BATCH4_STRICT_DEFAULTS } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
+import { approvalRuleQuorumsMatchingNow } from "./governed-evaluate.js";
 import { deriveSapIdempotencyKey, SAP_BUSINESS_DEFAULTS, SAP_BUSINESS_RULE_IDS } from "./mcp-sap-business.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
@@ -569,3 +571,32 @@ describe("ADR-0230 owner decision 2026-11-15: the SAP defaults are org settings"
     }
   });
 });
+
+describe("security review #798 (3bf47251): every reader of a tool's kind agrees on an SAP business server", () => {
+  it("marking stores every tool as a write, and a tool added later is stored as a write", async () => {
+    const serverId = await mkServer("stored-kind");
+    const marked = await app.inject({ method: "POST", url: `/v1/servers/${serverId}/system-class`, headers: adminKey, payload: { systemClass: "sap_business", approverRoleId: roleId } });
+    expect(marked.statusCode, marked.body).toBe(201);
+    const kinds = await db.select({ name: mcpTools.name, kind: mcpTools.kind }).from(mcpTools).where(eq(mcpTools.serverId, serverId));
+    expect(kinds.every((k) => k.kind === "write"), JSON.stringify(kinds)).toBe(true);
+    const added = await app.inject({ method: "POST", url: `/v1/servers/${serverId}/tools`, headers: boot, payload: { name: "list_sales_orders", kind: "read" } });
+    expect(added.statusCode, added.body).toBe(201);
+    expect(added.json().kind).toBe("write");
+  });
+
+  it("the execution re-check treats a stored 'read' tool as a write, so a raised write-only quorum binds it", async () => {
+    const serverId = await mkServer("recheck");
+    const marked = await app.inject({ method: "POST", url: `/v1/servers/${serverId}/system-class`, headers: adminKey, payload: { systemClass: "sap_business", approverRoleId: roleId } });
+    expect(marked.statusCode, marked.body).toBe(201);
+    const out = await executeGovernedToolCall(db, DATA_KEY, { userId: callerId, serverId, toolName: READ, projectId: await mkProject(100), arguments: { idempotencyKey: crypto.randomUUID() } });
+    expect(out.kind, JSON.stringify(out)).toBe("approval_required");
+    // a row written before this fix (or by any path that trusted the upstream hint) still says 'read'
+    await db.update(mcpTools).set({ kind: "read" }).where(and(eq(mcpTools.serverId, serverId), eq(mcpTools.name, READ)));
+    // the admin raises the seeded write-only rule's quorum after the call was queued
+    await db.update(approvalRules).set({ quorum: 3 }).where(eq(approvalRules.id, marked.json().approvalRule.id));
+    const now = await approvalRuleQuorumsMatchingNow(db, { userId: callerId, serverId, toolName: READ, projectId: null });
+    expect(now, "the write-only rule still matches").not.toBeNull();
+    expect(Math.max(...now!.map((r) => r.quorum))).toBe(3);
+  });
+});
+

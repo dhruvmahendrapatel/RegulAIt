@@ -297,6 +297,9 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   privacyOpsEnabled: fromStored(false, (v, b) => b === true && v === false),
   // a longer due date for data-subject requests is looser
   dsrSlaDays: atMost(30),
+  certificationReminderHours: exempt(
+    "when a campaign's deadline reminder goes out; the notice decides nothing (no keep, no revoke) and carries ids and counts only",
+  ),
   recommendationJudgeEnabled: exempt("adds a model-judged annotation to the deterministic findings; it refuses and allows nothing"),
   recommendationJudgeAgentId: exempt("names the judge of the annotation above; it refuses and allows nothing"),
   // ADR-0213: turning the vendor questionnaire drafter on sends supplier material to a model

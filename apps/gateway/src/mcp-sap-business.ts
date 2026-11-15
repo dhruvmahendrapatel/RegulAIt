@@ -31,7 +31,7 @@
 import { createHmac, hkdfSync } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { and, approvalRules, auditLog, eq, gte, isNull, lte, mcpServers, projects, rateLimits, sql, type Db } from "@regulait/db";
+import { and, approvalRules, auditLog, eq, gte, isNull, lte, mcpServers, mcpTools, projects, rateLimits, sql, type Db } from "@regulait/db";
 import { canonicalMcpAudience, createApprovalRuleSchema } from "@regulait/shared";
 import { pairwiseSubject } from "./delegated-token.js";
 import { identitySecretsFor } from "./oauth/common.js";
@@ -73,6 +73,22 @@ export interface SapBusinessSettings {
   unattributedWritesAllowed: boolean;
   /** true = the seeded approval rule covers every tool on the server, not only writes (a tightening) */
   readsApproveFirst: boolean;
+}
+
+/**
+ * Security review #798 (3bf47251): the stored `mcp_tools.kind` for a tool on an SAP business server is always 'write',
+ * whatever the upstream's `readOnlyHint` (or an admin's POST) says, so every reader of the column (the execution
+ * re-check, policy simulation, orchestration, autonomy, the builder) agrees with the proxy. Unmarking leaves the
+ * stored kinds at 'write' (the stricter reading) until the next manifest sync restores the upstream's hints.
+ */
+export function sapStoredToolKind(systemClass: string | null | undefined, kind: "read" | "write"): "read" | "write" {
+  return systemClass === "sap_business" ? "write" : kind;
+}
+
+/** the server's system class, for the writers of `mcp_tools.kind` */
+export async function serverSystemClass(db: Db, serverId: string): Promise<string | null> {
+  const [row] = await db.select({ systemClass: mcpServers.systemClass }).from(mcpServers).where(eq(mcpServers.id, serverId));
+  return row?.systemClass ?? null;
 }
 
 /** The org's SAP business settings (owner decision 2026-11-15), relaxed only through the stepped-up settings PUT. */
@@ -153,7 +169,9 @@ async function seededDefaults(db: Db, serverId: string): Promise<{ approvalRuleI
         eq(approvalRules.serverScope, "server"),
         eq(approvalRules.scope, "fleet"),
         isNull(approvalRules.toolName),
-        // a rule seeded under sapReadsApproveFirst covers reads too (write_only false)
+        // a rule seeded under sapReadsApproveFirst covers reads too (write_only false); only argument-bound
+        // ('action') rules are reported, as the seed creates (code review #798 at 3bf47251)
+        eq(approvalRules.approvalScope, "action"),
       ),
     )
     .limit(100);
@@ -278,6 +296,9 @@ export function registerMcpSapBusinessRoutes(app: FastifyInstance, db: Db): void
         if (!server) return null;
         if (server.systemClass === "sap_business") throw new AlreadyMarked(server.name);
         await tx.update(mcpServers).set({ systemClass: "sap_business" }).where(eq(mcpServers.id, serverId));
+        // security review #798: every stored tool kind on the server becomes 'write' with the mark, in the same
+        // transaction, so no reader of mcp_tools.kind sees an upstream-claimed read
+        await tx.update(mcpTools).set({ kind: "write" }).where(eq(mcpTools.serverId, serverId));
         // review #798: a re-mark (mark, unmark, mark) reuses the rows the first mark seeded while they still hold the
         // defaults, instead of seeding a second pair; a row someone relaxed since is not reused, so the new one is seeded
         const kept = await seededDefaultRows(tx, serverId, { approverUserId: adminId, approverRoleId: body.approverRoleId }, settings);

@@ -1,6 +1,6 @@
 # ADR-0069: Cross-vendor cost consolidation — imported spend, restated, never blended with metered spend
 
-- **Status**: Accepted
+- **Status**: Accepted; amended by ADR-0322 (2026-11-15: opt-in, per-tenant read-only vendor usage/cost pull)
 - **Date**: 2026-08-07
 - **Migration**: 0081
 - **Slice**: [COMPETITIVE_PARITY_PLAN.md](../product/COMPETITIVE_PARITY_PLAN.md) §1 Slice C
