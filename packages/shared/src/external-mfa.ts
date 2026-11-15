@@ -35,9 +35,9 @@ export const EXTERNAL_MFA_PATHS: Readonly<Record<ExternalMfaPortal, string>> = O
   supplier: "/supplier/v1/session/mfa",
   auditor: "/v1/auditor/session/mfa",
 });
-export const EXTERNAL_MFA_TOKEN_PREFIX = "rgxm_";
+export const PORTAL_STEP_HANDLE_PREFIX = "rgxm_";
 /** prefix + 64 hex (32 random bytes); linear, no nested quantifiers */
-export const EXTERNAL_MFA_TOKEN_RE = /^rgxm_[0-9a-f]{64}$/;
+export const PORTAL_STEP_HANDLE_RE = /^rgxm_[0-9a-f]{64}$/;
 
 export const externalMfaVerifySchema = z.object({ code: z.string().regex(/^[0-9]{6}$/) }).strict();
 export type ExternalMfaVerifyInput = z.infer<typeof externalMfaVerifySchema>;

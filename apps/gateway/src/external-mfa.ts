@@ -32,8 +32,8 @@ import {
 import {
   EXTERNAL_MFA_LIMITS as L,
   EXTERNAL_MFA_PATHS,
-  EXTERNAL_MFA_TOKEN_PREFIX,
-  EXTERNAL_MFA_TOKEN_RE,
+  PORTAL_STEP_HANDLE_PREFIX,
+  PORTAL_STEP_HANDLE_RE,
   PORTAL_STEP_COOKIE,
   type ExternalMfaPortal,
 } from "@regulait/shared";
@@ -75,7 +75,7 @@ export async function loadFactorView(db: Db, portal: ExternalMfaPortal, grantId:
  * The six-digit TOTP code never reaches `hashToken`; `totp.ts` verifies it. token-hash.test.ts pins the entropy.
  */
 export function newChallengeToken(): { token: string; tokenHash: string } {
-  const token = EXTERNAL_MFA_TOKEN_PREFIX + randomBytes(32).toString("hex");
+  const token = PORTAL_STEP_HANDLE_PREFIX + randomBytes(32).toString("hex");
   return { token, tokenHash: hashToken(token) };
 }
 
@@ -140,7 +140,7 @@ export type VerifyOutcome =
  * revokes its open challenges. On success the challenge is spent, the step recorded and the count reset.
  */
 export async function verifyChallenge(tx: Db, portal: ExternalMfaPortal, challengeToken: string, code: string, dataKey: string): Promise<VerifyOutcome> {
-  if (!EXTERNAL_MFA_TOKEN_RE.test(challengeToken)) return { ok: false, reason: "challenge" };
+  if (!PORTAL_STEP_HANDLE_RE.test(challengeToken)) return { ok: false, reason: "challenge" };
   const [row] = await tx
     .select({ challenge: externalMfaChallenges, factor: externalMfaFactors })
     .from(externalMfaChallenges)
