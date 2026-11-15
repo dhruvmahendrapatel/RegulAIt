@@ -178,8 +178,14 @@ async function mockApi(page: Page, opts: Opts = {}) {
 
 const usageCard = (page: Page) => page.locator("[data-rg-card]").filter({ has: page.getByText("Usage counts — custom mapping", { exact: true }) });
 
-async function openTriage(page: Page) {
+// the card sits in the Agents page's "Pricing & prompts" tab (P3 tabs, #642)
+async function gotoAgents(page: Page) {
   await page.goto("/ui/admin/agents");
+  await page.getByRole("tab", { name: "Pricing & prompts" }).click();
+}
+
+async function openTriage(page: Page) {
+  await gotoAgents(page);
   const card = usageCard(page);
   await card.getByLabel("Agent", { exact: true }).selectOption(TRIAGE);
   await expect(card.getByText("Versions for Claims triage")).toBeVisible();
@@ -406,7 +412,7 @@ test.describe("ADR-0241 (P21): usage counts — custom mapping", () => {
   test("a failed read shows the error with Retry; an agent with no versions shows the empty state", async ({ page }) => {
     // two: the app retries a failed read once before it shows the error
     await mockApi(page, { failVersions: 2 });
-    await page.goto("/ui/admin/agents");
+    await gotoAgents(page);
     const card = usageCard(page);
     await card.getByLabel("Agent", { exact: true }).selectOption(TRIAGE);
     const err = card.getByRole("alert").filter({ hasText: "Couldn't load the versions for Claims triage" });

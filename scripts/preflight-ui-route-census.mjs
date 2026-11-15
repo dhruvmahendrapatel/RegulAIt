@@ -103,6 +103,7 @@ export const MACHINE_ONLY = new Map([
   // ---- runner and executor channels (credentialed machines) ----------------
   ["* /v1/engine-runner/*", { reason: "runner channel: only an engine runner credential reaches these (ADR-0187, route-classes.ts; ADR-0188 S7 adds the key rotation route; ADR-0190 I5 adds the three task routes; ENG-IMG removes the runner artifact route)", matches: 9 }],
   ["POST /v1/third-party-ingest/defenseclaw/records", "third-party exporter channel: a customer's DefenseClaw HTTP JSONL exporter posts here with its source's write-only rgti_ token, never a person (ADR-0261)"],
+  ["POST /v1/third-party-ingest/defenseclaw/otlp/v1/logs", "third-party exporter channel: a customer's DefenseClaw OTLP/HTTP logs exporter (protobuf or JSON) posts here with its source's write-only rgti_ token, never a person (ADR-0302)"],
   ["* /v1/endpoint-agent/*", { reason: "endpoint agent channel: the agent's install step (bulk enrolment token), its registration (device ticket) and its own DPoP-bound self token reach these, never a person (ADR-0195 SD4b)", matches: 5 }],
   ["* /v1/executor-channel/*", { reason: "executor channel: only an enrolled executor reaches these (ADR-0190; I4 adds the two stdio session routes, I5 the two task input routes)", matches: 11 }],
 
@@ -181,11 +182,11 @@ export const INDIRECT_UI_CALLS = new Map([
     ["GET /v1/virtual-keys/export.xlsx", "apps/web/src/views/admin/identity/VirtualKeysPage.tsx"],
     ["GET /v1/virtual-keys/:keyId/usage/export.xlsx", "apps/web/src/views/admin/identity/VirtualKeysPage.tsx"],
     ["GET /v1/admin/credentials/export.xlsx", "apps/web/src/views/admin/identity/CredentialsPage.tsx"],
-    ["GET /v1/workload-identities/export.xlsx", "apps/web/src/views/admin/identity/WorkloadIdentitiesPage.tsx"],
-    ["GET /v1/auth/link-requests/export.xlsx", "apps/web/src/views/admin/identity/SsoPage.tsx"],
-    ["GET /v1/chatops/identity-links/export.xlsx", "apps/web/src/views/admin/governance/ChatOpsPage.tsx"],
-    ["GET /v1/agents/export.xlsx", "apps/web/src/views/admin/integrations/AgentsPage.tsx"],
-    ["GET /v1/licenses/verifications/export.xlsx", "apps/web/src/views/admin/settings/LicensingPage.tsx"],
+    ["GET /v1/workload-identities/export.xlsx", "apps/web/src/views/admin/identity/WorkloadIdentitySubpages.tsx"],
+    ["GET /v1/auth/link-requests/export.xlsx", "apps/web/src/views/admin/identity/LinkRequestsPage.tsx"],
+    ["GET /v1/chatops/identity-links/export.xlsx", "apps/web/src/views/admin/governance/ChatIdentityLinksPage.tsx"],
+    ["GET /v1/agents/export.xlsx", "apps/web/src/views/admin/integrations/AgentCatalogPage.tsx"],
+    ["GET /v1/licenses/verifications/export.xlsx", "apps/web/src/views/admin/settings/LicenceVerificationsPage.tsx"],
     // P2 batch C: the workflows, engines, cost and operations lists
     ["GET /v1/admission/skills/export.xlsx", "apps/web/src/views/admin/governance/AdmissionReviewPage.tsx"],
     ["GET /v1/billing/statements/export.xlsx", "apps/web/src/views/admin/cost/BillingHistory.tsx"],
