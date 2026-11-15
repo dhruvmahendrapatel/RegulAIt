@@ -1394,8 +1394,8 @@ function CreateIdentityDialog(props: { onClose: () => void; onSave: (body: Creat
               setError(null);
             }}
           >
-            {/* an endpoint agent's identity is made by the agent's own registration (ADR-0195 SD4b), never here */}
-            {WORKLOAD_IDENTITY_KINDS.filter((k) => k !== "endpoint_agent").map((k) => (
+            {/* an endpoint agent's or browser extension's identity is made by its own registration (ADR-0195 SD4b, ADR-0334), never here */}
+            {WORKLOAD_IDENTITY_KINDS.filter((k) => k !== "endpoint_agent" && k !== "browser_extension").map((k) => (
               <option key={k} value={k}>
                 {workloadKindLabels[k]}
               </option>
