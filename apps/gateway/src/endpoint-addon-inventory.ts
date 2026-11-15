@@ -1,172 +1,85 @@
 /**
  * ADR-0332 (lane E14) — one governed view of every AI add-on on every endpoint.
  *
- * A read model over the ADR-0195 / ADR-0259 discovery evidence, in four 3NF tables (packages/db schema block
- * "ADR-0332"): endpoints (the pseudonym, joined to an enrolled device), add-ons (kind + identity), versions (version
- * string + content digest) and sightings (one version on one endpoint from one detection source).
+ * The inventory is READ, never projected, so it cannot lag or copy the evidence:
  *
- *   - `projectEndpointAddons` folds the evidence in: every `endpoint_mcp_servers` entry (an MCP server in a coding
- *     agent's config, from the endpoint agent) and every device `shadow_ai_findings` row whose signal came from an
- *     endpoint source (a coding agent, from the endpoint agent, the osquery pack or an inventory import). A sighting
- *     points at its evidence row and is deleted with it, so retention and pruning carry over unchanged.
- *   - `recordEndpointAddonSightings` is the direct contract for facts the evidence tables do not hold (a skill or
- *     plugin with its content digest), for the endpoint lanes to call.
- *   - The admission-scan verdict is joined at read time from `admission_engine_scans` by the version's content
- *     digest (ADR-0242: mcpscanner for an MCP server, skillscanner for a skill), never copied. A version with no
- *     digest, no scanner for its kind or no scan of its digest reads `not_yet_scanned`, never clear.
- *   - `endpointAddonsFlagged` is the "assets flagged at or above severity X" query (the ADR-0332 contract consumed by
- *     the removal directive and the detections).
+ *   - MCP servers: `endpoint_mcp_servers` (ADR-0259), one row per server entry per enrolled device;
+ *   - coding agents: device `shadow_ai_findings` whose signal came from an endpoint source (ADR-0195: the endpoint
+ *     agent, the osquery pack or an inventory import), a false positive excluded;
+ *   - skills and plugins: the direct-record tables (`endpoint_addons` / `_versions` / `_sightings`), written through
+ *     `recordEndpointAddonSightings` by the endpoint lanes, because no evidence table holds them.
+ *
+ * Every fact is joined from its one home (first/last seen, version, source, device pseudonym, risk flags, secret
+ * types), so retention and pruning of the evidence apply unchanged. The admission-scan verdict is joined from
+ * `admission_engine_scans` by the version's content digest (ADR-0242) and decided by the gate's own helper
+ * (`engineAdmissionHold`): a disabled engine, no digest, no scanner for the kind or no scan of that digest reads
+ * `not_yet_scanned`, never clear. `endpointAddonsFlagged` is the "assets flagged at or above severity X" contract.
  *
  * Nothing here returns content: a version is its version string and digest, a scan is its verdict and counts-only
- * findings (the same fields the scanner already exposes), and secrets are their TYPE only (rule ids). Every table is
- * under row-level security (admins and `system_task` only), and every route is admin-only (not in NON_ADMIN_ROUTES).
+ * findings (the fields the scanner already exposes), and secrets are their TYPE only (rule ids). The direct-record
+ * tables are under row-level security (admins and `system_task` only), and every route is admin-only (not in
+ * NON_ADMIN_ROUTES). Read-only routes: nothing here changes state on a request.
  *
- *   GET  /v1/endpoint-addons/versions     one row per add-on version: scan status, severity, endpoint count
- *   GET  /v1/endpoint-addons/sightings    one row per version per endpoint per source (filters below)
- *   GET  /v1/endpoint-addons/flagged      sightings flagged at or above `atOrAbove` (+ not yet scanned by default)
- *   POST /v1/endpoint-addons/refresh      re-project the discovery evidence (audited)
+ *   GET /v1/endpoint-addons/versions     one row per add-on version: scan status, severity, endpoint count
+ *   GET /v1/endpoint-addons/sightings    one row per version per endpoint per source (filters below)
+ *   GET /v1/endpoint-addons/flagged      sightings flagged at or above `atOrAbove` (+ not yet scanned by default)
  */
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import {
-  auditLog,
+  and,
+  endpointDevices,
+  engines,
   ENDPOINT_ADDON_IDENTITY_KINDS,
   ENDPOINT_ADDON_KINDS,
   ENDPOINT_ADDON_SOURCES,
+  inArray,
+  isNull,
   sql,
   type Db,
   type SQL,
 } from "@regulait/db";
-import { AI_BOM_INSTALL_SUBJECT_ID, aiBomRef, MCP_ADMISSION_SEVERITIES, type McpAdmissionSeverity } from "@regulait/shared";
+import {
+  ADMISSION_SCAN_ENGINE_IDS,
+  AI_BOM_INSTALL_SUBJECT_ID,
+  admissionScanEngineFor,
+  aiBomRef,
+  engineAdmissionHold,
+  MCP_ADMISSION_SEVERITIES,
+  maxSeverity,
+  type AdmissionScanEngineId,
+  type AdmissionScanSubjectKind,
+  type AdmissionScanVerdict,
+  type McpAdmissionFinding,
+  type McpAdmissionSeverity,
+} from "@regulait/shared";
 import { ENDPOINT_IDENTITY_RE } from "./endpoint-mcp-config.js";
 
-const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 export type EndpointAddonKind = (typeof ENDPOINT_ADDON_KINDS)[number];
 export type EndpointAddonSource = (typeof ENDPOINT_ADDON_SOURCES)[number];
 /** pass / fail / unknown are the ADR-0242 verdicts of the latest scan of THIS digest; not_yet_scanned is never clear */
 export const ENDPOINT_ADDON_SCAN_STATUSES = ["not_yet_scanned", "pass", "fail", "unknown"] as const;
 export type EndpointAddonScanStatus = (typeof ENDPOINT_ADDON_SCAN_STATUSES)[number];
-export const ENDPOINT_ADDON_NOT_SCANNED_REASONS = ["no_content_digest", "no_scanner_for_kind", "no_scan_for_digest"] as const;
+export const ENDPOINT_ADDON_NOT_SCANNED_REASONS = ["no_scanner_for_kind", "scanner_off", "no_content_digest", "no_scan_for_digest"] as const;
+export type EndpointAddonNotScannedReason = (typeof ENDPOINT_ADDON_NOT_SCANNED_REASONS)[number];
 
-/** the scanner that owns each kind's content digest (ADR-0242); a kind with none is never scanned here */
-const SCANNER_FOR_KIND: Record<EndpointAddonKind, "mcpscanner" | "skillscanner" | null> = {
+/** the admission-scan subject an add-on kind is (ADR-0242); the engine comes from `admissionScanEngineFor` */
+const SCAN_SUBJECT_FOR_KIND: Record<EndpointAddonKind, AdmissionScanSubjectKind | null> = {
   coding_agent: null,
-  mcp_server: "mcpscanner",
-  skill: "skillscanner",
+  mcp_server: "mcp_server",
+  skill: "builder_skill",
   plugin: null,
+};
+const scannerFor = (kind: EndpointAddonKind): AdmissionScanEngineId | null => {
+  const subject = SCAN_SUBJECT_FOR_KIND[kind];
+  return subject ? admissionScanEngineFor(subject) : null;
 };
 /** rank 1..4 in the shared severity order (low → critical), for SQL comparisons */
 const SEVERITY_RANK = Object.fromEntries(MCP_ADMISSION_SEVERITIES.map((s, i) => [s, i + 1])) as Record<McpAdmissionSeverity, number>;
+const ENDPOINT_SIGNALS = sql.raw(`ARRAY['endpoint_agent', 'endpoint_osquery', 'endpoint_inventory']`);
 
 // ---------------------------------------------------------------------------
-// Projection from the discovery evidence
-// ---------------------------------------------------------------------------
-
-export interface EndpointAddonProjection {
-  mcpServerSightings: number;
-  codingAgentSightings: number;
-  prunedVersions: number;
-  prunedAddons: number;
-}
-
-/**
- * Fold the discovery evidence into the read model. Idempotent and set-based: run it after a report commits, on a
- * schedule, or from the admin refresh route. Must run inside a scope the policies admit (an admin principal or
- * `system_task`); under any other scope row-level security makes it a no-op that writes nothing.
- */
-export async function projectEndpointAddons(db: Db): Promise<EndpointAddonProjection> {
-  return db.transaction(async (tx) => {
-    const t = tx as unknown as Db;
-    const one = async (q: SQL): Promise<number> => Number(((await t.execute<{ n: number }>(q)).rows[0]?.n ?? 0));
-
-    // endpoints: every enrolled device with evidence, and every device pseudonym a finding names
-    await t.execute(sql`
-      INSERT INTO endpoint_addon_endpoints (pseudonym, device_id)
-      SELECT d.device_pseudonym, d.id FROM endpoint_devices d
-       WHERE EXISTS (SELECT 1 FROM endpoint_mcp_servers m WHERE m.device_id = d.id)
-          OR EXISTS (SELECT 1 FROM shadow_ai_findings f WHERE f.subject_kind = 'device' AND f.subject = d.device_pseudonym)
-      ON CONFLICT (pseudonym) DO UPDATE SET device_id = COALESCE(endpoint_addon_endpoints.device_id, EXCLUDED.device_id)`);
-    await t.execute(sql`
-      INSERT INTO endpoint_addon_endpoints (pseudonym)
-      SELECT DISTINCT f.subject FROM shadow_ai_findings f
-       WHERE f.subject_kind = 'device' AND f.subject ~ '^psn:[0-9a-f]{24}$'
-         AND f.signal_sources ?| ARRAY['endpoint_agent', 'endpoint_osquery', 'endpoint_inventory']
-      ON CONFLICT (pseudonym) DO NOTHING`);
-
-    // MCP servers: identity as ADR-0259 keys it, version = the reported package version; no digest is reported
-    await t.execute(sql`
-      INSERT INTO endpoint_addons (kind, identity_kind, identity)
-      SELECT DISTINCT 'mcp_server', m.identity_kind, left(m.identity, 255) FROM endpoint_mcp_servers m
-      ON CONFLICT (kind, identity_kind, identity) DO NOTHING`);
-    await t.execute(sql`
-      INSERT INTO endpoint_addon_versions (addon_id, version, content_digest)
-      SELECT DISTINCT a.id, left(COALESCE(m.package_version, ''), 128), NULL::text
-        FROM endpoint_mcp_servers m
-        JOIN endpoint_addons a ON a.kind = 'mcp_server' AND a.identity_kind = m.identity_kind AND a.identity = left(m.identity, 255)
-      ON CONFLICT ON CONSTRAINT endpoint_addon_versions_uq DO NOTHING`);
-    const mcpServerSightings = await one(sql`
-      WITH up AS (
-        INSERT INTO endpoint_addon_sightings (version_id, endpoint_id, source, host_agent, endpoint_mcp_server_id, first_seen_at, last_seen_at)
-        SELECT v.id, e.id, 'endpoint_agent', m.provider, m.id, m.first_seen_at, m.last_seen_at
-          FROM endpoint_mcp_servers m
-          JOIN endpoint_devices d ON d.id = m.device_id
-          JOIN endpoint_addon_endpoints e ON e.pseudonym = d.device_pseudonym
-          JOIN endpoint_addons a ON a.kind = 'mcp_server' AND a.identity_kind = m.identity_kind AND a.identity = left(m.identity, 255)
-          JOIN endpoint_addon_versions v ON v.addon_id = a.id AND v.version = left(COALESCE(m.package_version, ''), 128) AND v.content_digest IS NULL
-        ON CONFLICT (endpoint_mcp_server_id) WHERE endpoint_mcp_server_id IS NOT NULL DO UPDATE SET
-          version_id = EXCLUDED.version_id, endpoint_id = EXCLUDED.endpoint_id, host_agent = EXCLUDED.host_agent,
-          first_seen_at = EXCLUDED.first_seen_at, last_seen_at = EXCLUDED.last_seen_at
-        RETURNING 1)
-      SELECT count(*)::int AS n FROM up`);
-
-    // coding agents: one per device finding from an endpoint source (false positives are an admin's dismissal)
-    await t.execute(sql`
-      INSERT INTO endpoint_addons (kind, identity_kind, identity)
-      SELECT DISTINCT 'coding_agent', 'provider', left(f.provider, 255) FROM shadow_ai_findings f
-       WHERE f.subject_kind = 'device' AND f.disposition <> 'false_positive'
-         AND f.signal_sources ?| ARRAY['endpoint_agent', 'endpoint_osquery', 'endpoint_inventory']
-      ON CONFLICT (kind, identity_kind, identity) DO NOTHING`);
-    await t.execute(sql`
-      INSERT INTO endpoint_addon_versions (addon_id, version, content_digest)
-      SELECT a.id, '', NULL::text FROM endpoint_addons a WHERE a.kind = 'coding_agent'
-      ON CONFLICT ON CONSTRAINT endpoint_addon_versions_uq DO NOTHING`);
-    const codingAgentSightings = await one(sql`
-      WITH up AS (
-        INSERT INTO endpoint_addon_sightings (version_id, endpoint_id, source, host_agent, shadow_ai_finding_id, first_seen_at, last_seen_at)
-        SELECT v.id, e.id,
-               CASE WHEN f.signal_sources ? 'endpoint_agent' THEN 'endpoint_agent'
-                    WHEN f.signal_sources ? 'endpoint_osquery' THEN 'endpoint_osquery'
-                    ELSE 'endpoint_inventory' END,
-               left(f.provider, 255), f.id, LEAST(f.first_seen_at, f.last_seen_at), f.last_seen_at
-          FROM shadow_ai_findings f
-          JOIN endpoint_addon_endpoints e ON e.pseudonym = f.subject
-          JOIN endpoint_addons a ON a.kind = 'coding_agent' AND a.identity_kind = 'provider' AND a.identity = left(f.provider, 255)
-          JOIN endpoint_addon_versions v ON v.addon_id = a.id AND v.version = '' AND v.content_digest IS NULL
-         WHERE f.subject_kind = 'device' AND f.disposition <> 'false_positive'
-           AND f.signal_sources ?| ARRAY['endpoint_agent', 'endpoint_osquery', 'endpoint_inventory']
-        ON CONFLICT (shadow_ai_finding_id) WHERE shadow_ai_finding_id IS NOT NULL DO UPDATE SET
-          version_id = EXCLUDED.version_id, endpoint_id = EXCLUDED.endpoint_id, source = EXCLUDED.source,
-          host_agent = EXCLUDED.host_agent, first_seen_at = EXCLUDED.first_seen_at, last_seen_at = EXCLUDED.last_seen_at
-        RETURNING 1)
-      SELECT count(*)::int AS n FROM up`);
-    // a finding an admin later marked a false positive leaves the inventory
-    await t.execute(sql`
-      DELETE FROM endpoint_addon_sightings s USING shadow_ai_findings f
-       WHERE s.shadow_ai_finding_id = f.id AND f.disposition = 'false_positive'`);
-
-    // versions and add-ons nothing is seen with any more
-    const prunedVersions = await one(sql`
-      WITH d AS (DELETE FROM endpoint_addon_versions v WHERE NOT EXISTS (SELECT 1 FROM endpoint_addon_sightings s WHERE s.version_id = v.id) RETURNING 1)
-      SELECT count(*)::int AS n FROM d`);
-    const prunedAddons = await one(sql`
-      WITH d AS (DELETE FROM endpoint_addons a WHERE NOT EXISTS (SELECT 1 FROM endpoint_addon_versions v WHERE v.addon_id = a.id) RETURNING 1)
-      SELECT count(*)::int AS n FROM d`);
-    return { mcpServerSightings, codingAgentSightings, prunedVersions, prunedAddons };
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Direct record contract (skills, plugins: facts the evidence tables do not hold)
+// Direct record contract (skills, plugins: facts no evidence table holds)
 // ---------------------------------------------------------------------------
 
 export const endpointAddonSightingInput = z
@@ -176,8 +89,8 @@ export const endpointAddonSightingInput = z
     identity: z.string().regex(ENDPOINT_IDENTITY_RE),
     version: z.string().max(128).regex(/^[A-Za-z0-9._+~:-]*$/).default(""),
     contentDigest: z.string().regex(/^[0-9a-f]{64}$/).nullable().default(null),
-    endpointPseudonym: z.string().regex(/^psn:[0-9a-f]{24}$/),
-    deviceId: z.string().uuid().nullable().default(null),
+    /** the enrolled device (ADR-0195 SD4b) that reported it; its pseudonym is joined, never taken from the caller */
+    deviceId: z.string().uuid(),
     source: z.enum(ENDPOINT_ADDON_SOURCES),
     hostAgent: z.string().max(255).regex(/^[A-Za-z0-9._:-]*$/).default(""),
     // secret TYPES only (rule ids); a name or value cannot match this shape
@@ -187,21 +100,34 @@ export const endpointAddonSightingInput = z
   .strict();
 export type EndpointAddonSightingInput = z.input<typeof endpointAddonSightingInput>;
 
+export class EndpointAddonDeviceError extends Error {
+  constructor(readonly deviceIds: string[]) {
+    super(`endpoint add-on sightings refused: no active enrolled device ${deviceIds.join(", ")}`);
+  }
+}
+
 /**
- * Record sightings the endpoint lanes report directly (ADR-0332 contract). Validates every input (a bad one refuses
- * the whole batch), keeps first_seen and advances last_seen monotonically, and replaces the secret types on each
- * newer sighting. Same scope rule as the projection.
+ * Record sightings an endpoint lane reports directly (ADR-0332 contract), all or nothing. Every input is validated,
+ * every device must be an enrolled, unrevoked `endpoint_devices` row (else `EndpointAddonDeviceError`, nothing
+ * written), first seen is kept, last seen only advances, and the secret types are replaced only by a newer sighting.
+ * Runs under the caller's scope; the policies admit an admin principal or `system_task`. The caller audits the
+ * request that carried the facts, in this same transaction when it passes its own `tx`.
  */
 export async function recordEndpointAddonSightings(db: Db, inputs: readonly EndpointAddonSightingInput[]): Promise<{ recorded: number }> {
   const parsed = z.array(endpointAddonSightingInput).max(1000).parse(inputs);
   if (!parsed.length) return { recorded: 0 };
   return db.transaction(async (tx) => {
     const t = tx as unknown as Db;
+    const ids = [...new Set(parsed.map((o) => o.deviceId))];
+    const live = await t
+      .select({ id: endpointDevices.id })
+      .from(endpointDevices)
+      .where(and(inArray(endpointDevices.id, ids), isNull(endpointDevices.revokedAt)))
+      .for("share");
+    const known = new Set(live.map((d) => d.id));
+    const missing = ids.filter((id) => !known.has(id));
+    if (missing.length) throw new EndpointAddonDeviceError(missing);
     for (const o of parsed) {
-      const ep = await t.execute<{ id: string }>(sql`
-        INSERT INTO endpoint_addon_endpoints (pseudonym, device_id) VALUES (${o.endpointPseudonym}, ${o.deviceId})
-        ON CONFLICT (pseudonym) DO UPDATE SET device_id = COALESCE(endpoint_addon_endpoints.device_id, EXCLUDED.device_id)
-        RETURNING id`);
       const ad = await t.execute<{ id: string }>(sql`
         INSERT INTO endpoint_addons (kind, identity_kind, identity) VALUES (${o.kind}, ${o.identityKind}, ${o.identity})
         ON CONFLICT (kind, identity_kind, identity) DO UPDATE SET identity = EXCLUDED.identity
@@ -211,9 +137,9 @@ export async function recordEndpointAddonSightings(db: Db, inputs: readonly Endp
         ON CONFLICT ON CONSTRAINT endpoint_addon_versions_uq DO UPDATE SET version = EXCLUDED.version
         RETURNING id`);
       const si = await t.execute<{ id: string; newer: boolean }>(sql`
-        INSERT INTO endpoint_addon_sightings (version_id, endpoint_id, source, host_agent, first_seen_at, last_seen_at)
-        VALUES (${ve.rows[0]!.id}, ${ep.rows[0]!.id}, ${o.source}, ${o.hostAgent}, ${o.seenAt}, ${o.seenAt})
-        ON CONFLICT (version_id, endpoint_id, source, host_agent) WHERE endpoint_mcp_server_id IS NULL AND shadow_ai_finding_id IS NULL
+        INSERT INTO endpoint_addon_sightings (version_id, device_id, source, host_agent, first_seen_at, last_seen_at)
+        VALUES (${ve.rows[0]!.id}, ${o.deviceId}, ${o.source}, ${o.hostAgent}, ${o.seenAt}, ${o.seenAt})
+        ON CONFLICT ON CONSTRAINT endpoint_addon_sightings_uq
         DO UPDATE SET first_seen_at = LEAST(endpoint_addon_sightings.first_seen_at, EXCLUDED.first_seen_at),
                       last_seen_at = GREATEST(endpoint_addon_sightings.last_seen_at, EXCLUDED.last_seen_at)
         RETURNING id, (last_seen_at = ${o.seenAt}) AS newer`);
@@ -230,34 +156,86 @@ export async function recordEndpointAddonSightings(db: Db, inputs: readonly Endp
 }
 
 // ---------------------------------------------------------------------------
-// Read model: versions joined to the latest scan of their exact digest
+// The read: every sighting from its home, each version joined to the scan of its exact digest
 // ---------------------------------------------------------------------------
 
-const SCANNER_CASE = sql.raw(
-  `CASE a.kind ${Object.entries(SCANNER_FOR_KIND)
-    .map(([k, e]) => `WHEN '${k}' THEN ${e ? `'${e}'` : "NULL"}`)
-    .join(" ")} END`,
-);
-const RANK_CASE = sql.raw(
-  `CASE f->>'severity' ${Object.entries(SEVERITY_RANK)
-    .map(([s, r]) => `WHEN '${s}' THEN ${r}`)
-    .join(" ")} END`,
-);
+/** a stable id for a derived key (the evidence tables have no add-on or version row): md5 of its JSON encoding */
+const keyId = (...parts: SQL[]) => sql`md5(jsonb_build_array(${sql.join(parts, sql`, `)})::text)::uuid`;
 
-/** one row per version, with its add-on, its latest scan for its exact digest and the scan's top severity rank */
-const VERSIONS_CTE = sql`
-  scanned AS (
-    SELECT v.id AS version_id, v.version, v.content_digest, a.id AS addon_id, a.kind, a.identity_kind, a.identity,
-           ${SCANNER_CASE} AS scanner, sc.id AS scan_id, sc.verdict, sc.findings, sc.created_at AS scanned_at,
-           sc.engine_version, sc.rules_sha256,
-           (SELECT max(${RANK_CASE}) FROM jsonb_array_elements(COALESCE(sc.findings, '[]'::jsonb)) f) AS severity_rank
-      FROM endpoint_addon_versions v
-      JOIN endpoint_addons a ON a.id = v.addon_id
+const SCANNER_CASE = (kindCol: SQL) =>
+  sql`(CASE ${kindCol} ${sql.raw(
+    ENDPOINT_ADDON_KINDS.map((k) => {
+      const e = scannerFor(k);
+      return `WHEN '${k}' THEN ${e ? `'${e}'` : "NULL"}`;
+    }).join(" "),
+  )} END)`;
+
+/**
+ * Every sighting, one row each, from the table that owns it. The sighting id is the evidence row's own id (random
+ * uuids across three tables), which is the keyset.
+ */
+const SIGHTINGS_CTE = sql`
+  ev AS (
+    SELECT m.id AS sighting_id, 'mcp_server'::text AS kind, m.identity_kind::text AS identity_kind, m.identity,
+           COALESCE(m.package_version, '') AS version, NULL::text AS content_digest,
+           d.id AS device_id, d.device_pseudonym AS pseudonym, 'endpoint_agent'::text AS source, m.provider AS host_agent,
+           m.id AS endpoint_mcp_server_id, NULL::uuid AS shadow_ai_finding_id, NULL::text AS discovery_severity,
+           m.risks, m.secret_types, m.first_seen_at, m.last_seen_at
+      FROM endpoint_mcp_servers m
+      JOIN endpoint_devices d ON d.id = m.device_id
+    UNION ALL
+    SELECT f.id, 'coding_agent', 'provider', f.provider, '', NULL, dv.id, f.subject,
+           CASE WHEN f.signal_sources ? 'endpoint_agent' THEN 'endpoint_agent'
+                WHEN f.signal_sources ? 'endpoint_osquery' THEN 'endpoint_osquery'
+                ELSE 'endpoint_inventory' END,
+           f.provider, NULL, f.id, f.severity, NULL::text[], NULL::text[], LEAST(f.first_seen_at, f.last_seen_at), f.last_seen_at
+      FROM shadow_ai_findings f
       LEFT JOIN LATERAL (
-        SELECT s.id, s.verdict, s.findings, s.created_at, s.engine_version, s.rules_sha256 FROM admission_engine_scans s
-         WHERE v.content_digest IS NOT NULL AND s.engine_id = ${SCANNER_CASE} AND s.subject_digest = v.content_digest
-         ORDER BY s.created_at DESC, s.id DESC LIMIT 1) sc ON true
+        SELECT d.id FROM endpoint_devices d WHERE d.device_pseudonym = f.subject
+         ORDER BY (d.revoked_at IS NULL) DESC, d.created_at DESC LIMIT 1) dv ON true
+     WHERE f.subject_kind = 'device' AND f.disposition <> 'false_positive' AND f.signal_sources ?| ${ENDPOINT_SIGNALS}
+    UNION ALL
+    SELECT s.id, a.kind, a.identity_kind, a.identity, v.version, v.content_digest, d.id, d.device_pseudonym, s.source,
+           s.host_agent, NULL, NULL, NULL, NULL::text[],
+           (SELECT array_agg(st.secret_type ORDER BY st.secret_type) FROM endpoint_addon_sighting_secret_types st WHERE st.sighting_id = s.id),
+           s.first_seen_at, s.last_seen_at
+      FROM endpoint_addon_sightings s
+      JOIN endpoint_addon_versions v ON v.id = s.version_id
+      JOIN endpoint_addons a ON a.id = v.addon_id
+      JOIN endpoint_devices d ON d.id = s.device_id
+  ),
+  sx AS (
+    SELECT ev.*,
+           ${keyId(sql`ev.kind`, sql`ev.identity_kind`, sql`ev.identity`)} AS addon_id,
+           ${keyId(sql`ev.kind`, sql`ev.identity_kind`, sql`ev.identity`, sql`ev.version`, sql`COALESCE(ev.content_digest, '')`)} AS version_id
+      FROM ev
   )`;
+
+/**
+ * The scan ingredients for one version, exactly what `engineAdmissionHold` takes: is the kind's engine enabled, and
+ * the latest scan of this digest. `eff_status` and `severity_rank` mirror that helper for SQL filtering (the item's
+ * own view is built by the helper itself; the suite holds the two equal).
+ */
+const SCAN_LATERAL = (alias: string) => sql`
+  LEFT JOIN LATERAL (
+    SELECT ${SCANNER_CASE(sql.raw(`${alias}.kind`))} AS scanner) sk ON true
+  LEFT JOIN engines eg ON eg.id = sk.scanner
+  LEFT JOIN LATERAL (
+    SELECT s.id, s.verdict, s.findings, s.created_at, s.engine_version, s.rules_sha256 FROM admission_engine_scans s
+     WHERE ${sql.raw(alias)}.content_digest IS NOT NULL AND s.engine_id = sk.scanner AND s.subject_digest = ${sql.raw(alias)}.content_digest
+     ORDER BY s.created_at DESC, s.id DESC LIMIT 1) sc ON true
+  LEFT JOIN LATERAL (
+    SELECT CASE WHEN sk.scanner IS NULL OR NOT COALESCE(eg.enabled, false) OR sc.id IS NULL THEN 'not_yet_scanned' ELSE sc.verdict END AS eff_status,
+           CASE WHEN sc.verdict = 'fail' AND COALESCE(eg.enabled, false)
+                THEN (SELECT max(CASE f->>'severity' ${sql.raw(
+                  MCP_ADMISSION_SEVERITIES.map((s) => `WHEN '${s}' THEN ${SEVERITY_RANK[s]}`).join(" "),
+                )} END) FROM jsonb_array_elements(sc.findings) f) END AS severity_rank) st ON true
+  LEFT JOIN endpoint_mcp_server_links l
+    ON ${sql.raw(alias)}.kind = 'mcp_server' AND l.identity_kind = ${sql.raw(alias)}.identity_kind AND l.identity = ${sql.raw(alias)}.identity`;
+
+const SCAN_COLUMNS = sql`sk.scanner, COALESCE(eg.enabled, false) AS engine_enabled, sc.id AS scan_id, sc.verdict, sc.findings,
+  sc.created_at AS scanned_at, sc.engine_version, sc.rules_sha256, st.eff_status, st.severity_rank,
+  l.mcp_server_id AS registry_mcp_server_id`;
 
 const SEVERITY_FILTERS = [...MCP_ADMISSION_SEVERITIES, "not_yet_scanned"] as const;
 /** a comma-separated (or repeated) query parameter of closed values */
@@ -283,7 +261,6 @@ const sightingsQuery = z
   .object({
     ...filterShape,
     agent: z.string().max(255).regex(/^[A-Za-z0-9._:-]+$/).optional(),
-    endpointId: z.string().uuid().optional(),
     deviceId: z.string().uuid().optional(),
     endpointPseudonym: z.string().regex(/^psn:[0-9a-f]{24}$/).optional(),
     source: csv(ENDPOINT_ADDON_SOURCES).optional(),
@@ -301,21 +278,22 @@ export type EndpointAddonVersionsQuery = z.input<typeof versionsQuery>;
 export type EndpointAddonSightingsQuery = z.input<typeof sightingsQuery>;
 export type EndpointAddonFlaggedQuery = z.input<typeof flaggedQuery>;
 
-const SCAN_STATUS_SQL = sql`(CASE WHEN x.scan_id IS NULL THEN 'not_yet_scanned' ELSE x.verdict END)`;
+const list = (xs: readonly (string | number)[]) => sql.join(xs.map((x) => sql`${x}`), sql`, `);
 
+/** the version-level filters, over the alias `x` (a version row joined to its scan) */
 function versionConds(f: z.output<typeof versionsQuery>): SQL[] {
   const c: SQL[] = [];
-  if (f.kind) c.push(sql`x.kind IN (${sql.join(f.kind.map((k) => sql`${k}`), sql`, `)})`);
+  if (f.kind) c.push(sql`x.kind IN (${list(f.kind)})`);
   if (f.addonId) c.push(sql`x.addon_id = ${f.addonId}`);
   if (f.identity) c.push(sql`x.identity = ${f.identity}`);
   if (f.version !== undefined) c.push(sql`x.version = ${f.version}`);
-  if (f.scanStatus) c.push(sql`${SCAN_STATUS_SQL} IN (${sql.join(f.scanStatus.map((s) => sql`${s}`), sql`, `)})`);
-  if (f.atOrAbove) c.push(sql`x.severity_rank >= ${SEVERITY_RANK[f.atOrAbove]}`);
+  if (f.scanStatus) c.push(sql`st.eff_status IN (${list(f.scanStatus)})`);
+  if (f.atOrAbove) c.push(sql`st.severity_rank >= ${SEVERITY_RANK[f.atOrAbove]}`);
   if (f.severity) {
     const ranks = f.severity.filter((s): s is McpAdmissionSeverity => s !== "not_yet_scanned").map((s) => SEVERITY_RANK[s]);
     const parts: SQL[] = [];
-    if (ranks.length) parts.push(sql`x.severity_rank IN (${sql.join(ranks.map((r) => sql`${r}`), sql`, `)})`);
-    if (f.severity.includes("not_yet_scanned")) parts.push(sql`x.scan_id IS NULL`);
+    if (ranks.length) parts.push(sql`st.severity_rank IN (${list(ranks)})`);
+    if (f.severity.includes("not_yet_scanned")) parts.push(sql`st.eff_status = 'not_yet_scanned'`);
     c.push(sql`(${sql.join(parts, sql` OR `)})`);
   }
   return c;
@@ -329,59 +307,63 @@ type VersionRowDb = {
   kind: EndpointAddonKind;
   identity_kind: string;
   identity: string;
-  scanner: string | null;
+  scanner: AdmissionScanEngineId | null;
+  engine_enabled: boolean;
   scan_id: string | null;
-  verdict: "pass" | "fail" | "unknown" | null;
-  findings: Array<{ rule: string; severity: string; tool: string; count: number }> | null;
+  verdict: AdmissionScanVerdict | null;
+  findings: McpAdmissionFinding[] | null;
   scanned_at: string | Date | null;
   engine_version: string | null;
   rules_sha256: string | null;
+  eff_status: EndpointAddonScanStatus;
   severity_rank: number | null;
   registry_mcp_server_id: string | null;
 };
 
-const RANK_TO_SEVERITY = Object.fromEntries(Object.entries(SEVERITY_RANK).map(([s, r]) => [r, s])) as Record<number, McpAdmissionSeverity>;
 const iso = (d: string | Date | null): string | null => (d === null ? null : new Date(d).toISOString());
+const REASON_TEXT: Record<EndpointAddonNotScannedReason, (kind: string) => string> = {
+  no_scanner_for_kind: (k) => `NOT YET SCANNED: no admission scanner covers a ${k.replace("_", " ")}; treat it as unreviewed, not clear.`,
+  scanner_off: () => "NOT YET SCANNED: the admission scanner for this kind is off, so no verdict counts; treat it as unreviewed, not clear.",
+  no_content_digest: () =>
+    "NOT YET SCANNED: the endpoint reported no content digest, so no scan can be tied to this exact content; treat it as unreviewed, not clear.",
+  no_scan_for_digest: () => "NOT YET SCANNED: no admission scan exists for this exact content digest; treat it as unreviewed, not clear.",
+};
 
-function scanView(r: VersionRowDb) {
-  if (!r.scan_id) {
-    const reason = r.scanner === null ? "no_scanner_for_kind" : r.content_digest === null ? "no_content_digest" : "no_scan_for_digest";
-    return {
-      status: "not_yet_scanned" as const,
-      severity: null,
-      notScannedReason: reason,
-      summary:
-        reason === "no_scanner_for_kind"
-          ? `NOT YET SCANNED: no admission scanner covers a ${r.kind.replace("_", " ")}; treat it as unreviewed, not clear.`
-          : reason === "no_content_digest"
-            ? "NOT YET SCANNED: the endpoint reported no content digest, so no scan can be tied to this exact content; treat it as unreviewed, not clear."
-            : "NOT YET SCANNED: no admission scan exists for this exact content digest; treat it as unreviewed, not clear.",
-      scanner: r.scanner,
-      scannedAt: null,
-      engineVersion: null,
-      rulesSha256: null,
-      findings: [] as Array<{ rule: string; severity: string; tool: string; count: number }>,
-    };
-  }
-  const severity = r.severity_rank ? (RANK_TO_SEVERITY[r.severity_rank] ?? null) : null;
+/** the version's scan, decided by the admission gate's own helper (ADR-0242 `engineAdmissionHold`) */
+export function scanView(r: VersionRowDb) {
+  const base = { scanner: r.scanner, scannedAt: null as string | null, engineVersion: null as string | null, rulesSha256: null as string | null };
+  const notScanned = (reason: EndpointAddonNotScannedReason) => ({
+    ...base,
+    status: "not_yet_scanned" as const,
+    severity: null,
+    notScannedReason: reason,
+    summary: REASON_TEXT[reason](r.kind),
+    findings: [] as Array<{ rule: string; severity: McpAdmissionSeverity; tool: string; count: number }>,
+  });
+  if (r.scanner === null) return notScanned("no_scanner_for_kind");
+  const outcome = engineAdmissionHold({
+    engineEnabled: r.engine_enabled,
+    scan: r.scan_id ? { verdict: r.verdict!, findings: (r.findings ?? []).filter((f) => f.severity in SEVERITY_RANK) } : null,
+  });
+  if (outcome.status === "off") return notScanned("scanner_off");
+  if (outcome.status === "pending") return notScanned(r.content_digest === null ? "no_content_digest" : "no_scan_for_digest");
+  const severity = maxSeverity(outcome.findings);
   return {
-    status: r.verdict as "pass" | "fail" | "unknown",
+    ...base,
+    status: outcome.status,
     severity,
     notScannedReason: null,
     summary:
-      r.verdict === "pass"
-        ? `Scanned by ${r.scanner}: pass${severity ? ` (top finding ${severity})` : ""}.`
-        : r.verdict === "fail"
+      outcome.status === "pass"
+        ? `Scanned by ${r.scanner}: pass.`
+        : outcome.status === "fail"
           ? `Scanned by ${r.scanner}: FAIL${severity ? ` (top finding ${severity})` : ""}.`
           : `Scanned by ${r.scanner}: inconclusive; treat it as unreviewed, not clear.`,
-    scanner: r.scanner,
     scannedAt: iso(r.scanned_at),
     engineVersion: r.engine_version,
     rulesSha256: r.rules_sha256,
     // counts-only findings, exactly the fields the scanner already exposes (ADR-0242); `where` is engine-internal
-    findings: (r.findings ?? [])
-      .filter((x) => x.severity in SEVERITY_RANK)
-      .map((x) => ({ rule: x.rule, severity: x.severity, tool: x.tool, count: x.count })),
+    findings: outcome.findings.map((x) => ({ rule: x.rule, severity: x.severity, tool: x.tool, count: x.count })),
   };
 }
 
@@ -397,9 +379,6 @@ function aiBomView(r: VersionRowDb) {
   };
 }
 
-const REGISTRY_JOIN = sql`LEFT JOIN endpoint_mcp_server_links l
-  ON x.kind = 'mcp_server' AND l.identity_kind = x.identity_kind AND l.identity = x.identity`;
-
 function versionView(r: VersionRowDb) {
   return {
     addon: { id: r.addon_id, kind: r.kind, identity: { kind: r.identity_kind, value: r.identity } },
@@ -409,19 +388,23 @@ function versionView(r: VersionRowDb) {
   };
 }
 
+const whereOf = (conds: SQL[]) => (conds.length ? sql`WHERE ${sql.join(conds, sql` AND `)}` : sql``);
+
 export async function listEndpointAddonVersions(db: Db, query: EndpointAddonVersionsQuery) {
   const f = versionsQuery.parse(query);
   const conds = versionConds(f);
   if (f.cursor) conds.push(sql`x.version_id > ${f.cursor}`);
   const rows = (
     await db.execute<VersionRowDb & { endpoints: number; first_seen_at: string; last_seen_at: string }>(sql`
-      WITH ${VERSIONS_CTE}
-      SELECT x.*, l.mcp_server_id AS registry_mcp_server_id,
-             (SELECT count(DISTINCT s.endpoint_id)::int FROM endpoint_addon_sightings s WHERE s.version_id = x.version_id) AS endpoints,
-             (SELECT min(s.first_seen_at) FROM endpoint_addon_sightings s WHERE s.version_id = x.version_id) AS first_seen_at,
-             (SELECT max(s.last_seen_at) FROM endpoint_addon_sightings s WHERE s.version_id = x.version_id) AS last_seen_at
-        FROM scanned x ${REGISTRY_JOIN}
-       ${conds.length ? sql`WHERE ${sql.join(conds, sql` AND `)}` : sql``}
+      WITH ${SIGHTINGS_CTE},
+      x AS (
+        SELECT version_id, addon_id, kind, identity_kind, identity, version, content_digest,
+               count(DISTINCT pseudonym)::int AS endpoints, min(first_seen_at) AS first_seen_at, max(last_seen_at) AS last_seen_at
+          FROM sx GROUP BY version_id, addon_id, kind, identity_kind, identity, version, content_digest
+      )
+      SELECT x.*, ${SCAN_COLUMNS}
+        FROM x ${SCAN_LATERAL("x")}
+       ${whereOf(conds)}
        ORDER BY x.version_id ASC
        LIMIT ${f.limit + 1}`)
   ).rows;
@@ -434,46 +417,33 @@ export async function listEndpointAddonVersions(db: Db, query: EndpointAddonVers
 
 type SightingRowDb = VersionRowDb & {
   sighting_id: string;
-  endpoint_id: string;
   pseudonym: string;
   device_id: string | null;
   source: EndpointAddonSource;
   host_agent: string;
   endpoint_mcp_server_id: string | null;
   shadow_ai_finding_id: string | null;
+  discovery_severity: string | null;
+  risks: string[] | null;
+  secret_types: string[] | null;
   first_seen_at: string;
   last_seen_at: string;
-  secret_types: string[] | null;
-  risks: string[] | null;
-  finding_severity: string | null;
 };
 
 async function querySightings(db: Db, f: z.output<typeof sightingsQuery>, extra: SQL[]) {
   const conds = [...versionConds(f), ...extra];
-  if (f.cursor) conds.push(sql`s.id > ${f.cursor}`);
-  if (f.agent) conds.push(sql`s.host_agent = ${f.agent}`);
-  if (f.endpointId) conds.push(sql`s.endpoint_id = ${f.endpointId}`);
-  if (f.deviceId) conds.push(sql`e.device_id = ${f.deviceId}`);
-  if (f.endpointPseudonym) conds.push(sql`e.pseudonym = ${f.endpointPseudonym}`);
-  if (f.source) conds.push(sql`s.source IN (${sql.join(f.source.map((x) => sql`${x}`), sql`, `)})`);
+  if (f.cursor) conds.push(sql`x.sighting_id > ${f.cursor}`);
+  if (f.agent) conds.push(sql`x.host_agent = ${f.agent}`);
+  if (f.deviceId) conds.push(sql`x.device_id = ${f.deviceId}`);
+  if (f.endpointPseudonym) conds.push(sql`x.pseudonym = ${f.endpointPseudonym}`);
+  if (f.source) conds.push(sql`x.source IN (${list(f.source)})`);
   const rows = (
     await db.execute<SightingRowDb>(sql`
-      WITH ${VERSIONS_CTE}
-      SELECT x.*, l.mcp_server_id AS registry_mcp_server_id,
-             s.id AS sighting_id, s.endpoint_id, e.pseudonym, e.device_id, s.source, s.host_agent,
-             s.endpoint_mcp_server_id, s.shadow_ai_finding_id, s.first_seen_at, s.last_seen_at,
-             -- secret TYPES and risk flag names only (ADR-0259), never a key name or value
-             COALESCE(m.secret_types, (SELECT array_agg(st.secret_type ORDER BY st.secret_type) FROM endpoint_addon_sighting_secret_types st
-                                        WHERE st.sighting_id = s.id)) AS secret_types,
-             m.risks, fd.severity AS finding_severity
-        FROM endpoint_addon_sightings s
-        JOIN scanned x ON x.version_id = s.version_id
-        JOIN endpoint_addon_endpoints e ON e.id = s.endpoint_id
-        LEFT JOIN endpoint_mcp_servers m ON m.id = s.endpoint_mcp_server_id
-        LEFT JOIN shadow_ai_findings fd ON fd.id = s.shadow_ai_finding_id
-        ${REGISTRY_JOIN}
-       ${conds.length ? sql`WHERE ${sql.join(conds, sql` AND `)}` : sql``}
-       ORDER BY s.id ASC
+      WITH ${SIGHTINGS_CTE}
+      SELECT x.*, ${SCAN_COLUMNS}
+        FROM sx x ${SCAN_LATERAL("x")}
+       ${whereOf(conds)}
+       ORDER BY x.sighting_id ASC
        LIMIT ${f.limit + 1}`)
   ).rows;
   const page = rows.slice(0, f.limit);
@@ -481,13 +451,14 @@ async function querySightings(db: Db, f: z.output<typeof sightingsQuery>, extra:
     items: page.map((r) => ({
       id: r.sighting_id,
       ...versionView(r),
-      endpoint: { id: r.endpoint_id, pseudonym: r.pseudonym, deviceId: r.device_id },
+      endpoint: { pseudonym: r.pseudonym, deviceId: r.device_id },
       detection: {
         source: r.source,
         hostAgent: r.host_agent === "" ? null : r.host_agent,
         endpointMcpServerId: r.endpoint_mcp_server_id,
         shadowAiFindingId: r.shadow_ai_finding_id,
-        discoverySeverity: r.finding_severity,
+        discoverySeverity: r.discovery_severity,
+        // risk flag names and secret TYPES only (ADR-0259), never a key name or value
         risks: r.risks ?? [],
         secretTypes: r.secret_types ?? [],
       },
@@ -503,23 +474,31 @@ export async function listEndpointAddonSightings(db: Db, query: EndpointAddonSig
 }
 
 /**
- * ADR-0332 contract: the sightings whose add-on version's latest scan of its exact digest has a finding at or above
- * `atOrAbove`, plus (default `notYetScanned: "include"`) every sighting not yet scanned or scanned inconclusively,
- * because unscanned is never clear. Keyset paginated on the sighting id; the consumer decides what to do per row.
+ * ADR-0332 contract: the sightings whose version's latest scan of its exact digest (engine on) has a finding at or
+ * above `atOrAbove`, plus (default `notYetScanned: "include"`) every sighting not yet scanned or scanned
+ * inconclusively, because unscanned is never clear. Read at call time from the evidence, so nothing lags. Keyset
+ * paginated on the sighting id; the consumer decides what to do per row.
  */
 export async function endpointAddonsFlagged(db: Db, query: EndpointAddonFlaggedQuery) {
   const f = flaggedQuery.parse(query);
   const rank = SEVERITY_RANK[f.atOrAbove];
   const flagged =
     f.notYetScanned === "include"
-      ? sql`(x.severity_rank >= ${rank} OR x.scan_id IS NULL OR x.verdict = 'unknown')`
-      : sql`(x.severity_rank >= ${rank})`;
+      ? sql`(st.severity_rank >= ${rank} OR st.eff_status IN ('not_yet_scanned', 'unknown'))`
+      : sql`(st.severity_rank >= ${rank})`;
   const out = await querySightings(db, { ...f, atOrAbove: undefined, severity: undefined, scanStatus: undefined }, [flagged]);
   return { atOrAbove: f.atOrAbove, notYetScanned: f.notYetScanned, ...out };
 }
 
+/** the engines' on/off state, for callers that want it alongside the list (the admission gate's own source) */
+export async function admissionScannerStates(db: Db): Promise<Record<AdmissionScanEngineId, boolean>> {
+  const rows = await db.select({ id: engines.id, enabled: engines.enabled }).from(engines).where(inArray(engines.id, ADMISSION_SCAN_ENGINE_IDS));
+  const on = new Map(rows.map((r) => [r.id, r.enabled]));
+  return Object.fromEntries(ADMISSION_SCAN_ENGINE_IDS.map((id) => [id, on.get(id) === true])) as Record<AdmissionScanEngineId, boolean>;
+}
+
 // ---------------------------------------------------------------------------
-// Routes (admin-only: none is in NON_ADMIN_ROUTES)
+// Routes (admin-only: none is in NON_ADMIN_ROUTES; read-only)
 // ---------------------------------------------------------------------------
 
 const refuse = (reply: FastifyReply, status: number, error: string, detail: string) => reply.status(status).send({ error, detail });
@@ -529,37 +508,19 @@ export function registerEndpointAddonInventoryRoutes(app: FastifyInstance, db: D
   app.get("/v1/endpoint-addons/versions", async (req, reply) => {
     const q = versionsQuery.safeParse(req.query ?? {});
     if (!q.success) return refuse(reply, 400, "invalid_query", issues(q.error));
-    return listEndpointAddonVersions(db, q.data);
+    return { scanners: await admissionScannerStates(db), ...(await listEndpointAddonVersions(db, q.data)) };
   });
 
   app.get("/v1/endpoint-addons/sightings", async (req, reply) => {
     const q = sightingsQuery.safeParse(req.query ?? {});
     if (!q.success) return refuse(reply, 400, "invalid_query", issues(q.error));
-    return listEndpointAddonSightings(db, q.data);
+    return { scanners: await admissionScannerStates(db), ...(await listEndpointAddonSightings(db, q.data)) };
   });
 
   app.get("/v1/endpoint-addons/flagged", async (req, reply) => {
     const q = flaggedQuery.safeParse(req.query ?? {});
     if (!q.success) return refuse(reply, 400, "invalid_query", issues(q.error));
-    return endpointAddonsFlagged(db, q.data);
-  });
-
-  app.post("/v1/endpoint-addons/refresh", async (req, reply) => {
-    if (req.body !== undefined && req.body !== null && (typeof req.body !== "object" || Object.keys(req.body as object).length)) {
-      return refuse(reply, 400, "invalid_body", "this route takes no body");
-    }
-    const result = await projectEndpointAddons(db);
-    await db.insert(auditLog).values({
-      userId: req.authCtx.userId ?? NIL_UUID,
-      // the projection reads every endpoint discovery source's evidence; no single object
-      objectType: "discovery_source",
-      objectId: null,
-      detail: { subsystem: "endpoint-addon-inventory", adr: "0332", ...result },
-      effect: "allow",
-      ruleId: "endpoint-addon-inventory-refreshed",
-      ruleChain: [],
-      reason: `endpoint AI add-on inventory re-projected from discovery evidence (ADR-0332): ${result.mcpServerSightings} MCP server and ${result.codingAgentSightings} coding agent sightings`,
-    });
-    return reply.status(200).send(result);
+    return { scanners: await admissionScannerStates(db), ...(await endpointAddonsFlagged(db, q.data)) };
   });
 }
+

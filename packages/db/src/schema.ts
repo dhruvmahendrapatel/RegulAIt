@@ -16586,36 +16586,20 @@ export const resourceRateReservations = pgTable(
 
 // ===== ADR-0332 (lane E14): endpoint AI add-on inventory (pending migration endpoint_addon_inventory) =====
 //
-// One governed read model of every AI add-on on every endpoint: coding agent, MCP server, skill, plugin. An add-on is
-// a row, each version of it (reported version string and, when the endpoint reported one, the content digest) is a
-// row, an endpoint is a row (its ADR-0195 pseudonym, joined to an enrolled `endpoint_devices` row when there is one),
-// and a sighting joins one version to one endpoint for one detection source. The admission-scan verdict is NEVER
-// copied here: it is joined at read time from `admission_engine_scans` by the version's content digest (ADR-0242),
-// so a version with no digest, or no scan for its digest, reads "not yet scanned", never clear. Row-level security:
-// admins and the `system_task` reason only (pending migration). No content of a skill or config is stored.
+// The inventory of AI add-ons on endpoints (coding agent, MCP server, skill, plugin) is read, not projected: MCP
+// servers come from `endpoint_mcp_servers` (ADR-0259) and coding agents from endpoint-sourced device
+// `shadow_ai_findings` (ADR-0195), joined at read time. These tables are the system of record only for what those
+// evidence tables do not hold: a sighting an endpoint lane records directly (a skill or plugin with its content
+// digest). An add-on is a row, each version of it is a row, and a sighting joins one version to one enrolled device
+// for one detection source; the device's pseudonym is joined from `endpoint_devices`, never copied. The
+// admission-scan verdict is joined at read time from `admission_engine_scans` by content digest (ADR-0242). Row-level
+// security: admins and the `system_task` reason only (pending migration). No content of a skill or config is stored.
 
 export const ENDPOINT_ADDON_KINDS = ["coding_agent", "mcp_server", "skill", "plugin"] as const;
 export const ENDPOINT_ADDON_IDENTITY_KINDS = ["provider", "package", "host", "command", "name", "unknown"] as const;
 export const ENDPOINT_ADDON_SOURCES = ["endpoint_agent", "endpoint_osquery", "endpoint_inventory"] as const;
 
-/** an endpoint as discovery knows it: its pseudonym, and the enrolled agent device when there is one */
-export const endpointAddonEndpoints = pgTable(
-  "endpoint_addon_endpoints",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    pseudonym: text("pseudonym").notNull(),
-    deviceId: uuid("device_id").references(() => endpointDevices.id, { onDelete: "set null" }),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [
-    unique("endpoint_addon_endpoints_pseudonym_uq").on(t.pseudonym),
-    uniqueIndex("endpoint_addon_endpoints_device_uq").on(t.deviceId).where(sql`${t.deviceId} IS NOT NULL`),
-    check("endpoint_addon_endpoints_pseudonym_check", sql`${t.pseudonym} ~ '^psn:[0-9a-f]{24}$'`),
-  ],
-);
-export type EndpointAddonEndpointRow = typeof endpointAddonEndpoints.$inferSelect;
-
-/** one AI add-on, by kind and identity (a provider, a package, a remote host, a command base name or a skill name) */
+/** one directly recorded AI add-on, by kind and identity (a package, a host, a command base name or a skill name) */
 export const endpointAddons = pgTable(
   "endpoint_addons",
   {
@@ -16632,7 +16616,7 @@ export const endpointAddons = pgTable(
 );
 export type EndpointAddonRow = typeof endpointAddons.$inferSelect;
 
-/** one version of an add-on: the reported version string ('' when none was reported) and the content digest, if any */
+/** one version of a directly recorded add-on: the reported version string ('' when none) and its content digest */
 export const endpointAddonVersions = pgTable(
   "endpoint_addon_versions",
   {
@@ -16653,12 +16637,7 @@ export const endpointAddonVersions = pgTable(
 );
 export type EndpointAddonVersionRow = typeof endpointAddonVersions.$inferSelect;
 
-/**
- * One version seen on one endpoint by one detection source. A sighting projected from discovery evidence points at
- * that evidence row (an `endpoint_mcp_servers` entry or a device `shadow_ai_findings` row) and is deleted with it, so
- * the read model never outlives the ADR-0195 retention. A sighting recorded directly (a skill or plugin fact) has
- * neither and is unique per (version, endpoint, source, host agent).
- */
+/** one directly recorded version seen on one enrolled device by one source and host agent (deleted with the device) */
 export const endpointAddonSightings = pgTable(
   "endpoint_addon_sightings",
   {
@@ -16666,26 +16645,18 @@ export const endpointAddonSightings = pgTable(
     versionId: uuid("version_id")
       .notNull()
       .references(() => endpointAddonVersions.id, { onDelete: "cascade" }),
-    endpointId: uuid("endpoint_id")
+    deviceId: uuid("device_id")
       .notNull()
-      .references(() => endpointAddonEndpoints.id, { onDelete: "cascade" }),
+      .references(() => endpointDevices.id, { onDelete: "cascade" }),
     source: text("source", { enum: ENDPOINT_ADDON_SOURCES }).notNull(),
-    // exception (ADR-0200 addendum): the signed report's catalogue provider of the host agent (closed catalogue id)
     hostAgent: text("host_agent").notNull().default(""),
-    endpointMcpServerId: uuid("endpoint_mcp_server_id").references(() => endpointMcpServers.id, { onDelete: "cascade" }),
-    shadowAiFindingId: uuid("shadow_ai_finding_id").references(() => shadowAiFindings.id, { onDelete: "cascade" }),
     firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull(),
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
   },
   (t) => [
-    uniqueIndex("endpoint_addon_sightings_mcp_uq").on(t.endpointMcpServerId).where(sql`${t.endpointMcpServerId} IS NOT NULL`),
-    uniqueIndex("endpoint_addon_sightings_finding_uq").on(t.shadowAiFindingId).where(sql`${t.shadowAiFindingId} IS NOT NULL`),
-    uniqueIndex("endpoint_addon_sightings_direct_uq")
-      .on(t.versionId, t.endpointId, t.source, t.hostAgent)
-      .where(sql`${t.endpointMcpServerId} IS NULL AND ${t.shadowAiFindingId} IS NULL`),
-    index("endpoint_addon_sightings_version_idx").on(t.versionId),
-    index("endpoint_addon_sightings_endpoint_idx").on(t.endpointId),
-    check("endpoint_addon_sightings_evidence_check", sql`${t.endpointMcpServerId} IS NULL OR ${t.shadowAiFindingId} IS NULL`),
+    unique("endpoint_addon_sightings_uq").on(t.versionId, t.deviceId, t.source, t.hostAgent),
+    index("endpoint_addon_sightings_device_idx").on(t.deviceId),
+    index("endpoint_addon_sightings_last_seen_idx").on(t.lastSeenAt),
     check("endpoint_addon_sightings_seen_check", sql`${t.firstSeenAt} <= ${t.lastSeenAt}`),
   ],
 );
