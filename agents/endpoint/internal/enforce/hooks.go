@@ -48,6 +48,15 @@ type Capabilities struct {
 	ManagedLocation bool `json:"managedLocation"`
 }
 
+// Coverage grades: what we tell a customer an adapter is (owner decisions 2026-11-15, ADR-0330 §8).
+const (
+	// CoverageEnforce: the contract names the server and the agent blocks when the hook fails.
+	CoverageEnforce = "enforce-grade"
+	// CoverageAudit: a deny is reliable, but the contract cannot identify servers or fails open, so the adapter is
+	// a guardrail and an audit source, paired with the vendor's own control.
+	CoverageAudit = "audit-grade"
+)
+
 // Contract identifies the vendor contract an adapter was written and tested against.
 type Contract struct {
 	// Version names the contract as checked. It is also the fixture directory, testdata/hooks/<agent>/<version>/.
@@ -69,6 +78,12 @@ type Adapter struct {
 	// UnattestedSource is the source every call from this agent carries when the contract cannot attest provenance
 	// (Capabilities.MCPProvenance false). A policy accepts such calls only by listing it in allowSources.
 	UnattestedSource string `json:"unattestedSource,omitempty"`
+	// Coverage is the grade presented for this agent (CoverageEnforce or CoverageAudit).
+	Coverage string `json:"coverage"`
+	// RecommendedMode is the policy mode recommended for this agent (agentModes), audit or enforce.
+	RecommendedMode string `json:"recommendedMode"`
+	// VendorControl is the vendor's own control recommended alongside the hook, when the hook alone is not enough.
+	VendorControl string `json:"vendorControl,omitempty"`
 
 	// Parse reads one hook input. It never decodes tool arguments.
 	Parse func(io.Reader) (Call, error) `json:"-"`

@@ -203,10 +203,28 @@ func TestCapabilityMatrix(t *testing.T) {
 		if !c.CanBlock {
 			t.Errorf("%s: an adapter for a contract that cannot block enforces nothing", a.Name)
 		}
+		// enforce-grade is a claim: the server is named and a failing hook blocks; anything else is audit-grade and
+		// must name the vendor control it is paired with
+		strong := c.MCPServer != ServerNotVisible && c.OnError != FailOpen && c.OnTimeout != FailOpen
+		switch a.Coverage {
+		case CoverageEnforce:
+			if !strong {
+				t.Errorf("%s: presented as enforce-grade but its contract fails open or cannot name the server", a.Name)
+			}
+		case CoverageAudit:
+			if strong || a.VendorControl == "" {
+				t.Errorf("%s: audit-grade needs a weak contract and a paired vendor control", a.Name)
+			}
+		default:
+			t.Errorf("%s: unknown coverage %q", a.Name, a.Coverage)
+		}
+		if a.RecommendedMode != ModeAudit && a.RecommendedMode != ModeEnforce || c.MCPServer == ServerNotVisible && a.RecommendedMode != ModeAudit {
+			t.Errorf("%s: recommended mode %q", a.Name, a.RecommendedMode)
+		}
 	}
 	// the matrix is exported as JSON (regulait-agent hook-capabilities), without the functions
 	b, err := json.Marshal(Adapters)
-	if err != nil || bytes.Contains(b, []byte("Parse")) || !bytes.Contains(b, []byte(`"onTimeout":"open"`)) {
+	if err != nil || bytes.Contains(b, []byte("Parse")) || !bytes.Contains(b, []byte(`"onTimeout":"open"`)) || !bytes.Contains(b, []byte(`"coverage":"audit-grade"`)) {
 		t.Errorf("capability matrix JSON: %v %s", err, b)
 	}
 }
@@ -262,5 +280,26 @@ func TestAgentModes(t *testing.T) {
 		if _, err := LoadPolicy(bytes.NewReader(env), keys, now); err == nil {
 			t.Errorf("%s: agentModes accepted", name)
 		}
+	}
+}
+
+// Owner decisions 2026-11-15 (ADR-0330 §8), pinned so a later edit cannot drift silently.
+func TestOwnerDecisions(t *testing.T) {
+	want := map[string][2]string{
+		AgentClaudeCode: {CoverageEnforce, ModeEnforce},
+		AgentCursor:     {CoverageEnforce, ModeEnforce},
+		AgentCopilotCLI: {CoverageAudit, ModeAudit},   // H1
+		AgentCodex:      {CoverageAudit, ModeEnforce}, // H2
+	}
+	for name, w := range want {
+		a, _ := Lookup(name)
+		if a.Coverage != w[0] || a.RecommendedMode != w[1] {
+			t.Errorf("%s: %s/%s, want %s/%s", name, a.Coverage, a.RecommendedMode, w[0], w[1])
+		}
+	}
+	// H3: Cursor answers an allowed call with an explicit "allow", and a deny still blocks
+	cursor, _ := Lookup(AgentCursor)
+	if out, _, exit := cursor.Render(Decision{Verdict: Allow}); exit != 0 || string(out) != `{"permission":"allow"}` {
+		t.Errorf("cursor allow: %d %s", exit, out)
 	}
 }

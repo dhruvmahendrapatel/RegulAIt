@@ -65,6 +65,11 @@ var codexAdapter = Adapter{
 		OnError: FailOpen, OnTimeout: FailOpen, ExecForm: false, ManagedLocation: true,
 	},
 	UnattestedSource: SourceCodexUnattested,
-	Parse:            ParseCodexPreToolUse,
-	Render:           renderPreToolUseDeny,
+	// owner decision H2 (2026-11-15): presented as audit-grade (its hook errors fail open), paired with Codex's own
+	// requirements.toml server-identity allow-list; its denies still block, so enforce mode stays recommended
+	Coverage:        CoverageAudit,
+	RecommendedMode: ModeEnforce,
+	VendorControl:   "requirements.toml [mcp_servers.<name>] identity allow-list",
+	Parse:           ParseCodexPreToolUse,
+	Render:          renderPreToolUseDeny,
 }

@@ -144,9 +144,15 @@ func hook(args []string) int {
 		fmt.Fprintln(os.Stderr, "RegulAIt: the enforcement hook is registered without a policy file, so it blocks.")
 		return enforce.ExitBlock
 	}
+	// the keyring: the compiled keys plus the device-policy signer's keys the admin pinned in the agent's
+	// root-owned config (owner decision B4). An unreadable or invalid config pins nothing, so the hook still denies.
+	keys := enforce.CompiledKeyring
+	if cfg, err := agent.LoadConfig(agent.DefaultPaths().ConfigFile, agent.SystemOwner()); err == nil {
+		keys = keys.With(cfg.DevicePolicyKeys)
+	}
 	var policy *enforce.Policy
 	if f, err := os.Open(*file); err == nil {
-		policy, _ = enforce.LoadPolicy(f, enforce.CompiledKeyring, time.Now())
+		policy, _ = enforce.LoadPolicy(f, keys, time.Now())
 		_ = f.Close()
 	}
 	stdout, stderr, code := adapter.Hook(os.Stdin, policy)

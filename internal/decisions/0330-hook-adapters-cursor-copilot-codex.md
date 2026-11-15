@@ -93,6 +93,9 @@ The matrix as built (contract versions 2026-11-14 for Claude Code, 2026-11-15 fo
 | onTimeout | closed-if-configured | closed-if-configured | **open** | **open** |
 | execForm | yes | no | yes | no |
 | managedLocation | yes | yes | yes | yes |
+| **coverage** (§8) | enforce-grade | enforce-grade | **audit-grade** | **audit-grade** |
+| **recommendedMode** (§8) | enforce | enforce | **audit** | enforce |
+| **vendorControl** (§8) | none | none | GitHub MCP registry allow-list | `requirements.toml` server identity allow-list |
 
 ### 2a. Versioned contract fixtures
 
@@ -170,8 +173,8 @@ The policy gains one optional, closed member, `agentModes`: a map from an adapte
 
 ### 6. Still off by default
 
-Nothing registers any hook, and the compiled keyring is still empty until SD4. A registered hook therefore denies MCP
-calls on every agent, which is ADR-0298's fail-closed default, and Copilot CLI's non-built-in tools are denied too. An
+Nothing registers any hook. The compiled keyring is still empty, and no device-policy key is pinned until an admin
+pins one (§8, B4). A registered hook therefore denies MCP calls on every agent, which is ADR-0298's fail-closed default, and Copilot CLI's non-built-in tools are denied too. An
 admin opts in per agent by deploying that agent's managed hook registration:
 
 - **Cursor.** `failClosed: true`, in the enterprise `hooks.json` only. Dashboard (team) hooks cannot set `failClosed`
@@ -188,6 +191,41 @@ The README documents each registration.
 - **No shared library.** No maintained library implements these vendors' hook contracts across agents.
 - **Rejected again.** DefenseClaw stays rejected as an embedded component (ADR-0298 §5).
 - **Dependencies.** JSON comes from the Go standard library. No dependency is added.
+
+### 8. Owner decisions (2026-11-15)
+
+The owner answered the questions this ADR left open on #864. These decisions are recorded here and pinned by
+`TestOwnerDecisions`.
+
+- **H1, Copilot CLI.** The recommended configuration is `audit` mode (`agentModes: {"copilot-cli": "audit"}`) plus
+  GitHub's own MCP registry allow-list, until GitHub documents server identity in the hook input. The adapter carries
+  `coverage: audit-grade`, `recommendedMode: audit`, and that allow-list as its `vendorControl`.
+- **H2, Codex.** Codex is presented as **audit-grade** coverage, because its hook errors fail open. It is paired with
+  Codex's `requirements.toml` `[mcp_servers.<name>] identity` allow-list. Its denies still block, so the recommended
+  mode stays `enforce`.
+- **The grading rule.** `enforce-grade` is a tested claim. It needs a contract that names the server and blocks when
+  the hook fails. Anything else is `audit-grade` and must name the vendor control it is paired with.
+- **H3, Cursor allow.** The Cursor adapter answers an allowed call with `{"permission":"allow"}`, and a deny still
+  blocks (JSON and exit 2).
+  - **Re-check of the docs.** cursor.com/docs/hooks was re-checked on 2026-11-15. It says responses merge across
+    sources: `deny` beats `ask`, and `ask` beats `allow`. With `failClosed`, empty output blocks. It does **not** say
+    whether a hook `allow` skips Cursor's own run confirmation.
+  - **What we test.** The adapter's output is tested (`TestOwnerDecisions`). Cursor's behaviour cannot be tested in CI
+    without a Cursor install.
+  - **Manual check.** Run it against a real install before the coverage is shown to a customer: register the
+    enterprise hook, allow a server that Cursor's own settings would ask about, and record whether Cursor still asks.
+    Until that is recorded, the console says "not documented".
+- **B4, one device-policy signer.** One rotatable device-policy signer on the control plane signs both the endpoint
+  enforcement policy and the managed-browser policy, in this envelope (`keyId`, `payload`, `signature`, Ed25519). The
+  signer is built by the browser lane in #867.
+  - **Where the key lives.** Its key is operator-managed or install-generated, so it cannot be compiled into the agent.
+    The admin pins its public keys in the agent's MDM-deployed, root-owned config as `devicePolicyKeys`: at most two,
+    the current key and the next one, so a rotation never leaves a device unable to verify. That is how the browser
+    extension pins the key in managed storage.
+  - **How the hook verifies.** It uses the compiled keyring plus these pins. A pin never overrides a compiled key.
+  - **What a bad config does.** A malformed pin refuses the whole config, and an unreadable config pins nothing. Either
+    way, the hook keeps denying.
+  - **Effect.** Pinning a key can only let a signed policy restrict the device further.
 
 ## Not in this slice
 

@@ -167,3 +167,34 @@ func TestToolNameServer(t *testing.T) {
 		}
 	}
 }
+
+func TestPinnedDevicePolicyKeys(t *testing.T) {
+	pub, priv := testKey(t)
+	x := base64.RawURLEncoding.EncodeToString(pub)
+	keys, err := KeyringFrom([]PinnedKey{{KeyID: "device-policy-1", X: x}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(basePolicy())
+	// a policy signed by the shared device-policy signer verifies through the pinned key, on top of the compiled set
+	if _, err := LoadPolicy(bytes.NewReader(sign(t, priv, "device-policy-1", payload)), CompiledKeyring.With(keys), now); err != nil {
+		t.Fatalf("a pinned device-policy key did not verify: %v", err)
+	}
+	other := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))
+	for name, pins := range map[string][]PinnedKey{
+		"three keys":    {{"k-aa1", x}, {"k-aa2", other}, {"k-aa3", other}},
+		"duplicate id":  {{"device-policy-1", x}, {"device-policy-1", other}},
+		"bad id":        {{"A B", x}},
+		"short key":     {{"device-policy-1", "AAAA"}},
+		"padded base64": {{"device-policy-1", base64.URLEncoding.EncodeToString(pub)}},
+	} {
+		if _, err := KeyringFrom(pins); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// a pin never overrides a compiled key of the same id
+	compiled := Keyring{"device-policy-1": pub}
+	if got := compiled.With(Keyring{"device-policy-1": ed25519.PublicKey(bytes.Repeat([]byte{1}, 32))}); !got["device-policy-1"].Equal(pub) {
+		t.Error("a pinned key replaced a compiled one")
+	}
+}

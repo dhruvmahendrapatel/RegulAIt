@@ -131,6 +131,8 @@ var claudeCodeAdapter = Adapter{
 		CanBlock: true, MCPServer: ServerFromField, MCPProvenance: true,
 		OnError: FailClosedIfConfigured, OnTimeout: FailClosedIfConfigured, ExecForm: true, ManagedLocation: true,
 	},
-	Parse:  ParseClaudeCodePreToolUse,
-	Render: RenderClaudeCode,
+	Coverage:        CoverageEnforce,
+	RecommendedMode: ModeEnforce,
+	Parse:           ParseClaudeCodePreToolUse,
+	Render:          RenderClaudeCode,
 }

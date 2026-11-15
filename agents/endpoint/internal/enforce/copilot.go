@@ -97,6 +97,11 @@ var copilotAdapter = Adapter{
 		OnError: FailClosed, OnTimeout: FailOpen, ExecForm: true, ManagedLocation: true,
 	},
 	UnattestedSource: SourceCopilotUnattested,
-	Parse:            ParseCopilotPreToolUse,
-	Render:           RenderCopilot,
+	// owner decision H1 (2026-11-15): audit mode plus GitHub's own MCP registry allow-list, until GitHub documents
+	// server identity in the hook input
+	Coverage:        CoverageAudit,
+	RecommendedMode: ModeAudit,
+	VendorControl:   "GitHub MCP registry allow-list (Copilot policy: MCP servers in Copilot)",
+	Parse:           ParseCopilotPreToolUse,
+	Render:          RenderCopilot,
 }

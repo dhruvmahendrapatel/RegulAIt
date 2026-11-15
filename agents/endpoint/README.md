@@ -33,12 +33,18 @@ bash scripts/package-linux.sh <bin> <out> <version>   # unsigned .deb and .rpm
 
 `regulait-agent hook AGENT -policy FILE` answers one MCP tool-call hook for AGENT = `claude-code`, `cursor`,
 `copilot-cli` or `codex`. It reads the hook input on stdin and the signed policy file, and never uses the network.
-Nothing registers it: an admin opts in per agent through that agent's managed location. Until the SD4 signer pins a key,
+Nothing registers it: an admin opts in per agent through that agent's managed location. Until an admin pins a device-policy key (below),
 no policy verifies, so a registered hook denies every MCP call. ADR-0330 §2 records what each agent's contract can and
 cannot see. In particular, Codex cannot fail closed, and Copilot CLI denies every non-built-in tool in `enforce` mode.
 `regulait-agent hook-capabilities` prints that capability matrix, with each adapter's contract version and docs, as
 JSON. To add an agent, add one `Adapter` (`internal/enforce/hooks.go`) and its versioned fixtures
 (`internal/enforce/testdata/hooks/README.md`).
+
+Policies are signed by the control plane's device-policy signer, the same one that signs the managed-browser policy
+(ADR-0330 §8, B4). Pin its public keys (the current key and at most one next key) in the agent config:
+`"devicePolicyKeys": [{"keyId": "<key id>", "x": "<Ed25519 public key, base64url>"}]`.
+ADR-0330 §8 also records the recommended configuration per agent: Copilot CLI in `audit` mode with GitHub's MCP
+registry allow-list, and Codex as audit-grade, paired with its `requirements.toml` server allow-list.
 
 Registrations (paths are examples; use absolute paths with no shell metacharacters):
 

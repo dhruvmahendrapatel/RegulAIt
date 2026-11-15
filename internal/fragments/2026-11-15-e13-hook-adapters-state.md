@@ -12,3 +12,10 @@
   always fail open. Codex takes the server only from the tool name, and its hook errors fail open.
 - **Default:** off (nothing registers a hook; the keyring stays empty until SD4). The admin UI for per-agent modes and
   coverage is a known UI gap on #453.
+- **Owner decisions (2026-11-15, ADR-0330 §8):**
+  - Copilot CLI: audit mode plus GitHub's MCP registry allow-list.
+  - Codex: audit-grade, paired with `requirements.toml`.
+  - Cursor: allows answered "allow". Whether that skips Cursor's own run confirmation is not documented, and is a
+    manual check.
+  - Signing: one rotatable device-policy signer, shared with the browser lane. The agent verifies its pinned
+    `devicePolicyKeys`, two at most.

@@ -56,9 +56,11 @@ type cursorOutput struct {
 	AgentMessage string `json:"agent_message,omitempty"`
 }
 
-// RenderCursor turns a decision into stdout bytes and an exit code. Cursor treats empty or invalid stdout as a
-// block, so every answer is explicit JSON. An allow is "allow": the org approved the server, and Cursor's own
-// run-confirmation settings are a separate control the hook does not replace. A deny is also exit 2.
+// RenderCursor turns a decision into stdout bytes and an exit code. Every answer is explicit JSON: with failClosed,
+// Cursor blocks on no output, and it blocks on invalid JSON always. An allow is "allow" (owner decision H3,
+// 2026-11-15); a deny is "deny" and exit 2. Whether a hook "allow" skips Cursor's own run confirmation is NOT
+// documented (cursor.com/docs/hooks, re-checked 2026-11-15: responses merge across sources, deny beats ask beats
+// allow, nothing more). ADR-0330 §8 records it as a manual check against a real Cursor install.
 func RenderCursor(d Decision) (stdout []byte, stderr string, exit int) {
 	if d.Verdict == Deny {
 		b, _ := json.Marshal(cursorOutput{Permission: "deny", UserMessage: d.Reason, AgentMessage: d.Reason})
@@ -81,6 +83,8 @@ var cursorAdapter = Adapter{
 		OnError: FailClosedIfConfigured, OnTimeout: FailClosedIfConfigured, ExecForm: false, ManagedLocation: true,
 	},
 	UnattestedSource: SourceCursorUnattested,
+	Coverage:         CoverageEnforce,
+	RecommendedMode:  ModeEnforce,
 	Parse:            ParseCursorBeforeMCP,
 	Render:           RenderCursor,
 }
