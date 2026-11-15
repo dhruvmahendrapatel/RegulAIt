@@ -401,6 +401,11 @@ export interface Connector {
   createdAt?: string;
   ownerUserId?: string | null;
   ownership?: "owned" | "unowned" | "orphaned";
+  /** ADR-0207: a disabled object refuses every governed call; `disabledBy` is the email of who disabled it */
+  enabled?: boolean;
+  disabledReason?: string | null;
+  disabledAt?: string | null;
+  disabledBy?: string | null;
 }
 
 export interface ConnectorCredentialInfo {
@@ -410,6 +415,11 @@ export interface ConnectorCredentialInfo {
 export interface McpServer {
   id: string;
   name: string;
+  /** ADR-0207: a disabled object refuses every governed call; `disabledBy` is the email of who disabled it */
+  enabled?: boolean;
+  disabledReason?: string | null;
+  disabledAt?: string | null;
+  disabledBy?: string | null;
   url: string;
   /** PILLAR 5: the server's FLAT list price per allowed tool call. Null =
    * unpriced (cost stays an honest null, never invented). */
@@ -459,6 +469,10 @@ export interface PmConnection {
   project: string;
   baseUrl: string | null;
   apiVersion?: number | null;
+  /** how inbound drift is resolved (manual = detect only) */
+  driftResolution?: "manual" | "prefer_regulait" | "prefer_pm";
+  /** ADR-0207: while a rotation's grace window is open, when the previous webhook secret stops working */
+  previousSecretValidUntil?: string | null;
   createdAt: string;
 }
 

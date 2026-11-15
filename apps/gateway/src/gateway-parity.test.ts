@@ -748,7 +748,9 @@ describe("virtual keys: lifecycle", () => {
     expect(del.statusCode).toBe(200);
     const after = await chat(k.header!, "gp-fast-model", "after");
     expect(after.statusCode).toBe(401);
-    expect(after.json().error).toBe("virtual_key_revoked");
+    // ADR-0288: on a compat route the refusal reads in the client's dialect; the code is kept
+    expect(after.json().error.regulait_code).toBe("virtual_key_revoked");
+    expect(after.json().error.type).toBe("authentication_error");
   });
 
   it("an EXPIRED key stops authenticating, and says so", async () => {
@@ -765,7 +767,9 @@ describe("virtual keys: lifecycle", () => {
       .where(eq(virtualKeys.id, k.id));
     const after = await chat(k.header!, "gp-fast-model", "after");
     expect(after.statusCode).toBe(401);
-    expect(after.json().error).toBe("virtual_key_expired");
+    // ADR-0288: on a compat route the refusal reads in the client's dialect; the code is kept
+    expect(after.json().error.regulait_code).toBe("virtual_key_expired");
+    expect(after.json().error.type).toBe("authentication_error");
   });
 
   it("the OWNER of an ADMIN-ISSUED key cannot raise its ceiling — only rename or revoke it", async () => {

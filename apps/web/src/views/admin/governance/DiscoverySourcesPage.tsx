@@ -32,6 +32,7 @@ import v from "../../views.module.css";
 import FederationCard from "./FederationCard";
 import { EndpointImportCard } from "./EndpointImportCard";
 import { EndpointAgentCard } from "./EndpointAgentCard";
+import { EndpointMcpServersCard } from "./EndpointMcpServersCard";
 import { FoldTable } from "../../../ui/fold";
 import { DISCOVERY_SOURCES_PATH, ListPreview, runColumns, runsAttention, usePreviewPage, type PreviewSource } from "./discoveryLists";
 import {
@@ -98,6 +99,8 @@ export default function DiscoverySourcesPage() {
   const [retentionDays, setRetentionDays] = useState("");
   // ADR-0235: the wider-source family switches as edited (unsaved); empty = as saved
   const [familyDraft, setFamilyDraft] = useState<Partial<FamilySwitches>>({});
+  // MCP host-config discovery as edited (unsaved); null = as saved. Turning it on asks for the step-up.
+  const [mcpDraft, setMcpDraft] = useState<boolean | null>(null);
   // a finding's sighting links here with ?pseudonym=… (revealing still needs the step-up)
   const [params] = useSearchParams();
   const [pseudonym, setPseudonym] = useState(params.get("pseudonym") ?? "");
@@ -118,6 +121,8 @@ export default function DiscoverySourcesPage() {
   const built = kinds.filter((k) => k.built);
   const savedFamilies: FamilySwitches = settings.data?.families ?? { saas: false, identity: false, ml_platform: false };
   const familyEdit = familyChanges(savedFamilies, familyDraft);
+  const mcpSaved = settings.data?.endpointMcpConfig ?? false;
+  const mcpChanged = mcpDraft !== null && mcpDraft !== mcpSaved;
   const chosenKind = kinds.find((k) => k.kind === form.kind);
   const chosenKindOff = !form.editing && familySwitchedOff(chosenKind, savedFamilies);
   const posture = sources.data?.posture;
@@ -206,11 +211,13 @@ export default function DiscoverySourcesPage() {
     if (warnDays.trim()) body.credentialWarningAgeDays = Number(warnDays);
     if (retentionDays.trim()) body.endpointRetentionDays = Number(retentionDays);
     if (Object.keys(familyEdit.changed).length > 0) body.families = familyEdit.changed;
+    if (mcpChanged) body.endpointMcpConfig = mcpDraft;
     void act.run(async () => {
       await withStepUp((h) => stepUpApi.put("/v1/discovery/settings", body, h));
       setWarnDays("");
       setRetentionDays("");
       setFamilyDraft({});
+      setMcpDraft(null);
       await refetchAll();
     }, "Discovery settings saved");
   };
@@ -480,6 +487,8 @@ export default function DiscoverySourcesPage() {
 
           <EndpointAgentCard sources={list} />
 
+          <EndpointMcpServersCard />
+
           {/* P3: the newest runs, with failures counted in the heading; every run is on its own page */}
           <ListPreview<DiscoveryRunView>
             {...RUNS_PREVIEW}
@@ -545,12 +554,19 @@ export default function DiscoverySourcesPage() {
                   );
                 })}
               </Fieldset>
+              <label className={v.row}>
+                <input type="checkbox" checked={mcpDraft ?? mcpSaved} disabled={!settings.data} onChange={(e) => setMcpDraft(e.target.checked)} />
+                <span>
+                  MCP config discovery on employee machines
+                  <span className={v.faint}> · endpoint agents read MCP host configs, read-only, never a secret value. Switching it on asks you to confirm it&apos;s you.</span>
+                </span>
+              </label>
               <div>
                 <Button
-                  disabled={act.busy || !settings.data || (!warnDays.trim() && !retentionDays.trim() && Object.keys(familyEdit.changed).length === 0)}
+                  disabled={act.busy || !settings.data || (!warnDays.trim() && !retentionDays.trim() && Object.keys(familyEdit.changed).length === 0 && !mcpChanged)}
                   onClick={saveSettings}
                 >
-                  {familyEdit.turnsOn ? "Save settings (confirm it's you)" : "Save settings"}
+                  {familyEdit.turnsOn || (mcpChanged && mcpDraft) ? "Save settings (confirm it's you)" : "Save settings"}
                 </Button>
               </div>
             </div>

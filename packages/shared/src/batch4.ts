@@ -95,7 +95,7 @@ export type ApprovalDecisionMethod = (typeof APPROVAL_DECISION_METHODS)[number];
  * `approval_signature_mode` and the sensitive-data quorum apply to.
  * `approvals.signature_mode` / `quorum` are stored on every row but only
  * these kinds consult them. */
-export const TOOL_CALL_APPROVAL_OBJECT_TYPES = ["mcp_tool", "connector_call"] as const;
+export const TOOL_CALL_APPROVAL_OBJECT_TYPES = ["mcp_tool", "connector_call", "model_call"] as const;
 
 /** an approval rule's quorum bounds (`approval_rules.quorum`, `approvals.quorum`,
  * `org_settings.tool_approval_sensitive_quorum`) */

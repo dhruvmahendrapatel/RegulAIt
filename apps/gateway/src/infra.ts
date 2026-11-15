@@ -44,6 +44,7 @@ import {
   users,
   sql,
   type Db,
+  runWithRlsSystem,
 } from "@regulait/db";
 import {
   applyPatchSchema,
@@ -1262,7 +1263,11 @@ export async function backupVerifyTick(db: Db, state: SchedulerTickState): Promi
 
 export function startBackupVerifyScheduler(db: Db): () => void {
   const state: SchedulerTickState = { lastRunAt: 0 };
-  const timer = setInterval(() => void backupVerifyTick(db, state), 3600 * 1000);
+  // ADR-0234 batch 7a: the tick has no principal; it runs under the named `system_task` reason
+  const timer = setInterval(
+    () => void runWithRlsSystem("system_task", "timer.backup-verify", () => backupVerifyTick(db, state)),
+    3600 * 1000,
+  );
   timer.unref?.();
   return () => clearInterval(timer);
 }

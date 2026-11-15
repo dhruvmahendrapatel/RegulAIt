@@ -1,12 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_DENY_RULE_ID,
-  evaluate,
+  evaluate as kernelEvaluate,
   visibleTools,
+  type EvaluationInput,
   type ServerGrant,
   type ToolGrant,
   type ToolRef,
 } from "./index.js";
+import { cedarRateLimitEvaluator } from "./rate-limit-cedar.js";
+
+/** ADR-0239 decision 4: rate limits need an engine (the hand-written default is gone); these cases run on the one the
+ * gateway injects. A case may still pass its own `rateLimitEvaluator`. */
+const evaluate = (input: EvaluationInput) => kernelEvaluate({ rateLimitEvaluator: cedarRateLimitEvaluator, ...input });
 
 /** ADR-0124 — the shipped posture: the dial adds nothing to any decision.
  * Declared here rather than exported from the kernel on purpose: a public

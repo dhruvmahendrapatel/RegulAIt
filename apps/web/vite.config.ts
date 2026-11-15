@@ -33,11 +33,11 @@ export default defineConfig({
     sourcemap: false,
     chunkSizeWarningLimit: 900,
     // The shipped code already needs these engines at run time: Array.prototype.at (src/ui/kit.tsx, in the entry) and
-    // Object.hasOwn need Chrome/Edge 92-93, Firefox 90-92 and Safari 15.4. Vite's default JS target ("modules":
-    // Chrome 87, Safari 14) made esbuild rewrite class fields, private members and `??=` into helper calls for engines
-    // that could not run the app anyway; matching the target to that floor drops about 20 kB gzipped from the all-JS
-    // total with no change for any browser the app runs on. The CSS target stays Vite's default, so the CSS is
-    // byte-for-byte what it was.
+    // Object.hasOwn need Chrome/Edge 92-93, Firefox 90-92 and Safari 15.4, so the JS target is set to that floor rather
+    // than left at Vite's default. Vite 8 lowers JS with Oxc and bundles with rolldown; with an older target they
+    // rewrite class fields, private members and `??=` into helper calls for engines that could not run the app anyway.
+    // The CSS target is pinned separately below. Vite 8 minifies CSS with lightningcss (not esbuild), so the CSS bytes
+    // differ from the Vite 6 build, but they are lowered for the same engines.
     target: ["chrome93", "edge93", "firefox92", "safari15.4"],
     cssTarget: ["es2020", "edge88", "firefox78", "chrome87", "safari14"],
     // the polyfill only emulates <link rel="modulepreload"> on browsers without native support (older Firefox and

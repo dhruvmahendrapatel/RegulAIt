@@ -35,8 +35,10 @@ describe("ADR-0148 — control → trust dimension", () => {
     // §Consequences). ADR-0150's v2 packs add fairness controls; this is the
     // line that keeps the radar from claiming a bias axis the active packs
     // do not have.
-    // ADR-0294: nist-ai-600-1@1 is a later pack whose GAI risk 6 is a bias control from its first version
-    const v1 = DEFAULT_COMPLIANCE_PACKS.filter((p) => p.version === 1 && p.framework !== "nist-ai-600-1").flatMap((p) => p.controls);
+    // ADR-0294 and ADR-0297: nist-ai-600-1@1 (GAI risk 6) and nyc-ll144@1 (bias audit) are later packs with a bias
+    // control from their first version
+    const later = new Set(["nist-ai-600-1", "nyc-ll144"]);
+    const v1 = DEFAULT_COMPLIANCE_PACKS.filter((p) => p.version === 1 && !later.has(p.framework)).flatMap((p) => p.controls);
     const seenV1 = new Set(v1.map((c) => dimensionForControl(c)));
     expect([...seenV1].sort()).toEqual(["compliance", "privacy", "reliability", "safety", "security"]);
     const seenAll = new Set(allControls.map((c) => dimensionForControl(c)));
@@ -59,6 +61,8 @@ describe("ADR-0148 — control → trust dimension", () => {
       "eu-ai-act:art-10-bias-examination",
       "nist-ai-600-1:risk-harmful-bias-homogenization",
       "nist-ai-rmf:MEASURE-2.11",
+      "nyc-ll144:bias-audit",
+      "nyc-ll144:impact-ratios",
     ]);
   });
 });
