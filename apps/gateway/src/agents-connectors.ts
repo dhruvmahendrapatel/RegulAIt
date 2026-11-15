@@ -40,13 +40,16 @@ import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.j
 import { literacySlot } from "./ai-literacy.js";
 import { errMessage } from "./err-serializer.js";
 import { abacPrincipalFromRequest } from "./abac-principal.js";
+import { refusePieceConnector } from "./connector-catalogue.js";
 import {
   CREDENTIAL_HOST_CONNECTOR_KINDS,
   ConnectorProviderError,
   connectorCredentialHosts,
   connectorDefaultBaseUrl,
   isConnectorProviderKind,
+  isPieceProviderKind,
   parseOutlookCredential,
+  parsePieceCredentialShape,
   parseResendCredential,
   parseSnowflakeCredential,
   parseTeamsCredential,
@@ -157,6 +160,7 @@ import {
   type ConversationContext,
 } from "./conversations.js";
 import { ownerChangeGate, resolveRegistrationOwner, withOwnership } from "./ownership.js";
+import { withLifecycle } from "./integration-lifecycle.js";
 import { CHANGED_CONCURRENTLY, checkStepUp, grantMintStepUp, requireStepUp } from "./step-up.js";
 import { governedModelGate } from "./governed-core.js";
 import { resolveDispatchUsage } from "./usage-extractors.js";
@@ -423,6 +427,8 @@ export type DispatchOutcome =
       trace?: DispatchTraceRef;
       /** ADR-0188 S4: the kernel rule that refused a DELEGATED dispatch (`error: "delegation_denied"`) */
       ruleId?: string;
+      /** ADR-0251: the model-call approval a hold (202 `approval_pending`) or a failed replay names */
+      approvalId?: string;
     };
 
 /** ADR-0070 — the trace coordinates of one dispatch attempt. */
@@ -1409,6 +1415,19 @@ async function dispatchAttempt(
     agentName: served.name,
     mode: args.mode ?? "execute",
     projectId: args.projectId ?? null,
+    provider: served.provider ?? null,
+    model: served.model ?? null,
+    // P-01: a model approval rule holds the call; its consent is bound to exactly this request (ADR-0104)
+    invocation: {
+      input: args.input,
+      messages: args.messages,
+      system: args.system,
+      tools: args.tools,
+      toolChoice: args.toolChoice,
+      responseFormat: args.responseFormat,
+      thinking: args.thinking,
+      maxTokens: args.maxTokens,
+    },
   });
   if (coreRefusal) {
     if (coreRefusal.auditLogId) sink.auditLogId = coreRefusal.auditLogId;
@@ -4299,6 +4318,7 @@ export function registerAgentConnectorRoutes(
                 decision,
                 error: governed.error,
                 ...(governed.detail ? { detail: governed.detail } : {}),
+                ...(governed.approvalId ? { approvalId: governed.approvalId } : {}),
                 ...(governed.pii ? { pii: governed.pii } : {}),
                 ...(governed.guardrails ? { guardrails: governed.guardrails } : {}),
                 ...suppressionFlag,
@@ -5034,6 +5054,7 @@ export function registerAgentConnectorRoutes(
             routing,
             error: outcome.error,
             ...(outcome.detail ? { detail: outcome.detail } : {}),
+            ...(outcome.approvalId ? { approvalId: outcome.approvalId } : {}),
             ...(outcome.pii ? { pii: outcome.pii } : {}),
             ...(outcome.guardrails ? { guardrails: outcome.guardrails } : {}),
           });
@@ -5157,6 +5178,8 @@ export function registerAgentConnectorRoutes(
         routing,
         error: dispatchOutcome.error,
         ...(dispatchOutcome.detail ? { detail: dispatchOutcome.detail } : {}),
+        // ADR-0251: a held model call (202 `approval_pending`) names the approval to re-submit against
+        ...(dispatchOutcome.approvalId ? { approvalId: dispatchOutcome.approvalId } : {}),
         ...(dispatchOutcome.pii ? { pii: dispatchOutcome.pii } : {}),
         ...(dispatchOutcome.guardrails ? { guardrails: dispatchOutcome.guardrails } : {}),
         // ADR-0066 §4: an EXHAUSTED chain must be as visible as a successful
@@ -5202,6 +5225,10 @@ export function registerAgentConnectorRoutes(
       what: `creating connector '${body.name}'`,
     });
     if (licenseRefusal) return reply.status(licenseRefusal.status).send(licenseRefusal.body);
+    // ADR-0255 (P31) — a catalogue-piece connector needs its piece enabled first (and is refused air-gapped or with a
+    // baseUrl). The same predicate runs again on every invoke; this is the earliest honest failure.
+    const pieceRefusal = await refusePieceConnector(db, { providerKind: body.providerKind, baseUrl: body.baseUrl, label: `connector '${body.name}'` });
+    if (pieceRefusal) return reply.status(pieceRefusal.status).send({ error: pieceRefusal.error, detail: pieceRefusal.detail });
     // ADR-0034 amendment #2 — the earliest honest failure for a connector
     // endpoint. NOT a substitute for the invoke-time check (see the note
     // there): this is so a typo, or a deliberate IMDS/collector URL, is a 400
@@ -5237,7 +5264,7 @@ export function registerAgentConnectorRoutes(
     return reply.status(201).send(row);
   });
 
-  app.get("/v1/connectors", async () => ({ connectors: await withOwnership(db, await db.select().from(connectors)) }));
+  app.get("/v1/connectors", async () => ({ connectors: await withLifecycle(db, await withOwnership(db, await db.select().from(connectors))) }));
 
   // --- connector credentials (admin-only via the global gate) ---
   // One platform credential per connector, encrypted at rest, never returned —
@@ -5278,7 +5305,12 @@ export function registerAgentConnectorRoutes(
       // ADR-0202 lane E: {apiKey, from}, the sender explicit
       resend: parseResendCredential,
     };
-    const parseShape = connector.providerKind ? shapeParsers[connector.providerKind] : undefined;
+    // ADR-0255: a catalogue piece's credential ({siteUrl, email, apiToken} for Jira Cloud, a Google OAuth client and
+    // refresh token for Sheets and Gmail, a token for Slack and GitHub) is shape-checked by the piece's own parser
+    const parseShape = connector.providerKind
+      ? (shapeParsers[connector.providerKind] ??
+        (isPieceProviderKind(connector.providerKind) ? (t: string) => parsePieceCredentialShape(connector.providerKind!, t) : undefined))
+      : undefined;
     if (parseShape) {
       try {
         parseShape(body.token);

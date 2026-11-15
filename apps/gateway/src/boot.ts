@@ -59,6 +59,7 @@ import { describeEgressPosture, resolveDeployMode } from "./deploy-posture.js";
 import { describePublicUrl, resolvePublicUrl } from "./public-url.js";
 import { describeDataKey, verifyDataKeyOnBoot, type DataKeyBootResult } from "./data-key.js";
 import { Scheduler, resolveSchedulerConfig, syncSchedulerJobs } from "./scheduler.js";
+import { startStageRetryWorker, stageRetryWorkerEnabled, warmStageQueueSender, type StageRetryWorker } from "./workflows-queue.js";
 import { schedulerJobRegistry } from "./scheduler-jobs.js";
 import { captureAnchor, flushPendingAnchors, resolveAnchorSink } from "./audit-chain.js";
 import { backfillOtlpHeaderCiphertext, loadOrgSettings } from "./org-settings.js";
@@ -68,7 +69,8 @@ import { checkReceiptSigningKey } from "./receipt-signing-key.js";
 import { ensureInstallIdentityKey, identitySigningKeyConfiguration } from "./identity-signing-keys.js";
 import { describeGatewayLogger, resolveGatewayLogger } from "./gateway-logger.js";
 import { databaseTlsBootWarning, describeDbPool, resolveDbPoolConfig } from "@regulait/db";
-import { describeMetricsPosture, resolveMetricsConfig, startMetricsListener } from "./metrics.js";
+import { describeMetricsPosture, disablePrometheusReader, enableOtlpPushReader, resolveMetricsConfig, startMetricsListener } from "./metrics.js";
+import { createOtlpMetricsPusher, describeOtlpMetricsPosture, resolveOtlpMetricsConfig } from "./metrics-otlp.js";
 import { configureRateLimitEvaluator, describeRateLimitEvaluator } from "./rate-limit-evaluator.js";
 import { seedBuiltinEvalDatasets } from "./eval-builtin-datasets.js";
 import { assertReceiptEmitterBootable } from "./decision-receipts.js";
@@ -124,6 +126,12 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // bearer token (or with an unparseable address) refuses the boot here, for
   // the same reason — nothing exists yet to leave behind.
   const metricsConfig = resolveMetricsConfig(env);
+  // ADR-0301: an OTLP metrics setting that is present but unusable refuses here too.
+  const otlpMetricsConfig = resolveOtlpMetricsConfig(env);
+  // ADR-0301 review item 1: the push reader is registered before anything records, and only when it is wanted
+  if (otlpMetricsConfig) enableOtlpPushReader();
+  // ADR-0301 second review: the Prometheus reader likewise exists only when a scrape surface is on
+  if (!metricsConfig.listen && !metricsConfig.onMainListener) disablePrometheusReader();
   // ADR-0239: an unrecognised REGULAIT_RATE_LIMIT_EVALUATOR refuses the boot here, before anything exists.
   const rateLimitEvaluator = configureRateLimitEvaluator(env);
   // ADR-0189 R25 item 12: FIRST BOOT creates the install-generated receipt signing key when no key is
@@ -301,6 +309,11 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   app.addHook("onClose", async () => {
     if (scheduler) await scheduler.stop();
   });
+  // ADR-0283: the workflow retry worker, registered before listen for the same reason
+  let retryWorker: StageRetryWorker | null = null;
+  app.addHook("onClose", async () => {
+    if (retryWorker) await retryWorker.stop();
+  });
 
   // Audit anchoring is DEFAULT-ON and deliberately does NOT ride the ADR-0064
   // scheduler. Two reasons, both load-bearing:
@@ -339,6 +352,14 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
       throw err;
     }
   }
+
+  // ADR-0301 — OTLP metrics push, only when an endpoint is configured. The
+  // first push is one interval after boot; every push re-checks the egress
+  // allow-list. Its close hook goes in before listen, like the ones above.
+  const otlpMetricsPusher = otlpMetricsConfig
+    ? createOtlpMetricsPusher(db, otlpMetricsConfig, { start: !underTest, log })
+    : null;
+  if (otlpMetricsPusher) app.addHook("onClose", async () => otlpMetricsPusher.stop());
 
   const address = await app.listen({ port, host });
 
@@ -443,6 +464,18 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
     // an in-flight job rather than abandoning it mid-sweep (see Scheduler.stop).
     // The hook itself is registered above, before listen — see the note there.
   }
+  // ADR-0283: automatic stage retries. On unless REGULAIT_WORKFLOW_RETRY_WORKER=off (forced off under vitest). A
+  // failure to start is a degradation, not an outage: a failed stage stays retryable through /advance.
+  if (stageRetryWorkerEnabled(env)) {
+    try {
+      retryWorker = await startStageRetryWorker(db);
+    } catch (err) {
+      console.error(`[regulait] workflow retry worker did not start: ${errLine(err)}`);
+    }
+  }
+  // The sender starts here, not inside the first failing stage's transaction. Best-effort: a send that still finds no
+  // sender commits the failure with `stage-retry-not-scheduled: queue_unavailable`.
+  await warmStageQueueSender().catch((err: unknown) => console.error(`[regulait] workflow retry sender did not start: ${errLine(err)}`));
 
   log(`regulait gateway listening on ${address}`);
   // ADR-0033: /ui is the whole product surface; /app and /admin are only
@@ -525,6 +558,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // from a stale registry screen three months later.
   // ADR-0185 G5: whether /metrics is served, where, and that it needs a token
   log(`  metrics:   ${describeMetricsPosture(metricsConfig, metricsListener?.address ?? null)}`);
+  log(`  metrics:   ${describeOtlpMetricsPosture(otlpMetricsConfig)}`);
   // ADR-0239: which engine evaluates rate limits (Cedar by default; legacy only by explicit setting)
   log(`  rate limits: ${describeRateLimitEvaluator(rateLimitEvaluator)}`);
   log(`  scheduler: ${schedulerConfig.reason}${schedulerConfig.enabled ? `, ${registry.size} job(s)` : ""}`);

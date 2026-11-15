@@ -31,6 +31,7 @@ import { PostureEstimate, type PostureScoreDoc } from "./PostureEstimate";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 import p from "./posture.module.css";
+import ed from "./executiveDashboard.module.css";
 
 interface PostureDoc {
   generatedAt: string;
@@ -314,6 +315,36 @@ function BehindCompletedInstance(props: { item: { count: number; sampleUseCaseId
   );
 }
 
+const USE_CASE_STAGES = [
+  ["proposed", "Proposed"],
+  ["underReview", "Under review"],
+  ["approved", "Approved"],
+  ["rejected", "Rejected"],
+  ["retired", "Retired"],
+] as const;
+
+/** "Use cases by status" from the approved mockup: display only, the counts are the text and the bars are decoration. */
+function UseCaseStatusBars(props: { counts: PostureDoc["useCases"] }) {
+  const { counts } = props;
+  return (
+    <ul className={ed.bars} aria-label="Use cases by status">
+      {USE_CASE_STAGES.map(([key, label]) => {
+        const n = counts[key];
+        const width = counts.total > 0 ? Math.round((n / counts.total) * 100) : 0;
+        return (
+          <li key={key} className={ed.barRow}>
+            <span className={ed.barLabel}>{label}</span>
+            <span className={ed.barTrack} aria-hidden="true">
+              <span className={ed.barFill} data-stage={key} style={{ width: `${width}%` }} />
+            </span>
+            <span className={ed.barValue}>{n}</span>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
 function SectionLink(props: { to: string; label?: string }) {
   return (
     <Link to={props.to} className={p.sectionLink}>
@@ -335,7 +366,10 @@ export default function PosturePage() {
         title="Posture"
         info={<p>The one-page executive read of everything the operator pages hold: pack coverage, open risks, red-team posture, spend vs budget, governance activity, audit anchoring and the use-case pipeline. The posture estimate at the top weighs seven objectives by published formulae and ranks what to fix first; it is an estimate, never a compliance verdict. Every number is computed from the real ledgers at the moment this page loads — nothing is a stored rollup — and where a ledger is empty the page says unmeasured, never zero-implies-good. Print this page for the meeting: the browser's print view drops the app chrome.</p>}
         actions={
-          <span className={p.noPrint}>
+          <span className={`${p.noPrint} ${ed.actions}`}>
+            <Button variant="ghost" onClick={() => { if (!q.isFetching) void q.refetch(); }} aria-disabled={q.isFetching || undefined}>
+              {q.isFetching ? "Refreshing…" : "Refresh"}
+            </Button>
             <Button variant="ghost" onClick={() => window.print()}>
               Print one-pager
             </Button>
@@ -345,10 +379,47 @@ export default function PosturePage() {
       <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
         {d && (
           <div className={v.stack}>
+            <p className={v.faint} data-testid="posture-scope">
+              Whole organisation · last {d.window.days} days · generated {ago(d.generatedAt)}
+            </p>
             {/* ---------------- estimate, objectives and what to fix first ---------------- */}
             {d.score && <PostureEstimate score={d.score} />}
-            {/* ---------------- headlines ---------------- */}
-            <div className={v.grid4}>
+            {/* ---------------- headlines: the approved mockup's five-tile row ---------------- */}
+            <div className={ed.kpis} role="group" aria-label="Headline figures">
+              <Headline
+                value={d.useCases.total}
+                label="registered AI use cases"
+                line={<>Every use case recorded through intake, in any status. This is an inventory count, not a compliance score.</>}
+                link={<SectionLink to="/admin/use-cases" label="use-case registry →" />}
+              />
+              <Headline
+                value={d.useCases.approved}
+                label="approved use cases"
+                line={<>Use cases whose review approved them. {d.useCases.rejected} rejected and {d.useCases.retired} retired are not counted here.</>}
+                link={<SectionLink to="/admin/use-cases" label="use-case registry →" />}
+              />
+              <Headline
+                value={d.useCases.proposed + d.useCases.underReview}
+                label="use cases in review"
+                line={<>{d.useCases.proposed} proposed and {d.useCases.underReview} under review, waiting for a decision.</>}
+                link={<SectionLink to="/admin/governance/intake" label="intake reviews →" />}
+              />
+              <Headline
+                value={d.risks.open + d.risks.mitigating}
+                label="open + mitigating risks"
+                line={
+                  <>
+                    {d.risks.open} open, {d.risks.mitigating} being mitigated, {d.risks.accepted} formally accepted.
+                    {(d.risks.transferred ?? 0) > 0 && <> {d.risks.transferred} transferred to an insurer or supplier.</>}
+                    {(d.risks.avoided ?? 0) > 0 && <> {d.risks.avoided} avoided — the use stopped.</>}
+                    {d.risks.attestationOnly > 0 && (
+                      <> {d.risks.attestationOnly} rest on attestation only — no ledger measures them.</>
+                    )}
+                  </>
+                }
+                chip={d.risks.attestationOnly > 0 ? <Badge>{`${d.risks.attestationOnly} attestation only`}</Badge> : null}
+                link={<SectionLink to="/admin/risks" />}
+              />
               <Headline
                 value={
                   d.packs.active.length === 0
@@ -369,21 +440,20 @@ export default function PosturePage() {
                 }
                 link={<SectionLink to="/admin/compliance-packs" />}
               />
+            </div>
+            <div className={v.grid4}>
               <Headline
-                value={d.risks.open + d.risks.mitigating}
-                label="open + mitigating risks"
-                line={
-                  <>
-                    {d.risks.open} open, {d.risks.mitigating} being mitigated, {d.risks.accepted} formally accepted.
-                    {(d.risks.transferred ?? 0) > 0 && <> {d.risks.transferred} transferred to an insurer or supplier.</>}
-                    {(d.risks.avoided ?? 0) > 0 && <> {d.risks.avoided} avoided — the use stopped.</>}
-                    {d.risks.attestationOnly > 0 && (
-                      <> {d.risks.attestationOnly} rest on attestation only — no ledger measures them.</>
-                    )}
-                  </>
-                }
-                chip={d.risks.attestationOnly > 0 ? <Badge>{`${d.risks.attestationOnly} attestation only`}</Badge> : null}
-                link={<SectionLink to="/admin/risks" />}
+                value={d.agentOwnership.total}
+                label="registered AI agents"
+                line={<>{d.agentOwnership.owned} owned, {d.agentOwnership.unowned} unowned and {d.agentOwnership.orphaned} orphaned.</>}
+                chip={d.agentOwnership.unowned + d.agentOwnership.orphaned > 0 ? <Badge tone="warn">Ownership attention needed</Badge> : null}
+                link={<SectionLink to="/admin/inventory" label="agent inventory →" />}
+              />
+              <Headline
+                value={d.governance.approvalsPending}
+                label="pending governance approvals"
+                line={<>Pending approvals in the governance queue, not every task assigned to a person. {d.governance.approvalsDecidedInWindow} decided in the last {d.window.days} days.</>}
+                link={<SectionLink to="/admin/approvals" label="approvals queue →" />}
               />
               <Headline
                 value={d.redteam.measured && d.redteam.latest ? pct(d.redteam.latest.asr) : "unmeasured"}
@@ -598,6 +668,7 @@ export default function PosturePage() {
                     </>
                   )}
                 </div>
+                {d.useCases.total > 0 && <UseCaseStatusBars counts={d.useCases} />}
                 {d.useCases.instanceCompletedNotApproved && (
                   <BehindCompletedInstance item={d.useCases.instanceCompletedNotApproved} />
                 )}

@@ -87,6 +87,7 @@ export const MACHINE_ONLY = new Map([
 
   // ---- the data plane: what the gateway proxies and governs -------------------
   ["POST /v1/chat/completions", "data plane: OpenAI-compatible proxy (ADR-0020); called by vendor SDKs, governed per call"],
+  ["POST /v1/responses", "data plane: OpenAI Responses-compatible proxy (ADR-0287); called by vendor SDKs, governed per call"],
   ["POST /v1/messages", "data plane: Anthropic-compatible proxy (ADR-0024); called by vendor SDKs, governed per call"],
   ["GET /v1/models", "data plane: OpenAI-compatible model list for vendor SDKs"],
   ["POST /mcp/:serverId", "data plane: the governed MCP proxy endpoint MCP clients connect to"],
@@ -271,8 +272,6 @@ export const INDIRECT_UI_CALLS = new Map([
     ["GET /v1/governance/remediations", "apps/web/src/views/admin/governance/RemediationsCard.tsx"],
     ["GET /v1/certification-campaigns", "apps/web/src/views/admin/governance/CampaignsPage.tsx"],
     ["GET /v1/certification-campaigns/:campaignId/items", "apps/web/src/views/admin/governance/CampaignsPage.tsx"],
-    ["GET /v1/sod/overrides", "apps/web/src/views/admin/governance/SodRulesPage.tsx"],
-    ["GET /v1/policy-simulations", "apps/web/src/views/admin/governance/SimulationPage.tsx"],
     ["GET /v1/copilot/queries", "apps/web/src/views/admin/governance/CopilotPage.tsx"],
     ["GET /v1/copilot/proposals", "apps/web/src/views/admin/governance/CopilotPage.tsx"],
     ["GET /v1/shadow-ai/imports", "apps/web/src/views/admin/governance/ShadowAiPage.tsx"],
@@ -374,6 +373,10 @@ export const KNOWN_UI_GAPS = new Map([
   ["POST /v1/agents/:agentId/usage-extractor/versions/:versionId/test", { does: "tests a version against a sample response and the counts the admin expects", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["POST /v1/agents/:agentId/usage-extractor/versions/:versionId/activate", { does: "activates a version whose latest test passed (settings_relax step-up)", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["POST /v1/agents/:agentId/usage-extractor/deactivate", { does: "returns an agent to its adapter's built-in usage counts", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["POST /v1/mcp-catalogue/presets/:preset", { does: "seeds the official MCP Registry or awesome-mcp-servers as a disabled catalogue source", tracking: "ADR-0256 (P32): the brief is API and backend only; the deduped catalogue page, preset buttons and bundle upload are posted on #453. RAISED FROM 7 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["POST /v1/mcp-catalogue/bundles", { does: "imports a signed offline catalogue bundle (air-gapped installs)", tracking: "ADR-0256 (P32): the brief is API and backend only; the deduped catalogue page, preset buttons and bundle upload are posted on #453. RAISED FROM 7 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["GET /v1/mcp-catalogue/bundle", { does: "exports one source as an unsigned bundle, to be signed offline", tracking: "ADR-0256 (P32): the brief is API and backend only; the deduped catalogue page, preset buttons and bundle upload are posted on #453. RAISED FROM 7 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["GET /v1/mcp-catalogue", { does: "reads the deduped catalogue: sources, vetting, paid/x402 flag and admission state", tracking: "ADR-0256 (P32): the brief is API and backend only; the deduped catalogue page, preset buttons and bundle upload are posted on #453. RAISED FROM 7 for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["GET /v1/mcp/definition-pins", { does: "lists the MCP servers with a tool, prompt or resource changed since approval (rug-pull queue)", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["GET /v1/servers/:serverId/definition-pins", { does: "one server's pinned definitions with each changed item's RFC 6902 diff", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["POST /v1/servers/:serverId/definition-pins/approve", { does: "re-approves reviewed changed items against their digests (settings_relax step-up)", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
@@ -405,25 +408,33 @@ export const KNOWN_UI_GAPS = new Map([
   ["POST /v1/third-party-ingest/sources/:sourceId/credential", { does: "issues or replaces the source's write-only rgti_ token, shown once (step-up, audited)", tracking: "#453" }],
   ["POST /v1/third-party-ingest/sources/:sourceId/credential/revoke", { does: "revokes the source's ingest token (audited)", tracking: "#453" }],
   ["GET /v1/third-party-ingest/sources/:sourceId/records", { does: "the newest third-party evidence a source delivered, each marked third-party with its linked findings", tracking: "#453" }],
-  ["GET /v1/reports/posture/assets", { does: "pages per-asset posture scores (agents or use cases) the caller can read, each with objectives and ranked actions", tracking: "ADR-0214 amendment (P3): the brief is API-only; the per-asset score screen is posted on #453 (c6703277931) for the Governed Designer, and the owner chose the temporary gap on #705 (2026-11-07)" }],
-  ["GET /v1/reports/posture/assets/:kind/:assetId", { does: "one agent's or use case's posture score, with its objectives, not-applicable list and ranked actions", tracking: "ADR-0214 amendment (P3): the brief is API-only; the per-asset score screen is posted on #453 (c6703277931) for the Governed Designer, and the owner chose the temporary gap on #705 (2026-11-07)" }],
-  // ADR-0259 (P35): owner decision on #733 (2026-11-07, option c): the backend landed before its screen; the UI
-  // lane builds it on #453, then deletes these three.
+  // ADR-0303 (lane L11, P18 C6): five API-only SIEM destination routes; the admin screen is posted on #453.
+  ["GET /v1/siem/destinations", { does: "lists SIEM destinations, their state, cursor and lag (never the secret)", tracking: "#453" }],
+  ["POST /v1/siem/destinations", { does: "creates a SIEM destination, off by default; the Standard Webhooks secret is shown once", tracking: "#453" }],
+  ["PUT /v1/siem/destinations/:destinationId/enabled", { does: "turns a SIEM destination on (step-up, audited as a relaxation) or off (audited)", tracking: "#453" }],
+  ["POST /v1/siem/destinations/:destinationId/rotate-secret", { does: "rotates a SIEM destination's signing secret, shown once (step-up, audited)", tracking: "#453" }],
+  ["POST /v1/siem/destinations/:destinationId/recover", { does: "returns a dead-lettered or backing-off SIEM destination to delivery now (audited)", tracking: "#453" }],
+  // EXCEPTION (ADR-0255, P31, 2026-11-07): the P31 brief is "API and backend only; post the catalogue UI need on
+  // #453 for the Governed Designer", so these two routes ship with their screen owned by that lane. These two
+  // raise the cap by 2, visibly; the Designer's catalogue screen deletes both entries and lowers it by 2. Decided on #753
+  // (2026-11-14): keep the temporary gap; lane UI-C builds the catalogue screen after merge and lowers the cap.
   [
-    "GET /v1/discovery/endpoint-mcp-servers",
+    "GET /v1/connector-catalogue",
     {
-      does: "ADR-0259: the MCP servers enrolled devices' host configs name, with risk flags, secret types and the registry diff (linked, registered, unregistered); keyset-paginated, filters status/risky/secrets/deviceId",
-      tracking: "#453",
+      does: "lists the curated catalogue pieces (status, actions, upstream) and the community pieces available, not enabled (paginated, q filter)",
+      tracking: "ADR-0255 / P31: catalogue screen for the Governed Designer, requested on #453",
     },
   ],
   [
-    "POST /v1/discovery/endpoint-mcp-server-links",
-    { does: "ADR-0259: link a configured MCP server identity (package, host or command) to an approved mcp_servers row, audited", tracking: "#453" },
+    "POST /v1/connector-catalogue/:pieceKey/enablement",
+    {
+      does: "enables (admin, step-up) or disables a curated piece, with a reason, audited",
+      tracking: "ADR-0255 / P31: catalogue screen for the Governed Designer, requested on #453",
+    },
   ],
-  [
-    "POST /v1/discovery/endpoint-mcp-server-links/remove",
-    { does: "ADR-0259: remove that link, audited", tracking: "#453" },
-  ],  ["GET /v1/servers/:serverId/token-exchange", { does: "reads an MCP server's upstream token-exchange configuration and per-action scope map (never the secret)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
+  ["GET /v1/reports/posture/assets", { does: "pages per-asset posture scores (agents or use cases) the caller can read, each with objectives and ranked actions", tracking: "ADR-0214 amendment (P3): the brief is API-only; the per-asset score screen is posted on #453 (c6703277931) for the Governed Designer, and the owner chose the temporary gap on #705 (2026-11-07)" }],
+  ["GET /v1/reports/posture/assets/:kind/:assetId", { does: "one agent's or use case's posture score, with its objectives, not-applicable list and ranked actions", tracking: "ADR-0214 amendment (P3): the brief is API-only; the per-asset score screen is posted on #453 (c6703277931) for the Governed Designer, and the owner chose the temporary gap on #705 (2026-11-07)" }],
+  ["GET /v1/servers/:serverId/token-exchange", { does: "reads an MCP server's upstream token-exchange configuration and per-action scope map (never the secret)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
   ["PUT /v1/servers/:serverId/token-exchange", { does: "sets or changes an MCP server's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
   ["DELETE /v1/servers/:serverId/token-exchange", { does: "removes an MCP server's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
   ["GET /v1/connectors/:connectorId/token-exchange", { does: "reads a connector's upstream token-exchange configuration and per-action scope map (never the secret)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
@@ -437,7 +448,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 44;
+export const KNOWN_UI_GAPS_MAX = 52; // main's 48 (43 + ADR-0303 L11 5 SIEM routes) + ADR-0256 (P32) 4, master decision on #725 2026-11-14
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 

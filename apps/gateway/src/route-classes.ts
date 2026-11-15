@@ -272,6 +272,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // deliberately NOT here: writing the posture stays admin-only.
   "POST /v1/messages",
   "POST /v1/chat/completions",
+  // ADR-0287: the OpenAI Responses dialect of the same developer path.
+  "POST /v1/responses",
   // ADR-0066 §1 — the discovery endpoint. Non-admin for exactly the reason the
   // two shims above are: it is the DEVELOPER's setup call, and its governance
   // is the per-caller entitlement filter inside the handler, not admin-ness.
