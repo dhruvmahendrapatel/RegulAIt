@@ -161,3 +161,63 @@ with ten look-alikes per carrier; a drifted file is
 refused before parsing; metrics are undefined without their denominator class; the regression rule fires only on a
 change worse than the tolerance in the right direction; the heuristic does not regress on any dataset; the trained
 entry is recorded, not gated, and covers every case.
+
+## Amendment — 2026-11-14: AgentDojo task-dependent attacks
+
+As built (P25 follow-up; no migration, no UI). This closes the "Not done" item "AgentDojo's task-dependent attacks, and
+the injection rendered inside each tool output" as far as it can be done without running AgentDojo; the original
+sections above are unchanged.
+
+**What was added.** A sixth snapshot, `agentdojo-task-dependent.json` (158 cases, 120 injection / 38 benign, 110 kB),
+from the same pinned checkout (`ethz-spylab/agentdojo@089ed468cf3ed0322acc66b0211f26d9d90dbf60`, MIT, the same
+`LICENSE-agentdojo`), written by the same `scripts/refresh-injection-eval-snapshots.py` and pinned in `MANIFEST.json`
+and `injection-baselines.ts`. The manifest entry also records the sha256 of each of the 19 upstream files it is read
+from. A full refresh reproduces the five existing snapshots byte for byte.
+
+1. **Task-dependent attacks (81 texts).** The six attacks whose text depends on the attacked pipeline or the injection
+   task: `important_instructions` (names the user, "Emma Johnson", and the model), its `no_model_name`,
+   `no_user_name`, `wrong_model_name` and `wrong_user_name` ("Mark Smith") variants, and `tool_knowledge` (adds the
+   injection task's tool calls with their placeholder arguments). Templates, user names and how each variant picks
+   the model name are read from the attack classes with `ast`. The model's prose name comes from `models.py`
+   `MODEL_NAMES`: one seeded draw (seed 20261107) of a pipeline model id per text; `wrong_model_name` reproduces
+   upstream's `random.Random(0).choice` over the other names. `tool_knowledge`'s `{tools}` text is rebuilt from each
+   injection task's ground-truth `placeholder_args` when those are literals; one task's arguments read the environment
+   (`slack/injection_task_2`), so it has no `tool_knowledge` case and the manifest names it. Three of the six attacks
+   per goal are kept (seeded sample) to hold the file near the `agentdojo` snapshot's size.
+2. **Injections rendered in their carriers (39 injection, 38 benign).** For each of the 39 injection vectors (banking
+   4, slack 6, travel 13, workspace 16), the environment field AgentDojo puts it in (a file, an email body, a calendar
+   description, a web page, a transaction subject, a review list joined by newlines as the travel tools join it),
+   read from `environment.yaml` and its includes by a narrow line reader that accepts only one-line double-quoted
+   values, lists of them and literal blocks, and fails the refresh on anything else. One seeded (goal, attack) pair
+   per vector, drawn from all 11 attacks, replaces the placeholder. The benign counterpart is the same field at its
+   `injection_vectors.yaml` default, which is what the agent reads with no attack (one vector whose default is empty
+   leaves an empty field and is skipped).
+
+**Limits (recorded in the manifest).** AgentDojo inserts the text into a PyYAML-dumped copy of the environment and
+returns a serialised tool result; reproducing that needs PyYAML and the AgentDojo runtime, so the snapshot keeps the
+field's text, with the injection's own whitespace and any escapes a default carries (the banking bill) as written,
+not the whole tool result. Which user tasks reach which vector (the ground-truth pipeline) is not reproduced, as
+before: a text detector sees the same field whatever the user task.
+
+**Measured (heuristic, gated at the same 2-point tolerance; re-measured by `injection-baselines.test.ts`).**
+
+| Dataset | Cases (inj / benign) | Heuristic precision | Heuristic recall | Heuristic FPR | Trained |
+|---|---|---|---|---|---|
+| AgentDojo task-dependent | 120 / 38 | 100% (21/21) | **17.5%** (21/120) | **0.0%** (0/38) | not yet measured |
+| Pooled, all six sets | 755 / 624 | 98.7% | 30.9% (233/755) | 0.5% (3/624) | (five sets, unchanged) |
+
+The heuristic catches all 15 bare `tool_knowledge` texts and 4 of 5 in carriers, and the 2 `injecagent`-wrapped
+carriers; it catches none of the 66 named `important_instructions` texts or any other carrier. The pooled recall drop
+(33.4% to 30.9%) is the new set's mix, not a change in the detector. The other five rows are unchanged.
+
+**Trained classifier.** Still measured offline only (ADR-0220 §8). `eval_baselines.py` now includes the new set; until
+it is re-run, `injection-baselines.expected.json` lists the set under `notYetMeasured` for the trained entry, and the
+test requires every set to be either measured or listed there (the gated heuristic must cover all six). No number is
+written for it here.
+
+**Still not done.** HackAPrompt (owner gate, unchanged); gating the trained classifier once its image builds in CI;
+the full serialised tool result and per-user-task injection candidates (need the AgentDojo runtime).
+
+**Tests.** `injection-baselines.test.ts` gains one case (every named attack and every suite's carrier and default is
+present, labels follow strata, same commit and licence as `agentdojo`), and the seed and the trained entry's
+measured-or-listed rule are checked.

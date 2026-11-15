@@ -22,6 +22,10 @@
     "./rate-limit-cedar": {
       "types": "./dist/rate-limit-cedar.d.ts",
       "default": "./dist/rate-limit-cedar.js"
+    },
+    "./approval-rule-cedar": {
+      "types": "./dist/approval-rule-cedar.d.ts",
+      "default": "./dist/approval-rule-cedar.js"
     }
   },
   "scripts": {

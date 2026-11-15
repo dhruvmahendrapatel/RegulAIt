@@ -54,6 +54,7 @@ import {
   type Db,
   type EngineRunRow,
   type ExecutorRow,
+  runWithRlsSystem,
 } from "@regulait/db";
 import {
   ENGINE_RUN_ENTITLEMENT_PHASE,
@@ -610,7 +611,8 @@ function watchRun(db: Db, deps: EngineTaskDeps, task: EngineTask): void {
       clearInterval(timer);
       return;
     }
-    void (async () => {
+    // ADR-0234 batch 7a (#809 review): server-side work, not the runner request that started the task
+    void runWithRlsSystem("system_task", "timer.engine-task-watchdog", async () => {
       const [r] = await db.select({ status: engineRuns.status }).from(engineRuns).where(eq(engineRuns.id, task.runId));
       if (!r || r.status !== "leased") {
         clearInterval(timer);
@@ -618,7 +620,7 @@ function watchRun(db: Db, deps: EngineTaskDeps, task: EngineTask): void {
         return;
       }
       await taskState(db, deps, task);
-    })().catch(() => undefined);
+    }).catch(() => undefined);
   }, ENGINE_TASK_WATCHDOG_MS);
   timer.unref?.();
 }

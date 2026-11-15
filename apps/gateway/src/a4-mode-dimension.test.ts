@@ -6,7 +6,11 @@ let restoreStrictAdmission: (() => Promise<void>) | undefined;
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, auditLog, createDb, eq, runMigrations, type Db } from "@regulait/db";
-import { evaluate } from "@regulait/policy-kernel";
+import { evaluate as kernelEvaluate, type EvaluationInput } from "@regulait/policy-kernel";
+import { cedarRateLimitEvaluator } from "@regulait/policy-kernel/rate-limit-cedar";
+
+/** ADR-0239 decision 4: rate limits need the engine the gateway injects (the hand-written default is gone) */
+const evaluate = (input: EvaluationInput) => kernelEvaluate({ rateLimitEvaluator: cedarRateLimitEvaluator, ...input });
 import { buildApp } from "./app.js";
 import { deriveDeployContext, governedEvaluate } from "./governed-evaluate.js";
 import { effectiveModeOverrides, runAuditPruneOnce, retentionFloor } from "./org-settings.js";

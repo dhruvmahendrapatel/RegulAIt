@@ -471,3 +471,101 @@ describe("ADR-0230 A3: the idempotency key, its approval binding, and the busine
     upstream.nextDocument = null;
   });
 });
+
+describe("ADR-0230 owner decision 2026-11-15: the SAP defaults are org settings", () => {
+  const setSap = (v: Partial<typeof orgSettings.$inferInsert>) => db.update(orgSettings).set(v).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  const SHIPPED = { sapApprovalQuorum: 2, sapWriteRatePerHour: 10, sapUnattributedWritesAllowed: false, sapReadsApproveFirst: false };
+  const lastSettingsAudit = async () =>
+    (await db.select().from(auditLog).where(eq(auditLog.ruleId, "org-settings-updated")).orderBy(desc(auditLog.seq)).limit(1))[0];
+
+  it("ships the built values as the defaults", async () => {
+    const [row] = await db
+      .select({ q: orgSettings.sapApprovalQuorum, r: orgSettings.sapWriteRatePerHour, u: orgSettings.sapUnattributedWritesAllowed, a: orgSettings.sapReadsApproveFirst })
+      .from(orgSettings)
+      .where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    expect(row).toEqual({ q: 2, r: 10, u: false, a: false });
+    const got = await app.inject({ method: "GET", url: "/v1/org/settings", headers: adminKey });
+    expect(got.json().settings).toMatchObject(SHIPPED);
+  });
+
+  it("each relaxation needs a settings_relax step-up; with it (bootstrap), it is applied and named in the audit", async () => {
+    for (const payload of [{ sapApprovalQuorum: 1 }, { sapWriteRatePerHour: 11 }, { sapUnattributedWritesAllowed: true }]) {
+      const asked = await app.inject({ method: "PUT", url: "/v1/org/settings", headers: adminKey, payload });
+      expect(asked.statusCode, asked.body).toBe(403);
+      expect(asked.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax" });
+      const done = await app.inject({ method: "PUT", url: "/v1/org/settings", headers: boot, payload });
+      expect(done.statusCode, done.body).toBe(200);
+      expect(JSON.stringify((await lastSettingsAudit())?.detail)).toContain(Object.keys(payload)[0]!);
+    }
+    await setSap(SHIPPED);
+  });
+
+  it("tightening is free: a higher quorum, a lower rate and approve-first reads need no step-up", async () => {
+    const r = await app.inject({ method: "PUT", url: "/v1/org/settings", headers: adminKey, payload: { sapApprovalQuorum: 3, sapWriteRatePerHour: 5, sapReadsApproveFirst: true } });
+    expect(r.statusCode, r.body).toBe(200);
+    // ...and turning approve-first reads off again leaves a stricter stored posture: a relaxation
+    const back = await app.inject({ method: "PUT", url: "/v1/org/settings", headers: adminKey, payload: { sapReadsApproveFirst: false } });
+    expect(back.statusCode, back.body).toBe(403);
+    await setSap(SHIPPED);
+  });
+
+  it("the quorum can never drop below 1", async () => {
+    const r = await app.inject({ method: "PUT", url: "/v1/org/settings", headers: boot, payload: { sapApprovalQuorum: 0 } });
+    expect(r.statusCode).toBe(400);
+    await expect(setSap({ sapApprovalQuorum: 0 })).rejects.toThrow();
+  });
+
+  it("a mark seeds the org's quorum, rate and read coverage", async () => {
+    await setSap({ sapApprovalQuorum: 1, sapWriteRatePerHour: 4, sapReadsApproveFirst: true });
+    try {
+      const serverId = await mkServer("org-settings");
+      const marked = await app.inject({ method: "POST", url: `/v1/servers/${serverId}/system-class`, headers: adminKey, payload: { systemClass: "sap_business", approverRoleId: roleId } });
+      expect(marked.statusCode, marked.body).toBe(201);
+      expect(marked.json().approvalRule).toMatchObject({ quorum: 1, writeOnly: false, approvalScope: "action" });
+      expect(marked.json().rateLimit).toMatchObject({ writeOnly: true, maxCalls: 4, windowSeconds: 3600 });
+      expect((await lastAudit(SAP_BUSINESS_RULE_IDS.marked, serverId))?.detail).toMatchObject({ quorum: 1, writeOnly: false, maxCalls: 4 });
+    } finally {
+      await setSap(SHIPPED);
+    }
+  });
+
+  it("with quorum 1 the requester still cannot approve their own write", async () => {
+    await setSap({ sapApprovalQuorum: 1 });
+    try {
+      const serverId = await mkServer("quorum-one");
+      const marked = await app.inject({ method: "POST", url: `/v1/servers/${serverId}/system-class`, headers: adminKey, payload: { systemClass: "sap_business", approverRoleId: roleId } });
+      expect(marked.statusCode, marked.body).toBe(201);
+      const out = await executeGovernedToolCall(db, DATA_KEY, { userId: callerId, serverId, toolName: WRITE, projectId: await mkProject(100), arguments: { idempotencyKey: crypto.randomUUID() } });
+      expect(out.kind).toBe("approval_required");
+      const [pending] = await db.select({ id: approvals.id }).from(approvals).where(and(eq(approvals.userId, callerId), eq(approvals.serverId, serverId)));
+      const callerKey = await app.inject({ method: "POST", url: `/v1/users/${callerId}/keys`, headers: boot, payload: { name: "self" } });
+      const self = await app.inject({
+        method: "POST",
+        url: `/v1/approvals/${pending!.id}/decide`,
+        headers: { authorization: `Bearer ${callerKey.json().token}` },
+        payload: { decision: "approved" },
+      });
+      expect(self.statusCode, self.body).toBeGreaterThanOrEqual(400);
+      const [still] = await db.select({ status: approvals.status }).from(approvals).where(eq(approvals.id, pending!.id));
+      expect(still!.status).toBe("pending");
+    } finally {
+      await setSap(SHIPPED);
+    }
+  });
+
+  it("allowing unattributed writes lets an SAP write with no project through to the approval; a named unbudgeted project is still refused", async () => {
+    const serverId = await mkServer("unattributed");
+    const marked = await app.inject({ method: "POST", url: `/v1/servers/${serverId}/system-class`, headers: adminKey, payload: { systemClass: "sap_business", approverRoleId: roleId } });
+    expect(marked.statusCode, marked.body).toBe(201);
+    await setSap({ sapUnattributedWritesAllowed: true });
+    try {
+      const out = await executeGovernedToolCall(db, DATA_KEY, { userId: callerId, serverId, toolName: WRITE, arguments: { idempotencyKey: crypto.randomUUID() } });
+      expect(out.kind, JSON.stringify(out)).toBe("approval_required");
+      const unbudgeted = await executeGovernedToolCall(db, DATA_KEY, { userId: callerId, serverId, toolName: WRITE, projectId: await mkProject(null), arguments: { idempotencyKey: crypto.randomUUID() } });
+      expect(unbudgeted.kind).toBe("denied");
+      if (unbudgeted.kind === "denied") expect(unbudgeted.decision.ruleId).toBe(SAP_BUSINESS_RULE_IDS.needsProject);
+    } finally {
+      await setSap(SHIPPED);
+    }
+  });
+});

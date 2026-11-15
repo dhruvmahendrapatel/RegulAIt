@@ -4,9 +4,9 @@
 // gateway through two of its own drivers:
 //   - `openai-compatible` -> POST {url}/chat/completions
 //   - `anthropic`         -> POST {url}/messages
-// laravel/ai's native `openai` driver speaks the OpenAI Responses API
-// (`/v1/responses`), which the gateway does not expose; that is recorded as a
-// finding in ADR-0257, not papered over here.
+//   - `openai` (its default) -> POST {url}/responses (ADR-0287), configured
+//     with `store => false`: the gateway keeps no conversation state, so the
+//     driver replays the whole history instead of a previous_response_id.
 //
 // The package is booted inside a minimal Testbench application, exactly as its
 // own test suite boots it. Each check is printed as one JSON line; the harness
@@ -53,12 +53,17 @@ function provider(string $driver, string $url, string $key, string $project): ar
         'url' => $url,
         'key' => $key,
         'headers' => ['x-regulait-project-id' => $project],
+        // the `openai` (Responses) driver: stateless, so no previous_response_id
+        ...($driver === 'openai' ? ['store' => false] : []),
     ];
 }
 
+/** driver => env prefix of its allow/deny keys */
+$drivers = ['openai-compatible' => 'OPENAI', 'anthropic' => 'ANTHROPIC', 'openai' => 'RESPONSES'];
+
 $providers = [];
-foreach (['openai-compatible' => "{$gateway}/v1", 'anthropic' => "{$gateway}/v1"] as $driver => $url) {
-    $prefix = $driver === 'anthropic' ? 'ANTHROPIC' : 'OPENAI';
+foreach ($drivers as $driver => $prefix) {
+    $url = "{$gateway}/v1";
     $providers["rg-{$driver}-allow"] = provider($driver, $url, env_or_fail("{$prefix}_ALLOW_KEY"), $project);
     $providers["rg-{$driver}-deny"] = provider($driver, $url, env_or_fail("{$prefix}_DENY_KEY"), $project);
     $providers["rg-{$driver}-badkey"] = provider($driver, $url, 'rgk_not-a-real-key', $project);
@@ -122,21 +127,15 @@ function readable_refusal(Throwable $e, int $status): array
     expect_true($cause instanceof RequestException, 'expected an HTTP refusal, got '.get_class($e).': '.$e->getMessage());
     expect_true($cause->response->status() === $status, "expected {$status}, got ".$cause->response->status());
     $body = $cause->response->json();
-    if ($status === 401) {
-        // The gateway's shared auth hook answers every surface with its own
-        // `{"error": "<code>"}` before the compat shim runs (ADR-0257 finding 2),
-        // so a 401 carries the RegulAIt code rather than the provider envelope.
-        $message = $body['error']['message'] ?? $body['error'] ?? null;
-        expect_true(is_string($message) && $message !== '', 'empty 401 body: '.$cause->response->body());
-    } else {
-        $message = $body['error']['message'] ?? null;
-        expect_true(is_string($message) && strlen($message) > 10, 'unreadable error body: '.$cause->response->body());
-    }
+    // ADR-0288: a 401 on a compat surface is in the provider's envelope too, so
+    // every refusal carries a readable `error.message`.
+    $message = $body['error']['message'] ?? null;
+    expect_true(is_string($message) && strlen($message) > 10, 'unreadable error body: '.$cause->response->body());
 
     return ['status' => $status, 'type' => $body['error']['type'] ?? null, 'message' => substr($message, 0, 200)];
 }
 
-foreach (['openai-compatible' => 'openai', 'anthropic' => 'anthropic'] as $driver => $label) {
+foreach (['openai-compatible' => 'openai', 'anthropic' => 'anthropic', 'openai' => 'responses'] as $driver => $label) {
     $p = "rg-{$driver}";
 
     check($results, "laravel.{$label}.auth", function () use ($p, $model, $label) {
