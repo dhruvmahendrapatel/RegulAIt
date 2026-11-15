@@ -271,6 +271,8 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   a2aEnabled: notEqual(false),
   // ADR-0236 (P11): turning on MCP bundles opens a new way to grant tools to many people at once
   mcpBundlesEnabled: notEqual(false),
+  // ADR-0320 (lane E5): turning on cloud coding agents opens a new egress path and a new kind of worker
+  cloudWorkersEnabled: notEqual(false),
   // ADR-0251: the attribution mandate for connector and A2A calls; turning it off lets calls run unattributed
   connectorAttributionRequired: notEqual(true),
   a2aAttributionRequired: notEqual(true),

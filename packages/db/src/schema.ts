@@ -1511,6 +1511,9 @@ export const auditLog = pgTable(
         // ADR-0219 (P10): an admin registering, re-carding, crediting, granting or removing a remote A2A agent,
         // and every governed A2A call (allowed or refused). Plain text column — no DDL needed.
         "a2a_agent",
+        // ADR-0320 (lane E5): a cloud coding agent provider configured, credentialed, granted, halted, and every governed
+        // dispatch, poll state change and cancel (allowed or refused). Plain text column — no DDL needed.
+        "cloud_worker",
         // ADR-0236 (P11): a governed MCP bundle created, changed (a new version), archived, granted or revoked, and
         // every refused attempt. Plain text column — no DDL needed.
         "mcp_bundle",
@@ -5000,6 +5003,9 @@ export const orgSettings = pgTable(
     /** ADR-0236 (P11, migration `mcp_bundles`): governed MCP bundles. FALSE (the default, ADR-0180) = no bundle can be created,
      * changed or granted, and the gateway loads no bundle grant; an admin may turn it on (settings_relax step-up, audited). */
     mcpBundlesEnabled: boolean("mcp_bundles_enabled").notNull().default(false),
+    /** ADR-0320 (lane E5, migration `cloud_worker_providers`): dispatching a signed-off build stage to a third-party cloud
+     * coding agent. FALSE (the default, ADR-0180) = no dispatch; an admin may turn it on (settings_relax step-up, audited). */
+    cloudWorkersEnabled: boolean("cloud_workers_enabled").notNull().default(false),
     /** ADR-0251 (migration governed_core_resource_rules): must a connector call name a project? TRUE (the ADR-0180 default) = an unattributed
      * connector call is refused (`attribution-required`), audited, before anything is sent; an admin may relax it
      * (settings_relax step-up, audited), and the call then meters into the Unattributed bucket. */
@@ -16490,3 +16496,157 @@ export const resourceRateReservations = pgTable(
     ),
   ],
 );
+
+// ===== ADR-0320 (lane E5) =====
+/**
+ * ADR-0320 (lane E5, migration `cloud_worker_providers`) — THIRD-PARTY CLOUD CODING AGENTS AS GOVERNED PILLAR-7
+ * WORKERS. Four tables, all default-deny: a provider row is created disabled, nobody may dispatch without a grant, and
+ * every dispatch goes through `executeGovernedCloudWorkerDispatch` (apps/gateway/src/cloud-workers.ts).
+ *
+ * The provider ids are `CLOUD_WORKER_PROVIDERS` in `@regulait/orchestration-kernel` (cloud-worker.ts); the db package
+ * does not depend on the kernel, so the list is repeated here and the gateway test pins the two equal.
+ */
+export const CLOUD_WORKER_PROVIDER_IDS = ["cursor", "devin", "github_copilot", "openai_codex"] as const;
+export const CLOUD_WORKER_DISPATCH_STATES = ["queued", "launching", "running", "needs_input", "succeeded", "failed", "cancelled"] as const;
+
+/** One row per provider per tenant. `halted_at` / `halted_reason` are the per-provider kill switch (set together).
+ * `allow_private_ranges` NULL inherits `org_settings.mcp_private_ranges_default`, exactly like `a2a_agents`. The two
+ * prices are the admin's table for measured usage (ADR-0320 §4); NULL = no price, so the reserved cap is charged. */
+export const cloudWorkerProviders = pgTable(
+  "cloud_worker_providers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    provider: text("provider", { enum: CLOUD_WORKER_PROVIDER_IDS }).notNull(),
+    baseUrl: text("base_url").notNull(),
+    enabled: boolean("enabled").notNull().default(false),
+    haltedAt: timestamp("halted_at", { withTimezone: true }),
+    haltedReason: text("halted_reason"),
+    haltedBy: uuid("halted_by").references(() => users.id, { onDelete: "set null" }),
+    allowPrivateRanges: boolean("allow_private_ranges"),
+    usdPerAcu: doublePrecision("usd_per_acu"),
+    usdPerMillionTokens: doublePrecision("usd_per_million_tokens"),
+    maxPollMinutes: integer("max_poll_minutes").notNull().default(120),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("cloud_worker_providers_provider_uq").on(t.provider),
+    check("cloud_worker_providers_provider_check", sql`${t.provider} IN ('cursor', 'devin', 'github_copilot', 'openai_codex')`),
+    check("cloud_worker_providers_base_url_check", sql`char_length(${t.baseUrl}) <= 2048 AND ${t.baseUrl} ~ '^https?://'`),
+    check("cloud_worker_providers_halt_check", sql`(${t.haltedAt} IS NULL) = (${t.haltedReason} IS NULL)`),
+    check("cloud_worker_providers_halted_reason_check", sql`${t.haltedReason} IS NULL OR char_length(${t.haltedReason}) BETWEEN 1 AND 500`),
+    check("cloud_worker_providers_usd_per_acu_check", sql`${t.usdPerAcu} IS NULL OR (${t.usdPerAcu} > 0 AND ${t.usdPerAcu} <= 1000)`),
+    check("cloud_worker_providers_usd_per_mtok_check", sql`${t.usdPerMillionTokens} IS NULL OR (${t.usdPerMillionTokens} > 0 AND ${t.usdPerMillionTokens} <= 10000)`),
+    check("cloud_worker_providers_max_poll_check", sql`${t.maxPollMinutes} BETWEEN 1 AND 120`),
+  ],
+);
+export type CloudWorkerProviderRow = typeof cloudWorkerProviders.$inferSelect;
+
+/** The provider's service-account key: data-key envelope (CIPHERTEXT_COLUMNS), last four only, never returned. Its own
+ * table so no provider read carries it; deleting the provider deletes it. `secret_set_at` is stamped by the 0142
+ * trigger on the database clock. */
+export const cloudWorkerCredentials = pgTable(
+  "cloud_worker_credentials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    providerId: uuid("provider_id")
+      .notNull()
+      .references(() => cloudWorkerProviders.id, { onDelete: "cascade" }),
+    secretCiphertext: text("secret_ciphertext").notNull(),
+    secretLast4: text("secret_last4").notNull(),
+    setBy: uuid("set_by").references(() => users.id, { onDelete: "set null" }),
+    secretSetAt: timestamp("secret_set_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("cloud_worker_credentials_provider_uq").on(t.providerId),
+    check("cloud_worker_credentials_last4_check", sql`char_length(${t.secretLast4}) = 4`),
+  ],
+);
+export type CloudWorkerCredentialRow = typeof cloudWorkerCredentials.$inferSelect;
+
+/** Who may dispatch to which provider. No row = no dispatch (default deny). A worker never holds a grant of its own:
+ * it dispatches as the person who started the workflow instance. */
+export const cloudWorkerGrants = pgTable(
+  "cloud_worker_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    providerId: uuid("provider_id")
+      .notNull()
+      .references(() => cloudWorkerProviders.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    grantedBy: uuid("granted_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("cloud_worker_grants_uq").on(t.providerId, t.userId),
+    index("cloud_worker_grants_user_idx").on(t.userId, t.providerId),
+  ],
+);
+export type CloudWorkerGrantRow = typeof cloudWorkerGrants.$inferSelect;
+
+/** One governed dispatch to a cloud coding agent. Written only after the whole envelope allowed it and the provider
+ * accepted the launch, in the same transaction as its usage row and its allow audit row. A refusal writes no row
+ * here (its audit row is the record). */
+export const cloudWorkerDispatches = pgTable(
+  "cloud_worker_dispatches",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    providerId: uuid("provider_id")
+      .notNull()
+      .references(() => cloudWorkerProviders.id),
+    /** the person the dispatch runs as: the workflow instance's initiator */
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
+    workflowInstanceId: uuid("workflow_instance_id")
+      .notNull()
+      .references(() => workflowInstances.id, { onDelete: "cascade" }),
+    runId: uuid("run_id").references(() => orchestrationRuns.id, { onDelete: "set null" }),
+    /** a node id inside `orchestration_runs.graph` (a kernel-owned jsonb snapshot), so it cannot be a foreign key */
+    nodeId: text("node_id"),
+    // 3NF exception, deliberate: an "as dispatched" snapshot of the pinned scope the provider was told to work in.
+    // The workflow's git connection and stage may change later; the scope check on the captured PR (ADR-0320 §3) must
+    // compare against what was actually sent, not against today's configuration.
+    repoHost: text("repo_host").notNull(),
+    repoOwner: text("repo_owner").notNull(),
+    repoName: text("repo_name").notNull(),
+    baseBranch: text("base_branch").notNull(),
+    branchPrefix: text("branch_prefix").notNull(),
+    externalId: text("external_id"),
+    externalRunId: text("external_run_id"),
+    state: text("state", { enum: CLOUD_WORKER_DISPATCH_STATES }).notNull().default("queued"),
+    /** a snake_case reason CODE (CHECK-constrained), never provider text: excluded from the prose scrub */
+    reason: text("reason"),
+    reservedUsd: doublePrecision("reserved_usd").notNull(),
+    costUsd: doublePrecision("cost_usd"),
+    usageEventId: uuid("usage_event_id").references(() => usageEvents.id, { onDelete: "set null" }),
+    prUrl: text("pr_url"),
+    // 3NF exception, deliberate: the absolute poll deadline as dispatched (now() + the provider's max_poll_minutes at
+    // that moment); a later change to the provider's limit does not move a running dispatch's deadline.
+    pollDeadlineAt: timestamp("poll_deadline_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("cloud_worker_dispatches_provider_state_idx").on(t.providerId, t.state),
+    index("cloud_worker_dispatches_instance_idx").on(t.workflowInstanceId),
+    index("cloud_worker_dispatches_user_idx").on(t.userId, t.createdAt),
+    uniqueIndex("cloud_worker_dispatches_external_uq").on(t.providerId, t.externalId).where(sql`${t.externalId} IS NOT NULL`),
+    check("cloud_worker_dispatches_state_check", sql`${t.state} IN ('queued', 'launching', 'running', 'needs_input', 'succeeded', 'failed', 'cancelled')`),
+    check("cloud_worker_dispatches_reason_check", sql`${t.reason} IS NULL OR ${t.reason} ~ '^[a-z][a-z_]{0,63}$'`),
+    check("cloud_worker_dispatches_node_check", sql`${t.nodeId} IS NULL OR char_length(${t.nodeId}) BETWEEN 1 AND 128`),
+    check("cloud_worker_dispatches_repo_check", sql`char_length(${t.repoHost}) BETWEEN 1 AND 253 AND char_length(${t.repoOwner}) BETWEEN 1 AND 39 AND char_length(${t.repoName}) BETWEEN 1 AND 100`),
+    check("cloud_worker_dispatches_branch_check", sql`char_length(${t.baseBranch}) BETWEEN 1 AND 200 AND char_length(${t.branchPrefix}) BETWEEN 2 AND 200`),
+    check("cloud_worker_dispatches_external_check", sql`(${t.externalId} IS NULL OR ${t.externalId} ~ '^[A-Za-z0-9_-]{1,128}$') AND (${t.externalRunId} IS NULL OR ${t.externalRunId} ~ '^[A-Za-z0-9_-]{1,128}$')`),
+    check("cloud_worker_dispatches_reserved_check", sql`${t.reservedUsd} > 0 AND ${t.reservedUsd} <= 10000`),
+    check("cloud_worker_dispatches_cost_check", sql`${t.costUsd} IS NULL OR (${t.costUsd} >= 0 AND ${t.costUsd} <= ${t.reservedUsd})`),
+    check("cloud_worker_dispatches_pr_url_check", sql`${t.prUrl} IS NULL OR (char_length(${t.prUrl}) <= 2048 AND ${t.prUrl} ~ '^https://')`),
+  ],
+);
+export type CloudWorkerDispatchRow = typeof cloudWorkerDispatches.$inferSelect;
+// ===== end ADR-0320 =====

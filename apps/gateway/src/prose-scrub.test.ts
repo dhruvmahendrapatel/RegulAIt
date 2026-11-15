@@ -644,6 +644,8 @@ describe("6. the covered / NOT-covered inventory", () => {
     // ADR-0224 (migration 0252)
     "data_subject_requests.close_note",
     "data_subject_tombstones.reason",
+    // ADR-0320 (lane E5, migration `cloud_worker_providers`): a provider's kill-switch reason
+    "cloud_worker_providers.halted_reason",
   ];
 
   it("covers exactly the enumerated columns — the ADR's list is this list", () => {
@@ -653,6 +655,8 @@ describe("6. the covered / NOT-covered inventory", () => {
   it("names its exclusions rather than merely omitting them", () => {
     expect([...PROSE_SCRUB_EXCLUSIONS].sort()).toEqual([
       "audit_log.reason",
+      // ADR-0320: a CHECK-constrained snake_case reason code from the kernel
+      "cloud_worker_dispatches.reason",
       // ADR-0188: a CHECK-constrained seven-member revocation code
       "delegation_grants.revoked_reason",
       // ADR-0187: a CHECK-constrained six-member code

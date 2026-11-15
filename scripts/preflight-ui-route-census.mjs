@@ -435,7 +435,17 @@ export const KNOWN_UI_GAPS = new Map([
   ["DELETE /v1/servers/:serverId/token-exchange", { does: "removes an MCP server's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
   ["GET /v1/connectors/:connectorId/token-exchange", { does: "reads a connector's upstream token-exchange configuration and per-action scope map (never the secret)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
   ["PUT /v1/connectors/:connectorId/token-exchange", { does: "sets or changes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
-  ["DELETE /v1/connectors/:connectorId/token-exchange", { does: "removes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
+  ["DELETE /v1/connectors/:connectorId/token-exchange", { does: "removes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],  // ADR-0320 (lane E5, slice 2): nine API-only cloud coding agent admin routes (ADR-0320 §6: no screens); the admin
+  // screen is posted on #453 for the Governed Designer. Raised for the master's review.
+  ["GET /v1/cloud-workers/providers", { does: "lists the cloud coding agent providers (Cursor, Devin, ...), their readiness, kill switch, prices and whether a credential is set (never the secret)", tracking: "ADR-0320 (lane E5): API only by decision (§6); screen requested on #453" }],
+  ["PUT /v1/cloud-workers/providers/:provider", { does: "configures a provider's base URL, prices and poll limit; enabling it or a private-range opt-in is a step-up", tracking: "ADR-0320 (lane E5): API only by decision (§6); screen requested on #453" }],
+  ["PUT /v1/cloud-workers/providers/:provider/credential", { does: "sets or rotates a provider's service-account key (step-up); returns the last four characters only", tracking: "ADR-0320 (lane E5): API only by decision (§6); screen requested on #453" }],
+  ["GET /v1/cloud-workers/providers/:provider/grants", { does: "lists who may dispatch to a provider", tracking: "ADR-0320 (lane E5): API only by decision (§6); screen requested on #453" }],
+  ["POST /v1/cloud-workers/providers/:provider/grants", { does: "grants a person dispatch to a provider (default deny)", tracking: "ADR-0320 (lane E5): API only by decision (§6); screen requested on #453" }],
+  ["DELETE /v1/cloud-workers/providers/:provider/grants/:grantId", { does: "removes a person's dispatch grant", tracking: "ADR-0320 (lane E5): API only by decision (§6); screen requested on #453" }],
+  ["POST /v1/cloud-workers/providers/:provider/halt", { does: "the provider kill switch: refuses new dispatches and cancels live ones (audited)", tracking: "ADR-0320 (lane E5): API only by decision (§6); screen requested on #453" }],
+  ["POST /v1/cloud-workers/providers/:provider/unhalt", { does: "lifts a provider's halt (step-up, audited)", tracking: "ADR-0320 (lane E5): API only by decision (§6); screen requested on #453" }],
+  ["GET /v1/cloud-workers/dispatches", { does: "pages the governed cloud worker dispatches with their state, reserved cost and PR", tracking: "ADR-0320 (lane E5): API only by decision (§6); screen requested on #453" }],
 ]);
 
 /**
@@ -444,7 +454,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 48; // main's 43 (46 incl. ADR-0255 P31 +2, master decision on #753 2026-11-14; − 3 endpoint MCP config routes, #824) + ADR-0303 (lane L11) 5 SIEM destination routes awaiting #453
+export const KNOWN_UI_GAPS_MAX = 57; // main's 43 (46 incl. ADR-0255 P31 +2, master decision on #753 2026-11-14; − 3 endpoint MCP config routes, #824) + ADR-0303 (lane L11) 5 SIEM destination routes awaiting #453 + ADR-0320 (lane E5) 9 cloud worker admin routes awaiting #453
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 

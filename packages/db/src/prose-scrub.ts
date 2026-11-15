@@ -296,6 +296,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.engineRunners, ["revokeReason"]],
   // ADR-0217: an automatic re-test's reason (a runner's gate reason or refusal detail, which can quote a case)
   [s.mrmRetestRuns, ["reason"]],
+  // ADR-0320 (lane E5): why an admin halted a cloud coding agent provider (the kill switch; operator prose)
+  [s.cloudWorkerProviders, ["haltedReason"]],
 ];
 
 /**
@@ -339,9 +341,14 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
  * - `fairness_datasets.purge_reason` — ADR-0222 (migration 0271): a DB CHECK
  *   limits it to `'retention'` or `'deleted'`, set only by the retention sweep
  *   and the delete route. A credential cannot appear in a two-member enum.
+ * - `cloud_worker_dispatches.reason` — ADR-0320 (migration
+ *   `cloud_worker_providers`): a DB CHECK limits it to a snake_case code of
+ *   lowercase letters and underscores (`^[a-z][a-z_]{0,63}$`), written only
+ *   from the orchestration kernel's fixed reason codes, never provider text.
  */
 export const PROSE_SCRUB_EXCLUSIONS: readonly string[] = [
   "audit_log.reason",
+  "cloud_worker_dispatches.reason",
   "delegation_grants.revoked_reason",
   "engine_run_items.not_run_reason",
   "execution_offers.decline_reason",
