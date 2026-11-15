@@ -1,0 +1,13 @@
+# Copy to terraform.tfvars (git-ignored) and fill in. Never commit real values.
+workload_account_id  = "<12-digit regulait-dev account id>"
+workload_sso_profile = "<regulait-dev SSO profile>"
+aws_region           = "<region, e.g. us-east-1>"
+github_org           = "<github owner>"
+github_repo          = "<github repository>"
+# Recommended (step 1b of the runbook): pin the numeric repository id.
+# github_repository_id = <number from: gh api repos/<owner>/<repo> --jq .id>
+
+# If `aws iam list-open-id-connect-providers` already shows
+# token.actions.githubusercontent.com in this account:
+# create_oidc_provider       = false
+# existing_oidc_provider_arn = "arn:aws:iam::<account>:oidc-provider/token.actions.githubusercontent.com"

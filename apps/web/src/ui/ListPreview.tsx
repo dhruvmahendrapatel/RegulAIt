@@ -115,11 +115,7 @@ export function ListPreview<T>(props: {
     <Card
       title={heading ? `${props.title} · ${heading}` : props.title}
       info={props.info}
-      actions={
-        <Link to={props.viewAll} aria-label={`View all ${props.noun}`}>
-          View all →
-        </Link>
-      }
+      actions={<ViewAllLink to={props.viewAll} noun={props.noun} />}
     >
       <div className={d.preview} data-preview={props.endpoint}>
         {props.note}
@@ -134,6 +130,15 @@ export function ListPreview<T>(props: {
         />
       </div>
     </Card>
+  );
+}
+
+/** a preview card's link to its list's own page (also used by previews that do not read through ListPreview) */
+export function ViewAllLink(props: { to: string; noun: string }) {
+  return (
+    <Link to={props.to} aria-label={`View all ${props.noun}`}>
+      View all →
+    </Link>
   );
 }
 
