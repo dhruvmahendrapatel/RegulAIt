@@ -102,11 +102,11 @@ describe("scan at create, import and update", () => {
   });
 
   it("scans a SKILL.md import", async () => {
-    const md = `---\nname: "Bad import ${k.RUN}"\ndescription: d\n---\n${REFUSED_BODY}\n`;
+    const md = `---\nname: "bad-import-${k.RUN}"\ndescription: d\n---\n${REFUSED_BODY}\n`;
     const r = await k.req("POST", "/v1/builder/skills/import", owner.auth, { markdown: md });
     expect(r.statusCode).toBe(422);
     expect(r.json().error).toBe("skill_admission_refused");
-    const good = `---\nname: "Good import ${k.RUN}"\ndescription: d\n---\n# fine\n`;
+    const good = `---\nname: "good-import-${k.RUN}"\ndescription: d\n---\n# fine\n`;
     expect((await k.req("POST", "/v1/builder/skills/import", owner.auth, { markdown: good })).statusCode).toBe(201);
   });
 
