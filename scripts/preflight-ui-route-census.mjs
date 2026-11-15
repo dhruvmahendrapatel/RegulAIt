@@ -436,6 +436,9 @@ export const KNOWN_UI_GAPS = new Map([
   ["GET /v1/connectors/:connectorId/token-exchange", { does: "reads a connector's upstream token-exchange configuration and per-action scope map (never the secret)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
   ["PUT /v1/connectors/:connectorId/token-exchange", { does: "sets or changes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
   ["DELETE /v1/connectors/:connectorId/token-exchange", { does: "removes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
+  ["POST /v1/managed-settings/bundles", { does: "compiles a user's or role's effective MCP entitlements into signed vendor managed settings (audited)", tracking: "ADR-0310 (G2, lane E1): the brief is API-only; the managed-settings export screen is requested on #453 (Governed Designer). RAISED FROM 48 for the master's review" }],
+  ["GET /v1/managed-settings/bundles", { does: "lists managed-settings bundle versions, newest first", tracking: "ADR-0310 (G2, lane E1): the brief is API-only; the managed-settings export screen is requested on #453 (Governed Designer). RAISED FROM 48 for the master's review" }],
+  ["GET /v1/managed-settings/bundles/:id/archive", { does: "downloads a bundle's signed tar.gz for MDM push", tracking: "ADR-0310 (G2, lane E1): the brief is API-only; the managed-settings export screen is requested on #453 (Governed Designer). RAISED FROM 48 for the master's review" }],
 ]);
 
 /**
@@ -444,7 +447,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 48; // main's 43 (46 incl. ADR-0255 P31 +2, master decision on #753 2026-11-14; − 3 endpoint MCP config routes, #824) + ADR-0303 (lane L11) 5 SIEM destination routes awaiting #453
+export const KNOWN_UI_GAPS_MAX = 51; // + ADR-0310 (lane E1) 3 managed-settings routes awaiting #453; main's 43 (46 incl. ADR-0255 P31 +2, master decision on #753 2026-11-14; − 3 endpoint MCP config routes, #824) + ADR-0303 (lane L11) 5 SIEM destination routes awaiting #453
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 
