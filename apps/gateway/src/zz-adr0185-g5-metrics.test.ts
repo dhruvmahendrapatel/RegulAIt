@@ -109,7 +109,7 @@ async function get(port: number, urlPath: string, headers: Record<string, string
 }
 
 function bootEnv(extra: Record<string, string>): NodeJS.ProcessEnv {
-  return { PATH: process.env.PATH, VITEST: "1", REGULAIT_SCHEDULER: "off", ...extra } as NodeJS.ProcessEnv;
+  return { PATH: process.env.PATH, VITEST: "1", REGULAIT_SCHEDULER: "off", REGULAIT_DEV_PRIVILEGED_DB_LOGIN: "1", ...extra } as NodeJS.ProcessEnv;
 }
 
 let admin: Db;
