@@ -51,6 +51,14 @@ export const CONCURRENT_INDEXES: ReadonlyArray<{ migration: string; name: string
       `CREATE INDEX CONCURRENTLY IF NOT EXISTS "workflow_instances_project_open_idx" ON "workflow_instances" ("project_id") ` +
       `WHERE "status" NOT IN ('completed', 'aborted', 'denied', 'rolled_back')`,
   },
+  {
+    // ADR-0312 (cost per outcome): the outcome spend join reads a run's metered rows by `detail.runId`
+    migration: "cost_outcomes",
+    name: "usage_events_run_id_idx",
+    create:
+      `CREATE INDEX CONCURRENTLY IF NOT EXISTS "usage_events_run_id_idx" ON "usage_events" (("detail"->>'runId')) ` +
+      `WHERE ("detail"->>'runId') IS NOT NULL`,
+  },
 ];
 
 /**

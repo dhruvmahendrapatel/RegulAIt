@@ -1,0 +1,2 @@
+<!-- fold: pending -->
+**G3 — cost per outcome: built 2026-11-15 ([ADR-0312](../decisions/0312-cost-per-outcome.md)).** Open: the dashboard cards for the three `/v1/cost-outcomes` routes (#453); attributing spend made outside an orchestration run (workflow review-check agents) once those calls carry the instance id; owner question whether a PM tool's own "done" state should count as a completed work item.

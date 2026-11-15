@@ -444,6 +444,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // leak sideways. Every other cost-import route — uploading a file, asserting
   // an identity mapping, reading fleet-wide — is absent here on purpose.
   "GET /v1/users/:userId/cost-consolidated",
+  // ADR-0312: a non-admin pages the outcomes of workflows they initiated (handler predicate and the table's RLS)
+  "GET /v1/cost-outcomes",
   // ADR-0070 — a person may list and read THEIR OWN traces, and only their own.
   // Every one of these four is self-scoped INSIDE the handler: a non-admin who
   // passes `userId` for somebody else gets a 403 rather than a silently-ignored
