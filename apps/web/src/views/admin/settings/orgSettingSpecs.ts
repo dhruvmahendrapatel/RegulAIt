@@ -642,6 +642,16 @@ export const CORE_SPECS: Readonly<Record<string, OrgSettingSpec>> = {
     control: onOff("On", "Off"),
     isRelaxed: notEqual(false),
   },
+  // MCP bundles (#453): off by default; turning them on is a settings_relax step-up (org-setting-strictness.ts)
+  mcpBundlesEnabled: {
+    key: "mcpBundlesEnabled",
+    label: "Tool bundles",
+    strictDefault: false,
+    strict: "Off: no bundle can be created, changed or granted, and no bundle grant gives anyone a tool.",
+    relaxed: "On: an admin can grant a named set of tools to a user, a role or a team at once. Every change is audited.",
+    control: onOff("On", "Off"),
+    isRelaxed: notEqual(false),
+  },
 };
 
 export const ALL_SPECS: Readonly<Record<string, OrgSettingSpec>> = {
