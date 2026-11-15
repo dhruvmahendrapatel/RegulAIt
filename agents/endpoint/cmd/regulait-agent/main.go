@@ -47,7 +47,7 @@ func main() {
 	defer stop()
 	opts := agent.Options{Paths: agent.DefaultPaths(), SystemOwner: agent.SystemOwner(), TicketGID: -1, Log: log}
 	cycle := func() *agent.Cycle {
-		return &agent.Cycle{Options: opts, Keyring: pack.CompiledKeyring, Identity: agent.ProductionIdentity(), Env: func() (*collect.Env, error) {
+		return &agent.Cycle{Options: opts, Keyring: pack.CompiledKeyring, DirectiveKeyring: enforce.CompiledKeyring, Identity: agent.ProductionIdentity(), Env: func() (*collect.Env, error) {
 			home, err := os.UserHomeDir()
 			if err != nil {
 				return nil, err

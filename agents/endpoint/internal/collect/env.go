@@ -40,6 +40,12 @@ func addRoot(env *Env, root contract.Root, dir string) error {
 		return err
 	}
 	env.Roots[root] = r.FS()
+	if root == contract.RootHome || root == contract.RootAppData || root == contract.RootLocalAppData {
+		if env.UserRoots == nil {
+			env.UserRoots = map[contract.Root]*os.Root{}
+		}
+		env.UserRoots[root] = r
+	}
 	return nil
 }
 

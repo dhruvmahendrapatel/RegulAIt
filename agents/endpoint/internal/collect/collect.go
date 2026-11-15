@@ -15,6 +15,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"os"
 	"path"
 	"sort"
 	"strings"
@@ -62,6 +63,9 @@ type Env struct {
 	StartupFiles []string
 	// MaxFileBytes caps each file read (R15 §2.3: for example 256 KiB).
 	MaxFileBytes int64
+	// UserRoots are the user-writable roots (home, appdata, localappdata) as os.Root handles. Only the add-on removal
+	// applier (ADR-0331) writes through them; no collector does.
+	UserRoots map[contract.Root]*os.Root
 }
 
 // PathDir is one PATH directory: Root is RootHome (Path relative to the home) or RootPath (Path absolute, never

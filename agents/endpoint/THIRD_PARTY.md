@@ -3,7 +3,7 @@
 ADR-0176 admission rules: MIT, Apache-2.0, BSD or ISC; maintained (a release in about the last 12 months); pinned;
 works air-gapped. Go modules are pinned by `go.mod` and hashed by `go.sum`; nothing is fetched at run time.
 `scripts/check-licences.sh` fails CI when the binary links a module@version that is not in the first table.
-Searched and checked 2026-10-17 against `proxy.golang.org` (release dates) and each module's `LICENSE` file.
+Searched and checked 2026-10-17 (the tidwall rows 2026-11-15) against `proxy.golang.org` (release dates) and each module's `LICENSE` file.
 
 ## Linked into the agent binary
 
@@ -18,6 +18,10 @@ Searched and checked 2026-10-17 against `proxy.golang.org` (release dates) and e
 | `github.com/ebitengine/purego` | `v0.11.1` (2026-09-18) | Apache-2.0 | darwin | Transitive, through gopsutil (calls libSystem without cgo) |
 | `github.com/tidwall/jsonc` | `v0.3.3` (2026-03-10) | MIT | all | Blanks JSONC comments and trailing commas (offset-preserving) before `encoding/json` reads an MCP host config: VS Code `settings.json`, Zed settings (`internal/collect/mcp.go`, ADR-0259 amendment 2026-11-14). No dependencies. v0.3.4 (2026-11-12) was less than two weeks old when pinned |
 | `github.com/pelletier/go-toml/v2` | `v2.4.3` (2026-07-05) | MIT | all | Decodes TOML MCP host configs: Codex `config.toml` (`internal/collect/mcp.go`, ADR-0259 amendment 2026-11-14). No dependencies |
+| `github.com/tidwall/sjson` | `v1.2.5` (2022-08-05) | MIT | all | Deletes one MCP server key from a plain-JSON MCP host config while leaving every other byte as it was (`internal/directive/apply.go`, ADR-0331). The result is re-parsed and compared with the original minus that entry before anything is written. Maintained: v1.2.6 to v1.2.9 (2026-11-06 to 2026-11-09) were less than two weeks old when pinned |
+| `github.com/tidwall/gjson` | `v1.20.0` (2026-10-05) | MIT | all | Transitive, through sjson (path lookup). v1.20.1 and v1.20.2 (2026-11-06, 2026-11-08) were less than two weeks old when pinned |
+| `github.com/tidwall/pretty` | `v1.2.2` (2026-09-27) | MIT | all | Transitive, through gjson. v1.3.0 (2026-11-08) was less than two weeks old when pinned |
+| `github.com/tidwall/match` | `v1.2.0` (2025-09-05) | MIT | all | Transitive, through gjson (wildcard matching; our paths are escaped literals, so it never matches a wildcard) |
 
 ## Test-only (never linked)
 

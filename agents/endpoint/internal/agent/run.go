@@ -18,6 +18,8 @@ import (
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/collect"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/contract"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/devicekey"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/directive"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/enforce"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/pack"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/privacy"
 )
@@ -39,6 +41,11 @@ type Cycle struct {
 	Env func() (*collect.Env, error)
 	// Identity is what the pseudonymity guard refuses to send.
 	Identity privacy.Identity
+	// DirectiveKeyring verifies add-on removal directives (ADR-0331): the enforcement keyring
+	// (enforce.CompiledKeyring, empty until SD4, so no directive verifies in this build).
+	DirectiveKeyring enforce.Keyring
+	// Notify shows the developer a removal notice (directive.PlatformNotifier in production).
+	Notify directive.Notifier
 
 	lastConfig *auth.Response
 }
@@ -48,6 +55,8 @@ type Result struct {
 	Interval time.Duration
 	Report   *contract.Report
 	Rotated  bool
+	// Directives is the add-on removal sync (ADR-0331); nil when it did not run.
+	Directives *DirectiveRun
 }
 
 func clampInterval(seconds int) time.Duration {
@@ -196,6 +205,12 @@ func (c *Cycle) RunOnce(ctx context.Context) (*Result, error) {
 		return nil, err
 	}
 	out := &Result{Interval: clampInterval(conf.OrgPolicy.IntervalSeconds), Report: rep}
+	// ADR-0331: removal directives, bounded by the manifest verified above; a failure here never fails the cycle
+	if run, err := c.syncDirectives(ctx, cl, s, verified.Collection, env); err != nil {
+		c.Log.Info("removal directives not synced", "err", err)
+	} else {
+		out.Directives = run
+	}
 	if cl.RotateDue(c.Now()) {
 		if err := c.rotate(ctx, cfg, cl, store, s); err != nil {
 			c.Log.Warn("key rotation failed; the next run retries", "err", err)
