@@ -33,6 +33,8 @@ import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { grantStepUpForTest, sessionRequest, stepUpRequest } from "./testing/step-up-grant.js";
 import type { StepUpCheckArgs } from "./step-up.js";
 import { RULE_STEP_AUDIT_RULE_IDS } from "./rule-steps.js";
+import { induceStepRule, type StepRun } from "@regulait/optimizer-kernel";
+import { induceStepRuleOffThread } from "@regulait/optimizer-kernel/offload";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -188,5 +190,31 @@ describe("ADR-0327 rule-like AI step detection", () => {
     expect(after?.status).toBe("dismissed");
     const dismissed = await app.inject({ method: "GET", url: "/v1/rule-steps/suggestions?status=dismissed", headers: KEY });
     expect(dismissed.json().suggestions.map((x: { id: string }) => x.id)).toContain(row!.id);
+  });
+});
+
+describe("ADR-0327 induction off the event loop (review #862)", () => {
+  // a deterministic, CPU-heavy, not-rule-like history: many candidate fields, random labels
+  const heavy = (): StepRun[] => {
+    let x = 7;
+    const rnd = () => ((x = (Math.imul(x, 1664525) + 1013904223) >>> 0), x / 2 ** 32);
+    return Array.from({ length: 2000 }, () => ({
+      fields: Object.fromEntries(Array.from({ length: 16 }, (_, k) => [`f${k}`, Math.floor(rnd() * 6)])),
+      output: rnd() < 0.5 ? "a" : "b",
+    }));
+  };
+
+  it("gives the same result as the inline kernel while the event loop keeps ticking", async () => {
+    const runs = heavy();
+    let ticks = 0;
+    const timer = setInterval(() => ticks++, 10);
+    const off = await induceStepRuleOffThread(runs);
+    clearInterval(timer);
+    expect(off).toEqual(induceStepRule(runs));
+    expect(ticks).toBeGreaterThan(0);
+  });
+
+  it("rejects when the worker runs past its time limit, so no partial rule is ever used", async () => {
+    await expect(induceStepRuleOffThread(heavy(), {}, { timeoutMs: 1 })).rejects.toThrow(/timed out/);
   });
 });

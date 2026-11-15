@@ -99,3 +99,10 @@ induction over numeric ranges is deferred to a sandboxed engine image with sciki
 - Test cases are the rule's own cells (input fields, expected output, support); no extra copy of captured inputs is
   stored. The saving is `window cost × (30 / 30 days) × structured share × held-out coverage`, labelled an estimate.
 - A dismissed suggestion stays dismissed when a later scan refreshes its evidence.
+- Review #862: induction runs on a worker thread (`induceStepRuleOffThread`, entry `@regulait/optimizer-kernel/offload`,
+  Node's `node:worker_threads`, no dependency), one step at a time, with a 120 s timeout and a 256 MB heap cap. Measured
+  on 5 000 runs × 24 fields: inline the event loop served no timer for 3.7 s; off-thread it kept ticking, with an
+  identical result. A step whose worker fails or times out is reported as `induction_failed` in the scan's audit row.
+- Not yet done, tracked for slice 3 (PENDING): `rule_step_suggestions.rule` copies input values out of `trace_spans`,
+  so it must follow trace retention (prune or refresh suggestions whose window has aged out) and be found and redacted
+  by the privacy-ops erasure locator; and both new tables join the RLS batch plan with the other single-tenant tables.

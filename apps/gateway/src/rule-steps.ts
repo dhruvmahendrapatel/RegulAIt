@@ -8,7 +8,9 @@
  *    JSON object and whose output preview is complete, and runs the kernel's `induceStepRule` on them. It writes
  *    suggestions only: nothing here changes routing, entitlement or any permission decision (ADR-0327 §Decision 5).
  *  - Bounded: at most `SCAN_MAX_STEPS` steps (the costliest first), `SCAN_MAX_RUNS` runs each, a `SCAN_WINDOW_DAYS`
- *    window, and scans spaced `SCAN_SPACING_MINUTES` apart by the database clock.
+ *    window, and scans spaced `SCAN_SPACING_MINUTES` apart by the database clock. Induction (seconds of CPU per step)
+ *    runs on a worker thread (`induceStepRuleOffThread`), one step at a time, so the event loop that serves governance
+ *    decisions and the proxy path never stalls; a step whose worker fails or times out is reported, not guessed.
  *  - The projected monthly saving is the step's measured span cost over the window, scaled to 30 days, times the share
  *    of runs the rule would answer (structured share × held-out coverage). It is an estimate and says so.
  */
@@ -32,11 +34,11 @@ import {
   DEFAULT_RULE_INDUCTION_OPTIONS,
   RULE_INDUCTION_FLOORS,
   extractStepFields,
-  induceStepRule,
   renderInducedRule,
   type InducedRule,
   type StepRun,
 } from "@regulait/optimizer-kernel";
+import { induceStepRuleOffThread } from "@regulait/optimizer-kernel/offload";
 import { TRACE_TRUNCATION_MARKER } from "@regulait/shared";
 import { requireStepUp } from "./step-up.js";
 
@@ -201,13 +203,22 @@ async function scan(db: Db, settings: RuleStepSettings): Promise<StepScan[]> {
       .orderBy(desc(traceSpans.startedAt), desc(traceSpans.id))
       .limit(SCAN_MAX_RUNS);
     const runs = spansToRuns(rows);
-    const result = induceStepRule(runs, {
+    // seconds of CPU per step: run it on a worker thread so the gateway's event loop keeps serving (review #862)
+    const options = {
       minRuns: settings.minRuns,
       minAgreement: settings.minAgreement,
       minCoverage: settings.minCoverage,
       minCellSupport: settings.minCellSupport,
       maxRuns: SCAN_MAX_RUNS,
-    });
+    };
+    let result: Awaited<ReturnType<typeof induceStepRuleOffThread>>;
+    try {
+      result = await induceStepRuleOffThread(runs, options);
+    } catch {
+      // a failed or timed-out worker yields no rule: reported in the scan's audit, never guessed
+      results.push({ agentId, stepName: step.stepName, outcome: "not_rule_like", reason: "induction_failed", runs: rows.length, structuredRuns: runs.length });
+      continue;
+    }
     if (result.status !== "rule_like") {
       results.push({ agentId, stepName: step.stepName, outcome: "not_rule_like", reason: result.reason, runs: rows.length, structuredRuns: runs.length });
       continue;
