@@ -282,7 +282,17 @@ describe("S-02: the bootstrap credential retires once an active admin exists", (
   });
 
   it("the posture page says the token is RETIRED (and the relaxed app says it is live)", async () => {
-    const adminSession = await signInSession(adminId, "password");
+    // a session that satisfies the org MFA requirement (the admin-only route needs one); the token already retired above
+    const adminSession = `s02-session-posture-${Math.random().toString(36).slice(2)}`;
+    await db.insert(authSessions).values({
+      tokenHash: hashToken(adminSession),
+      userId: adminId,
+      origin: "password",
+      idpMfa: true,
+      expiresAt: new Date(Date.now() + 3_600_000),
+      idleExpiresAt: new Date(Date.now() + 3_600_000),
+      idleMinutes: 60,
+    });
     const cookie = { cookie: `${SESSION_COOKIE}=${adminSession}` };
     const retiredBefore = await auditCount("bootstrap-retired");
     const p = await strict.inject({ method: "GET", url: "/v1/org/posture", headers: cookie });

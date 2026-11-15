@@ -271,7 +271,7 @@ describe("B4S-06: the bootstrap credential passes step-up only during first-admi
   });
 
   it("while no admin can step up, the bootstrap header and its exchanged session pass (first-admin setup)", async () => {
-    expect(await posture()).toEqual({ configured: true, adminWithStepUpMethod: false, passesStepUp: true, findings: [] });
+    expect(await posture()).toEqual({ configured: true, retired: false, adminWithStepUpMethod: false, passesStepUp: true, findings: [] });
     expect((await relax(40)).statusCode).toBe(200);
     expect((await relaxViaSession(45)).statusCode).toBe(200);
   });
