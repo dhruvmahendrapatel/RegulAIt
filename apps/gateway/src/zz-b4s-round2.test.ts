@@ -33,6 +33,7 @@
  * (M-068), so the global state it needs (which admins have a step-up method,
  * the strict settings) is its own.
  */
+import { hashToken } from "./token-hash.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -137,7 +138,7 @@ const boot = (method: Method, url: string, payload?: unknown, headers: Record<st
 async function mkSession(userId: string): Promise<string> {
   const token = "rgls_" + randomBytes(32).toString("hex");
   await db.insert(authSessions).values({
-    tokenHash: createHash("sha256").update(token).digest("hex"),
+    tokenHash: hashToken(token),
     userId,
     origin: "password",
     expiresAt: new Date(Date.now() + 3_600_000),

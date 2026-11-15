@@ -23,6 +23,7 @@
  * Global state (org settings, env, SSO providers) is restored in afterAll
  * (M-068); nothing append-only is written outside a rolled-back transaction.
  */
+import { hashToken } from "./token-hash.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -120,7 +121,7 @@ async function mkSession(userId: string, opts: { origin?: "password" | "api_key"
   const [row] = await db
     .insert(authSessions)
     .values({
-      tokenHash: createHash("sha256").update(token).digest("hex"),
+      tokenHash: hashToken(token),
       userId,
       origin: opts.origin ?? "password",
       createdAt,
@@ -546,7 +547,7 @@ describe("step-up grants: single use, bound to kind+digest, session-bound, expir
     const server = await mkServer("own4");
     const facts = { objectType: "mcp_server", objectId: server, ownerUserId: people.member.id };
     const token = await stepUpWithPasskey(admin, auth, { kind: "owner_change", body: facts });
-    const hash = createHash("sha256").update(token).digest("hex");
+    const hash = hashToken(token);
     const [g] = await db.select().from(stepUpGrants).where(eq(stepUpGrants.tokenHash, hash));
     expect(g!.expiresAt.getTime() - g!.createdAt.getTime()).toBe(120_000);
     expect(g!.actionDigest).toBe(stepUpActionDigest("owner_change", facts));

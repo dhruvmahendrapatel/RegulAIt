@@ -13,6 +13,7 @@
  * Under the strict step-up values; global state is put back strict in afterAll (M-068), and the admin's
  * passkey is removed (B4S-06).
  */
+import { hashToken } from "./token-hash.js";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -154,7 +155,7 @@ beforeAll(async () => {
   const [s] = await db
     .insert(authSessions)
     .values({
-      tokenHash: createHash("sha256").update(token).digest("hex"),
+      tokenHash: hashToken(token),
       userId: id,
       origin: "password",
       expiresAt: new Date(Date.now() + 3_600_000),
