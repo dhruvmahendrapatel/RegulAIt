@@ -4,7 +4,7 @@
  * on the server). The agents overview keeps a five-row preview with the disabled count in its heading.
  */
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
-import { Link, Route, Routes, useLocation } from "react-router-dom";
+import { Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import AgentsScreen from "./AgentsScreen";
 import AgentStewardshipPage from "./AgentStewardshipPage";
 import type { AdminAgent } from "../../../api/adminTypes";
@@ -228,6 +228,8 @@ export function AgentsArea() {
       <Route index element={<AgentsScreen />} />
       <Route path="catalog" element={<AgentCatalogPage />} />
       <Route path="stewardship" element={<AgentStewardshipPage />} />
+      {/* an unknown sub-path goes back to the area's own page, never a blank page */}
+      <Route path="*" element={<Navigate to="/admin/agents" replace />} />
     </Routes>
   );
 }

@@ -38,8 +38,8 @@ const SPLITS = [
   {
     name: "SSO",
     path: "/ui/admin/sso",
-    heading: "Account-link requests · 12 pending",
-    viewAll: "View all pending",
+    heading: "Account-link requests · 12 pending requests",
+    viewAll: "View all pending requests",
     page: "/ui/admin/sso/link-requests",
     pageTitle: "Account-link requests",
     endpoint: "/v1/auth/link-requests",
@@ -125,6 +125,14 @@ for (const P of SPLITS) {
 
       await page.getByRole("navigation", { name: "Breadcrumb" }).getByRole("link", { name: P.back }).click();
       await expect(page).toHaveURL(new RegExp(`${P.path}$`));
+      await expect(page.getByText(P.heading, { exact: true })).toBeVisible();
+    });
+
+    test("an unknown sub-path goes back to the area's own page, never a blank page (review of #642)", async ({ page }) => {
+      await mockApi(page);
+      await page.goto(`${P.path}/no-such-page`);
+      await expect(page).toHaveURL(new RegExp(`${P.path}$`));
+      await expect(page.getByRole("heading", { name: P.back, level: 1 })).toBeVisible();
       await expect(page.getByText(P.heading, { exact: true })).toBeVisible();
     });
   });

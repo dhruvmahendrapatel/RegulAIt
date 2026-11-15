@@ -4,7 +4,7 @@
  * its heading.
  */
 import { useMemo, useState } from "react";
-import { Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes } from "react-router-dom";
 import LicensingPage from "./LicensingPage";
 import { PageHeader } from "../../../shell/AppShell";
 import { Card, Field, Select } from "../../../ui/kit";
@@ -58,6 +58,8 @@ export function LicensingArea() {
     <Routes>
       <Route index element={<LicensingPage />} />
       <Route path="verifications" element={<LicenceVerificationsPage />} />
+      {/* an unknown sub-path goes back to the area's own page, never a blank page */}
+      <Route path="*" element={<Navigate to="/admin/licensing" replace />} />
     </Routes>
   );
 }

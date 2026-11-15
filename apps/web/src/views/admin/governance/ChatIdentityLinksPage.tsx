@@ -4,7 +4,7 @@
  * overview keeps a five-row preview with the admin-asserted count in its heading.
  */
 import { useMemo, useState } from "react";
-import { Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes } from "react-router-dom";
 import ChatOpsPage from "./ChatOpsPage";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
@@ -155,6 +155,8 @@ export function ChatOpsArea() {
     <Routes>
       <Route index element={<ChatOpsPage />} />
       <Route path="identity-links" element={<ChatIdentityLinksPage />} />
+      {/* an unknown sub-path goes back to the area's own page, never a blank page */}
+      <Route path="*" element={<Navigate to="/admin/chatops" replace />} />
     </Routes>
   );
 }

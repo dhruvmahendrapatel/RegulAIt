@@ -38,6 +38,11 @@ import { fmtDateTime } from "../../../api/format";
 import { ListPreview } from "../../../ui/ListPreview";
 
 const PENDING = { status: "pending" };
+
+// review of #642 (N2): one source for what the SAML card flags, so the tab count and the card cannot drift
+const trustsAnyDomain = (p: SamlProvider) => !(p.allowedEmailDomains && p.allowedEmailDomains.length > 0);
+/** a SAML provider the card flags: it trusts any email domain, or it accepts IdP-initiated logins */
+const samlNeedsReview = (p: SamlProvider) => trustsAnyDomain(p) || p.allowIdpInitiated;
 const STEP_UP_KEYS = ["stepUpMode", "stepUpMaxAgeSeconds", "stepUpActions"];
 
 export default function SsoPage() {
@@ -48,7 +53,7 @@ export default function SsoPage() {
   const samlUnresolved: Unresolved | null = saml.isError
     ? { unknown: 1, warnings: 0 }
     : saml.data
-      ? { unknown: 0, warnings: (saml.data.providers ?? []).filter((p) => !(p.allowedEmailDomains && p.allowedEmailDomains.length > 0) || p.allowIdpInitiated).length }
+      ? { unknown: 0, warnings: (saml.data.providers ?? []).filter(samlNeedsReview).length }
       : null;
   const settings = useQuery(orgSettingsQuery<OrgSettingsResponse>());
   const stepUpUnresolved = orgSettingsUnresolved(STEP_UP_KEYS, { data: settings.data, failed: settings.isError });
@@ -63,7 +68,7 @@ export default function SsoPage() {
         {/* P3: the growing list is a preview; the full list and its decisions have their own page */}
         <ListPreview<LinkRequest>
           title="Account-link requests"
-          noun="pending"
+          noun="pending requests"
           endpoint="/v1/auth/link-requests"
           legacyKey="requests"
           queryKey={["admin", "link-requests"]}
@@ -579,8 +584,8 @@ function SamlCard() {
               key: "domains",
               header: "Domains",
               render: (p) =>
-                p.allowedEmailDomains && p.allowedEmailDomains.length > 0 ? (
-                  p.allowedEmailDomains.join(", ")
+                !trustsAnyDomain(p) ? (
+                  (p.allowedEmailDomains ?? []).join(", ")
                 ) : (
                   <Badge tone="warn" infoLabel="any domain" info={<>Every email this IdP asserts is trusted.</>}>
                     any
