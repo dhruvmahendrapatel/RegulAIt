@@ -41,6 +41,7 @@
  * telemetry, not governance decisions (the same reasoning as ADR-0185's
  * uncounted scrape refusals).
  */
+import { runWithRlsSystem } from "@regulait/db";
 import type { Db } from "@regulait/db";
 import { JsonMetricsSerializer } from "@opentelemetry/otlp-transformer";
 import { collectForOtlpPush, enableOtlpPushReader, MetricsBootError, recordOtlpPush, type MetricOtlpPushOutcome } from "./metrics.js";
@@ -319,7 +320,9 @@ export function createOtlpMetricsPusher(
 
   if (deps.start) {
     timer = setInterval(() => {
-      if (!inFlight) void pushOnce();
+      // ADR-0234 batch 7a: background work with no request runs under the system_task reason (it reads only
+      // egress_allow_hosts, but the scope keeps it correct when that or any table it reaches gains RLS)
+      if (!inFlight) void runWithRlsSystem("system_task", "metrics.otlp-push", () => pushOnce());
     }, cfg.intervalMs);
     timer.unref();
   }
