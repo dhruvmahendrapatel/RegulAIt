@@ -20,16 +20,19 @@ never runs a stage twice, and wait-for-token pauses. The third, per-queue concur
    (AER-048). The key therefore changes whenever the work it names stops being current.
 2. **Used three ways.**
    - **Queue idempotency.** It is the retry job's `singletonKey`, and the `workflow-stage-retry` queue is `exclusive`:
-     at most one job per key queued, retrying or active. A second failure of the same entry (a manual `/advance` that
-     fails again while the chain waits) sends nothing new and audits `workflow:stage-retry-not-scheduled` with
-     `already_scheduled`.
+     at most one job per key queued, retrying or active. Beyond that, an execution gets one chain ever (ADR-0283
+     decision 2, recorded by its `stage-retry-scheduled` audit row): a second failure of the same entry sends nothing
+     new and audits `workflow:stage-retry-not-scheduled`, with `already_scheduled` while the chain waits (a manual
+     `/advance` that fails again) and `exhausted` once it has ended (a nested run aborting after its attempt handed off,
+     a manual `/advance` after the last attempt).
    - **Execution idempotency.** A job runs only while the instance is still awaiting exactly that execution (stage,
      round and entry match, status `awaiting_execution`); otherwise it is *superseded* and runs nothing. A redelivered
      job (a worker that died after the stage succeeded) finds the stage done and stops. Inside an execution the existing
      claim (`executingEntry`, `executingClaim`, REL-06 TTL) still keeps two executors off one stage, and the effect
      stamps (AER-049) still keep a git step from being redone.
    - **Traceability.** The key is in every retry audit row (`executionKey`) and in the `retryAttempt` detail of the
-     events an attempt commits.
+     events an attempt commits for that execution. The key also scopes the attempt: a downstream stage the attempt's
+     executor runs on into has its own key, so it schedules and audits as if no attempt were running.
 3. **Wait-for-token is the existing sign-off pause.** trigger.dev's `wait.forToken` (and the spike's `createHook` /
    `resumeHook`) park a run on a token that an authenticated caller completes. The runner already does this: a
    `human_approval` stage parks the instance at `blocked_on_approval` with one `approvals` row per approver, the row id
@@ -43,5 +46,6 @@ never runs a stage twice, and wait-for-token pauses. The third, per-queue concur
 - No new route or table. The `Idempotency-Key` header (ADR-0179) stays on the intake writes it already covers. Adding
   it to `/advance` and `/decide` is a follow-up if a client needs replay-safe resumes; today a repeated decide is
   refused because the row is no longer pending, and a repeated `/advance` finds the stage claimed or moved on.
-- Tests: `workflows-queue.test.ts` covers the key (one job per execution, the second failure of an entry, a redelivered
-  job superseded, an aborted instance superseding its queued job).
+- Tests: `workflows-queue.test.ts` covers the key (one job per execution, the second failure of an entry while the
+  chain waits and after it ended, a redelivered job superseded, an aborted instance superseding its queued job, a
+  downstream stage keyed apart from the attempt that ran into it).

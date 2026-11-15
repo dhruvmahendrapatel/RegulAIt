@@ -66,6 +66,8 @@ test.describe("ADR-0180: the continuous-assurance gate setting", () => {
   test("reads enforce by default, says so, and saves through its own audited route", async ({ page }) => {
     const cap = await mockApi(page);
     await page.goto("/ui/admin/organization");
+    // I-2 rollout H: the gates live on the Approvals & gates tab
+    await page.getByRole("tablist", { name: "Organisation settings" }).getByRole("tab", { name: /^Approvals & gates/ }).click();
     const card = page.locator("section[data-rg-card]").filter({ hasText: "Continuous-assurance deploy gate" }).first();
     await expect(card).toBeVisible();
     const select = card.getByLabel("Continuous-assurance gate");
@@ -87,6 +89,8 @@ test("ADR-0186 A: relaxing the use-case gate asks to confirm it's you and resend
   const cap = await mockApi(page);
   const su = await requireStepUpOn(page, { method: "PUT", path: "/v1/org/settings", kind: "settings_relax" });
   await page.goto("/ui/admin/organization");
+  // I-2 rollout H: the gates live on the Approvals & gates tab
+  await page.getByRole("tablist", { name: "Organisation settings" }).getByRole("tab", { name: /^Approvals & gates/ }).click();
   const card = page.locator("section[data-rg-card]").filter({ hasText: "AI use-case dispatch gate" }).first();
   await card.getByLabel("Use-case dispatch gate").selectOption("warn");
   await card.getByRole("button", { name: "Save use-case gate" }).click();

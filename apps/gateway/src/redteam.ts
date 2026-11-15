@@ -68,7 +68,6 @@ import {
   and,
   asc,
   auditLog,
-  complianceProfiles,
   count,
   desc,
   eq,
@@ -136,7 +135,7 @@ import {
 import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
 import { type AgentRow } from "./agents-connectors.js";
 import { buildAgentDecider, runEvalSuite, type EvalRunOutcome } from "./evals.js";
-import { assertProjectAttribution } from "./projects.js";
+import { assertProjectAttribution, complianceProfilesForTags } from "./projects.js";
 import { installPresentationScrub } from "./conversation-presentation.js";
 import {
   auditAdjudication,
@@ -450,8 +449,9 @@ export async function resolveRedTeamPreset(db: Db, projectId: string | null | un
   if (!project) return null;
   const tags = (project.classifications ?? []) as string[];
   if (tags.length === 0) return null;
-  const rows = await db.select().from(complianceProfiles);
-  const matching = rows.filter((p) => tags.includes(p.tag));
+  // ADR-0045 amendment 2026-11-14: through the ONE cascade funnel, so the profile's ACTIVE VERSION governs (ADR-0073). Reading the table
+  // row directly ignored a versioned tightening, and a pack-seeded preset edited through versions never reached a run.
+  const matching = await complianceProfilesForTags(db, tags);
   if (matching.length === 0) return null;
   const preset = composeRedTeamPreset(
     matching.map((p) => ({
