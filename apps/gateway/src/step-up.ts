@@ -396,15 +396,30 @@ export async function adminWithStepUpMethodExists(db: Db): Promise<boolean> {
   return Boolean(hit);
 }
 
-/** what GET /v1/org/posture says about the bootstrap credential (B4S-06) */
-export async function bootstrapStepUpPosture(db: Db, bootstrapConfigured: boolean) {
+/**
+ * what GET /v1/org/posture says about the bootstrap credential (B4S-06). A
+ * RETIRED token (S-02: an active admin exists and the relaxation is off)
+ * authenticates nothing, so it passes no step-up; it is reported so the
+ * operator removes it.
+ */
+export async function bootstrapStepUpPosture(db: Db, bootstrapConfigured: boolean, retired = false) {
   const adminCanStepUp = await adminWithStepUpMethodExists(db);
+  const live = bootstrapConfigured && !retired;
   return {
     configured: bootstrapConfigured,
+    retired: bootstrapConfigured && retired,
     adminWithStepUpMethod: adminCanStepUp,
-    passesStepUp: bootstrapConfigured && !adminCanStepUp,
-    findings:
-      bootstrapConfigured && adminCanStepUp
+    passesStepUp: live && !adminCanStepUp,
+    findings: bootstrapConfigured && retired
+      ? [
+          {
+            code: "bootstrap_token_retired",
+            detail:
+              "REGULAIT_BOOTSTRAP_TOKEN is still set but RETIRED: an active administrator exists, so it authenticates " +
+              "nothing. Unset it (and restart).",
+          },
+        ]
+      : live && adminCanStepUp
         ? [
             {
               code: "bootstrap_token_configured",

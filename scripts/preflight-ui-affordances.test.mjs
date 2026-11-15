@@ -95,13 +95,9 @@ describe("affordance census: a notBuilt route counts only when the file defines 
   });
 
   it("no exemption names a stub: a stub is skipped already, so an entry for one is stale", () => {
-    // all three are real handlers, not stubs: ADR-0246 (P27) authorised-targets, raised for the master's review,
-    // plus the two ADR-0236 bundle routes (archive, grant revoke) until the #453 bundle screen (owner decision 2026-11-07, #697)
-    expect([...DELIBERATELY_API_ONLY.keys()]).toEqual([
-      "/v1/mcp/authorised-targets/:x",
-      "/v1/mcp-bundles/:x",
-      "/v1/mcp-bundles/:x/grants/:x",
-    ]);
+    // a real handler, not a stub: ADR-0246 (P27) authorised-targets, raised for the master's review (the two ADR-0236
+    // bundle routes left this list when the #453 bundle screen landed)
+    expect([...DELIBERATELY_API_ONLY.keys()]).toEqual(["/v1/mcp/authorised-targets/:x"]);
   });
 });
 
