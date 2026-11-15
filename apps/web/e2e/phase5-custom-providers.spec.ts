@@ -458,7 +458,9 @@ test.describe("ADR-0034 custom LLM providers — the admin surface", () => {
     expect(body.costPerMTokIn).toBeUndefined();
     expect(body.costPerMTokOut).toBeUndefined();
 
-    // scoped to the Catalog card: the stewardship table above lists the same agent
+    // P3: the overview keeps only a five-row preview; the full catalogue is on its own page, so open it to find the
+    // just-registered agent whatever its name's sort position.
+    await page.getByRole("link", { name: "View all agents" }).click();
     const catalog = page.locator("section[data-rg-card]").filter({ has: page.getByText("Catalog", { exact: true }) });
     const row = catalog.getByRole("row", { name: /e2e-local-agent/ });
     await expect(row).toContainText(`custom · ${PROVIDER}`);
