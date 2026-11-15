@@ -21,9 +21,12 @@
 #   log-verify    <witness-log>
 #   dry-run       [--keep]                  (the whole ceremony with throwaway keys; see below)
 #
-# --pass takes an openssl pass source (pass:<x> for the dry run only, file:<path>,
-# env:<VAR>, or omit it to be prompted). Private keys are written encrypted with
-# AES-256 (PKCS#8) unless --pass is "none", which only the dry run uses.
+# --pass takes an openssl pass source: file:<path>, env:<VAR>, or omit it to be prompted.
+# Private keys are always written encrypted with AES-256 (PKCS#8). A passphrase on the
+# command line, or no encryption, is refused outside the built-in dry run.
+#
+# keygen, sign-keyring and sign-release refuse to run while a network interface is up.
+# --allow-network overrides that (for a rehearsal only) and the witness log records it.
 #
 # Hardware token: give --key / --root-key a PKCS#11 URI (pkcs11:token=...;object=...)
 # and install pkcs11-provider (Apache-2.0) for openssl 3. The key never leaves the token.
@@ -82,6 +85,30 @@ network_up() {
   done
   return 1
 }
+# The dry run's throwaway keys use "none" or "pass:..."; a real ceremony never may (ADR-0180).
+# The dry run marks its own temp directory; only key files inside it qualify.
+dry_run_path() {
+  local d="${REGULAIT_CEREMONY_DRY_RUN_DIR:-}" p
+  [ -n "$d" ] && [ -d "$d" ] || return 1
+  case "$(basename "$d")" in regulait-ceremony-dryrun.*) ;; *) return 1 ;; esac
+  p="$(cd -- "$(dirname -- "$1")" 2>/dev/null && pwd)/$(basename -- "$1")" || return 1
+  case "$p" in "$(cd -- "$d" && pwd)"/*) return 0 ;; *) return 1 ;; esac
+}
+check_pass_src() { # <key path>
+  case "$PASS_SRC" in
+    none|pass:*)
+      dry_run_path "$1" || die "--pass $([ "$PASS_SRC" = none ] && echo none || echo 'pass:...') is refused: it leaves the key unencrypted or puts the passphrase in shell history and the process list." \
+        "Use --pass file:<path> or env:<VAR>, or leave --pass out to be prompted." ;;
+  esac
+  return 0
+}
+air_gap_check() { # <allow_net 0|1> <command name>
+  if [ "$1" = "0" ] && network_up; then
+    die "a network interface is up. $2 handles a private key: run it on the air-gapped machine (runbook part 2)." \
+        "Unplug the cable and turn Wi-Fi off, then run this again."
+  fi
+  return 0
+}
 pass_args() { # prints -passin/-pass flags for the configured pass source
   if [ -n "$PASS_SRC" ] && [ "$PASS_SRC" != "none" ]; then printf '%s\n%s\n' "$1" "$PASS_SRC"; fi
 }
@@ -129,11 +156,9 @@ cmd_keygen() {
   mkdir -p "$out"
   out="$(cd -- "$out" && pwd)"
   in_git_checkout "$out" && die "refusing to write a private key inside a git checkout ($out)"
-  if [ "$allow_net" = "0" ] && network_up; then
-    die "a network interface is up. Generate keys on an air-gapped machine (runbook part 2)." \
-        "Unplug the cable and turn Wi-Fi off, then run this again."
-  fi
+  air_gap_check "$allow_net" keygen
   [ ! -e "$out/$id.pem" ] || die "$out/$id.pem already exists; a key is never overwritten"
+  check_pass_src "$out/$id.pem"
   local -a pa=()
   mapfile -t pa < <(pass_args -pass)
   if [ "$PASS_SRC" = "none" ]; then
@@ -150,7 +175,7 @@ cmd_keygen() {
   fp="$(kr_fingerprint "$out/$id.pub")"
   ok "$role key $id: private half $out/$id.pem (encrypted unless the dry run), public half $out/$id.pub"
   info "fingerprint sha256:$fp   <- read this aloud; the witness writes it down"
-  log_event "keygen role=$role id=$id sha256=$fp"
+  log_event "keygen role=$role id=$id sha256=$fp encrypted=$([ "$PASS_SRC" = none ] && echo no || echo yes) allow_network=$allow_net"
 }
 
 # --- keyring statement -------------------------------------------------------------
@@ -175,6 +200,10 @@ cmd_keyring() {
   done
   [ -n "$outdir" ] || die "keyring: --out-dir <dir>"
   [ ! -e "$outdir/keyring.json" ] || die "$outdir/keyring.json exists; write each new statement to a new directory"
+  if [ "${KR_SERIAL:-}" != "1" ] && [ -z "$previous" ]; then
+    die "serial ${KR_SERIAL:-<none>} needs --previous <the current keyring dir>: it carries every earlier revocation forward." \
+        "Without it, a rotation could silently un-revoke a stolen key."
+  fi
   if [ "$single" = "0" ] && [ "${KR_THRESHOLD:-0}" -lt 2 ] 2>/dev/null; then
     die "threshold below 2: one lost or stolen root would then decide alone." \
         "The default is 2 of 3 (runbook part 1). --allow-single-root relaxes it, and the witness log records that."
@@ -225,9 +254,10 @@ cmd_keyring() {
 }
 
 cmd_sign_keyring() {
-  local dir="" rid="" rkey=""
+  local dir="" rid="" rkey="" allow_net=0
   while [ $# -gt 0 ]; do
     case "$1" in
+      --allow-network) allow_net=1; shift ;;
       --dir) dir="${2:-}"; shift 2 ;;
       --root-id) rid="${2:-}"; shift 2 ;;
       --root-key) rkey="${2:-}"; shift 2 ;;
@@ -237,6 +267,8 @@ cmd_sign_keyring() {
     esac
   done
   [ -f "$dir/keyring.json" ] || die "sign-keyring: --dir must hold keyring.json"
+  air_gap_check "$allow_net" sign-keyring
+  case "$rkey" in pkcs11:*) ;; *) check_pass_src "$rkey" ;; esac
   [ -f "$dir/root/$rid.pub" ] || die "sign-keyring: $rid is not a root in this statement"
   kr_parse "$dir/keyring.json" || die "the statement does not parse: $KR_ERR"
   # Sign only with the key the statement names: compare the private key's public half first.
@@ -247,13 +279,14 @@ cmd_sign_keyring() {
   rm -f "$mine"
   sign_file "$rkey" "$dir/keyring.json" "$dir/keyring.json.sig.$rid"
   ok "root $rid signed keyring serial $KR_SERIAL"
-  log_event "sign-keyring serial=$KR_SERIAL root=$rid statement_sha256=$(kr_sha256_file "$dir/keyring.json")"
+  log_event "sign-keyring serial=$KR_SERIAL root=$rid statement_sha256=$(kr_sha256_file "$dir/keyring.json") allow_network=$allow_net"
 }
 
 cmd_sign_release() {
-  local cand="" key="" out="" trust=""
+  local cand="" key="" out="" trust="" allow_net=0
   while [ $# -gt 0 ]; do
     case "$1" in
+      --allow-network) allow_net=1; shift ;;
       --candidate) cand="${2:-}"; shift 2 ;;
       --key) key="${2:-}"; shift 2 ;;
       --out) out="${2:-}"; shift 2 ;;
@@ -263,10 +296,12 @@ cmd_sign_release() {
       *) die "sign-release: unknown option $1" ;;
     esac
   done
-  [ -f "$cand" ] && [ -n "$key" ] && [ -n "$out" ] || die "sign-release: --candidate, --key and --out are required"
+  [ -f "$cand" ] && [ -n "$key" ] && [ -n "$out" ] && [ -n "$trust" ] \
+    || die "sign-release: --candidate, --key, --trust and --out are required"
   [ ! -e "$out" ] || die "$out exists"
-  local -a targs=()
-  [ -z "$trust" ] || targs=(--trust "$trust")
+  air_gap_check "$allow_net" sign-release
+  case "$key" in pkcs11:*) ;; *) check_pass_src "$key" ;; esac
+  local -a targs=(--trust "$trust")
   # Never sign what does not check out: the same offline checks a customer runs, minus the signature.
   bash "$SCRIPT_DIR/verify-release.sh" --candidate "$cand" "${targs[@]}" --quiet \
     || die "the candidate does not pass the pre-sign check; NOT signing it"
@@ -281,14 +316,16 @@ cmd_sign_release() {
     || { rm -rf "$stage" "$mine"; die "this private key is not $keyid, the key the candidate names"; }
   rm -f "$mine"
   sign_file "$key" "$root/manifest.json" "$root/manifest.json.sig"
-  sign_file "$key" "$root/provenance.intoto.json" "$root/provenance.intoto.json.sig"
+  kr_provenance_message "$root/provenance.intoto.json" >"$stage/prov.msg"
+  sign_file "$key" "$stage/prov.msg" "$root/provenance.intoto.json.sig"
+  rm -f "$stage/prov.msg"
   tar -C "$stage" -czf "$out" "$(basename "$root")"
   local msha
   msha="$(kr_sha256_file "$root/manifest.json")"
   rm -rf "$stage"
   bash "$SCRIPT_DIR/verify-release.sh" "$out" "${targs[@]}" --quiet || die "the signed release does not verify; do not publish it"
   ok "signed: $out (key $keyid, manifest sha256:$msha); it verifies"
-  log_event "sign-release key=$keyid manifest_sha256=$msha bundle_sha256=$(kr_sha256_file "$out")"
+  log_event "sign-release key=$keyid manifest_sha256=$msha bundle_sha256=$(kr_sha256_file "$out") allow_network=$allow_net"
 }
 
 cmd_current_signing_key() {
@@ -318,6 +355,7 @@ cmd_dry_run() {
   DRY_W="$(mktemp -d "${TMPDIR:-/tmp}/regulait-ceremony-dryrun.XXXXXX")"
   if [ "$keep" = "0" ]; then trap 'rm -rf "$DRY_W"' EXIT; fi
   local W="$DRY_W"
+  export REGULAIT_CEREMONY_DRY_RUN_DIR="$DRY_W"
   local T="$SCRIPT_DIR/release-ceremony.sh" V="$SCRIPT_DIR/verify-release.sh" B="$SCRIPT_DIR/build-update-bundle.sh"
   local P="$SCRIPT_DIR/release-provenance.sh"
   local REPO="https://github.com/example/regulait" WF=".github/workflows/release.yml"
@@ -341,7 +379,7 @@ cmd_dry_run() {
   }
   keygen() { q bash "$T" keygen --role "$1" --id "$2" --out "$OFF" --pass "$PW" --log "$LOG" --allow-network || { cat "$W/last.out"; die "dry run: keygen $2 failed"; }; }
   keyring() { q bash "$T" keyring --log "$LOG" "$@" || { cat "$W/last.out"; die "dry run: keyring failed"; }; }
-  rootsign() { local d="$1"; shift; for r in "$@"; do q bash "$T" sign-keyring --dir "$d" --root-id "$r" --root-key "$OFF/$r.pem" --pass "$PW" --log "$LOG" || { cat "$W/last.out"; die "dry run: sign-keyring $r failed"; }; done; }
+  rootsign() { local d="$1"; shift; for r in "$@"; do q bash "$T" sign-keyring --dir "$d" --root-id "$r" --root-key "$OFF/$r.pem" --pass "$PW" --log "$LOG" --allow-network || { cat "$W/last.out"; die "dry run: sign-keyring $r failed"; }; done; }
   # candidate <version> <key-id> <keyring dir> <out> [--no-sbom] [--workflow <path>]
   candidate() {
     local ver="$1" kid="$2" kdir="$3" out="$4" sbom=1 wf="$WF" src
@@ -362,7 +400,7 @@ cmd_dry_run() {
       --commit "$(printf '%s' "$ver" | kr_sha256_stdin | cut -c1-40)" \
       --invocation "$REPO/actions/runs/1/attempts/1" || { cat "$W/last.out"; die "dry run: provenance failed"; }
   }
-  sign() { q bash "$T" sign-release --candidate "$1" --key "$OFF/$2.pem" --pass "$PW" --trust "$3" --out "$4" --log "$LOG" || { cat "$W/last.out"; die "dry run: sign-release failed"; }; }
+  sign() { q bash "$T" sign-release --candidate "$1" --key "$OFF/$2.pem" --pass "$PW" --trust "$3" --out "$4" --log "$LOG" --allow-network || { cat "$W/last.out"; die "dry run: sign-release failed"; }; }
   retar() { # retar <bundle> <out> <command run inside the extracted bundle dir>
     local x; x="$(mktemp -d "$W/x.XXXXXX")"
     tar -xzf "$1" -C "$x"
@@ -376,7 +414,7 @@ cmd_dry_run() {
     --root "root-a=$OFF/root-a.pub" --root "root-b=$OFF/root-b.pub" --root "root-c=$OFF/root-c.pub" \
     --key "release-s1=$OFF/release-s1.pub:update-bundle,provenance,license:2099-12-31"
   expect_refuse "a keyring signed by ONE of three roots (threshold 2)" "signed by 1 of its roots" \
-    bash -c "bash '$T' sign-keyring --dir '$W/kr1' --root-id root-a --root-key '$OFF/root-a.pem' --pass '$PW' >/dev/null && bash '$V' --keyring-only '$W/kr1'"
+    bash -c "bash '$T' sign-keyring --dir '$W/kr1' --root-id root-a --root-key '$OFF/root-a.pem' --pass '$PW' --allow-network >/dev/null && bash '$V' --keyring-only '$W/kr1'"
   rootsign "$W/kr1" root-b
   expect_pass "the keyring verifies with two of three root signatures" bash "$V" --keyring-only "$W/kr1"
   expect_refuse "a threshold of 1 needs --allow-single-root" "threshold below 2" \
@@ -404,24 +442,24 @@ cmd_dry_run() {
   expect_refuse "provenance whose signature was replaced" "PROVENANCE SIGNATURE" bash "$V" "$W/t-unsigned-prov.tar.gz" --trust "$W/kr1"
   candidate 1.0.0 release-s1 "$W/kr1" "$W/c100-evil.tar.gz" --workflow .github/workflows/evil.yml
   expect_refuse "the signer refuses a candidate built by another workflow" "pre-sign check" \
-    bash "$T" sign-release --candidate "$W/c100-evil.tar.gz" --key "$OFF/release-s1.pem" --pass "$PW" --trust "$W/kr1" --out "$W/never.tar.gz"
+    bash "$T" sign-release --candidate "$W/c100-evil.tar.gz" --key "$OFF/release-s1.pem" --pass "$PW" --trust "$W/kr1" --out "$W/never.tar.gz" --allow-network
   candidate 1.0.1 release-s1 "$W/kr1" "$W/c101.tar.gz"
   retar "$W/r100.tar.gz" "$W/t-prov-swap.tar.gz" "tar -xzf '$W/c101.tar.gz' -O --wildcards '*/provenance.intoto.json' > provenance.intoto.json"
   expect_refuse "provenance of a different build swapped in" "PROVENANCE MISMATCH" bash "$V" "$W/t-prov-swap.tar.gz" --trust "$W/kr1"
   candidate 1.0.2 release-s1 "$W/kr1" "$W/c102-nosbom.tar.gz" --no-sbom
   expect_refuse "the signer refuses a candidate with no SBOM" "pre-sign check" \
-    bash "$T" sign-release --candidate "$W/c102-nosbom.tar.gz" --key "$OFF/release-s1.pem" --pass "$PW" --trust "$W/kr1" --out "$W/never.tar.gz"
+    bash "$T" sign-release --candidate "$W/c102-nosbom.tar.gz" --key "$OFF/release-s1.pem" --pass "$PW" --trust "$W/kr1" --out "$W/never.tar.gz" --allow-network
   expect_refuse "a candidate with no SBOM fails verification" "NO SBOM" bash "$V" --candidate "$W/c102-nosbom.tar.gz" --trust "$W/kr1"
 
   printf '\n-- an attacker with their own keys (the LiteLLM case: a pipeline that signs whatever it is given)\n'
   keygen root evil-root; keygen signing evil-s
-  keyring --out-dir "$W/kr-evil" --serial 9 --threshold 1 --allow-single-root --builder "$BUILDER" \
+  keyring --out-dir "$W/kr-evil" --serial 1 --threshold 1 --allow-single-root --builder "$BUILDER" \
     --root "evil-root=$OFF/evil-root.pub" --key "evil-s=$OFF/evil-s.pub:update-bundle,provenance:2099-12-31"
   rootsign "$W/kr-evil" evil-root
   candidate 6.6.6 evil-s "$W/kr-evil" "$W/c-evil.tar.gz"
   sign "$W/c-evil.tar.gz" evil-s "$W/kr-evil" "$W/r-evil.tar.gz"
   expect_refuse "a validly signed release under an attacker's own root" "TRUSTED root key(s)" bash "$V" "$W/r-evil.tar.gz" --trust "$W/kr1"
-  keyring --out-dir "$W/kr-1root" --serial 2 --threshold 2 --builder "$BUILDER" \
+  keyring --out-dir "$W/kr-1root" --previous "$W/kr1" --serial 2 --threshold 2 --builder "$BUILDER" \
     --root "root-a=$OFF/root-a.pub" --root "root-b=$OFF/root-b.pub" --root "root-c=$OFF/root-c.pub" \
     --key "release-s1=$OFF/release-s1.pub:update-bundle,provenance,license:2099-12-31" \
     --key "evil-s=$OFF/evil-s.pub:update-bundle,provenance:2099-12-31"
@@ -469,6 +507,69 @@ cmd_dry_run() {
   rootsign "$W/kr4" root-b root-d
   candidate 1.4.0 release-old "$W/kr4" "$W/c140.tar.gz"
   expect_refuse "a candidate naming an expired signing key" "expired on 2000-01-01" bash "$V" --candidate "$W/c140.tar.gz" --trust "$W/kr3"
+
+  printf '\n-- guards the review asked to see exercised (#853)\n'
+  # sign a file with a dry-run root, in-process (for statements the tool itself would refuse to write)
+  rawsign() { PASS_SRC="$PW" sign_file "$OFF/$1.pem" "$2" "$2.sig.$1"; }
+  keyring --out-dir "$W/kr-purpose" --previous "$W/kr1" --serial 2 --threshold 2 --builder "$BUILDER" \
+    --root "root-a=$OFF/root-a.pub" --root "root-b=$OFF/root-b.pub" --root "root-c=$OFF/root-c.pub" \
+    --key "release-s1=$OFF/release-s1.pub:license:2099-12-31"
+  rootsign "$W/kr-purpose" root-a root-b
+  candidate 1.5.0 release-s1 "$W/kr-purpose" "$W/c-purpose.tar.gz"
+  expect_refuse "a signing key without the update-bundle purpose" "not authorised to sign update bundles" \
+    bash "$V" --candidate "$W/c-purpose.tar.gz" --trust "$W/kr1"
+  keygen signing release-extra
+  keyring --out-dir "$W/kr1-alt" --serial 1 --threshold 2 --builder "$BUILDER" \
+    --root "root-a=$OFF/root-a.pub" --root "root-b=$OFF/root-b.pub" --root "root-c=$OFF/root-c.pub" \
+    --key "release-s1=$OFF/release-s1.pub:update-bundle,provenance,license:2099-12-31" \
+    --key "release-extra=$OFF/release-extra.pub:update-bundle,provenance:2099-12-31"
+  rootsign "$W/kr1-alt" root-a root-b
+  candidate 1.5.1 release-s1 "$W/kr1-alt" "$W/c-sameserial.tar.gz"
+  expect_refuse "the installed serial with different content" "has the installed serial 1 but different content" \
+    bash "$V" --candidate "$W/c-sameserial.tar.gz" --trust "$W/kr1"
+  cp -R "$W/kr1" "$W/kr1-noncanon"; printf '\n' >>"$W/kr1-noncanon/keyring.json"
+  rawsign root-a "$W/kr1-noncanon/keyring.json"; rawsign root-b "$W/kr1-noncanon/keyring.json"
+  expect_refuse "a validly signed but non-canonical statement" "not in canonical form" bash "$V" --keyring-only "$W/kr1-noncanon"
+  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$OFF/rsa.pem" 2>/dev/null
+  openssl pkey -in "$OFF/rsa.pem" -pubout -out "$OFF/release-rsa.pub" 2>/dev/null
+  mkdir -p "$W/kr-rsa/root"; cp "$W/kr1/root/"*.pub "$W/kr-rsa/root/"; cp "$OFF/release-rsa.pub" "$W/kr-rsa/"
+  kr_parse "$W/kr1/keyring.json" || die "dry run: kr1 does not parse"
+  KR_KEY_IDS=(release-rsa); KR_KEY_FPS=("$(kr_fingerprint "$OFF/release-rsa.pub")")
+  KR_KEY_NOTAFTER=(2099-12-31); KR_KEY_PURPOSES=(update-bundle)
+  kr_render >"$W/kr-rsa/keyring.json"
+  rawsign root-a "$W/kr-rsa/keyring.json"; rawsign root-b "$W/kr-rsa/keyring.json"
+  expect_refuse "a non-Ed25519 signing key, listed with its true fingerprint" "not an Ed25519 public key" \
+    bash "$V" --keyring-only "$W/kr-rsa"
+  expect_refuse "--allow-dev-keyring outside --keyring-only" "Usage:" bash "$V" "$W/r100.tar.gz" --trust "$W/kr1" --allow-dev-keyring
+  expect_refuse "a release check with no trust anchor named" "name the keyring you already trust" bash "$V" "$W/r100.tar.gz"
+  expect_refuse "keyring serial 2 without --previous (it would drop revocations)" "needs --previous" \
+    bash "$T" keyring --out-dir "$W/kr-noprev" --serial 2 --threshold 2 --builder "$BUILDER" \
+    --root "root-a=$OFF/root-a.pub" --root "root-b=$OFF/root-b.pub"
+
+  printf '\n-- the install path: apply-update-bundle.sh goes through verify-release.sh (#853 C1)\n'
+  # A STOLEN but unrevoked key signs a bundle whose payload keyring adds the attacker's own .pub.
+  local src2; src2="$(mktemp -d "$W/src.XXXXXX")"
+  printf 'services: {}\n' >"$src2/docker-compose.yml"; mkdir -p "$src2/infra" "$src2/sbom"
+  cp -R "$W/kr1" "$src2/infra/release-keys"; cp "$OFF/evil-s.pub" "$src2/infra/release-keys/"
+  printf '{\n  "bomFormat": "CycloneDX"\n}\n' >"$src2/sbom/regulait-workspace.cdx.json"
+  q bash "$B" --version 1.6.0 --unsigned --key-id release-s1 --source "$src2" --include docker-compose.yml \
+    --include infra/release-keys --include sbom --out "$W/c-plant.tar.gz" || { cat "$W/last.out"; die "dry run: build failed"; }
+  q bash "$P" --candidate "$W/c-plant.tar.gz" --repository "$REPO" --workflow "$WF" --ref refs/tags/v1.6.0 \
+    --commit "$(printf 'plant' | kr_sha256_stdin | cut -c1-40)" --invocation "$REPO/actions/runs/1/attempts/1" \
+    || { cat "$W/last.out"; die "dry run: provenance failed"; }
+  x="$(mktemp -d "$W/x.XXXXXX")"; tar -xzf "$W/c-plant.tar.gz" -C "$x"
+  PASS_SRC="$PW" sign_file "$OFF/release-s1.pem" "$x/regulait-update-1.6.0/manifest.json" "$x/regulait-update-1.6.0/manifest.json.sig"
+  kr_provenance_message "$x/regulait-update-1.6.0/provenance.intoto.json" >"$x/prov.msg"
+  PASS_SRC="$PW" sign_file "$OFF/release-s1.pem" "$x/prov.msg" "$x/regulait-update-1.6.0/provenance.intoto.json.sig"
+  tar -C "$x" -czf "$W/r-plant.tar.gz" regulait-update-1.6.0
+  local inst="$W/install"; mkdir -p "$inst/infra"; : >"$inst/.env"; cp -R "$W/kr1" "$inst/infra/release-keys"
+  expect_refuse "apply-update-bundle.sh refuses a stolen key's bundle that plants its own .pub" "did not verify" \
+    bash "$SCRIPT_DIR/apply-update-bundle.sh" "$W/r-plant.tar.gz" --install-dir "$inst" --yes
+  if [ -e "$inst/infra/release-keys/evil-s.pub" ] || [ -e "$inst/docker-compose.yml" ]; then
+    fails=$((fails + 1)); echo "  [FAILED]  the refused bundle changed the install directory"
+  else passes=$((passes + 1)); echo "  [pass]    the refused bundle left the install directory untouched"; fi
+  expect_pass "a verified release extracts only after every check (--extract-to)" \
+    bash -c "bash '$V' '$W/r100.tar.gz' --trust '$W/kr1' --extract-to '$W/extracted' && test -f '$W/extracted/docker-compose.yml'"
 
   printf '\n-- witness log\n'
   expect_pass "the witness log's hash chain is intact" bash "$T" log-verify "$LOG"

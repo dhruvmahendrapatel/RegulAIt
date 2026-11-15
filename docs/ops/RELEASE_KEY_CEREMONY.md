@@ -196,8 +196,10 @@ bash $T log-verify $LOG
 The first command lists each root's fingerprint. The witness compares them with the sheet.
 
 **4.6 Take out only public files.** Copy `~/ceremony/keyring/` and `~/ceremony/witness.log` to **PUBLIC**.
-Check with `grep -rl "PRIVATE KEY" /media/$USER/PUBLIC`, which must print nothing. Shut the laptop down;
-the live system forgets everything. Seal the remaining envelopes. You and the witness sign the sheet.
+Check with `grep -rl "PRIVATE KEY" /media/$USER/PUBLIC`, which must print nothing. Shut the laptop down.
+The live system runs from memory, so `~/ceremony`, `~/tools` and `/tmp` (where the tools write short-lived
+files that hold only signatures) are gone once it powers off. Never boot this ceremony from an installed
+system that writes to the laptop's own disk. Seal the remaining envelopes. You and the witness sign the sheet.
 
 ---
 
@@ -241,9 +243,12 @@ the live system forgets everything. Seal the remaining envelopes. You and the wi
    (`git rev-parse vX.Y.Z`). *Why:* this is the step LiteLLM did not have. A person confirms that CI built
    what was reviewed before anything is signed.
 3. **Sign, offline.** Copy the candidate to a stick. Boot the signing laptop from **BOOT** with the network
-   off, and plug in **SIGNING** and the stick. Then run:
+   off, and plug in **TOOLS**, **SIGNING** and the stick. Copy **TOOLS** to the laptop's memory as in part 3,
+   then run:
 
    ```sh
+   T=~/tools/scripts/release-ceremony.sh
+   LOG=~/ceremony/witness-release-X.Y.Z.log; mkdir -p ~/ceremony
    bash $T sign-release --candidate regulait-update-X.Y.Z.unsigned.tar.gz \
      --key /media/$USER/SIGNING/regulait-release-2026-12.pem \
      --trust ~/tools/infra/release-keys --out regulait-update-X.Y.Z.tar.gz --log $LOG
@@ -251,11 +256,16 @@ the live system forgets everything. Seal the remaining envelopes. You and the wi
 
    The tool repeats the pre-sign check and refuses to sign a candidate that fails it. It checks that the
    key is the one the candidate names, signs the manifest and the provenance, and verifies the result.
+   Copy the signed bundle and `$LOG` to **PUBLIC** before you shut down: the live system keeps nothing.
+   The log goes to `infra/release-keys/ceremonies/` with the release.
 4. **Publish.** Attach `regulait-update-X.Y.Z.tar.gz` (never the `.unsigned` one) to the GitHub release and
    publish it. The Release workflow's **verify** job downloads it and verifies it against the keyring on
    the default branch. It fails if an asset is unsigned or does not verify.
-5. **Customers** run `scripts/verify-release.sh regulait-update-X.Y.Z.tar.gz`. The operator and
-   `apply-update-bundle.sh` keep running the ADR-0041 checks.
+5. **Customers** install with `scripts/apply-update-bundle.sh regulait-update-X.Y.Z.tar.gz`. It runs
+   `verify-release.sh` against the installed keyring before anything is written, so the root, SBOM and
+   provenance checks are not a separate manual step. To check a bundle without installing it, run
+   `scripts/verify-release.sh regulait-update-X.Y.Z.tar.gz --install-dir <the deployment>`. The Kubernetes
+   operator still runs the ADR-0041 checks only (ADR-0324 follow-up).
 
 ---
 
@@ -263,7 +273,8 @@ the live system forgets everything. Seal the remaining envelopes. You and the wi
 
 **Yearly signing-key rotation** (before `notAfter`). Hold a short ceremony with two roots. Make a new
 signing key (`keygen --role signing`), then write a statement with the next serial that lists the new key
-and leaves out, or revokes, the old one:
+and **revokes** the old one. Leaving a retired key out is not enough: a retired key stolen later could sign
+a bundle backdated to before its `notAfter`, and only revocation refuses it whatever date it claims.
 
 ```sh
 bash $T keyring --out-dir ~/ceremony/keyring-2 --previous ~/tools/infra/release-keys --serial 2 --threshold 2 \
@@ -310,7 +321,9 @@ Record the date and result on a new witness sheet.
 - **Two copies of every root key** (main and backup sticks), in **different places**. The passphrase card
   is stored apart from both. One root per place: A at home, B in a bank box, C with a trusted third party.
 - **Paper copy (optional):** the encrypted key file is short text. `cat regulait-root-a-2026.pem` can be
-  printed and kept with the backup. It is useless without the passphrase.
+  printed and kept with the backup. It is useless without the passphrase. Print it **only** on a printer
+  plugged directly into the air-gapped laptop with no network connection (many printers keep a copy of
+  every job, and a networked one can send it on), or skip the paper copy.
 - USB sticks fail over time. Check the backups at the yearly drill, and copy them to new sticks every few
   years.
 - This is "M-of-N by independent keys" rather than splitting one key into shares (Shamir). Each root is a

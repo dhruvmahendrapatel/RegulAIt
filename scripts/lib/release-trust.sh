@@ -48,6 +48,12 @@ kr_verify_sig() {
   rm -f "$bin"; return 1
 }
 
+# The release key signs two kinds of document. The manifest keeps the exact ADR-0041
+# bytes (the operator and verify-update-bundle.sh check those); the provenance is signed
+# with a context prefix, so a signature over one can never be presented as the other.
+KR_PROVENANCE_CONTEXT="regulait.release-provenance/1"
+kr_provenance_message() { printf '%s\n' "$KR_PROVENANCE_CONTEXT"; cat "$1"; }
+
 kr_reset() {
   KR_SERIAL=""; KR_ISSUED=""; KR_THRESHOLD=""; KR_BUILDER=""
   KR_ROOT_IDS=(); KR_ROOT_FPS=()

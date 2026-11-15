@@ -124,8 +124,8 @@ jobs:
         run: |
           set -euo pipefail
           c="$RUNNER_TEMP/candidate/regulait-update-$VERSION.unsigned.tar.gz"
-          scripts/verify-release.sh --candidate "$c"
-          if scripts/verify-release.sh "$c" 2>"$RUNNER_TEMP/refusal.txt"; then
+          scripts/verify-release.sh --candidate "$c" --trust infra/release-keys
+          if scripts/verify-release.sh "$c" --trust infra/release-keys 2>"$RUNNER_TEMP/refusal.txt"; then
             echo "::error::an UNSIGNED candidate verified as a release"; exit 1
           fi
           grep -q "UNSIGNED" "$RUNNER_TEMP/refusal.txt" || { cat "$RUNNER_TEMP/refusal.txt"; echo "::error::refused for the wrong reason"; exit 1; }
@@ -180,7 +180,7 @@ jobs:
           cosign attest-blob --yes --type https://slsa.dev/provenance/v1 \
             --predicate "$RUNNER_TEMP/predicate.json" --bundle "$d/provenance.sigstore.json" "$d/manifest.json"
           tar -C "$x" -czf "$c" "regulait-update-$VERSION"
-          scripts/verify-release.sh --candidate "$c" --online
+          scripts/verify-release.sh --candidate "$c" --trust infra/release-keys --online
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -233,6 +233,6 @@ jobs:
             case "$b" in *.unsigned.tar.gz) echo "::error::an unsigned candidate was published: $(basename "$b")"; exit 1 ;; esac
             online=()
             if tar -tzf "$b" | grep -q '/provenance.sigstore.json$'; then online=(--online); fi
-            scripts/verify-release.sh "$b" "${online[@]}"
+            scripts/verify-release.sh "$b" --trust infra/release-keys "${online[@]}"
             echo "verified: $(basename "$b") $(sha256sum "$b" | cut -d' ' -f1)" >> "$GITHUB_STEP_SUMMARY"
           done

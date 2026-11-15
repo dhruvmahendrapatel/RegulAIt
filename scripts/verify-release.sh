@@ -59,6 +59,7 @@ DEV_PUBLIC_ID="regulait-release-dev-2026-08"
 DEV_PUBLIC_SPKI_SHA256="f2cbda4b1471e4070f7bd75edb69617a48cf58721f34607011935933fa629ff1"
 
 TRUST=""
+EXTRACT_TO=""
 BUNDLE=""
 MODE="release"
 ONLINE=0
@@ -89,6 +90,8 @@ Usage:
                              repository's infra/release-keys.
   --installed-version <v>    Passed to verify-update-bundle.sh (downgrade check).
   --install-dir <dir>        Passed to verify-update-bundle.sh.
+  --extract-to <dir>         Release mode: on success, extract the VERIFIED payload
+                             here (empty directory). apply-update-bundle.sh uses it.
   --online                   Also verify the CI's keyless Sigstore attestation
                              (needs cosign and network). Off by default so the
                              verifier works air-gapped.
@@ -105,6 +108,7 @@ while [ $# -gt 0 ]; do
     --online)            ONLINE=1; shift ;;
     --installed-version) INSTALLED_VERSION="${2:-}"; shift 2 ;;
     --install-dir)       INSTALL_DIR="${2:-}"; shift 2 ;;
+    --extract-to)        EXTRACT_TO="${2:-}"; shift 2 ;;
     --quiet)             QUIET=1; shift ;;
     -h|--help)           usage; exit 0 ;;
     -*)                  usage >&2; exit 2 ;;
@@ -115,9 +119,13 @@ done
 command -v openssl >/dev/null 2>&1 || refuse "openssl is not installed"
 [ "$ALLOW_DEV" = "0" ] || [ "$MODE" = "keyring" ] || { usage >&2; exit 2; }
 
+# The trust anchor is always named, never inferred from where this script sits: a copy of
+# this script inside an extracted bundle would otherwise verify the bundle against its own keyring.
 if [ -z "$TRUST" ]; then
-  if [ -n "$INSTALL_DIR" ] && [ -d "$INSTALL_DIR/infra/release-keys" ]; then TRUST="$INSTALL_DIR/infra/release-keys"
-  else TRUST="$REPO_ROOT/infra/release-keys"; fi
+  [ -n "$INSTALL_DIR" ] && [ -d "$INSTALL_DIR/infra/release-keys" ] \
+    || refuse "name the keyring you already trust: --trust <dir> or --install-dir <installed deployment>" \
+         "The verifier does not guess its trust anchor (ADR-0324)."
+  TRUST="$INSTALL_DIR/infra/release-keys"
 fi
 [ -d "$TRUST" ] || refuse "trusted keyring directory not found: $TRUST"
 TRUST="$(cd -- "$TRUST" && pwd)"
@@ -284,7 +292,8 @@ pass "provenance: SLSA v1, builder $BUILDER, tag v$VERSION, commit $COMMIT"
 
 if [ "$MODE" = "release" ]; then
   case ",$KEY_PURPOSES," in *,provenance,*) ;; *) refuse "$KEY_ID is not authorised to sign provenance" ;; esac
-  kr_verify_sig "$SIGNING_PUB" "$PROV" "$PROV.sig" || refuse "PROVENANCE SIGNATURE does not verify under $KEY_ID" \
+  kr_provenance_message "$PROV" >"$WORK/prov.msg"
+  kr_verify_sig "$SIGNING_PUB" "$WORK/prov.msg" "$PROV.sig" || refuse "PROVENANCE SIGNATURE does not verify under $KEY_ID" \
     "The release signer signs the provenance they checked; this one was not, or was changed."
   pass "provenance signature verifies under $KEY_ID"
 fi
@@ -302,6 +311,15 @@ if [ "$ONLINE" = "1" ]; then
   pass "keyless attestation: signed by $BUILDER@refs/tags/v$VERSION (Sigstore)"
 else
   note "keyless Sigstore attestation not checked (offline; pass --online on a connected machine)"
+fi
+
+# Only now, with every check passed, is the payload placed anywhere. verify-update-bundle.sh
+# verifies its own extraction before it writes, against the one root-authorised key.
+if [ -n "$EXTRACT_TO" ]; then
+  [ "$MODE" = "release" ] || refuse "--extract-to is for a signed release, not a candidate"
+  bash "$SCRIPT_DIR/verify-update-bundle.sh" "${args[@]}" --extract-to "$EXTRACT_TO" \
+    || refuse "extracting the verified payload failed (reason above)"
+  pass "verified payload extracted to $EXTRACT_TO"
 fi
 
 if [ "$MODE" = "candidate" ]; then

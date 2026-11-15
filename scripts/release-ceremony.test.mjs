@@ -2,7 +2,8 @@
 // The dry run performs the whole ceremony with throwaway keys in a temp dir and proves that a signed release
 // verifies while each tampering, stolen-key and rollback case is refused for the right reason.
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
@@ -29,11 +30,34 @@ describe("release-key ceremony dry run (ADR-0324)", () => {
     ]) {
       expect(out).toContain(`[refused] ${line}`);
     }
-    expect(Number(out.match(/DRY RUN PASSED: (\d+)/)[1])).toBeGreaterThanOrEqual(28);
+    expect(Number(out.match(/DRY RUN PASSED: (\d+)/)[1])).toBeGreaterThanOrEqual(38);
+    expect(out).toContain("[refused] apply-update-bundle.sh refuses a stolen key's bundle that plants its own .pub");
+    expect(out).toContain("[pass]    the refused bundle left the install directory untouched");
     // the throwaway keys are deleted
     const dir = out.match(/DRY RUN in (\S+)/)[1];
     expect(existsSync(dir)).toBe(false);
   }, 180_000);
+});
+
+describe("dry-run-only passphrase modes are refused on a real run (#853 S1)", () => {
+  const out = mkdtempSync(path.join(tmpdir(), "e9-real-keygen-"));
+  const keygen = (pass, env = {}) =>
+    spawnSync("bash", ["scripts/release-ceremony.sh", "keygen", "--role", "root", "--id", "probe", "--out", out, "--pass", pass, "--allow-network"], {
+      cwd: repo,
+      encoding: "utf8",
+      env: { ...process.env, ...env },
+    });
+  it.each([["none"], ["pass:not-a-real-passphrase"]])("keygen --pass %s fails and writes no key", (pass) => {
+    const r = keygen(pass);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("is refused");
+    expect(existsSync(path.join(out, "probe.pem"))).toBe(false);
+  });
+  it("a dry-run marker pointing anywhere but a dry-run temp dir does not unlock them", () => {
+    const r = keygen("none", { REGULAIT_CEREMONY_DRY_RUN_DIR: out });
+    expect(r.status).not.toBe(0);
+    expect(existsSync(path.join(out, "probe.pem"))).toBe(false);
+  });
 });
 
 describe("the committed keyring", () => {

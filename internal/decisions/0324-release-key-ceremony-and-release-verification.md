@@ -107,15 +107,43 @@ and replaced that a deployment can trust without a network.
 - The keyless `--online` path and the `attest` job have not run (no OIDC here). They are first proven on the first
   approved tag run.
 - The hardware-token (PKCS#11) path has not been run against a physical token.
-- The operator (Go) still reads the flat keyring, not the statement. It stays safe because CI requires the flat `.pub`
-  set to equal the statement's signing keys, but a customer can still drop a `.pub` into an installed directory.
+- The operator (Go) still reads the flat keyring, not the statement, so it does not yet refuse a bundle whose payload
+  adds an unauthorised `.pub`. `apply-update-bundle.sh` (the Compose install path) does, since the #853 review: see
+  the addendum below.
 - The licence signing key (`infra/license-keys/`) is generated at the same ceremony (runbook 4.2) and recorded in the
   witness log, but it is not yet root-authorised: the licence verifier still pins it directly. Follow-ups below.
 
 ### Follow-ups (PENDING)
 
-- The operator verifies `keyring.json` (roots, threshold, revocation) instead of the flat `.pub` set, and
-  `apply-update-bundle.sh` calls `verify-release.sh`.
+- The operator verifies `keyring.json` (roots, threshold, revocation) instead of the flat `.pub` set.
+- `--online` checks the Sigstore attestation's signer but does not yet compare the attested predicate with the local
+  `provenance.intoto.json` (#853 review C8).
+- An `--expect-root-fingerprint` option so a first install pins the roots mechanically, not only by reading the
+  printed fingerprints (#853 review C3).
 - The licence verifier (ADR-0052) accepts a licence key only if a root-signed statement lists it with purpose `license`.
 - The owner runs the ceremony (runbook parts 2-5), retires the dev key in the same change and publishes the root
   fingerprints out of band.
+
+## Addendum: #853 review (2026-11-15)
+
+Both reviews asked for changes at `b8b36536`. Fixed in the same PR:
+
+- **The install path (blocking, C1).** `apply-update-bundle.sh` now runs `verify-release.sh --trust <installed keyring>
+  --install-dir <deployment> --extract-to <stage>` instead of the flat-keyring check alone. The payload is extracted
+  only after the root chain, signature, SBOM and provenance checks pass, through `verify-update-bundle.sh` against
+  the one root-authorised key. A stolen, unrevoked key's bundle that adds its own `.pub` to the payload keyring is
+  refused before anything reaches the install directory; the dry run proves this through `apply-update-bundle.sh`
+  itself, and fails if the old check is restored. Decision 3's claim now holds for the Compose install path.
+- **Dry-run-only passphrase modes (blocking, S1).** `--pass none` and `--pass pass:<x>` are refused unless the key file
+  sits inside the dry run's own marked temp directory. A real run must use `file:`, `env:` or the prompt. `keygen`
+  logs `encrypted=` and `allow_network=`, and the signing commands log `allow_network=`.
+- **Also fixed:** `sign-keyring` and `sign-release` refuse to run while a network interface is up (C6); a statement
+  above serial 1 needs `--previous`, so revocations cannot be dropped (C5); the provenance is signed with the context
+  prefix `regulait.release-provenance/1`, so a signature over the manifest can never pass as one over the provenance
+  (C7); the verifier no longer infers its trust anchor from its own location and needs `--trust` or `--install-dir`
+  (C3); the dry run now also covers a key without the required purpose, an equal serial with different content, a
+  non-canonical but validly signed statement, a non-Ed25519 key with its true fingerprint and `--allow-dev-keyring`
+  outside `--keyring-only` (C4), for 38 cases in all.
+- **Runbook:** retired keys are revoked, not left out (C2); part 6.3 sets `T` and `LOG` and copies the signing log to
+  PUBLIC (C9); the paper copy only on a directly attached, non-networked printer (S3); the live system's memory,
+  including `~/ceremony` and `/tmp`, is what is wiped at power-off (S4).
