@@ -49,6 +49,7 @@ controller-runtime moves. None has an open advisory (`govulncheck` runs in CI).
 | `github.com/google/uuid` | `v1.6.0` | BSD-3-Clause | *transitive* (release 2024-01-23) |
 | `github.com/grpc-ecosystem/grpc-gateway/v2` | `v2.29.0` | BSD-3-Clause | *transitive* (release 2026-04-15) |
 | `github.com/json-iterator/go` | `v1.1.12` | MIT | *transitive* (release 2021-09-11) |
+| `github.com/klauspost/compress` | `v1.20.2` | BSD-3-Clause (root LICENSE; `gzhttp/` is Apache-2.0, `zstd/internal/xxhash`, `snappy/xerial` and `s2/cmd/internal/*` are MIT) | *transitive* (release 2026-10-12; raised from 1.19.0 on 2026-11-15 for GO-2026-6865, which put it in `go.mod` as an indirect requirement; reached through `prometheus/client_golang` → `controller-runtime` metrics) |
 | `github.com/modern-go/concurrent` | `v0.0.0-20180306012644-bacd9c7ef1dd` | Apache-2.0 | *transitive* (release 2018-03-06) |
 | `github.com/modern-go/reflect2` | `v1.0.3-0.20250322232337-35a7c28c31ee` | Apache-2.0 | *transitive* (release 2025-03-22) |
 | `github.com/munnerz/goautoneg` | `v0.0.0-20191010083416-a7dc8b61c822` | BSD-3-Clause | *transitive* (release 2019-10-10) |
