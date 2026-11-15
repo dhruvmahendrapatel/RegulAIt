@@ -51,8 +51,19 @@ They stay as they are. This ADR adds a per-session sequence engine beside them.
   - `event_count`: at least `threshold` matching events in one group within `timespanSeconds`.
 - **Selectors** are conjunctions over closed fields: `objectType`, `effect`, `ruleId` (exact list), `toolClass`,
   `phase`, `dataScoped` (the decision's rule chain carries a data-scope step), `addonSeverityAtLeast` (the MCP
-  server's admission severity) and `delegated` (the call was made by an agent). There are no expressions, no
-  regular expressions and no code, so evaluation is linear and deterministic.
+  server's admission severity) and `delegated` (the call was made by an agent).
+- **Evaluated on Cedar, not by hand.** Whether an event matches a selector is a Cedar policy
+  (`@regulait/policy-kernel/detection-cedar`). Cedar already runs ABAC (ADR-0040), rate limits (ADR-0239) and
+  approval rules. The pattern is ADR-0239's:
+  - one `permit` per selector position, whose text depends only on the position;
+  - the selector itself is an entity, so no stored value is spliced into a policy;
+  - a tool class is one `permit` per glob using Cedar's own `like` wildcard match. The glob is the only pack value
+    that enters policy text, because `like` takes a literal. The pack schema and the module both hold globs to
+    `[a-z0-9_.:*-]`, so nothing in a glob can change a policy's structure;
+  - any engine or policy error throws, so the sweep keeps its cursor and re-reads the same rows. An event is never
+    silently treated as matching nothing.
+
+  The gateway code only orders those per-event answers into the three rule shapes over the window.
 - **Bounds.** At most 64 rules, 8 steps per rule and 64 globs per class; a window is at most one hour; a threshold at
   most 1,000.
 - **Signing.** The built-in default pack ships in code. An admin's edit is stored as a new version, signed (Ed25519,
@@ -104,8 +115,23 @@ match tool names only, so they are heuristics, and the admin can edit them.
   `settings_relax` step-up and is audited as one. Responses run after the incident commits, are recorded on the
   incident, and their failure is recorded, never retried silently.
 
-### 6. Open-source search (ADR-0176)
+### 6. Reuse and open-source search (ADR-0176)
 
+**In the repo first:**
+- **The audit chain and receipts (ADR-0060, ADR-0186).** They are the event source and the evidence. Receipts are
+  joined, not copied.
+- **The SIEM exporter (ADR-0303).** Incidents reach it as chained audit rows. There is no second export path and no
+  change to the envelope.
+- **The policy rule evaluator (Cedar in `@regulait/policy-kernel`).** It matches selectors and tool classes.
+- **The receipt signing key.** It signs the rule pack, registered through `registerReceiptSigningKey`.
+- **`requireStepUp`.** It gates relaxations (`settings_relax`).
+- **The scheduler.** It runs the sweep.
+- **Responses.** `revokeDelegationGrant` (ADR-0188), the `issued_tokens` revocation, and `createApprovalRuleRow`,
+  which leads into the Approvals Queue.
+- **Not reused: ADR-0186's monitor rules.** They are periodic 24-hour posture checks over the assurance monitor, with
+  no per-session window, so they stay separate.
+
+**Open source, for the windowed sequence part:**
 - **json-rules-engine 7.3.1 (ISC).** Stateless facts-to-events rules with no sequence or window. Its last release
   was 2025-02, so it fails the maintenance test.
 - **eep 0.3.1 (MIT).** Windowed aggregates, but its last release was 2022.
@@ -116,11 +142,11 @@ match tool names only, so they are heuristics, and the admin can edit them.
   licence is also refused.
 - **Sigma correlation rules (specification, no maintained JS evaluator).** The vocabulary is adopted (section 2), so
   an admin who knows Sigma reads the pack directly.
-- **Reused, already pinned.** zod (the pack schema), `canonicalize` through `canonicalJson` (bytes to sign), Node's
-  Ed25519 (`node:crypto`) and the receipt signing key.
-- **Exception recorded.** The evaluator is our own code because no validated module meets two hard requirements:
-  multi-replica state and evaluation over our own hash-chained evidence format. It is about 200 lines and has no
-  dependency. Re-check when a maintained permissive JS Sigma correlation evaluator appears.
+
+**Exception recorded.** The window logic is our own code (about 80 lines: ordered steps, a count at a threshold, and
+look-back within a timespan). No validated module meets two hard requirements: multi-replica state, and evaluation
+over our own hash-chained evidence format. Matching itself is not hand-written. Re-check when a maintained,
+permissive JS evaluator for Sigma correlation rules appears.
 
 ### 7. Off and on
 
