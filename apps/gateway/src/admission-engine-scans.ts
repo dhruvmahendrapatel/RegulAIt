@@ -17,9 +17,15 @@
  *   3. `recordAdmissionEngineScan` — one engine report in: interpreted (fail closed), stored as one
  *      `admission_engine_scans` row, audited, and folded into the subject's stored admission state when it is
  *      about the subject's current digest: `clean` (or `unscanned`/`grandfathered`) becomes `held` on a `fail` or
- *      `unknown`; a `held` whose ONLY findings were the engine's becomes `clean` again on a `pass`. An admin's
- *      decision for that digest (`cleared`, `admitted`) and a `refused` skill stand: nothing here overrides a
- *      person's audited decision, and an admin can always re-review.
+ *      `unknown`; a `held` whose ONLY findings were the engine's becomes `clean` again on a `pass`. A `refused`
+ *      skill stands.
+ *   4. A LATER `fail` REVOKES AN EARLIER CLEARANCE (owner question 2 of ADR-0242, built with the secure default
+ *      by lane L4). An admin's `cleared` (MCP) or `admitted` (skill) decision for the current digest is re-held
+ *      when the engine flags that digest and the admin had not already seen that same flag: no `fail` scan of the
+ *      same digest under the same rule set was recorded at or before the clearance. A re-scan that repeats the
+ *      fail the admin reviewed leaves the clearance alone; a fail from new rules (a rules upgrade moves the
+ *      digest) or on a digest cleared before any engine verdict revokes it, audited as
+ *      `admission-engine-clearance-revoked`. An `unknown` (an engine error) is not evidence and revokes nothing.
  *
  * Engine findings are recognisable by `where` starting `engine:` (counts and locations only, as every admission
  * finding). The status findings (`engine.<id>.pending`, `engine.<id>.unknown`) sit at the subject's hold line.
@@ -28,10 +34,13 @@ import {
   and,
   auditLog,
   admissionEngineScans,
+  builderAgentSkills,
   builderSkills,
   desc,
   eq,
   engines,
+  isNull,
+  lte,
   mcpServers,
   type Db,
 } from "@regulait/db";
@@ -103,6 +112,32 @@ export async function skillEngineHold(db: Db, skillId: string, digest: string): 
   return outcome.holds ? outcome : null;
 }
 
+type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+/**
+ * Did the admin see this same engine flag before clearing? True when a `fail` scan of the subject at this digest,
+ * under the same rule set, was recorded at or before the clearance. (Both times come from writes in this database's
+ * transactions; the clearance's is the gateway clock, so a scan within clock skew of a clearance counts as seen.)
+ */
+async function failSeenBeforeClearance(tx: Tx, subject: AdmissionScanSubject, rulesSha256: string | null, clearedAt: Date | null): Promise<boolean> {
+  if (!clearedAt) return false;
+  const col = subject.kind === "mcp_server" ? admissionEngineScans.mcpServerId : admissionEngineScans.builderSkillId;
+  const [row] = await tx
+    .select({ id: admissionEngineScans.id })
+    .from(admissionEngineScans)
+    .where(
+      and(
+        eq(col, subject.id),
+        eq(admissionEngineScans.subjectDigest, subject.digest),
+        eq(admissionEngineScans.verdict, "fail"),
+        rulesSha256 === null ? isNull(admissionEngineScans.rulesSha256) : eq(admissionEngineScans.rulesSha256, rulesSha256),
+        lte(admissionEngineScans.createdAt, clearedAt),
+      ),
+    )
+    .limit(1);
+  return row !== undefined;
+}
+
 export interface RecordedAdmissionScan {
   id: string;
   verdict: AdmissionScanVerdict;
@@ -110,6 +145,8 @@ export interface RecordedAdmissionScan {
   state: string | null;
   /** false when the scan is about a digest that is no longer the subject's current one */
   current: boolean;
+  /** true when this scan revoked an admin's clearance of the current digest (a later fail) */
+  revokedClearance: boolean;
 }
 
 /**
@@ -145,10 +182,17 @@ export async function recordAdmissionEngineScan(
     let previous: string | null = null;
     let state: string | null = null;
     let current = false;
+    let revokedClearance = false;
     let name = "";
     if (subject.kind === "mcp_server") {
       const [s] = await tx
-        .select({ name: mcpServers.name, state: mcpServers.admissionState, digest: mcpServers.admissionManifestDigest, findings: mcpServers.admissionFindings })
+        .select({
+          name: mcpServers.name,
+          state: mcpServers.admissionState,
+          digest: mcpServers.admissionManifestDigest,
+          findings: mcpServers.admissionFindings,
+          clearedAt: mcpServers.admissionClearedAt,
+        })
         .from(mcpServers)
         .where(eq(mcpServers.id, subject.id))
         .for("update");
@@ -163,15 +207,32 @@ export async function recordAdmissionEngineScan(
           const baseHolds = severityAtLeast(maxSeverity(base), spec.holdAt);
           if (outcome.holds && (s.state === "clean" || s.state === "unscanned" || s.state === "grandfathered")) state = "held";
           else if (!outcome.holds && s.state === "held" && !baseHolds) state = "clean";
+          else if (r.verdict === "fail" && s.state === "cleared" && !(await failSeenBeforeClearance(tx, subject, r.rulesSha256, s.clearedAt))) {
+            state = "held";
+            revokedClearance = true;
+          }
           await tx
             .update(mcpServers)
-            .set({ admissionState: state as typeof s.state, admissionFindings: findings, admissionSeverity: maxSeverity(findings) })
+            .set({
+              admissionState: state as typeof s.state,
+              admissionFindings: findings,
+              admissionSeverity: maxSeverity(findings),
+              // a revoked clearance is cleared out with it, as a drift re-hold does (mcp-admission.ts)
+              ...(revokedClearance ? { admissionClearedBy: null, admissionClearedAt: null, admissionClearReason: null } : {}),
+            })
             .where(eq(mcpServers.id, subject.id));
         }
       }
     } else {
       const [s] = await tx
-        .select({ name: builderSkills.name, state: builderSkills.admissionState, digest: builderSkills.contentDigest, findings: builderSkills.admissionFindings })
+        .select({
+          name: builderSkills.name,
+          state: builderSkills.admissionState,
+          digest: builderSkills.contentDigest,
+          findings: builderSkills.admissionFindings,
+          admittedAt: builderSkills.admittedAt,
+          admittedDigest: builderSkills.admittedDigest,
+        })
         .from(builderSkills)
         .where(eq(builderSkills.id, subject.id))
         .for("update");
@@ -186,10 +247,37 @@ export async function recordAdmissionEngineScan(
           const baseHolds = severityAtLeast(maxSeverity(base), spec.holdAt);
           if (outcome.holds && (s.state === "clean" || s.state === "unscanned")) state = "held";
           else if (!outcome.holds && s.state === "held" && !baseHolds) state = "clean";
+          else if (
+            r.verdict === "fail" &&
+            s.state === "admitted" &&
+            s.admittedDigest === subject.digest &&
+            !(await failSeenBeforeClearance(tx, subject, r.rulesSha256, s.admittedAt))
+          ) {
+            state = "held";
+            revokedClearance = true;
+          }
           await tx
             .update(builderSkills)
-            .set({ admissionState: state as typeof s.state, admissionFindings: findings, admissionSeverity: maxSeverity(findings) })
+            .set({
+              admissionState: state as typeof s.state,
+              admissionFindings: findings,
+              admissionSeverity: maxSeverity(findings),
+              ...(revokedClearance ? { admittedBy: null, admittedAt: null, admitReason: null, admittedDigest: null } : {}),
+            })
             .where(eq(builderSkills.id, subject.id));
+          // the pinned copies of the revoked digest lose their admission with it: the run-time loader holds them
+          if (revokedClearance) {
+            await tx
+              .update(builderAgentSkills)
+              .set({ snapshotAdmissionState: "held" })
+              .where(
+                and(
+                  eq(builderAgentSkills.skillId, subject.id),
+                  eq(builderAgentSkills.snapshotDigest, subject.digest),
+                  eq(builderAgentSkills.snapshotAdmissionState, "admitted"),
+                ),
+              );
+          }
         }
       }
     }
@@ -210,18 +298,20 @@ export async function recordAdmissionEngineScan(
         rulesSha256: r.rulesSha256,
         previousState: previous,
         admissionState: state,
+        revokedClearance,
         // COUNTS AND LOCATIONS ONLY, as every admission finding
         findings: r.findings,
       },
       effect: outcome.holds ? "deny" : "allow",
-      ruleId: outcome.holds ? "admission-engine-held" : "admission-engine-passed",
+      ruleId: revokedClearance ? "admission-engine-clearance-revoked" : outcome.holds ? "admission-engine-held" : "admission-engine-passed",
       ruleChain: [],
       reason:
         `${engineId} ${spec.version} ${r.verdict === "pass" ? "passed" : r.verdict === "fail" ? "flagged" : "could not scan (fail closed)"} ` +
         `${subject.kind === "mcp_server" ? "MCP server" : "skill"} '${name || subject.id}' at digest ${subject.digest.slice(0, 12)}` +
         (r.verdict === "fail" ? ` — ${admissionFindingSummary(r.findings)}` : r.verdict === "unknown" ? ` — ${r.reason}` : "") +
-        (current ? (state !== previous ? ` (${previous} → ${state})` : ` (stays ${state})`) : " (not its current digest: recorded only)"),
+        (current ? (state !== previous ? ` (${previous} → ${state})` : ` (stays ${state})`) : " (not its current digest: recorded only)") +
+        (revokedClearance ? "; the admin's earlier clearance of this digest is revoked: the engine's flag is new since it was given" : ""),
     });
-    return { id: row!.id, verdict: r.verdict, state, current };
+    return { id: row!.id, verdict: r.verdict, state, current, revokedClearance };
   });
 }

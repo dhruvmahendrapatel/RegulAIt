@@ -26,6 +26,7 @@ export interface UseCaseRow {
   decidedAt: string | null;
   retiredReason: string | null;
   createdAt: string;
+  updatedAt?: string;
   /** ADR-0168: set on approval (high → +6 months, minimal/limited → +12); absent on an older gateway */
   approvedUntil?: string | null;
   /** ADR-0168: open approval conditions; absent on an older gateway */
