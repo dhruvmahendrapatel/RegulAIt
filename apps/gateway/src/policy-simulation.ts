@@ -100,7 +100,7 @@ import {
   type PolicySimulationRow,
   type PolicySimulationSettingsRow,
 } from "@regulait/db";
-import { abacEngine, type AbacPolicy, type AbacRequest } from "@regulait/policy-kernel/abac";
+import { abacEngine, abacPolicyReachesGovernedActions, type AbacPolicy, type AbacRequest } from "@regulait/policy-kernel/abac";
 import {
   ABAC_CANNOT_GRANT_NOTE,
   AUDIT_ADVISORY_KEY,
@@ -137,6 +137,23 @@ const SAMPLE_LIMIT = 50;
 
 /** recorded-call ids per batched count statement */
 const COUNT_CHUNK_SIZE = 5_000;
+
+/**
+ * ADR-0251 slice 4, review #836: the replay re-decides recorded MCP tool decisions only. A v5 policy that can reach a
+ * model, connector or A2A call (`ModelInvoke`, `ConnectorCall`, `A2aMessage`) would otherwise preview as zero impact
+ * and then refuse those calls once active, so the run says it did not preview them and is never reported exact.
+ */
+export const GOVERNED_CALLS_NOT_REPLAYED =
+  "this policy can apply to model, connector or A2A calls (schema v5), and the replay re-decides recorded MCP tool " +
+  "decisions only, so its effect on those calls is NOT previewed here";
+function withGovernedCallCaveat(
+  fidelity: ReturnType<typeof analyzeReplayFidelity>,
+  source: string,
+  schemaVersion: string,
+): ReturnType<typeof analyzeReplayFidelity> {
+  if (!abacPolicyReachesGovernedActions(source, schemaVersion)) return fidelity;
+  return { exact: false, caveats: [...fidelity.caveats, { attribute: "action", why: GOVERNED_CALLS_NOT_REPLAYED }] };
+}
 
 // ---------------------------------------------------------------------------
 // Settings
@@ -1048,7 +1065,7 @@ export async function runPolicySimulation(
         approverUserId: version.approverUserId,
         description: policy?.description ?? null,
       };
-      const fidelity = analyzeReplayFidelity(version.source);
+      const fidelity = withGovernedCallCaveat(analyzeReplayFidelity(version.source), version.source, version.schemaVersion);
 
       // The recorded transcript: every governed MCP tool DECISION in the window
       // that names a server and a tool. `audit_log` is append-only and FK-free by

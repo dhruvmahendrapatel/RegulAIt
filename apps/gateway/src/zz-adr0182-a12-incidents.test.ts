@@ -227,8 +227,41 @@ describe("ADR-0182 A12: clocks start automatically on serious / phi_breach", () 
       const none = await open("owner", { useCaseId: uc, serious: true, seriousCriteria: ["health"] });
       expect(none.notifications).toEqual([]);
     } finally {
-      expect((await inject("PUT", "/v1/org/settings", users.admin.auth, { incidentClockRegimes: ["eu-ai-act", "hipaa"] })).statusCode).toBe(200);
+      // ADR-0296: restore the full strict set
+      expect((await inject("PUT", "/v1/org/settings", users.admin.auth, { incidentClockRegimes: ["eu-ai-act", "hipaa", "gdpr", "nis2", "dora", "cra"] })).statusCode).toBe(200);
     }
+  });
+
+  it("ADR-0296: a personal data breach, a significant or major ICT incident and a CRA incident start their own clocks, with the caveat", async () => {
+    const d = await open("owner", {
+      severity: "medium",
+      seriousCriteria: ["personal_data_breach", "significant_cyber_incident", "major_ict_incident", "severe_product_incident"],
+    });
+    expect(d.incident.serious).toBe(false);
+    expect(clockIds(d)).toEqual(
+      [
+        "gdpr-33-1-supervisory-authority",
+        "gdpr-33-2-processor-to-controller",
+        "gdpr-34-1-data-subjects",
+        "nis2-23-4a-early-warning",
+        "nis2-23-4b-incident-notification",
+        "nis2-23-4d-final-report",
+        "dora-rts5-1a-initial-notification",
+        "dora-rts5-1b-intermediate-report",
+        "dora-rts5-1c-final-report",
+        "cra-14-4a-incident-early-warning",
+        "cra-14-4b-incident-notification",
+        "cra-14-4c-incident-final-report",
+      ].sort(),
+    );
+    const byId = new Map(d.notifications.map((n) => [n.clockId, n]));
+    const aware = new Date(d.incident.awareAt).getTime();
+    expect(new Date(byId.get("gdpr-33-1-supervisory-authority")!.dueAt).getTime() - aware).toBe(72 * 3_600_000);
+    expect(new Date(byId.get("dora-rts5-1a-initial-notification")!.dueAt).getTime() - aware).toBe(4 * 3_600_000);
+    for (const n of d.notifications) expect(n.caveat, n.clockId).toMatch(/confirm with counsel/);
+    // the database accepts the new regimes and criteria (migration incident_clock_regimes_gdpr_nis2_dora_cra)
+    const rows = await db.select({ regime: aiIncidentNotifications.regime }).from(aiIncidentNotifications).where(eq(aiIncidentNotifications.incidentId, d.incident.id));
+    expect([...new Set(rows.map((r) => r.regime))].sort()).toEqual(["cra", "dora", "gdpr", "nis2"]);
   });
 });
 

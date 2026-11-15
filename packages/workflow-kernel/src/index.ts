@@ -34,6 +34,17 @@ export type GitAction = (typeof GIT_ACTIONS)[number];
 
 export type StageType = (typeof EXECUTABLE_STAGE_TYPES)[number];
 
+/** ADR-0260 (P36): the review profiles a review-bound check can run */
+export const REVIEW_PROFILES = ["code_review", "security_review", "design_review"] as const;
+export type ReviewProfile = (typeof REVIEW_PROFILES)[number];
+/** ADR-0260: the triage a reviewer files each finding under, most severe first
+ * (the source methodology's Blocker / High / Medium / Nit matrix) */
+export const REVIEW_SEVERITIES = ["blocker", "high", "medium", "nit"] as const;
+export type ReviewSeverity = (typeof REVIEW_SEVERITIES)[number];
+/** a nit never fails a check — it is by definition optional polish */
+export const REVIEW_FAIL_ON = ["blocker", "high", "medium"] as const;
+export type ReviewFailOn = (typeof REVIEW_FAIL_ON)[number];
+
 const stageSchema = z.object({
   id: z.string().min(1),
   type: z.enum(EXECUTABLE_STAGE_TYPES),
@@ -164,8 +175,73 @@ const stageSchema = z.object({
       }),
     )
     .optional(),
+  /** automated_check (ADR-0260, P36): bind a NAMED CHECK to a governed
+   * REVIEW by a registry agent — a code review, a security review against the
+   * OWASP Top 10, or a design/UI review (patterns adapted from
+   * OneRedOak/claude-code-workflows, MIT). On stage entry the gateway
+   * dispatches the reviewer through the governed dispatch core AS THE INSTANCE
+   * INITIATOR on the instance's project (entitlements, model policy, cost,
+   * audit), with the change's evidence as delimited, untrusted data. The agent
+   * must answer with structured findings; the gateway numbers them. The check
+   * FAILS when any finding is at or above `failOn`, and when the review could
+   * not run or its answer is unusable. Never reported (POST .../checks refuses
+   * it) and never auto-passed. */
+  reviews: z
+    .array(
+      z.object({
+        /** the declared check this review decides */
+        check: z.string().min(1),
+        /** the reviewer, by registry NAME */
+        agent: z.string().min(1).max(200),
+        profile: z.enum(REVIEW_PROFILES),
+        /** the lowest finding severity that fails the check. Default "medium"
+         * (ADR-0180: the strict value — only a nit passes); an admin may relax
+         * it to "high" or "blocker" in the template, which is versioned and
+         * audited like every template change. */
+        failOn: z.enum(REVIEW_FAIL_ON).optional(),
+        /** the reviewer's answer budget, in output tokens. Default 4096. */
+        maxTokens: z.number().int().min(256).max(16_384).optional(),
+        /** ADR-0260 review fix: a code or security review needs the diff, and a
+         * design review a capture of the running UI. Until the evidence carries
+         * them the check FAILS without dispatching (ADR-0180). `true` is the
+         * template's explicit, versioned relaxation: the review runs on the
+         * evidence the instance holds and its result is labelled evidence-only. */
+        allowEvidenceOnly: z.boolean().optional(),
+      }),
+    )
+    .max(10)
+    .optional(),
+  /** ADR-0285 (P30): how many of this check stage's eval-bound checks run AT
+   * ONCE (in-stage fan-out). Absent = the gateway's default
+   * (REGULAIT_WORKFLOW_CHECK_CONCURRENCY, 4). 1 runs them one after another,
+   * as before P30. Every verdict still commits as ONE transition. Only valid
+   * on an automated_check stage with named checks. */
+  checkConcurrency: z.number().int().min(1).max(16).optional(),
+  /** ADR-0283 (P30): automatic retry with backoff after a retryable
+   * `execution_failed` on an EXECUTED stage (git_operation, deployment, a
+   * build with a nested run, a check stage with named checks; never a
+   * rollback, whose failure is an operator situation).
+   * Absent = no automatic retry (the strict default, ADR-0180): the stage
+   * waits at awaiting_execution for `/advance`, as before. A failed CHECK is
+   * never retried — `check_failed` is a verdict, not an execution error.
+   * Bounded so a template cannot turn a broken stage into a hot loop. */
+  retry: z
+    .object({
+      /** automatic attempts after the first failure */
+      maxAttempts: z.number().int().min(1).max(10),
+      /** delay before the first retry */
+      delaySeconds: z.number().int().min(5).max(3600).default(30),
+      /** exponential backoff (with jitter) between attempts */
+      backoff: z.boolean().default(true),
+      /** the ceiling backoff never passes */
+      maxDelaySeconds: z.number().int().min(5).max(86_400).default(3600),
+    })
+    .strict()
+    .refine((r) => r.maxDelaySeconds >= r.delaySeconds, { message: "retry.maxDelaySeconds must be at least retry.delaySeconds" })
+    .optional(),
 });
 export type Stage = z.infer<typeof stageSchema>;
+export type StageRetryPolicy = NonNullable<Stage["retry"]>;
 
 /** OPTIMIZATION §9: workflow-level bias for pillar 6's optimizer. Strictness
  * order (strictest last): cost-sensitive < standard < quality-sensitive. */
@@ -216,6 +292,24 @@ export const workflowDefinitionSchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: `stage '${s.id}' (${s.type}) cannot carry offlineAutoPass — only an automated_check stage with named checks can`,
+        });
+      }
+      // ADR-0285: fan-out width is a check-executor setting, like offlineAutoPass
+      if (s.checkConcurrency !== undefined && (s.type !== "automated_check" || (s.checks?.length ?? 0) === 0)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `stage '${s.id}' (${s.type}) cannot carry checkConcurrency — only an automated_check stage with named checks can`,
+        });
+      }
+      // ADR-0283: a retry policy only means something on a stage the gateway
+      // executes; anywhere else it is a promise nothing keeps — refused loudly.
+      // A deployment is executed but never retried unattended: its failures
+      // are manual hand-offs (blocked_on_deploy), and an automatic re-deploy
+      // (to production above all) is a decision for a person.
+      if (s.retry !== undefined && (!isExecutedStage(s) || s.type === "deployment")) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `stage '${s.id}' (${s.type}) cannot carry retry — only git_operation, automated_build with a run and automated_check with named checks can (a deployment is never re-deployed unattended)`,
         });
       }
       if (s.type === "artifact_generation" && !s.output) {
@@ -330,6 +424,35 @@ export const workflowDefinitionSchema = z
               });
             }
             seen.add(e.check);
+          }
+        }
+      }
+      // ADR-0260: review bindings follow the same rules — a declared check, one
+      // decider per check (an eval, an engine run OR a review, never two).
+      if (s.reviews?.length) {
+        if (s.type !== "automated_check") {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `stage '${s.id}' (${s.type}) cannot carry review bindings — only an automated_check stage can`,
+          });
+        } else {
+          const declared = new Set(s.checks ?? []);
+          const otherBound = new Set([...(s.evals ?? []), ...(s.engines ?? [])].map((e) => e.check));
+          const seen = new Set<string>();
+          for (const r of s.reviews) {
+            if (!declared.has(r.check)) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: `check stage '${s.id}' binds a review to check '${r.check}', which the stage does not declare`,
+              });
+            }
+            if (seen.has(r.check) || otherBound.has(r.check)) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: `check stage '${s.id}' binds check '${r.check}' more than once (an eval, engine or review binding each)`,
+              });
+            }
+            seen.add(r.check);
           }
         }
       }
@@ -619,6 +742,36 @@ export function initialState(def: WorkflowDefinition): InstanceState {
 
 function stageAt(def: WorkflowDefinition, index: number): Stage | undefined {
   return def.stages[index];
+}
+
+/**
+ * The stages that complete through `execution_succeeded` / `execution_failed`
+ * (the gateway executes them). One definition, shared by the transition guard,
+ * the retry-policy validation (ADR-0283) and the gateway. A rollback stage is
+ * executed too but ends through `rolled_back`; a rollback that fails is an
+ * operator situation (it waits for `/advance`) and is never retried
+ * automatically.
+ */
+export function isExecutedStage(stage: Stage): boolean {
+  return (
+    stage.type === "git_operation" ||
+    stage.type === "deployment" ||
+    (stage.type === "automated_build" && stage.run !== undefined) ||
+    (stage.type === "automated_check" && (stage.checks?.length ?? 0) > 0)
+  );
+}
+
+/**
+ * ADR-0283: the delay before automatic retry number `attempt` (1-based), in
+ * seconds, without jitter: `delaySeconds` for the first, then doubling when
+ * `backoff` is on, never above `maxDelaySeconds`. The queue applies its own
+ * jittered backoff between attempts (pg-boss `retryBackoff`); this is the
+ * deterministic bound the gateway reports and tests against.
+ */
+export function retryDelaySeconds(policy: StageRetryPolicy, attempt: number): number {
+  if (attempt < 1) throw new RangeError("attempt is 1-based");
+  const base = policy.backoff ? policy.delaySeconds * 2 ** Math.min(attempt - 1, 16) : policy.delaySeconds;
+  return Math.min(base, policy.maxDelaySeconds);
 }
 
 /**
@@ -919,12 +1072,7 @@ export function transition(
   }
 
   if (event.kind === "execution_succeeded" || event.kind === "execution_failed") {
-    const executable =
-      current?.type === "git_operation" ||
-      current?.type === "deployment" ||
-      (current?.type === "automated_build" && current.run !== undefined) ||
-      (current?.type === "automated_check" && (current.checks?.length ?? 0) > 0);
-    if (!current || current.id !== event.stageId || !executable) {
+    if (!current || current.id !== event.stageId || !isExecutedStage(current)) {
       throw new WorkflowStateError(`instance is not executing stage '${event.stageId}'`);
     }
     if (event.kind === "execution_failed") {

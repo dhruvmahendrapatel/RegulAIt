@@ -133,3 +133,24 @@ manual database delete or a gateway that fails mid-processing (below) can delete
 - **A concurrent duplicate is dropped.** If a duplicate arrives while the first attempt is still processing, it is
   answered 200 and dropped. If the first attempt then fails, the event is processed again only when the provider
   retries the first attempt's 5xx. Every supported provider does that.
+
+## Amendment 2026-11-14: the OUTBOUND generic contract signs `<ts>.<body>` (S-03 follow-up (a); builder lane L6; no migration)
+
+S-03 moved the inbound generic contract to a timestamped signature so RegulAIt can refuse replays. The outbound
+direction (RegulAIt's `GenericWebhookProvider` posting `{ event, timestamp, project, payload }` to a customer receiver)
+still signed the body alone, so a receiver had no signed time and could not apply the same window.
+
+- **Decision.** Every outbound generic delivery carries `x-regulait-timestamp: <unix seconds>` and
+  `x-regulait-signature: sha256=<hex HMAC-SHA256 of "<timestamp>.<exact body>">` under the connection token, which is
+  exactly the inbound contract. The envelope's ISO `timestamp` and the signed header name the same instant. A receiver
+  verifies the signature over `<ts>.<raw body>` and refuses a timestamp outside its window. RegulAIt's own window is
+  `PM_WEBHOOK_REPLAY_WINDOW_SECONDS` (300 s), and receivers should use the same.
+- **One implementation.** The signer lives in `packages/pm-provider/src/generic-signature.ts`, a dependency-free
+  module that the inbound verifier and the outbound adapter both import. It is exported as `signGenericWebhook`, and
+  `signGenericInboundWebhook` stays as the existing name.
+- **No grandfathering (ADR-0180).** The body-only outbound signature is removed outright. A receiver written against
+  the first cut must verify `<ts>.<body>`. The product is not live, so no receiver in the field depends on the old form.
+- **Open-source check (ADR-0176).** Node's `crypto` HMAC is the primitive, as it is inbound. The Standard Webhooks
+  scheme (`webhook-id`/`webhook-timestamp`/`webhook-signature`, base64) was considered and not adopted: the inbound
+  contract is already `x-regulait-*` hex, and one contract for both directions matters more than a second header set.
+  Moving both directions to Standard Webhooks would be its own decision.

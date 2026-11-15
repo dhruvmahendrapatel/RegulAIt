@@ -27,7 +27,8 @@ infra/caddy/*Caddyfile text eol=lf
 # the macOS install step (no .sh suffix) is executed by the macOS installer
 agents/endpoint/**/testdata/** -text
 agents/endpoint/packaging/macos/scripts/* text eol=lf
-# ADR-0201: project memory and internal docs never ship; `git archive` source exports leave them out
-internal/ export-ignore
+# ADR-0201: project memory and internal docs never ship; `git archive` source exports leave them out. Anchored, so
+# Go packages named internal/ (deploy/operator/internal) stay in the export.
+/internal/ export-ignore
 # ADR-0257 (M-069): the client compatibility images build and run these on Linux
 client-compat/** text eol=lf

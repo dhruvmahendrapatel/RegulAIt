@@ -125,6 +125,8 @@ export interface DiscoverySettingsView {
   endpointRetentionDays: number;
   /** absent from a gateway older than the wider sources: read as all off */
   families?: FamilySwitches;
+  /** MCP host-config discovery on employee machines; absent from an older gateway: read as off */
+  endpointMcpConfig?: boolean;
   version: number;
 }
 
