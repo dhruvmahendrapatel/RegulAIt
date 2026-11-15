@@ -9,3 +9,7 @@ export { default as TeamsPage } from "../views/admin/identity/TeamsPage";
 export { default as UsersPage } from "../views/admin/identity/UsersPage";
 export { default as VirtualKeysPage } from "../views/admin/identity/VirtualKeysPage";
 export { default as WorkloadIdentitiesPage } from "../views/admin/identity/WorkloadIdentitiesPage";
+// P3 (#453): the SSO and workload-identities areas (overview + full lists) as lazy chunks reached through this screen,
+// each owning its nested <Routes>, so the sub-pages add nothing to the entry bundle (see App.tsx).
+export { SsoArea } from "../views/admin/identity/LinkRequestsPage";
+export { WorkloadIdentitiesArea } from "../views/admin/identity/WorkloadIdentitySubpages";
