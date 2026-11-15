@@ -90,6 +90,14 @@ import { RLS_PRINCIPAL_SETTING, RLS_SYSTEM_SETTING, noteInternalSystemReason } f
  * always taken BEFORE this one, never after); a new key must differ from all
  * three.
  */
+/**
+ * ADR-0234 batch 7a: the registered reasons that may append to audit_log but not read it. The chain writer enters
+ * `audit_subject` for its INSERT alone under these, so the RETURNING of the row it appended is visible.
+ */
+const AUDIT_APPEND_ONLY_REASONS_SQL = sql.raw(
+  "array['authenticate','identity_provisioning','approval_maintenance','public_ingest','credential_request']",
+);
+
 export const AUDIT_CHAIN_LOCK_KEY = 6_000_000_060;
 
 /**
@@ -270,9 +278,11 @@ export async function appendChainedAuditRows(
   // .user_id is the sponsor or subject (ADR-0188), so such a row is appended under the registered `audit_subject`
   // reason, for this INSERT only (restored right after it) and counted. Decided in SQL, from the principal the
   // database itself holds, in the same statement that leaves `audit_chain`.
+  // Batch 7a: the same window is used when the caller's reason may append but not read the ledger (sign-in, SCIM,
+  // approval routing, public ingest), so the writer's `RETURNING` of the row it just appended is visible.
   const subjectIds = JSON.stringify([...new Set(values.map((v) => String((v as { userId?: unknown }).userId ?? "").toLowerCase()))]);
   const left = (await tx.execute(
-    sql`select set_config(${RLS_SYSTEM_SETTING}, case when s.prev = '' and s.uid <> '' and not (s.uid = all(array(select pg_catalog.jsonb_array_elements_text(${subjectIds}::jsonb)))) then 'audit_subject' else s.prev end, true) = 'audit_subject' and s.prev = '' as subject from (select ${prevRlsContext}::text as prev, coalesce(current_setting(${RLS_PRINCIPAL_SETTING}, true), '') as uid) s`,
+    sql`select set_config(${RLS_SYSTEM_SETTING}, case when (s.prev = '' and s.uid <> '' and not (s.uid = all(array(select pg_catalog.jsonb_array_elements_text(${subjectIds}::jsonb))))) or s.prev = any(${AUDIT_APPEND_ONLY_REASONS_SQL}::text[]) then 'audit_subject' else s.prev end, true) = 'audit_subject' and s.prev <> 'audit_subject' as subject from (select ${prevRlsContext}::text as prev, coalesce(current_setting(${RLS_PRINCIPAL_SETTING}, true), '') as uid) s`,
   )) as { rows?: Array<{ subject: boolean | null }> };
   const enteredSubject = left.rows?.[0]?.subject === true;
   if (enteredSubject) noteInternalSystemReason("audit_subject", "audit-chain.append");
