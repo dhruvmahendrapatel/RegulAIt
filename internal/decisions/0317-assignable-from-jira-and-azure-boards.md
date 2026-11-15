@@ -134,7 +134,13 @@ and this custom body:
 
 - An admin can turn a Jira or Azure Boards assignment into a governed, audited workflow started as the person who
   assigned it, and see approvals land back on the item.
-- Live tenants are owner-gated; the tests use fake Jira and Azure DevOps servers.
+- Azure Boards is the pilot path (owner, 2026-11-15). The tests cover every Boards step against a fake Azure DevOps
+  server:
+  - an `AssignedTo` change and a comment @mention each start the workflow as the linked user;
+  - the start is commented on the work item;
+  - the sign-off decision is written back as a comment on it.
+
+  Jira is covered the same way, plus the Automation rule. Live tenants are owner-gated.
 
 **Known limits:**
 

@@ -310,7 +310,46 @@ describe("Azure Boards", () => {
       }),
     });
     expect(r.statusCode, r.body).toBe(202);
-    expect(r.json().assignment).toMatchObject({ assignment: "started", writeBack: "commented" });
+    const outcome = r.json().assignment as { assignment: string; instanceId: string; writeBack: string };
+    expect(outcome).toMatchObject({ assignment: "started", writeBack: "commented" });
     expect(received.slice(before).some((w) => w.url.includes("/Payments/_apis/wit/workItems/77/comments"))).toBe(true);
+    const [linkRow] = await db
+      .select()
+      .from(pmLinks)
+      .where(and(eq(pmLinks.objectType, "workflow_instance"), eq(pmLinks.objectId, outcome.instanceId)));
+    expect(linkRow?.externalUrl).toBe(`${base}/ado/Payments/_workitems/edit/77`);
+
+    // the sign-off decision is written back onto the Boards work item
+    const queue = await app.inject({ method: "GET", headers: approver.auth, url: "/v1/approvals?status=pending" });
+    const pending = (queue.json().approvals as Array<{ id: string; instanceId: string | null }>).find((a) => a.instanceId === outcome.instanceId);
+    expect(pending).toBeDefined();
+    const beforeDecide = received.length;
+    const decide = await app.inject({ method: "POST", headers: approver.auth, url: `/v1/approvals/${pending!.id}/decide`, payload: { decision: "approved", reason: "pilot sign-off" } });
+    expect(decide.statusCode, decide.body).toBe(200);
+    const mirrored = received.slice(beforeDecide).find((w) => w.url.includes("/Payments/_apis/wit/workItems/77/comments"));
+    expect(mirrored?.body).toContain("pma_gate");
+  });
+
+  it("an @mention of the agent identity in a Boards comment starts the workflow for that item", async () => {
+    const adoAgentId = "ab12cd34-0000-4000-8000-0000000000aa";
+    const on = await putTrigger(triggerBody({ agentRef: adoAgentId }), AUTH, adoConn);
+    expect(on.statusCode, on.body).toBe(200);
+    const r = await app.inject({
+      method: "POST",
+      url: `/v1/pm/webhooks/${adoConn}`,
+      headers: { "content-type": "application/json", authorization: `Basic ${Buffer.from(`svc:${adoSecret}`).toString("base64")}` },
+      payload: JSON.stringify({
+        id: `pma-ado-${RUN}-2`, createdDate: new Date().toISOString(), eventType: "workitem.commented",
+        resource: {
+          id: 78,
+          fields: {
+            "System.ChangedBy": `Alice <alice.${RUN}@contoso.com>`,
+            "System.History": `<div><a href="#" data-vss-mention="version:2.0,${adoAgentId.toUpperCase()}">@RegulAIt</a> please plan this</div>`,
+          },
+        },
+      }),
+    });
+    expect(r.statusCode, r.body).toBe(202);
+    expect(r.json().assignment).toMatchObject({ assignment: "started" });
   });
 });
