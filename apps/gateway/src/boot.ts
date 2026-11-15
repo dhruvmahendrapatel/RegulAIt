@@ -69,7 +69,8 @@ import { checkReceiptSigningKey } from "./receipt-signing-key.js";
 import { ensureInstallIdentityKey, identitySigningKeyConfiguration } from "./identity-signing-keys.js";
 import { describeGatewayLogger, resolveGatewayLogger } from "./gateway-logger.js";
 import { databaseTlsBootWarning, describeDbPool, resolveDbPoolConfig } from "@regulait/db";
-import { describeMetricsPosture, resolveMetricsConfig, startMetricsListener } from "./metrics.js";
+import { describeMetricsPosture, disablePrometheusReader, enableOtlpPushReader, resolveMetricsConfig, startMetricsListener } from "./metrics.js";
+import { createOtlpMetricsPusher, describeOtlpMetricsPosture, resolveOtlpMetricsConfig } from "./metrics-otlp.js";
 import { configureRateLimitEvaluator, describeRateLimitEvaluator } from "./rate-limit-evaluator.js";
 import { seedBuiltinEvalDatasets } from "./eval-builtin-datasets.js";
 import { assertReceiptEmitterBootable } from "./decision-receipts.js";
@@ -118,6 +119,12 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // bearer token (or with an unparseable address) refuses the boot here, for
   // the same reason — nothing exists yet to leave behind.
   const metricsConfig = resolveMetricsConfig(env);
+  // ADR-0301: an OTLP metrics setting that is present but unusable refuses here too.
+  const otlpMetricsConfig = resolveOtlpMetricsConfig(env);
+  // ADR-0301 review item 1: the push reader is registered before anything records, and only when it is wanted
+  if (otlpMetricsConfig) enableOtlpPushReader();
+  // ADR-0301 second review: the Prometheus reader likewise exists only when a scrape surface is on
+  if (!metricsConfig.listen && !metricsConfig.onMainListener) disablePrometheusReader();
   // ADR-0239: an unrecognised REGULAIT_RATE_LIMIT_EVALUATOR refuses the boot here, before anything exists.
   const rateLimitEvaluator = configureRateLimitEvaluator(env);
   // ADR-0189 R25 item 12: FIRST BOOT creates the install-generated receipt signing key when no key is
@@ -338,6 +345,14 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
     }
   }
 
+  // ADR-0301 — OTLP metrics push, only when an endpoint is configured. The
+  // first push is one interval after boot; every push re-checks the egress
+  // allow-list. Its close hook goes in before listen, like the ones above.
+  const otlpMetricsPusher = otlpMetricsConfig
+    ? createOtlpMetricsPusher(db, otlpMetricsConfig, { start: !underTest, log })
+    : null;
+  if (otlpMetricsPusher) app.addHook("onClose", async () => otlpMetricsPusher.stop());
+
   const address = await app.listen({ port, host });
 
   // Capture the chain head on a timer. Started AFTER listen so a slow first
@@ -545,6 +560,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // from a stale registry screen three months later.
   // ADR-0185 G5: whether /metrics is served, where, and that it needs a token
   log(`  metrics:   ${describeMetricsPosture(metricsConfig, metricsListener?.address ?? null)}`);
+  log(`  metrics:   ${describeOtlpMetricsPosture(otlpMetricsConfig)}`);
   // ADR-0239: which engine evaluates rate limits (Cedar by default; legacy only by explicit setting)
   log(`  rate limits: ${describeRateLimitEvaluator(rateLimitEvaluator)}`);
   log(`  scheduler: ${schedulerConfig.reason}${schedulerConfig.enabled ? `, ${registry.size} job(s)` : ""}`);
