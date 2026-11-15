@@ -14,7 +14,8 @@
 ## What the role can and cannot do
 
 It can build and destroy the BYOC test stack in one region: network, Kubernetes (EKS), Postgres (RDS), encryption
-keys, the audit bucket, the egress firewall, and calls to Bedrock. IAM roles and S3 buckets must be named
+keys, the audit bucket, the egress firewall, a private container registry, and calls to Bedrock. IAM roles,
+IAM policies, S3 buckets and registry repositories must be named
 `regulait-rehearsal-…`; the network, cluster, database, key and firewall must carry the tag `purpose=rehearsal` to be
 created or deleted.
 

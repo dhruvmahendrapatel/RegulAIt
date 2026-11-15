@@ -43,13 +43,7 @@ locals {
     "autoscaling:*",
     "network-firewall:*",
     "acm:*",
-    "ecr:BatchCheckLayerAvailability",
-    "ecr:BatchGetImage",
-    "ecr:DescribeImages",
-    "ecr:DescribeRepositories",
-    "ecr:GetAuthorizationToken",
-    "ecr:GetDownloadUrlForLayer",
-    "ecr:ListImages",
+    "ecr:*",
     "bedrock:InvokeModel",
     "bedrock:InvokeModelWithResponseStream",
     "bedrock:Converse",
@@ -79,7 +73,9 @@ locals {
 
   stack_roles             = "${local.iam}:role/${var.name_prefix}-*"
   stack_instance_profiles = "${local.iam}:instance-profile/${var.name_prefix}-*"
+  stack_policies          = "${local.iam}:policy/${var.name_prefix}-*"
   stack_buckets           = "arn:${local.partition}:s3:::${var.name_prefix}-*"
+  stack_repositories      = "arn:${local.partition}:ecr:*:${local.account}:repository/${var.name_prefix}*"
 
   # Root resources: created and deleted only with the scope tag.
   tagged_create_actions = [
@@ -132,8 +128,6 @@ data "aws_iam_policy_document" "boundary" {
       "iam:AttachUserPolicy",
       "iam:PutUserPolicy",
       "iam:AddUserToGroup",
-      "iam:CreatePolicyVersion",
-      "iam:SetDefaultPolicyVersion",
       "iam:DeleteRolePermissionsBoundary",
       "iam:DeleteUserPermissionsBoundary",
       "iam:CreateSAMLProvider",
@@ -145,11 +139,20 @@ data "aws_iam_policy_document" "boundary" {
   }
 
   statement {
+    sid           = "NoPolicyVersionsOutsideTheStack"
+    effect        = "Deny"
+    actions       = ["iam:CreatePolicyVersion", "iam:SetDefaultPolicyVersion"]
+    not_resources = [local.stack_policies]
+  }
+
+  statement {
     sid    = "BoundaryPolicyIsImmutable"
     effect = "Deny"
     actions = [
       "iam:CreatePolicy",
       "iam:DeletePolicy",
+      "iam:CreatePolicyVersion",
+      "iam:SetDefaultPolicyVersion",
       "iam:DeletePolicyVersion",
       "iam:TagPolicy",
       "iam:UntagPolicy",
@@ -212,7 +215,31 @@ data "aws_iam_policy_document" "deployer" {
   statement {
     sid = "StackServices"
     # Everything in the boundary except IAM and S3, which are scoped below.
-    actions   = [for a in local.service_actions : a if !startswith(a, "iam:") && !startswith(a, "s3:")]
+    actions   = [for a in local.service_actions : a if !startswith(a, "iam:") && !startswith(a, "s3:") && !startswith(a, "ecr:")]
+    resources = ["*"]
+  }
+
+  statement {
+    sid       = "StackRepositoriesOnly"
+    actions   = ["ecr:*"]
+    resources = [local.stack_repositories]
+  }
+
+  statement {
+    sid = "EcrRegistryLevel"
+    # Registry-level calls (login, pull-through cache rules for the stack's
+    # own prefix, describing what exists) have no repository resource.
+    actions = [
+      "ecr:GetAuthorizationToken",
+      "ecr:DescribeRepositories",
+      "ecr:DescribeRegistry",
+      "ecr:DescribePullThroughCacheRules",
+      "ecr:CreatePullThroughCacheRule",
+      "ecr:DeletePullThroughCacheRule",
+      "ecr:UpdatePullThroughCacheRule",
+      "ecr:ValidatePullThroughCacheRule",
+      "ecr:BatchImportUpstreamImage",
+    ]
     resources = ["*"]
   }
 
@@ -262,13 +289,30 @@ data "aws_iam_policy_document" "deployer" {
   }
 
   statement {
-    sid       = "AttachListedManagedPoliciesOnly"
+    sid = "StackManagedPolicies"
+    # Modules such as terraform-aws-modules/eks create their own policies
+    # (cluster encryption, for example). They can only go on stack roles,
+    # which carry the boundary, so they cannot grant beyond it.
+    actions = [
+      "iam:CreatePolicy",
+      "iam:DeletePolicy",
+      "iam:CreatePolicyVersion",
+      "iam:DeletePolicyVersion",
+      "iam:SetDefaultPolicyVersion",
+      "iam:TagPolicy",
+      "iam:UntagPolicy",
+    ]
+    resources = [local.stack_policies]
+  }
+
+  statement {
+    sid       = "AttachListedOrStackPoliciesOnly"
     actions   = ["iam:AttachRolePolicy"]
     resources = [local.stack_roles]
     condition {
-      test     = "ArnEquals"
+      test     = "ArnLike"
       variable = "iam:PolicyARN"
-      values   = var.attachable_managed_policy_arns
+      values   = concat(var.attachable_managed_policy_arns, [local.stack_policies])
     }
   }
 
@@ -279,7 +323,13 @@ data "aws_iam_policy_document" "deployer" {
     condition {
       test     = "StringEquals"
       variable = "iam:PassedToService"
-      values   = ["eks.amazonaws.com", "ec2.amazonaws.com", "monitoring.rds.amazonaws.com", "pods.eks.amazonaws.com"]
+      values = [
+        "eks.amazonaws.com",
+        "ec2.amazonaws.com",
+        "monitoring.rds.amazonaws.com",
+        "pods.eks.amazonaws.com",
+        "vpc-flow-logs.amazonaws.com",
+      ]
     }
   }
 

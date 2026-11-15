@@ -35,14 +35,16 @@ named, tagged or designated production.
 - **`infra/modules/aws-byoc-deployer-policy`** (new, project-agnostic) produces two documents:
   - the **boundary**, attached to the deployer and, by condition, to every role the deployer creates: only the
     stack's services (EC2/VPC, EKS, RDS, KMS, S3, CloudWatch Logs, Secrets Manager, ELB, Auto Scaling, Network
-    Firewall, ACM, ECR read, Bedrock invoke and read, Service Quotas read, IAM); a region lock (IAM and STS exempt);
-    no IAM users, access keys, login profiles, policy versions or boundary removal; the boundary policy and the
-    deployer role are immutable; no Organizations, account, SSO or billing action; and any action on a resource, or
+    Firewall, ACM, ECR, Bedrock invoke and read, Service Quotas read, IAM); a region lock (IAM and STS exempt);
+    no IAM users, access keys, login profiles or boundary removal, and no policy versions outside the stack's own
+    `<prefix>-*` policies; the boundary policy and the deployer role are immutable; no Organizations, account, SSO or billing action; and any action on a resource, or
     a request, tagged `environment`/`env`/`stage`/`purpose` matching `prod`, `prod-*`, `*-prod`, `production` or
     `*production*` is denied.
   - the **deployer policy**, narrower: IAM roles and instance profiles only named `<prefix>-*`, created only with the
-    boundary; only listed AWS-managed policies attachable (EKS, ECR read, SSM core, EBS CSI, RDS monitoring);
-    `PassRole` only to EKS, EC2, RDS monitoring and EKS Pod Identity; S3 only on `<prefix>-*` buckets; the stack's
+    boundary; managed policies only `<prefix>-*` (modules such as the EKS one create their own) or listed AWS-managed
+    ones (EKS, ECR read, SSM core, EBS CSI, RDS monitoring); `PassRole` only to EKS, EC2, RDS monitoring, EKS Pod
+    Identity and VPC Flow Logs; S3 only on `<prefix>-*` buckets; ECR only on `<prefix>*` repositories and their
+    pull-through cache rules; the stack's
     root resources (VPC, EKS cluster, RDS instance, KMS key, Network Firewall) created only with the scope tag and
     deleted only if they carry it.
   The same module is offered to the customer for their own installer role (PR 3 runbook).

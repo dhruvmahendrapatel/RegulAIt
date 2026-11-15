@@ -52,6 +52,11 @@ run "boundary_locks_region_escalation_and_production" {
   }
 
   assert {
+    condition     = length([for s in jsondecode(data.aws_iam_policy_document.boundary.json).Statement : s if s.Sid == "BoundaryPolicyIsImmutable" && contains(flatten([try(s.Action, [])]), "iam:CreatePolicyVersion") && try(s.Resource, "") == "arn:aws:iam::111111111111:policy/regulait-rehearsal-byoc-boundary"]) == 1
+    error_message = "No one under the boundary may version or delete the boundary itself."
+  }
+
+  assert {
     condition     = !contains(flatten([for s in jsondecode(data.aws_iam_policy_document.boundary.json).Statement : try(s.Action, []) if s.Effect == "Allow"]), "*")
     error_message = "The boundary must never allow every action."
   }
@@ -86,6 +91,11 @@ run "deployer_roles_need_the_boundary_and_the_prefix" {
   assert {
     condition     = length([for s in jsondecode(data.aws_iam_policy_document.deployer.json).Statement : s if s.Sid == "StackBucketsOnly" && contains(try(flatten([s.Resource]), []), "arn:aws:s3:::regulait-rehearsal-*")]) == 1
     error_message = "S3 must be limited to the stack's buckets."
+  }
+
+  assert {
+    condition     = length([for s in jsondecode(data.aws_iam_policy_document.deployer.json).Statement : s if s.Sid == "StackRepositoriesOnly" && try(s.Resource, "") == "arn:aws:ecr:*:111111111111:repository/regulait-rehearsal*"]) == 1
+    error_message = "ECR repository management must be limited to the stack's prefix."
   }
 
   assert {
