@@ -102,9 +102,11 @@ write permission, so it is not read either: owners are read instead.
   - optionally, linking an imported Entra agent to a RegulAIt workload identity (ADR-0188). That link would be a grant
     step, so it stays out of import.
 
-## Owner questions (built with the secure default)
+## Owner decisions (2026-11-15, relayed by the master on #855)
 
-- Should an imported agent's steward default to its vendor-side owner, when that owner matches a RegulAIt user? Built
-  with no steward. Matching would mean revealing a pseudonym, which is a step-up of its own.
-- Should the schedule re-import (update the inventory row) when the vendor renames an agent? Built so that only the
-  staged record follows the vendor. The inventory row is RegulAIt's and changes only by an admin edit.
+- **R1, steward:** an imported agent gets no steward automatically, as built. An admin may name one at import or
+  later. Matching a vendor-side owner would need a pseudonym reveal, a step-up of its own.
+- **R2, vendor renames:** a vendor rename updates only the staged record, as built. The inventory row is RegulAIt's
+  and changes only when an admin accepts the change by editing the agent.
+- **R3, Gemini:** no live Gemini tenant check for now. The limit stays documented under Consequences: `agents.list`
+  documents that it lists the agents the caller created.
