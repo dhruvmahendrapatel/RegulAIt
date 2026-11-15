@@ -47,6 +47,7 @@ import {
   type Db,
   type OrgSettingsRow,
   type SQL,
+  runWithoutRlsScope,
 } from "@regulait/db";
 import { relaxedOrgSettingKeys, type RelaxationFacts, type WritableOrgSettingKey } from "./org-setting-strictness.js";
 import {
@@ -293,17 +294,25 @@ export async function retentionFloor(db: Db): Promise<RetentionFloor> {
 /** One prune pass under the composed floor. Deletes nothing when no floor is
  * set. The prune is itself audited (a meta row newer than every cutoff), with
  * `auto` marking scheduler-driven passes apart from the admin's POST. */
-export async function runAuditPruneOnce(
-  db: Db,
-  actorUserId: string | null,
-  auto: boolean,
-): Promise<{
+export interface AuditPruneResult {
   deleted: number;
   /** ADR-0070: traces removed under the SAME §8.3 floor, in the same pass */
   tracesDeleted: number;
   retainedDays: number | null;
   floorSource: string[];
-}> {
+}
+
+/**
+ * ADR-0234 batch 7a: the prune deletes audit_log rows, and the app role every RLS scope runs as has no DELETE on
+ * audit_log (0272: the ledger is append-only for it). So the pass always leaves the caller's scope (an admin's POST,
+ * a bootstrap-token request, the timer) and runs on the connection's own login, as it did before batch 2. Batch 7b
+ * moves it to the owner (migrator) connection, the only login that may delete from the ledger.
+ */
+export function runAuditPruneOnce(db: Db, actorUserId: string | null, auto: boolean): Promise<AuditPruneResult> {
+  return runWithoutRlsScope(() => runAuditPruneOnceUnscoped(db, actorUserId, auto));
+}
+
+async function runAuditPruneOnceUnscoped(db: Db, actorUserId: string | null, auto: boolean): Promise<AuditPruneResult> {
   const f = await retentionFloor(db);
   if (f.retainedDays == null || f.cutoff == null) {
     return { deleted: 0, tracesDeleted: 0, retainedDays: null, floorSource: [] };
