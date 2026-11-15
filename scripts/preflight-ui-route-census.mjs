@@ -396,6 +396,14 @@ export const KNOWN_UI_GAPS = new Map([
   ["POST /v1/mcp-bundles/:bundleId/grants", { does: "grants a bundle to a user, role or team up to a scope tier (read by default)", tracking: "#453" }],
   ["DELETE /v1/mcp-bundles/:bundleId/grants/:grantId", { does: "revokes a bundle grant", tracking: "#453" }],
   ["PUT /v1/mcp-tools/:toolId/dangerous", { does: "flags or clears a tool's dangerous scope tier (clearing is a step-up)", tracking: "#453" }],
+  // ADR-0261 (P37) adds six: the owner decided on 2026-11-07 to raise the cap by exactly these and ship the
+  // DefenseClaw ingest API-only, with the admin screen tracked on #453.
+  // ADR-0303 (lane L11, P18 C6): five API-only SIEM destination routes; the admin screen is posted on #453.
+  ["GET /v1/siem/destinations", { does: "lists SIEM destinations, their state, cursor and lag (never the secret)", tracking: "#453" }],
+  ["POST /v1/siem/destinations", { does: "creates a SIEM destination, off by default; the Standard Webhooks secret is shown once", tracking: "#453" }],
+  ["PUT /v1/siem/destinations/:destinationId/enabled", { does: "turns a SIEM destination on (step-up, audited as a relaxation) or off (audited)", tracking: "#453" }],
+  ["POST /v1/siem/destinations/:destinationId/rotate-secret", { does: "rotates a SIEM destination's signing secret, shown once (step-up, audited)", tracking: "#453" }],
+  ["POST /v1/siem/destinations/:destinationId/recover", { does: "returns a dead-lettered or backing-off SIEM destination to delivery now (audited)", tracking: "#453" }],
   // EXCEPTION (ADR-0255, P31, 2026-11-07): the P31 brief is "API and backend only; post the catalogue UI need on
   // #453 for the Governed Designer", so these two routes ship with their screen owned by that lane. These two
   // raise the cap by 2, visibly; the Designer's catalogue screen deletes both entries and lowers it by 2. Decided on #753
@@ -430,7 +438,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 37; // main's 43 (incl. ADR-0255 P31 +2, #824 −3) − 6 DefenseClaw ingest routes closed by #829
+export const KNOWN_UI_GAPS_MAX = 42; // main's 48 − 6 DefenseClaw ingest routes closed by #829
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 

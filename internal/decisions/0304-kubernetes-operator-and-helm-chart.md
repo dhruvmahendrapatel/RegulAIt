@@ -214,3 +214,36 @@ touches a cloud account.
 - **Data at rest on claims.** The install-secrets claim (signing keys) and the backup claim (dumps whose non-data-key
   columns are plain) are protected only by their StorageClass. The docs and the sample name an encrypted class.
 - Not built here: multi-replica HA (P2), image publication and signing, OLM packaging, and the bundle schema `/2`.
+
+## As built (operator, lane L12 PR 2)
+
+- `deploy/operator/` uses controller-runtime v0.25.2 and k8s.io/* v0.37.0, with Go 1.26. Envtest runs kube-apiserver
+  and etcd 1.37.0. `govulncheck` is clean after `golang.org/x/net`, `grpc`, `otel` and `cel-go` were raised to their
+  fixed versions.
+- Two details beyond §1: `spec.egress.allowPublicEgress` opens public addresses on **443 only** (private ranges
+  excluded), and `status.installedImage` (repository@digest) sits next to `installedVersion`. A new digest therefore
+  always migrates, even at the same version. A `SpecValid` condition carries the operator-side validation result.
+- Drift is detected by server-side apply under the field manager `regulait-operator`. A write that changes an owned
+  object while the spec and the installed image are unchanged counts as drift.
+- Events go through the `events.k8s.io/v1` recorder, and the Role grants `events.k8s.io` rather than core events.
+- Bundle parsing refuses a manifest that repeats a top-level key. The shell verifier reads the first occurrence and
+  `encoding/json` the last, so a duplicated `version` could otherwise mean two things.
+- An informational `StorageClassNamed` condition (not part of `Ready`) and a `Warning` event on every reconcile report
+  an install-secrets claim on the cluster's default StorageClass, or one created on a class other than the one now
+  named. This follows the security review's note on #792, so an unencrypted default class is visible, not only
+  documented.
+- Code review on #813 (ADR-0180):
+  - No egress list may overlap a link-local range or a cloud metadata address (`169.254.0.0/16`, `fe80::/10`,
+    `fd00:ec2::254`), in any mode. Link-local is no longer counted as private for `air_gapped`.
+  - `egress.dns.cidrs` takes private ranges and single link-local addresses (NodeLocal DNSCache) only.
+  - The informational conditions `PublicEgress`, `ImageProvenance` and `ReleaseKeyring` report public egress, the
+    unsigned image digest, and a development-only keyring on every reconcile.
+  - `Ready` no longer calls the running image "verified".
+- Threat model notes:
+  - Until schema `/2`, edit rights on a `RegulaitInstallation` equal deploy rights with the data key.
+  - Downgrade protection trusts `status.installedVersion`, so `regulaitinstallations/status` patch rights belong to
+    the operator alone.
+- Versions are compared with `golang.org/x/mod/semver`. Unlike the shell verifier, it orders a pre-release below its
+  release, so `1.0.0-rc.1` after `1.0.0` is a downgrade. That is stricter, and it is deliberate.
+- The gateway gains `migrate-job.ts`, a thin entrypoint over a testable `migrate-job-run.ts`. It refuses to run without
+  `DATABASE_URL` instead of falling back to a default database, and it never logs the URL.
