@@ -53,7 +53,7 @@ model neither), so the catalogue stays data.
 7. **Presets, not new machinery** (`privacy-packs.ts`). For the GDPR, the CCPA as amended by the CPRA, India's DPDP Act
    2023 and Brazil's LGPD, a preset names the org settings the law suggests on the ADR-0224 machinery: the
    data-subject request period (`dsrSlaDays`: the statute's period or the strict default of 30 days, whichever is
-   shorter — GDPR one month (Art. 12(3)), CCPA 45 days (§ 1798.130(a)(2)), DPDP left to rules (s. 13(2)), LGPD 15
+   shorter; 30 days approximates the GDPR's one month (Art. 12(3)), CCPA 45 days (§ 1798.130(a)(2)), DPDP set by the DPDP Rules, 2025 under s. 13(2), not encoded, LGPD 15
    days (Art. 19, II)), the national identifiers the PII detector looks for (EU: BSN, codice fiscale, DNI/NIE, NIR,
    Steuer-ID; India: Aadhaar; Brazil: CPF) and the processing limit. `privacyPresetPatch` combines several laws to the
    strictest and only ever tightens: it never lengthens the period, removes an identifier or turns the limit off. An
@@ -63,7 +63,9 @@ model neither), so the catalogue stays data.
    (`data-subject-request-*`), refusals by the processing limit (`processing-not-permitted`), the PII cascade and the
    incident register. A test reads the gateway's privacy source to prove each rule-id filter is written. What the
    platform does not do (DPIAs, which wait for lane C1; CCPA correction and opt-out; consent collection; transfers) is
-   attestation-required and says so. Every privacy control is on the privacy trust dimension.
+   attestation-required and says so. Every privacy control is on the privacy trust dimension. The CCPA and the DPDP
+   Act have no records-of-processing duty, so their records control cites the nearest provision (CCPA
+   § 1798.100(a), notice at collection; DPDP s. 8(1), the general obligation), marked "no direct equivalent".
 9. **Not encoded:** breach clocks for the CCPA, DPDP and LGPD (their deadlines are in state law, rules and an ANPD
    resolution, partly in working days, which the clock arithmetic does not model); the LGPD's ten legal bases and the
    DPDP's grounds as record-of-processing bases (the six GDPR bases stay; the presets say how to map them); request

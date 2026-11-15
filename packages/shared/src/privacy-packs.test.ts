@@ -145,10 +145,26 @@ describe("GDPR: article numbers, a plain-language summary per article, the offic
   });
 });
 
+describe("records of processing: a law without the duty is marked, not overstated (review, 2026-11-15)", () => {
+  it("CCPA and DPDP cite their nearest provision as no direct equivalent; GDPR and LGPD cite the duty itself", () => {
+    const rec = (fw: string) => PRIVACY_PACKS.find((p) => p.framework === fw)!.controls.find((c) => c.controlRef === `${fw}:records-of-processing`)!;
+    for (const fw of ["ccpa", "dpdp"]) {
+      expect(rec(fw).title, fw).toMatch(/\(no direct equivalent\) — /);
+      expect(rec(fw).ownerNote, fw).toMatch(/has no records-of-processing duty/);
+    }
+    for (const fw of ["gdpr", "lgpd"]) expect(rec(fw).title, fw).not.toMatch(/no direct equivalent/);
+  });
+
+  it("the DPDP preset says the DPDP Rules, 2025 exist, though their periods are not encoded", () => {
+    expect(PRIVACY_LAW_PRESETS.dpdp.statutoryPeriod).toMatch(/DPDP Rules, 2025/);
+    expect(PRIVACY_LAW_PRESETS.dpdp.notes).toMatch(/DPDP Rules, 2025 are notified/);
+  });
+});
+
 /** content hashes of the published versions: a change is a new version (ADR-0058) */
 const PINNED: Record<string, string> = {
   gdpr: "086a80a23faeb1add32d10152797f0c8d879455afe49e3da58f41836572fa039",
-  ccpa: "16f2afb73784ae221fc36b14ed9acb16085e7b31605856288b5081ed729c3ab8",
-  dpdp: "43bdb45c13a64adff3ea135cfc60c538f8313215f5d931b40dffe005a2585786",
+  ccpa: "61f5aaa663fc6a69d26e92d20ca5c7cb11347cc8d827f7ae2d428acf69478748",
+  dpdp: "5b073afd565c33e3ead5734a05ada8a0c92b4b8f66adae0464bdcf5172f62806",
   lgpd: "c4ea8d6235311e572b8303a2095007117dee289a9a2269cfb9ae86d2a72f5b71",
 };

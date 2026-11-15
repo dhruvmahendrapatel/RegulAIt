@@ -52,7 +52,8 @@ export const PRIVACY_LAW_PRESETS: Readonly<Record<PrivacyLaw, PrivacyLawPreset>>
     law: "gdpr",
     title: "GDPR — Regulation (EU) 2016/679",
     statutoryPeriod: "one month from receipt, extendable by two further months (Art. 12(3))",
-    // one month; the strict default (30 days) is the shorter reading
+    // one month (Art. 12(3)); a calendar month can be 28 to 31 days (Reg. 1182/71), so 30 days approximates it and is
+    // longer than a month that spans February. The request period is counted in days, so 30 is the nearest whole value.
     dsrSlaDays: DSR_DEFAULT_SLA_DAYS,
     piiInternationalCategories: ["bsn", "codice_fiscale", "dni_nie", "nir", "steuer_id"],
     notes:
@@ -73,12 +74,13 @@ export const PRIVACY_LAW_PRESETS: Readonly<Record<PrivacyLaw, PrivacyLawPreset>>
   dpdp: {
     law: "dpdp",
     title: "Digital Personal Data Protection Act 2023 (India)",
-    statutoryPeriod: "a period the Act leaves to rules (s. 13(2)); the strict default applies",
+    statutoryPeriod: "set by the DPDP Rules, 2025 under s. 13(2) (not encoded); the strict default applies",
     dsrSlaDays: DSR_DEFAULT_SLA_DAYS,
     piiInternationalCategories: ["aadhaar"],
     notes:
       "The Act's grounds are consent and certain legitimate uses (ss. 4, 6, 7); map them onto a record's basis as " +
-      "consent or legal obligation. Breach intimation to the Board is not an encoded clock.",
+      "consent or legal obligation. The DPDP Rules, 2025 are notified: they set the grievance-redressal period and a " +
+      "72-hour breach report to the Board. Neither is encoded; breach intimation to the Board is not a clock here.",
   },
   lgpd: {
     law: "lgpd",
@@ -159,15 +161,35 @@ const att = (controlRef: string, title: string, coverage: Control["coverage"], o
 });
 
 /** the shared controls every law has, in its own citation */
-function common(fw: string, cite: { records: string; access: string; erasure: string; minimise: string; security: string }): Control[] {
+/**
+ * The citation of each shared control. `recordsNoEquivalent` says the law has no records-of-processing duty: the
+ * cited provision is only the nearest one, and the title and note say so rather than overstate the mapping.
+ */
+interface CommonCites {
+  records: string;
+  recordsNoEquivalent?: string;
+  access: string;
+  erasure: string;
+  minimise: string;
+  security: string;
+}
+
+function common(fw: string, cite: CommonCites): Control[] {
+  const recordsNote = "Records cover AI systems governed by the platform. Processing outside it is the organisation's to record.";
   return [
-    ev(`${fw}:records-of-processing`, `${cite.records} — Keep a record of each AI system's processing`, {
-      coverage: "partial",
-      collector: "audit_decisions",
-      collectorParams: { ruleIdPrefix: RECORDS },
-      evidence: "records of processing created or changed in the period.",
-      note: "Records cover AI systems governed by the platform. Processing outside it is the organisation's to record.",
-    }),
+    ev(
+      `${fw}:records-of-processing`,
+      cite.recordsNoEquivalent
+        ? `${cite.records} (no direct equivalent) — Keep a record of each AI system's processing`
+        : `${cite.records} — Keep a record of each AI system's processing`,
+      {
+        coverage: "partial",
+        collector: "audit_decisions",
+        collectorParams: { ruleIdPrefix: RECORDS },
+        evidence: "records of processing created or changed in the period.",
+        note: cite.recordsNoEquivalent ? `${cite.recordsNoEquivalent} ${recordsNote}` : recordsNote,
+      },
+    ),
     ev(`${fw}:access-requests`, `${cite.access} — Answer people's requests about their data on time`, {
       coverage: "partial",
       collector: "audit_decisions",
@@ -289,7 +311,12 @@ export const GDPR_PACK: CreateCompliancePackInput = {
 };
 
 export const CCPA_PACK = pack("ccpa", "CCPA/CPRA — privacy operations (control mapping)", "Cal. Civ. Code § 1798.100 ff. (CCPA as amended by the CPRA)", "as in force 2026", [
-  ...common("ccpa", { records: "§ 1798.100(a)", access: "§ 1798.110, 1798.130", erasure: "§ 1798.105", minimise: "§ 1798.100(c)", security: "§ 1798.100(e)" }),
+  ...common("ccpa", {
+    records: "§ 1798.100(a)",
+    recordsNoEquivalent:
+      "The CCPA has no records-of-processing duty: § 1798.100(a) is notice at collection, the nearest provision. A " +
+      "record here is good practice that supports the notice, not a statutory record.",
+    access: "§ 1798.110, 1798.130", erasure: "§ 1798.105", minimise: "§ 1798.100(c)", security: "§ 1798.100(e)" }),
   att("ccpa:correction", "§ 1798.106 — Correct inaccurate personal information on request", "unaddressed", "Not addressed by the platform: correction is not a request kind. Attest the correction process."),
   att("ccpa:opt-out", "§ 1798.120, 1798.135 — Honour opting out of sale or sharing", "unaddressed", "Not addressed by the platform: it neither sells nor shares data for advertising. Attest how opt-outs are honoured elsewhere."),
   att("ccpa:sensitive-limit", "§ 1798.121 — Limit use of sensitive personal information on request", "partial", "Partly supported: the processing limit refuses categories no record permits. Attest how a limit request is handled."),
@@ -302,13 +329,20 @@ export const CCPA_PACK = pack("ccpa", "CCPA/CPRA — privacy operations (control
 ]);
 
 export const DPDP_PACK = pack("dpdp", "India DPDP Act 2023 — privacy operations (control mapping)", "Digital Personal Data Protection Act, 2023 (No. 22 of 2023)", "2023 Act", [
-  ...common("dpdp", { records: "s. 8(1)", access: "s. 11, 13", erasure: "s. 8(7), 12", minimise: "s. 4, 6(1)", security: "s. 8(5)" }),
+  ...common("dpdp", {
+    records: "s. 8(1)",
+    recordsNoEquivalent:
+      "The DPDP Act has no records-of-processing duty: s. 8(1) is the fiduciary's general obligation, the nearest " +
+      "provision. A record here is good practice that supports it, not a statutory record.",
+    access: "s. 11, 13", erasure: "s. 8(7), 12", minimise: "s. 4, 6(1)", security: "s. 8(5)" }),
   att("dpdp:notice-consent", "s. 5, 6 — Give notice and hold consent where it is the ground", "unaddressed", "Not addressed by the platform: consent is collected where the data is collected. Attest the notices and consent records."),
   ev("dpdp:breach-intimation", "s. 8(6) — Tell the Board and affected people about a breach", {
     coverage: "partial",
     collector: "incident_register",
     evidence: "incidents recorded in the period.",
-    note: "Intimation to the Data Protection Board is not an encoded clock; the register records the incident and its dates.",
+    note:
+      "The DPDP Rules, 2025 set a 72-hour report to the Data Protection Board; it is not an encoded clock. The register " +
+      "records the incident and its dates.",
   }),
   att("dpdp:cross-border", "s. 16 — Transfer outside India only where not restricted", "partial", "Partly supported: provider region pinning and BYOC keep data in place. Attest the transfers made."),
 ]);
