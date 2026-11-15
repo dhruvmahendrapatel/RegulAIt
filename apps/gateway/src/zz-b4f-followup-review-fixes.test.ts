@@ -382,7 +382,7 @@ describe("F50: a passkey-backed grant ends with its passkey", () => {
     const [row] = await db
       .select({ usedAt: stepUpGrants.usedAt })
       .from(stepUpGrants)
-      .where(eq(stepUpGrants.tokenHash, createHash("sha256").update(outstanding).digest("hex")));
+      .where(eq(stepUpGrants.tokenHash, hashToken(outstanding)));
     expect(row?.usedAt, "the outstanding grant was ended with the passkey").not.toBeNull();
   });
 });

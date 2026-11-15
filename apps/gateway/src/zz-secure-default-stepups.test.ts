@@ -109,7 +109,7 @@ async function relaxThroughStepUp(method: Method, url: string, payload: unknown,
   const other = await grantFor({ kind: "settings_relax", body: differentValue(facts) });
   expect((await asAdmin(method, url, payload, { [STEP_UP_HEADER]: other })).statusCode).toBe(403);
   // refused, and not spent: the grant made for other facts is still unused
-  const [otherGrant] = await db.select({ usedAt: stepUpGrants.usedAt }).from(stepUpGrants).where(eq(stepUpGrants.tokenHash, createHash("sha256").update(other).digest("hex")));
+  const [otherGrant] = await db.select({ usedAt: stepUpGrants.usedAt }).from(stepUpGrants).where(eq(stepUpGrants.tokenHash, hashToken(other)));
   expect(otherGrant!.usedAt).toBeNull();
   const token = await grantFor(asked.json().action);
   return asAdmin(method, url, payload, { [STEP_UP_HEADER]: token });
@@ -646,7 +646,7 @@ describe("recheck: spellings, fail-closed import, concurrency and url binding", 
     const host = `sds-addrace-${RUN}.example.test`;
     const action = { kind: "settings_relax", body: { op: "egress_allow_host", host, values: { added: true } } };
     const token = await grantFor(action);
-    const tokenHash = createHash("sha256").update(token).digest("hex");
+    const tokenHash = hashToken(token);
     // the other writer: holds the same per-host lock the route takes and adds the host, not yet committed
     const other = await db.$client.connect();
     try {
@@ -680,7 +680,7 @@ describe("recheck: spellings, fail-closed import, concurrency and url binding", 
     const host = `sds-outside-${RUN}.example.test`;
     const action = { kind: "settings_relax", body: { op: "egress_allow_host", host, values: { added: true } } };
     const token = await grantFor(action);
-    const tokenHash = createHash("sha256").update(token).digest("hex");
+    const tokenHash = hashToken(token);
     // the other writer takes NO per-host lock (as a writer outside this route would not): its uncommitted row is
     // invisible to the route's re-decision ("added" still holds), and the route's insert waits on it
     const other = await db.$client.connect();
@@ -807,7 +807,7 @@ describe("PATCH /v1/servers/:serverId: the columns and the owner are one conditi
     const [after] = await db.select().from(mcpServers).where(eq(mcpServers.id, serverId));
     // the rename was NOT written without the owner change: the other writer's owner stands, the name is unchanged
     expect({ name: after!.name, ownerUserId: after!.ownerUserId }).toEqual({ name: before!.name, ownerUserId: otherOwner });
-    const [grant] = await db.select().from(stepUpGrants).where(eq(stepUpGrants.tokenHash, createHash("sha256").update(token).digest("hex")));
+    const [grant] = await db.select().from(stepUpGrants).where(eq(stepUpGrants.tokenHash, hashToken(token)));
     expect(grant!.usedAt).toBeNull();
     // positive control: with the owner it was decided on, the rename and the owner change land together, audited
     await db.update(mcpServers).set({ ownerUserId: null }).where(eq(mcpServers.id, serverId));
@@ -815,7 +815,7 @@ describe("PATCH /v1/servers/:serverId: the columns and the owner are one conditi
     expect(ok.statusCode, ok.body).toBe(200);
     expect(ok.json()).toMatchObject({ name: `sds-srv-cas-renamed-${RUN}`, ownerUserId: admin.id });
     expect((await lastAudit("mcp-server-owner-changed", serverId))!.detail).toMatchObject({ transitions: { ownerUserId: { from: null, to: admin.id } } });
-    const [spent] = await db.select().from(stepUpGrants).where(eq(stepUpGrants.tokenHash, createHash("sha256").update(token).digest("hex")));
+    const [spent] = await db.select().from(stepUpGrants).where(eq(stepUpGrants.tokenHash, hashToken(token)));
     expect(spent!.usedAt).not.toBeNull();
   });
 });
@@ -838,7 +838,7 @@ describe("PATCH /v1/servers/:serverId: an owner id in another case is the same o
     expect(ok.statusCode, ok.body).toBe(200);
     expect(ok.json()).toMatchObject({ ownerUserId: admin.id });
     expect((await lastAudit("mcp-server-owner-changed", serverId))!.detail).toMatchObject({ transitions: { ownerUserId: { from: null, to: admin.id } } });
-    const [spent] = await db.select().from(stepUpGrants).where(eq(stepUpGrants.tokenHash, createHash("sha256").update(token).digest("hex")));
+    const [spent] = await db.select().from(stepUpGrants).where(eq(stepUpGrants.tokenHash, hashToken(token)));
     expect(spent!.usedAt).not.toBeNull();
     // the current owner in uppercase: no change, so no step-up is asked and the owner stays as stored
     const again = await asAdmin("PATCH", `/v1/servers/${serverId}`, { ownerUserId: upper });

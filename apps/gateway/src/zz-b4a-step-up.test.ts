@@ -854,7 +854,7 @@ describe("fresh SSO login for a step-up", () => {
     const got = await as(s, "GET", `/v1/auth/step-up/${st.stepUpId}`);
     expect(got.statusCode, got.body).toBe(200);
     expect(got.json()).toMatchObject({ status: "granted", method: "sso", actionKind: "owner_change" });
-    const [g] = await db.select().from(stepUpGrants).where(eq(stepUpGrants.tokenHash, createHash("sha256").update(got.json().stepUpToken).digest("hex")));
+    const [g] = await db.select().from(stepUpGrants).where(eq(stepUpGrants.tokenHash, hashToken(got.json().stepUpToken)));
     expect(g!.actionDigest).toBe(stepUpActionDigest("owner_change", st.action.body));
     // collected once
     const twice = await as(s, "GET", `/v1/auth/step-up/${st.stepUpId}`);
