@@ -512,3 +512,6 @@ export function estimateGraphCost(
     unpricedNodes,
   };
 }
+
+// ADR-0320: cloud coding agents as governed workers.
+export * from "./cloud-worker.js";
