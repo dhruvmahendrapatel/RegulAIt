@@ -430,7 +430,8 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
     // like the counters above: a missed prune only keeps rows longer, which refuses more replays, never fewer.
     pmDeliveryPruneTimer = setInterval(
       () => {
-        void prunePmWebhookDeliveries(db).catch((err: unknown) => {
+        // ADR-0234 PM batch: pm_webhook_deliveries is under row-level security; the prune runs as system_task.
+        void runWithRlsSystem("system_task", "boot.pm-delivery-prune", () => prunePmWebhookDeliveries(db)).catch((err: unknown) => {
           app.log.warn({ err }, "PM webhook delivery prune failed; replay refusal is unaffected");
         });
       },

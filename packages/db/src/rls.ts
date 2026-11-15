@@ -92,6 +92,14 @@ export const RLS_SYSTEM_REASONS = [
    * one runner step that supersedes an approval enters approval_maintenance for that statement only.
    */
   "credential_request",
+  /**
+   * PM batch (#828 review, owner decision: RLS on every PM table): the PM mirror and link work a request does on
+   * behalf of a principal who need not be an admin (a node status or sign-off decision mirrored to the linked work
+   * item, a run or instance linked to one, a decision record, the links read, the governance-alert ticket lookups).
+   * Entered as a principal step, so the principal still writes its own audit rows: pm_connections (read), pm_links
+   * (all), pm_sync_events (read, append). Never the webhook delivery records or the import linkage.
+   */
+  "pm_sync",
 ] as const;
 export type RlsSystemReason = (typeof RLS_SYSTEM_REASONS)[number];
 

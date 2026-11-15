@@ -16615,7 +16615,11 @@ export const pmImportedWorkItems = pgTable(
       .notNull()
       .references(() => pmConnections.id, { onDelete: "cascade" }),
     externalId: text("external_id").notNull(),
+    // ADR-0200 3NF exception (verbatim external payload): the item's URL as the PM tool reported it at the last import.
+    // The PM tool owns it (pillar 8); the importer refreshes it on every apply and never derives anything from it.
     externalUrl: text("external_url").notNull(),
+    // ADR-0200 3NF exception (verbatim external payload): the tool's own work-item type name ("Bug", "Story"), as
+    // reported at the last import. It is the tool's vocabulary, not a RegulAIt reference, so there is nothing to join.
     itemType: text("item_type").notNull(),
     firstImportId: uuid("first_import_id").references(() => onboardingImports.id, { onDelete: "set null" }),
     lastImportId: uuid("last_import_id").references(() => onboardingImports.id, { onDelete: "set null" }),
