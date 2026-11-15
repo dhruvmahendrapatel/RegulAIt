@@ -15,6 +15,7 @@ import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, IdChip, Input, Table } from "../../ui/kit";
 import { TotpQrCode } from "../../ui/TotpQrCode";
+import { PREVIEW_ROWS, ViewAllLink } from "../../ui/ListPreview";
 import { useToast } from "../../ui/toast";
 import ModelKeysCard from "./ModelKeysCard";
 import { UsernameForm } from "./UsernameForm";
@@ -115,11 +116,11 @@ export default function AccountPage() {
         </div>
         {auth?.userId && (
           <div ref={passkeysRef} className={a.anchor} data-testid="account-passkeys">
-            <PasskeysCard />
+            <PasskeysCard preview />
           </div>
         )}
         <div ref={sessionsRef} className={a.anchor}>
-          <SessionsCard />
+          <SessionsCard preview />
         </div>
         <div ref={keysRef} className={a.anchor}>
           <ModelKeysCard />
@@ -189,8 +190,18 @@ function AiPoliciesCard(props: { hasUser: boolean }) {
  * account (device label, where it is now, when it was last seen), with
  * per-session revoke and "sign out other devices". The device label is a
  * derived display string, never a security control.
+ *
+ * P3 (#453): on the Account page this is a preview (the first five sessions, the live count in the title, the same
+ * sign-out actions, and a link to the full list); on its own page (`preview` false, AccountSubpages) it is every
+ * session. Both read the same query, so the audited list read is not repeated.
  */
-function SessionsCard() {
+const seenAt = (x: OwnSession) => Date.parse(x.lastSeenAt ?? x.createdAt) || 0;
+/** this device first, then the most recently seen */
+export function sortSessions(rows: readonly OwnSession[]): OwnSession[] {
+  return [...rows].sort((a, b) => Number(b.current) - Number(a.current) || seenAt(b) - seenAt(a));
+}
+
+export function SessionsCard(props: { preview?: boolean }) {
   const { toast } = useToast();
   const qc = useQueryClient();
   const [busy, setBusy] = useState(false);
@@ -199,7 +210,9 @@ function SessionsCard() {
     queryKey: ["account", "sessions"],
     queryFn: () => api.get<{ sessions: OwnSession[] }>("/auth/sessions"),
   });
-  const sessions = q.data?.sessions ?? [];
+  // this device first, then the most recently seen, so a five-row preview never drops the session you are using (the
+  // read has no order of its own)
+  const sessions = sortSessions(q.data?.sessions ?? []);
   const others = sessions.filter((x) => !x.current);
 
   const run = async (fn: () => Promise<unknown>, okMsg: string) => {
@@ -220,17 +233,20 @@ function SessionsCard() {
     <Card
       title={
         <span className={v.rowTight}>
-          Devices & sessions
-          <Badge>{sessions.length} live</Badge>
+          {/* on its own page the h1 already says "Devices & sessions" */}
+          {props.preview ? "Devices & sessions" : "Every live session"}
+          {/* a count only from a read that answered: a failed or pending read never shows "0 live" */}
+          {q.data ? <Badge>{sessions.length} live</Badge> : q.error ? <Badge tone="warn">count unavailable</Badge> : null}
         </span>
       }
+      actions={props.preview ? <ViewAllLink to="/account/sessions" noun="sessions" /> : undefined}
     >
       {error && (
         <div className={v.errLine} role="alert" style={{ marginBottom: "var(--s1)" }}>
           {error}
         </div>
       )}
-      <div className={v.stack}>
+      <div className={v.stack} data-preview={props.preview ? "/auth/sessions" : undefined}>
         <Table<OwnSession>
           columns={[
             {
@@ -272,8 +288,11 @@ function SessionsCard() {
                 ),
             },
           ]}
-          rows={sessions}
+          rows={props.preview ? sessions.slice(0, PREVIEW_ROWS) : sessions}
           rowKey={(x) => x.id}
+          loading={q.isLoading}
+          error={q.error}
+          onRetry={() => void q.refetch()}
           empty={<EmptyState title="No live sessions" body="Sessions appear here when you sign in from a browser." />}
         />
         <div className={v.row}>
