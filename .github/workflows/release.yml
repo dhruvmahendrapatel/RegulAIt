@@ -1,0 +1,238 @@
+name: Release
+
+# ADR-0324: release candidates and release verification.
+#
+# THIS WORKFLOW NEVER HOLDS A SIGNING KEY. The LiteLLM 2026-10-21 release was
+# built AND signed by LiteLLM's own pipeline, so a compromised pipeline shipped
+# signed malware. Here CI only builds an UNSIGNED candidate (bundle + CycloneDX
+# SBOM + SLSA v1 provenance). The release signer checks it and signs it off CI
+# with the release signing key (docs/ops/RELEASE_KEY_CEREMONY.md, part 5), and
+# uploads the signed bundle to the GitHub release by hand.
+#
+#   candidate  (push of a v* tag)  build the unsigned candidate; prove it is NOT
+#                                  yet a release; upload it as a workflow artifact
+#   attest     (same run, gated)   keyless Sigstore attestation of the provenance,
+#                                  only when the owner has set the repository
+#                                  variable RELEASE_PROVENANCE_PUBLISH_APPROVED to
+#                                  'true' (it writes to the public Rekor log)
+#   verify     (release published) download the release's bundles and verify
+#                                  each against the keyring on the default branch;
+#                                  an unsigned or unverifiable asset fails the run
+#
+# Until the release-key ceremony has run, `candidate` fails at its first step:
+# there is no root-signed keyring, so no key may be named. That is intended.
+
+on:
+  push:
+    tags: ['v*']
+  release:
+    types: [published]
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # the same pinned tools as security.yml (bump together)
+  TRIVY_VERSION: '0.74.0'
+  TRIVY_SHA256: '2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a'
+  COSIGN_VERSION: '3.1.3'
+  COSIGN_SHA256: '4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71'
+
+jobs:
+  candidate:
+    name: Build the unsigned release candidate
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Release version from the tag
+        id: version
+        run: |
+          set -euo pipefail
+          v="${GITHUB_REF_NAME#v}"
+          [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::tag $GITHUB_REF_NAME is not vX.Y.Z"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: The keyring is root-signed, and names the key that will sign
+        id: key
+        run: |
+          set -euo pipefail
+          scripts/verify-release.sh --keyring-only infra/release-keys
+          echo "key-id=$(scripts/release-ceremony.sh current-signing-key --keyring infra/release-keys)" >> "$GITHUB_OUTPUT"
+
+      - name: Install cosign (pinned version and SHA-256)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -sSfL --retry 3 -o "$RUNNER_TEMP/bin/cosign" \
+            "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-amd64"
+          echo "${COSIGN_SHA256}  $RUNNER_TEMP/bin/cosign" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/bin/cosign"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Install Trivy (pinned SHA-256 AND its Sigstore signature)
+        run: |
+          set -euo pipefail
+          base="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
+          tgz="$RUNNER_TEMP/trivy.tar.gz"
+          curl -sSfL --retry 3 -o "$tgz" "${base}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -sSfL --retry 3 -o "$tgz.sigstore.json" "${base}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz.sigstore.json"
+          echo "${TRIVY_SHA256}  ${tgz}" | sha256sum -c -
+          cosign verify-blob --bundle "$tgz.sigstore.json" \
+            --certificate-identity "https://github.com/aquasecurity/trivy/.github/workflows/reusable-release.yaml@refs/tags/v${TRIVY_VERSION}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$tgz"
+          tar -xzf "$tgz" -C "$RUNNER_TEMP/bin" trivy
+
+      # Trivy runs from an empty directory, so no .trivyignore or trivy.yaml in the checkout can configure it.
+      - name: SBOM (CycloneDX) into the payload
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          trivy fs --include-dev-deps --format cyclonedx --output "$RUNNER_TEMP/regulait-workspace.cdx.json" "$GITHUB_WORKSPACE"
+          mkdir -p "$GITHUB_WORKSPACE/sbom"
+          cp "$RUNNER_TEMP/regulait-workspace.cdx.json" "$GITHUB_WORKSPACE/sbom/"
+
+      - name: Build the candidate and its provenance (no key, no signature)
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          KEY_ID: ${{ steps.key.outputs.key-id }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/candidate/regulait-update-$VERSION.unsigned.tar.gz"
+          scripts/build-update-bundle.sh --version "$VERSION" --unsigned --key-id "$KEY_ID" --out "$out"
+          scripts/release-provenance.sh --candidate "$out" \
+            --repository "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --workflow .github/workflows/release.yml \
+            --ref "$GITHUB_REF" --commit "$GITHUB_SHA" \
+            --invocation "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT"
+
+      - name: The candidate passes the pre-sign check, and is refused as a release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          c="$RUNNER_TEMP/candidate/regulait-update-$VERSION.unsigned.tar.gz"
+          scripts/verify-release.sh --candidate "$c"
+          if scripts/verify-release.sh "$c" 2>"$RUNNER_TEMP/refusal.txt"; then
+            echo "::error::an UNSIGNED candidate verified as a release"; exit 1
+          fi
+          grep -q "UNSIGNED" "$RUNNER_TEMP/refusal.txt" || { cat "$RUNNER_TEMP/refusal.txt"; echo "::error::refused for the wrong reason"; exit 1; }
+          sha256sum "$c" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/candidate
+          if-no-files-found: error
+          retention-days: 30
+
+  attest:
+    name: Keyless provenance attestation (owner-gated)
+    needs: candidate
+    if: vars.RELEASE_PROVENANCE_PUBLISH_APPROVED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/candidate
+
+      - name: Install cosign (pinned version and SHA-256)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -sSfL --retry 3 -o "$RUNNER_TEMP/bin/cosign" \
+            "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-amd64"
+          echo "${COSIGN_SHA256}  $RUNNER_TEMP/bin/cosign" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/bin/cosign"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Attest the provenance over the manifest, then check it online
+        env:
+          VERSION: ${{ needs.candidate.outputs.version }}
+        run: |
+          set -euo pipefail
+          c="$RUNNER_TEMP/candidate/regulait-update-$VERSION.unsigned.tar.gz"
+          x="$RUNNER_TEMP/x"; mkdir -p "$x"
+          tar -xzf "$c" -C "$x"
+          d="$x/regulait-update-$VERSION"
+          jq '.predicate' "$d/provenance.intoto.json" > "$RUNNER_TEMP/predicate.json"
+          cosign attest-blob --yes --type https://slsa.dev/provenance/v1 \
+            --predicate "$RUNNER_TEMP/predicate.json" --bundle "$d/provenance.sigstore.json" "$d/manifest.json"
+          tar -C "$x" -czf "$c" "regulait-update-$VERSION"
+          scripts/verify-release.sh --candidate "$c" --online
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-candidate-attested
+          path: ${{ runner.temp }}/candidate
+          if-no-files-found: error
+          retention-days: 30
+
+  verify:
+    name: Verify the published release against the pinned keyring
+    if: github.event_name == 'release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      # The trust anchor is the keyring on the default branch, not whatever the tag points at.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Download the release's bundles
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/rel"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern 'regulait-update-*.tar.gz' --dir "$RUNNER_TEMP/rel" \
+            || { echo "::error::release $TAG has no regulait-update-*.tar.gz asset"; exit 1; }
+
+      - name: Install cosign (pinned version and SHA-256)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -sSfL --retry 3 -o "$RUNNER_TEMP/bin/cosign" \
+            "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-amd64"
+          echo "${COSIGN_SHA256}  $RUNNER_TEMP/bin/cosign" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/bin/cosign"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Every bundle is a signed, verifiable release
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          bundles=("$RUNNER_TEMP"/rel/regulait-update-*.tar.gz)
+          [ "${#bundles[@]}" -ge 1 ] || { echo "::error::no bundle to verify"; exit 1; }
+          for b in "${bundles[@]}"; do
+            case "$b" in *.unsigned.tar.gz) echo "::error::an unsigned candidate was published: $(basename "$b")"; exit 1 ;; esac
+            online=()
+            if tar -tzf "$b" | grep -q '/provenance.sigstore.json$'; then online=(--online); fi
+            scripts/verify-release.sh "$b" "${online[@]}"
+            echo "verified: $(basename "$b") $(sha256sum "$b" | cut -d' ' -f1)" >> "$GITHUB_STEP_SUMMARY"
+          done
