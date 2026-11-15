@@ -4946,6 +4946,8 @@ export {
   MODEL_DRIFT_MONITOR_RULE_ID,
   suggestedHaltFor,
   type AccountabilityMonitorRuleId,
+  SPEND_MONITOR_RULE_IDS,
+  type SpendMonitorRuleId,
 } from "./governance-monitor.js";
 
 // ===== ADR-0186 (batch 4) — dual control, step-up, passkey-signed approvals,

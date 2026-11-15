@@ -3,7 +3,7 @@
 - **Status**: Accepted (builder lane E2, 2026-11-15; market-analysis gap G3)
 - **Date**: 2026-11-15
 - **Index**: Cost per outcome: an RLS outcome ledger joined at read time to the metered spend of the runs that produced it
-- **Migration**: `pending/cost_outcomes.sql` (numbered at merge, ADR-0252)
+- **Migration**: `pending/cost_outcomes.sql` and `pending/user_spend_budgets.sql` (numbered at merge, ADR-0252)
 
 ## Context
 
@@ -88,5 +88,49 @@ scheduler. No new dependency.
 - Follow-ups: the dashboard cards (#453); an outcome hook in the workflow engine, if five minutes of latency is too
   much; attributing spend made outside an orchestration run (for example a workflow's review-check agents) once those
   calls carry the instance id.
-- Owner question open: whether a completed work item should also count when the PM tool reports its own "done" state
-  for an item whose RegulAIt object has not completed (today: no, the PM state is shown and not interpreted).
+- Owner decision (2026-11-15, relayed by the master on #848): only outcomes RegulAIt completed count. A PM tool's own
+  "done" state is shown on the outcome (`workItems[].inboundState`) and never counted. This is as built.
+
+## Pilot addendum (owner direction, 2026-11-15)
+
+The pilot is an engineering organisation on Entra ID, Azure DevOps Boards and Repos, several coding tools and several
+model providers. Success includes "per-user and per-project spend across tools and APIs visible within minutes, with
+a budget alert firing". Three additions follow.
+
+8. **Azure DevOps (and every git and PM provider) on the outcome.** Each listed outcome carries, joined at read time
+   and never copied:
+   - `pullRequest`: the id and URL the workflow's `open_pr` stage recorded (an Azure DevOps Repos PR URL on that
+     provider);
+   - `workItems`: the outcome's own PM link, or the instance's linked items (at most 10), each with provider, external
+     id, URL and the PM-reported state.
+
+   The joins are provider-agnostic, because pillars 2 and 8 already record these fields for every adapter.
+
+9. **Budget alerts through the existing alerting path.** Two governance-monitor rules, fed by `budget-alerts.ts`:
+   - `project_budget_threshold`: a project's metered spend in its budget window (the month for a monthly budget,
+     otherwise its lifetime) reached `alert_threshold_pct` of its own budget (80% by default);
+   - `user_budget_threshold`: a person's metered spend across every model, MCP tool and connector call reached the
+     threshold of their spend budget.
+
+   Both are high once spend reaches the budget, and imported spend is in the alert detail beside the metered figure,
+   never added. Alerts are ordinary monitor episodes: an owner and due time (ADR-0182 S5), chat delivery (ADR-0162),
+   the optional ticket and the audit chain (and so the SIEM). The hourly monitor evaluates them. So alerts arrive
+   within minutes, a `spend-budget-alerts` scheduler job runs the spend rules alone every five minutes through
+   `applyMonitorFindings`, the monitor's one alert-write path, now factored out of `runGovernanceMonitor` without
+   behaviour change. Its pass audit row is written only when it raised or resolved something. The compliance-cascade
+   ceiling is enforced by the project gate and is not separately alerted.
+
+10. **A person's spend budget (alert only).** `user_spend_budgets` has one row per person: amount, window (`monthly` by
+    default, or `none` for lifetime) and alert threshold (1% to 100%, default 80). Nothing is refused on it; project
+    budgets and run caps are the enforcement. Routes:
+    - `GET /v1/user-spend-budgets` (admin);
+    - `GET /v1/users/:userId/spend-budget`: self or admin, with metered spend in the window and imported spend
+      beside it;
+    - `PUT /v1/users/:userId/spend-budget`: admin, audited;
+    - `DELETE /v1/users/:userId/spend-budget`: admin, a `settings_relax` step-up, audited as a relaxation.
+
+    All four are API-only on #453.
+
+- Owner question open: should a person's budget also alert on imported spend (Copilot, Cursor and other seat or usage
+  exports)? Today the alert compares only metered spend. Imported spend is shown beside it, because ADR-0069 forbids a
+  combined figure.

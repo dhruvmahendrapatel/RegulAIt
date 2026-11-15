@@ -16549,4 +16549,32 @@ export const costOutcomes = pgTable(
   ],
 );
 export type CostOutcomeRow = typeof costOutcomes.$inferSelect;
+
+/**
+ * ADR-0312 (pilot addendum; migration `pending/user_spend_budgets.sql`) — A PERSON'S SPEND BUDGET, alert only. The
+ * governance monitor's `user_budget_threshold` rule raises an alert when the person's metered spend across every model,
+ * MCP tool and connector call in the window reaches `alert_threshold_pct` of `budget_usd` (high at 100%). Nothing is
+ * refused on it; the project budget and run caps are the enforcement. Monthly by default (the strict, bounded window).
+ */
+export const userSpendBudgets = pgTable(
+  "user_spend_budgets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    budgetUsd: doublePrecision("budget_usd").notNull(),
+    budgetPeriod: text("budget_period", { enum: ["monthly", "none"] }).notNull().default("monthly"),
+    alertThresholdPct: integer("alert_threshold_pct").notNull().default(80),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("user_spend_budgets_user_uq").on(t.userId),
+    check("user_spend_budgets_budget_check", sql`${t.budgetUsd} > 0 AND ${t.budgetUsd} <= 10000000`),
+    check("user_spend_budgets_pct_check", sql`${t.alertThresholdPct} BETWEEN 1 AND 100`),
+  ],
+);
+export type UserSpendBudgetRow = typeof userSpendBudgets.$inferSelect;
 // ===== end ADR-0312 =================================================================================================

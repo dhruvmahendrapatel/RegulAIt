@@ -11,6 +11,9 @@ import { randomUUID } from "node:crypto";
 import {
   costOutcomes,
   createDb,
+  governanceAlerts,
+  and,
+  ne,
   eq,
   importedCostLines,
   costImportBatches,
@@ -30,6 +33,8 @@ import {
 import { buildApp } from "./app.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { COST_OUTCOME_BASIS_STATEMENT, recordCostOutcomes, resolveOutcomeWindow } from "./cost-outcomes.js";
+import { runSpendBudgetPass } from "./governance-monitor.js";
+import { budgetCrossing } from "./budget-alerts.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -118,7 +123,7 @@ beforeAll(async () => {
   bobKey = b.key;
   await db.insert(projects).values({ id: projectId, name: `adr0312-project-${RUN}`, costCenter: cc });
   await db.insert(workflowInstances).values([
-    instance(ids.merged, "completed", { prId: "17", mergeSha: "a".repeat(40) }),
+    instance(ids.merged, "completed", { prId: "17", prUrl: "https://dev.azure.com/org/proj/_git/app/pullrequest/17", mergeSha: "a".repeat(40) }),
     instance(ids.aborted, "aborted", {}),
     instance(ids.running, "running", { prId: "18" }),
   ]);
@@ -138,7 +143,8 @@ beforeAll(async () => {
   await db.insert(pmConnections).values({
     id: ids.conn,
     name: `adr0312-pm-${RUN}`,
-    provider: "mock",
+    provider: "azure_devops",
+    baseUrl: "https://dev.azure.com/org",
     project: "REG",
     tokenCiphertext: "unused",
     webhookSecretHash: "unused",
@@ -230,6 +236,11 @@ describe("ADR-0312 the list", () => {
     expect(body.basisStatement).toBe(COST_OUTCOME_BASIS_STATEMENT);
     expect(body.items).toHaveLength(1);
     expect(body.items[0]).toMatchObject({ kind: "merged_pr", meteredUsd: 2, calls: 3, unpricedCalls: 1, projectName: `adr0312-project-${RUN}` });
+    // Azure DevOps Repos and Boards, joined at read time: the PR the workflow opened and the work item it mirrors
+    expect(body.items[0].pullRequest).toEqual({ id: "17", url: "https://dev.azure.com/org/proj/_git/app/pullrequest/17" });
+    expect(body.items[0].workItems).toEqual([
+      { provider: "azure_devops", externalId: `E-${RUN}-1`, externalUrl: "https://pm.example.com/1", inboundState: null },
+    ]);
   });
 
   it("a node's work item carries only that node's spend", async () => {
@@ -348,3 +359,63 @@ describe("ADR-0312 windows", () => {
   });
 });
 
+
+describe("ADR-0312 budget alerts through the governance monitor", () => {
+  const alertsFor = (subjectKey: string) =>
+    db.select().from(governanceAlerts).where(and(eq(governanceAlerts.subjectKey, subjectKey), ne(governanceAlerts.status, "resolved")));
+
+  it("a project and a person crossing their thresholds raise alerts within one spend pass, high at 100%", async () => {
+    const p = randomUUID();
+    await db.insert(projects).values({ id: p, name: `adr0312-budget-${RUN}`, budgetUsd: 10, budgetPeriod: "monthly", alertThresholdPct: 80, budgetApproverUserId: bob });
+    await db.insert(usageEvents).values({ userId: bob, objectType: "agent", costUsd: 8.5, projectId: p });
+    const set = await app.inject({ method: "PUT", url: `/v1/users/${bob}/spend-budget`, headers: AUTH, payload: { budgetUsd: 10, alertThresholdPct: 50 } });
+    expect(set.statusCode, set.body).toBe(200);
+    expect(set.json().budget).toMatchObject({ budgetUsd: 10, budgetPeriod: "monthly", alertThresholdPct: 50 });
+
+    const out = await runSpendBudgetPass(db);
+    expect(out.notEvaluated).toEqual([]);
+    const [pa] = await alertsFor(`project:${p}`);
+    expect(pa).toMatchObject({ ruleId: "project_budget_threshold", severity: "medium", status: "open" });
+    expect(pa!.detail).toMatchObject({ basis: "metered", meteredUsd: 8.5, budgetUsd: 10 });
+    const [ua] = await alertsFor(`user:${bob}`);
+    expect(ua).toMatchObject({ ruleId: "user_budget_threshold", severity: "medium" });
+    expect(ua!.title).not.toContain("@");
+    expect((ua!.detail as { imported: { basis: string } }).imported.basis).toBe("imported");
+
+    // crossing the budget itself refreshes the same episode to high
+    await db.insert(usageEvents).values({ userId: bob, objectType: "agent", costUsd: 2, projectId: p });
+    await runSpendBudgetPass(db);
+    const [high] = await alertsFor(`project:${p}`);
+    expect(high).toMatchObject({ id: pa!.id, severity: "high" });
+
+    // raising the budget clears the condition: the next pass resolves both episodes
+    await db.update(projects).set({ budgetUsd: 1000 }).where(eq(projects.id, p));
+    await app.inject({ method: "PUT", url: `/v1/users/${bob}/spend-budget`, headers: AUTH, payload: { budgetUsd: 1000 } });
+    await runSpendBudgetPass(db);
+    expect(await alertsFor(`project:${p}`)).toEqual([]);
+    expect(await alertsFor(`user:${bob}`)).toEqual([]);
+  });
+
+  it("a person reads their own budget and spend, not anyone else's; removing a budget is a step-up", async () => {
+    const own = await app.inject({ method: "GET", url: `/v1/users/${bob}/spend-budget`, headers: bobKey });
+    expect(own.statusCode, own.body).toBe(200);
+    expect(own.json()).toMatchObject({ metered: { basis: "metered" }, imported: { basis: "imported" } });
+    const other = await app.inject({ method: "GET", url: `/v1/users/${bob}/spend-budget`, headers: aliceKey });
+    expect(other.statusCode).toBe(403);
+    const write = await app.inject({ method: "PUT", url: `/v1/users/${alice}/spend-budget`, headers: aliceKey, payload: { budgetUsd: 1 } });
+    expect(write.statusCode).toBe(403);
+    const bad = await app.inject({ method: "PUT", url: `/v1/users/${bob}/spend-budget`, headers: AUTH, payload: { budgetUsd: 0 } });
+    expect(bad.statusCode).toBe(400);
+    const gone = await app.inject({ method: "DELETE", url: `/v1/users/${bob}/spend-budget`, headers: AUTH });
+    expect(gone.statusCode, gone.body).toBe(204);
+    const list = await app.inject({ method: "GET", url: "/v1/user-spend-budgets", headers: AUTH });
+    expect(list.statusCode).toBe(200);
+  });
+
+  it("the threshold arithmetic", () => {
+    expect(budgetCrossing({ spentUsd: 7.99, budgetUsd: 10, pct: 80 })).toBeNull();
+    expect(budgetCrossing({ spentUsd: 8, budgetUsd: 10, pct: 80 })).toMatchObject({ severity: "medium" });
+    expect(budgetCrossing({ spentUsd: 10, budgetUsd: 10, pct: 80 })).toMatchObject({ severity: "high" });
+    expect(budgetCrossing({ spentUsd: 5, budgetUsd: 0, pct: 80 })).toBeNull();
+  });
+});

@@ -414,6 +414,10 @@ export const KNOWN_UI_GAPS = new Map([
   ["GET /v1/cost-outcomes", { does: "pages recorded outcomes (merged PR, workflow run, accepted change, completed work item) with each one's metered spend; a non-admin sees only their own", tracking: "#453" }],
   ["GET /v1/cost-outcomes/summary", { does: "per-project or per-cost-centre cost per outcome, metered by kind, with imported spend beside it (never combined)", tracking: "#453" }],
   ["POST /v1/cost-outcomes/refresh", { does: "runs the outcome recorder now (admin, audited); the scheduler runs it every five minutes", tracking: "#453" }],
+  ["GET /v1/user-spend-budgets", { does: "lists every person's spend budget (alert only): amount, window and alert threshold", tracking: "#453" }],
+  ["GET /v1/users/:userId/spend-budget", { does: "a person's spend budget with their metered spend in the window and imported spend beside it (self or admin)", tracking: "#453" }],
+  ["PUT /v1/users/:userId/spend-budget", { does: "sets a person's spend budget; crossing its threshold raises a governance alert (audited)", tracking: "#453" }],
+  ["DELETE /v1/users/:userId/spend-budget", { does: "removes a person's spend budget, a relaxation (settings_relax step-up, audited)", tracking: "#453" }],
   // EXCEPTION (ADR-0255, P31, 2026-11-07): the P31 brief is "API and backend only; post the catalogue UI need on
   // #453 for the Governed Designer", so these two routes ship with their screen owned by that lane. These two
   // raise the cap by 2, visibly; the Designer's catalogue screen deletes both entries and lowers it by 2. Decided on #753
@@ -448,7 +452,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 51; // main's 43 (46 incl. ADR-0255 P31 +2, master decision on #753 2026-11-14; − 3 endpoint MCP config routes, #824) + ADR-0303 (lane L11) 5 SIEM destination routes awaiting #453 + ADR-0312 (lane E2) 3 cost-per-outcome routes awaiting #453
+export const KNOWN_UI_GAPS_MAX = 55; // main's 43 (46 incl. ADR-0255 P31 +2, master decision on #753 2026-11-14; − 3 endpoint MCP config routes, #824) + ADR-0303 (lane L11) 5 SIEM destination routes awaiting #453 + ADR-0312 (lane E2) 7 cost-per-outcome and spend-budget routes awaiting #453
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 

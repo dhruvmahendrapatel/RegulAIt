@@ -202,14 +202,41 @@ export function resolveOutcomeWindow(q: { from?: string | undefined; to?: string
 // the list (ADR-0226 contract)
 // ---------------------------------------------------------------------------
 
+/** a PM work item as the PM tool holds it (Azure DevOps Boards, Jira, ...): joined at read time, never copied */
+export interface OutcomeWorkItem {
+  provider: string;
+  externalId: string;
+  externalUrl: string;
+  /** the PM tool's own reported state: shown, never counted (owner decision on #848) */
+  inboundState: string | null;
+}
+
 export type CostOutcomeListRow = CostOutcomeRow & {
   projectName: string | null;
+  /** the pull request the outcome's workflow opened (Azure DevOps Repos, GitHub, GitLab, Bitbucket), read from the
+   * instance's context at query time */
+  pullRequest: { id: string | null; url: string | null } | null;
+  workItems: OutcomeWorkItem[];
   meteredUsd: number;
   calls: number;
   unpricedCalls: number;
 };
 
 const PROJECT_NAME = sql<string | null>`(SELECT p.name FROM projects p WHERE p.id = ${costOutcomes.projectId})`;
+const PULL_REQUEST = sql<{ id: string | null; url: string | null } | null>`(
+  SELECT CASE WHEN wi.context ? 'prId' OR wi.context ? 'prUrl'
+              THEN json_build_object('id', wi.context->>'prId', 'url', wi.context->>'prUrl') END
+    FROM workflow_instances wi WHERE wi.id = ${costOutcomes.workflowInstanceId})`;
+// the outcome's own link for a work item; otherwise the instance's linked items (bounded)
+const WORK_ITEMS = sql<OutcomeWorkItem[]>`coalesce((
+  SELECT json_agg(json_build_object('provider', c.provider, 'externalId', l.external_id, 'externalUrl', l.external_url,
+                                    'inboundState', l.inbound_state) ORDER BY l.created_at)
+    FROM (SELECT * FROM pm_links l0
+           WHERE (${costOutcomes.pmLinkId} IS NOT NULL AND l0.id = ${costOutcomes.pmLinkId})
+              OR (${costOutcomes.pmLinkId} IS NULL AND l0.object_type = 'workflow_instance'
+                  AND l0.object_id = ${costOutcomes.workflowInstanceId} AND l0.orphaned_at IS NULL)
+           ORDER BY l0.created_at LIMIT 10) l
+    JOIN pm_connections c ON c.id = l.connection_id), '[]'::json)`;
 
 export const COST_OUTCOMES_LIST: ListSpec<CostOutcomeListRow> = {
   id: "cost-outcomes",
@@ -227,6 +254,8 @@ export const COST_OUTCOMES_LIST: ListSpec<CostOutcomeListRow> = {
     calls: { label: "Calls", value: (r) => r.calls },
     unpriced: { label: "Unpriced calls", value: (r) => r.unpricedCalls },
     merge: { label: "Merge commit", value: (r) => r.mergeSha },
+    pr: { label: "Pull request", value: (r) => r.pullRequest?.url ?? r.pullRequest?.id ?? null },
+    items: { label: "Work items", value: (r) => r.workItems.map((w) => w.externalId).join(", ") || null },
   },
   filters: ["kind", "projectId"],
   defaultSort: { col: "when", dir: "desc" },
@@ -426,6 +455,8 @@ export function registerCostOutcomeRoutes(app: FastifyInstance, db: Db): void {
             trigger: costOutcomes.trigger,
             observedAt: costOutcomes.observedAt,
             projectName: PROJECT_NAME,
+            pullRequest: PULL_REQUEST,
+            workItems: WORK_ITEMS,
             meteredUsd: meteredUsdOf(tableRefs),
             calls: callsOf(tableRefs),
             unpricedCalls: unpricedOf(tableRefs),

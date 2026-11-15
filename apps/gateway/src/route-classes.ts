@@ -446,6 +446,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/users/:userId/cost-consolidated",
   // ADR-0312: a non-admin pages the outcomes of workflows they initiated (handler predicate and the table's RLS)
   "GET /v1/cost-outcomes",
+  // ADR-0312 (pilot addendum): a person reads their own spend budget and spend (refused in-handler otherwise)
+  "GET /v1/users/:userId/spend-budget",
   // ADR-0070 — a person may list and read THEIR OWN traces, and only their own.
   // Every one of these four is self-scoped INSIDE the handler: a non-admin who
   // passes `userId` for somebody else gets a 403 rather than a silently-ignored
