@@ -367,6 +367,8 @@ export const INDIRECT_UI_CALLS = new Map([
  * until the entry is deleted, and KNOWN_UI_GAPS_MAX is lowered to match.
  */
 export const KNOWN_UI_GAPS = new Map([
+  ["GET /v1/copilot/redteam-gate", { does: "reads the copilot narrator red-team gate settings and, for one agent, whether it may narrate and which run decided it", tracking: "ADR-0056 §5 amendment (lane L7): the brief is API-only; the settings card and per-narrator status are for the design builder on #453. RAISED for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["PUT /v1/copilot/redteam-gate", { does: "turns the copilot narrator red-team gate on or off, or changes how long a passing run counts (relaxing is a settings_relax step-up, audited)", tracking: "ADR-0056 §5 amendment (lane L7): the brief is API-only; the settings card is for the design builder on #453. RAISED for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["POST /v1/mcp-catalogue/presets/:preset", { does: "seeds the official MCP Registry or awesome-mcp-servers as a disabled catalogue source", tracking: "ADR-0256 (P32): the brief is API and backend only; the deduped catalogue page, preset buttons and bundle upload are posted on #453. RAISED FROM 7 for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["POST /v1/mcp-catalogue/bundles", { does: "imports a signed offline catalogue bundle (air-gapped installs)", tracking: "ADR-0256 (P32): the brief is API and backend only; the deduped catalogue page, preset buttons and bundle upload are posted on #453. RAISED FROM 7 for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["GET /v1/mcp-catalogue/bundle", { does: "exports one source as an unsigned bundle, to be signed offline", tracking: "ADR-0256 (P32): the brief is API and backend only; the deduped catalogue page, preset buttons and bundle upload are posted on #453. RAISED FROM 7 for review: the master decides on the PR whether to keep this or build the screen first" }],
@@ -444,7 +446,7 @@ export const KNOWN_UI_GAPS = new Map([
  * usage-extractor routes are called by the Agents page's usage-counts card
  * (owner-approved on #453, 2026-11-07).
  */
-export const KNOWN_UI_GAPS_MAX = 45; // main's 52 (43 + ADR-0303 L11 5 SIEM routes + ADR-0256 (P32) 4, master decision on #725 2026-11-14) less the seven ADR-0241 (P21) routes
+export const KNOWN_UI_GAPS_MAX = 47; // main's 54 (48 + ADR-0256 (P32) 4, master decision on #725 2026-11-14; + ADR-0056 §5 amendment (lane L7) 2 copilot red-team gate routes) less the seven ADR-0241 (P21) routes
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 

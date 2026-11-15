@@ -93,7 +93,7 @@ describe("boot re-pins before it listens", () => {
         bootstrapToken: "repin-boot-token",
         dataKey: "a".repeat(64),
         log: () => {},
-        env: { PATH: process.env.PATH, VITEST: "1" } as NodeJS.ProcessEnv,
+        env: { PATH: process.env.PATH, VITEST: "1", REGULAIT_DEV_PRIVILEGED_DB_LOGIN: "1" } as NodeJS.ProcessEnv,
       }),
     ).rejects.toBeInstanceOf(ManifestDigestRepinBootError);
     expect(await listening(port)).toBe(false);
@@ -112,7 +112,7 @@ describe("boot re-pins before it listens", () => {
       bootstrapToken: "repin-boot-token",
       dataKey: "a".repeat(64),
       log: (l) => lines.push(l),
-      env: { PATH: process.env.PATH, VITEST: "1" } as NodeJS.ProcessEnv,
+      env: { PATH: process.env.PATH, VITEST: "1", REGULAIT_DEV_PRIVILEGED_DB_LOGIN: "1" } as NodeJS.ProcessEnv,
     });
     app = started.app;
     const [row] = await db.select().from(mcpServers).where(eq(mcpServers.id, serverId));
