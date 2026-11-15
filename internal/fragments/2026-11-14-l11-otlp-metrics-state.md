@@ -1,0 +1,2 @@
+<!-- fold: state-recap -->
+**2026-11-14 - L11 slice 1: OTLP metrics push ([ADR-0301](../decisions/0301-otlp-metrics-push.md), no migration).** The ADR-0185 meter gains a second reader; `REGULAIT_METRICS_OTLP_ENDPOINT` (off by default) pushes the same series as OTLP/JSON (official `@opentelemetry/otlp-transformer` serializer) through the egress-guarded fetch every 10 to 3600 s, counted in `regulait_metrics_otlp_pushes_total{outcome}`. Ambient `OTEL_*` variables are not read.

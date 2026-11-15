@@ -103,6 +103,7 @@ export const MACHINE_ONLY = new Map([
   // ---- runner and executor channels (credentialed machines) ----------------
   ["* /v1/engine-runner/*", { reason: "runner channel: only an engine runner credential reaches these (ADR-0187, route-classes.ts; ADR-0188 S7 adds the key rotation route; ADR-0190 I5 adds the three task routes; ENG-IMG removes the runner artifact route)", matches: 9 }],
   ["POST /v1/third-party-ingest/defenseclaw/records", "third-party exporter channel: a customer's DefenseClaw HTTP JSONL exporter posts here with its source's write-only rgti_ token, never a person (ADR-0261)"],
+  ["POST /v1/third-party-ingest/defenseclaw/otlp/v1/logs", "third-party exporter channel: a customer's DefenseClaw OTLP/HTTP logs exporter (protobuf or JSON) posts here with its source's write-only rgti_ token, never a person (ADR-0302)"],
   ["* /v1/endpoint-agent/*", { reason: "endpoint agent channel: the agent's install step (bulk enrolment token), its registration (device ticket) and its own DPoP-bound self token reach these, never a person (ADR-0195 SD4b)", matches: 5 }],
   ["* /v1/executor-channel/*", { reason: "executor channel: only an enrolled executor reaches these (ADR-0190; I4 adds the two stdio session routes, I5 the two task input routes)", matches: 11 }],
 
@@ -181,11 +182,11 @@ export const INDIRECT_UI_CALLS = new Map([
     ["GET /v1/virtual-keys/export.xlsx", "apps/web/src/views/admin/identity/VirtualKeysPage.tsx"],
     ["GET /v1/virtual-keys/:keyId/usage/export.xlsx", "apps/web/src/views/admin/identity/VirtualKeysPage.tsx"],
     ["GET /v1/admin/credentials/export.xlsx", "apps/web/src/views/admin/identity/CredentialsPage.tsx"],
-    ["GET /v1/workload-identities/export.xlsx", "apps/web/src/views/admin/identity/WorkloadIdentitiesPage.tsx"],
-    ["GET /v1/auth/link-requests/export.xlsx", "apps/web/src/views/admin/identity/SsoPage.tsx"],
-    ["GET /v1/chatops/identity-links/export.xlsx", "apps/web/src/views/admin/governance/ChatOpsPage.tsx"],
-    ["GET /v1/agents/export.xlsx", "apps/web/src/views/admin/integrations/AgentsPage.tsx"],
-    ["GET /v1/licenses/verifications/export.xlsx", "apps/web/src/views/admin/settings/LicensingPage.tsx"],
+    ["GET /v1/workload-identities/export.xlsx", "apps/web/src/views/admin/identity/WorkloadIdentitySubpages.tsx"],
+    ["GET /v1/auth/link-requests/export.xlsx", "apps/web/src/views/admin/identity/LinkRequestsPage.tsx"],
+    ["GET /v1/chatops/identity-links/export.xlsx", "apps/web/src/views/admin/governance/ChatIdentityLinksPage.tsx"],
+    ["GET /v1/agents/export.xlsx", "apps/web/src/views/admin/integrations/AgentCatalogPage.tsx"],
+    ["GET /v1/licenses/verifications/export.xlsx", "apps/web/src/views/admin/settings/LicenceVerificationsPage.tsx"],
     // P2 batch C: the workflows, engines, cost and operations lists
     ["GET /v1/admission/skills/export.xlsx", "apps/web/src/views/admin/governance/AdmissionReviewPage.tsx"],
     ["GET /v1/billing/statements/export.xlsx", "apps/web/src/views/admin/cost/BillingHistory.tsx"],
@@ -366,6 +367,8 @@ export const INDIRECT_UI_CALLS = new Map([
  * until the entry is deleted, and KNOWN_UI_GAPS_MAX is lowered to match.
  */
 export const KNOWN_UI_GAPS = new Map([
+  ["GET /v1/copilot/redteam-gate", { does: "reads the copilot narrator red-team gate settings and, for one agent, whether it may narrate and which run decided it", tracking: "ADR-0056 §5 amendment (lane L7): the brief is API-only; the settings card and per-narrator status are for the design builder on #453. RAISED for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["PUT /v1/copilot/redteam-gate", { does: "turns the copilot narrator red-team gate on or off, or changes how long a passing run counts (relaxing is a settings_relax step-up, audited)", tracking: "ADR-0056 §5 amendment (lane L7): the brief is API-only; the settings card is for the design builder on #453. RAISED for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["GET /v1/usage-extractors", { does: "reads the org switch and every agent's active usage-mapping version", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["PUT /v1/usage-extractors/enabled", { does: "turns the usage extractor on (settings_relax step-up) or off", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["GET /v1/agents/:agentId/usage-extractor/versions", { does: "lists an agent's usage-mapping versions with each one's latest sample test", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
@@ -373,6 +376,10 @@ export const KNOWN_UI_GAPS = new Map([
   ["POST /v1/agents/:agentId/usage-extractor/versions/:versionId/test", { does: "tests a version against a sample response and the counts the admin expects", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["POST /v1/agents/:agentId/usage-extractor/versions/:versionId/activate", { does: "activates a version whose latest test passed (settings_relax step-up)", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
   ["POST /v1/agents/:agentId/usage-extractor/deactivate", { does: "returns an agent to its adapter's built-in usage counts", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["POST /v1/mcp-catalogue/presets/:preset", { does: "seeds the official MCP Registry or awesome-mcp-servers as a disabled catalogue source", tracking: "ADR-0256 (P32): the brief is API and backend only; the deduped catalogue page, preset buttons and bundle upload are posted on #453. RAISED FROM 7 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["POST /v1/mcp-catalogue/bundles", { does: "imports a signed offline catalogue bundle (air-gapped installs)", tracking: "ADR-0256 (P32): the brief is API and backend only; the deduped catalogue page, preset buttons and bundle upload are posted on #453. RAISED FROM 7 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["GET /v1/mcp-catalogue/bundle", { does: "exports one source as an unsigned bundle, to be signed offline", tracking: "ADR-0256 (P32): the brief is API and backend only; the deduped catalogue page, preset buttons and bundle upload are posted on #453. RAISED FROM 7 for review: the master decides on the PR whether to keep this or build the screen first" }],
+  ["GET /v1/mcp-catalogue", { does: "reads the deduped catalogue: sources, vetting, paid/x402 flag and admission state", tracking: "ADR-0256 (P32): the brief is API and backend only; the deduped catalogue page, preset buttons and bundle upload are posted on #453. RAISED FROM 7 for review: the master decides on the PR whether to keep this or build the screen first" }],
   // batch U4 (ui-gaps-details) closed the last 22. The entries below are the ADR-0236 (P11) MCP bundle routes:
   // the owner decided on 2026-11-07 (#697) to ship them API-first while the Governed Designer builds the bundle
   // screen requested on #453. Building that screen closes these and lowers KNOWN_UI_GAPS_MAX back to 0.
@@ -435,7 +442,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 39; // main's 48 − 9 MCP pinning and high-risk routes closed by #823
+export const KNOWN_UI_GAPS_MAX = 45; // main's 54 − 9 MCP pinning and high-risk routes closed by #823
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 
