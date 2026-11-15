@@ -177,7 +177,7 @@ jobs:
           cat "$RUNNER_TEMP/gateway.log"; exit 1
         env:
           REGULAIT_LICENSE_KEYRING: ${{ runner.temp }}/license-keys
-          # ADR-0234 batch 7b: the first boot creates the regulait_runtime login through the owner connection and
+          # ADR-0234 batch 7b: the first boot creates the regulait_runtime_<database> login through the owner connection and
           # serves every request on it, so the journeys below run with row-level security binding the gateway
           REGULAIT_INSTALL_SECRETS_DIR: ${{ runner.temp }}/install-secrets
 
