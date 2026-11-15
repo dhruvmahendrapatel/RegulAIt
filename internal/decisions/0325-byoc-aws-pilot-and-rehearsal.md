@@ -1,4 +1,4 @@
-# ADR-0325: BYOC on AWS for the pilot: a customer-run Terraform stack, rehearsed in regulait-dev through a GitHub OIDC role
+# ADR-0325: BYOC on AWS as a durable product path: a customer-run Terraform stack, rehearsed in regulait-dev through a GitHub OIDC role
 
 - **Status**: Accepted (owner direction 2026-11-15, lane E10 brief)
 - **Date**: 2026-11-15
@@ -12,10 +12,17 @@
 
 ## Context
 
-The owner has a pilot with a large engineering organisation in about two weeks (direction 2026-11-15). It runs BYOC in
-the customer's AWS account, all pilot data stays in that account, and the customer's own team installs it from our
-runbook in under a day. We have never applied the BYOC stack to a real AWS account, so the runbook needs a rehearsal
-that we can repeat on every change, without anyone holding an AWS key.
+The first direction (2026-11-15, morning) was a two-week pilot: BYOC in the customer's AWS account, with all data
+staying there, installed by the customer's own team from our runbook in under a day. The owner revised it the same
+day: **the pilot is no longer the driver.** It is handled separately and not in this lane, and no pilot branch is
+created here. This ADR builds the durable product path. It has three parts:
+
+- reusable, project-agnostic Terraform modules in `infra/modules/`;
+- a repeatable install and teardown that any customer can run in their own account, within a working day;
+- the regulait-dev rehearsal as the automated test of that path, repeatable on every change, without anyone holding
+  an AWS key.
+
+We have never applied the BYOC stack to a real AWS account, so the rehearsal comes first.
 
 The owner authorised (2026-11-15, exact scope) `terraform apply` into **our dev account regulait-dev only**:
 non-production, every resource tagged `purpose=rehearsal`, torn down after each rehearsal, every apply logged in the
