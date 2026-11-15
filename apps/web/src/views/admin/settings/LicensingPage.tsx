@@ -19,7 +19,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { DataList } from "../../../ui/DataList";
+import { ListPreview } from "../../../ui/ListPreview";
+import { VERIFICATION_COLUMNS, VERIFICATIONS_EMPTY, type VerificationRow } from "./licenceVerifications";
 import { Badge, Button, Card, EmptyState, Field, Table, Textarea } from "../../../ui/kit";
 import { KV, QueryGate, Stat, useAction } from "../adminKit";
 import a from "../admin.module.css";
@@ -72,16 +73,6 @@ interface LicenseRow {
   signingKeyId: string;
   expiresAt: string;
   installedAt: string;
-}
-interface VerificationRow {
-  id: string;
-  at: string;
-  trigger: string;
-  ok: boolean;
-  state: string;
-  ruleId: string;
-  reason: string;
-  signingKeyId: string | null;
 }
 
 const stateTone = (s: Status["state"]) =>
@@ -372,39 +363,19 @@ export default function LicensingPage() {
             )}
           </Card>
 
-          <Card title="Verification trail">
-            <DataList<VerificationRow>
-              listId="licence-verifications"
-              noun="verifications"
-              endpoint="/v1/licenses/verifications"
-              exportPath="/v1/licenses/verifications/export.xlsx"
-              queryKey={["admin", "license-verifications", "list"]}
-              legacyKey="verifications"
-              defaultSort={{ key: "at", dir: "desc" }}
-              rowKey={(c) => c.id}
-              empty={
-                <EmptyState
-                  title="Nothing has ever been verified on this deployment"
-                  body="Every install, every operator-driven check and every refusal lands here — including artifacts that were refused and therefore never became a licence."
-                />
-              }
-              columns={[
-                { key: "at", header: "When", main: true, sortable: true, render: (c) => ago(c.at) },
-                { key: "trigger", header: "Trigger", main: true, sortable: true, render: (c) => c.trigger },
-                {
-                  key: "ok",
-                  header: "",
-                  srHeader: "Status",
-                  main: true,
-                  required: "A refused check is a warning, so status is always shown",
-                  render: (c) => <Badge tone={c.ok ? "ok" : "danger"}>{c.ok ? "ok" : "REFUSED"}</Badge>,
-                },
-                { key: "state", header: "State", main: true, sortable: true, render: (c) => c.state },
-                { key: "rule", header: "Rule", main: true, sortable: true, render: (c) => <code>{c.ruleId}</code> },
-                { key: "reason", header: "Reason", main: true, render: (c) => <span className={v.faint}>{c.reason}</span> },
-              ]}
-            />
-          </Card>
+          <ListPreview<VerificationRow>
+            title="Verification trail"
+            noun="verifications"
+            endpoint="/v1/licenses/verifications"
+            legacyKey="verifications"
+            queryKey={["admin", "license-verifications"]}
+            sort={{ key: "at", dir: "desc" }}
+            attention={[{ label: "refused", filters: { ok: "false" } }]}
+            columns={VERIFICATION_COLUMNS}
+            rowKey={(c) => c.id}
+            viewAll="/admin/licensing/verifications"
+            empty={VERIFICATIONS_EMPTY}
+          />
         </QueryGate>
       </div>
     </>
