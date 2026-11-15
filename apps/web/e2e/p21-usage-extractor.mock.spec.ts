@@ -7,7 +7,8 @@
  *
  * Covered: the list, create (with a 422), test fail and pass, Activate disabled until a pass, activate with the
  * step-up, deactivate, the switch with its step-up (and none to turn it off), the fallback count ("not measured",
- * never 0), the error with Retry, the empty state, the refusals inline, and axe in light and dark.
+ * never 0), the error with Retry, the empty state, the refusals inline, a failed or pending switch read (never shown as
+ * "off"), and axe in light and dark.
  * Synthetic names only.
  */
 import { expect, test, type Page, type Route } from "@playwright/test";
@@ -55,12 +56,16 @@ interface Opts {
   activate409?: boolean;
   /** answer every test with the 413 */
   sample413?: boolean;
+  /** start with the switch on and version 1 (its latest test passed) active for Claims triage */
+  startOn?: boolean;
+  /** the switch's own read (GET /v1/usage-extractors): fail it with a 500, or never answer it */
+  switchRead?: "fail" | "hang";
 }
 
 async function mockApi(page: Page, opts: Opts = {}) {
   const calls: Array<{ method: string; path: string; body: unknown }> = [];
-  let enabled = false;
-  let activeId: string | null = null;
+  let enabled = opts.startOn === true;
+  let activeId: string | null = opts.startOn ? V1 : null;
   let failVersions = opts.failVersions ?? 0;
   const versions: Version[] = [
     {
@@ -84,6 +89,7 @@ async function mockApi(page: Page, opts: Opts = {}) {
       latestTest: null,
     },
   ];
+  if (opts.startOn) versions[1]!.latestTest = { id: "t-1", versionId: V1, passed: true, failure: null, testedAt: "2026-11-03T09:05:00.000Z" };
   await page.route("**/*", async (route) => {
     const req = route.request();
     const p = new URL(req.url()).pathname;
@@ -101,6 +107,8 @@ async function mockApi(page: Page, opts: Opts = {}) {
     if (p === "/v1/agents") return json(route, { agents });
     if (p === "/v1/users") return json(route, { users });
     if (p === "/v1/custom-model-providers") return json(route, { providers: [] });
+    if (p === "/v1/usage-extractors" && opts.switchRead === "hang") return; // never answered: the read stays pending
+    if (p === "/v1/usage-extractors" && opts.switchRead === "fail") return json(route, { error: "internal_error" }, 500);
     if (p === "/v1/usage-extractors") {
       const a = versions.find((v) => v.id === activeId);
       return json(route, { enabled, active: a ? [{ agentId: a.agentId, versionId: a.id, version: a.version, testId: a.latestTest!.id, activatedBy: "ada", activatedAt: NOW }] : [] });
@@ -379,6 +387,21 @@ test.describe("ADR-0241 (P21): usage counts — custom mapping", () => {
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
     expect(overflow, "horizontal page overflow in px").toBeLessThanOrEqual(0);
   });
+
+  for (const [read, what] of [["fail", "a failed"], ["hang", "a pending"]] as const) {
+    test(`review of #744: ${what} switch read never shows the switch as off`, async ({ page }) => {
+      // the switch is on and version 1 is active; only the switch's own read is missing
+      await mockApi(page, { startOn: true, switchRead: read });
+      const card = await openTriage(page);
+      const tile = card.getByTestId("usage-counting-with");
+      await expect(tile).toContainText("Version 1");
+      // the versions read says the switch is on, so the tile says nothing about it, and never "off"
+      await expect(tile).not.toContainText("switch is off");
+      await expect(tile).not.toContainText("unknown");
+      await expect(card.getByRole("switch", { name: "Use custom mappings" })).toHaveCount(0);
+      if (read === "fail") await expectAxeClean(page, "Usage counts: the switch read failed");
+    });
+  }
 
   test("a failed read shows the error with Retry; an agent with no versions shows the empty state", async ({ page }) => {
     // two: the app retries a failed read once before it shows the error

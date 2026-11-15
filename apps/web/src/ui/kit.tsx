@@ -34,7 +34,7 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: ButtonVariant;
   size?: "md" | "sm";
   /**
-   * Busy or not allowed yet, but still focusable (DESIGN_GUIDELINES: `aria-disabled` plus a guard, not `disabled`):
+   * Busy (a request in flight), but still focusable (DESIGN_GUIDELINES: `aria-disabled` plus a guard, not `disabled`):
    * focus stays on the button mid-request, so a step-up dialog can return to it. A click does nothing, and a submit
    * button does not submit.
    */
@@ -50,7 +50,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
   { variant = "default", size = "md", className, type, busy, onClick, ...rest },
   ref,
 ) {
-  const cls = [variantClass[variant], size === "sm" ? s.btnSm : "", busy ? s.btnBusy : "", className ?? ""]
+  const cls = [variantClass[variant], size === "sm" ? s.btnSm : "", className ?? ""]
     .filter(Boolean)
     .join(" ");
   return (

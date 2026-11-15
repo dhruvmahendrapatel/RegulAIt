@@ -95,6 +95,9 @@ export function UsageMappingCard(props: { agents: AdminAgent[] }) {
   const agent = props.agents.find((x) => x.id === agentId);
   const name = agent?.name ?? "this agent";
   const enabled = state.data?.enabled === true;
+  // review of #744: the switch's own read can be pending or failed; the versions read carries the same flag, so the
+  // tile uses that, and says "unknown" when neither is known, never "off" (DESIGN_GUIDELINES: honest states)
+  const switchKnown: boolean | null = state.data?.enabled ?? versions.data?.enabled ?? null;
   const list: UsageExtractorVersion[] = Array.isArray(versions.data?.versions) ? versions.data.versions : [];
   const activeId = versions.data?.activeVersionId ?? null;
   const active = list.find((x) => x.id === activeId) ?? null;
@@ -222,10 +225,12 @@ export function UsageMappingCard(props: { agents: AdminAgent[] }) {
                             x.id === activeId ? null : (
                               <Button
                                 size="sm"
-                                busy={!gate.allowed || rowAct.busy}
+                                busy={rowAct.busy}
+                                // not allowed yet is its own state, not "busy": focusable, aria-disabled, a click does nothing
+                                aria-disabled={!gate.allowed || undefined}
                                 aria-describedby={gate.reason ? whyId : undefined}
                                 aria-label={`Activate version ${x.version}`}
-                                onClick={() => activate(x)}
+                                onClick={() => gate.allowed && activate(x)}
                               >
                                 Activate
                               </Button>
@@ -349,7 +354,7 @@ export function UsageMappingCard(props: { agents: AdminAgent[] }) {
                       <span>
                         {since}
                         {by}
-                        {enabled ? "" : " · not used while the switch is off"}
+                        {switchKnown === null ? " · switch state unknown" : switchKnown ? "" : " · not used while the switch is off"}
                       </span>
                     </>
                   ) : (
