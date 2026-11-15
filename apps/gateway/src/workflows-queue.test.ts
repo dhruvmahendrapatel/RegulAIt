@@ -235,6 +235,33 @@ describe("ADR-0283: automatic retry with backoff, one chain per stage execution 
     expect(await audits(id, "workflow:stage-retry-attempt")).toHaveLength(0);
   });
 
+  it("owner decision 2026-11-15: a template that turns retry on is audited; one without retry is not", async () => {
+    const create = async (name: string, retry?: Record<string, unknown>) => {
+      const r = await app.inject({
+        method: "POST",
+        headers: AUTH,
+        url: "/v1/workflows/templates",
+        payload: {
+          name,
+          definition: {
+            workflow: name,
+            stages: [
+              { id: "intake", type: "trigger" },
+              { id: "branch", type: "git_operation", action: "create_branch", connection: `${name}-git`, repo: `${name}/app`, ...(retry ? { retry } : {}) },
+            ],
+          },
+        },
+      });
+      expect(r.statusCode).toBe(201);
+      return db.select().from(auditLog).where(and(eq(auditLog.objectId, r.json().id), eq(auditLog.ruleId, "workflow:template-stage-retry-enabled")));
+    };
+    expect(await create("l5-retry-default-off")).toHaveLength(0);
+    const on = await create("l5-retry-opt-in", { maxAttempts: 3, delaySeconds: 5 });
+    expect(on).toHaveLength(1);
+    expect(on[0]!.objectType).toBe("workflow_template");
+    expect(on[0]!.detail).toMatchObject({ stages: [{ stageId: "branch", type: "git_operation", retry: { maxAttempts: 3, delaySeconds: 5 } }] });
+  });
+
   it("a template with no retry policy schedules nothing (the strict default)", async () => {
     const tpl = await app.inject({
       method: "POST",

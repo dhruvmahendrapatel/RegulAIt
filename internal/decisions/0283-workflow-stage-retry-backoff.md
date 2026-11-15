@@ -31,7 +31,7 @@ backoff under it, with the audit row kept in the transition's transaction.
      failure is an operator situation and does not go through `execution_failed`), and a governance refusal.
    - Automatic retry of a git stage re-runs a governed external effect without a person. That is why it is
      opt-in per template rather than on by default; each attempt passes the same claim and completion guard as a human
-     `/advance`. **Owner question open:** whether a default policy should apply to git stages.
+     `/advance`. The owner decided there is no default policy for git stages (see the owner decision below).
 2. **Scheduled in the failure's transaction.** `applyEvent` is the one place every transition commits. When the event is
    `execution_failed` and the failing stage has a policy, it sends one job to `workflow-stage-retry` through the same
    transaction (pg-boss `send` with its `fromDrizzle` adapter over our transaction) and writes
@@ -85,6 +85,15 @@ backoff under it, with the audit row kept in the transition's transaction.
    status NOT IN ('completed', 'aborted', 'denied', 'rolled_back')`, built `CONCURRENTLY` by `runMigrations` through
    `CONCURRENT_INDEXES` (the 0210 pattern) and declared in `schema.ts`. It serves `guardProjectPlanOnly` and the retry
    handler's open-instance reads.
+
+## Owner decision (2026-11-15)
+
+Git stages (push, PR creation, merge) do **not** retry by default: a failure stops, and the stage waits at
+`awaiting_execution` for a person (`/advance`). An admin may turn on capped retries per workflow template (the stage's
+`retry` policy, at most 10 attempts, bounded delays), and turning it on is audited: creating a template whose stages
+carry `retry` writes `workflow:template-stage-retry-enabled` (object `workflow_template`, the stages and their
+policies, the admin as actor) in the create's own transaction. Main already had no default policy; the audit row is
+what this decision added. Test: `workflows-queue.test.ts` ("a template that turns retry on is audited").
 
 ## Consequences
 
