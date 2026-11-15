@@ -6,8 +6,9 @@
 //	regulait-agent run-once                         one collection and upload
 //	regulait-agent run                              run-once on the org's schedule until stopped
 //	regulait-agent preview -manifest FILE           collect against a local manifest and print the facts; sends nothing
-//	regulait-agent hook claude-code -policy FILE    on-device enforcement (ADR-0298, default off): Claude Code's
-//	                                                PreToolUse hook for MCP tool calls; reads stdin, never the network
+//	regulait-agent hook AGENT -policy FILE          on-device enforcement (ADR-0298, ADR-0330, default off): the
+//	                                                MCP tool-call hook for AGENT = claude-code, cursor, copilot-cli
+//	                                                or codex; reads stdin, never the network
 //	regulait-agent version
 package main
 
@@ -31,7 +32,7 @@ import (
 )
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: regulait-agent redeem-ticket [-ticket-gid N] | register | run-once | run | preview -manifest FILE | hook claude-code -policy FILE | version")
+	fmt.Fprintln(os.Stderr, "usage: regulait-agent redeem-ticket [-ticket-gid N] | register | run-once | run | preview -manifest FILE | hook claude-code|cursor|copilot-cli|codex -policy FILE | version")
 	os.Exit(2)
 }
 
@@ -115,14 +116,21 @@ func preview(log *slog.Logger, file string) {
 	fmt.Println(string(out))
 }
 
-// hook answers one coding-agent hook call (ADR-0298). Every failure blocks: a missing or unverifiable policy denies
-// MCP tool calls, and a usage error exits 2, which the agent treats as a block. Nothing is sent anywhere.
+// hook answers one coding-agent hook call (ADR-0298, ADR-0330). Every failure blocks: a missing or unverifiable
+// policy denies MCP tool calls, and a usage error exits 2, which every supported agent treats as a block. Nothing is
+// sent anywhere.
 func hook(args []string) int {
-	if len(args) < 1 || args[0] != "claude-code" {
-		fmt.Fprintln(os.Stderr, "RegulAIt: usage: regulait-agent hook claude-code -policy FILE")
+	const usage = "RegulAIt: usage: regulait-agent hook claude-code|cursor|copilot-cli|codex -policy FILE"
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, usage)
 		return enforce.ExitBlock
 	}
-	fs := flag.NewFlagSet("hook claude-code", flag.ContinueOnError)
+	run, ok := enforce.Hooks[args[0]]
+	if !ok {
+		fmt.Fprintln(os.Stderr, usage)
+		return enforce.ExitBlock
+	}
+	fs := flag.NewFlagSet("hook "+args[0], flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	file := fs.String("policy", "", "the signed enforcement policy (regulait.endpoint-enforcement/1)")
 	if err := fs.Parse(args[1:]); err != nil || *file == "" {
@@ -134,7 +142,7 @@ func hook(args []string) int {
 		policy, _ = enforce.LoadPolicy(f, enforce.CompiledKeyring, time.Now())
 		_ = f.Close()
 	}
-	stdout, stderr, code := enforce.HookClaudeCode(os.Stdin, policy)
+	stdout, stderr, code := run(os.Stdin, policy)
 	if len(stdout) > 0 {
 		_, _ = os.Stdout.Write(stdout)
 	}

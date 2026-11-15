@@ -28,3 +28,28 @@ bash scripts/package-linux.sh <bin> <out> <version>   # unsigned .deb and .rpm
 | `internal/auth`, `internal/transport` | ES256 JOSE, the DPoP-bound token client, the issuer-only TLS 1.3 client |
 | `internal/agent` | Config, enrolment, the cycle, the signed upload and key rotation |
 | `internal/gatewaytest`, `internal/pack/packtest` | Test doubles: a strict fake gateway and a run-time pack signer |
+
+## On-device enforcement hooks (ADR-0298, ADR-0330; default off)
+
+`regulait-agent hook AGENT -policy FILE` answers one MCP tool-call hook for AGENT = `claude-code`, `cursor`,
+`copilot-cli` or `codex`. It reads the hook input on stdin and the signed policy file, and never uses the network.
+Nothing registers it: an admin opts in per agent through that agent's managed location. Until the SD4 signer pins a key,
+no policy verifies, so a registered hook denies every MCP call. ADR-0330 §2 records what each agent's contract can and
+cannot see. In particular, Codex cannot fail closed, and Copilot CLI denies every non-built-in tool in `enforce` mode.
+
+Registrations (paths are examples; use absolute paths with no shell metacharacters):
+
+- **Claude Code**, managed settings: a `PreToolUse` hook with matcher `mcp__.*`, exec form
+  `"args": ["/usr/local/bin/regulait-agent", "hook", "claude-code", "-policy", "/etc/regulait/policy.json"]`,
+  `"onFailure": "block"`, and `allowManagedHooksOnly: true`.
+- **Cursor**, enterprise `hooks.json` (`/etc/cursor/hooks.json`, `/Library/Application Support/Cursor/hooks.json` or
+  `C:\ProgramData\Cursor\hooks.json`):
+  `{"version": 1, "hooks": {"beforeMCPExecution": [{"command": "/usr/local/bin/regulait-agent hook cursor -policy /etc/regulait/policy.json", "failClosed": true}]}}`.
+  Team (dashboard) hooks cannot set `failClosed` and are not supported.
+- **Copilot CLI**, a root-owned policy file `/etc/github-copilot/policy.d/regulait.json` (Windows:
+  `C:\ProgramData\GitHub\Copilot\policy.d\`):
+  `{"version": 1, "hooks": {"preToolUse": [{"type": "command", "exec": "/usr/local/bin/regulait-agent", "args": ["hook", "copilot-cli", "-policy", "/etc/regulait/policy.json"]}]}}`.
+- **Codex**, `/etc/codex/requirements.toml` (Windows: `%ProgramData%\OpenAI\Codex\requirements.toml`): a `[hooks]`
+  `PreToolUse` command `/usr/local/bin/regulait-agent hook codex -policy /etc/regulait/policy.json`, with
+  `allow_managed_hooks_only = true` and `[features] hooks = true`. Pair it with the `[mcp_servers.<name>] identity`
+  allow-list.

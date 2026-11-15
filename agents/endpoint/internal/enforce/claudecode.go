@@ -35,16 +35,9 @@ type claudeInput struct {
 // ParseClaudeCodePreToolUse reads a PreToolUse hook input. Unknown fields are expected (the contract grows) and
 // ignored; tool_input is never decoded, so arguments are never read.
 func ParseClaudeCodePreToolUse(r io.Reader) (Call, error) {
-	raw, err := io.ReadAll(io.LimitReader(r, maxEventBytes+1))
-	if err != nil {
-		return Call{}, err
-	}
-	if len(raw) > maxEventBytes {
-		return Call{}, errors.New("hook input too large")
-	}
 	var in claudeInput
-	if err := json.NewDecoder(bytes.NewReader(raw)).Decode(&in); err != nil {
-		return Call{}, errors.New("hook input is not JSON")
+	if err := readHookInput(r, &in); err != nil {
+		return Call{}, err
 	}
 	if in.HookEventName != "PreToolUse" {
 		return Call{}, errors.New("not a PreToolUse event")
@@ -52,7 +45,7 @@ func ParseClaudeCodePreToolUse(r io.Reader) (Call, error) {
 	if in.ToolName == "" {
 		return Call{}, errors.New("no tool_name")
 	}
-	c := Call{Tool: in.ToolName}
+	c := Call{Agent: AgentClaudeCode, Tool: in.ToolName}
 	if in.MCPServer != nil {
 		c.MCP = &MCPCall{Server: in.MCPServer.Name, Source: in.MCPServer.Source}
 	} else if strings.HasPrefix(in.ToolName, "mcp__") {
@@ -63,6 +56,27 @@ func ParseClaudeCodePreToolUse(r io.Reader) (Call, error) {
 	return c, nil
 }
 
+// readHookInput reads one bounded JSON hook input. Unknown fields are expected (every contract grows) and ignored.
+func readHookInput(r io.Reader, v any) error {
+	raw, err := io.ReadAll(io.LimitReader(r, maxEventBytes+1))
+	if err != nil {
+		return err
+	}
+	if len(raw) > maxEventBytes {
+		return errors.New("hook input too large")
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if err := dec.Decode(v); err != nil {
+		return errors.New("hook input is not JSON")
+	}
+	if dec.More() {
+		return errors.New("hook input has trailing data")
+	}
+	return nil
+}
+
+// mcpServerFromToolName reads the server out of an mcp__<server>__<tool> name. Only Codex has no better source; for
+// Claude Code it names the server of a call that arrived without provenance (which is then denied anyway).
 func mcpServerFromToolName(tool string) string {
 	rest := strings.TrimPrefix(tool, "mcp__")
 	if i := strings.Index(rest, "__"); i > 0 {
@@ -82,27 +96,35 @@ type claudeOutput struct {
 // RenderClaudeCode turns a decision into stdout bytes and an exit code. A deny is written both ways (JSON and exit
 // 2) so it blocks even if the JSON were rejected by a future schema.
 func RenderClaudeCode(d Decision) (stdout []byte, stderr string, exit int) {
-	if d.Verdict == NoDecision {
+	// "allow" would skip the user's permission prompt; an allowed server stays subject to Claude Code's own
+	// permission flow, so an allow is reported as no decision
+	return renderPreToolUseDeny(d)
+}
+
+// renderPreToolUseDeny is the hookSpecificOutput deny shape Claude Code and Codex share; anything but a deny is no
+// output at all.
+func renderPreToolUseDeny(d Decision) (stdout []byte, stderr string, exit int) {
+	if d.Verdict != Deny {
 		return nil, "", 0
 	}
 	var out claudeOutput
 	out.HookSpecificOutput.HookEventName = "PreToolUse"
-	out.HookSpecificOutput.PermissionDecisionReason = d.Reason
-	if d.Verdict == Allow {
-		// "allow" would skip the user's permission prompt; an allowed server stays subject to Claude Code's own
-		// permission flow, so an allow is reported as no decision
-		return nil, "", 0
-	}
 	out.HookSpecificOutput.PermissionDecision = "deny"
+	out.HookSpecificOutput.PermissionDecisionReason = d.Reason
 	b, _ := json.Marshal(out)
 	return b, d.Reason, ExitBlock
+}
+
+// unreadable is the answer to a hook input that cannot be parsed: a block, with the reason but no input echoed.
+func unreadable(err error) string {
+	return "RegulAIt: the enforcement hook could not read this tool call (" + err.Error() + "), so it is blocked."
 }
 
 // HookClaudeCode is the whole hook: parse, decide, render. A parse failure on an MCP-capable hook is a deny.
 func HookClaudeCode(stdin io.Reader, policy *Policy) (stdout []byte, stderr string, exit int) {
 	call, err := ParseClaudeCodePreToolUse(stdin)
 	if err != nil {
-		return nil, "RegulAIt: the enforcement hook could not read this tool call (" + err.Error() + "), so it is blocked.", ExitBlock
+		return renderPreToolUseDeny(Decision{Verdict: Deny, Reason: unreadable(err)})
 	}
 	return RenderClaudeCode(Decide(policy, call))
 }
