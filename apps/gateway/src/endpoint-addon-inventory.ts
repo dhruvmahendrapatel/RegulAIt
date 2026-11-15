@@ -37,7 +37,8 @@ import {
   type Db,
   type SQL,
 } from "@regulait/db";
-import { MCP_ADMISSION_SEVERITIES, type McpAdmissionSeverity } from "@regulait/shared";
+import { AI_BOM_INSTALL_SUBJECT_ID, aiBomRef, MCP_ADMISSION_SEVERITIES, type McpAdmissionSeverity } from "@regulait/shared";
+import { ENDPOINT_IDENTITY_RE } from "./endpoint-mcp-config.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 export type EndpointAddonKind = (typeof ENDPOINT_ADDON_KINDS)[number];
@@ -54,7 +55,8 @@ const SCANNER_FOR_KIND: Record<EndpointAddonKind, "mcpscanner" | "skillscanner" 
   skill: "skillscanner",
   plugin: null,
 };
-const SEVERITY_RANK: Record<McpAdmissionSeverity, number> = { low: 1, medium: 2, high: 3, critical: 4 };
+/** rank 1..4 in the shared severity order (low → critical), for SQL comparisons */
+const SEVERITY_RANK = Object.fromEntries(MCP_ADMISSION_SEVERITIES.map((s, i) => [s, i + 1])) as Record<McpAdmissionSeverity, number>;
 
 // ---------------------------------------------------------------------------
 // Projection from the discovery evidence
@@ -167,12 +169,11 @@ export async function projectEndpointAddons(db: Db): Promise<EndpointAddonProjec
 // Direct record contract (skills, plugins: facts the evidence tables do not hold)
 // ---------------------------------------------------------------------------
 
-const IDENTITY_RE = /^[A-Za-z0-9@[][A-Za-z0-9@._~/:+[\] -]{0,254}$/;
 export const endpointAddonSightingInput = z
   .object({
     kind: z.enum(ENDPOINT_ADDON_KINDS),
     identityKind: z.enum(ENDPOINT_ADDON_IDENTITY_KINDS),
-    identity: z.string().regex(IDENTITY_RE),
+    identity: z.string().regex(ENDPOINT_IDENTITY_RE),
     version: z.string().max(128).regex(/^[A-Za-z0-9._+~:-]*$/).default(""),
     contentDigest: z.string().regex(/^[0-9a-f]{64}$/).nullable().default(null),
     endpointPseudonym: z.string().regex(/^psn:[0-9a-f]{24}$/),
@@ -274,7 +275,7 @@ const filterShape = {
   atOrAbove: z.enum(MCP_ADMISSION_SEVERITIES).optional(),
   scanStatus: csv(ENDPOINT_ADDON_SCAN_STATUSES).optional(),
   addonId: z.string().uuid().optional(),
-  identity: z.string().regex(IDENTITY_RE).optional(),
+  identity: z.string().regex(ENDPOINT_IDENTITY_RE).optional(),
   version: z.string().max(128).optional(),
 };
 const versionsQuery = z.object(filterShape).strict();
@@ -389,9 +390,9 @@ function aiBomView(r: VersionRowDb) {
   if (!r.registry_mcp_server_id) return null;
   return {
     mcpServerId: r.registry_mcp_server_id,
-    // aiBomRef.mcp (packages/shared bom/ai-bom-cyclonedx.ts): the server's component in the install AI-BOM
-    bomRef: `service:mcp:${r.registry_mcp_server_id}`,
-    snapshots: `/v1/ai-bom/install/${NIL_UUID}/snapshots`,
+    // the server's component in the install AI-BOM (ADR-0189)
+    bomRef: aiBomRef.mcp(r.registry_mcp_server_id),
+    snapshots: `/v1/ai-bom/install/${AI_BOM_INSTALL_SUBJECT_ID}/snapshots`,
     note: "The AI-BOM entry describes the approved registry server, not the bytes on this endpoint.",
   };
 }
