@@ -8,14 +8,14 @@
 - **Migration**: none in slice 1; slice 2 adds `pending/rule_step_settings.sql` (settings and suggestions), numbered at merge
 - **Related**: [TOKEN_OPTIMIZATION_SPEC §8, §12](../product/TOKEN_OPTIMIZATION_SPEC.md), ADR-0172 (builder agents),
   ADR-0044 (eval harness), ADR-0176 (open source first), ADR-0180 (secure by default), ADR-0200 (3NF, security
-  checklist), ADR-0251 (one governed decision core), ADR-0252 (merge-time numbering), ADR-0328 (repetitive ask →
+  checklist), ADR-0251 (one governed decision core), ADR-0252 (merge-time numbering), the repetitive-ask lane item (repetitive ask →
   smaller model, the same shadow/approve/revert pattern)
 
 ## Context
 
 Owner direction (2026-11-15), quoted from the lane brief: "detect workflow steps that use AI but behave like fixed
 rules, and offer to replace them with a deterministic script to save cost." Opt-in local fine-tuning is post-pilot
-(ADR-0329) and is not part of this decision.
+(recorded separately, post-pilot) and is not part of this decision.
 
 Facts read from the code on `main` (19f2a1f1):
 
