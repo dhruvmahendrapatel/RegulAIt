@@ -53,7 +53,7 @@ const request = (over: Partial<AbacRequest> = {}): AbacRequest => ({
   },
   context: { deployModes: ["hosted"], environments: ["production"], rateLimitUsagePct: 0 },
   ...over,
-});
+}) as AbacRequest;
 
 const NIGHT_HIPAA_WRITE = `
 forbid (

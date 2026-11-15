@@ -40,6 +40,7 @@ import {
   OAUTH_REVOCATION_PATH,
   OAUTH_TOKEN_PATH,
   DEFENSECLAW_INGEST_PATH,
+  DEFENSECLAW_OTLP_LOGS_PATH,
 } from "@regulait/shared";
 
 /** ADR-0187: the routes only an engine runner credential reaches */
@@ -183,6 +184,8 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // ADR-0261 (P37): a DefenseClaw exporter holds no RegulAIt session or API key; the route authenticates IN-ROUTE on
   // the source's write-only `rgti_` token (hash lookup), and that token reaches nothing else.
   DEFENSECLAW_INGEST_PATH,
+  // ADR-0302 decision 2: the same exporter channel over OTLP/HTTP logs, the same in-route `rgti_` token
+  DEFENSECLAW_OTLP_LOGS_PATH,
 ]);
 
 export const NON_ADMIN_ROUTES = new Set([
@@ -898,6 +901,8 @@ export const NON_ADMIN_ROUTES = new Set([
   ...ENDPOINT_AGENT_ENROLMENT_PATHS.map((p) => `POST ${p}`),
   // ADR-0261 (P37): the third-party exporter route (authenticated in-route by its source token)
   `POST ${DEFENSECLAW_INGEST_PATH}`,
+  // ADR-0302 decision 2: its OTLP/HTTP logs twin
+  `POST ${DEFENSECLAW_OTLP_LOGS_PATH}`,
 
   // ADR-0189 slice B4 — the Decision BOM and AI BOM reads, bundles and the
   // online verifier. The gate is `bom_export_roles` (§7, §9), checked IN THE
@@ -937,6 +942,67 @@ export const NON_ADMIN_ROUTES = new Set([
 export type RouteAuthClass = "public" | "scim-token" | "engine-runner" | "user" | "admin";
 
 const SCIM_ROUTE_SET: ReadonlySet<string> = new Set<string>(SCIM_ROUTES);
+
+/** ADR-0234 batch 7a: the exempt routes that create or link a user from an identity provider's assertion */
+const IDENTITY_PROVISIONING_EXEMPT: ReadonlySet<string> = new Set<string>([
+  "/auth/oidc/callback",
+  "/auth/link/confirm",
+  "/auth/saml/:providerId/acs",
+]);
+/** ADR-0234 batch 7a: the exempt routes that route or decide an approval (signed in-route by the platform) */
+const APPROVAL_EXEMPT: ReadonlySet<string> = new Set<string>([
+  "/v1/pm/webhooks/:connectionName",
+  "/v1/chatops/:connectionName/interactions",
+]);
+
+/** the closed set of reasons an auth-exempt route may run under (a subset of RLS_SYSTEM_REASONS) */
+export type ExemptRouteRlsReason = "authenticate" | "identity_provisioning" | "approval_maintenance" | "public_ingest";
+
+/**
+ * ADR-0234 batch 7a: the named RLS system reason an auth-exempt route runs under. Such a route resolves no principal,
+ * so it used to run with no scope at all (every row on a superuser login, zero rows on a non-superuser one). Each now
+ * runs under the narrowest registered reason that fits what it does:
+ *   - SCIM, and the sign-in callbacks that create or link a user: `identity_provisioning`;
+ *   - every other `/auth/*` route (login, MFA, logout, provider lists): `authenticate`;
+ *   - the PM webhook and the chat approval callback: `approval_maintenance`;
+ *   - everything else (health, portals, ingest, agents, OAuth endpoints, chat events): `public_ingest`, the
+ *     narrowest reason (users read, audit append), because these take attacker-shaped input.
+ */
+export function exemptRouteRlsReason(url: string): ExemptRouteRlsReason {
+  if (SCIM_ROUTE_SET.has(url) || IDENTITY_PROVISIONING_EXEMPT.has(url)) return "identity_provisioning";
+  if (url.startsWith("/auth/")) return "authenticate";
+  if (APPROVAL_EXEMPT.has(url)) return "approval_maintenance";
+  return "public_ingest";
+}
+
+/**
+ * ADR-0234 batch 7a: the RLS scope a request runs under once authentication has resolved (or not), in order:
+ *   - a user id (a person, an API key, a session, a workload identity's sponsor): that principal, never a system scope;
+ *   - an auth-exempt route: the reason its class needs (`exemptRouteRlsReason`), before any credential branch, so an
+ *     exempt route never lands in `bootstrap_admin` or `credential_request`;
+ *   - the bootstrap token (an admin with no user row): `bootstrap_admin`;
+ *   - any other credential (engine runner or enrolment token, PDP client, endpoint agent): `credential_request`,
+ *     which reads users and appends to the ledger and nothing else (#809 review);
+ *   - no credential at all: no scope (the authentication hook has already refused it).
+ */
+export type RequestRlsScope =
+  | { kind: "principal"; userId: string }
+  | { kind: "exempt"; reason: ExemptRouteRlsReason }
+  | { kind: "bootstrap" }
+  | { kind: "credential"; via: string }
+  | { kind: "none" };
+
+export function requestRlsScope(
+  ctx: { userId: string | null; isAdmin: boolean; via: string } | undefined,
+  routeUrl: string,
+): RequestRlsScope {
+  const userId = ctx?.userId;
+  if (typeof userId === "string" && userId.length > 0) return { kind: "principal", userId };
+  if (AUTH_EXEMPT_ROUTES.has(routeUrl)) return { kind: "exempt", reason: exemptRouteRlsReason(routeUrl) };
+  if (ctx?.isAdmin === true) return { kind: "bootstrap" };
+  if (ctx) return { kind: "credential", via: ctx.via };
+  return { kind: "none" };
+}
 
 export function routeAuthClass(method: string, url: string): RouteAuthClass {
   if (SCIM_ROUTE_SET.has(url)) return "scim-token";

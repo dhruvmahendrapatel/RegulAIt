@@ -1128,8 +1128,56 @@ export const mcpRegistries = pgTable("mcp_registries", {
     enum: ["ok", "failed", "refused", "skipped"],
   }),
   lastSyncDetail: jsonb("last_sync_detail"),
+  /** ADR-0256 (the `mcp_catalogue_seed` migration): a curated registry, or a community list whose entries are UNVETTED */
+  listingKind: text("listing_kind", { enum: ["registry", "community"] }).notNull().default("registry"),
+  /** ADR-0256: refreshed by an egress-guarded pull, or only by a signed offline bundle (never dialled) */
+  delivery: text("delivery", { enum: ["pull", "offline_bundle"] }).notNull().default("pull"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * ADR-0256 (the `mcp_catalogue_seed` migration) — one server as the catalogue understands it, across sources. The dedupe key is
+ * `repo:github.com/owner/repo` when a source names a GitHub repository, else `name:<upstream name>`. Each source keeps
+ * its own `mcp_registry_entries` row pointing here, so provenance is per source and never merged away.
+ */
+export const mcpCatalogueItems = pgTable(
+  "mcp_catalogue_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    dedupeKey: text("dedupe_key").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("mcp_catalogue_items_dedupe_key_uq").on(t.dedupeKey)],
+);
+
+/**
+ * ADR-0256 (the `mcp_catalogue_seed` migration) — APPEND-ONLY evidence of one successful refresh of a source: what it asserted (count and
+ * content digest), when, by whom and, for an offline bundle, which trusted key signed it. UPDATE, DELETE and TRUNCATE
+ * are refused by triggers.
+ */
+export const mcpCatalogueSnapshots = pgTable(
+  "mcp_catalogue_snapshots",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    registryId: uuid("registry_id")
+      .notNull()
+      .references(() => mcpRegistries.id, { onDelete: "restrict" }),
+    /** point-in-time copy of the source's listing kind when refreshed (evidence exception, ADR-0200 addendum) */
+    listingKind: text("listing_kind", { enum: ["registry", "community"] }).notNull(),
+    /** point-in-time copy of the source's delivery when refreshed (evidence exception, ADR-0200 addendum) */
+    delivery: text("delivery", { enum: ["pull", "offline_bundle"] }).notNull(),
+    /** the admin who triggered it, NULL for the scheduler; evidence, so deliberately no foreign key */
+    actorUserId: uuid("actor_user_id"),
+    entryCount: integer("entry_count").notNull(),
+    truncated: boolean("truncated").notNull(),
+    contentDigest: text("content_digest").notNull(),
+    bundleKeyId: text("bundle_key_id"),
+    bundleDigest: text("bundle_digest"),
+    bundleCreatedAt: timestamp("bundle_created_at", { withTimezone: true }),
+    takenAt: timestamp("taken_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("mcp_catalogue_snapshots_registry_idx").on(t.registryId, t.takenAt)],
+);
 
 /**
  * ADR-0101 — THE CATALOGUE. The only table a sync writes.
@@ -1152,6 +1200,8 @@ export const mcpRegistryEntries = pgTable(
     title: text("title"),
     description: text("description"),
     repositoryUrl: text("repository_url"),
+    /** ADR-0256: the server's folder inside `repository_url` (a monorepo), normalised; part of the dedupe key */
+    repositorySubfolder: text("repository_subfolder"),
     websiteUrl: text("website_url"),
     kind: text("kind", { enum: ["remote", "catalogue_only"] }).notNull(),
     remoteUrl: text("remote_url"),
@@ -1180,9 +1230,18 @@ export const mcpRegistryEntries = pgTable(
      * this entry — "beyond the page cap" and "gone" are different facts. It
      * never deletes, disables or un-grants the local server. */
     missingSince: timestamp("missing_since", { withTimezone: true }),
+    /** ADR-0256 (the `mcp_catalogue_seed` migration): the deduped item this source row describes; NULL only for a row from before that migration,
+     * until its source is next refreshed */
+    catalogueItemId: uuid("catalogue_item_id").references(() => mcpCatalogueItems.id, { onDelete: "restrict" }),
+    /** ADR-0256: what this source's listing says about payment (`x402` or `paid`), a flag for an operator */
+    paidSignal: text("paid_signal", { enum: ["x402", "paid"] }),
+    /** ADR-0256: the refresh that last asserted this row (its provenance) */
+    lastSnapshotId: uuid("last_snapshot_id").references(() => mcpCatalogueSnapshots.id, { onDelete: "restrict" }),
   },
   (t) => [
     uniqueIndex("mcp_registry_entries_registry_name_uq").on(t.registryId, t.upstreamName),
+    index("mcp_registry_entries_item_idx").on(t.catalogueItemId),
+    index("mcp_registry_entries_snapshot_idx").on(t.lastSnapshotId),
     index("mcp_registry_entries_kind_idx").on(t.registryId, t.kind),
     index("mcp_registry_entries_server_idx").on(t.serverId),
   ],
@@ -1846,6 +1905,9 @@ export const auditLog = pgTable(
         // ADR-0173 batch 2b: a decision on a held connector write (the
         // approvals queue's object type rides the audit row). Plain text — no DDL.
         "connector_call",
+        // ADR-0251: a decision on a held model call (the approvals queue's object
+        // type rides the audit row). Plain text — no DDL.
+        "model_call",
         // ADR-0173 batch 2c (Q): an annotation queue created / changed /
         // removed or exported (objectId = the queue), and an annotation item
         // queued, read, reviewed, removed or past its deadline (objectId = the
@@ -1921,6 +1983,9 @@ export const auditLog = pgTable(
         // ADR-0261 (P37): a third-party ingest source (created, enabled, disabled, its write-only credential issued or
         // revoked) and each accepted or refused batch of third-party evidence. Plain text column — no DDL.
         "third_party_ingest_source",
+        // ADR-0303: a SIEM destination (created, enabled, disabled, secret rotated, dead-lettered, recovered). Plain
+        // text column — no DDL.
+        "siem_destination",
         // ADR-0193 (I4): a content provenance record (objectId = the record) and a trust-tier change (a source's
         // tier, or the write floor). Plain text column — no DDL.
         "content_provenance",
@@ -2015,6 +2080,11 @@ export const auditLog = pgTable(
     index("audit_log_alert_escalated_idx")
       .on(t.objectId)
       .where(sql`${t.ruleId} = 'governance-alert-escalated'`),
+    // pending/chatops_campaign_deadline_notify.sql (ADR-0090 amendment): the deadline sweep's delivery markers only,
+    // so "already delivered to this target" never scans the trail (review of #825)
+    index("audit_log_campaign_deadline_marker_idx")
+      .on(t.objectId)
+      .where(sql`${t.ruleId} = 'campaign-deadline-notified'`),
     // migration 0155 (ADR-0180 A2): the guardrail hit rows only (the ids
     // guardrails.ts writes as `guardrail-${outcome}`), so the guardrail_hits
     // condition metric never scans the trail
@@ -2516,6 +2586,9 @@ export const approvals = pgTable(
     // ADR-0173 batch 2b (migration 0144) — a 'connector_call' approval: the
     // connector the consent may be spent against. NULL on every other kind.
     connectorId: uuid("connector_id").references(() => connectors.id, { onDelete: "cascade" }),
+    // ADR-0251 (migration model_call_approvals) — a 'model_call' approval: the agent (model) the consent may be spent
+    // against. NULL on every other kind.
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
     // ADR-0186 A/B (migration 0170) — SNAPSHOTTED AT QUEUE TIME. Consulted for
     // the tool-call kinds (`mcp_tool`, `connector_call`) only. Every pre-0170
     // row took quorum 1 and the strict `passkey` mode (no grandfathering).
@@ -2561,6 +2634,10 @@ export const approvals = pgTable(
     index("approvals_connector_binding_idx")
       .on(t.userId, t.connectorId, t.status, t.argumentsDigest)
       .where(sql`${t.connectorId} IS NOT NULL`),
+    // ADR-0251: the model-call consent lookup (user, model, status, payload)
+    index("approvals_agent_binding_idx")
+      .on(t.userId, t.agentId, t.status, t.argumentsDigest)
+      .where(sql`${t.agentId} IS NOT NULL`),
   ],
 );
 
@@ -5365,6 +5442,9 @@ export const orgSettings = pgTable(
     privacyOpsEnabled: boolean("privacy_ops_enabled").notNull().default(false),
     /** days from a data-subject request's receipt to its due date; 30 is the strict default, shorter is stricter */
     dsrSlaDays: integer("dsr_sla_days").notNull().default(30),
+    /** ADR-0090 amendment (lane L11, owner 2026-11-15): how many hours before a certification campaign's due time its
+     * deadline reminder is sent (1 hour to 14 days; 48 is the default). A change is audited by PUT /v1/org/settings. */
+    certificationReminderHours: integer("certification_reminder_hours").notNull().default(48),
 
     /** ADR-0222 (P13(a), migration 0271): fairness testing. Off by default — turning it on starts storing
      * sensitive attributes, so it needs the `settings_relax` step-up. */
@@ -5374,12 +5454,35 @@ export const orgSettings = pgTable(
     /** ADR-0222: an uploaded evaluation dataset's rows are deleted this many days after upload (strict 30) */
     fairnessDatasetRetentionDays: integer("fairness_dataset_retention_days").notNull().default(30),
 
+    /** ADR-0056 §5 amendment (lane L7, migration copilot_redteam_gate): a model may narrate a copilot answer only
+     * while its latest copilot red-team run passed against the model it serves now (strict true; turning it off is a
+     * settings_relax step-up, audited; copilot-redteam-gate.ts). */
+    copilotRedteamGateEnabled: boolean("copilot_redteam_gate_enabled").notNull().default(true),
+    /** ADR-0056 §5 amendment: how many days a passing copilot red-team run counts (strict 30; longer is a relax) */
+    copilotRedteamMaxAgeDays: integer("copilot_redteam_max_age_days").notNull().default(30),
+    /** ADR-0056 §5 amendment (review of #811): the resist rate each copilot class must reach on the deciding run,
+     * judged by the gate from the probes the MODEL answered (platform-held and errored trials excluded), never from
+     * the run's own (caller-tunable) gate verdict. Strict 1 (every model-answered probe in the class resisted);
+     * lowering it is a settings_relax step-up. */
+    copilotRedteamMinResistRate: doublePrecision("copilot_redteam_min_resist_rate").notNull().default(1),
+    /** ADR-0056 §5 amendment (second review of #811): THE copilot red-team library. Only a run against this library
+     * version decides, so a run's starter cannot pick a weaker library after a regression. NULL (the default) means
+     * none is designated, and the gate refuses every narrator: fail closed. Any change is a settings_relax step-up,
+     * audited (swapping libraries can weaken the suite). Deleting the library clears it, which refuses again. */
+    copilotRedteamLibraryId: uuid("copilot_redteam_library_id").references(() => redteamLibraries.id, {
+      onDelete: "set null",
+    }),
+    /** ADR-0056 §5 amendment (second review of #811): the trials per probe the deciding run must have used (strict 3;
+     * a single-trial run is not evidence by default). Lowering it is a settings_relax step-up. */
+    copilotRedteamMinTrials: integer("copilot_redteam_min_trials").notNull().default(3),
+
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     check("org_settings_singleton", sql`${t.id} = 'singleton'`),
+    check("org_settings_copilot_redteam_min_trials_check", sql`${t.copilotRedteamMinTrials} BETWEEN 1 AND 25`),
     check(
       "org_settings_mrm_expiry_warn_days_check",
       sql`${t.mrmExpiryWarnDays} >= 0 AND ${t.mrmExpiryWarnDays} <= 3650`,
@@ -5440,6 +5543,7 @@ export const orgSettings = pgTable(
     check("org_settings_literacy_gate_mode_check", sql`${t.literacyGateMode} IN ('off', 'warn', 'enforce')`),
     check("org_settings_literacy_validity_check", sql`${t.literacyDefaultValidityDays} BETWEEN 30 AND 730`),
     check("org_settings_dsr_sla_days_check", sql`${t.dsrSlaDays} BETWEEN 1 AND 90`),
+    check("org_settings_certification_reminder_hours_check", sql`${t.certificationReminderHours} BETWEEN 1 AND 336`),
     check(
       "org_settings_alert_sla_hours_check",
       sql`jsonb_typeof(${t.alertSlaHours}) = 'object' AND jsonb_typeof(${t.alertSlaHours} -> 'high') = 'number' AND jsonb_typeof(${t.alertSlaHours} -> 'medium') = 'number' AND jsonb_typeof(${t.alertSlaHours} -> 'low') = 'number' AND (${t.alertSlaHours} ->> 'high')::numeric BETWEEN 1 AND 720 AND (${t.alertSlaHours} ->> 'medium')::numeric BETWEEN 1 AND 720 AND (${t.alertSlaHours} ->> 'low')::numeric BETWEEN 1 AND 720`,
@@ -8467,6 +8571,8 @@ export const chatopsConnections = pgTable("chatops_connections", {
   /** ADR-0162 (migration 0127) — minimum governance-alert severity posted to
    * this workspace; null = alerts are not posted (opt-in) */
   notifyAlertMinSeverity: text("notify_alert_min_severity", { enum: ["medium", "high"] }),
+  /** ADR-0090 amendment (lane L11) — opt-in; false = certification-campaign deadline notices are not sent here */
+  notifyCampaignDeadlines: boolean("notify_campaign_deadlines").notNull().default(false),
   enabled: boolean("enabled").notNull().default(true),
   /** ADR-0173 batch 2b (migration 0144) — Microsoft Teams Bot Framework. The
    * bot's app id is the audience its tokens must carry; null = the bot
@@ -16405,6 +16511,47 @@ export const thirdPartyIngestRecordFindings = pgTable(
   (t) => [primaryKey({ columns: [t.recordId, t.findingId] }), index("third_party_ingest_record_findings_finding_idx").on(t.findingId)],
 );
 
+// ===== ADR-0303 (lane L11): SIEM delivery of the audit chain =====================================================
+export const SIEM_DESTINATION_KINDS = ["webhook"] as const;
+export const SIEM_DESTINATION_STATES = ["active", "backoff", "dead_letter"] as const;
+
+/**
+ * One SIEM destination: an outbox cursor over `audit_log.seq` (ADR-0135's proposed delivery contract). The cursor moves
+ * only after the receiver acknowledges a batch (2xx), so delivery is at least once and in chain order. New
+ * destinations are off; enabling one is a step-up relaxation (ADR-0180). The signing secret is a Standard Webhooks
+ * `whsec_` value under REGULAIT_DATA_KEY. `last_error_code` is one of a fixed set of codes, never receiver text.
+ */
+export const siemDestinations = pgTable(
+  "siem_destinations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    kind: text("kind", { enum: SIEM_DESTINATION_KINDS }).notNull().default("webhook"),
+    url: text("url").notNull(),
+    allowPlaintextHttp: boolean("allow_plaintext_http").notNull().default(false),
+    enabled: boolean("enabled").notNull().default(false),
+    secretCiphertext: text("secret_ciphertext").notNull(),
+    secretRotatedAt: timestamp("secret_rotated_at", { withTimezone: true }).notNull().defaultNow(),
+    /** the highest `audit_log.seq` the receiver acknowledged */
+    cursorSeq: bigint("cursor_seq", { mode: "number" }).notNull(),
+    state: text("state", { enum: SIEM_DESTINATION_STATES }).notNull().default("active"),
+    consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }),
+    leaseUntil: timestamp("lease_until", { withTimezone: true }),
+    /** the claiming pass's token: every write after a claim is conditional on it */
+    leaseToken: uuid("lease_token"),
+    lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
+    lastSuccessAt: timestamp("last_success_at", { withTimezone: true }),
+    lastErrorCode: text("last_error_code"),
+    deliveredEvents: bigint("delivered_events", { mode: "number" }).notNull().default(0),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("siem_destinations_name_uq").on(sql`lower(${t.name})`), index("siem_destinations_due_idx").on(t.enabled, t.nextAttemptAt)],
+);
+export type SiemDestinationRow = typeof siemDestinations.$inferSelect;
+// ===== end ADR-0303 =================================================================================================
 /**
  * ADR-0251 (P-01 remainder, lane L1; migration resource_rate_reservations) — HARD rate-limit windows for the governed
  * core's connector and A2A calls. One row is one slot a call took in the window: written in the same transaction as
