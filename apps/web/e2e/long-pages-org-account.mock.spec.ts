@@ -115,6 +115,13 @@ for (const P of SPLITS) {
   });
 }
 
+test("Account: an unknown sub-path goes back to the Account page, never a blank page (review of #654)", async ({ page }) => {
+  await mockApi(page);
+  await page.goto("/ui/account/no-such-page");
+  await expect(page).toHaveURL(/\/ui\/account$/);
+  await expect(page.getByRole("heading", { name: "Account", level: 1 })).toBeVisible();
+});
+
 test("Account › Devices & sessions: every row's Sign out is on the full page, and only for other devices", async ({ page }) => {
   await mockApi(page);
   await page.goto("/ui/account/sessions");
