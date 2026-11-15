@@ -36,7 +36,10 @@ The owner's 2026-11-15 decision is the recorded authority for this exception.
   `PUT /v1/discovery/settings`, and the change is audited. Turning it off is free. While it is off, no directive is
   created or delivered, pending ones included.
 - **Signing key.** A directive is signed with the policy-signing key path of ADR-0298: the same Ed25519 `Envelope`,
-  verified against the same compiled keyring (`enforce.CompiledKeyring`). That keyring is empty until the ADR-0195 SD4
+  verified against the same keyring. Under owner decision B4 (2026-11-15), that path is one rotatable device-policy
+  signer that signs the endpoint policy, the browser policy and these directives. The agent verifies it against the
+  compiled keyring plus the device-policy keys an admin pins in the agent config (ADR-0330 §8, on #864). The
+  gateway's signer interface is wired to that shared signer when it lands (#867). That keyring is empty until the ADR-0195 SD4
   signer lands, so in this build no directive verifies. The gateway's directive route answers `503
   directive_signer_unavailable` while it has no signer, just as the config route answers `503
   collection_pack_unavailable`.
@@ -105,6 +108,27 @@ Each target becomes one directive, served by `GET /v1/endpoint-agent/directives`
 - **Manifest bounds.** The current, verified collection manifest has an `mcp_config` entry with that `signatureId`, and
   one of that entry's locators for this OS matches the root and path. The match uses the same glob code that discovered
   the file.
+
+### 4a. The agent's one read of its flagged assets (owner answer I2, 2026-11-15)
+
+The owner's answer is that the agent reads its device's flagged-asset list through one narrow, audited read that is
+limited to that device. This is its exact form:
+
+- **There is exactly one read.** `GET /v1/endpoint-agent/directives` is the only route through which an agent learns
+  anything about removals or flagged assets. No other agent-side read of removals, targets or flags exists.
+- **It covers only the calling device.** The device comes from the caller's own DPoP-bound agent token (`agentOf`).
+  Nothing in the query or body selects a device, so an agent cannot ask about another device, and a stolen token reveals
+  only its own device's list.
+- **It returns only that device's undelivered, unexpired, uncancelled targets** (at most 20), each as a signed
+  directive. A flag that has no removal attached is never sent: the agent learns of an asset only when an admin has
+  decided to remove it.
+- **Every call is audited, empty results included.** Each read writes one audit row with fixed fields only:
+  - `deviceId` and `identityId`;
+  - `served`, the number of directives returned, and their target ids;
+  - `outcome`: one of `served`, `none`, `switch_off` or `signer_unavailable`.
+
+  The row never carries asset names or paths, so the audit trail shows who looked, when and how much, without
+  duplicating the evidence.
 
 ### 5. Applying a removal, and its limits
 
