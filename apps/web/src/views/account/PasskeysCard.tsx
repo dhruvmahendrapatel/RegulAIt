@@ -14,6 +14,7 @@ import { startRegistration, type PublicKeyCredentialCreationOptionsJSON } from "
 import { ApiError, codeSentence } from "../../api/client";
 import { ago } from "../../api/format";
 import { Badge, Button, Card, EmptyState, Field, Input, Table } from "../../ui/kit";
+import { PREVIEW_ROWS, ViewAllLink } from "../../ui/ListPreview";
 import { RemoveButton } from "../admin/adminKit";
 import { api, withStepUp } from "../../stepup/stepUp";
 import v from "../views.module.css";
@@ -26,6 +27,12 @@ export interface OwnPasskey {
   createdAt: string;
   lastUsedAt: string | null;
   backedUp: boolean;
+}
+
+const at = (iso: string | null) => (iso ? Date.parse(iso) || 0 : 0);
+/** the most recently used first; never-used ones after them, the newest first */
+export function sortPasskeys(rows: readonly OwnPasskey[]): OwnPasskey[] {
+  return [...rows].sort((a, b) => at(b.lastUsedAt) - at(a.lastUsedAt) || at(b.createdAt) - at(a.createdAt));
 }
 
 const PASSKEY_SENTENCES: Readonly<Record<string, string>> = {
@@ -47,7 +54,12 @@ function reasonOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-export default function PasskeysCard() {
+/**
+ * P3 (#453): on the Account page this is a preview (the first five passkeys, the active count in the title, the same
+ * add, rename and revoke, and a link to the full list); on its own page (`preview` false, AccountSubpages) it lists
+ * every passkey.
+ */
+export default function PasskeysCard(props: { preview?: boolean }) {
   const qc = useQueryClient();
   const [label, setLabel] = useState("");
   const [busy, setBusy] = useState(false);
@@ -57,7 +69,8 @@ export default function PasskeysCard() {
     queryKey: ["account", "passkeys"],
     queryFn: () => api.get<{ passkeys: OwnPasskey[]; rpConfigured: boolean }>("/v1/auth/passkeys"),
   });
-  const passkeys = q.data?.passkeys ?? [];
+  // the most recently used first (never used last, newest first), so the preview shows the ones in use
+  const passkeys = sortPasskeys(q.data?.passkeys ?? []);
   const rpConfigured = q.data?.rpConfigured !== false;
   const refresh = () => void qc.invalidateQueries({ queryKey: ["account", "passkeys"] });
 
@@ -91,10 +104,17 @@ export default function PasskeysCard() {
     <Card
       title={
         <span className={v.rowTight}>
-          Passkeys
-          {passkeys.length > 0 ? <Badge tone="ok">{passkeys.length} active</Badge> : <Badge>none</Badge>}
+          {/* on its own page the h1 already says "Passkeys" */}
+          {props.preview ? "Passkeys" : "Every passkey"}
+          {/* a count only from a read that answered: a failed or pending read never shows "none" */}
+          {q.data ? (
+            passkeys.length > 0 ? <Badge tone="ok">{passkeys.length} active</Badge> : <Badge>none</Badge>
+          ) : q.error ? (
+            <Badge tone="warn">count unavailable</Badge>
+          ) : null}
         </span>
       }
+      actions={props.preview ? <ViewAllLink to="/account/passkeys" noun="passkeys" /> : undefined}
       infoLabel="passkeys"
       info={
         <p>
@@ -104,7 +124,7 @@ export default function PasskeysCard() {
         </p>
       }
     >
-      <div className={v.stack}>
+      <div className={v.stack} data-preview={props.preview ? "/v1/auth/passkeys" : undefined}>
         {!rpConfigured && (
           <div className={v.errLine} role="alert">
             Passkeys aren't available yet: an administrator has to set this deployment's public address first.
@@ -151,7 +171,7 @@ export default function PasskeysCard() {
               ),
             },
           ]}
-          rows={passkeys}
+          rows={props.preview ? passkeys.slice(0, PREVIEW_ROWS) : passkeys}
           rowKey={(p) => p.id}
           loading={q.isLoading}
           error={q.error}
