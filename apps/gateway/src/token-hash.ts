@@ -9,13 +9,23 @@
  * token — re-exports it unchanged, so every pre-existing `import { hashToken }
  * from "./auth.js"` keeps working and there is no import cycle.
  *
- * sha256 with no salt and no work factor is correct HERE and would be wrong for
- * a password: these tokens are 192+ bits of `randomBytes` entropy, so there is
- * no dictionary to attack and no cost parameter worth paying on every request.
- * Passwords go through scrypt in `auth.ts`; the two must not be confused.
+ * The hash is scrypt (owner decision 2026-11-15, ADR-0167 amendment S-02):
+ * every value here is a real secret, and CodeQL's js/insufficient-password-hash
+ * is fixed in code, never dismissed. The salt is one fixed, versioned domain
+ * string, not a per-value salt: the result is the LOOKUP key a presented token
+ * is found by, so it must be deterministic, and a per-value salt would need a
+ * token-id format for every credential. With 192+ bits of `randomBytes` per
+ * token there is no dictionary for a per-value salt to defeat. The work factor
+ * is modest (N=2^10, r=8: about 1 MiB and a millisecond), because it runs on
+ * every authenticated request. Passwords keep their own per-user-salted scrypt
+ * in `auth.ts` (`hashPassword`); the two must not be confused.
  *
- * Every caller, as of the PR #117 CodeQL triage (js/insufficient-password-hash
- * on this function is a false positive for each of them):
+ * Changing the scheme invalidates every stored token hash: sessions, API keys,
+ * virtual keys, SCIM tokens and handles issued before it no longer resolve and
+ * are re-issued. The product is not live, so nothing is grandfathered (ADR-0180).
+ *
+ * Every caller (each passes 192+ random bits; the list started at the PR #117
+ * CodeQL triage):
  *   - API keys `rgl_` (`generateToken`, auth.ts): randomBytes(24), 192 bits;
  *     looked up from `x-api-key` / `Authorization: Bearer`.
  *   - virtual keys `rglv_` (`generateVirtualKeyToken`): randomBytes(24), 192 bits.
@@ -29,10 +39,15 @@
  * `token-hash.test.ts` pins the generators' entropy.
  *
  * No server-side pepper (HMAC): it would add nothing against 192+ bits of
- * randomness, and it would invalidate every stored hash.
+ * randomness, and it would tie every stored hash to a key to rotate.
  */
-import { createHash } from "node:crypto";
+import { scryptSync } from "node:crypto";
+
+/** versioned, so a future scheme change is visible in the code that made it */
+export const TOKEN_HASH_SALT = "regulait:token-hash:v2";
+/** scrypt cost for a per-request lookup hash of a high-entropy token (see above) */
+export const TOKEN_HASH_PARAMS = { N: 1024, r: 8, p: 1 } as const;
 
 export function hashToken(token: string): string {
-  return createHash("sha256").update(token).digest("hex");
+  return scryptSync(token, TOKEN_HASH_SALT, 32, TOKEN_HASH_PARAMS).toString("hex");
 }

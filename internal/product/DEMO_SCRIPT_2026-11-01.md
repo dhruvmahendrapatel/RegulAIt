@@ -510,7 +510,8 @@ The beat shows one governed call denied with its rule named, one queued for a na
 the approval, the call executing only after it, and the audit rows. It is second in the cutting order.
 
 Code: `apps/gateway/src/demo-enforce-lib.ts` (`demo:enforce`: on 10-31 `~/enforce.sh` in the laptop terminal against LIVE, ADR-0203; at the FALLBACK rehearsal
-`pnpm --filter @regulait/gateway demo:enforce`), the gateway's
+`pnpm --filter @regulait/gateway demo:enforce`; since S-02 the gateway it calls needs `REGULAIT_BOOTSTRAP_AFTER_ADMIN=1`,
+audited at boot, or the retired bootstrap token is refused with `401 bootstrap_retired`), the gateway's
 own MCP route `POST /mcp/:serverId` and ChatOps route `POST /v1/chatops/approvals/:id/post`; UI: Avery's **Inbox**,
 `AuditLogPage.tsx`, and on the fallback `SimulationPage.tsx`. Seed: `apps/gateway/src/seed.ts` (Dana's role grant on
 `repo-tools`, her revocation of `search_code`, the approval rule that sends her `write_file` calls to Avery).
