@@ -20,6 +20,13 @@
  * process noticing, both may act once. The three timers are idempotent at that grain (a prune deletes what is already
  * past retention; an anchor records the chain head it reads; a verification appends a ledger row).
  *
+ * WHY NOT THE ADR-0064 SCHEDULER, which already runs a job on one replica (ADR-0343 §3 has the full reason):
+ *  - `REGULAIT_SCHEDULER=off` would then also stop these three controls. Anchor capture (tamper evidence),
+ *    audit prune (retention) and backup verification each have their own audited org-setting switch instead.
+ *  - Their interval lives in the org settings and is re-read every tick; a scheduler row would hold a second copy.
+ *  - They already report to /v1/health/schedulers.
+ * Each leader pins one pool connection while it leads: at most three per replica.
+ *
  * OPEN SOURCE FIRST (ADR-0176): leader election on Postgres advisory locks is the standard pattern; a library for it
  * (e.g. an etcd or Kubernetes Lease client) would add a second coordination service that BYOC and air-gapped installs
  * do not have. Nothing to adopt for a few lines over `pg`.

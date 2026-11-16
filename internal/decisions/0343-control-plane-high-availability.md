@@ -97,6 +97,28 @@ production.
   session and so its lock, and after a failover the new primary never had it. `leaderOnly` wraps the anchor, prune and
   backup-verify ticks. The other boot timers (rate-limit counter prune, PM delivery prune) are idempotent deletes and
   stay on every replica.
+
+  **Why these three are not ADR-0064 scheduler jobs.** The scheduler already gives "one runner per cluster" (a row
+  lock and a lease), so moving the three timers onto it was the first option. It was not taken, for three reasons:
+  - **The scheduler has an off switch, and these three must not share it.** `REGULAIT_SCHEDULER=off` exists because
+    the scheduler's sweeps mutate governed state and one of them (the ADR-0057 red-team run) costs money per run.
+    - Anchor capture is a tamper-evidence control. It is deliberately off the scheduler (see the comment in `boot.ts`,
+      ADR-0181), so that turning the sweeps off never also turns anchoring off.
+    - Audit prune is the retention control. It is switched by its own org setting (`autoPruneEnabled`).
+    - Backup verification is on by default and switched by its own audited org setting.
+    - Putting them on the scheduler would make one operator variable silently stop three controls. The other fix, an
+      exemption from the off switch for some jobs, would give the scheduler two kinds of job and is a larger change than
+      this slice.
+  - **Their interval belongs to the org settings, not to the scheduler row.** Prune and verify read
+    `pruneIntervalHours` and `backupVerifyIntervalHours` on every tick, so an admin's change applies without a restart.
+    As scheduler jobs, the same fact would also live in `scheduler_jobs.interval_seconds`: two sources of truth for one
+    setting, against ADR-0200's normalised-schema rule.
+  - **They already report to `/v1/health/schedulers`** (`recordSchedulerSuccess` and `recordSchedulerFailure`, with an
+    audit row on failure), so moving them would not add visibility. The run ledger is the one thing they would gain.
+    PENDING tracks that as a follow-up, together with the exemption decision above.
+
+  Each leader pins one pool connection for as long as it leads, so at most three connections per replica (one per
+  key, and only on the replica that leads that key). The slice-2 pool-size guidance counts them.
 - **Readiness is not liveness.** `GET /ready` (auth-exempt, never rate limited, `internal` in the OpenAPI registry)
   answers 503 `draining` from the moment a shutdown starts, and 503 `degraded` when the database does not answer within
   the `/health` deadline. `GET /health` stays the liveness probe. `REGULAIT_DRAIN_DELAY_MS` (default 0, at most 60 s,
