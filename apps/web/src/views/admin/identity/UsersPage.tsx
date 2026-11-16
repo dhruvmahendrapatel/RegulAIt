@@ -60,6 +60,11 @@ import {
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
+/** a person's role, status and sign-in method: one renderer each, shared by the list columns and the detail's status row */
+export const roleBadge = (u: AdminUser) => (u.isAdmin ? <Badge tone="primary">admin</Badge> : <Badge>member</Badge>);
+export const statusBadge = (u: AdminUser) => (u.disabledAt ? <Badge tone="danger">disabled</Badge> : <Badge tone="ok">active</Badge>);
+export const signInLabel = (u: AdminUser) => (u.hasPassword ? (u.mustChangePassword ? "one-time password" : "password") : "no password");
+
 /** ADR-0226: the users list's columns; the ids and sortable ones match the gateway's USERS_LIST */
 export const USER_COLUMNS: Array<DataColumn<AdminUser>> = [
   {
@@ -70,12 +75,12 @@ export const USER_COLUMNS: Array<DataColumn<AdminUser>> = [
     render: (u) => <span className={u.disabledAt ? v.faint : undefined}>{u.displayName || "—"}</span>,
   },
   { key: "email", header: "Email", main: true, sortable: true, render: (u) => u.email },
-  { key: "role", header: "Role", main: true, sortable: true, render: (u) => (u.isAdmin ? <Badge tone="primary">admin</Badge> : <Badge>member</Badge>) },
+  { key: "role", header: "Role", main: true, sortable: true, render: roleBadge },
   {
     key: "signIn",
     header: "Sign-in",
     main: true,
-    render: (u) => (u.hasPassword ? (u.mustChangePassword ? "one-time pw" : "password") : "no password"),
+    render: signInLabel,
   },
   { key: "mfa", header: "MFA", main: true, sortable: true, render: (u) => (u.totpEnabled ? "TOTP" : "—") },
   {
@@ -84,7 +89,7 @@ export const USER_COLUMNS: Array<DataColumn<AdminUser>> = [
     main: true,
     sortable: true,
     required: "Status is always shown",
-    render: (u) => (u.disabledAt ? <Badge tone="danger">disabled</Badge> : <Badge tone="ok">active</Badge>),
+    render: statusBadge,
   },
   { key: "created", header: "Created", main: true, sortable: true, render: (u) => ago(u.createdAt) },
   { key: "username", header: "Username", sortable: true, render: (u) => u.username ?? <span className={v.faint}>—</span> },
@@ -396,9 +401,9 @@ function UserDetail(props: {
     >
       {/* I-2: the person's standing facts stay above the tabs, so no tab hides a deactivation or the last-admin guard */}
       <div className={v.row} role="group" aria-label="User status" style={{ marginBottom: "var(--s2)" }}>
-        {user.isAdmin ? <Badge tone="primary">admin</Badge> : <Badge>member</Badge>}
-        {user.disabledAt ? <Badge tone="danger">disabled</Badge> : <Badge tone="ok">active</Badge>}
-        <Badge tone="neutral">{`Sign-in: ${user.hasPassword ? (user.mustChangePassword ? "one-time password" : "password") : "no password"}`}</Badge>
+        {roleBadge(user)}
+        {statusBadge(user)}
+        <Badge tone="neutral">{`Sign-in: ${signInLabel(user)}`}</Badge>
         <Badge tone="neutral">{user.totpEnabled ? "MFA: TOTP" : "MFA: not enrolled"}</Badge>
         {lastAdmin && <Badge tone="warn">Last active admin: cannot be demoted or deactivated</Badge>}
       </div>

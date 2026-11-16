@@ -1346,7 +1346,8 @@ export function TabPanel(props: { idPrefix: string; id: string; active: string; 
   const ids = tabIds(props.idPrefix, props.id);
   const isActive = props.active === props.id;
   const [opened, setOpened] = useState(isActive);
-  if (isActive && !opened) setOpened(true);
+  // only a lazy panel tracks its first opening, so an eager one never re-renders for it
+  if (props.lazy && isActive && !opened) setOpened(true);
   return (
     <div role="tabpanel" id={ids.panel} aria-labelledby={ids.tab} hidden={!isActive} className={props.className}>
       {!props.lazy || opened ? props.children : null}
