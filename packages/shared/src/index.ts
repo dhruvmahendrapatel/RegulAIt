@@ -5051,6 +5051,8 @@ export * from "./atlas-redteam-map.js";
 
 // ===== ADR-0221 (PENDING P4) — the supplier portal =========================
 export * from "./supplier-portal.js";
+// ===== ADR-0240 — one second factor (TOTP) for the supplier and auditor portals ==========
+export * from "./external-mfa.js";
 // ADR-0222 (P13(a)): fairness testing — the group metrics, thresholds and outcome (pure)
 export * from "./fairness.js";
 // ADR-0261 (P37): third-party security telemetry ingest — the DefenseClaw JSONL parser and mapping (pure)
