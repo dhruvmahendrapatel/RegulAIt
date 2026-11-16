@@ -68,6 +68,10 @@ number** of workflow templates, composed from a shared library of reusable stage
   stage, a merge included. The forward flow skips it. A cancel or a denied sign-off runs the compensations of the
   stages that ran, in reverse order, through the ordinary executors and audit, then the instance ends `aborted` or
   `denied`; ending a compensation early is an admin's act.
+- **Stage deadline (SLA)** *(2026-11-16, ADR-0340 slice 2)* — any resting or executed stage (not a trigger, rollback
+  or compensation) may carry `sla`: a reminder before the breach, then on breach `notify`, `reassign` (a sign-off moves
+  to named approvers) or `fail` (the instance is cancelled and compensated). Timers are durable queue jobs set when
+  the stage is entered; escalation never approves or denies a sign-off.
 - **Notification / webhook** — alert stakeholders or trigger an external system at any point.
 - **Conditional branch** — route to different subsequent stages based on outcome (e.g. "if security scan finds a critical issue, route to a remediation sub-workflow instead of merge approval").
 

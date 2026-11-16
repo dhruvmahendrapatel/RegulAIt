@@ -1,7 +1,7 @@
 # ADR-0340: Process-level reliability for pillar 2's runner: compensation (saga) stages, stage deadlines with SLA escalation, and process-version pinning, migration and canary
 
-- **Status**: Accepted (builder lane E21; slice 1, compensation, is built; slices 2 and 3 follow in this lane under
-  this ADR)
+- **Status**: Accepted (builder lane E21; slice 1, compensation, and slice 2, deadlines, are built; slice 3 follows
+  in this lane under this ADR)
 - **Date**: 2026-11-16
 - **Index**: Process reliability for the workflow runner (Camunda gap 2 and 8): compensation stages run in reverse on a cancel or a denial through the ordinary executors; stage deadlines with SLA escalation (notify, reassign or fail) over pg-boss timers; process versions pinned per instance, governed in-flight migration and canary rollout. No new engine.
 - **Backlog item**: `internal/product/GAP_ANALYSIS_CAMUNDA_2026-11.md` rows 2, 5 and 8; next step 3 ("process-level
@@ -11,7 +11,8 @@
   engine), ADR-0046 and ADR-0061 (the approvals queue and ChatOps), ADR-0180 (secure by default), ADR-0176 (open
   source first), AER-048 and AER-049 (rounds, stage entries, effect records).
 - **Migrations**: slice 1 none (the compensation state lives in the instance's `state` jsonb, which the kernel
-  owns). Slices 2 and 3 add pending migrations, numbered at merge (ADR-0252).
+  owns). Slice 2: `pending/workflow_stage_queue_deadline.sql` (the `workflow-stage-deadline` queue). Slice 3 adds its
+  own. All numbered at merge (ADR-0252).
 
 ## Context
 
@@ -82,37 +83,58 @@ kernel and runner.
    gates, as an abort or denial always did, and is a new stage entry, so a forward executor still running from before
    the cancel can never commit into the compensation.
 
-### Slice 2: stage deadlines and SLA escalation (decided; built next)
+### Slice 2: stage deadlines and SLA escalation (built)
 
 7. A stage may carry `sla: { breachAfterSeconds, warnAfterSeconds?, onBreach: "notify" | "reassign" | "fail",
-   reassignTo? }`, bounded, absent by default. `reassign` only on a `human_approval` stage; `fail` cancels the
-   instance (and so compensates it, decision 2). A timer is a pg-boss job sent in the transaction that enters the
-   stage, keyed by the stage execution key (ADR-0284), so it exists if and only if the entry committed and a stale
-   timer finds a different key and does nothing.
-8. The timer's action runs as a named system actor (`workflow-sla`) through `applyEvent` or the approvals queue under
-   the instance lock: `notify` writes the approvals-queue reminder and a ChatOps alert (ADR-0061); `reassign`
-   supersedes the stage's pending rows and requests the named approvers (resolved like a stage's own approvers);
-   `fail` applies `abort`. Each writes `workflow:sla-warned`, `workflow:sla-breached` or `workflow:sla-reassigned` in
-   that transaction. The worker follows ADR-0283's switch; a timer that cannot be sent is audited and the stage
-   simply has no deadline, never a blocked transition.
+   reassignTo? }`, strict, bounded (one minute to 90 days, the warning before the breach), absent by default.
+   `reassign` (with `reassignTo`, required with it and refused without it) only on a `human_approval` stage; `fail`
+   cancels the instance, and so compensates it (decision 2). Not allowed on a trigger, a rollback or a compensation
+   stage. A deadline is per stage ENTRY: a stage re-entered (a re-open, a recheck) gets fresh timers.
+8. **Timers are pg-boss jobs on the `workflow-stage-deadline` queue** (policy `exclusive`), sent in the transaction
+   that enters the stage, so a timer exists if and only if the entry committed. A job carries ids only and its
+   singleton key is the stage execution key (ADR-0284) plus the phase (`warn`, `breach`). The entry also records the
+   `sla:<stage>` marker (`executionKey`, `warnAt`, `dueAt`, `onBreach`) on the instance and `workflow:sla-scheduled`;
+   a queue that cannot take the job is audited `workflow:sla-not-scheduled` (deny) and the transition still commits,
+   with no deadline. The worker starts on the boot path beside the retry worker, under the same switch.
+9. **A firing timer acts only if the instance still rests at that stage execution** (same stage, round and entry; not
+   ended, not compensating) and that phase has not run for it, decided under the instance lock with the marker and
+   the audit row in one transaction; otherwise it does nothing. The actor is the system actor `workflow-sla`.
+   - `warn`: `workflow:sla-warned` and a reminder.
+   - `breach`: `workflow:sla-breached` (deny), then `notify` (a notice); `reassign` (the stage's pending sign-off rows
+     are superseded and the `reassignTo` approvers requested through the same path as the stage's own request,
+     audited `workflow:sla-reassigned` with both sets); or `fail` (the kernel's `abort`, which supersedes the gates and
+     compensates; the first compensation runs after the commit through the ordinary executor and its guard).
+   - **Escalation never approves or denies a sign-off**, the ADR-0046 workbench rule: a reassignment moves the
+     decision, and a failure cancels the instance, whose pending rows are superseded, not denied.
+10. **Notices** go through a courier ChatOps registers per database handle (as for governance alerts, ADR-0162, and
+    the alert SLA sweep): an alert card with a content-free text and a link to the instance, to the workspaces opted
+    into alerts (a reminder is `medium`, a breach `high`); a resend workspace mails the people the stage waits on (the
+    pending approvers, or the initiator of a cancelled instance), never anyone a request names. Each post is audited
+    `chatops-workflow-sla-posted` or `-post-failed`. A notice is sent after the commit and never fails the timer; a
+    deployment without ChatOps posts nothing, and the pending sign-off stays in the approvals queue.
 
 ### Slice 3: process versions, in-flight migration and canary (decided; built after slice 2)
 
-9. **Versions.** Every template create or change writes an immutable, numbered template version row; an instance
+11. **Versions.** Every template create or change writes an immutable, numbered template version row; an instance
    records the versions it was started from (a join table, ADR-0200 3NF) beside its snapshotted definition, which
    stays the definition it runs. A running instance always finishes on its version unless it is migrated.
-10. **Governed migration.** `POST …/instances/:id/migrations` with `dryRun` returns the diff (RFC 6902) between the
+12. **Governed migration.** `POST …/instances/:id/migrations` with `dryRun` returns the diff (RFC 6902) between the
     instance's definition and the target version, and refuses a migration the target cannot honour (the current stage
     or a stage that ran is missing or changed type; a compensation that would be lost). Applying needs an approval in
     the approvals queue by an admin other than the requester (ADR-0195), is re-validated under the instance lock when
     approved, bumps the stage entry, and writes `workflow:instance-migrated` with both versions and the diff.
-11. **Canary.** An admin may roll a new version out to a percentage (1 to 50) of NEW instances of a template; the
+13. **Canary.** An admin may roll a new version out to a percentage (1 to 50) of NEW instances of a template; the
     choice is deterministic per instance id, recorded on the instance and audited at start
     (`workflow:canary-version-selected`); starting and stopping a canary is audited. Running instances are never
     switched by a canary.
 
 ## Consequences
 
+- Slice 2 adds no route either; `GET /v1/workflows/instances/:id` shows the `sla:<stage>` marker (when it is due,
+  when it warned and breached). Slice 2's tests: kernel validation ("ADR-0340 slice 2: stage deadlines") and
+  `apps/gateway/src/workflows-sla.test.ts` (the queued timers and their delays, a reminder that runs once, a
+  reassignment that then decides normally, a stale timer that does nothing, a failure that cancels and compensates as
+  `workflow-sla`, a notice to the pending approvers, a refused template).
 - Slice 1 adds no route (the existing `/abort`, `/advance` and approval decide routes drive it), no table and no UI;
   `GET /v1/workflows/instances/:id` shows `state.compensation`. Two git adapter calls are new on every provider
   (GitHub, GitLab, Bitbucket, Azure DevOps, mock) and classified as external writes.

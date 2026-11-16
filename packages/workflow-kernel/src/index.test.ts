@@ -1155,3 +1155,42 @@ describe("ADR-0340: compensation (saga) stages", () => {
     );
   });
 });
+
+describe("ADR-0340 slice 2: stage deadlines (sla)", () => {
+  const base = [
+    { id: "intake", type: "trigger" },
+    { id: "req", type: "artifact_generation", output: "r" },
+    { id: "gate", type: "human_approval", approvers: ["requesting_user"] },
+    { id: "branch", type: "git_operation", action: "create_branch", connection: "gh", repo: "o/r" },
+  ];
+  const withStage = (extra: Record<string, unknown>, at = 2) =>
+    validateDefinition({ workflow: "sla", stages: base.map((s, i) => (i === at ? { ...s, ...extra } : s)) });
+
+  it("accepts a bounded deadline on a resting or executed stage, with notify as the default action", () => {
+    const def = withStage({ sla: { warnAfterSeconds: 3600, breachAfterSeconds: 86_400 } });
+    expect(def.stages[2]!.sla).toEqual({ warnAfterSeconds: 3600, breachAfterSeconds: 86_400, onBreach: "notify" });
+    expect(withStage({ sla: { breachAfterSeconds: 600, onBreach: "fail" } }, 3).stages[3]!.sla?.onBreach).toBe("fail");
+    expect(withStage({ sla: { breachAfterSeconds: 600, onBreach: "reassign", reassignTo: ["admin_not_initiator"] } }).stages[2]!.sla?.reassignTo).toEqual([
+      "admin_not_initiator",
+    ]);
+  });
+
+  it("refuses bad bounds, a reassign without a sign-off, and timed failure paths", () => {
+    expect(() => withStage({ sla: { breachAfterSeconds: 30 } })).toThrow();
+    expect(() => withStage({ sla: { breachAfterSeconds: 600, warnAfterSeconds: 600 } })).toThrow(/less than/);
+    expect(() => withStage({ sla: { breachAfterSeconds: 600, onBreach: "reassign" } })).toThrow(/reassignTo is required/);
+    expect(() => withStage({ sla: { breachAfterSeconds: 600, reassignTo: ["u"] } })).toThrow(/reassignTo is required/);
+    expect(() => withStage({ sla: { breachAfterSeconds: 600, onBreach: "reassign", reassignTo: ["u"] } }, 1)).toThrow(/only a human_approval/);
+    expect(() => withStage({ sla: { breachAfterSeconds: 600, extra: 1 } })).toThrow();
+    expect(() => withStage({ sla: { breachAfterSeconds: 600 } }, 0)).toThrow(/not timed/);
+    expect(() =>
+      validateDefinition({
+        workflow: "x",
+        stages: [
+          ...base,
+          { id: "undo", type: "git_operation", action: "delete_branch", connection: "gh", repo: "o/r", compensates: "branch", sla: { breachAfterSeconds: 600 } },
+        ],
+      }),
+    ).toThrow(/not timed/);
+  });
+});
