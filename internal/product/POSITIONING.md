@@ -45,6 +45,9 @@ control in RegulAIt goes green only when a SELECT over our own ledgers says so (
   cascade, evidence, WORM audit — the parts a proxy cannot retrofit."
 - **vs GitHub / Microsoft agent controls**: "Their controls end at their platform's edge. Ours
   are vendor-neutral by construction — any model, any cloud, any git host, any PM tool."
+- **vs Obsidian Security (SaaS-side agent security)**: "Obsidian watches agents from the SaaS side and blocks
+  what it can see. We are the path the agent's calls take — every action decided, costed and recorded before it
+  runs, in your cloud or air-gapped." (Gaps: [GAP_ANALYSIS_OBSIDIAN_2026-11.md](GAP_ANALYSIS_OBSIDIAN_2026-11.md).)
 - **vs building it in-house**: "Every hole we closed is a test that stays: 2,100+ enforcement
   tests, adversarial by method, mistakes ledger public in the repo."
 
