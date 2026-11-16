@@ -241,7 +241,7 @@ export const GEMINI_HOSTS: Readonly<Record<string, string>> = Object.freeze({
 export function geminiTargetProblem(target: Readonly<Record<string, string>>, scope: Readonly<{ orgLevel: boolean; include: readonly string[] }>): string | null {
   if (!target.projectId || !GCP_PROJECT_ID.test(target.projectId)) return "'projectId' must be a GCP project id";
   if (!target.location || !Object.hasOwn(GEMINI_HOSTS, target.location)) return "'location' must be global, us or eu";
-  if (!scope.orgLevel && (scope.include.length === 0 || scope.include.some((x) => !GEMINI_ENGINE_ID.test(x.trim())))) return "the scope names Gemini Enterprise engine (app) ids";
+  if (!scope.orgLevel && (scope.include.length === 0 || scope.include.some((x) => !GEMINI_ENGINE_ID.test(x.trim())))) return "the scope names the registry's engine (app) ids";
   return null;
 }
 
@@ -284,7 +284,7 @@ async function runGemini(ctx: ScanContext, opts: CloudScannerOptions = {}): Prom
   let engines: string[] = [];
   let enginesComplete = true;
   if (ctx.source.scope.orgLevel) {
-    const READ = "Gemini Enterprise engines";
+    const READ = "registry engines";
     const first = `${base}/engines?pageSize=100`;
     await readListing(ctx, READ, first, outcomes, (body) => {
       const value = atPath(body, "engines");
@@ -304,7 +304,7 @@ async function runGemini(ctx: ScanContext, opts: CloudScannerOptions = {}): Prom
   const records: RegistryAgentRecord[] = [];
   let agentsComplete = enginesComplete;
   for (const engine of engines) {
-    const READ = `Gemini Enterprise agents of ${engine}`;
+    const READ = `registry agents of engine ${engine}`;
     const first = `${base}/engines/${engine}/assistants/default_assistant/agents?pageSize=100`;
     await readListing(ctx, READ, first, outcomes, (body) => {
       const value = atPath(body, "agents");
