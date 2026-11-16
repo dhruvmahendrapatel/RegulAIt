@@ -34,7 +34,7 @@ export function BootSchedulerHealth() {
   const q = { ...q0, data: q0.data ? { ...q0.data, schedulers: q0.data.schedulers ?? [] } : undefined, refetch: q0.refetch };
   return (
     <Card title="Boot schedulers — retention prune and backup verification">
-      <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+      <QueryGate query={q}>
         {q.data && (
           <div className={v.stack}>
             {q.data.schedulers.length === 0 ? (

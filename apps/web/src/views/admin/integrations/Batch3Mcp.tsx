@@ -17,7 +17,7 @@ export function McpCoverage({ servers }: { servers: McpServer[] }) {
   const settings = useQuery({ queryKey: ["admin", "org-settings"], queryFn: () => api.get<OrgSettingsResponse>("/v1/org/settings") });
   return <>
     <Card title="MCP protocol coverage" info={<p>Tool calls use their existing tool grants. Other protocol methods need both organisation enablement and a separate per-user protocol grant. A read-only server grant includes no protocol methods.</p>}>
-      <QueryGate loading={settings.isLoading} error={settings.error} onRetry={() => void settings.refetch()}>
+      <QueryGate query={settings}>
         {settings.data?.settings ? <CoverageSettings key={JSON.stringify(settings.data.settings)} settings={settings.data.settings} />
           : !settings.isLoading && !settings.error && <p role="alert">This gateway has not reported MCP protocol coverage. Refresh before changing it.</p>}
       </QueryGate>

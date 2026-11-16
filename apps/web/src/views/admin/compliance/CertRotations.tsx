@@ -45,7 +45,7 @@ export function CertRotationsCard(props: { certId: string; commonName: string; o
         </Button>
       }
     >
-      <QueryGate loading={rotations.isLoading} error={rotations.error} onRetry={() => void rotations.refetch()}>
+      <QueryGate query={rotations}>
         <Table<CertRotation>
           rows={rotations.data?.rotations ?? []}
           rowKey={(r) => r.id}
