@@ -9,4 +9,5 @@ export * from "./runner.js";
 export * from "./loop.js";
 export * from "./key.js";
 export * from "./task-bridge.js";
+export * from "./task-subject.js";
 export { fsyncDir } from "./durable.js";
