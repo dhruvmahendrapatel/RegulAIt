@@ -575,9 +575,7 @@ export default function VirtualKeysPage() {
             }
           >
             <QueryGate
-              loading={usage.isLoading}
-              error={usage.error}
-              onRetry={() => void usage.refetch()}
+              query={usage}
             >
               {usage.data && (
                 <div className={v.stack}>

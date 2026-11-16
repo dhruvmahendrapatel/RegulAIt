@@ -39,6 +39,7 @@ import { specsFor, storedValue } from "./orgSettingSpecs";
 import { isOff, ORG_PAGE_RULES, ORG_PAGE_SPEC_TABS, type OrgTab } from "./orgPageRelaxed";
 import { PALETTES } from "../../../theme/palette";
 import { CardBoundary } from "../../../ui/CardBoundary";
+import { errorText } from "../../../api/format";
 
 // ADR-0218: the organisation default theme and lock, loaded only when this page opens
 const ThemesCard = lazy(() => import("./ThemesCard"));
@@ -139,7 +140,7 @@ export default function OrganizationPage() {
       ) : q.error ? (
         <ErrorState
           title="Couldn't load the organisation settings"
-          message={q.error instanceof Error ? q.error.message : String(q.error)}
+          message={errorText(q.error)}
           onRetry={() => void q.refetch()}
         />
       ) : (
@@ -386,7 +387,7 @@ function Loaded(props: { settings: Record<string, unknown> }) {
             "This allow-list excludes your own current IP under continuous enforcement — saving would sign you out on your next request.",
         );
       } else {
-        setNetError(err instanceof Error ? err.message : String(err));
+        setNetError(errorText(err));
       }
     } finally {
       setNetBusy(false);

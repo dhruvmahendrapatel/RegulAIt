@@ -133,7 +133,7 @@ export default function LicensingPage() {
         info={<p>A licence is a COMMERCIAL ceiling on top of the governance ceiling — it caps how many entitled users exist and which tier features are available, and can never grant an entitlement the governance layer denies. It is a signed file verified locally against a pinned public key, with no phone-home of any kind, because the flagship deployment is air-gapped and there is no home to phone.</p>}
       />
       <div className={v.stack}>
-        <QueryGate loading={status.isLoading} error={status.error} onRetry={() => void status.refetch()}>
+        <QueryGate query={status}>
           <Card title="Current state">
             <div className={a.statRow}>
               <Stat value={<Badge tone={stateTone(s?.state ?? "absent")}>{s?.state ?? "—"}</Badge>} label="licence state" />

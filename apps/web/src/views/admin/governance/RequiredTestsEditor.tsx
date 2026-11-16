@@ -114,7 +114,7 @@ function draftFrom(view: RequiredTestsView): Draft {
 export function RequiredTestsEditor() {
   const q = useQuery({ queryKey: KEY, queryFn: () => api.get<RequiredTestsView>(REQUIRED_TESTS_PATH) });
   return (
-    <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+    <QueryGate query={q}>
       {q.data && q.data.effective && Array.isArray(q.data.testClasses) ? (
         <RequiredTestsForm key={q.data.updatedAt ?? "default"} view={q.data} />
       ) : q.data ? (

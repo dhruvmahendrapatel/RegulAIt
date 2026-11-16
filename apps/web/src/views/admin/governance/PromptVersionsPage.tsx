@@ -20,7 +20,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
-import { ago, fmtUsd } from "../../../api/format";
+import { ago, fmtUsd, errorText } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, ErrorState, Field, Input, Select, SkeletonBlock, Table, Textarea } from "../../../ui/kit";
 import { QueryGate, agentOpts, optionEls, useAction, useAgents } from "../adminKit";
@@ -110,7 +110,7 @@ export default function PromptVersionsPage() {
           {agents.error && !agents.data && (
             <ErrorState
               title="Couldn't load the agents"
-              message={agents.error instanceof Error ? agents.error.message : String(agents.error)}
+              message={errorText(agents.error)}
               access={(agents.error as { status?: number }).status === 403}
               onRetry={() => void agents.refetch()}
             />
