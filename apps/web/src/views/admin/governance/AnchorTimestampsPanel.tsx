@@ -38,7 +38,7 @@ export function AnchorTimestampsPanel(props: { bare?: boolean } = {}) {
     </div>
     <p className={v.faint}>Anchoring pins the current head of the audit chain and records that it did. Writing out retries every anchor not yet stored at the configured destination.</p>
     {said ? <p role="status" data-testid="anchor-said">{said}</p> : null}
-    <QueryGate loading={anchors.isLoading} error={anchors.error} onRetry={() => void anchors.refetch()}>
+    <QueryGate query={anchors}>
       {Array.isArray(rows) ? rows.length === 0 ? <p>No anchors are available to timestamp.</p> : <Table rows={rows} rowKey={(row) => row.id} columns={[
         { key: "seq", header: "Anchor sequence", render: (row) => row.seq },
         { key: "timestamp", header: "Timestamp", render: (row) => {

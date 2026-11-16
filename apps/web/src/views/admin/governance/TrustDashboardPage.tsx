@@ -125,7 +125,7 @@ export default function TrustDashboardPage() {
           </>
         }
       />
-      <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+      <QueryGate query={q}>
         {q.data ? (
           <TrustReportView
             report={q.data}

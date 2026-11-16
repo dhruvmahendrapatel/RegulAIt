@@ -37,7 +37,7 @@ import { ListPreview } from "../../../ui/ListPreview";
 import { ExpandableTable } from "../../../ui/ExpandableTable";
 import { normalisePage, pageUrl } from "../../../ui/listState";
 import { api } from "../../../api/client";
-import { ago, fmtUsd, plural, shortId } from "../../../api/format";
+import { ago, fmtUsd, plural, shortId, errorText } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import {
   Badge,
@@ -419,7 +419,7 @@ export default function CostConsolidationPage() {
       if (file.name.toLowerCase().endsWith(".json")) setRosterFormat("json");
       else if (file.name.toLowerCase().endsWith(".csv")) setRosterFormat("csv");
     } catch (e) {
-      setRosterFileError(e instanceof Error ? e.message : String(e));
+      setRosterFileError(errorText(e));
     }
   };
 
@@ -461,7 +461,7 @@ export default function CostConsolidationPage() {
       if (file.name.toLowerCase().endsWith(".json")) setFormat("json");
       else if (file.name.toLowerCase().endsWith(".csv")) setFormat("csv");
     } catch (e) {
-      setFileError(e instanceof Error ? e.message : String(e));
+      setFileError(errorText(e));
     }
   };
 
@@ -594,9 +594,7 @@ export default function CostConsolidationPage() {
                 {/* --- import ------------------------------------------------------ */}
                 <Card title="Import a vendor export" info={adapters.data?.posture ? <p>{adapters.data.posture}</p> : undefined}>
                   <QueryGate
-                    loading={adapters.isLoading}
-                    error={adapters.error}
-                    onRetry={() => void adapters.refetch()}
+                    query={adapters}
                   >
                     <div className={v.stack}>
                       <div className={a.formRow}>
@@ -833,9 +831,7 @@ export default function CostConsolidationPage() {
                   info={mappings.data?.posture ? <p>{mappings.data.posture}</p> : undefined}
                 >
                   <QueryGate
-                    loading={mappings.isLoading}
-                    error={mappings.error}
-                    onRetry={() => void mappings.refetch()}
+                    query={mappings}
                   >
                     <div className={v.stack}>
 
@@ -1221,9 +1217,7 @@ export default function CostConsolidationPage() {
                     </div>
 
                     <QueryGate
-                      loading={consolidated.isLoading}
-                      error={consolidated.error}
-                      onRetry={() => void consolidated.refetch()}
+                      query={consolidated}
                     >
                       {subjects.length === 0 ? (
                         <EmptyState
@@ -1374,9 +1368,7 @@ export default function CostConsolidationPage() {
                   }
                 >
                   <QueryGate
-                    loading={reconciliation.isLoading}
-                    error={reconciliation.error}
-                    onRetry={() => void reconciliation.refetch()}
+                    query={reconciliation}
                   >
                     <div className={v.stack} data-testid="rc-card">
                       <div className={v.grid}>

@@ -382,7 +382,7 @@ export default function CopilotPage() {
       ) : null}
 
       <Card title="Everything it can do">
-        <QueryGate loading={tools.isLoading} error={tools.error} onRetry={() => void tools.refetch()}>
+        <QueryGate query={tools}>
           <Table<ToolSpec>
             rows={tools.data?.tools ?? []}
             rowKey={(t) => t.id}
