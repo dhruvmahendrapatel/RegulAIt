@@ -36,6 +36,8 @@ export const SUPPLIER_API_PREFIX = "/supplier/v1";
  * on the supplier cookie only. A supplier session reaches nothing else. */
 export const SUPPLIER_ROUTES = [
   "POST /supplier/v1/session",
+  // ADR-0240: the second factor between a spent link and a session (enrol on first use, then a TOTP code)
+  "POST /supplier/v1/session/mfa",
   "POST /supplier/v1/session/end",
   "GET /supplier/v1/assessment",
   "POST /supplier/v1/submissions",
@@ -111,9 +113,16 @@ export const publishSupplierQuestionnaireVersionSchema = z
  * scanner is configured (with one, every file is scanned and this has no effect). Turning either on is a relaxation.
  */
 export const supplierPortalSettingsSchema = z
-  .object({ enabled: z.boolean().optional(), acceptUnscannedFiles: z.boolean().optional() })
+  .object({
+    enabled: z.boolean().optional(),
+    acceptUnscannedFiles: z.boolean().optional(),
+    /** ADR-0240: strict true; false relaxes it (a spent link alone opens a session) */
+    mfaRequired: z.boolean().optional(),
+  })
   .strict()
-  .refine((b) => b.enabled !== undefined || b.acceptUnscannedFiles !== undefined, { message: "nothing to change" });
+  .refine((b) => b.enabled !== undefined || b.acceptUnscannedFiles !== undefined || b.mfaRequired !== undefined, {
+    message: "nothing to change",
+  });
 
 export const createSupplierAccessSchema = z
   .object({

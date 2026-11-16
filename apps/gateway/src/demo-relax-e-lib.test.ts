@@ -20,12 +20,12 @@ const STRICT = { toolApprovalSensitiveQuorum: 2, approvalSignatureMode: "passkey
 const personas = DEMO_PERSONA_EMAILS.map((email) => ({ email }));
 
 /** a stub gateway: GETs served from state, PUTs answered by `onPut`; every call recorded */
-function gateway(opts: { settings?: Json; beatsStatus?: number; users?: Json[]; onPut?: (headers: Record<string, string>, body: Json) => { status: number; body: Json } } = {}) {
+function gateway(opts: { settings?: Json; beatsStatus?: number; beatsBody?: Json; users?: Json[]; onPut?: (headers: Record<string, string>, body: Json) => { status: number; body: Json } } = {}) {
   const settings: Json = { ...STRICT, ...opts.settings };
   const calls: Array<{ method: string; url: string; headers: Record<string, string>; body?: unknown }> = [];
   const call: GatewayCall = async (method, url, headers, body) => {
     calls.push({ method, url, headers, body });
-    if (method === "GET" && url === "/v1/demo/beats") return { status: opts.beatsStatus ?? 200, body: { beats: [{ beatId: "enforce-it", mode: "live" }] } };
+    if (method === "GET" && url === "/v1/demo/beats") return { status: opts.beatsStatus ?? 200, body: opts.beatsBody ?? { beats: [{ beatId: "enforce-it", mode: "live" }] } };
     if (method === "GET" && url === "/v1/users") return { status: 200, body: { users: opts.users ?? personas } };
     if (method === "GET" && url === ORG_SETTINGS_PATH) return { status: 200, body: { settings } };
     if (method === "PUT" && url === ORG_SETTINGS_PATH) {
@@ -86,6 +86,15 @@ describe("applyDemoERelaxation", () => {
     const g = gateway({ beatsStatus: 403 });
     expect((await applyDemoERelaxation(g.call, { headers: BOOT })).status).toBe("refused");
     expect(g.puts()).toHaveLength(0);
+  });
+
+  it("a RETIRED bootstrap token (S-02) is needs_admin, so the admin path runs; nothing read or written", async () => {
+    const g = gateway({ beatsStatus: 401, beatsBody: { error: "bootstrap_retired" } });
+    const r = await applyDemoERelaxation(g.call, { headers: BOOT });
+    expect(r.status).toBe("needs_admin");
+    expect(r.lines.join("\n")).toContain("retired");
+    expect(g.calls).toHaveLength(1);
+    expect(g.settings).toMatchObject(STRICT);
   });
 
   it("the bootstrap credential's step-up refusal is reported as needs_admin, never retried, nothing changed", async () => {

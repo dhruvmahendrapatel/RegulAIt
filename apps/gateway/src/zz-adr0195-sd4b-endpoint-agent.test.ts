@@ -24,6 +24,7 @@
  *
  * Everything this suite creates is removed in afterAll.
  */
+import { hashToken } from "./token-hash.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -245,7 +246,7 @@ describe("ADR-0195 SD4b: enrolment", () => {
     expect(out.enrolFile.issuer).toBe(ORIGIN);
     expect(out.enrolFile.token).toMatch(/^rgea_[0-9a-f]{64}$/);
     const [row] = await db.select().from(endpointEnrolmentTokens).where(eq(endpointEnrolmentTokens.id, out.token.id));
-    expect(row!.tokenHash).toBe(createHash("sha256").update(out.enrolFile.token).digest("hex"));
+    expect(row!.tokenHash).toBe(hashToken(out.enrolFile.token));
     const list = await inject("GET", `/v1/discovery/sources/${sourceId}/enrolment-tokens`, AUTH);
     expect(list.body).not.toContain(out.enrolFile.token);
     const audits = await db.select({ d: auditLog.detail }).from(auditLog).where(sql`${auditLog.detail}->>'tokenId' = ${out.token.id}`);
