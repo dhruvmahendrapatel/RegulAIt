@@ -575,7 +575,7 @@ function AdminSpdxFieldsPanel(props: PanelProps) {
         The supplier-declared values an SPDX 3.0.1 AI BOM needs and no other record holds (ADR-0189 R51). Only administrators see or
         change them. Every set and every withdrawal is written to the audit log by the gateway, in the same transaction as the value.
       </p>
-      <QueryGate loading={fields.isLoading} error={fields.error} onRetry={() => void fields.refetch()}>
+      <QueryGate query={fields}>
         {fields.data && (
           <SpdxFieldsView
             kind={props.kind}

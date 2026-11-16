@@ -22,7 +22,7 @@ import { TrainedDetectorsPanel } from "./TrainedDetectorsPanel";
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
-import { ago } from "../../../api/format";
+import { ago, errorText } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import {
   Badge,
@@ -293,7 +293,7 @@ export default function GuardrailsPage() {
               {effective.error && !effective.data ? (
                 <ErrorState
                   title="Couldn't resolve what applies"
-                  message={effective.error instanceof Error ? effective.error.message : String(effective.error)}
+                  message={errorText(effective.error)}
                   onRetry={() => void effective.refetch()}
                 />
               ) : (

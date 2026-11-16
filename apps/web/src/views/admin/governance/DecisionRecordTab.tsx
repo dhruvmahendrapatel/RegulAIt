@@ -70,7 +70,7 @@ export function DecisionRecordTab(props: { useCaseId: string }) {
       {isRefusal(q.error) ? (
         <NotAvailableToYou what="The decision records" />
       ) : (
-      <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+      <QueryGate query={q}>
         {q.data ? (
           <>
             <Table

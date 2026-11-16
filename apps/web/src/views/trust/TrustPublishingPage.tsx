@@ -313,7 +313,7 @@ function NewControlDraft(props: { onCreated: (p: TrustPublication) => void }) {
   };
   return (
     <Card title="Start a draft from a control">
-      <QueryGate loading={sources.isLoading} error={sources.error} onRetry={() => void sources.refetch()}>
+      <QueryGate query={sources}>
         {controls.length === 0 ? (
           <EmptyState title="No active compliance pack" body="Activate a compliance pack first; its controls appear here." />
         ) : (
@@ -359,7 +359,7 @@ function NewCardDraft(props: { onCreated: (p: TrustPublication) => void }) {
     }, "Card drafted from the register and the model cards. Edit it before publishing.");
   return (
     <Card title="Start an AI system card from the register">
-      <QueryGate loading={sources.isLoading} error={sources.error} onRetry={() => void sources.refetch()}>
+      <QueryGate query={sources}>
         {useCases.length === 0 ? (
           <EmptyState title="No registered use cases" body="Register a use case first; its card is drafted from that record." />
         ) : (
@@ -723,7 +723,7 @@ function GrantDetailModal(props: { grantId: string; onClose: () => void }) {
   const q = useQuery({ queryKey: [...KEY, "grant", props.grantId], queryFn: () => api.get<GrantDetail>(`/v1/trust/auditor-grants/${props.grantId}`) });
   return (
     <Modal open wide title="Auditor activity" onClose={props.onClose} actions={<Button onClick={props.onClose}>Close</Button>}>
-      <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+      <QueryGate query={q}>
         {q.data && (
           <div className={v.stack}>
             <KV
@@ -773,7 +773,7 @@ function HeadingTab() {
       .then((ok) => ok && setDraft(null));
   return (
     <Card title="Trust centre heading">
-      <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+      <QueryGate query={q}>
         <div className={v.stack}>
           <Field label="Organisation name, as shown">
             <Input value={value.displayName} maxLength={120} onChange={(e) => setDraft({ ...value, displayName: e.target.value })} />

@@ -72,7 +72,7 @@ export function ReencryptionStatusCard() {
   return (
     <Card title="Re-encryption after a key rotation">
       <div className={v.stack} data-testid="data-key-reencryption">
-        <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+        <QueryGate query={q}>
           {q.data ? (
             <>
               {run && state ? (
