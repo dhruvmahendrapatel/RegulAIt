@@ -1,13 +1,13 @@
 // ADR-0262: the PR scope fails closed. A rename out of code into docs is still a code change, and a diff
 // that cannot be read means a full run.
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
 import { afterEach, describe, expect, it } from "vitest";
-import { evaluate, planFor, ranJobs, runnerCount } from "./ci-plan.mjs";
+import { PR_WORKFLOWS, PR_WORKFLOWS_EXCLUDED, evaluate, planFor, ranJobs, runnerCount } from "./ci-plan.mjs";
 import { ALL_RE, BASE_DOCS_RE, FULL, OUTPUTS, changedFiles, gatewayWebReaders, scopeForEvent, scopeOf } from "./ci-scope.mjs";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -297,10 +297,20 @@ describe("the workflows wire the scope fail-closed", () => {
     expect(ui).toContain('def ok(want): if want == "true" then .result == "success" elif want == "false" then .result == "skipped" else false end;');
   });
 
+  it("the dry run covers every workflow a pull_request can start (a new one fails here until it is listed)", () => {
+    const prTriggered = readdirSync(path.join(repo, ".github/workflows"))
+      .filter((f) => /\.ya?ml$/.test(f))
+      .filter((f) => {
+        const on = workflow(f).on;
+        return on && typeof on === "object" && "pull_request" in on;
+      })
+      .sort();
+    expect([...PR_WORKFLOWS, ...PR_WORKFLOWS_EXCLUDED].sort()).toEqual(prTriggered);
+  });
+
   it("every workflow a PR starts cancels a superseded PR run, and only a PR run", () => {
     const PR_ONLY = "${{ github.event_name == 'pull_request' }}";
-    for (const f of ["ci.yml", "ui-enterprise.yml", "security.yml", "import-cycles.yml", "integrations.yml", "client-compat.yml",
-      "endpoint-agent.yml", "engine-images-build.yml", "operator.yml"]) {
+    for (const f of PR_WORKFLOWS) {
       const c = workflow(f).concurrency;
       expect(c["cancel-in-progress"], f).toBe(PR_ONLY);
       expect(c.group, f).toContain("github.run_id");
