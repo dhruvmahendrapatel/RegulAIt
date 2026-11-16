@@ -619,6 +619,7 @@ import { WEB_UI_ROUTES, defaultWebDistDir, registerWebServing } from "./web-serv
 // their own module so the published OpenAPI document derives each route's
 // documented credential requirement from the SAME objects that enforce it.
 import { AUTH_EXEMPT_ROUTES, NON_ADMIN_ROUTES, requestRlsScope } from "./route-classes.js";
+import { isDraining } from "./readiness.js";
 import { registerOpenApiRoutes, type RouteInventoryEntry } from "./openapi.js";
 import { registerOnboardingRoutes } from "./onboarding.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
@@ -980,7 +981,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       timeWindow: (_req, key) => rateLimitWindowMs(rateCfg, key),
       // a load balancer's liveness poll must never be throttled into a false
       // "gateway is down"
-      allowList: (req) => req.url === "/health",
+      allowList: (req) => req.url === "/health" || req.url === "/ready",
       // The plugin constructs this itself and hands it the whole options
       // object, so the db arrives through the closure rather than through a
       // constructor argument we control.
@@ -5710,12 +5711,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // human landing on / gets the app (the SPA since the phase-2 swap), a load
   // balancer or uptime check gets a status. Both are auth-exempt.
   app.get("/", async (_req, reply) => reply.redirect("/ui", 302));
-  app.get("/health", async (_req, reply) => {
-    // ADR-0167 (CFG-08): the probe RACES a short deadline. `select 1` goes
-    // through the same pool every request uses, so with the pool exhausted it
-    // would queue behind them and the liveness check would hang rather than
-    // answer — a probe that cannot say "degraded" is not a probe. The query is
-    // left to settle on its own; it is one slot, and the answer is already out.
+  // ADR-0167 (CFG-08): the probe RACES a short deadline. `select 1` goes through the same pool every request uses, so
+  // with the pool exhausted it would queue behind them and the check would hang rather than answer — a probe that
+  // cannot say "degraded" is not a probe. The query is left to settle on its own; it is one slot, and the answer is
+  // already out.
+  const probeDatabase = async (): Promise<"ok" | "unreachable" | "timeout"> => {
     const probe = db.execute(sql`select 1`).then(
       () => "ok" as const,
       () => "unreachable" as const,
@@ -5726,10 +5726,21 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     });
     const database = await Promise.race([probe, deadline]);
     if (timer) clearTimeout(timer);
+    return database;
+  };
+  app.get("/health", async (_req, reply) => {
+    const database = await probeDatabase();
     if (database !== "ok") {
       return reply.status(503).send({ status: "degraded", database });
     }
     return { status: "ok", database: "ok" };
+  });
+  // ADR-0343: readiness. 503 `draining` once a shutdown has started, so the load balancer stops routing here first.
+  app.get("/ready", async (_req, reply) => {
+    if (isDraining(app)) return reply.status(503).send({ status: "draining" });
+    const database = await probeDatabase();
+    if (database !== "ok") return reply.status(503).send({ status: "degraded", database });
+    return { status: "ready", database: "ok" };
   });
 
   // ADR-0031 item 6: the health surface the two boot schedulers report into.
