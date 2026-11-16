@@ -150,15 +150,30 @@ named, tagged or designated production.
   must approve each run. It:
   - exchanges the job's OIDC token for a three-hour session of the rehearsal role with the AWS CLI (no third-party
     action);
-  - refuses any account but the one in the role ARN, and masks that account ID in the public logs;
-  - runs the preflight, applies the customer root with `rehearsal.tfvars.example` (Kubernetes API open to the
-    runner's /32 only), and runs the smoke test with the WORM probe;
+  - refuses any account but regulait-dev: the caller must match the role ARN, and the account's IAM alias must equal
+    `EXPECTED_ACCOUNT_ALIAS`, which is committed in the workflow (#873 review, finding 1). The role ARN comes from an
+    environment variable, so it proves nothing alone. The alias is used, not a hash of the account ID, because the
+    repository is public and a hash of a 12-digit ID can be reversed by brute force. The account ID is masked in logs;
+  - refuses to start while anything tagged `purpose=rehearsal` is still live, so a missed teardown blocks the next
+    rehearsal instead of piling up (finding 2);
+  - runs the preflight, applies the customer root with `rehearsal.tfvars.example`, and runs the smoke test with the
+    WORM probe. For the length of the run, the cluster's public API endpoint is open to the runner's own /32, read from
+    `checkip.amazonaws.com`, and to nothing else. It is gone when the stack is destroyed;
+  - caps every step so the caps add up to the job's 170 minutes (apply 70, smoke 20, destroy 55). The 180-minute
+    session starts after setup and outlives the job, so destroy always has time and live credentials, even after a
+    hung apply (finding 2). State is local to the runner, which is why the leftovers gate exists: a lost runner loses
+    the state, and the next run refuses to start until the owner clears what it left;
   - **always** destroys, after `infra/scripts/byoc-rehearsal-sweep.sh` empties the GOVERNANCE-mode rehearsal bucket
     and the cache repositories (the sweep refuses any prefix that is not `regulait-rehearsal*`, and any bucket in
     COMPLIANCE mode);
   - lists anything still tagged `purpose=rehearsal`, and writes every step's start, duration and result to the run
     summary, which the lane copies into its PR.
 
+- The runbook's §6 is idempotent (finding 3). It uses `--dry-run=client | kubectl apply`, `helm upgrade --install`
+  and `helm repo add --force-update`. §6.3 keeps an existing `regulait` Secret and never generates a second data key,
+  because a re-run that rotated it would leave every stored credential unreadable (ADR-0035). The database URL asks
+  for `sslmode=verify-full`. Until the chart can mount the RDS CA bundle, that is listed as a known gap rather than
+  weakened (ADR-0180).
 - **Operator backups to S3 (ADR-0305 §2) are not in this PR** (#868 review, finding 4). `backup-target-s3` grants
   `s3:ListBucket` (ADR-0305 forbids it) and no S3-conditioned `kms:GenerateDataKey`/`kms:Decrypt`, so composing it
   as is would break the operator's least-privilege contract, and changing it touches its other callers. A follow-up

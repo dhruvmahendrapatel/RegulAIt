@@ -46,6 +46,11 @@ jobs:
       AWS_PAGER: ''
       KUBECTL_VERSION: v1.34.13
       KUBECTL_SHA256: b4bb494e9466a7a94bb851414548bc0d3e2f8da90757e6eccc3371e648648591
+      # The one account this workflow may touch, by its IAM account alias. Not
+      # the account ID: the repository is public, and a hash of a 12-digit ID
+      # can be reversed by brute force. Changing it takes a reviewed PR; the
+      # role ARN variable alone cannot move a rehearsal to another account.
+      EXPECTED_ACCOUNT_ALIAS: regulait-dev
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -75,6 +80,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install Terraform and kubectl (pinned, SHA-256 checked)
+        timeout-minutes: 5
         run: |
           set -euo pipefail
           infra/scripts/install-terraform.sh "$RUNNER_TEMP/bin"
@@ -84,6 +90,7 @@ jobs:
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       - name: Assume the rehearsal role (GitHub OIDC, no stored key)
+        timeout-minutes: 2
         run: |
           set -euo pipefail
           token="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)"
@@ -99,13 +106,39 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Refuse any account but regulait-dev
+        timeout-minutes: 2
         run: |
           set -euo pipefail
           got="$(aws sts get-caller-identity --query Account --output text)"
-          [ "$got" = "$ACCOUNT_ID" ] || { echo "::error::credentials are for another account"; exit 1; }
-          echo "signed in as $(aws sts get-caller-identity --query Arn --output text)"
+          [ "$got" = "$ACCOUNT_ID" ] || { echo "::error::credentials are for another account than the role ARN names"; exit 1; }
+          # The role ARN comes from an environment variable, so it alone proves
+          # nothing: a same-named role in another account would pass the check
+          # above. The account's IAM alias is pinned in this file.
+          alias="$(aws iam list-account-aliases --query 'AccountAliases[0]' --output text)"
+          if [ "$alias" != "$EXPECTED_ACCOUNT_ALIAS" ]; then
+            echo "::error::this account's IAM alias is '$alias', not '$EXPECTED_ACCOUNT_ALIAS'; refusing to touch it (docs/ops/BYOC_REHEARSAL_ROLE.md, step 0)"
+            exit 1
+          fi
+          if grep -qiE 'prod' <<<"$alias"; then echo "::error::refusing an account whose alias names production"; exit 1; fi
+          echo "signed in to the $alias account as $(aws sts get-caller-identity --query Arn --output text)"
+
+      - name: Refuse to start while a rehearsal is still standing
+        timeout-minutes: 4
+        run: |
+          set -uo pipefail
+          # A teardown that was missed (lost runner, expired session) leaves
+          # tagged resources behind. Block the next rehearsal on them instead
+          # of letting them pile up; they are listed in the log.
+          if infra/scripts/byoc-rehearsal-sweep.sh leftovers "$PREFIX"; then
+            echo "| leftovers before apply | | | none |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| leftovers before apply | | | **FOUND**: clean up per docs/ops/BYOC_REHEARSAL_ROLE.md, then re-run |" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::resources tagged purpose=rehearsal are still live; refusing to apply"
+            exit 1
+          fi
 
       - name: Preflight
+        timeout-minutes: 8
         env:
           MODEL: ${{ inputs.bedrock_model }}
         run: |
@@ -117,7 +150,12 @@ jobs:
           echo "| preflight | $(date -u -d @"$start" +%H:%M:%S) | $(( $(date +%s) - start ))s | exit $rc |" >> "$GITHUB_STEP_SUMMARY"
           exit $rc
 
+      # Time budget. Every step is capped, and the caps add up to the job's 170
+      # minutes: setup 21, apply 70, smoke 20, destroy 55, leftovers 4. The
+      # session (180 minutes) starts after setup, so it outlives the job and
+      # destroy never runs on expired credentials, even when an apply hangs.
       - name: Terraform apply
+        timeout-minutes: 70
         env:
           MODEL: ${{ inputs.bedrock_model }}
         run: |
@@ -141,6 +179,7 @@ jobs:
           exit "$rc"
 
       - name: Smoke test
+        timeout-minutes: 20
         env:
           MODEL: ${{ inputs.bedrock_model }}
         run: |
@@ -166,6 +205,7 @@ jobs:
 
       - name: Destroy (always)
         if: always()
+        timeout-minutes: 55
         run: |
           set -uo pipefail
           start=$(date +%s)
@@ -188,6 +228,7 @@ jobs:
 
       - name: Nothing left behind
         if: always()
+        timeout-minutes: 4
         run: |
           set -uo pipefail
           if [ -z "${AWS_SESSION_TOKEN:-}" ]; then exit 0; fi

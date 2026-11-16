@@ -148,43 +148,56 @@ docker push "$(terraform output -json ecr_repository_urls | jq -r .gateway):<ver
 The digest that `docker push` prints must equal the one in the bundle's `manifest.json`. Do the same for the
 operator image.
 
+Every command in 6.2 to 6.5 is safe to run again: re-running a step after a failure, or the whole section, changes
+nothing that is already right and never replaces a key.
+
 **6.2 Storage, load balancer controller, namespace**
 
 ```bash
 terraform output -raw storage_class_manifest | kubectl apply -f -
-kubectl create namespace regulait
+kubectl create namespace regulait --dry-run=client -o yaml | kubectl apply -f -
 
-helm repo add eks https://aws.github.io/eks-charts
+helm repo add eks https://aws.github.io/eks-charts --force-update
 terraform output -raw lb_controller_helm_values > lbc-values.yaml
-helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
+helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
   --version 3.6.3 -n kube-system -f lbc-values.yaml
 ```
 
-**6.3 The secrets** (generated here, never typed into a file in the repository):
+**6.3 The secrets** (generated here, never typed into a file in the repository). **This step creates the data key
+once and never again.** If the `regulait` Secret already exists, it is kept as it is: a second data key would leave
+everything encrypted under the first one unreadable.
 
 ```bash
-DB=$(aws secretsmanager get-secret-value --secret-id "$(terraform output -raw db_master_secret_arn)" \
-  --query SecretString --output text)
-DB_URL="postgres://$(jq -r .username <<<"$DB"):$(jq -rn --arg p "$(jq -r .password <<<"$DB")" '$p|@uri')@$(terraform output -raw db_endpoint):5432/regulait?sslmode=require"
-DATA_KEY=$(openssl rand -hex 32)
-BOOTSTRAP_TOKEN=$(openssl rand -hex 32)      # keep this shell open: step 7 uses it once
-kubectl -n regulait create secret generic regulait \
-  --from-literal=data-key="$DATA_KEY" \
-  --from-literal=database-url="$DB_URL" \
-  --from-literal=bootstrap-token="$BOOTSTRAP_TOKEN"
-unset DB DB_URL
+if kubectl -n regulait get secret regulait >/dev/null 2>&1; then
+  echo "secret regulait exists: kept, data key unchanged"
+  BOOTSTRAP_TOKEN=$(kubectl -n regulait get secret regulait -o jsonpath='{.data.bootstrap-token}' | base64 -d)
+else
+  DB=$(aws secretsmanager get-secret-value --secret-id "$(terraform output -raw db_master_secret_arn)" \
+    --query SecretString --output text)
+  DB_URL="postgres://$(jq -r .username <<<"$DB"):$(jq -rn --arg p "$(jq -r .password <<<"$DB")" '$p|@uri')@$(terraform output -raw db_endpoint):5432/regulait?sslmode=verify-full"
+  DATA_KEY=$(openssl rand -hex 32)
+  BOOTSTRAP_TOKEN=$(openssl rand -hex 32)      # keep this shell open: step 7 uses it once
+  kubectl -n regulait create secret generic regulait \
+    --from-literal=data-key="$DATA_KEY" \
+    --from-literal=database-url="$DB_URL" \
+    --from-literal=bootstrap-token="$BOOTSTRAP_TOKEN"
+  unset DB DB_URL
+  echo "secret regulait created: record DATA_KEY now (below), then unset DATA_KEY"
+fi
 ```
 
 > **Record `DATA_KEY` now** in your password manager or vault, then `unset DATA_KEY`. Every stored credential
 > in RegulAIt is encrypted under it, and **if it is lost, those credentials cannot be recovered**
 > ([INSTALL.md](INSTALL.md#before-you-start-the-one-thing-that-cannot-be-recovered)). Do not store it next to the
-> database backups.
+> database backups. To change the database password later, edit only the `database-url` key of the Secret; never
+> recreate the Secret.
 
 **6.4 The signed bundle manifest**
 
 ```bash
 kubectl -n regulait create configmap regulait-bundle-<version> \
-  --from-file=<bundle>/manifest.json --from-file=<bundle>/manifest.json.sig
+  --from-file=<bundle>/manifest.json --from-file=<bundle>/manifest.json.sig \
+  --dry-run=client -o yaml | kubectl apply -f -
 ```
 
 **6.5 Install the chart**
@@ -206,7 +219,7 @@ operator:
     repository: "$(terraform output -json ecr_repository_urls | jq -r .operator)"
     digest: "<operator digest from manifest.json>"
 EOF
-helm install regulait deploy/helm/regulait -n regulait -f stack-values.yaml -f release-values.yaml
+helm upgrade --install regulait deploy/helm/regulait -n regulait -f stack-values.yaml -f release-values.yaml
 kubectl -n regulait rollout status deploy/regulait-gateway --timeout=10m
 ```
 
@@ -359,5 +372,9 @@ it before you send it** (`tar -xzf` it and look).
   does, step 6.6 needs a chart change (tracked with the chart, ADR-0304).
 - The Helm chart cannot yet pass the S3 audit-anchor settings (`terraform output gateway_environment`) to the
   gateway. Until it can, anchors go to the local volume only.
+- The database URL asks for `sslmode=verify-full`, so the certificate and host name are checked. RDS certificates
+  chain to the Amazon RDS CA, which Node.js does not ship, and the chart cannot yet mount the RDS CA bundle
+  (`NODE_EXTRA_CA_CERTS`). Until it can, the gateway cannot verify the database and will not connect. Weakening
+  the check is not the fix (ADR-0180). Tracked with the chart (ADR-0304).
 - The chart's default-deny egress may block the EKS Pod Identity agent (`169.254.170.23:80`). If the gateway logs
   "could not load credentials", that is the cause.

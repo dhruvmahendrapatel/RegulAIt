@@ -22,6 +22,9 @@ case "$cmd" in
     if aws s3api head-bucket --bucket "$bucket" >/dev/null 2>&1; then
       mode="$(aws s3api get-object-lock-configuration --bucket "$bucket" --query ObjectLockConfiguration.Rule.DefaultRetention.Mode --output text 2>/dev/null)"
       if [ "$mode" != "GOVERNANCE" ]; then echo "bucket $bucket is $mode, not GOVERNANCE: not touching it" >&2; exit 1; fi
+      # Each pass lists from the start (no continuation token) and deletes
+      # what it listed, so the next pass sees the rest. That is correct only
+      # because every pass deletes; stop as soon as a pass finds nothing.
       while :; do
         batch="$(aws s3api list-object-versions --bucket "$bucket" --max-items 500 --output json \
           --query '{Objects: [Versions[].{Key:Key,VersionId:VersionId}, DeleteMarkers[].{Key:Key,VersionId:VersionId}][] }')"
