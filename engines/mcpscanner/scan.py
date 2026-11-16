@@ -77,6 +77,27 @@ def use_writable_tempdir(out_path):
         tempfile.tempdir = None
 
 
+MAX_INPUT_FILES = 64
+
+
+def input_digests(in_dir):
+    """every file the scan was given, as [{path, sha256}] sorted by path (#843 security review): the gateway records
+    a verdict only when this is exactly the one file it placed, so the report proves which bytes were scanned"""
+    out = []
+    for root, dirs, files in os.walk(in_dir):
+        dirs.sort()
+        for name in files:
+            p = os.path.join(root, name)
+            if len(out) >= MAX_INPUT_FILES:
+                return None
+            h = hashlib.sha256()
+            with open(p, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 16), b""):
+                    h.update(chunk)
+            out.append({"path": os.path.relpath(p, in_dir).replace(os.sep, "/")[:256], "sha256": h.hexdigest()})
+    return sorted(out, key=lambda e: e["path"])
+
+
 def slug(text):
     return "".join(c if c.isalnum() else "_" for c in str(text).strip().lower()).strip("_")[:64] or "unnamed"
 
@@ -109,6 +130,12 @@ def main(argv):
             inputs[kind] = p
     if not inputs:
         failed(out_path, "no input", {"rulesSha256": actual})
+    try:
+        given = input_digests(in_dir)
+    except OSError as e:
+        failed(out_path, f"input unreadable: {type(e).__name__}", {"rulesSha256": actual})
+    if given is None:
+        failed(out_path, "too many input files", {"rulesSha256": actual})
 
     import asyncio
 
@@ -165,6 +192,7 @@ def main(argv):
         "status": "failed" if errors else "completed",
         "analyzers": list(ANALYZERS),
         "rulesSha256": actual,
+        "inputs": given,
         "items": items,
         "findings": findings,
     }

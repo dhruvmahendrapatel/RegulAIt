@@ -70,7 +70,8 @@ write permission, so it is not read either: owners are read instead.
    carries the provenance (record, source, registry, vendor id, last run). Deleting the agent re-opens the record.
 
 6. **API only; the screens are a known UI gap on #453.** Three routes: list (keyset-paginated, at most 200), get and
-   import. All three are in `KNOWN_UI_GAPS`.
+   import. All three are in `KNOWN_UI_GAPS`, raising `KNOWN_UI_GAPS_MAX` by 3 under the master brief for lane E3
+   (2026-11-15), which makes new routes API-only with a `KNOWN_UI_GAPS` entry pointing at #453.
 
 ## Open-source check (ADR-0176)
 

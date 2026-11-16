@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { AGENTCORE_MAX_RUNTIMES, listAgentCoreRuntimes } from "./agent-registries.js";
+import { paginate, paginateBounded } from "./report.js";
 import { awsSts, fakeCloud, installNetworkTripwire, json, synthetic, type RecordedCall } from "./test-cloud.js";
 
 const ACCOUNT = "111122223333";
@@ -84,5 +85,48 @@ describe("ADR-0314: AgentCore runtime listing", () => {
     ).rejects.toThrow(/not an AWS region/);
     expect(cloud.calls).toHaveLength(0);
     expect(AGENTCORE_MAX_RUNTIMES).toBe(5000);
+  });
+});
+
+describe("paginateBounded (the shared pager with a truncation flag)", () => {
+  const pages = (sizes: number[]) => {
+    let calls = 0;
+    const fetchPage = async (token: string | undefined) => {
+      const i = token ? Number(token) : 0;
+      calls++;
+      return { items: Array.from({ length: sizes[i]! }, (_, k) => `${i}-${k}`), next: i + 1 < sizes.length ? String(i + 1) : undefined };
+    };
+    return { fetchPage, calls: () => calls };
+  };
+  const run = (sizes: number[], maxPages: number, maxItems?: number) => {
+    const p = pages(sizes);
+    return paginateBounded(maxPages, p.fetchPage, (x) => x.items, (x) => x.next, maxItems).then((r) => ({ ...r, calls: p.calls() }));
+  };
+
+  it("reads to the end: not truncated, and paginate() still returns the same items", async () => {
+    const r = await run([3, 2], 10);
+    expect(r).toMatchObject({ truncated: false, calls: 2 });
+    expect(r.items).toHaveLength(5);
+    const p = pages([3, 2]);
+    expect(await paginate(10, p.fetchPage, (x) => x.items, (x) => x.next)).toEqual(r.items);
+  });
+
+  it("the item cap hit inside the LAST page (no next token) is truncated: the review's case", async () => {
+    const r = await run([3, 4], 10, 5);
+    expect(r.items).toHaveLength(5);
+    expect(r.truncated).toBe(true);
+  });
+
+  it("the item cap met exactly at the end of the listing is complete", async () => {
+    expect((await run([3, 2], 10, 5)).truncated).toBe(false);
+  });
+
+  it("the page cap with a next page pending is truncated, and no further page is fetched", async () => {
+    const r = await run([1, 1, 1], 2);
+    expect(r).toMatchObject({ truncated: true, calls: 2 });
+  });
+
+  it("no room left is truncated without a request", async () => {
+    expect(await run([1], 5, 0)).toMatchObject({ truncated: true, calls: 0, items: [] });
   });
 });

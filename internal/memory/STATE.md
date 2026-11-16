@@ -77,6 +77,13 @@ pg-boss. The prototype is in `spikes/workflow-p30/` (default off); there is no p
   the demo workflow set it, and the in-process `seed`/`demo:*` tools pass it in code.
 - Minting an API key for another user is an `identity_manage` step-up; the admin Users page wraps it in `withStepUp`.
 
+**2026-11-07 - drift ingestion credential (builder lane, [ADR-0223 amendment 1](../decisions/0223-classical-model-drift-explainability.md), pending migration `drift_ingest_credentials`).**
+- The #628 follow-up: each drift monitor can hold a write-only `rgldi_` credential that opens only
+  `POST /v1/model-drift/ingest/:monitorId/reports` for that monitor. Hash-only, always expiring (90 days default, 365
+  CHECK-capped), revoked at once; issue, rotate and revoke need an `identity_manage` step-up and are audited in the
+  same transaction; replay-safe through an Idempotency-Key. Branch `builder/p13b-ingest-credential`, draft PR held for
+  review. The admin panel is posted on #453 for the designer session.
+
 **2026-10-29 - the customer demo moves to one date, Saturday 2026-10-31 (owner, #453 c6508111468).**
 - **Date:** the internal run-through on Sun 11-01 and the external demo on Tue 11-03 are dropped; there is one run, on
   10-31. LIVE is never re-prepared, so every beat, state-changing ones included, runs on LIVE once, at the demo; the

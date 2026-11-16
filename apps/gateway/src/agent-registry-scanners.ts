@@ -150,7 +150,8 @@ async function runEntraRegistry(ctx: ScanContext): Promise<ScanResult> {
   let ownerReads = 0;
   let ownerFailures = 0;
   for (const it of identities) {
-    if (ownerReads >= ENTRA_OWNER_LOOKUPS_MAX || ctx.signal.aborted) break;
+    // the same lease check `readListing` makes before each page: a lost lease stops the lookups
+    if (ownerReads >= ENTRA_OWNER_LOOKUPS_MAX || ctx.signal.aborted || !(await ctx.heartbeat())) break;
     ownerReads++;
     try {
       const body = await get(`${GRAPH_ORIGIN}/v1.0/servicePrincipals/${it.id}/microsoft.graph.agentIdentity/owners?$select=id,displayName&$top=20`);
@@ -231,6 +232,9 @@ async function runEntraRegistry(ctx: ScanContext): Promise<ScanResult> {
 
 const GCP_PROJECT_ID = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
 const GEMINI_ENGINE_ID = /^[a-z0-9][a-z0-9_-]{0,62}$/;
+/** the most engines one run reads agents from */
+export const GEMINI_MAX_ENGINES = 500;
+
 /** the Discovery Engine host for each multi-region (the location is part of the host, so it is a closed list) */
 export const GEMINI_HOSTS: Readonly<Record<string, string>> = Object.freeze({
   global: "https://discoveryengine.googleapis.com",
@@ -291,7 +295,10 @@ async function runGemini(ctx: ScanContext, opts: CloudScannerOptions = {}): Prom
       if (Array.isArray(value)) {
         for (const e of value) {
           const id = str(atPath(e, "name"), 512)?.split("/").pop();
-          if (id && GEMINI_ENGINE_ID.test(id) && engines.length < 500) engines.push(id);
+          if (!id || !GEMINI_ENGINE_ID.test(id)) continue;
+          // the engine bound is a cap, not a silent drop: the read becomes partial, so nothing is marked absent
+          if (engines.length >= GEMINI_MAX_ENGINES) return ITEM_CAP;
+          engines.push(id);
         }
       }
       return pageUrl(first, body);
@@ -368,7 +375,7 @@ async function runAgentCore(ctx: ScanContext, opts: CloudScannerOptions = {}): P
   const outcomes: DiscoveryReadOutcome[] = out.regions.map((r) => ({
     read: `AgentCore runtimes in ${r.region}`,
     status: r.status === "ok" ? "read" : r.status,
-    ...(r.detail ? { detail: r.detail } : {}),
+    ...(r.detail ? { detail: r.detail } : r.truncated ? { detail: "stopped at the page or runtime cap: partial, so nothing is marked absent" } : {}),
   }));
   const account = ctx.source.target.accountId!;
   const records: RegistryAgentRecord[] = [];

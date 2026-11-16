@@ -37,7 +37,7 @@ import {
   workloadIdentities,
   type Db,
 } from "@regulait/db";
-import { DISCOVERY_STEP_UP_KEYS, stepUpActionDigest, type AgentRegistry } from "@regulait/shared";
+import { DISCOVERY_PSEUDONYM_PREFIX, DISCOVERY_STEP_UP_KEYS, stepUpActionDigest, type AgentRegistry } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { enableStepUpArgs } from "./discovery-routes.js";
 import { scannerRegistry, type RegistryAgentRecord, type Scanner } from "./discovery-scanners.js";
@@ -127,6 +127,8 @@ const recordsOf = (sourceId: string) => db.select().from(agentRegistryRecords).w
 const latestRun = async (sourceId: string) => (await db.select().from(discoveryRuns).where(eq(discoveryRuns.sourceId, sourceId)).orderBy(desc(discoveryRuns.createdAt)))[0]!;
 
 let sourceId: string;
+/** a vendor-side owner, as the scanner stages it (a pseudonym): R1 says it never becomes the steward */
+const VENDOR_OWNER = `${DISCOVERY_PSEUDONYM_PREFIX}${"ab".repeat(12)}`;
 async function runNow(records: RegistryAgentRecord[], complete: AgentRegistry[]) {
   next = { records, complete };
   const r = await inject("POST", `/v1/discovery/sources/${sourceId}/runs`, adminKey, {});
@@ -195,7 +197,7 @@ describe("ADR-0314 agent registry import", () => {
   });
 
   it("a run stages records with provenance; only a complete read marks a missing record absent", async () => {
-    const a: RegistryAgentRecord = { registry: "entra_agent_id", externalId: ID_A, displayName: `HR helper ${RUN}`, attributes: { appId: CLIENT, accountEnabled: true } };
+    const a: RegistryAgentRecord = { registry: "entra_agent_id", externalId: ID_A, displayName: `HR helper ${RUN}`, attributes: { appId: CLIENT, accountEnabled: true, owners: [VENDOR_OWNER] } };
     const b: RegistryAgentRecord = { registry: "entra_agent_id", externalId: ID_B, displayName: `Invoice bot ${RUN}` };
     const run1 = await runNow([a, b], ["entra_agent_id"]);
     expect(run1.status, run1.errorDetail ?? "").toBe("succeeded");
@@ -243,11 +245,21 @@ describe("ADR-0314 agent registry import", () => {
     // NEGATIVE CONTROLS: no step-up; a step-up for another name
     const none = await inject("POST", `/v1/agent-registry/records/${rec.id}/import`, adminKey, { name, tier: 2 });
     expect(none.statusCode).toBe(403);
-    const wrong = await session(agentRegistryImportStepUpArgs(rec.id, `other-${RUN}`));
-    expect((await wrong("POST", `/v1/agent-registry/records/${rec.id}/import`, { name, tier: 2 })).statusCode).toBe(403);
+    const bound = { recordId: rec.id, name, tier: 2, stewardUserId: null };
+    for (const other of [{ name: `other-${RUN}` }, { tier: 3 }, { stewardUserId: adminId }]) {
+      const wrong = await session(agentRegistryImportStepUpArgs({ ...bound, ...other }));
+      expect((await wrong("POST", `/v1/agent-registry/records/${rec.id}/import`, { name, tier: 2 })).statusCode, JSON.stringify(other)).toBe(403);
+    }
+    // the shared owner check (checkOwnerTarget): an unknown steward is a 422 before any step-up is spent
+    const ghost = await inject("POST", `/v1/agent-registry/records/${rec.id}/import`, adminKey, { name, tier: 2, stewardUserId: randomUUID() });
+    expect(ghost.statusCode).toBe(422);
+    expect(ghost.json().error).toBe("unknown_owner");
     expect((await db.select().from(agents).where(eq(agents.name, name))).length).toBe(0);
 
-    const ok = await session(agentRegistryImportStepUpArgs(rec.id, name));
+    // the staged record carries a vendor owner; R1: it is never made the steward
+    const [staged] = await db.select().from(agentRegistryRecords).where(eq(agentRegistryRecords.id, rec.id));
+    expect((staged!.vendorAttributes as { owners?: string[] }).owners).toEqual([VENDOR_OWNER]);
+    const ok = await session(agentRegistryImportStepUpArgs(bound));
     const r = await ok("POST", `/v1/agent-registry/records/${rec.id}/import`, { name, tier: 2 });
     expect(r.statusCode, r.body).toBe(201);
     const agentId = r.json().agent.id as string;
@@ -267,6 +279,14 @@ describe("ADR-0314 agent registry import", () => {
     expect((a!.detail as { provenance: Record<string, unknown> }).provenance).toMatchObject({ recordId: rec.id, sourceId, registry: "entra_agent_id", externalId: ID_A });
     const prov = await inject("GET", `/v1/agent-registry/records?status=imported&agentId=${agentId}`, adminKey);
     expect(prov.json().records.map((x: { id: string }) => x.id)).toEqual([rec.id]);
+
+    // R2: the vendor renames the agent after import; only the staged record moves, the agent keeps its name
+    const renamed = `HR helper renamed ${RUN}`;
+    expect((await runNow([{ registry: "entra_agent_id", externalId: ID_A, displayName: renamed }], [])).status).toBe("succeeded");
+    const [afterRename] = await db.select().from(agentRegistryRecords).where(eq(agentRegistryRecords.id, rec.id));
+    expect(afterRename!.displayName).toBe(renamed);
+    expect(afterRename!.agentId).toBe(agentId);
+    expect((await db.select().from(agents).where(eq(agents.id, agentId)))[0]!.name).toBe(name);
 
     // a second import is refused before any step-up is asked
     const again = await inject("POST", `/v1/agent-registry/records/${rec.id}/import`, adminKey, { name: `other-${RUN}`, tier: 1 });

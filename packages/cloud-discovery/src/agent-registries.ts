@@ -14,6 +14,7 @@
 import { BedrockAgentCoreControlClient, ListAgentRuntimesCommand } from "@aws-sdk/client-bedrock-agentcore-control";
 import { AWS_PINNED_ENDPOINT_CONFIG, awsCredentialProvider, type AwsScannerDeps } from "./aws.js";
 import { guardedAwsRequestHandler } from "./transport.js";
+import { paginateBounded } from "./report.js";
 
 /** one AgentCore runtime as listed: only the fields the import keeps */
 export interface AgentCoreRuntimeListing {
@@ -30,7 +31,7 @@ export interface AgentCoreRuntimeListing {
 export interface AgentCoreListOutcome {
   runtimes: AgentCoreRuntimeListing[];
   /** per region: `ok`, or the error class name (never the message, which can echo request details) */
-  regions: Array<{ region: string; status: "ok" | "denied" | "error"; detail?: string }>;
+  regions: Array<{ region: string; status: "ok" | "denied" | "error"; detail?: string; /** stopped at a page or runtime cap: the listing is partial */ truncated?: boolean }>;
   /** true when every region was read to the end (no cap hit, no region failed) */
   complete: boolean;
 }
@@ -56,31 +57,33 @@ export async function listAgentCoreRuntimes(deps: AwsScannerDeps, regions: reado
     if (!isAwsRegion(region)) throw new Error(`agentcore: '${region.slice(0, 40)}' is not an AWS region`);
     const client = new BedrockAgentCoreControlClient({ region, credentials, requestHandler: guardedAwsRequestHandler(deps.fetch), maxAttempts: 3, ...AWS_PINNED_ENDPOINT_CONFIG });
     try {
-      let nextToken: string | undefined;
-      let pages = 0;
-      do {
-        if (out.runtimes.length >= AGENTCORE_MAX_RUNTIMES || pages >= AGENTCORE_MAX_PAGES) {
-          out.complete = false;
-          break;
-        }
-        const res = await client.send(new ListAgentRuntimesCommand({ maxResults: 100, ...(nextToken ? { nextToken } : {}) }), signal ? { abortSignal: signal } : {});
-        pages += 1;
-        for (const r of res.agentRuntimes ?? []) {
-          if (!r.agentRuntimeArn || !r.agentRuntimeId || !r.agentRuntimeName) continue;
-          if (out.runtimes.length >= AGENTCORE_MAX_RUNTIMES) break;
-          out.runtimes.push({
-            region,
-            agentRuntimeArn: r.agentRuntimeArn.slice(0, 2048),
-            agentRuntimeId: r.agentRuntimeId.slice(0, 256),
-            agentRuntimeName: r.agentRuntimeName.slice(0, 256),
-            agentRuntimeVersion: r.agentRuntimeVersion?.slice(0, 64) ?? null,
-            description: r.description?.slice(0, 1000) ?? null,
-            status: r.status?.slice(0, 64) ?? null,
-            lastUpdatedAt: r.lastUpdatedAt instanceof Date && !Number.isNaN(r.lastUpdatedAt.getTime()) ? r.lastUpdatedAt.toISOString() : null,
-          });
-        }
-        nextToken = res.nextToken || undefined;
-      } while (nextToken);
+      // the shared pager, bounded by pages and by the runtimes still allowed; `truncated` keeps the read partial
+      const page = await paginateBounded(
+        AGENTCORE_MAX_PAGES,
+        (nextToken) => client.send(new ListAgentRuntimesCommand({ maxResults: 100, ...(nextToken ? { nextToken } : {}) }), signal ? { abortSignal: signal } : {}),
+        (res) => (res.agentRuntimes ?? []).flatMap((r): AgentCoreRuntimeListing[] =>
+          !r.agentRuntimeArn || !r.agentRuntimeId || !r.agentRuntimeName
+            ? []
+            : [{
+                region,
+                agentRuntimeArn: r.agentRuntimeArn.slice(0, 2048),
+                agentRuntimeId: r.agentRuntimeId.slice(0, 256),
+                agentRuntimeName: r.agentRuntimeName.slice(0, 256),
+                agentRuntimeVersion: r.agentRuntimeVersion?.slice(0, 64) ?? null,
+                description: r.description?.slice(0, 1000) ?? null,
+                status: r.status?.slice(0, 64) ?? null,
+                lastUpdatedAt: r.lastUpdatedAt instanceof Date && !Number.isNaN(r.lastUpdatedAt.getTime()) ? r.lastUpdatedAt.toISOString() : null,
+              }],
+        ),
+        (res) => res.nextToken,
+        AGENTCORE_MAX_RUNTIMES - out.runtimes.length,
+      );
+      out.runtimes.push(...page.items);
+      if (page.truncated) {
+        out.complete = false;
+        out.regions.push({ region, status: "ok", truncated: true });
+        continue;
+      }
       out.regions.push({ region, status: "ok" });
     } catch (err) {
       if (signal?.aborted) throw err;

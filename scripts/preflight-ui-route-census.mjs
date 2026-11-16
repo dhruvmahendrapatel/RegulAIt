@@ -109,6 +109,7 @@ export const MACHINE_ONLY = new Map([
 
   // ---- inbound callbacks and provisioning -----------------------------------
   ["POST /v1/pm/webhooks/:connectionName", "inbound callback: PM-tool webhooks, signature-verified in route (ADR-0061)"],
+  ["POST /v1/model-drift/ingest/:monitorId/reports", "pipeline push: a drift monitor's write-only ingestion credential, authenticated in route (ADR-0223 amendment 1)"],
   ["POST /v1/chatops/:connectionName/interactions", "inbound callback: Slack/Teams button interactions, signature-verified in route (ADR-0061)"],
   ["POST /v1/chatops/:connectionName/events", "inbound callback: Slack Events API to builder agents (ADR-0173)"],
   ["POST /v1/chatops/:connectionName/messages", "inbound callback: Teams outgoing webhook to builder agents (ADR-0173)"],
@@ -453,9 +454,12 @@ export const KNOWN_UI_GAPS = new Map([
   ["GET /v1/connectors/:connectorId/token-exchange", { does: "reads a connector's upstream token-exchange configuration and per-action scope map (never the secret)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
   ["PUT /v1/connectors/:connectorId/token-exchange", { does: "sets or changes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
   ["DELETE /v1/connectors/:connectorId/token-exchange", { does: "removes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
-  ["GET /v1/agent-registry/records", { does: "pages the agents staged from vendor agent registries (Entra Agent ID, Agent 365, Gemini Enterprise, Bedrock AgentCore), open, imported or absent", tracking: "ADR-0314 (G6, lane E3): the brief is API-only; the registry import screen (staged records, import form) is posted on #453 for the Governed Designer. RAISED for the master's review" }],
-  ["GET /v1/agent-registry/records/:recordId", { does: "one staged registry agent with its provenance (source, run, vendor id) and import state", tracking: "ADR-0314 (G6, lane E3): the brief is API-only; the registry import screen (staged records, import form) is posted on #453 for the Governed Designer. RAISED for the master's review" }],
-  ["POST /v1/agent-registry/records/:recordId/import", { does: "imports a staged registry agent into the inventory, disabled and proposed with no grants (settings_relax step-up, audited)", tracking: "ADR-0314 (G6, lane E3): the brief is API-only; the registry import screen (staged records, import form) is posted on #453 for the Governed Designer. RAISED for the master's review" }],
+  ["GET /v1/agent-registry/records", { does: "pages the agents staged from vendor agent registries (Entra Agent ID, Agent 365, Gemini Enterprise, Bedrock AgentCore), open, imported or absent", tracking: "ADR-0314 (G6, lane E3): master brief for lane E3 (2026-11-15): new routes are API-only with a KNOWN_UI_GAPS entry pointing at #453; the registry import screen (staged records, import form) is posted on #453 for the Governed Designer. RAISED for the master's review" }],
+  ["GET /v1/agent-registry/records/:recordId", { does: "one staged registry agent with its provenance (source, run, vendor id) and import state", tracking: "ADR-0314 (G6, lane E3): master brief for lane E3 (2026-11-15): new routes are API-only with a KNOWN_UI_GAPS entry pointing at #453; the registry import screen (staged records, import form) is posted on #453 for the Governed Designer. RAISED for the master's review" }],
+  ["POST /v1/agent-registry/records/:recordId/import", { does: "imports a staged registry agent into the inventory, disabled and proposed with no grants (settings_relax step-up, audited)", tracking: "ADR-0314 (G6, lane E3): master brief for lane E3 (2026-11-15): new routes are API-only with a KNOWN_UI_GAPS entry pointing at #453; the registry import screen (staged records, import form) is posted on #453 for the Governed Designer. RAISED for the master's review" }],
+  ["GET /v1/endpoint-addons/versions", { does: "lists each AI add-on version seen on endpoints with its admission-scan verdict for that exact content digest (not yet scanned is never clear)", tracking: "ADR-0332 (lane E14): master brief for lane E14 (2026-11-15): the inventory is API-only and the UI builder builds its screen; KNOWN_UI_GAPS entries point at #453 (screen brief in PR #866)" }],
+  ["GET /v1/endpoint-addons/sightings", { does: "lists each add-on version per endpoint and detection source, with first/last seen, risk flags and secret types (never a value)", tracking: "ADR-0332 (lane E14): master brief for lane E14 (2026-11-15): the inventory is API-only and the UI builder builds its screen; KNOWN_UI_GAPS entries point at #453 (screen brief in PR #866)" }],
+  ["GET /v1/endpoint-addons/flagged", { does: "lists the endpoint add-on sightings flagged at or above a severity (the removal-directive and detection contract)", tracking: "ADR-0332 (lane E14): master brief for lane E14 (2026-11-15): the inventory is API-only and the UI builder builds its screen; KNOWN_UI_GAPS entries point at #453 (screen brief in PR #866)" }],
 ]);
 
 /**
@@ -464,7 +468,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 52; // main's 54 − 11 MCP bundle routes closed by #815 + ADR-0240 6 external-portal second-factor routes awaiting #453 (#709) + ADR-0314 (lane E3) 3 agent registry routes awaiting #453
+export const KNOWN_UI_GAPS_MAX = 55; // main's 54 − 11 MCP bundle routes closed by #815 + ADR-0240 6 external-portal second-factor routes awaiting #453 (#709) + ADR-0332 (lane E14) 3 API-only endpoint add-on inventory routes, master brief for lane E14 2026-11-15 (screen by the UI builder, #453) + ADR-0314 (lane E3) 3 API-only agent registry routes, master brief for lane E3 (2026-11-15): new routes are API-only with a KNOWN_UI_GAPS entry pointing at #453
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 

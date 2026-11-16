@@ -11,7 +11,8 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { AGENT_REGISTRIES, AGENT_REGISTRY_LABELS, type AgentRegistry } from "@regulait/shared";
-import { agentRegistryRecords, agents, and, auditLog, desc, discoverySources, eq, isNotNull, isNull, sql, users, type Db } from "@regulait/db";
+import { agentRegistryRecords, agents, and, auditLog, desc, discoverySources, eq, isNotNull, isNull, sql, type Db } from "@regulait/db";
+import { checkOwnerTarget } from "./ownership.js";
 import { requireStepUp } from "./step-up.js";
 import { refuseIfExpansionBlocked } from "./licensing.js";
 
@@ -81,8 +82,9 @@ function decodeCursor(c: string): { at: string; id: string } | null {
   return null;
 }
 
-export function agentRegistryImportStepUpArgs(recordId: string, name: string) {
-  return { kind: "settings_relax" as const, facts: { op: "agent_registry_import", recordId, name } };
+/** the import step-up, bound to everything the import decides: the record, the agent's name, its tier and its steward */
+export function agentRegistryImportStepUpArgs(a: { recordId: string; name: string; tier: number; stewardUserId: string | null }) {
+  return { kind: "settings_relax" as const, facts: { op: "agent_registry_import", recordId: a.recordId, name: a.name, tier: a.tier, stewardUserId: a.stewardUserId } };
 }
 
 export function registerAgentRegistryRoutes(app: FastifyInstance, db: Db): void {
@@ -150,11 +152,10 @@ export function registerAgentRegistryRoutes(app: FastifyInstance, db: Db): void 
     // checked BEFORE the step-up is spent, so a refusal never burns the grant
     const [taken] = await db.select({ id: agents.id }).from(agents).where(eq(agents.name, name));
     if (taken) return reply.status(409).send({ error: "conflict", detail: `an agent named '${name}' already exists: import it under another name` });
-    if (b.data.stewardUserId) {
-      const [u] = await db.select({ id: users.id, disabledAt: users.disabledAt }).from(users).where(eq(users.id, b.data.stewardUserId));
-      if (!u || u.disabledAt) return reply.status(400).send({ error: "invalid_steward", detail: "the steward must be an active user" });
-    }
-    const su = await requireStepUp(db, req, reply, agentRegistryImportStepUpArgs(rec.id, name));
+    // the shared owner check (as every other owner assignment): an existing, active user, else 422
+    const steward = await checkOwnerTarget(db, b.data.stewardUserId ?? null);
+    if (!steward.ok) return reply.status(steward.status).send(steward.body);
+    const su = await requireStepUp(db, req, reply, agentRegistryImportStepUpArgs({ recordId: rec.id, name, tier: b.data.tier, stewardUserId: steward.ownerUserId }));
     if (!su.ok) return reply;
 
     const label = AGENT_REGISTRY_LABELS[rec.registry];
@@ -174,7 +175,7 @@ export function registerAgentRegistryRoutes(app: FastifyInstance, db: Db): void 
           lifecycleStatus: "proposed",
           lifecycleReason: `imported from ${label} (${locked.externalId.slice(0, 200)}); awaiting review`,
           lifecycleChangedAt: sql`now()`,
-          ownerUserId: b.data.stewardUserId ?? null,
+          ownerUserId: steward.ownerUserId,
         })
         .onConflictDoNothing({ target: agents.name })
         .returning();
