@@ -22,6 +22,7 @@ import {
   auditLog,
   desc,
   eq,
+  getTableColumns,
   ruleStepSettings,
   ruleStepSuggestions,
   sql,
@@ -29,6 +30,7 @@ import {
   type Db,
   type RuleStepSettingsRow,
   type RuleStepSuggestionRow,
+  RULE_STEP_SUGGESTION_STATUSES,
 } from "@regulait/db";
 import {
   DEFAULT_RULE_INDUCTION_OPTIONS,
@@ -41,6 +43,8 @@ import {
 import { induceStepRuleOffThread } from "@regulait/optimizer-kernel/offload";
 import { TRACE_TRUNCATION_MARKER } from "@regulait/shared";
 import { requireStepUp } from "./step-up.js";
+import type { ListSpec } from "./list-contract.js";
+import { answerListExport, answerListPage, type ContractList } from "./list-contract-route.js";
 
 const SETTINGS_ID = "singleton";
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
@@ -75,13 +79,8 @@ const settingsBody = z
     minCellSupport: z.number().int().min(RULE_INDUCTION_FLOORS.minCellSupport).max(1_000).optional(),
   })
   .strict();
-const listQuery = z
-  .object({
-    status: z.enum(["suggested", "dismissed"]).default("suggested"),
-    limit: z.coerce.number().int().min(1).max(100).default(25),
-    offset: z.coerce.number().int().min(0).max(10_000).default(0),
-  })
-  .strict();
+/** the list's one filter beside the ADR-0226 contract's own params; absent means the open suggestions */
+const suggestionFilters = z.object({ status: z.enum(RULE_STEP_SUGGESTION_STATUSES).optional() }).strict();
 const idParam = z.object({ id: z.string().uuid() }).strict();
 
 export async function loadRuleStepSettings(db: Db): Promise<RuleStepSettings> {
@@ -141,6 +140,38 @@ function view(row: RuleStepSuggestionRow & { agentName: string | null }) {
     dismissedAt: row.dismissedAt,
   };
 }
+
+export type RuleStepSuggestionView = ReturnType<typeof view>;
+
+/**
+ * ADR-0226: the suggestions list under the shared list contract. The export carries the summary columns only, never
+ * the rule's cells (they copy captured input values; ADR-0327 retention note).
+ */
+export const RULE_STEP_SUGGESTIONS_LIST: ListSpec<RuleStepSuggestionView> = {
+  id: "rule-step-suggestions",
+  sorts: {
+    savings: { expr: ruleStepSuggestions.projectedMonthlySavingsUsd },
+    agent: { expr: sql`lower(${agents.name})` },
+    step: { expr: ruleStepSuggestions.stepName },
+    coverage: { expr: ruleStepSuggestions.coverage },
+    agreement: { expr: ruleStepSuggestions.agreement },
+    runs: { expr: ruleStepSuggestions.runs },
+    detected: { expr: ruleStepSuggestions.detectedAt, keysetAt: ruleStepSuggestions.detectedAt },
+  },
+  columns: {
+    agent: { label: "Agent", value: (r) => r.agentName ?? r.agentId },
+    step: { label: "Step", value: (r) => r.stepName },
+    status: { label: "Status", value: (r) => r.status },
+    savings: { label: "Projected monthly saving (USD, estimate)", value: (r) => r.savings.projectedMonthlySavingsUsd },
+    coverage: { label: "Coverage", value: (r) => r.evidence.coverage },
+    agreement: { label: "Agreement", value: (r) => r.evidence.agreement },
+    runs: { label: "Runs", value: (r) => r.evidence.runs },
+    detected: { label: "Detected", value: (r) => r.detectedAt },
+  },
+  filters: ["status"],
+  defaultSort: { col: "savings", dir: "desc" },
+  idCol: ruleStepSuggestions.id,
+};
 
 type SuggestionValues = Omit<typeof ruleStepSuggestions.$inferInsert, "id" | "agentId" | "stepName" | "status" | "detectedAt" | "dismissedBy" | "dismissedAt">;
 type StepScan =
@@ -336,19 +367,30 @@ export function registerRuleStepRoutes(app: FastifyInstance, db: Db): void {
     return { stepsScanned: results.length, ruleLike: found, steps };
   });
 
-  app.get("/v1/rule-steps/suggestions", async (req) => {
-    const q = listQuery.parse(req.query);
-    const rows = await db
-      .select({ s: ruleStepSuggestions, agentName: agents.name })
-      .from(ruleStepSuggestions)
-      .leftJoin(agents, eq(agents.id, ruleStepSuggestions.agentId))
-      .where(eq(ruleStepSuggestions.status, q.status))
-      .orderBy(desc(ruleStepSuggestions.projectedMonthlySavingsUsd), ruleStepSuggestions.id)
-      .limit(q.limit + 1)
-      .offset(q.offset);
-    const page = rows.slice(0, q.limit).map((r) => view({ ...r.s, agentName: r.agentName }));
-    return { suggestions: page, nextOffset: rows.length > q.limit ? q.offset + q.limit : null };
-  });
+  // ADR-0226: the shared list contract (sort, cursor or offset, count, export); the status filter defaults to open
+  const suggestionsList: ContractList<RuleStepSuggestionView, z.infer<typeof suggestionFilters>> = {
+    spec: RULE_STEP_SUGGESTIONS_LIST,
+    filters: suggestionFilters,
+    reader: {
+      fetch: async (q) => {
+        const rows = await db
+          .select({ ...getTableColumns(ruleStepSuggestions), agentName: agents.name, _cursorAt: q.cursorAt })
+          .from(ruleStepSuggestions)
+          .leftJoin(agents, eq(agents.id, ruleStepSuggestions.agentId))
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset);
+        return rows.map(({ _cursorAt, ...r }) => ({ ...view(r), _cursorAt }));
+      },
+      countable: (where) =>
+        db.select({ one: sql`1` }).from(ruleStepSuggestions).leftJoin(agents, eq(agents.id, ruleStepSuggestions.agentId)).where(where),
+      idOf: (r) => r.id,
+    },
+    where: (_req, f) => eq(ruleStepSuggestions.status, f.status ?? "suggested"),
+  };
+  app.get("/v1/rule-steps/suggestions/export.xlsx", async (req, reply) => answerListExport(db, req, reply, suggestionsList));
+  app.get("/v1/rule-steps/suggestions", async (req, reply) => answerListPage(db, req, reply, suggestionsList));
 
   app.post("/v1/rule-steps/suggestions/:id/dismiss", async (req, reply) => {
     const { id } = idParam.parse(req.params);

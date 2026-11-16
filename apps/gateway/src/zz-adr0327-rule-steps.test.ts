@@ -121,7 +121,7 @@ describe("ADR-0327 rule-like AI step detection", () => {
     expect(scan.json().error).toBe("rule_steps_disabled");
     const list = await app.inject({ method: "GET", url: "/v1/rule-steps/suggestions", headers: KEY });
     expect(list.statusCode).toBe(200);
-    expect(list.json().suggestions.filter((x: { agentId: string }) => x.agentId === agentId)).toEqual([]);
+    expect(list.json().items.filter((x: { agentId: string }) => x.agentId === agentId)).toEqual([]);
   });
 
   it("is admin-only", async () => {
@@ -159,7 +159,7 @@ describe("ADR-0327 rule-like AI step detection", () => {
     expect(audit?.detail).toMatchObject({ scope: "rule_steps" });
 
     const list = await app.inject({ method: "GET", url: "/v1/rule-steps/suggestions", headers: KEY });
-    const s = list.json().suggestions.find((x: { agentId: string }) => x.agentId === agentId);
+    const s = list.json().items.find((x: { agentId: string }) => x.agentId === agentId);
     expect(s).toMatchObject({ stepName: TRIAGE, fields: ["severity", "source"], evidence: { runs: 302, structuredRuns: 300, agreement: 1, coverage: 1 } });
     expect(s.ruleLines).toContain('when severity = "high" and source = "phone" -> "on-call" (25 runs)');
     expect(s.ruleLines.at(-1)).toMatch(/^otherwise -> ask the AI/);
@@ -173,6 +173,20 @@ describe("ADR-0327 rule-like AI step detection", () => {
     const again = await app.inject({ method: "POST", url: "/v1/rule-steps/scan", headers: KEY });
     expect(again.statusCode).toBe(429);
     expect(again.json().error).toBe("rule_steps_scan_too_soon");
+  });
+
+  it("answers the suggestions list under the shared list contract (review #862)", async () => {
+    const page = await app.inject({ method: "GET", url: "/v1/rule-steps/suggestions?count=exact&sort=detected&dir=desc&limit=10", headers: KEY });
+    expect(page.statusCode, page.body).toBe(200);
+    const body = page.json();
+    expect(body.items.length).toBeGreaterThanOrEqual(1);
+    expect(body.total).toBeGreaterThanOrEqual(1);
+    expect(body).toHaveProperty("nextCursor");
+    expect((await app.inject({ method: "GET", url: "/v1/rule-steps/suggestions?bogus=1", headers: KEY })).statusCode).toBe(400);
+    expect((await app.inject({ method: "GET", url: "/v1/rule-steps/suggestions?status=other", headers: KEY })).statusCode).toBe(400);
+    const xlsx = await app.inject({ method: "GET", url: "/v1/rule-steps/suggestions/export.xlsx?columns=agent,step,savings", headers: KEY });
+    expect(xlsx.statusCode, xlsx.body).toBe(200);
+    expect(xlsx.headers["content-type"]).toMatch(/spreadsheetml/);
   });
 
   it("dismissing is audited and survives a later scan", async () => {
@@ -189,7 +203,7 @@ describe("ADR-0327 rule-like AI step detection", () => {
     const [after] = await db.select().from(ruleStepSuggestions).where(inArray(ruleStepSuggestions.id, [row!.id]));
     expect(after?.status).toBe("dismissed");
     const dismissed = await app.inject({ method: "GET", url: "/v1/rule-steps/suggestions?status=dismissed", headers: KEY });
-    expect(dismissed.json().suggestions.map((x: { id: string }) => x.id)).toContain(row!.id);
+    expect(dismissed.json().items.map((x: { id: string }) => x.id)).toContain(row!.id);
   });
 });
 

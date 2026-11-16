@@ -103,6 +103,12 @@ induction over numeric ranges is deferred to a sandboxed engine image with sciki
   Node's `node:worker_threads`, no dependency), one step at a time, with a 120 s timeout and a 256 MB heap cap. Measured
   on 5 000 runs × 24 fields: inline the event loop served no timer for 3.7 s; off-thread it kept ticking, with an
   identical result. A step whose worker fails or times out is reported as `induction_failed` in the scan's audit row.
+- Review #862 (second round): `GET /v1/rule-steps/suggestions` answers through the shared ADR-0226 list contract
+  (`RULE_STEP_SUGGESTIONS_LIST` with `answerListPage`, sort, cursor or offset, count), with its `status` filter
+  defaulting to open suggestions, and `GET /v1/rule-steps/suggestions/export.xlsx` exports through `answerListExport`
+  (audited). The export carries summary columns only, never the rule's cells.
+- Not yet done, tracked for slice 3 (PENDING): the scan still answers when it finishes; answering 202 with the scan's
+  audit id, so a proxy timeout cannot cut a completed scan's response, comes with the scheduler entry.
 - Not yet done, tracked for slice 3 (PENDING): `rule_step_suggestions.rule` copies input values out of `trace_spans`,
   so it must follow trace retention (prune or refresh suggestions whose window has aged out) and be found and redacted
   by the privacy-ops erasure locator; and both new tables join the RLS batch plan with the other single-tenant tables.
