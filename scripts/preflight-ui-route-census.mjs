@@ -463,6 +463,9 @@ export const KNOWN_UI_GAPS = new Map([
   ["GET /v1/connectors/:connectorId/token-exchange", { does: "reads a connector's upstream token-exchange configuration and per-action scope map (never the secret)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
   ["PUT /v1/connectors/:connectorId/token-exchange", { does: "sets or changes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
   ["DELETE /v1/connectors/:connectorId/token-exchange", { does: "removes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
+  ["GET /v1/endpoint-addons/versions", { does: "lists each AI add-on version seen on endpoints with its admission-scan verdict for that exact content digest (not yet scanned is never clear)", tracking: "ADR-0332 (lane E14): master brief for lane E14 (2026-11-15): the inventory is API-only and the UI builder builds its screen; KNOWN_UI_GAPS entries point at #453 (screen brief in PR #866)" }],
+  ["GET /v1/endpoint-addons/sightings", { does: "lists each add-on version per endpoint and detection source, with first/last seen, risk flags and secret types (never a value)", tracking: "ADR-0332 (lane E14): master brief for lane E14 (2026-11-15): the inventory is API-only and the UI builder builds its screen; KNOWN_UI_GAPS entries point at #453 (screen brief in PR #866)" }],
+  ["GET /v1/endpoint-addons/flagged", { does: "lists the endpoint add-on sightings flagged at or above a severity (the removal-directive and detection contract)", tracking: "ADR-0332 (lane E14): master brief for lane E14 (2026-11-15): the inventory is API-only and the UI builder builds its screen; KNOWN_UI_GAPS entries point at #453 (screen brief in PR #866)" }],
 ]);
 
 /**
@@ -471,7 +474,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 58; // main's 54 − 11 MCP bundle routes closed by #815 + ADR-0240 6 external-portal second-factor routes awaiting #453 (#709); + ADR-0322 (lane E7) 9 vendor usage pull routes awaiting #453 (lane brief: API-only, KNOWN_UI_GAPS entries pointing at #453)
+export const KNOWN_UI_GAPS_MAX = 61; // main's 54 − 11 MCP bundle routes closed by #815 + ADR-0240 6 external-portal second-factor routes awaiting #453 (#709) + ADR-0332 (lane E14) 3 API-only endpoint add-on inventory routes, master brief for lane E14 2026-11-15 (screen by the UI builder, #453); + ADR-0322 (lane E7) 9 vendor usage pull routes awaiting #453 (lane brief: API-only, KNOWN_UI_GAPS entries pointing at #453)
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 
