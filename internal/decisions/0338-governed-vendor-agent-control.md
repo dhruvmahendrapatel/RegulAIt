@@ -4,8 +4,8 @@
 - **Date**: 2026-11-16
 - **Index**: Governed vendor agent control (disable, quarantine or restore an agent in Copilot Studio, Agentforce, OpenAI or n8n through the vendor admin API; off by default, step-up, second-person approval, payload-bound, single-use, audited)
 - **Builds on**: the vendor agent registry import of PR #855 (the `agent_registry` family, `agent_registry_records`, the
-  `Scanner` adapter shape), lane E17's decision record (the Copilot Studio, Agentforce, OpenAI and n8n registry adapters this
-  ADR extends), the governed add-on removal of PR #871 (evidence-bound targets, off by default, audited in the same
+  `Scanner` adapter shape), lane E17's decision record on PR #880 (the `AgentPlatformAdapter` with its `governedActions`
+  declarations, and the `platform_write` credential rule, which this ADR implements), the governed add-on removal of PR #871 (evidence-bound targets, off by default, audited in the same
   transaction), ADR-0104 (payload-bound approvals), ADR-0124 (the kill switch and `runExternalWrite`), ADR-0195
   (discovery credentials, the guarded fetch; decision 7, read-only discovery), ADR-0159 (remediation proposals: a
   second person approves an admin action), ADR-0180 (secure by default), ADR-0176 (open source first), ADR-0252
@@ -25,8 +25,8 @@ so every adapter is tested against fixtures):
 | Vendor | Take out of service | Put back | Read state | Notes |
 |---|---|---|---|---|
 | Copilot Studio | `POST api.powerplatform.com/copilotstudio/environments/{env}/bots/{bot}/api/botQuarantine/SetAsQuarantined?api-version=1` | `…/SetAsUnquarantined?api-version=1` | `GET …/api/botQuarantine?api-version=1` (`isBotQuarantined`, `lastUpdateTimeUtc`) | Needs `CopilotStudio.AdminActions.Invoke`. Classic chatbots answer `405`. Makers can still test a quarantined agent; no other channel reaches it. |
-| Salesforce Agentforce | deactivate the agent's active `BotVersion` | reactivate the same version | read the `BotVersion` status | Verified in slice 2. |
-| OpenAI | the vendor's admin control for the agent, if one exists | its inverse | its read | Verified in slice 2; if no reversible admin control exists, OpenAI gets no action and the ADR says so. |
+| Salesforce Agentforce | deactivate the agent's active `BotVersion` | reactivate the same version | read the `BotVersion` status | The path lane E17 records. Verified in slice 2. |
+| OpenAI (ChatGPT custom GPTs) | none reversible | none | the Compliance API listing | The only documented control is GPT removal through the Compliance API, which cannot be undone. OpenAI therefore declares no action (section 1). Re-checked in slice 2. |
 | n8n | `POST /api/v1/workflows/{id}/deactivate` | `POST /api/v1/workflows/{id}/activate` | `GET /api/v1/workflows/{id}` (`active`) | API key with only the workflow activate and deactivate scopes where the edition supports scopes. Verified in slice 2. |
 
 Delete is never offered for any vendor: it cannot be reversed.
@@ -35,10 +35,12 @@ Delete is never offered for any vendor: it cannot be reversed.
 
 ### 1. Three actions, and only those
 
-`disable`, `quarantine` and `restore`. Each vendor adapter declares which of `disable` and `quarantine` it supports
-(Copilot Studio: `quarantine` only, because the vendor's only reversible control is quarantine). `restore` is always
-the inverse of the action that was applied, never a free choice: it names the earlier, succeeded action it reverses,
-and the adapter calls that action's inverse.
+`disable`, `quarantine` and `restore`. An adapter offers `disable` or `quarantine` only when its `governedActions`
+(lane E17) declares that action **and** marks it `reversible`: an irreversible vendor action (OpenAI GPT removal,
+any delete) is never offered. `restore` is always the inverse of an action that was applied, never a free choice: it
+names the earlier, succeeded action it reverses, and the adapter calls that action's inverse (`unquarantine` for
+`quarantine`, re-activation for `disable`). Copilot Studio offers `quarantine` only, because quarantine is the
+vendor's only documented reversible control.
 
 Nothing starts an action automatically. No finding, detection, rule, schedule or model creates one: every action is
 requested by an admin, approved by a second person and executed by the requester.
@@ -49,18 +51,23 @@ requested by an admin, approved by a second person and executed by the requester
   step-up (`DISCOVERY_STEP_UP_KEYS.vendorAgentControl`) through the existing `PUT /v1/discovery/settings`, audited in
   the same transaction. Turning it off is free and stops every action that has not yet executed.
 - **A control credential per source.** Discovery credentials stay read-only (ADR-0195 decision 7 is unchanged: a
-  read credential that can write is still refused). Control uses a separate credential, `vendor_control_credentials`,
-  one per discovery source, stored exactly as discovery credentials are: encrypted with the data key
+  read credential that can write is still refused). Control uses a separate write credential, the `platform_write` purpose that
+  lane E17 fixes, held in its own table `vendor_control_credentials` (the purpose is the table, not a field), one per
+  discovery source, stored exactly as discovery credentials are: encrypted with the data key
   (`encryptSecret`), never returned, never in code, federated by default (Entra workload identity for Copilot Studio)
   with a stored secret only as a `settings_relax` step-up, rotatable by replacing the row, revocable at once. Its
-  scope is the vendor's narrowest control permission and nothing else. Adding one is itself a `settings_relax`
+  scope is the vendor's narrowest control permission (the `vendorPermission` the adapter declares) and nothing
+  else. The read credential is never used to write, and the write credential is never used to read the inventory.
+  Adding one is itself a `settings_relax`
   step-up and audited. With no live control credential, a source offers no action.
 - **The vendor action itself.** An adapter that does not declare an action cannot be asked for it.
 
 ### 3. The adapter: one per vendor, read and control together
 
-The vendor adapter that lane E17 adds for discovery gains an optional `control` member. There is no second adapter
-per vendor:
+Lane E17's `AgentPlatformAdapter` already declares, per vendor, `governedActions: GovernedActionSpec[]` (action,
+`reversible`, `vendorPermission`) and ships no write code. This ADR adds the executing half as one optional member of
+that same adapter, `control`. There is no second adapter per vendor, and a declaration without a `control` member, or
+a `control` member for an undeclared action, fails the adapter-list test:
 
 ```ts
 interface VendorAgentControl {
@@ -75,6 +82,8 @@ interface VendorAgentControl {
 // ControlResult = { outcome: "applied" | "already_in_state" | "refused" | "failed"; code: string; httpStatus?: number }
 ```
 
+- The action names follow E17's declarations: `ControlOp` `{action: "quarantine", direction: "reverse"}` is the
+  declared `unquarantine`. `restore` exists only at the API, so a reviewer reads one verb for "put it back".
 - `ControlContext` carries the guarded fetch (`createGuardedFetch` with the tenant's egress allow-list, as the
   discovery worker builds it), a deadline signal and the control token. Every vendor call goes through it; an adapter
   holds no fetch of its own.
@@ -83,6 +92,30 @@ interface VendorAgentControl {
   discovery read has not seen cannot be targeted, the same evidence rule as the governed add-on removal of PR #871.
 - Vendor response bodies are bounded, parsed as closed shapes and never stored verbatim. Tokens are scrubbed from every
   error before it is logged or audited.
+
+### 3a. Copilot Studio: the constraint lane E17 left to this ADR
+
+Microsoft documents `SetAsQuarantined` and `SetAsUnquarantined` with a delegated token from a user who holds the AI,
+Power Platform or Global administrator role, consented for `CopilotStudio.AdminActions.Invoke`. Lane E17 records this
+as an open constraint, because ADR-0195's credential model refuses a stored user refresh token. Separately, the Power
+Platform API's authentication page documents service principals with an RBAC role, though not for these two calls
+specifically.
+
+Decision:
+
+- **No delegated user credential is stored.** A refresh token for an admin user is a standing, broad, human credential.
+  It is not built, and adding it would be its own decision (owner question 1).
+- **The write credential is a federated service principal** (Entra workload identity, no stored secret by default)
+  with the narrowest Power Platform RBAC role an admin assigns, and the Copilot Studio adapter calls the documented
+  quarantine endpoints with it.
+- **Whether those calls accept an app-only token is unverified** until a live tenant is tried, which is owner-gated.
+  The source's control credential therefore carries `scope: unverified`, as lane E17 does for keys it cannot prove, and
+  every action on it is audited as such.
+- **A vendor `401` or `403`** ends the action `failed / vendor_refused_credential` and changes nothing. There is no
+  retry and no fallback to another credential.
+- **The Dataverse `bot.statecode` (Inactive) is not used as a disable.** Writing it is app-only, but Microsoft does
+  not document that it takes an agent out of service, and this ADR does not claim a control the vendor does not
+  document.
 
 ### 4. The flow: request, approve, execute
 
@@ -159,9 +192,9 @@ barrier applies unchanged.
 
 ## Owner questions (open; the secure default is built meanwhile)
 
-1. **Copilot Studio credential.** Microsoft's quarantine page asks for a user token from an AI, Power Platform or
-   Global administrator; the Power Platform API also accepts a service principal with an RBAC role. Built: a
-   federated service principal only. Storing a delegated refresh token for an admin user is not built.
+1. **Copilot Studio credential (section 3a).** If a live tenant shows that the quarantine calls refuse app-only
+   tokens, should RegulAIt store a delegated refresh token for a dedicated, least-privilege admin user? Built: no; a
+   federated service principal only, marked `scope: unverified`.
 2. **Narrowing during a halt.** Should disable and quarantine run while the kill switch is `halt` or `read_only`?
    Built: no (section 7).
 
