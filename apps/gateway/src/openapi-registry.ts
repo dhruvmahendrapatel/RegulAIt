@@ -419,6 +419,13 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/mrm/cards/:id/evidence": "internal",
   "DELETE /v1/mrm/cards/:id/evidence/:evidenceId": "internal",
   // ADR-0223 (P13b): classical-model drift and explainability
+  // ADR-0327 (lane E12): rule-like AI step detection
+  "GET /v1/rule-steps/settings": "internal",
+  "PUT /v1/rule-steps/settings": "internal",
+  "POST /v1/rule-steps/scan": "internal",
+  "GET /v1/rule-steps/suggestions": "internal",
+  "GET /v1/rule-steps/suggestions/export.xlsx": "internal",
+  "POST /v1/rule-steps/suggestions/:id/dismiss": "internal",
   "GET /v1/model-drift/settings": "internal",
   "PUT /v1/model-drift/settings": "internal",
   "GET /v1/mrm/cards/:id/drift": "internal",
@@ -1857,6 +1864,13 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/mrm/cards/:id/evidence": "mrm",
   "DELETE /v1/mrm/cards/:id/evidence/:evidenceId": "mrm",
   // ADR-0223 (P13b): classical-model drift and explainability
+  // ADR-0327 (lane E12): rule-like AI step detection
+  "GET /v1/rule-steps/settings": "cost-events",
+  "PUT /v1/rule-steps/settings": "cost-events",
+  "POST /v1/rule-steps/scan": "cost-events",
+  "GET /v1/rule-steps/suggestions": "cost-events",
+  "GET /v1/rule-steps/suggestions/export.xlsx": "cost-events",
+  "POST /v1/rule-steps/suggestions/:id/dismiss": "cost-events",
   "GET /v1/model-drift/settings": "mrm",
   "PUT /v1/model-drift/settings": "mrm",
   "GET /v1/mrm/cards/:id/drift": "mrm",
