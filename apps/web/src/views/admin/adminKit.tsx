@@ -24,7 +24,7 @@ import type {
   Role,
   Team,
 } from "../../api/adminTypes";
-import { fmtUsd } from "../../api/format";
+import { fmtUsd, errorText } from "../../api/format";
 import {
   Badge,
   Button,
@@ -377,7 +377,7 @@ export function useAction() {
       invalidate();
       return true;
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = errorText(e);
       setError(msg);
       setGuidance(guidanceOf(e));
       toast(msg, "error");
@@ -449,7 +449,7 @@ export function useApiAction() {
         setOutcome(o);
         toast(reason, "error");
       } else {
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = errorText(e);
         setOutcome({ ok: false, code: null, status: null, reason: msg, payload: null });
         toast(msg, "error");
       }
@@ -542,27 +542,35 @@ export function NotAvailableToYou(props: { what: string }) {
   );
 }
 
-export function QueryGate(props: {
-  loading: boolean;
+/** a read's state, as `useQuery` returns it: `<QueryGate query={q}>` gates on `q.isLoading`, `q.error` and `q.refetch` */
+interface GateQuery {
+  isLoading: boolean;
   error: unknown;
-  onRetry: () => void;
-  children: ReactNode;
-}) {
-  if (props.loading)
+  refetch: () => unknown;
+}
+
+export function QueryGate(
+  props: ({ loading: boolean; error: unknown; onRetry: () => void } | { query: GateQuery }) & { children: ReactNode },
+) {
+  const q = "query" in props ? props.query : null;
+  const loading = q ? q.isLoading : (props as { loading: boolean }).loading;
+  const error = q ? q.error : (props as { error: unknown }).error;
+  const onRetry = q ? () => void q.refetch() : (props as { onRetry: () => void }).onRetry;
+  if (loading)
     return (
       <Card>
         <SkeletonBlock lines={5} />
       </Card>
     );
-  if (props.error)
+  if (error)
     return (
       <Card>
         <div className={v.stack}>
           <div className={v.errLine} role="alert">
-            {props.error instanceof Error ? props.error.message : String(props.error)}
+            {errorText(error)}
           </div>
           <div>
-            <Button size="sm" onClick={props.onRetry}>
+            <Button size="sm" onClick={onRetry}>
               Retry
             </Button>
           </div>

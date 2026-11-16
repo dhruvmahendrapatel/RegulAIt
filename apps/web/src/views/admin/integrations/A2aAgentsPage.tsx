@@ -73,7 +73,7 @@ export default function A2aAgentsPage(props: { slot?: AgentsTabSlot }) {
         }
       />
       {props.slot?.tabs}
-      <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+      <QueryGate query={q}>
         <div className={v.stack} {...props.slot?.panel}>
           <Card
             title="Registry"

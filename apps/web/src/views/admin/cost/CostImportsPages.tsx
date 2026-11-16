@@ -156,7 +156,7 @@ export function CostImportLinesPage() {
             <EmptyState title={refused.title} body={refused.body} />
           </Card>
         ) : (
-          <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+          <QueryGate query={q}>
             {d && (
               <>
                 <Card title="Batch">

@@ -19,16 +19,11 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
-  and,
-  approvalRules,
   asc,
   auditLog,
   eq,
-  gte,
-  isNull,
   mcpAuthorisedTargets,
   mcpServers,
-  rateLimits,
   type Db,
 } from "@regulait/db";
 import {
@@ -44,7 +39,7 @@ import {
   type AuthorisedTarget,
 } from "@regulait/shared";
 import { loadOrgSettings } from "./org-settings.js";
-import { createApprovalRuleRow } from "./rule-creates.js";
+import { findServerPolicyTemplate, seedServerPolicyTemplate } from "./rule-creates.js";
 import { requireStepUp } from "./step-up.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
@@ -93,28 +88,14 @@ export async function recordRiskClassification(tx: Db, serverId: string, tools: 
   return true;
 }
 
-/** Is the template in force on this server: a fleet approval rule (quorum >= 2, every tool) and a rate limit? */
+/**
+ * Is the template in force on this server: a fleet approval rule (quorum >= 2, every tool) and a rate limit counting
+ * every call? The shared template finder (rule-creates.ts, code review #798) does the matching, so a write-only or a
+ * deploy-mode-scoped row never stands in for the template on a server whose every call is high-risk.
+ */
 export async function highRiskPolicyApplied(db: Db, serverId: string): Promise<{ approvalRuleId: string | null; rateLimitId: string | null }> {
-  const [rule] = await db
-    .select({ id: approvalRules.id })
-    .from(approvalRules)
-    .where(
-      and(
-        eq(approvalRules.serverId, serverId),
-        eq(approvalRules.serverScope, "server"),
-        eq(approvalRules.scope, "fleet"),
-        isNull(approvalRules.toolName),
-        eq(approvalRules.writeOnly, false),
-        gte(approvalRules.quorum, HIGH_RISK_MIN_QUORUM),
-      ),
-    )
-    .limit(1);
-  const [limit] = await db
-    .select({ id: rateLimits.id })
-    .from(rateLimits)
-    .where(and(eq(rateLimits.serverId, serverId), eq(rateLimits.serverScope, "server"), eq(rateLimits.scope, "fleet"), isNull(rateLimits.toolName)))
-    .limit(1);
-  return { approvalRuleId: rule?.id ?? null, rateLimitId: limit?.id ?? null };
+  const found = await findServerPolicyTemplate(db, { serverId, ruleCovers: "all", minQuorum: HIGH_RISK_MIN_QUORUM, limitCovers: "all" });
+  return { approvalRuleId: found.approvalRule?.id ?? null, rateLimitId: found.rateLimit?.id ?? null };
 }
 
 async function authorisedTargets(db: Db): Promise<AuthorisedTarget[]> {
@@ -272,11 +253,11 @@ export function registerMcpHighRiskRoutes(app: FastifyInstance, db: Db): void {
     });
     const out = await db.transaction(async (rawTx) => {
       const tx = rawTx as unknown as Db;
-      const approval = await createApprovalRuleRow(tx, rule);
-      const [limit] = await tx
-        .insert(rateLimits)
-        .values({ scope: "fleet", serverScope: "server", serverId, toolName: null, maxCalls: body.maxCalls, windowSeconds: body.windowSeconds })
-        .returning();
+      // code review #798: the one template seed, shared with the ADR-0230 SAP business mark
+      const { approvalRule: approval, rateLimit: limit } = await seedServerPolicyTemplate(tx, {
+        rule,
+        limit: { serverId, writeOnly: false, maxCalls: body.maxCalls, windowSeconds: body.windowSeconds },
+      });
       await tx.insert(auditLog).values({
         userId: req.authCtx.userId ?? NIL_USER,
         serverId,

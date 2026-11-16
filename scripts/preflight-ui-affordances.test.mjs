@@ -95,9 +95,9 @@ describe("affordance census: a notBuilt route counts only when the file defines 
   });
 
   it("no exemption names a stub: a stub is skipped already, so an entry for one is stale", () => {
-    // both lists emptied: the ADR-0236 bundle routes left with the #453 bundle screen (#815) and the ADR-0246
-    // authorised-targets entry left with its screen (#823)
-    expect([...DELIBERATELY_API_ONLY.keys()]).toEqual([]);
+    // the ADR-0236 bundle routes left with the #453 bundle screen (#815) and the ADR-0246 authorised-targets entry left
+    // with its screen (#823); the ADR-0230 A2 SAP business unmark stays until its #453 screen
+    expect([...DELIBERATELY_API_ONLY.keys()]).toEqual(["/v1/servers/:x/system-class"]);
   });
 });
 

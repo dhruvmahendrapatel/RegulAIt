@@ -30,7 +30,7 @@ export function McpRegistryEntriesPage() {
             Federation is refused in this deployment ({list.data.deployMode}): {list.data.federationRefusedReason ?? "registries cannot be pulled"}.
           </p>
         )}
-        <QueryGate loading={list.isLoading} error={list.error} onRetry={() => void list.refetch()}>
+        <QueryGate query={list}>
           {registry ? (
             <RegistryEntriesCard registry={registry} />
           ) : (

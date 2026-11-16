@@ -184,7 +184,7 @@ export default function RisksPage() {
 
   // the open risk, shown in place under its register row
   const renderDetail = () => (
-    <QueryGate loading={detail.isLoading} error={detail.error} onRetry={() => void detail.refetch()}>
+    <QueryGate query={detail}>
       {d && (
                 <div className={v.stack}>
                   <div>
@@ -452,7 +452,7 @@ export default function RisksPage() {
         )}
 
         {/* ---------------- register list ---------------- */}
-        <QueryGate loading={list.isLoading} error={list.error} onRetry={() => void list.refetch()}>
+        <QueryGate query={list}>
           <Card title="Register">
             {(list.data?.risks ?? []).length === 0 ? (
               <EmptyState

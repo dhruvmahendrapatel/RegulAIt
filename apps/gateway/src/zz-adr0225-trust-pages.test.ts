@@ -146,11 +146,12 @@ beforeAll(async () => {
     const token = (await inject("POST", `/v1/users/${id}/keys`, AUTH, { name: "p13d" })).json().token as string;
     users[k] = { id, auth: { authorization: `Bearer ${token}` } };
   }
-  await db.execute(sql`UPDATE org_settings SET trust_pages_enabled = false`);
+  // ADR-0240: this suite pins the link-to-session flow; the second factor is pinned in zz-adr0240-external-portal-mfa
+  await db.execute(sql`UPDATE org_settings SET trust_pages_enabled = false, trust_auditor_mfa_required = false`);
 }, 120_000);
 
 afterAll(async () => {
-  await db.execute(sql`UPDATE org_settings SET trust_pages_enabled = false`);
+  await db.execute(sql`UPDATE org_settings SET trust_pages_enabled = false, trust_auditor_mfa_required = true`);
   await restoreStepUp?.();
   await restoreIdentity?.();
   if (created.grants.length) await db.delete(auditorGrants).where(inArray(auditorGrants.id, created.grants));

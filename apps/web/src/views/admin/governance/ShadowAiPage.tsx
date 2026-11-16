@@ -37,7 +37,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
-import { ago, evidenceLabel, fmtDateTime, humanize, plural, providerLabel } from "../../../api/format";
+import { ago, evidenceLabel, fmtDateTime, humanize, plural, providerLabel, errorText } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, CodeBlock, EmptyState, Field, InfoButton, Input, RowActions, Select, SeverityBadge, Table, Tabs, tabIds, Textarea } from "../../../ui/kit";
 import { FoldTable } from "../../../ui/fold";
@@ -371,7 +371,7 @@ export default function ShadowAiPage() {
       else if (lower.endsWith(".csv")) setRawFormat("csv");
       else setRawFormat("text");
     } catch (e) {
-      setRawFileError(e instanceof Error ? e.message : String(e));
+      setRawFileError(errorText(e));
     }
   };
 
@@ -790,7 +790,7 @@ export default function ShadowAiPage() {
         <>
       {/* ================= ADR-0071 — the format adapters ================= */}
       <Card title="Import a raw log file (format adapters)">
-        <QueryGate loading={adapters.isLoading} error={adapters.error} onRetry={() => void adapters.refetch()}>
+        <QueryGate query={adapters}>
           <div className={v.stack}>
             <p className={v.dim}>{adapters.data?.posture}</p>
             <p className={v.faint}>{adapters.data?.pipeline}</p>
@@ -1015,7 +1015,7 @@ export default function ShadowAiPage() {
 
       {/* ================= ADR-0083 — first-party discovery ================= */}
       <Card title="First-party discovery (classify what you already hold)">
-        <QueryGate loading={discovery.isLoading} error={discovery.error} onRetry={() => void discovery.refetch()}>
+        <QueryGate query={discovery}>
           <div className={v.stack}>
             <p className={v.dim}>{discovery.data?.posture}</p>
             <p className={v.faint}>{discovery.data?.limits}</p>

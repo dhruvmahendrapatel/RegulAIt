@@ -25,6 +25,7 @@ import {
   type SQL,
   sql,
 } from "@regulait/db";
+import { sapStoredToolKind, serverSystemClass } from "./sap-tool-kind.js";
 import { evaluate, matchingApprovalRulesWith, type Decision, type GovernedActor, type ToolRef } from "@regulait/policy-kernel";
 // ADR-0239 slice 2: approval rules are matched on Cedar, here and in the kernel call below, so the gateway's reads of
 // the matched rules (consent scope, quorum) and the kernel's decision come from ONE engine and cannot disagree
@@ -279,8 +280,11 @@ export async function approvalRuleQuorumsMatchingNow(
   const protocolKinds = Object.values(MCP_PROTOCOL_METHOD_GRANTS)
     .filter((m) => m.grant === call.toolName)
     .map((m) => m.kind);
-  const kind = tool?.kind ?? (protocolKinds.length ? (protocolKinds.includes("write") ? "write" : "read") : null);
-  if (!kind) return null;
+  const storedKind = tool?.kind ?? (protocolKinds.length ? (protocolKinds.includes("write") ? "write" : "read") : null);
+  if (!storedKind) return null;
+  // security review #798 (3bf47251): on an SAP business server every tool is a write, exactly as the proxy decides,
+  // so a write-only rule's raised quorum still binds the execution re-check of a tool the upstream calls read-only
+  const kind = sapStoredToolKind(await serverSystemClass(db, call.serverId), storedKind);
   const { roleIds, teamIds } = await loadScopeMemberships(db, call.userId);
   const rows = await db
     .select()
@@ -466,7 +470,7 @@ export async function governedEvaluate(
   // scope this user matches. The kernel receives a pre-filtered set and stays
   // subject-free — it re-checks only the user-scope id it must never widen.
   const { roleIds, teamIds } = await loadScopeMemberships(db, userId);
-  const [entitlements, aRules, limits, scopeRules, approvedRows, serverRows] = await Promise.all([
+  const [entitlements, aRules, loadedLimits, scopeRules, approvedRows, serverRows] = await Promise.all([
     loadEntitlements(db, userId, serverId),
     db
       .select()
@@ -573,6 +577,11 @@ export async function governedEvaluate(
       .from(mcpServers)
       .where(eq(mcpServers.id, serverId)),
   ]);
+
+  // ADR-0230 A2: a write-only rate limit applies to write-kind tools only (the same read/write classification a
+  // write-only approval rule uses), so for a read tool it is not loaded at all. `write_only` is not a versioned field,
+  // so filtering on the table row before version resolution is exact.
+  const limits = loadedLimits.filter((l) => !l.writeOnly || tool.kind === "write");
 
   // Display names for the decision's reason prose — the ids in ruleId /
   // ruleChain / stored audit fields stay authoritative, but the sentence a
@@ -689,7 +698,11 @@ export async function governedEvaluate(
     toolName: string | null;
     windowSeconds: number;
     maxCalls: number;
+    writeOnly?: boolean;
   }) => {
+    // ADR-0230 A2: a write-only limit is only ever loaded for a write call (above). In a REPLAY it counts every
+    // allowed call in its window (the replay counter has no tool-kind dimension): an over-count, so a simulation of a
+    // write-only limit can only read stricter than the live decision, never looser.
     if (replay) {
       const windowStart = new Date(replay.asOf.getTime() - l.windowSeconds * 1000);
       if (typeof replay.countAllowed !== "function") {
@@ -723,6 +736,15 @@ export async function governedEvaluate(
     ];
     if (l.serverScope !== "all") conditions.push(eq(auditLog.serverId, serverId));
     if (l.toolName) conditions.push(eq(auditLog.toolName, l.toolName));
+    // ADR-0230 A2: a write-only limit counts write calls only. A row counts unless its tool is known to be a READ
+    // tool on that server: a tool missing from the inventory counts, the conservative reading (an unannotated tool
+    // is a write, mcp-proxy.ts `toolKind`), and so does every tool of an SAP business server.
+    if (l.writeOnly) {
+      conditions.push(
+        // ADR-0230 (review #798): a tool on an SAP business server is a write whatever its row says, as at call time
+        sql`NOT EXISTS (SELECT 1 FROM ${mcpTools} JOIN ${mcpServers} ON ${mcpServers.id} = ${mcpTools.serverId} WHERE ${mcpTools.serverId} = ${auditLog.serverId} AND ${mcpTools.name} = ${auditLog.toolName} AND ${mcpTools.kind} = 'read' AND ${mcpServers.systemClass} IS DISTINCT FROM 'sap_business')`,
+      );
+    }
     const [row] = await db
       .select({ value: count() })
       .from(auditLog)

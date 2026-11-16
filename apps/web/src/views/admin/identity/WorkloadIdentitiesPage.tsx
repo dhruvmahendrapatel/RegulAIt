@@ -304,20 +304,7 @@ export default function WorkloadIdentitiesPage() {
           />
         )}
 
-        {/* P3: the settings are in tabs; delegation (and its warnings) opens first, and the trust tab counts what needs review */}
-        <Tabs
-          tabs={[
-            { id: "delegation", label: "Delegation" },
-            { id: "settings", label: tabLabel("Settings", settingsUnresolved) },
-            { id: "trust", label: tabLabel("Signing & trust", trustUnresolved) },
-          ]}
-          active={tab}
-          onChange={setTab}
-          idPrefix="identity-settings"
-          label="Identity settings"
-        />
-        {/* the kit panels stay mounted while hidden, so a draft survives a tab switch (review of #642) */}
-        <TabPanel idPrefix="identity-settings" id="delegation" active={tab}><div className={s.stack}>
+        {/* I-2: the standing delegation refusal stays above the tabs, so the Settings and Signing & trust tabs never hide it */}
         <Card
           title="Delegation safeguards"
           info={
@@ -348,7 +335,20 @@ export default function WorkloadIdentitiesPage() {
           </div>
         </Card>
 
-
+        {/* P3: the settings are in tabs; delegation (and its warnings) opens first, and the trust tab counts what needs review */}
+        <Tabs
+          tabs={[
+            { id: "delegation", label: "Delegation" },
+            { id: "settings", label: tabLabel("Settings", settingsUnresolved) },
+            { id: "trust", label: tabLabel("Signing & trust", trustUnresolved) },
+          ]}
+          active={tab}
+          onChange={setTab}
+          idPrefix="identity-settings"
+          label="Identity settings"
+        />
+        {/* the kit panels stay mounted while hidden, so a picked run, an unsaved setting or a half-added bundle survives a tab switch (I-2; review of #642) */}
+        <TabPanel idPrefix="identity-settings" id="delegation" active={tab}><div className={s.stack}>
         <RunDelegationTree busy={write.busy} personLabel={personLabel} identities={seen} ask={ask} />
         </div></TabPanel>
         <TabPanel idPrefix="identity-settings" id="settings" active={tab}><div className={s.stack}>

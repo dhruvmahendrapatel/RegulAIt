@@ -22,6 +22,7 @@ import { QueryGate } from "../adminKit";
 import v from "../../views.module.css";
 import { shortDate } from "./useCaseLifecycle";
 import { putOrgSettings } from "../../../stepup/stepUp";
+import { errorText } from "../../../api/format";
 
 // ---------------------------------------------------------------------------
 // The API shapes (packages/shared/src/decision-regression.ts)
@@ -234,7 +235,7 @@ export function PreviewImpactModal(props: {
       const r = await api.post<RegressionRun>(PREVIEW_PATH, { subject: props.subject, candidate: props.candidate });
       if (mine === seq.current) setRun(r);
     } catch (e) {
-      if (mine === seq.current) setError(e instanceof Error ? e.message : String(e));
+      if (mine === seq.current) setError(errorText(e));
     } finally {
       if (mine === seq.current) setLoading(false);
     }
@@ -263,8 +264,8 @@ export function PreviewImpactModal(props: {
       const code = e instanceof ApiError ? String(e.payload.error ?? "") : "";
       setSaveError(
         code.startsWith("decision_regression_")
-          ? `${e instanceof Error ? e.message : String(e)}`
-          : `Not saved: ${e instanceof Error ? e.message : String(e)}`,
+          ? `${errorText(e)}`
+          : `Not saved: ${errorText(e)}`,
       );
     } finally {
       setSaving(false);
@@ -427,7 +428,7 @@ function RunsSection() {
             </Button>
           }
         >
-          <QueryGate loading={detail.isLoading} error={detail.error} onRetry={() => void detail.refetch()}>
+          <QueryGate query={detail}>
             {detail.data ? (
               <div className={v.stack}>
                 <p className={`${v.dim} ${v.flush}`}>
@@ -491,7 +492,7 @@ function CasesSection() {
       setTier("");
       await queryClient.invalidateQueries({ queryKey: CASES_KEY });
     } catch (e) {
-      setAddError(e instanceof Error ? e.message : String(e));
+      setAddError(errorText(e));
     } finally {
       setAdding(false);
     }
@@ -503,7 +504,7 @@ function CasesSection() {
       toast("Case retired", "success");
       await queryClient.invalidateQueries({ queryKey: CASES_KEY });
     } catch (e) {
-      toast(e instanceof Error ? e.message : String(e), "error");
+      toast(errorText(e), "error");
     } finally {
       setRetiring(null);
     }
@@ -676,7 +677,7 @@ function SettingsSection() {
       setAge(null);
       await queryClient.invalidateQueries({ queryKey: ["org-settings"] });
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorText(e));
     } finally {
       setBusy(false);
     }
@@ -684,7 +685,7 @@ function SettingsSection() {
 
   return (
     <Card title="Settings">
-      <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+      <QueryGate query={q}>
         <form
           className={v.stack}
           noValidate

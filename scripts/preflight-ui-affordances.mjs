@@ -45,6 +45,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const DELIBERATELY_API_ONLY = new Map([
   // A DELETE that is still a 501 `notBuilt` stub needs no entry: a stub deletes nothing, so the census skips it until
   // it becomes a real handler, and an entry for one is reported stale (see staleExemptions).
+  // ADR-0230 A2 (P19, Lane L3): the UI is built by the design builder; delete this entry when the screen lands
+  ["/v1/servers/:x/system-class", "unmarking an SAP business server (settings_relax step-up): API-only until the SAP server screen on #453 (route census KNOWN_UI_GAPS)"],
 ]);
 
 /**

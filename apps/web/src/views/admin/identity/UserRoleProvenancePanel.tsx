@@ -62,7 +62,7 @@ export default function UserRoleProvenancePanel(props: { userId: string }) {
   const roles = Array.isArray(q.data?.roles) ? q.data!.roles : [];
   return (
     <div className={v.stack} data-testid="role-provenance">
-      <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+      <QueryGate query={q}>
         {q.data ? (
           <>
             <p className={v.faint}>

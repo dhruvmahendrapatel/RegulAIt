@@ -81,7 +81,7 @@ import { evaluateIpEnvelope, isValidCidr } from "./net-policy.js";
 import { countEnabledSsoProviders } from "./sso-providers.js";
 import { signInInvariantChecked, signInInvariantWritten, withSignInInvariant } from "./break-glass.js";
 import { settingTransitions } from "./setting-transitions.js";
-import { revokeAuditorAccessOnDisable } from "./trust-pages-revoke.js";
+import { revokeAuditorAccessOnDisable, revokeAuditorSessionsOnMfaRequired } from "./trust-pages-revoke.js";
 import { databaseNow } from "./db-clock.js";
 import {
   approvalRuleStepUp,
@@ -996,6 +996,9 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
       // ADR-0225 (review M1): trust pages turned off ends every auditor's access in this same commit; on again revives none
       if (locked.trustPagesEnabled && !after.trustPagesEnabled) {
         await revokeAuditorAccessOnDisable(tx as unknown as Db, req.authCtx.userId);
+      } else if (!locked.trustAuditorMfaRequired && after.trustAuditorMfaRequired) {
+        // ADR-0240 (#709 review): re-tightening ends the sessions a link alone opened while the factor was relaxed
+        await revokeAuditorSessionsOnMfaRequired(tx as unknown as Db, req.authCtx.userId);
       }
       return { after };
     });

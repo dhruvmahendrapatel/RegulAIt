@@ -26,7 +26,7 @@ import type {
   ProposalNode,
   RunSummary,
 } from "../../api/types";
-import { ago, fmtUsd, plural } from "../../api/format";
+import { ago, fmtUsd, plural, errorText } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
 import {
@@ -269,7 +269,7 @@ export default function RunsPage() {
       toast("Plan drafted — review and adjust, then Plan run", "success");
     } catch (e) {
       // 422 decomposition_invalid arrives with its detail on the message
-      setDraftError(e instanceof Error ? e.message : String(e));
+      setDraftError(errorText(e));
     } finally {
       setDrafting(false);
     }
@@ -326,7 +326,7 @@ export default function RunsPage() {
       void queryClient.invalidateQueries({ queryKey: ["runs"] });
       navigate(`/runs/${r.id}`);
     } catch (e) {
-      setCreateError(e instanceof Error ? e.message : String(e));
+      setCreateError(errorText(e));
     } finally {
       setCreating(false);
     }

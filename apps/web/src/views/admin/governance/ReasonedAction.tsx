@@ -9,6 +9,7 @@ import { Button } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
 import { ReasonModal, useAdminInvalidate } from "../adminKit";
 import v from "../../views.module.css";
+import { errorText } from "../../../api/format";
 
 export function ReasonedAction(props: {
   label: string;
@@ -77,7 +78,7 @@ export function ReasonedAction(props: {
               props.onDone?.();
             } catch (e) {
               const known = e instanceof ApiError && typeof e.payload.error === "string" ? props.refusal?.(e.payload.error, e.payload) : null;
-              setRefused(known ?? (e instanceof Error ? e.message : String(e)));
+              setRefused(known ?? (errorText(e)));
             }
           })();
         }}

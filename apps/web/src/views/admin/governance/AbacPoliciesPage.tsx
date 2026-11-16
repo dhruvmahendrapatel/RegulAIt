@@ -234,9 +234,7 @@ export default function AbacPoliciesPage() {
         </Card>
 
         <QueryGate
-          loading={policies.isLoading}
-          error={policies.error}
-          onRetry={() => void policies.refetch()}
+          query={policies}
         >
           <Card title="Policies">
             <Table
@@ -372,9 +370,7 @@ function PolicyDetail(props: { policyId: string; currentSchema: string | null })
 
   return (
     <QueryGate
-      loading={detail.isLoading}
-      error={detail.error}
-      onRetry={() => void detail.refetch()}
+      query={detail}
     >
       <Card
         title={`Versions — ${detail.data?.policy.name ?? ""}`}
