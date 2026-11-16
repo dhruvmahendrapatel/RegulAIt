@@ -52,6 +52,7 @@ OUT=""
 SOURCE="$REPO_ROOT"
 MIN_INSTALLED="0.0.0"
 INCLUDES=()
+UNSIGNED=0
 
 usage() {
   cat <<'USAGE'
@@ -70,6 +71,11 @@ Usage: scripts/build-update-bundle.sh --version <v> --key <private.pem> [options
                            (recorded in the manifest; enforced by the verifier).
   --include <relpath>      Add a path (file or directory). Repeatable. If given
                            at all, it REPLACES the default deployment set.
+  --unsigned               Build a release CANDIDATE with no signature, for the
+                           release workflow (ADR-0324): CI never holds the
+                           signing key. Needs --key-id (the key that will sign
+                           it) and writes *.unsigned.tar.gz. Every verifier
+                           refuses it until the release signer signs it.
   -h, --help
 USAGE
 }
@@ -83,18 +89,25 @@ while [ $# -gt 0 ]; do
     --source)        SOURCE="${2:-}"; shift 2 ;;
     --min-installed) MIN_INSTALLED="${2:-}"; shift 2 ;;
     --include)       INCLUDES+=("${2:-}"); shift 2 ;;
+    --unsigned)      UNSIGNED=1; shift ;;
     -h|--help)       usage; exit 0 ;;
     *) usage >&2; die "unknown option: $1" ;;
   esac
 done
 
 [ -n "$VERSION" ] || { usage >&2; die "--version is required"; }
-[ -n "$KEY" ] || { usage >&2; die "--key is required — an unsigned bundle is not a bundle, it is a tarball"; }
-[ -f "$KEY" ] || die "private key not found: $KEY"
-command -v openssl >/dev/null 2>&1 || die "openssl is required"
-
-[ -n "$KEY_ID" ] || { KEY_ID="$(basename "$KEY")"; KEY_ID="${KEY_ID%.*}"; }
-OUT="${OUT:-$REPO_ROOT/dist/regulait-update-$VERSION.tar.gz}"
+if [ "$UNSIGNED" = "1" ]; then
+  [ -z "$KEY" ] || die "--unsigned takes no --key: the candidate is signed later, by the release signer, off CI"
+  [ -n "$KEY_ID" ] || die "--unsigned needs --key-id: the manifest names the key that will sign it"
+  printf '%s' "$KEY_ID" | grep -qE '^[A-Za-z0-9._-]+$' || die "bad --key-id: $KEY_ID"
+  OUT="${OUT:-$REPO_ROOT/dist/regulait-update-$VERSION.unsigned.tar.gz}"
+else
+  [ -n "$KEY" ] || { usage >&2; die "--key is required — an unsigned bundle is not a bundle, it is a tarball"; }
+  [ -f "$KEY" ] || die "private key not found: $KEY"
+  command -v openssl >/dev/null 2>&1 || die "openssl is required"
+  [ -n "$KEY_ID" ] || { KEY_ID="$(basename "$KEY")"; KEY_ID="${KEY_ID%.*}"; }
+  OUT="${OUT:-$REPO_ROOT/dist/regulait-update-$VERSION.tar.gz}"
+fi
 SOURCE="$(cd -- "$SOURCE" && pwd)"
 
 # The default deployment set: what a customer's box actually needs in order to
@@ -118,6 +131,8 @@ if [ "${#INCLUDES[@]}" -eq 0 ]; then
     docs/deployment
     # the engine image lock and its signatures (engines/signatures/): the installer verifies bundled engine images
     engines
+    # the release SBOM (ADR-0324): written by the release workflow before it builds; absent elsewhere (skipped)
+    sbom
     # ADR-0305: the Helm chart and the operator's manifests (CRD, Role, manager) for a Kubernetes install. Shipping them
     # here puts them under the bundle's release-key signature, so an air-gapped site installs the chart it verified
     # rather than one pulled from a registry it cannot reach.
@@ -198,6 +213,12 @@ MANIFEST="$BUNDLE_DIR/manifest.json"
 COUNT="$(printf '%s\n' "$FILE_LIST" | wc -l | tr -d ' ')"
 ok "manifest lists $COUNT files"
 
+if [ "$UNSIGNED" = "1" ]; then
+  mkdir -p "$(dirname "$OUT")"
+  tar -C "$STAGE" -czf "$OUT" "regulait-update-$VERSION"
+  ok "UNSIGNED candidate: $OUT (to be signed by $KEY_ID; every verifier refuses it until then)"
+  exit 0
+fi
 printf '==> Signing manifest with %s (key id: %s)\n' "$KEY" "$KEY_ID"
 # Ed25519 signs the message directly (-rawin); for RSA/EC keys openssl falls
 # back to a digest, so -rawin is attempted first and the digest form second.
