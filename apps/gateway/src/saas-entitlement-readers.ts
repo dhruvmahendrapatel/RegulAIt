@@ -49,6 +49,7 @@ import {
   str,
 } from "./discovery-wider-scanners.js";
 import type { ScanContext, ScanResult, Scanner } from "./discovery-scanners.js";
+import { errMessage } from "./err-serializer.js";
 
 /**
  * A read outcome that says the listing was not read to its end. A resource that is not provisioned in the tenant
@@ -344,7 +345,7 @@ async function runWorkspaceEntitlements(ctx: ScanContext): Promise<ScanResult> {
     accessToken = tok.token;
   } catch (err) {
     // only Google's OAuth error code is kept from the error text, never the response body
-    const code = /\b(unauthorized_client|invalid_grant|access_denied|invalid_client|invalid_scope)\b/.exec(err instanceof Error ? err.message : "")?.[1];
+    const code = /\b(unauthorized_client|invalid_grant|access_denied|invalid_client|invalid_scope)\b/.exec(errMessage(err))?.[1];
     throw new WiderSourceConfigError(`entitlement_google_workspace: the delegated token request failed${code ? ` (${code})` : ""}; check the service account's domain-wide delegation of the read-only Reports scope`);
   }
   onSecret(accessToken);
