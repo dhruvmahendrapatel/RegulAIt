@@ -50,6 +50,11 @@ describe("ADR-0337 vocabulary", () => {
     expect(publicConfigProblem("entitlement_google_workspace", "static", { adminSubject: "admin@acme.example" })).toBeNull();
     expect(publicConfigProblem("entitlement_google_workspace", "static", { adminSubject: "not an email" })).toMatch(/email/);
     expect(publicConfigProblem("entitlement_google_workspace", "static", {})).toMatch(/required/);
+    expect(publicConfigProblem("entitlement_salesforce", "static", { clientId: "3MVG9consumerKeyForTests_000", username: "integration@acme.example" })).toBeNull();
+    expect(publicConfigProblem("entitlement_salesforce", "static", { clientId: "short", username: "integration@acme.example" })).toMatch(/salesforce_consumer_key/);
+    expect(publicConfigProblem("entitlement_salesforce", "federated", {})).toMatch(/OIDC/);
+    expect(publicConfigProblem("entitlement_slack", "static", {})).toBeNull();
+    expect(publicConfigProblem("entitlement_slack", "static", { token: "xoxp-1" })).toMatch(/not a public config field/);
     // a key never goes in public config
     expect(publicConfigProblem("entitlement_google_workspace", "static", { adminSubject: "a@b.example", private_key: "x" })).toMatch(/not a public config field/);
   });

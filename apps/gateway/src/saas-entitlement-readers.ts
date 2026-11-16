@@ -25,10 +25,17 @@
  *
  * TARGETS (key=value fields on the source; documented in docs/deployment/SAAS_ENTITLEMENTS.md):
  *  - entitlement_m365              tenantId; scope: organisation-level = every app, include = client application ids
+ *  - entitlement_salesforce        loginUrl (https://login.salesforce.com, https://test.salesforce.com or a
+ *                                  https://<domain>.my.salesforce.com), orgId (00D…); scope: organisation-level =
+ *                                  every connected app, include = connected app ids (0H4…)
+ *  - entitlement_slack             enterpriseId (E…, Enterprise Grid org) or teamId (T…); scope: organisation-level
+ *                                  = every app, include = Slack app ids
  *  - entitlement_google_workspace  customerId? (default my_customer), lookbackDays? (1-180, default 180);
  *                                  scope: organisation-level = every app, include = OAuth client ids
  */
 import { GOOGLE_WORKSPACE_REPORTS_READONLY_SCOPE, workspaceDelegatedClient } from "@regulait/cloud-discovery";
+import { BodyTooLargeError, readBodyCapped } from "@regulait/cloud-discovery";
+import { SignJWT, importPKCS8 } from "jose";
 import type { DiscoveryReadOutcome, SaasAppEntitlement, SaasEntitlementBatch, SaasScopeGrant } from "@regulait/shared";
 import { SAAS_ENTITLEMENT_LIMITS } from "@regulait/shared";
 import { dedupedSecretSink, scannerFetch } from "./discovery-cloud-scanners.js";
@@ -37,6 +44,7 @@ import {
   GUID,
   ITEM_CAP,
   ReadFailure,
+  WIDER_MAX_BODY_BYTES,
   WIDER_MAX_ITEMS,
   WiderSourceConfigError,
   atPath,
@@ -436,10 +444,347 @@ async function runWorkspaceEntitlements(ctx: ScanContext): Promise<ScanResult> {
 }
 
 // ---------------------------------------------------------------------------
+// entitlement_salesforce
+// ---------------------------------------------------------------------------
+
+export const SALESFORCE_API_VERSION = "v62.0";
+const SF_ID = /^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/;
+const SF_ORG_ID = /^00D[a-zA-Z0-9]{12}(?:[a-zA-Z0-9]{3})?$/;
+const SF_APP_ID = /^0H4[a-zA-Z0-9]{12}(?:[a-zA-Z0-9]{3})?$/;
+/** a permission set or profile API name (letters, digits, underscores), bounded */
+const SF_NAME = /^[A-Za-z][A-Za-z0-9_]{0,79}$/;
+/**
+ * The system permissions that can change the org (data, setup, users, code or metadata). A run-as user holding any of
+ * them is refused before anything is read (ADR-0195 decision 7): the reader needs only View Setup and Configuration.
+ */
+export const SALESFORCE_WRITE_PERMISSIONS = Object.freeze(["PermissionsModifyAllData", "PermissionsCustomizeApplication", "PermissionsManageUsers", "PermissionsAuthorApex", "PermissionsModifyMetadata"]);
+
+/** the 15-character form of a Salesforce id (ids are case-sensitive; 18-character ids add a case-safe suffix) */
+const sf15 = (id: string) => id.slice(0, 15);
+
+function salesforceLogin(raw: string | undefined): { origin: string; audience: string } | null {
+  if (!raw) return null;
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== "https:" || u.username || u.password || u.search || u.hash || (u.pathname !== "/" && u.pathname !== "")) return null;
+  const h = u.hostname.toLowerCase();
+  if (h === "login.salesforce.com") return { origin: u.origin, audience: "https://login.salesforce.com" };
+  if (h === "test.salesforce.com") return { origin: u.origin, audience: "https://test.salesforce.com" };
+  if (/^[a-z0-9-]{1,80}(?:\.sandbox)?\.my\.salesforce\.com$/.test(h)) return { origin: u.origin, audience: h.includes(".sandbox.") ? "https://test.salesforce.com" : "https://login.salesforce.com" };
+  return null;
+}
+
+function salesforceTargetProblem(target: Readonly<Record<string, string>>, scope: Readonly<{ orgLevel: boolean; include: readonly string[] }>): string | null {
+  if (!salesforceLogin(target.loginUrl)) return "'loginUrl' must be https://login.salesforce.com, https://test.salesforce.com or your https://<domain>.my.salesforce.com (no path or query)";
+  if (!target.orgId || !SF_ORG_ID.test(target.orgId)) return "'orgId' must be the org's id (00D…)";
+  if (!scope.orgLevel && scope.include.some((x) => !SF_APP_ID.test(x.trim()))) return "the scope names connected app ids (0H4…)";
+  return null;
+}
+
+/** the instance the token response names, kept only when it is an https Salesforce host */
+function salesforceInstance(raw: unknown): string | null {
+  const s = str(raw, 256);
+  if (!s) return null;
+  try {
+    const u = new URL(s);
+    const h = u.hostname.toLowerCase();
+    return u.protocol === "https:" && !u.username && !u.password && /^[a-z0-9.-]{1,200}\.(?:my\.)?salesforce\.com$/.test(h) ? u.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+async function runSalesforceEntitlements(ctx: ScanContext): Promise<ScanResult> {
+  const t = ctx.source.target;
+  const problem = salesforceTargetProblem(t, ctx.source.scope);
+  if (problem) throw new WiderSourceConfigError(`entitlement_salesforce: ${problem}`);
+  const login = salesforceLogin(t.loginUrl)!;
+  const c = ctx.credential;
+  if (!c || c.mode !== "static" || !c.secret) throw new WiderSourceConfigError("entitlement_salesforce: a static credential holding the connected app's private key is required");
+  const { clientId, username } = c.publicConfig;
+  if (!clientId || !username) throw new WiderSourceConfigError("entitlement_salesforce: the credential names clientId (the consumer key) and username (the read-only integration user)");
+
+  // 1. the OAuth 2.0 JWT bearer flow: a short assertion signed with the connected app's key (jose, RS256)
+  let assertion: string;
+  try {
+    const key = await importPKCS8(c.secret, "RS256");
+    assertion = await new SignJWT({}).setProtectedHeader({ alg: "RS256" }).setIssuer(clientId).setSubject(username).setAudience(login.audience).setExpirationTime("3m").sign(key);
+  } catch {
+    throw new WiderSourceConfigError("entitlement_salesforce: the private key is not a PKCS#8 RSA key (BEGIN PRIVATE KEY)");
+  }
+  ctx.registerSecret(assertion);
+  const credentialFetch = scannerFetch(ctx, { digest: false });
+  let tokenBody: unknown;
+  try {
+    const res = await credentialFetch(`${login.origin}/services/oauth2/token`, {
+      method: "POST",
+      headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion }).toString(),
+      redirect: "manual",
+      signal: ctx.signal,
+    });
+    tokenBody = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(await readBodyCapped(res.body, 64 * 1024)));
+  } catch (err) {
+    if (ctx.signal.aborted) throw err;
+    throw new WiderSourceConfigError("entitlement_salesforce: the token request did not complete (is the login host on the egress allow list?)");
+  }
+  const accessToken = str(atPath(tokenBody, "access_token"), 4096);
+  if (!accessToken) {
+    // only Salesforce's OAuth error code is kept, never the description
+    const code = (str(atPath(tokenBody, "error"), 64) ?? "no_token").replace(/[^a-z_]/g, "");
+    throw new WiderSourceConfigError(`entitlement_salesforce: the token request failed (${code}); check the connected app's pre-authorisation of the integration user and its certificate`);
+  }
+  ctx.registerSecret(accessToken);
+  const instance = salesforceInstance(atPath(tokenBody, "instance_url"));
+  if (!instance) throw new WiderSourceConfigError("entitlement_salesforce: the token response named no Salesforce instance");
+  // the identity URL ends /id/<org id>/<user id>; the org must be the source's org
+  const idParts = (str(atPath(tokenBody, "id"), 512) ?? "").split("/");
+  const orgId = idParts.at(-2) ?? "";
+  const userId = idParts.at(-1) ?? "";
+  if (!SF_ORG_ID.test(orgId) || !SF_ID.test(userId)) throw new WiderSourceConfigError("entitlement_salesforce: the token response named no valid identity");
+  if (sf15(orgId) !== sf15(t.orgId!)) throw new WiderSourceConfigError("entitlement_salesforce: the token belongs to another org than the source's target");
+
+  const fetchImpl = scannerFetch(ctx);
+  const headers = { authorization: `Bearer ${accessToken}` };
+  const get = (url: string) => getJson(fetchImpl, url, headers, ctx.signal);
+  const soql = (q: string) => `${instance}/services/data/${SALESFORCE_API_VERSION}/query?q=${encodeURIComponent(q)}`;
+  const nextRecords = (body: unknown) => {
+    const next = str(atPath(body, "nextRecordsUrl"), 512);
+    return next && next.startsWith(`/services/data/${SALESFORCE_API_VERSION}/query/`) ? sameOriginNext(instance, `${instance}${next}`) : null;
+  };
+  const records = (body: unknown, what: string): unknown[] => {
+    const r = atPath(body, "records");
+    if (!Array.isArray(r)) throw new ReadFailure("error", `the ${what} query has no record list`);
+    return r;
+  };
+
+  // 2. decision 7: the run-as user's system permissions (its profile's permission set included) must be read-only
+  const outcomes: DiscoveryReadOutcome[] = [];
+  const held = new Set<string>();
+  const permsRead = await readListing(
+    ctx,
+    "Salesforce run-as user permissions",
+    soql(`SELECT ${SALESFORCE_WRITE_PERMISSIONS.join(", ")} FROM PermissionSet WHERE Id IN (SELECT PermissionSetId FROM PermissionSetAssignment WHERE AssigneeId = '${userId}')`),
+    outcomes,
+    (body) => {
+      for (const r of records(body, "permission")) for (const p of SALESFORCE_WRITE_PERMISSIONS) if (atPath(r, p) === true) held.add(p);
+      return nextRecords(body);
+    },
+    get,
+  );
+  if (!permsRead) return finish([], outcomes, "unverified");
+  if (held.size > 0) {
+    return { observations: [], credentialWriteScope: "write", readOutcomes: [{ read: "credential write scope", status: "denied", detail: `the integration user holds permissions that can change the org: ${[...held].join(", ")}` }] };
+  }
+
+  // 3. the connected apps, and whether any user may authorise each one themselves
+  const keep = includeSet(ctx);
+  const drafts = new Map<string, AppDraft>();
+  let truncated = false;
+  await readListing(
+    ctx,
+    "Salesforce connected apps",
+    soql("SELECT Id, Name, OptionsAllowAdminApprovedUsersOnly FROM ConnectedApplication"),
+    outcomes,
+    (body) => {
+      for (const r of records(body, "connected app")) {
+        const id = str(atPath(r, "Id"), 18);
+        if (!id || !SF_APP_ID.test(id)) continue;
+        if (keep && !keep.has(id.toLowerCase()) && !keep.has(sf15(id).toLowerCase())) continue;
+        if (drafts.size >= SAAS_ENTITLEMENT_LIMITS.apps) {
+          truncated = true;
+          return ITEM_CAP;
+        }
+        const d: AppDraft = { app: { externalId: sf15(id), appKind: "connected_app", displayName: label(atPath(r, "Name"), SAAS_ENTITLEMENT_LIMITS.displayName), publisher: null, publisherVerified: null }, grants: new Map() };
+        // "All users may self-authorize": anyone in the org can grant this app access to their data
+        if (atPath(r, "OptionsAllowAdminApprovedUsersOnly") === false) addGrant(d, { resource: "", scope: "connected_app:self_authorize", grantType: "delegated", consent: "tenant" }, null);
+        drafts.set(sf15(id), d);
+      }
+      return nextRecords(body);
+    },
+    get,
+  );
+
+  // 4. the profiles and permission sets an admin pre-authorised for each app
+  await readListing(
+    ctx,
+    "Salesforce connected app pre-authorisations",
+    soql("SELECT SetupEntityId, Parent.Name, Parent.IsOwnedByProfile, Parent.Profile.Name FROM SetupEntityAccess WHERE SetupEntityType = 'ConnectedApplication'"),
+    outcomes,
+    (body) => {
+      for (const r of records(body, "pre-authorisation")) {
+        const appId = str(atPath(r, "SetupEntityId"), 18);
+        const d = appId ? drafts.get(sf15(appId)) : undefined;
+        if (!d) continue;
+        const byProfile = atPath(r, "Parent.IsOwnedByProfile") === true;
+        const name = str(byProfile ? atPath(r, "Parent.Profile.Name") : atPath(r, "Parent.Name"), 80);
+        const resource = byProfile ? `profile:${(name ?? "").replace(/[^A-Za-z0-9_ ]/g, "").trim().replace(/ +/g, "_")}` : `permission_set:${name ?? ""}`;
+        if (!name || !SF_NAME.test(resource.split(":")[1]!)) continue;
+        if (!addGrant(d, { resource, scope: "connected_app:preauthorized", grantType: "delegated", consent: "tenant" }, null)) truncated = true;
+      }
+      return nextRecords(body);
+    },
+    get,
+  );
+  if (truncated) outcomes.push({ read: "entitlement batch size", status: "skipped", detail: "a per-app or per-grant bound was reached: the rest was not kept" });
+  // completeness is judged on the listings the graph depends on, before the by-design note below is added
+  const complete = !truncated && !outcomes.some(cutShort);
+  outcomes.push({ read: "Salesforce OAuth scopes and per-user tokens", status: "skipped", detail: "OAuth scopes are only in the Metadata API and org-wide tokens need Customize Application; both can change the org, so neither is read (ADR-0337 owner question)" });
+  // system permissions were checked; object-level edit rights of the user cannot all be judged, so unverified
+  const result = finish([], outcomes, "unverified");
+  const entitlements: SaasEntitlementBatch = {
+    platform: "salesforce",
+    tenant: sf15(orgId),
+    complete,
+    apps: [...drafts.values()].filter((d) => d.grants.size > 0).map((d) => ({ ...d.app, grants: [...d.grants.values()] })),
+  };
+  return { ...result, entitlements };
+}
+
+// ---------------------------------------------------------------------------
+// entitlement_slack
+// ---------------------------------------------------------------------------
+
+const SLACK_ORIGIN = "https://slack.com";
+const SLACK_ENTERPRISE_ID = /^E[A-Z0-9]{6,20}$/;
+const SLACK_TEAM_ID = /^T[A-Z0-9]{6,20}$/;
+const SLACK_APP_ID = /^A[A-Z0-9]{6,20}$/;
+/** a Slack scope name as the admin API returns it (bounded, linear) */
+const SLACK_SCOPE = /^[a-z][a-z0-9_.]{0,63}(?::[a-z][a-z0-9_.]{0,63})?$/;
+
+function slackTargetProblem(target: Readonly<Record<string, string>>, scope: Readonly<{ orgLevel: boolean; include: readonly string[] }>): string | null {
+  const e = target.enterpriseId;
+  const t = target.teamId;
+  if ((e === undefined) === (t === undefined)) return "name exactly one of 'enterpriseId' (an Enterprise Grid org, E…) or 'teamId' (a workspace, T…)";
+  if (e !== undefined && !SLACK_ENTERPRISE_ID.test(e)) return "'enterpriseId' must be a Slack enterprise id (E…)";
+  if (t !== undefined && !SLACK_TEAM_ID.test(t)) return "'teamId' must be a Slack team id (T…)";
+  if (!scope.orgLevel && scope.include.some((x) => !SLACK_APP_ID.test(x.trim().toUpperCase()))) return "the scope names Slack app ids (A…)";
+  return null;
+}
+
+/**
+ * The scopes a Slack token holds, from the `x-oauth-scopes` header Slack sends on every Web API response. Read-only
+ * when every scope is a `:read` scope (`admin.apps:read` is the one the reader needs); `write` otherwise; `unverified`
+ * when Slack sent no header.
+ */
+export function slackWriteScope(header: string | null): { scope: "read_only" | "write" | "unverified"; scopes: string[] } {
+  if (!header) return { scope: "unverified", scopes: [] };
+  const scopes = header.split(",").map((x) => x.trim()).filter((x) => x.length > 0).slice(0, 100);
+  if (scopes.length === 0) return { scope: "unverified", scopes };
+  return { scope: scopes.every((x) => /^[a-z][a-z0-9_.]*:read$/.test(x)) ? "read_only" : "write", scopes };
+}
+
+/** Slack answers HTTP 200 with `ok: false` for refusals; turn those into read failures */
+function slackOk(body: unknown, what: string): void {
+  if (atPath(body, "ok") === true) return;
+  const err = str(atPath(body, "error"), 64) ?? "unknown_error";
+  const denied = ["missing_scope", "not_allowed_token_type", "invalid_auth", "not_authed", "token_revoked", "account_inactive", "feature_not_enabled", "not_an_admin", "ekm_access_denied"];
+  throw new ReadFailure(denied.includes(err) ? "denied" : "error", `${what}: Slack refused (${err.replace(/[^a-z_]/g, "")})`);
+}
+
+async function runSlackEntitlements(ctx: ScanContext): Promise<ScanResult> {
+  const t = ctx.source.target;
+  const problem = slackTargetProblem(t, ctx.source.scope);
+  if (problem) throw new WiderSourceConfigError(`entitlement_slack: ${problem}`);
+  const c = ctx.credential;
+  if (!c || c.mode !== "static" || !c.secret) throw new WiderSourceConfigError("entitlement_slack: a static credential holding an org-level token with admin.apps:read is required");
+  ctx.registerSecret(c.secret);
+  const fetchImpl = scannerFetch(ctx);
+  const headers = { authorization: `Bearer ${c.secret}` };
+
+  // 1. who the token is, and which scopes it holds (decision 7), before anything is read
+  let res: Response;
+  try {
+    res = await fetchImpl(`${SLACK_ORIGIN}/api/auth.test`, { method: "GET", headers: { accept: "application/json", ...headers }, redirect: "manual", signal: ctx.signal });
+  } catch (err) {
+    if (ctx.signal.aborted) throw err;
+    throw new WiderSourceConfigError("entitlement_slack: Slack could not be reached (is slack.com on the egress allow list?)");
+  }
+  let auth: unknown;
+  try {
+    auth = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(await readBodyCapped(res.body, WIDER_MAX_BODY_BYTES)));
+  } catch (err) {
+    if (err instanceof BodyTooLargeError || !ctx.signal.aborted) throw new WiderSourceConfigError("entitlement_slack: the token check did not answer JSON");
+    throw err;
+  }
+  if (atPath(auth, "ok") !== true) throw new WiderSourceConfigError(`entitlement_slack: the token check failed (${(str(atPath(auth, "error"), 64) ?? "unknown_error").replace(/[^a-z_]/g, "")})`);
+  const write = slackWriteScope(res.headers.get("x-oauth-scopes"));
+  if (write.scope === "write") {
+    return { observations: [], credentialWriteScope: "write", readOutcomes: [{ read: "credential write scope", status: "denied", detail: `the token holds more than read scopes: ${write.scopes.join(", ").slice(0, 300)}` }] };
+  }
+  const tokenOrg = t.enterpriseId ? str(atPath(auth, "enterprise_id"), 32) : str(atPath(auth, "team_id"), 32);
+  if (tokenOrg !== (t.enterpriseId ?? t.teamId)) throw new WiderSourceConfigError("entitlement_slack: the token belongs to another Slack org or workspace than the source's target");
+
+  // 2. the apps approved for the org or workspace, with the scopes each holds
+  const outcomes: DiscoveryReadOutcome[] = [];
+  const keep = includeSet(ctx);
+  const drafts = new Map<string, AppDraft>();
+  let truncated = false;
+  const where = t.enterpriseId ? `enterprise_id=${encodeURIComponent(t.enterpriseId)}` : `team_id=${encodeURIComponent(t.teamId!)}`;
+  const base = `${SLACK_ORIGIN}/api/admin.apps.approved.list?limit=1000&${where}`;
+  await readListing(
+    ctx,
+    "Slack approved apps",
+    base,
+    outcomes,
+    (body) => {
+      slackOk(body, "approved apps");
+      const list = atPath(body, "approved_apps");
+      if (!Array.isArray(list)) throw new ReadFailure("error", "the approved app listing has no list");
+      for (const entry of list) {
+        const appId = str(atPath(entry, "app.id"), 32)?.toUpperCase();
+        if (!appId || !SLACK_APP_ID.test(appId)) continue;
+        if (keep && !keep.has(appId.toLowerCase())) continue;
+        let d = drafts.get(appId);
+        if (!d) {
+          if (drafts.size >= SAAS_ENTITLEMENT_LIMITS.apps) {
+            truncated = true;
+            return ITEM_CAP;
+          }
+          const directory = atPath(entry, "app.is_app_directory_approved");
+          d = {
+            app: { externalId: appId, appKind: "slack_app", displayName: label(atPath(entry, "app.name"), SAAS_ENTITLEMENT_LIMITS.displayName), publisher: null, publisherVerified: typeof directory === "boolean" ? directory : null },
+            grants: new Map(),
+          };
+          drafts.set(appId, d);
+        }
+        const scopes = atPath(entry, "scopes");
+        for (const sc of Array.isArray(scopes) ? scopes : []) {
+          const name = str(atPath(sc, "name"), 128);
+          if (!name || !SLACK_SCOPE.test(name)) continue;
+          // a user scope acts for each user who installs the app; a bot or app scope acts as the app itself
+          const user = atPath(sc, "token_type") === "user";
+          if (!addGrant(d, { resource: "", scope: name, grantType: user ? "delegated" : "application", consent: "tenant" }, null)) truncated = true;
+        }
+      }
+      const cursor = str(atPath(body, "response_metadata.next_cursor"), 2048);
+      return cursor ? `${base}&cursor=${encodeURIComponent(cursor)}` : null;
+    },
+    (url) => getJson(fetchImpl, url, headers, ctx.signal),
+  );
+  if (truncated) outcomes.push({ read: "entitlement batch size", status: "skipped", detail: "a per-app or per-grant bound was reached: the rest was not kept" });
+  const complete = !truncated && !outcomes.some(cutShort);
+  const result = finish([], outcomes, write.scope);
+  const entitlements: SaasEntitlementBatch = {
+    platform: "slack",
+    tenant: (t.enterpriseId ?? t.teamId)!,
+    complete,
+    apps: [...drafts.values()].filter((d) => d.grants.size > 0).map((d) => ({ ...d.app, grants: [...d.grants.values()] })),
+  };
+  return { ...result, entitlements };
+}
+
+// ---------------------------------------------------------------------------
 // registration
 // ---------------------------------------------------------------------------
 
 export const SAAS_ENTITLEMENT_SCANNERS: readonly Scanner[] = Object.freeze([
   { kind: "entitlement_m365", requiresCredential: true, run: runM365Entitlements, validateTarget: (t, s) => m365TargetProblem(t, s) },
   { kind: "entitlement_google_workspace", requiresCredential: true, run: runWorkspaceEntitlements, validateTarget: (t, s) => workspaceTargetProblem(t, s) },
+  { kind: "entitlement_salesforce", requiresCredential: true, run: runSalesforceEntitlements, validateTarget: (t, s) => salesforceTargetProblem(t, s) },
+  { kind: "entitlement_slack", requiresCredential: true, run: runSlackEntitlements, validateTarget: (t, s) => slackTargetProblem(t, s) },
 ]);

@@ -60,6 +60,36 @@ Directory API's token listing, whose only scope can also revoke tokens.
 
 Egress: `oauth2.googleapis.com` and `admin.googleapis.com`.
 
-## Salesforce and Slack
+## Salesforce connected apps — `entitlement_salesforce`
 
-`entitlement_salesforce` and `entitlement_slack` are listed as "not built yet"; their readers follow.
+Reads every connected app, whether any user may authorise it themselves ("All users may self-authorize"), and which
+profiles and permission sets an admin pre-authorised for it.
+
+Target: `loginUrl` (`https://login.salesforce.com`, `https://test.salesforce.com` or your
+`https://<domain>.my.salesforce.com`), `orgId` (the org's `00D…` id). Scope: organisation level, or a list of connected
+app ids (`0H4…`).
+
+Credential: static only (the OAuth 2.0 JWT bearer flow). Create a connected app with "Use digital signatures" and a
+certificate, pre-authorise a dedicated integration user, and store the matching private key (PKCS#8 PEM,
+`BEGIN PRIVATE KEY`) as the secret. Public config: `clientId` (the consumer key) and `username` (the integration user).
+
+Give the integration user View Setup and Configuration and API Enabled, and nothing that can change the org: a user
+holding Modify All Data, Customize Application, Manage Users, Author Apex or Modify Metadata is refused before anything
+is read. Because of that, connected apps' OAuth scopes (Metadata API) and every user's OAuth tokens (which need
+Customize Application) are not read.
+
+Egress: your login host and your instance host (`<domain>.my.salesforce.com`).
+
+## Slack approved apps — `entitlement_slack`
+
+Reads the apps approved for an Enterprise Grid org or a workspace, with each app's user and bot scopes.
+
+Target: exactly one of `enterpriseId` (`E…`) or `teamId` (`T…`). Scope: organisation level, or a list of app ids
+(`A…`).
+
+Credential: static only. The secret is an org-level user token (`xoxp-…`) from an app installed by an org admin, with
+the scope `admin.apps:read` (other `:read` scopes are tolerated). Every run checks the token's scopes first; any scope
+that is not a `:read` scope refuses the credential before anything is read. The token must belong to the target org or
+workspace.
+
+Egress: `slack.com`.

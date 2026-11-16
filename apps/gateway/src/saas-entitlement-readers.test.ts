@@ -16,7 +16,7 @@ import { describe, expect, it } from "vitest";
 import { GOOGLE_WORKSPACE_REPORTS_READONLY_SCOPE } from "@regulait/cloud-discovery";
 import { checkSaasEntitlementBatch, type SaasEntitlementBatch } from "@regulait/shared";
 import { DISCOVERY_SCANNERS, type ScanContext } from "./discovery-scanners.js";
-import { M365_PERMISSION_RESOURCES, SAAS_ENTITLEMENT_SCANNERS } from "./saas-entitlement-readers.js";
+import { M365_PERMISSION_RESOURCES, SAAS_ENTITLEMENT_SCANNERS, SALESFORCE_WRITE_PERMISSIONS, slackWriteScope } from "./saas-entitlement-readers.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000e18";
 const CLIENT = "00000000-0000-4000-8000-000000000e19";
@@ -63,11 +63,8 @@ function ctxFor(over: Partial<ScanContext> & Pick<ScanContext, "fetch" | "source
 }
 
 describe("ADR-0337 registration", () => {
-  it("registers the two slice-1 readers in the production registry, Salesforce and Slack not yet", () => {
-    expect(DISCOVERY_SCANNERS.has("entitlement_m365")).toBe(true);
-    expect(DISCOVERY_SCANNERS.has("entitlement_google_workspace")).toBe(true);
-    expect(DISCOVERY_SCANNERS.has("entitlement_salesforce")).toBe(false);
-    expect(DISCOVERY_SCANNERS.has("entitlement_slack")).toBe(false);
+  it("registers all four readers in the production registry", () => {
+    for (const k of ["entitlement_m365", "entitlement_google_workspace", "entitlement_salesforce", "entitlement_slack"] as const) expect(DISCOVERY_SCANNERS.has(k)).toBe(true);
   });
 
   it("refuses a malformed target before anything runs", () => {
@@ -295,5 +292,165 @@ describe("ADR-0337 entitlement_google_workspace", () => {
     const g = fakeGoogle();
     await expect(scanner("entitlement_google_workspace").run(ctxFor({ fetch: g.f, source, credential: { ...credential, publicConfig: {} } }).ctx)).rejects.toThrow(/adminSubject/);
     await expect(scanner("entitlement_google_workspace").run(ctxFor({ fetch: g.f, source, credential: { ...credential, secret: null } }).ctx)).rejects.toThrow(/static credential/);
+  });
+});
+
+describe("ADR-0337 entitlement_slack", () => {
+  const ORG = "E0ACME123";
+  const source = { id: "s-slack", name: "slack", kind: "entitlement_slack" as const, target: { enterpriseId: ORG }, scope: { orgLevel: true, include: [] as string[] } };
+  const credential = { mode: "static" as const, publicConfig: {}, secret: `xoxp-${randomBytes(12).toString("hex")}` };
+
+  function fakeSlack(scopesHeader: string, over?: (url: URL) => Response | null) {
+    const f = (async (input: string | URL | Request) => {
+      const url = urlOf(input);
+      const o = over?.(url);
+      if (o) return o;
+      if (url.pathname === "/api/auth.test") {
+        return new Response(JSON.stringify({ ok: true, enterprise_id: ORG, team_id: "T0ACME123", user_id: "U1" }), { status: 200, headers: { "content-type": "application/json", "x-oauth-scopes": scopesHeader } });
+      }
+      if (url.pathname === "/api/admin.apps.approved.list") {
+        if (!url.searchParams.get("cursor")) {
+          return json({
+            ok: true,
+            approved_apps: [
+              {
+                app: { id: "A0NOTES001", name: "AI notes\u0007", is_app_directory_approved: true },
+                scopes: [
+                  { name: "channels:history", token_type: "user", is_sensitive: true },
+                  { name: "chat:write", token_type: "bot", is_sensitive: false },
+                  { name: "bad scope!", token_type: "bot" },
+                ],
+              },
+            ],
+            response_metadata: { next_cursor: "c2" },
+          });
+        }
+        return json({ ok: true, approved_apps: [{ app: { id: "A0WIKI0002", name: "Wiki" }, scopes: [{ name: "users:read", token_type: "bot" }] }], response_metadata: { next_cursor: "" } });
+      }
+      return json({ ok: false, error: "unknown_method" });
+    }) as typeof fetch;
+    return f;
+  }
+
+  it("reads approved apps and their scopes across pages, read-only token verified, complete", async () => {
+    const { ctx, calls } = ctxFor({ fetch: fakeSlack("admin.apps:read, users:read"), source, credential });
+    const res = await scanner("entitlement_slack").run(ctx);
+    expect(res.credentialWriteScope).toBe("read_only");
+    const batch = checkSaasEntitlementBatch(res.entitlements, "slack");
+    expect(batch).toMatchObject({ tenant: ORG, complete: true });
+    const notes = batch.apps.find((a) => a.externalId === "A0NOTES001")!;
+    expect(notes).toMatchObject({ appKind: "slack_app", displayName: "AI notes", publisherVerified: true });
+    expect(notes.grants.map((g) => [g.scope, g.grantType, g.consent]).sort()).toEqual([
+      ["channels:history", "delegated", "tenant"],
+      ["chat:write", "application", "tenant"],
+    ]);
+    expect(batch.apps.find((a) => a.externalId === "A0WIKI0002")!.publisherVerified).toBeNull();
+    expect(calls.methods.every(([, m]) => m === "GET")).toBe(true);
+    expect(calls.secrets).toContain(credential.secret);
+    expect(JSON.stringify(res)).not.toContain(credential.secret);
+  });
+
+  it("a token with any non-read scope is refused before the app listing is read (decision 7)", async () => {
+    const { ctx, calls } = ctxFor({ fetch: fakeSlack("admin.apps:read,admin.apps:write"), source, credential });
+    const res = await scanner("entitlement_slack").run(ctx);
+    expect(res.credentialWriteScope).toBe("write");
+    expect(res.entitlements).toBeUndefined();
+    expect(calls.methods).toHaveLength(1);
+  });
+
+  it("a token of another org is refused; a Slack refusal makes the read fail with its reason", async () => {
+    await expect(scanner("entitlement_slack").run(ctxFor({ fetch: fakeSlack("admin.apps:read"), source: { ...source, target: { enterpriseId: "E0OTHER99" } }, credential }).ctx)).rejects.toThrow(/another Slack org/);
+    const denied = fakeSlack("admin.apps:read", (u) => (u.pathname === "/api/admin.apps.approved.list" ? json({ ok: false, error: "not_an_admin" }) : null));
+    await expect(scanner("entitlement_slack").run(ctxFor({ fetch: denied, source, credential }).ctx)).rejects.toThrow(/approved apps denied/);
+  });
+
+  it("scope header parsing and target checks", () => {
+    expect(slackWriteScope(null).scope).toBe("unverified");
+    expect(slackWriteScope("admin.apps:read").scope).toBe("read_only");
+    expect(slackWriteScope("admin.apps:read,chat:write").scope).toBe("write");
+    expect(slackWriteScope("admin").scope).toBe("write");
+    expect(scanner("entitlement_slack").validateTarget!({ enterpriseId: ORG, teamId: "T0ACME123" }, { orgLevel: true, include: [] })).toMatch(/exactly one/);
+    expect(scanner("entitlement_slack").validateTarget!({ teamId: "T0ACME123" }, { orgLevel: false, include: ["A0NOTES001"] })).toBeNull();
+  });
+});
+
+describe("ADR-0337 entitlement_salesforce", () => {
+  const ORG = "00D5g000004AbCdEAA";
+  const USER = "0055g00000AbCdEAAA";
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const credential = { mode: "static" as const, publicConfig: { clientId: "3MVG9consumerKeyForTests_000", username: "integration@acme.example" }, secret: privateKey.export({ type: "pkcs8", format: "pem" }).toString() };
+  const source = { id: "s-sf", name: "sf", kind: "entitlement_salesforce" as const, target: { loginUrl: "https://login.salesforce.com", orgId: ORG }, scope: { orgLevel: true, include: [] as string[] } };
+  const INSTANCE = "https://acme.my.salesforce.com";
+
+  function fakeSalesforce(perms: Record<string, boolean>, over?: (url: URL, q: string) => Response | null) {
+    const accessToken = `00D!${randomBytes(16).toString("hex")}`;
+    const assertions: string[] = [];
+    const queries: string[] = [];
+    const f = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = urlOf(input);
+      if (url.hostname === "login.salesforce.com" && url.pathname === "/services/oauth2/token") {
+        assertions.push(new URLSearchParams(String(init?.body)).get("assertion") ?? "");
+        return json({ access_token: accessToken, instance_url: INSTANCE, id: `https://login.salesforce.com/id/${ORG}/${USER}`, token_type: "Bearer" });
+      }
+      if (url.origin === INSTANCE && url.pathname.startsWith("/services/data/v62.0/query")) {
+        const q = url.searchParams.get("q") ?? "";
+        queries.push(q || url.pathname);
+        const o = over?.(url, q);
+        if (o) return o;
+        if (q.includes("FROM PermissionSet ")) return json({ done: true, records: [{ ...Object.fromEntries(SALESFORCE_WRITE_PERMISSIONS.map((p) => [p, false])), ...perms }] });
+        if (q.includes("FROM ConnectedApplication")) {
+          return json({ done: false, nextRecordsUrl: "/services/data/v62.0/query/01gxx-2000", records: [{ Id: "0H4AGENT0000001AAA", Name: "Sales agent", OptionsAllowAdminApprovedUsersOnly: false }] });
+        }
+        if (url.pathname === "/services/data/v62.0/query/01gxx-2000") return json({ done: true, records: [{ Id: "0H4LOCKED000002AAA", Name: "Locked app", OptionsAllowAdminApprovedUsersOnly: true }] });
+        if (q.includes("FROM SetupEntityAccess")) {
+          return json({
+            done: true,
+            records: [
+              { SetupEntityId: "0H4LOCKED000002AAA", Parent: { Name: "Sales_Agents", IsOwnedByProfile: false } },
+              { SetupEntityId: "0H4AGENT0000001AAA", Parent: { Name: "X00e", IsOwnedByProfile: true, Profile: { Name: "System Administrator" } } },
+            ],
+          });
+        }
+      }
+      return json({}, 404);
+    }) as typeof fetch;
+    return { f, accessToken, assertions, queries };
+  }
+
+  it("reads connected apps, self-authorisation and pre-authorisations with a read-only user; never selects a token field", async () => {
+    const sf = fakeSalesforce({});
+    const { ctx, calls } = ctxFor({ fetch: sf.f, source, credential });
+    const res = await scanner("entitlement_salesforce").run(ctx);
+    expect(res.credentialWriteScope).toBe("unverified");
+    const batch = checkSaasEntitlementBatch(res.entitlements, "salesforce");
+    expect(batch).toMatchObject({ tenant: ORG.slice(0, 15), complete: true });
+    expect(batch.apps.map((a) => [a.externalId, a.grants.map((g) => `${g.resource} ${g.scope}`).sort()]).sort()).toEqual([
+      ["0H4AGENT0000001", [" connected_app:self_authorize", "profile:System_Administrator connected_app:preauthorized"]],
+      ["0H4LOCKED000002", ["permission_set:Sales_Agents connected_app:preauthorized"]],
+    ]);
+    // the JWT bearer assertion names the consumer key, the integration user and the login audience
+    const claims = JSON.parse(Buffer.from(sf.assertions[0]!.split(".")[1]!, "base64url").toString("utf8")) as Record<string, unknown>;
+    expect(claims).toMatchObject({ iss: credential.publicConfig.clientId, sub: credential.publicConfig.username, aud: "https://login.salesforce.com" });
+    // nothing that could revoke a token (DeleteToken, RequestToken, AccessToken) is ever queried; every API call is a GET
+    expect(sf.queries.join(" ")).not.toMatch(/OauthToken|DeleteToken|RequestToken/);
+    expect(calls.methods.filter(([h]) => h === "acme.my.salesforce.com").every(([, m]) => m === "GET")).toBe(true);
+    expect(calls.secrets).toEqual(expect.arrayContaining([sf.accessToken, sf.assertions[0]]));
+    expect(calls.raw.join("")).not.toContain(sf.accessToken);
+  });
+
+  it.each(SALESFORCE_WRITE_PERMISSIONS)("an integration user holding %s is refused before any app is read (decision 7)", async (perm) => {
+    const sf = fakeSalesforce({ [perm]: true });
+    const res = await scanner("entitlement_salesforce").run(ctxFor({ fetch: sf.f, source, credential }).ctx);
+    expect(res.credentialWriteScope).toBe("write");
+    expect(res.entitlements).toBeUndefined();
+    expect(sf.queries.some((q) => q.includes("ConnectedApplication"))).toBe(false);
+  });
+
+  it("refuses another org's token, a bad login host, and a non-PKCS#8 key", async () => {
+    await expect(scanner("entitlement_salesforce").run(ctxFor({ fetch: fakeSalesforce({}).f, source: { ...source, target: { ...source.target, orgId: "00D5g000009ZzZzEAA" } }, credential }).ctx)).rejects.toThrow(/another org/);
+    expect(scanner("entitlement_salesforce").validateTarget!({ loginUrl: "https://evil.example", orgId: ORG }, { orgLevel: true, include: [] })).toMatch(/loginUrl/);
+    expect(scanner("entitlement_salesforce").validateTarget!({ loginUrl: "https://acme.my.salesforce.com/x", orgId: ORG }, { orgLevel: true, include: [] })).toMatch(/loginUrl/);
+    expect(scanner("entitlement_salesforce").validateTarget!({ loginUrl: "https://acme.sandbox.my.salesforce.com", orgId: ORG }, { orgLevel: true, include: [] })).toBeNull();
+    await expect(scanner("entitlement_salesforce").run(ctxFor({ fetch: fakeSalesforce({}).f, source, credential: { ...credential, secret: "not a key" } }).ctx)).rejects.toThrow(/PKCS#8/);
   });
 });

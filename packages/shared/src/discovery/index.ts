@@ -251,7 +251,7 @@ export function activeDiscoveryPosture(active: readonly ActiveDiscoverySource[])
  * only identifiers of a known form are accepted, and anything that could carry
  * a secret is refused.
  */
-export type PublicConfigShape = "numeric_id" | "guid" | "aws_role_arn" | "gcp_id" | "gcp_sa_email" | "https_url" | "header_name" | "email";
+export type PublicConfigShape = "numeric_id" | "guid" | "aws_role_arn" | "gcp_id" | "gcp_sa_email" | "https_url" | "header_name" | "email" | "salesforce_consumer_key";
 
 const SHAPE_PATTERNS: Readonly<Record<Exclude<PublicConfigShape, "https_url">, RegExp>> = {
   numeric_id: /^[0-9]{1,20}$/,
@@ -262,6 +262,8 @@ const SHAPE_PATTERNS: Readonly<Record<Exclude<PublicConfigShape, "https_url">, R
   // ADR-0235: the HTTP header a static API token is sent in (a header name, never a value)
   header_name: /^[A-Za-z][A-Za-z0-9-]{0,63}$/,
   // ADR-0337: the Google Workspace admin a domain-wide delegated read impersonates (bounded, linear)
+  // ADR-0337: a Salesforce connected app's consumer key (public: it identifies the app, the private key is the secret)
+  salesforce_consumer_key: /^[A-Za-z0-9._]{20,256}$/,
   email: /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){1,8}$/,
 };
 
@@ -369,8 +371,8 @@ export const DISCOVERY_PUBLIC_CONFIG: Readonly<Record<DiscoverySourceKind, Reado
   // ADR-0337: a service-account key (the secret) with domain-wide delegation, impersonating one admin for the
   // read-only Reports scope; Google has no keyless delegation RegulAIt can use yet (federationUnsupportedReason)
   entitlement_google_workspace: { federated: {}, static: { adminSubject: { shape: "email", required: true } } },
-  // slice 2 builds these readers; until then the kinds exist and no scanner is registered ("not built yet")
-  entitlement_salesforce: { federated: {}, static: {} },
+  // ADR-0337: the JWT bearer flow; the secret is the connected app's private key (PEM), signed for `username`
+  entitlement_salesforce: { federated: {}, static: { clientId: { shape: "salesforce_consumer_key", required: true }, username: { shape: "email", required: true } } },
   entitlement_slack: { federated: {}, static: {} },
 });
 
