@@ -220,6 +220,9 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.riskAcceptances, ["rationale", "revokeReason"]],
   // ADR-0180 A8 — a steward's note on the autonomy class they declared
   [s.builderAgents, ["autonomyNote"]],
+  // ADR-0339 slice 2 — the note an admin types when staging an agent's non-human identity link, and the second
+  // admin's note on the decision
+  [s.agentIdentityLinks, ["note", "decisionNote"]],
   [s.remediationProposals, ["rationale"]],
   // ADR-0182 (ADR-0175 batch D4, migration 0162) — accountability records.
   // Every new free-text column is registered, titles included: an incident
