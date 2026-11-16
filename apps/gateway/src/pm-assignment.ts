@@ -38,6 +38,7 @@ import {
   type Db,
 } from "@regulait/db";
 import type { NormalizedInboundEvent } from "@regulait/pm-provider";
+import { errMessage } from "./err-serializer.js";
 import { requireStepUp } from "./step-up.js";
 import { changeWithServerFacts, matchedTemplateIds, startWorkflowInstanceWithTemplates, withRequiredTemplates } from "./workflows.js";
 import { SHADOW_AI_REMEDIATION_CHANGE_TYPE } from "./shadow-ai-remediation.js";
@@ -304,7 +305,7 @@ export async function handleAssignmentEvent(
       ruleId: PM_ASSIGNMENT_RULE_IDS.writebackFailed,
       effect: "deny",
       reason: `PM connection '${conn.name}': the start comment could not be written to work item ${label}; the workflow runs and its approvals still mirror`,
-      detail: { phase: "assignment-writeback", ...base, error: err instanceof Error ? err.message.slice(0, 300) : "unknown" },
+      detail: { phase: "assignment-writeback", ...base, error: errMessage(err).slice(0, 300) },
     });
   }
   return { assignment: "started", instanceId: started.instanceId, writeBack };
