@@ -40,6 +40,7 @@ import {
   OAUTH_REVOCATION_PATH,
   OAUTH_TOKEN_PATH,
   DEFENSECLAW_INGEST_PATH,
+  DEFENSECLAW_OTLP_LOGS_PATH,
 } from "@regulait/shared";
 
 /** ADR-0187: the routes only an engine runner credential reaches */
@@ -152,6 +153,8 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // audited. Listed in NON_ADMIN_ROUTES too, so they are `public`.
   "/v1/trust-center",
   "/v1/auditor/session",
+  // ADR-0240: the auditor's second factor (challenge cookie + TOTP code; authenticated in-route)
+  "/v1/auditor/session/mfa",
   "/v1/auditor/items/:slug",
   // ADR-0221 (P4) — the SUPPLIER PORTAL: the routes a supplier, who holds no platform credential, signs in to and
   // answers one assessment through. They authenticate IN-ROUTE on the supplier's own cookie (supplier-portal.ts) and
@@ -183,6 +186,8 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // ADR-0261 (P37): a DefenseClaw exporter holds no RegulAIt session or API key; the route authenticates IN-ROUTE on
   // the source's write-only `rgti_` token (hash lookup), and that token reaches nothing else.
   DEFENSECLAW_INGEST_PATH,
+  // ADR-0302 decision 2: the same exporter channel over OTLP/HTTP logs, the same in-route `rgti_` token
+  DEFENSECLAW_OTLP_LOGS_PATH,
 ]);
 
 export const NON_ADMIN_ROUTES = new Set([
@@ -806,6 +811,7 @@ export const NON_ADMIN_ROUTES = new Set([
   // ADMIN-ONLY. These are the public reads and the auditor portal (also in AUTH_EXEMPT_ROUTES above).
   "GET /v1/trust-center",
   "POST /v1/auditor/session",
+  "POST /v1/auditor/session/mfa",
   "GET /v1/auditor/session",
   "DELETE /v1/auditor/session",
   "GET /v1/auditor/items/:slug",
@@ -898,6 +904,8 @@ export const NON_ADMIN_ROUTES = new Set([
   ...ENDPOINT_AGENT_ENROLMENT_PATHS.map((p) => `POST ${p}`),
   // ADR-0261 (P37): the third-party exporter route (authenticated in-route by its source token)
   `POST ${DEFENSECLAW_INGEST_PATH}`,
+  // ADR-0302 decision 2: its OTLP/HTTP logs twin
+  `POST ${DEFENSECLAW_OTLP_LOGS_PATH}`,
 
   // ADR-0189 slice B4 — the Decision BOM and AI BOM reads, bundles and the
   // online verifier. The gate is `bom_export_roles` (§7, §9), checked IN THE

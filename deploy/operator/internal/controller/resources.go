@@ -27,7 +27,13 @@ const (
 	MigrateEntrypoint  = "apps/gateway/dist/migrate-job.js"
 	// The official postgres image runs pg_dump as uid 999.
 	BackupUID = int64(999)
+	// IRSARoleAnnotation names the IAM role the EKS pod identity webhook projects a token for.
+	IRSARoleAnnotation = "eks.amazonaws.com/role-arn"
 )
+
+// podIdentityAgent is the EKS Pod Identity agent on every node (IPv4 and IPv6). It is link-local, so only the backup
+// pods' own policy opens it, and only with backup.s3.podIdentity.
+var podIdentityAgent = []string{"169.254.170.23/32", "fd00:ec2::23/128"}
 
 // privateRanges are the only ranges an air_gapped install may open, and the ranges an egress list may name without a
 // PublicEgress warning.
@@ -37,8 +43,11 @@ var privateRanges = []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "1
 // is refused on its own in validate.go). No egress list may overlap them; the public-egress rule excludes them.
 var linkLocalRanges = []string{"169.254.0.0/16", "fe80::/10"}
 
-// publicEgressExcept is what the public 443 rule never reaches: every private and link-local range.
-var publicEgressExcept = append(append([]string{}, privateRanges...), linkLocalRanges...)
+// reservedV4 are not routable public addresses (this network, loopback, multicast, reserved); the public rule skips them.
+var reservedV4 = []string{"0.0.0.0/8", "127.0.0.0/8", "224.0.0.0/4", "240.0.0.0/4"}
+
+// publicEgressExcept is what the public 443 rule never reaches: every private, link-local and reserved range.
+var publicEgressExcept = append(append(append([]string{}, privateRanges...), linkLocalRanges...), reservedV4...)
 
 func labels(in *v1alpha1.RegulaitInstallation, component string) map[string]string {
 	l := map[string]string{
@@ -137,6 +146,22 @@ func ServiceAccount(in *v1alpha1.RegulaitInstallation) *corev1.ServiceAccount {
 }
 
 // Service in front of the gateway.
+// BackupServiceAccount is the backup CronJob's own identity, so an AWS role granted to it (IRSA or EKS Pod Identity)
+// is never shared with the gateway. The Kubernetes API token is not mounted; the AWS webhooks project their own token.
+func BackupServiceAccount(in *v1alpha1.RegulaitInstallation) *corev1.ServiceAccount {
+	sa := &corev1.ServiceAccount{
+		TypeMeta:                     typeMeta("ServiceAccount", "v1"),
+		ObjectMeta:                   objectMeta(in, backupName(in), "backup"),
+		AutomountServiceAccountToken: ptr.To(false),
+	}
+	if s3 := in.Spec.Backup.S3; s3 != nil && s3.RoleARN != "" {
+		sa.Annotations = map[string]string{IRSARoleAnnotation: s3.RoleARN}
+	}
+	return sa
+}
+
+func backupName(in *v1alpha1.RegulaitInstallation) string { return in.Name + "-backup" }
+
 func Service(in *v1alpha1.RegulaitInstallation) *corev1.Service {
 	sel := instanceSelector(in)
 	sel["app.kubernetes.io/component"] = "gateway"
@@ -203,7 +228,7 @@ func policy(in *v1alpha1.RegulaitInstallation, name string, sel metav1.LabelSele
 // NetworkPolicies are the per-workload policies of ADR-0304 §2b. Policies add up, so the namespace-wide baseline
 // denies everything the other two do not open.
 func NetworkPolicies(in *v1alpha1.RegulaitInstallation) []*networkingv1.NetworkPolicy {
-	return []*networkingv1.NetworkPolicy{BaselinePolicy(in), GatewayPolicy(in), DatabaseClientsPolicy(in)}
+	return []*networkingv1.NetworkPolicy{BaselinePolicy(in), GatewayPolicy(in), DatabaseClientsPolicy(in), BackupObjectStorePolicy(in)}
 }
 
 // BaselinePolicy selects every pod in the namespace and allows nothing.
@@ -251,6 +276,21 @@ func DatabaseClientsPolicy(in *v1alpha1.RegulaitInstallation) *networkingv1.Netw
 	}
 	egress := append([]networkingv1.NetworkPolicyEgressRule{dnsRule(in)}, databaseRules(in)...)
 	return policy(in, in.Name+"-database-clients", sel, nil, egress)
+}
+
+// BackupObjectStorePolicy adds, for the backup pods only, 443 to backup.s3.egressCIDRs (the S3 and STS endpoints) and,
+// with podIdentity, TCP 80 to the EKS Pod Identity agent. It is always applied; without backup.s3 it opens nothing.
+func BackupObjectStorePolicy(in *v1alpha1.RegulaitInstallation) *networkingv1.NetworkPolicy {
+	var egress []networkingv1.NetworkPolicyEgressRule
+	if s3 := in.Spec.Backup.S3; s3 != nil && !in.Spec.Backup.Disabled {
+		egress = append(egress, networkingv1.NetworkPolicyEgressRule{To: ipBlocks(s3.EgressCIDRs), Ports: []networkingv1.NetworkPolicyPort{npPort(corev1.ProtocolTCP, 443)}})
+		if s3.PodIdentity {
+			egress = append(egress, networkingv1.NetworkPolicyEgressRule{To: ipBlocks(podIdentityAgent), Ports: []networkingv1.NetworkPolicyPort{npPort(corev1.ProtocolTCP, 80)}})
+		}
+	}
+	sel := instanceSelector(in)
+	sel["app.kubernetes.io/component"] = "backup"
+	return policy(in, in.Name+"-backup-object-store", metav1.LabelSelector{MatchLabels: sel}, nil, egress)
 }
 
 func ipBlocks(cidrs []string) []networkingv1.NetworkPolicyPeer {
@@ -443,6 +483,62 @@ find /backup -maxdepth 1 -name 'regulait-*.dump' -mtime "+$RETENTION_DAYS" -dele
 	if b.Image != nil {
 		image = imageRef(*b.Image)
 	}
+	dump := corev1.Container{
+		Name:            "pg-dump",
+		Image:           image,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		Command:         []string{"/bin/sh", "-c", script},
+		Env: []corev1.EnvVar{
+			{Name: "RETENTION_DAYS", Value: fmt.Sprint(retention)},
+			secretEnv("DATABASE_URL", in.Spec.DatabaseURLSecretRef),
+		},
+		SecurityContext: restrictedContainer(),
+		Resources:       resources("100m", "256Mi", "1", "1Gi"),
+		VolumeMounts:    []corev1.VolumeMount{tmpM, {Name: "backup", MountPath: "/backup"}},
+	}
+	backupVol := corev1.Volume{Name: "backup", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: b.DestinationClaimName}}}
+	var initContainers []corev1.Container
+	containers := []corev1.Container{dump}
+	if s3 := b.S3; s3 != nil {
+		// The dump lands in a pod-local emptyDir; the uploader, which never sees the database URL, sends it to S3.
+		dump.Command = []string{"/bin/sh", "-c", `set -eu
+n="regulait-$(date -u +%Y%m%dT%H%M%SZ).dump"
+pg_dump --format=custom --no-owner --file="/backup/$n.partial" "$DATABASE_URL"
+mv "/backup/$n.partial" "/backup/$n"
+printf '%s' "$n" > /backup/NAME`}
+		dump.Env = []corev1.EnvVar{secretEnv("DATABASE_URL", in.Spec.DatabaseURLSecretRef)}
+		// The plaintext dump sits on node disk until the upload ends; the limit bounds it (the pod is evicted, and the
+		// Job fails, rather than filling the node).
+		staging := resource.MustParse("20Gi")
+		if s3.StagingSizeLimit != nil {
+			staging = *s3.StagingSizeLimit
+		}
+		backupVol.VolumeSource = corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &staging}}
+		initContainers = []corev1.Container{dump}
+		containers = []corev1.Container{{
+			Name:            "upload-s3",
+			Image:           imageRef(s3.UploaderImage),
+			ImagePullPolicy: corev1.PullIfNotPresent,
+			Command: []string{"/bin/sh", "-c", `set -eu
+n="$(cat /backup/NAME)"
+aws s3 cp "/backup/$n" "s3://$BUCKET/$PREFIX$n" --region "$REGION" --sse aws:kms --sse-kms-key-id "$SSE_KMS_ARN" --expected-bucket-owner "$EXPECTED_BUCKET_OWNER" --only-show-errors`},
+			Env: []corev1.EnvVar{
+				{Name: "BUCKET", Value: s3.Bucket},
+				{Name: "PREFIX", Value: s3.Prefix},
+				{Name: "REGION", Value: s3.Region},
+				{Name: "AWS_REGION", Value: s3.Region},
+				{Name: "SSE_KMS_ARN", Value: s3.KMSKeyARN},
+				{Name: "EXPECTED_BUCKET_OWNER", Value: s3.ExpectedBucketOwner},
+				// A read-only root filesystem: the CLI's config and cache go to the /tmp emptyDir.
+				{Name: "HOME", Value: "/tmp"},
+				{Name: "AWS_STS_REGIONAL_ENDPOINTS", Value: "regional"},
+				{Name: "AWS_EC2_METADATA_DISABLED", Value: "true"},
+			},
+			SecurityContext: restrictedContainer(),
+			Resources:       resources("100m", "128Mi", "1", "512Mi"),
+			VolumeMounts:    []corev1.VolumeMount{tmpM, {Name: "backup", MountPath: "/backup", ReadOnly: true}},
+		}}
+	}
 	return &batchv1.CronJob{
 		TypeMeta:   typeMeta("CronJob", "batch/v1"),
 		ObjectMeta: objectMeta(in, in.Name+"-backup", "backup"),
@@ -458,27 +554,13 @@ find /backup -maxdepth 1 -name 'regulait-*.dump' -mtime "+$RETENTION_DAYS" -dele
 					ObjectMeta: metav1.ObjectMeta{Labels: labels(in, "backup")},
 					Spec: corev1.PodSpec{
 						RestartPolicy:                corev1.RestartPolicyNever,
-						ServiceAccountName:           gatewayName(in),
+						ServiceAccountName:           backupName(in),
 						AutomountServiceAccountToken: ptr.To(false),
 						EnableServiceLinks:           ptr.To(false),
 						SecurityContext:              restrictedPod(BackupUID),
-						Containers: []corev1.Container{{
-							Name:            "pg-dump",
-							Image:           image,
-							ImagePullPolicy: corev1.PullIfNotPresent,
-							Command:         []string{"/bin/sh", "-c", script},
-							Env: []corev1.EnvVar{
-								{Name: "RETENTION_DAYS", Value: fmt.Sprint(retention)},
-								secretEnv("DATABASE_URL", in.Spec.DatabaseURLSecretRef),
-							},
-							SecurityContext: restrictedContainer(),
-							Resources:       resources("100m", "256Mi", "1", "1Gi"),
-							VolumeMounts:    []corev1.VolumeMount{tmpM, {Name: "backup", MountPath: "/backup"}},
-						}},
-						Volumes: []corev1.Volume{
-							tmpV,
-							{Name: "backup", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: b.DestinationClaimName}}},
-						},
+						InitContainers:               initContainers,
+						Containers:                   containers,
+						Volumes:                      []corev1.Volume{tmpV, backupVol},
 					},
 				},
 			}},

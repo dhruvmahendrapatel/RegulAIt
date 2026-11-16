@@ -1,0 +1,97 @@
+# ADR-0326 — the live pilot-path harness (apps/gateway/live/).
+#
+# Real calls to TEST tenants and low-limit TEST keys only: Anthropic, OpenAI and Gemini through the gateway's
+# coding-tool surfaces (cost attribution and a budget alert), an Azure DevOps test organization (Boards + Repos),
+# and an Entra ID test tenant (discovery, app secret, OIDC provider) plus Entra's SCIM shapes in process.
+#
+# It never runs on pull_request, so normal PR CI needs no credentials. Every group skips itself when its secrets are
+# empty, so a dispatch with none configured is green and calls nothing. The secrets live on the `live-tests`
+# environment, which the owner protects with required reviewers; docs/deployment/LIVE_TESTS.md lists each one.
+name: Live tests
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-tests
+  cancel-in-progress: false
+
+jobs:
+  live:
+    # The nightly schedule is off by default (owner decision 2026-11-15): a scheduled run only proceeds when the
+    # repository variable LIVE_TESTS_NIGHTLY is "true". Manual dispatch always runs.
+    if: github.event_name != 'schedule' || vars.LIVE_TESTS_NIGHTLY == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: live-tests
+
+    services:
+      postgres:
+        image: postgres:16@sha256:9e2cf6287f25c3151f4c9421ccce2b17f3e60061c111a29165e0d2cdd9ff0a97
+        env:
+          POSTGRES_USER: regulait
+          POSTGRES_PASSWORD: regulait
+          POSTGRES_DB: regulait_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U regulait -d regulait_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://regulait:regulait@localhost:5432/regulait_test
+      REGULAIT_DATABASE_SSL: disable
+      REGULAIT_SCHEDULER: "off"
+      REGULAIT_MIGRATIONS_UNASSIGNED: apply
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build the gateway and its workspace dependencies
+        run: pnpm --filter "@regulait/gateway..." build
+
+      - name: Typecheck the live harness
+        working-directory: apps/gateway
+        run: pnpm exec tsc -p live/tsconfig.json
+
+      # The repository is public, so its Actions logs are too: the test organization, project, repository, tenant and
+      # client ids are masked like secrets, so an adapter error that quotes a URL names none of them.
+      - name: Mask the test tenant identifiers
+        env:
+          IDS: ${{ vars.LIVE_ADO_ORG }} ${{ vars.LIVE_ADO_PROJECT }} ${{ vars.LIVE_ADO_REPO }} ${{ vars.LIVE_ENTRA_TENANT_ID }} ${{ vars.LIVE_ENTRA_CLIENT_ID }}
+        run: |
+          for v in $IDS; do echo "::add-mask::$v"; done
+
+      # Secrets are passed only to this step. An unset secret arrives as an empty string and its group is skipped.
+      - name: Live harness
+        working-directory: apps/gateway
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.LIVE_ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.LIVE_OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.LIVE_GEMINI_API_KEY }}
+          REGULAIT_LIVE_ADO_ORG: ${{ vars.LIVE_ADO_ORG }}
+          REGULAIT_LIVE_ADO_PROJECT: ${{ vars.LIVE_ADO_PROJECT }}
+          REGULAIT_LIVE_ADO_REPO: ${{ vars.LIVE_ADO_REPO }}
+          REGULAIT_LIVE_ADO_PAT: ${{ secrets.LIVE_ADO_PAT }}
+          REGULAIT_LIVE_ENTRA_TENANT_ID: ${{ vars.LIVE_ENTRA_TENANT_ID }}
+          REGULAIT_LIVE_ENTRA_CLIENT_ID: ${{ vars.LIVE_ENTRA_CLIENT_ID }}
+          REGULAIT_LIVE_ENTRA_CLIENT_SECRET: ${{ secrets.LIVE_ENTRA_CLIENT_SECRET }}
+        run: pnpm exec vitest run --config live/vitest.config.ts

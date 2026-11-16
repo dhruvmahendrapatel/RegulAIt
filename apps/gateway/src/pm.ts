@@ -1,4 +1,4 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   and,
   approvals,
@@ -15,6 +15,7 @@ import {
   pmLinks,
   pmSyncEvents,
   pmWebhookDeliveries,
+  runAsPrincipalStepIfScoped,
   sql,
   users,
   workflowInstances,
@@ -132,7 +133,7 @@ const mintWebhookSecret = () => `rglwh_${randomBytes(24).toString("hex")}`;
  * `CompiledDefaultEgressBlockedError`, which both pm-sync endpoints turn into
  * the same honest 403 the guarded path produces.
  */
-async function providerFor(
+export async function providerFor(
   db: Db,
   conn: {
     id: string;
@@ -198,6 +199,12 @@ async function providerFor(
   return {
     kind: provider.kind,
     getWorkItem: (...args) => provider.getWorkItem(...args),
+    // ADR-0289: a read, like getWorkItem (the generic contract's work_item.list is a POST that changes nothing)
+    // an adapter without a listing answers 501, which the importer refuses by name (never an empty import)
+    listWorkItems: (project: string, page: { cursor?: string | undefined; limit: number }) =>
+      provider.listWorkItems
+        ? provider.listWorkItems(project, page)
+        : Promise.reject(new PmProviderError(`the ${provider.kind} adapter cannot list a project's work items`, 501)),
     createWorkItem: (...args) => runExternalWrite(db, "pm.create_work_item", () => provider.createWorkItem(...args)),
     updateFields: (...args) => runExternalWrite(db, "pm.update_fields", () => provider.updateFields(...args)),
     transitionState: (...args) => runExternalWrite(db, "pm.transition_state", () => provider.transitionState(...args)),
@@ -210,7 +217,7 @@ async function providerFor(
  * unmapped status is skipped, never invented; a provider failure is surfaced
  * to the caller and never fails the run event itself. Returns null when there
  * is nothing to mirror. */
-export async function mirrorNodeStatus(
+async function mirrorNodeStatusInScope(
   db: Db,
   dataKey: string | undefined,
   runId: string,
@@ -277,7 +284,7 @@ export async function mirrorNodeStatus(
  * transition when the mapping names one for this stage, a comment otherwise
  * (never a silent drop). Strictly a mirror of the ONE approvals queue: the
  * decision is already made and recorded; a mirror failure never unwinds it. */
-export async function mirrorApprovalDecision(
+async function mirrorApprovalDecisionInScope(
   db: Db,
   dataKey: string | undefined,
   approvalRow: {
@@ -383,6 +390,11 @@ export async function mirrorApprovalDecision(
   } catch (err) {
     return { ok: false, error: errMessage(err) };
   }
+}
+
+/** wrap a non-admin route's handler in the pm_sync principal step (ADR-0234 PM batch) */
+function pmSyncRoute<R>(path: string, handler: (req: FastifyRequest, reply: FastifyReply) => Promise<R>) {
+  return (req: FastifyRequest, reply: FastifyReply): Promise<R> => asPmSync(path, () => handler(req, reply));
 }
 
 /**
@@ -762,7 +774,7 @@ export function registerPmRoutes(
 
   // §2/§3: link every task-graph node to a real work item in the customer's
   // tool. Idempotent — already-linked nodes are skipped, not duplicated.
-  app.post("/v1/runs/:runId/pm-sync", async (req, reply) => {
+  app.post("/v1/runs/:runId/pm-sync", pmSyncRoute("pm.route.run-sync", async (req, reply) => {
     const { runId } = runIdParam.parse(req.params);
     const body = pmSyncSchema.parse(req.body);
     const [run] = await db.select().from(orchestrationRuns).where(eq(orchestrationRuns.id, runId));
@@ -936,11 +948,11 @@ export function registerPmRoutes(
       orphaned,
       skipped: [...linked].filter((n): n is string => n !== null),
     });
-  });
+  }));
 
   // §5: link a workflow instance to ONE work item so its sign-offs are
   // visible in the customer's tool without opening RegulAIt.
-  app.post("/v1/workflows/instances/:instanceId/pm-sync", async (req, reply) => {
+  app.post("/v1/workflows/instances/:instanceId/pm-sync", pmSyncRoute("pm.route.instance-sync", async (req, reply) => {
     const { instanceId } = z.object({ instanceId: z.string().uuid() }).parse(req.params);
     const body = pmSyncSchema.parse(req.body);
     const [instance] = await db
@@ -1077,7 +1089,7 @@ export function registerPmRoutes(
     return reply
       .status(201)
       .send({ created: true, externalId: ref.id, externalUrl: ref.url });
-  });
+  }));
 
   // ADR-0010 inbound processing for ONE normalized event — unchanged
   // semantics: every event lands in the append-only pm_sync_events log;
@@ -1419,7 +1431,7 @@ export function registerPmRoutes(
   // §4: first-class decision records. Recorded locally ALWAYS; mirrored to
   // the PM tool as a linked work item of the mapped Decision-like type, or a
   // tagged comment on the parent item when no type is mapped — never dropped.
-  app.post("/v1/decisions", async (req, reply) => {
+  app.post("/v1/decisions", pmSyncRoute("pm.route.decision-create", async (req, reply) => {
     const body = createDecisionSchema.parse(req.body);
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_decide" });
@@ -1548,9 +1560,9 @@ export function registerPmRoutes(
       }
     }
     return reply.status(201).send({ ...row, ...(pmMirror ? { pmMirror } : {}) });
-  });
+  }));
 
-  app.get("/v1/decisions", async (req, reply) => {
+  app.get("/v1/decisions", pmSyncRoute("pm.route.decision-list", async (req, reply) => {
     const q = z
       .object({ objectType: z.enum(["run", "workflow_instance"]), objectId: z.string().uuid() })
       .parse(req.query);
@@ -1622,7 +1634,7 @@ export function registerPmRoutes(
         };
       }),
     };
-  });
+  }));
 
   // §3 read-through: RegulAIt stores only the linkage. live=true resolves the
   // PM-authoritative fields (priority/description/…) from the tool right now —
@@ -1631,7 +1643,7 @@ export function registerPmRoutes(
   // item) or instanceId (the workflow instance's single item). Each link
   // carries its connection's NAME so a caller can drive the matching
   // pm-sync endpoint without the admin-only connections list.
-  app.get("/v1/pm/links", async (req, reply) => {
+  app.get("/v1/pm/links", pmSyncRoute("pm.route.links", async (req, reply) => {
     const q = z
       .object({
         runId: z.string().uuid().optional(),
@@ -1722,7 +1734,7 @@ export function registerPmRoutes(
       }),
     );
     return { links: live };
-  });
+  }));
 }
 
 // ===========================================================================
@@ -1749,7 +1761,7 @@ export type AlertTicketOutcome =
   | { outcome: "refused"; status: number; error: string; detail: string };
 
 /** the episode's work item, if one was filed (oldest wins) */
-export async function governanceAlertTicket(db: Db, alertId: string) {
+async function governanceAlertTicketInScope(db: Db, alertId: string) {
   const [link] = await db
     .select({
       connectionId: pmLinks.connectionId,
@@ -1768,8 +1780,8 @@ export async function governanceAlertTicket(db: Db, alertId: string) {
 }
 
 /** the work items of many episodes in one query (oldest per episode wins) */
-export async function governanceAlertTickets(db: Db, alertIds: readonly string[]) {
-  const out = new Map<string, NonNullable<Awaited<ReturnType<typeof governanceAlertTicket>>>>();
+async function governanceAlertTicketsInScope(db: Db, alertIds: readonly string[]) {
+  const out = new Map<string, NonNullable<Awaited<ReturnType<typeof governanceAlertTicketInScope>>>>();
   if (alertIds.length === 0) return out;
   const rows = await db
     .select({
@@ -1789,7 +1801,7 @@ export async function governanceAlertTickets(db: Db, alertIds: readonly string[]
   return out;
 }
 
-export async function fileGovernanceAlertTicket(
+async function fileGovernanceAlertTicketInScope(
   db: Db,
   dataKey: string,
   input: {
@@ -1802,7 +1814,7 @@ export async function fileGovernanceAlertTicket(
 ): Promise<AlertTicketOutcome> {
   return db.transaction(async (tx) => {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`pm_link:governance_alert:${input.alertId}`}))`);
-    const existing = await governanceAlertTicket(tx as unknown as Db, input.alertId);
+    const existing = await governanceAlertTicketInScope(tx as unknown as Db, input.alertId);
     if (existing) {
       return {
         outcome: "existing" as const,
@@ -1881,3 +1893,24 @@ export async function prunePmWebhookDeliveries(
   );
   return (res as unknown as { rowCount?: number }).rowCount ?? 0;
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// ADR-0234 PM batch (#828 review): every PM table is under row-level security. An admin request reaches them as an
+// admin; the PM webhook (approval_maintenance), scheduler jobs and boot timers (system_task) through their own
+// scope. The mirror and link work a request does for a principal who need not be an admin enters `pm_sync` as a
+// principal step, so the principal still writes its own audit rows. In any other scope it runs unchanged.
+// ---------------------------------------------------------------------------------------------------------------
+export function asPmSync<T>(path: string, fn: () => T): T {
+  return runAsPrincipalStepIfScoped("pm_sync", path, fn);
+}
+
+export const mirrorNodeStatus = (...args: Parameters<typeof mirrorNodeStatusInScope>) =>
+  asPmSync("pm.mirror-node-status", () => mirrorNodeStatusInScope(...args));
+export const mirrorApprovalDecision = (...args: Parameters<typeof mirrorApprovalDecisionInScope>) =>
+  asPmSync("pm.mirror-approval-decision", () => mirrorApprovalDecisionInScope(...args));
+export const governanceAlertTicket = (...args: Parameters<typeof governanceAlertTicketInScope>) =>
+  asPmSync("pm.alert-ticket", () => governanceAlertTicketInScope(...args));
+export const governanceAlertTickets = (...args: Parameters<typeof governanceAlertTicketsInScope>) =>
+  asPmSync("pm.alert-tickets", () => governanceAlertTicketsInScope(...args));
+export const fileGovernanceAlertTicket = (...args: Parameters<typeof fileGovernanceAlertTicketInScope>) =>
+  asPmSync("pm.alert-ticket-file", () => fileGovernanceAlertTicketInScope(...args));

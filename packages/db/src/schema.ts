@@ -1128,8 +1128,56 @@ export const mcpRegistries = pgTable("mcp_registries", {
     enum: ["ok", "failed", "refused", "skipped"],
   }),
   lastSyncDetail: jsonb("last_sync_detail"),
+  /** ADR-0256 (the `mcp_catalogue_seed` migration): a curated registry, or a community list whose entries are UNVETTED */
+  listingKind: text("listing_kind", { enum: ["registry", "community"] }).notNull().default("registry"),
+  /** ADR-0256: refreshed by an egress-guarded pull, or only by a signed offline bundle (never dialled) */
+  delivery: text("delivery", { enum: ["pull", "offline_bundle"] }).notNull().default("pull"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * ADR-0256 (the `mcp_catalogue_seed` migration) — one server as the catalogue understands it, across sources. The dedupe key is
+ * `repo:github.com/owner/repo` when a source names a GitHub repository, else `name:<upstream name>`. Each source keeps
+ * its own `mcp_registry_entries` row pointing here, so provenance is per source and never merged away.
+ */
+export const mcpCatalogueItems = pgTable(
+  "mcp_catalogue_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    dedupeKey: text("dedupe_key").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("mcp_catalogue_items_dedupe_key_uq").on(t.dedupeKey)],
+);
+
+/**
+ * ADR-0256 (the `mcp_catalogue_seed` migration) — APPEND-ONLY evidence of one successful refresh of a source: what it asserted (count and
+ * content digest), when, by whom and, for an offline bundle, which trusted key signed it. UPDATE, DELETE and TRUNCATE
+ * are refused by triggers.
+ */
+export const mcpCatalogueSnapshots = pgTable(
+  "mcp_catalogue_snapshots",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    registryId: uuid("registry_id")
+      .notNull()
+      .references(() => mcpRegistries.id, { onDelete: "restrict" }),
+    /** point-in-time copy of the source's listing kind when refreshed (evidence exception, ADR-0200 addendum) */
+    listingKind: text("listing_kind", { enum: ["registry", "community"] }).notNull(),
+    /** point-in-time copy of the source's delivery when refreshed (evidence exception, ADR-0200 addendum) */
+    delivery: text("delivery", { enum: ["pull", "offline_bundle"] }).notNull(),
+    /** the admin who triggered it, NULL for the scheduler; evidence, so deliberately no foreign key */
+    actorUserId: uuid("actor_user_id"),
+    entryCount: integer("entry_count").notNull(),
+    truncated: boolean("truncated").notNull(),
+    contentDigest: text("content_digest").notNull(),
+    bundleKeyId: text("bundle_key_id"),
+    bundleDigest: text("bundle_digest"),
+    bundleCreatedAt: timestamp("bundle_created_at", { withTimezone: true }),
+    takenAt: timestamp("taken_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("mcp_catalogue_snapshots_registry_idx").on(t.registryId, t.takenAt)],
+);
 
 /**
  * ADR-0101 — THE CATALOGUE. The only table a sync writes.
@@ -1152,6 +1200,8 @@ export const mcpRegistryEntries = pgTable(
     title: text("title"),
     description: text("description"),
     repositoryUrl: text("repository_url"),
+    /** ADR-0256: the server's folder inside `repository_url` (a monorepo), normalised; part of the dedupe key */
+    repositorySubfolder: text("repository_subfolder"),
     websiteUrl: text("website_url"),
     kind: text("kind", { enum: ["remote", "catalogue_only"] }).notNull(),
     remoteUrl: text("remote_url"),
@@ -1180,9 +1230,18 @@ export const mcpRegistryEntries = pgTable(
      * this entry — "beyond the page cap" and "gone" are different facts. It
      * never deletes, disables or un-grants the local server. */
     missingSince: timestamp("missing_since", { withTimezone: true }),
+    /** ADR-0256 (the `mcp_catalogue_seed` migration): the deduped item this source row describes; NULL only for a row from before that migration,
+     * until its source is next refreshed */
+    catalogueItemId: uuid("catalogue_item_id").references(() => mcpCatalogueItems.id, { onDelete: "restrict" }),
+    /** ADR-0256: what this source's listing says about payment (`x402` or `paid`), a flag for an operator */
+    paidSignal: text("paid_signal", { enum: ["x402", "paid"] }),
+    /** ADR-0256: the refresh that last asserted this row (its provenance) */
+    lastSnapshotId: uuid("last_snapshot_id").references(() => mcpCatalogueSnapshots.id, { onDelete: "restrict" }),
   },
   (t) => [
     uniqueIndex("mcp_registry_entries_registry_name_uq").on(t.registryId, t.upstreamName),
+    index("mcp_registry_entries_item_idx").on(t.catalogueItemId),
+    index("mcp_registry_entries_snapshot_idx").on(t.lastSnapshotId),
     index("mcp_registry_entries_kind_idx").on(t.registryId, t.kind),
     index("mcp_registry_entries_server_idx").on(t.serverId),
   ],
@@ -2021,6 +2080,11 @@ export const auditLog = pgTable(
     index("audit_log_alert_escalated_idx")
       .on(t.objectId)
       .where(sql`${t.ruleId} = 'governance-alert-escalated'`),
+    // pending/chatops_campaign_deadline_notify.sql (ADR-0090 amendment): the deadline sweep's delivery markers only,
+    // so "already delivered to this target" never scans the trail (review of #825)
+    index("audit_log_campaign_deadline_marker_idx")
+      .on(t.objectId)
+      .where(sql`${t.ruleId} = 'campaign-deadline-notified'`),
     // migration 0155 (ADR-0180 A2): the guardrail hit rows only (the ids
     // guardrails.ts writes as `guardrail-${outcome}`), so the guardrail_hits
     // condition metric never scans the trail
@@ -5345,6 +5409,9 @@ export const orgSettings = pgTable(
     supplierPortalEnabled: boolean("supplier_portal_enabled").notNull().default(false),
     /** ADR-0221 (migration 0241): with no scanner configured, evidence files are refused unless this is on (a relaxation) */
     supplierPortalAcceptUnscannedFiles: boolean("supplier_portal_accept_unscanned_files").notNull().default(false),
+    /** ADR-0240 (pending migration external_portal_mfa): a spent supplier link opens a session only after a TOTP code (enrolment on first use).
+     * Shipped ON (ADR-0180); turning it off is a relaxation (settings_relax step-up, audited). */
+    supplierPortalMfaRequired: boolean("supplier_portal_mfa_required").notNull().default(true),
     /** ADR-0211 (migration 0250): may a risk be recorded as transferred or
      * avoided? OFF by default (ADR-0180); turning it on is a step-up relaxation */
     riskTreatmentsEnabled: boolean("risk_treatments_enabled").notNull().default(false),
@@ -5370,6 +5437,9 @@ export const orgSettings = pgTable(
     /** ADR-0225 (P13 d, migration 0247): the public trust centre and the auditor portal — built, shipped OFF
      * (ADR-0180). Off, both answer 404 and nothing can be published or granted. */
     trustPagesEnabled: boolean("trust_pages_enabled").notNull().default(false),
+    /** ADR-0240 (pending migration external_portal_mfa): a spent auditor link opens a session only after a TOTP code (enrolment on first use).
+     * Shipped ON (ADR-0180); turning it off is a relaxation (settings_relax step-up, audited). */
+    trustAuditorMfaRequired: boolean("trust_auditor_mfa_required").notNull().default(true),
 
     // --- ADR-0224 (P13 c, migration 0251): privacy operations ------------
     /** Shipped OFF (owner, 10-30). When on, personal data the PII detector finds in a governed dispatch must be a
@@ -5378,6 +5448,9 @@ export const orgSettings = pgTable(
     privacyOpsEnabled: boolean("privacy_ops_enabled").notNull().default(false),
     /** days from a data-subject request's receipt to its due date; 30 is the strict default, shorter is stricter */
     dsrSlaDays: integer("dsr_sla_days").notNull().default(30),
+    /** ADR-0090 amendment (lane L11, owner 2026-11-15): how many hours before a certification campaign's due time its
+     * deadline reminder is sent (1 hour to 14 days; 48 is the default). A change is audited by PUT /v1/org/settings. */
+    certificationReminderHours: integer("certification_reminder_hours").notNull().default(48),
 
     /** ADR-0222 (P13(a), migration 0271): fairness testing. Off by default — turning it on starts storing
      * sensitive attributes, so it needs the `settings_relax` step-up. */
@@ -5387,12 +5460,35 @@ export const orgSettings = pgTable(
     /** ADR-0222: an uploaded evaluation dataset's rows are deleted this many days after upload (strict 30) */
     fairnessDatasetRetentionDays: integer("fairness_dataset_retention_days").notNull().default(30),
 
+    /** ADR-0056 §5 amendment (lane L7, migration copilot_redteam_gate): a model may narrate a copilot answer only
+     * while its latest copilot red-team run passed against the model it serves now (strict true; turning it off is a
+     * settings_relax step-up, audited; copilot-redteam-gate.ts). */
+    copilotRedteamGateEnabled: boolean("copilot_redteam_gate_enabled").notNull().default(true),
+    /** ADR-0056 §5 amendment: how many days a passing copilot red-team run counts (strict 30; longer is a relax) */
+    copilotRedteamMaxAgeDays: integer("copilot_redteam_max_age_days").notNull().default(30),
+    /** ADR-0056 §5 amendment (review of #811): the resist rate each copilot class must reach on the deciding run,
+     * judged by the gate from the probes the MODEL answered (platform-held and errored trials excluded), never from
+     * the run's own (caller-tunable) gate verdict. Strict 1 (every model-answered probe in the class resisted);
+     * lowering it is a settings_relax step-up. */
+    copilotRedteamMinResistRate: doublePrecision("copilot_redteam_min_resist_rate").notNull().default(1),
+    /** ADR-0056 §5 amendment (second review of #811): THE copilot red-team library. Only a run against this library
+     * version decides, so a run's starter cannot pick a weaker library after a regression. NULL (the default) means
+     * none is designated, and the gate refuses every narrator: fail closed. Any change is a settings_relax step-up,
+     * audited (swapping libraries can weaken the suite). Deleting the library clears it, which refuses again. */
+    copilotRedteamLibraryId: uuid("copilot_redteam_library_id").references(() => redteamLibraries.id, {
+      onDelete: "set null",
+    }),
+    /** ADR-0056 §5 amendment (second review of #811): the trials per probe the deciding run must have used (strict 3;
+     * a single-trial run is not evidence by default). Lowering it is a settings_relax step-up. */
+    copilotRedteamMinTrials: integer("copilot_redteam_min_trials").notNull().default(3),
+
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     check("org_settings_singleton", sql`${t.id} = 'singleton'`),
+    check("org_settings_copilot_redteam_min_trials_check", sql`${t.copilotRedteamMinTrials} BETWEEN 1 AND 25`),
     check(
       "org_settings_mrm_expiry_warn_days_check",
       sql`${t.mrmExpiryWarnDays} >= 0 AND ${t.mrmExpiryWarnDays} <= 3650`,
@@ -5453,6 +5549,7 @@ export const orgSettings = pgTable(
     check("org_settings_literacy_gate_mode_check", sql`${t.literacyGateMode} IN ('off', 'warn', 'enforce')`),
     check("org_settings_literacy_validity_check", sql`${t.literacyDefaultValidityDays} BETWEEN 30 AND 730`),
     check("org_settings_dsr_sla_days_check", sql`${t.dsrSlaDays} BETWEEN 1 AND 90`),
+    check("org_settings_certification_reminder_hours_check", sql`${t.certificationReminderHours} BETWEEN 1 AND 336`),
     check(
       "org_settings_alert_sla_hours_check",
       sql`jsonb_typeof(${t.alertSlaHours}) = 'object' AND jsonb_typeof(${t.alertSlaHours} -> 'high') = 'number' AND jsonb_typeof(${t.alertSlaHours} -> 'medium') = 'number' AND jsonb_typeof(${t.alertSlaHours} -> 'low') = 'number' AND (${t.alertSlaHours} ->> 'high')::numeric BETWEEN 1 AND 720 AND (${t.alertSlaHours} ->> 'medium')::numeric BETWEEN 1 AND 720 AND (${t.alertSlaHours} ->> 'low')::numeric BETWEEN 1 AND 720`,
@@ -7790,7 +7887,8 @@ export const onboardingImports = pgTable(
   "onboarding_imports",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    kind: text("kind", { enum: ["users", "group_roles"] }).notNull(),
+    /** ADR-0289 adds `pm_work_items` (the PM project/work-item importer) */
+    kind: text("kind", { enum: ["users", "group_roles", "pm_work_items"] }).notNull(),
     mode: text("mode", { enum: ["dry_run", "apply"] }).notNull(),
     status: text("status", { enum: ["planned", "applied", "refused"] }).notNull(),
     /** fingerprint of the exact screened bytes — "which file did this?" without
@@ -8480,6 +8578,8 @@ export const chatopsConnections = pgTable("chatops_connections", {
   /** ADR-0162 (migration 0127) — minimum governance-alert severity posted to
    * this workspace; null = alerts are not posted (opt-in) */
   notifyAlertMinSeverity: text("notify_alert_min_severity", { enum: ["medium", "high"] }),
+  /** ADR-0090 amendment (lane L11) — opt-in; false = certification-campaign deadline notices are not sent here */
+  notifyCampaignDeadlines: boolean("notify_campaign_deadlines").notNull().default(false),
   enabled: boolean("enabled").notNull().default(true),
   /** ADR-0173 batch 2b (migration 0144) — Microsoft Teams Bot Framework. The
    * bot's app id is the audience its tokens must carry; null = the bot
@@ -14249,6 +14349,17 @@ export const engineRuns = pgTable(
     targetAgentId: uuid("target_agent_id").references(() => agents.id, { onDelete: "set null" }),
     judgeAgentId: uuid("judge_agent_id").references(() => agents.id, { onDelete: "set null" }),
     targetArtifactId: uuid("target_artifact_id").references(() => modelArtifacts.id, { onDelete: "set null" }),
+    /** ADR-0242 L4.3: a `subject` run's MCP server (mcpscanner) */
+    targetMcpServerId: uuid("target_mcp_server_id").references(() => mcpServers.id, { onDelete: "set null" }),
+    /** ADR-0242 L4.3: a `subject` run's builder skill (skillscanner) */
+    targetBuilderSkillId: uuid("target_builder_skill_id").references(() => builderSkills.id, { onDelete: "set null" }),
+    /** ADR-0242 L4.3: the subject digest the run scans (sha256 hex) */
+    targetSubjectDigest: text("target_subject_digest"),
+    /**
+     * ADR-0200 exception: a temporary verbatim external payload. The MCP manifest snapshot an admission scan reads,
+     * encrypted under the data key, cleared when the run ends; never returned by any route (ADR-0242 L4.3).
+     */
+    targetSubjectInputCiphertext: text("target_subject_input_ciphertext"),
     config: jsonb("config").$type<EngineRunConfig>().notNull(),
     configHash: text("config_hash").notNull(),
     /** the target agent's configuration hash when the run was made (A3 compares it) */
@@ -14295,9 +14406,10 @@ export const engineRuns = pgTable(
   },
   (t) => [
     uniqueIndex("engine_runs_task_placement_uq").on(t.taskPlacementId).where(sql`${t.taskPlacementId} IS NOT NULL`),
+    // ADR-0242 L4.3 (pending migration `admission_scan_subject_target`); the trigger and target-kind CHECKs live in SQL only
     check(
       "engine_runs_target_check",
-      sql`(${t.targetKind} = 'agent' AND ${t.targetArtifactId} IS NULL) OR (${t.targetKind} = 'artifact' AND ${t.targetAgentId} IS NULL AND ${t.judgeAgentId} IS NULL)`,
+      sql`(${t.targetKind} IN ('agent', 'artifact') AND ${t.trigger} <> 'admission' AND ${t.targetMcpServerId} IS NULL AND ${t.targetBuilderSkillId} IS NULL AND ${t.targetSubjectDigest} IS NULL AND ${t.targetSubjectInputCiphertext} IS NULL AND ((${t.targetKind} = 'agent' AND ${t.targetArtifactId} IS NULL) OR (${t.targetKind} = 'artifact' AND ${t.targetAgentId} IS NULL AND ${t.judgeAgentId} IS NULL))) OR (${t.targetKind} = 'subject' AND ${t.trigger} = 'admission' AND ${t.targetAgentId} IS NULL AND ${t.judgeAgentId} IS NULL AND ${t.targetArtifactId} IS NULL AND ${t.runAsUserId} IS NULL AND ${t.projectId} IS NULL AND num_nonnulls(${t.targetMcpServerId}, ${t.targetBuilderSkillId}) <= 1 AND (${t.targetMcpServerId} IS NULL OR ${t.engineId} = 'mcpscanner') AND (${t.targetBuilderSkillId} IS NULL OR ${t.engineId} = 'skillscanner') AND ${t.targetSubjectDigest} IS NOT NULL AND ${t.targetSubjectDigest} ~ '^[0-9a-f]{64}$' AND (${t.targetSubjectInputCiphertext} IS NULL OR ${t.engineId} = 'mcpscanner'))`,
     ),
     check("engine_runs_trials_check", sql`${t.trials} BETWEEN 1 AND 25`),
     check("engine_runs_budget_check", sql`${t.budgetUsd} > 0`),
@@ -14310,6 +14422,13 @@ export const engineRuns = pgTable(
       .on(t.workflowInstanceId, t.workflowStageId, t.workflowCheckName, t.workflowRound)
       .where(sql`${t.workflowInstanceId} IS NOT NULL`),
     uniqueIndex("engine_runs_runner_lease_request_unique").on(t.runnerId, t.leaseRequestId).where(sql`${t.leaseRequestId} IS NOT NULL`),
+    // ADR-0242 L4.3: one live (queued or leased) admission run per engine, subject and digest
+    uniqueIndex("engine_runs_subject_mcp_live_uq")
+      .on(t.engineId, t.targetMcpServerId, t.targetSubjectDigest)
+      .where(sql`${t.targetMcpServerId} IS NOT NULL AND ${t.status} IN ('queued', 'leased')`),
+    uniqueIndex("engine_runs_subject_skill_live_uq")
+      .on(t.engineId, t.targetBuilderSkillId, t.targetSubjectDigest)
+      .where(sql`${t.targetBuilderSkillId} IS NOT NULL AND ${t.status} IN ('queued', 'leased')`),
   ],
 );
 export type EngineRunRow = typeof engineRuns.$inferSelect;
@@ -16123,6 +16242,71 @@ export const supplierSessions = pgTable(
 );
 export type SupplierSessionRow = typeof supplierSessions.$inferSelect;
 
+// ---------------------------------------------------------------------------
+// ADR-0240 (pending migration external_portal_mfa) — one second factor for the external portals
+// ---------------------------------------------------------------------------
+
+/**
+ * ADR-0240: the TOTP factor of ONE external grant, a supplier access (ADR-0221) or an auditor grant (ADR-0225).
+ * Exactly one reference is set (CHECK), so the portal is whichever is set. `activatedAt` null = enrolment started
+ * but no code proved yet. Locked after repeated wrong codes; only an admin reset (which deletes the row) recovers it.
+ * The secret is a data-key envelope listed in `CIPHERTEXT_COLUMNS`.
+ */
+export const externalMfaFactors = pgTable(
+  "external_mfa_factors",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    supplierAccessId: uuid("supplier_access_id").references(() => supplierAccess.id, { onDelete: "cascade" }),
+    auditorGrantId: uuid("auditor_grant_id").references(() => auditorGrants.id, { onDelete: "cascade" }),
+    secretCiphertext: text("secret_ciphertext").notNull(),
+    activatedAt: timestamp("activated_at", { withTimezone: true }),
+    lastUsedStep: bigint("last_used_step", { mode: "number" }),
+    failedAttempts: integer("failed_attempts").notNull().default(0),
+    lockedAt: timestamp("locked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("external_mfa_factors_supplier_access_uq").on(t.supplierAccessId),
+    unique("external_mfa_factors_auditor_grant_uq").on(t.auditorGrantId),
+    check("external_mfa_factors_one_grant_check", sql`num_nonnulls(${t.supplierAccessId}, ${t.auditorGrantId}) = 1`),
+    check("external_mfa_factors_failed_check", sql`${t.failedAttempts} BETWEEN 0 AND 100`),
+    check("external_mfa_factors_secret_check", sql`char_length(${t.secretCiphertext}) BETWEEN 1 AND 4096`),
+  ],
+);
+export type ExternalMfaFactorRow = typeof externalMfaFactors.$inferSelect;
+
+/**
+ * ADR-0240: the step between a spent link and a session. Only the sha256 of its token is stored; at most 15 minutes;
+ * spent by the first correct code. It names the link that was spent (exactly one of the two references).
+ */
+export const externalMfaChallenges = pgTable(
+  "external_mfa_challenges",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    factorId: uuid("factor_id")
+      .notNull()
+      .references(() => externalMfaFactors.id, { onDelete: "cascade" }),
+    supplierInvitationId: uuid("supplier_invitation_id").references(() => supplierInvitations.id, { onDelete: "cascade" }),
+    auditorLinkId: uuid("auditor_link_id").references(() => auditorLinks.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("external_mfa_challenges_token_hash_uq").on(t.tokenHash),
+    check("external_mfa_challenges_token_hash_check", sql`${t.tokenHash} ~ '^[0-9a-f]{64}$'`),
+    check("external_mfa_challenges_one_link_check", sql`num_nonnulls(${t.supplierInvitationId}, ${t.auditorLinkId}) = 1`),
+    check(
+      "external_mfa_challenges_ttl_check",
+      sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} - ${t.createdAt} <= interval '15 minutes'`,
+    ),
+    index("external_mfa_challenges_factor_idx").on(t.factorId),
+  ],
+);
+export type ExternalMfaChallengeRow = typeof externalMfaChallenges.$inferSelect;
+
 export const supplierSubmissions = pgTable(
   "supplier_submissions",
   {
@@ -16490,6 +16674,58 @@ export const resourceRateReservations = pgTable(
     ),
   ],
 );
+
+// ---------------------------------------------------------------------------
+// ADR-0289 (builder lane L6) — the PM project / work-item importer (ADR-0054 §3).
+// Migration `pending/pm_work_item_import.sql` (numbered at merge).
+// ---------------------------------------------------------------------------
+
+/** Which RegulAIt Initiative a PM connection's project rolls up to. One row per connection (the connection names one
+ * PM project), so the mapping is a fact about the connection, kept apart from the reporting-only initiative. */
+export const pmProjectInitiatives = pgTable("pm_project_initiatives", {
+  connectionId: uuid("connection_id")
+    .primaryKey()
+    .references(() => pmConnections.id, { onDelete: "cascade" }),
+  initiativeId: uuid("initiative_id")
+    .notNull()
+    .references(() => initiatives.id, { onDelete: "cascade" }),
+  /** the import that set (or last changed) the mapping */
+  importId: uuid("import_id").references(() => onboardingImports.id, { onDelete: "set null" }),
+  mappedAt: timestamp("mapped_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [index("pm_project_initiatives_initiative_idx").on(t.initiativeId)]);
+
+/** An existing work item the importer found in a connection's project. LINKAGE ONLY: the PM tool stays the source of
+ * truth (pillar 8), so title, state and fields are read through live and never stored here. `external_url` and
+ * `item_type` are the provider's own last-reported values (reconciled on every import), not RegulAIt-owned copies. */
+export const pmImportedWorkItems = pgTable(
+  "pm_imported_work_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => pmConnections.id, { onDelete: "cascade" }),
+    externalId: text("external_id").notNull(),
+    // ADR-0200 3NF exception (verbatim external payload): the item's URL as the PM tool reported it at the last import.
+    // The PM tool owns it (pillar 8); the importer refreshes it on every apply and never derives anything from it.
+    externalUrl: text("external_url").notNull(),
+    // ADR-0200 3NF exception (verbatim external payload): the tool's own work-item type name ("Bug", "Story"), as
+    // reported at the last import. It is the tool's vocabulary, not a RegulAIt reference, so there is nothing to join.
+    itemType: text("item_type").notNull(),
+    firstImportId: uuid("first_import_id").references(() => onboardingImports.id, { onDelete: "set null" }),
+    lastImportId: uuid("last_import_id").references(() => onboardingImports.id, { onDelete: "set null" }),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    /** set when a later import no longer finds the item in the PM tool; never deleted (re-appearing clears it) */
+    missingSince: timestamp("missing_since", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("pm_imported_work_items_conn_ext_uq").on(t.connectionId, t.externalId),
+    index("pm_imported_work_items_conn_id_idx").on(t.connectionId, t.id),
+    index("pm_imported_work_items_first_import_idx").on(t.firstImportId),
+    index("pm_imported_work_items_last_import_idx").on(t.lastImportId),
+  ],
+);
+export type PmImportedWorkItemRow = typeof pmImportedWorkItems.$inferSelect;
 
 // ---------------------------------------------------------------------------
 // ADR-0317 (builder lane L6, gap G4) — RegulAIt assignable from Jira and Azure Boards.

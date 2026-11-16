@@ -2844,6 +2844,7 @@ export async function runStageRetryJob(
 export async function createWorkflowTemplateValidated(
   db: Db,
   body: { name: string; definition?: unknown },
+  actorUserId: string | null = null,
 ): Promise<
   | { ok: true; row: typeof workflowTemplates.$inferSelect }
   | { ok: false; status: number; body: Record<string, unknown> }
@@ -2933,11 +2934,30 @@ export async function createWorkflowTemplateValidated(
       return { ok: false, status: 422, body: { error: "invalid_approver" } };
     }
   }
-  const [row] = await db
-    .insert(workflowTemplates)
-    .values({ name: body.name, definition })
-    .returning();
-  return { ok: true, row: row! };
+  // ADR-0283 owner decision (2026-11-15): no stage retries unless its template
+  // says so; a template that turns automatic retry on is audited, by stage and
+  // policy, in ONE transaction with the insert (a savepoint when the caller
+  // already holds one), so a retry-enabled template never exists unaudited.
+  const retried = definition.stages.filter((st) => st.retry);
+  const row = await db.transaction(async (tx) => {
+    const [created] = await tx
+      .insert(workflowTemplates)
+      .values({ name: body.name, definition })
+      .returning();
+    if (retried.length === 0) return created!;
+    await tx.insert(auditLog).values({
+      userId: actorUserId ?? SYSTEM_IDENTITY,
+      objectType: "workflow_template",
+      objectId: created!.id,
+      detail: { templateName: body.name, stages: retried.map((st) => ({ stageId: st.id, type: st.type, retry: st.retry })) },
+      effect: "allow",
+      ruleId: "workflow:template-stage-retry-enabled",
+      ruleChain: [],
+      reason: `template '${body.name}' turns on automatic retry for ${retried.map((st) => `'${st.id}'`).join(", ")} (capped by each stage's retry policy)`,
+    });
+    return created!;
+  });
+  return { ok: true, row };
 }
 
 /** the refusal when a sign-off owed by someone other than the initiator has nobody to go to */
@@ -3457,7 +3477,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
   app.post("/v1/workflows/templates", async (req, reply) => {
     const body = createWorkflowTemplateSchema.parse(req.body);
     if (!isIntakeTemplateName(body.name)) {
-      const result = await createWorkflowTemplateValidated(db, body);
+      const result = await createWorkflowTemplateValidated(db, body, req.authCtx.userId ?? null);
       if (!result.ok) return reply.status(result.status).send(result.body);
       return reply.status(201).send(result.row);
     }
@@ -3470,7 +3490,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       raw: req.body,
       candidate: { name: body.name, definition: (body.definition ?? {}) as Record<string, unknown> },
       actorUserId: req.authCtx.userId ?? null,
-      write: (tx, resolved) => createWorkflowTemplateValidated(tx, { name: body.name, definition: resolved!.definition }).then((r) => (r.ok ? { ok: true as const, value: r.row } : r)),
+      write: (tx, resolved) => createWorkflowTemplateValidated(tx, { name: body.name, definition: resolved!.definition }, req.authCtx.userId ?? null).then((r) => (r.ok ? { ok: true as const, value: r.row } : r)),
     });
     if (!gated.ok) return reply.status(gated.status).send(gated.body);
     return reply.status(201).send({ ...gated.value, ...(gated.decisionRegression ? { decisionRegression: gated.decisionRegression } : {}) });

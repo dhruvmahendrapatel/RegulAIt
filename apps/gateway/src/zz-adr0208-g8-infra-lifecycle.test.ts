@@ -18,6 +18,7 @@
  * Global state (M-068): the org settings it changes are put back; its resources and policies (including the fleet
  * policy it may create) and the admin's passkey, sessions and step-up grants are removed in afterAll.
  */
+import { hashToken } from "./token-hash.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
@@ -154,7 +155,7 @@ beforeAll(async () => {
   const [sess] = await db
     .insert(authSessions)
     .values({
-      tokenHash: createHash("sha256").update(token).digest("hex"),
+      tokenHash: hashToken(token),
       userId: adminId,
       origin: "password",
       expiresAt: new Date(Date.now() + 3_600_000),
