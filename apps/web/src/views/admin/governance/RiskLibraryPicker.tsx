@@ -74,7 +74,7 @@ export function RiskLibraryPicker(props: { useCaseId?: string; agentId?: string;
 
   return (
     <Card title="Add risk from library">
-      <QueryGate loading={scenarios.isLoading} error={scenarios.error} onRetry={() => void scenarios.refetch()}>
+      <QueryGate query={scenarios}>
         <div className={v.stack}>
           <div className={s.libraryFilters}>
             <Field label="Search scenarios"><Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="prompt injection, runaway loop…" /></Field>
