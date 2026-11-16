@@ -12,8 +12,9 @@
 
 ## Context
 
-The owner's 2026-11-16 gap analysis against Obsidian Security's AI Agent Security product (in flight on PR #879, not
-yet on main; the gap numbers below are that analysis's) ranks vendor-platform agent discovery first (gap 1). RegulAIt
+The owner's 2026-11-16 gap analysis against Obsidian Security's AI Agent Security product
+([GAP_ANALYSIS_OBSIDIAN_2026-11.md](../product/GAP_ANALYSIS_OBSIDIAN_2026-11.md) §3; the gap numbers below are its
+ranking) puts vendor-platform agent discovery first (gap 1). RegulAIt
 already scans clouds, repos, endpoints and Entra consents (ADR-0195, ADR-0235), and #855 imports agents from Entra
 Agent ID, Agent 365, Gemini Enterprise and Bedrock AgentCore. Agents built in **Microsoft Copilot Studio**,
 **Salesforce Agentforce**, the **OpenAI** builders (ChatGPT custom GPTs, AgentKit) and **n8n** are not seen at all.
