@@ -116,7 +116,7 @@ test.describe("UI-D D4: the governed change", () => {
     await mockGateway(page, { stages: STAGES.filter((s) => s.type !== "automated_check") });
     await page.goto(`/ui/workflows/${INST}`);
     const checks = page.getByRole("list", { name: "Governed change steps" }).getByRole("listitem").filter({ hasText: "Checks" });
-    await expect(checks).toContainText("Not in this template");
+    await expect(checks).toContainText("Not in template");
     await expect(checks).not.toContainText("Done");
   });
 
@@ -134,7 +134,7 @@ test.describe("UI-D D4: the governed change", () => {
     await mockGateway(page, { linksStatus: 404 });
     await page.goto(`/ui/workflows/${INST}`);
     const item = page.getByRole("list", { name: "Governed change steps" }).getByRole("listitem").first();
-    await expect(item).toContainText("The linked work items are not visible to you");
+    await expect(item).toContainText("Not visible to you");
     await expect(item).not.toContainText("Could not read");
   });
 
@@ -164,7 +164,7 @@ test.describe("UI-D D4: the governed change", () => {
     await expect(rows.nth(2)).toContainText("Sign-off granted at plan sign-off");
     await expect(rows.nth(3)).toContainText("Stage agent build started running");
     await expect(rows.nth(3)).toContainText("System");
-    await expect(rows.nth(0)).toContainText("Ada Admin");
+    await expect(rows.nth(0)).toContainText("ada");
   });
 
   test("no sideways scroll at phone width", async ({ page }) => {

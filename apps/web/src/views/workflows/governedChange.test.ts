@@ -86,11 +86,11 @@ describe("buildChain", () => {
   it("says no work item is linked, and says it does not know while loading, on error, or when hidden", () => {
     expect(buildChain(detail({}), pmNone)[0]).toMatchObject({ state: "to_do", detail: "No work item linked" });
     expect(buildChain(detail({}), pmLinks(2))[0]).toMatchObject({ state: "done", detail: "2 linked work items" });
-    expect(buildChain(detail({}), { state: "loading" })[0]).toMatchObject({ state: "unknown", detail: "Reading the linked work items" });
+    expect(buildChain(detail({}), { state: "loading" })[0]).toMatchObject({ state: "unknown", detail: "Reading" });
     expect(buildChain(detail({}), { state: "error" })[0]).toMatchObject({ state: "unknown", detail: "Could not read the linked work items" });
     expect(buildChain(detail({}), { state: "hidden" })[0]).toMatchObject({
       state: "unknown",
-      detail: "The linked work items are not visible to you",
+      detail: "Not visible to you",
     });
   });
 

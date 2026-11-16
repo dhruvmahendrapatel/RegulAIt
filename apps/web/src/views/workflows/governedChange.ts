@@ -65,7 +65,7 @@ export const CHAIN_STATE_WORDS: Record<ChainState, string> = {
   attention: "Needs attention",
   to_do: "Not started",
   unknown: "Unknown",
-  not_in_template: "Not in this template",
+  not_in_template: "Not in template",
 };
 
 /** instance statuses that mean the current stage is stuck, not merely in progress */
@@ -145,11 +145,11 @@ export function buildChain(detail: WorkflowDetailResponse, pm: PmLinksRead): Cha
   const live = pm.state === "ok" ? pm.links.filter((l) => !l.orphanedAt).length : 0;
   const workItem: ChainStep =
     pm.state === "loading"
-      ? wi("unknown", "Reading the linked work items")
+      ? wi("unknown", "Reading")
       : pm.state === "error"
         ? wi("unknown", "Could not read the linked work items")
         : pm.state === "hidden"
-          ? wi("unknown", "The linked work items are not visible to you")
+          ? wi("unknown", "Not visible to you")
           : live > 0
             ? wi("done", `${plural(live, "linked work item")}`)
             : wi("to_do", "No work item linked");

@@ -11,7 +11,6 @@
 import { ApiError } from "../../api/client";
 import { actorLabel, fmtAt } from "../../api/format";
 import type { WorkflowDetailResponse } from "../../api/types";
-import { useSession } from "../../session/SessionContext";
 import { Badge, Button, Card, EmptyState, type Tone } from "../../ui/kit";
 import { usePmLinks } from "../pm/PmAndDecisions";
 import { buildChain, CHAIN_STATE_WORDS, type ChainState, eventSentence, type PmLinksRead, type WorkflowEventRow } from "./governedChange";
@@ -19,28 +18,21 @@ import v from "../views.module.css";
 import s from "./workflows.module.css";
 import g from "./governedChange.module.css";
 
-const STATE_TONE: Record<ChainState, Tone> = {
-  done: "ok",
-  current: "primary",
-  attention: "danger",
-  to_do: "neutral",
-  unknown: "neutral",
-  not_in_template: "neutral",
-};
+/** the detail endpoint carries no names, and the users list is admin-only: actors show as a short id */
+const NO_NAMES = new Map<string, string>();
 
-/** the Pipeline rail's box for each state, so the chain and the rail look the same */
-const STATE_BOX: Record<ChainState, string | undefined> = {
-  done: s.stageDone,
-  current: s.stageActive,
-  attention: s.stageFailed,
-  to_do: s.stage,
-  unknown: s.stage,
-  not_in_template: g.absent,
+/** each state's badge tone and the Pipeline rail's box, so the chain and the rail look the same */
+const LOOK: Record<ChainState, [Tone, string | undefined]> = {
+  done: ["ok", s.stageDone],
+  current: ["primary", s.stageActive],
+  attention: ["danger", s.stageFailed],
+  to_do: ["neutral", s.stage],
+  unknown: ["neutral", s.stage],
+  not_in_template: ["neutral", g.absent],
 };
 
 export function ChangeTimeline(props: { detail: WorkflowDetailResponse & { events?: WorkflowEventRow[] } }) {
   const { detail } = props;
-  const { me } = useSession();
   const links = usePmLinks({ objectType: "workflow_instance", objectId: detail.instance.id });
   // the links route answers 404 to a reader it does not admit (a past approver): not visible, not an error
   const pm: PmLinksRead = links.isPending
@@ -53,17 +45,16 @@ export function ChangeTimeline(props: { detail: WorkflowDetailResponse & { event
   const chain = buildChain(detail, pm);
   // the server returns the events oldest first (workflows.ts); kept as sent
   const events = detail.events ?? [];
-  const names = new Map(me?.user ? [[me.user.id, me.user.displayName || me.user.email]] : []);
 
   return (
     <>
       <Card title="Governed change">
         <ol className={g.chain} aria-label="Governed change steps">
           {chain.map((step) => (
-            <li key={step.id} className={STATE_BOX[step.state]} aria-current={step.state === "current" ? "step" : undefined}>
+            <li key={step.id} className={LOOK[step.state][1]} aria-current={step.state === "current" ? "step" : undefined}>
               <strong>{step.label}</strong>
               <span>
-                <Badge tone={STATE_TONE[step.state]}>{CHAIN_STATE_WORDS[step.state]}</Badge>
+                <Badge tone={LOOK[step.state][0]}>{CHAIN_STATE_WORDS[step.state]}</Badge>
               </span>
               <span>{step.detail}</span>
               {step.id === "work_item" && pm.state === "error" && (
@@ -87,7 +78,7 @@ export function ChangeTimeline(props: { detail: WorkflowDetailResponse & { event
                   {fmtAt(e.at)}
                 </time>
                 <span>{eventSentence(e.event)}</span>
-                <span className={v.faint}>{actorLabel(e.actorUserId, names)}</span>
+                <span className={v.faint}>{actorLabel(e.actorUserId, NO_NAMES)}</span>
               </li>
             ))}
           </ol>
