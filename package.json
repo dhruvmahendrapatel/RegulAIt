@@ -17,6 +17,7 @@
     "typecheck": "pnpm -r typecheck"
   },
   "devDependencies": {
+    "@actions/expressions": "0.3.61",
     "dependency-cruiser": "18.7.0",
     "js-yaml": "4.3.2",
     "typescript": "^5.8.3",
