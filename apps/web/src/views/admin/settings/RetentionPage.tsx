@@ -31,7 +31,7 @@ export default function RetentionPage() {
     <PageHeader title="Memory & retention" sub="Retention limits, isolation and evidence holds for this organisation's memory stores." />
     <div className={v.stack}>
       <Card title="Retention settings">
-        <QueryGate loading={settings.isLoading} error={settings.error} onRetry={() => void settings.refetch()}>
+        <QueryGate query={settings}>
           {settings.data && <RetentionSettings key={JSON.stringify(settings.data.settings)} settings={settings.data.settings} />}
         </QueryGate>
       </Card>
@@ -202,7 +202,7 @@ function MetricsPostureCard() {
   const metrics = posture.data?.metrics;
   const measured = isMetricsPosture(metrics);
   return <Card title="Metrics posture" info={<p>Metrics are disabled by default. This gateway reports its deployment configuration; reachability and authentication through a proxy still need operator verification.</p>}>
-    <QueryGate loading={posture.isLoading} error={posture.error} onRetry={() => void posture.refetch()}>
+    <QueryGate query={posture}>
       {posture.data && (measured ? <>
         <p>Separate metrics listener: {metrics.separateListener === "off" ? "off" : metrics.separateListener === "loopback" ? "loopback only" : "non-loopback"}.</p>
         <p>Main listener: {metrics.mainListener ? "metrics enabled" : "no metrics endpoint served"}.</p>

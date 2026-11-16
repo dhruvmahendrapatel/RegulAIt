@@ -63,6 +63,8 @@ export function admissionScanEngineFor(subject: AdmissionScanSubjectKind): Admis
 const ident = z.string().min(1).max(160).regex(/^[a-z0-9_.-]+$/);
 const name = z.string().max(256);
 const REPORT_SEVERITIES = ["info", "low", "medium", "high", "critical"] as const;
+/** #843 security review: every file the driver was given, so a verdict is bound to the bytes the gateway placed */
+const scannedInputs = z.array(z.strictObject({ path: z.string().min(1).max(256), sha256: z.string().regex(/^[0-9a-f]{64}$/) })).max(64);
 
 export const admissionScanReportSchema = z.discriminatedUnion("status", [
   z.strictObject({
@@ -72,6 +74,7 @@ export const admissionScanReportSchema = z.discriminatedUnion("status", [
     status: z.literal("completed"),
     analyzers: z.array(ident).max(16),
     rulesSha256: z.string().regex(/^[0-9a-f]{64}$/),
+    inputs: scannedInputs,
     items: z.array(z.strictObject({ kind: ident, name, status: z.enum(["completed", "failed"]) })).max(5000),
     findings: z.array(z.strictObject({ rule: ident, severity: z.enum(REPORT_SEVERITIES), kind: ident, name })).max(5000),
   }),
@@ -83,11 +86,18 @@ export const admissionScanReportSchema = z.discriminatedUnion("status", [
     error: z.string().max(200),
     analyzers: z.array(ident).max(16).optional(),
     rulesSha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+    inputs: scannedInputs.optional(),
     items: z.array(z.strictObject({ kind: ident, name, status: z.enum(["completed", "failed"]) })).max(5000).optional(),
     findings: z.array(z.strictObject({ rule: ident, severity: z.enum(REPORT_SEVERITIES), kind: ident, name })).max(5000).optional(),
   }),
 ]);
 export type AdmissionScanReport = z.infer<typeof admissionScanReportSchema>;
+
+/** the one file the gateway placed for the scan, by path and sha256 (recorded on the run at task start) */
+export interface AdmissionScanExpectedInput {
+  path: string;
+  sha256: string;
+}
 
 export interface AdmissionScanInterpretation {
   verdict: AdmissionScanVerdict;
@@ -104,7 +114,10 @@ const UNKNOWN = (reason: string, rulesSha256: string | null = null): AdmissionSc
  * One report → one verdict. The engine id and version are what the gateway asked for; a report that names
  * another engine or version, that fails, or that does not parse, is `unknown`.
  */
-export function interpretAdmissionScanReport(raw: unknown, expect: { engine: AdmissionScanEngineId; version?: string }): AdmissionScanInterpretation {
+export function interpretAdmissionScanReport(
+  raw: unknown,
+  expect: { engine: AdmissionScanEngineId; version?: string; input: AdmissionScanExpectedInput | null },
+): AdmissionScanInterpretation {
   if (raw === null || raw === undefined) return UNKNOWN("no report");
   const parsed = admissionScanReportSchema.safeParse(raw);
   if (!parsed.success) return UNKNOWN("the report is not a regulait.admission-scan.v1 report");
@@ -118,6 +131,13 @@ export function interpretAdmissionScanReport(raw: unknown, expect: { engine: Adm
   const ran = [...r.analyzers].sort();
   const pinned = [...spec.analyzers].sort();
   if (ran.length !== pinned.length || ran.some((a, i) => a !== pinned[i])) return UNKNOWN("the report's analyzer set is not the pinned one");
+  // #843 security review: the driver read exactly the one file the gateway placed, nothing more and nothing else.
+  // No recorded expectation (a run whose task never placed the subject) is never a pass.
+  if (!expect.input) return UNKNOWN("no input digest was recorded for this scan", r.rulesSha256);
+  const want = expect.input;
+  if (r.inputs.length !== 1 || r.inputs[0]!.path !== want.path || r.inputs[0]!.sha256 !== want.sha256) {
+    return UNKNOWN("the report's scanned input is not the gateway's subject file", r.rulesSha256);
+  }
   if (r.items.length === 0) return UNKNOWN("the engine scanned nothing", r.rulesSha256);
   if (r.items.some((i) => i.status !== "completed")) return UNKNOWN("an item did not scan", r.rulesSha256);
   const counts = new Map<string, McpAdmissionFinding>();

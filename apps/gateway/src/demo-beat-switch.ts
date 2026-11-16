@@ -39,6 +39,16 @@ export async function readDemoBeat(
     headers: { authorization: `Bearer ${bootstrapToken}` },
   });
   if (res.status === 404) return { routeDeployed: false, simulated: false };
+  if (res.status === 401) {
+    const err = ((await res.json().catch(() => null)) as { error?: unknown } | null)?.error;
+    if (err === "bootstrap_retired") {
+      // S-02: the token retires once an admin signs in; the presenter's gateway must keep it (audited relaxation)
+      throw new Error(
+        `GET ${DEMO_BEATS_ROUTE} -> 401 bootstrap_retired: an admin has signed in, so the bootstrap token is retired on this ` +
+          "gateway. Start that gateway with REGULAIT_BOOTSTRAP_AFTER_ADMIN=1 (printed and audited at boot) to use demo:enforce.",
+      );
+    }
+  }
   if (res.status !== 200) throw new Error(`GET ${DEMO_BEATS_ROUTE} -> ${res.status}: the beat's switch cannot be read`);
   const body = (await res.json().catch(() => null)) as { beats?: Array<{ beatId?: unknown; mode?: unknown }> } | null;
   const beat = body?.beats?.find((b) => b.beatId === beatId);

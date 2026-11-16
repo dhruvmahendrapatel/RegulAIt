@@ -26,6 +26,7 @@ import { createPortal } from "react-dom";
 import { useParams } from "react-router-dom";
 import { useSession } from "../session/SessionContext";
 import s from "./kit.module.css";
+import { errorText } from "../api/format";
 
 // ---- Button ---------------------------------------------------------------
 
@@ -1114,7 +1115,7 @@ export function Table<T>(props: TableProps<T>) {
               <td colSpan={shown.length} className={s.tableStale} role="alert">
                 <StatusDot tone="danger" />
                 <span>
-                  Couldn't refresh this list — {props.error instanceof Error ? props.error.message : String(props.error)}.
+                  Couldn't refresh this list — {errorText(props.error)}.
                   Showing the last loaded rows.
                 </span>
                 {props.onRetry && (
@@ -1130,7 +1131,7 @@ export function Table<T>(props: TableProps<T>) {
               <td colSpan={shown.length}>
                 <ErrorState
                   title="Couldn't load this list"
-                  message={props.error instanceof Error ? props.error.message : String(props.error)}
+                  message={errorText(props.error)}
                   access={(props.error as { status?: number }).status === 403}
                   onRetry={props.onRetry}
                 />
@@ -1339,13 +1340,18 @@ export const tabIds = (prefix: string, id: string) => ({ tab: `${prefix}-tab-${i
 
 /**
  * A panel for `Tabs` with `idPrefix`: `role="tabpanel"`, labelled by its tab, and kept mounted (`hidden`) while another
- * tab is open, so a draft or a pick inside it survives a tab switch
+ * tab is open, so a draft or a pick inside it survives a tab switch. `lazy`: its content mounts the first time its tab
+ * opens (so a panel that reads data reads nothing until then) and then stays mounted like any other.
  */
-export function TabPanel(props: { idPrefix: string; id: string; active: string; className?: string; children: ReactNode }) {
+export function TabPanel(props: { idPrefix: string; id: string; active: string; className?: string; lazy?: boolean; children: ReactNode }) {
   const ids = tabIds(props.idPrefix, props.id);
+  const isActive = props.active === props.id;
+  const [opened, setOpened] = useState(isActive);
+  // only a lazy panel tracks its first opening, so an eager one never re-renders for it
+  if (props.lazy && isActive && !opened) setOpened(true);
   return (
-    <div role="tabpanel" id={ids.panel} aria-labelledby={ids.tab} hidden={props.active !== props.id} className={props.className}>
-      {props.children}
+    <div role="tabpanel" id={ids.panel} aria-labelledby={ids.tab} hidden={!isActive} className={props.className}>
+      {!props.lazy || opened ? props.children : null}
     </div>
   );
 }
