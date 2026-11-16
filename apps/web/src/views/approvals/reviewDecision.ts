@@ -8,6 +8,7 @@
  */
 import { ApiError } from "../../api/client";
 import type { Approval, DecideApprovalBody } from "../../api/types";
+import { errorText } from "../../api/format";
 
 export type ReviewOutcome = "approve" | "approve_conditions" | "return" | "reject";
 
@@ -155,7 +156,7 @@ export function decideErrorText(error: unknown): { text: string; aboutRiskAccept
     return { text: "The decision was refused: you are not named as a risk acceptor in the review policy. Clear “Accept residual risk” to decide without it.", aboutRiskAcceptance: true };
   if (error instanceof ApiError && error.payload.error === "risk_not_on_use_case")
     return { text: "The decision was refused: a chosen risk is no longer on this use case. Reload the review and choose again.", aboutRiskAcceptance: true };
-  return { text: error instanceof Error ? error.message : String(error), aboutRiskAcceptance: false };
+  return { text: errorText(error), aboutRiskAcceptance: false };
 }
 
 const REVIEW_STATUS: Record<string, string> = {

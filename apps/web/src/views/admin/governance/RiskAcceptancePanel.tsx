@@ -150,7 +150,7 @@ export function RiskAcceptancePanel(props: { riskId: string; onChanged?: () => v
     }, "Acceptance recorded. It lapses at its expiry date and the risk then reopens.");
 
   return (
-    <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+    <QueryGate query={q}>
       {h && p && (
         <div className={v.stack}>
           <Card title="Residual risk against tolerance">

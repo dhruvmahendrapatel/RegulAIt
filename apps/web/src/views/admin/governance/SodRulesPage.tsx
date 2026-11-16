@@ -410,7 +410,7 @@ export default function SodRulesPage() {
         </Card>
 
         {/* ---------------- rules ---------------- */}
-        <QueryGate loading={rules.isLoading} error={rules.error} onRetry={() => void rules.refetch()}>
+        <QueryGate query={rules}>
           <Card title="Rules" info={rules.data ? <p>{rules.data.notes.enforcement}</p> : undefined}>
             {settling ? (
               <SkeletonBlock lines={3} />

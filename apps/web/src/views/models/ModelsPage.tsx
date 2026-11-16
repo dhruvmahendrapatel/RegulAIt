@@ -16,7 +16,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api, ApiError, codeSentence } from "../../api/client";
 import type { AdminAgent } from "../../api/adminTypes";
 import type { InvokeResult, MyAgentsResponse, Project, ProviderStatusResponse } from "../../api/types";
-import { fmtUsd } from "../../api/format";
+import { fmtUsd, errorText } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, ErrorState, Input, Select, SkeletonBlock, Tabs, Textarea } from "../../ui/kit";
@@ -148,7 +148,7 @@ export default function ModelsPage() {
           ) : listQ.error && !listQ.data ? (
             <ErrorState
               title="Couldn't load your models"
-              message={listQ.error instanceof Error ? listQ.error.message : String(listQ.error)}
+              message={errorText(listQ.error)}
               access={listQ.error instanceof ApiError && listQ.error.status === 403}
               onRetry={() => void listQ.refetch()}
             />

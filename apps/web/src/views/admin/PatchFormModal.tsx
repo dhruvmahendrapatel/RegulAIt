@@ -8,6 +8,7 @@ import { useId, useState, type ReactNode } from "react";
 import { Button, Field, Fieldset, Input, Modal, Select, Textarea } from "../../ui/kit";
 import v from "../views.module.css";
 import { draftFromRecord, multiChoices, patchBody, type PatchDraft, type PatchField } from "./patchForm";
+import { errorText } from "../../api/format";
 
 export function PatchFormModal(props: {
   title: string;
@@ -36,7 +37,7 @@ export function PatchFormModal(props: {
       props.onSaved?.();
       props.onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorText(err));
     } finally {
       setBusy(false);
     }

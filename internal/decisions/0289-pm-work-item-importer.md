@@ -57,7 +57,7 @@ evidence logic is RegulAIt's own governance surface, so it is the "genuinely Reg
 - The importer creates no runs and no `pm_links`. Linking a run node to an imported item instead of creating a new
   one is a follow-up on the pm-sync path, recorded in PENDING.
 - The two routes are API-only. The screen is requested on #453. `KNOWN_UI_GAPS_MAX` rises by 2 over main's value at
-  each merge (52 to 54 at the latest). The master session relayed the owner's answer (2026-11-15, recorded in the
+  each merge (55 to 57 at the latest). The master session relayed the owner's answer (2026-11-15, recorded in the
   #828 body) that the cap may rise for API-only routes while the entry is kept.
 - **Row-level security (#828 review; owner decision 2026-11-15: RLS on every PM table).** Both new tables are
   ENABLED and FORCED, readable and writable by an admin principal (or the bootstrap token) and the `migration` reason

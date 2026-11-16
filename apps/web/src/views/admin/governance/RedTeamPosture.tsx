@@ -15,7 +15,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api, ApiError } from "../../../api/client";
-import { ago, fmtUsd } from "../../../api/format";
+import { ago, fmtUsd, errorText } from "../../../api/format";
 import { Badge, Button, Card, ConfirmModal, EmptyState, Field, InfoButton, Input, Select, SeverityBadge, Table } from "../../../ui/kit";
 import { QueryGate, Stat, optionEls, useAction } from "../adminKit";
 import { RED_TEAM_SEVERITIES, REDTEAM_EVIDENCE_REFUSALS, asrText, probeTrialSummary, type ProbeTrial, type ProbeTrialSummary } from "./redteamModel";
@@ -55,7 +55,7 @@ export function RedTeamSummaryCard(props: { onOpenRun: (id: string) => void }) {
   const s = q.data;
   return (
     <Card title="Posture — what got through recently">
-      <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+      <QueryGate query={q}>
         {s && (
           <div className={v.stack}>
             <div className={a.formRow}>
@@ -237,7 +237,7 @@ export function RunTrialsSection(props: { runId: string }) {
   return (
     <section className={v.stack} aria-label="Per-trial record">
       <div className={v.sectionTitle}>Per-trial record</div>
-      <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+      <QueryGate query={q}>
         {q.data?.run && (
           <>
             <p>
@@ -354,7 +354,7 @@ export function AttachRunEvidence(props: { runId: string; attached: Array<{ id: 
       </form>
       {cards.isError && (
         <p className={v.errLine} role="alert">
-          The model cards could not be loaded: {cards.error instanceof Error ? cards.error.message : String(cards.error)}
+          The model cards could not be loaded: {errorText(cards.error)}
         </p>
       )}
       {act.error && (
