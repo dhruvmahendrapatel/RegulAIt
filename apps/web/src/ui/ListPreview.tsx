@@ -47,6 +47,18 @@ export function previewHeading(
   ].join(" · ");
 }
 
+/**
+ * The exact-count read a preview runs for one filter. A page that shows the same count elsewhere (a tab label) uses
+ * this rather than rebuilding it, so it reads the same cache entry and cannot drift from the preview (review of #680).
+ */
+export function previewCountQuery<T>(p: { endpoint: string; legacyKey: string; queryKey: readonly unknown[]; sort: ListSort; filters: Filters }) {
+  return {
+    queryKey: [...p.queryKey, "preview-count", p.filters],
+    queryFn: () =>
+      api.get<unknown>(pageUrl(p.endpoint, { limit: 10, sort: p.sort, filters: p.filters, count: "exact" })).then((b) => normalisePage<T>(b, p.legacyKey)),
+  };
+}
+
 export function ListPreview<T>(props: {
   title: string;
   /** plural, lower case */
@@ -78,8 +90,7 @@ export function ListPreview<T>(props: {
     queries: [
       { queryKey: [...props.queryKey, "preview", filters], queryFn: read(filters) },
       ...attention.map((a) => ({
-        queryKey: [...props.queryKey, "preview-count", { ...filters, ...a.filters }],
-        queryFn: read({ ...filters, ...a.filters }),
+        ...previewCountQuery<T>({ endpoint: props.endpoint, legacyKey: props.legacyKey, queryKey: props.queryKey, sort: props.sort, filters: { ...filters, ...a.filters } }),
         enabled: a.filters !== undefined,
       })),
     ],

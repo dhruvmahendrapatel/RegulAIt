@@ -8,6 +8,13 @@
 /.github/CODEOWNERS                  @dhruvmahendrapatel
 /scripts/security-*                  @dhruvmahendrapatel
 /Dockerfile                          @dhruvmahendrapatel
+# ADR-0324: who may sign a release, and how a release is verified.
+/infra/release-keys/                 @dhruvmahendrapatel
+/scripts/verify-release.sh           @dhruvmahendrapatel
+/scripts/verify-update-bundle.sh     @dhruvmahendrapatel
+/scripts/release-ceremony.sh         @dhruvmahendrapatel
+/scripts/release-provenance.sh       @dhruvmahendrapatel
+/scripts/lib/release-trust.sh        @dhruvmahendrapatel
 # ADR-0189 B7 (security review F5): the release AI BOM's switch, builder and CLI
 # decide what is signed and published; the workflow is covered by /.github/workflows/ above.
 /scripts/release-ai-bom.mjs                       @dhruvmahendrapatel
