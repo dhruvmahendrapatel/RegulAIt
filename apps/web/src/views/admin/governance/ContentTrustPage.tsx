@@ -53,7 +53,7 @@ export default function ContentTrustPage() {
         }
       />
       <div className={v.stack}>
-        <QueryGate loading={trust.isLoading} error={trust.error} onRetry={() => void trust.refetch()}>
+        <QueryGate query={trust}>
           {trust.data && !Array.isArray(trust.data.sources) ? (
             <Card title="Content trust">
               <p className={v.faint}>This gateway does not report content trust tiers.</p>

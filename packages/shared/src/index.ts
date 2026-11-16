@@ -2484,6 +2484,15 @@ export const updateOrgSettingsSchema = z
     /** ADR-0246 addendum: 'enforce' (strict default) gates every call to a server classified high-risk (offensive
      * tooling) on the policy template and the authorised-targets list; 'off' is a step-up, audited relaxation. */
     mcpHighRiskMode: z.enum(MCP_HIGH_RISK_MODES).optional(),
+    /** ADR-0230 owner decision 2026-11-15: SAP business server defaults. The approval quorum seeded on a mark
+     * (default 2; never below 1, and the requester never approves their own write); below 2 is a relaxation. */
+    sapApprovalQuorum: z.number().int().min(1).max(10).optional(),
+    /** SAP writes per user per hour on the seeded write-only limit (default 10); higher is a relaxation */
+    sapWriteRatePerHour: z.number().int().min(1).max(1000).optional(),
+    /** false (default) refuses an SAP write with no project; true is a relaxation */
+    sapUnattributedWritesAllowed: z.boolean().optional(),
+    /** false (default) = the seeded rule covers writes only; true also makes reads approve-first (a tightening) */
+    sapReadsApproveFirst: z.boolean().optional(),
     /** ADR-0175 A5: the release-age cooldown in days. 0 (default) = off. While
      * on, a newly registered MCP server, a changed manifest, a federated import
      * and a new skill version stay in quarantine until this deployment has
@@ -4969,6 +4978,8 @@ export * from "./isaca-pack.js";
 export * from "./iso-packs.js";
 // ADR-0297 (P18 B6): SR 11-7 and NYC Local Law 144 sector packs
 export * from "./sector-packs.js";
+// ADR-0319 (gap G11): the AIUC-1 ID-only pack
+export * from "./aiuc-packs.js";
 // ADR-0243 (P24): the OWASP MCP and LLM Top 10 packs
 export * from "./owasp-packs.js";
 export * from "./nist-ai-600-1-pack.js";
