@@ -133,6 +133,21 @@ and the gateway reads the `-rw` service. ADR-0304's cap of one replica is lifted
 `RollingUpdate` strategy, a PodDisruptionBudget, zone topology spread, `/ready` as the readiness probe and a preStop
 drain. The migration Job stays the one migrator; the boot lock covers anything else that migrates.
 
+**As built (slice 2, 2026-11-16).** The Terraform modules are `infra/modules/postgres-ha-{aws,azure,gcp}`. The search
+record in `infra/THIRD_PARTY.md` says why GCP and Azure use provider resources directly: the community modules keep
+passwords in state or need a telemetry provider. The chart now takes `replicas` (1 to 20). Above 1 it refuses a
+`ReadWriteOnce` install-secrets claim and renders `RollingUpdate` (`maxUnavailable: 0`), zone and node topology
+spread, and a PodDisruptionBudget. At any count it probes `/ready` and sets `REGULAIT_DRAIN_DELAY_MS` from
+`highAvailability.drainDelaySeconds` (default 10, at most 60) inside a matching termination grace period. The drain is
+the gateway's own `/ready` flip, so no preStop hook is needed. Two parts are not built yet:
+- **The operator's v1alpha1 cap of one replica stays** until the operator gains the same checks. That is Go and
+  envtest work in `deploy/operator`, tracked in PENDING.
+- **The chart does not render a CloudNativePG cluster yet.** Under the chart's default-deny baseline policy, a CNPG
+  cluster needs instance-to-instance replication, the CNPG operator's status port, the instance manager's API-server
+  access and object-store egress. Getting that wrong fails closed: replication stops and writes pause under
+  `dataDurability: required`. That needs a cluster test the lane cannot run. The README tells installers to use a
+  CNPG cluster with a synchronous standby and its `-rw` Service; rendering it is tracked in PENDING.
+
 ### 5. The failover test suite (slice 3)
 
 A Docker Compose file (`deploy/ha-test/`) with a Postgres primary and a synchronous standby, two gateway replicas and a
