@@ -4,7 +4,7 @@
 - **Date**: 2026-11-15
 - **Index**: Governed removal of flagged add-ons (signed directive, admin-started, off by default)
 - **Builds on**: ADR-0195 (the endpoint agent; decision 19, a read-only agent), ADR-0259 (MCP client-config discovery),
-  ADR-0298 and the hook-adapter decision on #864 (on-device enforcement: the signed envelope, the keyring and the deny list), ADR-0180 (secure
+  ADR-0298 and ADR-0330 (on-device enforcement: the signed envelope, the keyring and the deny list), ADR-0180 (secure
   by default), ADR-0176 (open source first), ADR-0252 (merge-time numbering).
 
 ## Context
@@ -38,9 +38,9 @@ The owner's 2026-11-15 decision is the recorded authority for this exception.
 - **Signing key.** A directive is signed with the policy-signing key path of ADR-0298: the same Ed25519 `Envelope`,
   verified against the same keyring. Under owner decision B4 (2026-11-15), that path is one rotatable device-policy
   signer that signs the endpoint policy, the browser policy and these directives. The agent verifies it against the
-  compiled keyring plus the device-policy keys an admin pins in the agent config (the hook-adapter decision on #864, section 8). The
-  gateway's signer interface is wired to that shared signer when it lands (#867). That keyring is empty until the ADR-0195 SD4
-  signer lands, so in this build no directive verifies. The gateway's directive route answers `503
+  compiled keyring plus the device-policy keys an admin pins in the agent config (ADR-0330, section 8). The
+  gateway's signer interface is wired to that shared signer when it lands (#867). The compiled keyring is empty until the ADR-0195
+  SD4 signer lands, so a directive verifies only on a device whose admin has pinned a device-policy key. The gateway's directive route answers `503
   directive_signer_unavailable` while it has no signer, just as the config route answers `503
   collection_pack_unavailable`.
 
@@ -138,7 +138,7 @@ limited to that device. This is its exact form:
   - JSONC (comments or trailing commas) and TOML (Codex `config.toml`) are left untouched and reported as
     `failed / unsupported_format`.
   - Rewriting those formats would lose the developer's comments and formatting. For Codex, the stronger control is its
-    own `requirements.toml` server allow-list (the hook-adapter decision on #864).
+    own `requirements.toml` server allow-list (ADR-0330).
 - **Which entry.** The agent removes the entry with exactly `serverName` under the server maps that ADR-0259's parser
   reads (`mcpServers`, `servers`, `mcp.servers`, `context_servers`, `projects.<p>.mcpServers`). It removes it only when
   the entry's identity, derived by the same describer, matches the directive's `identityKind`, `identity` and, if given,
@@ -154,7 +154,7 @@ limited to that device. This is its exact form:
 With `blockReinstall` (the default), the removal's server identity is recorded as blocked. When ADR-0298's policy content
 is derived from the gateway (a follow-up that waits for SD4), every active blocked identity contributes its server
 name to the enforcement policy's `denyServers`. A reinstalled server's calls are then denied in every agent that can
-identify the server (the capability matrix in the hook-adapter decision on #864).
+identify the server (the capability matrix in ADR-0330).
 
 Until then the block is recorded, shown and audited, but nothing on the device enforces it. The ADR says so rather than
 claiming coverage.
@@ -222,7 +222,8 @@ Coverage follows the MCP hosts whose config files the signed collection manifest
   agent's identity verifies.
 - **Gateway.** It gains one org switch, one step-up kind, two tables, three admin routes and two agent routes. Every
   write is audited.
-- **Until SD4.** The whole path is inert: no key, no verified directive.
+- **Until SD4.** The whole path is inert unless an admin pins a device-policy key on the device and the gateway has a
+  signer: until both exist, no directive is delivered or verified.
 
 ## Numbering
 

@@ -16,6 +16,7 @@ import (
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/collect"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/contract"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/directive"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/enforce"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/pack"
 )
 
@@ -29,7 +30,8 @@ type DirectiveRun struct {
 }
 
 // syncDirectives fetches, verifies, applies and reports this device's removal directives.
-func (c *Cycle) syncDirectives(ctx context.Context, cl *auth.Client, s *State, col *pack.Collection, env *collect.Env) (*DirectiveRun, error) {
+// keys is the compiled keyring plus this cycle's pinned device-policy keys.
+func (c *Cycle) syncDirectives(ctx context.Context, cl *auth.Client, s *State, col *pack.Collection, env *collect.Env, keys enforce.Keyring) (*DirectiveRun, error) {
 	res, err := cl.Do(ctx, http.MethodGet, contract.RouteDirectives, nil, nil)
 	if err != nil {
 		return nil, err
@@ -54,7 +56,7 @@ func (c *Cycle) syncDirectives(ctx context.Context, cl *auth.Client, s *State, c
 	}
 	run := &DirectiveRun{}
 	for _, raw := range dr.Directives {
-		d, code, err := directive.Verify(raw, c.DirectiveKeyring, s.IdentityID, now)
+		d, code, err := directive.Verify(raw, keys, s.IdentityID, now)
 		if err != nil {
 			run.Refused++
 			c.Log.Warn("removal directive refused", "err", err)

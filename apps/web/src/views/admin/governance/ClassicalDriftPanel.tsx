@@ -4,7 +4,8 @@
  *  - Off until an admin turns it on (a step-up); the requirements sit beside the switch.
  *  - A drift monitor holds a reference distribution (histograms or category tables) and thresholds. A threshold above
  *    its default alerts later, so the form says it needs a step-up before it is saved.
- *  - Summaries arrive from the customer's pipeline (an admin API key) or as an upload here. Results are per feature:
+ *  - Summaries arrive from the customer's pipeline (the monitor's own write-only ingestion credential, ADR-0223
+ *    amendment 1, managed under the monitor's results) or as an upload here. Results are per feature:
  *    PSI, the KS distance (numeric features; a lower bound on binned data) and Jensen–Shannon.
  *  - Drift opens an alert on Governance alerts; this tab does not decide anything.
  *  - Explainability artefacts (feature importance, SHAP summaries) come from the customer's tooling and are recorded
@@ -22,6 +23,7 @@ import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, RowActions
 import { useAction } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+import DriftIngestCredentials from "./DriftIngestCredentials";
 import {
   KIND_LABEL,
   STATUS_LABEL,
@@ -180,6 +182,7 @@ export default function ClassicalDriftPanel(props: { cardId: string }) {
             ]}
           />
           {selectedMonitor && <MonitorResults monitor={selectedMonitor} enabled={d.settings.enabled} cardModelVersion={d.cardModelVersion} onChanged={refresh} />}
+          {selectedMonitor && <DriftIngestCredentials monitorId={selectedMonitor.id} monitorName={selectedMonitor.name} enabled={d.settings.enabled} />}
           {d.settings.enabled && <RegisterMonitor cardId={props.cardId} strict={d.strictThresholds} cardModelVersion={d.cardModelVersion} onSaved={refresh} />}
         </div>
       </Card>

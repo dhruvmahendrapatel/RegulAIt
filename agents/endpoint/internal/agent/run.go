@@ -41,8 +41,8 @@ type Cycle struct {
 	Env func() (*collect.Env, error)
 	// Identity is what the pseudonymity guard refuses to send.
 	Identity privacy.Identity
-	// DirectiveKeyring verifies add-on removal directives (ADR-0331): the enforcement keyring
-	// (enforce.CompiledKeyring, empty until SD4, so no directive verifies in this build).
+	// DirectiveKeyring verifies add-on removal directives (ADR-0331): the compiled enforcement keyring. Each cycle adds
+	// the device-policy keys pinned in the root-owned config (ADR-0330 §8, B4); a pin never overrides a compiled key.
 	DirectiveKeyring enforce.Keyring
 	// Notify shows the developer a removal notice (directive.PlatformNotifier in production).
 	Notify directive.Notifier
@@ -206,7 +206,7 @@ func (c *Cycle) RunOnce(ctx context.Context) (*Result, error) {
 	}
 	out := &Result{Interval: clampInterval(conf.OrgPolicy.IntervalSeconds), Report: rep}
 	// ADR-0331: removal directives, bounded by the manifest verified above; a failure here never fails the cycle
-	if run, err := c.syncDirectives(ctx, cl, s, verified.Collection, env); err != nil {
+	if run, err := c.syncDirectives(ctx, cl, s, verified.Collection, env, c.DirectiveKeyring.With(cfg.DevicePolicyKeys)); err != nil {
 		c.Log.Info("removal directives not synced", "err", err)
 	} else {
 		out.Directives = run

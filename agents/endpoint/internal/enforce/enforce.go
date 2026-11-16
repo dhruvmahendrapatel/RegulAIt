@@ -1,9 +1,11 @@
-// Package enforce is the first clean-room slice of on-device enforcement (PENDING §2b P1, ADR-0298).
+// Package enforce is on-device enforcement of on-device enforcement (PENDING §2b P1, ADR-0298).
 //
 // It decides whether a coding agent's MCP tool call may run on this device, from a signed enforcement policy the
-// control plane issues, and answers the agent through its hook contract. Slice 1 has one adapter, Claude Code's
-// PreToolUse command hook (code.claude.com/docs/en/hooks, checked 2026-11-14), and one decision: MCP tool calls,
-// against an allow-list of MCP server names and definition sources. Every other tool call gets no decision from us.
+// control plane issues, and answers the agent through its hook contract. There is one decision (Decide): MCP tool
+// calls, against an allow-list of MCP server names and definition sources; every other tool call gets no decision
+// from us. Each coding agent has an adapter that turns its documented hook input into a Call and the Decision back
+// into its documented output: Claude Code (ADR-0298), Cursor, GitHub Copilot CLI and Codex (ADR-0330). What each
+// contract can see, and whether it can fail closed, differs; each adapter file records it.
 //
 // It is OFF by default, twice over: nothing registers the hook (an admin does so through Claude Code managed
 // settings), and the compiled policy keyring is empty until the ADR-0195 SD4 signer lands, so no policy verifies.
@@ -63,6 +65,36 @@ type Policy struct {
 	// NotAfter bounds offline use: past it the policy is stale and the hook denies (the honest offline mode).
 	NotAfter time.Time `json:"notAfter"`
 	MCP      MCPRules  `json:"mcp"`
+	// AgentModes optionally sets the mode for one coding agent (ADR-0330), overriding Mode for that agent only. Keys
+	// are adapter names (Adapters); an unknown key or mode is refused. It exists because the agents' hook contracts differ
+	// in what they can see: an org may enforce on an agent that names MCP servers and only audit on one that cannot.
+	AgentModes map[string]string `json:"agentModes,omitempty"`
+}
+
+// Coding agents with a hook adapter (ADR-0298 slice 1, ADR-0330).
+const (
+	AgentClaudeCode = "claude-code"
+	AgentCursor     = "cursor"
+	AgentCopilotCLI = "copilot-cli"
+	AgentCodex      = "codex"
+)
+
+// Unattested sources: an agent whose hook input cannot say where an MCP server was defined reports one of these as
+// the call's source (Adapter.UnattestedSource). A policy accepts calls from such an agent only by listing its
+// unattested source in allowSources, so trusting a server by name alone is an explicit, signed choice per agent,
+// never a default.
+const (
+	SourceCursorUnattested  = "cursor-unattested"
+	SourceCopilotUnattested = "copilot-unattested"
+	SourceCodexUnattested   = "codex-unattested"
+)
+
+// modeFor is the mode that applies to one agent's calls.
+func (p *Policy) modeFor(agent string) string {
+	if m, ok := p.AgentModes[agent]; ok {
+		return m
+	}
+	return p.Mode
 }
 
 // MCPRules: an MCP tool call runs only when its server name is allowed AND its definition source is allowed.
@@ -131,6 +163,14 @@ func (p *Policy) validate(now time.Time) error {
 	if p.Mode != ModeAudit && p.Mode != ModeEnforce {
 		return refuse("mode %q", p.Mode)
 	}
+	if len(p.AgentModes) > len(Adapters) {
+		return refuse("agentModes")
+	}
+	for a, m := range p.AgentModes {
+		if !knownAgent(a) || (m != ModeAudit && m != ModeEnforce) {
+			return refuse("agentModes entry %q", a)
+		}
+	}
 	if p.Subject == "" || len(p.Subject) > 128 {
 		return refuse("subject")
 	}
@@ -167,7 +207,9 @@ func (p *Policy) validate(now time.Time) error {
 
 // Call is one tool call an agent asks about, in adapter-neutral form.
 type Call struct {
-	Tool string
+	// Agent is the adapter that parsed the call (an adapter name, set by Adapter.Hook); it selects the policy's per-agent mode.
+	Agent string
+	Tool  string
 	// MCP is set only for MCP tool calls.
 	MCP *MCPCall
 }
@@ -208,13 +250,16 @@ func Decide(policy *Policy, c Call) Decision {
 	if !deny {
 		return Decision{Verdict: Allow, Reason: "RegulAIt: MCP server allowed by policy"}
 	}
-	if policy.Mode == ModeAudit {
+	if policy.modeFor(c.Agent) == ModeAudit {
 		return Decision{Verdict: NoDecision, WouldDeny: true, Reason: reason}
 	}
 	return Decision{Verdict: Deny, Reason: reason}
 }
 
 func mcpDenied(r MCPRules, c MCPCall) (bool, string) {
+	if c.Server == "" {
+		return true, "RegulAIt: this tool's MCP server cannot be identified from the coding agent's hook input, so it is blocked."
+	}
 	for _, s := range r.DenyServers {
 		if s == c.Server {
 			return true, "RegulAIt: this MCP server is blocked by your organisation's policy."

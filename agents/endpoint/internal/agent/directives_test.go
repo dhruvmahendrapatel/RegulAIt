@@ -31,6 +31,7 @@ type directiveFixture struct {
 	*fixture
 	home     string
 	priv     ed25519.PrivateKey
+	pub      ed25519.PublicKey
 	keys     enforce.Keyring
 	notices  []string
 	identity string
@@ -48,7 +49,7 @@ func newDirectiveFixture(t *testing.T) *directiveFixture {
 	f.gw.Unlock()
 	Redeem(context.Background(), f.opts)
 	pub, priv, _ := ed25519.GenerateKey(bytes.NewReader(bytes.Repeat([]byte{5}, 64)))
-	return &directiveFixture{fixture: f, home: home, priv: priv, keys: enforce.Keyring{"regulait-policy-test": pub}}
+	return &directiveFixture{fixture: f, home: home, priv: priv, pub: pub, keys: enforce.Keyring{"regulait-policy-test": pub}}
 }
 
 func (f *directiveFixture) run(t *testing.T) *Result {
@@ -152,5 +153,37 @@ func TestDirectiveRefusals(t *testing.T) {
 	os.WriteFile(filepath.Join(f.opts.Paths.StateDir, ledgerFile), []byte("{"), 0o600)
 	if r := f.run(t); r.Directives != nil {
 		t.Fatal("directives were processed with a damaged ledger")
+	}
+}
+
+// Owner decision B4 (ADR-0330 §8): a directive signed only by a device-policy key the admin pinned in the root-owned
+// agent config verifies, with no compiled key; without the pin the same directive is refused and nothing changes.
+func TestDirectiveVerifiesUnderAPinnedDevicePolicyKey(t *testing.T) {
+	f := newDirectiveFixture(t)
+	f.keys = enforce.Keyring{} // the compiled keyring is empty until SD4
+	f.run(t)
+	f.serve(t, f.directive("2c4e6a8b-1d3f-4a5c-9e7b-0f2a4c6e8a1b"))
+	if r := f.run(t); r.Directives != nil && len(r.Directives.Outcomes) != 0 || f.config(t) != removalConfig {
+		t.Fatalf("an unpinned directive was acted on: %+v", r.Directives)
+	}
+	raw, err := os.ReadFile(f.opts.Paths.ConfigFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg["devicePolicyKeys"] = []map[string]string{{"keyId": "regulait-policy-test", "x": base64.RawURLEncoding.EncodeToString(f.pub)}}
+	out, _ := json.Marshal(cfg)
+	if err := os.WriteFile(f.opts.Paths.ConfigFile, out, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := f.run(t)
+	if r.Directives == nil || len(r.Directives.Outcomes) != 1 || r.Directives.Outcomes[0].Outcome != contract.OutcomeRemoved {
+		t.Fatalf("a pinned-key directive was not applied: %+v\n%s", r.Directives, f.logs)
+	}
+	if strings.Contains(f.config(t), "shadow") {
+		t.Fatal("the server entry is still there")
 	}
 }

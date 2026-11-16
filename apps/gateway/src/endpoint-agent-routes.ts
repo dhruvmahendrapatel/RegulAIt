@@ -44,6 +44,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { prefixedBearer } from "./prefixed-bearer.js";
 import {
   filterParams,
   parseListExport,
@@ -152,14 +153,7 @@ async function audit(db: Db, actor: string, objectType: AuditObject, objectId: s
 }
 
 /** the bearer value of an Authorization header when it has `prefix` and 64 hex characters after it, else null */
-function bearerWithPrefix(req: FastifyRequest, prefix: string): string | null {
-  const h = req.headers.authorization;
-  if (typeof h !== "string" || !h.startsWith("Bearer ")) return null;
-  const v = h.slice("Bearer ".length);
-  if (v.length !== prefix.length + 64 || !v.startsWith(prefix)) return null;
-  const hex = v.slice(prefix.length);
-  return [...hex].every((c) => (c >= "0" && c <= "9") || (c >= "a" && c <= "f")) ? v : null;
-}
+const bearerWithPrefix = (req: FastifyRequest, prefix: string) => prefixedBearer(req, prefix, 64, "hex");
 
 /** the raw body as JSON, or undefined (an unparseable body is never echoed) */
 function jsonOf(body: unknown): unknown {
