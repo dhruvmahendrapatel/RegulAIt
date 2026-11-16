@@ -3,35 +3,35 @@
   "engines": {
     "promptfoo": {
       "repository": "ghcr.io/dhruvmahendrapatel/regulait-engine-promptfoo",
-      "manifestDigest": "sha256:c54fe2d821a46cd7a6ed68c09cac2b3713d99ae2cf705d4f6957c99c29db0be2",
-      "imageId": "sha256:d500a7b03421aa96fd10126a7c6f75f2f8b76115781d65570dbdeb7dd27dbe30",
-      "publishGeneration": 9,
-      "sourceCommit": "fe5cfbb43a61f3ad975d260170f6c29beab03a44",
-      "publishedAt": "2026-10-24T23:15:26.890Z"
+      "manifestDigest": "sha256:f16b73cbc23d024503d842844a76c26e6fbbe8feeb4d2527f5e70ff06bb57343",
+      "imageId": "sha256:7aec40088eacd21c090eff2deacc20f7c19769dffe18fbff4ba2cf4f9cdaba63",
+      "publishGeneration": 10,
+      "sourceCommit": "559d493aecc63e18ca719e49320709e2053cc31e",
+      "publishedAt": "2026-11-16T05:39:51.230Z"
     },
     "modelscan": {
       "repository": "ghcr.io/dhruvmahendrapatel/regulait-engine-modelscan",
-      "manifestDigest": "sha256:2980529bf57d232760c9400f34a5e701411acc79b59a462f4e20d3a4dda60ac2",
-      "imageId": "sha256:334f94729d99b0b4ce333c6c48add3c14752ec1bcbb67628147b7002c1690480",
-      "publishGeneration": 8,
-      "sourceCommit": "4ae0eebcb170abf65840baafe9bec834ac4ea4a4",
-      "publishedAt": "2026-10-24T22:26:31.270Z"
+      "manifestDigest": "sha256:1d02e7acc9a1a6abeb04769628c46d9780ec9bfb65138db308abc0c4b0aae6b2",
+      "imageId": "sha256:423313fd1463564e46f4da7ac49646f727767e15d652923e6efbee846dba17d3",
+      "publishGeneration": 9,
+      "sourceCommit": "559d493aecc63e18ca719e49320709e2053cc31e",
+      "publishedAt": "2026-11-16T05:39:51.230Z"
     },
     "garak": {
       "repository": "ghcr.io/dhruvmahendrapatel/regulait-engine-garak",
-      "manifestDigest": "sha256:70c59a0177cfba5063a587de5dc958e60bedae2487997e4d01b62a747b50cf52",
-      "imageId": "sha256:5c0ab003fe301804cd7f98653ca61017ea31886549f2fac1b2e25589cc40483a",
-      "publishGeneration": 9,
-      "sourceCommit": "4ae0eebcb170abf65840baafe9bec834ac4ea4a4",
-      "publishedAt": "2026-10-24T22:26:31.270Z"
+      "manifestDigest": "sha256:62137d7fec4babe8621a6f91657d0efb7c7b991cf9904318ac6d4af2d2d2f88a",
+      "imageId": "sha256:ee795d3e7239fdb96434cfe62d4fdd3494becc987acebb5887ff0228315ecb6b",
+      "publishGeneration": 10,
+      "sourceCommit": "559d493aecc63e18ca719e49320709e2053cc31e",
+      "publishedAt": "2026-11-16T05:39:51.230Z"
     },
     "spikee": {
-      "repository": null,
-      "manifestDigest": null,
-      "imageId": null,
-      "publishGeneration": 0,
-      "sourceCommit": null,
-      "publishedAt": null
+      "repository": "ghcr.io/dhruvmahendrapatel/regulait-engine-spikee",
+      "manifestDigest": "sha256:84f326b2e043abc32577353d069b0ce077ed8b0c7e57b6259348e32a79c402c2",
+      "imageId": "sha256:d9f2c7d1204384fe3a94e51b781d61958597cd88e87ee1668045aec0d138f80b",
+      "publishGeneration": 1,
+      "sourceCommit": "559d493aecc63e18ca719e49320709e2053cc31e",
+      "publishedAt": "2026-11-16T05:39:51.230Z"
     }
   }
 }
