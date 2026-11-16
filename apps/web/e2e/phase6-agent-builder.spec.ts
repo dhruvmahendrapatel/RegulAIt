@@ -280,6 +280,11 @@ test("a non-admin creates an agent from a template and configures it", async ({ 
 });
 
 test("chat answers through the governed core with its cost, and the thread is in Agent inbox", async ({ browser }) => {
+  // The admin grant below steps up with a TOTP code. The gateway takes each 30 s step once, and beforeAll's sign-in
+  // and step-up have usually spent the current and next steps, so nextCode() waits up to ~60 s for a fresh one (the
+  // replay control working as designed). On the 60 s default that wait alone timed the test out (#851 CI, 2026-11-15).
+  // Same budget as the other step-up journeys (phase6-builder-tools.spec.ts); no assertion changes.
+  test.setTimeout(120_000);
   const { page, track } = await danaSession(browser);
   // ADR-0188 S4: the agent acts only within grants of its own (the strict default) — Ada grants it the model
   // Dana chose, as an admin does, through the identity grants route (stepped up, from her signed-in page)
@@ -354,6 +359,8 @@ test("a tiny monthly limit refuses the next message by name", async ({ browser }
 });
 
 test("an admin sees that agent's spend in Agent usage", async ({ browser }) => {
+  // the admin sign-in passes a TOTP code: the same once-per-30-s-step wait as the grant above
+  test.setTimeout(120_000);
   const page = await browser.newPage();
   const track = trackConsole(page);
   await signIn(page, "admin@regulait.local", [ADMIN_PASSWORD, state.passwords.admin], ADMIN_PASSWORD);

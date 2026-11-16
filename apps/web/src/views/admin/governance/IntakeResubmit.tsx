@@ -20,7 +20,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
-import { humanize } from "../../../api/format";
+import { humanize, errorText } from "../../../api/format";
 import type { IntakeScreeningAnswers, UseCaseLifecycleDetail } from "../../../api/types";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, Input, Select, Textarea } from "../../../ui/kit";
@@ -133,7 +133,7 @@ export function IntakeResubmit(props: { useCaseId: string }) {
   }
 
   return (
-    <QueryGate loading={detail.isLoading} error={detail.error} onRetry={() => void detail.refetch()}>
+    <QueryGate query={detail}>
       {d ? (
         <>
           <PageHeader title="Update and resubmit" sub="Only a use case sent back for information can be resubmitted." />
@@ -325,7 +325,7 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
       void queryClient.invalidateQueries({ queryKey: ["admin", "use-cases"] });
       void queryClient.invalidateQueries({ queryKey: ["admin", "use-case", props.useCaseId] });
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorText(e));
     } finally {
       setBusy(false);
     }

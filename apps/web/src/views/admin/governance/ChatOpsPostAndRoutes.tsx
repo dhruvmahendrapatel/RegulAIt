@@ -75,7 +75,7 @@ export function PostApprovalCard(props: { connections: ChatConnectionOption[] })
       }
     >
       <div className={v.stack} data-testid="chatops-post-approval">
-        <QueryGate loading={pending.isLoading} error={pending.error} onRetry={() => void pending.refetch()}>
+        <QueryGate query={pending}>
           {rows.length === 0 ? (
             <EmptyState title="No pending approvals" body="An approval waiting for a decision can be posted here." />
           ) : (
@@ -149,7 +149,7 @@ export function BuilderRoutesCard() {
   return (
     <Card title="Builder agent channel routes" info={q.data?.posture ? <p>{q.data.posture}</p> : undefined}>
       <div className={v.stack} data-testid="chatops-builder-routes">
-        <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+        <QueryGate query={q}>
           <Table<BuilderRoute>
             rows={routes}
             rowKey={(r) => r.channelId}

@@ -18,7 +18,7 @@ import { useId, useState, type FormEvent } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { ApiError, api } from "../../api/client";
-import { fmtAt } from "../../api/format";
+import { fmtAt, errorText } from "../../api/format";
 import { PageHeader } from "../../shell/AppShell";
 import { Lockup } from "../../ui/Brand";
 import { Button, Card, ErrorState, Field, Input, SkeletonBlock, Textarea } from "../../ui/kit";
@@ -44,7 +44,7 @@ function refusalText(e: unknown): string {
     if (typeof e.payload.detail === "string") return e.payload.detail;
     return e.message;
   }
-  return e instanceof Error ? e.message : String(e);
+  return errorText(e);
 }
 
 function FeedbackForm(props: {
