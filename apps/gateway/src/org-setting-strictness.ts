@@ -279,6 +279,12 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   mcpDefinitionPinMode: notEqual("block"),
   // ADR-0246 addendum: 'off' lets calls to an offensive-tooling server through without the template or target checks
   mcpHighRiskMode: notEqual("enforce"),
+  // ADR-0230 owner decision 2026-11-15: SAP business server defaults. A lower quorum, a higher write rate and
+  // allowing unattributed writes loosen; turning reads approve-first on only tightens, so turning it off again does
+  sapApprovalQuorum: atLeast(2),
+  sapWriteRatePerHour: atMost(10),
+  sapUnattributedWritesAllowed: notEqual(false),
+  sapReadsApproveFirst: fromStored(false, (v, b) => b === true && v === false),
   minReleaseAgeDays: atLeast(7),
   credentialUnusedDays: atMost(90),
   staleCredentialAlerts: notEqual(true),

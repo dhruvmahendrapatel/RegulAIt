@@ -13,6 +13,7 @@ import { Fragment, useEffect, useId, useMemo, useRef, useState, type ReactNode }
 import { Button, EmptyState, ErrorState, InfoButton, Skeleton, StatusDot, type TableProps } from "./kit";
 import s from "./kit.module.css";
 import x from "./expandableTable.module.css";
+import { errorText } from "../api/format";
 
 export type ExpandableTableProps<T> = TableProps<T> & {
   expand: { open: (row: T) => boolean; toggle: (row: T) => void; label: (row: T) => string; render: (row: T) => ReactNode };
@@ -180,7 +181,7 @@ export function ExpandableTable<T>(props: ExpandableTableProps<T>) {
               <td colSpan={cols} className={s.tableStale} role="alert">
                 <StatusDot tone="danger" />
                 <span>
-                  Couldn't refresh this list — {props.error instanceof Error ? props.error.message : String(props.error)}.
+                  Couldn't refresh this list — {errorText(props.error)}.
                   Showing the last loaded rows.
                 </span>
                 {props.onRetry && (
@@ -196,7 +197,7 @@ export function ExpandableTable<T>(props: ExpandableTableProps<T>) {
               <td colSpan={cols}>
                 <ErrorState
                   title="Couldn't load this list"
-                  message={props.error instanceof Error ? props.error.message : String(props.error)}
+                  message={errorText(props.error)}
                   access={(props.error as { status?: number }).status === 403}
                   onRetry={props.onRetry}
                 />

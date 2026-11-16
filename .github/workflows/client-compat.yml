@@ -37,9 +37,10 @@ on:
 permissions:
   contents: read
 
+# ADR-0323: cancel a superseded run on a PR only; a scheduled or manual run has a group of its own and always completes.
 concurrency:
-  group: client-compat-${{ github.ref }}
-  cancel-in-progress: true
+  group: client-compat-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   client-compat:

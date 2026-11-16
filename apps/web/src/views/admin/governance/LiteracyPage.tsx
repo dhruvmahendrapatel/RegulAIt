@@ -158,7 +158,7 @@ function DocumentsCard() {
         </Button>
       }
     >
-      <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+      <QueryGate query={q}>
         <Table<AiPolicyDoc>
           rows={docs}
           rowKey={(d) => d.id}
@@ -503,7 +503,7 @@ function CoverageCard() {
         </p>
       }
     >
-      <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+      <QueryGate query={q}>
         {docs.length === 0 ? (
           <EmptyState title="Nothing published" body="Coverage appears once a document is published." />
         ) : (
@@ -705,7 +705,7 @@ function LiteracySettingsCard() {
 
   return (
     <Card title="Settings (admin)">
-      <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+      <QueryGate query={q}>
         {s && (
           <div className={v.stack}>
             <div className={v.stack}>

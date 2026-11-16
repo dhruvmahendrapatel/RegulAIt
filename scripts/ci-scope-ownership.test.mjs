@@ -9,7 +9,7 @@ import { describe, expect, it } from "vitest";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p) => readFileSync(path.join(repo, p), "utf8");
-const SCOPE_PATHS = [".github/actions/", "scripts/ci-scope.mjs", "scripts/ci-scope.test.mjs"];
+const SCOPE_PATHS = [".github/actions/", "scripts/ci-scope.mjs", "scripts/ci-scope.test.mjs", "scripts/ci-plan.mjs"];
 
 describe("the CI scope is owner-reviewed and watched as a security gate", () => {
   it("CODEOWNERS names the owner for each scope path", () => {
