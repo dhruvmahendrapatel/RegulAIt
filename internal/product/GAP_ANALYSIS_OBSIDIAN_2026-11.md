@@ -35,10 +35,10 @@ to AI agents with a four-stage story: **find it, govern it, stop it, prove it**.
 | 3 | Author vs runner, orphaned agents, NHI mapping | **Partial** | ADR-0089 (owner, lifecycle, orphan flag), ADR-0188 (agent principal, human sponsor, RFC 8693 actor chain) | No "built by / run by" view for vendor agents; cloud service accounts are not linked to agents. |
 | 4 | OAuth / entitlement map into SaaS apps | **Partial** | ADR-0235 (Entra `oauth2PermissionGrants`), ADR-0255 | Entra only, and only as shadow-AI findings. No Salesforce, Google Workspace or Slack scope graph. |
 | 5 | Usage-based least privilege; oversharing, public exposure | **Partial** | ADR-0092 (`unused-grant` from the usage ledger), ADR-0090 (certification campaigns) | Right-sizes RegulAIt's own grants, not SaaS-side permissions. No oversharing or public-agent detection. |
-| 6 | Embedded credentials in agent integrations | **Partial** | ADR-0055, ADR-0195, ADR-0233 | Repos and endpoint configs are scanned; agent configs inside SaaS builders are not. |
+| 6 | Embedded credentials in agent integrations | **Partial** | ADR-0055, ADR-0195, ADR-0259 | Repos and endpoint configs are scanned; agent configs inside SaaS builders are not. |
 | 7 | Auto risk score on publish/modify, OWASP, blast radius, toxic combinations | **Partial**, #831 in flight | ADR-0214, ADR-0091, ADR-0243, ADR-0059 | No score recomputed on every change; OWASP drives required tests, not a score. |
 | 8 | Block before execution; per-agent/team/org policy; context-aware decisions | **Have** (strongest area) | ADR-0251, ADR-0040; endpoint hooks ADR-0298, ADR-0330 | Only for traffic through the gateway or endpoint hook. Decisions do not yet use live third-party app context. |
-| 9 | Behavioural baselines and anomalies | **Partial**, #865 in flight | ADR-0049 (statistical baseline per project and user), the decision record on #865 (sequence rules over the audit chain) | No learned per-agent baseline; #865 is deterministic rules by owner decision. |
+| 9 | Behavioural baselines and anomalies | **Gap**, #865 in flight | Nearest on main: ADR-0049 (spend-anomaly detection only); the decision record on #865 (sequence rules over the audit chain) | No behavioural baseline for agents or users today; #865 adds deterministic rules, not a learned baseline, by owner decision. |
 | 10 | Continuous audit-ready evidence | **Have, ahead** | ADR-0058, ADR-0060, ADR-0116, ADR-0186, ADR-0303 | Hash-chained audit, signed exports and receipts, SIEM delivery go further than the page claims. |
 | 11 | Enforcement inside SaaS / low-code builders | **Gap**, partly in flight | the decision record on #850 (vendor-native managed settings), the decision record on #867 (managed browser extension); SAP only via ADR-0230/0231 | Agents that never touch the gateway or an endpoint are visible at best, not controllable. |
 | 12 | Regional hosting / data isolation | **Have, by another route** | ADR-0015, ADR-0041, ADR-0062 | No multi-region hosted SaaS; BYOC and air-gapped give customer-controlled residency. |
@@ -71,7 +71,7 @@ a signed detection-content feed covers the same need.
 Obsidian's page claims none of the following, each of which exists in the repo:
 
 - **Execution-path governance, not just posture:** declarative multi-stage workflow engine with a forced plan gate
-  and governed deploy (ADR-0079, ADR-0161, ADR-0282–0286); multi-agent orchestration with tighten-only delegation as
+  and governed deploy (ADR-0079, ADR-0161), on a durable stage runner (ADR-0282–0286); multi-agent orchestration with tighten-only delegation as
   a tested invariant (ADR-0078); governed A2A (ADR-0219); payload-bound approvals in Slack and Teams (ADR-0104,
   ADR-0061).
 - **Cost and token economics:** per-call cost attribution, budgets enforced through the approvals queue, cross-vendor
