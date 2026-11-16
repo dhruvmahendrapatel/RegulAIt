@@ -80,7 +80,7 @@ scheduler. No new dependency.
    `cost_outcomes`), so neither build blocks writers. The roll-up builds every group before it pages by offset; that is
    bounded by the number of projects or cost centres.
 
-## API stability (for consumers such as ADR-0342 process analytics)
+## API stability (for consumers such as the lane E23 process-analytics value view)
 
 `/v1/cost-outcomes` and `/v1/cost-outcomes/summary` are versioned under `/v1`. Their fields are additive only: a field
 is never renamed, retyped or removed within `/v1`. A breaking change gets a new version path and an ADR amendment.
