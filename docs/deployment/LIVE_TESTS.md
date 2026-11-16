@@ -1,8 +1,8 @@
 # Live pilot-path tests (ADR-0326)
 
 `apps/gateway/live/` holds tests that call real vendor APIs with **test** tenants and **low-limit test** keys. They
-run only in `.github/workflows/live-tests.yml`, on manual dispatch and nightly at 04:17 UTC. They never run on pull
-requests. Each group skips itself when its credentials are empty, so a run with nothing configured passes and calls
+run only in `.github/workflows/live-tests.yml`, on manual dispatch, and nightly at 04:17 UTC only when the repository
+variable `LIVE_TESTS_NIGHTLY` is set to `true` (off by default). They never run on pull requests. Each group skips itself when its credentials are empty, so a run with nothing configured passes and calls
 nothing.
 
 ## What the owner sets up, once
