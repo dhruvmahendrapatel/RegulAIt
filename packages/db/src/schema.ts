@@ -1932,6 +1932,9 @@ export const auditLog = pgTable(
         "supplier_access",
         "supplier_submission",
         "supplier_questionnaire",
+        // ADR-0223 amendment 1: a drift monitor's write-only ingestion credential (issued, rotated, revoked, or
+        // refused on use). Plain text column — no DDL needed.
+        "model_drift_ingest_credential",
         "ai_policy_document",
         "ai_policy_acknowledgement",
         // ADR-0185 I3: memory retention. A conversation purged by the sweep or
@@ -16432,6 +16435,43 @@ export const modelDriftMonitors = pgTable(
 );
 export type ModelDriftMonitorRow = typeof modelDriftMonitors.$inferSelect;
 
+/**
+ * ADR-0223 amendment 1 (pending migration `drift_ingest_credentials`): a write-only ingestion credential bound to ONE drift monitor. It opens only
+ * `POST /v1/model-drift/ingest/:monitorId/reports` for that monitor. Only the `hashToken` hash of the `rgldi_` token
+ * is stored; it always expires (at most 365 days, CHECK-capped) and is revoked by `revoked_at`. Rotation is a new row
+ * (`replacesId`) plus the old row's revocation, so `createdAt` is when the secret was set.
+ */
+export const modelDriftIngestCredentials = pgTable(
+  "model_drift_ingest_credentials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    monitorId: uuid("monitor_id")
+      .notNull()
+      .references(() => modelDriftMonitors.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    tokenHash: text("token_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    replacesId: uuid("replaces_id").references((): AnyPgColumn => modelDriftIngestCredentials.id, { onDelete: "set null" }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: uuid("revoked_by").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    unique("model_drift_ingest_credentials_token_hash_uq").on(t.tokenHash),
+    check("model_drift_ingest_credentials_name_check", sql`char_length(btrim(${t.name})) BETWEEN 1 AND 120`),
+    check("model_drift_ingest_credentials_hash_check", sql`${t.tokenHash} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "model_drift_ingest_credentials_expiry_check",
+      sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} <= ${t.createdAt} + interval '365 days'`,
+    ),
+    check("model_drift_ingest_credentials_revoked_check", sql`${t.revokedAt} IS NULL OR ${t.revokedAt} >= ${t.createdAt}`),
+    index("model_drift_ingest_credentials_monitor_idx").on(t.monitorId, t.createdAt.desc()),
+  ],
+);
+export type ModelDriftIngestCredentialRow = typeof modelDriftIngestCredentials.$inferSelect;
+
 export const MODEL_DRIFT_REPORT_SOURCES = ["push", "upload"] as const;
 export const MODEL_DRIFT_STATUSES = ["within", "warn", "drift", "insufficient"] as const;
 /** where a report's or artefact's `model_version` came from: the card's pin at write time, or the submission */
@@ -16457,9 +16497,15 @@ export const modelDriftReports = pgTable(
     modelVersion: text("model_version").notNull(),
     modelVersionSource: text("model_version_source", { enum: MODEL_VERSION_SOURCES }).notNull(),
     submittedBy: uuid("submitted_by").references(() => users.id, { onDelete: "set null" }),
+    /** pending migration drift_ingest_credentials: the ingestion credential that pushed this summary; NULL for an admin's upload or push */
+    ingestCredentialId: uuid("ingest_credential_id").references(() => modelDriftIngestCredentials.id, { onDelete: "set null" }),
+    /** pending migration drift_ingest_credentials: the replay guard on a credential push; one key records one report per monitor */
+    idempotencyKey: text("idempotency_key"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    check("model_drift_reports_idempotency_check", sql`${t.idempotencyKey} IS NULL OR char_length(${t.idempotencyKey}) BETWEEN 16 AND 128`),
+    uniqueIndex("model_drift_reports_idempotency_uq").on(t.monitorId, t.idempotencyKey).where(sql`${t.idempotencyKey} IS NOT NULL`),
     check("model_drift_reports_source_check", sql`${t.source} IN ('push', 'upload')`),
     check("model_drift_reports_window_check", sql`${t.windowEnd} > ${t.windowStart}`),
     check("model_drift_reports_samples_check", sql`${t.sampleCount} > 0`),
@@ -16692,3 +16738,97 @@ export const resourceRateReservations = pgTable(
     ),
   ],
 );
+
+// ===== ADR-0332 (lane E14): endpoint AI add-on inventory (pending migration endpoint_addon_inventory) =====
+//
+// The inventory of AI add-ons on endpoints (coding agent, MCP server, skill, plugin) is read, not projected: MCP
+// servers come from `endpoint_mcp_servers` (ADR-0259) and coding agents from endpoint-sourced device
+// `shadow_ai_findings` (ADR-0195), joined at read time. These tables are the system of record only for what those
+// evidence tables do not hold: a sighting an endpoint lane records directly (a skill or plugin with its content
+// digest). An add-on is a row, each version of it is a row, and a sighting joins one version to one enrolled device
+// for one detection source; the device's pseudonym is joined from `endpoint_devices`, never copied. The
+// admission-scan verdict is joined at read time from `admission_engine_scans` by content digest (ADR-0242). Row-level
+// security: admins and the `system_task` reason only (pending migration). No content of a skill or config is stored.
+
+export const ENDPOINT_ADDON_KINDS = ["coding_agent", "mcp_server", "skill", "plugin"] as const;
+export const ENDPOINT_ADDON_IDENTITY_KINDS = ["provider", "package", "host", "command", "name", "unknown"] as const;
+export const ENDPOINT_ADDON_SOURCES = ["endpoint_agent", "endpoint_osquery", "endpoint_inventory"] as const;
+
+/** one directly recorded AI add-on, by kind and identity (a package, a host, a command base name or a skill name) */
+export const endpointAddons = pgTable(
+  "endpoint_addons",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kind: text("kind", { enum: ENDPOINT_ADDON_KINDS }).notNull(),
+    identityKind: text("identity_kind", { enum: ENDPOINT_ADDON_IDENTITY_KINDS }).notNull(),
+    identity: text("identity").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("endpoint_addons_identity_uq").on(t.kind, t.identityKind, t.identity),
+    check("endpoint_addons_identity_check", sql`length(${t.identity}) BETWEEN 1 AND 255`),
+  ],
+);
+export type EndpointAddonRow = typeof endpointAddons.$inferSelect;
+
+/** one version of a directly recorded add-on: the reported version string ('' when none) and its content digest */
+export const endpointAddonVersions = pgTable(
+  "endpoint_addon_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    addonId: uuid("addon_id")
+      .notNull()
+      .references(() => endpointAddons.id, { onDelete: "cascade" }),
+    version: text("version").notNull().default(""),
+    contentDigest: text("content_digest"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("endpoint_addon_versions_uq").on(t.addonId, t.version, t.contentDigest).nullsNotDistinct(),
+    index("endpoint_addon_versions_digest_idx").on(t.contentDigest).where(sql`${t.contentDigest} IS NOT NULL`),
+    check("endpoint_addon_versions_digest_check", sql`${t.contentDigest} IS NULL OR ${t.contentDigest} ~ '^[0-9a-f]{64}$'`),
+    check("endpoint_addon_versions_version_check", sql`length(${t.version}) <= 128`),
+  ],
+);
+export type EndpointAddonVersionRow = typeof endpointAddonVersions.$inferSelect;
+
+/** one directly recorded version seen on one enrolled device by one source and host agent (deleted with the device) */
+export const endpointAddonSightings = pgTable(
+  "endpoint_addon_sightings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    versionId: uuid("version_id")
+      .notNull()
+      .references(() => endpointAddonVersions.id, { onDelete: "cascade" }),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => endpointDevices.id, { onDelete: "cascade" }),
+    source: text("source", { enum: ENDPOINT_ADDON_SOURCES }).notNull(),
+    hostAgent: text("host_agent").notNull().default(""),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    unique("endpoint_addon_sightings_uq").on(t.versionId, t.deviceId, t.source, t.hostAgent),
+    index("endpoint_addon_sightings_device_idx").on(t.deviceId),
+    index("endpoint_addon_sightings_last_seen_idx").on(t.lastSeenAt),
+    check("endpoint_addon_sightings_seen_check", sql`${t.firstSeenAt} <= ${t.lastSeenAt}`),
+  ],
+);
+export type EndpointAddonSightingRow = typeof endpointAddonSightings.$inferSelect;
+
+/** the secret TYPES (rule ids, never a name or value) a directly recorded sighting reported; one row per type */
+export const endpointAddonSightingSecretTypes = pgTable(
+  "endpoint_addon_sighting_secret_types",
+  {
+    sightingId: uuid("sighting_id")
+      .notNull()
+      .references(() => endpointAddonSightings.id, { onDelete: "cascade" }),
+    secretType: text("secret_type").notNull(),
+  },
+  (t) => [
+    primaryKey({ name: "endpoint_addon_sighting_secret_types_pk", columns: [t.sightingId, t.secretType] }),
+    check("endpoint_addon_sighting_secret_types_check", sql`${t.secretType} ~ '^[a-z][a-z0-9_.]{0,63}$'`),
+  ],
+);
+// ===== end ADR-0332 =====
