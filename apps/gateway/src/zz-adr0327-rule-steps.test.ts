@@ -33,6 +33,7 @@ import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { grantStepUpForTest, sessionRequest, stepUpRequest } from "./testing/step-up-grant.js";
 import type { StepUpCheckArgs } from "./step-up.js";
 import { RULE_STEP_AUDIT_RULE_IDS } from "./rule-steps.js";
+import { pruneRuleStepSuggestions } from "./rule-step-retention.js";
 import { induceStepRule, type StepRun } from "@regulait/optimizer-kernel";
 import { induceStepRuleOffThread } from "@regulait/optimizer-kernel/offload";
 
@@ -230,5 +231,31 @@ describe("ADR-0327 induction off the event loop (review #862)", () => {
 
   it("rejects when the worker runs past its time limit, so no partial rule is ever used", async () => {
     await expect(induceStepRuleOffThread(heavy(), {}, { timeoutMs: 1 })).rejects.toThrow(/timed out/);
+  });
+});
+
+describe("ADR-0327 suggestions follow the §8.3 retention floor (slice 3)", () => {
+  it("deletes a suggestion detected before the cutoff and keeps a newer one", async () => {
+    const row = (stepName: string) => ({
+      agentId,
+      stepName,
+      rule: { fields: ["severity"], cells: [{ key: ["high"], output: "on-call", support: 9 }] },
+      runs: 9,
+      structuredRuns: 9,
+      outputClasses: 1,
+      agreement: 1,
+      coverage: 1,
+      windowCostUsd: 0.1,
+      projectedMonthlySavingsUsd: 0.1,
+    });
+    const [old] = await db
+      .insert(ruleStepSuggestions)
+      .values({ ...row(`retention-old-${Date.now()}`), detectedAt: sql`now() - interval '40 days'` })
+      .returning({ id: ruleStepSuggestions.id });
+    const [fresh] = await db.insert(ruleStepSuggestions).values(row(`retention-new-${Date.now()}`)).returning({ id: ruleStepSuggestions.id });
+    const cutoff = new Date(Date.now() - 30 * 86_400_000);
+    expect(await pruneRuleStepSuggestions(db, cutoff)).toBeGreaterThanOrEqual(1);
+    const left = await db.select({ id: ruleStepSuggestions.id }).from(ruleStepSuggestions).where(inArray(ruleStepSuggestions.id, [old!.id, fresh!.id]));
+    expect(left.map((x) => x.id)).toEqual([fresh!.id]);
   });
 });
