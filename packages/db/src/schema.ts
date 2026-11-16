@@ -10709,6 +10709,10 @@ export const traceSpans = pgTable(
     uniqueIndex("trace_spans_run_uq")
       .on(t.traceId, t.runId)
       .where(sql`${t.kind} = 'run' AND ${t.runId} IS NOT NULL`),
+    /** ADR-0327 (migration `rule_step_detection`): the rule-like step scan groups recent model spans per step */
+    index("trace_spans_llm_step_started_idx")
+      .on(t.agentId, t.name, t.startedAt)
+      .where(sql`${t.kind} = 'llm' AND ${t.agentId} IS NOT NULL`),
   ],
 );
 
@@ -16813,6 +16817,77 @@ export const managedSettingsBundleFiles = pgTable(
   ],
 );
 // ---------------------------------------------------------------------------
+// ADR-0327 (lane E12, migration `rule_step_detection`) — rule-like AI steps. Written only by
+// `apps/gateway/src/rule-steps.ts`, each write in the same transaction as its audit row.
+// ---------------------------------------------------------------------------
+
+/** one row, absent until first saved; absent = OFF (ADR-0180). Thresholds default strict; lowering one is a step-up. */
+export const ruleStepSettings = pgTable(
+  "rule_step_settings",
+  {
+    id: text("id").primaryKey().default("singleton"),
+    enabled: boolean("enabled").notNull().default(false),
+    minRuns: integer("min_runs").notNull().default(200),
+    minAgreement: doublePrecision("min_agreement").notNull().default(0.99),
+    minCoverage: doublePrecision("min_coverage").notNull().default(0.9),
+    minCellSupport: integer("min_cell_support").notNull().default(5),
+    /** database clock; scans are spaced by the gateway against now() */
+    lastScanAt: timestamp("last_scan_at", { withTimezone: true }),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("rule_step_settings_singleton_check", sql`${t.id} = 'singleton'`),
+    check("rule_step_settings_min_runs_check", sql`${t.minRuns} BETWEEN 50 AND 100000`),
+    check("rule_step_settings_min_agreement_check", sql`${t.minAgreement} >= 0.95 AND ${t.minAgreement} <= 1`),
+    check("rule_step_settings_min_coverage_check", sql`${t.minCoverage} >= 0.5 AND ${t.minCoverage} <= 1`),
+    check("rule_step_settings_min_cell_support_check", sql`${t.minCellSupport} BETWEEN 3 AND 1000`),
+  ],
+);
+export type RuleStepSettingsRow = typeof ruleStepSettings.$inferSelect;
+
+export const RULE_STEP_SUGGESTION_STATUSES = ["suggested", "dismissed"] as const;
+
+/** one suggestion per AI step (agent + span name): the latest scan's rule and its evidence */
+export const ruleStepSuggestions = pgTable(
+  "rule_step_suggestions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    /** the trace span name that identifies the step within the agent */
+    stepName: text("step_name").notNull(),
+    /** point-in-time snapshot (ADR-0200 exception): the induced rule `{fields, cells}` as the scan produced it,
+     * validated by the kernel's InducedRule shape; the evidence columns below describe this exact table */
+    rule: jsonb("rule").notNull(),
+    runs: integer("runs").notNull(),
+    structuredRuns: integer("structured_runs").notNull(),
+    outputClasses: integer("output_classes").notNull(),
+    agreement: doublePrecision("agreement").notNull(),
+    coverage: doublePrecision("coverage").notNull(),
+    /** measured spend of the step over the scan window (sum of trace span cost) */
+    windowCostUsd: doublePrecision("window_cost_usd").notNull(),
+    projectedMonthlySavingsUsd: doublePrecision("projected_monthly_savings_usd").notNull(),
+    status: text("status", { enum: RULE_STEP_SUGGESTION_STATUSES }).notNull().default("suggested"),
+    detectedAt: timestamp("detected_at", { withTimezone: true }).notNull().defaultNow(),
+    dismissedBy: uuid("dismissed_by").references(() => users.id, { onDelete: "set null" }),
+    dismissedAt: timestamp("dismissed_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("rule_step_suggestions_step_uq").on(t.agentId, t.stepName),
+    index("rule_step_suggestions_status_savings_idx").on(t.status, t.projectedMonthlySavingsUsd),
+    check("rule_step_suggestions_status_check", sql`${t.status} IN ('suggested', 'dismissed')`),
+    check("rule_step_suggestions_rates_check", sql`${t.agreement} BETWEEN 0 AND 1 AND ${t.coverage} BETWEEN 0 AND 1`),
+    check(
+      "rule_step_suggestions_dismissed_check",
+      sql`(${t.status} = 'dismissed') = (${t.dismissedAt} IS NOT NULL)`,
+    ),
+  ],
+);
+export type RuleStepSuggestionRow = typeof ruleStepSuggestions.$inferSelect;
+
+// ---------------------------------------------------------------------------
 // Lane L7 (P14 + P16 lineage; ADR-0216 / ADR-0217 amendments, migration model_artifact_lineage)
 // ---------------------------------------------------------------------------
 
@@ -16947,3 +17022,67 @@ export const endpointAddonSightingSecretTypes = pgTable(
   ],
 );
 // ===== end ADR-0332 =====
+
+// ===== ADR-0341 — the visual pipeline builder: drafts and versions of workflow templates =====
+/**
+ * One open draft per template, edited on the builder's canvas. `definition` is a schema-validated configuration
+ * document (ADR-0200 exception: it is validated by `workflowDefinitionSchema` on every save, may be invalid while
+ * someone is mid-edit, and is never executed). `base_version_id` is the version the draft was opened from; a publish is
+ * refused when the template has been published since. `revision` is the optimistic-concurrency counter every save
+ * names. Deployment-wide like `workflow_templates` (no tenant column, so no RLS policy); the routes are admin-only.
+ */
+export const workflowTemplateDrafts = pgTable(
+  "workflow_template_drafts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    templateId: uuid("template_id")
+      .notNull()
+      .references(() => workflowTemplates.id, { onDelete: "cascade" }),
+    definition: jsonb("definition").notNull(),
+    baseVersionId: uuid("base_version_id")
+      .notNull()
+      .references((): AnyPgColumn => workflowTemplateVersions.id, { onDelete: "cascade" }),
+    revision: integer("revision").notNull().default(1),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("workflow_template_drafts_template_uq").on(t.templateId),
+    index("workflow_template_drafts_base_version_idx").on(t.baseVersionId),
+    check("workflow_template_drafts_revision_check", sql`${t.revision} >= 1`),
+    check("workflow_template_drafts_definition_check", sql`jsonb_typeof(${t.definition}) = 'object'`),
+  ],
+);
+export type WorkflowTemplateDraftRow = typeof workflowTemplateDrafts.$inferSelect;
+
+/**
+ * Every published version of a template, append-only (`regulait_refuse_mutation`, no TRUNCATE). `definition` is a
+ * point-in-time snapshot (ADR-0200 exception): the bytes that went live, which `content_hash` (SHA-256 of ADR-0060's
+ * canonical JSON) identifies. `origin` `baseline` is the live definition captured the first time a template is opened
+ * in the builder; `builder` is a publish.
+ */
+export const workflowTemplateVersions = pgTable(
+  "workflow_template_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    templateId: uuid("template_id")
+      .notNull()
+      .references(() => workflowTemplates.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    definition: jsonb("definition").notNull(),
+    contentHash: text("content_hash").notNull(),
+    origin: text("origin", { enum: ["baseline", "builder"] }).notNull(),
+    publishedBy: uuid("published_by").references(() => users.id, { onDelete: "set null" }),
+    publishedAt: timestamp("published_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("workflow_template_versions_template_version_uq").on(t.templateId, t.version),
+    check("workflow_template_versions_version_check", sql`${t.version} >= 1`),
+    check("workflow_template_versions_hash_check", sql`${t.contentHash} ~ '^[0-9a-f]{64}$'`),
+    check("workflow_template_versions_origin_check", sql`${t.origin} IN ('baseline', 'builder')`),
+  ],
+);
+export type WorkflowTemplateVersionRow = typeof workflowTemplateVersions.$inferSelect;
+// ===== end ADR-0341 =====

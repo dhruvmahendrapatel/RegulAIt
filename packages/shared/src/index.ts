@@ -5070,3 +5070,6 @@ export * from "./fairness.js";
 export * from "./third-party-ingest/index.js";
 // ADR-0310 (G2): vendor-native managed settings compiled from effective MCP entitlements
 export * from "./managed-settings.js";
+
+// ADR-0341: RFC 6902 patches for diff views
+export { jsonPatch, type JsonPatchOperation } from "./json-patch.js";
