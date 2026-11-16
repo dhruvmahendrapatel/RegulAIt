@@ -35,7 +35,7 @@ jobs:
     env:
       # Modules and compositions this workflow checks. Older ones are added as
       # they gain tests; each must init without a backend.
-      MODULES: github-oidc-role aws-byoc-deployer-policy byoc-aws
+      MODULES: github-oidc-role aws-byoc-deployer-policy byoc-aws postgres-ha-aws postgres-ha-azure postgres-ha-gcp
       ENVIRONMENTS: regulait-dev-rehearsal-role byoc-aws
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
