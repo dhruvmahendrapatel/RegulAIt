@@ -157,12 +157,20 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // audited. Listed in NON_ADMIN_ROUTES too, so they are `public`.
   "/v1/trust-center",
   "/v1/auditor/session",
+  // ADR-0240: the auditor's second factor (challenge cookie + TOTP code; authenticated in-route)
+  "/v1/auditor/session/mfa",
   "/v1/auditor/items/:slug",
   // ADR-0221 (P4) — the SUPPLIER PORTAL: the routes a supplier, who holds no platform credential, signs in to and
   // answers one assessment through. They authenticate IN-ROUTE on the supplier's own cookie (supplier-portal.ts) and
   // never read a platform session or key; they answer 404 while `supplier_portal_enabled` is off (the shipped
   // default). Listed in NON_ADMIN_ROUTES too, so they are `public` to the platform hooks.
   ...SUPPLIER_ROUTE_PATHS,
+  // ADR-0223 amendment 1 — the drift monitor's WRITE-ONLY ingestion credential. A pipeline holds no platform
+  // credential: the route authenticates IN-ROUTE on `Authorization: Bearer rgldi_…` only (drift-ingest-credentials.ts;
+  // only its SHA-256 stored, always expiring, revocable, bound to one monitor by the row), never reads a platform
+  // session or key, and is rate-limited per address and per credential. Only POST is registered on this path, so
+  // the credential reads nothing. Listed in NON_ADMIN_ROUTES too, so it is `public` to the platform hooks.
+  "/v1/model-drift/ingest/:monitorId/reports",
   // ADR-0037 — SCIM is a SEPARATE TRUST PATH, and this exemption is what
   // makes that true rather than aspirational. These routes must never
   // authenticate via a human session cookie or a user's API key: they
@@ -811,12 +819,17 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/feedback/l/:token",
   // ADR-0221 (P4): the supplier routes (see AUTH_EXEMPT_ROUTES)
   ...SUPPLIER_ROUTES,
+  // ADR-0223 amendment 1: the ingestion credential's one route (see AUTH_EXEMPT_ROUTES). Issuing, rotating, revoking
+  // and listing credentials (/v1/model-drift/monitors/:monitorId/ingest-credentials*) are DELIBERATELY ABSENT, so
+  // ADMIN-ONLY, each write with an identity_manage step-up.
+  "POST /v1/model-drift/ingest/:monitorId/reports",
   //
   // --- ADR-0225 (P13 d): the public trust pages ---------------------------------
   // Everything under /v1/trust/* (drafting, publishing, the heading, auditor grants) is DELIBERATELY ABSENT, so
   // ADMIN-ONLY. These are the public reads and the auditor portal (also in AUTH_EXEMPT_ROUTES above).
   "GET /v1/trust-center",
   "POST /v1/auditor/session",
+  "POST /v1/auditor/session/mfa",
   "GET /v1/auditor/session",
   "DELETE /v1/auditor/session",
   "GET /v1/auditor/items/:slug",

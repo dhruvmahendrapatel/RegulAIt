@@ -110,6 +110,7 @@ export const MACHINE_ONLY = new Map([
 
   // ---- inbound callbacks and provisioning -----------------------------------
   ["POST /v1/pm/webhooks/:connectionName", "inbound callback: PM-tool webhooks, signature-verified in route (ADR-0061)"],
+  ["POST /v1/model-drift/ingest/:monitorId/reports", "pipeline push: a drift monitor's write-only ingestion credential, authenticated in route (ADR-0223 amendment 1)"],
   ["POST /v1/chatops/:connectionName/interactions", "inbound callback: Slack/Teams button interactions, signature-verified in route (ADR-0061)"],
   ["POST /v1/chatops/:connectionName/events", "inbound callback: Slack Events API to builder agents (ADR-0173)"],
   ["POST /v1/chatops/:connectionName/messages", "inbound callback: Teams outgoing webhook to builder agents (ADR-0173)"],
@@ -422,6 +423,30 @@ export const KNOWN_UI_GAPS = new Map([
       tracking: "ADR-0255 / P31: catalogue screen for the Governed Designer, requested on #453",
     },
   ],
+  [
+    "GET /v1/vendors/:vendorId/supplier-access/:accessId/mfa",
+    { does: "ADR-0240: a supplier grant's second-factor state (none, enrolling, active, locked); never the secret", tracking: "#453" },
+  ],
+  [
+    "POST /v1/vendors/:vendorId/supplier-access/:accessId/mfa/reset",
+    { does: "ADR-0240: the inviting admin resets a supplier's second factor (identity_manage step-up, reason, audited)", tracking: "#453" },
+  ],
+  [
+    "POST /supplier/v1/session/mfa",
+    { does: "ADR-0240: the supplier turns a spent link's challenge into a session with a TOTP code", tracking: "#453" },
+  ],
+  [
+    "GET /v1/trust/auditor-grants/:grantId/mfa",
+    { does: "ADR-0240: an auditor grant's second-factor state (none, enrolling, active, locked); never the secret", tracking: "#453" },
+  ],
+  [
+    "POST /v1/trust/auditor-grants/:grantId/mfa/reset",
+    { does: "ADR-0240: the inviting admin resets an auditor's second factor (identity_manage step-up, reason, audited)", tracking: "#453" },
+  ],
+  [
+    "POST /v1/auditor/session/mfa",
+    { does: "ADR-0240: the auditor turns a spent link's challenge into a session with a TOTP code", tracking: "#453" },
+  ],
   ["GET /v1/reports/posture/assets", { does: "pages per-asset posture scores (agents or use cases) the caller can read, each with objectives and ranked actions", tracking: "ADR-0214 amendment (P3): the brief is API-only; the per-asset score screen is posted on #453 (c6703277931) for the Governed Designer, and the owner chose the temporary gap on #705 (2026-11-07)" }],
   ["GET /v1/reports/posture/assets/:kind/:assetId", { does: "one agent's or use case's posture score, with its objectives, not-applicable list and ranked actions", tracking: "ADR-0214 amendment (P3): the brief is API-only; the per-asset score screen is posted on #453 (c6703277931) for the Governed Designer, and the owner chose the temporary gap on #705 (2026-11-07)" }],
   ["GET /v1/servers/:serverId/token-exchange", { does: "reads an MCP server's upstream token-exchange configuration and per-action scope map (never the secret)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
@@ -449,7 +474,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 54; // main's 54 − 11 MCP bundle routes closed by #815 = 43; + ADR-0334 (lane E16) 11 browser governance admin routes
+export const KNOWN_UI_GAPS_MAX = 60; // main's 49 (#815 closures, ADR-0240 six portal second-factor routes) + ADR-0334 (lane E16) 11 browser governance admin routes awaiting #453
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 

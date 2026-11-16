@@ -92,6 +92,15 @@ export const CREDENTIAL_TYPES = {
     issuedHere: true,
     overScoped: null,
   },
+  // ADR-0223 amendment 1: write-only, bound to one drift monitor, always expiring (at most 365 days)
+  drift_ingest_credential: {
+    label: "Drift ingestion credential",
+    manageAt: "/admin/model-risk",
+    lastUsed: "recorded",
+    lastUsedNote: "the credential's last_used_at, written when a summary it pushed is accepted",
+    issuedHere: true,
+    overScoped: null,
+  },
   model_credential: {
     label: "Model provider key (platform)",
     manageAt: "/admin/model-credentials",
