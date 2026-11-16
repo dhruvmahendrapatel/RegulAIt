@@ -148,7 +148,7 @@ export default function GettingStartedPage() {
           </Button>
         }
       />
-      <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+      <QueryGate query={q}>
         {d && (
           <div className={v.stack}>
             {d.complete && (

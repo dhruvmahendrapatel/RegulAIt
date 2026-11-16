@@ -23,6 +23,9 @@ concurrency:
 
 jobs:
   live:
+    # The nightly schedule is off by default (owner decision 2026-11-15): a scheduled run only proceeds when the
+    # repository variable LIVE_TESTS_NIGHTLY is "true". Manual dispatch always runs.
+    if: github.event_name != 'schedule' || vars.LIVE_TESTS_NIGHTLY == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     environment: live-tests

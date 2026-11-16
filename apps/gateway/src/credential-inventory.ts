@@ -43,6 +43,8 @@ import {
   inArray,
   isNotNull,
   modelCredentials,
+  modelDriftIngestCredentials,
+  modelDriftMonitors,
   oidcProviders,
   orgSettings,
   pmConnections,
@@ -327,6 +329,37 @@ export async function computeCredentialInventory(
       secretSetAt: iso(t.secretSetAt),
       overScoped: false,
       status: t.revokedAt ? "revoked" : "active",
+    });
+  }
+
+  // --- ADR-0223 amendment 1: drift ingestion credentials (write-only, one monitor each) ---
+  for (const c of await db
+    .select({
+      id: modelDriftIngestCredentials.id,
+      name: modelDriftIngestCredentials.name,
+      monitorName: modelDriftMonitors.name,
+      createdAt: modelDriftIngestCredentials.createdAt,
+      lastUsedAt: modelDriftIngestCredentials.lastUsedAt,
+      expiresAt: modelDriftIngestCredentials.expiresAt,
+      revokedAt: modelDriftIngestCredentials.revokedAt,
+    })
+    .from(modelDriftIngestCredentials)
+    .innerJoin(modelDriftMonitors, eq(modelDriftMonitors.id, modelDriftIngestCredentials.monitorId))) {
+    drafts.push({
+      id: `drift_ingest_credential:${c.id}`,
+      type: "drift_ingest_credential",
+      name: c.name,
+      ownerUserId: null,
+      ownerKind: null,
+      scope: `push production summaries to drift monitor '${c.monitorName}' only`,
+      createdAt: c.createdAt.toISOString(),
+      lastUsedAt: iso(c.lastUsedAt),
+      expiresAt: c.expiresAt.toISOString(),
+      revokedAt: iso(c.revokedAt),
+      // rotation is a new row, so the secret was set when the row was created
+      secretSetAt: c.createdAt.toISOString(),
+      overScoped: false,
+      status: c.revokedAt ? "revoked" : "active",
     });
   }
 

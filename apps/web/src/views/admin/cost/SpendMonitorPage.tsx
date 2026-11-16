@@ -256,7 +256,7 @@ export default function SpendMonitorPage() {
           </div>
         </Card>
 
-        <QueryGate loading={overview.isLoading} error={overview.error} onRetry={() => void overview.refetch()}>
+        <QueryGate query={overview}>
           {/* ---------------- policies ---------------- */}
           <Card title="Anomaly policies">
             <div className={v.stack}>

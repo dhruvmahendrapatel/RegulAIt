@@ -116,7 +116,7 @@ function SignedLinks(props: { useCaseId: string }) {
       title="Public signed links"
       actions={q.data ? <Badge tone={q.data.enabled ? "warn" : "ok"}>{q.data.enabled ? "on (relaxed)" : "off (strict default)"}</Badge> : null}
     >
-      <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+      <QueryGate query={q}>
         {q.data && (
           <div className={v.stack}>
             {q.data.enabled ? (

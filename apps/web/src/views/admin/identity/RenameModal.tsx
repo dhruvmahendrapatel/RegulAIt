@@ -9,7 +9,7 @@
  */
 import { useEffect, useState } from "react";
 import { api, ApiError } from "../../../api/client";
-import { plural } from "../../../api/format";
+import { plural, errorText } from "../../../api/format";
 import { withStepUp } from "../../../stepup/stepUp";
 import { Button, Field, Input, Modal } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
@@ -73,7 +73,7 @@ export function RenameModal(props: {
         rules: (e.payload.rules as Ref[] | undefined) ?? [],
       });
     } else {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorText(e));
     }
   };
 

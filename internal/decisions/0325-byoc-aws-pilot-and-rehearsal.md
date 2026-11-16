@@ -98,14 +98,63 @@ named, tagged or designated production.
   boundary, and the managed-policy size limits. Terraform is installed by `infra/scripts/install-terraform.sh`, pinned to
   1.16.7 (terraform-aws-modules/rds 7.x needs 1.11 or later) with its SHA-256 committed.
 
+### PR 2: the BYOC AWS module
+
+- **`infra/modules/byoc-aws`** builds what the Helm chart runs on, inside the customer's account (details in its
+  README): a VPC over two zones; egress `allow_list` (default: AWS Network Firewall, strict rule order, TLS SNI allow-list
+  of `egress_allowed_domains`, default only `login.microsoftonline.com`, everything else dropped and logged) or `none`;
+  VPC endpoints for every AWS API the stack uses, so AWS traffic never crosses the firewall; EKS (private API
+  endpoint by default, `0.0.0.0/0` refused, access entries only, KMS envelope encryption, control-plane audit logs,
+  IMDSv2 hop limit 1, VPC CNI with NetworkPolicy enforcement on, EBS CSI and Pod Identity add-ons); RDS PostgreSQL 16
+  (stack key, TLS forced, Multi-AZ, 14-day PITR, final snapshot, deletion protection, RDS-managed master secret); one
+  rotating KMS key; the audit-anchor Object Lock bucket in COMPLIANCE mode through `audit-anchor-worm-s3`; a gateway
+  Pod Identity role that may invoke only the listed Bedrock models and write anchors; private ECR repositories
+  (immutable, scanned) and a `public.ecr.aws` pull-through cache.
+- **`infra/environments/byoc-aws`** is the root the customer applies; the rehearsal applies the same root with
+  `rehearsal.tfvars.example`, so the rehearsal exercises the customer's exact path.
+- **Data boundary**: both the control plane and the agent-execution plane run in the customer's account, and nothing
+  goes to the vendor. The product has no channel to us (DATA_BOUNDARY.md §1) and the stack opens none. The brief's
+  "metadata only to our control plane" has no counterpart in the product today. Adding one would be a new, opt-in data
+  path that needs its own ADR, so it is not built (owner note).
+- **Egress posture (ADR-0062)**: strict on both layers by default. At the network layer, the firewall allow-list
+  passes only the listed hosts. At the app layer, the org setting `egressCompiledDefaultPolicy` defaults to `strict`
+  (since ADR-0180), so a `byoc` install also checks compiled vendor endpoints against `egress_allow_hosts`. The
+  runbook has the installer confirm it and add the same hosts there.
+- **Preflight** `infra/modules/byoc-aws/preflight/preflight.sh` (read-only): tools, signed-in account, region and
+  zones, quotas, Network Firewall and endpoint availability, Bedrock model access, and free names.
+
 ### Open source first (ADR-0176)
 
 Searched: `terraform-aws-modules/iam` (Apache-2.0) has `iam-github-oidc-provider` and `iam-github-oidc-role`
 submodules. Its role submodule matches `sub` with `StringLike` and attaches managed policy ARNs; it does not take an
 inline boundary-scoped policy or refuse a wildcard subject. Our module already existed and is ~100 lines, so it is
 extended rather than replaced; the boundary and deployer policy are RegulAIt's governance semantics (what an
-installer may do), which ADR-0176 §4 keeps in house. `terraform-aws-modules` is the first choice for PR 2's VPC, EKS
-and RDS.
+installer may do), which ADR-0176 §4 keeps in house. PR 2 composes validated modules instead of hand-written
+resources, all Apache-2.0 and pinned to exact versions: `terraform-aws-modules` vpc 6.7.3 (with `vpc-endpoints`), eks
+21.29.0, rds 7.2.2, eks-pod-identity 2.10.0 (every Pod Identity role: gateway, EBS CSI driver, Load Balancer
+Controller, the last two with their upstream-maintained policies), kms 4.2.2, ecr 3.2.1 and network-firewall 2.3.0
+(firewall, policy and rule group), plus the repo's own `audit-anchor-worm-s3`. What stays hand-written, and why
+(ADR-0176 §4): the per-zone NAT gateways and the routes node subnet, firewall endpoint, NAT and back, because the vpc
+module's NAT routes private subnets straight to the NAT and cannot place the firewall endpoint on the symmetric path;
+the firewall's CloudWatch log groups (encrypted with the stack key); the gp3 StorageClass in the outputs.
+
+### Review of #868 (2026-11-16)
+
+The code review returned REQUEST CHANGES at `eeaa0698`; the security review approved.
+
+1. Pod Identity roles now come from `terraform-aws-modules/eks-pod-identity`; the copied Load Balancer Controller
+   policy file is gone. The EBS CSI role keeps the tighter key grant (`kms:ViaService` EC2) through the module's
+   `policy_statements`.
+2. The stack key comes from `terraform-aws-modules/kms`, the repositories and pull-through cache from
+   `terraform-aws-modules/ecr`.
+3. The firewall, policy and rule group come from `terraform-aws-modules/network-firewall`; the NAT and routes stay
+   hand-written for the reason above. The firewall now defaults to delete protection (`firewall_delete_protection`,
+   off only in the rehearsal tfvars), and its policy and rule group are encrypted with the stack key too.
+4. Operator backups to S3 (ADR-0305 §2) move to PR 3. `infra/modules/backup-target-s3` does not fit as it stands: it
+   grants `s3:ListBucket` (ADR-0305 forbids it) and no `kms:GenerateDataKey`/`kms:Decrypt` conditioned on S3, so PR 3
+   either extends that module with a pod-identity writer mode or records why not.
+5. PR 3's runbook and sweep document the ordered teardown and what is left behind on purpose: the final RDS snapshot,
+   the COMPLIANCE audit anchors and the KMS key in its 30-day deletion window.
 
 ### Review of #854 (2026-11-15)
 

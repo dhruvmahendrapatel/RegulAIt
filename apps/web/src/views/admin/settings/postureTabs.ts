@@ -37,12 +37,16 @@ export interface Read {
 
 const settled = (r: Read) => r.data !== undefined || r.failed;
 
+/** a tab's name and whatever it holds that is unresolved, joined with " · "; a `null` part is left out */
+export function joinTabLabel(name: string, parts: ReadonlyArray<string | null>): string {
+  const shown = parts.filter((p): p is string => p !== null);
+  return shown.length ? `${name} · ${shown.join(" · ")}` : name;
+}
+
 /** "Isolation · 2 unknown", "Discovery · 1 warning", or just the name when nothing is unresolved */
 export function tabLabel(name: string, u: Unresolved | null): string {
   if (!u) return name;
-  const parts = [u.unknown > 0 ? `${u.unknown.toLocaleString()} unknown` : null, u.warnings > 0 ? plural(u.warnings, "warning") : null];
-  const shown = parts.filter((p): p is string => p !== null);
-  return shown.length ? `${name} · ${shown.join(" · ")}` : name;
+  return joinTabLabel(name, [u.unknown > 0 ? `${u.unknown.toLocaleString("en-GB")} unknown` : null, u.warnings > 0 ? plural(u.warnings, "warning") : null]);
 }
 
 /** `OrgSettingsCard`: a key that reads unknown, or one that reads "relaxed (audited)" */
