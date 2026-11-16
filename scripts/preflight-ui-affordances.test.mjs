@@ -96,12 +96,13 @@ describe("affordance census: a notBuilt route counts only when the file defines 
 
   it("no exemption names a stub: a stub is skipped already, so an entry for one is stale", () => {
     // real handlers, not stubs: ADR-0246 (P27) authorised-targets, raised for the master's review (the two ADR-0236
-    // bundle routes left this list when the #453 bundle screen landed), plus lane L2 (ADR-0219 follow-up): remote-agent
-    // role grant and revocation removal, until the controls on #453
+    // bundle routes left this list when the #453 bundle screen landed); lane L2 (ADR-0219 follow-up): remote-agent role
+    // grant and revocation removal, until the controls on #453; and the ADR-0230 A2 SAP business unmark until its screen
     expect([...DELIBERATELY_API_ONLY.keys()]).toEqual([
       "/v1/mcp/authorised-targets/:x",
       "/v1/a2a/agents/:x/role-grants/:x",
       "/v1/a2a/agents/:x/revocations/:x",
+      "/v1/servers/:x/system-class",
     ]);
   });
 });

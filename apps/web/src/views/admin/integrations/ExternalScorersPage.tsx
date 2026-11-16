@@ -111,9 +111,7 @@ export default function ExternalScorersPage() {
         </Card>
 
         <QueryGate
-          loading={scorers.isLoading}
-          error={scorers.error}
-          onRetry={() => void scorers.refetch()}
+          query={scorers}
         >
           <Card
             title="Register a scoring endpoint"

@@ -16,6 +16,9 @@ outputs:
   code:
     description: "'true' unless every changed file is documentation (internal/**, docs/**, *.md, .gitignore, LICENSE)"
     value: ${{ steps.scope.outputs.code }}
+  base:
+    description: "'true' when code changed, or documentation that build-and-test-base reads (internal/decisions/**, internal/fragments/**, PENDING.md, any THIRD_PARTY.md; ADR-0323)"
+    value: ${{ steps.scope.outputs.base }}
   web:
     description: "'true' when the web app or what it is built from changed (always on a full run)"
     value: ${{ steps.scope.outputs.web }}
@@ -25,6 +28,9 @@ outputs:
   engines:
     description: "'true' when an engine's own input changed: engines/**, any Dockerfile, the lockfile, the engine allow-lists and gate scripts, the image workflows (not packages/ or apps/, which the shim stage also copies)"
     value: ${{ steps.scope.outputs.engines }}
+  gateway:
+    description: "'true' unless the PR changes only apps/web/** or docs (ADR-0323): 'false' runs one gateway runner with the tests that read apps/web, not the five shards"
+    value: ${{ steps.scope.outputs.gateway }}
 runs:
   using: composite
   steps:

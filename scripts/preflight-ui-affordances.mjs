@@ -50,6 +50,8 @@ export const DELIBERATELY_API_ONLY = new Map([
   // census KNOWN_UI_GAPS). RAISED for the master's review on the PR: delete these entries when the controls land
   ["/v1/a2a/agents/:x/role-grants/:x", "removing a role's access to a remote agent: API-only until the controls on #453 (lane L2 brief)"],
   ["/v1/a2a/agents/:x/revocations/:x", "lifting a person's revocation on a remote agent: API-only until the controls on #453 (lane L2 brief)"],
+  // ADR-0230 A2 (P19, Lane L3): the UI is built by the design builder; delete this entry when the screen lands
+  ["/v1/servers/:x/system-class", "unmarking an SAP business server (settings_relax step-up): API-only until the SAP server screen on #453 (route census KNOWN_UI_GAPS)"],
 ]);
 
 /**
