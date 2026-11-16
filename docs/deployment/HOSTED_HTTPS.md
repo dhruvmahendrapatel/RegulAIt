@@ -42,6 +42,7 @@ For the laptop-hosted demo behind a Cloudflare Tunnel (no inbound port, no ACME)
 | `REGULAIT_KC_HOSTNAME` | `https://demo.example.com/idp` | Only with the `sso` profile. Must be the same name under `/idp`. |
 | `REGULAIT_KC_RELATIVE_PATH` | `/idp` | Only with the `sso` profile. Keycloak serves under this path. Default `/` (laptop). |
 | `REGULAIT_HSTS` | `max-age=86400` | Already set to one day in the box's `docker-compose.override.yml`. The gateway owns this header, not Caddy. |
+| `REGULAIT_BOOTSTRAP_TOKEN`, `REGULAIT_DATA_KEY` | `openssl rand -hex 24` / `-hex 32` | Real values (install.sh generates them). The gateway refuses the published compose defaults behind this profile (ADR-0167 amendment, S-02); never set `REGULAIT_ALLOW_DEV_SECRETS=1` here. |
 
 `hosted-config.sh` refuses (and the box keeps its current name) when `REGULAIT_PUBLIC_HOST` is not a valid name, or
 when `REGULAIT_PUBLIC_URL` or `REGULAIT_KC_HOSTNAME` spell a different origin.
