@@ -59,6 +59,7 @@ export const DELIBERATELY_API_ONLY = new Map([
 export const NO_REMOVE_BY_DESIGN = new Map([
   ["/v1/decisions", "signed approval decisions are evidence; a decision is superseded by a later one, never deleted"],
   ["/v1/runs", "a run is an execution record the audit trail and cost ledger point at"],
+  ["/v1/workflows/instances/:x/migrations", "ADR-0340: a migration request is the evidence of a decided change to a running instance; it ends applied, denied or stale, never deleted"],
   ["/v1/evals/runs", "an evaluation run is a result record that model-risk sign-offs cite"],
   ["/v1/engine-runner/runs/:x/task/frames", "frames are the runner's output stream for one run, append-only"],
   ["/v1/governance/alerts/:x/remediation", "a remediation plan is part of the alert's record; the alert closes, the plan stays"],

@@ -513,6 +513,7 @@ import {
   precheckComplianceProfileDecision,
   registerComplianceProfileLifecycleRoutes,
 } from "./compliance-profile-lifecycle.js";
+import { applyWorkflowMigrationDecision, precheckWorkflowMigrationDecision, registerWorkflowMigrationRoutes } from "./workflow-migrations.js";
 import { applyInfraApprovalDecision, registerInfraRoutes } from "./infra.js";
 import { registerOptimizationRoutes } from "./optimization.js";
 import { applyRunApprovalDecision, registerOrchestrationRoutes } from "./orchestration.js";
@@ -5215,6 +5216,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const refusal = await precheckComplianceProfileDecision(db, row, deciderUserId);
       if (refusal) return fail(refusal.status, refusal.body);
     }
+    // ADR-0340 slice 3 — `cannot_approve_own_workflow_migration`, keyed on the DECIDER
+    if (row.objectType === "workflow_migration") {
+      const refusal = await precheckWorkflowMigrationDecision(db, row, deciderUserId);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
     // Separation-of-duties guard: the person deciding IS the person who
     // triggered the governed action. Still decidable (alternate-approver
     // routing is deliberately out of scope) but never silently — a recorded
@@ -5485,6 +5491,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // ADR-0208 (G7): a reviewed compliance-profile version — approved = it becomes the active version here, inside
       // the decision's transaction, only if its base version is still the active one (else recorded stale); running
       // workflow instances of the carrying projects get the additive changes only. Denied = nothing changes.
+      // ADR-0340 slice 3: an approved migration is re-planned under the instance lock and applied HERE, inside the
+      // decision's transaction, or recorded stale; denied = nothing changes
+      if (updated.objectType === "workflow_migration") {
+        await applyWorkflowMigrationDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
+      }
       if (updated.objectType === "compliance_profile") {
         await applyComplianceProfileDecision(
           tx as unknown as Db,
@@ -6028,6 +6039,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerDecomposeRoutes(app, db, { dataKey: opts.dataKey });
   registerPmRoutes(app, db, { dataKey: opts.dataKey });
 
+  registerWorkflowMigrationRoutes(app, db);
   registerWorkflowRoutes(app, db, {
     dataKey: opts.dataKey,
     // ADR-0080/0084: artifact submit / advance / abort can move an instance

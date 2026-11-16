@@ -1532,6 +1532,8 @@ export const auditLog = pgTable(
         "role",
         "team",
         "workflow_template",
+        // ADR-0340 slice 3: a request to migrate a running instance (also an approvals-queue kind)
+        "workflow_migration",
         "approval_delegation",
         // ADR-0025 secure auth: sign-in lifecycle events (login success/
         // failure/lockout, password + MFA changes, session revocations) audit
@@ -7153,6 +7155,8 @@ export const CONFIG_ARTIFACT_TYPES = [
   "rate_limit",
   "data_scope_rule",
   "compliance_profile",
+  // ADR-0340 slice 3: a workflow template's definition (pinned per instance, canaried over new instances)
+  "workflow_template",
 ] as const;
 export type ConfigArtifactType = (typeof CONFIG_ARTIFACT_TYPES)[number];
 
@@ -16842,3 +16846,68 @@ export const endpointAddonSightingSecretTypes = pgTable(
   ],
 );
 // ===== end ADR-0332 =====
+
+// ===== ADR-0340 slice 3 (lane E21): workflow template versions, instance pinning and in-flight migration =====
+// Versions themselves are ADR-0048 `config_versions` rows (artifact_type 'workflow_template'); these two tables
+// record which version each instance runs and the governed requests to move a running instance to another.
+
+/** the template versions an instance runs: one row when it starts (per template) and one per applied migration */
+export const workflowInstanceTemplateVersions = pgTable(
+  "workflow_instance_template_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    instanceId: uuid("instance_id")
+      .notNull()
+      .references(() => workflowInstances.id, { onDelete: "cascade" }),
+    templateId: uuid("template_id")
+      .notNull()
+      .references(() => workflowTemplates.id, { onDelete: "cascade" }),
+    /** NULL = the template had no version history yet: the instance runs the definition the template was created with */
+    configVersionId: uuid("config_version_id").references(() => configVersions.id, { onDelete: "restrict" }),
+    /** point-in-time fact of the selection (a canary bucket served it), not a copy of the version's status */
+    canary: boolean("canary").notNull().default(false),
+    via: text("via", { enum: ["start", "migration"] }).notNull(),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("workflow_instance_template_versions_instance_idx").on(t.instanceId),
+    index("workflow_instance_template_versions_version_idx").on(t.configVersionId),
+    check("workflow_instance_template_versions_via_check", sql`${t.via} IN ('start', 'migration')`),
+  ],
+);
+
+export const WORKFLOW_MIGRATION_STATUSES = ["pending", "applied", "denied", "stale"] as const;
+
+/** a request to move one running instance to another version of its template, decided in the one approvals queue */
+export const workflowInstanceMigrations = pgTable(
+  "workflow_instance_migrations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    instanceId: uuid("instance_id")
+      .notNull()
+      .references(() => workflowInstances.id, { onDelete: "cascade" }),
+    targetVersionId: uuid("target_version_id")
+      .notNull()
+      .references(() => configVersions.id, { onDelete: "restrict" }),
+    requestedByUserId: uuid("requested_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    reason: text("reason").notNull(),
+    status: text("status", { enum: WORKFLOW_MIGRATION_STATUSES }).notNull().default("pending"),
+    /** point-in-time evidence (ADR-0200 exception): the dry-run plan and RFC 6902 diff the approver reviewed, as
+     * computed at the request; the apply re-plans under the instance lock and refuses a plan that no longer holds */
+    plan: jsonb("plan").$type<Record<string, unknown>>().notNull(),
+    /** SHA-256 of the instance definition the plan was computed against; the apply refuses if it moved */
+    fromDefinitionSha256: text("from_definition_sha256").notNull(),
+    decidedByUserId: uuid("decided_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("workflow_instance_migrations_instance_idx").on(t.instanceId),
+    // one open request per instance at a time
+    uniqueIndex("workflow_instance_migrations_one_pending_uq").on(t.instanceId).where(sql`${t.status} = 'pending'`),
+    check("workflow_instance_migrations_status_check", sql`${t.status} IN ('pending', 'applied', 'denied', 'stale')`),
+    check("workflow_instance_migrations_sha_check", sql`${t.fromDefinitionSha256} ~ '^[0-9a-f]{64}$'`),
+  ],
+);
+export type WorkflowInstanceMigrationRow = typeof workflowInstanceMigrations.$inferSelect;
+// ===== end ADR-0340 slice 3 =====

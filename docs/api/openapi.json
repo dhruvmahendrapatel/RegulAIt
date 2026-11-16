@@ -1132,7 +1132,8 @@
                 "engine_run",
                 "eval_run",
                 "compliance_profile",
-                "model_call"
+                "model_call",
+                "workflow_migration"
               ]
             }
           },

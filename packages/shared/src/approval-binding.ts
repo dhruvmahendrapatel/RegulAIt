@@ -99,6 +99,8 @@ export const APPROVAL_OBJECT_TYPES = [
   "compliance_profile",
   // ADR-0251: a model call held by a model approval rule, released once by the identical re-submitted call
   "model_call",
+  // ADR-0340: moving one running workflow instance to another template version (bound to the request's plan)
+  "workflow_migration",
 ] as const;
 export type ApprovalObjectType = (typeof APPROVAL_OBJECT_TYPES)[number];
 
@@ -106,6 +108,7 @@ export type ApprovalObjectType = (typeof APPROVAL_OBJECT_TYPES)[number];
 export const APPROVAL_OBJECT_TYPE_LABELS: Record<ApprovalObjectType, string> = {
   mcp_tool: "MCP tool call",
   workflow: "workflow stage sign-off",
+  workflow_migration: "workflow instance migration",
   run: "agent run escalation",
   project: "project budget overage",
   infra_operation: "infrastructure operation",
