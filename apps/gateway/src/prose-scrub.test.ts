@@ -507,6 +507,8 @@ describe("6. the covered / NOT-covered inventory", () => {
     "engine_runners.revoke_reason",
     // ADR-0217: an automatic re-test's reason
     "mrm_retest_runs.reason",
+    // ADR-0331: the admin's reason for removing an MCP server from endpoints
+    "endpoint_addon_removals.reason",
     // ADR-0175: a held skill's admission reason and a release-age override reason
     "builder_skills.admit_reason",
     "release_overrides.reason",
