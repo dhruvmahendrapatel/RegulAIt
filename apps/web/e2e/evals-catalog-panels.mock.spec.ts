@@ -29,14 +29,14 @@ const CATALOG = {
   evaluators: [
     { id: "scorer:exact", kind: "scorer", name: "exact", summary: "Exact match.", limits: "Brittle by design.", deterministic: true, runnableOn: ["dataset", "trace"], refs: refs(["MEASURE-2.1", "MEASURE-2.5"], ["iso-42001:9.1-monitoring-measurement"], ["eu-ai-act:art-15-accuracy-robustness"], []) },
     { id: "scorer:llm_as_judge", kind: "scorer", name: "llm_as_judge", summary: "A judge agent scores.", limits: "Not free; varies run to run.", deterministic: false, runnableOn: ["dataset"], refs: refs(["MEASURE-2.5"], ["iso-42001:9.1-monitoring-measurement"], [], []) },
-    { id: "detector:prompt_injection", kind: "detector", name: "prompt_injection", summary: "Instruction override.", limits: "Lexical.", deterministic: true, runnableOn: ["runtime", "trace"], refs: refs(["MEASURE-2.7"], ["iso-42001:9.1-monitoring-measurement"], ["eu-ai-act:art-15-accuracy-robustness"], ["owasp:llm:01", "owasp:agentic:asi01"]) },
-    { id: "redteam:tool_abuse", kind: "redteam_class", name: "tool_abuse", summary: "Induced tool call.", limits: "A decision, never an execution.", deterministic: false, runnableOn: ["redteam"], refs: refs(["MEASURE-2.7"], ["iso-42001:A.6-ai-system-lifecycle"], ["eu-ai-act:art-14-human-oversight"], ["owasp:llm:06", "owasp:agentic:asi02"]) },
+    { id: "detector:prompt_injection", kind: "detector", name: "prompt_injection", summary: "Instruction override.", limits: "Lexical.", deterministic: true, runnableOn: ["runtime", "trace"], refs: refs(["MEASURE-2.7"], ["iso-42001:9.1-monitoring-measurement"], ["eu-ai-act:art-15-accuracy-robustness"], ["owasp:llm:2026:01", "owasp:agentic:asi01"]) },
+    { id: "redteam:tool_abuse", kind: "redteam_class", name: "tool_abuse", summary: "Induced tool call.", limits: "A decision, never an execution.", deterministic: false, runnableOn: ["redteam"], refs: refs(["MEASURE-2.7"], ["iso-42001:A.6-ai-system-lifecycle"], ["eu-ai-act:art-14-human-oversight"], ["owasp:llm:2026:03", "owasp:agentic:asi02"]) },
   ],
   counts: { scorers: 13, detectors: 5, redteamClasses: 10, externalScorers: 0 },
   owasp: {
     references: [
-      { id: "owasp:llm:01", list: "owasp-llm-top-10", name: "Prompt Injection" },
-      { id: "owasp:llm:06", list: "owasp-llm-top-10", name: "Excessive Agency" },
+      { id: "owasp:llm:2026:01", list: "owasp-llm-top-10", name: "Prompt Injection", edition: 2026, legacyId: "owasp:llm:01" },
+      { id: "owasp:llm:2026:03", list: "owasp-llm-top-10", name: "Excessive Agency", edition: 2026, legacyId: "owasp:llm:06" },
       { id: "owasp:agentic:asi01", list: "owasp-agentic-top-10", name: "ASI01: Agent Goal Hijack" },
       { id: "owasp:agentic:asi02", list: "owasp-agentic-top-10", name: "ASI02: Tool Misuse and Exploitation" },
     ],
@@ -158,7 +158,8 @@ test.describe("Evaluations — catalog, compare, judge panels and calibration", 
     await expect(page.getByText("scorer:exact")).toBeVisible();
     await expect(page.getByText("redteam:tool_abuse")).toBeVisible();
     await expect(page.getByTestId("owasp-attribution")).toContainText("promptfoo's framework mapping tables, release 0.123.1");
-    await page.getByLabel("Search name or control").fill("owasp:llm:01");
+    // ADR-0297: the catalog cites 2026 ids
+    await page.getByLabel("Search name or control").fill("owasp:llm:2026:01");
     await expect(page.getByText("detector:prompt_injection")).toBeVisible();
     await expect(page.getByText("scorer:exact")).toHaveCount(0);
     await expectAxeClean(page, "evals catalog");

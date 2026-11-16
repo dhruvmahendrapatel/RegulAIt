@@ -475,7 +475,7 @@ export function registerTemplateGalleryRoutes(app: FastifyInstance, db: Db): voi
         galleryDefinitionWithApprover(entry.definition, body.approverUserId),
         body.reviewerAgent,
       );
-      const result = await createWorkflowTemplateValidated(db, { name: body.name, definition });
+      const result = await createWorkflowTemplateValidated(db, { name: body.name, definition }, req.authCtx.userId ?? null);
       if (!result.ok) return reply.status(result.status).send(result.body);
       await audit(db, result.row);
       return reply.status(201).send({ ...result.row, galleryId });
@@ -493,7 +493,7 @@ export function registerTemplateGalleryRoutes(app: FastifyInstance, db: Db): voi
       candidate: { galleryId, name: body.name, ...(body.approverUserId ? { approverUserId: body.approverUserId } : {}) },
       actorUserId: req.authCtx.userId ?? null,
       write: async (tx, resolved) => {
-        const result = await createWorkflowTemplateValidated(tx, { name: body.name, definition: resolved!.definition });
+        const result = await createWorkflowTemplateValidated(tx, { name: body.name, definition: resolved!.definition }, req.authCtx.userId ?? null);
         if (!result.ok) return result;
         await audit(tx, result.row);
         return { ok: true, value: result.row };

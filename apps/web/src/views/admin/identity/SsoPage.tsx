@@ -19,14 +19,15 @@ import {
   CodeBlock,
   ConfirmModal,
   EmptyState,
+  ErrorState,
   Field,
   Input,
   Modal,
   Select,
   Table,
+  TabPanel,
   Tabs,
   Textarea,
-  TabPanel,
 } from "../../../ui/kit";
 import { QueryGate, optionEls, orgSettingsQuery, roleOpts, useAction, useRoles, useUsers } from "../adminKit";
 import a from "../admin.module.css";
@@ -55,6 +56,8 @@ export default function SsoPage() {
     : saml.data
       ? { unknown: 0, warnings: (saml.data.providers ?? []).filter(samlNeedsReview).length }
       : null;
+  // I-2: the reads the status row counts, with the cards' own query keys (one fetch each, shared)
+  const oidc = useQuery({ queryKey: ["admin", "oidc-providers"], queryFn: () => api.get<{ providers: OidcProvider[] }>("/v1/auth/oidc-providers") });
   const settings = useQuery(orgSettingsQuery<OrgSettingsResponse>());
   const stepUpUnresolved = orgSettingsUnresolved(STEP_UP_KEYS, { data: settings.data, failed: settings.isError });
   return (
@@ -93,6 +96,8 @@ export default function SsoPage() {
           viewAll="/admin/sso/link-requests"
           empty={<EmptyState title="No pending link requests" body="A federated identity that matches an account with its own password waits here; it is never linked silently." />}
         />
+        {/* I-2: OIDC and SAML count together for "SSO only", so both families' facts stay above the tabs, whichever is open */}
+        <SignInStatus oidc={oidc} saml={saml} settings={settings} />
         {/* P3: the providers and the session policy are settings, in tabs; a hidden tab counts what needs review */}
         <Tabs
           tabs={[
@@ -119,6 +124,50 @@ export default function SsoPage() {
         </div></TabPanel>
       </div>
     </>
+  );
+}
+
+interface StatusRead<T> {
+  data?: T;
+  error: unknown;
+  refetch: () => unknown;
+}
+
+/**
+ * I-2: the sign-in facts no tab may hide: enabled providers of each family (counted together for "SSO only"), and
+ * whether password sign-in is refused. A read that failed is an error with Retry, never "0 enabled" or "off".
+ */
+function SignInStatus(props: {
+  oidc: StatusRead<{ providers: OidcProvider[] }>;
+  saml: StatusRead<{ providers: SamlProvider[] }>;
+  settings: StatusRead<OrgSettingsResponse>;
+}) {
+  const failed = [props.oidc, props.saml, props.settings].filter((r) => !r.data && r.error);
+  if (failed.length > 0) {
+    const first = failed[0]!.error;
+    return (
+      <ErrorState
+        title="Couldn't load the sign-in status"
+        message={first instanceof Error ? first.message : String(first)}
+        onRetry={() => failed.forEach((r) => void r.refetch())}
+      />
+    );
+  }
+  if (!props.oidc.data || !props.saml.data || !props.settings.data) return null;
+  const oidcOn = (props.oidc.data.providers ?? []).filter((p) => p.enabled).length;
+  const samlOn = (props.saml.data.providers ?? []).filter((p) => p.enabled).length;
+  const ssoOnly = props.settings.data.settings?.ssoOnly === true || props.settings.data.settings?.ssoOnly === "true";
+  const breakGlassOnly = props.settings.data.settings?.localSignIn === "break_glass_only";
+  return (
+    <div className={v.row} role="group" aria-label="Sign-in status">
+      <Badge tone="neutral">{`OIDC: ${oidcOn.toLocaleString()} enabled`}</Badge>
+      <Badge tone="neutral">{`SAML: ${samlOn.toLocaleString()} enabled`}</Badge>
+      {/* the restrictive states carry a warn tone, as the ChatOps and Users status rows do for theirs (review of #691) */}
+      <Badge tone={ssoOnly ? "warn" : "neutral"}>{ssoOnly ? "SSO only: on, password sign-in refused" : "SSO only: off"}</Badge>
+      <Badge tone={breakGlassOnly ? "warn" : "neutral"}>
+        {breakGlassOnly ? "Email sign-in: break-glass admins only" : "Email sign-in: everyone with a password"}
+      </Badge>
+    </div>
   );
 }
 
