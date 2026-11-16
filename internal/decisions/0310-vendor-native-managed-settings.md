@@ -76,7 +76,7 @@ own allowlists, which the vendors' clients enforce.
    principal, or another system reason reads and writes nothing (pinned by a test).
 11. **Route census.** The three routes have no screen yet. Under the lane E1 brief (rule 3: new routes go into the
    census with a `KNOWN_UI_GAPS` entry on #453), each has a `KNOWN_UI_GAPS` entry, and `KNOWN_UI_GAPS_MAX` rises by
-   exactly 3, from main's 49 to **52**. The ratchet falls again when the #453 screen lands.
+   exactly 3 over main (52 + 3 = **55** after ADR-0332's three endpoint add-on routes landed on main). The ratchet falls again when the #453 screen lands.
 
 ## Owner decision
 
