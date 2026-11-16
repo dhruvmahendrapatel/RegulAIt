@@ -24,6 +24,7 @@
  *     first); and the judge's calls go through the gateway on the run's own key, so they are governed,
  *     audited and costed on the run like the target's.
  */
+import { hashToken } from "./token-hash.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -253,7 +254,7 @@ beforeAll(async () => {
   const a = await makeUser(`b5g-admin-${RUN}@example.com`, true);
   const token = "rgls_" + randomBytes(32).toString("hex");
   await db.insert(authSessions).values({
-    tokenHash: createHash("sha256").update(token).digest("hex"),
+    tokenHash: hashToken(token),
     userId: a.id,
     origin: "password",
     expiresAt: new Date(Date.now() + 3_600_000),
