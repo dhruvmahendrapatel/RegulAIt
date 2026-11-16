@@ -423,35 +423,39 @@ Supersedes the interim in slice 2 and in "Consequences" ("approval rules on mode
    `forbidden` (the kernel refuses the hold as a deny); only an approval-rule hold that cannot be queued answers
    `approval_required`.
 
-### P-01 remainder, slice 2: admin routes for the resource rules (2026-11-14)
+### P-01 remainder, slice 2: admin routes for the resource rules (2026-11-14; reworked on review of #818, 2026-11-16)
 
 Closes review #715 finding 4 ("no admin routes yet"). `apps/gateway/src/resource-rule-routes.ts`:
 
 | Route | Step-up |
 |---|---|
-| `GET /v1/rules/resource/approval-rules`, `GET /v1/rules/resource/rate-limits` | none (read; keyset-paginated by id, `limit` 1 to 200, optional `resourceType`) |
+| `GET /v1/rules/resource/approval-rules`, `GET /v1/rules/resource/rate-limits` (and each `/export.xlsx`) | none (read; the ADR-0226 list contract: `answerListPage` / `answerListExport` with the `resource-approval-rules` and `resource-rate-limits` list specs, optional `resourceType`) |
 | `POST /v1/rules/resource/approval-rules`, `POST /v1/rules/resource/rate-limits` | none: adding a rule or a limit only ever restricts |
-| `PATCH /v1/rules/resource/approval-rules/:ruleId` (`writeOnly`, `approverUserId`) | `settings_relax` when `writeOnly` turns on (fewer calls held) or the approver changes (who releases calls can only be judged by a person); none when `writeOnly` turns off |
+| `PATCH /v1/rules/resource/approval-rules/:ruleId` (`writeOnly`, `approverUserId`) | `settings_relax` when the approver pool widens (`approvalRuleLoosens`, the pool predicate the MCP approval rules use) or, resource-specific, when `writeOnly` turns on (fewer calls held); none when it only tightens |
 | `PATCH /v1/rules/resource/rate-limits/:ruleId` (`maxCalls`, `windowSeconds`) | `settings_relax` when more calls are allowed or the rate rises (`rateLimitChangeRelaxes`: more calls over a longer window is ambiguous and takes the step-up); none when it only tightens |
-| `DELETE` on either | `settings_relax` |
+| `DELETE` on either | `settings_relax` (`assertApprovalRuleLooseningStepUp` with the rule removed; `assertRuleRemovalStepUp`) |
 
-- **Admin only** through the global gate (not in `NON_ADMIN_ROUTES`). The step-up is bound to the exact change
-  (`resourceApprovalRuleChanged`, `resourceApprovalRuleRemoved`, `resourceRateLimitChanged`, `resourceRateLimitRemoved`
-  with the rule id and the new values).
+- **Reuse (review of #818).** These routes write through the existing approval-rule code rather than beside it:
+  - THE ONE GUARD, `assertApprovalRuleWritable`, runs on every create and edit inside the writer's transaction, so a
+    rule whose pool can never approve (no such approver, a disabled one, the subject as their own approver) is refused
+    with the same 422 `quorum_unsatisfiable` as every other approval-rule writer.
+  - The loosening is judged under the row lock by the shared predicate, and the step-up is asked inside that lock
+    (`approvalRuleStepUp`, `requireRuleStepUp`), bound to the shared facts `{ruleId, values}` (the quorum, approver
+    role and approver, plus `writeOnly: true` when it turns on; `{deleted: true}` for a removal). A concurrent edit
+    can no longer make a judged tightening into a loosening, so the former 409 `rule_changed` is gone.
+  - The lists use the shared list contract, so the console's list kit, its sorting and its export work unchanged.
+- **Admin only** through the global gate (not in `NON_ADMIN_ROUTES`).
 - **Audit in the same transaction** as the write, on `objectType: restriction_rule`, `receiptClass: configuration`:
-  the created or deleted row, or the `{from, to}` transitions, with `relaxed` and the step-up method on a loosening.
-  A PATCH re-reads the row under `FOR UPDATE`; an edit judged a tightening that a concurrent change turned into a
-  loosening is refused (409 `rule_changed`), never applied without its step-up.
+  the created or deleted row, or the `{from, to}` transitions, with `relaxed` on a loosening.
 - **Identity is not editable.** The subject and the resource binding select which calls a rule applies to; changing
   them is a new rule (delete and create), as for the MCP rule kinds (ADR-0073 §2).
-- **Refused with a reason, never stored:** an unknown resource, subject or approver (422); a disabled approver (422
-  `approver_disabled`); an approver who is the rule's own user subject (422 `approver_is_subject`: the caller is never
-  in their own approval pool, ADR-0186 A, so the rule could only refuse); a write-only model rule and a model rate limit
-  (400: a model call never writes, and model limits stay in `model_rate_limits`, one fact in one place).
+- **Refused with a reason, never stored:** an unknown resource or subject (422); a rule no pool can approve (422
+  `quorum_unsatisfiable`, the shared guard); a write-only model rule and a model rate limit (400: a model call never
+  writes, and model limits stay in `model_rate_limits`, one fact in one place).
 - **Path.** Under `/v1/rules/resource/…` rather than `/v1/rules/resource-…`, so the SPA's generic one-segment
   `/v1/rules/${kind}` calls are not read by the route census as reaching these routes.
-- **UI.** No screen in this lane: the six writes and two lists are `KNOWN_UI_GAPS` (cap 44 → 52) and the two removals
-  are `DELIBERATELY_API_ONLY`, all tracked on #453 for the design builder.
-- **Tests.** `zz-adr0251-resource-rule-routes.test.ts` (admin only; create, list, tighten, loosen and delete with the
-  step-up refusal naming the exact change; every refusal reason; the core loads what the routes wrote and stops
-  loading a deleted limit); `resource-rules.test.ts` (the loosening predicate and the request shapes).
+- **UI.** No screen in this lane: the six writes, two lists and two list exports are `KNOWN_UI_GAPS` (main's ceiling
+  plus these ten) and the two removals are `DELIBERATELY_API_ONLY`, all tracked on #453 for the design builder.
+- **Tests.** `zz-adr0251-resource-rule-routes.test.ts` (admin only; create, list, export, tighten, loosen and delete
+  with the step-up refusal naming the exact change; every refusal reason; the core loads what the routes wrote and
+  stops loading a deleted limit); `resource-rules.test.ts` (the rate-limit loosening predicate and the request shapes).

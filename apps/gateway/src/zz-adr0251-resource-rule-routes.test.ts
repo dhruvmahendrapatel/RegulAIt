@@ -7,9 +7,11 @@
  *  - a loosening (delete; an approval rule's approver change or writeOnly on; a rate limit with more calls or a
  *    shorter window) is refused without a `settings_relax` step-up bound to exactly that change, and audited with the
  *    row before and after once admitted; a tightening needs no step-up;
- *  - bad bindings are refused with a reason (unknown resource, subject or approver, an approver who is the subject,
- *    a write-only model rule), never stored;
- *  - the list is bounded and keyset-paginated;
+ *  - bad bindings are refused with a reason (unknown resource or subject; through THE ONE approval-rule guard, an
+ *    unknown approver or an approver who is the subject, whose pool can never approve; a write-only model rule), never
+ *    stored;
+ *  - the step-up names exactly the change, in the shared approval-rule facts (`{ruleId, values}`);
+ *  - the lists answer the shared list contract (ADR-0226): bounded page sizes, a total;
  *  - what the routes write is what the core enforces (a created connector limit binds, a deleted one stops binding).
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -31,11 +33,12 @@ const lastAudit = async (objectId: string) =>
   (await k.db.select().from(auditLog).where(and(eq(auditLog.objectType, "restriction_rule"), eq(auditLog.objectId, objectId))).orderBy(desc(auditLog.seq)).limit(1))[0];
 
 /** refused without a step-up (naming exactly this change), then admitted under the relaxed posture */
-async function relaxing(method: "PATCH" | "DELETE", url: string, payload: unknown, values: Record<string, unknown>) {
+async function relaxing(method: "PATCH" | "DELETE", url: string, payload: unknown, ruleId: string, values: Record<string, unknown>) {
   const refused = await admin(method, url, payload);
   expect(refused.statusCode, refused.body).toBe(403);
   expect(refused.json()).toMatchObject({ error: "step_up_required" });
   expect(refused.json().action?.body?.values ?? values).toEqual(values);
+  expect(refused.json().action?.body?.ruleId ?? ruleId).toBe(ruleId);
   return relaxStepUpAround(k.db, () => admin(method, url, payload));
 }
 
@@ -85,25 +88,33 @@ describe("ADR-0251: resource approval rule routes", () => {
     expect((await admin("PATCH", `/v1/rules/resource/approval-rules/${id}`, { writeOnly: false })).json()).toMatchObject({ changed: false });
 
     // loosening: writeOnly back on, and a new approver, each need the step-up
-    const on = await relaxing("PATCH", `/v1/rules/resource/approval-rules/${id}`, { writeOnly: true }, {
-      resourceApprovalRuleChanged: { ruleId: id, writeOnly: true, approverUserId: approver.id },
+    const on = await relaxing("PATCH", `/v1/rules/resource/approval-rules/${id}`, { writeOnly: true }, id, {
+      quorum: 1, approverRoleId: null, approverUserId: approver.id, writeOnly: true,
     });
     expect(on.statusCode, on.body).toBe(200);
     expect((await lastAudit(id))!.detail).toMatchObject({ relaxed: ["writeOnly"] });
     const second = await k.person("approver-2");
-    const moved = await relaxing("PATCH", `/v1/rules/resource/approval-rules/${id}`, { approverUserId: second.id }, {
-      resourceApprovalRuleChanged: { ruleId: id, writeOnly: true, approverUserId: second.id },
+    const moved = await relaxing("PATCH", `/v1/rules/resource/approval-rules/${id}`, { approverUserId: second.id }, id, {
+      quorum: 1, approverRoleId: null, approverUserId: second.id,
     });
     expect(moved.statusCode, moved.body).toBe(200);
     expect((await lastAudit(id))!.detail).toMatchObject({ relaxed: ["approverUserId"], transitions: { approverUserId: { from: approver.id, to: second.id } } });
 
-    // the list is bounded and paginated
-    const page = await admin("GET", "/v1/rules/resource/approval-rules?resourceType=connector&limit=1");
+    // the list answers the shared list contract: a bounded page size, a total, the filter
+    const page = await admin("GET", "/v1/rules/resource/approval-rules?resourceType=connector&limit=10&count=exact");
     expect(page.statusCode, page.body).toBe(200);
-    expect(page.json().rules.length).toBe(1);
-    expect((await admin("GET", "/v1/rules/resource/approval-rules?limit=500")).statusCode).toBe(400);
+    expect(page.json().items.map((r: { id: string }) => r.id)).toContain(id);
+    expect(page.json().total).toBeGreaterThanOrEqual(1);
+    expect((await admin("GET", "/v1/rules/resource/approval-rules?limit=7")).statusCode).toBe(400);
+    expect((await admin("GET", "/v1/rules/resource/approval-rules?resourceType=tool")).statusCode).toBe(400);
+    // the same list as an Excel file, under the same admin-only route authorisation
+    const xlsx = await admin("GET", "/v1/rules/resource/approval-rules/export.xlsx?resourceType=connector&columns=type,scope,approver,created");
+    expect(xlsx.statusCode, xlsx.body.slice(0, 200)).toBe(200);
+    expect(String(xlsx.headers["content-type"])).toContain("spreadsheetml");
+    expect((await admin("GET", "/v1/rules/resource/approval-rules/export.xlsx?columns=nope")).statusCode).toBe(400);
+    expect((await k.req("GET", "/v1/rules/resource/approval-rules/export.xlsx?columns=type", caller.auth)).statusCode).toBe(403);
 
-    const del = await relaxing("DELETE", `/v1/rules/resource/approval-rules/${id}`, undefined, { resourceApprovalRuleRemoved: { ruleId: id } });
+    const del = await relaxing("DELETE", `/v1/rules/resource/approval-rules/${id}`, undefined, id, { deleted: true });
     expect(del.statusCode, del.body).toBe(200);
     expect((await lastAudit(id))!).toMatchObject({ ruleId: "resource-approval-rule-deleted" });
     expect((await lastAudit(id))!.detail).toMatchObject({ relaxation: true });
@@ -116,8 +127,9 @@ describe("ADR-0251: resource approval rule routes", () => {
     const cases: Array<[Record<string, unknown>, number, string]> = [
       [{ ...base, resourceId: "00000000-0000-4000-a000-0000000000ff" }, 422, "unknown_resource"],
       [{ ...base, userId: "00000000-0000-4000-a000-0000000000ff" }, 422, "unknown_user"],
-      [{ ...base, approverUserId: "00000000-0000-4000-a000-0000000000ff" }, 422, "unknown_approver"],
-      [{ ...base, approverUserId: caller.id }, 422, "approver_is_subject"],
+      // THE ONE GUARD: neither pool can ever approve (no such person; the subject never approves their own call)
+      [{ ...base, approverUserId: "00000000-0000-4000-a000-0000000000ff" }, 422, "quorum_unsatisfiable"],
+      [{ ...base, approverUserId: caller.id }, 422, "quorum_unsatisfiable"],
     ];
     for (const [body, status, error] of cases) {
       const r = await admin("POST", "/v1/rules/resource/approval-rules", body);
@@ -155,14 +167,10 @@ describe("ADR-0251: resource rate limit routes", () => {
     expect((await lastAudit(id))!.detail).not.toHaveProperty("relaxed");
 
     // the same calls over a shorter window: looser
-    const shorter = await relaxing("PATCH", `/v1/rules/resource/rate-limits/${id}`, { windowSeconds: 30 }, {
-      resourceRateLimitChanged: { ruleId: id, maxCalls: 5, windowSeconds: 30 },
-    });
+    const shorter = await relaxing("PATCH", `/v1/rules/resource/rate-limits/${id}`, { windowSeconds: 30 }, id, { maxCalls: 5, windowSeconds: 30 });
     expect(shorter.statusCode, shorter.body).toBe(200);
     // more calls over a longer window: ambiguous, so it takes the step-up
-    const ambiguous = await relaxing("PATCH", `/v1/rules/resource/rate-limits/${id}`, { maxCalls: 6, windowSeconds: 3600 }, {
-      resourceRateLimitChanged: { ruleId: id, maxCalls: 6, windowSeconds: 3600 },
-    });
+    const ambiguous = await relaxing("PATCH", `/v1/rules/resource/rate-limits/${id}`, { maxCalls: 6, windowSeconds: 3600 }, id, { maxCalls: 6, windowSeconds: 3600 });
     expect(ambiguous.statusCode, ambiguous.body).toBe(200);
     expect((await lastAudit(id))!.detail).toMatchObject({ relaxed: ["maxCalls", "windowSeconds"] });
 
@@ -171,7 +179,7 @@ describe("ADR-0251: resource rate limit routes", () => {
     expect((await admin("POST", "/v1/rules/resource/rate-limits", { resourceType: "model", scope: "fleet", maxCalls: 1, windowSeconds: 1 })).statusCode).toBe(400);
     expect((await admin("POST", "/v1/rules/resource/rate-limits", { resourceType: "a2a", scope: "fleet", maxCalls: 0, windowSeconds: 1 })).statusCode).toBe(400);
 
-    const del = await relaxing("DELETE", `/v1/rules/resource/rate-limits/${id}`, undefined, { resourceRateLimitRemoved: { ruleId: id } });
+    const del = await relaxing("DELETE", `/v1/rules/resource/rate-limits/${id}`, undefined, id, { deleted: true });
     expect(del.statusCode, del.body).toBe(200);
     expect((await lastAudit(id))!.detail).toMatchObject({ relaxation: true });
     const after = await loadResourceRestrictions(k.db, { userId: caller.id, resource: { type: "a2a", id: "00000000-0000-4000-a000-000000000001", skillId: null } });

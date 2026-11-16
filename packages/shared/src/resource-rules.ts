@@ -14,8 +14,6 @@ export const RESOURCE_RULE_SCOPES = ["user", "role", "team", "fleet"] as const;
 /** the bounds of `resource_rate_limits` (its CHECK constraints) */
 export const RESOURCE_RATE_LIMIT_MAX_CALLS = 1_000_000;
 export const RESOURCE_RATE_LIMIT_MAX_WINDOW_SECONDS = 30 * 24 * 3600;
-/** a list page is bounded (ADR-0200: scalable APIs are bounded and paginated) */
-export const RESOURCE_RULES_PAGE_MAX = 200;
 
 const subjectFields = {
   scope: z.enum(RESOURCE_RULE_SCOPES).default("user"),
@@ -87,15 +85,6 @@ export const updateResourceRateLimitSchema = z
   })
   .strict()
   .refine((b) => b.maxCalls !== undefined || b.windowSeconds !== undefined, { message: "nothing to change" });
-
-/** keyset pagination: `after` is the last id of the previous page (rules are listed by id) */
-export const listResourceRulesQuerySchema = z
-  .object({
-    resourceType: z.enum(RESOURCE_APPROVAL_RULE_TYPES).optional(),
-    limit: z.coerce.number().int().min(1).max(RESOURCE_RULES_PAGE_MAX).default(50),
-    after: z.string().uuid().optional(),
-  })
-  .strict();
 
 /**
  * Is a rate-limit change a RELAXATION (a settings_relax step-up)? More calls, or the same calls over a shorter

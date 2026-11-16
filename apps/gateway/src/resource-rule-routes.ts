@@ -1,11 +1,13 @@
 /**
  * ADR-0251 (P-01 remainder, review #715 finding 4) — the admin routes for the governed core's resource rules:
  *
- *   GET    /v1/rules/resource/approval-rules            list (keyset-paginated, optional resourceType filter)
+ *   GET    /v1/rules/resource/approval-rules            list (the ADR-0226 list contract; optional resourceType)
+ *   GET    /v1/rules/resource/approval-rules/export.xlsx the same list as an Excel file
  *   POST   /v1/rules/resource/approval-rules            add a rule (only ever restricts: no step-up)
  *   PATCH  /v1/rules/resource/approval-rules/:ruleId    change the approver or writeOnly
  *   DELETE /v1/rules/resource/approval-rules/:ruleId    remove a rule (a relaxation: step-up)
- *   GET    /v1/rules/resource/rate-limits               list
+ *   GET    /v1/rules/resource/rate-limits               list (the ADR-0226 list contract; optional resourceType)
+ *   GET    /v1/rules/resource/rate-limits/export.xlsx   the same list as an Excel file
  *   POST   /v1/rules/resource/rate-limits               add a limit (only ever restricts: no step-up)
  *   PATCH  /v1/rules/resource/rate-limits/:ruleId       change maxCalls or windowSeconds
  *   DELETE /v1/rules/resource/rate-limits/:ruleId       remove a limit (a relaxation: step-up)
@@ -16,9 +18,15 @@
  * never disagree with the table. A rule's subject and resource binding are its identity: they are not editable
  * (delete it and create a new one), as for the MCP rule kinds (ADR-0073 §2).
  *
+ * Reuse (review of #818): an approval-rule write goes through THE ONE GUARD every approval-rule writer uses
+ * (`assertApprovalRuleWritable`: a pool that can never approve, an approver who is the subject, a disabled or
+ * unknown approver), and its loosening is judged by the same pool predicate as the MCP kinds (`approvalRuleLoosens`,
+ * `assertApprovalRuleLooseningStepUp`, `assertRuleRemovalStepUp`), with the step-up asked inside the writer's lock
+ * (`approvalRuleStepUp`). The lists answer the shared list contract (`answerListPage`, `answerListExport`).
+ *
  * What counts as a loosening:
- *  - approval rule: removing it; turning `writeOnly` on (it then holds fewer calls); changing the approver (a
- *    different person releases the calls, which can only be judged by a person, so it is always stepped up).
+ *  - approval rule: removing it; a wider approver pool (`approvalRuleLoosens`); and, resource-specific, turning
+ *    `writeOnly` on (the rule then holds fewer calls).
  *  - rate limit: removing it; more calls, or the same calls over a shorter window (`rateLimitChangeRelaxes`).
  *
  * The tables need no new migration: they shipped with ADR-0251 slice 1 (`governed_core_resource_rules`).
@@ -28,15 +36,14 @@ import { z } from "zod";
 import {
   a2aAgents,
   agents,
-  and,
-  asc,
   auditLog,
   connectors,
   eq,
-  gt,
+  getTableColumns,
   resourceApprovalRules,
   resourceRateLimits,
   roles,
+  sql,
   teams,
   users,
   type Db,
@@ -44,12 +51,23 @@ import {
 import {
   createResourceApprovalRuleSchema,
   createResourceRateLimitSchema,
-  listResourceRulesQuerySchema,
+  RESOURCE_APPROVAL_RULE_TYPES,
+  RESOURCE_RATE_LIMIT_TYPES,
   rateLimitChangeRelaxes,
   updateResourceApprovalRuleSchema,
   updateResourceRateLimitSchema,
 } from "@regulait/shared";
-import { requireStepUp } from "./step-up.js";
+import {
+  approvalRuleLoosens,
+  approvalRuleShape,
+  assertApprovalRuleLooseningStepUp,
+  assertApprovalRuleWritable,
+  assertRuleRemovalStepUp,
+  requireRuleStepUp,
+} from "./approval-pool.js";
+import type { ListSpec } from "./list-contract.js";
+import { answerListExport, answerListPage, type ContractList } from "./list-contract-route.js";
+import { approvalRuleStepUp } from "./step-up.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 const idParam = z.object({ ruleId: z.string().uuid() });
@@ -106,64 +124,113 @@ async function subjectRefusal(db: Db, s: Subject): Promise<Refusal | null> {
   return null;
 }
 
-/**
- * The approver must be an active user who is not the rule's own subject: the caller is never in their own approval
- * pool (ADR-0186 A), so such a rule could only ever refuse, and should be refused when it is written instead.
- */
-async function approverRefusal(db: Db, approverUserId: string, subject: Subject): Promise<Refusal | null> {
-  const [a] = await db.select({ id: users.id, disabledAt: users.disabledAt }).from(users).where(eq(users.id, approverUserId));
-  if (!a) return { status: 422, error: "unknown_approver", detail: "no user with that approverUserId" };
-  if (a.disabledAt) return { status: 422, error: "approver_disabled", detail: "the approver's account is disabled; name an active user" };
-  if (subject.scope === "user" && subject.userId === approverUserId) {
-    return {
-      status: 422,
-      error: "approver_is_subject",
-      detail: "a person can never approve their own call, so this rule could only refuse; name a different approver",
-    };
-  }
-  return null;
-}
-
 const send = (reply: FastifyReply, r: Refusal) => reply.status(r.status).send({ error: r.error, detail: r.detail });
 const actor = (req: FastifyRequest) => req.authCtx.userId ?? NIL_USER;
+
+type ApprovalRuleRow = typeof resourceApprovalRules.$inferSelect;
+type RateLimitRow = typeof resourceRateLimits.$inferSelect;
+
+const subjectOf = (r: { scope: string; userId: string | null; roleId: string | null; teamId: string | null }) =>
+  r.scope === "user" ? r.userId : r.scope === "role" ? r.roleId : r.scope === "team" ? r.teamId : null;
+const resourceOf = (r: { agentId?: string | null; connectorId: string | null; a2aAgentId: string | null }) =>
+  r.agentId ?? r.connectorId ?? r.a2aAgentId ?? null;
+
+/** ADR-0226: the governed core's approval rules under the shared list contract */
+export const RESOURCE_APPROVAL_RULES_LIST: ListSpec<ApprovalRuleRow> = {
+  id: "resource-approval-rules",
+  sorts: {
+    created: { expr: resourceApprovalRules.createdAt, keysetAt: resourceApprovalRules.createdAt },
+    type: { expr: resourceApprovalRules.resourceType },
+    scope: { expr: resourceApprovalRules.scope },
+    writeOnly: { expr: resourceApprovalRules.writeOnly },
+    approver: { expr: resourceApprovalRules.approverUserId },
+  },
+  columns: {
+    type: { label: "Calls", value: (r) => r.resourceType },
+    resource: { label: "Resource", value: (r) => resourceOf(r) ?? "every resource" },
+    scope: { label: "Applies to", value: (r) => r.scope },
+    subject: { label: "Subject", value: (r) => subjectOf(r) },
+    writeOnly: { label: "Writes only", value: (r) => r.writeOnly },
+    approver: { label: "Approver", value: (r) => r.approverUserId },
+    created: { label: "Created", value: (r) => new Date(r.createdAt) },
+  },
+  filters: ["resourceType"],
+  defaultSort: { col: "created", dir: "desc" },
+  idCol: resourceApprovalRules.id,
+};
+
+/** ADR-0226: the governed core's rate limits under the shared list contract */
+export const RESOURCE_RATE_LIMITS_LIST: ListSpec<RateLimitRow> = {
+  id: "resource-rate-limits",
+  sorts: {
+    created: { expr: resourceRateLimits.createdAt, keysetAt: resourceRateLimits.createdAt },
+    type: { expr: resourceRateLimits.resourceType },
+    scope: { expr: resourceRateLimits.scope },
+    maxCalls: { expr: resourceRateLimits.maxCalls },
+    window: { expr: resourceRateLimits.windowSeconds },
+  },
+  columns: {
+    type: { label: "Calls", value: (r) => r.resourceType },
+    resource: { label: "Resource", value: (r) => resourceOf(r) ?? "every resource" },
+    scope: { label: "Applies to", value: (r) => r.scope },
+    subject: { label: "Subject", value: (r) => subjectOf(r) },
+    maxCalls: { label: "Calls allowed", value: (r) => r.maxCalls },
+    window: { label: "Window (s)", value: (r) => r.windowSeconds },
+    created: { label: "Created", value: (r) => new Date(r.createdAt) },
+  },
+  filters: ["resourceType"],
+  defaultSort: { col: "created", dir: "desc" },
+  idCol: resourceRateLimits.id,
+};
+
+/** the fail-closed refusal detail when a writer has no request to step up (never a silent loosening) */
+const APPROVAL_RELAX =
+  "this change loosens an approval rule (fewer calls held, or a wider approver pool) and needs a step-up, which " +
+  "this write path cannot ask for: make the change as an admin in RegulAIt";
+const RATE_RELAX =
+  "this change loosens a rate limit (more calls, or the same calls over a shorter window) and needs a step-up, which " +
+  "this write path cannot ask for: make the change as an admin in RegulAIt";
 
 export function registerResourceRuleRoutes(app: FastifyInstance, db: Db) {
   // ---------------------------------------------------------------------------------------------------------------
   // resource_approval_rules
   // ---------------------------------------------------------------------------------------------------------------
 
-  app.get("/v1/rules/resource/approval-rules", async (req) => {
-    const q = listResourceRulesQuerySchema.parse(req.query ?? {});
-    const rows = await db
-      .select()
-      .from(resourceApprovalRules)
-      .where(
-        and(
-          q.resourceType ? eq(resourceApprovalRules.resourceType, q.resourceType) : undefined,
-          q.after ? gt(resourceApprovalRules.id, q.after) : undefined,
-        ),
-      )
-      .orderBy(asc(resourceApprovalRules.id))
-      .limit(q.limit + 1);
-    const page = rows.slice(0, q.limit);
-    return { rules: page, next: rows.length > q.limit ? page[page.length - 1]!.id : null };
-  });
+  const approvalRulesList: ContractList<ApprovalRuleRow, { resourceType?: (typeof RESOURCE_APPROVAL_RULE_TYPES)[number] }> = {
+    spec: RESOURCE_APPROVAL_RULES_LIST,
+    filters: z.object({ resourceType: z.enum(RESOURCE_APPROVAL_RULE_TYPES).optional() }).strict(),
+    reader: {
+      fetch: (q) =>
+        db
+          .select({ ...getTableColumns(resourceApprovalRules), _cursorAt: q.cursorAt })
+          .from(resourceApprovalRules)
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset),
+      countable: (where) => db.select({ one: sql`1` }).from(resourceApprovalRules).where(where),
+      idOf: (r) => r.id,
+    },
+    where: (_req, f) => (f.resourceType ? eq(resourceApprovalRules.resourceType, f.resourceType) : undefined),
+  };
+  app.get("/v1/rules/resource/approval-rules/export.xlsx", async (req, reply) => answerListExport(db, req, reply, approvalRulesList));
+  app.get("/v1/rules/resource/approval-rules", async (req, reply) => answerListPage(db, req, reply, approvalRulesList));
 
   // Adding a rule only ever holds more calls, so it needs no step-up; it is audited with the write.
   app.post("/v1/rules/resource/approval-rules", async (req, reply) => {
     const body = createResourceApprovalRuleSchema.parse(req.body);
-    const refused =
-      (await resourceRefusal(db, body.resourceType, body.resourceId)) ??
-      (await subjectRefusal(db, body)) ??
-      (await approverRefusal(db, body.approverUserId, body));
+    const refused = (await resourceRefusal(db, body.resourceType, body.resourceId)) ?? (await subjectRefusal(db, body));
     if (refused) return send(reply, refused);
+    const subject = subjectColumns(body);
     const row = await db.transaction(async (tx) => {
+      // THE ONE GUARD (ADR-0186 A), inside the writer's transaction: a rule whose pool can never approve is refused
+      await assertApprovalRuleWritable(tx, approvalRuleShape({ approverUserId: body.approverUserId, ...subject }));
       const [created] = await tx
         .insert(resourceApprovalRules)
         .values({
           resourceType: body.resourceType,
           ...resourceColumns(body.resourceType, body.resourceId),
-          ...subjectColumns(body),
+          ...subject,
           writeOnly: body.writeOnly,
           approverUserId: body.approverUserId,
           createdBy: req.authCtx.userId ?? null,
@@ -187,36 +254,31 @@ export function registerResourceRuleRoutes(app: FastifyInstance, db: Db) {
   app.patch("/v1/rules/resource/approval-rules/:ruleId", async (req, reply) => {
     const { ruleId } = idParam.parse(req.params);
     const patch = updateResourceApprovalRuleSchema.parse(req.body ?? {});
-    const [existing] = await db.select().from(resourceApprovalRules).where(eq(resourceApprovalRules.id, ruleId));
-    if (!existing) return reply.status(404).send({ error: "unknown_rule" });
-    if (patch.writeOnly === true && existing.resourceType === "model") {
-      return reply.status(400).send({ error: "validation", detail: "a model call is never a write: writeOnly cannot be set on a model rule" });
-    }
-    const next = { writeOnly: patch.writeOnly ?? existing.writeOnly, approverUserId: patch.approverUserId ?? existing.approverUserId };
-    if (next.writeOnly === existing.writeOnly && next.approverUserId === existing.approverUserId) {
-      return reply.send({ rule: existing, changed: false });
-    }
-    if (next.approverUserId !== existing.approverUserId) {
-      const refused = await approverRefusal(db, next.approverUserId, existing);
-      if (refused) return send(reply, refused);
-    }
-    const relaxed: string[] = [];
-    if (!existing.writeOnly && next.writeOnly) relaxed.push("writeOnly");
-    if (next.approverUserId !== existing.approverUserId) relaxed.push("approverUserId");
-    let stepUp: string | null = null;
-    if (relaxed.length) {
-      const su = await requireStepUp(db, req, reply, {
-        kind: "settings_relax",
-        facts: { values: { resourceApprovalRuleChanged: { ruleId, ...next } } },
-      });
-      if (!su.ok) return reply;
-      stepUp = su.method;
-    }
+    const stepUp = approvalRuleStepUp(db, req);
     const out = await db.transaction(async (tx) => {
+      // every decision is taken on the row as locked here, so a concurrent edit cannot turn a judged tightening into
+      // an unjudged loosening
       const [locked] = await tx.select().from(resourceApprovalRules).where(eq(resourceApprovalRules.id, ruleId)).for("update");
       if (!locked) return null;
-      // the step-up judged the row as read above; a concurrent edit in between is re-judged, never assumed
-      if (!relaxed.length && ((!locked.writeOnly && next.writeOnly) || locked.approverUserId !== next.approverUserId)) return "stale" as const;
+      if (patch.writeOnly === true && locked.resourceType === "model") return "model_write_only" as const;
+      const next = { writeOnly: patch.writeOnly ?? locked.writeOnly, approverUserId: patch.approverUserId ?? locked.approverUserId };
+      if (next.writeOnly === locked.writeOnly && next.approverUserId === locked.approverUserId) return { rule: locked, changed: false };
+      const before = approvalRuleShape(locked);
+      const after = approvalRuleShape({ ...locked, ...next });
+      await assertApprovalRuleWritable(tx, after);
+      // the shared pool predicate (the MCP kinds use it too), plus the resource-specific writeOnly-on: one step-up
+      const poolLoosens = await approvalRuleLoosens(tx, before, after);
+      const writeOnlyOn = !locked.writeOnly && next.writeOnly;
+      const relaxed = [...(writeOnlyOn ? ["writeOnly"] : []), ...(poolLoosens ? ["approverUserId"] : [])];
+      if (relaxed.length) {
+        const values = {
+          quorum: after.quorum ?? 1,
+          approverRoleId: after.approverRoleId ?? null,
+          approverUserId: after.approverUserId,
+          ...(writeOnlyOn ? { writeOnly: true } : {}),
+        };
+        await requireRuleStepUp(tx, { ruleId, values }, stepUp, APPROVAL_RELAX);
+      }
       const [row] = await tx.update(resourceApprovalRules).set(next).where(eq(resourceApprovalRules.id, ruleId)).returning();
       await tx.insert(auditLog).values({
         userId: actor(req),
@@ -229,7 +291,7 @@ export function registerResourceRuleRoutes(app: FastifyInstance, db: Db) {
             ...(locked.writeOnly !== next.writeOnly ? { writeOnly: { from: locked.writeOnly, to: next.writeOnly } } : {}),
             ...(locked.approverUserId !== next.approverUserId ? { approverUserId: { from: locked.approverUserId, to: next.approverUserId } } : {}),
           },
-          ...(relaxed.length ? { relaxed, stepUp } : {}),
+          ...(relaxed.length ? { relaxed, stepUp: "settings_relax" } : {}),
           receiptClass: "configuration",
         },
         effect: "allow",
@@ -237,37 +299,34 @@ export function registerResourceRuleRoutes(app: FastifyInstance, db: Db) {
         ruleChain: [],
         reason: `approval rule for ${locked.resourceType} calls changed${relaxed.length ? ` — RELAXED: ${relaxed.join(", ")}` : ""}`,
       });
-      return row!;
+      return { rule: row!, changed: true };
     });
     if (out === null) return reply.status(404).send({ error: "unknown_rule" });
-    if (out === "stale") {
-      return reply.status(409).send({ error: "rule_changed", detail: "the rule changed while this edit was being made; read it again and retry" });
+    if (out === "model_write_only") {
+      return reply.status(400).send({ error: "validation", detail: "a model call is never a write: writeOnly cannot be set on a model rule" });
     }
-    return reply.send({ rule: out, changed: true });
+    return reply.send(out);
   });
 
-  // Removing a rule releases every call it held: settings_relax step-up, audited in the same transaction.
+  // Removing a rule releases every call it held: the shared loosening guard (a removal always loosens) asks the
+  // settings_relax step-up inside the lock; audited in the same transaction.
   app.delete("/v1/rules/resource/approval-rules/:ruleId", async (req, reply) => {
     const { ruleId } = idParam.parse(req.params);
-    const [existing] = await db.select().from(resourceApprovalRules).where(eq(resourceApprovalRules.id, ruleId));
-    if (!existing) return reply.status(404).send({ error: "unknown_rule" });
-    const su = await requireStepUp(db, req, reply, {
-      kind: "settings_relax",
-      facts: { values: { resourceApprovalRuleRemoved: { ruleId } } },
-    });
-    if (!su.ok) return reply;
+    const stepUp = approvalRuleStepUp(db, req);
     const deleted = await db.transaction(async (tx) => {
-      const rows = await tx.delete(resourceApprovalRules).where(eq(resourceApprovalRules.id, ruleId)).returning();
-      if (rows.length === 0) return false;
+      const [locked] = await tx.select().from(resourceApprovalRules).where(eq(resourceApprovalRules.id, ruleId)).for("update");
+      if (!locked) return false;
+      await assertApprovalRuleLooseningStepUp(tx, { ruleId, before: approvalRuleShape(locked), after: null, stepUp });
+      await tx.delete(resourceApprovalRules).where(eq(resourceApprovalRules.id, ruleId));
       await tx.insert(auditLog).values({
         userId: actor(req),
         objectType: "restriction_rule",
         objectId: ruleId,
-        detail: { phase: "resource-approval-rule-delete", via: req.authCtx.via, rule: rows[0], relaxation: true, stepUp: su.method, receiptClass: "configuration" },
+        detail: { phase: "resource-approval-rule-delete", via: req.authCtx.via, rule: locked, relaxation: true, stepUp: "settings_relax", receiptClass: "configuration" },
         effect: "allow",
         ruleId: "resource-approval-rule-deleted",
         ruleChain: [],
-        reason: `approval rule for ${existing.resourceType} calls removed — a relaxation`,
+        reason: `approval rule for ${locked.resourceType} calls removed — a relaxation`,
       });
       return true;
     });
@@ -276,28 +335,28 @@ export function registerResourceRuleRoutes(app: FastifyInstance, db: Db) {
   });
 
   // ---------------------------------------------------------------------------------------------------------------
-  // resource_rate_limits
+  // resource_rate_limits (model limits stay in model_rate_limits: one fact in one place)
   // ---------------------------------------------------------------------------------------------------------------
 
-  app.get("/v1/rules/resource/rate-limits", async (req, reply) => {
-    const q = listResourceRulesQuerySchema.parse(req.query ?? {});
-    if (q.resourceType === "model") {
-      return reply.status(400).send({ error: "validation", detail: "model rate limits are listed at /v1/rules/model-rate-limits" });
-    }
-    const rows = await db
-      .select()
-      .from(resourceRateLimits)
-      .where(
-        and(
-          q.resourceType ? eq(resourceRateLimits.resourceType, q.resourceType) : undefined,
-          q.after ? gt(resourceRateLimits.id, q.after) : undefined,
-        ),
-      )
-      .orderBy(asc(resourceRateLimits.id))
-      .limit(q.limit + 1);
-    const page = rows.slice(0, q.limit);
-    return { rules: page, next: rows.length > q.limit ? page[page.length - 1]!.id : null };
-  });
+  const rateLimitsList: ContractList<RateLimitRow, { resourceType?: (typeof RESOURCE_RATE_LIMIT_TYPES)[number] }> = {
+    spec: RESOURCE_RATE_LIMITS_LIST,
+    filters: z.object({ resourceType: z.enum(RESOURCE_RATE_LIMIT_TYPES).optional() }).strict(),
+    reader: {
+      fetch: (q) =>
+        db
+          .select({ ...getTableColumns(resourceRateLimits), _cursorAt: q.cursorAt })
+          .from(resourceRateLimits)
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset),
+      countable: (where) => db.select({ one: sql`1` }).from(resourceRateLimits).where(where),
+      idOf: (r) => r.id,
+    },
+    where: (_req, f) => (f.resourceType ? eq(resourceRateLimits.resourceType, f.resourceType) : undefined),
+  };
+  app.get("/v1/rules/resource/rate-limits/export.xlsx", async (req, reply) => answerListExport(db, req, reply, rateLimitsList));
+  app.get("/v1/rules/resource/rate-limits", async (req, reply) => answerListPage(db, req, reply, rateLimitsList));
 
   app.post("/v1/rules/resource/rate-limits", async (req, reply) => {
     const body = createResourceRateLimitSchema.parse(req.body);
@@ -334,27 +393,15 @@ export function registerResourceRuleRoutes(app: FastifyInstance, db: Db) {
   app.patch("/v1/rules/resource/rate-limits/:ruleId", async (req, reply) => {
     const { ruleId } = idParam.parse(req.params);
     const patch = updateResourceRateLimitSchema.parse(req.body ?? {});
-    const [existing] = await db.select().from(resourceRateLimits).where(eq(resourceRateLimits.id, ruleId));
-    if (!existing) return reply.status(404).send({ error: "unknown_rule" });
-    const next = { maxCalls: patch.maxCalls ?? existing.maxCalls, windowSeconds: patch.windowSeconds ?? existing.windowSeconds };
-    if (next.maxCalls === existing.maxCalls && next.windowSeconds === existing.windowSeconds) {
-      return reply.send({ rule: existing, changed: false });
-    }
-    const relaxes = rateLimitChangeRelaxes(existing, next);
-    let stepUp: string | null = null;
-    if (relaxes) {
-      const su = await requireStepUp(db, req, reply, {
-        kind: "settings_relax",
-        facts: { values: { resourceRateLimitChanged: { ruleId, ...next } } },
-      });
-      if (!su.ok) return reply;
-      stepUp = su.method;
-    }
+    const stepUp = approvalRuleStepUp(db, req);
     const out = await db.transaction(async (tx) => {
       const [locked] = await tx.select().from(resourceRateLimits).where(eq(resourceRateLimits.id, ruleId)).for("update");
       if (!locked) return null;
-      // the step-up judged the row as read above; a concurrent edit in between is re-judged, never assumed
-      if (!relaxes && rateLimitChangeRelaxes(locked, next)) return "stale" as const;
+      const next = { maxCalls: patch.maxCalls ?? locked.maxCalls, windowSeconds: patch.windowSeconds ?? locked.windowSeconds };
+      if (next.maxCalls === locked.maxCalls && next.windowSeconds === locked.windowSeconds) return { rule: locked, changed: false };
+      // judged on the locked row; the step-up is asked inside the lock, like every rule writer (ADR-0186 decision 28)
+      const relaxes = rateLimitChangeRelaxes(locked, next);
+      if (relaxes) await requireRuleStepUp(tx, { ruleId, values: { ...next } }, stepUp, RATE_RELAX);
       const [row] = await tx.update(resourceRateLimits).set(next).where(eq(resourceRateLimits.id, ruleId)).returning();
       await tx.insert(auditLog).values({
         userId: actor(req),
@@ -367,7 +414,7 @@ export function registerResourceRuleRoutes(app: FastifyInstance, db: Db) {
             maxCalls: { from: locked.maxCalls, to: next.maxCalls },
             windowSeconds: { from: locked.windowSeconds, to: next.windowSeconds },
           },
-          ...(relaxes ? { relaxed: ["maxCalls", "windowSeconds"], stepUp } : {}),
+          ...(relaxes ? { relaxed: ["maxCalls", "windowSeconds"], stepUp: "settings_relax" } : {}),
           receiptClass: "configuration",
         },
         effect: "allow",
@@ -377,36 +424,29 @@ export function registerResourceRuleRoutes(app: FastifyInstance, db: Db) {
           `rate limit for ${locked.resourceType} calls changed from ${locked.maxCalls}/${locked.windowSeconds}s to ` +
           `${next.maxCalls}/${next.windowSeconds}s${relaxes ? " — RELAXED" : ""}`,
       });
-      return row!;
+      return { rule: row!, changed: true };
     });
     if (out === null) return reply.status(404).send({ error: "unknown_rule" });
-    if (out === "stale") {
-      return reply.status(409).send({ error: "rule_changed", detail: "the limit changed while this edit was being made; read it again and retry" });
-    }
-    return reply.send({ rule: out, changed: true });
+    return reply.send(out);
   });
 
   app.delete("/v1/rules/resource/rate-limits/:ruleId", async (req, reply) => {
     const { ruleId } = idParam.parse(req.params);
-    const [existing] = await db.select().from(resourceRateLimits).where(eq(resourceRateLimits.id, ruleId));
-    if (!existing) return reply.status(404).send({ error: "unknown_rule" });
-    const su = await requireStepUp(db, req, reply, {
-      kind: "settings_relax",
-      facts: { values: { resourceRateLimitRemoved: { ruleId } } },
-    });
-    if (!su.ok) return reply;
+    const stepUp = approvalRuleStepUp(db, req);
     const deleted = await db.transaction(async (tx) => {
-      const rows = await tx.delete(resourceRateLimits).where(eq(resourceRateLimits.id, ruleId)).returning();
-      if (rows.length === 0) return false;
+      const [locked] = await tx.select().from(resourceRateLimits).where(eq(resourceRateLimits.id, ruleId)).for("update");
+      if (!locked) return false;
+      await assertRuleRemovalStepUp(tx, { ruleId, stepUp });
+      await tx.delete(resourceRateLimits).where(eq(resourceRateLimits.id, ruleId));
       await tx.insert(auditLog).values({
         userId: actor(req),
         objectType: "restriction_rule",
         objectId: ruleId,
-        detail: { phase: "resource-rate-limit-delete", via: req.authCtx.via, rule: rows[0], relaxation: true, stepUp: su.method, receiptClass: "configuration" },
+        detail: { phase: "resource-rate-limit-delete", via: req.authCtx.via, rule: locked, relaxation: true, stepUp: "settings_relax", receiptClass: "configuration" },
         effect: "allow",
         ruleId: "resource-rate-limit-deleted",
         ruleChain: [],
-        reason: `rate limit for ${existing.resourceType} calls removed (${existing.maxCalls} calls per ${existing.windowSeconds}s, ${existing.scope}) — a relaxation`,
+        reason: `rate limit for ${locked.resourceType} calls removed (${locked.maxCalls} calls per ${locked.windowSeconds}s, ${locked.scope}) — a relaxation`,
       });
       return true;
     });

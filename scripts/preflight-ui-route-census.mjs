@@ -459,8 +459,10 @@ export const KNOWN_UI_GAPS = new Map([
   ["GET /v1/endpoint-addons/flagged", { does: "lists the endpoint add-on sightings flagged at or above a severity (the removal-directive and detection contract)", tracking: "ADR-0332 (lane E14): master brief for lane E14 (2026-11-15): the inventory is API-only and the UI builder builds its screen; KNOWN_UI_GAPS entries point at #453 (screen brief in PR #866)" }],
   // ADR-0251 (P-01, lane L1): the governed core's resource-rule admin routes ship API-first (orchestrator brief
   // 2026-11-14: the UI is built by the design builder on #453).
-  ["GET /v1/rules/resource/approval-rules", { does: "lists the governed core's approval rules for model, connector and A2A calls (keyset-paginated)", tracking: "#453" }],
-  ["GET /v1/rules/resource/rate-limits", { does: "lists the governed core's rate limits for connector and A2A calls (keyset-paginated)", tracking: "#453" }],
+  ["GET /v1/rules/resource/approval-rules", { does: "lists the governed core's approval rules for model, connector and A2A calls (the ADR-0226 list contract)", tracking: "#453" }],
+  ["GET /v1/rules/resource/approval-rules/export.xlsx", { does: "the approval-rule list as an Excel file (the ADR-0226 list contract, audited)", tracking: "#453" }],
+  ["GET /v1/rules/resource/rate-limits", { does: "lists the governed core's rate limits for connector and A2A calls (the ADR-0226 list contract)", tracking: "#453" }],
+  ["GET /v1/rules/resource/rate-limits/export.xlsx", { does: "the rate-limit list as an Excel file (the ADR-0226 list contract, audited)", tracking: "#453" }],
   ["POST /v1/rules/resource/approval-rules", { does: "adds an approval rule for model, connector or A2A calls (audited)", tracking: "#453" }],
   ["PATCH /v1/rules/resource/approval-rules/:ruleId", { does: "changes a rule's approver or writeOnly (a loosening is a settings_relax step-up, audited)", tracking: "#453" }],
   ["DELETE /v1/rules/resource/approval-rules/:ruleId", { does: "removes an approval rule (settings_relax step-up, audited)", tracking: "#453" }],
@@ -475,7 +477,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 60; // main's 52 = 54 − 11 MCP bundle routes closed by #815 + ADR-0240 6 external-portal second-factor routes awaiting #453 (#709) + ADR-0332 (lane E14) 3 API-only endpoint add-on inventory routes, master brief for lane E14 2026-11-15 (screen by the UI builder, #453) + ADR-0251 (P-01, lane L1) 8 resource-rule admin routes, orchestrator brief 2026-11-14 (#453)
+export const KNOWN_UI_GAPS_MAX = 62; // main's 52 =54 − 11 MCP bundle routes closed by #815 + ADR-0240 6 external-portal second-factor routes awaiting #453 (#709) + ADR-0332 (lane E14) 3 API-only endpoint add-on inventory routes, master brief for lane E14 2026-11-15 (screen by the UI builder, #453) + ADR-0251 (P-01, lane L1) 10 resource-rule admin routes (8 + the 2 list exports, review of #818), orchestrator brief 2026-11-14 (#453)
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 
