@@ -603,6 +603,8 @@ describe("6. the covered / NOT-covered inventory", () => {
     "vendor_account_aliases.reason",
     "vendor_domain_rules.reason",
     "workflow_templates.retired_reason",
+    // ADR-0340 slice 3: a migration request's reason
+    "workflow_instance_migrations.reason",
     // ADR-0208 (migration 0223)
     "compliance_profiles.retired_reason",
     // ADR-0208 G9 (migration 0225): retire and cancel reasons of the libraries
