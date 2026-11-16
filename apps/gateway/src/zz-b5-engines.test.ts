@@ -25,6 +25,7 @@
  * Run on its own scratch database (the evidence tables are append-only); the
  * runner drops it afterwards.
  */
+import { hashToken } from "./token-hash.js";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -343,7 +344,7 @@ beforeAll(async () => {
   const a = await makeUser(`b5-admin-${RUN}@example.com`, true);
   const token = "rgls_" + randomBytes(32).toString("hex");
   await db.insert(authSessions).values({
-    tokenHash: createHash("sha256").update(token).digest("hex"),
+    tokenHash: hashToken(token),
     userId: a.id,
     origin: "password",
     expiresAt: new Date(Date.now() + 3_600_000),

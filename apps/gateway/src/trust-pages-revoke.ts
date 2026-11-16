@@ -14,6 +14,7 @@
  * org-settings.ts, so putting it in either would make an import cycle.
  */
 import { and, auditLog, auditorLinks, auditorSessions, eq, isNull, orgSettings, ORG_SETTINGS_ID, type Db } from "@regulait/db";
+import { revokePortalChallenges } from "./external-mfa.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -29,11 +30,13 @@ export async function revokeAuditorAccessOnDisable(tx: Db, userId: string | null
     .set({ revokedAt: now })
     .where(and(isNull(auditorLinks.usedAt), isNull(auditorLinks.revokedAt)))
     .returning({ id: auditorLinks.id });
+  // ADR-0240: a second-factor step under way ends too, so turning the pages on again does not finish it
+  const challenges = await revokePortalChallenges(tx, "auditor");
   await tx.insert(auditLog).values({
     userId: userId ?? NO_IDENTITY,
     objectType: "auditor_grant",
     objectId: null,
-    detail: { sessionsRevoked: sessions.length, linksRevoked: links.length },
+    detail: { sessionsRevoked: sessions.length, linksRevoked: links.length, mfaChallengesRevoked: challenges },
     effect: "allow",
     ruleId: "auditor-access-revoked-pages-off",
     ruleChain: [],
@@ -42,6 +45,30 @@ export async function revokeAuditorAccessOnDisable(tx: Db, userId: string | null
       "turning the pages on again restores none of them",
   });
   return { sessions: sessions.length, links: links.length };
+}
+
+/**
+ * ADR-0240 (#709 review): the auditor second factor turned back ON. A session opened while it was relaxed was opened
+ * by a link alone, so every open auditor session ends here, in the settings write's transaction; the next sign-in
+ * presents a code. Links stay: a redemption now opens a challenge, not a session.
+ */
+export async function revokeAuditorSessionsOnMfaRequired(tx: Db, userId: string | null, now = new Date()): Promise<number> {
+  const sessions = await tx
+    .update(auditorSessions)
+    .set({ revokedAt: now })
+    .where(isNull(auditorSessions.revokedAt))
+    .returning({ id: auditorSessions.id });
+  await tx.insert(auditLog).values({
+    userId: userId ?? NO_IDENTITY,
+    objectType: "auditor_grant",
+    objectId: null,
+    detail: { sessionsRevoked: sessions.length },
+    effect: "allow",
+    ruleId: "auditor-sessions-revoked-mfa-required",
+    ruleChain: [],
+    reason: `auditor second factor required again: ${sessions.length} open auditor session(s) ended; the next sign-in needs a code`,
+  });
+  return sessions.length;
 }
 
 /** is the setting still on, read under a share lock on the org row (inside a transaction that creates access) */

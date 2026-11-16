@@ -18,6 +18,7 @@
  *
  * Runs on its OWN scratch database (prefix `b4s1_`), dropped in afterAll (M-068).
  */
+import { hashToken } from "./token-hash.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -86,7 +87,7 @@ async function mkPerson(label: string, isAdmin: boolean): Promise<Person> {
   expect(key.statusCode, key.body).toBe(201);
   const token = "rgls_" + randomBytes(32).toString("hex");
   await db.insert(authSessions).values({
-    tokenHash: createHash("sha256").update(token).digest("hex"),
+    tokenHash: hashToken(token),
     userId: id,
     origin: "password",
     expiresAt: new Date(Date.now() + 3_600_000),
