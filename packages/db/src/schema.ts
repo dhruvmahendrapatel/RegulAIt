@@ -5409,6 +5409,9 @@ export const orgSettings = pgTable(
     supplierPortalEnabled: boolean("supplier_portal_enabled").notNull().default(false),
     /** ADR-0221 (migration 0241): with no scanner configured, evidence files are refused unless this is on (a relaxation) */
     supplierPortalAcceptUnscannedFiles: boolean("supplier_portal_accept_unscanned_files").notNull().default(false),
+    /** ADR-0240 (pending migration external_portal_mfa): a spent supplier link opens a session only after a TOTP code (enrolment on first use).
+     * Shipped ON (ADR-0180); turning it off is a relaxation (settings_relax step-up, audited). */
+    supplierPortalMfaRequired: boolean("supplier_portal_mfa_required").notNull().default(true),
     /** ADR-0211 (migration 0250): may a risk be recorded as transferred or
      * avoided? OFF by default (ADR-0180); turning it on is a step-up relaxation */
     riskTreatmentsEnabled: boolean("risk_treatments_enabled").notNull().default(false),
@@ -5434,6 +5437,9 @@ export const orgSettings = pgTable(
     /** ADR-0225 (P13 d, migration 0247): the public trust centre and the auditor portal — built, shipped OFF
      * (ADR-0180). Off, both answer 404 and nothing can be published or granted. */
     trustPagesEnabled: boolean("trust_pages_enabled").notNull().default(false),
+    /** ADR-0240 (pending migration external_portal_mfa): a spent auditor link opens a session only after a TOTP code (enrolment on first use).
+     * Shipped ON (ADR-0180); turning it off is a relaxation (settings_relax step-up, audited). */
+    trustAuditorMfaRequired: boolean("trust_auditor_mfa_required").notNull().default(true),
 
     // --- ADR-0224 (P13 c, migration 0251): privacy operations ------------
     /** Shipped OFF (owner, 10-30). When on, personal data the PII detector finds in a governed dispatch must be a
@@ -14342,6 +14348,17 @@ export const engineRuns = pgTable(
     targetAgentId: uuid("target_agent_id").references(() => agents.id, { onDelete: "set null" }),
     judgeAgentId: uuid("judge_agent_id").references(() => agents.id, { onDelete: "set null" }),
     targetArtifactId: uuid("target_artifact_id").references(() => modelArtifacts.id, { onDelete: "set null" }),
+    /** ADR-0242 L4.3: a `subject` run's MCP server (mcpscanner) */
+    targetMcpServerId: uuid("target_mcp_server_id").references(() => mcpServers.id, { onDelete: "set null" }),
+    /** ADR-0242 L4.3: a `subject` run's builder skill (skillscanner) */
+    targetBuilderSkillId: uuid("target_builder_skill_id").references(() => builderSkills.id, { onDelete: "set null" }),
+    /** ADR-0242 L4.3: the subject digest the run scans (sha256 hex) */
+    targetSubjectDigest: text("target_subject_digest"),
+    /**
+     * ADR-0200 exception: a temporary verbatim external payload. The MCP manifest snapshot an admission scan reads,
+     * encrypted under the data key, cleared when the run ends; never returned by any route (ADR-0242 L4.3).
+     */
+    targetSubjectInputCiphertext: text("target_subject_input_ciphertext"),
     config: jsonb("config").$type<EngineRunConfig>().notNull(),
     configHash: text("config_hash").notNull(),
     /** the target agent's configuration hash when the run was made (A3 compares it) */
@@ -14388,9 +14405,10 @@ export const engineRuns = pgTable(
   },
   (t) => [
     uniqueIndex("engine_runs_task_placement_uq").on(t.taskPlacementId).where(sql`${t.taskPlacementId} IS NOT NULL`),
+    // ADR-0242 L4.3 (pending migration `admission_scan_subject_target`); the trigger and target-kind CHECKs live in SQL only
     check(
       "engine_runs_target_check",
-      sql`(${t.targetKind} = 'agent' AND ${t.targetArtifactId} IS NULL) OR (${t.targetKind} = 'artifact' AND ${t.targetAgentId} IS NULL AND ${t.judgeAgentId} IS NULL)`,
+      sql`(${t.targetKind} IN ('agent', 'artifact') AND ${t.trigger} <> 'admission' AND ${t.targetMcpServerId} IS NULL AND ${t.targetBuilderSkillId} IS NULL AND ${t.targetSubjectDigest} IS NULL AND ${t.targetSubjectInputCiphertext} IS NULL AND ((${t.targetKind} = 'agent' AND ${t.targetArtifactId} IS NULL) OR (${t.targetKind} = 'artifact' AND ${t.targetAgentId} IS NULL AND ${t.judgeAgentId} IS NULL))) OR (${t.targetKind} = 'subject' AND ${t.trigger} = 'admission' AND ${t.targetAgentId} IS NULL AND ${t.judgeAgentId} IS NULL AND ${t.targetArtifactId} IS NULL AND ${t.runAsUserId} IS NULL AND ${t.projectId} IS NULL AND num_nonnulls(${t.targetMcpServerId}, ${t.targetBuilderSkillId}) <= 1 AND (${t.targetMcpServerId} IS NULL OR ${t.engineId} = 'mcpscanner') AND (${t.targetBuilderSkillId} IS NULL OR ${t.engineId} = 'skillscanner') AND ${t.targetSubjectDigest} IS NOT NULL AND ${t.targetSubjectDigest} ~ '^[0-9a-f]{64}$' AND (${t.targetSubjectInputCiphertext} IS NULL OR ${t.engineId} = 'mcpscanner'))`,
     ),
     check("engine_runs_trials_check", sql`${t.trials} BETWEEN 1 AND 25`),
     check("engine_runs_budget_check", sql`${t.budgetUsd} > 0`),
@@ -14403,6 +14421,13 @@ export const engineRuns = pgTable(
       .on(t.workflowInstanceId, t.workflowStageId, t.workflowCheckName, t.workflowRound)
       .where(sql`${t.workflowInstanceId} IS NOT NULL`),
     uniqueIndex("engine_runs_runner_lease_request_unique").on(t.runnerId, t.leaseRequestId).where(sql`${t.leaseRequestId} IS NOT NULL`),
+    // ADR-0242 L4.3: one live (queued or leased) admission run per engine, subject and digest
+    uniqueIndex("engine_runs_subject_mcp_live_uq")
+      .on(t.engineId, t.targetMcpServerId, t.targetSubjectDigest)
+      .where(sql`${t.targetMcpServerId} IS NOT NULL AND ${t.status} IN ('queued', 'leased')`),
+    uniqueIndex("engine_runs_subject_skill_live_uq")
+      .on(t.engineId, t.targetBuilderSkillId, t.targetSubjectDigest)
+      .where(sql`${t.targetBuilderSkillId} IS NOT NULL AND ${t.status} IN ('queued', 'leased')`),
   ],
 );
 export type EngineRunRow = typeof engineRuns.$inferSelect;
@@ -16215,6 +16240,71 @@ export const supplierSessions = pgTable(
   ],
 );
 export type SupplierSessionRow = typeof supplierSessions.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0240 (pending migration external_portal_mfa) — one second factor for the external portals
+// ---------------------------------------------------------------------------
+
+/**
+ * ADR-0240: the TOTP factor of ONE external grant, a supplier access (ADR-0221) or an auditor grant (ADR-0225).
+ * Exactly one reference is set (CHECK), so the portal is whichever is set. `activatedAt` null = enrolment started
+ * but no code proved yet. Locked after repeated wrong codes; only an admin reset (which deletes the row) recovers it.
+ * The secret is a data-key envelope listed in `CIPHERTEXT_COLUMNS`.
+ */
+export const externalMfaFactors = pgTable(
+  "external_mfa_factors",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    supplierAccessId: uuid("supplier_access_id").references(() => supplierAccess.id, { onDelete: "cascade" }),
+    auditorGrantId: uuid("auditor_grant_id").references(() => auditorGrants.id, { onDelete: "cascade" }),
+    secretCiphertext: text("secret_ciphertext").notNull(),
+    activatedAt: timestamp("activated_at", { withTimezone: true }),
+    lastUsedStep: bigint("last_used_step", { mode: "number" }),
+    failedAttempts: integer("failed_attempts").notNull().default(0),
+    lockedAt: timestamp("locked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("external_mfa_factors_supplier_access_uq").on(t.supplierAccessId),
+    unique("external_mfa_factors_auditor_grant_uq").on(t.auditorGrantId),
+    check("external_mfa_factors_one_grant_check", sql`num_nonnulls(${t.supplierAccessId}, ${t.auditorGrantId}) = 1`),
+    check("external_mfa_factors_failed_check", sql`${t.failedAttempts} BETWEEN 0 AND 100`),
+    check("external_mfa_factors_secret_check", sql`char_length(${t.secretCiphertext}) BETWEEN 1 AND 4096`),
+  ],
+);
+export type ExternalMfaFactorRow = typeof externalMfaFactors.$inferSelect;
+
+/**
+ * ADR-0240: the step between a spent link and a session. Only the sha256 of its token is stored; at most 15 minutes;
+ * spent by the first correct code. It names the link that was spent (exactly one of the two references).
+ */
+export const externalMfaChallenges = pgTable(
+  "external_mfa_challenges",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    factorId: uuid("factor_id")
+      .notNull()
+      .references(() => externalMfaFactors.id, { onDelete: "cascade" }),
+    supplierInvitationId: uuid("supplier_invitation_id").references(() => supplierInvitations.id, { onDelete: "cascade" }),
+    auditorLinkId: uuid("auditor_link_id").references(() => auditorLinks.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("external_mfa_challenges_token_hash_uq").on(t.tokenHash),
+    check("external_mfa_challenges_token_hash_check", sql`${t.tokenHash} ~ '^[0-9a-f]{64}$'`),
+    check("external_mfa_challenges_one_link_check", sql`num_nonnulls(${t.supplierInvitationId}, ${t.auditorLinkId}) = 1`),
+    check(
+      "external_mfa_challenges_ttl_check",
+      sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} - ${t.createdAt} <= interval '15 minutes'`,
+    ),
+    index("external_mfa_challenges_factor_idx").on(t.factorId),
+  ],
+);
+export type ExternalMfaChallengeRow = typeof externalMfaChallenges.$inferSelect;
 
 export const supplierSubmissions = pgTable(
   "supplier_submissions",

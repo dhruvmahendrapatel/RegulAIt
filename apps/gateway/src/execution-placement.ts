@@ -124,6 +124,12 @@ export interface PlacementRequest {
    * unknown-agent floor. Absent or false = never relaxed (an API key, a workload token, a worker loop, an engine).
    */
   interactivePerson?: boolean;
+  /**
+   * ADR-0242 L4.3: the sensitivity of a PROJECT-LESS workload the gateway itself starts (an admission scan of an MCP
+   * manifest or a skill, which belongs to no project). Read only when `projectId` is null; a project's own
+   * sensitivity always wins. Absent with no project = the fact does not resolve, as before.
+   */
+  sensitivity?: PlacementSensitivity;
 }
 
 /** owner decision C: the relaxation one requirement used (recorded on the decision and the placement audit) */
@@ -265,7 +271,7 @@ export async function resolveRequirement(db: Db, req: PlacementRequest): Promise
   }
   const kind = req.workloadKind;
   const org = await loadOrgSettings(db);
-  const sensitivity = await projectSensitivity(db, req.projectId);
+  const sensitivity = req.projectId ? await projectSensitivity(db, req.projectId) : req.sensitivity;
   const sensitivityFloor = sensitivity === undefined ? undefined : org[SENSITIVITY_FLOOR_KEYS[sensitivity]];
   const tagFloors = await complianceFloors(db, req.projectId);
 
