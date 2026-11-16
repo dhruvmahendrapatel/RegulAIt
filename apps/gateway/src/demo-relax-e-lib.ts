@@ -94,6 +94,18 @@ const isBootstrapStepUpRefusal = (status: number, body: Json) =>
 export async function applyDemoERelaxation(call: GatewayCall, opts: DemoERelaxOptions): Promise<DemoERelaxResult> {
   const h = opts.headers;
   const beats = await call("GET", DEMO_BEATS_ROUTE, h);
+  // S-02: once an admin has signed in, the bootstrap token is RETIRED (401 bootstrap_retired) unless the
+  // gateway sets REGULAIT_BOOTSTRAP_AFTER_ADMIN=1. Nothing was read or written; the admin path still works.
+  if (beats.status === 401 && beats.body.error === "bootstrap_retired") {
+    return {
+      status: "needs_admin",
+      lines: [
+        "beat E: NOT relaxed. The bootstrap token is retired on this stack (an admin has signed in), so it authenticates nothing.",
+        "  Run `demo:relax-e` with REGULAIT_DEMO_ADMIN_PASSWORD set (it signs in as Ada and asks for two authenticator codes),",
+        "  or, signed in as Ada on /ui/admin/organization, relax both settings and confirm the step-up (DEMO_RUNBOOK §7.3, row E).",
+      ],
+    };
+  }
   if (beats.status !== 200 && beats.status !== 404) {
     return { status: "refused", lines: [`REFUSED  GET ${DEMO_BEATS_ROUTE} -> ${beats.status}: cannot show this is a demo gateway. Nothing was changed.`] };
   }

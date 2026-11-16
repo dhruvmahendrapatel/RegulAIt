@@ -14,6 +14,7 @@
  * The upstreams are real loopback receivers that record what reached them, so
  * "refused" is proved as "the receiver saw nothing", not "the call errored".
  */
+import { hashToken } from "./token-hash.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 // an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
 import { relaxStepUpAround } from "./testing/step-up-posture.js";
@@ -532,7 +533,7 @@ describe("decision 32: relaxing to `off` needs a settings_relax step-up, is audi
     const [s] = await db
       .insert(authSessions)
       .values({
-        tokenHash: createHash("sha256").update(token).digest("hex"),
+        tokenHash: hashToken(token),
         userId: adminId,
         origin: "password",
         expiresAt: new Date(Date.now() + 3_600_000),
