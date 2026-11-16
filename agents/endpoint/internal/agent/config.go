@@ -29,7 +29,8 @@ type LocalConfig struct {
 	DisabledKinds []contract.Kind `json:"disabledKinds,omitempty"`
 	// DevicePolicyKeys pins the control plane's device-policy signer (owner decision B4, ADR-0330 §8): the public
 	// keys the on-device enforcement hook verifies signed policies with, the current key and at most one next key.
-	// Pinning a key can only let a signed policy restrict the device further; nothing here relaxes the agent.
+	// Pinning authorises policies signed by these keys, and so whatever they allow; a pin never overrides a compiled
+	// key, and nothing here relaxes the agent without such a signed policy.
 	DevicePolicyKeys []enforce.PinnedKey `json:"devicePolicyKeys,omitempty"`
 }
 

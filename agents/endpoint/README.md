@@ -53,7 +53,11 @@ Registrations (paths are examples; use absolute paths with no shell metacharacte
   `"onFailure": "block"`, and `allowManagedHooksOnly: true`.
 - **Cursor**, enterprise `hooks.json` (`/etc/cursor/hooks.json`, `/Library/Application Support/Cursor/hooks.json` or
   `C:\ProgramData\Cursor\hooks.json`):
-  `{"version": 1, "hooks": {"beforeMCPExecution": [{"command": "/usr/local/bin/regulait-agent hook cursor -policy /etc/regulait/policy.json", "failClosed": true}]}}`.
+  `{"version": 1, "hooks": {"beforeMCPExecution": [{"command": "'/usr/local/bin/regulait-agent' 'hook' 'cursor' '-policy' '/etc/regulait/policy.json'", "failClosed": true}]}}`.
+  Cursor has no exec form (`execForm: false` in `regulait-agent hook-capabilities`), so the command runs through a
+  shell: keep the path and every argument quoted, with nothing interpolated. On Windows it runs through PowerShell,
+  so prefix the quoted path with the call operator `&`.
+  In audit mode an allowed call gets `allow` and a would-deny gets `ask`, never `allow`.
   Team (dashboard) hooks cannot set `failClosed` and are not supported.
 - **Copilot CLI**, a root-owned policy file `/etc/github-copilot/policy.d/regulait.json` (Windows:
   `C:\ProgramData\GitHub\Copilot\policy.d\`):

@@ -109,6 +109,10 @@ func checkAnswer(t *testing.T, name string, a Adapter, want string, stdout []byt
 		if exit != 0 || len(stdout) == 0 || isDenyJSON(a.Name, stdout) {
 			t.Errorf("%s: want an explicit allow, got exit %d %s", name, exit, stdout)
 		}
+	case "ask":
+		if exit != 0 || !isAskJSON(a.Name, stdout) {
+			t.Errorf("%s: want ask (defer to the agent's own confirmation), got exit %d %s", name, exit, stdout)
+		}
 	case "deny":
 		if exit != ExitBlock || stderr == "" || !isDenyJSON(a.Name, stdout) {
 			t.Errorf("%s: want a deny, got exit %d %s", name, exit, stdout)
@@ -116,6 +120,12 @@ func checkAnswer(t *testing.T, name string, a Adapter, want string, stdout []byt
 	default:
 		t.Errorf("%s: unknown expectation %q", name, want)
 	}
+}
+
+// isAskJSON: only Cursor has a documented "ask" answer.
+func isAskJSON(agent string, stdout []byte) bool {
+	var m map[string]any
+	return agent == AgentCursor && json.Unmarshal(stdout, &m) == nil && len(m) == 1 && m["permission"] == "ask"
 }
 
 // isDenyJSON checks the agent's own documented deny shape.
@@ -301,5 +311,9 @@ func TestOwnerDecisions(t *testing.T) {
 	cursor, _ := Lookup(AgentCursor)
 	if out, _, exit := cursor.Render(Decision{Verdict: Allow}); exit != 0 || string(out) != `{"permission":"allow"}` {
 		t.Errorf("cursor allow: %d %s", exit, out)
+	}
+	// audit mode's would-deny never approves: Cursor gets "ask", not "allow"
+	if out, _, exit := cursor.Render(Decision{Verdict: NoDecision, WouldDeny: true}); exit != 0 || string(out) != `{"permission":"ask"}` {
+		t.Errorf("cursor audit would-deny: %d %s", exit, out)
 	}
 }

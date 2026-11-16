@@ -57,8 +57,9 @@ type cursorOutput struct {
 }
 
 // RenderCursor turns a decision into stdout bytes and an exit code. Every answer is explicit JSON: with failClosed,
-// Cursor blocks on no output, and it blocks on invalid JSON always. An allow is "allow" (owner decision H3,
-// 2026-11-15); a deny is "deny" and exit 2. Whether a hook "allow" skips Cursor's own run confirmation is NOT
+// Cursor blocks on no output, and it blocks on invalid JSON always. Only a policy allow is "allow" (owner decision
+// H3, 2026-11-15); a deny is "deny" and exit 2. Anything else (audit mode's would-deny) is "ask": audit observes and
+// never approves a call the policy would block, so Cursor's own confirmation still applies (ADR-0180). Whether a hook "allow" skips Cursor's own run confirmation is NOT
 // documented (cursor.com/docs/hooks, re-checked 2026-11-15: responses merge across sources, deny beats ask beats
 // allow, nothing more). ADR-0330 §8 records it as a manual check against a real Cursor install.
 func RenderCursor(d Decision) (stdout []byte, stderr string, exit int) {
@@ -66,8 +67,12 @@ func RenderCursor(d Decision) (stdout []byte, stderr string, exit int) {
 		b, _ := json.Marshal(cursorOutput{Permission: "deny", UserMessage: d.Reason, AgentMessage: d.Reason})
 		return b, d.Reason, ExitBlock
 	}
-	// NoDecision only arises in audit mode here (every call is MCP); audit never blocks
-	b, _ := json.Marshal(cursorOutput{Permission: "allow"})
+	if d.Verdict == Allow && !d.WouldDeny {
+		b, _ := json.Marshal(cursorOutput{Permission: "allow"})
+		return b, "", 0
+	}
+	// NoDecision only arises in audit mode here (every call is MCP): never block, never approve
+	b, _ := json.Marshal(cursorOutput{Permission: "ask"})
 	return b, "", 0
 }
 

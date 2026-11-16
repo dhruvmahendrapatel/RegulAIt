@@ -2,8 +2,8 @@
   {"input": "mcp-stdio-allowed.json", "policy": "enforce", "want": "allow"},
   {"input": "mcp-stdio-allowed.json", "policy": "none", "want": "deny"},
   {"input": "mcp-http-unlisted.json", "policy": "enforce", "want": "deny"},
-  {"input": "mcp-http-unlisted.json", "policy": "audit", "want": "allow"},
+  {"input": "mcp-http-unlisted.json", "policy": "audit", "want": "ask"},
   {"input": "mcp-no-server-name.json", "policy": "enforce", "want": "deny"},
-  {"input": "mcp-no-server-name.json", "policy": "audit", "want": "allow"},
+  {"input": "mcp-no-server-name.json", "policy": "audit", "want": "ask"},
   {"input": "shell-event.json", "policy": "enforce", "want": "deny"}
 ]

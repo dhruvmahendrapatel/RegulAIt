@@ -127,8 +127,9 @@ change for a new agent version cannot silently break devices still on the old on
 The agents differ in a few ways the table cannot show:
 
 - **Cursor** covers only local agents. `beforeMCPExecution` does not run in Cursor's cloud agents.
-- **Cursor** has no exec form, so the registration command is an absolute path with no shell metacharacters. On Windows
-  it runs through PowerShell.
+- **Cursor** has no exec form (`execForm: false` in `hook-capabilities`), so the command runs through a shell. The
+  registration quotes the absolute binary path and each argument, with no interpolated input. On Windows it runs
+  through PowerShell.
 - **Codex** documents that hooks are "a useful guardrail, not a complete enforcement boundary". A deny from the hook is
   reliable. A crash or a stall lets the call run.
 - **Codex's** stronger, vendor-native control is the `requirements.toml` `[mcp_servers.<name>] identity` allow-list,
@@ -207,6 +208,9 @@ The owner answered the questions this ADR left open on #864. These decisions are
   the hook fails. Anything else is `audit-grade` and must name the vendor control it is paired with.
 - **H3, Cursor allow.** The Cursor adapter answers an allowed call with `{"permission":"allow"}`, and a deny still
   blocks (JSON and exit 2).
+  - **Audit mode never approves.** A call that `audit` mode lets through but `enforce` would deny gets
+    `{"permission":"ask"}`, never `allow`, so audit cannot approve a blocked server or skip Cursor's own confirmation
+    (ADR-0180). `ask` is documented valid output, so `failClosed` does not block it.
   - **Re-check of the docs.** cursor.com/docs/hooks was re-checked on 2026-11-15. It says responses merge across
     sources: `deny` beats `ask`, and `ask` beats `allow`. With `failClosed`, empty output blocks. It does **not** say
     whether a hook `allow` skips Cursor's own run confirmation.
@@ -225,7 +229,9 @@ The owner answered the questions this ADR left open on #864. These decisions are
   - **How the hook verifies.** It uses the compiled keyring plus these pins. A pin never overrides a compiled key.
   - **What a bad config does.** A malformed pin refuses the whole config, and an unreadable config pins nothing. Either
     way, the hook keeps denying.
-  - **Effect.** Pinning a key can only let a signed policy restrict the device further.
+  - **Effect.** A pinned key never overrides a compiled key. Pinning authorises policies signed by that key, so any
+    relaxation (a server a policy allows, where the no-policy default denies every MCP call) still needs a policy
+    signed by a pinned or compiled key.
 
 ## Not in this slice
 
