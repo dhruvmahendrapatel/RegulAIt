@@ -74,7 +74,12 @@ import {
   evaluateSla,
   selectAssignmentRule,
   slaDeadlines,
+  slaStateAt,
+  taskScheduleRelaxations,
+  APPROVAL_TASK_PRIORITY_ORDER,
   type ApprovalRoutingContext,
+  type TaskPriority,
+  type TaskSchedule,
 } from "@regulait/shared";
 import { loadOrgSettings } from "./org-settings.js";
 import { requireStepUp } from "./step-up.js";
@@ -566,6 +571,171 @@ export async function runApprovalSlaSweep(
 }
 
 // ---------------------------------------------------------------------------
+// ADR-0342 slice 2 — a human task's priority and due date, and the one entry point a stage timer uses
+// ---------------------------------------------------------------------------
+
+export interface TaskScheduleInput {
+  priority?: TaskPriority | undefined;
+  /** undefined = unchanged; null = remove */
+  dueAt?: Date | null | undefined;
+  warnAt?: Date | null | undefined;
+  /** the admin-defined policy whose escalation target a breach uses; undefined = unchanged; null = none */
+  slaPolicyId?: string | null | undefined;
+}
+
+export interface TaskScheduleContext {
+  /** `explicit`: an admin through the route; `stage_timer`: a workflow stage timer (lane E21), which may only tighten */
+  source: "explicit" | "stage_timer";
+  actorUserId: string | null;
+  /** the system path that called, recorded on the audit row (e.g. "workflow-stage-timer") */
+  systemActor?: string | null | undefined;
+  /** asked only when the change loosens the task; the route runs a `settings_relax` step-up here */
+  authorizeRelaxation?: ((relaxations: string[]) => Promise<boolean>) | undefined;
+  now?: Date | undefined;
+}
+
+export type TaskScheduleOutcome =
+  | { ok: true; assignment: ApprovalAssignmentRow; relaxations: string[] }
+  | { ok: false; status: number; error: string; detail: string; handled?: boolean };
+
+const SLA_RANK = { ok: 0, warning: 1, breached: 2 } as const;
+
+/**
+ * Set a pending human task's priority, due and warn times and escalation policy. The ONE function for both an admin
+ * and a workflow stage timer: there is no second escalation path. After the write the ADR-0046 evaluation runs, so
+ * a due time already passed breaches and escalates exactly as a policy-derived one would (never deciding anything).
+ *
+ * Secure by default (ADR-0180): a tightening (earlier due, higher priority, a policy where there was none) is audited;
+ * a loosening also needs `authorizeRelaxation` (the route's step-up) and is audited as a relaxation; a stage timer may
+ * never loosen. Run it in a scope that can read and write approvals (an admin principal, or the scope the SLA sweep runs
+ * in).
+ */
+export async function scheduleApprovalTask(
+  db: Db,
+  approvalId: string,
+  input: TaskScheduleInput,
+  ctx: TaskScheduleContext,
+): Promise<TaskScheduleOutcome> {
+  const now = ctx.now ?? new Date();
+  const [row] = await db.select().from(approvals).where(eq(approvals.id, approvalId)).for("update");
+  if (!row) return { ok: false, status: 404, error: "not_found", detail: "no such approval" };
+  if (row.status !== "pending") return { ok: false, status: 409, error: "not_pending", detail: `the approval is ${row.status}` };
+  const a = await ensureAssignment(db, row, ctx.actorUserId);
+  if (!a) return { ok: false, status: 409, error: "no_assignment", detail: "the approval has no assignment to schedule" };
+
+  const current: TaskSchedule = {
+    priority: (APPROVAL_TASK_PRIORITY_ORDER as readonly string[]).includes(a.priority) ? (a.priority as TaskPriority) : "normal",
+    warnAt: a.warnAt,
+    dueAt: a.dueAt,
+    slaPolicyId: a.slaPolicyId,
+  };
+  const next: TaskSchedule = {
+    priority: input.priority ?? current.priority,
+    dueAt: input.dueAt === undefined ? current.dueAt : input.dueAt,
+    warnAt: input.warnAt === undefined ? (input.dueAt === null ? null : current.warnAt) : input.warnAt,
+    slaPolicyId: input.slaPolicyId === undefined ? current.slaPolicyId : input.slaPolicyId,
+  };
+  if (next.warnAt && !next.dueAt) return { ok: false, status: 400, error: "invalid_schedule", detail: "a warn time needs a due time" };
+  if (next.warnAt && next.dueAt && next.warnAt.getTime() > next.dueAt.getTime()) {
+    return { ok: false, status: 400, error: "invalid_schedule", detail: "the warn time must not be after the due time" };
+  }
+  if (input.dueAt && input.dueAt.getTime() <= now.getTime()) {
+    return { ok: false, status: 400, error: "invalid_schedule", detail: "a new due time must be in the future" };
+  }
+  if (input.slaPolicyId) {
+    const [policy] = await db.select().from(approvalSlaPolicies).where(eq(approvalSlaPolicies.id, input.slaPolicyId));
+    if (!policy || !policy.enabled) return { ok: false, status: 400, error: "invalid_schedule", detail: "no such enabled SLA policy" };
+  }
+
+  const relaxations = taskScheduleRelaxations(current, next);
+  if (relaxations.length > 0) {
+    if (ctx.source === "stage_timer") {
+      return { ok: false, status: 409, error: "stage_timer_cannot_relax", detail: `a stage timer may only tighten a task (${relaxations.join(", ")})` };
+    }
+    if (!ctx.authorizeRelaxation || !(await ctx.authorizeRelaxation(relaxations))) {
+      return { ok: false, status: 403, error: "relaxation_not_authorized", detail: relaxations.join(", "), handled: Boolean(ctx.authorizeRelaxation) };
+    }
+  }
+
+  const timesChanged =
+    (current.dueAt?.getTime() ?? null) !== (next.dueAt?.getTime() ?? null) ||
+    (current.warnAt?.getTime() ?? null) !== (next.warnAt?.getTime() ?? null);
+  const patch: Partial<typeof approvalAssignments.$inferInsert> = {
+    priority: next.priority,
+    dueAt: next.dueAt,
+    warnAt: next.warnAt,
+    slaPolicyId: next.slaPolicyId,
+    dueSource: timesChanged ? ctx.source : a.dueSource,
+  };
+  // moving the clock BACK re-arms it here; moving it forward into warning or breach is left to the ADR-0046
+  // evaluation below, so the warning/breach audit and the escalation happen exactly once, the usual way
+  const implied = slaStateAt(next, now);
+  if (SLA_RANK[implied] < SLA_RANK[a.slaState as keyof typeof SLA_RANK]) patch.slaState = implied;
+  const [written] = await db.update(approvalAssignments).set(patch).where(eq(approvalAssignments.id, a.id)).returning();
+
+  const iso = (d: Date | null) => d?.toISOString() ?? null;
+  await db.insert(auditLog).values({
+    userId: ctx.actorUserId ?? row.userId,
+    objectType: row.objectType,
+    objectId: row.instanceId ?? row.runId ?? row.projectId ?? null,
+    serverId: row.serverId,
+    toolName: row.toolName,
+    detail: {
+      phase: "task_schedule",
+      adr: "0342",
+      approvalId: row.id,
+      assignmentId: a.id,
+      source: ctx.source,
+      ...(ctx.systemActor ? { actor: ctx.systemActor } : {}),
+      before: { priority: current.priority, warnAt: iso(current.warnAt), dueAt: iso(current.dueAt), slaPolicyId: current.slaPolicyId },
+      after: { priority: next.priority, warnAt: iso(next.warnAt), dueAt: iso(next.dueAt), slaPolicyId: next.slaPolicyId },
+      relaxations,
+      receiptClass: "excluded",
+    },
+    effect: "allow",
+    ruleId: relaxations.length > 0 ? "approval-task-schedule-relaxed" : "approval-task-scheduled",
+    ruleChain: [],
+    reason:
+      relaxations.length > 0
+        ? `human task schedule LOOSENED (${relaxations.join(", ")}) after a settings_relax step-up (ADR-0342)`
+        : `human task scheduled by ${ctx.source === "stage_timer" ? "a workflow stage timer" : "an admin"} (ADR-0342)`,
+  });
+  const assignment = await evaluateAssignmentSla(db, row, written!, now);
+  return { ok: true, assignment, relaxations };
+}
+
+/**
+ * The stage-timer entry point (lane E21's contract): schedule every pending task of one workflow stage. A timer on a
+ * human stage calls this; it never escalates by itself. Returns one outcome per pending approval of the stage.
+ */
+export async function scheduleStageApprovals(
+  db: Db,
+  target: { instanceId: string; stageId: string },
+  input: TaskScheduleInput,
+  ctx: Omit<TaskScheduleContext, "source" | "authorizeRelaxation"> & { systemActor: string },
+): Promise<Array<{ approvalId: string; outcome: TaskScheduleOutcome }>> {
+  const rows = await db
+    .select({ id: approvals.id })
+    .from(approvals)
+    .where(and(eq(approvals.instanceId, target.instanceId), eq(approvals.stageId, target.stageId), eq(approvals.status, "pending")));
+  const out: Array<{ approvalId: string; outcome: TaskScheduleOutcome }> = [];
+  for (const r of rows) {
+    out.push({ approvalId: r.id, outcome: await scheduleApprovalTask(db, r.id, input, { ...ctx, source: "stage_timer" }) });
+  }
+  return out;
+}
+
+const taskScheduleBody = z
+  .object({
+    priority: z.enum(APPROVAL_TASK_PRIORITY_ORDER).optional(),
+    dueAt: z.coerce.date().nullable().optional(),
+    warnAt: z.coerce.date().nullable().optional(),
+    slaPolicyId: z.string().uuid().nullable().optional(),
+  })
+  .strict()
+  .refine((b) => Object.keys(b).length > 0, { message: "name at least one of priority, dueAt, warnAt, slaPolicyId" });
+
+// ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
 
@@ -786,6 +956,25 @@ export function registerWorkbenchRoutes(app: FastifyInstance, db: Db, opts: Work
         .sort((a, b) => b.breached - a.breached || b.open - a.open),
       note: "Read-only aggregate over pending approvals, scoped to the queues you are party to.",
     };
+  });
+
+  // ---------------- ADR-0342 slice 2: a task's priority and due date (admin) ----------------
+
+  app.put("/v1/approvals/:approvalId/schedule", async (req, reply) => {
+    const params = z.object({ approvalId: z.string().uuid() }).safeParse(req.params);
+    if (!params.success) return reply.status(400).send({ error: "invalid_params" });
+    const body = taskScheduleBody.safeParse(req.body ?? {});
+    if (!body.success) {
+      return reply.status(400).send({ error: "invalid_body", detail: body.error.issues.map((i) => `${i.path.join(".") || "body"}: ${i.message}`).join("; ") });
+    }
+    const out = await scheduleApprovalTask(db, params.data.approvalId, body.data, {
+      source: "explicit",
+      actorUserId: req.authCtx.userId ?? null,
+      authorizeRelaxation: async (relaxations) =>
+        (await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { values: { approvalTaskSchedule: { approvalId: params.data.approvalId, ...body.data, relaxations } } } })).ok,
+    });
+    if (!out.ok) return out.handled ? reply : reply.status(out.status).send({ error: out.error, detail: out.detail });
+    return reply.status(200).send({ assignment: out.assignment, relaxations: out.relaxations });
   });
 
   // ---------------- claiming a role/team assignment ----------------

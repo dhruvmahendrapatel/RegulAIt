@@ -308,3 +308,41 @@ export const createApprovalSavedViewSchema = z.object({
   /** admin-only: publish for everyone instead of owning it privately */
   shared: z.boolean().default(false),
 });
+
+// ---------------------------------------------------------------------------
+// ADR-0342 slice 2 — a human task's priority and explicit due date
+// ---------------------------------------------------------------------------
+
+export const APPROVAL_TASK_PRIORITY_ORDER = ["low", "normal", "high", "urgent"] as const;
+export type TaskPriority = (typeof APPROVAL_TASK_PRIORITY_ORDER)[number];
+
+export interface TaskSchedule {
+  priority: TaskPriority;
+  warnAt: Date | null;
+  dueAt: Date | null;
+  slaPolicyId: string | null;
+}
+
+/**
+ * Does moving a task from `current` to `next` LOOSEN it (ADR-0180)? A later or removed due or warn time, a lower
+ * priority, or a different escalation policy (it changes who the task escalates to) is a relaxation and needs an
+ * admin's `settings_relax` step-up; a stage timer may never make one. An earlier due time, a higher priority, or a
+ * policy set where there was none is a tightening.
+ */
+export function taskScheduleRelaxations(current: TaskSchedule, next: TaskSchedule): string[] {
+  const out: string[] = [];
+  const later = (a: Date | null, b: Date | null) => (a !== null && b === null) || (a !== null && b !== null && b.getTime() > a.getTime());
+  if (later(current.dueAt, next.dueAt)) out.push(next.dueAt ? "due_later" : "due_removed");
+  if (later(current.warnAt, next.warnAt)) out.push(next.warnAt ? "warn_later" : "warn_removed");
+  const rank = (p: TaskPriority) => APPROVAL_TASK_PRIORITY_ORDER.indexOf(p);
+  if (rank(next.priority) < rank(current.priority)) out.push("priority_lowered");
+  if (current.slaPolicyId !== null && next.slaPolicyId !== current.slaPolicyId) out.push("escalation_policy_changed");
+  return out;
+}
+
+/** the SLA state a schedule implies at `now`, from scratch (a moved due time re-arms the clock) */
+export function slaStateAt(schedule: { warnAt: Date | null; dueAt: Date | null }, now: Date): "ok" | "warning" | "breached" {
+  if (schedule.dueAt && now.getTime() >= schedule.dueAt.getTime()) return "breached";
+  if (schedule.warnAt && now.getTime() >= schedule.warnAt.getTime()) return "warning";
+  return "ok";
+}

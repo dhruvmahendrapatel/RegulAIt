@@ -6860,6 +6860,14 @@ export type ApprovalEscalateAction = (typeof APPROVAL_ESCALATE_ACTIONS)[number];
 export const APPROVAL_SLA_STATES = ["ok", "warning", "breached"] as const;
 export type ApprovalSlaState = (typeof APPROVAL_SLA_STATES)[number];
 
+/** ADR-0342 slice 2: a human task's priority, lowest to highest (the queue sorts on it; nothing decides on it) */
+export const APPROVAL_TASK_PRIORITIES = ["low", "normal", "high", "urgent"] as const;
+export type ApprovalTaskPriority = (typeof APPROVAL_TASK_PRIORITIES)[number];
+/** ADR-0342 slice 2: where an assignment's warn/due times came from. `policy` = derived from its SLA policy (or none);
+ * `explicit` = set by an admin; `stage_timer` = set by a workflow stage timer (lane E21) through the same function */
+export const APPROVAL_DUE_SOURCES = ["policy", "explicit", "stage_timer"] as const;
+export type ApprovalDueSource = (typeof APPROVAL_DUE_SOURCES)[number];
+
 export const approvalSlaPolicies = pgTable(
   "approval_sla_policies",
   {
@@ -6973,9 +6981,15 @@ export const approvalAssignments = pgTable(
     escalatedAt: timestamp("escalated_at", { withTimezone: true }),
     escalationAssigneeKind: text("escalation_assignee_kind", { enum: APPROVAL_ASSIGNEE_KINDS }),
     escalationAssigneeId: uuid("escalation_assignee_id"),
+    /** ADR-0342 slice 2 (pending migration `approval_task_priority`) */
+    priority: text("priority", { enum: APPROVAL_TASK_PRIORITIES }).notNull().default("normal"),
+    dueSource: text("due_source", { enum: APPROVAL_DUE_SOURCES }).notNull().default("policy"),
   },
   (t) => [
     check("approval_assignments_kind_check", sql`${t.assigneeKind} IN ('user','role','team')`),
+    check("approval_assignments_priority_check", sql`${t.priority} IN ('low','normal','high','urgent')`),
+    check("approval_assignments_due_source_check", sql`${t.dueSource} IN ('policy','explicit','stage_timer')`),
+    check("approval_assignments_warn_due_check", sql`${t.warnAt} IS NULL OR (${t.dueAt} IS NOT NULL AND ${t.warnAt} <= ${t.dueAt})`),
     check("approval_assignments_quorum_check", sql`${t.quorum} >= 1`),
     check("approval_assignments_sla_state_check", sql`${t.slaState} IN ('ok','warning','breached')`),
     check(

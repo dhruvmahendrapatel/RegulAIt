@@ -460,6 +460,7 @@ export const KNOWN_UI_GAPS = new Map([
   ["GET /v1/endpoint-addons/versions", { does: "lists each AI add-on version seen on endpoints with its admission-scan verdict for that exact content digest (not yet scanned is never clear)", tracking: "ADR-0332 (lane E14): master brief for lane E14 (2026-11-15): the inventory is API-only and the UI builder builds its screen; KNOWN_UI_GAPS entries point at #453 (screen brief in PR #866)" }],
   ["GET /v1/endpoint-addons/sightings", { does: "lists each add-on version per endpoint and detection source, with first/last seen, risk flags and secret types (never a value)", tracking: "ADR-0332 (lane E14): master brief for lane E14 (2026-11-15): the inventory is API-only and the UI builder builds its screen; KNOWN_UI_GAPS entries point at #453 (screen brief in PR #866)" }],
   ["GET /v1/endpoint-addons/flagged", { does: "lists the endpoint add-on sightings flagged at or above a severity (the removal-directive and detection contract)", tracking: "ADR-0332 (lane E14): master brief for lane E14 (2026-11-15): the inventory is API-only and the UI builder builds its screen; KNOWN_UI_GAPS entries point at #453 (screen brief in PR #866)" }],
+  ["PUT /v1/approvals/:approvalId/schedule", { does: "sets a pending human task's priority, due and warn times and escalation policy; loosening needs a settings_relax step-up (audited)", tracking: "ADR-0342 (lane E23 slice 2): API-only by the lane brief (no screens); the task priority and due-date controls in the approvals queue are posted on #453 for the design builder" }],
 ]);
 
 /**
@@ -468,7 +469,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 55; // main's 54 − 11 MCP bundle routes closed by #815 + ADR-0240 6 external-portal second-factor routes awaiting #453 (#709) + ADR-0332 (lane E14) 3 API-only endpoint add-on inventory routes, master brief for lane E14 2026-11-15 (screen by the UI builder, #453); + ADR-0230 A2 (P19, Lane L3) 3 SAP business server routes, master decision in the Lane L3 brief 2026-11-14, recorded in ADR-0230, section Recorded decision (2026-11-14)
+export const KNOWN_UI_GAPS_MAX = 56; // + ADR-0342 (lane E23 slice 2) 1 API-only task schedule route, awaiting the queue controls on #453; main's 54 − 11 MCP bundle routes closed by #815 + ADR-0240 6 external-portal second-factor routes awaiting #453 (#709) + ADR-0332 (lane E14) 3 API-only endpoint add-on inventory routes, master brief for lane E14 2026-11-15 (screen by the UI builder, #453); + ADR-0230 A2 (P19, Lane L3) 3 SAP business server routes, master decision in the Lane L3 brief 2026-11-14, recorded in ADR-0230, section Recorded decision (2026-11-14)
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 
