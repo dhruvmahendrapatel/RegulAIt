@@ -9,7 +9,7 @@ import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
 import type { Project, ProjectArchiveImpact } from "../../api/types";
-import { fmtDay, plural } from "../../api/format";
+import { fmtDay, plural, errorText } from "../../api/format";
 import { withStepUp } from "../../stepup/stepUp";
 import { ConfirmModal, SkeletonBlock } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
@@ -164,7 +164,7 @@ export function ArchiveProjectDialog(props: { project: Project; onClose: () => v
           } catch (e) {
             const r = archiveRefusal(e);
             if (r) setRefusal(r);
-            else setError(e instanceof Error ? e.message : String(e));
+            else setError(errorText(e));
           }
         })();
       }}
@@ -190,7 +190,7 @@ export function UnarchiveProjectDialog(props: { project: Project; onClose: () =>
             await withStepUp((h) => api.postWithHeaders(`/v1/projects/${p.id}/unarchive`, {}, h));
             toast("Project unarchived", "success");
           } catch (e) {
-            toast(e instanceof Error ? e.message : String(e), "error");
+            toast(errorText(e), "error");
           } finally {
             void queryClient.invalidateQueries({ queryKey: ["projects"] });
           }

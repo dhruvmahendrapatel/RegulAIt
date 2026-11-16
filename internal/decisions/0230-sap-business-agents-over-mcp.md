@@ -342,18 +342,114 @@ return an empty `to_Item`, so the tool reads back after creating. This is confir
 - Follow-ups: approval-card rendering of business fields (a sales order preview); change and cancel tools; OData v4
   services (`API_SALESORDER_0001` style) through the same descriptor.
 
-## Open questions for the owner
+## Owner questions (all answered)
 
-1. **Approval quorum default**: 2 with requester excluded, or 1 plus a named approver role?
-2. **Rate-limit default**: 10 SAP writes per user per hour — right order of magnitude?
-3. **Unattributed SAP writes**: refuse (proposed), or allow and attribute to a default "SAP" project?
-4. **Full-key read-back on SAP's side** (decided: no blind re-post, unmatched means reconcile by hand). Should the
-   runbook ask customers to enable SAP Gateway idempotency for `API_SALES_ORDER_SRV`, or to add a header extension field
-   for the key, so that fewer timeouts end in manual reconciliation?
-5. **Smoke-test system**: which BTP / S/4HANA trial system is used for A0? (No hostnames in this public repo.)
-6. **Read-only business tools**: should they also default to approve-first, or only allow-list plus rate limit?
-7. **Licence scope for the ABAP MCP server**: does ADR-0176's licence rule bind the regulAIt-ABAP product? If it does,
-   the SAP Cloud SDK is out because of its SAP-licensed transitive dependencies, and we use odata2ts plus a small CSRF
-   helper of our own. If it does not (it runs only on SAP's own platform), the Cloud SDK is the better fit.
-8. **Which SAP identity attribute by default** when an admin turns release on: login name, e-mail or IdP user UUID?
-   Proposed: no default, so the admin must choose.
+All eight questions are now owner decisions:
+- Questions 1, 2, 3 and 6 are answered under "Owner decision (2026-11-15): the SAP defaults are org settings" below.
+- Questions 4, 5, 7 and 8 are answered under "Owner decision (2026-11-15): the remaining open questions" below.
+
+## Amendment (2026-11-14): slice A2, gateway part, as built (Lane L3, first PR)
+
+Built with the proposed defaults while owner questions 1, 2, 3 and 6 were open (since answered: "Owner decision (2026-11-15)" below) (they are ordinary rows, so a different
+answer is a data change, not a code change).
+
+- **`mcp_servers.system_class`** (null or `sap_business`, CHECK-bound) and **`rate_limits.write_only`** (default false),
+  in the pending migration `sap_business_servers`.
+- **Marking** is `POST /v1/servers/:serverId/system-class` (`mcp-sap-business.ts`), not a field on registration: one
+  transaction locks the server row, sets the class, seeds the §5 approval rule (fleet, that server, `write_only`,
+  `action` scope, quorum 2, the marking admin plus the role the request must name, through `createApprovalRuleRow` so
+  the ADR-0186 pool guard refuses a pool that cannot reach the quorum) and the write-only fleet rate limit (10 per
+  hour), and writes the audit row `mcp-server-sap-business`. A second mark is refused (409). Marking tightens, so it
+  needs no step-up. Relaxing a seeded row goes through the existing rule paths, which already need the settings_relax
+  step-up (loosening and deletion). **Unmarking** (`DELETE`) drops the project requirement: a settings_relax step-up
+  bound to the server, audited `mcp-server-sap-business-unmarked`; the seeded rows stay.
+- **The write-only rate limit**: the kernel is unchanged. `governedEvaluate` does not load a write-only limit for a
+  read tool, and counts a write-only limit's window over calls whose tool is not a known read tool on that server (an
+  unknown tool counts, the conservative reading). A policy replay counts every call for such a limit, so a simulation can
+  only read stricter. `rule-loosening.ts` classifies `writeOnly` true as the looser value.
+- **The project requirement** (`sapWriteRefusal`, in the proxy after the high-risk gate and before the kernel): a write
+  to an SAP business server with no project, an unknown or archived project, or a project with no budget is refused
+  `sap-write-needs-project`, audited, and never reaches the upstream or the usage ledger. The existing project budget
+  gate then applies to the attributed call.
+- **Review of #798 (code review, request changes):**
+  - **The upstream's `readOnlyHint` is ignored on an SAP business server.** Every tool on a marked server is a write
+    at call time (the proxy), and in the write-only window count, so a posting tool annotated read-only still needs
+    the project, the quorum approval and the rate limit. A per-server, admin-confirmed read allow-list (adding an entry
+    a stepped-up loosening) is the follow-up that lets genuine SAP reads skip them. ADR-0246 definition pinning is not
+    required for this: flipping the hint changes nothing on a marked server. Pinning still blocks other changed
+    definitions under its own mode.
+  - **The project requirement runs after the entitlement decision.** A caller the kernel refuses gets that refusal
+    and learns nothing about the server's class.
+  - **A re-mark reuses the seeded rows** while they still hold the defaults (quorum at least 2 and `action` scope;
+    at most 10 calls in at least an hour), are not scoped to a deploy mode, and (for the rule) name the approver pool
+    this request names. Any other row is not reused, so a new seeded row applies beside it, and the audit records the
+    approver pool of the rule actually in force (security review #798).
+  - **An approver role that does not exist** is refused by the ADR-0186 pool guard with a 4xx, and nothing changes.
+- **Not built here**: `identity_release`, `subject_token_retention`, the `approved_pending_execution` state and option
+  (b)'s SAP-trust key need slice A0 (owner-blocked). The HMAC idempotency key and the A3 audit and usage detail are the
+  lane's second PR.
+
+## Owner decision (2026-11-15): the SAP defaults are org settings
+
+Owner, relayed by the master orchestrator: "We might need to allow orgs to decide their own settings." This answers
+owner questions 1, 2, 3 and 6. The built values stay as the shipped defaults, and each one becomes an org-level setting
+an admin can change in `PUT /v1/org/settings` (pending migration `sap_business_servers`, `org_settings.sap_*`):
+
+| Setting | Default | Looser (settings_relax step-up, audited) | Applies |
+|---|---|---|---|
+| `sapApprovalQuorum` | 2 | below 2. Never below 1 (zod and a CHECK), and the requester never counts: `approval-signatures.ts` refuses a decision by the caller whatever the quorum | the rule a mark seeds |
+| `sapWriteRatePerHour` | 10 | above 10 (at most 1000) | the write-only limit a mark seeds |
+| `sapUnattributedWritesAllowed` | false | true: an SAP write with no project runs unattributed. A named project must still exist, be live and have a budget | every SAP write, at call time |
+| `sapReadsApproveFirst` | false (reads not approve-first) | turning it off again once on | the rule a mark seeds: true seeds it over every tool (`write_only` false) |
+
+- **Tightening is free** (a higher quorum, a lower rate, approve-first reads): no step-up. Relaxing is judged against
+  the default and the stored value, as for every org setting (`org-setting-strictness.ts`, ADR-0186 decision 26).
+- **The quorum and rate seed the rows of a mark; they do not rewrite existing rows.** Seeded rows are ordinary approval
+  rules and rate limits, and changing them goes through the rule paths (a loosening is stepped up there too). A re-mark
+  reuses a seeded row only while it is at least as strict as the current settings.
+- **Reads, until the admin-confirmed read allow-list lands:** every tool on a marked server is still a write (review
+  #798), so `sapReadsApproveFirst` changes nothing at call time today. It decides whether confirmed reads will be
+  approve-first once the allow-list exists, and it is honoured by the seeded rule already.
+- **Unattributed writes and cost:** under `sapUnattributedWritesAllowed` such a write carries no project, so its cost
+  is attributed to no project (pillar 5's dashboard shows it as unattributed). That is the trade the relaxation makes,
+  and why it is stepped up and audited.
+- **Every reader agrees that an SAP tool is a write** (security review #798 at 3bf47251): the stored
+  `mcp_tools.kind` is 'write' for every tool on a marked server (set at mark, at manifest sync and on a manual tool
+  add), and the execution re-check (`approvalRuleQuorumsMatchingNow`) forces 'write' on such a server too, so a raised
+  write-only quorum retires consents given under the old one. Unmarking leaves the stored kinds at 'write' until the
+  next sync restores the upstream's hints.
+- Owner questions 1, 2, 3 and 6 are closed by this decision. Questions 4, 5, 7 and 8 were answered the same day (next section).
+
+## Owner decision (2026-11-15): the remaining open questions
+
+The owner answered the remaining open questions on 2026-11-15, relayed by the master orchestrator to this lane (Lane L3) the same day:
+
+| # | Question | Decision |
+|---|---|---|
+| 4 | Full-key read-back on SAP's side | The install runbook **recommends** that customers enable SAP Gateway idempotency for `API_SALES_ORDER_SRV`. It is recommended, not required. The decided behaviour stands: no blind re-post, and an unmatched result means reconcile by hand. |
+| 5 | Smoke-test system for A0 | There is no live SAP system yet. The smoke test runs against **recorded fixtures**. No hostnames go in this public repo. |
+| 7 | Licence scope for the ABAP MCP server | ADR-0176's licence rule **does** bind the regulAIt-ABAP server. The SAP Cloud SDK is out because of its SAP-licensed transitive dependencies. Use **odata2ts plus a small CSRF helper** of our own. |
+| 8 | Default SAP identity attribute | There is **no default**. An admin must choose one (login name, e-mail or IdP user UUID) when turning identity release on. Release stays off until they do. |
+
+These bind slices A0 and A1 (identity release and the ABAP server) and the runbook. Nothing in the gateway part
+(A2/A3) changes.
+
+## Recorded decision (2026-11-14): the three system-class routes ship API-only
+
+The master orchestrator's Lane L3 brief (2026-11-14), which assigned this slice, directs: "New routes go in the route
+census plus a KNOWN_UI_GAPS entry pointing at #453. Do not build screens." The three routes
+`GET|POST|DELETE /v1/servers/:serverId/system-class` (and the four `sap*` org settings) are therefore API-only, and
+raising `KNOWN_UI_GAPS_MAX` by 3 for them cites this section. The screen is built by the design builder on #453, which
+lowers the ceiling again.
+
+## Code review #798 (8b3e264e): one shared server policy template
+
+The SAP mark and the ADR-0246 high-risk policy template now seed and find their rows through one helper pair in
+`rule-creates.ts` (`seedServerPolicyTemplate`, `findServerPolicyTemplate`), parameterised by rule coverage (every tool
+or writes), quorum, argument binding, approver pool and the limit's coverage, calls and window. Two consequences:
+- the high-risk gate no longer accepts a write-only or deploy-mode-scoped row as its template (both bind only some
+  calls on a server whose every call is high-risk);
+- the system-class GET reports only the rows the marks seeded (read from the marks' audit rows), never a rule an admin
+  created by hand on the same server.
+
+A manifest sync reads the server row `FOR SHARE`, so it waits for a mark in progress and stores the kinds the mark set.

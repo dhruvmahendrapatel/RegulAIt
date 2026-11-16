@@ -78,7 +78,7 @@ export default function EvalsCatalogTab() {
           .includes(q.toLowerCase())),
   );
   return (
-    <QueryGate loading={catalog.isLoading} error={catalog.error} onRetry={() => void catalog.refetch()}>
+    <QueryGate query={catalog}>
       {catalog.data && (
         <Card title="Evaluator catalog — what each one measures, and which controls it evidences">
           <div className={v.stack}>

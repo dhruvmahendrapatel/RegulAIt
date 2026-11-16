@@ -366,7 +366,7 @@ export function BomPostureCard({ receiptKey }: { receiptKey: ReceiptSigningKeyPo
         <p className={v.faint}>
           Each setting ships strict. Changing one is audited (old → new); loosening one asks you to confirm it&rsquo;s you.
         </p>
-        <QueryGate loading={settings.isLoading} error={settings.error} onRetry={() => void settings.refetch()}>
+        <QueryGate query={settings}>
           {stored ? (
             BOM_POSTURE_SETTINGS.map((setting) => (
               <BomSettingRow

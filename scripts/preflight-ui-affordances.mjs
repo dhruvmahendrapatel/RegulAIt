@@ -46,6 +46,8 @@ export const DELIBERATELY_API_ONLY = new Map([
   // A DELETE that is still a 501 `notBuilt` stub needs no entry: a stub deletes nothing, so the census skips it until
   // it becomes a real handler, and an entry for one is reported stale (see staleExemptions).
   ["/v1/mcp/authorised-targets/:x", "ADR-0246 (P27): API-only brief; the authorised-targets screen is posted on #453 (route census KNOWN_UI_GAPS). RAISED for the master's review on the PR: delete this entry when the screen lands"],
+  // ADR-0230 A2 (P19, Lane L3): the UI is built by the design builder; delete this entry when the screen lands
+  ["/v1/servers/:x/system-class", "unmarking an SAP business server (settings_relax step-up): API-only until the SAP server screen on #453 (route census KNOWN_UI_GAPS)"],
   // ADR-0312 (lane E2, pilot addendum): removing a person's spend budget (a step-up relaxation) is API-only until the
   // spend-budget screen on #453 lands (route census KNOWN_UI_GAPS holds the same route); delete this entry then.
   ["/v1/users/:x/spend-budget", "removing a person's spend budget (settings_relax step-up, audited): API-only until the spend-budget screen on #453 (ADR-0312 pilot addendum)"],
