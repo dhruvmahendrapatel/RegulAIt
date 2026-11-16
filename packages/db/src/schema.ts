@@ -16832,6 +16832,8 @@ export const VENDOR_USAGE_PULL_ERROR_CODES = [
   "page_limit",
   "scan_blocked",
   "internal",
+  // a second pull of a connector refused while another is still running (#861 review)
+  "in_progress",
 ] as const;
 
 /**

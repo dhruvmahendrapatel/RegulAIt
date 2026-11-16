@@ -219,6 +219,36 @@ Migration `pending/vendor_usage_pull.sql` (numbered at merge); code in `apps/gat
 - **Run errors** are one of a fixed set of codes (CHECK) plus a sentence RegulAIt wrote; no vendor body is stored.
 - **Consolidated read**: `overlaps_metered` lines are excluded from the imported side and disclosed as
   `meteredOverlap` (count and amount by currency). Changing a connector's gateway-id lists re-marks its stored lines.
+- **Review round (#861)**:
+  - **Row-level security** (§7, ADR-0234): the four new tables are ENABLED and FORCED. Only an active admin
+    principal, the scheduled sweep (`system_task`) and `migration` reach them. A plain app connection and every
+    request-only reason see and write nothing, which the suite proves for `public_ingest`, `credential_request` and a
+    non-admin principal. `imported_cost_lines` and `cost_import_batches` are not under RLS yet; they belong to the
+    ADR-0069 import surface and are a tracked follow-up (fragment), not part of this table set.
+  - **Audit with the change**: every state change and its audit row share one transaction (policy, connector create,
+    config with its re-marking, enable, credential store/replace and revoke). A pull's outcome and audit row commit
+    with its batch, so a pull is never recorded as succeeded without its lines, or the reverse.
+  - **Batches keep their lines**: a re-pulled line keeps the batch that first brought it in. Each pull batch records
+    `newLines` and `restatedLines`. Revoking a pull batch withdraws only the lines it introduced, and rewinds the
+    connector's `pulled_through` to the batch's first day, so the next pull fetches those days again.
+  - **One pull per connector at a time**: opening a run takes a per-connector advisory lock. A run still `running`
+    inside a 30-minute lease refuses a second one (`in_progress`) without calling the vendor. A row stuck past the lease
+    is treated as a crashed process and stops blocking.
+  - **Failure handling**: an error in the batch write rolls the batch back and closes the run as `internal` with
+    RegulAIt's own sentence. A connector that throws does not stop the sweep for the others. A fact key the vendor
+    returns twice in one pull is one fact.
+  - **Bounds**: a vendor that repeats a page cursor is refused (`bad_response`) instead of looping to the 40-page cap.
+    Re-marking reads in keyset pages of 1000 and updates per page. The runs list is keyset-paginated (`before`, 50 per
+    page).
+- **Differences from §3 and §5**:
+  - **No per-vendor rate limit yet**: each scheduled pass makes at most one run per connector, of at most 40 requests.
+  - **A 429 fails the run** as `rate_limited` instead of backing off inside it. The next pass resumes from
+    `pulled_through` (minus the two restated days), which is the stored cursor. Nothing is lost, only delayed.
+  - **Not built**: the in-run backoff, and the §5 variance report (vendor-reported spend against metered spend for the
+    same keys and window). Both are tracked in the pending fragment.
+- **API-only routes (lane brief)**: the nine routes are in the route census as `KNOWN_UI_GAPS` entries pointing at
+  #453. That is the lane brief's own instruction for new routes ("new routes go in the route census plus a
+  KNOWN_UI_GAPS entry pointing at #453 (no screens)"), and the cap moves by nine.
 - **Not built in this slice**: Claude Code per-user cost (the Claude Code report's API-billed cost is already inside
   the cost report, so pulling it as spend would double count; it needs an attribution-only design); Anthropic's newer
   Analytics API (`/v1/organizations/analytics/cost`, beta); the settings screen (#453); live-tenant tests (lane E11).

@@ -76,6 +76,7 @@ const connectorIds: string[] = [];
 const restores: Array<() => Promise<void>> = [];
 /** an admin API key: an API key can never satisfy a step-up, whatever the shared database holds */
 let KEY: { authorization: string };
+let ADMIN_ID = "";
 
 const today = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate()));
 const dayIso = (offset: number) => new Date(today.getTime() + offset * 86_400_000).toISOString();
@@ -143,6 +144,7 @@ beforeAll(async () => {
   restores.push(await relaxIdentityForTest(db, { mfaRequired: "off" }));
   const created = await app.inject({ method: "POST", url: "/v1/users", headers: AUTH, payload: { email: `adr0322-admin-${RUN}@example.com`, displayName: "vendor usage admin", isAdmin: true } });
   expect(created.statusCode, created.body).toBe(201);
+  ADMIN_ID = created.json().id;
   const key = await app.inject({ method: "POST", url: `/v1/users/${created.json().id}/keys`, headers: AUTH, payload: { name: "adr0322" } });
   KEY = { authorization: `Bearer ${key.json().token}` };
 });
@@ -331,6 +333,79 @@ describe("ADR-0322: the Anthropic pull", () => {
     expect(lines.every((l) => !l.overlapsMetered)).toBe(true);
   });
 
+  it("a re-pulled line keeps its first batch, and revoking a later pull batch withdraws only what it introduced (#861 review)", async () => {
+    const c = connectorIds[0]!;
+    const base = anthropicPages("2000");
+    answer = (url) => {
+      if (url.searchParams.get("page")) return base(url);
+      return json({
+        data: [
+          {
+            starting_at: dayIso(-2),
+            ending_at: dayIso(-1),
+            results: [
+              { amount: "2000", currency: "USD", workspace_id: "wrkspc_people", description: "Input Tokens", cost_type: "tokens", model: "claude-x" },
+              { amount: "500", currency: "USD", workspace_id: "wrkspc_gateway", description: "Input Tokens", cost_type: "tokens", model: "claude-x" },
+              { amount: "700", currency: "USD", workspace_id: "wrkspc_people", description: "Output Tokens", cost_type: "tokens", model: "claude-x" },
+            ],
+          },
+        ],
+        has_more: true,
+        next_page: "page_2",
+      });
+    };
+    const before = await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c));
+    expect(before).toHaveLength(3);
+    const firstBatches = new Set(before.map((l) => l.batchId));
+    const res = await app.inject({ method: "POST", url: `/v1/vendor-usage/connectors/${c}/pull`, headers: AUTH });
+    expect(res.statusCode, res.body).toBe(200);
+    const latest = res.json().run.batchId as string;
+    const [batch] = await db.select().from(costImportBatches).where(eq(costImportBatches.id, latest));
+    expect(batch?.summary).toMatchObject({ newLines: 1, restatedLines: 3 });
+    const after = await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c));
+    expect(after).toHaveLength(4);
+    // the three restated lines did not move to the newest batch
+    expect(after.filter((l) => l.batchId === latest).map((l) => l.description)).toEqual(["Output Tokens"]);
+    expect(after.filter((l) => l.batchId !== latest).every((l) => firstBatches.has(l.batchId))).toBe(true);
+    // the success audit row was written with the batch
+    const [done] = await db.select().from(auditLog).where(eq(auditLog.objectId, res.json().run.id));
+    expect([done?.ruleId, (done?.detail as { batchId?: string }).batchId]).toEqual([VENDOR_USAGE_RULE_IDS.pullCompleted, latest]);
+
+    const [conn] = await db.select().from(vendorUsageConnectors).where(eq(vendorUsageConnectors.id, c));
+    const revoked = await app.inject({ method: "DELETE", url: `/v1/cost-imports/${latest}`, headers: AUTH, payload: { reason: "adr0322 suite withdraw" } });
+    expect(revoked.statusCode, revoked.body).toBe(200);
+    expect(revoked.json().linesRemoved).toBe(1);
+    const kept = await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c));
+    expect(kept.map((l) => l.description).sort()).toEqual(["Input Tokens", "Input Tokens", "Web search"]);
+    // the connector is rewound to the withdrawn batch's first day, so the next pull fetches those days again
+    const [rewound] = await db.select().from(vendorUsageConnectors).where(eq(vendorUsageConnectors.id, c));
+    expect(rewound!.pulledThrough!.getTime()).toBeLessThanOrEqual(batch!.periodStart!.getTime());
+    expect(rewound!.pulledThrough!.getTime()).toBeLessThan(conn!.pulledThrough!.getTime());
+  });
+
+  it("refuses a second pull while one is running, without calling the vendor (#861 review)", async () => {
+    const c = connectorIds[0]!;
+    const [running] = await db.insert(vendorUsagePullRuns).values({ connectorId: c, trigger: "schedule" }).returning();
+    try {
+      seen = [];
+      answer = anthropicPages("2000");
+      const res = await app.inject({ method: "POST", url: `/v1/vendor-usage/connectors/${c}/pull`, headers: AUTH });
+      expect(res.statusCode).toBe(409);
+      expect(res.json().run).toMatchObject({ status: "refused", errorCode: "in_progress" });
+      expect(seen).toHaveLength(0);
+    } finally {
+      await db.delete(vendorUsagePullRuns).where(eq(vendorUsagePullRuns.id, running!.id));
+    }
+  });
+
+  it("refuses a vendor that repeats a page cursor (#861 review)", async () => {
+    answer = () =>
+      json({ data: [{ starting_at: dayIso(-1), ending_at: dayIso(0), results: [] }], has_more: true, next_page: "same_cursor" });
+    const res = await app.inject({ method: "POST", url: `/v1/vendor-usage/connectors/${connectorIds[0]}/pull`, headers: AUTH });
+    expect(res.json().run.errorCode).toBe("bad_response");
+    expect(res.json().run.pages).toBe(0);
+  });
+
   it("stores a fixed code and RegulAIt's own sentence when the vendor refuses, never the vendor's body", async () => {
     answer = () => json({ error: { message: `invalid x-api-key ${ANTHROPIC_KEY}` } }, 401);
     const res = await app.inject({ method: "POST", url: `/v1/vendor-usage/connectors/${connectorIds[0]}/pull`, headers: AUTH });
@@ -405,6 +480,62 @@ describe("ADR-0322: the OpenAI pull (official SDK, guarded fetch injected)", () 
     expect(conn?.enabled).toBe(false);
     const { run } = await runVendorUsagePull(db, c, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl, resolve } });
     expect([run.status, run.errorCode]).toEqual(["refused", "disabled"]);
+  });
+});
+
+describe("ADR-0322: row-level security on the four tables (ADR-0234, #861 review)", () => {
+  const TABLES = ["vendor_usage_connectors", "vendor_usage_credentials", "vendor_usage_pull_policy", "vendor_usage_pull_runs"] as const;
+  const countAs = (scope: { reason?: string; userId?: string }) =>
+    db.transaction(async (tx) => {
+      await tx.execute(sql`select set_config('role', 'regulait_app', true)`);
+      if (scope.reason) await tx.execute(sql`select set_config('regulait.system_context', ${scope.reason}, true)`);
+      if (scope.userId) await tx.execute(sql`select set_config('regulait.user_id', ${scope.userId}, true)`);
+      const r = await tx.execute(sql`select
+        (select count(*)::int from vendor_usage_connectors) as vendor_usage_connectors,
+        (select count(*)::int from vendor_usage_credentials) as vendor_usage_credentials,
+        (select count(*)::int from vendor_usage_pull_policy) as vendor_usage_pull_policy,
+        (select count(*)::int from vendor_usage_pull_runs) as vendor_usage_pull_runs`);
+      return (r.rows as Array<Record<(typeof TABLES)[number], number>>)[0]!;
+    });
+  const none = Object.fromEntries(TABLES.map((t) => [t, 0]));
+
+  it("all four tables have row-level security ENABLED and FORCED", async () => {
+    const r = await db.execute(sql`
+      select relname, relrowsecurity as on, relforcerowsecurity as forced from pg_class
+       where relnamespace = 'public'::regnamespace and relkind = 'r' and relname in ('vendor_usage_connectors', 'vendor_usage_credentials', 'vendor_usage_pull_policy', 'vendor_usage_pull_runs') order by relname`);
+    expect(r.rows).toEqual(TABLES.map((relname) => ({ relname, on: true, forced: true })));
+  });
+
+  it("NEGATIVE: a plain app connection, request-only reasons and a non-admin principal see nothing", async () => {
+    const owner = await countAs({ reason: "migration" });
+    for (const t of TABLES) expect(owner[t], t).toBeGreaterThan(0);
+    expect(await countAs({})).toEqual(none);
+    expect(await countAs({ reason: "public_ingest" })).toEqual(none);
+    expect(await countAs({ reason: "credential_request" })).toEqual(none);
+    const u = await app.inject({ method: "POST", url: "/v1/users", headers: AUTH, payload: { email: `adr0322-member-${RUN}@example.com`, displayName: "vendor usage member" } });
+    expect(u.statusCode, u.body).toBe(201);
+    expect(await countAs({ userId: u.json().id })).toEqual(none);
+    // the admin principal and the scheduled sweep reach every row
+    expect(await countAs({ userId: ADMIN_ID })).toEqual(owner);
+    expect(await countAs({ reason: "system_task" })).toEqual(owner);
+  });
+
+  it("NEGATIVE: without an admin principal or the sweep's reason nothing can be written", async () => {
+    const attempt = (reason: string | null) =>
+      db
+        .transaction(async (tx) => {
+          await tx.execute(sql`select set_config('role', 'regulait_app', true)`);
+          if (reason) await tx.execute(sql`select set_config('regulait.system_context', ${reason}, true)`);
+          await tx.execute(sql`insert into vendor_usage_connectors (vendor, name) values ('anthropic', ${`adr0322-rls-${RUN}-${reason ?? "none"}`})`);
+        })
+        .then(
+          () => null,
+          (e: unknown) => e as { message?: string; cause?: { message?: string } },
+        );
+    for (const reason of [null, "public_ingest", "credential_request"]) {
+      const err = await attempt(reason);
+      expect(String(err?.cause?.message ?? err?.message), String(reason)).toMatch(/row-level security/);
+    }
   });
 });
 

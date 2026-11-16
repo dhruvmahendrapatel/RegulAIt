@@ -37,7 +37,9 @@ import {
   costImportBatches,
   desc,
   eq,
+  gt,
   importedCostLines,
+  inArray,
   isNull,
   sql,
   vendorUsageConnectors,
@@ -89,6 +91,9 @@ const DAY_MS = 24 * 3600 * 1000;
 /** the last two days are always re-pulled: both vendors restate the current and previous day as usage settles */
 const RESTATE_DAYS = 2;
 const REQUEST_TIMEOUT_MS = 30_000;
+/** a run still `running` after this is treated as a crashed process, so it does not block the connector forever */
+const PULL_LEASE_SECONDS = 30 * 60;
+const RUNS_PAGE = 50;
 
 export const VENDOR_USAGE_PULL_JOB_NAME = "vendor-usage-pull-sweep";
 
@@ -201,6 +206,11 @@ function guardedFetch(allowList: Awaited<ReturnType<typeof loadEgressAllowList>>
   });
 }
 
+/** a vendor that hands back a cursor it already returned would loop to the page cap; refuse it at once (#861 review) */
+function repeatedCursor(page: number): PullError {
+  return new PullError("bad_response", `the vendor returned page ${page} with a cursor it had already returned; nothing was written`);
+}
+
 async function fetchAnthropic(
   key: string,
   window: { start: Date; end: Date },
@@ -208,6 +218,7 @@ async function fetchAnthropic(
 ): Promise<{ facts: VendorUsageFact[]; pages: number }> {
   const facts: VendorUsageFact[] = [];
   let page: string | null = null;
+  const cursors = new Set<string>();
   for (let n = 1; n <= VENDOR_USAGE_MAX_PAGES; n++) {
     const url = new URL(`https://${VENDOR_USAGE_CATALOGUE.anthropic.host}/v1/organizations/cost_report`);
     url.searchParams.set("starting_at", window.start.toISOString());
@@ -240,6 +251,8 @@ async function fetchAnthropic(
       throw classifyError(err, n);
     }
     if (!parsed.has_more || !parsed.next_page) return { facts, pages: n };
+    if (cursors.has(parsed.next_page)) throw repeatedCursor(n);
+    cursors.add(parsed.next_page);
     page = parsed.next_page;
   }
   throw new PullError("page_limit", `the vendor still had more pages after ${VENDOR_USAGE_MAX_PAGES}; nothing was written`);
@@ -264,6 +277,7 @@ async function fetchOpenAi(
   });
   const facts: VendorUsageFact[] = [];
   let page: string | undefined;
+  const cursors = new Set<string>();
   for (let n = 1; n <= VENDOR_USAGE_MAX_PAGES; n++) {
     let parsed;
     try {
@@ -281,6 +295,8 @@ async function fetchOpenAi(
       throw classifyError(err, n);
     }
     if (!parsed.has_more || !parsed.next_page) return { facts, pages: n };
+    if (cursors.has(parsed.next_page)) throw repeatedCursor(n);
+    cursors.add(parsed.next_page);
     page = parsed.next_page;
   }
   throw new PullError("page_limit", `the vendor still had more pages after ${VENDOR_USAGE_MAX_PAGES}; nothing was written`);
@@ -304,8 +320,12 @@ async function liveCredential(db: Db, connectorId: string) {
   return row ?? null;
 }
 
+type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+type DbOrTx = Db | Tx;
+
+/** the audit row; callers pass the transaction that holds the state change, so neither lands without the other */
 async function audit(
-  db: Db,
+  db: DbOrTx,
   userId: string | null,
   objectType: "vendor_usage_pull_policy" | "vendor_usage_connector" | "vendor_usage_credential" | "vendor_usage_pull_run",
   objectId: string | null,
@@ -349,24 +369,65 @@ export async function runVendorUsagePull(
   const now = opts.now ?? new Date();
   const [connector] = await db.select().from(vendorUsageConnectors).where(eq(vendorUsageConnectors.id, connectorId)).limit(1);
   if (!connector) throw new Error(`vendor usage connector ${connectorId} not found`);
-  const [opened] = await db
-    .insert(vendorUsagePullRuns)
-    .values({ connectorId, trigger: opts.trigger, requestedBy: opts.requestedBy ?? null })
-    .returning();
-  const runId = opened!.id;
+  // one pull per connector at a time (#861 review): the open step is serialised on the connector, and a run another
+  // caller opened inside the lease refuses this one, so the vendor is not called twice and no second batch is written
+  const opening = await db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`regulait.vendor-usage-pull:${connectorId}`}, 0))`);
+    const [busy] = await tx
+      .select({ id: vendorUsagePullRuns.id })
+      .from(vendorUsagePullRuns)
+      .where(
+        and(
+          eq(vendorUsagePullRuns.connectorId, connectorId),
+          eq(vendorUsagePullRuns.status, "running"),
+          sql`${vendorUsagePullRuns.startedAt} > now() - make_interval(secs => ${PULL_LEASE_SECONDS})`,
+        ),
+      )
+      .limit(1);
+    if (!busy) {
+      const [row] = await tx.insert(vendorUsagePullRuns).values({ connectorId, trigger: opts.trigger, requestedBy: opts.requestedBy ?? null }).returning();
+      return { run: row!, busy: false as const };
+    }
+    const detail = `another pull of this connector (run ${busy.id}) is still running; this one was not started`;
+    const [row] = await tx
+      .insert(vendorUsagePullRuns)
+      .values({
+        connectorId,
+        trigger: opts.trigger,
+        requestedBy: opts.requestedBy ?? null,
+        status: "refused",
+        errorCode: "in_progress",
+        errorDetail: detail,
+        finishedAt: sql`now()`,
+      })
+      .returning();
+    await audit(tx, opts.requestedBy ?? null, "vendor_usage_pull_run", row!.id, VENDOR_USAGE_RULE_IDS.pullRefused, "deny", detail, {
+      connectorId,
+      vendor: connector.vendor,
+      trigger: opts.trigger,
+      status: "refused",
+      errorCode: "in_progress",
+      runningRunId: busy.id,
+    });
+    return { run: row!, busy: true as const };
+  });
+  if (opening.busy) return { run: opening.run };
+  const runId = opening.run.id;
 
-  const finish = async (
+  // the run row's outcome and its audit row are written in the same transaction (#861 review)
+  const finishIn = async (
+    tx: DbOrTx,
     patch: Partial<typeof vendorUsagePullRuns.$inferInsert>,
     ruleId: string,
     effect: "allow" | "deny",
     reason: string,
   ): Promise<PullOutcome> => {
-    const [run] = await db
+    const [run] = await tx
       .update(vendorUsagePullRuns)
       .set({ ...patch, finishedAt: sql`now()` })
       .where(eq(vendorUsagePullRuns.id, runId))
       .returning();
-    await audit(db, opts.requestedBy ?? null, "vendor_usage_pull_run", runId, ruleId, effect, reason, {
+    await audit(tx, opts.requestedBy ?? null, "vendor_usage_pull_run", runId, ruleId, effect, reason, {
       connectorId,
       vendor: connector.vendor,
       trigger: opts.trigger,
@@ -374,9 +435,12 @@ export async function runVendorUsagePull(
       errorCode: run!.errorCode,
       linesUpserted: run!.linesUpserted,
       overlapLines: run!.overlapLines,
+      ...(patch.batchId ? { batchId: patch.batchId } : {}),
     });
     return { run: run! };
   };
+  const finish = (patch: Partial<typeof vendorUsagePullRuns.$inferInsert>, ruleId: string, effect: "allow" | "deny", reason: string) =>
+    db.transaction((tx) => finishIn(tx, patch, ruleId, effect, reason));
   const refuse = (code: "disabled" | "air_gapped" | "no_credential" | "data_key_unavailable", detail: string) =>
     finish({ status: "refused", errorCode: code, errorDetail: detail }, VENDOR_USAGE_RULE_IDS.pullRefused, "deny", detail);
 
@@ -426,10 +490,16 @@ export async function runVendorUsagePull(
   }
 
   const ctx = await loadResolutionContext(db);
-  const lines = fetched.facts.map((fact, i) => {
+  // a fact key the vendor returned twice is one fact: the later bucket wins, so one statement never touches a row twice
+  const byKey = new Map<string, { fact: VendorUsageFact; i: number; factKey: string }>();
+  fetched.facts.forEach((fact, i) => {
+    const factKey = vendorUsageFactKey(fact);
+    byKey.set(factKey, { fact, i, factKey });
+  });
+  const lines = [...byKey.values()].map(({ fact, i, factKey }) => {
     const resolution = resolveVendorAccount(fact.accountRef, vendor, ctx);
     const overlaps = factOverlapsMetered(vendor, fact, config, (fact.detail.projectId as string | undefined) ?? null);
-    return { fact, i, resolution, overlaps, factKey: vendorUsageFactKey(fact) };
+    return { fact, i, resolution, overlaps, factKey };
   });
   const currencies = [...new Set(lines.map((l) => l.fact.currency))];
   const totalUsd =
@@ -448,7 +518,8 @@ export async function runVendorUsagePull(
     `pulled ${lines.length} line(s) from ${vendor} for ${window.start.toISOString().slice(0, 10)} to ` +
     `${window.end.toISOString().slice(0, 10)}; ${overlapLines} billed to the gateway's own keys and excluded as already metered`;
 
-  const batchId = await db.transaction(async (tx) => {
+  try {
+  return await db.transaction(async (tx) => {
     const [batch] = await tx
       .insert(costImportBatches)
       .values({
@@ -478,6 +549,7 @@ export async function runVendorUsagePull(
       })
       .returning({ id: costImportBatches.id });
     const CHUNK = 500;
+    let newLines = 0;
     for (let i = 0; i < lines.length; i += CHUNK) {
       const values = lines.slice(i, i + CHUNK).map(({ fact, i: idx, resolution, overlaps, factKey }) => ({
         batchId: batch!.id,
@@ -506,15 +578,15 @@ export async function runVendorUsagePull(
         factKey,
         overlapsMetered: overlaps,
       }));
-      await tx
+      // a restated line keeps the batch that first brought it in (#861 review): revoking a later pull batch then
+      // withdraws only the lines that batch introduced, never the spend an earlier pull stored
+      const written = await tx
         .insert(importedCostLines)
         .values(values)
         .onConflictDoUpdate({
           target: [importedCostLines.pullConnectorId, importedCostLines.factKey],
           targetWhere: sql`${importedCostLines.pullConnectorId} IS NOT NULL`,
           set: {
-            batchId: sql`excluded.batch_id`,
-            sourceRow: sql`excluded.source_row`,
             amount: sql`excluded.amount`,
             currency: sql`excluded.currency`,
             quantity: sql`excluded.quantity`,
@@ -531,22 +603,33 @@ export async function runVendorUsagePull(
             resolutionMappingId: sql`excluded.resolution_mapping_id`,
             resolutionDomainRuleId: sql`excluded.resolution_domain_rule_id`,
           },
-        });
+        })
+        .returning({ inserted: sql<boolean>`(xmax = 0)` });
+      newLines += written.filter((w) => w.inserted).length;
     }
+    await tx
+      .update(costImportBatches)
+      .set({ summary: { origin: "pull", connectorId, runId, vendors: [vendor], overlapLines, pages: fetched.pages, newLines, restatedLines: lines.length - newLines } })
+      .where(eq(costImportBatches.id, batch!.id));
     const through = new Date(Math.min(window.end.getTime(), now.getTime()));
     await tx
       .update(vendorUsageConnectors)
       .set({ pulledThrough: through, updatedAt: sql`now()` })
       .where(eq(vendorUsageConnectors.id, connectorId));
-    return batch!.id;
+    // the success outcome and its audit row commit with the batch, or not at all
+    return finishIn(
+      tx,
+      { status: "succeeded", batchId: batch!.id, pages: fetched.pages, linesUpserted: lines.length, overlapLines },
+      VENDOR_USAGE_RULE_IDS.pullCompleted,
+      "allow",
+      reason,
+    );
   });
-
-  return finish(
-    { status: "succeeded", batchId, pages: fetched.pages, linesUpserted: lines.length, overlapLines },
-    VENDOR_USAGE_RULE_IDS.pullCompleted,
-    "allow",
-    reason,
-  );
+  } catch {
+    // the batch rolled back; the run is closed as failed with RegulAIt's own sentence, never the driver's text
+    const detail = "writing the pulled lines failed and was rolled back; nothing was written";
+    return finish({ status: "failed", errorCode: "internal", errorDetail: detail, pages: fetched.pages }, VENDOR_USAGE_RULE_IDS.pullFailed, "deny", detail);
+  }
 }
 
 /** the scheduled sweep: one pull per enabled connector, only while the policy is on */
@@ -559,9 +642,14 @@ export async function runVendorUsagePullSweep(
   let linesUpserted = 0;
   let failed = 0;
   for (const c of due) {
-    const { run } = await runVendorUsagePull(db, c.id, { trigger: "schedule", dataKey: opts.dataKey, deps: opts.deps, now: opts.now });
-    linesUpserted += run.linesUpserted;
-    if (run.status !== "succeeded") failed++;
+    try {
+      const { run } = await runVendorUsagePull(db, c.id, { trigger: "schedule", dataKey: opts.dataKey, deps: opts.deps, now: opts.now });
+      linesUpserted += run.linesUpserted;
+      if (run.status !== "succeeded") failed++;
+    } catch {
+      // a connector that throws before its run row exists (deleted mid-sweep) is counted and the sweep moves on
+      failed++;
+    }
   }
   return { connectors: due.length, linesUpserted, failed };
 }
@@ -587,14 +675,22 @@ export function vendorUsageJobDefinitions(opts: { dataKey?: string | undefined }
  * Re-mark every stored line of a connector after its gateway-id lists change, so the exclusion always reflects the
  * current declaration rather than the one in force when each line was pulled.
  */
-async function remarkOverlap(db: Db, connector: VendorUsageConnectorRow, config: PublicConfig): Promise<number> {
+async function remarkOverlap(db: DbOrTx, connector: VendorUsageConnectorRow, config: PublicConfig): Promise<number> {
   if (!isPullVendor(connector.vendor)) return 0;
   const vendor = connector.vendor;
-  const rows = await db
-    .select({ id: importedCostLines.id, detail: importedCostLines.detail, overlapsMetered: importedCostLines.overlapsMetered })
-    .from(importedCostLines)
-    .where(eq(importedCostLines.pullConnectorId, connector.id));
+  // read in keyset pages and flip in set-based updates (#861 review): bounded memory, one statement per page and value
+  const PAGE = 1000;
   let changed = 0;
+  let after: string | null = null;
+  for (;;) {
+    const rows: Array<{ id: string; detail: unknown; overlapsMetered: boolean }> = await db
+      .select({ id: importedCostLines.id, detail: importedCostLines.detail, overlapsMetered: importedCostLines.overlapsMetered })
+      .from(importedCostLines)
+      .where(and(eq(importedCostLines.pullConnectorId, connector.id), after ? gt(importedCostLines.id, after) : undefined))
+      .orderBy(importedCostLines.id)
+      .limit(PAGE);
+    if (rows.length === 0) break;
+    const flip: Record<"true" | "false", string[]> = { true: [], false: [] };
   for (const r of rows) {
     const d = (r.detail ?? {}) as Record<string, unknown>;
     const kind = d.accountKind as VendorUsageFact["accountKind"] | undefined;
@@ -605,10 +701,15 @@ async function remarkOverlap(db: Db, connector: VendorUsageConnectorRow, config:
       config,
       (d.projectId as string | undefined) ?? null,
     );
-    if (overlaps !== r.overlapsMetered) {
-      await db.update(importedCostLines).set({ overlapsMetered: overlaps }).where(eq(importedCostLines.id, r.id));
-      changed++;
+    if (overlaps !== r.overlapsMetered) flip[overlaps ? "true" : "false"].push(r.id);
+  }
+    for (const value of [true, false] as const) {
+      const ids = flip[value ? "true" : "false"];
+      if (ids.length) await db.update(importedCostLines).set({ overlapsMetered: value }).where(inArray(importedCostLines.id, ids));
+      changed += ids.length;
     }
+    if (rows.length < PAGE) break;
+    after = rows[rows.length - 1]!.id;
   }
   return changed;
 }
@@ -725,13 +826,15 @@ export function registerVendorUsagePullRoutes(
       return reply;
     }
     const before = await loadPolicyEnabled(db);
-    await db
-      .insert(vendorUsagePullPolicy)
-      .values({ id: "singleton", enabled, updatedBy: actor(req) })
-      .onConflictDoUpdate({ target: vendorUsagePullPolicy.id, set: { enabled, updatedBy: actor(req), updatedAt: sql`now()` } });
-    await audit(db, actor(req), "vendor_usage_pull_policy", null, VENDOR_USAGE_RULE_IDS.policyChanged, "allow",
-      `vendor usage pull ${before ? "on" : "off"} -> ${enabled ? "on" : "off"}: ${reason}`,
-      { transition: { from: before, to: enabled }, reason, receiptClass: "configuration" });
+    await db.transaction(async (tx) => {
+      await tx
+        .insert(vendorUsagePullPolicy)
+        .values({ id: "singleton", enabled, updatedBy: actor(req) })
+        .onConflictDoUpdate({ target: vendorUsagePullPolicy.id, set: { enabled, updatedBy: actor(req), updatedAt: sql`now()` } });
+      await audit(tx, actor(req), "vendor_usage_pull_policy", null, VENDOR_USAGE_RULE_IDS.policyChanged, "allow",
+        `vendor usage pull ${before ? "on" : "off"} -> ${enabled ? "on" : "off"}: ${reason}`,
+        { transition: { from: before, to: enabled }, reason, receiptClass: "configuration" });
+    });
     return reply.send({ policy: { enabled } });
   });
 
@@ -747,13 +850,16 @@ export function registerVendorUsagePullRoutes(
       .where(sql`lower(${vendorUsageConnectors.name}) = lower(${name})`)
       .limit(1);
     if (exists.length) return reply.status(409).send({ error: "connector_name_taken" });
-    const [row] = await db
-      .insert(vendorUsageConnectors)
-      .values({ vendor, name, publicConfig: cfg.data as Record<string, unknown>, createdBy: actor(req) })
-      .returning();
-    await audit(db, actor(req), "vendor_usage_connector", row!.id, VENDOR_USAGE_RULE_IDS.connectorCreated, "allow",
-      `vendor usage connector '${name}' (${vendor}) created, disabled: ${reason}`, { vendor, name, reason });
-    return reply.status(201).send({ connector: connectorView(row!, null) });
+    const row = await db.transaction(async (tx) => {
+      const [created] = await tx
+        .insert(vendorUsageConnectors)
+        .values({ vendor, name, publicConfig: cfg.data as Record<string, unknown>, createdBy: actor(req) })
+        .returning();
+      await audit(tx, actor(req), "vendor_usage_connector", created!.id, VENDOR_USAGE_RULE_IDS.connectorCreated, "allow",
+        `vendor usage connector '${name}' (${vendor}) created, disabled: ${reason}`, { vendor, name, reason });
+      return created!;
+    });
+    return reply.status(201).send({ connector: connectorView(row, null) });
   });
 
   app.put("/v1/vendor-usage/connectors/:connectorId/config", async (req, reply) => {
@@ -765,17 +871,20 @@ export function registerVendorUsagePullRoutes(
     if (!parsed.success) return reply.status(400).send(bad("expected { config, reason }"));
     const cfg = vendorUsagePublicConfigSchemas[connector.vendor].safeParse(parsed.data.config);
     if (!cfg.success) return reply.status(400).send(bad(`config does not match the ${connector.vendor} connector's schema`));
-    const [row] = await db
-      .update(vendorUsageConnectors)
-      .set({ publicConfig: cfg.data as Record<string, unknown>, updatedAt: sql`now()` })
-      .where(eq(vendorUsageConnectors.id, connector.id))
-      .returning();
-    const remarked = await remarkOverlap(db, row!, cfg.data);
-    await audit(db, actor(req), "vendor_usage_connector", connector.id, VENDOR_USAGE_RULE_IDS.connectorConfigured, "allow",
-      `vendor usage connector '${connector.name}' configuration changed; ${remarked} stored line(s) re-marked: ${parsed.data.reason}`,
-      { reason: parsed.data.reason, linesRemarked: remarked, configKeys: Object.keys(cfg.data) });
+    const { row, remarked } = await db.transaction(async (tx) => {
+      const [updated] = await tx
+        .update(vendorUsageConnectors)
+        .set({ publicConfig: cfg.data as Record<string, unknown>, updatedAt: sql`now()` })
+        .where(eq(vendorUsageConnectors.id, connector.id))
+        .returning();
+      const n = await remarkOverlap(tx, updated!, cfg.data);
+      await audit(tx, actor(req), "vendor_usage_connector", connector.id, VENDOR_USAGE_RULE_IDS.connectorConfigured, "allow",
+        `vendor usage connector '${connector.name}' configuration changed; ${n} stored line(s) re-marked: ${parsed.data.reason}`,
+        { reason: parsed.data.reason, linesRemarked: n, configKeys: Object.keys(cfg.data) });
+      return { row: updated!, remarked: n };
+    });
     const cred = await liveCredential(db, connector.id);
-    return reply.send({ connector: connectorView(row!, cred), linesRemarked: remarked });
+    return reply.send({ connector: connectorView(row, cred), linesRemarked: remarked });
   });
 
   app.put("/v1/vendor-usage/connectors/:connectorId/credential", async (req, reply) => {
@@ -833,12 +942,12 @@ export function registerVendorUsagePullRoutes(
           createdBy: actor(req),
         })
         .returning();
+      const ruleId = existing ? VENDOR_USAGE_RULE_IDS.credentialReplaced : VENDOR_USAGE_RULE_IDS.credentialStored;
+      await audit(tx, actor(req), "vendor_usage_credential", row!.id, ruleId, "allow",
+        `vendor usage credential ${existing ? "replaced" : "stored"} for '${connector.name}' (${posture}): ${parsed.data.reason}`,
+        { connectorId: connector.id, replacedCredentialId: existing?.id ?? null, scopePosture: posture, writeCapableAcknowledged: posture === "write_capable", reason: parsed.data.reason });
       return row!;
     });
-    const ruleId = existing ? VENDOR_USAGE_RULE_IDS.credentialReplaced : VENDOR_USAGE_RULE_IDS.credentialStored;
-    await audit(db, actor(req), "vendor_usage_credential", stored.id, ruleId, "allow",
-      `vendor usage credential ${existing ? "replaced" : "stored"} for '${connector.name}' (${posture}): ${parsed.data.reason}`,
-      { connectorId: connector.id, replacedCredentialId: existing?.id ?? null, scopePosture: posture, writeCapableAcknowledged: posture === "write_capable", reason: parsed.data.reason });
     return reply.status(existing ? 200 : 201).send({ credential: { id: stored.id, scopePosture: posture, storedAt: stored.createdAt.toISOString() } });
   });
 
@@ -859,10 +968,10 @@ export function registerVendorUsagePullRoutes(
         .where(eq(vendorUsageCredentials.id, existing.id));
       // a connector without a credential cannot pull; disabling it keeps the state honest
       await tx.update(vendorUsageConnectors).set({ enabled: false, updatedAt: sql`now()` }).where(eq(vendorUsageConnectors.id, connector.id));
+      await audit(tx, actor(req), "vendor_usage_credential", existing.id, VENDOR_USAGE_RULE_IDS.credentialRevoked, "allow",
+        `vendor usage credential revoked for '${connector.name}', connector disabled: ${parsed.data.reason}`,
+        { connectorId: connector.id, reason: parsed.data.reason });
     });
-    await audit(db, actor(req), "vendor_usage_credential", existing.id, VENDOR_USAGE_RULE_IDS.credentialRevoked, "allow",
-      `vendor usage credential revoked for '${connector.name}', connector disabled: ${parsed.data.reason}`,
-      { connectorId: connector.id, reason: parsed.data.reason });
     return reply.send({ revoked: existing.id });
   });
 
@@ -889,15 +998,18 @@ export function registerVendorUsagePullRoutes(
         return reply;
       }
     }
-    const [row] = await db
-      .update(vendorUsageConnectors)
-      .set({ enabled, updatedAt: sql`now()` })
-      .where(eq(vendorUsageConnectors.id, connector.id))
-      .returning();
-    await audit(db, actor(req), "vendor_usage_connector", connector.id, VENDOR_USAGE_RULE_IDS.connectorEnabledChanged, "allow",
-      `vendor usage connector '${connector.name}' ${connector.enabled ? "enabled" : "disabled"} -> ${enabled ? "enabled" : "disabled"}: ${reason}`,
-      { transition: { from: connector.enabled, to: enabled }, reason, receiptClass: "configuration" });
-    return reply.send({ connector: connectorView(row!, await liveCredential(db, connector.id)) });
+    const row = await db.transaction(async (tx) => {
+      const [updated] = await tx
+        .update(vendorUsageConnectors)
+        .set({ enabled, updatedAt: sql`now()` })
+        .where(eq(vendorUsageConnectors.id, connector.id))
+        .returning();
+      await audit(tx, actor(req), "vendor_usage_connector", connector.id, VENDOR_USAGE_RULE_IDS.connectorEnabledChanged, "allow",
+        `vendor usage connector '${connector.name}' ${connector.enabled ? "enabled" : "disabled"} -> ${enabled ? "enabled" : "disabled"}: ${reason}`,
+        { transition: { from: connector.enabled, to: enabled }, reason, receiptClass: "configuration" });
+      return updated!;
+    });
+    return reply.send({ connector: connectorView(row, await liveCredential(db, connector.id)) });
   });
 
   app.post("/v1/vendor-usage/connectors/:connectorId/pull", async (req, reply) => {
@@ -915,12 +1027,31 @@ export function registerVendorUsagePullRoutes(
     if (!p.success) return reply.status(404).send({ error: "not_found" });
     const connector = await loadConnector(p.data.connectorId);
     if (!connector) return reply.status(404).send({ error: "not_found" });
+    // keyset pagination on (started_at, id) (#861 review): `before` is the last run id of the previous page
+    const q = z.object({ before: z.string().uuid().optional() }).strict().safeParse(req.query ?? {});
+    if (!q.success) return reply.status(400).send(bad("expected ?before=<run id>"));
+    let cursor: { startedAt: Date; id: string } | null = null;
+    if (q.data.before) {
+      const [c] = await db
+        .select({ startedAt: vendorUsagePullRuns.startedAt, id: vendorUsagePullRuns.id })
+        .from(vendorUsagePullRuns)
+        .where(and(eq(vendorUsagePullRuns.id, q.data.before), eq(vendorUsagePullRuns.connectorId, connector.id)));
+      if (!c) return reply.status(400).send(bad("before must name a run of this connector"));
+      cursor = c;
+    }
     const runs = await db
       .select()
       .from(vendorUsagePullRuns)
-      .where(eq(vendorUsagePullRuns.connectorId, connector.id))
-      .orderBy(desc(vendorUsagePullRuns.startedAt))
-      .limit(50);
-    return reply.send({ runs: runs.map(runView) });
+      .where(
+        and(
+          eq(vendorUsagePullRuns.connectorId, connector.id),
+          cursor
+            ? sql`(${vendorUsagePullRuns.startedAt}, ${vendorUsagePullRuns.id}) < (${cursor.startedAt}, ${cursor.id})`
+            : undefined,
+        ),
+      )
+      .orderBy(desc(vendorUsagePullRuns.startedAt), desc(vendorUsagePullRuns.id))
+      .limit(RUNS_PAGE);
+    return reply.send({ runs: runs.map(runView), nextBefore: runs.length === RUNS_PAGE ? runs[runs.length - 1]!.id : null });
   });
 }

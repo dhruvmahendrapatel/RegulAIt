@@ -795,10 +795,23 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
       .set({ status: "revoked", revokedAt: new Date(), revokedByUserId: req.authCtx.userId ?? null, reason: `revoked: ${body.reason}` })
       .where(eq(costImportBatches.id, importId))
       .returning();
+    // ADR-0322 (#861 review): a pulled batch holds only the lines it first introduced, so withdrawing it removes days the
+    // connector believes it already has. Rewind the connector to the batch's first day, so the next pull fetches them again.
+    const pullConnectorId =
+      batch.origin === "pull" ? ((batch.summary as { connectorId?: unknown } | null)?.connectorId as string | undefined) : undefined;
+    let connectorRewoundTo: string | null = null;
+    if (pullConnectorId && batch.periodStart && removed.length > 0) {
+      const [rewound] = await db
+        .update(vendorUsageConnectors)
+        .set({ pulledThrough: sql`least(${vendorUsageConnectors.pulledThrough}, ${batch.periodStart})`, updatedAt: sql`now()` })
+        .where(eq(vendorUsageConnectors.id, pullConnectorId))
+        .returning({ pulledThrough: vendorUsageConnectors.pulledThrough });
+      connectorRewoundTo = rewound?.pulledThrough?.toISOString() ?? null;
+    }
     await audit(req.authCtx.userId, "cost_import_batch", importId, COST_IMPORT_RULE_IDS.importRevoked, "allow",
       `withdrew ${removed.length} imported cost line(s) from batch ${importId}: ${body.reason}` +
         (reinstated > 0 ? ` — ${reinstated} older line(s) this batch had superseded were reinstated` : ""),
-      { linesRemoved: removed.length, linesReinstated: reinstated, vendor: batch.vendor, adapter: batch.adapter, payloadSha256: batch.payloadSha256 });
+      { linesRemoved: removed.length, linesReinstated: reinstated, vendor: batch.vendor, adapter: batch.adapter, payloadSha256: batch.payloadSha256, ...(pullConnectorId ? { pullConnectorId, connectorRewoundTo } : {}) });
     return { revoked: true, import: updated, linesRemoved: removed.length, linesReinstated: reinstated };
   });
 

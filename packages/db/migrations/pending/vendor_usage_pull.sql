@@ -11,7 +11,10 @@
 -- - `cost_import_batches.origin` and three `imported_cost_lines` columns: pulled lines are ordinary imported lines
 --   (basis stays 'imported'); `(pull_connector_id, fact_key)` makes a re-pull an upsert, and `overlaps_metered`
 --   marks spend billed to a key the gateway itself holds, which the consolidated read excludes and discloses.
--- - The deployment is single-tenant, so like the other register tables (0281) there is no tenant column for RLS.
+-- - Row-level security (ADR-0234, ADR-0322 §7; #861 review): the four new tables are ENABLED and FORCED, readable
+--   and writable only by an active admin principal (regulait_rls_is_admin()), the scheduled sweep (`system_task`) and
+--   `migration`. A plain `regulait_app` connection and every request-only reason (`public_ingest`,
+--   `credential_request`, ...) see and write nothing, so the sealed vendor keys are out of reach of any other path.
 -- No new functions or refusal triggers.
 
 CREATE TABLE IF NOT EXISTS "vendor_usage_pull_policy" (
@@ -82,7 +85,8 @@ CREATE TABLE IF NOT EXISTS "vendor_usage_pull_runs" (
   CONSTRAINT "vendor_usage_pull_runs_status_check" CHECK ("status" IN ('running', 'succeeded', 'failed', 'refused')),
   CONSTRAINT "vendor_usage_pull_runs_error_code_check" CHECK ("error_code" IS NULL OR "error_code" IN (
     'disabled', 'air_gapped', 'no_credential', 'data_key_unavailable', 'egress_refused', 'unauthorized', 'forbidden',
-    'rate_limited', 'http_error', 'bad_response', 'response_too_large', 'network_error', 'page_limit', 'scan_blocked', 'internal')),
+    'rate_limited', 'http_error', 'bad_response', 'response_too_large', 'network_error', 'page_limit', 'scan_blocked', 'internal',
+    'in_progress')),
   CONSTRAINT "vendor_usage_pull_runs_error_detail_check" CHECK ("error_detail" IS NULL OR char_length("error_detail") <= 500),
   CONSTRAINT "vendor_usage_pull_runs_outcome_check" CHECK (("status" IN ('failed', 'refused')) = ("error_code" IS NOT NULL))
 );
@@ -109,3 +113,67 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 --> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "imported_cost_lines_pull_fact_uq"
   ON "imported_cost_lines" ("pull_connector_id", "fact_key") WHERE "pull_connector_id" IS NOT NULL;
+--> statement-breakpoint
+ALTER TABLE "vendor_usage_pull_policy" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "vendor_usage_pull_policy" FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+DROP POLICY IF EXISTS vendor_usage_pull_policy_all ON "vendor_usage_pull_policy";
+--> statement-breakpoint
+CREATE POLICY vendor_usage_pull_policy_all ON "vendor_usage_pull_policy" FOR ALL
+  USING (
+    (SELECT regulait_rls_is_admin())
+    OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration'])
+  )
+  WITH CHECK (
+    (SELECT regulait_rls_is_admin())
+    OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration'])
+  );
+--> statement-breakpoint
+ALTER TABLE "vendor_usage_connectors" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "vendor_usage_connectors" FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+DROP POLICY IF EXISTS vendor_usage_connectors_all ON "vendor_usage_connectors";
+--> statement-breakpoint
+CREATE POLICY vendor_usage_connectors_all ON "vendor_usage_connectors" FOR ALL
+  USING (
+    (SELECT regulait_rls_is_admin())
+    OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration'])
+  )
+  WITH CHECK (
+    (SELECT regulait_rls_is_admin())
+    OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration'])
+  );
+--> statement-breakpoint
+ALTER TABLE "vendor_usage_credentials" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "vendor_usage_credentials" FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+DROP POLICY IF EXISTS vendor_usage_credentials_all ON "vendor_usage_credentials";
+--> statement-breakpoint
+CREATE POLICY vendor_usage_credentials_all ON "vendor_usage_credentials" FOR ALL
+  USING (
+    (SELECT regulait_rls_is_admin())
+    OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration'])
+  )
+  WITH CHECK (
+    (SELECT regulait_rls_is_admin())
+    OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration'])
+  );
+--> statement-breakpoint
+ALTER TABLE "vendor_usage_pull_runs" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "vendor_usage_pull_runs" FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+DROP POLICY IF EXISTS vendor_usage_pull_runs_all ON "vendor_usage_pull_runs";
+--> statement-breakpoint
+CREATE POLICY vendor_usage_pull_runs_all ON "vendor_usage_pull_runs" FOR ALL
+  USING (
+    (SELECT regulait_rls_is_admin())
+    OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration'])
+  )
+  WITH CHECK (
+    (SELECT regulait_rls_is_admin())
+    OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration'])
+  );
