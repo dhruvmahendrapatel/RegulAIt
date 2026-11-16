@@ -454,6 +454,8 @@ export const KNOWN_UI_GAPS = new Map([
   ["PUT /v1/connectors/:connectorId/token-exchange", { does: "sets or changes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
   ["DELETE /v1/connectors/:connectorId/token-exchange", { does: "removes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
   ["GET /v1/a2a/agents/:agentId/role-grants", { does: "lists the roles that may call a remote agent", tracking: "Lane L2 (ADR-0219 follow-up, P10): the brief is API-only; the remote-agent role-grant and revocation controls are posted on #453 for the design builder" }],
+  ["GET /v1/a2a/agents/:agentId/role-grants/export.xlsx", { does: "exports the roles that may call a remote agent (ADR-0226 list contract)", tracking: "Lane L2 (ADR-0219 follow-up, P10): the brief is API-only; the remote-agent role-grant and revocation controls are posted on #453 for the design builder" }],
+  ["GET /v1/a2a/agents/:agentId/revocations/export.xlsx", { does: "exports the revocations on a remote agent (ADR-0226 list contract)", tracking: "Lane L2 (ADR-0219 follow-up, P10): the brief is API-only; the remote-agent role-grant and revocation controls are posted on #453 for the design builder" }],
   ["POST /v1/a2a/agents/:agentId/role-grants", { does: "grants a role access to a remote agent, whole or one skill (audited)", tracking: "Lane L2 (ADR-0219 follow-up, P10): the brief is API-only; the remote-agent role-grant and revocation controls are posted on #453 for the design builder" }],
   ["DELETE /v1/a2a/agents/:agentId/role-grants/:grantId", { does: "removes a role's access to a remote agent (audited)", tracking: "Lane L2 (ADR-0219 follow-up, P10): the brief is API-only; the remote-agent role-grant and revocation controls are posted on #453 for the design builder" }],
   ["GET /v1/a2a/agents/:agentId/revocations", { does: "lists the people whose role-derived access to a remote agent is revoked", tracking: "Lane L2 (ADR-0219 follow-up, P10): the brief is API-only; the remote-agent role-grant and revocation controls are posted on #453 for the design builder" }],
@@ -467,7 +469,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 55; // + lane L2 (ADR-0219 follow-up, P10) 6 A2A role-grant/revocation routes; base: main's 54 − 11 MCP bundle routes closed by #815 + ADR-0240 6 external-portal second-factor routes awaiting #453 (#709)
+export const KNOWN_UI_GAPS_MAX = 57; // + lane L2 (ADR-0219 follow-up, P10) 8 A2A role-grant/revocation routes (6 + 2 list exports, PR #810 review); base: main's 54 − 11 MCP bundle routes closed by #815 + ADR-0240 6 external-portal second-factor routes awaiting #453 (#709)
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 

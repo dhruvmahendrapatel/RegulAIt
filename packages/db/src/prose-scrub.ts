@@ -125,6 +125,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.approvalDelegations, ["reason"]],
   [s.agentRevocations, ["reason"]],
   [s.connectorRevocations, ["reason"]],
+  // ADR-0219 follow-up (PR #810 review): why a person's role-derived access to a remote agent was revoked
+  [s.a2aAgentRevocations, ["reason"]],
   // ADR-0207 — why an admin disabled a connector (the server twin is on the mcp_servers entry above)
   [s.connectors, ["disabledReason"]],
   // ADR-0124 — the emergency-stop reasons. Operator free prose typed under

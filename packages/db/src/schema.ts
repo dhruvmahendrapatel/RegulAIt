@@ -16716,8 +16716,14 @@ export const a2aAgentRevocations = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
     revokedBy: uuid("revoked_by").references(() => users.id, { onDelete: "set null" }),
+    /** why, in the admin's words: shown with the revocation, as `agent_revocations.reason` is (PR #810 review) */
+    reason: text("reason"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [uniqueIndex("a2a_agent_revocations_uq").on(t.agentId, t.userId), index("a2a_agent_revocations_user_idx").on(t.userId, t.agentId)],
+  (t) => [
+    uniqueIndex("a2a_agent_revocations_uq").on(t.agentId, t.userId),
+    index("a2a_agent_revocations_user_idx").on(t.userId, t.agentId),
+    check("a2a_agent_revocations_reason_check", sql`${t.reason} IS NULL OR char_length(${t.reason}) BETWEEN 1 AND 500`),
+  ],
 );
 export type A2aAgentRevocationRow = typeof a2aAgentRevocations.$inferSelect;

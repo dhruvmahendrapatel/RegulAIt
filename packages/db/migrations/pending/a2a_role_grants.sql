@@ -22,7 +22,9 @@ CREATE TABLE IF NOT EXISTS "a2a_agent_revocations" (
   "agent_id" uuid NOT NULL REFERENCES "a2a_agents"("id") ON DELETE CASCADE,
   "user_id" uuid NOT NULL REFERENCES "users"("id") ON DELETE CASCADE,
   "revoked_by" uuid REFERENCES "users"("id") ON DELETE SET NULL,
-  "created_at" timestamp with time zone DEFAULT now() NOT NULL
+  "reason" text,
+  "created_at" timestamp with time zone DEFAULT now() NOT NULL,
+  CONSTRAINT "a2a_agent_revocations_reason_check" CHECK ("reason" IS NULL OR char_length("reason") BETWEEN 1 AND 500)
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "a2a_agent_revocations_uq" ON "a2a_agent_revocations" ("agent_id", "user_id");

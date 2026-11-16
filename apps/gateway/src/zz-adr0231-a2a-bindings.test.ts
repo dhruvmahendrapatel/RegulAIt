@@ -27,11 +27,13 @@ import { AgentCard, Role, type Message } from "@a2a-js/sdk";
 import { AgentEvent, DefaultRequestHandler, InMemoryTaskStore, type AgentExecutor } from "@a2a-js/sdk/server";
 import { restHandler, UserBuilder } from "@a2a-js/sdk/server/express";
 import { legacyRestRouter } from "@a2a-js/sdk/compat/v0_3/server/express";
-import { a2aAgentGrants, a2aAgents, and, auditLog, roles, createDb, desc, eq, inArray, ORG_SETTINGS_ID, orgSettings, runMigrations, usageEvents, type Db } from "@regulait/db";
+import { a2aAgentGrants, a2aAgentRoleGrants, a2aAgents, and, auditLog, roleAssignments, roles, createDb, desc, eq, inArray, ORG_SETTINGS_ID, orgSettings, runMigrations, usageEvents, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { A2A_RULE_IDS, a2aProtocolVersionSupported } from "./a2a.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+import { grantMintStepUp } from "./step-up.js";
+import { grantSpent, grantStepUpForTest, stepUpRequest } from "./testing/step-up-grant.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -415,6 +417,7 @@ describe("ADR-0219 follow-up: role grants and per-person revocations", () => {
   let roleId: string;
   let member: { id: string; key: Record<string, string> };
   let outsider: { id: string; key: Record<string, string> };
+  let admin: { id: string; key: Record<string, string> };
 
   async function person(tag: string, isAdmin = false) {
     const u = await req("POST", "/v1/users", { email: `b1-${tag}-${RUN}@example.com`, displayName: `b1 ${tag} ${RUN}`, ...(isAdmin ? { isAdmin: true } : {}) });
@@ -437,8 +440,47 @@ describe("ADR-0219 follow-up: role grants and per-person revocations", () => {
     roleIds.push(roleId);
     member = await person("member");
     outsider = await person("outsider");
+    admin = await person("admin", true);
     const a = await req("POST", `/v1/users/${member.id}/roles`, { roleId });
     expect([200, 201], a.body).toContain(a.statusCode);
+  });
+
+  it("PR #810 review: a member key reaches none of the admin routes", async () => {
+    for (const [method, url, body] of [
+      ["GET", `/v1/a2a/agents/${agentId}/role-grants`, undefined],
+      ["POST", `/v1/a2a/agents/${agentId}/role-grants`, { roleId }],
+      ["GET", `/v1/a2a/agents/${agentId}/revocations`, undefined],
+      ["POST", `/v1/a2a/agents/${agentId}/revocations`, { userId: outsider.id }],
+      ["DELETE", `/v1/a2a/agents/${agentId}/revocations/${outsider.id}`, undefined],
+      ["POST", `/v1/a2a/agents/${agentId}/grants`, { userId: member.id }],
+    ] as const) {
+      const r = await req(method, url, body, member.key);
+      expect(r.statusCode, `${method} ${url}: ${r.body}`).toBe(403);
+    }
+  });
+
+  it("PR #810 review: minting a role or direct grant is the shared grant_mint step-up; an admin API key cannot widen access", async () => {
+    for (const [url, body] of [
+      [`/v1/a2a/agents/${agentId}/role-grants`, { roleId, skillId: "echo" }],
+      [`/v1/a2a/agents/${agentId}/grants`, { userId: outsider.id }],
+    ] as const) {
+      const r = await req("POST", url, body, admin.key);
+      expect(r.statusCode, r.body).toBe(403);
+      expect(r.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax" });
+    }
+    expect(await db.select().from(a2aAgentRoleGrants).where(eq(a2aAgentRoleGrants.agentId, agentId))).toEqual([]);
+    expect(await db.select().from(a2aAgentGrants).where(eq(a2aAgentGrants.agentId, agentId))).toEqual([]);
+    // a grant made for another mint is refused and not spent; one made for exactly this mint lets it through
+    const wrong = await grantStepUpForTest(db, admin.id, grantMintStepUp({ kind: "a2a", userId: member.id, agentId, skillId: null }));
+    const refused = await app.inject({ method: "POST", url: `/v1/a2a/agents/${agentId}/grants`, payload: { userId: outsider.id }, ...stepUpRequest(wrong) });
+    // refused (403, or 422 when the admin has no authenticator to step up with) and nothing written
+    expect([403, 422], refused.body).toContain(refused.statusCode);
+    expect(await grantSpent(db, wrong.grantId)).toBe(false);
+    const right = await grantStepUpForTest(db, admin.id, grantMintStepUp({ kind: "a2a", userId: outsider.id, agentId, skillId: null }));
+    const minted = await app.inject({ method: "POST", url: `/v1/a2a/agents/${agentId}/grants`, payload: { userId: outsider.id }, ...stepUpRequest(right) });
+    expect(minted.statusCode, minted.body).toBe(201);
+    expect(await grantSpent(db, right.grantId)).toBe(true);
+    expect((await req("DELETE", `/v1/a2a/agents/${agentId}/grants/${minted.json().id}`)).statusCode).toBe(204);
   });
 
   it("is default-deny until the role is granted; a skill-scoped role grant does not reach another skill", async () => {
@@ -456,12 +498,39 @@ describe("ADR-0219 follow-up: role grants and per-person revocations", () => {
     expect((await call(member)).statusCode).toBe(403);
     // not holding the role confers nothing
     expect((await call(outsider, "echo")).statusCode).toBe(403);
-    expect((await req("GET", `/v1/a2a/agents/${agentId}/role-grants`)).json().roleGrants).toEqual([expect.objectContaining({ roleId, skillId: "echo" })]);
+    // ADR-0226 list contract (PR #810 review): bounded and paginated, with the shared page shape and an Excel export
+    const page = (await req("GET", `/v1/a2a/agents/${agentId}/role-grants?limit=10`)).json();
+    expect(page.items).toEqual([expect.objectContaining({ roleId, skillId: "echo" })]);
+    expect(page).toMatchObject({ nextCursor: null });
+    expect((await req("GET", `/v1/a2a/agents/${agentId}/role-grants?limit=7`)).statusCode).toBe(400);
+    const xlsx = await req("GET", `/v1/a2a/agents/${agentId}/role-grants/export.xlsx?columns=role,skill,created`);
+    expect(xlsx.statusCode, xlsx.body.slice(0, 200)).toBe(200);
+  });
+
+  it("PR #810 review: assigning a role whose only grant is a remote agent is the grant_mint step-up", async () => {
+    const role2 = await req("POST", "/v1/roles", { name: `b1-a2a-only-${RUN}` });
+    expect(role2.statusCode, role2.body).toBe(201);
+    const role2Id = role2.json().id as string;
+    roleIds.push(role2Id);
+    expect((await req("POST", `/v1/a2a/agents/${agentId}/role-grants`, { roleId: role2Id })).statusCode).toBe(201);
+    const asked = await req("POST", `/v1/users/${outsider.id}/roles`, { roleId: role2Id }, admin.key);
+    expect(asked.statusCode, asked.body).toBe(403);
+    expect(asked.json()).toMatchObject({ error: "step_up_required" });
+    expect(await db.select().from(roleAssignments).where(and(eq(roleAssignments.userId, outsider.id), eq(roleAssignments.roleId, role2Id)))).toEqual([]);
+    const g = await grantStepUpForTest(db, admin.id, grantMintStepUp({ kind: "role_assignment", userId: outsider.id, roleId: role2Id }));
+    const assigned = await app.inject({ method: "POST", url: `/v1/users/${outsider.id}/roles`, payload: { roleId: role2Id }, ...stepUpRequest(g) });
+    expect([200, 201], assigned.body).toContain(assigned.statusCode);
+    expect((await call(outsider, "echo")).statusCode).toBe(200);
+    await db.delete(roleAssignments).where(and(eq(roleAssignments.userId, outsider.id), eq(roleAssignments.roleId, role2Id)));
+    await db.delete(a2aAgentRoleGrants).where(eq(a2aAgentRoleGrants.roleId, role2Id));
   });
 
   it("a revocation takes role-derived access away from one person; a direct grant still applies; lifting is a step-up", async () => {
-    const v = await req("POST", `/v1/a2a/agents/${agentId}/revocations`, { userId: member.id });
+    const v = await req("POST", `/v1/a2a/agents/${agentId}/revocations`, { userId: member.id, reason: "left the support team" });
     expect(v.statusCode, v.body).toBe(201);
+    expect(v.json()).toMatchObject({ reason: "left the support team" });
+    expect((await req("GET", `/v1/a2a/agents/${agentId}/revocations`)).json().items).toEqual([expect.objectContaining({ userId: member.id, reason: "left the support team" })]);
+    expect((await req("POST", `/v1/a2a/agents/${agentId}/revocations`, { userId: outsider.id, reason: "x".repeat(501) })).statusCode).toBe(400);
     expect((await call(member, "echo")).statusCode).toBe(403);
     expect((await req("POST", `/v1/a2a/agents/${agentId}/revocations`, { userId: member.id })).statusCode).toBe(409);
 
@@ -475,7 +544,6 @@ describe("ADR-0219 follow-up: role grants and per-person revocations", () => {
     expect((await call(member, "echo")).statusCode).toBe(403);
 
     // an API key is asked for a step-up to lift it; the bootstrap token passes
-    const admin = await person("admin", true);
     const asked = await req("DELETE", `/v1/a2a/agents/${agentId}/revocations/${member.id}`, undefined, admin.key);
     expect(asked.statusCode, asked.body).toBe(403);
     expect(asked.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax" });
@@ -485,7 +553,7 @@ describe("ADR-0219 follow-up: role grants and per-person revocations", () => {
   });
 
   it("removing the role grant stops the next call", async () => {
-    const [g] = (await req("GET", `/v1/a2a/agents/${agentId}/role-grants`)).json().roleGrants as Array<{ id: string }>;
+    const [g] = (await req("GET", `/v1/a2a/agents/${agentId}/role-grants`)).json().items as Array<{ id: string }>;
     expect((await req("DELETE", `/v1/a2a/agents/${agentId}/role-grants/${g!.id}`)).statusCode).toBe(204);
     expect((await call(member, "echo")).statusCode).toBe(403);
     expect((await req("DELETE", `/v1/a2a/agents/${agentId}/role-grants/${g!.id}`)).statusCode).toBe(404);

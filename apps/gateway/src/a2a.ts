@@ -65,6 +65,7 @@ import {
   asc,
   auditLog,
   eq,
+  sql,
   usageEvents,
   users,
   type A2aAgentCredentialRow,
@@ -79,7 +80,11 @@ import { assertProjectAttribution, enforcePII, piiCategoryList, piiWithheldMarke
 import { guardrailCategoryList, guardrailWithheldMarker } from "@regulait/shared";
 import { flattenFindings, guardrailOutcome, recordGuardrailDecision, resolveGuardrailPolicy, runGuardrailsAsync, type DispatchGuardrails } from "./guardrails.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
-import { checkStepUp, requireStepUp } from "./step-up.js";
+import { checkStepUp, grantMintStepUp, requireStepUp, revocationLiftStepUp } from "./step-up.js";
+import { refuseSodMint } from "./sod.js";
+import { insertRoleGrantLocked, lockPersonForRevocation, roleNotFoundBody } from "./workload-identity-admin.js";
+import { answerListExport, answerListPage, noListFilters } from "./identity-lists.js";
+import type { ListReader, ListSpec } from "./list-contract.js";
 import { timeouts } from "./timeouts.js";
 import { evaluateA2a, governedCoreErrorDecision, RESOURCE_RULE_IDS, type GovernedResource, type GovernedResourceDecision } from "@regulait/policy-kernel";
 import { governedEvaluateResource } from "./governed-core.js";
@@ -612,7 +617,99 @@ const registerSchema = z
 const updateSchema = z.object({ enabled: z.boolean().optional(), pricePerCallUsd: z.number().min(0).max(1000).nullable().optional() }).strict();
 const grantSchema = z.object({ userId: z.string().uuid(), skillId: z.string().min(1).max(128).nullable().optional() }).strict();
 const roleGrantSchema = z.object({ roleId: z.string().uuid(), skillId: z.string().min(1).max(128).nullable().optional() }).strict();
-const revocationSchema = z.object({ userId: z.string().uuid() }).strict();
+const revocationSchema = z.object({ userId: z.string().uuid(), reason: z.string().min(1).max(500).nullable().optional() }).strict();
+
+// --- the role-grant and revocation lists under the shared list contract (ADR-0226; PR #810 review: bounded, paginated) ---
+
+interface A2aRoleGrantListRow {
+  id: string;
+  roleId: string;
+  roleName: string;
+  skillId: string | null;
+  createdAt: Date;
+}
+const a2aRoleGrantsReader = (db: Db): ListReader<A2aRoleGrantListRow> => ({
+  fetch: (q) =>
+    db
+      .select({
+        id: a2aAgentRoleGrants.id,
+        roleId: a2aAgentRoleGrants.roleId,
+        roleName: roles.name,
+        skillId: a2aAgentRoleGrants.skillId,
+        createdAt: a2aAgentRoleGrants.createdAt,
+        _cursorAt: q.cursorAt,
+      })
+      .from(a2aAgentRoleGrants)
+      .innerJoin(roles, eq(roles.id, a2aAgentRoleGrants.roleId))
+      .where(q.where)
+      .orderBy(...q.orderBy)
+      .limit(q.limit)
+      .offset(q.offset),
+  countable: (where) => db.select({ one: sql`1` }).from(a2aAgentRoleGrants).innerJoin(roles, eq(roles.id, a2aAgentRoleGrants.roleId)).where(where),
+  idOf: (r) => r.id,
+});
+const A2A_ROLE_GRANTS_LIST: ListSpec<A2aRoleGrantListRow> = {
+  id: "a2a-agent-role-grants",
+  sorts: {
+    role: { expr: sql`lower(${roles.name})` },
+    skill: { expr: sql`lower(${a2aAgentRoleGrants.skillId})` },
+    created: { expr: a2aAgentRoleGrants.createdAt, keysetAt: a2aAgentRoleGrants.createdAt },
+  },
+  columns: {
+    role: { label: "Role", value: (r) => r.roleName },
+    skill: { label: "Skill", value: (r) => r.skillId ?? "every skill" },
+    created: { label: "Created", value: (r) => r.createdAt },
+  },
+  filters: [],
+  defaultSort: { col: "role", dir: "asc" },
+  idCol: a2aAgentRoleGrants.id,
+};
+
+interface A2aRevocationListRow {
+  id: string;
+  userId: string;
+  email: string;
+  displayName: string | null;
+  reason: string | null;
+  createdAt: Date;
+}
+const a2aRevocationsReader = (db: Db): ListReader<A2aRevocationListRow> => ({
+  fetch: (q) =>
+    db
+      .select({
+        id: a2aAgentRevocations.id,
+        userId: a2aAgentRevocations.userId,
+        email: users.email,
+        displayName: users.displayName,
+        reason: a2aAgentRevocations.reason,
+        createdAt: a2aAgentRevocations.createdAt,
+        _cursorAt: q.cursorAt,
+      })
+      .from(a2aAgentRevocations)
+      .innerJoin(users, eq(users.id, a2aAgentRevocations.userId))
+      .where(q.where)
+      .orderBy(...q.orderBy)
+      .limit(q.limit)
+      .offset(q.offset),
+  countable: (where) => db.select({ one: sql`1` }).from(a2aAgentRevocations).innerJoin(users, eq(users.id, a2aAgentRevocations.userId)).where(where),
+  idOf: (r) => r.id,
+});
+const A2A_REVOCATIONS_LIST: ListSpec<A2aRevocationListRow> = {
+  id: "a2a-agent-revocations",
+  sorts: {
+    person: { expr: sql`lower(${users.email})` },
+    reason: { expr: sql`lower(${a2aAgentRevocations.reason})` },
+    created: { expr: a2aAgentRevocations.createdAt, keysetAt: a2aAgentRevocations.createdAt },
+  },
+  columns: {
+    person: { label: "Person", value: (r) => r.email },
+    reason: { label: "Reason", value: (r) => r.reason },
+    created: { label: "Created", value: (r) => r.createdAt },
+  },
+  filters: [],
+  defaultSort: { col: "person", dir: "asc" },
+  idCol: a2aAgentRevocations.id,
+};
 const userParam = z.object({ agentId: z.string().uuid(), userId: z.string().uuid() });
 const callSchema = z
   .object({ text: z.string().min(1).max(A2A_MESSAGE_MAX_CHARS), skillId: z.string().min(1).max(128).nullable().optional(), projectId: z.string().uuid().nullable().optional() })
@@ -873,6 +970,11 @@ export function registerA2aRoutes(app: FastifyInstance, db: Db, opts: { dataKey?
     const [user] = await db.select({ id: users.id, email: users.email }).from(users).where(eq(users.id, userId));
     if (!user) return reply.status(404).send({ error: "unknown_user" });
     if (skillId !== null && !cardSkills(agent.card).some((s) => s.id === skillId)) return reply.status(400).send({ error: "unknown_skill", detail: "the agent's card lists no such skill" });
+    // ADR-0091: the SoD mint gate; ADR-0250 (S-04): a grant widens default deny, so a fresh step-up bound to it
+    // (an admin API key can never give one). PR #810 review: the same gates every other grant mint passes.
+    const sod = await refuseSodMint(db, { kind: "a2a", userId, agentId }, req.authCtx.userId);
+    if (sod) return reply.status(409).send(sod);
+    if (!(await requireStepUp(db, req, reply, grantMintStepUp({ kind: "a2a", userId, agentId, skillId }))).ok) return reply;
     const row = await db.transaction(async (tx) => {
       const [created] = await tx.insert(a2aAgentGrants).values({ agentId, userId, skillId, grantedBy: req.authCtx.userId ?? null }).onConflictDoNothing().returning();
       if (!created) return null;
@@ -899,17 +1001,15 @@ export function registerA2aRoutes(app: FastifyInstance, db: Db, opts: { dataKey?
 
   // --- role grants and per-person revocations (ADR-0219 follow-up; admin-only, audited with the write) ---------
 
+  app.get("/v1/a2a/agents/:agentId/role-grants/export.xlsx", async (req, reply) => {
+    const { agentId } = agentParam.parse(req.params);
+    if (!(await loadAgent(agentId))) return reply.status(404).send({ error: "unknown_agent" });
+    return answerListExport(db, req, reply, A2A_ROLE_GRANTS_LIST, a2aRoleGrantsReader(db), noListFilters, () => eq(a2aAgentRoleGrants.agentId, agentId), { agentId });
+  });
   app.get("/v1/a2a/agents/:agentId/role-grants", async (req, reply) => {
     const { agentId } = agentParam.parse(req.params);
     if (!(await loadAgent(agentId))) return reply.status(404).send({ error: "unknown_agent" });
-    const rows = await db
-      .select({ id: a2aAgentRoleGrants.id, roleId: a2aAgentRoleGrants.roleId, roleName: roles.name, skillId: a2aAgentRoleGrants.skillId, createdAt: a2aAgentRoleGrants.createdAt })
-      .from(a2aAgentRoleGrants)
-      .innerJoin(roles, eq(roles.id, a2aAgentRoleGrants.roleId))
-      .where(eq(a2aAgentRoleGrants.agentId, agentId))
-      .orderBy(asc(roles.name))
-      .limit(1000);
-    return { roleGrants: rows.map((r) => ({ ...r, createdAt: r.createdAt.toISOString() })) };
+    return answerListPage(db, req, reply, A2A_ROLE_GRANTS_LIST, a2aRoleGrantsReader(db), noListFilters, () => eq(a2aAgentRoleGrants.agentId, agentId));
   });
 
   app.post("/v1/a2a/agents/:agentId/role-grants", async (req, reply) => {
@@ -923,9 +1023,15 @@ export function registerA2aRoutes(app: FastifyInstance, db: Db, opts: { dataKey?
     const [role] = await db.select({ id: roles.id, name: roles.name }).from(roles).where(eq(roles.id, roleId));
     if (!role) return reply.status(404).send({ error: "unknown_role" });
     if (skillId !== null && !cardSkills(agent.card).some((s) => s.id === skillId)) return reply.status(400).send({ error: "unknown_skill", detail: "the agent's card lists no such skill" });
-    const row = await db.transaction(async (tx) => {
+    // PR #810 review: the gates of `POST /v1/roles/:roleId/grants/agents`. ADR-0091 SoD per current assignee; ADR-0250
+    // (S-04) a role grant widens default deny for every holder, so a fresh step-up bound to it; and the insert under
+    // the role's row lock (PR #339 review), serialized with the workload-identity steward check.
+    const sod = await refuseSodMint(db, { kind: "role_a2a", roleId, agentId }, req.authCtx.userId);
+    if (sod) return reply.status(409).send(sod);
+    if (!(await requireStepUp(db, req, reply, grantMintStepUp({ kind: "role_a2a", roleId, agentId, skillId }))).ok) return reply;
+    const locked = await insertRoleGrantLocked(db, roleId, { actorUserId: req.authCtx.userId, via: "POST /v1/a2a/agents/:agentId/role-grants" }, async (tx) => {
       const [created] = await tx.insert(a2aAgentRoleGrants).values({ agentId, roleId, skillId, grantedBy: req.authCtx.userId ?? null }).onConflictDoNothing().returning();
-      if (!created) return null;
+      if (!created) return { created: null };
       const holders = await tx.selectDistinct({ userId: roleAssignments.userId }).from(roleAssignments).where(eq(roleAssignments.roleId, roleId));
       await audit(tx as unknown as Db, req, agentId, A2A_RULE_IDS.roleGranted, "allow", `Remote agent '${agent.name}': everyone holding role '${role.name}' (${holders.length} now) may call ${skillId ? `it for skill '${skillId}'` : "every skill"}`, {
         phase: "grant",
@@ -935,8 +1041,10 @@ export function registerA2aRoutes(app: FastifyInstance, db: Db, opts: { dataKey?
         skillId,
         holdersAtGrant: holders.length,
       });
-      return created;
+      return { created };
     });
+    if (!locked) return reply.status(404).send(roleNotFoundBody(roleId));
+    const row = locked.created;
     if (!row) return reply.status(409).send({ error: "grant_exists", detail: "this role already has this access" });
     return reply.status(201).send({ id: row.id, roleId, roleName: role.name, skillId, createdAt: row.createdAt.toISOString() });
   });
@@ -955,36 +1063,37 @@ export function registerA2aRoutes(app: FastifyInstance, db: Db, opts: { dataKey?
     return reply.status(204).send();
   });
 
+  app.get("/v1/a2a/agents/:agentId/revocations/export.xlsx", async (req, reply) => {
+    const { agentId } = agentParam.parse(req.params);
+    if (!(await loadAgent(agentId))) return reply.status(404).send({ error: "unknown_agent" });
+    return answerListExport(db, req, reply, A2A_REVOCATIONS_LIST, a2aRevocationsReader(db), noListFilters, () => eq(a2aAgentRevocations.agentId, agentId), { agentId });
+  });
   app.get("/v1/a2a/agents/:agentId/revocations", async (req, reply) => {
     const { agentId } = agentParam.parse(req.params);
     if (!(await loadAgent(agentId))) return reply.status(404).send({ error: "unknown_agent" });
-    const rows = await db
-      .select({ id: a2aAgentRevocations.id, userId: a2aAgentRevocations.userId, email: users.email, displayName: users.displayName, createdAt: a2aAgentRevocations.createdAt })
-      .from(a2aAgentRevocations)
-      .innerJoin(users, eq(users.id, a2aAgentRevocations.userId))
-      .where(eq(a2aAgentRevocations.agentId, agentId))
-      .orderBy(asc(users.email))
-      .limit(1000);
-    return { revocations: rows.map((r) => ({ ...r, createdAt: r.createdAt.toISOString() })) };
+    return answerListPage(db, req, reply, A2A_REVOCATIONS_LIST, a2aRevocationsReader(db), noListFilters, () => eq(a2aAgentRevocations.agentId, agentId));
   });
 
   app.post("/v1/a2a/agents/:agentId/revocations", async (req, reply) => {
     const { agentId } = agentParam.parse(req.params);
     const parsed = revocationSchema.safeParse(req.body);
-    if (!parsed.success) return reply.status(400).send({ error: "invalid_request", detail: "expected { userId }" });
+    if (!parsed.success) return reply.status(400).send({ error: "invalid_request", detail: "expected { userId, reason? (1 to 500 characters) }" });
     const { userId } = parsed.data;
+    const reason = parsed.data.reason ?? null;
     const agent = await loadAgent(agentId);
     if (!agent) return reply.status(404).send({ error: "unknown_agent" });
     const [user] = await db.select({ id: users.id, email: users.email }).from(users).where(eq(users.id, userId));
     if (!user) return reply.status(404).send({ error: "unknown_user" });
     const row = await db.transaction(async (tx) => {
-      const [created] = await tx.insert(a2aAgentRevocations).values({ agentId, userId, revokedBy: req.authCtx.userId ?? null }).onConflictDoNothing().returning();
+      // ADR-0188 S4+S5 follow-up (review L5): the person's row first, serialized with the workload-identity steward check
+      await lockPersonForRevocation(tx as unknown as Db, userId);
+      const [created] = await tx.insert(a2aAgentRevocations).values({ agentId, userId, revokedBy: req.authCtx.userId ?? null, reason }).onConflictDoNothing().returning();
       if (!created) return null;
-      await audit(tx as unknown as Db, req, agentId, A2A_RULE_IDS.revoked, "allow", `Remote agent '${agent.name}': ${user.email} may no longer call it through a role (a direct grant, if any, still applies)`, { phase: "revocation", revocationId: created.id, userId });
+      await audit(tx as unknown as Db, req, agentId, A2A_RULE_IDS.revoked, "allow", `Remote agent '${agent.name}': ${user.email} may no longer call it through a role (a direct grant, if any, still applies)`, { phase: "revocation", revocationId: created.id, userId, reason });
       return created;
     });
     if (!row) return reply.status(409).send({ error: "revocation_exists", detail: "this person's role-derived access to this agent is already revoked" });
-    return reply.status(201).send({ id: row.id, userId, createdAt: row.createdAt.toISOString() });
+    return reply.status(201).send({ id: row.id, userId, reason: row.reason, createdAt: row.createdAt.toISOString() });
   });
 
   app.delete("/v1/a2a/agents/:agentId/revocations/:userId", async (req, reply) => {
@@ -994,8 +1103,8 @@ export function registerA2aRoutes(app: FastifyInstance, db: Db, opts: { dataKey?
     // lifting a revocation widens access again: a relaxation, so a step-up as for a credential write
     const [existing] = await db.select({ id: a2aAgentRevocations.id }).from(a2aAgentRevocations).where(and(eq(a2aAgentRevocations.agentId, agentId), eq(a2aAgentRevocations.userId, userId)));
     if (!existing) return reply.status(404).send({ error: "unknown_revocation" });
-    const su = await checkStepUp(db, req, { kind: "settings_relax", facts: { op: "a2a_revocation_lift", agentId, userId } });
-    if (!su.ok) return reply.status(su.status).send(su.body);
+    // B4S-05 (PR #810 review): the one revocation-lift step-up every kind uses
+    if (!(await requireStepUp(db, req, reply, revocationLiftStepUp("a2a", existing.id, userId))).ok) return reply;
     await db.transaction(async (tx) => {
       const gone = await tx.delete(a2aAgentRevocations).where(eq(a2aAgentRevocations.id, existing.id)).returning({ id: a2aAgentRevocations.id });
       if (gone.length === 0) return;
