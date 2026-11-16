@@ -5044,6 +5044,8 @@ export * from "./trained-detectors.js";
 export * from "./guardrail-vendor-adapters.js";
 // ADR-0224 (P13 c): privacy operations — records of processing, data-subject requests, the processing limit
 export * from "./privacy-ops.js";
+// ADR-0296 part 2 (P18 B2): privacy-law presets and packs
+export * from "./privacy-packs.js";
 
 // ===== ADR-0215 (P5) — framework content imports and the imported regulatory feed =====
 export * from "./framework-imports.js";
@@ -5051,6 +5053,8 @@ export * from "./atlas-redteam-map.js";
 
 // ===== ADR-0221 (PENDING P4) — the supplier portal =========================
 export * from "./supplier-portal.js";
+// ===== ADR-0240 — one second factor (TOTP) for the supplier and auditor portals ==========
+export * from "./external-mfa.js";
 // ADR-0222 (P13(a)): fairness testing — the group metrics, thresholds and outcome (pure)
 export * from "./fairness.js";
 // ADR-0261 (P37): third-party security telemetry ingest — the DefenseClaw JSONL parser and mapping (pure)
