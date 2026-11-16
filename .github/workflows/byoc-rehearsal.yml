@@ -1,0 +1,199 @@
+name: BYOC rehearsal
+
+# ADR-0325: apply the customer BYOC root (infra/environments/byoc-aws) into
+# regulait-dev, run the smoke test, and ALWAYS destroy, even on failure.
+#
+# - Manual only, and the job runs in the `rehearsal` environment, whose required
+#   reviewers approve each run before any AWS credential exists.
+# - AWS access: this job's GitHub OIDC token is exchanged for a session of the
+#   rehearsal role (infra/environments/regulait-dev-rehearsal-role), which only
+#   that environment can assume and whose boundary limits it to resources named
+#   regulait-rehearsal-* and tagged purpose=rehearsal. No stored AWS key, and
+#   no third-party action on the credential path.
+# - The repository is public, so the session credentials and the account ID are
+#   registered as masked values (GitHub's standard secret masking); nothing else
+#   is hidden. Every apply and destroy is written to the run summary with its
+#   timing, and the lane copies that summary into its PR.
+# - Non-production only. Nothing here is named, tagged or designated production.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bedrock_model:
+        description: 'Bedrock model or inference-profile id to smoke-test (blank = skip the Bedrock check)'
+        required: false
+        default: ''
+
+concurrency:
+  group: byoc-rehearsal
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  rehearse:
+    name: byoc rehearsal (apply, smoke test, destroy)
+    runs-on: ubuntu-24.04
+    environment: rehearsal
+    timeout-minutes: 170
+    env:
+      TF_DIR: infra/environments/byoc-aws
+      PREFIX: regulait-rehearsal
+      TF_IN_AUTOMATION: '1'
+      TF_INPUT: '0'
+      AWS_PAGER: ''
+      KUBECTL_VERSION: v1.34.13
+      KUBECTL_SHA256: b4bb494e9466a7a94bb851414548bc0d3e2f8da90757e6eccc3371e648648591
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the environment is configured
+        env:
+          ROLE_ARN: ${{ vars.REHEARSAL_ROLE_ARN }}
+          REGION: ${{ vars.REHEARSAL_AWS_REGION }}
+        run: |
+          set -euo pipefail
+          [[ "$ROLE_ARN" =~ ^arn:aws:iam::[0-9]{12}:role/gh-actions-regulait-rehearsal$ ]] || { echo "::error::set REHEARSAL_ROLE_ARN on the rehearsal environment (docs/ops/BYOC_REHEARSAL_ROLE.md)"; exit 1; }
+          [[ "$REGION" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]$ ]] || { echo "::error::set REHEARSAL_AWS_REGION on the rehearsal environment"; exit 1; }
+          account="$(cut -d: -f5 <<<"$ROLE_ARN")"
+          echo "::add-mask::$account"
+          {
+            echo "ACCOUNT_ID=$account"
+            echo "AWS_REGION=$REGION"
+            echo "AWS_DEFAULT_REGION=$REGION"
+            echo "ROLE_ARN=$ROLE_ARN"
+            echo "BOUNDARY_ARN=arn:aws:iam::$account:policy/regulait-rehearsal-byoc-workload-boundary"
+          } >> "$GITHUB_ENV"
+          {
+            echo "## BYOC rehearsal, run $GITHUB_RUN_ID ($GITHUB_SHA)"
+            echo "| step | started (UTC) | took | result |"
+            echo "|---|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install Terraform and kubectl (pinned, SHA-256 checked)
+        run: |
+          set -euo pipefail
+          infra/scripts/install-terraform.sh "$RUNNER_TEMP/bin"
+          curl -fsSL --proto '=https' -o "$RUNNER_TEMP/kubectl" "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          echo "${KUBECTL_SHA256}  $RUNNER_TEMP/kubectl" | sha256sum -c -
+          install -m 0755 "$RUNNER_TEMP/kubectl" "$RUNNER_TEMP/bin/kubectl"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Assume the rehearsal role (GitHub OIDC, no stored key)
+        run: |
+          set -euo pipefail
+          token="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)"
+          echo "::add-mask::$token"
+          creds="$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" \
+            --role-session-name "byoc-rehearsal-${GITHUB_RUN_ID}" --web-identity-token "$token" \
+            --duration-seconds 10800 --query Credentials --output json)"
+          for k in AccessKeyId SecretAccessKey SessionToken; do echo "::add-mask::$(jq -r ".$k" <<<"$creds")"; done
+          {
+            echo "AWS_ACCESS_KEY_ID=$(jq -r .AccessKeyId <<<"$creds")"
+            echo "AWS_SECRET_ACCESS_KEY=$(jq -r .SecretAccessKey <<<"$creds")"
+            echo "AWS_SESSION_TOKEN=$(jq -r .SessionToken <<<"$creds")"
+          } >> "$GITHUB_ENV"
+
+      - name: Refuse any account but regulait-dev
+        run: |
+          set -euo pipefail
+          got="$(aws sts get-caller-identity --query Account --output text)"
+          [ "$got" = "$ACCOUNT_ID" ] || { echo "::error::credentials are for another account"; exit 1; }
+          echo "signed in as $(aws sts get-caller-identity --query Arn --output text)"
+
+      - name: Preflight
+        env:
+          MODEL: ${{ inputs.bedrock_model }}
+        run: |
+          set -uo pipefail
+          start=$(date +%s)
+          args=(--account "$ACCOUNT_ID" --region "$AWS_REGION" --prefix "$PREFIX")
+          if [ -n "$MODEL" ]; then args+=(--model "$MODEL"); fi
+          infra/modules/byoc-aws/preflight/preflight.sh "${args[@]}"; rc=$?
+          echo "| preflight | $(date -u -d @"$start" +%H:%M:%S) | $(( $(date +%s) - start ))s | exit $rc |" >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
+      - name: Terraform apply
+        env:
+          MODEL: ${{ inputs.bedrock_model }}
+        run: |
+          set -uo pipefail
+          start=$(date +%s)
+          runner_ip="$(curl -fsS https://checkip.amazonaws.com | tr -d '[:space:]')"
+          [[ "$runner_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::cannot read the runner's public IP"; exit 1; }
+          models="[]"
+          if [ -n "$MODEL" ]; then models="$(jq -cn --arg m "$MODEL" '[$m]')"; fi
+          jq -n --arg a "$ACCOUNT_ID" --arg r "$AWS_REGION" --arg b "$BOUNDARY_ARN" --arg ip "$runner_ip/32" --argjson m "$models" '{
+            account_id: $a, region: $r, iam_permissions_boundary_arn: $b,
+            cluster_endpoint_public_access_cidrs: [$ip], bedrock_model_ids: $m, ingress_controller: true
+          }' > "$RUNNER_TEMP/rehearsal.auto.tfvars.json"
+          terraform -chdir="$TF_DIR" init -input=false -no-color > "$RUNNER_TEMP/init.log" 2>&1 || { cat "$RUNNER_TEMP/init.log"; exit 1; }
+          terraform -chdir="$TF_DIR" apply -auto-approve -no-color \
+            -var-file=rehearsal.tfvars.example -var-file="$RUNNER_TEMP/rehearsal.auto.tfvars.json" 2>&1 | tee "$RUNNER_TEMP/apply.log"
+          rc=${PIPESTATUS[0]}
+          added="$(grep -oE 'Apply complete! Resources: [0-9]+ added' "$RUNNER_TEMP/apply.log" | grep -oE '[0-9]+' | head -1 || true)"
+          took=$(( $(date +%s) - start ))
+          echo "| terraform apply | $(date -u -d @"$start" +%H:%M:%S) | $((took / 60))m$((took % 60))s | exit $rc, ${added:-?} added |" >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      - name: Smoke test
+        env:
+          MODEL: ${{ inputs.bedrock_model }}
+        run: |
+          set -uo pipefail
+          start=$(date +%s)
+          aws eks update-kubeconfig --region "$AWS_REGION" --name "$PREFIX-eks" >/dev/null
+          args=(--tf-dir "$TF_DIR" --write-anchor-probe)
+          if [ -n "$MODEL" ]; then args+=(--model "$MODEL"); fi
+          infra/modules/byoc-aws/smoke/smoke-test.sh "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/smoke.log"
+          rc=${PIPESTATUS[0]}
+          {
+            echo "| smoke test | $(date -u -d @"$start" +%H:%M:%S) | $(( $(date +%s) - start ))s | exit $rc |"
+            echo
+            echo '<details><summary>smoke test output</summary>'
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/smoke.log"
+            echo '```'
+            echo '</details>'
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      - name: Destroy (always)
+        if: always()
+        run: |
+          set -uo pipefail
+          start=$(date +%s)
+          if [ -z "${AWS_SESSION_TOKEN:-}" ]; then echo "no AWS session: nothing was applied"; exit 0; fi
+          if [ ! -f "$RUNNER_TEMP/rehearsal.auto.tfvars.json" ]; then echo "apply never started: nothing to destroy"; exit 0; fi
+          kubectl delete namespace regulait --ignore-not-found --wait=true --timeout=300s >/dev/null 2>&1 || true
+          infra/scripts/byoc-rehearsal-sweep.sh pre-destroy "$PREFIX" || echo "::warning::pre-destroy sweep reported a problem"
+          rc=1
+          for attempt in 1 2; do
+            terraform -chdir="$TF_DIR" destroy -auto-approve -no-color \
+              -var-file=rehearsal.tfvars.example -var-file="$RUNNER_TEMP/rehearsal.auto.tfvars.json" 2>&1 | tee "$RUNNER_TEMP/destroy-$attempt.log"
+            rc=${PIPESTATUS[0]}
+            if [ "$rc" -eq 0 ]; then break; fi
+            echo "::warning::destroy attempt $attempt failed; retrying"
+            infra/scripts/byoc-rehearsal-sweep.sh pre-destroy "$PREFIX" || true
+          done
+          took=$(( $(date +%s) - start ))
+          echo "| terraform destroy | $(date -u -d @"$start" +%H:%M:%S) | $((took / 60))m$((took % 60))s | exit $rc |" >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      - name: Nothing left behind
+        if: always()
+        run: |
+          set -uo pipefail
+          if [ -z "${AWS_SESSION_TOKEN:-}" ]; then exit 0; fi
+          if infra/scripts/byoc-rehearsal-sweep.sh leftovers "$PREFIX"; then
+            echo "| leftovers | | | none |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| leftovers | | | **FOUND**: see the log; clean up per docs/ops/BYOC_REHEARSAL_ROLE.md |" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi

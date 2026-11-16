@@ -123,6 +123,48 @@ named, tagged or designated production.
 - **Preflight** `infra/modules/byoc-aws/preflight/preflight.sh` (read-only): tools, signed-in account, region and
   zones, quotas, Network Firewall and endpoint availability, Bedrock model access, and free names.
 
+### PR 3: the install runbook and the rehearsal workflow
+
+- **[docs/deployment/BYOC_AWS_INSTALL.md](../../docs/deployment/BYOC_AWS_INSTALL.md)** is written for a platform
+  team that does not know RegulAIt. It runs about two hours hands-on plus about 45 minutes of waiting, and covers
+  prerequisites, quotas and Bedrock access, bundle verification, preflight, one `terraform apply`, the chart install
+  (images mirrored into the customer's ECR, secrets generated in place, the data-key warning), the internal ALB, the
+  first admin, Entra ID OIDC, the smoke test, upgrade and rollback, uninstall (the COMPLIANCE bucket is kept as
+  evidence), the support bundle, the data boundary and the known gaps. The uninstall is ordered (load balancer first,
+  then the two protections off in one reviewed apply, then the mirrored images, then destroy) and lists what is left
+  behind on purpose: the final RDS snapshot, the COMPLIANCE anchors, the KMS key in its 30-day waiting period and the
+  retained install-secrets volume (#868 review, finding 5).
+- **`infra/modules/byoc-aws/smoke/smoke-test.sh`** runs its checks from short-lived pods under the gateway's own
+  namespace and service account, using images by digest through the ECR pull-through cache. It checks that:
+  - nodes are Ready;
+  - the pod gets the gateway role through Pod Identity;
+  - the bucket has Object Lock, and (optionally) a delete of a probe object is refused;
+  - one Bedrock Converse call works;
+  - the database accepts TLS and refuses plain connections;
+  - an allow-listed host is reachable and `example.com` is not;
+  - default-deny NetworkPolicy is enforced.
+
+  **`support-bundle.sh`** collects statuses, events and the last 500 log lines, with no secret values and no state,
+  and the installer reviews it before sending.
+- **`.github/workflows/byoc-rehearsal.yml`** runs on manual dispatch, in the `rehearsal` environment, so a reviewer
+  must approve each run. It:
+  - exchanges the job's OIDC token for a three-hour session of the rehearsal role with the AWS CLI (no third-party
+    action);
+  - refuses any account but the one in the role ARN, and masks that account ID in the public logs;
+  - runs the preflight, applies the customer root with `rehearsal.tfvars.example` (Kubernetes API open to the
+    runner's /32 only), and runs the smoke test with the WORM probe;
+  - **always** destroys, after `infra/scripts/byoc-rehearsal-sweep.sh` empties the GOVERNANCE-mode rehearsal bucket
+    and the cache repositories (the sweep refuses any prefix that is not `regulait-rehearsal*`, and any bucket in
+    COMPLIANCE mode);
+  - lists anything still tagged `purpose=rehearsal`, and writes every step's start, duration and result to the run
+    summary, which the lane copies into its PR.
+
+- **Operator backups to S3 (ADR-0305 §2) are not in this PR** (#868 review, finding 4). `backup-target-s3` grants
+  `s3:ListBucket` (ADR-0305 forbids it) and no S3-conditioned `kms:GenerateDataKey`/`kms:Decrypt`, so composing it
+  as is would break the operator's least-privilege contract, and changing it touches its other callers. A follow-up
+  PR extends it with a Pod Identity writer mode that matches ADR-0305 exactly and composes it in `byoc-aws`. Until
+  then a BYOC install backs up to the operator's PVC path, and RDS point-in-time backups cover the database.
+
 ### Open source first (ADR-0176)
 
 Searched: `terraform-aws-modules/iam` (Apache-2.0) has `iam-github-oidc-provider` and `iam-github-oidc-role`
