@@ -118,7 +118,7 @@ export function McpBundlesPage() {
       <SubpageTrail parent="MCP servers" parentTo="/admin/mcp-servers" current="MCP bundles" />
       <PageHeader title="MCP bundles" sub="Exact tools granted to a person, role or team as one unit." />
       <div className={v.stack}>
-        <QueryGate loading={list.isLoading} error={list.error} onRetry={() => void list.refetch()}>
+        <QueryGate query={list}>
           {list.data && !list.data.enabled && <OffNote>nothing can be created or granted, and no bundle grant gives a tool.</OffNote>}
           <Card title="Bundles">
             <Table
@@ -466,7 +466,7 @@ function VersionView(props: { id: string; n: number; names: Names }) {
   return (
     <section aria-label={`Version ${props.n}`}>
       <h3>Version {props.n} (never changes)</h3>
-      <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+      <QueryGate query={q}>
         <ItemsTable items={q.data?.items ?? []} names={props.names} />
       </QueryGate>
     </section>

@@ -75,7 +75,7 @@ export default function MonitoringPage() {
             </Button>
           }
         >
-          <QueryGate loading={kris.isLoading} error={kris.error} onRetry={() => void kris.refetch()}>
+          <QueryGate query={kris}>
             {(kris.data?.kris ?? []).length === 0 ? (
               <EmptyState title="No KRIs yet" body="Add one to watch a metric against a threshold." />
             ) : (
@@ -276,7 +276,7 @@ function SeriesChart(props: { title: string; metric: string; groupBy: string; ra
   const [table, setTable] = useState(Boolean(props.showTable));
   const pivot = useMemo(() => (q.data ? pivotSeries(q.data) : null), [q.data]);
   return (
-    <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+    <QueryGate query={q}>
       {q.data && pivot && pivot.rows.length === 0 ? (
         <EmptyState title="No traces in this range" />
       ) : q.data && pivot ? (
@@ -398,7 +398,7 @@ function DashboardsCard(props: { kris: Kri[] }) {
   const full = (current?.panels.length ?? 0) >= MONITORING_LIMITS.maxPanels;
   return (
     <Card title="Dashboards">
-      <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+      <QueryGate query={q}>
         <div className={v.stack}>
           <div className={v.row}>
             <Field label="Dashboard">

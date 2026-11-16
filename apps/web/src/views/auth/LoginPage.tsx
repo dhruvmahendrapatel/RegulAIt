@@ -43,6 +43,7 @@ import { Button, Field, Input } from "../../ui/kit";
 import { RefusalNotice } from "../../ui/RefusalNotice";
 import { Logo } from "../../ui/logos/Logo";
 import s from "./auth.module.css";
+import { errorText } from "../../api/format";
 
 /** the lockup every auth gate opens with (also used by the forced-change and
  * forced-MFA gates) */
@@ -185,7 +186,7 @@ export default function LoginPage() {
         // uniform 401 is not an account-existence oracle and neither is this
         setError("Email/username or password is incorrect.");
       } else {
-        setError(err instanceof Error ? err.message : String(err));
+        setError(errorText(err));
       }
     } finally {
       setBusy(false);
@@ -208,7 +209,7 @@ export default function LoginPage() {
         setSamlStepUp(false);
         setCode("");
       } else {
-        setError(err instanceof Error ? err.message : String(err));
+        setError(errorText(err));
       }
     } finally {
       setBusy(false);
@@ -233,7 +234,7 @@ export default function LoginPage() {
       } else if (err instanceof ApiError && err.guidance) {
         setGuidance(err.guidance);
       } else {
-        setError(err instanceof Error ? err.message : String(err));
+        setError(errorText(err));
       }
     } finally {
       setBusy(false);
@@ -487,7 +488,7 @@ function LinkAccount(props: { onDone: () => Promise<void> }) {
       } else if (err instanceof ApiError && err.status === 401) {
         setError("Password or code is incorrect.");
       } else {
-        setError(err instanceof Error ? err.message : String(err));
+        setError(errorText(err));
       }
     } finally {
       setBusy(false);

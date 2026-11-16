@@ -279,7 +279,7 @@ export default function VendorsPage() {
 
         {/* ---------------- detail ---------------- */}
         {openId && (
-          <QueryGate loading={detail.isLoading} error={detail.error} onRetry={() => void detail.refetch()}>
+          <QueryGate query={detail}>
             {d && (
               <Card
                 title={`Vendor: ${d.vendor.name}`}

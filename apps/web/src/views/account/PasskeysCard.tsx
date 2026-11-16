@@ -12,7 +12,7 @@ import { useState, type FormEvent } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { startRegistration, type PublicKeyCredentialCreationOptionsJSON } from "@simplewebauthn/browser";
 import { ApiError, codeSentence } from "../../api/client";
-import { ago } from "../../api/format";
+import { ago, errorText } from "../../api/format";
 import { Badge, Button, Card, EmptyState, Field, Input, Table } from "../../ui/kit";
 import { PREVIEW_ROWS, ViewAllLink } from "../../ui/ListPreview";
 import { RemoveButton } from "../admin/adminKit";
@@ -51,7 +51,7 @@ function reasonOf(err: unknown): string {
   }
   if (err instanceof Error && err.name === "NotAllowedError") return "The passkey prompt was closed or timed out. Nothing was added.";
   if (err instanceof Error && err.name === "InvalidStateError") return "That passkey is already registered on this account.";
-  return err instanceof Error ? err.message : String(err);
+  return errorText(err);
 }
 
 /**
