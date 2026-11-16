@@ -80,6 +80,21 @@ scheduler. No new dependency.
    `cost_outcomes`), so neither build blocks writers. The roll-up builds every group before it pages by offset; that is
    bounded by the number of projects or cost centres.
 
+## API stability (for consumers such as ADR-0342 process analytics)
+
+`/v1/cost-outcomes` and `/v1/cost-outcomes/summary` are versioned under `/v1`. Their fields are additive only: a field
+is never renamed, retyped or removed within `/v1`. A breaking change gets a new version path and an ADR amendment.
+- Each list row: `id`, `kind`, `workflowInstanceId`, `orchestrationRunId`, `nodeId`, `pmLinkId`, `projectId`,
+  `projectName`, `initiatorUserId`, `mergeSha`, `subjectStatus`, `trigger`, `observedAt`, `meteredUsd`, `calls`,
+  `unpricedCalls`, `pullRequest` (`{id, url}` or null) and `workItems[]` (`provider`, `externalId`, `externalUrl`,
+  `inboundState`).
+- Each page also carries `basis: "metered"` and `basisStatement`, beside the ADR-0226 page fields.
+- Each summary group: `key`, `label`, `costCenter`, `metered[kind]` (`outcomes`, `meteredUsd`, `calls`,
+  `unpricedCalls`, `meteredPerOutcomeUsd`) and `imported` (per cost centre only, never combined with metered spend).
+- The page also carries `window`, `groupedBy`, `kind`, `totalGroups`, `nextOffset`, `basisStatement` and `note`.
+
+A consumer joins on the outcome `id` or on `workflowInstanceId`, never on a figure.
+
 ## Consequences
 
 - The dashboard data layer can show spend per merged PR, per workflow run, per accepted change and per completed work
