@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { and, admissionEngineScans, auditLog, builderAgentSkills, builderSkills, engines, eq, inArray, mcpServers } from "@regulait/db";
+import { and, admissionEngineScans, auditLog, builderAgentSkills, builderSkills, engines, governanceAlerts, eq, inArray, mcpServers } from "@regulait/db";
 import { ENGINE_MANIFEST, type McpAdmissionFinding } from "@regulait/shared";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
@@ -142,7 +142,7 @@ describe("ADR-0242 mcpscanner on an MCP server (enforce)", () => {
     await expect(assertAdmitted(k.db, id)).rejects.toBeInstanceOf(McpAdmissionHeldError);
   });
 
-  it("owner question 2 (secure default): a later fail revokes a clearance given before it; a fail the admin saw does not", async () => {
+  it("owner decision Q2: every later fail revokes a clearance, even of a flag the admin saw, and alerts the admin", async () => {
     // cleared before any engine verdict existed: the engine's fail is new evidence, so the clearance is revoked
     const early = await server("cleared");
     await k.db.update(mcpServers).set({ admissionClearedBy: owner.id, admissionClearedAt: new Date(), admissionClearReason: "reviewed" }).where(eq(mcpServers.id, early));
@@ -154,8 +154,11 @@ describe("ADR-0242 mcpscanner on an MCP server (enforce)", () => {
     const audit = await k.db.select().from(auditLog).where(and(eq(auditLog.objectId, early), eq(auditLog.ruleId, "admission-engine-clearance-revoked")));
     expect(audit).toHaveLength(1);
     expect(audit[0]!.detail).toMatchObject({ revokedClearance: true, previousState: "cleared", admissionState: "held" });
+    const alerts = await k.db.select().from(governanceAlerts).where(eq(governanceAlerts.subjectKey, `mcp_server:${early}`));
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toMatchObject({ ruleId: "admission-engine-clearance-revoked", severity: "high", status: "open", id: revoked.alertId });
 
-    // the admin cleared it AFTER seeing that same fail: the re-scan repeats it and the clearance stands
+    // the admin cleared it AFTER seeing that same fail: the re-scan repeating it still re-holds (the override is redone)
     const seen = await server("held");
     await recordAdmissionEngineScan(k.db, { subject: { kind: "mcp_server", id: seen, digest: DIGEST_A }, report: report("mcpscanner-bad") });
     await k.db
@@ -163,8 +166,8 @@ describe("ADR-0242 mcpscanner on an MCP server (enforce)", () => {
       .set({ admissionState: "cleared", admissionClearedBy: owner.id, admissionClearedAt: new Date(), admissionClearReason: "reviewed the engine's flag" })
       .where(eq(mcpServers.id, seen));
     const again = await recordAdmissionEngineScan(k.db, { subject: { kind: "mcp_server", id: seen, digest: DIGEST_A }, report: report("mcpscanner-bad") });
-    expect(again).toMatchObject({ verdict: "fail", state: "cleared", revokedClearance: false });
-    await expect(assertAdmitted(k.db, seen)).resolves.toBeUndefined();
+    expect(again).toMatchObject({ verdict: "fail", state: "held", revokedClearance: true });
+    await expect(assertAdmitted(k.db, seen)).rejects.toBeInstanceOf(McpAdmissionHeldError);
 
     // an engine error is not evidence: it revokes nothing
     const crashed = await server("cleared");
@@ -264,7 +267,7 @@ describe("ADR-0242 skillscanner on a builder skill", () => {
     expect(await pinState(otherDigest, s.id)).toBe("admitted");
   });
 
-  it("a skill fail the admin saw before admitting leaves the admission; a fail under new rules revokes it", async () => {
+  it("owner decision Q2: a skill fail the admin saw before admitting still revokes the admission on a re-scan", async () => {
     const s = await skill("Sort the table by its first column.");
     // the engine flags it, the skill is held, and the admin admits it after seeing that flag
     await recordAdmissionEngineScan(k.db, { subject: { kind: "builder_skill", id: s.id, digest: s.contentDigest }, report: report("skillscanner-bad") });
@@ -273,16 +276,9 @@ describe("ADR-0242 skillscanner on a builder skill", () => {
       .set({ admissionState: "admitted", admittedBy: owner.id, admittedAt: new Date(), admitReason: "reviewed the flag", admittedDigest: s.contentDigest })
       .where(eq(builderSkills.id, s.id));
     const repeat = await recordAdmissionEngineScan(k.db, { subject: { kind: "builder_skill", id: s.id, digest: s.contentDigest }, report: report("skillscanner-bad") });
-    expect(repeat).toMatchObject({ verdict: "fail", state: "admitted", revokedClearance: false });
-
-    // the same digest flagged under a different rule set (a rules upgrade) is new evidence: the admission is revoked.
-    // The earlier fail row is re-labelled as the old rule set, which is what a rules upgrade leaves behind.
-    await k.db
-      .update(admissionEngineScans)
-      .set({ rulesSha256: "0".repeat(64) })
-      .where(eq(admissionEngineScans.builderSkillId, s.id));
-    const upgraded = await recordAdmissionEngineScan(k.db, { subject: { kind: "builder_skill", id: s.id, digest: s.contentDigest }, report: report("skillscanner-bad") });
-    expect(upgraded).toMatchObject({ verdict: "fail", state: "held", revokedClearance: true });
+    expect(repeat).toMatchObject({ verdict: "fail", state: "held", revokedClearance: true });
+    expect(repeat.alertId).not.toBeNull();
+    expect((await skillRow(s.id)).admittedDigest).toBeNull();
   });
 
   it("a skill admitted at another digest is not revoked by a fail on its current digest", async () => {
