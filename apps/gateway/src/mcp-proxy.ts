@@ -113,6 +113,8 @@ import {
 } from "./mcp-admission.js";
 import { definitionPinRefusal, recordDefinitionPins } from "./mcp-definition-pins.js";
 import { highRiskRefusal, recordRiskClassification } from "./mcp-high-risk.js";
+import { sapWriteRefusal } from "./mcp-sap-business.js";
+import { sapStoredToolKind, serverSystemClass } from "./sap-tool-kind.js";
 import { loadEntitlements } from "./entitlements.js";
 // ADR-0185 G3 — the non-tool MCP methods
 import {
@@ -997,6 +999,10 @@ async function executeGovernedToolCallInner(
       // (a tool this sync found is approved: under 'block' syncUpstreamTools returns no other)
       kind = toolKind(found);
     }
+    // ADR-0230 A2 (review #798): on an SAP business server a tool's kind is NOT taken from the upstream's own
+    // `readOnlyHint`. Every tool is a write, so the approval rule, the write-only rate limit and the project
+    // requirement cannot be skipped by a manifest that annotates a posting tool as read-only.
+    if (serverRow.systemClass === "sap_business") kind = "write";
 
     // ADR-0246 addendum: a high-risk (offensive) server needs its policy template and an authorised target, and
     // every call's arguments are audited, redacted; refused here before the kernel decision and any tool call
@@ -1081,6 +1087,26 @@ async function executeGovernedToolCallInner(
         args.principal, undefined, preparedPii, approvalTargetForServer(serverId, serverRow), { actor: null },
       );
       if (own.decision.effect === "deny") decision = own.decision;
+    }
+
+    // ADR-0230 A2: a write to an SAP business server must be attributed to a live, budgeted project. Checked AFTER the
+    // entitlement decision (review #798): a caller the kernel refuses gets that refusal, so the requirement never tells
+    // an unentitled caller that the server is SAP business. Refused before the decision row, any approval is queued
+    // or any tool call; audited and never costed.
+    if (decision.effect !== "deny") {
+      const sapRefusal = await sapWriteRefusal(db, {
+        userId,
+        serverId,
+        serverName: serverRow.name,
+        systemClass: serverRow.systemClass,
+        toolName,
+        toolKind: kind,
+        projectId: projectId ?? null,
+      });
+      if (sapRefusal) {
+        if (upstream) await operationSucceeded();
+        return { kind: "denied", decision: { effect: "deny", ruleId: sapRefusal.ruleId, ruleChain: [], reason: sapRefusal.reason } };
+      }
     }
 
     if (preparedPii && preparationGeneration?.epoch !== policyEpoch) {
@@ -2175,19 +2201,22 @@ export async function syncUpstreamTools(
     // ADR-0246 addendum: offensive tooling makes the server high-risk (over the whole served manifest)
     await recordRiskClassification(tx, serverId, tools, trigger);
     returned = pins.blockedTools.size > 0 ? tools.filter((t) => !pins.blockedTools.has(t.name)) : tools;
+    // security review #798: on an SAP business server every stored kind is 'write', whatever the hint says
+    // code review #798: FOR SHARE, so a sync waits for a mark in progress instead of storing hint kinds after it
+    const systemClass = await serverSystemClass(tx, serverId, { lock: true });
     for (const tool of returned) {
       await tx
         .insert(mcpTools)
         .values({
           serverId,
           name: tool.name,
-          kind: toolKind(tool),
+          kind: sapStoredToolKind(systemClass, toolKind(tool)),
           description: tool.description ?? null,
           inputSchema: tool.inputSchema,
         })
         .onConflictDoUpdate({
           target: [mcpTools.serverId, mcpTools.name],
-          set: { kind: toolKind(tool), description: tool.description ?? null, inputSchema: tool.inputSchema },
+          set: { kind: sapStoredToolKind(systemClass, toolKind(tool)), description: tool.description ?? null, inputSchema: tool.inputSchema },
         });
     }
     if (onStored) await onStored(tx, returned);
