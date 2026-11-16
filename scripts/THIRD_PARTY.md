@@ -6,10 +6,19 @@ Root `devDependencies` used only by the scripts in this directory. Nothing here 
 
 | Package | Version | Licence | Used by | Why |
 |---|---|---|---|---|
+| `@actions/expressions` | 0.3.61 | MIT | `ci-plan.mjs` | ADR-0323 (#851 review): parses and evaluates the GitHub Actions expressions in our workflow files (`if:`, matrix expressions) for the CI dry run, with GitHub's own coercion and comparison rules. Published by GitHub from `actions/languageservices` (release 2026-08-04). No dependencies; pure ESM; works offline. |
 | `dependency-cruiser` | 18.7.0 | MIT | `preflight-import-cycles.mjs` (and the module list of `preflight-import-smoke.mjs`) | ADR-0190 I4 follow-ups: finds the static import cycles of the compiled gateway, for the CI ratchet against new ones. It parses (acorn) and resolves (enhanced-resolve); the script only selects, sorts and compares edges. Works offline, no network at run time. Its transitive runtime closure is 42 packages (39 MIT, 3 ISC; checked 2026-10-16), 34 of them new to the lockfile. |
 | `js-yaml` | 4.3.2 | MIT | `refresh-framework-imports.mjs` | ADR-0215 (P5): parses the MITRE ATLAS YAML release when a developer refreshes the vendored framework-import snapshots. Safe `JSON_SCHEMA` load only (no custom types). The same version was already in the lockfile through other tools; one dependency (`argparse`, Python-2.0 licence, CLI only and not loaded by `load`). Never runs in the product: the product reads the vendored JSON. |
 
 ## Search record (ADR-0176)
+
+GitHub Actions expression evaluation for the CI dry run, 2026-11-16 (#851 review finding 1):
+
+- `@actions/expressions` 0.3.61 (MIT, GitHub, released 2026-08-04): chosen. GitHub's own lexer, parser and evaluator
+  for workflow expressions, the one its language services use; no dependencies. It replaces a hand-written subset.
+- `@actions/workflow-parser` 0.3.61 (MIT): not needed. It parses whole workflow files into a template model; the dry
+  run reads plain YAML with the existing `js-yaml` and evaluates only the expression strings.
+- `act` (MIT): rejected for a dry run. It runs the jobs in Docker, needs images and a network, and is a Go binary.
 
 YAML parsing for the framework-import refresh, 2026-10-30:
 
