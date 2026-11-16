@@ -75,6 +75,7 @@ describe("refusals", () => {
     ["https://user:pw@gw.example.com/mcp/x", /credentials/],
     ["https://gw.example.com/mcp/x?token=abc", /query/],
     ["not a url", /unparseable/],
+    ["https://*.example.com/mcp/x", /'\*'/],
   ])("refuses %s", (u, re) => {
     expect(() => compileManagedSettings(withUrl(u))).toThrow(re);
   });

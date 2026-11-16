@@ -9,7 +9,9 @@
  *  - the manifest is Ed25519-signed with the export key and lists each file's sha256; the archive is byte-stable;
  *  - an unchanged policy returns the same version (200), a changed one takes the next version (201), audited;
  *  - with no signing key, or no public URL, the export is refused (never an unsigned bundle);
- *  - the routes are admin-only.
+ *  - the routes are admin-only;
+ *  - NEGATIVE (#850 review): a read-tier bundle naming only a write tool, an archived bundle, and a reserved `mcp:`
+ *    protocol name each leave their server out; both tables are under forced row-level security (admin or `migration`).
  *
  * Everything this suite creates is removed in afterAll (users are disabled, as other suites leave them).
  */
@@ -35,6 +37,7 @@ import {
   orgSettings,
   mcpTools,
   roleAssignments,
+  sql,
   roles,
   roleToolGrants,
   runMigrations,
@@ -77,8 +80,9 @@ let loneId: string;
 let roleId: string;
 const userIds: string[] = [];
 const serverIds: string[] = [];
-const S: Record<"a" | "b" | "halted" | "off" | "fresh" | "bundled", string> = { a: "", b: "", halted: "", off: "", fresh: "", bundled: "" };
-let bundleId = "";
+type Srv = "a" | "b" | "halted" | "off" | "fresh" | "bundled" | "bundledWrite" | "archived" | "reserved";
+const S = {} as Record<Srv, string>;
+const bundleIds: string[] = [];
 let bundlesWereEnabled = false;
 
 const inject = (method: "GET" | "POST", url: string, headers: Record<string, string>, payload?: unknown) =>
@@ -108,7 +112,7 @@ async function user(tag: string) {
   return id;
 }
 
-async function server(tag: string, toolsSpec: Array<{ name: string; halted?: boolean }>, disabled = false) {
+async function server(tag: string, toolsSpec: Array<{ name: string; halted?: boolean; kind?: "read" | "write" }>, disabled = false) {
   const [s] = await db
     .insert(mcpServers)
     .values({
@@ -123,7 +127,7 @@ async function server(tag: string, toolsSpec: Array<{ name: string; halted?: boo
     await db.insert(mcpTools).values({
       serverId: s!.id,
       name: t.name,
-      kind: "read",
+      kind: t.kind ?? "read",
       ...(t.halted ? { haltedAt: new Date(), haltedReason: "e1 test: halted tool" } : {}),
     });
   }
@@ -159,17 +163,32 @@ beforeAll(async () => {
     { userId: memberId, serverId: S.off, toolName: "t" },
     { userId: memberId, serverId: S.fresh, toolName: "new_tool" },
   ]);
+  // a reserved protocol name (the `mcp:` grants of mcp-protocol.ts) is never a tool a client lists: the server stays out
+  S.reserved = await server("reserved", [{ name: "mcp:resources" }]);
+  await db.insert(toolGrants).values({ userId: memberId, serverId: S.reserved, toolName: "mcp:resources" });
   const [r] = await db.insert(roles).values({ name: `e1-role-${RUN}` }).returning({ id: roles.id });
   roleId = r!.id;
   await db.insert(roleToolGrants).values({ roleId, serverId: S.b, toolName: "search" });
 
   // ADR-0236: a bundle granted to the role, naming a tool on a server the role has no direct grant on
+  const roleBundle = async (tag: string, serverId: string, toolName: string, maxTier: "read" | "write", archived = false) => {
+    const [b] = await db
+      .insert(mcpBundles)
+      .values({ name: `e1-${tag}-${RUN}`, currentVersion: 1, createdBy: adminId, ...(archived ? { archivedAt: new Date() } : {}) })
+      .returning({ id: mcpBundles.id });
+    bundleIds.push(b!.id);
+    const [v] = await db.insert(mcpBundleVersions).values({ bundleId: b!.id, version: 1, createdBy: adminId }).returning({ id: mcpBundleVersions.id });
+    await db.insert(mcpBundleVersionItems).values({ versionId: v!.id, serverId, toolName });
+    await db.insert(mcpBundleGrants).values({ bundleId: b!.id, roleId, maxTier, grantedBy: adminId });
+  };
   S.bundled = await server("bundled", [{ name: "bundled_tool" }]);
-  const [b] = await db.insert(mcpBundles).values({ name: `e1-bundle-${RUN}`, currentVersion: 1, createdBy: adminId }).returning({ id: mcpBundles.id });
-  bundleId = b!.id;
-  const [v] = await db.insert(mcpBundleVersions).values({ bundleId, version: 1, createdBy: adminId }).returning({ id: mcpBundleVersions.id });
-  await db.insert(mcpBundleVersionItems).values({ versionId: v!.id, serverId: S.bundled, toolName: "bundled_tool" });
-  await db.insert(mcpBundleGrants).values({ bundleId, roleId, maxTier: "read", grantedBy: adminId });
+  await roleBundle("bundle", S.bundled, "bundled_tool", "read");
+  // NEGATIVE: a read-tier grant of a bundle that names only a write tool reaches nothing on that server
+  S.bundledWrite = await server("bundled-write", [{ name: "write_only", kind: "write" }]);
+  await roleBundle("bundle-write", S.bundledWrite, "write_only", "read");
+  // NEGATIVE: an archived bundle grants nothing, whatever its tier
+  S.archived = await server("archived", [{ name: "arch_tool" }]);
+  await roleBundle("bundle-archived", S.archived, "arch_tool", "write", true);
   const [o] = await db.select({ on: orgSettings.mcpBundlesEnabled }).from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   bundlesWereEnabled = o?.on === true;
 }, 120_000);
@@ -184,7 +203,7 @@ afterAll(async () => {
     await db.update(users).set({ disabledAt: new Date() }).where(inArray(users.id, userIds));
   }
   await db.update(orgSettings).set({ mcpBundlesEnabled: bundlesWereEnabled }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
-  if (bundleId) await db.delete(mcpBundles).where(eq(mcpBundles.id, bundleId));
+  if (bundleIds.length) await db.delete(mcpBundles).where(inArray(mcpBundles.id, bundleIds));
   if (roleId) await db.delete(managedSettingsBundles).where(eq(managedSettingsBundles.roleId, roleId));
   if (roleId) await db.delete(roles).where(eq(roles.id, roleId));
   if (serverIds.length) await db.delete(mcpServers).where(inArray(mcpServers.id, serverIds));
@@ -297,6 +316,17 @@ describe("ADR-0310: a role's bundle", () => {
     const want = [S.b, S.bundled].map((id) => ({ serverUrl: `${ORIGIN}/mcp/${id}` })).sort((x, y) => (x.serverUrl < y.serverUrl ? -1 : 1));
     expect(await allowedFor(r.json().id)).toEqual(want);
   });
+
+  it("NEGATIVE: leaves out a read-tier bundle naming only a write tool, and an archived bundle (#850 review)", async () => {
+    await db.update(orgSettings).set({ mcpBundlesEnabled: true }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    const r = await exportFor("role", roleId);
+    expect(r.statusCode, r.body).toBe(200);
+    const urls = (await allowedFor(r.json().id)).map((e: { serverUrl: string }) => e.serverUrl);
+    expect(urls).not.toContain(`${ORIGIN}/mcp/${S.bundledWrite}`);
+    expect(urls).not.toContain(`${ORIGIN}/mcp/${S.archived}`);
+    // positive control: the same role does reach the read-tier bundle
+    expect(urls).toContain(`${ORIGIN}/mcp/${S.bundled}`);
+  });
 });
 
 describe("ADR-0310: refusals", () => {
@@ -325,5 +355,59 @@ describe("ADR-0310: refusals", () => {
   it("is admin-only", async () => {
     expect((await inject("POST", "/v1/managed-settings/bundles", memberKey, { subject: { kind: "user", id: memberId } })).statusCode).toBe(403);
     expect((await inject("GET", "/v1/managed-settings/bundles", memberKey)).statusCode).toBe(403);
+  });
+});
+
+describe("ADR-0310: row-level security on the bundle tables (#850 review)", () => {
+  type Counts = { b: number; f: number };
+  const COUNT = sql`select (select count(*)::int from managed_settings_bundles) as b, (select count(*)::int from managed_settings_bundle_files) as f`;
+  const countAs = async (opts: { userId?: string; reason?: string }) =>
+    db.transaction(async (tx) => {
+      await tx.execute(sql`select set_config('role', 'regulait_app', true)`);
+      if (opts.userId) await tx.execute(sql`select set_config('regulait.user_id', ${opts.userId}, true)`);
+      if (opts.reason) await tx.execute(sql`select set_config('regulait.system_context', ${opts.reason}, true)`);
+      return ((await tx.execute(COUNT)).rows as Counts[])[0]!;
+    });
+
+  it("both tables have row-level security ENABLED and FORCED", async () => {
+    const r = await db.execute(sql`
+      select relname, relrowsecurity as on, relforcerowsecurity as forced from pg_class
+       where relnamespace = 'public'::regnamespace and relname in ('managed_settings_bundles', 'managed_settings_bundle_files') order by relname`);
+    expect(r.rows).toEqual([
+      { relname: "managed_settings_bundle_files", on: true, forced: true },
+      { relname: "managed_settings_bundles", on: true, forced: true },
+    ]);
+  });
+
+  it("NEGATIVE: a plain regulait_app connection, a non-admin principal and another system reason see no row", async () => {
+    const all = ((await db.execute(COUNT)).rows as Counts[])[0]!;
+    expect(all.b).toBeGreaterThan(0);
+    expect(all.f).toBeGreaterThan(0);
+    expect(await countAs({})).toEqual({ b: 0, f: 0 });
+    expect(await countAs({ userId: loneId })).toEqual({ b: 0, f: 0 });
+    expect(await countAs({ reason: "public_ingest" })).toEqual({ b: 0, f: 0 });
+    // positive controls: an active admin principal and the migration reason reach every row
+    expect(await countAs({ userId: adminId })).toEqual(all);
+    expect(await countAs({ reason: "migration" })).toEqual(all);
+  });
+
+  it("NEGATIVE: a non-admin principal cannot write either table", async () => {
+    const [anyBundle] = await db.select({ id: managedSettingsBundles.id }).from(managedSettingsBundles).where(inArray(managedSettingsBundles.userId, userIds)).limit(1);
+    const writeAs = (stmt: ReturnType<typeof sql>) =>
+      db
+        .transaction(async (tx) => {
+          await tx.execute(sql`select set_config('role', 'regulait_app', true)`);
+          await tx.execute(sql`select set_config('regulait.user_id', ${loneId}, true)`);
+          await tx.execute(stmt);
+        })
+        .then(
+          () => null,
+          (e: unknown) => e as { message?: string; cause?: { message?: string } },
+        );
+    const b = await writeAs(sql`insert into managed_settings_bundles (subject_kind, user_id, version, policy_digest, manifest, signature, key_id)
+      values ('user', ${loneId}, 999, 'd', '{}', 's', 'k')`);
+    expect(String(b?.cause?.message ?? b?.message)).toMatch(/row-level security/);
+    const f = await writeAs(sql`insert into managed_settings_bundle_files (bundle_id, path, body, sha256) values (${anyBundle!.id}, 'x', 'x', 'x')`);
+    expect(String(f?.cause?.message ?? f?.message)).toMatch(/row-level security/);
   });
 });

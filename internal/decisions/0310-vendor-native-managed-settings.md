@@ -66,6 +66,17 @@ own allowlists, which the vendors' clients enforce.
 8. **Drift (slice 2).** ADR-0259's `endpoint_mcp_servers` rows will be compared with the latest bundles. A configured
    server whose identity is not an exported gateway URL is drift. Devices are pseudonymous, so drift is reported per
    device and identity, not per named user.
+9. **Effective policy reuses the gateway's loaders (#850 review).** The user path calls `visibleMcpToolNamesByServer`
+   (`builder-access.ts`, the same admission, entitlement and `visibleTools` loop as `entitledMcpToolIds`). The role
+   path calls `loadRoleEntitlements`, built on the `loadRoleGrants` that `loadEntitlements` itself uses. A filter added
+   to either loader therefore narrows the compiled file too. Reserved `mcp:` protocol names are dropped, as `tools/list`
+   drops them, and a gateway URL containing `*` is refused (vendors read it as a wildcard).
+10. **Row-level security.** Both tables are under ENABLE and FORCE ROW LEVEL SECURITY with ADR-0234's admin-only
+   policy: an active admin principal or the `migration` reason. A plain `regulait_app` connection, a non-admin
+   principal, or another system reason reads and writes nothing (pinned by a test).
+11. **Route census.** The three routes have no screen yet. Under the lane E1 brief (rule 3: new routes go into the
+   census with a `KNOWN_UI_GAPS` entry on #453), each has a `KNOWN_UI_GAPS` entry, and `KNOWN_UI_GAPS_MAX` rises by
+   exactly 3, from main's 49 to **52**. The ratchet falls again when the #453 screen lands.
 
 ## Owner decision
 

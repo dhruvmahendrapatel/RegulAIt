@@ -93,43 +93,64 @@ export async function loadEntitlements(
   // receives role-derived GRANTS, never assignments), but the SET is what the
   // pre-filter means.
   const roleIds = [...new Set(assignments.map((a) => a.roleId))];
-  const [rtGrants, rsGrants, roleRows] =
-    roleIds.length === 0
-      ? [[], [], []]
-      : await Promise.all([
-          db
-            .select()
-            .from(roleToolGrants)
-            .where(
-              and(inArray(roleToolGrants.roleId, roleIds), eq(roleToolGrants.serverId, serverId)),
-            ),
-          db
-            .select()
-            .from(roleServerGrants)
-            .where(
-              and(
-                inArray(roleServerGrants.roleId, roleIds),
-                eq(roleServerGrants.serverId, serverId),
-              ),
-            ),
-          db
-            .select({ id: roles.id, name: roles.name })
-            .from(roles)
-            .where(inArray(roles.id, roleIds)),
-        ]);
-
-  // Role display names ride along for the kernel's reason prose — ids stay
-  // authoritative in ruleId/ruleChain, but a matched role reads by name.
-  const roleName = new Map(roleRows.map((r) => [r.id, r.name]));
+  const roleGrants = await loadRoleGrants(db, roleIds, serverId);
   return {
     toolGrants: tGrants,
     serverGrants: sGrants,
-    roleToolGrants: rtGrants.map((g) => ({ ...g, roleName: roleName.get(g.roleId) ?? null })),
-    roleServerGrants: rsGrants.map((g) => ({ ...g, roleName: roleName.get(g.roleId) ?? null })),
+    roleToolGrants: roleGrants.roleToolGrants,
+    roleServerGrants: roleGrants.roleServerGrants,
     // ADR-0236: present only when the user holds a bundle naming a tool on this server, so every other decision's
     // input (and therefore its rule chain) is exactly what it was before
     ...(bundleGrants.length > 0 ? { bundleToolGrants: bundleGrants } : {}),
     revocations: revs,
+  };
+}
+
+/**
+ * The role-derived tool and server grants that `roleIds` carry on `serverId`, with each role's display name for the
+ * kernel's reason prose (ids stay authoritative in ruleId/ruleChain). The one place role grants are read: the
+ * gateway's decisions (`loadEntitlements`) and the ADR-0310 managed-settings compile both call it, so a filter added
+ * here applies to both and a compiled file can never admit more than the gateway does (#850 review).
+ */
+export async function loadRoleGrants(
+  db: Db,
+  roleIds: readonly string[],
+  serverId: string,
+): Promise<{ roleToolGrants: NonNullable<Entitlements["roleToolGrants"]>; roleServerGrants: NonNullable<Entitlements["roleServerGrants"]> }> {
+  if (roleIds.length === 0) return { roleToolGrants: [], roleServerGrants: [] };
+  const ids = [...roleIds];
+  const [rtGrants, rsGrants, roleRows] = await Promise.all([
+    db
+      .select()
+      .from(roleToolGrants)
+      .where(and(inArray(roleToolGrants.roleId, ids), eq(roleToolGrants.serverId, serverId))),
+    db
+      .select()
+      .from(roleServerGrants)
+      .where(and(inArray(roleServerGrants.roleId, ids), eq(roleServerGrants.serverId, serverId))),
+    db.select({ id: roles.id, name: roles.name }).from(roles).where(inArray(roles.id, ids)),
+  ]);
+  const roleName = new Map(roleRows.map((r) => [r.id, r.name]));
+  return {
+    roleToolGrants: rtGrants.map((g) => ({ ...g, roleName: roleName.get(g.roleId) ?? null })),
+    roleServerGrants: rsGrants.map((g) => ({ ...g, roleName: roleName.get(g.roleId) ?? null })),
+  };
+}
+
+/**
+ * ADR-0310 (owner decision M1) — what every holder of `roleId` receives on `serverId` through the role, before their
+ * personal grants and revocations: the role's tool and server grants (`loadRoleGrants`, the same read the gateway
+ * makes) plus the ADR-0236 bundles granted to the role. No direct grants and no revocations: those belong to a user.
+ */
+export async function loadRoleEntitlements(db: Db, roleId: string, serverId: string): Promise<Entitlements> {
+  const [rg, rb] = await Promise.all([loadRoleGrants(db, [roleId], serverId), loadRoleBundleToolGrants(db, roleId, serverId)]);
+  return {
+    toolGrants: [],
+    serverGrants: [],
+    roleToolGrants: rg.roleToolGrants,
+    roleServerGrants: rg.roleServerGrants,
+    ...(rb.length > 0 ? { bundleToolGrants: rb } : {}),
+    revocations: [],
   };
 }
 

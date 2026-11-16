@@ -43,3 +43,39 @@ CREATE TABLE IF NOT EXISTS "managed_settings_bundle_files" (
   CONSTRAINT "managed_settings_bundle_files_pkey" PRIMARY KEY ("bundle_id", "path"),
   CONSTRAINT "managed_settings_bundle_files_size_check" CHECK (octet_length("body") <= 262144)
 );
+--> statement-breakpoint
+-- Row-level security (#850 review; ADR-0234's admin-only shape). Both tables hold one subject's compiled policy and
+-- are read and written only by the admin-only export routes, so a row is reachable only by an active admin principal
+-- or under the `migration` reason. A plain `regulait_app` connection, or any other system reason, sees and writes
+-- nothing.
+ALTER TABLE "managed_settings_bundles" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "managed_settings_bundles" FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+DROP POLICY IF EXISTS managed_settings_bundles_all ON "managed_settings_bundles";
+--> statement-breakpoint
+CREATE POLICY managed_settings_bundles_all ON "managed_settings_bundles" FOR ALL
+  USING (
+    (SELECT regulait_rls_is_admin())
+    OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['migration'])
+  )
+  WITH CHECK (
+    (SELECT regulait_rls_is_admin())
+    OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['migration'])
+  );
+--> statement-breakpoint
+ALTER TABLE "managed_settings_bundle_files" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "managed_settings_bundle_files" FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+DROP POLICY IF EXISTS managed_settings_bundle_files_all ON "managed_settings_bundle_files";
+--> statement-breakpoint
+CREATE POLICY managed_settings_bundle_files_all ON "managed_settings_bundle_files" FOR ALL
+  USING (
+    (SELECT regulait_rls_is_admin())
+    OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['migration'])
+  )
+  WITH CHECK (
+    (SELECT regulait_rls_is_admin())
+    OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['migration'])
+  );

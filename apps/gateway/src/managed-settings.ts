@@ -33,8 +33,6 @@ import {
   mcpTools,
   or,
   roles,
-  roleServerGrants,
-  roleToolGrants,
   sql,
   users,
   type Db,
@@ -47,8 +45,10 @@ import {
   type EffectiveMcpPolicy,
   type EffectiveMcpServer,
 } from "@regulait/shared";
-import { visibleTools, type Entitlements, type ToolRef } from "@regulait/policy-kernel";
-import { loadEntitlements, loadRoleBundleToolGrants } from "./entitlements.js";
+import { visibleTools, type ToolRef } from "@regulait/policy-kernel";
+import { visibleMcpToolNamesByServer } from "./builder-access.js";
+import { loadRoleEntitlements } from "./entitlements.js";
+import { isReservedToolName } from "./mcp-protocol.js";
 import { admissionHidesTools } from "./mcp-admission.js";
 import { buildTarGz, resolveExportSigningKey } from "./export-bundle.js";
 import { joinPublicUrl, resolvePublicUrl } from "./public-url.js";
@@ -95,42 +95,37 @@ export async function loadEffectiveMcpPolicy(db: Db, subject: ManagedSubject, pu
     .from(mcpServers)
     .where(isNull(mcpServers.disabledAt));
   if (servers.length === 0) return empty;
-  const tools = await db
-    .select({ serverId: mcpTools.serverId, name: mcpTools.name, kind: mcpTools.kind })
-    .from(mcpTools)
-    .where(and(inArray(mcpTools.serverId, servers.map((s) => s.id)), isNull(mcpTools.haltedAt)));
-  const byServer = new Map<string, ToolRef[]>();
-  for (const t of tools) byServer.set(t.serverId, [...(byServer.get(t.serverId) ?? []), { serverId: t.serverId, name: t.name, kind: t.kind }]);
+  const tools = (
+    await db
+      .select({ serverId: mcpTools.serverId, name: mcpTools.name, kind: mcpTools.kind })
+      .from(mcpTools)
+      .where(and(inArray(mcpTools.serverId, servers.map((s) => s.id)), isNull(mcpTools.haltedAt)))
+  )
+    // the reserved `mcp:` names are protocol grants, never tools: `tools/list` drops them (mcp-proxy), so do we
+    .filter((t) => !isReservedToolName(t.name));
+
+  // the same helpers the gateway decides with (#850 review): a user goes through the builder-access loop (admission,
+  // entitlements, kernel visibility); a role through `loadRoleEntitlements` (the gateway's role-grant read plus the
+  // role's ADR-0236 bundles, owner decision M1) and the same admission check and kernel filter
+  let visible: Map<string, Set<string>>;
+  if (subject.kind === "user") {
+    visible = await visibleMcpToolNamesByServer(db, subject.id, tools);
+  } else {
+    visible = new Map();
+    const byServer = new Map<string, ToolRef[]>();
+    for (const t of tools) byServer.set(t.serverId, [...(byServer.get(t.serverId) ?? []), { serverId: t.serverId, name: t.name, kind: t.kind }]);
+    for (const [serverId, refs] of byServer) {
+      if (await admissionHidesTools(db, serverId)) continue;
+      const names = visibleTools(`role:${subject.id}`, serverId, refs, await loadRoleEntitlements(db, subject.id, serverId)).map((r) => r.name);
+      if (names.length > 0) visible.set(serverId, new Set(names));
+    }
+  }
 
   const out: EffectiveMcpServer[] = [];
   for (const s of servers) {
-    const refs = byServer.get(s.id);
-    if (!refs || refs.length === 0) continue;
-    if (await admissionHidesTools(db, s.id)) continue;
-    let visible: ToolRef[];
-    if (subject.kind === "user") {
-      visible = visibleTools(subject.id, s.id, refs, await loadEntitlements(db, subject.id, s.id));
-    } else {
-      // what every holder of the role gets, before their personal grants and revocations: the role's own tool and
-      // server grants plus the ADR-0236 bundles granted to the role (owner decision 2026-11-15, M1: the same set the
-      // gateway already allows a holder through the role)
-      const [rt, rs, rb] = await Promise.all([
-        db.select().from(roleToolGrants).where(and(eq(roleToolGrants.roleId, subject.id), eq(roleToolGrants.serverId, s.id))),
-        db.select().from(roleServerGrants).where(and(eq(roleServerGrants.roleId, subject.id), eq(roleServerGrants.serverId, s.id))),
-        loadRoleBundleToolGrants(db, subject.id, s.id),
-      ]);
-      const ent: Entitlements = {
-        toolGrants: [],
-        serverGrants: [],
-        roleToolGrants: rt.map((g) => ({ ...g, roleName: null })),
-        roleServerGrants: rs.map((g) => ({ ...g, roleName: null })),
-        ...(rb.length > 0 ? { bundleToolGrants: rb } : {}),
-        revocations: [],
-      };
-      visible = visibleTools(`role:${subject.id}`, s.id, refs, ent);
-    }
-    if (visible.length === 0) continue;
-    out.push({ serverId: s.id, name: s.name, gatewayUrl: joinPublicUrl(publicUrl, `/mcp/${s.id}`), tools: visible.map((t) => t.name) });
+    const names = visible.get(s.id);
+    if (!names || names.size === 0) continue;
+    out.push({ serverId: s.id, name: s.name, gatewayUrl: joinPublicUrl(publicUrl, `/mcp/${s.id}`), tools: [...names] });
   }
   return { subject, servers: out };
 }

@@ -95,6 +95,10 @@ function normalised(policy: EffectiveMcpPolicy): EffectiveMcpPolicy {
     if (u.protocol !== "https:" && !(u.protocol === "http:" && (u.hostname === "localhost" || u.hostname === "127.0.0.1"))) {
       throw new ManagedSettingsCompileError(`managed settings: gateway URL for server ${s.serverId} must be https`);
     }
+    // Claude Code and Copilot read `*` in a serverUrl as a wildcard: an entry must name exactly one endpoint (#850 review)
+    if (s.gatewayUrl.includes("*")) {
+      throw new ManagedSettingsCompileError(`managed settings: gateway URL for server ${s.serverId} must not contain '*'`);
+    }
     if (u.username || u.password || u.search || u.hash) {
       throw new ManagedSettingsCompileError(`managed settings: gateway URL for server ${s.serverId} must not carry credentials, a query or a fragment`);
     }
