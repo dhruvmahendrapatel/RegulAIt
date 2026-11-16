@@ -132,8 +132,10 @@ Every rule here runs in the gateway on validate and again on publish; the UI onl
   bundle does not grow. Palette (the stage types), canvas, property sheet, an Outline view that is the keyboard,
   screen-reader and phone path, loading skeletons, and the shared kit throughout.
 - Bundle, measured on 2026-11-16 (gzip):
-  - The editor's own chunks (`PipelineBuilderPage`, `PipelineCanvas`) are 11.4 kB, under a new `lazy: PipelineBuilderPage`
-    ceiling of 13 kB.
+  - The editor's own chunks (`PipelineBuilderPage`, `PipelineCanvas`) are 11.4 kB after slice 2 and 13.5 kB with slice
+    3's publish and history, under a new `lazy: PipelineBuilderPage` ceiling of 14 kB. Lazy-loading publish and history
+    separately was tried and rejected: the bundler then moved shared styles into the entry (+0.6 kB CSS) and the total
+    grew by 1.8 kB.
   - The graph libraries the two canvases now share are split out by the bundler as `runGraphLayout-*` (70.5 kB), under
     a new `lazy: graph libraries (shared)` ceiling of 74 kB. The unchanged `lazy: RunGraphCanvas` entry now measures 1.4 kB.
   - The entry grows by 0.08 kB (the route).

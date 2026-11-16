@@ -43,7 +43,7 @@
       "dist/assets/PipelineCanvas-*.js"
     ],
     "gzip": true,
-    "limit": "13 kB"
+    "limit": "14 kB"
   },
   {
     "name": "all JS",
