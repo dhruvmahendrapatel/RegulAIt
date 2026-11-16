@@ -557,6 +557,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/model-signing-keys": "internal",
   "POST /v1/model-signing-keys/:keyId/revoke": "internal",
   "POST /v1/model-artifacts/:artifactId/signature": "internal",
+  "POST /v1/model-artifacts/:artifactId/lineage": "internal",
+  "GET /v1/model-artifacts/:artifactId/lineage": "internal",
   "PUT /v1/model-artifacts/:artifactId/supply-chain-relaxation": "internal",
   "DELETE /v1/model-artifacts/:artifactId/supply-chain-relaxation": "internal",
   "PUT /v1/servers/:serverId/owner": "internal",
@@ -1258,6 +1260,15 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/workflows/templates": "internal",
   "POST /v1/workflows/templates": "internal",
   "POST /v1/workflows/templates/:templateId/retire": "internal",
+  "GET /v1/workflows/builder/templates": "internal",
+  "POST /v1/workflows/builder/templates/:templateId/draft": "internal",
+  "GET /v1/workflows/builder/templates/:templateId/draft": "internal",
+  "PUT /v1/workflows/builder/templates/:templateId/draft": "internal",
+  "DELETE /v1/workflows/builder/templates/:templateId/draft": "internal",
+  "POST /v1/workflows/builder/validate": "internal",
+  "POST /v1/workflows/builder/templates/:templateId/publish": "internal",
+  "GET /v1/workflows/builder/templates/:templateId/versions": "internal",
+  "GET /v1/workflows/builder/templates/:templateId/versions/:version": "internal",
 
   // ===== ADR-0180 (D3) — continuous assurance. Internal: admin console and
   // governance surfaces whose shapes are still moving. Append-only per owner.
@@ -1977,6 +1988,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/model-signing-keys": "engines",
   "POST /v1/model-signing-keys/:keyId/revoke": "engines",
   "POST /v1/model-artifacts/:artifactId/signature": "engines",
+  "POST /v1/model-artifacts/:artifactId/lineage": "engines",
+  "GET /v1/model-artifacts/:artifactId/lineage": "engines",
   "PUT /v1/model-artifacts/:artifactId/supply-chain-relaxation": "engines",
   "DELETE /v1/model-artifacts/:artifactId/supply-chain-relaxation": "engines",
   "PUT /v1/servers/:serverId/owner": "servers",
@@ -2568,6 +2581,15 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/workflows/templates": "workflows",
   "POST /v1/workflows/templates": "workflows",
   "POST /v1/workflows/templates/:templateId/retire": "workflows",
+  "GET /v1/workflows/builder/templates": "workflows",
+  "POST /v1/workflows/builder/templates/:templateId/draft": "workflows",
+  "GET /v1/workflows/builder/templates/:templateId/draft": "workflows",
+  "PUT /v1/workflows/builder/templates/:templateId/draft": "workflows",
+  "DELETE /v1/workflows/builder/templates/:templateId/draft": "workflows",
+  "POST /v1/workflows/builder/validate": "workflows",
+  "POST /v1/workflows/builder/templates/:templateId/publish": "workflows",
+  "GET /v1/workflows/builder/templates/:templateId/versions": "workflows",
+  "GET /v1/workflows/builder/templates/:templateId/versions/:version": "workflows",
 
   // ===== ADR-0180 (D3) — continuous assurance. Append-only per owner.
   // --- P0

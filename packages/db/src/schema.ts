@@ -16749,6 +16749,48 @@ export const resourceRateReservations = pgTable(
   ],
 );
 
+// ---------------------------------------------------------------------------
+// Lane L7 (P14 + P16 lineage; ADR-0216 / ADR-0217 amendments, migration model_artifact_lineage)
+// ---------------------------------------------------------------------------
+
+/** how a model file was derived from its parent file(s); `merged` takes two or more parents, the rest exactly one */
+export const MODEL_LINEAGE_RELATIONS = ["repackaged", "converted", "fine_tuned", "merged", "quantized"] as const;
+export type ModelLineageRelation = (typeof MODEL_LINEAGE_RELATIONS)[number];
+
+/**
+ * One parent edge of a derived model file: the child was made from the parent by `relation`. A JOIN TABLE (a merge
+ * has several parents), recorded once per child and never edited: a second derivation for the same child is refused
+ * in the handler, and an edit would rewrite provenance. Rows go with either artifact when it is deleted; the audit row
+ * written with them (`model-artifact-lineage-recorded`) keeps the record, with both sha256s.
+ */
+export const modelArtifactLineage = pgTable(
+  "model_artifact_lineage",
+  {
+    childArtifactId: uuid("child_artifact_id")
+      .notNull()
+      .references(() => modelArtifacts.id, { onDelete: "cascade" }),
+    parentArtifactId: uuid("parent_artifact_id")
+      .notNull()
+      .references(() => modelArtifacts.id, { onDelete: "cascade" }),
+    relation: text("relation", { enum: MODEL_LINEAGE_RELATIONS }).notNull(),
+    /** free text the person recorded, e.g. "GPTQ 4-bit" or "TIES merge, density 0.5" (bounded) */
+    method: text("method"),
+    recordedByUserId: uuid("recorded_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.childArtifactId, t.parentArtifactId] }),
+    check("model_artifact_lineage_no_self_check", sql`${t.childArtifactId} <> ${t.parentArtifactId}`),
+    check(
+      "model_artifact_lineage_relation_check",
+      sql`${t.relation} IN ('repackaged', 'converted', 'fine_tuned', 'merged', 'quantized')`,
+    ),
+    check("model_artifact_lineage_method_check", sql`${t.method} IS NULL OR length(${t.method}) BETWEEN 1 AND 200`),
+    index("model_artifact_lineage_parent_idx").on(t.parentArtifactId),
+  ],
+);
+export type ModelArtifactLineageRow = typeof modelArtifactLineage.$inferSelect;
+
 // ===== ADR-0332 (lane E14): endpoint AI add-on inventory (pending migration endpoint_addon_inventory) =====
 //
 // The inventory of AI add-ons on endpoints (coding agent, MCP server, skill, plugin) is read, not projected: MCP
@@ -16842,3 +16884,67 @@ export const endpointAddonSightingSecretTypes = pgTable(
   ],
 );
 // ===== end ADR-0332 =====
+
+// ===== ADR-0341 — the visual pipeline builder: drafts and versions of workflow templates =====
+/**
+ * One open draft per template, edited on the builder's canvas. `definition` is a schema-validated configuration
+ * document (ADR-0200 exception: it is validated by `workflowDefinitionSchema` on every save, may be invalid while
+ * someone is mid-edit, and is never executed). `base_version_id` is the version the draft was opened from; a publish is
+ * refused when the template has been published since. `revision` is the optimistic-concurrency counter every save
+ * names. Deployment-wide like `workflow_templates` (no tenant column, so no RLS policy); the routes are admin-only.
+ */
+export const workflowTemplateDrafts = pgTable(
+  "workflow_template_drafts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    templateId: uuid("template_id")
+      .notNull()
+      .references(() => workflowTemplates.id, { onDelete: "cascade" }),
+    definition: jsonb("definition").notNull(),
+    baseVersionId: uuid("base_version_id")
+      .notNull()
+      .references((): AnyPgColumn => workflowTemplateVersions.id, { onDelete: "cascade" }),
+    revision: integer("revision").notNull().default(1),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("workflow_template_drafts_template_uq").on(t.templateId),
+    index("workflow_template_drafts_base_version_idx").on(t.baseVersionId),
+    check("workflow_template_drafts_revision_check", sql`${t.revision} >= 1`),
+    check("workflow_template_drafts_definition_check", sql`jsonb_typeof(${t.definition}) = 'object'`),
+  ],
+);
+export type WorkflowTemplateDraftRow = typeof workflowTemplateDrafts.$inferSelect;
+
+/**
+ * Every published version of a template, append-only (`regulait_refuse_mutation`, no TRUNCATE). `definition` is a
+ * point-in-time snapshot (ADR-0200 exception): the bytes that went live, which `content_hash` (SHA-256 of ADR-0060's
+ * canonical JSON) identifies. `origin` `baseline` is the live definition captured the first time a template is opened
+ * in the builder; `builder` is a publish.
+ */
+export const workflowTemplateVersions = pgTable(
+  "workflow_template_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    templateId: uuid("template_id")
+      .notNull()
+      .references(() => workflowTemplates.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    definition: jsonb("definition").notNull(),
+    contentHash: text("content_hash").notNull(),
+    origin: text("origin", { enum: ["baseline", "builder"] }).notNull(),
+    publishedBy: uuid("published_by").references(() => users.id, { onDelete: "set null" }),
+    publishedAt: timestamp("published_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("workflow_template_versions_template_version_uq").on(t.templateId, t.version),
+    check("workflow_template_versions_version_check", sql`${t.version} >= 1`),
+    check("workflow_template_versions_hash_check", sql`${t.contentHash} ~ '^[0-9a-f]{64}$'`),
+    check("workflow_template_versions_origin_check", sql`${t.origin} IN ('baseline', 'builder')`),
+  ],
+);
+export type WorkflowTemplateVersionRow = typeof workflowTemplateVersions.$inferSelect;
+// ===== end ADR-0341 =====
