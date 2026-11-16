@@ -31,7 +31,8 @@ const fixtures = (shared as unknown as { DEMO_INTAKE_FIXTURES?: DemoIntakeFixtur
 
 const db = createDb(connectionString);
 await runMigrations(db, path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations"));
-const app = buildApp(db, { bootstrapToken: BOOT, dataKey: process.env.REGULAIT_DATA_KEY });
+// in-process operator tool holding DATABASE_URL: the token is not a network credential here (ADR-0167 amendment, S-02)
+const app = buildApp(db, { bootstrapToken: BOOT, bootstrapAfterAdmin: true, dataKey: process.env.REGULAIT_DATA_KEY });
 await app.ready();
 
 const checks = await runDemoCheck(app, { bootstrapToken: BOOT, fixtures, live });

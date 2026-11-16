@@ -22,6 +22,7 @@
  * Global state (M-068): the engine row, runners, org settings and the placement affinity seam are restored in
  * afterAll; executor and identity rows are scoped by this run's ids (they cannot be deleted by design).
  */
+import { hashToken } from "./token-hash.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -304,7 +305,7 @@ beforeAll(async () => {
   const a = await makeUser(`i5-admin-${RUN}@example.com`, true);
   const token = "rgls_" + randomBytes(32).toString("hex");
   await db.insert(authSessions).values({
-    tokenHash: createHash("sha256").update(token).digest("hex"),
+    tokenHash: hashToken(token),
     userId: a.id,
     origin: "password",
     expiresAt: new Date(Date.now() + 3_600_000),
