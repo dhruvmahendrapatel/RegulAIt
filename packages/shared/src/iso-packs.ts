@@ -32,32 +32,11 @@
  * to append the packs to `DEFAULT_COMPLIANCE_PACKS`.
  */
 import type { CreateCompliancePackInput } from "./compliance-packs.js";
+// #830 review: the shared control builders (one copy, `pack-builders.ts`)
+import { attestedControl as att, evidencedControl as ev } from "./pack-builders.js";
 import type { TrustDimension } from "./risks.js";
 
 type Control = CreateCompliancePackInput["controls"][number];
-type Evidence = Pick<Control, "coverage" | "collector"> & Partial<Pick<Control, "collectorParams">> & { note: string };
-
-const ev = (controlRef: string, title: string, e: Evidence): Control => ({
-  controlRef,
-  title,
-  coverage: e.coverage,
-  collector: e.collector,
-  collectorParams: e.collectorParams ?? {},
-  minEvidenceCount: 1,
-  attestationRequired: false,
-  ownerNote: e.note,
-});
-
-const att = (controlRef: string, title: string, coverage: Control["coverage"], ownerNote: string): Control => ({
-  controlRef,
-  title,
-  coverage,
-  collector: "none",
-  collectorParams: {},
-  minEvidenceCount: 1,
-  attestationRequired: true,
-  ownerNote,
-});
 
 /** ISO-wide wording for organisational clauses the platform does not touch */
 const ORG = (what: string) => `Organisational: the platform does not address this. Attest ${what}.`;
