@@ -24,6 +24,7 @@
  * Global state (M-068): org settings this file changes are put back, the issuer keys it activated are retired, and
  * the admin's passkey, sessions and step-up grants are removed (B4S-06) in afterAll.
  */
+import { hashToken } from "./token-hash.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import http from "node:http";
 import os from "node:os";
@@ -277,7 +278,7 @@ beforeAll(async () => {
   const [sess] = await db
     .insert(authSessions)
     .values({
-      tokenHash: createHash("sha256").update(token).digest("hex"),
+      tokenHash: hashToken(token),
       userId: adminId,
       origin: "password",
       expiresAt: new Date(Date.now() + 3_600_000),
