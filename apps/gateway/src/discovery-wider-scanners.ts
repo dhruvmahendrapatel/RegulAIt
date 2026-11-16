@@ -52,7 +52,7 @@ export const WIDER_MAX_ITEMS = 5_000;
 /** at most this much of one JSON body is parsed */
 export const WIDER_MAX_BODY_BYTES = 8 * 1024 * 1024;
 
-const GRAPH_ORIGIN = "https://graph.microsoft.com";
+export const GRAPH_ORIGIN = "https://graph.microsoft.com";
 const GRAPH_SCOPE = "https://graph.microsoft.com/.default";
 
 // ---------------------------------------------------------------------------
@@ -100,7 +100,7 @@ export function atPath(value: unknown, path: string): unknown {
   return cur;
 }
 
-const str = (v: unknown, max = 256): string | null => (typeof v === "string" && v.trim() ? v.trim().slice(0, max) : null);
+export const str = (v: unknown, max = 256): string | null => (typeof v === "string" && v.trim() ? v.trim().slice(0, max) : null);
 
 /** the host of an http(s) URL or bare domain, lower-case; null when it is not one */
 export function hostOf(raw: string | null): string | null {
@@ -126,7 +126,7 @@ function tokenHeaders(ctx: ScanContext, kind: string): Record<string, string> {
   return header && header.toLowerCase() !== "authorization" ? { [header]: c.secret } : { authorization: `Bearer ${c.secret}` };
 }
 
-class ReadFailure extends Error {
+export class ReadFailure extends Error {
   constructor(
     readonly status: DiscoveryReadStatus,
     message: string,
@@ -136,7 +136,7 @@ class ReadFailure extends Error {
 }
 
 /** GET a JSON body, bounded; an HTTP or transport failure becomes a `ReadFailure` with a read status */
-async function getJson(fetchImpl: typeof fetch, url: string, headers: Record<string, string>, signal: AbortSignal): Promise<unknown> {
+export async function getJson(fetchImpl: typeof fetch, url: string, headers: Record<string, string>, signal: AbortSignal): Promise<unknown> {
   let res: Response;
   try {
     res = await fetchImpl(url, { method: "GET", headers: { accept: "application/json", ...headers }, redirect: "manual", signal });
@@ -169,11 +169,11 @@ async function getJson(fetchImpl: typeof fetch, url: string, headers: Record<str
 }
 
 /** the include list, lower-cased; null for an organisation-level scope */
-const includeSet = (ctx: ScanContext): Set<string> | null =>
+export const includeSet = (ctx: ScanContext): Set<string> | null =>
   ctx.source.scope.orgLevel ? null : new Set(ctx.source.scope.include.map((x) => x.trim().toLowerCase()));
 
 /** finish a run: read outcomes (problems first), and a failure when nothing could be read at all */
-function finish(observations: ScanObservation[], outcomes: DiscoveryReadOutcome[], writeScope: ScanResult["credentialWriteScope"]): ScanResult {
+export function finish(observations: ScanObservation[], outcomes: DiscoveryReadOutcome[], writeScope: ScanResult["credentialWriteScope"]): ScanResult {
   const sorted = [...outcomes.filter((o) => o.status !== "read"), ...outcomes.filter((o) => o.status === "read")].slice(0, DISCOVERY_READ_OUTCOMES_MAX);
   if (!outcomes.some((o) => o.status === "read")) {
     throw new WiderSourceConfigError(`nothing could be read: ${sorted.map((o) => `${o.read} ${o.status}${o.detail ? ` (${o.detail})` : ""}`).join("; ").slice(0, 600)}`);
@@ -182,10 +182,10 @@ function finish(observations: ScanObservation[], outcomes: DiscoveryReadOutcome[
 }
 
 /** returned by a page callback that stopped at `WIDER_MAX_ITEMS`, so the outcome says the listing was cut short */
-const ITEM_CAP = Symbol("item cap");
+export const ITEM_CAP = Symbol("item cap");
 
 /** run one paged listing, recording its outcome; `page` returns the next URL, null at the end, or ITEM_CAP */
-async function readListing(
+export async function readListing(
   ctx: ScanContext,
   read: string,
   first: string,
@@ -222,7 +222,7 @@ async function readListing(
 }
 
 /** a next-page URL the service returned, kept only when it stays on the first URL's origin */
-function sameOriginNext(base: string, next: unknown): string | null {
+export function sameOriginNext(base: string, next: unknown): string | null {
   const s = str(next, 4096);
   if (!s) return null;
   try {
@@ -297,7 +297,7 @@ async function runSaasInventory(ctx: ScanContext): Promise<ScanResult> {
 // idp_entra
 // ---------------------------------------------------------------------------
 
-const GUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+export const GUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 function entraTargetProblem(target: Readonly<Record<string, string>>, scope: Readonly<{ orgLevel: boolean; include: readonly string[] }>): string | null {
   if (!target.tenantId || !GUID.test(target.tenantId)) return "'tenantId' must be the Entra tenant's id (a GUID)";
@@ -325,27 +325,28 @@ export function entraWriteScope(accessToken: string): { scope: "read_only" | "wr
   return { scope: roles.every((r) => /\.Read(?:Basic)?\.All$/.test(r)) ? "read_only" : "write", roles };
 }
 
-interface EntraApp {
-  appId: string;
-  displayName: string | null;
-  host: string | null;
-}
-
-async function runEntra(ctx: ScanContext): Promise<ScanResult> {
-  const problem = entraTargetProblem(ctx.source.target, ctx.source.scope);
-  if (problem) throw new WiderSourceConfigError(`idp_entra: ${problem}`);
+/**
+ * An access token for Microsoft Graph from the source's Entra credential (federated or a client secret), registered as
+ * a secret before it is used. A token whose app holds more than read permissions is refused before anything is read
+ * (ADR-0195 decision 7): the caller returns `refused` as its result. Shared by `idp_entra` and ADR-0337's
+ * `entitlement_m365`.
+ */
+export async function entraGraphToken(
+  ctx: ScanContext,
+  kind: string,
+): Promise<{ accessToken: string; write: ReturnType<typeof entraWriteScope> } | { refused: ScanResult }> {
   const c = ctx.credential;
-  if (!c) throw new WiderSourceConfigError("idp_entra: a credential is required");
+  if (!c) throw new WiderSourceConfigError(`${kind}: a credential is required`);
   const tenantId = c.publicConfig.tenantId;
   const clientId = c.publicConfig.clientId;
-  if (!tenantId || !clientId) throw new WiderSourceConfigError("idp_entra: the credential names tenantId and clientId");
-  if (tenantId.toLowerCase() !== ctx.source.target.tenantId!.toLowerCase()) throw new WiderSourceConfigError("idp_entra: the credential's tenant is not the source's tenant");
+  if (!tenantId || !clientId) throw new WiderSourceConfigError(`${kind}: the credential names tenantId and clientId`);
+  if (tenantId.toLowerCase() !== ctx.source.target.tenantId!.toLowerCase()) throw new WiderSourceConfigError(`${kind}: the credential's tenant is not the source's tenant`);
   let credential;
   if (c.mode === "static") {
-    if (!c.secret) throw new WiderSourceConfigError("idp_entra: the static credential has no client secret");
+    if (!c.secret) throw new WiderSourceConfigError(`${kind}: the static credential has no client secret`);
     credential = { mode: "azure_client_secret" as const, tenantId, clientId, clientSecret: c.secret };
   } else {
-    if (!ctx.federation) throw new WiderSourceConfigError("idp_entra: federated credentials need RegulAIt's federation issuer; an admin turns federation on under Discovery sources");
+    if (!ctx.federation) throw new WiderSourceConfigError(`${kind}: federated credentials need RegulAIt's federation issuer; an admin turns federation on under Discovery sources`);
     credential = { mode: "azure_federated" as const, tenantId, clientId };
   }
   const onSecret = dedupedSecretSink(ctx.registerSecret);
@@ -365,14 +366,29 @@ async function runEntra(ctx: ScanContext): Promise<ScanResult> {
   } catch (err) {
     // only the AADSTS code is kept from the error text (as discovery-git-federation.ts does)
     const code = /AADSTS[0-9]{5,7}/.exec(errMessage(err))?.[0];
-    throw new WiderSourceConfigError(`idp_entra: the Entra token request failed${code ? ` (${code})` : ""}`);
+    throw new WiderSourceConfigError(`${kind}: the Entra token request failed${code ? ` (${code})` : ""}`);
   }
   onSecret(accessToken);
   const write = entraWriteScope(accessToken);
   if (write.scope === "write") {
     // decision 7: a credential that may write is refused before anything is read
-    return { observations: [], credentialWriteScope: "write", readOutcomes: [{ read: "credential write scope", status: "denied", detail: `the app holds more than read permissions: ${write.roles.join(", ").slice(0, 300)}` }] };
+    return { refused: { observations: [], credentialWriteScope: "write", readOutcomes: [{ read: "credential write scope", status: "denied", detail: `the app holds more than read permissions: ${write.roles.join(", ").slice(0, 300)}` }] } };
   }
+  return { accessToken, write };
+}
+
+interface EntraApp {
+  appId: string;
+  displayName: string | null;
+  host: string | null;
+}
+
+async function runEntra(ctx: ScanContext): Promise<ScanResult> {
+  const problem = entraTargetProblem(ctx.source.target, ctx.source.scope);
+  if (problem) throw new WiderSourceConfigError(`idp_entra: ${problem}`);
+  const token = await entraGraphToken(ctx, "idp_entra");
+  if ("refused" in token) return token.refused;
+  const { accessToken, write } = token;
   const fetchImpl = scannerFetch(ctx);
   const headers = { authorization: `Bearer ${accessToken}` };
   const outcomes: DiscoveryReadOutcome[] = [];

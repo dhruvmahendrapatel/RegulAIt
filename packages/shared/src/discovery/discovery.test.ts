@@ -37,10 +37,11 @@ describe("ADR-0195 SD0 discovery vocabulary", () => {
     expect(DISCOVERY_SOURCE_KINDS.filter((k) => DISCOVERY_KIND_SPECS[k].uploadFed)).toEqual(["endpoint_osquery", "endpoint_inventory", "endpoint_agent"]);
   });
 
-  it("every source kind has a spec whose evidence and subject kinds are non-empty", () => {
+  it("every source kind has a spec whose evidence and subject kinds are non-empty, except an entitlement reader (ADR-0337), which returns a graph and no observations", () => {
     for (const k of DISCOVERY_SOURCE_KINDS) {
-      expect(DISCOVERY_KIND_SPECS[k].evidenceKinds.length).toBeGreaterThan(0);
-      expect(DISCOVERY_KIND_SPECS[k].subjectKinds.length).toBeGreaterThan(0);
+      const spec = DISCOVERY_KIND_SPECS[k];
+      expect(spec.evidenceKinds.length === 0, k).toBe(spec.entitlements === true);
+      expect(spec.subjectKinds.length === 0, k).toBe(spec.entitlements === true);
     }
   });
 

@@ -53,6 +53,10 @@ import {
   runWithRlsSystem,
 } from "@regulait/db";
 import {
+  checkSaasEntitlementBatch,
+  entitlementPlatformOf,
+  SaasEntitlementBatchRefused,
+  type SaasEntitlementBatch,
   classifyObservation,
   correlateObservations,
   DISCOVERY_KIND_SPECS,
@@ -96,6 +100,7 @@ import { awsPrincipalRoleArn, federationTokenMinter } from "./federation-signing
 import type { SchedulerJobDefinition } from "./scheduler.js";
 import { errMessage } from "./err-serializer.js";
 import { runEndpointMcpRetention } from "./endpoint-mcp-config.js";
+import { persistEntitlementBatch } from "./saas-entitlements.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -763,8 +768,32 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
     if (err instanceof ObservationRefused) return fail("observation_refused", err.message);
     throw err;
   }
+  // ADR-0337: an entitlement reader's graph is checked here and stored with the run's completion, in its transaction
+  const platform = entitlementPlatformOf(source.kind);
+  let entitlements: SaasEntitlementBatch | null = null;
+  if (result.entitlements !== undefined && !platform) return fail("entitlements_refused", `a ${source.kind} source may not return an entitlement graph`);
+  if (platform) {
+    if (result.entitlements === undefined) return fail("entitlements_missing", "the entitlement reader returned no entitlement graph");
+    try {
+      entitlements = checkSaasEntitlementBatch(result.entitlements, platform);
+    } catch (err) {
+      if (err instanceof SaasEntitlementBatchRefused) return fail("entitlements_refused", err.message);
+      throw err;
+    }
+  }
   const digest = rawSeen ? hash.digest("hex") : createHash("sha256").update(JSON.stringify(observations)).digest("hex");
-  return applyDiscoveryRunObservations(db, run, owner, source, observations, digest, classifyCatalogue, readOutcomes);
+  const batch = entitlements;
+  return applyDiscoveryRunObservations(
+    db,
+    run,
+    owner,
+    source,
+    observations,
+    digest,
+    classifyCatalogue,
+    readOutcomes,
+    batch ? async (t) => void (await persistEntitlementBatch(t, { runId: run.id, sourceId: source.id, sourceName: source.name }, batch)) : undefined,
+  );
 }
 
 /**

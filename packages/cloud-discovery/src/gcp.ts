@@ -153,6 +153,21 @@ export function gcpAuthClient(deps: GcpScannerDeps): AuthClient {
   return client;
 }
 
+/** ADR-0337: the only scope a Google Workspace entitlement read asks for (the Admin SDK Reports API, read-only) */
+export const GOOGLE_WORKSPACE_REPORTS_READONLY_SCOPE = "https://www.googleapis.com/auth/admin.reports.audit.readonly";
+
+/**
+ * ADR-0337: a domain-wide delegated client for a Google Workspace read. The service-account key signs a JWT whose
+ * subject is the admin it acts for, exchanged at Google's token endpoint for an access token carrying ONLY `scopes`.
+ * The exchange goes through the credential fetch and every API call through the scan fetch (the `gcpTransportFetch`
+ * routing), so nothing leaves around the egress guard.
+ */
+export function workspaceDelegatedClient(deps: Pick<GcpScannerDeps, "fetch" | "credentialFetch" | "onSecret"> & { keyJson: string; subject: string; scopes: readonly string[] }): JWT {
+  if (deps.scopes.length === 0) throw new Error("cloud-discovery: a delegated Workspace client needs at least one scope");
+  const key = parseServiceAccountKey(deps.keyJson);
+  return new JWT({ email: key.clientEmail, key: key.privateKey, subject: deps.subject, scopes: [...deps.scopes], transporter: guardedGaxios(gcpTransportFetch(deps)), universeDomain: GCP_UNIVERSE_DOMAIN });
+}
+
 interface LogEntry {
   logName?: string;
   timestamp?: string;

@@ -8105,7 +8105,7 @@ export const discoverySources = pgTable(
   (t) => [
     check(
       "discovery_sources_kind_check",
-      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow')`,
+      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow', 'entitlement_m365', 'entitlement_google_workspace', 'entitlement_salesforce', 'entitlement_slack')`,
     ),
     check("discovery_sources_name_check", sql`char_length(${t.name}) BETWEEN 1 AND 120`),
     check("discovery_sources_target_check", sql`jsonb_typeof(${t.target}) = 'object'`),
@@ -8190,7 +8190,7 @@ export const discoveryRuns = pgTable(
     check("discovery_runs_status_check", sql`${t.status} IN ('queued', 'running', 'succeeded', 'failed')`),
     check(
       "discovery_runs_kind_check",
-      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow')`,
+      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow', 'entitlement_m365', 'entitlement_google_workspace', 'entitlement_salesforce', 'entitlement_slack')`,
     ),
     check("discovery_runs_attempt_check", sql`${t.attempt} BETWEEN 0 AND 3`),
     check("discovery_runs_gaps_check", sql`jsonb_typeof(${t.catalogueGaps}) = 'array' AND jsonb_array_length(${t.catalogueGaps}) <= 50`),
@@ -16823,3 +16823,114 @@ export const endpointAddonSightingSecretTypes = pgTable(
   ],
 );
 // ===== end ADR-0332 =====
+
+// ===== ADR-0337 (lane E18): the SaaS entitlement graph =====
+// What an entitlement read (an ADR-0195 discovery source of an `entitlement_*` kind) returns, in third normal form:
+// an app per source, a scope dictionary, app x scope grants and grant x pseudonymised-user principals. The platform is
+// the source's kind (not copied onto the app); a scope's access class is computed from its name by the frozen
+// classifier in `@regulait/shared` (not stored). Row-level security: admins and the `system_task` reason only (pending
+// migration `saas_entitlement_graph`).
+
+export const SAAS_ENTITLEMENT_APP_KINDS = ["service_principal", "oauth_client", "connected_app", "slack_app"] as const;
+export const SAAS_ENTITLEMENT_PLATFORM_VALUES = ["m365", "google_workspace", "salesforce", "slack"] as const;
+export const SAAS_ENTITLEMENT_GRANT_TYPES = ["delegated", "application"] as const;
+export const SAAS_ENTITLEMENT_CONSENTS = ["tenant", "user"] as const;
+
+/** one app holding grants in the tenant one discovery source reads (deleted with the source) */
+export const saasEntitlementApps = pgTable(
+  "saas_entitlement_apps",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => discoverySources.id, { onDelete: "cascade" }),
+    externalId: text("external_id").notNull(),
+    appKind: text("app_kind", { enum: SAAS_ENTITLEMENT_APP_KINDS }).notNull(),
+    displayName: text("display_name"),
+    publisher: text("publisher"),
+    publisherVerified: boolean("publisher_verified"),
+    /** the RegulAIt agent registration this vendor-side app is, when an admin linked it */
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+    lastSeenRunId: uuid("last_seen_run_id").references(() => discoveryRuns.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    unique("saas_entitlement_apps_uq").on(t.sourceId, t.externalId),
+    index("saas_entitlement_apps_agent_idx").on(t.agentId).where(sql`${t.agentId} IS NOT NULL`),
+    check("saas_entitlement_apps_kind_check", sql`${t.appKind} IN ('service_principal', 'oauth_client', 'connected_app', 'slack_app')`),
+    check("saas_entitlement_apps_external_id_check", sql`length(${t.externalId}) BETWEEN 1 AND 255`),
+    check("saas_entitlement_apps_display_name_check", sql`${t.displayName} IS NULL OR length(${t.displayName}) BETWEEN 1 AND 200`),
+    check("saas_entitlement_apps_publisher_check", sql`${t.publisher} IS NULL OR length(${t.publisher}) BETWEEN 1 AND 200`),
+    check("saas_entitlement_apps_seen_check", sql`${t.firstSeenAt} <= ${t.lastSeenAt}`),
+  ],
+);
+export type SaasEntitlementAppRow = typeof saasEntitlementApps.$inferSelect;
+
+/** the scope dictionary: one row per platform, resource ('' where scope names are global) and scope name */
+export const saasEntitlementScopes = pgTable(
+  "saas_entitlement_scopes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    platform: text("platform", { enum: SAAS_ENTITLEMENT_PLATFORM_VALUES }).notNull(),
+    resource: text("resource").notNull().default(""),
+    name: text("name").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("saas_entitlement_scopes_uq").on(t.platform, t.resource, t.name),
+    check("saas_entitlement_scopes_platform_check", sql`${t.platform} IN ('m365', 'google_workspace', 'salesforce', 'slack')`),
+    check("saas_entitlement_scopes_resource_check", sql`length(${t.resource}) <= 255`),
+    check("saas_entitlement_scopes_name_check", sql`length(${t.name}) BETWEEN 1 AND 512`),
+  ],
+);
+export type SaasEntitlementScopeRow = typeof saasEntitlementScopes.$inferSelect;
+
+/** app x scope x grant type: one scope one app holds one way, with how broadly it was consented */
+export const saasEntitlementGrants = pgTable(
+  "saas_entitlement_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    appId: uuid("app_id")
+      .notNull()
+      .references(() => saasEntitlementApps.id, { onDelete: "cascade" }),
+    scopeId: uuid("scope_id")
+      .notNull()
+      .references(() => saasEntitlementScopes.id, { onDelete: "restrict" }),
+    grantType: text("grant_type", { enum: SAAS_ENTITLEMENT_GRANT_TYPES }).notNull(),
+    consent: text("consent", { enum: SAAS_ENTITLEMENT_CONSENTS }).notNull(),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+    lastSeenRunId: uuid("last_seen_run_id").references(() => discoveryRuns.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    unique("saas_entitlement_grants_uq").on(t.appId, t.scopeId, t.grantType),
+    index("saas_entitlement_grants_scope_idx").on(t.scopeId),
+    check("saas_entitlement_grants_type_check", sql`${t.grantType} IN ('delegated', 'application')`),
+    check("saas_entitlement_grants_consent_check", sql`${t.consent} IN ('tenant', 'user')`),
+    check("saas_entitlement_grants_seen_check", sql`${t.firstSeenAt} <= ${t.lastSeenAt}`),
+  ],
+);
+export type SaasEntitlementGrantRow = typeof saasEntitlementGrants.$inferSelect;
+
+/** grant x pseudonymised user: who consented to a user-consent grant (only ever a pseudonym, ADR-0195 decision 20) */
+export const saasEntitlementGrantPrincipals = pgTable(
+  "saas_entitlement_grant_principals",
+  {
+    grantId: uuid("grant_id")
+      .notNull()
+      .references(() => saasEntitlementGrants.id, { onDelete: "cascade" }),
+    pseudonymId: uuid("pseudonym_id")
+      .notNull()
+      .references(() => discoveryPseudonyms.id, { onDelete: "cascade" }),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    primaryKey({ name: "saas_entitlement_grant_principals_pk", columns: [t.grantId, t.pseudonymId] }),
+    index("saas_entitlement_grant_principals_pseudonym_idx").on(t.pseudonymId),
+    check("saas_entitlement_grant_principals_seen_check", sql`${t.firstSeenAt} <= ${t.lastSeenAt}`),
+  ],
+);
+export type SaasEntitlementGrantPrincipalRow = typeof saasEntitlementGrantPrincipals.$inferSelect;
+// ===== end ADR-0337 =====
