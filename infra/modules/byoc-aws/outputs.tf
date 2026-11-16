@@ -41,7 +41,7 @@ output "db_master_secret_arn" {
 }
 
 output "kms_key_arn" {
-  value = aws_kms_key.data.arn
+  value = module.kms.key_arn
 }
 
 output "audit_bucket" {
@@ -53,16 +53,16 @@ output "audit_object_lock_mode" {
 }
 
 output "gateway_role_arn" {
-  value = aws_iam_role.gateway.arn
+  value = module.gateway_pod_identity.iam_role_arn
 }
 
 output "ecr_repository_urls" {
-  value = { for k, r in aws_ecr_repository.images : k => r.repository_url }
+  value = { for k, m in module.ecr : k => m.repository_url }
 }
 
 output "ecr_public_cache_prefix" {
   description = "Pull a public.ecr.aws image as <registry>/<this>/<path>, e.g. .../docker/library/postgres:16."
-  value       = var.ecr_pull_through_ecr_public ? "${local.account}.dkr.ecr.${local.region}.amazonaws.com/${aws_ecr_pull_through_cache_rule.ecr_public[0].ecr_repository_prefix}" : null
+  value       = var.ecr_pull_through_ecr_public ? "${local.account}.dkr.ecr.${local.region}.amazonaws.com/${var.name_prefix}-ecr-public" : null
 }
 
 output "egress" {
@@ -89,7 +89,7 @@ output "storage_class_manifest" {
     parameters = merge({
       type      = "gp3"
       encrypted = "true"
-      kmsKeyId  = aws_kms_key.data.arn
+      kmsKeyId  = module.kms.key_arn
     }, { for i, k in sort(keys(var.tags)) : "tagSpecification_${i + 1}" => "${k}=${var.tags[k]}" })
   })
 }
@@ -130,11 +130,11 @@ output "data_boundary" {
     cluster ${module.eks.cluster_name}, region ${local.region}). Every prompt,
     completion, connector payload, audit row and key stays here: RDS
     ${module.db.db_instance_identifier}, audit bucket ${module.audit_anchors.bucket},
-    KMS key ${aws_kms_key.data.arn}.
+    KMS key ${module.kms.key_arn}.
     To RegulAIt (the vendor): nothing. The product has no telemetry, licence
     check or update call (docs/deployment/DATA_BOUNDARY.md section 1), and this
     stack opens no path to a RegulAIt endpoint. Updates arrive as signed bundles
-    you mirror into ${aws_ecr_repository.images["gateway"].repository_url}.
+    you mirror into ${module.ecr["gateway"].repository_url}.
     Model calls: Amazon Bedrock in this account through a VPC endpoint
     (${length(var.bedrock_model_ids)} model(s) allowed).
     Internet: ${local.allow_list ? "HTTPS to ${join(", ", local.firewall_domains)} only, through Network Firewall, logged" : "none"}.

@@ -9,7 +9,7 @@ module "audit_anchors" {
   bucket_name       = "${var.name_prefix}-audit-anchors-${local.account}"
   object_lock_mode  = var.audit_object_lock_mode
   retention_days    = var.audit_retention_days
-  kms_key_arn       = aws_kms_key.data.arn
-  writer_role_names = [aws_iam_role.gateway.name]
+  kms_key_arn       = module.kms.key_arn
+  writer_role_names = [module.gateway_pod_identity.iam_role_name]
   tags              = var.tags
 }

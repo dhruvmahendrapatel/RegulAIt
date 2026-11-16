@@ -129,9 +129,32 @@ Searched: `terraform-aws-modules/iam` (Apache-2.0) has `iam-github-oidc-provider
 submodules. Its role submodule matches `sub` with `StringLike` and attaches managed policy ARNs; it does not take an
 inline boundary-scoped policy or refuse a wildcard subject. Our module already existed and is ~100 lines, so it is
 extended rather than replaced; the boundary and deployer policy are RegulAIt's governance semantics (what an
-installer may do), which ADR-0176 §4 keeps in house. PR 2 uses `terraform-aws-modules` vpc 6.7.3, eks 21.29.0 and rds 7.2.2 (Apache-2.0) rather than hand-written
-network, cluster and database code. The firewall routing, Pod Identity roles and Bedrock grant are a few resources
-with no maintained module that fits the strict allow-list, so they are written here.
+installer may do), which ADR-0176 §4 keeps in house. PR 2 composes validated modules instead of hand-written
+resources, all Apache-2.0 and pinned to exact versions: `terraform-aws-modules` vpc 6.7.3 (with `vpc-endpoints`), eks
+21.29.0, rds 7.2.2, eks-pod-identity 2.10.0 (every Pod Identity role: gateway, EBS CSI driver, Load Balancer
+Controller, the last two with their upstream-maintained policies), kms 4.2.2, ecr 3.2.1 and network-firewall 2.3.0
+(firewall, policy and rule group), plus the repo's own `audit-anchor-worm-s3`. What stays hand-written, and why
+(ADR-0176 §4): the per-zone NAT gateways and the routes node subnet, firewall endpoint, NAT and back, because the vpc
+module's NAT routes private subnets straight to the NAT and cannot place the firewall endpoint on the symmetric path;
+the firewall's CloudWatch log groups (encrypted with the stack key); the gp3 StorageClass in the outputs.
+
+### Review of #868 (2026-11-16)
+
+The code review returned REQUEST CHANGES at `eeaa0698`; the security review approved.
+
+1. Pod Identity roles now come from `terraform-aws-modules/eks-pod-identity`; the copied Load Balancer Controller
+   policy file is gone. The EBS CSI role keeps the tighter key grant (`kms:ViaService` EC2) through the module's
+   `policy_statements`.
+2. The stack key comes from `terraform-aws-modules/kms`, the repositories and pull-through cache from
+   `terraform-aws-modules/ecr`.
+3. The firewall, policy and rule group come from `terraform-aws-modules/network-firewall`; the NAT and routes stay
+   hand-written for the reason above. The firewall now defaults to delete protection (`firewall_delete_protection`,
+   off only in the rehearsal tfvars), and its policy and rule group are encrypted with the stack key too.
+4. Operator backups to S3 (ADR-0305 §2) move to PR 3. `infra/modules/backup-target-s3` does not fit as it stands: it
+   grants `s3:ListBucket` (ADR-0305 forbids it) and no `kms:GenerateDataKey`/`kms:Decrypt` conditioned on S3, so PR 3
+   either extends that module with a pod-identity writer mode or records why not.
+5. PR 3's runbook and sweep document the ordered teardown and what is left behind on purpose: the final RDS snapshot,
+   the COMPLIANCE audit anchors and the KMS key in its 30-day deletion window.
 
 ### Review of #854 (2026-11-15)
 

@@ -2,22 +2,8 @@
 # one service account. It may invoke the listed Bedrock models and write audit
 # anchors (granted by the audit module). Nothing else: no database password
 # (that is a Kubernetes Secret), no S3 beyond the anchor prefix.
-
-resource "aws_iam_role" "gateway" {
-  name                 = "${var.name_prefix}-gateway"
-  description          = "RegulAIt gateway (${var.gateway_namespace}/${var.gateway_service_account}) via EKS Pod Identity."
-  assume_role_policy   = data.aws_iam_policy_document.pod_identity_trust.json
-  permissions_boundary = var.iam_permissions_boundary_arn
-  tags                 = var.tags
-}
-
-resource "aws_eks_pod_identity_association" "gateway" {
-  cluster_name    = module.eks.cluster_name
-  namespace       = var.gateway_namespace
-  service_account = var.gateway_service_account
-  role_arn        = aws_iam_role.gateway.arn
-  tags            = var.tags
-}
+# Built with terraform-aws-modules/eks-pod-identity (ADR-0176), like every
+# Pod Identity role in this stack.
 
 locals {
   # A cross-region inference profile ("us.<model>") routes to the base model
@@ -27,41 +13,53 @@ locals {
   bedrock_profiles = [for id in var.bedrock_model_ids : id if id != replace(id, "/^(us|eu|apac|us-gov|global)\\./", "")]
 }
 
-data "aws_iam_policy_document" "gateway_bedrock" {
-  count = length(var.bedrock_model_ids) > 0 ? 1 : 0
+locals {
+  bedrock_invoke_actions = [
+    "bedrock:InvokeModel",
+    "bedrock:InvokeModelWithResponseStream",
+    "bedrock:Converse",
+    "bedrock:ConverseStream",
+  ]
 
-  statement {
-    sid = "InvokeListedModelsInThisRegion"
-    actions = [
-      "bedrock:InvokeModel",
-      "bedrock:InvokeModelWithResponseStream",
-      "bedrock:Converse",
-      "bedrock:ConverseStream",
-    ]
-    resources = [for id in local.bedrock_base_ids : "arn:${local.partition}:bedrock:${local.region}::foundation-model/${id}"]
-  }
-
-  dynamic "statement" {
-    for_each = length(local.bedrock_profiles) > 0 ? [1] : []
-    content {
-      sid = "InvokeListedInferenceProfiles"
-      actions = [
-        "bedrock:InvokeModel",
-        "bedrock:InvokeModelWithResponseStream",
-        "bedrock:Converse",
-        "bedrock:ConverseStream",
-      ]
+  gateway_policy_statements = concat(
+    length(local.bedrock_base_ids) > 0 ? [{
+      sid       = "InvokeListedModelsInThisRegion"
+      actions   = local.bedrock_invoke_actions
+      resources = [for id in local.bedrock_base_ids : "arn:${local.partition}:bedrock:${local.region}::foundation-model/${id}"]
+    }] : [],
+    length(local.bedrock_profiles) > 0 ? [{
+      sid     = "InvokeListedInferenceProfiles"
+      actions = local.bedrock_invoke_actions
       resources = concat(
         [for id in local.bedrock_profiles : "arn:${local.partition}:bedrock:${local.region}:${local.account}:inference-profile/${id}"],
         [for id in local.bedrock_profiles : "arn:${local.partition}:bedrock:*::foundation-model/${replace(id, "/^(us|eu|apac|us-gov|global)\\./", "")}"],
       )
-    }
-  }
+    }] : [],
+  )
 }
 
-resource "aws_iam_role_policy" "gateway_bedrock" {
-  count  = length(var.bedrock_model_ids) > 0 ? 1 : 0
-  name   = "bedrock-listed-models"
-  role   = aws_iam_role.gateway.id
-  policy = data.aws_iam_policy_document.gateway_bedrock[0].json
+module "gateway_pod_identity" {
+  source  = "terraform-aws-modules/eks-pod-identity/aws"
+  version = "2.10.0"
+
+  name                     = "${var.name_prefix}-gateway"
+  use_name_prefix          = false
+  description              = "RegulAIt gateway (${var.gateway_namespace}/${var.gateway_service_account}) via EKS Pod Identity."
+  permissions_boundary_arn = var.iam_permissions_boundary_arn
+  trust_policy_conditions  = local.pod_identity_trust_conditions
+
+  # No model is granted when bedrock_model_ids is empty.
+  attach_custom_policy      = length(var.bedrock_model_ids) > 0
+  custom_policy_description = "Invoke only the listed Bedrock models."
+  policy_statements         = local.gateway_policy_statements
+
+  associations = {
+    gateway = {
+      cluster_name    = module.eks.cluster_name
+      namespace       = var.gateway_namespace
+      service_account = var.gateway_service_account
+    }
+  }
+
+  tags = var.tags
 }

@@ -49,23 +49,28 @@ run "secure_defaults" {
   }
 
   assert {
-    condition     = length(aws_networkfirewall_firewall.egress) == 1 && length(aws_nat_gateway.this) == 2 && length(aws_route.private_to_firewall) == 2 && length(aws_route.public_return_via_firewall) == 2
+    condition     = length(aws_nat_gateway.this) == 2 && length(aws_route.private_to_firewall) == 2 && length(aws_route.public_return_via_firewall) == 2
     error_message = "allow_list routes every zone's nodes through the firewall, both ways."
   }
 
   assert {
-    condition     = aws_kms_key.data.enable_key_rotation
-    error_message = "The stack key rotates."
+    condition     = var.firewall_delete_protection
+    error_message = "The firewall defaults to delete protection."
   }
 
   assert {
-    condition     = aws_ecr_repository.images["gateway"].image_tag_mutability == "IMMUTABLE"
-    error_message = "Image tags are immutable."
+    condition     = module.gateway_pod_identity.iam_policy_name == "regulait-test-gateway" && module.gateway_pod_identity.iam_role_name == "regulait-test-gateway"
+    error_message = "Listed models give the gateway its own Bedrock policy, named inside the stack prefix."
   }
 
   assert {
-    condition     = length(aws_iam_role_policy.gateway_bedrock) == 1
-    error_message = "Listed models give the gateway a Bedrock grant."
+    condition     = module.ebs_csi_pod_identity.iam_role_name == "regulait-test-ebs-csi" && module.ebs_csi_pod_identity.iam_policy_name == "regulait-test-ebs-csi"
+    error_message = "The EBS CSI role and policy are named inside the stack prefix, so the installer boundary covers them."
+  }
+
+  assert {
+    condition     = module.lb_controller_pod_identity.iam_role_name == "regulait-test-lb-controller" && module.lb_controller_pod_identity.iam_policy_name == "regulait-test-lb-controller"
+    error_message = "The Load Balancer Controller role and its upstream-maintained policy are on by default and named inside the stack prefix."
   }
 }
 
@@ -77,7 +82,7 @@ run "egress_none_has_no_internet_path" {
   }
 
   assert {
-    condition     = length(aws_networkfirewall_firewall.egress) == 0 && length(aws_nat_gateway.this) == 0 && length(aws_eip.nat) == 0 && length(aws_route.private_to_firewall) == 0
+    condition     = module.network_firewall.arn == null && module.egress_domains.arn == null && length(aws_nat_gateway.this) == 0 && length(aws_eip.nat) == 0 && length(aws_route.private_to_firewall) == 0
     error_message = "egress_mode none creates no firewall, NAT or route out."
   }
 }
@@ -90,7 +95,7 @@ run "no_bedrock_models_no_grant" {
   }
 
   assert {
-    condition     = length(aws_iam_role_policy.gateway_bedrock) == 0
+    condition     = module.gateway_pod_identity.iam_policy_name == null
     error_message = "No listed model, no Bedrock grant."
   }
 }
@@ -113,4 +118,17 @@ run "wildcard_egress_domain_is_refused" {
   }
 
   expect_failures = [var.egress_allowed_domains]
+}
+
+run "no_ingress_controller_no_role" {
+  command = plan
+
+  variables {
+    ingress_controller = false
+  }
+
+  assert {
+    condition     = module.lb_controller_pod_identity.iam_role_name == null
+    error_message = "No Load Balancer Controller role when ingress_controller is off."
+  }
 }

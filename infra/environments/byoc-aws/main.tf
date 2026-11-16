@@ -20,6 +20,7 @@ module "byoc" {
   db_instance_class                    = var.db_instance_class
   db_multi_az                          = var.db_multi_az
   db_backup_retention_days             = var.db_backup_retention_days
+  firewall_delete_protection           = var.firewall_delete_protection
   db_deletion_protection               = var.db_deletion_protection
   db_skip_final_snapshot               = var.db_skip_final_snapshot
   audit_object_lock_mode               = var.audit_object_lock_mode

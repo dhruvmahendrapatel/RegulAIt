@@ -1,39 +1,33 @@
 # Optional AWS Load Balancer Controller identity (EKS Pod Identity) for an
 # internal ALB in front of the gateway. The controller is installed from its
-# official Helm chart (eks-charts, Apache-2.0) by the runbook; this file gives
-# it exactly the upstream v3.6.3 IAM policy, carried verbatim in files/ so it
-# is pinned and reviewable. The runbook turns WAF, Shield and Cognito off;
-# those calls are outside the installer boundary anyway.
+# official Helm chart (eks-charts, Apache-2.0) by the runbook. Its IAM policy
+# is the one terraform-aws-modules/eks-pod-identity maintains for the
+# controller (ADR-0176), so it follows upstream releases instead of a copied
+# file. The runbook turns WAF, Shield and Cognito off; those calls are outside
+# the workload boundary anyway.
 
-resource "aws_iam_role" "lb_controller" {
-  count                = var.ingress_controller ? 1 : 0
-  name                 = "${var.name_prefix}-lb-controller"
-  assume_role_policy   = data.aws_iam_policy_document.pod_identity_trust.json
-  permissions_boundary = var.iam_permissions_boundary_arn
-  tags                 = var.tags
-}
+module "lb_controller_pod_identity" {
+  source  = "terraform-aws-modules/eks-pod-identity/aws"
+  version = "2.10.0"
+  create  = var.ingress_controller
 
-resource "aws_iam_policy" "lb_controller" {
-  count       = var.ingress_controller ? 1 : 0
-  name        = "${var.name_prefix}-lb-controller"
-  description = "AWS Load Balancer Controller v3.6.3 (upstream docs/install/iam_policy.json)."
-  policy      = file("${path.module}/files/aws-load-balancer-controller-v3.6.3-iam-policy.json")
-  tags        = var.tags
-}
+  name                     = "${var.name_prefix}-lb-controller"
+  use_name_prefix          = false
+  permissions_boundary_arn = var.iam_permissions_boundary_arn
+  trust_policy_conditions  = local.pod_identity_trust_conditions
 
-resource "aws_iam_role_policy_attachment" "lb_controller" {
-  count      = var.ingress_controller ? 1 : 0
-  role       = aws_iam_role.lb_controller[0].name
-  policy_arn = aws_iam_policy.lb_controller[0].arn
-}
+  attach_aws_lb_controller_policy = true
+  aws_lb_controller_policy_name   = "${var.name_prefix}-lb-controller"
 
-resource "aws_eks_pod_identity_association" "lb_controller" {
-  count           = var.ingress_controller ? 1 : 0
-  cluster_name    = module.eks.cluster_name
-  namespace       = "kube-system"
-  service_account = "aws-load-balancer-controller"
-  role_arn        = aws_iam_role.lb_controller[0].arn
-  tags            = var.tags
+  associations = {
+    controller = {
+      cluster_name    = module.eks.cluster_name
+      namespace       = "kube-system"
+      service_account = "aws-load-balancer-controller"
+    }
+  }
+
+  tags = var.tags
 }
 
 locals {

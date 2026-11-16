@@ -42,14 +42,14 @@ module "db" {
   max_allocated_storage = var.db_allocated_storage_gb * 4
   storage_type          = "gp3"
   storage_encrypted     = true
-  kms_key_id            = aws_kms_key.data.arn
+  kms_key_id            = module.kms.key_arn
 
   db_name  = "regulait"
   username = "regulait_admin"
   port     = 5432
 
   manage_master_user_password   = true
-  master_user_secret_kms_key_id = aws_kms_key.data.arn
+  master_user_secret_kms_key_id = module.kms.key_arn
 
   multi_az               = var.db_multi_az
   create_db_subnet_group = false
@@ -73,12 +73,12 @@ module "db" {
   allow_major_version_upgrade = false
 
   performance_insights_enabled    = true
-  performance_insights_kms_key_id = aws_kms_key.data.arn
+  performance_insights_kms_key_id = module.kms.key_arn
 
   enabled_cloudwatch_logs_exports        = ["postgresql"]
   create_cloudwatch_log_group            = true
   cloudwatch_log_group_retention_in_days = var.log_retention_days
-  cloudwatch_log_group_kms_key_id        = aws_kms_key.data.arn
+  cloudwatch_log_group_kms_key_id        = module.kms.key_arn
 
   create_monitoring_role               = true
   monitoring_interval                  = 60

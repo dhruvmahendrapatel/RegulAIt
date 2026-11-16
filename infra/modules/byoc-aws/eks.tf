@@ -46,7 +46,7 @@ module "eks" {
 
   create_kms_key = false
   encryption_config = {
-    provider_key_arn = aws_kms_key.data.arn
+    provider_key_arn = module.kms.key_arn
     resources        = ["secrets"]
   }
   attach_encryption_policy          = true
@@ -55,7 +55,7 @@ module "eks" {
 
   enabled_log_types                      = ["api", "audit", "authenticator"]
   cloudwatch_log_group_retention_in_days = var.log_retention_days
-  cloudwatch_log_group_kms_key_id        = aws_kms_key.data.arn
+  cloudwatch_log_group_kms_key_id        = module.kms.key_arn
 
   enable_irsa = false
 
@@ -85,7 +85,7 @@ module "eks" {
     # and a StorageClass encrypted with the stack key (see outputs).
     aws-ebs-csi-driver = {
       pod_identity_association = [{
-        role_arn        = aws_iam_role.ebs_csi.arn
+        role_arn        = module.ebs_csi_pod_identity.iam_role_arn
         service_account = "ebs-csi-controller-sa"
       }]
     }
@@ -147,56 +147,53 @@ module "eks" {
 
 ### EBS CSI driver identity (Pod Identity) ###
 
-data "aws_iam_policy_document" "pod_identity_trust" {
-  statement {
-    actions = ["sts:AssumeRole", "sts:TagSession"]
-    principals {
-      type        = "Service"
-      identifiers = ["pods.eks.amazonaws.com"]
-    }
-    condition {
-      test     = "StringEquals"
-      variable = "aws:SourceAccount"
-      values   = [local.account]
-    }
-  }
+# Every Pod Identity role trusts pods.eks.amazonaws.com only from this account.
+locals {
+  pod_identity_trust_conditions = [{
+    test     = "StringEquals"
+    variable = "aws:SourceAccount"
+    values   = [local.account]
+  }]
 }
 
-resource "aws_iam_role" "ebs_csi" {
-  name                 = "${var.name_prefix}-ebs-csi"
-  assume_role_policy   = data.aws_iam_policy_document.pod_identity_trust.json
-  permissions_boundary = var.iam_permissions_boundary_arn
-  tags                 = var.tags
-}
+# The EBS CSI driver's role (terraform-aws-modules/eks-pod-identity, ADR-0176).
+# The add-on above creates the association. The stack key is granted only for
+# grants to AWS resources and for use through EC2, which is tighter than the
+# module's own aws_ebs_csi_kms_arns statements, so those are passed here
+# instead.
+module "ebs_csi_pod_identity" {
+  source  = "terraform-aws-modules/eks-pod-identity/aws"
+  version = "2.10.0"
 
-resource "aws_iam_role_policy_attachment" "ebs_csi" {
-  role       = aws_iam_role.ebs_csi.name
-  policy_arn = "arn:${local.partition}:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
-}
+  name                     = "${var.name_prefix}-ebs-csi"
+  use_name_prefix          = false
+  permissions_boundary_arn = var.iam_permissions_boundary_arn
+  trust_policy_conditions  = local.pod_identity_trust_conditions
 
-data "aws_iam_policy_document" "ebs_csi_kms" {
-  statement {
-    actions   = ["kms:CreateGrant", "kms:ListGrants", "kms:RevokeGrant"]
-    resources = [aws_kms_key.data.arn]
-    condition {
-      test     = "Bool"
-      variable = "kms:GrantIsForAWSResource"
-      values   = ["true"]
-    }
-  }
-  statement {
-    actions   = ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:DescribeKey"]
-    resources = [aws_kms_key.data.arn]
-    condition {
-      test     = "StringEquals"
-      variable = "kms:ViaService"
-      values   = ["ec2.${local.region}.amazonaws.com"]
-    }
-  }
-}
+  attach_aws_ebs_csi_policy = true
+  aws_ebs_csi_policy_name   = "${var.name_prefix}-ebs-csi"
+  policy_statements = [
+    {
+      sid       = "StackKeyGrantsForAwsResources"
+      actions   = ["kms:CreateGrant", "kms:ListGrants", "kms:RevokeGrant"]
+      resources = [module.kms.key_arn]
+      condition = [{
+        test     = "Bool"
+        variable = "kms:GrantIsForAWSResource"
+        values   = ["true"]
+      }]
+    },
+    {
+      sid       = "StackKeyThroughEc2"
+      actions   = ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:DescribeKey"]
+      resources = [module.kms.key_arn]
+      condition = [{
+        test     = "StringEquals"
+        variable = "kms:ViaService"
+        values   = ["ec2.${local.region}.amazonaws.com"]
+      }]
+    },
+  ]
 
-resource "aws_iam_role_policy" "ebs_csi_kms" {
-  name   = "stack-key-for-volumes"
-  role   = aws_iam_role.ebs_csi.id
-  policy = data.aws_iam_policy_document.ebs_csi_kms.json
+  tags = var.tags
 }

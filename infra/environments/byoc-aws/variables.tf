@@ -88,6 +88,11 @@ variable "db_backup_retention_days" {
   default = 14
 }
 
+variable "firewall_delete_protection" {
+  type    = bool
+  default = true
+}
+
 variable "db_deletion_protection" {
   type    = bool
   default = true

@@ -41,7 +41,7 @@ locals {
 resource "aws_cloudwatch_log_group" "flow" {
   name              = "/${var.name_prefix}/vpc-flow"
   retention_in_days = var.log_retention_days
-  kms_key_id        = aws_kms_key.data.arn
+  kms_key_id        = module.kms.key_arn
   tags              = var.tags
 }
 
@@ -167,109 +167,108 @@ resource "aws_nat_gateway" "this" {
   tags          = merge(var.tags, { Name = "${var.name_prefix}-nat-${local.azs[count.index]}" })
 }
 
-resource "aws_networkfirewall_rule_group" "egress_domains" {
-  count    = local.allow_list ? 1 : 0
+# The firewall, its policy and the domain rule group come from
+# terraform-aws-modules/network-firewall (ADR-0176). Only the NAT gateways and
+# the routes around the firewall are written here: the vpc module's NAT routes
+# private subnets straight to the NAT, and the allow-list needs the symmetric
+# path node -> firewall endpoint -> NAT and back, per zone.
+
+module "egress_domains" {
+  source  = "terraform-aws-modules/network-firewall/aws//modules/rule-group"
+  version = "2.3.0"
+  create  = local.allow_list
+
   name     = "${var.name_prefix}-egress-domains"
   type     = "STATEFUL"
   capacity = 100
-  tags     = var.tags
 
-  rule_group {
-    stateful_rule_options {
+  encryption_configuration = {
+    type   = "CUSTOMER_KMS"
+    key_id = module.kms.key_arn
+  }
+
+  rule_group = {
+    stateful_rule_options = {
       rule_order = "STRICT_ORDER"
     }
-    rule_variables {
-      ip_sets {
-        key = "HOME_NET"
-        ip_set {
-          definition = [var.vpc_cidr]
-        }
-      }
+    rule_variables = {
+      ip_sets = [{
+        key    = "HOME_NET"
+        ip_set = { definition = [var.vpc_cidr] }
+      }]
     }
-    rules_source {
-      rules_source_list {
+    rules_source = {
+      rules_source_list = {
         generated_rules_type = "ALLOWLIST"
         target_types         = ["TLS_SNI"]
         targets              = local.firewall_domains
       }
     }
   }
-}
 
-resource "aws_networkfirewall_firewall_policy" "egress" {
-  count = local.allow_list ? 1 : 0
-  name  = "${var.name_prefix}-egress"
-  tags  = var.tags
-
-  firewall_policy {
-    stateless_default_actions          = ["aws:forward_to_sfe"]
-    stateless_fragment_default_actions = ["aws:forward_to_sfe"]
-
-    stateful_engine_options {
-      rule_order = "STRICT_ORDER"
-    }
-    # Anything the allow-list does not pass is dropped once established (so the
-    # TLS ClientHello can be inspected first) and alerted on.
-    stateful_default_actions = ["aws:drop_established", "aws:alert_established"]
-
-    stateful_rule_group_reference {
-      priority     = 100
-      resource_arn = aws_networkfirewall_rule_group.egress_domains[0].arn
-    }
-  }
-}
-
-resource "aws_networkfirewall_firewall" "egress" {
-  count               = local.allow_list ? 1 : 0
-  name                = "${var.name_prefix}-egress"
-  firewall_policy_arn = aws_networkfirewall_firewall_policy.egress[0].arn
-  vpc_id              = module.vpc.vpc_id
-  delete_protection   = false
-  tags                = var.tags
-
-  encryption_configuration {
-    type   = "CUSTOMER_KMS"
-    key_id = aws_kms_key.data.arn
-  }
-
-  dynamic "subnet_mapping" {
-    for_each = module.vpc.intra_subnets
-    content {
-      subnet_id = subnet_mapping.value
-    }
-  }
+  tags = var.tags
 }
 
 resource "aws_cloudwatch_log_group" "firewall" {
   for_each          = local.allow_list ? toset(["alert", "flow"]) : toset([])
   name              = "/${var.name_prefix}/network-firewall/${each.key}"
   retention_in_days = var.log_retention_days
-  kms_key_id        = aws_kms_key.data.arn
+  kms_key_id        = module.kms.key_arn
   tags              = var.tags
 }
 
-resource "aws_networkfirewall_logging_configuration" "egress" {
-  count        = local.allow_list ? 1 : 0
-  firewall_arn = aws_networkfirewall_firewall.egress[0].arn
+module "network_firewall" {
+  source  = "terraform-aws-modules/network-firewall/aws"
+  version = "2.3.0"
+  create  = local.allow_list
 
-  logging_configuration {
-    dynamic "log_destination_config" {
-      for_each = aws_cloudwatch_log_group.firewall
-      content {
-        log_type             = upper(log_destination_config.key)
-        log_destination_type = "CloudWatchLogs"
-        log_destination = {
-          logGroup = log_destination_config.value.name
-        }
-      }
+  name              = "${var.name_prefix}-egress"
+  description       = "${var.name_prefix}: egress allow-list (TLS SNI), everything else dropped and logged."
+  vpc_id            = module.vpc.vpc_id
+  delete_protection = var.firewall_delete_protection
+  subnet_mapping = {
+    for i, id in module.vpc.intra_subnets : local.azs[i] => { subnet_id = id }
+  }
+  encryption_configuration = {
+    type   = "CUSTOMER_KMS"
+    key_id = module.kms.key_arn
+  }
+
+  create_logging_configuration = true
+  logging_configuration_destination_config = [
+    for k, g in aws_cloudwatch_log_group.firewall : {
+      log_destination      = { logGroup = g.name }
+      log_destination_type = "CloudWatchLogs"
+      log_type             = upper(k)
+    }
+  ]
+
+  # Policy: strict rule order. Anything the allow-list does not pass is
+  # dropped once established (so the TLS ClientHello can be inspected first)
+  # and alerted on.
+  policy_name = "${var.name_prefix}-egress"
+  policy_encryption_configuration = {
+    type   = "CUSTOMER_KMS"
+    key_id = module.kms.key_arn
+  }
+  policy_stateless_default_actions          = ["aws:forward_to_sfe"]
+  policy_stateless_fragment_default_actions = ["aws:forward_to_sfe"]
+  policy_stateful_engine_options            = { rule_order = "STRICT_ORDER" }
+  policy_stateful_default_actions           = ["aws:drop_established", "aws:alert_established"]
+  policy_stateful_rule_group_reference = {
+    egress_domains = {
+      priority     = 100
+      resource_arn = module.egress_domains.arn
     }
   }
+
+  tags = var.tags
 }
 
 locals {
   # Firewall endpoint id per zone.
   firewall_endpoint_by_az = local.allow_list ? {
-    for s in aws_networkfirewall_firewall.egress[0].firewall_status[0].sync_states :
+    for s in module.network_firewall.status[0].sync_states :
     s.availability_zone => s.attachment[0].endpoint_id
   } : {}
 }

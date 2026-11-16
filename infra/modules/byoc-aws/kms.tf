@@ -1,8 +1,8 @@
 # One customer-managed key for the stack's data at rest: RDS storage and its
 # managed master-password secret, the audit-anchor bucket, Kubernetes secrets
-# (EKS envelope encryption) and the CloudWatch log groups. Rotated yearly.
-# The key never leaves the customer's account; RegulAIt (the vendor) has no
-# grant on it.
+# (EKS envelope encryption), EBS volumes, ECR and the CloudWatch log groups.
+# Rotated yearly. The key never leaves the customer's account; RegulAIt (the
+# vendor) has no grant on it. Built with terraform-aws-modules/kms (ADR-0176).
 
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
@@ -14,18 +14,20 @@ locals {
   region    = data.aws_region.current.region
 }
 
-data "aws_iam_policy_document" "data_key" {
-  statement {
-    sid       = "AccountAdministersThroughIam"
-    actions   = ["kms:*"]
-    resources = ["*"]
-    principals {
-      type        = "AWS"
-      identifiers = ["arn:${local.partition}:iam::${local.account}:root"]
-    }
-  }
+module "kms" {
+  source  = "terraform-aws-modules/kms/aws"
+  version = "4.2.2"
 
-  statement {
+  description             = "${var.name_prefix}: data at rest (RDS, audit anchors, Kubernetes secrets, volumes, logs)"
+  enable_key_rotation     = true
+  deletion_window_in_days = 30
+  aliases                 = ["${var.name_prefix}-data"]
+
+  # The default statement lets the account administer the key through IAM
+  # (account root principal, kms:*); nothing else is granted by default.
+  enable_default_policy = true
+
+  key_statements = [{
     sid = "CloudWatchLogsForThisAccountOnly"
     actions = [
       "kms:Encrypt*",
@@ -35,27 +37,16 @@ data "aws_iam_policy_document" "data_key" {
       "kms:Describe*",
     ]
     resources = ["*"]
-    principals {
+    principals = [{
       type        = "Service"
       identifiers = ["logs.${local.region}.amazonaws.com"]
-    }
-    condition {
+    }]
+    condition = [{
       test     = "ArnLike"
       variable = "kms:EncryptionContext:aws:logs:arn"
       values   = ["arn:${local.partition}:logs:${local.region}:${local.account}:log-group:*"]
-    }
-  }
-}
+    }]
+  }]
 
-resource "aws_kms_key" "data" {
-  description             = "${var.name_prefix}: data at rest (RDS, audit anchors, Kubernetes secrets, logs)"
-  enable_key_rotation     = true
-  deletion_window_in_days = 30
-  policy                  = data.aws_iam_policy_document.data_key.json
-  tags                    = var.tags
-}
-
-resource "aws_kms_alias" "data" {
-  name          = "alias/${var.name_prefix}-data"
-  target_key_id = aws_kms_key.data.key_id
+  tags = var.tags
 }

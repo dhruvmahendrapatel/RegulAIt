@@ -168,6 +168,12 @@ variable "db_backup_retention_days" {
   }
 }
 
+variable "firewall_delete_protection" {
+  description = "Refuse to delete the Network Firewall (allow_list egress). Turn off only for a disposable rehearsal, or before an uninstall."
+  type        = bool
+  default     = true
+}
+
 variable "db_deletion_protection" {
   description = "Refuse to delete the database. Turn off only for a disposable rehearsal."
   type        = bool
@@ -226,7 +232,7 @@ variable "iam_permissions_boundary_arn" {
 ### Ingress ###
 
 variable "ingress_controller" {
-  description = "Create the AWS Load Balancer Controller's identity (Pod Identity role with the upstream v3.6.3 policy) and the ELB VPC endpoint, so an internal ALB can front the gateway with your ACM certificate. Needed for SSO (users must reach the gateway over HTTPS)."
+  description = "Create the AWS Load Balancer Controller's identity (Pod Identity role with the controller policy maintained in terraform-aws-modules/eks-pod-identity) and the ELB VPC endpoint, so an internal ALB can front the gateway with your ACM certificate. Needed for SSO (users must reach the gateway over HTTPS)."
   type        = bool
   default     = true
 }

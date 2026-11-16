@@ -19,6 +19,8 @@ RegulAIt Helm chart (`deploy/helm/regulait`, ADR-0304) runs on, entirely inside 
 | Models | The gateway's Pod Identity role may invoke only `bedrock_model_ids`. | No model when the list is empty. |
 | Images | Private ECR repositories for the gateway and operator images, plus a pull-through cache for `public.ecr.aws`. | Immutable tags. Scan on push. KMS. |
 
+Built from `terraform-aws-modules` (vpc, eks, rds, eks-pod-identity, kms, ecr, network-firewall; exact versions and licences in `infra/THIRD_PARTY.md`) and the repo's `audit-anchor-worm-s3`. Only the NAT gateways and the routes through the firewall endpoint are written here (ADR-0325).
+
 ## Data boundary
 
 **Both planes run in your account.** In RegulAIt's terms, the *control plane* (the governance gateway, policies,
