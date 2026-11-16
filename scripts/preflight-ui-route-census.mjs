@@ -464,6 +464,10 @@ export const KNOWN_UI_GAPS = new Map([
   ["GET /v1/agent-risk/:kind/:subjectId", { does: "one agent's live risk score: every factor with its OWASP ids, reach, toxic combinations and ranked fixes, plus the newest stored assessment", tracking: "ADR-0339 (lane E20): API-only, master brief for lane E20 2026-11-16; the screen goes to the UI builder on #453" }],
   ["GET /v1/agent-risk/:kind/:subjectId/history", { does: "pages one agent's stored risk assessments, newest first, each with what triggered it", tracking: "ADR-0339 (lane E20): API-only, master brief for lane E20 2026-11-16; the screen goes to the UI builder on #453" }],
   ["POST /v1/agent-risk/recompute", { does: "runs the risk recompute sweep now, optionally for one agent (admin, audited per assessment)", tracking: "ADR-0339 (lane E20): API-only, master brief for lane E20 2026-11-16; the screen goes to the UI builder on #453" }],
+  ["GET /v1/agent-identity/:kind/:subjectId", { does: "one agent's author, runner (workload identity, invokers), ownership flag and linked non-human identities", tracking: "ADR-0339 slice 2 (lane E20): API-only, master brief for lane E20 2026-11-16; the screen goes to the UI builder on #453" }],
+  ["GET /v1/agent-identity/ownership-findings", { does: "pages agents whose owner is missing, deactivated or inactive (admin)", tracking: "ADR-0339 slice 2 (lane E20): API-only, master brief for lane E20 2026-11-16; the screen goes to the UI builder on #453" }],
+  ["POST /v1/agent-identity/:kind/:subjectId/links", { does: "stages a cloud service account, vendor agent identity or OAuth client link for an agent (admin, audited; confers nothing)", tracking: "ADR-0339 slice 2 (lane E20): API-only, master brief for lane E20 2026-11-16; the screen goes to the UI builder on #453" }],
+  ["POST /v1/agent-identity/links/:linkId/decision", { does: "confirms or rejects a staged identity link (a second named admin, identity_manage step-up, audited)", tracking: "ADR-0339 slice 2 (lane E20): API-only, master brief for lane E20 2026-11-16; the screen goes to the UI builder on #453" }],
 ]);
 
 /**
@@ -472,7 +476,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 59; // + ADR-0339 (lane E20) 4 API-only agent risk score routes (#453); main's 54 − 11 MCP bundle routes closed by #815 + ADR-0240 6 external-portal second-factor routes awaiting #453 (#709) + ADR-0332 (lane E14) 3 API-only endpoint add-on inventory routes, master brief for lane E14 2026-11-15 (screen by the UI builder, #453); + ADR-0230 A2 (P19, Lane L3) 3 SAP business server routes, master decision in the Lane L3 brief 2026-11-14, recorded in ADR-0230, section Recorded decision (2026-11-14)
+export const KNOWN_UI_GAPS_MAX = 63; // + ADR-0339 (lane E20) 4 API-only agent risk score routes and 4 agent identity routes (#453); main's 54 − 11 MCP bundle routes closed by #815 + ADR-0240 6 external-portal second-factor routes awaiting #453 (#709) + ADR-0332 (lane E14) 3 API-only endpoint add-on inventory routes, master brief for lane E14 2026-11-15 (screen by the UI builder, #453); + ADR-0230 A2 (P19, Lane L3) 3 SAP business server routes, master decision in the Lane L3 brief 2026-11-14, recorded in ADR-0230, section Recorded decision (2026-11-14)
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 

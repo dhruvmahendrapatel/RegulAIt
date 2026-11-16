@@ -199,6 +199,7 @@ import { registerReportingRoutes } from "./reporting.js";
 import { registerPostureRoutes } from "./posture.js";
 import { registerAssetScoreRoutes } from "./asset-score.js";
 import { registerAgentRiskRoutes } from "./agent-risk.js";
+import { registerAgentIdentityRoutes } from "./agent-identity.js";
 import { registerTrustDashboardRoutes } from "./trust-dashboard.js";
 import { registerUseCaseOverviewRoutes } from "./use-case-overview.js";
 import { registerUseCaseDraftRoutes } from "./use-case-drafts.js";
@@ -5888,6 +5889,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerAssetScoreRoutes(app, db);
   // ADR-0339 (lane E20) — the agent risk score, recomputed on every change
   registerAgentRiskRoutes(app, db);
+  // ADR-0339 slice 2 — author vs runner, non-human identity links, ownership findings
+  registerAgentIdentityRoutes(app, db);
   // ADR-0148 — the six-dimension trust dashboard (demo task C1)
   registerTrustDashboardRoutes(app, db);
   // ADR-0082 — the standing agent dependency inventory: per registered agent,

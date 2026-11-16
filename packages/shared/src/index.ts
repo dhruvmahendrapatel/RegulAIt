@@ -5070,3 +5070,5 @@ export * from "./fairness.js";
 export * from "./third-party-ingest/index.js";
 // ADR-0339 (lane E20): the agent risk score, recomputed on every change (pure; OWASP ids only)
 export * from "./agent-risk-score.js";
+// ADR-0339 slice 2 (lane E20): author vs runner and non-human identity links (pure vocabulary)
+export * from "./agent-identity.js";

@@ -16922,3 +16922,93 @@ export const agentRiskAssessments = pgTable(
 );
 export type AgentRiskAssessmentRow = typeof agentRiskAssessments.$inferSelect;
 // ===== end ADR-0339 =====
+
+// ===== ADR-0339 slice 2 (lane E20) — author vs runner, non-human identity links =====
+// Migration `pending/agent_identity_links.sql` (numbered at merge). Not tenant-scoped data (ADR-0234 scope): admin or
+// steward routes only, no RLS batch.
+import {
+  AGENT_AUTHOR_SOURCES as AGENT_AUTHOR_SOURCES_E20,
+  AGENT_NHI_KINDS as AGENT_NHI_KINDS_E20,
+  AGENT_NHI_LINK_SOURCES as AGENT_NHI_LINK_SOURCES_E20,
+  AGENT_NHI_LINK_STATUSES as AGENT_NHI_LINK_STATUSES_E20,
+  AGENT_NHI_PROVIDERS as AGENT_NHI_PROVIDERS_E20,
+} from "@regulait/shared";
+
+/**
+ * Who built an agent: one row per agent, written by the insert trigger in the creating transaction and never
+ * rewritten (UPDATE refused except the SET NULL of a deleted author; DELETE only with the agent). Agents that existed
+ * before are `unknown`: an author is never guessed.
+ */
+export const agentAuthorship = pgTable(
+  "agent_authorship",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    builderAgentId: uuid("builder_agent_id").references(() => builderAgents.id, { onDelete: "cascade" }),
+    authorUserId: uuid("author_user_id").references(() => users.id, { onDelete: "set null" }),
+    source: text("source", { enum: AGENT_AUTHOR_SOURCES_E20 }).notNull(),
+    /** an imported agent's vendor-side creator, as the import's pseudonym (never a name) */
+    vendorCreatorPseudonym: text("vendor_creator_pseudonym"),
+    recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("agent_authorship_subject_check", sql`num_nonnulls(${t.agentId}, ${t.builderAgentId}) = 1`),
+    check("agent_authorship_source_check", sql`${t.source} IN ('principal', 'builder_owner', 'vendor_record', 'unknown')`),
+    check("agent_authorship_unknown_check", sql`${t.source} <> 'unknown' OR ${t.authorUserId} IS NULL`),
+    check(
+      "agent_authorship_vendor_check",
+      sql`(${t.source} = 'vendor_record') = (${t.vendorCreatorPseudonym} IS NOT NULL) AND (${t.vendorCreatorPseudonym} IS NULL OR length(${t.vendorCreatorPseudonym}) BETWEEN 1 AND 128)`,
+    ),
+    uniqueIndex("agent_authorship_agent_uq").on(t.agentId).where(sql`${t.agentId} IS NOT NULL`),
+    uniqueIndex("agent_authorship_builder_uq").on(t.builderAgentId).where(sql`${t.builderAgentId} IS NOT NULL`),
+    index("agent_authorship_author_idx").on(t.authorUserId),
+  ],
+);
+export type AgentAuthorshipRow = typeof agentAuthorship.$inferSelect;
+
+/** an agent's cloud service account, vendor agent identity or OAuth client: staged, then confirmed by a second admin */
+export const agentIdentityLinks = pgTable(
+  "agent_identity_links",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    builderAgentId: uuid("builder_agent_id").references(() => builderAgents.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: AGENT_NHI_KINDS_E20 }).notNull(),
+    provider: text("provider", { enum: AGENT_NHI_PROVIDERS_E20 }).notNull(),
+    externalId: text("external_id").notNull(),
+    status: text("status", { enum: AGENT_NHI_LINK_STATUSES_E20 }).notNull().default("staged"),
+    source: text("source", { enum: AGENT_NHI_LINK_SOURCES_E20 }).notNull(),
+    note: text("note"),
+    stagedByUserId: uuid("staged_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    stagedAt: timestamp("staged_at", { withTimezone: true }).notNull().defaultNow(),
+    decidedByUserId: uuid("decided_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    decisionNote: text("decision_note"),
+  },
+  (t) => [
+    check("agent_identity_links_subject_check", sql`num_nonnulls(${t.agentId}, ${t.builderAgentId}) = 1`),
+    check("agent_identity_links_kind_check", sql`${t.kind} IN ('cloud_service_account', 'vendor_agent_identity', 'oauth_client')`),
+    check("agent_identity_links_provider_check", sql`${t.provider} IN ('aws', 'azure', 'gcp', 'entra', 'okta', 'other')`),
+    check("agent_identity_links_status_check", sql`${t.status} IN ('staged', 'confirmed', 'rejected')`),
+    check("agent_identity_links_source_check", sql`${t.source} IN ('admin', 'importer')`),
+    check("agent_identity_links_external_id_check", sql`length(${t.externalId}) BETWEEN 1 AND 1024`),
+    check(
+      "agent_identity_links_notes_check",
+      sql`(${t.note} IS NULL OR length(${t.note}) <= 500) AND (${t.decisionNote} IS NULL OR length(${t.decisionNote}) <= 500)`,
+    ),
+    check("agent_identity_links_decided_check", sql`(${t.status} = 'staged') = (${t.decidedAt} IS NULL)`),
+    check(
+      "agent_identity_links_four_eyes_check",
+      sql`${t.decidedByUserId} IS NULL OR ${t.stagedByUserId} IS NULL OR ${t.decidedByUserId} <> ${t.stagedByUserId}`,
+    ),
+    uniqueIndex("agent_identity_links_agent_uq")
+      .on(t.agentId, t.provider, t.externalId)
+      .where(sql`${t.agentId} IS NOT NULL`),
+    uniqueIndex("agent_identity_links_builder_uq")
+      .on(t.builderAgentId, t.provider, t.externalId)
+      .where(sql`${t.builderAgentId} IS NOT NULL`),
+    index("agent_identity_links_external_idx").on(t.provider, t.externalId),
+  ],
+);
+export type AgentIdentityLinkRow = typeof agentIdentityLinks.$inferSelect;
+// ===== end ADR-0339 slice 2 =====

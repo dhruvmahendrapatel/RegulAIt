@@ -28,7 +28,8 @@ import type { GuardrailMode } from "./guardrails.js";
 import type { AutonomyClass } from "./assurance.js";
 import type { AutonomyAgenticTestClass as RedTeamAgenticAttackClass, AutonomyObservedFacts } from "./autonomy.js";
 
-export const AGENT_RISK_METHOD_VERSION = "adr0339-v1" as const;
+/** v2 (slice 2): the ownership factor also scores an owner who has not been active within the window (`inactive`) */
+export const AGENT_RISK_METHOD_VERSION = "adr0339-v2" as const;
 
 /** what is scored: a registry agent (`agents`, including vendor-imported ones) or a builder agent */
 export const AGENT_RISK_SUBJECT_KINDS = ["agent", "builder_agent"] as const;
@@ -80,6 +81,28 @@ export type AgentRiskFactorId =
   | "schedules"
   | "unadmitted_skills";
 
+/**
+ * ADR-0339 slice 2: the ADR-0089 owner flag widened with `inactive`: the owner is active in the directory but has not
+ * signed in, used a session or used an API key within this many days. Strict default; it is a constant until an owner
+ * asks for it to be a setting (owner question on the slice 2 PR).
+ */
+export const AGENT_OWNER_INACTIVE_DAYS = 90;
+export const AGENT_OWNERSHIP_FLAGS = ["owned", "inactive", "unowned", "orphaned"] as const;
+export type AgentOwnershipFlag = (typeof AGENT_OWNERSHIP_FLAGS)[number];
+
+/** the ownership flag from the owner id, whether the owner is deactivated, and when they were last active */
+export function agentOwnershipFlag(
+  ownerUserId: string | null,
+  ownerDisabled: boolean,
+  ownerLastActiveAt: Date | null,
+  now: Date,
+): AgentOwnershipFlag {
+  if (!ownerUserId) return "unowned";
+  if (ownerDisabled) return "orphaned";
+  if (!ownerLastActiveAt || now.getTime() - ownerLastActiveAt.getTime() > AGENT_OWNER_INACTIVE_DAYS * 86_400_000) return "inactive";
+  return "owned";
+}
+
 export type AgentRiskToxicId = "sod_rule_held_by_agent" | "untrusted_input_data_action";
 
 /** the facts the gateway gathers; every count is a count of rows that exist now */
@@ -87,8 +110,9 @@ export interface AgentRiskInput {
   kind: AgentRiskSubjectKind;
   id: string;
   name: string;
-  /** owned, no accountable human recorded, or the recorded human is deactivated (ADR-0089) */
-  ownership: "owned" | "unowned" | "orphaned";
+  /** owned, no accountable human recorded, the recorded human is deactivated (ADR-0089), or has not been active
+   * within AGENT_OWNER_INACTIVE_DAYS (ADR-0339 slice 2) */
+  ownership: AgentOwnershipFlag;
   /** the effective guardrail modes on the agent's model and project (resolveGuardrailPolicy) */
   guardrailModes: Readonly<Record<"prompt_injection" | "jailbreak", GuardrailMode>>;
   /** the agent dispatches a model: a registry agent with a model id, or a builder agent bound to one */
@@ -199,6 +223,14 @@ const AUTONOMY_POINTS: Readonly<Record<AutonomyClass, number>> = Object.freeze({
   autonomous: 12,
 });
 
+/** an owner gone (deactivated) is worse than none recorded, which is worse than one who has gone quiet */
+const OWNERSHIP_POINTS: Readonly<Record<AgentOwnershipFlag, number>> = Object.freeze({
+  owned: 0,
+  inactive: 8,
+  unowned: 10,
+  orphaned: 15,
+});
+
 const per = (n: number, each: number, max: number) => Math.min(max, Math.max(0, n) * each);
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
@@ -293,14 +325,16 @@ function factorsFor(input: AgentRiskInput): AgentRiskFactor[] {
     id: "ownership",
     title: "No active accountable owner",
     owasp: [ASI(3), ASI(10)],
-    points: input.ownership === "orphaned" ? 15 : input.ownership === "unowned" ? 10 : 0,
-    max: 15,
+    points: OWNERSHIP_POINTS[input.ownership],
+    max: OWNERSHIP_POINTS.orphaned,
     evidence:
       input.ownership === "orphaned"
         ? "the recorded owner is deactivated, so nobody is accountable for this agent"
         : input.ownership === "unowned"
           ? "no accountable owner is recorded"
-          : "an active owner is recorded",
+          : input.ownership === "inactive"
+            ? `the recorded owner has not been active in the last ${AGENT_OWNER_INACTIVE_DAYS} days`
+            : "an active owner is recorded",
     fix: { title: "Assign an active owner (and a successor) to this agent", link: L.agent },
   });
 
