@@ -5,7 +5,7 @@
 - **Index**: Assignable from Jira and Azure Boards: assign, @mention or a tool-side rule starts the pillar-2 workflow as the assigning user (default off)
 - **Amends**: [ADR-0010](0010-pm-inbound-sync-webhooks-plus-read-through.md), which gains assignment signals on the
   normalized inbound event and Jira `X-Hub-Signature` verification.
-- **Migration**: `pending/pm_assignment_trigger.sql` (numbered at merge).
+- **Migration**: `pending/pm_assignment_trigger.sql` and `pending/rls_pm_assignment.sql` (numbered at merge).
 
 ## Context
 
@@ -146,8 +146,12 @@ and this custom body:
 
 - **One workflow per item, ever.** Re-assigning a finished item starts nothing, and the audit row names the earlier
   instance. Owner question open: whether a finished instance should release the claim.
-- **No RLS on the new tables yet,** matching `pm_links` and `pm_webhook_deliveries`. The RLS batches have not reached
-  the PM surface.
+- **Row-level security** (`pending/rls_pm_assignment.sql`, the ADR-0234 PM batch). All three tables are forced, and
+  an admin (or the bootstrap token) reaches them through `regulait_rls_is_admin()`.
+  - The PM webhook's reason, `approval_maintenance`, reads the trigger and the identity links, and claims and updates
+    the start.
+  - Only an admin or a migration writes the configuration.
+  - A non-admin principal and `pm_sync` reach none of them (`zz-adr0234-rls-pm.test.ts`).
 - **Atlassian audit events as evidence are not ingested in this slice.** The organisation audit-log API needs an
   Atlassian Guard/admin API key and a pull client, which is a separate slice over the ADR-0261 third-party-ingest
   path. Owner question open: Atlassian Guard availability.

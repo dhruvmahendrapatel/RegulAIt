@@ -663,6 +663,13 @@ still writes its own audit rows. In any other scope it changes nothing. These en
 The demo live check, a CLI with no principal, reads the connections as `system_task`. The `reencrypt` CLI and
 narrowing the route step to each handler's PM statements are PENDING follow-ups.
 
+ADR-0317 (G4) adds three assignment tables under the same pattern (`pending/rls_pm_assignment.sql`):
+`pm_assignment_triggers`, `pm_identity_links` and `pm_assignment_starts`.
+
+- An admin reaches all three.
+- `approval_maintenance` (the PM webhook) reads the trigger and the links, and claims starts.
+- Nothing else reaches them, `pm_sync` included.
+
 **What each reason reaches:**
 
 | Reason | pm_connections | pm_links | pm_sync_events | pm_webhook_deliveries | import tables |

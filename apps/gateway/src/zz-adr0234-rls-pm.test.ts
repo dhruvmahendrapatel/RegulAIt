@@ -20,7 +20,10 @@ import {
   createDb,
   eq,
   initiatives,
+  pmAssignmentStarts,
+  pmAssignmentTriggers,
   pmConnections,
+  pmIdentityLinks,
   pmImportedWorkItems,
   pmLinks,
   pmProjectInitiatives,
@@ -56,6 +59,8 @@ const PM_TABLES = [
   "pm_sync_events",
   "pm_webhook_deliveries",
 ] as const;
+/** ADR-0317 (G4): the assignment tables, under the same batch (`rls_pm_assignment`) */
+const ASSIGNMENT_TABLES = ["pm_assignment_starts", "pm_assignment_triggers", "pm_identity_links"] as const;
 
 let admin: Db;
 let db: Db;
@@ -116,7 +121,20 @@ beforeAll(async () => {
   await db.insert(initiatives).values({ id: ids.initiative, name: `rlspm-${ids.initiative}` });
   await db.insert(pmProjectInitiatives).values({ connectionId: ids.conn, initiativeId: ids.initiative });
   await db.insert(pmImportedWorkItems).values({ connectionId: ids.conn, externalId: "1", externalUrl: "https://pm.example/1", itemType: "Task" });
+  await db.insert(pmAssignmentTriggers).values({ connectionId: ids.conn, agentRef: "agent", changeType: "feature", environment: "dev" });
+  await db.insert(pmIdentityLinks).values({ connectionId: ids.conn, externalUserId: "pm-alice", userId: ids.alice });
+  await db.insert(pmAssignmentStarts).values({ connectionId: ids.conn, externalId: "1", initiatorUserId: ids.alice, actorExternalId: "pm-alice", trigger: "assigned" });
 }, 180_000);
+
+/** how many rows of each assignment table the current scope sees */
+async function visibleAssignment(): Promise<Record<string, number>> {
+  const out: Record<string, number> = {};
+  for (const t of ASSIGNMENT_TABLES) {
+    const r = await db.execute<{ n: number }>(sql.raw(`select count(*)::int as n from ${t}`));
+    out[t] = r.rows[0]!.n;
+  }
+  return out;
+}
 
 afterAll(async () => {
   await db?.$client.end().catch(() => undefined);
@@ -131,7 +149,7 @@ describe("the PM tables are under forced row-level security", () => {
     const r = await db.execute<{ relname: string; on: boolean; forced: boolean }>(sql`
       select relname, relrowsecurity as on, relforcerowsecurity as forced from pg_class
        where relnamespace = 'public'::regnamespace and relname like 'pm\\_%' and relkind = 'r' order by relname`);
-    expect(r.rows.map((x) => x.relname)).toEqual([...PM_TABLES]);
+    expect(r.rows.map((x) => x.relname)).toEqual([...PM_TABLES, ...ASSIGNMENT_TABLES].sort());
     for (const row of r.rows) expect([row.relname, row.on, row.forced]).toEqual([row.relname, true, true]);
   });
 });
@@ -200,6 +218,41 @@ describe("what each scope reaches, with no application filter", () => {
         expect(await visible()).toEqual(Object.fromEntries(PM_TABLES.map((t) => [t, 0])));
       });
     }
+  });
+});
+
+describe("ADR-0317 (G4): the assignment tables", () => {
+  it("a non-admin principal and pm_sync reach none; an admin reaches all", async () => {
+    const none = Object.fromEntries(ASSIGNMENT_TABLES.map((t) => [t, 0]));
+    await runWithRlsPrincipal({ userId: ids.alice }, async () => {
+      expect(await visibleAssignment()).toEqual(none);
+      expect(
+        await pgError(db.insert(pmIdentityLinks).values({ connectionId: ids.conn, externalUserId: "pm-mallory", userId: ids.alice })),
+      ).toMatch(/row-level security/);
+    });
+    await runWithRlsPrincipalStep({ userId: ids.alice }, "pm_sync", "test.pm-sync-assign", async () => {
+      expect(await visibleAssignment()).toEqual(none);
+    });
+    await runWithRlsPrincipal({ userId: ids.root }, async () => {
+      expect(await visibleAssignment()).toEqual(Object.fromEntries(ASSIGNMENT_TABLES.map((t) => [t, 1])));
+    });
+  });
+
+  it("the PM webhook's reason reads the trigger and links and claims starts, but never writes the configuration", async () => {
+    await runWithRlsSystem("approval_maintenance", "test.pm-assign", async () => {
+      expect(await visibleAssignment()).toEqual(Object.fromEntries(ASSIGNMENT_TABLES.map((t) => [t, 1])));
+      const [claim] = await db
+        .insert(pmAssignmentStarts)
+        .values({ connectionId: ids.conn, externalId: "2", initiatorUserId: ids.alice, actorExternalId: "pm-alice", trigger: "mentioned" })
+        .returning({ id: pmAssignmentStarts.id });
+      expect(claim?.id).toBeTruthy();
+      expect(
+        await db.update(pmAssignmentTriggers).set({ enabled: true }).where(eq(pmAssignmentTriggers.connectionId, ids.conn)).returning({ id: pmAssignmentTriggers.connectionId }),
+      ).toEqual([]);
+      expect(await pgError(db.insert(pmIdentityLinks).values({ connectionId: ids.conn, externalUserId: "pm-eve", userId: ids.root }))).toMatch(
+        /row-level security/,
+      );
+    });
   });
 });
 
