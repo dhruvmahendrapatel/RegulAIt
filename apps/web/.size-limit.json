@@ -27,6 +27,25 @@
     "limit": "78 kB"
   },
   {
+    "name": "lazy: graph libraries (shared)",
+    "path": [
+      "dist/assets/runGraphLayout-*.js",
+      "dist/assets/runGraphLayout-*.css"
+    ],
+    "gzip": true,
+    "limit": "74 kB"
+  },
+  {
+    "name": "lazy: PipelineBuilderPage",
+    "path": [
+      "dist/assets/PipelineBuilderPage-*.js",
+      "dist/assets/PipelineBuilderPage-*.css",
+      "dist/assets/PipelineCanvas-*.js"
+    ],
+    "gzip": true,
+    "limit": "13 kB"
+  },
+  {
     "name": "all JS",
     "path": "dist/assets/*.js",
     "gzip": true,

@@ -106,6 +106,8 @@ const TracesPage = screen(() => import("./screens/admin-approvals-audit"), "Trac
 // ADR-0173 batch 2c (K)
 const MonitoringPage = screen(() => import("./screens/admin-overview"), "MonitoringPage");
 const WorkflowTemplatesPage = screen(() => import("./screens/admin-policies-gates"), "WorkflowTemplatesPage");
+// ADR-0341 — the visual pipeline builder: its own chunk (the canvas inside it is a further lazy chunk)
+const PipelineBuilderPage = lazy(() => import("./views/builder/pipelines/PipelineBuilderPage"));
 const AgentsArea = screen(() => import("./screens/admin-integrations"), "AgentsArea");
 const ModelCredentialsPage = screen(() => import("./screens/admin-integrations"), "ModelCredentialsPage");
 const CustomProvidersPage = screen(() => import("./screens/admin-integrations"), "CustomProvidersPage");
@@ -336,6 +338,7 @@ function ApplicationRoutes() {
                 {/* ADR-0061 */}
                 <Route path="chatops/*" element={<ChatOpsArea />} />
                 <Route path="workflow-templates" element={<WorkflowTemplatesPage />} />
+                <Route path="workflow-templates/:templateId/builder" element={<PipelineBuilderPage />} />
                 <Route path="agents/*" element={<AgentsArea />} />
                 <Route path="model-credentials" element={<ModelCredentialsPage />} />
                 <Route path="custom-providers" element={<CustomProvidersPage />} />

@@ -178,7 +178,8 @@ follow-ups, [session record](memory/sessions/2026-10-24-session-02.md).*
 ## Performance
 
 - Stay inside the bundle ceilings in [.size-limit.json](../apps/web/.size-limit.json) (gzip): entry JS 138.5 kB, entry
-  CSS 10.7 kB, lazy `SeriesLineChart` 109 kB, lazy `RunGraphCanvas` 78 kB, all JS 1,057 kB. Raise a ceiling only through
+  CSS 10.7 kB, lazy `SeriesLineChart` 109 kB, lazy `RunGraphCanvas` 78 kB, lazy graph libraries (shared) 74 kB, lazy
+  `PipelineBuilderPage` 13 kB, all JS 1,150 kB. Raise a ceiling only through
   an ADR-recorded exception. *ADR-0196. Enforced in [ui-enterprise.yml](../.github/workflows/ui-enterprise.yml).*
 - During freeze week (2026-10-29 to 11-03), raise entry JS plus CSS by at most 1 kB in total, and only for a
   demo blocker recorded in the PR body and in an ADR note. *ADR-0198.*
