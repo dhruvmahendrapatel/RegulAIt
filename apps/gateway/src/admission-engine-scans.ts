@@ -52,6 +52,7 @@ import {
   maxSeverity,
   severityAtLeast,
   type AdmissionScanEngineId,
+  type AdmissionScanExpectedInput,
   type AdmissionScanVerdict,
   type EngineAdmissionOutcome,
   type McpAdmissionFinding,
@@ -132,7 +133,7 @@ export interface RecordedAdmissionScan {
  */
 export async function recordAdmissionEngineScan(
   db: Db,
-  input: { subject: AdmissionScanSubject; report: unknown; engineRunId?: string | null },
+  input: { subject: AdmissionScanSubject; report: unknown; engineRunId?: string | null; expectedInput: AdmissionScanExpectedInput | null },
 ): Promise<RecordedAdmissionScan> {
   return db.transaction((tx) => recordAdmissionEngineScanTx(tx, input));
 }
@@ -144,11 +145,11 @@ export async function recordAdmissionEngineScan(
  */
 export async function recordAdmissionEngineScanTx(
   tx: Tx,
-  input: { subject: AdmissionScanSubject; report: unknown; engineRunId?: string | null },
+  input: { subject: AdmissionScanSubject; report: unknown; engineRunId?: string | null; expectedInput: AdmissionScanExpectedInput | null },
 ): Promise<RecordedAdmissionScan> {
   const engineId = admissionScanEngineFor(input.subject.kind);
   const spec = ADMISSION_SCAN_ENGINES[engineId];
-  const r = interpretAdmissionScanReport(input.report, { engine: engineId });
+  const r = interpretAdmissionScanReport(input.report, { engine: engineId, input: input.expectedInput });
   {
     const subject = input.subject;
     const [row] = await tx

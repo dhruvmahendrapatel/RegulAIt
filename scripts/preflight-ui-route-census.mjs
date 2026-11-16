@@ -109,6 +109,7 @@ export const MACHINE_ONLY = new Map([
 
   // ---- inbound callbacks and provisioning -----------------------------------
   ["POST /v1/pm/webhooks/:connectionName", "inbound callback: PM-tool webhooks, signature-verified in route (ADR-0061)"],
+  ["POST /v1/model-drift/ingest/:monitorId/reports", "pipeline push: a drift monitor's write-only ingestion credential, authenticated in route (ADR-0223 amendment 1)"],
   ["POST /v1/chatops/:connectionName/interactions", "inbound callback: Slack/Teams button interactions, signature-verified in route (ADR-0061)"],
   ["POST /v1/chatops/:connectionName/events", "inbound callback: Slack Events API to builder agents (ADR-0173)"],
   ["POST /v1/chatops/:connectionName/messages", "inbound callback: Teams outgoing webhook to builder agents (ADR-0173)"],
@@ -457,6 +458,9 @@ export const KNOWN_UI_GAPS = new Map([
   // #453 (the design builder builds screens). Building it deletes these two and lowers the cap.
   ["POST /v1/onboarding/imports/pm", { does: "previews (default) or applies a PM project / work-item import: linkage only, onto an Initiative; apply carries the previewed planSha256", tracking: "#453" }],
   ["GET /v1/onboarding/imports/pm/items", { does: "pages the imported work-item linkage for one PM connection and its Initiative mapping", tracking: "#453" }],
+  ["GET /v1/endpoint-addons/versions", { does: "lists each AI add-on version seen on endpoints with its admission-scan verdict for that exact content digest (not yet scanned is never clear)", tracking: "ADR-0332 (lane E14): master brief for lane E14 (2026-11-15): the inventory is API-only and the UI builder builds its screen; KNOWN_UI_GAPS entries point at #453 (screen brief in PR #866)" }],
+  ["GET /v1/endpoint-addons/sightings", { does: "lists each add-on version per endpoint and detection source, with first/last seen, risk flags and secret types (never a value)", tracking: "ADR-0332 (lane E14): master brief for lane E14 (2026-11-15): the inventory is API-only and the UI builder builds its screen; KNOWN_UI_GAPS entries point at #453 (screen brief in PR #866)" }],
+  ["GET /v1/endpoint-addons/flagged", { does: "lists the endpoint add-on sightings flagged at or above a severity (the removal-directive and detection contract)", tracking: "ADR-0332 (lane E14): master brief for lane E14 (2026-11-15): the inventory is API-only and the UI builder builds its screen; KNOWN_UI_GAPS entries point at #453 (screen brief in PR #866)" }],
 ]);
 
 /**
@@ -465,7 +469,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 51; // main's 54 − 11 MCP bundle routes closed by #815 + ADR-0240 6 external-portal second-factor routes awaiting #453 (#709); + ADR-0289 (L6) 2 API-only PM importer routes, owner answer relayed by the master session 2026-11-15 (recorded in the #828 body)
+export const KNOWN_UI_GAPS_MAX = 54; // main's 54 − 11 MCP bundle routes closed by #815 + ADR-0240 6 external-portal second-factor routes awaiting #453 (#709) + ADR-0332 (lane E14) 3 API-only endpoint add-on inventory routes, master brief for lane E14 2026-11-15 (screen by the UI builder, #453); + ADR-0289 (L6) 2 API-only PM importer routes, owner answer relayed by the master session 2026-11-15 (recorded in the #828 body)
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 
