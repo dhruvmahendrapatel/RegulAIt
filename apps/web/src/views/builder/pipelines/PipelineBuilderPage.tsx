@@ -8,19 +8,23 @@
  */
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import { PageHeader } from "../../../shell/AppShell";
 import { Button, Card, ConfirmModal, EmptyState, RecordError, SkeletonBlock, TabPanel, Tabs } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
 import { ApiError } from "../../../api/client";
 import { plural } from "../../../api/format";
 import { insertStage, moveStage, newStage, removeStage, updateStage, isStageType, type StageType, type TemplateStage } from "./pipelineCanvasModel";
-import { isNoDraft, usePipelineDraft } from "./usePipelineDraft";
+import { isNoDraft, usePipelineDraft, versionsKey } from "./usePipelineDraft";
 import StagePalette from "./StagePalette";
 import StageOutline from "./StageOutline";
 import StageProperties from "./StageProperties";
+import PublishModal from "./PublishModal";
+import VersionHistory from "./VersionHistory";
 import s from "./pipelineBuilder.module.css";
 
 const PipelineCanvas = lazy(() => import("./PipelineCanvas"));
+
 
 const PHONE_QUERY = "(max-width: 700px)";
 const TAB_PREFIX = "pipeline-view";
@@ -47,7 +51,8 @@ export default function PipelineBuilderPage() {
   const st = usePipelineDraft(templateId);
   const phone = usePhone();
   const { toast } = useToast();
-  const [view, setView] = useState<"canvas" | "outline">(phone ? "outline" : "canvas");
+  const qc = useQueryClient();
+  const [view, setView] = useState<"canvas" | "outline" | "versions">(phone ? "outline" : "canvas");
   useEffect(() => {
     if (phone) setView("outline");
   }, [phone]);
@@ -55,6 +60,15 @@ export default function PipelineBuilderPage() {
   const [busy, setBusy] = useState(false);
   const [saveError, setSaveError] = useState<unknown>(null);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const [restoreVersion, setRestoreVersion] = useState<number | null>(null);
+  const [publishedVersion, setPublishedVersion] = useState<number | null>(null);
+  /** discard the open draft and open a new one (from the live definition, or from `fromVersion`) */
+  const reopen = (fromVersion?: number) =>
+    run(async () => {
+      await st.discard();
+      await st.open(fromVersion);
+    }, fromVersion === undefined ? "New draft opened" : `Draft opened from version ${fromVersion}`);
 
   const def = st.working;
   const selected = useMemo(() => def?.stages.find((x) => x.id === selectedId) ?? null, [def, selectedId]);
@@ -138,8 +152,12 @@ export default function PipelineBuilderPage() {
           {header()}
           <Card>
             <EmptyState
-              title="This template has no open draft"
-              body="Open a draft to edit a copy of the live definition. The live template keeps running until a draft is published."
+              title={publishedVersion !== null ? `Version ${publishedVersion} is live` : "This template has no open draft"}
+              body={
+                publishedVersion !== null
+                  ? "New instances start from it; instances already running keep the definition they started with. Open a draft to make the next change."
+                  : "Open a draft to edit a copy of the live definition. The live template keeps running until a draft is published."
+              }
               action={
                 <Button variant="primary" aria-disabled={busy} onClick={() => void run(() => st.open(), "Draft opened")}>
                   Open a draft
@@ -196,6 +214,9 @@ export default function PipelineBuilderPage() {
           <Button size="sm" variant="danger" onClick={() => setConfirmDiscard(true)}>
             Discard draft
           </Button>
+          <Button aria-disabled={busy || st.dirty} onClick={() => !st.dirty && !busy && setPublishing(true)}>
+            Review and publish
+          </Button>
           <Button variant="primary" aria-disabled={busy || !st.dirty} onClick={() => st.dirty && void run(() => st.save(), "Draft saved")}>
             Save draft
           </Button>
@@ -203,15 +224,20 @@ export default function PipelineBuilderPage() {
       )}
       <div className={s.toolbar}>
         <p className={[s.status, v.valid ? s.statusOk : ""].join(" ")} role="status" aria-live="polite">
-          {statusText} {st.dirty ? "Unsaved changes." : "All changes saved."} Draft revision {st.server.draft.revision}, from version{" "}
+          {statusText} {st.dirty ? "Unsaved changes: save the draft to publish it." : "All changes saved."} Draft revision {st.server.draft.revision}, from version{" "}
           {st.server.draft.baseVersion ?? "—"}.
         </p>
       </div>
       {st.server.stale && (
-        <p className={s.fieldError} role="alert">
-          The template was published from elsewhere since this draft was opened. Discard this draft and open a new one to
-          publish.
-        </p>
+        <div className={s.toolbar} role="alert">
+          <p className={s.fieldError}>
+            The template was published from elsewhere since this draft was opened. Discard this draft and open a new one
+            to publish.
+          </p>
+          <Button size="sm" onClick={() => void reopen()}>
+            Discard and open a new draft
+          </Button>
+        </div>
       )}
       <SaveProblem error={saveError} onReload={() => void st.reload()} />
       <div className={s.layout}>
@@ -224,10 +250,11 @@ export default function PipelineBuilderPage() {
             idPrefix={TAB_PREFIX}
             label="Builder view"
             active={view}
-            onChange={(id) => setView(id as "canvas" | "outline")}
+            onChange={(id) => setView(id as "canvas" | "outline" | "versions")}
             tabs={[
               { id: "canvas", label: "Canvas" },
               { id: "outline", label: "Outline" },
+              { id: "versions", label: "Versions" },
             ]}
           />
           <TabPanel idPrefix={TAB_PREFIX} id="canvas" active={view} lazy>
@@ -267,6 +294,9 @@ export default function PipelineBuilderPage() {
               onRemove={remove}
               onInsert={insert}
             />
+          </TabPanel>
+          <TabPanel idPrefix={TAB_PREFIX} id="versions" active={view} lazy>
+            <VersionHistory templateId={templateId} onRestore={setRestoreVersion} />
           </TabPanel>
           {general.length > 0 && (
             <Card title="Problems with the whole workflow">
@@ -321,6 +351,34 @@ export default function PipelineBuilderPage() {
           )}
         </Card>
       </div>
+      {publishing && (
+        <PublishModal
+          key={`${st.server.draft.revision}:${publishing}`}
+          open={publishing}
+          view={st.server}
+          onClose={() => setPublishing(false)}
+          onPublished={(r) => {
+            setPublishing(false);
+            setPublishedVersion(r.version.version);
+            toast(`Version ${r.version.version} published`, "success");
+            void qc.invalidateQueries({ queryKey: versionsKey(templateId) });
+            void st.reload();
+          }}
+        />
+      )}
+      <ConfirmModal
+        open={restoreVersion !== null}
+        title={`Start a new draft from version ${restoreVersion ?? ""}?`}
+        body="The current draft and every change in it is discarded. The live template is not affected until you publish."
+        danger
+        confirmLabel="Discard and start from this version"
+        onCancel={() => setRestoreVersion(null)}
+        onConfirm={() => {
+          const v = restoreVersion;
+          setRestoreVersion(null);
+          if (v !== null) void reopen(v);
+        }}
+      />
       <ConfirmModal
         open={confirmDiscard}
         title={`Discard the draft of ${st.server.template.name}?`}

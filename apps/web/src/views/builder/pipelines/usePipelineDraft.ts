@@ -17,6 +17,7 @@ export const VALIDATE_DEBOUNCE_MS = 450;
 const HISTORY_LIMIT = 100;
 
 export const draftKey = (templateId: string) => ["admin", "pipeline-builder", "draft", templateId] as const;
+export const versionsKey = (templateId: string) => ["admin", "pipeline-builder", "versions", templateId] as const;
 
 export interface LiveValidation {
   valid: boolean | null;

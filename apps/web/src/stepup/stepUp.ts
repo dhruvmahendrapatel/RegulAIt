@@ -198,6 +198,20 @@ export const STEP_UP_ACTION_COPY: Readonly<Record<string, string>> = {
   key_management: "changing a signing key or recording a key's custody",
 };
 
+/**
+ * ADR-0341: a kind that covers several acts says which one through `op` in the action's facts; an op named here is
+ * worded on its own, so the dialog never calls a publish "loosening a security setting". Sorted by op.
+ */
+export const STEP_UP_OP_COPY: Readonly<Record<string, string>> = {
+  workflow_template_publish: "publishing a new version of a workflow template",
+};
+
+/** the dialog's first line for an action: its op's own words when it has them, else its kind's */
+export function stepUpActionText(action: StepUpAction | null | undefined, kind: string): string {
+  const op = action?.body?.op;
+  return (typeof op === "string" ? STEP_UP_OP_COPY[op] : undefined) ?? STEP_UP_ACTION_COPY[kind] ?? "this action";
+}
+
 export const STEP_UP_METHOD_COPY: Readonly<Record<string, string>> = {
   passkey: "Use a passkey",
   totp: "Enter an authenticator code",

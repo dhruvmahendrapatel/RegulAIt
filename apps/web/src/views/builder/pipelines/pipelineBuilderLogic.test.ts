@@ -90,3 +90,52 @@ describe("helpers", () => {
     expect(indexAtX(centres, 50, "c")).toBe(0);
   });
 });
+
+describe("slice 3: publish gate, diff text, step-up wording", async () => {
+  const { publishBlocker, MIN_REASON } = await import("./PublishModal");
+  const { patchOpText } = await import("./DiffView");
+  const { originLabel } = await import("./VersionHistory");
+  const { stepUpActionText } = await import("../../../stepup/stepUp");
+  const base = {
+    template: { id: "t", name: "standard" },
+    draft: { id: "d", revision: 3, definition: def(), baseVersion: 1, createdBy: null, updatedBy: null, createdAt: "", updatedAt: "" },
+    liveVersion: 1,
+    stale: false,
+    validation: { valid: true, issues: [], contentHash: "a".repeat(64) },
+    diff: { patch: [{ op: "add" as const, path: "/stages/2", value: { id: "c", type: "automated_check" } }], stages: null, relaxations: [] },
+  };
+
+  it("publishBlocker refuses stale, invalid, unchanged and unaccepted drafts, in that order", () => {
+    expect(publishBlocker(base, false, "")).toBeNull();
+    expect(publishBlocker({ ...base, stale: true }, false, "")).toMatch(/published from elsewhere/);
+    expect(publishBlocker({ ...base, validation: { valid: false, issues: [{ code: "x", message: "m", stageId: null, path: [] }], contentHash: null } }, false, "")).toBe(
+      "Fix 1 problem first.",
+    );
+    expect(publishBlocker({ ...base, diff: { ...base.diff, patch: [] } }, false, "")).toMatch(/same as the live/);
+    const relaxing = { ...base, diff: { ...base.diff, relaxations: [{ code: "quorum_relaxed", stageId: "s", message: "m" }] } };
+    expect(publishBlocker(relaxing, false, "a good enough reason")).toMatch(/Accept the relaxations/);
+    expect(publishBlocker(relaxing, true, "too short")).toMatch(new RegExp(`at least ${MIN_REASON}`));
+    expect(publishBlocker(relaxing, true, "one approver is enough here")).toBeNull();
+  });
+
+  it("patchOpText words each operation and cuts long values", () => {
+    expect(patchOpText({ op: "remove", path: "/stages/1" })).toBe("Remove /stages/1");
+    expect(patchOpText({ op: "replace", path: "/stages/3/quorum", value: "any" })).toBe('Set /stages/3/quorum to "any"');
+    expect(patchOpText({ op: "move", from: "/stages/1", path: "/stages/2" })).toBe("Move /stages/1 to /stages/2");
+    const long = patchOpText({ op: "add", path: "/x", value: "y".repeat(400) });
+    expect(long).toMatch(/… \(402 characters\)$/);
+  });
+
+  it("names the origin of a version in words", () => {
+    expect(originLabel("baseline")).toBe("Before the builder");
+    expect(originLabel("builder")).toBe("Published");
+  });
+
+  it("the step-up dialog names a publish as a publish, not as a relaxed setting", () => {
+    expect(stepUpActionText({ kind: "settings_relax", body: { op: "workflow_template_publish" } }, "settings_relax")).toBe(
+      "publishing a new version of a workflow template",
+    );
+    expect(stepUpActionText({ kind: "settings_relax", body: { op: "grant_mint" } }, "settings_relax")).toBe("loosening a security setting");
+    expect(stepUpActionText(null, "nope")).toBe("this action");
+  });
+});
