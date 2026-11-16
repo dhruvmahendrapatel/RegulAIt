@@ -22,7 +22,7 @@
  * the kernel serves (the same ADR-0074 reasoning the create routes have
  * always carried; see `rule-write-guard.test.ts`).
  */
-import { approvalRules } from "@regulait/db";
+import { and, approvalRules, eq, gte, isNull, lte, rateLimits } from "@regulait/db";
 import type { DbOrTx, DbOrTxDeep } from "./config-versions.js";
 import type { z } from "zod";
 import type { createApprovalRuleSchema } from "@regulait/shared";
@@ -114,4 +114,114 @@ async function createApprovalRuleRowLocked(
     })
     .returning();
   return row!;
+}
+
+// ---------------------------------------------------------------------------
+// THE SERVER POLICY TEMPLATE (code review #798): one fleet approval rule on a server's tools and one fleet rate limit,
+// shared by the ADR-0246 high-risk template and the ADR-0230 SAP business seed, so both find and seed the rows the
+// same way. Neither caller audits here; each writes its own row in the same transaction.
+// ---------------------------------------------------------------------------
+
+/** What counts as the template already in force on a server. Every bound is "at least as strict as". */
+export interface ServerPolicyTemplateMatch {
+  serverId: string;
+  /** "all" = the rule must cover every tool (write_only false); "writes" = a write-only rule or a broader one */
+  ruleCovers: "all" | "writes";
+  minQuorum: number;
+  /** require argument-bound consent ('action' scope) */
+  actionScoped?: boolean;
+  /** require exactly this approver pool (a re-seed reuses a rule only with the pool it would have seeded) */
+  approvers?: { approverUserId: string; approverRoleId: string | null };
+  /** "all" = the limit must count every call (write_only false); "writes" = a write-only limit or a broader one */
+  limitCovers: "all" | "writes";
+  /** the limit must allow at most this many calls in at least this window */
+  maxCalls?: number;
+  minWindowSeconds?: number;
+}
+
+/**
+ * The template rows in force on a server: fleet scope, that server, every tool name, not scoped to a deploy mode (a
+ * mode-scoped row binds only some calls), and at least as strict as `m`.
+ */
+export async function findServerPolicyTemplate(
+  db: DbOrTx,
+  m: ServerPolicyTemplateMatch,
+): Promise<{ approvalRule: typeof approvalRules.$inferSelect | null; rateLimit: typeof rateLimits.$inferSelect | null }> {
+  const [rule] = await db
+    .select()
+    .from(approvalRules)
+    .where(
+      and(
+        eq(approvalRules.serverId, m.serverId),
+        eq(approvalRules.serverScope, "server"),
+        eq(approvalRules.scope, "fleet"),
+        isNull(approvalRules.toolName),
+        isNull(approvalRules.deployMode),
+        ...(m.ruleCovers === "all" ? [eq(approvalRules.writeOnly, false)] : []),
+        gte(approvalRules.quorum, m.minQuorum),
+        ...(m.actionScoped ? [eq(approvalRules.approvalScope, "action")] : []),
+        ...(m.approvers
+          ? [
+              eq(approvalRules.approverUserId, m.approvers.approverUserId),
+              m.approvers.approverRoleId === null
+                ? isNull(approvalRules.approverRoleId)
+                : eq(approvalRules.approverRoleId, m.approvers.approverRoleId),
+            ]
+          : []),
+      ),
+    )
+    .limit(1);
+  const [limit] = await db
+    .select()
+    .from(rateLimits)
+    .where(
+      and(
+        eq(rateLimits.serverId, m.serverId),
+        eq(rateLimits.serverScope, "server"),
+        eq(rateLimits.scope, "fleet"),
+        isNull(rateLimits.toolName),
+        isNull(rateLimits.deployMode),
+        ...(m.limitCovers === "all" ? [eq(rateLimits.writeOnly, false)] : []),
+        ...(m.maxCalls !== undefined ? [lte(rateLimits.maxCalls, m.maxCalls)] : []),
+        ...(m.minWindowSeconds !== undefined ? [gte(rateLimits.windowSeconds, m.minWindowSeconds)] : []),
+      ),
+    )
+    .limit(1);
+  return { approvalRule: rule ?? null, rateLimit: limit ?? null };
+}
+
+/**
+ * Seed the template inside the caller's transaction: the approval rule through `createApprovalRuleRow` (the ADR-0186
+ * pool guard applies) and a fleet rate limit. With `reuse`, a row already at least as strict is kept instead of a new
+ * one being written. Both rows are CREATE ONLY (a new row has no config_versions, rule-write-guard.test.ts).
+ */
+export async function seedServerPolicyTemplate(
+  tx: DbOrTxDeep,
+  spec: { rule: CreateApprovalRuleInput; limit: { serverId: string; maxCalls: number; windowSeconds: number; writeOnly: boolean } },
+  reuse?: ServerPolicyTemplateMatch,
+): Promise<{
+  approvalRule: typeof approvalRules.$inferSelect;
+  rateLimit: typeof rateLimits.$inferSelect;
+  approvalRuleReused: boolean;
+  rateLimitReused: boolean;
+}> {
+  const kept = reuse ? await findServerPolicyTemplate(tx, reuse) : { approvalRule: null, rateLimit: null };
+  const approvalRule = kept.approvalRule ?? (await createApprovalRuleRow(tx, spec.rule));
+  const rateLimit =
+    kept.rateLimit ??
+    (
+      await tx
+        .insert(rateLimits)
+        .values({
+          scope: "fleet",
+          serverScope: "server",
+          serverId: spec.limit.serverId,
+          toolName: null,
+          writeOnly: spec.limit.writeOnly,
+          maxCalls: spec.limit.maxCalls,
+          windowSeconds: spec.limit.windowSeconds,
+        })
+        .returning()
+    )[0]!;
+  return { approvalRule, rateLimit, approvalRuleReused: kept.approvalRule !== null, rateLimitReused: kept.rateLimit !== null };
 }

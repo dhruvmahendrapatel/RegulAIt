@@ -1,3 +1,4 @@
+import { errorText } from "../../api/format";
 /**
  * ADR-0173 batch 2b — the pure logic behind the Prompts, Playground and
  * Webhooks screens: variable detection, JSON editors, evaluate rows, the
@@ -42,7 +43,7 @@ export function parseJsonObject(text: string): JsonParse {
   try {
     v = JSON.parse(t);
   } catch (e) {
-    return { ok: false, error: `Not valid JSON: ${e instanceof Error ? e.message : String(e)}` };
+    return { ok: false, error: `Not valid JSON: ${errorText(e)}` };
   }
   if (!v || typeof v !== "object" || Array.isArray(v)) return { ok: false, error: "Use a JSON object, like {\"type\": \"object\"}." };
   return { ok: true, value: v as Record<string, unknown> };

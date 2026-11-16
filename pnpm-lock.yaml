@@ -16,6 +16,9 @@ importers:
 
   .:
     devDependencies:
+      '@actions/expressions':
+        specifier: 0.3.61
+        version: 0.3.61
       dependency-cruiser:
         specifier: 18.7.0
         version: 18.7.0
@@ -863,6 +866,10 @@ packages:
         optional: true
       pg:
         optional: true
+
+  '@actions/expressions@0.3.61':
+    resolution: {integrity: sha512-Ig+tXELvTjlqxQAWBQnLNn2dPpNraLMdSnT+vDzDPmJtbNUhIAH/Z9kVT8pZ8UtJi9vUGs8hwHE8JFJmbOnLEA==}
+    engines: {node: '>= 20'}
 
   '@ai-sdk/google@4.0.109':
     resolution: {integrity: sha512-BZd6F2vI53t1xb1Qtzfr6zDkUR7unzmKpI3UhDp9TxDl+JLw2DLRiTGWBeaqLJEdjt5myS4yqzjIhI9cDC9bfw==}
@@ -4285,6 +4292,8 @@ snapshots:
       '@grpc/grpc-js': 1.14.5
       express: 5.2.1
       pg: 8.23.1
+
+  '@actions/expressions@0.3.61': {}
 
   '@ai-sdk/google@4.0.109(zod@4.6.7)':
     dependencies:
