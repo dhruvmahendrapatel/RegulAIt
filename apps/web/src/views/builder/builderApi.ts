@@ -35,6 +35,7 @@ import type {
 } from "../../api/types";
 import type { AutonomyClass, BuilderAgentAutonomyView } from "./autonomyModel";
 import { bindingsFromGranted } from "../models/modelBindings";
+import { errorText } from "../../api/format";
 
 export const bk = {
   agents: ["builder", "agents"] as const,
@@ -170,7 +171,7 @@ export function chatRefusal(e: unknown): { message: string; code: string | null;
     const threadId = typeof e.payload.threadId === "string" ? e.payload.threadId : null;
     return { message: e.message, code: e.payload.error ?? null, threadId };
   }
-  return { message: e instanceof Error ? e.message : String(e), code: null, threadId: null };
+  return { message: errorText(e), code: null, threadId: null };
 }
 
 // ---- existing (non-builder) routes the builder reads ----------------------

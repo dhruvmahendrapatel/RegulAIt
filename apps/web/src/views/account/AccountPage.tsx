@@ -10,7 +10,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
 import { withStepUp } from "../../stepup/stepUp";
 import type { OwnSession } from "../../api/adminTypes";
-import { ago } from "../../api/format";
+import { ago, errorText } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, IdChip, Input, Table } from "../../ui/kit";
@@ -223,7 +223,7 @@ export function SessionsCard(props: { preview?: boolean }) {
       toast(okMsg, "success");
       await qc.invalidateQueries({ queryKey: ["account", "sessions"] });
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorText(err));
     } finally {
       setBusy(false);
     }
@@ -350,7 +350,7 @@ function PasswordCard(props: { passwordSet: boolean }) {
       } else if (err instanceof ApiError && err.payload.error === "no_password_set") {
         setError("This account has no password yet — an admin must set an initial one-time password.");
       } else {
-        setError(err instanceof Error ? err.message : String(err));
+        setError(errorText(err));
       }
     } finally {
       setBusy(false);

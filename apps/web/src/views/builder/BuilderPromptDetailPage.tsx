@@ -10,7 +10,7 @@
 import { useEffect, useId, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ago } from "../../api/format";
+import { ago, errorText } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
 import { Badge, Button, ConfirmModal, EmptyState, ErrorState, Field, Input, Modal, Select, SkeletonBlock, type Tone } from "../../ui/kit";
@@ -22,7 +22,7 @@ import { diffLinesOf, diffStats, PROD_TAG, prettyJson, shortHash, TAG_RE } from 
 import s from "./builder.module.css";
 import p from "./prompts.module.css";
 
-const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+const errText = (e: unknown) => (errorText(e));
 
 /** why one commit could not be read, in words */
 export function commitReadRefusal(e: unknown): string {

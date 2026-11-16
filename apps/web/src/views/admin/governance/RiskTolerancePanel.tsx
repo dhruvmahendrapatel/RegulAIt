@@ -117,7 +117,7 @@ export function RiskTolerancePanel() {
       }
       actions={d ? <Badge tone={d.source === "default" ? "ok" : "warn"}>{d.source === "default" ? "strict default" : "configured"}</Badge> : null}
     >
-      <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+      <QueryGate query={q}>
         {d && (
           <div className={v.stack}>
             <p className={v.hint}>

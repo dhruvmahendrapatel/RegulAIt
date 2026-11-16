@@ -8,7 +8,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import ChatOpsPage from "./ChatOpsPage";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
-import { ago } from "../../../api/format";
+import { ago, errorText } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, ErrorState, Field, Input, Select } from "../../../ui/kit";
 import { DataList } from "../../../ui/DataList";
@@ -104,7 +104,7 @@ export default function ChatIdentityLinksPage() {
         {connections.isError && !connections.data && (
           <ErrorState
             title="Couldn't load the chat workspaces"
-            message={connections.error instanceof Error ? connections.error.message : String(connections.error)}
+            message={errorText(connections.error)}
             onRetry={() => void connections.refetch()}
           />
         )}
