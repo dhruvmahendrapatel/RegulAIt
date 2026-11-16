@@ -21,6 +21,9 @@
 # the licence gate (licence-gate.mjs) runs on what this installs.
 # 2026-10-31: pyasn1 0.6.4 -> 0.6.5 (BSD-2-Clause) for CVE-2026-119194..119197 (high, fixed in 0.6.5); pyasn1-modules 0.4.2
 # accepts pyasn1>=0.6.1,<0.7.0, so no other pin moved. The hash is the py3-none-any wheel from PyPI's JSON API.
+# 2026-11-15: opentelemetry-api 1.45.1 -> 1.45.2 (Apache-2.0) for GHSA-mf5v-w3w3-f6cg (moderate, fixed in 1.45.2); its only
+# requirement is still typing-extensions>=4.5.0 and nothing here pins the api, so no other pin moved. The hash is the
+# py3-none-any wheel from PyPI's JSON API (the same version the skillscanner and mcpscanner closures already pin).
 accelerate==1.15.0 \
     --hash=sha256:97eacca0b73e45cb867dbf8c5d5d4dc32219544300e0c8992c7334dc2ef33cec
 aiohappyeyeballs==2.7.1 \
@@ -223,8 +226,8 @@ ollama==0.6.3 \
     --hash=sha256:6a20bc42c1a5f889295d7ec490d35e5132fc31f339561530f43a8abd4dbfe508
 openai==2.54.0 \
     --hash=sha256:89089789197ccdb87f173a03145ed1598d00795220c93e96cf712b1cbf5e5f2b
-opentelemetry-api==1.45.1 \
-    --hash=sha256:b31553efa588ae44bc306f863c785c5333a9ecc091248c6ee68b4b6c87fdedfb
+opentelemetry-api==1.45.2 \
+    --hash=sha256:2cbd737377e710ee740d261c94e93fa0f08e6d037c18f17513cc0a2d94479a34
 orjson==3.13.0 \
     --hash=sha256:bceadfd314bd238f584fc229a4bbaf0e573597e7a026dec5429fbf29fd66c641
 ormsgpack==1.13.0 \

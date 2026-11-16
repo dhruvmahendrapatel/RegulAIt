@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/contract"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/enforce"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/transport"
 )
 
@@ -26,6 +27,11 @@ type LocalConfig struct {
 	Issuer        string          `json:"issuer"`
 	CABundleFile  string          `json:"caBundleFile,omitempty"`
 	DisabledKinds []contract.Kind `json:"disabledKinds,omitempty"`
+	// DevicePolicyKeys pins the control plane's device-policy signer (owner decision B4, ADR-0330 §8): the public
+	// keys the on-device enforcement hook verifies signed policies with, the current key and at most one next key.
+	// Pinning authorises policies signed by these keys, and so whatever they allow; a pin never overrides a compiled
+	// key, and nothing here relaxes the agent without such a signed policy.
+	DevicePolicyKeys []enforce.PinnedKey `json:"devicePolicyKeys,omitempty"`
 }
 
 // Config is the validated local config.
@@ -33,6 +39,8 @@ type Config struct {
 	Issuer   string
 	CABundle []byte
 	Disabled map[contract.Kind]bool
+	// DevicePolicyKeys is the validated pinned device-policy keyring (empty when none is pinned).
+	DevicePolicyKeys enforce.Keyring
 }
 
 // LoadConfig reads and validates the config file and its CA bundle.
@@ -52,7 +60,11 @@ func LoadConfig(path string, owner int) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("config: %w", err)
 	}
-	cfg := &Config{Issuer: issuer, Disabled: map[contract.Kind]bool{}}
+	keys, err := enforce.KeyringFrom(lc.DevicePolicyKeys)
+	if err != nil {
+		return nil, fmt.Errorf("config: %w", err)
+	}
+	cfg := &Config{Issuer: issuer, Disabled: map[contract.Kind]bool{}, DevicePolicyKeys: keys}
 	for _, k := range lc.DisabledKinds {
 		known := false
 		for _, kk := range contract.Kinds {
