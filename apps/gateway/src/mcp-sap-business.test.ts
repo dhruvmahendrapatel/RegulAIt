@@ -30,6 +30,7 @@ import {
   mcpServers,
   mcpTools,
   orgSettings,
+  requestIdempotencyKeys,
   ORG_SETTINGS_ID,
   rateLimits,
   roleAssignments,
@@ -441,6 +442,19 @@ describe("ADR-0230 A3: the idempotency key, its approval binding, and the busine
     const [usage] = await db.select().from(usageEvents).where(and(eq(usageEvents.userId, callerId), eq(usageEvents.operation, WRITE))).orderBy(desc(usageEvents.at)).limit(1);
     expect(usage!.costUsd).toBe(0.01);
     expect(usage!.detail).toMatchObject({ sap: { documentNumber: "4711", replayed: false } });
+  });
+
+  it("code review #882: two concurrent first uses of one key with different fields cannot both pass; the claim is in the ADR-0179 store", async () => {
+    const k = crypto.randomUUID();
+    const [a, b] = await Promise.all([call({ idempotencyKey: k, quantity: 7 }), call({ idempotencyKey: k, quantity: 8 })]);
+    const refused = [a, b].filter((o) => o.kind === "denied" && o.decision.ruleId === SAP_BUSINESS_RULE_IDS.keyReused);
+    expect(refused.length, JSON.stringify([a.kind, b.kind])).toBe(1);
+    const stored = deriveSapIdempotencyKey(DATA_KEY, { id: serverId, url: upstreamUrl }, callerId, k)!;
+    const claims = await db
+      .select()
+      .from(requestIdempotencyKeys)
+      .where(and(eq(requestIdempotencyKeys.userId, callerId), eq(requestIdempotencyKeys.scope, `mcp-sap:${serverId}`), eq(requestIdempotencyKeys.key, stored)));
+    expect(claims.length).toBe(1);
   });
 
   it("a key reused with other fields is refused; a replay is recorded and not charged; SAP error text is never kept", async () => {

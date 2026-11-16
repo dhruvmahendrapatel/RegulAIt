@@ -400,10 +400,12 @@ answer is a data change, not a code change).
 - **The approval binding**: the stored key is in the arguments the ADR-0104 digest covers, and `governedEvaluate`'s
   new `bindArguments` option forces `action` scope for SAP business writes, so one approval authorises exactly one key
   and one set of fields even if an admin relaxes the rule to `tool` scope.
-- **Reuse with other fields**: the gateway refuses a stored key that an earlier decision row of the same person on the
-  same server (within 30 days, the server store's default retention) recorded with a different arguments digest
-  (`sap-idempotency-key-reused`). No new table: the decision rows carry `detail.sap.idempotencyKey`. The server's own
-  store (§2) stays the authority for replays and cross-principal hits.
+- **Reuse with other fields** (code review #882): the stored key is claimed in ADR-0179's request store
+  (`request_idempotency_keys`, scope `mcp-sap:<serverId>`, `request_digest` = the arguments digest) through
+  `claimRequestKey`. The unique (user, scope, key) index serialises concurrent first uses, so of two calls with one key
+  and different fields exactly one passes; the other is refused `sap-idempotency-key-reused`. The same key with the
+  same fields passes (a retry; the server's own store (§2) answers it). The store's 30-day window and the
+  `idempotency-key-sweep` apply. The decision rows still carry `detail.sap.idempotencyKey` as evidence.
 - **Audit and usage detail**: the decision row and the usage row carry `sap` (service, entity set, stored key; the
   usage row adds the outcome). A new outcome row `sap-business-outcome` records service, entity set, stored key, the
   approval id, the decision row id, and the document number, `replayed` and SAP error code read from the server's
@@ -413,7 +415,9 @@ answer is a data change, not a code change).
 - **Refusals after entitlement**: a key refusal is held and returned only after the entitlement decision, as the
   project requirement is (review #798), and audited only when it is the call's answer.
 - **Replays are not charged**: a result with `replayed: true` writes its usage row with cost 0 (and settles 0 along a
-  delegation chain).
+  delegation chain). This trusts the upstream's flag: the server is the customer's own, admin-registered regulAIt-ABAP
+  server and every write is approve-first, so the exposure is small (code review #882); a follow-up can cross-check a
+  replay against the key's claim.
 - **Contract for slice A1** (regulAIt-ABAP): return `structuredContent.businessDocument` with `documentNumber`,
   `replayed` and, on an SAP error, `errorCode` (`[A-Za-z0-9_]{1,64}`); accept `idempotencyKey` as a GUID.
 

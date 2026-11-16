@@ -28,15 +28,16 @@
  * Out of this slice (ADR-0230 A2, blocked on slice A0): identity release, subject-token retention and the
  * confirm-by-fresh-step-up execution state.
  */
-import { createHmac, hkdfSync } from "node:crypto";
+import { createHash, createHmac, hkdfSync } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { and, approvalRules, auditLog, eq, gte, inArray, mcpServers, mcpTools, projects, rateLimits, sql, type Db } from "@regulait/db";
+import { and, approvalRules, auditLog, eq, inArray, mcpServers, mcpTools, projects, rateLimits, sql, type Db } from "@regulait/db";
 import { canonicalMcpAudience, createApprovalRuleSchema } from "@regulait/shared";
 import { pairwiseSubject } from "./delegated-token.js";
 import { identitySecretsFor } from "./oauth/common.js";
 import { seedServerPolicyTemplate, type ServerPolicyTemplateMatch } from "./rule-creates.js";
 import { loadOrgSettings } from "./org-settings.js";
+import { claimRequestKey } from "./request-idempotency.js";
 import { requireStepUp } from "./step-up.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
@@ -334,8 +335,6 @@ export function registerMcpSapBusinessRoutes(app: FastifyInstance, db: Db): void
 
 /** The argument an SAP business write carries its caller-chosen key in (ADR-0230 §2). */
 export const SAP_IDEMPOTENCY_ARGUMENT = "idempotencyKey";
-/** How far back the gateway looks for an earlier use of a key: the server store's default retention (§2). */
-export const SAP_IDEMPOTENCY_RETENTION_DAYS = 30;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -344,14 +343,14 @@ const KNOWN_SAP_TOOLS: Readonly<Record<string, { service: string; entitySet: str
   create_sales_order: { service: "API_SALES_ORDER_SRV", entitySet: "A_SalesOrder" },
 };
 
-const hkdfCache = new Map<string, Buffer>();
+// one entry, keyed by a hash of the data key, so the raw key is never retained as a map key (code review #882)
+let hkdfCache: { id: string; base: Buffer } | null = null;
 function sapKeyBase(dataKey: string): Buffer {
-  let k = hkdfCache.get(dataKey);
-  if (!k) {
-    k = Buffer.from(hkdfSync("sha256", Buffer.from(dataKey, "utf8"), Buffer.alloc(0), "regulait/adr0230/sap-idempotency/v1", 32));
-    hkdfCache.set(dataKey, k);
+  const id = createHash("sha256").update(dataKey, "utf8").digest("hex");
+  if (hkdfCache?.id !== id) {
+    hkdfCache = { id, base: Buffer.from(hkdfSync("sha256", Buffer.from(dataKey, "utf8"), Buffer.alloc(0), "regulait/adr0230/sap-idempotency/v1", 32)) };
   }
-  return k;
+  return hkdfCache.base;
 }
 
 /**
@@ -452,22 +451,11 @@ export async function prepareSapWrite(
   const digest = call.argumentsDigestOf(args);
   const known = KNOWN_SAP_TOOLS[call.toolName];
   const facts: SapCallFacts = { service: known?.service ?? null, entitySet: known?.entitySet ?? null, idempotencyKey: stored };
-  // the key's earlier decisions, by this person on this server (the stored key embeds both, so this is exact)
-  const [earlier] = await db
-    .select({ digest: sql<string | null>`${auditLog.detail}->>'argumentsDigest'` })
-    .from(auditLog)
-    .where(
-      and(
-        eq(auditLog.userId, call.userId),
-        eq(auditLog.serverId, call.server.id),
-        gte(auditLog.at, sql`now() - make_interval(days => ${SAP_IDEMPOTENCY_RETENTION_DAYS})`),
-        sql`${auditLog.detail}->'sap'->>'idempotencyKey' = ${stored}`,
-        sql`${auditLog.detail}->>'argumentsDigest' IS NOT NULL`,
-        sql`${auditLog.detail}->>'argumentsDigest' <> ${digest}`,
-      ),
-    )
-    .limit(1);
-  if (earlier) {
+  // code review #882: the ADR-0179 request store claims the stored key, bound to these arguments. The unique
+  // (user, scope, key) index serialises concurrent first uses, so two calls with one key and different fields cannot
+  // both pass; the 30-day window and the idempotency-key sweep are the store's own
+  const claim = await claimRequestKey(db, { userId: call.userId, scope: `mcp-sap:${call.server.id}`, key: stored, requestDigest: digest });
+  if (claim === "reused") {
     return refuse(
       SAP_BUSINESS_RULE_IDS.keyReused,
       `write tool '${call.toolName}' on SAP business server '${call.server.name}' refused: this idempotency key was already used with other arguments; choose a new key`,
