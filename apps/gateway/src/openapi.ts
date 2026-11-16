@@ -303,6 +303,27 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
       "of a fresh preview, plus `acceptChangedOutcomes` and `acceptReason` when outcomes change.",
     body: retireTemplateSchema.extend(decisionRegressionAcceptanceFields),
   },
+  // ADR-0341 — the visual pipeline builder (admin)
+  "GET /v1/workflows/builder/templates": { summary: "Workflow templates as the pipeline builder lists them: live version, open draft, whether the builder may edit it." },
+  "POST /v1/workflows/builder/templates/:templateId/draft": {
+    summary:
+      "Open the template's one draft, from the live definition or `fromVersion`. The first open records the live definition as version 1 (`baseline`). Audited.",
+  },
+  "GET /v1/workflows/builder/templates/:templateId/draft": { summary: "The open draft with its validation result and its diff against the live template." },
+  "PUT /v1/workflows/builder/templates/:templateId/draft": {
+    summary: "Save `{revision, definition}` (compare-and-set on `revision`; at most 256 kB). Answers the validation result and the diff.",
+  },
+  "DELETE /v1/workflows/builder/templates/:templateId/draft": { summary: "Discard the open draft. Audited." },
+  "POST /v1/workflows/builder/validate": {
+    summary: "Validate a definition without storing it: schema, unknown fields, the forced plan gate, the governed deploy tail and the reference checks.",
+  },
+  "POST /v1/workflows/builder/templates/:templateId/publish": {
+    summary:
+      "Publish the draft as the next version and make it live. Refused while invalid or stale; a relaxation needs `acceptRelaxations` and a `reason`; " +
+      "needs a `settings_relax` step-up bound to the template, the version replaced and the content hash. Audited.",
+  },
+  "GET /v1/workflows/builder/templates/:templateId/versions": { summary: "The template's published versions, newest first (`before` pages)." },
+  "GET /v1/workflows/builder/templates/:templateId/versions/:version": { summary: "One version's definition and its diff against the live template." },
   "GET /v1/workflows/instances/:instanceId": {
     summary: "One workflow instance with its stage history.",
     responseNote:

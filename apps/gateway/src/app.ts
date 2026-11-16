@@ -521,6 +521,7 @@ import { mirrorApprovalDecision, registerPmRoutes } from "./pm.js";
 import { RunStateError } from "@regulait/orchestration-kernel";
 import { applyWorkflowApprovalDecision, registerWorkflowRoutes } from "./workflows.js";
 import { registerTemplateGalleryRoutes } from "./template-gallery.js";
+import { registerWorkflowBuilderRoutes } from "./workflow-builder.js";
 // ADR-0080 — the AI use-case registry (L1 front-door) and its lifecycle join.
 import {
   acceptUseCaseRisks,
@@ -6050,6 +6051,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   });
   // ADR-0077 — the cascade-annotated template gallery (admin-gated by default)
   registerTemplateGalleryRoutes(app, db);
+  // ADR-0341 — the visual pipeline builder: drafts, versions, diff and publish of workflow templates (admin)
+  registerWorkflowBuilderRoutes(app, db);
   registerUseCaseRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0171 / AER-050 — the intake wizard's server-side drafts
   registerUseCaseDraftRoutes(app, db);

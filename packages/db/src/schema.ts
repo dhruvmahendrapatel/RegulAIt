@@ -16842,3 +16842,67 @@ export const endpointAddonSightingSecretTypes = pgTable(
   ],
 );
 // ===== end ADR-0332 =====
+
+// ===== ADR-0341 — the visual pipeline builder: drafts and versions of workflow templates =====
+/**
+ * One open draft per template, edited on the builder's canvas. `definition` is a schema-validated configuration
+ * document (ADR-0200 exception: it is validated by `workflowDefinitionSchema` on every save, may be invalid while
+ * someone is mid-edit, and is never executed). `base_version_id` is the version the draft was opened from; a publish is
+ * refused when the template has been published since. `revision` is the optimistic-concurrency counter every save
+ * names. Deployment-wide like `workflow_templates` (no tenant column, so no RLS policy); the routes are admin-only.
+ */
+export const workflowTemplateDrafts = pgTable(
+  "workflow_template_drafts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    templateId: uuid("template_id")
+      .notNull()
+      .references(() => workflowTemplates.id, { onDelete: "cascade" }),
+    definition: jsonb("definition").notNull(),
+    baseVersionId: uuid("base_version_id")
+      .notNull()
+      .references((): AnyPgColumn => workflowTemplateVersions.id, { onDelete: "cascade" }),
+    revision: integer("revision").notNull().default(1),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("workflow_template_drafts_template_uq").on(t.templateId),
+    index("workflow_template_drafts_base_version_idx").on(t.baseVersionId),
+    check("workflow_template_drafts_revision_check", sql`${t.revision} >= 1`),
+    check("workflow_template_drafts_definition_check", sql`jsonb_typeof(${t.definition}) = 'object'`),
+  ],
+);
+export type WorkflowTemplateDraftRow = typeof workflowTemplateDrafts.$inferSelect;
+
+/**
+ * Every published version of a template, append-only (`regulait_refuse_mutation`, no TRUNCATE). `definition` is a
+ * point-in-time snapshot (ADR-0200 exception): the bytes that went live, which `content_hash` (SHA-256 of ADR-0060's
+ * canonical JSON) identifies. `origin` `baseline` is the live definition captured the first time a template is opened
+ * in the builder; `builder` is a publish.
+ */
+export const workflowTemplateVersions = pgTable(
+  "workflow_template_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    templateId: uuid("template_id")
+      .notNull()
+      .references(() => workflowTemplates.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    definition: jsonb("definition").notNull(),
+    contentHash: text("content_hash").notNull(),
+    origin: text("origin", { enum: ["baseline", "builder"] }).notNull(),
+    publishedBy: uuid("published_by").references(() => users.id, { onDelete: "set null" }),
+    publishedAt: timestamp("published_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("workflow_template_versions_template_version_uq").on(t.templateId, t.version),
+    check("workflow_template_versions_version_check", sql`${t.version} >= 1`),
+    check("workflow_template_versions_hash_check", sql`${t.contentHash} ~ '^[0-9a-f]{64}$'`),
+    check("workflow_template_versions_origin_check", sql`${t.origin} IN ('baseline', 'builder')`),
+  ],
+);
+export type WorkflowTemplateVersionRow = typeof workflowTemplateVersions.$inferSelect;
+// ===== end ADR-0341 =====
