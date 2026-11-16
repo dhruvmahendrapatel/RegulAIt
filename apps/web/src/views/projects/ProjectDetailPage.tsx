@@ -8,7 +8,7 @@ import { Link, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
 import type { ProjectCosts, ProjectMember } from "../../api/types";
-import { ago, fmtUsd, plural } from "../../api/format";
+import { ago, fmtUsd, plural, errorText } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
 import {
@@ -425,7 +425,7 @@ export default function ProjectDetailPage() {
                           toast("Member added", "success");
                           setAddUserId("");
                         } catch (err) {
-                          setMemberError(err instanceof Error ? err.message : String(err));
+                          setMemberError(errorText(err));
                         } finally {
                           void refreshMembers();
                         }

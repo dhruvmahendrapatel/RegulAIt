@@ -365,6 +365,6 @@ jobs:
         run: |
           echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
           echo "$RESULTS" | jq -e '
-            def ok(want): if want == "true" then .result == "success" else .result == "skipped" end;
+            def ok(want): if want == "true" then .result == "success" elif want == "false" then .result == "skipped" else false end;
             .scope.outputs as $o |
             .scope.result == "success" and (.static | ok($o.code)) and (.browsers | ok($o.web)) and (.screenshots | ok($o.full))' > /dev/null

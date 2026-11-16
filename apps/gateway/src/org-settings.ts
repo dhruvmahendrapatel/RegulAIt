@@ -49,6 +49,7 @@ import {
   type SQL,
   runWithoutRlsScope,
 } from "@regulait/db";
+import { ownerDbFor } from "./owner-db.js";
 import { relaxedOrgSettingKeys, type RelaxationFacts, type WritableOrgSettingKey } from "./org-setting-strictness.js";
 import {
   ACCOUNTABILITY_SETTING_KEYS,
@@ -80,7 +81,7 @@ import { evaluateIpEnvelope, isValidCidr } from "./net-policy.js";
 import { countEnabledSsoProviders } from "./sso-providers.js";
 import { signInInvariantChecked, signInInvariantWritten, withSignInInvariant } from "./break-glass.js";
 import { settingTransitions } from "./setting-transitions.js";
-import { revokeAuditorAccessOnDisable } from "./trust-pages-revoke.js";
+import { revokeAuditorAccessOnDisable, revokeAuditorSessionsOnMfaRequired } from "./trust-pages-revoke.js";
 import { databaseNow } from "./db-clock.js";
 import {
   approvalRuleStepUp,
@@ -305,11 +306,12 @@ export interface AuditPruneResult {
 /**
  * ADR-0234 batch 7a: the prune deletes audit_log rows, and the app role every RLS scope runs as has no DELETE on
  * audit_log (0272: the ledger is append-only for it). So the pass always leaves the caller's scope (an admin's POST,
- * a bootstrap-token request, the timer) and runs on the connection's own login, as it did before batch 2. Batch 7b
- * moves it to the owner (migrator) connection, the only login that may delete from the ledger.
+ * a bootstrap-token request, the timer). Batch 7b: it runs on the OWNER (migrator) connection, the only login that
+ * may delete from the ledger, under the owner-only `audit_retention` reason (FORCE row-level security binds the owner
+ * too; the app role cannot use the reason, and has no DELETE).
  */
 export function runAuditPruneOnce(db: Db, actorUserId: string | null, auto: boolean): Promise<AuditPruneResult> {
-  return runWithoutRlsScope(() => runAuditPruneOnceUnscoped(db, actorUserId, auto));
+  return runWithoutRlsScope(() => runAuditPruneOnceUnscoped(ownerDbFor(db), actorUserId, auto));
 }
 
 async function runAuditPruneOnceUnscoped(db: Db, actorUserId: string | null, auto: boolean): Promise<AuditPruneResult> {
@@ -329,6 +331,8 @@ async function runAuditPruneOnceUnscoped(db: Db, actorUserId: string | null, aut
   const retainedDays = f.retainedDays;
   const deleted = await db.transaction(async (rawTx) => {
     const tx = rawTx as unknown as Db;
+    // ADR-0234 batch 7b: the delete, and the read behind it, under the owner-only retention reason
+    await tx.execute(sql`select pg_catalog.set_config('regulait.system_context', 'audit_retention', true)`);
     const removed = await tx
       .delete(auditLog)
       .where(prunableWhere(cutoff, f.modeOverrides))
@@ -992,6 +996,9 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
       // ADR-0225 (review M1): trust pages turned off ends every auditor's access in this same commit; on again revives none
       if (locked.trustPagesEnabled && !after.trustPagesEnabled) {
         await revokeAuditorAccessOnDisable(tx as unknown as Db, req.authCtx.userId);
+      } else if (!locked.trustAuditorMfaRequired && after.trustAuditorMfaRequired) {
+        // ADR-0240 (#709 review): re-tightening ends the sessions a link alone opened while the factor was relaxed
+        await revokeAuditorSessionsOnMfaRequired(tx as unknown as Db, req.authCtx.userId);
       }
       return { after };
     });

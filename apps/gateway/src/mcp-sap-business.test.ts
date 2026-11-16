@@ -600,3 +600,28 @@ describe("security review #798 (3bf47251): every reader of a tool's kind agrees 
   });
 });
 
+describe("code review #798 (8b3e264e): one shared server policy template", () => {
+  it("the system-class GET lists only the rows a mark seeded, not a hand-made rule on the same server", async () => {
+    const serverId = await mkServer("provenance");
+    const marked = await app.inject({ method: "POST", url: `/v1/servers/${serverId}/system-class`, headers: adminKey, payload: { systemClass: "sap_business", approverRoleId: roleId } });
+    expect(marked.statusCode, marked.body).toBe(201);
+    // an action-scoped, fleet-wide rule on every tool, written by hand (the shape of a high-risk template rule)
+    const [manual] = await db
+      .insert(approvalRules)
+      .values({ scope: "fleet", serverScope: "server", serverId, toolName: null, writeOnly: false, approvalScope: "action", approverUserId: adminId, quorum: 2 })
+      .returning({ id: approvalRules.id });
+    const got = await app.inject({ method: "GET", url: `/v1/servers/${serverId}/system-class`, headers: adminKey });
+    expect(got.json().approvalRuleIds).toEqual([marked.json().approvalRule.id]);
+    expect(got.json().approvalRuleIds).not.toContain(manual!.id);
+  });
+
+  it("a write-only limit never stands in for the high-risk template's limit", async () => {
+    const { highRiskPolicyApplied } = await import("./mcp-high-risk.js");
+    const serverId = await mkServer("hr-limit");
+    await db.insert(rateLimits).values({ scope: "fleet", serverScope: "server", serverId, toolName: null, writeOnly: true, maxCalls: 1, windowSeconds: 3600 });
+    expect((await highRiskPolicyApplied(db, serverId)).rateLimitId).toBeNull();
+    await db.insert(rateLimits).values({ scope: "fleet", serverScope: "server", serverId, toolName: null, writeOnly: false, maxCalls: 1, windowSeconds: 3600 });
+    expect((await highRiskPolicyApplied(db, serverId)).rateLimitId).not.toBeNull();
+  });
+});
+

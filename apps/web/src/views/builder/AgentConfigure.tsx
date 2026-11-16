@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ago, fmtDateTime, fmtUsd, providerLabel } from "../../api/format";
+import { ago, fmtDateTime, fmtUsd, providerLabel, errorText } from "../../api/format";
 import type { BuilderAgentDetail, BuilderChannelProvider, BuilderSharing } from "../../api/types";
 import { useSession } from "../../session/SessionContext";
 import { Badge, Button, ConfirmModal, Field, Input, Meter, Select, Textarea } from "../../ui/kit";
@@ -31,7 +31,7 @@ export const CHANNELS: Array<{ provider: BuilderChannelProvider; name: string; l
   { provider: "email", name: "Email", logo: null, sub: "Send-only: an incoming email can't prove who sent it, so it never starts the agent" },
 ];
 
-const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+const errText = (e: unknown) => (errorText(e));
 
 /** one place that applies an agent-returning change to the cache */
 export function useAgentChange(agentId: string) {

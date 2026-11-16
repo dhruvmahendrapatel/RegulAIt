@@ -41,6 +41,15 @@ import { runAuditV2Cutover } from "@regulait/db";
 import { AUDIT_V2_CUTOVER_ENV, assertAuditChainWritable } from "./audit-v2-cutover.js";
 import { ensureInternalIdentities } from "./in-process-delegation.js";
 import { runMigrations, runWithRlsSystem, type Db } from "@regulait/db";
+import {
+  auditPrivilegedRuntimeLogin,
+  checkRuntimeLogin,
+  describeRuntimeLogin,
+  privilegedRuntimeLoginBanner,
+  resolveRuntimeDatabase,
+  type RuntimeLoginCheck,
+} from "./runtime-login.js";
+import { registerOwnerDb } from "./owner-db.js";
 import { buildApp, type BuildAppOptions } from "./app.js";
 import { RATE_LIMIT_COUNTER_RETENTION_MS, pruneRateLimitCounters } from "./rate-limit-store.js";
 import { prunePmWebhookDeliveries } from "./pm.js";
@@ -55,7 +64,16 @@ import { schedulerJobRegistry } from "./scheduler-jobs.js";
 import { captureAnchor, flushPendingAnchors, resolveAnchorSink } from "./audit-chain.js";
 import { backfillOtlpHeaderCiphertext, loadOrgSettings } from "./org-settings.js";
 import { ManifestDigestRepinBootError, repinManifestDigests, type ManifestDigestRepinResult } from "./manifest-digest-repin.js";
-import { DevSecretsBootError, assessDevSecrets, realAdminExists } from "./dev-secrets.js";
+import {
+  BOOTSTRAP_AFTER_ADMIN_ENV,
+  DEV_SECRETS_OVERRIDE_ENV,
+  DevSecretsBootError,
+  assessDevSecrets,
+  bootstrapAfterAdminRelaxed,
+  activeAdminExists,
+  recordDevSecretsOptIn,
+  recordBootstrapAfterAdmin,
+} from "./dev-secrets.js";
 import { checkReceiptSigningKey } from "./receipt-signing-key.js";
 import { ensureInstallIdentityKey, identitySigningKeyConfiguration } from "./identity-signing-keys.js";
 import { describeGatewayLogger, resolveGatewayLogger } from "./gateway-logger.js";
@@ -70,7 +88,14 @@ import { assertReceiptEmitterBootable } from "./decision-receipts.js";
 const DEFAULT_ANCHOR_INTERVAL_MS = 15 * 60_000;
 
 export interface StartGatewayOptions extends BuildAppOptions {
+  /**
+   * The OWNER (migrator) connection. ADR-0234 batch 7b: it runs the migrations, provisions the runtime login and runs
+   * the audit prune; requests are served on the runtime login (`resolveRuntimeDatabase`), or on this handle when no
+   * runtime login is configured (refused at boot unless it is fit, or the loud dev opt-in is set).
+   */
   db: Db;
+  /** the owner's connection string, from which the install-generated runtime login's URL is derived */
+  connectionString?: string;
   migrationsFolder: string;
   port?: number;
   host?: string;
@@ -92,6 +117,11 @@ export interface StartedGateway {
   metricsAddress: string | null;
 }
 
+/** end a handle's pool (the drizzle handle exposes it as `$client`) */
+function endPool(db: Db): Promise<void> {
+  return (db as unknown as { $client: { end: () => Promise<void> } }).$client.end();
+}
+
 /**
  * Bring a gateway up, or refuse to.
  *
@@ -100,7 +130,7 @@ export interface StartedGateway {
  * under. Nothing is listening when it throws.
  */
 export async function startGateway(opts: StartGatewayOptions): Promise<StartedGateway> {
-  const { db, migrationsFolder, port = 3000, host = "0.0.0.0", log = console.log, env = process.env, ...appOpts } = opts;
+  const { db: ownerDb, connectionString, migrationsFolder, port = 3000, host = "0.0.0.0", log = console.log, env = process.env, ...appOpts } = opts;
 
   // ADR-0121 amendment: a REGULAIT_PUBLIC_URL that is set but invalid refuses
   // the boot FIRST — before an app, a migration or a socket exists — because
@@ -137,10 +167,39 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // ADR-0060 / AER-012: the sink this process anchors WITH (below) is the sink
   // the app's readers grade — one instance, one observation cache.
   const anchorSink = appOpts.auditAnchorSink !== undefined ? appOpts.auditAnchorSink : resolveAnchorSink(env);
-  const app = buildApp(db, { ...appOpts, logger, auditAnchorSink: anchorSink });
+  // ADR-0167 amendment (S-02): the bootstrap token retires once an active admin exists, unless relaxed
+  const bootstrapAfterAdmin = appOpts.bootstrapAfterAdmin ?? bootstrapAfterAdminRelaxed(env);
 
-  // migrations are idempotent — booting always converges the schema
-  await runMigrations(db, migrationsFolder);
+  // migrations are idempotent — booting always converges the schema. ADR-0234 batch 7b: on the OWNER login.
+  await runMigrations(ownerDb, migrationsFolder);
+
+  // ADR-0234 batch 7b — THE RUNTIME LOGIN. Requests are served on a login that is a member of regulait_app and is
+  // not a superuser, BYPASSRLS, CREATEROLE or the owner of the RLS tables, nor a member of a role that is, so no
+  // request path can step out of the policies. Resolved after the migrations (the install-generated login is created through the owner, and needs
+  // regulait_app to exist), and refused here, before an app or a socket exists, when it is not fit.
+  const runtime = await resolveRuntimeDatabase(env, ownerDb, connectionString);
+  const db: Db = runtime.db;
+  let runtimeLogin: RuntimeLoginCheck;
+  try {
+    runtimeLogin = await checkRuntimeLogin(db, env);
+  } catch (err) {
+    if (db !== ownerDb) await endPool(db).catch(() => {});
+    throw err;
+  }
+  if (runtimeLogin.privileged) {
+    for (const line of privilegedRuntimeLoginBanner(runtimeLogin)) log(line);
+  }
+  registerOwnerDb(db, ownerDb);
+  const app = buildApp(db, { ...appOpts, bootstrapAfterAdmin, logger, auditAnchorSink: anchorSink });
+  if (db !== ownerDb) {
+    app.addHook("onClose", async () => {
+      await endPool(db).catch(() => {});
+    });
+  }
+  if (runtimeLogin.privileged) {
+    // the opt-in is evidence, not a footnote: one audit row per boot that used it
+    await runWithRlsSystem("system_task", "boot.runtime-login", () => auditPrivilegedRuntimeLogin(db, runtimeLogin));
+  }
 
   // ADR-0189 R43: a build that cannot emit v2 receipts with facts refuses to
   // start once a receipt v2 boundary is recorded (a v1 receipt there is
@@ -209,14 +268,40 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // and on a box that shows a sign of being deployed they REFUSE the boot —
   // before listen, like the data-key gate, so a refused deployment leaves no
   // socket behind. See dev-secrets.ts for exactly what refuses and what warns.
+  const activeAdminAtBoot = await asBootTask("active-admin-exists", () => activeAdminExists(db)).catch(() => false);
   const secrets = assessDevSecrets(env, {
     bootstrapToken: appOpts.bootstrapToken,
     dataKey: appOpts.dataKey,
-    realAdminExists: await asBootTask("real-admin-exists", () => realAdminExists(db)).catch(() => false),
+    realAdminExists: activeAdminAtBoot,
+    listenHost: host,
+    bootstrapAfterAdmin,
   });
   if (secrets.refuse) {
     await app.close().catch(() => {});
     throw new DevSecretsBootError(secrets);
+  }
+  // S-02: the dev opt-in is RECORDED, not only printed. A failed write is
+  // printed below and never fatal (the box is already accepted as dev-grade).
+  let optInRecorded: "recorded" | "not_needed" | "failed" = "not_needed";
+  try {
+    optInRecorded = (await asBootTask("dev-secrets-opt-in", () => recordDevSecretsOptIn(db, secrets))) ? "recorded" : "not_needed";
+  } catch {
+    optInRecorded = "failed";
+  }
+  // S-02 review: the retirement relaxation is RECORDED too (ADR-0180), never fatal.
+  let relaxationRecorded: "recorded" | "not_needed" | "failed" = "not_needed";
+  try {
+    relaxationRecorded = (await asBootTask("bootstrap-after-admin", () =>
+      recordBootstrapAfterAdmin(db, {
+        bootstrapAfterAdmin,
+        bootstrapToken: appOpts.bootstrapToken,
+        activeAdmin: activeAdminAtBoot,
+      }),
+    ))
+      ? "recorded"
+      : "not_needed";
+  } catch {
+    relaxationRecorded = "failed";
   }
 
   // ADR-0167 (SEC-06): a pre-0128 row still holding the OTLP collector
@@ -447,6 +532,8 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // belongs in the boot log next to the proxy posture rather than only in a
   // response an operator has to think to look at.
   log(`  hsts:      ${describeHsts(resolveHsts())}`);
+  // ADR-0234 batch 7b: say out loud which database login serves requests, and whether row-level security binds it
+  log(`  db login:  ${describeRuntimeLogin(runtimeLogin, runtime.source)}`);
   // ADR-0062: say out loud what this box will REFUSE to reach. An operator who
   // believes their install is air-gapped and has not set the variable must be
   // able to see that from the boot log rather than from a packet capture.
@@ -494,8 +581,20 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   for (const finding of secrets.findings) {
     log(`  secrets:   DEV-GRADE — ${finding}`);
   }
-  if (secrets.overridden && secrets.refusing.length > 0) {
-    log(`             (booting anyway: REGULAIT_ALLOW_DEV_SECRETS=1 overrides the refusal on ${secrets.networkFacingSignal})`);
+  if (secrets.overridden && secrets.refusing.length > 0 && secrets.exposure !== null) {
+    // S-02: LOUD, because this is the one line that says anyone with the repository can sign in as admin here
+    log("  ****************************************************************************");
+    log(`  * DEV SECRETS ACCEPTED: ${DEV_SECRETS_OVERRIDE_ENV}=1 overrides the refusal`);
+    log(`  * (${secrets.exposure}).`);
+    log("  * Published credentials are live on a reachable listener. Development only.");
+    log(`  * Audit: ${optInRecorded === "recorded" ? "recorded (rule dev-secrets-opt-in)" : "WRITE FAILED - this boot is not in the audit log"}`);
+    log("  ****************************************************************************");
+  }
+  if (bootstrapAfterAdmin && appOpts.bootstrapToken) {
+    log(`             (relaxed: ${BOOTSTRAP_AFTER_ADMIN_ENV}=1 keeps the bootstrap token working after an admin signs in)`);
+    log(
+      `             (audit: ${relaxationRecorded === "recorded" ? "recorded (rule bootstrap-after-admin-relaxed)" : "WRITE FAILED - this relaxation is not in the audit log"})`,
+    );
   }
   // ADR-0167 (CFG-08): the pool's bounds and whether the database hop is TLS.
   const dbPool = resolveDbPoolConfig(env);
@@ -618,7 +717,7 @@ export function installShutdownHandlers(
         log(`[regulait] app.close failed during drain: ${errLine(err)}`);
       }
       try {
-        await (db as unknown as { $client: { end: () => Promise<void> } }).$client.end();
+        await endPool(db);
       } catch (err) {
         log(`[regulait] pool.end failed during drain: ${errLine(err)}`);
       }

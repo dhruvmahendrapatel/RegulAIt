@@ -94,7 +94,7 @@ export function RunLineageCard(props: { runId: string | null; onRunId: (runId: s
         </p>
       )}
       {props.runId && (
-        <QueryGate loading={lineage.isLoading} error={lineage.error} onRetry={() => void lineage.refetch()}>
+        <QueryGate query={lineage}>
           {lineage.data ? (
             <div className={v.stack} data-testid="run-lineage">
               {(lineage.data.dispatches ?? []).map((d) => (

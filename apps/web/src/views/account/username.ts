@@ -6,6 +6,7 @@
  * the rule before submitting, and `username.test.ts` pins it.
  */
 import { ApiError } from "../../api/client";
+import { errorText } from "../../api/format";
 
 /** `USERNAME_PATTERN` (packages/shared/src/index.ts), mirrored */
 export const USERNAME_PATTERN = /^[a-z0-9][a-z0-9._-]{1,62}$/;
@@ -32,5 +33,5 @@ export function usernameRefusal(err: unknown): string {
     if (code === "unknown_user") return "This account no longer exists.";
     if (code === "no_user_identity") return "Only a signed-in person can set a username; the bootstrap operator has none.";
   }
-  return err instanceof Error ? err.message : String(err);
+  return errorText(err);
 }

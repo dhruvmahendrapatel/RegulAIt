@@ -114,7 +114,8 @@ import {
 } from "./mcp-admission.js";
 import { definitionPinRefusal, recordDefinitionPins } from "./mcp-definition-pins.js";
 import { highRiskRefusal, recordRiskClassification } from "./mcp-high-risk.js";
-import { prepareSapWrite, readSapOutcome, recordSapOutcome, recordSapRefusal, sapStoredToolKind, sapWriteRefusal, serverSystemClass, type SapCallFacts, type SapWritePreparation } from "./mcp-sap-business.js";
+import { prepareSapWrite, readSapOutcome, recordSapOutcome, recordSapRefusal, sapWriteRefusal, type SapCallFacts, type SapWritePreparation } from "./mcp-sap-business.js";
+import { sapStoredToolKind, serverSystemClass } from "./sap-tool-kind.js";
 import { loadEntitlements } from "./entitlements.js";
 // ADR-0185 G3 — the non-tool MCP methods
 import {
@@ -2238,7 +2239,8 @@ export async function syncUpstreamTools(
     await recordRiskClassification(tx, serverId, tools, trigger);
     returned = pins.blockedTools.size > 0 ? tools.filter((t) => !pins.blockedTools.has(t.name)) : tools;
     // security review #798: on an SAP business server every stored kind is 'write', whatever the hint says
-    const systemClass = await serverSystemClass(tx, serverId);
+    // code review #798: FOR SHARE, so a sync waits for a mark in progress instead of storing hint kinds after it
+    const systemClass = await serverSystemClass(tx, serverId, { lock: true });
     for (const tool of returned) {
       await tx
         .insert(mcpTools)

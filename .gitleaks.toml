@@ -2,7 +2,7 @@
 #
 # The default rule set stays on in full. The only exceptions below are the
 # SYNTHETIC values our own tests and docs use to prove that redaction, DLP and
-# secret scrubbing work, plus four non-secrets the generic rule misreads.
+# secret scrubbing work, plus non-secrets the generic rule misreads.
 #
 # Every exception is (path AND exact value), never a path alone: a real secret
 # pasted into one of these test files is still a finding, because its value is
@@ -19,6 +19,20 @@ title = "regulAIt gitleaks config"
 useDefault = true
 
 # --- Test fixtures: synthetic secrets the scrub/DLP/redaction tests feed in ---
+
+[[allowlists]]
+# ADR-0326: the first commit of the live harness (PR #857) fed these synthetic values to its redaction self-test. The
+# test now builds its fixtures at run time, but the commit stays in the PR's scanned range, so its exact values are
+# listed here for that one file only.
+description = "Synthetic redaction-test inputs in the live harness self-test (ADR-0326)"
+condition = "AND"
+paths = ['''^apps/gateway/live/live-env\.live\.test\.ts$''']
+regexTarget = "secret"
+regexes = [
+  '''^sk-test-123456789$''',
+  '''^abcdefghijkl$''',
+  '''^OnBhdHBhdHBhdA==$''',
+]
 
 [[allowlists]]
 description = "Synthetic test credentials: redaction, DLP and scrub test inputs"
@@ -117,6 +131,13 @@ regexes = [
 ]
 
 # --- Non-secrets in source and docs that the generic rule misreads ---
+
+[[allowlists]]
+description = "ADR-0324: the SHA-256 of the ADR-0041 development release key's PUBLIC key (DER SPKI), already published in infra/release-keys/README.md; verify-release.sh pins it so the untouched dev keyring is recognised. The generic rule reads the 'KEY' in the variable name of an earlier commit (52cfacb3) as a key name. Exact value, this one file."
+condition = "AND"
+paths = ['''^scripts/verify-release\.sh$''']
+regexTarget = "secret"
+regexes = ['''^f2cbda4b1471e4070f7bd75edb69617a48cf58721f34607011935933fa629ff1$''']
 
 [[allowlists]]
 description = "Demo scenario keys are identifiers, not credentials"

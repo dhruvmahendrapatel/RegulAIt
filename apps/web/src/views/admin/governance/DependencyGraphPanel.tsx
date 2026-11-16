@@ -92,7 +92,7 @@ export function DependencyGraphPanel({ useCaseId }: { useCaseId?: string }) {
       {isRefusal(graph.error) ? (
         <NotAvailableToYou what="The dependency graph" />
       ) : (
-      <QueryGate loading={graph.isLoading} error={graph.error} onRetry={() => void graph.refetch()}>
+      <QueryGate query={graph}>
         {!graph.data || graph.data.nodes.length === 0 ? (
           <EmptyState title="No governed dependencies found" body="Link an agent, model, vendor, MCP server, or connector to make the dependency chain visible." />
         ) : (

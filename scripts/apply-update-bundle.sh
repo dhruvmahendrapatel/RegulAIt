@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# RegulAIt update-bundle APPLIER (ADR-0041)
+# RegulAIt update-bundle APPLIER (ADR-0041, ADR-0324)
 #
 # Verify → stage → swap → re-converge. The ONLY entry point that should ever
 # put bundle content into an install directory.
@@ -45,7 +45,7 @@ usage() {
 Usage: scripts/apply-update-bundle.sh <bundle.tar.gz> [options]
 
   --install-dir <dir>    Deployment root to update. Default: this repo root.
-  --keyring <dir>        Pinned public keys. Default: <install-dir>/infra/release-keys
+  --keyring <dir>        The installed, root-signed keyring (ADR-0324). Default: <install-dir>/infra/release-keys
   --image-bundle <tar>   Air-gapped: `docker load` these images before restart.
   --yes, -y              Do not prompt.
   -h, --help
@@ -73,8 +73,12 @@ KEYRING="${KEYRING:-$INSTALL_DIR/infra/release-keys}"
 step "Verifying the bundle (offline, against the pinned keyring)"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
-"$SCRIPT_DIR/verify-update-bundle.sh" "$BUNDLE" \
-  --keyring "$KEYRING" \
+# ADR-0324: the release verifier, not the flat-keyring check alone. It accepts only a signing
+# key the installed root-signed keyring (or a statement its roots endorse) authorises, checks the
+# SBOM and provenance, and only then extracts. A bundle whose payload adds its own .pub to
+# infra/release-keys is refused here, before anything reaches the install directory.
+"$SCRIPT_DIR/verify-release.sh" "$BUNDLE" \
+  --trust "$KEYRING" \
   --install-dir "$INSTALL_DIR" \
   --extract-to "$STAGE/payload" \
   || die "the bundle did not verify — nothing was changed. See the refusal above."

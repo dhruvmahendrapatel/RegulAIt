@@ -4,6 +4,7 @@
  */
 import { Navigate, Route, Routes, useParams } from "react-router-dom";
 import McpServersPage from "./McpServersPage";
+import { McpBundlePage, McpBundlesPage } from "./McpBundlesPage";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
@@ -28,7 +29,7 @@ export function McpRegistryEntriesPage() {
             Federation is refused in this deployment ({list.data.deployMode}): {list.data.federationRefusedReason ?? "registries cannot be pulled"}.
           </p>
         )}
-        <QueryGate loading={list.isLoading} error={list.error} onRetry={() => void list.refetch()}>
+        <QueryGate query={list}>
           {registry ? (
             <RegistryEntriesCard registry={registry} />
           ) : (
@@ -52,6 +53,8 @@ export function McpServersArea() {
     <Routes>
       <Route index element={<McpServersPage />} />
       <Route path="registries/:registryId/entries" element={<McpRegistryEntriesPage />} />
+      <Route path="bundles" element={<McpBundlesPage />} />
+      <Route path="bundles/:bundleId" element={<McpBundlePage />} />
       {/* an unknown sub-path goes back to the area's own page, never a blank page */}
       <Route path="*" element={<Navigate to="/admin/mcp-servers" replace />} />
     </Routes>

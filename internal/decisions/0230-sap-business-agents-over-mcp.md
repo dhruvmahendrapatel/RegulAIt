@@ -342,25 +342,15 @@ return an empty `to_Item`, so the tool reads back after creating. This is confir
 - Follow-ups: approval-card rendering of business fields (a sales order preview); change and cancel tools; OData v4
   services (`API_SALESORDER_0001` style) through the same descriptor.
 
-## Open questions for the owner
+## Owner questions (all answered)
 
-1. **Approval quorum default**: 2 with requester excluded, or 1 plus a named approver role?
-2. **Rate-limit default**: 10 SAP writes per user per hour — right order of magnitude?
-3. **Unattributed SAP writes**: refuse (proposed), or allow and attribute to a default "SAP" project?
-4. **Full-key read-back on SAP's side** (decided: no blind re-post, unmatched means reconcile by hand). Should the
-   runbook ask customers to enable SAP Gateway idempotency for `API_SALES_ORDER_SRV`, or to add a header extension field
-   for the key, so that fewer timeouts end in manual reconciliation?
-5. **Smoke-test system**: which BTP / S/4HANA trial system is used for A0? (No hostnames in this public repo.)
-6. **Read-only business tools**: should they also default to approve-first, or only allow-list plus rate limit?
-7. **Licence scope for the ABAP MCP server**: does ADR-0176's licence rule bind the regulAIt-ABAP product? If it does,
-   the SAP Cloud SDK is out because of its SAP-licensed transitive dependencies, and we use odata2ts plus a small CSRF
-   helper of our own. If it does not (it runs only on SAP's own platform), the Cloud SDK is the better fit.
-8. **Which SAP identity attribute by default** when an admin turns release on: login name, e-mail or IdP user UUID?
-   Proposed: no default, so the admin must choose.
+All eight questions are now owner decisions:
+- Questions 1, 2, 3 and 6 are answered under "Owner decision (2026-11-15): the SAP defaults are org settings" below.
+- Questions 4, 5, 7 and 8 are answered under "Owner decision (2026-11-15): the remaining open questions" below.
 
 ## Amendment (2026-11-14): slice A2, gateway part, as built (Lane L3, first PR)
 
-Built with the proposed defaults while owner questions 1, 2, 3 and 6 stay open (they are ordinary rows, so a different
+Built with the proposed defaults while owner questions 1, 2, 3 and 6 were open (since answered: "Owner decision (2026-11-15)" below) (they are ordinary rows, so a different
 answer is a data change, not a code change).
 
 - **`mcp_servers.system_class`** (null or `sap_business`, CHECK-bound) and **`rate_limits.write_only`** (default false),
@@ -456,4 +446,38 @@ an admin can change in `PUT /v1/org/settings` (pending migration `sap_business_s
   add), and the execution re-check (`approvalRuleQuorumsMatchingNow`) forces 'write' on such a server too, so a raised
   write-only quorum retires consents given under the old one. Unmarking leaves the stored kinds at 'write' until the
   next sync restores the upstream's hints.
-- Owner questions 1, 2, 3 and 6 are closed. 4, 5, 7 and 8 stay open.
+- Owner questions 1, 2, 3 and 6 are closed by this decision. Questions 4, 5, 7 and 8 were answered the same day (next section).
+
+## Owner decision (2026-11-15): the remaining open questions
+
+The owner answered the remaining open questions on 2026-11-15, relayed by the master orchestrator to this lane (Lane L3) the same day:
+
+| # | Question | Decision |
+|---|---|---|
+| 4 | Full-key read-back on SAP's side | The install runbook **recommends** that customers enable SAP Gateway idempotency for `API_SALES_ORDER_SRV`. It is recommended, not required. The decided behaviour stands: no blind re-post, and an unmatched result means reconcile by hand. |
+| 5 | Smoke-test system for A0 | There is no live SAP system yet. The smoke test runs against **recorded fixtures**. No hostnames go in this public repo. |
+| 7 | Licence scope for the ABAP MCP server | ADR-0176's licence rule **does** bind the regulAIt-ABAP server. The SAP Cloud SDK is out because of its SAP-licensed transitive dependencies. Use **odata2ts plus a small CSRF helper** of our own. |
+| 8 | Default SAP identity attribute | There is **no default**. An admin must choose one (login name, e-mail or IdP user UUID) when turning identity release on. Release stays off until they do. |
+
+These bind slices A0 and A1 (identity release and the ABAP server) and the runbook. Nothing in the gateway part
+(A2/A3) changes.
+
+## Recorded decision (2026-11-14): the three system-class routes ship API-only
+
+The master orchestrator's Lane L3 brief (2026-11-14), which assigned this slice, directs: "New routes go in the route
+census plus a KNOWN_UI_GAPS entry pointing at #453. Do not build screens." The three routes
+`GET|POST|DELETE /v1/servers/:serverId/system-class` (and the four `sap*` org settings) are therefore API-only, and
+raising `KNOWN_UI_GAPS_MAX` by 3 for them cites this section. The screen is built by the design builder on #453, which
+lowers the ceiling again.
+
+## Code review #798 (8b3e264e): one shared server policy template
+
+The SAP mark and the ADR-0246 high-risk policy template now seed and find their rows through one helper pair in
+`rule-creates.ts` (`seedServerPolicyTemplate`, `findServerPolicyTemplate`), parameterised by rule coverage (every tool
+or writes), quorum, argument binding, approver pool and the limit's coverage, calls and window. Two consequences:
+- the high-risk gate no longer accepts a write-only or deploy-mode-scoped row as its template (both bind only some
+  calls on a server whose every call is high-risk);
+- the system-class GET reports only the rows the marks seeded (read from the marks' audit rows), never a rule an admin
+  created by hand on the same server.
+
+A manifest sync reads the server row `FOR SHARE`, so it waits for a mark in progress and stores the kinds the mark set.

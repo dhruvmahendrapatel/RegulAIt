@@ -1,0 +1,12 @@
+# Optional: keep Terraform state in your own encrypted S3 bucket (recommended
+# when more than one person runs the install). Copy to backend.tf, fill in, then
+# `terraform init -migrate-state`.
+terraform {
+  backend "s3" {
+    bucket       = "<your-state-bucket>"
+    key          = "regulait/byoc-aws.tfstate"
+    region       = "<region>"
+    encrypt      = true
+    use_lockfile = true
+  }
+}

@@ -20,6 +20,7 @@
  *   - engine error → unknown, and nothing reaches the red-team ledger;
  *   - egress denied → not_run.
  */
+import { hashToken } from "./token-hash.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -319,7 +320,7 @@ beforeAll(async () => {
   const a = await makeUser(`b5p-admin-${RUN}@example.com`, true);
   const token = "rgls_" + randomBytes(32).toString("hex");
   await db.insert(authSessions).values({
-    tokenHash: createHash("sha256").update(token).digest("hex"),
+    tokenHash: hashToken(token),
     userId: a.id,
     origin: "password",
     expiresAt: new Date(Date.now() + 3_600_000),

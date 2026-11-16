@@ -85,7 +85,7 @@ export default function TracesAutomationsTab() {
           </div>
         }
       >
-        <QueryGate loading={rules.isLoading} error={rules.error} onRetry={() => void rules.refetch()}>
+        <QueryGate query={rules}>
           <div className={v.stackTight}>
             <p className={v.faint}>
               A rule runs as its author on traces that finish after it is created, at most 500 traces and 45 seconds a
@@ -391,7 +391,7 @@ function MatchLog(props: { rule: AutomationRule; onClose: () => void }) {
         </Button>
       }
     >
-      <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+      <QueryGate query={q}>
         <Table<AutomationMatch>
           rows={q.data?.matches ?? []}
           rowKey={(x) => x.id}

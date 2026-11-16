@@ -4645,6 +4645,8 @@ export {
   externalEvaluatorId,
   externalScorerCatalogEntry,
   owaspReferences,
+  canonicalOwaspId,
+  OWASP_LLM_2026_PREFIX,
   redteamEvaluatorId,
   scorerEvaluatorId,
   type CatalogEvaluator,
@@ -4976,6 +4978,8 @@ export * from "./isaca-pack.js";
 export * from "./iso-packs.js";
 // ADR-0297 (P18 B6): SR 11-7 and NYC Local Law 144 sector packs
 export * from "./sector-packs.js";
+// ADR-0319 (gap G11): the AIUC-1 ID-only pack
+export * from "./aiuc-packs.js";
 // ADR-0243 (P24): the OWASP MCP and LLM Top 10 packs
 export * from "./owasp-packs.js";
 export * from "./nist-ai-600-1-pack.js";
@@ -5049,6 +5053,8 @@ export * from "./trained-detectors.js";
 export * from "./guardrail-vendor-adapters.js";
 // ADR-0224 (P13 c): privacy operations — records of processing, data-subject requests, the processing limit
 export * from "./privacy-ops.js";
+// ADR-0296 part 2 (P18 B2): privacy-law presets and packs
+export * from "./privacy-packs.js";
 
 // ===== ADR-0215 (P5) — framework content imports and the imported regulatory feed =====
 export * from "./framework-imports.js";
@@ -5056,6 +5062,8 @@ export * from "./atlas-redteam-map.js";
 
 // ===== ADR-0221 (PENDING P4) — the supplier portal =========================
 export * from "./supplier-portal.js";
+// ===== ADR-0240 — one second factor (TOTP) for the supplier and auditor portals ==========
+export * from "./external-mfa.js";
 // ADR-0222 (P13(a)): fairness testing — the group metrics, thresholds and outcome (pure)
 export * from "./fairness.js";
 // ADR-0261 (P37): third-party security telemetry ingest — the DefenseClaw JSONL parser and mapping (pure)

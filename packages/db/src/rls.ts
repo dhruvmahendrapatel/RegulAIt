@@ -43,7 +43,7 @@ export const RLS_APP_ROLE = "regulait_app";
  * blanket bypass: `authenticate` can read users and MFA challenges, and nothing in approvals or audit_log.
  */
 export const RLS_SYSTEM_REASONS = [
-  /** sign-in and session resolution, before a principal exists: users (read; update outside the guarded columns), auth_mfa_pending */
+  /** sign-in and session resolution, before a principal exists: users (read; update outside the guarded columns), auth_mfa_pending, and (ADR-0240) the external portals' external_mfa_factors and external_mfa_challenges */
   "authenticate",
   /** SCIM and the seed: users (all) */
   "identity_provisioning",
@@ -82,6 +82,11 @@ export const RLS_SYSTEM_REASONS = [
    */
   "bootstrap_admin",
   /**
+   * batch 7b: the audit retention prune on the OWNER connection: audit_log (read, delete). Never a caller reason: the
+   * prune sets it inside its own owner transaction, and the app role has no DELETE on audit_log anyway.
+   */
+  "audit_retention",
+  /**
    * batch 7a (#809 review): a request authenticated by a non-user credential (an engine runner or enrolment token,
    * a PDP client, an endpoint agent): users (read), audit_log (append). Nothing in approvals and no ledger read; the
    * one runner step that supersedes an approval enters approval_maintenance for that statement only.
@@ -91,7 +96,7 @@ export const RLS_SYSTEM_REASONS = [
 export type RlsSystemReason = (typeof RLS_SYSTEM_REASONS)[number];
 
 /** reasons a caller may pass to `withSystemContext`; `rls_membership` belongs to the SQL helpers alone */
-export type RlsCallerSystemReason = Exclude<RlsSystemReason, "rls_membership" | "migration" | "audit_subject" | "bootstrap_admin">;
+export type RlsCallerSystemReason = Exclude<RlsSystemReason, "rls_membership" | "migration" | "audit_subject" | "bootstrap_admin" | "audit_retention">;
 /** what a request or job scope may carry: a caller reason, or the bootstrap token's (entered by `runAsBootstrapAdmin` only) */
 export type RlsScopeSystemReason = RlsCallerSystemReason | "bootstrap_admin";
 
@@ -124,6 +129,7 @@ export const RLS_NON_CALLER_REASONS: ReadonlySet<RlsSystemReason> = new Set<RlsS
   "migration",
   "audit_subject",
   "bootstrap_admin",
+  "audit_retention",
 ]);
 const CALLER_REASONS: ReadonlySet<string> = new Set(RLS_SYSTEM_REASONS.filter((r) => !RLS_NON_CALLER_REASONS.has(r)));
 /** the caller reasons whose every table an admin (and so bootstrap_admin) is already admitted to */
