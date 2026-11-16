@@ -41,7 +41,7 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
-import { ago, fmtDateTime, fmtDur, fmtUsd, shortId } from "../../../api/format";
+import { ago, fmtDateTime, fmtDur, fmtUsd, shortId, errorText } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import {
   Badge,
@@ -313,7 +313,7 @@ function TraceStatusChips(props: { onOpen: (tab: string) => void }) {
     return (
       <ErrorState
         title="Couldn't load the tracing status"
-        message={config.error instanceof Error ? config.error.message : String(config.error)}
+        message={errorText(config.error)}
         onRetry={() => void config.refetch()}
       />
     );
@@ -350,7 +350,7 @@ function TracesRetention() {
   const config = useQuery(tracingConfigQuery());
   return (
     <div className={v.stack}>
-      <QueryGate loading={config.isLoading} error={config.error} onRetry={() => void config.refetch()}>
+      <QueryGate query={config}>
         {config.data && (
           <Card title="Retention and limits">
             <div className={v.stack}>
@@ -451,9 +451,7 @@ function TracesView(props: { section: "traces" | "export" }) {
         {/* --- posture ------------------------------------------------- */}
         {props.section === "export" && (
         <QueryGate
-          loading={config.isLoading}
-          error={config.error}
-          onRetry={() => void config.refetch()}
+          query={config}
         >
           {config.data && (
             <Card title="Export and posture">
@@ -610,9 +608,7 @@ function TracesView(props: { section: "traces" | "export" }) {
             one thing.
           </p>
           <QueryGate
-            loading={sessions.isLoading}
-            error={sessions.error}
-            onRetry={() => void sessions.refetch()}
+            query={sessions}
           >
             <NewestNote shown={sessions.data?.sessions?.length ?? 0} limit={50} noun="sessions" />
             {(sessions.data?.sessions ?? []).length === 0 ? (
@@ -841,7 +837,7 @@ function TracesView(props: { section: "traces" | "export" }) {
               </div>
             )}
 
-            <QueryGate loading={list.isLoading} error={list.error} onRetry={() => void list.refetch()}>
+            <QueryGate query={list}>
               {visible.length === 0 ? (
                 <EmptyState
                   title="No traces match"
@@ -955,9 +951,7 @@ function TracesView(props: { section: "traces" | "export" }) {
             }
           >
             <QueryGate
-              loading={detail.isLoading}
-              error={detail.error}
-              onRetry={() => void detail.refetch()}
+              query={detail}
             >
               {detail.data && (
                 <div className={v.stack}>

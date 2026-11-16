@@ -20,7 +20,7 @@ import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
-import { ago } from "../../../api/format";
+import { ago, errorText } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { ListPreview } from "../../../ui/ListPreview";
 import type { IdentityLink } from "./ChatIdentityLinksPage";
@@ -567,7 +567,7 @@ function WorkspaceStatus(props: { connections: { data?: ConnectionsResponse; err
     return error ? (
       <ErrorState
         title="Couldn't load the chat workspaces"
-        message={error instanceof Error ? error.message : String(error)}
+        message={errorText(error)}
         onRetry={props.onRetry}
       />
     ) : null;

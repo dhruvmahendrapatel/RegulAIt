@@ -22,6 +22,7 @@ import {
   subscribeStepUpPrompt,
   type StepUpPrompt,
 } from "./stepUp";
+import { errorText } from "../api/format";
 
 interface OptionsResponse {
   stepUpId: string;
@@ -46,7 +47,7 @@ function reasonOf(err: unknown): string {
     return code ? codeSentence(code) : err.message;
   }
   if (err instanceof Error && err.name === "NotAllowedError") return "The passkey prompt was closed or timed out. Try again when you're ready.";
-  return err instanceof Error ? err.message : String(err);
+  return errorText(err);
 }
 
 export default function StepUpDialog() {

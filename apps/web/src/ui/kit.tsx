@@ -26,6 +26,7 @@ import { createPortal } from "react-dom";
 import { useParams } from "react-router-dom";
 import { useSession } from "../session/SessionContext";
 import s from "./kit.module.css";
+import { errorText } from "../api/format";
 
 // ---- Button ---------------------------------------------------------------
 
@@ -1114,7 +1115,7 @@ export function Table<T>(props: TableProps<T>) {
               <td colSpan={shown.length} className={s.tableStale} role="alert">
                 <StatusDot tone="danger" />
                 <span>
-                  Couldn't refresh this list — {props.error instanceof Error ? props.error.message : String(props.error)}.
+                  Couldn't refresh this list — {errorText(props.error)}.
                   Showing the last loaded rows.
                 </span>
                 {props.onRetry && (
@@ -1130,7 +1131,7 @@ export function Table<T>(props: TableProps<T>) {
               <td colSpan={shown.length}>
                 <ErrorState
                   title="Couldn't load this list"
-                  message={props.error instanceof Error ? props.error.message : String(props.error)}
+                  message={errorText(props.error)}
                   access={(props.error as { status?: number }).status === 403}
                   onRetry={props.onRetry}
                 />

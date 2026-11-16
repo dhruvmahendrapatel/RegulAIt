@@ -8,6 +8,7 @@
  */
 import { ApiError } from "../../../api/client";
 import { api, withStepUp } from "../../../stepup/stepUp";
+import { errorText } from "../../../api/format";
 
 export interface ResyncResult {
   useCaseId: string;
@@ -47,7 +48,7 @@ export function resyncRefusalText(e: unknown): string {
     const code = typeof e.payload.error === "string" ? e.payload.error : "";
     return SENTENCE[code] ?? e.message;
   }
-  return e instanceof Error ? e.message : String(e);
+  return errorText(e);
 }
 
 /** the line announced after a re-sync answers */

@@ -53,6 +53,7 @@ import {
 } from "./promptsLogic";
 import s from "./builder.module.css";
 import p from "./prompts.module.css";
+import { errorText } from "../../api/format";
 
 const STARTER = "Summarise the following for {{audience}} in three bullet points.\n\n{{document}}";
 const TOOLS_NOT_EXECUTED = "Tools are described to the model. If it calls one, you see the call here; it is not run in the playground.";
@@ -69,7 +70,7 @@ interface Refusal {
   code: string | null;
 }
 const refusalOf = (e: unknown): Refusal =>
-  e instanceof ApiError ? { message: e.message, code: e.payload.error ?? null } : { message: e instanceof Error ? e.message : String(e), code: null };
+  e instanceof ApiError ? { message: e.message, code: e.payload.error ?? null } : { message: errorText(e), code: null };
 
 let toolKey = 0;
 const newTool = (): ToolDraft => ({ key: ++toolKey, name: "", description: "", schemaText: '{\n  "type": "object",\n  "properties": {}\n}' });
@@ -469,7 +470,7 @@ export default function BuilderPlaygroundPage() {
               </span>
             ) : models.error ? (
               <span className={s.small} role="alert">
-                Couldn't load your models: {models.error instanceof Error ? models.error.message : String(models.error)}
+                Couldn't load your models: {errorText(models.error)}
               </span>
             ) : null}
             <div className={p.row}>

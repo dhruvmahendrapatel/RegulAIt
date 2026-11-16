@@ -131,7 +131,7 @@ export default function ReportsPage() {
         info={<p>A read-only projection over the ledgers this platform already holds — spend, governance decisions and approval throughput. No second source of truth, no rollup table that could drift from the cost dashboard. Every generation is scoped to the requesting caller's own entitlement: a report can never show spend or audit data you could not see directly.</p>}
       />
       <div className={v.stack}>
-        <QueryGate loading={overview.isLoading} error={overview.error} onRetry={() => void overview.refetch()}>
+        <QueryGate query={overview}>
           <Card
             title="Report definitions"
             info={

@@ -103,6 +103,32 @@ write permission, so it is not read either: owners are read instead.
   - optionally, linking an imported Entra agent to a RegulAIt workload identity (ADR-0188). That link would be a grant
     step, so it stays out of import.
 
+## Adding a registry (the adapter seam)
+
+A new vendor registry (lane E17, ADR-0336: Copilot Studio, Agentforce, OpenAI, n8n) is one adapter. It touches
+these places and nothing else; the staging table, the import route, its step-up and its default-deny stay as they
+are.
+
+1. **Kind and registry** (`packages/shared/src/discovery/index.ts`): add an `agent_registry_<vendor>` source kind
+   in family `agent_registry` (with its label and `slice`), a value in `AGENT_REGISTRIES`, the kind's entry in
+   `AGENT_REGISTRIES_BY_KIND`, and its credential shape (federated first; a static secret only where the vendor has
+   no federation).
+2. **Migration** (`packages/db/migrations/pending/<slug>.sql`): widen the `discovery_sources` and `discovery_runs`
+   kind CHECKs and `agent_registry_records_registry_check` with the new values. No new table.
+3. **Scanner** (`apps/gateway/src/agent-registry-scanners.ts`): one `Scanner` per vendor, added to
+   `AGENT_REGISTRY_SCANNERS`. It must read only (GET or a documented read-only call), reach the network only
+   through `ctx.fetch` against a fixed host list, bound every listing (`readListing` or `paginateBounded`, a page
+   cap and an item cap), check `ctx.signal` and `ctx.heartbeat()` in every loop, pseudonymise people with
+   `ctx.pseudonymise`, and return `registryAgents` plus `registriesComplete` only for a registry it read in full (a
+   partial read marks nothing absent). Operator-visible strings name no AI vendor (the copy-vendor-names check).
+4. **Bounds** (`apps/gateway/src/agent-registry-records.ts`): no change. `checkRegistryAgents` reads
+   `AGENT_REGISTRIES_BY_KIND` from step 1, refuses a record for a registry the kind does not own, and bounds every
+   field.
+5. **Provider label** (`REGISTRY_PROVIDER` in `agent-registry-routes.ts`): the provider an imported agent records.
+6. **Federation audience** (`discovery-cloud-scanners.ts`), where the vendor accepts workload identity federation.
+7. **Tests with fakes**: a fake `ctx.fetch` per vendor covering the full read, the page and item caps (partial, so
+   nothing is marked absent), a refused credential, and the vendor's error shapes. No live tenant in CI.
+
 ## Owner decisions (2026-11-15, relayed by the master on #855)
 
 - **R1, steward:** an imported agent gets no steward automatically, as built. An admin may name one at import or
