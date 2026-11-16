@@ -28,7 +28,7 @@ import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { withStepUp } from "../../../stepup/stepUp";
-import { humanize } from "../../../api/format";
+import { humanize, errorText } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, Field, InfoButton, Meter, Select, Textarea } from "../../../ui/kit";
 import { QueryGate } from "../adminKit";
@@ -127,7 +127,7 @@ export default function FirstRunPage() {
     },
     onError: (e: unknown) => {
       setImportResult(null);
-      setImportError(e instanceof Error ? e.message : String(e));
+      setImportError(errorText(e));
     },
   });
 
@@ -149,7 +149,7 @@ export default function FirstRunPage() {
           </Button>
         }
       />
-      <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+      <QueryGate query={q}>
         {d && (
           <div className={v.stack}>
             <Card>

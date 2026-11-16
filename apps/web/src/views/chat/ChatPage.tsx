@@ -26,7 +26,7 @@ import type {
   Project,
   ProviderStatusResponse,
 } from "../../api/types";
-import { ago, fmtBytes, fmtUsd, UUID_RE, shortId } from "../../api/format";
+import { ago, fmtBytes, fmtUsd, UUID_RE, shortId, errorText } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
 import {
@@ -527,7 +527,7 @@ export default function ChatPage() {
             "(stream stopped — the dispatch itself already ran and was metered)";
         } else {
           d.error = "request_failed";
-          d.text = e instanceof Error ? e.message : String(e);
+          d.text = errorText(e);
         }
       });
     } finally {
@@ -583,7 +583,7 @@ export default function ChatPage() {
   // a failed read is not an empty one: "no agents granted" / "no conversations yet" only on a good answer
   const agentsFailed = agentsQ.error != null && !agentsQ.data;
   const convosFailed = convosQ.error != null && !convosQ.data;
-  const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+  const errText = (e: unknown) => (errorText(e));
   const noAgents = agents.length === 0 && !agentsFailed;
   // nothing can be sent without an agent, whether none is granted or the list failed to load
   const cannotSend = noAgents || agentsFailed;

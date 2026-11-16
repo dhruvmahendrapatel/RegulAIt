@@ -11,7 +11,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ago } from "../../api/format";
+import { ago, errorText } from "../../api/format";
 import type { BuilderSkillDetail } from "../../api/types";
 import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
@@ -33,7 +33,7 @@ description: Use when …
 `;
 
 type Visibility = "private" | "workspace";
-const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+const errText = (e: unknown) => (errorText(e));
 
 function SkillDrawer(props: { skillId: string | "new" | null; onClose: () => void }) {
   const isNew = props.skillId === "new";
