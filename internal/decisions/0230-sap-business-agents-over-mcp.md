@@ -422,7 +422,7 @@ an admin can change in `PUT /v1/org/settings` (pending migration `sap_business_s
 
 ## Owner decision (2026-11-15): the remaining open questions
 
-The owner answered the remaining open questions on 2026-11-15, relayed by the master orchestrator on #798:
+The owner answered the remaining open questions on 2026-11-15, relayed by the master orchestrator to this lane (Lane L3) the same day:
 
 | # | Question | Decision |
 |---|---|---|
