@@ -141,6 +141,30 @@ primary. It asserts that every decision the driver saw committed is present afte
 lost or duplicated, and that the hash chain verifies end to end (the existing offline verifier). The same driver runs
 on bare Postgres binaries when Docker is not available, so CI and a laptop run one suite.
 
+### As built: the failover suite (slice 3, 2026-11-16)
+
+`deploy/ha-test/failover-suite.mjs`, with two backends: `native` (Postgres 16 binaries and gateway processes) and
+`compose` (`deploy/ha-test/compose.yml`, the gateway image built from the repository Dockerfile). The governed decision
+is `POST /v1/authz/check` for an unknown subject, which commits one audited deny per acknowledged answer. Before the
+primary dies, the standby is taken down for 1.5 s so that it is behind. Freezing only its WAL receiver was tried first
+and was not enough: WAL already in the receiver's socket buffer was applied after it resumed, and the negative control
+did not fail.
+
+Measured on the native backend (4 CPU container, loopback, two replicas, 8 clients):
+
+| Run | Acknowledged | Lost | Duplicated | Chain | Replica kill → next answer | Primary crash → next answer |
+|---|---|---|---|---|---|---|
+| synchronous replication | 919 | 0 | 0 | ok (929 rows) | 85 ms | 328 ms |
+| synchronous, standby down 1.5 s before the crash | 715 | 0 | 0 | ok | 91 ms | 561 ms |
+| **asynchronous (negative control)**, same | 776 | **81**, all acknowledged while the standby was down | 0 | ok | 83 ms | 560 ms |
+
+The negative control is what makes the first rows evidence. The chain verifies in the asynchronous case too: a lost
+tail leaves a valid, shorter chain. So the suite checks the clients' ledger, and production depends on the anchor
+outside the database (ADR-0060) to show truncation. CI runs the suite and the negative control
+(`.github/workflows/ha-failover.yml`: native on HA pull requests, at merge, on main and nightly; Compose nightly and on
+demand). These are local recovery times with promotion driven by the suite. They are not the §1 targets, which include
+a managed service's or CloudNativePG's own detection and promotion time.
+
 ## Open-source search (ADR-0176)
 
 | Need | Candidate | Result |
