@@ -4969,6 +4969,8 @@ export * from "./isaca-pack.js";
 export * from "./iso-packs.js";
 // ADR-0297 (P18 B6): SR 11-7 and NYC Local Law 144 sector packs
 export * from "./sector-packs.js";
+// ADR-0319 (gap G11): the AIUC-1 ID-only pack
+export * from "./aiuc-packs.js";
 // ADR-0243 (P24): the OWASP MCP and LLM Top 10 packs
 export * from "./owasp-packs.js";
 export * from "./nist-ai-600-1-pack.js";
