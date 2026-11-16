@@ -815,6 +815,8 @@ describe("every sweep is registered", () => {
         // ADR-0302: third-party ingest evidence past the audit floor; driven end to end in
         // zz-adr0302-evidence-retention.test.ts (with no floor configured it deletes nothing)
         SCHEDULER_JOB_NAMES.thirdPartyEvidenceRetentionSweep,
+        // ADR-0339: scores every agent a change marked. Driven end-to-end in zz-adr0339-agent-risk.test.ts.
+        SCHEDULER_JOB_NAMES.agentRiskRecomputeSweep,
       ].sort(),
     );
     const discovery = registry.get(SCHEDULER_JOB_NAMES.discoveryScanSweep)!;

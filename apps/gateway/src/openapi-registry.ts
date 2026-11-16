@@ -648,6 +648,11 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // ADR-0214 amendment — per-asset posture scores; internal like the posture report.
   "GET /v1/reports/posture/assets": "internal",
   "GET /v1/reports/posture/assets/:kind/:assetId": "internal",
+  // ADR-0339 — the agent risk score; internal like the posture scores.
+  "GET /v1/agent-risk": "internal",
+  "GET /v1/agent-risk/:kind/:subjectId": "internal",
+  "GET /v1/agent-risk/:kind/:subjectId/history": "internal",
+  "POST /v1/agent-risk/recompute": "internal",
   "GET /v1/reports/trust": "internal",
   "GET /v1/reports/runs": "public-beta",
   "GET /v1/reports/runs/export.xlsx": "internal",
@@ -2026,6 +2031,10 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/reports/posture": "reports",
   "GET /v1/reports/posture/assets": "reports",
   "GET /v1/reports/posture/assets/:kind/:assetId": "reports",
+  "GET /v1/agent-risk": "reports",
+  "GET /v1/agent-risk/:kind/:subjectId": "reports",
+  "GET /v1/agent-risk/:kind/:subjectId/history": "reports",
+  "POST /v1/agent-risk/recompute": "reports",
   "GET /v1/reports/trust": "reports",
   "GET /v1/reports/runs": "reports",
   "GET /v1/reports/runs/export.xlsx": "reports",
