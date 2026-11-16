@@ -36,6 +36,7 @@ import {
 } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+import { errorText } from "../../../api/format";
 
 export default function ComplianceProfilesPage() {
   const profiles = useComplianceProfiles();
@@ -461,7 +462,7 @@ function retireRefusalText(e: unknown): string {
   if (e instanceof ApiError && e.payload.error === "compliance_profile_version_pending") {
     return "A change to this profile is waiting for review. Decide it in Approvals first.";
   }
-  return e instanceof Error ? e.message : String(e);
+  return errorText(e);
 }
 
 // ---- cascade preview ------------------------------------------------------

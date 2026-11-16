@@ -10,7 +10,7 @@
  */
 import { useEffect, useId, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ago } from "../../api/format";
+import { ago, errorText } from "../../api/format";
 import type { BuilderAgentDetail } from "../../api/types";
 import { Badge, Button, Field, Select, Textarea } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
@@ -18,7 +18,7 @@ import { AUTONOMY_CLASSES, AUTONOMY_CLASS_INFO, autonomyLabel as label, belowObs
 import { bk, builderApi } from "./builderApi";
 import s from "./builder.module.css";
 
-const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+const errText = (e: unknown) => (errorText(e));
 
 export function AutonomyPanel(props: { agent: BuilderAgentDetail }) {
   const { agent } = props;
