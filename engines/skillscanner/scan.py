@@ -94,8 +94,11 @@ def input_digests(in_dir):
             p = os.path.join(root, name)
             if len(out) >= MAX_INPUT_FILES:
                 return None
+            h = hashlib.sha256()
             with open(p, "rb") as f:
-                out.append({"path": os.path.relpath(p, in_dir).replace(os.sep, "/")[:256], "sha256": hashlib.sha256(f.read()).hexdigest()})
+                for chunk in iter(lambda: f.read(1 << 16), b""):
+                    h.update(chunk)
+            out.append({"path": os.path.relpath(p, in_dir).replace(os.sep, "/")[:256], "sha256": h.hexdigest()})
     return sorted(out, key=lambda e: e["path"])
 
 

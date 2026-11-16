@@ -406,7 +406,8 @@ async function startEngineTaskTx(
       }
       files.push({ meta: { path: body.subject!.path, size: subjectInput.bytes.length, sha256: subjectInput.sha256 }, source: { kind: "inline", bytes: subjectInput.bytes } });
       // #843 security review: what the run's end checks the driver's echoed input against (this transaction, so a
-      // refused start that rolls back leaves no expectation behind)
+      // refused start that rolls back leaves no expectation behind). A later start overwrites it on purpose: the last
+      // placement is the one the engine scans
       await tx.update(engineRuns).set({ targetSubjectInputSha256: subjectInput.sha256 }).where(eq(engineRuns.id, run.id));
     }
 

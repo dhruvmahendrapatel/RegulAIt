@@ -382,7 +382,9 @@ The gateway can now run the two admission-scan engines itself. Pending migration
   (`engine_runs.target_subject_input_sha256`, migration `admission_scan_subject_target_input_sha`). The run's end
   records a verdict only when `inputs` is exactly that one file at that path; anything else, or no recorded
   expectation, is `unknown`, which holds. This sits on top of the executor's signed input-manifest digest
-  (`input_digest_mismatch`) and proves what the scanner process itself read. The committed report fixtures predate
+  (`input_digest_mismatch`) and proves what the scanner process itself read. It proves which bytes an honest
+  driver read; it is not a defence against a compromised runner or executor, which could fail the run just as well
+  (the ADR-0190 runner-trust boundary). A mismatched report is `unknown`, which holds, and revokes no clearance. The committed report fixtures predate
   the echo (Docker Hub refused the base-image pull with 429 when they were to be re-recorded), so the tests add the
   `inputs` field to them; they are re-recorded with the image publish. A subject that is gone, whose digest is superseded, or whose
   snapshot is missing ends the run `not_run` (`subject_gone`, `subject_superseded`, `subject_input_gone`).
