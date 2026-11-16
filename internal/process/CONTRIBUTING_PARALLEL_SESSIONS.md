@@ -237,7 +237,7 @@ a time and over 200 runs queued. Since 2026-11-07 (ADR-0262):
 | `pull_request`, `apps/web/**` (or `packages/shared/**`, the lockfile) changed (`web`) | also the mocked SPA shards and the Chromium enterprise browser job |
 | `pull_request`, the root image's build context or its Trivy gate changed (`image`) | also Trivy: the root `Dockerfile`, `.dockerignore`, the workspace manifests and lockfile, `apps/**` and `packages/**` (not tests or `apps/web/e2e`), `security.yml`, `security/image-allowlist*.json`, and `scripts/security-{gate,runtime-contents,suppressions}.mjs` and `scripts/security-cosign-verify.sh` |
 | `pull_request`, an engine's own input changed (`engines`) | also the engine image scans and SBOMs, and the engine build-and-compare: `engines/**`, any `Dockerfile`, the lockfile, the engine packages and scripts, `security/image-allowlist.engine-*.json`, the gate scripts the engine scan runs, the image workflows. Not `packages/**` or `apps/**`, which each engine's shim stage also copies: a change there alone builds and compares the engines at merge time. |
-| `pull_request`, docs only | every scope-gated job is skipped by `if:`; `build-and-test` and `ui enterprise / all` still report. gitleaks and the dependency audit still run. |
+| `pull_request`, docs only | every scope-gated job is skipped by `if:`; `build-and-test` and `ui enterprise / all` still report. gitleaks and the dependency audit still run. Exception (ADR-0323, `base`): `internal/decisions/**`, `internal/fragments/**`, `internal/product/PENDING.md` or any `THIRD_PARTY.md` also runs build-and-test-base (scripts tests, licence gate; no database). |
 | `pull_request`, the scope rules themselves changed | everything, as a full run (`scripts/ci-scope.mjs`, `scripts/ci-plan.mjs`, their test, `.github/actions/ci-scope`) |
 | `pull_request`, a dependency, CI, schema/migration or security-config file changed (ADR-0323) | everything, as a full run: the lockfile, any `package.json`, `pnpm-workspace.yaml`, `.npmrc`, `.node-version`, `tsconfig.base.json`, `.github/workflows/**`, `.github/actions/**`, `CODEOWNERS`, `dependabot.yml`, `packages/db/src/schema.ts`, `packages/db/migrations/**`, `security/**`, `.gitleaks.toml` |
 | `merge_group`, push to `main`, nightly 03:17 UTC (`security.yml` 05:17 UTC) | everything: the above plus the SPA journeys, docker build, every SPA shard, Firefox, WebKit and the screenshot pack, every engine image scan, the demo journeys, gVisor and the engine build-and-compare |
@@ -261,7 +261,8 @@ What this means for a builder:
   path-filtered workflow (`import-cycles`, `integrations`, `endpoint-agent`, `engine-images-build`, `gvisor`, `demo`)
   or a workflow without a `merge_group` trigger.
 - No job is gated by a workflow-level path filter any more where it can be required. Gate a new job on the `scope`
-  job's outputs (`.github/actions/ci-scope`): `full`, `code`, `web`, `image`, `engines` or `gateway`, and add a case
+  job's outputs (`.github/actions/ci-scope`): `full`, `code`, `base`, `web`, `image`, `engines` or `gateway` (declare a new
+  one in the action's `outputs:`, or it reads as empty and the aggregates fail), and add a case
   to `scripts/ci-scope.test.mjs`.
 - **Dry run before you push** (ADR-0323): `node scripts/ci-plan.mjs --base origin/main` prints the scope and every job
   your branch's PR will start, evaluated from the workflow files themselves.

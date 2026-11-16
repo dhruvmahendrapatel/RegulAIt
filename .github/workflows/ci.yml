@@ -191,6 +191,7 @@ jobs:
     outputs:
       full: ${{ steps.scope.outputs.full }}
       code: ${{ steps.scope.outputs.code }}
+      base: ${{ steps.scope.outputs.base }}
       web: ${{ steps.scope.outputs.web }}
       gateway: ${{ steps.scope.outputs.gateway }}
     steps:
@@ -246,7 +247,8 @@ jobs:
   build-and-test-base:
     name: build-and-test / build, packages, static pre-flights
     needs: scope
-    if: needs.scope.outputs.code == 'true'
+    # ADR-0323: also on a docs PR that changes what its checks read (the ADR index, fragments, PENDING.md, THIRD_PARTY.md)
+    if: needs.scope.outputs.base == 'true'
     runs-on: ubuntu-24.04
     # A blast-radius cap, not a target (see the arithmetic above). Without the
     # gateway suite this job is install + `pnpm -r build` + the package suites.
@@ -705,7 +707,7 @@ jobs:
             def ok(want): if want == "true" then .result == "success" elif want == "false" then .result == "skipped" else false end;
             .scope.outputs as $o |
             length == 4 and .scope.result == "success" and
-            (."build-and-test-base" | ok($o.code)) and (."gateway-tests" | ok($o.code)) and (."gateway-coverage" | ok($o.gateway))' > /dev/null
+            (."build-and-test-base" | ok($o.base)) and (."gateway-tests" | ok($o.code)) and (."gateway-coverage" | ok($o.gateway))' > /dev/null
 
   docker-build:
     # The quickstart path must never rot: prove the compose image still builds.

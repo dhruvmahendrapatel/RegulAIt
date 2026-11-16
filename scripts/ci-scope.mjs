@@ -20,6 +20,9 @@
 //            the image workflows). NOT every input: each engine Dockerfile also COPYs packages/ and apps/ (the shim
 //            stage), so a change there alone gives engines=false and the engine build-and-compare runs at merge time.
 //
+//   base     ADR-0323: `code`, or a change to documentation that build-and-test-base's own checks read: the ADR files
+//            and index (internal/decisions/**), the merge-time fragments (internal/fragments/**), PENDING.md, and any
+//            THIRD_PARTY.md (the licence gate). Runs the build, package suites and static pre-flights, no database.
 //   gateway  ADR-0323: a code change outside apps/web/**. When it is false on a code PR (a web-only PR) the five
 //            gateway shards and their coverage check are replaced by ONE runner that runs only the gateway tests that
 //            read apps/web sources (`--gateway-web-readers`, below): step-up-posture-guard walks every product source,
@@ -52,11 +55,13 @@ export const SELF_RE = /^(scripts\/ci-(scope|plan)(\.test)?\.mjs|\.github\/actio
  *  toolchain (lockfile, every package.json, the workspace, .npmrc, .node-version, the base tsconfig), CI itself (any
  *  workflow or action), the database schema and its migrations, and the security configuration */
 export const ALL_RE = /^(pnpm-lock\.yaml|pnpm-workspace\.yaml|\.npmrc|\.node-version|tsconfig\.base\.json)$|(^|\/)package\.json$|^\.github\/(workflows|actions)\/|^\.github\/(CODEOWNERS|dependabot\.yml)$|^packages\/db\/(src\/schema\.ts|migrations\/|drizzle\.config\.ts)|^security\/|^\.gitleaks\.toml$/;
+/** ADR-0323: documentation that build-and-test-base's checks read (the scripts tests and the licence gate) */
+export const BASE_DOCS_RE = /^internal\/(decisions|fragments)\/|^internal\/product\/PENDING\.md$|(^|\/)THIRD_PARTY\.md$/;
 /** ADR-0323: the only tree a web-only PR changes; anything else is a gateway change */
 export const WEB_ONLY_RE = /^apps\/web\//;
 
-export const FULL = Object.freeze({ full: true, code: true, web: true, image: true, engines: true, gateway: true, reason: "" });
-export const OUTPUTS = Object.freeze(["full", "code", "web", "image", "engines", "gateway"]);
+export const FULL = Object.freeze({ full: true, code: true, base: true, web: true, image: true, engines: true, gateway: true, reason: "" });
+export const OUTPUTS = Object.freeze(["full", "code", "base", "web", "image", "engines", "gateway"]);
 
 /** the scope for a list of changed paths (null = could not be read) */
 export function scopeOf(files) {
@@ -69,6 +74,7 @@ export function scopeOf(files) {
   return {
     full: false,
     code: code.length > 0,
+    base: code.length > 0 || files.some((f) => BASE_DOCS_RE.test(f)),
     web: files.some((f) => WEB_RE.test(f)),
     image: code.some((f) => IMAGE_RE.test(f) && !IMAGE_IGNORED_RE.test(f)),
     engines: code.some((f) => ENGINES_RE.test(f)),

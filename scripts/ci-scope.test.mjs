@@ -7,8 +7,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
 import { afterEach, describe, expect, it } from "vitest";
-import { planFor, ranJobs, runnerCount } from "./ci-plan.mjs";
-import { ALL_RE, FULL, OUTPUTS, changedFiles, gatewayWebReaders, scopeForEvent, scopeOf } from "./ci-scope.mjs";
+import { evaluate, planFor, ranJobs, runnerCount } from "./ci-plan.mjs";
+import { ALL_RE, BASE_DOCS_RE, FULL, OUTPUTS, changedFiles, gatewayWebReaders, scopeForEvent, scopeOf } from "./ci-scope.mjs";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const workflow = (name) => yaml.load(readFileSync(path.join(repo, ".github/workflows", name), "utf8"));
@@ -198,6 +198,19 @@ describe("the PR scope's trim rules", () => {
     }
   });
 
+  it("rule 7 (ADR-0323): docs that build-and-test-base's checks read run it; other docs run nothing", () => {
+    for (const f of ["internal/decisions/0323-x.md", "internal/decisions/README.md", "internal/fragments/2026-11-16-x-state.md",
+      "internal/product/PENDING.md", "apps/gateway/THIRD_PARTY.md", "scripts/THIRD_PARTY.md", "THIRD_PARTY.md"]) {
+      expect(BASE_DOCS_RE.test(f), f).toBe(true);
+      expect(scopeOf([f]), f).toMatchObject({ full: false, code: false, base: true, gateway: false });
+    }
+    for (const f of ["docs/guide.md", "internal/memory/STATE.md", "internal/research/x.md", "README.md"]) {
+      expect(scopeOf([f]), f).toMatchObject({ code: false, base: false });
+    }
+    // every code change runs it too
+    expect(scopeOf(["apps/web/src/a.tsx"]).base).toBe(true);
+  });
+
   it("rule 5: a change to the scope rules themselves is a full run", () => {
     for (const f of ["scripts/ci-scope.mjs", "scripts/ci-scope.test.mjs", "scripts/ci-plan.mjs", ".github/actions/ci-scope/action.yml"]) {
       expect(scopeOf(["docs/a.md", f]), f).toMatchObject({ full: true, code: true, image: true, engines: true });
@@ -241,9 +254,10 @@ describe("the workflows wire the scope fail-closed", () => {
     expect(jobs.scope.outputs.gateway).toBe("${{ steps.scope.outputs.gateway }}");
     const rule = jobs["build-and-test"].steps.at(-1).run;
     expect(rule).toContain('.scope.result == "success"');
-    expect(rule).toContain('(."build-and-test-base" | ok($o.code))');
+    expect(rule).toContain('(."build-and-test-base" | ok($o.base))');
     expect(rule).toContain('(."gateway-tests" | ok($o.code))');
     expect(rule).toContain('(."gateway-coverage" | ok($o.gateway))');
+    expect(jobs["build-and-test-base"].if).toBe("needs.scope.outputs.base == 'true'");
   });
 
   it("the scope action declares every output the script writes, and every workflow reads only declared ones (#851)", () => {
@@ -261,7 +275,7 @@ describe("the workflows wire the scope fail-closed", () => {
 
   it("the aggregates refuse a scope output that is neither 'true' nor 'false', so an empty one never allows a skip", () => {
     const parts = (gateway, coverage) => JSON.stringify({
-      scope: { result: "success", outputs: { code: "true", gateway } },
+      scope: { result: "success", outputs: { code: "true", base: "true", gateway } },
       "build-and-test-base": { result: "success" }, "gateway-tests": { result: "success" }, "gateway-coverage": { result: coverage },
     });
     const rule = workflow("ci.yml").jobs["build-and-test"].steps.at(-1).run;
@@ -374,5 +388,24 @@ describe("the dry run (scripts/ci-plan.mjs) selects the expected jobs", () => {
     for (const files of [["docs/a.md"], ["apps/web/src/a.tsx"], ["apps/gateway/src/a.ts"], ["pnpm-lock.yaml"], ["engines/garak/Dockerfile"]]) {
       expect(ranJobs(planFor(files)), files[0]).toEqual(expect.arrayContaining(REQUIRED));
     }
+  });
+});
+
+// ADR-0323 (#851 review): the dry run evaluates expressions with GitHub's own library, not a hand-written parser.
+describe("the dry run's expressions are GitHub's (@actions/expressions)", () => {
+  const ctx = { needs: { scope: { result: "success", outputs: { gateway: "false", code: "true" } } }, github: { event_name: "pull_request" } };
+  it("evaluates the workflows' constructs with GitHub's rules", () => {
+    expect(evaluate("${{ fromJSON(needs.scope.outputs.gateway == 'false' && '[\"web-readers\"]' || '[1, 2, 3, 4, 5]') }}", ctx).value)
+      .toEqual(["web-readers"]);
+    expect(evaluate("!cancelled() && needs.scope.outputs.code != 'false'", ctx, { cancelled: false }).truthy).toBe(true);
+    // a missing output is null on GitHub: != 'false' is true (so the fail-closed gates run), == 'true' is false
+    expect(evaluate("needs.scope.outputs.missing != 'false'", ctx).truthy).toBe(true);
+    expect(evaluate("needs.scope.outputs.missing == 'true'", ctx).truthy).toBe(false);
+    // GitHub's loose equality: case-insensitive strings
+    expect(evaluate("github.event_name == 'PULL_REQUEST'", ctx).truthy).toBe(true);
+  });
+
+  it("fails on a context the dry run does not model, rather than guessing", () => {
+    expect(() => evaluate("secrets.TOKEN != ''", ctx)).toThrow();
   });
 });

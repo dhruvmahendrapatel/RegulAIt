@@ -66,18 +66,40 @@ pins all nine workflows.
 ### The dry run
 
 `node scripts/ci-plan.mjs <changed paths>` (or `--base origin/main`) evaluates the real workflow files: each job's
-`if:`, the scope-dependent matrices, `needs` and the workflow-level path filters, for the scope those paths give. It
-supports only the expression subset our workflows use and throws on anything else, so a new construct fails the dry
-run instead of answering wrongly. `scripts/ci-scope.test.mjs` uses it to pin the selections for a docs-only, a UI-only,
+`if:`, the scope-dependent matrices, `needs` and the workflow-level path filters, for the scope those paths give. The
+expressions are parsed and evaluated by GitHub's own library, `@actions/expressions` (MIT; #851 review finding 1), so
+coercion and comparison follow GitHub. RegulAIt's part is only the context: the needs graph, the scope outputs read
+through the action's declarations (an undeclared one is empty, as on GitHub), the path filters and the runner count.
+A context the dry run does not model (for example `secrets`) fails to parse, which fails the dry run. `scripts/ci-scope.test.mjs` uses it to pin the selections for a docs-only, a UI-only,
 a gateway-only and a lockfile change.
+
+### Documentation that a check reads (#851 review finding 3, security review note)
+
+Docs-only stays a skip, with one exception, the `base` output: a change to documentation that build-and-test-base's own
+checks read runs that job (the build, package suites, scripts tests and licence gate; no database). That is the ADR
+files and index (`internal/decisions/**`, read by `scripts/adr-index.test.mjs`), the merge-time fragments
+(`internal/fragments/**`), `internal/product/PENDING.md`, and any `THIRD_PARTY.md` (the licence gate's tables).
+
+**Known limit.** Other tests read documentation too: a few gateway tests read single ADRs or `docs/api` and
+`docs/deployment` pages, and a `packages/shared` test scans `internal/product`. A changed-path match cannot tell those
+apart (fixtures name most doc paths), so a docs-only PR touching them does not run them before merge. It runs them in
+the full suite after merge (below).
+
+### Where the full suite runs before or after a merge (#851 review finding 2)
+
+Today it runs **after** a merge. The merge queue is not available to this repository yet: it needs an organisation
+owner (M-113, #738), and on 2026-11-16 the reviewer read no branch protection and no ruleset on `main`. So a check a PR
+did not run, whether from a trim or a detector miss, first runs on the push-to-`main` run of the merged tree, and
+nightly. Once the repository moves to an organisation, a ruleset that requires the ADR-0262 checks plus the merge queue
+makes it run before the merge. That is an owner setting and is not changed here.
 
 ### Open source first (ADR-0176)
 
 `dorny/paths-filter` (MIT) was re-checked: it can classify paths, but it cannot express "every changed file is under
 `apps/web/`" with the fail-closed defaults above any more simply than the existing 90-line script, and ADR-0262 already
-records the decision not to add a third-party action to the scope path. No library evaluates GitHub Actions
-expressions offline for a dry run (`act` runs the jobs in Docker, which is the opposite of a dry run and needs images);
-the planner's evaluator is about 80 lines. Globs use node's built-in `path.matchesGlob`.
+records the decision not to add a third-party action to the scope path. Expression evaluation for the dry run uses
+`@actions/expressions` (above; search record in `scripts/THIRD_PARTY.md`). Globs use node's built-in
+`path.matchesGlob`.
 
 ## Consequences
 
@@ -90,8 +112,8 @@ the planner's evaluator is about 80 lines. Globs use node's built-in `path.match
   suite); it is the largest cost to watch if Dependabot volume rises, and the place to look first if runner time binds
   again.
 - A web-only PR can still break a gateway test that reads web files in a way the detector misses (for example a path
-  built from variables the patterns do not see). That test still runs at merge time, on `main` and nightly, as with any
-  ADR-0262 trim.
+  built from variables the patterns do not see). That test still runs in the full suite on `main` after the merge, and
+  nightly (see above: there is no merge queue yet).
 - **A scope output must be declared by the composite action, and the aggregates refuse anything but `true`/`false`.**
   On #851 the new `gateway` output was written by the script but not declared in `.github/actions/ci-scope/action.yml`,
   so it read as `''`: the matrix fell back to five shards (fail-closed) but the coverage check was skipped on a full

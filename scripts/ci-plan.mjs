@@ -3,10 +3,9 @@
 // (and the scope-dependent matrices) against the scope that scripts/ci-scope.mjs gives for a list of changed paths,
 // so the job selection is the workflows' own, not a copy of it.
 //
-// It understands the subset of the GitHub expression language our workflows use: string and number literals,
-// `needs.<job>.outputs.<name>` and `needs.<job>.result`, `github.event_name` and `github.ref`, `!`, `&&`, `||`, `==`,
-// `!=`, parentheses, `fromJSON()`, and the status functions (`!cancelled()`, `always()`, `success()`, `failure()`).
-// Anything else throws, so a new construct is a visible failure of the dry run, not a silent wrong answer.
+// Expressions are parsed and evaluated by GitHub's own library (@actions/expressions), so the dry run follows
+// GitHub's coercion and comparison rules. It models the `needs`, `github` (event_name, ref) and `matrix` contexts and
+// the job status functions; an expression naming any other context fails to parse, which fails the dry run.
 // Workflow-level `paths:` / `paths-ignore:` filters are applied with node's path.matchesGlob.
 //
 // usage: node scripts/ci-plan.mjs <changed path>...        print the scope and the jobs a PR with those changes runs
@@ -15,8 +14,10 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { Evaluator, Lexer, Parser, data } from "@actions/expressions";
+import { truthy } from "@actions/expressions/result";
 import yaml from "js-yaml";
-import { scopeOf } from "./ci-scope.mjs";
+import { OUTPUTS, scopeOf } from "./ci-scope.mjs";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -26,89 +27,25 @@ export const PR_WORKFLOWS = Object.freeze([
   "endpoint-agent.yml", "engine-images-build.yml", "operator.yml",
 ]);
 
-// ── the expression subset ───────────────────────────────────────────────────
-const TOKEN = /\s*(?:(\$\{\{|\}\})|('(?:[^']|'')*')|(-?\d+(?:\.\d+)?)|(&&|\|\||==|!=|[!(),])|([A-Za-z_][A-Za-z0-9_.-]*))/y;
+// ── expressions: GitHub's own evaluator (@actions/expressions, MIT, actions/languageservices) ──────────────────
+// The dry run uses the same parser, coercion and comparison rules as GitHub; RegulAIt adds only the context (the
+// needs graph and the scope) and the job status functions, which the library leaves to its host.
+const CONTEXTS = ["needs", "github", "matrix"];
+const STATUS_FNS = ["success", "always", "cancelled", "failure"];
 
-function tokenize(src) {
-  const out = [];
-  TOKEN.lastIndex = 0;
-  while (TOKEN.lastIndex < src.length) {
-    if (/^\s*$/.test(src.slice(TOKEN.lastIndex))) break;
-    const m = TOKEN.exec(src);
-    if (!m) throw new Error(`ci-plan: cannot read the expression at "${src.slice(TOKEN.lastIndex)}"`);
-    if (m[1]) continue; // the ${{ }} wrapper
-    if (m[2]) out.push({ t: "lit", v: m[2].slice(1, -1).replace(/''/g, "'") });
-    else if (m[3]) out.push({ t: "lit", v: Number(m[3]) });
-    else if (m[4]) out.push({ t: m[4] });
-    else out.push({ t: "id", v: m[5] });
-  }
-  return out;
-}
-
-const truthy = (v) => !(v === false || v === 0 || v === "" || v === null || v === undefined || Number.isNaN(v));
-/** GitHub's loose equality: strings compare case-insensitively; a string and a number compare as numbers */
-function eq(a, b) {
-  if (typeof a === "string" && typeof b === "string") return a.toLowerCase() === b.toLowerCase();
-  if (typeof a === "number" || typeof b === "number") return Number(a) === Number(b);
-  return a === b;
-}
-
-/** evaluate an expression; ctx.lookup(name) resolves identifiers, ctx.status(fn) the status functions */
-export function evaluate(src, ctx) {
-  const toks = tokenize(String(src));
-  let i = 0;
-  const peek = () => toks[i];
-  const take = (t) => {
-    if (toks[i]?.t !== t) throw new Error(`ci-plan: expected ${t} in "${src}"`);
-    return toks[i++];
-  };
-  const or = () => {
-    let v = and();
-    while (peek()?.t === "||") { i++; const r = and(); v = truthy(v) ? v : r; }
-    return v;
-  };
-  const and = () => {
-    let v = cmp();
-    while (peek()?.t === "&&") { i++; const r = cmp(); v = truthy(v) ? r : v; }
-    return v;
-  };
-  const cmp = () => {
-    let v = unary();
-    while (peek()?.t === "==" || peek()?.t === "!=") {
-      const op = toks[i++].t;
-      const r = unary();
-      v = op === "==" ? eq(v, r) : !eq(v, r);
-    }
-    return v;
-  };
-  const unary = () => {
-    if (peek()?.t === "!") { i++; return !truthy(unary()); }
-    return primary();
-  };
-  const primary = () => {
-    const tok = toks[i++];
-    if (!tok) throw new Error(`ci-plan: unexpected end of "${src}"`);
-    if (tok.t === "lit") return tok.v;
-    if (tok.t === "(") { const v = or(); take(")"); return v; }
-    if (tok.t === "id" && peek()?.t === "(") {
-      i++;
-      const args = [];
-      while (peek()?.t !== ")") { args.push(or()); if (peek()?.t === ",") i++; }
-      take(")");
-      if (tok.v === "fromJSON") return JSON.parse(args[0]);
-      if (["cancelled", "always", "success", "failure"].includes(tok.v)) return ctx.status(tok.v);
-      throw new Error(`ci-plan: unsupported function ${tok.v}() in "${src}"`);
-    }
-    if (tok.t === "id") {
-      if (tok.v === "true") return true;
-      if (tok.v === "false") return false;
-      return ctx.lookup(tok.v);
-    }
-    throw new Error(`ci-plan: unexpected ${tok.t} in "${src}"`);
-  };
-  const v = or();
-  if (i !== toks.length) throw new Error(`ci-plan: trailing tokens in "${src}"`);
-  return v;
+/** evaluate `src` (with or without the `${{ }}` wrapper) against a plain-JS context; returns plain JS */
+export function evaluate(src, context, status = {}) {
+  const body = String(src).trim().replace(/^\$\{\{([\s\S]*)\}\}$/, "$1").trim();
+  const fns = new Map(STATUS_FNS.map((name) => [name, {
+    name, minArgs: 0, maxArgs: 0,
+    call: () => new data.BooleanData(Boolean(status[name])),
+  }]));
+  const lexed = new Lexer(body).lex();
+  const expr = new Parser(lexed.tokens, CONTEXTS, [...fns.values()]).parse();
+  const ctx = new data.Dictionary();
+  for (const [k, v] of Object.entries(context)) ctx.add(k, JSON.parse(JSON.stringify(v), data.reviver));
+  const result = new Evaluator(expr, ctx, fns).evaluate();
+  return { value: JSON.parse(JSON.stringify(result, data.replacer)), truthy: truthy(result) };
 }
 
 const usesStatus = (expr) => /\b(cancelled|always|success|failure)\s*\(/.test(String(expr));
@@ -151,18 +88,18 @@ function outputsOf(file, id, job, scope) {
 }
 
 /** how many runners a job takes: its matrix's size (a scope-dependent matrix is evaluated), 1 without one */
-function runnersOf(job, lookup, file) {
+function runnersOf(job, context, file) {
   if (job.uses) {
     // a reusable workflow in this repository: the sum of its jobs' runners
     const called = yaml.load(readFileSync(path.join(repo, job.uses.replace(/^\.\//, "")), "utf8"));
-    return Object.values(called.jobs).reduce((n, j) => n + runnersOf(j, lookup, file), 0);
+    return Object.values(called.jobs).reduce((n, j) => n + runnersOf(j, context, file), 0);
   }
   const matrix = job.strategy?.matrix;
   if (!matrix) return 1;
-  if (typeof matrix === "string") return [].concat(evaluate(matrix, { lookup, status: () => true })).length;
+  if (typeof matrix === "string") return [].concat(evaluate(matrix, context).value).length;
   return Object.entries(matrix)
     .filter(([k]) => k !== "include" && k !== "exclude")
-    .reduce((n, [, v]) => n * (typeof v === "string" ? [].concat(evaluate(v, { lookup, status: () => true })).length : v.length), 1);
+    .reduce((n, [, v]) => n * (typeof v === "string" ? [].concat(evaluate(v, context).value).length : v.length), 1);
 }
 
 /** does a workflow-level path filter let a PR with these files start the workflow? */
@@ -195,24 +132,20 @@ export function planWorkflow(file, scope, files) {
     if (idx < 0) throw new Error(`ci-plan: ${file} has a needs cycle or an unknown need`);
     const [id, job] = pending.splice(idx, 1)[0];
     const needs = [].concat(job.needs ?? []);
-    const lookup = (name) => {
-      const m = /^needs\.([A-Za-z0-9_-]+)\.(outputs\.([A-Za-z0-9_-]+)|result)$/.exec(name);
-      if (m) {
-        if (!needs.includes(m[1])) throw new Error(`ci-plan: ${file} ${id} reads needs.${m[1]} without needing it`);
-        const r = results[m[1]];
-        return m[3] ? (r.ran ? (r.outputs[m[3]] ?? "") : "") : (r.ran ? "success" : "skipped");
-      }
-      if (name === "github.event_name") return "pull_request";
-      if (name === "github.ref") return "refs/pull/0/merge";
-      throw new Error(`ci-plan: ${file} ${id} reads ${name}, which the dry run does not model`);
+    for (const n of needs) if (!(n in results)) throw new Error(`ci-plan: ${file} ${id} needs unknown job ${n}`);
+    // what `needs` holds on GitHub: each needed job's result and outputs; a skipped job's outputs read as ''
+    const context = {
+      needs: Object.fromEntries(needs.map((n) => [n, { result: results[n].ran ? "success" : "skipped", outputs: results[n].outputs }])),
+      github: { event_name: "pull_request", ref: "refs/pull/0/merge" },
     };
     const allNeedsRan = needs.every((n) => results[n].ran);
-    const status = (fn) => ({ cancelled: false, always: true, success: allNeedsRan, failure: false })[fn];
+    const status = { cancelled: false, always: true, success: allNeedsRan, failure: false };
     let ran;
     if (job.if === undefined) ran = allNeedsRan;
-    else ran = truthy(evaluate(job.if, { lookup, status })) && (usesStatus(job.if) || allNeedsRan);
-    results[id] = { ran, outputs: ran ? outputsOf(file, id, job, scope) : {} };
-    jobs[id] = { name: job.name ?? id, ran, runners: ran ? runnersOf(job, lookup, file) : 0 };
+    else ran = evaluate(job.if, context, status).truthy && (usesStatus(job.if) || allNeedsRan);
+    const skippedOutputs = Object.fromEntries(Object.keys(job.outputs ?? {}).map((k) => [k, ""]));
+    results[id] = { ran, outputs: ran ? outputsOf(file, id, job, scope) : skippedOutputs };
+    jobs[id] = { name: job.name ?? id, ran, runners: ran ? runnersOf(job, context, file) : 0 };
   }
   return { file, started: true, jobs };
 }
@@ -236,7 +169,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   }
   const plan = planFor(files);
   const s = plan.scope;
-  console.log(`scope: ${["full", "code", "web", "image", "engines", "gateway"].map((k) => `${k}=${s[k]}`).join(" ")}${s.reason ? ` (full run: ${s.reason})` : ""}`);
+  console.log(`scope: ${OUTPUTS.map((k) => `${k}=${s[k]}`).join(" ")}${s.reason ? ` (full run: ${s.reason})` : ""}`);
   for (const w of plan.workflows) {
     if (!w.started) { console.log(`${w.file}: not started (path filter)`); continue; }
     for (const [id, j] of Object.entries(w.jobs)) console.log(`${w.file}: ${j.ran ? "RUN " : "skip"} ${id}${j.runners > 1 ? ` x${j.runners}` : ""}`);
