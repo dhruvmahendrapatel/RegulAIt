@@ -39,7 +39,12 @@ const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
 const migrationsFolder = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations");
 const here = path.dirname(fileURLToPath(import.meta.url));
-const fixture = (name: string) => readFileSync(path.resolve(here, "../../../packages/shared/src/engines/fixtures/admission-scan", `${name}.json`));
+// a recorded report, with the `inputs` the driver echoes (#843 security review; the recordings predate the echo)
+const fixture = (name: string, inputs?: ReadonlyArray<{ path: string; sha256: string }>) => {
+  const r = JSON.parse(readFileSync(path.resolve(here, "../../../packages/shared/src/engines/fixtures/admission-scan", `${name}.json`), "utf8")) as Record<string, unknown>;
+  return Buffer.from(JSON.stringify(inputs ? { ...r, inputs } : r));
+};
+const sha256 = (b: Buffer | string) => createHash("sha256").update(b).digest("hex");
 
 const RUN = randomBytes(3).toString("hex");
 const BOOT = `l4s-boot-${RUN}`;
@@ -174,7 +179,9 @@ describe("ADR-0242 L4.3 the subject target", () => {
     expect(lease!.subject).toEqual({ file: "SKILL.md", sha256: createHash("sha256").update(md).digest("hex"), size: md.length });
 
     expect(await rig!.place(lease!.runId)).not.toBeNull();
-    const status = await client.result(lease!.runId, envelope(lease!.runId, fixture("skillscanner-bad")));
+    // the task start recorded the sha256 of the one file it placed, for the run's end to check the driver's echo
+    expect((await db.select().from(engineRuns).where(eq(engineRuns.id, lease!.runId)))[0]!.targetSubjectInputSha256).toBe(sha256(md));
+    const status = await client.result(lease!.runId, envelope(lease!.runId, fixture("skillscanner-bad", [{ path: "SKILL.md", sha256: sha256(md) }])));
     expect(status).toBe(200);
 
     const [run] = await db.select().from(engineRuns).where(eq(engineRuns.id, lease!.runId));
@@ -206,8 +213,11 @@ describe("ADR-0242 L4.3 the subject target", () => {
     // nothing was placed by the refusals; the honest placement (root path, no files) still runs
     expect((await db.select().from(engineRuns).where(eq(engineRuns.id, run!.id)))[0]!.taskPlacementId).toBeNull();
     expect(await rig!.place(run!.id)).not.toBeNull();
-    // end the run so the next case's lease is not blocked by it
-    expect(await client.result(run!.id, envelope(run!.id, fixture("skillscanner-bad")))).toBe(200);
+    // (c) a report about other bytes (a decoy the scanner was somehow given) decides nothing: unknown, which holds,
+    // even when it is clean
+    expect(await client.result(run!.id, envelope(run!.id, fixture("skillscanner-clean", [{ path: "SKILL.md", sha256: sha256(Buffer.from(decoy, "base64")) }])))).toBe(200);
+    const [ended] = await db.select().from(engineRuns).where(eq(engineRuns.id, run!.id));
+    expect((ended!.summary as { admission?: { verdict: string; state: string } }).admission).toMatchObject({ verdict: "unknown", state: "held" });
     expect((await db.select().from(builderSkills).where(eq(builderSkills.id, s.id)))[0]!.admissionState).toBe("held");
   });
 

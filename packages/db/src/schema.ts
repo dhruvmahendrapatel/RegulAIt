@@ -14372,6 +14372,12 @@ export const engineRuns = pgTable(
      * encrypted under the data key, cleared when the run ends; never returned by any route (ADR-0242 L4.3).
      */
     targetSubjectInputCiphertext: text("target_subject_input_ciphertext"),
+    /**
+     * ADR-0200 exception: point-in-time evidence. The sha256 of the one input file the gateway placed for a `subject`
+     * run, recorded at task start; the run's verdict is recorded only when the engine's report names exactly this
+     * file (#843 security review). Never changes once set for a placement; null until a task starts.
+     */
+    targetSubjectInputSha256: text("target_subject_input_sha256"),
     config: jsonb("config").$type<EngineRunConfig>().notNull(),
     configHash: text("config_hash").notNull(),
     /** the target agent's configuration hash when the run was made (A3 compares it) */
@@ -14428,6 +14434,10 @@ export const engineRuns = pgTable(
     check("engine_runs_timeout_check", sql`${t.timeoutSeconds} BETWEEN 60 AND 7200`),
     check("engine_runs_error_code_check", sql`${t.errorCode} IS NULL OR ${t.errorCode} ~ '^[a-z][a-z0-9_]{0,63}$'`),
     check("engine_runs_raw_sha_check", sql`${t.rawReportSha256} IS NULL OR ${t.rawReportSha256} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "engine_runs_subject_input_sha_check",
+      sql`${t.targetSubjectInputSha256} IS NULL OR (${t.targetKind} = 'subject' AND ${t.targetSubjectInputSha256} ~ '^[0-9a-f]{64}$')`,
+    ),
     index("engine_runs_lease_idx").on(t.engineId, t.status, t.createdAt),
     index("engine_runs_user_idx").on(t.runAsUserId, t.createdAt),
     uniqueIndex("engine_runs_workflow_uq")
