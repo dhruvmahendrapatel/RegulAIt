@@ -133,7 +133,8 @@ const db = createDb(connectionString);
   }
 }
 await runMigrations(db, path.resolve(here, "../../../packages/db/migrations"));
-const app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+// in-process operator tool holding DATABASE_URL: the token is not a network credential here (ADR-0167 amendment, S-02)
+const app = buildApp(db, { bootstrapToken: BOOT, bootstrapAfterAdmin: true, dataKey: DATA_KEY });
 await app.ready();
 const call: ApiCall = async (method, url, payload) => {
   const res = await app.inject({
