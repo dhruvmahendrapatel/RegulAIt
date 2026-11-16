@@ -3591,7 +3591,11 @@ export const orchestrationRuns = pgTable(
       .default("planned"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("orchestration_runs_user_idx").on(t.initiatingUserId)],
+  (t) => [
+    index("orchestration_runs_user_idx").on(t.initiatingUserId),
+    // ADR-0312: the cost-per-outcome spend join reads an instance's runs; built CONCURRENTLY by runMigrations
+    index("orchestration_runs_workflow_instance_idx").on(t.workflowInstanceId).where(sql`${t.workflowInstanceId} IS NOT NULL`),
+  ],
 );
 
 export const orchestrationRunEvents = pgTable(
@@ -16738,6 +16742,8 @@ export type CostOutcomeRow = typeof costOutcomes.$inferSelect;
  * governance monitor's `user_budget_threshold` rule raises an alert when the person's metered spend across every model,
  * MCP tool and connector call in the window reaches `alert_threshold_pct` of `budget_usd` (high at 100%). Nothing is
  * refused on it; the project budget and run caps are the enforcement. Monthly by default (the strict, bounded window).
+ * Row-level security ENABLED and FORCED: an admin, `system_task` and `migration` read every row, a person only their
+ * own; only an admin or `migration` writes.
  */
 export const userSpendBudgets = pgTable(
   "user_spend_budgets",

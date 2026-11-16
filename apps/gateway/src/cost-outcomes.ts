@@ -81,7 +81,7 @@ const terminalList = sql.join(
  * concurrently (the partial unique indexes make a second insert of the same outcome a no-op). Runs as the caller's RLS
  * scope: the scheduler's `system_task`, or an admin's request.
  */
-export async function recordCostOutcomes(db: Db, trigger: "schedule" | "manual"): Promise<CostOutcomeRecordResult> {
+export async function recordCostOutcomes(db: Db | Tx, trigger: "schedule" | "manual"): Promise<CostOutcomeRecordResult> {
   const n = COST_OUTCOME_LIMITS.recordBatch;
   const count = (r: { rowCount?: number | null }) => r.rowCount ?? 0;
   const instanceKind = async (kind: Exclude<CostOutcomeKind, "completed_work_item">, predicate: SQL) =>
@@ -410,8 +410,11 @@ export async function buildCostOutcomeSummary(
 // routes
 // ---------------------------------------------------------------------------
 
+type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+/** Written in the same transaction as the change it records (the refresh), so a change never lands unaudited. */
 async function auditOutcome(
-  db: Db,
+  db: Db | Tx,
   actor: string | null | undefined,
   ruleId: string,
   reason: string,
@@ -530,9 +533,11 @@ export function registerCostOutcomeRoutes(app: FastifyInstance, db: Db): void {
   });
 
   app.post("/v1/cost-outcomes/refresh", async (req) => {
-    const out = await recordCostOutcomes(db, "manual");
-    await auditOutcome(db, req.authCtx.userId, COST_OUTCOME_RULE_IDS.recorded,
-      `cost-per-outcome recorder run by hand: ${out.total} new outcome(s)`, { recorded: out.recorded });
-    return out;
+    return db.transaction(async (tx) => {
+      const out = await recordCostOutcomes(tx, "manual");
+      await auditOutcome(tx, req.authCtx.userId, COST_OUTCOME_RULE_IDS.recorded,
+        `cost-per-outcome recorder run by hand: ${out.total} new outcome(s)`, { recorded: out.recorded });
+      return out;
+    });
   });
 }

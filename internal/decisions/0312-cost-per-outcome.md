@@ -74,9 +74,11 @@ scheduler. No new dependency.
    The instance's own `project_id` is FK-free and may be re-pointed; the outcome keeps what was true when it was
    observed.
 
-7. **Index.** The spend join reads `usage_events` by `detail->>'runId'`. A partial expression index
-   (`usage_events_run_id_idx`) is built CONCURRENTLY by `runMigrations` (`CONCURRENT_INDEXES`, slug `cost_outcomes`),
-   so the build never blocks the ledger's writers.
+7. **Indexes.** The spend join reads `usage_events` by `detail->>'runId'`, and an outcome with no run id reads every
+   run of its instance. Two partial indexes, `usage_events_run_id_idx` (an expression index) and
+   `orchestration_runs_workflow_instance_idx`, are built CONCURRENTLY by `runMigrations` (`CONCURRENT_INDEXES`, slug
+   `cost_outcomes`), so neither build blocks writers. The roll-up builds every group before it pages by offset; that is
+   bounded by the number of projects or cost centres.
 
 ## Consequences
 
@@ -126,12 +128,22 @@ a budget alert firing". Three additions follow.
 
 10. **A person's spend budget (alert only).** `user_spend_budgets` has one row per person: amount, window (`monthly` by
     default, or `none` for lifetime) and alert threshold (1% to 100%, default 80). Nothing is refused on it; project
-    budgets and run caps are the enforcement. Routes:
-    - `GET /v1/user-spend-budgets` (admin);
+    budgets and run caps are the enforcement. The table has row-level security enabled and forced: an admin,
+    `system_task` (the spend pass) and `migration` read every row, a person reads only their own, and only an admin
+    or `migration` writes. Routes:
+    - `GET /v1/user-spend-budgets`: admin, on the ADR-0226 list contract (keyset by last change, 10 to 500 a page);
     - `GET /v1/users/:userId/spend-budget`: self or admin, with metered spend in the window and imported spend
       beside it;
-    - `PUT /v1/users/:userId/spend-budget`: admin, audited;
+    - `PUT /v1/users/:userId/spend-budget`: admin. A first budget or a tightening is audited with no step-up. A higher
+      budget, a higher threshold or a different window loosens the alert, so it needs a `settings_relax` step-up and
+      is audited as a relaxation (ADR-0180). Either window change counts: a monthly window resets each month and a
+      lifetime one does not, so either can delay an alert. The write is a compare-and-set on the row the step-up
+      decision read (ADR-0186 A);
     - `DELETE /v1/users/:userId/spend-budget`: admin, a `settings_relax` step-up, audited as a relaxation.
+
+    Every write and `POST /v1/cost-outcomes/refresh` writes its audit row in the same transaction as the change. The
+    alert window and the spend reader are the project gate's own (`periodStart`, `currentPeriodKey` and
+    `meteredSpendUsdBy` in `projects.ts`), so alerting and enforcement cannot drift apart.
 
     All four are API-only on #453.
 

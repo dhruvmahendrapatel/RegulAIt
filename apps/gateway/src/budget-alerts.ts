@@ -34,7 +34,10 @@ import {
   type Db,
 } from "@regulait/db";
 import type { MonitorAssuranceInput, MonitorAssuranceSubject, SpendMonitorRuleId } from "@regulait/shared";
-import { requireStepUp } from "./step-up.js";
+import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
+import { currentPeriodKey, meteredSpendUsdBy, periodStart } from "./projects.js";
+import type { ListSpec } from "./list-contract.js";
+import { answerListPage, type ContractList } from "./list-contract-route.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -43,11 +46,11 @@ export const BUDGET_ALERT_RULE_IDS = {
   userBudgetDeleted: "user-spend-budget-deleted",
 } as const;
 
-/** UTC month start: the lower bound of a monthly window (the project gate's own rule) */
-function monthStart(now: Date): Date {
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-}
-const periodKey = (now: Date) => `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+// The window rules and the spend reader are the project gate's own (projects.ts), so the alert window and the
+// enforcement window cannot drift apart.
+const monthStart = periodStart;
+const periodKey = currentPeriodKey;
+const meteredBy = meteredSpendUsdBy;
 const usd = (n: number) => `$${n.toFixed(2)}`;
 
 interface Crossing {
@@ -61,17 +64,6 @@ export function budgetCrossing(c: Crossing): { severity: "medium" | "high"; pctO
   const pctOfBudget = (c.spentUsd / c.budgetUsd) * 100;
   if (c.spentUsd < (c.budgetUsd * c.pct) / 100) return null;
   return { severity: c.spentUsd >= c.budgetUsd ? "high" : "medium", pctOfBudget };
-}
-
-async function meteredBy(db: Db, column: "project_id" | "user_id", ids: string[], since: Date | null): Promise<Map<string, number>> {
-  if (ids.length === 0) return new Map();
-  const res = await db.execute<{ k: string; usd: number }>(sql`
-    SELECT ${sql.raw(column)}::text AS k, coalesce(sum(cost_usd), 0)::float8 AS usd
-      FROM usage_events
-     WHERE ${sql.raw(column)} = ANY(${sql`ARRAY[${sql.join(ids.map((i) => sql`${i}::uuid`), sql`, `)}]`})
-       ${since ? sql`AND at >= ${since.toISOString()}::timestamptz` : sql``}
-     GROUP BY 1`);
-  return new Map(res.rows.map((r) => [r.k, Number(r.usd)]));
 }
 
 async function importedByUser(db: Db, ids: string[], since: Date | null, now: Date): Promise<Map<string, { usd: number; nonUsdLines: number }>> {
@@ -224,7 +216,10 @@ function refuse(reply: FastifyReply, status: number, error: string, detail: stri
   return reply.status(status).send({ error, detail });
 }
 
-async function auditBudget(db: Db, actor: string | null | undefined, ruleId: string, reason: string, detail: Record<string, unknown>, objectId: string) {
+type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+/** Written in the same transaction as the change it records, so a change never lands without its audit row. */
+async function auditBudget(db: Db | Tx, actor: string | null | undefined, ruleId: string, reason: string, detail: Record<string, unknown>, objectId: string) {
   await db.insert(auditLog).values({
     userId: actor ?? NIL_UUID,
     objectType: "user",
@@ -236,6 +231,35 @@ async function auditBudget(db: Db, actor: string | null | undefined, ruleId: str
     reason,
   });
 }
+
+interface BudgetFacts {
+  budgetUsd: number;
+  budgetPeriod: "monthly" | "none";
+  alertThresholdPct: number;
+}
+
+/**
+ * The ways a change loosens a stored budget's alert (ADR-0180: a loosening is a step-up, audited as a relaxation): a
+ * higher budget, a higher threshold, or a different window. Either window change can move when the alert fires (a
+ * monthly window resets each month; a lifetime one counts spend the monthly one no longer does), so both are treated
+ * as a loosening. A first budget and a pure tightening loosen nothing.
+ */
+export function budgetLoosenings(before: BudgetFacts | null, after: BudgetFacts): string[] {
+  if (!before) return [];
+  const out: string[] = [];
+  if (after.budgetUsd > before.budgetUsd) out.push("budget_raised");
+  if (after.alertThresholdPct > before.alertThresholdPct) out.push("threshold_raised");
+  if (after.budgetPeriod !== before.budgetPeriod) out.push("window_changed");
+  return out;
+}
+
+const factsOf = (r: BudgetFacts): BudgetFacts => ({
+  budgetUsd: r.budgetUsd,
+  budgetPeriod: r.budgetPeriod,
+  alertThresholdPct: r.alertThresholdPct,
+});
+const sameFacts = (a: BudgetFacts, b: BudgetFacts) =>
+  a.budgetUsd === b.budgetUsd && a.budgetPeriod === b.budgetPeriod && a.alertThresholdPct === b.alertThresholdPct;
 
 async function viewFor(db: Db, userId: string, now = new Date()) {
   const [b] = await db.select().from(userSpendBudgets).where(eq(userSpendBudgets.userId, userId));
@@ -252,16 +276,70 @@ async function viewFor(db: Db, userId: string, now = new Date()) {
   };
 }
 
+interface SpendBudgetListRow {
+  id: string;
+  userId: string;
+  displayName: string | null;
+  budgetUsd: number;
+  budgetPeriod: string;
+  alertThresholdPct: number;
+  createdBy: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/** GET /v1/user-spend-budgets under the ADR-0226 list contract (keyset by last change, page sizes 10 to 500). */
+export const USER_SPEND_BUDGETS_LIST: ListSpec<SpendBudgetListRow> = {
+  id: "user-spend-budgets",
+  sorts: {
+    updated: { expr: userSpendBudgets.updatedAt, keysetAt: userSpendBudgets.updatedAt },
+    name: { expr: sql`lower(${users.displayName})` },
+    budget: { expr: userSpendBudgets.budgetUsd },
+  },
+  columns: {
+    name: { label: "Person", value: (r) => r.displayName },
+    budget: { label: "Budget (USD)", value: (r) => r.budgetUsd },
+    period: { label: "Window", value: (r) => r.budgetPeriod },
+    pct: { label: "Alert at (%)", value: (r) => r.alertThresholdPct },
+    updated: { label: "Last changed", value: (r) => r.updatedAt },
+  },
+  filters: [],
+  defaultSort: { col: "updated", dir: "desc" },
+  idCol: userSpendBudgets.id,
+};
+
 export function registerBudgetAlertRoutes(app: FastifyInstance, db: Db): void {
-  app.get("/v1/user-spend-budgets", async () => {
-    const rows = await db
-      .select({ budget: userSpendBudgets, displayName: users.displayName })
-      .from(userSpendBudgets)
-      .innerJoin(users, eq(users.id, userSpendBudgets.userId))
-      .orderBy(users.displayName)
-      .limit(1_000);
-    return { budgets: rows.map((r) => ({ ...r.budget, displayName: r.displayName })), limit: 1_000 };
-  });
+  const budgetsList: ContractList<SpendBudgetListRow, Record<string, never>> = {
+    spec: USER_SPEND_BUDGETS_LIST,
+    filters: z.object({}).strict() as unknown as z.ZodType<Record<string, never>>,
+    reader: {
+      fetch: (q) =>
+        db
+          .select({
+            id: userSpendBudgets.id,
+            userId: userSpendBudgets.userId,
+            displayName: users.displayName,
+            budgetUsd: userSpendBudgets.budgetUsd,
+            budgetPeriod: userSpendBudgets.budgetPeriod,
+            alertThresholdPct: userSpendBudgets.alertThresholdPct,
+            createdBy: userSpendBudgets.createdBy,
+            createdAt: userSpendBudgets.createdAt,
+            updatedAt: userSpendBudgets.updatedAt,
+            _cursorAt: q.cursorAt,
+          })
+          .from(userSpendBudgets)
+          .innerJoin(users, eq(users.id, userSpendBudgets.userId))
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset),
+      countable: (where) =>
+        db.select({ one: sql`1` }).from(userSpendBudgets).innerJoin(users, eq(users.id, userSpendBudgets.userId)).where(where),
+      idOf: (r) => r.id,
+    },
+    where: () => undefined,
+  };
+  app.get("/v1/user-spend-budgets", async (req, reply) => answerListPage(db, req, reply, budgetsList));
 
   /** Self-scoped (NON_ADMIN_ROUTES): a person reads their own budget and spend; anyone else's is an admin read. */
   app.get("/v1/users/:userId/spend-budget", async (req, reply) => {
@@ -275,27 +353,64 @@ export function registerBudgetAlertRoutes(app: FastifyInstance, db: Db): void {
     return view;
   });
 
-  // Setting or tightening a budget adds an alert (stricter); it is audited, not a step-up.
+  /**
+   * A first budget or a tightening adds or strengthens an alert: audited, no step-up. Raising the budget or the
+   * threshold, or changing the window, loosens it: a `settings_relax` step-up, audited as a relaxation (ADR-0180).
+   * The step-up is decided on an unlocked read, so the write is a compare-and-set on what was read (ADR-0186 A).
+   */
   app.put("/v1/users/:userId/spend-budget", async (req, reply) => {
     const p = userParam.safeParse(req.params);
     const b = budgetBody.safeParse(req.body ?? {});
     if (!p.success || !b.success) return refuse(reply, 400, "invalid_request", "send {budgetUsd > 0, budgetPeriod?: 'monthly' | 'none', alertThresholdPct?: 1-100}");
-    const [person] = await db.select({ id: users.id }).from(users).where(eq(users.id, p.data.userId));
+    const userId = p.data.userId;
+    const [person] = await db.select({ id: users.id }).from(users).where(eq(users.id, userId));
     if (!person) return refuse(reply, 404, "unknown_user", "no such person");
-    const values = {
+    const values: BudgetFacts = {
       budgetUsd: b.data.budgetUsd,
       budgetPeriod: b.data.budgetPeriod ?? "monthly",
       alertThresholdPct: b.data.alertThresholdPct ?? 80,
     };
-    const [row] = await db
-      .insert(userSpendBudgets)
-      .values({ userId: p.data.userId, ...values, createdBy: req.authCtx.userId ?? null })
-      .onConflictDoUpdate({ target: userSpendBudgets.userId, set: { ...values, updatedAt: sql`now()` } })
-      .returning();
-    await auditBudget(db, req.authCtx.userId, BUDGET_ALERT_RULE_IDS.userBudgetSet,
-      `spend budget set: ${usd(values.budgetUsd)} ${values.budgetPeriod === "monthly" ? "per month" : "lifetime"}, alert at ${values.alertThresholdPct}%`,
-      { ...values }, p.data.userId);
-    return { budget: row };
+    const [stored] = await db.select().from(userSpendBudgets).where(eq(userSpendBudgets.userId, userId));
+    const before = stored ? factsOf(stored as BudgetFacts) : null;
+    const loosenings = budgetLoosenings(before, values);
+    let stepUp: string | null = null;
+    if (loosenings.length > 0) {
+      const su = await requireStepUp(db, req, reply, {
+        kind: "settings_relax",
+        facts: { userSpendBudget: "loosen", userId, from: before, to: values, loosenings },
+      });
+      if (!su.ok) return reply;
+      stepUp = su.method;
+    }
+    const written = await db.transaction(async (tx) => {
+      let row;
+      if (before) {
+        // compare-and-set under the row lock: the step-up decision rested on `before`
+        const [locked] = await tx.select().from(userSpendBudgets).where(eq(userSpendBudgets.userId, userId)).for("update");
+        if (!locked || !sameFacts(factsOf(locked as BudgetFacts), before)) return null;
+        [row] = await tx
+          .update(userSpendBudgets)
+          .set({ ...values, updatedAt: sql`now()` })
+          .where(eq(userSpendBudgets.id, locked.id))
+          .returning();
+      } else {
+        // a first budget: if one appeared meanwhile, the decision (no step-up) may no longer hold
+        [row] = await tx
+          .insert(userSpendBudgets)
+          .values({ userId, ...values, createdBy: req.authCtx.userId ?? null })
+          .onConflictDoNothing({ target: userSpendBudgets.userId })
+          .returning();
+        if (!row) return null;
+      }
+      const relaxation = loosenings.length > 0;
+      await auditBudget(tx, req.authCtx.userId, BUDGET_ALERT_RULE_IDS.userBudgetSet,
+        `spend budget set: ${usd(values.budgetUsd)} ${values.budgetPeriod === "monthly" ? "per month" : "lifetime"}, alert at ${values.alertThresholdPct}%` +
+          (relaxation ? ` (a relaxation: ${loosenings.join(", ")})` : ""),
+        { ...values, previous: before, relaxation, loosenings, stepUp }, userId);
+      return row;
+    });
+    if (!written) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
+    return { budget: written };
   });
 
   // Removing a budget removes an alert: a relaxation, so a step-up, audited as one.
@@ -306,9 +421,15 @@ export function registerBudgetAlertRoutes(app: FastifyInstance, db: Db): void {
     if (!row) return refuse(reply, 404, "no_budget", "this person has no spend budget");
     const su = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { userSpendBudget: "delete", userId: p.data.userId } });
     if (!su.ok) return reply;
-    await db.delete(userSpendBudgets).where(eq(userSpendBudgets.id, row.id));
-    await auditBudget(db, req.authCtx.userId, BUDGET_ALERT_RULE_IDS.userBudgetDeleted,
-      "spend budget removed: this person's spend no longer raises a budget alert (a relaxation)", { relaxation: true, stepUp: su.method }, p.data.userId);
+    const removed = await db.transaction(async (tx) => {
+      const gone = await tx.delete(userSpendBudgets).where(eq(userSpendBudgets.id, row.id)).returning({ id: userSpendBudgets.id });
+      if (gone.length === 0) return false;
+      await auditBudget(tx, req.authCtx.userId, BUDGET_ALERT_RULE_IDS.userBudgetDeleted,
+        "spend budget removed: this person's spend no longer raises a budget alert (a relaxation)",
+        { relaxation: true, stepUp: su.method, previous: factsOf(row as BudgetFacts) }, p.data.userId);
+      return true;
+    });
+    if (!removed) return refuse(reply, 404, "no_budget", "this person has no spend budget");
     return reply.status(204).send();
   });
 }

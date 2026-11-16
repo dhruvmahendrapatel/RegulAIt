@@ -276,6 +276,28 @@ function overageActive(project: ProjectRow, periodKey: string): boolean {
   return project.overageApprovedPeriod === periodKey;
 }
 
+/**
+ * Metered spend (pillar 5 actuals, `usage_events`) per project or per person, batched: one GROUP BY for many ids.
+ * `since` null is lifetime-cumulative; otherwise only spend at or after it counts (a 'monthly' window's
+ * `periodStart`). The ONE reader of budget spend: the project gate below and the budget alerts (ADR-0312,
+ * budget-alerts.ts) both read it, so the alert window and the enforcement window cannot drift apart.
+ */
+export async function meteredSpendUsdBy(
+  db: Db,
+  column: "project_id" | "user_id",
+  ids: readonly string[],
+  since: Date | null,
+): Promise<Map<string, number>> {
+  if (ids.length === 0) return new Map();
+  const res = await db.execute<{ k: string; usd: number }>(sql`
+    SELECT ${sql.raw(column)}::text AS k, coalesce(sum(cost_usd), 0)::float8 AS usd
+      FROM usage_events
+     WHERE ${sql.raw(column)} = ANY(${sql`ARRAY[${sql.join(ids.map((i) => sql`${i}::uuid`), sql`, `)}]`})
+       ${since ? sql`AND at >= ${since.toISOString()}::timestamptz` : sql``}
+     GROUP BY 1`);
+  return new Map(res.rows.map((r) => [r.k, Number(r.usd)]));
+}
+
 /** Measured spend attributed to a project (pillar 5 actuals). Under a 'monthly'
  * budget only spend within the current calendar-month window counts; otherwise
  * it is lifetime-cumulative (default, back-compat). */
@@ -284,15 +306,8 @@ async function projectSpendUsd(
   projectId: string,
   opts?: { monthly?: boolean; now?: Date },
 ): Promise<number> {
-  const where =
-    opts?.monthly
-      ? and(eq(usageEvents.projectId, projectId), gte(usageEvents.at, periodStart(opts.now)))
-      : eq(usageEvents.projectId, projectId);
-  const [row] = await db
-    .select({ spent: sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8` })
-    .from(usageEvents)
-    .where(where);
-  return row?.spent ?? 0;
+  const since = opts?.monthly ? periodStart(opts.now) : null;
+  return (await meteredSpendUsdBy(db, "project_id", [projectId], since)).get(projectId) ?? 0;
 }
 
 async function escalateProjectBudget(

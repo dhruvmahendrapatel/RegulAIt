@@ -9,8 +9,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import {
+  auditLog,
   costOutcomes,
   createDb,
+  userSpendBudgets,
+  desc,
   governanceAlerts,
   and,
   ne,
@@ -66,12 +69,12 @@ const ids = {
   linkNodeOpen: randomUUID(),
 };
 
-async function mkUser(tag: string): Promise<{ id: string; key: { authorization: string } }> {
+async function mkUser(tag: string, isAdmin = false): Promise<{ id: string; key: { authorization: string } }> {
   const created = await app.inject({
     method: "POST",
     url: "/v1/users",
     headers: AUTH,
-    payload: { email: `adr0312-${tag}-${RUN}@example.com`, displayName: `adr0312 ${tag}`, isAdmin: false },
+    payload: { email: `adr0312-${tag}-${RUN}@example.com`, displayName: `adr0312 ${tag}`, isAdmin },
   });
   expect(created.statusCode, created.body).toBe(201);
   const id = created.json().id as string;
@@ -433,6 +436,70 @@ describe("ADR-0312 budget alerts through the governance monitor", () => {
     expect(gone.statusCode, gone.body).toBe(204);
     const list = await app.inject({ method: "GET", url: "/v1/user-spend-budgets", headers: AUTH });
     expect(list.statusCode).toBe(200);
+  });
+
+  it("raising the budget or threshold, or changing the window, is a step-up audited as a relaxation; tightening is not", async () => {
+    const carol = await mkUser("carol");
+    const keyAdmin = await mkUser("key-admin", true); // an API key can never step up
+    const put = (payload: Record<string, unknown>, headers = keyAdmin.key) =>
+      app.inject({ method: "PUT", url: `/v1/users/${carol.id}/spend-budget`, headers, payload });
+
+    expect((await put({ budgetUsd: 100, alertThresholdPct: 80 })).statusCode).toBe(200); // a first budget
+    const tighter = await put({ budgetUsd: 50, alertThresholdPct: 70 });
+    expect(tighter.statusCode, tighter.body).toBe(200);
+    for (const loosen of [
+      { budgetUsd: 500, alertThresholdPct: 70 },
+      { budgetUsd: 50, alertThresholdPct: 90 },
+      { budgetUsd: 50, alertThresholdPct: 70, budgetPeriod: "none" },
+    ]) {
+      const r = await put(loosen);
+      expect(r.statusCode, JSON.stringify(loosen)).toBe(403);
+      expect(r.json().error).toBe("step_up_required");
+    }
+    const [kept] = await db.select().from(userSpendBudgets).where(eq(userSpendBudgets.userId, carol.id));
+    expect(kept).toMatchObject({ budgetUsd: 50, alertThresholdPct: 70, budgetPeriod: "monthly" });
+    expect((await app.inject({ method: "DELETE", url: `/v1/users/${carol.id}/spend-budget`, headers: keyAdmin.key })).statusCode).toBe(403);
+
+    // the deployment credential passes the step-up during first-admin setup; the raise is audited as a relaxation
+    expect((await put({ budgetUsd: 75, alertThresholdPct: 70 }, AUTH)).statusCode).toBe(200);
+    const [audit] = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.objectId, carol.id), eq(auditLog.ruleId, "user-spend-budget-set")))
+      .orderBy(desc(auditLog.at))
+      .limit(1);
+    expect(audit!.detail).toMatchObject({ relaxation: true, loosenings: ["budget_raised"], previous: { budgetUsd: 50 }, budgetUsd: 75 });
+  });
+
+  it("a person's budget is under row-level security: their own row only, and no writes", async () => {
+    const dave = await mkUser("dave");
+    expect((await app.inject({ method: "PUT", url: `/v1/users/${dave.id}/spend-budget`, headers: AUTH, payload: { budgetUsd: 20 } })).statusCode).toBe(200);
+    const own = await withPrincipal(db, { userId: dave.id }, (tx) => tx.select().from(userSpendBudgets).where(eq(userSpendBudgets.userId, dave.id)));
+    expect(own.length).toBe(1);
+    const other = await withPrincipal(db, { userId: alice }, (tx) => tx.select().from(userSpendBudgets).where(eq(userSpendBudgets.userId, dave.id)));
+    expect(other).toEqual([]);
+    const spendPass = await withSystemContext(db, "system_task", "test.adr0312", (tx) =>
+      tx.select().from(userSpendBudgets).where(eq(userSpendBudgets.userId, dave.id)));
+    expect(spendPass.length).toBe(1);
+    await expect(
+      withPrincipal(db, { userId: alice }, (tx) => tx.insert(userSpendBudgets).values({ userId: alice, budgetUsd: 1 })),
+    ).rejects.toMatchObject({ cause: { code: "42501", message: expect.stringMatching(/row-level security/) } });
+    const raised = await withPrincipal(db, { userId: dave.id }, (tx) =>
+      tx.update(userSpendBudgets).set({ budgetUsd: 9_999 }).where(eq(userSpendBudgets.userId, dave.id)).returning());
+    expect(raised).toEqual([]); // the update policy matches no row for a non-admin
+    const none = await db.transaction(async (tx) => {
+      await tx.execute(sql`select set_config('role', 'regulait_app', true)`);
+      return tx.execute<{ n: number }>(sql`select count(*)::int as n from user_spend_budgets`);
+    });
+    expect(none.rows[0]!.n).toBe(0);
+  });
+
+  it("the budget list pages under the list contract", async () => {
+    const page = await app.inject({ method: "GET", url: "/v1/user-spend-budgets?limit=10&count=exact", headers: AUTH });
+    expect(page.statusCode, page.body).toBe(200);
+    expect(page.json().total).toBeGreaterThanOrEqual(1);
+    expect((await app.inject({ method: "GET", url: "/v1/user-spend-budgets?limit=7", headers: AUTH })).statusCode).toBe(400);
+    expect((await app.inject({ method: "GET", url: "/v1/user-spend-budgets", headers: bobKey })).statusCode).toBe(403);
   });
 
   it("the threshold arithmetic", () => {
