@@ -207,9 +207,7 @@ export default function EnforcementPosturePage() {
       />
       <div className={v.stack}>
         <QueryGate
-          loading={posture.isLoading}
-          error={posture.error}
-          onRetry={() => void posture.refetch()}
+          query={posture}
         >
           {/* I-2: the verdict line, then the one finding that must not be missed */}
           <div className={v.row} role="group" aria-label="This deployment">

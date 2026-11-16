@@ -29,7 +29,7 @@ import { useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
-import { ago } from "../../api/format";
+import { ago, errorText } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
 import {
   Badge,
@@ -142,7 +142,7 @@ export default function ModelKeysCard() {
           "This deployment has no encryption key configured, so nothing can be stored securely — an admin must set REGULAIT_DATA_KEY.",
         );
       } else {
-        setError(err instanceof Error ? err.message : String(err));
+        setError(errorText(err));
       }
     } finally {
       setBusy(false);
@@ -155,7 +155,7 @@ export default function ModelKeysCard() {
       toast(`${p} key removed`, "success");
       refresh();
     } catch (err) {
-      toast(err instanceof Error ? err.message : String(err), "error");
+      toast(errorText(err), "error");
     }
   };
 

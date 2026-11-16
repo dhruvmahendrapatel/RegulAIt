@@ -570,7 +570,7 @@ function RemediationPanel({ alertId }: { alertId: string }) {
   return (
     <div className={v.stack}>
       <div className={`${v.sectionTitle} ${v.flushTop}`}>Remediation</div>
-      <QueryGate loading={remediation.isLoading} error={remediation.error} onRetry={() => void remediation.refetch()}>
+      <QueryGate query={remediation}>
         {remediation.data ? (
           <div className={v.stack}>
             <p className={v.faint}>{remediation.data.note}</p>

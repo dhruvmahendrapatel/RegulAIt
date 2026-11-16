@@ -16,7 +16,7 @@ import {
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { BuilderMessage, BuilderPendingStep, BuilderTemplate, BuilderTool, BuilderToolStep, BuilderToolStepStatus } from "../../api/types";
-import { fmtUsd, fmtDur } from "../../api/format";
+import { fmtUsd, fmtDur, errorText } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
 import { Badge, Button, Field, Input, Modal, Select, Tabs, Textarea } from "../../ui/kit";
 import { ModelPicker } from "../../ui/ModelPicker";
@@ -854,7 +854,7 @@ export function NewAgentDialog(props: { open: boolean; onClose: () => void; temp
       props.onClose();
       navigate(`/builder/agents/${res.agent.id}?setup=1`);
     },
-    onError: (e) => setError(e instanceof Error ? e.message : String(e)),
+    onError: (e) => setError(errorText(e)),
   });
 
   const onClose = props.onClose;
@@ -980,7 +980,7 @@ export function useImportBundle() {
       );
       navigate(`/builder/agents/${res.agent.id}`);
     } catch (e) {
-      toast(e instanceof Error ? e.message : String(e), "error");
+      toast(errorText(e), "error");
     } finally {
       setBusy(false);
     }

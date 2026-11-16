@@ -45,6 +45,7 @@ const DECISION_WRITERS = [
   "mcp-high-risk.ts", // ADR-0246 addendum: a call to a high-risk MCP server refused (or passed on) by the target gate
   "mcp-identity-assertion.ts", // ADR-0188 S8: an opted-in server's call refused because no identity assertion can be made
   "mcp-protocol.ts", // MCP protocol methods
+  "mcp-sap-business.ts", // ADR-0230 A2: an SAP business write refused for want of a live, budgeted project
   "model-supply-chain.ts", // ADR-0216: a dispatch refused because a cited model file fails the supply-chain check
   "mcp-proxy.ts", // MCP tool calls (governed-evaluate.ts decides; its callers write the decision row)
   "model-call-consent.ts", // ADR-0251: a model call held for approval (insert(auditLog) on the chained handle)
