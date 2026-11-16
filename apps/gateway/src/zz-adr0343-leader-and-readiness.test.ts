@@ -6,6 +6,7 @@
  *    (liveness) still answers 200 until the listener closes.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import net from "node:net";
 import path from "node:path";
@@ -21,7 +22,8 @@ if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integra
 const migrationsFolder = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations");
 const SCRATCH_DB = `regulait_adr0343_ready_${process.pid}`;
 const scratchUrl = DATABASE_URL.replace(/\/[^/?]+(\?|$)/, `/${SCRATCH_DB}$1`);
-const REAL_KEY = "3f9a1c7e2b8d4f60a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718";
+// a data key generated per run: a fixed literal here reads as a secret to the scanner (and is not one)
+const REAL_KEY = randomBytes(32).toString("hex");
 const TEST_KEY = 0x5245_4741_4c54_5354n; // "REGALTST", test-only
 
 const end = (d: Db) => (d.$client as { end: () => Promise<void> }).end();
