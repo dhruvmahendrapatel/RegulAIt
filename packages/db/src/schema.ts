@@ -17129,7 +17129,9 @@ export const workflowTemplateVersions = pgTable(
     version: integer("version").notNull(),
     definition: jsonb("definition").notNull(),
     contentHash: text("content_hash").notNull(),
-    origin: text("origin", { enum: ["baseline", "builder"] }).notNull(),
+    /** ADR-0357: `governance_apply` = written by a reviewed governance-config apply (the pending
+     * `workflow_template_version_origin_apply` migration) */
+    origin: text("origin", { enum: ["baseline", "builder", "governance_apply"] }).notNull(),
     publishedBy: uuid("published_by").references(() => users.id, { onDelete: "set null" }),
     publishedAt: timestamp("published_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -17137,7 +17139,7 @@ export const workflowTemplateVersions = pgTable(
     uniqueIndex("workflow_template_versions_template_version_uq").on(t.templateId, t.version),
     check("workflow_template_versions_version_check", sql`${t.version} >= 1`),
     check("workflow_template_versions_hash_check", sql`${t.contentHash} ~ '^[0-9a-f]{64}$'`),
-    check("workflow_template_versions_origin_check", sql`${t.origin} IN ('baseline', 'builder')`),
+    check("workflow_template_versions_origin_check", sql`${t.origin} IN ('baseline', 'builder', 'governance_apply')`),
   ],
 );
 export type WorkflowTemplateVersionRow = typeof workflowTemplateVersions.$inferSelect;
