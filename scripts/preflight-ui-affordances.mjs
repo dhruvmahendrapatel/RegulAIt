@@ -43,6 +43,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  * somebody reviews.
  */
 export const DELIBERATELY_API_ONLY = new Map([
+  // ADR-0360 (lane E41): delete this entry when the fleet operations screen lands
+  ["/v1/discovery/device-groups/:x", "ADR-0360 (lane E41): deleting a device group no rollout names is API-only under the lane brief rule 3; the fleet operations screen is requested on #453 (route census KNOWN_UI_GAPS)"],
   // A DELETE that is still a 501 `notBuilt` stub needs no entry: a stub deletes nothing, so the census skips it until
   // it becomes a real handler, and an entry for one is reported stale (see staleExemptions).
   ["/v1/mcp/authorised-targets/:x", "ADR-0246 (P27): API-only brief; the authorised-targets screen is posted on #453 (route census KNOWN_UI_GAPS). RAISED for the master's review on the PR: delete this entry when the screen lands"],
@@ -57,6 +59,10 @@ export const DELIBERATELY_API_ONLY = new Map([
  * would remove the proof.
  */
 export const NO_REMOVE_BY_DESIGN = new Map([
+  // ADR-0360 (lane E41): each of these is removed or retired by a route the census's path matching does not see
+  ["/v1/discovery/sources/:x/device-groups", "ADR-0360: a group is deleted by DELETE /v1/discovery/device-groups/:groupId (a path outside the source's), refused while a rollout names it"],
+  ["/v1/discovery/device-groups/:x/members", "ADR-0360: members are removed by the same POST with {remove: [deviceId]}, audited"],
+  ["/v1/discovery/sources/:x/update-rollouts", "ADR-0360: a rollout is evidence of what was offered to which devices; it is retired by POST /v1/discovery/update-rollouts/:id/abort (or completes), never deleted"],
   ["/v1/managed-settings/bundles", "ADR-0310: a signed managed-settings bundle is evidence of what was pushed to devices (drift is measured against it); a new version supersedes it, and it is removed only with its subject (FK cascade)"],
   ["/v1/decisions", "signed approval decisions are evidence; a decision is superseded by a later one, never deleted"],
   ["/v1/runs", "a run is an execution record the audit trail and cost ledger point at"],
