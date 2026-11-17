@@ -330,3 +330,25 @@ export const VENDOR_USAGE_PULL_STATEMENT =
   "Pulled vendor figures are IMPORTED spend: a restatement of what the vendor says it billed, never metered by " +
   "RegulAIt and never added to metered spend. Lines billed to a key, project or workspace the gateway itself uses " +
   "are excluded from the imported side because that spend is already metered, and the exclusion is disclosed.";
+
+/**
+ * The pull run lifecycle, declared once (build rule 12, owner 2026-11-17). A run opens `running`, or is written
+ * already `refused` when another pull holds the connector; `running` ends in exactly one terminal state, and no
+ * terminal state has a way out. The run ledger's column vocabulary, its CHECK, and the only status write in the
+ * gateway (the finish step) all read this table.
+ */
+export const VENDOR_USAGE_PULL_RUN_STATUSES = ["running", "succeeded", "failed", "refused"] as const;
+export type VendorUsagePullRunStatus = (typeof VENDOR_USAGE_PULL_RUN_STATUSES)[number];
+/** the states a run row may be inserted in */
+export const VENDOR_USAGE_PULL_RUN_INITIAL_STATUSES: readonly VendorUsagePullRunStatus[] = ["running", "refused"];
+export const VENDOR_USAGE_PULL_RUN_TRANSITIONS: Readonly<Record<VendorUsagePullRunStatus, readonly VendorUsagePullRunStatus[]>> = {
+  running: ["succeeded", "failed", "refused"],
+  succeeded: [],
+  failed: [],
+  refused: [],
+};
+
+/** the states a run may move to `to` from, read off the table (the finish step's compare-and-set guard) */
+export function vendorUsagePullRunSources(to: VendorUsagePullRunStatus): VendorUsagePullRunStatus[] {
+  return VENDOR_USAGE_PULL_RUN_STATUSES.filter((from) => VENDOR_USAGE_PULL_RUN_TRANSITIONS[from].includes(to));
+}

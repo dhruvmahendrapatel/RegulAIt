@@ -161,6 +161,8 @@ import {
   CONTENT_TRUST_TIERS,
   CONTENT_TRUST_WRITE_FLOORS,
   type ModalitySplit,
+  // ADR-0322: the vendor usage pull run lifecycle (one declared table, build rule 12)
+  VENDOR_USAGE_PULL_RUN_STATUSES,
 } from "@regulait/shared";
 import {
   type AnyPgColumn,
@@ -16884,7 +16886,8 @@ export const vendorUsagePullRuns = pgTable(
       .notNull()
       .references(() => vendorUsageConnectors.id, { onDelete: "cascade" }),
     trigger: text("trigger", { enum: ["schedule", "manual"] }).notNull(),
-    status: text("status", { enum: ["running", "succeeded", "failed", "refused"] }).notNull().default("running"),
+    // the lifecycle (initial states, transitions) is VENDOR_USAGE_PULL_RUN_TRANSITIONS in @regulait/shared
+    status: text("status", { enum: VENDOR_USAGE_PULL_RUN_STATUSES }).notNull().default("running"),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
     windowStart: timestamp("window_start", { withTimezone: true }),

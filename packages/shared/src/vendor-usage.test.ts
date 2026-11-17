@@ -9,6 +9,10 @@ import {
   vendorUsageFactKey,
   vendorUsagePublicConfigSchemas,
   VendorUsageResponseError,
+  VENDOR_USAGE_PULL_RUN_INITIAL_STATUSES,
+  VENDOR_USAGE_PULL_RUN_STATUSES,
+  VENDOR_USAGE_PULL_RUN_TRANSITIONS,
+  vendorUsagePullRunSources,
 } from "./vendor-usage.js";
 
 describe("ADR-0322 vendor usage normalisers", () => {
@@ -91,5 +95,15 @@ describe("ADR-0322 vendor usage normalisers", () => {
     expect(vendorUsagePublicConfigSchemas.anthropic.parse({})).toEqual({ gatewayWorkspaceIds: [], backfillDays: 7 });
     expect(vendorUsagePublicConfigSchemas.anthropic.safeParse({ baseUrl: "https://evil.example" }).success).toBe(false);
     expect(vendorUsagePublicConfigSchemas.openai.safeParse({ backfillDays: 90 }).success).toBe(false);
+  });
+});
+
+describe("ADR-0322 pull run lifecycle (build rule 12)", () => {
+  it("opens running or refused, ends running in one terminal state, and never leaves a terminal state", () => {
+    expect(VENDOR_USAGE_PULL_RUN_INITIAL_STATUSES).toEqual(["running", "refused"]);
+    for (const to of ["succeeded", "failed", "refused"] as const) expect(vendorUsagePullRunSources(to)).toEqual(["running"]);
+    expect(vendorUsagePullRunSources("running")).toEqual([]);
+    for (const s of ["succeeded", "failed", "refused"] as const) expect(VENDOR_USAGE_PULL_RUN_TRANSITIONS[s]).toEqual([]);
+    expect(Object.keys(VENDOR_USAGE_PULL_RUN_TRANSITIONS).sort()).toEqual([...VENDOR_USAGE_PULL_RUN_STATUSES].sort());
   });
 });

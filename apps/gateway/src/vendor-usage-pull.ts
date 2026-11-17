@@ -65,6 +65,8 @@ import {
   VENDOR_USAGE_PULL_STATEMENT,
   VENDOR_USAGE_PULL_VENDORS,
   vendorUsageFactKey,
+  vendorUsagePullRunSources,
+  type VendorUsagePullRunStatus,
   vendorUsagePublicConfigSchemas,
   VendorUsageResponseError,
   type AnthropicPublicConfig,
@@ -85,6 +87,9 @@ import {
 import type { SchedulerJobDefinition } from "./scheduler.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { requireStepUp } from "./step-up.js";
+
+/** a run's closing write: it always names the terminal state it moves to (VENDOR_USAGE_PULL_RUN_TRANSITIONS) */
+type RunFinishPatch = Partial<typeof vendorUsagePullRuns.$inferInsert> & { status: Exclude<VendorUsagePullRunStatus, "running"> };
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 const DAY_MS = 24 * 3600 * 1000;
@@ -417,29 +422,33 @@ export async function runVendorUsagePull(
   // the run row's outcome and its audit row are written in the same transaction (#861 review)
   const finishIn = async (
     tx: DbOrTx,
-    patch: Partial<typeof vendorUsagePullRuns.$inferInsert>,
+    patch: RunFinishPatch,
     ruleId: string,
     effect: "allow" | "deny",
     reason: string,
   ): Promise<PullOutcome> => {
+    // the status moves only along VENDOR_USAGE_PULL_RUN_TRANSITIONS: a compare-and-set on the states that may reach
+    // the target, so a run that already ended is never rewritten
+    const to = patch.status;
     const [run] = await tx
       .update(vendorUsagePullRuns)
       .set({ ...patch, finishedAt: sql`now()` })
-      .where(eq(vendorUsagePullRuns.id, runId))
+      .where(and(eq(vendorUsagePullRuns.id, runId), inArray(vendorUsagePullRuns.status, vendorUsagePullRunSources(to))))
       .returning();
+    if (!run) throw new Error(`vendor usage pull run ${runId} cannot move to ${to}: it has already ended`);
     await audit(tx, opts.requestedBy ?? null, "vendor_usage_pull_run", runId, ruleId, effect, reason, {
       connectorId,
       vendor: connector.vendor,
       trigger: opts.trigger,
-      status: run!.status,
-      errorCode: run!.errorCode,
-      linesUpserted: run!.linesUpserted,
-      overlapLines: run!.overlapLines,
+      status: run.status,
+      errorCode: run.errorCode,
+      linesUpserted: run.linesUpserted,
+      overlapLines: run.overlapLines,
       ...(patch.batchId ? { batchId: patch.batchId } : {}),
     });
-    return { run: run! };
+    return { run };
   };
-  const finish = (patch: Partial<typeof vendorUsagePullRuns.$inferInsert>, ruleId: string, effect: "allow" | "deny", reason: string) =>
+  const finish = (patch: RunFinishPatch, ruleId: string, effect: "allow" | "deny", reason: string) =>
     db.transaction((tx) => finishIn(tx, patch, ruleId, effect, reason));
   const refuse = (code: "disabled" | "air_gapped" | "no_credential" | "data_key_unavailable", detail: string) =>
     finish({ status: "refused", errorCode: code, errorDetail: detail }, VENDOR_USAGE_RULE_IDS.pullRefused, "deny", detail);
