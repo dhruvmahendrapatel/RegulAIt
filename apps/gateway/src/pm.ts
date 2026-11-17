@@ -15,6 +15,7 @@ import {
   pmLinks,
   pmSyncEvents,
   pmWebhookDeliveries,
+  pmWorkTriggers,
   runAsPrincipalStepIfScoped,
   sql,
   users,
@@ -309,6 +310,14 @@ async function mirrorApprovalDecisionInScope(
       approvalRow.stageId.startsWith("__nodebudget__"));
   let linkWhere;
   if (approvalRow.objectType === "workflow" && approvalRow.instanceId) {
+    // ADR-0356 PR 2: an instance a PM trigger started is told through the idempotent write-back (pm-write-back.ts),
+    // which carries this mirror's behaviour; mirroring here as well would tell the item twice
+    const [triggered] = await db
+      .select({ id: pmWorkTriggers.id })
+      .from(pmWorkTriggers)
+      .where(eq(pmWorkTriggers.instanceId, approvalRow.instanceId))
+      .limit(1);
+    if (triggered) return null;
     linkWhere = and(
       eq(pmLinks.objectType, "workflow_instance"),
       eq(pmLinks.objectId, approvalRow.instanceId),

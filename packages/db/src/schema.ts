@@ -1576,6 +1576,7 @@ export const auditLog = pgTable(
         "pm_work_trigger",
         "pm_identity_link",
         "pm_trigger_settings",
+        "pm_write_back",
         // ADR-0043: an `mcp_servers.url` refused by the egress guard — at
         // write time (the 400 on POST/PATCH /v1/servers) or at connect time
         // (the audited refusal a re-pointed or pre-0049 row now gets). Plain
@@ -17471,4 +17472,27 @@ export const pmWorkTriggers = pgTable(
   ],
 );
 export type PmWorkTriggerRow = typeof pmWorkTriggers.$inferSelect;
+
+/**
+ * ADR-0356 PR 2 (migration `pm_write_backs`): the write-back ledger. One row per write-back to a triggering item,
+ * keyed by the trigger, the kind and the source (an approval id and status, a PR url, a terminal status). Recorded
+ * BEFORE the PM call and released (deleted) when the call fails, so a write-back is made at most once when it
+ * succeeds and retried when it does not. A marker, not evidence: the audit trail holds that.
+ */
+export const pmWriteBacks = pgTable(
+  "pm_write_backs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    triggerId: uuid("trigger_id")
+      .notNull()
+      .references(() => pmWorkTriggers.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: ["started", "signoff_request", "approval", "pr_link", "outcome"] }).notNull(),
+    sourceKey: text("source_key").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("pm_write_backs_key_uq").on(t.triggerId, t.kind, t.sourceKey),
+    check("pm_write_backs_kind_ck", sql`${t.kind} IN ('started', 'signoff_request', 'approval', 'pr_link', 'outcome')`),
+  ],
+);
 // ===== end ADR-0356 =====

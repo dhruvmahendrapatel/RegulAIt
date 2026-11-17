@@ -59,6 +59,42 @@ export function pmTriggerSourcesOf(to: PmTriggerState): PmTriggerState[] {
 
 const pmIdentity = z.string().trim().min(1).max(200);
 
+const pmState = z.string().trim().min(1).max(100);
+
+/** ADR-0356 PR 2: the configurable write-back mapping. Each kind can post a comment and, where named, move the item to a
+ * state or set a field. Sign-off outcomes reuse the connection's own `PmMapping.approval` stage map. */
+export const pmWriteBackSettingsSchema = z
+  .object({
+    started: z.object({ comment: z.boolean().default(true), state: pmState.optional() }).strict().default({ comment: true }),
+    signoffRequest: z.object({ comment: z.boolean().default(true), state: pmState.optional() }).strict().default({ comment: true }),
+    approval: z.object({ comment: z.boolean().default(true) }).strict().default({ comment: true }),
+    prLink: z
+      .object({
+        comment: z.boolean().default(true),
+        /** a provider field path the PR url is written to (Jira custom field id, Azure DevOps field reference name) */
+        field: z.string().trim().min(1).max(200).optional(),
+      })
+      .strict()
+      .default({ comment: true }),
+    outcome: z
+      .object({
+        comment: z.boolean().default(true),
+        /** terminal workflow status → the item state to move to; unmapped = no move */
+        states: z
+          .object({ completed: pmState.optional(), aborted: pmState.optional(), denied: pmState.optional(), rolled_back: pmState.optional() })
+          .strict()
+          .default({}),
+      })
+      .strict()
+      .default({ comment: true, states: {} }),
+  })
+  .strict();
+export type PmWriteBackSettings = z.infer<typeof pmWriteBackSettingsSchema>;
+
+/** The kinds of write-back, each recorded once per source (pm_write_backs). */
+export const PM_WRITE_BACK_KINDS = ["started", "signoff_request", "approval", "pr_link", "outcome"] as const;
+export type PmWriteBackKind = (typeof PM_WRITE_BACK_KINDS)[number];
+
 export const pmTriggerSettingsSchema = z
   .object({
     /** off until an admin turns it on: a connection without settings, or disabled, ignores every signal */
@@ -77,6 +113,9 @@ export const pmTriggerSettingsSchema = z
       .default({ assignment: true, mention: true, rule: true }),
     /** the RegulAIt registry agent the work runs on: the triggering person must be entitled to it */
     agentId: z.string().uuid(),
+    /** ADR-0356 PR 2: what is written back to the item, and how (comments on by default; no state is changed unless an
+     * admin names one — a customer's own workflow states are never moved by default) */
+    writeBack: pmWriteBackSettingsSchema.default(pmWriteBackSettingsSchema.parse({})),
     /** the change attributes the normal template assignment reads (ADR-0018) */
     change: z
       .object({

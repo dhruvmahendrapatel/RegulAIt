@@ -30,6 +30,7 @@ import {
   pmTriggerSettings,
   pmWebhookDeliveries,
   pmWorkTriggers,
+  pmWriteBacks,
   runMigrations,
   runWithRlsPrincipal,
   runWithRlsPrincipalStep,
@@ -62,6 +63,7 @@ const PM_TABLES = [
   "pm_trigger_settings",
   "pm_webhook_deliveries",
   "pm_work_triggers",
+  "pm_write_backs",
 ] as const;
 
 let admin: Db;
@@ -127,7 +129,11 @@ beforeAll(async () => {
   const [agent] = await db.insert(agents).values({ name: `rlspm-agent-${ids.conn}`, provider: "mock", tier: 1 }).returning({ id: agents.id });
   await db.insert(pmTriggerSettings).values({ connectionId: ids.conn, agentId: agent!.id, config: {} });
   await db.insert(pmIdentityLinks).values({ connectionId: ids.conn, pmUserId: "pm-alice", userId: ids.alice, verifiedSource: "admin_asserted" });
-  await db.insert(pmWorkTriggers).values({ connectionId: ids.conn, externalId: "1", mechanism: "assignment", deliveryContentSha256: "a".repeat(64) });
+  const [trigger] = await db
+    .insert(pmWorkTriggers)
+    .values({ connectionId: ids.conn, externalId: "1", mechanism: "assignment", deliveryContentSha256: "a".repeat(64) })
+    .returning({ id: pmWorkTriggers.id });
+  await db.insert(pmWriteBacks).values({ triggerId: trigger!.id, kind: "started", sourceKey: "instance" });
 }, 180_000);
 
 afterAll(async () => {
@@ -187,6 +193,7 @@ describe("what each scope reaches, with no application filter", () => {
         pm_trigger_settings: 1,
         pm_webhook_deliveries: 0,
         pm_work_triggers: 1,
+        pm_write_backs: 0,
       });
       const [ev] = await db.insert(pmSyncEvents).values({ connectionId: ids.conn, externalId: "1", kind: "commented", payload: {} }).returning({ id: pmSyncEvents.id });
       expect(ev?.id).toBeTruthy();
