@@ -43,7 +43,9 @@ FastMCP's `from_openapi` is Python only; Stainless and Speakeasy generate hosted
 never fetches: no spec URL, no redirect, and external `$ref` resolution is off (`refResolution.allowedProtocols: []`).
 Security schemes stay out of the input schema (`includeSecurityInInput` is false, the default), so a model never sees
 or supplies a credential. Its transitive `@apidevtools/json-schema-ref-parser` is pinned by a root override to 16.0.5,
-the newest release past the 7-day release age.
+the newest release past the 7-day release age. That parser's `js-yaml` 5 declares `argparse` 3 (PSF-2.0, not on the
+admitted list) for its command-line tool only, which is never loaded; a root override pins it to the already-admitted
+`argparse` 2.0.1 (Python-2.0), so no new licence enters the closure (`apps/gateway/THIRD_PARTY.md`).
 
 **Pluggable routing classifier.** KrakenD calls Not Diamond, a hosted service; the gap analysis (§5) rejects a hosted
 classifier on every prompt. No open-source package plugs a classifier into our own router: the router is ours
@@ -83,11 +85,15 @@ server side on every write, returned with each operation so the UI and agents ca
 | (none) | import | `staged` |
 | `staged` | approve | `approved` |
 | `staged` | reject | `rejected` |
+| `staged` | re-import, definition changed | `staged` (the new definition replaces the staged one) |
+| `staged` | re-import, operation gone | `withdrawn` |
 | `approved` | re-import, definition changed | `drifted` |
 | `approved` | re-import, operation gone | `withdrawn` |
 | `approved` | revoke | `withdrawn` |
 | `drifted` | approve (the new definition) | `approved` |
 | `drifted` | reject | `rejected` |
+| `drifted` | re-import, definition changed again | `drifted` (the newest definition waits) |
+| `drifted` | re-import, back to the approved definition | `approved` (exactly what an admin approved) |
 | `drifted` | re-import, operation gone | `withdrawn` |
 | `rejected` | re-import, definition changed | `staged` |
 | `withdrawn` | re-import, operation present | `staged` |
@@ -97,7 +103,8 @@ neither the old nor the new definition is offered until an admin approves the ne
 1). Every transition is one audit row (`openapi-operation-<event>`) written in the same transaction as the change.
 
 **4. What is pinned and approved.** The definition digest is SHA-256 over the RFC 8785 canonical form of the tool as
-served (name, title, description, inputSchema, outputSchema, annotations) and its request template (method, path and
+served (name, title, description, inputSchema, annotations; no outputSchema, because an MCP client then demands
+structured content matching it and a real API drifts from its document) and its request template (method, path and
 the parameter mapper), with the shared `canonicalize`. The operation row keeps both the imported definition and the
 approved one (point-in-time evidence, the commented ADR-0200 exception, like ADR-0246). Approve is a compare-and-set on
 the digest the admin reviewed (409 `openapi_operation_stale` if a re-import moved it), so an admin never approves a
