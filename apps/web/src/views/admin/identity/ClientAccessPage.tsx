@@ -98,7 +98,7 @@ export default function ClientAccessPage() {
         sub="Point an existing IDE or agent at regulAIt so its calls arrive governed."
         info={<p>regulAIt governs calls that ARRIVE at it. These settings decide which arrival surfaces exist, how a model string resolves onto a governed agent, and which rung of the interception ladder this organisation is on — labeled honestly. Both provider-shaped surfaces are OFF until you turn them on; while off they answer 404 and are indistinguishable from not existing.</p>}
       />
-      <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+      <QueryGate query={q}>
         {q.data && <Loaded data={q.data} />}
       </QueryGate>
     </>

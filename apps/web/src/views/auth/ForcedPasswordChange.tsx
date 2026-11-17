@@ -6,6 +6,7 @@ import { useSession } from "../../session/SessionContext";
 import { Button, Field, Input } from "../../ui/kit";
 import { Brand } from "./LoginPage";
 import s from "./auth.module.css";
+import { errorText } from "../../api/format";
 
 export default function ForcedPasswordChange() {
   const { auth, refresh, signOut } = useSession();
@@ -42,7 +43,7 @@ export default function ForcedPasswordChange() {
       } else if (err instanceof ApiError && err.payload.error === "password_policy") {
         setError(err.payload.detail ?? "The new password doesn't meet the organization's policy.");
       } else {
-        setError(err instanceof Error ? err.message : String(err));
+        setError(errorText(err));
       }
     } finally {
       setBusy(false);

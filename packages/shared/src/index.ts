@@ -2484,6 +2484,15 @@ export const updateOrgSettingsSchema = z
     /** ADR-0246 addendum: 'enforce' (strict default) gates every call to a server classified high-risk (offensive
      * tooling) on the policy template and the authorised-targets list; 'off' is a step-up, audited relaxation. */
     mcpHighRiskMode: z.enum(MCP_HIGH_RISK_MODES).optional(),
+    /** ADR-0230 owner decision 2026-11-15: SAP business server defaults. The approval quorum seeded on a mark
+     * (default 2; never below 1, and the requester never approves their own write); below 2 is a relaxation. */
+    sapApprovalQuorum: z.number().int().min(1).max(10).optional(),
+    /** SAP writes per user per hour on the seeded write-only limit (default 10); higher is a relaxation */
+    sapWriteRatePerHour: z.number().int().min(1).max(1000).optional(),
+    /** false (default) refuses an SAP write with no project; true is a relaxation */
+    sapUnattributedWritesAllowed: z.boolean().optional(),
+    /** false (default) = the seeded rule covers writes only; true also makes reads approve-first (a tightening) */
+    sapReadsApproveFirst: z.boolean().optional(),
     /** ADR-0175 A5: the release-age cooldown in days. 0 (default) = off. While
      * on, a newly registered MCP server, a changed manifest, a federated import
      * and a new skill version stay in quarantine until this deployment has
@@ -4636,6 +4645,8 @@ export {
   externalEvaluatorId,
   externalScorerCatalogEntry,
   owaspReferences,
+  canonicalOwaspId,
+  OWASP_LLM_2026_PREFIX,
   redteamEvaluatorId,
   scorerEvaluatorId,
   type CatalogEvaluator,
@@ -4967,6 +4978,8 @@ export * from "./isaca-pack.js";
 export * from "./iso-packs.js";
 // ADR-0297 (P18 B6): SR 11-7 and NYC Local Law 144 sector packs
 export * from "./sector-packs.js";
+// ADR-0319 (gap G11): the AIUC-1 ID-only pack
+export * from "./aiuc-packs.js";
 // ADR-0243 (P24): the OWASP MCP and LLM Top 10 packs
 export * from "./owasp-packs.js";
 export * from "./nist-ai-600-1-pack.js";
@@ -5040,6 +5053,8 @@ export * from "./trained-detectors.js";
 export * from "./guardrail-vendor-adapters.js";
 // ADR-0224 (P13 c): privacy operations — records of processing, data-subject requests, the processing limit
 export * from "./privacy-ops.js";
+// ADR-0296 part 2 (P18 B2): privacy-law presets and packs
+export * from "./privacy-packs.js";
 
 // ===== ADR-0215 (P5) — framework content imports and the imported regulatory feed =====
 export * from "./framework-imports.js";
@@ -5047,7 +5062,14 @@ export * from "./atlas-redteam-map.js";
 
 // ===== ADR-0221 (PENDING P4) — the supplier portal =========================
 export * from "./supplier-portal.js";
+// ===== ADR-0240 — one second factor (TOTP) for the supplier and auditor portals ==========
+export * from "./external-mfa.js";
 // ADR-0222 (P13(a)): fairness testing — the group metrics, thresholds and outcome (pure)
 export * from "./fairness.js";
 // ADR-0261 (P37): third-party security telemetry ingest — the DefenseClaw JSONL parser and mapping (pure)
 export * from "./third-party-ingest/index.js";
+// ADR-0310 (G2): vendor-native managed settings compiled from effective MCP entitlements
+export * from "./managed-settings.js";
+
+// ADR-0341: RFC 6902 patches for diff views
+export { jsonPatch, type JsonPatchOperation } from "./json-patch.js";

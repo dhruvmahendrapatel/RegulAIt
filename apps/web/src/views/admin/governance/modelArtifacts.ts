@@ -17,7 +17,7 @@
  *    reduced to the gateway's own `[A-Za-z0-9_./-]` alphabet before display.
  */
 import { apiErrorFrom, ApiError, CSRF_HEADER, type ApiErrorPayload } from "../../../api/client";
-import { fmtDay } from "../../../api/format";
+import { fmtDay, errorText } from "../../../api/format";
 import type { SupplyChainState } from "./supplyChain";
 
 export type ArtifactScanVerdict = "clean" | "no_known_unsafe" | "unsafe" | "unknown" | "not_run";
@@ -438,7 +438,7 @@ export function refusalText(e: unknown): string {
     }
     return e.message;
   }
-  return e instanceof Error ? e.message : String(e);
+  return errorText(e);
 }
 
 // ---- the upload -------------------------------------------------------------

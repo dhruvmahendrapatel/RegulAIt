@@ -73,7 +73,7 @@ function IncidentSettingsCard() {
       title="Incident settings"
       info={<p>Each setting starts at its strict value. Relaxing one is recorded in the audit log with the old and new value.</p>}
     >
-      <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+      <QueryGate query={q}>
         {s && (
           <div className={v.stack}>
             <div className={a.formRow}>

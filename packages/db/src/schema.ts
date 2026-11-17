@@ -901,6 +901,10 @@ export const mcpServers = pgTable("mcp_servers", {
   /** Point-in-time evidence (ADR-0200 exception, like `admission_findings`): the classifier verdict that made the
    * server high-risk, counts and locations only (tool, category, rule, where), never matched text. */
   riskFindings: jsonb("risk_findings"),
+  /** ADR-0230 A2 (the pending `sap_business_servers` migration): null = an ordinary MCP server. `sap_business` = its
+   * write tools post business documents into SAP; marking it seeds the strict defaults (mcp-sap-business.ts) and every
+   * write must be attributed to a budgeted project. Unmarking is a settings_relax step-up. */
+  systemClass: text("system_class", { enum: ["sap_business"] }),
   /** ADR-0185 G4 (migration 0169) — how the gateway reaches this upstream.
    * `streamable_http` (the default, so every pre-0169 row keeps what it used)
    * and `sse` connect to `url` through the egress guard; `stdio` starts
@@ -1928,6 +1932,9 @@ export const auditLog = pgTable(
         "supplier_access",
         "supplier_submission",
         "supplier_questionnaire",
+        // ADR-0223 amendment 1: a drift monitor's write-only ingestion credential (issued, rotated, revoked, or
+        // refused on use). Plain text column — no DDL needed.
+        "model_drift_ingest_credential",
         "ai_policy_document",
         "ai_policy_acknowledgement",
         // ADR-0185 I3: memory retention. A conversation purged by the sweep or
@@ -1999,6 +2006,8 @@ export const auditLog = pgTable(
         "trust_publication",
         "trust_center",
         "auditor_grant",
+        // ADR-0310 (G2): a signed managed-settings bundle export (objectId = the bundle). Plain text column — no DDL.
+        "managed_settings_bundle",
         // ADR-0333 (E15): a detection incident (objectId = the incident) and a detection rule pack change (objectId
         // null). Plain text column — no DDL.
         "detection_incident",
@@ -2302,6 +2311,9 @@ export const rateLimits = pgTable(
     toolName: text("tool_name"),
     maxCalls: integer("max_calls").notNull(),
     windowSeconds: integer("window_seconds").notNull(),
+    /** ADR-0230 A2 (the pending `sap_business_servers` migration): true = the limit applies to, and counts, write-kind
+     * tools only (the read/write classification `approval_rules.write_only` uses). False = every call (the default). */
+    writeOnly: boolean("write_only").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -5093,6 +5105,18 @@ export const orgSettings = pgTable(
      * template (an approval rule with quorum of at least 2 and a rate limit) and the authorised-targets list; 'off'
      * is a settings_relax relaxation, audited. */
     mcpHighRiskMode: text("mcp_high_risk_mode", { enum: ["enforce", "off"] }).notNull().default("enforce"),
+    /** ADR-0230 owner decision 2026-11-15: the org's defaults for an SAP business MCP server (pending migration
+     * sap_business_servers). The quorum and the write rate seed the rows a mark creates; the other two apply on every
+     * SAP call. Each default is the strict value; relaxing one (a quorum below 2, a rate above 10, allowing an
+     * unattributed write) is a settings_relax step-up and audited. The quorum is never below 1 (CHECK), and the
+     * requester never counts towards it (createApprovalRuleRow). */
+    sapApprovalQuorum: integer("sap_approval_quorum").notNull().default(2),
+    /** the seeded write-only limit: SAP writes per user per hour (default 10, CHECK 1..1000) */
+    sapWriteRatePerHour: integer("sap_write_rate_per_hour").notNull().default(10),
+    /** false (default) = an SAP write with no project is refused `sap-write-needs-project`; true = it runs unattributed */
+    sapUnattributedWritesAllowed: boolean("sap_unattributed_writes_allowed").notNull().default(false),
+    /** false (default) = the seeded approval rule covers writes only; true = it covers every tool on the server */
+    sapReadsApproveFirst: boolean("sap_reads_approve_first").notNull().default(false),
     /** ADR-0175 A5 (migration 0140): the release-age cooldown in days. 7
      * (DEFAULT since ADR-0181, migration 0159). 0 = off; an admin may relax
      * it (audited). */
@@ -5413,6 +5437,9 @@ export const orgSettings = pgTable(
     supplierPortalEnabled: boolean("supplier_portal_enabled").notNull().default(false),
     /** ADR-0221 (migration 0241): with no scanner configured, evidence files are refused unless this is on (a relaxation) */
     supplierPortalAcceptUnscannedFiles: boolean("supplier_portal_accept_unscanned_files").notNull().default(false),
+    /** ADR-0240 (pending migration external_portal_mfa): a spent supplier link opens a session only after a TOTP code (enrolment on first use).
+     * Shipped ON (ADR-0180); turning it off is a relaxation (settings_relax step-up, audited). */
+    supplierPortalMfaRequired: boolean("supplier_portal_mfa_required").notNull().default(true),
     /** ADR-0211 (migration 0250): may a risk be recorded as transferred or
      * avoided? OFF by default (ADR-0180); turning it on is a step-up relaxation */
     riskTreatmentsEnabled: boolean("risk_treatments_enabled").notNull().default(false),
@@ -5438,6 +5465,9 @@ export const orgSettings = pgTable(
     /** ADR-0225 (P13 d, migration 0247): the public trust centre and the auditor portal — built, shipped OFF
      * (ADR-0180). Off, both answer 404 and nothing can be published or granted. */
     trustPagesEnabled: boolean("trust_pages_enabled").notNull().default(false),
+    /** ADR-0240 (pending migration external_portal_mfa): a spent auditor link opens a session only after a TOTP code (enrolment on first use).
+     * Shipped ON (ADR-0180); turning it off is a relaxation (settings_relax step-up, audited). */
+    trustAuditorMfaRequired: boolean("trust_auditor_mfa_required").notNull().default(true),
 
     // --- ADR-0224 (P13 c, migration 0251): privacy operations ------------
     /** Shipped OFF (owner, 10-30). When on, personal data the PII detector finds in a governed dispatch must be a
@@ -10683,6 +10713,10 @@ export const traceSpans = pgTable(
     uniqueIndex("trace_spans_run_uq")
       .on(t.traceId, t.runId)
       .where(sql`${t.kind} = 'run' AND ${t.runId} IS NOT NULL`),
+    /** ADR-0327 (migration `rule_step_detection`): the rule-like step scan groups recent model spans per step */
+    index("trace_spans_llm_step_started_idx")
+      .on(t.agentId, t.name, t.startedAt)
+      .where(sql`${t.kind} = 'llm' AND ${t.agentId} IS NOT NULL`),
   ],
 );
 
@@ -14346,6 +14380,23 @@ export const engineRuns = pgTable(
     targetAgentId: uuid("target_agent_id").references(() => agents.id, { onDelete: "set null" }),
     judgeAgentId: uuid("judge_agent_id").references(() => agents.id, { onDelete: "set null" }),
     targetArtifactId: uuid("target_artifact_id").references(() => modelArtifacts.id, { onDelete: "set null" }),
+    /** ADR-0242 L4.3: a `subject` run's MCP server (mcpscanner) */
+    targetMcpServerId: uuid("target_mcp_server_id").references(() => mcpServers.id, { onDelete: "set null" }),
+    /** ADR-0242 L4.3: a `subject` run's builder skill (skillscanner) */
+    targetBuilderSkillId: uuid("target_builder_skill_id").references(() => builderSkills.id, { onDelete: "set null" }),
+    /** ADR-0242 L4.3: the subject digest the run scans (sha256 hex) */
+    targetSubjectDigest: text("target_subject_digest"),
+    /**
+     * ADR-0200 exception: a temporary verbatim external payload. The MCP manifest snapshot an admission scan reads,
+     * encrypted under the data key, cleared when the run ends; never returned by any route (ADR-0242 L4.3).
+     */
+    targetSubjectInputCiphertext: text("target_subject_input_ciphertext"),
+    /**
+     * ADR-0200 exception: point-in-time evidence. The sha256 of the one input file the gateway placed for a `subject`
+     * run, recorded at task start; the run's verdict is recorded only when the engine's report names exactly this
+     * file (#843 security review). Never changes once set for a placement; null until a task starts.
+     */
+    targetSubjectInputSha256: text("target_subject_input_sha256"),
     config: jsonb("config").$type<EngineRunConfig>().notNull(),
     configHash: text("config_hash").notNull(),
     /** the target agent's configuration hash when the run was made (A3 compares it) */
@@ -14392,21 +14443,33 @@ export const engineRuns = pgTable(
   },
   (t) => [
     uniqueIndex("engine_runs_task_placement_uq").on(t.taskPlacementId).where(sql`${t.taskPlacementId} IS NOT NULL`),
+    // ADR-0242 L4.3 (pending migration `admission_scan_subject_target`); the trigger and target-kind CHECKs live in SQL only
     check(
       "engine_runs_target_check",
-      sql`(${t.targetKind} = 'agent' AND ${t.targetArtifactId} IS NULL) OR (${t.targetKind} = 'artifact' AND ${t.targetAgentId} IS NULL AND ${t.judgeAgentId} IS NULL)`,
+      sql`(${t.targetKind} IN ('agent', 'artifact') AND ${t.trigger} <> 'admission' AND ${t.targetMcpServerId} IS NULL AND ${t.targetBuilderSkillId} IS NULL AND ${t.targetSubjectDigest} IS NULL AND ${t.targetSubjectInputCiphertext} IS NULL AND ((${t.targetKind} = 'agent' AND ${t.targetArtifactId} IS NULL) OR (${t.targetKind} = 'artifact' AND ${t.targetAgentId} IS NULL AND ${t.judgeAgentId} IS NULL))) OR (${t.targetKind} = 'subject' AND ${t.trigger} = 'admission' AND ${t.targetAgentId} IS NULL AND ${t.judgeAgentId} IS NULL AND ${t.targetArtifactId} IS NULL AND ${t.runAsUserId} IS NULL AND ${t.projectId} IS NULL AND num_nonnulls(${t.targetMcpServerId}, ${t.targetBuilderSkillId}) <= 1 AND (${t.targetMcpServerId} IS NULL OR ${t.engineId} = 'mcpscanner') AND (${t.targetBuilderSkillId} IS NULL OR ${t.engineId} = 'skillscanner') AND ${t.targetSubjectDigest} IS NOT NULL AND ${t.targetSubjectDigest} ~ '^[0-9a-f]{64}$' AND (${t.targetSubjectInputCiphertext} IS NULL OR ${t.engineId} = 'mcpscanner'))`,
     ),
     check("engine_runs_trials_check", sql`${t.trials} BETWEEN 1 AND 25`),
     check("engine_runs_budget_check", sql`${t.budgetUsd} > 0`),
     check("engine_runs_timeout_check", sql`${t.timeoutSeconds} BETWEEN 60 AND 7200`),
     check("engine_runs_error_code_check", sql`${t.errorCode} IS NULL OR ${t.errorCode} ~ '^[a-z][a-z0-9_]{0,63}$'`),
     check("engine_runs_raw_sha_check", sql`${t.rawReportSha256} IS NULL OR ${t.rawReportSha256} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "engine_runs_subject_input_sha_check",
+      sql`${t.targetSubjectInputSha256} IS NULL OR (${t.targetKind} = 'subject' AND ${t.targetSubjectInputSha256} ~ '^[0-9a-f]{64}$')`,
+    ),
     index("engine_runs_lease_idx").on(t.engineId, t.status, t.createdAt),
     index("engine_runs_user_idx").on(t.runAsUserId, t.createdAt),
     uniqueIndex("engine_runs_workflow_uq")
       .on(t.workflowInstanceId, t.workflowStageId, t.workflowCheckName, t.workflowRound)
       .where(sql`${t.workflowInstanceId} IS NOT NULL`),
     uniqueIndex("engine_runs_runner_lease_request_unique").on(t.runnerId, t.leaseRequestId).where(sql`${t.leaseRequestId} IS NOT NULL`),
+    // ADR-0242 L4.3: one live (queued or leased) admission run per engine, subject and digest
+    uniqueIndex("engine_runs_subject_mcp_live_uq")
+      .on(t.engineId, t.targetMcpServerId, t.targetSubjectDigest)
+      .where(sql`${t.targetMcpServerId} IS NOT NULL AND ${t.status} IN ('queued', 'leased')`),
+    uniqueIndex("engine_runs_subject_skill_live_uq")
+      .on(t.engineId, t.targetBuilderSkillId, t.targetSubjectDigest)
+      .where(sql`${t.targetBuilderSkillId} IS NOT NULL AND ${t.status} IN ('queued', 'leased')`),
   ],
 );
 export type EngineRunRow = typeof engineRuns.$inferSelect;
@@ -16220,6 +16283,71 @@ export const supplierSessions = pgTable(
 );
 export type SupplierSessionRow = typeof supplierSessions.$inferSelect;
 
+// ---------------------------------------------------------------------------
+// ADR-0240 (pending migration external_portal_mfa) — one second factor for the external portals
+// ---------------------------------------------------------------------------
+
+/**
+ * ADR-0240: the TOTP factor of ONE external grant, a supplier access (ADR-0221) or an auditor grant (ADR-0225).
+ * Exactly one reference is set (CHECK), so the portal is whichever is set. `activatedAt` null = enrolment started
+ * but no code proved yet. Locked after repeated wrong codes; only an admin reset (which deletes the row) recovers it.
+ * The secret is a data-key envelope listed in `CIPHERTEXT_COLUMNS`.
+ */
+export const externalMfaFactors = pgTable(
+  "external_mfa_factors",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    supplierAccessId: uuid("supplier_access_id").references(() => supplierAccess.id, { onDelete: "cascade" }),
+    auditorGrantId: uuid("auditor_grant_id").references(() => auditorGrants.id, { onDelete: "cascade" }),
+    secretCiphertext: text("secret_ciphertext").notNull(),
+    activatedAt: timestamp("activated_at", { withTimezone: true }),
+    lastUsedStep: bigint("last_used_step", { mode: "number" }),
+    failedAttempts: integer("failed_attempts").notNull().default(0),
+    lockedAt: timestamp("locked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("external_mfa_factors_supplier_access_uq").on(t.supplierAccessId),
+    unique("external_mfa_factors_auditor_grant_uq").on(t.auditorGrantId),
+    check("external_mfa_factors_one_grant_check", sql`num_nonnulls(${t.supplierAccessId}, ${t.auditorGrantId}) = 1`),
+    check("external_mfa_factors_failed_check", sql`${t.failedAttempts} BETWEEN 0 AND 100`),
+    check("external_mfa_factors_secret_check", sql`char_length(${t.secretCiphertext}) BETWEEN 1 AND 4096`),
+  ],
+);
+export type ExternalMfaFactorRow = typeof externalMfaFactors.$inferSelect;
+
+/**
+ * ADR-0240: the step between a spent link and a session. Only the sha256 of its token is stored; at most 15 minutes;
+ * spent by the first correct code. It names the link that was spent (exactly one of the two references).
+ */
+export const externalMfaChallenges = pgTable(
+  "external_mfa_challenges",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    factorId: uuid("factor_id")
+      .notNull()
+      .references(() => externalMfaFactors.id, { onDelete: "cascade" }),
+    supplierInvitationId: uuid("supplier_invitation_id").references(() => supplierInvitations.id, { onDelete: "cascade" }),
+    auditorLinkId: uuid("auditor_link_id").references(() => auditorLinks.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("external_mfa_challenges_token_hash_uq").on(t.tokenHash),
+    check("external_mfa_challenges_token_hash_check", sql`${t.tokenHash} ~ '^[0-9a-f]{64}$'`),
+    check("external_mfa_challenges_one_link_check", sql`num_nonnulls(${t.supplierInvitationId}, ${t.auditorLinkId}) = 1`),
+    check(
+      "external_mfa_challenges_ttl_check",
+      sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} - ${t.createdAt} <= interval '15 minutes'`,
+    ),
+    index("external_mfa_challenges_factor_idx").on(t.factorId),
+  ],
+);
+export type ExternalMfaChallengeRow = typeof externalMfaChallenges.$inferSelect;
+
 export const supplierSubmissions = pgTable(
   "supplier_submissions",
   {
@@ -16327,6 +16455,43 @@ export const modelDriftMonitors = pgTable(
 );
 export type ModelDriftMonitorRow = typeof modelDriftMonitors.$inferSelect;
 
+/**
+ * ADR-0223 amendment 1 (pending migration `drift_ingest_credentials`): a write-only ingestion credential bound to ONE drift monitor. It opens only
+ * `POST /v1/model-drift/ingest/:monitorId/reports` for that monitor. Only the `hashToken` hash of the `rgldi_` token
+ * is stored; it always expires (at most 365 days, CHECK-capped) and is revoked by `revoked_at`. Rotation is a new row
+ * (`replacesId`) plus the old row's revocation, so `createdAt` is when the secret was set.
+ */
+export const modelDriftIngestCredentials = pgTable(
+  "model_drift_ingest_credentials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    monitorId: uuid("monitor_id")
+      .notNull()
+      .references(() => modelDriftMonitors.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    tokenHash: text("token_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    replacesId: uuid("replaces_id").references((): AnyPgColumn => modelDriftIngestCredentials.id, { onDelete: "set null" }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: uuid("revoked_by").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    unique("model_drift_ingest_credentials_token_hash_uq").on(t.tokenHash),
+    check("model_drift_ingest_credentials_name_check", sql`char_length(btrim(${t.name})) BETWEEN 1 AND 120`),
+    check("model_drift_ingest_credentials_hash_check", sql`${t.tokenHash} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "model_drift_ingest_credentials_expiry_check",
+      sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} <= ${t.createdAt} + interval '365 days'`,
+    ),
+    check("model_drift_ingest_credentials_revoked_check", sql`${t.revokedAt} IS NULL OR ${t.revokedAt} >= ${t.createdAt}`),
+    index("model_drift_ingest_credentials_monitor_idx").on(t.monitorId, t.createdAt.desc()),
+  ],
+);
+export type ModelDriftIngestCredentialRow = typeof modelDriftIngestCredentials.$inferSelect;
+
 export const MODEL_DRIFT_REPORT_SOURCES = ["push", "upload"] as const;
 export const MODEL_DRIFT_STATUSES = ["within", "warn", "drift", "insufficient"] as const;
 /** where a report's or artefact's `model_version` came from: the card's pin at write time, or the submission */
@@ -16352,9 +16517,15 @@ export const modelDriftReports = pgTable(
     modelVersion: text("model_version").notNull(),
     modelVersionSource: text("model_version_source", { enum: MODEL_VERSION_SOURCES }).notNull(),
     submittedBy: uuid("submitted_by").references(() => users.id, { onDelete: "set null" }),
+    /** pending migration drift_ingest_credentials: the ingestion credential that pushed this summary; NULL for an admin's upload or push */
+    ingestCredentialId: uuid("ingest_credential_id").references(() => modelDriftIngestCredentials.id, { onDelete: "set null" }),
+    /** pending migration drift_ingest_credentials: the replay guard on a credential push; one key records one report per monitor */
+    idempotencyKey: text("idempotency_key"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    check("model_drift_reports_idempotency_check", sql`${t.idempotencyKey} IS NULL OR char_length(${t.idempotencyKey}) BETWEEN 16 AND 128`),
+    uniqueIndex("model_drift_reports_idempotency_uq").on(t.monitorId, t.idempotencyKey).where(sql`${t.idempotencyKey} IS NOT NULL`),
     check("model_drift_reports_source_check", sql`${t.source} IN ('push', 'upload')`),
     check("model_drift_reports_window_check", sql`${t.windowEnd} > ${t.windowStart}`),
     check("model_drift_reports_samples_check", sql`${t.sampleCount} > 0`),
@@ -16587,6 +16758,338 @@ export const resourceRateReservations = pgTable(
     ),
   ],
 );
+
+/**
+ * ADR-0310 (G2; migration `managed_settings_bundles`) — signed, versioned bundles of vendor-native managed settings
+ * (Claude Code, GitHub Copilot, OpenAI Codex, a Cursor worksheet) compiled from one subject's effective MCP
+ * entitlements. A new version is written only when the compiled policy's digest changes, so `version` counts real
+ * policy changes per subject.
+ *
+ * 3NF exception, deliberate: a bundle is a point-in-time, signed artifact. `manifest` is the exact signed bytes and
+ * `policy_digest` is over the policy as it was compiled; neither is recomputed from today's grants, which is the
+ * point of keeping them (drift is measured against what was exported). The subject is a foreign key, never a copied
+ * name or email.
+ */
+export const managedSettingsBundles = pgTable(
+  "managed_settings_bundles",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    subjectKind: text("subject_kind", { enum: ["user", "role"] }).notNull(),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    roleId: uuid("role_id").references(() => roles.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    /** `sha256:<hex>` over the canonical compiled policy */
+    policyDigest: text("policy_digest").notNull(),
+    /** the exact `manifest.json` bytes that were signed (snapshot; see the table comment) */
+    manifest: text("manifest").notNull(),
+    /** base64 Ed25519 signature over `manifest` */
+    signature: text("signature").notNull(),
+    keyId: text("key_id").notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "managed_settings_bundles_subject_check",
+      sql`CASE ${t.subjectKind} WHEN 'user' THEN ${t.userId} IS NOT NULL AND ${t.roleId} IS NULL WHEN 'role' THEN ${t.roleId} IS NOT NULL AND ${t.userId} IS NULL ELSE false END`,
+    ),
+    check("managed_settings_bundles_version_check", sql`${t.version} >= 1`),
+    check("managed_settings_bundles_manifest_size_check", sql`octet_length(${t.manifest}) <= 65536`),
+    uniqueIndex("managed_settings_bundles_user_version_uq").on(t.userId, t.version).where(sql`${t.userId} IS NOT NULL`),
+    uniqueIndex("managed_settings_bundles_role_version_uq").on(t.roleId, t.version).where(sql`${t.roleId} IS NOT NULL`),
+    index("managed_settings_bundles_created_idx").on(t.createdAt, t.id),
+  ],
+);
+
+/**
+ * ADR-0310 — one compiled vendor file of a bundle. Its sha256 is listed in the signed manifest, so the body is the
+ * evidence of what was exported (append-only snapshot, same exception as the bundle row).
+ */
+export const managedSettingsBundleFiles = pgTable(
+  "managed_settings_bundle_files",
+  {
+    bundleId: uuid("bundle_id")
+      .notNull()
+      .references(() => managedSettingsBundles.id, { onDelete: "cascade" }),
+    path: text("path").notNull(),
+    body: text("body").notNull(),
+    sha256: text("sha256").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.bundleId, t.path] }),
+    check("managed_settings_bundle_files_size_check", sql`octet_length(${t.body}) <= 262144`),
+  ],
+);
+// ---------------------------------------------------------------------------
+// ADR-0327 (lane E12, migration `rule_step_detection`) — rule-like AI steps. Written only by
+// `apps/gateway/src/rule-steps.ts`, each write in the same transaction as its audit row.
+// ---------------------------------------------------------------------------
+
+/** one row, absent until first saved; absent = OFF (ADR-0180). Thresholds default strict; lowering one is a step-up. */
+export const ruleStepSettings = pgTable(
+  "rule_step_settings",
+  {
+    id: text("id").primaryKey().default("singleton"),
+    enabled: boolean("enabled").notNull().default(false),
+    minRuns: integer("min_runs").notNull().default(200),
+    minAgreement: doublePrecision("min_agreement").notNull().default(0.99),
+    minCoverage: doublePrecision("min_coverage").notNull().default(0.9),
+    minCellSupport: integer("min_cell_support").notNull().default(5),
+    /** database clock; scans are spaced by the gateway against now() */
+    lastScanAt: timestamp("last_scan_at", { withTimezone: true }),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("rule_step_settings_singleton_check", sql`${t.id} = 'singleton'`),
+    check("rule_step_settings_min_runs_check", sql`${t.minRuns} BETWEEN 50 AND 100000`),
+    check("rule_step_settings_min_agreement_check", sql`${t.minAgreement} >= 0.95 AND ${t.minAgreement} <= 1`),
+    check("rule_step_settings_min_coverage_check", sql`${t.minCoverage} >= 0.5 AND ${t.minCoverage} <= 1`),
+    check("rule_step_settings_min_cell_support_check", sql`${t.minCellSupport} BETWEEN 3 AND 1000`),
+  ],
+);
+export type RuleStepSettingsRow = typeof ruleStepSettings.$inferSelect;
+
+export const RULE_STEP_SUGGESTION_STATUSES = ["suggested", "dismissed"] as const;
+
+/** one suggestion per AI step (agent + span name): the latest scan's rule and its evidence */
+export const ruleStepSuggestions = pgTable(
+  "rule_step_suggestions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    /** the trace span name that identifies the step within the agent */
+    stepName: text("step_name").notNull(),
+    /** point-in-time snapshot (ADR-0200 exception): the induced rule `{fields, cells}` as the scan produced it,
+     * validated by the kernel's InducedRule shape; the evidence columns below describe this exact table */
+    rule: jsonb("rule").notNull(),
+    runs: integer("runs").notNull(),
+    structuredRuns: integer("structured_runs").notNull(),
+    outputClasses: integer("output_classes").notNull(),
+    agreement: doublePrecision("agreement").notNull(),
+    coverage: doublePrecision("coverage").notNull(),
+    /** measured spend of the step over the scan window (sum of trace span cost) */
+    windowCostUsd: doublePrecision("window_cost_usd").notNull(),
+    projectedMonthlySavingsUsd: doublePrecision("projected_monthly_savings_usd").notNull(),
+    status: text("status", { enum: RULE_STEP_SUGGESTION_STATUSES }).notNull().default("suggested"),
+    detectedAt: timestamp("detected_at", { withTimezone: true }).notNull().defaultNow(),
+    dismissedBy: uuid("dismissed_by").references(() => users.id, { onDelete: "set null" }),
+    dismissedAt: timestamp("dismissed_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("rule_step_suggestions_step_uq").on(t.agentId, t.stepName),
+    index("rule_step_suggestions_status_savings_idx").on(t.status, t.projectedMonthlySavingsUsd),
+    check("rule_step_suggestions_status_check", sql`${t.status} IN ('suggested', 'dismissed')`),
+    check("rule_step_suggestions_rates_check", sql`${t.agreement} BETWEEN 0 AND 1 AND ${t.coverage} BETWEEN 0 AND 1`),
+    check(
+      "rule_step_suggestions_dismissed_check",
+      sql`(${t.status} = 'dismissed') = (${t.dismissedAt} IS NOT NULL)`,
+    ),
+  ],
+);
+export type RuleStepSuggestionRow = typeof ruleStepSuggestions.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// Lane L7 (P14 + P16 lineage; ADR-0216 / ADR-0217 amendments, migration model_artifact_lineage)
+// ---------------------------------------------------------------------------
+
+/** how a model file was derived from its parent file(s); `merged` takes two or more parents, the rest exactly one */
+export const MODEL_LINEAGE_RELATIONS = ["repackaged", "converted", "fine_tuned", "merged", "quantized"] as const;
+export type ModelLineageRelation = (typeof MODEL_LINEAGE_RELATIONS)[number];
+
+/**
+ * One parent edge of a derived model file: the child was made from the parent by `relation`. A JOIN TABLE (a merge
+ * has several parents), recorded once per child and never edited: a second derivation for the same child is refused
+ * in the handler, and an edit would rewrite provenance. Rows go with either artifact when it is deleted; the audit row
+ * written with them (`model-artifact-lineage-recorded`) keeps the record, with both sha256s.
+ */
+export const modelArtifactLineage = pgTable(
+  "model_artifact_lineage",
+  {
+    childArtifactId: uuid("child_artifact_id")
+      .notNull()
+      .references(() => modelArtifacts.id, { onDelete: "cascade" }),
+    parentArtifactId: uuid("parent_artifact_id")
+      .notNull()
+      .references(() => modelArtifacts.id, { onDelete: "cascade" }),
+    relation: text("relation", { enum: MODEL_LINEAGE_RELATIONS }).notNull(),
+    /** free text the person recorded, e.g. "GPTQ 4-bit" or "TIES merge, density 0.5" (bounded) */
+    method: text("method"),
+    recordedByUserId: uuid("recorded_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.childArtifactId, t.parentArtifactId] }),
+    check("model_artifact_lineage_no_self_check", sql`${t.childArtifactId} <> ${t.parentArtifactId}`),
+    check(
+      "model_artifact_lineage_relation_check",
+      sql`${t.relation} IN ('repackaged', 'converted', 'fine_tuned', 'merged', 'quantized')`,
+    ),
+    check("model_artifact_lineage_method_check", sql`${t.method} IS NULL OR length(${t.method}) BETWEEN 1 AND 200`),
+    index("model_artifact_lineage_parent_idx").on(t.parentArtifactId),
+  ],
+);
+export type ModelArtifactLineageRow = typeof modelArtifactLineage.$inferSelect;
+
+// ===== ADR-0332 (lane E14): endpoint AI add-on inventory (pending migration endpoint_addon_inventory) =====
+//
+// The inventory of AI add-ons on endpoints (coding agent, MCP server, skill, plugin) is read, not projected: MCP
+// servers come from `endpoint_mcp_servers` (ADR-0259) and coding agents from endpoint-sourced device
+// `shadow_ai_findings` (ADR-0195), joined at read time. These tables are the system of record only for what those
+// evidence tables do not hold: a sighting an endpoint lane records directly (a skill or plugin with its content
+// digest). An add-on is a row, each version of it is a row, and a sighting joins one version to one enrolled device
+// for one detection source; the device's pseudonym is joined from `endpoint_devices`, never copied. The
+// admission-scan verdict is joined at read time from `admission_engine_scans` by content digest (ADR-0242). Row-level
+// security: admins and the `system_task` reason only (pending migration). No content of a skill or config is stored.
+
+export const ENDPOINT_ADDON_KINDS = ["coding_agent", "mcp_server", "skill", "plugin"] as const;
+export const ENDPOINT_ADDON_IDENTITY_KINDS = ["provider", "package", "host", "command", "name", "unknown"] as const;
+export const ENDPOINT_ADDON_SOURCES = ["endpoint_agent", "endpoint_osquery", "endpoint_inventory"] as const;
+
+/** one directly recorded AI add-on, by kind and identity (a package, a host, a command base name or a skill name) */
+export const endpointAddons = pgTable(
+  "endpoint_addons",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kind: text("kind", { enum: ENDPOINT_ADDON_KINDS }).notNull(),
+    identityKind: text("identity_kind", { enum: ENDPOINT_ADDON_IDENTITY_KINDS }).notNull(),
+    identity: text("identity").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("endpoint_addons_identity_uq").on(t.kind, t.identityKind, t.identity),
+    check("endpoint_addons_identity_check", sql`length(${t.identity}) BETWEEN 1 AND 255`),
+  ],
+);
+export type EndpointAddonRow = typeof endpointAddons.$inferSelect;
+
+/** one version of a directly recorded add-on: the reported version string ('' when none) and its content digest */
+export const endpointAddonVersions = pgTable(
+  "endpoint_addon_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    addonId: uuid("addon_id")
+      .notNull()
+      .references(() => endpointAddons.id, { onDelete: "cascade" }),
+    version: text("version").notNull().default(""),
+    contentDigest: text("content_digest"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("endpoint_addon_versions_uq").on(t.addonId, t.version, t.contentDigest).nullsNotDistinct(),
+    index("endpoint_addon_versions_digest_idx").on(t.contentDigest).where(sql`${t.contentDigest} IS NOT NULL`),
+    check("endpoint_addon_versions_digest_check", sql`${t.contentDigest} IS NULL OR ${t.contentDigest} ~ '^[0-9a-f]{64}$'`),
+    check("endpoint_addon_versions_version_check", sql`length(${t.version}) <= 128`),
+  ],
+);
+export type EndpointAddonVersionRow = typeof endpointAddonVersions.$inferSelect;
+
+/** one directly recorded version seen on one enrolled device by one source and host agent (deleted with the device) */
+export const endpointAddonSightings = pgTable(
+  "endpoint_addon_sightings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    versionId: uuid("version_id")
+      .notNull()
+      .references(() => endpointAddonVersions.id, { onDelete: "cascade" }),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => endpointDevices.id, { onDelete: "cascade" }),
+    source: text("source", { enum: ENDPOINT_ADDON_SOURCES }).notNull(),
+    hostAgent: text("host_agent").notNull().default(""),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    unique("endpoint_addon_sightings_uq").on(t.versionId, t.deviceId, t.source, t.hostAgent),
+    index("endpoint_addon_sightings_device_idx").on(t.deviceId),
+    index("endpoint_addon_sightings_last_seen_idx").on(t.lastSeenAt),
+    check("endpoint_addon_sightings_seen_check", sql`${t.firstSeenAt} <= ${t.lastSeenAt}`),
+  ],
+);
+export type EndpointAddonSightingRow = typeof endpointAddonSightings.$inferSelect;
+
+/** the secret TYPES (rule ids, never a name or value) a directly recorded sighting reported; one row per type */
+export const endpointAddonSightingSecretTypes = pgTable(
+  "endpoint_addon_sighting_secret_types",
+  {
+    sightingId: uuid("sighting_id")
+      .notNull()
+      .references(() => endpointAddonSightings.id, { onDelete: "cascade" }),
+    secretType: text("secret_type").notNull(),
+  },
+  (t) => [
+    primaryKey({ name: "endpoint_addon_sighting_secret_types_pk", columns: [t.sightingId, t.secretType] }),
+    check("endpoint_addon_sighting_secret_types_check", sql`${t.secretType} ~ '^[a-z][a-z0-9_.]{0,63}$'`),
+  ],
+);
+// ===== end ADR-0332 =====
+
+// ===== ADR-0341 — the visual pipeline builder: drafts and versions of workflow templates =====
+/**
+ * One open draft per template, edited on the builder's canvas. `definition` is a schema-validated configuration
+ * document (ADR-0200 exception: it is validated by `workflowDefinitionSchema` on every save, may be invalid while
+ * someone is mid-edit, and is never executed). `base_version_id` is the version the draft was opened from; a publish is
+ * refused when the template has been published since. `revision` is the optimistic-concurrency counter every save
+ * names. Deployment-wide like `workflow_templates` (no tenant column, so no RLS policy); the routes are admin-only.
+ */
+export const workflowTemplateDrafts = pgTable(
+  "workflow_template_drafts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    templateId: uuid("template_id")
+      .notNull()
+      .references(() => workflowTemplates.id, { onDelete: "cascade" }),
+    definition: jsonb("definition").notNull(),
+    baseVersionId: uuid("base_version_id")
+      .notNull()
+      .references((): AnyPgColumn => workflowTemplateVersions.id, { onDelete: "cascade" }),
+    revision: integer("revision").notNull().default(1),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("workflow_template_drafts_template_uq").on(t.templateId),
+    index("workflow_template_drafts_base_version_idx").on(t.baseVersionId),
+    check("workflow_template_drafts_revision_check", sql`${t.revision} >= 1`),
+    check("workflow_template_drafts_definition_check", sql`jsonb_typeof(${t.definition}) = 'object'`),
+  ],
+);
+export type WorkflowTemplateDraftRow = typeof workflowTemplateDrafts.$inferSelect;
+
+/**
+ * Every published version of a template, append-only (`regulait_refuse_mutation`, no TRUNCATE). `definition` is a
+ * point-in-time snapshot (ADR-0200 exception): the bytes that went live, which `content_hash` (SHA-256 of ADR-0060's
+ * canonical JSON) identifies. `origin` `baseline` is the live definition captured the first time a template is opened
+ * in the builder; `builder` is a publish.
+ */
+export const workflowTemplateVersions = pgTable(
+  "workflow_template_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    templateId: uuid("template_id")
+      .notNull()
+      .references(() => workflowTemplates.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    definition: jsonb("definition").notNull(),
+    contentHash: text("content_hash").notNull(),
+    origin: text("origin", { enum: ["baseline", "builder"] }).notNull(),
+    publishedBy: uuid("published_by").references(() => users.id, { onDelete: "set null" }),
+    publishedAt: timestamp("published_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("workflow_template_versions_template_version_uq").on(t.templateId, t.version),
+    check("workflow_template_versions_version_check", sql`${t.version} >= 1`),
+    check("workflow_template_versions_hash_check", sql`${t.contentHash} ~ '^[0-9a-f]{64}$'`),
+    check("workflow_template_versions_origin_check", sql`${t.origin} IN ('baseline', 'builder')`),
+  ],
+);
+export type WorkflowTemplateVersionRow = typeof workflowTemplateVersions.$inferSelect;
+// ===== end ADR-0341 =====
 
 // ===== ADR-0333 (lane E15): rule-based detection of risky agent behaviour =========================================
 export const DETECTION_SEVERITIES = ["low", "medium", "high", "critical"] as const;

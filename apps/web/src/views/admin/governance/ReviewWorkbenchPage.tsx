@@ -26,7 +26,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { withStepUp } from "../../../stepup/stepUp";
 import type { Approval } from "../../../api/types";
-import { ago } from "../../../api/format";
+import { ago, errorText } from "../../../api/format";
 import { pendingQueueQuery, pendingRows, queueTotal } from "../../../api/approvalQueue";
 import { pendingCapNote } from "../../../api/approvalQueuePages";
 import { useSession } from "../../../session/SessionContext";
@@ -182,7 +182,7 @@ export default function ReviewWorkbenchPage() {
               // a failed read is never shown as "nothing breached"
               <ErrorState
                 title="Couldn't load the pending queue"
-                message={queue.error instanceof Error ? queue.error.message : String(queue.error)}
+                message={errorText(queue.error)}
                 onRetry={() => void queue.refetch()}
               />
             ) : null}

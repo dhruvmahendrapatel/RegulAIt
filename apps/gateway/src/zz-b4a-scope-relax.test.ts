@@ -8,6 +8,7 @@
  * Global state (the execution mode, overrides, rules, connections) is put back
  * in afterAll (M-068).
  */
+import { hashToken } from "./token-hash.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -102,7 +103,7 @@ beforeAll(async () => {
   const token = "rgls_" + randomBytes(32).toString("hex");
   const [s] = await db
     .insert(authSessions)
-    .values({ tokenHash: createHash("sha256").update(token).digest("hex"), userId: id, origin: "password", expiresAt: new Date(Date.now() + 3_600_000), idleExpiresAt: new Date(Date.now() + 3_600_000), idleMinutes: 60 })
+    .values({ tokenHash: hashToken(token), userId: id, origin: "password", expiresAt: new Date(Date.now() + 3_600_000), idleExpiresAt: new Date(Date.now() + 3_600_000), idleMinutes: 60 })
     .returning({ id: authSessions.id });
   created.sessions.push(s!.id);
   admin = { id, key: { authorization: `Bearer ${key.json().token}` }, token, auth: new SoftAuthenticator({ origin: ORIGIN }) };

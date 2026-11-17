@@ -2843,11 +2843,26 @@ export async function runStageRetryJob(
 export async function createWorkflowTemplateValidated(
   db: Db,
   body: { name: string; definition?: unknown },
+  actorUserId: string | null = null,
 ): Promise<
   | { ok: true; row: typeof workflowTemplates.$inferSelect }
   | { ok: false; status: number; body: Record<string, unknown> }
 > {
   const definition = validateDefinition(body.definition);
+  const refused = await checkWorkflowTemplateReferences(db, definition);
+  if (refused) return refused;
+  return insertWorkflowTemplate(db, body.name, definition, actorUserId);
+}
+
+/**
+ * ADR-0341: the gateway-side checks of a kernel-valid definition (what the kernel cannot see: retired datasets,
+ * registry agents, user ids, nested run graphs), shared by the create path and the builder's validate and publish.
+ * Null = the definition may be stored; otherwise the refusal to send.
+ */
+export async function checkWorkflowTemplateReferences(
+  db: Db,
+  definition: WorkflowDefinition,
+): Promise<{ ok: false; status: number; body: Record<string, unknown> } | null> {
   // ADR-0208 G9: a new quality gate may not bind a retired eval dataset (bindings name the dataset by NAME)
   const retiredBound = await retiredEvalDatasetNames(db, evalDatasetNamesBoundBy(definition));
   if (retiredBound.length > 0) {
@@ -2932,11 +2947,39 @@ export async function createWorkflowTemplateValidated(
       return { ok: false, status: 422, body: { error: "invalid_approver" } };
     }
   }
-  const [row] = await db
-    .insert(workflowTemplates)
-    .values({ name: body.name, definition })
-    .returning();
-  return { ok: true, row: row! };
+  return null;
+}
+
+async function insertWorkflowTemplate(
+  db: Db,
+  name: string,
+  definition: WorkflowDefinition,
+  actorUserId: string | null,
+): Promise<{ ok: true; row: typeof workflowTemplates.$inferSelect }> {
+  // ADR-0283 owner decision (2026-11-15): no stage retries unless its template
+  // says so; a template that turns automatic retry on is audited, by stage and
+  // policy, in ONE transaction with the insert (a savepoint when the caller
+  // already holds one), so a retry-enabled template never exists unaudited.
+  const retried = definition.stages.filter((st) => st.retry);
+  const row = await db.transaction(async (tx) => {
+    const [created] = await tx
+      .insert(workflowTemplates)
+      .values({ name, definition })
+      .returning();
+    if (retried.length === 0) return created!;
+    await tx.insert(auditLog).values({
+      userId: actorUserId ?? SYSTEM_IDENTITY,
+      objectType: "workflow_template",
+      objectId: created!.id,
+      detail: { templateName: name, stages: retried.map((st) => ({ stageId: st.id, type: st.type, retry: st.retry })) },
+      effect: "allow",
+      ruleId: "workflow:template-stage-retry-enabled",
+      ruleChain: [],
+      reason: `template '${name}' turns on automatic retry for ${retried.map((st) => `'${st.id}'`).join(", ")} (capped by each stage's retry policy)`,
+    });
+    return created!;
+  });
+  return { ok: true, row };
 }
 
 /** the refusal when a sign-off owed by someone other than the initiator has nobody to go to */
@@ -3414,7 +3457,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
   app.post("/v1/workflows/templates", async (req, reply) => {
     const body = createWorkflowTemplateSchema.parse(req.body);
     if (!isIntakeTemplateName(body.name)) {
-      const result = await createWorkflowTemplateValidated(db, body);
+      const result = await createWorkflowTemplateValidated(db, body, req.authCtx.userId ?? null);
       if (!result.ok) return reply.status(result.status).send(result.body);
       return reply.status(201).send(result.row);
     }
@@ -3427,7 +3470,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       raw: req.body,
       candidate: { name: body.name, definition: (body.definition ?? {}) as Record<string, unknown> },
       actorUserId: req.authCtx.userId ?? null,
-      write: (tx, resolved) => createWorkflowTemplateValidated(tx, { name: body.name, definition: resolved!.definition }).then((r) => (r.ok ? { ok: true as const, value: r.row } : r)),
+      write: (tx, resolved) => createWorkflowTemplateValidated(tx, { name: body.name, definition: resolved!.definition }, req.authCtx.userId ?? null).then((r) => (r.ok ? { ok: true as const, value: r.row } : r)),
     });
     if (!gated.ok) return reply.status(gated.status).send(gated.body);
     return reply.status(201).send({ ...gated.value, ...(gated.decisionRegression ? { decisionRegression: gated.decisionRegression } : {}) });

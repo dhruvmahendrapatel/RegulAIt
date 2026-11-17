@@ -120,6 +120,8 @@ await runMigrations(
 }
 const app = buildApp(db, {
   bootstrapToken: BOOT,
+  // in-process operator tool holding DATABASE_URL: the token is not a network credential here (ADR-0167 amendment, S-02)
+  bootstrapAfterAdmin: true,
   dataKey: DATA_KEY,
 });
 

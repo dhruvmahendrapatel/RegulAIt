@@ -14,6 +14,7 @@ import { useToast } from "../../../ui/toast";
 import { ReasonModal, useAction, useAdminInvalidate, useComplianceProfiles } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+import { errorText } from "../../../api/format";
 
 /** a retired row's place in the actions column */
 function ReadOnly(props: { retiredAt?: string | null }) {
@@ -26,7 +27,7 @@ function refusalText(e: unknown, known: (code: string, payload: ApiError["payloa
     const said = known(e.payload.error, e.payload);
     if (said) return said;
   }
-  return e instanceof Error ? e.message : String(e);
+  return errorText(e);
 }
 
 /** a reasoned retire: posts the reason through step-up; on refusal the dialog stays open and says why */

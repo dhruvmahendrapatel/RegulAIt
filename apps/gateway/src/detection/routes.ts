@@ -17,6 +17,7 @@ import {
   detectionIncidents,
   detectionRulePacks,
   eq,
+  inArray,
   lt,
   or,
   sql,
@@ -27,6 +28,7 @@ import { requireStepUp } from "../step-up.js";
 import { ReceiptKeyError, resolveReceiptSigningKey } from "../receipt-signing-key.js";
 import { registerReceiptSigningKey } from "../decision-receipts.js";
 import { DETECTION_RULE_IDS, loadActiveDetectionPack } from "./sweep.js";
+import { ADMIN_SETTABLE_STATUSES, incidentStatusSources, type DetectionIncidentStatus } from "./lifecycle.js";
 import { packChangeIsRelaxation, packDigest, parseDetectionPack, signDetectionPack } from "./pack.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
@@ -51,7 +53,9 @@ const listQuery = z
       .optional(),
   })
   .strict();
-const statusBody = z.object({ status: z.enum(["acknowledged", "closed"]) }).strict();
+const statusBody = z
+  .object({ status: z.enum(ADMIN_SETTABLE_STATUSES as [DetectionIncidentStatus, ...DetectionIncidentStatus[]]) })
+  .strict();
 
 type Rows<T> = { rows: T[] };
 
@@ -193,7 +197,7 @@ export function registerDetectionRoutes(app: FastifyInstance, db: Db): void {
       const [row] = await tx
         .update(detectionIncidents)
         .set({ status: b.data.status, statusChangedBy: req.authCtx.userId ?? null, statusChangedAt: sql`now()` })
-        .where(and(eq(detectionIncidents.id, p.data.incidentId), sql`${detectionIncidents.status} <> 'closed'`))
+        .where(and(eq(detectionIncidents.id, p.data.incidentId), inArray(detectionIncidents.status, incidentStatusSources(b.data.status))))
         .returning({ id: detectionIncidents.id, status: detectionIncidents.status });
       if (!row) return null;
       await tx.insert(auditLog).values({
