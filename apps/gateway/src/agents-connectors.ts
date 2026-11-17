@@ -69,6 +69,7 @@ import {
 import {
   defaultBaseUrlFor,
   isModelProviderKind,
+  validateVendorCredential,
   ModelProviderError,
   resolveModelProvider,
   type ModelChatMessage,
@@ -87,6 +88,8 @@ import {
   createConnectorGrantSchema,
   createConnectorSchema,
   createModelCredentialSchema,
+  ENV_FALLBACK_MODEL_PROVIDERS,
+  VENDOR_MODEL_PROVIDERS,
   invokeAgentSchema,
   invokeConnectorSchema,
   setAgentEnabledSchema,
@@ -2711,6 +2714,10 @@ export function platformEnvKey(
     openai: { key: ["OPENAI_API_KEY"], base: ["OPENAI_BASE_URL"] },
     google: { key: ["GOOGLE_API_KEY", "GEMINI_API_KEY"], base: ["GOOGLE_BASE_URL", "GEMINI_BASE_URL"] },
     xai: { key: ["XAI_API_KEY"], base: ["XAI_BASE_URL"] },
+    // ADR-0352: the API-key vendors. Base URLs come only from the stored credential.
+    mistral: { key: ["MISTRAL_API_KEY"], base: [] },
+    cohere: { key: ["COHERE_API_KEY", "CO_API_KEY"], base: [] },
+    qwen: { key: ["DASHSCOPE_API_KEY", "ALIBABA_API_KEY"], base: [] },
   };
   const entry = map[provider];
   if (!entry) return null;
@@ -2735,13 +2742,16 @@ export function platformEnvKeyName(provider: string): string | null {
     openai: "OPENAI_API_KEY",
     google: "GOOGLE_API_KEY",
     xai: "XAI_API_KEY",
+    mistral: "MISTRAL_API_KEY",
+    cohere: "COHERE_API_KEY",
+    qwen: "DASHSCOPE_API_KEY",
   };
   return names[provider] ?? null;
 }
 
 /** The non-mock providers that support the platform-key env fallback, i.e. the
  * provider kinds `platformEnvKey` can resolve. */
-export const ENV_FALLBACK_PROVIDERS = ["anthropic", "openai", "google", "xai"] as const;
+export const ENV_FALLBACK_PROVIDERS = ENV_FALLBACK_MODEL_PROVIDERS;
 
 /**
  * ADR-0181: the request header a client sends to say "if this call may not
@@ -3176,6 +3186,10 @@ export function registerAgentConnectorRoutes(
 
   app.post("/v1/model-credentials", async (req, reply) => {
     const body = createModelCredentialSchema.parse(req.body);
+    // ADR-0352: a structured (Bedrock / Vertex) secret is checked when it is typed,
+    // not on a user's first call. The message never contains the secret.
+    const shapeError = validateVendorCredential(body.provider, body.apiKey, body.baseUrl);
+    if (shapeError) return reply.status(400).send({ error: "invalid_credential", detail: shapeError });
     if (!opts.dataKey) {
       return reply.status(503).send({ error: "no_data_key", detail: "set REGULAIT_DATA_KEY" });
     }
@@ -3259,7 +3273,8 @@ export function registerAgentConnectorRoutes(
     const providers: Record<string, { configured: boolean }> = {
       mock: { configured: true },
     };
-    for (const provider of ENV_FALLBACK_PROVIDERS) {
+    // ADR-0352: every shipped vendor kind; the env half only for kinds that have one
+    for (const provider of VENDOR_MODEL_PROVIDERS) {
       providers[provider] = {
         configured:
           stored.has(provider) ||
@@ -3372,6 +3387,8 @@ export function registerAgentConnectorRoutes(
       return reply.status(403).send({ error: "forbidden" });
     }
     const body = createModelCredentialSchema.parse(req.body);
+    const shapeError = validateVendorCredential(body.provider, body.apiKey, body.baseUrl);
+    if (shapeError) return reply.status(400).send({ error: "invalid_credential", detail: shapeError });
     // ADR-0024 (O15): under enforced key custody, per-user BYO credentials
     // stop working — creation AND update (this endpoint upserts) are refused
     // with an explanation, and every refusal is audited. Existing rows are not
