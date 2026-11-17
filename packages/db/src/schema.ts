@@ -7911,7 +7911,8 @@ export const onboardingImports = pgTable(
   "onboarding_imports",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    kind: text("kind", { enum: ["users", "group_roles"] }).notNull(),
+    /** ADR-0289 adds `pm_work_items` (the PM project/work-item importer) */
+    kind: text("kind", { enum: ["users", "group_roles", "pm_work_items"] }).notNull(),
     mode: text("mode", { enum: ["dry_run", "apply"] }).notNull(),
     status: text("status", { enum: ["planned", "applied", "refused"] }).notNull(),
     /** fingerprint of the exact screened bytes — "which file did this?" without
@@ -16755,6 +16756,58 @@ export const resourceRateReservations = pgTable(
   ],
 );
 
+// ---------------------------------------------------------------------------
+// ADR-0289 (builder lane L6) — the PM project / work-item importer (ADR-0054 §3).
+// Migration `pending/pm_work_item_import.sql` (numbered at merge).
+// ---------------------------------------------------------------------------
+
+/** Which RegulAIt Initiative a PM connection's project rolls up to. One row per connection (the connection names one
+ * PM project), so the mapping is a fact about the connection, kept apart from the reporting-only initiative. */
+export const pmProjectInitiatives = pgTable("pm_project_initiatives", {
+  connectionId: uuid("connection_id")
+    .primaryKey()
+    .references(() => pmConnections.id, { onDelete: "cascade" }),
+  initiativeId: uuid("initiative_id")
+    .notNull()
+    .references(() => initiatives.id, { onDelete: "cascade" }),
+  /** the import that set (or last changed) the mapping */
+  importId: uuid("import_id").references(() => onboardingImports.id, { onDelete: "set null" }),
+  mappedAt: timestamp("mapped_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [index("pm_project_initiatives_initiative_idx").on(t.initiativeId)]);
+
+/** An existing work item the importer found in a connection's project. LINKAGE ONLY: the PM tool stays the source of
+ * truth (pillar 8), so title, state and fields are read through live and never stored here. `external_url` and
+ * `item_type` are the provider's own last-reported values (reconciled on every import), not RegulAIt-owned copies. */
+export const pmImportedWorkItems = pgTable(
+  "pm_imported_work_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => pmConnections.id, { onDelete: "cascade" }),
+    externalId: text("external_id").notNull(),
+    // ADR-0200 3NF exception (verbatim external payload): the item's URL as the PM tool reported it at the last import.
+    // The PM tool owns it (pillar 8); the importer refreshes it on every apply and never derives anything from it.
+    externalUrl: text("external_url").notNull(),
+    // ADR-0200 3NF exception (verbatim external payload): the tool's own work-item type name ("Bug", "Story"), as
+    // reported at the last import. It is the tool's vocabulary, not a RegulAIt reference, so there is nothing to join.
+    itemType: text("item_type").notNull(),
+    firstImportId: uuid("first_import_id").references(() => onboardingImports.id, { onDelete: "set null" }),
+    lastImportId: uuid("last_import_id").references(() => onboardingImports.id, { onDelete: "set null" }),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    /** set when a later import no longer finds the item in the PM tool; never deleted (re-appearing clears it) */
+    missingSince: timestamp("missing_since", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("pm_imported_work_items_conn_ext_uq").on(t.connectionId, t.externalId),
+    index("pm_imported_work_items_conn_id_idx").on(t.connectionId, t.id),
+    index("pm_imported_work_items_first_import_idx").on(t.firstImportId),
+    index("pm_imported_work_items_last_import_idx").on(t.lastImportId),
+  ],
+);
+export type PmImportedWorkItemRow = typeof pmImportedWorkItems.$inferSelect;
+
 /**
  * ADR-0310 (G2; migration `managed_settings_bundles`) — signed, versioned bundles of vendor-native managed settings
  * (Claude Code, GitHub Copilot, OpenAI Codex, a Cursor worksheet) compiled from one subject's effective MCP
@@ -17022,6 +17075,119 @@ export const endpointAddonSightingSecretTypes = pgTable(
   ],
 );
 // ===== end ADR-0332 =====
+
+// ===== ADR-0342 (lane E23): process analytics read model =====
+// A MEASURED READ MODEL (ADR-0200 addendum). Source of truth: `workflow_events` (the append-only per-instance history)
+// replayed through the pure workflow kernel against the instance's snapshotted definition. The projector
+// (apps/gateway/src/process-analytics.ts) rebuilds an instance's rows whenever `workflow_instances.updated_at` or its
+// project changes, so every row here can be dropped and rebuilt from the source. Nothing here is evidence: the audit
+// chain and `workflow_events` stay the record. Row-level security is enabled and forced (migration
+// `pending/process_analytics.sql`).
+
+export const PROCESS_ANALYTICS_REPLAY_STATUSES = ["ok", "diverged", "too_long"] as const;
+export type ProcessAnalyticsReplayStatus = (typeof PROCESS_ANALYTICS_REPLAY_STATUSES)[number];
+export const PROCESS_ANALYTICS_EXIT_KINDS = ["advanced", "reworked", "ended"] as const;
+export type ProcessAnalyticsExitKind = (typeof PROCESS_ANALYTICS_EXIT_KINDS)[number];
+
+/** one row per projected workflow instance */
+export const processAnalyticsInstances = pgTable(
+  "process_analytics_instances",
+  {
+    instanceId: uuid("instance_id")
+      .primaryKey()
+      .references(() => workflowInstances.id, { onDelete: "cascade" }),
+    /** READ-MODEL COPY of `workflow_instances.project_id` (ADR-0200 addendum exception): the row-level security read
+     * key and the scope filter. The projector re-syncs it whenever the instance's project differs. */
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
+    /** the first event's time (the `start` event) */
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    /** when the instance last reached a terminal status; NULL while it is open (a re-opened instance is open again) */
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+    /** the terminal status reached at `endedAt` (ADR-0200 exception: derived from the replay, rebuilt with it) */
+    terminalStatus: text("terminal_status"),
+    lastEventAt: timestamp("last_event_at", { withTimezone: true }).notNull(),
+    eventCount: integer("event_count").notNull(),
+    /** `ok`: the replay reproduced the stored state; `diverged` or `too_long`: the instance has no spans and is counted
+     * as excluded on every response */
+    replayStatus: text("replay_status", { enum: PROCESS_ANALYTICS_REPLAY_STATUSES }).notNull(),
+    /** the `workflow_instances.updated_at` this projection was built from (the change detector) */
+    sourceUpdatedAt: timestamp("source_updated_at", { withTimezone: true }).notNull(),
+    projectedAt: timestamp("projected_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("process_analytics_instances_replay_check", sql`${t.replayStatus} IN ('ok','diverged','too_long')`),
+    check("process_analytics_instances_ended_check", sql`(${t.endedAt} IS NULL) = (${t.terminalStatus} IS NULL)`),
+    // repeats TERMINAL_STATUSES from @regulait/workflow-kernel (the one declared set); keep the two equal
+    check(
+      "process_analytics_instances_terminal_check",
+      sql`${t.terminalStatus} IS NULL OR ${t.terminalStatus} IN ('completed','aborted','denied','rolled_back')`,
+    ),
+    check("process_analytics_instances_event_count_check", sql`${t.eventCount} >= 0`),
+    index("process_analytics_instances_project_started_idx").on(t.projectId, t.startedAt),
+    index("process_analytics_instances_started_idx").on(t.startedAt),
+    index("process_analytics_instances_ended_idx").on(t.endedAt),
+  ],
+);
+export type ProcessAnalyticsInstanceRow = typeof processAnalyticsInstances.$inferSelect;
+
+/** the templates an instance was started from (a merged instance has several); a join table, never a jsonb copy */
+export const processAnalyticsInstanceTemplates = pgTable(
+  "process_analytics_instance_templates",
+  {
+    instanceId: uuid("instance_id")
+      .notNull()
+      .references(() => processAnalyticsInstances.instanceId, { onDelete: "cascade" }),
+    templateId: uuid("template_id")
+      .notNull()
+      .references(() => workflowTemplates.id, { onDelete: "cascade" }),
+  },
+  (t) => [
+    primaryKey({ name: "process_analytics_instance_templates_pk", columns: [t.instanceId, t.templateId] }),
+    index("process_analytics_instance_templates_template_idx").on(t.templateId),
+  ],
+);
+
+/** one row per visit of an instance to a stage: entry, exit, and how the time inside split into wait and work */
+export const processAnalyticsStageSpans = pgTable(
+  "process_analytics_stage_spans",
+  {
+    instanceId: uuid("instance_id")
+      .notNull()
+      .references(() => processAnalyticsInstances.instanceId, { onDelete: "cascade" }),
+    /** 0-based order of the span within the instance */
+    seq: integer("seq").notNull(),
+    /** the stage's id and type in the instance's SNAPSHOTTED definition (ADR-0200 exception: point-in-time, as run) */
+    stageId: text("stage_id").notNull(),
+    stageType: text("stage_type").notNull(),
+    /** 1 = the first visit; 2+ = the stage ran again after rework */
+    visit: integer("visit").notNull(),
+    enteredAt: timestamp("entered_at", { withTimezone: true }).notNull(),
+    /** NULL while the instance is still at this stage */
+    exitedAt: timestamp("exited_at", { withTimezone: true }),
+    /** time in a status that needs a person or an outside party (approval, artifact, plan, trigger, failed check,
+     * deploy handoff); up to `exitedAt`, or up to the instance's last event while open */
+    waitMs: bigint("wait_ms", { mode: "number" }).notNull(),
+    /** time the engine was executing the stage or it was queued for an executor */
+    workMs: bigint("work_ms", { mode: "number" }).notNull(),
+    exitKind: text("exit_kind", { enum: PROCESS_ANALYTICS_EXIT_KINDS }),
+  },
+  (t) => [
+    primaryKey({ name: "process_analytics_stage_spans_pk", columns: [t.instanceId, t.seq] }),
+    check("process_analytics_stage_spans_seq_check", sql`${t.seq} >= 0 AND ${t.visit} >= 1`),
+    check("process_analytics_stage_spans_ms_check", sql`${t.waitMs} >= 0 AND ${t.workMs} >= 0`),
+    check("process_analytics_stage_spans_exit_check", sql`(${t.exitedAt} IS NULL) = (${t.exitKind} IS NULL)`),
+    check(
+      "process_analytics_stage_spans_exit_kind_check",
+      sql`${t.exitKind} IS NULL OR ${t.exitKind} IN ('advanced','reworked','ended')`,
+    ),
+    check("process_analytics_stage_spans_order_check", sql`${t.exitedAt} IS NULL OR ${t.exitedAt} >= ${t.enteredAt}`),
+    check("process_analytics_stage_spans_stage_id_check", sql`char_length(${t.stageId}) >= 1`),
+    index("process_analytics_stage_spans_stage_exited_idx").on(t.stageId, t.exitedAt),
+    index("process_analytics_stage_spans_exited_idx").on(t.exitedAt),
+  ],
+);
+export type ProcessAnalyticsStageSpanRow = typeof processAnalyticsStageSpans.$inferSelect;
+// ===== end ADR-0342 =====
 
 // ===== ADR-0341 — the visual pipeline builder: drafts and versions of workflow templates =====
 /**

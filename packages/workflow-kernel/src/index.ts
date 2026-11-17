@@ -658,6 +658,17 @@ export type InstanceStatus =
   // §2 terminal: a post-deploy verify failed and the deploy was reversed.
   | "rolled_back";
 
+/**
+ * The ONE declared set of terminal instance statuses (ADR-0342 review): an instance in one of these accepts no event
+ * except a `reopen` of a `completed` instance. Every consumer imports this (or `isTerminalStatus`) rather than
+ * restating it; SQL CHECKs that must repeat it say so in a comment.
+ */
+export const TERMINAL_STATUSES = ["completed", "aborted", "denied", "rolled_back"] as const satisfies readonly InstanceStatus[];
+export type TerminalStatus = (typeof TERMINAL_STATUSES)[number];
+export function isTerminalStatus(status: string): status is TerminalStatus {
+  return (TERMINAL_STATUSES as readonly string[]).includes(status);
+}
+
 export interface InstanceState {
   status: InstanceStatus;
   currentStageIndex: number;
@@ -791,12 +802,7 @@ export function currentPlanningStage(
   def: WorkflowDefinition,
   state: InstanceState,
 ): Stage | null {
-  if (
-    state.status === "completed" ||
-    state.status === "aborted" ||
-    state.status === "denied" ||
-    state.status === "rolled_back"
-  ) {
+  if (isTerminalStatus(state.status)) {
     return null;
   }
   const stage = stageAt(def, state.currentStageIndex);
@@ -953,12 +959,7 @@ export function transition(
     return runForward(def, s);
   }
 
-  if (
-    state.status === "completed" ||
-    state.status === "aborted" ||
-    state.status === "denied" ||
-    state.status === "rolled_back"
-  ) {
+  if (isTerminalStatus(state.status)) {
     throw new WorkflowStateError(`instance is terminal (${state.status}) and accepts no events`);
   }
 
@@ -1232,4 +1233,5 @@ export function transition(
 
 // ADR-0341: the visual pipeline builder's governance rules
 export * from "./builder.js";
+// ADR-0342: the pure workflow-history replayer (process analytics; lane E30's CI replay check)
 export * from "./replay.js";

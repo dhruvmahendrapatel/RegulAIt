@@ -1,79 +1,96 @@
 /**
- * ADR-0349 (lane E30, idea 1 of 5 borrowed from Temporal): deterministic replay of a recorded event history.
+ * ADR-0342 — the pure workflow-history replayer.
  *
- * A workflow instance's stored state (`workflow_instances.state`) is the fold of its recorded events
- * (`workflow_events.event`, in commit order) through `transition()`, starting from `initialState()` of the
- * instance's snapshotted definition. That is the same property Temporal's replayer checks for workflow code: a
- * kernel change that would fold the same recorded history to a different state would silently change what an
- * IN-FLIGHT instance does next. `replayEvents` is the one fold; the replay-fixture suite runs it over recorded
- * histories in CI, and the process-analytics read model (lane E23, PR #888) can use it for its own replay.
+ * Replays an instance's recorded events (`workflow_events`, in time order) through `transition` from `initialState`
+ * against the instance's snapshotted definition, and checks that the replay ends at the state the engine stored.
+ * It knows nothing about analytics, databases or transports: it takes events in and gives the replayed steps out, so
+ * any consumer (process analytics, lane E30's CI replay check) reads the same ordering and divergence rules.
  *
- * Pure and total: a history the kernel refuses is a result (`refused`, with the index of the event), never a throw,
- * so a caller can report every divergent history at once.
+ * Ordering. Events written in one transaction share a timestamp (`now()` is the transaction start), so their stored
+ * order may not be the order they were applied. Events are taken in time order; within a group sharing one
+ * timestamp the stored order is tried first, and the group is re-ordered only if the kernel refuses that order or the
+ * replay does not end at the stored state. The search is bounded (`REPLAY_TIE_GROUP_MAX`, `REPLAY_SEARCH_BUDGET`).
+ *
+ * Outcomes:
+ *   - `ok`: every event was accepted and the final state equals `stored` (status, current stage, stage statuses);
+ *   - `diverged`: no accepted order reaches `stored` (or there are no events);
+ *   - `too_long`: more than `REPLAY_EVENTS_MAX` events; nothing was replayed.
  */
-import {
-  initialState,
-  transition,
-  WorkflowStateError,
-  type InstanceState,
-  type InstanceStatus,
-  type WorkflowDefinition,
-  type WorkflowEvent,
-} from "./index.js";
+import { initialState, transition, type InstanceState, type WorkflowDefinition, type WorkflowEvent } from "./index.js";
 
-export type ReplayOutcome =
-  | {
-      ok: true;
-      state: InstanceState;
-      /** the instance status after each event, in order (a divergence report names the first that differs) */
-      statuses: InstanceStatus[];
-    }
-  | {
-      ok: false;
-      /** the index (0-based) of the event the kernel refused */
-      index: number;
-      event: WorkflowEvent;
-      reason: string;
-      statuses: InstanceStatus[];
-    };
+/** a history longer than this is not replayed */
+export const REPLAY_EVENTS_MAX = 5000;
+/** events sharing one timestamp are re-ordered at most this far */
+export const REPLAY_TIE_GROUP_MAX = 8;
+/** transitions tried across the whole search before giving up */
+export const REPLAY_SEARCH_BUDGET = 10_000;
 
-/** Fold `events` through `transition` from the definition's initial state. */
-export function replayEvents(def: WorkflowDefinition, events: readonly WorkflowEvent[]): ReplayOutcome {
-  let state = initialState(def);
-  const statuses: InstanceStatus[] = [];
-  for (let i = 0; i < events.length; i++) {
-    const event = events[i]!;
-    try {
-      state = transition(def, state, event).state;
-    } catch (err) {
-      // only the kernel's own refusal is a replay result; anything else is a bug and propagates
-      if (!(err instanceof WorkflowStateError)) throw err;
-      return { ok: false, index: i, event, reason: err.message, statuses };
-    }
-    statuses.push(state.status);
-  }
-  return { ok: true, state, statuses };
+export interface ReplayEvent {
+  event: WorkflowEvent;
+  at: Date;
 }
 
-/** The first difference between two instance states, in words, or null when they are equal. */
-export function stateDifference(expected: InstanceState, actual: InstanceState): string | null {
-  if (expected.status !== actual.status) return `status: expected '${expected.status}', got '${actual.status}'`;
-  if (expected.currentStageIndex !== actual.currentStageIndex) {
-    return `currentStageIndex: expected ${expected.currentStageIndex}, got ${actual.currentStageIndex}`;
+/** one applied event, with the state before and after it */
+export interface ReplayStep {
+  event: WorkflowEvent;
+  at: Date;
+  before: InstanceState;
+  after: InstanceState;
+}
+
+export type ReplayResult =
+  | { status: "ok"; steps: ReplayStep[]; final: InstanceState }
+  | { status: "diverged"; reason: string }
+  | { status: "too_long"; events: number };
+
+/** the parts of a state a replay must reproduce */
+export function sameInstanceState(a: InstanceState, b: InstanceState): boolean {
+  return (
+    a.status === b.status &&
+    a.currentStageIndex === b.currentStageIndex &&
+    JSON.stringify(a.stageStatuses) === JSON.stringify(b.stageStatuses)
+  );
+}
+
+export function replayHistory(def: WorkflowDefinition, history: readonly ReplayEvent[], stored: InstanceState): ReplayResult {
+  if (history.length > REPLAY_EVENTS_MAX) return { status: "too_long", events: history.length };
+  if (history.length === 0) return { status: "diverged", reason: "no events" };
+
+  const groups: ReplayEvent[][] = [];
+  for (const h of history) {
+    const last = groups[groups.length - 1];
+    if (last && last[0]!.at.getTime() === h.at.getTime()) last.push(h);
+    else groups.push([h]);
   }
-  if (expected.stageStatuses.length !== actual.stageStatuses.length) {
-    return `stageStatuses: expected ${expected.stageStatuses.length} stages, got ${actual.stageStatuses.length}`;
-  }
-  for (let i = 0; i < expected.stageStatuses.length; i++) {
-    if (expected.stageStatuses[i] !== actual.stageStatuses[i]) {
-      return `stageStatuses[${i}]: expected '${expected.stageStatuses[i]}', got '${actual.stageStatuses[i]}'`;
+
+  let budget = REPLAY_SEARCH_BUDGET;
+  const steps: ReplayStep[] = [];
+  const walk = (gi: number, state: InstanceState, rest: ReplayEvent[]): boolean => {
+    if (budget-- <= 0) return false;
+    if (rest.length === 0) {
+      if (gi === groups.length) return sameInstanceState(state, stored);
+      const g = groups[gi]!;
+      if (g.length > REPLAY_TIE_GROUP_MAX) return false;
+      return walk(gi + 1, state, g);
     }
-  }
-  const keys = new Set([...Object.keys(expected.artifactVersions), ...Object.keys(actual.artifactVersions)]);
-  for (const k of [...keys].sort()) {
-    if (expected.artifactVersions[k] !== actual.artifactVersions[k]) {
-      return `artifactVersions['${k}']: expected ${expected.artifactVersions[k] ?? "none"}, got ${actual.artifactVersions[k] ?? "none"}`;
+    for (let i = 0; i < rest.length; i++) {
+      const h = rest[i]!;
+      let after: InstanceState;
+      try {
+        after = transition(def, state, h.event).state;
+      } catch {
+        continue;
+      }
+      steps.push({ event: h.event, at: h.at, before: state, after });
+      if (walk(gi, after, [...rest.slice(0, i), ...rest.slice(i + 1)])) return true;
+      steps.pop();
+      if (budget <= 0) return false;
     }
+    return false;
+  };
+
+  if (!walk(0, initialState(def), [])) {
+    return { status: "diverged", reason: "no accepted order of this history reproduces the stored state" };
   }
-  return null;
+  return { status: "ok", steps, final: steps[steps.length - 1]!.after };
 }
