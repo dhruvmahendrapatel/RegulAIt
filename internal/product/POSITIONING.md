@@ -51,6 +51,15 @@ control in RegulAIt goes green only when a SELECT over our own ledgers says so (
 - **vs Camunda (process orchestration)**: "Camunda orchestrates the process around your agents. We govern every
   call your agents make inside it — and run the process too, in your cloud or air-gapped." (Gaps:
   [GAP_ANALYSIS_CAMUNDA_2026-11.md](GAP_ANALYSIS_CAMUNDA_2026-11.md).)
+- **vs DarkControl (endpoint AIDR for coding agents)**: "DarkControl polices what coding agents type into a laptop's
+  shell. We govern, cost and record every call those agents make, on the laptop, in the cloud or air-gapped." (Gaps:
+  [GAP_ANALYSIS_DARKCONTROL_2026-11.md](GAP_ANALYSIS_DARKCONTROL_2026-11.md).)
+- **vs Manifold Security (endpoint and browser AIDR)**: "Manifold watches and steers what agents do on a laptop. RegulAIt governs, costs and records every call those agents make, on the laptop, in the cloud or air-gapped, and is bringing the laptop's commands under the same signed policy." (Gaps:
+  [GAP_ANALYSIS_MANIFOLD_2026-11.md](GAP_ANALYSIS_MANIFOLD_2026-11.md).)
+- **vs KrakenD AI Gateway (API gateway with an AI module)**: "KrakenD routes, caches and rate-limits your AI traffic. RegulAIt decides, per person, whether each model, tool and agent call may happen at all, and proves it afterwards. Keep KrakenD at the edge if you already run it." (Gaps:
+  [GAP_ANALYSIS_KRAKEND_2026-11.md](GAP_ANALYSIS_KRAKEND_2026-11.md).)
+- **vs Forcepoint AI Security (data security adding AI)**: "Forcepoint watches the data that flows into AI. RegulAIt decides, per person, what each AI agent may call and spend, proves every decision with signed evidence, and runs in your cloud or air-gapped." (Gaps:
+  [GAP_ANALYSIS_FORCEPOINT_2026-11.md](GAP_ANALYSIS_FORCEPOINT_2026-11.md).)
 - **vs building it in-house**: "Every hole we closed is a test that stays: 2,100+ enforcement
   tests, adversarial by method, mistakes ledger public in the repo."
 
