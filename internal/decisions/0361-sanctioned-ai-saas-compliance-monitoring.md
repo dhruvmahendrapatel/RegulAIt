@@ -221,8 +221,9 @@ posture read instead of pretending.
   user, fewer app-class filters, more backfill). Revoking a credential and every narrowing need none.
 - **Data-key rotation.** Both ciphertext columns are in `CIPHERTEXT_COLUMNS`. The evidence guard lets the re-encryption
   walk rewrite `content_ciphertext` alone (the 0142 `regulait.secret_reencrypt` flag, every other column unchanged).
-- **Window.** A run resumes exactly where the last success ended and spans at most 30 days, so a connector that was off
-  for months catches up over several runs and never skips a gap.
+- **Window.** A run resumes exactly where the last success ended and spans at most one day (cap 50,000 interactions),
+  so a large tenant, a 30-day backfill or a connector that was off for months catches up over successive hourly runs
+  and never skips a gap. A run that still hits the cap fails without advancing, as §7 says.
 - **Not built in slice 1:** the ADR-0220 trained detectors on monitored text; a federated (client-assertion) Entra
   credential (the secret path only, the same `azureCredential` supports both); ChatGPT Enterprise and Claude Enterprise
   (slice 2); remediation (slice 3).

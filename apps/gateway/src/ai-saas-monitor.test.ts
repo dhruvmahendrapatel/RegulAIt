@@ -224,13 +224,17 @@ describe("ADR-0361 normaliser and text extraction", () => {
 describe("ADR-0361 run window, lifecycle and widening", () => {
   const now = new Date("2026-11-17T12:00:00Z");
   it("resumes exactly where the last success ended, never skipping a gap, and settles behind now", () => {
+    // a 7-day backfill starts 7 days back and reads one day per run
     const w = monitorWindow(null, 7, now);
-    expect(w.end.toISOString()).toBe("2026-11-17T11:55:00.000Z");
     expect(w.start.toISOString()).toBe("2026-11-10T11:55:00.000Z");
+    expect(w.end.toISOString()).toBe("2026-11-11T11:55:00.000Z");
     const old = new Date("2026-08-01T00:00:00Z");
     const caught = monitorWindow(old, 7, now);
     expect(caught.start).toEqual(old);
-    expect(caught.end.toISOString()).toBe("2026-08-31T00:00:00.000Z");
+    expect(caught.end.toISOString()).toBe("2026-08-02T00:00:00.000Z");
+    // caught up: the window ends at the settle point
+    const live = monitorWindow(new Date("2026-11-17T09:00:00Z"), 7, now);
+    expect(live.end.toISOString()).toBe("2026-11-17T11:55:00.000Z");
   });
 
   it("declares the run lifecycle: running closes once", () => {

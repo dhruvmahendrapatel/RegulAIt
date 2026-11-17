@@ -50,6 +50,7 @@ import {
   AI_SAAS_MONITOR_MAX_BACKFILL_DAYS,
   AI_SAAS_MONITOR_MAX_INTERACTIONS_PER_RUN,
   AI_SAAS_MONITOR_MAX_RESPONSE_BYTES,
+  AI_SAAS_MONITOR_MAX_WINDOW_MS,
   AI_SAAS_MONITOR_SETTLE_MS,
   AI_SAAS_MONITOR_STATEMENT,
   AI_SAAS_MONITOR_VENDORS,
@@ -223,13 +224,14 @@ export function scanInteraction(
 
 /**
  * The window the next run asks for: it resumes exactly where the last success ended (never skipping a gap), else the
- * configured backfill; it spans at most AI_SAAS_MONITOR_MAX_BACKFILL_DAYS, so a connector that was off for a long time
- * catches up over several runs; and it never reaches closer to now than the settle time.
+ * configured backfill; it spans at most one day (AI_SAAS_MONITOR_MAX_WINDOW_MS), so a large tenant, a long backfill or a
+ * connector that was off for a long time catches up over successive runs; and it never reaches closer to now than the
+ * settle time.
  */
 export function monitorWindow(monitoredThrough: Date | null, backfillDays: number, now: Date): { start: Date; end: Date } {
   const settled = now.getTime() - AI_SAAS_MONITOR_SETTLE_MS;
   const start = monitoredThrough ?? new Date(settled - Math.min(backfillDays, AI_SAAS_MONITOR_MAX_BACKFILL_DAYS) * DAY_MS);
-  const end = new Date(Math.min(settled, start.getTime() + AI_SAAS_MONITOR_MAX_BACKFILL_DAYS * DAY_MS));
+  const end = new Date(Math.min(settled, start.getTime() + AI_SAAS_MONITOR_MAX_WINDOW_MS));
   return { start, end };
 }
 

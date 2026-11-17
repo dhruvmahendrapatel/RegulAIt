@@ -78,7 +78,12 @@ export const AI_SAAS_MONITOR_MAX_BACKFILL_DAYS = 30;
 export const AI_SAAS_MONITOR_SETTLE_MS = 5 * 60 * 1000;
 export const AI_SAAS_MONITOR_MAX_USERS = 1000;
 export const AI_SAAS_MONITOR_MAX_PAGES_PER_USER = 50;
-export const AI_SAAS_MONITOR_MAX_INTERACTIONS_PER_RUN = 20_000;
+/**
+ * One run reads at most one day of a tenant's history, so a large tenant (or a long backfill, or a connector that was
+ * off for weeks) catches up over successive hourly runs instead of failing one oversized window over and over.
+ */
+export const AI_SAAS_MONITOR_MAX_WINDOW_MS = 24 * 3600 * 1000;
+export const AI_SAAS_MONITOR_MAX_INTERACTIONS_PER_RUN = 50_000;
 /** text scanned per interaction; longer text is truncated and the evidence row says so */
 export const AI_SAAS_MONITOR_MAX_TEXT_CHARS = 64 * 1024;
 /** each vendor response */
