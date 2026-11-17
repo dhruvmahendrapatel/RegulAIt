@@ -86,6 +86,13 @@
         },
         "storageClassName": {
           "type": "string"
+        },
+        "accessMode": {
+          "type": "string",
+          "enum": [
+            "ReadWriteOnce",
+            "ReadWriteMany"
+          ]
         }
       }
     },
@@ -209,6 +216,29 @@
         "installedVersion": {
           "type": "string",
           "pattern": "^([0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?)?$"
+        }
+      }
+    },
+    "replicas": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 20
+    },
+    "highAvailability": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "drainDelaySeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 60
+        },
+        "zoneSpread": {
+          "type": "string",
+          "enum": [
+            "DoNotSchedule",
+            "ScheduleAnyway"
+          ]
         }
       }
     }
