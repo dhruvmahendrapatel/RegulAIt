@@ -138,6 +138,8 @@ import {
   startInstanceSchema,
   submitArtifactSchema,
   isIntakeTemplateName,
+  WORKFLOW_TERMINAL_STATUSES,
+  isWorkflowTerminalStatus,
 } from "@regulait/shared";
 // ADR-0182 A11 — intake-named templates pass the decision-regression gate
 import { parseAcceptance, writeIntakeTemplateGated } from "./decision-regression.js";
@@ -451,7 +453,7 @@ async function applyEvent(
     // live engine runs with it (cancelled, key revoked, approval superseded);
     // a re-open cancels those of the rounds it left behind. Same transaction
     // as the transition, under the instance row lock.
-    const endsInstance = ["completed", "denied", "aborted", "rolled_back"].includes(state.status);
+    const endsInstance = isWorkflowTerminalStatus(state.status);
     if (endsInstance || isReopen) {
       const { cancelEngineRunsOfInstance } = await import("./engine-runs.js");
       await cancelEngineRunsOfInstance(tx, instance.id, actorUserId, {
@@ -618,8 +620,7 @@ async function recordWorkflowStageSpan(
   });
   // The instance's trace closes when the INSTANCE does — not when one of its
   // transitions returns, exactly as a run's trace closes with the run.
-  const terminal = ["completed", "denied", "aborted", "rolled_back"];
-  if (terminal.includes(applied.span.status)) {
+  if (isWorkflowTerminalStatus(applied.span.status)) {
     await finishTrace(db, ctx, applied.span.status === "completed" ? "ok" : "denied");
   }
 }
@@ -3139,7 +3140,7 @@ export async function startWorkflowInstanceWithTemplates(
 }
 
 /** ADR-0207 (G5): the workflow statuses after which an instance never runs another stage */
-const TERMINAL_INSTANCE_STATUSES = ["completed", "aborted", "denied", "rolled_back"] as const;
+const TERMINAL_INSTANCE_STATUSES = WORKFLOW_TERMINAL_STATUSES;
 /** a git stage naming the connection `$name`, anywhere in a definition's stage list */
 const GIT_STAGE_NAMING = '$.stages[*] ? (@.type == "git_operation" && @.connection == $name)';
 

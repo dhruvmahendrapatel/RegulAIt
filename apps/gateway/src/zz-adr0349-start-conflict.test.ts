@@ -7,6 +7,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, auditLog, createDb, desc, eq, orgSettings, runMigrations, sql, workflowInstances, type Db } from "@regulait/db";
+import { WORKFLOW_TERMINAL_STATUSES } from "@regulait/shared";
+import type { InstanceStatus } from "@regulait/workflow-kernel";
 import { buildApp } from "./app.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 
@@ -27,8 +29,13 @@ let restoreIdentity: (() => Promise<void>) | undefined;
 let pia: { id: string; auth: { authorization: string } };
 let bo: { id: string; auth: { authorization: string } };
 
-async function makeUser(email: string) {
-  const user = await app.inject({ method: "POST", headers: AUTH, url: "/v1/users", payload: { email, displayName: email.split("@")[0] } });
+async function makeUser(email: string, isAdmin = false) {
+  const user = await app.inject({
+    method: "POST",
+    headers: AUTH,
+    url: "/v1/users",
+    payload: { email, displayName: email.split("@")[0], ...(isAdmin ? { isAdmin: true } : {}) },
+  });
   expect(user.statusCode).toBe(201);
   const key = await app.inject({ method: "POST", headers: AUTH, url: `/v1/users/${user.json().id}/keys`, payload: { name: "test" } });
   return { id: user.json().id as string, auth: { authorization: `Bearer ${key.json().token}` } };
@@ -138,6 +145,32 @@ describe("ADR-0349 slice 2: one open instance per template set + target + work i
     await expect(dup).rejects.toMatchObject({ cause: { code: "23505", constraint: "workflow_instances_open_start_uq" } });
     // an ended row with the same key does not count
     await db.insert(workflowInstances).values({ ...held!, id: undefined, createdAt: undefined, updatedAt: undefined, status: "aborted" });
+  });
+
+  it("keys on the template SET: the same templates in another order hold the same key", async () => {
+    const [held] = await db.select().from(workflowInstances).where(eq(workflowInstances.workItemRef, item(1)));
+    const other = "00000000-0000-4000-8000-000000000001";
+    const ids = held!.templateIds as string[];
+    // a set of two, written in both orders: the second open row is refused
+    await db.insert(workflowInstances).values({ ...held!, id: undefined, createdAt: undefined, updatedAt: undefined, workItemRef: item(90), templateIds: [...ids, other] });
+    const swapped = db.insert(workflowInstances).values({ ...held!, id: undefined, createdAt: undefined, updatedAt: undefined, workItemRef: item(90), templateIds: [other, ...ids] });
+    await expect(swapped).rejects.toMatchObject({ cause: { code: "23505", constraint: "workflow_instances_open_start_uq" } });
+  });
+
+  it("the index predicate is built from the one declared list of terminal statuses, the kernel's", async () => {
+    // compile-time: every declared terminal status is a kernel status
+    const declared: readonly InstanceStatus[] = WORKFLOW_TERMINAL_STATUSES;
+    const res = (await db.execute(sql`SELECT pg_get_indexdef('workflow_instances_open_start_uq'::regclass) AS def`)) as unknown as { rows: Array<{ def: string }> };
+    const def = res.rows[0]!.def;
+    for (const s of declared) expect(def).toContain(`'${s}'`);
+    expect(def).toContain("regulait_workflow_template_set(template_ids)");
+  });
+
+  it("an admin's API key cannot relax the policy: the step-up is refused and nothing changes", async () => {
+    const ada = await makeUser(`e30-sc-ada-${RUN}@example.com`, true);
+    const put = await app.inject({ method: "PUT", headers: ada.auth, url: "/v1/org/settings", payload: { workflowStartConflictPolicy: "use_existing" } });
+    expect(put.statusCode).toBeGreaterThanOrEqual(400);
+    expect((await db.select({ p: orgSettings.workflowStartConflictPolicy }).from(orgSettings))[0]!.p).toBe("refuse");
   });
 
   it("refuses a work item that is not printable or is too long", async () => {

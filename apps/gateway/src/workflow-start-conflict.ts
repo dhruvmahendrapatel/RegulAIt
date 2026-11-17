@@ -13,11 +13,10 @@
  *   (an admin or its initiator). Anyone else gets the 409 without them, under either policy.
  */
 import { and, auditLog, eq, sql, workflowInstances, type Db } from "@regulait/db";
+import { WORKFLOW_TERMINAL_STATUSES } from "@regulait/shared";
 import { loadOrgSettings } from "./org-settings.js";
 
 export const WORKFLOW_START_KEY_INDEX = "workflow_instances_open_start_uq";
-
-const TERMINAL = ["completed", "aborted", "denied", "rolled_back"] as const;
 
 export interface StartKey {
   templateIds: readonly string[];
@@ -42,11 +41,12 @@ export async function openInstanceForStartKey(db: Db, key: StartKey) {
     .from(workflowInstances)
     .where(
       and(
-        sql`${workflowInstances.templateIds} = ${JSON.stringify(key.templateIds)}::jsonb`,
+        // the template SET, in any order: the same expression the index is built on
+        sql`regulait_workflow_template_set(${workflowInstances.templateIds}) = regulait_workflow_template_set(${JSON.stringify(key.templateIds)}::jsonb)`,
         sql`(${workflowInstances.change}->>'targetSystem') IS NOT DISTINCT FROM ${key.targetSystem}`,
         eq(workflowInstances.workItemRef, key.workItemRef),
         sql`${workflowInstances.status} NOT IN (${sql.join(
-          TERMINAL.map((s) => sql`${s}`),
+          WORKFLOW_TERMINAL_STATUSES.map((s) => sql`${s}`),
           sql`, `,
         )})`,
       ),

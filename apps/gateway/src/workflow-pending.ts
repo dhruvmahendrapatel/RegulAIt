@@ -18,6 +18,7 @@
  *   nothing         the instance has ended
  */
 import { and, approvals, eq, sql, type Db } from "@regulait/db";
+import { isWorkflowTerminalStatus } from "@regulait/shared";
 import type { InstanceState, WorkflowDefinition } from "@regulait/workflow-kernel";
 import { STAGE_RETRY_QUEUE, stageExecutionKey } from "./workflows-queue.js";
 
@@ -73,7 +74,7 @@ export function describePendingWork(input: PendingWorkInput) {
   const state = row.state as InstanceState;
   const stage = def.stages[state.currentStageIndex];
   const ctx = row.context ?? {};
-  const terminal = ["completed", "aborted", "denied", "rolled_back"].includes(row.status);
+  const terminal = isWorkflowTerminalStatus(row.status);
 
   // the claim, judged exactly as stageClaimState does (renewal, else the claim time, against the lease)
   const claimedStage = str(ctx.executing);
