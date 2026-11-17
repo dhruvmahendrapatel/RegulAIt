@@ -171,6 +171,9 @@ export {
   externalScorerAvailabilityFor,
   externalScorerKindSchema,
   EXTERNAL_SCORER_CLAIMABLE_KINDS,
+  ROUTING_SCORER_KIND,
+  ROUTING_SCORER_KINDS,
+  routingClassifierProblem,
   createExternalScorerSchema,
   updateExternalScorerSchema,
   setExternalScorerEnabledSchema,
@@ -2429,6 +2432,8 @@ export const updateOrgSettingsSchema = z
     compactionFailureMode: compactionFailureModeSchema.optional(),
     summarizerSelection: summarizerSelectionSchema.optional(),
     summarizerAgentId: z.string().uuid().nullable().optional(),
+    /** ADR-0353 part 2: the routing classifier (an ADR-0088 scorer claiming `routing_complexity`); null = off */
+    routingClassifierScorerId: z.string().uuid().nullable().optional(),
     // governance / compliance defaults
     defaultPiiMode: orgPiiModeSchema.optional(),
     /** ADR-0117: WHICH international national-identifier jurisdictions this

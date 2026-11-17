@@ -60,7 +60,8 @@ import {
   type ResolutionMode,
 } from "@regulait/db";
 import { evaluateAgent } from "@regulait/policy-kernel";
-import { classifyComplexity, estimateTokens, routeModel } from "@regulait/optimizer-kernel";
+import { estimateTokens, routeModel } from "@regulait/optimizer-kernel";
+import { auditRoutingClassification, classifyForRouting, routingClassifierDetail } from "./routing-classifier.js";
 import {
   isModelProviderKind,
   type ModelChatMessage,
@@ -892,7 +893,15 @@ export async function prepareCompatCall(
         a.id === requested.id ||
         (a.model && isModelProviderKind(a.provider) && configured.has(agentProviderToken(a))),
     );
-    const complexity = classifyComplexity(args.text);
+    const routingMode = effectiveTechniqueMode(org, org.routingEnabled, policy?.routingMode ?? null);
+    // ADR-0353 part 2: the configured classifier is asked only when routing will actually run
+    const classification = await classifyForRouting(
+      db,
+      dataKey,
+      { routingClassifierScorerId: routingMode === "automatic" ? org.routingClassifierScorerId : null },
+      args.text,
+    );
+    const complexity = classification.complexity;
     const estimate = estimateTokens(args.text, complexity);
     const routing = routeModel({
       requestedAgentId: requested.id,
@@ -902,10 +911,18 @@ export async function prepareCompatCall(
         costPerMTokIn: a.costPerMTokIn ?? null,
         costPerMTokOut: a.costPerMTokOut ?? null,
       })),
-      routingMode: effectiveTechniqueMode(org, org.routingEnabled, policy?.routingMode ?? null),
+      routingMode,
       complexity,
       ceilingTier,
       estimate,
+    });
+    await auditRoutingClassification(db, {
+      userId,
+      requestedAgentId: requested.id,
+      projectId,
+      classification,
+      routing,
+      surface: "compat",
     });
     served = registry.find((a) => a.id === routing.selectedAgentId) ?? requested;
     routerOverrode = served.id !== requested.id;
@@ -928,7 +945,7 @@ export async function prepareCompatCall(
         estimationBasis: routing.estimationBasis,
         ruleId: routing.ruleId,
         projectId,
-        detail: { effect: routing.effect, complexity, surface: "compat", mode: COMPAT_MODE },
+        detail: { effect: routing.effect, complexity, surface: "compat", mode: COMPAT_MODE, ...routingClassifierDetail(classification) },
       });
     }
   }

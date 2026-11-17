@@ -56,7 +56,6 @@ import {
   resolveConnectorProvider,
 } from "@regulait/connector-provider";
 import {
-  classifyComplexity,
   estimateTokens,
   routeModel,
   planPromptCache,
@@ -66,6 +65,7 @@ import {
   normalizeCacheInput,
   type RoutingDecision,
 } from "@regulait/optimizer-kernel";
+import { auditRoutingClassification, classifyForRouting, routingClassifierDetail } from "./routing-classifier.js";
 import {
   defaultBaseUrlFor,
   isModelProviderKind,
@@ -4567,7 +4567,14 @@ export function registerAgentConnectorRoutes(
       // counted into the input estimate so budget gates and cost forecasts
       // stay truthful as the thread grows — the MODEL-BOUND history, i.e.
       // the compacted view when a summary is in play.
-      const complexity = classifyComplexity(body.input);
+      // ADR-0353 part 2: the configured routing classifier is asked only when routing will actually run
+      const classification = await classifyForRouting(
+        db,
+        opts.dataKey,
+        { routingClassifierScorerId: modeFor(org.routingEnabled) === "automatic" ? org.routingClassifierScorerId : null },
+        body.input,
+      );
+      const complexity = classification.complexity;
       const estimate = estimateTokens(body.input, complexity);
       const boundChars = convoContext ? convoContext.modelBoundChars : (convo?.historyChars ?? 0);
       if (convo && boundChars > 0) estimate.in += Math.ceil(boundChars / 4);
@@ -4620,6 +4627,14 @@ export function registerAgentConnectorRoutes(
       // exactly what they meant, and the agents it never got to weigh are
       // listed beside them with the reason each was withheld.
       if (skippedCandidates.length > 0) routing = { ...routing, skippedCandidates };
+      await auditRoutingClassification(db, {
+        userId,
+        requestedAgentId: agent.id,
+        projectId,
+        classification,
+        routing,
+        surface: "invoke",
+      });
       // ADR-0021: with the ORG routing toggle off the technique does not run
       // at all — no model_routing ledger row is written (a per-user
       // passthrough, org toggle on, still records its passthrough decision,
@@ -4643,6 +4658,7 @@ export function registerAgentConnectorRoutes(
           detail: {
             effect: routing.effect,
             complexity,
+            ...routingClassifierDetail(classification),
             mode: body.mode,
             ...(body.conversationId ? { conversationId: body.conversationId } : {}),
           },
