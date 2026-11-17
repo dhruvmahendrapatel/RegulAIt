@@ -77,26 +77,22 @@ saved. A generic `POST /v1/servers` with `transport: "openapi"` is refused: only
   manifest, and a `tools/call` on it is refused before any request leaves.
 - Approving an operation grants nobody anything: users still need a tool grant (pillar 1), as for any MCP server.
 
-**3. The lifecycle is one declared transition table** (`OPENAPI_OPERATION_TRANSITIONS` in `@regulait/shared`), checked
-server side on every write, returned with each operation so the UI and agents can show the next allowed actions:
+**3. The lifecycle is one declared machine** (`OPENAPI_OPERATION_MACHINE` in `@regulait/shared`, built with the
+ADR-0348 `defineMachine` and listed in its `STATE_MACHINES`). Every write's UPDATE carries the machine's `whereFrom`
+guard, and each operation is returned with its `describe()` (every event, whether it is allowed now and why not), so
+the server, the UI and agents read the same table. Each event lands in one state:
 
-| From | Event | To |
+| Event | From | To |
 |---|---|---|
-| (none) | import | `staged` |
-| `staged` | approve | `approved` |
-| `staged` | reject | `rejected` |
-| `staged` | re-import, definition changed | `staged` (the new definition replaces the staged one) |
-| `staged` | re-import, operation gone | `withdrawn` |
-| `approved` | re-import, definition changed | `drifted` |
-| `approved` | re-import, operation gone | `withdrawn` |
-| `approved` | revoke | `withdrawn` |
-| `drifted` | approve (the new definition) | `approved` |
-| `drifted` | reject | `rejected` |
-| `drifted` | re-import, definition changed again | `drifted` (the newest definition waits) |
-| `drifted` | re-import, back to the approved definition | `approved` (exactly what an admin approved) |
-| `drifted` | re-import, operation gone | `withdrawn` |
-| `rejected` | re-import, definition changed | `staged` |
-| `withdrawn` | re-import, operation present | `staged` |
+| (import) | (none) | `staged` |
+| approve (admin, stepped up, by digest) | `staged`, `drifted` | `approved` |
+| reject (admin) | `staged`, `drifted` | `rejected` |
+| revoke (admin) | `approved` | `withdrawn` |
+| reimport_changed (definition changed) | `approved`, `drifted` | `drifted` |
+| reimport_restaged (definition changed) | `staged`, `rejected` | `staged` |
+| reimport_reverted (back to exactly the approved definition) | `drifted` | `approved` |
+| reimport_missing (operation gone) | `staged`, `approved`, `drifted`, `rejected` | `withdrawn` |
+| reimport_present (operation back) | `withdrawn` | `staged` |
 
 A re-import whose definition digest is unchanged changes nothing. `drifted` is **not served**: the API changed, so
 neither the old nor the new definition is offered until an admin approves the new one (secure default; owner question
