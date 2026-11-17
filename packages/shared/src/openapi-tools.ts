@@ -4,9 +4,9 @@
  * An admin imports an OpenAPI 3.x document (or a list of REST endpoints, turned into a minimal OpenAPI 3.1 document
  * here) and the gateway serves the operations an admin approved as MCP tools of an in-process `openapi` upstream.
  * This file decides nothing about the database or the request path. It owns:
- *   - the operation lifecycle as ONE declared transition table (`OPENAPI_OPERATION_TRANSITIONS`), the function every
- *     write goes through (`nextOperationState`) and the events each state allows (`allowedOperationEvents`), so the
- *     server, the UI and an agent read the same machine;
+ *   - the operation lifecycle as ONE declared machine (`OPENAPI_OPERATION_MACHINE`, ADR-0348 `defineMachine`), the
+ *     function every write goes through (`nextOperationState`) and the events each state allows, so the server, the
+ *     UI and an agent read the same machine;
  *   - the definition digest (RFC 8785 canonical JSON via `canonicalize`, SHA-256), the value an admin approves;
  *   - the re-import plan: which stored operation moves where;
  *   - the request shapes of the admin routes.
@@ -14,25 +14,16 @@
 import canonicalize from "canonicalize";
 import { z } from "zod";
 import { sha256Hex } from "./audit-chain.js";
+import { OPENAPI_OPERATION_MACHINE, OPENAPI_OPERATION_STATES, type OpenApiOperationState } from "./state-machines.js";
 
 // ---------------------------------------------------------------------------
-// the lifecycle (OWNER 2026-11-17 rule: one declared table, enforced server side)
+// the lifecycle: one declared machine (ADR-0348 `defineMachine`), enforced server side
 // ---------------------------------------------------------------------------
 
-export const OPENAPI_OPERATION_STATES = ["staged", "approved", "drifted", "rejected", "withdrawn"] as const;
-export type OpenApiOperationState = (typeof OPENAPI_OPERATION_STATES)[number];
+export { OPENAPI_OPERATION_MACHINE, OPENAPI_OPERATION_STATES, type OpenApiOperationState };
 
-/** what can happen to an operation: three admin acts and the three outcomes of a re-import */
-export const OPENAPI_OPERATION_EVENTS = [
-  "approve",
-  "reject",
-  "revoke",
-  "reimport_changed",
-  "reimport_missing",
-  "reimport_present",
-  "reimport_reverted",
-] as const;
-export type OpenApiOperationEvent = (typeof OPENAPI_OPERATION_EVENTS)[number];
+export type OpenApiOperationEvent = (typeof OPENAPI_OPERATION_MACHINE.events)[number];
+export const OPENAPI_OPERATION_EVENTS = OPENAPI_OPERATION_MACHINE.events;
 
 /** the events an admin sends through `POST .../operations/:operationId/:event` */
 export const OPENAPI_OPERATION_ADMIN_EVENTS = ["approve", "reject", "revoke"] as const satisfies readonly OpenApiOperationEvent[];
@@ -41,29 +32,14 @@ export type OpenApiOperationAdminEvent = (typeof OPENAPI_OPERATION_ADMIN_EVENTS)
 /** Only an approved operation is served. A drifted one is withheld until an admin approves its new definition. */
 export const OPENAPI_SERVED_STATE: OpenApiOperationState = "approved";
 
-/**
- * THE TRANSITION TABLE. Anything not listed is refused. A re-import whose definition digest is unchanged is no event
- * at all (the row is left exactly as it is).
- */
-export const OPENAPI_OPERATION_TRANSITIONS: Readonly<
-  Record<OpenApiOperationState, Readonly<Partial<Record<OpenApiOperationEvent, OpenApiOperationState>>>>
-> = {
-  staged: { approve: "approved", reject: "rejected", reimport_changed: "staged", reimport_missing: "withdrawn" },
-  approved: { revoke: "withdrawn", reimport_changed: "drifted", reimport_missing: "withdrawn" },
-  // the API went back to exactly the definition an admin approved: served again, no new approval needed
-  drifted: { approve: "approved", reject: "rejected", reimport_changed: "drifted", reimport_missing: "withdrawn", reimport_reverted: "approved" },
-  rejected: { reimport_changed: "staged", reimport_missing: "withdrawn" },
-  withdrawn: { reimport_present: "staged" },
-};
-
-/** the state `event` moves `from` to, or null when the table does not allow it */
+/** the state `event` moves `from` to, or null when the machine does not allow it */
 export function nextOperationState(from: OpenApiOperationState, event: OpenApiOperationEvent): OpenApiOperationState | null {
-  return OPENAPI_OPERATION_TRANSITIONS[from]?.[event] ?? null;
+  return OPENAPI_OPERATION_MACHINE.can(from, event) ? OPENAPI_OPERATION_MACHINE.next(from, event) : null;
 }
 
 /** the admin events a state allows (shown with each operation so a client offers only legal actions) */
 export function allowedOperationEvents(state: OpenApiOperationState): OpenApiOperationAdminEvent[] {
-  return OPENAPI_OPERATION_ADMIN_EVENTS.filter((e) => nextOperationState(state, e) !== null);
+  return OPENAPI_OPERATION_ADMIN_EVENTS.filter((e) => OPENAPI_OPERATION_MACHINE.can(state, e));
 }
 
 // ---------------------------------------------------------------------------
@@ -152,7 +128,7 @@ export function planOpenApiReimport(
     else if (s.state === "withdrawn") event = "reimport_present";
     else if (next.digest === s.importedDigest) event = null;
     else if (s.state === "drifted" && next.digest === s.approvedDigest) event = "reimport_reverted";
-    else event = "reimport_changed";
+    else event = s.state === "approved" || s.state === "drifted" ? "reimport_changed" : "reimport_restaged";
     const to = event ? nextOperationState(s.state, event) : null;
     if (!event || !to) {
       plan.unchanged.push(s.id);

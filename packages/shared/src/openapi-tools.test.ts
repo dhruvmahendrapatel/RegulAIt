@@ -3,9 +3,7 @@ import {
   allowedOperationEvents,
   importOpenApiToolSourceSchema,
   nextOperationState,
-  OPENAPI_OPERATION_EVENTS,
-  OPENAPI_OPERATION_STATES,
-  OPENAPI_OPERATION_TRANSITIONS,
+  OPENAPI_OPERATION_MACHINE,
   openApiDefinitionDigest,
   planOpenApiReimport,
   restEndpointSchema,
@@ -18,27 +16,18 @@ const def = (description: string): OpenApiOperationDefinition => ({
   request: { method: "GET", path: "/orders/{id}", mapper: [{ inputKey: "id", type: "path", key: "id", required: true }] },
 });
 
-describe("ADR-0353: the operation transition table", () => {
-  it("names only declared states and events", () => {
-    for (const [from, edges] of Object.entries(OPENAPI_OPERATION_TRANSITIONS)) {
-      expect(OPENAPI_OPERATION_STATES).toContain(from);
-      for (const [event, to] of Object.entries(edges)) {
-        expect(OPENAPI_OPERATION_EVENTS).toContain(event);
-        expect(OPENAPI_OPERATION_STATES).toContain(to);
-      }
-    }
-  });
-
+describe("ADR-0353: the operation machine (ADR-0348 defineMachine)", () => {
   it("serves only through an approval, and an approved operation can only be revoked by an admin", () => {
-    const toApproved = Object.entries(OPENAPI_OPERATION_TRANSITIONS).flatMap(([from, e]) =>
-      Object.entries(e).filter(([, to]) => to === "approved").map(([event]) => `${from}:${event}`),
-    );
+    const m = OPENAPI_OPERATION_MACHINE;
+    const toApproved = m.events.filter((e) => m.def.transitions[e].to === "approved").flatMap((e) => m.sourcesOf(e).map((f) => `${f}:${e}`));
     expect(toApproved.sort()).toEqual(["drifted:approve", "drifted:reimport_reverted", "staged:approve"]);
     expect(allowedOperationEvents("approved")).toEqual(["revoke"]);
     expect(allowedOperationEvents("staged")).toEqual(["approve", "reject"]);
     expect(allowedOperationEvents("withdrawn")).toEqual([]);
     expect(nextOperationState("rejected", "approve")).toBeNull();
     expect(nextOperationState("withdrawn", "approve")).toBeNull();
+    expect(nextOperationState("approved", "reimport_changed")).toBe("drifted");
+    expect(m.describe("staged").transitions.find((t) => t.event === "revoke")?.allowed).toBe(false);
   });
 });
 
@@ -51,6 +40,7 @@ describe("planOpenApiReimport", () => {
         { id: "a", operationKey: "GET /a", state: "approved", importedDigest: D1, approvedDigest: D1 },
         { id: "b", operationKey: "GET /b", state: "approved", importedDigest: D1, approvedDigest: D1 },
         { id: "c", operationKey: "GET /c", state: "staged", importedDigest: D1, approvedDigest: null },
+        { id: "r", operationKey: "GET /r", state: "rejected", importedDigest: D1, approvedDigest: null },
         { id: "d", operationKey: "GET /d", state: "withdrawn", importedDigest: D1, approvedDigest: D1 },
       ],
       [
@@ -58,6 +48,7 @@ describe("planOpenApiReimport", () => {
         { operationKey: "GET /c", digest: D1 },
         { operationKey: "GET /d", digest: D1 },
         { operationKey: "GET /e", digest: D1 },
+        { operationKey: "GET /r", digest: D2 },
       ],
     );
     expect(plan.added.map((a) => a.operationKey)).toEqual(["GET /e"]);
@@ -65,6 +56,7 @@ describe("planOpenApiReimport", () => {
     expect(plan.moved.map((m) => [m.id, m.event, m.to])).toEqual([
       ["a", "reimport_changed", "drifted"],
       ["b", "reimport_missing", "withdrawn"],
+      ["r", "reimport_restaged", "staged"],
       ["d", "reimport_present", "staged"],
     ]);
   });

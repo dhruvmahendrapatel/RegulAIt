@@ -37,6 +37,7 @@ import {
   mcpOpenApiSentinelUrl,
   nextOperationState,
   OPENAPI_OPERATION_ADMIN_EVENTS,
+  OPENAPI_OPERATION_MACHINE,
   pinnableDefinition,
   planOpenApiReimport,
   reimportOpenApiToolSourceSchema,
@@ -50,6 +51,7 @@ import { refuseIfExpansionBlocked } from "./licensing.js";
 import { resolveRegistrationOwner } from "./ownership.js";
 import { requireStepUp } from "./step-up.js";
 import { generateOpenApiOperations, OpenApiImportError, type GeneratedSource } from "./openapi-tools.js";
+import { whereFrom } from "./state-transition.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 const PAGE_MAX = 200;
@@ -91,6 +93,8 @@ function operationView(op: OpenapiToolOperationRow) {
     state,
     served: state === "approved",
     allowedEvents: allowedOperationEvents(state),
+    // ADR-0348: every event with whether it is allowed now and why not, for the UI and agents
+    lifecycle: OPENAPI_OPERATION_MACHINE.describe(state),
     importedDigest: op.importedDigest,
     approvedDigest: op.approvedDigest,
     imported: op.importedDefinition,
@@ -390,7 +394,7 @@ export function registerOpenApiToolRoutes(app: FastifyInstance, db: Db): void {
             stateChangedAt: sql`now()`,
             ...(next ? { importedDefinition: next.definition, importedDigest: next.digest, toolName: next.toolName } : {}),
           })
-          .where(and(eq(openapiToolOperations.id, m.id), eq(openapiToolOperations.state, m.from)));
+          .where(and(eq(openapiToolOperations.id, m.id), eq(openapiToolOperations.state, m.from), whereFrom(openapiToolOperations.state, OPENAPI_OPERATION_MACHINE, m.event)));
         await auditTransition(tx, { actor, serverId: source.serverId, sourceId, op: before, event: m.event, from: m.from, to: m.to, digest: m.digest });
         transitions.push({ operationKey: m.operationKey, event: m.event, from: m.from, to: m.to });
       }
@@ -469,6 +473,7 @@ export function registerOpenApiToolRoutes(app: FastifyInstance, db: Db): void {
       const where = and(
         eq(openapiToolOperations.id, operationId),
         eq(openapiToolOperations.state, from),
+        whereFrom(openapiToolOperations.state, OPENAPI_OPERATION_MACHINE, event),
         event === "approve" ? eq(openapiToolOperations.importedDigest, body.definitionDigest!) : undefined,
       );
       if (event === "approve") {

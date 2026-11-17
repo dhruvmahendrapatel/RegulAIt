@@ -27,6 +27,7 @@ compares the status in JavaScript, then writes `WHERE id = $1`; a concurrent wri
 
 | Machine | Where | Why it is fine |
 |---|---|---|
+| OpenAPI tool operation (`openapi_tool_operations.state`, ADR-0353, lane E34) | `OPENAPI_OPERATION_MACHINE` in `packages/shared/src/state-machines.ts`, written by `apps/gateway/src/openapi-tool-routes.ts` | Declared from the start with `defineMachine`; every UPDATE carries `whereFrom` and the GET returns `describe()`. |
 | Workflow instance and stage (`workflow_instances.status`, stage statuses) | `packages/workflow-kernel/src/index.ts:633-1014`, persisted by `apps/gateway/src/workflows.ts` `applyEvent` | A typed reducer over about 17 events, persisted under `FOR UPDATE`; stage claims are leased. Deploy, post-deploy verify and rollback are states of this machine (`blocked_on_deploy`, `rolled_back`). |
 | Orchestration run and node (`orchestration_runs.status`, node states) | `packages/orchestration-kernel/src/index.ts:289-462`, `apps/gateway/src/orchestration.ts:1826-1900` | `transitionRun` and `expectStatus`; terminal runs refused; persisted under `FOR UPDATE`, approvals superseded in the same transaction. |
 | Engine runs (`engine_runs.status`, `phase`) | `packages/shared/src/engines/contract.ts:44-58`, `apps/gateway/src/engine-runs.ts` | `isTerminalEngineRunStatus`; every write locked; late envelopes become `timeout`. |
