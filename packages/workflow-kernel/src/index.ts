@@ -854,9 +854,42 @@ export function isExecutedStage(stage: Stage): boolean {
   );
 }
 
+// ---------------------------------------------------------------------------
+// ADR-0340 — THE COMPENSATION LIFECYCLE, declared once (build rule 12). Every compensation transition below goes
+// through `nextCompensationPhase`; a move the table does not list is a WorkflowStateError, never a silent change.
+//
+//   none ──cancel/deny──▶ compensating ──step_succeeded──▶ compensating (next compensation)
+//                              │  └──────step_failed─────▶ compensating (same compensation, retryable)
+//                              ├──last_step_succeeded──▶ completed   (instance ends in its cause)
+//                              └──abort───────────────▶ abandoned   (admin; instance ends in its cause)
+// ---------------------------------------------------------------------------
+
+export type CompensationPhase = "none" | "compensating" | "completed" | "abandoned";
+export type CompensationTrigger = "cancel" | "deny" | "step_succeeded" | "last_step_succeeded" | "step_failed" | "abort";
+
+export const COMPENSATION_LIFECYCLE: Readonly<Record<CompensationPhase, Readonly<Partial<Record<CompensationTrigger, CompensationPhase>>>>> = {
+  none: { cancel: "compensating", deny: "compensating" },
+  compensating: { step_succeeded: "compensating", step_failed: "compensating", last_step_succeeded: "completed", abort: "abandoned" },
+  completed: {},
+  abandoned: {},
+};
+
+/** where an instance is in the compensation lifecycle */
+export function compensationPhaseOf(state: InstanceState): CompensationPhase {
+  if (!state.compensation) return "none";
+  return state.compensation.outcome ?? "compensating";
+}
+
+/** the phase `trigger` moves to from `from`, or a WorkflowStateError when the table does not allow it */
+export function nextCompensationPhase(from: CompensationPhase, trigger: CompensationTrigger): CompensationPhase {
+  const to = COMPENSATION_LIFECYCLE[from][trigger];
+  if (!to) throw new WorkflowStateError(`compensation cannot '${trigger}' from '${from}'`);
+  return to;
+}
+
 /** ADR-0340: is the instance compensating right now (started, not yet ended)? */
 export function isCompensating(state: InstanceState): boolean {
-  return state.compensation !== undefined && state.compensation.outcome === undefined;
+  return compensationPhaseOf(state) === "compensating";
 }
 
 /**
@@ -903,6 +936,7 @@ function startCompensation(
 ): TransitionResult | null {
   const plan = compensationPlan(def, state);
   if (plan.length === 0) return null;
+  nextCompensationPhase(compensationPhaseOf(state), cause === "aborted" ? "cancel" : "deny");
   const s: InstanceState = {
     ...state,
     stageStatuses: [...state.stageStatuses],
@@ -923,9 +957,10 @@ function advanceCompensation(def: WorkflowDefinition, state: InstanceState): Tra
   };
   s.stageStatuses[s.currentStageIndex] = "completed";
   const next = comp.remaining[0];
+  const phase = nextCompensationPhase(compensationPhaseOf(state), next !== undefined ? "step_succeeded" : "last_step_succeeded");
   if (next !== undefined) return enterCompensationStage(def, s, next, []);
   s.status = comp.cause;
-  s.compensation = { ...s.compensation!, outcome: "completed" };
+  s.compensation = { ...s.compensation!, outcome: phase as "completed" };
   return {
     state: s,
     effects: [
@@ -946,7 +981,7 @@ function compensatingTransition(def: WorkflowDefinition, state: InstanceState, e
       ...state,
       status: comp.cause,
       stageStatuses: [...state.stageStatuses],
-      compensation: { ...comp, outcome: "abandoned" },
+      compensation: { ...comp, outcome: nextCompensationPhase("compensating", "abort") as "abandoned" },
     };
     return {
       state: s,
@@ -959,7 +994,10 @@ function compensatingTransition(def: WorkflowDefinition, state: InstanceState, e
   const onCurrent = "stageId" in event && current !== undefined && current.id === event.stageId;
   if (onCurrent && (event.kind === "execution_succeeded" || event.kind === "execution_failed") && isExecutedStage(current)) {
     // a failed compensation stays where it is (retryable through /advance or its retry policy), like a forward stage
-    if (event.kind === "execution_failed") return { state: { ...state }, effects: [] };
+    if (event.kind === "execution_failed") {
+      nextCompensationPhase("compensating", "step_failed");
+      return { state: { ...state }, effects: [] };
+    }
     return advanceCompensation(def, state);
   }
   if (onCurrent && event.kind === "rolled_back" && current.type === "rollback") return advanceCompensation(def, state);

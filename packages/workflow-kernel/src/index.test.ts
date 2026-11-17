@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  COMPENSATION_LIFECYCLE,
+  compensationPhaseOf,
   compensationPlan,
+  nextCompensationPhase,
   currentPlanningStage,
   isCompensating,
   initialState,
@@ -1153,5 +1156,38 @@ describe("ADR-0340: compensation (saga) stages", () => {
       ],
       /not a forward stage/,
     );
+  });
+});
+
+describe("ADR-0340 rule 12: the compensation lifecycle is one declared table", () => {
+  it("pins every allowed move, and refuses anything else", () => {
+    expect(COMPENSATION_LIFECYCLE).toEqual({
+      none: { cancel: "compensating", deny: "compensating" },
+      compensating: { step_succeeded: "compensating", step_failed: "compensating", last_step_succeeded: "completed", abort: "abandoned" },
+      completed: {},
+      abandoned: {},
+    });
+    expect(() => nextCompensationPhase("completed", "abort")).toThrow(/cannot 'abort' from 'completed'/);
+    expect(() => nextCompensationPhase("none", "step_succeeded")).toThrow();
+    expect(() => nextCompensationPhase("abandoned", "cancel")).toThrow();
+  });
+
+  it("an instance's phase follows the table through a real saga", () => {
+    const def = validateDefinition({
+      workflow: "phase",
+      stages: [
+        { id: "intake", type: "trigger" },
+        { id: "branch", type: "git_operation", action: "create_branch", connection: "gh", repo: "o/r" },
+        { id: "gate", type: "human_approval", approvers: ["requesting_user"] },
+        { id: "undo", type: "git_operation", action: "delete_branch", connection: "gh", repo: "o/r", compensates: "branch" },
+      ],
+    });
+    let r = transition(def, initialState(def), { kind: "start" });
+    r = transition(def, r.state, { kind: "execution_succeeded", stageId: "branch" });
+    expect(compensationPhaseOf(r.state)).toBe("none");
+    r = transition(def, r.state, { kind: "abort" });
+    expect(compensationPhaseOf(r.state)).toBe("compensating");
+    r = transition(def, r.state, { kind: "execution_succeeded", stageId: "undo" });
+    expect(compensationPhaseOf(r.state)).toBe("completed");
   });
 });
