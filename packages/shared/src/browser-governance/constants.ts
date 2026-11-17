@@ -209,3 +209,53 @@ export const BROWSER_REFUSAL_CODES = [
   "browser_extension_token_required",
 ] as const;
 export type BrowserRefusalCode = (typeof BROWSER_REFUSAL_CODES)[number];
+
+// ---------------------------------------------------------------------------
+// The two lifecycles on this surface, declared once (owner build rule 12, 2026-11-17). A state is derived from the
+// row's facts (the columns stay the source of truth); every route that moves or checks one reads this table. The
+// app-wide state-machine audit is lane E29's (ADR-0348), so nothing outside this surface is refactored here.
+// ---------------------------------------------------------------------------
+
+export const BROWSER_ENROLMENT_TOKEN_STATES = ["active", "exhausted", "expired", "revoked"] as const;
+export type BrowserEnrolmentTokenState = (typeof BROWSER_ENROLMENT_TOKEN_STATES)[number];
+export const BROWSER_DEVICE_STATES = ["active", "revoked"] as const;
+export type BrowserDeviceState = (typeof BROWSER_DEVICE_STATES)[number];
+
+/** allowed transitions; `revoked` is terminal, and time (expiry) and use (the cap) move a token on without an admin */
+export const BROWSER_LIFECYCLES = {
+  enrolmentToken: {
+    active: ["exhausted", "expired", "revoked"],
+    exhausted: ["expired", "revoked"],
+    expired: ["revoked"],
+    revoked: [],
+  } satisfies Record<BrowserEnrolmentTokenState, readonly BrowserEnrolmentTokenState[]>,
+  device: {
+    active: ["revoked"],
+    revoked: [],
+  } satisfies Record<BrowserDeviceState, readonly BrowserDeviceState[]>,
+} as const;
+type BrowserLifecycles = typeof BROWSER_LIFECYCLES;
+
+export function browserCanTransition<M extends keyof BrowserLifecycles>(machine: M, from: keyof BrowserLifecycles[M], to: keyof BrowserLifecycles[M]): boolean {
+  const next = BROWSER_LIFECYCLES[machine][from] as readonly string[];
+  return next.includes(to as string);
+}
+
+/** revoked wins over expired, expired over exhausted: the strictest fact a token carries is its state */
+export function enrolmentTokenState(token: { revokedAt: Date | null; expiresAt: Date; devicesEnrolled: number; deviceCap: number }, now: Date): BrowserEnrolmentTokenState {
+  if (token.revokedAt) return "revoked";
+  if (token.expiresAt.getTime() <= now.getTime()) return "expired";
+  if (token.devicesEnrolled >= token.deviceCap) return "exhausted";
+  return "active";
+}
+
+export function browserDeviceState(device: { revokedAt: Date | null }): BrowserDeviceState {
+  return device.revokedAt ? "revoked" : "active";
+}
+
+/** why a token that is not active refuses a new device (the HTTP status lives with the route) */
+export const ENROLMENT_TOKEN_STATE_REFUSAL = {
+  exhausted: "enrolment_cap_reached",
+  expired: "token_expired",
+  revoked: "token_revoked",
+} as const satisfies Record<Exclude<BrowserEnrolmentTokenState, "active">, BrowserRefusalCode>;

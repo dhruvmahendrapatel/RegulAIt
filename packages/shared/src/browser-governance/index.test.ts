@@ -2,8 +2,16 @@ import { describe, expect, it } from "vitest";
 import { SHADOW_AI_CATALOG_V1 } from "../shadow-discovery.js";
 import { CREDENTIAL_MATERIAL_RULES } from "../guardrails.js";
 import {
+  BROWSER_DEVICE_STATES,
   BROWSER_DLP_RULE_IDS,
+  BROWSER_ENROLMENT_TOKEN_STATES,
+  BROWSER_LIFECYCLES,
   BROWSER_POLICY_SCHEMA,
+  BROWSER_REFUSAL_CODES,
+  browserCanTransition,
+  browserDeviceState,
+  enrolmentTokenState,
+  ENROLMENT_TOKEN_STATE_REFUSAL,
   BROWSER_SITE_CATALOGUE,
   browserEventSchema,
   browserManagedConfigSchema,
@@ -109,5 +117,48 @@ describe("ADR-0334 the signed-policy envelope is the endpoint agent's", () => {
     expect(devicePolicyEnvelopeSchema.safeParse({ ...env, alg: "none" }).success).toBe(false);
     expect(devicePolicyEnvelopeSchema.safeParse({ ...env, keyId: "Key_1" }).success).toBe(false);
     expect(devicePolicyEnvelopeSchema.safeParse({ ...env, signature: Buffer.alloc(64, 1).toString("base64url") + "x" }).success).toBe(false);
+  });
+});
+
+describe("ADR-0334 rule 12: the enrolment token and device lifecycles are one declared table", () => {
+  const at = new Date("2026-11-17T00:00:00Z");
+  const tok = (over: Partial<{ revokedAt: Date | null; expiresAt: Date; devicesEnrolled: number; deviceCap: number }> = {}) => ({
+    revokedAt: null,
+    expiresAt: new Date(at.getTime() + 86_400_000),
+    devicesEnrolled: 0,
+    deviceCap: 2,
+    ...over,
+  });
+
+  it("every state has a transition row, every target is a state, and revoked is terminal", () => {
+    expect(Object.keys(BROWSER_LIFECYCLES.enrolmentToken).sort()).toEqual([...BROWSER_ENROLMENT_TOKEN_STATES].sort());
+    expect(Object.keys(BROWSER_LIFECYCLES.device).sort()).toEqual([...BROWSER_DEVICE_STATES].sort());
+    for (const next of Object.values(BROWSER_LIFECYCLES.enrolmentToken)) for (const s of next) expect(BROWSER_ENROLMENT_TOKEN_STATES).toContain(s);
+    expect(BROWSER_LIFECYCLES.enrolmentToken.revoked).toEqual([]);
+    expect(BROWSER_LIFECYCLES.device.revoked).toEqual([]);
+  });
+
+  it("a token's state is its strictest fact: revoked over expired over exhausted", () => {
+    expect(enrolmentTokenState(tok(), at)).toBe("active");
+    expect(enrolmentTokenState(tok({ devicesEnrolled: 2 }), at)).toBe("exhausted");
+    expect(enrolmentTokenState(tok({ devicesEnrolled: 2, expiresAt: at }), at)).toBe("expired");
+    expect(enrolmentTokenState(tok({ devicesEnrolled: 2, expiresAt: at, revokedAt: at }), at)).toBe("revoked");
+    expect(browserDeviceState({ revokedAt: null })).toBe("active");
+    expect(browserDeviceState({ revokedAt: at })).toBe("revoked");
+  });
+
+  it("any live token or device can be revoked; nothing leaves revoked; a token never comes back to active", () => {
+    for (const s of ["active", "exhausted", "expired"] as const) expect(browserCanTransition("enrolmentToken", s, "revoked")).toBe(true);
+    for (const s of BROWSER_ENROLMENT_TOKEN_STATES) {
+      expect(browserCanTransition("enrolmentToken", s, "active")).toBe(false);
+      expect(browserCanTransition("enrolmentToken", "revoked", s)).toBe(false);
+    }
+    expect(browserCanTransition("device", "active", "revoked")).toBe(true);
+    expect(browserCanTransition("device", "revoked", "active")).toBe(false);
+  });
+
+  it("each non-active token state refuses registration with a declared refusal code", () => {
+    for (const code of Object.values(ENROLMENT_TOKEN_STATE_REFUSAL)) expect(BROWSER_REFUSAL_CODES).toContain(code);
+    expect(Object.keys(ENROLMENT_TOKEN_STATE_REFUSAL).sort()).toEqual(BROWSER_ENROLMENT_TOKEN_STATES.filter((s) => s !== "active").sort());
   });
 });

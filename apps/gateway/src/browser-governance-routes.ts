@@ -64,7 +64,11 @@ import {
   BROWSER_CAPTURE_RETENTION_DEFAULT_DAYS,
   BROWSER_CAPTURE_RETENTION_MAX_DAYS,
   BROWSER_CAPTURE_RETENTION_MIN_DAYS,
+  browserCanTransition,
+  browserDeviceState,
   browserEventsRequestSchema,
+  enrolmentTokenState,
+  ENROLMENT_TOKEN_STATE_REFUSAL,
   browserPolicyRequestSchema,
   browserPromptCaptureRequestSchema,
   browserRegisterRequestSchema,
@@ -209,17 +213,19 @@ export function registerBrowserGovernanceRoutes(app: FastifyInstance, db: Db, op
           const t = tx as unknown as Db;
           const [tok] = await t.select().from(browserEnrolmentTokens).where(eq(browserEnrolmentTokens.tokenHash, sha256Hex(token))).for("update");
           if (!tok) return { ok: false, code: "invalid_token", status: 401, tokenId: null };
-          if (tok.revokedAt) return { ok: false, code: "token_revoked", status: 403, tokenId: tok.id };
-          if (tok.expiresAt.getTime() <= now.getTime()) return { ok: false, code: "token_expired", status: 410, tokenId: tok.id };
+          // the declared token lifecycle (rule 12); a revoked or expired token refuses even a retried install
+          const tokState = enrolmentTokenState(tok, now);
+          if (tokState === "revoked" || tokState === "expired") return { ok: false, code: ENROLMENT_TOKEN_STATE_REFUSAL[tokState], status: TOKEN_REFUSAL_STATUS[tokState], tokenId: tok.id };
           // idempotent: the same key again (a retried install) answers with the device it already is
           const existing = await keyRegistered(t, jkt);
           if (existing) {
             const [own] = await t.select().from(browserDevices).where(eq(browserDevices.identityId, existing.identityId));
             if (!own) return { ok: false, code: "credential_already_registered", status: 409, tokenId: tok.id };
-            if (own.revokedAt) return { ok: false, code: "device_revoked", status: 403, tokenId: tok.id };
+            if (browserDeviceState(own) === "revoked") return { ok: false, code: "device_revoked", status: 403, tokenId: tok.id };
             return { ok: true, deviceId: own.id, identityId: own.identityId, created: false };
           }
-          if (tok.devicesEnrolled >= tok.deviceCap) return { ok: false, code: "enrolment_cap_reached", status: 409, tokenId: tok.id };
+          // an exhausted token still answers the device it already enrolled (above), never a new one
+          if (tokState === "exhausted") return { ok: false, code: ENROLMENT_TOKEN_STATE_REFUSAL.exhausted, status: TOKEN_REFUSAL_STATUS.exhausted, tokenId: tok.id };
           await t.insert(workloadIdentities).values({
             id: identityId,
             kind: "browser_extension",
@@ -272,7 +278,7 @@ export function registerBrowserGovernanceRoutes(app: FastifyInstance, db: Db, op
         return null;
       }
       const [device] = await db.select().from(browserDevices).where(eq(browserDevices.identityId, identityId));
-      if (!device || device.revokedAt) {
+      if (!device || browserDeviceState(device) === "revoked") {
         await deny(device?.id ?? null, "device_revoked", route);
         await refuse(reply, 403, "device_revoked");
         return null;
@@ -629,6 +635,8 @@ export function registerBrowserGovernanceRoutes(app: FastifyInstance, db: Db, op
     if (!p.success) return reply.status(400).send({ error: "invalid_request", detail: "tokenId must be a uuid" });
     const done = await db.transaction(async (tx) => {
       const t = tx as unknown as Db;
+      const [cur] = await t.select().from(browserEnrolmentTokens).where(eq(browserEnrolmentTokens.id, p.data.tokenId)).for("update");
+      if (!cur || !browserCanTransition("enrolmentToken", enrolmentTokenState(cur, new Date()), "revoked")) return false;
       const [row] = await t
         .update(browserEnrolmentTokens)
         .set({ revokedAt: sql`now()` })
@@ -662,6 +670,8 @@ export function registerBrowserGovernanceRoutes(app: FastifyInstance, db: Db, op
     if (!p.success) return reply.status(400).send({ error: "invalid_request", detail: "deviceId must be a uuid" });
     const done = await db.transaction(async (tx) => {
       const t = tx as unknown as Db;
+      const [cur] = await t.select().from(browserDevices).where(eq(browserDevices.id, p.data.deviceId)).for("update");
+      if (!cur || !browserCanTransition("device", browserDeviceState(cur), "revoked")) return false;
       const [row] = await t
         .update(browserDevices)
         .set({ revokedAt: sql`now()`, revokedBy: req.authCtx.userId ?? null })
@@ -735,6 +745,9 @@ function trimTrailingSlashes(u: string): string {
   while (end > 0 && u[end - 1] === "/") end--;
   return u.slice(0, end);
 }
+
+/** the HTTP status of each non-active token state's refusal at register (unchanged by rule 12) */
+const TOKEN_REFUSAL_STATUS = { exhausted: 409, expired: 410, revoked: 403 } as const;
 
 function tokenView(r: typeof browserEnrolmentTokens.$inferSelect, devicesActive: number) {
   return {

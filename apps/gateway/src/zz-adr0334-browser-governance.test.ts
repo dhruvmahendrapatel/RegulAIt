@@ -24,6 +24,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   auditLog,
   browserDevices,
+  browserEnrolmentTokens,
   browserEvents,
   browserGovernanceSettings,
   browserPromptCaptures,
@@ -379,5 +380,22 @@ describe("ADR-0334 enrolment and proofs", () => {
     const tok = await app.inject({ method: "POST", url: `/v1/browser-governance/enrolment-tokens/${tokenId}/revoke`, headers: KEY });
     expect(tok.statusCode).toBe(200);
     expect((await register(await newDevice())).json()).toEqual({ error: "token_revoked" });
+    // revoked is terminal in the declared lifecycle: a second revoke of either finds nothing live
+    expect((await app.inject({ method: "POST", url: `/v1/browser-governance/devices/${a.id}/revoke`, headers: KEY })).statusCode).toBe(404);
+    expect((await app.inject({ method: "POST", url: `/v1/browser-governance/enrolment-tokens/${tokenId}/revoke`, headers: KEY })).statusCode).toBe(404);
+  });
+
+  it("an expired token refuses a new device and can still be revoked", async () => {
+    const res = await app.inject({ method: "POST", url: "/v1/browser-governance/enrolment-tokens", headers: KEY, payload: { label: `adr0334-exp-${RUN}`, deviceCap: 5, expiresInDays: 1 } });
+    expect(res.statusCode, res.body).toBe(201);
+    const expiredId: string = res.json().token.tokenId;
+    await db.update(browserEnrolmentTokens).set({ createdAt: sql`now() - interval '2 days'`, expiresAt: sql`now() - interval '1 minute'` }).where(eq(browserEnrolmentTokens.id, expiredId));
+    const refused = await register(await newDevice(), res.json().managedConfig.enrolmentToken);
+    expect(refused.statusCode).toBe(410);
+    expect(refused.json()).toEqual({ error: "token_expired" });
+    const rev = await app.inject({ method: "POST", url: `/v1/browser-governance/enrolment-tokens/${expiredId}/revoke`, headers: KEY });
+    expect(rev.statusCode).toBe(200);
+    const after = await register(await newDevice(), res.json().managedConfig.enrolmentToken);
+    expect(after.json()).toEqual({ error: "token_revoked" });
   });
 });
