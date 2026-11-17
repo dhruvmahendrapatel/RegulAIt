@@ -282,6 +282,11 @@ and a kill-switch role (primary docs snippet).
   tamper detection, quarantine, SIEM and Teams alerts and an EU AI Act register *(vendor pages, read 2026-11-17; the
   vendor calls its console views illustrative; no docs or pricing published)*. Overlaps pillar 1 on the endpoint. Parity
   table and gaps: [GAP_ANALYSIS_DARKCONTROL_2026-11.md](GAP_ANALYSIS_DARKCONTROL_2026-11.md).
+  **Manifold Security** "AIDR" (added 2026-11-17): endpoint and browser runtime security for AI agents with discovery,
+  risk and exposure, and detection and response; Cedar policies with graduated responses (alert, advise, correct, ask,
+  block, block session, disable), governed removal of risky add-ons, a Chromium extension and the open-source
+  `agentaudit` repo-config scanner *(vendor blog and site, read 2026-11-17; docs and pricing pages not published)*.
+  Parity table and gaps: [GAP_ANALYSIS_MANIFOLD_2026-11.md](GAP_ANALYSIS_MANIFOLD_2026-11.md).
 - **Managed agent platforms.** Google Gemini Enterprise Agent Platform: Agent Identity, Agent Registry and Agent
   Gateway, GA end of July *(secondary)*. AWS Bedrock AgentCore: managed harness, CLI and skills in April *(primary
   AWS What's New title)*. Nothing later than April was found; re:Invent is in December.
@@ -418,6 +423,7 @@ title and snippet); **S** = secondary.
 | Obsidian Security AI Agent Security (added 2026-11-16) | https://www.obsidiansecurity.com/ai-agent-security | P |
 | Camunda agentic orchestration (added 2026-11-16) | https://camunda.com/ ; https://camunda.com/platform/ ; https://camunda.com/what-is-agentic-orchestration/ | P |
 | DarkControl AIDR (added 2026-11-17) | https://darkcontrolai.com/ ; https://darkcontrolai.com/platform.php ; https://darkcontrolai.com/features.php | P |
+| Manifold Security AIDR (added 2026-11-17) | https://www.manifold.security/ ; https://www.manifold.security/blog ; https://github.com/manifold-security/agentaudit | P |
 
 **Not found / unverified:** Agent HQ GA; any Windsurf news after August; Holistic AI Guardian Agents GA date;
 Credo AIUC-1 integration; Codex Admin plugin year; Runlayer Series A date; Kong 2.1 timing; MCP 2026-07-28 RC vs
