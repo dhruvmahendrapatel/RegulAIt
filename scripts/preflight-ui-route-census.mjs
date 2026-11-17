@@ -406,7 +406,7 @@ export const KNOWN_UI_GAPS = new Map([
   ["GET /v1/third-party-ingest/sources/:sourceId/records", { does: "the newest third-party evidence a source delivered, each marked third-party with its linked findings", tracking: "#453" }],
   // ADR-0303 (lane L11, P18 C6): five API-only SIEM destination routes; the admin screen is posted on #453.
   ["GET /v1/siem/destinations", { does: "lists SIEM destinations, their state, cursor and lag (never the secret)", tracking: "#453" }],
-  ["POST /v1/siem/destinations", { does: "creates a SIEM destination, off by default; the Standard Webhooks secret is shown once", tracking: "#453" }],
+  ["POST /v1/siem/destinations", { does: "creates a SIEM destination (signed webhook, or RFC 5424 syslog over TLS per ADR-0351), off by default; a webhook's secret is shown once", tracking: "#453" }],
   ["PUT /v1/siem/destinations/:destinationId/enabled", { does: "turns a SIEM destination on (step-up, audited as a relaxation) or off (audited)", tracking: "#453" }],
   ["POST /v1/siem/destinations/:destinationId/rotate-secret", { does: "rotates a SIEM destination's signing secret, shown once (step-up, audited)", tracking: "#453" }],
   ["POST /v1/siem/destinations/:destinationId/recover", { does: "returns a dead-lettered or backing-off SIEM destination to delivery now (audited)", tracking: "#453" }],
