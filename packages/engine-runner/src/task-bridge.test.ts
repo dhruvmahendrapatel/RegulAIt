@@ -22,6 +22,7 @@ import { ENGINE_TASK_HTTP_BODY_MAX_BYTES, ENGINE_TASK_HTTP_MAX_IN_FLIGHT, type E
 import { ExecutorTaskBridge, forwardGatewayRequest, taskInputFromJobDir } from "./task-bridge.js";
 import { prepareJobCopy, runSandboxTask, viaGatewayChannel } from "./sandbox-task.js";
 import { onTaskOver } from "./task-signal.js";
+import { parseSubjectJob, SUBJECT_JOB_FILE, subjectJobJson } from "./task-subject.js";
 
 const RUN = "0f1e2d3c-4b5a-4968-8776-655443322110";
 // a synthetic run key, derived at run time (never a secret-shaped literal)
@@ -321,5 +322,86 @@ describe("the bridge and the sandbox task, end to end over the relay", () => {
     off();
     expect(signalled).toBe(1);
     await rm(path.join(jobs, RUN), { recursive: true, force: true });
+  });
+});
+
+describe("ADR-0242 L4.3 a subject task (an admission scan) on the bridge", () => {
+  it("a job holding only the subject marker is an input with no files, no artifact, no secret and the root subject", async () => {
+    const jobs = tmp("i5-jobs-");
+    await mkdir(path.join(jobs, RUN));
+    await writeFile(path.join(jobs, RUN, SUBJECT_JOB_FILE), subjectJobJson("tools.json"));
+    expect(await taskInputFromJobDir(jobs, RUN)).toEqual({ files: [], artifact: null, subject: { path: "tools.json" }, secret: null });
+    // the marker beside any other file, or naming a nested or odd place, is refused (the runner adds nothing)
+    await writeFile(path.join(jobs, RUN, "job.json"), "{}");
+    await expect(taskInputFromJobDir(jobs, RUN)).rejects.toThrow(/marker only/);
+    await rm(path.join(jobs, RUN, "job.json"));
+    for (const bad of ['{"path":"a/tools.json"}', '{"path":"../x"}', '{"path":"subject.json"}', '{"path":"tools.json","extra":1}', "[]", "nope"]) {
+      await writeFile(path.join(jobs, RUN, SUBJECT_JOB_FILE), bad);
+      await expect(taskInputFromJobDir(jobs, RUN), bad).rejects.toThrow(/one file at the input root/);
+    }
+    expect(() => subjectJobJson("dir/SKILL.md")).toThrow();
+    expect(parseSubjectJob(subjectJobJson("SKILL.md"))).toEqual({ path: "SKILL.md" });
+  });
+
+  it("end to end: the sandbox sees only the subject file, writes under subject/, and the runner gets <runId>/", async () => {
+    const jobs = tmp("i5-jobs-");
+    const results = tmp("i5-results-");
+    const input = tmp("i5-sbx-in-");
+    const work = tmp("i5-sbx-work-");
+    await mkdir(path.join(jobs, RUN));
+    await writeFile(path.join(jobs, RUN, SUBJECT_JOB_FILE), subjectJobJson("SKILL.md"));
+    const r = relay();
+    const bridge = new ExecutorTaskBridge({ client: r.client, jobsRoot: jobs, resultsRoot: results, gatewayBaseUrl: "http://gateway:3000/v1" });
+    const bridged = bridge.bridge(RUN);
+    while (!r.started()) await new Promise((res) => setTimeout(res, 5));
+    // the executor writes the GATEWAY's file at the input root (the runner sent none)
+    expect(r.started()).toEqual({ files: [], artifact: null, subject: { path: "SKILL.md" }, secret: null });
+    await writeFile(path.join(input, "SKILL.md"), "# a skill\n");
+    const code = await runSandboxTask({
+      gateway: false,
+      subjectFiles: ["SKILL.md"],
+      jobsRoot: input,
+      workRoot: work,
+      stdout: r.stdout,
+      stdin: r.stdin,
+      readSecret: () => null,
+      run: async (ctx) => {
+        expect(ctx.subjectFile).toBe(path.join(input, "SKILL.md"));
+        expect(ctx.secret).toBeNull();
+        await writeFile(path.join(ctx.resultsRoot, ctx.runId, "report.json"), "{}");
+        await writeFile(path.join(ctx.resultsRoot, ctx.runId, "done.json"), "{}");
+      },
+    });
+    r.stdout.end();
+    expect(code).toBe(0);
+    expect(await bridged).toBe("ended");
+    expect(readFileSync(path.join(results, RUN, "report.json"), "utf8")).toBe("{}");
+    expect(existsSync(path.join(results, RUN, "done.json"))).toBe(true);
+    expect(existsSync(path.join(results, "subject"))).toBe(false);
+  });
+
+  it("a subject task refuses an input that is not exactly one named file at the root (nothing runs)", async () => {
+    for (const setup of [
+      async (d: string) => writeFile(path.join(d, "tools.json"), "{}"),
+      async (d: string) => {
+        await writeFile(path.join(d, "SKILL.md"), "x");
+        await writeFile(path.join(d, "decoy.md"), "x");
+      },
+      async (d: string) => mkdir(path.join(d, "SKILL.md")),
+      async () => undefined,
+    ]) {
+      const input = tmp("i5-sbx-in-");
+      await setup(input);
+      const out = new PassThrough();
+      const lines: string[] = [];
+      createInterface({ input: out }).on("line", (l) => lines.push(l));
+      let ran = false;
+      const code = await runSandboxTask({ gateway: false, subjectFiles: ["SKILL.md"], jobsRoot: input, workRoot: tmp("i5-sbx-work-"), stdout: out, stdin: new PassThrough(), readSecret: () => null, run: async () => void (ran = true) });
+      out.end();
+      await new Promise((res) => setTimeout(res, 5));
+      expect(code).toBe(2);
+      expect(ran).toBe(false);
+      expect(lines.map((l) => JSON.parse(l) as unknown)).toEqual([{ t: "end", code: 2 }]);
+    }
   });
 });

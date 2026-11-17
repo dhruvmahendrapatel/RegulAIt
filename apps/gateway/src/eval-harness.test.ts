@@ -731,6 +731,21 @@ describe("(6) the model-backed judge interface, exercised with a stub", () => {
     expect(outcome.gate.passed).toBe(false);
   });
 
+  it("ADR-0348: a runner that throws after the run started leaves the run `error`, never stranded `running`", async () => {
+    const before = await db.select({ id: evalRuns.id }).from(evalRuns).where(eq(evalRuns.datasetId, judgedDataset));
+    // a verdict outside [0, 1] is refused by the results table's CHECK: the database throws mid-run
+    const outOfRange = new StubJudge({ score: 5, passed: true, rationale: "out of range" });
+    await expect(
+      runEvalSuite(db, DATA_KEY, { datasetId: judgedDataset, agentId: subjectAgentId, userId: erinId, trigger: "manual", judge: outOfRange }),
+    ).rejects.toThrow();
+    const known = new Set(before.map((r) => r.id));
+    const mine = (await db.select().from(evalRuns).where(eq(evalRuns.datasetId, judgedDataset))).filter((r) => !known.has(r.id));
+    expect(mine).toHaveLength(1);
+    expect(mine[0]!.status).toBe("error");
+    expect(mine[0]!.error).toBeTruthy();
+    expect(mine[0]!.finishedAt).not.toBeNull();
+  });
+
   /**
    * THE REAL, MODEL-BACKED JUDGE PATH — exercised, but only as far as this
    * environment honestly permits. No provider is connected, so the judge agent
