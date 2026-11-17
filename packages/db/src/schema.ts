@@ -161,6 +161,8 @@ import {
   CONTENT_TRUST_TIERS,
   CONTENT_TRUST_WRITE_FLOORS,
   type ModalitySplit,
+  // ADR-0349: the one declared list of terminal workflow statuses (the open-instance index predicates below)
+  WORKFLOW_TERMINAL_STATUSES_SQL_LIST,
 } from "@regulait/shared";
 import {
   type AnyPgColumn,
@@ -3403,12 +3405,13 @@ export const workflowInstances = pgTable(
     // ADR-0283: built CONCURRENTLY by runMigrations (CONCURRENT_INDEXES), not by a migration statement
     index("workflow_instances_project_open_idx")
       .on(t.projectId)
-      .where(sql`${t.status} NOT IN ('completed', 'aborted', 'denied', 'rolled_back')`),
-    // ADR-0349 slice 2: one open instance per template set + target + work item. Built CONCURRENTLY by runMigrations
-    // (CONCURRENT_INDEXES), NULLS NOT DISTINCT (a missing target is a value), only where a work item is set.
+      .where(sql`${t.status} NOT IN (${sql.raw(WORKFLOW_TERMINAL_STATUSES_SQL_LIST)})`),
+    // ADR-0349 slice 2: one open instance per template SET (order-independent: regulait_workflow_template_set sorts
+    // the ids) + target + work item. Built CONCURRENTLY by runMigrations (CONCURRENT_INDEXES), NULLS NOT DISTINCT (a
+    // missing target is a value), only where a work item is set.
     uniqueIndex("workflow_instances_open_start_uq")
-      .on(t.templateIds, sql`(${t.change}->>'targetSystem')`, t.workItemRef)
-      .where(sql`${t.workItemRef} IS NOT NULL AND ${t.status} NOT IN ('completed', 'aborted', 'denied', 'rolled_back')`),
+      .on(sql`regulait_workflow_template_set(${t.templateIds})`, sql`(${t.change}->>'targetSystem')`, t.workItemRef)
+      .where(sql`${t.workItemRef} IS NOT NULL AND ${t.status} NOT IN (${sql.raw(WORKFLOW_TERMINAL_STATUSES_SQL_LIST)})`),
   ],
 );
 

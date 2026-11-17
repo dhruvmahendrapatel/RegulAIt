@@ -5088,3 +5088,4 @@ export * from "./managed-settings.js";
 
 // ADR-0341: RFC 6902 patches for diff views
 export { jsonPatch, type JsonPatchOperation } from "./json-patch.js";
+export * from "./workflow-status.js";
