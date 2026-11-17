@@ -100,6 +100,8 @@ export const SCHEDULER_JOB_NAMES = {
   idempotencyKeySweep: "idempotency-key-sweep",
   // ADR-0180 A2: measured conditions of approval
   conditionEvaluation: "condition-evaluation-sweep",
+  // ADR-0349 slice 4 (lane E30): defined and run by workflow-schedules.ts (block at the end)
+  workflowSchedules: "workflow-schedules",
   // ADR-0182 (D4): each defined and run by its slice's module (block at the end)
   incidentClockSweep: "incident-clock-sweep",
   feedbackSlaSweep: "feedback-sla-sweep",
@@ -843,6 +845,7 @@ import { spiffeBundleRefreshJobDefinitions } from "./oauth/spiffe-bundle-endpoin
 import { fairnessJobDefinitions } from "./fairness.js";
 import { siemJobDefinitions } from "./siem-delivery.js";
 import { thirdPartyIngestJobDefinitions } from "./third-party-ingest-retention.js";
+import { workflowScheduleJobDefinitions } from "./workflow-schedules.js";
 
 function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
   return [
@@ -861,6 +864,7 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...fairnessJobDefinitions(), // ADR-0222 (P13(a)): fairness-dataset-retention-sweep
     ...siemJobDefinitions({ dataKey: opts.dataKey }), // ADR-0303: siem-delivery-sweep
     ...thirdPartyIngestJobDefinitions(), // ADR-0302: third-party-evidence-retention-sweep
+    ...workflowScheduleJobDefinitions({ dataKey: opts.dataKey }), // ADR-0349 slice 4: workflow-schedules
   ];
 }
 // ===== end ADR-0182 block ====================================================

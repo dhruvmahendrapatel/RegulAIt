@@ -815,6 +815,9 @@ describe("every sweep is registered", () => {
         // ADR-0302: third-party ingest evidence past the audit floor; driven end to end in
         // zz-adr0302-evidence-retention.test.ts (with no floor configured it deletes nothing)
         SCHEDULER_JOB_NAMES.thirdPartyEvidenceRetentionSweep,
+        // ADR-0349 slice 4 (lane E30): starts due workflow schedules as their creators; driven end to end in
+        // zz-adr0349-schedules.test.ts (with no schedule it starts nothing)
+        SCHEDULER_JOB_NAMES.workflowSchedules,
       ].sort(),
     );
     const discovery = registry.get(SCHEDULER_JOB_NAMES.discoveryScanSweep)!;

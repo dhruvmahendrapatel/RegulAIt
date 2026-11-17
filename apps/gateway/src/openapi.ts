@@ -309,6 +309,14 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
     body: retireTemplateSchema.extend(decisionRegressionAcceptanceFields),
   },
   // ADR-0341 — the visual pipeline builder (admin)
+  "POST /v1/workflows/schedules": { summary: "ADR-0349: create a workflow schedule. It starts its template on a five-field cron calendar in an IANA time zone, AS the admin who creates it, through the governed start path. Refused 422 `invalid_schedule` when it would fire more often than every 5 minutes. An overlap policy other than `skip` is a `settings_relax` step-up, audited." },
+  "GET /v1/workflows/schedules": { summary: "ADR-0349: workflow schedules, `limit` (1-200) and `after` keyset paginated, versioned (`version: 1`). `state` is `active` or `paused`." },
+  "GET /v1/workflows/schedules/:scheduleId": { summary: "ADR-0349: one workflow schedule and its 50 most recent fire times (`started`, `reused`, `skipped_overlap`, `buffered`, `skipped_missed`, `refused`)." },
+  "PATCH /v1/workflows/schedules/:scheduleId": { summary: "ADR-0349: edit a workflow schedule. A moved calendar starts again from now. A relaxed overlap policy is a step-up; a concurrent edit is refused 409 `changed_concurrently`." },
+  "POST /v1/workflows/schedules/:scheduleId/pause": { summary: "ADR-0349: pause a workflow schedule with a note, audited." },
+  "POST /v1/workflows/schedules/:scheduleId/resume": { summary: "ADR-0349: resume a paused workflow schedule from now (fires missed while paused are not caught up), with a note, audited." },
+  "POST /v1/workflows/schedules/:scheduleId/backfill": { summary: "ADR-0349: start one instance per fire time in a past range (at most 100), under the schedule's overlap policy, audited." },
+  "POST /v1/workflows/schedules/run-due": { summary: "ADR-0349: run the workflow schedule sweep now. It is the same code the `workflow-schedules` scheduler job runs." },
   "GET /v1/workflows/builder/templates": { summary: "Workflow templates as the pipeline builder lists them: live version, open draft, whether the builder may edit it." },
   "POST /v1/workflows/builder/templates/:templateId/draft": {
     summary:

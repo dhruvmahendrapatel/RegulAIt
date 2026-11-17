@@ -17104,3 +17104,108 @@ export const workflowTemplateVersions = pgTable(
 );
 export type WorkflowTemplateVersionRow = typeof workflowTemplateVersions.$inferSelect;
 // ===== end ADR-0341 =====
+
+// ===== ADR-0349 slice 4 (lane E30): workflow schedules =====
+/** what a fire does while the schedule's previous instance is still open: skip it (default), keep one to start when
+ * the open instance ends, or start anyway. `buffer_one` and `allow` are audited, step-up relaxations. */
+export const WORKFLOW_SCHEDULE_OVERLAP_POLICIES = ["skip", "buffer_one", "allow"] as const;
+export type WorkflowScheduleOverlapPolicy = (typeof WORKFLOW_SCHEDULE_OVERLAP_POLICIES)[number];
+/** why a run row exists */
+export const WORKFLOW_SCHEDULE_RUN_TRIGGERS = ["scheduled", "buffered", "backfill"] as const;
+/** what one fire time came to. `starting` is the row's first state, inside the claim; it is replaced in the start's
+ * own call and stays only if the process died in between (then nothing started twice: the claim had moved on). */
+export const WORKFLOW_SCHEDULE_RUN_OUTCOMES = [
+  "starting",
+  "started",
+  "reused",
+  "skipped_overlap",
+  "buffered",
+  "skipped_missed",
+  "refused",
+] as const;
+
+/**
+ * A template that starts on a calendar (Temporal Schedules). Deployment-wide like `workflow_templates` (no tenant
+ * column, no RLS policy); the routes are admin-only. Every start goes through `startGovernedWorkflow` AS `run_as_user_id`
+ * (the admin who created the schedule): a schedule never runs as a system identity.
+ */
+export const workflowSchedules = pgTable(
+  "workflow_schedules",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    templateId: uuid("template_id")
+      .notNull()
+      .references(() => workflowTemplates.id, { onDelete: "cascade" }),
+    /** a five-field cron expression, read by cron-parser in `time_zone` */
+    cronExpression: text("cron_expression").notNull(),
+    /** an IANA time zone name */
+    timeZone: text("time_zone").notNull().default("UTC"),
+    /** the change each start submits (ADR-0200 exception: a schema-validated configuration document, parsed with
+     * `changeDescriptorSchema` on every write and again at every fire) */
+    change: jsonb("change").$type<Record<string, unknown>>().notNull(),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "cascade" }),
+    /** the PM work item each start names (a verbatim external id; with it the start conflict policy applies) */
+    workItemRef: text("work_item_ref"),
+    runAsUserId: uuid("run_as_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    overlapPolicy: text("overlap_policy", { enum: WORKFLOW_SCHEDULE_OVERLAP_POLICIES }).notNull().default("skip"),
+    /** how far back a missed fire time is still started after downtime; at least the sweep's own grace (5 minutes) */
+    catchupWindowSeconds: integer("catchup_window_seconds").notNull().default(0),
+    /** each fire is delayed by a deterministic 0..jitter seconds derived from the schedule id and the fire time */
+    jitterSeconds: integer("jitter_seconds").notNull().default(0),
+    /** the next NOMINAL fire time: the claim column, advanced compare-and-swap so two sweeps fire it once. Null while
+     * paused */
+    nextFireAt: timestamp("next_fire_at", { withTimezone: true }),
+    /** buffer_one: the one fire time waiting for the open instance to end */
+    bufferedFireAt: timestamp("buffered_fire_at", { withTimezone: true }),
+    pausedAt: timestamp("paused_at", { withTimezone: true }),
+    pausedByUserId: uuid("paused_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** why it was paused: a person's note, or the reason a fire paused it (scrubbed, prose-scrub.ts) */
+    pauseNote: text("pause_note"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("workflow_schedules_name_uq").on(t.name),
+    index("workflow_schedules_template_idx").on(t.templateId),
+    index("workflow_schedules_due_idx").on(t.nextFireAt).where(sql`${t.pausedAt} IS NULL`),
+    check("workflow_schedules_overlap_check", sql`${t.overlapPolicy} IN ('skip', 'buffer_one', 'allow')`),
+    check("workflow_schedules_catchup_check", sql`${t.catchupWindowSeconds} BETWEEN 0 AND 604800`),
+    check("workflow_schedules_jitter_check", sql`${t.jitterSeconds} BETWEEN 0 AND 3600`),
+    check("workflow_schedules_name_check", sql`char_length(${t.name}) BETWEEN 1 AND 200`),
+  ],
+);
+export type WorkflowScheduleRow = typeof workflowSchedules.$inferSelect;
+
+/** One row per fire time a schedule reached, unique, so a fire time starts at most once (the exactly-once record). */
+export const workflowScheduleRuns = pgTable(
+  "workflow_schedule_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scheduleId: uuid("schedule_id")
+      .notNull()
+      .references(() => workflowSchedules.id, { onDelete: "cascade" }),
+    /** the nominal fire time (before jitter) */
+    fireAt: timestamp("fire_at", { withTimezone: true }).notNull(),
+    trigger: text("trigger", { enum: WORKFLOW_SCHEDULE_RUN_TRIGGERS }).notNull(),
+    outcome: text("outcome", { enum: WORKFLOW_SCHEDULE_RUN_OUTCOMES }).notNull(),
+    instanceId: uuid("instance_id").references(() => workflowInstances.id, { onDelete: "set null" }),
+    /** a refused start's error code, as the start answered it */
+    refusal: text("refusal"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("workflow_schedule_runs_fire_uq").on(t.scheduleId, t.fireAt),
+    index("workflow_schedule_runs_instance_idx").on(t.instanceId),
+    check("workflow_schedule_runs_trigger_check", sql`${t.trigger} IN ('scheduled', 'buffered', 'backfill')`),
+    check(
+      "workflow_schedule_runs_outcome_check",
+      sql`${t.outcome} IN ('starting', 'started', 'reused', 'skipped_overlap', 'buffered', 'skipped_missed', 'refused')`,
+    ),
+  ],
+);
+export type WorkflowScheduleRunRow = typeof workflowScheduleRuns.$inferSelect;
+// ===== end ADR-0349 slice 4 =====
