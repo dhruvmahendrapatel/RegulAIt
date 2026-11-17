@@ -86,6 +86,8 @@ a `control` member for an undeclared action, fails the adapter-list test:
 ```ts
 interface VendorAgentControl {
   readonly actions: readonly ("disable" | "quarantine")[];
+  /** Credential modes the vendor accepts for control; "delegated" only where documented (section 3a). */
+  readonly acceptedModes: readonly ("federated" | "static" | "delegated")[];
   /** Read the agent's current service state. A GET (or the vendor's documented read). */
   readState(ctx: ControlContext, ref: VendorAgentRef): Promise<VendorAgentState>;
   /** Apply one action or its inverse. Must be idempotent at the vendor: applying it twice is one effect. */
@@ -115,18 +117,42 @@ as an open constraint, because ADR-0195's credential model refuses a stored user
 Platform API's authentication page documents service principals with an RBAC role, though not for these two calls
 specifically.
 
-Decision:
+Decision (owner decision 1, 2026-11-17: delegated credentials are allowed by admin opt-in; app-only stays preferred):
 
-- **No delegated user credential is stored.** A refresh token for an admin user is a standing, broad, human credential.
-  It is not built, and adding it would be its own decision (owner question 1).
-- **The write credential is a federated service principal** (Entra workload identity, no stored secret by default)
+- **The preferred write credential is a federated service principal** (Entra workload identity, no stored secret by default)
   with the narrowest Power Platform RBAC role an admin assigns, and the Copilot Studio adapter calls the documented
   quarantine endpoints with it.
 - **Whether those calls accept an app-only token is unverified** until a live tenant is tried, which is owner-gated.
   The source's control credential therefore carries `scope: unverified`, as lane E17 does for keys it cannot prove, and
   every action on it is audited as such.
+- **A delegated credential is allowed, off by default, by admin opt-in.** For a tenant where the quarantine calls
+  refuse an app-only token, an admin may connect a delegated credential for one named admin account:
+  - **Off by default.** `discovery_settings.vendor_agent_control_delegated_enabled` is false. Turning it on is a
+    `settings_relax` step-up, audited; turning it off is free and makes every delegated control credential unusable at
+    once (each is refused `credential_mode_disabled`, and the posture page lists it for revocation).
+  - **Only where the adapter declares it.** The adapter's `control` member lists the credential modes the vendor
+    accepts (`acceptedModes`). Only Copilot Studio lists `delegated` in slice 1. A delegated credential for any other
+    adapter is refused `credential_mode_not_accepted`.
+  - **Connecting is a step-up and audited.** An admin connects it through the vendor's OAuth authorization-code flow
+    with PKCE (`@azure/msal-node`, MIT, pinned, the same Entra library family as `@azure/identity`), signed in as the
+    named account and consented for `CopilotStudio.AdminActions.Invoke` only. The connect route needs a
+    `settings_relax` step-up bound to `{op: "vendor_control_delegated", sourceId, account}` and writes an audit row
+    with the account's object id and UPN.
+  - **The same storage.** The credential is a `discovery_credentials` row with `purpose = 'platform_write'` and the new
+    `credential_mode` value `delegated`, a CHECK allowing `delegated` only with that purpose. The refresh token is in
+    `secret_ciphertext` (encrypted with the data key, never returned, server side only). Each token refresh replaces
+    the stored refresh token in the same row, so it rotates on use. The named account's object id and UPN are in
+    `public_config`.
+  - **A mandatory expiry.** A new nullable column `expires_at`, with a CHECK that a `delegated` row has one. The admin
+    chooses it, at most 90 days ahead (30 by default). After it, the credential is refused `credential_expired` and
+    the admin must connect again, with a fresh step-up.
+  - **Revocable at once.** Revoke destroys the ciphertext (the existing revoke check) and is audited. Every action on
+    a delegated credential is audited with its mode and account, so the trail shows whose authority acted.
+  - **App-only stays preferred.** One live control credential per source (section 2) means the admin chooses one mode.
+    The posture page shows a delegated control credential as a finding, recommending a federated service principal
+    wherever the vendor accepts one.
 - **A vendor `401` or `403`** ends the action `failed / vendor_refused_credential` and changes nothing. There is no
-  retry and no fallback to another credential.
+  retry and no fallback to another credential or mode.
 - **The Dataverse `bot.statecode` (Inactive) is not used as a disable.** Writing it is app-only, but Microsoft does
   not document that it takes an agent out of service, and this ADR does not claim a control the vendor does not
   document.
@@ -211,7 +237,7 @@ write is a conditional `UPDATE … WHERE status = <from>`, so two racing request
 | From | Allowed to |
 |---|---|
 | `requested` | `approved`, `denied`, `cancelled` (by the requester or an admin, or `approval_expired`) |
-| `approved` | `executing`, `cancelled` (by the requester or an admin, or `approval_expired`) |
+| `approved` | `executing` (guard `kill_switch_narrowing_only`, section 7), `cancelled` (by the requester or an admin, or `approval_expired`) |
 | `executing` | `succeeded`, `already_in_state`, `failed`, `unknown` (a vendor timeout, or `lease_expired` after a crash) |
 | `unknown` | `succeeded`, `already_in_state`, `failed` (settled by a state re-read, never a second `apply`) |
 | `succeeded`, `already_in_state`, `failed`, `denied`, `cancelled` | none (terminal) |
@@ -229,12 +255,24 @@ HTTP status. No vendor body, token or free text from the vendor reaches the audi
 restored. It goes through the same request, approve and execute flow: putting an agent back into service widens
 access, so it is never cheaper than taking it out.
 
-### 7. The kill switch
+### 7. The kill switch: narrowing only (owner decision 2, 2026-11-17)
 
 Every vendor call is an external write under `runExternalWrite`. While the dial is `read_only`, `halt` or
-`require_approval`, executions are refused with the existing `execution_*` codes, including disable and quarantine.
-Allowing narrowing vendor actions during a halt is an owner question (below); until it is answered, the existing
-barrier applies unchanged.
+`require_approval`, a **narrowing** action still runs and a **widening** one does not:
+
+- **Narrowing:** `disable` and `quarantine` (direction `apply`). They take an agent out of service, which is what a
+  halt is for. They still need the full request, approval and step-up flow; the halt removes no check.
+- **Widening:** `restore` (direction `reverse`), and any action a future adapter adds that puts an agent back into
+  service. It is refused at execute with the existing `execution_*` code for the dial, and the row stays `approved`
+  until the halt lifts or the approval expires. A settle (a state read only) is allowed under any dial.
+
+The rule is a guard on the transition, not a separate check: the `approved → executing` edge in
+`VENDOR_ACTION_TRANSITIONS` carries `guard: "kill_switch_narrowing_only"`, and `assertTransition(from, to, ctx)` evaluates
+it with the dial and the op's direction. `runExternalWrite` gains one declared exemption, for the
+`vendor_agent_control` operation with direction `apply` only, and the external-effects barrier test gets the matching
+row, so no other operation can pass a halt. The dial is re-read at the moment of the call, as today. Slice 1 tests both
+directions under each non-`normal` dial: a quarantine and a disable execute, and a restore is refused with nothing
+sent to the vendor.
 
 ### 8. Open-source search (ADR-0176)
 
@@ -243,7 +281,9 @@ barrier applies unchanged.
   (PR #855 and lane E17) are all reused; this ADR adds one adapter member, one object type, one external-write
   operation, one table (the actions; control credentials reuse `discovery_credentials`) and five routes.
 - **Microsoft.** `Microsoft.PowerPlatform.Management` is a .NET SDK; there is no maintained JavaScript Power Platform
-  API client. The three calls are REST calls through the guarded fetch. The Entra token comes from `@azure/identity`,
+  API client. The three calls are REST calls through the guarded fetch. The delegated authorization-code flow
+  (section 3a) uses `@azure/msal-node` (MIT, maintained by Microsoft), already in the lockfile as a dependency of
+  `@azure/identity` and pinned in `engines/promptfoo`, rather than a hand-written OAuth client. The Entra token comes from `@azure/identity`,
   already used by discovery.
 - **The state table.** Searched 2026-11-17. Two approaches were compared:
   - `xstate` (MIT, actively maintained, v5) gives interpreted actors, timers and visualisation. None of these is
@@ -263,13 +303,15 @@ barrier applies unchanged.
 - Admin screens: the routes are API-only, listed in `KNOWN_UI_GAPS` against #453.
 - Bulk actions: one agent per action.
 
-## Owner questions (open; the secure default is built meanwhile)
+## Owner decisions (2026-11-17)
 
-1. **Copilot Studio credential (section 3a).** If a live tenant shows that the quarantine calls refuse app-only
-   tokens, should RegulAIt store a delegated refresh token for a dedicated, least-privilege admin user? Built: no; a
-   federated service principal only, marked `scope: unverified`.
-2. **Narrowing during a halt.** Should disable and quarantine run while the kill switch is `halt` or `read_only`?
-   Built: no (section 7).
+1. **Copilot Studio delegated credential: allowed, by admin opt-in.** Off by default; connected for a named account
+   with a step-up and an audit row; mandatory expiry and revocation; the token stays server side, rotates on use and
+   reuses the existing credential storage; app-only stays the preferred path wherever the vendor supports it
+   (section 3a).
+2. **Kill-switch halt: narrowing only.** Disable and quarantine still run during a halt, with the normal approval and
+   step-up; restore and anything that widens access stay blocked until the halt lifts. Encoded as a guard on the
+   `approved → executing` transition, with tests in both directions (section 7).
 
 ## Consequences
 
