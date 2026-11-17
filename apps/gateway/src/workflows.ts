@@ -86,6 +86,8 @@ import {
   loadCompiledEgressContext,
 } from "./compiled-egress.js";
 import { loadOrgSettings } from "./org-settings.js";
+import { isUniqueViolation } from "./pg-errors.js";
+import { answerStartConflict, openInstanceForStartKey, startKeyOf, WORKFLOW_START_KEY_INDEX } from "./workflow-start-conflict.js";
 import {
   REMEDIATION_ENVIRONMENT_PATTERN,
   SHADOW_AI_REMEDIATION_CHANGE_TYPE,
@@ -3015,9 +3017,18 @@ export async function startWorkflowInstanceWithTemplates(
      * (the use-case registry) passes its own, since the default looks the
      * object up by instance and finds nothing yet. */
     executor?: ExecutorHooks;
+    /** ADR-0349 slice 2: the PM work item this start is for. With it, at most one open instance per template set +
+     * target + work item (`workflow-start-conflict.ts`); without it, nothing is deduplicated. */
+    workItemRef?: string | null;
   },
 ): Promise<
-  | { ok: true; instance: { id: string; status: string; state: unknown }; executorRefusal: ExecutorRefusal | null }
+  | {
+      ok: true;
+      instance: { id: string; status: string; state: unknown };
+      executorRefusal: ExecutorRefusal | null;
+      /** ADR-0349 slice 2: the open instance was returned under the `use_existing` policy; nothing was started */
+      reused?: true;
+    }
   | { ok: false; status: number; body: Record<string, unknown> }
 > {
   const { templateIds, initiatorUserId, change } = input;
@@ -3079,18 +3090,39 @@ export async function startWorkflowInstanceWithTemplates(
       return { ok: false, status: attribution.status, body: { error: attribution.error } };
     }
   }
-  const [instance] = await db
-    .insert(workflowInstances)
-    .values({
-      templateIds,
-      definition: merged,
-      initiatorUserId,
-      change,
-      projectId: input.projectId ?? null,
-      state: initialState(merged),
-      status: "running",
-    })
-    .returning();
+  // ADR-0349 slice 2: one open instance per start key. The read answers the common case; the unique index answers a
+  // race (the insert runs under a savepoint, so a caller's own transaction survives the violation).
+  const workItemRef = input.workItemRef ?? null;
+  const startKey = workItemRef ? startKeyOf(templateIds, change, workItemRef) : null;
+  const conflict = async (existing: Awaited<ReturnType<typeof openInstanceForStartKey>>) => {
+    const answer = await answerStartConflict(db, startKey!, existing, { userId: initiatorUserId, isAdmin: input.isAdmin ?? false });
+    return answer.kind === "reused"
+      ? { ok: true as const, instance: answer.instance, executorRefusal: null, reused: true as const }
+      : { ok: false as const, status: answer.status, body: answer.body };
+  };
+  if (startKey) {
+    const existing = await openInstanceForStartKey(db, startKey);
+    if (existing) return conflict(existing);
+  }
+  const values = {
+    templateIds,
+    definition: merged,
+    initiatorUserId,
+    change,
+    projectId: input.projectId ?? null,
+    workItemRef,
+    state: initialState(merged),
+    status: "running",
+  };
+  let instance: typeof workflowInstances.$inferSelect | undefined;
+  try {
+    [instance] = startKey
+      ? await db.transaction((tx) => tx.insert(workflowInstances).values(values).returning())
+      : await db.insert(workflowInstances).values(values).returning();
+  } catch (err) {
+    if (!startKey || !isUniqueViolation(err, WORKFLOW_START_KEY_INDEX)) throw err;
+    return conflict(await openInstanceForStartKey(db, startKey));
+  }
 
   const first = await applyEvent(db, instance!.id, { kind: "start" }, initiatorUserId);
   const executed = await runGitExecutions(db, instance!.id, first.effects, initiatorUserId, dataKey, 0, input.executor ?? {});
@@ -3685,8 +3717,11 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       change,
       projectId: body.projectId ?? null,
       isAdmin: req.authCtx.isAdmin,
+      workItemRef: body.workItem ?? null,
     });
     if (!started.ok) return reply.status(started.status).send(started.body);
+    // ADR-0349 slice 2: under `use_existing` a conflicting start answers 200 with the open instance it found
+    if (started.reused) return reply.status(200).send({ ...started.instance, reused: true });
     return reply.status(201).send(started.instance);
   });
 

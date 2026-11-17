@@ -62,6 +62,15 @@ export const CONCURRENT_INDEXES: ReadonlyArray<{ migration: string; name: string
       `CREATE INDEX CONCURRENTLY IF NOT EXISTS "workflow_instances_project_open_idx" ON "workflow_instances" ("project_id") ` +
       `WHERE "status" NOT IN ('completed', 'aborted', 'denied', 'rolled_back')`,
   },
+  {
+    // ADR-0349 slice 2: at most one OPEN instance per template set + target + work item (the start conflict policy)
+    migration: "workflow_start_conflict",
+    name: "workflow_instances_open_start_uq",
+    create:
+      `CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS "workflow_instances_open_start_uq" ON "workflow_instances" ` +
+      `("template_ids", ("change"->>'targetSystem'), "work_item_ref") NULLS NOT DISTINCT ` +
+      `WHERE "work_item_ref" IS NOT NULL AND "status" NOT IN ('completed', 'aborted', 'denied', 'rolled_back')`,
+  },
 ];
 
 /**
