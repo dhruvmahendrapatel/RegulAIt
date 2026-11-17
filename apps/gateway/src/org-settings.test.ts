@@ -45,7 +45,6 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
-import { setOrgSettingsForTest } from "./testing/strict-data-posture.js";
 import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 import { backdated } from "./testing/backdated-audit.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
@@ -791,19 +790,11 @@ describe("size ceilings — narrowing below the zod walls", () => {
   });
 
   it("max_attachments_per_dispatch and max_attachment_bytes reject above the narrowed ceiling", async () => {
-    // defaults: two small attachments are fine (behaviour-preserving). ADR-0362: the shipped org-default PII mode
-    // (block) forces content inspection on for this unattributed dispatch and the engine is unpublished, so this one
-    // call runs at `log`; the size ceilings below refuse before inspection whatever the mode.
-    const restorePii = await setOrgSettingsForTest(db, { defaultPiiMode: "log" });
-    let ok: Awaited<ReturnType<typeof invoke>>;
-    try {
-      ok = await invoke(umaAuth, cheapAgentId, {
-        input: "with attachments",
-        attachments: [attach("a.png", 400), attach("b.png", 400)],
-      });
-    } finally {
-      await restorePii();
-    }
+    // defaults: two small attachments are fine (behaviour-preserving)
+    const ok = await invoke(umaAuth, cheapAgentId, {
+      input: "with attachments",
+      attachments: [attach("a.png", 400), attach("b.png", 400)],
+    });
     expect(ok.statusCode).toBe(200);
 
     await putOrg({ maxAttachmentsPerDispatch: 1 });

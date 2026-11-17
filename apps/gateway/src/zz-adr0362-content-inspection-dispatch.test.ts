@@ -207,12 +207,31 @@ describe("ADR-0362 content inspection on the governed dispatch", () => {
     expect(JSON.stringify(row)).not.toContain(FILE_NAME);
   });
 
-  it("the org-default PII mode (block, shipped) is the floor too: an unclassified project is forced on", async () => {
-    const proj = await invoke(`ci-unclassified-${RUN}`, unclassifiedProj, [pdf()]);
-    expect(proj.statusCode, proj.body).toBe(422);
-    expect(proj.json().error).toBe("content_not_inspectable");
+  it("the org-default PII mode (block, shipped) is NOT the floor: an unclassified project and an unattributed dispatch stay off", async () => {
+    const marker = `ci-unclassified-${RUN}`;
+    const proj = await invoke(marker, unclassifiedProj, [pdf()]);
+    expect(proj.statusCode, proj.body).toBe(200);
+    expect(sawMarker(marker)).toBe(true);
     const get = await app.inject({ method: "GET", url: `/v1/projects/${unclassifiedProj}/content-inspection`, headers: admin.key });
-    expect(get.json().effective).toEqual({ on: true, forced: true, onUninspectable: "refuse" });
+    expect(get.json().effective).toEqual({ on: false, forced: false, onUninspectable: "refuse" });
+    const unattributed = await app.inject({
+      method: "POST",
+      url: `/v1/agents/${agentId}/invoke`,
+      headers: user.key,
+      payload: { mode: "chat", dispatch: true, input: `ci-unattributed-${RUN}`, attachments: [pdf()] },
+    });
+    expect(unattributed.statusCode, unattributed.body).toBe(200);
+    expect(await rowsFor("content-inspection")).toSatisfy((rows: Array<{ detail: unknown }>) =>
+      rows.every((r) => (r.detail as { projectId?: string }).projectId !== unclassifiedProj),
+    );
+  });
+
+  it("PUT on an archived project is refused as every project-settings write is", async () => {
+    const archived = await makeProject(`ci1b2-archived-${RUN}`, [`ci1b2-log-${RUN}`]);
+    await db.execute(sql`UPDATE projects SET archived_at = now(), archived_reason = 'content inspection archive test' WHERE id = ${archived}`);
+    const r = await app.inject({ method: "PUT", url: `/v1/projects/${archived}/content-inspection`, headers: admin.key, payload: { enabled: true } });
+    expect(r.statusCode, r.body).toBe(409);
+    expect(r.json().error).toBe("project_archived");
   });
 
   it("on with pass_not_scanned: the dispatch goes on and the audit says not_scanned, never clean", async () => {
@@ -326,7 +345,7 @@ describe("ADR-0362 content-inspection settings routes", () => {
       const r = await app.inject({ method: "GET", url: url(blockProj), headers: admin.key });
       expect(r.statusCode).toBe(200);
       expect(r.json()).toMatchObject({ enabled: false, onUninspectable: "pass_not_scanned", effective: { on: true, forced: true, onUninspectable: "refuse" } });
-      expect(r.json().forcedBy).toMatch(/compliance PII mode is block/);
+      expect(r.json().forcedBy).toMatch(/compliance profiles set PII mode block/);
     } finally {
       await db.delete(projectContentInspection).where(eq(projectContentInspection.projectId, blockProj));
     }

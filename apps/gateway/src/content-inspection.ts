@@ -3,8 +3,9 @@
  * inspection step the governed dispatch core runs on a dispatch's files, and the admin routes.
  *
  *  - `effectiveContentInspection(db, projectId)` is THE policy: on when the project's row enables it OR the project's
- *    effective compliance cascade PII mode is `block` (the floor, resolved by `projectPiiMode`, the same resolution the
- *    dispatch's PII rung uses, including the org default for an unattributed dispatch). Under the floor a file that
+ *    explicit compliance profiles' effective PII mode is `block` (the floor, `projectProfilePiiMode`: the profile
+ *    resolution `projectPiiMode` uses, WITHOUT its org-default fallback, so an unclassified project, unmatched tags
+ *    and an unattributed dispatch are never forced; lane lead decision 2026-11-17, ADR-0362 owner question 4). Under the floor a file that
  *    cannot be read always refuses: the row's `pass_not_scanned` cannot relax it. No row is off / `refuse`.
  *  - `inspectDispatchFiles` runs in `dispatchAttempt` (agents-connectors.ts) BEFORE the three input checks (cascade PII
  *    mode, the ADR-0224 processing limit, the ADR-0042 guardrails). With inspection off it does nothing (no query beyond
@@ -39,7 +40,8 @@ import {
   type ContentRefusalReason,
 } from "@regulait/shared";
 import { extractContentForRequest, type ContentExtractBundleFile } from "./content-inspection-runs.js";
-import { enforcePII, piiInternationalCategories, projectPiiMode, projectRoleGate, type PiiMode } from "./projects.js";
+import { enforcePII, piiInternationalCategories, projectPiiMode, projectProfilePiiMode, projectRoleGate, type PiiMode } from "./projects.js";
+import { refuseIfArchived } from "./project-archive.js";
 import { requireStepUp } from "./step-up.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
@@ -79,15 +81,16 @@ export async function loadContentInspectionSetting(db: Db, projectId: string | n
 }
 
 /** compose a stored setting with the floor (the one place the rule lives) */
-function compose(setting: ContentInspectionSetting, piiMode: PiiMode | null): EffectiveContentInspection {
-  const forced = piiMode === "block";
+/** `profilePiiMode` is `projectProfilePiiMode` (explicit profiles only; null without one) */
+function compose(setting: ContentInspectionSetting, profilePiiMode: PiiMode | null): EffectiveContentInspection {
+  const forced = profilePiiMode === "block";
   return { on: setting.enabled || forced, forced, onUninspectable: forced ? "refuse" : setting.onUninspectable };
 }
 
-/** THE effective policy for a dispatch attributed to `projectId` (null: unattributed, the org-default PII mode decides) */
+/** THE effective policy for a dispatch attributed to `projectId` (null: unattributed, never forced, the default applies) */
 export async function effectiveContentInspection(db: Db, projectId: string | null): Promise<EffectiveContentInspection> {
-  const [setting, piiMode] = await Promise.all([loadContentInspectionSetting(db, projectId), projectPiiMode(db, projectId)]);
-  return compose(setting, piiMode);
+  const [setting, profilePiiMode] = await Promise.all([loadContentInspectionSetting(db, projectId), projectProfilePiiMode(db, projectId)]);
+  return compose(setting, profilePiiMode);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -145,9 +148,10 @@ export async function inspectDispatchFiles(
   },
 ): Promise<ContentInspectionVerdict> {
   if (args.files.length === 0) return { kind: "no_files" };
-  const [setting, piiMode] = await Promise.all([loadContentInspectionSetting(db, args.projectId), projectPiiMode(db, args.projectId)]);
-  const policy = compose(setting, piiMode);
+  const policy = await effectiveContentInspection(db, args.projectId);
   if (!policy.on) return { kind: "off" };
+  // the dispatch's own PII mode (org default included), for the per-file categories only
+  const piiMode = await projectPiiMode(db, args.projectId);
 
   const bundle: ContentExtractBundleFile[] = args.files.map((f, i) => ({
     id: `a${i}`,
@@ -187,7 +191,7 @@ export async function inspectDispatchFiles(
     const detail =
       `content inspection could not read ${refused.length} of ${records.length} attached file(s): ${fileList(refused)}` +
       (engineOutcome === "result" ? "" : `; the content-extraction engine answered ${engineOutcome}`) +
-      (policy.forced ? "; inspection is required by the project's compliance PII mode (block)" : "");
+      (policy.forced ? "; inspection is required by the project's compliance profile PII mode (block)" : "");
     const [row] = await db
       .insert(auditLog)
       .values({
@@ -272,8 +276,8 @@ export function contentInspectionRelaxations(from: ContentInspectionSetting, to:
   return out;
 }
 
-function view(projectId: string, setting: ContentInspectionSetting, piiMode: PiiMode | null) {
-  const effective = compose(setting, piiMode);
+function view(projectId: string, setting: ContentInspectionSetting, profilePiiMode: PiiMode | null) {
+  const effective = compose(setting, profilePiiMode);
   return {
     projectId,
     enabled: setting.enabled,
@@ -283,7 +287,7 @@ function view(projectId: string, setting: ContentInspectionSetting, piiMode: Pii
     ...(effective.forced
       ? {
           forcedBy:
-            "the project's effective compliance PII mode is block, so content inspection is on and a file that cannot be read refuses the dispatch, whatever this setting says",
+            "the project's compliance profiles set PII mode block, so content inspection is on and a file that cannot be read refuses the dispatch, whatever this setting says",
         }
       : {}),
   };
@@ -296,15 +300,20 @@ export function registerContentInspectionRoutes(app: FastifyInstance, db: Db): v
     if (!project) return reply.status(404).send({ error: "unknown_project" });
     const gate = await projectRoleGate(db, req, projectId, "viewer");
     if (!gate.ok) return reply.status(gate.status).send({ error: gate.error });
-    const [setting, piiMode] = await Promise.all([loadContentInspectionSetting(db, projectId), projectPiiMode(db, projectId)]);
-    return view(projectId, setting, piiMode);
+    const [setting, profilePiiMode] = await Promise.all([loadContentInspectionSetting(db, projectId), projectProfilePiiMode(db, projectId)]);
+    return view(projectId, setting, profilePiiMode);
   });
 
   app.put("/v1/projects/:projectId/content-inspection", async (req, reply) => {
     const { projectId } = projectIdParam.parse(req.params);
     const body = contentInspectionSettingsBodySchema.parse(req.body);
-    const [project] = await db.select({ id: projects.id }).from(projects).where(eq(projects.id, projectId));
+    const [project] = await db
+      .select({ id: projects.id, name: projects.name, archivedAt: projects.archivedAt })
+      .from(projects)
+      .where(eq(projects.id, projectId));
     if (!project) return reply.status(404).send({ error: "unknown_project" });
+    // ADR-0206 G1: an archived project's settings are frozen, as PATCH /v1/projects/:projectId and its classifications
+    if (await refuseIfArchived(reply, project)) return reply;
     // admin-only by the default route gate; the per-project check is kept so the route stays correct if that changes
     const gate = await projectRoleGate(db, req, projectId, "owner");
     if (!gate.ok) return reply.status(gate.status).send({ error: gate.error });
@@ -340,6 +349,6 @@ export function registerContentInspectionRoutes(app: FastifyInstance, db: Db): v
         reason: `content inspection settings changed${relaxed.length > 0 ? ` (relaxed with a step-up: ${relaxed.join(", ")})` : ""}`,
       });
     });
-    return view(projectId, to, await projectPiiMode(db, projectId));
+    return view(projectId, to, await projectProfilePiiMode(db, projectId));
   });
 }

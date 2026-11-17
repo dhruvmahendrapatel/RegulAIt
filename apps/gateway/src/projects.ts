@@ -501,19 +501,27 @@ export type PiiMode = "block" | "warn" | "log" | "redact";
  * relaxation) maps to null = no enforcement. And the org default still never
  * overrides a matched compliance framework — it is the floor under the
  * frameworks, not a ceiling over them. */
+/**
+ * The PII mode the project's EXPLICIT compliance profiles give it: null when the dispatch is unattributed, the project
+ * is unknown or unclassified, or no profile matches its tags (where `projectPiiMode` falls back to the org default).
+ * ADR-0362's content-inspection floor reads this, so the org default never forces inspection on.
+ */
+export async function projectProfilePiiMode(db: Db, projectId: string | null | undefined): Promise<PiiMode | null> {
+  if (!projectId) return null;
+  const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
+  if (!project) return null;
+  const tags = (project.classifications ?? []) as string[];
+  if (tags.length === 0) return null;
+  const profiles = await profilesForTags(db, tags);
+  if (profiles.length === 0) return null;
+  return effectiveCompliancePolicy(profiles).piiMode;
+}
+
 export async function projectPiiMode(
   db: Db,
   projectId: string | null | undefined,
 ): Promise<PiiMode | null> {
-  const fallback = async () => orgDefaultPiiMode(await loadOrgSettings(db));
-  if (!projectId) return fallback();
-  const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
-  if (!project) return fallback();
-  const tags = (project.classifications ?? []) as string[];
-  if (tags.length === 0) return fallback();
-  const profiles = await profilesForTags(db, tags);
-  if (profiles.length === 0) return fallback();
-  return effectiveCompliancePolicy(profiles).piiMode;
+  return (await projectProfilePiiMode(db, projectId)) ?? orgDefaultPiiMode(await loadOrgSettings(db));
 }
 
 // --- §8.3 mcpDefaultMode enforcement (ADR-0023) ----------------------------

@@ -5,11 +5,6 @@ import { createDb, runMigrations, type Db } from "@regulait/db";
 import { resolveModelProvider, type MockModelProvider } from "@regulait/model-provider";
 import { buildApp } from "./app.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
-import { setOrgSettingsForTest } from "./testing/strict-data-posture.js";
-// ADR-0362: the shipped org-default PII mode (block) forces content inspection on for an unattributed dispatch, and
-// the extraction engine is unpublished, so a file would be refused 422. This suite pins how attachments reach the
-// provider, not inspection (zz-adr0362-content-inspection-dispatch.test.ts), so it runs at `log`, restored after.
-let restorePiiDefault: () => Promise<void> = async () => {};
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
 
@@ -74,7 +69,6 @@ beforeAll(async () => {
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
-  restorePiiDefault = await setOrgSettingsForTest(db, { defaultPiiMode: "log" });
   mock = resolveModelProvider({ provider: "mock" }) as MockModelProvider;
   const res = await app.inject({
     method: "POST",
@@ -215,6 +209,5 @@ describe("multimodal attachments on a governed chat dispatch", () => {
 });
 
 afterAll(async () => {
-  await restorePiiDefault();
   await restoreSb2Gates();
 });

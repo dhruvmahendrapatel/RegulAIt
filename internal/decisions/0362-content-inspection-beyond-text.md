@@ -129,6 +129,9 @@ the existing `maxAttachmentsPerDispatch` and `maxAttachmentBytes` org settings.
 2. **Widen the floor?** Should inspection also be forced on when any guardrail detector is at `block` for the project,
    not only the cascade PII mode? The builder kept the narrower floor so as not to change existing projects' attachment
    behaviour without a decision.
+4. **The org default and the floor** (lane lead, 2026-11-17): The floor applies only to explicit compliance profiles at
+   PII `block`, not the org-default PII mode (also `block` by default, ADR-0181), which would force inspection on
+   everywhere and contradict the owner's off-by-default direction. Should the org default also force it?
 
 ## As built
 
@@ -154,9 +157,11 @@ the existing `maxAttachmentsPerDispatch` and `maxAttachmentBytes` org settings.
 - **Slice 1b-ii (2026-11-17)**: the request path, behind a per-project setting. Pending migration
   `content_inspection_settings`: `project_content_inspection` (one row per project; no row is off / `refuse`; no
   row-level security yet, like every project-scoped table, so by the ADR-0234 appendix rule it joins batch 5).
-  `apps/gateway/src/content-inspection.ts`: `effectiveContentInspection` (on = row enabled OR the effective cascade PII
-  mode is `block`, resolved by `projectPiiMode`, which falls back to the org default for an unclassified project or an
-  unattributed dispatch; under the floor `onUninspectable` is always `refuse`) and `inspectDispatchFiles`, which
+  `apps/gateway/src/content-inspection.ts`: `effectiveContentInspection` (on = row enabled OR the project's explicit
+  compliance profiles' effective PII mode is `block`, resolved by `projectProfilePiiMode`, the profile resolution
+  `projectPiiMode` uses without its org-default fallback, so an unclassified project, unmatched tags and an unattributed
+  dispatch are never forced (lane lead decision 2026-11-17, owner question 4); under the floor `onUninspectable` is
+  always `refuse`) and `inspectDispatchFiles`, which
   `dispatchAttempt` runs before the three input checks on every image and document block of the dispatch's messages
   (so the native invoke path and both compat shims converge on it; the native semantic-cache hit passes its files as
   `inspectFiles`), once per dispatch (memoised across fallback hops). Extracted text joins the prompt, each file behind
@@ -172,9 +177,8 @@ the existing `maxAttachmentsPerDispatch` and `maxAttachmentBytes` org settings.
   content-inspection`, both with the lane lead's `CONTENT_INSPECTION_COST_NOTE`; KNOWN_UI_GAPS entries on #453. The
   engine-run sweep deletes unread results and ends extraction runs older than ten minutes (database clock). The
   vocabulary (file statuses and their transitions, dispatch and engine outcomes, `onUninspectable`) is declared once in
-  `packages/shared/src/content-inspection.ts`. **Consequence recorded for the lane lead**: the shipped org-default PII
-  mode is `block` (ADR-0181), so on a fresh install the floor forces inspection on for every unclassified project and
-  every unattributed dispatch, and while the engine is unpublished every such dispatch with a file is refused 422.
-  `attachments.test.ts` and one `org-settings.test.ts` case now run at org-default `log` to keep pinning what they
-  pinned. Not built: the redact case of decision 5 (no dispatch PII mode redacts today), per-file guardrail attribution,
+  `packages/shared/src/content-inspection.ts`. With inspection off an unclassified project's dispatch is byte-identical
+  (`attachments.test.ts` and `org-settings.test.ts` pass unchanged under the shipped org default `block`). PUT on an
+  archived project is refused 409 `project_archived` (`refuseIfArchived`), as `PATCH /v1/projects/:projectId` and its
+  classifications are. Not built: the redact case of decision 5 (no dispatch PII mode redacts today), per-file guardrail attribution,
   and the response-side files.
