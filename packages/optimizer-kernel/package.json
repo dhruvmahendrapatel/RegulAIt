@@ -10,6 +10,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./offload": {
+      "types": "./dist/rule-induction-offload.d.ts",
+      "default": "./dist/rule-induction-offload.js"
     }
   },
   "scripts": {

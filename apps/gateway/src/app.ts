@@ -191,6 +191,7 @@ import { registerEvalRoutes } from "./evals.js";
 import { applyModelCardApprovalDecision, registerMrmRoutes } from "./mrm.js";
 import { registerFairnessRoutes } from "./fairness.js";
 import { registerClassicalDriftRoutes } from "./classical-drift.js";
+import { registerRuleStepRoutes } from "./rule-steps.js";
 import { registerDriftIngestCredentialRoutes } from "./drift-ingest-credentials.js";
 import { AiBomError } from "./ai-bom.js";
 import { runAiBomSignoffs, type AiBomSignoff } from "./ai-bom-signoff.js";
@@ -521,6 +522,7 @@ import { mirrorApprovalDecision, registerPmRoutes } from "./pm.js";
 import { RunStateError } from "@regulait/orchestration-kernel";
 import { applyWorkflowApprovalDecision, registerWorkflowRoutes } from "./workflows.js";
 import { registerTemplateGalleryRoutes } from "./template-gallery.js";
+import { registerWorkflowBuilderRoutes } from "./workflow-builder.js";
 // ADR-0080 — the AI use-case registry (L1 front-door) and its lifecycle join.
 import {
   acceptUseCaseRisks,
@@ -611,6 +613,7 @@ import { applyEngineRunApprovalDecision, lockEngineRunOfApprovalTx, registerEngi
 import { registerEngineRunnerScopeHook, engineCredentialRoutes } from "./engine-runner-auth.js";
 import { registerModelArtifactRoutes, type ArtifactStore } from "./model-artifacts.js";
 import { registerModelSupplyChainRoutes } from "./model-supply-chain.js";
+import { registerModelLineageRoutes } from "./model-lineage.js";
 import { schedulerJobRegistry } from "./scheduler-jobs.js";
 import { registerDataKeyRoutes } from "./data-key.js";
 import { registerDataKeyReencryptionRoutes } from "./data-key-reencrypt.js";
@@ -5841,6 +5844,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerFairnessRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0223 (P13b): drift and explainability for classical models, on the model register; off by default
   registerClassicalDriftRoutes(app, db);
+  // ADR-0327 (lane E12): rule-like AI step detection, admin-only via the default gate
+  registerRuleStepRoutes(app, db);
   // ADR-0223 amendment 1: the per-monitor write-only ingestion credential and its one route
   registerDriftIngestCredentialRoutes(app, db);
   // ADR-0057 — CONTINUOUS RED-TEAMING. Versioned attack libraries, the shipped
@@ -6061,6 +6066,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   });
   // ADR-0077 — the cascade-annotated template gallery (admin-gated by default)
   registerTemplateGalleryRoutes(app, db);
+  // ADR-0341 — the visual pipeline builder: drafts, versions, diff and publish of workflow templates (admin)
+  registerWorkflowBuilderRoutes(app, db);
   registerUseCaseRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0171 / AER-050 — the intake wizard's server-side drafts
   registerUseCaseDraftRoutes(app, db);
@@ -6405,6 +6412,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerModelArtifactRoutes(app, db, opts.artifactStore === undefined ? {} : { artifactStore: opts.artifactStore });
   // ADR-0216: signing keys (admin), signatures (uploader or admin), supply-chain relaxations (admin, step-up)
   registerModelSupplyChainRoutes(app, db);
+  // lane L7 (P14 + P16): model-file lineage
+  registerModelLineageRoutes(app, db);
   // ADR-0224 (P13 c): records of processing and data-subject requests (admin-only, the default gate)
   registerPrivacyOpsRoutes(app, db, { dataKey: opts.dataKey });
 
