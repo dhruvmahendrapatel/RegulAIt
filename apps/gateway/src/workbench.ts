@@ -38,7 +38,7 @@
  *     make adding one a deliberate act rather than an accident.
  */
 import { z } from "zod";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   and,
   approvalAssignmentRules,
@@ -570,6 +570,8 @@ export async function runApprovalSlaSweep(
 // ---------------------------------------------------------------------------
 
 export interface WorkbenchRouteOptions {
+  /** Canonical queue visibility, including delegates, pools and review roles. */
+  pendingScope: (req: FastifyRequest) => Promise<import("@regulait/db").SQL | undefined>;
   /** the ONE decide path, owned by app.ts. Bulk calls exactly this. */
   decideOne: (input: {
     approvalId: string;
@@ -747,8 +749,7 @@ export function registerWorkbenchRoutes(app: FastifyInstance, db: Db, opts: Work
 
   app.get("/v1/approvals/workload", async (req) => {
     const now = new Date();
-    const me = req.authCtx.userId ?? "";
-    const pending = await db.select().from(approvals).where(eq(approvals.status, "pending"));
+    const pending = await db.select().from(approvals).where(await opts.pendingScope(req));
     // Evaluate before aggregating, so "breached" in this view is the live truth
     // rather than whatever was last written. With no rule enabled nothing is
     // materialized at all and the aggregate falls back to the approval's own
@@ -757,11 +758,19 @@ export function registerWorkbenchRoutes(app: FastifyInstance, db: Db, opts: Work
       ? await materializeAndEvaluate(db, pending, req.authCtx.userId ?? null, now)
       : new Map<string, ApprovalAssignmentRow>();
     // ADR-0022 scoping: a non-admin sees only queues they are party to
-    const visibleIds = req.authCtx.isAdmin ? null : new Set(await assignedApprovalIdsFor(db, me));
+    // pendingScope already applies the canonical visibility predicate. No second, narrower policy.
+    const personLoad = new Map<string, { userId: string; open: number; claimed: number; priorities: Record<string, number> }>();
     const buckets = new Map<string, { kind: string; id: string; open: number; dueSoon: number; breached: number }>();
     for (const row of pending) {
       const a = assignments.get(row.id) ?? null;
-      if (visibleIds && !visibleIds.has(row.id) && row.approverUserId !== me) continue;
+      const person = a?.claimedByUserId ?? ((a?.assigneeKind ?? "user") === "user" ? (a?.assigneeId ?? row.approverUserId) : null);
+      if (person) {
+        const load = personLoad.get(person) ?? { userId: person, open: 0, claimed: 0, priorities: { low: 0, normal: 0, high: 0, urgent: 0 } };
+        load.open += 1;
+        if (a?.claimedByUserId) load.claimed += 1;
+        load.priorities[row.priority] = (load.priorities[row.priority] ?? 0) + 1;
+        personLoad.set(person, load);
+      }
       const kind = a?.assigneeKind ?? "user";
       const id = a?.assigneeId ?? row.approverUserId;
       const key = `${kind}:${id}`;
@@ -781,6 +790,7 @@ export function registerWorkbenchRoutes(app: FastifyInstance, db: Db, opts: Work
       : [];
     const nameOf = new Map(names.map((u) => [u.id, u.displayName || u.email]));
     return {
+      assigneeLoad: [...personLoad.values()].sort((a, b) => b.open - a.open || a.userId.localeCompare(b.userId)),
       workload: rows
         .map((r) => ({ ...r, name: r.kind === "user" ? (nameOf.get(r.id) ?? null) : null }))
         .sort((a, b) => b.breached - a.breached || b.open - a.open),

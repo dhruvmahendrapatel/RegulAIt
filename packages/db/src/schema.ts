@@ -2554,6 +2554,8 @@ export const approvals = pgTable(
     })
       .notNull()
       .default("pending"),
+    /** ADR-0352: queue metadata only; never an approval decision or routing-rule priority. */
+    priority: text("priority", { enum: ["low", "normal", "high", "urgent"] }).notNull().default("normal"),
     requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
     decidedBy: uuid("decided_by"),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
@@ -2624,6 +2626,8 @@ export const approvals = pgTable(
     namedApproverUserId: uuid("named_approver_user_id"),
   },
   (t) => [
+    check("approvals_priority_check", sql`${t.priority} IN ('low', 'normal', 'high', 'urgent')`),
+    index("approvals_status_priority_idx").on(t.status, t.priority, t.requestedAt, t.id),
     check("approvals_quorum_check", sql`${t.quorum} BETWEEN 1 AND 5`),
     check("approvals_signature_mode_check", sql`${t.signatureMode} IN ('passkey', 'step_up', 'off')`),
     index("approvals_status_idx").on(t.status),
