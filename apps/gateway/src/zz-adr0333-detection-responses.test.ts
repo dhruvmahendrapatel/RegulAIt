@@ -124,12 +124,35 @@ describe("ADR-0333 responses", () => {
   it("suspend_grant on an unknown delegation tree, and revoke_credential with no actor, fail with fixed codes", async () => {
     const [incident] = await db.select().from(detectionIncidents).where(eq(detectionIncidents.response, "suspend_grant")).limit(1);
     const base = { incidentId: incident!.id, ruleId: "high-risk-addon-call", userId: sponsorId, actorIdentityId: null, packAuthor: adminId, auditUserId: adminId };
+    // one fixture incident is reused: put it back to the pending state before each run (done/failed are terminal)
+    const pending = () => db.update(detectionIncidents).set({ responseState: "none", responseErrorCode: null }).where(eq(detectionIncidents.id, incident!.id));
+    await pending();
     expect(await runDetectionResponse(db, { ...base, response: "suspend_grant", groupKey: `grant:${randomUUID()}` })).toBe("failed");
     expect((await db.select().from(detectionIncidents).where(eq(detectionIncidents.id, incident!.id)))[0]!.responseErrorCode).toBe("grant_not_found");
+    await pending();
     expect(await runDetectionResponse(db, { ...base, response: "revoke_credential", groupKey: `user:${sponsorId}` })).toBe("failed");
     expect((await db.select().from(detectionIncidents).where(eq(detectionIncidents.id, incident!.id)))[0]!.responseErrorCode).toBe("no_actor_identity");
+    await pending();
     expect(await runDetectionResponse(db, { ...base, response: "require_approval", groupKey: `user:${sponsorId}`, packAuthor: sponsorId })).toBe("failed");
     expect((await db.select().from(detectionIncidents).where(eq(detectionIncidents.id, incident!.id)))[0]!.responseErrorCode).toBe("no_independent_approver");
+  });
+
+  it("a terminal response state is never overwritten (lifecycle.ts)", async () => {
+    const [incident] = await db.select().from(detectionIncidents).where(eq(detectionIncidents.response, "suspend_grant")).limit(1);
+    await db.update(detectionIncidents).set({ responseState: "done", responseErrorCode: null }).where(eq(detectionIncidents.id, incident!.id));
+    await runDetectionResponse(db, {
+      incidentId: incident!.id,
+      ruleId: "high-risk-addon-call",
+      response: "suspend_grant",
+      groupKey: `grant:${randomUUID()}`,
+      userId: sponsorId,
+      actorIdentityId: null,
+      packAuthor: adminId,
+      auditUserId: adminId,
+    });
+    const [after] = await db.select().from(detectionIncidents).where(eq(detectionIncidents.id, incident!.id));
+    expect(after!.responseState).toBe("done");
+    expect(after!.responseErrorCode).toBeNull();
   });
 
   it("revoke_credential revokes only the acting identity's live tokens", async () => {

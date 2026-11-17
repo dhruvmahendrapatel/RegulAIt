@@ -12,12 +12,13 @@
  * recorded on the incident (`response_state`, a fixed `response_error_code`) and audited; a failure is never retried
  * silently.
  */
-import { and, auditLog, approvalRules, detectionIncidents, eq, isNull, sql, type Db } from "@regulait/db";
+import { and, auditLog, approvalRules, detectionIncidents, eq, inArray, isNull, sql, type Db } from "@regulait/db";
 import { createApprovalRuleSchema } from "@regulait/shared";
 import { DelegationRefusedError, revokeDelegationGrant } from "../delegation.js";
 import { createApprovalRuleRow } from "../rule-creates.js";
 import { ApprovalRuleWriteRefusedError } from "../approval-pool.js";
 import type { DetectionResponse } from "./pack.js";
+import { responseStateSources } from "./lifecycle.js";
 
 export const DETECTION_RESPONSE_RULE_ID = "detection-response";
 
@@ -125,7 +126,8 @@ export async function runDetectionResponse(db: Db, t: DetectionResponseTarget): 
     await tx
       .update(detectionIncidents)
       .set({ responseState: state, responseErrorCode: outcome.ok ? null : outcome.code })
-      .where(eq(detectionIncidents.id, t.incidentId));
+      // the declared table (lifecycle.ts): a terminal response state is never overwritten
+      .where(and(eq(detectionIncidents.id, t.incidentId), inArray(detectionIncidents.responseState, responseStateSources(state))));
     await tx.insert(auditLog).values({
       userId: t.packAuthor ?? t.auditUserId,
       objectType: "detection_incident",

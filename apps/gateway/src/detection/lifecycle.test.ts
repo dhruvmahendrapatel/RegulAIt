@@ -24,3 +24,10 @@ describe("ADR-0333 incident lifecycles (rule 12)", () => {
     expect(responseStateSources("failed")).toEqual(["none"]);
   });
 });
+
+describe("ADR-0333 response runner pending set", () => {
+  it("is exactly the non-terminal response states", async () => {
+    const { RESPONSE_PENDING_STATES } = await import("./lifecycle.js");
+    expect(RESPONSE_PENDING_STATES).toEqual(["none"]);
+  });
+});

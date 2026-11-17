@@ -42,3 +42,8 @@ export function responseStateSources(to: DetectionResponseState): DetectionRespo
 export const ADMIN_SETTABLE_STATUSES = DETECTION_INCIDENT_STATUSES.filter(
   (s) => incidentStatusSources(s).length > 0,
 ) as DetectionIncidentStatus[];
+
+/** the response states a response may still run from (the runner's pending set) */
+export const RESPONSE_PENDING_STATES = DETECTION_RESPONSE_STATES.filter(
+  (s) => RESPONSE_STATE_TRANSITIONS[s].length > 0,
+) as DetectionResponseState[];

@@ -26,6 +26,7 @@ import type { SchedulerJobDefinition } from "../scheduler.js";
 const SYSTEM_ACTOR = "00000000-0000-0000-0000-000000000000";
 import { evaluateDetections, raisedKey, type DetectionEvent, type DetectionMatch } from "./engine.js";
 import { runDetectionResponse, type DetectionResponseTarget } from "./responses.js";
+import { RESPONSE_PENDING_STATES } from "./lifecycle.js";
 import { DEFAULT_DETECTION_PACK, packDigest, parseDetectionPack, verifyDetectionPack, type DetectionPack } from "./pack.js";
 
 export const DETECTION_SWEEP_JOB_NAME = "agent-detection-sweep";
@@ -357,7 +358,7 @@ async function runPendingResponses(db: Db, actorUserId: string | null): Promise<
     sql`SELECT i.id AS "incidentId", i.rule_id AS "ruleId", i.response AS response, i.group_key AS "groupKey",
                i.user_id AS "userId", i.actor_identity_id AS "actorIdentityId", p.created_by AS "packAuthor"
         FROM detection_incidents i LEFT JOIN detection_rule_packs p ON p.version = i.pack_version
-        WHERE i.response <> 'alert' AND i.response_state = 'none'
+        WHERE i.response <> 'alert' AND i.response_state IN (${sql.join(RESPONSE_PENDING_STATES.map((st) => sql`${st}`), sql`, `)})
         ORDER BY i.created_at, i.id LIMIT 100`,
   );
   for (const target of pending) await runDetectionResponse(db, { ...target, auditUserId: actorUserId ?? SYSTEM_ACTOR });
