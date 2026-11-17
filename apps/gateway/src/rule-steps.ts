@@ -43,6 +43,7 @@ import {
 import { induceStepRuleOffThread } from "@regulait/optimizer-kernel/offload";
 import { TRACE_TRUNCATION_MARKER } from "@regulait/shared";
 import { requireStepUp } from "./step-up.js";
+import { SCAN_WINDOW_DAYS } from "./rule-step-retention.js";
 import type { ListSpec } from "./list-contract.js";
 import { answerListExport, answerListPage, type ContractList } from "./list-contract-route.js";
 
@@ -50,7 +51,8 @@ const SETTINGS_ID = "singleton";
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 export const SCAN_MAX_STEPS = 10;
 export const SCAN_MAX_RUNS = 5_000;
-export const SCAN_WINDOW_DAYS = 30;
+// one definition, shared with the retention prune (rule-step-retention.ts): the prune keys on the window start
+export { SCAN_WINDOW_DAYS };
 export const SCAN_SPACING_MINUTES = 10;
 const MONTH_DAYS = 30;
 

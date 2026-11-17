@@ -7911,7 +7911,8 @@ export const onboardingImports = pgTable(
   "onboarding_imports",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    kind: text("kind", { enum: ["users", "group_roles"] }).notNull(),
+    /** ADR-0289 adds `pm_work_items` (the PM project/work-item importer) */
+    kind: text("kind", { enum: ["users", "group_roles", "pm_work_items"] }).notNull(),
     mode: text("mode", { enum: ["dry_run", "apply"] }).notNull(),
     status: text("status", { enum: ["planned", "applied", "refused"] }).notNull(),
     /** fingerprint of the exact screened bytes — "which file did this?" without
@@ -16754,6 +16755,58 @@ export const resourceRateReservations = pgTable(
     ),
   ],
 );
+
+// ---------------------------------------------------------------------------
+// ADR-0289 (builder lane L6) — the PM project / work-item importer (ADR-0054 §3).
+// Migration `pending/pm_work_item_import.sql` (numbered at merge).
+// ---------------------------------------------------------------------------
+
+/** Which RegulAIt Initiative a PM connection's project rolls up to. One row per connection (the connection names one
+ * PM project), so the mapping is a fact about the connection, kept apart from the reporting-only initiative. */
+export const pmProjectInitiatives = pgTable("pm_project_initiatives", {
+  connectionId: uuid("connection_id")
+    .primaryKey()
+    .references(() => pmConnections.id, { onDelete: "cascade" }),
+  initiativeId: uuid("initiative_id")
+    .notNull()
+    .references(() => initiatives.id, { onDelete: "cascade" }),
+  /** the import that set (or last changed) the mapping */
+  importId: uuid("import_id").references(() => onboardingImports.id, { onDelete: "set null" }),
+  mappedAt: timestamp("mapped_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [index("pm_project_initiatives_initiative_idx").on(t.initiativeId)]);
+
+/** An existing work item the importer found in a connection's project. LINKAGE ONLY: the PM tool stays the source of
+ * truth (pillar 8), so title, state and fields are read through live and never stored here. `external_url` and
+ * `item_type` are the provider's own last-reported values (reconciled on every import), not RegulAIt-owned copies. */
+export const pmImportedWorkItems = pgTable(
+  "pm_imported_work_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => pmConnections.id, { onDelete: "cascade" }),
+    externalId: text("external_id").notNull(),
+    // ADR-0200 3NF exception (verbatim external payload): the item's URL as the PM tool reported it at the last import.
+    // The PM tool owns it (pillar 8); the importer refreshes it on every apply and never derives anything from it.
+    externalUrl: text("external_url").notNull(),
+    // ADR-0200 3NF exception (verbatim external payload): the tool's own work-item type name ("Bug", "Story"), as
+    // reported at the last import. It is the tool's vocabulary, not a RegulAIt reference, so there is nothing to join.
+    itemType: text("item_type").notNull(),
+    firstImportId: uuid("first_import_id").references(() => onboardingImports.id, { onDelete: "set null" }),
+    lastImportId: uuid("last_import_id").references(() => onboardingImports.id, { onDelete: "set null" }),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    /** set when a later import no longer finds the item in the PM tool; never deleted (re-appearing clears it) */
+    missingSince: timestamp("missing_since", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("pm_imported_work_items_conn_ext_uq").on(t.connectionId, t.externalId),
+    index("pm_imported_work_items_conn_id_idx").on(t.connectionId, t.id),
+    index("pm_imported_work_items_first_import_idx").on(t.firstImportId),
+    index("pm_imported_work_items_last_import_idx").on(t.lastImportId),
+  ],
+);
+export type PmImportedWorkItemRow = typeof pmImportedWorkItems.$inferSelect;
 
 /**
  * ADR-0310 (G2; migration `managed_settings_bundles`) — signed, versioned bundles of vendor-native managed settings
