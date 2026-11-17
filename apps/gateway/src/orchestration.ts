@@ -1998,16 +1998,15 @@ export async function applyRunApprovalDecision(
     approvalRow.stageId.startsWith("__nodebudget_measured__")
   ) {
     if (decision === "approved") {
+      // ADR-0348: the overage gate flips in ONE statement that merges the flag into the stored budget. It used to
+      // read the budget, then write the whole object back, so a parallel node's `chargeRunBudget` (which locks)
+      // committing in between had its measured spend erased.
       const [run] = await dbx
-        .select()
-        .from(orchestrationRuns)
-        .where(eq(orchestrationRuns.id, runId));
-      if (!run) return null;
-      const budget = (run.budget ?? {}) as Record<string, unknown>;
-      await dbx
         .update(orchestrationRuns)
-        .set({ budget: { ...budget, overageApproved: true } })
-        .where(eq(orchestrationRuns.id, runId));
+        .set({ budget: sql`coalesce(${orchestrationRuns.budget}, '{}'::jsonb) || '{"overageApproved": true}'::jsonb` })
+        .where(eq(orchestrationRuns.id, runId))
+        .returning({ id: orchestrationRuns.id });
+      if (!run) return null;
       await dbx.insert(auditLog).values({
         userId: deciderUserId,
         objectType: "run",
