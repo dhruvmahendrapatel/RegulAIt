@@ -158,6 +158,13 @@ reply, 2026-08), so a GPT's connected apps are what its configured actions name,
 8. **API only.** New routes, if a slice needs any (a record's components), are added to the route census with a
    `KNOWN_UI_GAPS` entry pointing at #453. No screen is built in this lane.
 
+9. **No new lifecycle; states come from one declared table.** This lane adds no status field of its own. A
+   credential's read-only state is ADR-0195's `DISCOVERY_WRITE_SCOPE_STATES` (`unverified`, `read_only`, `refused`),
+   and slice 1 adds its allowed transitions next to that list in `@regulait/shared` as one declared table
+   (`unverified`→`read_only`/`refused`, `read_only`→`refused`, `refused` final until the credential is replaced),
+   which the worker and the routes both read instead of branching on their own. A staged record's present/absent
+   state and an imported agent's lifecycle stay #855's and ADR-0089's, unchanged.
+
 ## Slices
 
 1. This ADR, the adapter contract (wrapping #855's registry scanners as adapters too), `agent_registry_record_components`, and the Copilot Studio adapter.
