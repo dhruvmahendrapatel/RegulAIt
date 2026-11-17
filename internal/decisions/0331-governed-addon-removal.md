@@ -169,6 +169,17 @@ claiming coverage.
     `expired` or `wrong_identity`.
 
   Each outcome also carries `notified` (true or false).
+- **The target lifecycle.** One declared table, `ENDPOINT_ADDON_TARGET_TRANSITIONS` in `packages/db`, holds every
+  allowed move:
+
+  | From | To |
+  |---|---|
+  | `pending` | `delivered` (served to the agent), `cancelled` |
+  | `delivered` | `removed`, `nothing_to_remove`, `failed`, `cancelled` |
+  | `removed`, `nothing_to_remove`, `failed`, `cancelled` | nothing: final |
+
+  Every status write (deliver, report, cancel) takes its allowed source states from this table, as the SQL guard
+  `status IN (sources)`, so each move is atomic and no route decides a transition by itself. A test pins the table.
 - **Gateway side.** An outcome is accepted only for a target of the calling device that was delivered, and it is final.
   Repeating the same outcome is idempotent; a different one is refused. The target update and its audit row are written
   in one transaction.
@@ -200,8 +211,20 @@ Coverage follows the MCP hosts whose config files the signed collection manifest
 - **Adopted.** `tidwall/sjson` (MIT, with `tidwall/gjson`, `match` and `pretty`, all MIT) removes a JSON key while
   leaving every other byte as it was. The agent already uses `tidwall/jsonc`. All four are pinned in `go.sum` and
   listed in `THIRD_PARTY.md`.
-- **Rejected.** `gen2brain/beeep` (BSD-2) is a cross-platform notifier, but it pulls in `tadvi/systray`, last released
-  in 2019, which fails the maintenance rule.
+- **Compared for the JSON edit** (re-checked 2026-11-17):
+  - `tidwall/sjson` (MIT, tagged releases, the latest on 2026-11-09): deletes one key in place and keeps every other
+    byte. Adopted at v1.2.5, the newest release more than two weeks old when it was pinned.
+  - `tailscale/hujson` (BSD-3, maintained, the latest commit 2026-07-27): can also edit JSONC (comments, trailing
+    commas), but it publishes no tagged release, only commit pseudo-versions. It is the candidate for the JSONC
+    follow-up, which must first check it against the release rule.
+  - `encoding/json` decode and re-encode (standard library): loses key order, spacing and number formatting, so a
+    developer's file would be rewritten. Rejected.
+- **Compared for the notice:** `gen2brain/beeep` (BSD-2) is a cross-platform notifier, but even its 2026-11-13 release
+  (v0.12.0) still pulls in `tadvi/systray`, last released in 2019, which fails the maintenance rule. Rejected in favour
+  of the platform tools (below).
+- **Compared for the lifecycle:** `xstate` (MIT, maintained) is a full state-machine library. Six states and three
+  moves, each enforced as a SQL guard, do not need it, and it would add a runtime dependency to the gateway for one
+  table. A declared, typed table was chosen.
 - **Our own code (narrow exception).** The three-command notifier is the platform tools, run without a shell. It
   exists because no maintained module meets the air-gapped, no-shell and maintenance requirements together. It is
   re-checked when the ecosystem changes.

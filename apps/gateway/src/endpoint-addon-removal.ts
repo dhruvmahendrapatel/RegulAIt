@@ -53,6 +53,9 @@ import {
   type Db,
   type EndpointAddonRemovalRow,
   workloadIdentities,
+  ENDPOINT_ADDON_TARGET_OPEN_STATUSES,
+  ENDPOINT_ADDON_TARGET_STATUSES,
+  endpointAddonTargetSources,
   type SQL,
 } from "@regulait/db";
 import { scrubAuditText } from "@regulait/shared";
@@ -335,7 +338,7 @@ export const ADDON_REMOVAL_TARGETS_LIST: ListSpec<TargetListRow> = {
 };
 
 const idParam = z.object({ id: z.string().uuid() });
-const targetsFilter = z.object({ status: z.enum(["pending", "delivered", "removed", "nothing_to_remove", "failed", "cancelled"]).optional() }).strict();
+const targetsFilter = z.object({ status: z.enum(ENDPOINT_ADDON_TARGET_STATUSES).optional() }).strict();
 
 interface Refusal {
   status: number;
@@ -608,7 +611,7 @@ export function registerEndpointAddonRemovalRoutes(app: FastifyInstance, db: Db,
       const stopped = await t
         .update(endpointAddonRemovalTargets)
         .set({ status: "cancelled" })
-        .where(and(eq(endpointAddonRemovalTargets.removalId, id), inArray(endpointAddonRemovalTargets.status, ["pending", "delivered"])))
+        .where(and(eq(endpointAddonRemovalTargets.removalId, id), inArray(endpointAddonRemovalTargets.status, endpointAddonTargetSources("cancelled"))))
         .returning({ id: endpointAddonRemovalTargets.id, deliveredAt: endpointAddonRemovalTargets.deliveredAt });
       const [cancelled] = await t
         .update(endpointAddonRemovals)
@@ -682,7 +685,7 @@ export function registerEndpointDirectiveRoutes(scope: FastifyInstance, db: Db, 
         and(
           // only the calling identity's own targets: the paths are relative to that device user's home
           eq(endpointAddonRemovalTargets.identityId, agent.identityId),
-          inArray(endpointAddonRemovalTargets.status, ["pending", "delivered"]),
+          inArray(endpointAddonRemovalTargets.status, ENDPOINT_ADDON_TARGET_OPEN_STATUSES),
           isNull(endpointAddonRemovals.cancelledAt),
           gt(endpointAddonRemovals.expiresAt, sql`now()`),
         ),
@@ -731,7 +734,7 @@ export function registerEndpointDirectiveRoutes(scope: FastifyInstance, db: Db, 
       await t
         .update(endpointAddonRemovalTargets)
         .set({ status: "delivered", deliveredAt: sql`now()` })
-        .where(and(inArray(endpointAddonRemovalTargets.id, ids), eq(endpointAddonRemovalTargets.status, "pending")));
+        .where(and(inArray(endpointAddonRemovalTargets.id, ids), inArray(endpointAddonRemovalTargets.status, endpointAddonTargetSources("delivered"))));
       await readAudit(t, agent, "served", ids);
     });
     return reply.send({ directives });
@@ -782,11 +785,12 @@ export function registerEndpointDirectiveRoutes(scope: FastifyInstance, db: Db, 
           refuseItem(i, "not_your_directive");
           continue;
         }
-        if (row.status === "delivered") {
+        const sources = endpointAddonTargetSources(i.outcome);
+        if (sources.includes(row.status)) {
           await t
             .update(endpointAddonRemovalTargets)
             .set({ status: i.outcome, code: i.code, notified: i.notified, reportedAt: sql`GREATEST(now(), ${endpointAddonRemovalTargets.deliveredAt})` })
-            .where(and(eq(endpointAddonRemovalTargets.id, row.id), eq(endpointAddonRemovalTargets.status, "delivered")));
+            .where(and(eq(endpointAddonRemovalTargets.id, row.id), inArray(endpointAddonRemovalTargets.status, sources)));
           accepted.push({ directiveId: row.id, outcome: i.outcome, code: i.code, notified: i.notified, repeat: false });
         } else if (row.status === i.outcome && row.code === i.code) {
           // final already, with this same outcome: a retry of a post whose answer was lost

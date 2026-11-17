@@ -6,6 +6,13 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import {
+  ENDPOINT_ADDON_TARGET_OPEN_STATUSES,
+  ENDPOINT_ADDON_TARGET_STATUSES,
+  ENDPOINT_ADDON_TARGET_TRANSITIONS,
+  ENDPOINT_DIRECTIVE_OUTCOME_CODES,
+  endpointAddonTargetSources,
+} from "@regulait/db";
 import { directivePayload, outcomeCodeValid } from "./endpoint-addon-removal.js";
 
 const GOLDEN = fileURLToPath(new URL("../../../agents/endpoint/internal/contract/testdata/directive-payload.json", import.meta.url));
@@ -41,5 +48,28 @@ describe("ADR-0331: the directive payload", () => {
     expect(outcomeCodeValid("nothing_to_remove", "identity_differs")).toBe(true);
     expect(outcomeCodeValid("failed", "removed")).toBe(false);
     expect(outcomeCodeValid("removed", "not_present")).toBe(false);
+  });
+});
+
+// Owner rule 12 (2026-11-17): the target lifecycle is one declared table; these pin its shape so a later edit cannot
+// open a path the ADR forbids (a final outcome rewritten, an undelivered target reported, a cancelled one revived).
+describe("ADR-0331: the removal target lifecycle", () => {
+  it("declares every status, and only known statuses", () => {
+    expect(Object.keys(ENDPOINT_ADDON_TARGET_TRANSITIONS).sort()).toEqual([...ENDPOINT_ADDON_TARGET_STATUSES].sort());
+    for (const to of Object.values(ENDPOINT_ADDON_TARGET_TRANSITIONS).flat()) expect(ENDPOINT_ADDON_TARGET_STATUSES).toContain(to);
+  });
+  it("makes every outcome and cancelled final", () => {
+    for (const s of [...(Object.keys(ENDPOINT_DIRECTIVE_OUTCOME_CODES) as (keyof typeof ENDPOINT_DIRECTIVE_OUTCOME_CODES)[]), "cancelled" as const]) {
+      expect(ENDPOINT_ADDON_TARGET_TRANSITIONS[s]).toEqual([]);
+    }
+    expect(ENDPOINT_ADDON_TARGET_OPEN_STATUSES).toEqual(["pending", "delivered"]);
+  });
+  it("reaches an outcome only from delivered, delivery only from pending, and cancel from any open state", () => {
+    for (const o of Object.keys(ENDPOINT_DIRECTIVE_OUTCOME_CODES) as (keyof typeof ENDPOINT_DIRECTIVE_OUTCOME_CODES)[]) {
+      expect(endpointAddonTargetSources(o)).toEqual(["delivered"]);
+    }
+    expect(endpointAddonTargetSources("delivered")).toEqual(["pending"]);
+    expect(endpointAddonTargetSources("cancelled")).toEqual(["pending", "delivered"]);
+    expect(endpointAddonTargetSources("pending")).toEqual([]);
   });
 });

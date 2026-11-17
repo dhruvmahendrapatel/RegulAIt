@@ -16770,6 +16770,28 @@ export const ENDPOINT_ADDON_REMOVAL_SCOPES = ["device", "devices", "recent"] as 
 /** the user-writable config roots a removal may target; `system_applications` never is (ADR-0331 §3) */
 export const ENDPOINT_ADDON_REMOVAL_ROOTS = ["home", "appdata", "localappdata"] as const;
 export const ENDPOINT_ADDON_TARGET_STATUSES = ["pending", "delivered", "removed", "nothing_to_remove", "failed", "cancelled"] as const;
+export type EndpointAddonTargetStatus = (typeof ENDPOINT_ADDON_TARGET_STATUSES)[number];
+/**
+ * ADR-0331: the one declared lifecycle of a removal target. Every status write reads its allowed source states from
+ * this table (the SQL guard `status IN (sources)` makes each move atomic), so no route decides a transition by itself.
+ * pending → delivered (served to the agent) | cancelled; delivered → one final outcome | cancelled; the rest are final.
+ */
+export const ENDPOINT_ADDON_TARGET_TRANSITIONS = {
+  pending: ["delivered", "cancelled"],
+  delivered: ["removed", "nothing_to_remove", "failed", "cancelled"],
+  removed: [],
+  nothing_to_remove: [],
+  failed: [],
+  cancelled: [],
+} as const satisfies Record<EndpointAddonTargetStatus, readonly EndpointAddonTargetStatus[]>;
+/** the states a target may move to `to` from */
+export function endpointAddonTargetSources(to: EndpointAddonTargetStatus): EndpointAddonTargetStatus[] {
+  return ENDPOINT_ADDON_TARGET_STATUSES.filter((from) => (ENDPOINT_ADDON_TARGET_TRANSITIONS[from] as readonly string[]).includes(to));
+}
+/** the states that are not final: a target in one of them can still be served, reported or cancelled */
+export const ENDPOINT_ADDON_TARGET_OPEN_STATUSES: EndpointAddonTargetStatus[] = ENDPOINT_ADDON_TARGET_STATUSES.filter(
+  (s) => ENDPOINT_ADDON_TARGET_TRANSITIONS[s].length > 0,
+);
 /** ADR-0331 §7: each outcome and the closed codes it may carry (the agent's `contract.OutcomeCodes`) */
 export const ENDPOINT_DIRECTIVE_OUTCOME_CODES = {
   removed: ["removed"],
