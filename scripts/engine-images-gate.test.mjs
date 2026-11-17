@@ -6,7 +6,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { changedInputs, CONTEXT_EXCLUDED, GateError, GENERATED_LOCK_MODULE, inputCommit, inputPathspecs, plan, readWorkspace, ROOT, ROOT_INPUTS, workspaceClosure } from "./engine-images-gate.mjs";
 import { ENGINE_IDS } from "./engine-images-lock.mjs";
-import { inputPathspecs as specsFor, UNPUBLISHED_ENGINE_IDS } from "./engine-images-gate.mjs";
+import { inputPathspecs as specsFor, REPRO_ENGINE_IDS, UNPUBLISHED_ENGINE_IDS } from "./engine-images-gate.mjs";
 
 const repoGit = (args) => execFileSync("git", args, { cwd: ROOT, encoding: "utf8" });
 
@@ -29,7 +29,8 @@ describe("ENG-IMG publish gate: the input set of the real repository", () => {
   });
 
   it("every COPY source of every engine Dockerfile is an input (the build reads nothing the gate ignores)", () => {
-    for (const id of ENGINE_IDS) {
+    // the unpublished ADR-0242 images too: CI builds them twice and compares, so their inputs must be whole
+    for (const id of REPRO_ENGINE_IDS) {
       const covered = new Set(repoGit(["ls-files", "--", ...inputPathspecs(id, pkgs)]).split("\n").filter(Boolean));
       const dockerfile = readFileSync(path.join(ROOT, `engines/${id}/Dockerfile`), "utf8");
       const sources = [];
@@ -205,13 +206,19 @@ describe("ENG-IMG publish gate: the decision, on a throwaway repository", () => 
 });
 
 describe("ADR-0242 unpublished engines", () => {
-  it("have image inputs (their own directory, no workspace package) but are never planned for publish", () => {
+  it("have image inputs (their own directory and the shared admission-scan shim) but are never planned for publish", () => {
     expect(UNPUBLISHED_ENGINE_IDS).toEqual(["mcpscanner", "skillscanner"]);
+    const pkgs = readWorkspace();
     for (const id of UNPUBLISHED_ENGINE_IDS) {
       const specs = specsFor(id);
       expect(specs).toContain(`engines/${id}`);
-      expect(specs.some((s) => s.startsWith("packages/"))).toBe(false);
+      // ADR-0242 §6.1: the runner and task shim both images build
+      expect(workspaceClosure(id, pkgs)).toEqual(["packages/engine-admission-scan", "packages/engine-runner", "packages/shared"]);
+      for (const d of workspaceClosure(id, pkgs)) expect(specs).toContain(d);
       expect(ENGINE_IDS).not.toContain(id);
+      // never another engine's directory
+      const files = repoGit(["ls-files", "--", ...specs]).split("\n").filter(Boolean);
+      for (const other of REPRO_ENGINE_IDS.filter((o) => o !== id)) expect(files.filter((f) => f.startsWith(`engines/${other}/`))).toEqual([]);
     }
   });
 });
