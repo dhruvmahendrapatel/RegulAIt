@@ -635,6 +635,7 @@ import { registerEndpointImportRoutes } from "./endpoint-import-routes.js";
 import { registerThirdPartyIngestRoutes } from "./third-party-ingest-routes.js";
 import { registerSiemDeliveryRoutes } from "./siem-delivery.js";
 import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
+import { registerEndpointFleetRoutes } from "./endpoint-fleet-routes.js";
 import { registerEndpointMcpConfigRoutes } from "./endpoint-mcp-config.js";
 // ADR-0310 (G2): vendor-native managed settings bundles
 import { registerManagedSettingsRoutes } from "./managed-settings.js";
@@ -6252,6 +6253,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0259 (P35) — the MCP servers enrolled devices' host configs name, with the registry diff, and the admin's
   // links to approved servers. Admin-only by default; reads what the agent reports, contacts nothing.
   registerEndpointMcpConfigRoutes(app, db);
+  // ADR-0360 (lane E41): device groups, the self-update setting (off unless relaxed with a step-up), staged update
+  // rollouts and one-line enrolment tokens. Admin-only by default; every write audited.
+  registerEndpointFleetRoutes(app, db);
   registerManagedSettingsRoutes(app, db);
   // ADR-0332 (lane E14): the endpoint AI add-on inventory (admin-only, RLS: admins and system_task)
   registerEndpointAddonInventoryRoutes(app, db);
