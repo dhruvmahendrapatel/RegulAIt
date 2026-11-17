@@ -32,10 +32,13 @@ import { z } from "zod";
 import { auditLog, sql, type Db, type SQL } from "@regulait/db";
 import { evaluateReportAccess } from "@regulait/shared";
 import {
-  initialState,
-  transition,
+  isTerminalStatus,
+  replayHistory,
+  REPLAY_EVENTS_MAX,
   type InstanceState,
   type InstanceStatus,
+  type ReplayEvent,
+  type TerminalStatus,
   type WorkflowDefinition,
   type WorkflowEvent,
 } from "@regulait/workflow-kernel";
@@ -49,13 +52,10 @@ const DAY_MS = 86_400_000;
 export const PROCESS_ANALYTICS_PROJECTOR_JOB_NAME = "process-analytics-projector";
 /** instances rebuilt per pass; the rest wait for the next pass (oldest change first) */
 export const PROJECTION_BATCH_MAX = 500;
-/** an instance with more history than this is marked `too_long` and excluded rather than replayed */
-export const PROJECTION_EVENTS_MAX = 5000;
-/** events sharing one timestamp (one transaction) are re-ordered at most this far before the replay gives up */
-const TIE_GROUP_MAX = 8;
+/** an instance with more history than the kernel replays is marked `too_long` and excluded */
+export const PROJECTION_EVENTS_MAX = REPLAY_EVENTS_MAX;
 
-const TERMINAL: ReadonlySet<InstanceStatus> = new Set(["completed", "aborted", "denied", "rolled_back"]);
-/** the engine is executing the stage, or it is queued for an executor */
+/** analytics policy: the engine is executing the stage, or it is queued for an executor (everything else is wait) */
 const WORK: ReadonlySet<InstanceStatus> = new Set(["running", "awaiting_execution"]);
 
 export const BASIS =
@@ -67,13 +67,8 @@ export const BASIS =
   "templates counts under each.";
 
 // ---------------------------------------------------------------------------
-// The replay (pure)
+// Spans from the kernel's replay (analytics policy only; ordering and divergence are the kernel's `replayHistory`)
 // ---------------------------------------------------------------------------
-
-export interface HistoryEvent {
-  event: WorkflowEvent;
-  at: Date;
-}
 
 export interface ReplaySpan {
   seq: number;
@@ -87,83 +82,35 @@ export interface ReplaySpan {
   exitKind: "advanced" | "reworked" | "ended" | null;
 }
 
-export type ReplayResult =
+export type StageAnalytics =
   | {
       status: "ok";
       spans: ReplaySpan[];
       startedAt: Date;
       endedAt: Date | null;
-      terminalStatus: InstanceStatus | null;
+      terminalStatus: TerminalStatus | null;
       lastEventAt: Date;
     }
-  | { status: "diverged"; reason: string };
-
-function sameState(a: InstanceState, b: InstanceState): boolean {
-  return (
-    a.status === b.status &&
-    a.currentStageIndex === b.currentStageIndex &&
-    JSON.stringify(a.stageStatuses) === JSON.stringify(b.stageStatuses)
-  );
-}
+  | { status: "diverged"; reason: string }
+  | { status: "too_long" };
 
 /**
- * Order the history so the kernel accepts every event and ends at `stored`. Events are taken in time order; events
- * sharing one timestamp (written in one transaction, where `now()` is the transaction start) are tried in their
- * stored order first and re-ordered only if the kernel refuses that order. Returns the accepted order or null.
- */
-function acceptedOrder(def: WorkflowDefinition, history: HistoryEvent[], stored: InstanceState): HistoryEvent[] | null {
-  const groups: HistoryEvent[][] = [];
-  for (const h of history) {
-    const last = groups[groups.length - 1];
-    if (last && last[0]!.at.getTime() === h.at.getTime()) last.push(h);
-    else groups.push([h]);
-  }
-  let budget = 10_000;
-  const out: HistoryEvent[] = [];
-  const walk = (gi: number, state: InstanceState, rest: HistoryEvent[]): boolean => {
-    if (budget-- <= 0) return false;
-    if (rest.length === 0) {
-      if (gi === groups.length) return sameState(state, stored);
-      const g = groups[gi]!;
-      if (g.length > TIE_GROUP_MAX) return false;
-      return walk(gi + 1, state, g);
-    }
-    for (let i = 0; i < rest.length; i++) {
-      let next: InstanceState;
-      try {
-        next = transition(def, state, rest[i]!.event).state;
-      } catch {
-        continue;
-      }
-      out.push(rest[i]!);
-      if (walk(gi, next, [...rest.slice(0, i), ...rest.slice(i + 1)])) return true;
-      out.pop();
-      if (budget <= 0) return false;
-    }
-    return false;
-  };
-  return walk(0, initialState(def), []) ? out : null;
-}
-
-/**
- * Replay one instance's history into stage spans. Between two events the instance holds the status and stage the
+ * Turn an instance's history into stage spans. Between two events the instance holds the status and stage the
  * earlier event left it in; that interval is wait or work time of the span it falls in. A span ends when the instance
- * moves to another stage (`advanced` forward, `reworked` backward), re-runs a failed check (`reworked`) or reaches a
- * terminal status (`ended`). A re-opened terminal instance is open again.
+ * moves to another stage (`advanced` forward, `reworked` backward), re-runs a failed check or is re-opened
+ * (`reworked`), or reaches a terminal status (`ended`). A re-opened terminal instance is open again.
  */
-export function replayHistory(def: WorkflowDefinition, history: HistoryEvent[], stored: InstanceState): ReplayResult {
-  if (history.length === 0) return { status: "diverged", reason: "no events" };
-  const ordered = acceptedOrder(def, history, stored);
-  if (!ordered) return { status: "diverged", reason: "the kernel did not reproduce the stored state from this history" };
+export function stageAnalyticsFromHistory(def: WorkflowDefinition, history: readonly ReplayEvent[], stored: InstanceState): StageAnalytics {
+  const replay = replayHistory(def, history, stored);
+  if (replay.status === "too_long") return { status: "too_long" };
+  if (replay.status === "diverged") return replay;
 
   const spans: ReplaySpan[] = [];
   const visits = new Map<string, number>();
-  let state = initialState(def);
   let cur: ReplaySpan | null = null;
   let curIndex = -1;
-  let lastAt = ordered[0]!.at;
   let endedAt: Date | null = null;
-  let terminalStatus: InstanceStatus | null = null;
+  let terminalStatus: TerminalStatus | null = null;
 
   const close = (at: Date, kind: "advanced" | "reworked" | "ended") => {
     if (!cur) return;
@@ -182,38 +129,37 @@ export function replayHistory(def: WorkflowDefinition, history: HistoryEvent[], 
     spans.push(cur);
   };
 
-  for (const h of ordered) {
-    const elapsed = Math.max(0, h.at.getTime() - lastAt.getTime());
+  let lastAt = replay.steps[0]!.at;
+  for (const step of replay.steps) {
+    const elapsed = Math.max(0, step.at.getTime() - lastAt.getTime());
     if (cur && elapsed > 0) {
       const span: ReplaySpan = cur;
-      if (WORK.has(state.status)) span.workMs += elapsed;
+      if (WORK.has(step.before.status)) span.workMs += elapsed;
       else span.waitMs += elapsed;
     }
-    lastAt = h.at;
-    const prior = state;
-    state = transition(def, state, h.event).state;
-
-    if (TERMINAL.has(state.status)) {
-      close(h.at, "ended");
-      endedAt = h.at;
-      terminalStatus = state.status;
+    lastAt = step.at;
+    const after = step.after;
+    if (isTerminalStatus(after.status)) {
+      close(step.at, "ended");
+      endedAt = step.at;
+      terminalStatus = after.status;
       continue;
     }
-    if (TERMINAL.has(prior.status)) {
+    if (isTerminalStatus(step.before.status)) {
       endedAt = null;
       terminalStatus = null;
     }
-    const index = state.currentStageIndex;
-    if (cur === null) open(index, h.at);
+    const index = after.currentStageIndex;
+    if (cur === null) open(index, step.at);
     else if (index !== curIndex) {
-      close(h.at, index < curIndex ? "reworked" : "advanced");
-      open(index, h.at);
-    } else if (h.event.kind === "recheck" || h.event.kind === "reopen") {
-      close(h.at, "reworked");
-      open(index, h.at);
+      close(step.at, index < curIndex ? "reworked" : "advanced");
+      open(index, step.at);
+    } else if (step.event.kind === "recheck" || step.event.kind === "reopen") {
+      close(step.at, "reworked");
+      open(index, step.at);
     }
   }
-  return { status: "ok", spans, startedAt: ordered[0]!.at, endedAt, terminalStatus, lastEventAt: lastAt };
+  return { status: "ok", spans, startedAt: replay.steps[0]!.at, endedAt, terminalStatus, lastEventAt: lastAt };
 }
 
 // ---------------------------------------------------------------------------
@@ -268,10 +214,9 @@ export async function projectProcessAnalytics(db: Db, opts: { limit?: number } =
     ).rows.map((r) => ({ event: r.event, at: new Date(r.at) }));
     if (events.length === 0) continue; // being created: the next pass sees its start event
 
-    const tooLong = events.length > PROJECTION_EVENTS_MAX;
-    const replay = tooLong ? null : replayHistory(c.definition, events, c.state);
-    const ok = replay?.status === "ok" ? replay : null;
-    const replayStatus = tooLong ? "too_long" : ok ? "ok" : "diverged";
+    const replay = stageAnalyticsFromHistory(c.definition, events, c.state);
+    const ok = replay.status === "ok" ? replay : null;
+    const replayStatus = replay.status;
     const templateIds = Array.isArray(c.template_ids) ? c.template_ids.filter((t) => typeof t === "string") : [];
 
     await db.transaction(async (tx) => {

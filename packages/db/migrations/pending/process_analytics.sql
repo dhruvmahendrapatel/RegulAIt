@@ -12,6 +12,7 @@
 --   - every write: an admin (the audited refresh route) or `system_task` (the scheduler) only.
 -- A transaction with no principal and no system context sees zero rows. No functions or triggers.
 
+-- The terminal-status CHECK below repeats TERMINAL_STATUSES from @regulait/workflow-kernel; keep the two equal.
 CREATE TABLE IF NOT EXISTS "process_analytics_instances" (
   "instance_id" uuid PRIMARY KEY NOT NULL REFERENCES "workflow_instances"("id") ON DELETE CASCADE,
   "project_id" uuid REFERENCES "projects"("id") ON DELETE SET NULL,

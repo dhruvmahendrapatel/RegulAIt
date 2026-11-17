@@ -45,6 +45,13 @@ else. No new dependency.
    events it is `too_long`. Either way it has no spans and every response counts it under `excluded`, so no figure
    is built on a history we could not reproduce.
 
+   The replayer is pure and lives in the kernel (`packages/workflow-kernel/src/replay.ts`, `replayHistory`): events in,
+   `ok` with every step's state before and after, or `diverged`, or `too_long`. It owns the ordering and divergence
+   rules, so every consumer (these analytics, lane E30's CI replay check) applies the same ones. Analytics policy (wait
+   vs work, span exits) stays in the gateway. The kernel also declares the one terminal-status set
+   (`TERMINAL_STATUSES`, `isTerminalStatus`), which the kernel's own checks and the analytics import; the migration's
+   SQL CHECK repeats it and says so.
+
 2. **Spans, wait and work.** Between two events the instance holds the status and stage the earlier event left it in.
    That interval belongs to the span of that stage visit and is:
    - **wait** when the status needs a person or an outside party (`blocked_on_approval`, `blocked_on_artifact`,

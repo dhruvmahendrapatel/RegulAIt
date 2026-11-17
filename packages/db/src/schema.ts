@@ -17064,6 +17064,7 @@ export const processAnalyticsInstances = pgTable(
   (t) => [
     check("process_analytics_instances_replay_check", sql`${t.replayStatus} IN ('ok','diverged','too_long')`),
     check("process_analytics_instances_ended_check", sql`(${t.endedAt} IS NULL) = (${t.terminalStatus} IS NULL)`),
+    // repeats TERMINAL_STATUSES from @regulait/workflow-kernel (the one declared set); keep the two equal
     check(
       "process_analytics_instances_terminal_check",
       sql`${t.terminalStatus} IS NULL OR ${t.terminalStatus} IN ('completed','aborted','denied','rolled_back')`,

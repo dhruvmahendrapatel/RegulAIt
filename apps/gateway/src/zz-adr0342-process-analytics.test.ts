@@ -39,7 +39,7 @@ import {
 } from "@regulait/db";
 import { initialState, transition, validateDefinition, type InstanceState, type WorkflowEvent } from "@regulait/workflow-kernel";
 import { buildApp } from "./app.js";
-import { projectProcessAnalytics, replayHistory } from "./process-analytics.js";
+import { projectProcessAnalytics, stageAnalyticsFromHistory } from "./process-analytics.js";
 import { schedulerJobRegistry, SCHEDULER_JOB_NAMES } from "./scheduler-jobs.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { useTestIssuerKey } from "./testing/workload-client.js";
@@ -200,7 +200,7 @@ afterAll(async () => {
 
 describe("ADR-0342: the replay", () => {
   it("splits each stage visit into wait and work and marks the rework exit", () => {
-    const r = replayHistory(DEF, HISTORY, finalState(HISTORY));
+    const r = stageAnalyticsFromHistory(DEF, HISTORY, finalState(HISTORY));
     expect(r.status).toBe("ok");
     if (r.status !== "ok") return;
     expect(r.spans.map((s) => [s.stageId, s.visit, s.waitMs / MIN, s.workMs / MIN, s.exitKind])).toEqual([
@@ -221,9 +221,9 @@ describe("ADR-0342: the replay", () => {
       { event: { kind: "artifact_submitted", stageId: "req" } as WorkflowEvent, at: at(5) },
     ];
     const stored = finalState([tied[0]!, tied[2]!, tied[1]!]);
-    expect(replayHistory(DEF, tied, stored).status).toBe("ok");
-    expect(replayHistory(DEF, HISTORY.slice(0, 2), finalState(HISTORY)).status).toBe("diverged");
-    expect(replayHistory(DEF, [], initialState(DEF)).status).toBe("diverged");
+    expect(stageAnalyticsFromHistory(DEF, tied, stored).status).toBe("ok");
+    expect(stageAnalyticsFromHistory(DEF, HISTORY.slice(0, 2), finalState(HISTORY)).status).toBe("diverged");
+    expect(stageAnalyticsFromHistory(DEF, [], initialState(DEF)).status).toBe("diverged");
   });
 });
 
