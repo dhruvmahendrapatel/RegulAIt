@@ -645,7 +645,7 @@ export async function runEvalSuite(
     if (started.runId) {
       await db
         .update(evalRuns)
-        .set({ status: "error", error: (err instanceof Error ? err.message : String(err)).slice(0, 2000), finishedAt: new Date() })
+        .set({ status: "error", error: errMessage(err).slice(0, 2000), finishedAt: new Date() })
         .where(and(eq(evalRuns.id, started.runId), whereFrom(evalRuns.status, EVAL_RUN_MACHINE, "crash")))
         .catch(() => undefined); // the original failure is the one to report
     }
