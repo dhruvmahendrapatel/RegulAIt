@@ -85,7 +85,7 @@ spec:
 | `GET /v1/governance-config/schema` | The JSON Schema of the document | admin |
 | `GET /v1/governance-config/export?format=yaml\|json` | The live configuration as a document, with `metadata.revision` | admin; audited |
 | `POST /v1/governance-config/plan` | The dry run: parse, validate, resolve names, diff against live, classify each change, return the plan and its `planHash`. Writes nothing | admin; audited |
-| `POST /v1/governance-config/apply` | Re-plans under the lock, refuses unless the `planHash` matches the one sent, then writes every change in one transaction | admin + step-up; audited |
+| `POST /v1/governance-config/apply` | Re-plans under the lock, refuses unless the `planHash` matches the one sent, then writes every change in one transaction | admin + `settings_relax` step-up; audited |
 
 - **Apply always runs the dry run first.** Apply takes the document and the `planHash` the caller reviewed. It
   re-computes the plan inside the transaction, holding an advisory lock; if the live configuration moved since the
@@ -93,13 +93,15 @@ spec:
   reviewed (the Terraform saved-plan property).
 - **All or nothing.** One transaction. Any refusal, unresolved reference, validation error or database error rolls
   back every change.
-- **Step-up, always.** Apply needs a step-up of the new kind `governance_apply`, bound to `{planHash}`. An API key, a
-  bootstrap token or a bulk call can never apply (they can never pass a step-up). Like every step-up kind it is in
-  `org_settings.step_up_actions` by default, and removing it is itself a `settings_relax` relaxation (ADR-0180).
-- **Widening needs the relaxation path the UI uses.** The plan marks every change `widens`, `narrows` or `neutral`.
-  When any change widens, apply also needs a `settings_relax` step-up bound to
-  `{op: "governance_config_apply", planHash, widenings}`, the same kind the UI's grant mint (ADR-0250), revocation
-  lift and settings relax use. There is no apply flag that skips it.
+- **Step-up, always, on the relaxation path the UI uses.** Apply needs a `settings_relax` step-up bound to
+  `{op: "governance_config_apply", planHash, widenings}`: the same kind the UI's grant mint (ADR-0250), revocation
+  lift and settings relax use, bound to exactly the plan reviewed and the list of changes in it that widen (empty when
+  none does). The plan marks every change `widens`, `narrows` or `neutral`, and the widenings are what the person
+  approving sees. There is no apply flag that skips it. An API key, a bootstrap token or a bulk call can never pass a
+  step-up, so none of them can apply. We do not add a step-up kind of its own: every kind is pinned in three CHECK
+  constraints that a migration must rewrite whole, and two lanes rewriting them at once lose one another's kind with
+  no merge conflict. A tightening-only apply still needs the step-up, because pruning and replacing are reviewed as
+  one act.
 - **Audited.** Export and plan write one audit row each. Apply writes one row for the apply (plan hash, revision,
   counts) and one row per changed object, in the transaction, so a rolled-back apply leaves only its refusal row.
 - **Prune within a section.** A section present in the file is the full desired state of that section: an object
@@ -145,14 +147,13 @@ lowers a limit) or `neutral` (a description).
 
 - An org can keep its governance in Git, review a change as a diff, and promote it between deployments. The plan is
   the review artifact; apply cannot write anything other than what the plan showed.
-- Applying a file is never a quieter path to wider access: widening needs the same `settings_relax` step-up as the
-  UI, and apply always needs its own step-up.
+- Applying a file is never a quieter path to wider access: every apply needs the same `settings_relax` step-up as
+  the UI, bound to the plan and its widenings.
 - Pruning within a present section is powerful. A file that omits a role deletes it. The plan lists every deletion,
   and the step-up is bound to that plan.
 - Each section's writer in apply reuses the stores the UI writes (the role-grant tables, `rate_limits`, the
   append-only `mcp_bundle_versions`, `workflow_template_versions` with `origin`, the project budget columns). It
   does not add a parallel store.
-- **Slicing.** Slice 1a: this ADR, the document schema, export and plan. Slice 1b: apply, the `governance_apply`
-  step-up kind and its migration. Slice 2: business units, policy layers, the merge table and the effective view.
+- **Slicing.** Slice 1a: this ADR, the document schema, export and plan. Slice 1b: apply (no migration). Slice 2: business units, policy layers, the merge table and the effective view.
 - **Follow-ups:** user-scoped and model rate limits, ABAC policies, approval rules and compliance profiles as further
   sections; a signed export (ADR-0310 bundles) for air-gapped promotion; the UI for plan review (#453).

@@ -7,5 +7,5 @@
   `@regulait/shared` (`governance-config.ts`); `GET /v1/governance-config/schema`, `GET …/export` (YAML or JSON) and
   `POST …/plan` (the dry run: resolve names, diff, classify, `planHash`; writes nothing; YAML anchors refused) are in
   `apps/gateway/src/governance-config.ts`. Audited under the new `governance_config` object type. No migration.
-- **Next:** slice 1b (apply: all-or-nothing, bound to the `planHash`, the `governance_apply` step-up, widenings through
-  `settings_relax`); slice 2 (business units, tighten-only policy layers, the merge table, the effective-policy view).
+- **Next:** slice 1b (apply: all-or-nothing, bound to the `planHash`, one `settings_relax` step-up
+  bound to the plan and its widenings); slice 2 (business units, tighten-only policy layers, the merge table, the effective-policy view).
