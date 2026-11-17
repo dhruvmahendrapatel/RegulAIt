@@ -48,6 +48,25 @@ open.
 
    `--write` adds the missing ceilings at size plus headroom and drops stale ones. It never changes an existing limit.
 
+### Open-source options considered (ADR-0176)
+
+Searched in the repo and on npm on 2026-11-17. The repo already runs size-limit, and the ADR-0196 baseline guard protects
+its ceilings. Every option below is MIT-licensed.
+
+| Option | Release | Fit |
+|---|---|---|
+| **size-limit** 14.3.0 (in use) | 2026-10-22 | Supports per-entry ceilings, so it measures each `chunk:` entry. It sums every file a path matches and does not report a file that no entry covers. |
+| bundlewatch 1.2.0 | 2026-11-05 | Applies a glob's `maxSize` to each file it matches: one size for every chunk, not one per route. Its baselines and PR statuses use bundlewatch.io and a GitHub token, which do not work air-gapped. It does not report an uncovered file. |
+| bundlesize 0.18.2 | 2024-03-15 | Has had no release in more than 12 months, so it fails the ADR-0176 maintenance rule. bundlewatch is its successor. |
+| vite-plugin-bundlesize 0.3.0 | 2025-08-29 | Applies the first matching glob's limit to each chunk. A catch-all `**/*` gives every unlisted chunk one shared size, so a new chunk is never refused. It would be a second source of ceilings beside size-limit, which the ADR-0196 guard refuses. |
+| Vite `build.chunkSizeWarningLimit` | n/a | One uncompressed warning size for every chunk. It never fails the build. |
+| rollup-plugin-visualizer 7.1.3 | 2026-11-08 | Draws the bundle. It enforces nothing. |
+
+None of them fails when an emitted chunk has no ceiling of its own, and that check is the core of this decision. So we
+keep size-limit for measuring and enforcing, which reuses the existing guard and `CEILING_EXCEPTIONS`. Under ADR-0176
+rule 4, the only code we write is the coverage check and the `--write` helper in `scripts/ui-chunk-budgets.mjs`. They
+use only Node built-ins, and `--write` measures with the same gzip level 9 that size-limit uses.
+
 ### What is not done here
 
 The removal of `all JS` (the `all JS` ceiling is removed once the owner lands the guard change) needs one change in
