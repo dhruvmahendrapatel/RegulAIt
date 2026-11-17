@@ -33,6 +33,7 @@ import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { grantStepUpForTest, sessionRequest, stepUpRequest } from "./testing/step-up-grant.js";
 import type { StepUpCheckArgs } from "./step-up.js";
 import { RULE_STEP_AUDIT_RULE_IDS } from "./rule-steps.js";
+import { pruneRuleStepSuggestions } from "./rule-step-retention.js";
 import { induceStepRule, type StepRun } from "@regulait/optimizer-kernel";
 import { induceStepRuleOffThread } from "@regulait/optimizer-kernel/offload";
 
@@ -230,5 +231,35 @@ describe("ADR-0327 induction off the event loop (review #862)", () => {
 
   it("rejects when the worker runs past its time limit, so no partial rule is ever used", async () => {
     await expect(induceStepRuleOffThread(heavy(), {}, { timeoutMs: 1 })).rejects.toThrow(/timed out/);
+  });
+});
+
+describe("ADR-0327 suggestions follow the §8.3 retention floor (slice 3)", () => {
+  it("deletes a suggestion whose scan window starts before the cutoff, even one detected inside the floor (review #901)", async () => {
+    const row = (stepName: string) => ({
+      agentId,
+      stepName,
+      rule: { fields: ["severity"], cells: [{ key: ["high"], output: "on-call", support: 9 }] },
+      runs: 9,
+      structuredRuns: 9,
+      outputClasses: 1,
+      agreement: 1,
+      coverage: 1,
+      windowCostUsd: 0.1,
+      projectedMonthlySavingsUsd: 0.1,
+    });
+    // a 60-day floor; the scan window is 30 days
+    const cutoff = new Date(Date.now() - 60 * 86_400_000);
+    const at = async (name: string, daysAgo: number) =>
+      (await db
+        .insert(ruleStepSuggestions)
+        .values({ ...row(`${name}-${Date.now()}`), detectedAt: sql`now() - make_interval(days => ${daysAgo})` })
+        .returning({ id: ruleStepSuggestions.id }))[0]!.id;
+    const old = await at("retention-old", 70); // detected before the cutoff
+    const straddling = await at("retention-straddling", 45); // detected inside the floor, window starts 75 days ago
+    const fresh = await at("retention-fresh", 0); // window starts 30 days ago, inside the floor
+    expect(await pruneRuleStepSuggestions(db, cutoff)).toBeGreaterThanOrEqual(2);
+    const left = await db.select({ id: ruleStepSuggestions.id }).from(ruleStepSuggestions).where(inArray(ruleStepSuggestions.id, [old, straddling, fresh]));
+    expect(left.map((x) => x.id)).toEqual([fresh]);
   });
 });
