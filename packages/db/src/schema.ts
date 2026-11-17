@@ -165,6 +165,7 @@ import {
   FAIRNESS_DATASET_KINDS,
   FAIRNESS_RUN_MODES,
   FAIRNESS_BREACH_REVIEW_STATUSES,
+  FAIRNESS_EVALUATION_STATUSES,
 } from "@regulait/shared";
 import {
   type AnyPgColumn,
@@ -17161,8 +17162,6 @@ export const fairnessDatasetInputColumns = pgTable(
     check("fairness_dataset_input_columns_name_check", sql`char_length(${t.columnName}) BETWEEN 1 AND 200`),
   ],
 );
-
-export const FAIRNESS_EVALUATION_STATUSES = ["active", "archived"] as const;
 
 /** ADR-0346 decision 1: one fairness evaluation definition on one model card */
 export const fairnessEvaluations = pgTable(

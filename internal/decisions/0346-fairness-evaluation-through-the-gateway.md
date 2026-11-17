@@ -44,6 +44,9 @@ card's sign-off (draft → pending → approved), so that sign-off is the promot
 |---|---|---|---|
 | fairlearn 0.15.0 (PyPI) | MIT | 2026-10-12 | **Chosen** for the engine: maintained, MIT, wheel-only (`py3-none-any`), its closure (numpy, pandas, scipy, scikit-learn, narwhals) is BSD/MIT/Apache and installs offline from a hash-pinned lockfile |
 | aif360 0.6.1 (PyPI) | Apache-2.0 | 2024-04-08 | Rejected: no release in the last 12 months (ADR-0176 rule 3), and its base install pulls matplotlib |
+| aequitas 1.1.0 (PyPI) | not declared in the package metadata | 2026-02-03 | Rejected: licence not stated in the release metadata (ADR-0176 needs it verified), and it is an audit-report toolkit rather than a metric library |
+| fairness-indicators 0.52.0 (PyPI) | Apache-2.0 | 2026-07-10 | Rejected: built on TensorFlow Model Analysis, a far larger closure for the same four metrics |
+| GitHub search "fairness metrics machine learning" (by stars) | — | — | Trusted-AI/AIF360 is the only maintained library in the top results (the repository is active, its PyPI release is not); the rest are demos and papers |
 | npm search "fairness metrics", "fairlearn", "demographic parity" | — | — | Nothing maintained and relevant (as ADR-0222 found on 2026-10-30) |
 
 ## Decision
@@ -159,6 +162,8 @@ card's sign-off (draft → pending → approved), so that sign-off is the promot
 - The content-credential guard (ADR-0233) covers `fairness_evaluations.name` and
   `fairness_dataset_input_columns.column_name` (which has a surrogate `id` for the guard's report); the signed
   evidence body is excluded as `signed_evidence`. ADR-0233's generated inventory is regenerated.
+- The two status fields have one declared lifecycle each (`FAIRNESS_BREACH_REVIEW_TRANSITIONS`,
+  `FAIRNESS_EVALUATION_TRANSITIONS`, checked with `lifecycleAllows`); slice 3's write paths use them.
 - `rule-loosening.ts` classifies `fairness_gate_required` true → false/NULL as a loosening.
 - A card whose runs carry signed evidence cannot be deleted (RESTRICT). No evidence row is written until slice 2,
   which makes the card delete route refuse it with a named 409.

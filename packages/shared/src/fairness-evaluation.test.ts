@@ -21,6 +21,10 @@ import {
   parsePromptTemplate,
   templateColumns,
   unparseableOverCap,
+  FAIRNESS_BREACH_REVIEW_STATUSES,
+  FAIRNESS_BREACH_REVIEW_TRANSITIONS,
+  FAIRNESS_EVALUATION_TRANSITIONS,
+  lifecycleAllows,
   type GateCandidateRun,
 } from "./fairness-evaluation.js";
 
@@ -189,5 +193,23 @@ describe("breaches and the promotion gate", () => {
     const lapsed = { status: "accepted" as const, acceptedUntil: new Date(now.getTime() - 1) };
     expect(gate(run({ outcome: "flag", review: lapsed }))).toEqual({ allowed: false, reason: "breach_not_accepted" });
     expect(breachAcceptanceInForce({ status: "rejected", acceptedUntil: null }, now)).toBe(false);
+  });
+});
+
+describe("the declared lifecycles (rule 12)", () => {
+  it("a breach review starts pending, is decided once, and only supersession follows an acceptance", () => {
+    const T = FAIRNESS_BREACH_REVIEW_TRANSITIONS;
+    expect(Object.keys(T).sort()).toEqual([...FAIRNESS_BREACH_REVIEW_STATUSES].sort());
+    expect(lifecycleAllows(T, "pending", "accepted")).toBe(true);
+    expect(lifecycleAllows(T, "pending", "rejected")).toBe(true);
+    expect(lifecycleAllows(T, "accepted", "superseded")).toBe(true);
+    expect(lifecycleAllows(T, "accepted", "rejected")).toBe(false);
+    expect(lifecycleAllows(T, "rejected", "accepted")).toBe(false);
+    expect(lifecycleAllows(T, "superseded", "pending")).toBe(false);
+    expect(lifecycleAllows(T, "pending", "pending")).toBe(false);
+  });
+  it("archiving an evaluation is final", () => {
+    expect(lifecycleAllows(FAIRNESS_EVALUATION_TRANSITIONS, "active", "archived")).toBe(true);
+    expect(lifecycleAllows(FAIRNESS_EVALUATION_TRANSITIONS, "archived", "active")).toBe(false);
   });
 });
