@@ -384,6 +384,11 @@ export interface BuildAppOptions {
    * both unset, so the real DNS-pinned guarded fetch is used. */
   trainedDetectorResolve?: import("./egress-guard.js").EgressResolver;
   trainedDetectorFetch?: typeof fetch;
+  /** ADR-0361 test seams: the transport the AI SaaS monitor's guarded fetch sends through, its pinned DNS, and the
+   * connector registry (production: `AI_SAAS_CONNECTORS`) */
+  aiSaasMonitorFetch?: typeof fetch;
+  aiSaasMonitorResolve?: import("./egress-guard.js").EgressResolver;
+  aiSaasMonitorConnectors?: import("./ai-saas-monitor.js").AiSaasMonitorDeps["connectors"];
   /** ADR-0031: which peers may speak for the client via X-Forwarded-*.
    * Defaults to REGULAIT_TRUSTED_PROXIES (which itself defaults to trusting
    * nothing). Exposed so a test can assert both directions. */
@@ -641,6 +646,7 @@ import { registerManagedSettingsRoutes } from "./managed-settings.js";
 import { registerEndpointAddonInventoryRoutes } from "./endpoint-addon-inventory.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
 import { registerCostImportRoutes } from "./cost-import.js";
+import { registerAiSaasMonitorRoutes } from "./ai-saas-monitor.js";
 import { registerCostReconciliationRoutes } from "./cost-reconcile.js";
 import { registerTracingRoutes } from "./tracing.js";
 import { registerCompliancePackRoutes } from "./compliance-packs.js";
@@ -6265,6 +6271,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // under a CHECK that pins `basis = 'imported'`, so nothing it writes can ever
   // be read back as metered.
   registerCostImportRoutes(app, db);
+  // ADR-0361 — read-only monitoring of sanctioned AI SaaS through vendor compliance APIs (off by default, refused when
+  // air-gapped). Admin-only by default (none of these routes is in NON_ADMIN_ROUTES); credentials are never returned.
+  registerAiSaasMonitorRoutes(app, db, {
+    dataKey: opts.dataKey,
+    deps: {
+      ...(opts.aiSaasMonitorFetch ? { fetchImpl: opts.aiSaasMonitorFetch, minSpacingMs: 0 } : {}),
+      ...(opts.aiSaasMonitorResolve ? { resolve: opts.aiSaasMonitorResolve } : {}),
+      ...(opts.aiSaasMonitorConnectors ? { connectors: opts.aiSaasMonitorConnectors } : {}),
+    },
+  });
   // ADR-0076 — COST RECONCILIATION. Admin-only through the default gate: the
   // "run now" endpoint and the health/report read. Marks (never deletes)
   // cross-batch duplicate imported lines so a consolidated read cannot count

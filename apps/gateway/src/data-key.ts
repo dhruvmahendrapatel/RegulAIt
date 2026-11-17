@@ -289,6 +289,9 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   // ADR-0195 SD0 (migration 0202): a discovery source's static scanner secret (never returned), the per-tenant
   // pseudonym HMAC key, and the display names behind pseudonyms
   { table: "discovery_credentials", column: "secret_ciphertext", what: "discovery scanner credentials" },
+  // ADR-0361: an AI SaaS monitor connector's vendor secret (never returned) and an interaction's redacted text copy
+  { table: "ai_saas_monitor_credentials", column: "secret_ciphertext", what: "AI SaaS monitor credentials (ADR-0361)" },
+  { table: "ai_saas_interactions", column: "content_ciphertext", what: "AI SaaS interaction redacted text (ADR-0361)" },
   { table: "discovery_pseudonym_keys", column: "key_ciphertext", what: "the discovery pseudonym key" },
   { table: "discovery_pseudonyms", column: "display_name_ciphertext", what: "discovery pseudonym display names" },
   // ADR-0193 decision 3 (migration 0206): the per-tenant HMAC key of keyed (pii) content digests
