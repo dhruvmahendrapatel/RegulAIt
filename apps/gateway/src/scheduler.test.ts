@@ -818,6 +818,9 @@ describe("every sweep is registered", () => {
         // ADR-0322: vendor usage/cost pull from enabled connectors; driven end to end in
         // zz-adr0322-vendor-usage-pull.test.ts (with the org policy off, the default, it pulls nothing)
         SCHEDULER_JOB_NAMES.vendorUsagePullSweep,
+        // ADR-0342 (lane E23): rebuilds the process analytics read model from the workflow history; driven end to end
+        // in zz-adr0342-process-analytics.test.ts (reads workflow state only)
+        SCHEDULER_JOB_NAMES.processAnalyticsProjector,
       ].sort(),
     );
     const discovery = registry.get(SCHEDULER_JOB_NAMES.discoveryScanSweep)!;
