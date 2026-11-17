@@ -2008,6 +2008,10 @@ export const auditLog = pgTable(
         "auditor_grant",
         // ADR-0310 (G2): a signed managed-settings bundle export (objectId = the bundle). Plain text column — no DDL.
         "managed_settings_bundle",
+        // ADR-0350 (lane E31): an endpoint device group (objectId = the group) and a per-device command-rule
+        // exception (objectId = the exception). Plain text column — no DDL.
+        "endpoint_device_group",
+        "endpoint_command_exception",
       ],
     })
       .notNull()
@@ -17139,3 +17143,123 @@ export const workflowTemplateVersions = pgTable(
 );
 export type WorkflowTemplateVersionRow = typeof workflowTemplateVersions.$inferSelect;
 // ===== end ADR-0341 =====
+
+// ===== ADR-0350 (lane E31): endpoint device groups and per-device command-rule exceptions (pending migration endpoint_command_exceptions) =====
+// Device groups only NARROW a person's on-device policy: their rules are ask or deny, never allow. An exception
+// relaxes one named rule on one device until `not_after`, after a step-up approval by someone other than the
+// requester, bound to the exact terms (`terms_digest`, the approvals queue's ADR-0104 binding). The lifecycle is the
+// table in @regulait/shared `ENDPOINT_EXCEPTION_TRANSITIONS`; `expired` is derived from `not_after`, never stored.
+// Admin-only (row-level security admits an admin principal, system tasks and migrations).
+
+export const endpointDeviceGroups = pgTable(
+  "endpoint_device_groups",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    description: text("description"),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("endpoint_device_groups_name_uq").on(t.name),
+    check("endpoint_device_groups_name_check", sql`length(${t.name}) BETWEEN 1 AND 120`),
+  ],
+);
+export type EndpointDeviceGroupRow = typeof endpointDeviceGroups.$inferSelect;
+
+/** A device's membership of a group (a join table: a device may be in several groups). */
+export const endpointDeviceGroupMembers = pgTable(
+  "endpoint_device_group_members",
+  {
+    groupId: uuid("group_id")
+      .notNull()
+      .references(() => endpointDeviceGroups.id, { onDelete: "cascade" }),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => endpointDevices.id, { onDelete: "cascade" }),
+    addedBy: uuid("added_by").references(() => users.id, { onDelete: "set null" }),
+    addedAt: timestamp("added_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.groupId, t.deviceId] }), index("endpoint_device_group_members_device_idx").on(t.deviceId)],
+);
+
+/**
+ * One narrowing rule of a group. `rule` is a schema-validated configuration document (ADR-0200 exception): the
+ * ADR-0350 §2 rule body for its kind (an exec argv, a file access and path, or a package ecosystem and name), checked
+ * by the route before it is written.
+ */
+export const endpointDeviceGroupRules = pgTable(
+  "endpoint_device_group_rules",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    groupId: uuid("group_id")
+      .notNull()
+      .references(() => endpointDeviceGroups.id, { onDelete: "cascade" }),
+    ruleId: text("rule_id").notNull(),
+    kind: text("kind", { enum: ["exec", "file", "package"] }).notNull(),
+    rule: jsonb("rule").notNull(),
+    verdict: text("verdict", { enum: ["ask", "deny"] }).notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("endpoint_device_group_rules_rule_uq").on(t.groupId, t.ruleId),
+    check("endpoint_device_group_rules_rule_id_check", sql`${t.ruleId} ~ '^[a-z0-9][a-z0-9._-]{0,63}$'`),
+    check("endpoint_device_group_rules_kind_check", sql`${t.kind} IN ('exec', 'file', 'package')`),
+    check("endpoint_device_group_rules_verdict_check", sql`${t.verdict} IN ('ask', 'deny')`),
+    check("endpoint_device_group_rules_rule_check", sql`jsonb_typeof(${t.rule}) = 'object'`),
+  ],
+);
+export type EndpointDeviceGroupRuleRow = typeof endpointDeviceGroupRules.$inferSelect;
+
+export const endpointCommandExceptions = pgTable(
+  "endpoint_command_exceptions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => endpointDevices.id, { onDelete: "cascade" }),
+    ruleId: text("rule_id").notNull(),
+    verdict: text("verdict", { enum: ["allow", "ask"] }).notNull(),
+    hours: integer("hours").notNull(),
+    reason: text("reason").notNull(),
+    /** the approvals queue's digest of the exact terms (ADR-0104): an approval names the digest it approves */
+    termsDigest: text("terms_digest").notNull(),
+    requestedBy: uuid("requested_by")
+      .notNull()
+      .references(() => users.id),
+    approverUserId: uuid("approver_user_id")
+      .notNull()
+      .references(() => users.id),
+    status: text("status", { enum: ["requested", "approved", "rejected", "cancelled", "revoked"] })
+      .notNull()
+      .default("requested"),
+    decidedBy: uuid("decided_by").references(() => users.id),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    decisionReason: text("decision_reason"),
+    notAfter: timestamp("not_after", { withTimezone: true }),
+    revokedBy: uuid("revoked_by").references(() => users.id),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("endpoint_command_exceptions_device_idx").on(t.deviceId, t.status),
+    check("endpoint_command_exceptions_rule_id_check", sql`${t.ruleId} ~ '^[a-z0-9][a-z0-9._-]{0,63}$'`),
+    check("endpoint_command_exceptions_verdict_check", sql`${t.verdict} IN ('allow', 'ask')`),
+    check("endpoint_command_exceptions_hours_check", sql`${t.hours} BETWEEN 1 AND 168`),
+    check("endpoint_command_exceptions_reason_check", sql`length(${t.reason}) BETWEEN 1 AND 500`),
+    check("endpoint_command_exceptions_digest_check", sql`${t.termsDigest} ~ '^[0-9a-f]{64}$'`),
+    check("endpoint_command_exceptions_status_check", sql`${t.status} IN ('requested', 'approved', 'rejected', 'cancelled', 'revoked')`),
+    // nobody approves their own exception
+    check("endpoint_command_exceptions_approver_check", sql`${t.approverUserId} <> ${t.requestedBy}`),
+    check("endpoint_command_exceptions_decider_check", sql`${t.decidedBy} IS NULL OR ${t.decidedBy} <> ${t.requestedBy} OR ${t.status} = 'cancelled'`),
+    check("endpoint_command_exceptions_revoked_check", sql`(${t.status} = 'revoked') = (${t.revokedAt} IS NOT NULL)`),
+    // an approved (or later revoked) exception always has an expiry, and it is at most `hours` after the decision
+    check(
+      "endpoint_command_exceptions_expiry_check",
+      sql`(${t.status} IN ('approved', 'revoked')) = (${t.notAfter} IS NOT NULL) AND (${t.notAfter} IS NULL OR ${t.notAfter} <= ${t.decidedAt} + make_interval(hours => ${t.hours}))`,
+    ),
+  ],
+);
+export type EndpointCommandExceptionRow = typeof endpointCommandExceptions.$inferSelect;
+// ===== end ADR-0350 =====
