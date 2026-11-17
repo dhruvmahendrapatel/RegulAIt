@@ -435,6 +435,12 @@ set by the image and validated, fail closed).
   `UNPUBLISHED_ENGINE_IDS`; publishing, the lock entries, compose services and the §6.4 sandbox-limit proof are later
   slices. The Dockerfile change has not been built locally (Docker Hub rate-limits this sandbox); CI's
   `engine-images-build` builds it twice and compares.
+- **Shared helpers, not copies (#874 review).** The job-directory exchange (`JobExchange`, `jobDirRunId`: staging,
+  rename to live, the cancel file, release, reconcile) and the worker self-test's generic part (the report file, its
+  maximum age, the runner credential's locations, the common report schema, the isolation failures) live in
+  `@regulait/engine-runner` (`src/job-exchange.ts`, `src/worker-selftest.ts`); the admission scan keeps only its done
+  file, task errors, offline switch and remote-analyzer check. garak, spikee, modelscan and promptfoo still carry their
+  own copies and move onto these helpers next (PENDING).
 
 ## Owner decisions (2026-11-15)
 

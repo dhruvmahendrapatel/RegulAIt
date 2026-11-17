@@ -13,18 +13,21 @@
  *   4. the runner reads the report, checks it against done.json's sha256 and the gateway's raw-report cap, and
  *      removes its job.
  *
+ * The job-directory mechanics (staging → live, the cancel file, the poll, release, reconcile) are engine-runner's shared
+ * `JobExchange`; this module keeps what is the admission scan's own: the subject job file, the done-file schema, the
+ * task's error vocabulary and how the answer is read.
+ *
  * The report is UNTRUSTED output of a process that has just read attacker-controlled content: the runner never
  * parses, logs or judges it. It is carried, byte for byte, to the gateway, which parses it strictly and decides.
  */
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import { subjectJobJson } from "@regulait/engine-runner";
+import { isJobRunId, JobExchange, SUBJECT_JOB_FILE, subjectJobJson } from "@regulait/engine-runner";
 import { ENGINE_RESULT_LIMITS } from "@regulait/shared";
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const REPORT_FILE = "report.json";
 export const DONE_FILE = "done.json";
 /** the gateway's raw-report cap (`engineRawReportSchema`): a larger report is never posted */
@@ -71,12 +74,6 @@ export interface SubjectScanExecutor {
   reconcile(keepRunId: string | null): Promise<string[]>;
 }
 
-/** a job directory's run id: `<uuid>` (published) or `<uuid>.staging` (being written); else null */
-export function jobDirRunId(name: string): string | null {
-  const m = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(\.staging)?$/.exec(name);
-  return m ? m[1]! : null;
-}
-
 /** read the task's answer for one run from the results directory (pure file reading; exported for tests) */
 export async function collectSubjectScan(resultsRoot: string, runId: string): Promise<SubjectScanOutcome> {
   let done: SubjectScanDone;
@@ -102,62 +99,28 @@ export async function collectSubjectScan(resultsRoot: string, runId: string): Pr
 
 /** the runner's side of the exchange (the bridge reads `jobsRoot` and writes `resultsRoot`) */
 export class SubjectExchange implements SubjectScanExecutor {
+  private readonly jobs: JobExchange;
   constructor(
-    private readonly jobsRoot: string,
+    jobsRoot: string,
     private readonly resultsRoot: string,
-    private readonly opts: { pollMs?: number; graceMs?: number } = {},
-  ) {}
+    opts: { pollMs?: number; graceMs?: number } = {},
+  ) {
+    this.jobs = new JobExchange(jobsRoot, resultsRoot, { ...opts, doneFile: DONE_FILE });
+  }
 
   async scan(job: { runId: string; subjectFile: string; timeoutMs: number }, signal: AbortSignal): Promise<SubjectScanOutcome> {
-    if (!UUID.test(job.runId)) throw new Error("invalid run id");
+    if (!isJobRunId(job.runId)) throw new Error("invalid run id");
     const marker = subjectJobJson(job.subjectFile);
-    await this.release(job.runId);
-    if (signal.aborted) return { ...NO_ANSWER, cancelled: true };
-    const staging = path.join(this.jobsRoot, `${job.runId}.staging`);
-    await mkdir(staging, { mode: 0o750 });
-    const tmp = path.join(staging, `.${randomUUID()}.tmp`);
-    await writeFile(tmp, marker, { mode: 0o640 });
-    await rename(tmp, path.join(staging, "subject.json"));
-    const live = path.join(this.jobsRoot, job.runId);
-    await rename(staging, live);
-    const poll = this.opts.pollMs ?? 250;
-    const giveUpAt = Date.now() + job.timeoutMs + (this.opts.graceMs ?? 15_000);
-    const donePath = path.join(this.resultsRoot, job.runId, DONE_FILE);
-    let cancelSentAt: number | null = null;
-    for (;;) {
-      if (existsSync(donePath)) return collectSubjectScan(this.resultsRoot, job.runId);
-      if (signal.aborted && cancelSentAt === null) {
-        await writeFile(path.join(live, "cancel"), "", { mode: 0o640 }).catch(() => undefined);
-        cancelSentAt = Date.now();
-      }
-      if (cancelSentAt !== null && Date.now() - cancelSentAt > 5000) return { ...NO_ANSWER, cancelled: true };
-      if (Date.now() > giveUpAt) {
-        await writeFile(path.join(live, "cancel"), "", { mode: 0o640 }).catch(() => undefined);
-        return { ...NO_ANSWER, timedOut: true };
-      }
-      await new Promise((r) => setTimeout(r, poll));
-    }
+    const end = await this.jobs.run({ runId: job.runId, files: { [SUBJECT_JOB_FILE]: marker }, timeoutMs: job.timeoutMs }, signal);
+    if (end === "done") return collectSubjectScan(this.resultsRoot, job.runId);
+    return end === "cancelled" ? { ...NO_ANSWER, cancelled: true } : { ...NO_ANSWER, timedOut: true };
   }
 
-  async release(runId: string): Promise<void> {
-    if (!UUID.test(runId)) return;
-    await rm(path.join(this.jobsRoot, `${runId}.staging`), { recursive: true, force: true });
-    await rm(path.join(this.jobsRoot, runId), { recursive: true, force: true });
-    await rm(path.join(this.resultsRoot, runId), { recursive: true, force: true });
+  release(runId: string): Promise<void> {
+    return this.jobs.release(runId);
   }
 
-  async reconcile(keepRunId: string | null): Promise<string[]> {
-    const removed: string[] = [];
-    for (const name of await readdir(this.jobsRoot).catch(() => [] as string[])) {
-      const runId = jobDirRunId(name);
-      if (runId !== null && runId !== keepRunId) {
-        await rm(path.join(this.jobsRoot, name), { recursive: true, force: true });
-        removed.push(name);
-      }
-    }
-    for (const name of await readdir(this.resultsRoot).catch(() => [] as string[])) {
-      if (UUID.test(name) && name !== keepRunId) await rm(path.join(this.resultsRoot, name), { recursive: true, force: true });
-    }
-    return removed;
+  reconcile(keepRunId: string | null): Promise<string[]> {
+    return this.jobs.reconcile(keepRunId);
   }
 }

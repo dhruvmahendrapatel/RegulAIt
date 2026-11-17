@@ -10,4 +10,6 @@ export * from "./loop.js";
 export * from "./key.js";
 export * from "./task-bridge.js";
 export * from "./task-subject.js";
+export * from "./job-exchange.js";
+export * from "./worker-selftest.js";
 export { fsyncDir } from "./durable.js";
