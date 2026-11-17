@@ -49,7 +49,6 @@ export const ENGINE_IMAGES_LOCK: Readonly<Record<"promptfoo" | "modelscan" | "ga
     sourceCommit: null,
     publishedAt: null,
   }),
-  // ADR-0346: no publish recorded yet, so the engine cannot be enabled
   fairlearn: Object.freeze({
     repository: null,
     manifestDigest: null,
