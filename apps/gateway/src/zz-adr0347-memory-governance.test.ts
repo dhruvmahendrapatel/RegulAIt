@@ -46,7 +46,9 @@ const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
 const migrationsFolder = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations");
 
-const RUN = `m347-${process.pid}-${Date.now()}`;
+// letters only: a numeric prefix (pid + Date.now()) can form a Luhn-valid card number, which the memory scan
+// rightly refuses as PII (CI on #905, round 1)
+const RUN = `m347-${Array.from({ length: 10 }, () => String.fromCharCode(97 + Math.floor(Math.random() * 26))).join("")}`;
 const BOOT = `${RUN}-boot`;
 const boot = { authorization: `Bearer ${BOOT}` };
 type Auth = { authorization: string };
