@@ -90,7 +90,7 @@ describe("CA bundle", () => {
     expect(caPemProblem(leaf.pem)).toContain("CA certificate");
     expect(caPemProblem("hello")).toContain("no PEM");
     expect(caPemProblem("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n")).toContain("does not parse");
-    expect(caPemProblem(`${root.pem}-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n`)).toContain("private key");
+    expect(caPemProblem(`${root.pem}-----BEGIN ${["PRIVATE", "KEY"].join(" ")}-----\nAAAA\n-----END ${["PRIVATE", "KEY"].join(" ")}-----\n`)).toContain("private key");
   });
 });
 

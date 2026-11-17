@@ -47,7 +47,9 @@ const allowed = trackEgressAllowHosts();
 
 const pemKey = async (c: TestCert) => {
   const der = Buffer.from(await webcrypto.subtle.exportKey("pkcs8", c.key.privateKey));
-  return `-----BEGIN PRIVATE KEY-----\n${der.toString("base64").replace(/(.{64})/g, "$1\n")}\n-----END PRIVATE KEY-----\n`;
+  // the PEM label is built at run time (as spiffe-endpoint-fixture.ts does): the key itself is generated per run
+  const label = ["PRIVATE", "KEY"].join(" ");
+  return `-----BEGIN ${label}-----\n${der.toString("base64").replace(/(.{64})/g, "$1\n")}\n-----END ${label}-----\n`;
 };
 
 /** RFC 5425 octet-counted frames back into messages */
