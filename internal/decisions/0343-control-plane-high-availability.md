@@ -146,7 +146,12 @@ zone-redundant HA, encrypted storage with a customer-managed key, TLS-only conne
 (retention ≥ 7 days, default 14), deletion protection on, no public endpoint, and an optional cross-region replica or
 backup copy. They are validated with `terraform validate` and `terraform test` plans with mocked providers. Nothing is
 applied; a regulait-dev rehearsal (ADR-0325's exception) runs only if a plan cannot answer a question. The BYOC AWS
-module of lane E10 is not edited here: the AWS module is a sibling that BYOC can adopt later.
+module of lane E10 calls `postgres-ha-aws` from its `database.tf` (one RDS definition, not two that drift). It passes
+the VPC module's existing subnet group (`db_subnet_group_name`), the EKS node security group and the stack key, and
+the names and descriptions it already used. `moved` blocks map its old addresses (`module.db`, `aws_security_group.db`
+and the ingress rule) into `module.pg`, so an existing BYOC stack plans no replacement. The one in-place change is
+the parameter group gaining `synchronous_commit = on`, which is already the RDS default. The ingress rules use `count`,
+not `for_each`, because the EKS node group's id is unknown at plan time in the same apply.
 
 For Kubernetes and air-gapped installs, the chart gains an opt-in CloudNativePG `Cluster` (3 instances, one synchronous
 standby, pod anti-affinity across zones, WAL archive and base backups to an S3-compatible store, a `ScheduledBackup`),

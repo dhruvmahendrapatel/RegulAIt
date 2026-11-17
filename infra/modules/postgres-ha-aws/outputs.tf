@@ -8,6 +8,15 @@ output "address" {
   value       = module.db.db_instance_address
 }
 
+output "port" {
+  value = module.db.db_instance_port
+}
+
+output "identifier" {
+  description = "The RDS instance identifier."
+  value       = module.db.db_instance_identifier
+}
+
 output "db_instance_arn" {
   description = "For cross-region backup replication (modules/cross-region-backups)."
   value       = module.db.db_instance_arn

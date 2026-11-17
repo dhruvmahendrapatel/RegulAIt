@@ -18,6 +18,12 @@ variable or in Terraform state.
 Connect to `endpoint`. RDS moves it to the promoted standby on failover, which typically completes in one to two
 minutes, so clients only need to reconnect. The RegulAIt gateway's pool drops broken connections by itself.
 
+## Using an existing subnet group or existing names
+
+A caller whose VPC module already made a DB subnet group passes `db_subnet_group_name` instead of `subnet_ids`.
+`infra/modules/byoc-aws` does this, and also passes `resource_name_prefix` and the two descriptions it used before it
+called this module, so its existing resources keep their names (its `moved` blocks map the old addresses).
+
 ## Region loss
 
 `modules/cross-region-backups` copies automated backups to a second region using that region's provider and KMS key.

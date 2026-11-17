@@ -37,7 +37,7 @@ run "secure_ha_defaults" {
   }
 
   assert {
-    condition     = length(aws_vpc_security_group_ingress_rule.db) == 1 && aws_vpc_security_group_ingress_rule.db["sg-0cccccccccccccccc"].from_port == 5432
+    condition     = length(aws_vpc_security_group_ingress_rule.db) == 1 && aws_vpc_security_group_ingress_rule.db[0].from_port == 5432
     error_message = "The only ingress is 5432 from the named security groups."
   }
 }
@@ -80,4 +80,18 @@ run "nobody_may_connect_is_refused" {
   }
 
   expect_failures = [var.allowed_security_group_ids]
+}
+
+run "an_existing_subnet_group_needs_no_subnets" {
+  command = plan
+
+  variables {
+    subnet_ids           = []
+    db_subnet_group_name = "existing-db-subnets"
+  }
+
+  assert {
+    condition     = module.db.db_instance_identifier != null
+    error_message = "A caller with its own subnet group (byoc-aws) passes the group, not subnets."
+  }
 }

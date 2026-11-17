@@ -14,13 +14,20 @@ variable "vpc_id" {
 }
 
 variable "subnet_ids" {
-  description = "Private subnets in at least two availability zones. The standby is placed in a different zone from the primary."
+  description = "Private subnets in at least two availability zones, for the subnet group this module creates. The standby is placed in a different zone from the primary. Not used when db_subnet_group_name is set."
   type        = list(string)
+  default     = []
 
   validation {
-    condition     = length(var.subnet_ids) >= 2
-    error_message = "Give at least two subnets, in different availability zones: a Multi-AZ standby needs a second zone."
+    condition     = var.db_subnet_group_name != null || length(var.subnet_ids) >= 2
+    error_message = "Give at least two subnets, in different availability zones (a Multi-AZ standby needs a second zone), or an existing db_subnet_group_name."
   }
+}
+
+variable "db_subnet_group_name" {
+  description = "An existing DB subnet group to use instead of creating one (for example a VPC module's database subnet group). It must span at least two availability zones."
+  type        = string
+  default     = null
 }
 
 variable "allowed_security_group_ids" {
@@ -112,4 +119,22 @@ variable "iam_permissions_boundary_arn" {
 variable "tags" {
   type    = map(string)
   default = {}
+}
+
+variable "resource_name_prefix" {
+  description = "Prefix for the security group and monitoring role names. Defaults to name; a caller with existing state passes the prefix it already used."
+  type        = string
+  default     = null
+}
+
+variable "security_group_description" {
+  description = "Description of the database security group (changing it replaces the group)."
+  type        = string
+  default     = "PostgreSQL from the named security groups only."
+}
+
+variable "ingress_description" {
+  description = "Description on each 5432 ingress rule."
+  type        = string
+  default     = "PostgreSQL"
 }

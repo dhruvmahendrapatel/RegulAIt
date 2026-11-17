@@ -7,10 +7,21 @@
 #
 # Applications connect to `endpoint`, the writer's DNS name. RDS repoints it at
 # the promoted standby on failover, so a client only has to reconnect.
+#
+# Callers: an install's own environment, and infra/modules/byoc-aws (its
+# database.tf calls this module, so the BYOC stack and a standalone install get
+# one hardened RDS definition, not two copies that drift).
+
+locals {
+  # names of the companion resources; a caller with existing state passes the
+  # prefix it already used (byoc-aws) so nothing is renamed
+  resource_prefix   = coalesce(var.resource_name_prefix, var.name)
+  create_subnet_grp = var.db_subnet_group_name == null
+}
 
 resource "aws_security_group" "db" {
-  name_prefix = "${var.name}-db-"
-  description = "PostgreSQL from the named security groups only."
+  name_prefix = "${local.resource_prefix}-db-"
+  description = var.security_group_description
   vpc_id      = var.vpc_id
   tags        = var.tags
 
@@ -19,15 +30,18 @@ resource "aws_security_group" "db" {
   }
 }
 
+# `count`, not `for_each`: a caller usually passes a security group created in
+# the same apply (the EKS node group), whose id is unknown at plan time, and a
+# for_each key must be known then. The list's length is.
 resource "aws_vpc_security_group_ingress_rule" "db" {
-  for_each = toset(var.allowed_security_group_ids)
+  count = length(var.allowed_security_group_ids)
 
   security_group_id            = aws_security_group.db.id
-  description                  = "PostgreSQL"
+  description                  = var.ingress_description
   ip_protocol                  = "tcp"
   from_port                    = 5432
   to_port                      = 5432
-  referenced_security_group_id = each.value
+  referenced_security_group_id = var.allowed_security_group_ids[count.index]
 }
 
 module "db" {
@@ -57,9 +71,9 @@ module "db" {
   master_user_secret_kms_key_id = var.kms_key_arn
 
   multi_az               = var.multi_az
-  create_db_subnet_group = true
-  db_subnet_group_name   = var.name
-  subnet_ids             = var.subnet_ids
+  create_db_subnet_group = local.create_subnet_grp
+  db_subnet_group_name   = local.create_subnet_grp ? var.name : var.db_subnet_group_name
+  subnet_ids             = local.create_subnet_grp ? var.subnet_ids : []
   vpc_security_group_ids = [aws_security_group.db.id]
   publicly_accessible    = false
 
@@ -88,7 +102,7 @@ module "db" {
 
   create_monitoring_role               = true
   monitoring_interval                  = 60
-  monitoring_role_name                 = "${var.name}-rds-monitoring"
+  monitoring_role_name                 = "${local.resource_prefix}-rds-monitoring"
   monitoring_role_use_name_prefix      = true
   monitoring_role_permissions_boundary = var.iam_permissions_boundary_arn
 
