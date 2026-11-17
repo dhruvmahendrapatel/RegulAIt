@@ -1,0 +1,3 @@
+<!-- fold: state-recap -->
+
+**2026-11-14 - P19 Lane L3, second PR: the SAP idempotency key and business audit detail ([ADR-0230 amendment](../decisions/0230-sap-business-agents-over-mcp.md), no migration).** An SAP business write must carry a UUID `idempotencyKey`; the gateway replaces it with HMAC(per-server secret, deployment, pairwise sub, caller key), forces the approval to bind the exact arguments (one approval, one order), refuses a key reused with other fields, and records service, entity set, stored key, approval, document number and `replayed` on the decision, usage and a new `sap-business-outcome` row. Replays are not charged.

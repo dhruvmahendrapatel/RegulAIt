@@ -161,6 +161,11 @@ import {
   CONTENT_TRUST_TIERS,
   CONTENT_TRUST_WRITE_FLOORS,
   type ModalitySplit,
+  // ADR-0346 (migration fairness_evaluation): the fairness-evaluation vocabularies, in lockstep with the CHECKs
+  FAIRNESS_DATASET_KINDS,
+  FAIRNESS_RUN_MODES,
+  FAIRNESS_BREACH_REVIEW_STATUSES,
+  FAIRNESS_EVALUATION_STATUSES,
 } from "@regulait/shared";
 import {
   type AnyPgColumn,
@@ -2006,6 +2011,8 @@ export const auditLog = pgTable(
         "trust_publication",
         "trust_center",
         "auditor_grant",
+        // ADR-0310 (G2): a signed managed-settings bundle export (objectId = the bundle). Plain text column — no DDL.
+        "managed_settings_bundle",
       ],
     })
       .notNull()
@@ -4111,6 +4118,9 @@ export const complianceProfiles = pgTable("compliance_profiles", {
    * dispatches even where an admin relaxed the org-wide `mrmEnforced` (the ADR-0021 ceiling). false and NULL are
    * both "no requirement" and can never relax the org setting. */
   mrmRequired: boolean("mrm_required"),
+  /** ADR-0346 decision 9 (migration fairness_evaluation): this framework REQUIRES the fairness promotion gate on the
+   * model cards of projects it classifies. OR-composed like `mrmRequired`; NULL and false never relax the org setting. */
+  fairnessGateRequired: boolean("fairness_gate_required"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   /** ADR-0208 (migration 0223): a retired profile is read-only — no new version, no new carrier. Retire is refused
    * while any project, pending project, team or infra resource carries the tag. DB CHECK ties retired_* to status. */
@@ -5481,6 +5491,11 @@ export const orgSettings = pgTable(
     fairnessBlockOnFail: boolean("fairness_block_on_fail").notNull().default(true),
     /** ADR-0222: an uploaded evaluation dataset's rows are deleted this many days after upload (strict 30) */
     fairnessDatasetRetentionDays: integer("fairness_dataset_retention_days").notNull().default(30),
+    /** ADR-0346 decision 9 (migration fairness_evaluation): a model card's sign-off needs a fresh passing (or accepted)
+     * fairness run. Opt-in per tenant (default off); a compliance profile's `fairness_gate_required` forces it on. */
+    fairnessPromotionGate: boolean("fairness_promotion_gate").notNull().default(false),
+    /** ADR-0346 decision 9: the newest run the promotion gate accepts is at most this many days old (strict 90) */
+    fairnessRunMaxAgeDays: integer("fairness_run_max_age_days").notNull().default(90),
 
     /** ADR-0056 §5 amendment (lane L7, migration copilot_redteam_gate): a model may narrate a copilot answer only
      * while its latest copilot red-team run passed against the model it serves now (strict true; turning it off is a
@@ -5694,6 +5709,7 @@ export const orgSettings = pgTable(
       "org_settings_fairness_dataset_retention_days_check",
       sql`${t.fairnessDatasetRetentionDays} BETWEEN 1 AND 365`,
     ),
+    check("org_settings_fairness_run_max_age_days_check", sql`${t.fairnessRunMaxAgeDays} BETWEEN 1 AND 365`),
   ],
 );
 
@@ -6537,7 +6553,8 @@ export const MODEL_CARD_APPROVAL_STATUSES = [
 export type ModelCardApprovalStatus = (typeof MODEL_CARD_APPROVAL_STATUSES)[number];
 
 /** ADR-0187 (migration 0173) adds `engine_scan`: an `artifact_scans` row */
-export const MODEL_CARD_EVIDENCE_KINDS = ["eval_run", "external", "engine_scan"] as const;
+/** ADR-0346 (migration fairness_evaluation) adds `fairness_run`: a signed `fairness_runs` row */
+export const MODEL_CARD_EVIDENCE_KINDS = ["eval_run", "external", "engine_scan", "fairness_run"] as const;
 export type ModelCardEvidenceKind = (typeof MODEL_CARD_EVIDENCE_KINDS)[number];
 
 /** ADR-0045 §2: one declared bias/fairness assessment SLOT on a card. */
@@ -6677,17 +6694,21 @@ export const modelCardEvidence = pgTable(
     externalRef: text("external_ref"),
     /** ADR-0187: kind 'engine_scan' cites one artifact scan (RESTRICT, like a cited eval run) */
     artifactScanId: uuid("artifact_scan_id").references((): AnyPgColumn => artifactScans.id, { onDelete: "restrict" }),
+    /** ADR-0346 decision 7: kind 'fairness_run' cites one fairness run (RESTRICT, like a cited eval run) */
+    fairnessRunId: uuid("fairness_run_id").references((): AnyPgColumn => fairnessRuns.id, { onDelete: "restrict" }),
     label: text("label"),
     note: text("note"),
     attachedByUserId: uuid("attached_by_user_id").references(() => users.id, { onDelete: "set null" }),
     attachedAt: timestamp("attached_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    check("model_card_evidence_kind_check", sql`${t.kind} IN ('eval_run','external','engine_scan')`),
+    check("model_card_evidence_kind_check", sql`${t.kind} IN ('eval_run','external','engine_scan','fairness_run')`),
     check(
       "model_card_evidence_shape_check",
-      sql`(${t.kind} = 'eval_run' AND ${t.evalRunId} IS NOT NULL AND ${t.externalRef} IS NULL AND ${t.artifactScanId} IS NULL) OR (${t.kind} = 'external' AND ${t.externalRef} IS NOT NULL AND ${t.evalRunId} IS NULL AND ${t.artifactScanId} IS NULL) OR (${t.kind} = 'engine_scan' AND ${t.artifactScanId} IS NOT NULL AND ${t.evalRunId} IS NULL AND ${t.externalRef} IS NULL)`,
+      sql`(${t.kind} = 'eval_run' AND ${t.evalRunId} IS NOT NULL AND ${t.externalRef} IS NULL AND ${t.artifactScanId} IS NULL AND ${t.fairnessRunId} IS NULL) OR (${t.kind} = 'external' AND ${t.externalRef} IS NOT NULL AND ${t.evalRunId} IS NULL AND ${t.artifactScanId} IS NULL AND ${t.fairnessRunId} IS NULL) OR (${t.kind} = 'engine_scan' AND ${t.artifactScanId} IS NOT NULL AND ${t.evalRunId} IS NULL AND ${t.externalRef} IS NULL AND ${t.fairnessRunId} IS NULL) OR (${t.kind} = 'fairness_run' AND ${t.fairnessRunId} IS NOT NULL AND ${t.evalRunId} IS NULL AND ${t.externalRef} IS NULL AND ${t.artifactScanId} IS NULL)`,
     ),
+    // ADR-0346: a fairness run is cited on a card at most once
+    uniqueIndex("model_card_evidence_card_fairness_run_uq").on(t.cardId, t.fairnessRunId).where(sql`${t.fairnessRunId} IS NOT NULL`),
     index("model_card_evidence_card_idx").on(t.cardId),
     // ADR-0187 B5-M (migration 0175, PR #212 review [4234946093]): a scan is cited on a card at most once
     uniqueIndex("model_card_evidence_card_scan_unique").on(t.cardId, t.artifactScanId).where(sql`${t.artifactScanId} IS NOT NULL`),
@@ -6766,7 +6787,10 @@ export const fairnessDatasets = pgTable(
     name: text("name").notNull(),
     description: text("description"),
     labelColumn: text("label_column").notNull(),
-    predictionColumn: text("prediction_column").notNull(),
+    /** ADR-0346 decision 2: `supplied_predictions` (ADR-0222) or `model_inputs` (RegulAIt runs the model) */
+    kind: text("kind", { enum: FAIRNESS_DATASET_KINDS }).notNull().default("supplied_predictions"),
+    /** present exactly for `supplied_predictions` (DB CHECK); a model-input dataset has input columns instead */
+    predictionColumn: text("prediction_column"),
     favourableLabel: text("favourable_label").notNull(),
     /** the protected attribute columns, in upload order */
     protectedAttributes: jsonb("protected_attributes").$type<string[]>().notNull(),
@@ -6780,10 +6804,19 @@ export const fairnessDatasets = pgTable(
     /** when the rows were deleted, and why (`retention` or `deleted`) */
     purgedAt: timestamp("purged_at", { withTimezone: true }),
     purgeReason: text("purge_reason"),
+    /** ADR-0346 decision 3, a point-in-time snapshot (deliberately not joined): the cascade PII mode the input cells
+     * were checked under at upload, and how many findings it saw. NULL for supplied-prediction datasets (no text). */
+    piiMode: text("pii_mode", { enum: ["block", "redact", "warn", "log"] }),
+    piiFindings: integer("pii_findings"),
     uploadedByUserId: uuid("uploaded_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    check("fairness_datasets_kind_check", sql`${t.kind} IN ('supplied_predictions','model_inputs')`),
+    check(
+      "fairness_datasets_kind_shape_check",
+      sql`(${t.kind} = 'supplied_predictions' AND ${t.predictionColumn} IS NOT NULL AND ${t.piiMode} IS NULL AND ${t.piiFindings} IS NULL) OR (${t.kind} = 'model_inputs' AND ${t.predictionColumn} IS NULL AND ${t.piiMode} IS NOT NULL AND ${t.piiMode} IN ('block','redact','warn','log') AND ${t.piiFindings} IS NOT NULL AND ${t.piiFindings} >= 0)`,
+    ),
     check("fairness_datasets_row_count_check", sql`${t.rowCount} BETWEEN 1 AND 100000`),
     check("fairness_datasets_csv_bytes_check", sql`${t.csvBytes} BETWEEN 1 AND 5242880`),
     check(
@@ -6817,10 +6850,27 @@ export const fairnessRuns = pgTable(
     cardModelVersion: text("card_model_version"),
     /** how this run's thresholds were looser than the strict defaults (empty = strict); a step-up was given */
     relaxed: jsonb("relaxed").$type<Record<string, unknown>>().notNull().default({}),
+    /** ADR-0346 decision 5: how the predictions were obtained */
+    mode: text("mode", { enum: FAIRNESS_RUN_MODES }).notNull().default("supplied"),
+    /** ADR-0346: the evaluation a model run executed (RESTRICT: an evaluation is archived, never deleted under its runs) */
+    evaluationId: uuid("evaluation_id").references((): AnyPgColumn => fairnessEvaluations.id, { onDelete: "restrict" }),
+    /** ADR-0346: the engine run whose model calls produced the predictions */
+    engineRunId: uuid("engine_run_id").references((): AnyPgColumn => engineRuns.id, { onDelete: "restrict" }),
+    /** ADR-0346 decision 5: replies that matched neither declared output (a model run only) */
+    unparseableCount: integer("unparseable_count"),
+    /** ADR-0346 decision 5: the independent implementation that agreed with computeFairness, e.g. `fairlearn 0.15.0` */
+    metricsEngine: text("metrics_engine"),
     createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    check("fairness_runs_mode_check", sql`${t.mode} IN ('supplied','model')`),
+    check(
+      "fairness_runs_mode_shape_check",
+      sql`(${t.mode} = 'supplied' AND ${t.evaluationId} IS NULL AND ${t.engineRunId} IS NULL AND ${t.unparseableCount} IS NULL AND ${t.metricsEngine} IS NULL) OR (${t.mode} = 'model' AND ${t.evaluationId} IS NOT NULL AND ${t.engineRunId} IS NOT NULL AND ${t.unparseableCount} IS NOT NULL AND ${t.unparseableCount} >= 0)`,
+    ),
+    uniqueIndex("fairness_runs_engine_run_uq").on(t.engineRunId).where(sql`${t.engineRunId} IS NOT NULL`),
+    index("fairness_runs_evaluation_created_idx").on(t.evaluationId, t.createdAt).where(sql`${t.evaluationId} IS NOT NULL`),
     check("fairness_runs_outcome_check", sql`${t.outcome} IN ('pass','flag','fail','inconclusive')`),
     check("fairness_runs_min_group_size_check", sql`${t.minGroupSize} BETWEEN 30 AND 10000`),
     index("fairness_runs_card_created_idx").on(t.cardId, t.createdAt),
@@ -7923,7 +7973,8 @@ export const onboardingImports = pgTable(
   "onboarding_imports",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    kind: text("kind", { enum: ["users", "group_roles"] }).notNull(),
+    /** ADR-0289 adds `pm_work_items` (the PM project/work-item importer) */
+    kind: text("kind", { enum: ["users", "group_roles", "pm_work_items"] }).notNull(),
     mode: text("mode", { enum: ["dry_run", "apply"] }).notNull(),
     status: text("status", { enum: ["planned", "applied", "refused"] }).notNull(),
     /** fingerprint of the exact screened bytes — "which file did this?" without
@@ -10721,6 +10772,10 @@ export const traceSpans = pgTable(
     uniqueIndex("trace_spans_run_uq")
       .on(t.traceId, t.runId)
       .where(sql`${t.kind} = 'run' AND ${t.runId} IS NOT NULL`),
+    /** ADR-0327 (migration `rule_step_detection`): the rule-like step scan groups recent model spans per step */
+    index("trace_spans_llm_step_started_idx")
+      .on(t.agentId, t.name, t.startedAt)
+      .where(sql`${t.kind} = 'llm' AND ${t.agentId} IS NOT NULL`),
   ],
 );
 
@@ -16763,6 +16818,232 @@ export const resourceRateReservations = pgTable(
   ],
 );
 
+// ---------------------------------------------------------------------------
+// ADR-0289 (builder lane L6) — the PM project / work-item importer (ADR-0054 §3).
+// Migration `pending/pm_work_item_import.sql` (numbered at merge).
+// ---------------------------------------------------------------------------
+
+/** Which RegulAIt Initiative a PM connection's project rolls up to. One row per connection (the connection names one
+ * PM project), so the mapping is a fact about the connection, kept apart from the reporting-only initiative. */
+export const pmProjectInitiatives = pgTable("pm_project_initiatives", {
+  connectionId: uuid("connection_id")
+    .primaryKey()
+    .references(() => pmConnections.id, { onDelete: "cascade" }),
+  initiativeId: uuid("initiative_id")
+    .notNull()
+    .references(() => initiatives.id, { onDelete: "cascade" }),
+  /** the import that set (or last changed) the mapping */
+  importId: uuid("import_id").references(() => onboardingImports.id, { onDelete: "set null" }),
+  mappedAt: timestamp("mapped_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [index("pm_project_initiatives_initiative_idx").on(t.initiativeId)]);
+
+/** An existing work item the importer found in a connection's project. LINKAGE ONLY: the PM tool stays the source of
+ * truth (pillar 8), so title, state and fields are read through live and never stored here. `external_url` and
+ * `item_type` are the provider's own last-reported values (reconciled on every import), not RegulAIt-owned copies. */
+export const pmImportedWorkItems = pgTable(
+  "pm_imported_work_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => pmConnections.id, { onDelete: "cascade" }),
+    externalId: text("external_id").notNull(),
+    // ADR-0200 3NF exception (verbatim external payload): the item's URL as the PM tool reported it at the last import.
+    // The PM tool owns it (pillar 8); the importer refreshes it on every apply and never derives anything from it.
+    externalUrl: text("external_url").notNull(),
+    // ADR-0200 3NF exception (verbatim external payload): the tool's own work-item type name ("Bug", "Story"), as
+    // reported at the last import. It is the tool's vocabulary, not a RegulAIt reference, so there is nothing to join.
+    itemType: text("item_type").notNull(),
+    firstImportId: uuid("first_import_id").references(() => onboardingImports.id, { onDelete: "set null" }),
+    lastImportId: uuid("last_import_id").references(() => onboardingImports.id, { onDelete: "set null" }),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    /** set when a later import no longer finds the item in the PM tool; never deleted (re-appearing clears it) */
+    missingSince: timestamp("missing_since", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("pm_imported_work_items_conn_ext_uq").on(t.connectionId, t.externalId),
+    index("pm_imported_work_items_conn_id_idx").on(t.connectionId, t.id),
+    index("pm_imported_work_items_first_import_idx").on(t.firstImportId),
+    index("pm_imported_work_items_last_import_idx").on(t.lastImportId),
+  ],
+);
+export type PmImportedWorkItemRow = typeof pmImportedWorkItems.$inferSelect;
+
+/**
+ * ADR-0310 (G2; migration `managed_settings_bundles`) — signed, versioned bundles of vendor-native managed settings
+ * (Claude Code, GitHub Copilot, OpenAI Codex, a Cursor worksheet) compiled from one subject's effective MCP
+ * entitlements. A new version is written only when the compiled policy's digest changes, so `version` counts real
+ * policy changes per subject.
+ *
+ * 3NF exception, deliberate: a bundle is a point-in-time, signed artifact. `manifest` is the exact signed bytes and
+ * `policy_digest` is over the policy as it was compiled; neither is recomputed from today's grants, which is the
+ * point of keeping them (drift is measured against what was exported). The subject is a foreign key, never a copied
+ * name or email.
+ */
+export const managedSettingsBundles = pgTable(
+  "managed_settings_bundles",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    subjectKind: text("subject_kind", { enum: ["user", "role"] }).notNull(),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    roleId: uuid("role_id").references(() => roles.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    /** `sha256:<hex>` over the canonical compiled policy */
+    policyDigest: text("policy_digest").notNull(),
+    /** the exact `manifest.json` bytes that were signed (snapshot; see the table comment) */
+    manifest: text("manifest").notNull(),
+    /** base64 Ed25519 signature over `manifest` */
+    signature: text("signature").notNull(),
+    keyId: text("key_id").notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "managed_settings_bundles_subject_check",
+      sql`CASE ${t.subjectKind} WHEN 'user' THEN ${t.userId} IS NOT NULL AND ${t.roleId} IS NULL WHEN 'role' THEN ${t.roleId} IS NOT NULL AND ${t.userId} IS NULL ELSE false END`,
+    ),
+    check("managed_settings_bundles_version_check", sql`${t.version} >= 1`),
+    check("managed_settings_bundles_manifest_size_check", sql`octet_length(${t.manifest}) <= 65536`),
+    uniqueIndex("managed_settings_bundles_user_version_uq").on(t.userId, t.version).where(sql`${t.userId} IS NOT NULL`),
+    uniqueIndex("managed_settings_bundles_role_version_uq").on(t.roleId, t.version).where(sql`${t.roleId} IS NOT NULL`),
+    index("managed_settings_bundles_created_idx").on(t.createdAt, t.id),
+  ],
+);
+
+/**
+ * ADR-0310 — one compiled vendor file of a bundle. Its sha256 is listed in the signed manifest, so the body is the
+ * evidence of what was exported (append-only snapshot, same exception as the bundle row).
+ */
+export const managedSettingsBundleFiles = pgTable(
+  "managed_settings_bundle_files",
+  {
+    bundleId: uuid("bundle_id")
+      .notNull()
+      .references(() => managedSettingsBundles.id, { onDelete: "cascade" }),
+    path: text("path").notNull(),
+    body: text("body").notNull(),
+    sha256: text("sha256").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.bundleId, t.path] }),
+    check("managed_settings_bundle_files_size_check", sql`octet_length(${t.body}) <= 262144`),
+  ],
+);
+// ---------------------------------------------------------------------------
+// ADR-0327 (lane E12, migration `rule_step_detection`) — rule-like AI steps. Written only by
+// `apps/gateway/src/rule-steps.ts`, each write in the same transaction as its audit row.
+// ---------------------------------------------------------------------------
+
+/** one row, absent until first saved; absent = OFF (ADR-0180). Thresholds default strict; lowering one is a step-up. */
+export const ruleStepSettings = pgTable(
+  "rule_step_settings",
+  {
+    id: text("id").primaryKey().default("singleton"),
+    enabled: boolean("enabled").notNull().default(false),
+    minRuns: integer("min_runs").notNull().default(200),
+    minAgreement: doublePrecision("min_agreement").notNull().default(0.99),
+    minCoverage: doublePrecision("min_coverage").notNull().default(0.9),
+    minCellSupport: integer("min_cell_support").notNull().default(5),
+    /** database clock; scans are spaced by the gateway against now() */
+    lastScanAt: timestamp("last_scan_at", { withTimezone: true }),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("rule_step_settings_singleton_check", sql`${t.id} = 'singleton'`),
+    check("rule_step_settings_min_runs_check", sql`${t.minRuns} BETWEEN 50 AND 100000`),
+    check("rule_step_settings_min_agreement_check", sql`${t.minAgreement} >= 0.95 AND ${t.minAgreement} <= 1`),
+    check("rule_step_settings_min_coverage_check", sql`${t.minCoverage} >= 0.5 AND ${t.minCoverage} <= 1`),
+    check("rule_step_settings_min_cell_support_check", sql`${t.minCellSupport} BETWEEN 3 AND 1000`),
+  ],
+);
+export type RuleStepSettingsRow = typeof ruleStepSettings.$inferSelect;
+
+export const RULE_STEP_SUGGESTION_STATUSES = ["suggested", "dismissed"] as const;
+
+/** one suggestion per AI step (agent + span name): the latest scan's rule and its evidence */
+export const ruleStepSuggestions = pgTable(
+  "rule_step_suggestions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    /** the trace span name that identifies the step within the agent */
+    stepName: text("step_name").notNull(),
+    /** point-in-time snapshot (ADR-0200 exception): the induced rule `{fields, cells}` as the scan produced it,
+     * validated by the kernel's InducedRule shape; the evidence columns below describe this exact table */
+    rule: jsonb("rule").notNull(),
+    runs: integer("runs").notNull(),
+    structuredRuns: integer("structured_runs").notNull(),
+    outputClasses: integer("output_classes").notNull(),
+    agreement: doublePrecision("agreement").notNull(),
+    coverage: doublePrecision("coverage").notNull(),
+    /** measured spend of the step over the scan window (sum of trace span cost) */
+    windowCostUsd: doublePrecision("window_cost_usd").notNull(),
+    projectedMonthlySavingsUsd: doublePrecision("projected_monthly_savings_usd").notNull(),
+    status: text("status", { enum: RULE_STEP_SUGGESTION_STATUSES }).notNull().default("suggested"),
+    detectedAt: timestamp("detected_at", { withTimezone: true }).notNull().defaultNow(),
+    dismissedBy: uuid("dismissed_by").references(() => users.id, { onDelete: "set null" }),
+    dismissedAt: timestamp("dismissed_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("rule_step_suggestions_step_uq").on(t.agentId, t.stepName),
+    index("rule_step_suggestions_status_savings_idx").on(t.status, t.projectedMonthlySavingsUsd),
+    check("rule_step_suggestions_status_check", sql`${t.status} IN ('suggested', 'dismissed')`),
+    check("rule_step_suggestions_rates_check", sql`${t.agreement} BETWEEN 0 AND 1 AND ${t.coverage} BETWEEN 0 AND 1`),
+    check(
+      "rule_step_suggestions_dismissed_check",
+      sql`(${t.status} = 'dismissed') = (${t.dismissedAt} IS NOT NULL)`,
+    ),
+  ],
+);
+export type RuleStepSuggestionRow = typeof ruleStepSuggestions.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// Lane L7 (P14 + P16 lineage; ADR-0216 / ADR-0217 amendments, migration model_artifact_lineage)
+// ---------------------------------------------------------------------------
+
+/** how a model file was derived from its parent file(s); `merged` takes two or more parents, the rest exactly one */
+export const MODEL_LINEAGE_RELATIONS = ["repackaged", "converted", "fine_tuned", "merged", "quantized"] as const;
+export type ModelLineageRelation = (typeof MODEL_LINEAGE_RELATIONS)[number];
+
+/**
+ * One parent edge of a derived model file: the child was made from the parent by `relation`. A JOIN TABLE (a merge
+ * has several parents), recorded once per child and never edited: a second derivation for the same child is refused
+ * in the handler, and an edit would rewrite provenance. Rows go with either artifact when it is deleted; the audit row
+ * written with them (`model-artifact-lineage-recorded`) keeps the record, with both sha256s.
+ */
+export const modelArtifactLineage = pgTable(
+  "model_artifact_lineage",
+  {
+    childArtifactId: uuid("child_artifact_id")
+      .notNull()
+      .references(() => modelArtifacts.id, { onDelete: "cascade" }),
+    parentArtifactId: uuid("parent_artifact_id")
+      .notNull()
+      .references(() => modelArtifacts.id, { onDelete: "cascade" }),
+    relation: text("relation", { enum: MODEL_LINEAGE_RELATIONS }).notNull(),
+    /** free text the person recorded, e.g. "GPTQ 4-bit" or "TIES merge, density 0.5" (bounded) */
+    method: text("method"),
+    recordedByUserId: uuid("recorded_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.childArtifactId, t.parentArtifactId] }),
+    check("model_artifact_lineage_no_self_check", sql`${t.childArtifactId} <> ${t.parentArtifactId}`),
+    check(
+      "model_artifact_lineage_relation_check",
+      sql`${t.relation} IN ('repackaged', 'converted', 'fine_tuned', 'merged', 'quantized')`,
+    ),
+    check("model_artifact_lineage_method_check", sql`${t.method} IS NULL OR length(${t.method}) BETWEEN 1 AND 200`),
+    index("model_artifact_lineage_parent_idx").on(t.parentArtifactId),
+  ],
+);
+export type ModelArtifactLineageRow = typeof modelArtifactLineage.$inferSelect;
+
 // ===== ADR-0332 (lane E14): endpoint AI add-on inventory (pending migration endpoint_addon_inventory) =====
 //
 // The inventory of AI add-ons on endpoints (coding agent, MCP server, skill, plugin) is read, not projected: MCP
@@ -16856,3 +17137,355 @@ export const endpointAddonSightingSecretTypes = pgTable(
   ],
 );
 // ===== end ADR-0332 =====
+
+// ===== ADR-0342 (lane E23): process analytics read model =====
+// A MEASURED READ MODEL (ADR-0200 addendum). Source of truth: `workflow_events` (the append-only per-instance history)
+// replayed through the pure workflow kernel against the instance's snapshotted definition. The projector
+// (apps/gateway/src/process-analytics.ts) rebuilds an instance's rows whenever `workflow_instances.updated_at` or its
+// project changes, so every row here can be dropped and rebuilt from the source. Nothing here is evidence: the audit
+// chain and `workflow_events` stay the record. Row-level security is enabled and forced (migration
+// `pending/process_analytics.sql`).
+
+export const PROCESS_ANALYTICS_REPLAY_STATUSES = ["ok", "diverged", "too_long"] as const;
+export type ProcessAnalyticsReplayStatus = (typeof PROCESS_ANALYTICS_REPLAY_STATUSES)[number];
+export const PROCESS_ANALYTICS_EXIT_KINDS = ["advanced", "reworked", "ended"] as const;
+export type ProcessAnalyticsExitKind = (typeof PROCESS_ANALYTICS_EXIT_KINDS)[number];
+
+/** one row per projected workflow instance */
+export const processAnalyticsInstances = pgTable(
+  "process_analytics_instances",
+  {
+    instanceId: uuid("instance_id")
+      .primaryKey()
+      .references(() => workflowInstances.id, { onDelete: "cascade" }),
+    /** READ-MODEL COPY of `workflow_instances.project_id` (ADR-0200 addendum exception): the row-level security read
+     * key and the scope filter. The projector re-syncs it whenever the instance's project differs. */
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
+    /** the first event's time (the `start` event) */
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    /** when the instance last reached a terminal status; NULL while it is open (a re-opened instance is open again) */
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+    /** the terminal status reached at `endedAt` (ADR-0200 exception: derived from the replay, rebuilt with it) */
+    terminalStatus: text("terminal_status"),
+    lastEventAt: timestamp("last_event_at", { withTimezone: true }).notNull(),
+    eventCount: integer("event_count").notNull(),
+    /** `ok`: the replay reproduced the stored state; `diverged` or `too_long`: the instance has no spans and is counted
+     * as excluded on every response */
+    replayStatus: text("replay_status", { enum: PROCESS_ANALYTICS_REPLAY_STATUSES }).notNull(),
+    /** the `workflow_instances.updated_at` this projection was built from (the change detector) */
+    sourceUpdatedAt: timestamp("source_updated_at", { withTimezone: true }).notNull(),
+    projectedAt: timestamp("projected_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("process_analytics_instances_replay_check", sql`${t.replayStatus} IN ('ok','diverged','too_long')`),
+    check("process_analytics_instances_ended_check", sql`(${t.endedAt} IS NULL) = (${t.terminalStatus} IS NULL)`),
+    // repeats TERMINAL_STATUSES from @regulait/workflow-kernel (the one declared set); keep the two equal
+    check(
+      "process_analytics_instances_terminal_check",
+      sql`${t.terminalStatus} IS NULL OR ${t.terminalStatus} IN ('completed','aborted','denied','rolled_back')`,
+    ),
+    check("process_analytics_instances_event_count_check", sql`${t.eventCount} >= 0`),
+    index("process_analytics_instances_project_started_idx").on(t.projectId, t.startedAt),
+    index("process_analytics_instances_started_idx").on(t.startedAt),
+    index("process_analytics_instances_ended_idx").on(t.endedAt),
+  ],
+);
+export type ProcessAnalyticsInstanceRow = typeof processAnalyticsInstances.$inferSelect;
+
+/** the templates an instance was started from (a merged instance has several); a join table, never a jsonb copy */
+export const processAnalyticsInstanceTemplates = pgTable(
+  "process_analytics_instance_templates",
+  {
+    instanceId: uuid("instance_id")
+      .notNull()
+      .references(() => processAnalyticsInstances.instanceId, { onDelete: "cascade" }),
+    templateId: uuid("template_id")
+      .notNull()
+      .references(() => workflowTemplates.id, { onDelete: "cascade" }),
+  },
+  (t) => [
+    primaryKey({ name: "process_analytics_instance_templates_pk", columns: [t.instanceId, t.templateId] }),
+    index("process_analytics_instance_templates_template_idx").on(t.templateId),
+  ],
+);
+
+/** one row per visit of an instance to a stage: entry, exit, and how the time inside split into wait and work */
+export const processAnalyticsStageSpans = pgTable(
+  "process_analytics_stage_spans",
+  {
+    instanceId: uuid("instance_id")
+      .notNull()
+      .references(() => processAnalyticsInstances.instanceId, { onDelete: "cascade" }),
+    /** 0-based order of the span within the instance */
+    seq: integer("seq").notNull(),
+    /** the stage's id and type in the instance's SNAPSHOTTED definition (ADR-0200 exception: point-in-time, as run) */
+    stageId: text("stage_id").notNull(),
+    stageType: text("stage_type").notNull(),
+    /** 1 = the first visit; 2+ = the stage ran again after rework */
+    visit: integer("visit").notNull(),
+    enteredAt: timestamp("entered_at", { withTimezone: true }).notNull(),
+    /** NULL while the instance is still at this stage */
+    exitedAt: timestamp("exited_at", { withTimezone: true }),
+    /** time in a status that needs a person or an outside party (approval, artifact, plan, trigger, failed check,
+     * deploy handoff); up to `exitedAt`, or up to the instance's last event while open */
+    waitMs: bigint("wait_ms", { mode: "number" }).notNull(),
+    /** time the engine was executing the stage or it was queued for an executor */
+    workMs: bigint("work_ms", { mode: "number" }).notNull(),
+    exitKind: text("exit_kind", { enum: PROCESS_ANALYTICS_EXIT_KINDS }),
+  },
+  (t) => [
+    primaryKey({ name: "process_analytics_stage_spans_pk", columns: [t.instanceId, t.seq] }),
+    check("process_analytics_stage_spans_seq_check", sql`${t.seq} >= 0 AND ${t.visit} >= 1`),
+    check("process_analytics_stage_spans_ms_check", sql`${t.waitMs} >= 0 AND ${t.workMs} >= 0`),
+    check("process_analytics_stage_spans_exit_check", sql`(${t.exitedAt} IS NULL) = (${t.exitKind} IS NULL)`),
+    check(
+      "process_analytics_stage_spans_exit_kind_check",
+      sql`${t.exitKind} IS NULL OR ${t.exitKind} IN ('advanced','reworked','ended')`,
+    ),
+    check("process_analytics_stage_spans_order_check", sql`${t.exitedAt} IS NULL OR ${t.exitedAt} >= ${t.enteredAt}`),
+    check("process_analytics_stage_spans_stage_id_check", sql`char_length(${t.stageId}) >= 1`),
+    index("process_analytics_stage_spans_stage_exited_idx").on(t.stageId, t.exitedAt),
+    index("process_analytics_stage_spans_exited_idx").on(t.exitedAt),
+  ],
+);
+export type ProcessAnalyticsStageSpanRow = typeof processAnalyticsStageSpans.$inferSelect;
+// ===== end ADR-0342 =====
+
+// ===== ADR-0341 — the visual pipeline builder: drafts and versions of workflow templates =====
+/**
+ * One open draft per template, edited on the builder's canvas. `definition` is a schema-validated configuration
+ * document (ADR-0200 exception: it is validated by `workflowDefinitionSchema` on every save, may be invalid while
+ * someone is mid-edit, and is never executed). `base_version_id` is the version the draft was opened from; a publish is
+ * refused when the template has been published since. `revision` is the optimistic-concurrency counter every save
+ * names. Deployment-wide like `workflow_templates` (no tenant column, so no RLS policy); the routes are admin-only.
+ */
+export const workflowTemplateDrafts = pgTable(
+  "workflow_template_drafts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    templateId: uuid("template_id")
+      .notNull()
+      .references(() => workflowTemplates.id, { onDelete: "cascade" }),
+    definition: jsonb("definition").notNull(),
+    baseVersionId: uuid("base_version_id")
+      .notNull()
+      .references((): AnyPgColumn => workflowTemplateVersions.id, { onDelete: "cascade" }),
+    revision: integer("revision").notNull().default(1),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("workflow_template_drafts_template_uq").on(t.templateId),
+    index("workflow_template_drafts_base_version_idx").on(t.baseVersionId),
+    check("workflow_template_drafts_revision_check", sql`${t.revision} >= 1`),
+    check("workflow_template_drafts_definition_check", sql`jsonb_typeof(${t.definition}) = 'object'`),
+  ],
+);
+export type WorkflowTemplateDraftRow = typeof workflowTemplateDrafts.$inferSelect;
+
+/**
+ * Every published version of a template, append-only (`regulait_refuse_mutation`, no TRUNCATE). `definition` is a
+ * point-in-time snapshot (ADR-0200 exception): the bytes that went live, which `content_hash` (SHA-256 of ADR-0060's
+ * canonical JSON) identifies. `origin` `baseline` is the live definition captured the first time a template is opened
+ * in the builder; `builder` is a publish.
+ */
+export const workflowTemplateVersions = pgTable(
+  "workflow_template_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    templateId: uuid("template_id")
+      .notNull()
+      .references(() => workflowTemplates.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    definition: jsonb("definition").notNull(),
+    contentHash: text("content_hash").notNull(),
+    origin: text("origin", { enum: ["baseline", "builder"] }).notNull(),
+    publishedBy: uuid("published_by").references(() => users.id, { onDelete: "set null" }),
+    publishedAt: timestamp("published_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("workflow_template_versions_template_version_uq").on(t.templateId, t.version),
+    check("workflow_template_versions_version_check", sql`${t.version} >= 1`),
+    check("workflow_template_versions_hash_check", sql`${t.contentHash} ~ '^[0-9a-f]{64}$'`),
+    check("workflow_template_versions_origin_check", sql`${t.origin} IN ('baseline', 'builder')`),
+  ],
+);
+export type WorkflowTemplateVersionRow = typeof workflowTemplateVersions.$inferSelect;
+// ===== end ADR-0341 =====
+
+// ===== ADR-0346 — fairness evaluation through the governed gateway (migration fairness_evaluation) =====
+//
+// Extends ADR-0222. An evaluation is a saved definition on one model card: a model-input dataset, the attributes it
+// compares, its thresholds, a prompt template and the two outputs that count as a decision. A run of it is an engine
+// run of the `fairlearn` sidecar whose result lands as an ordinary `fairness_runs` row (mode 'model'). Every run gets
+// one signed, append-only evidence row; a breach opens one approvals-queue item recorded in
+// `fairness_breach_reviews`. Admin-only under RLS (system_task for the scheduler, credential_request for the runner).
+
+/** ADR-0346 decision 2: a model-input dataset's input columns, in prompt-template order (a join table, not a list) */
+export const fairnessDatasetInputColumns = pgTable(
+  "fairness_dataset_input_columns",
+  {
+    /** a surrogate key: the content-credential guard's existing-rows report keys every guarded table by `id` */
+    id: uuid("id").primaryKey().defaultRandom(),
+    datasetId: uuid("dataset_id")
+      .notNull()
+      .references(() => fairnessDatasets.id, { onDelete: "cascade" }),
+    columnName: text("column_name").notNull(),
+    position: integer("position").notNull(),
+  },
+  (t) => [
+    uniqueIndex("fairness_dataset_input_columns_name_uq").on(t.datasetId, t.columnName),
+    uniqueIndex("fairness_dataset_input_columns_position_uq").on(t.datasetId, t.position),
+    check("fairness_dataset_input_columns_position_check", sql`${t.position} BETWEEN 0 AND 7`),
+    check("fairness_dataset_input_columns_name_check", sql`char_length(${t.columnName}) BETWEEN 1 AND 200`),
+  ],
+);
+
+/** ADR-0346 decision 1: one fairness evaluation definition on one model card */
+export const fairnessEvaluations = pgTable(
+  "fairness_evaluations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    cardId: uuid("card_id")
+      .notNull()
+      .references(() => modelCards.id, { onDelete: "cascade" }),
+    /** RESTRICT: a dataset row is never deleted, only its ciphertext (ADR-0222) */
+    datasetId: uuid("dataset_id")
+      .notNull()
+      .references(() => fairnessDatasets.id, { onDelete: "restrict" }),
+    name: text("name").notNull(),
+    /** `{{column}}` placeholders name the dataset's input columns; filled per row by the engine task */
+    promptTemplate: text("prompt_template").notNull(),
+    /** the replies that count as the favourable and unfavourable decision (exact match after trim + case-fold) */
+    favourableOutput: text("favourable_output").notNull(),
+    unfavourableOutput: text("unfavourable_output").notNull(),
+    minGroupSize: integer("min_group_size").notNull().default(30),
+    /** the share of unparseable replies above which a run is inconclusive (strict 0, at most 0.05) */
+    maxUnparseableRate: doublePrecision("max_unparseable_rate").notNull().default(0),
+    /** the ADR-0187 schedule that starts its runs; NULL = on demand only */
+    engineScheduleId: uuid("engine_schedule_id").references(() => engineSchedules.id, { onDelete: "set null" }),
+    /** how this definition is looser than the strict defaults (empty = strict); a step-up was given when it was saved */
+    relaxed: jsonb("relaxed").$type<Record<string, unknown>>().notNull().default({}),
+    status: text("status", { enum: FAIRNESS_EVALUATION_STATUSES }).notNull().default("active"),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("fairness_evaluations_card_name_uq").on(t.cardId, t.name),
+    uniqueIndex("fairness_evaluations_schedule_uq").on(t.engineScheduleId).where(sql`${t.engineScheduleId} IS NOT NULL`),
+    index("fairness_evaluations_dataset_idx").on(t.datasetId),
+    check("fairness_evaluations_status_check", sql`${t.status} IN ('active','archived')`),
+    check("fairness_evaluations_name_check", sql`char_length(${t.name}) BETWEEN 1 AND 120`),
+    check("fairness_evaluations_template_check", sql`char_length(${t.promptTemplate}) BETWEEN 1 AND 8000`),
+    check(
+      "fairness_evaluations_outputs_check",
+      sql`char_length(${t.favourableOutput}) BETWEEN 1 AND 200 AND char_length(${t.unfavourableOutput}) BETWEEN 1 AND 200 AND lower(btrim(${t.favourableOutput})) <> lower(btrim(${t.unfavourableOutput}))`,
+    ),
+    check("fairness_evaluations_min_group_size_check", sql`${t.minGroupSize} BETWEEN 30 AND 10000`),
+    check("fairness_evaluations_unparseable_check", sql`${t.maxUnparseableRate} >= 0 AND ${t.maxUnparseableRate} <= 0.05`),
+    check("fairness_evaluations_relaxed_check", sql`jsonb_typeof(${t.relaxed}) = 'object'`),
+  ],
+);
+
+/** ADR-0346 decision 1: the protected attributes an evaluation compares (a subset of its dataset's) */
+export const fairnessEvaluationAttributes = pgTable(
+  "fairness_evaluation_attributes",
+  {
+    evaluationId: uuid("evaluation_id")
+      .notNull()
+      .references(() => fairnessEvaluations.id, { onDelete: "cascade" }),
+    attribute: text("attribute").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.evaluationId, t.attribute], name: "fairness_evaluation_attributes_pkey" }),
+    check("fairness_evaluation_attributes_name_check", sql`char_length(${t.attribute}) BETWEEN 1 AND 200`),
+  ],
+);
+
+/** ADR-0346 decision 1: one threshold per metric per evaluation */
+export const fairnessEvaluationThresholds = pgTable(
+  "fairness_evaluation_thresholds",
+  {
+    evaluationId: uuid("evaluation_id")
+      .notNull()
+      .references(() => fairnessEvaluations.id, { onDelete: "cascade" }),
+    metric: text("metric", {
+      enum: ["demographic_parity_difference", "disparate_impact_ratio", "equal_opportunity_difference", "equalized_odds_difference"],
+    }).notNull(),
+    limit: doublePrecision("limit").notNull(),
+    action: text("action", { enum: ["fail", "flag"] }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.evaluationId, t.metric], name: "fairness_evaluation_thresholds_pkey" }),
+    check(
+      "fairness_evaluation_thresholds_metric_check",
+      sql`${t.metric} IN ('demographic_parity_difference','disparate_impact_ratio','equal_opportunity_difference','equalized_odds_difference')`,
+    ),
+    check("fairness_evaluation_thresholds_limit_check", sql`${t.limit} >= 0 AND ${t.limit} <= 1`),
+    check("fairness_evaluation_thresholds_action_check", sql`${t.action} IN ('fail','flag')`),
+  ],
+);
+
+/** ADR-0346 decision 7: the signed evidence of one fairness run. Append-only (trigger + no TRUNCATE). */
+export const fairnessRunEvidence = pgTable(
+  "fairness_run_evidence",
+  {
+    runId: uuid("run_id")
+      .primaryKey()
+      .references(() => fairnessRuns.id, { onDelete: "restrict" }),
+    /** the exact canonical bytes (text, never jsonb: jsonb would reorder keys) */
+    body: text("body").notNull(),
+    bodySha256: text("body_sha256").notNull(),
+    signature: text("signature").notNull(),
+    keyId: text("key_id")
+      .notNull()
+      .references(() => receiptSigningKeys.keyId),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("fairness_run_evidence_body_size_check", sql`octet_length(${t.body}) <= 262144`),
+    check("fairness_run_evidence_body_sha256_check", sql`${t.bodySha256} = encode(sha256(convert_to(${t.body}, 'UTF8')), 'hex')`),
+    check(
+      "fairness_run_evidence_body_check",
+      sql`COALESCE((${t.body}::jsonb ->> 'v') = 'regulait.fairness-run.v1' AND (${t.body}::jsonb ->> 'runId') = ${t.runId}::text, false)`,
+    ),
+    check("fairness_run_evidence_signature_check", sql`${t.signature} ~ '^[A-Za-z0-9_-]{86}$'`),
+  ],
+);
+
+/** ADR-0346 decision 8: the one approvals-queue item a breaching run opens, and its risk acceptance */
+export const fairnessBreachReviews = pgTable(
+  "fairness_breach_reviews",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => fairnessRuns.id, { onDelete: "restrict" }),
+    approvalId: uuid("approval_id")
+      .notNull()
+      .references(() => approvals.id, { onDelete: "restrict" }),
+    status: text("status", { enum: FAIRNESS_BREACH_REVIEW_STATUSES }).notNull().default("pending"),
+    /** set exactly when accepted: the acceptance lapses here (at most 90 days after the decision) */
+    acceptedUntil: timestamp("accepted_until", { withTimezone: true }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("fairness_breach_reviews_run_uq").on(t.runId),
+    uniqueIndex("fairness_breach_reviews_approval_uq").on(t.approvalId),
+    index("fairness_breach_reviews_status_idx").on(t.status),
+    check("fairness_breach_reviews_status_check", sql`${t.status} IN ('pending','accepted','rejected','superseded')`),
+    check(
+      "fairness_breach_reviews_decision_check",
+      sql`(${t.status} = 'pending' AND ${t.decidedAt} IS NULL AND ${t.acceptedUntil} IS NULL) OR (${t.status} = 'accepted' AND ${t.decidedAt} IS NOT NULL AND ${t.acceptedUntil} > ${t.decidedAt} AND ${t.acceptedUntil} <= ${t.decidedAt} + interval '90 days') OR (${t.status} = 'rejected' AND ${t.decidedAt} IS NOT NULL AND ${t.acceptedUntil} IS NULL) OR (${t.status} = 'superseded' AND ${t.decidedAt} IS NOT NULL)`,
+    ),
+  ],
+);
+
+export type FairnessEvaluationRow = typeof fairnessEvaluations.$inferSelect;
+export type FairnessRunEvidenceRow = typeof fairnessRunEvidence.$inferSelect;
+export type FairnessBreachReviewRow = typeof fairnessBreachReviews.$inferSelect;
+// ===== end ADR-0346 =====
