@@ -1281,6 +1281,11 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/workflows/builder/templates/:templateId/publish": "internal",
   "GET /v1/workflows/builder/templates/:templateId/versions": "internal",
   "GET /v1/workflows/builder/templates/:templateId/versions/:version": "internal",
+  "GET /v1/workflows/fragments": "internal",
+  "POST /v1/workflows/fragments": "internal",
+  "GET /v1/workflows/fragments/:fragmentId": "internal",
+  "POST /v1/workflows/fragments/:fragmentId/versions": "internal",
+  "GET /v1/workflows/fragments/:fragmentId/versions/:version": "internal",
 
   // ===== ADR-0180 (D3) — continuous assurance. Internal: admin console and
   // governance surfaces whose shapes are still moving. Append-only per owner.
@@ -2614,6 +2619,11 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/workflows/builder/templates/:templateId/publish": "workflows",
   "GET /v1/workflows/builder/templates/:templateId/versions": "workflows",
   "GET /v1/workflows/builder/templates/:templateId/versions/:version": "workflows",
+  "GET /v1/workflows/fragments": "workflows",
+  "POST /v1/workflows/fragments": "workflows",
+  "GET /v1/workflows/fragments/:fragmentId": "workflows",
+  "POST /v1/workflows/fragments/:fragmentId/versions": "workflows",
+  "GET /v1/workflows/fragments/:fragmentId/versions/:version": "workflows",
 
   // ===== ADR-0180 (D3) — continuous assurance. Append-only per owner.
   // --- P0

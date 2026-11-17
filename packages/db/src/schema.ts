@@ -1537,6 +1537,8 @@ export const auditLog = pgTable(
         "role",
         "team",
         "workflow_template",
+        // ADR-0341 follow-up: a sub-process (workflow fragment) version proposed or decided. Plain text column.
+        "workflow_fragment",
         "approval_delegation",
         // ADR-0025 secure auth: sign-in lifecycle events (login success/
         // failure/lockout, password + MFA changes, session revocations) audit
@@ -17186,6 +17188,80 @@ export const workflowTemplateVersions = pgTable(
   ],
 );
 export type WorkflowTemplateVersionRow = typeof workflowTemplateVersions.$inferSelect;
+
+// ADR-0341 follow-up (Camunda gap row 10) — the sub-process catalogue: approved, reusable, versioned fragments.
+/**
+ * A reusable sub-process: a named list of stages that templates call by pinned version. Deployment-wide like
+ * `workflow_templates` (no tenant column, so no RLS policy); the routes are admin-only. Never deleted by a route.
+ */
+export const workflowFragments = pgTable(
+  "workflow_fragments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    description: text("description"),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("workflow_fragments_name_uq").on(sql`lower(${t.name})`),
+    check("workflow_fragments_name_check", sql`char_length(${t.name}) BETWEEN 1 AND 100`),
+    check("workflow_fragments_description_check", sql`${t.description} IS NULL OR char_length(${t.description}) <= 500`),
+  ],
+);
+export type WorkflowFragmentRow = typeof workflowFragments.$inferSelect;
+
+/**
+ * Every proposed version of a fragment, append-only. `stages` is a point-in-time snapshot (ADR-0200 exception): the
+ * bytes the reviewer approved, which `content_hash` identifies. The version's state (pending approval, approved,
+ * rejected) is NOT stored here: it is the status of its `approval_id` row in the one Approvals Queue
+ * (`WORKFLOW_FRAGMENT_VERSION_MACHINE` in @regulait/shared, ADR-0348, maps it), so one fact lives in one place. A removed approval row
+ * leaves `approval_id` null, which reads as rejected (fail closed).
+ */
+export const workflowFragmentVersions = pgTable(
+  "workflow_fragment_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    fragmentId: uuid("fragment_id")
+      .notNull()
+      .references(() => workflowFragments.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    stages: jsonb("stages").notNull(),
+    contentHash: text("content_hash").notNull(),
+    proposedBy: uuid("proposed_by").references(() => users.id, { onDelete: "set null" }),
+    approvalId: uuid("approval_id").references((): AnyPgColumn => approvals.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("workflow_fragment_versions_fragment_version_uq").on(t.fragmentId, t.version),
+    uniqueIndex("workflow_fragment_versions_approval_uq").on(t.approvalId),
+    check("workflow_fragment_versions_version_check", sql`${t.version} >= 1`),
+    check("workflow_fragment_versions_hash_check", sql`${t.contentHash} ~ '^[0-9a-f]{64}$'`),
+    check("workflow_fragment_versions_stages_check", sql`jsonb_typeof(${t.stages}) = 'array'`),
+  ],
+);
+export type WorkflowFragmentVersionRow = typeof workflowFragmentVersions.$inferSelect;
+
+/**
+ * Which fragment version each call stage of a published template version pinned (a join table, ADR-0200). Append-only:
+ * it is the record of what a template version was built from. It goes with its template version (own-parent cascade).
+ */
+export const workflowTemplateVersionFragments = pgTable(
+  "workflow_template_version_fragments",
+  {
+    templateVersionId: uuid("template_version_id")
+      .notNull()
+      .references(() => workflowTemplateVersions.id, { onDelete: "cascade" }),
+    callStageId: text("call_stage_id").notNull(),
+    fragmentVersionId: uuid("fragment_version_id")
+      .notNull()
+      .references(() => workflowFragmentVersions.id, { onDelete: "restrict" }),
+  },
+  (t) => [
+    primaryKey({ columns: [t.templateVersionId, t.callStageId] }),
+    index("workflow_template_version_fragments_fragment_version_idx").on(t.fragmentVersionId),
+  ],
+);
 // ===== end ADR-0341 =====
 
 // ===== ADR-0346 — fairness evaluation through the governed gateway (migration fairness_evaluation) =====

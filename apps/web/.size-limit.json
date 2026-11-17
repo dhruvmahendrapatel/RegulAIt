@@ -27,6 +27,12 @@
     "limit": "78 kB"
   },
   {
+    "name": "lazy: SubProcessesPage",
+    "path": "dist/assets/SubProcessesPage-*.js",
+    "gzip": true,
+    "limit": "3.5 kB"
+  },
+  {
     "name": "all JS",
     "path": "dist/assets/*.js",
     "gzip": true,
