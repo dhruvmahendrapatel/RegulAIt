@@ -12,7 +12,17 @@
  * Every detail line is scrubbed of the token it used.
  */
 
-import { chatopsConnections, connectorCredentials, connectors, eq, gitConnections, pmConnections, type Db } from "@regulait/db";
+import {
+  chatopsConnections,
+  connectorCredentials,
+  connectors,
+  currentRlsScope,
+  eq,
+  gitConnections,
+  pmConnections,
+  runWithRlsSystem,
+  type Db,
+} from "@regulait/db";
 import type { DemoCheck } from "./demo-check-lib.js";
 import { isBeatSimulated, type DemoBeatId } from "./demo-beats.js";
 import { LIVE_NAMES, readLiveDemoConfig, scrub, type LiveDemoConfig } from "./demo-live-lib.js";
@@ -163,7 +173,10 @@ export async function runLiveConnectionChecks(
 ): Promise<DemoCheck[]> {
   const { config, problems } = readLiveDemoConfig(deps.env);
   const [git] = await db.select().from(gitConnections).where(eq(gitConnections.name, LIVE_NAMES.github));
-  const pm = await db.select().from(pmConnections);
+  // ADR-0234 PM batch (#828 review): pm_connections is under row-level security. The demo check is a CLI with no
+  // principal, so on a non-superuser login it reads the connections as system_task; inside a scope it runs unchanged.
+  const readPm = () => db.select().from(pmConnections);
+  const pm = await (currentRlsScope() ? readPm() : runWithRlsSystem("system_task", "demo.live-connections", readPm));
   const jira = pm.find((p) => p.name === LIVE_NAMES.jira);
   const ado = pm.find((p) => p.name === LIVE_NAMES.azureDevOps);
   const [slackConnector] = await db.select().from(connectors).where(eq(connectors.name, LIVE_NAMES.slackConnector));

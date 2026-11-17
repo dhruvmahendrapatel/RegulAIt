@@ -402,6 +402,46 @@ The gateway can now run the two admission-scan engines itself. Pending migration
   locking the images (§6.3), and re-queueing MCP servers held only by a pending engine scan whose run expired. The
   ADR-0100 MCP sweep skips `held` servers; today a new live sync re-queues them.
 
+### L4.4 The runner shim (§6.1, 2026-11-16)
+
+`packages/engine-admission-scan` is the Node runner and task shim for both images, built in each Dockerfile's new
+`shim` stage exactly as modelscan's (pinned node stage, `pnpm deploy`, the normalised `.modules.yaml`; the node binary
+in the runtime with its libstdc++ and libgcc checked against the runtime base). The scanner stages and the smoke scans
+are unchanged. The image's default command is now the runner (`node /app/dist/main.js`, `REGULAIT_ADMISSION_ENGINE`
+set by the image and validated, fail closed).
+
+- **The task entry changed.** The manifest named the driver itself (`python -I scan.py /in /out/report.json`) as the
+  sandbox workload. That cannot run under ADR-0190 I5: the input is mounted at `/jobs`, the root is read-only, the
+  workload's stdout is the frame channel and nothing else, and the sandbox init passes the workload no environment but
+  PATH and HOME. The entry is now `node /app/dist/task-main.js <engine>` (the engine in argv). That task checks the input
+  root holds exactly the gateway's subject file, writes the worker self-test, runs the driver on the input root as a
+  child process group (10 minutes, inside the profile's wall clock) with an environment it builds (the offline switch, a
+  scratch HOME and TMPDIR), and sends the report back as frames.
+- **A subject run on the task bridge** (`@regulait/engine-runner` `task-subject.ts`). The runner's job directory holds
+  only `subject.json` (`{"path": "tools.json" | "SKILL.md"}`); the bridge starts the task with no files, no artifact,
+  no secret and that root subject path, which is what the gateway's task start requires. The task cannot know its run
+  id (the input has no run directory), so it writes under `subject/` and the bridge writes those frames under
+  `<runId>/`.
+- **The result.** The report is posted as the envelope's raw report, byte for byte (base64, sha256, bytes); the runner
+  never parses or logs it. A missing report, one that is not the bytes the task hashed, or one over the gateway's
+  raw-report cap (`ENGINE_RESULT_LIMITS.maxRawReportBytes`, 3 MiB) is posted as `failed` with no report; the gateway
+  records `unknown`. A driver that exited non-zero posts `failed` (`scan_failed`) with its own report attached.
+- **The worker-attested switch.** As spikee's: the task's self-test reports the offline switch only with the switch set
+  in the driver's environment, no remote-analyzer credential there (the drivers' `REMOTE_SWITCHES`, kept in lockstep by
+  a test), no runner credential in reach and nothing reachable. Before the first enable there is no report, so the
+  runner reports it false and the gateway rests it on the executor's attestation.
+- **The publish gate** (`scripts/engine-images-gate.mjs`) now counts the shim package's closure as both images' inputs
+  (`ENGINE_PACKAGES`), so the reproducible build archives a commit that has it. Both engines stay in
+  `UNPUBLISHED_ENGINE_IDS`; publishing, the lock entries, compose services and the §6.4 sandbox-limit proof are later
+  slices. The Dockerfile change has not been built locally (Docker Hub rate-limits this sandbox); CI's
+  `engine-images-build` builds it twice and compares.
+- **Shared helpers, not copies (#874 review).** The job-directory exchange (`JobExchange`, `jobDirRunId`: staging,
+  rename to live, the cancel file, release, reconcile) and the worker self-test's generic part (the report file, its
+  maximum age, the runner credential's locations, the common report schema, the isolation failures) live in
+  `@regulait/engine-runner` (`src/job-exchange.ts`, `src/worker-selftest.ts`); the admission scan keeps only its done
+  file, task errors, offline switch and remote-analyzer check. garak, spikee, modelscan and promptfoo still carry their
+  own copies and move onto these helpers next (PENDING).
+
 ## Owner decisions (2026-11-15)
 
 The owner answered the five open questions and the #843 placement question (relayed by the master orchestrator).

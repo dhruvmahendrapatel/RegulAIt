@@ -60,6 +60,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { requireStepUp } from "./step-up.js";
+import { whereFrom } from "./state-transition.js";
 import {
   admissionFindingSummary,
   clearMcpAdmissionSchema,
@@ -79,6 +80,8 @@ import {
   type McpAdmissionState,
   type ScannableTool,
   type VendoredDetectionPack,
+  IllegalTransitionError,
+  MCP_ADMISSION_MACHINE,
 } from "@regulait/shared";
 import { z } from "zod";
 import { loadOrgSettings } from "./org-settings.js";
@@ -481,59 +484,72 @@ async function scanAndPersistManifest(
   const mode = org.mcpAdmissionMode;
   if (mode === "off") return { mode, scan: null, state: null };
 
-  const [before] = await db
-    .select({
-      id: mcpServers.id,
-      name: mcpServers.name,
-      admissionState: mcpServers.admissionState,
-      admissionManifestDigest: mcpServers.admissionManifestDigest,
-    })
-    .from(mcpServers)
-    .where(eq(mcpServers.id, serverId));
-  if (!before) return { mode, scan: null, state: null };
+  const locked = await db.transaction(async (rawTx) => {
+    const tx = rawTx as unknown as Db;
+    const [before] = await tx
+      .select({
+        id: mcpServers.id,
+        name: mcpServers.name,
+        admissionState: mcpServers.admissionState,
+        admissionManifestDigest: mcpServers.admissionManifestDigest,
+      })
+      .from(mcpServers)
+      .where(eq(mcpServers.id, serverId))
+      // ADR-0348: read-to-write under the row lock, as the engine-scan writer and the admin clear do, so a
+      // clear or an engine hold that lands while this scan runs is seen, not overwritten
+      .for("no key update");
+    if (!before) return null;
 
-  // ADR-0242: with the mcpscanner engine on, its verdict on THIS digest joins the scan (no scan yet, an engine
-  // error or a flag all hold, fail closed); with it off (the default) this is the scan unchanged
-  const scan = await withEngineMcpFindings(
-    db,
-    serverId,
-    withVendoredMcpFindings(withReservedNameFindings(scanMcpManifest(tools), tools), tools, org.vendoredDetectionPacks),
-  );
-  const reserved = scan.findings.some((f) => f.rule === MCP_RESERVED_PREFIX_RULE);
-  const state = reserved
-    ? // ADR-0185 G3/G4: a reserved name holds the server whatever an admin
-      // cleared before — a clearance cannot make `mcp:resources` a tool
-      "held"
-    : nextAdmissionState({
-        scan,
-        previousState: before.admissionState,
-        // a clearance is only ever honoured for the digest it was granted for
-        clearedDigest: before.admissionState === "cleared" ? before.admissionManifestDigest : null,
-      });
+    // ADR-0242: with the mcpscanner engine on, its verdict on THIS digest joins the scan (no scan yet, an engine
+    // error or a flag all hold, fail closed); with it off (the default) this is the scan unchanged
+    const scan = await withEngineMcpFindings(
+      tx,
+      serverId,
+      withVendoredMcpFindings(withReservedNameFindings(scanMcpManifest(tools), tools), tools, org.vendoredDetectionPacks),
+    );
+    const reserved = scan.findings.some((f) => f.rule === MCP_RESERVED_PREFIX_RULE);
+    const state = reserved
+      ? // ADR-0185 G3/G4: a reserved name holds the server whatever an admin
+        // cleared before — a clearance cannot make `mcp:resources` a tool
+        "held"
+      : nextAdmissionState({
+          scan,
+          previousState: before.admissionState,
+          // a clearance is only ever honoured for the digest it was granted for
+          clearedDigest: before.admissionState === "cleared" ? before.admissionManifestDigest : null,
+        });
+    // ADR-0348: every computed verdict stays inside the declared table
+    if (!MCP_ADMISSION_MACHINE.canMove(before.admissionState, state)) {
+      throw new IllegalTransitionError(MCP_ADMISSION_MACHINE.def.id, `scan → ${state}`, before.admissionState, []);
+    }
 
-  // DRIFT: a server that was clean/cleared and now holds is the event worth
-  // filing. Recorded whether the mode enforces or only logs, because the whole
-  // point of `log` is that an admin can see what enforcing WOULD have done.
-  const reopened =
-    state === "held" && (before.admissionState === "cleared" || before.admissionState === "clean");
+    // DRIFT: a server that was clean/cleared and now holds is the event worth
+    // filing. Recorded whether the mode enforces or only logs, because the whole
+    // point of `log` is that an admin can see what enforcing WOULD have done.
+    const reopened =
+      state === "held" && (before.admissionState === "cleared" || before.admissionState === "clean");
 
-  await db
-    .update(mcpServers)
-    .set({
-      admissionState: state,
-      admissionScannedAt: new Date(),
-      admissionFindings: scan.findings,
-      admissionSeverity: scan.severity,
-      admissionScannerVersion: scan.scannerVersion,
-      admissionManifestDigest: scan.digest,
-      // a re-held server's stale clearance is cleared out with it — leaving
-      // "cleared by Alice, reason: reviewed" beside state `held` would read as
-      // an approval that is still in force
-      ...(state === "held"
-        ? { admissionClearedBy: null, admissionClearedAt: null, admissionClearReason: null }
-        : {}),
-    })
-    .where(eq(mcpServers.id, serverId));
+    await tx
+      .update(mcpServers)
+      .set({
+        admissionState: state,
+        admissionScannedAt: new Date(),
+        admissionFindings: scan.findings,
+        admissionSeverity: scan.severity,
+        admissionScannerVersion: scan.scannerVersion,
+        admissionManifestDigest: scan.digest,
+        // a re-held server's stale clearance is cleared out with it — leaving
+        // "cleared by Alice, reason: reviewed" beside state `held` would read as
+        // an approval that is still in force
+        ...(state === "held"
+          ? { admissionClearedBy: null, admissionClearedAt: null, admissionClearReason: null }
+          : {}),
+      })
+      .where(eq(mcpServers.id, serverId));
+    return { before, scan, state, reopened };
+  });
+  if (!locked) return { mode, scan: null, state: null };
+  const { before, scan, state, reopened } = locked;
 
   // ADR-0242 L4.3: with the mcpscanner engine on, this digest is queued for the engine's scan (live sync and the
   // ADR-0100 re-scan both come through here); the snapshot is the canonical tool list the digest covers. A no-op
@@ -589,6 +605,18 @@ async function scanAndPersistManifest(
 /** The registration path's explicit write. The migration's DEFAULT exists for
  * rows that predate the scanner; a row this code creates says what it means. */
 export const REGISTRATION_ADMISSION_STATE: McpAdmissionState = "unscanned";
+
+/** ADR-0348: the read-only lifecycle view of one server's admission. The table says which events may leave the
+ * state; the one refusal it cannot know is the reserved-name rule, which no admin clear overrides. */
+export function admissionLifecycle(state: McpAdmissionState, findings: unknown) {
+  const reserved = Array.isArray(findings) && findings.some((f) => (f as { rule?: unknown })?.rule === MCP_RESERVED_PREFIX_RULE);
+  return MCP_ADMISSION_MACHINE.describe(
+    state,
+    reserved
+      ? { admin_cleared: `a tool name starts with the reserved '${MCP_RESERVED_TOOL_PREFIX}' prefix; the upstream must rename it` }
+      : {},
+  );
+}
 
 /** Does this server contribute tools to a discovery surface right now? A held
  * server under `enforce` contributes NOTHING — not through the MCP proxy's
@@ -689,7 +717,9 @@ export function registerMcpAdmissionRoutes(app: FastifyInstance, db: Db) {
       holdAt: MCP_ADMISSION_HOLD_AT,
       scannerVersion: MCP_ADMISSION_SCANNER_VERSION,
       rules: mcpAdmissionRuleIds(),
-      servers: rows,
+      // ADR-0348: each server carries its admission state and every next step (allowed or not, and why), from
+      // the one declared table, so a screen or an agent reads the rule instead of re-deriving it
+      servers: rows.map((r) => ({ ...r, lifecycle: admissionLifecycle(r.admissionState, r.admissionFindings) })),
       // stated on the surface, not only in the ADR: in 'log' the states below
       // are recorded verdicts and nothing is being refused
       enforcing: mode === "enforce",
@@ -707,7 +737,7 @@ export function registerMcpAdmissionRoutes(app: FastifyInstance, db: Db) {
     const body = clearMcpAdmissionSchema.parse(req.body);
     const [before] = await db.select().from(mcpServers).where(eq(mcpServers.id, serverId));
     if (!before) return reply.status(404).send({ error: "unknown_server" });
-    if (before.admissionState !== "held") {
+    if (!MCP_ADMISSION_MACHINE.can(before.admissionState, "admin_cleared")) {
       return reply.status(409).send({
         error: "not_held",
         detail:
@@ -750,7 +780,7 @@ export function registerMcpAdmissionRoutes(app: FastifyInstance, db: Db) {
         .where(
           and(
             eq(mcpServers.id, serverId),
-            eq(mcpServers.admissionState, "held"),
+            whereFrom(mcpServers.admissionState, MCP_ADMISSION_MACHINE, "admin_cleared"),
             sql`${mcpServers.admissionManifestDigest} IS NOT DISTINCT FROM ${before.admissionManifestDigest}`,
           ),
         )
