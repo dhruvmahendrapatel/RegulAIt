@@ -1,0 +1,12 @@
+[
+  {"input": "mcp-allowed.json", "policy": "enforce", "want": "none"},
+  {"input": "mcp-allowed.json", "policy": "none", "want": "deny"},
+  {"input": "mcp-unlisted.json", "policy": "enforce", "want": "deny"},
+  {"input": "mcp-unlisted.json", "policy": "audit", "want": "none"},
+  {"input": "builtin-shell.json", "policy": "none", "want": "deny"},
+  {"input": "bash-ask-is-deny.json", "policy": "enforce", "want": "deny"},
+  {"input": "bash-argv.json", "policy": "enforce", "want": "none"},
+  {"input": "patch-outside.json", "policy": "enforce", "want": "deny"},
+  {"input": "patch-inside.json", "policy": "enforce", "want": "none"},
+  {"input": "patch-inside.json", "policy": "none", "want": "deny"}
+]
