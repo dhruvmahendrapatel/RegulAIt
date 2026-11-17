@@ -52,15 +52,18 @@ import {
   mappingFor,
   matchTrigger,
   pmTriggerSettingsSchema,
-  pmTriggerSourcesOf,
+  PM_WORK_TRIGGER_MACHINE,
   type PmTriggerSettings,
   type PmTriggerSignal,
+  type PmTriggerEvent,
   type PmTriggerState,
 } from "@regulait/pm-provider";
 import { agentDecision } from "./copilot.js";
 import { providerFor } from "./pm.js";
 import { startWorkflowForChange } from "./workflows.js";
 import { errMessage } from "./err-serializer.js";
+import { requireStepUp } from "./step-up.js";
+import { whereFrom } from "./state-transition.js";
 import { settingsOf } from "./pm-trigger-settings.js";
 import { syncPmWriteBacks } from "./pm-write-back.js";
 
@@ -128,20 +131,19 @@ const triggersQuerySchema = z
   .strict();
 
 // ---------------------------------------------------------------------------
-// The lifecycle: one compare-and-set move, along the declared table only
+// The lifecycle: one compare-and-set move per ADR-0348 machine event (PM_WORK_TRIGGER_MACHINE)
 // ---------------------------------------------------------------------------
 
 async function moveTrigger(
   db: Db,
   id: string,
-  to: PmTriggerState,
+  event: PmTriggerEvent,
   set: Partial<Pick<typeof pmWorkTriggers.$inferInsert, "userId" | "outcomeCode" | "outcomeDetail" | "instanceId">> = {},
 ): Promise<boolean> {
-  const from = pmTriggerSourcesOf(to);
   const moved = await db
     .update(pmWorkTriggers)
-    .set({ ...set, state: to, updatedAt: sql`now()` })
-    .where(and(eq(pmWorkTriggers.id, id), inArray(pmWorkTriggers.state, from)))
+    .set({ ...set, state: PM_WORK_TRIGGER_MACHINE.def.transitions[event].to, updatedAt: sql`now()` })
+    .where(and(eq(pmWorkTriggers.id, id), whereFrom(pmWorkTriggers.state, PM_WORK_TRIGGER_MACHINE, event)))
     .returning({ id: pmWorkTriggers.id });
   return moved.length === 1;
 }
@@ -215,7 +217,7 @@ async function handleOneSafely(
           eq(pmWorkTriggers.connectionId, conn.id),
           eq(pmWorkTriggers.externalId, signal.externalId),
           eq(pmWorkTriggers.deliveryContentSha256, contentSha256),
-          inArray(pmWorkTriggers.state, pmTriggerSourcesOf("failed")),
+          whereFrom(pmWorkTriggers.state, PM_WORK_TRIGGER_MACHINE, "fail"),
         ),
       )
       .returning({ id: pmWorkTriggers.id });
@@ -285,7 +287,7 @@ async function handleOne(
   if (!decision || decision.effect !== "allow") {
     return deny(db, dataKey, conn, trigger.id, base, { ...detail, agentId: row.agentId, agentRuleId: decision?.ruleId ?? null }, user.id, "not_entitled");
   }
-  if (!(await moveTrigger(db, trigger.id, "accepted", { userId: user.id }))) return { ...base, state: "received" };
+  if (!(await moveTrigger(db, trigger.id, "accept", { userId: user.id }))) return { ...base, state: "received" };
   await audit(db, user.id, trigger.id, PM_TRIGGER_RULE_IDS.accepted, "allow",
     `PM connection '${conn.name}': item ${signal.externalId} accepted for the linked user (agent decision ${decision.ruleId})`,
     { ...detail, agentId: row.agentId, agentRuleId: decision.ruleId });
@@ -334,7 +336,7 @@ async function handleOne(
     .insert(pmLinks)
     .values({ connectionId: conn.id, objectType: "workflow_instance", objectId: instanceId, externalId: signal.externalId, externalUrl: item.url })
     .onConflictDoNothing();
-  if (await moveTrigger(db, trigger.id, "running", { instanceId })) {
+  if (await moveTrigger(db, trigger.id, "start", { instanceId })) {
     await audit(db, user.id, trigger.id, PM_TRIGGER_RULE_IDS.running, "allow",
       `PM connection '${conn.name}': item ${signal.externalId} started workflow instance ${instanceId}`, { ...detail, instanceId });
   }
@@ -360,19 +362,19 @@ async function deny(
   code: string,
 ): Promise<PmTriggerOutcome> {
   const text = OUTCOME_TEXT[code]!;
-  if (!(await moveTrigger(db, triggerId, "denied", { userId, outcomeCode: code, outcomeDetail: text }))) {
+  if (!(await moveTrigger(db, triggerId, "deny", { userId, outcomeCode: code, outcomeDetail: text }))) {
     return { ...base, state: "received" };
   }
   await audit(db, userId ?? SYSTEM_IDENTITY, triggerId, PM_TRIGGER_RULE_IDS.denied, "deny",
     `PM connection '${conn.name}': item ${base.externalId} was not started (${code})`, { ...detail, outcomeCode: code });
   const posted = await postOutcomeComment(db, dataKey, conn, base.externalId, text, userId);
   if (posted.ok) {
-    await moveTrigger(db, triggerId, "written_back");
+    await moveTrigger(db, triggerId, "write_back");
     await audit(db, userId ?? SYSTEM_IDENTITY, triggerId, PM_TRIGGER_RULE_IDS.writtenBack, "allow",
       `PM connection '${conn.name}': the reason was posted on item ${base.externalId}`, { ...detail, outcomeCode: code });
     return { ...base, state: "written_back", outcomeCode: code };
   }
-  await moveTrigger(db, triggerId, "failed", { outcomeDetail: `${text} (The reason could not be posted on the item.)` });
+  await moveTrigger(db, triggerId, "fail", { outcomeDetail: `${text} (The reason could not be posted on the item.)` });
   await audit(db, userId ?? SYSTEM_IDENTITY, triggerId, PM_TRIGGER_RULE_IDS.failed, "deny",
     `PM connection '${conn.name}': the reason could not be posted on item ${base.externalId}`, { ...detail, outcomeCode: code, error: posted.error });
   return { ...base, state: "failed", outcomeCode: code };
@@ -390,7 +392,7 @@ async function fail(
   code: string,
 ): Promise<PmTriggerOutcome> {
   const text = OUTCOME_TEXT[code]!;
-  await moveTrigger(db, triggerId, "failed", { outcomeCode: code, outcomeDetail: text });
+  await moveTrigger(db, triggerId, "fail", { outcomeCode: code, outcomeDetail: text });
   const posted = await postOutcomeComment(db, dataKey, conn, base.externalId, text, userId);
   await audit(db, userId, triggerId, PM_TRIGGER_RULE_IDS.failed, "deny",
     `PM connection '${conn.name}': item ${base.externalId} was accepted but no workflow started (${code})`,
@@ -467,6 +469,14 @@ export function registerPmTriggerRoutes(app: FastifyInstance, db: Db): void {
     if (body.projectId) {
       const [project] = await db.select({ id: projects.id }).from(projects).where(eq(projects.id, body.projectId));
       if (!project) return reply.status(400).send({ error: "invalid_reference", detail: "projectId names no project" });
+    }
+    // turning triggers on lets a PM tool start governed work: a relaxation, so a step-up, audited (ADR-0180)
+    if (body.enabled) {
+      const [current] = await db.select({ enabled: pmTriggerSettings.enabled }).from(pmTriggerSettings).where(eq(pmTriggerSettings.connectionId, conn.id));
+      if (!current?.enabled) {
+        const su = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { pmTriggers: "enable", connection: conn.name } });
+        if (!su.ok) return reply;
+      }
     }
     const { enabled, agentId, projectId, ...config } = body;
     const values = { enabled, agentId, projectId: projectId ?? null, config, updatedByUserId: req.authCtx.userId ?? null };

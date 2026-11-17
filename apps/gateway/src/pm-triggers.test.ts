@@ -145,12 +145,13 @@ beforeAll(async () => {
   const rule = await app.inject({ method: "POST", headers: AUTH, url: "/v1/workflows/assignment-rules", payload: { templateId: tpl.json().id, changeType: CHANGE_TYPE } });
   expect(rule.statusCode, rule.body).toBe(201);
 
-  const put = await app.inject({
+  // turning triggers on is a settings_relax step-up (relaxed here, as the other suites do)
+  const put = await relaxStepUpAround(db, () => app.inject({
     method: "PUT",
     headers: AUTH,
     url: `/v1/pm/connections/${CONN}/trigger-settings`,
     payload: { enabled: true, agentIdentities: [AGENT_ACCOUNT], agentId, change: { changeType: CHANGE_TYPE, environment: "dev" } },
-  });
+  }));
   expect(put.statusCode, put.body).toBe(200);
   for (const [who, account] of [[alice, "557058:pmt-alice"], [bob, "557058:pmt-bob"]] as const) {
     const l = await app.inject({
