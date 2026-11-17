@@ -4,7 +4,7 @@
 - **Date**: 2026-11-17
 - **Index**: **Governed MCP tools from a customer's OpenAPI 3.x document or REST endpoint list (staged and default-deny until an admin approves each tool; drift on re-import needs re-approval; a declared transition table; served through the MCP proxy as an in-process `openapi` upstream; every call through the guarded fetch with server-held credentials) and a pluggable routing classifier behind the ADR-0088 scorer contract (off by default, recorded in the audit)** (lane E34)
 - **Driver**: `internal/product/GAP_ANALYSIS_KRAKEND_2026-11.md` (on PR #935 until it merges) rows 4 and 14, ranked gaps 4 and 5
-- **Built in**: lane E34, two PRs (1: this ADR and the routing classifier; 2: the OpenAPI tool sources)
+- **Built in**: lane E34, two PRs (1: this ADR and the routing classifier; 2: the OpenAPI tool sources and the part 3 conformance record)
 - **Migration**: `pending/routing_classifier.sql` (PR 1), `pending/openapi_tool_sources.sql` (PR 2), numbered at merge (ADR-0252)
 - **Related**: [ADR-0043](0043-mcp-oidc-egress-guard.md) (egress on MCP upstreams),
   [ADR-0088](0088-external-scorer-adapter.md) (external scorer contract), [ADR-0097](0097-mcp-admission-scanning-and-auth-discovery.md)
@@ -156,6 +156,48 @@ definition pinning run on exactly what a model will see, and the governed call p
 - Setting the classifier requires the scorer to exist, be enabled, speak the `regulait` contract and claim
   `routing_complexity`, through `PUT /v1/org/settings` (admin, audited). Naming a scorer is a strictness relaxation
   (it sends prompt text out), so it needs a `settings_relax` step-up; clearing it does not.
+
+### Part 3: MCP 2026-07-28 conformance check (owner addition, 2026-11-17, MARKET_ANALYSIS_2026-11 G10)
+
+**Result.** MCP revision 2026-07-28 is published and is the current version ([versioning](https://modelcontextprotocol.io/specification/versioning),
+[changelog](https://modelcontextprotocol.io/specification/2026-07-28/changelog)). It removes sessions, the `initialize`
+handshake, the GET stream and resumability; carries the protocol version and capabilities in every request's `_meta`;
+adds `server/discover`; moves sampling, elicitation and roots into `tools/call` results (`inputRequests`); and replaces
+`resources/subscribe` with `subscriptions/listen`. The gateway, on SDK `@modelcontextprotocol/sdk` 1.32.2 (the newest
+1.x; its `LATEST_PROTOCOL_VERSION` is 2025-11-25), is a conformant 2025-11-25 server and client, which the spec allows
+as a legacy peer. It does not speak 2026-07-28 on either side.
+
+| Change | Status | Evidence |
+|---|---|---|
+| No sessions; ignore an incoming `Mcp-Session-Id`, never mint one | Conformant | stateless transport per POST, `mcp-proxy.ts` (`sessionIdGenerator: undefined`) |
+| GET answers 405 | Conformant | `mcp-proxy.ts` `app.get("/mcp/:serverId")` |
+| No resumability (`Last-Event-ID`) | Conformant | no event store is passed to the transport |
+| DELETE answers 405 (SHOULD) | Gap: 404 | no DELETE route |
+| No `initialize`; per-request `_meta` version; `UnsupportedProtocolVersion` (-32022) | Gap | the SDK 1.x server answers a 2026-07-28 header with 400 / -32000; a dual-era client falls back to `initialize` and works, a 2026-07-28-only client fails |
+| `server/discover` MUST | Gap (modern era) | not handled |
+| Gateway as a client of a 2026-07-28-only upstream | Gap | the SDK 1.x `Client` always runs `initialize` (`mcp-egress.ts` `guardedMcpConnect`); the upstream refuses, and the call fails as an audited 502 |
+| `inputRequests` in results, `subscriptions/listen` | Not reachable today | our refusals of sampling, elicitation and subscribe match on method names (`mcp-protocol.ts`); in the new era these arrive inside `tools/call` results |
+| Auth (`iss` check, DCR changes) | n/a | the gateway runs no upstream OAuth client flow; RFC 9728 metadata unchanged |
+
+**Triage (owner rule, F×S).**
+- DELETE 404 instead of 405: F 2, S 1, F×S 2, filed as #997 (`triage-low`), code left alone.
+- A 2026-07-28-only client cannot use the gateway: F 3, S 5, F×S 15.
+- A 2026-07-28-only upstream is unreachable: F 3, S 5, F×S 15.
+- Speaking the new era without new governance would let upstream sampling and elicitation arrive as `inputRequests`
+  inside `tools/call` results, past the method-name refusals: F 2, S 8, F×S 16 (latent: unreachable until the gateway
+  speaks the new era).
+
+**Why the three scored ≥ 5 are not fixed in this lane.** None can be fixed on SDK 1.x: speaking 2026-07-28 needs the
+v2 packages `@modelcontextprotocol/server` and `@modelcontextprotocol/client` (2.4.0, released 2026-10-23, Apache-2.0),
+which answer and detect both eras. Moving the MCP proxy, the protocol relay, the transports and the egress connect onto
+a new major SDK changes the shared MCP request path that several lanes edit, so it is its own lane (PENDING fragment),
+not part of the OpenAPI slice. The binding conditions for that lane, recorded here so the migration cannot drop them:
+1. keep serving 2025-11-25 clients and upstreams (dual-era), with the stateless, POST-only transport;
+2. refuse, filter and audit `inputRequests` (sampling, elicitation, roots) in upstream results exactly as the current
+   method refusals do, and refuse `subscriptions/listen` like `resources/subscribe`, before the new era is enabled;
+3. answer `server/discover` with only the capabilities the caller is entitled to, and keep policy decisions on the
+   body, not the routing headers (`Mcp-Method`, `Mcp-Name`), rejecting a header/body mismatch (-32020);
+4. the new era stays off until an admin enables it (ADR-0180), and DELETE gets its 405 (#997).
 
 ## Consequences
 
