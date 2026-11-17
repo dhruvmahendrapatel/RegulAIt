@@ -192,6 +192,7 @@ import { applyModelCardApprovalDecision, registerMrmRoutes } from "./mrm.js";
 import { registerFairnessRoutes } from "./fairness.js";
 import { registerClassicalDriftRoutes } from "./classical-drift.js";
 import { registerRuleStepRoutes } from "./rule-steps.js";
+import { applyDecisionTableDecision, precheckDecisionTableDecision, registerDecisionTableRoutes } from "./decision-tables.js";
 import { registerDriftIngestCredentialRoutes } from "./drift-ingest-credentials.js";
 import { AiBomError } from "./ai-bom.js";
 import { runAiBomSignoffs, type AiBomSignoff } from "./ai-bom-signoff.js";
@@ -5222,6 +5223,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const refusal = await precheckComplianceProfileDecision(db, row, deciderUserId);
       if (refusal) return fail(refusal.status, refusal.body);
     }
+    // ADR-0327 addendum — `cannot_approve_own_decision_table`, keyed on the DECIDER (same reasoning as above).
+    if (row.objectType === "decision_table") {
+      const refusal = await precheckDecisionTableDecision(db, row, deciderUserId);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
     // Separation-of-duties guard: the person deciding IS the person who
     // triggered the governed action. Still decidable (alternate-approver
     // routing is deliberately out of scope) but never silently — a recorded
@@ -5501,6 +5507,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           (d, projectId, oldRequired, by) => reapplyReclassificationToInFlight(d, projectId, [], by, oldRequired),
           requiredTemplateIdsFor,
         );
+      }
+      // ADR-0327 addendum: a reviewed decision-table version — approved = published, inside the decision's transaction,
+      // only if the version it was proposed against is still the published one (else recorded stale). Denied = rejected.
+      if (updated.objectType === "decision_table") {
+        await applyDecisionTableDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
       }
       // ADR-0045 MRM sign-offs: the risk acceptance is recorded on the model
       // card chain HERE, inside the one decide path, so it inherits every
@@ -5849,6 +5860,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerClassicalDriftRoutes(app, db);
   // ADR-0327 (lane E12): rule-like AI step detection, admin-only via the default gate
   registerRuleStepRoutes(app, db);
+  registerDecisionTableRoutes(app, db);
   // ADR-0223 amendment 1: the per-monitor write-only ingestion credential and its one route
   registerDriftIngestCredentialRoutes(app, db);
   // ADR-0057 — CONTINUOUS RED-TEAMING. Versioned attack libraries, the shipped

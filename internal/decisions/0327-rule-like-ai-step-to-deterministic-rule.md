@@ -120,3 +120,47 @@ induction over numeric ranges is deferred to a sandboxed engine image with sciki
     scan rebuilds them only from spans still held. Trace spans themselves are outside the locator today and are
     bounded by the retention floor; that is unchanged here;
   - **RLS:** both tables are classified deployment-wide in ADR-0234 (no row policy; admin-only routes).
+
+## Addendum: decision tables (owner approval 2026-11-17, competitor gap audit, Camunda row 6)
+
+The owner asked that business users can write decision tables: a simple versioned table of conditions and outcomes,
+validated by a schema, compiled to this ADR's rule engine (not a new engine), and published only on an audited
+approval. This addendum records it; no new ADR.
+
+- **Shape.** A table names up to 4 input fields (the names `extractStepFields` produces) and up to 200 rows. Each row
+  gives every field one value, or a list of up to 20 values, and one fixed outcome of up to 200 characters. Values are
+  text, finite numbers, true, false or null. There is no expression language, no ranges and no wildcard: a condition a
+  person cannot write as exact values is not a decision-table condition. The zod schema in `decision-tables.ts` checks
+  the shape; `compileDecisionTable` (`packages/optimizer-kernel/src/decision-table.ts`) checks the rest and reports
+  every problem at once.
+- **One engine.** `compileDecisionTable` expands each row's value lists into exact-match cells and returns the same
+  `InducedRule` the detector produces, held to the same 1 000-cell ceiling, so `applyInducedRule` and the shadow tally
+  run a table unchanged. Hit policy is UNIQUE (DMN's term): two rows that cover the same input are refused, whether the
+  outcomes agree or not, so a table never depends on row order. An input the table does not cover goes to the AI.
+- **Versions and approval.** `decision_tables` binds a table to one AI step (agent and span name, the suggestion key);
+  `decision_table_versions` holds immutable versions. Proposing a version creates it `pending_review` with an
+  `approvals` row (`object_type` `decision_table`) naming an active administrator other than the author. Only the one
+  decide path publishes it (`applyDecisionTableDecision`, in the decision's transaction), and only if the version it
+  was proposed against is still the published one; otherwise it is recorded `stale`. The author can never decide their
+  own version, through delegation or the admin override (`cannot_approve_own_decision_table`). A denial records
+  `rejected` and changes nothing. A version that compiles to the same cells as the published one is refused
+  (`no_change`). At most one published and one pending version per table (partial unique indexes). Create, proposal
+  and every decision outcome are audited (`object_type` `decision_table`).
+- **Lifecycle (owner rule 12).** `DECISION_TABLE_VERSION_TRANSITIONS` declares the transitions once (publish, reject,
+  mark stale from `pending_review`; supersede from `published`) and `transitionVersion` enforces each as a
+  compare-and-set on the `from` state.
+- **Routes** (admin-only through the default gate, API only; UI-D builds the editor): `GET`/`POST /v1/decision-tables`
+  (the list under the ADR-0226 contract), `GET /v1/decision-tables/:id` (published and pending versions with readable
+  rows and test cases, plus the latest 20 versions), `POST /v1/decision-tables/:id/versions`.
+- **Publishing changes no routing.** The AI still answers the step. Serving a published table in place of the AI is the
+  slice 4 switch, which will take either a suggestion or a published table and needs its own approval.
+- **Open source (ADR-0176, compared in the slice PR).** DMN evaluators (`@hbtgmbh/dmn-eval-js`, `js-feel`) are stale
+  with open advisories; `json-rules-engine` is outside the maintenance window and evaluates rules at runtime; GoRules
+  ZEN evaluates its own expression language in a native binary; `dmn-js` carries a watermark clause outside the
+  ADR-0176 licence list. None compiles to an exact-match lookup, so the compiler is ours. DMN 1.3 XML import and export
+  through `dmn-moddle` (MIT, maintained, no evaluation) can map onto this shape later, limited to hit policy UNIQUE and
+  literal values.
+- **Data.** A table is configuration a person typed, not a copy of captured spans, so the trace retention floor and the
+  privacy-ops locator do not apply to it; it is kept until its agent is deleted (cascade). RLS: deployment-wide
+  (ADR-0234 appendix).
+
