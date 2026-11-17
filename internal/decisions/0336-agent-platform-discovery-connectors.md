@@ -129,8 +129,15 @@ reply, 2026-08), so a GPT's connected apps are what its configured actions name,
    `agent_registry_record_components`, audit rows or logs. Only names, ids, counts and enabled flags are kept, plus,
    where change detection needs it, a SHA-256 hash and a length of such text. Adapters select only named fields, and
    each slice's tests list the exact fields per vendor, so a test fails if an adapter keeps a content field.
-   Finding secrets embedded in agent configurations (gap 6) has to read that text, so it is its own decision, under
-   the ADR-0042 guardrail and PII posture and the compliance cascade's retention, not a widening of this one.
+   **Plaintext secrets in agent configurations are found in memory, reported by location only** (owner, 2026-11-17,
+   competitor gap audit row 6; slice 4). While a record is read, each content field the adapter selects for
+   hashing is also passed, in memory only, through the existing vendored secret matcher (`vendoredSecretSpans` over
+   `VENDORED_SECRET_RULES`, ADR-0186, the rule set the ADR-0042 guardrails and the ADR-0195/ADR-0055 discovery
+   scanners already use). A hit raises a discovery finding that names only the location: the source, the staged
+   record, the vendor's object id, the field path and the rule id. The matched value, any excerpt or offset into
+   the text, and any hash of the secret are never stored, logged or audited, and the content itself is dropped
+   when the read ends, as above. No new matcher, table or ADR: the finding reuses the existing discovery finding
+   path.
 
 5. **Credential checks and secrets, per run.**
    - The Copilot Studio `RetrieveUserPrivileges` check and the Agentforce `UserPermissionAccess` check run at the start
@@ -170,6 +177,7 @@ reply, 2026-08), so a GPT's connected apps are what its configured actions name,
 1. This ADR, the adapter contract (wrapping #855's registry scanners as adapters too), `agent_registry_record_components`, and the Copilot Studio adapter.
 2. The Agentforce adapter.
 3. The OpenAI and n8n adapters.
+4. Plaintext-secret findings in imported agent configurations (decision 4), across all four adapters.
 
 ## Open-source check (ADR-0176)
 
@@ -191,5 +199,5 @@ the RegulAIt-specific part: mapping a vendor's agent shape onto the governed inv
   read-only and their runs say `unverified`; n8n's community edition keys carry full scope, which the source's docs
   state plainly.
 - **Follow-ups (PENDING fragment):** the inventory API for Copilot Studio once it accepts app-only tokens; AgentKit
-  Agent Builder once listable; embedded-secret findings in agent configurations; the import and components screens
+  Agent Builder once listable; the import and components screens
   (#453).
