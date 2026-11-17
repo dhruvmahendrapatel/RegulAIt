@@ -196,3 +196,31 @@ above, it is recorded here, against the decision it refers to.
     field, because that marker is a context key. It becomes one when the due time is a column, which is recorded as
     a PENDING item.
   - The `describe` transitions of lane E29 (PR #920) join the pending view once that helper merges.
+
+## Addition: the incident console (owner, 2026-11-17; competitor gap audit, Camunda row 7)
+
+The master folded this into decision 5 (visibility); no separate ADR. It builds on the pending-work view:
+
+- **What is an incident.** `GET /v1/workflows/incidents` lists instances that wait on one of four things:
+  - a failed executed stage with no retry queued (`failed_stage`);
+  - a failed required check (`check_failed`);
+  - a deploy parked for a manual handoff (`deploy_handoff`);
+  - a claim whose lease lapsed without a result (`stuck_claim`).
+
+  Each entry carries the pending-work view and, for each action, whether it is allowed now and why not.
+- **Three actions**, each admin-only (server-side, the default admin gate), with a note, audited
+  `workflow:incident-<action>`, and run through the kernel's declared transitions:
+  - **retry**: `recheck` for a failed check, or the executor for an executed stage;
+  - **skip**: the new kernel event `stage_skipped`;
+  - **cancel**: `abort`.
+
+  Retry and skip are refused while an executor holds a live claim.
+- **Skip is narrow.**
+  - It is accepted only on an `automated_check` stage with named checks whose template sets `skippable: true`
+    (absent is the strict default), and only while the instance waits on that stage.
+  - A review, an approval, an artifact, a git or a deploy stage can never carry `skippable`; template validation
+    refuses it.
+  - Skipping completes the stage and runs forward, so the next sign-off still stops the instance.
+  - It needs a `settings_relax` step-up bound to the instance and the stage.
+- **Replay.** `stage_skipped` is a recorded event like any other. The replay check lists it, and the fixture
+  `intake-check-skipped-by-incident-console` pins it.

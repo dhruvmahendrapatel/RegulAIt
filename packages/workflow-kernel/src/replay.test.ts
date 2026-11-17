@@ -49,6 +49,7 @@ const EVENT_KINDS = [
   "deploy_override",
   "rolled_back",
   "reopen",
+  "stage_skipped",
   "abort",
 ] as const satisfies readonly WorkflowEvent["kind"][];
 type UnlistedKind = Exclude<WorkflowEvent["kind"], (typeof EVENT_KINDS)[number]>;
