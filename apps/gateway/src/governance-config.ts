@@ -10,7 +10,7 @@
  * The document format, the normal form and the classification are `@regulait/shared` (governance-config.ts).
  */
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { CORE_SCHEMA, dump, load } from "js-yaml";
+import { CORE_SCHEMA, YAMLException, dump, load } from "js-yaml";
 import { z } from "zod";
 import {
   agents,
@@ -253,7 +253,10 @@ export function parseGovernanceDocument(content: string) {
     });
   } catch (e) {
     if (e instanceof AnchorRefused) throw new GovernanceDocumentError("anchors_refused", "YAML anchors and aliases are not accepted in a governance document");
-    throw new GovernanceDocumentError("unparseable", `the document is not valid YAML or JSON: ${(e as Error).message.split("\n")[0]}`);
+    // the parser's own reason and position only: its message quotes the document, which is never echoed back
+    const where = e instanceof YAMLException && e.mark ? ` at line ${e.mark.line + 1}, column ${e.mark.column + 1}` : "";
+    const reason = e instanceof YAMLException && typeof e.reason === "string" ? `: ${e.reason.slice(0, 200)}` : "";
+    throw new GovernanceDocumentError("unparseable", `the document is not valid YAML or JSON${reason}${where}`);
   }
   const parsed = governanceConfigSchema.safeParse(raw);
   if (!parsed.success) {
