@@ -2011,6 +2011,9 @@ export const auditLog = pgTable(
         // ADR-0357 (lane E38): a governance-config export, plan (dry run) or apply, and each object an apply changes
         // (objectId = null; the detail names the section and key). Plain text column — no DDL.
         "governance_config",
+        // ADR-0357 §4 (lane E38): a policy layer written or removed, a business unit created or changed, a project
+        // moved between units, and every refusal. Plain text column — no DDL.
+        "governance_policy",
       ],
     })
       .notNull()
@@ -3946,6 +3949,9 @@ export const projects = pgTable("projects", {
    * governance or budget behaviour. onDelete 'set null': deleting an initiative
    * orphans its children back to ungrouped, never deletes project rows. */
   initiativeId: uuid("initiative_id").references(() => initiatives.id, { onDelete: "set null" }),
+  /** ADR-0357: the business unit whose policy layer this project inherits (org → business unit → project). Null =
+   * directly under the org. Set null when the unit is removed, so the project inherits the org's layer alone. */
+  businessUnitId: uuid("business_unit_id").references((): AnyPgColumn => businessUnits.id, { onDelete: "set null" }),
   budgetUsd: doublePrecision("budget_usd"),
   budgetApproverUserId: uuid("budget_approver_user_id").references(() => users.id, {
     onDelete: "set null",
@@ -3987,6 +3993,8 @@ export const projects = pgTable("projects", {
   archivedReason: text("archived_reason"),
   archivedByUserId: uuid("archived_by_user_id").references(() => users.id, { onDelete: "set null" }),
 }, (t) => [
+  // ADR-0357: the policy fold looks up a business unit's projects
+  index("projects_business_unit_idx").on(t.businessUnitId).where(sql`${t.businessUnitId} IS NOT NULL`),
   check(
     "projects_isolation_sensitivity_check",
     sql`${t.isolationSensitivity} IS NULL OR ${t.isolationSensitivity} IN ('public', 'internal', 'confidential', 'regulated')`,
@@ -17142,3 +17150,58 @@ export const workflowTemplateVersions = pgTable(
 );
 export type WorkflowTemplateVersionRow = typeof workflowTemplateVersions.$inferSelect;
 // ===== end ADR-0341 =====
+
+// ===== ADR-0357 (lane E38): business units and tighten-only policy layers =====
+/**
+ * A business unit: the level between the org and its projects in the policy hierarchy
+ * (org → business unit → project → use case). A project belongs to at most one (`projects.business_unit_id`).
+ */
+export const businessUnits = pgTable("business_units", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull().unique("business_units_name_uq"),
+  description: text("description"),
+  createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export type BusinessUnitRow = typeof businessUnits.$inferSelect;
+
+/**
+ * One policy layer per level and subject. `policy` is a schema-validated configuration document (ADR-0200
+ * exception): `governancePolicySchema` in `@regulait/shared`, validated on every write; the rules it names are a
+ * closed set declared in `POLICY_RULES`. The subject is a foreign key per level (DB CHECK: exactly the one the level
+ * needs), never a copied name. `version` is a compare-and-set counter for edits.
+ */
+export const governancePolicyLayers = pgTable(
+  "governance_policy_layers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    level: text("level", { enum: ["org", "business_unit", "project", "use_case"] }).notNull(),
+    businessUnitId: uuid("business_unit_id").references(() => businessUnits.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "cascade" }),
+    useCaseId: uuid("use_case_id").references(() => aiUseCases.id, { onDelete: "cascade" }),
+    policy: jsonb("policy").$type<Record<string, unknown>>().notNull(),
+    version: integer("version").notNull().default(1),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("governance_policy_layers_org_uq").on(t.level).where(sql`${t.level} = 'org'`),
+    uniqueIndex("governance_policy_layers_bu_uq").on(t.businessUnitId).where(sql`${t.businessUnitId} IS NOT NULL`),
+    uniqueIndex("governance_policy_layers_project_uq").on(t.projectId).where(sql`${t.projectId} IS NOT NULL`),
+    uniqueIndex("governance_policy_layers_use_case_uq").on(t.useCaseId).where(sql`${t.useCaseId} IS NOT NULL`),
+    check(
+      "governance_policy_layers_subject_check",
+      sql`CASE ${t.level}
+        WHEN 'org' THEN ${t.businessUnitId} IS NULL AND ${t.projectId} IS NULL AND ${t.useCaseId} IS NULL
+        WHEN 'business_unit' THEN ${t.businessUnitId} IS NOT NULL AND ${t.projectId} IS NULL AND ${t.useCaseId} IS NULL
+        WHEN 'project' THEN ${t.projectId} IS NOT NULL AND ${t.businessUnitId} IS NULL AND ${t.useCaseId} IS NULL
+        WHEN 'use_case' THEN ${t.useCaseId} IS NOT NULL AND ${t.businessUnitId} IS NULL AND ${t.projectId} IS NULL
+        ELSE false END`,
+    ),
+    check("governance_policy_layers_policy_check", sql`jsonb_typeof(${t.policy}) = 'object' AND octet_length(${t.policy}::text) <= 262144`),
+    check("governance_policy_layers_version_check", sql`${t.version} >= 1`),
+  ],
+);
+export type GovernancePolicyLayerRow = typeof governancePolicyLayers.$inferSelect;
+// ===== end ADR-0357 =====
