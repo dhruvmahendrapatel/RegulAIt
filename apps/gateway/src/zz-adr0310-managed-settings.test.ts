@@ -27,6 +27,7 @@ import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import {
   auditLog,
+  aiEndpointSignatures,
   createDb,
   discoverySources,
   endpointDevices,
@@ -499,9 +500,35 @@ describe("ADR-0310 slice 2: drift against the ADR-0259 endpoint MCP inventory", 
     expect(byName.get("local")).toMatchObject({ vendor: "openai-codex", transport: "stdio", identity: { kind: "package", value: "@acme/e1-mcp" } });
     expect(byName.get("local").verdict).toMatch(/^DRIFT: a local \(stdio\)/);
     expect(byName.get("otherport").vendor).toBe("cursor");
-    expect(body.summary).toEqual({ driftServers: 3, devices: 1 });
+    expect(body.summary).toMatchObject({ driftServers: 3, devices: 1 });
     // NEGATIVE: the gateway (any case, default port), a disabled server and Claude Desktop's config are not drift
     for (const n of ["gateway", "gatewayport", "disabled", "desktop"]) expect(byName.has(n)).toBe(false);
+  });
+
+  it("reports per-vendor coverage from the enabled catalogue: an uncollected vendor's drift is unknown (null), never 0 (#902 review)", async () => {
+    const before = (await drift(`?deviceId=${devA}`)).json();
+    expect(before.coverage.map((c: any) => c.vendor).sort()).toEqual(["claude-code", "cursor", "github-copilot", "openai-codex"]);
+    for (const c of before.coverage) {
+      if (c.status === "not_collected") expect(c.driftServers).toBeNull();
+      else expect(typeof c.driftServers).toBe("number");
+    }
+    expect(before.summary.complete).toBe(before.coverage.every((c: any) => c.status === "collected"));
+    if (!before.summary.complete) expect(before.coverageNote).toMatch(/^Not fully measured: .*unknown, not zero/);
+    // the seed's `.codex` directory row does not cover `.codex/config.toml`; a catalogue row for the file does
+    const [sig] = await db
+      .insert(aiEndpointSignatures)
+      .values({ provider: `e1prov-${RUN}`, kind: "assistant_config", value: ".codex/config.toml", matchType: "identifier", provenance: "admin", enabled: true })
+      .returning({ id: aiEndpointSignatures.id });
+    try {
+      const after = (await drift(`?deviceId=${devA}&vendor=openai-codex`)).json();
+      expect(after.coverage).toEqual([{ vendor: "openai-codex", status: "collected", collectedPaths: [".codex/config.toml"], missingPaths: [], driftServers: 1 }]);
+      // NEGATIVE: disabling the row makes it unmeasured again
+      await db.update(aiEndpointSignatures).set({ enabled: false }).where(eq(aiEndpointSignatures.id, sig!.id));
+      const off = (await drift(`?deviceId=${devA}&vendor=openai-codex`)).json();
+      expect(off.coverage[0]).toMatchObject({ status: "not_collected", driftServers: null });
+    } finally {
+      await db.delete(aiEndpointSignatures).where(eq(aiEndpointSignatures.id, sig!.id));
+    }
   });
 
   it("filters by vendor and pages by keyset", async () => {

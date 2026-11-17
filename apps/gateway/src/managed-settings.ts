@@ -20,6 +20,7 @@ import { createHash } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
+  aiEndpointSignatures,
   and,
   auditLog,
   asc,
@@ -49,6 +50,7 @@ import {
   MANAGED_SETTINGS_SCHEMA,
   MANAGED_SETTINGS_VENDORS,
   MANAGED_VENDOR_CONFIG_PATHS,
+  managedVendorCoverage,
   managedVendorOfConfigPath,
   ManagedSettingsCompileError,
   type EffectiveMcpPolicy,
@@ -366,6 +368,25 @@ export async function managedSettingsDrift(db: Db, q: DriftQuery, publicUrl: str
     .select({ servers: count(), devices: sql<number>`count(DISTINCT ${endpointMcpServers.deviceId})` })
     .from(endpointMcpServers)
     .where(and(...base));
+  // #902 review: a vendor whose config files the enabled catalogue (its `assistant_config` rows, the config_path
+  // catalogue SD3 matches and the collection manifest is built from) does not collect is not measured, so its count is
+  // null (unknown), never a reassuring zero (ADR-0180)
+  const catalogue = await db
+    .select({ value: aiEndpointSignatures.value })
+    .from(aiEndpointSignatures)
+    .where(and(eq(aiEndpointSignatures.enabled, true), eq(aiEndpointSignatures.kind, "assistant_config")));
+  const perVendor = new Map<string, number>();
+  for (const r of await db
+    .select({ vendor: VENDOR_OF_ROW, servers: count() })
+    .from(endpointMcpServers)
+    .where(and(...base))
+    .groupBy(sql`1`)) {
+    if (r.vendor) perVendor.set(r.vendor, Number(r.servers));
+  }
+  const coverage = managedVendorCoverage(catalogue.map((c) => c.value))
+    .filter((c) => !q.vendor || c.vendor === q.vendor)
+    .map((c) => ({ ...c, driftServers: c.status === "not_collected" ? null : (perVendor.get(c.vendor) ?? 0) }));
+  const unmeasured = coverage.filter((c) => c.status !== "collected").map((c) => c.vendor);
   const conds = q.cursor ? [...base, gt(endpointMcpServers.id, q.cursor)] : base;
   const rows = await db
     .select({ row: endpointMcpServers, devicePseudonym: endpointDevices.devicePseudonym })
@@ -405,7 +426,16 @@ export async function managedSettingsDrift(db: Db, q: DriftQuery, publicUrl: str
     body: {
       latestBundle: { id: latest.id, createdAt: latest.createdAt.toISOString() },
       gatewayHost: hosts[0],
-      summary: { driftServers: Number(totals?.servers ?? 0), devices: Number(totals?.devices ?? 0) },
+      summary: {
+        driftServers: Number(totals?.servers ?? 0),
+        devices: Number(totals?.devices ?? 0),
+        // the totals cover only what is collected; `complete: false` says some vendor's files are not (fully) read
+        complete: unmeasured.length === 0,
+      },
+      coverage,
+      coverageNote: unmeasured.length
+        ? `Not fully measured: ${unmeasured.join(", ")}. The enabled endpoint catalogue has no config_path row for some of these vendors' MCP config files, so the endpoint agent does not read them; drift there is unknown, not zero. Add the catalogue rows (see each vendor's missingPaths) to measure it.`
+        : "Every managed vendor's MCP config files are collected by the enabled endpoint catalogue.",
       items,
       nextCursor: rows.length > q.limit ? page[page.length - 1]!.row.id : null,
     },

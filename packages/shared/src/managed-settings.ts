@@ -225,3 +225,27 @@ export function isGatewayHost(reportedHost: string, publicUrl: string): boolean 
   const strip = (h: string) => (dflt && h.endsWith(`:${dflt}`) ? h.slice(0, -(dflt.length + 1)) : h);
   return strip(reportedHost.toLowerCase()) === strip(u.host.toLowerCase());
 }
+
+export type ManagedVendorCoverageStatus = "collected" | "partial" | "not_collected";
+
+/**
+ * Which of a managed vendor's MCP config files the enabled endpoint catalogue makes the agent collect (#902 review).
+ * The ADR-0259 agent reads only files the signed manifest names, and the manifest comes from enabled `config_path`
+ * catalogue rows, so a vendor with no covering row is NOT MEASURED: its drift must be reported as unknown, never as
+ * zero (ADR-0180). A catalogue value covers a path when it is that path, or an OS-prefixed form of it; a directory
+ * row (`.codex`) does not, since the agent does not expand directories into the files under them.
+ */
+export function managedVendorCoverage(
+  enabledConfigPaths: readonly string[],
+): Array<{ vendor: ManagedSettingsVendor; status: ManagedVendorCoverageStatus; collectedPaths: string[]; missingPaths: string[] }> {
+  const values = enabledConfigPaths.map((v) => v.replace(/\\/g, "/"));
+  return MANAGED_SETTINGS_VENDORS.map((vendor) => {
+    const collectedPaths: string[] = [];
+    const missingPaths: string[] = [];
+    for (const s of MANAGED_VENDOR_CONFIG_PATHS[vendor]) {
+      (values.some((v) => v === s || v.endsWith(`/${s}`)) ? collectedPaths : missingPaths).push(s);
+    }
+    const status: ManagedVendorCoverageStatus = missingPaths.length === 0 ? "collected" : collectedPaths.length === 0 ? "not_collected" : "partial";
+    return { vendor, status, collectedPaths, missingPaths };
+  });
+}

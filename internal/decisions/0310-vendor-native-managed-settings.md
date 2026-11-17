@@ -78,6 +78,13 @@ own allowlists, which the vendors' clients enforce.
    applied on that device or the client does not enforce it. The response carries the newest bundle, a summary
    (drift rows and distinct devices under the same filters) and, per row, `reportedAfterLatestExport`, so an admin can
    tell a device that has not reported since the last export from one that reported and still drifts.
+   **Coverage (#902 review).** The endpoint agent reads only the files the enabled catalogue names (its
+   `assistant_config` rows), and a directory row such as the seed's `.codex` does not cover `.codex/config.toml`.
+   The response therefore carries a per-vendor `coverage` entry (`collected`, `partial` or `not_collected`, with the
+   collected and missing paths). A `not_collected` vendor's `driftServers` is `null` (unknown), never `0`, and
+   `summary.complete` is false with a `coverageNote` naming the vendors that are not fully measured (ADR-0180: an
+   unmeasured control must not read as a clean one). On the shipped seed, Copilot and Codex are not collected until
+   their catalogue rows are added (PENDING).
    **Refusals (secure by default):** 409 `public_url_unset` with no public URL (the managed host is unknown), and 409
    `no_bundle_exported` before any bundle exists, since nothing is managed yet and listing every server as drift would
    be noise. Devices are pseudonymous (ADR-0195), so drift is per device and identity, never per named user; devices
