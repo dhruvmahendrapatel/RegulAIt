@@ -286,7 +286,8 @@ test("review policy: two role reviews, a send-back, a prefilled resubmission and
   await avery.goto("/ui/inbox");
   await expect(avery.getByRole("heading", { name: "Inbox" })).toBeVisible();
   await expect(avery.getByRole("button", { name: `Review sign-off for ${NAME}` })).toHaveCount(0);
-  await page.goto(`/ui/admin/governance/use-cases/${useCaseId}`);
+  // #745: the record opens on its decision summary; the lifecycle tracker is on the Overview tab (its own ?tab= link)
+  await page.goto(`/ui/admin/governance/use-cases/${useCaseId}?tab=overview`);
   const tracker = page.locator("section", { has: page.getByText("Lifecycle tracker", { exact: true }) });
   await expect(tracker.getByRole("row").filter({ hasText: "Sign-off: Security" })).toContainText("Closed — another review ended the round");
 
