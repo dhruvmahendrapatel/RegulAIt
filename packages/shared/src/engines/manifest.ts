@@ -19,6 +19,7 @@
 import { GARAK_ENGINE_VERSION, GARAK_USAGE_DATA_ENV, GARAK_WORKER_SELF_TEST_SWITCH, garakJudgeSets, garakManifestSets, garakReducedSet } from "./garak.js";
 import { ENGINE_IMAGES_LOCK } from "./images-lock.js";
 import { MODELSCAN_ENGINE_VERSION, modelscanReducedSet } from "./modelscan.js";
+import { FAIRLEARN_ENGINE_VERSION, FAIRLEARN_USAGE_DATA_ENV, FAIRLEARN_WORKER_SELF_TEST_SWITCH, fairlearnManifestSets } from "./fairlearn.js";
 import { SPIKEE_ENGINE_VERSION, SPIKEE_USAGE_DATA_ENV, SPIKEE_WORKER_SELF_TEST_SWITCH, spikeeJudgeSets, spikeeManifestSets, spikeeReducedSet } from "./spikee.js";
 import { ADMISSION_SCAN_ENGINES } from "./admission-scan.js";
 import { PROMPTFOO_ENGINE_VERSION, PROMPTFOO_USAGE_DATA_ENV, promptfooManifestSets, promptfooReducedSet } from "./promptfoo.js";
@@ -349,6 +350,38 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     airGappedReducedSet: spikeeReducedSet(),
     lastVerified: "2026-11-07",
     reCheckBy: "2027-02-07",
+    unverified: [
+      "image digest and signature: no publish is recorded yet (engines/images.lock.json), so the engine cannot be enabled",
+      "maintainer count",
+      "transitive licences inside the image beyond the hash-pinned closure's metadata (CI's image scan)",
+      "runtime behaviour inside the built image (the worker's egress test, an air-gapped run)",
+    ],
+  },
+  // ADR-0346: fairlearn (group-fairness metrics on a model's decisions). Off, and no image until its first signed
+  // publish: the lock's null digest means no runner passes the self-test, so it cannot be enabled.
+  fairlearn: {
+    id: "fairlearn",
+    kind: "eval",
+    displayName: "Fairlearn",
+    version: FAIRLEARN_ENGINE_VERSION,
+    generation: 1 + ENGINE_IMAGES_LOCK.fairlearn.publishGeneration,
+    imageDigest: ENGINE_IMAGES_LOCK.fairlearn.manifestDigest,
+    licence: "MIT",
+    maintainerCount: null,
+    usageDataEnv: { ...FAIRLEARN_USAGE_DATA_ENV, [FAIRLEARN_WORKER_SELF_TEST_SWITCH]: "1" },
+    workerAttestedSwitches: [...Object.keys(FAIRLEARN_USAGE_DATA_ENV), FAIRLEARN_WORKER_SELF_TEST_SWITCH],
+    // each row is one call to the card's model through the gateway, with the run's key
+    needsModelAccess: true,
+    // the reply is mapped by exact match to the evaluation's two declared outputs: no judge model
+    requiresJudge: false,
+    judgeSets: [],
+    credentialIsolation: true,
+    taskImage: ENGINE_IMAGES_LOCK.fairlearn.imageId,
+    taskEntry: { command: "/usr/local/bin/node", args: ["/app/dist/task-main.js"] },
+    sets: fairlearnManifestSets(),
+    airGappedReducedSet: [],
+    lastVerified: "2026-11-17",
+    reCheckBy: "2027-02-17",
     unverified: [
       "image digest and signature: no publish is recorded yet (engines/images.lock.json), so the engine cannot be enabled",
       "maintainer count",
