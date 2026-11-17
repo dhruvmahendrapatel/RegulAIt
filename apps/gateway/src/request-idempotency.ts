@@ -182,6 +182,32 @@ export async function withIdempotencyKey<T extends Record<string, unknown>>(
   });
 }
 
+/**
+ * Claim a key for a caller-supplied request id that is not an HTTP route (ADR-0230 A3, code review #882): the SAP
+ * business write's stored idempotency key. The same store, window, unique (user, scope, key) index and sweep as the
+ * routes above, without a transaction around a record: the claim IS the record (the upstream SAP store is the replay
+ * authority). Concurrent first uses of one key serialise on the unique index, so exactly one digest wins:
+ *   - "claimed": the key was free (or its window had passed) and is now bound to this digest;
+ *   - "same": the key is already bound to this digest (a retry of the same request);
+ *   - "reused": the key is bound to a different digest (refuse).
+ * The claim's `response` stays null: nothing replays from it.
+ */
+export async function claimRequestKey(db: Db, claim: IdempotencyClaim): Promise<"claimed" | "same" | "reused"> {
+  await db
+    .delete(requestIdempotencyKeys)
+    .where(and(keyWhere(claim), lt(requestIdempotencyKeys.createdAt, new Date(Date.now() - IDEMPOTENCY_WINDOW_MS))));
+  const claimed = await db
+    .insert(requestIdempotencyKeys)
+    .values({ userId: claim.userId, scope: claim.scope, key: claim.key, requestDigest: claim.requestDigest })
+    .onConflictDoNothing({ target: [requestIdempotencyKeys.userId, requestIdempotencyKeys.scope, requestIdempotencyKeys.key] })
+    .returning({ id: requestIdempotencyKeys.id });
+  if (claimed.length > 0) return "claimed";
+  const [hit] = await db.select({ requestDigest: requestIdempotencyKeys.requestDigest }).from(requestIdempotencyKeys).where(keyWhere(claim));
+  // the conflict that skipped the insert is that row; a sweep between the two reads would leave none: claim again
+  if (!hit) return claimRequestKey(db, claim);
+  return hit.requestDigest === claim.requestDigest ? "same" : "reused";
+}
+
 /** at most this many claims per table go in one pass; the rest wait for the next */
 export const IDEMPOTENCY_SWEEP_BATCH = 5000;
 

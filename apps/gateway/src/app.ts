@@ -191,6 +191,7 @@ import { registerEvalRoutes } from "./evals.js";
 import { applyModelCardApprovalDecision, registerMrmRoutes } from "./mrm.js";
 import { registerFairnessRoutes } from "./fairness.js";
 import { registerClassicalDriftRoutes } from "./classical-drift.js";
+import { registerRuleStepRoutes } from "./rule-steps.js";
 import { registerDriftIngestCredentialRoutes } from "./drift-ingest-credentials.js";
 import { AiBomError } from "./ai-bom.js";
 import { runAiBomSignoffs, type AiBomSignoff } from "./ai-bom-signoff.js";
@@ -524,6 +525,7 @@ import { mirrorApprovalDecision, registerPmRoutes } from "./pm.js";
 import { RunStateError } from "@regulait/orchestration-kernel";
 import { applyWorkflowApprovalDecision, registerWorkflowRoutes } from "./workflows.js";
 import { registerTemplateGalleryRoutes } from "./template-gallery.js";
+import { registerWorkflowBuilderRoutes } from "./workflow-builder.js";
 // ADR-0080 — the AI use-case registry (L1 front-door) and its lifecycle join.
 import {
   acceptUseCaseRisks,
@@ -614,6 +616,7 @@ import { applyEngineRunApprovalDecision, lockEngineRunOfApprovalTx, registerEngi
 import { registerEngineRunnerScopeHook, engineCredentialRoutes } from "./engine-runner-auth.js";
 import { registerModelArtifactRoutes, type ArtifactStore } from "./model-artifacts.js";
 import { registerModelSupplyChainRoutes } from "./model-supply-chain.js";
+import { registerModelLineageRoutes } from "./model-lineage.js";
 import { schedulerJobRegistry } from "./scheduler-jobs.js";
 import { registerDataKeyRoutes } from "./data-key.js";
 import { registerDataKeyReencryptionRoutes } from "./data-key-reencrypt.js";
@@ -622,6 +625,7 @@ import { WEB_UI_ROUTES, defaultWebDistDir, registerWebServing } from "./web-serv
 // their own module so the published OpenAPI document derives each route's
 // documented credential requirement from the SAME objects that enforce it.
 import { AUTH_EXEMPT_ROUTES, NON_ADMIN_ROUTES, requestRlsScope } from "./route-classes.js";
+import { isDraining } from "./readiness.js";
 import { registerOpenApiRoutes, type RouteInventoryEntry } from "./openapi.js";
 import { registerOnboardingRoutes } from "./onboarding.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
@@ -634,6 +638,8 @@ import { registerThirdPartyIngestRoutes } from "./third-party-ingest-routes.js";
 import { registerSiemDeliveryRoutes } from "./siem-delivery.js";
 import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
 import { registerEndpointMcpConfigRoutes } from "./endpoint-mcp-config.js";
+// ADR-0310 (G2): vendor-native managed settings bundles
+import { registerManagedSettingsRoutes } from "./managed-settings.js";
 import { registerEndpointAddonInventoryRoutes } from "./endpoint-addon-inventory.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
 import { registerCostImportRoutes } from "./cost-import.js";
@@ -984,7 +990,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       timeWindow: (_req, key) => rateLimitWindowMs(rateCfg, key),
       // a load balancer's liveness poll must never be throttled into a false
       // "gateway is down"
-      allowList: (req) => req.url === "/health",
+      allowList: (req) => req.url === "/health" || req.url === "/ready",
       // The plugin constructs this itself and hands it the whole options
       // object, so the db arrives through the closure rather than through a
       // constructor argument we control.
@@ -5714,12 +5720,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // human landing on / gets the app (the SPA since the phase-2 swap), a load
   // balancer or uptime check gets a status. Both are auth-exempt.
   app.get("/", async (_req, reply) => reply.redirect("/ui", 302));
-  app.get("/health", async (_req, reply) => {
-    // ADR-0167 (CFG-08): the probe RACES a short deadline. `select 1` goes
-    // through the same pool every request uses, so with the pool exhausted it
-    // would queue behind them and the liveness check would hang rather than
-    // answer — a probe that cannot say "degraded" is not a probe. The query is
-    // left to settle on its own; it is one slot, and the answer is already out.
+  // ADR-0167 (CFG-08): the probe RACES a short deadline. `select 1` goes through the same pool every request uses, so
+  // with the pool exhausted it would queue behind them and the check would hang rather than answer — a probe that
+  // cannot say "degraded" is not a probe. The query is left to settle on its own; it is one slot, and the answer is
+  // already out.
+  const probeDatabase = async (): Promise<"ok" | "unreachable" | "timeout"> => {
     const probe = db.execute(sql`select 1`).then(
       () => "ok" as const,
       () => "unreachable" as const,
@@ -5730,10 +5735,21 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     });
     const database = await Promise.race([probe, deadline]);
     if (timer) clearTimeout(timer);
+    return database;
+  };
+  app.get("/health", async (_req, reply) => {
+    const database = await probeDatabase();
     if (database !== "ok") {
       return reply.status(503).send({ status: "degraded", database });
     }
     return { status: "ok", database: "ok" };
+  });
+  // ADR-0343: readiness. 503 `draining` once a shutdown has started, so the load balancer stops routing here first.
+  app.get("/ready", async (_req, reply) => {
+    if (isDraining(app)) return reply.status(503).send({ status: "draining" });
+    const database = await probeDatabase();
+    if (database !== "ok") return reply.status(503).send({ status: "degraded", database });
+    return { status: "ready", database: "ok" };
   });
 
   // ADR-0031 item 6: the health surface the two boot schedulers report into.
@@ -5834,6 +5850,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerFairnessRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0223 (P13b): drift and explainability for classical models, on the model register; off by default
   registerClassicalDriftRoutes(app, db);
+  // ADR-0327 (lane E12): rule-like AI step detection, admin-only via the default gate
+  registerRuleStepRoutes(app, db);
   // ADR-0223 amendment 1: the per-monitor write-only ingestion credential and its one route
   registerDriftIngestCredentialRoutes(app, db);
   // ADR-0057 — CONTINUOUS RED-TEAMING. Versioned attack libraries, the shipped
@@ -6054,6 +6072,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   });
   // ADR-0077 — the cascade-annotated template gallery (admin-gated by default)
   registerTemplateGalleryRoutes(app, db);
+  // ADR-0341 — the visual pipeline builder: drafts, versions, diff and publish of workflow templates (admin)
+  registerWorkflowBuilderRoutes(app, db);
   registerUseCaseRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0171 / AER-050 — the intake wizard's server-side drafts
   registerUseCaseDraftRoutes(app, db);
@@ -6234,6 +6254,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0259 (P35) — the MCP servers enrolled devices' host configs name, with the registry diff, and the admin's
   // links to approved servers. Admin-only by default; reads what the agent reports, contacts nothing.
   registerEndpointMcpConfigRoutes(app, db);
+  registerManagedSettingsRoutes(app, db);
   // ADR-0332 (lane E14): the endpoint AI add-on inventory (admin-only, RLS: admins and system_task)
   registerEndpointAddonInventoryRoutes(app, db);
   // ADR-0069 — CROSS-VENDOR COST CONSOLIDATION. Admin-only by default: the ONLY
@@ -6407,6 +6428,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerModelArtifactRoutes(app, db, opts.artifactStore === undefined ? {} : { artifactStore: opts.artifactStore });
   // ADR-0216: signing keys (admin), signatures (uploader or admin), supply-chain relaxations (admin, step-up)
   registerModelSupplyChainRoutes(app, db);
+  // lane L7 (P14 + P16): model-file lineage
+  registerModelLineageRoutes(app, db);
   // ADR-0224 (P13 c): records of processing and data-subject requests (admin-only, the default gate)
   registerPrivacyOpsRoutes(app, db, { dataKey: opts.dataKey });
 
