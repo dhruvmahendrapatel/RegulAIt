@@ -290,7 +290,8 @@ export const AGENT_RISKS: readonly AgentRisk[] = [
     owaspRefs: [llm("agent-overreach"), llm("resource-exhaustion")],
     owaspAgentic: [asi("ASI08"), asi("ASI10")],
     controls: [
-      { kind: "setting", column: "org_settings.max_worker_turns", secure: { atMost: 20 }, adr: "ADR-0021" },
+      // a capacity ceiling, exempt from the strictness registry (ADR-0181): a bound that is always on, not a switch
+      { kind: "behaviour", behaviour: "every worker run is capped at its turn ceiling", adr: "ADR-0021" },
       { kind: "setting", column: "org_settings.budget_enforcement", secure: BLOCK, adr: "ADR-0021" },
       { kind: "behaviour", behaviour: "the halted execution mode refuses every dispatch", adr: "ADR-0124" },
     ],
