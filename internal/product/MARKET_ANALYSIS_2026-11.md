@@ -287,6 +287,11 @@ and a kill-switch role (primary docs snippet).
   block, block session, disable), governed removal of risky add-ons, a Chromium extension and the open-source
   `agentaudit` repo-config scanner *(vendor blog and site, read 2026-11-17; docs and pricing pages not published)*.
   Parity table and gaps: [GAP_ANALYSIS_MANIFOLD_2026-11.md](GAP_ANALYSIS_MANIFOLD_2026-11.md).
+- **API gateways adding AI modules (added 2026-11-17).** **KrakenD AI Gateway**: a stateless Go API gateway whose AI
+  module is Enterprise-only (LLM routing and failover, semantic cache, prompt guard, token quotas, stream rewriting, an
+  MCP server over REST backends); the Community Edition (Apache-2.0) has no AI module *(vendor pages and GitHub, read
+  2026-11-17)*. Overlaps pillars 1, 5 and 6 at the gateway. Parity table and gaps:
+  [GAP_ANALYSIS_KRAKEND_2026-11.md](GAP_ANALYSIS_KRAKEND_2026-11.md).
 - **Managed agent platforms.** Google Gemini Enterprise Agent Platform: Agent Identity, Agent Registry and Agent
   Gateway, GA end of July *(secondary)*. AWS Bedrock AgentCore: managed harness, CLI and skills in April *(primary
   AWS What's New title)*. Nothing later than April was found; re:Invent is in December.
@@ -424,6 +429,7 @@ title and snippet); **S** = secondary.
 | Camunda agentic orchestration (added 2026-11-16) | https://camunda.com/ ; https://camunda.com/platform/ ; https://camunda.com/what-is-agentic-orchestration/ | P |
 | DarkControl AIDR (added 2026-11-17) | https://darkcontrolai.com/ ; https://darkcontrolai.com/platform.php ; https://darkcontrolai.com/features.php | P |
 | Manifold Security AIDR (added 2026-11-17) | https://www.manifold.security/ ; https://www.manifold.security/blog ; https://github.com/manifold-security/agentaudit | P |
+| KrakenD AI Gateway (added 2026-11-17) | https://www.krakend.io/ai-gateway/ ; https://www.krakend.io/docs/enterprise/ai-gateway/ ; https://github.com/krakend | P |
 
 **Not found / unverified:** Agent HQ GA; any Windsurf news after August; Holistic AI Guardian Agents GA date;
 Credo AIUC-1 integration; Codex Admin plugin year; Runlayer Series A date; Kong 2.1 timing; MCP 2026-07-28 RC vs

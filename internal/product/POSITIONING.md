@@ -56,6 +56,8 @@ control in RegulAIt goes green only when a SELECT over our own ledgers says so (
   [GAP_ANALYSIS_DARKCONTROL_2026-11.md](GAP_ANALYSIS_DARKCONTROL_2026-11.md).)
 - **vs Manifold Security (endpoint and browser AIDR)**: "Manifold watches and steers what agents do on a laptop. RegulAIt governs, costs and records every call those agents make, on the laptop, in the cloud or air-gapped, and is bringing the laptop's commands under the same signed policy." (Gaps:
   [GAP_ANALYSIS_MANIFOLD_2026-11.md](GAP_ANALYSIS_MANIFOLD_2026-11.md).)
+- **vs KrakenD AI Gateway (API gateway with an AI module)**: "KrakenD routes, caches and rate-limits your AI traffic. RegulAIt decides, per person, whether each model, tool and agent call may happen at all, and proves it afterwards. Keep KrakenD at the edge if you already run it." (Gaps:
+  [GAP_ANALYSIS_KRAKEND_2026-11.md](GAP_ANALYSIS_KRAKEND_2026-11.md).)
 - **vs building it in-house**: "Every hole we closed is a test that stays: 2,100+ enforcement
   tests, adversarial by method, mistakes ledger public in the repo."
 
