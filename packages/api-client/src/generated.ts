@@ -10,7 +10,7 @@
 // Regenerate with:  REGULAIT_WRITE_API_ARTIFACTS=1 pnpm --filter @regulait/gateway exec vitest run src/openapi.test.ts
 //
 // Spec version: 1.0.0
-// Operations:   75
+// Operations:   76
 //
 // RESPONSES ARE `unknown` BY DESIGN. The gateway's routes declare request
 // schemas but not response schemas, so there is nothing to derive a response
@@ -717,7 +717,7 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * Workflow instances.
+ * Workflow instances. ADR-0349: typed search fields `status`, `template`, `target`, `workItem`, `owner` (initiator), `stage` (current stage id) and `complianceTag` (the attributed project's classification), each index-served. A non-admin sees only their own instances. Add any ADR-0226 list parameter (`sort`, `cursor`, `offset`, `count`) for the paginated contract.
  * @stability public-stable — auth: user
    */
   getV1WorkflowsInstances<T = unknown>(options?: RequestOptions): Promise<T> {
@@ -747,6 +747,14 @@ export class GeneratedRegulAItClient extends BaseClient {
    */
   postV1WorkflowsInstancesByInstanceIdAdvance<T = unknown>(instanceId: string, body?: unknown, options?: RequestOptions): Promise<T> {
     return this.request<T>("POST", `/v1/workflows/instances/${encodeURIComponent(instanceId)}/advance`, body, options);
+  }
+
+  /**
+ * ADR-0349: what this instance is waiting for (`version: 1`). `waitingOn` is one of approval, artifact, plan, trigger, execution, retry, check_report, advance, check_failed, deploy_handoff or nothing, with a plain `detail` sentence. It also carries the current stage, pending approvers, the execution claim (holder, renewal, lease expiry, live), the queued retry (attempt, next run), the stage deadline when one is set, and the last error. Read-only; the same readers as the instance.
+ * @stability public-beta — auth: user
+   */
+  getV1WorkflowsInstancesByInstanceIdPending<T = unknown>(instanceId: string, options?: RequestOptions): Promise<T> {
+    return this.request<T>("GET", `/v1/workflows/instances/${encodeURIComponent(instanceId)}/pending`, undefined, options);
   }
 }
 
@@ -1127,5 +1135,10 @@ export const OPERATIONS: ReadonlyArray<{ id: string; method: string; path: strin
     "id": "postV1WorkflowsInstancesByInstanceIdAdvance",
     "method": "POST",
     "path": "/v1/workflows/instances/{instanceId}/advance"
+  },
+  {
+    "id": "getV1WorkflowsInstancesByInstanceIdPending",
+    "method": "GET",
+    "path": "/v1/workflows/instances/{instanceId}/pending"
   }
 ];

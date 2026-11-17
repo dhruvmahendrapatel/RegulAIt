@@ -295,7 +295,12 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
       "MCP tool breakdowns plus `other` add up to `ledger`.",
   },
 
-  "GET /v1/workflows/instances": { summary: "Workflow instances." },
+  "GET /v1/workflows/instances": {
+    summary: "Workflow instances. ADR-0349: typed search fields `status`, `template`, `target`, `workItem`, `owner` (initiator), `stage` (current stage id) and `complianceTag` (the attributed project's classification), each index-served. A non-admin sees only their own instances. Add any ADR-0226 list parameter (`sort`, `cursor`, `offset`, `count`) for the paginated contract.",
+  },
+  "GET /v1/workflows/instances/:instanceId/pending": {
+    summary: "ADR-0349: what this instance is waiting for (`version: 1`). `waitingOn` is one of approval, artifact, plan, trigger, execution, retry, check_report, advance, check_failed, deploy_handoff or nothing, with a plain `detail` sentence. It also carries the current stage, pending approvers, the execution claim (holder, renewal, lease expiry, live), the queued retry (attempt, next run), the stage deadline when one is set, and the last error. Read-only; the same readers as the instance.",
+  },
   "POST /v1/workflows/instances": {
     summary:
       "Start a workflow instance from a template. ADR-0349: with `workItem` (the PM tool's key for the work item), at most one open instance may exist per template set + target system + work item. A second start is refused 409 `workflow_start_conflict`, naming the open instance to a caller who may read it (audited). Under the org setting `workflowStartConflictPolicy: use_existing` (an audited, step-up relaxation) it answers 200 with that instance and `reused: true`.",

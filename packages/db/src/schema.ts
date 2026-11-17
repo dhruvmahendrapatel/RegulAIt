@@ -3409,6 +3409,13 @@ export const workflowInstances = pgTable(
     uniqueIndex("workflow_instances_open_start_uq")
       .on(t.templateIds, sql`(${t.change}->>'targetSystem')`, t.workItemRef)
       .where(sql`${t.workItemRef} IS NOT NULL AND ${t.status} NOT IN ('completed', 'aborted', 'denied', 'rolled_back')`),
+    // ADR-0349 slice 5: the typed search fields of GET /v1/workflows/instances, all built CONCURRENTLY by
+    // runMigrations (CONCURRENT_INDEXES); `projects_classifications_gin` on projects serves the compliance tag
+    index("workflow_instances_template_ids_gin").using("gin", sql`${t.templateIds} jsonb_path_ops`),
+    index("workflow_instances_target_idx").on(sql`(${t.change}->>'targetSystem')`),
+    index("workflow_instances_work_item_idx").on(t.workItemRef).where(sql`${t.workItemRef} IS NOT NULL`),
+    index("workflow_instances_initiator_idx").on(t.initiatorUserId, t.createdAt.desc()),
+    index("workflow_instances_current_stage_idx").on(sql`(${t.definition} -> 'stages' -> ((${t.state} ->> 'currentStageIndex')::int) ->> 'id')`),
   ],
 );
 

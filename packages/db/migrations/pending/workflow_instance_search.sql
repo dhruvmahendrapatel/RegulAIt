@@ -1,0 +1,14 @@
+-- ADR-0349 slice 5 (lane E30): indexes for the typed search fields of GET /v1/workflows/instances. Hand-authored
+-- (never drizzle-kit generate). This file runs nothing that changes the schema, and no row is read or written.
+--
+-- The indexes are
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS "workflow_instances_template_ids_gin" ON "workflow_instances" USING gin ("template_ids" jsonb_path_ops)
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS "workflow_instances_target_idx" ON "workflow_instances" (("change"->>'targetSystem'))
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS "workflow_instances_work_item_idx" ON "workflow_instances" ("work_item_ref") WHERE "work_item_ref" IS NOT NULL
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS "workflow_instances_initiator_idx" ON "workflow_instances" ("initiator_user_id", "created_at" DESC)
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS "workflow_instances_current_stage_idx" ON "workflow_instances" (("definition" -> 'stages' -> (("state" ->> 'currentStageIndex')::int) ->> 'id'))
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS "projects_classifications_gin" ON "projects" USING gin ("classifications" jsonb_path_ops)
+-- built CONCURRENTLY so a build never blocks workflow or project writes, which the migrator's one transaction cannot
+-- do. The statements live in `CONCURRENT_INDEXES` in `packages/db/src/migrate.ts`, and `runMigrations` builds them
+-- after `migrate`, outside any transaction, once this file's slug (or, after assign-at-merge, its tag) is journalled.
+SELECT 1;

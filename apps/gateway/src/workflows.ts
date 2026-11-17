@@ -23,7 +23,9 @@ import {
   workflowInstances,
   workflowTemplates,
   withinSystemReason,
+  projects,
   type Db,
+  type SQL,
 } from "@regulait/db";
 import {
   initialState,
@@ -86,6 +88,8 @@ import {
   loadCompiledEgressContext,
 } from "./compiled-egress.js";
 import { loadOrgSettings } from "./org-settings.js";
+import { databaseNow } from "./db-clock.js";
+import { currentRetryJob, describePendingWork, pendingApproversOf } from "./workflow-pending.js";
 import { isUniqueViolation } from "./pg-errors.js";
 import { answerStartConflict, openInstanceForStartKey, startKeyOf, WORKFLOW_START_KEY_INDEX } from "./workflow-start-conflict.js";
 import {
@@ -4308,6 +4312,16 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
   });
 
   // §5 dashboard: one instance in full…
+  // ADR-0349 slice 5: what the instance is waiting for (read-only, machine-readable; the same readers as the GET below)
+  app.get("/v1/workflows/instances/:instanceId/pending", async (req, reply) => {
+    const { instanceId } = instanceIdParam.parse(req.params);
+    const loaded = await loadInstanceFor(req, instanceId, { allowParticipant: true });
+    if (loaded.error) return sendLoadError(reply, loaded.error);
+    const row = { ...loaded.instance, context: loaded.instance.context as Record<string, unknown> };
+    const [now, retry, pendingApprovers] = await Promise.all([databaseNow(db), currentRetryJob(db, row), pendingApproversOf(db, row)]);
+    return describePendingWork({ row, now, leaseMs: stageClaimTtlMs(), retry, pendingApprovers });
+  });
+
   app.get("/v1/workflows/instances/:instanceId", async (req, reply) => {
     const { instanceId } = instanceIdParam.parse(req.params);
     const loaded = await loadInstanceFor(req, instanceId, { allowParticipant: true });
@@ -4365,9 +4379,9 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
   // changeTypes and routes; with none of them, exactly the response below
   // (the Home preview's newest 100). The scope is the one predicate for the
   // list, its count and the Excel export.
-  const workflowsList: ContractList<WorkflowInstanceRow, { status?: string }> = {
+  const workflowsList: ContractList<WorkflowInstanceRow, z.infer<typeof instanceSearchFilters>> = {
     spec: WORKFLOWS_LIST,
-    filters: z.object({ status: z.string().min(1).max(64).optional() }).strict(),
+    filters: instanceSearchFilters,
     reader: {
       fetch: (q) =>
         db
@@ -4381,8 +4395,8 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       idOf: (r) => r.id,
     } satisfies ListReader<WorkflowInstanceRow>,
     where: (req, f) => {
-      const conditions = [];
-      if (f.status) conditions.push(eq(workflowInstances.status, f.status));
+      // ADR-0349 slice 5: the typed search fields, each served by an index (instanceSearchConditions)
+      const conditions = instanceSearchConditions(f);
       if (!req.authCtx.isAdmin) {
         if (!req.authCtx.userId) return null;
         conditions.push(eq(workflowInstances.initiatorUserId, req.authCtx.userId));
@@ -4433,9 +4447,8 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
   };
   app.get("/v1/workflows/instances", async (req, reply) => {
     if (wantsListContract(req.query)) return answerListPage(db, req, reply, workflowsList);
-    const { status } = z.object({ status: z.string().optional() }).parse(req.query);
-    const conditions = [];
-    if (status) conditions.push(eq(workflowInstances.status, status));
+    // ADR-0349 slice 5: the legacy (first 100) answer takes the same typed search fields as the contract
+    const conditions = instanceSearchConditions(instanceSearchFilters.parse(req.query ?? {}));
     if (!req.authCtx.isAdmin) {
       if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_has_no_instances" });
       conditions.push(eq(workflowInstances.initiatorUserId, req.authCtx.userId));
@@ -4457,6 +4470,43 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
 }
 
 type WorkflowInstanceRow = typeof workflowInstances.$inferSelect;
+
+/** ADR-0349 slice 5: the current stage's id, as SQL (served by `workflow_instances_current_stage_idx`) */
+export const CURRENT_STAGE_ID_SQL = sql`(${workflowInstances.definition} -> 'stages' -> ((${workflowInstances.state} ->> 'currentStageIndex')::int) ->> 'id')`;
+
+/**
+ * ADR-0349 slice 5: the typed search fields of the instances list. Each one is served by an index (migration
+ * workflow_instance_search): template ids (GIN), target and current stage (expression indexes), work item, owner and
+ * status (b-tree), and the compliance tag through the attributed project's classifications (GIN on projects). A
+ * non-admin's own-instances condition is added by the caller, so a filter only ever narrows what they may see.
+ */
+export const instanceSearchFilters = z
+  .object({
+    status: z.string().min(1).max(64).optional(),
+    template: z.string().uuid().optional(),
+    target: z.string().min(1).max(200).optional(),
+    workItem: z.string().min(1).max(200).optional(),
+    owner: z.string().uuid().optional(),
+    stage: z.string().min(1).max(200).optional(),
+    complianceTag: z.string().min(1).max(200).optional(),
+  })
+  .strict();
+
+export function instanceSearchConditions(f: z.infer<typeof instanceSearchFilters>): SQL[] {
+  const c: SQL[] = [];
+  if (f.status) c.push(eq(workflowInstances.status, f.status));
+  if (f.template) c.push(sql`${workflowInstances.templateIds} @> ${JSON.stringify([f.template])}::jsonb`);
+  if (f.target) c.push(sql`(${workflowInstances.change} ->> 'targetSystem') = ${f.target}`);
+  if (f.workItem) c.push(eq(workflowInstances.workItemRef, f.workItem));
+  if (f.owner) c.push(eq(workflowInstances.initiatorUserId, f.owner));
+  if (f.stage) c.push(sql`${CURRENT_STAGE_ID_SQL} = ${f.stage}`);
+  if (f.complianceTag) {
+    c.push(
+      sql`${workflowInstances.projectId} IN (SELECT ${projects.id} FROM ${projects} WHERE ${projects.classifications} @> ${JSON.stringify([f.complianceTag])}::jsonb)`,
+    );
+  }
+  return c;
+}
 const changeText = (r: WorkflowInstanceRow, key: "description" | "changeType" | "environment" | "targetSystem"): string | null => {
   const v = (r.change as Record<string, unknown> | null)?.[key];
   return typeof v === "string" ? v : null;
@@ -4486,7 +4536,7 @@ export const WORKFLOWS_LIST: ListSpec<WorkflowInstanceRow> = {
     project: { label: "Project", value: (r) => r.projectId },
     id: { label: "Workflow id", value: (r) => r.id },
   },
-  filters: ["status"],
+  filters: ["status", "template", "target", "workItem", "owner", "stage", "complianceTag"],
   defaultSort: { col: "created", dir: "desc" },
   idCol: workflowInstances.id,
 };
