@@ -17,7 +17,15 @@ fi
 GID="$(getent group "$GROUP" 2>/dev/null | cut -d: -f3)"
 case "$GID" in ''|*[!0-9]*) GID=-1 ;; esac
 /usr/bin/regulait-agent redeem-ticket -ticket-gid "$GID" || true
+# ADR-0360 §4: the self-update spool. The per-user agents (group regulait-agent) write into it; the sticky bit keeps one
+# user from replacing another's files; the root updater verifies everything it reads there and trusts none of it.
+if [ "$GID" != "-1" ]; then
+  install -d -m 1770 -o root -g "$GID" /var/lib/regulait-agent/update 2>/dev/null || true
+fi
 if command -v systemctl >/dev/null 2>&1; then
   systemctl --global enable regulait-agent.service >/dev/null 2>&1 || true
+  # the timer runs `regulait-agent update` as root; it installs nothing unless the gateway signs a directive (ADR-0360)
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl enable --now regulait-agent-update.timer >/dev/null 2>&1 || true
 fi
 exit 0

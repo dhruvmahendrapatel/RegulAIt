@@ -135,6 +135,13 @@ func Redeem(ctx context.Context, o Options) RedeemStatus {
 			return st(OutcomeTokenExpired, contract.ErrTokenExpired, "")
 		}
 	}
+	return redeemToken(ctx, o, cfg, ef.Token, st)
+}
+
+// redeemToken exchanges an enrolment token (the bulk token from the MDM file, or a one-line token from standard input)
+// for the device ticket and writes the ticket file. The token is only ever in this call's memory and its Authorization
+// header: it is never logged, never in a status file and never written to disk.
+func redeemToken(ctx context.Context, o Options, cfg *Config, token string, st func(outcome, code, ticketID string) RedeemStatus) RedeemStatus {
 	host, err := o.Hostname()
 	if err != nil || host == "" {
 		host = "unknown"
@@ -145,7 +152,7 @@ func Redeem(ctx context.Context, o Options) RedeemStatus {
 	}
 	body, _ := json.Marshal(contract.TicketRequest{Hostname: host, OS: runtime.GOOS, Arch: runtime.GOARCH, AgentVersion: Version})
 	res, err := auth.Send(ctx, client, http.MethodPost, cfg.Issuer+contract.RouteEnrolmentTickets,
-		http.Header{"Authorization": {"Bearer " + ef.Token}, "Content-Type": {"application/json"}}, body)
+		http.Header{"Authorization": {"Bearer " + token}, "Content-Type": {"application/json"}}, body)
 	if err != nil {
 		return st(OutcomeGatewayUnreachable, "", "")
 	}

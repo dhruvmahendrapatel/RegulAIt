@@ -8327,8 +8327,19 @@ export const endpointEnrolmentTokens = pgTable(
     expiryRelaxationStepUp: text("expiry_relaxation_step_up"),
     /** the `endpoint-enrolment-token-expiry-relaxed` audit row the issue wrote (no foreign key: retention may prune it) */
     expiryRelaxationAuditId: uuid("expiry_relaxation_audit_id"),
+    /** ADR-0360 §5: a one-line enrolment token: device cap 1 and at most 60 minutes (CHECKs below) */
+    singleUse: boolean("single_use").notNull().default(false),
+    /**
+     * ADR-0360 §5: the device group a redeemed device joins. The migration's composite foreign key
+     * (device_group_id, source_id) → endpoint_device_groups (id, source_id) keeps the group in the token's own source.
+     */
+    deviceGroupId: uuid("device_group_id"),
   },
   (t) => [
+    check(
+      "endpoint_enrolment_tokens_single_use_check",
+      sql`NOT ${t.singleUse} OR (${t.deviceCap} = 1 AND ${t.expiresAt} <= ${t.createdAt} + interval '60 minutes')`,
+    ),
     unique("endpoint_enrolment_tokens_hash_uq").on(t.tokenHash),
     check("endpoint_enrolment_tokens_hash_check", sql`${t.tokenHash} ~ '^[0-9a-f]{64}$'`),
     check("endpoint_enrolment_tokens_label_check", sql`length(${t.label}) BETWEEN 1 AND 100`),
@@ -17139,3 +17150,123 @@ export const workflowTemplateVersions = pgTable(
 );
 export type WorkflowTemplateVersionRow = typeof workflowTemplateVersions.$inferSelect;
 // ===== end ADR-0341 =====
+
+// ===== ADR-0360 (lane E41): endpoint agent fleet operations =====
+// Device groups (staging rings, a device in at most one), the per-source self-update setting (off unless relaxed with a
+// recorded step-up) and staged update rollouts with their stages. The lifecycles are declared once in the gateway's
+// `endpoint-fleet-lifecycle.ts`; every state write is a guarded UPDATE over that table's source states.
+
+export const ENDPOINT_ROLLOUT_STATES = ["draft", "running", "paused", "halted", "completed", "aborted"] as const;
+export const ENDPOINT_ROLLOUT_STAGE_STATES = ["pending", "active", "done"] as const;
+
+export const endpointDeviceGroups = pgTable(
+  "endpoint_device_groups",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => discoverySources.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("endpoint_device_groups_name_uq").on(t.sourceId, t.name),
+    // the target of the composite foreign keys that keep a token's or a stage's group in its own source
+    unique("endpoint_device_groups_id_source_uq").on(t.id, t.sourceId),
+    check("endpoint_device_groups_name_check", sql`length(${t.name}) BETWEEN 1 AND 100`),
+  ],
+);
+export type EndpointDeviceGroupRow = typeof endpointDeviceGroups.$inferSelect;
+
+/** a device is in at most one group (the primary key is the device), so stages select disjoint devices */
+export const endpointDeviceGroupMembers = pgTable(
+  "endpoint_device_group_members",
+  {
+    deviceId: uuid("device_id")
+      .primaryKey()
+      .references(() => endpointDevices.id, { onDelete: "cascade" }),
+    groupId: uuid("group_id")
+      .notNull()
+      .references(() => endpointDeviceGroups.id, { onDelete: "cascade" }),
+    addedBy: uuid("added_by").references(() => users.id, { onDelete: "set null" }),
+    addedAt: timestamp("added_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("endpoint_device_group_members_group_idx").on(t.groupId)],
+);
+
+/** absent row = every setting at its strict default (self-update off) */
+export const endpointFleetSettings = pgTable(
+  "endpoint_fleet_settings",
+  {
+    sourceId: uuid("source_id")
+      .primaryKey()
+      .references(() => discoverySources.id, { onDelete: "cascade" }),
+    selfUpdate: boolean("self_update").notNull().default(false),
+    /** the admin who relaxed self-update on, the step-up method, and the audit row the relaxation wrote */
+    selfUpdateRelaxedBy: uuid("self_update_relaxed_by").references(() => users.id, { onDelete: "set null" }),
+    selfUpdateStepUp: text("self_update_step_up"),
+    selfUpdateAuditId: uuid("self_update_audit_id"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "endpoint_fleet_settings_self_update_check",
+      sql`NOT ${t.selfUpdate} OR (${t.selfUpdateStepUp} IS NOT NULL AND ${t.selfUpdateAuditId} IS NOT NULL)`,
+    ),
+  ],
+);
+export type EndpointFleetSettingsRow = typeof endpointFleetSettings.$inferSelect;
+
+export const endpointUpdateRollouts = pgTable(
+  "endpoint_update_rollouts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => discoverySources.id, { onDelete: "cascade" }),
+    targetVersion: text("target_version").notNull(),
+    state: text("state", { enum: ENDPOINT_ROLLOUT_STATES }).notNull().default("draft"),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("endpoint_update_rollouts_version_check", sql`${t.targetVersion} ~ '^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]{1,32})?$'`),
+    check("endpoint_update_rollouts_state_check", sql`${t.state} IN ('draft', 'running', 'paused', 'halted', 'completed', 'aborted')`),
+    // at most one open rollout per source
+    uniqueIndex("endpoint_update_rollouts_open_uq").on(t.sourceId).where(sql`${t.state} NOT IN ('completed', 'aborted')`),
+    index("endpoint_update_rollouts_source_idx").on(t.sourceId, t.createdAt),
+  ],
+);
+export type EndpointUpdateRolloutRow = typeof endpointUpdateRollouts.$inferSelect;
+
+export const endpointUpdateRolloutStages = pgTable(
+  "endpoint_update_rollout_stages",
+  {
+    rolloutId: uuid("rollout_id")
+      .notNull()
+      .references(() => endpointUpdateRollouts.id, { onDelete: "cascade" }),
+    ordinal: integer("ordinal").notNull(),
+    /** ON DELETE RESTRICT: a group a rollout names is not deleted under it (the route keeps it in the rollout's source) */
+    groupId: uuid("group_id")
+      .notNull()
+      .references(() => endpointDeviceGroups.id, { onDelete: "restrict" }),
+    state: text("state", { enum: ENDPOINT_ROLLOUT_STAGE_STATES }).notNull().default("pending"),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (t) => [
+    primaryKey({ name: "endpoint_update_rollout_stages_pk", columns: [t.rolloutId, t.ordinal] }),
+    unique("endpoint_update_rollout_stages_group_uq").on(t.rolloutId, t.groupId),
+    index("endpoint_update_rollout_stages_group_idx").on(t.groupId),
+    check("endpoint_update_rollout_stages_ordinal_check", sql`${t.ordinal} BETWEEN 1 AND 20`),
+    check("endpoint_update_rollout_stages_state_check", sql`${t.state} IN ('pending', 'active', 'done')`),
+    check(
+      "endpoint_update_rollout_stages_times_check",
+      sql`(${t.state} = 'pending') = (${t.startedAt} IS NULL) AND (${t.state} = 'done') = (${t.completedAt} IS NOT NULL)`,
+    ),
+  ],
+);
+export type EndpointUpdateRolloutStageRow = typeof endpointUpdateRolloutStages.$inferSelect;
+// ===== end ADR-0360 =====

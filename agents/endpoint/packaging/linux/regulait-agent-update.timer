@@ -1,0 +1,11 @@
+# ADR-0360 §4: check the update spool hourly, spread over the fleet.
+[Unit]
+Description=RegulAIt endpoint agent self-update check
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=1h
+RandomizedDelaySec=30min
+
+[Install]
+WantedBy=timers.target

@@ -58,7 +58,13 @@ type fixture struct {
 
 func newFixture(t *testing.T, cap int) *fixture {
 	t.Helper()
-	gw := gatewaytest.New(bulkToken(), cap)
+	return newFixtureToken(t, cap, bulkToken())
+}
+
+// newFixtureToken is newFixture with the enrolment token the fake gateway accepts.
+func newFixtureToken(t *testing.T, cap int, token string) *fixture {
+	t.Helper()
+	gw := gatewaytest.New(token, cap)
 	t.Cleanup(gw.Close)
 	dir := t.TempDir()
 	sys := filepath.Join(dir, "sys")
@@ -67,13 +73,13 @@ func newFixture(t *testing.T, cap int) *fixture {
 	os.WriteFile(ca, gw.CAPEM(), 0o644)
 	cfg := fmt.Sprintf(`{"schema":"regulait.endpoint-agent-config/1","issuer":%q,"caBundleFile":%q}`, gw.Issuer, ca)
 	os.WriteFile(filepath.Join(sys, "config.json"), []byte(cfg), 0o644)
-	enrol := fmt.Sprintf(`{"schema":"regulait.endpoint-enrol/1","issuer":%q,"token":%q}`, gw.Issuer, bulkToken())
+	enrol := fmt.Sprintf(`{"schema":"regulait.endpoint-enrol/1","issuer":%q,"token":%q}`, gw.Issuer, token)
 	os.WriteFile(filepath.Join(sys, "enrol.json"), []byte(enrol), 0o600)
 	logs := &strings.Builder{}
 	f := &fixture{t: t, gw: gw, dir: dir, logs: logs, signer: packtest.NewSigner()}
 	f.opts = Options{
 		Paths: Paths{ConfigFile: filepath.Join(sys, "config.json"), EnrolFile: filepath.Join(sys, "enrol.json"), TicketFile: filepath.Join(sys, "ticket.json"),
-			StatusFile: filepath.Join(sys, "redeem-status.json"), StateDir: filepath.Join(dir, "user", "state")},
+			StatusFile: filepath.Join(sys, "redeem-status.json"), StateDir: filepath.Join(dir, "user", "state"), SpoolDir: filepath.Join(dir, "spool")},
 		SystemOwner: os.Getuid(), TicketGID: -1,
 		Log:      slog.New(slog.NewTextHandler(logs, nil)),
 		Hostname: func() (string, error) { return "jdoe-laptop", nil },

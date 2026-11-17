@@ -18,6 +18,7 @@ Searched and checked 2026-10-17 against `proxy.golang.org` (release dates) and e
 | `github.com/ebitengine/purego` | `v0.11.1` (2026-09-18) | Apache-2.0 | darwin | Transitive, through gopsutil (calls libSystem without cgo) |
 | `github.com/tidwall/jsonc` | `v0.3.3` (2026-03-10) | MIT | all | Blanks JSONC comments and trailing commas (offset-preserving) before `encoding/json` reads an MCP host config: VS Code `settings.json`, Zed settings (`internal/collect/mcp.go`, ADR-0259 amendment 2026-11-14). No dependencies. v0.3.4 (2026-11-12) was less than two weeks old when pinned |
 | `github.com/pelletier/go-toml/v2` | `v2.4.3` (2026-07-05) | MIT | all | Decodes TOML MCP host configs: Codex `config.toml` (`internal/collect/mcp.go`, ADR-0259 amendment 2026-11-14). No dependencies |
+| `golang.org/x/mod` | `v0.42.0` (2026-10-09) | BSD-3-Clause | all | `semver.Compare` for the self-update downgrade refusal (`internal/update`, ADR-0360 §4). The Go team's reference implementation of semantic versions; only the `semver` package is linked, which imports nothing outside the standard library. v0.43.0 (2026-11-09) was less than two weeks old when pinned. go-tuf v2 was compared and rejected: its linked closure includes `opencontainers/go-digest` v1.0.0 (2020) and `cenkalti/backoff/v5` v5.0.3 (2025-07), which fail the 12-month rule (ADR-0360) |
 
 ## Test-only (never linked)
 
