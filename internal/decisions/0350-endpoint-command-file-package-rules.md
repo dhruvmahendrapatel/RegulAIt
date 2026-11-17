@@ -166,10 +166,10 @@ direct API call. Creating a gist is the worked example: the GitHub MCP `create_g
 - **Unknown routes stay unknown.** An HTTP call whose method or URL is not literal is unresolved (§2), and an action
   the catalogue does not list is decided by the ordinary exec rules. Matching on the device is still textual.
 
-### 10. Response vocabulary (lane E35, ADR-0354)
+### 10. Response vocabulary (lane E35)
 
 Lane E35 defines graduated responses (advise, correct, block-session, disable) on the same decision model. On-device
-decisions use that vocabulary when ADR-0354 lands, rather than a second one. Until then the device's answers are the
+decisions use that vocabulary when lane E35's ADR lands on main, rather than a second one. Until then the device's answers are the
 agents' own (allow, ask, deny), and the mapping is agreed with E35 through the master: the proposed one is ask as
 "advise" with confirmation, deny as a block of the call, and block-session and disable as control-plane responses
 the device carries out by refusing every call (as a missing policy already does). Slice 2 builds that mapping.
