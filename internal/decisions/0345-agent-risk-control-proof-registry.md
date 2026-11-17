@@ -95,6 +95,13 @@ What exists already:
 - Searched the repo for an existing risk-to-test mapping or continuous control testing ("proof", "control test",
   "continuous control"). Nothing exists. The nearest pieces (ADR-0081 resolvers, ADR-0058 collectors) are read-only
   and are reused.
+- GitHub, compared on 2026-11-17:
+  - CISO Assistant (a full GRC application with a register, controls and evidence) is licensed AGPL-3.0, which
+    ADR-0176 bars. It is also a separate service that runs no proofs against a gateway.
+  - compliance-trestle (NIST OSCAL; Apache-2.0, active) models catalogues and assessment results. It is Python and
+    runs no tests, so it does not replace the runner. OSCAL assessment results remain a candidate export format for
+    the signed results.
+  - No other candidate had a licence, releases and users.
 - Test runners: garak, promptfoo and spikee are already integrated and are reused through the red-team and engine
   paths. No new runner is added.
 - Catalogues: the OWASP LLM, MCP and Agentic Top 10 are reused through the ADR-0243 packs and the vendored promptfoo
