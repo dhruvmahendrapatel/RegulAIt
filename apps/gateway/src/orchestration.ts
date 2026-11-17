@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { dbNow, MEMORY_DATA_PREAMBLE } from "./memory-governance.js";
+import { databaseNow } from "./db-clock.js";
+import { MEMORY_DATA_PREAMBLE } from "./memory-governance.js";
 import {
   filterParams,
   parseListExport,
@@ -524,7 +525,7 @@ async function buildNestedRunContext(
  *     does not exist yet is ordinary; failing an otherwise-valid dispatch over
  *     it would be worse than supplying less.
  */
-async function resolveSuppliedContext(
+export async function resolveSuppliedContext(
   db: Db,
   projectId: string | null,
   keys: string[] | undefined,
@@ -546,7 +547,7 @@ async function resolveSuppliedContext(
     if (!prev || r.revision > prev.revision) head.set(r.key, r);
   }
   // ADR-0347: an expired head is absent (never replaced by an older revision), judged by the database clock
-  const now = await dbNow(db);
+  const now = await databaseNow(db);
   for (const [k, r] of head) if (r.expiresAt <= now) head.delete(k);
   // preserve the caller's declared order so the prompt is deterministic
   const items = keys.map((k) => head.get(k)).filter((r): r is (typeof rows)[number] => Boolean(r));
@@ -567,7 +568,9 @@ async function resolveSuppliedContext(
           (i) =>
             `--- context '${i.key}' v${i.revision} (written by user ${i.contributedByUserId}` +
             `${i.producedByAgentId ? `, agent ${i.producedByAgentId}` : ""}${i.producedByRunId ? `, run ${i.producedByRunId}` : ""}` +
-            `; expires ${i.expiresAt.toISOString()}) ---\n${i.content}\n--- end context '${i.key}' ---`,
+            `; expires ${i.expiresAt.toISOString()}) ---\n` +
+            // quoted as one JSON string, like builder memory, so stored text can never close its own block (#905 review 2)
+            `${JSON.stringify(i.content)}\n--- end context '${i.key}' ---`,
         )
         .join("\n\n"),
     items: items.map((i) => ({ id: i.id, key: i.key, revision: i.revision })),

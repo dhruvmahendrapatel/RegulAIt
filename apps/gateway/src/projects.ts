@@ -39,7 +39,8 @@ import {
   type CsvWindow,
 } from "./csv-export.js";
 import { afterCursorDesc, atTextSql } from "./pagination.js";
-import { dbNow, expiresAtSql, governMemoryWrite, resolveRunProvenance } from "./memory-governance.js";
+import { databaseNow } from "./db-clock.js";
+import { expiresAtSql, governMemoryWrite, resolveRunProvenance } from "./memory-governance.js";
 import { recordContextRevision } from "./lineage.js";
 import {
   addProjectMemberSchema,
@@ -2108,7 +2109,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         .from(projectContextItems)
         .where(and(eq(projectContextItems.projectId, projectId), eq(projectContextItems.key, q.key)))
         .orderBy(projectContextItems.revision);
-      const histNow = await dbNow(db);
+      const histNow = await databaseNow(db);
       const [names, pendingMap] = await Promise.all([
         nameMaps(
           rows.map((r) => r.contributedByUserId),
@@ -2160,7 +2161,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     const latest = new Map<string, (typeof rows)[number]>();
     for (const row of rows) latest.set(row.key, row);
     // ADR-0347: a key whose accepted head has expired is absent. An older revision is never resurrected in its place.
-    const now = await dbNow(db);
+    const now = await databaseNow(db);
     for (const [k, row] of latest) if (row.expiresAt <= now) latest.delete(k);
     const pendingMap = await pendingConflictApprovals(
       projectId,

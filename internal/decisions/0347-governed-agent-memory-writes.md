@@ -101,9 +101,11 @@ recall is already pinned by the P25 baselines, and the ADR-0140 PII detector. No
 
 ## Owner questions (open; the secure default is built)
 
-1. Is 24 hours the right org default for shared project context, which teams use for durable decisions? The built
-   default follows the brief ("default short"); a longer default is one setting.
-2. Should the scan treat PII in shared context as quarantine-worthy (built) or redact it in place with ADR-0140's
+1. **Owner question open:** is 24 hours the right org default for shared project context, which teams use for durable
+   decisions? The built default follows the brief ("default short") and is kept strict until the owner decides. With no
+   grandfathering, every existing shared-context item stops being supplied to workers 24 hours after the first deploy
+   of this migration (hidden, not deleted). A longer default is one setting (`agent_memory_ttl_hours`, step-up).
+2. **Owner question open:** should the scan treat PII in shared context as quarantine-worthy (built) or redact it in place with ADR-0140's
    redactor and store the redacted text?
 
 ## As built
@@ -112,3 +114,7 @@ recall is already pinned by the P25 baselines, and the ADR-0140 PII detector. No
   `POST /v1/builder/agents/:id/memory`, expiry-aware reads and the data framing in `resolveSuppliedContext` and the
   builder runtime, the two org settings and `compliance_profiles.memory_ttl_hours` (strictness registry, versioned
   field, loosening comparator), and `zz-adr0347-memory-governance.test.ts`. No new route.
+- **Review round 1 on #905:** read-time expiry uses the shared database clock (`databaseNow`, `db-clock.ts`). Shared
+  context is supplied JSON-quoted inside its markers, as builder memory is, so stored text cannot close its own block.
+  The migration is re-runnable. `log` mode stores flagged text unredacted by design (step-up, audited); slice 2's
+  quarantine replaces it.
