@@ -114,6 +114,7 @@ const ConnectorsPage = screen(() => import("./screens/admin-integrations"), "Con
 // P3 (#453 c6527514889): each long operations/cost area is one lazy chunk whose module owns its nested <Routes> — the
 // overview at the index, each full list on its own page — so the sub-pages add nothing to the entry bundle.
 const McpServersArea = screen(() => import("./screens/admin-integrations"), "McpServersArea");
+const ManagedSettingsPage = screen(() => import("./screens/admin-managed-settings"), "ManagedSettingsPage");
 const GitConnectionsPage = screen(() => import("./screens/admin-integrations"), "GitConnectionsPage");
 const PmConnectionsPage = screen(() => import("./screens/admin-integrations"), "PmConnectionsPage");
 const DeployTargetsPage = screen(() => import("./screens/admin-integrations"), "DeployTargetsPage");
@@ -343,6 +344,8 @@ function ApplicationRoutes() {
                 <Route path="external-scorers" element={<ExternalScorersPage />} />
                 <Route path="connectors" element={<ConnectorsPage />} />
                 <Route path="mcp-servers/*" element={<McpServersArea />} />
+                {/* ADR-0310 (UI-D D1) */}
+                <Route path="managed-settings" element={<ManagedSettingsPage />} />
                 {/* ADR-0173 batch 2b */}
                 <Route path="webhooks" element={<WebhooksPage />} />
                 <Route path="admission" element={<AdmissionReviewPage />} />

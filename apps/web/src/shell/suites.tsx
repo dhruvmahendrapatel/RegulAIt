@@ -290,6 +290,8 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       { label: "regulAIt-LLM", to: "/admin/regulait-llm" },
       { label: "Connectors", to: "/admin/connectors" },
       { label: "MCP servers", to: "/admin/mcp-servers" },
+      // ADR-0310 (UI-D D1): the signed managed-settings export of those MCP entitlements, for MDM.
+      { label: "Managed settings", to: "/admin/managed-settings" },
       // ADR-0175 A6/A5 — flagged builder skills, share requests and the
       // release waiting period, beside the MCP servers they also cover.
       { label: "Admission review", to: "/admin/admission" },

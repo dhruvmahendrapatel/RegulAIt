@@ -169,6 +169,7 @@ const BY_ROUTE: Record<string, keyof typeof G> = {
   "/admin/regulait-llm": "spark",
   "/admin/connectors": "plug",
   "/admin/mcp-servers": "server",
+  "/admin/managed-settings": "laptop", // ADR-0310 (UI-D D1): settings pushed to developer machines
   "/admin/webhooks": "sync",
   "/admin/engines": "box", // ADR-0187
   "/admin/admission": "shield",
