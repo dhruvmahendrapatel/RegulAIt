@@ -815,6 +815,10 @@ describe("every sweep is registered", () => {
         // ADR-0302: third-party ingest evidence past the audit floor; driven end to end in
         // zz-adr0302-evidence-retention.test.ts (with no floor configured it deletes nothing)
         SCHEDULER_JOB_NAMES.thirdPartyEvidenceRetentionSweep,
+        // ADR-0361: AI SaaS compliance-export reads (nothing while the org policy is off, the default) and their
+        // evidence retention (nothing with no floor); driven end to end in zz-adr0361-ai-saas-monitoring.test.ts
+        SCHEDULER_JOB_NAMES.aiSaasMonitorSweep,
+        SCHEDULER_JOB_NAMES.aiSaasEvidenceRetentionSweep,
       ].sort(),
     );
     const discovery = registry.get(SCHEDULER_JOB_NAMES.discoveryScanSweep)!;

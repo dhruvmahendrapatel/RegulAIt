@@ -5073,3 +5073,6 @@ export * from "./managed-settings.js";
 
 // ADR-0341: RFC 6902 patches for diff views
 export { jsonPatch, type JsonPatchOperation } from "./json-patch.js";
+
+// ADR-0361: monitoring sanctioned AI SaaS through vendor compliance APIs (catalogue, schemas, normaliser, run lifecycle)
+export * from "./ai-saas-monitor.js";

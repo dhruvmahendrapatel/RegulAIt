@@ -53,7 +53,7 @@ What we already have and reuse:
   floor (`retentionFloor`) that ADR-0302 applies to third-party evidence;
 - `requireStepUp` (`settings_relax`) and the audit log.
 
-E17 (#880, ADR-0336) reads agent definitions from vendor platforms and explicitly stores no prompts. The ADR-0195
+E17 (#880) reads agent definitions from vendor platforms and explicitly stores no prompts. The ADR-0195
 scanner contract forbids a scanner to read or return prompts or responses. Neither framework can carry this feature
 without breaking its own promise, so this is its own surface with its own connector contract, built from the same
 primitives.
@@ -117,8 +117,8 @@ Copilot interaction export this API serves; Purview's own audit search is a sepa
   detector counts.
 - **Raw text is not stored by default.** The policy's `content_capture` is `none`. An admin may set it to `redacted`
   (a `settings_relax` step-up, audited): the text is then stored after ADR-0140 redaction, sealed under the data key,
-  and returned only to an admin. A connector whose compliance tags resolve to PII mode `block` never captures content,
-  whatever the policy says (strictest wins, the §8.3 rule).
+  and returned only to an admin. Redaction removes PII but not secrets, so an interaction with any blocking guardrail
+  finding (a credential, an injection) is never captured, even redacted.
 - **Findings** (`ai_saas_interaction_findings`): one row per (interaction, detector, category) with a hit count and the
   action the org's mode gives it (`block`, `warn`, `log`). They are counts only, never the matched text. The guardrail
   detectors run with the org guardrail policy; PII runs with the deployment's international categories, and its action
@@ -162,7 +162,7 @@ interaction. A cap reached fails the run without advancing the cursor.
 
 Slice 3 adds optional remediation (delete or quarantine a conversation through the vendor API): off by default, each
 action an approval with step-up, audited, narrowing only, with its lifecycle a declared transition table reusing
-ADR-0338's (#881) pattern. A vendor whose API offers no such action (the Graph export is read-only) says so on the
+lane E19's (#881) pattern. A vendor whose API offers no such action (the Graph export is read-only) says so on the
 posture read instead of pretending.
 
 ### 9. Threat model
@@ -199,11 +199,33 @@ posture read instead of pretending.
   admin-gated, but it is the most sensitive read credential we hold, which is why every switch is off and content is
   not kept by default.
 - Findings are after the fact: this observes and records, it does not block. Inline blocking stays the gateway's and
-  the browser extension's (ADR-0334).
+  the browser extension's (lane E16, #867).
 - Each vendor API change can break a connector; a shape it does not recognise fails the run with a stated reason and
   writes nothing for that page.
 - The routes are API only; screens are tracked on #453.
 
 ## As built (slice 1)
 
-Filled in on the slice 1 PR.
+- **Files.** `packages/shared/src/ai-saas-monitor.ts` (catalogue, per-vendor config schemas, the Graph response schema,
+  the normaliser, linear text extraction, the run transition table); `apps/gateway/src/ai-saas-connectors.ts` (the
+  connector contract and the Microsoft 365 Copilot connector); `apps/gateway/src/ai-saas-monitor.ts` (the run, the two
+  scheduler jobs, retention, ten admin routes); migration `pending/ai_saas_monitoring.sql`.
+- **Reused, not copied:** `azureCredential` (`@regulait/cloud-discovery`), `entraWriteScope`, `scannerFetch` and
+  `dedupedSecretSink` (discovery), `spacingRateLimiter` and `retryAfterMs` (discovery worker), `createGuardedFetch`,
+  `encryptSecret`/`decryptSecret`, `requireStepUp`, `resolveGuardrailPolicy` + `runGuardrails`, `detectPII` +
+  `redactPII`, `piiInternationalCategories`, `complianceProfilesForTags` + `effectiveCompliancePolicy`, `retentionFloor`.
+- **PII mode** of a connector resolves exactly as `projectPiiMode` does for a project: the strictest of its tags'
+  profiles, else the org default (`block` by default, ADR-0181). It sets the finding's action; `redact` counts as `warn`.
+- **Step-ups** (`settings_relax`): turning the policy on, turning content capture to `redacted` (separately), storing or
+  rotating a credential, enabling a connector, and widening an enabled connector's configuration (more users, every
+  user, fewer app-class filters, more backfill). Revoking a credential and every narrowing need none.
+- **Data-key rotation.** Both ciphertext columns are in `CIPHERTEXT_COLUMNS`. The evidence guard lets the re-encryption
+  walk rewrite `content_ciphertext` alone (the 0142 `regulait.secret_reencrypt` flag, every other column unchanged).
+- **Window.** A run resumes exactly where the last success ended and spans at most 30 days, so a connector that was off
+  for months catches up over several runs and never skips a gap.
+- **Not built in slice 1:** the ADR-0220 trained detectors on monitored text; a federated (client-assertion) Entra
+  credential (the secret path only, the same `azureCredential` supports both); ChatGPT Enterprise and Claude Enterprise
+  (slice 2); remediation (slice 3).
+- **Routes:** `GET /v1/ai-saas-monitoring`, `PUT …/policy`, `POST …/connectors`, `PUT …/connectors/:id/config`,
+  `PUT|DELETE …/connectors/:id/credential`, `PUT …/connectors/:id/enabled`, `POST|GET …/connectors/:id/runs`,
+  `GET …/connectors/:id/interactions`. All admin-only, all KNOWN_UI_GAPS on #453.

@@ -111,6 +111,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.thirdPartyIngestSources, ["name"]],
   // ADR-0303: a SIEM destination an admin names
   [s.siemDestinations, ["name"]],
+  // ADR-0361: an operator-typed AI SaaS monitor connector name (a pasted vendor key here would be refused)
+  [s.aiSaasMonitorConnectors, ["name"]],
   [s.engineRunners, ["name"]],
   [s.executors, ["name"]],
   [s.externalScorers, ["name"]],
