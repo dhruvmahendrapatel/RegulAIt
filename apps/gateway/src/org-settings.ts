@@ -43,6 +43,7 @@ import {
   sql,
   traceRetentionHolds,
   traces,
+  externalScorers,
   users,
   type Db,
   type OrgSettingsRow,
@@ -65,6 +66,7 @@ import {
   setRevocationScopeSchema,
   setRuleDeployModeSchema,
   updateOrgSettingsSchema,
+  TEXT_EMBEDDING_SCORER_KIND,
 } from "@regulait/shared";
 import { z } from "zod";
 // ADR-0070: the OTLP export endpoint is an admin-typed outbound URL and takes
@@ -788,6 +790,27 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
     // the row as re-read under that lock (AER-056). `before` here serves only
     // the checks that do not count sign-in doors.
     const before = await loadOrgSettings(db);
+    // ADR-0352: the meaning-based tier may only be ON with a usable local embedder named:
+    // an external scorer claiming `text_embedding` alone, enabled (it passed its connection test)
+    {
+      const nextEnabled = body.semanticCacheSimilarityEnabled ?? before.semanticCacheSimilarityEnabled;
+      const nextEmbedder = body.semanticCacheEmbedderId !== undefined ? body.semanticCacheEmbedderId : before.semanticCacheEmbedderId;
+      if (nextEmbedder && body.semanticCacheEmbedderId !== undefined) {
+        const [scorer] = await db
+          .select({ enabled: externalScorers.enabled, kinds: externalScorers.scorerKinds })
+          .from(externalScorers)
+          .where(eq(externalScorers.id, nextEmbedder));
+        if (!scorer || !(scorer.kinds as string[]).includes(TEXT_EMBEDDING_SCORER_KIND)) {
+          return reply.status(422).send({ error: "unknown_embedder", detail: "semanticCacheEmbedderId must name an external scorer that claims text_embedding" });
+        }
+        if (!scorer.enabled) {
+          return reply.status(422).send({ error: "embedder_disabled", detail: "the embedder must pass its connection test and be enabled first" });
+        }
+      }
+      if (nextEnabled && !nextEmbedder) {
+        return reply.status(422).send({ error: "embedder_required", detail: "turning on semanticCacheSimilarityEnabled needs semanticCacheEmbedderId" });
+      }
+    }
     // ADR-0039: CIDR blocks are validated at WRITE time — a malformed block
     // would silently match nothing at evaluation time (fail closed per
     // entry), so the honest failure is a 400 here, before anything is saved.

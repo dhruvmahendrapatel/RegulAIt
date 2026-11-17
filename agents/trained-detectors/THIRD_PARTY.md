@@ -35,6 +35,15 @@ What was looked for, and why these were chosen:
   review and pinning, and groundedness needs retrieval context the dispatch path does not carry. Recorded follow-up.
 - **Runtime (ADR-0247):** ONNX Runtime (MIT) and Hugging Face `tokenizers` (Apache-2.0). PyTorch and Transformers run
   only in the build's export stage, which writes the ONNX graphs; neither is in the runtime image.
+- **Text embedder (ADR-0352):** `sentence-transformers/all-MiniLM-L6-v2` (Apache-2.0; 384 dimensions, about 90 MB of
+  ONNX) for the gateway's meaning-based cache tier, loaded only when `DETECTOR_MODELS` names `embedding`. The
+  repository's own ONNX export is used as published, verified by sha256, with mean pooling and L2 normalisation in
+  `detector_core.py`. Compared: `BAAI/bge-small-en-v1.5` (MIT, also 384 dimensions, ships ONNX; needs a query prefix
+  for asymmetric retrieval, which the cache's symmetric prompt-to-prompt match does not need),
+  `nomic-ai/nomic-embed-text-v1.5` (Apache-2.0, but loads custom modelling code), and in-process Node options
+  (`@huggingface/transformers` with `onnxruntime-node`, a large native dependency in the gateway image; `fastembed`'s
+  JavaScript port, no release in the maintenance window). MiniLM was chosen as the most widely used symmetric
+  similarity model that loads with stock tooling only.
 - **HTTP server:** the Python standard library (`http.server`), so no web framework is added.
 
 ## Models (weights)
@@ -44,6 +53,7 @@ What was looked for, and why these were chosen:
 | leolee99/PIGuard (default) | `dd78b24e330193a22d2293ac66922dd4f982f563` | MIT (model card; the code repository `leolee99/PIGuard` is MIT, © 2024 Hao Li) | Fine-tune of microsoft/deberta-v3-base (MIT). Its published training set (`datasets/train.json` in the code repository, 76,735 rows from 22 sources) **includes sources under CC BY-NC 4.0 (tatsu-lab Alpaca, 4,000 rows; HuggingFaceH4 no_robots, 1,500 rows) and sources with no stated licence**, plus 435 LLM-generated rows. The weights are MIT; whether a non-commercial training licence reaches the weights is an open legal question, recorded for the owner in ADR-0247. |
 | protectai/deberta-v3-base-prompt-injection-v2 (alternative) | `90c9989b1a342275dd0d1a95aad283c04e075671` | Apache-2.0 | Fine-tune of microsoft/deberta-v3-base (MIT) on public datasets its card lists by licence: MIT, Apache-2.0, CC0, CC-BY-3.0, CC-BY-4.0 and six with no licence (treated as public by the publisher). |
 | unitary/toxic-bert | `4d6c22e74ba2fdd26bc4f7238f50766b045a0d94` | Apache-2.0 | Trained on the Jigsaw toxic-comment data (Wikipedia talk-page comments; Kaggle competition terms). |
+| sentence-transformers/all-MiniLM-L6-v2 (ADR-0352, opt-in) | `1110a243fdf4706b3f48f1d95db1a4f5529b4d41` | Apache-2.0 | Fine-tune of microsoft/MiniLM-L12-H384 (MIT) on about 1 billion sentence pairs its card lists (Reddit, S2ORC, WikiAnswers, PAQ, Stack Exchange, MS MARCO, and others) under their own terms. |
 | spaCy `en_core_web_sm` 3.8.0 (wheel) | sha256 `1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85` | MIT | Its `LICENSES_SOURCES` file lists the corpora it was trained on (including OntoNotes 5); the model is distributed under MIT. |
 
 ## Python closure (runtime image, `requirements.txt`)

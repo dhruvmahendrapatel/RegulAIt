@@ -22,6 +22,7 @@ import { createHash } from "node:crypto";
 import { agents, and, customModelProviders, eq, gte, semanticCache, type Db } from "@regulait/db";
 import { canonicalJson } from "@regulait/shared";
 import { loadVersions, resolveAgentPromptVersion } from "./config-versions.js";
+import { probeSimilar, type SimilarityProbe } from "./semantic-cache-similarity.js";
 
 export interface SemanticCacheKey {
   /** the normalized text actually stored, and re-compared on a candidate hit */
@@ -179,6 +180,17 @@ export interface SemanticCacheHit {
   /** when the entry was written — reported on the savings row so an operator
    * can see how stale the answer they were served is */
   readonly createdAt: Date;
+  /** ADR-0352: which tier served it; `similarity` and `cacheId` only on the meaning-based tier */
+  readonly tier?: "exact" | "similarity";
+  readonly similarity?: number;
+  readonly cacheId?: string;
+}
+
+/** ADR-0352: the tier fields a hit's audit and savings rows carry (never text) */
+export function semanticCacheTierDetail(hit: SemanticCacheHit): Record<string, unknown> {
+  return hit.tier === "similarity"
+    ? { tier: "similarity", similarity: Number((hit.similarity ?? 0).toFixed(4)), cacheId: hit.cacheId }
+    : { tier: "exact" };
 }
 
 /**
@@ -190,6 +202,16 @@ export interface SemanticCacheHit {
 export async function lookupSemanticCache(
   db: Db,
   args: {
+    /** ADR-0352: the meaning-based tier, tried only on an exact miss (native path only).
+     * `state.probe` is filled for the store side, so the input is embedded once. */
+    similarity?: {
+      dataKey: string | undefined;
+      embedderId: string;
+      min: number;
+      request: NativeCacheRequest;
+      config: NativeCacheConfig;
+      state: { probe: SimilarityProbe | null; missReason?: string };
+    };
     userId: string;
     /** the agent the CALLER asked for, not the one routing served — the cache
      * is scoped to what was requested, exactly as the invoke path scopes it */
@@ -211,10 +233,24 @@ export async function lookupSemanticCache(
       ),
     )
     .limit(1);
-  if (!hit) return null;
-  // the collision guard — never skip this
-  if (hit.normalizedInput !== args.key.norm) return null;
+  // the collision guard — never skip this (a colliding row is a miss)
+  if (!hit || hit.normalizedInput !== args.key.norm) {
+    if (!args.similarity) return null;
+    const sim = args.similarity;
+    const probed = await probeSimilar(db, sim.dataKey, {
+      embedderId: sim.embedderId,
+      userId: args.userId,
+      request: sim.request,
+      config: sim.config,
+      min: sim.min,
+      ttlSeconds: args.ttlSeconds,
+    });
+    sim.state.probe = probed.probe;
+    if (probed.missReason) sim.state.missReason = probed.missReason;
+    return probed.hit ? { ...probed.hit, tier: "similarity" } : null;
+  }
   return {
+    tier: "exact",
     outputText: hit.outputText,
     model: hit.model,
     inputTokens: hit.inputTokens,
@@ -239,9 +275,9 @@ export async function storeSemanticCache(
     inputTokens: number;
     outputTokens: number;
   },
-): Promise<void> {
-  if (!args.outputText) return;
-  await db
+): Promise<string | null> {
+  if (!args.outputText) return null;
+  const [row] = await db
     .insert(semanticCache)
     .values({
       userId: args.userId,
@@ -263,7 +299,10 @@ export async function storeSemanticCache(
         outputTokens: args.outputTokens,
         createdAt: new Date(),
       },
-    });
+    })
+    // ADR-0352: the id, so the meaning-based tier can index the row it just wrote
+    .returning({ id: semanticCache.id });
+  return row?.id ?? null;
 }
 
 /**

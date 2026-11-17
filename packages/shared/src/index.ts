@@ -2469,6 +2469,11 @@ export const updateOrgSettingsSchema = z
       .max(INTERNATIONAL_PII_CATEGORIES.length)
       .optional(),
     envKeyFallbackEnabled: z.boolean().optional(),
+    /** ADR-0352: the meaning-based tier behind the exact semantic cache. Off by default;
+     * turning it on needs an enabled `text_embedding` embedder (checked server side). */
+    semanticCacheSimilarityEnabled: z.boolean().optional(),
+    semanticCacheSimilarityMin: z.number().min(0.8).max(0.999).optional(),
+    semanticCacheEmbedderId: z.string().uuid().nullable().optional(),
     envFallbackProviders: z
       .array(z.enum(ENV_FALLBACK_MODEL_PROVIDERS))
       .max(ENV_FALLBACK_MODEL_PROVIDERS.length)
@@ -5073,6 +5078,8 @@ export * from "./project-archive-rename.js";
 export * from "./library-lifecycle.js";
 // ADR-0220: trained runtime detectors (PII recogniser, injection classifier, harm model) behind the external-scorer contract
 export * from "./trained-detectors.js";
+// ADR-0352: the meaning-based cache tier (pure half)
+export * from "./semantic-cache-similarity.js";
 // ADR-0237: native adapters for third-party guardrail providers (OpenAI Moderation, Azure AI Content Safety, Lakera Guard)
 export * from "./guardrail-vendor-adapters.js";
 // ADR-0224 (P13 c): privacy operations — records of processing, data-subject requests, the processing limit

@@ -4742,6 +4742,13 @@ export const orgSettings = pgTable(
     /** ADR-0185 I3: 1 s – 30 days (CHECK, migration 0169); since 0169 a purge
      * sweep DELETES expired rows (before, the TTL only filtered reads) */
     semanticCacheTtlSeconds: integer("semantic_cache_ttl_seconds").notNull().default(3600),
+    /** ADR-0352 (migration semantic_cache_similarity): the meaning-based tier behind the exact
+     * cache. OFF by default; on needs an enabled `text_embedding` embedder (the PUT checks it). */
+    semanticCacheSimilarityEnabled: boolean("semantic_cache_similarity_enabled").notNull().default(false),
+    /** cosine similarity a candidate must reach; 0.80 – 0.999 (CHECK), strict 0.95 */
+    semanticCacheSimilarityMin: doublePrecision("semantic_cache_similarity_min").notNull().default(0.95),
+    /** the local embedder (an external scorer claiming text_embedding); SET NULL if it is deleted */
+    semanticCacheEmbedderId: uuid("semantic_cache_embedder_id").references(() => externalScorers.id, { onDelete: "set null" }),
     /** ADR-0185 I3 (migration 0169): a conversation is deleted this many days
      * after its last message unless an incident that is not closed holds it.
      * Strict 30 (owner decision); longer, up to 2555, is an audited relaxation. */
@@ -5587,6 +5594,10 @@ export const orgSettings = pgTable(
     check(
       "org_settings_semantic_cache_ttl_seconds_check",
       sql`${t.semanticCacheTtlSeconds} BETWEEN 1 AND 2592000`,
+    ),
+    check(
+      "org_settings_semantic_cache_similarity_min_check",
+      sql`${t.semanticCacheSimilarityMin} BETWEEN 0.8 AND 0.999`,
     ),
     check(
       "org_settings_mcp_upstream_transports_check",
@@ -17139,3 +17150,38 @@ export const workflowTemplateVersions = pgTable(
 );
 export type WorkflowTemplateVersionRow = typeof workflowTemplateVersions.$inferSelect;
 // ===== end ADR-0341 =====
+
+// ---------------------------------------------------------------------------
+// ADR-0352 (lane E33 slice 2): the meaning-based cache tier. One row per
+// semantic_cache row that the tier may match by meaning. The row's owner
+// (user, agent) is the parent's and is joined for, never copied; lookups filter
+// on BOTH the parent's user/agent and this row's partition commitment.
+// ---------------------------------------------------------------------------
+export const semanticCacheEmbeddings = pgTable(
+  "semantic_cache_embeddings",
+  {
+    /** the cache row this vector indexes; deleted with it (TTL purge, user deletion) */
+    cacheId: uuid("cache_id")
+      .primaryKey()
+      .references(() => semanticCache.id, { onDelete: "cascade" }),
+    /** sha256 commitment to everything in the exact key EXCEPT the input text: user,
+     * agent, project, mode, options, attachments, planner dials and the serving
+     * configuration (ADR-0146). Only rows with the same commitment are ever compared. */
+    partitionKey: text("partition_key").notNull(),
+    /** the embedder that produced the vector; a vector is only compared with vectors
+     * from the same embedder and model */
+    embedderId: uuid("embedder_id")
+      .notNull()
+      .references(() => externalScorers.id, { onDelete: "cascade" }),
+    /** the model identity the embedder reported (repository@revision): an upgrade misses */
+    embedderModel: text("embedder_model").notNull(),
+    /** unit vector (L2-normalised by the gateway). Derived from the prompt, so it is
+     * purged with the cache row. */
+    embedding: doublePrecision("embedding").array().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("semantic_cache_embeddings_partition_idx").on(t.partitionKey, t.embedderId, t.embedderModel, t.createdAt),
+    check("semantic_cache_embeddings_dims_check", sql`cardinality(${t.embedding}) BETWEEN 16 AND 4096`),
+  ],
+);
