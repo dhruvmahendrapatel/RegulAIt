@@ -57,6 +57,7 @@ import {
   userModelCredentials,
   users,
   virtualKeys,
+  runAsPrincipalStepIfScoped,
   type Db,
 } from "@regulait/db";
 import {
@@ -577,7 +578,11 @@ export async function computeCredentialInventory(
     });
   }
 
-  for (const p of await db
+  // ADR-0234 PM batch (#828 review): pm_connections is under row-level security. The inventory also runs inside a
+  // non-admin request (a remediation decision re-runs the governance monitor as the deciding approver), so the read
+  // enters pm_sync as a principal step; in an admin or system scope it runs unchanged.
+  const pmRows = await runAsPrincipalStepIfScoped("pm_sync", "credentials.pm-connections", () =>
+    db
     .select({
       id: pmConnections.id,
       name: pmConnections.name,
@@ -588,7 +593,9 @@ export async function computeCredentialInventory(
       webhookSecretSetAt: pmConnections.webhookSecretSetAt,
       hasWebhookSecret: sql<boolean>`${pmConnections.webhookSecretHash} IS NOT NULL`,
     })
-    .from(pmConnections)) {
+    .from(pmConnections),
+  );
+  for (const p of pmRows) {
     drafts.push({
       id: `pm_token:${p.id}`,
       type: "pm_token",
