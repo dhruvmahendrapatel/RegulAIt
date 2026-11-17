@@ -86,6 +86,8 @@ import {
   loadCompiledEgressContext,
 } from "./compiled-egress.js";
 import { loadOrgSettings } from "./org-settings.js";
+import { databaseNow } from "./db-clock.js";
+import { claimLeaseMs, DEFAULT_CLAIM_LEASE_MS, executionMaxMs, startClaimHeartbeat } from "./workflow-claim-heartbeat.js";
 import {
   REMEDIATION_ENVIRONMENT_PATTERN,
   SHADOW_AI_REMEDIATION_CHANGE_TYPE,
@@ -1374,7 +1376,9 @@ async function runGitExecutions(
       const current = rowDef.stages[rowState.currentStageIndex];
       if (!current || current.id !== effect.stageId) return null;
       const ctx = { ...(row.context as Record<string, unknown>) };
-      const held = stageClaimState(ctx, effect.stageId, Date.now(), stageClaimTtlMs(), row.stageEntry);
+      // M-075: the claim is taken and judged on the database clock, the clock its renewals are written with
+      const claimNow = await databaseNow(tx);
+      const held = stageClaimState(ctx, effect.stageId, claimNow.getTime(), stageClaimTtlMs(), row.stageEntry);
       if (held.heldLive) return "held" as const; // another executor holds it
       // ADR-0189 R25 item 13 prevention: a stage whose success would complete
       // the instance (and so approve its governed use case) is not claimed —
@@ -1393,7 +1397,8 @@ async function runGitExecutions(
       // one the instance is waiting on (commitStageResult)
       const claimId = randomUUID();
       ctx.executing = effect.stageId;
-      ctx.executingSince = new Date().toISOString();
+      ctx.executingSince = claimNow.toISOString();
+      delete ctx.executingRenewedAt;
       ctx.executingEntry = row.stageEntry;
       ctx.executingClaim = claimId;
       await tx.update(workflowInstances).set({ context: ctx }).where(eq(workflowInstances.id, row.id));
@@ -1424,10 +1429,44 @@ async function runGitExecutions(
     // completion merges only those into the row as it is THEN (re-read FOR
     // UPDATE), so a report or re-open that committed meanwhile survives.
     const snapshot = { ...(instance.context as Record<string, unknown>) };
+    // ADR-0349 slice 3: renew the claim while this stage runs. Past the schedule-to-close limit the heartbeat stops
+    // renewing and fails the stage itself, under the same claim guard as any completion.
+    const heartbeat = startClaimHeartbeat(db, guard, async () => {
+      const maxMs = workflowTestHooks.claimHeartbeat?.maxMs ?? executionMaxMs();
+      const error = `execution limit reached: stage '${stage.id}' ran longer than ${maxMs} ms since its claim`;
+      await commitStageResult(
+        db,
+        guard,
+        actorUserId,
+        (fresh) => {
+          for (const k of CLAIM_KEYS) delete fresh[k];
+          fresh.lastError = `${stage.id}: ${error}`;
+          return {
+            event: { kind: "execution_failed", stageId: stage.id, error },
+            audits: [
+              {
+                userId: actorUserId ?? "00000000-0000-0000-0000-000000000000",
+                objectType: "workflow",
+                objectId: guard.instanceId,
+                detail: { stageId: stage.id, stageEntry: guard.entry, claimId: guard.claimId, executionMaxMs: maxMs },
+                effect: "deny",
+                ruleId: "workflow:execution-limit-reached",
+                ruleChain: [],
+                reason: error,
+              },
+            ],
+          };
+        },
+        { executionLimit: true },
+      ).catch((err) => console.error(`execution limit commit for ${guard.instanceId}/${stage.id} failed: ${errLine(err)}`));
+    }, workflowTestHooks.claimHeartbeat);
     const finish = async (
       event: WorkflowEvent | null,
       deployMode?: "hosted" | "byoc" | "air_gapped" | null,
     ): Promise<StageCommit> => {
+      // ADR-0349 slice 3: no renewal races the commit; a limit failure the heartbeat already committed makes this
+      // commit a discard (the claim is gone), which still salvages this executor's effect records
+      await heartbeat.stop();
       const owned = ownedKeyChanges(snapshot, context);
       return commitStageResult(
         db,
@@ -1494,6 +1533,9 @@ async function runGitExecutions(
       });
     }
     try {
+    if (workflowTestHooks.afterStageClaim) {
+      await workflowTestHooks.afterStageClaim({ instanceId: instance.id, stageId: stage.id, claimId: guard.claimId });
+    }
 
     // §8 nesting: an automated_build stage with a run graph spawns a nested
     // orchestration run instead of a git operation — planned under the
@@ -2250,24 +2292,26 @@ ${latestArtifact.content}`
       // nested-run lookup, an artifact read, a provider resolution) used to
       // leave `executing` set with nothing to clear it. Release it here —
       // only if this executor still holds it — and let the error propagate.
+      await heartbeat.stop();
       await releaseStageClaimIfHeld(db, instance.id, stage.id, guard.claimId).catch(() => {});
       await reevaluateIfReportsArrived().catch(() => {});
       throw err;
+    } finally {
+      // ADR-0349 slice 3: every way out of the stage stops the renewal (a no-op after finish or the catch)
+      await heartbeat.stop();
     }
   }
   return { effects: lastEffects, refused };
 }
 
-/** REL-06: how long an execution claim may go unreleased before another
- * executor may take it over (REGULAIT_WORKFLOW_CLAIM_TTL_MS, default 15 min —
- * the same horizon the ADR-0064 scheduler lease uses). */
-export const DEFAULT_STAGE_CLAIM_TTL_MS = 15 * 60_000;
+/** REL-06 / ADR-0349 slice 3: how long an execution claim stays live without a renewal before another executor may
+ * take it over. Since slice 3 the executor renews it (workflow-claim-heartbeat.ts), so this is a LEASE, 60 s by
+ * default (REGULAIT_WORKFLOW_CLAIM_LEASE_MS, 15 s to 15 min; the older REGULAIT_WORKFLOW_CLAIM_TTL_MS is still read
+ * when the new one is unset). It was a 15-minute TTL from the claim. */
+export const DEFAULT_STAGE_CLAIM_TTL_MS = DEFAULT_CLAIM_LEASE_MS;
 
 export function stageClaimTtlMs(env: NodeJS.ProcessEnv = process.env): number {
-  const raw = env.REGULAIT_WORKFLOW_CLAIM_TTL_MS;
-  if (raw === undefined || raw.trim() === "") return DEFAULT_STAGE_CLAIM_TTL_MS;
-  const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : DEFAULT_STAGE_CLAIM_TTL_MS;
+  return claimLeaseMs(env);
 }
 
 /**
@@ -2291,13 +2335,15 @@ export function stageClaimState(
   if (currentEntry !== undefined && typeof ctx.executingEntry === "number" && ctx.executingEntry !== currentEntry) {
     return { heldLive: false, expiredSince: typeof ctx.executingSince === "string" ? ctx.executingSince : "unknown" };
   }
-  const since = typeof ctx.executingSince === "string" ? Date.parse(ctx.executingSince) : NaN;
+  // ADR-0349 slice 3: the lease runs from the last renewal (the heartbeat), else from the claim
+  const renewedAt = typeof ctx.executingRenewedAt === "string" ? ctx.executingRenewedAt : ctx.executingSince;
+  const since = typeof renewedAt === "string" ? Date.parse(renewedAt) : NaN;
   if (Number.isFinite(since) && now - since < ttlMs) return { heldLive: true, expiredSince: null };
   return { heldLive: false, expiredSince: typeof ctx.executingSince === "string" ? ctx.executingSince : "unknown" };
 }
 
 /** the context keys that make up a stage execution claim */
-const CLAIM_KEYS = ["executing", "executingSince", "executingEntry", "executingClaim"] as const;
+const CLAIM_KEYS = ["executing", "executingSince", "executingEntry", "executingClaim", "executingRenewedAt"] as const;
 
 /** drop the claim from an in-memory context (the normal release path) */
 function releaseStageClaim(context: Record<string, unknown>): void {
@@ -2311,7 +2357,7 @@ async function releaseStageClaimIfHeld(db: Db, instanceId: string, stageId: stri
   await db
     .update(workflowInstances)
     .set({
-      context: sql`${workflowInstances.context} - 'executing' - 'executingSince' - 'executingEntry' - 'executingClaim'`,
+      context: sql`${workflowInstances.context} - 'executing' - 'executingSince' - 'executingEntry' - 'executingClaim' - 'executingRenewedAt'`,
     })
     .where(
       and(
@@ -2341,6 +2387,10 @@ export const workflowTestHooks: {
   duringStageEval?: (at: { instanceId: string; stageId: string }) => Promise<void>;
   /** parks ANY executor after its work, just before its locked completion */
   beforeStageCommit?: (at: { instanceId: string; stageId: string }) => Promise<void>;
+  /** ADR-0349 slice 3: parks ANY executor right after its claim, with its heartbeat running */
+  afterStageClaim?: (at: { instanceId: string; stageId: string; claimId: string }) => Promise<void>;
+  /** ADR-0349 slice 3: a lease and limit below their deployment bounds, for tests only */
+  claimHeartbeat?: { leaseMs: number; maxMs: number };
 } = {};
 
 type AuditInsert = typeof auditLog.$inferInsert;
