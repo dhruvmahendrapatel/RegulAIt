@@ -1,16 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
-  CMDB_SYNC_RUN_INITIAL_STATES,
-  CMDB_SYNC_RUN_STATES,
-  CMDB_SYNC_RUN_TRANSITIONS,
+  CMDB_SYNC_RUN_MACHINE,
   cmdbCiClassesSchema,
   cmdbInstanceUrlProblem,
-  cmdbRunCanTransition,
-  cmdbRunStatesBefore,
   cmdbSourceKey,
   createCmdbConnectorSchema,
   storeCmdbCredentialSchema,
 } from "./cmdb-sync.js";
+import { STATE_MACHINES } from "./state-machines.js";
 
 describe("ADR-0358 CMDB sync contract", () => {
   it("accepts an https origin only", () => {
@@ -28,11 +25,13 @@ describe("ADR-0358 CMDB sync contract", () => {
   });
 
   it("the run lifecycle: running ends once; terminal states have no way out", () => {
-    expect(CMDB_SYNC_RUN_INITIAL_STATES).toEqual(["running", "refused"]);
-    expect(cmdbRunStatesBefore("succeeded")).toEqual(["running"]);
-    expect(cmdbRunStatesBefore("failed")).toEqual(["running"]);
-    for (const s of CMDB_SYNC_RUN_STATES) if (s !== "running") expect(CMDB_SYNC_RUN_TRANSITIONS[s]).toEqual([]);
-    expect(cmdbRunCanTransition("running", "refused")).toBe(false);
+    const m = CMDB_SYNC_RUN_MACHINE;
+    expect(m.def.initial).toEqual(["running", "refused"]);
+    expect(m.sourcesOf("succeed")).toEqual(["running"]);
+    expect(m.sourcesOf("fail")).toEqual(["running"]);
+    for (const s of ["succeeded", "failed", "refused"] as const) expect(m.isTerminal(s)).toBe(true);
+    expect(m.canMove("running", "refused")).toBe(false);
+    expect(STATE_MACHINES.cmdb_sync_run).toBe(m);
   });
 
   it("the source key is stable and kind-scoped", () => {

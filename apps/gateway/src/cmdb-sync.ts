@@ -65,7 +65,7 @@ import {
   CMDB_LIMITS,
   cmdbCiClassesSchema,
   cmdbInstanceUrlProblem,
-  cmdbRunStatesBefore,
+  CMDB_SYNC_RUN_MACHINE,
   cmdbSourceKey,
   createCmdbConnectorSchema,
   setCmdbEnabledSchema,
@@ -353,11 +353,11 @@ async function auditRun(db: Db, c: CmdbConnectorRow, run: CmdbSyncRunRow, actor:
 }
 
 /** the one state change out of `running`, a compare-and-set on the states the declared table allows */
-async function finishRun(db: Db, runId: string, to: "succeeded" | "failed", counts: Partial<CmdbSyncRunRow>, code: CmdbErrorCode | null) {
+async function finishRun(db: Db, runId: string, event: "succeed" | "fail", counts: Partial<CmdbSyncRunRow>, code: CmdbErrorCode | null) {
   const [r] = await db
     .update(cmdbSyncRuns)
-    .set({ ...counts, status: to, errorCode: code, finishedAt: sql`now()` })
-    .where(and(eq(cmdbSyncRuns.id, runId), inArray(cmdbSyncRuns.status, cmdbRunStatesBefore(to))))
+    .set({ ...counts, status: CMDB_SYNC_RUN_MACHINE.def.transitions[event].to, errorCode: code, finishedAt: sql`now()` })
+    .where(and(eq(cmdbSyncRuns.id, runId), inArray(cmdbSyncRuns.status, [...CMDB_SYNC_RUN_MACHINE.sourcesOf(event)])))
     .returning();
   return r ?? null;
 }
@@ -382,7 +382,7 @@ export async function syncCmdbConnector(
   const fail = async (code: CmdbErrorCode) => {
     const run = await db.transaction(async (tx) => {
       const t = tx as unknown as Db;
-      const r = await finishRun(t, runId, "failed", counts, code);
+      const r = await finishRun(t, runId, "fail", counts, code);
       if (r) await auditRun(t, c, r, opts.actorUserId);
       return r;
     });
@@ -468,7 +468,7 @@ export async function syncCmdbConnector(
 
     const run = await db.transaction(async (tx) => {
       const t = tx as unknown as Db;
-      const r = await finishRun(t, runId, "succeeded", counts, null);
+      const r = await finishRun(t, runId, "succeed", counts, null);
       if (r) await auditRun(t, c, r, opts.actorUserId, { truncated });
       return r;
     });

@@ -35,7 +35,7 @@ import {
   withPrincipal,
   type Db,
 } from "@regulait/db";
-import { CMDB_SYNC_RUN_TRANSITIONS, cmdbRunCanTransition } from "@regulait/shared";
+import { CMDB_SYNC_RUN_MACHINE } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { syncCmdbConnector, CMDB_SYNC_JOB_NAME } from "./cmdb-sync.js";
 import { SCHEDULER_JOB_NAMES, schedulerJobDefinitions } from "./scheduler-jobs.js";
@@ -268,9 +268,9 @@ describe("ADR-0358 CMDB connectors: off by default, export only", () => {
     } finally {
       await db.update(cmdbSyncRuns).set({ status: "failed", errorCode: "internal", finishedAt: new Date() }).where(eq(cmdbSyncRuns.id, held!.id));
     }
-    expect(CMDB_SYNC_RUN_TRANSITIONS.running).toEqual(["succeeded", "failed"]);
-    expect(cmdbRunCanTransition("succeeded", "failed")).toBe(false);
-    expect(cmdbRunCanTransition("refused", "running")).toBe(false);
+    expect(CMDB_SYNC_RUN_MACHINE.sourcesOf("succeed")).toEqual(["running"]);
+    expect(CMDB_SYNC_RUN_MACHINE.canMove("succeeded", "failed")).toBe(false);
+    expect(CMDB_SYNC_RUN_MACHINE.canMove("refused", "running")).toBe(false);
   });
 
   it("reads ownership back only when turned on (step-up), recorded and never applied", async () => {

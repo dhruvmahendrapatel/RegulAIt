@@ -165,5 +165,7 @@ hand-written is RegulAIt's: which assets are exported, the policy, the audit and
   CMDB-reported owner to a RegulAIt agent is not built: the read-back is recorded on `cmdb_ci_links` and shown by
   `GET /v1/cmdb/connectors/:id/links` only (a follow-up in PENDING). There is no per-tenant rate limit beyond one pass
   per connector at a time (a partial unique index on `running`) and bounded batches (100 items per request, 2,000 per
-  pass); a 429 fails the run (`rate_limited`) and the next pass retries. Migration `pending/cmdb_sync.sql`. The nine
+  pass); a 429 fails the run (`rate_limited`) and the next pass retries. The run lifecycle is `CMDB_SYNC_RUN_MACHINE`, declared with ADR-0348's
+  `defineMachine` and listed in `STATE_MACHINES`; the finish step's guard is its `sourcesOf`. Migration
+  `pending/cmdb_sync.sql`. The nine
   routes are known UI gaps on #453, and the credential DELETE is listed as API-only in the affordance census until then.

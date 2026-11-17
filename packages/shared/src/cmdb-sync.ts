@@ -6,6 +6,7 @@
  * lifecycle (one declared transition table) and the source key every exported item carries.
  */
 import { z } from "zod";
+import { defineMachine } from "./state-machine.js";
 
 export const CMDB_KIND_VALUES = ["servicenow"] as const;
 export type CmdbKind = (typeof CMDB_KIND_VALUES)[number];
@@ -96,29 +97,35 @@ export const storeCmdbCredentialSchema = z
 export const setCmdbEnabledSchema = z.object({ enabled: z.boolean(), reason }).strict();
 
 // ---------------------------------------------------------------------------
-// the run lifecycle (owner build rule 12): one declared table, reused by the writer and readable by agents
+// the run lifecycle (owner build rule 12, ADR-0348): one declared machine, reused by the writer and readable by agents
 // ---------------------------------------------------------------------------
 
 export const CMDB_SYNC_RUN_STATES = ["running", "succeeded", "failed", "refused"] as const;
 export type CmdbSyncRunState = (typeof CMDB_SYNC_RUN_STATES)[number];
 
 /** a run opens `running` (or is written already `refused`); `running` ends in exactly one terminal state */
-export const CMDB_SYNC_RUN_TRANSITIONS: Readonly<Record<CmdbSyncRunState, readonly CmdbSyncRunState[]>> = Object.freeze({
-  running: ["succeeded", "failed"],
-  succeeded: [],
-  failed: [],
-  refused: [],
+export const CMDB_SYNC_RUN_MACHINE = defineMachine({
+  id: "cmdb_sync_run",
+  stored: "cmdb_sync_runs.status",
+  states: CMDB_SYNC_RUN_STATES,
+  initial: ["running", "refused"],
+  terminal: ["succeeded", "failed", "refused"],
+  transitions: {
+    succeed: {
+      from: ["running"],
+      to: "succeeded",
+      by: ["system", "admin"],
+      summary: "the pass finished: every confirmed item is linked, the rest are retried next pass",
+    },
+    fail: {
+      from: ["running"],
+      to: "failed",
+      by: ["system", "admin"],
+      summary: "the pass stopped on a fixed error code (or was found stale); nothing unconfirmed was linked",
+    },
+  },
 });
-export const CMDB_SYNC_RUN_INITIAL_STATES: readonly CmdbSyncRunState[] = ["running", "refused"];
-
-export function cmdbRunCanTransition(from: CmdbSyncRunState, to: CmdbSyncRunState): boolean {
-  return CMDB_SYNC_RUN_TRANSITIONS[from].includes(to);
-}
-
-/** the states a run may be in for `to` to be written (the compare-and-set's WHERE) */
-export function cmdbRunStatesBefore(to: CmdbSyncRunState): CmdbSyncRunState[] {
-  return CMDB_SYNC_RUN_STATES.filter((s) => cmdbRunCanTransition(s, to));
-}
+export type CmdbSyncRunEvent = (typeof CMDB_SYNC_RUN_MACHINE.events)[number];
 
 // ---------------------------------------------------------------------------
 // the exported item
