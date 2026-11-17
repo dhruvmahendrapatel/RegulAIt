@@ -815,6 +815,9 @@ describe("every sweep is registered", () => {
         // ADR-0302: third-party ingest evidence past the audit floor; driven end to end in
         // zz-adr0302-evidence-retention.test.ts (with no floor configured it deletes nothing)
         SCHEDULER_JOB_NAMES.thirdPartyEvidenceRetentionSweep,
+        // ADR-0358 (lane E39): pushes the AI asset inventory to enabled CMDB connectors; driven end to end in
+        // zz-adr0358-cmdb-sync.test.ts (with no connector enabled it sends nothing)
+        SCHEDULER_JOB_NAMES.cmdbSyncSweep,
       ].sort(),
     );
     const discovery = registry.get(SCHEDULER_JOB_NAMES.discoveryScanSweep)!;

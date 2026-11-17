@@ -640,6 +640,7 @@ import { registerEndpointMcpConfigRoutes } from "./endpoint-mcp-config.js";
 import { registerManagedSettingsRoutes } from "./managed-settings.js";
 import { registerEndpointAddonInventoryRoutes } from "./endpoint-addon-inventory.js";
 import { registerAdoptionAnalyticsRoutes } from "./adoption-analytics.js";
+import { registerCmdbSyncRoutes } from "./cmdb-sync.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
 import { registerCostImportRoutes } from "./cost-import.js";
 import { registerCostReconciliationRoutes } from "./cost-reconcile.js";
@@ -6258,6 +6259,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerEndpointAddonInventoryRoutes(app, db);
   // ADR-0358 (lane E39): AI adoption analytics, admin-only aggregates
   registerAdoptionAnalyticsRoutes(app, db);
+  // ADR-0358 (lane E39) part 2: CMDB sync of the AI asset inventory, admin-only
+  registerCmdbSyncRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0069 — CROSS-VENDOR COST CONSOLIDATION. Admin-only by default: the ONLY
   // route here in NON_ADMIN_ROUTES is `GET /v1/users/:userId/cost-consolidated`,
   // which refuses in-handler unless the caller IS that user. Uploading a file

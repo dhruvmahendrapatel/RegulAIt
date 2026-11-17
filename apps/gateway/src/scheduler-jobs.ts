@@ -129,6 +129,8 @@ export const SCHEDULER_JOB_NAMES = {
   siemDeliverySweep: "siem-delivery-sweep",
   // ADR-0302 (P37 follow-up): deletes third-party ingest evidence past the audit floor (third-party-ingest-retention.ts)
   thirdPartyEvidenceRetentionSweep: "third-party-evidence-retention-sweep",
+  // ADR-0358 (lane E39): pushes the AI asset inventory to enabled CMDB connectors (cmdb-sync.ts)
+  cmdbSyncSweep: "cmdb-sync-sweep",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -843,6 +845,7 @@ import { spiffeBundleRefreshJobDefinitions } from "./oauth/spiffe-bundle-endpoin
 import { fairnessJobDefinitions } from "./fairness.js";
 import { siemJobDefinitions } from "./siem-delivery.js";
 import { thirdPartyIngestJobDefinitions } from "./third-party-ingest-retention.js";
+import { cmdbSyncJobDefinitions } from "./cmdb-sync.js";
 
 function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
   return [
@@ -861,6 +864,7 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...fairnessJobDefinitions(), // ADR-0222 (P13(a)): fairness-dataset-retention-sweep
     ...siemJobDefinitions({ dataKey: opts.dataKey }), // ADR-0303: siem-delivery-sweep
     ...thirdPartyIngestJobDefinitions(), // ADR-0302: third-party-evidence-retention-sweep
+    ...cmdbSyncJobDefinitions({ dataKey: opts.dataKey }), // ADR-0358 (lane E39): cmdb-sync-sweep
   ];
 }
 // ===== end ADR-0182 block ====================================================
