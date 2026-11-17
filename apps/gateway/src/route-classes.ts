@@ -77,6 +77,8 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   "/app",
   "/",
   "/health",
+  // ADR-0343: the readiness probe (503 while draining); like /health it names no data
+  "/ready",
   // ADR-0185 G5 — mounted only when REGULAIT_METRICS_ON_MAIN_LISTENER is on
   // (otherwise no route exists: 404). The scraper holds no RegulAIt
   // credential; the route authenticates IN-ROUTE on REGULAIT_METRICS_TOKEN
@@ -619,6 +621,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /app",
   "GET /",
   "GET /health",
+  // ADR-0343: the readiness probe; no credential, no data
+  "GET /ready",
   // ADR-0185 G5 — see AUTH_EXEMPT_ROUTES: the metrics token is the credential
   "GET /metrics",
   // ADR-0026: the SPA shell, same static-page reasoning as /app above
@@ -895,6 +899,10 @@ export const NON_ADMIN_ROUTES = new Set([
   "DELETE /v1/model-artifacts/:artifactId",
   // ADR-0216: the uploader attaches a signature to their own artifact (an admin to any), checked in-handler
   "POST /v1/model-artifacts/:artifactId/signature",
+  // lane L7 (P14 + P16): the child's uploader records its derivation (an admin any); reads under the same rule.
+  // Checked in-handler; a relative the caller cannot see is a count, never an id
+  "POST /v1/model-artifacts/:artifactId/lineage",
+  "GET /v1/model-artifacts/:artifactId/lineage",
 
   // ADR-0188 (batch 6 item 1) — the public identity surface (auth-exempt above
   // too): the JWKS and the token endpoint family.
