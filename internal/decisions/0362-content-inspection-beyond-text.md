@@ -109,6 +109,50 @@ the existing `maxAttachmentsPerDispatch` and `maxAttachmentBytes` org settings.
    PPM (no Pillow); per-image pixel and per-request OCR-page caps. Until slice 2, an image or a PDF with no text layer
    is refused `needs_ocr`, so it fails closed with inspection on.
 
+## Cost (slice 3)
+
+Content inspection is **off by default per project** because of this cost; it is forced on only by the compliance floor
+(decision 7). A dispatch WITHOUT files pays nothing at all. A dispatch WITH files, where inspection is on, pays one
+sandboxed extraction before any provider work.
+
+**Measured: the extractor itself** (`engines/contentextract/bench.py`, reproducible; 2026-11-17, 4 vCPU Intel Xeon
+2.1 GHz, CPython 3.13, pypdfium2 5.15.2, Tesseract 5.3.4; median of 7 warm runs, p95, and the median of a cold process
+that starts the interpreter, imports, extracts and writes the result, which is what one sandboxed task pays):
+
+| File | Size | Warm median | Warm p95 | Cold process |
+|---|---|---|---|---|
+| CSV, 10,000 rows | 468 KB | 2.7 ms | 8.9 ms | 54 ms |
+| DOCX, 2,000 paragraphs | 23 KB | 7.0 ms | 8.3 ms | 53 ms |
+| XLSX, 5,000 rows | 52 KB | 20 ms | 42 ms | 69 ms |
+| ZIP, 50 text files | 12 KB | 1.3 ms | 1.7 ms | 42 ms |
+| PDF, 1 text page | 1.5 KB | 0.6 ms | 1.7 ms | 76 ms |
+| PDF, 50 text pages | 1.8 KB | 13 ms | 15 ms | 88 ms |
+| PDF, 200 text pages (the page cap) | 2.7 KB | 47 ms | 51 ms | 126 ms |
+| PNG, 1 page, OCR | 13 KB | 137 ms | 163 ms | 192 ms |
+| PDF, 1 scanned page, OCR | 10 KB | 338 ms | 358 ms | 405 ms |
+| PDF, 5 scanned pages, OCR | 10 KB | 1,810 ms | 1,964 ms | 1,849 ms |
+
+Read as: text formats cost **~40–130 ms per sandboxed task, most of it interpreter start**; OCR costs **~140 ms per image
+and ~350 ms per scanned page** on one core, so the 20-OCR-page cap is ~7 s, inside the 20 s extractor deadline.
+Throughput is one core per concurrent inspection: roughly 3 scanned pages, or 10–20 text documents, per second per
+core.
+
+**Modelled, not measured: the pipeline around it** (from the engine contract's constants; no built image could be
+timed here, and the repository records no measured gVisor start-up, ADR-0190 I0):
+
+| Step | Cost | Source |
+|---|---|---|
+| Runner picks up the queued run | 0–5 s (an idle runner polls every 5 s) | `packages/engine-runner/src/loop.ts` idle interval |
+| Bridge notices the job | ≤ 250 ms | `task-bridge.ts` tick |
+| Sandbox start (gVisor) and input fetch | not measured | ADR-0190 I5 |
+| Result frames back to the gateway | ≤ 250 ms per poll | `engine-tasks.ts` frame wait |
+| Gateway awaits the run's end | ≤ 100 ms per poll | `awaitContentExtractResult` |
+
+So an inspected dispatch with files adds **from under a second to several seconds** of latency today, dominated by
+the runner's idle poll, not by extraction. Follow-ups (PENDING): a short idle interval or a long-poll lease for this
+engine's runner, which removes most of it, and an end-to-end timing of the built image under gVisor once the image is
+admissible (owner questions 1 and 3).
+
 ## Consequences
 
 - A file in a prompt meets the same rules as the prompt, where inspection is on. Where it is off, the audit says the
@@ -169,3 +213,5 @@ the existing `maxAttachmentsPerDispatch` and `maxAttachmentBytes` org settings.
   runs with no shell, one thread and a fixed environment. A PDF page with no text layer and no OCR engine now fails
   closed (`needs_ocr`) even when other pages have text; slice 1a passed such a PDF with only its text pages.
   The image's unit tests run with `REGULAIT_REQUIRE_OCR=1`, so the OCR cases cannot be skipped.
+- **Slice 3 (2026-11-17), cost**: `engines/contentextract/bench.py` and the §Cost section above (measured extractor
+  cost per format, OCR included; the surrounding pipeline modelled from the engine contract's constants).
