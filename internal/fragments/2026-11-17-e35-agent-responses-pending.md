@@ -5,7 +5,7 @@
   orchestration run of a delegated worker, and is recorded with `sessionEnded: false` where no session exists. Then
   lift the route's `response_not_yet_enforced` refusal. Also render advise/correct on the model, connector and A2A
   refusal bodies (`governedEvaluateResource`, ADR-0251).
-- **E35 slice 3: endpoint hook adapters (ADR-0354 §8), after lane E31 (ADR-0350) merges.** Map a signed policy's
+- **E35 slice 3: endpoint hook adapters (ADR-0354 §8), after lane E31 (on-device command rules) merges.** Map a signed policy's
   graduated response onto the Go `Decision`; render guidance only into each agent's documented plain-text fields;
   Claude Code `continue: false` for block_session.
 - **UI (design builder, #453): the ABAC policy editor** needs the six response modes and the guidance message and

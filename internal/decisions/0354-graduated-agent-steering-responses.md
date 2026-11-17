@@ -9,10 +9,10 @@
   [ADR-0330](0330-hook-adapters-cursor-copilot-codex.md) (endpoint hook adapters), [ADR-0124](0124-kill-switch-and-safe-modes.md)
   (kill switch and agent halt), [ADR-0097](0097-mcp-admission-scanning-and-auth-discovery.md) (admission scan), ADR-0180 (secure by
   default), ADR-0176 (open source first)
-- **Coordinates with**: lane E31 / ADR-0350 (on-device command rules, branch `builder/e31-command-rules`, which adds
-  `Ask` to the Go verdict), lane E19 / ADR-0338 (#881, the kill-switch "narrowing only" guard)
+- **Coordinates with**: lane E31 (on-device command rules, branch `builder/e31-command-rules`, not yet on main, which
+  adds `Ask` to the Go verdict), lane E19 (#881, not yet on main: the kill-switch "narrowing only" guard)
 - **Source**: owner approval 2026-11-17 of gap 2 in
-  [GAP_ANALYSIS_MANIFOLD_2026-11.md](../product/GAP_ANALYSIS_MANIFOLD_2026-11.md). Vendor features are ideas only: no
+  `internal/product/GAP_ANALYSIS_MANIFOLD_2026-11.md` (on PR #935 until it merges). Vendor features are ideas only: no
   competitor proxy is embedded, and the ADR-0251 gateway stays the single decision point.
 - **Migration**: pending `abac_agent_responses` (`packages/db/migrations/pending/abac_agent_responses.sql`; numbered at
   merge under ADR-0252)
@@ -114,7 +114,7 @@ Both are declared in the table and accepted by the kernel and the Cedar engine, 
 ended when it is not. Slice 2 wires them on the proposed secure defaults:
 
 - **disable** reuses ADR-0124's agent halt (`haltAgentInTx`): it can set a halt, never lift one; lifting stays on the
-  execution-control route with its own step-up. This is the same narrowing-only rule lane E19 (#881, ADR-0338) encodes
+  execution-control route with its own step-up. This is the same narrowing-only rule lane E19 (#881) encodes
   as `kill_switch_narrowing_only`: under a non-normal dial a narrowing action still applies and a widening one is
   refused. Disable is narrowing by construction, so it applies under every dial.
 - **block_session** ends the narrowest session the call belongs to: the orchestration run for a delegated worker
@@ -124,7 +124,7 @@ ended when it is not. Slice 2 wires them on the proposed secure defaults:
 
 ### 8. The endpoint adapters (slice 3, after E31)
 
-The Go mirror decides nothing yet. ADR-0350 (lane E31) is adding `Ask` and a `Rule` field to the Go `Decision`; to
+The Go mirror decides nothing yet. Lane E31 (on-device command rules) is adding `Ask` and a `Rule` field to the Go `Decision`; to
 avoid two lanes editing one struct, slice 3 maps a signed policy's graduated response onto `Decision` after E31
 merges, renders guidance only into each agent's documented plain-text fields (Claude Code `permissionDecisionReason`
 and `additionalContext`), and adds the decision-record fields E1 needs. E31's device rules and the gateway rules then
