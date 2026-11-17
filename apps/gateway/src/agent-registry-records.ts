@@ -6,8 +6,36 @@
  * land exactly when the run succeeds and never from a run that lost its lease.
  */
 import { AGENT_REGISTRIES_BY_KIND, DISCOVERY_PSEUDONYM_PREFIX, type AgentRegistry, type DiscoverySourceKind } from "@regulait/shared";
-import { agentRegistryRecords, and, eq, inArray, sql, type Db } from "@regulait/db";
+import { agentRegistryRecords, and, eq, inArray, isNotNull, isNull, sql, type Db, type SQL } from "@regulait/db";
 import type { RegistryAgentRecord } from "./discovery-scanners.js";
+
+/**
+ * A staged record's lifecycle, declared once (owner build rule 12). The state is derived from the row, never stored:
+ *  - `open`:     staged and listed by the latest complete read; importable
+ *  - `absent`:   a complete read no longer lists it (`absent_since` set); still importable, the admin sees why
+ *  - `imported`: an agent row exists for it (`agent_id` set). Terminal for the record: `absent_since` keeps tracking
+ *                the vendor side, but the state stays `imported` and the inventory row is never touched (owner R2)
+ * Every write that moves a record names its move here; `canMoveRegistryRecord` is the only check.
+ */
+export const REGISTRY_RECORD_STATES = ["open", "absent", "imported"] as const;
+export type RegistryRecordState = (typeof REGISTRY_RECORD_STATES)[number];
+export const REGISTRY_RECORD_TRANSITIONS: Readonly<Record<RegistryRecordState, readonly RegistryRecordState[]>> = Object.freeze({
+  open: ["absent", "imported"], // a complete run that no longer lists it; POST …/import (step-up)
+  absent: ["open", "imported"], // a run that lists it again; POST …/import (step-up)
+  imported: [], // terminal
+});
+export function registryRecordState(r: { agentId: string | null; absentSince: Date | null }): RegistryRecordState {
+  return r.agentId ? "imported" : r.absentSince ? "absent" : "open";
+}
+export function canMoveRegistryRecord(from: RegistryRecordState, to: RegistryRecordState): boolean {
+  return REGISTRY_RECORD_TRANSITIONS[from].includes(to);
+}
+/** the SQL predicate for each state, the same derivation as `registryRecordState` */
+export const REGISTRY_RECORD_STATE_WHERE: Readonly<Record<RegistryRecordState, () => SQL | undefined>> = Object.freeze({
+  open: () => and(isNull(agentRegistryRecords.agentId), isNull(agentRegistryRecords.absentSince)),
+  absent: () => and(isNull(agentRegistryRecords.agentId), isNotNull(agentRegistryRecords.absentSince)),
+  imported: () => isNotNull(agentRegistryRecords.agentId),
+});
 
 /** at most this many records one run may stage (the scanners cap at 5,000 per listing) */
 export const REGISTRY_RECORDS_MAX = 10_000;

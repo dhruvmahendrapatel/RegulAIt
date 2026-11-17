@@ -6,7 +6,7 @@
  * inventory with a step-up. An imported agent starts disabled, `proposed`, and with no grant (default-deny).
  *
  * THE ADAPTER INTERFACE is `Scanner` plus `RegistryAgentRecord`: one scanner per vendor, one `AgentRegistry` value per
- * registry it reads. A later vendor (Atlassian, lane E17's ADR-0336 set) adds a kind, a registry value and a scanner here;
+ * registry it reads. A later vendor (Atlassian, lane E17's set) adds a kind, a registry value and a scanner here;
  * the full checklist is ADR-0314, section "Adding a registry (the adapter seam)".
  *
  * SD0 WIRING, as every scanner: network only through `ctx.fetch` (wrapped by `scannerFetch`: throttle, backoff,

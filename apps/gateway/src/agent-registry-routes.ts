@@ -11,8 +11,9 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { AGENT_REGISTRIES, AGENT_REGISTRY_LABELS, type AgentRegistry } from "@regulait/shared";
-import { agentRegistryRecords, agents, and, auditLog, desc, discoverySources, eq, isNotNull, isNull, sql, type Db } from "@regulait/db";
+import { agentRegistryRecords, agents, and, auditLog, desc, discoverySources, eq, sql, type Db } from "@regulait/db";
 import { checkOwnerTarget } from "./ownership.js";
+import { REGISTRY_RECORD_STATES, REGISTRY_RECORD_STATE_WHERE, canMoveRegistryRecord, registryRecordState } from "./agent-registry-records.js";
 import { requireStepUp } from "./step-up.js";
 import { refuseIfExpansionBlocked } from "./licensing.js";
 
@@ -30,7 +31,7 @@ export const AGENT_REGISTRY_PAGE_MAX = 200;
 
 const listQuery = z
   .object({
-    status: z.enum(["open", "imported", "absent", "all"]).default("open"),
+    status: z.enum([...REGISTRY_RECORD_STATES, "all"]).default("open"),
     sourceId: z.string().uuid().optional(),
     registry: z.enum(AGENT_REGISTRIES).optional(),
     agentId: z.string().uuid().optional(),
@@ -62,6 +63,7 @@ const recordView = (r: typeof agentRegistryRecords.$inferSelect, sourceName: str
   vendorAttributes: r.vendorAttributes,
   firstSeenAt: r.firstSeenAt.toISOString(),
   lastSeenAt: r.lastSeenAt.toISOString(),
+  state: registryRecordState(r),
   absentSince: r.absentSince?.toISOString() ?? null,
   lastRunId: r.lastRunId,
   agentId: r.agentId,
@@ -97,9 +99,7 @@ export function registerAgentRegistryRoutes(app: FastifyInstance, db: Db): void 
     if (!q.success) return badRequest(reply, q.error);
     const { status, sourceId, registry, agentId, limit, cursor } = q.data;
     const conds = [
-      status === "open" ? and(isNull(agentRegistryRecords.agentId), isNull(agentRegistryRecords.absentSince)) : undefined,
-      status === "imported" ? isNotNull(agentRegistryRecords.agentId) : undefined,
-      status === "absent" ? isNotNull(agentRegistryRecords.absentSince) : undefined,
+      status === "all" ? undefined : REGISTRY_RECORD_STATE_WHERE[status](),
       sourceId ? eq(agentRegistryRecords.sourceId, sourceId) : undefined,
       registry ? eq(agentRegistryRecords.registry, registry) : undefined,
       agentId ? eq(agentRegistryRecords.agentId, agentId) : undefined,
@@ -144,7 +144,7 @@ export function registerAgentRegistryRoutes(app: FastifyInstance, db: Db): void 
     if (!b.success) return badRequest(reply, b.error);
     const [rec] = await db.select().from(agentRegistryRecords).where(eq(agentRegistryRecords.id, p.data.recordId));
     if (!rec) return reply.status(404).send({ error: "unknown_registry_record" });
-    if (rec.agentId) return reply.status(409).send({ error: "already_imported", detail: "this registry agent is already in the inventory", agentId: rec.agentId });
+    if (!canMoveRegistryRecord(registryRecordState(rec), "imported")) return reply.status(409).send({ error: "already_imported", detail: "this registry agent is already in the inventory", agentId: rec.agentId });
     const name = (b.data.name ?? rec.displayName).trim().slice(0, 120);
     // ADR-0052: a new agent widens the governed footprint, so it is expansion-class (as POST /v1/agents)
     const licenseRefusal = await refuseIfExpansionBlocked(db, { actorUserId: actor(req), objectType: "agent", what: `importing agent '${name}' from a vendor registry` });
@@ -163,7 +163,7 @@ export function registerAgentRegistryRoutes(app: FastifyInstance, db: Db): void 
       const t = tx as unknown as Db;
       // re-read under lock: a concurrent import of the same record loses here, not at the unique index
       const [locked] = await t.select().from(agentRegistryRecords).where(eq(agentRegistryRecords.id, rec.id)).for("update");
-      if (!locked || locked.agentId) return { conflict: true as const };
+      if (!locked || !canMoveRegistryRecord(registryRecordState(locked), "imported")) return { conflict: true as const };
       const [agent] = await t
         .insert(agents)
         .values({

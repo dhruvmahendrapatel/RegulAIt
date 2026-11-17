@@ -103,9 +103,16 @@ write permission, so it is not read either: owners are read instead.
   - optionally, linking an imported Entra agent to a RegulAIt workload identity (ADR-0188). That link would be a grant
     step, so it stays out of import.
 
+## Staged record lifecycle (owner build rule 12, 2026-11-17)
+
+A staged record's state is derived from its row and declared once, in `REGISTRY_RECORD_TRANSITIONS`
+(`apps/gateway/src/agent-registry-records.ts`): `open` → `absent` | `imported`, `absent` → `open` | `imported`,
+`imported` terminal. `imported` wins over `absent`, so `?status=absent` lists only importable records. The list
+filter, both import guards and the API's `state` field all read that one table.
+
 ## Adding a registry (the adapter seam)
 
-A new vendor registry (lane E17, ADR-0336: Copilot Studio, Agentforce, OpenAI, n8n) is one adapter. It touches
+A new vendor registry (lane E17: Copilot Studio, Agentforce, OpenAI, n8n) is one adapter. It touches
 these places and nothing else; the staging table, the import route, its step-up and its default-deny stay as they
 are.
 

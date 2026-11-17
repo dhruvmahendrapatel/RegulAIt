@@ -279,6 +279,7 @@ describe("ADR-0314 agent registry import", () => {
     expect((a!.detail as { provenance: Record<string, unknown> }).provenance).toMatchObject({ recordId: rec.id, sourceId, registry: "entra_agent_id", externalId: ID_A });
     const prov = await inject("GET", `/v1/agent-registry/records?status=imported&agentId=${agentId}`, adminKey);
     expect(prov.json().records.map((x: { id: string }) => x.id)).toEqual([rec.id]);
+    expect(prov.json().records[0].state).toBe("imported");
 
     // R2: the vendor renames the agent after import; only the staged record moves, the agent keeps its name
     const renamed = `HR helper renamed ${RUN}`;
