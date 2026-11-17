@@ -142,7 +142,8 @@ export async function auditRoutingClassification(
         : `routing classifier unavailable (${c.fallbackReason}); the built-in heuristic chose ${c.complexity}`,
     detail: {
       phase: "routing",
-      receiptClass: "decision",
+      // a pillar-6 routing record, not a governed allow/deny (ADR-0186 decision 30): kept out of the receipt stream
+      receiptClass: "excluded",
       surface: args.surface,
       projectId: args.projectId,
       complexity: c.complexity,
