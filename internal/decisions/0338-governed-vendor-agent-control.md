@@ -242,6 +242,16 @@ write is a conditional `UPDATE … WHERE status = <from>`, so two racing request
 | `unknown` | `succeeded`, `already_in_state`, `failed` (settled by a state re-read, never a second `apply`) |
 | `succeeded`, `already_in_state`, `failed`, `denied`, `cancelled` | none (terminal) |
 
+**Generic and exported, so other lanes import it rather than copy it.** The table is built with one generic helper,
+`defineTransitionTable<State, Ctx>(edges)` in `@regulait/shared` (no vendor names in it). It returns
+`assertTransition(from, to, ctx)`, `allowedFrom(state)`, `isTerminal(state)` and the edge list, so a UI or an agent can
+read the machine. An edge may carry a named guard, a pure function of the context. The kill-switch guard is exported
+from the same module as `killSwitchNarrowingOnly({ dial, direction })`. It passes for `narrowing` under any dial and
+for `widening` only under `normal`, and it carries no vendor or action names. `VENDOR_ACTION_TRANSITIONS` is one
+instance of the helper. Lane E15's device-quarantine response rules can build their own table with it and reuse the
+guard unchanged. The helper's own tests cover a disallowed edge, a terminal state, a failing guard, and the
+narrowing guard in both directions under every dial.
+
 A restore is a new action row, so terminal rows stay terminal. If lane E29's app-wide state-machine work
 lands a shared machine helper, this table moves onto it unchanged. This lane refactors no other machine.
 
