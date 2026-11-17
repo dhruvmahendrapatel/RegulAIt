@@ -5,7 +5,7 @@
 - **Index**: **A customer assigns work to RegulAIt from inside Jira or Azure Boards. Assigning an item to the RegulAIt agent user, @mentioning it, or a Jira Automation / Azure DevOps service-hook rule starts a pillar-2 workflow (Intake, then forced Plan, through the normal template assignment) as the person who triggered it, after the existing signed and replay-protected PM webhook verifies the delivery, an admin-managed identity link maps the person to a RegulAIt user, and that user's own agent entitlement allows it. A denied trigger gets a comment on the item saying why. Plan sign-off requests, decisions, approvals, PR links and the final outcome are written back as comments, status changes or linked records, each once (idempotent) and audited, with a configurable field mapping. Atlassian Rovo-agent and MCP audit events are ingested read-only as evidence.** Off by default per connection.
 - **Backlog item**: `MARKET_ANALYSIS_2026-11` G4 (owner decision 2026-11-17, competitor gap audit)
 - **Built in**: lane E37, three PRs (1: this ADR and the trigger path; 2: write-back; 3: Rovo and MCP audit-event ingest)
-- **Migration**: `pending/pm_work_triggers.sql` (PR 1), `pending/pm_write_backs.sql` (PR 2), numbered at merge (ADR-0252)
+- **Migration**: `pending/pm_work_triggers.sql` (PR 1), `pending/pm_write_backs.sql` (PR 2), `pending/pm_audit_events.sql` (PR 3), numbered at merge (ADR-0252)
 - **Related**: [ADR-0010](0010-pm-inbound-sync-webhooks-plus-read-through.md) (inbound webhooks, S-03 replay amendment),
   [ADR-0054](0054-onboarding-migration.md) (onboarding), [ADR-0289](0289-pm-work-item-importer.md) (work-item importer, #828),
   [ADR-0061](0061-chatops-approvals.md) (the identity-link pattern reused here), ADR-0018/0019 (template assignment),
@@ -132,6 +132,19 @@ optional state or, for the pull request, a field; no item state is moved unless 
 Atlassian's organisation audit log carries Rovo-agent and Atlassian Remote MCP server activity. A read-only ingest
 pulls those events through the existing governed fetch and stores them as third-party evidence in the audit trail,
 never as decisions and never driving the state machine. No write scope is requested.
+
+**As built (PR 3).** The source is Atlassian's Organizations REST API, `GET {base}/admin/v1/orgs/{orgId}/events-stream`
+(an org admin API key as a Bearer token, cursor paging; `base` defaults to `https://api.atlassian.com`). An admin
+attaches a feed to the Jira connection of that organisation (`pm_audit_sources`, created disabled; enabling it and
+replacing its key are `settings_relax` step-ups; the key is stored encrypted and never returned). The poll
+(`pm-audit-ingest.ts`, on demand and from the hourly `pm-audit-ingest-sweep` job) goes through the connection egress
+guard, reads at most five pages per pass from the stored cursor, keeps the events whose action contains one of the
+feed's filters (default `rovo`, `mcp`; Atlassian names agent and MCP actions, so the filter is by action name and
+configurable), and stores each once in `pm_audit_events` (append-only: UPDATE, DELETE and TRUNCATE refused) under
+one audit-chain row per page marked `attribution: third_party, enforcement: false`. Only the action, the actor's
+account id and the ids and types of the objects touched are kept: no IP address, geolocation or display name. A
+refused fetch or page is audited by status and stops the pass. Migration `pending/pm_audit_events.sql`. A retention
+sweep for this evidence (following the audit floor, as ADR-0302 does for ADR-0261's) is a follow-up.
 
 ## Consequences
 

@@ -131,6 +131,8 @@ export const SCHEDULER_JOB_NAMES = {
   thirdPartyEvidenceRetentionSweep: "third-party-evidence-retention-sweep",
   // ADR-0356 PR 2: writes PM-triggered workflows' progress back to their work items (pm-write-back.ts)
   pmWriteBackSweep: "pm-write-back-sweep",
+  // ADR-0356 PR 3: reads Atlassian Rovo/MCP audit events as read-only evidence (pm-audit-ingest.ts)
+  pmAuditIngestSweep: "pm-audit-ingest-sweep",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -846,6 +848,7 @@ import { fairnessJobDefinitions } from "./fairness.js";
 import { siemJobDefinitions } from "./siem-delivery.js";
 import { thirdPartyIngestJobDefinitions } from "./third-party-ingest-retention.js";
 import { pmWriteBackJobDefinitions } from "./pm-write-back.js";
+import { pmAuditIngestJobDefinitions } from "./pm-audit-ingest.js";
 
 function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
   return [
@@ -865,6 +868,7 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...siemJobDefinitions({ dataKey: opts.dataKey }), // ADR-0303: siem-delivery-sweep
     ...thirdPartyIngestJobDefinitions(), // ADR-0302: third-party-evidence-retention-sweep
     ...pmWriteBackJobDefinitions({ dataKey: opts.dataKey }), // ADR-0356 PR 2: pm-write-back-sweep
+    ...pmAuditIngestJobDefinitions({ dataKey: opts.dataKey }), // ADR-0356 PR 3: pm-audit-ingest-sweep
   ];
 }
 // ===== end ADR-0182 block ====================================================

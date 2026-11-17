@@ -21,6 +21,8 @@ import {
   eq,
   initiatives,
   agents,
+  pmAuditEvents,
+  pmAuditSources,
   pmConnections,
   pmIdentityLinks,
   pmImportedWorkItems,
@@ -54,6 +56,8 @@ const urlFor = (name: string) => {
 };
 
 const PM_TABLES = [
+  "pm_audit_events",
+  "pm_audit_sources",
   "pm_connections",
   "pm_identity_links",
   "pm_imported_work_items",
@@ -134,6 +138,14 @@ beforeAll(async () => {
     .values({ connectionId: ids.conn, externalId: "1", mechanism: "assignment", deliveryContentSha256: "a".repeat(64) })
     .returning({ id: pmWorkTriggers.id });
   await db.insert(pmWriteBacks).values({ triggerId: trigger!.id, kind: "started", sourceKey: "instance" });
+  // ADR-0356 PR 3: an Atlassian audit feed and one stored event
+  const [feed] = await db
+    .insert(pmAuditSources)
+    .values({ connectionId: ids.conn, orgId: "org", baseUrl: "https://api.atlassian.com", apiKeyCiphertext: "x", actionFilters: ["rovo"] })
+    .returning({ id: pmAuditSources.id });
+  await db.insert(pmAuditEvents).values({
+    sourceId: feed!.id, eventId: "e1", action: "rovo_agent_invoked", attributes: {}, observedAt: new Date(), recordSha256: "c".repeat(64), auditLogId: randomUUID(),
+  });
 }, 180_000);
 
 afterAll(async () => {
@@ -184,6 +196,8 @@ describe("what each scope reaches, with no application filter", () => {
   it("pm_sync reaches connections, links and the inbound log, never the deliveries or the import linkage", async () => {
     await runWithRlsPrincipalStep({ userId: ids.alice }, "pm_sync", "test.pm-sync", async () => {
       expect(await visible()).toEqual({
+        pm_audit_events: 0,
+        pm_audit_sources: 0,
         pm_connections: 1,
         pm_identity_links: 0,
         pm_imported_work_items: 0,
