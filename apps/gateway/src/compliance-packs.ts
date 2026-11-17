@@ -114,6 +114,7 @@ import { refuseIfFeatureNotLicensed } from "./licensing.js";
 import { callerProjectIds, callerTeamIds, resolveScopeProjectIds } from "./reporting.js";
 import { countTestedEvaluators } from "./eval-catalog.js";
 import { overrideInForce } from "./guardrails.js";
+import { runEndpointBenchmarkCheck } from "./endpoint-benchmark-checks.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 /** a uuid that cannot exist, so an empty allow-list yields an empty result set
@@ -461,6 +462,14 @@ export async function runCollector(
           ),
         );
       return row?.n ?? 0;
+    }
+
+    case "endpoint_benchmark_check": {
+      // ADR-0351 slice 3: one fleet-wide endpoint check, 1 = pass. Endpoint rows carry no project, so only an
+      // org-scoped report counts it (fail closed, as `isolation_placements`). The schema requires `endpointCheck`.
+      if (projectIds !== null) return 0;
+      if (!params.endpointCheck) throw new Error("endpoint_benchmark_check needs collectorParams.endpointCheck");
+      return runEndpointBenchmarkCheck(db, params.endpointCheck);
     }
 
     default: {
@@ -839,26 +848,85 @@ export async function ensureCascadeProfile(
 // Routes
 // ---------------------------------------------------------------------------
 
+/** one audit row about a compliance pack (module scope so the ADR-0351 deployer register writes the same rows) */
+export async function auditCompliancePack(
+  db: Db,
+  actor: string | null,
+  objectId: string | null,
+  ruleId: string,
+  reason: string,
+  detail: Record<string, unknown>,
+  effect: "allow" | "deny" = "allow",
+): Promise<void> {
+  await db.insert(auditLog).values({
+    userId: actor ?? NO_IDENTITY,
+    objectType: "compliance_pack",
+    objectId,
+    detail,
+    effect,
+    ruleId,
+    ruleChain: [],
+    reason,
+  });
+}
+
+/**
+ * Record a person's attestation on an attestation-required control, and audit it. The ONE write path for pack
+ * attestations: the pack route and the ADR-0351 deployer register both call it, after their own checks.
+ */
+export async function recordPackAttestation(
+  db: Db,
+  args: {
+    actor: string | null;
+    pack: Pick<CompliancePackRow, "id" | "framework" | "version">;
+    controlRef: string;
+    statement: string;
+    evidenceRef: string | null;
+    validUntil: Date | null;
+    /** extra audit detail (the register adds its lifecycle transition) */
+    detail?: Record<string, unknown>;
+  },
+) {
+  const [row] = await db
+    .insert(compliancePackAttestations)
+    .values({
+      packId: args.pack.id,
+      controlRef: args.controlRef,
+      statement: args.statement,
+      evidenceRef: args.evidenceRef,
+      validUntil: args.validUntil,
+      attestedByUserId: args.actor,
+    })
+    .returning();
+  await auditCompliancePack(
+    db,
+    args.actor,
+    args.pack.id,
+    COMPLIANCE_PACK_RULE_IDS.attestationRecorded,
+    `attestation recorded for '${args.controlRef}' on pack '${args.pack.framework}' v${args.pack.version} — this ` +
+      `is the CUSTOMER'S OWN statement about an organisational control, attributed to a named human. ` +
+      `It is reported as 'attested', which is a distinct status from 'satisfied': RegulAIt collected ` +
+      `no evidence for it and does not claim to have`,
+    {
+      controlRef: args.controlRef,
+      validUntil: args.validUntil ? args.validUntil.toISOString() : null,
+      framework: args.pack.framework,
+      version: args.pack.version,
+      ...(args.detail ?? {}),
+    },
+  );
+  return row!;
+}
+
 export function registerCompliancePackRoutes(app: FastifyInstance, db: Db): void {
-  async function audit(
+  const audit = (
     actor: string | null,
     objectId: string | null,
     ruleId: string,
     reason: string,
     detail: Record<string, unknown>,
     effect: "allow" | "deny" = "allow",
-  ) {
-    await db.insert(auditLog).values({
-      userId: actor ?? NO_IDENTITY,
-      objectType: "compliance_pack",
-      objectId,
-      detail,
-      effect,
-      ruleId,
-      ruleChain: [],
-      reason,
-    });
-  }
+  ) => auditCompliancePack(db, actor, objectId, ruleId, reason, detail, effect);
 
   // --- the catalogue, as DATA (admin-only via the global gate) -------------
 
@@ -1334,32 +1402,14 @@ export function registerCompliancePackRoutes(app: FastifyInstance, db: Db): void
           `status is computed from the ledger and cannot be attested.`,
       });
     }
-    const [row] = await db
-      .insert(compliancePackAttestations)
-      .values({
-        packId: id,
-        controlRef: body.controlRef,
-        statement: body.statement,
-        evidenceRef: body.evidenceRef ?? null,
-        validUntil: body.validUntil ? new Date(body.validUntil) : null,
-        attestedByUserId: req.authCtx.userId ?? null,
-      })
-      .returning();
-    await audit(
-      req.authCtx.userId ?? null,
-      id,
-      COMPLIANCE_PACK_RULE_IDS.attestationRecorded,
-      `attestation recorded for '${body.controlRef}' on pack '${pack.framework}' v${pack.version} — this ` +
-        `is the CUSTOMER'S OWN statement about an organisational control, attributed to a named human. ` +
-        `It is reported as 'attested', which is a distinct status from 'satisfied': RegulAIt collected ` +
-        `no evidence for it and does not claim to have`,
-      {
-        controlRef: body.controlRef,
-        validUntil: body.validUntil ?? null,
-        framework: pack.framework,
-        version: pack.version,
-      },
-    );
+    const row = await recordPackAttestation(db, {
+      actor: req.authCtx.userId ?? null,
+      pack,
+      controlRef: body.controlRef,
+      statement: body.statement,
+      evidenceRef: body.evidenceRef ?? null,
+      validUntil: body.validUntil ? new Date(body.validUntil) : null,
+    });
     return reply.status(201).send({
       attestation: row,
       note:

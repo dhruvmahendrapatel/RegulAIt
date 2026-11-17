@@ -3707,6 +3707,9 @@ export {
   CONTROL_EVALUATION_STATUSES,
   DEFAULT_COMPLIANCE_PACKS,
   EVIDENCE_COLLECTORS,
+  // ADR-0351 slice 3: the endpoint benchmark collector's closed check list
+  ENDPOINT_BENCHMARK_CHECKS,
+  type EndpointBenchmarkCheck,
   PACK_STATUSES,
   assessPackControl,
   buildPackScorecard,
@@ -4980,6 +4983,10 @@ export * from "./iso-packs.js";
 export * from "./sector-packs.js";
 // ADR-0319 (gap G11): the AIUC-1 ID-only pack
 export * from "./aiuc-packs.js";
+// ADR-0351 slice 2: the EU AI Act deployer-obligation register (pack and lifecycle table)
+export * from "./eu-ai-act-deployer.js";
+// ADR-0351 slice 3: the CIS-style AI coding-agent endpoint benchmark pack
+export * from "./endpoint-benchmark-pack.js";
 // ADR-0243 (P24): the OWASP MCP and LLM Top 10 packs
 export * from "./owasp-packs.js";
 export * from "./nist-ai-600-1-pack.js";

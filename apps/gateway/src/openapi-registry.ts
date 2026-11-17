@@ -955,6 +955,9 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/compliance/packs/:id/activate": "internal",
   "DELETE /v1/compliance/packs/:id": "internal",
   "POST /v1/compliance/packs/:id/attestations": "internal",
+  // ADR-0351 slice 2: the EU AI Act deployer-obligation register
+  "GET /v1/compliance/deployer-register": "internal",
+  "POST /v1/compliance/deployer-register/attest": "internal",
   "POST /v1/compliance/packs/:id/evaluate": "internal",
   "GET /v1/compliance/pack-reports": "internal",
   "GET /v1/compliance/pack-reports/export.xlsx": "internal",
@@ -2323,6 +2326,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/compliance/packs/:id/activate": "compliance-packs",
   "DELETE /v1/compliance/packs/:id": "compliance-packs",
   "POST /v1/compliance/packs/:id/attestations": "compliance-packs",
+  "GET /v1/compliance/deployer-register": "compliance-packs",
+  "POST /v1/compliance/deployer-register/attest": "compliance-packs",
   "POST /v1/compliance/packs/:id/evaluate": "compliance-packs",
   "GET /v1/compliance/pack-reports": "compliance-packs",
   "GET /v1/compliance/pack-reports/export.xlsx": "compliance-packs",
