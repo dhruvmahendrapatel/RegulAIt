@@ -94,7 +94,7 @@ import { PROJECT_HEADER } from "./project-header.js";
 // ADR-0070 — the compat surfaces' entitlement refusal gets a `policy` deny span
 // too: an SDK pointed at this gateway has no RegulAIt UI to look in.
 import { beginTrace, finishTrace, recordSpan } from "./tracing.js";
-import { effectiveTechniqueMode, loadOrgSettings } from "./org-settings.js";
+import { effectiveTechniqueMode, incrementalStreamInspection, loadOrgSettings } from "./org-settings.js";
 import {
   lookupSemanticCache,
   semanticCacheRequestKey,
@@ -938,7 +938,9 @@ export async function prepareCompatCall(
   // --- ADR-0019 streaming suppression ---------------------------------------
   // Reused verbatim, not re-derived: on a block-mode project the OUTPUT PII
   // check can only run once the full text exists, so no delta may leave.
-  const streamingSuppressed = args.stream && (await projectPiiMode(db, projectId)) === "block";
+  // ADR-0352 slice 3: incremental output inspection keeps the stream live (windowed release)
+  const streamingSuppressed =
+    args.stream && !(await incrementalStreamInspection(db)) && (await projectPiiMode(db, projectId)) === "block";
   // ADR-0021: 'reject' refuses the stream request instead of quietly buffering
   // — the same admin choice the invoke path honours, held here so both shims
   // inherit it.

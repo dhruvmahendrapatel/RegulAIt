@@ -256,6 +256,8 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   semanticCacheSimilarityMin: atLeast(0.95),
   // which embedder serves is not a loosening by itself (the tier's switch is); naming one is exempt
   semanticCacheEmbedderId: exempt(OPTIMISATION),
+  // ADR-0352 slice 3: releasing a stream after windowed scans (not one whole-result scan) is looser
+  streamOutputInspection: notEqual("buffer"),
   // ADR-0181: a failed compaction refuses the call rather than sending the full context on
   compactionFailureMode: notEqual("fail_closed"),
 
