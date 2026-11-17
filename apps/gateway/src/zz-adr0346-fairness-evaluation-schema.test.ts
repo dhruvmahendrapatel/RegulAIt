@@ -36,7 +36,13 @@ import {
   users,
   type Db,
 } from "@regulait/db";
-import { FAIRNESS_DEFAULT_THRESHOLDS, FAIRNESS_EVALUATION_DEFAULT_SETTINGS, FAIRNESS_RUN_EVIDENCE_VERSION } from "@regulait/shared";
+import {
+  FAIRNESS_BREACH_REVIEW_MACHINE,
+  FAIRNESS_DEFAULT_THRESHOLDS,
+  FAIRNESS_EVALUATION_DEFAULT_SETTINGS,
+  FAIRNESS_EVALUATION_MACHINE,
+  FAIRNESS_RUN_EVIDENCE_VERSION,
+} from "@regulait/shared";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -292,5 +298,17 @@ describe("ADR-0346 schema", () => {
                         'fairness_evaluation_thresholds','fairness_run_evidence','fairness_breach_reviews')`);
     expect(rls.rows).toHaveLength(6);
     for (const r of rls.rows) expect([r.relname, r.relrowsecurity, r.relforcerowsecurity]).toEqual([r.relname, true, true]);
+  });
+
+  it("7. each ADR-0348 machine's states equal its column's CHECK", async () => {
+    for (const [constraint, machine] of [
+      ["fairness_breach_reviews_status_check", FAIRNESS_BREACH_REVIEW_MACHINE],
+      ["fairness_evaluations_status_check", FAIRNESS_EVALUATION_MACHINE],
+    ] as const) {
+      const r = await db.execute<{ def: string }>(sql`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = ${constraint}`);
+      const def = r.rows[0]?.def ?? "";
+      const values = [...def.matchAll(/'([a-z_]+)'::text/g)].map((m) => m[1]).sort();
+      expect(values, constraint).toEqual([...machine.def.states].sort());
+    }
   });
 });

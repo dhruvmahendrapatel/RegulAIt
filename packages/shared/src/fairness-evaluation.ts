@@ -48,30 +48,9 @@ export const FAIRNESS_RUN_MODES = ["supplied", "model"] as const;
 export type FairnessRunMode = (typeof FAIRNESS_RUN_MODES)[number];
 export const FAIRNESS_BREACH_REVIEW_STATUSES = ["pending", "accepted", "rejected", "superseded"] as const;
 export type FairnessBreachReviewStatus = (typeof FAIRNESS_BREACH_REVIEW_STATUSES)[number];
-/**
- * The ONE declared lifecycle of a breach review (rule 12). `pending` is the only start; a person decides it
- * (`accepted` or `rejected`); a later passing run supersedes a pending or accepted review. `rejected` and `superseded`
- * are final. A lapsed acceptance stays `accepted` with its end date in the past (time decides it, not a write).
- */
-export const FAIRNESS_BREACH_REVIEW_TRANSITIONS: Readonly<Record<FairnessBreachReviewStatus, readonly FairnessBreachReviewStatus[]>> = {
-  pending: ["accepted", "rejected", "superseded"],
-  accepted: ["superseded"],
-  rejected: [],
-  superseded: [],
-};
-
 export const FAIRNESS_EVALUATION_STATUSES = ["active", "archived"] as const;
 export type FairnessEvaluationStatus = (typeof FAIRNESS_EVALUATION_STATUSES)[number];
-/** an evaluation is archived, never deleted (its runs cite it); archiving is final, so a run's definition never changes */
-export const FAIRNESS_EVALUATION_TRANSITIONS: Readonly<Record<FairnessEvaluationStatus, readonly FairnessEvaluationStatus[]>> = {
-  active: ["archived"],
-  archived: [],
-};
-
-/** may a row move from `from` to `to` under its declared table? (the one check every write path uses) */
-export function lifecycleAllows<S extends string>(table: Readonly<Record<S, readonly S[]>>, from: S, to: S): boolean {
-  return table[from]?.includes(to) ?? false;
-}
+// The two lifecycles (breach review, evaluation) are declared as ADR-0348 machines in state-machines.ts.
 
 /** the signed evidence body's version tag (the DB CHECK on `fairness_run_evidence` reads it) */
 export const FAIRNESS_RUN_EVIDENCE_VERSION = "regulait.fairness-run.v1";

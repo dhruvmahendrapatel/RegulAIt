@@ -162,8 +162,9 @@ card's sign-off (draft → pending → approved), so that sign-off is the promot
 - The content-credential guard (ADR-0233) covers `fairness_evaluations.name` and
   `fairness_dataset_input_columns.column_name` (which has a surrogate `id` for the guard's report); the signed
   evidence body is excluded as `signed_evidence`. ADR-0233's generated inventory is regenerated.
-- The two status fields have one declared lifecycle each (`FAIRNESS_BREACH_REVIEW_TRANSITIONS`,
-  `FAIRNESS_EVALUATION_TRANSITIONS`, checked with `lifecycleAllows`); slice 3's write paths use them.
+- The two status fields have one declared lifecycle each. Slice 1 shipped them as plain transition tables; slice 2
+  moved them onto ADR-0348's `defineMachine` (`FAIRNESS_BREACH_REVIEW_MACHINE`, `FAIRNESS_EVALUATION_MACHINE`,
+  registered in `STATE_MACHINES`) once that landed, so there is one machine pattern in the app.
 - `rule-loosening.ts` classifies `fairness_gate_required` true → false/NULL as a loosening.
 - A card whose runs carry signed evidence cannot be deleted (RESTRICT). No evidence row is written until slice 2,
   which makes the card delete route refuse it with a named 409.
