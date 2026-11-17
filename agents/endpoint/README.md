@@ -18,7 +18,7 @@ bash scripts/package-linux.sh <bin> <out> <version>   # unsigned .deb and .rpm
 
 | Package | What it is |
 |---|---|
-| `cmd/regulait-agent` | The CLI: `redeem-ticket`, `register`, `run-once`, `run`, `preview`, `version` |
+| `cmd/regulait-agent` | The CLI: `redeem-ticket`, `enrol`, `update`, `health`, `register`, `run-once`, `run`, `preview`, `version` |
 | `internal/contract` | The wire contract SD4b implements, with golden bodies in `testdata/` |
 | `internal/pack` | ADR-0041-format pack verification and the collection-manifest validator |
 | `internal/collect` | The collectors, over `fs.FS` roots (`os.Root` in production); `mcp.go` is ADR-0259's opt-in `mcp_config` collector (MCP host configs: servers, key types and risk flags, never values; off unless the org policy enables it) |
@@ -26,8 +26,46 @@ bash scripts/package-linux.sh <bin> <out> <version>   # unsigned .deb and .rpm
 | `internal/privacy` | The pre-upload pseudonymity guard |
 | `internal/devicekey` | Device keys: TPM (Linux, Windows), file and DPAPI fallbacks, the darwin refusal |
 | `internal/auth`, `internal/transport` | ES256 JOSE, the DPoP-bound token client, the issuer-only TLS 1.3 client |
-| `internal/agent` | Config, enrolment, the cycle, the signed upload and key rotation |
+| `internal/agent` | Config, enrolment (MDM and one-line), the cycle, the signed upload, key rotation and the root self-update step |
+| `internal/update` | Self-update core (ADR-0360): directive and release-manifest verification, the downgrade refusal, staging, health check, swap and rollback |
 | `internal/gatewaytest`, `internal/pack/packtest` | Test doubles: a strict fake gateway and a run-time pack signer |
+
+## One-line enrolment (ADR-0360 §5)
+
+For a machine outside MDM, an admin issues a one-line enrolment token on the gateway (single use, 15 minutes by default,
+at most 60, optionally placing the device in a device group). With the package installed and the MDM config file in
+place, paste the line the gateway shows, as root:
+
+    printf '%s\n' '<token>' | sudo regulait-agent enrol
+
+The token is read from standard input only, never from an argument (an argument is visible in every user's process
+list). It is never logged, written to the status file or written to disk, and it is spent by its first use, so a copy
+left in shell history is inert. A device that already holds a valid ticket keeps it and does not spend the token. The
+device ticket still lives 7 days; a one-line-enrolled device needs a new token (or MDM's bulk token file) after that.
+
+## Self-update (ADR-0360 §4; off by default)
+
+`regulait-agent update` runs as root from the package's system timer (`regulait-agent-update.timer` on Linux, the
+`com.regulait.agent.update` LaunchDaemon on macOS). It installs nothing unless **all** of these hold:
+
+1. The config pins the device-policy keys (`devicePolicyKeys`) **and** the release keys (`releaseKeys`, at most two:
+   current and next). One key per purpose: the same key in both lists makes the config invalid.
+2. The spool (`/var/lib/regulait-agent/update`, `1770 root:regulait-agent`) holds an update directive signed by the
+   device-policy signer for **this** device (the ticket file's device id), valid now and for at most 24 hours. The
+   gateway signs one only while the admin has turned self-update on for the source (a step-up, audited) and the
+   device's group has an active rollout stage.
+3. The spool holds a release manifest (`regulait.endpoint-release/1`) signed by a release key for exactly the
+   directive's version, listing this OS and architecture with the binary's SHA-256 and length.
+4. That version is **newer** than the running binary (`golang.org/x/mod/semver`); a downgrade or a development build is
+   refused.
+
+It then copies the spooled binary to a root-only file beside the installed one, checks the copy's length and SHA-256
+(the copy, so a later change to the spool cannot change what runs), runs `<staged> health` (it must report the target
+version), renames it into place keeping `<binary>.previous`, runs the installed binary's `health` and restores the
+previous binary when that fails. The outcome (`installed`, `rolled_back`, `refused`, `failed`, with a fixed code) is
+written to the spool's `result.json`. On macOS the binary is universal, so a release lists `darwin/arm64` and
+`darwin/amd64` with the same digest. A package-managed binary replaced this way differs from the package database until
+the next package upgrade; fleets upgraded by MDM can leave self-update off (the default).
 
 ## On-device enforcement hooks (ADR-0298, ADR-0330; default off)
 
