@@ -16846,7 +16846,7 @@ export const ruleStepSettings = pgTable(
 );
 export type RuleStepSettingsRow = typeof ruleStepSettings.$inferSelect;
 
-export const RULE_STEP_SUGGESTION_STATUSES = ["suggested", "dismissed"] as const;
+export const RULE_STEP_SUGGESTION_STATUSES = ["suggested", "shadow", "dismissed"] as const;
 
 /** one suggestion per AI step (agent + span name): the latest scan's rule and its evidence */
 export const ruleStepSuggestions = pgTable(
@@ -16877,7 +16877,7 @@ export const ruleStepSuggestions = pgTable(
   (t) => [
     uniqueIndex("rule_step_suggestions_step_uq").on(t.agentId, t.stepName),
     index("rule_step_suggestions_status_savings_idx").on(t.status, t.projectedMonthlySavingsUsd),
-    check("rule_step_suggestions_status_check", sql`${t.status} IN ('suggested', 'dismissed')`),
+    check("rule_step_suggestions_status_check", sql`${t.status} IN ('suggested', 'shadow', 'dismissed')`),
     check("rule_step_suggestions_rates_check", sql`${t.agreement} BETWEEN 0 AND 1 AND ${t.coverage} BETWEEN 0 AND 1`),
     check(
       "rule_step_suggestions_dismissed_check",
@@ -16886,6 +16886,40 @@ export const ruleStepSuggestions = pgTable(
   ],
 );
 export type RuleStepSuggestionRow = typeof ruleStepSuggestions.$inferSelect;
+
+/**
+ * ADR-0327 slice 3b (migration `rule_step_shadow`): one shadow period of a suggestion. The counters are a measured read
+ * model of `trace_spans` (its source of truth), advanced through `evaluatedThrough`; counts only, never span content.
+ * At most one open period per suggestion. Nothing here changes routing.
+ */
+export const ruleStepShadows = pgTable(
+  "rule_step_shadows",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    suggestionId: uuid("suggestion_id")
+      .notNull()
+      .references(() => ruleStepSuggestions.id, { onDelete: "cascade" }),
+    startedBy: uuid("started_by").references(() => users.id, { onDelete: "set null" }),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    stoppedBy: uuid("stopped_by").references(() => users.id, { onDelete: "set null" }),
+    stoppedAt: timestamp("stopped_at", { withTimezone: true }),
+    /** the latest span start time already counted (null: nothing counted yet) */
+    evaluatedThrough: timestamp("evaluated_through", { withTimezone: true }),
+    /** structured runs seen since the start */
+    runs: integer("runs").notNull().default(0),
+    /** of those, the runs the rule answers (an input inside its table) */
+    covered: integer("covered").notNull().default(0),
+    /** of those, the runs where the rule's answer equals the AI's */
+    agreed: integer("agreed").notNull().default(0),
+  },
+  (t) => [
+    uniqueIndex("rule_step_shadows_open_uq").on(t.suggestionId).where(sql`${t.stoppedAt} IS NULL`),
+    index("rule_step_shadows_suggestion_started_idx").on(t.suggestionId, t.startedAt),
+    check("rule_step_shadows_counts_check", sql`${t.runs} >= 0 AND ${t.covered} BETWEEN 0 AND ${t.runs} AND ${t.agreed} BETWEEN 0 AND ${t.covered}`),
+    check("rule_step_shadows_stop_check", sql`${t.stoppedAt} IS NULL OR ${t.stoppedAt} >= ${t.startedAt}`),
+  ],
+);
+export type RuleStepShadowRow = typeof ruleStepShadows.$inferSelect;
 
 // ---------------------------------------------------------------------------
 // Lane L7 (P14 + P16 lineage; ADR-0216 / ADR-0217 amendments, migration model_artifact_lineage)
