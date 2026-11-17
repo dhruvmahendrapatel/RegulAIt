@@ -46,6 +46,7 @@ import {
 } from "@regulait/db";
 import { changeDescriptorSchema, fnv1a32, startInstanceSchema } from "@regulait/shared";
 import { databaseNow } from "./db-clock.js";
+import { errMessage } from "./err-serializer.js";
 import { requireStepUp } from "./step-up.js";
 import { startGovernedWorkflow } from "./workflows.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
@@ -88,7 +89,7 @@ export function validateCalendar(cronExpression: string, timeZone: string, from:
       .take(12)
       .map((d) => d.toDate());
   } catch (err) {
-    throw new ScheduleCalendarError(`cronExpression does not parse: ${err instanceof Error ? err.message : String(err)}`);
+    throw new ScheduleCalendarError(`cronExpression does not parse: ${errMessage(err)}`);
   }
   if (times.length === 0) throw new ScheduleCalendarError("cronExpression never fires");
   for (let i = 1; i < times.length; i++) {
