@@ -162,7 +162,8 @@ reply, 2026-08), so a GPT's connected apps are what its configured actions name,
      - Agentforce: `GET` on the REST and Tooling `query` paths and on `UserPermissionAccess` only, plus the single
        token `POST` above.
 
-     The read credential is used with `GET` only; the one exception is that token exchange. Pagination cursors are
+     Against the vendor's API the read credential is used with `GET` only; the one exception is that token exchange.
+     Entra token acquisition for Dataverse stays on the existing ADR-0195 `@azure/identity` path, unchanged. Pagination cursors are
      passed back as query parameters on an allow-listed path, never followed as URLs (no `nextRecordsUrl`, `next` or
      `@odata.nextLink` is fetched as given). Each slice's tests assert that any other method or path, and a cursor
      that would leave the path, is refused before a request is made. This matters most for the OpenAI and n8n keys,
