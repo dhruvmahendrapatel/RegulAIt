@@ -4,8 +4,11 @@
  *  - a proof result is append-only evidence: UPDATE, DELETE and TRUNCATE are refused;
  *  - the shape CHECKs hold: the key format, a 64-hex content hash, signature and key id both or neither, the outcome
  *    vocabulary, an interval inside 1..168 hours;
- *  - NEGATIVE: all three tables are under forced row-level security, readable and writable only by an admin principal
- *    or the `system_task` / `migration` system reasons.
+ *  - NEGATIVE: all three tables are under forced row-level security. Results and follow-ups are READ by an admin and
+ *    INSERTED only by the `system_task` / `migration` reasons, so not even an admin can fabricate a pass (#904
+ *    security review); settings are admin-writable;
+ *  - every control the catalogue binds to a setting column or a policy table exists in the migrated database (#904
+ *    code review: an unknown name fails here).
  *
  * The suite disables the users it creates; evidence rows stay, by design.
  */
@@ -14,6 +17,7 @@ import path from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { createDb, eq, inArray, runMigrations, sql, users, type Db } from "@regulait/db";
+import { agentRiskControlColumns, agentRiskControlTables } from "@regulait/shared";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -81,6 +85,10 @@ describe("ADR-0345: proof results are append-only evidence", () => {
     expect(await insert({ hash: "short" })).toMatch(/agent_risk_proof_results_hash_check/);
     expect(await insert({ sig: "c2ln" })).toMatch(/agent_risk_proof_results_signature_check/);
     expect(await insert({ outcome: "skipped" })).toMatch(/agent_risk_proof_results_outcome_check/);
+    // ADR-0180's vocabulary, not a second one: `error` is not a state, `insufficient` and `not_run` are
+    expect(await insert({ outcome: "error" })).toMatch(/agent_risk_proof_results_outcome_check/);
+    expect(await insert({ outcome: "insufficient" })).toBe("no error");
+    expect(await insert({ outcome: "not_run" })).toBe("no error");
     expect(await insert({ sig: "c2ln", keyId: `k-${RUN}` })).toBe("no error");
   });
 
@@ -130,19 +138,54 @@ describe("ADR-0345: row-level security on the proof tables", () => {
     expect(await countAs({ reason: "system_task" })).toBe(all);
   });
 
-  it("NEGATIVE: a non-admin principal cannot write a result", async () => {
-    const err = await failure(
+  const writeAs = (opts: { userId?: string; reason?: string }, stmt: ReturnType<typeof sql>) =>
+    failure(
       db.transaction(async (tx) => {
         await tx.execute(sql`select set_config('role', 'regulait_app', true)`);
-        await tx.execute(sql`select set_config('regulait.user_id', ${memberId}, true)`);
-        await tx.execute(sql`
-          insert into agent_risk_proof_results (proof_key, catalog_version, trigger, outcome, audit_log_id, content_hash,
-            detail, started_at)
-          values ('x.y', 1, 'manual', 'pass', ${randomUUID()}, ${HASH}, '{}', now())`);
+        if (opts.userId) await tx.execute(sql`select set_config('regulait.user_id', ${opts.userId}, true)`);
+        if (opts.reason) await tx.execute(sql`select set_config('regulait.system_context', ${opts.reason}, true)`);
+        await tx.execute(stmt);
       }),
     );
-    expect(err).toMatch(/row-level security/);
+  const insertResult = () => sql`
+    insert into agent_risk_proof_results (proof_key, catalog_version, trigger, outcome, audit_log_id, content_hash,
+      detail, started_at)
+    values ('x.y', 1, 'manual', 'pass', ${randomUUID()}, ${HASH}, '{}', now())`;
+
+  it("NEGATIVE: neither a member nor an ADMIN principal can insert a result or a follow-up", async () => {
+    expect(await writeAs({ userId: memberId }, insertResult())).toMatch(/row-level security/);
+    expect(await writeAs({ userId: adminId }, insertResult())).toMatch(/row-level security/);
+    expect(await writeAs({ reason: "public_ingest" }, insertResult())).toMatch(/row-level security/);
+    const followup = sql`insert into agent_risk_proof_followups (result_id) values (${resultId})`;
+    expect(await writeAs({ userId: adminId }, followup)).toMatch(/row-level security/);
     const [u] = await db.select({ id: users.id }).from(users).where(eq(users.id, memberId));
     expect(u?.id).toBe(memberId);
+  });
+
+  it("the proof runner (system_task) inserts a result; an admin may still write settings", async () => {
+    expect(await writeAs({ reason: "system_task" }, insertResult())).toBe("no error");
+    const key = `s_${RUN.replace(/[0-9]/g, "x")}.admin`;
+    expect(
+      await writeAs({ userId: adminId }, sql`insert into agent_risk_proof_settings (proof_key, enabled) values (${key}, false)`),
+    ).toBe("no error");
+    await db.execute(sql`delete from agent_risk_proof_settings where proof_key = ${key}`);
+  });
+});
+
+describe("ADR-0345: every catalogue control is bound to something that exists", () => {
+  it("each setting column exists", async () => {
+    const cols = agentRiskControlColumns();
+    expect(cols.length).toBeGreaterThan(5);
+    const r = await db.execute(sql`
+      select table_name || '.' || column_name as c from information_schema.columns where table_schema = 'public'`);
+    const live = new Set((r.rows as { c: string }[]).map((x) => x.c));
+    expect(cols.filter((c) => !live.has(c))).toEqual([]);
+  });
+
+  it("each policy table exists", async () => {
+    const tables = agentRiskControlTables();
+    const r = await db.execute(sql`select table_name as t from information_schema.tables where table_schema = 'public'`);
+    const live = new Set((r.rows as { t: string }[]).map((x) => x.t));
+    expect(tables.filter((t) => !live.has(t))).toEqual([]);
   });
 });

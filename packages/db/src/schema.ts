@@ -17120,9 +17120,11 @@ export const agentRiskProofSettings = pgTable(
 export type AgentRiskProofSettingRow = typeof agentRiskProofSettings.$inferSelect;
 
 /**
- * One proof run's result: append-only evidence (`regulait_refuse_mutation`, no TRUNCATE). Each row is written in the
- * same transaction as its hash-chained audit row (ADR-0060), which it references; `content_hash` is SHA-256 of
- * ADR-0060's canonical JSON of the evidence, and `signature` is the ADR-0116 Ed25519 signature over that hash when a
+ * One proof run's result: append-only evidence, INSERTED only by the proof runner (system task) or a migration and
+ * read by admins (RLS), so no principal can fabricate a pass; never updated or deleted (`regulait_refuse_mutation`, no
+ * TRUNCATE). `outcome` is ADR-0180's `MeasurementState`. Each row is written in the same transaction as its
+ * hash-chained audit row (ADR-0060), which it references and which carries the same `content_hash` (SHA-256 of
+ * ADR-0060's canonical JSON of the evidence); `signature` is the ADR-0116 Ed25519 signature over that hash when a
  * signing key is configured (both or neither). `detail` is a point-in-time snapshot (ADR-0200 exception): the engine's
  * summary as it was when the proof ran.
  */
@@ -17156,6 +17158,11 @@ export const agentRiskProofResults = pgTable(
     ),
     check("agent_risk_proof_results_detail_check", sql`jsonb_typeof(${t.detail}) = 'object'`),
     check("agent_risk_proof_results_order_check", sql`${t.finishedAt} >= ${t.startedAt}`),
+    check("agent_risk_proof_results_trigger_check", sql`${t.trigger} IN ('scheduled', 'manual')`),
+    check(
+      "agent_risk_proof_results_outcome_check",
+      sql`${t.outcome} IN ('pass', 'fail', 'insufficient', 'not_run')`,
+    ),
     uniqueIndex("agent_risk_proof_results_audit_uq").on(t.auditLogId),
     index("agent_risk_proof_results_latest_idx").on(t.proofKey, t.finishedAt),
     index("agent_risk_proof_results_redteam_run_idx").on(t.redteamRunId),

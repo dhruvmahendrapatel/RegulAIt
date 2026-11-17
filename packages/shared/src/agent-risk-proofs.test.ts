@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { MEASUREMENT_STATES } from "./assurance.js";
 import {
   AGENT_RISKS,
+  AGENT_RISK_PROOF_OUTCOMES,
+  agentRiskControlColumns,
   AGENT_RISK_KEYS,
   agentRiskCatalogProblems,
   agentRiskProofByKey,
@@ -38,6 +41,26 @@ describe("ADR-0345 agent risk / control / proof catalogue", () => {
       ...AGENT_RISKS.slice(1),
     ];
     expect(agentRiskCatalogProblems(noInput).some((p) => p.includes("missing or names an unknown input"))).toBe(true);
+  });
+
+  it("reuses the ADR-0180 assurance contract: one outcome vocabulary, metric proofs as MetricSpecs", () => {
+    expect(AGENT_RISK_PROOF_OUTCOMES).toBe(MEASUREMENT_STATES);
+    const metrics = agentRiskProofs().filter((p) => p.proof.engine === "assurance_metric");
+    expect(metrics.map((p) => p.proof.metric!.metric)).toEqual(expect.arrayContaining(["redteam_asr", "guardrail_mode", "eval_pass_rate"]));
+    const bad: AgentRisk[] = [
+      { ...AGENT_RISKS[0]!, proofs: [{ ...metrics[0]!.proof, metric: { ...metrics[0]!.proof.metric!, params: { attackClass: "nope" } } }] },
+      ...AGENT_RISKS.slice(1),
+    ];
+    expect(agentRiskCatalogProblems(bad).some((p) => p.includes("missing or names an unknown input"))).toBe(true);
+  });
+
+  it("binds every control to a real setting shape, a policy table or a named behaviour with its ADR", () => {
+    expect(agentRiskControlColumns()).toContain("org_settings.mcp_admission_mode");
+    const bad: AgentRisk[] = [
+      { ...AGENT_RISKS[0]!, controls: [{ kind: "setting", column: "mcp_admission.mode.x", secure: { oneOf: ["enforce"] }, adr: "ADR-0097" }] },
+      ...AGENT_RISKS.slice(1),
+    ];
+    expect(agentRiskCatalogProblems(bad)).toContain("prompt_injection: control column mcp_admission.mode.x is not table.column");
   });
 
   it("looks proofs up by their stable key", () => {

@@ -1,5 +1,5 @@
 -- ADR-0345 (lane E26): the agent risk / control / proof registry's tenant state. The catalogue itself is code
--- (`AGENT_RISKS` in @regulait/shared); these tables hold an admin's schedule relaxations, the append-only proof
+-- (`AGENT_RISKS` in @regulait/shared); `outcome` is ADR-0180's MEASUREMENT_STATES. These tables hold an admin's schedule relaxations, the append-only proof
 -- results (signed, hash-chained evidence) and what a failed proof raised.
 CREATE TABLE IF NOT EXISTS "agent_risk_proof_settings" (
   "proof_key" text PRIMARY KEY NOT NULL,
@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS "agent_risk_proof_results" (
   CONSTRAINT "agent_risk_proof_results_detail_check" CHECK (jsonb_typeof("detail") = 'object'),
   CONSTRAINT "agent_risk_proof_results_order_check" CHECK ("finished_at" >= "started_at"),
   CONSTRAINT "agent_risk_proof_results_trigger_check" CHECK ("trigger" IN ('scheduled', 'manual')),
-  CONSTRAINT "agent_risk_proof_results_outcome_check" CHECK ("outcome" IN ('pass', 'fail', 'error'))
+  CONSTRAINT "agent_risk_proof_results_outcome_check" CHECK ("outcome" IN ('pass', 'fail', 'insufficient', 'not_run'))
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "agent_risk_proof_results_audit_uq" ON "agent_risk_proof_results" ("audit_log_id");
@@ -80,18 +80,34 @@ ALTER TABLE "agent_risk_proof_results" ENABLE ROW LEVEL SECURITY;
 --> statement-breakpoint
 ALTER TABLE "agent_risk_proof_results" FORCE ROW LEVEL SECURITY;
 --> statement-breakpoint
+-- evidence: an admin READS it; only the proof runner (a system task) or a migration WRITES it, so no principal,
+-- however privileged, can insert a fabricated pass (#904 security review)
 DROP POLICY IF EXISTS "agent_risk_proof_results_admin" ON "agent_risk_proof_results";
 --> statement-breakpoint
-CREATE POLICY "agent_risk_proof_results_admin" ON "agent_risk_proof_results" FOR ALL
-  USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
-  WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
+DROP POLICY IF EXISTS "agent_risk_proof_results_read" ON "agent_risk_proof_results";
+--> statement-breakpoint
+CREATE POLICY "agent_risk_proof_results_read" ON "agent_risk_proof_results" FOR SELECT
+  USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
+--> statement-breakpoint
+DROP POLICY IF EXISTS "agent_risk_proof_results_write" ON "agent_risk_proof_results";
+--> statement-breakpoint
+CREATE POLICY "agent_risk_proof_results_write" ON "agent_risk_proof_results" FOR INSERT
+  WITH CHECK ((SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
 --> statement-breakpoint
 ALTER TABLE "agent_risk_proof_followups" ENABLE ROW LEVEL SECURITY;
 --> statement-breakpoint
 ALTER TABLE "agent_risk_proof_followups" FORCE ROW LEVEL SECURITY;
 --> statement-breakpoint
+-- evidence: an admin READS it; only the proof runner (a system task) or a migration WRITES it, so no principal,
+-- however privileged, can insert a fabricated pass (#904 security review)
 DROP POLICY IF EXISTS "agent_risk_proof_followups_admin" ON "agent_risk_proof_followups";
 --> statement-breakpoint
-CREATE POLICY "agent_risk_proof_followups_admin" ON "agent_risk_proof_followups" FOR ALL
-  USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
-  WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
+DROP POLICY IF EXISTS "agent_risk_proof_followups_read" ON "agent_risk_proof_followups";
+--> statement-breakpoint
+CREATE POLICY "agent_risk_proof_followups_read" ON "agent_risk_proof_followups" FOR SELECT
+  USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
+--> statement-breakpoint
+DROP POLICY IF EXISTS "agent_risk_proof_followups_write" ON "agent_risk_proof_followups";
+--> statement-breakpoint
+CREATE POLICY "agent_risk_proof_followups_write" ON "agent_risk_proof_followups" FOR INSERT
+  WITH CHECK ((SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));

@@ -3,10 +3,10 @@
 - **Status**: Accepted (slice 1 implemented)
 - **Date**: 2026-11-17
 - **Lane**: E26
-- **Related**: ADR-0057/0068 (continuous red-team, its statistics), ADR-0058 (compliance packs), ADR-0060 (hash-chained
+- **Related**: ADR-0180 (continuous assurance: A2 measurable conditions, `MEASUREMENT_STATES`), ADR-0057/0068 (continuous red-team, its statistics), ADR-0058 (compliance packs), ADR-0060 (hash-chained
   audit), ADR-0064 (scheduler), ADR-0078 (tighten-only conformance), ADR-0081/0147 (AI risk register), ADR-0104/0105
   (approval binding, single use, expiry), ADR-0116 (signed exports), ADR-0124 (execution modes, kill switch), ADR-0157
-  (governance alerts), ADR-0176 (open source first), ADR-0180 (secure by default), ADR-0193 (content trust), ADR-0214
+  (governance alerts), ADR-0176 (open source first), ADR-0193 (content trust), ADR-0214
   (posture score), ADR-0243 (OWASP packs), ADR-0246 (MCP definition pins), ADR-0252 (merge-time numbering)
 - **Migrations**: `pending/agent_risk_proofs.sql` (numbered at merge)
 
@@ -25,6 +25,10 @@ What exists already:
 - The ADR-0243 packs give the OWASP LLM Top 10 (2025 as `@1`, 2026 as `@2`) and the OWASP MCP Top 10 as pack
   controls. The OWASP Agentic Top 10 (ASI01..ASI10) exists only as reference names (`OWASP_AGENTIC_NAMES`).
 - The ADR-0078 conformance suite is test-only (vitest), not callable at run time.
+- The ADR-0180 continuous-assurance contract (`assurance.ts`, `condition-metrics.ts`) already measures conditions from
+  ledgers on a cadence: `measureAssuranceMetric` reads red-team ASR, guardrail mode, evaluation pass rate and
+  others, `measurementStateFor` is the one place a state is decided, and its vocabulary is `MEASUREMENT_STATES`
+  (`pass | fail | insufficient | not_run`). Only `pass` passes.
 - Controls exist for each risk the owner named except two gaps: there is no numeric range control on tool arguments
   (`data_scope_rules` is an allow-list of values), and no memory-poisoning detector (ADR-0193 content trust tiers gate
   who may write into shared context).
@@ -37,18 +41,28 @@ What exists already:
    server), memory and context exploits, infrastructure baseline, governance gaps. Each names:
    - its OWASP items as ADR-0243 pack `controlRef`s (LLM, MCP) plus the ASI name as a reference;
    - the ADR-0081 register categories it evidences, so a tenant's `ai_risks` row reaches its proofs by category;
-   - the control settings that mitigate it, each with its secure value (ADR-0180);
+   - the controls that mitigate it, each bound to something real. A `setting` control names a real `table.column`
+     and its strict value, and the gateway suite checks the column exists in the migrated database. A
+     `policy_table` control names a policy table (`data_scope_rules`, `abac_policies`). A `behaviour` control names
+     a built-in behaviour that has no switch, such as single-use approvals or the audit chain, by its ADR, and is
+     never shown as a setting;
    - one or more proofs, each run by an existing engine. This is the ADR-0081 `RISK_CATEGORY_EVIDENCE` pattern: the
      mapping is versioned code (`AGENT_RISK_CATALOG_VERSION`), so no admin can edit a row to make a risk look proven.
-2. **No new test runner (ADR-0176).** A proof is one of three kinds:
-   - `redteam_suite`: `runRedTeamSuite` (ADR-0057) over the named attack classes, judged by its own gating floor and
-     ADR-0068 statistics;
+2. **Built on ADR-0180, no new test runner (ADR-0176).** A proof is one of three kinds:
+   - `assurance_metric`: an ADR-0180 `MetricSpec` (red-team ASR per attack class, guardrail mode at block, evaluation
+     pass rate), measured by `measureAssuranceMetric` and judged by `measurementStateFor`. The catalogue validates
+     each spec with `metricSpecSchema` and `validateMetricParams`. The red-team runs themselves stay ADR-0057's
+     scheduled sweep;
    - `gateway_probe`: one sandboxed governed call against the tenant's own gateway whose refusal is the pass. The
      probes are: a hidden instruction in a returned document, a replayed approval, an expired approval, an
      out-of-scope tool argument, a seeded loop against the turn cap, a dispatch under `halted`, a tool definition
      changed after approval, and an untrusted write into shared context;
-   - `ledger_check`: a read-only check over an existing ledger: audit chain verification (ADR-0060), register hygiene
-     (owner, scope, review window), and the groundedness floor (ADR-0067).
+   - `ledger_check`: a read-only check over a ledger that no ADR-0180 metric measures: audit chain verification
+     (ADR-0060) and register hygiene (owner, scope, review window).
+
+   The gateway probes and ledger checks are outside ADR-0180 for a stated reason. Its metrics read ledgers, but
+   whether a replayed approval is refused is behaviour that no ledger records until something tries it. Every proof
+   result, of any kind, is a `MeasurementState`; there is no second vocabulary.
    The catalogue's invariants are a function (`agentRiskCatalogProblems`) that a test pins to empty. A risk with no
    proof, an unknown pack control, an unknown attack class or a proof without its engine's input fails the build.
 3. **Scheduled on the ADR-0064 scheduler, strict by default.** Every proof is on, daily. An admin may disable a proof
@@ -59,12 +73,19 @@ What exists already:
    real usage. A gateway probe uses run-scoped fixtures it creates and retires (a sandbox agent, tool and approval).
    It never reads or changes tenant records, and never calls a real tool's side effect.
 5. **Results are signed, hash-chained evidence.** Each run writes one `agent_risk_proof_results` row in the same
-   transaction as its audit row. The audit row is hash-chained automatically by `withAuditChain` (ADR-0060). The
-   result row is append-only (`regulait_refuse_mutation`, TRUNCATE refused). Its `content_hash` is SHA-256 of
-   ADR-0060's canonical JSON. When the ADR-0116 export key is configured, `signature` holds the Ed25519 signature over
-   that hash; the CHECK requires both the signature and its key id, or neither. `error` (could not run) is its own
-   outcome and never reads as a pass.
-6. **A failure is raised, not filed.** A `fail` or `error` raises a governance alert (ADR-0157, through its existing
+   transaction as its audit row. The audit row is hash-chained automatically by `withAuditChain` (ADR-0060), and
+   its `detail` carries the same `content_hash`. The result row is append-only (`regulait_refuse_mutation`, TRUNCATE
+   refused). Its `content_hash` is SHA-256 of ADR-0060's canonical JSON. When the ADR-0116 export key is configured,
+   `signature` holds the Ed25519 signature over that hash; the CHECK requires both the signature and its key id, or
+   neither.
+   - **No principal can write evidence.** Results and follow-ups are readable by an admin, but only the proof runner
+     (system reason `system_task`) or a migration may insert them. An admin cannot fabricate a pass (#904 security
+     review). Settings stay admin-writable, and their relaxation route carries the `settings_relax` step-up.
+   - **A result counts as evidence only when its chain row agrees.** The read API and the verifier treat a result as
+     evidence only when its audit row is still in the chain and carries the same hash. A pruned audit row reads as
+     `unverifiable`. An unsigned result is labelled `unsigned`, never shown as if it were signed.
+   - A proof that could not run is `not_run`, and one with too little data is `insufficient`. Neither is a pass.
+6. **A failure is raised, not filed.** A `fail`, `insufficient` or `not_run` raises a governance alert (ADR-0157, through its existing
    alert insert and `afterAlertsRaised`) and an approvals-queue item for the control's owner to acknowledge. Both are
    linked to the result in `agent_risk_proof_followups`.
 7. **Feeds what exists.** The latest result per proof becomes evidence for the cited pack controls (through a
@@ -92,9 +113,9 @@ What exists already:
 
 ## Open-source search (ADR-0176)
 
-- Searched the repo for an existing risk-to-test mapping or continuous control testing ("proof", "control test",
-  "continuous control"). Nothing exists. The nearest pieces (ADR-0081 resolvers, ADR-0058 collectors) are read-only
-  and are reused.
+- In the repo: the first search ("proof", "control test", "continuous control") missed the ADR-0180
+  continuous-assurance contract, which the #904 code review pointed out. The catalogue is now built on it
+  (decision 2). Also reused: the ADR-0081 resolvers and the ADR-0058 collectors.
 - GitHub, compared on 2026-11-17:
   - CISO Assistant (a full GRC application with a register, controls and evidence) is licensed AGPL-3.0, which
     ADR-0176 bars. It is also a separate service that runs no proofs against a gateway.
