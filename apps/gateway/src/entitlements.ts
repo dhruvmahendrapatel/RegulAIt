@@ -25,6 +25,7 @@ import {
   toolGrants,
   users,
   type Db,
+  type SQL,
 } from "@regulait/db";
 import type {
   AgentRevocation,
@@ -92,43 +93,64 @@ export async function loadEntitlements(
   // receives role-derived GRANTS, never assignments), but the SET is what the
   // pre-filter means.
   const roleIds = [...new Set(assignments.map((a) => a.roleId))];
-  const [rtGrants, rsGrants, roleRows] =
-    roleIds.length === 0
-      ? [[], [], []]
-      : await Promise.all([
-          db
-            .select()
-            .from(roleToolGrants)
-            .where(
-              and(inArray(roleToolGrants.roleId, roleIds), eq(roleToolGrants.serverId, serverId)),
-            ),
-          db
-            .select()
-            .from(roleServerGrants)
-            .where(
-              and(
-                inArray(roleServerGrants.roleId, roleIds),
-                eq(roleServerGrants.serverId, serverId),
-              ),
-            ),
-          db
-            .select({ id: roles.id, name: roles.name })
-            .from(roles)
-            .where(inArray(roles.id, roleIds)),
-        ]);
-
-  // Role display names ride along for the kernel's reason prose — ids stay
-  // authoritative in ruleId/ruleChain, but a matched role reads by name.
-  const roleName = new Map(roleRows.map((r) => [r.id, r.name]));
+  const roleGrants = await loadRoleGrants(db, roleIds, serverId);
   return {
     toolGrants: tGrants,
     serverGrants: sGrants,
-    roleToolGrants: rtGrants.map((g) => ({ ...g, roleName: roleName.get(g.roleId) ?? null })),
-    roleServerGrants: rsGrants.map((g) => ({ ...g, roleName: roleName.get(g.roleId) ?? null })),
+    roleToolGrants: roleGrants.roleToolGrants,
+    roleServerGrants: roleGrants.roleServerGrants,
     // ADR-0236: present only when the user holds a bundle naming a tool on this server, so every other decision's
     // input (and therefore its rule chain) is exactly what it was before
     ...(bundleGrants.length > 0 ? { bundleToolGrants: bundleGrants } : {}),
     revocations: revs,
+  };
+}
+
+/**
+ * The role-derived tool and server grants that `roleIds` carry on `serverId`, with each role's display name for the
+ * kernel's reason prose (ids stay authoritative in ruleId/ruleChain). The one place role grants are read: the
+ * gateway's decisions (`loadEntitlements`) and the ADR-0310 managed-settings compile both call it, so a filter added
+ * here applies to both and a compiled file can never admit more than the gateway does (#850 review).
+ */
+export async function loadRoleGrants(
+  db: Db,
+  roleIds: readonly string[],
+  serverId: string,
+): Promise<{ roleToolGrants: NonNullable<Entitlements["roleToolGrants"]>; roleServerGrants: NonNullable<Entitlements["roleServerGrants"]> }> {
+  if (roleIds.length === 0) return { roleToolGrants: [], roleServerGrants: [] };
+  const ids = [...roleIds];
+  const [rtGrants, rsGrants, roleRows] = await Promise.all([
+    db
+      .select()
+      .from(roleToolGrants)
+      .where(and(inArray(roleToolGrants.roleId, ids), eq(roleToolGrants.serverId, serverId))),
+    db
+      .select()
+      .from(roleServerGrants)
+      .where(and(inArray(roleServerGrants.roleId, ids), eq(roleServerGrants.serverId, serverId))),
+    db.select({ id: roles.id, name: roles.name }).from(roles).where(inArray(roles.id, ids)),
+  ]);
+  const roleName = new Map(roleRows.map((r) => [r.id, r.name]));
+  return {
+    roleToolGrants: rtGrants.map((g) => ({ ...g, roleName: roleName.get(g.roleId) ?? null })),
+    roleServerGrants: rsGrants.map((g) => ({ ...g, roleName: roleName.get(g.roleId) ?? null })),
+  };
+}
+
+/**
+ * ADR-0310 (owner decision M1) — what every holder of `roleId` receives on `serverId` through the role, before their
+ * personal grants and revocations: the role's tool and server grants (`loadRoleGrants`, the same read the gateway
+ * makes) plus the ADR-0236 bundles granted to the role. No direct grants and no revocations: those belong to a user.
+ */
+export async function loadRoleEntitlements(db: Db, roleId: string, serverId: string): Promise<Entitlements> {
+  const [rg, rb] = await Promise.all([loadRoleGrants(db, [roleId], serverId), loadRoleBundleToolGrants(db, roleId, serverId)]);
+  return {
+    toolGrants: [],
+    serverGrants: [],
+    roleToolGrants: rg.roleToolGrants,
+    roleServerGrants: rg.roleServerGrants,
+    ...(rb.length > 0 ? { bundleToolGrants: rb } : {}),
+    revocations: [],
   };
 }
 
@@ -143,17 +165,35 @@ const BUNDLE_VIA_ORDER = { user: 0, role: 1, team: 2 } as const;
  * grants; this loader only resolves which bundle items are in reach.
  */
 export async function loadBundleToolGrants(db: Db, userId: string, serverId: string): Promise<BundleToolGrant[]> {
-  const [org] = await db
-    .select({ enabled: orgSettings.mcpBundlesEnabled })
-    .from(orgSettings)
-    .where(eq(orgSettings.id, ORG_SETTINGS_ID));
-  if (!org?.enabled) return [];
+  if (!(await mcpBundlesEnabled(db))) return [];
   const { roleIds, teamIds } = await loadScopeMemberships(db, userId);
   const subject = or(
     eq(mcpBundleGrants.userId, userId),
     ...(roleIds.length > 0 ? [inArray(mcpBundleGrants.roleId, roleIds)] : []),
     ...(teamIds.length > 0 ? [inArray(mcpBundleGrants.teamId, teamIds)] : []),
   );
+  return bundleToolGrantsWhere(db, subject!, serverId);
+}
+
+/**
+ * ADR-0310 (owner decision 2026-11-15, M1) — the bundle grants made to ONE role on `serverId`: what every holder of the
+ * role receives through ADR-0236 bundles, before their personal grants and revocations. Same switch, same query and
+ * same fail-closed joins as `loadBundleToolGrants`; only the subject differs.
+ */
+export async function loadRoleBundleToolGrants(db: Db, roleId: string, serverId: string): Promise<BundleToolGrant[]> {
+  if (!(await mcpBundlesEnabled(db))) return [];
+  return bundleToolGrantsWhere(db, eq(mcpBundleGrants.roleId, roleId), serverId);
+}
+
+async function mcpBundlesEnabled(db: Db): Promise<boolean> {
+  const [org] = await db
+    .select({ enabled: orgSettings.mcpBundlesEnabled })
+    .from(orgSettings)
+    .where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  return org?.enabled === true;
+}
+
+async function bundleToolGrantsWhere(db: Db, subject: SQL, serverId: string): Promise<BundleToolGrant[]> {
   const rows = await db
     .select({
       grantId: mcpBundleGrants.id,

@@ -30,6 +30,7 @@
  *      and caps it at `METRIC_CARDINALITY_LIMIT` series (the SDK folds the rest
  *      into one overflow series).
  */
+import { PROCESS_INSTANCE_ID } from "./instance-id.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -361,7 +362,8 @@ function buildMeter(): Meter {
     views,
     // replaces the SDK's default resource (which names the SDK and runtime);
     // the Prometheus side drops it anyway (`withoutTargetInfo`)
-    resource: resourceFromAttributes({ "service.name": OTLP_METRICS_SERVICE_NAME }),
+    // ADR-0343: `service.instance.id` keeps N replicas' series apart at an OTLP collector
+    resource: resourceFromAttributes({ "service.name": OTLP_METRICS_SERVICE_NAME, "service.instance.id": PROCESS_INSTANCE_ID }),
   });
   const m = provider.getMeter("regulait-gateway");
   return {
