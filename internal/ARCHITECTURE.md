@@ -73,6 +73,7 @@ builds on its own.
 | `training-provider` | The pure training half of the in-house model work. |
 | `engine-runner` | Sidecar runner core for the evaluation engines; hands every run to the executor, never runs one itself. |
 | `engine-promptfoo`, `engine-modelscan`, `engine-garak` | Per-engine shims (adapter, config, mapper, worker). |
+| `engine-admission-scan` | The runner and task shim of both ADR-0242 admission-scan images (mcpscanner, skillscanner): subject runs on the task bridge, the driver's report posted as the raw report. |
 | `sandbox-executor` | The isolation executor: `runc` (L1 hardened container) and `gvisor` (L2 user-space kernel) backends, chosen by `REGULAIT_EXECUTOR_BACKEND`. |
 | `api-client` | The supported TypeScript client for the public API (generated from [openapi.json](../docs/api/openapi.json)). |
 

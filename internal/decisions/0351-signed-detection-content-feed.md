@@ -73,4 +73,4 @@ no polling, expiry/delegation/threshold-key protocol, rollback reset or publishe
 adds no guarantee of complete detection. Imported detection content requires independent code and security
 review before release.
 
-Validation note: the three API-only controls add three documented screen gaps. The existing gap ceiling and its pinned test stay unchanged; the route census currently fails at 71 versus 68. Master approval for an API-only exception or a UI-builder assignment was requested on #935. No READY claim is made while that gate fails.
+Validation note: the three API-only controls add three documented screen gaps. The existing gap ceiling and its pinned test stay unchanged; the route census currently fails at 76 versus 73. Master approval for an API-only exception or a UI-builder assignment was requested on #935. No READY claim is made while that gate fails.
