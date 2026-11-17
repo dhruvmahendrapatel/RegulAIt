@@ -25,7 +25,8 @@ const migrationsFolder = path.resolve(path.dirname(fileURLToPath(import.meta.url
 const BOOT = "adr0352-bootstrap-token";
 const AUTH = { authorization: `Bearer ${BOOT}` };
 const DATA_KEY = "c".repeat(64);
-const SECRET = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYADR0352KEY";
+// synthetic, never a real key (ADR-0184: obviously fake, low entropy)
+const SECRET = "synthetic-never-echoed-secret-access-key-adr0352";
 
 let db: Db;
 let app: ReturnType<typeof buildApp>;
