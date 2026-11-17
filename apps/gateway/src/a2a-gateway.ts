@@ -51,6 +51,26 @@ export const ARD_MAX_ENTRIES = 500;
 const TOKEN_RESPONSE_MAX_BYTES = 64 * 1024;
 const TOKEN_REFRESH_MARGIN_MS = 60_000;
 
+/**
+ * The review state of an imported agent's card (build rule 12): one declared table, read by every write that changes
+ * it. `none` = calls use the stored card and nothing waits for review; `pending` = the catalogue's card changed and is
+ * held (calls use the stored card, narrowed to what both allow). A refresh that sees another change replaces the held
+ * card (`pending` -> `pending`); one that sees the stored card again drops it. Accept makes the held card the stored
+ * one; reject drops it (the next refresh that sees the same change holds it again). A transition not in the table is
+ * refused, so `accept` or `reject` with nothing held is a 409.
+ */
+export type PendingCardState = "none" | "pending";
+export type PendingCardEvent = "refresh_changed" | "refresh_reverted" | "accept" | "reject";
+export const PENDING_CARD_TRANSITIONS: Readonly<Record<PendingCardState, Partial<Record<PendingCardEvent, PendingCardState>>>> = Object.freeze({
+  none: { refresh_changed: "pending" },
+  pending: { refresh_changed: "pending", refresh_reverted: "none", accept: "none", reject: "none" },
+});
+export const pendingCardState = (agent: { pendingCard: unknown }): PendingCardState => (agent.pendingCard ? "pending" : "none");
+/** the next state, or null when the table does not allow `event` from `state` */
+export function pendingCardNext(state: PendingCardState, event: PendingCardEvent): PendingCardState | null {
+  return PENDING_CARD_TRANSITIONS[state][event] ?? null;
+}
+
 export const A2A_GATEWAY_RULE_IDS = Object.freeze({
   connectionCreated: "a2a-gateway-connection-created",
   connectionUpdated: "a2a-gateway-connection-updated",
@@ -539,7 +559,7 @@ export function registerA2aGatewayRoutes(app: FastifyInstance, db: Db, opts: { d
       }
       if (card.rawSha256 === agent.cardRawSha256 && entry.url === agent.url) {
         // unchanged: a pending card that the remote has since reverted is dropped
-        if (agent.pendingCard) await db.update(a2aAgents).set({ pendingCard: null, pendingCardRawSha256: null, pendingCardFetchedAt: null, updatedAt: new Date() }).where(eq(a2aAgents.id, agent.id));
+        if (pendingCardNext(pendingCardState(agent), "refresh_reverted")) await db.update(a2aAgents).set({ pendingCard: null, pendingCardRawSha256: null, pendingCardFetchedAt: null, updatedAt: new Date() }).where(eq(a2aAgents.id, agent.id));
         results.push({ agentId: agent.id, outcome: "unchanged" });
         continue;
       }
@@ -554,6 +574,7 @@ export function registerA2aGatewayRoutes(app: FastifyInstance, db: Db, opts: { d
         continue;
       }
       const diff = cardDiff(agent.card, card.card);
+      if (!pendingCardNext(pendingCardState(agent), "refresh_changed")) throw new Error("unreachable: refresh_changed is allowed from every pending-card state");
       await db.transaction(async (tx) => {
         await tx.update(a2aAgents).set({ pendingCard: card.card, pendingCardRawSha256: card.rawSha256, pendingCardFetchedAt: new Date(), updatedAt: new Date() }).where(eq(a2aAgents.id, agent.id));
         await audit(tx as unknown as Db, req, "a2a_agent", agent.id, A2A_GATEWAY_RULE_IDS.cardPending, "allow", `Remote agent '${agent.name}': its card changed and is held for review; calls keep the stored card, narrowed to what both allow`, {
@@ -574,7 +595,7 @@ export function registerA2aGatewayRoutes(app: FastifyInstance, db: Db, opts: { d
     const { agentId } = agentParam.parse(req.params);
     const [agent] = await db.select().from(a2aAgents).where(eq(a2aAgents.id, agentId));
     if (!agent) return reply.status(404).send({ error: "unknown_agent" });
-    if (!agent.pendingCard) return reply.status(409).send({ error: "no_pending_card" });
+    if (!pendingCardNext(pendingCardState(agent), "accept") || !agent.pendingCard) return reply.status(409).send({ error: "no_pending_card" });
     // every card check again, on the card that would become the one calls use
     let parsedCard: AgentCard;
     try {
@@ -619,7 +640,7 @@ export function registerA2aGatewayRoutes(app: FastifyInstance, db: Db, opts: { d
     const { agentId } = agentParam.parse(req.params);
     const [agent] = await db.select().from(a2aAgents).where(eq(a2aAgents.id, agentId));
     if (!agent) return reply.status(404).send({ error: "unknown_agent" });
-    if (!agent.pendingCard) return reply.status(409).send({ error: "no_pending_card" });
+    if (!pendingCardNext(pendingCardState(agent), "reject") || !agent.pendingCard) return reply.status(409).send({ error: "no_pending_card" });
     await db.transaction(async (tx) => {
       // the rejected hash is remembered as pending-and-rejected by keeping it out of the stored card; the next refresh
       // that sees the same card holds it again, so a rejection is a decision for now, not a permanent ignore

@@ -28,7 +28,7 @@ import { legacyRestRouter } from "@a2a-js/sdk/compat/v0_3/server/express";
 import { a2aAgents, a2aGatewayConnections, and, auditLog, createDb, desc, eq, inArray, ORG_SETTINGS_ID, orgSettings, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { A2A_RULE_IDS } from "./a2a.js";
-import { A2A_GATEWAY_RULE_IDS, clearGatewayTokenCacheForTest, parseArdManifest } from "./a2a-gateway.js";
+import { A2A_GATEWAY_RULE_IDS, clearGatewayTokenCacheForTest, parseArdManifest, PENDING_CARD_TRANSITIONS, pendingCardNext } from "./a2a-gateway.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 
@@ -457,3 +457,16 @@ describe("B3: switching it off", () => {
 function cardSkillIds(card: Record<string, unknown>): string[] {
   return (Array.isArray(card.skills) ? card.skills : []).map((s) => String((s as Record<string, unknown>).id));
 }
+
+describe("build rule 12: the pending-card review state is one declared table", () => {
+  it("allows exactly these transitions and refuses the rest", () => {
+    expect(PENDING_CARD_TRANSITIONS).toEqual({
+      none: { refresh_changed: "pending" },
+      pending: { refresh_changed: "pending", refresh_reverted: "none", accept: "none", reject: "none" },
+    });
+    expect(pendingCardNext("none", "accept")).toBeNull();
+    expect(pendingCardNext("none", "reject")).toBeNull();
+    expect(pendingCardNext("none", "refresh_reverted")).toBeNull();
+    expect(pendingCardNext("pending", "accept")).toBe("none");
+  });
+});

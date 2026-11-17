@@ -383,6 +383,9 @@ ships it.
 - **Refresh.** A changed card (a different raw hash) is held as `pending_card`, with the diff audited. While it waits,
   a call uses only what both cards allow (`effectiveCard`), so a removed skill or interface stops at once.
   - Accepting the change re-runs every card check. When the change widens what the agent offers, accepting is a step-up.
+  - The review state (`none` or `pending`) and its four transitions (refresh changed, refresh reverted, accept,
+    reject) are one declared table, `PENDING_CARD_TRANSITIONS` in `a2a-gateway.ts` (build rule 12). Every write that
+    changes the state reads it, and a transition it does not list is refused (accept or reject with nothing held is a 409).
   - Rejecting keeps the stored card. A later refresh that sees the same card holds it again.
   - An agent gone from the catalogue is turned off, never deleted.
   - The manual card refresh of an imported agent is refused, because the gateway refresh owns it.
