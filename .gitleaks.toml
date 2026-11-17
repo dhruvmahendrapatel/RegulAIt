@@ -157,6 +157,13 @@ regexTarget = "secret"
 regexes = ['''^(hallucination|scope-drift|shadow-ai)-scenario-[0-9]+$''']
 
 [[allowlists]]
+description = "ADR-0352 (lane E33): a made-up AWS-style secret access key in the first commit of the vendor-adapter test (replaced by an obviously synthetic value in the next commit; it stays in branch history, which this scan reads). Never a real credential. Exact value, this one test file."
+condition = "AND"
+paths = ['''^apps/gateway/src/zz-adr0352-vendor-adapters\.test\.ts$''']
+regexTarget = "secret"
+regexes = ['''^wJalrXUtnFEMI/K7MDENG\+bPxRfiCYADR0352KEY$''']
+
+[[allowlists]]
 description = "ADR-0220, ADR-0247: sha256 digests of public model files (tokenizer and special-token files on a public model hub), pinned so the build can verify them; the generic rule reads the 'token' in the file names as a key name. Exact values, this one lock file."
 condition = "AND"
 paths = ['''^agents/trained-detectors/models\.lock\.json$''']
