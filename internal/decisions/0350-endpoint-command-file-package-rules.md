@@ -115,6 +115,23 @@ now governed, so with no policy they deny.
   (database `now()`), and the device's own expiry check (§3) means a lapsed exception stops applying even before the
   next policy fetch.
 
+**As built (slice 3).** Tables `endpoint_device_groups`, `endpoint_device_group_members` (a join table),
+`endpoint_device_group_rules` and `endpoint_command_exceptions` (migration `pending/endpoint_command_exceptions.sql`,
+row-level security admin-only). The lifecycle table is `ENDPOINT_EXCEPTION_TRANSITIONS` in `@regulait/shared`, and
+every transition is a conditional `UPDATE` from the state it names. Two choices differ from the text above and are
+recorded here:
+
+- **The approval reuses the approvals queue's binding, not its table.** The request stores the ADR-0104 digest of
+  the exact terms (`approvalArgumentsDigest`), the approver names that digest, and the `approval_decide` step-up is
+  bound to it. Rows do not go into `approvals`, because the generic decide route admits a self-review with a reason,
+  and these exceptions must never be self-approved. The database refuses it as well (CHECK).
+- **Longer than 24 hours is a step-up on that exception**, not an org setting: approving one beyond 24 hours needs a
+  second, `settings_relax` grant bound to the exception and its hours. That keeps the default strict without a new
+  org-wide switch. 168 hours stays the hard limit, on both the control plane and the device.
+
+Removing a device from a group, or a rule from a group, is a relaxation and needs a `settings_relax` step-up; adding
+either narrows and needs none. Revoking an active exception tightens and needs none.
+
 ### 6. One compiler, from the gateway's own entitlements (slice 2)
 
 The control plane compiles each device policy from the **same per-user entitlement resolution the gateway enforces**
@@ -181,6 +198,7 @@ the device carries out by refusing every call (as a missing policy already does)
    the device with its device id; the action catalogue, action rules and the cross-route conformance test (§9); the
    E35 response mapping (§10).
 3. Device groups and exceptions (§5): migration, routes (known UI gaps on #453), the lifecycle table, step-up, audit.
+   Built. Folding approved exceptions and group rules into each device's compiled policy is part of 2b.
 
 ## Owner questions open (built with the secure default)
 
