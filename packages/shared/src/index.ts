@@ -5079,3 +5079,6 @@ export { jsonPatch, type JsonPatchOperation } from "./json-patch.js";
 
 // ADR-0346: fairness evaluation through the gateway — definitions, the reply mapping and the promotion gate (pure)
 export * from "./fairness-evaluation.js";
+
+// ADR-0363 slice 2: customer-defined classifiers inside the guardrail pipeline
+export * from "./custom-classifiers.js";

@@ -649,6 +649,12 @@ import { registerCopilotRedteamGateRoutes } from "./copilot-redteam-gate.js";
 import { registerBuilderRoutes } from "./builder.js";
 // ADR-0180 (D3) — continuous assurance: P0's gate-mode setting and each item owner's routes
 import { registerAssuranceSettingsRoutes } from "./assurance-settings.js";
+import {
+  applyCustomClassifierDecision,
+  precheckCustomClassifierDecision,
+  registerClassifierDataKey,
+  registerCustomClassifierRoutes,
+} from "./custom-classifiers.js";
 import { registerRiskTreatmentSettingsRoutes } from "./risk-treatment-settings.js";
 import { decideApprovalWithMeasuredSchema, registerConditionMetricRoutes } from "./condition-metrics.js";
 import { registerRequiredTestRoutes } from "./required-tests.js";
@@ -877,6 +883,8 @@ class StepUpRefusedInTx extends Error {
 }
 
 export function buildApp(db: Db, opts: BuildAppOptions = {}) {
+  // ADR-0363 slice 2: the EDM classifier key is opened with the deployment data key wherever a guardrail policy resolves
+  registerClassifierDataKey(opts.dataKey);
   // ADR-0167 amendment (S-02): resolved once, so every credential path agrees
   const bootstrapAfterAdmin = opts.bootstrapAfterAdmin ?? bootstrapAfterAdminRelaxed(process.env);
   // trustProxy (ADR-0029, NARROWED by ADR-0031 item 3): the deployed stack runs
@@ -5222,6 +5230,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const refusal = await precheckComplianceProfileDecision(db, row, deciderUserId);
       if (refusal) return fail(refusal.status, refusal.body);
     }
+    // ADR-0363 slice 2 — `cannot_approve_own_classifier`, keyed on the DECIDER like the profile check above.
+    if (row.objectType === "custom_classifier") {
+      const refusal = await precheckCustomClassifierDecision(db, row, deciderUserId);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
     // Separation-of-duties guard: the person deciding IS the person who
     // triggered the governed action. Still decidable (alternate-approver
     // routing is deliberately out of scope) but never silently — a recorded
@@ -5492,6 +5505,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // ADR-0208 (G7): a reviewed compliance-profile version — approved = it becomes the active version here, inside
       // the decision's transaction, only if its base version is still the active one (else recorded stale); running
       // workflow instances of the carrying projects get the additive changes only. Denied = nothing changes.
+      // ADR-0363 slice 2: a reviewed customer-classifier version is published (or rejected) inside the decision
+      if (updated.objectType === "custom_classifier") {
+        await applyCustomClassifierDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
+      }
       if (updated.objectType === "compliance_profile") {
         await applyComplianceProfileDecision(
           tx as unknown as Db,
@@ -6041,6 +6058,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerProjectRoutes(app, db);
   // ADR-0208 (G7): reviewed compliance-profile versions and retire
   registerComplianceProfileLifecycleRoutes(app, db);
+  // ADR-0363 slice 2: customer classifiers (admin API; the UI is a #453 gap)
+  registerCustomClassifierRoutes(app, db, { dataKey: opts.dataKey });
   registerInfraRoutes(app, db, opts.dataKey);
   registerOptimizationRoutes(app, db);
   registerOrchestrationRoutes(app, db, { dataKey: opts.dataKey });
