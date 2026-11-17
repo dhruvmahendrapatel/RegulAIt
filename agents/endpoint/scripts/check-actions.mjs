@@ -2,9 +2,9 @@
  * The endpoint agent's embedded action catalogue against the shared source (ADR-0350 §9).
  *
  *   node agents/endpoint/scripts/check-actions.mjs           exit 1 on drift, else 0
- *   node agents/endpoint/scripts/check-actions.mjs --write   rewrite internal/enforce/actions.json
+ *   node agents/endpoint/scripts/check-actions.mjs --write   rewrite internal/enforce/action-catalogue.json
  *
- * Needs packages/shared built (`pnpm --filter @regulait/shared build`). The Go agent embeds actions.json, so a
+ * Needs packages/shared built (`pnpm --filter @regulait/shared build`). The Go agent embeds action-catalogue.json, so a
  * catalogue change in packages/shared fails here until the file is regenerated, and the Go and TypeScript suites
  * both run packages/shared/src/endpoint-actions-conformance.json.
  */
@@ -14,7 +14,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, "../../..");
-const file = path.join(here, "../internal/enforce/actions.json");
+const file = path.join(here, "../internal/enforce/action-catalogue.json");
 const { ENDPOINT_ACTIONS } = await import(pathToFileURL(path.join(repo, "packages/shared/dist/index.js")).href);
 const want = `${JSON.stringify(ENDPOINT_ACTIONS, null, 1)}\n`;
 
@@ -24,7 +24,7 @@ if (process.argv.includes("--write")) {
   process.exit(0);
 }
 if (readFileSync(file, "utf8") !== want) {
-  console.error("packages/shared ENDPOINT_ACTIONS differs from agents/endpoint/internal/enforce/actions.json; run with --write");
+  console.error("packages/shared ENDPOINT_ACTIONS differs from agents/endpoint/internal/enforce/action-catalogue.json; run with --write");
   process.exit(1);
 }
 console.log(`ok: ${ENDPOINT_ACTIONS.length} actions match`);

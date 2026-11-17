@@ -1,6 +1,6 @@
 package enforce
 
-// One policy, every route (ADR-0350 §9). The action catalogue (actions.json, generated from packages/shared
+// One policy, every route (ADR-0350 §9). The action catalogue (action-catalogue.json, generated from packages/shared
 // ENDPOINT_ACTIONS and held equal to it by scripts/check-actions.mjs) names actions an agent can reach as an MCP
 // tool, a CLI or a direct HTTP call. The control plane compiles one rule per action from the subject's gateway
 // entitlements (commands.actions), and the device applies that rule on every route it can see: the MCP tool, the
@@ -14,7 +14,7 @@ import (
 	"strings"
 )
 
-//go:embed actions.json
+//go:embed action-catalogue.json
 var actionsJSON []byte
 
 // EndpointAction is one catalogue entry.
@@ -53,7 +53,7 @@ var Actions = mustActions()
 func mustActions() []EndpointAction {
 	var a []EndpointAction
 	if err := strictJSON(actionsJSON, &a); err != nil || len(a) == 0 {
-		panic("enforce: actions.json does not parse")
+		panic("enforce: action-catalogue.json does not parse")
 	}
 	return a
 }

@@ -5,7 +5,7 @@
  * `visibleTools`, `EffectiveMcpPolicy`), so the two cannot disagree: an action is allowed on the device exactly when
  * the subject is entitled to its MCP tool at the gateway, and an admin override may only tighten it.
  *
- * Pure and zero-I/O. The Go agent embeds `ENDPOINT_ACTIONS` as `internal/enforce/actions.json`; CI
+ * Pure and zero-I/O. The Go agent embeds `ENDPOINT_ACTIONS` as `internal/enforce/action-catalogue.json`; CI
  * (`agents/endpoint/scripts/check-actions.mjs`) fails when the two differ. `endpoint-actions-conformance.json` is the
  * shared conformance fixture both the TypeScript and the Go suites run in full.
  */
