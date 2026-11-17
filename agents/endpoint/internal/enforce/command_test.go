@@ -61,24 +61,28 @@ func TestShellActionsArgvAware(t *testing.T) {
 }
 
 func TestPackageNames(t *testing.T) {
-	cases := map[string][]string{
-		"npm install @scope/pkg@1.2 lodash --save-dev":       {"npm:@scope/pkg", "npm:lodash"},
-		"npm install --registry https://evil.test lodash":    {"npm:lodash"},
-		"pnpm add -D react":                                  {"npm:react"},
-		"yarn":                                               {"npm:"},
-		"npx -y cowsay hi":                                   {"npm:cowsay"},
-		"npx -p typescript tsc":                              {"npm:typescript"},
-		"pip install -r req.txt Flask_Login[x]>=1":           {"pypi:flask-login", "pypi:"},
-		"uv pip install requests":                            {"pypi:requests"},
-		"uvx --from httpie http":                             {"pypi:httpie"},
-		"apt-get install -y curl=7.1":                        {"apt:curl"},
-		"go install golang.org/x/tools/cmd/goimports@latest": {"go:golang.org/x/tools/cmd/goimports"},
-		"cargo add serde@1":                                  {"cargo:serde"},
-		"brew install jq":                                    {"brew:jq"},
-		"npm run build":                                      nil,
-		"git install x":                                      nil,
+	cases := []struct {
+		line string
+		want []string
+	}{
+		{"npm install @scope/pkg@1.2 lodash --save-dev", []string{"npm:@scope/pkg", "npm:lodash"}},
+		{"npm install --registry https://evil.test lodash", []string{"npm:lodash"}},
+		{"pnpm add -D react", []string{"npm:react"}},
+		{"yarn", []string{"npm:"}},
+		{"npx -y cowsay hi", []string{"npm:cowsay"}},
+		{"npx -p typescript tsc", []string{"npm:typescript"}},
+		{"pip install -r req.txt Flask_Login[x]>=1", []string{"pypi:flask-login", "pypi:"}},
+		{"uv pip install requests", []string{"pypi:requests"}},
+		{"uvx --from httpie http", []string{"pypi:httpie"}},
+		{"apt-get install -y curl=7.1", []string{"apt:curl"}},
+		{"go install golang.org/x/tools/cmd/goimports@latest", []string{"go:golang.org/x/tools/cmd/goimports"}},
+		{"cargo add serde@1", []string{"cargo:serde"}},
+		{"brew install jq", []string{"brew:jq"}},
+		{"npm run build", nil},
+		{"git install x", nil},
 	}
-	for line, want := range cases {
+	for _, c := range cases {
+		line, want := c.line, c.want
 		var got []string
 		for _, a := range packageActions(strings.Fields(line)) {
 			got = append(got, a.eco+":"+a.name)
