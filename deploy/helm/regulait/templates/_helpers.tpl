@@ -114,6 +114,11 @@ without encrypted: "true"). The chart cannot check a class, so it requires an ex
 {{- if and (not $v.installSecrets.existingClaim) (not $v.installSecrets.storageClassName) -}}
 {{- fail "set installSecrets.storageClassName to an encrypted StorageClass, or installSecrets.existingClaim to a claim on encrypted storage: the claim holds signing keys unencrypted" -}}
 {{- end -}}
+{{- /* ADR-0343: replicas share the install-generated keys and the runtime-login file; per-pod copies would give each
+replica different signing keys, so receipts and tokens would not verify across replicas. */ -}}
+{{- if and (gt (int $v.replicas) 1) (ne $v.installSecrets.accessMode "ReadWriteMany") -}}
+{{- fail "replicas > 1 needs installSecrets.accessMode: ReadWriteMany (a StorageClass that supports it, such as EFS, Azure Files or Filestore): every replica must read the same install-generated signing keys" -}}
+{{- end -}}
 {{- if and (eq $v.mode "air_gapped") (empty $v.image.allowedRegistries) -}}
 {{- fail "air_gapped requires image.allowedRegistries" -}}
 {{- end -}}

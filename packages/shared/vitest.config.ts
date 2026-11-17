@@ -11,6 +11,7 @@ import { defineConfig } from "vitest/config";
  * test file measures time with `performance.now()` or `Date.now()` and an upper bound outside this list.
  */
 export const TIMING_FILES = [
+  "src/fairness-evaluation-timing.test.ts",
   "src/mcp-catalogue-timing.test.ts",
   "src/audit-scrub-redos.test.ts",
   "src/chatops-redos.test.ts",
