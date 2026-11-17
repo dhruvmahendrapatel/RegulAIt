@@ -138,7 +138,7 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * Liveness probe. The only route that is never rate limited.
+ * Liveness probe. Never rate limited (nor is the internal readiness probe, /ready).
  * @stability public-stable — auth: public
    */
   getHealth<T = unknown>(options?: RequestOptions): Promise<T> {
