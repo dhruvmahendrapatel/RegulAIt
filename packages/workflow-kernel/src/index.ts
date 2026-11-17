@@ -1455,3 +1455,6 @@ export function transition(
 
   throw new WorkflowStateError(`unhandled event`);
 }
+
+// ADR-0341: the visual pipeline builder's governance rules
+export * from "./builder.js";
