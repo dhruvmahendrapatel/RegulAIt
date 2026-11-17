@@ -234,6 +234,11 @@ describe("ADR-0350 device groups", () => {
     const trail = await db.select({ ruleId: auditLog.ruleId }).from(auditLog).where(eq(auditLog.objectId, gid));
     expect(trail.map((t) => t.ruleId)).toEqual(expect.arrayContaining(["endpoint-device-group.rule-remove", "endpoint-device-group.member-remove"]));
 
+    // deleting the group is a relaxation too, and takes its memberships and rules with it
+    expect((await app.inject({ method: "DELETE", url: `/v1/endpoint-device-groups/${gid}`, headers: keys.a })).statusCode).toBe(403);
+    const delArgs: StepUpCheckArgs = { kind: "settings_relax", facts: { values: { endpointDeviceGroupDelete: { groupId: gid } } } };
+    expect((await stepped("DELETE", `/v1/endpoint-device-groups/${gid}`, undefined, "a", delArgs)).statusCode).toBe(200);
+    expect((await app.inject({ method: "GET", url: "/v1/endpoint-device-groups", headers: keys.a })).json().items.some((i: { id: string }) => i.id === gid)).toBe(false);
     expect((await app.inject({ method: "GET", url: "/v1/endpoint-device-groups", headers: keys.member })).statusCode).toBe(403);
     expect((await app.inject({ method: "GET", url: "/v1/endpoint-command-exceptions", headers: keys.member })).statusCode).toBe(403);
   });

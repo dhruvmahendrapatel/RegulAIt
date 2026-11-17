@@ -1050,6 +1050,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // ADR-0350 (lane E31): endpoint device groups and time-limited per-device command-rule exceptions
   "POST /v1/endpoint-device-groups": "internal",
   "GET /v1/endpoint-device-groups": "internal",
+  "DELETE /v1/endpoint-device-groups/:groupId": "internal",
   "POST /v1/endpoint-device-groups/:groupId/members": "internal",
   "DELETE /v1/endpoint-device-groups/:groupId/members/:deviceId": "internal",
   "POST /v1/endpoint-device-groups/:groupId/rules": "internal",
@@ -2410,6 +2411,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/endpoint-addons/flagged": "shadow-ai",
   "POST /v1/endpoint-device-groups": "shadow-ai",
   "GET /v1/endpoint-device-groups": "shadow-ai",
+  "DELETE /v1/endpoint-device-groups/:groupId": "shadow-ai",
   "POST /v1/endpoint-device-groups/:groupId/members": "shadow-ai",
   "DELETE /v1/endpoint-device-groups/:groupId/members/:deviceId": "shadow-ai",
   "POST /v1/endpoint-device-groups/:groupId/rules": "shadow-ai",

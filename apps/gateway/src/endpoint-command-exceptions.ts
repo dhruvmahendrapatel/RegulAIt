@@ -164,6 +164,19 @@ export function registerEndpointCommandExceptionRoutes(app: FastifyInstance, db:
     };
   });
 
+  app.delete("/v1/endpoint-device-groups/:groupId", async (req, reply) => {
+    const p = id("groupId").safeParse(req.params);
+    if (!p.success) return refuse(reply, 400, "invalid_request", "groupId must be a uuid");
+    const groupId = p.data.groupId as string;
+    // deleting a group drops its narrowing rules from every member device: a relaxation
+    const step = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { values: { endpointDeviceGroupDelete: { groupId } } } });
+    if (!step.ok) return reply;
+    const [gone] = await db.delete(endpointDeviceGroups).where(eq(endpointDeviceGroups.id, groupId)).returning({ id: endpointDeviceGroups.id, name: endpointDeviceGroups.name });
+    if (!gone) return refuse(reply, 404, "not_found", "no such group");
+    await audit(db, actor(req), "endpoint_device_group", groupId, "endpoint-device-group.delete", "device group deleted with its memberships and rules", { name: gone.name, stepUp: step.method });
+    return reply.send({ removed: true });
+  });
+
   app.post("/v1/endpoint-device-groups/:groupId/members", async (req, reply) => {
     const p = id("groupId").safeParse(req.params);
     const b = memberBody.safeParse(req.body ?? {});

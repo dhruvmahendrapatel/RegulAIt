@@ -97,8 +97,14 @@ describe("affordance census: a notBuilt route counts only when the file defines 
   it("no exemption names a stub: a stub is skipped already, so an entry for one is stale", () => {
     // a real handler, not a stub: ADR-0246 (P27) authorised-targets, raised for the master's review (the two ADR-0236
     // bundle routes left this list when the #453 bundle screen landed), plus the ADR-0230 A2 SAP business unmark until
-    // its #453 screen
-    expect([...DELIBERATELY_API_ONLY.keys()]).toEqual(["/v1/mcp/authorised-targets/:x", "/v1/servers/:x/system-class"]);
+    // its #453 screen, plus the three ADR-0350 (lane E31) device-group removals until the device-group screen on #453
+    expect([...DELIBERATELY_API_ONLY.keys()]).toEqual([
+      "/v1/mcp/authorised-targets/:x",
+      "/v1/endpoint-device-groups/:x",
+      "/v1/endpoint-device-groups/:x/members/:x",
+      "/v1/endpoint-device-groups/:x/rules/:x",
+      "/v1/servers/:x/system-class",
+    ]);
   });
 });
 
