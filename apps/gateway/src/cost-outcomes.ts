@@ -53,6 +53,21 @@ export const COST_OUTCOME_LIMITS = {
 /** workflow statuses after which an instance never moves again (the workflow kernel's terminal set) */
 export const TERMINAL_INSTANCE_STATUSES = ["completed", "aborted", "denied", "rolled_back"] as const;
 
+/**
+ * Which subject states count as each outcome: the one declared table the recorder reads (owner rule 12). The recorder
+ * only reads these states and never moves a subject between them; the workflow kernel and the orchestrator own those
+ * transitions. A merged pull request is observed by its merge commit, not a state. A work item counts only when the
+ * RegulAIt object it mirrors reached a completed state. The PM tool's own state is shown and never read here.
+ */
+export const OUTCOME_SUBJECT_STATES = {
+  workflow_run: { instance: TERMINAL_INSTANCE_STATUSES },
+  accepted_change: { instance: ["completed"] },
+  completed_work_item: { instance: ["completed"], run: ["completed"], runNode: ["done"] },
+} as const;
+
+const inStates = (column: SQL, states: readonly string[]) =>
+  sql`${column} IN (${sql.join(states.map((x) => sql`${x}`), sql`, `)})`;
+
 export const COST_OUTCOME_BASIS_STATEMENT =
   "Metered spend is the sum of usage_events.cost_usd over the calls the outcome's orchestration runs dispatched " +
   "(detail.runId; for a run node, detail.nodeId too), across the subject's whole life, not only the window. Calls with " +
@@ -70,11 +85,6 @@ export interface CostOutcomeRecordResult {
   recorded: Record<CostOutcomeKind, number>;
   total: number;
 }
-
-const terminalList = sql.join(
-  TERMINAL_INSTANCE_STATUSES.map((s) => sql`${s}`),
-  sql`, `,
-);
 
 /**
  * One idempotent pass: inserts an outcome row for every subject that reached an outcome and has none yet. Safe to run
@@ -100,8 +110,8 @@ export async function recordCostOutcomes(db: Db | Tx, trigger: "schedule" | "man
         ON CONFLICT DO NOTHING`),
     );
   const merged = await instanceKind("merged_pr", sql`coalesce(wi.context->>'mergeSha', '') <> ''`);
-  const runs = await instanceKind("workflow_run", sql`wi.status IN (${terminalList})`);
-  const accepted = await instanceKind("accepted_change", sql`wi.status = 'completed'`);
+  const runs = await instanceKind("workflow_run", inStates(sql`wi.status`, OUTCOME_SUBJECT_STATES.workflow_run.instance));
+  const accepted = await instanceKind("accepted_change", inStates(sql`wi.status`, OUTCOME_SUBJECT_STATES.accepted_change.instance));
   // a PM work item is complete when the RegulAIt object it mirrors completed. The PM tool's own state strings
   // (pm_links.inbound_state) are provider-specific and are shown, never interpreted.
   const items = count(
@@ -111,17 +121,17 @@ export async function recordCostOutcomes(db: Db | Tx, trigger: "schedule" | "man
       SELECT 'completed_work_item', coalesce(wi.id, r.workflow_instance_id), r.id,
              CASE WHEN l.object_type = 'run_node' THEN l.node_id END, l.id, p.id,
              coalesce(wi.initiator_user_id, r.initiating_user_id),
-             CASE l.object_type WHEN 'workflow_instance' THEN wi.status WHEN 'run' THEN r.status ELSE 'done' END,
+             CASE l.object_type WHEN 'workflow_instance' THEN wi.status WHEN 'run' THEN r.status ELSE r.state->'nodeStatuses'->>l.node_id END,
              ${trigger}
         FROM pm_links l
         LEFT JOIN workflow_instances wi ON l.object_type = 'workflow_instance' AND wi.id = l.object_id
         LEFT JOIN orchestration_runs r ON l.object_type IN ('run', 'run_node') AND r.id = l.object_id
         LEFT JOIN projects p ON p.id = coalesce(wi.project_id, r.project_id)
        WHERE l.orphaned_at IS NULL
-         AND (   (l.object_type = 'workflow_instance' AND wi.status = 'completed')
-              OR (l.object_type = 'run' AND r.status = 'completed')
+         AND (   (l.object_type = 'workflow_instance' AND ${inStates(sql`wi.status`, OUTCOME_SUBJECT_STATES.completed_work_item.instance)})
+              OR (l.object_type = 'run' AND ${inStates(sql`r.status`, OUTCOME_SUBJECT_STATES.completed_work_item.run)})
               OR (l.object_type = 'run_node' AND char_length(coalesce(l.node_id, '')) BETWEEN 1 AND 64
-                  AND r.state->'nodeStatuses'->>l.node_id = 'done'))
+                  AND ${inStates(sql`r.state->'nodeStatuses'->>l.node_id`, OUTCOME_SUBJECT_STATES.completed_work_item.runNode)}))
          AND NOT EXISTS (SELECT 1 FROM cost_outcomes o WHERE o.kind = 'completed_work_item' AND o.pm_link_id = l.id)
        ORDER BY l.created_at, l.id
        LIMIT ${n}
