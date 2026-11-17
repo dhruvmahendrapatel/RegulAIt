@@ -213,7 +213,7 @@ async function m365Users(ctx: ConnectorContext, cfg: M365CopilotConfig, headers:
   for (let page = 1; url; page++) {
     if (page > 20) throw new ConnectorError("page_limit", "listing the tenant's users needed more than 20 pages; list the users in scope instead");
     const parsed = graphUserPageSchema.safeParse(await getJson(fetchImpl, url, headers, ctx.signal, "the user list"));
-    if (!parsed.success) throw new ConnectorError("bad_response", "the user list did not match Graph's documented shape");
+    if (!parsed.success) throw new ConnectorError("bad_response", "the user list did not match the vendor's documented shape");
     for (const u of parsed.data.value) ids.push(u.id);
     if (ids.length > AI_SAAS_MONITOR_MAX_USERS) {
       throw new ConnectorError("interaction_limit", `the tenant has more than ${AI_SAAS_MONITOR_MAX_USERS} users; list the users in scope instead`);
@@ -236,7 +236,7 @@ async function* m365ListInteractions(ctx: ConnectorContext, auth: ConnectorAutho
       }
       const body = await getJson(fetchImpl, url, auth.headers, ctx.signal, "a user's Copilot interactions");
       const parsed = graphAiInteractionPageSchema.safeParse(body);
-      if (!parsed.success) throw new ConnectorError("bad_response", "a Copilot interaction page did not match Graph's documented shape");
+      if (!parsed.success) throw new ConnectorError("bad_response", "a Copilot interaction page did not match the vendor's documented shape");
       yield { unit: userId, interactions: parsed.data.value.map(normalizeGraphInteraction) };
       const next = sameOriginNext(GRAPH_ORIGIN, parsed.data["@odata.nextLink"]);
       if (next && seenLinks.has(next)) throw new ConnectorError("bad_response", "the vendor returned a next-page link it had already returned");
@@ -278,7 +278,7 @@ async function chatGptAuthorise(ctx: ConnectorContext): Promise<ConnectorAuthori
   u.searchParams.set("event_type", "CONVERSATION_MESSAGE");
   u.searchParams.set("limit", "1");
   const parsed = chatGptLogFileListSchema.safeParse(await getJson(connectorFetch(ctx), u.toString(), headers, ctx.signal, "the compliance log list"));
-  if (!parsed.success) throw new ConnectorError("bad_response", "the compliance log list did not match OpenAI's documented shape");
+  if (!parsed.success) throw new ConnectorError("bad_response", "the compliance log list did not match the vendor's documented shape");
   return { scope: "unverified", permissions: [], headers };
 }
 
@@ -304,7 +304,7 @@ async function chatGptDownload(ctx: ConnectorContext, fetchImpl: typeof fetch, u
     } catch (err) {
       for (let e: unknown = err, i = 0; e && i < 8; e = (e as { cause?: unknown }).cause, i++) {
         if (e instanceof EgressBlockedError) {
-          throw new ConnectorError("egress_refused", `the log download redirected to ${target.hostname}, which is not on the egress allow-list: add it to read ChatGPT logs`);
+          throw new ConnectorError("egress_refused", `the log download redirected to ${target.hostname}, which is not on the egress allow-list: add it to read the compliance logs`);
         }
       }
       throw err;
@@ -331,13 +331,13 @@ async function* chatGptListInteractions(ctx: ConnectorContext, auth: ConnectorAu
     u.searchParams.set("before", window.end.toISOString());
     u.searchParams.set("limit", "100");
     const list = chatGptLogFileListSchema.safeParse(await getJson(fetchImpl, u.toString(), auth.headers, ctx.signal, "the compliance log list"));
-    if (!list.success) throw new ConnectorError("bad_response", "the compliance log list did not match OpenAI's documented shape");
+    if (!list.success) throw new ConnectorError("bad_response", "the compliance log list did not match the vendor's documented shape");
     for (const file of list.data.data) {
       if (seen.has(file.id)) continue;
       seen.add(file.id);
       const body = await chatGptDownload(ctx, fetchImpl, `${base}/${encodeURIComponent(file.id)}`, auth.headers);
       if (file.file_sha256 && createHash("sha256").update(body, "utf8").digest("hex") !== file.file_sha256.toLowerCase()) {
-        throw new ConnectorError("bad_response", "a compliance log file did not match the SHA-256 OpenAI listed for it; nothing from it was written");
+        throw new ConnectorError("bad_response", "a compliance log file did not match the SHA-256 the vendor listed for it; nothing from it was written");
       }
       const interactions = [];
       for (const line of body.split("\n")) {
@@ -351,7 +351,7 @@ async function* chatGptListInteractions(ctx: ConnectorContext, auth: ConnectorAu
         // only conversation messages are read; any other record type in the file is not ours to keep
         if ((raw as { type?: unknown })?.type !== "CONVERSATION_MESSAGE") continue;
         const rec = chatGptConversationMessageSchema.safeParse(raw);
-        if (!rec.success) throw new ConnectorError("bad_response", "a conversation message did not match OpenAI's documented shape");
+        if (!rec.success) throw new ConnectorError("bad_response", "a conversation message did not match the vendor's documented shape");
         interactions.push(normalizeChatGptMessage(rec.data));
       }
       yield { unit: file.id, interactions };
@@ -394,7 +394,7 @@ async function claudeAuthorise(ctx: ConnectorContext): Promise<ConnectorAuthoris
   claudeConfig(ctx.config);
   const headers = { "x-api-key": ctx.credential.secret, "anthropic-version": ANTHROPIC_COMPLIANCE_VERSION };
   const parsed = claudeChatListSchema.safeParse(await getJson(connectorFetch(ctx), `${ANTHROPIC_ORIGIN}/v1/compliance/apps/chats?limit=1`, headers, ctx.signal, "the chat list"));
-  if (!parsed.success) throw new ConnectorError("bad_response", "the chat list did not match Anthropic's documented shape");
+  if (!parsed.success) throw new ConnectorError("bad_response", "the chat list did not match the vendor's documented shape");
   return { scope: "unverified", permissions: [], headers };
 }
 
@@ -414,7 +414,7 @@ async function* claudeListInteractions(ctx: ConnectorContext, auth: ConnectorAut
     for (const org of cfg.organizationIds) u.searchParams.append("organization_ids[]", org);
     if (afterId) u.searchParams.set("after_id", afterId);
     const chats = claudeChatListSchema.safeParse(await getJson(fetchImpl, u.toString(), auth.headers, ctx.signal, "the chat list"));
-    if (!chats.success) throw new ConnectorError("bad_response", "the chat list did not match Anthropic's documented shape");
+    if (!chats.success) throw new ConnectorError("bad_response", "the chat list did not match the vendor's documented shape");
     for (const chat of chats.data.data) {
       let msgAfter: string | null = null;
       const msgCursors = new Set<string>();
@@ -423,7 +423,7 @@ async function* claudeListInteractions(ctx: ConnectorContext, auth: ConnectorAut
         const mu = new URL(`${ANTHROPIC_ORIGIN}/v1/compliance/apps/chats/${encodeURIComponent(chat.id)}/messages`);
         if (msgAfter) mu.searchParams.set("after_id", msgAfter);
         const msgs = claudeChatMessagesSchema.safeParse(await getJson(fetchImpl, mu.toString(), auth.headers, ctx.signal, "a chat's messages"));
-        if (!msgs.success) throw new ConnectorError("bad_response", "a chat's messages did not match Anthropic's documented shape");
+        if (!msgs.success) throw new ConnectorError("bad_response", "a chat's messages did not match the vendor's documented shape");
         // a message after the window belongs to the next run; one before it was read already (the evidence key dedupes)
         yield { unit: chat.id, interactions: normalizeClaudeMessages(msgs.data).filter((i) => i.occurredAt < window.end) };
         if (!msgs.data.has_more || !msgs.data.last_id) break;
