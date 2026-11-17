@@ -1572,6 +1572,7 @@ export const auditLog = pgTable(
         "pm_identity_link",
         "pm_trigger_settings",
         "pm_write_back",
+        "pm_audit_source",
         // ADR-0043: an `mcp_servers.url` refused by the egress guard — at
         // write time (the 400 on POST/PATCH /v1/servers) or at connect time
         // (the audited refusal a re-pointed or pre-0049 row now gets). Plain
@@ -17272,4 +17273,62 @@ export const pmWriteBacks = pgTable(
     check("pm_write_backs_kind_ck", sql`${t.kind} IN ('started', 'signoff_request', 'approval', 'pr_link', 'outcome')`),
   ],
 );
+
+/**
+ * ADR-0356 PR 3 (migration `pm_audit_events`): a read-only feed of an Atlassian organisation's audit log (Rovo-agent
+ * and Remote MCP activity), attached to the PM connection of that organisation's Jira. OFF by default; enabling is a
+ * settings_relax step-up. The org admin API key is stored AES-256-GCM-encrypted (the connection-token discipline).
+ */
+export const pmAuditSources = pgTable(
+  "pm_audit_sources",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => pmConnections.id, { onDelete: "restrict" }),
+    // ADR-0200 3NF exception (verbatim external payload): Atlassian's organisation id, its key, not ours.
+    orgId: text("org_id").notNull(),
+    baseUrl: text("base_url").notNull(),
+    apiKeyCiphertext: text("api_key_ciphertext").notNull(),
+    // ADR-0200 3NF exception (schema-validated configuration document): the action filters, validated on every write.
+    actionFilters: jsonb("action_filters").$type<string[]>().notNull(),
+    enabled: boolean("enabled").notNull().default(false),
+    /** the events-stream cursor after the last stored page; NULL = from the start of the configured window */
+    cursor: text("cursor"),
+    lastPolledAt: timestamp("last_polled_at", { withTimezone: true }),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("pm_audit_sources_conn_org_uq").on(t.connectionId, t.orgId)],
+);
+export type PmAuditSourceRow = typeof pmAuditSources.$inferSelect;
+
+/**
+ * One Atlassian audit event stored as THIRD-PARTY EVIDENCE: append-only (UPDATE, DELETE and TRUNCATE refused), never
+ * a decision, never driving a state machine. `attributes` is the allow-listed point-in-time copy of a verbatim external
+ * payload (ADR-0200 exception). Dedup on (source, Atlassian event id). Each row names the audit-chain row of its batch.
+ */
+export const pmAuditEvents = pgTable(
+  "pm_audit_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => pmAuditSources.id, { onDelete: "restrict" }),
+    eventId: text("event_id").notNull(),
+    action: text("action").notNull(),
+    actorAccountId: text("actor_account_id"),
+    attributes: jsonb("attributes").$type<Record<string, unknown>>().notNull(),
+    observedAt: timestamp("observed_at", { withTimezone: true }).notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+    recordSha256: text("record_sha256").notNull(),
+    auditLogId: uuid("audit_log_id").notNull(),
+  },
+  (t) => [
+    uniqueIndex("pm_audit_events_dedup_uq").on(t.sourceId, t.eventId),
+    index("pm_audit_events_source_observed_idx").on(t.sourceId, t.observedAt.desc()),
+  ],
+);
+export type PmAuditEventRow = typeof pmAuditEvents.$inferSelect;
 // ===== end ADR-0356 =====
