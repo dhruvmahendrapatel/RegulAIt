@@ -268,12 +268,12 @@ Verified against the vendors' own documentation on 2026-11-17: OpenAI's Admin AP
   air-gapped), and a separate `remediate` credential per connector (`ai_saas_monitor_credentials.purpose`), as both
   vendors recommend, so the monitoring key stays read-only.
 - **The lifecycle is declared once**, on lane E29's `defineMachine` (ADR-0348), which landed on main while this lane was
-  in flight; lane E19's ADR-0338 says to use it when it lands. `AI_SAAS_REMEDIATION_MACHINE`:
+  in flight; lane E19's design (#881) says to use it when it lands. `AI_SAAS_REMEDIATION_MACHINE`:
   `requested → approved | denied | cancelled`, `approved → executing | cancelled`, `executing → succeeded | failed |
   unknown`, `unknown → succeeded | failed`. Every write is a conditional UPDATE on `sourcesOf(event)` with its audit row
   in the same transaction, and every read returns `describe(state)`. The slice 1 run lifecycle moved onto the same
   helper (`AI_SAAS_MONITOR_RUN_MACHINE`). Neither machine is added to E29's `STATE_MACHINES` registry (E29 owns it).
-- **The flow, following ADR-0338 §4:**
+- **The flow, following lane E19's design (#881, §4):**
   1. **Request.** This needs a step-up bound to the interaction and action. The request names an approver: an active
      admin other than the requester, or the org's default approver. The action row, a pending `ai_saas_remediation`
      approval (digest and preview of what will be deleted, expiring after `approvalTtlHours`, 24 by default) and an

@@ -21,7 +21,7 @@
  *    delete (a 404 means it is gone); it never runs a different action and needs no second approval.
  *  - Every state change is a conditional UPDATE on `AI_SAAS_REMEDIATION_MACHINE.sourcesOf(event)` (ADR-0348), with
  *    its audit row in the same transaction. The approval's state is folded in lazily when the action is next touched,
- *    as ADR-0338 does: an approval decided, denied or expired moves the action, and nothing runs on a timer.
+ *    as lane E19's design (#881) does: an approval decided, denied or expired moves the action, and nothing runs on a timer.
  *  - No vendor text reaches a row, a response or an audit row: outcomes are fixed codes plus the HTTP status.
  */
 import type { FastifyInstance, FastifyRequest } from "fastify";
@@ -126,7 +126,7 @@ async function transition(
 }
 
 /**
- * Fold the approval's state and an expired lease into the action, lazily (ADR-0338 §4): a `requested` action whose
+ * Fold the approval's state and an expired lease into the action, lazily (lane E19's design, #881, §4): a `requested` action whose
  * approval was approved moves to `approved`, denied to `denied`, expired or superseded to `cancelled`; an `approved`
  * one whose approval expired is cancelled; an `executing` one past its lease is `unknown`.
  */
