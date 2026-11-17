@@ -43,6 +43,7 @@ import { createWorkflowTemplateValidated } from "./workflows.js";
 import { REVIEWER_PLACEHOLDER } from "./workflow-review-checks.js";
 import { isIntakeTemplateName } from "@regulait/shared";
 import { writeIntakeTemplateGated } from "./decision-regression.js";
+import { approvedFragmentCatalogue } from "./workflow-fragments.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -424,8 +425,12 @@ export function registerTemplateGalleryRoutes(app: FastifyInstance, db: Db): voi
   // admin-gated by the default route class (not in NON_ADMIN_ROUTES)
   app.get("/v1/workflows/template-gallery", async () => {
     const gallery = await buildTemplateGallery(db);
+    // ADR-0341 follow-up: the sub-process catalogue sits beside the shapes — approved versions only, for a builder
+    // draft to call by pinned version
+    const fragments = await approvedFragmentCatalogue(db);
     return {
       ...gallery,
+      fragments: fragments.items,
       note:
         "Stage annotations and compliance-heavy shapes are DERIVED live from the compliance " +
         "profiles' required templates (the same rules requiredTemplateIdsFor enforces) — " +

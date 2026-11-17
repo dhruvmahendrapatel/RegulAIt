@@ -30,6 +30,7 @@ import {
   users,
   workflowTemplateDrafts,
   workflowTemplates,
+  workflowTemplateVersionFragments,
   workflowTemplateVersions,
   type Db,
   type WorkflowTemplateDraftRow,
@@ -38,7 +39,9 @@ import {
 import { canonicalJson, isIntakeTemplateName, jsonPatch, sha256Hex, type JsonPatchOperation } from "@regulait/shared";
 import {
   builderRuleIssues,
+  collapseCalls,
   findRelaxations,
+  FRAGMENT_ID_SEPARATOR,
   stageDiff,
   workflowDefinitionSchema,
   type Relaxation,
@@ -46,6 +49,7 @@ import {
   type WorkflowDefinition,
 } from "@regulait/workflow-kernel";
 import { checkWorkflowTemplateReferences } from "./workflows.js";
+import { callsOfTemplateVersion, expandDefinitionCalls } from "./workflow-fragments.js";
 import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
 
 /** ADR-0341 §4.9 */
@@ -77,8 +81,24 @@ export interface BuilderIssue {
 }
 
 export type BuilderValidation =
-  | { valid: true; issues: []; definition: WorkflowDefinition; contentHash: string }
+  | {
+      valid: true;
+      issues: [];
+      /** the definition as it goes live: every call stage expanded into the pinned sub-process version's stages */
+      definition: WorkflowDefinition;
+      contentHash: string;
+      /** the sub-process versions the call stages pin, recorded with the published version */
+      calls: Array<{ callStageId: string; fragmentVersionId: string }>;
+    }
   | { valid: false; issues: BuilderIssue[] };
+
+/** an issue on a stage a call expanded into is shown on the call stage itself */
+function callStageOf(stageId: string | null, callIds: ReadonlySet<string>): string | null {
+  if (!stageId) return stageId;
+  const at = stageId.indexOf(FRAGMENT_ID_SEPARATOR);
+  const head = at > 0 ? stageId.slice(0, at) : null;
+  return head && callIds.has(head) ? head : stageId;
+}
 
 /** SHA-256 over ADR-0060's canonical JSON: what a version is identified and a publish step-up is bound by */
 export function definitionContentHash(definition: unknown): string {
@@ -98,11 +118,17 @@ function stageIdAt(raw: unknown, path: ReadonlyArray<PropertyKey>): string | nul
  * (a stored template must be exactly what the builder showed), the builder rules (forced plan gate, governed deploy
  * tail) and the gateway's reference checks (the create path's own function).
  */
-export async function validateBuilderDefinition(db: Db, raw: unknown): Promise<BuilderValidation> {
-  const bytes = Buffer.byteLength(JSON.stringify(raw ?? null), "utf8");
+export async function validateBuilderDefinition(db: Db, draft: unknown): Promise<BuilderValidation> {
+  const bytes = Buffer.byteLength(JSON.stringify(draft ?? null), "utf8");
   if (bytes > BUILDER_MAX_DEFINITION_BYTES) {
     return { valid: false, issues: [{ code: "too_large", message: `the definition is ${bytes} bytes; the most is ${BUILDER_MAX_DEFINITION_BYTES}`, stageId: null, path: [] }] };
   }
+  // the sub-process catalogue: each call stage becomes the stages of the approved version it pins, and every check
+  // below runs on the result, so the plan gate and the deploy tail see the pipeline that will actually run
+  const expanded = await expandDefinitionCalls(db, draft);
+  if (!expanded.ok) return { valid: false, issues: expanded.issues.map((i) => ({ ...i, path: [] })) };
+  const raw = expanded.definition;
+  const callIds = new Set(expanded.calls.map((c) => c.callStageId));
   const stagesRaw = (raw as { stages?: unknown } | null)?.stages;
   if (Array.isArray(stagesRaw) && stagesRaw.length > BUILDER_MAX_STAGES) {
     return { valid: false, issues: [{ code: "too_many_stages", message: `the definition has ${stagesRaw.length} stages; the most is ${BUILDER_MAX_STAGES}`, stageId: null, path: ["stages"] }] };
@@ -114,7 +140,7 @@ export async function validateBuilderDefinition(db: Db, raw: unknown): Promise<B
       issues: parsed.error.issues.map((i) => ({
         code: "schema",
         message: i.message,
-        stageId: stageIdAt(raw, i.path),
+        stageId: callStageOf(stageIdAt(raw, i.path), callIds),
         path: i.path.filter((p): p is string | number => typeof p !== "symbol"),
       })),
     };
@@ -129,18 +155,24 @@ export async function validateBuilderDefinition(db: Db, raw: unknown): Promise<B
       .slice(1)
       .map((p) => p.replace(/~1/g, "/").replace(/~0/g, "~"))
       .map((p) => (/^\d+$/.test(p) ? Number(p) : p));
-    return { code: "unknown_field", message: `'${op.path}' is not a field of a workflow template`, stageId: stageIdAt(raw, path), path };
+    return { code: "unknown_field", message: `'${op.path}' is not a field of a workflow template`, stageId: callStageOf(stageIdAt(raw, path), callIds), path };
   });
-  for (const r of builderRuleIssues(definition)) issues.push({ code: r.code, message: r.message, stageId: r.stageId, path: [] });
+  for (const r of builderRuleIssues(definition)) issues.push({ code: r.code, message: r.message, stageId: callStageOf(r.stageId, callIds), path: [] });
   if (issues.length === 0) {
     const refused = await checkWorkflowTemplateReferences(db, definition);
     if (refused) {
       const b = refused.body as { error?: string; detail?: string; stageId?: string };
-      issues.push({ code: b.error ?? "invalid_reference", message: b.detail ?? b.error ?? "a reference in the definition does not resolve", stageId: b.stageId ?? null, path: [] });
+      issues.push({ code: b.error ?? "invalid_reference", message: b.detail ?? b.error ?? "a reference in the definition does not resolve", stageId: callStageOf(b.stageId ?? null, callIds), path: [] });
     }
   }
   if (issues.length > 0) return { valid: false, issues };
-  return { valid: true, issues: [], definition, contentHash: definitionContentHash(definition) };
+  return {
+    valid: true,
+    issues: [],
+    definition,
+    contentHash: definitionContentHash(definition),
+    calls: expanded.calls.map((c) => ({ callStageId: c.callStageId, fragmentVersionId: c.fragmentVersionId })),
+  };
 }
 
 /** a definition as the kernel reads it, or null when it no longer parses (shown as a patch only) */
@@ -349,6 +381,7 @@ export function registerWorkflowBuilderRoutes(app: FastifyInstance, db: Db): voi
       if (existing) return { refused: { status: 409, body: { error: "draft_exists", detail: "this template already has an open draft: edit it or discard it", revision: existing.revision } } };
       const latest = await ensureBaseline(tx, t!, actor);
       let source: unknown = t!.definition;
+      let sourceVersionId = latest.id;
       if (body.fromVersion !== undefined) {
         const [v] = await tx
           .select()
@@ -356,7 +389,11 @@ export function registerWorkflowBuilderRoutes(app: FastifyInstance, db: Db): voi
           .where(and(eq(workflowTemplateVersions.templateId, templateId), eq(workflowTemplateVersions.version, body.fromVersion)));
         if (!v) return { refused: { status: 404, body: { error: "unknown_version" } } };
         source = v.definition;
+        sourceVersionId = v.id;
       }
+      // the draft shows what the admin wrote: a sub-process the version expanded is put back as its call stage
+      const calls = await callsOfTemplateVersion(tx, sourceVersionId);
+      if (calls.length > 0) source = collapseCalls(source as Record<string, unknown>, calls);
       const [d] = await tx
         .insert(workflowTemplateDrafts)
         .values({ templateId, definition: source as Record<string, unknown>, baseVersionId: latest.id, createdBy: actor, updatedBy: actor })
@@ -549,6 +586,11 @@ async function publish(db: Db, req: FastifyRequest, reply: FastifyReply) {
       .insert(workflowTemplateVersions)
       .values({ templateId, version: latest.version + 1, definition: v.definition, contentHash: v.contentHash, origin: "builder", publishedBy: actor })
       .returning();
+    if (v.calls.length > 0) {
+      await tx
+        .insert(workflowTemplateVersionFragments)
+        .values(v.calls.map((c) => ({ templateVersionId: version!.id, callStageId: c.callStageId, fragmentVersionId: c.fragmentVersionId })));
+    }
     await tx.update(workflowTemplates).set({ definition: v.definition }).where(eq(workflowTemplates.id, templateId));
     await tx.delete(workflowTemplateDrafts).where(eq(workflowTemplateDrafts.id, nowDraft.id));
     const retried = v.definition.stages.filter((st) => st.retry);
@@ -566,6 +608,7 @@ async function publish(db: Db, req: FastifyRequest, reply: FastifyReply) {
         stages: diff.stages,
         patchOps: diff.patch.length,
         relaxations: diff.relaxations,
+        ...(v.calls.length > 0 ? { fragmentCalls: v.calls } : {}),
         ...(diff.relaxations.length > 0 ? { relaxationReason: body.reason } : {}),
         ...(retried.length > 0 ? { retryStages: retried.map((st) => ({ stageId: st.id, retry: st.retry })) } : {}),
         stepUp: su.method,
