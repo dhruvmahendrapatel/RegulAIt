@@ -109,6 +109,14 @@ induction over numeric ranges is deferred to a sandboxed engine image with sciki
   (audited). The export carries summary columns only, never the rule's cells.
 - Not yet done, tracked for slice 3 (PENDING): the scan still answers when it finishes; answering 202 with the scan's
   audit id, so a proxy timeout cannot cut a completed scan's response, comes with the scheduler entry.
-- Not yet done, tracked for slice 3 (PENDING): `rule_step_suggestions.rule` copies input values out of `trace_spans`,
-  so it must follow trace retention (prune or refresh suggestions whose window has aged out) and be found and redacted
-  by the privacy-ops erasure locator; and both new tables join the RLS batch plan with the other single-tenant tables.
+- Slice 3, first part (done): `rule_step_suggestions.rule` copies input values out of `trace_spans`, so
+  - **retention:** the §8.3 prune pass (`runAuditPruneOnce`, the same floor that prunes traces) deletes every suggestion
+    whose scan window `[detected_at − 30 days, detected_at]` starts before the cutoff (`rule-step-retention.ts`), so no
+    cell outlives a span it was copied from (review #901: keying on `detected_at` alone let a suggestion detected
+    inside the floor keep values from spans up to 30 days older than it); a rescan rebuilds it from spans still held;
+  - **erasure:** privacy-ops locates the subject in a fifth store, `rule_step_suggestions` (each cell's key values and
+    output, compared element by element), and an
+    erasure deletes the matching suggestions rather than redacting a cell, which would leave a wrong rule. A later
+    scan rebuilds them only from spans still held. Trace spans themselves are outside the locator today and are
+    bounded by the retention floor; that is unchanged here;
+  - **RLS:** both tables are classified deployment-wide in ADR-0234 (no row policy; admin-only routes).
