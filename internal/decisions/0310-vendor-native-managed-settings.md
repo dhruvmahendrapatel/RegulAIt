@@ -85,6 +85,12 @@ own allowlists, which the vendors' clients enforce.
    `summary.complete` is false with a `coverageNote` naming the vendors that are not fully measured (ADR-0180: an
    unmeasured control must not read as a clean one). On the shipped seed, Copilot and Codex are not collected until
    their catalogue rows are added (PENDING).
+   **Collection switch (#902 review [3]).** A catalogue path is only collection capability. The agent collects
+   MCP configs only while ADR-0259's org switch (`endpoint_mcp_config_enabled`, default off) is on, and the gateway
+   refuses such facts while it is off. With the switch off, every vendor is reported `not_collected` (its
+   `catalogueStatus` still shows what the catalogue could collect), every drift count is `null`, `collectionEnabled`
+   and `summary.complete` are false, and the note says that any listed rows are historical evidence, not a current
+   measurement.
    **Refusals (secure by default):** 409 `public_url_unset` with no public URL (the managed host is unknown), and 409
    `no_bundle_exported` before any bundle exists, since nothing is managed yet and listing every server as drift would
    be noise. Devices are pseudonymous (ADR-0195), so drift is per device and identity, never per named user; devices

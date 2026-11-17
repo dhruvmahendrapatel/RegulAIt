@@ -62,6 +62,7 @@ import { loadRoleEntitlements } from "./entitlements.js";
 import { isReservedToolName } from "./mcp-protocol.js";
 import { admissionHidesTools } from "./mcp-admission.js";
 import { buildTarGz, resolveExportSigningKey } from "./export-bundle.js";
+import { loadDiscoverySettings } from "./discovery-posture.js";
 import { joinPublicUrl, resolvePublicUrl } from "./public-url.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
@@ -383,9 +384,16 @@ export async function managedSettingsDrift(db: Db, q: DriftQuery, publicUrl: str
     .groupBy(sql`1`)) {
     if (r.vendor) perVendor.set(r.vendor, Number(r.servers));
   }
+  // #902 review [3]: a catalogue path is collection CAPABILITY. Collection itself runs only while the ADR-0259 org
+  // switch is on (default off); while it is off the agent collects nothing and the gateway refuses mcp_config facts,
+  // so every vendor is unmeasured: status not_collected, drift null, whatever the catalogue names.
+  const collectionEnabled = (await loadDiscoverySettings(db)).endpointMcpConfig;
   const coverage = managedVendorCoverage(catalogue.map((c) => c.value))
     .filter((c) => !q.vendor || c.vendor === q.vendor)
-    .map((c) => ({ ...c, driftServers: c.status === "not_collected" ? null : (perVendor.get(c.vendor) ?? 0) }));
+    .map((c) => {
+      const status = collectionEnabled ? c.status : ("not_collected" as const);
+      return { ...c, catalogueStatus: c.status, status, driftServers: status === "not_collected" ? null : (perVendor.get(c.vendor) ?? 0) };
+    });
   const unmeasured = coverage.filter((c) => c.status !== "collected").map((c) => c.vendor);
   const conds = q.cursor ? [...base, gt(endpointMcpServers.id, q.cursor)] : base;
   const rows = await db
@@ -433,7 +441,10 @@ export async function managedSettingsDrift(db: Db, q: DriftQuery, publicUrl: str
         complete: unmeasured.length === 0,
       },
       coverage,
-      coverageNote: unmeasured.length
+      collectionEnabled,
+      coverageNote: !collectionEnabled
+        ? "Not measured: endpoint MCP config discovery is off (ADR-0259, the default), so no endpoint agent reads MCP config files and none is reported; drift is unknown, not zero. Any rows listed are historical evidence from while it was on (see each lastSeenAt), not a current measurement."
+        : unmeasured.length
         ? `Not fully measured: ${unmeasured.join(", ")}. The enabled endpoint catalogue has no config_path row for some of these vendors' MCP config files, so the endpoint agent does not read them; drift there is unknown, not zero. Add the catalogue rows (see each vendor's missingPaths) to measure it.`
         : "Every managed vendor's MCP config files are collected by the enabled endpoint catalogue.",
       items,

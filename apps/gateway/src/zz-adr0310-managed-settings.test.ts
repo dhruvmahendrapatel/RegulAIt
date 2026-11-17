@@ -29,6 +29,7 @@ import {
   auditLog,
   aiEndpointSignatures,
   createDb,
+  discoverySettings,
   discoverySources,
   endpointDevices,
   endpointEnrolmentTokens,
@@ -429,7 +430,16 @@ describe("ADR-0310 slice 2: drift against the ADR-0259 endpoint MCP inventory", 
   const ids: Record<string, string> = {};
   const hex = (t: string, n: number) => createHash("sha256").update(`${t}-${RUN}`).digest("hex").slice(0, n);
 
+  let switchWas = false;
+  const setCollection = (on: boolean) => db.update(discoverySettings).set({ endpointMcpConfigEnabled: on }).where(eq(discoverySettings.id, 1));
+  afterAll(async () => {
+    await setCollection(switchWas);
+  });
+
   beforeAll(async () => {
+    // ADR-0259 collection on for the measured cases (files run serially); restored after
+    switchWas = (await db.select().from(discoverySettings).where(eq(discoverySettings.id, 1)))[0]?.endpointMcpConfigEnabled ?? false;
+    await setCollection(true);
     // a bundle exists from the suites above; the inventory rows are seeded as ADR-0259's recordMcpServers stores them
     const [src] = await db
       .insert(discoverySources)
@@ -521,7 +531,26 @@ describe("ADR-0310 slice 2: drift against the ADR-0259 endpoint MCP inventory", 
       .returning({ id: aiEndpointSignatures.id });
     try {
       const after = (await drift(`?deviceId=${devA}&vendor=openai-codex`)).json();
-      expect(after.coverage).toEqual([{ vendor: "openai-codex", status: "collected", collectedPaths: [".codex/config.toml"], missingPaths: [], driftServers: 1 }]);
+      expect(after.coverage).toEqual([
+        { vendor: "openai-codex", status: "collected", catalogueStatus: "collected", collectedPaths: [".codex/config.toml"], missingPaths: [], driftServers: 1 },
+      ]);
+      expect(after.summary.complete).toBe(true);
+      // NEGATIVE (#902 review [3]): with the org collection switch off, a catalogued vendor is NOT measured
+      await setCollection(false);
+      try {
+        const offSwitch = (await drift(`?deviceId=${devA}&vendor=openai-codex`)).json();
+        expect(offSwitch.collectionEnabled).toBe(false);
+        expect(offSwitch.coverage[0]).toMatchObject({ status: "not_collected", catalogueStatus: "collected", driftServers: null });
+        expect(offSwitch.summary.complete).toBe(false);
+        expect(offSwitch.coverageNote).toMatch(/^Not measured: endpoint MCP config discovery is off/);
+        // every vendor, not only the filtered one
+        const all = (await drift(`?deviceId=${devA}`)).json();
+        expect(all.coverage.every((c: any) => c.status === "not_collected" && c.driftServers === null)).toBe(true);
+      } finally {
+        await setCollection(true);
+      }
+      // turning it back on restores the measurement
+      expect((await drift(`?deviceId=${devA}&vendor=openai-codex`)).json().summary.complete).toBe(true);
       // NEGATIVE: disabling the row makes it unmeasured again
       await db.update(aiEndpointSignatures).set({ enabled: false }).where(eq(aiEndpointSignatures.id, sig!.id));
       const off = (await drift(`?deviceId=${devA}&vendor=openai-codex`)).json();
