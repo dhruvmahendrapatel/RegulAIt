@@ -149,7 +149,27 @@ reply, 2026-08), so a GPT's connected apps are what its configured actions name,
      `scope: unverified` field, not only a label on each run.
    - The Agentforce JWT signing key is held like every other stored secret: encrypted with the data key, never
      returned, rotatable. It is bound to one consumer key and one integration user; the assertion lives for the
-     shortest time Salesforce accepts, and its `aud` is pinned to the source's validated My Domain login host.
+     shortest time Salesforce accepts, and its `aud` is pinned to the source's validated My Domain login host. The token
+     endpoint the assertion is posted to is derived from that same validated host, never from configuration or a
+     vendor response, so a signed assertion cannot be sent anywhere else.
+   - **Every adapter enforces a fixed endpoint allow-list in code.** Each adapter's fetch wrapper, on top of the
+     guarded fetch, admits only the (method, path template) pairs the adapter declares, and refuses anything else
+     before the request leaves:
+     - n8n: `GET /api/v1/workflows` only;
+     - OpenAI: the Compliance API GPT listing endpoint(s) only;
+     - Copilot Studio: `GET` on the Dataverse `WhoAmI`, `RetrieveUserPrivileges`, `bots`, `botcomponents` and
+       `connectionreferences` paths only;
+     - Agentforce: `GET` on the REST and Tooling `query` paths and on `UserPermissionAccess` only, plus the single
+       token `POST` above.
+
+     The read credential is used with `GET` only; the one exception is that token exchange. Pagination cursors are
+     passed back as query parameters on an allow-listed path, never followed as URLs (no `nextRecordsUrl`, `next` or
+     `@odata.nextLink` is fetched as given). Each slice's tests assert that any other method or path, and a cursor
+     that would leave the path, is refused before a request is made. This matters most for the OpenAI and n8n keys,
+     whose scope cannot be checked: the allow-list is the control that keeps a possibly broad key on its read
+     endpoints, and it also makes "the read credential is never used to write" enforced rather than declared.
+   - The OpenAI source's documentation states plainly how broad a Compliance API key is (it reaches workspace data
+     well beyond the GPT listing), so the admin who accepts the `scope: unverified` relaxation knows what is stored.
 
 6. **Targets are named, never guessed, and shape-checked.** Copilot Studio takes a list of Dataverse org URLs
    (`https://<org>.crm[N].dynamics.com`, plus the sovereign suffixes, each validated); Agentforce a My Domain URL on a
