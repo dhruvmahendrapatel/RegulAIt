@@ -442,6 +442,44 @@ set by the image and validated, fail closed).
   file, task errors, offline switch and remote-analyzer check. garak, spikee, modelscan and promptfoo still carry their
   own copies and move onto these helpers next (PENDING).
 
+### L4.5 Publish (§6.3, 2026-11-17)
+
+Both images are now publishable by the existing pipeline, exactly as spikee was made publishable (ADR-0245). Nothing
+is published by this change: CI's `engine-images.yml` publishes, signs keylessly and records them on its next run on
+main, and the lock-update branch is merged by a person.
+
+- **The published set.** `mcpscanner` and `skillscanner` join `ENGINE_IDS` (`scripts/engine-images-lock.mjs`), so the
+  publish gate plans them (`never published` until their first publish), the lock validates them and the lock bot
+  records them. `UNPUBLISHED_ENGINE_IDS` (`scripts/engine-images-gate.mjs`) is now empty; the reproducible-build
+  check still covers both. `scripts/build-engine-image.sh push` no longer refuses them.
+- **The lock.** `engines/images.lock.json` carries an all-null entry for each with `publishGeneration` 0, and the
+  generated `packages/shared/src/engines/images-lock.ts` and the compose defaults were regenerated with
+  `node scripts/engine-images-lock.mjs --write`.
+- **The manifest.** Each engine reads `imageDigest`, `taskImage` and its generation step (`1 + publishGeneration`)
+  from `ENGINE_IMAGES_LOCK`, as spikee does. The generation is unchanged (1) while the entry is null. The null digest
+  still keeps both engines un-enableable until a signed publish is recorded (secure by default): no runner passes the
+  self-test (`image_not_built`) and no task is placed (`taskImage` null). The `unverified` line now says the engine is
+  publishable with no publish recorded; skillscanner's yara-x line cites owner decision Q3 instead of "awaiting".
+- **Compose.** `engine-mcpscanner` and `engine-skillscanner` runners (profile `engines`) merge the hardened
+  `x-engine-runner` template on the internal `engines` network, digest-pinned by one variable each
+  (`REGULAIT_ENGINE_<ENGINE>_REPOSITORY` and `_DIGEST`, defaults written from the lock: all-zero until a publish, so
+  nothing starts), with their own state volume and two tmpfs exchange volumes (16 MiB jobs: the job directory holds
+  only `subject.json`; 64 MiB results: frames, one report of at most 3 MiB and the self-test). The environment is
+  what `packages/engine-admission-scan/src/main.ts` reads: the gateway URL, a per-engine enrolment token, the image
+  reference and digest, `REGULAIT_ADMISSION_ENGINE` (the same value the image sets) and the jobs and results
+  directories. Build-only `engine-<id>-image` services (profile `engine-images`) build each Dockerfile, as the other
+  engines'. There is no per-engine executor configuration: the executor starts a task by the manifest's `taskImage`.
+- **Also mirrored from spikee:** Dependabot pip entries for both engine directories and both in the base-image
+  digest group.
+- **Already in place, so unchanged:** the build-and-compare matrix (`engine-images-build.yml`), the publish workflow's
+  path filter (`packages/engine-admission-scan/**`), and the image-level Trivy and SBOM scan in `security.yml`,
+  which discovers every `engines/*/Dockerfile`.
+- **Not mirrored:** the air-gapped bundle (`scripts/build-image-bundle.sh --with-engines`) and the installer's bundled
+  tags still name promptfoo, modelscan and garak only, as for spikee: adding an engine with no recorded publish
+  would make `--with-engines` fail. They join the bundle with spikee once the first publish is recorded.
+- **Still open:** the first publish itself (CI), the §6.4 sandbox-limit proof, re-recording the report fixtures with
+  the published image, and the Q5 tuning on the `anthropics/skills` corpus.
+
 ## Owner decisions (2026-11-15)
 
 The owner answered the five open questions and the #843 placement question (relayed by the master orchestrator).
