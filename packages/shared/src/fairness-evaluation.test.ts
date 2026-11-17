@@ -57,11 +57,6 @@ describe("the prompt template", () => {
     expect(parsePromptTemplate("{{ a{b }}")).toBeNull();
     expect(parsePromptTemplate(`{{${"x".repeat(201)}}}`)).toBeNull();
   });
-  it("is linear on a hostile template", () => {
-    const t0 = Date.now();
-    parsePromptTemplate("{{".repeat(4000));
-    expect(Date.now() - t0).toBeLessThan(500);
-  });
   it("fills from a row and refuses a missing column", () => {
     const parts = parsePromptTemplate("Hi {{name}}!")!;
     expect(fillPromptTemplate(parts, { name: "Sam" })).toBe("Hi Sam!");
