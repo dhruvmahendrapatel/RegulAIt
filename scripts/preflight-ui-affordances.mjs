@@ -46,6 +46,8 @@ export const DELIBERATELY_API_ONLY = new Map([
   // A DELETE that is still a 501 `notBuilt` stub needs no entry: a stub deletes nothing, so the census skips it until
   // it becomes a real handler, and an entry for one is reported stale (see staleExemptions).
   ["/v1/mcp/authorised-targets/:x", "ADR-0246 (P27): API-only brief; the authorised-targets screen is posted on #453 (route census KNOWN_UI_GAPS). RAISED for the master's review on the PR: delete this entry when the screen lands"],
+  // ADR-0230 A2 (P19, Lane L3): the UI is built by the design builder; delete this entry when the screen lands
+  ["/v1/servers/:x/system-class", "unmarking an SAP business server (settings_relax step-up): API-only until the SAP server screen on #453 (route census KNOWN_UI_GAPS)"],
 ]);
 
 /**
@@ -55,9 +57,11 @@ export const DELIBERATELY_API_ONLY = new Map([
  * would remove the proof.
  */
 export const NO_REMOVE_BY_DESIGN = new Map([
+  ["/v1/managed-settings/bundles", "ADR-0310: a signed managed-settings bundle is evidence of what was pushed to devices (drift is measured against it); a new version supersedes it, and it is removed only with its subject (FK cascade)"],
   ["/v1/decisions", "signed approval decisions are evidence; a decision is superseded by a later one, never deleted"],
   ["/v1/runs", "a run is an execution record the audit trail and cost ledger point at"],
   ["/v1/evals/runs", "an evaluation run is a result record that model-risk sign-offs cite"],
+  ["/v1/model-artifacts/:x/lineage", "a model file's derivation is provenance evidence, recorded once and never edited or removed; it goes with the file when the file is deleted, and its audit row keeps the record (lane L7, P14)"],
   ["/v1/engine-runner/runs/:x/task/frames", "frames are the runner's output stream for one run, append-only"],
   ["/v1/governance/alerts/:x/remediation", "a remediation plan is part of the alert's record; the alert closes, the plan stays"],
   ["/v1/security/data-key/attestations", "key attestations are append-only evidence of who held the data key when"],

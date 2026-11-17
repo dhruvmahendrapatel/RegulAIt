@@ -8,7 +8,7 @@ import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
 import type { Project, WorkflowInstanceSummary, WorkflowListResponse } from "../../api/types";
-import { ago, humanize } from "../../api/format";
+import { ago, humanize, errorText } from "../../api/format";
 import { PageHeader } from "../../shell/AppShell";
 import {
   Button,
@@ -102,7 +102,7 @@ export default function WorkflowsPage() {
         e instanceof ApiError && e.payload.error === "no_workflow_matches_change"
           ? " — no assignment rule matches this change type"
           : "";
-      setError((e instanceof Error ? e.message : String(e)) + suffix);
+      setError((errorText(e)) + suffix);
     } finally {
       setBusy(false);
     }

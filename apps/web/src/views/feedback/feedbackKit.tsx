@@ -240,7 +240,7 @@ export function FeedbackDetail(props: { id: string | null; onClose: () => void }
     <Modal open={!!props.id} title={d ? `${KIND_LABEL[d.kind]} on ${d.useCaseName ?? "a use case"}` : "Feedback"} onClose={close} wide>
       {act.error && <p role="alert">{act.error}</p>}
       {notice && <p role="status">{notice}</p>}
-      <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+      <QueryGate query={q}>
         {d && (
           <div className={v.stack}>
             <p className={v.hint}>Opening an item is recorded in the audit trail, with who opened it.</p>
@@ -481,7 +481,7 @@ export function FeedbackSettings() {
       info={<p>Every setting starts at its strict value. Relaxing one is allowed and is recorded in the audit trail as a relaxation.</p>}
     >
       <span id="settings" />
-      <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+      <QueryGate query={q}>
         <div className={v.stack}>
           {/* each setting: label with its (i), control, and its state as a pill */}
           <div className={v.row}>

@@ -35,7 +35,7 @@ import v from "../../views.module.css";
 import { putOrgSettings, withStepUp } from "../../../stepup/stepUp";
 import { OrgSettingsCard } from "../settings/OrgSettingsCard";
 import { orgSettingsUnresolved, tabLabel, type Unresolved } from "../settings/postureTabs";
-import { fmtDateTime } from "../../../api/format";
+import { fmtDateTime, errorText } from "../../../api/format";
 import { ListPreview } from "../../../ui/ListPreview";
 
 const PENDING = { status: "pending" };
@@ -148,7 +148,7 @@ function SignInStatus(props: {
     return (
       <ErrorState
         title="Couldn't load the sign-in status"
-        message={first instanceof Error ? first.message : String(first)}
+        message={errorText(first)}
         onRetry={() => failed.forEach((r) => void r.refetch())}
       />
     );
@@ -774,7 +774,7 @@ function SessionsPolicyCard() {
     queryFn: () => api.get<OrgSettingsResponse>("/v1/org/settings"),
   });
   return (
-    <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+    <QueryGate query={q}>
       {q.data && <SessionsPolicyForm settings={q.data.settings} />}
     </QueryGate>
   );
