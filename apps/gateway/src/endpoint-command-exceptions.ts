@@ -19,6 +19,7 @@ import {
   and,
   auditLog,
   desc,
+  PROSE_SCRUB,
   endpointCommandExceptions,
   endpointDeviceGroupMembers,
   endpointDeviceGroupRules,
@@ -248,7 +249,9 @@ export function registerEndpointCommandExceptionRoutes(app: FastifyInstance, db:
     const [d] = await db.select({ id: endpointDevices.id, revokedAt: endpointDevices.revokedAt }).from(endpointDevices).where(eq(endpointDevices.id, b.data.deviceId));
     if (!d) return refuse(reply, 404, "not_found", "no such device");
     if (d.revokedAt) return refuse(reply, 409, "device_revoked", "the device is revoked");
-    const terms = { deviceId: d.id, ruleId: b.data.ruleId, verdict: b.data.verdict, hours: b.data.hours, reason: b.data.reason };
+    // the digest covers the reason as stored: the write path scrubs credentials out of it (ADR-0102), so the
+    // approver approves the text they can read
+    const terms = { deviceId: d.id, ruleId: b.data.ruleId, verdict: b.data.verdict, hours: b.data.hours, reason: PROSE_SCRUB(b.data.reason) };
     const [row] = await db
       .insert(endpointCommandExceptions)
       .values({ ...terms, termsDigest: endpointExceptionDigest(terms), requestedBy: requester, approverUserId: b.data.approverUserId })

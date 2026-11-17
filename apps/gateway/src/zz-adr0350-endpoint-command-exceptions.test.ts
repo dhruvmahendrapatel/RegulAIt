@@ -199,6 +199,14 @@ describe("ADR-0350 exceptions", () => {
     ).rejects.toThrow();
   });
 
+  it("a credential typed into the reason is stored scrubbed, and the request is still approvable", async () => {
+    const key = "AKIA" + "ABCDEFGHIJKLMNOP";
+    const ex = (await request({ reason: `cleanup, the token is ${key}` })).json();
+    expect(ex.reason).not.toContain(key);
+    expect(JSON.stringify(await db.select().from(endpointCommandExceptions).where(eq(endpointCommandExceptions.id, ex.id)))).not.toContain(key);
+    expect((await approve(ex)).statusCode).toBe(200);
+  });
+
   it("refuses terms the device would refuse", async () => {
     for (const bad of [{ hours: 169 }, { hours: 0 }, { verdict: "deny" }, { ruleId: "Bad Id" }, { reason: "" }]) {
       expect((await request(bad)).statusCode).toBe(400);

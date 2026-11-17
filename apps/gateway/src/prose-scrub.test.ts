@@ -529,6 +529,9 @@ describe("6. the covered / NOT-covered inventory", () => {
     "ai_use_cases.retired_reason",
     "ai_vendors.retired_reason",
     "approval_delegations.reason",
+    // ADR-0350 (lane E31): per-device command-rule exceptions
+    "endpoint_command_exceptions.reason",
+    "endpoint_command_exceptions.decision_reason",
     "approvals.decision_reason",
     "billing_statements.issue_reason",
     "cert_rotations.reason",
