@@ -683,6 +683,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/openapi.json",
   "GET /v1/api/versioning",
   "GET /v1/me",
+  // ADR-0348: the declared lifecycle tables (definitions only, no record), for every signed-in caller and agent
+  "GET /v1/state-machines",
   "GET /v1/model-providers/status",
   "GET /v1/runs",
   // ADR-0226: the Excel export of the same list, under the same scope (a non-admin gets only their own runs)
