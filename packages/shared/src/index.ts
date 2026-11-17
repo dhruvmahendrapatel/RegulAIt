@@ -5068,3 +5068,6 @@ export * from "./external-mfa.js";
 export * from "./fairness.js";
 // ADR-0261 (P37): third-party security telemetry ingest — the DefenseClaw JSONL parser and mapping (pure)
 export * from "./third-party-ingest/index.js";
+
+// ADR-0341: RFC 6902 patches for diff views
+export { jsonPatch, type JsonPatchOperation } from "./json-patch.js";
