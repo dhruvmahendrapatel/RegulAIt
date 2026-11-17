@@ -384,6 +384,8 @@ export interface BuildAppOptions {
    * both unset, so the real DNS-pinned guarded fetch is used. */
   trainedDetectorResolve?: import("./egress-guard.js").EgressResolver;
   trainedDetectorFetch?: typeof fetch;
+  /** ADR-0360 slice 2: tests only — the EDR connections' egress resolver and fetch (the guard still runs) */
+  edrEgress?: ConnectionEgressDeps;
   /** ADR-0031: which peers may speak for the client via X-Forwarded-*.
    * Defaults to REGULAIT_TRUSTED_PROXIES (which itself defaults to trusting
    * nothing). Exposed so a test can assert both directions. */
@@ -636,6 +638,8 @@ import { registerThirdPartyIngestRoutes } from "./third-party-ingest-routes.js";
 import { registerSiemDeliveryRoutes } from "./siem-delivery.js";
 import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
 import { registerEndpointFleetRoutes } from "./endpoint-fleet-routes.js";
+import { registerEdrRoutes } from "./edr/routes.js";
+import type { ConnectionEgressDeps } from "./connection-egress.js";
 import { registerEndpointMcpConfigRoutes } from "./endpoint-mcp-config.js";
 // ADR-0310 (G2): vendor-native managed settings bundles
 import { registerManagedSettingsRoutes } from "./managed-settings.js";
@@ -6256,6 +6260,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0360 (lane E41): device groups, the self-update setting (off unless relaxed with a step-up), staged update
   // rollouts and one-line enrolment tokens. Admin-only by default; every write audited.
   registerEndpointFleetRoutes(app, db);
+  // ADR-0360 slice 2 (lane E41): EDR connections (read-only by default), device signals, the verified vendor webhook
+  // (auth-exempt, verified in-route) and two-person, stepped-up isolation requests
+  registerEdrRoutes(app, db, { dataKey: opts.dataKey, ...(opts.edrEgress ? { egress: opts.edrEgress } : {}) });
   registerManagedSettingsRoutes(app, db);
   // ADR-0332 (lane E14): the endpoint AI add-on inventory (admin-only, RLS: admins and system_task)
   registerEndpointAddonInventoryRoutes(app, db);

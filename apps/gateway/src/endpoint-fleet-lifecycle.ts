@@ -12,15 +12,15 @@ import { ENDPOINT_ROLLOUT_STAGE_STATES, ENDPOINT_ROLLOUT_STATES } from "@regulai
 
 export type RolloutState = (typeof ENDPOINT_ROLLOUT_STATES)[number];
 export type RolloutStageState = (typeof ENDPOINT_ROLLOUT_STAGE_STATES)[number];
-type Actor = "admin" | "system";
+export type Actor = "admin" | "approver" | "system";
 
-interface Transition<S extends string> {
+export interface Transition<S extends string> {
   readonly from: readonly S[];
   readonly to: S;
   readonly by: readonly Actor[];
   readonly summary: string;
 }
-interface Machine<S extends string, E extends string> {
+export interface Machine<S extends string, E extends string> {
   readonly id: string;
   readonly stored: string;
   readonly states: readonly S[];
