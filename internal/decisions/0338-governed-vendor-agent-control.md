@@ -189,7 +189,7 @@ call never runs inside a database transaction, and ADR-0159's rule that the prop
      (`discovery_settings.vendor_agent_control_approval_ttl_hours`, 1 to 72). Shortening it is free; lengthening it
      past 24 hours is a `settings_relax` step-up, audited. An action whose approval expired before it was decided
      moves `requested → cancelled`, and one approved but not executed in time moves `approved → cancelled`, both with
-     reason `approval_expired`, through `assertTransition`. The move is written when the action is next touched
+     reason `approval_expired`, through the machine's `next`. The move is written when the action is next touched
      (execute, cancel, a read or a new request for the same agent), so an expired action never blocks a new request
      and is never executed. Nothing runs on a timer to do it.
 3. **Execute.** `POST /v1/vendor-agent-control/actions/:id/execute` by the requester, with a fresh `settings_relax`
@@ -211,7 +211,7 @@ call never runs inside a database transaction, and ADR-0159's rule that the prop
    now + the vendor deadline + 60 seconds of margin (the deadline is the `ControlContext` signal, 30 seconds by
    default). If the gateway or worker dies before the outcome commits, the row stays `executing` with a lease in the
    past. Any later execute, cancel or read of that action, or a new request for the same agent, first moves it
-   `executing → unknown` (code `lease_expired`) through `assertTransition`, with an update conditional on
+   `executing → unknown` (code `lease_expired`) through the machine's `next`, with an update conditional on
    `status = 'executing' AND lease_expires_at < now()`, so a live execution is never taken over. The `unknown` row is
    then settled as above: by `readState` only, never a second `apply`.
    - **Settling.** If the vendor shows the target state, the action becomes `succeeded`. If it shows the prior state,
@@ -230,30 +230,34 @@ Read routes: `GET /v1/vendor-agent-control/actions` (keyset-paginated, at most 2
 
 ### 5. States and audit
 
-The states and their allowed transitions are one declared table, `VENDOR_ACTION_TRANSITIONS` in
-`@regulait/shared`. Every route goes through its `assertTransition(from, to)`, with no scattered if/else. The database
-write is a conditional `UPDATE … WHERE status = <from>`, so two racing requests cannot both move an action.
+The states and their allowed transitions are one machine, `VENDOR_ACTION_MACHINE` in `@regulait/shared`, declared
+with ADR-0348's shared `defineMachine` (`packages/shared/src/state-machine.ts`). No second helper is written. Every route
+moves an action through `next(from, event)`, with no scattered if/else. The database write is a conditional
+`UPDATE … WHERE status IN (sourcesOf(event))`, so two racing requests cannot both move an action, and `describe(state)`
+gives the UI and agents the allowed next steps.
 
 | From | Allowed to |
 |---|---|
 | `requested` | `approved`, `denied`, `cancelled` (by the requester or an admin, or `approval_expired`) |
-| `approved` | `executing` (guard `kill_switch_narrowing_only`, section 7), `cancelled` (by the requester or an admin, or `approval_expired`) |
+| `approved` | `executing` (guard `killSwitchNarrowingOnly`, section 7), `cancelled` (by the requester or an admin, or `approval_expired`) |
 | `executing` | `succeeded`, `already_in_state`, `failed`, `unknown` (a vendor timeout, or `lease_expired` after a crash) |
 | `unknown` | `succeeded`, `already_in_state`, `failed` (settled by a state re-read, never a second `apply`) |
 | `succeeded`, `already_in_state`, `failed`, `denied`, `cancelled` | none (terminal) |
 
-**Generic and exported, so other lanes import it rather than copy it.** The table is built with one generic helper,
-`defineTransitionTable<State, Ctx>(edges)` in `@regulait/shared` (no vendor names in it). It returns
-`assertTransition(from, to, ctx)`, `allowedFrom(state)`, `isTerminal(state)` and the edge list, so a UI or an agent can
-read the machine. An edge may carry a named guard, a pure function of the context. The kill-switch guard is exported
-from the same module as `killSwitchNarrowingOnly({ dial, direction })`. It passes for `narrowing` under any dial and
-for `widening` only under `normal`, and it carries no vendor or action names. `VENDOR_ACTION_TRANSITIONS` is one
-instance of the helper. Lane E15's device-quarantine response rules can build their own table with it and reuse the
-guard unchanged. The helper's own tests cover a disallowed edge, a terminal state, a failing guard, and the
-narrowing guard in both directions under every dial.
+**Generic and exported, so other lanes import it rather than copy it.**
+- The machine helper is ADR-0348's `defineMachine`, which every lane already shares.
+- The kill-switch guard is new and generic: `killSwitchNarrowingOnly({ dial, direction })`, exported from
+  `@regulait/shared` next to the machine helpers. It is a pure function that returns `null` (allowed) or a refusal
+  reason. It allows `narrowing` under any dial and `widening` only under `normal`, and it has no vendor or action
+  names in it.
+- `defineMachine` has no guard field. The guard therefore runs before `next(approved, "execute")`, and its reason is
+  passed as `describe(state, { execute: reason })`, so the UI and agents show the same refusal the server gives.
+- Lane E15's device-quarantine response rules can declare their own machine with `defineMachine` and reuse the guard
+  unchanged.
+- The guard's tests cover both directions under every dial. The vendor machine's tests cover a disallowed event and
+  the terminal states.
 
-A restore is a new action row, so terminal rows stay terminal. If lane E29's app-wide state-machine work
-lands a shared machine helper, this table moves onto it unchanged. This lane refactors no other machine.
+A restore is a new action row, so terminal rows stay terminal. This lane refactors no other machine.
 
 Every transition writes one audit row in the same transaction as the state change, with fixed fields
 only: action id, record id, source, registry, vendor id, action, reverses, prior and observed state, outcome code and
@@ -276,9 +280,9 @@ Every vendor call is an external write under `runExternalWrite`. While the dial 
   service. It is refused at execute with the existing `execution_*` code for the dial, and the row stays `approved`
   until the halt lifts or the approval expires. A settle (a state read only) is allowed under any dial.
 
-The rule is a guard on the transition, not a separate check: the `approved → executing` edge in
-`VENDOR_ACTION_TRANSITIONS` carries `guard: "kill_switch_narrowing_only"`, and `assertTransition(from, to, ctx)` evaluates
-it with the dial and the op's direction. `runExternalWrite` gains one declared exemption, for the
+The rule is a guard on the transition, not a separate check. The `execute` event (`approved → executing`) of
+`VENDOR_ACTION_MACHINE` is taken only after `killSwitchNarrowingOnly({ dial, direction })` (section 5) returns no
+refusal. The guard's reason is the one `describe` reports. `runExternalWrite` gains one declared exemption, for the
 `vendor_agent_control` operation with direction `apply` only, and the external-effects barrier test gets the matching
 row, so no other operation can pass a halt. The dial is re-read at the moment of the call, as today. Slice 1 tests both
 directions under each non-`normal` dial: a quarantine and a disable execute, and a restore is refused with nothing
@@ -299,10 +303,11 @@ sent to the vendor.
   - `xstate` (MIT, actively maintained, v5) gives interpreted actors, timers and visualisation. None of these is
     needed for a server-side lifecycle of nine states whose source of truth is a database row, and xstate is not used
     elsewhere in the repo.
-  - A declared transition table with a conditional SQL update. It is enforced in the database, there is no runtime
-    to load, and it is the shape lane E29's app-wide audit expects.
+  - A declared transition table with a conditional SQL update. It is enforced in the database, and there is no
+    runtime to load.
 
-  The table is adopted, and xstate is not.
+  The table is adopted, and xstate is not. ADR-0348 made the same comparison and choice app-wide, so the table is
+  declared with its `defineMachine`.
 - **Salesforce, n8n, OpenAI.** Chosen in slice 2, with the same rule: an existing pinned client only when it signs or
   does something we must not hand-write; otherwise REST through the guarded fetch.
 
