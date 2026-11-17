@@ -61,6 +61,7 @@ import { agentDecision } from "./copilot.js";
 import { providerFor } from "./pm.js";
 import { startWorkflowForChange } from "./workflows.js";
 import { errMessage } from "./err-serializer.js";
+import { requireStepUp } from "./step-up.js";
 
 const SYSTEM_IDENTITY = "00000000-0000-0000-0000-000000000000";
 /** at most this many triggers are handled from one delivery (a comment can mention the agent once; the rest is noise) */
@@ -466,6 +467,14 @@ export function registerPmTriggerRoutes(app: FastifyInstance, db: Db): void {
     if (body.projectId) {
       const [project] = await db.select({ id: projects.id }).from(projects).where(eq(projects.id, body.projectId));
       if (!project) return reply.status(400).send({ error: "invalid_reference", detail: "projectId names no project" });
+    }
+    // turning triggers on lets a PM tool start governed work: a relaxation, so a step-up, audited (ADR-0180)
+    if (body.enabled) {
+      const [current] = await db.select({ enabled: pmTriggerSettings.enabled }).from(pmTriggerSettings).where(eq(pmTriggerSettings.connectionId, conn.id));
+      if (!current?.enabled) {
+        const su = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { pmTriggers: "enable", connection: conn.name } });
+        if (!su.ok) return reply;
+      }
     }
     const { enabled, agentId, projectId, ...config } = body;
     const values = { enabled, agentId, projectId: projectId ?? null, config, updatedByUserId: req.authCtx.userId ?? null };
