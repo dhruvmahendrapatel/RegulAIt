@@ -438,6 +438,7 @@ import { disableUpstreamExchangeOnUrlMove, registerUpstreamTokenExchangeRoutes }
 import { registerA2aRoutes } from "./a2a.js";
 import { registerMcpBundleRoutes } from "./mcp-bundles.js";
 import { registerGovernanceConfigRoutes } from "./governance-config.js";
+import { registerGovernanceConfigApplyRoute } from "./governance-config-apply.js";
 import { registerPrivacyOpsRoutes } from "./privacy-ops.js";
 import { ExternalEffectBlockedError } from "./external-effects.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
@@ -6133,6 +6134,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerMcpBundleRoutes(app, db);
   // ADR-0357 (lane E38): governance configuration as code (schema, export, dry-run plan)
   registerGovernanceConfigRoutes(app, db);
+  registerGovernanceConfigApplyRoute(app, db);
   // ADR-0097 part A — the admission review queue and the reason-required,
   // audited clear. Admin-only through the default gate, like the MCP registry
   // writes it sits beside.

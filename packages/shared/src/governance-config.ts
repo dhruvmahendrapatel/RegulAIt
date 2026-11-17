@@ -218,9 +218,10 @@ export interface NormalSpec {
   budgets?: NormalBudget[];
 }
 
-/** the identity of a rate limit: everything except its values */
-export function rateLimitKey(r: Pick<NormalRateLimit, "scope" | "subject" | "server" | "tool" | "deployMode">): string {
-  return [r.scope, r.subject ?? "*", r.server ?? "*", r.tool ?? "*", r.deployMode ?? "*"].join("|");
+/** The identity of a rate limit: what selects the calls it counts. Only `maxCalls` and `windowSeconds` are values;
+ * `writeOnly` decides which calls match and is not editable on a live rule, so changing it is a new rule. */
+export function rateLimitKey(r: Pick<NormalRateLimit, "scope" | "subject" | "server" | "tool" | "deployMode" | "writeOnly">): string {
+  return [r.scope, r.subject ?? "*", r.server ?? "*", r.tool ?? "*", r.deployMode ?? "*", r.writeOnly ? "write" : "all"].join("|");
 }
 const toolKey = (g: { server: string; tool: string }) => `${g.server}\u0000${g.tool}`;
 const grantSubjectKey = (g: { role: string | null; team: string | null }) => (g.role !== null ? `role:${g.role}` : `team:${g.team}`);
@@ -304,7 +305,7 @@ export function duplicateKeys(spec: GovernanceConfigSpec): { section: Governance
 export function normalizeSpec(spec: GovernanceConfigSpec): NormalSpec {
   const out: NormalSpec = {};
   if (spec.roles) out.roles = spec.roles.map(normalizeRole).sort(byKey((r) => r.name));
-  if (spec.rateLimits) out.rateLimits = spec.rateLimits.map(normalizeRateLimit).sort(byKey((r) => `${rateLimitKey(r)}|${r.maxCalls}|${r.windowSeconds}|${r.writeOnly}`));
+  if (spec.rateLimits) out.rateLimits = spec.rateLimits.map(normalizeRateLimit).sort(byKey((r) => `${rateLimitKey(r)}|${r.maxCalls}|${r.windowSeconds}`));
   if (spec.mcpBundles) out.mcpBundles = spec.mcpBundles.map(normalizeMcpBundle).sort(byKey((b) => b.name));
   if (spec.workflowTemplates) out.workflowTemplates = spec.workflowTemplates.map(normalizeWorkflowTemplate).sort(byKey((t) => t.name));
   if (spec.budgets) out.budgets = spec.budgets.map(normalizeBudget).sort(byKey((b) => b.project));
@@ -501,8 +502,6 @@ function rateLimitFindings(before: NormalRateLimit | null, after: NormalRateLimi
   if (after.maxCalls < before.maxCalls) out.push(N("max_calls_lowered", `maxCalls ${before.maxCalls} → ${after.maxCalls}`));
   if (after.windowSeconds < before.windowSeconds) out.push(W("window_shortened", `window ${before.windowSeconds}s → ${after.windowSeconds}s`));
   if (after.windowSeconds > before.windowSeconds) out.push(N("window_lengthened", `window ${before.windowSeconds}s → ${after.windowSeconds}s`));
-  if (after.writeOnly !== before.writeOnly)
-    out.push(after.writeOnly ? W("write_only_set", "now counts write tools only") : N("write_only_cleared", "now counts every call"));
   return out;
 }
 
