@@ -100,6 +100,8 @@ export const SCHEDULER_JOB_NAMES = {
   idempotencyKeySweep: "idempotency-key-sweep",
   // ADR-0180 A2: measured conditions of approval
   conditionEvaluation: "condition-evaluation-sweep",
+  // ADR-0342 (lane E23): defined and run by process-analytics.ts (block at the end)
+  processAnalyticsProjector: "process-analytics-projector",
   // ADR-0182 (D4): each defined and run by its slice's module (block at the end)
   incidentClockSweep: "incident-clock-sweep",
   feedbackSlaSweep: "feedback-sla-sweep",
@@ -845,6 +847,7 @@ import { spiffeBundleRefreshJobDefinitions } from "./oauth/spiffe-bundle-endpoin
 import { fairnessJobDefinitions } from "./fairness.js";
 import { siemJobDefinitions } from "./siem-delivery.js";
 import { behaviourJobDefinitions } from "./behaviour/sweep.js";
+import { processAnalyticsJobDefinitions } from "./process-analytics.js";
 import { thirdPartyIngestJobDefinitions } from "./third-party-ingest-retention.js";
 
 function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
@@ -865,6 +868,7 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...siemJobDefinitions({ dataKey: opts.dataKey }), // ADR-0303: siem-delivery-sweep
     ...behaviourJobDefinitions(), // ADR-0359: behaviour-baseline-sweep
     ...thirdPartyIngestJobDefinitions(), // ADR-0302: third-party-evidence-retention-sweep
+    ...processAnalyticsJobDefinitions(), // ADR-0342: process-analytics-projector
   ];
 }
 // ===== end ADR-0182 block ====================================================
