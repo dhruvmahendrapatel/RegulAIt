@@ -112,6 +112,9 @@ match tool names only, so they are heuristics, and the admin can edit them.
   the incident API, or through the signed export.
 - **Foreign keys.** The incident's sponsor, grant and identity are foreign keys, set only when the id still resolves
   (the audit trail itself is FK-free). An incident about a deleted user keeps its group key and evidence.
+- **Declared lifecycles.** `status` (open → acknowledged | closed; acknowledged → acknowledged | closed; closed is
+  terminal) and `response_state` (none → done | failed; both terminal) are one transition table each in
+  `apps/gateway/src/detection/lifecycle.ts`. The status route's guarded UPDATE takes its WHERE set from that table.
 - **The sweep never feeds itself.** Rows with `objectType` `detection_incident` or `detection_rule_pack` are skipped.
 
 ### 5. Responses (slice 2)
