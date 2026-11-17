@@ -6,7 +6,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ago } from "../../api/format";
+import { ago, errorText } from "../../api/format";
 import { PageHeader } from "../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, ErrorState, Input, SkeletonBlock, Tabs } from "../../ui/kit";
 import { DataList, type DataColumn } from "../../ui/DataList";
@@ -89,7 +89,7 @@ export default function BuilderInboxPage() {
       void queryClient.invalidateQueries({ queryKey: ["builder", "threads"] });
       void queryClient.invalidateQueries({ queryKey: bk.thread(selected!) });
     },
-    onError: (e) => toast(e instanceof Error ? e.message : String(e), "error"),
+    onError: (e) => toast(errorText(e), "error"),
   });
   const [pending, setPending] = useState<string | null>(null);
   const reply = useMutation({

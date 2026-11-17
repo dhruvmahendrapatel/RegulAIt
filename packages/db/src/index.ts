@@ -30,6 +30,7 @@ export {
   type RawQueryable,
   type RuntimeLoginFacts,
 } from "./runtime-login.js";
+export { SESSION_LOCK_KEYS, withSessionAdvisoryLock } from "./session-lock.js";
 export { PENDING_DIR, UNASSIGNED_ENV, UnassignedMigrationsError, assignPending, pendingFiles } from "./pending-migrations.js";
 export { and, asc, count, desc, eq, getTableColumns, gt, gte, inArray, isNotNull, isNull, lt, lte, ne, notInArray, or, sql } from "drizzle-orm";
 // Types consumers need to build reusable predicates without taking a direct

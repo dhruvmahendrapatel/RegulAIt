@@ -102,7 +102,7 @@ export function StaticCredentialCard(props: {
     void act.run(() => withStepUp((h) => props.clear(h)), `Credential for ${server.name} cleared`);
   };
 
-  if (!view) return <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>{null}</QueryGate>;
+  if (!view) return <QueryGate query={q}>{null}</QueryGate>;
   return (
     <Card
       title={props.title}

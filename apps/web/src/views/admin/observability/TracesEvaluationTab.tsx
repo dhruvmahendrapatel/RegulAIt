@@ -100,7 +100,7 @@ function ContentEvaluationCard() {
           {act.error}
         </p>
       )}
-      <QueryGate loading={summary.isLoading} error={summary.error} onRetry={() => void summary.refetch()}>
+      <QueryGate query={summary}>
         {s ? (
           <div className={v.stack} data-testid="trace-evaluation-summary">
             <div className={a.statRow}>

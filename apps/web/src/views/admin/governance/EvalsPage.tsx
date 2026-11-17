@@ -338,9 +338,7 @@ export default function EvalsPage() {
           }
         >
           <QueryGate
-            loading={semantics.isLoading}
-            error={semantics.error}
-            onRetry={() => void semantics.refetch()}
+            query={semantics}
           >
             {semantics.data && (
               <div className={v.stack}>
