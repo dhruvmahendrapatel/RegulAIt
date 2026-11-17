@@ -83,6 +83,7 @@ import { signInInvariantChecked, signInInvariantWritten, withSignInInvariant } f
 import { settingTransitions } from "./setting-transitions.js";
 import { revokeAuditorAccessOnDisable, revokeAuditorSessionsOnMfaRequired } from "./trust-pages-revoke.js";
 import { databaseNow } from "./db-clock.js";
+import { CLUSTER_LEADER_KEYS, ClusterLeader, leaderOnly } from "./cluster-leader.js";
 import {
   approvalRuleStepUp,
   breakGlassChange,
@@ -441,11 +442,16 @@ export async function auditPruneTick(db: Db, state: SchedulerTickState): Promise
   }
 }
 
-export function startAuditPruneScheduler(db: Db): () => void {
+export function startAuditPruneScheduler(db: Db): () => Promise<void> {
   const state: SchedulerTickState = { lastRunAt: 0 };
-  const timer = setInterval(() => void auditPruneTick(db, state), 3600 * 1000);
+  // ADR-0343: one replica of the cluster prunes, not every replica
+  const leader = new ClusterLeader(db, CLUSTER_LEADER_KEYS.auditPrune);
+  const timer = setInterval(leaderOnly(leader, () => auditPruneTick(db, state)), 3600 * 1000);
   timer.unref?.();
-  return () => clearInterval(timer);
+  return async () => {
+    clearInterval(timer);
+    await leader.release();
+  };
 }
 
 // ---------------------------------------------------------------------------

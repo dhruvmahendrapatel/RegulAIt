@@ -18,6 +18,9 @@
 import { createHash, createHmac, pbkdf2Sync, randomBytes } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { RLS_APP_ROLE } from "./rls.js";
+import { SESSION_LOCK_KEYS, withSessionAdvisoryLock, type RawQueryable } from "./session-lock.js";
+
+export type { RawQueryable } from "./session-lock.js";
 
 /** the runtime login's name is this prefix and the database it serves (`runtimeLoginRoleFor`) */
 export const RUNTIME_LOGIN_ROLE_PREFIX = "regulait_runtime_";
@@ -191,40 +194,15 @@ export function scramSha256Verifier(password: string, opts: { salt?: Buffer; ite
   return `SCRAM-SHA-256$${iterations}:${salt.toString("base64")}$${storedKey.toString("base64")}:${serverKey.toString("base64")}`;
 }
 
-/** a minimal raw query surface (a `pg` Pool or PoolClient) */
-export interface RawQueryable {
-  query: (text: string, values?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }>;
-}
-interface RawPool {
-  connect: () => Promise<RawQueryable & { release: (err?: Error | boolean) => void }>;
-}
-
 /** a generated password is URL-safe by construction; anything else is refused */
 const PASSWORD_RE = /^[A-Za-z0-9_-]{32,128}$/;
 
-/** the advisory lock key every replica's provisioning takes (advisory locks are per database) */
-const PROVISION_LOCK_KEY = 0x5245_4741_4c52_4c53n; // "REGALRLS"
-
 /**
  * Run `fn` holding a session advisory lock on one owner connection, so two booting replicas provision one login and
- * write one connection string. `fn` gets that connection: provisioning runs on it.
+ * write one connection string. `fn` gets that connection: provisioning runs on it. ADR-0343: the shared helper.
  */
 export async function withRuntimeLoginLock<T>(owner: { $client: unknown }, fn: (client: RawQueryable) => Promise<T>): Promise<T> {
-  const client = await (owner.$client as RawPool).connect();
-  let broken: Error | undefined;
-  try {
-    await client.query("select pg_catalog.pg_advisory_lock($1::bigint)", [PROVISION_LOCK_KEY.toString()]);
-    try {
-      return await fn(client);
-    } finally {
-      await client.query("select pg_catalog.pg_advisory_unlock($1::bigint)", [PROVISION_LOCK_KEY.toString()]).catch((e: Error) => {
-        broken = e;
-      });
-    }
-  } finally {
-    // a connection whose unlock failed still holds the lock: destroy it rather than pool it
-    client.release(broken ?? false);
-  }
+  return withSessionAdvisoryLock(owner, SESSION_LOCK_KEYS.runtimeLogin, fn);
 }
 
 async function exec(c: RawQueryable, formatSql: string, args: unknown[]): Promise<void> {

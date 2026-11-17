@@ -75,8 +75,8 @@
  * recorded and the next tick tries again — the right shape for a sweep, and the
  * wrong shape for anything that needs to run for hours. See the ADR.
  */
+import { PROCESS_INSTANCE_ID } from "./instance-id.js";
 import { errLine } from "./err-serializer.js";
-import { randomUUID } from "node:crypto";
 import {
   and,
   asc,
@@ -730,7 +730,7 @@ export class Scheduler {
     registerMetricJobNames(opts.registry.keys());
     this.tickMs = opts.tickMs ?? DEFAULT_TICK_MS;
     this.leaseSeconds = opts.leaseSeconds ?? DEFAULT_LEASE_SECONDS;
-    this.instanceId = opts.instanceId ?? randomUUID();
+    this.instanceId = opts.instanceId ?? PROCESS_INSTANCE_ID;
     this.clock = opts.now ?? (() => new Date());
     this.clockInjected = opts.now !== undefined;
   }
