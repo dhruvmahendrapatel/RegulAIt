@@ -69,7 +69,7 @@ import {
 import { AI_SAAS_CONNECTORS, ConnectorError, type ComplianceConnector, type ConnectorContext } from "./ai-saas-connectors.js";
 import { loadEgressAllowList } from "./custom-providers.js";
 import { resolveDeployMode } from "./deploy-posture.js";
-import { DISCOVERY_BACKOFF_MAX_MS, DISCOVERY_BACKOFF_MAX_TIMES, retryAfterMs, spacingRateLimiter } from "./discovery-worker.js";
+import { DISCOVERY_BACKOFF_MAX_MS, DISCOVERY_BACKOFF_MAX_TIMES, retryAfterMs, scrubRunText, spacingRateLimiter } from "./discovery-worker.js";
 import { createGuardedFetch, egressRefusal, egressResponseTooLarge, type EgressResolver } from "./egress-guard.js";
 import { resolveGuardrailPolicy, runGuardrails, type GuardrailPolicy } from "./guardrails.js";
 import { loadOrgSettings, orgDefaultPiiMode, piiInternationalCategories, retentionFloor } from "./org-settings.js";
@@ -300,6 +300,8 @@ export async function runAiSaasMonitor(db: Db, connectorId: string, opts: RunOpt
 
   const counters = { usersRead: 0, pages: 0, interactionsSeen: 0, interactionsNew: 0, findingsCreated: 0 };
   const units = new Set<string>();
+  /** the decrypted secret and every short-lived token the connector registered: scrubbed from anything stored */
+  const secrets: string[] = [];
 
   const finish = async (status: Exclude<AiSaasMonitorRunStatus, "running">, code: AiSaasMonitorErrorCode | null, detail: string | null, extra: { window?: { start: Date; end: Date } } = {}): Promise<AiSaasMonitorRunRow> => {
     return db.transaction(async (tx) => {
@@ -309,7 +311,7 @@ export async function runAiSaasMonitor(db: Db, connectorId: string, opts: RunOpt
           status,
           finishedAt: sql`now()`,
           errorCode: code,
-          errorDetail: detail ? detail.slice(0, 500) : null,
+          errorDetail: detail ? scrubRunText(detail, secrets, 500) : null,
           ...counters,
           usersRead: units.size,
           ...(extra.window ? { windowStart: extra.window.start, windowEnd: extra.window.end } : {}),
@@ -323,7 +325,7 @@ export async function runAiSaasMonitor(db: Db, connectorId: string, opts: RunOpt
       await audit(tx, requestedBy, "ai_saas_monitor_run", run.id, ruleId, status === "succeeded" ? "allow" : "deny",
         status === "succeeded"
           ? `AI SaaS monitor run for '${connector.name}' read ${counters.interactionsSeen} interaction(s), ${counters.interactionsNew} new, ${counters.findingsCreated} finding(s)`
-          : `AI SaaS monitor run for '${connector.name}' ${status}: ${code} — ${detail ?? ""}`.slice(0, 1000),
+          : `AI SaaS monitor run for '${connector.name}' ${status}: ${code} — ${scrubRunText(detail ?? "", secrets, 800)}`,
         { connectorId: connector.id, vendor: connector.vendor, trigger: opts.trigger, status, errorCode: code, ...counters, usersRead: units.size, window: extra.window ? { start: extra.window.start.toISOString(), end: extra.window.end.toISOString() } : null });
       return closed ?? run;
     });
@@ -344,7 +346,7 @@ export async function runAiSaasMonitor(db: Db, connectorId: string, opts: RunOpt
     if (configProblem) throw new RunStop("refused", "internal", `the stored configuration is invalid: ${configProblem}`);
 
     const secret = decryptSecret(opts.dataKey, cred.secretCiphertext);
-    const secrets = [secret];
+    secrets.push(secret);
     const deadline = AbortSignal.timeout(RUN_MAX_MS);
     const limiter = spacingRateLimiter(opts.deps?.minSpacingMs ?? MIN_SPACING_MS);
     let backoffs = 0;
