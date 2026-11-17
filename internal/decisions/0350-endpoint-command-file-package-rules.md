@@ -163,6 +163,16 @@ direct API call. Creating a gist is the worked example: the GitHub MCP `create_g
 - **Conformance test:** one shared fixture file lists each action's equivalent calls on every route and the expected
   verdict for a given policy. The Go engine and the gateway's decision core each run the whole file in CI; a
   disagreement fails both suites. The gist example is the first fixture.
+- **Entitlement is the source (as built, slice 2a).** `compileActionRules` (`packages/shared/src/endpoint-actions.ts`)
+  gives each action **allow exactly when the subject is entitled to one of its MCP tools** on a server whose upstream is
+  the action's (the kernel's `visibleTools`, through `EffectiveMcpPolicy`), and **deny** otherwise; an admin override
+  may only tighten it (to ask or deny), and an unknown override is refused. The gateway's MCP answer
+  (`gatewayMcpActionVerdict`) is the same entitlement plus the same rule. On the device the rule applies to the MCP
+  tool (by server and tool name), to the CLI argv, and to the HTTP call inside `curl`, `wget`, `http`/`https`/`xh`
+  and `gh api` (method and URL read from their options; a matched action rule takes precedence over the exec default,
+  never over a matching deny). The fixture's `deviceRules` must equal the compiler's output (TypeScript test), and
+  the Go suite decides every route from them (`TestOnePolicyConformance`); flipping one expected verdict fails seven
+  device checks. The catalogue starts with `github.gist.create`, `github.pull.merge` and `github.issue.create`.
 - **Unknown routes stay unknown.** An HTTP call whose method or URL is not literal is unresolved (§2), and an action
   the catalogue does not list is decided by the ordinary exec rules. Matching on the device is still textual.
 
@@ -177,9 +187,11 @@ the device carries out by refusing every call (as a missing policy already does)
 ### Slices
 
 1. **This PR:** §1–4 and §8 in `agents/endpoint` (the engine, the four adapters, fixtures, the matrix). Default off.
-2. The compiler (§6) in shared code and the gateway, signed by the B4 signer (stacks on #867), and policy delivery to
-   the device with its device id; the action catalogue, action rules and the cross-route conformance test (§9); the
-   E35 response mapping (§10).
+2. a. The action catalogue, the action-rule compiler from entitlements, the device's recognisers on every route and
+      the cross-route conformance test (§9). Built.
+   b. The whole-policy compiler (§6) in the gateway, signed by the B4 signer (stacks on #867); policy delivery to the
+      device with its device id; the gateway's connector route consulting the same rules; the E35 response mapping
+      (§10).
 3. Device groups and exceptions (§5): migration, routes (known UI gaps on #453), the lifecycle table, step-up, audit.
 
 ## Owner questions open (built with the secure default)

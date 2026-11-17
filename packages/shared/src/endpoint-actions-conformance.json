@@ -1,0 +1,153 @@
+{
+ "comment": "ADR-0350 §9 conformance: each case is one action reached by every route; every route must give `expect`. deviceRules must equal compileActionRules(servers, overrides) (TypeScript test); the Go suite decides the same cases from deviceRules.",
+ "scenarios": [
+  {
+   "name": "entitled to issues only, merge tightened to ask",
+   "servers": [
+    {
+     "serverId": "srv-gh",
+     "name": "github",
+     "upstreamHost": "api.githubcopilot.com",
+     "tools": [
+      "create_issue",
+      "merge_pull_request"
+     ]
+    }
+   ],
+   "overrides": [
+    {
+     "action": "github.pull.merge",
+     "verdict": "ask"
+    }
+   ],
+   "deviceRules": [
+    {
+     "id": "github.gist.create",
+     "action": "github.gist.create",
+     "verdict": "deny",
+     "mcpServers": [
+      "github"
+     ]
+    },
+    {
+     "id": "github.pull.merge",
+     "action": "github.pull.merge",
+     "verdict": "ask",
+     "mcpServers": [
+      "github"
+     ]
+    },
+    {
+     "id": "github.issue.create",
+     "action": "github.issue.create",
+     "verdict": "allow",
+     "mcpServers": [
+      "github"
+     ]
+    }
+   ],
+   "cases": [
+    {
+     "action": "github.gist.create",
+     "expect": "deny",
+     "mcp": {
+      "server": "github",
+      "tool": "create_gist"
+     },
+     "http": [
+      {
+       "method": "POST",
+       "url": "https://api.github.com/gists"
+      }
+     ],
+     "cli": [
+      "gh gist create notes.txt",
+      "curl -X POST https://api.github.com/gists -d @gist.json",
+      "curl --json @gist.json https://api.github.com/gists",
+      "gh api --method POST /gists -f description=x",
+      "sh -c 'gh gist create a.txt'"
+     ]
+    },
+    {
+     "action": "github.issue.create",
+     "expect": "allow",
+     "mcp": {
+      "server": "github",
+      "tool": "create_issue"
+     },
+     "http": [
+      {
+       "method": "POST",
+       "url": "https://api.github.com/repos/acme/app/issues"
+      }
+     ],
+     "cli": [
+      "gh issue create -t x -b y",
+      "curl -X POST https://api.github.com/repos/acme/app/issues -d '{}'",
+      "gh api repos/acme/app/issues -X POST"
+     ]
+    },
+    {
+     "action": "github.pull.merge",
+     "expect": "ask",
+     "mcp": {
+      "server": "github",
+      "tool": "merge_pull_request"
+     },
+     "http": [
+      {
+       "method": "PUT",
+       "url": "https://api.github.com/repos/acme/app/pulls/7/merge"
+      }
+     ],
+     "cli": [
+      "gh pr merge 7 --squash",
+      "curl -X PUT https://api.github.com/repos/acme/app/pulls/7/merge"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "no GitHub server entitled",
+   "servers": [],
+   "overrides": [],
+   "deviceRules": [
+    {
+     "id": "github.gist.create",
+     "action": "github.gist.create",
+     "verdict": "deny",
+     "mcpServers": []
+    },
+    {
+     "id": "github.pull.merge",
+     "action": "github.pull.merge",
+     "verdict": "deny",
+     "mcpServers": []
+    },
+    {
+     "id": "github.issue.create",
+     "action": "github.issue.create",
+     "verdict": "deny",
+     "mcpServers": []
+    }
+   ],
+   "cases": [
+    {
+     "action": "github.issue.create",
+     "expect": "deny",
+     "mcp": null,
+     "http": [
+      {
+       "method": "POST",
+       "url": "https://api.github.com/repos/acme/app/issues"
+      }
+     ],
+     "cli": [
+      "gh issue new",
+      "curl -XPOST https://api.github.com/repos/acme/app/issues"
+     ]
+    }
+   ]
+  }
+ ]
+}

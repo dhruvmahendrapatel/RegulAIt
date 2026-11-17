@@ -55,6 +55,8 @@ type CommandRules struct {
 	Exec       []ExecRule `json:"exec"`
 	Files      FileRules  `json:"files"`
 	Packages   PkgRules   `json:"packages"`
+	// Actions are the compiled one-policy rules (ADR-0350 §9), one per catalogue action at most.
+	Actions []ActionRule `json:"actions"`
 }
 
 // ExecRule matches one argv. Argv holds one doublestar glob per argument, compared position by position; argv[0] is
@@ -199,6 +201,9 @@ func (c *CommandRules) validate(p *Policy) error {
 		if r.Verdict == RuleAllow && wildcardOnly(r.Name) {
 			return refuse("commands: rule %q is a catch-all allow", r.ID)
 		}
+	}
+	if err := validateActions(c.Actions, use); err != nil {
+		return err
 	}
 	if len(p.Exceptions) > maxExceptions {
 		return refuse("exceptions: too many")
@@ -350,6 +355,11 @@ func decideAction(p *Policy, a action, env HookEnv) outcome {
 			for _, x := range r.Exec {
 				if argvMatch(x.Argv, a.argv) {
 					yield(x.ID, x.Verdict)
+				}
+			}
+			for _, id := range cliActions(a.argv) {
+				if ar, ok := r.actionRule(id); ok {
+					yield(ar.ID, ar.Verdict)
 				}
 			}
 		})

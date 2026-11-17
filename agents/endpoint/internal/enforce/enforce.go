@@ -251,6 +251,8 @@ type Call struct {
 type MCPCall struct {
 	Server string
 	Source string
+	// Tool is the tool's own name on its server, when the hook input shows it (for ADR-0350 §9 action rules).
+	Tool string
 }
 
 // Verdict is what the hook answers.
@@ -295,7 +297,25 @@ func DecideWith(policy *Policy, c Call, env HookEnv) Decision {
 	}
 	deny, reason := mcpDenied(policy.MCP, *c.MCP)
 	if !deny {
-		return Decision{Verdict: Allow, Reason: "RegulAIt: MCP server allowed by policy"}
+		d := Decision{Verdict: Allow, Reason: "RegulAIt: MCP server allowed by policy"}
+		// the one-policy action rules for this tool (ADR-0350 §9): the device gives the gateway's answer
+		if c.MCP.Tool != "" {
+			o := strictest(policy, env, func(yield func(id, verdict string)) {
+				for _, r := range mcpActions(&policy.Commands, c.MCP.Server, c.MCP.Tool) {
+					yield(r.ID, r.Verdict)
+				}
+			})
+			if o.rule != "" && o.verdict != RuleAllow {
+				d = Decision{Verdict: Ask, Rule: o.rule, Reason: "RegulAIt: this MCP tool matches your organisation's action rule " + o.rule + "."}
+				if o.verdict == RuleDeny {
+					d.Verdict = Deny
+				}
+				if policy.modeFor(c.Agent) == ModeAudit {
+					d.WouldDeny, d.WouldAsk, d.Verdict = d.Verdict == Deny, d.Verdict == Ask, NoDecision
+				}
+			}
+		}
+		return d
 	}
 	if policy.modeFor(c.Agent) == ModeAudit {
 		return Decision{Verdict: NoDecision, WouldDeny: true, Reason: reason}

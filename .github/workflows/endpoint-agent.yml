@@ -4,7 +4,8 @@ name: Endpoint agent
 #
 #   test           gofmt, vet for all six targets, unit tests (with -race), the TPM store against the reference
 #                  TPM simulator (-tags tpmsim, cgo), and the linked-module licence check
-#   secret-rules   the compiled key patterns agree with packages/shared's dlp.secret.* rules (needs shared built)
+#   secret-rules   the compiled key patterns agree with packages/shared's dlp.secret.* rules, and the embedded
+#                  action catalogue agrees with packages/shared ENDPOINT_ACTIONS (ADR-0350 §9; needs shared built)
 #   test-macos     the unit tests on macOS, including the real plutil conversion and the process table
 #   test-windows   the unit tests on Windows, including DPAPI, the NCrypt probe (a runner without a TPM must answer
 #                  "no hardware"), the Toolhelp/TCP tables and the registry
@@ -23,12 +24,14 @@ on:
     paths:
       - 'agents/endpoint/**'
       - 'packages/shared/src/guardrails.ts'
+      - 'packages/shared/src/endpoint-actions*'
       - '.github/workflows/endpoint-agent.yml'
   push:
     branches: [main]
     paths:
       - 'agents/endpoint/**'
       - 'packages/shared/src/guardrails.ts'
+      - 'packages/shared/src/endpoint-actions*'
       - '.github/workflows/endpoint-agent.yml'
   workflow_dispatch:
 
@@ -93,6 +96,7 @@ jobs:
       - run: pnpm --filter @regulait/shared build
         working-directory: .
       - run: node scripts/check-secret-rules.mjs
+      - run: node scripts/check-actions.mjs
 
   test-macos:
     name: endpoint agent / test (macos)
