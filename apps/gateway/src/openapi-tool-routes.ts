@@ -123,6 +123,8 @@ async function auditTransition(
     objectType: "mcp_tool",
     objectId: args.op.id,
     detail: {
+      // an admin's configuration of what may be called, not a governed call's decision
+      receiptClass: "configuration",
       phase: "openapi-operation",
       sourceId: args.sourceId,
       operationKey: args.op.operationKey,
@@ -274,6 +276,7 @@ export function registerOpenApiToolRoutes(app: FastifyInstance, db: Db): void {
         objectType: "mcp_server",
         objectId: server!.id,
         detail: {
+          receiptClass: "configuration",
           phase: "registration",
           transport: "openapi",
           sourceId: source!.id,
@@ -409,7 +412,7 @@ export function registerOpenApiToolRoutes(app: FastifyInstance, db: Db): void {
         serverId: source.serverId,
         objectType: "mcp_server",
         objectId: source.serverId,
-        detail: { phase: "openapi-reimport", sourceId, specDigest: generated.specDigest, transitions: transitions.length, unchanged: plan.unchanged.length, skipped: generated.skipped },
+        detail: { receiptClass: "configuration", phase: "openapi-reimport", sourceId, specDigest: generated.specDigest, transitions: transitions.length, unchanged: plan.unchanged.length, skipped: generated.skipped },
         effect: "allow",
         ruleId: OPENAPI_RULE_IDS.reimported,
         ruleChain: [],
