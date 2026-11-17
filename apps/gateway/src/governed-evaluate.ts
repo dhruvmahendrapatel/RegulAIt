@@ -457,7 +457,9 @@ export async function governedEvaluate(
    * never from the request) is decided as the kernel's intersection, and each actor is also evaluated by Cedar
    * as `Agent` against the active v4 policies — lazily, only when one is active.
    */
-  opts: { origin?: GovernedCallOrigin; actor: GovernedActor | null },
+  /** ADR-0230 A3: `bindArguments` = the consent binds the exact arguments whatever the matched rules' scope (an SAP
+   * business write, whose arguments carry its idempotency key: one approval authorises exactly one order). */
+  opts: { origin?: GovernedCallOrigin; actor: GovernedActor | null; bindArguments?: boolean },
 ): Promise<GovernedEvaluation> {
   if (preparedPii && preparedPii.originalArgumentsDigest !== approvalArgumentsDigest({ projectId, arguments: args })) {
     throw new Error("Prepared PII action does not match the original arguments");
@@ -800,7 +802,7 @@ export async function governedEvaluate(
   // On an engine error the kernel call below refuses this call (`approval-rule-engine-error`, same engine, same
   // rules), so no consent is ever bound or spent on it; the strict default scope is read meanwhile.
   const matchedARules = matchedVerdict.kind === "matched" ? matchedVerdict.rules : [];
-  const approvalScope = preparedPii ? "action" : effectiveApprovalScope(matchedARules);
+  const approvalScope = preparedPii || opts.bindArguments ? "action" : effectiveApprovalScope(matchedARules);
 
   // ADR-0040 ABAC. The policy-set load is ONE indexed query, and an install
   // with no active policies stops there: `abacDecision` stays null, the kernel
