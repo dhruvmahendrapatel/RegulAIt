@@ -1285,6 +1285,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // ===== ADR-0180 (D3) — continuous assurance. Internal: admin console and
   // governance surfaces whose shapes are still moving. Append-only per owner.
   // --- P0
+  "GET /v1/ai-app-risk": "internal",
+  "GET /v1/shadow-ai/risk": "internal",
   "GET /v1/org/settings/assurance-gate-mode": "internal",
   "PUT /v1/org/settings/assurance-gate-mode": "internal",
   // --- ADR-0211 (P17)
@@ -2617,6 +2619,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
 
   // ===== ADR-0180 (D3) — continuous assurance. Append-only per owner.
   // --- P0
+  "GET /v1/ai-app-risk": "org",
+  "GET /v1/shadow-ai/risk": "org",
   "GET /v1/org/settings/assurance-gate-mode": "org",
   "PUT /v1/org/settings/assurance-gate-mode": "org",
   "GET /v1/org/settings/risk-treatments": "org",
