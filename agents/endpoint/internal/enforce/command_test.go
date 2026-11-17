@@ -2,6 +2,7 @@ package enforce
 
 import (
 	"bytes"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -131,7 +132,9 @@ func TestFileRules(t *testing.T) {
 		t.Error("the project directory is not a workspace root")
 	}
 	// symlinks are resolved before matching
-	env.Resolve = func(s string) string { return strings.Replace(s, "/work/link", "/home/u/.ssh", 1) }
+	env.Resolve = func(s string) string {
+		return strings.Replace(s, filepath.FromSlash("/work/link"), filepath.FromSlash("/home/u/.ssh"), 1)
+	}
 	if DecideWith(p, Call{Command: &CommandCall{Files: []FileAccess{{Path: "/work/link/id_rsa"}}, Workspace: []string{"/work"}}}, env).Verdict != Deny {
 		t.Error("a symlink stepped around a rule")
 	}

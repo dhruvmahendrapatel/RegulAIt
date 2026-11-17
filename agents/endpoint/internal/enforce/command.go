@@ -335,7 +335,7 @@ func absolute(p, cwd string, env HookEnv) string {
 	if strings.HasPrefix(p, "~/") && env.Home != "" {
 		p = filepath.Join(env.Home, p[2:])
 	}
-	if !filepath.IsAbs(p) && cwd != "" {
+	if !rooted(p) && cwd != "" {
 		p = filepath.Join(cwd, p)
 	}
 	p = filepath.Clean(p)
@@ -343,6 +343,12 @@ func absolute(p, cwd string, env HookEnv) string {
 		p = env.Resolve(p)
 	}
 	return p
+}
+
+// rooted: an absolute path, or on Windows a path rooted on the current drive (`\x`, `/x`), which must never be
+// joined to the working directory (that would make `/etc/hosts` look like a file inside the workspace).
+func rooted(p string) bool {
+	return filepath.IsAbs(p) || strings.HasPrefix(p, "/") || strings.HasPrefix(p, `\`)
 }
 
 func decideAction(p *Policy, a action, env HookEnv) outcome {
