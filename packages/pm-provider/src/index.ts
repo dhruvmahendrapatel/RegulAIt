@@ -1403,6 +1403,8 @@ export {
   PM_TRIGGER_OPEN_STATES,
   PM_TRIGGER_STATES,
   PM_TRIGGER_TRANSITIONS,
+  PM_WORK_TRIGGER_MACHINE,
+  type PmTriggerEvent,
   type PmTriggerMechanism,
   type PmTriggerSettings,
   type PmTriggerSignal,

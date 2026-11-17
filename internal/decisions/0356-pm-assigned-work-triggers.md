@@ -82,9 +82,11 @@ we extend our own adapters. The repository search found the pieces above to reus
    workflow bills to is the settings' `project_id` (optional), because an initiative can hold several projects.
 6. **Linked, not copied.** The started instance is linked to the item through `pm_links` (`workflow_instance`), the
    same record a manual pm-sync writes, so the existing status mirror and drift processing apply.
-7. **A declared lifecycle.** `pm_work_triggers` records each trigger with its state. The states and allowed transitions
-   live in one exported table (`PM_TRIGGER_TRANSITIONS`), the server moves a row only with a compare-and-set update
-   whose `WHERE` names the allowed source states, and a database check constrains the state column:
+7. **A declared lifecycle.** `pm_work_triggers` records each trigger with its state. The states and transitions are one
+   ADR-0348 machine, `PM_WORK_TRIGGER_MACHINE` (`packages/shared/src/pm-trigger-machine.ts`, registered in
+   `STATE_MACHINES`; events `accept`, `deny`, `start`, `write_back`, `fail`), the server moves a row only with a
+   compare-and-set update guarded by `whereFrom` (the event's source states), and a database CHECK and BEFORE UPDATE
+   trigger hold the same states and moves:
 
    | from | to |
    | --- | --- |

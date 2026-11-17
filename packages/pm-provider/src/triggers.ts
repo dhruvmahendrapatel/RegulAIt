@@ -18,30 +18,34 @@
  */
 import { z } from "zod";
 import type { PmProviderKind } from "./index.js";
+import { PM_WORK_TRIGGER_MACHINE } from "@regulait/shared";
 import { JIRA_TRIGGER_RULE_EVENT } from "./inbound.js";
 
 // ---------------------------------------------------------------------------
 // Lifecycle (owner rule 2026-11-17: explicit state machines)
 // ---------------------------------------------------------------------------
 
-export const PM_TRIGGER_STATES = ["received", "accepted", "denied", "running", "written_back", "failed"] as const;
+/** The lifecycle is the ADR-0348 machine `PM_WORK_TRIGGER_MACHINE` (@regulait/shared); the views below derive from it. */
+export { PM_WORK_TRIGGER_MACHINE };
+export const PM_TRIGGER_STATES = PM_WORK_TRIGGER_MACHINE.def.states;
 export type PmTriggerState = (typeof PM_TRIGGER_STATES)[number];
+export type PmTriggerEvent = keyof typeof PM_WORK_TRIGGER_MACHINE.def.transitions;
 
-/** The ONE declared table of allowed transitions. `written_back` and `failed` are terminal. */
-export const PM_TRIGGER_TRANSITIONS: Readonly<Record<PmTriggerState, readonly PmTriggerState[]>> = Object.freeze({
-  received: ["accepted", "denied", "failed"],
-  accepted: ["running", "failed"],
-  running: ["written_back", "failed"],
-  denied: ["written_back", "failed"],
-  written_back: [],
-  failed: [],
-});
+/** from-state → reachable states, derived from the machine (`written_back` and `failed` are terminal) */
+export const PM_TRIGGER_TRANSITIONS: Readonly<Record<PmTriggerState, readonly PmTriggerState[]>> = Object.freeze(
+  Object.fromEntries(
+    PM_TRIGGER_STATES.map((from) => [
+      from,
+      [...new Set(Object.values(PM_WORK_TRIGGER_MACHINE.def.transitions).filter((t) => (t.from as readonly string[]).includes(from)).map((t) => t.to))],
+    ]),
+  ) as Record<PmTriggerState, PmTriggerState[]>,
+);
 
 /** States in which an item's trigger is still open: one item has at most one (a partial unique index holds it). */
 export const PM_TRIGGER_OPEN_STATES: readonly PmTriggerState[] = ["received", "accepted", "running"];
 
 export function canPmTriggerTransition(from: PmTriggerState, to: PmTriggerState): boolean {
-  return PM_TRIGGER_TRANSITIONS[from].includes(to);
+  return PM_WORK_TRIGGER_MACHINE.canMove(from, to);
 }
 
 /** The states a row may be moved to `to` from: what the gateway's compare-and-set update puts in its WHERE. */

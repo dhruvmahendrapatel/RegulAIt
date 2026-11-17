@@ -40,7 +40,8 @@ import {
   workflowInstances,
   type Db,
 } from "@regulait/db";
-import { mappingFor, pmTriggerSourcesOf, resolveApprovalAction, type PmWriteBackKind } from "@regulait/pm-provider";
+import { mappingFor, PM_WORK_TRIGGER_MACHINE, resolveApprovalAction, type PmWriteBackKind } from "@regulait/pm-provider";
+import { whereFrom } from "./state-transition.js";
 import { settingsOf } from "./pm-trigger-settings.js";
 import { providerFor } from "./pm.js";
 import { errMessage } from "./err-serializer.js";
@@ -210,7 +211,7 @@ async function syncInScope(db: Db, dataKey: string | undefined, instanceId: stri
       const moved = await db
         .update(pmWorkTriggers)
         .set({ state: "written_back", updatedAt: sql`now()` })
-        .where(and(eq(pmWorkTriggers.id, trigger.id), inArray(pmWorkTriggers.state, pmTriggerSourcesOf("written_back"))))
+        .where(and(eq(pmWorkTriggers.id, trigger.id), whereFrom(pmWorkTriggers.state, PM_WORK_TRIGGER_MACHINE, "write_back")))
         .returning({ id: pmWorkTriggers.id });
       if (moved.length === 1) {
         summary.writtenBack = true;
