@@ -1,0 +1,7 @@
+{
+  "name": "absent-optional-peer",
+  "version": "0.0.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "description": "Empty placeholder, no code. engines/promptfoo/package.json points unused OPTIONAL peer dependencies (puppeteer-extra-plugin-stealth of promptfoo, chokidar of nunjucks) here through `overrides`, so their transitive closures (deepmerge GHSA-gcqx-w48m-w2h4, braces GHSA-vfj7-8cjw-p6xm) leave the lockfile. `npm ci --omit=optional` never installs it. See engines/promptfoo/THIRD_PARTY.md."
+}

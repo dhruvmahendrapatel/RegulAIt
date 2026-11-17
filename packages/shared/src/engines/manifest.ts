@@ -248,9 +248,9 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     ],
   },
   // ADR-0242: mcp-scanner, run by our offline driver (engines/mcpscanner/scan.py) on one MCP server manifest. Its runs are started by the
-  // admission gate, never by a person, and its verdict joins that subject's admission state. No image is
-  // published yet (phase 2 adds the runner stage and the lock entry), so the digest is null and the engine
-  // cannot be enabled (secure default).
+  // admission gate, never by a person, and its verdict joins that subject's admission state. The image carries
+  // the Node runner stage (§6.1), but no image is published yet (§6.3 adds the lock entry), so the digest is null
+  // and the engine cannot be enabled (secure default).
   mcpscanner: {
     id: "mcpscanner",
     kind: "admission_scan",
@@ -269,22 +269,26 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     judgeSets: [],
     credentialIsolation: false,
     taskImage: null,
-    taskEntry: { command: "/opt/mcpscanner/venv/bin/python", args: ["-I", "/opt/mcpscanner/scan.py", "/in", "/out/report.json"] },
+    // ADR-0242 §6.1: the Node task (packages/engine-admission-scan) checks the input root holds only the gateway's
+    // subject file, runs our driver on it as a child process group and sends the report back as frames
+    // (stdout is the frame channel, so the driver is never the workload itself); the engine is named in argv,
+    // because the sandbox init gives the workload no environment but PATH and HOME
+    taskEntry: { command: "/usr/local/bin/node", args: ["/app/dist/task-main.js", "mcpscanner"] },
     sets: { scan: "standard" },
     airGappedReducedSet: [],
     lastVerified: "2026-11-07",
     reCheckBy: "2027-05-07",
     unverified: [
-      "the published image, its digest and signature (phase 2: the runner stage and the publish)",
+      "the published image, its digest and signature (phase 2 §6.3: the publish and the lock entry; the runner stage is built, unpublished)",
       "maintainer count",
       "transitive licences: the PSF-2.0, MPL-2.0, MIT-0 and CNRI-Python terms are the ones the owner accepted for garak (ADR-0187 decision 193); yara-python is built from source without OpenSSL",
-      "the runner and sandbox path (phase 2); the driver and the image's offline smoke scan were measured on 2026-11-07 (ADR-0242 §3)",
+      "the runner and task inside the built image and the sandbox limits (phase 2 §6.4; the shim is tested without Docker); the driver and the image's offline smoke scan were measured on 2026-11-07 (ADR-0242 §3)",
     ],
   },
   // ADR-0242: skill-scanner, run by our offline driver (engines/skillscanner/scan.py) on one agent skill (SKILL.md and its files). Its runs are started by the
-  // admission gate, never by a person, and its verdict joins that subject's admission state. No image is
-  // published yet (phase 2 adds the runner stage and the lock entry), so the digest is null and the engine
-  // cannot be enabled (secure default).
+  // admission gate, never by a person, and its verdict joins that subject's admission state. The image carries
+  // the Node runner stage (§6.1), but no image is published yet (§6.3 adds the lock entry), so the digest is null
+  // and the engine cannot be enabled (secure default).
   skillscanner: {
     id: "skillscanner",
     kind: "admission_scan",
@@ -303,16 +307,20 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     judgeSets: [],
     credentialIsolation: false,
     taskImage: null,
-    taskEntry: { command: "/opt/skillscanner/venv/bin/python", args: ["-I", "/opt/skillscanner/scan.py", "/in", "/out/report.json"] },
+    // ADR-0242 §6.1: the Node task (packages/engine-admission-scan) checks the input root holds only the gateway's
+    // subject file, runs our driver on it as a child process group and sends the report back as frames
+    // (stdout is the frame channel, so the driver is never the workload itself); the engine is named in argv,
+    // because the sandbox init gives the workload no environment but PATH and HOME
+    taskEntry: { command: "/usr/local/bin/node", args: ["/app/dist/task-main.js", "skillscanner"] },
     sets: { scan: "standard" },
     airGappedReducedSet: [],
     lastVerified: "2026-11-07",
     reCheckBy: "2027-05-07",
     unverified: [
-      "the published image, its digest and signature (phase 2: the runner stage and the publish)",
+      "the published image, its digest and signature (phase 2 §6.3: the publish and the lock entry; the runner stage is built, unpublished)",
       "maintainer count",
       "transitive licences: as mcpscanner, plus numpy's (ADR-0187 decision 106); yara-x's statically linked Rust crates carry Apache-2.0 WITH LLVM-exception, Zlib and Unicode-3.0 terms awaiting an owner decision; pcodedmp (GPL-3.0) is excluded",
-      "the runner and sandbox path (phase 2); the driver and the image's offline smoke scan were measured on 2026-11-07 (ADR-0242 §3)",
+      "the runner and task inside the built image and the sandbox limits (phase 2 §6.4; the shim is tested without Docker); the driver and the image's offline smoke scan were measured on 2026-11-07 (ADR-0242 §3)",
     ],
   },
   // ADR-0245: spikee (indirect prompt injection in documents). Off, and no image until its first signed publish:
