@@ -131,6 +131,7 @@ export const SCHEDULER_JOB_NAMES = {
   thirdPartyEvidenceRetentionSweep: "third-party-evidence-retention-sweep",
   // ADR-0339: scores every agent a change marked (agent-risk.ts)
   agentRiskRecomputeSweep: "agent-risk-recompute-sweep",
+  agentRiskDailyMark: "agent-risk-daily-mark",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -864,7 +865,7 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...fairnessJobDefinitions(), // ADR-0222 (P13(a)): fairness-dataset-retention-sweep
     ...siemJobDefinitions({ dataKey: opts.dataKey }), // ADR-0303: siem-delivery-sweep
     ...thirdPartyIngestJobDefinitions(), // ADR-0302: third-party-evidence-retention-sweep
-    ...agentRiskJobDefinitions(), // ADR-0339: agent-risk-recompute-sweep
+    ...agentRiskJobDefinitions(), // ADR-0339: agent-risk-recompute-sweep, agent-risk-daily-mark
   ];
 }
 // ===== end ADR-0182 block ====================================================

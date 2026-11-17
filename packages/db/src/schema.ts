@@ -17048,7 +17048,7 @@ export const agentRiskRecomputeRequests = pgTable(
     check("agent_risk_recompute_requests_subject_check", sql`num_nonnulls(${t.agentId}, ${t.builderAgentId}) = 1`),
     check(
       "agent_risk_recompute_requests_trigger_check",
-      sql`${t.trigger} IN ('created', 'modified', 'published', 'access_changed', 'imported', 'backfill', 'manual')`,
+      sql`${t.trigger} IN ('created', 'modified', 'published', 'access_changed', 'evidence_changed', 'imported', 'backfill', 'scheduled', 'manual')`,
     ),
     uniqueIndex("agent_risk_recompute_requests_agent_uq").on(t.agentId, t.trigger).where(sql`${t.agentId} IS NOT NULL`),
     uniqueIndex("agent_risk_recompute_requests_builder_uq")
@@ -17092,7 +17092,7 @@ export const agentRiskAssessments = pgTable(
     check("agent_risk_assessments_digest_check", sql`${t.assessmentDigest} ~ '^[0-9a-f]{64}$'`),
     check(
       "agent_risk_assessments_triggers_check",
-      sql`cardinality(${t.triggers}) BETWEEN 1 AND 7 AND ${t.triggers} <@ ARRAY['created', 'modified', 'published', 'access_changed', 'imported', 'backfill', 'manual']::text[]`,
+      sql`cardinality(${t.triggers}) BETWEEN 1 AND 9 AND ${t.triggers} <@ ARRAY['created', 'modified', 'published', 'access_changed', 'evidence_changed', 'imported', 'backfill', 'scheduled', 'manual']::text[]`,
     ),
     index("agent_risk_assessments_agent_idx").on(t.agentId, t.computedAt, t.id).where(sql`${t.agentId} IS NOT NULL`),
     index("agent_risk_assessments_builder_idx")
@@ -17101,6 +17101,29 @@ export const agentRiskAssessments = pgTable(
   ],
 );
 export type AgentRiskAssessmentRow = typeof agentRiskAssessments.$inferSelect;
+
+/**
+ * The ranked list's read path: one pointer per agent to its newest assessment, moved forward by a database trigger on
+ * every append (never by application code), so the list reads one row per agent instead of sorting the whole history.
+ * References only (third normal form): the score and band are read through the pointer.
+ */
+export const agentRiskLatest = pgTable(
+  "agent_risk_latest",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    builderAgentId: uuid("builder_agent_id").references(() => builderAgents.id, { onDelete: "cascade" }),
+    assessmentId: uuid("assessment_id")
+      .notNull()
+      .references(() => agentRiskAssessments.id, { onDelete: "cascade" }),
+  },
+  (t) => [
+    check("agent_risk_latest_subject_check", sql`num_nonnulls(${t.agentId}, ${t.builderAgentId}) = 1`),
+    uniqueIndex("agent_risk_latest_agent_uq").on(t.agentId).where(sql`${t.agentId} IS NOT NULL`),
+    uniqueIndex("agent_risk_latest_builder_uq").on(t.builderAgentId).where(sql`${t.builderAgentId} IS NOT NULL`),
+    uniqueIndex("agent_risk_latest_assessment_uq").on(t.assessmentId),
+  ],
+);
 // ===== end ADR-0339 =====
 
 // ===== ADR-0341 — the visual pipeline builder: drafts and versions of workflow templates =====

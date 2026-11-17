@@ -77,6 +77,7 @@ import { databaseNow } from "./db-clock.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
 
 export const AGENT_RISK_SWEEP_JOB_NAME = "agent-risk-recompute-sweep";
+export const AGENT_RISK_DAILY_MARK_JOB_NAME = "agent-risk-daily-mark";
 /** agents scored per sweep pass; the rest wait for the next pass (bounded work per tick) */
 export const AGENT_RISK_SWEEP_BATCH = 50;
 export const AGENT_RISK_LIST_MAX_LIMIT = 100;
@@ -262,6 +263,13 @@ export async function markAgentRisk(db: Db, subject: AgentRiskSubject, trigger: 
   );
 }
 
+/** mark every agent and live builder agent (the daily mark); returns how many requests are now queued for that reason */
+export async function markAllAgentRisk(db: Db, trigger: AgentRiskTrigger): Promise<number> {
+  await db.execute(sql`SELECT public.regulait_agent_risk_mark_all(${trigger})`);
+  const [r] = await db.select({ n: count() }).from(agentRiskRecomputeRequests).where(eq(agentRiskRecomputeRequests.trigger, trigger));
+  return Number(r?.n ?? 0);
+}
+
 export async function runAgentRiskRecomputeSweep(
   db: Db,
   opts: { now?: Date; limit?: number; actorUserId?: string | null; only?: AgentRiskSubject } = {},
@@ -368,6 +376,18 @@ export function agentRiskJobDefinitions(): SchedulerJobDefinition[] {
       run: async (ctx) => {
         const out = await runAgentRiskRecomputeSweep(ctx.db, { now: ctx.now });
         return { itemsProcessed: out.scored, detail: { ...out } };
+      },
+    },
+    {
+      name: AGENT_RISK_DAILY_MARK_JOB_NAME,
+      description:
+        "Mark every agent 'scheduled' once a day, so facts that change with time alone (a sign-off or a red-team run " +
+        "going stale, an owner going inactive) reach the stored score and the ranked list. The sweep does the scoring.",
+      adr: "ADR-0339",
+      defaultIntervalSeconds: 86_400,
+      run: async (ctx) => {
+        const marked = await markAllAgentRisk(ctx.db, "scheduled");
+        return { itemsProcessed: marked, detail: { marked } };
       },
     },
   ];
@@ -500,11 +520,12 @@ export function registerAgentRiskRoutes(app: FastifyInstance, db: Db): void {
         ? sql`JOIN agents s ON s.id = l.subject_id`
         : sql`JOIN builder_agents s ON s.id = l.subject_id AND s.archived_at IS NULL`;
     const cursorCond = after ? sql`AND (l.score < ${after.s} OR (l.score = ${after.s} AND l.subject_id > ${after.i}::uuid))` : sql``;
+    // one row per agent through the latest pointer (kept by a DB trigger on every append): never the whole history
     const rows = await db.execute<{ subject_id: string; name: string; score: number; band: string; computed_at: string; assessment_id: string }>(sql`
       WITH l AS (
-        SELECT DISTINCT ON (${col}) ${col} AS subject_id, id AS assessment_id, score, band, computed_at
-        FROM agent_risk_assessments WHERE ${col} IS NOT NULL
-        ORDER BY ${col}, computed_at DESC, id DESC
+        SELECT p.${col} AS subject_id, r.id AS assessment_id, r.score, r.band, r.computed_at
+        FROM agent_risk_latest p JOIN agent_risk_assessments r ON r.id = p.assessment_id
+        WHERE p.${col} IS NOT NULL
       )
       SELECT l.subject_id, s.name, l.score, l.band, l.computed_at, l.assessment_id FROM l ${nameJoin}
       WHERE true ${cursorCond}
@@ -512,8 +533,8 @@ export function registerAgentRiskRoutes(app: FastifyInstance, db: Db): void {
       LIMIT ${q.data.limit + 1}`);
     const unscored = await db.execute<{ n: number }>(
       q.data.kind === "agent"
-        ? sql`SELECT count(*)::int AS n FROM agents a WHERE NOT EXISTS (SELECT 1 FROM agent_risk_assessments r WHERE r.agent_id = a.id)`
-        : sql`SELECT count(*)::int AS n FROM builder_agents b WHERE b.archived_at IS NULL AND NOT EXISTS (SELECT 1 FROM agent_risk_assessments r WHERE r.builder_agent_id = b.id)`,
+        ? sql`SELECT count(*)::int AS n FROM agents a WHERE NOT EXISTS (SELECT 1 FROM agent_risk_latest p WHERE p.agent_id = a.id)`
+        : sql`SELECT count(*)::int AS n FROM builder_agents b WHERE b.archived_at IS NULL AND NOT EXISTS (SELECT 1 FROM agent_risk_latest p WHERE p.builder_agent_id = b.id)`,
     );
     const page = rows.rows.slice(0, q.data.limit);
     const last = page[page.length - 1];

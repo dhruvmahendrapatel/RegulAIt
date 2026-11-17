@@ -817,6 +817,7 @@ describe("every sweep is registered", () => {
         SCHEDULER_JOB_NAMES.thirdPartyEvidenceRetentionSweep,
         // ADR-0339: scores every agent a change marked. Driven end-to-end in zz-adr0339-agent-risk.test.ts.
         SCHEDULER_JOB_NAMES.agentRiskRecomputeSweep,
+        SCHEDULER_JOB_NAMES.agentRiskDailyMark,
       ].sort(),
     );
     const discovery = registry.get(SCHEDULER_JOB_NAMES.discoveryScanSweep)!;
