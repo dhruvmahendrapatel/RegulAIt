@@ -122,16 +122,22 @@ export interface AiSaasMonitorDeps {
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type DbOrTx = Db | Tx;
-type AuditObject = "ai_saas_monitor_policy" | "ai_saas_monitor_connector" | "ai_saas_monitor_credential" | "ai_saas_monitor_run" | "ai_saas_interaction";
+type AuditObject =
+  | "ai_saas_monitor_policy"
+  | "ai_saas_monitor_connector"
+  | "ai_saas_monitor_credential"
+  | "ai_saas_monitor_run"
+  | "ai_saas_interaction"
+  | "ai_saas_remediation";
 
 /** the audit row; callers pass the transaction that holds the state change, so neither lands without the other */
-async function audit(
+export async function audit(
   db: DbOrTx,
   userId: string | null,
   objectType: AuditObject,
   objectId: string | null,
   ruleId: string,
-  effect: "allow" | "deny",
+  effect: "allow" | "deny" | "require_approval",
   reason: string,
   detail: Record<string, unknown>,
 ): Promise<string> {
@@ -146,16 +152,23 @@ async function audit(
 // Reads
 // --------------------------------------------------------------------------------------------------------------------
 
-export async function loadAiSaasPolicy(db: DbOrTx): Promise<{ enabled: boolean; contentCapture: AiSaasContentCapture }> {
+export async function loadAiSaasPolicy(db: DbOrTx): Promise<{ enabled: boolean; contentCapture: AiSaasContentCapture; remediationEnabled: boolean }> {
   const [row] = await db.select().from(aiSaasMonitorPolicy).limit(1);
-  return { enabled: row?.enabled === true, contentCapture: row?.contentCapture === "redacted" ? "redacted" : "none" };
+  return { enabled: row?.enabled === true, contentCapture: row?.contentCapture === "redacted" ? "redacted" : "none", remediationEnabled: row?.remediationEnabled === true };
 }
 
-async function liveCredential(db: DbOrTx, connectorId: string) {
+/** the connector's live credential for `purpose` (`read` monitors; slice 3's `remediate` key deletes) */
+export async function liveCredential(db: DbOrTx, connectorId: string, purpose: "read" | "remediate" = "read") {
   const [row] = await db
     .select()
     .from(aiSaasMonitorCredentials)
-    .where(and(eq(aiSaasMonitorCredentials.connectorId, connectorId), isNull(aiSaasMonitorCredentials.revokedAt)))
+    .where(
+      and(
+        eq(aiSaasMonitorCredentials.connectorId, connectorId),
+        eq(aiSaasMonitorCredentials.purpose, purpose),
+        isNull(aiSaasMonitorCredentials.revokedAt),
+      ),
+    )
     .limit(1);
   return row ?? null;
 }
@@ -256,6 +269,50 @@ function classifyRunError(err: unknown): RunStop {
   return new RunStop("failed", "internal", "the run stopped on an unexpected error; nothing past the last stored page was written");
 }
 
+/**
+ * The context every connector call gets (a run, and slice 3's remediation): the egress-guarded fetch (a redirect is
+ * handed back, never followed), the per-connector spacing limiter, a bounded 429/503 backoff, and the secret sink.
+ */
+export async function connectorContextFor(
+  db: Db,
+  connector: AiSaasMonitorConnectorRow,
+  impl: ComplianceConnector,
+  secret: string,
+  secrets: string[],
+  signal: AbortSignal,
+  deps?: AiSaasMonitorDeps,
+): Promise<ConnectorContext> {
+  const limiter = spacingRateLimiter(deps?.minSpacingMs ?? impl.minSpacingMs ?? MIN_SPACING_MS);
+  let backoffs = 0;
+  return {
+    config: connector.publicConfig,
+    credential: { secret },
+    fetch: createGuardedFetch({
+      allowList: await loadEgressAllowList(db),
+      maxResponseBytes: AI_SAAS_MONITOR_MAX_RESPONSE_BYTES,
+      // a redirect comes back to the connector (never followed here); only the ChatGPT log download re-requests one,
+      // through this same guard, and every other connector treats a 3xx as an error
+      returnRedirects: true,
+      ...(deps?.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
+      ...(deps?.resolve ? { resolve: deps.resolve } : {}),
+    }),
+    throttle: () => limiter.acquire(connector.id, signal),
+    backoff: async (res) => {
+      if (res.status !== 429 && res.status !== 503) return false;
+      if (backoffs >= DISCOVERY_BACKOFF_MAX_TIMES) return false;
+      backoffs += 1;
+      await res.arrayBuffer().catch(() => undefined);
+      const ms = retryAfterMs(res) ?? Math.min(1000 * 2 ** backoffs, DISCOVERY_BACKOFF_MAX_MS);
+      await new Promise((r) => setTimeout(r, ms));
+      return true;
+    },
+    registerSecret: (v) => {
+      if (v && secrets.length < 64 && !secrets.includes(v)) secrets.push(v);
+    },
+    signal,
+  };
+}
+
 export interface RunOptions {
   trigger: "schedule" | "manual";
   dataKey?: string | undefined;
@@ -349,36 +406,7 @@ export async function runAiSaasMonitor(db: Db, connectorId: string, opts: RunOpt
 
     const secret = decryptSecret(opts.dataKey, cred.secretCiphertext);
     secrets.push(secret);
-    const deadline = AbortSignal.timeout(RUN_MAX_MS);
-    const limiter = spacingRateLimiter(opts.deps?.minSpacingMs ?? impl.minSpacingMs ?? MIN_SPACING_MS);
-    let backoffs = 0;
-    const ctx: ConnectorContext = {
-      config: connector.publicConfig,
-      credential: { secret },
-      fetch: createGuardedFetch({
-        allowList: await loadEgressAllowList(db),
-        maxResponseBytes: AI_SAAS_MONITOR_MAX_RESPONSE_BYTES,
-        // a redirect comes back to the connector (never followed here); only the ChatGPT log download re-requests one,
-        // through this same guard, and every other connector treats a 3xx as an error
-        returnRedirects: true,
-        ...(opts.deps?.fetchImpl ? { fetchImpl: opts.deps.fetchImpl } : {}),
-        ...(opts.deps?.resolve ? { resolve: opts.deps.resolve } : {}),
-      }),
-      throttle: () => limiter.acquire(connector.id, deadline),
-      backoff: async (res) => {
-        if (res.status !== 429 && res.status !== 503) return false;
-        if (backoffs >= DISCOVERY_BACKOFF_MAX_TIMES) return false;
-        backoffs += 1;
-        await res.arrayBuffer().catch(() => undefined);
-        const ms = retryAfterMs(res) ?? Math.min(1000 * 2 ** backoffs, DISCOVERY_BACKOFF_MAX_MS);
-        await new Promise((r) => setTimeout(r, ms));
-        return true;
-      },
-      registerSecret: (v) => {
-        if (v && secrets.length < 64 && !secrets.includes(v)) secrets.push(v);
-      },
-      signal: deadline,
-    };
+    const ctx = await connectorContextFor(db, connector, impl, secret, secrets, AbortSignal.timeout(RUN_MAX_MS), opts.deps);
 
     const auth = await impl.authorise(ctx);
     if (auth.scope === "write") {
@@ -571,7 +599,14 @@ const policyBody = z.object({ enabled: z.boolean(), contentCapture: z.enum(AI_SA
 const createBody = z.object({ vendor: z.enum(AI_SAAS_MONITOR_VENDORS), name: z.string().trim().min(1).max(120), config: z.unknown(), complianceTags: tagList, reason }).strict();
 const configBody = z.object({ config: z.unknown(), complianceTags: tagList, reason }).strict();
 const credentialBody = z
-  .object({ secret: z.string().min(8).max(4096), replacesCredentialId: z.string().uuid().nullable(), attestReadOnly: z.literal(true).optional(), reason })
+  .object({
+    secret: z.string().min(8).max(4096),
+    replacesCredentialId: z.string().uuid().nullable(),
+    attestReadOnly: z.literal(true).optional(),
+    /** ADR-0361 slice 3: `remediate` stores the separate delete-capable key; default `read` */
+    purpose: z.enum(["read", "remediate"]).default("read"),
+    reason,
+  })
   .strict();
 const revokeBody = z.object({ reason }).strict();
 const enabledBody = z.object({ enabled: z.boolean(), reason }).strict();
@@ -729,28 +764,39 @@ export function registerAiSaasMonitorRoutes(app: FastifyInstance, db: Db, opts: 
     const parsed = credentialBody.safeParse(req.body);
     if (!parsed.success) return reply.status(400).send(bad("expected { secret, replacesCredentialId: uuid | null, attestReadOnly?: true, reason }"));
     const entry = AI_SAAS_MONITOR_CATALOGUE[connector.vendor];
-    // a vendor that offers no probe of a key's scopes: the admin attests the key is read-only, and the attestation is audited
-    if (!entry.scopeVerifiable && parsed.data.attestReadOnly !== true) {
+    const purpose = parsed.data.purpose;
+    if (purpose === "remediate") {
+      // a delete-capable key exists only where the vendor documents a delete, and only once remediation is on
+      if (!(opts.deps?.connectors ?? AI_SAAS_CONNECTORS).get(connector.vendor)?.remediation) {
+        return reply.status(409).send({ error: "remediation_not_offered", detail: `the ${connector.vendor} API documents no conversation delete` });
+      }
+      if (!(await loadAiSaasPolicy(db)).remediationEnabled) {
+        return reply.status(409).send({ error: "ai_saas_remediation_disabled", detail: "turn AI SaaS remediation on for the organisation first" });
+      }
+    }
+    // a vendor that offers no probe of a key's scopes: the admin attests the READ key is read-only, and that is audited
+    if (purpose === "read" && !entry.scopeVerifiable && parsed.data.attestReadOnly !== true) {
       return reply.status(409).send({ error: "read_only_attestation_required", detail: `${entry.scopeCheck}. Send attestReadOnly: true to store it.` });
     }
     if (resolveDeployMode() === "air_gapped") return reply.status(409).send(airGapped);
     if (!(await loadAiSaasPolicy(db)).enabled) return reply.status(409).send(policyOff);
     if (!opts.dataKey) return reply.status(503).send({ error: "data_key_unavailable" });
-    if (!(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { aiSaasConnector: connector.id, values: { credential: "store" } } })).ok) return reply;
-    const existing = await liveCredential(db, connector.id);
+    const values = purpose === "read" ? { credential: "store" } : { credential: "store", purpose };
+    if (!(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { aiSaasConnector: connector.id, values } })).ok) return reply;
+    const existing = await liveCredential(db, connector.id, purpose);
     if ((existing?.id ?? null) !== parsed.data.replacesCredentialId) {
       return reply.status(409).send({ error: "credential_conflict", detail: "replacesCredentialId must name the connector's live credential (null when it has none)", liveCredentialId: existing?.id ?? null });
     }
     const ciphertext = encryptSecret(opts.dataKey, parsed.data.secret);
     const stored = await db.transaction(async (tx) => {
       if (existing) await tx.update(aiSaasMonitorCredentials).set({ revokedAt: sql`now()`, revokedBy: actor(req), secretCiphertext: null }).where(eq(aiSaasMonitorCredentials.id, existing.id));
-      const [row] = await tx.insert(aiSaasMonitorCredentials).values({ connectorId: connector.id, secretCiphertext: ciphertext, createdBy: actor(req) }).returning();
+      const [row] = await tx.insert(aiSaasMonitorCredentials).values({ connectorId: connector.id, secretCiphertext: ciphertext, purpose, createdBy: actor(req) }).returning();
       await audit(tx, actor(req), "ai_saas_monitor_credential", row!.id, existing ? AI_SAAS_RULE_IDS.credentialReplaced : AI_SAAS_RULE_IDS.credentialStored, "allow",
-        `AI SaaS monitor credential ${existing ? "replaced" : "stored"} for '${connector.name}': ${parsed.data.reason}`,
-        { connectorId: connector.id, replacedCredentialId: existing?.id ?? null, readOnlyAttested: !entry.scopeVerifiable, requiredScope: entry.permissions, reason: parsed.data.reason });
+        `AI SaaS monitor ${purpose === "read" ? "" : "remediation "}credential ${existing ? "replaced" : "stored"} for '${connector.name}': ${parsed.data.reason}`,
+        { connectorId: connector.id, purpose, replacedCredentialId: existing?.id ?? null, readOnlyAttested: purpose === "read" && !entry.scopeVerifiable, requiredScope: purpose === "read" ? entry.permissions : [], reason: parsed.data.reason });
       return row!;
     });
-    return reply.status(existing ? 200 : 201).send({ credential: { id: stored.id, scopePosture: stored.scopePosture, storedAt: stored.createdAt.toISOString() } });
+    return reply.status(existing ? 200 : 201).send({ credential: { id: stored.id, purpose, scopePosture: stored.scopePosture, storedAt: stored.createdAt.toISOString() } });
   });
 
   // revoking is never harder than granting: no step-up (ADR-0361 §6)
@@ -761,13 +807,18 @@ export function registerAiSaasMonitorRoutes(app: FastifyInstance, db: Db, opts: 
     if (!connector) return reply.status(404).send({ error: "not_found" });
     const parsed = revokeBody.safeParse(req.body);
     if (!parsed.success) return reply.status(400).send(bad("expected { reason }"));
-    const existing = await liveCredential(db, connector.id);
+    const q = z.object({ purpose: z.enum(["read", "remediate"]).default("read") }).strict().safeParse(req.query ?? {});
+    if (!q.success) return reply.status(400).send(bad("expected ?purpose=read|remediate"));
+    const purpose = q.data.purpose;
+    const existing = await liveCredential(db, connector.id, purpose);
     if (!existing) return reply.status(404).send({ error: "no_live_credential" });
     await db.transaction(async (tx) => {
       await tx.update(aiSaasMonitorCredentials).set({ revokedAt: sql`now()`, revokedBy: actor(req), secretCiphertext: null }).where(eq(aiSaasMonitorCredentials.id, existing.id));
-      await tx.update(aiSaasMonitorConnectors).set({ enabled: false, updatedAt: sql`now()` }).where(eq(aiSaasMonitorConnectors.id, connector.id));
+      // without its read key a connector cannot run, so it is disabled; revoking the delete key leaves monitoring alone
+      if (purpose === "read") await tx.update(aiSaasMonitorConnectors).set({ enabled: false, updatedAt: sql`now()` }).where(eq(aiSaasMonitorConnectors.id, connector.id));
       await audit(tx, actor(req), "ai_saas_monitor_credential", existing.id, AI_SAAS_RULE_IDS.credentialRevoked, "allow",
-        `AI SaaS monitor credential revoked for '${connector.name}', connector disabled: ${parsed.data.reason}`, { connectorId: connector.id, reason: parsed.data.reason });
+        `AI SaaS monitor ${purpose === "read" ? "credential revoked, connector disabled" : "remediation credential revoked"} for '${connector.name}': ${parsed.data.reason}`,
+        { connectorId: connector.id, purpose, reason: parsed.data.reason });
     });
     return reply.send({ revoked: existing.id });
   });

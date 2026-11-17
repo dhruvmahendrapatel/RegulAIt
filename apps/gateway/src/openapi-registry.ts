@@ -261,6 +261,13 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/ai-saas-monitoring/connectors/:connectorId/runs": "internal", // ADR-0361
   "GET /v1/ai-saas-monitoring/connectors/:connectorId/runs": "internal", // ADR-0361
   "GET /v1/ai-saas-monitoring/connectors/:connectorId/interactions": "internal", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/remediation": "internal", // ADR-0361 slice 3
+  "POST /v1/ai-saas-monitoring/remediations": "internal", // ADR-0361 slice 3
+  "GET /v1/ai-saas-monitoring/remediations": "internal", // ADR-0361 slice 3
+  "GET /v1/ai-saas-monitoring/remediations/:remediationId": "internal", // ADR-0361 slice 3
+  "POST /v1/ai-saas-monitoring/remediations/:remediationId/execute": "internal", // ADR-0361 slice 3
+  "POST /v1/ai-saas-monitoring/remediations/:remediationId/settle": "internal", // ADR-0361 slice 3
+  "POST /v1/ai-saas-monitoring/remediations/:remediationId/cancel": "internal", // ADR-0361 slice 3
   "GET /v1/cost-imports/reconciliation": "internal",
   "POST /v1/cost-imports/roster": "internal",
   "DELETE /v1/cost-imports/:importId": "internal",
@@ -1706,6 +1713,13 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/ai-saas-monitoring/connectors/:connectorId/runs": "shadow-ai", // ADR-0361
   "GET /v1/ai-saas-monitoring/connectors/:connectorId/runs": "shadow-ai", // ADR-0361
   "GET /v1/ai-saas-monitoring/connectors/:connectorId/interactions": "shadow-ai", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/remediation": "shadow-ai", // ADR-0361 slice 3
+  "POST /v1/ai-saas-monitoring/remediations": "shadow-ai", // ADR-0361 slice 3
+  "GET /v1/ai-saas-monitoring/remediations": "shadow-ai", // ADR-0361 slice 3
+  "GET /v1/ai-saas-monitoring/remediations/:remediationId": "shadow-ai", // ADR-0361 slice 3
+  "POST /v1/ai-saas-monitoring/remediations/:remediationId/execute": "shadow-ai", // ADR-0361 slice 3
+  "POST /v1/ai-saas-monitoring/remediations/:remediationId/settle": "shadow-ai", // ADR-0361 slice 3
+  "POST /v1/ai-saas-monitoring/remediations/:remediationId/cancel": "shadow-ai", // ADR-0361 slice 3
   "GET /v1/cost-imports/reconciliation": "cost-imports",
   "POST /v1/cost-imports/roster": "cost-imports",
   "DELETE /v1/cost-imports/:importId": "cost-imports",

@@ -6,7 +6,8 @@ import { describe, expect, it } from "vitest";
 import {
   adaptiveCardText,
   AI_SAAS_MONITOR_MAX_TEXT_CHARS,
-  AI_SAAS_MONITOR_RUN_TRANSITIONS,
+  AI_SAAS_MONITOR_RUN_MACHINE,
+  AI_SAAS_REMEDIATION_MACHINE,
   aiSaasMonitorRunSources,
   htmlToScanText,
   normalizeGraphInteraction,
@@ -238,9 +239,19 @@ describe("ADR-0361 run window, lifecycle and widening", () => {
   });
 
   it("declares the run lifecycle: running closes once", () => {
-    expect(AI_SAAS_MONITOR_RUN_TRANSITIONS.running).toEqual(["succeeded", "failed", "refused"]);
+    expect(AI_SAAS_MONITOR_RUN_MACHINE.describe("running").transitions.filter((t) => t.allowed).map((t) => t.to)).toEqual(["succeeded", "failed", "refused"]);
     expect(aiSaasMonitorRunSources("failed")).toEqual(["running"]);
-    expect(AI_SAAS_MONITOR_RUN_TRANSITIONS.succeeded).toEqual([]);
+    expect(AI_SAAS_MONITOR_RUN_MACHINE.isTerminal("succeeded")).toBe(true);
+  });
+
+  it("declares the remediation lifecycle: approve before execute, unknown settles by a read, terminals stay terminal", () => {
+    const m = AI_SAAS_REMEDIATION_MACHINE;
+    expect(m.can("requested", "execute")).toBe(false);
+    expect(m.next("approved", "execute")).toBe("executing");
+    expect(m.sourcesOf("succeed")).toEqual(["executing", "unknown"]);
+    expect(m.can("unknown", "execute")).toBe(false);
+    for (const t of ["succeeded", "failed", "denied", "cancelled"] as const) expect(m.isTerminal(t)).toBe(true);
+    expect(() => m.next("succeeded", "execute")).toThrow();
   });
 
   it("knows when a configuration reads more than before", () => {

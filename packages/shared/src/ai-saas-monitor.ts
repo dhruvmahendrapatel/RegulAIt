@@ -7,6 +7,7 @@
  * `ai-saas-connectors.ts`) does the I/O.
  */
 import { z } from "zod";
+import { defineMachine } from "./state-machine.js";
 
 export const AI_SAAS_MONITOR_VENDORS = ["m365_copilot", "chatgpt_enterprise", "claude_enterprise"] as const;
 export type AiSaasMonitorVendor = (typeof AI_SAAS_MONITOR_VENDORS)[number];
@@ -28,8 +29,8 @@ export interface AiSaasMonitorCatalogueEntry {
    * audited attestation that the key holds only the read scope named in `permissions` (ADR-0361 §6)
    */
   scopeVerifiable: boolean;
-  /** whether the vendor's API offers a conversation delete or quarantine (slice 3) */
-  remediation: "none" | "planned";
+  /** what the vendor's API offers for remediation (slice 3): a conversation delete, or nothing; none offers a quarantine */
+  remediation: "none" | "delete";
   docs: string;
   built: boolean;
 }
@@ -57,7 +58,7 @@ export const AI_SAAS_MONITOR_CATALOGUE: Readonly<Record<AiSaasMonitorVendor, AiS
     scopeCheck:
       "OpenAI offers no scope probe: storing the key needs the admin's attestation that it holds only the conversation_message read scope (no compliance_export delete scope)",
     scopeVerifiable: false,
-    remediation: "planned",
+    remediation: "delete",
     docs: "https://chatgpt.com/public/admin/api-reference",
     built: true,
   },
@@ -69,7 +70,7 @@ export const AI_SAAS_MONITOR_CATALOGUE: Readonly<Record<AiSaasMonitorVendor, AiS
     scopeCheck:
       "Anthropic offers no scope probe: storing the key needs the admin's attestation that it holds no delete:compliance_user_data scope (Anthropic recommends a separate key for deletion)",
     scopeVerifiable: false,
-    remediation: "planned",
+    remediation: "delete",
     docs: "https://platform.claude.com/docs/en/manage-claude/compliance-api",
     built: true,
   },
@@ -497,18 +498,66 @@ export function normalizeClaudeMessages(chat: ClaudeChatMessages): MonitoredInte
 export const AI_SAAS_MONITOR_RUN_STATUSES = ["running", "succeeded", "failed", "refused"] as const;
 export type AiSaasMonitorRunStatus = (typeof AI_SAAS_MONITOR_RUN_STATUSES)[number];
 
-/** the only moves a run makes: it opens `running` and closes once */
-export const AI_SAAS_MONITOR_RUN_TRANSITIONS: Readonly<Record<AiSaasMonitorRunStatus, readonly AiSaasMonitorRunStatus[]>> = {
-  running: ["succeeded", "failed", "refused"],
-  succeeded: [],
-  failed: [],
-  refused: [],
-};
+/** `ai_saas_monitor_runs.status`, declared on the ADR-0348 helper: a run opens `running` and closes once */
+export const AI_SAAS_MONITOR_RUN_MACHINE = defineMachine({
+  id: "ai_saas_monitor_run",
+  stored: "ai_saas_monitor_runs.status",
+  states: AI_SAAS_MONITOR_RUN_STATUSES,
+  initial: ["running", "refused"],
+  terminal: ["succeeded", "failed", "refused"],
+  transitions: {
+    succeed: { from: ["running"], to: "succeeded", by: ["system"], summary: "The window was read and every new interaction recorded; the connector's cursor moved to the window's end." },
+    fail: { from: ["running"], to: "failed", by: ["system"], summary: "The vendor or a bound stopped the run; pages already stored stay, and the cursor did not move." },
+    refuse: { from: ["running"], to: "refused", by: ["system"], summary: "A switch was off or a precondition missing, so nothing was read." },
+  },
+});
 
-/** the states a run may move to `to` from, read off the table (the finish step's compare-and-set guard) */
-export function aiSaasMonitorRunSources(to: AiSaasMonitorRunStatus): AiSaasMonitorRunStatus[] {
-  return AI_SAAS_MONITOR_RUN_STATUSES.filter((from) => AI_SAAS_MONITOR_RUN_TRANSITIONS[from].includes(to));
+/** the event that closes a run in `to` */
+const RUN_CLOSE_EVENT = { succeeded: "succeed", failed: "fail", refused: "refuse" } as const;
+
+/** the states a run may move to `to` from, read off the machine (the finish step's compare-and-set guard) */
+export function aiSaasMonitorRunSources(to: Exclude<AiSaasMonitorRunStatus, "running">): AiSaasMonitorRunStatus[] {
+  return [...AI_SAAS_MONITOR_RUN_MACHINE.sourcesOf(RUN_CLOSE_EVENT[to])];
 }
+
+// --------------------------------------------------------------------------------------------------------------------
+// Remediation (ADR-0361 slice 3): delete a conversation through the vendor API, off by default, approved, audited
+// --------------------------------------------------------------------------------------------------------------------
+
+/** the only remediation any of these vendors documents; no vendor documents a quarantine, so none is offered */
+export const AI_SAAS_REMEDIATION_ACTIONS = ["delete_conversation"] as const;
+export type AiSaasRemediationAction = (typeof AI_SAAS_REMEDIATION_ACTIONS)[number];
+
+export const AI_SAAS_REMEDIATION_STATUSES = ["requested", "approved", "executing", "unknown", "succeeded", "failed", "denied", "cancelled"] as const;
+export type AiSaasRemediationStatus = (typeof AI_SAAS_REMEDIATION_STATUSES)[number];
+
+/**
+ * `ai_saas_remediations.status`: a request is approved in the Approvals Queue by someone other than the requester,
+ * executed once by the requester, and settled. The vendor call never runs inside a transaction; a crash or timeout
+ * leaves `unknown`, which is settled by reading the conversation again (or, where the vendor documents no read, by the
+ * same idempotent delete, a 404 meaning it is gone), never by a different action.
+ */
+export const AI_SAAS_REMEDIATION_MACHINE = defineMachine({
+  id: "ai_saas_remediation",
+  stored: "ai_saas_remediations.status",
+  states: AI_SAAS_REMEDIATION_STATUSES,
+  initial: ["requested"],
+  terminal: ["succeeded", "failed", "denied", "cancelled"],
+  transitions: {
+    approve: { from: ["requested"], to: "approved", by: ["approver"], summary: "An eligible approver other than the requester approved it, with a fresh step-up." },
+    deny: { from: ["requested"], to: "denied", by: ["approver"], summary: "An eligible approver refused it; nothing is sent to the vendor." },
+    cancel: { from: ["requested", "approved"], to: "cancelled", by: ["admin", "system"], summary: "The requester or an admin withdrew it, or its approval expired before it ran." },
+    execute: { from: ["approved"], to: "executing", by: ["admin"], summary: "The requester ran it with a fresh step-up; the approval is consumed and the kill switch re-read." },
+    succeed: { from: ["executing", "unknown"], to: "succeeded", by: ["system"], summary: "The vendor confirmed the conversation is deleted." },
+    fail: { from: ["executing", "unknown"], to: "failed", by: ["system"], summary: "The vendor refused or the conversation is still there; a new request needs a new approval." },
+    lose: {
+      from: ["executing"],
+      to: "unknown",
+      by: ["system"],
+      summary: "The vendor did not answer in time, or the process stopped; settled by reading the conversation, or by the same idempotent delete where the vendor offers no read, never by another action.",
+    },
+  },
+});
 
 /** every error code a run may record; the text beside it is always a sentence RegulAIt wrote */
 export const AI_SAAS_MONITOR_ERROR_CODES = [

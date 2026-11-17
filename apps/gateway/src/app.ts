@@ -647,6 +647,7 @@ import { registerEndpointAddonInventoryRoutes } from "./endpoint-addon-inventory
 import type { ScannerRegistry } from "./discovery-scanners.js";
 import { registerCostImportRoutes } from "./cost-import.js";
 import { registerAiSaasMonitorRoutes } from "./ai-saas-monitor.js";
+import { precheckAiSaasRemediationDecision, registerAiSaasRemediationRoutes } from "./ai-saas-remediation.js";
 import { registerCostReconciliationRoutes } from "./cost-reconcile.js";
 import { registerTracingRoutes } from "./tracing.js";
 import { registerCompliancePackRoutes } from "./compliance-packs.js";
@@ -5228,6 +5229,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const refusal = await precheckComplianceProfileDecision(db, row, deciderUserId);
       if (refusal) return fail(refusal.status, refusal.body);
     }
+    // ADR-0361 slice 3 — `cannot_approve_own_ai_saas_remediation` (keyed on the DECIDER, so the requester cannot reach
+    // their own deletion through delegation or the admin override above) and a fresh `approval_decide` step-up on
+    // every decision, so an API key, a chat tap or a bulk decide cannot decide a conversation deletion.
+    if (row.objectType === "ai_saas_remediation") {
+      const refusal = await precheckAiSaasRemediationDecision(db, row, deciderUserId, binaryDecision, input.req, input.channel);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
     // Separation-of-duties guard: the person deciding IS the person who
     // triggered the governed action. Still decidable (alternate-approver
     // routing is deliberately out of scope) but never silently — a recorded
@@ -6274,6 +6282,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0361 — read-only monitoring of sanctioned AI SaaS through vendor compliance APIs (off by default, refused when
   // air-gapped). Admin-only by default (none of these routes is in NON_ADMIN_ROUTES); credentials are never returned.
   registerAiSaasMonitorRoutes(app, db, {
+    dataKey: opts.dataKey,
+    deps: {
+      ...(opts.aiSaasMonitorFetch ? { fetchImpl: opts.aiSaasMonitorFetch, minSpacingMs: 0 } : {}),
+      ...(opts.aiSaasMonitorResolve ? { resolve: opts.aiSaasMonitorResolve } : {}),
+      ...(opts.aiSaasMonitorConnectors ? { connectors: opts.aiSaasMonitorConnectors } : {}),
+    },
+  });
+  registerAiSaasRemediationRoutes(app, db, {
     dataKey: opts.dataKey,
     deps: {
       ...(opts.aiSaasMonitorFetch ? { fetchImpl: opts.aiSaasMonitorFetch, minSpacingMs: 0 } : {}),

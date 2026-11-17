@@ -14,6 +14,8 @@ export const EXTERNAL_WRITE_OPERATIONS = [
   "pm.update_fields",
   "pm.transition_state",
   "pm.add_comment",
+  // ADR-0361 slice 3: deleting a monitored conversation in a sanctioned AI SaaS tenant (ai-saas-remediation.ts)
+  "vendor.delete_conversation",
 ] as const;
 
 export type ExternalWriteOperation = (typeof EXTERNAL_WRITE_OPERATIONS)[number];
