@@ -235,7 +235,7 @@ describe("ADR-0327 induction off the event loop (review #862)", () => {
 });
 
 describe("ADR-0327 suggestions follow the §8.3 retention floor (slice 3)", () => {
-  it("deletes a suggestion detected before the cutoff and keeps a newer one", async () => {
+  it("deletes a suggestion whose scan window starts before the cutoff, even one detected inside the floor (review #901)", async () => {
     const row = (stepName: string) => ({
       agentId,
       stepName,
@@ -248,14 +248,18 @@ describe("ADR-0327 suggestions follow the §8.3 retention floor (slice 3)", () =
       windowCostUsd: 0.1,
       projectedMonthlySavingsUsd: 0.1,
     });
-    const [old] = await db
-      .insert(ruleStepSuggestions)
-      .values({ ...row(`retention-old-${Date.now()}`), detectedAt: sql`now() - interval '40 days'` })
-      .returning({ id: ruleStepSuggestions.id });
-    const [fresh] = await db.insert(ruleStepSuggestions).values(row(`retention-new-${Date.now()}`)).returning({ id: ruleStepSuggestions.id });
-    const cutoff = new Date(Date.now() - 30 * 86_400_000);
-    expect(await pruneRuleStepSuggestions(db, cutoff)).toBeGreaterThanOrEqual(1);
-    const left = await db.select({ id: ruleStepSuggestions.id }).from(ruleStepSuggestions).where(inArray(ruleStepSuggestions.id, [old!.id, fresh!.id]));
-    expect(left.map((x) => x.id)).toEqual([fresh!.id]);
+    // a 60-day floor; the scan window is 30 days
+    const cutoff = new Date(Date.now() - 60 * 86_400_000);
+    const at = async (name: string, daysAgo: number) =>
+      (await db
+        .insert(ruleStepSuggestions)
+        .values({ ...row(`${name}-${Date.now()}`), detectedAt: sql`now() - make_interval(days => ${daysAgo})` })
+        .returning({ id: ruleStepSuggestions.id }))[0]!.id;
+    const old = await at("retention-old", 70); // detected before the cutoff
+    const straddling = await at("retention-straddling", 45); // detected inside the floor, window starts 75 days ago
+    const fresh = await at("retention-fresh", 0); // window starts 30 days ago, inside the floor
+    expect(await pruneRuleStepSuggestions(db, cutoff)).toBeGreaterThanOrEqual(2);
+    const left = await db.select({ id: ruleStepSuggestions.id }).from(ruleStepSuggestions).where(inArray(ruleStepSuggestions.id, [old, straddling, fresh]));
+    expect(left.map((x) => x.id)).toEqual([fresh]);
   });
 });

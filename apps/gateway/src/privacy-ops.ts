@@ -194,6 +194,14 @@ export function subjectPattern(kind: DsrIdentifierKind, identifier: string): str
 /** the column matches the subject pattern (case-insensitive) */
 const matchesSubject = (column: unknown, pattern: string) => sql`${column} ~* ${pattern}`;
 
+/**
+ * ADR-0327: a rule-step suggestion holds the subject when any cell's key value or output matches, compared element by element
+ * (the jsonb text form escapes `"` and `\`, so matching `rule::text` could miss a value that holds either). One
+ * predicate, used by locate and by erasure alike.
+ */
+const ruleHoldsSubject = (pattern: string) =>
+  sql`exists (select 1 from jsonb_array_elements(${ruleStepSuggestions.rule} -> 'cells') c where c ->> 'output' ~* ${pattern} or exists (select 1 from jsonb_array_elements_text(c -> 'key') k where k ~* ${pattern}))`;
+
 interface Located {
   findings: DsrStoreFinding[];
   auditIds: string[];
@@ -227,7 +235,7 @@ async function locateSubject(db: Db, kind: DsrIdentifierKind, identifier: string
     db.select({ n: sql<number>`count(*)::int` }).from(conversationMessages).where(matchesSubject(conversationMessages.content, pattern)),
     db.select({ n: sql<number>`count(*)::int` }).from(conversations).where(and(sql`${conversations.summary} IS NOT NULL`, matchesSubject(conversations.summary, pattern))),
     db.select({ n: sql<number>`count(*)::int` }).from(projectContextItems).where(matchesSubject(projectContextItems.content, pattern)),
-    db.select({ n: sql<number>`count(*)::int` }).from(ruleStepSuggestions).where(matchesSubject(sql`${ruleStepSuggestions.rule}::text`, pattern)),
+    db.select({ n: sql<number>`count(*)::int` }).from(ruleStepSuggestions).where(ruleHoldsSubject(pattern)),
     db
       .select({ n: sql<number>`count(*)::int`, newest: sql<Date | null>`max(${auditLog.at})` })
       .from(auditLog)
@@ -692,7 +700,7 @@ export function registerPrivacyOpsRoutes(app: FastifyInstance, db: Db, opts: { d
         // ADR-0327: a suggestion's rule is derived, so it is deleted, never redacted (a redacted cell would be a wrong rule)
         const rules = await t
           .delete(ruleStepSuggestions)
-          .where(matchesSubject(sql`${ruleStepSuggestions.rule}::text`, pattern))
+          .where(ruleHoldsSubject(pattern))
           .returning({ id: ruleStepSuggestions.id });
         const retainedUntil =
           floorDays != null && located.newestAuditAt ? new Date(located.newestAuditAt.getTime() + floorDays * 86_400_000) : null;

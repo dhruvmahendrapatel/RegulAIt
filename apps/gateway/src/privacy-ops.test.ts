@@ -211,6 +211,7 @@ describe("data-subject requests", () => {
   let auditRowId: string;
   let ruleWithSubject: string;
   let ruleWithout: string;
+  let ruleOutput: string;
 
   // ADR-0327: a rule-like step suggestion whose cell holds an input value (here, the subject's email)
   const suggestion = (stepName: string, value: string) => ({
@@ -231,6 +232,12 @@ describe("data-subject requests", () => {
     ruleWithSubject = rs!.id;
     const [ro] = await db.insert(ruleStepSuggestions).values(suggestion(`route-other-${RUN}`, "nobody@example.org")).returning({ id: ruleStepSuggestions.id });
     ruleWithout = ro!.id;
+    // the subject only in a cell's output (an AI output copied into the rule), never in its key
+    const [rp] = await db
+      .insert(ruleStepSuggestions)
+      .values({ ...suggestion(`route-output-${RUN}`, "tier-1"), rule: { fields: ["queue"], cells: [{ key: ["vip"], output: `escalate to ${SUBJECT}`, support: 9 }] } })
+      .returning({ id: ruleStepSuggestions.id });
+    ruleOutput = rp!.id;
     // personal data about the subject in a conversation, and in one audit row
     const [c] = await db.insert(conversations).values({ userId, agentId, projectId: proj, title: "support" }).returning();
     const [m] = await db.insert(conversationMessages).values({ conversationId: c!.id, role: "user", content: `Please contact ${SUBJECT} tomorrow.` }).returning();
@@ -281,7 +288,7 @@ describe("data-subject requests", () => {
     const byStore = Object.fromEntries((v.located as Array<{ store: string; matches: number }>).map((f) => [f.store, f.matches]));
     expect(byStore.conversations).toBeGreaterThanOrEqual(1);
     expect(byStore.audit_trail).toBeGreaterThanOrEqual(1);
-    expect(byStore.rule_step_suggestions).toBeGreaterThanOrEqual(1);
+    expect(byStore.rule_step_suggestions).toBeGreaterThanOrEqual(2);
     expect(JSON.stringify(r.json())).not.toContain(SUBJECT.toLowerCase());
   });
 
@@ -305,7 +312,7 @@ describe("data-subject requests", () => {
     const [auditAfter] = await db.select().from(auditLog).where(eq(auditLog.id, auditRowId));
     expect(auditAfter).toEqual(auditBefore);
     // ADR-0327: the suggestion that copied the subject's value is deleted; an unrelated one stays
-    const left = await db.select({ id: ruleStepSuggestions.id }).from(ruleStepSuggestions).where(sql`${ruleStepSuggestions.id} in (${ruleWithSubject}, ${ruleWithout})`);
+    const left = await db.select({ id: ruleStepSuggestions.id }).from(ruleStepSuggestions).where(sql`${ruleStepSuggestions.id} in (${ruleWithSubject}, ${ruleWithout}, ${ruleOutput})`);
     expect(left.map((x) => x.id)).toEqual([ruleWithout]);
     const tombs = await db.select().from(dataSubjectTombstones).where(eq(dataSubjectTombstones.requestId, requestId));
     expect(tombs).toHaveLength(1);
