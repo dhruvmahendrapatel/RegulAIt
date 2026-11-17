@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  assertCompensationStatus,
+  closePrSupersededByMerge,
+  COMPENSATION_LIFECYCLE,
+  compensationStatusFor,
+  compensationPhaseOf,
+  compensationPlan,
+  nextCompensationPhase,
   currentPlanningStage,
+  isCompensating,
   initialState,
   isExecutedStage,
   matchTemplates,
@@ -981,5 +989,280 @@ describe("ADR-0285: checkConcurrency is a check-stage-only, bounded setting", ()
   it("is refused on any other stage", () => {
     expect(() => validateDefinition({ workflow: "bad", stages: [...base, { id: "checks", type: "automated_check", checkConcurrency: 2 }] })).toThrow(/cannot carry checkConcurrency/);
     expect(() => validateDefinition({ workflow: "bad", stages: [...base, { id: "plan", type: "planning", checkConcurrency: 2 }] })).toThrow(/cannot carry checkConcurrency/);
+  });
+});
+
+describe("ADR-0340: compensation (saga) stages", () => {
+  const sagaStages = [
+    { id: "intake", type: "trigger" },
+    { id: "branch", type: "git_operation", action: "create_branch", connection: "gh", repo: "o/r" },
+    { id: "pr", type: "git_operation", action: "open_pr", connection: "gh", repo: "o/r" },
+    { id: "deploy", type: "deployment", connection: "dt", environment: "staging" },
+    { id: "merge_gate", type: "human_approval", approvers: ["requesting_user"] },
+    { id: "merge", type: "git_operation", action: "merge", connection: "gh", repo: "o/r" },
+    { id: "undo_branch", type: "git_operation", action: "delete_branch", connection: "gh", repo: "o/r", compensates: "branch" },
+    { id: "undo_pr", type: "git_operation", action: "close_pr", connection: "gh", repo: "o/r", compensates: "pr" },
+    { id: "undo_deploy", type: "rollback", connection: "dt", compensates: "deploy" },
+    { id: "undo_merge", type: "automated_build", compensates: "merge" },
+  ];
+  const saga = validateDefinition({ workflow: "saga", stages: sagaStages });
+
+  /** run forward to the merge gate: branch, pr and deploy have run */
+  function atGate(): InstanceState {
+    let r = transition(saga, initialState(saga), { kind: "start" });
+    for (const id of ["branch", "pr", "deploy"]) r = transition(saga, r.state, { kind: "execution_succeeded", stageId: id });
+    expect(r.state.status).toBe("blocked_on_approval");
+    return r.state;
+  }
+
+  it("compensation stages never run in the forward flow", () => {
+    let r = transition(saga, atGate(), { kind: "approval_granted", stageId: "merge_gate" });
+    expect(r.effects).toContainEqual({ kind: "execute_stage", stageId: "merge" });
+    r = transition(saga, r.state, { kind: "execution_succeeded", stageId: "merge" });
+    expect(r.state.status).toBe("completed");
+    for (const id of ["undo_branch", "undo_pr", "undo_deploy", "undo_merge"]) {
+      expect(r.state.stageStatuses[saga.stages.findIndex((s) => s.id === id)]).toBe("pending");
+    }
+  });
+
+  it("a cancel runs the compensations of the stages that ran, in reverse order, then ends aborted", () => {
+    const gate = atGate();
+    expect(compensationPlan(saga, gate)).toEqual(["undo_deploy", "undo_pr", "undo_branch"]);
+    let r = transition(saga, gate, { kind: "abort" });
+    expect(r.effects).toEqual([
+      { kind: "compensation_started", cause: "aborted", plan: ["undo_deploy", "undo_pr", "undo_branch"] },
+      { kind: "execute_stage", stageId: "undo_deploy" },
+    ]);
+    expect(r.state.status).toBe("awaiting_execution");
+    expect(isCompensating(r.state)).toBe(true);
+    expect(r.state.compensation).toMatchObject({ cause: "aborted", fromStageId: "merge_gate" });
+    // the rollback compensation ends with rolled_back, which here moves on instead of ending the run
+    r = transition(saga, r.state, { kind: "rolled_back", stageId: "undo_deploy" });
+    expect(r.effects).toEqual([{ kind: "execute_stage", stageId: "undo_pr" }]);
+    // a failed compensation stays where it is, retryable
+    r = transition(saga, r.state, { kind: "execution_failed", stageId: "undo_pr", error: "502" });
+    expect(r.state.status).toBe("awaiting_execution");
+    expect(saga.stages[r.state.currentStageIndex]!.id).toBe("undo_pr");
+    r = transition(saga, r.state, { kind: "execution_succeeded", stageId: "undo_pr" });
+    r = transition(saga, r.state, { kind: "execution_succeeded", stageId: "undo_branch" });
+    expect(r.state.status).toBe("aborted");
+    expect(r.state.compensation).toMatchObject({ outcome: "completed", remaining: [] });
+    expect(r.effects).toEqual([
+      { kind: "compensation_completed", cause: "aborted", plan: ["undo_deploy", "undo_pr", "undo_branch"] },
+      { kind: "instance_aborted" },
+    ]);
+    expect(isCompensating(r.state)).toBe(false);
+  });
+
+  it("a denial compensates and ends denied; a manual compensation completes by a person", () => {
+    let r = transition(saga, atGate(), { kind: "approval_granted", stageId: "merge_gate" });
+    r = transition(saga, r.state, { kind: "execution_succeeded", stageId: "merge" });
+    // a completed instance cannot be cancelled (it is terminal) — so deny at a gate instead: use a 2nd gate template
+    expect(() => transition(saga, r.state, { kind: "abort" })).toThrow(/terminal/);
+    r = transition(saga, atGate(), { kind: "approval_denied", stageId: "merge_gate" });
+    expect(r.state.compensation?.cause).toBe("denied");
+    expect(r.state.status).toBe("awaiting_execution");
+    r = transition(saga, r.state, { kind: "rolled_back", stageId: "undo_deploy" });
+    r = transition(saga, r.state, { kind: "execution_succeeded", stageId: "undo_pr" });
+    r = transition(saga, r.state, { kind: "execution_succeeded", stageId: "undo_branch" });
+    expect(r.state.status).toBe("denied");
+    expect(r.effects).toContainEqual({ kind: "instance_denied" });
+  });
+
+  it("a merge is undone by a manual task a person completes (never by a git action)", () => {
+    const def = validateDefinition({
+      workflow: "merge-saga",
+      stages: [
+        { id: "intake", type: "trigger" },
+        { id: "branch", type: "git_operation", action: "create_branch", connection: "gh", repo: "o/r" },
+        { id: "pr", type: "git_operation", action: "open_pr", connection: "gh", repo: "o/r" },
+        { id: "merge", type: "git_operation", action: "merge", connection: "gh", repo: "o/r" },
+        { id: "release_gate", type: "human_approval", approvers: ["requesting_user"] },
+        { id: "revert_merge", type: "automated_build", compensates: "merge" },
+      ],
+    });
+    let r = transition(def, initialState(def), { kind: "start" });
+    for (const id of ["branch", "pr", "merge"]) r = transition(def, r.state, { kind: "execution_succeeded", stageId: id });
+    r = transition(def, r.state, { kind: "approval_denied", stageId: "release_gate" });
+    expect(r.state.status).toBe("awaiting_trigger");
+    expect(r.effects).toContainEqual({ kind: "await_human_trigger", stageId: "revert_merge" });
+    // nothing else moves a compensating instance
+    expect(() => transition(def, r.state, { kind: "approval_granted", stageId: "release_gate" })).toThrow(/compensating/);
+    expect(() => transition(def, r.state, { kind: "reopen", stageId: "release_gate", reason: "x" })).toThrow(/compensating/);
+    r = transition(def, r.state, { kind: "human_trigger", stageId: "revert_merge" });
+    expect(r.state.status).toBe("denied");
+  });
+
+  it("an abort while compensating abandons the rest, naming what never ran", () => {
+    let r = transition(saga, atGate(), { kind: "abort" });
+    r = transition(saga, r.state, { kind: "rolled_back", stageId: "undo_deploy" });
+    r = transition(saga, r.state, { kind: "abort" });
+    expect(r.state.status).toBe("aborted");
+    expect(r.state.compensation?.outcome).toBe("abandoned");
+    expect(r.effects).toEqual([
+      { kind: "compensation_abandoned", cause: "aborted", notRun: ["undo_pr", "undo_branch"] },
+      { kind: "instance_aborted" },
+    ]);
+  });
+
+  it("a stage that never completed is not compensated; no compensations = the old abort", () => {
+    let r = transition(saga, initialState(saga), { kind: "start" });
+    r = transition(saga, r.state, { kind: "execution_failed", stageId: "branch", error: "x" });
+    r = transition(saga, r.state, { kind: "abort" });
+    expect(r.state.status).toBe("aborted");
+    expect(r.state.compensation).toBeUndefined();
+    expect(r.effects).toEqual([{ kind: "instance_aborted" }]);
+  });
+
+  it("re-opens ignore compensation stages when finding the first shipping stage", () => {
+    const def = validateDefinition({
+      workflow: "reopen-saga",
+      stages: [
+        { id: "intake", type: "trigger" },
+        { id: "req", type: "artifact_generation", output: "r" },
+        { id: "branch", type: "git_operation", action: "create_branch", connection: "gh", repo: "o/r" },
+        { id: "undo_branch", type: "git_operation", action: "delete_branch", connection: "gh", repo: "o/r", compensates: "branch" },
+        { id: "signoff", type: "human_approval", approvers: ["requesting_user"] },
+        { id: "pr", type: "git_operation", action: "open_pr", connection: "gh", repo: "o/r" },
+      ],
+    });
+    let r = transition(def, initialState(def), { kind: "start" });
+    r = transition(def, r.state, { kind: "artifact_submitted", stageId: "req" });
+    r = transition(def, r.state, { kind: "execution_succeeded", stageId: "branch" });
+    expect(r.state.status).toBe("blocked_on_approval");
+    r = transition(def, r.state, { kind: "approval_granted", stageId: "signoff" });
+    r = transition(def, r.state, { kind: "reopen", stageId: "signoff", reason: "recertify" });
+    expect(r.state.status).toBe("blocked_on_approval");
+  });
+
+  it("validation: undo actions need compensates; the pairing, repo and uniqueness are checked", () => {
+    const base = sagaStages.slice(0, 6);
+    const bad = (extra: unknown[], re: RegExp) =>
+      expect(() => validateDefinition({ workflow: "bad", stages: [...base, ...extra] })).toThrow(re);
+    bad([{ id: "x", type: "git_operation", action: "delete_branch", connection: "gh", repo: "o/r" }], /needs compensates/);
+    bad([{ id: "x", type: "git_operation", action: "close_pr", connection: "gh", repo: "o/r", compensates: "branch" }], /cannot compensate 'branch'/);
+    bad([{ id: "x", type: "git_operation", action: "delete_branch", connection: "gh", repo: "o/other", compensates: "branch" }], /connection and repo/);
+    bad([{ id: "x", type: "rollback", connection: "dt", compensates: "pr" }], /cannot compensate 'pr'/);
+    bad([{ id: "x", type: "automated_build", compensates: "merge_gate" }], /cannot compensate 'merge_gate'/);
+    bad([{ id: "x", type: "automated_build", compensates: "nope" }], /not a forward stage/);
+    bad(
+      [
+        { id: "x", type: "automated_build", compensates: "branch" },
+        { id: "y", type: "git_operation", action: "delete_branch", connection: "gh", repo: "o/r", compensates: "branch" },
+      ],
+      /more than one compensation/,
+    );
+    bad(
+      [
+        { id: "x", type: "automated_build", compensates: "branch" },
+        { id: "y", type: "automated_build", compensates: "x" },
+      ],
+      /not a forward stage/,
+    );
+  });
+});
+
+describe("ADR-0340 rule 12: the compensation lifecycle is one declared table", () => {
+  it("pins every allowed move, and refuses anything else", () => {
+    expect(COMPENSATION_LIFECYCLE).toEqual({
+      none: { cancel: { to: "compensating", status: "stage" }, deny: { to: "compensating", status: "stage" } },
+      compensating: {
+        step_succeeded: { to: "compensating", status: "stage" },
+        step_failed: { to: "compensating", status: "unchanged" },
+        last_step_succeeded: { to: "completed", status: "cause" },
+        abort: { to: "abandoned", status: "cause" },
+      },
+      completed: {},
+      abandoned: {},
+    });
+    expect(() => nextCompensationPhase("completed", "abort")).toThrow(/cannot 'abort' from 'completed'/);
+    expect(() => nextCompensationPhase("none", "step_succeeded")).toThrow();
+    expect(() => nextCompensationPhase("abandoned", "cancel")).toThrow();
+  });
+
+  it("an instance's phase follows the table through a real saga", () => {
+    const def = validateDefinition({
+      workflow: "phase",
+      stages: [
+        { id: "intake", type: "trigger" },
+        { id: "branch", type: "git_operation", action: "create_branch", connection: "gh", repo: "o/r" },
+        { id: "gate", type: "human_approval", approvers: ["requesting_user"] },
+        { id: "undo", type: "git_operation", action: "delete_branch", connection: "gh", repo: "o/r", compensates: "branch" },
+      ],
+    });
+    let r = transition(def, initialState(def), { kind: "start" });
+    r = transition(def, r.state, { kind: "execution_succeeded", stageId: "branch" });
+    expect(compensationPhaseOf(r.state)).toBe("none");
+    r = transition(def, r.state, { kind: "abort" });
+    expect(compensationPhaseOf(r.state)).toBe("compensating");
+    expect(r.state.status).toBe("awaiting_execution");
+    expect(() => assertCompensationStatus(def, r.state)).not.toThrow();
+    r = transition(def, r.state, { kind: "execution_succeeded", stageId: "undo" });
+    expect(compensationPhaseOf(r.state)).toBe("completed");
+    expect(r.state.status).toBe("aborted");
+    expect(compensationStatusFor(def, r.state)).toBe("aborted");
+  });
+
+  it("the status each phase implies is checked: a finished saga without its terminal status is refused", () => {
+    const def = validateDefinition({
+      workflow: "phase-status",
+      stages: [
+        { id: "intake", type: "trigger" },
+        { id: "branch", type: "git_operation", action: "create_branch", connection: "gh", repo: "o/r" },
+        { id: "gate", type: "human_approval", approvers: ["requesting_user"] },
+        { id: "undo", type: "git_operation", action: "delete_branch", connection: "gh", repo: "o/r", compensates: "branch" },
+      ],
+    });
+    let r = transition(def, initialState(def), { kind: "start" });
+    r = transition(def, r.state, { kind: "execution_succeeded", stageId: "branch" });
+    expect(compensationStatusFor(def, r.state)).toBeNull();
+    r = transition(def, r.state, { kind: "approval_denied", stageId: "gate", approver: "u" } as never);
+    expect(r.state.status).toBe("awaiting_execution");
+    // a later edit that ends the saga without its outcome, or sets the outcome without the status, is caught
+    expect(() => assertCompensationStatus(def, { ...r.state, status: "denied" })).toThrow(/needs status 'awaiting_execution'/);
+    const done = transition(def, r.state, { kind: "execution_succeeded", stageId: "undo" }).state;
+    expect(done.status).toBe("denied");
+    expect(() => assertCompensationStatus(def, { ...done, status: "awaiting_execution" })).toThrow(/needs status 'denied'/);
+    // a failed compensation keeps its status (retryable)
+    const failed = transition(def, r.state, { kind: "execution_failed", stageId: "undo", error: "x" } as never).state;
+    expect(failed.status).toBe("awaiting_execution");
+  });
+});
+
+describe("ADR-0340: a saga after a merge", () => {
+  const stages = [
+    { id: "intake", type: "trigger" },
+    { id: "branch", type: "git_operation", action: "create_branch", connection: "gh", repo: "o/r" },
+    { id: "pr", type: "git_operation", action: "open_pr", connection: "gh", repo: "o/r" },
+    { id: "merge", type: "git_operation", action: "merge", connection: "gh", repo: "o/r" },
+    { id: "release", type: "human_approval", approvers: ["requesting_user"] },
+    { id: "undo_branch", type: "git_operation", action: "delete_branch", connection: "gh", repo: "o/r", compensates: "branch" },
+    { id: "undo_pr", type: "git_operation", action: "close_pr", connection: "gh", repo: "o/r", compensates: "pr" },
+  ];
+
+  it("a close_pr whose pull request a stage merges needs that merge compensated too", () => {
+    expect(() => validateDefinition({ workflow: "m", stages })).toThrow(/closes the pull request that 'merge' merges/);
+    expect(() =>
+      validateDefinition({ workflow: "m", stages: [...stages, { id: "revert", type: "automated_build", compensates: "merge" }] }),
+    ).not.toThrow();
+  });
+
+  it("close_pr is superseded only once the merge's own revert completed in this saga", () => {
+    const def = validateDefinition({ workflow: "m", stages: [...stages, { id: "revert", type: "automated_build", compensates: "merge" }] });
+    let r = transition(def, initialState(def), { kind: "start" });
+    for (const id of ["branch", "pr", "merge"]) r = transition(def, r.state, { kind: "execution_succeeded", stageId: id });
+    expect(r.state.status).toBe("blocked_on_approval");
+    expect(closePrSupersededByMerge(def, r.state, "undo_pr")).toBe(false);
+    r = transition(def, r.state, { kind: "abort" });
+    expect(r.state.compensation!.plan).toEqual(["revert", "undo_pr", "undo_branch"]);
+    expect(closePrSupersededByMerge(def, r.state, "undo_pr")).toBe(false); // the revert has not run yet
+    r = transition(def, r.state, { kind: "human_trigger", stageId: "revert" } as never);
+    expect(r.state.status).toBe("awaiting_execution");
+    expect(closePrSupersededByMerge(def, r.state, "undo_pr")).toBe(true);
+    expect(closePrSupersededByMerge(def, r.state, "undo_branch")).toBe(false);
+    r = transition(def, r.state, { kind: "execution_succeeded", stageId: "undo_pr" });
+    r = transition(def, r.state, { kind: "execution_succeeded", stageId: "undo_branch" });
+    expect(r.state.status).toBe("aborted");
+    expect(r.state.compensation!.outcome).toBe("completed");
   });
 });

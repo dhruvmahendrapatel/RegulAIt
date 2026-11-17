@@ -818,6 +818,9 @@ describe("every sweep is registered", () => {
         // ADR-0334 (owner decision B2): captured browser prompts past retention; driven end to end in
         // zz-adr0334-browser-governance.test.ts (with capture off nothing is stored, so it deletes nothing)
         SCHEDULER_JOB_NAMES.browserPromptCaptureRetentionSweep,
+        // ADR-0342 (lane E23): rebuilds the process analytics read model from the workflow history; driven end to end
+        // in zz-adr0342-process-analytics.test.ts (reads workflow state only)
+        SCHEDULER_JOB_NAMES.processAnalyticsProjector,
       ].sort(),
     );
     const discovery = registry.get(SCHEDULER_JOB_NAMES.discoveryScanSweep)!;
