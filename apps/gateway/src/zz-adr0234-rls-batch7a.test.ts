@@ -284,7 +284,7 @@ describe("the census: what may still run with no scope, or outside a request's",
     // file -> the intervals in it that run with no scope of their own, and why that is safe
     const ALLOWED: Record<string, { count: number; why: string }> = {
       "scheduler.ts": { count: 1, why: "the tick runs each job through runSchedulerJob, which enters system_task" },
-      "boot.ts": { count: 2, why: "rate-limit counter and PM delivery prunes touch no RLS table" },
+      "boot.ts": { count: 1, why: "the rate-limit counter prune touches no RLS table (the PM delivery prune runs as system_task)" },
       "org-settings.ts": { count: 1, why: "the audit prune runs on the owner connection (runAuditPruneOnce)" },
     };
     const found: Record<string, number> = {};

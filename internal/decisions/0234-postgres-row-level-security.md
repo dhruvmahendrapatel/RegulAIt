@@ -627,6 +627,71 @@ owner with RLS satisfied. On a non-superuser owner they need the `identity_provi
 is recorded as a follow-up. CI's unit shards keep the superuser login with the opt-in; the demo job is the end-to-end
 check on the runtime login.
 
+## Amendment: the PM tables (lane L6, #828 review, 2026-11-15)
+
+**Decision (owner, 2026-11-15, relayed by the master session): every PM table is under row-level security.** The
+inventory below classed the PM tables as deployment-wide, with no policy. They carry no `org_id` (ADR-0041) and no
+owner column: a connection, its links, its inbound log and its import linkage are configuration an admin manages.
+So they follow the admin-managed pattern: an active admin principal (or the bootstrap token) through
+`regulait_rls_is_admin()`, plus a closed list of named reasons for the paths that run without one.
+Migration `pending/rls_pm_tables.sql` ENABLEs and FORCEs RLS on six tables:
+
+- `pm_connections`
+- `pm_links`
+- `pm_sync_events`
+- `pm_webhook_deliveries`
+- ADR-0289's `pm_project_initiatives`
+- ADR-0289's `pm_imported_work_items`
+
+**One new reason, `pm_sync`.** It covers the PM mirror and link work a request does for a principal who need not be
+an admin:
+
+- a run node's status, or a sign-off decision, mirrored to the linked work item;
+- a run or instance linked to an item;
+- a decision record;
+- the links read;
+- the governance-alert ticket lookups.
+
+It is entered as a principal step (`runAsPrincipalStepIfScoped`, through `asPmSync` in `pm.ts`), so the principal
+still writes its own audit rows. In any other scope it changes nothing. These enter it:
+
+- the five non-admin PM routes;
+- the exported mirror and alert-ticket helpers;
+- the stale-credential inventory's connection read. A remediation decided by a non-admin approver re-runs the
+  governance monitor in that approver's scope. Without the step, the PM credentials would vanish from the input and
+  their open episodes would clear (#828 re-review).
+
+The demo live check, a CLI with no principal, reads the connections as `system_task`. The `reencrypt` CLI and
+narrowing the route step to each handler's PM statements are PENDING follow-ups.
+
+**What each reason reaches:**
+
+| Reason | pm_connections | pm_links | pm_sync_events | pm_webhook_deliveries | import tables |
+|---|---|---|---|---|---|
+| admin principal, bootstrap | all | all | all | all | all |
+| `pm_sync` | read | all | read, append | none | none |
+| `approval_maintenance` (the PM webhook's scope since 7a) | read | all | read, append | all | none |
+| `system_task` (jobs, the delivery prune) | read | all | read, append | read, delete | none |
+| `migration` | all | all | all | all | all |
+| anything else (`public_ingest`, `credential_request`, …) | none | none | none | none | none |
+
+The chat approval callback shares `approval_maintenance`, so it could reach the same PM rows. It reads none.
+
+**The PM-delivery prune timer** now runs as `system_task`. The 7a census allow-list drops it, leaving the rate-limit
+prune as the only unscoped `boot.ts` timer. Foreign-key cascades are not subject to RLS, so deleting a connection as
+an admin still clears its dependent rows.
+
+**Tests.** `zz-adr0234-rls-pm.test.ts` checks, with no application filter:
+
+- every PM table is ENABLED and FORCED;
+- a non-admin principal reads, inserts, updates and deletes nothing;
+- an admin principal reaches every PM table;
+- each reason reaches exactly the row above;
+- a helper called for a non-admin principal enters `pm_sync` itself;
+- the prune works as `system_task`.
+
+The existing webhook, mirror, drift, alert-ticket and importer suites pass unchanged under the policies.
+
 ## Appendix: the inventory (2026-11-06, migrated head)
 
 - **User-owned (49):** a2a_agent_grants, agent_grants, agent_revocations, agents, ai_incident_actions, ai_incidents,
