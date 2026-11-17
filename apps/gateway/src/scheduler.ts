@@ -397,27 +397,15 @@ async function releaseJob(
   jobName: string,
   runId: string,
   outcome: "ok" | "failed",
-  opts: { startedAt: Date; itemsProcessed: number; detail: Record<string, unknown>; error: string | null },
+  opts: { instanceId: string; startedAt: Date; itemsProcessed: number; detail: Record<string, unknown>; error: string | null },
 ): Promise<void> {
   const finishedAt = new Date();
   const durationMs = Math.max(0, finishedAt.getTime() - opts.startedAt.getTime());
 
-  await db
-    .update(schedulerRuns)
-    .set({
-      finishedAt,
-      durationMs,
-      outcome,
-      itemsProcessed: opts.itemsProcessed,
-      detail: opts.detail,
-      error: opts.error,
-    })
-    .where(eq(schedulerRuns.id, runId));
-
   const [current] = await db.select().from(schedulerJobs).where(eq(schedulerJobs.name, jobName));
   const intervalSeconds = current?.intervalSeconds ?? 3600;
 
-  await db
+  const released = await db
     .update(schedulerJobs)
     .set({
       running: false,
@@ -438,7 +426,30 @@ async function releaseJob(
         outcome === "failed" ? sql`${schedulerJobs.consecutiveFailures} + 1` : sql`0`,
       updatedAt: finishedAt,
     })
-    .where(eq(schedulerJobs.name, jobName));
+    // ADR-0348: only the pass that holds the lease releases it. A pass that outlived its lease, which another
+    // pass then took (a new `last_run_at`), must not clear that pass's lease or move `next_due_at` and the counters.
+    .where(
+      and(
+        eq(schedulerJobs.name, jobName),
+        eq(schedulerJobs.running, true),
+        eq(schedulerJobs.leaseOwner, opts.instanceId),
+        eq(schedulerJobs.lastRunAt, opts.startedAt),
+      ),
+    )
+    .returning({ name: schedulerJobs.name });
+
+  // this pass's own ledger row always records how it ended; a lost lease is said on it
+  await db
+    .update(schedulerRuns)
+    .set({
+      finishedAt,
+      durationMs,
+      outcome,
+      itemsProcessed: opts.itemsProcessed,
+      detail: released.length > 0 ? opts.detail : { ...opts.detail, leaseLost: true },
+      error: opts.error,
+    })
+    .where(eq(schedulerRuns.id, runId));
 }
 
 // ---------------------------------------------------------------------------
@@ -621,6 +632,7 @@ async function runSchedulerJobScoped(
     const items = result.itemsProcessed ?? 0;
     const detail = result.detail ?? {};
     await releaseJob(db, def.name, run.id, "ok", {
+      instanceId: opts.instanceId,
       startedAt: run.startedAt,
       itemsProcessed: items,
       detail,
@@ -653,6 +665,7 @@ async function runSchedulerJobScoped(
     console.error(`[regulait] scheduled job '${def.name}' FAILED: ${errLine(err)}`);
     try {
       await releaseJob(db, def.name, run.id, "failed", {
+        instanceId: opts.instanceId,
         startedAt: run.startedAt,
         itemsProcessed: 0,
         detail: {},

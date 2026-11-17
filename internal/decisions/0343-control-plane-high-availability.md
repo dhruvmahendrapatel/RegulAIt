@@ -146,7 +146,12 @@ zone-redundant HA, encrypted storage with a customer-managed key, TLS-only conne
 (retention ≥ 7 days, default 14), deletion protection on, no public endpoint, and an optional cross-region replica or
 backup copy. They are validated with `terraform validate` and `terraform test` plans with mocked providers. Nothing is
 applied; a regulait-dev rehearsal (ADR-0325's exception) runs only if a plan cannot answer a question. The BYOC AWS
-module of lane E10 is not edited here: the AWS module is a sibling that BYOC can adopt later.
+module of lane E10 calls `postgres-ha-aws` from its `database.tf` (one RDS definition, not two that drift). It passes
+the VPC module's existing subnet group (`db_subnet_group_name`), the EKS node security group and the stack key, and
+the names and descriptions it already used. `moved` blocks map its old addresses (`module.db`, `aws_security_group.db`
+and the ingress rule) into `module.pg`, so an existing BYOC stack plans no replacement. The one in-place change is
+the parameter group gaining `synchronous_commit = on`, which is already the RDS default. The ingress rules use `count`,
+not `for_each`, because the EKS node group's id is unknown at plan time in the same apply.
 
 For Kubernetes and air-gapped installs, the chart gains an opt-in CloudNativePG `Cluster` (3 instances, one synchronous
 standby, pod anti-affinity across zones, WAL archive and base backups to an S3-compatible store, a `ScheduledBackup`),
@@ -155,6 +160,21 @@ and the gateway reads the `-rw` service. ADR-0304's cap of one replica is lifted
 `RollingUpdate` strategy, a PodDisruptionBudget, zone topology spread, `/ready` as the readiness probe and a preStop
 drain. The migration Job stays the one migrator; the boot lock covers anything else that migrates.
 
+**As built (slice 2, 2026-11-16).** The Terraform modules are `infra/modules/postgres-ha-{aws,azure,gcp}`. The search
+record in `infra/THIRD_PARTY.md` says why GCP and Azure use provider resources directly: the community modules keep
+passwords in state or need a telemetry provider. The chart now takes `replicas` (1 to 20). Above 1 it refuses a
+`ReadWriteOnce` install-secrets claim and renders `RollingUpdate` (`maxUnavailable: 0`), zone and node topology
+spread, and a PodDisruptionBudget. At any count it probes `/ready` and sets `REGULAIT_DRAIN_DELAY_MS` from
+`highAvailability.drainDelaySeconds` (default 10, at most 60) inside a matching termination grace period. The drain is
+the gateway's own `/ready` flip, so no preStop hook is needed. Two parts are not built yet:
+- **The operator's v1alpha1 cap of one replica stays** until the operator gains the same checks. That is Go and
+  envtest work in `deploy/operator`, tracked in PENDING.
+- **The chart does not render a CloudNativePG cluster yet.** Under the chart's default-deny baseline policy, a CNPG
+  cluster needs instance-to-instance replication, the CNPG operator's status port, the instance manager's API-server
+  access and object-store egress. Getting that wrong fails closed: replication stops and writes pause under
+  `dataDurability: required`. That needs a cluster test the lane cannot run. The README tells installers to use a
+  CNPG cluster with a synchronous standby and its `-rw` Service; rendering it is tracked in PENDING.
+
 ### 5. The failover test suite (slice 3)
 
 A Docker Compose file (`deploy/ha-test/`) with a Postgres primary and a synchronous standby, two gateway replicas and a
@@ -162,6 +182,30 @@ promotion step, plus a driver that runs governed decisions and audit appends whi
 primary. It asserts that every decision the driver saw committed is present after the failover, that no audit row is
 lost or duplicated, and that the hash chain verifies end to end (the existing offline verifier). The same driver runs
 on bare Postgres binaries when Docker is not available, so CI and a laptop run one suite.
+
+### As built: the failover suite (slice 3, 2026-11-16)
+
+`deploy/ha-test/failover-suite.mjs`, with two backends: `native` (Postgres 16 binaries and gateway processes) and
+`compose` (`deploy/ha-test/compose.yml`, the gateway image built from the repository Dockerfile). The governed decision
+is `POST /v1/authz/check` for an unknown subject, which commits one audited deny per acknowledged answer. Before the
+primary dies, the standby is taken down for 1.5 s so that it is behind. Freezing only its WAL receiver was tried first
+and was not enough: WAL already in the receiver's socket buffer was applied after it resumed, and the negative control
+did not fail.
+
+Measured on the native backend (4 CPU container, loopback, two replicas, 8 clients):
+
+| Run | Acknowledged | Lost | Duplicated | Chain | Replica kill → next answer | Primary crash → next answer |
+|---|---|---|---|---|---|---|
+| synchronous replication | 919 | 0 | 0 | ok (929 rows) | 85 ms | 328 ms |
+| synchronous, standby down 1.5 s before the crash | 715 | 0 | 0 | ok | 91 ms | 561 ms |
+| **asynchronous (negative control)**, same | 776 | **81**, all acknowledged while the standby was down | 0 | ok | 83 ms | 560 ms |
+
+The negative control is what makes the first rows evidence. The chain verifies in the asynchronous case too: a lost
+tail leaves a valid, shorter chain. So the suite checks the clients' ledger, and production depends on the anchor
+outside the database (ADR-0060) to show truncation. CI runs the suite and the negative control
+(`.github/workflows/ha-failover.yml`: native on HA pull requests, at merge, on main and nightly; Compose nightly and on
+demand). These are local recovery times with promotion driven by the suite. They are not the §1 targets, which include
+a managed service's or CloudNativePG's own detection and promotion time.
 
 ## Open-source search (ADR-0176)
 
