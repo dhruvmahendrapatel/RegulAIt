@@ -48,6 +48,7 @@ export const DSR_STORE_LABELS: Readonly<Record<string, string>> = {
   accounts: "User accounts",
   conversations: "Conversations",
   project_context: "Shared project context",
+  rule_step_suggestions: "Rule-like AI step suggestions",
   audit_trail: "Audit trail",
 };
 

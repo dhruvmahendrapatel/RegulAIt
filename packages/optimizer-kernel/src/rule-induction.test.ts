@@ -6,6 +6,7 @@ import {
   extractStepFields,
   induceStepRule,
   normalizeStepOutput,
+  renderInducedRule,
   resolveRuleInductionOptions,
   type StepRun,
 } from "./index.js";
@@ -187,5 +188,13 @@ describe("extractStepFields / normalizeStepOutput", () => {
 
   it("keeps case and collapses whitespace", () => {
     expect(normalizeStepOutput("  On-Call \n now ")).toBe("On-Call now");
+  });
+});
+
+describe("renderInducedRule", () => {
+  it("prints one quoted line per cell and the AI fallback", () => {
+    const lines = renderInducedRule({ fields: ["owner", "severity"], cells: [{ key: [ABSENT, "high"], output: "on-call", support: 9 }] });
+    expect(lines).toEqual(['when owner = (absent) and severity = "high" -> "on-call" (9 runs)', "otherwise -> ask the AI (input not covered by this rule)"]);
+    expect(renderInducedRule({ fields: [], cells: [{ key: [], output: "ok", support: 300 }] })[0]).toBe('always -> "ok" (300 runs)');
   });
 });
