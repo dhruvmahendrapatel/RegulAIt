@@ -14,6 +14,7 @@ import {
   dataSubjectRequests,
   dataSubjectTombstones,
   eq,
+  ruleStepSuggestions,
   runMigrations,
   sql,
   usageEvents,
@@ -208,8 +209,35 @@ describe("data-subject requests", () => {
   let requestId: string;
   let messageId: string;
   let auditRowId: string;
+  let ruleWithSubject: string;
+  let ruleWithout: string;
+  let ruleOutput: string;
+
+  // ADR-0327: a rule-like step suggestion whose cell holds an input value (here, the subject's email)
+  const suggestion = (stepName: string, value: string) => ({
+    agentId,
+    stepName,
+    rule: { fields: ["requester"], cells: [{ key: [value], output: "tier-1", support: 9 }] },
+    runs: 9,
+    structuredRuns: 9,
+    outputClasses: 1,
+    agreement: 1,
+    coverage: 1,
+    windowCostUsd: 0.1,
+    projectedMonthlySavingsUsd: 0.1,
+  });
 
   beforeAll(async () => {
+    const [rs] = await db.insert(ruleStepSuggestions).values(suggestion(`route-${RUN}`, SUBJECT)).returning({ id: ruleStepSuggestions.id });
+    ruleWithSubject = rs!.id;
+    const [ro] = await db.insert(ruleStepSuggestions).values(suggestion(`route-other-${RUN}`, "nobody@example.org")).returning({ id: ruleStepSuggestions.id });
+    ruleWithout = ro!.id;
+    // the subject only in a cell's output (an AI output copied into the rule), never in its key
+    const [rp] = await db
+      .insert(ruleStepSuggestions)
+      .values({ ...suggestion(`route-output-${RUN}`, "tier-1"), rule: { fields: ["queue"], cells: [{ key: ["vip"], output: `escalate to ${SUBJECT}`, support: 9 }] } })
+      .returning({ id: ruleStepSuggestions.id });
+    ruleOutput = rp!.id;
     // personal data about the subject in a conversation, and in one audit row
     const [c] = await db.insert(conversations).values({ userId, agentId, projectId: proj, title: "support" }).returning();
     const [m] = await db.insert(conversationMessages).values({ conversationId: c!.id, role: "user", content: `Please contact ${SUBJECT} tomorrow.` }).returning();
@@ -260,6 +288,7 @@ describe("data-subject requests", () => {
     const byStore = Object.fromEntries((v.located as Array<{ store: string; matches: number }>).map((f) => [f.store, f.matches]));
     expect(byStore.conversations).toBeGreaterThanOrEqual(1);
     expect(byStore.audit_trail).toBeGreaterThanOrEqual(1);
+    expect(byStore.rule_step_suggestions).toBeGreaterThanOrEqual(2);
     expect(JSON.stringify(r.json())).not.toContain(SUBJECT.toLowerCase());
   });
 
@@ -282,6 +311,9 @@ describe("data-subject requests", () => {
     expect(m!.content).toBe(`Please contact ${ERASED_MARKER} tomorrow.`);
     const [auditAfter] = await db.select().from(auditLog).where(eq(auditLog.id, auditRowId));
     expect(auditAfter).toEqual(auditBefore);
+    // ADR-0327: the suggestion that copied the subject's value is deleted; an unrelated one stays
+    const left = await db.select({ id: ruleStepSuggestions.id }).from(ruleStepSuggestions).where(sql`${ruleStepSuggestions.id} in (${ruleWithSubject}, ${ruleWithout}, ${ruleOutput})`);
+    expect(left.map((x) => x.id)).toEqual([ruleWithout]);
     const tombs = await db.select().from(dataSubjectTombstones).where(eq(dataSubjectTombstones.requestId, requestId));
     expect(tombs).toHaveLength(1);
     expect(tombs[0]!.store).toBe("audit_trail");
@@ -326,7 +358,7 @@ describe("the subject pattern never reaches a superstring neighbour", () => {
     const id = c.json().request.id as string;
     const loc = await app.inject({ method: "POST", url: `/v1/privacy/requests/${id}/locate`, headers: AUTH, payload: { identifier } });
     expect(loc.statusCode).toBe(200);
-    expect(loc.json().searchScope).toContain("Only these four");
+    expect(loc.json().searchScope).toContain("Only these five");
     const conv = (loc.json().request.located as Array<{ store: string; matches: number }>).find((f) => f.store === "conversations")!;
     const close = await app.inject({ method: "POST", url: `/v1/privacy/requests/${id}/close`, headers: AUTH, payload: { outcome: "completed", note: "erased", identifier } });
     expect(close.statusCode).toBe(200);
