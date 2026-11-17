@@ -51,15 +51,29 @@ requested by an admin, approved by a second person and executed by the requester
   step-up (`DISCOVERY_STEP_UP_KEYS.vendorAgentControl`) through the existing `PUT /v1/discovery/settings`, audited in
   the same transaction. Turning it off is free and stops every action that has not yet executed.
 - **A control credential per source.** Discovery credentials stay read-only (ADR-0195 decision 7 is unchanged: a
-  read credential that can write is still refused). Control uses a separate write credential, the `platform_write` purpose that
-  lane E17 fixes, held in its own table `vendor_control_credentials` (the purpose is the table, not a field), one per
-  discovery source, stored exactly as discovery credentials are: encrypted with the data key
-  (`encryptSecret`), never returned, never in code, federated by default (Entra workload identity for Copilot Studio)
-  with a stored secret only as a `settings_relax` step-up, rotatable by replacing the row, revocable at once. Its
-  scope is the vendor's narrowest control permission (the `vendorPermission` the adapter declares) and nothing
+  read credential that can write is still refused). Control uses a separate write credential, the `platform_write`
+  purpose that lane E17 fixes. It lives in the existing `discovery_credentials` table, not a second credential table,
+  so storage, encryption, revoke and replace stay one set of helpers:
+  - **One new column, `purpose`.** `text NOT NULL DEFAULT 'discovery_read'`, with a CHECK of
+    `purpose IN ('discovery_read', 'platform_write')`. It is set at insert and never updated (no route changes it, and
+    an update trigger refuses a change), so the purpose is a fixed rule of the row, as lane E17 asks, not a mutable
+    field. Every existing row is `discovery_read` and behaves exactly as today.
+  - **One live credential per source and purpose.** The live-unique index `discovery_credentials_live_uq` becomes
+    `(source_id, purpose) WHERE revoked_at IS NULL`, so a source holds at most one read and one control credential.
+  - **The purposes never cross.** The discovery scanner's credential loader selects only `purpose = 'discovery_read'`,
+    and the control path's loader selects only `purpose = 'platform_write'`. A test pins both filters, so a control
+    credential can never reach a scan and a read credential can never reach `apply`.
+  - **`write_scope` keeps ADR-0195's meaning for read credentials.** For a `platform_write` row a CHECK fixes
+    `write_scope = 'unverified'`: the scanner's read-only verification never runs on it, and its control scope is
+    reported as unverified until a live tenant proves it (section 3a).
+  - **Stored as discovery credentials are:** encrypted with the data key (`encryptSecret`), never returned, never in
+    code, federated by default (Entra workload identity for Copilot Studio) with a stored secret only as a
+    `settings_relax` step-up, rotatable by replacing the row, revocable at once.
+
+  Its scope is the vendor's narrowest control permission (the `vendorPermission` the adapter declares) and nothing
   else. The read credential is never used to write, and the write credential is never used to read the inventory.
-  Adding one is itself a `settings_relax`
-  step-up and audited. With no live control credential, a source offers no action.
+  Adding one is itself a `settings_relax` step-up and audited. With no live control credential, a source offers no
+  action.
 - **The vendor action itself.** An adapter that does not declare an action cannot be asked for it.
 
 ### 3. The adapter: one per vendor, read and control together
@@ -130,8 +144,28 @@ call never runs inside a database transaction, and ADR-0159's rule that the prop
    and its preview is `approvalArgumentsPreview` of the same, so the approver reads what will run.
    - **Idempotent.** A repeat of the same request while one is open returns that action (200, `idempotent: true`); a
      different open action for the same agent is `409 action_already_open`.
-2. **Approve.** Through the existing `POST /v1/approvals/:id/decide`. A per-kind precheck refuses the requester
-   (`cannot_approve_own_vendor_action`), so a second person must decide. A denial closes the action.
+2. **Approve.** Through the existing `POST /v1/approvals/:id/decide`, with two per-kind rules for
+   `vendor_agent_control`:
+   - **Who may decide.** The eligible pool is resolved by the existing ADR-0186 pool guard (`loadApprovalPool`): the
+     members of the approver role named by an `approval_rules` row for this object type, or, with no such rule, the
+     org's active admins. The requester is never eligible (`cannot_approve_own_vendor_action`), a delegation
+     component counts once, and the quorum (1 by default, at most 5) is snapshotted on the approval at queue time. A
+     decider outside the pool gets `403 not_an_eligible_approver`.
+   - **A fresh step-up for every decision.** Approve and deny both need an `approval_decide` step-up grant (ADR-0186:
+     single use, session-bound, MFA by passkey, TOTP or fresh SSO) bound to `{approvalId, decision, argumentsDigest}`.
+     The generic decide path does not step up today for kinds other than tool calls, so slice 1 adds the check to the
+     per-kind precheck for this object type; a decision without it gets `403 step_up_required`. An API key, chat tap
+     or bulk decide cannot decide this kind, because none of them can step up.
+
+   A denial closes the action. Slice 1 tests: a decider outside the pool, the requester, a decision with no step-up
+   and one whose step-up is bound to a different digest are each refused, and nothing moves.
+   - **Expiry.** The approval carries `expires_at` = queued time + the approval window, 24 hours by default
+     (`discovery_settings.vendor_agent_control_approval_ttl_hours`, 1 to 72). Shortening it is free; lengthening it
+     past 24 hours is a `settings_relax` step-up, audited. An action whose approval expired before it was decided
+     moves `requested → cancelled`, and one approved but not executed in time moves `approved → cancelled`, both with
+     reason `approval_expired`, through `assertTransition`. The move is written when the action is next touched
+     (execute, cancel, a read or a new request for the same agent), so an expired action never blocks a new request
+     and is never executed. Nothing runs on a timer to do it.
 3. **Execute.** `POST /v1/vendor-agent-control/actions/:id/execute` by the requester, with a fresh `settings_relax`
    step-up bound to the same facts plus the action id. The server re-reads every input and refuses if anything
    moved: the switch is off, the control credential was revoked or replaced, the record is gone or absent, or the
@@ -143,9 +177,26 @@ call never runs inside a database transaction, and ADR-0159's rule that the prop
    - reads the state again and records `observed_state`;
    - writes the outcome and its audit row in one transaction.
 
-   A vendor timeout leaves the action `unknown`; the next execute (the approval is already consumed, so only the
-   requester, with a fresh step-up) re-reads the state and settles it without a second approval, because `apply` is
+   A vendor timeout leaves the action `unknown`; a later settle (the approval is already consumed, so no new
+   approval; see "Who may settle" below) re-reads the state and settles it without a second approval, because `apply` is
    idempotent at the vendor. It never re-applies a different action.
+
+   **A crashed execution is recovered, never stuck.** The `approved → executing` update stamps `lease_expires_at` =
+   now + the vendor deadline + 60 seconds of margin (the deadline is the `ControlContext` signal, 30 seconds by
+   default). If the gateway or worker dies before the outcome commits, the row stays `executing` with a lease in the
+   past. Any later execute, cancel or read of that action, or a new request for the same agent, first moves it
+   `executing → unknown` (code `lease_expired`) through `assertTransition`, with an update conditional on
+   `status = 'executing' AND lease_expires_at < now()`, so a live execution is never taken over. The `unknown` row is
+   then settled as above: by `readState` only, never a second `apply`.
+   - **Settling.** If the vendor shows the target state, the action becomes `succeeded`. If it shows the prior state,
+     it becomes `failed` (code `not_applied`), and the requester may ask again through a new request and a new
+     approval. If the state cannot be read, the row stays `unknown` and still counts as open, because the vendor
+     state is uncertain.
+   - **Who may settle.** The requester or any admin, with a `settings_relax` step-up bound to the action id. Settling
+     only reads the vendor, so it needs no approval, and an agent is never left unactionable because the requester
+     is gone.
+   - Slice 1 tests a crash between `executing` and the outcome commit (the lease expires, the row moves to `unknown`
+     and is settled by a read) and a live lease that is not taken over.
 4. **Cancel.** `POST …/actions/:id/cancel` before execution, by the requester or an admin, audited. It narrows, so it
    needs no step-up. The pending approval is superseded.
 
@@ -159,9 +210,9 @@ write is a conditional `UPDATE … WHERE status = <from>`, so two racing request
 
 | From | Allowed to |
 |---|---|
-| `requested` | `approved`, `denied`, `cancelled` |
-| `approved` | `executing`, `cancelled` |
-| `executing` | `succeeded`, `already_in_state`, `failed`, `unknown` |
+| `requested` | `approved`, `denied`, `cancelled` (by the requester or an admin, or `approval_expired`) |
+| `approved` | `executing`, `cancelled` (by the requester or an admin, or `approval_expired`) |
+| `executing` | `succeeded`, `already_in_state`, `failed`, `unknown` (a vendor timeout, or `lease_expired` after a crash) |
 | `unknown` | `succeeded`, `already_in_state`, `failed` (settled by a state re-read, never a second `apply`) |
 | `succeeded`, `already_in_state`, `failed`, `denied`, `cancelled` | none (terminal) |
 
@@ -190,7 +241,7 @@ barrier applies unchanged.
 - **Repo first.** The approvals queue, payload digest and preview (ADR-0104), the settings step-up, the discovery
   switch and credential storage (ADR-0195), the guarded fetch, `runExternalWrite` (ADR-0124) and the registry adapter
   (PR #855 and lane E17) are all reused; this ADR adds one adapter member, one object type, one external-write
-  operation, two tables and five routes.
+  operation, one table (the actions; control credentials reuse `discovery_credentials`) and five routes.
 - **Microsoft.** `Microsoft.PowerPlatform.Management` is a .NET SDK; there is no maintained JavaScript Power Platform
   API client. The three calls are REST calls through the guarded fetch. The Entra token comes from `@azure/identity`,
   already used by discovery.
@@ -223,7 +274,7 @@ barrier applies unchanged.
 ## Consequences
 
 - An org can take a vendor-hosted agent out of service without leaving RegulAIt, with two people, an MFA step-up on
-  each consequential step, the exact payload approved, one execution per approval and a full audit trail.
+  each consequential step (request, decision and execute), the exact payload approved, one execution per approval and a full audit trail.
 - The read path stays provably read-only: control uses a different credential with a different scope.
 - Until E17's adapters exist for a vendor, that vendor offers no action.
 
