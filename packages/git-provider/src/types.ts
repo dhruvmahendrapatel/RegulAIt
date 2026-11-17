@@ -63,6 +63,13 @@ export interface GitProvider {
   /** CI checks/statuses attached to the PR's head commit */
   listChecks(repo: string, prId: string): Promise<CheckRun[]>;
   mergePullRequest(repo: string, prId: string, strategy: MergeStrategy): Promise<MergeResult>;
+  /** ADR-0340 (compensation): delete a branch. Idempotent: a branch that is already gone answers
+   * `{ deleted: false }` rather than failing, so a compensation can run again after a partial failure. */
+  deleteBranch(repo: string, branch: string): Promise<{ deleted: boolean }>;
+  /** ADR-0340 (compensation): close (decline, abandon) an open pull request without merging it. Idempotent: an
+   * already-closed one answers `{ closed: false }`. A MERGED pull request throws: closing cannot undo a merge,
+   * and a compensation that claimed it had would be a lie on the audit trail. */
+  closePullRequest(repo: string, prId: string): Promise<{ closed: boolean }>;
 }
 
 export class GitProviderError extends Error {

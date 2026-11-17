@@ -29,7 +29,8 @@
  *
  * Rows: deploy.deploy, deploy.rollback (workflow deployment + rollback stages);
  * git.create_branch, git.open_pull_request, git.merge_pull_request
- * (git_operation stages); infra.remediate via ALL THREE sites — the finding
+ * (git_operation stages); git.close_pull_request, git.delete_branch (ADR-0340
+ * compensation stages, driven by a cancel); infra.remediate via ALL THREE sites — the finding
  * approval-decision, the scan auto-remediation and the cert_rotate operator
  * action-decision; pm.create_work_item, pm.update_fields
  * (run sync: create, then repair-in-place), pm.transition_state (node status
@@ -117,6 +118,8 @@ vi.mock("@regulait/git-provider", async (importOriginal) => {
         createBranch: "git.create_branch",
         openPullRequest: "git.open_pull_request",
         mergePullRequest: "git.merge_pull_request",
+        deleteBranch: "git.delete_branch",
+        closePullRequest: "git.close_pull_request",
       }),
   };
 });
@@ -432,6 +435,49 @@ describe("AER-018 — the barrier matrix: flip the dial while the route waits on
     inst = await view(id);
     expect(inst.status).toBe("completed");
     expect(inst.context.mergeSha).toBe("sha-merge-1");
+  });
+
+  it("git.close_pull_request, git.delete_branch (ADR-0340 compensation stages, driven by a cancel)", async () => {
+    const conn = await post("/v1/git/connections", { name: `bm-comp-${RUN}`, provider: "mock", token: "not-a-real-token" });
+    expect(conn.statusCode, conn.body).toBe(201);
+    const repo = `bm-comp-${RUN}/app`;
+    const c = { connection: `bm-comp-${RUN}`, repo };
+    await registerTemplate(`bm-comp-${RUN}`, `bm-comp-${RUN}`, [
+      { id: "intake", type: "trigger" },
+      { id: "branch", type: "git_operation", action: "create_branch", ...c },
+      { id: "open_pr", type: "git_operation", action: "open_pr", ...c },
+      { id: "gate", type: "human_approval", approvers: [anaId] },
+      { id: "undo_pr", type: "git_operation", action: "close_pr", compensates: "open_pr", ...c },
+      { id: "undo_branch", type: "git_operation", action: "delete_branch", compensates: "branch", ...c },
+    ]);
+    const id = await start(`bm-comp-${RUN}`);
+    let inst = await view(id);
+    expect(inst.status).toBe("blocked_on_approval");
+    expect(inst.context.prId).toBeDefined();
+    // the cancel starts compensating: the PR is closed first (reverse order)
+    const cancelled = await refusedAtBarrier("git.close_pull_request", "halted", () => post(`/v1/workflows/instances/${id}/abort`, {}, piaAuth));
+    expect(cancelled.statusCode, cancelled.body).toBe(200);
+    inst = await view(id);
+    expect(inst.status).toBe("awaiting_execution");
+    expect(inst.state.compensation).toMatchObject({ cause: "aborted", plan: ["undo_pr", "undo_branch"] });
+    for (const mode of ["read_only", "require_approval"] as const) {
+      await refusedAtBarrier("git.close_pull_request", mode, () => advance(id, "undo_pr"));
+      inst = await view(id);
+      expect(inst.context["compensation:undo_pr"]).toBeUndefined();
+      expect(inst.context.lastError).toContain(`execution mode is '${mode}'`);
+    }
+    // positive for the close, with the branch delete's gate armed
+    const closesBefore = probe.count("git.close_pull_request");
+    await refusedAtBarrier("git.delete_branch", "halted", () => advance(id, "undo_pr"));
+    expect(probe.count("git.close_pull_request")).toBe(closesBefore + 1);
+    mark("git.close_pull_request", "normal");
+    for (const mode of ["read_only", "require_approval"] as const) {
+      await refusedAtBarrier("git.delete_branch", mode, () => advance(id, "undo_branch"));
+    }
+    await admitted("git.delete_branch", () => advance(id, "undo_branch"));
+    inst = await view(id);
+    expect(inst.status).toBe("aborted");
+    expect(inst.state.compensation).toMatchObject({ outcome: "completed" });
   });
 
   it("infra.remediate — the approval-decision site, the scan auto-remediation site and the cert_rotate action-decision site", async () => {
