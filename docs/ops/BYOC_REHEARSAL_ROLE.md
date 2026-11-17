@@ -120,6 +120,25 @@ aws iam list-open-id-connect-providers --profile <your-regulait-dev-profile>
 
 If the list contains `token.actions.githubusercontent.com`, note its ARN for step 3.
 
+### Step 2b: give the account its alias (once, 1 minute)
+
+The `byoc-rehearsal` workflow refuses any account whose IAM account alias is not exactly `regulait-dev`
+(`EXPECTED_ACCOUNT_ALIAS` in `.github/workflows/byoc-rehearsal.yml`). The role ARN it is given proves nothing on its
+own, because a role with the same name could exist in another account. Check the alias:
+
+```bash
+aws iam list-account-aliases --profile <your-regulait-dev-profile>
+```
+
+If the list is empty, set it:
+
+```bash
+aws iam create-account-alias --account-alias regulait-dev --profile <your-regulait-dev-profile>
+```
+
+Aliases are unique across all of AWS. If `regulait-dev` is taken, choose another name. Change
+`EXPECTED_ACCOUNT_ALIAS` to match in a reviewed PR before the first run. Never give another account this alias.
+
 ## Step 3: apply (10 minutes)
 
 ```bash
