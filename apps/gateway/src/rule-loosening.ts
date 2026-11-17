@@ -180,6 +180,8 @@ export const COMPLIANCE_PROFILE_LOOSENING: Classified<typeof complianceProfiles.
     looser: (b, a) => b === true && a !== true,
     why: "the framework no longer requires model risk management sign-off",
   },
+  // ADR-0347: a longer (or no) memory lifetime keeps agent-written memory readable for longer
+  memoryTtlHours: { kind: "compare", looser: ceilingRaised, why: "a longer (or no) agent memory lifetime" },
 };
 
 const BY_KIND: Readonly<Record<string, Readonly<Record<string, FieldClass>>>> = {

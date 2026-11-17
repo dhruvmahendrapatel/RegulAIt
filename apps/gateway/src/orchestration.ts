@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { dbNow, MEMORY_DATA_PREAMBLE } from "./memory-governance.js";
 import {
   filterParams,
   parseListExport,
@@ -544,6 +545,9 @@ async function resolveSuppliedContext(
     const prev = head.get(r.key);
     if (!prev || r.revision > prev.revision) head.set(r.key, r);
   }
+  // ADR-0347: an expired head is absent (never replaced by an older revision), judged by the database clock
+  const now = await dbNow(db);
+  for (const [k, r] of head) if (r.expiresAt <= now) head.delete(k);
   // preserve the caller's declared order so the prompt is deterministic
   const items = keys.map((k) => head.get(k)).filter((r): r is (typeof rows)[number] => Boolean(r));
   if (items.length === 0) return { items: [] };
@@ -555,8 +559,17 @@ async function resolveSuppliedContext(
   const manifest = items.map((i) => `${i.key} v${i.revision}`).join(", ");
   return {
     system:
-      `Shared project context supplied to this worker: ${manifest}.\n\n` +
-      items.map((i) => `--- context '${i.key}' v${i.revision} ---\n${i.content}`).join("\n\n"),
+      `Shared project context supplied to this worker: ${manifest}.\n` +
+      // ADR-0347: memory is supplied as quoted data with its provenance, never as instructions
+      `${MEMORY_DATA_PREAMBLE}\n\n` +
+      items
+        .map(
+          (i) =>
+            `--- context '${i.key}' v${i.revision} (written by user ${i.contributedByUserId}` +
+            `${i.producedByAgentId ? `, agent ${i.producedByAgentId}` : ""}${i.producedByRunId ? `, run ${i.producedByRunId}` : ""}` +
+            `; expires ${i.expiresAt.toISOString()}) ---\n${i.content}\n--- end context '${i.key}' ---`,
+        )
+        .join("\n\n"),
     items: items.map((i) => ({ id: i.id, key: i.key, revision: i.revision })),
   };
 }
