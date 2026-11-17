@@ -92,10 +92,12 @@ const auditsOf = (approvalId: string) =>
 const put = (id: string, payload: unknown, headers = adminKey) =>
   app.inject({ method: "PUT", url: `/v1/approvals/${id}/schedule`, headers, payload: payload as object });
 
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
+
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
-  await relaxIdentityForTest(db, { mfaRequired: "off" });
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   await useTestIssuerKey(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   await app.ready();
@@ -119,6 +121,7 @@ afterAll(async () => {
   if (approvalIds.length) await db.delete(approvals).where(inArray(approvals.id, approvalIds));
   if (policyId) await db.delete(approvalSlaPolicies).where(eq(approvalSlaPolicies.id, policyId));
   if (INSTANCE) await db.delete(workflowInstances).where(eq(workflowInstances.id, INSTANCE));
+  await restoreAdminKeyMfa?.(); // the deployment-wide MFA posture must not leak into later suites
   await app?.close();
 });
 
