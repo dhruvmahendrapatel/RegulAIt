@@ -251,6 +251,23 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "DELETE /v1/cost-imports/domain-rules/:ruleId": "internal",
   // ADR-0076: reconciliation (run-now + health/report) and the roster ingest
   "POST /v1/cost-imports/reconcile": "internal",
+  "GET /v1/ai-saas-monitoring": "internal", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/policy": "internal", // ADR-0361
+  "POST /v1/ai-saas-monitoring/connectors": "internal", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/connectors/:connectorId/config": "internal", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/connectors/:connectorId/credential": "internal", // ADR-0361
+  "DELETE /v1/ai-saas-monitoring/connectors/:connectorId/credential": "internal", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/connectors/:connectorId/enabled": "internal", // ADR-0361
+  "POST /v1/ai-saas-monitoring/connectors/:connectorId/runs": "internal", // ADR-0361
+  "GET /v1/ai-saas-monitoring/connectors/:connectorId/runs": "internal", // ADR-0361
+  "GET /v1/ai-saas-monitoring/connectors/:connectorId/interactions": "internal", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/remediation": "internal", // ADR-0361 slice 3
+  "POST /v1/ai-saas-monitoring/remediations": "internal", // ADR-0361 slice 3
+  "GET /v1/ai-saas-monitoring/remediations": "internal", // ADR-0361 slice 3
+  "GET /v1/ai-saas-monitoring/remediations/:remediationId": "internal", // ADR-0361 slice 3
+  "POST /v1/ai-saas-monitoring/remediations/:remediationId/execute": "internal", // ADR-0361 slice 3
+  "POST /v1/ai-saas-monitoring/remediations/:remediationId/settle": "internal", // ADR-0361 slice 3
+  "POST /v1/ai-saas-monitoring/remediations/:remediationId/cancel": "internal", // ADR-0361 slice 3
   "GET /v1/cost-imports/reconciliation": "internal",
   "POST /v1/cost-imports/roster": "internal",
   "DELETE /v1/cost-imports/:importId": "internal",
@@ -1686,6 +1703,23 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/cost-imports/domain-rules": "cost-imports",
   "DELETE /v1/cost-imports/domain-rules/:ruleId": "cost-imports",
   "POST /v1/cost-imports/reconcile": "cost-imports",
+  "GET /v1/ai-saas-monitoring": "shadow-ai", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/policy": "shadow-ai", // ADR-0361
+  "POST /v1/ai-saas-monitoring/connectors": "shadow-ai", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/connectors/:connectorId/config": "shadow-ai", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/connectors/:connectorId/credential": "shadow-ai", // ADR-0361
+  "DELETE /v1/ai-saas-monitoring/connectors/:connectorId/credential": "shadow-ai", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/connectors/:connectorId/enabled": "shadow-ai", // ADR-0361
+  "POST /v1/ai-saas-monitoring/connectors/:connectorId/runs": "shadow-ai", // ADR-0361
+  "GET /v1/ai-saas-monitoring/connectors/:connectorId/runs": "shadow-ai", // ADR-0361
+  "GET /v1/ai-saas-monitoring/connectors/:connectorId/interactions": "shadow-ai", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/remediation": "shadow-ai", // ADR-0361 slice 3
+  "POST /v1/ai-saas-monitoring/remediations": "shadow-ai", // ADR-0361 slice 3
+  "GET /v1/ai-saas-monitoring/remediations": "shadow-ai", // ADR-0361 slice 3
+  "GET /v1/ai-saas-monitoring/remediations/:remediationId": "shadow-ai", // ADR-0361 slice 3
+  "POST /v1/ai-saas-monitoring/remediations/:remediationId/execute": "shadow-ai", // ADR-0361 slice 3
+  "POST /v1/ai-saas-monitoring/remediations/:remediationId/settle": "shadow-ai", // ADR-0361 slice 3
+  "POST /v1/ai-saas-monitoring/remediations/:remediationId/cancel": "shadow-ai", // ADR-0361 slice 3
   "GET /v1/cost-imports/reconciliation": "cost-imports",
   "POST /v1/cost-imports/roster": "cost-imports",
   "DELETE /v1/cost-imports/:importId": "cost-imports",

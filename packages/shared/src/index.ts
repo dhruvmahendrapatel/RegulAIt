@@ -5079,3 +5079,6 @@ export { jsonPatch, type JsonPatchOperation } from "./json-patch.js";
 
 // ADR-0346: fairness evaluation through the gateway — definitions, the reply mapping and the promotion gate (pure)
 export * from "./fairness-evaluation.js";
+
+// ADR-0361: monitoring sanctioned AI SaaS through vendor compliance APIs (catalogue, schemas, normaliser, run lifecycle)
+export * from "./ai-saas-monitor.js";

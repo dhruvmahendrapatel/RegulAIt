@@ -129,6 +129,10 @@ export const SCHEDULER_JOB_NAMES = {
   siemDeliverySweep: "siem-delivery-sweep",
   // ADR-0302 (P37 follow-up): deletes third-party ingest evidence past the audit floor (third-party-ingest-retention.ts)
   thirdPartyEvidenceRetentionSweep: "third-party-evidence-retention-sweep",
+  // ADR-0361: reads enabled AI SaaS compliance exports (ai-saas-monitor.ts); off by default
+  aiSaasMonitorSweep: "ai-saas-monitor-sweep",
+  // ADR-0361: deletes AI SaaS interaction evidence past the cascade floor (ai-saas-monitor.ts)
+  aiSaasEvidenceRetentionSweep: "ai-saas-evidence-retention-sweep",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -843,6 +847,7 @@ import { spiffeBundleRefreshJobDefinitions } from "./oauth/spiffe-bundle-endpoin
 import { fairnessJobDefinitions } from "./fairness.js";
 import { siemJobDefinitions } from "./siem-delivery.js";
 import { thirdPartyIngestJobDefinitions } from "./third-party-ingest-retention.js";
+import { aiSaasMonitorJobDefinitions } from "./ai-saas-monitor.js";
 
 function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
   return [
@@ -861,6 +866,7 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...fairnessJobDefinitions(), // ADR-0222 (P13(a)): fairness-dataset-retention-sweep
     ...siemJobDefinitions({ dataKey: opts.dataKey }), // ADR-0303: siem-delivery-sweep
     ...thirdPartyIngestJobDefinitions(), // ADR-0302: third-party-evidence-retention-sweep
+    ...aiSaasMonitorJobDefinitions({ dataKey: opts.dataKey }), // ADR-0361: ai-saas-monitor-sweep, ai-saas-evidence-retention-sweep
   ];
 }
 // ===== end ADR-0182 block ====================================================
