@@ -89,12 +89,22 @@ kernel and runner.
    instance (and so compensates it, decision 2). A timer is a pg-boss job sent in the transaction that enters the
    stage, keyed by the stage execution key (ADR-0284), so it exists if and only if the entry committed and a stale
    timer finds a different key and does nothing.
-8. The timer's action runs as a named system actor (`workflow-sla`) through `applyEvent` or the approvals queue under
-   the instance lock: `notify` writes the approvals-queue reminder and a ChatOps alert (ADR-0061); `reassign`
-   supersedes the stage's pending rows and requests the named approvers (resolved like a stage's own approvers);
-   `fail` applies `abort`. Each writes `workflow:sla-warned`, `workflow:sla-breached` or `workflow:sla-reassigned` in
-   that transaction. The worker follows ADR-0283's switch; a timer that cannot be sent is audited and the stage
-   simply has no deadline, never a blocked transition.
+8. **The escalation contract with lane E23 (its process-analytics ADR, PR #888): one escalation mechanism for human tasks.** A sign-off is a
+   row in the one approvals queue, and its timed escalation is the ADR-0046 SLA sweep over `approval_assignments`.
+   - On a `human_approval` stage, E21 does not escalate the task itself. When the stage is entered, E21 sets each of
+     the stage's pending tasks' warn time, due time (and, from the stage's `sla`, the escalation target for `reassign`)
+     through the one `workbench.ts` function lane E23's slice 2 provides. The sweep then warns, breaches and escalates
+     (`notify_only`, `reassign`, `add_assignee`), audits it and never decides. A re-entry of the stage sets the due
+     time of its new tasks; a superseded task's clock stops with it.
+   - The one human-stage action that is not a task escalation stays E21's: `onBreach: "fail"` cancels the INSTANCE
+     (and so compensates it, decision 2). E21 keeps a breach timer for it, keyed by the stage execution; when it fires
+     on a stage still resting at that entry it applies `abort` as the system actor `workflow-sla`. The pending tasks are
+     superseded by the abort, never denied.
+   - On every other stage (an artifact, a plan, a manual trigger, an executed stage), the timer and its action
+     (`notify` or `fail`) are E21's own, through `applyEvent` under the instance lock, audited `workflow:sla-warned`,
+     `workflow:sla-breached` in that transaction. These are not task escalations and do not touch the approvals queue.
+   - A timer that cannot be sent is audited and the stage simply has no deadline, never a blocked transition. The
+     worker follows ADR-0283's switch.
 
 ### Slice 3: process versions, in-flight migration and canary (decided; built after slice 2)
 
