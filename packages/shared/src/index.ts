@@ -5073,3 +5073,6 @@ export * from "./managed-settings.js";
 
 // ADR-0341: RFC 6902 patches for diff views
 export { jsonPatch, type JsonPatchOperation } from "./json-patch.js";
+
+// ADR-0362: content inspection beyond text (the sandboxed extractor's vocabulary)
+export * from "./content-inspection.js";
