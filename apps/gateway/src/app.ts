@@ -1,3 +1,4 @@
+import { registerDetectionFeedRoutes } from "./detection-feed.js";
 import Fastify, {
   LogController,
   type FastifyReply,
@@ -6397,6 +6398,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerDecisionReceiptRoutes(app, db, { dataKey: opts.dataKey });
   registerAuditTimestampRoutes(app, db);
   registerDetectionContentRoutes(app, db);
+  registerDetectionFeedRoutes(app, db);
   // ADR-0188 S1: per-agent and workload identity (route classes in route-classes.ts)
   registerIdentityRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0189 B1: the Decision BOM and AI BOM (admin-only route class until B4's export-role check)

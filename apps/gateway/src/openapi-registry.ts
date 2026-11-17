@@ -530,6 +530,9 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/audit/anchors/:anchorId/timestamp": "internal",
   "GET /v1/audit/anchors/:anchorId/timestamp.tsr": "internal",
   "GET /v1/detection-content": "internal",
+  "GET /v1/detection-content/feed": "internal",
+  "POST /v1/detection-content/feed/import": "internal",
+  "PUT /v1/detection-content/feed/settings": "internal",
   // ADR-0187 (batch 5, §4.10) — internal while the engine slices land
   "GET /v1/engines": "internal",
   "GET /v1/engines/:engineId": "internal",
@@ -1974,6 +1977,9 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/audit/anchors/:anchorId/timestamp": "audit",
   "GET /v1/audit/anchors/:anchorId/timestamp.tsr": "audit",
   "GET /v1/detection-content": "guardrails",
+  "GET /v1/detection-content/feed": "guardrails",
+  "POST /v1/detection-content/feed/import": "guardrails",
+  "PUT /v1/detection-content/feed/settings": "guardrails",
   // ADR-0187 (batch 5)
   "GET /v1/engines": "engines",
   "GET /v1/engines/:engineId": "engines",

@@ -1,3 +1,4 @@
+import { loadDetectionFeedRuntime, type DetectionFeedRuntime } from "./detection-feed.js";
 /**
  * ADR-0042 — the GATEWAY half of the guardrail engine.
  *
@@ -148,6 +149,7 @@ export interface GuardrailProvenance {
 }
 
 export interface GuardrailPolicy {
+  detectionFeed?: DetectionFeedRuntime | undefined;
   modes: GuardrailModes;
   terms: GuardrailTerms;
   provenance: GuardrailProvenance[];
@@ -313,7 +315,7 @@ export async function resolveGuardrailPolicy(
       ? "connector"
       : null;
 
-  const [orgRow, overrideRow, packsRow, trained] = await Promise.all([
+  const [orgRow, overrideRow, packsRow, trained, detectionFeed] = await Promise.all([
     loadOrgGuardrailConfig(db),
     scope && scopeId
       ? db
@@ -338,6 +340,7 @@ export async function resolveGuardrailPolicy(
       .then((r) => r[0]),
     // ADR-0220: the trained detectors in force (one indexed read; none by default)
     loadTrainedDetectorRuntime(db, { userId: args.userId ?? null, projectId: args.projectId ?? null }),
+    loadDetectionFeedRuntime(db),
   ]);
 
   const orgModes: Partial<GuardrailModes> = orgRow ? rowModes(orgRow) : { ...GUARDRAIL_DEFAULT_MODES };
@@ -383,7 +386,7 @@ export async function resolveGuardrailPolicy(
 
   const registry = guardrailRegistry();
   const atBlock = (phase: GuardrailPhase) =>
-    registry.some((d) => d.phases.includes(phase) && modes[d.id] === "block") ||
+    !!detectionFeed?.unavailable || registry.some((d) => d.phases.includes(phase) && modes[d.id] === "block") ||
     // a trained detector at block (or failing closed at block) must also see
     // the whole text before any of it is delivered
     planTrainedDetectors(trained?.settings ?? [], phase, trainedModes ?? modes).some((p) => p.mode === "block");
@@ -392,7 +395,8 @@ export async function resolveGuardrailPolicy(
     modes,
     terms,
     provenance,
-    active: GUARDRAIL_DETECTOR_IDS.some((id) => modes[id] !== "off") || (trained?.settings.length ?? 0) > 0,
+    detectionFeed,
+    active: !!detectionFeed?.unavailable || GUARDRAIL_DETECTOR_IDS.some((id) => modes[id] !== "off") || (trained?.settings.length ?? 0) > 0,
     blocksInput: atBlock("input"),
     blocksOutput: atBlock("output"),
     vendoredPacks: packsRow?.packs,
@@ -504,6 +508,10 @@ export function runGuardrails(
   phase: GuardrailPhase,
   text: string,
 ): GuardrailEvaluation {
+  if(policy.detectionFeed?.unavailable) {
+    const finding:GuardrailFinding={detector:"prompt_injection",mode:"block",action:"block",hits:[{detector:"prompt_injection",category:"feed_unavailable",count:1}]};
+    return {phase,action:"block",findings:[finding],blocking:[finding]};
+  }
   return evaluateGuardrails({
     phase,
     text,
@@ -511,6 +519,7 @@ export function runGuardrails(
     terms: policy.terms,
     exclude: ["pii"],
     vendoredPacks: policy.vendoredPacks,
+    detectionFeedRules: policy.detectionFeed?.rules,
   });
 }
 
