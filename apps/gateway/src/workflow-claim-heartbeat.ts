@@ -18,6 +18,7 @@
  *   salvaged by the discard path).
  */
 import { and, eq, sql, workflowInstances, type Db } from "@regulait/db";
+import { errLine } from "./err-serializer.js";
 
 export const DEFAULT_CLAIM_LEASE_MS = 60_000;
 export const CLAIM_LEASE_BOUNDS = { min: 15_000, max: 15 * 60_000 } as const;
@@ -108,7 +109,7 @@ export function startClaimHeartbeat(
     try {
       state = await renewStageClaim(db, g, maxMs);
     } catch (err) {
-      console.error(`workflow claim renewal for ${g.instanceId}/${g.stageId} failed: ${String(err)}`);
+      console.error(`workflow claim renewal for ${g.instanceId}/${g.stageId} failed: ${errLine(err)}`);
       return;
     }
     if (state === "renewed") return;
@@ -118,7 +119,7 @@ export function startClaimHeartbeat(
   };
   const timer = setInterval(() => {
     inFlight = inFlight.then(tick).catch((err) => {
-      console.error(`workflow claim heartbeat for ${g.instanceId}/${g.stageId}: ${String(err)}`);
+      console.error(`workflow claim heartbeat for ${g.instanceId}/${g.stageId}: ${errLine(err)}`);
     });
   }, Math.max(1_000, Math.floor(leaseMs / 3)));
   timer.unref();
