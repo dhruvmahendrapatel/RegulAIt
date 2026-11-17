@@ -115,7 +115,7 @@ lowers a limit) or `neutral` (a description).
 
 | Section | Widens | Narrows |
 |---|---|---|
-| roles | a new tool, server, agent or connector grant on a role; server `readOnlyAll` true → false; connector `read` → `readwrite`; agent modes or connector objects gained or set to unrestricted | a grant removed; a role removed; modes or objects reduced |
+| roles | a new tool, server, agent or connector grant on a role; server `readOnlyAll` false → true (false confers nothing, and the plan refuses it as an inert grant); connector `read` → `readwrite`; agent modes or connector objects gained or set to unrestricted | a grant removed; a role removed; modes or objects reduced |
 | rateLimits | a limit removed; `maxCalls` raised; `windowSeconds` shortened; `writeOnly` false → true | a limit added; `maxCalls` lowered; window lengthened |
 | mcpBundles | an item added; a grant added; a grant's `maxTier` raised; a bundle un-archived | an item or grant removed; tier lowered; bundle archived |
 | workflowTemplates | any definition change, a new template, a template un-retired (a stage removed can skip a sign-off; the plan cannot prove a definition change is stricter) | a template retired |

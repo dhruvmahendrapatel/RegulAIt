@@ -121,8 +121,11 @@ describe("the classification table (ADR-0357 §3)", () => {
   it("roles", () => {
     expect(codes({ roles: [] }, role({ toolGrants: [{ server: "s", tool: "t" }] }))).toEqual(["widens:tool_grant_added"]);
     expect(codes(role({ toolGrants: [{ server: "s", tool: "t" }] }), role({}))).toEqual(["narrows:tool_grant_removed"]);
-    expect(codes(role({ serverGrants: [{ server: "s", readOnlyAll: true }] }), role({ serverGrants: [{ server: "s", readOnlyAll: false }] }))).toEqual([
+    expect(codes(role({ serverGrants: [{ server: "s", readOnlyAll: false }] }), role({ serverGrants: [{ server: "s", readOnlyAll: true }] }))).toEqual([
       "widens:server_grant_widened",
+    ]);
+    expect(codes(role({ serverGrants: [{ server: "s", readOnlyAll: true }] }), role({ serverGrants: [{ server: "s", readOnlyAll: false }] }))).toEqual([
+      "narrows:server_grant_narrowed",
     ]);
     expect(codes(role({ connectorGrants: [{ connector: "c", mode: "read" }] }), role({ connectorGrants: [{ connector: "c", mode: "readwrite" }] }))).toEqual([
       "widens:connector_mode_widened",

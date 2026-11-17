@@ -455,10 +455,12 @@ function roleFindings(before: NormalRole | null, after: NormalRole | null): Chan
       (g) => g.server,
       (g) => [W("server_grant_added", `server ${g.server} granted${g.readOnlyAll ? " (read-only tools)" : ""}`)],
       (g) => [N("server_grant_removed", `server ${g.server} no longer granted`)],
+      // `readOnlyAll: true` grants every read-kind tool on the server; false confers nothing (the API refuses it as
+      // an inert grant), so gaining it widens and losing it narrows
       (x, y) =>
         x.readOnlyAll === y.readOnlyAll
           ? []
-          : [x.readOnlyAll ? W("server_grant_widened", `server ${y.server}: no longer read-only`) : N("server_grant_narrowed", `server ${y.server}: now read-only`)],
+          : [y.readOnlyAll ? W("server_grant_widened", `server ${y.server}: now grants every read tool`) : N("server_grant_narrowed", `server ${y.server}: no longer grants its read tools`)],
     ),
     ...keyedDiff(
       b.agentGrants,
