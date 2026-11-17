@@ -155,6 +155,10 @@ export function gcpAuthClient(deps: GcpScannerDeps): AuthClient {
 
 /** ADR-0337: the only scope a Google Workspace entitlement read asks for (the Admin SDK Reports API, read-only) */
 export const GOOGLE_WORKSPACE_REPORTS_READONLY_SCOPE = "https://www.googleapis.com/auth/admin.reports.audit.readonly";
+/** ADR-0337 §4 (owner decision 2026-11-17): the admin opt-in Directory token listing needs the user listing (read-only)
+ * and the token scope. The token scope can also revoke tokens; RegulAIt only reads with it (GET-only transport). */
+export const GOOGLE_WORKSPACE_DIRECTORY_USER_READONLY_SCOPE = "https://www.googleapis.com/auth/admin.directory.user.readonly";
+export const GOOGLE_WORKSPACE_DIRECTORY_USER_SECURITY_SCOPE = "https://www.googleapis.com/auth/admin.directory.user.security";
 
 /**
  * ADR-0337: a domain-wide delegated client for a Google Workspace read. The service-account key signs a JWT whose

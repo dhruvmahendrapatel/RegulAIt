@@ -302,3 +302,12 @@ export function classifySaasScope(platform: SaasEntitlementPlatform, scope: stri
   }
   return { access: "unknown", reason: "no rule recognises this scope name, so it is treated as able to change data" };
 }
+
+// ---------------------------------------------------------------------------
+// Linking a vendor-side app to a RegulAIt agent (owner decision 2026-11-17, ADR-0337 §6)
+// ---------------------------------------------------------------------------
+
+/** the link's states and transitions are the declared ADR-0348 machine `SAAS_APP_AGENT_LINK_MACHINE` (state-machines.ts) */
+
+/** an identifier an admin declares for an agent: the app's id on one platform, compared exactly (case-sensitive) */
+export const AGENT_VENDOR_IDENTIFIER_PATTERN = /^[\x21-\x7e]{1,255}$/;

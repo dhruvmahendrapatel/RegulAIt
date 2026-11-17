@@ -28,7 +28,12 @@
  *  - entitlement_google_workspace  customerId? (default my_customer), lookbackDays? (1-180, default 180);
  *                                  scope: organisation-level = every app, include = OAuth client ids
  */
-import { GOOGLE_WORKSPACE_REPORTS_READONLY_SCOPE, workspaceDelegatedClient } from "@regulait/cloud-discovery";
+import {
+  GOOGLE_WORKSPACE_DIRECTORY_USER_READONLY_SCOPE,
+  GOOGLE_WORKSPACE_DIRECTORY_USER_SECURITY_SCOPE,
+  GOOGLE_WORKSPACE_REPORTS_READONLY_SCOPE,
+  workspaceDelegatedClient,
+} from "@regulait/cloud-discovery";
 import type { DiscoveryReadOutcome, SaasAppEntitlement, SaasEntitlementBatch, SaasScopeGrant } from "@regulait/shared";
 import { SAAS_ENTITLEMENT_LIMITS } from "@regulait/shared";
 import { dedupedSecretSink, scannerFetch } from "./discovery-cloud-scanners.js";
@@ -292,6 +297,7 @@ const GOOGLE_CLIENT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;
 const GOOGLE_CUSTOMER_ID = /^(?:my_customer|C[0-9a-z]{6,20})$/;
 
 function workspaceTargetProblem(target: Readonly<Record<string, string>>, scope: Readonly<{ orgLevel: boolean; include: readonly string[] }>): string | null {
+  if (target.directoryTokens !== undefined && target.directoryTokens !== "on" && target.directoryTokens !== "off") return "'directoryTokens' is 'on' (the admin opt-in Directory token listing) or 'off' (the default)";
   if (target.customerId !== undefined && !GOOGLE_CUSTOMER_ID.test(target.customerId)) return "'customerId' must be my_customer or a Workspace customer id (C…)";
   if (target.lookbackDays !== undefined) {
     const n = Number(target.lookbackDays);
@@ -326,6 +332,7 @@ async function runWorkspaceEntitlements(ctx: ScanContext): Promise<ScanResult> {
   if (problem) throw new WiderSourceConfigError(`entitlement_google_workspace: ${problem}`);
   const c = ctx.credential;
   if (!c || c.mode !== "static" || !c.secret) throw new WiderSourceConfigError("entitlement_google_workspace: a static credential holding the service-account key is required");
+  const directory = t.directoryTokens === "on";
   const subject = c.publicConfig.adminSubject;
   if (!subject) throw new WiderSourceConfigError("entitlement_google_workspace: the credential names adminSubject, the admin the read acts for");
   const onSecret = dedupedSecretSink(ctx.registerSecret);
@@ -337,7 +344,8 @@ async function runWorkspaceEntitlements(ctx: ScanContext): Promise<ScanResult> {
       onSecret,
       keyJson: c.secret,
       subject,
-      scopes: [GOOGLE_WORKSPACE_REPORTS_READONLY_SCOPE],
+      // the Reports scope only, unless an admin opted in to the Directory token listing (ADR-0337 §4)
+      scopes: directory ? [GOOGLE_WORKSPACE_DIRECTORY_USER_READONLY_SCOPE, GOOGLE_WORKSPACE_DIRECTORY_USER_SECURITY_SCOPE] : [GOOGLE_WORKSPACE_REPORTS_READONLY_SCOPE],
     });
     await ctx.throttle();
     const tok = await client.getAccessToken();
@@ -346,11 +354,15 @@ async function runWorkspaceEntitlements(ctx: ScanContext): Promise<ScanResult> {
   } catch (err) {
     // only Google's OAuth error code is kept from the error text, never the response body
     const code = /\b(unauthorized_client|invalid_grant|access_denied|invalid_client|invalid_scope)\b/.exec(errMessage(err))?.[1];
-    throw new WiderSourceConfigError(`entitlement_google_workspace: the delegated token request failed${code ? ` (${code})` : ""}; check the service account's domain-wide delegation of the read-only Reports scope`);
+    throw new WiderSourceConfigError(
+      `entitlement_google_workspace: the delegated token request failed${code ? ` (${code})` : ""}; check the service account's domain-wide delegation of ${directory ? "the two Directory scopes" : "the read-only Reports scope"}`,
+    );
   }
   onSecret(accessToken);
-  const fetchImpl = scannerFetch(ctx);
+  // every data call is a GET: a revoke (DELETE) is refused before it leaves, whatever the token could do
+  const fetchImpl = readOnlyFetch(scannerFetch(ctx));
   const headers = { authorization: `Bearer ${accessToken}` };
+  if (directory) return runWorkspaceDirectory(ctx, fetchImpl, headers);
   const get = (url: string) => getJson(fetchImpl, url, headers, ctx.signal);
   const outcomes: DiscoveryReadOutcome[] = [];
   const lookback = t.lookbackDays ? Number(t.lookbackDays) : GOOGLE_REPORTS_MAX_LOOKBACK_DAYS;
@@ -432,6 +444,124 @@ async function runWorkspaceEntitlements(ctx: ScanContext): Promise<ScanResult> {
     complete: false,
     apps: [...drafts.values()].filter((d) => d.grants.size > 0).map((d) => ({ ...d.app, grants: [...d.grants.values()] })),
     revokedPrincipals,
+  };
+  return { ...result, entitlements };
+}
+
+/**
+ * A fetch that only reads. The opt-in Directory scope (`admin.directory.user.security`) can also revoke a user's
+ * tokens; an entitlement reader never revokes (findings are recommendations acted on through the governed removal
+ * flow), so any method other than GET or HEAD is refused here, before it leaves the gateway.
+ */
+export function readOnlyFetch(f: typeof fetch): typeof fetch {
+  return (async (input: string | URL | Request, init?: RequestInit) => {
+    const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+    if (method !== "GET" && method !== "HEAD") {
+      throw new Error(`entitlement reader: ${method} refused: a reader only reads; a revoke goes through the governed removal flow`);
+    }
+    return f(input, init);
+  }) as typeof fetch;
+}
+
+/** a Google Directory user id (numeric), bounded */
+const GOOGLE_USER_ID = /^[0-9]{1,64}$/;
+
+/**
+ * The admin opt-in Directory read (owner decision 2026-11-17): every user (`users.list`), then each user's OAuth tokens
+ * (`users.tokens.list`). It sees grants older than the Reports window, so a read that reached every user and every
+ * listing is COMPLETE (an unseen grant was revoked); anything less is partial and removes nothing unseen.
+ */
+async function runWorkspaceDirectory(ctx: ScanContext, fetchImpl: typeof fetch, headers: Record<string, string>): Promise<ScanResult> {
+  const t = ctx.source.target;
+  const get = (url: string) => getJson(fetchImpl, url, headers, ctx.signal);
+  const outcomes: DiscoveryReadOutcome[] = [];
+  const keep = includeSet(ctx);
+  const customer = encodeURIComponent(t.customerId ?? "my_customer");
+  const userIds: string[] = [];
+  const base = `${REPORTS_ORIGIN}/admin/directory/v1/users?customer=${customer}&maxResults=500&projection=basic&fields=${encodeURIComponent("users(id),nextPageToken")}`;
+  await readListing(
+    ctx,
+    "Google Workspace users (Directory)",
+    base,
+    outcomes,
+    (body) => {
+      const users = atPath(body, "users");
+      if (users !== undefined && !Array.isArray(users)) throw new ReadFailure("error", "the user listing has no user list");
+      for (const u of (users as unknown[] | undefined) ?? []) {
+        if (userIds.length >= WIDER_MAX_ITEMS) return ITEM_CAP;
+        const id = str(atPath(u, "id"), 64);
+        if (id && GOOGLE_USER_ID.test(id)) userIds.push(id);
+      }
+      const token = str(atPath(body, "nextPageToken"), 2048);
+      return token ? `${base}&pageToken=${encodeURIComponent(token)}` : null;
+    },
+    get,
+  );
+
+  const drafts = new Map<string, AppDraft>();
+  let truncated = false;
+  let failed = 0;
+  let firstFailure: ReadFailure | null = null;
+  let stopped = false;
+  let read = 0;
+  for (const id of userIds) {
+    if (ctx.signal.aborted || !(await ctx.heartbeat())) {
+      stopped = true;
+      break;
+    }
+    let body: unknown;
+    try {
+      body = await get(`${REPORTS_ORIGIN}/admin/directory/v1/users/${encodeURIComponent(id)}/tokens`);
+    } catch (err) {
+      if (!(err instanceof ReadFailure)) throw err;
+      failed += 1;
+      firstFailure ??= err;
+      continue;
+    }
+    read += 1;
+    const items = atPath(body, "items");
+    if (!Array.isArray(items)) continue;
+    const principal = await ctx.pseudonymise("idp_user", id);
+    for (const item of items) {
+      const clientId = str(atPath(item, "clientId"), 255);
+      if (!clientId || !GOOGLE_CLIENT_ID.test(clientId)) continue;
+      if (keep && !keep.has(clientId.toLowerCase())) continue;
+      const scopes = atPath(item, "scopes");
+      let d = drafts.get(clientId);
+      if (!d) {
+        if (drafts.size >= SAAS_ENTITLEMENT_LIMITS.apps) {
+          truncated = true;
+          continue;
+        }
+        d = { app: { externalId: clientId, appKind: "oauth_client", displayName: label(atPath(item, "displayText"), SAAS_ENTITLEMENT_LIMITS.displayName), publisher: null, publisherVerified: null }, grants: new Map() };
+        drafts.set(clientId, d);
+      }
+      for (const scope of Array.isArray(scopes) ? scopes : []) {
+        const name = str(scope, SAAS_ENTITLEMENT_LIMITS.scope);
+        if (!name || !/^[\x21-\x7e]+$/.test(name)) continue;
+        if (!addGrant(d, { resource: "", scope: name, grantType: "delegated", consent: "user" }, principal)) truncated = true;
+      }
+    }
+  }
+  const tokensRead = "Google Workspace user tokens (Directory)";
+  if (stopped) outcomes.push({ read: tokensRead, status: "skipped", detail: `the run's lease or time ran out after ${read} of ${userIds.length} users` });
+  else if (failed > 0 && read === 0 && firstFailure) outcomes.push({ read: tokensRead, status: firstFailure.status, detail: firstFailure.message });
+  else outcomes.push({ read: tokensRead, status: "read", ...(failed > 0 ? { detail: `stopped after ${read} of ${userIds.length} users: ${failed} listing(s) could not be read` } : {}) });
+  if (truncated) outcomes.push({ read: "entitlement batch size", status: "skipped", detail: "a per-app or per-grant bound was reached: the rest was not kept" });
+  // completeness first: the note below is informational, not a listing cut short
+  const complete = !stopped && failed === 0 && !truncated && !outcomes.some(cutShort);
+  outcomes.push({
+    read: "Google Workspace token scope",
+    status: "skipped",
+    detail: "the opted-in Directory token scope can also revoke tokens; this reader only reads (every data call is a GET)",
+  });
+  const result = finish([], outcomes, "unverified");
+  const entitlements: SaasEntitlementBatch = {
+    platform: "google_workspace",
+    tenant: t.customerId ?? "my_customer",
+    complete,
+    apps: [...drafts.values()].filter((d) => d.grants.size > 0).map((d) => ({ ...d.app, grants: [...d.grants.values()] })),
+    revokedPrincipals: [],
   };
   return { ...result, entitlements };
 }

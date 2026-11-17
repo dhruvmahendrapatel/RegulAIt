@@ -47,6 +47,10 @@ export const DELIBERATELY_API_ONLY = new Map([
   // it becomes a real handler, and an entry for one is reported stale (see staleExemptions).
   ["/v1/mcp/authorised-targets/:x", "ADR-0246 (P27): API-only brief; the authorised-targets screen is posted on #453 (route census KNOWN_UI_GAPS). RAISED for the master's review on the PR: delete this entry when the screen lands"],
   // ADR-0230 A2 (P19, Lane L3): the UI is built by the design builder; delete this entry when the screen lands
+  // ADR-0337 §6 (lane E18, owner decision 2026-11-17): API-only until the entitlement graph screen on #453; delete these
+  // entries when the screen lands
+  ["/v1/discovery/agent-identifiers/:x", "removing an agent's declared vendor identifier (audited): API-only until the entitlement graph screen on #453 (route census KNOWN_UI_GAPS)"],
+  ["/v1/discovery/entitlements/apps/:x/agent-link", "unlinking a vendor app from its agent (audited, declared machine): API-only until the entitlement graph screen on #453 (route census KNOWN_UI_GAPS)"],
   ["/v1/servers/:x/system-class", "unmarking an SAP business server (settings_relax step-up): API-only until the SAP server screen on #453 (route census KNOWN_UI_GAPS)"],
 ]);
 

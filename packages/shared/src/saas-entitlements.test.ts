@@ -8,7 +8,10 @@ import {
   DISCOVERY_SOURCE_KINDS,
   SAAS_ENTITLEMENT_PLATFORMS,
   SAAS_ENTITLEMENT_SOURCE_PLATFORM,
+  SAAS_APP_AGENT_LINK_MACHINE,
   SAAS_SCOPE_RULES_V1,
+  STATE_MACHINES,
+  AGENT_VENDOR_IDENTIFIER_PATTERN,
   SaasEntitlementBatchRefused,
   checkSaasEntitlementBatch,
   classifySaasScope,
@@ -154,5 +157,27 @@ describe("ADR-0337 scope classifier V1 (frozen)", () => {
 
   it("an over-long name is unknown, never matched", () => {
     expect(classifySaasScope("slack", `${"a".repeat(600)}:read`).access).toBe("unknown");
+  });
+});
+
+describe("ADR-0337 §6 agent link machine (owner decision 2026-11-17)", () => {
+  const m = SAAS_APP_AGENT_LINK_MACHINE;
+  it("is declared and listed with the other machines", () => {
+    expect(STATE_MACHINES[m.def.id]).toBe(m);
+    expect(m.def.stored).toBe("saas_entitlement_apps.agent_link_state");
+  });
+  it("auto-links only an app nobody linked or unlinked; an admin may link from anywhere and unlink a link", () => {
+    expect(m.sourcesOf("auto_link")).toEqual(["none"]);
+    expect(m.can("unlinked", "auto_link")).toBe(false);
+    expect(m.can("admin", "auto_link")).toBe(false);
+    for (const s of m.def.states) expect(m.can(s, "link")).toBe(true);
+    expect(m.can("none", "unlink")).toBe(false);
+    expect(m.next("auto", "unlink")).toBe("unlinked");
+    expect(m.describe("unlinked").transitions.find((t) => t.event === "auto_link")!.allowed).toBe(false);
+  });
+  it("an identifier is printable, no spaces, at most 255 characters (compared exactly)", () => {
+    expect(AGENT_VENDOR_IDENTIFIER_PATTERN.test("1234-abc.apps.googleusercontent.com")).toBe(true);
+    expect(AGENT_VENDOR_IDENTIFIER_PATTERN.test("has space")).toBe(false);
+    expect(AGENT_VENDOR_IDENTIFIER_PATTERN.test("x".repeat(256))).toBe(false);
   });
 });

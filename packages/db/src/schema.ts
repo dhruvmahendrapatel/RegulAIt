@@ -1992,6 +1992,10 @@ export const auditLog = pgTable(
         "discovery_run",
         "discovery_settings",
         "discovery_pseudonym",
+        // ADR-0337: a vendor app's agent link (auto-linked, linked, unlinked) and an agent's vendor identifier
+        // (declared, removed). Plain text column — no DDL.
+        "saas_entitlement_app",
+        "agent_vendor_identifier",
         // ADR-0261 (P37): a third-party ingest source (created, enabled, disabled, its write-only credential issued or
         // revoked) and each accepted or refused batch of third-party evidence. Plain text column — no DDL.
         "third_party_ingest_source",
@@ -17135,6 +17139,7 @@ export const SAAS_ENTITLEMENT_APP_KINDS = ["service_principal", "oauth_client", 
 export const SAAS_ENTITLEMENT_PLATFORM_VALUES = ["m365", "google_workspace", "salesforce", "slack"] as const;
 export const SAAS_ENTITLEMENT_GRANT_TYPES = ["delegated", "application"] as const;
 export const SAAS_ENTITLEMENT_CONSENTS = ["tenant", "user"] as const;
+export const SAAS_APP_AGENT_LINK_STATES = ["none", "auto", "admin", "unlinked"] as const;
 
 /** one app holding grants in the tenant one discovery source reads (deleted with the source) */
 export const saasEntitlementApps = pgTable(
@@ -17149,8 +17154,11 @@ export const saasEntitlementApps = pgTable(
     displayName: text("display_name"),
     publisher: text("publisher"),
     publisherVerified: boolean("publisher_verified"),
-    /** the RegulAIt agent registration this vendor-side app is, when an admin linked it */
-    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    /** the RegulAIt agent this vendor-side app is, when linked (auto on an exact identifier match, or by an admin).
+     * RESTRICT: an agent is retired through its lifecycle, never deleted while an app is linked to it */
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "restrict" }),
+    /** ADR-0348 machine SAAS_APP_AGENT_LINK_MACHINE (@regulait/shared): none | auto | admin | unlinked */
+    agentLinkState: text("agent_link_state", { enum: SAAS_APP_AGENT_LINK_STATES }).notNull().default("none"),
     firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull(),
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
     lastSeenRunId: uuid("last_seen_run_id").references(() => discoveryRuns.id, { onDelete: "set null" }),
@@ -17163,9 +17171,37 @@ export const saasEntitlementApps = pgTable(
     check("saas_entitlement_apps_display_name_check", sql`${t.displayName} IS NULL OR length(${t.displayName}) BETWEEN 1 AND 200`),
     check("saas_entitlement_apps_publisher_check", sql`${t.publisher} IS NULL OR length(${t.publisher}) BETWEEN 1 AND 200`),
     check("saas_entitlement_apps_seen_check", sql`${t.firstSeenAt} <= ${t.lastSeenAt}`),
+    check("saas_entitlement_apps_agent_link_state_check", sql`${t.agentLinkState} IN ('none', 'auto', 'admin', 'unlinked')`),
+    check(
+      "saas_entitlement_apps_agent_link_pair_check",
+      sql`(${t.agentId} IS NOT NULL) = (${t.agentLinkState} = 'auto' OR ${t.agentLinkState} = 'admin')`,
+    ),
   ],
 );
 export type SaasEntitlementAppRow = typeof saasEntitlementApps.$inferSelect;
+
+/** an identifier an admin declares for an agent (its app id on one platform); an app whose vendor id EXACTLY equals it
+ * is auto-linked to the agent (owner decision 2026-11-17). One identifier names one agent. */
+export const agentVendorIdentifiers = pgTable(
+  "agent_vendor_identifiers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    platform: text("platform", { enum: SAAS_ENTITLEMENT_PLATFORM_VALUES }).notNull(),
+    externalId: text("external_id").notNull(),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("agent_vendor_identifiers_uq").on(t.platform, t.externalId),
+    index("agent_vendor_identifiers_agent_idx").on(t.agentId),
+    check("agent_vendor_identifiers_platform_check", sql`${t.platform} IN ('m365', 'google_workspace', 'salesforce', 'slack')`),
+    check("agent_vendor_identifiers_external_id_check", sql`${t.externalId} ~ '^[!-~]{1,255}$'`),
+  ],
+);
+export type AgentVendorIdentifierRow = typeof agentVendorIdentifiers.$inferSelect;
 
 /** the scope dictionary: one row per platform, resource ('' where scope names are global) and scope name */
 export const saasEntitlementScopes = pgTable(
