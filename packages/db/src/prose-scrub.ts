@@ -296,6 +296,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.engineRunners, ["revokeReason"]],
   // ADR-0217: an automatic re-test's reason (a runner's gate reason or refusal detail, which can quote a case)
   [s.mrmRetestRuns, ["reason"]],
+  // ADR-0349 slice 4: why a workflow schedule was paused (a person's note, or the refusal that paused it)
+  [s.workflowSchedules, ["pauseNote"]],
 ];
 
 /**

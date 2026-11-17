@@ -120,6 +120,19 @@ export type PostV1UsersByUserIdRolesBody = {
     roleId: string;
   };
 
+export type PostV1WorkflowsInstancesBody = {
+    projectId?: string;
+    change: {
+      description: string;
+      paths: Array<string>;
+      changeType: string;
+      environment: string;
+      targetSystem?: string;
+    };
+    templateId?: string;
+    workItem?: string;
+  };
+
 export class GeneratedRegulAItClient extends BaseClient {
   /**
  * GET /.well-known/oauth-protected-resource
@@ -712,11 +725,10 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * Start a workflow instance from a template.
+ * Start a workflow instance from a template. ADR-0349: with `workItem` (the PM tool's key for the work item), at most one open instance may exist per template set + target system + work item. A second start is refused 409 `workflow_start_conflict`, naming the open instance to a caller who may read it (audited). Under the org setting `workflowStartConflictPolicy: use_existing` (an audited, step-up relaxation) it answers 200 with that instance and `reused: true`.
  * @stability public-stable — auth: user
- * @remarks this route declares no request schema in the spec, so `body` is untyped.
    */
-  postV1WorkflowsInstances<T = unknown>(body?: unknown, options?: RequestOptions): Promise<T> {
+  postV1WorkflowsInstances<T = unknown>(body: PostV1WorkflowsInstancesBody, options?: RequestOptions): Promise<T> {
     return this.request<T>("POST", `/v1/workflows/instances`, body, options);
   }
 
