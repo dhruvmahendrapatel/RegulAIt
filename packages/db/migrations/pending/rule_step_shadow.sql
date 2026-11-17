@@ -4,8 +4,8 @@
 --                                 in shadow a rescan refreshes nothing on the row, so the counts describe one rule.
 --   rule_step_shadows             one row per shadow period of a suggestion (start, stop, and what was measured). The
 --                                 counters are a measured read model of `trace_spans` (the source of truth), advanced
---                                 by `evaluated_through`; they hold counts only, never span content. At most one open
---                                 period per suggestion. Rows go with their suggestion (retention and erasure delete it).
+--                                 by the keyset (`evaluated_through`, `evaluated_through_id`); they hold counts only,
+--                                 never span content. At most one open period per suggestion. Rows go with their suggestion (retention and erasure delete it).
 -- Nothing here changes routing: the AI still answers every request.
 
 ALTER TABLE "rule_step_suggestions" DROP CONSTRAINT IF EXISTS "rule_step_suggestions_status_check";
@@ -20,11 +20,15 @@ CREATE TABLE IF NOT EXISTS "rule_step_shadows" (
   "stopped_by" uuid REFERENCES "users"("id") ON DELETE SET NULL,
   "stopped_at" timestamp with time zone,
   "evaluated_through" timestamp with time zone,
+  -- the cursor's tiebreaker: the id of the last span counted. No foreign key: a cursor position, and the span may be
+  -- pruned while the period stays
+  "evaluated_through_id" uuid,
   "runs" integer DEFAULT 0 NOT NULL,
   "covered" integer DEFAULT 0 NOT NULL,
   "agreed" integer DEFAULT 0 NOT NULL,
   CONSTRAINT "rule_step_shadows_counts_check" CHECK ("runs" >= 0 AND "covered" BETWEEN 0 AND "runs" AND "agreed" BETWEEN 0 AND "covered"),
-  CONSTRAINT "rule_step_shadows_stop_check" CHECK ("stopped_at" IS NULL OR "stopped_at" >= "started_at")
+  CONSTRAINT "rule_step_shadows_stop_check" CHECK ("stopped_at" IS NULL OR "stopped_at" >= "started_at"),
+  CONSTRAINT "rule_step_shadows_cursor_check" CHECK (("evaluated_through" IS NULL) = ("evaluated_through_id" IS NULL))
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS "rule_step_shadows_open_uq" ON "rule_step_shadows" ("suggestion_id") WHERE "stopped_at" IS NULL;

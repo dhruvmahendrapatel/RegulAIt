@@ -16990,7 +16990,7 @@ export type RuleStepSuggestionRow = typeof ruleStepSuggestions.$inferSelect;
 
 /**
  * ADR-0327 slice 3b (migration `rule_step_shadow`): one shadow period of a suggestion. The counters are a measured read
- * model of `trace_spans` (its source of truth), advanced through `evaluatedThrough`; counts only, never span content.
+ * model of `trace_spans` (its source of truth), advanced through the `(evaluatedThrough, evaluatedThroughId)` keyset; counts only, never span content.
  * At most one open period per suggestion. Nothing here changes routing.
  */
 export const ruleStepShadows = pgTable(
@@ -17004,8 +17004,10 @@ export const ruleStepShadows = pgTable(
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     stoppedBy: uuid("stopped_by").references(() => users.id, { onDelete: "set null" }),
     stoppedAt: timestamp("stopped_at", { withTimezone: true }),
-    /** the latest span start time already counted (null: nothing counted yet) */
+    /** the last span already counted, as a keyset (start time, id); both null until something is counted. No foreign
+     * key: it is a cursor position, and the span may be pruned while the period stays */
     evaluatedThrough: timestamp("evaluated_through", { withTimezone: true }),
+    evaluatedThroughId: uuid("evaluated_through_id"),
     /** structured runs seen since the start */
     runs: integer("runs").notNull().default(0),
     /** of those, the runs the rule answers (an input inside its table) */
@@ -17018,6 +17020,7 @@ export const ruleStepShadows = pgTable(
     index("rule_step_shadows_suggestion_started_idx").on(t.suggestionId, t.startedAt),
     check("rule_step_shadows_counts_check", sql`${t.runs} >= 0 AND ${t.covered} BETWEEN 0 AND ${t.runs} AND ${t.agreed} BETWEEN 0 AND ${t.covered}`),
     check("rule_step_shadows_stop_check", sql`${t.stoppedAt} IS NULL OR ${t.stoppedAt} >= ${t.startedAt}`),
+    check("rule_step_shadows_cursor_check", sql`(${t.evaluatedThrough} IS NULL) = (${t.evaluatedThroughId} IS NULL)`),
   ],
 );
 export type RuleStepShadowRow = typeof ruleStepShadows.$inferSelect;

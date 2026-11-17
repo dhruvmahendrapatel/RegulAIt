@@ -29,12 +29,12 @@ import {
   runMigrations,
   type Db,
 } from "@regulait/db";
-import { TRACE_TRUNCATION_MARKER } from "@regulait/shared";
+import { RULE_STEP_SUGGESTION_MACHINE, STATE_MACHINES, TRACE_TRUNCATION_MARKER } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { grantStepUpForTest, sessionRequest, stepUpRequest } from "./testing/step-up-grant.js";
 import type { StepUpCheckArgs } from "./step-up.js";
-import { RULE_STEP_AUDIT_RULE_IDS, RULE_STEP_TRANSITIONS } from "./rule-steps.js";
+import { RULE_STEP_AUDIT_RULE_IDS, SCAN_MAX_RUNS } from "./rule-steps.js";
 import { pruneRuleStepSuggestions } from "./rule-step-retention.js";
 import { induceStepRule, type StepRun } from "@regulait/optimizer-kernel";
 import { induceStepRuleOffThread } from "@regulait/optimizer-kernel/offload";
@@ -360,24 +360,64 @@ describe("ADR-0327 shadow mode (slice 3b)", () => {
     const [audit] = await auditRows(RULE_STEP_AUDIT_RULE_IDS.shadowStopped);
     expect(audit?.detail).toMatchObject({ suggestionId, runs: 6, covered: 4, agreed: 3 });
     expect((await app.inject({ method: "POST", url: `/v1/rule-steps/suggestions/${suggestionId}/shadow/stop`, headers: KEY })).statusCode).toBe(404);
+    expect((await app.inject({ method: "POST", url: `/v1/rule-steps/suggestions/${suggestionId}/shadow/stop`, headers: USER_KEY })).statusCode).toBe(403);
     await db.insert(traceSpans).values([span({ severity: "high", source: "phone" }, "on-call", new Date(Date.now() + 2000))]);
     const scanned = await rescan();
     expect(scanned.shadows.find((x) => x.suggestionId === suggestionId)).toBeUndefined();
     const [period] = await db.select().from(ruleStepShadows).where(eq(ruleStepShadows.suggestionId, suggestionId));
     expect(period).toMatchObject({ runs: 6, covered: 4, agreed: 3 });
   });
+
+  it("start, stop, start: a new period opens and the list shows the latest one (review #903)", async () => {
+    const r = await app.inject({ method: "POST", url: `/v1/rule-steps/suggestions/${suggestionId}/shadow`, headers: KEY });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(r.json().shadow).toMatchObject({ runs: 0, covered: 0, agreed: 0, stoppedAt: null });
+    const periods = await db.select().from(ruleStepShadows).where(eq(ruleStepShadows.suggestionId, suggestionId)).orderBy(ruleStepShadows.startedAt);
+    expect(periods.map((p) => [p.runs, p.stoppedAt === null])).toEqual([
+      [6, false],
+      [0, true],
+    ]);
+    const v = await latest();
+    expect(v?.shadow).toMatchObject({ id: periods[1]!.id, runs: 0 });
+  });
+
+  it("counts every span of a full page that shares one start time, over two passes (review #903)", async () => {
+    // drain what earlier tests recorded ahead of the clock, so the page below holds only the tied spans
+    await rescan();
+    const before = (await latest())!.shadow!.runs;
+    const at = new Date(Date.now() + 3600_000);
+    const tied = Array.from({ length: SCAN_MAX_RUNS + 1 }, () => span({ severity: "high", source: "phone" }, "on-call", at));
+    for (let i = 0; i < tied.length; i += 1000) await db.insert(traceSpans).values(tied.slice(i, i + 1000));
+    const first = await rescan();
+    expect(first.shadows.find((x) => x.suggestionId === suggestionId)).toMatchObject({ runs: SCAN_MAX_RUNS });
+    // a time-only cursor moved past `at` here and never counted the last span
+    const second = await rescan();
+    expect(second.shadows.find((x) => x.suggestionId === suggestionId)).toMatchObject({ runs: 1, covered: 1, agreed: 1 });
+    expect((await latest())?.shadow?.runs).toBe(before + SCAN_MAX_RUNS + 1);
+    expect((await rescan()).shadows.find((x) => x.suggestionId === suggestionId)).toBeUndefined();
+  });
 });
 
-describe("ADR-0327 suggestion lifecycle is one declared table (owner rule 12)", () => {
-  it("declares exactly the allowed transitions, each between known states", () => {
-    expect(RULE_STEP_TRANSITIONS).toEqual({
-      shadow_start: { from: "suggested", to: "shadow" },
-      shadow_stop: { from: "shadow", to: "suggested" },
-      dismiss: { from: "suggested", to: "dismissed" },
+describe("ADR-0327 suggestion lifecycle is the declared ADR-0348 machine (owner rule 12, review #903)", () => {
+  it("declares exactly the allowed transitions, over the column's states, and is registered", () => {
+    expect([...RULE_STEP_SUGGESTION_MACHINE.def.states]).toEqual([...RULE_STEP_SUGGESTION_STATUSES]);
+    expect(STATE_MACHINES.rule_step_suggestion).toBe(RULE_STEP_SUGGESTION_MACHINE);
+    expect(Object.fromEntries(Object.entries(RULE_STEP_SUGGESTION_MACHINE.def.transitions).map(([e, t]) => [e, [t.from, t.to]]))).toEqual({
+      shadow_start: [["suggested"], "shadow"],
+      shadow_stop: [["shadow"], "suggested"],
+      dismiss: [["suggested"], "dismissed"],
     });
-    for (const t of Object.values(RULE_STEP_TRANSITIONS)) {
-      expect(RULE_STEP_SUGGESTION_STATUSES).toContain(t.from);
-      expect(RULE_STEP_SUGGESTION_STATUSES).toContain(t.to);
+    expect(RULE_STEP_SUGGESTION_MACHINE.def.terminal).toEqual(["dismissed"]);
+  });
+
+  it("each listed suggestion carries its read-only lifecycle", async () => {
+    const r = await app.inject({ method: "GET", url: "/v1/rule-steps/suggestions?status=shadow", headers: KEY });
+    expect(r.statusCode, r.body).toBe(200);
+    const items = r.json().items as Array<{ status: string; lifecycle: { machine: string; state: string; transitions: Array<{ event: string; allowed: boolean }> } }>;
+    expect(items.length).toBeGreaterThan(0);
+    for (const it of items) {
+      expect(it.lifecycle).toMatchObject({ machine: "rule_step_suggestion", state: it.status, terminal: false });
+      expect(Object.fromEntries(it.lifecycle.transitions.map((t) => [t.event, t.allowed]))).toEqual({ shadow_start: false, shadow_stop: true, dismiss: false });
     }
   });
 });
