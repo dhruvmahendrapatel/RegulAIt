@@ -114,6 +114,7 @@ import { refuseIfFeatureNotLicensed } from "./licensing.js";
 import { callerProjectIds, callerTeamIds, resolveScopeProjectIds } from "./reporting.js";
 import { countTestedEvaluators } from "./eval-catalog.js";
 import { overrideInForce } from "./guardrails.js";
+import { runEndpointBenchmarkCheck } from "./endpoint-benchmark-checks.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 /** a uuid that cannot exist, so an empty allow-list yields an empty result set
@@ -461,6 +462,14 @@ export async function runCollector(
           ),
         );
       return row?.n ?? 0;
+    }
+
+    case "endpoint_benchmark_check": {
+      // ADR-0351 slice 3: one fleet-wide endpoint check, 1 = pass. Endpoint rows carry no project, so only an
+      // org-scoped report counts it (fail closed, as `isolation_placements`). The schema requires `endpointCheck`.
+      if (projectIds !== null) return 0;
+      if (!params.endpointCheck) throw new Error("endpoint_benchmark_check needs collectorParams.endpointCheck");
+      return runEndpointBenchmarkCheck(db, params.endpointCheck);
     }
 
     default: {
