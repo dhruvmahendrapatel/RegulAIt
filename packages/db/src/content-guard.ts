@@ -121,6 +121,9 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.redteamLibraries, ["name"]],
   [s.trainingDatasets, ["name"]],
   [s.fairnessDatasets, ["name", "description"]],
+  // ADR-0346: an evaluation's name, and a model-input dataset's input column names (CSV headers an admin typed)
+  [s.fairnessEvaluations, ["name"]],
+  [s.fairnessDatasetInputColumns, ["columnName"]],
   [s.modelDriftMonitors, ["name"]],
   [s.trainingJobs, ["name"]],
   [s.monitoringDashboards, ["name"]],
@@ -230,6 +233,8 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   "conversations.title": "conversation",
   "ai_bom_snapshots.body": "signed_evidence",
   "decision_boms.body": "signed_evidence",
+  // ADR-0346: the canonical bytes of a signed fairness run (aggregates the gateway computed; refusing would break the signature)
+  "fairness_run_evidence.body": "signed_evidence",
   // ADR-0310: a compiled managed-settings file (vendor JSON/TOML of gateway URLs and tool names); its sha256 is in the
   // signed bundle manifest, so refusing it after compilation would break the signature, not stop a paste
   "managed_settings_bundle_files.body": "signed_evidence",
