@@ -51,6 +51,9 @@ control in RegulAIt goes green only when a SELECT over our own ledgers says so (
 - **vs Camunda (process orchestration)**: "Camunda orchestrates the process around your agents. We govern every
   call your agents make inside it — and run the process too, in your cloud or air-gapped." (Gaps:
   [GAP_ANALYSIS_CAMUNDA_2026-11.md](GAP_ANALYSIS_CAMUNDA_2026-11.md).)
+- **vs DarkControl (endpoint AIDR for coding agents)**: "DarkControl polices what coding agents type into a laptop's
+  shell. We govern, cost and record every call those agents make, on the laptop, in the cloud or air-gapped." (Gaps:
+  [GAP_ANALYSIS_DARKCONTROL_2026-11.md](GAP_ANALYSIS_DARKCONTROL_2026-11.md).)
 - **vs building it in-house**: "Every hole we closed is a test that stays: 2,100+ enforcement
   tests, adversarial by method, mistakes ledger public in the repo."
 

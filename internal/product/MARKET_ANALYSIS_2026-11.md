@@ -276,6 +276,12 @@ and a kill-switch role (primary docs snippet).
   shared modeler, durable engine, live operations console, task list, process analytics and a connector marketplace
   over MCP, A2A and REST *(primary vendor pages, read 2026-11-16; analyst placements are vendor claims)*. Overlaps
   pillars 2 and 7. Parity table and gaps: [GAP_ANALYSIS_CAMUNDA_2026-11.md](GAP_ANALYSIS_CAMUNDA_2026-11.md).
+- **Endpoint "AI detection and response" for coding agents (added 2026-11-17).** **DarkControl** "AIDR": a
+  lightweight endpoint agent that intercepts AI coding agents' shell commands, file access and package installs and
+  returns Allow, Ask or Deny from central policy, with an MCP inventory and risk scores, time-limited exceptions,
+  tamper detection, quarantine, SIEM and Teams alerts and an EU AI Act register *(vendor pages, read 2026-11-17; the
+  vendor calls its console views illustrative; no docs or pricing published)*. Overlaps pillar 1 on the endpoint. Parity
+  table and gaps: [GAP_ANALYSIS_DARKCONTROL_2026-11.md](GAP_ANALYSIS_DARKCONTROL_2026-11.md).
 - **Managed agent platforms.** Google Gemini Enterprise Agent Platform: Agent Identity, Agent Registry and Agent
   Gateway, GA end of July *(secondary)*. AWS Bedrock AgentCore: managed harness, CLI and skills in April *(primary
   AWS What's New title)*. Nothing later than April was found; re:Invent is in December.
@@ -411,6 +417,7 @@ title and snippet); **S** = secondary.
 | Warp Factories / Linear agents | https://warp.dev/factories ; https://linear.app/agents | P (vendor pages) |
 | Obsidian Security AI Agent Security (added 2026-11-16) | https://www.obsidiansecurity.com/ai-agent-security | P |
 | Camunda agentic orchestration (added 2026-11-16) | https://camunda.com/ ; https://camunda.com/platform/ ; https://camunda.com/what-is-agentic-orchestration/ | P |
+| DarkControl AIDR (added 2026-11-17) | https://darkcontrolai.com/ ; https://darkcontrolai.com/platform.php ; https://darkcontrolai.com/features.php | P |
 
 **Not found / unverified:** Agent HQ GA; any Windsurf news after August; Holistic AI Guardian Agents GA date;
 Credo AIUC-1 integration; Codex Admin plugin year; Runlayer Series A date; Kong 2.1 timing; MCP 2026-07-28 RC vs
