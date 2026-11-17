@@ -5,6 +5,7 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
 import type {
   AssignmentRule,
@@ -118,6 +119,7 @@ export default function WorkflowTemplatesPage() {
       <PageHeader
         title="Workflow templates"
         info={<p>Stage chains and how changes route to them. Retired templates start no new instances; in-flight ones keep their snapshotted definition.</p>}
+        actions={<Link to="/admin/workflow-templates/sub-processes">Sub-process catalogue</Link>}
       />
       <div className={v.stack}>
         <Card title="Templates">

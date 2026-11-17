@@ -144,6 +144,37 @@ Every rule here runs in the gateway on validate and again on publish; the UI onl
   stage schema has cross-field rules zod enforces server side, and a generated form would pull a large dependency into
   the lazy chunk for about a dozen fields.
 
+### 9. The sub-process catalogue (follow-up, 2026-11-17; Camunda gap row 10)
+
+Owner-approved addition to this lane, recorded here rather than in a new ADR (master brief, 2026-11-17).
+
+1. **Fragments.** A sub-process is a named list of stages (`workflow_fragments`), versioned append-only
+   (`workflow_fragment_versions`). A fragment has no trigger, calls no other fragment (one level only) and uses no `.`
+   in its stage ids. It is validated by the template schema behind a trigger, so cross-stage rules (a rollback target)
+   apply inside it.
+2. **Approval before listing.** Every version is filed in the one Approvals Queue as kind `workflow_fragment`, decided
+   by a named, active administrator who is not its proposer (`reviewer_is_author`, and
+   `cannot_approve_own_fragment_version` in the decide path, even by admin override). One pending version at a time.
+3. **State is the approval row (rule 12).** The version stores no state. The kernel's declared `FRAGMENT_VERSION_STATES`
+   maps the approval's status: `pending → pending_approval`, `approved → approved`, `denied → rejected`, and anything
+   else to rejected (fail closed). Only `approved` is listed and callable.
+4. **Calls pin a version.** A draft writes `{ id, type: "call", fragment, version }`. Validate and publish expand it into
+   the version's stages with ids `<callId>.<stageId>`, so the plan gate, the deploy tail, the relaxation check and every
+   existing reader see the real pipeline. The live definition and every instance snapshot stay plain kernel
+   definitions. The pin is a row of `workflow_template_version_fragments` (template version, call stage, fragment
+   version), and reopening a draft collapses the expansion back into the call.
+5. **A new version never moves a caller.** A template keeps its pinned version until it is republished, and only an
+   approved version can be pinned.
+6. **Gallery reuse.** `GET /v1/workflows/template-gallery` gains an additive `fragments` list (approved only).
+7. **Screen.** `/admin/workflow-templates/sub-processes` (its own lazy chunk, `lazy: SubProcessesPage` 3.5 kB) lists the
+   catalogue, proposes a sub-process or its next version, and shows each version's state. Calling a sub-process from
+   the canvas palette follows once the canvas (slice 2) is on `main`.
+8. **Open source compared (rule 9).** GitHub Actions reusable workflows (`uses: …@ref`), Argo Workflows `templateRef`
+   and Camunda call activities with a `versionTag` binding all resolve a reference pinned by version at run time. Here
+   it is resolved at publish instead, so the kernel and the instance snapshot need no change. Storing versions as
+   ADR-0048 `config_versions` rows was considered and not used: that model keeps one active version per artifact,
+   while callers must be able to pin any approved version, and it has no rejected state.
+
 ## Consequences
 
 - Business and IT edit the same template, the one that runs; there is no export step and nothing to keep in sync.
@@ -158,3 +189,6 @@ Every rule here runs in the gateway on validate and again on publish; the UI onl
 2. Should non-admins (for example a business role) be able to edit drafts while only admins publish? Built meanwhile:
    admin only.
 3. A dedicated step-up kind for template publishes instead of `settings_relax` with an op?
+4. Template versions are kept in two places: `workflow_template_versions` here, and E21's `config_versions` rows of type
+   `workflow_template` (ADR-0340, #894, not yet merged). Which one is canonical? Built meanwhile: sub-process pins key
+   to `workflow_template_versions`.
