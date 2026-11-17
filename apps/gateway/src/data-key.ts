@@ -285,7 +285,11 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   { table: "engine_runs", column: "raw_report_ciphertext", what: "raw engine reports" },
   // ADR-0242 L4.3 (the pending `admission_scan_subject_target` migration): the MCP manifest snapshot an admission
   // scan run carries from queueing to its task input (hostile upstream text), cleared when the run ends
-  { table: "engine_runs", column: "target_subject_input_ciphertext", what: "admission-scan MCP manifest snapshots" },
+  // ADR-0362 (pending `content_extract_engine`): it also carries a content-extraction run's file bundle (a person's
+  // files), cleared when the run ends
+  { table: "engine_runs", column: "target_subject_input_ciphertext", what: "admission-scan MCP manifest snapshots and content-extraction bundles" },
+  // ADR-0362: the text the sandboxed extractor returned for one request's files, deleted when the gateway reads it
+  { table: "content_inspection_results", column: "result_ciphertext", what: "content-extraction results" },
   // ADR-0195 SD0 (migration 0202): a discovery source's static scanner secret (never returned), the per-tenant
   // pseudonym HMAC key, and the display names behind pseudonyms
   { table: "discovery_credentials", column: "secret_ciphertext", what: "discovery scanner credentials" },

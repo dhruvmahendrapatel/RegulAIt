@@ -4,17 +4,21 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { changedInputs, CONTEXT_EXCLUDED, GateError, GENERATED_LOCK_MODULE, inputCommit, inputPathspecs, plan, readWorkspace, ROOT, ROOT_INPUTS, workspaceClosure } from "./engine-images-gate.mjs";
+import { changedInputs, CONTEXT_EXCLUDED, enginePackage, GateError, GENERATED_LOCK_MODULE, inputCommit, inputPathspecs, plan, readWorkspace, ROOT, ROOT_INPUTS, workspaceClosure } from "./engine-images-gate.mjs";
 import { ENGINE_IDS } from "./engine-images-lock.mjs";
 import { inputPathspecs as specsFor, REPRO_ENGINE_IDS, UNPUBLISHED_ENGINE_IDS } from "./engine-images-gate.mjs";
 
 const repoGit = (args) => execFileSync("git", args, { cwd: ROOT, encoding: "utf8" });
+/** the directory of an engine's shim package (`@regulait/engine-<id>`, or the shared admission-scan shim) */
+const packageDir = (id) => `packages/${enginePackage(id).slice("@regulait/".length)}`;
 
 describe("ENG-IMG publish gate: the input set of the real repository", () => {
   const pkgs = readWorkspace();
 
   it("each engine's closure is its package, the runner and shared (the shim stage builds exactly these)", () => {
-    for (const id of ENGINE_IDS) expect(workspaceClosure(id, pkgs)).toEqual([`packages/engine-${id}`, "packages/engine-runner", "packages/shared"].sort());
+    for (const id of ENGINE_IDS) expect(workspaceClosure(id, pkgs)).toEqual([packageDir(id), "packages/engine-runner", "packages/shared"].sort());
+    // ADR-0362: the content extractor's shim is the admission-scan engines' (one runner and task for every subject engine)
+    expect(enginePackage("contentextract")).toBe("@regulait/engine-admission-scan");
   });
 
   it("an engine's inputs never include another engine's directory, the lock, the signatures or the generated module", () => {
@@ -93,10 +97,11 @@ describe("ENG-IMG publish gate: the decision, on a throwaway repository", () => 
     dir = mkdtempSync(path.join(tmpdir(), "engine-gate-"));
     git(["init", "-q"]);
     for (const f of ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.base.json", ".dockerignore", "scripts/build-engine-image.sh", "scripts/other.mjs", ".github/workflows/engine-images.yml", "engines/images.lock.json", "engines/signatures/garak.sigstore.json"]) write(f);
-    for (const id of ENGINE_IDS) {
-      write(`engines/${id}/Dockerfile`);
-      pkg(`packages/engine-${id}`, `@regulait/engine-${id}`, { "@regulait/engine-runner": "workspace:*", "@regulait/shared": "workspace:*" });
-      write(`packages/engine-${id}/src/main.ts`);
+    for (const id of ENGINE_IDS) write(`engines/${id}/Dockerfile`);
+    // one package per shim (ADR-0362: contentextract builds the shared admission-scan shim)
+    for (const id of new Set(ENGINE_IDS.map((e) => packageDir(e)))) {
+      pkg(id, `@regulait/${id.slice("packages/".length)}`, { "@regulait/engine-runner": "workspace:*", "@regulait/shared": "workspace:*" });
+      write(`${id}/src/main.ts`);
     }
     pkg("packages/engine-runner", "@regulait/engine-runner", { "@regulait/shared": "workspace:*" });
     pkg("packages/shared", "@regulait/shared");
@@ -162,7 +167,7 @@ describe("ENG-IMG publish gate: the decision, on a throwaway repository", () => 
 
   it("force publishes every engine; a never-published engine publishes", () => {
     expect(decide(base, { force: true }).publish).toEqual(ENGINE_IDS);
-    const r = plan({ engines: { promptfoo: { sourceCommit: null }, modelscan: { sourceCommit: base }, garak: { sourceCommit: base }, spikee: { sourceCommit: base } } }, { changed: () => [] });
+    const r = plan({ engines: { promptfoo: { sourceCommit: null }, modelscan: { sourceCommit: base }, garak: { sourceCommit: base }, spikee: { sourceCommit: base }, contentextract: { sourceCommit: base } } }, { changed: () => [] });
     expect(r.publish).toEqual(["promptfoo"]);
     expect(r.engines.promptfoo.reason).toBe("never published");
   });

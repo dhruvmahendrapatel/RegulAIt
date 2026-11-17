@@ -51,7 +51,12 @@ export const UNPUBLISHED_ENGINE_IDS = ["mcpscanner", "skillscanner"];
  * ADR-0242 §6.1: the workspace package an engine's shim stage builds, where it is not `@regulait/engine-<id>`. The two
  * admission-scan images share one runner and task shim.
  */
-export const ENGINE_PACKAGES = { mcpscanner: "@regulait/engine-admission-scan", skillscanner: "@regulait/engine-admission-scan" };
+export const ENGINE_PACKAGES = {
+  mcpscanner: "@regulait/engine-admission-scan",
+  skillscanner: "@regulait/engine-admission-scan",
+  // ADR-0362: the content extractor is the shim's third subject engine
+  contentextract: "@regulait/engine-admission-scan",
+};
 export const enginePackage = (engine) => ENGINE_PACKAGES[engine] ?? `@regulait/engine-${engine}`;
 /** every engine the reproducible-build check covers */
 export const REPRO_ENGINE_IDS = [...ENGINE_IDS, ...UNPUBLISHED_ENGINE_IDS];

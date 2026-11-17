@@ -9,7 +9,7 @@ import { ENGINE_MANIFEST } from "./manifest.js";
 
 describe("ENG-IMG: the manifest's image fields are the lock's", () => {
   it("imageDigest is the registry digest, taskImage the image id; both null together until a publish", () => {
-    for (const id of ["promptfoo", "modelscan", "garak"] as const) {
+    for (const id of ["promptfoo", "modelscan", "garak", "spikee", "contentextract"] as const) {
       const lock = ENGINE_IMAGES_LOCK[id];
       expect(ENGINE_MANIFEST[id].imageDigest).toBe(lock.manifestDigest);
       expect(ENGINE_MANIFEST[id].taskImage).toBe(lock.imageId);
@@ -21,7 +21,7 @@ describe("ENG-IMG: the manifest's image fields are the lock's", () => {
 
 describe("ENG-IMG: the manifest's caveats match the lock", () => {
   it("an engine with a recorded publish does not still list its image as not built", () => {
-    for (const id of ["promptfoo", "modelscan", "garak"] as const) {
+    for (const id of ["promptfoo", "modelscan", "garak", "spikee", "contentextract"] as const) {
       if (ENGINE_IMAGES_LOCK[id].manifestDigest === null) continue;
       for (const line of ENGINE_MANIFEST[id].unverified) expect(line).not.toMatch(/not (been )?built yet/);
     }

@@ -132,3 +132,16 @@ the existing `maxAttachmentsPerDispatch` and `maxAttachmentBytes` org settings.
 - **Slice 1a (2026-11-17)**: `engines/contentextract/` (the extractor, its tests, the pinned closure, the reused
   licence gate, the image), `packages/shared/src/content-inspection.ts` and its parity test. No gateway change and no
   migration yet.
+- **Slice 1b-i (2026-11-17)**: the engine is registered, inert. `contentextract` (kind `content_extract`) joins
+  ENGINE_IDS, the manifest (null digest from the images lock until its first signed publish, so it cannot be enabled),
+  the lock, compose (runner and build-only image services), the build script and the image workflow. Pending migration
+  `content_extract_engine`: the engine row (off), trigger `inspection`, a third `engine_runs_target_check` branch (a
+  `subject` run of `contentextract` only, which may name the request's person and project), and
+  `content_inspection_results` (the result, encrypted under the data key, deleted when read; in the data-key
+  re-encryption registry). The runner and task are the admission-scan shim's (`packages/engine-admission-scan`), made a
+  three-engine subject shim: the extractor differs only in its input argument (the bundle file, not the input root).
+  The image gains that shim stage; the licence gate is now this engine's own copy of mcpscanner's, because the
+  publish gate refuses an engine whose image inputs name another engine's directory. Gateway:
+  `apps/gateway/src/content-inspection-runs.ts` (`enqueueContentExtractRun`, `awaitContentExtractResult` and the
+  input, end and placement hooks). The raw report of a `contentextract` run is never kept on the run. No request-path
+  wiring yet (slice 1b-ii).

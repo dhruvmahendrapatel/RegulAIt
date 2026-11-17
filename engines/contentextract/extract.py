@@ -47,6 +47,8 @@ import zipfile
 import xml.etree.ElementTree as ET
 
 RESULT_VERSION = 1
+# the engine version the manifest pins (CONTENTEXTRACT_ENGINE_VERSION); the runner shim reads it from this file
+EXTRACTOR_VERSION = "0.1.0"
 
 # the hard caps; ADR-0362 "Limits". A request's `limits` may lower each one, never raise it.
 HARD_LIMITS = {
