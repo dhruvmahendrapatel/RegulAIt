@@ -19,25 +19,6 @@ export const FRAGMENT_MAX_STAGES = 50;
 /** what joins a call stage's id to the id of a stage it expands into */
 export const FRAGMENT_ID_SEPARATOR = ".";
 
-/**
- * Rule 12: a fragment version's state, declared once. The state is not stored on the version: it is read from the
- * version's Approvals Queue row, so one fact lives in one place. Only an approved version is listed or callable.
- * Anything the queue reports that is not named here (a future status) reads as rejected, so it fails closed.
- */
-export const FRAGMENT_VERSION_STATES = {
-  pending_approval: { approvalStatus: "pending", listed: false, callable: false, next: ["approved", "rejected"] },
-  approved: { approvalStatus: "approved", listed: true, callable: true, next: [] },
-  rejected: { approvalStatus: "denied", listed: false, callable: false, next: [] },
-} as const satisfies Record<string, { approvalStatus: string; listed: boolean; callable: boolean; next: readonly string[] }>;
-export type FragmentVersionState = keyof typeof FRAGMENT_VERSION_STATES;
-
-export function fragmentVersionState(approvalStatus: string | null | undefined): FragmentVersionState {
-  for (const [state, def] of Object.entries(FRAGMENT_VERSION_STATES)) {
-    if (def.approvalStatus === approvalStatus) return state as FragmentVersionState;
-  }
-  return "rejected";
-}
-
 export const callStageSchema = z
   .object({
     id: z.string().min(1).max(100).refine((s) => !s.includes(FRAGMENT_ID_SEPARATOR), `a call stage id cannot contain '${FRAGMENT_ID_SEPARATOR}'`),

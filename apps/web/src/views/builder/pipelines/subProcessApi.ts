@@ -4,7 +4,7 @@
  */
 import { api } from "../../../api/client";
 
-/** the kernel's FRAGMENT_VERSION_STATES, as the screen words them */
+/** WORKFLOW_FRAGMENT_VERSION_MACHINE's states (@regulait/shared, ADR-0348), as the screen words them */
 export type SubProcessState = "pending_approval" | "approved" | "rejected";
 export const SUB_PROCESS_STATE_LABEL: Record<SubProcessState, { text: string; tone: "warn" | "ok" | "danger" }> = {
   pending_approval: { text: "Waiting for review", tone: "warn" },

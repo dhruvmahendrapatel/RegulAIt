@@ -3,8 +3,6 @@ import {
   builderRuleIssues,
   collapseCalls,
   expandCalls,
-  fragmentVersionState,
-  FRAGMENT_VERSION_STATES,
   validateDefinition,
   validateFragmentStages,
 } from "./index.js";
@@ -21,19 +19,6 @@ const draft = {
   stages: [{ id: "intake", type: "trigger" }, { id: "review", type: "call", fragment: FRAG, version: 2 }, { id: "build", type: "automated_build" }],
 };
 const resolve = (id: string, v: number) => (id === FRAG && v === 2 ? review : null);
-
-describe("fragment version states (rule 12)", () => {
-  it("only an approved version is listed or callable, and an unknown status fails closed", () => {
-    expect(fragmentVersionState("pending")).toBe("pending_approval");
-    expect(fragmentVersionState("approved")).toBe("approved");
-    expect(fragmentVersionState("denied")).toBe("rejected");
-    expect(fragmentVersionState("superseded")).toBe("rejected");
-    expect(fragmentVersionState(undefined)).toBe("rejected");
-    const callable = Object.entries(FRAGMENT_VERSION_STATES).filter(([, s]) => s.callable).map(([k]) => k);
-    expect(callable).toEqual(["approved"]);
-    expect(FRAGMENT_VERSION_STATES.pending_approval.next).toEqual(["approved", "rejected"]);
-  });
-});
 
 describe("validateFragmentStages", () => {
   it("accepts stages with an internal rollback target", () => {

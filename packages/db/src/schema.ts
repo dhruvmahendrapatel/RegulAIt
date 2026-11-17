@@ -17215,7 +17215,7 @@ export type WorkflowFragmentRow = typeof workflowFragments.$inferSelect;
  * Every proposed version of a fragment, append-only. `stages` is a point-in-time snapshot (ADR-0200 exception): the
  * bytes the reviewer approved, which `content_hash` identifies. The version's state (pending approval, approved,
  * rejected) is NOT stored here: it is the status of its `approval_id` row in the one Approvals Queue
- * (`FRAGMENT_VERSION_STATES` in the workflow kernel maps it), so one fact lives in one place. A removed approval row
+ * (`WORKFLOW_FRAGMENT_VERSION_MACHINE` in @regulait/shared, ADR-0348, maps it), so one fact lives in one place. A removed approval row
  * leaves `approval_id` null, which reads as rejected (fail closed).
  */
 export const workflowFragmentVersions = pgTable(

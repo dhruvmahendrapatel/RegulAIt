@@ -155,9 +155,10 @@ Owner-approved addition to this lane, recorded here rather than in a new ADR (ma
 2. **Approval before listing.** Every version is filed in the one Approvals Queue as kind `workflow_fragment`, decided
    by a named, active administrator who is not its proposer (`reviewer_is_author`, and
    `cannot_approve_own_fragment_version` in the decide path, even by admin override). One pending version at a time.
-3. **State is the approval row (rule 12).** The version stores no state. The kernel's declared `FRAGMENT_VERSION_STATES`
-   maps the approval's status: `pending → pending_approval`, `approved → approved`, `denied → rejected`, and anything
-   else to rejected (fail closed). Only `approved` is listed and callable.
+3. **State is the approval row (rule 12).** The version stores no state. ADR-0348's declared
+   `WORKFLOW_FRAGMENT_VERSION_MACHINE` (in `@regulait/shared`, listed in `STATE_MACHINES`) maps the approval's status:
+   `pending → pending_approval`, `approved → approved`, `denied → rejected`, and anything else to rejected (fail
+   closed). Only `approved` is listed and callable.
 4. **Calls pin a version.** A draft writes `{ id, type: "call", fragment, version }`. Validate and publish expand it into
    the version's stages with ids `<callId>.<stageId>`, so the plan gate, the deploy tail, the relaxation check and every
    existing reader see the real pipeline. The live definition and every instance snapshot stay plain kernel

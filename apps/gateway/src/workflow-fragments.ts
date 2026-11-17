@@ -11,7 +11,8 @@
  *
  * Every version is filed in the one Approvals Queue (kind `workflow_fragment`), decided by the named administrator
  * (never its proposer), and only an approved version is listed or callable. A version's state is the status of that
- * approval row, mapped by the kernel's declared `FRAGMENT_VERSION_STATES` (rule 12): nothing here writes a state.
+ * approval row, read through ADR-0348's declared `WORKFLOW_FRAGMENT_VERSION_MACHINE` (rule 12): nothing here writes a
+ * state.
  * A new version never changes a caller: callers pin a version, and only a republish of the caller moves the pin.
  */
 import { randomUUID } from "node:crypto";
@@ -31,17 +32,15 @@ import {
   workflowTemplateVersionFragments,
   type Db,
 } from "@regulait/db";
-import { canonicalJson, sha256Hex } from "@regulait/shared";
 import {
-  expandCalls,
+  canonicalJson,
   fragmentVersionState,
-  FRAGMENT_VERSION_STATES,
-  isCallStage,
-  validateFragmentStages,
-  type CallIssue,
-  type FragmentVersionState,
-  type ResolvedCall,
-} from "@regulait/workflow-kernel";
+  FRAGMENT_VERSION_CALLABLE_APPROVAL_STATUS,
+  FRAGMENT_VERSION_CALLABLE_STATE,
+  sha256Hex,
+  type WorkflowFragmentVersionState as FragmentVersionState,
+} from "@regulait/shared";
+import { expandCalls, isCallStage, validateFragmentStages, type CallIssue, type ResolvedCall } from "@regulait/workflow-kernel";
 
 /** the approval row's `stage_id` names the version it decides */
 export const FRAGMENT_VERSION_PREFIX = "workflow-fragment-version:";
@@ -124,12 +123,12 @@ async function versionsOf(db: Db, fragmentIds: string[]): Promise<Map<string, Ve
   return out;
 }
 
-const latestApproved = (vs: readonly VersionView[] | undefined) => vs?.find((v) => FRAGMENT_VERSION_STATES[v.state].listed) ?? null;
+const latestApproved = (vs: readonly VersionView[] | undefined) => vs?.find((v) => v.state === FRAGMENT_VERSION_CALLABLE_STATE) ?? null;
 
 /** the catalogue the template gallery shows: every fragment with an approved version, by name */
 export async function approvedFragmentCatalogue(db: Db, limit = 100, offset = 0) {
   const listed = sql`exists (select 1 from ${workflowFragmentVersions} v join ${approvals} a on a.id = v.approval_id
-    where v.fragment_id = ${workflowFragments.id} and a.status = ${FRAGMENT_VERSION_STATES.approved.approvalStatus})`;
+    where v.fragment_id = ${workflowFragments.id} and a.status = ${FRAGMENT_VERSION_CALLABLE_APPROVAL_STATUS})`;
   const rows = await db
     .select()
     .from(workflowFragments)
@@ -180,7 +179,7 @@ export async function expandDefinitionCalls(
         .where(inArray(workflowFragmentVersions.fragmentId, ids))
     : [];
   const callable = new Map(
-    rows.filter((r) => FRAGMENT_VERSION_STATES[fragmentVersionState(r.approvalStatus)].callable).map((r) => [`${r.fragmentId}@${r.version}`, r]),
+    rows.filter((r) => fragmentVersionState(r.approvalStatus) === FRAGMENT_VERSION_CALLABLE_STATE).map((r) => [`${r.fragmentId}@${r.version}`, r]),
   );
   const expanded = expandCalls(raw, (fragmentId, version) => (callable.get(`${fragmentId}@${version}`)?.stages as Record<string, unknown>[]) ?? null);
   if (!expanded.ok) return expanded;
