@@ -4749,6 +4749,11 @@ export const orgSettings = pgTable(
     semanticCacheSimilarityMin: doublePrecision("semantic_cache_similarity_min").notNull().default(0.95),
     /** the local embedder (an external scorer claiming text_embedding); SET NULL if it is deleted */
     semanticCacheEmbedderId: uuid("semantic_cache_embedder_id").references(() => externalScorers.id, { onDelete: "set null" }),
+    /** ADR-0352 slice 3 (migration stream_output_inspection): how a stream is released under an
+     * output-phase block policy. `buffer` (strict default) = the whole completion is scanned
+     * before one flush (ADR-0042); `incremental` = released piece by piece after windowed scans,
+     * ended by an explicit error event on a block. CHECK in the migration. */
+    streamOutputInspection: text("stream_output_inspection", { enum: ["buffer", "incremental"] }).notNull().default("buffer"),
     /** ADR-0185 I3 (migration 0169): a conversation is deleted this many days
      * after its last message unless an incident that is not closed holds it.
      * Strict 30 (owner decision); longer, up to 2555, is an audited relaxation. */
@@ -5595,6 +5600,7 @@ export const orgSettings = pgTable(
       "org_settings_semantic_cache_ttl_seconds_check",
       sql`${t.semanticCacheTtlSeconds} BETWEEN 1 AND 2592000`,
     ),
+    check("org_settings_stream_output_inspection_check", sql`${t.streamOutputInspection} IN ('buffer', 'incremental')`),
     check(
       "org_settings_semantic_cache_similarity_min_check",
       sql`${t.semanticCacheSimilarityMin} BETWEEN 0.8 AND 0.999`,

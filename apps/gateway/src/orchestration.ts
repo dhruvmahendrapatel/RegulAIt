@@ -76,7 +76,7 @@ import {
   planRequestBatching,
   routeModel,
 } from "@regulait/optimizer-kernel";
-import { effectiveTechniqueMode, loadOrgSettings } from "./org-settings.js";
+import { effectiveTechniqueMode, incrementalStreamInspection, loadOrgSettings } from "./org-settings.js";
 import { recordRunInputs, recordRunOutput, recordToolResultInput } from "./lineage.js";
 import {
   isModelProviderKind,
@@ -190,6 +190,8 @@ async function resolveStreamRequest(
   const { stream } = streamFlagSchema.parse(rawBody ?? {});
   if (stream !== true) return { mode: "off" };
   if ((await projectPiiMode(db, projectId)) !== "block") return { mode: "stream" };
+  // ADR-0352 slice 3: under incremental output inspection the worker stream stays live
+  if (await incrementalStreamInspection(db)) return { mode: "stream" };
   const iset = await loadInterceptionSettings(db);
   // ADR-0181: a client that accepts a buffered answer is not refused
   if (iset.streamingOnBlockMode === "reject" && !acceptBuffered) {
