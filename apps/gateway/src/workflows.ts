@@ -26,6 +26,8 @@ import {
   type Db,
 } from "@regulait/db";
 import {
+  assertCompensationStatus,
+  closePrSupersededByMerge,
   initialState,
   isCompensating,
   matchTemplates,
@@ -296,7 +298,11 @@ async function applyEvent(
     const round = instance.round + (isReopen ? 1 : 0);
     const stageEntry = instance.stageEntry + (bumpEntry ? 1 : 0);
 
-    await tx
+    // ADR-0340 (rule 12): a compensation phase implies the instance status (the lifecycle table); a state that
+    // disagrees is refused before it is written. The UPDATE is guarded on the status and stage entry read under the
+    // lock, so the move it writes is exactly the one computed from that row.
+    assertCompensationStatus(def, state);
+    const written = await tx
       .update(workflowInstances)
       .set({
         state,
@@ -306,7 +312,15 @@ async function applyEvent(
         updatedAt: new Date(),
         ...(context ? { context } : {}),
       })
-      .where(eq(workflowInstances.id, instance.id));
+      .where(
+        and(
+          eq(workflowInstances.id, instance.id),
+          eq(workflowInstances.status, instance.status),
+          eq(workflowInstances.stageEntry, instance.stageEntry),
+        ),
+      )
+      .returning({ id: workflowInstances.id });
+    if (written.length !== 1) throw new WorkflowStateError(`instance ${instance.id} moved while '${event.kind}' was applied`);
     await tx.insert(workflowEvents).values({ instanceId: instance.id, event, actorUserId });
 
     const isDenial = event.kind === "approval_denied" || event.kind === "abort";
@@ -2172,7 +2186,18 @@ async function runGitExecutions(
             context[recordKey] = { action: stage.action, compensates: stage.compensates, branch, changed: res?.deleted ?? false, ...(branch ? {} : { nothingRecorded: true }) };
           } else {
             const prId = context.prId === undefined || context.prId === null ? null : String(context.prId);
-            const res = prId
+            // a pull request this instance merged, whose merge its own revert already undid in this saga, has
+            // nothing left to close: closing a merged pull request throws on every provider, so without this the
+            // saga would fail on every retry. Only a provider that says MERGED supersedes it; a PR merged by
+            // anyone else, or with no revert, still fails honestly.
+            const superseded =
+              prId !== null &&
+              closePrSupersededByMerge(def, instance.state as InstanceState, stage.id) &&
+              (await provider.getPullRequest(stage.repo!, prId)).state === "merged";
+            if (superseded) {
+              context[recordKey] = { action: stage.action, compensates: stage.compensates, prId, changed: false, superseded: "merged" };
+            }
+            const res = prId && !superseded
               ? await runExternalWrite(
                   db,
                   "git.close_pull_request",
@@ -2180,7 +2205,9 @@ async function runGitExecutions(
                   effectAudit((r) => ({ repo: stage.repo, prId, closed: r.closed, compensates: stage.compensates })),
                 )
               : null;
-            context[recordKey] = { action: stage.action, compensates: stage.compensates, prId, changed: res?.closed ?? false, ...(prId ? {} : { nothingRecorded: true }) };
+            if (!superseded) {
+              context[recordKey] = { action: stage.action, compensates: stage.compensates, prId, changed: res?.closed ?? false, ...(prId ? {} : { nothingRecorded: true }) };
+            }
           }
         }
       } else if (stage.action === "create_branch") {

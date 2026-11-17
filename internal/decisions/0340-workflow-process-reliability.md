@@ -53,6 +53,8 @@ kernel and runner.
    - an `automated_build` undoes a git, deploy or build stage: with a `run`, a governed nested run; without one, a
      manual task a person completes. A merge has no git compensation: reverting a merge is a new change that needs
      its own review, so a template compensates it this way.
+   - a template whose `close_pr` closes a pull request that a later stage merges must compensate that merge too:
+     closing cannot undo a merge, so without it a saga after the merge would fail on every retry.
 2. **What triggers it.** A cancel (`abort`) or a denied sign-off (`approval_denied`) on an instance where a forward
    stage that ran (completed, or completed and later re-opened) has a compensation. The plan is those compensations
    in reverse definition order, so the last effect is undone first. A stage that never completed is not compensated.
@@ -70,13 +72,21 @@ kernel and runner.
 4. **What a compensation undoes.** Exactly what the forward stage recorded for the current round: the `branch`, the
    `prId`, the `deploy:<stage>` record. Nothing recorded (or only a dry-run deploy) means nothing to undo, and the
    compensation succeeds with `nothingRecorded` on its record (`compensation:<stage>` or `rollback:<stage>`). The
-   provider calls are idempotent (a branch already gone and a PR already closed answer `false`). Closing a merged
-   pull request throws, so the stage fails rather than claiming an undo that did not happen.
+   provider calls are idempotent (a branch already gone and a PR already closed answer `false`; on GitHub only a
+   missing ref counts as gone, any other refusal such as branch protection throws). Closing a merged pull request
+   throws, so the stage fails rather than claiming an undo that did not happen, with one exception: when this
+   instance's own merge of that pull request was already reverted by its compensation in the same saga, and the
+   provider says the pull request is merged, the `close_pr` is recorded `superseded: "merged"` and succeeds.
 5. **Ending a compensation early is an admin's act.** `abort` on a compensating instance abandons the rest: the
    instance ends in its cause, `workflow:compensation-abandoned` (deny) names the compensations that never completed.
    Anyone else gets `403 compensation_abandon_requires_admin`, audited `workflow:compensation-abandon-refused`; the
    decision is taken under the instance lock.
-6. **Audit.** `workflow:compensation-started` (the plan), `workflow:compensation-completed` and
+6. **One declared lifecycle (build rule 12).** `COMPENSATION_LIFECYCLE` in the kernel lists every compensation move
+   (`none → compensating → completed | abandoned`) with the instance status it implies (the compensation stage's
+   resting status, the cause's terminal status, or unchanged). Every move goes through it, and the gateway refuses
+   to write a state whose status disagrees with its phase. The instance UPDATE is guarded on the status and stage
+   entry read under the lock.
+7. **Audit.** `workflow:compensation-started` (the plan), `workflow:compensation-completed` and
    `workflow:compensation-abandoned` are written in the transition's transaction beside the event's own row. Starting
    a compensation cancels the instance's live engine runs (cause `workflow_compensating`) and supersedes its pending
    gates, as an abort or denial always did, and is a new stage entry, so a forward executor still running from before
@@ -84,12 +94,12 @@ kernel and runner.
 
 ### Slice 2: stage deadlines and SLA escalation (decided; built next)
 
-7. A stage may carry `sla: { breachAfterSeconds, warnAfterSeconds?, onBreach: "notify" | "reassign" | "fail",
+8. A stage may carry `sla: { breachAfterSeconds, warnAfterSeconds?, onBreach: "notify" | "reassign" | "fail",
    reassignTo? }`, bounded, absent by default. `reassign` only on a `human_approval` stage; `fail` cancels the
    instance (and so compensates it, decision 2). A timer is a pg-boss job sent in the transaction that enters the
    stage, keyed by the stage execution key (ADR-0284), so it exists if and only if the entry committed and a stale
    timer finds a different key and does nothing.
-8. **The escalation contract with lane E23 (its process-analytics ADR, PR #888): one escalation mechanism for human tasks.** A sign-off is a
+9. **The escalation contract with lane E23 (its process-analytics ADR, PR #888): one escalation mechanism for human tasks.** A sign-off is a
    row in the one approvals queue, and its timed escalation is the ADR-0046 SLA sweep over `approval_assignments`.
    - On a `human_approval` stage, E21 does not escalate the task itself. When the stage is entered, E21 sets each of
      the stage's pending tasks' warn time, due time (and, from the stage's `sla`, the escalation target for `reassign`)
@@ -108,15 +118,15 @@ kernel and runner.
 
 ### Slice 3: process versions, in-flight migration and canary (decided; built after slice 2)
 
-9. **Versions.** Every template create or change writes an immutable, numbered template version row; an instance
+10. **Versions.** Every template create or change writes an immutable, numbered template version row; an instance
    records the versions it was started from (a join table, ADR-0200 3NF) beside its snapshotted definition, which
    stays the definition it runs. A running instance always finishes on its version unless it is migrated.
-10. **Governed migration.** `POST …/instances/:id/migrations` with `dryRun` returns the diff (RFC 6902) between the
+11. **Governed migration.** `POST …/instances/:id/migrations` with `dryRun` returns the diff (RFC 6902) between the
     instance's definition and the target version, and refuses a migration the target cannot honour (the current stage
     or a stage that ran is missing or changed type; a compensation that would be lost). Applying needs an approval in
     the approvals queue by an admin other than the requester (ADR-0195), is re-validated under the instance lock when
     approved, bumps the stage entry, and writes `workflow:instance-migrated` with both versions and the diff.
-11. **Canary.** An admin may roll a new version out to a percentage (1 to 50) of NEW instances of a template; the
+12. **Canary.** An admin may roll a new version out to a percentage (1 to 50) of NEW instances of a template; the
     choice is deterministic per instance id, recorded on the instance and audited at start
     (`workflow:canary-version-selected`); starting and stopping a canary is audited. Running instances are never
     switched by a canary.

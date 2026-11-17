@@ -544,6 +544,22 @@ export const workflowDefinitionSchema = z
         });
       }
     }
+    // ADR-0340: once a pull request is merged, closing it cannot undo it. A template whose close_pr undoes an
+    // open_pr that a later stage merges must therefore compensate that merge too (a governed revert); then a saga
+    // after the merge reverts it and the close_pr is recorded as superseded instead of failing on every retry.
+    for (const s of def.stages) {
+      if (s.type !== "git_operation" || s.action !== "close_pr" || s.compensates === undefined) continue;
+      for (const m of mergesOfPullRequest(def, s)) {
+        if (!def.stages.some((c) => c.compensates === m.id)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message:
+              `compensation stage '${s.id}' closes the pull request that '${m.id}' merges, and closing cannot undo a merge — ` +
+              `give '${m.id}' its own compensation (an automated_build that reverts it)`,
+          });
+        }
+      }
+    }
     if (def.stages[0]!.type !== "trigger") {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "first stage must be a trigger" });
     }
@@ -866,10 +882,25 @@ export function isExecutedStage(stage: Stage): boolean {
 
 export type CompensationPhase = "none" | "compensating" | "completed" | "abandoned";
 export type CompensationTrigger = "cancel" | "deny" | "step_succeeded" | "last_step_succeeded" | "step_failed" | "abort";
+/**
+ * The instance status a compensation move implies: `stage` is the resting status of the compensation stage it
+ * enters (`awaiting_execution` for an executed one, `awaiting_trigger` for a manual one), `cause` is the terminal
+ * status the cancel or denial asked for (`aborted` or `denied`), `unchanged` keeps the status it had.
+ */
+export type CompensationStatusRule = "stage" | "cause" | "unchanged";
+export interface CompensationMove {
+  readonly to: CompensationPhase;
+  readonly status: CompensationStatusRule;
+}
 
-export const COMPENSATION_LIFECYCLE: Readonly<Record<CompensationPhase, Readonly<Partial<Record<CompensationTrigger, CompensationPhase>>>>> = {
-  none: { cancel: "compensating", deny: "compensating" },
-  compensating: { step_succeeded: "compensating", step_failed: "compensating", last_step_succeeded: "completed", abort: "abandoned" },
+export const COMPENSATION_LIFECYCLE: Readonly<Record<CompensationPhase, Readonly<Partial<Record<CompensationTrigger, CompensationMove>>>>> = {
+  none: { cancel: { to: "compensating", status: "stage" }, deny: { to: "compensating", status: "stage" } },
+  compensating: {
+    step_succeeded: { to: "compensating", status: "stage" },
+    step_failed: { to: "compensating", status: "unchanged" },
+    last_step_succeeded: { to: "completed", status: "cause" },
+    abort: { to: "abandoned", status: "cause" },
+  },
   completed: {},
   abandoned: {},
 };
@@ -880,11 +911,58 @@ export function compensationPhaseOf(state: InstanceState): CompensationPhase {
   return state.compensation.outcome ?? "compensating";
 }
 
+/** the move `trigger` makes from `from`, or a WorkflowStateError when the table does not allow it */
+export function nextCompensationMove(from: CompensationPhase, trigger: CompensationTrigger): CompensationMove {
+  const move = COMPENSATION_LIFECYCLE[from][trigger];
+  if (!move) throw new WorkflowStateError(`compensation cannot '${trigger}' from '${from}'`);
+  return move;
+}
+
 /** the phase `trigger` moves to from `from`, or a WorkflowStateError when the table does not allow it */
 export function nextCompensationPhase(from: CompensationPhase, trigger: CompensationTrigger): CompensationPhase {
-  const to = COMPENSATION_LIFECYCLE[from][trigger];
-  if (!to) throw new WorkflowStateError(`compensation cannot '${trigger}' from '${from}'`);
-  return to;
+  return nextCompensationMove(from, trigger).to;
+}
+
+/** the resting status of a compensation stage: an executor runs it, or a person completes it by hand */
+function compensationStageStatus(stage: Stage): "awaiting_execution" | "awaiting_trigger" {
+  return isExecutedStage(stage) || stage.type === "rollback" ? "awaiting_execution" : "awaiting_trigger";
+}
+
+/**
+ * ADR-0340 (rule 12): the instance statuses a compensation phase allows. A compensating instance rests at its
+ * current compensation stage's status; a completed or abandoned one is in its cause's terminal status. `null` when
+ * the instance never compensated (its status is the ordinary machine's). The gateway checks a new state against
+ * this before it writes it, so a later edit cannot end a saga without its outcome, or the reverse.
+ */
+export function compensationStatusFor(def: WorkflowDefinition, state: InstanceState): InstanceStatus | null {
+  const phase = compensationPhaseOf(state);
+  if (phase === "none") return null;
+  if (phase !== "compensating") return state.compensation!.cause;
+  const stage = def.stages[state.currentStageIndex];
+  return stage ? compensationStageStatus(stage) : null;
+}
+
+/** ADR-0340 (rule 12): throw when a state's status is not the one its compensation phase implies */
+export function assertCompensationStatus(def: WorkflowDefinition, state: InstanceState): void {
+  const want = compensationStatusFor(def, state);
+  if (want !== null && state.status !== want) {
+    throw new WorkflowStateError(`compensation phase '${compensationPhaseOf(state)}' needs status '${want}', not '${state.status}'`);
+  }
+}
+
+/** apply `trigger`'s move to `s` (a copy the caller owns): the phase, and the status the table says it implies */
+function applyCompensationMove(
+  def: WorkflowDefinition,
+  s: InstanceState,
+  from: CompensationPhase,
+  trigger: CompensationTrigger,
+): CompensationPhase {
+  const move = nextCompensationMove(from, trigger);
+  const comp = s.compensation!;
+  if (move.to === "completed" || move.to === "abandoned") s.compensation = { ...comp, outcome: move.to };
+  if (move.status === "cause") s.status = comp.cause;
+  else if (move.status === "stage") s.status = compensationStageStatus(def.stages[s.currentStageIndex]!);
+  return move.to;
 }
 
 /** ADR-0340: is the instance compensating right now (started, not yet ended)? */
@@ -911,20 +989,51 @@ export function compensationPlan(def: WorkflowDefinition, state: InstanceState):
   return plan;
 }
 
-/** ADR-0340: point the instance at compensation stage `stageId` and say what runs it */
-function enterCompensationStage(def: WorkflowDefinition, s: InstanceState, stageId: string, effects: Effect[]): TransitionResult {
+/** ADR-0340: the merge stages that merge the pull request a close_pr compensation closes (same connection and repo) */
+function mergesOfPullRequest(def: { stages: readonly Stage[] }, closePr: Stage): Stage[] {
+  return def.stages.filter(
+    (m) =>
+      m.type === "git_operation" &&
+      m.action === "merge" &&
+      m.compensates === undefined &&
+      m.connection === closePr.connection &&
+      m.repo === closePr.repo,
+  );
+}
+
+/**
+ * ADR-0340: is close_pr compensation `stageId` superseded by a merge? True when this instance's own merge of that
+ * pull request has a compensation which already completed in the current saga: the merge was undone by its own
+ * governed revert, so the merged pull request has nothing left to close. The executor still asks the provider
+ * whether the pull request IS merged before it records the stage as superseded.
+ */
+export function closePrSupersededByMerge(def: WorkflowDefinition, state: InstanceState, stageId: string): boolean {
+  const stage = def.stages.find((st) => st.id === stageId);
+  const comp = state.compensation;
+  if (!stage || stage.type !== "git_operation" || stage.action !== "close_pr" || !comp) return false;
+  return mergesOfPullRequest(def, stage).some((m) => {
+    const revertIndex = def.stages.findIndex((c) => c.compensates === m.id);
+    const revert = def.stages[revertIndex];
+    return revert !== undefined && comp.plan.includes(revert.id) && state.stageStatuses[revertIndex] === "completed";
+  });
+}
+
+/** ADR-0340: point the instance at compensation stage `stageId` (its status comes from the lifecycle table) */
+function enterCompensationStage(
+  def: WorkflowDefinition,
+  s: InstanceState,
+  stageId: string,
+  from: CompensationPhase,
+  trigger: CompensationTrigger,
+  effects: Effect[],
+): TransitionResult {
   const index = def.stages.findIndex((st) => st.id === stageId);
   const stage = def.stages[index]!;
   s.currentStageIndex = index;
   s.stageStatuses[index] = "active";
-  if (isExecutedStage(stage) || stage.type === "rollback") {
-    s.status = "awaiting_execution";
-    effects.push({ kind: "execute_stage", stageId });
-  } else {
-    // an automated_build without a run: a manual compensation a person completes
-    s.status = "awaiting_trigger";
-    effects.push({ kind: "await_human_trigger", stageId });
-  }
+  applyCompensationMove(def, s, from, trigger);
+  // an executed compensation runs now; an automated_build without a run is a manual one a person completes
+  effects.push(s.status === "awaiting_execution" ? { kind: "execute_stage", stageId } : { kind: "await_human_trigger", stageId });
   return { state: s, effects };
 }
 
@@ -936,19 +1045,20 @@ function startCompensation(
 ): TransitionResult | null {
   const plan = compensationPlan(def, state);
   if (plan.length === 0) return null;
-  nextCompensationPhase(compensationPhaseOf(state), cause === "aborted" ? "cancel" : "deny");
+  const from = compensationPhaseOf(state);
   const s: InstanceState = {
     ...state,
     stageStatuses: [...state.stageStatuses],
     artifactVersions: { ...state.artifactVersions },
     compensation: { cause, fromStageId: def.stages[state.currentStageIndex]?.id ?? null, plan, remaining: plan.slice(1) },
   };
-  return enterCompensationStage(def, s, plan[0]!, [{ kind: "compensation_started", cause, plan }]);
+  return enterCompensationStage(def, s, plan[0]!, from, cause === "aborted" ? "cancel" : "deny", [{ kind: "compensation_started", cause, plan }]);
 }
 
 /** ADR-0340: the current compensation finished; run the next one, or end in the cause's terminal status */
 function advanceCompensation(def: WorkflowDefinition, state: InstanceState): TransitionResult {
   const comp = state.compensation!;
+  const from = compensationPhaseOf(state);
   const s: InstanceState = {
     ...state,
     stageStatuses: [...state.stageStatuses],
@@ -957,10 +1067,8 @@ function advanceCompensation(def: WorkflowDefinition, state: InstanceState): Tra
   };
   s.stageStatuses[s.currentStageIndex] = "completed";
   const next = comp.remaining[0];
-  const phase = nextCompensationPhase(compensationPhaseOf(state), next !== undefined ? "step_succeeded" : "last_step_succeeded");
-  if (next !== undefined) return enterCompensationStage(def, s, next, []);
-  s.status = comp.cause;
-  s.compensation = { ...s.compensation!, outcome: phase as "completed" };
+  if (next !== undefined) return enterCompensationStage(def, s, next, from, "step_succeeded", []);
+  applyCompensationMove(def, s, from, "last_step_succeeded");
   return {
     state: s,
     effects: [
@@ -977,12 +1085,8 @@ function compensatingTransition(def: WorkflowDefinition, state: InstanceState, e
   if (event.kind === "abort") {
     // an operator ends the compensation early: the instance ends in its cause, the rest never runs (audited)
     const notRun = [current?.id, ...comp.remaining].filter((x): x is string => typeof x === "string");
-    const s: InstanceState = {
-      ...state,
-      status: comp.cause,
-      stageStatuses: [...state.stageStatuses],
-      compensation: { ...comp, outcome: nextCompensationPhase("compensating", "abort") as "abandoned" },
-    };
+    const s: InstanceState = { ...state, stageStatuses: [...state.stageStatuses], compensation: { ...comp } };
+    applyCompensationMove(def, s, "compensating", "abort");
     return {
       state: s,
       effects: [
@@ -995,8 +1099,9 @@ function compensatingTransition(def: WorkflowDefinition, state: InstanceState, e
   if (onCurrent && (event.kind === "execution_succeeded" || event.kind === "execution_failed") && isExecutedStage(current)) {
     // a failed compensation stays where it is (retryable through /advance or its retry policy), like a forward stage
     if (event.kind === "execution_failed") {
-      nextCompensationPhase("compensating", "step_failed");
-      return { state: { ...state }, effects: [] };
+      const s: InstanceState = { ...state };
+      applyCompensationMove(def, s, "compensating", "step_failed");
+      return { state: s, effects: [] };
     }
     return advanceCompensation(def, state);
   }

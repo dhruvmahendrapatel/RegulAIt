@@ -28,6 +28,21 @@ describe("GitHubProvider compensation calls", () => {
     expect(await p().deleteBranch("o/r", "regulait/abc")).toEqual({ deleted: false });
   });
 
+  it("a 422 for anything but a missing ref (a protected branch) throws instead of counting as gone", async () => {
+    upstream.route("DELETE", "/repos/o/r/git/refs/heads/regulait/abc", {
+      status: 422,
+      body: { message: "Cannot delete this protected branch" },
+    });
+    const err = await p().deleteBranch("o/r", "regulait/abc").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(GitProviderError);
+    expect(String((err as Error).message)).toMatch(/protected branch/);
+  });
+
+  it("encodes each segment of the branch name", async () => {
+    upstream.route("DELETE", "/repos/o/r/git/refs/heads/regulait/a%23b", { status: 204, body: undefined });
+    expect(await p().deleteBranch("o/r", "regulait/a#b")).toEqual({ deleted: true });
+  });
+
   it("refuses a delete the server rejects, scrubbing the token", async () => {
     upstream.route("DELETE", "/repos/o/r/git/refs/heads/b", { status: 403, body: { message: "bad ghp-secret" } });
     const err = await p().deleteBranch("o/r", "b").catch((e: unknown) => e);
