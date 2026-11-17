@@ -10,7 +10,7 @@
  * Metered spend is compared with the budget; imported spend is shown beside it and never added (ADR-0069).
  * The model is personBudgetModel.ts.
  */
-import { useDeferredValue, useMemo, useState, type ReactNode } from "react";
+import { useDeferredValue, useMemo, useReducer, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
@@ -23,6 +23,7 @@ import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Modal as K
 import { QueryGate, useAction, useUserPicker } from "../adminKit";
 import {
   DEFAULT_THRESHOLD_PCT,
+  PAGE_IDLE,
   PERIOD_WORDS,
   STANDING_TONE,
   STANDING_WORDS,
@@ -30,9 +31,12 @@ import {
   budgetBody,
   budgetLine,
   matchesName,
+  pageReducer,
   pctWords,
   peopleWithoutBudget,
   periodWords,
+  removeBlockedReason,
+  removeReducer,
   standing,
   thresholdProblem,
   type BudgetPeriod,
@@ -53,12 +57,12 @@ export default function PersonBudgetsPage() {
   });
   const [filter, setFilter] = useState("");
   const deferred = useDeferredValue(filter);
-  const [openId, setOpenId] = useState<string | null>(null);
-  const [editing, setEditing] = useState<PersonBudget | "new" | null>(null);
+  const [overlay, send] = useReducer(pageReducer, PAGE_IDLE);
+  const { editing } = overlay;
 
   const budgets = list.data?.budgets ?? [];
   const shown = useMemo(() => budgets.filter((b) => matchesName(b, deferred)), [budgets, deferred]);
-  const open = budgets.find((b) => b.userId === openId) ?? null;
+  const open = budgets.find((b) => b.userId === overlay.viewing) ?? null;
 
   return (
     <>
@@ -81,7 +85,7 @@ export default function PersonBudgetsPage() {
           total={list.data && deferred.trim() ? budgets.length : undefined}
           countNoun={["person", "people"]}
           actions={
-            <Button variant="primary" onClick={() => setEditing("new")}>
+            <Button variant="primary" onClick={() => send({ type: "edit", target: "new" })}>
               Set a budget
             </Button>
           }
@@ -103,7 +107,7 @@ export default function PersonBudgetsPage() {
             rows={shown}
             rowKey={(b) => b.id}
             rowLabel={(b) => `Open spend for ${b.displayName ?? "this person"}`}
-            onRowClick={(b) => setOpenId(b.userId)}
+            onRowClick={(b) => send({ type: "view", userId: b.userId })}
             empty={
               deferred.trim() ? (
                 <EmptyState title="No one matches that name" />
@@ -132,7 +136,7 @@ export default function PersonBudgetsPage() {
                         aria-label={`View spend for ${b.displayName ?? "this person"}`}
                         onClick={(e) => {
                           e.stopPropagation();
-                          setOpenId(b.userId);
+                          send({ type: "view", userId: b.userId });
                         }}
                       >
                         View spend
@@ -144,7 +148,7 @@ export default function PersonBudgetsPage() {
                         aria-label={`Change budget for ${b.displayName ?? "this person"}`}
                         onClick={(e) => {
                           e.stopPropagation();
-                          setEditing(b);
+                          send({ type: "edit", target: b });
                         }}
                       >
                         Change budget
@@ -158,12 +162,12 @@ export default function PersonBudgetsPage() {
         </Card>
       </div>
 
-      {open && <PersonSpendDrawer budget={open} onClose={() => setOpenId(null)} onEdit={() => setEditing(open)} />}
+      {open && <PersonSpendDrawer budget={open} onClose={() => send({ type: "closeView" })} onEdit={() => send({ type: "edit", target: open })} />}
       {editing && (
         <BudgetFormModal
           existing={editing === "new" ? null : editing}
           budgets={budgets}
-          onClose={() => setEditing(null)}
+          onClose={() => send({ type: "closeEdit" })}
         />
       )}
     </>
@@ -179,16 +183,18 @@ function PersonSpendDrawer(props: { budget: PersonBudget; onClose: () => void; o
     retry: false,
   });
   const act = useAction();
-  const [confirmRemove, setConfirmRemove] = useState(false);
+  const [removal, step] = useReducer(removeReducer, "idle");
+  const blocked = removeBlockedReason(removal);
   const view = q.data;
   const st = view ? standing(view) : null;
 
   const remove = () => {
-    setConfirmRemove(false);
+    step("confirm");
     void act
       .run(() => withStepUp((h) => stepUpApi.del(`/v1/users/${budget.userId}/spend-budget`, undefined, h)), `Budget for ${name} removed`)
       .then((ok) => {
         if (ok) props.onClose();
+        else step("failed");
       });
   };
 
@@ -244,19 +250,24 @@ function PersonSpendDrawer(props: { budget: PersonBudget; onClose: () => void; o
             </Button>
           }
           secondary={
-            <Button variant="danger" disabled={act.busy} onClick={() => setConfirmRemove(true)}>
-              Remove budget
+            <Button variant="danger" disabled={blocked !== null} aria-describedby={blocked ? "remove-blocked" : undefined} onClick={() => step("ask")}>
+              {removal === "removing" ? "Removing…" : "Remove budget"}
             </Button>
           }
         />
       </DrawerActions>
+      {blocked && (
+        <p id="remove-blocked" className={v.dim} role="status">
+          {blocked}
+        </p>
+      )}
       <ConfirmModal
-        open={confirmRemove}
+        open={removal === "confirming"}
         danger
         title={`Remove the spend budget for ${name}?`}
         confirmLabel="Remove budget"
         body={<p>{name}'s spend stops raising budget alerts. You will be asked to confirm it's you.</p>}
-        onCancel={() => setConfirmRemove(false)}
+        onCancel={() => step("cancel")}
         onConfirm={remove}
       />
     </DetailDrawer>
@@ -354,7 +365,7 @@ function ModalShell(props: { title: string; onClose: () => void; onSave: () => v
         <>
           <Button onClick={props.onClose}>Cancel</Button>
           <Button variant="primary" aria-disabled={props.busy} onClick={() => !props.busy && props.onSave()}>
-            Save budget
+            {props.busy ? "Saving…" : "Save budget"}
           </Button>
         </>
       }

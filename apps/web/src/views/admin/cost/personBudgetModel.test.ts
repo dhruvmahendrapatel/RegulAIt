@@ -4,15 +4,20 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  PAGE_IDLE,
   amountProblem,
   budgetBody,
   budgetLine,
   matchesName,
   pctWords,
+  pageReducer,
   peopleWithoutBudget,
+  removeBlockedReason,
+  removeReducer,
   periodWords,
   standing,
   thresholdProblem,
+  type PersonBudget,
 } from "./personBudgetModel";
 
 const view = (spent: number, budgetUsd = 100, alertThresholdPct = 80) => ({
@@ -86,5 +91,40 @@ describe("people", () => {
     expect(matchesName({ displayName: "Avery Approver" }, "approv")).toBe(true);
     expect(matchesName({ displayName: "Avery Approver" }, "dana")).toBe(false);
     expect(matchesName({ displayName: null }, "  ")).toBe(true);
+  });
+});
+
+describe("pageReducer", () => {
+  const b = { id: "b1", userId: "u1" } as PersonBudget;
+  it("opens and closes the drawer", () => {
+    const s = pageReducer(PAGE_IDLE, { type: "view", userId: "u1" });
+    expect(s).toEqual({ viewing: "u1", editing: null });
+    expect(pageReducer(s, { type: "closeView" })).toEqual(PAGE_IDLE);
+  });
+  it("keeps the drawer open under the form opened from it", () => {
+    const s = pageReducer({ viewing: "u1", editing: null }, { type: "edit", target: b });
+    expect(s).toEqual({ viewing: "u1", editing: b });
+    expect(pageReducer(s, { type: "closeEdit" })).toEqual({ viewing: "u1", editing: null });
+  });
+  it("does not open a row behind the open form", () => {
+    const s = { viewing: null, editing: "new" as const };
+    expect(pageReducer(s, { type: "view", userId: "u2" })).toBe(s);
+  });
+});
+
+describe("removeReducer", () => {
+  it("only removes after a confirmation", () => {
+    expect(removeReducer("idle", "confirm")).toBe("idle");
+    expect(removeReducer("idle", "ask")).toBe("confirming");
+    expect(removeReducer("confirming", "confirm")).toBe("removing");
+  });
+  it("returns to idle on cancel or failure, and ignores a second ask while removing", () => {
+    expect(removeReducer("confirming", "cancel")).toBe("idle");
+    expect(removeReducer("removing", "failed")).toBe("idle");
+    expect(removeReducer("removing", "ask")).toBe("removing");
+  });
+  it("says why Remove is unavailable only while removing", () => {
+    expect(removeBlockedReason("idle")).toBeNull();
+    expect(removeBlockedReason("removing")).toMatch(/Removing/);
   });
 });

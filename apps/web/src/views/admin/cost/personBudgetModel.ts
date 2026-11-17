@@ -117,3 +117,49 @@ export function matchesName(b: Pick<PersonBudget, "displayName">, q: string): bo
   const t = q.trim().toLowerCase();
   return !t || (b.displayName ?? "").toLowerCase().includes(t);
 }
+
+/**
+ * What the page has open, as one declared state (rule 12): nothing, one person's drawer, the budget form, or the
+ * form over the drawer ("Change budget" from inside it). Every overlay change goes through pageReducer.
+ */
+export interface PageState {
+  viewing: string | null;
+  editing: PersonBudget | "new" | null;
+}
+export type PageEvent =
+  | { type: "view"; userId: string }
+  | { type: "closeView" }
+  | { type: "edit"; target: PersonBudget | "new" }
+  | { type: "closeEdit" };
+export const PAGE_IDLE: PageState = { viewing: null, editing: null };
+
+export function pageReducer(s: PageState, e: PageEvent): PageState {
+  switch (e.type) {
+    case "view":
+      // the form is modal: a row cannot be opened behind it
+      return s.editing ? s : { ...s, viewing: e.userId };
+    case "closeView":
+      return { ...s, viewing: null };
+    case "edit":
+      return { ...s, editing: e.target };
+    case "closeEdit":
+      return { ...s, editing: null };
+  }
+}
+
+/**
+ * Removing a budget: idle → confirming → removing → (closed on success | idle on failure). The step-up and the
+ * request run only from "removing"; any other event in a state that does not allow it leaves the state unchanged.
+ */
+export type RemoveState = "idle" | "confirming" | "removing";
+export type RemoveEvent = "ask" | "cancel" | "confirm" | "failed";
+const REMOVE_NEXT: Record<RemoveState, Partial<Record<RemoveEvent, RemoveState>>> = {
+  idle: { ask: "confirming" },
+  confirming: { cancel: "idle", confirm: "removing" },
+  removing: { failed: "idle" },
+};
+export const removeReducer = (s: RemoveState, e: RemoveEvent): RemoveState => REMOVE_NEXT[s][e] ?? s;
+
+/** why the Remove button cannot be pressed now, or null when it can */
+export const removeBlockedReason = (s: RemoveState): string | null =>
+  s === "removing" ? "Removing the budget; wait for it to finish." : null;
