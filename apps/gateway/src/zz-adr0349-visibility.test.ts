@@ -123,7 +123,8 @@ describe("ADR-0349 slice 5: typed instance search", () => {
       [{ owner: randomUUID() }, "workflow_instances_initiator_idx"],
       [{ stage: "x" }, "workflow_instances_current_stage_idx"],
       [{ status: "x" }, "workflow_instances_status_idx"],
-      [{ complianceTag: "x" }, "projects_classifications_gin"],
+      // the tag filter is a join: instances by project (asserted here), projects by tag (asserted below)
+      [{ complianceTag: "x" }, "workflow_instances_project_idx"],
     ];
     for (const [f, index] of fields) {
       const where = sql.join(instanceSearchConditions(f), sql` AND `);
@@ -134,6 +135,12 @@ describe("ADR-0349 slice 5: typed instance search", () => {
       });
       expect(plan, `${Object.keys(f)[0]} → ${index}`).toContain(index);
     }
+    const tagPlan = await db.transaction(async (tx) => {
+      await tx.execute(sql`SET LOCAL enable_seqscan = off`);
+      const r = (await tx.execute(sql`EXPLAIN SELECT id FROM projects WHERE classifications @> ${JSON.stringify(["x"])}::jsonb`)) as unknown as { rows: Array<Record<string, string>> };
+      return r.rows.map((x) => Object.values(x)[0]).join("\n");
+    });
+    expect(tagPlan, "complianceTag → projects_classifications_gin").toContain("projects_classifications_gin");
     void CURRENT_STAGE_ID_SQL;
   });
 });

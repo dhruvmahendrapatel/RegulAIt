@@ -8,6 +8,7 @@
 --   CREATE INDEX CONCURRENTLY IF NOT EXISTS "workflow_instances_initiator_idx" ON "workflow_instances" ("initiator_user_id", "created_at" DESC)
 --   CREATE INDEX CONCURRENTLY IF NOT EXISTS "workflow_instances_current_stage_idx" ON "workflow_instances" (("definition" -> 'stages' -> (("state" ->> 'currentStageIndex')::int) ->> 'id'))
 --   CREATE INDEX CONCURRENTLY IF NOT EXISTS "projects_classifications_gin" ON "projects" USING gin ("classifications" jsonb_path_ops)
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS "workflow_instances_project_idx" ON "workflow_instances" ("project_id")
 -- built CONCURRENTLY so a build never blocks workflow or project writes, which the migrator's one transaction cannot
 -- do. The statements live in `CONCURRENT_INDEXES` in `packages/db/src/migrate.ts`, and `runMigrations` builds them
 -- after `migrate`, outside any transaction, once this file's slug (or, after assign-at-merge, its tag) is journalled.

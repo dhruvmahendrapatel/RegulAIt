@@ -107,6 +107,13 @@ export const CONCURRENT_INDEXES: ReadonlyArray<{ migration: string; name: string
     name: "projects_classifications_gin",
     create: `CREATE INDEX CONCURRENTLY IF NOT EXISTS "projects_classifications_gin" ON "projects" USING gin ("classifications" jsonb_path_ops)`,
   },
+  {
+    // ADR-0349 slice 5: the instances list's `complianceTag` search field, the other side of the join (the existing
+    // project index is partial, open instances only)
+    migration: "workflow_instance_search",
+    name: "workflow_instances_project_idx",
+    create: `CREATE INDEX CONCURRENTLY IF NOT EXISTS "workflow_instances_project_idx" ON "workflow_instances" ("project_id")`,
+  },
 ];
 
 /**
