@@ -75,6 +75,7 @@ import {
   selectAssignmentRule,
   slaDeadlines,
   slaStateAt,
+  slaTransitionAllowed,
   taskScheduleRelaxations,
   APPROVAL_TASK_PRIORITY_ORDER,
   type ApprovalRoutingContext,
@@ -598,8 +599,6 @@ export type TaskScheduleOutcome =
   | { ok: true; assignment: ApprovalAssignmentRow; relaxations: string[] }
   | { ok: false; status: number; error: string; detail: string; handled?: boolean };
 
-const SLA_RANK = { ok: 0, warning: 1, breached: 2 } as const;
-
 /**
  * Set a pending human task's priority, due and warn times and escalation policy. The ONE function for both an admin
  * and a workflow stage timer: there is no second escalation path. After the write the ADR-0046 evaluation runs, so
@@ -667,10 +666,10 @@ export async function scheduleApprovalTask(
     slaPolicyId: next.slaPolicyId,
     dueSource: timesChanged ? ctx.source : a.dueSource,
   };
-  // moving the clock BACK re-arms it here; moving it forward into warning or breach is left to the ADR-0046
-  // evaluation below, so the warning/breach audit and the escalation happen exactly once, the usual way
+  // APPROVAL_SLA_TRANSITIONS.reschedule: moving the clock BACK re-arms it here; moving it forward into warning or breach
+  // is the `clock` cause, left to the ADR-0046 evaluation below, so the audit and the escalation happen once
   const implied = slaStateAt(next, now);
-  if (SLA_RANK[implied] < SLA_RANK[a.slaState as keyof typeof SLA_RANK]) patch.slaState = implied;
+  if (slaTransitionAllowed("reschedule", a.slaState, implied)) patch.slaState = implied;
   const [written] = await db.update(approvalAssignments).set(patch).where(eq(approvalAssignments.id, a.id)).returning();
 
   const iso = (d: Date | null) => d?.toISOString() ?? null;

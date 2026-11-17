@@ -30,6 +30,7 @@ import {
   workflowInstances,
   type Db,
 } from "@regulait/db";
+import { APPROVAL_SLA_TRANSITIONS, evaluateSla, slaTransitionAllowed } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { runApprovalSlaSweep, scheduleApprovalTask, scheduleStageApprovals } from "./workbench.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
@@ -239,5 +240,22 @@ describe("ADR-0342 slice 2: the queue", () => {
     expect(order).toEqual([urgent, low]);
     const d = await app.inject({ method: "GET", headers: adminKey, url: `/v1/approvals?status=pending&sort=due&dir=asc&limit=500` });
     expect(d.statusCode, d.body).toBe(200);
+  });
+});
+
+describe("ADR-0342 slice 2: the declared SLA transition table (rule 12)", () => {
+  it("the ADR-0046 clock only makes `clock` transitions, and a reschedule only re-arms", () => {
+    const now = new Date("2026-11-17T12:00:00Z");
+    const at = (m: number) => new Date(now.getTime() + m * 60_000);
+    for (const stored of ["ok", "warning", "breached"] as const) {
+      for (const [warnAt, dueAt] of [[at(-20), at(-10)], [at(-10), at(10)], [at(10), at(20)], [null, at(-1)], [null, null]] as const) {
+        const v = evaluateSla({ warnAt, dueAt, slaState: stored }, now);
+        if (v.state !== stored) expect([stored, v.state, slaTransitionAllowed("clock", stored, v.state)]).toEqual([stored, v.state, true]);
+      }
+    }
+    expect(APPROVAL_SLA_TRANSITIONS.reschedule.ok).toEqual([]);
+    expect(slaTransitionAllowed("reschedule", "breached", "ok")).toBe(true);
+    expect(slaTransitionAllowed("reschedule", "ok", "breached")).toBe(false);
+    expect(slaTransitionAllowed("clock", "breached", "ok")).toBe(false);
   });
 });

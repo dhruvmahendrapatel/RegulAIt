@@ -346,3 +346,22 @@ export function slaStateAt(schedule: { warnAt: Date | null; dueAt: Date | null }
   if (schedule.warnAt && now.getTime() >= schedule.warnAt.getTime()) return "warning";
   return "ok";
 }
+
+/**
+ * ADR-0342 slice 2 (rule 12): the one declared table of SLA state transitions, by cause.
+ *  - `clock`: the ADR-0046 evaluation (`evaluateSla`) only ever moves a clock forward.
+ *  - `reschedule`: a moved due or warn time (`scheduleApprovalTask`) may re-arm it backward; moving forward is left to
+ *    the clock, so a warning or breach is audited and escalated once, the usual way.
+ * Staying in the same state is always allowed and is not listed.
+ */
+export const APPROVAL_SLA_TRANSITIONS: Readonly<
+  Record<"clock" | "reschedule", Readonly<Record<"ok" | "warning" | "breached", readonly ("ok" | "warning" | "breached")[]>>>
+> = {
+  clock: { ok: ["warning", "breached"], warning: ["breached"], breached: [] },
+  reschedule: { ok: [], warning: ["ok"], breached: ["ok", "warning"] },
+};
+
+export function slaTransitionAllowed(cause: keyof typeof APPROVAL_SLA_TRANSITIONS, from: string, to: string): boolean {
+  const row = APPROVAL_SLA_TRANSITIONS[cause][from as "ok" | "warning" | "breached"];
+  return row !== undefined && (row as readonly string[]).includes(to);
+}
