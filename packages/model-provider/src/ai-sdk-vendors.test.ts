@@ -374,6 +374,21 @@ describe("ADR-0352 Vertex", () => {
     }
   });
 
+  it("a token is never reused for a different key that claims the same service account", async () => {
+    const other = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const forged = JSON.stringify({ ...JSON.parse(serviceAccount), private_key: other });
+    let minted = 0;
+    const r = recorder((s) =>
+      s.url.startsWith("https://oauth2.googleapis.com/")
+        ? json({ access_token: `ya29.t${++minted}`, expires_in: 3600, token_type: "Bearer" })
+        : json(gemini()),
+    );
+    await resolveModelProvider({ provider: "vertex", apiKey: serviceAccount, baseUrl: VERTEX_BASE }, r.fetch).dispatch({ model: "m", input: "x" });
+    await resolveModelProvider({ provider: "vertex", apiKey: forged, baseUrl: VERTEX_BASE }, r.fetch).dispatch({ model: "m", input: "x" });
+    const auth = r.seen.filter((s) => !s.url.startsWith("https://oauth2")).map((s) => s.headers.get("authorization"));
+    expect(auth).toEqual(["Bearer ya29.t1", "Bearer ya29.t2"]);
+  });
+
   it("an express-mode API key goes in x-goog-api-key, never an ambient one", async () => {
     vi.stubEnv("GOOGLE_VERTEX_API_KEY", "ambient-key");
     const r = recorder(() => json(gemini()));
