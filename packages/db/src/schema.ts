@@ -17358,6 +17358,32 @@ export const fairnessBreachReviews = pgTable(
   ],
 );
 
+/**
+ * ADR-0346 slice 2 (migration fairness_engine_input): the input file the gateway placed for one fairlearn engine run,
+ * pinned when the task starts (the ADR-0242 subject-file pattern). The run's end counts the task's result only when it
+ * names exactly this sha256. One row per engine run; the evaluation is the one the run's config named.
+ */
+export const fairnessEngineInputs = pgTable(
+  "fairness_engine_inputs",
+  {
+    engineRunId: uuid("engine_run_id")
+      .primaryKey()
+      .references(() => engineRuns.id, { onDelete: "cascade" }),
+    evaluationId: uuid("evaluation_id")
+      .notNull()
+      .references(() => fairnessEvaluations.id, { onDelete: "restrict" }),
+    inputSha256: text("input_sha256").notNull(),
+    /** the prompts in the file (one gateway call each) */
+    rowCount: integer("row_count").notNull(),
+    placedAt: timestamp("placed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("fairness_engine_inputs_evaluation_idx").on(t.evaluationId),
+    check("fairness_engine_inputs_sha256_check", sql`${t.inputSha256} ~ '^[0-9a-f]{64}$'`),
+    check("fairness_engine_inputs_row_count_check", sql`${t.rowCount} BETWEEN 1 AND 2000`),
+  ],
+);
+
 export type FairnessEvaluationRow = typeof fairnessEvaluations.$inferSelect;
 export type FairnessRunEvidenceRow = typeof fairnessRunEvidence.$inferSelect;
 export type FairnessBreachReviewRow = typeof fairnessBreachReviews.$inferSelect;

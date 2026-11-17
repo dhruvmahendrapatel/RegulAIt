@@ -49,6 +49,7 @@
  * attestation-required. Everything else — a new framework, a new control, a
  * revised mapping, a customer's own internal control set — is rows, no deploy.
  */
+import { fairnessCardMeasuredSql } from "./fairness-evaluation.js";
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import { wantsListContract, type ListSpec } from "./list-contract.js";
@@ -253,10 +254,13 @@ export async function runCollector(
       // least one completed (`assessed`) bias/fairness assessment. The
       // platform does not compute or grade fairness; it counts that the
       // examination was documented and where its result lives.
+      // ADR-0346 decision 7: OR when it holds MEASURED evidence: its latest
+      // fairness run passed, on the card's current model version, and that
+      // run's evidence is signed (fairnessCardMeasuredSql).
       const [row] = await db
         .select({ n: count() })
         .from(modelCards)
-        .where(sql`jsonb_path_exists(${modelCards.biasFairness}, '$[*] ? (@.status == "assessed")')`);
+        .where(sql`(jsonb_path_exists(${modelCards.biasFairness}, '$[*] ? (@.status == "assessed")') OR ${fairnessCardMeasuredSql()})`);
       return row?.n ?? 0;
     }
 

@@ -145,8 +145,11 @@ export const createModelInputDatasetSchema = z
     favourableLabel: z.string().trim().min(1).max(FAIRNESS_LIMITS.maxCellChars),
     protectedAttributes: z.array(columnName).min(1).max(FAIRNESS_LIMITS.maxAttributes),
     inputColumns: z.array(columnName).min(1).max(FAIRNESS_EVALUATION_LIMITS.maxInputColumns),
-    /** the card the dataset is for: its project's cascade PII mode governs the upload (decision 3) */
+    /** the card the dataset is for */
     cardId: z.string().uuid(),
+    /** the project the evaluation's runs attribute to: its compliance cascade's PII mode governs the upload with the
+     * org default as the floor (decision 3). A model card has no project of its own. */
+    projectId: z.string().uuid().nullish(),
   })
   .strict()
   .refine(

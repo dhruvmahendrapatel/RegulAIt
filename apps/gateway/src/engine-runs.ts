@@ -118,6 +118,7 @@ import { ENGINE_TASK_ISOLATION_UNAVAILABLE, ENGINE_TASK_NOT_PLACED, engineTaskPl
 import { engineWorkerAttestationBasis } from "./engine-worker-attestation.js";
 import { writeEngineRunLedgers } from "./engine-ledger.js";
 import { admissionReportOf, recordSubjectRunEndTx, setAdmissionScanRuntime, subjectInputTx } from "./admission-scan-runs.js";
+import { recordFairnessRunEndTx, setFairnessEvaluationRuntime } from "./fairness-evaluation.js";
 import { agentConfigHash, buildAgentDecider } from "./evals.js";
 import { assertProjectAttribution } from "./projects.js";
 import { loadOrgSettings } from "./org-settings.js";
@@ -145,6 +146,8 @@ export function setEngineRuntime(opts: EngineOptions): void {
   runtime = opts;
   // ADR-0242 L4.3: the admission-scan runs encrypt their MCP manifest snapshot under the same data key
   setAdmissionScanRuntime({ dataKey: opts.dataKey });
+  // ADR-0346: the fairness evaluation runs decrypt their model-input dataset under the same data key
+  setFairnessEvaluationRuntime({ dataKey: opts.dataKey });
 }
 export function engineRuntime(): EngineOptions {
   return runtime;
@@ -568,6 +571,8 @@ export interface FinishArgs {
   requirePlacedTask?: boolean;
   /** ADR-0242 L4.3: a `subject` run's engine report (the decoded raw report), recorded at the run's end */
   admissionReport?: unknown;
+  /** ADR-0346: a fairlearn run's raw report content (base64), measured and recorded at the run's end */
+  fairnessReportBase64?: string;
 }
 
 /**
@@ -706,6 +711,22 @@ async function endLockedRun(tx: Tx, locked: EngineRunRow, given: FinishArgs, now
     await tx
       .update(engineRuns)
       .set({ summary: { ...summary, verdict: admission.verdict === "pass" ? "pass" : admission.verdict === "fail" ? "fail" : "unknown", admission } })
+      .where(eq(engineRuns.id, runId));
+  }
+  // ADR-0346: a fairness evaluation run lands as a fairness run on its card, in this same transaction; anything short of
+  // an agreeing, complete measurement is inconclusive (it holds the card), and the run's evidence is signed
+  const fairness =
+    locked.engineId === "fairlearn"
+      ? await recordFairnessRunEndTx(tx as unknown as Parameters<typeof recordFairnessRunEndTx>[0], locked, {
+          status: args.status,
+          placed: !unplaced && locked.taskPlacementId !== null,
+          rawReportContentBase64: args.fairnessReportBase64,
+        })
+      : null;
+  if (fairness) {
+    await tx
+      .update(engineRuns)
+      .set({ summary: { ...summary, verdict: fairness.outcome === "pass" ? "pass" : fairness.outcome === "fail" ? "fail" : "unknown", fairness } })
       .where(eq(engineRuns.id, runId));
   }
   let ledgers: { evalRunId: string | null; redteamRunId: string | null } = { evalRunId: null, redteamRunId: null };
@@ -2321,6 +2342,7 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
         rawReport,
         // ADR-0242 L4.3: a subject run's report is the engine's admission-scan report (untrusted; parsed strictly later)
         ...(run.targetKind === "subject" ? { admissionReport: admissionReportOf(envelope!.rawReport?.contentBase64) } : {}),
+        ...(run.engineId === "fairlearn" && envelope!.rawReport?.contentBase64 !== undefined ? { fairnessReportBase64: envelope!.rawReport.contentBase64 } : {}),
         requireLive: true,
         requirePlacedTask: true,
       });
