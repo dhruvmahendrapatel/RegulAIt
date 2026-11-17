@@ -125,8 +125,8 @@ describe("ADR-0349 slice 3: renewStageClaim, the guarded UPDATE", () => {
     expect(await renewStageClaim(db, g, 60_000)).toBe("renewed");
     const ctx = await contextOf(g.instanceId);
     expect(typeof ctx.executingRenewedAt).toBe("string");
-    const [{ drift }] = (await db.execute(sql`select abs(extract(epoch from (now() - ${ctx.executingRenewedAt as string}::timestamptz))) as drift`)).rows as Array<{ drift: number }>;
-    expect(Number(drift)).toBeLessThan(5);
+    const [clock] = (await db.execute(sql`select abs(extract(epoch from (now() - ${ctx.executingRenewedAt as string}::timestamptz))) as drift`)).rows as Array<{ drift: number }>;
+    expect(Number(clock!.drift)).toBeLessThan(5);
   });
 
   it("is lost when the claim was re-taken, the entry moved or the instance left awaiting_execution", async () => {
