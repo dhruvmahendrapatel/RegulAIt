@@ -5036,6 +5036,7 @@ export * from "./shadow-catalog-v2.js";
 export * from "./shadow-catalog-v3.js";
 export * from "./repo-manifests.js";
 export * from "./repo-analysis.js";
+export * from "./agent-config-audit.js";
 // ADR-0195 SD0: shadow-AI active discovery (sources, credentials, runs, evidence kinds)
 export * from "./discovery/index.js";
 // ADR-0195 SD3: endpoint discovery without an agent (osquery pack, importers, endpoint signature seed).
