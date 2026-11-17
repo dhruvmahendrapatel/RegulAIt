@@ -23,7 +23,9 @@ import {
   workflowInstances,
   workflowTemplates,
   withinSystemReason,
+  projects,
   type Db,
+  type SQL,
 } from "@regulait/db";
 import {
   initialState,
@@ -86,6 +88,10 @@ import {
   loadCompiledEgressContext,
 } from "./compiled-egress.js";
 import { loadOrgSettings } from "./org-settings.js";
+import { databaseNow } from "./db-clock.js";
+import { currentRetryJob, describePendingWork, pendingApproversOf } from "./workflow-pending.js";
+import { isUniqueViolation } from "./pg-errors.js";
+import { answerStartConflict, openInstanceForStartKey, startKeyOf, WORKFLOW_START_KEY_INDEX } from "./workflow-start-conflict.js";
 import {
   REMEDIATION_ENVIRONMENT_PATTERN,
   SHADOW_AI_REMEDIATION_CHANGE_TYPE,
@@ -131,6 +137,8 @@ import {
   startInstanceSchema,
   submitArtifactSchema,
   isIntakeTemplateName,
+  WORKFLOW_TERMINAL_STATUSES,
+  isWorkflowTerminalStatus,
 } from "@regulait/shared";
 // ADR-0182 A11 — intake-named templates pass the decision-regression gate
 import { parseAcceptance, writeIntakeTemplateGated } from "./decision-regression.js";
@@ -444,7 +452,7 @@ async function applyEvent(
     // live engine runs with it (cancelled, key revoked, approval superseded);
     // a re-open cancels those of the rounds it left behind. Same transaction
     // as the transition, under the instance row lock.
-    const endsInstance = ["completed", "denied", "aborted", "rolled_back"].includes(state.status);
+    const endsInstance = isWorkflowTerminalStatus(state.status);
     if (endsInstance || isReopen) {
       const { cancelEngineRunsOfInstance } = await import("./engine-runs.js");
       await cancelEngineRunsOfInstance(tx, instance.id, actorUserId, {
@@ -611,8 +619,7 @@ async function recordWorkflowStageSpan(
   });
   // The instance's trace closes when the INSTANCE does — not when one of its
   // transitions returns, exactly as a run's trace closes with the run.
-  const terminal = ["completed", "denied", "aborted", "rolled_back"];
-  if (terminal.includes(applied.span.status)) {
+  if (isWorkflowTerminalStatus(applied.span.status)) {
     await finishTrace(db, ctx, applied.span.status === "completed" ? "ok" : "denied");
   }
 }
@@ -3015,9 +3022,18 @@ export async function startWorkflowInstanceWithTemplates(
      * (the use-case registry) passes its own, since the default looks the
      * object up by instance and finds nothing yet. */
     executor?: ExecutorHooks;
+    /** ADR-0349 slice 2: the PM work item this start is for. With it, at most one open instance per template set +
+     * target + work item (`workflow-start-conflict.ts`); without it, nothing is deduplicated. */
+    workItemRef?: string | null;
   },
 ): Promise<
-  | { ok: true; instance: { id: string; status: string; state: unknown }; executorRefusal: ExecutorRefusal | null }
+  | {
+      ok: true;
+      instance: { id: string; status: string; state: unknown };
+      executorRefusal: ExecutorRefusal | null;
+      /** ADR-0349 slice 2: the open instance was returned under the `use_existing` policy; nothing was started */
+      reused?: true;
+    }
   | { ok: false; status: number; body: Record<string, unknown> }
 > {
   const { templateIds, initiatorUserId, change } = input;
@@ -3079,18 +3095,39 @@ export async function startWorkflowInstanceWithTemplates(
       return { ok: false, status: attribution.status, body: { error: attribution.error } };
     }
   }
-  const [instance] = await db
-    .insert(workflowInstances)
-    .values({
-      templateIds,
-      definition: merged,
-      initiatorUserId,
-      change,
-      projectId: input.projectId ?? null,
-      state: initialState(merged),
-      status: "running",
-    })
-    .returning();
+  // ADR-0349 slice 2: one open instance per start key. The read answers the common case; the unique index answers a
+  // race (the insert runs under a savepoint, so a caller's own transaction survives the violation).
+  const workItemRef = input.workItemRef ?? null;
+  const startKey = workItemRef ? startKeyOf(templateIds, change, workItemRef) : null;
+  const conflict = async (existing: Awaited<ReturnType<typeof openInstanceForStartKey>>) => {
+    const answer = await answerStartConflict(db, startKey!, existing, { userId: initiatorUserId, isAdmin: input.isAdmin ?? false });
+    return answer.kind === "reused"
+      ? { ok: true as const, instance: answer.instance, executorRefusal: null, reused: true as const }
+      : { ok: false as const, status: answer.status, body: answer.body };
+  };
+  if (startKey) {
+    const existing = await openInstanceForStartKey(db, startKey);
+    if (existing) return conflict(existing);
+  }
+  const values = {
+    templateIds,
+    definition: merged,
+    initiatorUserId,
+    change,
+    projectId: input.projectId ?? null,
+    workItemRef,
+    state: initialState(merged),
+    status: "running",
+  };
+  let instance: typeof workflowInstances.$inferSelect | undefined;
+  try {
+    [instance] = startKey
+      ? await db.transaction((tx) => tx.insert(workflowInstances).values(values).returning())
+      : await db.insert(workflowInstances).values(values).returning();
+  } catch (err) {
+    if (!startKey || !isUniqueViolation(err, WORKFLOW_START_KEY_INDEX)) throw err;
+    return conflict(await openInstanceForStartKey(db, startKey));
+  }
 
   const first = await applyEvent(db, instance!.id, { kind: "start" }, initiatorUserId);
   const executed = await runGitExecutions(db, instance!.id, first.effects, initiatorUserId, dataKey, 0, input.executor ?? {});
@@ -3102,7 +3139,7 @@ export async function startWorkflowInstanceWithTemplates(
 }
 
 /** ADR-0207 (G5): the workflow statuses after which an instance never runs another stage */
-const TERMINAL_INSTANCE_STATUSES = ["completed", "aborted", "denied", "rolled_back"] as const;
+const TERMINAL_INSTANCE_STATUSES = WORKFLOW_TERMINAL_STATUSES;
 /** a git stage naming the connection `$name`, anywhere in a definition's stage list */
 const GIT_STAGE_NAMING = '$.stages[*] ? (@.type == "git_operation" && @.connection == $name)';
 
@@ -3124,6 +3161,131 @@ export async function gitConnectionUse(
     .where(and(notInArray(workflowInstances.status, [...TERMINAL_INSTANCE_STATUSES]), naming(workflowInstances.definition)))
     .orderBy(workflowInstances.id);
   return { templates: tpl.length, instances: inst.length, templateNames: tpl.slice(0, 20).map((t) => t.name), instanceIds: inst.slice(0, 20).map((i) => i.id) };
+}
+
+/**
+ * THE governed workflow start (POST /v1/workflows/instances), as a function so a workflow schedule (ADR-0349 slice 4)
+ * starts exactly as a person does: server-resolved roles and data sensitivity, the shadow-AI remediation rules,
+ * assignment-rule routing (or an admin's explicit template), the compliance cascade, project attribution, the start
+ * conflict policy and the audit rows. Answers the HTTP status and body the route sends.
+ */
+export async function startGovernedWorkflow(
+  db: Db,
+  dataKey: string | undefined,
+  caller: { userId: string; isAdmin: boolean },
+  body: z.infer<typeof startInstanceSchema>,
+): Promise<{ status: number; body: unknown }> {
+  const answer = (status: number, out: unknown) => ({ status, body: out });
+  const userId = caller.userId;
+
+  // ADR-0018 §4 dim: the INITIATING user's role names are resolved SERVER-SIDE
+  // (never from the request body) and passed on the change descriptor so a
+  // role-scoped assignment rule can only ever fire for a genuine role holder.
+  // The kernel stays subject-free — it just matches these strings.
+  const initiatorRoleRows = await db
+    .select({ name: roles.name })
+    .from(roleAssignments)
+    .innerJoin(roles, eq(roles.id, roleAssignments.roleId))
+    .where(eq(roleAssignments.userId, userId));
+  // ADR-0038: distinct — a role held both directly and via an IdP group
+  // mapping is two assignment rows and one role name.
+  const initiatorRoles = [...new Set(initiatorRoleRows.map((r) => r.name))];
+  // ADR-0018 addendum (ADR-0019) — the 6th dim, resolved SERVER-SIDE like the
+  // 5th: a change's data sensitivity is the set of compliance classification
+  // tags its ATTRIBUTED PROJECT carries, i.e. the exact same source
+  // effectiveCompliancePolicy cascades from. That is the only
+  // server-authoritative sensitivity signal in the model, and it means the
+  // dim cannot be asserted by a client. No project, or a project with no
+  // classifications, yields [] — a sensitivity-scoped rule then simply does
+  // not fire (matches as absent; never an invented sensitivity).
+  const dataSensitivities = body.projectId
+    ? await projectClassifications(db, body.projectId)
+    : [];
+  // targetSystem is a legitimate client-supplied change attribute;
+  // initiatorRoles and dataSensitivities are authoritative server truth.
+  // Neither could ever reach here from a client — changeDescriptorSchema
+  // accepts neither — but rebuild explicitly.
+  const change = { ...body.change, initiatorRoles, dataSensitivities };
+
+  // ADR-0195 A4: a shadow-AI remediation never starts in the plan's placeholder environment (fail closed), and
+  // its strict default workflow is installed the first time one is started (an admin relaxes it by retiring it)
+  if (change.changeType === SHADOW_AI_REMEDIATION_CHANGE_TYPE) {
+    const environment = change.environment.trim();
+    if (environment.toLowerCase() === SHADOW_AI_REMEDIATION_ENVIRONMENT_UNSTATED) {
+      return answer(422, {
+        error: "environment_unstated",
+        detail:
+          "the remediation plan's environment is a placeholder: state where the ungoverned usage runs " +
+          "(change.environment) before starting the workflow",
+      });
+    }
+    // the same allow-list the plan route applies: only an environment an admin has already given a meaning to
+    const allowed = await allowedRemediationEnvironments(db);
+    if (!REMEDIATION_ENVIRONMENT_PATTERN.test(environment) || !allowed.includes(environment)) {
+      return answer(422, {
+        error: "environment_not_allowed",
+        allowed,
+        detail: "name one of the environments a deploy target or workflow assignment rule already uses",
+      });
+    }
+    // the install runs only once this start's own checks pass, so a refused start installs nothing
+    if (!body.templateId && (await shadowAiRemediationDefaultState(db)) === "not_installed") {
+      if (body.projectId) {
+        const attribution = await assertProjectAttribution(db, body.projectId, userId, caller.isAdmin);
+        if (!attribution.ok) return answer(attribution.status, { error: attribution.error });
+      }
+      if (await secondApproverMissing(db, shadowAiRemediationDefinition(), userId)) {
+        return answer(422, secondApproverUnavailable());
+      }
+      await ensureShadowAiRemediationDefault(db, userId);
+    }
+  }
+
+  let templateIds: string[];
+  if (body.templateId) {
+    if (!caller.isAdmin) {
+      return answer(403, { error: "explicit_template_is_admin_only" });
+    }
+    templateIds = [body.templateId];
+  } else {
+    const rules = await db
+      .select()
+      .from(workflowAssignmentRules)
+      .orderBy(workflowAssignmentRules.createdAt);
+    templateIds = matchTemplates(change, rules);
+  }
+  // §8.3 cascade — the ENFORCED consumer: a classified project's required
+  // templates are unioned in with no manual per-control setup (and can
+  // force a workflow even when no assignment rule matches). The existing
+  // §4 union/strictest merge keeps every added sign-off stage.
+  if (body.projectId) {
+    const required = await requiredTemplateIdsFor(db, body.projectId);
+    for (const id of required) if (!templateIds.includes(id)) templateIds.push(id);
+  }
+  if (templateIds.length === 0) {
+    // no workflow is assigned on an admin's behalf (the one shipped default is ADR-0195 A4's shadow-AI remediation
+    // rule, installed above): say who can fix it
+    return answer(422, {
+      error: "no_workflow_matches_change",
+      changeType: change.changeType,
+      detail:
+        `no workflow assignment rule matches this change (change type '${change.changeType}'), so no workflow was ` +
+        "started: an admin must assign a workflow template to it under Workflow templates (assignment rules)",
+    });
+  }
+
+  const started = await startWorkflowInstanceWithTemplates(db, dataKey, {
+    templateIds,
+    initiatorUserId: userId,
+    change,
+    projectId: body.projectId ?? null,
+    isAdmin: caller.isAdmin,
+    workItemRef: body.workItem ?? null,
+  });
+  if (!started.ok) return answer(started.status, started.body);
+  // ADR-0349 slice 2: under `use_existing` a conflicting start answers 200 with the open instance it found
+  if (started.reused) return answer(200, { ...started.instance, reused: true });
+  return answer(201, started.instance);
 }
 
 export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: WorkflowRouteOptions = {}) {
@@ -3582,112 +3744,9 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const body = startInstanceSchema.parse(req.body);
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_initiate" });
-
-    // ADR-0018 §4 dim: the INITIATING user's role names are resolved SERVER-SIDE
-    // (never from the request body) and passed on the change descriptor so a
-    // role-scoped assignment rule can only ever fire for a genuine role holder.
-    // The kernel stays subject-free — it just matches these strings.
-    const initiatorRoleRows = await db
-      .select({ name: roles.name })
-      .from(roleAssignments)
-      .innerJoin(roles, eq(roles.id, roleAssignments.roleId))
-      .where(eq(roleAssignments.userId, userId));
-    // ADR-0038: distinct — a role held both directly and via an IdP group
-    // mapping is two assignment rows and one role name.
-    const initiatorRoles = [...new Set(initiatorRoleRows.map((r) => r.name))];
-    // ADR-0018 addendum (ADR-0019) — the 6th dim, resolved SERVER-SIDE like the
-    // 5th: a change's data sensitivity is the set of compliance classification
-    // tags its ATTRIBUTED PROJECT carries, i.e. the exact same source
-    // effectiveCompliancePolicy cascades from. That is the only
-    // server-authoritative sensitivity signal in the model, and it means the
-    // dim cannot be asserted by a client. No project, or a project with no
-    // classifications, yields [] — a sensitivity-scoped rule then simply does
-    // not fire (matches as absent; never an invented sensitivity).
-    const dataSensitivities = body.projectId
-      ? await projectClassifications(db, body.projectId)
-      : [];
-    // targetSystem is a legitimate client-supplied change attribute;
-    // initiatorRoles and dataSensitivities are authoritative server truth.
-    // Neither could ever reach here from a client — changeDescriptorSchema
-    // accepts neither — but rebuild explicitly.
-    const change = { ...body.change, initiatorRoles, dataSensitivities };
-
-    // ADR-0195 A4: a shadow-AI remediation never starts in the plan's placeholder environment (fail closed), and
-    // its strict default workflow is installed the first time one is started (an admin relaxes it by retiring it)
-    if (change.changeType === SHADOW_AI_REMEDIATION_CHANGE_TYPE) {
-      const environment = change.environment.trim();
-      if (environment.toLowerCase() === SHADOW_AI_REMEDIATION_ENVIRONMENT_UNSTATED) {
-        return reply.status(422).send({
-          error: "environment_unstated",
-          detail:
-            "the remediation plan's environment is a placeholder: state where the ungoverned usage runs " +
-            "(change.environment) before starting the workflow",
-        });
-      }
-      // the same allow-list the plan route applies: only an environment an admin has already given a meaning to
-      const allowed = await allowedRemediationEnvironments(db);
-      if (!REMEDIATION_ENVIRONMENT_PATTERN.test(environment) || !allowed.includes(environment)) {
-        return reply.status(422).send({
-          error: "environment_not_allowed",
-          allowed,
-          detail: "name one of the environments a deploy target or workflow assignment rule already uses",
-        });
-      }
-      // the install runs only once this start's own checks pass, so a refused start installs nothing
-      if (!body.templateId && (await shadowAiRemediationDefaultState(db)) === "not_installed") {
-        if (body.projectId) {
-          const attribution = await assertProjectAttribution(db, body.projectId, userId, req.authCtx.isAdmin);
-          if (!attribution.ok) return reply.status(attribution.status).send({ error: attribution.error });
-        }
-        if (await secondApproverMissing(db, shadowAiRemediationDefinition(), userId)) {
-          return reply.status(422).send(secondApproverUnavailable());
-        }
-        await ensureShadowAiRemediationDefault(db, userId);
-      }
-    }
-
-    let templateIds: string[];
-    if (body.templateId) {
-      if (!req.authCtx.isAdmin) {
-        return reply.status(403).send({ error: "explicit_template_is_admin_only" });
-      }
-      templateIds = [body.templateId];
-    } else {
-      const rules = await db
-        .select()
-        .from(workflowAssignmentRules)
-        .orderBy(workflowAssignmentRules.createdAt);
-      templateIds = matchTemplates(change, rules);
-    }
-    // §8.3 cascade — the ENFORCED consumer: a classified project's required
-    // templates are unioned in with no manual per-control setup (and can
-    // force a workflow even when no assignment rule matches). The existing
-    // §4 union/strictest merge keeps every added sign-off stage.
-    if (body.projectId) {
-      const required = await requiredTemplateIdsFor(db, body.projectId);
-      for (const id of required) if (!templateIds.includes(id)) templateIds.push(id);
-    }
-    if (templateIds.length === 0) {
-      // no workflow is assigned on an admin's behalf (the one shipped default is ADR-0195 A4's shadow-AI remediation
-      // rule, installed above): say who can fix it
-      return reply.status(422).send({
-        error: "no_workflow_matches_change",
-        changeType: change.changeType,
-        detail:
-          `no workflow assignment rule matches this change (change type '${change.changeType}'), so no workflow was ` +
-          "started: an admin must assign a workflow template to it under Workflow templates (assignment rules)",
-      });
-    }
-
-    const started = await startWorkflowInstanceWithTemplates(db, opts.dataKey, {
-      templateIds,
-      initiatorUserId: userId,
-      change,
-      projectId: body.projectId ?? null,
-      isAdmin: req.authCtx.isAdmin,
-    });
-    if (!started.ok) return reply.status(started.status).send(started.body);
-    return reply.status(201).send(started.instance);
+    // ADR-0349 slice 4: the one governed start, shared with workflow schedules
+    const out = await startGovernedWorkflow(db, opts.dataKey, { userId, isAdmin: req.authCtx.isAdmin }, body);
+    return reply.status(out.status).send(out.body);
   });
 
   type LoadResult =
@@ -4254,6 +4313,16 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
   });
 
   // §5 dashboard: one instance in full…
+  // ADR-0349 slice 5: what the instance is waiting for (read-only, machine-readable; the same readers as the GET below)
+  app.get("/v1/workflows/instances/:instanceId/pending", async (req, reply) => {
+    const { instanceId } = instanceIdParam.parse(req.params);
+    const loaded = await loadInstanceFor(req, instanceId, { allowParticipant: true });
+    if (loaded.error) return sendLoadError(reply, loaded.error);
+    const row = { ...loaded.instance, context: loaded.instance.context as Record<string, unknown> };
+    const [now, retry, pendingApprovers] = await Promise.all([databaseNow(db), currentRetryJob(db, row), pendingApproversOf(db, row)]);
+    return describePendingWork({ row, now, leaseMs: stageClaimTtlMs(), retry, pendingApprovers });
+  });
+
   app.get("/v1/workflows/instances/:instanceId", async (req, reply) => {
     const { instanceId } = instanceIdParam.parse(req.params);
     const loaded = await loadInstanceFor(req, instanceId, { allowParticipant: true });
@@ -4311,9 +4380,9 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
   // changeTypes and routes; with none of them, exactly the response below
   // (the Home preview's newest 100). The scope is the one predicate for the
   // list, its count and the Excel export.
-  const workflowsList: ContractList<WorkflowInstanceRow, { status?: string }> = {
+  const workflowsList: ContractList<WorkflowInstanceRow, z.infer<typeof instanceSearchFilters>> = {
     spec: WORKFLOWS_LIST,
-    filters: z.object({ status: z.string().min(1).max(64).optional() }).strict(),
+    filters: instanceSearchFilters,
     reader: {
       fetch: (q) =>
         db
@@ -4327,8 +4396,8 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       idOf: (r) => r.id,
     } satisfies ListReader<WorkflowInstanceRow>,
     where: (req, f) => {
-      const conditions = [];
-      if (f.status) conditions.push(eq(workflowInstances.status, f.status));
+      // ADR-0349 slice 5: the typed search fields, each served by an index (instanceSearchConditions)
+      const conditions = instanceSearchConditions(f);
       if (!req.authCtx.isAdmin) {
         if (!req.authCtx.userId) return null;
         conditions.push(eq(workflowInstances.initiatorUserId, req.authCtx.userId));
@@ -4379,9 +4448,8 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
   };
   app.get("/v1/workflows/instances", async (req, reply) => {
     if (wantsListContract(req.query)) return answerListPage(db, req, reply, workflowsList);
-    const { status } = z.object({ status: z.string().optional() }).parse(req.query);
-    const conditions = [];
-    if (status) conditions.push(eq(workflowInstances.status, status));
+    // ADR-0349 slice 5: the legacy (first 100) answer takes the same typed search fields as the contract
+    const conditions = instanceSearchConditions(instanceSearchFilters.parse(req.query ?? {}));
     if (!req.authCtx.isAdmin) {
       if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_has_no_instances" });
       conditions.push(eq(workflowInstances.initiatorUserId, req.authCtx.userId));
@@ -4403,6 +4471,43 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
 }
 
 type WorkflowInstanceRow = typeof workflowInstances.$inferSelect;
+
+/** ADR-0349 slice 5: the current stage's id, as SQL (served by `workflow_instances_current_stage_idx`) */
+export const CURRENT_STAGE_ID_SQL = sql`(${workflowInstances.definition} -> 'stages' -> ((${workflowInstances.state} ->> 'currentStageIndex')::int) ->> 'id')`;
+
+/**
+ * ADR-0349 slice 5: the typed search fields of the instances list. Each one is served by an index (migration
+ * workflow_instance_search): template ids (GIN), target and current stage (expression indexes), work item, owner and
+ * status (b-tree), and the compliance tag through the attributed project's classifications (GIN on projects). A
+ * non-admin's own-instances condition is added by the caller, so a filter only ever narrows what they may see.
+ */
+export const instanceSearchFilters = z
+  .object({
+    status: z.string().min(1).max(64).optional(),
+    template: z.string().uuid().optional(),
+    target: z.string().min(1).max(200).optional(),
+    workItem: z.string().min(1).max(200).optional(),
+    owner: z.string().uuid().optional(),
+    stage: z.string().min(1).max(200).optional(),
+    complianceTag: z.string().min(1).max(200).optional(),
+  })
+  .strict();
+
+export function instanceSearchConditions(f: z.infer<typeof instanceSearchFilters>): SQL[] {
+  const c: SQL[] = [];
+  if (f.status) c.push(eq(workflowInstances.status, f.status));
+  if (f.template) c.push(sql`${workflowInstances.templateIds} @> ${JSON.stringify([f.template])}::jsonb`);
+  if (f.target) c.push(sql`(${workflowInstances.change} ->> 'targetSystem') = ${f.target}`);
+  if (f.workItem) c.push(eq(workflowInstances.workItemRef, f.workItem));
+  if (f.owner) c.push(eq(workflowInstances.initiatorUserId, f.owner));
+  if (f.stage) c.push(sql`${CURRENT_STAGE_ID_SQL} = ${f.stage}`);
+  if (f.complianceTag) {
+    c.push(
+      sql`${workflowInstances.projectId} IN (SELECT ${projects.id} FROM ${projects} WHERE ${projects.classifications} @> ${JSON.stringify([f.complianceTag])}::jsonb)`,
+    );
+  }
+  return c;
+}
 const changeText = (r: WorkflowInstanceRow, key: "description" | "changeType" | "environment" | "targetSystem"): string | null => {
   const v = (r.change as Record<string, unknown> | null)?.[key];
   return typeof v === "string" ? v : null;
@@ -4432,7 +4537,7 @@ export const WORKFLOWS_LIST: ListSpec<WorkflowInstanceRow> = {
     project: { label: "Project", value: (r) => r.projectId },
     id: { label: "Workflow id", value: (r) => r.id },
   },
-  filters: ["status"],
+  filters: ["status", "template", "target", "workItem", "owner", "stage", "complianceTag"],
   defaultSort: { col: "created", dir: "desc" },
   idCol: workflowInstances.id,
 };

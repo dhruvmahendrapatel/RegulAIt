@@ -161,6 +161,8 @@ import {
   CONTENT_TRUST_TIERS,
   CONTENT_TRUST_WRITE_FLOORS,
   type ModalitySplit,
+  // ADR-0349: the one declared list of terminal workflow statuses (the open-instance index predicates below)
+  WORKFLOW_TERMINAL_STATUSES_SQL_LIST,
   // ADR-0346 (migration fairness_evaluation): the fairness-evaluation vocabularies, in lockstep with the CHECKs
   FAIRNESS_DATASET_KINDS,
   FAIRNESS_RUN_MODES,
@@ -3395,6 +3397,11 @@ export const workflowInstances = pgTable(
      * re-open. An executor captures it with its claim and commits its result
      * only if it is still current. */
     stageEntry: integer("stage_entry").notNull().default(0),
+    /** ADR-0349 slice 2 (start conflict): the PM tool's key for the work item this instance runs for, as the client
+     * gave it at start (at most 200 characters, CHECK). A verbatim external identifier (ADR-0200 exception: not a
+     * reference to a row we own). With template_ids and change->>'targetSystem' it is the start key: at most one
+     * OPEN instance per key (`workflow_instances_open_start_uq`). Null = no work item, no deduplication. */
+    workItemRef: text("work_item_ref"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -3403,7 +3410,21 @@ export const workflowInstances = pgTable(
     // ADR-0283: built CONCURRENTLY by runMigrations (CONCURRENT_INDEXES), not by a migration statement
     index("workflow_instances_project_open_idx")
       .on(t.projectId)
-      .where(sql`${t.status} NOT IN ('completed', 'aborted', 'denied', 'rolled_back')`),
+      .where(sql`${t.status} NOT IN (${sql.raw(WORKFLOW_TERMINAL_STATUSES_SQL_LIST)})`),
+    // ADR-0349 slice 2: one open instance per template SET (order-independent: regulait_workflow_template_set sorts
+    // the ids) + target + work item. Built CONCURRENTLY by runMigrations (CONCURRENT_INDEXES), NULLS NOT DISTINCT (a
+    // missing target is a value), only where a work item is set.
+    uniqueIndex("workflow_instances_open_start_uq")
+      .on(sql`regulait_workflow_template_set(${t.templateIds})`, sql`(${t.change}->>'targetSystem')`, t.workItemRef)
+      .where(sql`${t.workItemRef} IS NOT NULL AND ${t.status} NOT IN (${sql.raw(WORKFLOW_TERMINAL_STATUSES_SQL_LIST)})`),
+    // ADR-0349 slice 5: the typed search fields of GET /v1/workflows/instances, all built CONCURRENTLY by
+    // runMigrations (CONCURRENT_INDEXES); `projects_classifications_gin` on projects serves the compliance tag
+    index("workflow_instances_template_ids_gin").using("gin", sql`${t.templateIds} jsonb_path_ops`),
+    index("workflow_instances_target_idx").on(sql`(${t.change}->>'targetSystem')`),
+    index("workflow_instances_work_item_idx").on(t.workItemRef).where(sql`${t.workItemRef} IS NOT NULL`),
+    index("workflow_instances_initiator_idx").on(t.initiatorUserId, t.createdAt.desc()),
+    index("workflow_instances_project_idx").on(t.projectId),
+    index("workflow_instances_current_stage_idx").on(sql`(${t.definition} -> 'stages' -> ((${t.state} ->> 'currentStageIndex')::int) ->> 'id')`),
   ],
 );
 
@@ -4701,6 +4722,8 @@ export const LOCAL_SIGN_IN_MODES = ["enabled", "break_glass_only"] as const;
 export type LocalSignInMode = (typeof LOCAL_SIGN_IN_MODES)[number];
 export const BUDGET_ENFORCEMENTS = ["block", "warn_only"] as const;
 export const APPROVAL_QUORUMS = ["all", "any"] as const;
+/** ADR-0349 slice 2: a start whose template set + target + work item already has an open instance */
+export const WORKFLOW_START_CONFLICT_POLICIES = ["refuse", "use_existing"] as const;
 /** ADR-0062: the org's TIGHTENING dial over the deployment-wide egress
  * posture. 'inherit' defers to the env-derived deploy mode; 'strict' raises
  * the floor. There is deliberately no value that lowers it. */
@@ -4948,6 +4971,12 @@ export const orgSettings = pgTable(
      * is taken for whatever round is current when it is applied. A person in
      * the console (session) may always omit it. */
     checkReportsAllowUnbound: boolean("check_reports_allow_unbound").notNull().default(false),
+    /** ADR-0349 slice 2: what a start does when an OPEN instance already has its template set + target + work
+     * item. 'refuse' (default, ADR-0180) = 409 `workflow_start_conflict` naming the existing instance; 'use_existing'
+     * = the start answers with that instance instead. Relaxing it is a `settings_relax` step-up, audited. */
+    workflowStartConflictPolicy: text("workflow_start_conflict_policy", { enum: WORKFLOW_START_CONFLICT_POLICIES })
+      .notNull()
+      .default("refuse"),
     /** ADR-0022: master switch for approver delegation. ON = active
      * delegation windows widen the delegate's inbox and let them decide
      * on-behalf-of. OFF (the ADR-0181 default, migration 0156; was ON) =
@@ -17362,3 +17391,108 @@ export type FairnessEvaluationRow = typeof fairnessEvaluations.$inferSelect;
 export type FairnessRunEvidenceRow = typeof fairnessRunEvidence.$inferSelect;
 export type FairnessBreachReviewRow = typeof fairnessBreachReviews.$inferSelect;
 // ===== end ADR-0346 =====
+
+// ===== ADR-0349 slice 4 (lane E30): workflow schedules =====
+/** what a fire does while the schedule's previous instance is still open: skip it (default), keep one to start when
+ * the open instance ends, or start anyway. `buffer_one` and `allow` are audited, step-up relaxations. */
+export const WORKFLOW_SCHEDULE_OVERLAP_POLICIES = ["skip", "buffer_one", "allow"] as const;
+export type WorkflowScheduleOverlapPolicy = (typeof WORKFLOW_SCHEDULE_OVERLAP_POLICIES)[number];
+/** why a run row exists */
+export const WORKFLOW_SCHEDULE_RUN_TRIGGERS = ["scheduled", "buffered", "backfill"] as const;
+/** what one fire time came to. `starting` is the row's first state, inside the claim; it is replaced in the start's
+ * own call and stays only if the process died in between (then nothing started twice: the claim had moved on). */
+export const WORKFLOW_SCHEDULE_RUN_OUTCOMES = [
+  "starting",
+  "started",
+  "reused",
+  "skipped_overlap",
+  "buffered",
+  "skipped_missed",
+  "refused",
+] as const;
+
+/**
+ * A template that starts on a calendar (Temporal Schedules). Deployment-wide like `workflow_templates` (no tenant
+ * column, no RLS policy); the routes are admin-only. Every start goes through `startGovernedWorkflow` AS `run_as_user_id`
+ * (the admin who created the schedule): a schedule never runs as a system identity.
+ */
+export const workflowSchedules = pgTable(
+  "workflow_schedules",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    templateId: uuid("template_id")
+      .notNull()
+      .references(() => workflowTemplates.id, { onDelete: "cascade" }),
+    /** a five-field cron expression, read by cron-parser in `time_zone` */
+    cronExpression: text("cron_expression").notNull(),
+    /** an IANA time zone name */
+    timeZone: text("time_zone").notNull().default("UTC"),
+    /** the change each start submits (ADR-0200 exception: a schema-validated configuration document, parsed with
+     * `changeDescriptorSchema` on every write and again at every fire) */
+    change: jsonb("change").$type<Record<string, unknown>>().notNull(),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "cascade" }),
+    /** the PM work item each start names (a verbatim external id; with it the start conflict policy applies) */
+    workItemRef: text("work_item_ref"),
+    runAsUserId: uuid("run_as_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    overlapPolicy: text("overlap_policy", { enum: WORKFLOW_SCHEDULE_OVERLAP_POLICIES }).notNull().default("skip"),
+    /** how far back a missed fire time is still started after downtime; at least the sweep's own grace (5 minutes) */
+    catchupWindowSeconds: integer("catchup_window_seconds").notNull().default(0),
+    /** each fire is delayed by a deterministic 0..jitter seconds derived from the schedule id and the fire time */
+    jitterSeconds: integer("jitter_seconds").notNull().default(0),
+    /** the next NOMINAL fire time: the claim column, advanced compare-and-swap so two sweeps fire it once. Null while
+     * paused */
+    nextFireAt: timestamp("next_fire_at", { withTimezone: true }),
+    /** buffer_one: the one fire time waiting for the open instance to end */
+    bufferedFireAt: timestamp("buffered_fire_at", { withTimezone: true }),
+    pausedAt: timestamp("paused_at", { withTimezone: true }),
+    pausedByUserId: uuid("paused_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** why it was paused: a person's note, or the reason a fire paused it (scrubbed, prose-scrub.ts) */
+    pauseNote: text("pause_note"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("workflow_schedules_name_uq").on(t.name),
+    index("workflow_schedules_template_idx").on(t.templateId),
+    index("workflow_schedules_due_idx").on(t.nextFireAt).where(sql`${t.pausedAt} IS NULL`),
+    check("workflow_schedules_overlap_check", sql`${t.overlapPolicy} IN ('skip', 'buffer_one', 'allow')`),
+    check("workflow_schedules_catchup_check", sql`${t.catchupWindowSeconds} BETWEEN 0 AND 604800`),
+    check("workflow_schedules_jitter_check", sql`${t.jitterSeconds} BETWEEN 0 AND 3600`),
+    check("workflow_schedules_name_check", sql`char_length(${t.name}) BETWEEN 1 AND 200`),
+  ],
+);
+export type WorkflowScheduleRow = typeof workflowSchedules.$inferSelect;
+
+/** One row per fire time a schedule reached, unique, so a fire time starts at most once (the exactly-once record). */
+export const workflowScheduleRuns = pgTable(
+  "workflow_schedule_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scheduleId: uuid("schedule_id")
+      .notNull()
+      .references(() => workflowSchedules.id, { onDelete: "cascade" }),
+    /** the nominal fire time (before jitter) */
+    fireAt: timestamp("fire_at", { withTimezone: true }).notNull(),
+    trigger: text("trigger", { enum: WORKFLOW_SCHEDULE_RUN_TRIGGERS }).notNull(),
+    outcome: text("outcome", { enum: WORKFLOW_SCHEDULE_RUN_OUTCOMES }).notNull(),
+    instanceId: uuid("instance_id").references(() => workflowInstances.id, { onDelete: "set null" }),
+    /** a refused start's error code, as the start answered it */
+    refusal: text("refusal"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("workflow_schedule_runs_fire_uq").on(t.scheduleId, t.fireAt),
+    index("workflow_schedule_runs_instance_idx").on(t.instanceId),
+    check("workflow_schedule_runs_trigger_check", sql`${t.trigger} IN ('scheduled', 'buffered', 'backfill')`),
+    check(
+      "workflow_schedule_runs_outcome_check",
+      sql`${t.outcome} IN ('starting', 'started', 'reused', 'skipped_overlap', 'buffered', 'skipped_missed', 'refused')`,
+    ),
+  ],
+);
+export type WorkflowScheduleRunRow = typeof workflowScheduleRuns.$inferSelect;
+// ===== end ADR-0349 slice 4 =====
