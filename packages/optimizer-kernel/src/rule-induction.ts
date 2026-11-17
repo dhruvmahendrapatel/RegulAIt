@@ -192,6 +192,17 @@ export function applyInducedRule(rule: InducedRule, fields: Readonly<Record<stri
   return { matched: false };
 }
 
+/** Render a rule as readable lines, one per cell, plus the fallback line. Values are JSON-quoted so they cannot be misread. */
+export function renderInducedRule(rule: InducedRule): string[] {
+  const show = (v: FieldValue | AbsentMarker): string => (isAbsent(v) ? "(absent)" : JSON.stringify(v));
+  const lines = rule.cells.map((c) => {
+    const when = rule.fields.length === 0 ? "always" : `when ${rule.fields.map((f, i) => `${f} = ${show(c.key[i]!)}`).join(" and ")}`;
+    return `${when} -> ${JSON.stringify(c.output)} (${c.support} runs)`;
+  });
+  lines.push("otherwise -> ask the AI (input not covered by this rule)");
+  return lines;
+}
+
 /** Find the smallest exact-match rule that reproduces a step's outputs, or explain why none does. */
 export function induceStepRule(runsIn: readonly StepRun[], overrides: Partial<RuleInductionOptions> = {}): RuleInductionResult {
   const o = resolveRuleInductionOptions(overrides);
@@ -336,6 +347,10 @@ function encodeKey(fields: readonly string[], values: Readonly<Record<string, Fi
 
 function encodeCellKey(key: readonly (FieldValue | AbsentMarker)[]): string {
   return JSON.stringify(key.map((v) => encodeValue(v)));
+}
+
+function isAbsent(v: FieldValue | AbsentMarker): v is AbsentMarker {
+  return typeof v === "object" && v !== null;
 }
 
 function isScalar(v: unknown): v is FieldValue {

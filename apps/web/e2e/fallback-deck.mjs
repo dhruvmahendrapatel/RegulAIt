@@ -125,7 +125,8 @@ const BEATS_1101 = [
     persona: "Ada",
     shots: [
       ["ds-g1a-registry", "The AI registry"],
-      ["ds-g1b-use-case-record", "The use-case record: tier, lifecycle, approval and conditions"],
+      ["ds-g1b-use-case-record", "The use-case record: its decision summary, next action and conditions"],
+      ["ds-g1b2-use-case-lifecycle", "The lifecycle tracker on the record's Overview tab"],
       ["ds-g1c-use-case-audit", "The use case's own audit trail"],
     ],
   },

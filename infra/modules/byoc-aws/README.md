@@ -3,8 +3,8 @@
 The customer-run Terraform module for a BYOC install
 ([ADR-0325](../../../internal/decisions/0325-byoc-aws-pilot-and-rehearsal.md)). It builds the AWS infrastructure the
 RegulAIt Helm chart (`deploy/helm/regulait`, ADR-0304) runs on, entirely inside your account. Apply it from
-[`infra/environments/byoc-aws`](../../environments/byoc-aws); the step-by-step install runbook
-(`docs/deployment/BYOC_AWS_INSTALL.md`) follows in ADR-0325 PR 3.
+[`infra/environments/byoc-aws`](../../environments/byoc-aws); the step-by-step install is
+[docs/deployment/BYOC_AWS_INSTALL.md](../../../docs/deployment/BYOC_AWS_INSTALL.md).
 
 ## What it creates
 
