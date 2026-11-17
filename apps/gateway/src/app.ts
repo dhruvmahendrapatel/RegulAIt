@@ -634,6 +634,7 @@ import { registerMcpIdentityOidcRoutes } from "./mcp-identity-oidc-routes.js";
 import { registerEndpointImportRoutes } from "./endpoint-import-routes.js";
 import { registerThirdPartyIngestRoutes } from "./third-party-ingest-routes.js";
 import { registerSiemDeliveryRoutes } from "./siem-delivery.js";
+import { registerBehaviourRoutes } from "./behaviour/routes.js";
 import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
 import { registerEndpointMcpConfigRoutes } from "./endpoint-mcp-config.js";
 // ADR-0310 (G2): vendor-native managed settings bundles
@@ -6242,6 +6243,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerThirdPartyIngestRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0303: SIEM delivery of the audit chain (admin-only through the default gate)
   registerSiemDeliveryRoutes(app, db, { dataKey: opts.dataKey });
+  registerBehaviourRoutes(app, db); // ADR-0359 (E40): behaviour baselines, shadow mode (admin-only through the default gate)
   // ADR-0195 SD4b — the RegulAIt endpoint agent: ticket redemption and registration (authenticated in-route by the
   // bulk token or the device ticket), the agent's own routes (its DPoP-bound self token only), and the admin's
   // enrolment-token and device routes (admin-only by default). Nothing works until an endpoint agent source is enabled.

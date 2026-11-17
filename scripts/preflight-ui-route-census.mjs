@@ -410,6 +410,12 @@ export const KNOWN_UI_GAPS = new Map([
   ["PUT /v1/siem/destinations/:destinationId/enabled", { does: "turns a SIEM destination on (step-up, audited as a relaxation) or off (audited)", tracking: "#453" }],
   ["POST /v1/siem/destinations/:destinationId/rotate-secret", { does: "rotates a SIEM destination's signing secret, shown once (step-up, audited)", tracking: "#453" }],
   ["POST /v1/siem/destinations/:destinationId/recover", { does: "returns a dead-lettered or backing-off SIEM destination to delivery now (audited)", tracking: "#453" }],
+  ["GET /v1/behaviour/settings", { does: "reads the behaviour baseline mode (shadow by default), its limits and the sweep state", tracking: "ADR-0359 (E40) #453" }],
+  ["PUT /v1/behaviour/settings", { does: "turns behaviour baselines off (step-up, audited as a relaxation) or back on in shadow mode (audited)", tracking: "ADR-0359 (E40) #453" }],
+  ["GET /v1/behaviour/findings", { does: "pages behaviour anomaly findings, newest first, filtered by status, subject or signal", tracking: "ADR-0359 (E40) #453" }],
+  ["GET /v1/behaviour/findings/:findingId", { does: "one behaviour finding with its baseline, deviation and allowed next states", tracking: "ADR-0359 (E40) #453" }],
+  ["PUT /v1/behaviour/findings/:findingId/status", { does: "acknowledges or dismisses a behaviour finding (audited)", tracking: "ADR-0359 (E40) #453" }],
+  ["GET /v1/behaviour/baselines/:subjectKind/:subjectId", { does: "a user's or agent's current baseline per signal (median and MAD, or the usual keys and their shares)", tracking: "ADR-0359 (E40) #453" }],
   // EXCEPTION (ADR-0255, P31, 2026-11-07): the P31 brief is "API and backend only; post the catalogue UI need on
   // #453 for the Governed Designer", so these two routes ship with their screen owned by that lane. These two
   // raise the cap by 2, visibly; the Designer's catalogue screen deletes both entries and lowers it by 2. Decided on #753
@@ -484,7 +490,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 68; // main's 54 − 11 MCP bundle routes closed by #815 + ADR-0240 6 external-portal second-factor routes awaiting #453 (#709) + ADR-0332 (lane E14) 3 API-only endpoint add-on inventory routes, master brief for lane E14 2026-11-15 (screen by the UI builder, #453); + ADR-0230 A2 (P19, Lane L3) 3 SAP business server routes, master decision in the Lane L3 brief 2026-11-14, recorded in ADR-0230, section Recorded decision (2026-11-14); + lane L7 (P14 + P16) 2 model-file lineage routes + ADR-0327 (lane E12) 6 rule-like step routes (5 + the suggestions export) + ADR-0310 (lane E1) 3 API-only managed-settings routes awaiting #453 (lane brief rule 3, recorded in ADR-0310); + ADR-0289 (L6) 2 API-only PM importer routes, owner answer relayed by the master session 2026-11-15 (recorded in the #828 body)
+export const KNOWN_UI_GAPS_MAX = 74; // + ADR-0359 (E40) 6 behaviour baseline routes awaiting #453; main's 54 − 11 MCP bundle routes closed by #815 + ADR-0240 6 external-portal second-factor routes awaiting #453 (#709) + ADR-0332 (lane E14) 3 API-only endpoint add-on inventory routes, master brief for lane E14 2026-11-15 (screen by the UI builder, #453); + ADR-0230 A2 (P19, Lane L3) 3 SAP business server routes, master decision in the Lane L3 brief 2026-11-14, recorded in ADR-0230, section Recorded decision (2026-11-14); + lane L7 (P14 + P16) 2 model-file lineage routes + ADR-0327 (lane E12) 6 rule-like step routes (5 + the suggestions export) + ADR-0310 (lane E1) 3 API-only managed-settings routes awaiting #453 (lane brief rule 3, recorded in ADR-0310); + ADR-0289 (L6) 2 API-only PM importer routes, owner answer relayed by the master session 2026-11-15 (recorded in the #828 body)
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 
