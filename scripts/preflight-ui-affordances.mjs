@@ -48,6 +48,8 @@ export const DELIBERATELY_API_ONLY = new Map([
   ["/v1/mcp/authorised-targets/:x", "ADR-0246 (P27): API-only brief; the authorised-targets screen is posted on #453 (route census KNOWN_UI_GAPS). RAISED for the master's review on the PR: delete this entry when the screen lands"],
   // ADR-0230 A2 (P19, Lane L3): the UI is built by the design builder; delete this entry when the screen lands
   ["/v1/servers/:x/system-class", "unmarking an SAP business server (settings_relax step-up): API-only until the SAP server screen on #453 (route census KNOWN_UI_GAPS)"],
+  // ADR-0317 (Lane L6, G4): delete this entry when the PM assignment screen lands
+  ["/v1/pm/connections/:x/identity-links/:x", "ADR-0317: removing an admin-managed PM-user to RegulAIt-user link (audited); API-only until the PM assignment screen on #453 (route census KNOWN_UI_GAPS). RAISED for the master's review on the PR"],
 ]);
 
 /**
