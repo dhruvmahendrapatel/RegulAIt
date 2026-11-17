@@ -167,7 +167,7 @@ describe("ENG-IMG publish gate: the decision, on a throwaway repository", () => 
 
   it("force publishes every engine; a never-published engine publishes", () => {
     expect(decide(base, { force: true }).publish).toEqual(ENGINE_IDS);
-    const r = plan({ engines: { promptfoo: { sourceCommit: null }, modelscan: { sourceCommit: base }, garak: { sourceCommit: base }, spikee: { sourceCommit: base }, contentextract: { sourceCommit: base } } }, { changed: () => [] });
+    const r = plan({ engines: { promptfoo: { sourceCommit: null }, modelscan: { sourceCommit: base }, garak: { sourceCommit: base }, spikee: { sourceCommit: base } } }, { changed: () => [] });
     expect(r.publish).toEqual(["promptfoo"]);
     expect(r.engines.promptfoo.reason).toBe("never published");
   });
@@ -212,7 +212,7 @@ describe("ENG-IMG publish gate: the decision, on a throwaway repository", () => 
 
 describe("ADR-0242 unpublished engines", () => {
   it("have image inputs (their own directory and the shared admission-scan shim) but are never planned for publish", () => {
-    expect(UNPUBLISHED_ENGINE_IDS).toEqual(["mcpscanner", "skillscanner"]);
+    expect(UNPUBLISHED_ENGINE_IDS).toEqual(["mcpscanner", "skillscanner", "contentextract"]);
     const pkgs = readWorkspace();
     for (const id of UNPUBLISHED_ENGINE_IDS) {
       const specs = specsFor(id);

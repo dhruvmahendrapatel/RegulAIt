@@ -5,11 +5,12 @@ ISC, or a public-domain dedication; maintained; pinned; works air-gapped). The P
 `engines/contentextract/requirements.txt` (every wheel by version and sha256) and installed with
 `pip install --require-hashes --no-deps --only-binary :all:`. Facts were read from the pinned wheel on 2026-11-17.
 
-**Admission status: NOT ADMISSIBLE YET.** The engine is registered (ADR-0362 slice 1b) and CI's engine image workflow
-builds it, but no publish is recorded in `engines/images.lock.json`, the image-level scan (OS layer, vulnerabilities,
-licences) has not run, and the components bundled inside `libpdfium.so` whose licences are permissive but outside the
-ADR-0176 list (below) await an owner decision. The manifest's digest is null until a publish is recorded, so no runner
-passes the self-test and nothing can enable it.
+**Admission status: NOT ADMISSIBLE YET; the image is HELD UNPUBLISHED.** The engine is registered (ADR-0362 slice 1b)
+and CI's build-only workflow builds it twice and compares, but it is never published until the owner decides ADR-0362
+owner question 1: the components bundled inside `libpdfium.so` whose licences are permissive but outside the ADR-0176
+list (below). It has no `engines/images.lock.json` entry, the build script refuses to push it, and the image-level scan
+(OS layer, vulnerabilities, licences) has not run. The manifest's digest is null, so no runner passes the self-test
+and nothing can enable it.
 
 | Component | Version | Licence | Used for, and why |
 |---|---|---|---|

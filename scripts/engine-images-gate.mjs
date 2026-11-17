@@ -46,7 +46,7 @@ import { ENGINE_IDS } from "./engine-images-lock.mjs";
  * published and have no lock entry yet (§6.3 adds their lock entry and publish). `--plan` never publishes them,
  * because it only walks ENGINE_IDS.
  */
-export const UNPUBLISHED_ENGINE_IDS = ["mcpscanner", "skillscanner"];
+export const UNPUBLISHED_ENGINE_IDS = ["mcpscanner", "skillscanner", "contentextract"];
 /**
  * ADR-0242 §6.1: the workspace package an engine's shim stage builds, where it is not `@regulait/engine-<id>`. The two
  * admission-scan images share one runner and task shim.

@@ -72,13 +72,16 @@ the existing `maxAttachmentsPerDispatch` and `maxAttachmentBytes` org settings.
    different family is `type_mismatch`. An OOXML part that declares a DOCTYPE or ENTITY is `malformed`, which closes
    entity-expansion and external-entity attacks whatever the expat version.
 4. **Limits.** The hard caps below are baked into the extractor; a request may only lower them. Every zip read stops
-   one byte past its limit, whatever the header claims.
+   one byte past its limit, whatever the header claims. The text cap (750,000 characters, lowered from 2,000,000 by the
+   lane lead on 2026-11-17) keeps the result, as escaped JSON, under the engine contract's 3 MiB raw-report cap for
+   ordinary text (at most 4 UTF-8 bytes a character); text that escapes to more (control characters) makes the report
+   over the cap, which fails closed (`report_too_large`, every file refused).
 
    | Limit | Hard cap |
    |---|---|
    | one input file | 16 MiB |
    | PDF pages | 200 |
-   | text returned per request | 2,000,000 characters |
+   | text returned per request | 750,000 characters |
    | archive entries (OOXML parts count) | 256 |
    | archive nesting | 2 (an archive in an archive in an archive is refused) |
    | uncompressed bytes per archive tree | 64 MiB |
@@ -133,8 +136,11 @@ the existing `maxAttachmentsPerDispatch` and `maxAttachmentBytes` org settings.
   licence gate, the image), `packages/shared/src/content-inspection.ts` and its parity test. No gateway change and no
   migration yet.
 - **Slice 1b-i (2026-11-17)**: the engine is registered, inert. `contentextract` (kind `content_extract`) joins
-  ENGINE_IDS, the manifest (null digest from the images lock until its first signed publish, so it cannot be enabled),
-  the lock, compose (runner and build-only image services), the build script and the image workflow. Pending migration
+  ENGINE_IDS and the manifest (null digest, so it cannot be enabled),
+  compose (runner and build-only image services), the build script and the image build-and-compare workflow. The
+  image is HELD UNPUBLISHED, like mcpscanner and skillscanner, until the owner decides owner question 1 (lane lead,
+  2026-11-17): it has no images-lock entry, the publish gate lists it as unpublished, the build script refuses to push
+  it, and the manifest hardcodes a null digest and task image. Pending migration
   `content_extract_engine`: the engine row (off), trigger `inspection`, a third `engine_runs_target_check` branch (a
   `subject` run of `contentextract` only, which may name the request's person and project), and
   `content_inspection_results` (the result, encrypted under the data key, deleted when read; in the data-key

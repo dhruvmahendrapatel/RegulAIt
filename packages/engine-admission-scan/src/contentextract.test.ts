@@ -18,8 +18,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
-import { contentExtractResultSchema } from "@regulait/shared";
+import { CONTENT_EXTRACT_HARD_LIMITS, contentExtractResultSchema } from "@regulait/shared";
 import { ADMISSION_SUBJECT_FILE } from "./config.js";
+import { ADMISSION_REPORT_MAX_BYTES } from "./exchange.js";
 import { fakeDriver, gatewayStartRefusal, runEndToEnd, subjectLease } from "./harness.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -73,6 +74,21 @@ describe.skipIf(!HAVE_PYTHON)("ADR-0362: the real extractor through the bridge a
     expect(r.envelope).toMatchObject({ status: "failed", errorCode: "engine_timeout", rawReport: null });
     expect(r.report).toBeNull();
   }, 30_000);
+
+  it("ADR-0362 text cap: a result at the cap of 4-byte characters fits under the raw-report cap; one that escapes larger fails closed", async () => {
+    expect(CONTENT_EXTRACT_HARD_LIMITS.maxTextChars).toBe(750_000);
+    // the worst ordinary text: every character 4 UTF-8 bytes, exactly at the cap
+    const atCap = "\u{1F600}".repeat(CONTENT_EXTRACT_HARD_LIMITS.maxTextChars);
+    const ok = await runEndToEnd({ engine: "contentextract", subject: bundle([{ id: "a0", text: atCap }]), task: { driver: realDriver } });
+    expect(ok.envelope).toMatchObject({ status: "completed", errorCode: null });
+    expect(ok.envelope.rawReport!.bytes).toBeLessThanOrEqual(ADMISSION_REPORT_MAX_BYTES);
+    expect(contentExtractResultSchema.parse(ok.report).files[0]).toMatchObject({ id: "a0", status: "extracted" });
+    // control characters escape to six bytes each: the report is over the cap, so nothing is posted (every file refused)
+    const escaped = "\u0001".repeat(CONTENT_EXTRACT_HARD_LIMITS.maxTextChars);
+    const over = await runEndToEnd({ engine: "contentextract", subject: bundle([{ id: "a0", text: escaped }]), task: { driver: realDriver } });
+    expect(over.envelope).toMatchObject({ status: "failed", errorCode: "report_too_large", rawReport: null });
+    expect(over.report).toBeNull();
+  }, 60_000);
 
   it("a driver that writes nothing: failed, no report", async () => {
     const r = await runEndToEnd({ engine: "contentextract", subject: bundle([{ id: "a0", text: "x" }]), task: { driver: await fakeDriver(scripts, null) } });

@@ -110,8 +110,9 @@ repro)
   repro_build "type=image,name=regulait-engine-${engine}:repro,push=false" "$out" "{}"
   ;;
 push)
-  # ADR-0242: mcpscanner and skillscanner are built and compared, never published, until phase 2
-  case "$engine" in mcpscanner | skillscanner) echo "${engine} is not published yet (ADR-0242 phase 2)" >&2; exit 2 ;; esac
+  # ADR-0242: mcpscanner and skillscanner are built and compared, never published, until phase 2;
+  # ADR-0362: contentextract likewise, until the owner decides its libpdfium licences (owner question 1)
+  case "$engine" in mcpscanner | skillscanner | contentextract) echo "${engine} is not published yet (ADR-0242 phase 2, ADR-0362 owner question 1)" >&2; exit 2 ;; esac
   repo="${3:-}"
   out="${4:-}"
   if ! printf '%s' "$repo" | grep -Eq "^ghcr\.io/[a-z0-9][a-z0-9-]{0,38}/regulait-engine-${engine}\$"; then

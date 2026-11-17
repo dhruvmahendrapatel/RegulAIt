@@ -54,7 +54,7 @@ EXTRACTOR_VERSION = "0.1.0"
 HARD_LIMITS = {
     "maxFileBytes": 16 * 1024 * 1024,  # one input file
     "maxPages": 200,  # one PDF
-    "maxTextChars": 2_000_000,  # all text this request returns, across files
+    "maxTextChars": 750_000,  # all text this request returns, across files (escaped JSON stays under the 3 MiB raw-report cap)
     "maxArchiveEntries": 256,  # entries across one archive tree (OOXML parts count)
     "maxArchiveDepth": 2,  # archive inside archive inside archive: refused
     "maxArchiveTotalBytes": 64 * 1024 * 1024,  # uncompressed bytes read across one archive tree

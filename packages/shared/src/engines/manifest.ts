@@ -359,16 +359,16 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
   },
   // ADR-0362: our own content extractor (engines/contentextract/extract.py), turning one request's files into text for
   // the gateway's own detectors. Its runs are `subject` runs (trigger `inspection`) the gateway queues itself, never a
-  // person. Off, and no image until its first signed publish: the lock's null digest means no runner passes the
-  // self-test, so it cannot be enabled (secure by construction).
+  // person. HELD UNPUBLISHED (like mcpscanner and skillscanner) until the owner decides ADR-0362 owner question 1 (the
+  // licences bundled in libpdfium.so): it has no images-lock entry, so the digest and task image are hardcoded null, no
+  // runner passes the self-test and nothing can be placed or enabled (secure by construction).
   contentextract: {
     id: "contentextract",
     kind: "content_extract",
     displayName: "content extraction",
     version: CONTENTEXTRACT_ENGINE_VERSION,
-    // bump with every build change; plus one per recorded publish (the lock moves it)
-    generation: 1 + ENGINE_IMAGES_LOCK.contentextract.publishGeneration,
-    imageDigest: ENGINE_IMAGES_LOCK.contentextract.manifestDigest,
+    generation: 1,
+    imageDigest: null,
     // our own code; the shipped closure's licences are in engines/contentextract/THIRD_PARTY.md
     licence: "LicenseRef-RegulAIt",
     maintainerCount: null,
@@ -380,7 +380,7 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     requiresJudge: false,
     judgeSets: [],
     credentialIsolation: false,
-    taskImage: ENGINE_IMAGES_LOCK.contentextract.imageId,
+    taskImage: null,
     // the admission-scan shim's Node task (packages/engine-admission-scan), with the engine in argv (the sandbox init
     // gives the workload no environment but PATH and HOME); it runs extract.py on the gateway's bundle.json
     taskEntry: { command: "/usr/local/bin/node", args: ["/app/dist/task-main.js", "contentextract"] },
@@ -389,7 +389,7 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     lastVerified: "2026-11-17",
     reCheckBy: "2027-05-17",
     unverified: [
-      "image digest and signature: no publish is recorded yet (engines/images.lock.json), so the engine cannot be enabled",
+      "the published image, its digest and signature: held unpublished until the owner decides ADR-0362 owner question 1 (built and compared by CI only), so the engine cannot be enabled",
       "transitive licences: the components bundled in libpdfium.so outside the ADR-0176 list await an owner decision (ADR-0362 owner question 1)",
       "runtime behaviour inside the built image (the worker's egress test, the extractor's limits under the sandbox's)",
       "the gateway's request-path call and its deadline (ADR-0362 slice 1b-ii)",

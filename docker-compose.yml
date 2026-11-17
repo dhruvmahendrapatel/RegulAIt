@@ -688,8 +688,8 @@ services:
   # bundle, executed as an engine TASK in the executor's sandbox under the run's
   # `engine_worker` placement: no network, no gateway channel, no secret, the
   # gateway's bundle.json alone at the read-only input root. Its digest default
-  # is all-zero (no image) until the first signed publish is recorded in
-  # engines/images.lock.json, so it cannot start, and the engine stays off.
+  # is all-zero (no image): the image is held unpublished until the owner
+  # decides ADR-0362 owner question 1, so it cannot start and the engine stays off.
   engine-contentextract:
     <<: *engine-runner
     platform: linux/amd64
