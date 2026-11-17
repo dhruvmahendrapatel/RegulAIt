@@ -311,9 +311,7 @@ function RoleGrantsPanel(props: { roleId: string }) {
 
   return (
     <QueryGate
-      loading={grants.isLoading}
-      error={grants.error}
-      onRetry={() => void grants.refetch()}
+      query={grants}
     >
       <Card title="Held by">
         <DataList<RoleAssignment>

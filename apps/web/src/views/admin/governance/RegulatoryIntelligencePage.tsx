@@ -138,7 +138,7 @@ export default function RegulatoryIntelligencePage() {
         info={<><p>A curated, source-linked timeline of obligations and proposals, joined to active packs, controls, evidence, and in-scope AI use cases.</p><p>This feed is decision support, not legal advice. Status and dates come from the linked primary sources; control and use-case impact is computed against this deployment.</p></>}
       />
       <div className={v.stack}>
-        <QueryGate loading={query.isLoading} error={query.error} onRetry={() => void query.refetch()}>
+        <QueryGate query={query}>
           {query.data ? (
             <>
               {/* one strip of plain figures; only a non-zero gap count takes a colour */}

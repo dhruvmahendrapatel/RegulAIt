@@ -1,6 +1,6 @@
 # ADR-0232: An agent pipeline builder: drag-and-drop, governed pipelines with SAP CPI-style features for AI agents
 
-- **Status**: Proposed (design session, 2026-11-06; owner request of the same day)
+- **Status**: Proposed (design session, 2026-11-06; owner request of the same day). The canvas, drafts, versions and diff are accepted and built over the existing workflow templates by [ADR-0341](0341-visual-pipeline-builder-over-workflow-templates.md); the pipeline runtime (§2–§5, §7, §8) stays Proposed
 - **Date**: 2026-11-06
 - **Related**: ADR-0172 and ADR-0173 (the agent builder suite), ADR-0219 (governed A2A calls), ADR-0016 (transitive
   per-node budget ceiling), ADR-0064 and ADR-0181 (scheduler), ADR-0070 (traces), ADR-0104 and ADR-0105 (approval payload

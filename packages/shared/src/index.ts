@@ -2484,6 +2484,15 @@ export const updateOrgSettingsSchema = z
     /** ADR-0246 addendum: 'enforce' (strict default) gates every call to a server classified high-risk (offensive
      * tooling) on the policy template and the authorised-targets list; 'off' is a step-up, audited relaxation. */
     mcpHighRiskMode: z.enum(MCP_HIGH_RISK_MODES).optional(),
+    /** ADR-0230 owner decision 2026-11-15: SAP business server defaults. The approval quorum seeded on a mark
+     * (default 2; never below 1, and the requester never approves their own write); below 2 is a relaxation. */
+    sapApprovalQuorum: z.number().int().min(1).max(10).optional(),
+    /** SAP writes per user per hour on the seeded write-only limit (default 10); higher is a relaxation */
+    sapWriteRatePerHour: z.number().int().min(1).max(1000).optional(),
+    /** false (default) refuses an SAP write with no project; true is a relaxation */
+    sapUnattributedWritesAllowed: z.boolean().optional(),
+    /** false (default) = the seeded rule covers writes only; true also makes reads approve-first (a tightening) */
+    sapReadsApproveFirst: z.boolean().optional(),
     /** ADR-0175 A5: the release-age cooldown in days. 0 (default) = off. While
      * on, a newly registered MCP server, a changed manifest, a federated import
      * and a new skill version stay in quarantine until this deployment has
@@ -5059,3 +5068,8 @@ export * from "./external-mfa.js";
 export * from "./fairness.js";
 // ADR-0261 (P37): third-party security telemetry ingest — the DefenseClaw JSONL parser and mapping (pure)
 export * from "./third-party-ingest/index.js";
+// ADR-0310 (G2): vendor-native managed settings compiled from effective MCP entitlements
+export * from "./managed-settings.js";
+
+// ADR-0341: RFC 6902 patches for diff views
+export { jsonPatch, type JsonPatchOperation } from "./json-patch.js";
