@@ -22,6 +22,7 @@ import {
   ruleStepSettings,
   ruleStepShadows,
   ruleStepSuggestions,
+  RULE_STEP_SUGGESTION_STATUSES,
   sql,
   traceSpans,
   traces,
@@ -33,7 +34,7 @@ import { buildApp } from "./app.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { grantStepUpForTest, sessionRequest, stepUpRequest } from "./testing/step-up-grant.js";
 import type { StepUpCheckArgs } from "./step-up.js";
-import { RULE_STEP_AUDIT_RULE_IDS } from "./rule-steps.js";
+import { RULE_STEP_AUDIT_RULE_IDS, RULE_STEP_TRANSITIONS } from "./rule-steps.js";
 import { pruneRuleStepSuggestions } from "./rule-step-retention.js";
 import { induceStepRule, type StepRun } from "@regulait/optimizer-kernel";
 import { induceStepRuleOffThread } from "@regulait/optimizer-kernel/offload";
@@ -323,6 +324,8 @@ describe("ADR-0327 shadow mode (slice 3b)", () => {
     expect(r.json()).toMatchObject({ status: "shadow", shadow: { runs: 0, covered: 0, agreed: 0, stoppedAt: null } });
     expect((await app.inject({ method: "POST", url: `/v1/rule-steps/suggestions/${suggestionId}/shadow`, headers: KEY })).statusCode).toBe(404);
     expect((await app.inject({ method: "POST", url: `/v1/rule-steps/suggestions/${suggestionId}/shadow`, headers: USER_KEY })).statusCode).toBe(403);
+    // the declared lifecycle: a suggestion in shadow cannot be dismissed until its shadow is stopped
+    expect((await app.inject({ method: "POST", url: `/v1/rule-steps/suggestions/${suggestionId}/dismiss`, headers: KEY })).statusCode).toBe(404);
     const [audit] = await auditRows(RULE_STEP_AUDIT_RULE_IDS.shadowStarted);
     expect(audit?.detail).toMatchObject({ suggestionId });
   });
@@ -362,5 +365,19 @@ describe("ADR-0327 shadow mode (slice 3b)", () => {
     expect(scanned.shadows.find((x) => x.suggestionId === suggestionId)).toBeUndefined();
     const [period] = await db.select().from(ruleStepShadows).where(eq(ruleStepShadows.suggestionId, suggestionId));
     expect(period).toMatchObject({ runs: 6, covered: 4, agreed: 3 });
+  });
+});
+
+describe("ADR-0327 suggestion lifecycle is one declared table (owner rule 12)", () => {
+  it("declares exactly the allowed transitions, each between known states", () => {
+    expect(RULE_STEP_TRANSITIONS).toEqual({
+      shadow_start: { from: "suggested", to: "shadow" },
+      shadow_stop: { from: "shadow", to: "suggested" },
+      dismiss: { from: "suggested", to: "dismissed" },
+    });
+    for (const t of Object.values(RULE_STEP_TRANSITIONS)) {
+      expect(RULE_STEP_SUGGESTION_STATUSES).toContain(t.from);
+      expect(RULE_STEP_SUGGESTION_STATUSES).toContain(t.to);
+    }
   });
 });

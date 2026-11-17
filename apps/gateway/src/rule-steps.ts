@@ -35,6 +35,7 @@ import {
   type RuleStepSettingsRow,
   type RuleStepShadowRow,
   type RuleStepSuggestionRow,
+  type SQL,
   RULE_STEP_SUGGESTION_STATUSES,
 } from "@regulait/db";
 import {
@@ -61,6 +62,42 @@ export const SCAN_MAX_RUNS = 5_000;
 export { SCAN_WINDOW_DAYS };
 export const SCAN_SPACING_MINUTES = 10;
 const MONTH_DAYS = 30;
+
+/**
+ * ADR-0327: the suggestion lifecycle, declared once (owner rule 12). Every status change goes through
+ * `transitionSuggestion` with one of these actions; nothing else writes `status`. A new scan inserts `suggested`;
+ * dismissal is final (a rescan refreshes the evidence of a dismissed suggestion but never its status).
+ *
+ *   suggested --shadow_start--> shadow --shadow_stop--> suggested
+ *   suggested --dismiss-------> dismissed
+ */
+export const RULE_STEP_TRANSITIONS = {
+  shadow_start: { from: "suggested", to: "shadow" },
+  shadow_stop: { from: "shadow", to: "suggested" },
+  dismiss: { from: "suggested", to: "dismissed" },
+} as const satisfies Record<string, { from: RuleStepSuggestionStatus; to: RuleStepSuggestionStatus }>;
+export type RuleStepTransition = keyof typeof RULE_STEP_TRANSITIONS;
+type RuleStepSuggestionStatus = (typeof RULE_STEP_SUGGESTION_STATUSES)[number];
+
+/**
+ * Apply one declared transition atomically: the row moves only if it is in the action's `from` state (compare-and-set
+ * in one UPDATE), so two concurrent requests cannot both move it. Returns the updated row, or null when the suggestion
+ * does not exist or is not in that state.
+ */
+async function transitionSuggestion(
+  db: Db,
+  id: string,
+  action: RuleStepTransition,
+  extra: { [K in keyof typeof ruleStepSuggestions.$inferInsert]?: (typeof ruleStepSuggestions.$inferInsert)[K] | SQL } = {},
+): Promise<RuleStepSuggestionRow | null> {
+  const t = RULE_STEP_TRANSITIONS[action];
+  const [row] = await db
+    .update(ruleStepSuggestions)
+    .set({ ...extra, status: t.to })
+    .where(and(eq(ruleStepSuggestions.id, id), eq(ruleStepSuggestions.status, t.from)))
+    .returning();
+  return row ?? null;
+}
 
 export const RULE_STEP_AUDIT_RULE_IDS = {
   settings: "rule_step_settings_changed",
@@ -267,7 +304,7 @@ export async function measureShadows(db: Db): Promise<ShadowEvaluation[]> {
     })
     .from(ruleStepShadows)
     .innerJoin(ruleStepSuggestions, eq(ruleStepSuggestions.id, ruleStepShadows.suggestionId))
-    .where(and(isNull(ruleStepShadows.stoppedAt), eq(ruleStepSuggestions.status, "shadow")))
+    .where(and(isNull(ruleStepShadows.stoppedAt), eq(ruleStepSuggestions.status, RULE_STEP_TRANSITIONS.shadow_start.to)))
     .orderBy(asc(ruleStepShadows.startedAt))
     .limit(SCAN_MAX_STEPS);
   const out: ShadowEvaluation[] = [];
@@ -479,7 +516,7 @@ export function registerRuleStepRoutes(app: FastifyInstance, db: Db): void {
           .onConflictDoUpdate({
             target: [ruleStepSuggestions.agentId, ruleStepSuggestions.stepName],
             set: { ...r.values, detectedAt: sql`now()` },
-            setWhere: sql`${ruleStepSuggestions.status} <> 'shadow'`,
+            setWhere: sql`${ruleStepSuggestions.status} <> ${RULE_STEP_TRANSITIONS.shadow_start.to}`,
           });
       }
       await applyShadowEvaluations(tx as unknown as Db, shadows);
@@ -538,11 +575,7 @@ export function registerRuleStepRoutes(app: FastifyInstance, db: Db): void {
     const { id } = idParam.parse(req.params);
     const userId = req.authCtx.userId ?? null;
     const out = await db.transaction(async (tx) => {
-      const [row] = await tx
-        .update(ruleStepSuggestions)
-        .set({ status: "dismissed", dismissedAt: sql`now()`, dismissedBy: userId })
-        .where(and(eq(ruleStepSuggestions.id, id), eq(ruleStepSuggestions.status, "suggested")))
-        .returning();
+      const row = await transitionSuggestion(tx as unknown as Db, id, "dismiss", { dismissedAt: sql`now()`, dismissedBy: userId });
       if (!row) return null;
       await tx.insert(auditLog).values({
         userId: userId ?? NO_IDENTITY,
@@ -573,11 +606,7 @@ export function registerRuleStepRoutes(app: FastifyInstance, db: Db): void {
       return reply.status(409).send({ error: "rule_steps_disabled", detail: "rule-like step detection is off" });
     }
     const out = await db.transaction(async (tx) => {
-      const [row] = await tx
-        .update(ruleStepSuggestions)
-        .set({ status: "shadow" })
-        .where(and(eq(ruleStepSuggestions.id, id), eq(ruleStepSuggestions.status, "suggested")))
-        .returning();
+      const row = await transitionSuggestion(tx as unknown as Db, id, "shadow_start");
       if (!row) return null;
       const [shadow] = await tx.insert(ruleStepShadows).values({ suggestionId: id, startedBy: userId }).returning();
       await tx.insert(auditLog).values({
@@ -601,11 +630,7 @@ export function registerRuleStepRoutes(app: FastifyInstance, db: Db): void {
     const { id } = idParam.parse(req.params);
     const userId = req.authCtx.userId ?? null;
     const out = await db.transaction(async (tx) => {
-      const [row] = await tx
-        .update(ruleStepSuggestions)
-        .set({ status: "suggested" })
-        .where(and(eq(ruleStepSuggestions.id, id), eq(ruleStepSuggestions.status, "shadow")))
-        .returning();
+      const row = await transitionSuggestion(tx as unknown as Db, id, "shadow_stop");
       if (!row) return null;
       const [shadow] = await tx
         .update(ruleStepShadows)
