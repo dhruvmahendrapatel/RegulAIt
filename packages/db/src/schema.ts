@@ -5986,8 +5986,13 @@ export type WebhookDeliveryRow = typeof webhookDeliveries.$inferSelect;
 // refuses a Cedar `permit` at write time. Empty tables = pre-ADR-0040
 // behaviour exactly.
 
-/** what a matching ABAC policy does to a call the RBAC layer already allowed */
-export const ABAC_POLICY_MODES = ["forbid", "require_approval"] as const;
+/**
+ * What a matching ABAC policy does to a call the RBAC layer already allowed. ADR-0354 adds the graduated responses
+ * (the declared table is `@regulait/policy-kernel`'s `AGENT_RESPONSE_TABLE`; the kernel's `POLICY_RESPONSES` is the
+ * same list, pinned by a test): advise allows with guidance, correct denies with a safe alternative, block_session
+ * denies and ends the session, disable denies and quarantines the agent. None widens access.
+ */
+export const ABAC_POLICY_MODES = ["advise", "require_approval", "correct", "forbid", "block_session", "disable"] as const;
 
 /** Shared-lockable policy generation for exact-action approval consumption. */
 export const governancePolicyEpoch = pgTable("governance_policy_epoch", {
@@ -6031,6 +6036,12 @@ export const abacPolicyVersions = pgTable(
     /** required when mode='require_approval' (DB CHECK): the Approvals-Queue
      * approver a paused call routes to — the SAME queue, not a parallel one */
     approverUserId: uuid("approver_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** ADR-0354 — the static, admin-reviewed text an `advise` or `correct` response returns to the agent. Plain text
+     * (validated by `parseAgentGuidance`; the CHECKs refuse markup and bound the length). Required for advise and
+     * correct, NULL for every other mode (DB CHECK). */
+    guidanceMessage: text("guidance_message"),
+    /** ADR-0354 — `correct` only: the approved route the agent may take instead. Advisory text, never a grant. */
+    guidanceAlternative: text("guidance_alternative"),
     /** policy unit tests travelling WITH the version they describe */
     testCases: jsonb("test_cases").$type<AbacPolicyTestCase[]>(),
     authorUserId: uuid("author_user_id").references(() => users.id, { onDelete: "set null" }),
@@ -6039,7 +6050,18 @@ export const abacPolicyVersions = pgTable(
   (t) => [
     uniqueIndex("abac_policy_versions_policy_version_uq").on(t.policyId, t.version),
     index("abac_policy_versions_policy_idx").on(t.policyId, t.version),
-    check("abac_policy_versions_mode_check", sql`${t.mode} IN ('forbid','require_approval')`),
+    check(
+      "abac_policy_versions_mode_check",
+      sql`${t.mode} IN ('advise','require_approval','correct','forbid','block_session','disable')`,
+    ),
+    check(
+      "abac_policy_versions_guidance_check",
+      sql`CASE ${t.mode} WHEN 'advise' THEN ${t.guidanceMessage} IS NOT NULL AND ${t.guidanceAlternative} IS NULL WHEN 'correct' THEN ${t.guidanceMessage} IS NOT NULL AND ${t.guidanceAlternative} IS NOT NULL ELSE ${t.guidanceMessage} IS NULL AND ${t.guidanceAlternative} IS NULL END`,
+    ),
+    check(
+      "abac_policy_versions_guidance_text_check",
+      sql`(${t.guidanceMessage} IS NULL OR (char_length(${t.guidanceMessage}) BETWEEN 1 AND 500 AND ${t.guidanceMessage} !~ '[<>[:cntrl:]]')) AND (${t.guidanceAlternative} IS NULL OR (char_length(${t.guidanceAlternative}) BETWEEN 1 AND 300 AND ${t.guidanceAlternative} !~ '[<>[:cntrl:]]'))`,
+    ),
     check(
       "abac_policy_versions_approver_check",
       sql`${t.mode} <> 'require_approval' OR ${t.approverUserId} IS NOT NULL`,
