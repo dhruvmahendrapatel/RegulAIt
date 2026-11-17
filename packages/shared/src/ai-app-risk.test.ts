@@ -103,5 +103,5 @@ describe("ADR-0363 slice 3: AI app risk dataset", () => {
 });
 
 // filled from the frozen dataset (ai-app-risk-data.ts); a v2 is the only way to change them
-const PINNED_ROWS = 0;
-const PINNED_HASH = "";
+const PINNED_ROWS = 10;
+const PINNED_HASH = "17e21cce428d8bda3126f306de82d653845c7230b8b90432a43ae1bf34c920e6";
