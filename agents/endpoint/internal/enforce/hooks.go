@@ -46,6 +46,30 @@ type Capabilities struct {
 	ExecForm bool `json:"execForm"`
 	// ManagedLocation: the vendor documents an admin location a user cannot override or disable.
 	ManagedLocation bool `json:"managedLocation"`
+	// Commands is what the contract lets command rules do (ADR-0350).
+	Commands CommandCapabilities `json:"commands"`
+}
+
+// ActionCoverage is what a hook can do with one kind of built-in action.
+type ActionCoverage string
+
+const (
+	// CoverAsk: the hook sees the action before it runs and can allow, ask (the agent's own prompt) or deny.
+	CoverAsk ActionCoverage = "ask"
+	// CoverBlock: the hook sees it and can deny, but cannot ask, so an ask rule is answered as a deny.
+	CoverBlock ActionCoverage = "block"
+	// CoverNone: the hook cannot see the action before it runs, or cannot tell what it acts on. We decide nothing.
+	CoverNone ActionCoverage = "none"
+)
+
+// CommandCapabilities is the command row of the capability matrix, one cell per kind of action, with the vendor's
+// own limits stated in Notes. Matching is textual on every agent (a guardrail, not containment).
+type CommandCapabilities struct {
+	Shell     ActionCoverage `json:"shell"`
+	FileRead  ActionCoverage `json:"fileRead"`
+	FileWrite ActionCoverage `json:"fileWrite"`
+	// Packages follows Shell: installs are found on the shell command line.
+	Notes []string `json:"notes"`
 }
 
 // Coverage grades: what we tell a customer an adapter is (owner decisions 2026-11-15, ADR-0330 §8).
@@ -92,8 +116,14 @@ type Adapter struct {
 	Render func(Decision) (stdout []byte, stderr string, exit int) `json:"-"`
 }
 
-// Hook answers one hook call: parse, decide, render. Unreadable input is a deny. policy is nil when none verified.
+// Hook is HookWith with no device environment.
 func (a Adapter) Hook(stdin io.Reader, policy *Policy) (stdout []byte, stderr string, exit int) {
+	return a.HookWith(stdin, policy, HookEnv{})
+}
+
+// HookWith answers one hook call: parse, decide, render. Unreadable input is a deny. policy is nil when none
+// verified. An ask the agent cannot show for this call is a deny (fail closed, ADR-0350 §4).
+func (a Adapter) HookWith(stdin io.Reader, policy *Policy, env HookEnv) (stdout []byte, stderr string, exit int) {
 	call, err := a.Parse(stdin)
 	if err != nil {
 		return a.Render(Decision{Verdict: Deny, Reason: unreadable(err)})
@@ -102,7 +132,13 @@ func (a Adapter) Hook(stdin io.Reader, policy *Policy) (stdout []byte, stderr st
 	if call.MCP != nil && a.UnattestedSource != "" {
 		call.MCP.Source = a.UnattestedSource
 	}
-	return a.Render(Decide(policy, call))
+	d := DecideWith(policy, call, env)
+	d.NoAsk = call.NoAsk
+	if d.Verdict == Ask && call.NoAsk {
+		d.Verdict = Deny
+		d.Reason += " This coding agent cannot ask you to confirm it here, so it is blocked."
+	}
+	return a.Render(d)
 }
 
 // Adapters is every supported coding agent, in a fixed order.

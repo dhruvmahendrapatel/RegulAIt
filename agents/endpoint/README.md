@@ -46,6 +46,18 @@ Policies are signed by the control plane's device-policy signer, the same one th
 ADR-0330 §8 also records the recommended configuration per agent: Copilot CLI in `audit` mode with GitHub's MCP
 registry allow-list, and Codex as audit-grade, paired with its `requirements.toml` server allow-list.
 
+**Command rules (ADR-0350).** Schema 2 policies carry a required `commands` section: shell commands (argv globs,
+parsed as bash), file reads and writes (path globs, with defaults for outside the workspace) and package installs
+(ecosystem and name), each allow, ask or deny, the strictest winning. An ask shows the agent's own permission prompt;
+where the agent has no ask for that action it is a deny. `regulait-agent hook-capabilities` prints, per agent, which
+actions the hook can see (`commands.shell`, `fileRead`, `fileWrite`: `ask`, `block` or `none`) and the vendor's
+limits. Matching is textual: a guardrail, not containment. For command rules to apply, each registration below also
+needs the built-in tools:
+
+- Claude Code: matcher `Bash|PowerShell|Read|Write|Edit|MultiEdit|NotebookEdit|mcp__.*`.
+- Cursor: the same command under `beforeShellExecution` and `beforeReadFile`, each with `"failClosed": true`.
+- Copilot CLI and Codex: the `preToolUse` / `PreToolUse` hook already sees every tool.
+
 Registrations (paths are examples; use absolute paths with no shell metacharacters):
 
 - **Claude Code**, managed settings: a `PreToolUse` hook with matcher `mcp__.*`, exec form

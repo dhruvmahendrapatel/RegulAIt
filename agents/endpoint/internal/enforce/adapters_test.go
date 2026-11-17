@@ -122,10 +122,22 @@ func checkAnswer(t *testing.T, name string, a Adapter, want string, stdout []byt
 	}
 }
 
-// isAskJSON: only Cursor has a documented "ask" answer.
+// isAskJSON checks the agent's own documented ask shape. Codex has none.
 func isAskJSON(agent string, stdout []byte) bool {
 	var m map[string]any
-	return agent == AgentCursor && json.Unmarshal(stdout, &m) == nil && len(m) == 1 && m["permission"] == "ask"
+	if json.Unmarshal(stdout, &m) != nil {
+		return false
+	}
+	switch agent {
+	case AgentCursor:
+		return m["permission"] == "ask"
+	case AgentCopilotCLI:
+		return m["permissionDecision"] == "ask"
+	case AgentClaudeCode:
+		h, _ := m["hookSpecificOutput"].(map[string]any)
+		return h["hookEventName"] == "PreToolUse" && h["permissionDecision"] == "ask"
+	}
+	return false
 }
 
 // isDenyJSON checks the agent's own documented deny shape.

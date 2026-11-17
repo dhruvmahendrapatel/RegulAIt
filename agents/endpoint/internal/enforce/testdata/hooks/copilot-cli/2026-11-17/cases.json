@@ -1,0 +1,12 @@
+[
+  {"input": "builtin-bash.json", "policy": "enforce", "want": "none"},
+  {"input": "builtin-bash.json", "policy": "none", "want": "deny"},
+  {"input": "builtin-pascal.json", "policy": "enforce", "want": "none"},
+  {"input": "unlisted-tool.json", "policy": "enforce", "want": "deny"},
+  {"input": "unlisted-tool.json", "policy": "audit", "want": "none"},
+  {"input": "unlisted-tool.json", "policy": "none", "want": "deny"},
+  {"input": "bash-ask-string-args.json", "policy": "enforce", "want": "ask"},
+  {"input": "bash-deny.json", "policy": "enforce", "want": "deny"},
+  {"input": "bash-no-command.json", "policy": "enforce", "want": "ask"},
+  {"input": "view-not-decided.json", "policy": "enforce", "want": "none"}
+]
