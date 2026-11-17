@@ -39,6 +39,8 @@
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { isStdioClosureImage, MCP_STDIO_LIMITS, type McpUpstreamTransport } from "@regulait/shared";
 import { ExecutorStdioTransport, type StdioSession } from "./executor-stdio.js";
 
@@ -142,7 +144,9 @@ export function isSseCrossOriginRefusal(err: unknown): boolean {
 /** what `guardedMcpConnect` decided may be opened (stdio: a session already PLACED in a sandbox) */
 export type UpstreamLaunch =
   | { transport: "streamable_http" | "sse"; url: string; fetch: typeof fetch }
-  | { transport: "stdio"; session: StdioSession };
+  | { transport: "stdio"; session: StdioSession }
+  /** ADR-0353: the in-process server of an imported OpenAPI source; its own requests ride the guarded fetch */
+  | { transport: "openapi"; server: Server };
 
 /**
  * Open the SDK transport for an ALREADY-ADJUDICATED destination. Nothing here
@@ -168,6 +172,13 @@ export function openTransport(launch: UpstreamLaunch, opts: { deadlineMs: number
     case "stdio":
       // ADR-0190 I4: the MCP bytes go to the sandbox over the executor's channel; nothing is spawned here
       return new ExecutorStdioTransport(launch.session);
+    case "openapi": {
+      // ADR-0353: a linked in-memory pair. The server side starts first; a message sent before it is connected is
+      // queued by the SDK. Closing the client closes the pair and the server with it.
+      const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+      void launch.server.connect(serverSide).catch(() => void clientSide.close().catch(() => {}));
+      return clientSide;
+    }
   }
 }
 

@@ -428,7 +428,7 @@ export interface McpServer {
    * null = inherit the org default (mcpPrivateRangesDefault). IMDS/link-local
    * is never opened by this flag. */
   allowPrivateRanges?: boolean | null;
-  transport?: "streamable_http" | "sse" | "stdio";
+  transport?: "streamable_http" | "sse" | "stdio" | "openapi";
   /** ADR-0190 I4: `image` is the closure image digest the sandbox runs (also `stdioCommandDigest`) */
   stdio?: { image?: string | null; command: string; args: string[] } | null;
   stdioCommandDigest?: string | null;

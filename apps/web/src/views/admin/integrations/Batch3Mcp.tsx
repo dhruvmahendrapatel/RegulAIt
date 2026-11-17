@@ -11,7 +11,7 @@ import v from "../../views.module.css";
 // Browser-only mirrors of shared/batch3.ts; batch3 contract tests pin these.
 export const MCP_PROTOCOL_METHODS = ["resources/list", "resources/templates/list", "resources/read", "prompts/list", "prompts/get", "completion/complete", "logging/setLevel"] as const;
 export const MCP_PROTOCOL_GRANT_NAMES = ["mcp:resources", "mcp:prompts", "mcp:completion", "mcp:logging"] as const;
-export const MCP_UPSTREAM_TRANSPORTS = ["streamable_http", "sse", "stdio"] as const;
+export const MCP_UPSTREAM_TRANSPORTS = ["streamable_http", "sse", "stdio", "openapi"] as const;
 
 export function McpCoverage({ servers }: { servers: McpServer[] }) {
   const settings = useQuery({ queryKey: ["admin", "org-settings"], queryFn: () => api.get<OrgSettingsResponse>("/v1/org/settings") });

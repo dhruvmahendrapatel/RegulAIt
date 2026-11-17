@@ -174,10 +174,77 @@ export const EVAL_RUN_MACHINE = defineMachine({
   },
 });
 
+export const OPENAPI_OPERATION_STATES = ["staged", "approved", "drifted", "rejected", "withdrawn"] as const;
+export type OpenApiOperationState = (typeof OPENAPI_OPERATION_STATES)[number];
+
+/**
+ * `openapi_tool_operations.state` (ADR-0353, governed MCP tools from OpenAPI; the feature is `openapi-tools.ts`). Only `approved` is served. Every event lands in one state; a re-import
+ * picks its event from the stored state and what it found (`planOpenApiReimport`). A re-import whose definition
+ * digest is unchanged is no event at all.
+ */
+export const OPENAPI_OPERATION_MACHINE = defineMachine({
+  id: "openapi_operation",
+  stored: "openapi_tool_operations.state",
+  states: OPENAPI_OPERATION_STATES,
+  initial: ["staged"],
+  terminal: [],
+  transitions: {
+    approve: {
+      from: ["staged", "drifted"],
+      to: "approved",
+      by: ["admin"],
+      summary: "An admin reviewed this exact definition (by digest, with a step-up) and lets it be served; users still need a grant.",
+    },
+    reject: {
+      from: ["staged", "drifted"],
+      to: "rejected",
+      by: ["admin"],
+      summary: "An admin decided this definition is not to be served.",
+    },
+    revoke: {
+      from: ["approved"],
+      to: "withdrawn",
+      by: ["admin"],
+      summary: "An admin takes a served operation out of service.",
+    },
+    reimport_changed: {
+      from: ["approved", "drifted"],
+      to: "drifted",
+      by: ["admin"],
+      summary: "A re-import changed a served (or already drifted) operation: it is withheld until its new definition is approved.",
+    },
+    reimport_restaged: {
+      from: ["staged", "rejected"],
+      to: "staged",
+      by: ["admin"],
+      summary: "A re-import changed an operation that is not served: the new definition waits for review.",
+    },
+    reimport_reverted: {
+      from: ["drifted"],
+      to: "approved",
+      by: ["admin"],
+      summary: "A re-import went back to exactly the definition an admin approved, so it is served again.",
+    },
+    reimport_missing: {
+      from: ["staged", "approved", "drifted", "rejected"],
+      to: "withdrawn",
+      by: ["admin"],
+      summary: "The re-imported document no longer has this operation, so it is not served.",
+    },
+    reimport_present: {
+      from: ["withdrawn"],
+      to: "staged",
+      by: ["admin"],
+      summary: "The operation is back in a re-imported document and waits for review again.",
+    },
+  },
+});
 /** Every declared machine, by id: the one list an agent or a document reads. */
 export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string>>> = Object.freeze({
   [TRAINING_JOB_MACHINE.def.id]: TRAINING_JOB_MACHINE,
   [MCP_ADMISSION_MACHINE.def.id]: MCP_ADMISSION_MACHINE,
   [INCIDENT_MACHINE.def.id]: INCIDENT_MACHINE,
   [EVAL_RUN_MACHINE.def.id]: EVAL_RUN_MACHINE,
+  // ADR-0353 (lane E34)
+  [OPENAPI_OPERATION_MACHINE.def.id]: OPENAPI_OPERATION_MACHINE,
 } as Record<string, StateMachine<string, string>>);

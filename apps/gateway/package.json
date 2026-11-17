@@ -85,6 +85,7 @@
     "fastq": "1.20.3",
     "jose": "6.2.14",
     "js-yaml": "4.3.2",
+    "mcp-from-openapi": "2.9.1",
     "ml-distance": "5.0.0",
     "oauth4webapi": "3.8.8",
     "oidc-provider": "9.12.2",

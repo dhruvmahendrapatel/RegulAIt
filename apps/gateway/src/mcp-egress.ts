@@ -65,6 +65,7 @@ import { observeUpstream, type MetricUpstreamOutcome } from "./metrics.js";
 import { identityAssertionMiddleware, type OutboundIdentity } from "./mcp-identity-assertion.js";
 import { upstreamExchangeMiddleware, type UpstreamExchangeHolder } from "./upstream-token-exchange.js";
 import { openUpstreamCredential, upstreamCredentialMiddleware } from "./mcp-upstream-credential.js";
+import { createOpenApiMcpServer, OPENAPI_TOOL_MAX_RESPONSE_BYTES, openApiSourceForServer } from "./openapi-tools.js";
 import { loadEgressAllowList } from "./custom-providers.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { timeouts } from "./timeouts.js";
@@ -328,6 +329,10 @@ export const MCP_UPSTREAM_REFUSALS = {
   mcp_sse_endpoint_refused: "mcp-sse-endpoint-refused",
   /** ADR-0204: the server has an upstream credential this process cannot open; nothing is sent without it */
   mcp_upstream_credential_unavailable: "mcp-upstream-credential-unavailable",
+  /** ADR-0353: an `openapi` server is created only by the OpenAPI import route */
+  mcp_openapi_import_only: "mcp-openapi-import-only",
+  /** ADR-0353: an `openapi` row with no imported source behind it (nothing to serve, nothing sent) */
+  mcp_openapi_source_missing: "mcp-openapi-source-missing",
 } as const;
 export type McpUpstreamRefusal = keyof typeof MCP_UPSTREAM_REFUSALS;
 
@@ -406,6 +411,8 @@ async function withTransportColumns(db: Db, row: McpUpstreamRow): Promise<FullUp
 /** what the destination decision allowed; `guardedMcpConnect` opens it */
 export type UpstreamDestination =
   | { transport: "streamable_http" | "sse"; row: FullUpstreamRow; posture: McpEgressPosture }
+  /** ADR-0353: an in-process server whose requests go to the source's base URL, adjudicated here like any URL */
+  | { transport: "openapi"; row: FullUpstreamRow; posture: McpEgressPosture; source: { id: string; baseUrl: string } }
   | {
       transport: "stdio";
       row: FullUpstreamRow;
@@ -468,11 +475,26 @@ export async function checkUpstreamDestination(
     }
     return { transport: "stdio", row, image: check.image, command: check.command, args: check.args };
   }
-  const { decision, posture } = await checkMcpServerUrl(db, row.url, row.allowPrivateRanges, deps);
+  // ADR-0353: an openapi row's destination is its source's base URL, never the `openapi:` sentinel
+  let source: { id: string; baseUrl: string } | null = null;
+  if (row.transport === "openapi") {
+    source = await openApiSourceForServer(db, row.id);
+    if (!source) {
+      await refuseUpstream(
+        db,
+        row,
+        "mcp_openapi_source_missing",
+        `${label} refused: no imported OpenAPI source is attached to it, so it has nothing to serve. Nothing was sent.`,
+      );
+      throw new Error("unreachable");
+    }
+  }
+  const destinationUrl = source ? source.baseUrl : row.url;
+  const { decision, posture } = await checkMcpServerUrl(db, destinationUrl, row.allowPrivateRanges, deps);
   if (!decision.ok) {
     await auditMcpEgressDenied(db, {
       serverId: row.id,
-      url: row.url,
+      url: destinationUrl,
       phase: "connect",
       decision,
       reason: `MCP upstream connect refused: ${decision.reason}`,
@@ -480,7 +502,8 @@ export async function checkUpstreamDestination(
     });
     throw new McpEgressBlockedError(decision);
   }
-  return { transport: row.transport, row, posture };
+  if (source) return { transport: "openapi", row, posture, source };
+  return { transport: row.transport as "streamable_http" | "sse", row, posture };
 }
 
 /** a deadline the SDK's own timers do not cover (SSE waiting for its
@@ -590,9 +613,12 @@ export async function guardedMcpConnect(
       );
     }
     const credential = opened.ok ? opened.credential : null;
+    // ADR-0353: an openapi server's requests go to its source's base URL (the credential is bound to that origin)
+    const destinationUrl = dest.transport === "openapi" ? dest.source.baseUrl : dest.row.url;
     const guarded = createGuardedFetch({
       allowList: dest.posture.allowList,
       privateLan: { openByDefault: dest.posture.openByDefault },
+      ...(dest.transport === "openapi" ? { maxResponseBytes: OPENAPI_TOOL_MAX_RESPONSE_BYTES } : {}),
       ...(deps.resolve ? { resolve: deps.resolve } : {}),
       ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
       // ADR-0188 S8: an assertion's "issued" row is written once the destination is allowed, before it leaves
@@ -601,13 +627,13 @@ export async function guardedMcpConnect(
     const assertedOnly = deps.outboundIdentity ? (identityAssertionMiddleware(deps.outboundIdentity)(guarded) as typeof fetch) : guarded;
     // ADR-0238: the exchanged token replaces any Authorization set further out (an ADR-0204 Bearer credential)
     const asserted = deps.upstreamExchange ? (upstreamExchangeMiddleware(deps.upstreamExchange)(assertedOnly) as typeof fetch) : assertedOnly;
-    launch = {
-      transport: dest.transport,
-      url: dest.row.url,
-      // ADR-0204: OUTSIDE the assertion's middleware, so its holder still receives the init the guarded fetch is given;
-      // set only for the registered origin, and the guarded fetch refuses every redirect
-      fetch: credential ? (upstreamCredentialMiddleware(credential, dest.row.url)(asserted) as typeof fetch) : asserted,
-    };
+    // ADR-0204: OUTSIDE the assertion's middleware, so its holder still receives the init the guarded fetch is given;
+    // set only for the registered origin, and the guarded fetch refuses every redirect
+    const sendFetch = credential ? (upstreamCredentialMiddleware(credential, destinationUrl)(asserted) as typeof fetch) : asserted;
+    launch =
+      dest.transport === "openapi"
+        ? { transport: "openapi", server: createOpenApiMcpServer(db, dest.source, sendFetch) }
+        : { transport: dest.transport, url: dest.row.url, fetch: sendFetch };
   }
 
   const client = new Client({ name: "regulait-gateway", version: "0.1.0" });
@@ -709,6 +735,8 @@ export async function checkMcpTransportWrite(
     serverId?: string | null;
     phase: "registration" | "update";
     label: string;
+    /** ADR-0353: true only for the OpenAPI import route, the one writer of an `openapi` row */
+    viaOpenApiImport?: boolean;
   },
 ): Promise<McpTransportWriteResult> {
   const refuse = async (
@@ -740,6 +768,13 @@ export async function checkMcpTransportWrite(
       `the '${args.transport}' transport is not enabled for this organization (mcp_upstream_transports: ` +
         `${JSON.stringify(enabled)}). An admin may enable it under Integrations > MCP servers > MCP protocol coverage (an audited relaxation).`,
       { enabledTransports: enabled },
+    );
+  }
+  if (args.transport === "openapi" && args.viaOpenApiImport !== true) {
+    return refuse(
+      422,
+      "mcp_openapi_import_only",
+      "an 'openapi' MCP server is created only by importing a document (POST /v1/openapi-tool-sources), so its tools are staged for approval.",
     );
   }
   if (args.transport !== "stdio") return { ok: true, stdio: null };

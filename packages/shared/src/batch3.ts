@@ -67,7 +67,8 @@ export const MCP_PROTOCOL_METHOD_GRANTS: Readonly<
 });
 
 /** G4: how the gateway reaches an MCP upstream (`mcp_servers.transport`) */
-export const MCP_UPSTREAM_TRANSPORTS = ["streamable_http", "sse", "stdio"] as const;
+/** ADR-0353: `openapi` is an in-process upstream generated from an imported OpenAPI document (off by default) */
+export const MCP_UPSTREAM_TRANSPORTS = ["streamable_http", "sse", "stdio", "openapi"] as const;
 export type McpUpstreamTransport = (typeof MCP_UPSTREAM_TRANSPORTS)[number];
 
 /** G4: the `url` a stdio row carries (`mcp_servers_transport_shape`). It is not
@@ -75,6 +76,11 @@ export type McpUpstreamTransport = (typeof MCP_UPSTREAM_TRANSPORTS)[number];
  * fails the egress check (fails closed). */
 export const MCP_STDIO_URL_PREFIX = "stdio:";
 export const mcpStdioSentinelUrl = (serverName: string): string => `${MCP_STDIO_URL_PREFIX}${serverName}`;
+/** ADR-0353: the `url` an `openapi` row carries (`mcp_servers_openapi_shape`). Like the stdio sentinel it is not a
+ * destination: the in-process server sends to the source's admin-set base URL, and an egress check on this value
+ * fails closed. */
+export const MCP_OPENAPI_URL_PREFIX = "openapi:";
+export const mcpOpenApiSentinelUrl = (serverName: string): string => `${MCP_OPENAPI_URL_PREFIX}${serverName}`;
 
 /** G4: the argv bounds (≤ 64 arguments × 4 KiB, no NUL). The route refuses
  * past them with 400 `mcp_stdio_command_refused` / `invalid_argv`. */

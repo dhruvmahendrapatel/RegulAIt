@@ -127,6 +127,7 @@ import {
 import { checkStdioClosure } from "./mcp-transports.js";
 import { classifyScannedContent, recordContentProvenance } from "./content-provenance.js";
 import { stdioRefusalSentence } from "./mcp-egress.js";
+import { mcpCallDestinationUrl } from "./openapi-tools.js";
 import { errMessage } from "./err-serializer.js";
 
 /** ADR-0185 G3: the reserved tool-name prefix. Protocol grants live under it
@@ -426,7 +427,8 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs, stdioHold: {
       userId,
       surface: "mcp_protocol",
       content: [decided],
-      destinations: [serverRow.url],
+      // ADR-0353: an openapi server's calls reach its source's base URL
+      destinations: [await mcpCallDestinationUrl(db, serverRow)],
       projectId,
       subject: { serverId, toolName: grant },
       detail: { method, approvalScope, contextDigest, target: auditTarget(serverRow) },
