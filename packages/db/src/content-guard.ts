@@ -227,6 +227,9 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   "conversations.title": "conversation",
   "ai_bom_snapshots.body": "signed_evidence",
   "decision_boms.body": "signed_evidence",
+  // ADR-0310: a compiled managed-settings file (vendor JSON/TOML of gateway URLs and tool names); its sha256 is in the
+  // signed bundle manifest, so refusing it after compilation would break the signature, not stop a paste
+  "managed_settings_bundle_files.body": "signed_evidence",
   "model_artifact_signatures.resource_name": "signed_evidence",
   "model_artifact_signatures.signed_name": "signed_evidence",
   "prompt_tags.name": "check_constrained",
