@@ -89,14 +89,20 @@ describe("ADR-0343: replicas booting together", () => {
       holderPid = Number((await c.query("select pg_backend_pid() as pid")).rows[0]!.pid);
       await blocked;
     }).catch((e: unknown) => e);
-    while (holderPid === 0) await new Promise((res) => setTimeout(res, 10));
-    let waited = false;
-    const waiter = withSessionAdvisoryLock(replicas[1]!, key, async () => "acquired", { onWait: () => (waited = true) });
-    // kill the holder's backend, as a crash or a failover would
-    await admin.execute(sql`select pg_terminate_backend(${holderPid})`);
-    await expect(waiter).resolves.toBe("acquired");
-    expect(waited).toBe(true);
-    release();
-    await holder;
+    try {
+      while (holderPid === 0) await new Promise((res) => setTimeout(res, 10));
+      // the waiter must be seen waiting BEFORE the holder dies, or a fast kill lets it acquire at once (a CI race)
+      let markWaiting!: () => void;
+      const waiting = new Promise<void>((res) => (markWaiting = res));
+      const waiter = withSessionAdvisoryLock(replicas[1]!, key, async () => "acquired", { onWait: () => markWaiting() });
+      await waiting;
+      // kill the holder's backend, as a crash or a failover would
+      await admin.execute(sql`select pg_terminate_backend(${holderPid})`);
+      await expect(waiter).resolves.toBe("acquired");
+    } finally {
+      // always let the holder finish, so its pool can end in afterAll
+      release();
+      await holder;
+    }
   });
 });

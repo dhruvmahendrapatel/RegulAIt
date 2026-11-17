@@ -625,6 +625,7 @@ import { AUTH_EXEMPT_ROUTES, NON_ADMIN_ROUTES, requestRlsScope } from "./route-c
 import { isDraining } from "./readiness.js";
 import { registerOpenApiRoutes, type RouteInventoryEntry } from "./openapi.js";
 import { registerOnboardingRoutes } from "./onboarding.js";
+import { registerPmImportRoutes } from "./pm-import.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
 import { registerDiscoveryRoutes } from "./discovery-routes.js";
 import { registerContentTrustRoutes } from "./content-trust-routes.js";
@@ -638,6 +639,7 @@ import { registerEndpointMcpConfigRoutes } from "./endpoint-mcp-config.js";
 // ADR-0310 (G2): vendor-native managed settings bundles
 import { registerManagedSettingsRoutes } from "./managed-settings.js";
 import { registerEndpointAddonInventoryRoutes } from "./endpoint-addon-inventory.js";
+import { registerProcessAnalyticsRoutes } from "./process-analytics.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
 import { registerCostImportRoutes } from "./cost-import.js";
 import { registerCostReconciliationRoutes } from "./cost-reconcile.js";
@@ -6207,6 +6209,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // exactly the authority a non-admin must not reach. None appear in
   // NON_ADMIN_ROUTES.
   registerOnboardingRoutes(app, db, { dataKey: opts.dataKey });
+  registerPmImportRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0055 — SHADOW-AI DISCOVERY. Admin-only by default (nothing here is in
   // NON_ADMIN_ROUTES): uploading a customer's proxy export, editing the
   // detection catalogue and dispositioning findings are all operator authority.
@@ -6253,6 +6256,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerManagedSettingsRoutes(app, db);
   // ADR-0332 (lane E14): the endpoint AI add-on inventory (admin-only, RLS: admins and system_task)
   registerEndpointAddonInventoryRoutes(app, db);
+  // ADR-0342 (lane E23): process analytics over the workflow history (reads scoped by the ADR-0047 decision; refresh admin)
+  registerProcessAnalyticsRoutes(app, db);
   // ADR-0069 — CROSS-VENDOR COST CONSOLIDATION. Admin-only by default: the ONLY
   // route here in NON_ADMIN_ROUTES is `GET /v1/users/:userId/cost-consolidated`,
   // which refuses in-handler unless the caller IS that user. Uploading a file
