@@ -5071,3 +5071,9 @@ export * from "./third-party-ingest/index.js";
 // ADR-0334 (lane E16): the managed browser extension's contract (also the `@regulait/shared/browser-governance` subpath)
 export * from "./browser-governance/index.js";
 export { dlpRuleIds, matchDlp } from "./dlp-secret-re2.js";
+
+// ADR-0310 (G2): vendor-native managed settings compiled from effective MCP entitlements
+export * from "./managed-settings.js";
+
+// ADR-0341: RFC 6902 patches for diff views
+export { jsonPatch, type JsonPatchOperation } from "./json-patch.js";

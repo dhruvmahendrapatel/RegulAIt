@@ -35,6 +35,16 @@ regexes = [
 ]
 
 [[allowlists]]
+# ADR-0343: the first commit of the replica readiness test (PR #887) used the same synthetic data-key fixture as
+# process-lifecycle.test.ts (allow-listed below). The test now generates its key at run time, but that commit stays in
+# the PR's scanned range, so its exact value is listed here for that one file only.
+description = "Synthetic data-key fixture in the ADR-0343 replica readiness test"
+condition = "AND"
+paths = ['''^apps/gateway/src/zz-adr0343-leader-and-readiness\.test\.ts$''']
+regexTarget = "secret"
+regexes = ['''^3f9a1c7e2b8d4f60a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718$''']
+
+[[allowlists]]
 description = "Synthetic test credentials: redaction, DLP and scrub test inputs"
 condition = "AND"
 paths = [
