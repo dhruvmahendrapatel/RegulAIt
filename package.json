@@ -30,7 +30,10 @@
       "@azure/ms-rest-js>uuid": "^11.1.1",
       "@esbuild-kit/core-utils>esbuild": "^0.25.0",
       "express>body-parser": "^2.4.0",
-      "@azure/identity>@azure/msal-node": "^7.1.1"
+      "@azure/identity>@azure/msal-node": "^7.1.1",
+      "mcp-from-openapi>@apidevtools/json-schema-ref-parser": "16.0.5",
+      "@apidevtools/json-schema-ref-parser>js-yaml": "5.5.0",
+      "js-yaml@5>argparse": "2.0.1"
     },
     "onlyBuiltDependencies": [],
     "ignoredBuiltDependencies": [

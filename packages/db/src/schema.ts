@@ -936,7 +936,9 @@ export const mcpServers = pgTable("mcp_servers", {
   executionProfileId: uuid("execution_profile_id").references((): AnyPgColumn => executionProfiles.id, { onDelete: "restrict" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
-  check("mcp_servers_transport_check", sql`${t.transport} IN ('streamable_http', 'sse', 'stdio')`),
+  check("mcp_servers_transport_check", sql`${t.transport} IN ('streamable_http', 'sse', 'stdio', 'openapi')`),
+  // ADR-0353: an `openapi` row carries the `openapi:<name>` sentinel, and only an `openapi` row may
+  check("mcp_servers_openapi_shape", sql`(${t.transport} = 'openapi') = (${t.url} LIKE 'openapi:%')`),
   check("mcp_servers_execution_profile_check", sql`${t.executionProfileId} IS NULL OR ${t.transport} = 'stdio'`),
   check("mcp_servers_disclose_agent_ids_check", sql`NOT ${t.discloseAgentWorkloadIds} OR ${t.identityPropagation} = 'signed_assertion'`),
   check(
@@ -5590,7 +5592,7 @@ export const orgSettings = pgTable(
     ),
     check(
       "org_settings_mcp_upstream_transports_check",
-      sql`jsonb_typeof(${t.mcpUpstreamTransports}) = 'array' AND ${t.mcpUpstreamTransports} <@ '["streamable_http", "sse", "stdio"]'::jsonb`,
+      sql`jsonb_typeof(${t.mcpUpstreamTransports}) = 'array' AND ${t.mcpUpstreamTransports} <@ '["streamable_http", "sse", "stdio", "openapi"]'::jsonb`,
     ),
     check(
       "org_settings_mcp_protocol_methods_check",
@@ -17139,3 +17141,77 @@ export const workflowTemplateVersions = pgTable(
 );
 export type WorkflowTemplateVersionRow = typeof workflowTemplateVersions.$inferSelect;
 // ===== end ADR-0341 =====
+
+// ===== ADR-0353 (lane E34): governed MCP tools from an OpenAPI document or REST endpoint list =====
+/** The declared lifecycle (`OPENAPI_OPERATION_TRANSITIONS` in @regulait/shared); the DB checks the value set. */
+export const OPENAPI_OPERATION_STATE_VALUES = ["staged", "approved", "drifted", "rejected", "withdrawn"] as const;
+
+/**
+ * One imported OpenAPI document (or REST endpoint list) and the `openapi` MCP server it is served as. The base URL is
+ * the admin's, never the document's `servers` entry; it is re-checked by the egress guard on every connect. The
+ * document itself is not stored: only its digest, title and version, and each operation's generated definition.
+ */
+export const openapiToolSources = pgTable(
+  "openapi_tool_sources",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    mcpServerId: uuid("mcp_server_id")
+      .notNull()
+      .references(() => mcpServers.id, { onDelete: "cascade" }),
+    baseUrl: text("base_url").notNull(),
+    sourceKind: text("source_kind", { enum: ["openapi", "rest_endpoints"] }).notNull(),
+    specTitle: text("spec_title"),
+    specVersion: text("spec_version"),
+    specDigest: text("spec_digest").notNull(),
+    importedBy: uuid("imported_by").references(() => users.id, { onDelete: "set null" }),
+    importedAt: timestamp("imported_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("openapi_tool_sources_server_uq").on(t.mcpServerId),
+    check("openapi_tool_sources_kind_check", sql`${t.sourceKind} IN ('openapi', 'rest_endpoints')`),
+    check("openapi_tool_sources_digest_check", sql`${t.specDigest} ~ '^[0-9a-f]{64}$'`),
+    check("openapi_tool_sources_base_url_check", sql`${t.baseUrl} ~ '^https?://' AND char_length(${t.baseUrl}) <= 2048`),
+  ],
+);
+export type OpenapiToolSourceRow = typeof openapiToolSources.$inferSelect;
+
+/**
+ * One generated tool of a source and where it is in its lifecycle. Only `approved` is served. `imported_definition`
+ * and `approved_definition` are point-in-time snapshots (ADR-0200 exception, like ADR-0246's pins): what the last
+ * import generated and what an admin approved, kept so a re-import's drift can be reviewed. The checks tie the state
+ * to the digests, so a row written around the API cannot serve a definition nobody approved.
+ */
+export const openapiToolOperations = pgTable(
+  "openapi_tool_operations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => openapiToolSources.id, { onDelete: "cascade" }),
+    operationKey: text("operation_key").notNull(),
+    toolName: text("tool_name").notNull(),
+    state: text("state", { enum: OPENAPI_OPERATION_STATE_VALUES }).notNull().default("staged"),
+    importedDefinition: jsonb("imported_definition").notNull(),
+    importedDigest: text("imported_digest").notNull(),
+    approvedDefinition: jsonb("approved_definition"),
+    approvedDigest: text("approved_digest"),
+    decidedBy: uuid("decided_by").references(() => users.id, { onDelete: "set null" }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    stateChangedAt: timestamp("state_changed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("openapi_tool_operations_key_uq").on(t.sourceId, t.operationKey),
+    // one served tool per name on a server; a withdrawn or rejected operation may share a name with its successor
+    uniqueIndex("openapi_tool_operations_served_name_uq").on(t.sourceId, t.toolName).where(sql`${t.state} = 'approved'`),
+    check("openapi_tool_operations_state_check", sql`${t.state} IN ('staged', 'approved', 'drifted', 'rejected', 'withdrawn')`),
+    check("openapi_tool_operations_digest_check", sql`${t.importedDigest} ~ '^[0-9a-f]{64}$' AND (${t.approvedDigest} IS NULL OR ${t.approvedDigest} ~ '^[0-9a-f]{64}$')`),
+    check("openapi_tool_operations_tool_name_check", sql`${t.toolName} ~ '^[A-Za-z0-9_-]{1,64}$'`),
+    check(
+      "openapi_tool_operations_approval_check",
+      sql`(${t.approvedDigest} IS NULL) = (${t.approvedDefinition} IS NULL) AND (${t.state} <> 'approved' OR ${t.approvedDigest} = ${t.importedDigest}) AND (${t.state} <> 'drifted' OR (${t.approvedDigest} IS NOT NULL AND ${t.approvedDigest} <> ${t.importedDigest}))`,
+    ),
+  ],
+);
+export type OpenapiToolOperationRow = typeof openapiToolOperations.$inferSelect;
+// ===== end ADR-0353 =====

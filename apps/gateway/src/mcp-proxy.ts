@@ -83,6 +83,7 @@ import { checkStdioClosure } from "./mcp-transports.js";
 import { isStdioSessionLostError } from "./stdio-session-loss.js";
 import { PROJECT_HEADER } from "./project-header.js";
 import { stdioRefusalSentence } from "./mcp-egress.js";
+import { mcpCallDestinationUrl } from "./openapi-tools.js";
 import { armOutboundIdentity, IdentityAssertionRefusedError, outboundIdentityFor, type OutboundIdentity } from "./mcp-identity-assertion.js";
 import { armUpstreamExchange, UpstreamExchangeHolder } from "./upstream-token-exchange.js";
 import { timeouts } from "./timeouts.js";
@@ -1157,7 +1158,8 @@ async function executeGovernedToolCallInner(
         userId,
         surface: "mcp_tool",
         content: [preparedPii?.effectiveArguments ?? args.arguments ?? {}],
-        destinations: [serverRow.url],
+        // ADR-0353: an openapi server's calls reach its source's base URL
+        destinations: [await mcpCallDestinationUrl(db, serverRow)],
         projectId,
         subject: { serverId, toolName },
         detail: { ...(args.detail ?? {}), approvalScope, contextDigest, target: auditTarget(serverRow) },

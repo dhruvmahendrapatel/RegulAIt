@@ -639,6 +639,40 @@ export {
   type StoredDefinitionPin,
 } from "./mcp-definition-pins.js";
 
+// ADR-0353 part 1 — governed MCP tools from an OpenAPI document or REST endpoint list (the pure half)
+export {
+  allowedOperationEvents,
+  decideOpenApiOperationSchema,
+  importOpenApiToolSourceSchema,
+  nextOperationState,
+  OPENAPI_HTTP_METHODS,
+  OPENAPI_MAX_OPERATIONS,
+  OPENAPI_MAX_SPEC_BYTES,
+  OPENAPI_OPERATION_ADMIN_EVENTS,
+  OPENAPI_OPERATION_EVENTS,
+  OPENAPI_OPERATION_STATES,
+  OPENAPI_OPERATION_TRANSITIONS,
+  OPENAPI_SERVED_STATE,
+  openApiDefinitionDigest,
+  openApiOperationKey,
+  planOpenApiReimport,
+  reimportOpenApiToolSourceSchema,
+  restEndpointSchema,
+  restEndpointsToOpenApi,
+  type DecideOpenApiOperation,
+  type ImportedOpenApiOperation,
+  type ImportOpenApiToolSource,
+  type OpenApiOperationAdminEvent,
+  type OpenApiOperationDefinition,
+  type OpenApiOperationEvent,
+  type OpenApiOperationState,
+  type OpenApiReimportPlan,
+  type OpenApiRequestMapping,
+  type ReimportOpenApiToolSource,
+  type RestEndpoint,
+  type StoredOpenApiOperation,
+} from "./openapi-tools.js";
+
 // ADR-0175 A6 — admission scanning for builder skills (the ADR-0097 rule set
 // through `scanAdmissionUnits`, plus confusable and exfiltration-URL detectors).
 export {

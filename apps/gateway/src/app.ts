@@ -489,6 +489,7 @@ import {
 } from "./mcp-admission.js";
 import { registerMcpToolSyncRoutes } from "./mcp-tool-sync.js";
 import { registerMcpDefinitionPinRoutes } from "./mcp-definition-pins.js";
+import { registerOpenApiToolRoutes } from "./openapi-tool-routes.js";
 import { registerMcpHighRiskRoutes } from "./mcp-high-risk.js";
 import { registerMcpSapBusinessRoutes } from "./mcp-sap-business.js";
 import { sapStoredToolKind, serverSystemClass } from "./sap-tool-kind.js";
@@ -2319,6 +2320,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       return reply.status(409).send({ error: "mcp_server_disabled", detail: "enable the MCP server before editing it" });
     }
     const isStdio = before.transport === "stdio";
+    // ADR-0353: an openapi server's destination is its imported source's base URL, not a url on this row
+    if (before.transport === "openapi" && (body.url !== undefined || body.allowPrivateRanges !== undefined || body.transport !== undefined)) {
+      return reply.status(409).send({
+        error: "mcp_transport_immutable",
+        detail: "this server serves an imported OpenAPI source: its base URL and private-range posture are set at import. Nothing was saved.",
+      });
+    }
     // ADR-0185 G4 — a server's transport is fixed at registration; a stdio
     // block applies to a stdio server only, and a stdio server has no url or
     // private-range posture to change (`ownerUserId` is applied below, after
@@ -6139,6 +6147,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerMcpToolSyncRoutes(app, db);
   // ADR-0246: definition pinning (rug-pull detection) — the changed-since-approval queue, the diff, the re-approval
   registerMcpDefinitionPinRoutes(app, db);
+  // ADR-0353 (lane E34): governed MCP tools imported from an OpenAPI document or REST endpoint list
+  registerOpenApiToolRoutes(app, db);
   // ADR-0246 addendum: offensive MCP servers as high-risk — the policy template and the authorised-targets list
   registerMcpHighRiskRoutes(app, db);
   registerMcpSapBusinessRoutes(app, db);
