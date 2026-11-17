@@ -59,6 +59,7 @@ export const MACHINE_ONLY = new Map([
   ["GET /ui", "shell: serves the SPA's index.html (the page itself, not a call it makes)"],
   ["GET /ui/*", { reason: "shell: serves the SPA's static assets and deep links", matches: 1 }],
   ["GET /health", "health: the load balancer / container liveness probe"],
+  ["GET /ready", "readiness: the orchestrator readiness probe; 503 while draining or degraded (ADR-0343)"],
   ["GET /v1/openapi.json", "docs: the published OpenAPI document (ADR-0053), read by SDK generators"],
   ["GET /v1/api/versioning", "docs: the published versioning/deprecation policy (ADR-0053), read by API clients"],
 

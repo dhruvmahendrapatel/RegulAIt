@@ -61,6 +61,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /auth/username": "internal",
   "PUT /auth/appearance": "internal",
   "GET /health": "public-stable",
+  "GET /ready": "internal",
   // ADR-0097 — RFC 9728 protected-resource metadata. `public-stable` because
   // the RFC pins the path and the shape; the CONTENTS are derived from what
   // this gateway actually accepts, which is what makes it safe to publish.
@@ -1510,6 +1511,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /auth/username": "auth",
   "PUT /auth/appearance": "auth",
   "GET /health": "health",
+  "GET /ready": "health",
   "GET /.well-known/oauth-protected-resource": "mcp-proxy",
   "GET /.well-known/oauth-protected-resource/mcp/:serverId": "mcp-proxy",
   "POST /mcp/:serverId": "mcp-proxy",
