@@ -41,6 +41,13 @@ FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:4840d514c583a4d3d8cad
 LABEL org.opencontainers.image.title="regulait-engine-contentextract" \
       org.opencontainers.image.description="ADR-0362 content extraction (PDF, Office Open XML, CSV, zip), sandbox-only" \
       org.opencontainers.image.licenses="LicenseRef-RegulAIt"
+# ADR-0184 / ADR-0200 (patch, never allow-list): CVE-2026-76844 and CVE-2026-85091 (zlib1g, HIGH), as the
+# mcpscanner image does on this same base digest. Upgrade exactly that package to exactly the fixed version, then
+# drop what apt and dpkg wrote with wall-clock content, so the layer stays byte-reproducible. Remove this when a
+# rebuilt base digest already carries the fix.
+RUN apt-get update \
+ && apt-get install -y --only-upgrade --no-install-recommends zlib1g=1:1.3.dfsg+really1.3.1-1+deb13u1 \
+ && rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log /var/cache/ldconfig/aux-cache
 RUN python -m pip uninstall -y --disable-pip-version-check pip \
  && useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin extract
 COPY --from=closure /opt/contentextract /opt/contentextract
