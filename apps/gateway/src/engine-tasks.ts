@@ -78,6 +78,7 @@ import {
   type EngineTaskInputManifest,
   type EngineTaskState,
   type ExecutionRefusalReason,
+  FAIRLEARN_INPUT_FILE,
 } from "@regulait/shared";
 import { databaseWallNow } from "./delegation.js";
 import { expireOffers, linkedReportOf, offerLinkedPlacement, pickLinkedReport, refusedLinkedPlacement, type EngineTaskChannelHooks } from "./executor-channel.js";
@@ -416,11 +417,12 @@ async function startEngineTaskTx(
 
     // ADR-0346: the fairness evaluation's input, built from the gateway's encrypted dataset and pinned on the run (the
     // runner never sees a row); a refusal ends the run `not_run` with its code, after the entitlement checks below
+    // the path is checked first: a refused start returns (and so commits) without having pinned anything
+    if (isFairnessRun && body.subject!.path !== FAIRLEARN_INPUT_FILE) {
+      return { kind: "refused_request" as const, status: 422, error: "engine_task_input_invalid", detail: `the fairness input is placed as ${FAIRLEARN_INPUT_FILE}, at the input root` };
+    }
     const fairnessInput = isFairnessRun ? await fairnessInputTx(txDb, run) : null;
     if (fairnessInput?.ok) {
-      if (body.subject!.path !== fairnessInput.file) {
-        return { kind: "refused_request" as const, status: 422, error: "engine_task_input_invalid", detail: `the fairness input is placed as ${fairnessInput.file}, at the input root` };
-      }
       files.push({ meta: { path: body.subject!.path, size: fairnessInput.bytes.length, sha256: fairnessInput.sha256 }, source: { kind: "inline", bytes: fairnessInput.bytes } });
     }
 

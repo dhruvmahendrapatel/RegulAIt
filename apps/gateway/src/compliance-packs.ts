@@ -49,7 +49,7 @@
  * attestation-required. Everything else — a new framework, a new control, a
  * revised mapping, a customer's own internal control set — is rows, no deploy.
  */
-import { fairnessCardMeasuredSql } from "./fairness-evaluation.js";
+import { fairnessCardMeasuredSql } from "./fairness-evidence-sql.js";
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import { wantsListContract, type ListSpec } from "./list-contract.js";

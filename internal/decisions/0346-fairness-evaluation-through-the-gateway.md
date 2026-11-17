@@ -169,3 +169,45 @@ card's sign-off (draft → pending → approved), so that sign-off is the promot
 - A card whose runs carry signed evidence cannot be deleted (RESTRICT). No evidence row is written until slice 2,
   which makes the card delete route refuse it with a named 409.
 - Slices 2 (engine, metrics, evidence) and 3 (gate and APIs) follow in their own PRs.
+
+### Slice 2: the engine, the gateway's measurement and signed evidence
+
+- **The engine.** `packages/engine-fairlearn` (runner adapter, task, exchange, self-test) and `engines/fairlearn/`
+  (the image: the spikee/garak shape, every base pinned by digest, the hash-pinned closure in `requirements.txt`, the
+  licence gate on the installed closure, an offline `--network=none` proof that runs `fairlearn_metrics.py`). The
+  engine id joins `ENGINE_IDS` as kind `eval` with a null lock entry, so it cannot be enabled until a signed publish
+  (pending migration `fairlearn_engine` adds the `engines` row, off). Calls are one at a time; a 402/429 answer stops
+  the run `budget_exhausted`, another refusal `gateway_refused`, a 5xx leaves only that row unanswered. The metric
+  step reads the kept rows from a scratch file (the engine-runner's spawn guard gives a child no stdin pipe).
+  Licence-gate admissions reuse ADR-0187 decision 106 for numpy's and scipy's bundled GCC runtime and quadmath
+  libraries; scikit-learn's bundled `libgomp` (GCC Runtime Library Exception) is admitted on the same reasoning and
+  named for the owner to confirm.
+- **Verified on 2026-11-17:** the closure installs with no network in the pinned `python:3.12-slim-trixie` base
+  (`--require-hashes --no-deps --only-binary :all:`, `pip check` clean), and fairlearn 0.15.0 reproduces ADR-0222's
+  golden fixture exactly. A local image build passed every step (1.08 GB on disk).
+- **The input never passes through the runner.** A fairlearn job directory holds `job.json` and a
+  `gateway-input.json` marker; the task bridge turns the marker into the upload's `subject` (ADR-0242's mechanism,
+  widened to this one agent-run case), and the gateway's task start builds `fairness-input.json` from the evaluation
+  and its encrypted dataset (`fairnessInputTx`) and pins its sha256 in `fairness_engine_inputs` (pending migration
+  `fairness_evaluation_engine_input`). A wrong path is refused before anything is pinned. A refusal to build ends the
+  run `not_run` with `fairness_<code>`.
+- **Bounds of a model run:** at most 2,000 rows (one gateway call each), prompts of at most 16,000 characters after
+  the template is filled, an 8 MiB input file and a 2 MiB result.
+- **The measurement** (`measureModelRun`): the result must name the run, the evaluation and the pinned input sha256;
+  the parseable rows are measured with `computeFairness` and compared with fairlearn's values to 1e-9 (a metric the
+  gateway cannot compute is not compared: it is already inconclusive). The run is `inconclusive`, with a closed
+  problem code on the result, for no result, an invalid or mismatched result, an engine problem, unparseable replies
+  over the cap, a disagreement or purged rows. A cancelled, refused or expired run records nothing.
+- **Signed evidence for every run.** `signFairnessRunEvidenceTx` signs the canonical body (`canonicalJson`) with the
+  receipt key (ADR-0189), stores it in `fairness_run_evidence` and cites the run as `model_card_evidence` kind
+  `fairness_run`; ADR-0222's supplied-prediction runs are signed too. With no usable key the run is kept, no evidence
+  row is stored, and an audit row says why.
+- **Deviation from decision 3:** a model card has no project, so the upload names the project the evaluation's runs
+  attribute to (`projectId`, optional); the PII mode is the stricter of that project's cascade mode and the org
+  default, and `redact` stores the redacted text. Model-input datasets hold at most 2,000 rows.
+- **The card keeps its evidence.** `DELETE /v1/mrm/cards/:id` answers 409 `model_card_has_fairness_evidence` for a
+  card with signed evidence or an evaluation that ran. `mrm.test.ts` and `zz-adr0222-fairness.test.ts` no longer wipe
+  such cards in their cleanup.
+- **Compliance packs.** ADR-0150's `model_card_fairness` collector also counts a card whose latest run passed on its
+  current model version with signed evidence (`fairnessCardMeasuredSql`, a leaf module so the packs import no signing
+  code). Naming in a pack which of the two kinds it found is left for slice 3, with the card view.

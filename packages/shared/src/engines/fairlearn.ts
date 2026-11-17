@@ -129,6 +129,8 @@ export const fairlearnInputSchema = z
   })
   .strict()
   .refine((i) => i.labels.length === i.prompts.length, "one label per prompt")
+  // the two outputs must stay distinct after the reply mapping's trim and case-fold, or every reply maps one way
+  .refine((i) => i.outputs.favourable.trim().toLocaleLowerCase("en-US") !== i.outputs.unfavourable.trim().toLocaleLowerCase("en-US"), "the two outputs must differ")
   .refine((i) => {
     const names = Object.keys(i.attributes);
     return names.length >= 1 && names.length <= FAIRNESS_LIMITS.maxAttributes && names.every((n) => i.attributes[n]!.length === i.prompts.length);

@@ -35,10 +35,12 @@ import {
   ORG_SETTINGS_ID,
   receiptSigningKeys,
   runMigrations,
+  sql,
   type Db,
 } from "@regulait/db";
 import {
   computeFairness,
+  ENGINE_MANIFEST,
   FAIRLEARN_INPUT_FILE,
   FAIRLEARN_RESULT_VERSION,
   FAIRLEARN_SET,
@@ -65,6 +67,7 @@ import {
 } from "./fairness-evaluation.js";
 import { decryptSecret } from "./secrets.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
+import { startEngineTask } from "./engine-tasks.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -82,6 +85,9 @@ let app: ReturnType<typeof buildApp>;
 let restoreIdentity: (() => Promise<void>) | undefined;
 let agentId: string;
 let cardId: string;
+/** this suite's own admin key: the fairness write rate limit is per person, so the bootstrap token's budget is
+ * never shared with another suite */
+let adminKey: { authorization: string };
 let keyDir: string;
 const savedKeyEnv = { file: process.env.REGULAIT_RECEIPT_SIGNING_KEY, id: process.env.REGULAIT_RECEIPT_SIGNING_KEY_ID };
 
@@ -139,7 +145,7 @@ async function fairlearnRun(evaluationId: string, target = agentId) {
     .values({
       engineId: "fairlearn",
       engineVersion: "0.15.0",
-      status: "leased",
+      status: "queued",
       trigger: "manual",
       targetKind: "agent",
       targetAgentId: target,
@@ -174,6 +180,9 @@ beforeAll(async () => {
   setFairnessEvaluationRuntime({ dataKey: DATA_KEY });
   restoreIdentity = await relaxIdentityForTest(db, { mfaRequired: "off" });
   await setOrg({ fairnessTestingEnabled: true });
+  const u = await app.inject({ method: "POST", url: "/v1/users", headers: AUTH, payload: { email: `fm-admin-${RUN}@example.test`, displayName: "fm admin", isAdmin: true } });
+  const k = await app.inject({ method: "POST", url: `/v1/users/${u.json().id}/keys`, headers: AUTH, payload: { name: "fm" } });
+  adminKey = { authorization: `Bearer ${k.json().token}` };
   const [a] = await db.insert(agents).values({ name: `fm-agent-${RUN}`, provider: "mock", tier: 1 }).returning({ id: agents.id });
   agentId = a!.id;
   const [c] = await db.insert(modelCards).values({ agentId, intendedUse: `loan pre-screening ${RUN}` }).returning({ id: modelCards.id });
@@ -216,10 +225,11 @@ describe("1. the model-input upload", () => {
     expect(blocked).toMatchObject({ ok: false, error: "dataset_pii_blocked" });
     expect(JSON.stringify(blocked)).not.toContain(SECRET_CELL);
     const redacted = checkModelInputPii(p.rows, "redact", []);
-    expect(redacted.ok && redacted.findings).toBe(1);
+    // the fixture puts the address in the first row of each of the two groups
+    expect(redacted.ok && redacted.findings).toBe(2);
     expect(JSON.stringify(redacted.ok && redacted.rows.inputs)).not.toContain(SECRET_CELL);
     const logged = checkModelInputPii(p.rows, "log", []);
-    expect(logged.ok && logged.findings).toBe(1);
+    expect(logged.ok && logged.findings).toBe(2);
     expect(strictestPiiMode(null, "warn")).toBe("warn");
     expect(strictestPiiMode(null)).toBe("log");
     expect(strictestPiiMode("log", "block", "redact")).toBe("block");
@@ -229,7 +239,7 @@ describe("1. the model-input upload", () => {
     const refused = await app.inject({
       method: "POST",
       url: "/v1/mrm/fairness/datasets",
-      headers: AUTH,
+      headers: adminKey,
       payload: { kind: "model_inputs", name: `m-${RUN}`, csv: modelCsv(` ${SECRET_CELL}`), labelColumn: "outcome", favourableLabel: "1", protectedAttributes: ["region"], inputColumns: ["summary"], cardId },
     });
     expect(refused.statusCode).toBe(422);
@@ -238,7 +248,7 @@ describe("1. the model-input upload", () => {
     const ok = await app.inject({
       method: "POST",
       url: "/v1/mrm/fairness/datasets",
-      headers: AUTH,
+      headers: adminKey,
       payload: { kind: "model_inputs", name: `m2-${RUN}`, csv: modelCsv(), labelColumn: "outcome", favourableLabel: "1", protectedAttributes: ["region"], inputColumns: ["summary"], cardId },
     });
     expect(ok.statusCode, ok.body).toBe(201);
@@ -248,7 +258,7 @@ describe("1. the model-input upload", () => {
     const stored = decodeModelInputRows(decryptSecret(DATA_KEY, row!.rowsCiphertext!));
     expect(Object.keys(stored.inputs)).toEqual(["summary"]);
     // a supplied-prediction run refuses a model-input dataset
-    const run = await app.inject({ method: "POST", url: "/v1/mrm/fairness/runs", headers: AUTH, payload: { datasetId: row!.id, cardId } });
+    const run = await app.inject({ method: "POST", url: "/v1/mrm/fairness/runs", headers: adminKey, payload: { datasetId: row!.id, cardId } });
     expect(run.json().error).toBe("fairness_dataset_needs_model_run");
   });
 });
@@ -282,6 +292,38 @@ describe("2. the task's input file", () => {
     await setOrg({ fairnessTestingEnabled: false });
     expect(await fairnessInputTx(db, await fairlearnRun(ev2.id))).toEqual({ ok: false, code: "fairness_testing_off" });
     await setOrg({ fairnessTestingEnabled: true });
+  });
+});
+
+describe("2b. the task start places the gateway's file, and only it", () => {
+  it("a fairlearn run's input names the fairness file at the root; the gateway builds and pins it", async () => {
+    const { dataset } = await modelDataset();
+    const ev = await evaluationFor(dataset.id);
+    const queued = await fairlearnRun(ev.id);
+    const runner = (await db.execute(
+      sql`insert into engine_runners (engine_id, name, reported_digest, reported_version, self_test, self_test_passed) values ('fairlearn', ${`fm-runner-${RUN}`}, ${`sha256:${"1".repeat(64)}`}, '0.15.0', '{}'::jsonb, true) returning id`,
+    )) as unknown as { rows: Array<{ id: string }> };
+    const runnerId = runner.rows[0]!.id;
+    await db
+      .update(engineRuns)
+      .set({ status: "leased", runnerId, leasedAt: sql`now()` as never, leaseExpiresAt: sql`now() + interval '10 minutes'` as never, deadlineAt: sql`now() + interval '10 minutes'` as never })
+      .where(eq(engineRuns.id, queued.id));
+    const deps = { manifest: () => ENGINE_MANIFEST, artifactStore: () => null, endRunTx: async () => null, notifyEnded: async () => undefined };
+    const job = { path: `${queued.id}/job.json`, data: Buffer.from(JSON.stringify({ runId: queued.id })).toString("base64") };
+    // the gateway's file must be named, and only at its own root name
+    expect(await startEngineTask(db, deps, runnerId, queued.id, { files: [job], artifact: null, secret: "k" })).toMatchObject({ kind: "refused_request", status: 422 });
+    expect(await startEngineTask(db, deps, runnerId, queued.id, { files: [job], artifact: null, subject: { path: "other.json" }, secret: "k" })).toMatchObject({
+      kind: "refused_request",
+      status: 422,
+      error: "engine_task_input_invalid",
+    });
+    expect(await db.select().from(fairnessEngineInputs).where(eq(fairnessEngineInputs.engineRunId, queued.id))).toHaveLength(0);
+    // the honest input goes on to the entitlement checks (this fixture run has no run-as person: refused there), and
+    // the gateway's file was built and pinned in the same transaction
+    const out = await startEngineTask(db, deps, runnerId, queued.id, { files: [job], artifact: null, subject: { path: FAIRLEARN_INPUT_FILE }, secret: "k" });
+    expect(out).toMatchObject({ kind: "not_entitled", code: "run_as_gone" });
+    const [pin] = await db.select().from(fairnessEngineInputs).where(eq(fairnessEngineInputs.engineRunId, queued.id));
+    expect(pin).toMatchObject({ evaluationId: ev.id, rowCount: 80 });
   });
 });
 
@@ -372,7 +414,7 @@ describe("3–4. the run's end, measured and signed", () => {
 
 describe("5. the card keeps its evidence; the pack counts it", () => {
   it("a card with signed fairness evidence cannot be deleted, and counts as measured while its latest run passes", async () => {
-    const res = await app.inject({ method: "DELETE", url: `/v1/mrm/cards/${cardId}`, headers: AUTH });
+    const res = await app.inject({ method: "DELETE", url: `/v1/mrm/cards/${cardId}`, headers: adminKey });
     expect(res.statusCode).toBe(409);
     expect(res.json().error).toBe("model_card_has_fairness_evidence");
     const measured = async () =>

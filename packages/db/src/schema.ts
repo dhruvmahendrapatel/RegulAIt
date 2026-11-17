@@ -17359,7 +17359,7 @@ export const fairnessBreachReviews = pgTable(
 );
 
 /**
- * ADR-0346 slice 2 (migration fairness_engine_input): the input file the gateway placed for one fairlearn engine run,
+ * ADR-0346 slice 2 (migration fairness_evaluation_engine_input): the input file the gateway placed for one fairlearn engine run,
  * pinned when the task starts (the ADR-0242 subject-file pattern). The run's end counts the task's result only when it
  * names exactly this sha256. One row per engine run; the evaluation is the one the run's config named.
  */
