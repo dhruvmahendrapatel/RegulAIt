@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { defineMachine, IllegalTransitionError } from "./state-machine.js";
-import { MCP_ADMISSION_MACHINE, STATE_MACHINES, TRAINING_JOB_MACHINE } from "./state-machines.js";
+import { EVAL_RUN_MACHINE, INCIDENT_MACHINE, MCP_ADMISSION_MACHINE, STATE_MACHINES, TRAINING_JOB_MACHINE } from "./state-machines.js";
+import { INCIDENT_STATUSES } from "./accountability.js";
 import { MCP_ADMISSION_STATES } from "./mcp-admission.js";
 
 const door = () =>
@@ -113,5 +114,22 @@ describe("ADR-0348 declared machines", () => {
     }
     expect(m.canMove("clean", "cleared")).toBe(false);
     expect(m.canMove("cleared", "cleared")).toBe(true);
+  });
+
+  it("incident: open, contained and resolved move freely by an edit; close is final; a halt contains only an open one", () => {
+    const m = INCIDENT_MACHINE;
+    expect([...m.def.states]).toEqual([...INCIDENT_STATUSES]);
+    const live = ["open", "contained", "resolved"] as const;
+    for (const a of live) for (const b of live) if (a !== b) expect(m.canMove(a, b)).toBe(true);
+    for (const a of live) expect(m.can(a, "close")).toBe(true);
+    expect(m.sourcesOf("contain_by_halt")).toEqual(["open"]);
+    for (const e of m.events) expect(m.can("closed", e)).toBe(false);
+  });
+
+  it("eval_run: a running run ends completed or error, and nothing leaves a finished run", () => {
+    const m = EVAL_RUN_MACHINE;
+    expect(m.next("running", "complete")).toBe("completed");
+    expect(m.next("running", "crash")).toBe("error");
+    for (const s of m.def.terminal) for (const e of m.events) expect(m.can(s, e)).toBe(false);
   });
 });
