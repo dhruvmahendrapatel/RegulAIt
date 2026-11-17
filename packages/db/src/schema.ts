@@ -2013,6 +2013,9 @@ export const auditLog = pgTable(
         "auditor_grant",
         // ADR-0310 (G2): a signed managed-settings bundle export (objectId = the bundle). Plain text column — no DDL.
         "managed_settings_bundle",
+        // ADR-0357 (lane E38): a governance-config export, plan (dry run) or apply, and each object an apply changes
+        // (objectId = null; the detail names the section and key). Plain text column — no DDL.
+        "governance_config",
       ],
     })
       .notNull()
