@@ -270,6 +270,10 @@ type KeyFound struct {
 	KeyName string `json:"keyName"`          // the field or variable name holding the key
 	RuleID  string `json:"ruleId,omitempty"` // the compiled `dlp.secret.*` rule that matched, if any
 	Present bool   `json:"present"`
+	// Fingerprint is the keyed HMAC of the value under the tenant's credential-reuse key, and FingerprintKeyID names
+	// that key (ADR-0350 §11). Both are empty when no key is configured; the value itself is never reported.
+	Fingerprint      string `json:"fingerprint,omitempty"`
+	FingerprintKeyID string `json:"fingerprintKeyId,omitempty"`
 }
 
 // Gap is something a collector could not observe, so posture tells the truth about coverage.

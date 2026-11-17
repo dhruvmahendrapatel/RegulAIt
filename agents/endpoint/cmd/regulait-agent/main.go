@@ -9,12 +9,16 @@
 //	regulait-agent hook AGENT -policy FILE          on-device enforcement (ADR-0298, ADR-0330, ADR-0350, default off): the
 //	                                                MCP and built-in command hook for AGENT = claude-code, cursor, copilot-cli
 //	                                                or codex; reads stdin, never the network
+//	regulait-agent credential-reuse-key             print a new tenant credential-reuse key (ADR-0350 §11) and its key id,
+//	                                                for the admin to deploy, the same on every device, in the config file
 //	regulait-agent hook-capabilities                print each hook adapter's contract and capability matrix as JSON
 //	regulait-agent version
 package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -31,16 +35,20 @@ import (
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/collect"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/enforce"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/pack"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/secrets"
 )
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: regulait-agent redeem-ticket [-ticket-gid N] | register | run-once | run | preview -manifest FILE | hook claude-code|cursor|copilot-cli|codex -policy FILE | hook-capabilities | version")
+	fmt.Fprintln(os.Stderr, "usage: regulait-agent redeem-ticket [-ticket-gid N] | register | run-once | run | preview -manifest FILE | hook claude-code|cursor|copilot-cli|codex -policy FILE | hook-capabilities | credential-reuse-key | version")
 	os.Exit(2)
 }
 
 func main() {
 	if len(os.Args) < 2 {
 		usage()
+	}
+	if os.Args[1] == "credential-reuse-key" {
+		os.Exit(credentialReuseKey())
 	}
 	if os.Args[1] == "hook-capabilities" {
 		// the per-agent capability matrix (ADR-0330), for the admin console and for a customer's own review
@@ -194,6 +202,25 @@ func resolveExisting(p string) string {
 		}
 		rest = filepath.Join(filepath.Base(dir), rest)
 	}
+}
+
+// credentialReuseKey prints a fresh 32-byte tenant key, base64url, and its key id. The key is printed once and never
+// sent anywhere: the control plane compares fingerprints and never needs it.
+func credentialReuseKey() int {
+	raw := make([]byte, secrets.FingerprintKeyBytes)
+	if _, err := rand.Read(raw); err != nil {
+		fmt.Fprintln(os.Stderr, "regulait-agent: no randomness:", err)
+		return 1
+	}
+	key := base64.RawURLEncoding.EncodeToString(raw)
+	f, err := secrets.NewFingerprinter(key)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "regulait-agent:", err)
+		return 1
+	}
+	out, _ := json.Marshal(map[string]string{"credentialReuseKey": key, "keyId": f.KeyID()})
+	fmt.Println(string(out))
+	return 0
 }
 
 func fail(log *slog.Logger, err error) {

@@ -36,7 +36,7 @@ import {
   type EndpointObservation,
   type EndpointObservationKey,
 } from "@regulait/shared";
-import { MCP_CONFIG_KIND, MCP_SERVER_MATCHED_ON, mcpServerSchema, mcpSightingsOf, type McpServerSighting } from "./endpoint-mcp-config.js";
+import { keyFoundSchema, MCP_CONFIG_KIND, MCP_SERVER_MATCHED_ON, mcpServerSchema, mcpSightingsOf, type McpServerSighting } from "./endpoint-mcp-config.js";
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -167,7 +167,7 @@ const factSchema = z
     port: z.number().int().min(1).max(65_535).optional(),
     portOnly: z.boolean().optional(),
     keys: z
-      .array(z.object({ keyName: z.string().min(1).max(128), ruleId: z.string().max(64).optional(), present: z.boolean() }).strict())
+      .array(keyFoundSchema)
       .max(ENDPOINT_FACT_MAX_KEYS)
       .optional(),
     // ADR-0259: one configured MCP server, on an mcp_config fact only

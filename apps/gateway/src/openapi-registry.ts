@@ -1047,6 +1047,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/endpoint-addons/versions": "internal",
   "GET /v1/endpoint-addons/sightings": "internal",
   "GET /v1/endpoint-addons/flagged": "internal",
+  // ADR-0350 §11 (lane E31): credential reuse across endpoints, from fingerprints only
+  "GET /v1/endpoint-credential-reuse": "internal",
   // ADR-0193 (I4) P1: content source trust tiers, the write floor, and the P0 provenance evidence view
   "GET /v1/content-trust": "internal",
   "PUT /v1/content-trust/sources/:sourceKind/:sourceId": "internal",
@@ -2395,6 +2397,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/endpoint-addons/versions": "shadow-ai",
   "GET /v1/endpoint-addons/sightings": "shadow-ai",
   "GET /v1/endpoint-addons/flagged": "shadow-ai",
+  "GET /v1/endpoint-credential-reuse": "shadow-ai",
   "GET /v1/discovery/sources/:sourceId/endpoint-devices/export.xlsx": "shadow-ai",
   "POST /v1/discovery/endpoint-devices/:deviceId/revoke": "shadow-ai",
   "GET /v1/content-trust": "content-provenance",

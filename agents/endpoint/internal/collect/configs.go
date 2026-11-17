@@ -62,7 +62,7 @@ func keysIn(as []assignment, listed []string) []contract.KeyFound {
 		if had && prev.RuleID != "" {
 			continue
 		}
-		byName[name] = contract.KeyFound{KeyName: name, RuleID: rule, Present: true}
+		byName[name] = keyFound(name, rule, a.value)
 	}
 	out := make([]contract.KeyFound, 0, len(byName))
 	for _, kf := range byName {

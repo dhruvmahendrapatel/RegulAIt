@@ -606,7 +606,7 @@ func rootMount(args []string, container bool) bool {
 func describeURL(raw string) (host string, plaintext bool, keys []contract.KeyFound) {
 	raw = strings.TrimSpace(raw)
 	if r := secrets.Match(raw); r != "" {
-		keys = append(keys, contract.KeyFound{KeyName: "(url)", RuleID: r, Present: true})
+		keys = append(keys, keyFound("(url)", r, raw))
 	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" {
@@ -614,14 +614,15 @@ func describeURL(raw string) (host string, plaintext bool, keys []contract.KeyFo
 	}
 	if u.User != nil {
 		if _, has := u.User.Password(); has {
-			keys = append(keys, contract.KeyFound{KeyName: "(url)", RuleID: RuleURLUserinfo, Present: true})
+			pw, _ := u.User.Password()
+			keys = append(keys, keyFound("(url)", RuleURLUserinfo, pw))
 		}
 	}
 	if len(keys) == 0 {
 		for _, vs := range u.Query() {
 			for _, v := range vs {
 				if secrets.Match(v) != "" {
-					keys = append(keys, contract.KeyFound{KeyName: "(url)", RuleID: RuleURLKey, Present: true})
+					keys = append(keys, keyFound("(url)", RuleURLKey, v))
 				}
 			}
 		}
@@ -666,9 +667,9 @@ func envKeys(v any) []contract.KeyFound {
 			reported = unnamed
 		}
 		if r := secrets.Match(val); r != "" {
-			out = append(out, contract.KeyFound{KeyName: reported, RuleID: r, Present: true})
+			out = append(out, keyFound(reported, r, val))
 		} else if secretName(name) && !reference(val) {
-			out = append(out, contract.KeyFound{KeyName: reported, RuleID: RuleNamedLiteral, Present: true})
+			out = append(out, keyFound(reported, RuleNamedLiteral, val))
 		}
 	}
 	return out
@@ -691,17 +692,17 @@ func headerKeys(v any) []contract.KeyFound {
 		lower := strings.ToLower(name)
 		switch {
 		case secrets.Match(val) != "":
-			out = append(out, contract.KeyFound{KeyName: reported, RuleID: secrets.Match(val), Present: true})
+			out = append(out, keyFound(reported, secrets.Match(val), val))
 		case lower == "authorization" || lower == "proxy-authorization":
 			cred := strings.TrimSpace(val)
 			if i := strings.IndexByte(cred, ' '); i > 0 {
 				cred = strings.TrimSpace(cred[i+1:])
 			}
 			if cred != "" && !reference(cred) {
-				out = append(out, contract.KeyFound{KeyName: reported, RuleID: RuleAuthHeader, Present: true})
+				out = append(out, keyFound(reported, RuleAuthHeader, cred))
 			}
 		case secretName(strings.ReplaceAll(strings.ToUpper(name), "-", "_")) && !reference(val):
-			out = append(out, contract.KeyFound{KeyName: reported, RuleID: RuleNamedLiteral, Present: true})
+			out = append(out, keyFound(reported, RuleNamedLiteral, val))
 		}
 	}
 	return out
@@ -712,7 +713,7 @@ func mergeKeys(in []contract.KeyFound) []contract.KeyFound {
 	seen := map[string]bool{}
 	var out []contract.KeyFound
 	for _, k := range in {
-		id := k.KeyName + "\x00" + k.RuleID
+		id := k.KeyName + "\x00" + k.RuleID + "\x00" + k.Fingerprint
 		if seen[id] {
 			continue
 		}
@@ -723,7 +724,10 @@ func mergeKeys(in []contract.KeyFound) []contract.KeyFound {
 		if out[i].KeyName != out[j].KeyName {
 			return out[i].KeyName < out[j].KeyName
 		}
-		return out[i].RuleID < out[j].RuleID
+		if out[i].RuleID != out[j].RuleID {
+			return out[i].RuleID < out[j].RuleID
+		}
+		return out[i].Fingerprint < out[j].Fingerprint
 	})
 	return out
 }

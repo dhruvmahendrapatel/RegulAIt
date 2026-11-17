@@ -165,6 +165,7 @@ func (c *Cycle) RunOnce(ctx context.Context) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	env.Fingerprint = cfg.CredentialReuse
 	facts, gaps := collect.Collect(env, verified.Collection, disabled)
 	if facts == nil {
 		facts = []contract.Fact{}

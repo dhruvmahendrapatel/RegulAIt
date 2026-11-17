@@ -40,6 +40,7 @@
  * fields only.
  */
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { recordCredentialFingerprints } from "./endpoint-credential-reuse.js";
 import { z } from "zod";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { prefixedBearer } from "./prefixed-bearer.js";
@@ -834,6 +835,10 @@ export function registerEndpointAgentRoutes(app: FastifyInstance, db: Db, opts: 
         const complete = !report.gaps.some((g) => g.kind === MCP_CONFIG_KIND);
         mcp = await recordMcpServers(db, { sourceId: agent.sourceId, deviceId: agent.deviceId, reportId: row.id, collectedAt: new Date(report.collectedAt), sightings: reduction.mcpServers, complete });
       }
+      // ADR-0350 §11: credential-reuse fingerprints of the facts this report path accepted (never env-name facts, and
+      // MCP facts only while the switch is on); the values themselves never reach here
+      const accepted = report.facts.filter((f) => f.kind !== "env_name" && f.matchedOn !== "envName" && (f.kind !== MCP_CONFIG_KIND || mcpConfigEnabled));
+      const reuse = await recordCredentialFingerprints(db, agent.identityId, accepted.flatMap((f) => [...(f.keys ?? []), ...(f.server?.keys ?? [])]));
       await db.update(endpointAgentIdentities).set({ lastReportAt: sql`now()` }).where(eq(endpointAgentIdentities.identityId, agent.identityId));
       await audit(db, NIL_UUID, "discovery_source", agent.sourceId, "endpoint-agent-report-accepted", "allow", `an endpoint agent report was accepted: ${report.facts.length} fact(s), ${reduction.sightings.length} catalogue sighting(s) (ADR-0195 SD4b)`, {
         deviceId: agent.deviceId,
@@ -847,6 +852,8 @@ export function registerEndpointAgentRoutes(app: FastifyInstance, db: Db, opts: 
         mcpServersRecorded: mcp.upserted,
         mcpServersPruned: mcp.pruned,
         mcpServersAdded: mcp.added,
+        credentialFingerprints: reuse.recorded,
+        credentialReuseRaised: reuse.reused,
         droppedSnapshots: report.droppedSnapshots,
         bodySha256,
       });
