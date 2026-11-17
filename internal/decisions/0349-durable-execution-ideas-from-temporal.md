@@ -40,19 +40,19 @@ Temporal replays recorded histories against new workflow code, so a change that 
 behave differently fails before it ships. Our equivalent is smaller, because our "workflow code" is the kernel plus
 the instance's snapshotted definition.
 
-- **One fold.** `replayEvents(definition, events)` in the kernel folds the events through `transition()` from
-  `initialState()`. It returns the final state and the status after each event. A refusal is a result, with the
-  index of the event, not a throw. `stateDifference(expected, actual)` names the first field that differs.
-  Lane E23's analytics projection (PR #888) can call the same fold for its own replay once both have merged.
+- **One replayer.** The check uses ADR-0342's `replayHistory(definition, history, stored)` (lane E23, PR #888), the
+  kernel's one pure replayer, shared with process analytics. It folds the events through `transition()` from
+  `initialState()` and reports `ok` with every step, or `diverged` / `too_long`. Slice 1 first shipped its own fold
+  next to it; the code review asked for one replayer, so that copy was removed and this check stacks on PR #888.
 - **Recorded fixtures.** `packages/workflow-kernel/replay-fixtures/*.json` hold histories in the exact shape of
   `workflow_events.event`, each with the definition snapshot it ran on (defaults applied, as
   `workflow_instances.definition` stores it) and the state and status trail recorded with it. The first ten cover
   both shipped pipeline shapes (intake to merge, and governed deploy with verify and rollback), every event kind and
   every status an instance can rest in.
-- **The check.** `replay.test.ts` runs in the kernel suite, which CI runs on every PR. For every fixture:
+- **The check.** `replay-fixtures.test.ts` runs in the kernel suite, which CI runs on every PR. For every fixture:
   - the snapshot still passes `validateDefinition`;
-  - the fold reaches the recorded status after every event;
-  - the final state equals the recorded one.
+  - `replayHistory` replays it `ok`, in recorded order, and every step rests in the recorded status;
+  - the final state equals the recorded one in full (not only the parts `replayHistory` compares).
 
   Compile-time lists make the coverage test ask for a new fixture whenever an event kind or a resting status is added
   to the kernel.
@@ -67,8 +67,8 @@ Temporal's workflow-id reuse policy refuses a second running workflow with the s
 instance per template set + target + work item.**
 
 - **The key.** `POST /v1/workflows/instances` takes an optional `workItem` (the PM tool's item key, at most 200
-  characters, a verbatim external identifier). With a work item, the start key is the routed template ids (in
-  routing order), `change.targetSystem` (null counts as a value) and the work item. Without a work item there is no
+  characters, a verbatim external identifier). With a work item, the start key is the routed template SET (the
+  ids in any order), `change.targetSystem` (null counts as a value) and the work item. Without a work item there is no
   identity to deduplicate on, and the start behaves as before.
 - **Enforced in the database.** A partial unique index over `workflow_instances` (template ids, target and work
   item, `NULLS NOT DISTINCT`, `WHERE status NOT IN` the four terminal statuses, and only where a work item is set).
@@ -170,7 +170,7 @@ lane E29's `MachineDef` (PR #920) and its guarded writes, not with a new helper.
 Slices 2–5 are separate PRs (#927 for slice 2; slices 3–5 follow). Where the build differs in detail from the decisions
 above, it is recorded here, against the decision it refers to.
 
-- **Decision 2 (start conflict), PR #927.** As decided. The key's template ids are the routed ids in routing order.
+- **Decision 2 (start conflict), PR #927.** As decided. The key compares the template SET: `regulait_workflow_template_set(jsonb)`, an immutable SQL function, sorts the ids in byte order, and the unique index and the lookup use the same expression (code review: routing order must not let one set start twice). The open-instance predicate is built from the one declared terminal-status list.
   A race is answered like the pre-check, because the insert runs under a savepoint, so a caller's own transaction
   survives the unique violation.
 - **Decision 3 (heartbeat).**

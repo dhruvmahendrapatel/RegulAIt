@@ -38,11 +38,26 @@ if (existsSync(out)) {
   process.exit(1);
 }
 const definition = kernel.validateDefinition(scenario.definition);
-const result = kernel.replayEvents(definition, scenario.events);
-if (!result.ok) {
-  console.error(`the kernel refuses event ${result.index} (${result.event.kind}): ${result.reason}`);
+// what today's kernel makes of the events, event by event; the kernel's refusal stops the recording
+const statuses = [];
+let state = kernel.initialState(definition);
+for (const [i, event] of scenario.events.entries()) {
+  try {
+    state = kernel.transition(definition, state, event).state;
+  } catch (err) {
+    console.error(`the kernel refuses event ${i} (${event.kind}): ${err instanceof Error ? err.message : "refused"}`);
+    process.exit(1);
+  }
+  statuses.push(state.status);
+}
+// and the fixture must replay under the one replayer the CI check uses (ADR-0342 replayHistory)
+const history = scenario.events.map((event, i) => ({ event, at: new Date(Date.UTC(2026, 0, 1) + i * 1000) }));
+const replayed = kernel.replayHistory(definition, history, state);
+if (replayed.status !== "ok") {
+  console.error(`replayHistory does not reproduce the recording: ${replayed.status}`);
   process.exit(1);
 }
+const result = { state, statuses };
 const fixture = {
   fixture: 1,
   name: scenario.name,

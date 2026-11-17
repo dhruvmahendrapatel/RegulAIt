@@ -818,6 +818,9 @@ describe("every sweep is registered", () => {
         // ADR-0349 slice 4 (lane E30): starts due workflow schedules as their creators; driven end to end in
         // zz-adr0349-schedules.test.ts (with no schedule it starts nothing)
         SCHEDULER_JOB_NAMES.workflowSchedules,
+        // ADR-0342 (lane E23): rebuilds the process analytics read model from the workflow history; driven end to end
+        // in zz-adr0342-process-analytics.test.ts (reads workflow state only)
+        SCHEDULER_JOB_NAMES.processAnalyticsProjector,
       ].sort(),
     );
     const discovery = registry.get(SCHEDULER_JOB_NAMES.discoveryScanSweep)!;

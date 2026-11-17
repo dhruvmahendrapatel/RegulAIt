@@ -17153,6 +17153,119 @@ export const endpointAddonSightingSecretTypes = pgTable(
 );
 // ===== end ADR-0332 =====
 
+// ===== ADR-0342 (lane E23): process analytics read model =====
+// A MEASURED READ MODEL (ADR-0200 addendum). Source of truth: `workflow_events` (the append-only per-instance history)
+// replayed through the pure workflow kernel against the instance's snapshotted definition. The projector
+// (apps/gateway/src/process-analytics.ts) rebuilds an instance's rows whenever `workflow_instances.updated_at` or its
+// project changes, so every row here can be dropped and rebuilt from the source. Nothing here is evidence: the audit
+// chain and `workflow_events` stay the record. Row-level security is enabled and forced (migration
+// `pending/process_analytics.sql`).
+
+export const PROCESS_ANALYTICS_REPLAY_STATUSES = ["ok", "diverged", "too_long"] as const;
+export type ProcessAnalyticsReplayStatus = (typeof PROCESS_ANALYTICS_REPLAY_STATUSES)[number];
+export const PROCESS_ANALYTICS_EXIT_KINDS = ["advanced", "reworked", "ended"] as const;
+export type ProcessAnalyticsExitKind = (typeof PROCESS_ANALYTICS_EXIT_KINDS)[number];
+
+/** one row per projected workflow instance */
+export const processAnalyticsInstances = pgTable(
+  "process_analytics_instances",
+  {
+    instanceId: uuid("instance_id")
+      .primaryKey()
+      .references(() => workflowInstances.id, { onDelete: "cascade" }),
+    /** READ-MODEL COPY of `workflow_instances.project_id` (ADR-0200 addendum exception): the row-level security read
+     * key and the scope filter. The projector re-syncs it whenever the instance's project differs. */
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
+    /** the first event's time (the `start` event) */
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    /** when the instance last reached a terminal status; NULL while it is open (a re-opened instance is open again) */
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+    /** the terminal status reached at `endedAt` (ADR-0200 exception: derived from the replay, rebuilt with it) */
+    terminalStatus: text("terminal_status"),
+    lastEventAt: timestamp("last_event_at", { withTimezone: true }).notNull(),
+    eventCount: integer("event_count").notNull(),
+    /** `ok`: the replay reproduced the stored state; `diverged` or `too_long`: the instance has no spans and is counted
+     * as excluded on every response */
+    replayStatus: text("replay_status", { enum: PROCESS_ANALYTICS_REPLAY_STATUSES }).notNull(),
+    /** the `workflow_instances.updated_at` this projection was built from (the change detector) */
+    sourceUpdatedAt: timestamp("source_updated_at", { withTimezone: true }).notNull(),
+    projectedAt: timestamp("projected_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("process_analytics_instances_replay_check", sql`${t.replayStatus} IN ('ok','diverged','too_long')`),
+    check("process_analytics_instances_ended_check", sql`(${t.endedAt} IS NULL) = (${t.terminalStatus} IS NULL)`),
+    // repeats TERMINAL_STATUSES from @regulait/workflow-kernel (the one declared set); keep the two equal
+    check(
+      "process_analytics_instances_terminal_check",
+      sql`${t.terminalStatus} IS NULL OR ${t.terminalStatus} IN ('completed','aborted','denied','rolled_back')`,
+    ),
+    check("process_analytics_instances_event_count_check", sql`${t.eventCount} >= 0`),
+    index("process_analytics_instances_project_started_idx").on(t.projectId, t.startedAt),
+    index("process_analytics_instances_started_idx").on(t.startedAt),
+    index("process_analytics_instances_ended_idx").on(t.endedAt),
+  ],
+);
+export type ProcessAnalyticsInstanceRow = typeof processAnalyticsInstances.$inferSelect;
+
+/** the templates an instance was started from (a merged instance has several); a join table, never a jsonb copy */
+export const processAnalyticsInstanceTemplates = pgTable(
+  "process_analytics_instance_templates",
+  {
+    instanceId: uuid("instance_id")
+      .notNull()
+      .references(() => processAnalyticsInstances.instanceId, { onDelete: "cascade" }),
+    templateId: uuid("template_id")
+      .notNull()
+      .references(() => workflowTemplates.id, { onDelete: "cascade" }),
+  },
+  (t) => [
+    primaryKey({ name: "process_analytics_instance_templates_pk", columns: [t.instanceId, t.templateId] }),
+    index("process_analytics_instance_templates_template_idx").on(t.templateId),
+  ],
+);
+
+/** one row per visit of an instance to a stage: entry, exit, and how the time inside split into wait and work */
+export const processAnalyticsStageSpans = pgTable(
+  "process_analytics_stage_spans",
+  {
+    instanceId: uuid("instance_id")
+      .notNull()
+      .references(() => processAnalyticsInstances.instanceId, { onDelete: "cascade" }),
+    /** 0-based order of the span within the instance */
+    seq: integer("seq").notNull(),
+    /** the stage's id and type in the instance's SNAPSHOTTED definition (ADR-0200 exception: point-in-time, as run) */
+    stageId: text("stage_id").notNull(),
+    stageType: text("stage_type").notNull(),
+    /** 1 = the first visit; 2+ = the stage ran again after rework */
+    visit: integer("visit").notNull(),
+    enteredAt: timestamp("entered_at", { withTimezone: true }).notNull(),
+    /** NULL while the instance is still at this stage */
+    exitedAt: timestamp("exited_at", { withTimezone: true }),
+    /** time in a status that needs a person or an outside party (approval, artifact, plan, trigger, failed check,
+     * deploy handoff); up to `exitedAt`, or up to the instance's last event while open */
+    waitMs: bigint("wait_ms", { mode: "number" }).notNull(),
+    /** time the engine was executing the stage or it was queued for an executor */
+    workMs: bigint("work_ms", { mode: "number" }).notNull(),
+    exitKind: text("exit_kind", { enum: PROCESS_ANALYTICS_EXIT_KINDS }),
+  },
+  (t) => [
+    primaryKey({ name: "process_analytics_stage_spans_pk", columns: [t.instanceId, t.seq] }),
+    check("process_analytics_stage_spans_seq_check", sql`${t.seq} >= 0 AND ${t.visit} >= 1`),
+    check("process_analytics_stage_spans_ms_check", sql`${t.waitMs} >= 0 AND ${t.workMs} >= 0`),
+    check("process_analytics_stage_spans_exit_check", sql`(${t.exitedAt} IS NULL) = (${t.exitKind} IS NULL)`),
+    check(
+      "process_analytics_stage_spans_exit_kind_check",
+      sql`${t.exitKind} IS NULL OR ${t.exitKind} IN ('advanced','reworked','ended')`,
+    ),
+    check("process_analytics_stage_spans_order_check", sql`${t.exitedAt} IS NULL OR ${t.exitedAt} >= ${t.enteredAt}`),
+    check("process_analytics_stage_spans_stage_id_check", sql`char_length(${t.stageId}) >= 1`),
+    index("process_analytics_stage_spans_stage_exited_idx").on(t.stageId, t.exitedAt),
+    index("process_analytics_stage_spans_exited_idx").on(t.exitedAt),
+  ],
+);
+export type ProcessAnalyticsStageSpanRow = typeof processAnalyticsStageSpans.$inferSelect;
+// ===== end ADR-0342 =====
+
 // ===== ADR-0341 — the visual pipeline builder: drafts and versions of workflow templates =====
 /**
  * One open draft per template, edited on the builder's canvas. `definition` is a schema-validated configuration
