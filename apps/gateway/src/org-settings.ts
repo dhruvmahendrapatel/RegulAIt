@@ -94,6 +94,7 @@ import {
   settingsRelaxStepUpRefusal,
   stepUpRefusal,
 } from "./step-up.js";
+import { pruneRuleStepSuggestions } from "./rule-step-retention.js";
 
 export type { OrgSettingsRow };
 
@@ -300,6 +301,8 @@ export interface AuditPruneResult {
   deleted: number;
   /** ADR-0070: traces removed under the SAME §8.3 floor, in the same pass */
   tracesDeleted: number;
+  /** ADR-0327: rule-like step suggestions (which copy span input values) removed under the same floor */
+  ruleStepSuggestionsDeleted: number;
   retainedDays: number | null;
   floorSource: string[];
 }
@@ -318,7 +321,7 @@ export function runAuditPruneOnce(db: Db, actorUserId: string | null, auto: bool
 async function runAuditPruneOnceUnscoped(db: Db, actorUserId: string | null, auto: boolean): Promise<AuditPruneResult> {
   const f = await retentionFloor(db);
   if (f.retainedDays == null || f.cutoff == null) {
-    return { deleted: 0, tracesDeleted: 0, retainedDays: null, floorSource: [] };
+    return { deleted: 0, tracesDeleted: 0, ruleStepSuggestionsDeleted: 0, retainedDays: null, floorSource: [] };
   }
   // A4: prune under the COMPOSED floor — the global cutoff, minus rows a
   // longer per-mode override still retains (MAX-only: never shortens).
@@ -402,9 +405,21 @@ async function runAuditPruneOnceUnscoped(db: Db, actorUserId: string | null, aut
     // never let trace pruning fail the audit prune it rides along with
     tracesDeleted = 0;
   }
+  // ADR-0327 slice 3 — RULE-LIKE STEP SUGGESTIONS FOLLOW THE SAME FLOOR. A suggestion's rule copies input values out
+  // of trace spans, and its scan window ends at `detected_at`, so a suggestion detected before the cutoff draws only on
+  // spans this pass has just removed (a held trace keeps its evidence, not the suggestion derived from it). Deleted,
+  // not redacted: the next scan rebuilds it from spans still held.
+  let ruleStepSuggestionsDeleted = 0;
+  try {
+    ruleStepSuggestionsDeleted = await pruneRuleStepSuggestions(db, f.cutoff);
+  } catch {
+    // like the trace prune, never let it fail the audit prune it rides along with
+    ruleStepSuggestionsDeleted = 0;
+  }
   return {
     deleted: deleted.length,
     tracesDeleted,
+    ruleStepSuggestionsDeleted,
     retainedDays: f.retainedDays,
     floorSource: f.floorSource,
   };
