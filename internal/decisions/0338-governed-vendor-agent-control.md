@@ -153,8 +153,22 @@ Read routes: `GET /v1/vendor-agent-control/actions` (keyset-paginated, at most 2
 
 ### 5. States and audit
 
-An action is `requested → approved → executing → succeeded | already_in_state | failed | unknown`, or `denied` or
-`cancelled`. Every transition writes one audit row in the same transaction as the state change, with fixed fields
+The states and their allowed transitions are one declared table, `VENDOR_ACTION_TRANSITIONS` in
+`@regulait/shared`. Every route goes through its `assertTransition(from, to)`, with no scattered if/else. The database
+write is a conditional `UPDATE … WHERE status = <from>`, so two racing requests cannot both move an action.
+
+| From | Allowed to |
+|---|---|
+| `requested` | `approved`, `denied`, `cancelled` |
+| `approved` | `executing`, `cancelled` |
+| `executing` | `succeeded`, `already_in_state`, `failed`, `unknown` |
+| `unknown` | `succeeded`, `already_in_state`, `failed` (settled by a state re-read, never a second `apply`) |
+| `succeeded`, `already_in_state`, `failed`, `denied`, `cancelled` | none (terminal) |
+
+A restore is a new action row, so terminal rows stay terminal. If lane E29's app-wide state-machine work
+lands a shared machine helper, this table moves onto it unchanged. This lane refactors no other machine.
+
+Every transition writes one audit row in the same transaction as the state change, with fixed fields
 only: action id, record id, source, registry, vendor id, action, reverses, prior and observed state, outcome code and
 HTTP status. No vendor body, token or free text from the vendor reaches the audit trail.
 
@@ -180,6 +194,14 @@ barrier applies unchanged.
 - **Microsoft.** `Microsoft.PowerPlatform.Management` is a .NET SDK; there is no maintained JavaScript Power Platform
   API client. The three calls are REST calls through the guarded fetch. The Entra token comes from `@azure/identity`,
   already used by discovery.
+- **The state table.** Searched 2026-11-17. Two approaches were compared:
+  - `xstate` (MIT, actively maintained, v5) gives interpreted actors, timers and visualisation. None of these is
+    needed for a server-side lifecycle of nine states whose source of truth is a database row, and xstate is not used
+    elsewhere in the repo.
+  - A declared transition table with a conditional SQL update. It is enforced in the database, there is no runtime
+    to load, and it is the shape lane E29's app-wide audit expects.
+
+  The table is adopted, and xstate is not.
 - **Salesforce, n8n, OpenAI.** Chosen in slice 2, with the same rule: an existing pinned client only when it signs or
   does something we must not hand-write; otherwise REST through the guarded fetch.
 
