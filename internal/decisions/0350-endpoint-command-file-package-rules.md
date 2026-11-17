@@ -147,11 +147,39 @@ exposes the fields a record needs (`Rule`, `Verdict`, `WouldDeny`, `WouldAsk`, t
 Both modules are pinned in `go.mod`/`go.sum` and listed in `agents/endpoint/THIRD_PARTY.md`; nothing is fetched at
 run time.
 
+### 9. One policy, every route (master brief 2026-11-17, owner-approved from the Manifold review)
+
+The same action must get the same decision whether an agent reaches it through an MCP tool, a CLI on the device or a
+direct API call. Creating a gist is the worked example: the GitHub MCP `create_gist` tool, `gh gist create`, and
+`curl -X POST https://api.github.com/gists` are one action.
+
+- **A declared action catalogue** in shared code (`packages/shared`, one JSON file, embedded in the Go agent and held
+  equal to it by a CI check, as the secret rules already are). Each entry is a canonical action id
+  (`github.gist.create`) with its recognisers on every route: MCP (server and tool names), CLI (argv globs, through
+  §2's parser and wrapper table) and HTTP (method, host and path glob; on the device from `curl`, `wget`, `http` and
+  `gh api` argv, on the gateway from the governed connector or egress request).
+- **Action rules** (`actions: [{id, action, verdict}]`) live in the one policy the control plane compiles (§6). The
+  compiler emits the gateway's rule and the device's rule from the same entry, so neither can be edited alone.
+- **Conformance test:** one shared fixture file lists each action's equivalent calls on every route and the expected
+  verdict for a given policy. The Go engine and the gateway's decision core each run the whole file in CI; a
+  disagreement fails both suites. The gist example is the first fixture.
+- **Unknown routes stay unknown.** An HTTP call whose method or URL is not literal is unresolved (§2), and an action
+  the catalogue does not list is decided by the ordinary exec rules. Matching on the device is still textual.
+
+### 10. Response vocabulary (lane E35, ADR-0354)
+
+Lane E35 defines graduated responses (advise, correct, block-session, disable) on the same decision model. On-device
+decisions use that vocabulary when ADR-0354 lands, rather than a second one. Until then the device's answers are the
+agents' own (allow, ask, deny), and the mapping is agreed with E35 through the master: the proposed one is ask as
+"advise" with confirmation, deny as a block of the call, and block-session and disable as control-plane responses
+the device carries out by refusing every call (as a missing policy already does). Slice 2 builds that mapping.
+
 ### Slices
 
 1. **This PR:** §1–4 and §8 in `agents/endpoint` (the engine, the four adapters, fixtures, the matrix). Default off.
 2. The compiler (§6) in shared code and the gateway, signed by the B4 signer (stacks on #867), and policy delivery to
-   the device with its device id.
+   the device with its device id; the action catalogue, action rules and the cross-route conformance test (§9); the
+   E35 response mapping (§10).
 3. Device groups and exceptions (§5): migration, routes (known UI gaps on #453), the lifecycle table, step-up, audit.
 
 ## Owner questions open (built with the secure default)
