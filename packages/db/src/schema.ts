@@ -2006,6 +2006,8 @@ export const auditLog = pgTable(
         "trust_publication",
         "trust_center",
         "auditor_grant",
+        // ADR-0310 (G2): a signed managed-settings bundle export (objectId = the bundle). Plain text column — no DDL.
+        "managed_settings_bundle",
         // ADR-0333 (E15): a detection incident (objectId = the incident) and a detection rule pack change (objectId
         // null). Plain text column — no DDL.
         "detection_incident",
@@ -10711,6 +10713,10 @@ export const traceSpans = pgTable(
     uniqueIndex("trace_spans_run_uq")
       .on(t.traceId, t.runId)
       .where(sql`${t.kind} = 'run' AND ${t.runId} IS NOT NULL`),
+    /** ADR-0327 (migration `rule_step_detection`): the rule-like step scan groups recent model spans per step */
+    index("trace_spans_llm_step_started_idx")
+      .on(t.agentId, t.name, t.startedAt)
+      .where(sql`${t.kind} = 'llm' AND ${t.agentId} IS NOT NULL`),
   ],
 );
 
@@ -16753,6 +16759,338 @@ export const resourceRateReservations = pgTable(
   ],
 );
 
+/**
+ * ADR-0310 (G2; migration `managed_settings_bundles`) — signed, versioned bundles of vendor-native managed settings
+ * (Claude Code, GitHub Copilot, OpenAI Codex, a Cursor worksheet) compiled from one subject's effective MCP
+ * entitlements. A new version is written only when the compiled policy's digest changes, so `version` counts real
+ * policy changes per subject.
+ *
+ * 3NF exception, deliberate: a bundle is a point-in-time, signed artifact. `manifest` is the exact signed bytes and
+ * `policy_digest` is over the policy as it was compiled; neither is recomputed from today's grants, which is the
+ * point of keeping them (drift is measured against what was exported). The subject is a foreign key, never a copied
+ * name or email.
+ */
+export const managedSettingsBundles = pgTable(
+  "managed_settings_bundles",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    subjectKind: text("subject_kind", { enum: ["user", "role"] }).notNull(),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    roleId: uuid("role_id").references(() => roles.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    /** `sha256:<hex>` over the canonical compiled policy */
+    policyDigest: text("policy_digest").notNull(),
+    /** the exact `manifest.json` bytes that were signed (snapshot; see the table comment) */
+    manifest: text("manifest").notNull(),
+    /** base64 Ed25519 signature over `manifest` */
+    signature: text("signature").notNull(),
+    keyId: text("key_id").notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "managed_settings_bundles_subject_check",
+      sql`CASE ${t.subjectKind} WHEN 'user' THEN ${t.userId} IS NOT NULL AND ${t.roleId} IS NULL WHEN 'role' THEN ${t.roleId} IS NOT NULL AND ${t.userId} IS NULL ELSE false END`,
+    ),
+    check("managed_settings_bundles_version_check", sql`${t.version} >= 1`),
+    check("managed_settings_bundles_manifest_size_check", sql`octet_length(${t.manifest}) <= 65536`),
+    uniqueIndex("managed_settings_bundles_user_version_uq").on(t.userId, t.version).where(sql`${t.userId} IS NOT NULL`),
+    uniqueIndex("managed_settings_bundles_role_version_uq").on(t.roleId, t.version).where(sql`${t.roleId} IS NOT NULL`),
+    index("managed_settings_bundles_created_idx").on(t.createdAt, t.id),
+  ],
+);
+
+/**
+ * ADR-0310 — one compiled vendor file of a bundle. Its sha256 is listed in the signed manifest, so the body is the
+ * evidence of what was exported (append-only snapshot, same exception as the bundle row).
+ */
+export const managedSettingsBundleFiles = pgTable(
+  "managed_settings_bundle_files",
+  {
+    bundleId: uuid("bundle_id")
+      .notNull()
+      .references(() => managedSettingsBundles.id, { onDelete: "cascade" }),
+    path: text("path").notNull(),
+    body: text("body").notNull(),
+    sha256: text("sha256").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.bundleId, t.path] }),
+    check("managed_settings_bundle_files_size_check", sql`octet_length(${t.body}) <= 262144`),
+  ],
+);
+// ---------------------------------------------------------------------------
+// ADR-0327 (lane E12, migration `rule_step_detection`) — rule-like AI steps. Written only by
+// `apps/gateway/src/rule-steps.ts`, each write in the same transaction as its audit row.
+// ---------------------------------------------------------------------------
+
+/** one row, absent until first saved; absent = OFF (ADR-0180). Thresholds default strict; lowering one is a step-up. */
+export const ruleStepSettings = pgTable(
+  "rule_step_settings",
+  {
+    id: text("id").primaryKey().default("singleton"),
+    enabled: boolean("enabled").notNull().default(false),
+    minRuns: integer("min_runs").notNull().default(200),
+    minAgreement: doublePrecision("min_agreement").notNull().default(0.99),
+    minCoverage: doublePrecision("min_coverage").notNull().default(0.9),
+    minCellSupport: integer("min_cell_support").notNull().default(5),
+    /** database clock; scans are spaced by the gateway against now() */
+    lastScanAt: timestamp("last_scan_at", { withTimezone: true }),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("rule_step_settings_singleton_check", sql`${t.id} = 'singleton'`),
+    check("rule_step_settings_min_runs_check", sql`${t.minRuns} BETWEEN 50 AND 100000`),
+    check("rule_step_settings_min_agreement_check", sql`${t.minAgreement} >= 0.95 AND ${t.minAgreement} <= 1`),
+    check("rule_step_settings_min_coverage_check", sql`${t.minCoverage} >= 0.5 AND ${t.minCoverage} <= 1`),
+    check("rule_step_settings_min_cell_support_check", sql`${t.minCellSupport} BETWEEN 3 AND 1000`),
+  ],
+);
+export type RuleStepSettingsRow = typeof ruleStepSettings.$inferSelect;
+
+export const RULE_STEP_SUGGESTION_STATUSES = ["suggested", "dismissed"] as const;
+
+/** one suggestion per AI step (agent + span name): the latest scan's rule and its evidence */
+export const ruleStepSuggestions = pgTable(
+  "rule_step_suggestions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    /** the trace span name that identifies the step within the agent */
+    stepName: text("step_name").notNull(),
+    /** point-in-time snapshot (ADR-0200 exception): the induced rule `{fields, cells}` as the scan produced it,
+     * validated by the kernel's InducedRule shape; the evidence columns below describe this exact table */
+    rule: jsonb("rule").notNull(),
+    runs: integer("runs").notNull(),
+    structuredRuns: integer("structured_runs").notNull(),
+    outputClasses: integer("output_classes").notNull(),
+    agreement: doublePrecision("agreement").notNull(),
+    coverage: doublePrecision("coverage").notNull(),
+    /** measured spend of the step over the scan window (sum of trace span cost) */
+    windowCostUsd: doublePrecision("window_cost_usd").notNull(),
+    projectedMonthlySavingsUsd: doublePrecision("projected_monthly_savings_usd").notNull(),
+    status: text("status", { enum: RULE_STEP_SUGGESTION_STATUSES }).notNull().default("suggested"),
+    detectedAt: timestamp("detected_at", { withTimezone: true }).notNull().defaultNow(),
+    dismissedBy: uuid("dismissed_by").references(() => users.id, { onDelete: "set null" }),
+    dismissedAt: timestamp("dismissed_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("rule_step_suggestions_step_uq").on(t.agentId, t.stepName),
+    index("rule_step_suggestions_status_savings_idx").on(t.status, t.projectedMonthlySavingsUsd),
+    check("rule_step_suggestions_status_check", sql`${t.status} IN ('suggested', 'dismissed')`),
+    check("rule_step_suggestions_rates_check", sql`${t.agreement} BETWEEN 0 AND 1 AND ${t.coverage} BETWEEN 0 AND 1`),
+    check(
+      "rule_step_suggestions_dismissed_check",
+      sql`(${t.status} = 'dismissed') = (${t.dismissedAt} IS NOT NULL)`,
+    ),
+  ],
+);
+export type RuleStepSuggestionRow = typeof ruleStepSuggestions.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// Lane L7 (P14 + P16 lineage; ADR-0216 / ADR-0217 amendments, migration model_artifact_lineage)
+// ---------------------------------------------------------------------------
+
+/** how a model file was derived from its parent file(s); `merged` takes two or more parents, the rest exactly one */
+export const MODEL_LINEAGE_RELATIONS = ["repackaged", "converted", "fine_tuned", "merged", "quantized"] as const;
+export type ModelLineageRelation = (typeof MODEL_LINEAGE_RELATIONS)[number];
+
+/**
+ * One parent edge of a derived model file: the child was made from the parent by `relation`. A JOIN TABLE (a merge
+ * has several parents), recorded once per child and never edited: a second derivation for the same child is refused
+ * in the handler, and an edit would rewrite provenance. Rows go with either artifact when it is deleted; the audit row
+ * written with them (`model-artifact-lineage-recorded`) keeps the record, with both sha256s.
+ */
+export const modelArtifactLineage = pgTable(
+  "model_artifact_lineage",
+  {
+    childArtifactId: uuid("child_artifact_id")
+      .notNull()
+      .references(() => modelArtifacts.id, { onDelete: "cascade" }),
+    parentArtifactId: uuid("parent_artifact_id")
+      .notNull()
+      .references(() => modelArtifacts.id, { onDelete: "cascade" }),
+    relation: text("relation", { enum: MODEL_LINEAGE_RELATIONS }).notNull(),
+    /** free text the person recorded, e.g. "GPTQ 4-bit" or "TIES merge, density 0.5" (bounded) */
+    method: text("method"),
+    recordedByUserId: uuid("recorded_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.childArtifactId, t.parentArtifactId] }),
+    check("model_artifact_lineage_no_self_check", sql`${t.childArtifactId} <> ${t.parentArtifactId}`),
+    check(
+      "model_artifact_lineage_relation_check",
+      sql`${t.relation} IN ('repackaged', 'converted', 'fine_tuned', 'merged', 'quantized')`,
+    ),
+    check("model_artifact_lineage_method_check", sql`${t.method} IS NULL OR length(${t.method}) BETWEEN 1 AND 200`),
+    index("model_artifact_lineage_parent_idx").on(t.parentArtifactId),
+  ],
+);
+export type ModelArtifactLineageRow = typeof modelArtifactLineage.$inferSelect;
+
+// ===== ADR-0332 (lane E14): endpoint AI add-on inventory (pending migration endpoint_addon_inventory) =====
+//
+// The inventory of AI add-ons on endpoints (coding agent, MCP server, skill, plugin) is read, not projected: MCP
+// servers come from `endpoint_mcp_servers` (ADR-0259) and coding agents from endpoint-sourced device
+// `shadow_ai_findings` (ADR-0195), joined at read time. These tables are the system of record only for what those
+// evidence tables do not hold: a sighting an endpoint lane records directly (a skill or plugin with its content
+// digest). An add-on is a row, each version of it is a row, and a sighting joins one version to one enrolled device
+// for one detection source; the device's pseudonym is joined from `endpoint_devices`, never copied. The
+// admission-scan verdict is joined at read time from `admission_engine_scans` by content digest (ADR-0242). Row-level
+// security: admins and the `system_task` reason only (pending migration). No content of a skill or config is stored.
+
+export const ENDPOINT_ADDON_KINDS = ["coding_agent", "mcp_server", "skill", "plugin"] as const;
+export const ENDPOINT_ADDON_IDENTITY_KINDS = ["provider", "package", "host", "command", "name", "unknown"] as const;
+export const ENDPOINT_ADDON_SOURCES = ["endpoint_agent", "endpoint_osquery", "endpoint_inventory"] as const;
+
+/** one directly recorded AI add-on, by kind and identity (a package, a host, a command base name or a skill name) */
+export const endpointAddons = pgTable(
+  "endpoint_addons",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kind: text("kind", { enum: ENDPOINT_ADDON_KINDS }).notNull(),
+    identityKind: text("identity_kind", { enum: ENDPOINT_ADDON_IDENTITY_KINDS }).notNull(),
+    identity: text("identity").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("endpoint_addons_identity_uq").on(t.kind, t.identityKind, t.identity),
+    check("endpoint_addons_identity_check", sql`length(${t.identity}) BETWEEN 1 AND 255`),
+  ],
+);
+export type EndpointAddonRow = typeof endpointAddons.$inferSelect;
+
+/** one version of a directly recorded add-on: the reported version string ('' when none) and its content digest */
+export const endpointAddonVersions = pgTable(
+  "endpoint_addon_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    addonId: uuid("addon_id")
+      .notNull()
+      .references(() => endpointAddons.id, { onDelete: "cascade" }),
+    version: text("version").notNull().default(""),
+    contentDigest: text("content_digest"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("endpoint_addon_versions_uq").on(t.addonId, t.version, t.contentDigest).nullsNotDistinct(),
+    index("endpoint_addon_versions_digest_idx").on(t.contentDigest).where(sql`${t.contentDigest} IS NOT NULL`),
+    check("endpoint_addon_versions_digest_check", sql`${t.contentDigest} IS NULL OR ${t.contentDigest} ~ '^[0-9a-f]{64}$'`),
+    check("endpoint_addon_versions_version_check", sql`length(${t.version}) <= 128`),
+  ],
+);
+export type EndpointAddonVersionRow = typeof endpointAddonVersions.$inferSelect;
+
+/** one directly recorded version seen on one enrolled device by one source and host agent (deleted with the device) */
+export const endpointAddonSightings = pgTable(
+  "endpoint_addon_sightings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    versionId: uuid("version_id")
+      .notNull()
+      .references(() => endpointAddonVersions.id, { onDelete: "cascade" }),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => endpointDevices.id, { onDelete: "cascade" }),
+    source: text("source", { enum: ENDPOINT_ADDON_SOURCES }).notNull(),
+    hostAgent: text("host_agent").notNull().default(""),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    unique("endpoint_addon_sightings_uq").on(t.versionId, t.deviceId, t.source, t.hostAgent),
+    index("endpoint_addon_sightings_device_idx").on(t.deviceId),
+    index("endpoint_addon_sightings_last_seen_idx").on(t.lastSeenAt),
+    check("endpoint_addon_sightings_seen_check", sql`${t.firstSeenAt} <= ${t.lastSeenAt}`),
+  ],
+);
+export type EndpointAddonSightingRow = typeof endpointAddonSightings.$inferSelect;
+
+/** the secret TYPES (rule ids, never a name or value) a directly recorded sighting reported; one row per type */
+export const endpointAddonSightingSecretTypes = pgTable(
+  "endpoint_addon_sighting_secret_types",
+  {
+    sightingId: uuid("sighting_id")
+      .notNull()
+      .references(() => endpointAddonSightings.id, { onDelete: "cascade" }),
+    secretType: text("secret_type").notNull(),
+  },
+  (t) => [
+    primaryKey({ name: "endpoint_addon_sighting_secret_types_pk", columns: [t.sightingId, t.secretType] }),
+    check("endpoint_addon_sighting_secret_types_check", sql`${t.secretType} ~ '^[a-z][a-z0-9_.]{0,63}$'`),
+  ],
+);
+// ===== end ADR-0332 =====
+
+// ===== ADR-0341 — the visual pipeline builder: drafts and versions of workflow templates =====
+/**
+ * One open draft per template, edited on the builder's canvas. `definition` is a schema-validated configuration
+ * document (ADR-0200 exception: it is validated by `workflowDefinitionSchema` on every save, may be invalid while
+ * someone is mid-edit, and is never executed). `base_version_id` is the version the draft was opened from; a publish is
+ * refused when the template has been published since. `revision` is the optimistic-concurrency counter every save
+ * names. Deployment-wide like `workflow_templates` (no tenant column, so no RLS policy); the routes are admin-only.
+ */
+export const workflowTemplateDrafts = pgTable(
+  "workflow_template_drafts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    templateId: uuid("template_id")
+      .notNull()
+      .references(() => workflowTemplates.id, { onDelete: "cascade" }),
+    definition: jsonb("definition").notNull(),
+    baseVersionId: uuid("base_version_id")
+      .notNull()
+      .references((): AnyPgColumn => workflowTemplateVersions.id, { onDelete: "cascade" }),
+    revision: integer("revision").notNull().default(1),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("workflow_template_drafts_template_uq").on(t.templateId),
+    index("workflow_template_drafts_base_version_idx").on(t.baseVersionId),
+    check("workflow_template_drafts_revision_check", sql`${t.revision} >= 1`),
+    check("workflow_template_drafts_definition_check", sql`jsonb_typeof(${t.definition}) = 'object'`),
+  ],
+);
+export type WorkflowTemplateDraftRow = typeof workflowTemplateDrafts.$inferSelect;
+
+/**
+ * Every published version of a template, append-only (`regulait_refuse_mutation`, no TRUNCATE). `definition` is a
+ * point-in-time snapshot (ADR-0200 exception): the bytes that went live, which `content_hash` (SHA-256 of ADR-0060's
+ * canonical JSON) identifies. `origin` `baseline` is the live definition captured the first time a template is opened
+ * in the builder; `builder` is a publish.
+ */
+export const workflowTemplateVersions = pgTable(
+  "workflow_template_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    templateId: uuid("template_id")
+      .notNull()
+      .references(() => workflowTemplates.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    definition: jsonb("definition").notNull(),
+    contentHash: text("content_hash").notNull(),
+    origin: text("origin", { enum: ["baseline", "builder"] }).notNull(),
+    publishedBy: uuid("published_by").references(() => users.id, { onDelete: "set null" }),
+    publishedAt: timestamp("published_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("workflow_template_versions_template_version_uq").on(t.templateId, t.version),
+    check("workflow_template_versions_version_check", sql`${t.version} >= 1`),
+    check("workflow_template_versions_hash_check", sql`${t.contentHash} ~ '^[0-9a-f]{64}$'`),
+    check("workflow_template_versions_origin_check", sql`${t.origin} IN ('baseline', 'builder')`),
+  ],
+);
+export type WorkflowTemplateVersionRow = typeof workflowTemplateVersions.$inferSelect;
+// ===== end ADR-0341 =====
+
 // ===== ADR-0333 (lane E15): rule-based detection of risky agent behaviour =========================================
 export const DETECTION_SEVERITIES = ["low", "medium", "high", "critical"] as const;
 export const DETECTION_INCIDENT_STATUSES = ["open", "acknowledged", "closed"] as const;
@@ -16885,97 +17223,3 @@ export const detectionIncidentEvidence = pgTable(
   ],
 );
 // ===== end ADR-0333 =================================================================================================
-
-// ===== ADR-0332 (lane E14): endpoint AI add-on inventory (pending migration endpoint_addon_inventory) =====
-//
-// The inventory of AI add-ons on endpoints (coding agent, MCP server, skill, plugin) is read, not projected: MCP
-// servers come from `endpoint_mcp_servers` (ADR-0259) and coding agents from endpoint-sourced device
-// `shadow_ai_findings` (ADR-0195), joined at read time. These tables are the system of record only for what those
-// evidence tables do not hold: a sighting an endpoint lane records directly (a skill or plugin with its content
-// digest). An add-on is a row, each version of it is a row, and a sighting joins one version to one enrolled device
-// for one detection source; the device's pseudonym is joined from `endpoint_devices`, never copied. The
-// admission-scan verdict is joined at read time from `admission_engine_scans` by content digest (ADR-0242). Row-level
-// security: admins and the `system_task` reason only (pending migration). No content of a skill or config is stored.
-
-export const ENDPOINT_ADDON_KINDS = ["coding_agent", "mcp_server", "skill", "plugin"] as const;
-export const ENDPOINT_ADDON_IDENTITY_KINDS = ["provider", "package", "host", "command", "name", "unknown"] as const;
-export const ENDPOINT_ADDON_SOURCES = ["endpoint_agent", "endpoint_osquery", "endpoint_inventory"] as const;
-
-/** one directly recorded AI add-on, by kind and identity (a package, a host, a command base name or a skill name) */
-export const endpointAddons = pgTable(
-  "endpoint_addons",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    kind: text("kind", { enum: ENDPOINT_ADDON_KINDS }).notNull(),
-    identityKind: text("identity_kind", { enum: ENDPOINT_ADDON_IDENTITY_KINDS }).notNull(),
-    identity: text("identity").notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [
-    unique("endpoint_addons_identity_uq").on(t.kind, t.identityKind, t.identity),
-    check("endpoint_addons_identity_check", sql`length(${t.identity}) BETWEEN 1 AND 255`),
-  ],
-);
-export type EndpointAddonRow = typeof endpointAddons.$inferSelect;
-
-/** one version of a directly recorded add-on: the reported version string ('' when none) and its content digest */
-export const endpointAddonVersions = pgTable(
-  "endpoint_addon_versions",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    addonId: uuid("addon_id")
-      .notNull()
-      .references(() => endpointAddons.id, { onDelete: "cascade" }),
-    version: text("version").notNull().default(""),
-    contentDigest: text("content_digest"),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [
-    unique("endpoint_addon_versions_uq").on(t.addonId, t.version, t.contentDigest).nullsNotDistinct(),
-    index("endpoint_addon_versions_digest_idx").on(t.contentDigest).where(sql`${t.contentDigest} IS NOT NULL`),
-    check("endpoint_addon_versions_digest_check", sql`${t.contentDigest} IS NULL OR ${t.contentDigest} ~ '^[0-9a-f]{64}$'`),
-    check("endpoint_addon_versions_version_check", sql`length(${t.version}) <= 128`),
-  ],
-);
-export type EndpointAddonVersionRow = typeof endpointAddonVersions.$inferSelect;
-
-/** one directly recorded version seen on one enrolled device by one source and host agent (deleted with the device) */
-export const endpointAddonSightings = pgTable(
-  "endpoint_addon_sightings",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    versionId: uuid("version_id")
-      .notNull()
-      .references(() => endpointAddonVersions.id, { onDelete: "cascade" }),
-    deviceId: uuid("device_id")
-      .notNull()
-      .references(() => endpointDevices.id, { onDelete: "cascade" }),
-    source: text("source", { enum: ENDPOINT_ADDON_SOURCES }).notNull(),
-    hostAgent: text("host_agent").notNull().default(""),
-    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull(),
-    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
-  },
-  (t) => [
-    unique("endpoint_addon_sightings_uq").on(t.versionId, t.deviceId, t.source, t.hostAgent),
-    index("endpoint_addon_sightings_device_idx").on(t.deviceId),
-    index("endpoint_addon_sightings_last_seen_idx").on(t.lastSeenAt),
-    check("endpoint_addon_sightings_seen_check", sql`${t.firstSeenAt} <= ${t.lastSeenAt}`),
-  ],
-);
-export type EndpointAddonSightingRow = typeof endpointAddonSightings.$inferSelect;
-
-/** the secret TYPES (rule ids, never a name or value) a directly recorded sighting reported; one row per type */
-export const endpointAddonSightingSecretTypes = pgTable(
-  "endpoint_addon_sighting_secret_types",
-  {
-    sightingId: uuid("sighting_id")
-      .notNull()
-      .references(() => endpointAddonSightings.id, { onDelete: "cascade" }),
-    secretType: text("secret_type").notNull(),
-  },
-  (t) => [
-    primaryKey({ name: "endpoint_addon_sighting_secret_types_pk", columns: [t.sightingId, t.secretType] }),
-    check("endpoint_addon_sighting_secret_types_check", sql`${t.secretType} ~ '^[a-z][a-z0-9_.]{0,63}$'`),
-  ],
-);
-// ===== end ADR-0332 =====

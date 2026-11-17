@@ -266,6 +266,16 @@ and a kill-switch role (primary docs snippet).
 - **"Software factory" orchestration for coding agents.** Warp Factories (work enters from Linear and Jira; factory
   definitions as version-controlled code), Linear agent integrations, and Cursor's Agent SDK *(secondary / vendor
   pages)*. This is pillar 7's ground in a single-developer-tool shape.
+- **SaaS-security vendors extending to agents (added 2026-11-16).** **Obsidian Security** "AI Agent Security":
+  continuous discovery across Bedrock, Azure AI Foundry, Copilot Studio, ChatGPT, Vertex, Agentforce, n8n and Claude
+  Code; agent-to-owner, MCP, model and SaaS-permission mapping; usage-based least privilege; risk scores on publish;
+  runtime blocking via a "context-aware runtime decision engine"; audit evidence *(primary vendor page, read
+  2026-11-16)*. Full parity table and ranked gaps: [GAP_ANALYSIS_OBSIDIAN_2026-11.md](GAP_ANALYSIS_OBSIDIAN_2026-11.md).
+- **Process-orchestration incumbents repositioning as agentic (added 2026-11-16).** **Camunda** "agentic
+  orchestration": BPMN processes that sequence AI agents, people, systems, rules, RPA and document processing, with a
+  shared modeler, durable engine, live operations console, task list, process analytics and a connector marketplace
+  over MCP, A2A and REST *(primary vendor pages, read 2026-11-16; analyst placements are vendor claims)*. Overlaps
+  pillars 2 and 7. Parity table and gaps: [GAP_ANALYSIS_CAMUNDA_2026-11.md](GAP_ANALYSIS_CAMUNDA_2026-11.md).
 - **Managed agent platforms.** Google Gemini Enterprise Agent Platform: Agent Identity, Agent Registry and Agent
   Gateway, GA end of July *(secondary)*. AWS Bedrock AgentCore: managed harness, CLI and skills in April *(primary
   AWS What's New title)*. Nothing later than April was found; re:Invent is in December.
@@ -399,6 +409,8 @@ title and snippet); **S** = secondary.
 | MCP-gateway funding | https://www.superbcrew.com/runlayer-raises-30m-series-a-funding-round/ ; https://obot.ai/obot-ai-secures-35m-seed-to-build-enterprise-mcp-gateway/ ; https://pulse2.com/neuraltrust-raises-20-million-to-secure-enterprise-ai-agents/amp/ | S |
 | AI FinOps entrants | https://www.revefi.com/blog/best-ai-finops-tools ; https://www.techtarget.com/searchcloudcomputing/news/366644897/AWS-launches-FinOps-agent-expands-bedrock-cost-tracking ; https://itbrief.news/story/revenium-unveils-tool-registry-to-track-full-ai-costs | S |
 | Warp Factories / Linear agents | https://warp.dev/factories ; https://linear.app/agents | P (vendor pages) |
+| Obsidian Security AI Agent Security (added 2026-11-16) | https://www.obsidiansecurity.com/ai-agent-security | P |
+| Camunda agentic orchestration (added 2026-11-16) | https://camunda.com/ ; https://camunda.com/platform/ ; https://camunda.com/what-is-agentic-orchestration/ | P |
 
 **Not found / unverified:** Agent HQ GA; any Windsurf news after August; Holistic AI Guardian Agents GA date;
 Credo AIUC-1 integration; Codex Admin plugin year; Runlayer Series A date; Kong 2.1 timing; MCP 2026-07-28 RC vs

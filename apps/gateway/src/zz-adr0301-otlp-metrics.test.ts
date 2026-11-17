@@ -2,6 +2,7 @@
  * ADR-0301 — OTLP metrics push. No database: the allow-list, resolver and
  * receiver are injected, so each test pins one rule of the push path.
  */
+import { PROCESS_INSTANCE_ID } from "./instance-id.js";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import {
   createOtlpMetricsPusher,
@@ -127,7 +128,7 @@ describe("ADR-0301 the push reader exists only when a push is configured", () =>
 });
 
 describe("ADR-0301 push: the same series as /metrics, through the egress guard", () => {
-  it("posts OTLP/JSON with the configured headers, carrying the meter's series and only service.name", async () => {
+  it("posts OTLP/JSON with the configured headers, carrying the meter's series, service.name and a random service.instance.id (ADR-0343)", async () => {
     recordDecision({ surface: "agent", effect: "deny" });
     const { fetchImpl, seen } = receiver(200);
     const p = createOtlpMetricsPusher(null, cfg(), { loadAllowList: async () => allow, resolve, fetchImpl });
@@ -138,7 +139,13 @@ describe("ADR-0301 push: the same series as /metrics, through the egress guard",
     expect(seen[0]!.headers.get("authorization")).toBe(SECRET);
     const body = JSON.parse(seen[0]!.body);
     const rm = body.resourceMetrics[0];
-    expect(rm.resource.attributes).toEqual([{ key: "service.name", value: { stringValue: "regulait-gateway" } }]);
+    // ADR-0343: plus `service.instance.id`, a random per-process UUID (no host, process or SDK detail), so N replicas'
+    // cumulative series stay apart at the collector
+    expect(rm.resource.attributes).toEqual([
+      { key: "service.name", value: { stringValue: "regulait-gateway" } },
+      { key: "service.instance.id", value: { stringValue: PROCESS_INSTANCE_ID } },
+    ]);
+    expect(PROCESS_INSTANCE_ID).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     const names = rm.scopeMetrics.flatMap((s: { metrics: Array<{ name: string }> }) => s.metrics.map((m) => m.name));
     expect(names).toContain("regulait_governance_decisions_total");
     // second review, item 4: a real data point, cumulative, carrying only allow-listed attribute keys
