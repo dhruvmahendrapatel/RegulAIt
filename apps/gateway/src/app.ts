@@ -626,6 +626,7 @@ import { isDraining } from "./readiness.js";
 import { registerOpenApiRoutes, type RouteInventoryEntry } from "./openapi.js";
 import { registerOnboardingRoutes } from "./onboarding.js";
 import { registerPmImportRoutes } from "./pm-import.js";
+import { handlePmTriggers, registerPmTriggerRoutes } from "./pm-triggers.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
 import { registerDiscoveryRoutes } from "./discovery-routes.js";
 import { registerContentTrustRoutes } from "./content-trust-routes.js";
@@ -6045,7 +6046,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerOptimizationRoutes(app, db);
   registerOrchestrationRoutes(app, db, { dataKey: opts.dataKey });
   registerDecomposeRoutes(app, db, { dataKey: opts.dataKey });
-  registerPmRoutes(app, db, { dataKey: opts.dataKey });
+  registerPmRoutes(app, db, {
+    dataKey: opts.dataKey,
+    // ADR-0356: work handed to RegulAIt from the PM tool (no data key, no triggers: nothing can be decrypted anyway)
+    ...(opts.dataKey ? { triggers: (conn, delivery) => handlePmTriggers(db, opts.dataKey!, conn, delivery) } : {}),
+  });
+  registerPmTriggerRoutes(app, db);
 
   registerWorkflowRoutes(app, db, {
     dataKey: opts.dataKey,

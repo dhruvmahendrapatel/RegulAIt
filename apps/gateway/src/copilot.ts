@@ -1520,6 +1520,8 @@ export async function agentDecision(
   userId: string,
   agent: AgentRow,
   opts: ModelPolicyGate | undefined = undefined,
+  /** ADR-0356: the mode decided (the PM trigger path asks for "execute"); every other caller keeps "chat" */
+  mode: string = "chat",
 ): Promise<AgentDecision> {
   const [grants, roleGrants, revocations, [policy]] = await Promise.all([
     db.select().from(agentGrants).where(eq(agentGrants.userId, userId)),
@@ -1548,7 +1550,7 @@ export async function agentDecision(
       enabled: agent.enabled,
       modes: agent.modes ?? null,
     },
-    mode: "chat",
+    mode,
     agentGrants: grants,
     roleAgentGrants: roleGrants,
     agentRevocations: revocations,

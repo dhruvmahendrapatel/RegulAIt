@@ -69,14 +69,17 @@ we extend our own adapters. The repository search found the pieces above to reus
    one, with the ADR-0061 verification-source column). The PM actor is an assertion: an unlinked or disabled person is
    **denied**, and so is a person whose own agent decision (the same `evaluateAgent` call the invoke path uses, in
    `execute` mode, with grants, role grants, revocations and the tier ceiling) does not allow the configured agent.
+   On a rule delivery the actor is the one the rule's body names (Jira: `{{initiator.accountId}}`), so it is as
+   trustworthy as whoever can edit a rule holding the connection's webhook secret; an admin who does not want that
+   turns the `rule` mechanism off. The agent's own actions (its write-back comments) never trigger it.
    The bot never becomes the actor and no admin authority is borrowed: the start runs as the mapped user, with that
    user's own `is_admin`, inside that user's row-level-security scope.
 5. **The normal start.** An accepted trigger starts the workflow through the same function the
    `POST /v1/workflows/instances` route now calls (`startWorkflowForChange`, extracted, behaviour unchanged): the
    assignment rules choose the template from the change and the server-derived roles and classifications, so the
    Intake and forced Plan stages come from the template, not from this path. The change's description is the item's
-   own text read through the adapter at start time (`getWorkItem`); RegulAIt stores no copy (pillar 8). The project is
-   the initiative's project when the importer mapped the connection's project to one.
+   own text read through the adapter at start time (`getWorkItem`); RegulAIt stores no copy (pillar 8). The project the
+   workflow bills to is the settings' `project_id` (optional), because an initiative can hold several projects.
 6. **Linked, not copied.** The started instance is linked to the item through `pm_links` (`workflow_instance`), the
    same record a manual pm-sync writes, so the existing status mirror and drift processing apply.
 7. **A declared lifecycle.** `pm_work_triggers` records each trigger with its state. The states and allowed transitions
@@ -85,14 +88,14 @@ we extend our own adapters. The repository search found the pieces above to reus
 
    | from | to |
    | --- | --- |
-   | `received` | `accepted`, `denied` |
+   | `received` | `accepted`, `denied`, `failed` |
    | `accepted` | `running`, `failed` |
    | `running` | `written_back`, `failed` |
    | `denied` | `written_back`, `failed` |
    | `written_back`, `failed` | (terminal) |
 
-   `failed` records a start the engine refused (for example no assignment rule matches) or a denial comment that could
-   not be posted; the reason is on the row and in the audit trail. One item has at most one open trigger
+   `failed` records a trigger that could not be evaluated (an unexpected error), a start the engine refused (for
+   example no assignment rule matches), an item that could not be read, or a denial comment that could not be posted; the reason is on the row and in the audit trail. One item has at most one open trigger
    (`received`, `accepted`, `running`): a second assignment while one is open is recorded as a duplicate and starts
    nothing.
 8. **Denials are explained on the item.** A denied trigger posts one comment on the work item naming the reason in
