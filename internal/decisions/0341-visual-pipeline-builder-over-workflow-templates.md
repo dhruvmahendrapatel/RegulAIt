@@ -191,5 +191,5 @@ Owner-approved addition to this lane, recorded here rather than in a new ADR (ma
    admin only.
 3. A dedicated step-up kind for template publishes instead of `settings_relax` with an op?
 4. Template versions are kept in two places: `workflow_template_versions` here, and E21's `config_versions` rows of type
-   `workflow_template` (ADR-0340, #894, not yet merged). Which one is canonical? Built meanwhile: sub-process pins key
+   `workflow_template` (lane E21, #894, not yet merged). Which one is canonical? Built meanwhile: sub-process pins key
    to `workflow_template_versions`.
