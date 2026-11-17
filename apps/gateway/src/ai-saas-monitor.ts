@@ -350,7 +350,7 @@ export async function runAiSaasMonitor(db: Db, connectorId: string, opts: RunOpt
     const secret = decryptSecret(opts.dataKey, cred.secretCiphertext);
     secrets.push(secret);
     const deadline = AbortSignal.timeout(RUN_MAX_MS);
-    const limiter = spacingRateLimiter(opts.deps?.minSpacingMs ?? MIN_SPACING_MS);
+    const limiter = spacingRateLimiter(opts.deps?.minSpacingMs ?? impl.minSpacingMs ?? MIN_SPACING_MS);
     let backoffs = 0;
     const ctx: ConnectorContext = {
       config: connector.publicConfig,
@@ -358,6 +358,9 @@ export async function runAiSaasMonitor(db: Db, connectorId: string, opts: RunOpt
       fetch: createGuardedFetch({
         allowList: await loadEgressAllowList(db),
         maxResponseBytes: AI_SAAS_MONITOR_MAX_RESPONSE_BYTES,
+        // a redirect comes back to the connector (never followed here); only the ChatGPT log download re-requests one,
+        // through this same guard, and every other connector treats a 3xx as an error
+        returnRedirects: true,
         ...(opts.deps?.fetchImpl ? { fetchImpl: opts.deps.fetchImpl } : {}),
         ...(opts.deps?.resolve ? { resolve: opts.deps.resolve } : {}),
       }),
@@ -567,7 +570,9 @@ const tagList = z.array(z.string().trim().min(1).max(64)).max(20).default([]);
 const policyBody = z.object({ enabled: z.boolean(), contentCapture: z.enum(AI_SAAS_CONTENT_CAPTURE_MODES).default("none"), reason }).strict();
 const createBody = z.object({ vendor: z.enum(AI_SAAS_MONITOR_VENDORS), name: z.string().trim().min(1).max(120), config: z.unknown(), complianceTags: tagList, reason }).strict();
 const configBody = z.object({ config: z.unknown(), complianceTags: tagList, reason }).strict();
-const credentialBody = z.object({ secret: z.string().min(8).max(4096), replacesCredentialId: z.string().uuid().nullable(), reason }).strict();
+const credentialBody = z
+  .object({ secret: z.string().min(8).max(4096), replacesCredentialId: z.string().uuid().nullable(), attestReadOnly: z.literal(true).optional(), reason })
+  .strict();
 const revokeBody = z.object({ reason }).strict();
 const enabledBody = z.object({ enabled: z.boolean(), reason }).strict();
 
@@ -722,7 +727,12 @@ export function registerAiSaasMonitorRoutes(app: FastifyInstance, db: Db, opts: 
     const connector = await loadConnector(p.data.connectorId);
     if (!connector) return reply.status(404).send({ error: "not_found" });
     const parsed = credentialBody.safeParse(req.body);
-    if (!parsed.success) return reply.status(400).send(bad("expected { secret, replacesCredentialId: uuid | null, reason }"));
+    if (!parsed.success) return reply.status(400).send(bad("expected { secret, replacesCredentialId: uuid | null, attestReadOnly?: true, reason }"));
+    const entry = AI_SAAS_MONITOR_CATALOGUE[connector.vendor];
+    // a vendor that offers no probe of a key's scopes: the admin attests the key is read-only, and the attestation is audited
+    if (!entry.scopeVerifiable && parsed.data.attestReadOnly !== true) {
+      return reply.status(409).send({ error: "read_only_attestation_required", detail: `${entry.scopeCheck}. Send attestReadOnly: true to store it.` });
+    }
     if (resolveDeployMode() === "air_gapped") return reply.status(409).send(airGapped);
     if (!(await loadAiSaasPolicy(db)).enabled) return reply.status(409).send(policyOff);
     if (!opts.dataKey) return reply.status(503).send({ error: "data_key_unavailable" });
@@ -737,7 +747,7 @@ export function registerAiSaasMonitorRoutes(app: FastifyInstance, db: Db, opts: 
       const [row] = await tx.insert(aiSaasMonitorCredentials).values({ connectorId: connector.id, secretCiphertext: ciphertext, createdBy: actor(req) }).returning();
       await audit(tx, actor(req), "ai_saas_monitor_credential", row!.id, existing ? AI_SAAS_RULE_IDS.credentialReplaced : AI_SAAS_RULE_IDS.credentialStored, "allow",
         `AI SaaS monitor credential ${existing ? "replaced" : "stored"} for '${connector.name}': ${parsed.data.reason}`,
-        { connectorId: connector.id, replacedCredentialId: existing?.id ?? null, reason: parsed.data.reason });
+        { connectorId: connector.id, replacedCredentialId: existing?.id ?? null, readOnlyAttested: !entry.scopeVerifiable, requiredScope: entry.permissions, reason: parsed.data.reason });
       return row!;
     });
     return reply.status(existing ? 200 : 201).send({ credential: { id: stored.id, scopePosture: stored.scopePosture, storedAt: stored.createdAt.toISOString() } });

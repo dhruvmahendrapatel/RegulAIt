@@ -188,8 +188,8 @@ describe("ADR-0361 three switches, all off", () => {
   it("a new connector is disabled, validated, and tagged only with real profiles", async () => {
     const bad = await app.inject({ method: "POST", url: "/v1/ai-saas-monitoring/connectors", headers: KEY, payload: { vendor: "m365_copilot", name: `adr0361-${RUN}-bad`, config: { ...config, tenantId: "contoso" }, reason: "pilot tenant" } });
     expect(bad.statusCode).toBe(400);
-    const notBuilt = await app.inject({ method: "POST", url: "/v1/ai-saas-monitoring/connectors", headers: KEY, payload: { vendor: "chatgpt_enterprise", name: `adr0361-${RUN}-gpt`, config: {}, reason: "pilot tenant" } });
-    expect(notBuilt.statusCode).toBe(409);
+    const badGpt = await app.inject({ method: "POST", url: "/v1/ai-saas-monitoring/connectors", headers: KEY, payload: { vendor: "chatgpt_enterprise", name: `adr0361-${RUN}-gpt`, config: {}, reason: "pilot tenant" } });
+    expect(badGpt.statusCode).toBe(400);
     const unknownTag = await app.inject({ method: "POST", url: "/v1/ai-saas-monitoring/connectors", headers: KEY, payload: { vendor: "m365_copilot", name: `adr0361-${RUN}-tag`, config, complianceTags: [`nope-${RUN}`], reason: "pilot tenant" } });
     expect(unknownTag.statusCode).toBe(400);
     const res = await app.inject({ method: "POST", url: "/v1/ai-saas-monitoring/connectors", headers: KEY, payload: { vendor: "m365_copilot", name: `adr0361-${RUN}`, config, complianceTags: [TAG], reason: "pilot tenant" } });

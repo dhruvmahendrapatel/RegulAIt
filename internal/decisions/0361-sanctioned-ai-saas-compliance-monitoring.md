@@ -156,8 +156,8 @@ interaction. A cap reached fails the run without advancing the cursor.
 | vendor | API (documented) | slice |
 |---|---|---|
 | Microsoft 365 Copilot | Graph `getAllEnterpriseInteractions` (§3) | 1 (this PR) |
-| ChatGPT Enterprise | the Enterprise Compliance API (`api.chatgpt.com`, `conversation_message` log files per workspace, an Enterprise Compliance API key); routes and schemas verified against OpenAI's Admin API reference when built | 2 |
-| Claude Enterprise | Anthropic's documented compliance API for Claude Enterprise (organization-scoped compliance key); routes verified against Anthropic's documentation when built | 2 |
+| ChatGPT Enterprise | the Compliance Logs Platform (`api.chatgpt.com/v1/compliance/{workspaces,organizations}/{id}/logs?event_type=CONVERSATION_MESSAGE`, then each file's 307 to a signed URL); a workspace Admin key with `…conversation_message.read` (as built: below) | 2 |
+| Claude Enterprise | the Compliance API (`api.anthropic.com/v1/compliance/apps/chats` and `…/chats/{id}/messages`, `x-api-key`, `anthropic-version: 2026-10-21`); a Compliance Access Key with `read:compliance_user_data` (as built: below) | 2 |
 | Gemini for Workspace | not in this ADR: Google exposes Gemini activity only through the Workspace audit and Vault APIs, which need their own review | later |
 
 Slice 3 adds optional remediation (delete or quarantine a conversation through the vendor API): off by default, each
@@ -230,3 +230,30 @@ posture read instead of pretending.
 - **Routes:** `GET /v1/ai-saas-monitoring`, `PUT …/policy`, `POST …/connectors`, `PUT …/connectors/:id/config`,
   `PUT|DELETE …/connectors/:id/credential`, `PUT …/connectors/:id/enabled`, `POST|GET …/connectors/:id/runs`,
   `GET …/connectors/:id/interactions`. All admin-only, all KNOWN_UI_GAPS on #453.
+
+## As built (slice 2)
+
+Verified against the vendors' own documentation on 2026-11-17: OpenAI's Admin API OpenAPI document
+(`chatgpt.com/public/admin/api-reference/openapi.json`, version 2.5.42) and Anthropic's Compliance API pages
+(`platform.claude.com/docs/en/manage-claude/compliance-api*`, `/docs/en/api/compliance/apps/chats*`).
+
+- **ChatGPT Enterprise.** `GET …/logs?event_type=CONVERSATION_MESSAGE&after=&before=&limit=100`, paged by
+  `last_end_time` while `has_more`; each file `GET …/logs/{id}` answers 307 to a short-lived signed URL. The guarded
+  fetch gained one opt-in, `returnRedirects` (default off for every other caller): it hands the 307 back with only its
+  `Location`, never following it. The connector checks the target is plain https, registers the signed URL as a
+  secret, and re-requests it through the same guard **without our key**. OpenAI does not document the storage host, so
+  a run that meets an unlisted one fails `egress_refused` naming that host for the admin to allow-list. The file's
+  listed SHA-256 is checked before any record is written. Only `CONVERSATION_MESSAGE` records are kept; the idempotency
+  key is `event_id` (delivery is at least once). Spacing 700 ms (100 requests a minute per route).
+- **Claude Enterprise.** Org-wide polling as Anthropic documents it: `order_by=updated_at`, `updated_at.gte/lt` on the
+  window, `after_id` paging, optional `organization_ids[]` (a user filter is rejected with `updated_at` windows). Each
+  chat's messages are read with `after_id` paging; text blocks and the text inside tool results are scanned; a message
+  created after the window waits for the next run. The actor is the chat's user (Anthropic records it on the chat).
+  Spacing 150 ms (600 a minute per parent organization, shared by every key).
+- **Read-only attestation.** Neither vendor offers a probe of a key's scopes, so the catalogue marks them
+  `scopeVerifiable: false` and storing such a credential needs `attestReadOnly: true` (the admin attests the key holds
+  only the read scope named in the catalogue, not `compliance_export` delete or `delete:compliance_user_data`), audited
+  with the credential row. The posture stays `unverified`.
+- **Open source** (ADR-0176): no maintained, permissively licensed client exists for either API (an Anthropic Python
+  SDK is GPL-3.0; another client has no licence; OpenAI ships only Bash and PowerShell scripts), so both are thin
+  guarded-fetch clients against the vendor spec.
