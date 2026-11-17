@@ -164,3 +164,35 @@ lane E29's `MachineDef` (PR #920) and its guarded writes, not with a new helper.
 | Restate (BUSL-1.1 server) | Similar model; licence not allowed under ADR-0176 | Rejected |
 | DBOS Transact (MIT, Postgres) | Durable steps in our Postgres, but its own system tables and recovery loop, beside the runner we keep | Rejected for the same reasons as `vercel/workflow` (ADR-0254 criterion 3) |
 | Ideas inside our runner, on pg-boss and the ADR-0064 scheduler | No new runtime, our RLS and audit, air-gapped | **Chosen** |
+
+## As built
+
+Slices 2–5 are separate PRs (#927 for slice 2; slices 3–5 follow). Where the build differs in detail from the decisions
+above, it is recorded here, against the decision it refers to.
+
+- **Decision 2 (start conflict), PR #927.** As decided. The key's template ids are the routed ids in routing order.
+  A race is answered like the pre-check, because the insert runs under a savepoint, so a caller's own transaction
+  survives the unique violation.
+- **Decision 3 (heartbeat).**
+  - The claim is now also *taken* on the database clock (`databaseNow`), not only renewed on it, so the one
+    liveness predicate compares like with like.
+  - The older `REGULAIT_WORKFLOW_CLAIM_TTL_MS` is still read when the new variable is unset, within the same bounds.
+  - The limit failure is committed by the heartbeat itself through `commitStageResult` (the claim guard). It is
+    audited `workflow:execution-limit-reached`, and the executor's late result is then discarded by the existing
+    discard path.
+- **Decision 4 (schedules).**
+  - *"Declared with lane E29's `MachineDef`"*: the schedule has no status column. It is paused exactly when
+    `paused_at` is set (with `paused_by_user_id` and `pause_note`), and the API derives `state: active | paused` from
+    that. Two states held by one nullable timestamp have no transition table to declare, so no machine helper is used.
+  - *"Catch-up window (default 0)"*: a fire time is on time within `max(5 minutes, window)`. Otherwise a default
+    schedule would treat its own fire as missed whenever the 60-second sweep ran a little late.
+  - A start refused with `workflow_start_conflict` is recorded on the run and audited, but does not pause the
+    schedule: the open instance is the schedule's overlap, not a broken schedule.
+  - `POST /v1/workflows/schedules/run-due` runs the same sweep on demand, as the other ADR-0064 jobs have.
+  - There is no delete route: pause is enough, and a schedule's runs are its evidence.
+- **Decision 5 (visibility).**
+  - The search fields are query parameters of the existing list (legacy answer and ADR-0226 contract).
+  - *Deadline* is in the pending view, read from lane E21's `sla:<stage>` marker (PR #891). It is not yet a search
+    field, because that marker is a context key. It becomes one when the due time is a column, which is recorded as
+    a PENDING item.
+  - The `describe` transitions of lane E29 (PR #920) join the pending view once that helper merges.
