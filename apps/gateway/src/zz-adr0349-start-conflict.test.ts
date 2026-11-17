@@ -8,7 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, auditLog, createDb, desc, eq, orgSettings, runMigrations, sql, workflowInstances, type Db } from "@regulait/db";
 import { WORKFLOW_TERMINAL_STATUSES } from "@regulait/shared";
-import type { InstanceStatus } from "@regulait/workflow-kernel";
+import { TERMINAL_STATUSES, type InstanceStatus } from "@regulait/workflow-kernel";
 import { buildApp } from "./app.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 
@@ -160,6 +160,8 @@ describe("ADR-0349 slice 2: one open instance per template set + target + work i
   it("the index predicate is built from the one declared list of terminal statuses, the kernel's", async () => {
     // compile-time: every declared terminal status is a kernel status
     const declared: readonly InstanceStatus[] = WORKFLOW_TERMINAL_STATUSES;
+    // and it is exactly the kernel's own list (ADR-0342), which the kernel enforces
+    expect([...declared].sort()).toEqual([...TERMINAL_STATUSES].sort());
     const res = (await db.execute(sql`SELECT pg_get_indexdef('workflow_instances_open_start_uq'::regclass) AS def`)) as unknown as { rows: Array<{ def: string }> };
     const def = res.rows[0]!.def;
     for (const s of declared) expect(def).toContain(`'${s}'`);

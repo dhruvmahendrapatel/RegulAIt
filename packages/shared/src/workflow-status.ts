@@ -1,9 +1,9 @@
 /**
- * The workflow instance statuses an instance ends in (the kernel's `InstanceStatus`, packages/workflow-kernel).
- * Declared once (rule 12): the gateway's open-instance reads, the partial indexes in packages/db (schema.ts and
- * migrate.ts's CONCURRENT_INDEXES) and the ADR-0349 start-conflict lookup all build from this list, so a lookup and
- * the index it relies on cannot disagree about which instances are open. ADR-0348's state-machine declarations are
- * the place to fold it into once the workflow instance machine is declared there.
+ * The workflow instance statuses an instance ends in, for the packages that cannot import the kernel
+ * (`packages/db`'s partial index predicates, and the gateway reads that must agree with those indexes).
+ * The kernel's `TERMINAL_STATUSES` (packages/workflow-kernel, ADR-0342) is the source of truth;
+ * `zz-adr0349-start-conflict.test.ts` fails if the two lists ever differ. ADR-0348's state-machine declarations
+ * are the place to fold both into once the workflow instance machine is declared there.
  */
 export const WORKFLOW_TERMINAL_STATUSES = ["completed", "aborted", "denied", "rolled_back"] as const;
 export type WorkflowTerminalStatus = (typeof WORKFLOW_TERMINAL_STATUSES)[number];
