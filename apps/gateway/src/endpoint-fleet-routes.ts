@@ -12,7 +12,7 @@
  *                      enrolment token, optionally placing the device in one group. Only its SHA-256 is kept; no audit
  *                      row, log line or later read carries the secret
  *
- * The device side (the signed directive, the TUF repository route, update results) is slice 1c.
+ * The device side (the signed directive, the release download route, update results) is slice 1c.
  */
 import { randomBytes, randomUUID } from "node:crypto";
 import { z } from "zod";

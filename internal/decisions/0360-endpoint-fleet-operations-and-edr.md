@@ -3,7 +3,7 @@
 - **Status**: Proposed (builder lane E41, 2026-11-17; owner decision 2026-11-17, competitor gap audit DarkControl row 21
   and Manifold row 14)
 - **Date**: 2026-11-17
-- **Index**: Endpoint fleet ops: device groups, off-by-default TUF-verified staged self-update, one-line enrolment, EDR adapters
+- **Index**: Endpoint fleet ops: device groups, off-by-default signed staged self-update, one-line enrolment, EDR adapters
 - **Builds on**: ADR-0195 (SD4 endpoint agent), ADR-0197 (Q13 token expiry relaxation), ADR-0259 (endpoint MCP config
   discovery), ADR-0298 (on-device enforcement), ADR-0330 (hook adapters; B4 device-policy signer), and the open
   proposals of lane E16 (the device-policy signer as built, PR #867), lane E15 (the detection engine, PR #865) and lane
@@ -42,15 +42,23 @@ The brief, as given (owner direction, quoted):
 
 | Candidate | Licence | Last release | Fit | Verdict |
 |---|---|---|---|---|
-| **go-tuf v2** (`theupdateframework/go-tuf/v2`, CNCF TUF) | Apache-2.0 | v2.4.2, 2026-05-19 | Signed metadata with threshold keys and key rotation through a pinned `root.json`; rollback (version) and freeze (expiry) protection of the metadata; target length and hash checks; pluggable fetcher, so the repository can be any mirror, including the customer's own gateway in an air-gapped install. Transitive modules (sigstore, go-securesystemslib, go-containerregistry, protobuf) are Apache-2.0, MIT or BSD-3. | **Chosen** for "signature-verified against the pinned key" and "refuse a downgrade" of metadata. |
+| go-tuf v2 (`theupdateframework/go-tuf/v2`, CNCF TUF) | Apache-2.0 | v2.4.2, 2026-05-19 | The strongest model: threshold keys, root rotation, metadata rollback and freeze protection, pluggable fetcher. | **Rejected at admission** (checked 2026-11-17 against `proxy.golang.org`): its linked closure (`metadata` imports `sigstore/sigstore/pkg/signature`, which imports `go-containerregistry/pkg/name`) includes `opencontainers/go-digest` v1.0.0 (2020-05-14) and `cenkalti/backoff/v5` v5.0.3 (2025-07-23), neither with a newer release, so it fails the 12-month rule as the agent applies it (`agents/endpoint/THIRD_PARTY.md` kept `wmi` and `go-ole` out for the same reason). It would also add about 12 MB and nine modules to a binary that root runs. Re-check when go-tuf's closure is maintained. |
 | minio/selfupdate | Apache-2.0 | v0.6.0, 2022-10-19 | Binary swap with optional minisign check. | Rejected: no release in four years (fails "actively maintained"). |
 | fynelabs/selfupdate | Apache-2.0 | v0.2.1, 2025-07-07 | Same lineage as minio's (inconshreveable/go-update). | Rejected: no release in the last 12 months. |
 | creativeprojects/go-selfupdate | MIT | v1.7.1, 2026-11-10 | Release discovery from GitHub, GitLab and Gitea; checksum, ECDSA or PGP validation. | Rejected: built around public forge APIs (pulls go-github, the GitLab client and the Gitea SDK), which an air-gapped fleet cannot reach, and its validators are a single key, not a rotatable, threshold-signed root. |
 
-**What we write ourselves (narrow exception, ADR-0176 §4):** the binary swap (stage next to the binary, run the staged
-binary's health check, rename, keep the previous binary, restore it when the post-install health check fails). The
-only maintained swap libraries are the two rejected above; the swap is about 100 lines of `os.Rename` per platform.
-Re-check when a maintained swap module appears.
+**Chosen: the agent's existing signed envelope, with its own release keyring.** The agent already verifies the
+device-policy signer's envelope (`{keyId, payload, signature}`, Ed25519 over the exact payload bytes, standard library
+`crypto/ed25519`) against a pinned keyring of at most two keys (current and next, so a rotation never strands a device).
+Release manifests use the same verifier (`enforce.VerifyEnvelope`, extracted for both) with a **separate** keyring,
+`releaseKeys`, pinned in the root-owned config: one key per purpose, and the release key stays with the release
+pipeline (offline), never on the control plane. Versions are compared by `golang.org/x/mod/semver` (BSD-3-Clause, the Go
+team's module, already the reference implementation for Go module versions).
+
+**What we write ourselves (narrow exception, ADR-0176 §4):** the manifest format (four fields), and the binary swap (stage
+next to the binary, run the staged binary's health check, rename, keep the previous binary, restore it when the
+post-install health check fails). The unmet requirement is the maintained-dependency rule above: no validated module
+covers either. Re-check when go-tuf's closure or a maintained swap module qualifies.
 
 ### EDR clients
 
@@ -108,24 +116,29 @@ and summary) so they move onto `defineMachine` when lane E29's PR merges, withou
 
 ### 4. The device side (slice 1b and 1c)
 
-- **Trust.** The release pipeline publishes a TUF repository (root, targets, snapshot, timestamp, and the per-OS and
-  per-arch agent binaries). The admin pins the TUF `root.json` in the agent's MDM-placed config (`updateRoot`, a file
-  path, root-owned); without a pinned root the updater never runs. Pinning a trust anchor is not a relaxation: like the
+- **Trust.** The release pipeline signs a release manifest per version with the offline release key:
+  `{schema: "regulait.endpoint-release/1", version, issuedAt, targets: [{os, arch, sha256, length}]}` in the signed
+  envelope. The admin pins the release public keys (`releaseKeys`, at most two) in the agent's MDM-placed, root-owned
+  config; without a pinned release key the updater never runs. Pinning a trust anchor is not a relaxation: like the
   device-policy keys (ADR-0330 B4), it only says whose signatures count.
 - **Directive.** The gateway answers the per-user agent's existing config request with an update directive signed by
-  the device-policy signer (ADR-0330 B4 as lane E16 builds it, PR #867; the same envelope `{keyId, payload, signature}` and pinned keyring as the
-  enforcement policy). Payload: `{schema, deviceId, rolloutId, targetVersion, issuedAt, notAfter}` (at most 24 hours).
-  The agent writes it to a spool file; the root updater (a system timer the package installs) verifies it against the
-  pinned device-policy keys, checks it names this device (the ticket file's device id) and is fresh. A local user can
-  replay an old directive but cannot forge one; an old one can only name an older or equal version, which is refused or
-  a no-op.
-- **Install.** The updater refreshes the TUF metadata (go-tuf v2) from the gateway's read-only repository route,
-  downloads the target `regulait-agent/<os>-<arch>/<version>`, which TUF checks for length and hash, and **refuses any
-  version not greater than the running one** (semantic-version compare). It stages the binary beside the installed one,
-  runs `<staged> health` (it must start, load the config and print its own version, equal to the target), renames it
-  into place and keeps the previous binary. On the next run, the installed binary's health check runs again; a failure
-  restores the previous binary. Every outcome (`installed`, `rolled_back`, `refused`, `failed`) is reported with a
-  fixed code, and a `rolled_back` or `failed` result halts the rollout.
+  the device-policy signer (ADR-0330 B4 as lane E16 builds it, PR #867; the same envelope `{keyId, payload, signature}`
+  and pinned keyring as the enforcement policy). Payload: `{schema, deviceId, rolloutId, targetVersion, issuedAt,
+  notAfter}` (at most 24 hours). Only while self-update is on, the rollout is running and the device's group has an
+  active stage.
+- **Transport is untrusted, verification is not.** The per-user agent (which holds the self token) downloads the
+  directive, the release manifest and the binary into a spool directory (`/var/lib/regulait-agent/update`). The root
+  updater (`regulait-agent update`, a system timer the package installs) trusts none of it: it verifies the directive
+  against the device-policy keys, checks it names this device (the ticket file's device id) and is fresh, verifies the
+  manifest against the release keys, checks that the manifest's version is the directive's, copies the binary into a
+  root-only staging file and checks its length and SHA-256 there (so a later change to the spool cannot swap what runs),
+  and **refuses any version not greater than the running one**. A local user can replay an old directive or manifest but
+  cannot forge either; an old one names an older or equal version, which is refused or a no-op.
+- **Install.** It runs `<staged> health` (it must start, load the config and print its own version, equal to the
+  target), renames it into place and keeps the previous binary. On the next run, the installed binary's health check runs
+  again; a failure restores the previous binary. Every outcome (`installed`, `rolled_back`, `refused`, `failed`) is
+  written with a fixed code to a result file the per-user agent reports, and a `rolled_back` or `failed` result halts
+  the rollout.
 
 ### 5. One-line enrolment
 
@@ -177,10 +190,10 @@ process list). The token is consumed on use, so a copy left in shell history is 
 
 1. **1a (gateway):** this ADR, device groups, the self-update setting, rollouts and their lifecycle, one-line
    enrolment tokens.
-2. **1b (agent):** `regulait-agent enrol` (token on standard input) and the TUF-verified updater with health check and
-   rollback.
-3. **1c (gateway):** the signed directive in the config response, the read-only TUF repository route and the device's
-   update-result route (which halts a rollout).
+2. **1b (agent):** `regulait-agent enrol` (token on standard input) and the root updater: directive and manifest
+   verification, the downgrade refusal, staging, health check and rollback.
+3. **1c (gateway and agent):** the signed directive and release manifest in the config response, the binary download
+   route, the per-user agent's spool writer, and the device's update-result route (which halts a rollout).
 4. **2 (gateway):** EDR adapters, signal ingest, verified webhooks and governed isolation.
 
 ## Owner questions (built with the secure default)
