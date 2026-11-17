@@ -110,7 +110,14 @@ describe("GET /v1/governance-config/export", () => {
     const text = JSON.stringify(doc);
     expect(text).not.toContain(serverId);
     expect(text).not.toContain(roleId);
-    expect(text).not.toMatch(/ciphertext|secret|password|token/i);
+    // no field that could carry a credential (keys, not values: another suite's descriptions may say "token")
+    const keys = new Set<string>();
+    const walk = (v: unknown): void => {
+      if (Array.isArray(v)) v.forEach(walk);
+      else if (v && typeof v === "object") for (const [k, x] of Object.entries(v)) (keys.add(k), walk(x));
+    };
+    walk(doc);
+    expect([...keys].filter((k) => /ciphertext|secret|password|token|credential|key$/i.test(k))).toEqual([]);
     const row = await lastAudit("governance_config.export");
     expect(row?.detail).toMatchObject({ revision: doc.metadata.revision, format: "json" });
   });
