@@ -1,0 +1,72 @@
+/**
+ * ADR-0242 §6.1 — the two admission-scan images' runner stage, read as text (no daemon here; M-063/M-065): each image
+ * builds this package in a pinned node stage exactly as modelscan's does, ships the pinned node binary with its
+ * libraries checked against the runtime base, runs the runner by default, names its engine, and keeps every base
+ * pinned by digest. The scanner stages and the smoke scans are the ones ADR-0242 §3 measured (not changed here).
+ */
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
+import { ADMISSION_SCAN_ENGINE_IDS, ENGINE_MANIFEST, isPublicAddress } from "@regulait/shared";
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+const modelscan = readFileSync(path.join(root, "engines/modelscan/Dockerfile"), "utf8");
+const stage = (dockerfile: string, name: string) => {
+  const start = dockerfile.search(new RegExp(`^FROM .* AS ${name}$`, "m"));
+  const next = dockerfile.slice(start + 1).search(/^FROM /m);
+  return dockerfile.slice(start, next < 0 ? undefined : start + 1 + next);
+};
+const lines = (s: string) => s.split("\n").filter((l) => !l.startsWith("#"));
+
+describe.each(ADMISSION_SCAN_ENGINE_IDS)("the %s image's runner stage", (engine) => {
+  const dockerfile = readFileSync(path.join(root, `engines/${engine}/Dockerfile`), "utf8");
+
+  it("every base is pinned by digest; the shim and node come from the pinned node image modelscan uses", () => {
+    const froms = [...dockerfile.matchAll(/^FROM --platform=linux\/amd64 (\S+)/gm)].map((m) => m[1]!);
+    expect(froms.length).toBe([...dockerfile.matchAll(/^FROM /gm)].length);
+    for (const b of froms) expect(b).toMatch(/^[a-z0-9.\/-]+:[a-z0-9.-]+@sha256:[0-9a-f]{64}$/);
+    const nodeBase = /^FROM --platform=linux\/amd64 (\S+) AS shim$/m.exec(modelscan)![1];
+    expect(/^FROM --platform=linux\/amd64 (\S+) AS shim$/m.exec(dockerfile)?.[1]).toBe(nodeBase);
+    expect(/^FROM --platform=linux\/amd64 (\S+) AS node$/m.exec(dockerfile)?.[1]).toBe(nodeBase);
+    expect(/^FROM --platform=linux\/amd64 (\S+) AS runtime$/m.exec(dockerfile)?.[1]).toBe(/^FROM --platform=linux\/amd64 (\S+) AS runtime$/m.exec(modelscan)![1]);
+  });
+
+  it("the shim stage is modelscan's, building and deploying this package (reproducibly)", () => {
+    const ours = lines(stage(dockerfile, "shim")).join("\n").replaceAll("@regulait/engine-admission-scan", "@regulait/engine-X");
+    const theirs = lines(stage(modelscan, "shim")).join("\n").replaceAll("@regulait/engine-modelscan", "@regulait/engine-X");
+    expect(ours.trim()).toBe(theirs.trim());
+    expect(dockerfile).toContain('pnpm --filter "@regulait/engine-admission-scan..." build');
+    expect(dockerfile).toContain("pnpm --filter @regulait/engine-admission-scan deploy --prod --legacy /out");
+    expect(dockerfile).toContain("node scripts/engine-images-normalise.mjs modules-yaml /out/node_modules/.modules.yaml");
+  });
+
+  it("the runtime ships node with its libraries from this base, the shim at /app, and starts the runner", () => {
+    const runtime = stage(dockerfile, "runtime");
+    const nodeCopy = runtime.indexOf("COPY --from=node /usr/local/bin/node /usr/local/bin/node");
+    const nodeCheck = runtime.indexOf("&& node --version");
+    expect(nodeCopy).toBeGreaterThan(0);
+    expect(nodeCheck).toBeGreaterThan(nodeCopy);
+    expect(runtime.slice(nodeCopy, nodeCheck)).toContain("dpkg-query -W -f='${Package} ${Version}\\n' libstdc++6 libgcc-s1");
+    expect(runtime.slice(nodeCopy, nodeCheck)).toContain("ldd /usr/local/bin/node | grep -q 'not found'");
+    expect(nodeCheck).toBeLessThan(runtime.indexOf("\nUSER "));
+    expect(runtime).toContain("COPY --from=shim /out /app");
+    // the manifest's task entry is what the image ships
+    const entry = ENGINE_MANIFEST[engine].taskEntry;
+    expect(entry.command).toBe("/usr/local/bin/node");
+    expect(entry.args).toEqual(["/app/dist/task-main.js", engine]);
+    expect(dockerfile.trimEnd().endsWith('CMD ["node", "/app/dist/main.js"]')).toBe(true);
+    expect(dockerfile).not.toMatch(/^ENTRYPOINT /m);
+    expect(dockerfile).not.toMatch(/docker\.sock|EXPOSE/);
+    expect(dockerfile).toMatch(/\nUSER 10001:10001\n/);
+    const env = /\nENV ([\s\S]*?)\nUSER/.exec(runtime)![1]!;
+    expect(env).toContain(`REGULAIT_ADMISSION_ENGINE=${engine} \\`);
+    expect(isPublicAddress(/REGULAIT_EGRESS_PROBE_ADDRESS=(\S+)/.exec(env)?.[1])).toBe(true);
+    expect(runtime).toMatch(/mkdir -p \/state \/jobs \/results[\s\S]*chmod 0700 \/state/);
+  });
+
+  it("the scanner's smoke scan still runs offline in the image as built", () => {
+    expect(dockerfile).toMatch(new RegExp(`RUN --network=none /opt/${engine}/venv/bin/python -I /opt/${engine}/`));
+    expect(dockerfile).toContain(`/opt/${engine}/venv/bin/python -I /opt/${engine}/scan.py /opt/${engine}/fixtures/bad /work/bad.json`);
+  });
+});
