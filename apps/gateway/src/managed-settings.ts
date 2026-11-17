@@ -22,8 +22,13 @@ import { z } from "zod";
 import {
   and,
   auditLog,
+  asc,
+  count,
   desc,
+  endpointDevices,
+  endpointMcpServers,
   eq,
+  gt,
   inArray,
   isNull,
   lt,
@@ -40,7 +45,11 @@ import {
 import {
   canonicalPolicyJson,
   compileManagedSettings,
+  isGatewayHost,
   MANAGED_SETTINGS_SCHEMA,
+  MANAGED_SETTINGS_VENDORS,
+  MANAGED_VENDOR_CONFIG_PATHS,
+  managedVendorOfConfigPath,
   ManagedSettingsCompileError,
   type EffectiveMcpPolicy,
   type EffectiveMcpServer,
@@ -283,6 +292,126 @@ const listQuery = z
   .refine((q) => (q.subjectId === undefined) === (q.subjectKind === undefined), { message: "subjectKind and subjectId go together" });
 const idParams = z.object({ id: z.string().uuid() }).strict();
 
+
+// ---------------------------------------------------------------------------
+// Slice 2: drift against ADR-0259's endpoint MCP inventory (ADR-0310 decision 8)
+// ---------------------------------------------------------------------------
+
+const likeEscape = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
+
+/** SQL: the managed vendor an inventory row's config file belongs to (managedVendorOfConfigPath, in SQL), or NULL */
+const VENDOR_OF_ROW = sql<string | null>`(CASE ${sql.join(
+  MANAGED_SETTINGS_VENDORS.map(
+    (v) =>
+      sql`WHEN ${sql.join(
+        MANAGED_VENDOR_CONFIG_PATHS[v].map(
+          (suffix) => sql`(replace(${endpointMcpServers.configPath}, '\\', '/') = ${suffix} OR replace(${endpointMcpServers.configPath}, '\\', '/') LIKE ${`%/${likeEscape(suffix)}`})`,
+        ),
+        sql` OR `,
+      )} THEN ${v}`,
+  ),
+  sql` `,
+)} END)`;
+
+/** the host strings a device may report for this gateway (isGatewayHost, as a set for SQL) */
+function gatewayHostForms(publicUrl: string): string[] {
+  const u = new URL(publicUrl);
+  const host = u.host.toLowerCase();
+  const dflt = u.protocol === "https:" ? "443" : u.protocol === "http:" ? "80" : "";
+  return u.port || !dflt ? [host] : [host, `${host}:${dflt}`];
+}
+
+export const driftQuery = z
+  .object({
+    deviceId: z.string().uuid().optional(),
+    vendor: z.enum(MANAGED_SETTINGS_VENDORS).optional(),
+    cursor: z.string().uuid().optional(),
+    limit: z.coerce.number().int().min(1).max(200).default(50),
+  })
+  .strict();
+export type DriftQuery = z.infer<typeof driftQuery>;
+
+export type DriftOutcome =
+  | { ok: true; body: Record<string, unknown> }
+  | { ok: false; status: number; error: string; detail: string };
+
+/**
+ * Drift: an enabled MCP server configured in a managed vendor's config file on an enrolled device whose identity is
+ * not this gateway. A bundle names only gateway URLs and sets the vendor's managed-only switch, so such a server
+ * means the bundle is not applied on that device, or the client does not enforce it. Measured against what was
+ * exported: with no bundle exported nothing is managed yet, and the request is refused rather than reporting every
+ * server as drift. Devices are pseudonymous (ADR-0195), so drift is per device and identity, never per named user.
+ */
+export async function managedSettingsDrift(db: Db, q: DriftQuery, publicUrl: string | null = resolvePublicUrl()): Promise<DriftOutcome> {
+  if (!publicUrl) {
+    return { ok: false, status: 409, error: "public_url_unset", detail: "REGULAIT_PUBLIC_URL is not set, so the gateway host a managed device must name is unknown" };
+  }
+  const [latest] = await db
+    .select({ id: managedSettingsBundles.id, createdAt: managedSettingsBundles.createdAt })
+    .from(managedSettingsBundles)
+    .orderBy(desc(managedSettingsBundles.createdAt), desc(managedSettingsBundles.id))
+    .limit(1);
+  if (!latest) {
+    return { ok: false, status: 409, error: "no_bundle_exported", detail: "no managed-settings bundle has been exported, so there is no managed allowlist to drift from" };
+  }
+  const hosts = gatewayHostForms(publicUrl);
+  const isGateway = sql`(${endpointMcpServers.transport} IN ('http', 'sse') AND lower(${endpointMcpServers.host}) IN (${sql.join(
+    hosts.map((h) => sql`${h}`),
+    sql`, `,
+  )}))`;
+  const base = [eq(endpointMcpServers.disabled, false), sql`${VENDOR_OF_ROW} IS NOT NULL`, sql`NOT coalesce(${isGateway}, false)`];
+  if (q.deviceId) base.push(eq(endpointMcpServers.deviceId, q.deviceId));
+  if (q.vendor) base.push(sql`${VENDOR_OF_ROW} = ${q.vendor}`);
+  const [totals] = await db
+    .select({ servers: count(), devices: sql<number>`count(DISTINCT ${endpointMcpServers.deviceId})` })
+    .from(endpointMcpServers)
+    .where(and(...base));
+  const conds = q.cursor ? [...base, gt(endpointMcpServers.id, q.cursor)] : base;
+  const rows = await db
+    .select({ row: endpointMcpServers, devicePseudonym: endpointDevices.devicePseudonym })
+    .from(endpointMcpServers)
+    .innerJoin(endpointDevices, eq(endpointDevices.id, endpointMcpServers.deviceId))
+    .where(and(...conds))
+    .orderBy(asc(endpointMcpServers.id))
+    .limit(q.limit + 1);
+  const page = rows.slice(0, q.limit);
+  const items = page.map(({ row, devicePseudonym }) => {
+    const vendor = managedVendorOfConfigPath(row.configPath);
+    const remote = row.transport === "http" || row.transport === "sse";
+    // a remote row on this gateway is excluded by the query; the check here keeps the two definitions honest
+    const onGateway = remote && !!row.host && isGatewayHost(row.host, publicUrl);
+    return {
+      id: row.id,
+      deviceId: row.deviceId,
+      devicePseudonym,
+      vendor,
+      config: { root: row.configRoot, path: row.configPath },
+      serverName: row.serverName,
+      transport: row.transport,
+      identity: { kind: row.identityKind, value: row.identity },
+      risks: row.risks,
+      secretTypes: row.secretTypes,
+      onGateway,
+      reportedAfterLatestExport: row.lastSeenAt >= latest.createdAt,
+      verdict: remote
+        ? `DRIFT: a remote MCP server (${row.identity}) in ${vendor}'s config that is not this gateway. The managed allowlist names only gateway URLs, so its presence means the managed settings are not applied on this device, or the client does not enforce them.`
+        : `DRIFT: a local (${row.transport}) MCP server (${row.identity}) in ${vendor}'s config. The managed allowlist names only gateway URLs, so its presence means the managed settings are not applied on this device, or the client does not enforce them.`,
+      firstSeenAt: row.firstSeenAt.toISOString(),
+      lastSeenAt: row.lastSeenAt.toISOString(),
+    };
+  });
+  return {
+    ok: true,
+    body: {
+      latestBundle: { id: latest.id, createdAt: latest.createdAt.toISOString() },
+      gatewayHost: hosts[0],
+      summary: { driftServers: Number(totals?.servers ?? 0), devices: Number(totals?.devices ?? 0) },
+      items,
+      nextCursor: rows.length > q.limit ? page[page.length - 1]!.row.id : null,
+    },
+  };
+}
+
 const refuse = (reply: FastifyReply, status: number, error: string, detail: string) => reply.status(status).send({ error, detail });
 const issues = (e: z.ZodError) => e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
 
@@ -322,6 +451,14 @@ export function registerManagedSettingsRoutes(app: FastifyInstance, db: Db): voi
       .limit(limit + 1);
     const page = rows.slice(0, limit);
     return { bundles: page.map(view), next: rows.length > limit ? page[page.length - 1]!.id : null };
+  });
+
+  app.get("/v1/managed-settings/drift", async (req, reply) => {
+    const q = driftQuery.safeParse(req.query ?? {});
+    if (!q.success) return refuse(reply, 400, "invalid_query", issues(q.error));
+    const out = await managedSettingsDrift(db, q.data);
+    if (!out.ok) return refuse(reply, out.status, out.error, out.detail);
+    return out.body;
   });
 
   app.get("/v1/managed-settings/bundles/:id/archive", async (req, reply) => {

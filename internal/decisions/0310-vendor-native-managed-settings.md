@@ -2,8 +2,8 @@
 
 - **Status**: Accepted (lane E1 brief, 2026-11-15; gap G2 of `internal/product/MARKET_ANALYSIS_2026-11.md` §3, PR #844)
 - **Date**: 2026-11-15
-- **Index**: **Vendor-native managed settings (G2): a user's or role's effective MCP entitlements compiled into Claude Code and GitHub Copilot `managed-settings.json`, an OpenAI Codex `requirements.toml` and a Cursor dashboard worksheet. Every entitled server is named by its gateway URL; nothing entitled means an explicit deny-all. Exported as a signed (Ed25519), versioned tar.gz for MDM push; refused when there is no signing key or public URL.** Drift against ADR-0259 discovery follows in slice 2.
-- **Built in**: lane E1. Slice 1: compiler, signed bundles, API. Slice 2: drift detection against ADR-0259.
+- **Index**: **Vendor-native managed settings (G2): a user's or role's effective MCP entitlements compiled into Claude Code and GitHub Copilot `managed-settings.json`, an OpenAI Codex `requirements.toml` and a Cursor dashboard worksheet. Every entitled server is named by its gateway URL; nothing entitled means an explicit deny-all. Exported as a signed (Ed25519), versioned tar.gz for MDM push; refused when there is no signing key or public URL. Drift (slice 2): an enabled server in a managed vendor's MCP config on an enrolled device whose identity is not this gateway, from ADR-0259's inventory.**
+- **Built in**: lane E1. Slice 1: compiler, signed bundles, API. Slice 2: drift detection against ADR-0259 (`GET /v1/managed-settings/drift`).
 - **Migration**: `pending/managed_settings_bundles.sql` (numbered at merge, ADR-0252)
 - **Related**: ADR-0259 (endpoint MCP config discovery), ADR-0298 (on-device hooks; a different mechanism),
   ADR-0236 (MCP bundles), ADR-0041 / `export-bundle.ts` (the export signing key), ADR-0176, ADR-0180, ADR-0200
@@ -63,9 +63,26 @@ own allowlists, which the vendors' clients enforce.
 7. **Open source first (ADR-0176).** `smol-toml` 1.9.1 renders the TOML. It was already pinned in `@regulait/shared`,
    is **BSD-3-Clause** (the market analysis said MIT, which is wrong) and needs no network. JSON is native. The tar.gz
    reuses `export-bundle.ts`'s deterministic writer. No vendor SDK or library generates these formats.
-8. **Drift (slice 2).** ADR-0259's `endpoint_mcp_servers` rows will be compared with the latest bundles. A configured
-   server whose identity is not an exported gateway URL is drift. Devices are pseudonymous, so drift is reported per
-   device and identity, not per named user.
+8. **Drift (slice 2).** `GET /v1/managed-settings/drift` (admin-only, keyset-paginated, at most 200 a page, filters
+   `deviceId` and `vendor`) reads ADR-0259's `endpoint_mcp_servers` inventory. A row is **drift** when all hold:
+   - it is not disabled (a disabled server is not loaded);
+   - its config file is one a managed vendor reads (`MANAGED_VENDOR_CONFIG_PATHS` in `@regulait/shared`: Claude Code
+     `.claude.json`, `.mcp.json`, `.claude/settings.json`; Copilot `Code/User/mcp.json`, `Code/User/settings.json`,
+     `.vscode/mcp.json`; Codex `.codex/config.toml`; Cursor `.cursor/mcp.json`). Another host app's config (Claude
+     Desktop, Windsurf, Zed) is not under any bundle, so it stays ADR-0259's registry diff, not drift;
+   - it is not this gateway: a remote (`http`/`sse`) server whose reported host equals `REGULAIT_PUBLIC_URL`'s host,
+     case-insensitively, with an explicit default port matching its absence, is managed. The device reports a host and
+     never a path (ADR-0259), so the comparison is per host, not per `/mcp/<serverId>` URL.
+
+   Each bundle names only gateway URLs and sets the vendor's managed-only switch, so a drift row means the bundle is not
+   applied on that device or the client does not enforce it. The response carries the newest bundle, a summary
+   (drift rows and distinct devices under the same filters) and, per row, `reportedAfterLatestExport`, so an admin can
+   tell a device that has not reported since the last export from one that reported and still drifts.
+   **Refusals (secure by default):** 409 `public_url_unset` with no public URL (the managed host is unknown), and 409
+   `no_bundle_exported` before any bundle exists, since nothing is managed yet and listing every server as drift would
+   be noise. Devices are pseudonymous (ADR-0195), so drift is per device and identity, never per named user; devices
+   are not mapped to bundle subjects. **Open source first:** no library compares MCP client configs with an allowlist;
+   the comparison is a set check over rows ADR-0259 already stores, with no new table or migration.
 9. **Effective policy reuses the gateway's loaders (#850 review).** The user path calls `visibleMcpToolNamesByServer`
    (`builder-access.ts`, the same admission, entitlement and `visibleTools` loop as `entitledMcpToolIds`). The role
    path calls `loadRoleEntitlements`, built on the `loadRoleGrants` that `loadEntitlements` itself uses. A filter added
@@ -74,9 +91,9 @@ own allowlists, which the vendors' clients enforce.
 10. **Row-level security.** Both tables are under ENABLE and FORCE ROW LEVEL SECURITY with ADR-0234's admin-only
    policy: an active admin principal or the `migration` reason. A plain `regulait_app` connection, a non-admin
    principal, or another system reason reads and writes nothing (pinned by a test).
-11. **Route census.** The three routes have no screen yet. Under the lane E1 brief (rule 3: new routes go into the
+11. **Route census.** The three routes (four with slice 2's drift route) have no screen yet. Under the lane E1 brief (rule 3: new routes go into the
    census with a `KNOWN_UI_GAPS` entry on #453), each has a `KNOWN_UI_GAPS` entry, and `KNOWN_UI_GAPS_MAX` rises by
-   exactly 3 over main (63 + 3 = **66** after ADR-0332's, ADR-0230 A2's, lane L7's and ADR-0327's routes landed on main). The ratchet falls again when the #453 screen lands.
+   exactly 3 over main (63 + 3 = **66** after ADR-0332's, ADR-0230 A2's, lane L7's and ADR-0327's routes landed on main); slice 2 adds the drift route, so **67**. The ratchet falls again when the #453 screen lands.
 
 ## Owner decision
 
@@ -102,5 +119,5 @@ own allowlists, which the vendors' clients enforce.
 
 The Managed rung exists and follows pillar 1. Re-exporting after a grant change gives a new version, and an unchanged
 policy keeps its version, so MDM sees a change only when there is one. A developer can still remove the managed file
-on an unmanaged device. ROADMAP's "developer can undo locally" stands, and drift detection (slice 2) is how an admin
-sees it.
+on an unmanaged device. ROADMAP's "developer can undo locally" stands, and drift detection (slice 2, `GET /v1/managed-settings/drift`) is how an
+admin sees it, from the next endpoint report.
