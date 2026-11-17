@@ -5079,3 +5079,6 @@ export * from "./adoption-analytics.js";
 
 // ADR-0341: RFC 6902 patches for diff views
 export { jsonPatch, type JsonPatchOperation } from "./json-patch.js";
+
+// ADR-0346: fairness evaluation through the gateway — definitions, the reply mapping and the promotion gate (pure)
+export * from "./fairness-evaluation.js";
