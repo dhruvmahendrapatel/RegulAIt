@@ -588,6 +588,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/projects/:projectId/context/graph",
   "POST /v1/projects/:projectId/context/promote",
   "GET /v1/projects/:projectId/compliance",
+  // ADR-0362: a project viewer may read whether its files are inspected (projectRoleGate in the handler); PUT stays admin
+  "GET /v1/projects/:projectId/content-inspection",
   "GET /v1/projects/:projectId/costs",
   "GET /v1/projects/:projectId/costs.csv",
   // ADR-0044: triggering an eval run is governed by the caller's own AGENT

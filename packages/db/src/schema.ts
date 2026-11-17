@@ -17171,4 +17171,28 @@ export const contentInspectionResults = pgTable(
   ],
 );
 export type ContentInspectionResultRow = typeof contentInspectionResults.$inferSelect;
+
+/**
+ * ADR-0362 slice 1b-ii (pending migration `content_inspection_settings`): one project's content-inspection setting. No
+ * row means the shipped default: off, and a file that cannot be read refuses the dispatch (`refuse`). Inspection is also
+ * forced on, whatever this row says, when the project's effective compliance cascade PII mode is `block`; the floor then
+ * also forces `refuse`. Turning it off or choosing `pass_not_scanned` is a `settings_relax` step-up, audited.
+ */
+export const projectContentInspection = pgTable(
+  "project_content_inspection",
+  {
+    projectId: uuid("project_id")
+      .primaryKey()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    enabled: boolean("enabled").notNull().default(false),
+    onUninspectable: text("on_uninspectable").notNull().default("refuse"),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("project_content_inspection_updated_by_idx").on(t.updatedBy),
+    check("project_content_inspection_on_uninspectable_check", sql`${t.onUninspectable} IN ('refuse', 'pass_not_scanned')`),
+  ],
+);
+export type ProjectContentInspectionRow = typeof projectContentInspection.$inferSelect;
 // ===== end ADR-0362 =====

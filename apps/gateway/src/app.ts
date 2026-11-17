@@ -192,6 +192,7 @@ import { applyModelCardApprovalDecision, registerMrmRoutes } from "./mrm.js";
 import { registerFairnessRoutes } from "./fairness.js";
 import { registerClassicalDriftRoutes } from "./classical-drift.js";
 import { registerRuleStepRoutes } from "./rule-steps.js";
+import { registerContentInspectionRoutes } from "./content-inspection.js";
 import { registerDriftIngestCredentialRoutes } from "./drift-ingest-credentials.js";
 import { AiBomError } from "./ai-bom.js";
 import { runAiBomSignoffs, type AiBomSignoff } from "./ai-bom-signoff.js";
@@ -5849,6 +5850,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerClassicalDriftRoutes(app, db);
   // ADR-0327 (lane E12): rule-like AI step detection, admin-only via the default gate
   registerRuleStepRoutes(app, db);
+  // ADR-0362 slice 1b-ii: the per-project content-inspection setting (GET for project viewers, PUT admin-only)
+  registerContentInspectionRoutes(app, db);
   // ADR-0223 amendment 1: the per-monitor write-only ingestion credential and its one route
   registerDriftIngestCredentialRoutes(app, db);
   // ADR-0057 — CONTINUOUS RED-TEAMING. Versioned attack libraries, the shipped

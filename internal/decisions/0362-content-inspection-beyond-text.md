@@ -151,3 +151,30 @@ the existing `maxAttachmentsPerDispatch` and `maxAttachmentBytes` org settings.
   `apps/gateway/src/content-inspection-runs.ts` (`enqueueContentExtractRun`, `awaitContentExtractResult` and the
   input, end and placement hooks). The raw report of a `contentextract` run is never kept on the run. No request-path
   wiring yet (slice 1b-ii).
+- **Slice 1b-ii (2026-11-17)**: the request path, behind a per-project setting. Pending migration
+  `content_inspection_settings`: `project_content_inspection` (one row per project; no row is off / `refuse`; no
+  row-level security yet, like every project-scoped table, so by the ADR-0234 appendix rule it joins batch 5).
+  `apps/gateway/src/content-inspection.ts`: `effectiveContentInspection` (on = row enabled OR the effective cascade PII
+  mode is `block`, resolved by `projectPiiMode`, which falls back to the org default for an unclassified project or an
+  unattributed dispatch; under the floor `onUninspectable` is always `refuse`) and `inspectDispatchFiles`, which
+  `dispatchAttempt` runs before the three input checks on every image and document block of the dispatch's messages
+  (so the native invoke path and both compat shims converge on it; the native semantic-cache hit passes its files as
+  `inspectFiles`), once per dispatch (memoised across fallback hops). Extracted text joins the prompt, each file behind
+  `[attachment aN]`, for exactly those checks; a file that cannot be read refuses `422 content_not_inspectable`
+  (index, kind and reason only), audited, before any provider work, or with `pass_not_scanned` goes on recorded
+  `not_scanned`. One `content-inspection` audit row per inspected dispatch (files by index and kind, the extractor's
+  detected type, the PII categories found per file, the engine run and outcome; never a name or any text). With
+  inspection off the native invoke path's dispatch audit row carries an additive `contentInspection` key, every file
+  `not_scanned`. Every engine outcome but a result refuses every file with reason `timeout`; the dispatch-level
+  `engine.outcome` says which (`engine_off`, `not_queued`, `timeout`, `not_run`, `failed`, `no_result`). The request
+  waits at most 30 s (`CONTENT_INSPECTION_DEADLINE_MS`). Routes `GET` (project viewer or admin, `projectRoleGate`) and
+  `PUT` (admin; turning it off or choosing `pass_not_scanned` is a `settings_relax` step-up) `/v1/projects/:projectId/
+  content-inspection`, both with the lane lead's `CONTENT_INSPECTION_COST_NOTE`; KNOWN_UI_GAPS entries on #453. The
+  engine-run sweep deletes unread results and ends extraction runs older than ten minutes (database clock). The
+  vocabulary (file statuses and their transitions, dispatch and engine outcomes, `onUninspectable`) is declared once in
+  `packages/shared/src/content-inspection.ts`. **Consequence recorded for the lane lead**: the shipped org-default PII
+  mode is `block` (ADR-0181), so on a fresh install the floor forces inspection on for every unclassified project and
+  every unattributed dispatch, and while the engine is unpublished every such dispatch with a file is refused 422.
+  `attachments.test.ts` and one `org-settings.test.ts` case now run at org-default `log` to keep pinning what they
+  pinned. Not built: the redact case of decision 5 (no dispatch PII mode redacts today), per-file guardrail attribution,
+  and the response-side files.

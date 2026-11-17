@@ -1172,31 +1172,43 @@ export async function applyProjectPatch(
   return { ok: true, row: row!, changed };
 }
 
+export type ProjectRole = "viewer" | "contributor" | "owner";
+
+/**
+ * The object-level gate of the per-project routes: an admin passes; anyone else must hold a membership of at least
+ * `minRole` on the project, or is refused 403 `forbidden`. Exported so a per-project route outside this file (ADR-0362
+ * content-inspection settings) applies exactly the same check.
+ */
+export async function projectRoleGate(
+  db: Db,
+  req: { authCtx: { userId: string | null; isAdmin: boolean } },
+  projectId: string,
+  minRole: ProjectRole,
+): Promise<
+  | { ok: true; membership: typeof projectMembers.$inferSelect | null }
+  | { ok: false; status: number; error: string }
+> {
+  if (req.authCtx.isAdmin) return { ok: true, membership: null };
+  if (!req.authCtx.userId) return { ok: false, status: 403, error: "forbidden" };
+  const [membership] = await db
+    .select()
+    .from(projectMembers)
+    .where(and(eq(projectMembers.projectId, projectId), eq(projectMembers.userId, req.authCtx.userId)));
+  if (!membership || ROLE_RANK[membership.role]! < ROLE_RANK[minRole]!) {
+    return { ok: false, status: 403, error: "forbidden" };
+  }
+  return { ok: true, membership };
+}
+
 export function registerProjectRoutes(app: FastifyInstance, db: Db) {
   /** §9.3: per-user, per-Shared-Project access — viewer reads, contributor+
    * writes, owner administers membership. Admins bypass. Returns the
    * membership row for provenance defaults. */
-  async function requireRole(
+  const requireRole = (
     req: { authCtx: { userId: string | null; isAdmin: boolean } },
     projectId: string,
-    minRole: "viewer" | "contributor" | "owner",
-  ): Promise<
-    | { ok: true; membership: typeof projectMembers.$inferSelect | null }
-    | { ok: false; status: number; error: string }
-  > {
-    if (req.authCtx.isAdmin) return { ok: true, membership: null };
-    if (!req.authCtx.userId) return { ok: false, status: 403, error: "forbidden" };
-    const [membership] = await db
-      .select()
-      .from(projectMembers)
-      .where(
-        and(eq(projectMembers.projectId, projectId), eq(projectMembers.userId, req.authCtx.userId)),
-      );
-    if (!membership || ROLE_RANK[membership.role]! < ROLE_RANK[minRole]!) {
-      return { ok: false, status: 403, error: "forbidden" };
-    }
-    return { ok: true, membership };
-  }
+    minRole: ProjectRole,
+  ) => projectRoleGate(db, req, projectId, minRole);
 
   /** Display enrichment (same discipline as the approvals list): resolve user
    * and team ids to names in one pass. Provenance ids are FK-free by design,
