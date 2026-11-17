@@ -159,6 +159,9 @@ export const CONTENT_GUARD_EXCLUSION_REASONS: Readonly<Record<ContentGuardExclus
 export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclusion>> = {
   // ADR-0261: an event identifier the sending product chose (a linear lower-case identifier check bounds it)
   "third_party_ingest_records.event_name": "ingested",
+  // ADR-0337: an app's display name and a scope name as the SaaS vendor reports them (read-only entitlement reads)
+  "saas_entitlement_apps.display_name": "ingested",
+  "saas_entitlement_scopes.name": "ingested",
   "ai_incident_actions.title": "prose_owned_by_adr0102",
   "ai_incidents.summary": "prose_owned_by_adr0102",
   "ai_incidents.title": "prose_owned_by_adr0102",
