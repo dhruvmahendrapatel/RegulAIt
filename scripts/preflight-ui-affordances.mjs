@@ -57,6 +57,7 @@ export const DELIBERATELY_API_ONLY = new Map([
  * would remove the proof.
  */
 export const NO_REMOVE_BY_DESIGN = new Map([
+  ["/v1/managed-settings/bundles", "ADR-0310: a signed managed-settings bundle is evidence of what was pushed to devices (drift is measured against it); a new version supersedes it, and it is removed only with its subject (FK cascade)"],
   ["/v1/decisions", "signed approval decisions are evidence; a decision is superseded by a later one, never deleted"],
   ["/v1/runs", "a run is an execution record the audit trail and cost ledger point at"],
   ["/v1/evals/runs", "an evaluation run is a result record that model-risk sign-offs cite"],

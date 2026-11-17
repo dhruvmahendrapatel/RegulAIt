@@ -2006,6 +2006,8 @@ export const auditLog = pgTable(
         "trust_publication",
         "trust_center",
         "auditor_grant",
+        // ADR-0310 (G2): a signed managed-settings bundle export (objectId = the bundle). Plain text column — no DDL.
+        "managed_settings_bundle",
       ],
     })
       .notNull()
@@ -16753,6 +16755,67 @@ export const resourceRateReservations = pgTable(
   ],
 );
 
+/**
+ * ADR-0310 (G2; migration `managed_settings_bundles`) — signed, versioned bundles of vendor-native managed settings
+ * (Claude Code, GitHub Copilot, OpenAI Codex, a Cursor worksheet) compiled from one subject's effective MCP
+ * entitlements. A new version is written only when the compiled policy's digest changes, so `version` counts real
+ * policy changes per subject.
+ *
+ * 3NF exception, deliberate: a bundle is a point-in-time, signed artifact. `manifest` is the exact signed bytes and
+ * `policy_digest` is over the policy as it was compiled; neither is recomputed from today's grants, which is the
+ * point of keeping them (drift is measured against what was exported). The subject is a foreign key, never a copied
+ * name or email.
+ */
+export const managedSettingsBundles = pgTable(
+  "managed_settings_bundles",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    subjectKind: text("subject_kind", { enum: ["user", "role"] }).notNull(),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    roleId: uuid("role_id").references(() => roles.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    /** `sha256:<hex>` over the canonical compiled policy */
+    policyDigest: text("policy_digest").notNull(),
+    /** the exact `manifest.json` bytes that were signed (snapshot; see the table comment) */
+    manifest: text("manifest").notNull(),
+    /** base64 Ed25519 signature over `manifest` */
+    signature: text("signature").notNull(),
+    keyId: text("key_id").notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "managed_settings_bundles_subject_check",
+      sql`CASE ${t.subjectKind} WHEN 'user' THEN ${t.userId} IS NOT NULL AND ${t.roleId} IS NULL WHEN 'role' THEN ${t.roleId} IS NOT NULL AND ${t.userId} IS NULL ELSE false END`,
+    ),
+    check("managed_settings_bundles_version_check", sql`${t.version} >= 1`),
+    check("managed_settings_bundles_manifest_size_check", sql`octet_length(${t.manifest}) <= 65536`),
+    uniqueIndex("managed_settings_bundles_user_version_uq").on(t.userId, t.version).where(sql`${t.userId} IS NOT NULL`),
+    uniqueIndex("managed_settings_bundles_role_version_uq").on(t.roleId, t.version).where(sql`${t.roleId} IS NOT NULL`),
+    index("managed_settings_bundles_created_idx").on(t.createdAt, t.id),
+  ],
+);
+
+/**
+ * ADR-0310 — one compiled vendor file of a bundle. Its sha256 is listed in the signed manifest, so the body is the
+ * evidence of what was exported (append-only snapshot, same exception as the bundle row).
+ */
+export const managedSettingsBundleFiles = pgTable(
+  "managed_settings_bundle_files",
+  {
+    bundleId: uuid("bundle_id")
+      .notNull()
+      .references(() => managedSettingsBundles.id, { onDelete: "cascade" }),
+    path: text("path").notNull(),
+    body: text("body").notNull(),
+    sha256: text("sha256").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.bundleId, t.path] }),
+    check("managed_settings_bundle_files_size_check", sql`octet_length(${t.body}) <= 262144`),
+  ],
+);
 // ---------------------------------------------------------------------------
 // ADR-0327 (lane E12, migration `rule_step_detection`) — rule-like AI steps. Written only by
 // `apps/gateway/src/rule-steps.ts`, each write in the same transaction as its audit row.
