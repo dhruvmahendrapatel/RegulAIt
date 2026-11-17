@@ -394,9 +394,14 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
     const record = list.useCases.find((u) => u.name.startsWith("Govern ")) ?? list.useCases[0];
     expect(record, "the registry has a use case").toBeTruthy();
     recordId = record!.id;
+    // #745: the record opens on its decision summary (the default tab); the lifecycle tracker is on Overview
     await ada.goto(`/ui/admin/governance/use-cases/${recordId}`);
-    await expect(ada.getByText("Lifecycle tracker")).toBeVisible();
+    await expect(ada.getByTestId("decision-panel")).toBeVisible();
+    await expect(ada.getByTestId("next-action")).toBeVisible();
     await capture(ada, ADA, "ds-g1b-use-case-record");
+    await ada.getByRole("tab", { name: /^Overview\b/ }).click();
+    await expect(ada.getByText("Lifecycle tracker")).toBeVisible();
+    await capture(ada, ADA, "ds-g1b2-use-case-lifecycle");
     // #465: the use case's own audit trail, its true total, and (admin only) the link into the audit log's filter
     await ada.getByRole("tab", { name: /^Audit\b/ }).click();
     await expect(ada.getByText("Recent use-case audit evidence")).toBeVisible();
