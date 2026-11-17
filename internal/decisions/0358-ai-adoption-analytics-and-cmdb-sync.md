@@ -151,3 +151,11 @@ hand-written is RegulAIt's: which assets are exported, the policy, the audit and
 - RegulAIt can hold a CMDB credential: a new secret class with the ADR-0322 custody rules.
 - A ServiceNow API change can break the push; the adapter fails the run with a fixed error code and writes nothing for
   the items it could not confirm.
+
+## As built
+
+- **Slice 1 (analytics).** As decided, with these details: the per-person view is metered only (imported accounts are
+  vendor identities, not people, until resolved); the imported vendor ranking in `/v1/adoption/top-tools` is returned
+  whole up to 100 vendors with a `truncated` flag rather than paged (one row per vendor); when `licensed`,
+  `activeLicensed` or `idleLicensed` is suppressed, `activeLicensed`, `idleLicensed` and `utilisation` are withheld
+  together, since any one of them with `licensed` gives the others back. Migration `pending/adoption_analytics_policy.sql`. The six routes are known UI gaps on #453.
