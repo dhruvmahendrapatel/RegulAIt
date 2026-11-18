@@ -57,7 +57,12 @@ const sys = <T>(fn: () => Promise<T>) => runWithRlsSystem("system_task", "test.a
 const measured = (state: Measurement["state"]): Measurement => ({ value: state === "pass" ? 0 : 50, samples: 40, state, evidence: [] });
 const unsigned = () => ({ ok: false as const, ruleId: "export-signing-key-absent" as const, reason: "not configured" });
 const okChain = async () =>
-  ({ status: "ok", scanned: { rows: 10 }, firstBreak: null, anchor: { checked: true, source: "database", matches: true } }) as never;
+  ({
+    status: "ok",
+    scanned: { rows: 10, bounded: false },
+    firstBreak: null,
+    anchor: { checked: true, source: "worm_sink", tamperResistant: true, matches: true },
+  }) as never;
 const deps = (state: Measurement["state"], over: Partial<AgentRiskProofDeps> = {}): AgentRiskProofDeps => ({
   measure: async () => measured(state),
   verifyChain: okChain,
@@ -153,6 +158,23 @@ describe("ADR-0345 slice 2a: a failure is raised, not filed", () => {
     await sys(() => runAgentRiskProof(db, entry, { trigger: "manual", deps: deps("pass") }));
     const [after] = await db.select().from(governanceAlerts).where(eq(governanceAlerts.id, first.alertId!));
     expect(after!.status).toBe("resolved");
+    // the acknowledgement asked about a failure that no longer holds: it is superseded, not left open (#1039)
+    const [ack] = await db.select().from(approvals).where(eq(approvals.id, first.approvalId!));
+    expect(ack!.status).toBe("superseded");
+  });
+
+  it("the acknowledgement goes to someone other than its requester when the deployment has a second admin (#1039)", async () => {
+    const [second] = await db
+      .insert(users)
+      .values({ email: `e26-runner-2-${RUN}@example.test`, displayName: "e26 second admin", isAdmin: true })
+      .returning({ id: users.id });
+    try {
+      const rec = (await sys(() => runAgentRiskProof(db, probeProof(), { trigger: "manual", deps: deps("pass") })))!;
+      const [ack] = await db.select().from(approvals).where(eq(approvals.id, rec.approvalId!));
+      expect(ack!.approverUserId).not.toBe(ack!.userId);
+    } finally {
+      await db.update(users).set({ disabledAt: new Date() }).where(eq(users.id, second!.id));
+    }
   });
 
   it("NEGATIVE: insufficient data is not a pass — it raises a medium alert", async () => {
@@ -178,9 +200,25 @@ describe("ADR-0345 slice 2a: engines", () => {
   it("the audit-chain check fails on a broken chain and passes an intact one", async () => {
     const chain = agentRiskProofs().find((p) => p.proof.check === "audit_chain_verifies")!.proof;
     const broken = async () =>
-      ({ status: "broken", scanned: { rows: 3 }, firstBreak: { seq: 2 }, anchor: { checked: false, source: "none", matches: null } }) as never;
+      ({ status: "broken", scanned: { rows: 3, bounded: false }, firstBreak: { seq: 2 }, anchor: { checked: false, source: "none", tamperResistant: false, matches: null } }) as never;
     expect((await runAgentRiskProofEngine(db, chain, new Date(), deps("pass", { verifyChain: broken }))).outcome).toBe("fail");
     expect((await runAgentRiskProofEngine(db, chain, new Date(), deps("pass"))).outcome).toBe("pass");
+  });
+
+  it("NEGATIVE: an intact chain without a checked, tamper-resistant anchor is insufficient, never a pass (#1039)", async () => {
+    const chain = agentRiskProofs().find((p) => p.proof.check === "audit_chain_verifies")!.proof;
+    const report = (anchor: object, bounded = false) => async () =>
+      ({ status: "ok", scanned: { rows: 10, bounded }, firstBreak: null, anchor }) as never;
+    const cases: Array<[object, boolean, string]> = [
+      [{ checked: false, source: "none", tamperResistant: false, matches: null }, false, "no_anchor_checked"],
+      [{ checked: true, source: "database", tamperResistant: false, matches: true }, false, "anchor_not_tamper_resistant"],
+      [{ checked: true, source: "worm_sink", tamperResistant: true, matches: true }, true, "partial_scan"],
+    ];
+    for (const [anchor, bounded, reason] of cases) {
+      const r = await runAgentRiskProofEngine(db, chain, new Date(), deps("pass", { verifyChain: report(anchor, bounded) }));
+      expect(r.outcome, reason).toBe("insufficient");
+      expect((r.detail as { reason: string }).reason).toBe(reason);
+    }
   });
 
   it("register hygiene fails on a live risk whose last review is past the window", async () => {
@@ -211,6 +249,26 @@ describe("ADR-0345 slice 2a: the sweep", () => {
     const second = await sys(() => runAgentRiskProofSweep(db, { deps: deps("pass") }));
     expect(second.ran).toBe(0);
     expect(second.notDue).toBe(total - 1);
+  });
+
+  it("NEGATIVE: one proof that cannot be recorded is audited, and the sweep goes on to the others (#1039)", async () => {
+    await db.delete(agentRiskProofSettings);
+    const victim = metricProof().proof.key;
+    // make every proof due again by pushing the clock past the longest interval
+    const later = new Date(Date.now() + 8 * 24 * 3_600_000);
+    // the evidence write itself throws (here: signing), after the engine ran
+    const throwing = deps("pass", {
+      signingKey: () => {
+        throw new RangeError("signing failed");
+      },
+    });
+    const out = await sys(() => runAgentRiskProofSweep(db, { now: later, deps: throwing }));
+    expect(out.errors).toBeGreaterThan(0);
+    expect(out.errors + out.ran + out.notDue + out.duplicates + out.skippedDisabled).toBe(agentRiskProofs().length);
+    const failed = await db.execute(
+      sql`select count(*)::int as n from audit_log where rule_id = 'agent-risk-proof-run-failed' and detail->>'proofKey' = ${victim}`,
+    );
+    expect((failed.rows[0] as { n: number }).n).toBeGreaterThan(0);
   });
 
   it("the scheduler registers the job", () => {

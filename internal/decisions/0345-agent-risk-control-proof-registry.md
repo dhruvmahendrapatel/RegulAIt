@@ -98,14 +98,23 @@ What exists already:
      failure (`apps/gateway/src/agent-risk-proof-runner.ts`). Until 2b, each gateway probe is recorded as `not_run`
      (reason `probe_harness_not_built`), so it shows as a raised alert, never as a pass.
      - The metric engine measures every registered agent (an empty scope is `not_run`).
-     - The chain check passes only an intact chain whose anchor agrees (`verifyAuditChain`); an empty chain is
-       `not_run`.
+     - The chain check (`verifyAuditChain`) fails a broken chain or a disagreeing anchor. It passes only a full scan
+       of an intact chain whose tamper-resistant anchor was checked and matched. Without that anchor (or on a
+       partial scan) it is `insufficient`: anyone who can write the database could re-hash the chain consistently
+       (#1039 security review). An empty chain is `not_run`.
      - Register hygiene fails a live risk with an inactive owner, no scope, or no change inside 90 days.
        `ai_risks` has no review-date column, so its `updated_at` stands for the last review (owner question below).
      - The signature (ADR-0116 export key) covers the hex content hash, base64-encoded.
      - An engine that throws is `not_run`, and the row keeps only the error class.
+     - The result, its audit row and its follow-ups commit in one transaction, so a recorded failure always has its
+       alert. A transaction-scoped advisory lock per proof stops two replicas recording the same run twice.
      - The alert is deduped per proof while open. A repeat failure refreshes it, reuses the pending acknowledgement
-       (`agent_risk_proof` approval, stage `agent-risk-proof:<key>`) and links the new result. A pass resolves it.
+       (`agent_risk_proof` approval, stage `agent-risk-proof:<key>`) and links the new result. A pass resolves the
+       alert and supersedes the acknowledgement.
+     - Attribution uses the shared ADR-0107 helper (`system-attribution.ts`): audit rows name the oldest active
+       admin, else the all-zero system id. The acknowledgement's requester must be a real user (foreign key), and
+       its approver is someone else wherever the deployment has a second admin or an alert owner.
+     - One proof that cannot be recorded is audited (`agent-risk-proof-run-failed`); the sweep goes on to the others.
    - Slice 2b: the gateway-probe harness (the eight probes), the ADR-0058 pack collector and the ADR-0214 posture
      input, and the verifier's `unverifiable` label for a result whose audit row is gone.
    - Slice 3: the read and settings APIs for the view. The UI belongs to a design builder and is a `KNOWN_UI_GAPS`
