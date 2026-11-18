@@ -17164,6 +17164,109 @@ export const endpointAddonSightingSecretTypes = pgTable(
 );
 // ===== end ADR-0332 =====
 
+// ===== ADR-0339 (lane E20) — the agent risk score, recomputed on every change =====
+// Migration `pending/agent_risk_scores.sql` (numbered at merge, ADR-0252). Database triggers on every write path of an
+// agent (the row, its tools, schedules, sub-agents, channels, skills, shares and grants, and a config activation) mark
+// the agent in `agent_risk_recompute_requests` in the change's own transaction, so no route can forget to; the
+// scheduled sweep (agent-risk.ts) scores each marked agent and appends an assessment with its audit row in one
+// transaction. Not tenant-scoped data (ADR-0234 scope): read through admin or steward routes only, so no RLS batch.
+import {
+  AGENT_RISK_BANDS as AGENT_RISK_BANDS_E20,
+  AGENT_RISK_TRIGGERS as AGENT_RISK_TRIGGERS_E20,
+} from "@regulait/shared";
+
+/** a pending recompute: one row per agent and reason; drained (deleted) by the sweep in the assessment's transaction */
+export const agentRiskRecomputeRequests = pgTable(
+  "agent_risk_recompute_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    builderAgentId: uuid("builder_agent_id").references(() => builderAgents.id, { onDelete: "cascade" }),
+    trigger: text("trigger", { enum: AGENT_RISK_TRIGGERS_E20 }).notNull(),
+    requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("agent_risk_recompute_requests_subject_check", sql`num_nonnulls(${t.agentId}, ${t.builderAgentId}) = 1`),
+    check(
+      "agent_risk_recompute_requests_trigger_check",
+      sql`${t.trigger} IN ('created', 'modified', 'published', 'access_changed', 'evidence_changed', 'imported', 'backfill', 'scheduled', 'manual')`,
+    ),
+    uniqueIndex("agent_risk_recompute_requests_agent_uq").on(t.agentId, t.trigger).where(sql`${t.agentId} IS NOT NULL`),
+    uniqueIndex("agent_risk_recompute_requests_builder_uq")
+      .on(t.builderAgentId, t.trigger)
+      .where(sql`${t.builderAgentId} IS NOT NULL`),
+    index("agent_risk_recompute_requests_requested_idx").on(t.requestedAt),
+  ],
+);
+export type AgentRiskRecomputeRequestRow = typeof agentRiskRecomputeRequests.$inferSelect;
+
+/**
+ * One assessment: append-only evidence (UPDATE and DELETE refused by trigger, except a parent agent's cascade;
+ * TRUNCATE refused). `score`, `band` and `method_version` are columns because the ranked list filters and sorts on them.
+ */
+export const agentRiskAssessments = pgTable(
+  "agent_risk_assessments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    builderAgentId: uuid("builder_agent_id").references(() => builderAgents.id, { onDelete: "cascade" }),
+    methodVersion: text("method_version").notNull(),
+    score: integer("score").notNull(),
+    band: text("band", { enum: AGENT_RISK_BANDS_E20 }).notNull(),
+    /** the reasons drained into this assessment (closed vocabulary values, not references) */
+    triggers: text("triggers").array().notNull(),
+    /**
+     * DELIBERATE EXCEPTION to third normal form (ADR-0200 addendum): a point-in-time evidence snapshot. The factors,
+     * combinations, reach and ranked fixes exactly as scored, so a later change to the agent or to the weights never
+     * rewrites what was shown. Source of truth for "what was the score then"; the live score is recomputed on read.
+     */
+    assessment: jsonb("assessment").notNull(),
+    /** sha256 (hex) of the canonical assessment, so an unchanged recompute is visible as unchanged */
+    assessmentDigest: text("assessment_digest").notNull(),
+    computedAt: timestamp("computed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("agent_risk_assessments_subject_check", sql`num_nonnulls(${t.agentId}, ${t.builderAgentId}) = 1`),
+    check("agent_risk_assessments_score_check", sql`${t.score} BETWEEN 0 AND 100`),
+    check("agent_risk_assessments_band_check", sql`${t.band} IN ('low', 'medium', 'high', 'critical')`),
+    check("agent_risk_assessments_method_check", sql`${t.methodVersion} ~ '^[a-z0-9.-]{1,32}$'`),
+    check("agent_risk_assessments_digest_check", sql`${t.assessmentDigest} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "agent_risk_assessments_triggers_check",
+      sql`cardinality(${t.triggers}) BETWEEN 1 AND 9 AND ${t.triggers} <@ ARRAY['created', 'modified', 'published', 'access_changed', 'evidence_changed', 'imported', 'backfill', 'scheduled', 'manual']::text[]`,
+    ),
+    index("agent_risk_assessments_agent_idx").on(t.agentId, t.computedAt, t.id).where(sql`${t.agentId} IS NOT NULL`),
+    index("agent_risk_assessments_builder_idx")
+      .on(t.builderAgentId, t.computedAt, t.id)
+      .where(sql`${t.builderAgentId} IS NOT NULL`),
+  ],
+);
+export type AgentRiskAssessmentRow = typeof agentRiskAssessments.$inferSelect;
+
+/**
+ * The ranked list's read path: one pointer per agent to its newest assessment, moved forward by a database trigger on
+ * every append (never by application code), so the list reads one row per agent instead of sorting the whole history.
+ * References only (third normal form): the score and band are read through the pointer.
+ */
+export const agentRiskLatest = pgTable(
+  "agent_risk_latest",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    builderAgentId: uuid("builder_agent_id").references(() => builderAgents.id, { onDelete: "cascade" }),
+    assessmentId: uuid("assessment_id")
+      .notNull()
+      .references(() => agentRiskAssessments.id, { onDelete: "cascade" }),
+  },
+  (t) => [
+    check("agent_risk_latest_subject_check", sql`num_nonnulls(${t.agentId}, ${t.builderAgentId}) = 1`),
+    uniqueIndex("agent_risk_latest_agent_uq").on(t.agentId).where(sql`${t.agentId} IS NOT NULL`),
+    uniqueIndex("agent_risk_latest_builder_uq").on(t.builderAgentId).where(sql`${t.builderAgentId} IS NOT NULL`),
+    uniqueIndex("agent_risk_latest_assessment_uq").on(t.assessmentId),
+  ],
+);
+// ===== end ADR-0339 =====
+
 // ===== ADR-0342 (lane E23): process analytics read model =====
 // A MEASURED READ MODEL (ADR-0200 addendum). Source of truth: `workflow_events` (the append-only per-instance history)
 // replayed through the pure workflow kernel against the instance's snapshotted definition. The projector
