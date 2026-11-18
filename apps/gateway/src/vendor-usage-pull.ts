@@ -65,8 +65,7 @@ import {
   VENDOR_USAGE_PULL_STATEMENT,
   VENDOR_USAGE_PULL_VENDORS,
   vendorUsageFactKey,
-  vendorUsagePullRunSources,
-  type VendorUsagePullRunStatus,
+  VENDOR_USAGE_PULL_RUN_MACHINE,
   vendorUsagePublicConfigSchemas,
   VendorUsageResponseError,
   type AnthropicPublicConfig,
@@ -85,11 +84,14 @@ import {
   type EgressResolver,
 } from "./egress-guard.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
+import { whereFrom } from "./state-transition.js";
+import { lockConnectorAndFindRunningPull } from "./vendor-usage-lock.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { requireStepUp } from "./step-up.js";
 
-/** a run's closing write: it always names the terminal state it moves to (VENDOR_USAGE_PULL_RUN_TRANSITIONS) */
-type RunFinishPatch = Partial<typeof vendorUsagePullRuns.$inferInsert> & { status: Exclude<VendorUsagePullRunStatus, "running"> };
+/** a run's closing write; its status comes from the machine's event, never from the caller (ADR-0348) */
+type RunFinishPatch = Omit<Partial<typeof vendorUsagePullRuns.$inferInsert>, "status">;
+type RunFinishEvent = (typeof VENDOR_USAGE_PULL_RUN_MACHINE.events)[number];
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 const DAY_MS = 24 * 3600 * 1000;
@@ -97,7 +99,6 @@ const DAY_MS = 24 * 3600 * 1000;
 const RESTATE_DAYS = 2;
 const REQUEST_TIMEOUT_MS = 30_000;
 /** a run still `running` after this is treated as a crashed process, so it does not block the connector forever */
-const PULL_LEASE_SECONDS = 30 * 60;
 const RUNS_PAGE = 50;
 
 export const VENDOR_USAGE_PULL_JOB_NAME = "vendor-usage-pull-sweep";
@@ -377,18 +378,7 @@ export async function runVendorUsagePull(
   // one pull per connector at a time (#861 review): the open step is serialised on the connector, and a run another
   // caller opened inside the lease refuses this one, so the vendor is not called twice and no second batch is written
   const opening = await db.transaction(async (tx) => {
-    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`regulait.vendor-usage-pull:${connectorId}`}, 0))`);
-    const [busy] = await tx
-      .select({ id: vendorUsagePullRuns.id })
-      .from(vendorUsagePullRuns)
-      .where(
-        and(
-          eq(vendorUsagePullRuns.connectorId, connectorId),
-          eq(vendorUsagePullRuns.status, "running"),
-          sql`${vendorUsagePullRuns.startedAt} > now() - make_interval(secs => ${PULL_LEASE_SECONDS})`,
-        ),
-      )
-      .limit(1);
+    const busy = await lockConnectorAndFindRunningPull(tx, connectorId);
     if (!busy) {
       const [row] = await tx.insert(vendorUsagePullRuns).values({ connectorId, trigger: opts.trigger, requestedBy: opts.requestedBy ?? null }).returning();
       return { run: row!, busy: false as const };
@@ -422,6 +412,7 @@ export async function runVendorUsagePull(
   // the run row's outcome and its audit row are written in the same transaction (#861 review)
   const finishIn = async (
     tx: DbOrTx,
+    event: RunFinishEvent,
     patch: RunFinishPatch,
     ruleId: string,
     effect: "allow" | "deny",
@@ -429,11 +420,11 @@ export async function runVendorUsagePull(
   ): Promise<PullOutcome> => {
     // the status moves only along VENDOR_USAGE_PULL_RUN_TRANSITIONS: a compare-and-set on the states that may reach
     // the target, so a run that already ended is never rewritten
-    const to = patch.status;
+    const to = VENDOR_USAGE_PULL_RUN_MACHINE.def.transitions[event].to;
     const [run] = await tx
       .update(vendorUsagePullRuns)
-      .set({ ...patch, finishedAt: sql`now()` })
-      .where(and(eq(vendorUsagePullRuns.id, runId), inArray(vendorUsagePullRuns.status, vendorUsagePullRunSources(to))))
+      .set({ ...patch, status: to, finishedAt: sql`now()` })
+      .where(and(eq(vendorUsagePullRuns.id, runId), whereFrom(vendorUsagePullRuns.status, VENDOR_USAGE_PULL_RUN_MACHINE, event)))
       .returning();
     if (!run) throw new Error(`vendor usage pull run ${runId} cannot move to ${to}: it has already ended`);
     await audit(tx, opts.requestedBy ?? null, "vendor_usage_pull_run", runId, ruleId, effect, reason, {
@@ -448,10 +439,10 @@ export async function runVendorUsagePull(
     });
     return { run };
   };
-  const finish = (patch: RunFinishPatch, ruleId: string, effect: "allow" | "deny", reason: string) =>
-    db.transaction((tx) => finishIn(tx, patch, ruleId, effect, reason));
+  const finish = (event: RunFinishEvent, patch: RunFinishPatch, ruleId: string, effect: "allow" | "deny", reason: string) =>
+    db.transaction((tx) => finishIn(tx, event, patch, ruleId, effect, reason));
   const refuse = (code: "disabled" | "air_gapped" | "no_credential" | "data_key_unavailable", detail: string) =>
-    finish({ status: "refused", errorCode: code, errorDetail: detail }, VENDOR_USAGE_RULE_IDS.pullRefused, "deny", detail);
+    finish("refuse", { errorCode: code, errorDetail: detail }, VENDOR_USAGE_RULE_IDS.pullRefused, "deny", detail);
 
   if (resolveDeployMode() === "air_gapped") {
     return refuse("air_gapped", "this deployment is air-gapped; vendor usage pull is refused and file import stays available");
@@ -484,7 +475,7 @@ export async function runVendorUsagePull(
     fetched = vendor === "anthropic" ? await fetchAnthropic(key, window, fetcher) : await fetchOpenAi(key, window, fetcher);
   } catch (err) {
     const e = classifyError(err, 0);
-    return finish({ status: "failed", errorCode: e.code, errorDetail: e.detail }, VENDOR_USAGE_RULE_IDS.pullFailed, "deny", e.detail);
+    return finish("fail", {errorCode: e.code, errorDetail: e.detail }, VENDOR_USAGE_RULE_IDS.pullFailed, "deny", e.detail);
   }
 
   // ADR-0042 posture over the only free text a pull keeps (vendor product names); counts only
@@ -495,7 +486,7 @@ export async function runVendorUsagePull(
   );
   if (scan.verdict === "blocked") {
     const detail = "the ingest scan blocked text in the vendor response under the organisation's PII posture; nothing was written";
-    return finish({ status: "failed", errorCode: "scan_blocked", errorDetail: detail, pages: fetched.pages }, VENDOR_USAGE_RULE_IDS.pullFailed, "deny", detail);
+    return finish("fail", {errorCode: "scan_blocked", errorDetail: detail, pages: fetched.pages }, VENDOR_USAGE_RULE_IDS.pullFailed, "deny", detail);
   }
 
   const ctx = await loadResolutionContext(db);
@@ -628,7 +619,8 @@ export async function runVendorUsagePull(
     // the success outcome and its audit row commit with the batch, or not at all
     return finishIn(
       tx,
-      { status: "succeeded", batchId: batch!.id, pages: fetched.pages, linesUpserted: lines.length, overlapLines },
+      "succeed",
+      { batchId: batch!.id, pages: fetched.pages, linesUpserted: lines.length, overlapLines },
       VENDOR_USAGE_RULE_IDS.pullCompleted,
       "allow",
       reason,
@@ -637,7 +629,7 @@ export async function runVendorUsagePull(
   } catch {
     // the batch rolled back; the run is closed as failed with RegulAIt's own sentence, never the driver's text
     const detail = "writing the pulled lines failed and was rolled back; nothing was written";
-    return finish({ status: "failed", errorCode: "internal", errorDetail: detail, pages: fetched.pages }, VENDOR_USAGE_RULE_IDS.pullFailed, "deny", detail);
+    return finish("fail", {errorCode: "internal", errorDetail: detail, pages: fetched.pages }, VENDOR_USAGE_RULE_IDS.pullFailed, "deny", detail);
   }
 }
 

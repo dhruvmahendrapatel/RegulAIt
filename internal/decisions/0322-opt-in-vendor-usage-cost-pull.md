@@ -240,6 +240,15 @@ Migration `pending/vendor_usage_pull.sql` (numbered at merge); code in `apps/gat
   - **Bounds**: a vendor that repeats a page cursor is refused (`bad_response`) instead of looping to the 40-page cap.
     Re-marking reads in keyset pages of 1000 and updates per page. The runs list is keyset-paginated (`before`, 50 per
     page).
+- **Review round 2 (#861)**:
+  - **Run lifecycle on the ADR-0348 machine**: `vendor_usage_pull_runs.status` is `VENDOR_USAGE_PULL_RUN_MACHINE` in
+    `@regulait/shared` (registered in `STATE_MACHINES`, listed in `internal/product/STATE_MACHINES.md`). A run opens
+    `running`, or is written already `refused` when another pull holds the lease; the finish step moves it with the
+    events succeed, fail and refuse through `whereFrom`. The outcome CHECK is written as two comparisons so the one
+    value-list CHECK on the column is the machine's, which the ADR-0348 test holds equal.
+  - **Revoke is atomic and serialised with pulls**: revoking an import batch runs in one transaction (reinstate,
+    withdraw, batch status, connector rewind, audit). A pulled batch takes its connector's pull lock and is refused
+    (409 `pull_in_progress`) while a pull holds the lease, so a running pull cannot overwrite the rewound day.
 - **Differences from §3 and §5**:
   - **No per-vendor rate limit yet**: each scheduled pass makes at most one run per connector, of at most 40 requests.
   - **A 429 fails the run** as `rate_limited` instead of backing off inside it. The next pass resumes from

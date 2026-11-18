@@ -88,7 +88,9 @@ CREATE TABLE IF NOT EXISTS "vendor_usage_pull_runs" (
     'rate_limited', 'http_error', 'bad_response', 'response_too_large', 'network_error', 'page_limit', 'scan_blocked', 'internal',
     'in_progress')),
   CONSTRAINT "vendor_usage_pull_runs_error_detail_check" CHECK ("error_detail" IS NULL OR char_length("error_detail") <= 500),
-  CONSTRAINT "vendor_usage_pull_runs_outcome_check" CHECK (("status" IN ('failed', 'refused')) = ("error_code" IS NOT NULL))
+  -- an error code exactly when the run failed or was refused; written as two comparisons so the one value-list CHECK on
+  -- status stays vendor_usage_pull_runs_status_check, which ADR-0348 holds equal to the declared machine
+  CONSTRAINT "vendor_usage_pull_runs_outcome_check" CHECK (("status" <> 'failed' AND "status" <> 'refused') = ("error_code" IS NULL))
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "vendor_usage_pull_runs_connector_idx" ON "vendor_usage_pull_runs" ("connector_id", "started_at");

@@ -9,11 +9,8 @@ import {
   vendorUsageFactKey,
   vendorUsagePublicConfigSchemas,
   VendorUsageResponseError,
-  VENDOR_USAGE_PULL_RUN_INITIAL_STATUSES,
-  VENDOR_USAGE_PULL_RUN_STATUSES,
-  VENDOR_USAGE_PULL_RUN_TRANSITIONS,
-  vendorUsagePullRunSources,
 } from "./vendor-usage.js";
+import { STATE_MACHINES, VENDOR_USAGE_PULL_RUN_MACHINE as M } from "./state-machines.js";
 
 describe("ADR-0322 vendor usage normalisers", () => {
   it("moves the decimal point for Anthropic cents strings instead of dividing a float", () => {
@@ -98,12 +95,17 @@ describe("ADR-0322 vendor usage normalisers", () => {
   });
 });
 
-describe("ADR-0322 pull run lifecycle (build rule 12)", () => {
+describe("ADR-0322 pull run lifecycle (ADR-0348 machine)", () => {
   it("opens running or refused, ends running in one terminal state, and never leaves a terminal state", () => {
-    expect(VENDOR_USAGE_PULL_RUN_INITIAL_STATUSES).toEqual(["running", "refused"]);
-    for (const to of ["succeeded", "failed", "refused"] as const) expect(vendorUsagePullRunSources(to)).toEqual(["running"]);
-    expect(vendorUsagePullRunSources("running")).toEqual([]);
-    for (const s of ["succeeded", "failed", "refused"] as const) expect(VENDOR_USAGE_PULL_RUN_TRANSITIONS[s]).toEqual([]);
-    expect(Object.keys(VENDOR_USAGE_PULL_RUN_TRANSITIONS).sort()).toEqual([...VENDOR_USAGE_PULL_RUN_STATUSES].sort());
+    expect(M.def.initial).toEqual(["running", "refused"]);
+    for (const e of ["succeed", "fail", "refuse"] as const) expect(M.sourcesOf(e)).toEqual(["running"]);
+    expect(M.next("running", "succeed")).toBe("succeeded");
+    expect(M.next("running", "fail")).toBe("failed");
+    expect(M.next("running", "refuse")).toBe("refused");
+    for (const s of ["succeeded", "failed", "refused"] as const) {
+      expect(M.isTerminal(s)).toBe(true);
+      expect(() => M.next(s, "fail")).toThrow(/not allowed/);
+    }
+    expect(STATE_MACHINES.vendor_usage_pull_run).toBe(M);
   });
 });

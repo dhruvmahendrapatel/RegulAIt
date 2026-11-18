@@ -142,6 +142,7 @@ import {
   piiInternationalCategories,
 } from "./org-settings.js";
 import { reinstateLinesSupersededBy } from "./cost-reconcile.js";
+import { lockConnectorAndFindRunningPull } from "./vendor-usage-lock.js";
 import { securityHeaders } from "./security-headers.js";
 import { errMessage } from "./err-serializer.js";
 
@@ -352,8 +353,9 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
     effect: "allow" | "deny",
     reason: string,
     detail: Record<string, unknown>,
+    executor: Pick<Db, "insert"> = db,
   ) =>
-    db.insert(auditLog).values({
+    executor.insert(auditLog).values({
       userId: actorUserId ?? NIL_UUID,
       objectType,
       objectId,
@@ -777,42 +779,63 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
         detail: `batch ${importId} is '${batch.status}' — only an applied batch holds lines to withdraw`,
       });
     }
-    // ADR-0076: if any of this batch's lines had SUPERSEDED older duplicates,
-    // those older lines come back to life BEFORE the deletion — a withdrawn
-    // restatement must not silently erase the fact it restated.
-    const doomedIds = (
-      await db.select({ id: importedCostLines.id }).from(importedCostLines).where(eq(importedCostLines.batchId, importId))
-    ).map((r) => r.id);
-    const reinstated = await reinstateLinesSupersededBy(db, {
-      batchId: importId,
-      lineIds: doomedIds,
-      actorUserId: req.authCtx.userId ?? null,
-      reason: body.reason,
-    });
-    const removed = await db.delete(importedCostLines).where(eq(importedCostLines.batchId, importId)).returning({ id: importedCostLines.id });
-    const [updated] = await db
-      .update(costImportBatches)
-      .set({ status: "revoked", revokedAt: new Date(), revokedByUserId: req.authCtx.userId ?? null, reason: `revoked: ${body.reason}` })
-      .where(eq(costImportBatches.id, importId))
-      .returning();
-    // ADR-0322 (#861 review): a pulled batch holds only the lines it first introduced, so withdrawing it removes days the
-    // connector believes it already has. Rewind the connector to the batch's first day, so the next pull fetches them again.
     const pullConnectorId =
       batch.origin === "pull" ? ((batch.summary as { connectorId?: unknown } | null)?.connectorId as string | undefined) : undefined;
-    let connectorRewoundTo: string | null = null;
-    if (pullConnectorId && batch.periodStart && removed.length > 0) {
-      const [rewound] = await db
-        .update(vendorUsageConnectors)
-        .set({ pulledThrough: sql`least(${vendorUsageConnectors.pulledThrough}, ${batch.periodStart})`, updatedAt: sql`now()` })
-        .where(eq(vendorUsageConnectors.id, pullConnectorId))
-        .returning({ pulledThrough: vendorUsageConnectors.pulledThrough });
-      connectorRewoundTo = rewound?.pulledThrough?.toISOString() ?? null;
+    // the withdrawal, the batch status, the connector rewind and the audit row commit together (#861 review). A pulled
+    // batch is revoked under its connector's pull lock and refused while a pull holds the lease, so a running pull can
+    // never overwrite the rewound day afterwards.
+    const outcome = await db.transaction(async (tx) => {
+      if (pullConnectorId) {
+        const busy = await lockConnectorAndFindRunningPull(tx, pullConnectorId);
+        if (busy) return { busyRunId: busy.id } as const;
+      }
+      // ADR-0076: if any of this batch's lines had SUPERSEDED older duplicates,
+      // those older lines come back to life BEFORE the deletion — a withdrawn
+      // restatement must not silently erase the fact it restated.
+      const doomedIds = (
+        await tx.select({ id: importedCostLines.id }).from(importedCostLines).where(eq(importedCostLines.batchId, importId))
+      ).map((r) => r.id);
+      const reinstated = await reinstateLinesSupersededBy(tx, {
+        batchId: importId,
+        lineIds: doomedIds,
+        actorUserId: req.authCtx.userId ?? null,
+        reason: body.reason,
+      });
+      const removed = await tx.delete(importedCostLines).where(eq(importedCostLines.batchId, importId)).returning({ id: importedCostLines.id });
+      const [updated] = await tx
+        .update(costImportBatches)
+        .set({ status: "revoked", revokedAt: new Date(), revokedByUserId: req.authCtx.userId ?? null, reason: `revoked: ${body.reason}` })
+        .where(and(eq(costImportBatches.id, importId), eq(costImportBatches.status, "applied")))
+        .returning();
+      if (!updated) return { raced: true } as const;
+      // ADR-0322 (#861 review): a pulled batch holds only the lines it first introduced, so withdrawing it removes days the
+      // connector believes it already has. Rewind the connector to the batch's first day, so the next pull fetches them again.
+      let connectorRewoundTo: string | null = null;
+      if (pullConnectorId && batch.periodStart && removed.length > 0) {
+        const [rewound] = await tx
+          .update(vendorUsageConnectors)
+          .set({ pulledThrough: sql`least(${vendorUsageConnectors.pulledThrough}, ${batch.periodStart})`, updatedAt: sql`now()` })
+          .where(eq(vendorUsageConnectors.id, pullConnectorId))
+          .returning({ pulledThrough: vendorUsageConnectors.pulledThrough });
+        connectorRewoundTo = rewound?.pulledThrough?.toISOString() ?? null;
+      }
+      await audit(req.authCtx.userId, "cost_import_batch", importId, COST_IMPORT_RULE_IDS.importRevoked, "allow",
+        `withdrew ${removed.length} imported cost line(s) from batch ${importId}: ${body.reason}` +
+          (reinstated > 0 ? ` — ${reinstated} older line(s) this batch had superseded were reinstated` : ""),
+        { linesRemoved: removed.length, linesReinstated: reinstated, vendor: batch.vendor, adapter: batch.adapter, payloadSha256: batch.payloadSha256, ...(pullConnectorId ? { pullConnectorId, connectorRewoundTo } : {}) },
+        tx);
+      return { updated, removed: removed.length, reinstated } as const;
+    });
+    if ("busyRunId" in outcome) {
+      return reply.status(409).send({
+        error: "pull_in_progress",
+        detail: `a pull of this batch's connector (run ${outcome.busyRunId}) is running; revoke the batch once it has finished`,
+      });
     }
-    await audit(req.authCtx.userId, "cost_import_batch", importId, COST_IMPORT_RULE_IDS.importRevoked, "allow",
-      `withdrew ${removed.length} imported cost line(s) from batch ${importId}: ${body.reason}` +
-        (reinstated > 0 ? ` — ${reinstated} older line(s) this batch had superseded were reinstated` : ""),
-      { linesRemoved: removed.length, linesReinstated: reinstated, vendor: batch.vendor, adapter: batch.adapter, payloadSha256: batch.payloadSha256, ...(pullConnectorId ? { pullConnectorId, connectorRewoundTo } : {}) });
-    return { revoked: true, import: updated, linesRemoved: removed.length, linesReinstated: reinstated };
+    if ("raced" in outcome) {
+      return reply.status(409).send({ error: "not_revocable", detail: `batch ${importId} was revoked by another request` });
+    }
+    return { revoked: true, import: outcome.updated, linesRemoved: outcome.removed, linesReinstated: outcome.reinstated };
   });
 
   // =======================================================================

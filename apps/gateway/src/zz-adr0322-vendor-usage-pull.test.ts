@@ -18,6 +18,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  and,
   auditLog,
   costImportBatches,
   createDb,
@@ -33,6 +34,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { COST_IMPORT_RULE_IDS } from "./cost-import.js";
 import { DEPLOY_MODE_ENV } from "./deploy-posture.js";
 import { trackEgressAllowHosts } from "./testing/egress-allow-cleanup.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
@@ -381,6 +383,37 @@ describe("ADR-0322: the Anthropic pull", () => {
     const [rewound] = await db.select().from(vendorUsageConnectors).where(eq(vendorUsageConnectors.id, c));
     expect(rewound!.pulledThrough!.getTime()).toBeLessThanOrEqual(batch!.periodStart!.getTime());
     expect(rewound!.pulledThrough!.getTime()).toBeLessThan(conn!.pulledThrough!.getTime());
+  });
+
+  it("revoking a pulled batch while a pull of its connector is running is refused, and changes nothing (#861 review 2)", async () => {
+    const c = connectorIds[0]!;
+    const [applied] = await db
+      .select()
+      .from(costImportBatches)
+      .where(and(eq(costImportBatches.origin, "pull"), eq(costImportBatches.status, "applied"), sql`${costImportBatches.summary}->>'connectorId' = ${c}`))
+      .limit(1);
+    expect(applied, "an applied pull batch from the earlier pulls").toBeTruthy();
+    const linesBefore = await db.select({ id: importedCostLines.id }).from(importedCostLines).where(eq(importedCostLines.batchId, applied!.id));
+    const [connBefore] = await db.select().from(vendorUsageConnectors).where(eq(vendorUsageConnectors.id, c));
+    const [running] = await db.insert(vendorUsagePullRuns).values({ connectorId: c, trigger: "schedule" }).returning();
+    try {
+      const res = await app.inject({ method: "DELETE", url: `/v1/cost-imports/${applied!.id}`, headers: AUTH, payload: { reason: "adr0322 revoke during pull" } });
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json().error).toBe("pull_in_progress");
+      const [batchAfter] = await db.select().from(costImportBatches).where(eq(costImportBatches.id, applied!.id));
+      expect(batchAfter!.status).toBe("applied");
+      const linesAfter = await db.select({ id: importedCostLines.id }).from(importedCostLines).where(eq(importedCostLines.batchId, applied!.id));
+      expect(linesAfter).toHaveLength(linesBefore.length);
+      const [connAfter] = await db.select().from(vendorUsageConnectors).where(eq(vendorUsageConnectors.id, c));
+      expect(connAfter!.pulledThrough?.getTime()).toBe(connBefore!.pulledThrough?.getTime());
+      const revokeAudits = await db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.ruleId, COST_IMPORT_RULE_IDS.importRevoked), eq(auditLog.objectId, applied!.id)));
+      expect(revokeAudits).toHaveLength(0);
+    } finally {
+      await db.delete(vendorUsagePullRuns).where(eq(vendorUsagePullRuns.id, running!.id));
+    }
   });
 
   it("refuses a second pull while one is running, without calling the vendor (#861 review)", async () => {

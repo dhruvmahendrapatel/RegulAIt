@@ -163,7 +163,7 @@ import {
   AGENT_RISK_PROOF_OUTCOMES,
   AGENT_RISK_PROOF_TRIGGERS,
   type ModalitySplit,
-  // ADR-0322: the vendor usage pull run lifecycle (one declared table, build rule 12)
+  // ADR-0322: the vendor usage pull run states, declared with their machine (ADR-0348)
   VENDOR_USAGE_PULL_RUN_STATUSES,
   // ADR-0346 (migration fairness_evaluation): the fairness-evaluation vocabularies, in lockstep with the CHECKs
   FAIRNESS_DATASET_KINDS,
@@ -16937,7 +16937,7 @@ export const vendorUsagePullRuns = pgTable(
       .notNull()
       .references(() => vendorUsageConnectors.id, { onDelete: "cascade" }),
     trigger: text("trigger", { enum: ["schedule", "manual"] }).notNull(),
-    // the lifecycle (initial states, transitions) is VENDOR_USAGE_PULL_RUN_TRANSITIONS in @regulait/shared
+    // the lifecycle (initial states, transitions) is VENDOR_USAGE_PULL_RUN_MACHINE in @regulait/shared (ADR-0348)
     status: text("status", { enum: VENDOR_USAGE_PULL_RUN_STATUSES }).notNull().default("running"),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
@@ -16964,7 +16964,8 @@ export const vendorUsagePullRuns = pgTable(
     ),
     check(
       "vendor_usage_pull_runs_outcome_check",
-      sql`(${t.status} IN ('failed', 'refused')) = (${t.errorCode} IS NOT NULL)`,
+      // two comparisons, not a value list: the one value-list CHECK on status is the ADR-0348 machine's
+      sql`(${t.status} <> 'failed' AND ${t.status} <> 'refused') = (${t.errorCode} IS NULL)`,
     ),
     index("vendor_usage_pull_runs_connector_idx").on(t.connectorId, t.startedAt),
   ],
