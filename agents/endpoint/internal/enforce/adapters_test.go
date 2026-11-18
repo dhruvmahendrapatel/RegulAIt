@@ -76,7 +76,7 @@ func TestContractFixtures(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				stdout, stderr, exit := a.Hook(bytes.NewReader(in), policy)
+				stdout, stderr, exit := a.HookWith(bytes.NewReader(in), policy, fixtureEnv(a.Name))
 				if strings.Contains(string(stdout)+stderr, "secret-argument") {
 					t.Errorf("%s: a tool argument or launch command reached the hook output", name)
 				}
@@ -122,10 +122,22 @@ func checkAnswer(t *testing.T, name string, a Adapter, want string, stdout []byt
 	}
 }
 
-// isAskJSON: only Cursor has a documented "ask" answer.
+// isAskJSON checks the agent's own documented ask shape. Codex has none.
 func isAskJSON(agent string, stdout []byte) bool {
 	var m map[string]any
-	return agent == AgentCursor && json.Unmarshal(stdout, &m) == nil && len(m) == 1 && m["permission"] == "ask"
+	if json.Unmarshal(stdout, &m) != nil {
+		return false
+	}
+	switch agent {
+	case AgentCursor:
+		return m["permission"] == "ask"
+	case AgentCopilotCLI:
+		return m["permissionDecision"] == "ask"
+	case AgentClaudeCode:
+		h, _ := m["hookSpecificOutput"].(map[string]any)
+		return h["hookEventName"] == "PreToolUse" && h["permissionDecision"] == "ask"
+	}
+	return false
 }
 
 // isDenyJSON checks the agent's own documented deny shape.
@@ -316,4 +328,13 @@ func TestOwnerDecisions(t *testing.T) {
 	if out, _, exit := cursor.Render(Decision{Verdict: NoDecision, WouldDeny: true}); exit != 0 || string(out) != `{"permission":"ask"}` {
 		t.Errorf("cursor audit would-deny: %d %s", exit, out)
 	}
+}
+
+// fixtureEnv is what main passes the hook: Claude Code's project directory (CLAUDE_PROJECT_DIR) is the fixtures'
+// /work; no other agent declares a root through the environment.
+func fixtureEnv(agent string) HookEnv {
+	if agent == AgentClaudeCode {
+		return HookEnv{ProjectDir: "/work"}
+	}
+	return HookEnv{}
 }

@@ -18,6 +18,8 @@ Searched and checked 2026-10-17 against `proxy.golang.org` (release dates) and e
 | `github.com/ebitengine/purego` | `v0.11.1` (2026-09-18) | Apache-2.0 | darwin | Transitive, through gopsutil (calls libSystem without cgo) |
 | `github.com/tidwall/jsonc` | `v0.3.3` (2026-03-10) | MIT | all | Blanks JSONC comments and trailing commas (offset-preserving) before `encoding/json` reads an MCP host config: VS Code `settings.json`, Zed settings (`internal/collect/mcp.go`, ADR-0259 amendment 2026-11-14). No dependencies. v0.3.4 (2026-11-12) was less than two weeks old when pinned |
 | `github.com/pelletier/go-toml/v2` | `v2.4.3` (2026-07-05) | MIT | all | Decodes TOML MCP host configs: Codex `config.toml` (`internal/collect/mcp.go`, ADR-0259 amendment 2026-11-14). No dependencies |
+| `mvdan.cc/sh/v3` | `v3.14.1` (2026-09-06) | BSD-3-Clause | all | Parses a coding agent's shell command line as bash (`syntax` package only: lists, pipelines, quoting, substitutions, redirections) so command rules match argv, never a regex over the joined line (`internal/enforce/shell.go`, ADR-0350). The parser shfmt uses. Compared with a hand-written tokenizer (re-solves quoting and nesting) and `github.com/google/shlex` (no release since 2019, splits words but not lists or substitutions) |
+| `github.com/bmatcuk/doublestar/v4` | `v4.10.4` (2026-10-24) | MIT | all | `**` path and argument globs in command rules (`internal/enforce/command.go`, ADR-0350); the standard library's `path.Match` has no `**`. No dependencies |
 
 ## Test-only (never linked)
 
