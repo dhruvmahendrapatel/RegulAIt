@@ -72,7 +72,8 @@ func ParseCopilotPreToolUse(r io.Reader) (Call, error) {
 		return Call{}, errors.New("not a preToolUse event")
 	}
 	c := Call{Tool: tool}
-	roots := []string{in.Cwd}
+	// the cwd is never a workspace root by itself (review #941 S-B1): only a root the agent declares counts
+	var roots []string
 	switch tool {
 	case "bash", "Bash":
 		c.Command = shellCall(args, "command", in.Cwd, roots)
@@ -123,6 +124,7 @@ var copilotAdapter = Adapter{
 			"An ask is a deny under autopilot and the cloud agent (vendor behaviour).",
 			"File tools' path fields are not documented: file reads and writes are not decided.",
 			"A hook timeout always fails open (vendor behaviour).",
+			"No declared workspace root: every file access through the shell gets the outside-the-workspace defaults.",
 		}},
 	},
 	UnattestedSource: SourceCopilotUnattested,

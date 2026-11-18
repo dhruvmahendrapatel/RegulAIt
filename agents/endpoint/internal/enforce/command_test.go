@@ -247,3 +247,68 @@ func FuzzShellNeverPanics(f *testing.F) {
 		}
 	})
 }
+
+// Review #941 S-B1: a filesystem or drive root, the home directory or an ancestor of it is never a workspace root,
+// and the cwd never counts on its own, so starting an agent from / or ~ does not make every file "inside".
+func TestWorkspaceRootsRefused(t *testing.T) {
+	p := cmdPolicy()
+	read := func(file, cwd string, env HookEnv, declared ...string) Verdict {
+		return DecideWith(p, Call{Command: &CommandCall{Files: []FileAccess{{Path: file}}, Cwd: cwd, Workspace: declared}}, env).Verdict
+	}
+	home := HookEnv{Home: "/home/u"}
+	for name, c := range map[string]struct {
+		file, cwd string
+		env       HookEnv
+		declared  []string
+	}{
+		"cwd is /":                    {"/home/u/.ssh/id_rsa", "/", home, nil},
+		"declared root /":             {"/home/u/.ssh/id_rsa", "/", home, []string{"/"}},
+		"declared drive root":         {`C:\Users\u\.ssh\id_rsa`, `C:\`, home, []string{`C:\`, "C:/", "C:"}},
+		"project dir is the home":     {"/home/u/.aws/credentials", "/home/u", HookEnv{Home: "/home/u", ProjectDir: "/home/u"}, nil},
+		"declared root ancestor of ~": {"/home/u/.ssh/id_rsa", "/home", home, []string{"/home"}},
+		"cwd a parent of the project": {"/srv/other/x", "/srv", HookEnv{ProjectDir: "/srv/app"}, nil},
+		"relative declared root":      {"/work/x", "/work", home, []string{"work"}},
+	} {
+		if got := read(c.file, c.cwd, c.env, c.declared...); got != Ask {
+			t.Errorf("%s: got %v, want the outside-read default (ask)", name, got)
+		}
+	}
+	// a real project root still counts
+	if got := read("/srv/app/main.go", "/srv", HookEnv{Home: "/home/u", ProjectDir: "/srv/app"}); got != Allow {
+		t.Errorf("a file in the project directory: got %v", got)
+	}
+	if got := read("/home/u/code/app/x", "/", home, "/home/u/code/app"); got != Allow {
+		t.Errorf("a file in a declared root under home: got %v", got)
+	}
+}
+
+// Review #941 code finding 1: a bare-name allow never allows a program named by path; deny and ask still match one.
+func TestProgramNamedByPath(t *testing.T) {
+	p := cmdPolicy()
+	p.Commands.Default = RuleAsk
+	for line, want := range map[string]Verdict{
+		"git status":           Allow, // found on PATH: the allow applies
+		"./git status":         Ask,   // a file in the workspace: unresolved
+		"bin/git status":       Ask,
+		"../x/git status":      Ask,
+		"/opt/x/git status":    Ask, // not allowed by the bare-name rule: the default decides
+		"/bin/rm -rf x":        Deny,
+		"sudo ./rm -rf x":      Deny, // deny still matches through a wrapper
+		"sh -c './git status'": Ask,
+	} {
+		if got := Decide(p, shell(line)).Verdict; got != want {
+			t.Errorf("%q: got %v, want %v", line, got, want)
+		}
+	}
+	// an admin who wants a path allowed names the path
+	p.Commands.Exec = append(p.Commands.Exec, ExecRule{ID: "opt-git", Argv: []string{"/opt/x/git", "**"}, Verdict: RuleAllow})
+	if got := Decide(p, shell("/opt/x/git status")).Verdict; got != Allow {
+		t.Errorf("a path-named allow rule: got %v", got)
+	}
+	// an exception cannot relax a bare-name rule into an allow of a path-named program
+	p.Device = "d-1"
+	p.Exceptions = []Exception{{ID: "x1", RuleID: "rm-rf", Verdict: RuleAllow, NotAfter: now.Add(time.Hour)}}
+	if got := DecideWith(p, shell("/tmp/x/rm -rf y"), HookEnv{DeviceID: "d-1", Now: now}).Verdict; got != Ask {
+		t.Errorf("an exception allowed a path-named program: got %v", got)
+	}
+}

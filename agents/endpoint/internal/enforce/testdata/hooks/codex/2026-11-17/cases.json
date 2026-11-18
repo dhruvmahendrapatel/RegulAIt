@@ -7,6 +7,7 @@
   {"input": "bash-ask-is-deny.json", "policy": "enforce", "want": "deny"},
   {"input": "bash-argv.json", "policy": "enforce", "want": "none"},
   {"input": "patch-outside.json", "policy": "enforce", "want": "deny"},
-  {"input": "patch-inside.json", "policy": "enforce", "want": "none"},
-  {"input": "patch-inside.json", "policy": "none", "want": "deny"}
+  {"input": "patch-inside.json", "policy": "enforce", "want": "deny"},
+  {"input": "patch-inside.json", "policy": "none", "want": "deny"},
+  {"input": "bash-path-program.json", "policy": "enforce", "want": "deny"}
 ]

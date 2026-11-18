@@ -20,19 +20,21 @@ import {
   eq,
   inArray,
   ruleStepSettings,
+  ruleStepShadows,
   ruleStepSuggestions,
+  RULE_STEP_SUGGESTION_STATUSES,
   sql,
   traceSpans,
   traces,
   runMigrations,
   type Db,
 } from "@regulait/db";
-import { TRACE_TRUNCATION_MARKER } from "@regulait/shared";
+import { RULE_STEP_SUGGESTION_MACHINE, STATE_MACHINES, TRACE_TRUNCATION_MARKER } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { grantStepUpForTest, sessionRequest, stepUpRequest } from "./testing/step-up-grant.js";
 import type { StepUpCheckArgs } from "./step-up.js";
-import { RULE_STEP_AUDIT_RULE_IDS } from "./rule-steps.js";
+import { RULE_STEP_AUDIT_RULE_IDS, SCAN_MAX_RUNS } from "./rule-steps.js";
 import { pruneRuleStepSuggestions } from "./rule-step-retention.js";
 import { induceStepRule, type StepRun } from "@regulait/optimizer-kernel";
 import { induceStepRuleOffThread } from "@regulait/optimizer-kernel/offload";
@@ -261,5 +263,161 @@ describe("ADR-0327 suggestions follow the §8.3 retention floor (slice 3)", () =
     expect(await pruneRuleStepSuggestions(db, cutoff)).toBeGreaterThanOrEqual(2);
     const left = await db.select({ id: ruleStepSuggestions.id }).from(ruleStepSuggestions).where(inArray(ruleStepSuggestions.id, [old, straddling, fresh]));
     expect(left.map((x) => x.id)).toEqual([fresh]);
+  });
+});
+
+describe("ADR-0327 shadow mode (slice 3b)", () => {
+  const SHADOW = `adr0327-shadow-${RUN}`;
+  // a deliberately simpler rule than the scan would induce, so a rewrite by a rescan is visible
+  const RULE = {
+    fields: ["severity"],
+    cells: [
+      { key: ["high"], output: "on-call", support: 9 },
+      { key: ["low"], output: "backlog", support: 9 },
+    ],
+  };
+  let suggestionId: string;
+  let seq = 100_000;
+  const span = (fields: Record<string, string> | string, output: string, startedAt: Date) => ({
+    traceId,
+    seq: seq++,
+    kind: "llm" as const,
+    status: "ok" as const,
+    agentId,
+    name: SHADOW,
+    costUsd: 0.05,
+    startedAt,
+    inputPreview: typeof fields === "string" ? fields : JSON.stringify(fields),
+    outputPreview: output,
+  });
+  const rescan = async () => {
+    await db.update(ruleStepSettings).set({ lastScanAt: sql`now() - interval '1 hour'` });
+    const r = await app.inject({ method: "POST", url: "/v1/rule-steps/scan", headers: KEY });
+    expect(r.statusCode, r.body).toBe(200);
+    return r.json() as { shadows: Array<{ suggestionId: string; runs: number; covered: number; agreed: number }> };
+  };
+  const latest = async () => {
+    const r = await app.inject({ method: "GET", url: "/v1/rule-steps/suggestions?status=shadow", headers: KEY });
+    return (r.json().items as Array<{ id: string; fields: string[]; shadow: { runs: number; covered: number; agreed: number; agreement: number | null } | null }>).find((x) => x.id === suggestionId);
+  };
+
+  beforeAll(async () => {
+    // history from before the shadow starts: rule-like on (severity, source), enough for a scan to pick the step up
+    const before = new Date(Date.now() - 3600_000);
+    const history = [];
+    for (let i = 0; i < 220; i++) {
+      const sev = SEVERITIES[i % 4]!;
+      const src = SOURCES[Math.floor(i / 4) % 3]!;
+      history.push(span({ severity: sev, source: src }, queueFor(sev, src), before));
+    }
+    await db.insert(traceSpans).values(history);
+    const [s] = await db
+      .insert(ruleStepSuggestions)
+      .values({ agentId, stepName: SHADOW, rule: RULE, runs: 220, structuredRuns: 220, outputClasses: 2, agreement: 1, coverage: 0.5, windowCostUsd: 11, projectedMonthlySavingsUsd: 5.5 })
+      .returning({ id: ruleStepSuggestions.id });
+    suggestionId = s!.id;
+  });
+
+  it("starts a shadow period (audited) and refuses a second start", async () => {
+    const r = await app.inject({ method: "POST", url: `/v1/rule-steps/suggestions/${suggestionId}/shadow`, headers: KEY });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(r.json()).toMatchObject({ status: "shadow", shadow: { runs: 0, covered: 0, agreed: 0, stoppedAt: null } });
+    expect((await app.inject({ method: "POST", url: `/v1/rule-steps/suggestions/${suggestionId}/shadow`, headers: KEY })).statusCode).toBe(404);
+    expect((await app.inject({ method: "POST", url: `/v1/rule-steps/suggestions/${suggestionId}/shadow`, headers: USER_KEY })).statusCode).toBe(403);
+    // the declared lifecycle: a suggestion in shadow cannot be dismissed until its shadow is stopped
+    expect((await app.inject({ method: "POST", url: `/v1/rule-steps/suggestions/${suggestionId}/dismiss`, headers: KEY })).statusCode).toBe(404);
+    const [audit] = await auditRows(RULE_STEP_AUDIT_RULE_IDS.shadowStarted);
+    expect(audit?.detail).toMatchObject({ suggestionId });
+  });
+
+  it("measures only runs recorded after the start, keeps the rule under test frozen, and never counts a run twice", async () => {
+    const after = new Date(Date.now() + 1000);
+    await db.insert(traceSpans).values([
+      span({ severity: "high", source: "phone" }, "on-call", after), // covered, agrees
+      span({ severity: "high", source: "portal" }, " on-call ", after), // covered, agrees after normalising
+      span({ severity: "high", source: "email" }, "triage", after), // covered, disagrees
+      span({ severity: "low", source: "email" }, "backlog", after), // covered, agrees
+      span({ severity: "medium", source: "email" }, "triage", after), // not covered
+      span({ severity: "critical", source: "phone" }, "on-call", after), // not covered
+      span("unstructured prompt", "triage", after), // not a structured run
+    ]);
+    const first = await rescan();
+    expect(first.shadows.find((x) => x.suggestionId === suggestionId)).toMatchObject({ runs: 6, covered: 4, agreed: 3 });
+    const v = await latest();
+    expect(v?.fields).toEqual(["severity"]); // the rescan found the step rule-like and still left the row alone
+    expect(v?.shadow).toMatchObject({ runs: 6, covered: 4, agreed: 3 });
+    expect(v?.shadow?.agreement).toBeCloseTo(0.75, 6);
+    const second = await rescan();
+    expect(second.shadows.find((x) => x.suggestionId === suggestionId)).toBeUndefined();
+    expect((await latest())?.shadow).toMatchObject({ runs: 6, covered: 4, agreed: 3 });
+  });
+
+  it("stopping keeps the counts, reopens the suggestion and is audited; later runs are not counted", async () => {
+    const r = await app.inject({ method: "POST", url: `/v1/rule-steps/suggestions/${suggestionId}/shadow/stop`, headers: KEY });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(r.json()).toMatchObject({ status: "suggested", shadow: { runs: 6, covered: 4, agreed: 3 } });
+    expect(r.json().shadow.stoppedAt).not.toBeNull();
+    const [audit] = await auditRows(RULE_STEP_AUDIT_RULE_IDS.shadowStopped);
+    expect(audit?.detail).toMatchObject({ suggestionId, runs: 6, covered: 4, agreed: 3 });
+    expect((await app.inject({ method: "POST", url: `/v1/rule-steps/suggestions/${suggestionId}/shadow/stop`, headers: KEY })).statusCode).toBe(404);
+    expect((await app.inject({ method: "POST", url: `/v1/rule-steps/suggestions/${suggestionId}/shadow/stop`, headers: USER_KEY })).statusCode).toBe(403);
+    await db.insert(traceSpans).values([span({ severity: "high", source: "phone" }, "on-call", new Date(Date.now() + 2000))]);
+    const scanned = await rescan();
+    expect(scanned.shadows.find((x) => x.suggestionId === suggestionId)).toBeUndefined();
+    const [period] = await db.select().from(ruleStepShadows).where(eq(ruleStepShadows.suggestionId, suggestionId));
+    expect(period).toMatchObject({ runs: 6, covered: 4, agreed: 3 });
+  });
+
+  it("start, stop, start: a new period opens and the list shows the latest one (review #903)", async () => {
+    const r = await app.inject({ method: "POST", url: `/v1/rule-steps/suggestions/${suggestionId}/shadow`, headers: KEY });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(r.json().shadow).toMatchObject({ runs: 0, covered: 0, agreed: 0, stoppedAt: null });
+    const periods = await db.select().from(ruleStepShadows).where(eq(ruleStepShadows.suggestionId, suggestionId)).orderBy(ruleStepShadows.startedAt);
+    expect(periods.map((p) => [p.runs, p.stoppedAt === null])).toEqual([
+      [6, false],
+      [0, true],
+    ]);
+    const v = await latest();
+    expect(v?.shadow).toMatchObject({ id: periods[1]!.id, runs: 0 });
+  });
+
+  it("counts every span of a full page that shares one start time, over two passes (review #903)", async () => {
+    // drain what earlier tests recorded ahead of the clock, so the page below holds only the tied spans
+    await rescan();
+    const before = (await latest())!.shadow!.runs;
+    const at = new Date(Date.now() + 3600_000);
+    const tied = Array.from({ length: SCAN_MAX_RUNS + 1 }, () => span({ severity: "high", source: "phone" }, "on-call", at));
+    for (let i = 0; i < tied.length; i += 1000) await db.insert(traceSpans).values(tied.slice(i, i + 1000));
+    const first = await rescan();
+    expect(first.shadows.find((x) => x.suggestionId === suggestionId)).toMatchObject({ runs: SCAN_MAX_RUNS });
+    // a time-only cursor moved past `at` here and never counted the last span
+    const second = await rescan();
+    expect(second.shadows.find((x) => x.suggestionId === suggestionId)).toMatchObject({ runs: 1, covered: 1, agreed: 1 });
+    expect((await latest())?.shadow?.runs).toBe(before + SCAN_MAX_RUNS + 1);
+    expect((await rescan()).shadows.find((x) => x.suggestionId === suggestionId)).toBeUndefined();
+  });
+});
+
+describe("ADR-0327 suggestion lifecycle is the declared ADR-0348 machine (owner rule 12, review #903)", () => {
+  it("declares exactly the allowed transitions, over the column's states, and is registered", () => {
+    expect([...RULE_STEP_SUGGESTION_MACHINE.def.states]).toEqual([...RULE_STEP_SUGGESTION_STATUSES]);
+    expect(STATE_MACHINES.rule_step_suggestion).toBe(RULE_STEP_SUGGESTION_MACHINE);
+    expect(Object.fromEntries(Object.entries(RULE_STEP_SUGGESTION_MACHINE.def.transitions).map(([e, t]) => [e, [t.from, t.to]]))).toEqual({
+      shadow_start: [["suggested"], "shadow"],
+      shadow_stop: [["shadow"], "suggested"],
+      dismiss: [["suggested"], "dismissed"],
+    });
+    expect(RULE_STEP_SUGGESTION_MACHINE.def.terminal).toEqual(["dismissed"]);
+  });
+
+  it("each listed suggestion carries its read-only lifecycle", async () => {
+    const r = await app.inject({ method: "GET", url: "/v1/rule-steps/suggestions?status=shadow", headers: KEY });
+    expect(r.statusCode, r.body).toBe(200);
+    const items = r.json().items as Array<{ status: string; lifecycle: { machine: string; state: string; transitions: Array<{ event: string; allowed: boolean }> } }>;
+    expect(items.length).toBeGreaterThan(0);
+    for (const it of items) {
+      expect(it.lifecycle).toMatchObject({ machine: "rule_step_suggestion", state: it.status, terminal: false });
+      expect(Object.fromEntries(it.lifecycle.transitions.map((t) => [t.event, t.allowed]))).toEqual({ shadow_start: false, shadow_stop: true, dismiss: false });
+    }
   });
 });
