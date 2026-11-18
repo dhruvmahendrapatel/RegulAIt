@@ -106,7 +106,7 @@ own allowlists, which the vendors' clients enforce.
    principal, or another system reason reads and writes nothing (pinned by a test).
 11. **Route census.** The three routes (four with slice 2's drift route) have no screen yet. Under the lane E1 brief (rule 3: new routes go into the
    census with a `KNOWN_UI_GAPS` entry on #453), each has a `KNOWN_UI_GAPS` entry, and `KNOWN_UI_GAPS_MAX` rises by
-   exactly 3 over main (63 + 3 = **66** after ADR-0332's, ADR-0230 A2's, lane L7's and ADR-0327's routes landed on main); slice 2 adds the drift route, so **67** (then **74** after ADR-0289's two PM importer routes and ADR-0342's five process-analytics routes landed on main). The ratchet falls again when the #453 screen lands.
+   exactly 3 over main (63 + 3 = **66** after ADR-0332's, ADR-0230 A2's, lane L7's and ADR-0327's routes landed on main); slice 2 adds the drift route, so **67** (then **78** after ADR-0289's two PM importer routes, ADR-0342's five process-analytics routes and ADR-0363's four sensitivity-label routes landed on main). The ratchet falls again when the #453 screen lands.
 
 ## Owner decision
 
