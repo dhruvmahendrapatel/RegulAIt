@@ -204,9 +204,9 @@ direct API call. Creating a gist is the worked example: the GitHub MCP `create_g
   - proxy variables set outside the line.
 
   A hidden environment or config file can make an exact allow wrong. A renamed command (an alias, a function, a gh
-  alias or extension) can also avoid a deny, because the deny is matched on the text. These are the limits ADR-0298
-  already states for on-device matching. The gateway's own decision on the MCP and connector routes (slice 2b) is the
-  backstop.
+  alias or extension) can also avoid a deny, because the deny is matched on the text. On-device matching guards an
+  agent's ordinary commands; it is not a sandbox against a process set on evading it. The gateway's own decision on
+  the MCP and connector routes (slice 2b) is the backstop.
 - **Unknown routes stay unknown.** An HTTP call whose method or URL is not literal, or whose argv the client table
   cannot fully read, is unresolved (§2). An action the catalogue does not list (`gh api graphql`, a GitHub Enterprise
   Server `/api/v3` path) is decided by the ordinary exec rules. Matching on the device is still textual.
