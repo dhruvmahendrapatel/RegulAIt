@@ -38,19 +38,15 @@ Read this first if you are taking over as the master session of the RegulAIt bui
 
 ## Where we left off (current master)
 
-- **2026-11-18, 14:40 UTC.** Master hand-over at about 08:54 UTC; the new master runs the merge loop.
-- **Merged and audited since the hand-over:** #941, #1013 (docs), #904 (E26), #1010 (E45 RPA ADR), #903 (E12). Every
-  merge's second parent equals the released SHA.
-- **Census-counter bottleneck.** `KNOWN_UI_GAPS_MAX` in `scripts/preflight-ui-route-census.mjs` (and its test pin) is
-  edited by every PR that adds API-only routes, so each merge makes the others conflict. Five approved, released PRs
-  are being refreshed one at a time: #744 (UI-B) first, then #902 (E1), #883 (E20), #848 (E2), #855 (E3). The waiting
-  builders were told not to merge main until their turn. A computed count would remove the bottleneck; that is a
-  proposal for the owner, not started.
-- **Request changes, fixes pushed, waiting for READY:** #861 (E7), #865 (E15), #982 (E44), #952 (E31), #867 (E16),
-  #871 (E13). On READY they return to the same reviewer pair.
-- **In review:** #1019 (E26, geography risk factor).
+- **2026-11-18, 18:10 UTC.** Master hand-over at about 08:54 UTC; the new master runs the merge loop.
+- **Merged and audited since the hand-over:** #941, #1013, #904, #1010, #903, #1035, #744, #1019. Every merge's second
+  parent equals the released SHA. #952 (E31) is released and should merge next.
+- **Census-counter queue (M-118).** One PR that edits `KNOWN_UI_GAPS_MAX` is released at a time. Order: #902 (E1, CI
+  running after its main merge, census 73), then #883 (E20), #848 (E2), #855 (E3), #861 (E7), #867 (E16), and #865
+  (E15) once approved. Each builder waits for the master's message, merges main, sets the census to main's value plus its
+  own routes, and posts READY; then a merge-only delta review and release.
+- **In review:** #865 (E15) delta R3 + Xtyd8.
+- **Request changes, waiting for READY:** #1020 (E12), #982 (E44), #871 (E13).
 - **Waiting on the builder:** #884 (E18), #996 (E27, three failing checks), Codex #936 (route first on READY), #1006,
   #1007.
-- **Next steps:**
-  1. Work the census order; after each merge, tell the next builder main's new count.
-  2. Lift rule 15 a few lanes at a time once the open PR count is under 50, with E45's code first.
+- **Proposal for the owner, not started:** compute the census count instead of hand-setting it, to end the queue.

@@ -1,22 +1,21 @@
 # Build status
 
-## Current state (2026-11-18, 14:40 UTC)
+## Current state (2026-11-18, 18:10 UTC)
 
 - **Rule 15 (finish before starting)** is in force for every builder lane.
-- **Queue:** about 80 open PRs. Target: under 50, then lift rule 15 a few lanes at a time, E45 (RPA) code first.
+- **Queue:** about 75 open PRs. Target: under 50, then lift rule 15 a few lanes at a time, E45 (RPA) code first.
 - **Sessions:** phasing down to 10 (D-2026-11-18-04). Archived today: E24, E25.
-- **Merge loop:** runs from the master's scratchpad, restarted every 7000 s. released.txt now also holds 1013, 904,
-  1010, 903 (merged) and 744, 848, 855, 902, 883 (released, then made dirty by the census counter; each needs a new
-  release line at its new head).
+- **Merge loop:** runs from the master's scratchpad, restarted every 7000 s. One census-counter PR released at a time
+  (M-118).
 
 ## Pending
 
 | Item | Owner | Since | Notes |
 |---|---|---|---|
-| #744 UI-B, #902 E1, #883 E20, #848 E2, #855 E3 | builders, one at a time | 2026-11-18 | Census-counter conflict; serial refresh, #744 first |
-| #861 E7, #865 E15, #982 E44, #952 E31, #867 E16, #871 E13 | builders | 2026-11-18 | Request changes; fixes pushed, waiting for READY |
-| #1019 E26 geography factor | WaRPg + Xtyd8 | 2026-11-18 | First review |
-| #884 E18 SaaS entitlement graph | E18 | 2026-11-18 | Security request changes; fix pushed, no READY yet |
+| Census queue: #902 E1, #883 E20, #848 E2, #855 E3, #861 E7, #867 E16, #865 E15 | builders, one at a time | 2026-11-18 | M-118; #902 first |
+| #952 E31 | merge loop | 2026-11-18 | Released at ac673b69 |
+| #1020 E12, #982 E44, #871 E13 | builders | 2026-11-18 | Request changes; waiting for READY |
+| #884 E18 SaaS entitlement graph | E18 | 2026-11-18 | Security request changes; no READY yet |
 | #996 E27 fairness slice 2 | E27 | 2026-11-18 | Three failing checks |
 | #936 Codex C1 CI build-once | Codex | 2026-11-18 | Route first when READY |
 | #1006 C2, #1007 C3 | Codex | 2026-11-18 | Drafts, checks failing |
@@ -27,6 +26,7 @@
 
 ## Done log (newest first)
 
+- 2026-11-18 (evening): #1035, #744 and #1019 merged, each audited. M-118 logged.
 - 2026-11-18 (afternoon): #1013, #904, #1010 and #903 merged, each audited (second parent = released SHA).
 - 2026-11-18: master hand-over (about 08:54 UTC). #941 merged (82142059, second parent 3b86b4e0, audited); #973 and
   #1011 merged and audited; #880 merged. Lanes E24 and E25 archived (done, no open PR).
