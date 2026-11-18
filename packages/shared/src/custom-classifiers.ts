@@ -14,9 +14,9 @@
  * Pure: the HMAC is injected (`hash`), so this module never sees the key and has no I/O. Results are counts only,
  * never the matched text, the same contract as every guardrail hit.
  *
- * Lifecycle (owner rule 12): one declared transition table, `CLASSIFIER_VERSION_TRANSITIONS`, enforced server side
- * by `classifierTransitionProblem`. A version is drafted, submitted for approval, then published or rejected; a newer
- * published version supersedes the older one; a published version can be retired.
+ * Lifecycle (owner rule 12, ADR-0348): the declared machine `CLASSIFIER_VERSION_MACHINE` (state-machines.ts). A
+ * version is drafted, submitted for approval, then published or rejected; a newer published version supersedes the
+ * older one; a published version can be retired.
  */
 import { RE2JS } from "re2js";
 import { z } from "zod";
@@ -40,8 +40,14 @@ export const CLASSIFIER_LIMITS = Object.freeze({
   edmValues: 100_000,
   edmValueLength: 256,
   edmMaxTokens: 6,
-  /** the text a classifier scans is capped, so a dictionary or EDM scan stays bounded */
+  /** the text a classifier scans is capped; longer text is `unavailable` (fail closed), never reported clean */
   scanChars: 1_000_000,
+  /** an EDM scan hashes up to `maxTokens` windows per token, so its token count is capped too; past it the scan is
+   * `unavailable` (fail closed) rather than an unbounded run of HMACs on the event loop */
+  edmScanTokens: 20_000,
+  /** classifiers live (published, or waiting for review) at once, so the per-dispatch cost stays bounded */
+  liveClassifiers: 50,
+  liveEdmClassifiers: 5,
 });
 
 const term = z.string().trim().min(1).max(CLASSIFIER_LIMITS.termLength);
@@ -69,27 +75,11 @@ export const CLASSIFIER_KEY_RE = /^[a-z][a-z0-9_]{1,47}$/;
 export const edmValuesSchema = z.array(z.string().max(CLASSIFIER_LIMITS.edmValueLength)).min(1).max(CLASSIFIER_LIMITS.edmValues);
 
 // ---------------------------------------------------------------------------------------------------------------
-// The lifecycle: one declared machine (owner rule 12)
+// The lifecycle's states (the machine itself is CLASSIFIER_VERSION_MACHINE in state-machines.ts, ADR-0348)
 // ---------------------------------------------------------------------------------------------------------------
 
 export const CLASSIFIER_VERSION_STATUSES = ["draft", "pending_approval", "published", "rejected", "superseded", "retired"] as const;
 export type ClassifierVersionStatus = (typeof CLASSIFIER_VERSION_STATUSES)[number];
-
-/** every allowed move, with what causes it; anything absent is refused */
-export const CLASSIFIER_VERSION_TRANSITIONS: Readonly<Record<ClassifierVersionStatus, Readonly<Partial<Record<ClassifierVersionStatus, string>>>>> =
-  Object.freeze({
-    draft: { pending_approval: "submitted for approval to a named reviewer" },
-    pending_approval: { published: "the reviewer approved it", rejected: "the reviewer denied it" },
-    published: { superseded: "a newer version was published", retired: "an admin retired the classifier (step-up)" },
-    rejected: {},
-    superseded: {},
-    retired: {},
-  });
-
-/** null when `from` → `to` is allowed, else the reason it is not */
-export function classifierTransitionProblem(from: ClassifierVersionStatus, to: ClassifierVersionStatus): string | null {
-  return CLASSIFIER_VERSION_TRANSITIONS[from][to] ? null : `a ${from} classifier version cannot become ${to}`;
-}
 
 /** the statuses that take effect at the gateway */
 export const CLASSIFIER_LIVE_STATUSES: readonly ClassifierVersionStatus[] = ["published"];
@@ -113,13 +103,41 @@ export function edmNormalise(value: string, mode: EdmNormalisation): string {
   }
 }
 
-/** the text's tokens: runs of letters, digits and the joiners an identifier keeps (`-`, `.`, `_`, `@`, `/`) */
+/**
+ * The text's tokens: runs of letters and digits, joined inside by the joiners an identifier keeps (`-`, `.`, `_`,
+ * `@`, `/`). A token starts AND ends with a letter or digit, so the full stop that ends a sentence ("... EMP-1234.")
+ * or a trailing hyphen never sticks to the value and hides it. Values and text are tokenised by this one function.
+ */
 export function classifierTokens(text: string): string[] {
-  return text.slice(0, CLASSIFIER_LIMITS.scanChars).match(/[\p{L}\p{N}][\p{L}\p{N}\-._@/]*/gu) ?? [];
+  return text.slice(0, CLASSIFIER_LIMITS.scanChars).match(/[\p{L}\p{N}](?:[\p{L}\p{N}\-._@/]*[\p{L}\p{N}])?/gu) ?? [];
 }
 
 /** the dictionary's lookup form of a word */
 const dictForm = (w: string) => w.normalize("NFKC").toLowerCase();
+
+/**
+ * The 0-based positions of saved values the scan could never match: a dictionary word that is not exactly one token,
+ * or an EDM value whose normalised form cannot be rebuilt from its own tokens (`O'Brien`, `+1 (555) 010`) or spans more
+ * tokens than `maxTokens`. Refused at save, so an admin is never told a value is protected when it is not. Positions,
+ * never the values themselves (an EDM value is sensitive).
+ */
+export function unmatchableClassifierValues(def: ClassifierDefinition, values: readonly string[] = []): number[] {
+  const out: number[] = [];
+  if (def.kind === "dictionary") {
+    def.terms.forEach((t, i) => {
+      const tokens = classifierTokens(t);
+      if (tokens.length !== 1 || dictForm(tokens[0]!) !== dictForm(t.trim())) out.push(i);
+    });
+  } else if (def.kind === "exact_data_match") {
+    values.forEach((v, i) => {
+      const norm = edmNormalise(v, def.normalisation);
+      if (!norm) return; // empty after normalising: skipped, as the upload always did
+      const tokens = classifierTokens(v);
+      if (tokens.length > def.maxTokens || edmNormalise(tokens.join(" "), def.normalisation) !== norm) out.push(i);
+    });
+  }
+  return out;
+}
 
 // ---------------------------------------------------------------------------------------------------------------
 // Compiling and running
@@ -141,7 +159,8 @@ export interface CompiledClassifier {
   version: number;
   mode: ClassifierMode;
   phases: readonly GuardrailPhase[];
-  /** how many matches, never what; `unavailable` = it could not run (an EDM classifier with no key): fail closed */
+  /** how many matches, never what; `unavailable` = it could not run (no EDM key, a definition that no longer parses,
+   * text past the scan bound): fail closed */
   count(text: string): number | "unavailable";
 }
 
@@ -161,6 +180,16 @@ export function classifierDefinitionProblem(def: ClassifierDefinition): string |
  * in which case an EDM classifier reports `unavailable` on every scan rather than "no match".
  */
 export function compileClassifier(spec: ClassifierSpec, hash: ((normalised: string) => string) | null): CompiledClassifier {
+  const inner = compileUnbounded(spec, hash);
+  return { ...inner, count: (text) => (text.length > CLASSIFIER_LIMITS.scanChars ? "unavailable" : inner.count(text)) };
+}
+
+/** a classifier that cannot run (its stored definition no longer parses): every scan is `unavailable`, fail closed */
+export function unavailableClassifier(spec: Omit<ClassifierSpec, "definition" | "digests">): CompiledClassifier {
+  return { key: spec.key, version: spec.version, mode: spec.mode, phases: spec.phases, count: () => "unavailable" };
+}
+
+function compileUnbounded(spec: ClassifierSpec, hash: ((normalised: string) => string) | null): CompiledClassifier {
   const base = { key: spec.key, version: spec.version, mode: spec.mode, phases: spec.phases };
   const def = spec.definition;
   switch (def.kind) {
@@ -206,6 +235,7 @@ export function compileClassifier(spec: ClassifierSpec, hash: ((normalised: stri
           if (!hash) return "unavailable";
           if (digests.size === 0) return 0;
           const tokens = classifierTokens(text);
+          if (tokens.length > CLASSIFIER_LIMITS.edmScanTokens) return "unavailable";
           let n = 0;
           for (let i = 0; i < tokens.length; i++) {
             // the longest window first, so "Jane Doe" counts once, not also as "Jane"
@@ -225,5 +255,46 @@ export function compileClassifier(spec: ClassifierSpec, hash: ((normalised: stri
   }
 }
 
-/** the finding category a classifier's hits carry */
-export const classifierCategory = (key: string) => `classifier.${key}`;
+// ---------------------------------------------------------------------------------------------------------------
+// Relaxation: a new version that is looser than the published one needs the author's step-up (ADR-0180)
+// ---------------------------------------------------------------------------------------------------------------
+
+const MODE_RANK: Readonly<Record<ClassifierMode, number>> = { log: 0, warn: 1, block: 2 };
+
+export interface ClassifierVersionShape {
+  mode: ClassifierMode;
+  scanInput: boolean;
+  scanOutput: boolean;
+  definition: ClassifierDefinition;
+}
+
+/**
+ * Why `next` is looser than the published `prev`, or [] when it is not. A weaker mode or a dropped phase is looser;
+ * so is any change that may match less: a regex that changed at all (no proof it matches a superset), a term list
+ * missing a published term, an EDM version with a weaker normalisation or fewer tokens, or (`edmDropped`, counted by
+ * the caller over the stored digests) one that no longer carries every published value. A different kind is looser.
+ */
+export function classifierVersionRelaxes(prev: ClassifierVersionShape, next: ClassifierVersionShape, edmDropped = 0): string[] {
+  const out: string[] = [];
+  if (MODE_RANK[next.mode] < MODE_RANK[prev.mode]) out.push(`mode ${prev.mode} -> ${next.mode}`);
+  if (prev.scanInput && !next.scanInput) out.push("stops scanning the input");
+  if (prev.scanOutput && !next.scanOutput) out.push("stops scanning the output");
+  const a = prev.definition;
+  const b = next.definition;
+  if (a.kind !== b.kind) {
+    out.push(`kind ${a.kind} -> ${b.kind}`);
+    return out;
+  }
+  if (a.kind === "regex" && b.kind === "regex") {
+    if (a.pattern !== b.pattern || (a.caseInsensitive && !b.caseInsensitive)) out.push("the pattern changed");
+  } else if ((a.kind === "keyword" || a.kind === "dictionary") && (b.kind === "keyword" || b.kind === "dictionary")) {
+    const kept = new Set(b.terms.map(dictForm));
+    const dropped = a.terms.filter((t) => !kept.has(dictForm(t))).length;
+    if (dropped) out.push(`${dropped} term(s) removed`);
+  } else if (a.kind === "exact_data_match" && b.kind === "exact_data_match") {
+    if (a.normalisation !== b.normalisation) out.push(`normalisation ${a.normalisation} -> ${b.normalisation}`);
+    if (b.maxTokens < a.maxTokens) out.push(`maxTokens ${a.maxTokens} -> ${b.maxTokens}`);
+    if (edmDropped > 0) out.push(`${edmDropped} protected value(s) removed`);
+  }
+  return out;
+}

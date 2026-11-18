@@ -11,8 +11,12 @@
  *     logged, audited or returned. Without the data key an EDM classifier fails closed (`unavailable` is a hit).
  *   - A version takes effect only when a named reviewer approves it in the one approvals queue
  *     (`objectType: custom_classifier`, the ADR-0208 pattern): the author never approves their own version, and the
- *     publish happens inside the decision's transaction. Retiring a published classifier removes a control, so it is
- *     a `settings_relax` step-up. Every step is audited. Transitions follow `CLASSIFIER_VERSION_TRANSITIONS`.
+ *     publish happens inside the decision's transaction. Retiring a published classifier removes a control, and so
+ *     does submitting a version looser than the published one (`classifierVersionRelaxes`): both are a
+ *     `settings_relax` step-up. Every step is audited. Every status write follows `CLASSIFIER_VERSION_MACHINE`
+ *     (ADR-0348): guarded by `whereFrom` and `.returning()`, so a lost race is a 409, never a silent no-op.
+ *   - Cost is bounded: at most `CLASSIFIER_LIMITS.liveClassifiers` live classifiers (`liveEdmClassifiers` of them EDM),
+ *     and an EDM scan past `edmScanTokens` tokens is `unavailable` (fail closed).
  */
 import { createHmac, randomBytes } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
@@ -36,20 +40,26 @@ import {
 } from "@regulait/db";
 import {
   CLASSIFIER_KEY_RE,
+  CLASSIFIER_LIMITS,
   CLASSIFIER_MODES,
+  CLASSIFIER_VERSION_MACHINE,
   classifierDefinitionProblem,
   classifierDefinitionSchema,
-  classifierTransitionProblem,
+  classifierVersionRelaxes,
   compileClassifier,
   edmNormalise,
   edmValuesSchema,
+  unavailableClassifier,
+  unmatchableClassifierValues,
   type ClassifierDefinition,
-  type ClassifierVersionStatus,
   type CompiledClassifier,
   type GuardrailPhase,
 } from "@regulait/shared";
 import { decryptSecret, encryptSecret } from "./secrets.js";
+import { whereFrom } from "./state-transition.js";
 import { requireRelaxStepUp } from "./step-up.js";
+
+type ClassifierEvent = (typeof CLASSIFIER_VERSION_MACHINE.events)[number];
 
 export const CUSTOM_CLASSIFIER_APPROVAL_TYPE = "custom_classifier" as const;
 export const CUSTOM_CLASSIFIER_STAGE_PREFIX = "custom-classifier-version:";
@@ -116,25 +126,25 @@ export async function loadPublishedClassifiers(db: Db): Promise<readonly Compile
     }
   }
   let hash: ((s: string) => string) | null = null;
+  let keyFailed = false;
   if (edmIds.length && deploymentDataKey) {
     try {
       hash = hmacWith(await edmKey(db, deploymentDataKey));
     } catch {
       hash = null; // fails closed: every EDM scan reports `unavailable`
+      keyFailed = true; // and is not cached, so a transient read error does not outlive this call
     }
   }
   const compiled = rows
     .sort((a, b) => a.key.localeCompare(b.key))
     .map((r) => {
       const parsed = classifierDefinitionSchema.safeParse(r.v.definition);
+      const spec = { key: r.key, version: r.v.version, mode: r.v.mode, phases: phasesOf(r.v) };
       // a stored definition that no longer parses cannot be run: report it unavailable (fail closed), never skip it
-      const definition: ClassifierDefinition = parsed.success ? parsed.data : { kind: "regex", pattern: "(", caseInsensitive: false };
-      return compileClassifier(
-        { key: r.key, version: r.v.version, mode: r.v.mode, phases: phasesOf(r.v), definition, digests: digests.get(r.v.id) ?? [] },
-        hash,
-      );
+      if (!parsed.success) return unavailableClassifier(spec);
+      return compileClassifier({ ...spec, definition: parsed.data, digests: digests.get(r.v.id) ?? [] }, hash);
     });
-  cache = { fingerprint, compiled };
+  if (!keyFailed) cache = { fingerprint, compiled };
   return compiled;
 }
 
@@ -172,6 +182,14 @@ function versionProblem(v: VersionInput): string | null {
   if (def) return def;
   if (v.definition.kind === "exact_data_match" && !v.values?.length) return "an exact-data-match version needs its values";
   if (v.definition.kind !== "exact_data_match" && v.values) return "only an exact-data-match version takes values";
+  const unmatchable = unmatchableClassifierValues(v.definition, v.values);
+  if (unmatchable.length) {
+    const what = v.definition.kind === "dictionary" ? "dictionary word" : "value";
+    return (
+      `${unmatchable.length} ${what}(s) could never match, first at position ${unmatchable[0]}: a ${what} must be letters and ` +
+      `digits joined only by - . _ @ / (and spaces between the words of a value, at most maxTokens of them)`
+    );
+  }
   return null;
 }
 
@@ -211,7 +229,7 @@ async function insertVersion(tx: Db, classifierId: string, version: number, v: V
   return { row: row!, digestCount };
 }
 
-class ClassifierWriteError extends Error {
+export class ClassifierWriteError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
@@ -221,14 +239,43 @@ class ClassifierWriteError extends Error {
   }
 }
 
-/** move one version along the declared machine, refusing anything the table does not allow */
-async function transition(tx: Db, v: CustomClassifierVersionRow, to: ClassifierVersionStatus, extra: Partial<CustomClassifierVersionRow> = {}) {
-  const problem = classifierTransitionProblem(v.status, to);
-  if (problem) throw new ClassifierWriteError(409, "classifier_transition_refused", problem);
-  await tx
+/**
+ * Move one version along CLASSIFIER_VERSION_MACHINE (ADR-0348). The UPDATE is guarded by the event's source states and
+ * must return the row: an empty result means another writer moved it first, and the caller's transaction is refused
+ * (409) instead of auditing a change that did not happen.
+ */
+export async function transitionClassifierVersion(tx: Db, v: CustomClassifierVersionRow, event: ClassifierEvent, extra: Partial<CustomClassifierVersionRow> = {}) {
+  if (!CLASSIFIER_VERSION_MACHINE.can(v.status, event)) {
+    throw new ClassifierWriteError(409, "classifier_transition_refused", `a ${v.status} classifier version cannot be '${event}'`);
+  }
+  const moved = await tx
     .update(customClassifierVersions)
-    .set({ status: to, statusChangedAt: sql`now()`, ...extra })
-    .where(and(eq(customClassifierVersions.id, v.id), eq(customClassifierVersions.status, v.status)));
+    .set({ status: CLASSIFIER_VERSION_MACHINE.next(v.status, event), statusChangedAt: sql`now()`, ...extra })
+    .where(and(eq(customClassifierVersions.id, v.id), whereFrom(customClassifierVersions.status, CLASSIFIER_VERSION_MACHINE, event)))
+    .returning({ id: customClassifierVersions.id });
+  if (moved.length === 0) {
+    throw new ClassifierWriteError(409, "classifier_version_moved", `version ${v.version} changed state meanwhile; reload and try again`);
+  }
+}
+
+/** the protected values of the published EDM version `prev` that the version `next` no longer carries */
+async function edmDroppedCount(db: Db, prevId: string, nextId: string): Promise<number> {
+  const rows = (await db.execute(sql`
+    SELECT count(*)::int AS n FROM ${customClassifierEdmDigests} p
+    WHERE p.version_id = ${prevId}
+      AND NOT EXISTS (SELECT 1 FROM ${customClassifierEdmDigests} n WHERE n.version_id = ${nextId} AND n.digest = p.digest)`)) as unknown as
+    | { rows: Array<{ n: number }> }
+    | Array<{ n: number }>;
+  return (Array.isArray(rows) ? rows : rows.rows)[0]?.n ?? 0;
+}
+
+/** why `next` is looser than `prev` (both stored rows), or [] */
+async function storedRelaxes(db: Db, prev: CustomClassifierVersionRow, next: CustomClassifierVersionRow): Promise<string[]> {
+  const a = classifierDefinitionSchema.safeParse(prev.definition);
+  const b = classifierDefinitionSchema.safeParse(next.definition);
+  if (!a.success || !b.success) return ["a definition could not be read"];
+  const dropped = a.data.kind === "exact_data_match" && b.data.kind === "exact_data_match" ? await edmDroppedCount(db, prev.id, next.id) : 0;
+  return classifierVersionRelaxes({ ...prev, definition: a.data }, { ...next, definition: b.data }, dropped);
 }
 
 /** the version list an admin sees (no digests, only their count) */
@@ -268,6 +315,7 @@ async function listView(db: Db, ids?: string[]) {
         scanOutput: v.scanOutput,
         definition: v.definition,
         ...(v.kind === "exact_data_match" ? { valueCount: counts.get(v.id) ?? 0 } : {}),
+        lifecycle: CLASSIFIER_VERSION_MACHINE.describe(v.status),
         approvalId: v.approvalId,
         authorUserId: v.authorUserId,
         createdAt: v.createdAt.toISOString(),
@@ -291,6 +339,26 @@ function audit(tx: Db, userId: string | null, classifierId: string, ruleId: stri
     ruleChain: [],
     reason,
   });
+}
+
+/** the per-dispatch cost bound: how many classifiers may be live (published or in review) at once */
+async function checkLiveCaps(tx: Db, classifierId: string, kind: string): Promise<void> {
+  const others = await tx
+    .selectDistinct({ classifierId: customClassifierVersions.classifierId, kind: customClassifierVersions.kind })
+    .from(customClassifierVersions)
+    .where(and(inArray(customClassifierVersions.status, ["published", "pending_approval"]), sql`${customClassifierVersions.classifierId} <> ${classifierId}`));
+  const ids = new Set(others.map((o) => o.classifierId));
+  if (ids.size >= CLASSIFIER_LIMITS.liveClassifiers) {
+    throw new ClassifierWriteError(409, "classifier_limit_reached", `at most ${CLASSIFIER_LIMITS.liveClassifiers} classifiers can be live at once; retire one first`);
+  }
+  const edm = new Set(others.filter((o) => o.kind === "exact_data_match").map((o) => o.classifierId));
+  if (kind === "exact_data_match" && edm.size >= CLASSIFIER_LIMITS.liveEdmClassifiers) {
+    throw new ClassifierWriteError(
+      409,
+      "classifier_limit_reached",
+      `at most ${CLASSIFIER_LIMITS.liveEdmClassifiers} exact-data-match classifiers can be live at once; retire one first`,
+    );
+  }
 }
 
 export const CUSTOM_CLASSIFIERS_PATH = "/v1/classifiers";
@@ -370,6 +438,16 @@ export function registerCustomClassifierRoutes(app: FastifyInstance, db: Db, opt
     if (!reviewer || reviewer.disabledAt !== null || !reviewer.isAdmin) {
       return reply.status(422).send({ error: "reviewer_not_eligible", detail: "the reviewer must be an active administrator" });
     }
+    const versions = await db.select().from(customClassifierVersions).where(eq(customClassifierVersions.classifierId, id));
+    const target = versions.find((x) => x.version === version);
+    const published = versions.find((x) => x.status === "published");
+    // a version looser than the one in force removes part of a control: the author's step-up, bound to both versions
+    if (target && published && target.status === "draft") {
+      const relaxes = await storedRelaxes(db, published, target);
+      if (relaxes.length && !(await requireRelaxStepUp(db, req, reply, { [`customClassifier.${id}`]: `v${published.version} -> v${version}: ${relaxes.join("; ")}` }))) {
+        return reply;
+      }
+    }
     try {
       const approvalId = await db.transaction(async (tx) => {
         const t = tx as unknown as Db;
@@ -380,6 +458,12 @@ export function registerCustomClassifierRoutes(app: FastifyInstance, db: Db, opt
         if (!v) throw new ClassifierWriteError(404, "classifier_version_not_found", "no such version");
         const pending = all.find((x) => x.status === "pending_approval");
         if (pending) throw new ClassifierWriteError(409, "classifier_version_pending", `version ${pending.version} is waiting for review; decide it first`);
+        // the step-up above was asked against this published version; a publish in between means it must be asked again
+        const nowPublished = all.find((x) => x.status === "published");
+        if ((nowPublished?.id ?? null) !== (published?.id ?? null)) {
+          throw new ClassifierWriteError(409, "classifier_version_moved", "the published version changed meanwhile; reload and submit again");
+        }
+        await checkLiveCaps(t, id, v.kind);
         if (v.authorUserId !== null && v.authorUserId === body.reviewerUserId) {
           throw new ClassifierWriteError(422, "reviewer_is_author", "the reviewer drafted this version");
         }
@@ -392,7 +476,7 @@ export function registerCustomClassifierRoutes(app: FastifyInstance, db: Db, opt
             approverUserId: body.reviewerUserId,
           })
           .returning({ id: approvals.id });
-        await transition(t, v, "pending_approval", { approvalId: approval!.id });
+        await transitionClassifierVersion(t, v, "submit", { approvalId: approval!.id });
         await audit(t, actor, id, "custom-classifier-submitted", "require_approval", body.reason ?? `classifier '${c.key}' version ${version} submitted for review`, {
           key: c.key,
           version,
@@ -420,7 +504,10 @@ export function registerCustomClassifierRoutes(app: FastifyInstance, db: Db, opt
     try {
       await db.transaction(async (tx) => {
         const t = tx as unknown as Db;
-        await transition(t, published, "retired");
+        // re-read under a lock: a publish that superseded this version since the step-up must not be reported retired
+        const [locked] = await t.select().from(customClassifierVersions).where(eq(customClassifierVersions.id, published.id)).for("update");
+        if (!locked) throw new ClassifierWriteError(404, "classifier_version_not_found", "no such version");
+        await transitionClassifierVersion(t, locked, "retire");
         await audit(t, actorOf(req), id, "custom-classifier-retired", "allow", body.reason, { version: published.version });
       });
       return reply.status(200).send((await listView(db, [id]))[0]);
@@ -489,7 +576,7 @@ export async function applyCustomClassifierDecision(
     return;
   }
   if (decision === "denied") {
-    await transition(tx, v, "rejected");
+    await transitionClassifierVersion(tx, v, "reject");
     await audit(tx, deciderUserId, v.classifierId, "custom-classifier-rejected", "deny", `classifier '${c?.key}' version ${v.version} rejected`, base);
     return;
   }
@@ -498,8 +585,8 @@ export async function applyCustomClassifierDecision(
     .from(customClassifierVersions)
     .where(and(eq(customClassifierVersions.classifierId, v.classifierId), eq(customClassifierVersions.status, "published")))
     .for("update");
-  if (previous) await transition(tx, previous, "superseded");
-  await transition(tx, v, "published");
+  if (previous) await transitionClassifierVersion(tx, previous, "supersede");
+  await transitionClassifierVersion(tx, v, "approve");
   await audit(tx, deciderUserId, v.classifierId, "custom-classifier-published", "allow", `classifier '${c?.key}' version ${v.version} published (${v.kind}, ${v.mode})`, {
     ...base,
     kind: v.kind,

@@ -7,6 +7,7 @@
 import { defineMachine, type StateMachine } from "./state-machine.js";
 import { MCP_ADMISSION_STATES } from "./mcp-admission.js";
 import { INCIDENT_STATUSES } from "./accountability.js";
+import { CLASSIFIER_VERSION_STATUSES } from "./custom-classifiers.js";
 
 /** `training_jobs.status` (ADR-0065). Same values as `TRAINING_JOB_STATUSES` in @regulait/db. */
 export const TRAINING_JOB_MACHINE = defineMachine({
@@ -174,10 +175,53 @@ export const EVAL_RUN_MACHINE = defineMachine({
   },
 });
 
+/** `custom_classifier_versions.status` (ADR-0363 slice 2). A version takes effect only through an approval in the
+ * one queue; publishing supersedes the classifier's previous published version in the same transaction. */
+export const CLASSIFIER_VERSION_MACHINE = defineMachine({
+  id: "custom_classifier_version",
+  stored: "custom_classifier_versions.status",
+  states: CLASSIFIER_VERSION_STATUSES,
+  initial: ["draft"],
+  terminal: ["rejected", "superseded", "retired"],
+  transitions: {
+    submit: {
+      from: ["draft"],
+      to: "pending_approval",
+      by: ["admin"],
+      summary: "The author submitted the version to a named reviewer; a looser version needs the author's step-up.",
+    },
+    approve: {
+      from: ["pending_approval"],
+      to: "published",
+      by: ["approver"],
+      summary: "The reviewer approved it in the Approvals Queue; it runs in every guardrail scan from the next call.",
+    },
+    reject: {
+      from: ["pending_approval"],
+      to: "rejected",
+      by: ["approver"],
+      summary: "The reviewer denied it; it never takes effect.",
+    },
+    supersede: {
+      from: ["published"],
+      to: "superseded",
+      by: ["system"],
+      summary: "A newer version of the classifier was published.",
+    },
+    retire: {
+      from: ["published"],
+      to: "retired",
+      by: ["admin"],
+      summary: "An admin retired the classifier with a step-up; it stops running.",
+    },
+  },
+});
+
 /** Every declared machine, by id: the one list an agent or a document reads. */
 export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string>>> = Object.freeze({
   [TRAINING_JOB_MACHINE.def.id]: TRAINING_JOB_MACHINE,
   [MCP_ADMISSION_MACHINE.def.id]: MCP_ADMISSION_MACHINE,
   [INCIDENT_MACHINE.def.id]: INCIDENT_MACHINE,
   [EVAL_RUN_MACHINE.def.id]: EVAL_RUN_MACHINE,
+  [CLASSIFIER_VERSION_MACHINE.def.id]: CLASSIFIER_VERSION_MACHINE,
 } as Record<string, StateMachine<string, string>>);

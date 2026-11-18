@@ -17576,7 +17576,7 @@ export const customClassifiers = pgTable(
 export type CustomClassifierRow = typeof customClassifiers.$inferSelect;
 
 /**
- * Every version of a classifier, with its declared lifecycle (CLASSIFIER_VERSION_TRANSITIONS). `definition` is a
+ * Every version of a classifier, with its declared lifecycle (CLASSIFIER_VERSION_MACHINE, ADR-0348). `definition` is a
  * schema-validated configuration document (ADR-0200 exception); EDM values are never in it, only their digests in
  * `custom_classifier_edm_digests`.
  */

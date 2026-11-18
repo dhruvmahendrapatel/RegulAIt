@@ -11,10 +11,15 @@ import {
   customClassifiers,
   desc,
   eq,
+  inArray,
   runMigrations,
   type Db,
 } from "@regulait/db";
+import { CLASSIFIER_LIMITS, compileClassifier, GUARDRAIL_DEFAULT_MODES } from "@regulait/shared";
+import { createHmac } from "node:crypto";
 import { buildApp } from "./app.js";
+import { ClassifierWriteError, transitionClassifierVersion } from "./custom-classifiers.js";
+import { scanTrainingRows } from "./regulait-llm.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxStepUpAround } from "./testing/step-up-posture.js";
@@ -25,7 +30,9 @@ import { relaxStepUpAround } from "./testing/step-up-posture.js";
  *   - a published regex, keyword or EDM classifier blocks a governed dispatch through the guardrail engine;
  *   - EDM values are stored only as HMAC digests (never the plaintext, never in an audit row);
  *   - a newer published version supersedes the older one; retiring is a step-up and stops enforcement;
- *   - the lifecycle refuses transitions the declared table does not allow.
+ *   - the lifecycle refuses transitions the declared table does not allow, and a lost race is a 409 (ADR-0348);
+ *   - a version looser than the published one needs the author's step-up; a value that could never match is refused;
+ *   - the training-corpus scan runs the classifiers too; the live-classifier cap bounds the per-dispatch cost.
  * Shares one database (fileParallelism off); everything is keyed e44c_<run>.
  */
 
@@ -163,7 +170,13 @@ describe("ADR-0363 slice 2: customer classifiers", () => {
 
     const v2 = await app.inject({ method: "POST", headers: author.auth, url: `/v1/classifiers/${c.id}/versions`, payload: { mode: "warn", definition: { kind: "keyword", terms: [`aurora${RUN}`] } } });
     expect(v2.statusCode).toBe(201);
-    await publish(c.id, 2);
+    // block -> warn loosens the control: submitting it needs the author's step-up, and nothing is queued without it
+    const loose = await submit(c.id, 2);
+    expect(loose.statusCode, loose.body).not.toBe(202);
+    expect((await db.select().from(customClassifierVersions).where(and(eq(customClassifierVersions.classifierId, c.id), eq(customClassifierVersions.version, 2))))[0]!.status).toBe("draft");
+    const stepped = await relaxStepUpAround(db, () => submit(c.id, 2));
+    expect(stepped.statusCode, stepped.body).toBe(202);
+    expect((await decide(reviewer, stepped.json().approvalId, "approved")).statusCode).toBe(200);
     const statuses = (await db.select().from(customClassifierVersions).where(eq(customClassifierVersions.classifierId, c.id))).map((v) => [v.version, v.status]);
     expect(statuses.sort()).toEqual([[1, "superseded"], [2, "published"]]);
     expect((await invoke(`about aurora${RUN}`)).statusCode).toBe(200); // warn proceeds
@@ -190,6 +203,81 @@ describe("ADR-0363 slice 2: customer classifiers", () => {
     const noValues = await app.inject({ method: "POST", headers: author.auth, url: "/v1/classifiers", payload: { key: key("nov"), name: "nov", version: { mode: "block", definition: { kind: "exact_data_match", normalisation: "digits", maxTokens: 1 } } } });
     expect(noValues.statusCode).toBe(422);
     expect((await app.inject({ method: "GET", headers: caller.auth, url: "/v1/classifiers" })).statusCode).toBe(403);
+  });
+
+  it("a stricter version needs no step-up; a value the scan could never match is refused at save", async () => {
+    const c = await create(key("strict"), { mode: "warn", scanOutput: false, definition: { kind: "dictionary", terms: [`yy${RUN}`] } });
+    await publish(c.id, 1);
+    const v2 = await app.inject({
+      method: "POST",
+      headers: author.auth,
+      url: `/v1/classifiers/${c.id}/versions`,
+      payload: { mode: "block", definition: { kind: "dictionary", terms: [`yy${RUN}`, `ww${RUN}`] } },
+    });
+    expect(v2.statusCode, v2.body).toBe(201);
+    expect((await submit(c.id, 2)).statusCode).toBe(202); // more terms, a stronger mode, one more phase: no step-up
+    const versions = (await app.inject({ method: "GET", headers: author.auth, url: "/v1/classifiers" })).json().classifiers;
+    const mine = versions.find((x: { id: string }) => x.id === c.id);
+    expect(mine.versions[0].lifecycle).toMatchObject({ machine: "custom_classifier_version", state: "pending_approval" });
+
+    const bad = await app.inject({
+      method: "POST",
+      headers: author.auth,
+      url: "/v1/classifiers",
+      payload: { key: key("unm"), name: "unm", version: { mode: "block", definition: { kind: "exact_data_match", normalisation: "casefold", maxTokens: 2 }, values: ["E1", "O'Brien"] } },
+    });
+    expect(bad.statusCode).toBe(422);
+    expect(bad.json().detail).toMatch(/position 1/);
+    expect(bad.body).not.toContain("Brien");
+  });
+
+  it("a lost race on a status write is a 409, never a silent no-op (ADR-0348)", async () => {
+    const c = await create(key("race"), { mode: "block", definition: { kind: "keyword", terms: [`race${RUN}`] } });
+    await publish(c.id, 1);
+    const [stale] = await db.select().from(customClassifierVersions).where(eq(customClassifierVersions.classifierId, c.id));
+    expect(stale!.status).toBe("published");
+    // another writer supersedes it after this one read it
+    await db.update(customClassifierVersions).set({ status: "superseded" }).where(eq(customClassifierVersions.id, stale!.id));
+    const err = await transitionClassifierVersion(db, stale!, "retire").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ClassifierWriteError);
+    expect((err as ClassifierWriteError).status).toBe(409);
+    expect((err as ClassifierWriteError).code).toBe("classifier_version_moved");
+    // the retire route re-reads under a lock: a version no longer published is refused and nothing is audited retired
+    const r = await app.inject({ method: "POST", headers: AUTH, url: `/v1/classifiers/${c.id}/retire`, payload: { reason: "x" } });
+    expect(r.statusCode).toBe(409);
+    const retiredRows = await db.select().from(auditLog).where(and(eq(auditLog.objectId, c.id), eq(auditLog.ruleId, "custom-classifier-retired")));
+    expect(retiredRows).toHaveLength(0);
+  });
+
+  it("the training-corpus scan runs the classifiers, whatever their phases", () => {
+    const k = Buffer.alloc(32, 3);
+    const h = (s: string) => createHmac("sha256", k).update(s).digest("hex");
+    const edm = compileClassifier(
+      { key: "emp", version: 1, mode: "block", phases: ["output"], definition: { kind: "exact_data_match", normalisation: "exact", maxTokens: 1 }, digests: [h("E77")] },
+      h,
+    );
+    const rows = [{ input: "who is E77.", output: "nobody" }];
+    expect(scanTrainingRows(rows, GUARDRAIL_DEFAULT_MODES, [], []).guardrailBlocked).toBe(false);
+    const scan = scanTrainingRows(rows, GUARDRAIL_DEFAULT_MODES, [], [edm]);
+    expect(scan.guardrailBlocked).toBe(true);
+    expect(JSON.stringify(scan.findings)).toContain("classifier.emp");
+    expect(JSON.stringify(scan.findings)).not.toContain("E77");
+  });
+
+  it("at most liveEdmClassifiers exact-data-match classifiers are live at once", async () => {
+    const live = await db
+      .selectDistinct({ id: customClassifierVersions.classifierId })
+      .from(customClassifierVersions)
+      .where(and(eq(customClassifierVersions.kind, "exact_data_match"), inArray(customClassifierVersions.status, ["published", "pending_approval"])));
+    const ids: string[] = [];
+    for (let i = live.length; i <= CLASSIFIER_LIMITS.liveEdmClassifiers; i++) {
+      const c = await create(key(`cap${i}`), { mode: "log", definition: { kind: "exact_data_match", normalisation: "exact", maxTokens: 1 }, values: [`CAP${RUN}${i}`] });
+      ids.push(c.id);
+    }
+    for (const id of ids.slice(0, -1)) expect((await submit(id, 1)).statusCode).toBe(202);
+    const over = await submit(ids.at(-1)!, 1);
+    expect(over.statusCode).toBe(409);
+    expect(over.json().error).toBe("classifier_limit_reached");
   });
 
   it("the dry run counts matches and stores nothing", async () => {

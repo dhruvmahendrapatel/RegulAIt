@@ -1,15 +1,20 @@
 import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  CLASSIFIER_LIMITS,
   CLASSIFIER_VERSION_STATUSES,
-  CLASSIFIER_VERSION_TRANSITIONS,
   classifierDefinitionProblem,
   classifierDefinitionSchema,
-  classifierTransitionProblem,
+  classifierTokens,
+  classifierVersionRelaxes,
   compileClassifier,
   edmNormalise,
+  unavailableClassifier,
+  unmatchableClassifierValues,
   type ClassifierSpec,
+  type ClassifierVersionShape,
 } from "./custom-classifiers.js";
+import { CLASSIFIER_VERSION_MACHINE, STATE_MACHINES } from "./state-machines.js";
 import { GUARDRAIL_DEFAULT_MODES, evaluateGuardrails } from "./guardrails.js";
 
 const KEY = Buffer.alloc(32, 7);
@@ -73,13 +78,60 @@ describe("ADR-0363 slice 2: customer classifiers", () => {
     expect(JSON.stringify(output)).not.toContain("aurora");
   });
 
-  it("the lifecycle is one declared machine", () => {
-    for (const s of CLASSIFIER_VERSION_STATUSES) expect(CLASSIFIER_VERSION_TRANSITIONS[s]).toBeDefined();
-    expect(classifierTransitionProblem("draft", "pending_approval")).toBeNull();
-    expect(classifierTransitionProblem("pending_approval", "published")).toBeNull();
-    expect(classifierTransitionProblem("draft", "published")).toMatch(/cannot/);
-    expect(classifierTransitionProblem("rejected", "published")).toMatch(/cannot/);
-    expect(classifierTransitionProblem("published", "superseded")).toBeNull();
+  it("the lifecycle is one declared ADR-0348 machine, registered", () => {
+    expect([...CLASSIFIER_VERSION_MACHINE.def.states]).toEqual([...CLASSIFIER_VERSION_STATUSES]);
+    expect(STATE_MACHINES["custom_classifier_version"]).toBe(CLASSIFIER_VERSION_MACHINE);
+    expect(CLASSIFIER_VERSION_MACHINE.next("draft", "submit")).toBe("pending_approval");
+    expect(CLASSIFIER_VERSION_MACHINE.next("pending_approval", "approve")).toBe("published");
+    expect(CLASSIFIER_VERSION_MACHINE.can("draft", "approve")).toBe(false);
+    expect(CLASSIFIER_VERSION_MACHINE.can("rejected", "approve")).toBe(false);
+    expect(CLASSIFIER_VERSION_MACHINE.next("published", "supersede")).toBe("superseded");
+    expect(CLASSIFIER_VERSION_MACHINE.sourcesOf("retire")).toEqual(["published"]);
+  });
+
+  it("tokens never keep a trailing joiner, so a sentence-final value still matches", () => {
+    expect(classifierTokens("My id is EMP-1234. Also a.b@c.com/x- and E12345-")).toEqual(["My", "id", "is", "EMP-1234", "Also", "a.b@c.com/x", "and", "E12345"]);
+    const dict = compileClassifier(spec({ kind: "dictionary", terms: ["Bluebird"] }), hash);
+    expect(dict.count("The codename is Bluebird. Ok")).toBe(1);
+    for (const tail of [".", "-", "/", "_", "@"]) {
+      const edm = compileClassifier(spec({ kind: "exact_data_match", normalisation: "exact", maxTokens: 2 }, { digests: [hash("E12345"), hash("Jane Doe")] }), hash);
+      expect(edm.count(`Employee E12345${tail} and Jane Doe${tail}`)).toBe(2);
+    }
+  });
+
+  it("a value the scan could never match is reported at save, by position only", () => {
+    const edm = { kind: "exact_data_match", normalisation: "casefold", maxTokens: 2 } as const;
+    expect(unmatchableClassifierValues(edm, ["E12345", "Jane Doe", "O'Brien", "+1 (555) 010", "a b c", "  "])).toEqual([2, 3, 4]);
+    // digits normalisation rebuilds a phone number from its tokens
+    expect(unmatchableClassifierValues({ ...edm, normalisation: "digits", maxTokens: 3 }, ["+1 (555) 010"])).toEqual([]);
+    expect(unmatchableClassifierValues({ kind: "dictionary", terms: ["ok", "end.", "O'Brien"] })).toEqual([1, 2]);
+    expect(unmatchableClassifierValues({ kind: "keyword", terms: ["x y"] })).toEqual([]);
+  });
+
+  it("scans past their bounds are unavailable (fail closed), never clean", () => {
+    const edm = compileClassifier(spec({ kind: "exact_data_match", normalisation: "exact", maxTokens: 6 }, { digests: [hash("zz")] }), hash);
+    expect(edm.count("a ".repeat(CLASSIFIER_LIMITS.edmScanTokens + 1))).toBe("unavailable");
+    expect(edm.count("a ".repeat(100))).toBe(0);
+    const re = compileClassifier(spec({ kind: "regex", pattern: "zz", caseInsensitive: false }), hash);
+    expect(re.count("a".repeat(CLASSIFIER_LIMITS.scanChars + 1))).toBe("unavailable");
+    expect(unavailableClassifier({ key: "k", version: 1, mode: "block", phases: ["input"] }).count("x")).toBe("unavailable");
+  });
+
+  it("a looser version is named as a relaxation; a stricter one is not", () => {
+    const base: ClassifierVersionShape = { mode: "block", scanInput: true, scanOutput: true, definition: { kind: "keyword", terms: ["a", "b"] } };
+    expect(classifierVersionRelaxes(base, { ...base, definition: { kind: "keyword", terms: ["a", "b", "c"] } })).toEqual([]);
+    expect(classifierVersionRelaxes(base, { ...base, mode: "log" })).toEqual(["mode block -> log"]);
+    expect(classifierVersionRelaxes(base, { ...base, scanOutput: false })).toEqual(["stops scanning the output"]);
+    expect(classifierVersionRelaxes(base, { ...base, definition: { kind: "keyword", terms: ["a"] } })).toEqual(["1 term(s) removed"]);
+    const re: ClassifierVersionShape = { ...base, definition: { kind: "regex", pattern: "x", caseInsensitive: false } };
+    expect(classifierVersionRelaxes(re, { ...re, definition: { kind: "regex", pattern: "y", caseInsensitive: false } })).toEqual(["the pattern changed"]);
+    expect(classifierVersionRelaxes(base, re)).toEqual(["kind keyword -> regex"]);
+    const edm: ClassifierVersionShape = { ...base, definition: { kind: "exact_data_match", normalisation: "casefold", maxTokens: 3 } };
+    expect(classifierVersionRelaxes(edm, edm, 0)).toEqual([]);
+    expect(classifierVersionRelaxes(edm, { ...edm, definition: { kind: "exact_data_match", normalisation: "casefold", maxTokens: 2 } }, 4)).toEqual([
+      "maxTokens 3 -> 2",
+      "4 protected value(s) removed",
+    ]);
   });
 
   it("normalisation modes", () => {

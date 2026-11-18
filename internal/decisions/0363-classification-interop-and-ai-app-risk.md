@@ -104,9 +104,24 @@ What exists and is reused (repo search, 2026-11-17):
 7. They run **inside the existing pipeline**: classifier findings are guardrail findings, evaluated by
    `evaluateGuardrails`, composed and audited by the engine's own modes and audit rows. Redaction uses the ADR-0140
    span-union redactor. There is no second pipeline and no second audit format.
-8. Each classifier is **versioned** (`config_versions`, a new artifact type). A version takes effect only after an
+8. Each classifier is **versioned**. *Amended as built:* versions live in their own table,
+   `custom_classifier_versions`, not `config_versions`: an EDM version owns a digest set (a child table keyed by the
+   version), which a `config_versions` document cannot hold under 3NF. The lifecycle is the declared ADR-0348 machine
+   `CLASSIFIER_VERSION_MACHINE` (draft, pending_approval, published, rejected, superseded, retired); every status write
+   is guarded by `whereFrom` and `.returning()`, so a lost race is a 409. A version takes effect only after an
    approval in the one approvals queue (the ADR-0208 pattern: no self-approval; activation inside the decide
    transaction; every step audited).
+8a. **Loosening is a step-up** (ADR-0180, the ADR-0186 decision 29 precedent). Submitting a version looser than the
+   published one (a weaker mode, a dropped phase, a changed pattern, a removed term or protected value, a weaker EDM
+   normalisation, fewer EDM tokens, another kind) needs the author's `settings_relax` step-up, bound to both version
+   ids. Retiring a published classifier needs one too.
+8b. **Matching and cost bounds.** Text and values are tokenised by one function, and a token starts and ends with a
+   letter or digit, so a value at the end of a sentence still matches. A dictionary word or EDM value the scan could
+   never match (`O'Brien`, more tokens than `maxTokens`) is refused at save, by position only. Text past 1M characters,
+   or an EDM scan past 20,000 tokens, is `unavailable` (a hit, fail closed). At most 50 classifiers, 5 of them EDM, are
+   live (published or in review) at once.
+8c. **Every guardrail site** runs the classifiers, including the training-corpus scan (whatever a classifier's phases:
+   a corpus row is prompt and completion alike) and the cost-import text scan.
 
 ### Slice 3 — AI app risk attributes (PR 3)
 
@@ -146,3 +161,8 @@ What exists and is reused (repo search, 2026-11-17):
   commit in `discovery-worker.ts` (`inCommit`), `stricterPiiMode` in `projects.ts`, `extraComplianceTags` in
   `guardrails.ts`, migration `sensitivity_labels`. Tests: `sensitivity-labels.test.ts` (shared),
   `zz-adr0363-sensitivity-labels.test.ts`, and a case in `discovery-wider-scanners.test.ts`.
+- Slice 2: `packages/shared/src/custom-classifiers.ts` (+ test), `CLASSIFIER_VERSION_MACHINE` in
+  `packages/shared/src/state-machines.ts`, `apps/gateway/src/custom-classifiers.ts` (loader, six admin routes, the
+  decide hooks), the `classifiers` argument at every `evaluateGuardrails` site (`guardrails.ts`, `regulait-llm.ts`,
+  `cost-import.ts`), migration `custom_classifiers`. Tests: `custom-classifiers.test.ts` (shared),
+  `zz-adr0363-custom-classifiers.test.ts`, and the CHECK equality in `adr0348-state-machines.test.ts`.
