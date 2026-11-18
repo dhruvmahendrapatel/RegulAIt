@@ -31,7 +31,7 @@ import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api/client";
 import type { DecisionRecord, PmLink } from "../../api/types";
-import { ago } from "../../api/format";
+import { ago, errorText } from "../../api/format";
 import { Badge, Button, Card, EmptyState, Field, Input, Table, Textarea } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
 import v from "../views.module.css";
@@ -102,7 +102,7 @@ export function PmLinksCard(props: { parent: Parent }) {
       toast(`Synced with ${syncConn} — ${parts.join(", ")}`, (r.orphaned?.length ?? 0) > 0 ? "error" : "success");
       void qc.invalidateQueries({ queryKey: ["pm-links", parent.objectType, parent.objectId] });
     } catch (e) {
-      toast(e instanceof Error ? e.message : String(e), "error");
+      toast(errorText(e), "error");
     } finally {
       setSyncing(false);
     }
@@ -309,7 +309,7 @@ export function DecisionLedgerCard(props: { parent: Parent }) {
       void qc.invalidateQueries({ queryKey: ["decisions", parent.objectType, parent.objectId] });
       void qc.invalidateQueries({ queryKey: ["pm-links", parent.objectType, parent.objectId] });
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorText(e));
     } finally {
       setBusy(false);
     }

@@ -19,6 +19,7 @@
  */
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { prefixedBearer } from "./prefixed-bearer.js";
 import { z } from "zod";
 import {
   and,
@@ -100,14 +101,7 @@ async function audit(db: Db, actor: string, objectId: string | null, ruleId: str
 }
 
 /** the bearer value when it is `rgti_` + 64 lower-case hex, else null (no regex on caller input) */
-function ingestBearer(req: FastifyRequest): string | null {
-  const h = req.headers.authorization;
-  if (typeof h !== "string" || !h.startsWith("Bearer ")) return null;
-  const v = h.slice("Bearer ".length);
-  if (v.length !== THIRD_PARTY_INGEST_TOKEN_PREFIX.length + 64 || !v.startsWith(THIRD_PARTY_INGEST_TOKEN_PREFIX)) return null;
-  const hex = v.slice(THIRD_PARTY_INGEST_TOKEN_PREFIX.length);
-  return [...hex].every((c) => (c >= "0" && c <= "9") || (c >= "a" && c <= "f")) ? v : null;
-}
+const ingestBearer = (req: FastifyRequest) => prefixedBearer(req, THIRD_PARTY_INGEST_TOKEN_PREFIX, 64, "hex");
 
 const refuse = (reply: FastifyReply, status: number, error: string, detail?: string) => reply.status(status).send(detail ? { error, detail } : { error });
 

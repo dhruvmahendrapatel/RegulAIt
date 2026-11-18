@@ -9,7 +9,7 @@ import { Link, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api/client";
 import type { CheckResult, WorkflowDetailResponse } from "../../api/types";
-import { ago, humanize } from "../../api/format";
+import { ago, humanize, errorText } from "../../api/format";
 import { QuestionnaireView } from "../admin/governance/UseCaseQuestionnaire";
 import { PageHeader } from "../../shell/AppShell";
 import {
@@ -94,7 +94,7 @@ export default function WorkflowDetailPage() {
       toast(label, "success");
       void refresh();
     } catch (e) {
-      setActionError(e instanceof Error ? e.message : String(e));
+      setActionError(errorText(e));
     }
   };
 

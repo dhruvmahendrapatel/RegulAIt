@@ -77,6 +77,8 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   "/app",
   "/",
   "/health",
+  // ADR-0343: the readiness probe (503 while draining); like /health it names no data
+  "/ready",
   // ADR-0185 G5 — mounted only when REGULAIT_METRICS_ON_MAIN_LISTENER is on
   // (otherwise no route exists: 404). The scraper holds no RegulAIt
   // credential; the route authenticates IN-ROUTE on REGULAIT_METRICS_TOKEN
@@ -161,6 +163,12 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // never read a platform session or key; they answer 404 while `supplier_portal_enabled` is off (the shipped
   // default). Listed in NON_ADMIN_ROUTES too, so they are `public` to the platform hooks.
   ...SUPPLIER_ROUTE_PATHS,
+  // ADR-0223 amendment 1 — the drift monitor's WRITE-ONLY ingestion credential. A pipeline holds no platform
+  // credential: the route authenticates IN-ROUTE on `Authorization: Bearer rgldi_…` only (drift-ingest-credentials.ts;
+  // only its SHA-256 stored, always expiring, revocable, bound to one monitor by the row), never reads a platform
+  // session or key, and is rate-limited per address and per credential. Only POST is registered on this path, so
+  // the credential reads nothing. Listed in NON_ADMIN_ROUTES too, so it is `public` to the platform hooks.
+  "/v1/model-drift/ingest/:monitorId/reports",
   // ADR-0037 — SCIM is a SEPARATE TRUST PATH, and this exemption is what
   // makes that true rather than aspirational. These routes must never
   // authenticate via a human session cookie or a user's API key: they
@@ -449,6 +457,12 @@ export const NON_ADMIN_ROUTES = new Set([
   // leak sideways. Every other cost-import route — uploading a file, asserting
   // an identity mapping, reading fleet-wide — is absent here on purpose.
   "GET /v1/users/:userId/cost-consolidated",
+  // ADR-0342 (lane E23): process analytics. Each read applies `evaluateReportAccess` in the handler and is narrowed to
+  // the projects in scope the caller is a member of (org scope is admin-only); refresh stays admin.
+  "GET /v1/process-analytics/templates",
+  "GET /v1/process-analytics/stages",
+  "GET /v1/process-analytics/heatmap",
+  "GET /v1/process-analytics/throughput",
   // ADR-0070 — a person may list and read THEIR OWN traces, and only their own.
   // Every one of these four is self-scoped INSIDE the handler: a non-admin who
   // passes `userId` for somebody else gets a 403 rather than a silently-ignored
@@ -609,6 +623,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /app",
   "GET /",
   "GET /health",
+  // ADR-0343: the readiness probe; no credential, no data
+  "GET /ready",
   // ADR-0185 G5 — see AUTH_EXEMPT_ROUTES: the metrics token is the credential
   "GET /metrics",
   // ADR-0026: the SPA shell, same static-page reasoning as /app above
@@ -805,6 +821,10 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/feedback/l/:token",
   // ADR-0221 (P4): the supplier routes (see AUTH_EXEMPT_ROUTES)
   ...SUPPLIER_ROUTES,
+  // ADR-0223 amendment 1: the ingestion credential's one route (see AUTH_EXEMPT_ROUTES). Issuing, rotating, revoking
+  // and listing credentials (/v1/model-drift/monitors/:monitorId/ingest-credentials*) are DELIBERATELY ABSENT, so
+  // ADMIN-ONLY, each write with an identity_manage step-up.
+  "POST /v1/model-drift/ingest/:monitorId/reports",
   //
   // --- ADR-0225 (P13 d): the public trust pages ---------------------------------
   // Everything under /v1/trust/* (drafting, publishing, the heading, auditor grants) is DELIBERATELY ABSENT, so
@@ -881,6 +901,10 @@ export const NON_ADMIN_ROUTES = new Set([
   "DELETE /v1/model-artifacts/:artifactId",
   // ADR-0216: the uploader attaches a signature to their own artifact (an admin to any), checked in-handler
   "POST /v1/model-artifacts/:artifactId/signature",
+  // lane L7 (P14 + P16): the child's uploader records its derivation (an admin any); reads under the same rule.
+  // Checked in-handler; a relative the caller cannot see is a count, never an id
+  "POST /v1/model-artifacts/:artifactId/lineage",
+  "GET /v1/model-artifacts/:artifactId/lineage",
 
   // ADR-0188 (batch 6 item 1) — the public identity surface (auth-exempt above
   // too): the JWKS and the token endpoint family.

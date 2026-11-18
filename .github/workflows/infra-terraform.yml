@@ -10,6 +10,7 @@ on:
       - 'infra/modules/**'
       - 'infra/environments/**'
       - 'infra/scripts/install-terraform.sh'
+      - 'infra/scripts/byoc-rehearsal-sweep.sh'
       - '.github/workflows/infra-terraform.yml'
   push:
     branches: [main]
@@ -17,6 +18,7 @@ on:
       - 'infra/modules/**'
       - 'infra/environments/**'
       - 'infra/scripts/install-terraform.sh'
+      - 'infra/scripts/byoc-rehearsal-sweep.sh'
       - '.github/workflows/infra-terraform.yml'
   workflow_dispatch:
 
@@ -35,8 +37,8 @@ jobs:
     env:
       # Modules and compositions this workflow checks. Older ones are added as
       # they gain tests; each must init without a backend.
-      MODULES: github-oidc-role aws-byoc-deployer-policy
-      ENVIRONMENTS: regulait-dev-rehearsal-role
+      MODULES: github-oidc-role aws-byoc-deployer-policy byoc-aws postgres-ha-aws postgres-ha-azure postgres-ha-gcp
+      ENVIRONMENTS: regulait-dev-rehearsal-role byoc-aws
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -45,6 +47,8 @@ jobs:
         run: |
           infra/scripts/install-terraform.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: shellcheck
+        run: shellcheck infra/scripts/install-terraform.sh infra/scripts/byoc-rehearsal-sweep.sh infra/modules/byoc-aws/preflight/*.sh infra/modules/byoc-aws/smoke/*.sh
       - name: fmt
         run: terraform fmt -check -recursive infra/modules infra/environments
       - name: validate and test

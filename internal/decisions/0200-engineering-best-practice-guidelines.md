@@ -174,3 +174,34 @@ UI only, so it carries a pointer rather than the rule.
    - A batch that touches an RLS table (ADR-0233) gives its data steps the `migration` system context.
 5. **Precedence.** Secure by default (ADR-0180), open source first (ADR-0176) and evidence immutability (ADR-0060)
    win over this rule. Where normalizing would weaken one of them, the column stays as it is with an exception comment.
+
+## Addendum — 2026-11-17: four build rules (owner)
+
+**Owner, 2026-11-17, to the master orchestrator:** "Find all of the implicit state machines in my app. Make the best
+decision that will elevate all three: the user experience (UX), developer experience (DX), and agent experience (AX)
+always, without breaking anything. Don't write an unfamiliar feature from scratch. Search GitHub for open-source
+projects, compare their approaches, then start. Rate each bug from 1 to 10 on how often it would happen and how bad it
+would be. If the two scores multiplied are below 5, just file it as an issue and leave the code alone. Do not design for
+rare or future cases nobody asked about. Finish the whole job before you stop. Don't offer to continue: continue. Ask me
+before you delete anything. End with a recap for someone who saw none of the work: key points first, plain words."
+
+These four rules bind every session, builder brief and review, and are listed in CLAUDE.md.
+
+1. **Compare open source before an unfamiliar feature.** Search GitHub for projects that solve it and compare at least
+   two approaches (licence and the other ADR-0176 tests, maintenance, fit) before writing code. The comparison goes in
+   the PR body or ADR. This sharpens ADR-0176 rule 1; it does not relax it.
+2. **Triage bugs by frequency × severity.** Score each bug 1–10 for how often it would happen (F) and 1–10 for how bad
+   it would be (S). If F×S is below 5, file a GitHub issue labelled `triage-low` with the scores and leave the code
+   alone. Do not design for rare or future cases nobody asked about. Reviewers put F, S and F×S on every finding; a
+   finding below 5 is an issue, not a blocker. **Precedence:** a confirmed gap in the CLAUDE.md security checklist stays
+   blocking under ADR-0180 whatever its score.
+3. **Finish the job; ask before deleting; recap plainly.** Do not stop to offer to continue. Deleting anything (files,
+   branches, tables, tests, routes, data) needs the owner's go-ahead first; builders ask the orchestrator, which asks
+   the owner unless an earlier owner decision already covers it. Every finished piece of work ends with a recap for
+   someone who saw none of it: key points first, plain words.
+4. **Explicit state machines that serve UX, DX and AX together.** A status, lifecycle or multi-step flow declares its
+   states and allowed transitions in one reused place, not scattered conditionals; the server enforces them; the UI shows
+   the real state, the allowed next actions and why one is disabled; an agent can read the same machine-readable
+   definition. Existing valid transitions keep working. The app-wide inventory and the shared approach come from lane E29
+   (in flight, its own decision record); until it lands, changes keep to the machines in their own surface.
+

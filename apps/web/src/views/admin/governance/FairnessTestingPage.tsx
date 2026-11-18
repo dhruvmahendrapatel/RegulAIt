@@ -65,7 +65,7 @@ export default function FairnessTestingPage() {
         }
       />
       <div className={v.stack}>
-        <QueryGate loading={fairness.isLoading} error={fairness.error} onRetry={() => void fairness.refetch()}>
+        <QueryGate query={fairness}>
           {fairness.data && !settings && (
             <EmptyState title="Fairness testing settings unavailable" body="The settings could not be read. Reload the page, or try again later." />
           )}
@@ -513,7 +513,7 @@ function RunsCard(props: {
         />
       </Card>
       {props.openRunId !== null && (
-        <QueryGate loading={openRun.isLoading} error={openRun.error} onRetry={() => void openRun.refetch()}>
+        <QueryGate query={openRun}>
           {open && <RunDetail run={open} cardLabelText={cardLabel(cardOf(open.cardId))} onClose={() => props.onOpen(null)} />}
         </QueryGate>
       )}

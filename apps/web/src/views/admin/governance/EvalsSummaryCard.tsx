@@ -67,7 +67,7 @@ export function EvalsSummaryCard(props: { onOpenRun?: (runId: string) => void })
         </Button>
       }
     >
-      <QueryGate loading={summary.isLoading} error={summary.error} onRetry={() => void summary.refetch()}>
+      <QueryGate query={summary}>
         {s ? (
           <div className={v.stack} data-testid="evals-summary">
             <div className={a.statRow}>
