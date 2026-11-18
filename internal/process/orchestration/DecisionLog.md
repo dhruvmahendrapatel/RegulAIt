@@ -8,13 +8,14 @@ questions.
 
 | Since | Question | Blocks |
 |---|---|---|
-| 2026-11-16 | Approve the git push in lane S7's own session | S7 |
-| 2026-11-16 | Apply the dev-account rehearsal role per `docs/ops/BYOC_REHEARSAL_ROLE.md` (AWS write, owner only) | E10 rehearsal |
+| none | (none open) | |
 
 ## Decisions
 
 | ID | Date | Question | Answer | Applied in |
 |---|---|---|---|---|
+| D-2026-11-18-09 | 2026-11-18 | Apply the dev-account rehearsal role for E10? | Deferred. E10 parks the rehearsal and does no AWS step | E10 told 06:09 |
+| D-2026-11-18-08 | 2026-11-18 | Approve S7's git push (its permission layer refused it)? | Approved, push only (no force-push), relayed to S7. If S7's own permission layer still refuses, the owner approves in S7's session | S7 told 06:09 |
 | D-2026-11-18-07 | 2026-11-18 | Where do the hand-over files live? | In the repo, under `internal/process/orchestration/`, with nothing identifying | This folder |
 | D-2026-11-18-06 | 2026-11-18 | Scheduled tasks: the new rules say none unless asked | Keep the merge loop, a master check-in about every 40-60 min while PRs are in flight, and merge-loop restarts; nothing else | RULES.md §3 |
 | D-2026-11-18-05 | 2026-11-18 | Workers posting outward: the new rules say never | Keep the GitHub exception: builders open draft PRs and post READY, and reviewers post their own verdicts; all else goes through the master | RULES.md §1 |

@@ -22,7 +22,8 @@
 | #1010 E45 ADR-0364 RPA | E45 | 2026-11-18 | ADR only until rule 15 lifts |
 | #936 Codex C1 CI build-once | Codex | 2026-11-18 | Route first when READY |
 | #1009 flaky SAP idempotency test | triage-low | 2026-11-18 | F2 × S2 = 4; code left alone |
-| S7 push approval, E10 rehearsal role | owner | 2026-11-16 | See DecisionLog |
+| S7 RLS PM-tables batch push | S7 | 2026-11-18 | Owner approved the push (D-2026-11-18-08); confirm that S7 pushed |
+| E10 rehearsal | parked | 2026-11-18 | Owner deferred the rehearsal role (D-2026-11-18-09) |
 
 ## Done log (newest first)
 
