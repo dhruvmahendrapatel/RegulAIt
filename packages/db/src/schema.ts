@@ -17403,6 +17403,84 @@ export const agentRiskProofFollowups = pgTable(
 export type AgentRiskProofFollowupRow = typeof agentRiskProofFollowups.$inferSelect;
 // ===== end ADR-0345 =====
 
+// ===== ADR-0363 (lane E44): customer sensitivity labels — migration `sensitivity_labels` (pending, numbered at merge) =====
+/**
+ * The provider's label list (Purview first), read-only, as the `idp_entra` discovery scan read it. A label the provider
+ * stops listing is marked inactive, never deleted. `parentLabelId` is the provider's own id copied verbatim from its
+ * payload (ADR-0200 exception: a verbatim external reference, resolved by the unique key; a parent can arrive after
+ * its child).
+ */
+export const sensitivityLabelDefinitions = pgTable(
+  "sensitivity_label_definitions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    provider: text("provider", { enum: ["microsoft_purview"] }).notNull(),
+    tenantId: text("tenant_id").notNull(),
+    labelId: text("label_id").notNull(),
+    name: text("name").notNull(),
+    parentLabelId: text("parent_label_id"),
+    rank: integer("rank"),
+    active: boolean("active").notNull().default(true),
+    sourceId: uuid("source_id").references(() => discoverySources.id, { onDelete: "set null" }),
+    syncedAt: timestamp("synced_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("sensitivity_label_definitions_uq").on(t.provider, t.tenantId, t.labelId),
+    check("sensitivity_label_definitions_provider_check", sql`${t.provider} IN ('microsoft_purview')`),
+    check(
+      "sensitivity_label_definitions_guid_check",
+      sql`${t.tenantId} ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' AND ${t.labelId} ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' AND (${t.parentLabelId} IS NULL OR ${t.parentLabelId} ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')`,
+    ),
+    check("sensitivity_label_definitions_name_check", sql`char_length(${t.name}) BETWEEN 1 AND 256`),
+  ],
+);
+export type SensitivityLabelDefinitionRow = typeof sensitivityLabelDefinitions.$inferSelect;
+
+/** the admin's mapping: one label -> action, data sensitivity and optionally the compliance profile it pulls in */
+export const sensitivityLabelRules = pgTable(
+  "sensitivity_label_rules",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    definitionId: uuid("definition_id")
+      .notNull()
+      .references(() => sensitivityLabelDefinitions.id, { onDelete: "cascade" }),
+    action: text("action", { enum: ["allow", "redact", "block"] }).notNull(),
+    sensitivity: text("sensitivity", { enum: ["public", "internal", "confidential", "restricted"] }).notNull(),
+    complianceProfileId: uuid("compliance_profile_id").references(() => complianceProfiles.id, { onDelete: "restrict" }),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("sensitivity_label_rules_definition_uq").on(t.definitionId),
+    index("sensitivity_label_rules_profile_idx").on(t.complianceProfileId).where(sql`${t.complianceProfileId} IS NOT NULL`),
+    check("sensitivity_label_rules_action_check", sql`${t.action} IN ('allow', 'redact', 'block')`),
+    check("sensitivity_label_rules_sensitivity_check", sql`${t.sensitivity} IN ('public', 'internal', 'confidential', 'restricted')`),
+  ],
+);
+export type SensitivityLabelRuleRow = typeof sensitivityLabelRules.$inferSelect;
+
+/** one row (id = true): the strict fallbacks; no row reads as all `block` */
+export const sensitivityLabelSettings = pgTable(
+  "sensitivity_label_settings",
+  {
+    id: boolean("id").primaryKey().default(true),
+    unmappedAction: text("unmapped_action", { enum: ["allow", "redact", "block"] }).notNull().default("block"),
+    protectedAction: text("protected_action", { enum: ["allow", "redact", "block"] }).notNull().default("block"),
+    unreadableAction: text("unreadable_action", { enum: ["allow", "redact", "block"] }).notNull().default("block"),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("sensitivity_label_settings_singleton_check", sql`${t.id}`),
+    check(
+      "sensitivity_label_settings_action_check",
+      sql`${t.unmappedAction} IN ('allow', 'redact', 'block') AND ${t.protectedAction} IN ('allow', 'redact', 'block') AND ${t.unreadableAction} IN ('allow', 'redact', 'block')`,
+    ),
+  ],
+);
+export type SensitivityLabelSettingsRow = typeof sensitivityLabelSettings.$inferSelect;
+// ===== end ADR-0363 slice 1 =====
+
 // ===== ADR-0346 — fairness evaluation through the governed gateway (migration fairness_evaluation) =====
 //
 // Extends ADR-0222. An evaluation is a saved definition on one model card: a model-input dataset, the attributes it
