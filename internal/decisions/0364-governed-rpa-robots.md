@@ -7,7 +7,9 @@
 - **Built in**: lane E45, one PR per slice: S1 this ADR; S2 backend (tables, CRUD, versions, review, the Robots MCP server, toolbox options); S3 the browser runner; S4 authoring; S5 (later, its own addendum) the desktop engine and the workflow "Robot step" stage
 - **Migration**: S2 adds `packages/db/migrations/pending/robots.sql` (numbered at merge, ADR-0252); S1 has none
 - **Related**: [ADR-0103](0103-mcp-path-project-budget-gate.md) (MCP cost and budget), [ADR-0176](0176-open-source-first.md),
-  [ADR-0180](0180-continuous-assurance-strict-by-default.md), [ADR-0181](0181-strict-defaults.md) (Ask first on by default),
+  [ADR-0124](0124-kill-switch-and-safe-modes.md) (kill switch and safe modes),
+  [ADR-0139](0139-final-call-emergency-gate-for-external-writes.md) (final-call gate for external writes),
+  [ADR-0180](0180-continuous-assurance-strict-by-default.md), [ADR-0187](0187-batch5-sidecar-engines.md) (heartbeat cancel), [ADR-0181](0181-strict-defaults.md) (Ask first on by default),
   [ADR-0190](0190-batch6-isolation-execution-profiles.md) (sandbox executor), [ADR-0204](0204-mcp-upstream-static-credential.md) (secret envelope),
   [ADR-0230](0230-sap-business-agents-over-mcp.md) (first-party MCP pattern), [ADR-0246](0246-mcp-definition-pinning-and-vuln-fixtures.md)
   (definition pins, high-risk servers), [ADR-0251](0251-one-governed-decision-core.md) (one decision core),
@@ -97,7 +99,14 @@ All three authoring paths end in the **same** human review:
    back to the model only when a step breaks.** The fallback is a per-robot setting, **off by default** (ADR-0180),
    turning it on is audited. When on and a step fails, the runner stops and the gateway makes **one governed model call**
    (the ADR-0251 core, as the run's initiating user, against the run's project budget) that proposes a repaired step.
-   The run ends `failed` with the proposal attached. The proposal becomes a new **draft** version that goes through
+   **What that call may see** is built server side, never by the runner:
+   - the failed step's definition and its error code;
+   - the page's accessibility snapshot, with every input value removed, every field a secret was typed into removed,
+     and PII masked under the run's compliance-tag PII mode. Under `block`, no page content is sent at all, only the
+     step and the error.
+
+   No screenshot, trace, secret value or run input is ever part of it. The run ends `failed` with the proposal
+   attached. The proposal becomes a new **draft** version that goes through
    review like any other. An approved version is never edited, and a run never continues on model output.
 
 Submitting a version for review writes one row to the **existing approvals queue** with a new object type
@@ -107,7 +116,20 @@ schemas, allow-list, secret names); a version cannot be edited after submission,
 that needs its own approval. Approving runs the tool sync in the decision's own transaction.
 
 A version must have at least one passing **test run** (S3) recorded against the exact digest before it can be submitted.
-Test runs are themselves governed robot runs by the author, in the sandbox, with the same egress list.
+Test runs are governed robot runs by the author, in the sandbox, behind the same egress list. **Before approval a test run
+only ever receives test-scoped secrets** (§6 `robot_secrets.scope = 'test'`, the robot equivalent of a sandbox
+credential). A live secret is resolved only for a run of an `approved` version whose digest matches its pin, so an
+unapproved or agent-drafted script never holds a production credential. A step that needs a secret with no test value
+fails the test run with `secret_unavailable_in_test`. The approver sees which live secrets the version binds, and to
+which origins, as part of the digest they approve.
+
+**The digest** covers:
+- the script and, for `steps_v1`, the compiled Playwright output and the compiler version;
+- the input and output schemas;
+- the allow-list;
+- each secret binding: its name, the origin it may be filled on, and the live secret it uses.
+
+A recompile under a new compiler is a new version.
 
 ### 4. Free-form browser control
 
@@ -122,6 +144,11 @@ robots, as a second first-party server, **RegulAIt Browser (free-form)**. Per AD
   the browser's network proxy refuses every other host, and `@playwright/mcp` gets the same list as `--allowed-origins`
   as a second line.
 - **Every call is audited with a screenshot** (redacted per §7) stored as run evidence.
+- **Same sandbox, same boundary.** A free-form session is the same `robot_browser` workload (§5) and runs from its own
+  image (§9). It sits behind the same per-run Smokescreen proxy, whose ACL is the authorised-targets list. The session is
+  destroyed at the end of the agent turn, after 5 minutes idle, or after 30 minutes at most.
+- **No robot secrets, ever.** The free-form server has no secret-injection path: a model reads that page, so it never
+  receives a robot secret, live or test.
 
 A free-form run is the input to agent-drafted authoring (§3, path 3); its output is a draft, never an approved robot.
 
@@ -139,6 +166,20 @@ the sandbox, the runner executes the script, and the sandbox is destroyed after 
 download outlives a run. Results are typed outputs (validated against the version's output schema before they are
 returned to the agent) and evidence (§7).
 
+**Kill switch and safe modes ([ADR-0124](0124-kill-switch-and-safe-modes.md),
+[ADR-0139](0139-final-call-emergency-gate-for-external-writes.md)).** Every robot run is classed as an **external write**,
+whatever its steps, because a script can submit forms on an external system. This covers agent, test and free-form
+runs.
+- `read_only` refuses robot runs and free-form calls at the ADR-0139 final-call gate.
+- `halted` refuses new runs and cancels in-flight ones at the next step. The runner sends a heartbeat between steps
+  that answers `{cancel}`, the pattern of ADR-0187's engine runners. A cancelled run ends `cancelled` with
+  `failure_code = 'halted'`, and its sandbox is destroyed.
+
+**Attribution.** Every run is attributed to a project with a budget (`robot_runs.project_id` is NOT NULL):
+- an agent run takes the project of the governed call; a call the proxy would let through unattributed is refused for
+  robots (`robot-run-needs-project`);
+- a test run names one of the author's projects with a budget, and that budget gates it like any other call.
+
 **The existing "Use a computer" switch** (`computerUse` on `builder_agents`) stays inert in this ADR. It is **not**
 wired to free-form browser control: that switch was designed for model-driven desktop use and has no governance of its
 own. S5's addendum decides whether the desktop engine takes it over.
@@ -148,32 +189,43 @@ own. S5's addendum decides whether the desktop engine takes it over.
 S2 adds these tables in its own block of `packages/db/src/schema.ts`, in `pending/robots.sql`:
 
 - **`robots`**: `id`, `slug` (unique, `^[a-z0-9_]{1,48}$`), `name`, `description`, `engine` (`browser` | `desktop`),
-  `owner_user_id` → `users`, `status` (the ROBOT machine, §8), `model_fallback` (boolean, default false, §3 path 3;
+  `owner_user_id` → `users`, `status` (`active` | `retired`, the robot's own lifecycle, §8; the list's "Status"
+  column is computed from the versions, not stored), `model_fallback` (boolean, default false, §3 path 3;
   changes audited), `created_at`, `retired_at`.
 - **`robot_versions`**: `id`, `robot_id` → `robots`, `version` (integer, unique per robot), `status` (`draft` |
-  `in_review` | `approved` | `rejected` | `retired`, the version machine), `source` (`recorded` | `uploaded` |
+  `in_review` | `approved` | `rejected` | `retired`, the version machine; `rejected` is terminal), `source` (`recorded` | `uploaded` |
   `agent_drafted`), `script_format` (`steps_v1` | `playwright_ts` | `robot_framework`), `script` (text, the reviewed
-  artefact; exception comment: an immutable evidence artefact once submitted), `script_sha256`, `input_schema` and
+  artefact; exception comment: an immutable evidence artefact once submitted), `script_sha256`, `compiled_sha256` and `compiler_version` (`steps_v1` only), `content_digest` (§3), `input_schema` and
   `output_schema` (jsonb; exception comment: schema-validated configuration documents), `author_user_id` → `users`,
   `drafted_by_agent_id` → `builder_agents` (nullable), `approval_id` → `approvals` (nullable), `mcp_tool_id` →
-  `mcp_tools` (nullable until approved), `created_at`, `submitted_at`, `decided_at`. Content columns are frozen by a
+  `mcp_tools` (nullable until approved), `created_at`, `submitted_at`, `decided_at`. Unique on (`id`, `robot_id`), for
+  the composite foreign keys below. Content columns are frozen by a
   trigger once `status <> 'draft'`.
 - **`robot_version_allowed_sites`**: `robot_version_id` → `robot_versions`, `origin` (normalised `https://host[:port]`),
   primary key on both. A join table, not a jsonb list.
-- **`robot_version_secrets`**: `robot_version_id` → `robot_versions`, `name` (the name the script uses), `robot_secret_id`
-  → `robot_secrets`. Primary key on (version, name).
-- **`robot_secrets`**: `id`, `robot_id` → `robots`, `name`, `ciphertext` (the ADR-0204 envelope, listed in
+- **`robot_version_secrets`**: `robot_version_id`, `robot_id`, `name` (the name the script uses), `origin`,
+  `live_secret_id` and `test_secret_id` (nullable). Primary key on (version, name). It is joined to its parents by
+  composite foreign keys, so a version can only bind its own robot's secrets, and only on one of its own allowed sites:
+  - (`robot_version_id`, `robot_id`) → `robot_versions` (`id`, `robot_id`);
+  - (`live_secret_id`, `robot_id`) and (`test_secret_id`, `robot_id`) → `robot_secrets` (`id`, `robot_id`);
+  - (`robot_version_id`, `origin`) → `robot_version_allowed_sites`.
+
+  A trigger checks that `live_secret_id` has scope `live` and `test_secret_id` has scope `test`. The runner fills a
+  secret only on a page whose origin equals the binding's `origin`.
+- **`robot_secrets`**: `id`, `robot_id` → `robots`, `name`, `scope` (`live` | `test`), unique on (`robot_id`, `name`,
+  `scope`) and on (`id`, `robot_id`), `ciphertext` (the ADR-0204 envelope, listed in
   `CIPHERTEXT_COLUMNS`), `last4`, `set_by` → `users`, `set_at`. Its own table so no read of a robot carries ciphertext.
   The UI shows "set / not set" and the last four characters; nothing returns the value.
 - **`robot_runs`**: `id`, `robot_version_id` → `robot_versions`, `requested_by` → `users`, `agent_id` →
-  `builder_agents` (nullable; null for a test run), `project_id` → `projects` (nullable), `mcp_call_audit_id` →
+  `builder_agents` (nullable; null for a test run), `project_id` → `projects` (NOT NULL, §5), `mcp_call_audit_id` →
   `audit_log` (the governed call that started it), `placement_id` → the isolation placement, `status` (the ROBOT_RUN
   machine), `kind` (`test` | `agent` | `freeform`), `started_at`, `finished_at`, `step_count`, `duration_ms`,
   `failure_code` (a fixed vocabulary), `proposed_version_id` → `robot_versions` (nullable: the draft a model
   fallback proposed), `created_at`.
 - **`robot_run_evidence`**: `id`, `robot_run_id` → `robot_runs`, `kind` (`screenshot` | `trace` | `download` | `log`),
   `step_index`, `object_key`, `sha256`, `bytes`, `redaction` (`none` | `masked` | `withheld`), `expires_at`.
-  Append-only (exception comment: evidence).
+  Append-only (exception comment: evidence). When the run ends, its audit row carries the list of evidence `sha256`
+  values, which anchors them in the audit hash chain. A replaced or deleted object is then detectable.
 
 Who used a version ("Used by N agents") is a count over `builder_agent_tools` joined through `robot_versions.mcp_tool_id`,
 not a stored number. Inputs and outputs of a run are not stored in the run row: they are in the audit chain, redacted,
@@ -187,8 +239,8 @@ requester, the agent's owner and admins.
 
 | Threat | Control |
 |---|---|
-| **Credential theft or leakage** | Secrets live in `robot_secrets` under the ADR-0204 envelope, never in a script, a version, an input, a log or an audit row. The runner receives values for one run over the executor channel, held in memory, injected only into `fill` steps that name them; the step editor and the upload lint refuse a script that reads a secret into an output, a `read` step, a URL or a log. Screenshots mask every field a secret was typed into (§ PII below), and Playwright traces are recorded with secret values replaced. A secret can be sent only to an origin on the version's allow-list, so a changed page cannot exfiltrate it to another host. |
-| **SSRF and egress** | The sandbox has no direct network. Its only route out is a per-run forward proxy that admits CONNECT only to origins on the version's `robot_version_allowed_sites` (free-form: the authorised-targets list), after the same destination check `mcp-egress.ts` applies (DNS re-validation, address pinning, private, loopback, link-local and metadata ranges refused unless the org's private-network setting allows them, redirects to other origins refused). Playwright `route` blocking repeats the allow-list inside the browser as a second line. Downloads are size-capped and stored as evidence, never executed. |
+| **Credential theft or leakage** | Secrets live in `robot_secrets` under the ADR-0204 envelope, never in a script, a version, an input, a log or an audit row. The runner receives values for one run over the executor channel, held in memory, injected only into `fill` steps that name them; the step editor and the upload lint refuse a script that reads a secret into an output, a `read` step, a URL or a log. Screenshots use Playwright's own `page.screenshot({ mask })` over every locator a secret or input was filled into. **Traces are off by default:** an admin may turn them on per robot for debugging, for test runs with test secrets only. Each trace is recorded with `snapshots: false` and `sources: false`. The trace zip is then post-processed before upload: every known test-secret value and every input value is replaced, and PII is masked under the PII mode. A trace is never kept under `block`. S3 adds a canary test: a known secret value must never appear in any byte of stored evidence. A secret is bound to one origin (§6), and the runner fills it only on that origin, so a changed page cannot send it to another allowed host. |
+| **SSRF and egress** | The sandbox has no direct network: its network policy allows exactly one peer, its own per-run **Smokescreen** instance (stripe/smokescreen, MIT, §9). Smokescreen runs beside the sandbox in the executor, with an ACL generated for that run alone: one role with `action: enforce` and `allowed_domains` set to the hosts of the version's `robot_version_allowed_sites` (free-form: the authorised-targets list). The `open` and `report` actions are switched off with `--disable-acl-policy-action`. It resolves every name itself and connects only to the address it checked, so DNS rebinding cannot move a connection. Non-public addresses are refused by default. `--deny-range` adds the cloud metadata addresses (169.254.169.254/32, fd00:ec2::254/128). `--allow-range` is set only where the org's private-network setting allows ranges (ADR-0043), and each one is audited. Ports are limited to those of the version's origins: by the in-browser route check, and in S3 by Smokescreen's port setting if it has one, otherwise by a CONNECT filter in front of it, recorded as an ADR-0176 exception. Each run's Smokescreen log is part of its evidence. Playwright `route` blocking repeats the allow-list inside the browser as a second line. Downloads are size-capped and stored as evidence, never executed. They follow the PII mode: under `block` only their `sha256` and size are kept, and under `warn` and `log` they are stored with read access limited to the run's viewers. |
 | **Screenshot PII** | Screenshots and traces follow the **PII handling mode of the compliance tag** that cascades to the run's project (pillar 3): `block` withholds screenshots and keeps only step outcomes; `warn` and `log` mask detected PII (the existing `mcp-pii.ts` detectors on the page text, plus masks over input fields and any element the script marks sensitive) before upload. With no tag the strict default is masking. |
 | **Evidence capture** | Run evidence **is Playwright's own trace and screenshots** (`tracing.start` / `tracing.stop`, `page.screenshot`), redacted before upload as above. We write no capture code, only the redaction and the upload. |
 | **Evidence retention** | Evidence is written to the object store under the org's evidence bucket, content-addressed (`sha256`), and expires at the audit-retention period of the run's compliance tag (pillar 3), default the org's audit retention. Evidence rows are append-only; deletion happens only by expiry, recorded. |
@@ -201,14 +253,26 @@ requester, the agent's owner and admins.
 
 Declared with `defineMachine` in `packages/shared/src/state-machines.ts` (S2):
 
-- **`ROBOT_VERSION_MACHINE`** (`robot_versions.status`, initial `draft`, terminal `retired`): `submit` draft →
-  in_review (needs a passing test run on the digest); `approve` in_review → approved (the queue decision); `reject`
-  in_review → rejected; `revise` rejected → draft (only the author; it reopens the same row, whose content was frozen
-  only while in review); `retire` approved → retired.
-- **`ROBOT_MACHINE`** (`robots.status`, initial `draft`, terminal `retired`): the robot's status is the summary the list
-  shows. `draft` (no approved version) → `in_review` (a version is in review and none is approved) → `approved` (at least
-  one approved version) → `retired`; `rejected` back to `draft`. It moves only as a consequence of version transitions,
-  in the same transaction, never by its own API.
+- **`ROBOT_VERSION_MACHINE`** (`robot_versions.status`, initial `draft`, terminal `rejected` and `retired`), with four
+  transitions:
+
+  | Event | From | To | Note |
+  |---|---|---|---|
+  | `submit` | draft | in_review | needs a passing test run on the digest |
+  | `approve` | in_review | approved | the queue decision |
+  | `reject` | in_review | rejected | |
+  | `retire` | approved | retired | |
+
+  A rejected version stays rejected, with its approval and digest kept as the record of what was refused. A fix is a
+  new version number, as §3 says. Content is frozen once the status is not `draft`.
+- **`ROBOT_MACHINE`** (`robots.status`, initial `active`, terminal `retired`): the robot's own lifecycle, not a summary
+  of its versions. The only transition is `retire` active → retired, through its own audited API. In the same
+  transaction it retires every approved version and moves every draft or in-review version to `rejected`, with reason
+  `robot_retired`. The list's "Status" column is computed on read from the versions, with this precedence:
+  - Retired, if the robot is retired;
+  - otherwise Approved, if any version is approved;
+  - otherwise In review, if any version is in review;
+  - otherwise Draft.
 - **`ROBOT_RUN_MACHINE`** (`robot_runs.status`, initial `queued`): `queued` → `running` → `succeeded` | `failed` |
   `timed_out` | `cancelled`; `queued` → `refused` (placement refused, egress or secret unresolved); all of the last five
   terminal.
@@ -228,6 +292,9 @@ container, without `RPA.Cloud.*`, `RPA.Robocorp.Vault` or `RPA.Robocorp.WorkItem
 store, which would bypass ours). S5 compares `rf-mcp` (RobotMCP, Apache-2.0) with a thin wrapper of our own. In reserve:
 robotgo (Apache-2.0, Go, low-level input) and Astron RPA (Apache-2.0, a Windows platform).
 
+**Before S5:** check the licences of rpaframework's transitive dependencies. Any LGPL package is not on the ADR-0176 list
+and is excluded or replaced.
+
 **Our own code** is only what is genuinely RegulAIt: the governance (the tool mapping, versioning, review, the
 first-party server), the step model, the evidence format and redaction, and the run placement.
 
@@ -246,6 +313,9 @@ first-party server), the step model, the evidence format and redaction, and the 
 | TagUI | Apache-2.0 | active (v7.0.0, 2026-11-09) | rejected (fit: a second browser driver and its own runtime beside Playwright, no MCP surface) |
 | RPA-Python (`rpa`) | Apache-2.0 | last release 1.50.0, 2023-07 | rejected (maintenance) |
 | rpatool | WTFPL | not RPA (a Ren'Py archive tool) | rejected (not a fit) |
+| **Per-run egress proxy:** stripe/smokescreen | MIT | active (v0.1.0, 2026-09-18; commits to 2026-11-17) | **chosen** (S3). It is a CONNECT proxy built for SSRF: a hostname ACL per role, its own DNS resolution with a public-address check, and deny and allow ranges. It is one static Go binary with no runtime downloads (air-gapped). |
+| Envoy dynamic forward proxy + RBAC | Apache-2.0 | very active (v1.40.2) | rejected for fit: it can allow-list hosts, but it has no built-in check that a resolved address is public, so we would write that part ourselves. It is also a much larger component to configure and patch for one job. |
+| Squid, tinyproxy | GPL-2.0 | active | rejected (licence) |
 
 **Versions verified 2026-11-18** (npm and PyPI registries, licence from each repository's LICENSE file). S2 to S5 pin
 exactly and re-check on the day they add the dependency:
@@ -276,6 +346,7 @@ Two findings shape the build:
 | Playwright codegen | the recorder (S4) | a recorder |
 | Playwright trace and screenshots | run evidence (S3) | capture code |
 | `@playwright/mcp` | the free-form browser tools, wrapped behind the gateway as a high-risk server (S3) | any browser tool |
+| stripe/smokescreen | the per-run egress proxy, the sandbox's only route out (S3) | a forward proxy, a DNS-rebinding check or an address-range filter |
 | Robot Framework + rpaframework | desktop, Excel, PDF, email and OCR steps (S5) | those libraries |
 | rf-mcp (RobotMCP) | evaluated in S5 **before** any MCP wrapper of our own is written | a wrapper, unless the evaluation records why rf-mcp fails |
 | robotgo, Astron RPA | in reserve | |
@@ -293,8 +364,8 @@ Two findings shape the build:
 - version pinning (§2);
 - the approval, allow-list, audit and cost hooks into the existing governance (§2, §3, §7);
 - the thin first-party MCP server that maps approved versions to tools (§2), on the MCP SDK;
-- the sandbox workload glue (§5): the placement, the per-run egress proxy configuration, the secret injection, and the
-  evidence redaction and upload.
+- the sandbox workload glue (§5): the placement, generating each run's Smokescreen ACL file from the version's allow-list,
+  the secret injection, and the evidence redaction and upload.
 
 Anything beyond this list needs a written ADR-0176 exception in an addendum to this ADR. One item needs a note now. The
 step model (`steps_v1`) and its compiler to a Playwright script are ours, because it is a RegulAIt evidence and review
@@ -328,8 +399,12 @@ Agent editor ▸ Toolbox ▸ Add connection
 - **Easier:** a deterministic UI task costs one priced call and some sandbox seconds instead of a model loop, and is
   repeatable and reviewable. Every governance control the platform already has applies with no new decision path, so a
   robot cannot be the hole in the policy.
-- **Harder:** a new transport value (`first_party`), a new workload kind (`robot_browser`), a new approvals object type
-  (`robot_version`) and a runner image to publish and keep patched. Pages change, so robots break; a broken robot fails
+- **Harder:** there is more to add and maintain:
+  - a new transport value (`first_party`);
+  - a new workload kind (`robot_browser`);
+  - a new approvals object type (`robot_version`);
+  - a runner image and a pinned Smokescreen binary to publish and keep patched;
+  - a test value to keep beside each live secret. Pages change, so robots break; a broken robot fails
   its run with evidence rather than guessing, and the fix is a new version through review.
 - **Given up:** self-healing selectors and silent model recovery inside a robot run. A broken step never continues on
   model output; the opt-in fallback (§3, path 3) only proposes a new draft version for review. Free-form control covers
