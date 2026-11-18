@@ -123,6 +123,10 @@ describe("ADR-0187: the engines network and the runner template", () => {
     ["promptfoo", "engine-promptfoo-worker"],
     ["modelscan", "engine-modelscan-scanner"],
     ["garak", "engine-garak-worker"],
+    // ADR-0245 and ADR-0242 L4.5: spikee and the two admission-scan runners follow the same shape
+    ["spikee", "engine-spikee-worker"],
+    ["mcpscanner", "engine-mcpscanner-scanner"],
+    ["skillscanner", "engine-skillscanner-scanner"],
   ])("I5: %s has no worker container; its runner merges the template and owns both exchange volumes", (engine, gone) => {
     expect(compose).not.toMatch(new RegExp(`\\n {2}${gone}:\\n`));
     const runner = block(`engine-${engine}`);
@@ -147,5 +151,18 @@ describe("ADR-0187: the engines network and the runner template", () => {
       expect(vols.slice(at, at + 200), v).toMatch(/type: tmpfs\n\s+device: tmpfs\n/);
     }
     expect(compose).not.toMatch(/worker-main\.js|scanner-main\.js/);
+  });
+
+  // ADR-0242 L4.5: one shim serves both admission-scan images; each runner names its own engine (the image sets the
+  // same value and the runner refuses any other) and the shim's own exchange directories
+  it.each(["mcpscanner", "skillscanner"])("%s: the runner names its engine and its exchange directories", (engine) => {
+    const runner = block(`engine-${engine}`);
+    const line = (k: string) => runner.split("\n").find((l) => l.trimStart().startsWith(`${k}:`))?.trim().slice(k.length + 1).trim();
+    expect(line("REGULAIT_ADMISSION_ENGINE")).toBe(engine);
+    expect(line("REGULAIT_ADMISSION_JOBS_DIR")).toBe("/jobs");
+    expect(line("REGULAIT_ADMISSION_RESULTS_DIR")).toBe("/results");
+    expect(line("REGULAIT_ENGINE_IMAGE_DIGEST")).toBe(lockedRef(engine).digest);
+    expect(line("REGULAIT_ENGINE_ENROLLMENT_TOKEN")).toBe(`\${REGULAIT_ENGINE_${engine.toUpperCase()}_ENROLLMENT_TOKEN:-}`);
+    expect(readFileSync(path.join(root, "engines", engine, "Dockerfile"), "utf8")).toContain(`REGULAIT_ADMISSION_ENGINE=${engine} `);
   });
 });

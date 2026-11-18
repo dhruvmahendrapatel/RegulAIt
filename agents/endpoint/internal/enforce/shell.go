@@ -10,6 +10,7 @@ package enforce
 
 import (
 	"path"
+	"path/filepath"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -202,7 +203,12 @@ var opaque = set("eval", "source", ".", "trap")
 // argvActions decides one argv: the program itself, what it wraps, and any package install it is.
 func argvActions(argv []string, depth int) []action {
 	acts := []action{{kind: "exec", argv: argv}}
-	prog := path.Base(argv[0])
+	// a program named by a relative path (./x, ../x, dir/x) is a file in or near the workspace whose contents are not
+	// seen: unresolved, as a script file is (review #941)
+	if p := filepath.ToSlash(argv[0]); strings.Contains(p, "/") && !rooted(argv[0]) {
+		acts = append(acts, action{kind: "unresolved", cause: "a program file named by path"})
+	}
+	prog := path.Base(filepath.ToSlash(argv[0]))
 	switch {
 	case opaque[prog]:
 		acts = append(acts, action{kind: "unresolved", cause: "`" + prog + "` runs code that is not on the command line"})

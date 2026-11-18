@@ -52,7 +52,8 @@ func ParseCodexPreToolUse(r io.Reader) (Call, error) {
 		return Call{}, errors.New("no tool_name")
 	}
 	c := Call{Tool: in.ToolName, NoAsk: true}
-	roots := []string{in.Cwd}
+	// the cwd is never a workspace root by itself (review #941 S-B1): only a root the agent declares counts
+	var roots []string
 	switch in.ToolName {
 	case "Bash":
 		c.Command = shellCall(in.ToolInput, "command", in.Cwd, roots)
@@ -93,6 +94,7 @@ var codexAdapter = Adapter{
 			"Deny only: ask is not supported by Codex, so an ask rule is a deny.",
 			"No read tool hook: reads through the shell are decided as commands, others are not seen.",
 			"Writes are seen through apply_patch's file headers only.",
+			"No declared workspace root: every patched file gets the outside-the-workspace default for writes.",
 			"A hook error or timeout lets the call run (vendor behaviour): a guardrail, not a boundary.",
 		}},
 	},
