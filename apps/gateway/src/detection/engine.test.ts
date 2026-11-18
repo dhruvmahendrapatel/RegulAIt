@@ -3,7 +3,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
-import { evaluateDetections, raisedKey, type DetectionEvent } from "./engine.js";
+import { episodeKey, evaluateDetections, raisedKey, type DetectionEvent } from "./engine.js";
 import {
   DEFAULT_DETECTION_PACK,
   packChangeIsRelaxation,
@@ -102,6 +102,22 @@ describe("ADR-0333 default rules", () => {
     expect(m[0]!.trigger.seq).toBe(events[9]!.seq);
     const spread = Array.from({ length: 12 }, (_, i) => ev({ at: T0 + i * 60_000, effect: "deny", ruleId: "default-deny" }));
     expect(ids(DEFAULT_DETECTION_PACK, spread)).toEqual([]);
+  });
+
+  it("a steady probe raises one denied-call-burst per window, not one per denied call (review of #865)", () => {
+    // one denied call every 10 s for 20 minutes: the 5-minute count stays at or above 10 the whole time
+    const events = Array.from({ length: 120 }, (_, i) => ev({ at: T0 + i * 10_000, effect: "deny", ruleId: "default-deny" }));
+    const m = evaluateDetections(DEFAULT_DETECTION_PACK, events, all(events)).filter((x) => x.rule.id === "denied-call-burst");
+    expect(m).toHaveLength(4);
+    for (let i = 1; i < m.length; i++) expect(m[i]!.trigger.at - m[i - 1]!.trigger.at).toBeGreaterThanOrEqual(300_000);
+    expect(m.every((x) => x.evidence.length === 10)).toBe(true);
+  });
+
+  it("an open incident from an earlier batch suppresses the same burst in the next batch", () => {
+    const events = Array.from({ length: 12 }, (_, i) => ev({ at: T0 + i * 1000, effect: "deny", ruleId: "default-deny" }));
+    const episodes = new Map([[episodeKey("denied-call-burst", `user:${U}`), T0]]);
+    const m = evaluateDetections(DEFAULT_DETECTION_PACK, events, all(events), new Set(), undefined, episodes);
+    expect(m.filter((x) => x.rule.id === "denied-call-burst")).toEqual([]);
   });
 
   it("is deterministic: the same input gives the same output", () => {

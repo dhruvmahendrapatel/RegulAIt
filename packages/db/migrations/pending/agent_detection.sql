@@ -8,7 +8,10 @@
 -- - `detection_incidents` and `detection_incident_evidence`: each detection and the audit rows that prove it. The
 --   audit pointers are FK-free on purpose, like `decision_receipts.audit_id`: the audit trail is FK-free and its
 --   retention prune must not be blocked by, or cascade into, incident history.
--- - The deployment is single-tenant, so like the other register tables (0281) there is no tenant column for RLS.
+-- - Row-level security (ADR-0234), ENABLED and FORCED on detection_incidents and detection_incident_evidence: an
+--   incident names a sponsor, a grant and an identity, so it is user-owned data. Only an active admin principal
+--   (regulait_rls_is_admin()) and the `system_task` (the sweep) and `migration` reasons read or write it. The rule
+--   pack and the engine state hold no principal and are deployment-wide by the ADR-0234 appendix rule.
 -- No new functions or refusal triggers.
 
 CREATE TABLE IF NOT EXISTS "detection_rule_packs" (
@@ -122,3 +125,23 @@ DO $$ BEGIN
   ALTER TABLE "detection_incident_evidence" ADD CONSTRAINT "detection_incident_evidence_incident_id_detection_incidents_id_fk"
     FOREIGN KEY ("incident_id") REFERENCES "public"."detection_incidents"("id") ON DELETE cascade ON UPDATE no action;
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+--> statement-breakpoint
+ALTER TABLE "detection_incidents" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "detection_incidents" FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+DROP POLICY IF EXISTS "detection_incidents_admin" ON "detection_incidents";
+--> statement-breakpoint
+CREATE POLICY "detection_incidents_admin" ON "detection_incidents" FOR ALL
+  USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
+  WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
+--> statement-breakpoint
+ALTER TABLE "detection_incident_evidence" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "detection_incident_evidence" FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+DROP POLICY IF EXISTS "detection_incident_evidence_admin" ON "detection_incident_evidence";
+--> statement-breakpoint
+CREATE POLICY "detection_incident_evidence_admin" ON "detection_incident_evidence" FOR ALL
+  USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
+  WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));

@@ -17624,12 +17624,22 @@ export const detectionIncidents = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     ruleId: text("rule_id").notNull(),
     packVersion: integer("pack_version").references(() => detectionRulePacks.version, { onDelete: "restrict" }),
+    // ADR-0200 exception (evidence snapshot): the rule's severity in the signed pack version that raised it. A
+    // later pack may re-grade the rule; the incident keeps the grade it was raised with.
     severity: text("severity", { enum: DETECTION_SEVERITIES }).notNull(),
+    // ADR-0200 exception (evidence snapshot): the group the rule window ran over (`grant:<root>` / `user:<id>`), as
+    // computed when it matched. A grant's root or a user can be deleted; the incident's group must not change.
     groupKey: text("group_key").notNull(),
     // Evidence pointer, deliberately FK-free like `decision_receipts.audit_id`: the audit trail is FK-free and its
     // retention prune must not be blocked or cascade into incident history.
     triggerAuditId: uuid("trigger_audit_id").notNull(),
+    // ADR-0200 exception (evidence snapshot): the trigger's chain position, kept because the audit row it points at
+    // may be pruned while the incident is retained. It equals the last evidence row's `audit_seq`, held here so the
+    // (rule, trigger) idempotency key and the incident list need no join.
     triggerAuditSeq: bigint("trigger_audit_seq", { mode: "number" }).notNull(),
+    // ADR-0200 exception (evidence snapshot): the trigger row's sponsor, grant and identity as foreign keys, set only
+    // while the id resolves (the audit row itself is FK-free and may be pruned); they are the incident's subjects
+    // for row-level security and the slice-2 responses, not a copy of a mutable attribute.
     userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
     delegationGrantId: uuid("delegation_grant_id").references(() => delegationGrants.id, { onDelete: "set null" }),
     actorIdentityId: uuid("actor_identity_id").references(() => workloadIdentities.id, { onDelete: "set null" }),
@@ -17681,6 +17691,8 @@ export const detectionIncidentEvidence = pgTable(
     // FK-free evidence pointer (see `detection_incidents.trigger_audit_id`); the receipt is joined through
     // `decision_receipts.audit_id`, never copied.
     auditId: uuid("audit_id").notNull(),
+    // ADR-0200 exception (evidence snapshot): the evidence row's chain position, kept because the audit row may be
+    // pruned while the evidence is retained; it orders the chain and is half of the primary key.
     auditSeq: bigint("audit_seq", { mode: "number" }).notNull(),
     stepIndex: smallint("step_index").notNull(),
   },

@@ -17,9 +17,6 @@ import {
   detectionIncidents,
   detectionRulePacks,
   eq,
-  inArray,
-  lt,
-  or,
   sql,
   DETECTION_INCIDENT_STATUSES,
   type Db,
@@ -28,7 +25,9 @@ import { requireStepUp } from "../step-up.js";
 import { ReceiptKeyError, resolveReceiptSigningKey } from "../receipt-signing-key.js";
 import { registerReceiptSigningKey } from "../decision-receipts.js";
 import { DETECTION_RULE_IDS, loadActiveDetectionPack } from "./sweep.js";
-import { ADMIN_SETTABLE_STATUSES, incidentStatusSources, type DetectionIncidentStatus } from "./lifecycle.js";
+import { DETECTION_INCIDENT_MACHINE, DETECTION_RESPONSE_MACHINE } from "@regulait/shared";
+import { whereFrom } from "../state-transition.js";
+import { afterCursorDesc, atTextSql, decodeCursor, encodeCursor } from "../pagination.js";
 import { packChangeIsRelaxation, packDigest, parseDetectionPack, signDetectionPack } from "./pack.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
@@ -46,16 +45,13 @@ const listQuery = z
   .object({
     status: z.enum(DETECTION_INCIDENT_STATUSES).optional(),
     limit: z.coerce.number().int().min(1).max(PAGE_MAX).default(50),
-    /** keyset cursor: `<createdAt ISO>_<id>` of the last row of the previous page */
-    before: z
-      .string()
-      .regex(/^[0-9T:.\-+Z]{20,40}_[0-9a-f-]{36}$/)
-      .optional(),
+    /** the previous page's `next`: the ADR-0031 opaque keyset cursor (microsecond-exact `created_at`, then id) */
+    before: z.string().min(1).max(200).optional(),
   })
   .strict();
-const statusBody = z
-  .object({ status: z.enum(ADMIN_SETTABLE_STATUSES as [DetectionIncidentStatus, ...DetectionIncidentStatus[]]) })
-  .strict();
+const statusBody = z.object({ status: z.enum(["acknowledged", "closed"]) }).strict();
+/** the requested status -> the DETECTION_INCIDENT_MACHINE event that lands there (ADR-0348) */
+const STATUS_EVENT = { acknowledged: "acknowledge", closed: "close" } as const;
 
 type Rows<T> = { rows: T[] };
 
@@ -140,11 +136,11 @@ export function registerDetectionRoutes(app: FastifyInstance, db: Db): void {
     const conds = [];
     if (q.data.status) conds.push(eq(detectionIncidents.status, q.data.status));
     if (q.data.before) {
-      const cut = q.data.before.lastIndexOf("_");
-      const at = new Date(q.data.before.slice(0, cut));
-      const id = q.data.before.slice(cut + 1);
-      if (!Number.isFinite(at.getTime())) return refuse(reply, 400, "invalid_request", "before is not a valid cursor");
-      conds.push(or(lt(detectionIncidents.createdAt, at), and(eq(detectionIncidents.createdAt, at), lt(detectionIncidents.id, id))));
+      // A Date cursor keeps milliseconds only, and one sweep batch inserts every incident at the same now(): a
+      // millisecond cursor would skip the rest of that batch. The shared cursor is microsecond-exact (ADR-0031).
+      const cursor = decodeCursor(q.data.before);
+      if (!cursor) return refuse(reply, 400, "invalid_request", "before is not a valid cursor");
+      conds.push(afterCursorDesc(detectionIncidents.createdAt, detectionIncidents.id, cursor));
     }
     const rows = await db
       .select({
@@ -161,6 +157,7 @@ export function registerDetectionRoutes(app: FastifyInstance, db: Db): void {
         delegationGrantId: detectionIncidents.delegationGrantId,
         triggerAuditId: detectionIncidents.triggerAuditId,
         createdAt: detectionIncidents.createdAt,
+        cursorAt: atTextSql(detectionIncidents.createdAt),
       })
       .from(detectionIncidents)
       .where(conds.length ? and(...conds) : undefined)
@@ -169,7 +166,10 @@ export function registerDetectionRoutes(app: FastifyInstance, db: Db): void {
     const more = rows.length > q.data.limit;
     const page = more ? rows.slice(0, q.data.limit) : rows;
     const last = page[page.length - 1];
-    return { incidents: page, next: more && last ? `${last.createdAt.toISOString()}_${last.id}` : null };
+    return {
+      incidents: page.map(({ cursorAt: _cursorAt, ...row }) => row),
+      next: more && last ? encodeCursor({ at: last.cursorAt, id: last.id }) : null,
+    };
   });
 
   app.get("/v1/detection/incidents/:incidentId", async (req, reply) => {
@@ -190,7 +190,12 @@ export function registerDetectionRoutes(app: FastifyInstance, db: Db): void {
       WHERE e.incident_id = ${incident.id}
       ORDER BY e.step_index, e.audit_seq
       LIMIT 1000`)) as unknown as Rows<Record<string, unknown>>;
-    return { incident, evidence: evidence.rows };
+    // ADR-0348: what may happen next and why not, from the same tables the server enforces
+    const lifecycle = {
+      status: DETECTION_INCIDENT_MACHINE.describe(incident.status),
+      response: DETECTION_RESPONSE_MACHINE.describe(incident.responseState),
+    };
+    return { incident, lifecycle, evidence: evidence.rows };
   });
 
   app.put("/v1/detection/incidents/:incidentId/status", async (req, reply) => {
@@ -201,7 +206,7 @@ export function registerDetectionRoutes(app: FastifyInstance, db: Db): void {
       const [row] = await tx
         .update(detectionIncidents)
         .set({ status: b.data.status, statusChangedBy: req.authCtx.userId ?? null, statusChangedAt: sql`now()` })
-        .where(and(eq(detectionIncidents.id, p.data.incidentId), inArray(detectionIncidents.status, incidentStatusSources(b.data.status))))
+        .where(and(eq(detectionIncidents.id, p.data.incidentId), whereFrom(detectionIncidents.status, DETECTION_INCIDENT_MACHINE, STATUS_EVENT[b.data.status])))
         .returning({ id: detectionIncidents.id, status: detectionIncidents.status });
       if (!row) return null;
       await tx.insert(auditLog).values({

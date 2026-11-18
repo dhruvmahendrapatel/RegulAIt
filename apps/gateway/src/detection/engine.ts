@@ -80,6 +80,11 @@ function indexRules(pack: DetectionPack): { rules: IndexedRule[]; selectors: Det
   return { rules, selectors };
 }
 
+/** the episode key of an `event_count` rule in one group */
+export const episodeKey = (ruleId: string, group: string): string => `${ruleId}\u0000${group}`;
+/** `episodeKey` -> the trigger time (ms) of the latest not-closed incident: a burst is one incident per window */
+export type DetectionEpisodes = Map<string, number>;
+
 /** Evaluate every enabled rule. `events` must be sorted by seq ascending. */
 export function evaluateDetections(
   pack: DetectionPack,
@@ -87,6 +92,7 @@ export function evaluateDetections(
   fresh: ReadonlySet<number>,
   raised: RaisedKeys = new Set(),
   matcher: DetectionSelectorMatcher = matchDetectionSelectors,
+  episodes: DetectionEpisodes = new Map(),
 ): DetectionMatch[] {
   const { rules, selectors } = indexRules(pack);
   const answers = matcher(selectors, pack.toolClasses, events.map(facts));
@@ -112,6 +118,14 @@ export function evaluateDetections(
       if (!evidence) continue;
       const key = raisedKey(r.rule.id, evidence[0]!.seq);
       if (raised.has(key)) continue;
+      if (r.rule.type === "event_count") {
+        // A sliding window keeps reaching the threshold while a probe goes on, each time with a different first
+        // event: one open incident per (rule, group) per timespan, not one per denied call (review of #865).
+        const ep = episodeKey(r.rule.id, e.group);
+        const last = episodes.get(ep);
+        if (last !== undefined && Math.abs(e.at - last) < r.rule.timespanSeconds * 1000) continue;
+        episodes.set(ep, e.at);
+      }
       raised.add(key);
       out.push({ rule: r.rule, group: e.group, trigger: e, evidence });
     }
@@ -132,8 +146,9 @@ function matchRule(
     if (!hits(selectors[0]!, e)) return null;
     const window: DetectionEvent[] = [];
     for (let i = idx; i >= 0 && history[i]!.at >= since; i--) if (hits(selectors[0]!, history[i]!)) window.push(history[i]!);
-    // Fire when the count reaches the threshold, not on every event above it.
-    return window.length === rule.threshold ? window.reverse() : null;
+    // At or above the threshold; the episode check in evaluateDetections keeps it to one incident per window. The
+    // evidence is the `threshold` most recent matching events.
+    return window.length >= rule.threshold ? window.slice(0, rule.threshold).reverse() : null;
   }
   // temporal_ordered: the trigger matches the last step; walk back, taking the latest earlier event for each step.
   const last = selectors.length - 1;

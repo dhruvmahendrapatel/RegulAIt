@@ -16,15 +16,16 @@ import {
   detectionIncidents,
   detectionRulePacks,
   eq,
-  receiptSigningKeys,
   sql,
   type Db,
 } from "@regulait/db";
 import type { SchedulerJobDefinition } from "../scheduler.js";
+import { resolveReceiptSigningKey } from "../receipt-signing-key.js";
 
 /** the scheduler's system actor (`SCHEDULER_SYSTEM_ACTOR`), restated to keep this module type-only on the scheduler */
 const SYSTEM_ACTOR = "00000000-0000-0000-0000-000000000000";
-import { evaluateDetections, raisedKey, type DetectionEvent, type DetectionMatch } from "./engine.js";
+import { episodeKey, evaluateDetections, raisedKey, type DetectionEpisodes, type DetectionEvent, type DetectionMatch } from "./engine.js";
+import { DETECTION_INCIDENT_MACHINE } from "@regulait/shared";
 import { DEFAULT_DETECTION_PACK, packDigest, parseDetectionPack, verifyDetectionPack, type DetectionPack } from "./pack.js";
 
 export const DETECTION_SWEEP_JOB_NAME = "agent-detection-sweep";
@@ -33,14 +34,19 @@ export const DETECTION_OWN_OBJECT_TYPES = ["detection_incident", "detection_rule
 export const DETECTION_SWEEP_LIMITS = {
   batchSize: 500,
   maxBatchesPerPass: 10,
-  /** look-back rows loaded per batch for the groups the batch touches */
-  lookbackRows: 5000,
+  /** look-back rows loaded per group (delegation tree or sponsor) the batch touches: one busy group cannot push
+   * another group's step-1 events (a secret read) out of the window */
+  lookbackRowsPerGroup: 2000,
+  /** and in total per batch, across all its groups */
+  lookbackRows: 20000,
   leaseSeconds: 60,
 } as const;
 
 export const DETECTION_RULE_IDS = {
   packUpdated: "detection-pack-updated",
   packUnverified: "detection-pack-unverified",
+  /** the look-back was truncated, so a sequence whose first step fell outside it may go undetected (audited, never silent) */
+  degraded: "detection-degraded",
   incidentStatus: "detection-incident-status",
 } as const;
 
@@ -53,30 +59,40 @@ export interface ActivePack {
   unverifiedVersion: number | null;
 }
 
-/** The pack the engine uses: the latest stored version if it parses and verifies, else the built-in default. */
-export async function loadActiveDetectionPack(db: Pick<Db, "select">): Promise<ActivePack> {
+/**
+ * The pack the engine uses: the latest stored version if it parses and verifies, else the built-in default.
+ *
+ * The signature is checked against the gateway's CONFIGURED receipt signing key (`resolveReceiptSigningKey`, an
+ * operator secret or the install-generated file), never against a key looked up from the database: anyone who can
+ * insert a row into `receipt_signing_keys` could otherwise sign a pack that disables every rule (review of #865).
+ * A pack signed by any other key, including one the receipt key was rotated away from, is unverified: the built-in
+ * pack runs and the fallback is audited, until an admin re-saves the pack under the current key.
+ */
+export async function loadActiveDetectionPack(
+  db: Pick<Db, "select">,
+  resolveKey: () => { keyId: string; jwk: { kty: string; crv: string; x: string } } | null = resolveReceiptSigningKey,
+): Promise<ActivePack> {
   const [row] = await db
     .select({
       version: detectionRulePacks.version,
       pack: detectionRulePacks.pack,
       signature: detectionRulePacks.signature,
       digest: detectionRulePacks.packDigest,
-      publicJwk: receiptSigningKeys.publicJwk,
-      retiredAt: receiptSigningKeys.retiredAt,
+      keyId: detectionRulePacks.keyId,
     })
     .from(detectionRulePacks)
-    .innerJoin(receiptSigningKeys, eq(receiptSigningKeys.keyId, detectionRulePacks.keyId))
     .orderBy(desc(detectionRulePacks.version))
     .limit(1);
   const builtIn = { pack: DEFAULT_DETECTION_PACK, version: null, digest: packDigest(DEFAULT_DETECTION_PACK) };
   if (!row) return { ...builtIn, unverifiedVersion: null };
   try {
+    const key = resolveKey();
     const pack = parseDetectionPack(row.pack);
-    if (packDigest(pack) === row.digest && verifyDetectionPack(pack, row.signature, row.publicJwk)) {
+    if (key && row.keyId === key.keyId && packDigest(pack) === row.digest && verifyDetectionPack(pack, row.signature, key.jwk)) {
       return { pack, version: row.version, digest: row.digest, unverifiedVersion: null };
     }
   } catch {
-    /* falls through: a stored pack that does not parse is unverified */
+    /* falls through: an unusable key, or a stored pack that does not parse, is unverified */
   }
   return { ...builtIn, unverifiedVersion: row.version };
 }
@@ -285,8 +301,10 @@ async function runRange(
     result.outcome = "evaluated";
     read += batch.length;
     const fresh = batch.filter((r) => !(DETECTION_OWN_OBJECT_TYPES as readonly string[]).includes(r.objectType)).map(toEvent);
-    const matches = await evaluateBatch(db, active, fresh, cursor, maxSpanSeconds, result);
-    result.incidents += await commitBatch(db, token, active, matches, lastSeq, mode);
+    const degraded: string[] = [];
+    const matches = await evaluateBatch(db, active, fresh, cursor, maxSpanSeconds, result, degraded);
+    const window = { fromSeq: cursor, toSeq: lastSeq, maxSpanSeconds };
+    result.incidents += await commitBatch(db, token, active, matches, lastSeq, mode, degraded.length ? { groups: degraded, ...window } : null);
     cursor = lastSeq;
     if (batch.length < DETECTION_SWEEP_LIMITS.batchSize) break;
   }
@@ -300,6 +318,8 @@ async function evaluateBatch(
   cursor: number,
   maxSpanSeconds: number,
   result: DetectionSweepResult,
+  /** out: the groups whose look-back was truncated in this batch */
+  degraded: string[],
 ): Promise<DetectionMatch[]> {
   if (fresh.length === 0) return [];
   const groups = [...new Set(fresh.map((e) => e.group))];
@@ -307,21 +327,34 @@ async function evaluateBatch(
   let lookback: DetectionEvent[] = [];
   if (maxSpanSeconds > 0) {
     const since = Math.min(...fresh.map((e) => e.at)) - maxSpanSeconds * 1000;
-    const loaded = await rows<EventRow>(
+    // Both kinds of group key (a delegation tree, a sponsor) belong to the sponsors of the fresh rows, so the filter
+    // is pushed down to `user_id`, which `audit_log_user_at_idx (user_id, at)` serves with the window's lower bound:
+    // the scan never walks the whole chain backwards (review of #865).
+    const users = [...new Set(fresh.map((e) => e.userId))];
+    const userList = sql`ARRAY[${sql.join(users.map((u) => sql`${u}`), sql`, `)}]::uuid[]`;
+    const perGroup = DETECTION_SWEEP_LIMITS.lookbackRowsPerGroup;
+    const loaded = await rows<EventRow & { rn: number | string }>(
       db,
       sql`SELECT * FROM (
-            SELECT ${EVENT_SELECT} ${EVENT_FROM}
-            WHERE a.seq <= ${cursor} AND a.seq IS NOT NULL AND ${NOT_OWN}
-              AND a.at >= to_timestamp(${since / 1000}::float8)
-            ORDER BY a.seq DESC
-          ) w WHERE w."group" = ANY(${groupList})
-          ORDER BY w.seq DESC LIMIT ${DETECTION_SWEEP_LIMITS.lookbackRows + 1}`,
+            SELECT w.*, row_number() OVER (PARTITION BY w."group" ORDER BY w.seq DESC) AS rn FROM (
+              SELECT ${EVENT_SELECT} ${EVENT_FROM}
+              WHERE a.user_id = ANY(${userList}) AND a.at >= to_timestamp(${since / 1000}::float8)
+                AND a.seq <= ${cursor} AND a.seq IS NOT NULL AND ${NOT_OWN}
+            ) w WHERE w."group" = ANY(${groupList})
+          ) r WHERE r.rn <= ${perGroup + 1}
+          ORDER BY r.seq DESC LIMIT ${DETECTION_SWEEP_LIMITS.lookbackRows + 1}`,
     );
+    const truncated = new Set(loaded.filter((r) => Number(r.rn) > perGroup).map((r) => r.group));
+    let kept = loaded.filter((r) => Number(r.rn) <= perGroup);
     if (loaded.length > DETECTION_SWEEP_LIMITS.lookbackRows) {
-      result.lookbackTruncated = true;
-      loaded.length = DETECTION_SWEEP_LIMITS.lookbackRows;
+      kept = kept.slice(0, DETECTION_SWEEP_LIMITS.lookbackRows);
+      for (const g of groups) truncated.add(g);
     }
-    lookback = loaded.map(toEvent).reverse();
+    if (truncated.size > 0) {
+      result.lookbackTruncated = true;
+      degraded.push(...[...truncated].sort());
+    }
+    lookback = kept.map(({ rn: _rn, ...r }) => toEvent(r)).reverse();
   }
   const raisedRows = await rows<{ ruleId: string; firstSeq: number | string }>(
     db,
@@ -332,8 +365,22 @@ async function evaluateBatch(
         GROUP BY i.id, i.rule_id`,
   );
   const raised = new Set(raisedRows.map((r) => raisedKey(r.ruleId, Number(r.firstSeq))));
+  // the latest NOT-closed incident per (rule, group): an ongoing burst stays one incident per window, and closing
+  // it lets the next burst raise a new one (DETECTION_INCIDENT_MACHINE: closed is terminal)
+  const openStates = DETECTION_INCIDENT_MACHINE.def.states.filter((st) => !DETECTION_INCIDENT_MACHINE.isTerminal(st));
+  const episodeRows = await rows<{ ruleId: string; group: string; atMs: number | string }>(
+    db,
+    sql`SELECT i.rule_id AS "ruleId", i.group_key AS "group",
+               max(extract(epoch FROM coalesce(a.at, i.created_at)) * 1000)::float8 AS "atMs"
+        FROM detection_incidents i LEFT JOIN audit_log a ON a.id = i.trigger_audit_id
+        WHERE i.group_key = ANY(${groupList})
+          AND i.status IN (${sql.join(openStates.map((st) => sql`${st}`), sql`, `)})
+          AND i.created_at >= now() - make_interval(secs => ${Math.max(maxSpanSeconds, 60) * 2})
+        GROUP BY i.rule_id, i.group_key`,
+  );
+  const episodes: DetectionEpisodes = new Map(episodeRows.map((r) => [episodeKey(r.ruleId, r.group), Number(r.atMs)]));
   const events = [...lookback, ...fresh];
-  return evaluateDetections(active.pack, events, new Set(fresh.map((e) => e.seq)), raised);
+  return evaluateDetections(active.pack, events, new Set(fresh.map((e) => e.seq)), raised, undefined, episodes);
 }
 
 /** Incidents, evidence, audit rows and the cursor move commit together, conditional on this pass's lease. */
@@ -344,10 +391,34 @@ async function commitBatch(
   matches: DetectionMatch[],
   lastSeq: number,
   mode: SweepMode,
+  degraded: { groups: string[]; fromSeq: number; toSeq: number; maxSpanSeconds: number } | null,
 ): Promise<number> {
   const historical = mode === "replay";
   return db.transaction(async (tx) => {
     let raised = 0;
+    if (degraded) {
+      // ADR-0333 §1: a truncated look-back is never silently treated as matching nothing. One chained row per batch
+      // reaches the SIEM through ADR-0303 like every incident.
+      await tx.insert(auditLog).values({
+        userId: SYSTEM_ACTOR,
+        objectType: "detection_incident",
+        detail: {
+          subsystem: "agent-detection",
+          adr: "0333",
+          groups: degraded.groups.slice(0, 50),
+          groupCount: degraded.groups.length,
+          fromSeq: degraded.fromSeq,
+          toSeq: degraded.toSeq,
+          windowSeconds: degraded.maxSpanSeconds,
+          perGroupRows: DETECTION_SWEEP_LIMITS.lookbackRowsPerGroup,
+          historical,
+        },
+        effect: "deny",
+        ruleId: DETECTION_RULE_IDS.degraded,
+        ruleChain: [],
+        reason: "Detection look-back truncated: a sequence whose first step fell outside it may not be detected",
+      });
+    }
     for (const m of matches) {
       const refs = m.trigger as FreshEvent;
       const [incident] = await tx
