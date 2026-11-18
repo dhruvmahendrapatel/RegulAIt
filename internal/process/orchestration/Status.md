@@ -18,7 +18,7 @@
 | #973 E44 Purview labels | R3 + Xtyd8 | 2026-11-18 | First review |
 | #941 E31 on-device rules | WaRPg + a3BYi | 2026-11-18 | Delta re-review |
 | #883 E20 agent risk score | WaRPg + Xtyd8 | 2026-11-18 | Delta check of the conflict merge |
-| #1010 E45 ADR-0364 RPA | E45 | 2026-11-18 | ADR only until rule 15 lifts |
+| #1010 E45 RPA ADR | E45 | 2026-11-18 | ADR only until rule 15 lifts |
 | #936 Codex C1 CI build-once | Codex | 2026-11-18 | Route first when READY |
 | #1009 flaky SAP idempotency test | triage-low | 2026-11-18 | F2 × S2 = 4; code left alone |
 | S7 RLS PM-tables batch push | S7 | 2026-11-18 | Owner approved the push (D-2026-11-18-08); confirm that S7 pushed |

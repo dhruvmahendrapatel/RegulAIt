@@ -1967,3 +1967,12 @@ killed it. Once (19:00-22:00) nothing merged for three hours, and a READY (#941)
 
 Rule: on every wake, check `pgrep -fa merge-loop.sh` first and restart the loop if it is gone. Keep the hand-over state
 in the repo (internal/process/orchestration/), not only in the scratchpad.
+
+### M-117 (2026-11-18) - REPEAT: a doc cited an ADR that is only on an open PR
+
+#1011 cited lane E45's ADR by number while it is still only on #1010, and `scripts/adr-index.test.mjs` failed after the push. The same mistake
+happened on 2026-11-17 with two other lane ADRs. The test was run, but the failure was not read before pushing (the
+commit was chained in the same command).
+
+Rule: cite an unmerged ADR by its PR number and lane, never by its ADR number. Run the adr-index test as its own step, and
+push only after it prints all passed; never chain the push into the same command as the test.

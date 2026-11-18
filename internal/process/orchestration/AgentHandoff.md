@@ -41,7 +41,7 @@ Read this first if you are taking over as the master session of the RegulAIt bui
 - **2026-11-18:**
   - #1004 (the picomatch no-fix gate, ADR-0184 addendum) merged at 5aacbc16; the audit was OK.
   - Lanes whose PRs failed only "Dependency audit" were told to merge main once, in the same push as their review fixes.
-- **New lane E45:** RPA "Robots" (ADR-0364, #1010; design document only until rule 15 lifts).
+- **New lane E45:** RPA "Robots" (#1010; design document only until rule 15 lifts).
 - **Owner decisions today:** D-2026-11-18-01 to -07 in DecisionLog.md. The master phases sessions down to 10.
 - **In review:**
   - #973: R3 and Xtyd8.
