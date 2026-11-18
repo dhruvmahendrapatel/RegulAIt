@@ -123,7 +123,7 @@ func Apply(d *Directive, col *pack.Collection, env *collect.Env) Result {
 	if !ok {
 		return failed("write_failed")
 	}
-	if err := replaceFile(root, a.Path, out, st.Mode().Perm()); err != nil {
+	if err := replaceFile(root, a.Path, out, st); err != nil {
 		return failed("write_failed")
 	}
 	res.Outcome, res.Code = contract.OutcomeRemoved, "removed"
@@ -201,9 +201,11 @@ func escapePath(p []string) string {
 	return b.String()
 }
 
-// replaceFile writes data to a new file beside name (same mode), syncs it, and renames it over name, all through
-// the root, so the developer never sees a half-written config and nothing escapes the root.
-func replaceFile(root *os.Root, name string, data []byte, mode fs.FileMode) error {
+// replaceFile writes data to a new file beside name (same mode and, where the platform has one, the same owner and
+// group as the original st), syncs it, and renames it over name, all through the root, so the developer never sees a
+// half-written config, never finds it owned by the agent, and nothing escapes the root.
+func replaceFile(root *os.Root, name string, data []byte, st fs.FileInfo) error {
+	mode := st.Mode().Perm()
 	var suffix [8]byte
 	if _, err := rand.Read(suffix[:]); err != nil {
 		return err
@@ -216,9 +218,13 @@ func replaceFile(root *os.Root, name string, data []byte, mode fs.FileMode) erro
 	_, werr := f.Write(data)
 	serr := f.Sync()
 	cerr := f.Close()
-	if werr != nil || serr != nil || cerr != nil {
+	var oerr error
+	if uid, gid, ok := fileOwner(st); ok {
+		oerr = root.Lchown(tmp, uid, gid)
+	}
+	if werr != nil || serr != nil || cerr != nil || oerr != nil {
 		_ = root.Remove(tmp)
-		return errors.Join(werr, serr, cerr)
+		return errors.Join(werr, serr, cerr, oerr)
 	}
 	if err := root.Rename(tmp, name); err != nil {
 		_ = root.Remove(tmp)

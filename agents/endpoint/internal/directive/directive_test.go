@@ -308,9 +308,13 @@ func TestLedger(t *testing.T) {
 func TestNotifierNeverUsesAShell(t *testing.T) {
 	text := Notice(`shadow`, "Cursor", `.cursor/mcp.json"; do shell script "rm -rf ~"`)
 	for _, goos := range []string{"darwin", "linux", "windows"} {
-		name, args := notifierCommand(goos, "dev", text)
-		if name == "" || strings.Contains(name, "sh") && name != "notify-send" {
+		name, args := notifierCommand(goos, "dev", `C:\Windows`, text)
+		if name == "" || strings.Contains(name, "sh") && name != "/usr/bin/notify-send" {
 			t.Errorf("%s: notifier %q", goos, name)
+		}
+		// named by absolute path, never looked up through PATH
+		if !strings.HasPrefix(name, "/") && !strings.HasPrefix(name, `C:\`) {
+			t.Errorf("%s: notifier %q is not an absolute path", goos, name)
 		}
 		// the text is passed as exactly one argv item, never inside the script
 		n := 0
@@ -325,8 +329,17 @@ func TestNotifierNeverUsesAShell(t *testing.T) {
 			t.Errorf("%s: the text is not one argv item: %v", goos, args)
 		}
 	}
-	if name, _ := notifierCommand("windows", `bad user`, text); name != "" {
+	if name, _ := notifierCommand("windows", `bad user`, `C:\Windows`, text); name != "" {
 		t.Error("an unusual Windows user name was used as a msg target")
+	}
+	for root, want := range map[string]string{
+		`D:\WINNT`: `D:\WINNT\System32\msg.exe`, ``: `C:\Windows\System32\msg.exe`,
+		`\\evil\share`: `C:\Windows\System32\msg.exe`, `C:\Users\dev\..\x`: `C:\Windows\System32\msg.exe`,
+		`relative`: `C:\Windows\System32\msg.exe`,
+	} {
+		if name, _ := notifierCommand("windows", "dev", root, text); name != want {
+			t.Errorf("SystemRoot %q: msg at %q, want %q", root, name, want)
+		}
 	}
 }
 
