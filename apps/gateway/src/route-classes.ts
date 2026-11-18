@@ -397,6 +397,10 @@ export const NON_ADMIN_ROUTES = new Set([
   // already read (an agent they steward, a use case they own or may read; everything for an admin)
   "GET /v1/reports/posture/assets",
   "GET /v1/reports/posture/assets/:kind/:assetId",
+  // ADR-0339 — one agent's risk score and its history: any user, scoped in the handler to an admin or the agent's own
+  // steward/owner (404 otherwise). The ranked list and the recompute stay admin through the default gate.
+  "GET /v1/agent-risk/:kind/:subjectId",
+  "GET /v1/agent-risk/:kind/:subjectId/history",
   "GET /v1/risks",
   "GET /v1/risks/library",
   // G2/X8: the scenario library — same class as the risk library

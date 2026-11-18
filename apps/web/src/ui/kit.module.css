@@ -18,7 +18,7 @@
   transition: background 120ms ease, border-color 120ms ease;
   white-space: nowrap;
 }
-.btn:hover:not(:disabled) {
+.btn:hover:not(:disabled):not([aria-disabled="true"]) {
   background: var(--surface-2);
   border-color: var(--border-strong);
 }
@@ -33,7 +33,7 @@
   border-color: var(--primary);
   color: var(--text-invert);
 }
-.btnPrimary:hover:not(:disabled) {
+.btnPrimary:hover:not(:disabled):not([aria-disabled="true"]) {
   background: var(--primary-strong);
   border-color: var(--primary-strong);
 }
@@ -47,7 +47,7 @@
     border-color: var(--rg-signal-700);
     color: var(--rg-signal-700);
   }
-  :global(:root:not([data-theme="light"])) .btnPrimary:hover:not(:disabled) {
+  :global(:root:not([data-theme="light"])) .btnPrimary:hover:not(:disabled):not([aria-disabled="true"]) {
     background: color-mix(in srgb, var(--rg-signal) 22%, var(--rg-surface));
     border-color: var(--rg-signal-700);
   }
@@ -57,7 +57,7 @@
   border-color: var(--rg-signal-700);
   color: var(--rg-signal-700);
 }
-:global(:root[data-theme="dark"]) .btnPrimary:hover:not(:disabled) {
+:global(:root[data-theme="dark"]) .btnPrimary:hover:not(:disabled):not([aria-disabled="true"]) {
   background: color-mix(in srgb, var(--rg-signal) 22%, var(--rg-surface));
   border-color: var(--rg-signal-700);
 }
@@ -66,7 +66,7 @@
   color: var(--danger);
   border-color: var(--danger);
 }
-.btnDanger:hover:not(:disabled) {
+.btnDanger:hover:not(:disabled):not([aria-disabled="true"]) {
   background: var(--danger-soft);
   border-color: var(--danger);
 }
@@ -76,7 +76,7 @@
   border-color: transparent;
   color: var(--text-dim);
 }
-.btnGhost:hover:not(:disabled) {
+.btnGhost:hover:not(:disabled):not([aria-disabled="true"]) {
   background: var(--surface-2);
   border-color: transparent;
   color: var(--text);
@@ -810,4 +810,58 @@ a.barLabel {
   -webkit-line-clamp: 2;
   line-clamp: 2;
   overflow: hidden;
+}
+
+/* ---- Switch (kit Switch) ---- */
+.switch {
+  position: relative;
+  width: 44px;
+  height: 24px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  cursor: pointer;
+  flex: none;
+  padding: 0;
+  transition: background var(--rg-dur-fast) var(--rg-ease);
+}
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--text-dim);
+  transition: transform var(--rg-dur-fast) var(--rg-ease);
+}
+.switch[aria-checked="true"] {
+  background: var(--primary);
+  border-color: var(--primary);
+}
+.switch[aria-checked="true"]::after {
+  background: var(--text-invert);
+  transform: translateX(20px);
+}
+.switch:focus-visible {
+  box-shadow: var(--focus-ring);
+  outline: none;
+}
+.switch[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.switchSm {
+  width: 36px;
+  height: 20px;
+}
+.switchSm::after {
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+}
+.switchSm[aria-checked="true"]::after {
+  transform: translateX(16px);
 }

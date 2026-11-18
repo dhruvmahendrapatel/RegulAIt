@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"regexp"
 	"strings"
 )
 
@@ -75,7 +76,7 @@ func ParseClaudeCodePreToolUse(r io.Reader) (Call, error) {
 		return c, nil
 	}
 	if in.MCPServer != nil {
-		c.MCP = &MCPCall{Server: in.MCPServer.Name, Source: in.MCPServer.Source}
+		c.MCP = &MCPCall{Server: in.MCPServer.Name, Source: in.MCPServer.Source, Tool: mcpToolFromToolName(in.ToolName, in.MCPServer.Name)}
 	} else if strings.HasPrefix(in.ToolName, "mcp__") {
 		// MCP-shaped but without provenance: decided as an MCP call from an unknown source (denied unless the policy
 		// accepts an empty source, which validate never allows)
@@ -102,6 +103,20 @@ func readHookInput(r io.Reader, v any) error {
 	}
 	return nil
 }
+
+// mcpToolFromToolName reads the tool out of an mcp__<server>__<tool> name for a known server, or returns "". The
+// agent writes the server part with every character outside [A-Za-z0-9_-] replaced by "_" (a server named gh.x is
+// mcp__gh_x__...), so the name is matched in that form (review #952).
+func mcpToolFromToolName(name, server string) string {
+	for _, s := range []string{server, mcpNameForm.ReplaceAllString(server, "_")} {
+		if t, ok := strings.CutPrefix(name, "mcp__"+s+"__"); ok && t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
+var mcpNameForm = regexp.MustCompile(`[^A-Za-z0-9_-]`)
 
 // mcpServerFromToolName reads the server out of an mcp__<server>__<tool> name. Only Codex has no better source; for
 // Claude Code it names the server of a call that arrived without provenance (which is then denied anyway).
