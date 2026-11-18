@@ -651,6 +651,7 @@ import { registerCopilotRedteamGateRoutes } from "./copilot-redteam-gate.js";
 import { registerBuilderRoutes } from "./builder.js";
 // ADR-0180 (D3) — continuous assurance: P0's gate-mode setting and each item owner's routes
 import { registerAssuranceSettingsRoutes } from "./assurance-settings.js";
+import { registerSensitivityLabelRoutes } from "./sensitivity-labels.js";
 import { registerRiskTreatmentSettingsRoutes } from "./risk-treatment-settings.js";
 import { decideApprovalWithMeasuredSchema, registerConditionMetricRoutes } from "./condition-metrics.js";
 import { registerRequiredTestRoutes } from "./required-tests.js";
@@ -6371,6 +6372,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // A8 autonomy, A10 risk tolerance and acceptance (stubs answer 501 until
   // their owner lands).
   registerAssuranceSettingsRoutes(app, db);
+  // ADR-0363 slice 1: customer sensitivity labels (admin API; the UI is a #453 gap)
+  registerSensitivityLabelRoutes(app, db);
   // ADR-0211 (P17): the default-off switch for transferred and avoided risk treatments
   registerRiskTreatmentSettingsRoutes(app, db);
   registerConditionMetricRoutes(app, db);
