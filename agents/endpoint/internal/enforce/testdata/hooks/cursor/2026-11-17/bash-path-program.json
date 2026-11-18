@@ -1,0 +1,1 @@
+{"conversation_id":"c-1","generation_id":"g-10","hook_event_name":"beforeShellExecution","cursor_version":"1.7.2","workspace_roots":["/work"],"command":"./git status secret-argument","cwd":"/work","sandbox":false}
