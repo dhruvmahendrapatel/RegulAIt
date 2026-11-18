@@ -45,6 +45,12 @@
     "limit": "11.3 kB"
   },
   {
+    "name": "chunk: AssetScore",
+    "path": "dist/assets/AssetScore-????????.js",
+    "gzip": true,
+    "limit": "4.2 kB"
+  },
+  {
     "name": "chunk: BomEvidencePanel",
     "path": "dist/assets/BomEvidencePanel-????????.js",
     "gzip": true,
