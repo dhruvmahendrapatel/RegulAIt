@@ -276,6 +276,28 @@ and a kill-switch role (primary docs snippet).
   shared modeler, durable engine, live operations console, task list, process analytics and a connector marketplace
   over MCP, A2A and REST *(primary vendor pages, read 2026-11-16; analyst placements are vendor claims)*. Overlaps
   pillars 2 and 7. Parity table and gaps: [GAP_ANALYSIS_CAMUNDA_2026-11.md](GAP_ANALYSIS_CAMUNDA_2026-11.md).
+- **Endpoint "AI detection and response" for coding agents (added 2026-11-17).** **DarkControl** "AIDR": a
+  lightweight endpoint agent that intercepts AI coding agents' shell commands, file access and package installs and
+  returns Allow, Ask or Deny from central policy, with an MCP inventory and risk scores, time-limited exceptions,
+  tamper detection, quarantine, SIEM and Teams alerts and an EU AI Act register *(vendor pages, read 2026-11-17; the
+  vendor calls its console views illustrative; no docs or pricing published)*. Overlaps pillar 1 on the endpoint. Parity
+  table and gaps: [GAP_ANALYSIS_DARKCONTROL_2026-11.md](GAP_ANALYSIS_DARKCONTROL_2026-11.md).
+  **Manifold Security** "AIDR" (added 2026-11-17): endpoint and browser runtime security for AI agents with discovery,
+  risk and exposure, and detection and response; Cedar policies with graduated responses (alert, advise, correct, ask,
+  block, block session, disable), governed removal of risky add-ons, a Chromium extension and the open-source
+  `agentaudit` repo-config scanner *(vendor blog and site, read 2026-11-17; docs and pricing pages not published)*.
+  Parity table and gaps: [GAP_ANALYSIS_MANIFOLD_2026-11.md](GAP_ANALYSIS_MANIFOLD_2026-11.md).
+- **API gateways adding AI modules (added 2026-11-17).** **KrakenD AI Gateway**: a stateless Go API gateway whose AI
+  module is Enterprise-only (LLM routing and failover, semantic cache, prompt guard, token quotas, stream rewriting, an
+  MCP server over REST backends); the Community Edition (Apache-2.0) has no AI module *(vendor pages and GitHub, read
+  2026-11-17)*. Overlaps pillars 1, 5 and 6 at the gateway. Parity table and gaps:
+  [GAP_ANALYSIS_KRAKEND_2026-11.md](GAP_ANALYSIS_KRAKEND_2026-11.md).
+- **Data-security incumbents adding AI controls (added 2026-11-17).** **Forcepoint AI Security** (limited GA 2026-10-13,
+  qualified customers): AI detection and response through vendor APIs (M365 Copilot, ChatGPT Enterprise, Claude
+  Enterprise, Bedrock), shadow-AI discovery and coaching on endpoints, and an AI Agent Gateway for MCP with brokered
+  credentials, field redaction and human approval, on its DSPM, DLP and web-security base *(vendor marketing pages,
+  read 2026-11-17; no public docs or pricing)*. Parity table and gaps:
+  [GAP_ANALYSIS_FORCEPOINT_2026-11.md](GAP_ANALYSIS_FORCEPOINT_2026-11.md).
 - **Managed agent platforms.** Google Gemini Enterprise Agent Platform: Agent Identity, Agent Registry and Agent
   Gateway, GA end of July *(secondary)*. AWS Bedrock AgentCore: managed harness, CLI and skills in April *(primary
   AWS What's New title)*. Nothing later than April was found; re:Invent is in December.
@@ -411,6 +433,10 @@ title and snippet); **S** = secondary.
 | Warp Factories / Linear agents | https://warp.dev/factories ; https://linear.app/agents | P (vendor pages) |
 | Obsidian Security AI Agent Security (added 2026-11-16) | https://www.obsidiansecurity.com/ai-agent-security | P |
 | Camunda agentic orchestration (added 2026-11-16) | https://camunda.com/ ; https://camunda.com/platform/ ; https://camunda.com/what-is-agentic-orchestration/ | P |
+| DarkControl AIDR (added 2026-11-17) | https://darkcontrolai.com/ ; https://darkcontrolai.com/platform.php ; https://darkcontrolai.com/features.php | P |
+| Manifold Security AIDR (added 2026-11-17) | https://www.manifold.security/ ; https://www.manifold.security/blog ; https://github.com/manifold-security/agentaudit | P |
+| KrakenD AI Gateway (added 2026-11-17) | https://www.krakend.io/ai-gateway/ ; https://www.krakend.io/docs/enterprise/ai-gateway/ ; https://github.com/krakend | P |
+| Forcepoint AI Security (added 2026-11-17) | https://www.forcepoint.com/ai-data-security ; https://www.forcepoint.com/product/forcepoint-ai-agent-gateway | P |
 
 **Not found / unverified:** Agent HQ GA; any Windsurf news after August; Holistic AI Guardian Agents GA date;
 Credo AIUC-1 integration; Codex Admin plugin year; Runlayer Series A date; Kong 2.1 timing; MCP 2026-07-28 RC vs
