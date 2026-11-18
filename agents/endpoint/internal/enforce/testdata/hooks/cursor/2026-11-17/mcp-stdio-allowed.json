@@ -1,0 +1,1 @@
+{"conversation_id":"c-1","generation_id":"g-1","model":"m","hook_event_name":"beforeMCPExecution","cursor_version":"1.7.2","workspace_roots":["/work"],"user_email":null,"transcript_path":null,"tool_name":"search","tool_input":"{\"q\":\"secret-argument\"}","mcp_server_name":"regulait","command":"npx -y regulait-mcp --token secret-argument"}
