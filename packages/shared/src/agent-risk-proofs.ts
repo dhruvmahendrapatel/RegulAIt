@@ -26,6 +26,7 @@ import { MEASUREMENT_STATES, metricSpecSchema, type MeasurementState, type Metri
 import { validateMetricParams } from "./condition-metrics.js";
 import { OWASP_AGENTIC_NAMES } from "./owasp-framework-mappings.js";
 import { OWASP_LLM_EDITIONS, OWASP_MCP_IDS } from "./owasp-packs.js";
+import { EU_AI_ACT_TIER_RANK, type EuAiActTier } from "./eu-ai-act.js";
 import { AI_RISK_CATEGORIES, type AiRiskCategory } from "./risks.js";
 
 /** bumped whenever a risk, control or proof changes meaning; every evidence row records the version it ran under */
@@ -462,9 +463,6 @@ export function agentRiskCatalogProblems(risks: readonly AgentRisk[] = AGENT_RIS
 /** a jurisdiction code: `EU`, `US`, `US-CO`, `US-NYC`, `International` (the ADR-0158 feed's spelling) */
 export const JURISDICTION_CODE_RE = /^[A-Z][A-Za-z]{1,12}(-[A-Z0-9]{2,4})?$/;
 
-/** the risk tiers a jurisdiction may floor a use case to, weakest first (the ADR-0085 screening outcomes) */
-export const JURISDICTION_TIER_FLOORS = ["minimal", "limited", "high", "prohibited"] as const;
-export type JurisdictionTierFloor = (typeof JURISDICTION_TIER_FLOORS)[number];
 
 export interface JurisdictionRow {
   code: string;
@@ -481,7 +479,7 @@ export interface JurisdictionObligationRow {
   /** the agent risk whose controls and proofs answer the obligation */
   agentRiskKey: AgentRiskKey;
   /** the lowest tier a use case in scope may carry; null = the obligation does not move the tier */
-  tierFloor: JurisdictionTierFloor | null;
+  tierFloor: EuAiActTier | null;
 }
 
 export interface GeographyResolution {
@@ -493,10 +491,9 @@ export interface GeographyResolution {
   unknown: string[];
   obligations: JurisdictionObligationRow[];
   /** the strictest floor any in-scope obligation sets, or null */
-  tierFloor: JurisdictionTierFloor | null;
+  tierFloor: EuAiActTier | null;
 }
 
-const floorRank = (t: JurisdictionTierFloor) => JURISDICTION_TIER_FLOORS.indexOf(t);
 
 /** the obligations a use case's declared jurisdictions bring in, and the tier floor they set */
 export function resolveGeography(
@@ -519,9 +516,9 @@ export function resolveGeography(
   }
   for (const j of jurisdictions) if (j.global) inScope.add(j.code);
   const applied = obligations.filter((o) => inScope.has(o.jurisdictionCode));
-  let tierFloor: JurisdictionTierFloor | null = null;
+  let tierFloor: EuAiActTier | null = null;
   for (const o of applied) {
-    if (o.tierFloor && (tierFloor === null || floorRank(o.tierFloor) > floorRank(tierFloor))) tierFloor = o.tierFloor;
+    if (o.tierFloor && (tierFloor === null || EU_AI_ACT_TIER_RANK[o.tierFloor] > EU_AI_ACT_TIER_RANK[tierFloor])) tierFloor = o.tierFloor;
   }
   return { inScope: [...inScope].sort(), undeclared, unknown, obligations: applied, tierFloor };
 }
@@ -531,9 +528,9 @@ export function resolveGeography(
  * jurisdictions set. An unscreened use case stays `unscreened` (a floor never stands in for the screening).
  */
 export function effectiveRiskTier(
-  screened: JurisdictionTierFloor | "unscreened",
-  floor: JurisdictionTierFloor | null,
-): JurisdictionTierFloor | "unscreened" {
+  screened: EuAiActTier | "unscreened",
+  floor: EuAiActTier | null,
+): EuAiActTier | "unscreened" {
   if (screened === "unscreened" || floor === null) return screened;
-  return floorRank(floor) > floorRank(screened) ? floor : screened;
+  return EU_AI_ACT_TIER_RANK[floor] > EU_AI_ACT_TIER_RANK[screened] ? floor : screened;
 }

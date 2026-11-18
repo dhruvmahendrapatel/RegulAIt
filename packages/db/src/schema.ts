@@ -163,7 +163,6 @@ import {
   AGENT_RISK_KEYS,
   AGENT_RISK_PROOF_OUTCOMES,
   AGENT_RISK_PROOF_TRIGGERS,
-  JURISDICTION_TIER_FLOORS,
   type ModalitySplit,
   // ADR-0346 (migration fairness_evaluation): the fairness-evaluation vocabularies, in lockstep with the CHECKs
   FAIRNESS_DATASET_KINDS,
@@ -17443,7 +17442,8 @@ export const jurisdictionObligations = pgTable(
       .references(() => jurisdictions.code, { onDelete: "cascade" }),
     regulatoryUpdateKey: text("regulatory_update_key").notNull(),
     agentRiskKey: text("agent_risk_key", { enum: AGENT_RISK_KEYS }).notNull(),
-    tierFloor: text("tier_floor", { enum: JURISDICTION_TIER_FLOORS }),
+    // the ADR-0085 screening tiers (`EU_AI_ACT_TIER_VALUES`, the mirror of `EU_AI_ACT_TIERS`); the CHECK repeats them
+    tierFloor: text("tier_floor", { enum: EU_AI_ACT_TIER_VALUES }),
     createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },

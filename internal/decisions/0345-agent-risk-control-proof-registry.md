@@ -116,6 +116,12 @@ What exists already:
    - `effectiveRiskTier` returns the stricter of the screened tier (ADR-0085) and the floor. An unscreened use case
      stays `unscreened`: a floor never stands in for the screening.
    - No seeded obligation sets a floor, because a floor is a legal judgement for an admin to record.
+   - The floor reuses the ADR-0085 screening ladder (`EU_AI_ACT_TIERS`, ranked by `EU_AI_ACT_TIER_RANK`); the
+     `tier_floor` CHECK repeats the four values and a test pins it to that constant (#1019 code review).
+   - **The write routes (slice 3) treat a narrowing as a relaxation.** Deleting an obligation, lowering or clearing a
+     `tier_floor`, removing a declared jurisdiction from a use case, or deleting a jurisdiction (which narrows scope
+     for every undeclared use case) carries the `settings_relax` step-up and is audited in the same transaction. The
+     same routes refuse a `regulatory_update_key` that is not in the ADR-0158 feed (#1019 security review).
    - The review-policy routing (`tierKeyFor`, owned outside this lane) still reads the screened tier. Switching it
      to the effective tier is an owner question below, because it changes who signs existing use cases.
 

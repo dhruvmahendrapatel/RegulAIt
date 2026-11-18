@@ -24,7 +24,7 @@ import {
   users,
   type Db,
 } from "@regulait/db";
-import { REGULATORY_UPDATES, effectiveRiskTier, resolveGeography, type JurisdictionObligationRow } from "@regulait/shared";
+import { EU_AI_ACT_TIERS, REGULATORY_UPDATES, effectiveRiskTier, resolveGeography, type JurisdictionObligationRow } from "@regulait/shared";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -155,6 +155,13 @@ describe("ADR-0345 §9: NEGATIVE shape checks and row-level security", () => {
           values ('EU', 'x', 'governance_gap', 'severe')`),
       ),
     ).toMatch(/jurisdiction_obligations_tier_check/);
+  });
+
+  it("the tier_floor CHECK admits exactly the ADR-0085 screening tiers (EU_AI_ACT_TIERS), no copy of its own", async () => {
+    const res = await db.execute(sql`select pg_get_constraintdef(oid) as d from pg_constraint where conname = 'jurisdiction_obligations_tier_check'`);
+    const def = (res.rows[0] as { d: string }).d;
+    const allowed = [...def.matchAll(/'([a-z]+)'::text/g)].map((m) => m[1]!).sort();
+    expect(allowed).toEqual([...EU_AI_ACT_TIERS].sort());
   });
 
   it("all three tables are under forced row-level security; a plain connection sees no row", async () => {

@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS "jurisdiction_obligations" (
   CONSTRAINT "jurisdiction_obligations_risk_check" CHECK ("agent_risk_key" IN ('prompt_injection', 'data_leakage',
     'tool_misuse', 'hallucination', 'access_control_failure', 'autonomous_overreach', 'supply_chain',
     'memory_context_exploit', 'infrastructure_baseline', 'governance_gap')),
+  -- tier_floor values must equal EU_AI_ACT_TIERS (@regulait/shared eu-ai-act.ts); a test pins the two together
   CONSTRAINT "jurisdiction_obligations_tier_check" CHECK ("tier_floor" IS NULL OR "tier_floor" IN ('minimal', 'limited', 'high', 'prohibited'))
 );
 --> statement-breakpoint
