@@ -38,17 +38,20 @@ Read this first if you are taking over as the master session of the RegulAIt bui
 
 ## Where we left off (current master)
 
-- **2026-11-18:**
-  - #1004 (the picomatch no-fix gate, ADR-0184 addendum) merged at 5aacbc16; the audit was OK.
-  - Lanes whose PRs failed only "Dependency audit" were told to merge main once, in the same push as their review fixes.
-- **New lane E45:** RPA "Robots" (#1010; design document only until rule 15 lifts).
-- **Owner decisions today:** D-2026-11-18-01 to -07 in DecisionLog.md. The master phases sessions down to 10.
-- **In review:**
-  - #973: R3 and Xtyd8.
-  - #941 delta: WaRPg and a3BYi.
-  - #883 delta: WaRPg and Xtyd8.
+- **2026-11-18, about 08:54 UTC:** master hand-over. The previous master stopped its merge loop and its scheduled tasks,
+  and its session is to be archived. The new master runs the merge loop from its own scratchpad, seeded with the same
+  released.txt.
+- **Merged and audited today:** #1004, #880, #1011, #973, #941 (merge 82142059, second parent 3b86b4e0 = released).
+- **Released, not merged (dirty after other merges):** #904 (E26), #903 (E12), #902 (E1), #883 (E20). Each builder was
+  told to merge main and post a new READY. Then delta reviews: #904 R3 + Xtyd8; #903 R2 + a3BYi; #902 WaRPg + a3BYi;
+  #883 WaRPg + Xtyd8.
+- **Request changes, waiting on the builder:** #1010 (E45, RPA ADR only), #884 (E18, security RC on the directory opt-in
+  and auto-link).
+- **Older lanes:** E24 and E25 were done with no open PR and are archived. E2 (#848), E3 (#855), E7 (#861), E13 (#871),
+  E15 (#865), E16 (#867) and E27 (#996) had been idle since 2026-11-17. Each was told to merge main once (the picomatch
+  no-fix gate, #1004, clears their audit failure), fix any real failure, and post READY.
 - **Next steps:**
-  1. Release the PRs that reach both approvals at their head.
-  2. Route #936 (Codex C1, CI build-once) first when it posts READY.
+  1. Route #936 (Codex C1, CI build-once) first when it posts READY.
+  2. Delta-review the four dirty PRs as their READYs arrive; release on both approvals at the head.
   3. Archive lanes as they say "LANE DONE".
   4. Lift rule 15 a few lanes at a time once the open PR count is under 50, with E45's code first.
