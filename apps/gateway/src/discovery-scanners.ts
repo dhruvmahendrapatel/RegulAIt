@@ -38,7 +38,7 @@
  * prefix and length); or call a provider to test a key it found (decision 6).
  */
 import type { DiscoveryEvidenceKind, DiscoveryPseudonymKind, DiscoverySourceKind, DiscoverySubjectKind, ArtifactSignatureKind } from "@regulait/shared";
-import type { AgentRegistry, AiSignature, AiSignatureKind, DiscoveryCredentialMode, DiscoveryReadOutcome } from "@regulait/shared";
+import type { AgentRegistry, AiSignature, AiSignatureKind, DiscoveryCredentialMode, DiscoveryReadOutcome, LabelDefinition } from "@regulait/shared";
 import { REPO_SCANNERS } from "./discovery-repo-scanner.js";
 import { cloudDiscoveryScanners } from "./discovery-cloud-scanners.js";
 import { ENDPOINT_AGENT_SCANNER, ENDPOINT_IMPORT_SCANNERS } from "./endpoint-discovery-scanners.js";
@@ -185,6 +185,11 @@ export interface ScanResult {
    * these does the worker mark a staged record the run did not list as absent; a partial read never does.
    */
   registriesComplete?: AgentRegistry[];
+  /**
+   * ADR-0363 slice 1, `idp_entra` only: the tenant's complete sensitivity-label list. Absent when it was not read (no
+   * permission, or a listing cut short), which leaves the stored definitions as they are.
+   */
+  labelDefinitions?: LabelDefinition[];
 }
 
 /** ADR-0314: one agent a vendor registry listed, as a scanner reports it (bounded and shape-checked by the worker) */

@@ -84,7 +84,9 @@ import {
   FEDERATION_AWS_PRINCIPAL_SUBJECT,
   federationSourceSubject,
   type DiscoverySourceKind,
+  normaliseGuid,
 } from "@regulait/shared";
+import { upsertLabelDefinitions } from "./sensitivity-labels.js";
 import { loadEgressAllowList } from "./custom-providers.js";
 import { createGuardedFetch, EgressBlockedError, EgressRedirectError, type EgressResolver } from "./egress-guard.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
@@ -768,16 +770,30 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
     throw err;
   }
   const digest = rawSeen ? hash.digest("hex") : createHash("sha256").update(JSON.stringify(observations)).digest("hex");
-  const stageRegistry =
-    registry.records.length || registry.complete.length
-      ? async (t: Db) => {
-          const staged = await stageRegistryRecords(t, source.id, run.id, registry.records, registry.complete);
-          await audit(t, "discovery_run", run.id, "agent-registry-records-staged", "allow",
-            `discovery run of '${source.name}' staged ${staged.staged} registry agent(s) for import; ${staged.absent} no longer listed`,
-            { sourceId: source.id, kind: source.kind, staged: staged.staged, absent: staged.absent, completeRegistries: registry.complete });
-        }
-      : undefined;
-  return applyDiscoveryRunObservations(db, run, owner, source, observations, digest, classifyCatalogue, readOutcomes, stageRegistry);
+  // ADR-0363 slice 1: an Entra scan that read the tenant's complete Purview label list commits it with the run
+  const labelTenant = source.kind === "idp_entra" ? normaliseGuid(cred?.publicConfig.tenantId) : null;
+  const labels = result.labelDefinitions;
+  // every write that must commit with the run, fenced on its lease: the labels (ADR-0363) and the staged registry agents (ADR-0314)
+  const writes: Array<(t: Db) => Promise<void>> = [];
+  if (labels && labelTenant) {
+    writes.push(async (t) => {
+      await upsertLabelDefinitions(t, { tenantId: labelTenant, sourceId: source.id, definitions: labels });
+    });
+  }
+  if (registry.records.length || registry.complete.length) {
+    writes.push(async (t) => {
+      const staged = await stageRegistryRecords(t, source.id, run.id, registry.records, registry.complete);
+      await audit(t, "discovery_run", run.id, "agent-registry-records-staged", "allow",
+        `discovery run of '${source.name}' staged ${staged.staged} registry agent(s) for import; ${staged.absent} no longer listed`,
+        { sourceId: source.id, kind: source.kind, staged: staged.staged, absent: staged.absent, completeRegistries: registry.complete });
+    });
+  }
+  const inCommit = writes.length
+    ? async (t: Db) => {
+        for (const w of writes) await w(t);
+      }
+    : undefined;
+  return applyDiscoveryRunObservations(db, run, owner, source, observations, digest, classifyCatalogue, readOutcomes, inCommit);
 }
 
 /**

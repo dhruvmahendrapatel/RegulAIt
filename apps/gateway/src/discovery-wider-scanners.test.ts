@@ -12,7 +12,7 @@ import { classifyObservation, familySwitchProblem, publicConfigProblem, type AiS
 import type { ScanContext } from "./discovery-scanners.js";
 import { DISCOVERY_SCANNERS } from "./discovery-scanners.js";
 import { checkObservations } from "./discovery-worker.js";
-import { ML_PLATFORM_ASSET_SEED, WIDER_DISCOVERY_SCANNERS, WIDER_MAX_BODY_BYTES, WIDER_MAX_ITEMS, atPath, entraWriteScope, httpsTargetProblem } from "./discovery-wider-scanners.js";
+import { ML_PLATFORM_ASSET_SEED, WIDER_DISCOVERY_SCANNERS, WIDER_MAX_BODY_BYTES, WIDER_MAX_ITEMS, atPath, entraWriteScope, httpsTargetProblem, PURVIEW_LABEL_ROLE } from "./discovery-wider-scanners.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const CLIENT = "00000000-0000-4000-8000-000000000002";
@@ -299,6 +299,35 @@ describe("ADR-0235 idp_entra", () => {
     const checked = checkObservations("idp_entra", res.observations, NOW);
     expect(classifyObservation(checked[0]!, [catalogueRow({ kind: "oauth_app", value: AI_APP.toUpperCase(), matchType: "identifier" })]).matched).toBe(true);
     expect(classifyObservation(checked[1]!, [catalogueRow({ kind: "oauth_app", value: AI_APP, matchType: "identifier" })]).matched).toBe(false);
+  });
+
+  it("ADR-0363: reads the Purview label list only with InformationProtectionPolicy.Read.All, and only a complete read is kept", async () => {
+    const HC = "f048e7b8-f3aa-4857-bf32-a317f4bc3f29";
+    const labels = (url: URL) =>
+      url.pathname === "/beta/security/informationProtection/sensitivityLabels"
+        ? json({ value: [{ id: HC, name: "Highly Confidential", sensitivity: 9, isActive: true }, { id: "bad", name: "x" }] })
+        : null;
+    const granted = fakeEntra(["Application.Read.All", "DelegatedPermissionGrant.Read.All", PURVIEW_LABEL_ROLE], labels);
+    const withRole = ctxFor({ fetch: granted.f, source, credential: { mode: "static", publicConfig: { tenantId: TENANT, clientId: CLIENT }, secret: "s" } });
+    const res = await scanner("idp_entra").run(withRole.ctx);
+    expect(res.credentialWriteScope).toBe("read_only");
+    expect(res.labelDefinitions).toEqual([
+      { provider: "microsoft_purview", labelId: HC, name: "Highly Confidential", parentLabelId: null, rank: 9, active: true },
+    ]);
+
+    const without = fakeEntra(["Application.Read.All", "DelegatedPermissionGrant.Read.All"], labels);
+    const noRole = ctxFor({ fetch: without.f, source, credential: { mode: "static", publicConfig: { tenantId: TENANT, clientId: CLIENT }, secret: "s" } });
+    const res2 = await scanner("idp_entra").run(noRole.ctx);
+    expect(res2.labelDefinitions).toBeUndefined();
+    expect(res2.readOutcomes).toContainEqual(expect.objectContaining({ read: "Purview sensitivity labels", status: "skipped" }));
+    expect(noRole.calls.urls.some((u) => u.includes("sensitivityLabels"))).toBe(false);
+
+    const broken = fakeEntra([PURVIEW_LABEL_ROLE, "Application.Read.All"], (url) =>
+      url.pathname.includes("sensitivityLabels") ? json({ nope: true }) : null,
+    );
+    const res3 = await scanner("idp_entra").run(ctxFor({ fetch: broken.f, source, credential: { mode: "static", publicConfig: { tenantId: TENANT, clientId: CLIENT }, secret: "s" } }).ctx);
+    expect(res3.labelDefinitions).toBeUndefined();
+    expect(res3.readOutcomes).toContainEqual(expect.objectContaining({ read: "Purview sensitivity labels", status: "error" }));
   });
 
   it("a credential holding a write permission is refused before Graph is read", async () => {
