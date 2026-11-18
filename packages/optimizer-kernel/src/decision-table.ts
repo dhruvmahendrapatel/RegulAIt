@@ -22,6 +22,7 @@
  */
 import {
   RULE_INDUCTION_CEILINGS,
+  encodeCellKey,
   normalizeStepOutput,
   type FieldValue,
   type InducedRule,
@@ -137,7 +138,7 @@ export function compileDecisionTable(table: DecisionTableBody): DecisionTableCom
       return;
     }
     for (const key of product(values)) {
-      const k = JSON.stringify(key.map(encodeValue));
+      const k = encodeCellKey(key);
       const seen = firstRowFor.get(k);
       if (seen) {
         if (seen.row !== row) {
@@ -186,11 +187,6 @@ function* product(lists: readonly FieldValue[][]): Generator<FieldValue[]> {
 
 function describe(fields: readonly string[], key: readonly FieldValue[]): string {
   return fields.map((f, i) => `${f} = ${JSON.stringify(key[i])}`).join(" and ");
-}
-
-// the same encoding the rule engine keys on (`rule-induction.ts`): the type is part of the key, so "1" and 1 never collide
-function encodeValue(v: FieldValue): string {
-  return `${typeof v}:${String(v)}`;
 }
 
 function isScalar(v: unknown): v is FieldValue {

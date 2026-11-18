@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DECISION_TABLE_LIMITS, compileDecisionTable, renderDecisionTable, type DecisionTableBody } from "./decision-table.js";
-import { applyInducedRule } from "./rule-induction.js";
+import { applyInducedRule, encodeCellKey } from "./rule-induction.js";
 
 const triage: DecisionTableBody = {
   fields: ["source", "severity"],
@@ -36,6 +36,16 @@ describe("compileDecisionTable", () => {
     expect(out.ok).toBe(false);
     if (out.ok) return;
     expect(out.problems.map((p) => p.code)).toEqual(["conflicting_rows", "duplicate_row"]);
+  });
+
+  it("detects overlap with the engine's own cell key: every distinct key compiles, and each matches its own row", () => {
+    // values that look alike but are different inputs to the engine: the compiler must not merge them
+    const lookalikes = ["1", 1, "true", true, "null", null, "", 0, false];
+    const out = compileDecisionTable({ fields: ["v"], rows: lookalikes.map((v, i) => ({ when: { v }, then: `row ${i}` })) });
+    expect(out.ok, JSON.stringify(out)).toBe(true);
+    if (!out.ok) return;
+    expect(new Set(out.rule.cells.map((c) => encodeCellKey(c.key))).size).toBe(lookalikes.length);
+    lookalikes.forEach((v, i) => expect(applyInducedRule(out.rule, { v })).toEqual({ matched: true, output: `row ${i}` }));
   });
 
   it("reports every row problem at once", () => {
