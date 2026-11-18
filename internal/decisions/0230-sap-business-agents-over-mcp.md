@@ -389,6 +389,38 @@ answer is a data change, not a code change).
   (b)'s SAP-trust key need slice A0 (owner-blocked). The HMAC idempotency key and the A3 audit and usage detail are the
   lane's second PR.
 
+## Amendment (2026-11-14): slice A3 and A2's idempotency key, as built (Lane L3, second PR)
+
+- **The key** (`prepareSapWrite`, in the proxy after the project requirement and before the decision): an SAP business
+  write must carry `idempotencyKey`, a UUID (refused `sap-idempotency-key-required` otherwise). The gateway replaces it
+  with the stored key, HMAC-SHA256(per-server secret, deployment ‖ pairwise `sub` ‖ caller key), formatted as a GUID.
+  The per-server secret is HKDF of the data key (`regulait/adr0230/sap-idempotency/v1`), then HMAC'd with the server
+  id. The `sub` is the ADR-0188 pairwise subject for the server's audience, the one its identity assertion carries.
+  With no data key the write is refused (`sap-idempotency-key-unavailable`). The upstream never sees the caller's key.
+- **The approval binding**: the stored key is in the arguments the ADR-0104 digest covers, and `governedEvaluate`'s
+  new `bindArguments` option forces `action` scope for SAP business writes, so one approval authorises exactly one key
+  and one set of fields even if an admin relaxes the rule to `tool` scope.
+- **Reuse with other fields** (code review #882): the stored key is claimed in ADR-0179's request store
+  (`request_idempotency_keys`, scope `mcp-sap:<serverId>`, `request_digest` = the arguments digest) through
+  `claimRequestKey`. The unique (user, scope, key) index serialises concurrent first uses, so of two calls with one key
+  and different fields exactly one passes; the other is refused `sap-idempotency-key-reused`. The same key with the
+  same fields passes (a retry; the server's own store (§2) answers it). The store's 30-day window and the
+  `idempotency-key-sweep` apply. The decision rows still carry `detail.sap.idempotencyKey` as evidence.
+- **Audit and usage detail**: the decision row and the usage row carry `sap` (service, entity set, stored key; the
+  usage row adds the outcome). A new outcome row `sap-business-outcome` records service, entity set, stored key, the
+  approval id, the decision row id, and the document number, `replayed` and SAP error code read from the server's
+  result contract `structuredContent.businessDocument`. Each field is shape-checked and anything else is dropped, so
+  SAP's error text, prices and addresses never reach the audit. Service and entity set come from a gateway table for
+  known tools (`create_sales_order` → `API_SALES_ORDER_SRV` / `A_SalesOrder`), else from the result.
+- **Refusals after entitlement**: a key refusal is held and returned only after the entitlement decision, as the
+  project requirement is (review #798), and audited only when it is the call's answer.
+- **Replays are not charged**: a result with `replayed: true` writes its usage row with cost 0 (and settles 0 along a
+  delegation chain). This trusts the upstream's flag: the server is the customer's own, admin-registered regulAIt-ABAP
+  server and every write is approve-first, so the exposure is small (code review #882); a follow-up can cross-check a
+  replay against the key's claim.
+- **Contract for slice A1** (regulAIt-ABAP): return `structuredContent.businessDocument` with `documentNumber`,
+  `replayed` and, on an SAP error, `errorCode` (`[A-Za-z0-9_]{1,64}`); accept `idempotencyKey` as a GUID.
+
 ## Owner decision (2026-11-15): the SAP defaults are org settings
 
 Owner, relayed by the master orchestrator: "We might need to allow orgs to decide their own settings." This answers

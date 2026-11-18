@@ -22,6 +22,7 @@ on:
       - packages/engine-garak/**
       - packages/engine-spikee/**
       - packages/engine-modelscan/**
+      - packages/engine-admission-scan/**
       - packages/engine-promptfoo/**
       - packages/engine-runner/**
       - scripts/build-engine-image.sh

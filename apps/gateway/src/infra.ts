@@ -79,6 +79,7 @@ import { ExternalEffectBlockedError, runExternalWrite } from "./external-effects
 import { errMessage } from "./err-serializer.js";
 import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
 import { retiredTagRefusal, retiredTagsAmong } from "./compliance-profile-facts.js";
+import { CLUSTER_LEADER_KEYS, ClusterLeader, leaderOnly } from "./cluster-leader.js";
 
 type InfraResourceRow = typeof infraResources.$inferSelect;
 type InfraPolicyRow = typeof infraPolicies.$inferSelect;
@@ -1261,15 +1262,20 @@ export async function backupVerifyTick(db: Db, state: SchedulerTickState): Promi
   }
 }
 
-export function startBackupVerifyScheduler(db: Db): () => void {
+export function startBackupVerifyScheduler(db: Db): () => Promise<void> {
   const state: SchedulerTickState = { lastRunAt: 0 };
+  // ADR-0343: one replica of the cluster verifies, not every replica
+  const leader = new ClusterLeader(db, CLUSTER_LEADER_KEYS.backupVerify);
   // ADR-0234 batch 7a: the tick has no principal; it runs under the named `system_task` reason
   const timer = setInterval(
-    () => void runWithRlsSystem("system_task", "timer.backup-verify", () => backupVerifyTick(db, state)),
+    leaderOnly(leader, () => runWithRlsSystem("system_task", "timer.backup-verify", () => backupVerifyTick(db, state))),
     3600 * 1000,
   );
   timer.unref?.();
-  return () => clearInterval(timer);
+  return async () => {
+    clearInterval(timer);
+    await leader.release();
+  };
 }
 
 // ===========================================================================
