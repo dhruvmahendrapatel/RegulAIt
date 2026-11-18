@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"regexp"
 	"strings"
 )
 
@@ -103,13 +104,19 @@ func readHookInput(r io.Reader, v any) error {
 	return nil
 }
 
-// mcpToolFromToolName reads the tool out of an mcp__<server>__<tool> name for a known server, or returns "".
+// mcpToolFromToolName reads the tool out of an mcp__<server>__<tool> name for a known server, or returns "". The
+// agent writes the server part with every character outside [A-Za-z0-9_-] replaced by "_" (a server named gh.x is
+// mcp__gh_x__...), so the name is matched in that form (review #952).
 func mcpToolFromToolName(name, server string) string {
-	if t, ok := strings.CutPrefix(name, "mcp__"+server+"__"); ok {
-		return t
+	for _, s := range []string{server, mcpNameForm.ReplaceAllString(server, "_")} {
+		if t, ok := strings.CutPrefix(name, "mcp__"+s+"__"); ok && t != "" {
+			return t
+		}
 	}
 	return ""
 }
+
+var mcpNameForm = regexp.MustCompile(`[^A-Za-z0-9_-]`)
 
 // mcpServerFromToolName reads the server out of an mcp__<server>__<tool> name. Only Codex has no better source; for
 // Claude Code it names the server of a call that arrived without provenance (which is then denied anyway).

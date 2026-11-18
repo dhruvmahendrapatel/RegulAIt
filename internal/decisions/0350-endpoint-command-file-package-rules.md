@@ -178,12 +178,21 @@ direct API call. Creating a gist is the worked example: the GitHub MCP `create_g
   may only tighten it (to ask or deny), and an unknown override is refused. The gateway's MCP answer
   (`gatewayMcpActionVerdict`) is the same entitlement plus the same rule. On the device the rule applies to the MCP
   tool (by server and tool name), to the CLI argv, and to the HTTP call inside `curl`, `wget`, `http`/`https`/`xh`
-  and `gh api` (method and URL read from their options; a matched action rule takes precedence over the exec default,
-  never over a matching deny). The fixture's `deviceRules` must equal the compiler's output (TypeScript test), and
+  and `gh api`. On the CLI and HTTP routes an action rule **only tightens** the exec decision (review #952): a deny
+  or ask always applies, and an allow may relax only the default for commands, and only when the argv was read
+  exactly. That means every option is in the client's declared table, there is one URL, no proxy, resolver override,
+  insecure TLS, second request or config file, and the program is named by its bare name. Every local file the call
+  reads or writes (`-d @f`, `-T`, `-o`, `--body-file`, a gist's files) is its own file action, decided by the file
+  rules. An HTTP client argv that cannot be read completely is unresolved (ask or deny), so a deny is never
+  bypassed by an unread option. Device exceptions never apply to action rules, because they come from gateway
+  entitlements. An MCP call whose tool name cannot be read takes the strictest rule naming its server, and at least
+  ask. URLs are compared the same way on both sides: host in lower case without a trailing dot, dot segments
+  removed, path case-insensitive. The fixture's `deviceRules` must equal the compiler's output (TypeScript test), and
   the Go suite decides every route from them (`TestOnePolicyConformance`); flipping one expected verdict fails seven
   device checks. The catalogue starts with `github.gist.create`, `github.pull.merge` and `github.issue.create`.
-- **Unknown routes stay unknown.** An HTTP call whose method or URL is not literal is unresolved (§2), and an action
-  the catalogue does not list is decided by the ordinary exec rules. Matching on the device is still textual.
+- **Unknown routes stay unknown.** An HTTP call whose method or URL is not literal, or whose argv the client table
+  cannot fully read, is unresolved (§2). An action the catalogue does not list (`gh api graphql`, a GitHub Enterprise
+  Server `/api/v3` path) is decided by the ordinary exec rules. Matching on the device is still textual.
 
 ### 10. Response vocabulary (lane E35)
 

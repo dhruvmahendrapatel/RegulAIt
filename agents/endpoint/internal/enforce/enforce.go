@@ -299,12 +299,18 @@ func DecideWith(policy *Policy, c Call, env HookEnv) Decision {
 	if !deny {
 		d := Decision{Verdict: Allow, Reason: "RegulAIt: MCP server allowed by policy"}
 		// the one-policy action rules for this tool (ADR-0350 §9): the device gives the gateway's answer
-		if c.MCP.Tool != "" {
-			o := strictest(policy, env, func(yield func(id, verdict string)) {
-				for _, r := range mcpActions(&policy.Commands, c.MCP.Server, c.MCP.Tool) {
-					yield(r.ID, r.Verdict)
+		// (no device exception applies: these rules come from the gateway entitlements). A call whose tool name cannot
+		// be read may be any action the server's rules name: the strictest of them, and never less than ask.
+		{
+			var o outcome
+			for _, r := range mcpActions(&policy.Commands, c.MCP.Server, c.MCP.Tool) {
+				if o.rule == "" || strictness(r.Verdict) > strictness(o.verdict) {
+					o = outcome{verdict: r.Verdict, rule: r.ID}
 				}
-			})
+			}
+			if o.rule != "" && c.MCP.Tool == "" && o.verdict == RuleAllow {
+				o.verdict = RuleAsk
+			}
 			if o.rule != "" && o.verdict != RuleAllow {
 				d = Decision{Verdict: Ask, Rule: o.rule, Reason: "RegulAIt: this MCP tool matches your organisation's action rule " + o.rule + "."}
 				if o.verdict == RuleDeny {

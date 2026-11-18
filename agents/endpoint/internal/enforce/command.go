@@ -372,11 +372,6 @@ func decideAction(p *Policy, a action, env HookEnv) outcome {
 				}
 				yield(x.ID, x.Verdict)
 			}
-			for _, id := range cliActions(a.argv) {
-				if ar, ok := r.actionRule(id); ok {
-					yield(ar.ID, ar.Verdict)
-				}
-			}
 		})
 		if o.verdict == RuleAllow && byPath && o.rule != "" {
 			// an exception may relax a bare-name rule, but not to an allow of a program named by path
@@ -385,10 +380,11 @@ func decideAction(p *Policy, a action, env HookEnv) outcome {
 			}
 		}
 		if o.rule == "" {
-			return outcome{verdict: r.Default, rule: defaultExecRuleID, reason: "RegulAIt: `" + a.argv[0] + "` is decided by your organisation's default for commands."}
+			o = outcome{verdict: r.Default, rule: defaultExecRuleID, reason: "RegulAIt: `" + a.argv[0] + "` is decided by your organisation's default for commands."}
+		} else {
+			o.reason = "RegulAIt: `" + a.argv[0] + "` matches your organisation's command rule " + o.rule + "."
 		}
-		o.reason = "RegulAIt: `" + a.argv[0] + "` matches your organisation's command rule " + o.rule + "."
-		return o
+		return withActions(r, a.argv, byPath, o)
 	case "package":
 		o := strictest(p, env, func(yield func(id, verdict string)) {
 			for _, x := range r.Packages.Rules {
@@ -433,6 +429,36 @@ func decideAction(p *Policy, a action, env HookEnv) outcome {
 		}
 		return outcome{verdict: v, rule: id, reason: "RegulAIt: " + a.kind + " of " + a.path + " is outside the workspace."}
 	}
+}
+
+// withActions applies the one-policy action rules (ADR-0350 §9) to an exec outcome. An action rule always tightens.
+// It relaxes only the default for commands, and only when every action the argv performs is allowed and was read
+// exactly by a program named by its bare name (review #952): an allowed issue create never carries a second URL, an
+// unread option or a look-alike binary through. Device exceptions never apply to action rules: they come from the
+// subject's gateway entitlements, and only the gateway may loosen them.
+func withActions(r *CommandRules, argv []string, byPath bool, o outcome) outcome {
+	matches := cliActions(argv)
+	relax := o.rule == defaultExecRuleID && !byPath && len(matches) > 0
+	allowRule := ""
+	for _, m := range matches {
+		ar, ok := r.actionRule(m.id)
+		if !ok {
+			relax = false
+			continue
+		}
+		if ar.Verdict != RuleAllow || !m.exact {
+			relax = false
+		} else if allowRule == "" {
+			allowRule = ar.ID
+		}
+		if strictness(ar.Verdict) > strictness(o.verdict) {
+			o = outcome{verdict: ar.Verdict, rule: ar.ID, reason: "RegulAIt: `" + argv[0] + "` performs an action your organisation's rule " + ar.ID + " decides."}
+		}
+	}
+	if relax && strictness(o.verdict) > strictness(RuleAllow) {
+		o = outcome{verdict: RuleAllow, rule: allowRule, reason: "RegulAIt: `" + argv[0] + "` performs an action your organisation's rule " + allowRule + " allows."}
+	}
+	return o
 }
 
 // strictest applies active exceptions and keeps the strictest matching rule.

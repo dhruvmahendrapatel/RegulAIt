@@ -100,6 +100,7 @@ export function compileActionRules(
 ): DeviceActionRule[] {
   for (const o of overrides) {
     if (!ENDPOINT_ACTIONS.some((a) => a.id === o.action)) throw new Error(`unknown endpoint action ${o.action}`);
+    if (!(o.verdict in STRICTNESS)) throw new Error(`endpoint action override ${o.action}: verdict ${String(o.verdict)}`);
   }
   return ENDPOINT_ACTIONS.map((a) => {
     const servers = effective.servers.filter((s) => {
@@ -141,8 +142,10 @@ export function httpAction(method: string, url: string): EndpointAction | null {
     return null;
   }
   if (u.protocol !== "https:" && u.protocol !== "http:") return null;
-  const host = u.hostname.toLowerCase();
-  const path = u.pathname.replace(/\/+$/, "") || "/";
+  // host lower case without a trailing dot, path compared case-insensitively; URL has already removed dot segments.
+  // The device reads a URL the same way (agents/endpoint actions.go httpActionID).
+  const host = u.hostname.toLowerCase().replace(/\.$/, "");
+  const path = u.pathname.toLowerCase().replace(/\/+$/, "") || "/";
   for (const a of ENDPOINT_ACTIONS) {
     for (const h of a.http) {
       if (h.method === method.toUpperCase() && h.host === host && pathGlob(h.path, path)) return a;

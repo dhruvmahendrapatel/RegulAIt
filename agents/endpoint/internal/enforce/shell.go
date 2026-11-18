@@ -231,6 +231,7 @@ func argvActions(argv []string, depth int) []action {
 		}
 	}
 	acts = append(acts, packageActions(argv)...)
+	acts = append(acts, clientActions(argv)...)
 	return acts
 }
 
