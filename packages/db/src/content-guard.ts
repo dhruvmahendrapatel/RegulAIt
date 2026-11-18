@@ -130,6 +130,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.automationRules, ["name"]],
   [s.policySimulations, ["policyName"]],
   [s.rateCards, ["name", "description"]],
+  // ADR-0327 addendum: a decision table's name is typed by an administrator
+  [s.decisionTables, ["name"]],
 ];
 
 export type ContentGuardExclusion =
@@ -196,6 +198,9 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   "redteam_runs.agent_name": "platform_copy",
   "redteam_runs.library_name": "platform_copy",
   "rule_step_suggestions.step_name": "platform_copy",
+  // ADR-0327 addendum: names an existing trace span (`trace_spans.name`, machine) and must equal it exactly to bind the
+  // table to that step; refusing it would make the step unbindable, not stop a paste
+  "decision_tables.step_name": "platform_copy",
   "scheduler_runs.job_name": "platform_copy",
   "use_case_decision_records.intake_template_name": "platform_copy",
   "cert_inventory.common_name": "ingested",
