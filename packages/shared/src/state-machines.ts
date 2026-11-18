@@ -6,6 +6,7 @@
  */
 import { defineMachine, type StateMachine } from "./state-machine.js";
 import { MCP_ADMISSION_STATES } from "./mcp-admission.js";
+import { INCIDENT_STATUSES } from "./accountability.js";
 import { FAIRNESS_BREACH_REVIEW_STATUSES, FAIRNESS_EVALUATION_STATUSES } from "./fairness-evaluation.js";
 
 /** `training_jobs.status` (ADR-0065). Same values as `TRAINING_JOB_STATUSES` in @regulait/db. */
@@ -103,6 +104,77 @@ export const MCP_ADMISSION_MACHINE = defineMachine({
   },
 });
 
+/** `ai_incidents.status` (ADR-0182 A12, the AI incident register). Open, contained and resolved move freely between each other by an
+ * edit (a responder's triage, including a re-open); closing is its own route, needs every clock final and every
+ * corrective action done or cancelled, and is final. */
+export const INCIDENT_MACHINE = defineMachine({
+  id: "incident",
+  stored: "ai_incidents.status",
+  states: INCIDENT_STATUSES,
+  initial: ["open"],
+  terminal: ["closed"],
+  transitions: {
+    contain: {
+      from: ["open", "resolved"],
+      to: "contained",
+      by: ["user", "admin"],
+      summary: "A responder marks the incident contained: the harm has stopped spreading.",
+    },
+    contain_by_halt: {
+      from: ["open"],
+      to: "contained",
+      by: ["admin", "agent"],
+      summary: "Halting a linked agent from the incident contains an open incident (POST .../contain).",
+    },
+    resolve: {
+      from: ["open", "contained"],
+      to: "resolved",
+      by: ["user", "admin"],
+      summary: "A responder marks the incident resolved; this releases nothing.",
+    },
+    reopen: {
+      from: ["contained", "resolved"],
+      to: "open",
+      by: ["user", "admin"],
+      summary: "A responder re-opens the incident.",
+    },
+    close: {
+      from: ["open", "contained", "resolved"],
+      to: "closed",
+      by: ["user", "admin"],
+      summary:
+        "Close with the root cause and lessons learned, once every notification clock is final and every corrective " +
+        "action is done or cancelled. Closing a serious, high or critical incident is an admin's (it releases the deploy gate).",
+    },
+  },
+});
+
+/** `eval_runs.status` (ADR-0056). A run is inserted `running` and finishes `completed`; an engine ledger row is
+ * inserted already `completed`. `error` is written when the runner throws after the run exists (ADR-0348; before,
+ * such a run stayed `running` forever and blocked its red-team library's retirement). `denied` is in the column's
+ * CHECK but no code writes it today; it is declared so the table covers every stored value. */
+export const EVAL_RUN_MACHINE = defineMachine({
+  id: "eval_run",
+  stored: "eval_runs.status",
+  states: ["running", "completed", "error", "denied"],
+  initial: ["running", "completed", "denied"],
+  terminal: ["completed", "error", "denied"],
+  transitions: {
+    complete: {
+      from: ["running"],
+      to: "completed",
+      by: ["system"],
+      summary: "Every case was dispatched and scored, and the aggregate and gate verdict were recorded.",
+    },
+    crash: {
+      from: ["running"],
+      to: "error",
+      by: ["system"],
+      summary: "The runner failed after the run started; the error is recorded and nothing is scored.",
+    },
+  },
+});
+
 /** `fairness_breach_reviews.status` (ADR-0346 decision 8). A breaching run opens one review in the Approvals Queue;
  * an approver accepts it (time-boxed risk acceptance, at most 90 days) or rejects it; a later passing run
  * supersedes it. A lapsed acceptance stays `accepted` with its end date in the past: time decides it, not a write. */
@@ -156,6 +228,8 @@ export const FAIRNESS_EVALUATION_MACHINE = defineMachine({
 export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string>>> = Object.freeze({
   [TRAINING_JOB_MACHINE.def.id]: TRAINING_JOB_MACHINE,
   [MCP_ADMISSION_MACHINE.def.id]: MCP_ADMISSION_MACHINE,
+  [INCIDENT_MACHINE.def.id]: INCIDENT_MACHINE,
+  [EVAL_RUN_MACHINE.def.id]: EVAL_RUN_MACHINE,
   [FAIRNESS_BREACH_REVIEW_MACHINE.def.id]: FAIRNESS_BREACH_REVIEW_MACHINE,
   [FAIRNESS_EVALUATION_MACHINE.def.id]: FAIRNESS_EVALUATION_MACHINE,
 } as Record<string, StateMachine<string, string>>);

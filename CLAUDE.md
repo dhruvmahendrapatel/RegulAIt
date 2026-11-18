@@ -276,3 +276,25 @@ Bedrock → Ollama, in that priority order — no per-file confirmation). Never 
 Installed as a Claude Code plugin (user scope), fully local, zero network calls — verified safe
 for use with no restrictions (see ADR-0005). Say "talk like caveman" or `/caveman` to compress
 agent output tokens; "normal mode" to turn off.
+
+## Build orchestration (owner, 2026-11-18)
+
+How the build itself is run (master session, worker sessions, merge loop, hand-over) is in
+[internal/process/orchestration/](internal/process/orchestration/README.md). Read `RULES.md` there before starting or
+steering worker sessions. In brief:
+- at most 10 worker sessions at once;
+- Opus at medium effort for code, Sonnet for mechanical work;
+- worker reports are claims that the master checks;
+- the hand-over files are kept current after every task.
+
+# Compact instructions
+
+When the conversation is compacted, keep:
+- the hard safety rules (production sign-off, no AWS writes, merge commits only, public repo, ask before deleting);
+- every open question waiting on the owner, with what was asked;
+- the current batch: PRs in review, released SHAs, open sessions and their roles, and the running background tasks;
+- outcomes already confirmed versus only proposed;
+- items touched in external systems (PR numbers, comments posted, scheduled tasks created);
+- file paths of evidence and results.
+
+Drop: raw tool output, query result rows, file contents that can be re-read, superseded plans, and chatter.
