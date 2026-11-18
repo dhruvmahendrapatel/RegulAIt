@@ -222,20 +222,29 @@ describe("ADR-0333 sweep: incidents with evidence, exported through the audit ch
     expect(await incidentsFor(replayTrigger)).toHaveLength(1);
   });
 
-  it("a truncated look-back is audited as degraded detection, never silent (review of #865)", async () => {
+  it("a truncated look-back is audited as degraded detection, once per group per window (review of #865)", async () => {
     await toHead();
+    await db.execute(sql`DELETE FROM detection_degraded_marks WHERE group_key = ${`user:${adminId}`}`);
     const before = await db.select({ id: auditLog.id }).from(auditLog).where(eq(auditLog.ruleId, DETECTION_RULE_IDS.degraded));
-    // more than one group's look-back budget inside the window: the last batch's look-back must truncate
-    const n = DETECTION_SWEEP_LIMITS.lookbackRowsPerGroup + 600;
+    // more than one group's look-back budget inside the window: the last TWO batches' look-backs truncate
+    const n = DETECTION_SWEEP_LIMITS.lookbackRowsPerGroup + 1100;
     await db.insert(auditLog).values(
       Array.from({ length: n }, () => ({ userId: adminId, objectType: "mcp_tool" as const, toolName: "noop_tool", effect: "allow" as const, ruleId: "allow-list", ruleChain: [], reason: "test" })),
     );
     const out = await runDetectionSweep(db, adminId);
     expect(out.lookbackTruncated).toBe(true);
     const after = await db.select().from(auditLog).where(eq(auditLog.ruleId, DETECTION_RULE_IDS.degraded)).orderBy(desc(auditLog.seq));
-    expect(after.length).toBeGreaterThan(before.length);
-    expect(after[0]!.detail).toMatchObject({ subsystem: "agent-detection", groups: [`user:${adminId}`], perGroupRows: DETECTION_SWEEP_LIMITS.lookbackRowsPerGroup });
+    // two consecutive truncated batches, one audit row: the group is reported once per window
+    expect(after.length - before.length).toBe(1);
+    expect(after[0]!.detail).toMatchObject({ subsystem: "agent-detection", groups: [`user:${adminId}`], groupCount: 1, perGroupRows: DETECTION_SWEEP_LIMITS.lookbackRowsPerGroup });
     expect(after[0]!.effect).toBe("deny");
+    // still busy in the next pass, inside the same window: nothing new
+    await db.insert(auditLog).values(
+      Array.from({ length: 500 }, () => ({ userId: adminId, objectType: "mcp_tool" as const, toolName: "noop_tool", effect: "allow" as const, ruleId: "allow-list", ruleChain: [], reason: "test" })),
+    );
+    expect((await runDetectionSweep(db, adminId)).lookbackTruncated).toBe(true);
+    const later = await db.select({ id: auditLog.id }).from(auditLog).where(eq(auditLog.ruleId, DETECTION_RULE_IDS.degraded));
+    expect(later.length).toBe(after.length);
   });
 
   it("a held lease is not claimed by a second pass", async () => {

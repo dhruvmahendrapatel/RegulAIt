@@ -17840,4 +17840,22 @@ export const detectionIncidentEvidence = pgTable(
     check("detection_incident_evidence_step_check", sql`${t.stepIndex} BETWEEN 0 AND 999`),
   ],
 );
+
+/**
+ * When the engine last AUDITED a truncated look-back for a group (`detection-degraded`), so a group that stays busy
+ * is reported once per detection window, not on every batch (review of #865). One row per group, overwritten.
+ */
+export const detectionDegradedMarks = pgTable(
+  "detection_degraded_marks",
+  {
+    groupKey: text("group_key").primaryKey(),
+    recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "detection_degraded_marks_group_key_check",
+      sql`${t.groupKey} ~ '^(grant|user|endpoint):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'`,
+    ),
+  ],
+);
 // ===== end ADR-0333 =================================================================================================

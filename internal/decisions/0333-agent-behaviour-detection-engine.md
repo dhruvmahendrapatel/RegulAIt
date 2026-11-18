@@ -43,7 +43,8 @@ They stay as they are. This ADR adds a per-session sequence engine beside them.
   the chain backwards. It keeps at most 2,000 rows per group and 20,000 per batch, so one busy group cannot push
   another group's first step out of the window. When a group's look-back is cut, the batch writes one
   `detection-degraded` audit row (effect `deny`, the groups and the seq range), which reaches the SIEM like any
-  incident. **Residual:** a sequence whose first step lies more than 2,000 rows back in its own group, inside the
+  incident. A group is reported once per detection window (`detection_degraded_marks`), not on every batch while it
+  stays busy. **Residual:** a sequence whose first step lies more than 2,000 rows back in its own group, inside the
   window, may go undetected; it is reported, not hidden.
 - **First run replays history (D2).** On first run the live cursor starts at the chain head. The retained history,
   from the first retained row up to that head, is replayed behind a second cursor (`replay_cursor_seq` up to

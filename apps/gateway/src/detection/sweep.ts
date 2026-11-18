@@ -396,17 +396,30 @@ async function commitBatch(
   const historical = mode === "replay";
   return db.transaction(async (tx) => {
     let raised = 0;
-    if (degraded) {
-      // ADR-0333 §1: a truncated look-back is never silently treated as matching nothing. One chained row per batch
-      // reaches the SIEM through ADR-0303 like every incident.
+    // ADR-0333 §1: a truncated look-back is never silently treated as matching nothing. It is audited once per group
+    // per detection window, not on every batch: a group that stays busy would otherwise flood the chain and the
+    // SIEM (review of #865). The mark is claimed in this transaction, so a rolled-back batch leaves it unclaimed.
+    const report = degraded
+      ? (
+          await rows<{ group: string }>(
+            tx,
+            sql`INSERT INTO detection_degraded_marks (group_key, recorded_at)
+                SELECT g, now() FROM unnest(ARRAY[${sql.join(degraded.groups.map((g) => sql`${g}`), sql`, `)}]::text[]) AS g
+                ON CONFLICT (group_key) DO UPDATE SET recorded_at = now()
+                  WHERE detection_degraded_marks.recorded_at < now() - make_interval(secs => ${Math.max(degraded.maxSpanSeconds, 60)})
+                RETURNING group_key AS "group"`,
+          )
+        ).map((r) => r.group).sort()
+      : [];
+    if (degraded && report.length > 0) {
       await tx.insert(auditLog).values({
         userId: SYSTEM_ACTOR,
         objectType: "detection_incident",
         detail: {
           subsystem: "agent-detection",
           adr: "0333",
-          groups: degraded.groups.slice(0, 50),
-          groupCount: degraded.groups.length,
+          groups: report.slice(0, 50),
+          groupCount: report.length,
           fromSeq: degraded.fromSeq,
           toSeq: degraded.toSeq,
           windowSeconds: degraded.maxSpanSeconds,

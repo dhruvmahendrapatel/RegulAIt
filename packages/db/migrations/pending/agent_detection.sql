@@ -145,3 +145,21 @@ DROP POLICY IF EXISTS "detection_incident_evidence_admin" ON "detection_incident
 CREATE POLICY "detection_incident_evidence_admin" ON "detection_incident_evidence" FOR ALL
   USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
   WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
+--> statement-breakpoint
+-- When a truncated look-back was last audited per group: one `detection-degraded` row per group per window.
+-- RLS as on the incident tables (the group key names a principal); only the sweep (`system_task`) writes it.
+CREATE TABLE IF NOT EXISTS "detection_degraded_marks" (
+  "group_key" text PRIMARY KEY NOT NULL,
+  "recorded_at" timestamp with time zone DEFAULT now() NOT NULL,
+  CONSTRAINT "detection_degraded_marks_group_key_check" CHECK ("group_key" ~ '^(grant|user|endpoint):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+);
+--> statement-breakpoint
+ALTER TABLE "detection_degraded_marks" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "detection_degraded_marks" FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+DROP POLICY IF EXISTS "detection_degraded_marks_admin" ON "detection_degraded_marks";
+--> statement-breakpoint
+CREATE POLICY "detection_degraded_marks_admin" ON "detection_degraded_marks" FOR ALL
+  USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
+  WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
