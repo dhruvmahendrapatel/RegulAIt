@@ -11,7 +11,9 @@ import (
 	_ "embed"
 	"net/url"
 	"path"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
@@ -128,6 +130,22 @@ func mcpActions(c *CommandRules, server, tool string) []ActionRule {
 	return out
 }
 
+// unreserved percent-escapes (%67 is "g", %2e is ".") name the same path as the bare character, so both sides
+// decode them before matching; an escaped "/" or any other byte stays escaped
+var unreserved = regexp.MustCompile(`%[0-9a-f]{2}`)
+
+func decodeUnreserved(esc string) string {
+	b, err := strconv.ParseUint(esc[1:], 16, 8)
+	if err != nil {
+		return esc
+	}
+	c := byte(b)
+	if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '.' || c == '_' || c == '~' {
+		return strings.ToLower(string(c))
+	}
+	return esc
+}
+
 // servesAs: the call's server is one of names, as written or in the mcp__<server>__ form an agent derives from it.
 func servesAs(names []string, server string) bool {
 	return slices.ContainsFunc(names, func(n string) bool { return n == server || mcpNameForm.ReplaceAllString(n, "_") == server })
@@ -142,7 +160,7 @@ func httpActionID(method, raw string) (string, bool) {
 		return "", false
 	}
 	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
-	p := strings.TrimRight(path.Clean("/"+strings.ReplaceAll(strings.ToLower(u.EscapedPath()), "%2e", ".")), "/")
+	p := strings.TrimRight(path.Clean("/"+unreserved.ReplaceAllStringFunc(strings.ToLower(u.EscapedPath()), decodeUnreserved)), "/")
 	if p == "" {
 		p = "/"
 	}

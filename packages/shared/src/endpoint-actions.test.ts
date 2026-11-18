@@ -82,8 +82,10 @@ describe("ADR-0350 §9 endpoint actions", () => {
     const loosened = compileActionRules(effectiveOf(s), host, [{ action: "github.gist.create", verdict: "allow" }]);
     expect(loosened.find((r) => r.action === "github.gist.create")?.verdict).toBe("deny");
     expect(() => compileActionRules(effectiveOf(s), host, [{ action: "nope", verdict: "deny" }])).toThrow();
-    const bad = { action: "github.gist.create", verdict: "maybe" } as unknown as ActionOverride;
-    expect(() => compileActionRules(effectiveOf(s), host, [bad])).toThrow();
+    for (const verdict of ["maybe", "toString", "__proto__"]) {
+      const bad = { action: "github.gist.create", verdict } as unknown as ActionOverride;
+      expect(() => compileActionRules(effectiveOf(s), host, [bad]), verdict).toThrow();
+    }
   });
 
   it("unknown or malformed HTTP calls are not an action", () => {
@@ -94,5 +96,7 @@ describe("ADR-0350 §9 endpoint actions", () => {
     // read the way the device reads it (review #952): dot segments, a trailing-dot host, path case
     expect(httpAction("POST", "https://api.github.com/x/../gists")?.id).toBe("github.gist.create");
     expect(httpAction("POST", "https://api.github.com./GISTS")?.id).toBe("github.gist.create");
+    expect(httpAction("POST", "https://api.github.com/%67ists")?.id).toBe("github.gist.create");
+    expect(httpAction("POST", "https://api.github.com/gists%2fx")).toBeNull();
   });
 });

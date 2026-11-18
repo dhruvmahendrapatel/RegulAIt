@@ -181,7 +181,12 @@ direct API call. Creating a gist is the worked example: the GitHub MCP `create_g
   and `gh api`. On the CLI and HTTP routes an action rule **only tightens** the exec decision (review #952): a deny
   or ask always applies, and an allow may relax only the default for commands, and only when the argv was read
   exactly. That means every option is in the client's declared table, there is one URL, no proxy, resolver override,
-  insecure TLS, second request or config file, and the program is named by its bare name. Every local file the call
+  insecure TLS, second request or config file, and the program is named by its bare name. The line must not change
+  the environment: no `FOO=x prog`, `env`, `export`, `declare`, `set` or `source`. curl must start with `-q` so that
+  no `.curlrc` is read, and wget must have `--no-config`. httpie and xh are never exact, because they read a config
+  file they cannot skip. A `--request-target`, `Host` header or `--location-trusted` voids exactness. A client run by
+  `xargs`, or a curl or wget call with no URL on its argv, is unresolved. For gh, a `--flag=value` before the
+  command words is skipped as cobra skips it (the call is then not exact); any other flag there is unresolved. Every local file the call
   reads or writes (`-d @f`, `-T`, `-o`, `--body-file`, a gist's files) is its own file action, decided by the file
   rules. An HTTP client argv that cannot be read completely is unresolved (ask or deny), so a deny is never
   bypassed by an unread option. Device exceptions never apply to action rules, because they come from gateway
@@ -190,6 +195,18 @@ direct API call. Creating a gist is the worked example: the GitHub MCP `create_g
   removed, path case-insensitive. The fixture's `deviceRules` must equal the compiler's output (TypeScript test), and
   the Go suite decides every route from them (`TestOnePolicyConformance`); flipping one expected verdict fails seven
   device checks. The catalogue starts with `github.gist.create`, `github.pull.merge` and `github.issue.create`.
+- **Limits of matching the command line as text.** The device sees one tool call's command line, not the process
+  it starts. It cannot see:
+  - variables exported by an earlier, separate tool call;
+  - a shell alias or function defined earlier;
+  - gh aliases and extensions;
+  - a `~/.curlrc` when `-q` is missing (the call is then not exact, so it only tightens);
+  - proxy variables set outside the line.
+
+  A hidden environment or config file can make an exact allow wrong. A renamed command (an alias, a function, a gh
+  alias or extension) can also avoid a deny, because the deny is matched on the text. These are the limits ADR-0298
+  already states for on-device matching. The gateway's own decision on the MCP and connector routes (slice 2b) is the
+  backstop.
 - **Unknown routes stay unknown.** An HTTP call whose method or URL is not literal, or whose argv the client table
   cannot fully read, is unresolved (§2). An action the catalogue does not list (`gh api graphql`, a GitHub Enterprise
   Server `/api/v3` path) is decided by the ordinary exec rules. Matching on the device is still textual.

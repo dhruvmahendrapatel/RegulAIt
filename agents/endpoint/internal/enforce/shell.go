@@ -49,6 +49,9 @@ func parseShell(line string, depth int) []action {
 		return []action{{kind: "unresolved", cause: "a command line the shell parser cannot read"}}
 	}
 	var acts []action
+	// envTouched: the line sets or exports a variable (FOO=x alone, export, declare, set, source), so every program
+	// in it may run with an environment the check does not see (review #952)
+	envTouched := false
 	syntax.Walk(file, func(n syntax.Node) bool {
 		switch x := n.(type) {
 		case *syntax.Stmt:
@@ -57,6 +60,7 @@ func parseShell(line string, depth int) []action {
 			}
 		case *syntax.CallExpr:
 			if len(x.Args) == 0 {
+				envTouched = envTouched || len(x.Assigns) > 0
 				return true // assignments only; their values are walked for substitutions
 			}
 			argv, ok := literalArgv(x.Args)
@@ -64,15 +68,38 @@ func parseShell(line string, depth int) []action {
 				acts = append(acts, action{kind: "unresolved", cause: "a word that is not literal, such as a variable or a command substitution"})
 				return true
 			}
-			acts = append(acts, argvActions(argv, depth)...)
-		case *syntax.DeclClause, *syntax.LetClause, *syntax.ArithmCmd, *syntax.TestClause:
+			if envChangers[argv[0]] {
+				envTouched = true
+			}
+			inner := argvActions(argv, depth)
+			if len(x.Assigns) > 0 { // FOO=x prog: the assignment is in prog's environment only
+				markEnv(inner)
+			}
+			acts = append(acts, inner...)
+		case *syntax.DeclClause:
+			envTouched = true // export, declare, typeset, local, readonly
+		case *syntax.LetClause, *syntax.ArithmCmd, *syntax.TestClause:
 			// builtins with no program to run; their words are walked for substitutions
 		case *syntax.CoprocClause:
 			acts = append(acts, action{kind: "unresolved", cause: "a coprocess"})
 		}
 		return true
 	})
+	if envTouched {
+		markEnv(acts)
+	}
 	return acts
+}
+
+// envChangers are builtins that change the environment later programs in the line run with
+var envChangers = set("set", "unset", "source", ".", "shopt", "alias")
+
+func markEnv(acts []action) {
+	for i := range acts {
+		if acts[i].kind == "exec" {
+			acts[i].envSet = true
+		}
+	}
 }
 
 // literalArgv returns the words as the shell would pass them, when every word is literal.
@@ -226,7 +253,15 @@ func argvActions(argv []string, depth int) []action {
 	default:
 		if w, ok := wrappers[prog]; ok {
 			if inner := unwrap(argv[1:], w); len(inner) > 0 {
-				acts = append(acts, argvActions(inner, depth)...)
+				innerActs := argvActions(inner, depth)
+				if prog == "env" {
+					markEnv(innerActs) // env sets, unsets or clears variables for the program it runs
+				}
+				if prog == "xargs" && isClient(inner) {
+					// xargs appends arguments read from stdin: URLs and options the argv does not show
+					innerActs = append(innerActs, action{kind: "unresolved", cause: "an HTTP client or gh run by xargs"})
+				}
+				acts = append(acts, innerActs...)
 			}
 		}
 	}

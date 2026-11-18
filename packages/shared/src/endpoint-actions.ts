@@ -100,7 +100,7 @@ export function compileActionRules(
 ): DeviceActionRule[] {
   for (const o of overrides) {
     if (!ENDPOINT_ACTIONS.some((a) => a.id === o.action)) throw new Error(`unknown endpoint action ${o.action}`);
-    if (!(o.verdict in STRICTNESS)) throw new Error(`endpoint action override ${o.action}: verdict ${String(o.verdict)}`);
+    if (!Object.hasOwn(STRICTNESS, o.verdict)) throw new Error(`endpoint action override ${o.action}: verdict ${String(o.verdict)}`);
   }
   return ENDPOINT_ACTIONS.map((a) => {
     const servers = effective.servers.filter((s) => {
@@ -145,7 +145,15 @@ export function httpAction(method: string, url: string): EndpointAction | null {
   // host lower case without a trailing dot, path compared case-insensitively; URL has already removed dot segments.
   // The device reads a URL the same way (agents/endpoint actions.go httpActionID).
   const host = u.hostname.toLowerCase().replace(/\.$/, "");
-  const path = u.pathname.toLowerCase().replace(/\/+$/, "") || "/";
+  // an unreserved percent-escape (%67 is "g") names the same path as the bare character; "/" and others stay escaped
+  const path =
+    u.pathname
+      .toLowerCase()
+      .replace(/%[0-9a-f]{2}/g, (e) => {
+        const c = String.fromCharCode(parseInt(e.slice(1), 16));
+        return /[a-z0-9\-._~]/i.test(c) ? c.toLowerCase() : e;
+      })
+      .replace(/\/+$/, "") || "/";
   for (const a of ENDPOINT_ACTIONS) {
     for (const h of a.http) {
       if (h.method === method.toUpperCase() && h.host === host && pathGlob(h.path, path)) return a;

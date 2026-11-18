@@ -16,6 +16,7 @@ package enforce
 import (
 	"net/url"
 	"path"
+	"slices"
 	"strings"
 )
 
@@ -52,6 +53,7 @@ const (
 	oFanOut            // a flag that makes the call reach more than its URL (recursion, span hosts)
 	oPostData          // wget --post-data / --body-data: data, method POST unless --method
 	oPostFile          // wget --post-file / --body-file: a file to read, method POST unless --method
+	oNoConfig          // wget --no-config: no wgetrc
 	oUnknownV          // understood but not checkable, with a value (config file, input list, execute)
 	oUnknown           // understood but not checkable, a flag (--next)
 )
@@ -80,24 +82,23 @@ func merge(ms ...map[string]opt) map[string]opt {
 }
 
 var curlOpts = merge(
-	optTable(oBool, false, "-s", "--silent", "-S", "--show-error", "-L", "--location", "-f", "--fail", "--fail-with-body",
+	optTable(oBool, false, "-V", "--version", "-h", "--help", "-s", "--silent", "-S", "--show-error", "-L", "--location", "-f", "--fail", "--fail-with-body",
 		"--fail-early", "-v", "--verbose", "-i", "--include", "-N", "--no-buffer", "-#", "--progress-bar",
 		"--no-progress-meter", "--compressed", "-0", "--http1.0", "--http1.1", "--http2", "--http2-prior-knowledge",
 		"--http3", "-4", "--ipv4", "-6", "--ipv6", "-j", "--junk-session-cookies", "-l", "--list-only", "-n", "--netrc",
 		"--netrc-optional", "-R", "--remote-time", "-M", "--manual", "-q", "--disable", "-J", "--remote-header-name",
 		"--create-dirs", "--path-as-is", "--post301", "--post302", "--post303", "--retry-all-errors",
-		"--retry-connrefused", "--location-trusted", "--raw", "--tcp-nodelay", "--no-keepalive", "--no-sessionid",
+		"--retry-connrefused", "--raw", "--tcp-nodelay", "--no-keepalive", "--no-sessionid",
 		"--digest", "--basic", "--ntlm", "--negotiate", "--anyauth", "--styled-output", "--no-styled-output",
 		"--crlf", "--ignore-content-length", "--no-clobber", "--remove-on-error", "--ssl", "--ssl-reqd", "-1",
 		"--tlsv1", "--tlsv1.0", "--tlsv1.1", "--tlsv1.2", "--tlsv1.3", "--cert-status", "--suppress-connect-headers",
 		"--fail-early", "-a", "--append", "-B", "--use-ascii", "-p", "--proxytunnel", "--skip-existing"),
-	optTable(oValue, true, "-u", "--user", "-A", "--user-agent", "-e", "--referer", "-w", "--write-out", "-m",
-		"--max-time", "--connect-timeout", "--retry", "--retry-delay", "--retry-max-time", "--cacert", "--capath",
-		"-E", "--cert", "--cert-type", "--key", "--key-type", "--pass", "-r", "--range", "--limit-rate",
+	optTable(oValue, true, "-u", "--user", "-A", "--user-agent", "-e", "--referer", "-m",
+		"--max-time", "--connect-timeout", "--retry", "--retry-delay", "--retry-max-time",
+		"--cert-type", "--key-type", "--pass", "-r", "--range", "--limit-rate",
 		"--max-filesize", "--max-redirs", "--oauth2-bearer", "--keepalive-time", "-y", "--speed-limit", "-Y",
-		"--speed-time", "--expect100-timeout", "--ciphers", "--tls13-ciphers", "--pinnedpubkey", "--noproxy",
-		"--request-target", "--aws-sigv4", "--url-query", "--proto", "--proto-redir", "--proto-default", "-z",
-		"--time-cond", "-C", "--continue-at", "--rate", "--parallel-max", "--tls-max", "--curves", "--create-file-mode",
+		"--speed-time", "--expect100-timeout", "--ciphers", "--tls13-ciphers", "--noproxy",
+		"--aws-sigv4", "--proto", "--proto-redir", "--proto-default", "-C", "--continue-at", "--rate", "--parallel-max", "--tls-max", "--curves", "--create-file-mode",
 		"--local-port", "--interface", "-t", "--telnet-option", "-Q", "--quote", "-P", "--ftp-port",
 		"-U", "--proxy-user"),
 	optTable(oMethod, true, "-X", "--request"),
@@ -111,23 +112,32 @@ var curlOpts = merge(
 	optTable(oUpload, true, "-T", "--upload-file"),
 	optTable(oHeader, true, "-H", "--header", "--proxy-header"),
 	optTable(oCookie, true, "-b", "--cookie"),
-	optTable(oRead, true, "--netrc-file", "--etag-compare"),
+	// every option whose value may name a local file curl reads (review #952): the file rules decide it
+	optTable(oRead, true, "--netrc-file", "--etag-compare", "--cacert", "--capath", "-E", "--cert", "--key",
+		"--pinnedpubkey", "-z", "--time-cond"),
+	optTable(oHeader, true, "-w", "--write-out"), // -w @file reads a format file
+	optTable(oDataURL, true, "--url-query"),
 	optTable(oWrite, true, "-o", "--output", "-D", "--dump-header", "-c", "--cookie-jar", "--trace", "--trace-ascii",
 		"--stderr", "--etag-save", "--libcurl"),
 	optTable(oRemoteName, false, "-O", "--remote-name", "--remote-name-all"),
 	optTable(oNoGlob, false, "-g", "--globoff"),
-	optTable(oRedirect, true, "-x", "--proxy", "--preproxy", "--socks4", "--socks4a", "--socks5", "--socks5-hostname",
+	optTable(oRedirect, true, "--request-target", "-x", "--proxy", "--preproxy", "--socks4", "--socks4a", "--socks5", "--socks5-hostname",
 		"--resolve", "--connect-to", "--unix-socket", "--abstract-unix-socket", "--doh-url", "--dns-servers"),
-	optTable(oInsecure, false, "-k", "--insecure", "--proxy-insecure", "--doh-insecure"),
+	optTable(oInsecure, false, "-k", "--insecure", "--proxy-insecure", "--doh-insecure", "--location-trusted"),
 	optTable(oUnknownV, true, "-K", "--config", "--variable", "--output-dir"),
 	optTable(oUnknown, false, "-:", "--next", "-Z", "--parallel"),
 )
+
+// infoOpts print the client's own version or help and call no URL
+var infoOpts = set("-V", "--version", "-h", "--help")
 
 var wgetOpts = merge(
 	optTable(oBool, false, "-q", "--quiet", "-v", "--verbose", "-nv", "--no-verbose", "-S", "--server-response",
 		"--spider", "-c", "--continue", "-N", "--timestamping", "-4", "--inet4-only", "-6", "--inet6-only", "-nc",
 		"--no-clobber", "--content-disposition", "--no-cookies", "--ignore-length", "--no-cache", "--no-dns-cache",
-		"--auth-no-challenge", "--https-only", "--show-progress", "--no-proxy", "--debug", "-d", "--no-hsts"),
+		"--auth-no-challenge", "--https-only", "--show-progress", "--no-proxy", "--debug", "-d", "--no-hsts",
+		"-V", "--version", "-h", "--help"),
+	optTable(oNoConfig, false, "--no-config"),
 	optTable(oValue, true, "-U", "--user-agent", "--user", "--password", "--http-user", "--http-password", "-t",
 		"--tries", "-T", "--timeout", "-w", "--wait", "-Q", "--quota", "--limit-rate", "--referer", "--ca-certificate",
 		"--certificate", "--private-key", "--max-redirect", "--progress", "--retry-on-http-error"),
@@ -267,7 +277,9 @@ func httpClient(argv []string) (clientCall, bool) {
 }
 
 func curlCall(args []string) clientCall {
-	c := clientCall{exact: true}
+	// exact only with -q (--disable) first: otherwise curl reads a .curlrc from $CURL_HOME, $XDG_CONFIG_HOME or
+	// $HOME, which can add URLs, uploads and proxies this argv does not show (review #952)
+	c := clientCall{exact: len(args) > 0 && (args[0] == "-q" || args[0] == "--disable")}
 	unread := false // an option that is read but cannot be checked (a config file, a second request)
 	method, data, get, remote, glob := "", false, false, false, true
 	c.complete = parseOpts(args, curlOpts, func(name string, o opt, v string) {
@@ -311,12 +323,17 @@ func curlCall(args []string) clientCall {
 			if f := fileValue(v); f != "" {
 				c.files = append(c.files, readAct(f))
 			}
+			if name, _, _ := strings.Cut(v, ":"); strings.EqualFold(strings.TrimSpace(name), "host") {
+				c.exact = false // a Host header sends the request to another virtual host
+			}
 		case oCookie:
 			if !strings.Contains(v, "=") && v != "-" {
 				c.files = append(c.files, readAct(v))
 			}
 		case oRead:
-			c.files = append(c.files, readAct(v))
+			if !strings.HasPrefix(v, "sha256//") { // --pinnedpubkey takes a hash or a key file
+				c.files = append(c.files, readAct(v))
+			}
 		case oWrite:
 			if v != "-" {
 				c.files = append(c.files, writeAct(v))
@@ -331,6 +348,9 @@ func curlCall(args []string) clientCall {
 			unread = true
 		}
 	}, func(p string) { c.urls = append(c.urls, p) }) && !unread
+	if len(c.urls) == 0 && !slices.ContainsFunc(args, func(a string) bool { return infoOpts[a] }) {
+		c.complete = false // the URL comes from somewhere this argv does not show (stdin, xargs, a config file)
+	}
 	for i, u := range c.urls {
 		if glob && strings.ContainsAny(u, "{[") {
 			c.complete = false // URL globbing expands to more URLs than the argv shows
@@ -372,7 +392,8 @@ func remoteNames(c *clientCall) bool {
 }
 
 func wgetCall(args []string) clientCall {
-	c := clientCall{exact: true}
+	// exact only with --no-config: otherwise wget reads $WGETRC or ~/.wgetrc, which can add proxies and uploads
+	c := clientCall{exact: slices.Contains(args, "--no-config")}
 	unread := false // an option that is read but cannot be checked (a config file, a second request)
 	method, post, output := "", false, false
 	c.complete = parseOpts(args, wgetOpts, func(name string, o opt, v string) {
@@ -405,6 +426,9 @@ func wgetCall(args []string) clientCall {
 		}
 		c.urls = append(c.urls, p)
 	}) && !unread
+	if len(c.urls) == 0 && !slices.ContainsFunc(args, func(a string) bool { return infoOpts[a] }) {
+		c.complete = false // the URL comes from somewhere this argv does not show
+	}
 	if !output {
 		c.complete = c.complete && remoteNames(&c) // wget saves each URL into the working directory
 	}
@@ -423,7 +447,9 @@ func wgetCall(args []string) clientCall {
 var httpieSeps = []string{":=@", "=@", "==", ":=", "=", "@", ":"}
 
 func httpieCall(argv []string) clientCall {
-	c := clientCall{exact: true}
+	// never exact: httpie and xh read default options from a config file ($HTTPIE_CONFIG_DIR, $XH_CONFIG_DIR) and
+	// have no option to skip it, so an action rule only tightens their calls (review #952)
+	c := clientCall{}
 	unread := false // an option that is read but cannot be checked (a config file, a second request)
 	method, data, download := "", false, false
 	var pos []string
@@ -505,7 +531,7 @@ var httpMethods = set("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"
 var ghPlaceholders = strings.NewReplacer("{owner}", "_", "{repo}", "_", "{branch}", "_")
 
 func ghAPICall(g ghArgv) clientCall {
-	c := clientCall{exact: true}
+	c := clientCall{exact: !g.early}
 	method, host, data, endpoint := "", "api.github.com", false, ""
 	var extra []string
 	c.complete = parseOpts(g.rest, ghAPIOpts, func(name string, o opt, v string) {
@@ -570,6 +596,10 @@ func ghAPICall(g ghArgv) clientCall {
 type ghArgv struct {
 	words []string
 	rest  []string
+	// early: a --flag=value or -fVALUE came before the command words (gh still runs the command); it is not read,
+	// so the call is not exact. lost: a flag before the words whose shape does not say whether it takes the next
+	// argument, so the command words cannot be placed (review #952): the call is unresolved.
+	early, lost bool
 }
 
 // ghWords splits gh's command words (gist create, pr merge, api) from the arguments after them. A -R/--repo
@@ -587,8 +617,11 @@ func ghWords(argv []string) ghArgv {
 		case a == "-R" || a == "--repo":
 			i++
 		case strings.HasPrefix(a, "--repo=") || (strings.HasPrefix(a, "-R") && len(a) > 2):
+		case (strings.HasPrefix(a, "--") && strings.Contains(a, "=")) || (!strings.HasPrefix(a, "--") && strings.HasPrefix(a, "-") && len(a) > 2):
+			g.early = true // cobra skips a flag that carries its own value while it looks for the command
 		case strings.HasPrefix(a, "-"):
-			g.rest = args[i:] // a flag before the command words: the command is not read
+			g.lost = true
+			g.rest = args[i:]
 			return g
 		default:
 			g.words = append(g.words, a)
@@ -629,7 +662,7 @@ func init() {
 
 // ghCall parses a gh command from the table: the files it sends and whether every argument was understood.
 func ghCall(g ghArgv) (files []action, complete bool) {
-	if len(g.words) < 2 {
+	if len(g.words) < 2 || g.lost {
 		return nil, false
 	}
 	cmd, ok := ghCommands[g.words[0]+" "+g.words[1]]
@@ -647,10 +680,18 @@ func ghCall(g ghArgv) (files []action, complete bool) {
 			files = append(files, readAct(p))
 		}
 	})
-	if cmd.positionals >= 0 && n > cmd.positionals {
+	if (cmd.positionals >= 0 && n > cmd.positionals) || g.early {
 		complete = false
 	}
 	return files, complete
+}
+
+// isClient: argv runs an HTTP client or gh.
+func isClient(argv []string) bool {
+	if _, ok := httpClient(argv); ok {
+		return true
+	}
+	return path.Base(argv[0]) == "gh"
 }
 
 // clientActions are the actions an HTTP client or gh command adds to its exec action: the local files it reads and
@@ -664,7 +705,11 @@ func clientActions(argv []string) []action {
 		return acts
 	}
 	if path.Base(argv[0]) == "gh" {
-		files, _ := ghCall(ghWords(argv))
+		g := ghWords(argv)
+		files, _ := ghCall(g)
+		if g.lost {
+			files = append(files, action{kind: "unresolved", cause: "a gh command whose words this check cannot place"})
+		}
 		return files
 	}
 	return nil
