@@ -84,7 +84,9 @@ import {
   FEDERATION_AWS_PRINCIPAL_SUBJECT,
   federationSourceSubject,
   type DiscoverySourceKind,
+  normaliseGuid,
 } from "@regulait/shared";
+import { upsertLabelDefinitions } from "./sensitivity-labels.js";
 import { loadEgressAllowList } from "./custom-providers.js";
 import { createGuardedFetch, EgressBlockedError, EgressRedirectError, type EgressResolver } from "./egress-guard.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
@@ -764,7 +766,15 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
     throw err;
   }
   const digest = rawSeen ? hash.digest("hex") : createHash("sha256").update(JSON.stringify(observations)).digest("hex");
-  return applyDiscoveryRunObservations(db, run, owner, source, observations, digest, classifyCatalogue, readOutcomes);
+  // ADR-0363 slice 1: an Entra scan that read the tenant's complete Purview label list commits it with the run
+  const labelTenant = source.kind === "idp_entra" ? normaliseGuid(cred?.publicConfig.tenantId) : null;
+  const labels = result.labelDefinitions;
+  const inCommit = labels && labelTenant
+    ? async (t: Db) => {
+        await upsertLabelDefinitions(t, { tenantId: labelTenant, sourceId: source.id, definitions: labels });
+      }
+    : undefined;
+  return applyDiscoveryRunObservations(db, run, owner, source, observations, digest, classifyCatalogue, readOutcomes, inCommit);
 }
 
 /**

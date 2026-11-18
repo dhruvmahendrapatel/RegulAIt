@@ -364,6 +364,13 @@ type ComplianceProfileRow = typeof complianceProfiles.$inferSelect;
 
 const PII_STRICTNESS: Record<string, number> = { log: 0, warn: 1, redact: 2, block: 3 };
 
+/** ADR-0363: the stricter of two PII modes (null = no enforcement, the least strict), by the cascade's own order */
+export function stricterPiiMode(a: PiiMode | null, b: PiiMode | null): PiiMode | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return PII_STRICTNESS[b]! > PII_STRICTNESS[a]! ? b : a;
+}
+
 /** §8.3: the effective policy of a SET of framework profiles. The spec gives
  * no strictness ordering among frameworks, so profiles compose additively:
  * required templates union, mcp defaults tighten to read_only if ANY profile
