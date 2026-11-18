@@ -447,6 +447,7 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/approvals/bulk",
   "POST /v1/approvals/:approvalId/claim",
   "GET /v1/approvals/workload",
+  "GET /v1/approvals/task-widget",
   "GET /v1/approvals/views",
   "POST /v1/approvals/views",
   "DELETE /v1/approvals/views/:id",

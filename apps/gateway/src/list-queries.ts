@@ -2,7 +2,7 @@
  * Query-string schemas shared by a route handler and its OpenAPI doc, so the
  * published parameters are the ones the handler actually parses.
  */
-import { APPROVAL_OBJECT_TYPES } from "@regulait/shared";
+import { APPROVAL_OBJECT_TYPES, APPROVAL_PRIORITIES } from "@regulait/shared";
 import { z } from "zod";
 
 export const APPROVAL_STATUSES = ["pending", "approved", "denied", "returned", "consumed", "superseded"] as const;
@@ -22,6 +22,7 @@ export const approvalsListQuery = z.object({
     .pipe(z.array(z.enum(APPROVAL_STATUSES)).min(1).max(APPROVAL_STATUSES.length))
     .optional(),
   objectType: z.enum(APPROVAL_OBJECT_TYPES).optional(),
+  priority: z.enum(APPROVAL_PRIORITIES).optional(),
   approverUserId: z.string().uuid().optional(),
   order: z.enum(["asc", "desc"]).default("desc"),
 });

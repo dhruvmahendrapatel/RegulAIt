@@ -145,6 +145,7 @@ import {
   csvRecord,
 } from "@regulait/shared";
 import { governedEvaluate } from "./governed-evaluate.js";
+import { registerApprovalPriorityRoutes, taskWidgetItem } from "./approval-priorities.js";
 import { APPROVALS_PAGE_LIMIT, approvalsListQuery } from "./list-queries.js";
 import { checkMcpTransportWrite, refuseMcpServerWrite } from "./mcp-egress.js";
 import {
@@ -4198,7 +4199,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // count and the Excel export (ADR-0226), so the three cannot disagree.
   const approvalsScope = async (
     req: FastifyRequest,
-    { status, objectType, approverUserId }: Omit<z.infer<typeof approvalsListQuery>, "order">,
+    { status, objectType, approverUserId, priority }: Omit<z.infer<typeof approvalsListQuery>, "order">,
   ) => {
     // B9b — THREE server-side filters, not one.
     //
@@ -4301,6 +4302,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       objectType ? eq(approvals.objectType, objectType) : undefined,
       // ANDed with `scopeCondition`, never substituted for it
       approverUserId ? eq(approvals.approverUserId, approverUserId) : undefined,
+      priority ? eq(approvals.priority, priority) : undefined,
       scopeCondition,
     ].filter((c) => c !== undefined);
     const listWhere = conditions.length > 0 ? and(...conditions) : undefined;
@@ -4773,6 +4775,24 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0226: the queue as an Excel file, read through approvalsScope (the
   // visibility a non-admin's page has, never wider) and audited before the first
   // byte by sendListExport (the list-export-xlsx row every list export writes).
+  registerApprovalPriorityRoutes(app, db);
+  app.get("/v1/approvals/task-widget", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const filters = approvalsFilterQuery.parse(filterParams(q));
+      const page = parseListPage(APPROVALS_LIST, q);
+      const { listWhere, me, delegators } = await approvalsScope(req, filters);
+      const result = await runListPage(db, APPROVALS_LIST, approvalsReader(me, delegators), listWhere, page);
+      return {
+        ...result,
+        contract: "approval-task-widget.v1",
+        authentication: "existing-host-authentication",
+        items: result.items.map((row) => taskWidgetItem(row, req.authCtx.isAdmin)),
+      };
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
   app.get("/v1/approvals/export.xlsx", async (req, reply) => {
     try {
       const q = req.query as Record<string, unknown>;
@@ -4797,8 +4817,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         return sendListError(reply, e);
       }
     }
-    const { status, objectType, approverUserId, order } = approvalsListQuery.parse(req.query);
-    const { listWhere, me, delegators } = await approvalsScope(req, { status, objectType, approverUserId });
+    const { status, objectType, approverUserId, priority, order } = approvalsListQuery.parse(req.query);
+    const { listWhere, me, delegators } = await approvalsScope(req, { status, objectType, approverUserId, priority });
     // `id` breaks requested_at ties so the page boundary is stable in either order
     const [rows, [counted]] = await Promise.all([
       db
@@ -5867,7 +5887,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // handed `decideOneApproval` — the very function the single-decision route
   // calls — so a bulk item cannot take a shortcut around any guard.
   // ADR-0186: a bulk item can never be signed or stepped up (channel "bulk").
-  registerWorkbenchRoutes(app, db, { decideOne: (i) => decideOneApproval({ ...i, channel: "bulk" }) });
+  registerWorkbenchRoutes(app, db, {
+    decideOne: (i) => decideOneApproval({ ...i, channel: "bulk" }),
+    pendingScope: async (req) => (await approvalsScope(req, { status: ["pending"] })).listWhere,
+  });
   // ADR-0061 — CHATOPS APPROVALS. Handed the SAME `decideOneApproval` the
   // portal route and the bulk endpoint use: the chat surface is a courier over
   // the one decide path, never a second authority path. The inbound callback

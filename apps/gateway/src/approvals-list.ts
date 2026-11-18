@@ -13,6 +13,7 @@ export interface ApprovalListRow {
   id: string;
   objectType: string;
   status: string;
+  priority: string;
   toolName: string | null;
   stageId: string | null;
   requestedAt: Date | string;
@@ -39,6 +40,7 @@ export const APPROVALS_LIST: ListSpec<ApprovalListRow> = {
     requested: { expr: approvals.requestedAt, keysetAt: approvals.requestedAt },
     decided: { expr: approvals.decidedAt },
     status: { expr: approvals.status },
+    priority: { expr: sql`CASE ${approvals.priority} WHEN 'low' THEN 0 WHEN 'normal' THEN 1 WHEN 'high' THEN 2 WHEN 'urgent' THEN 3 END`, then: [approvals.requestedAt] },
     kind: { expr: approvals.objectType },
     requester: { expr: nameOf(approvals.userId) },
     approver: { expr: nameOf(approvals.approverUserId) },
@@ -50,6 +52,7 @@ export const APPROVALS_LIST: ListSpec<ApprovalListRow> = {
       value: (r) => [r.objectType.replace(/_/g, " "), r.objectLabel ?? r.toolName].filter(Boolean).join(" · "),
     },
     status: { label: "Status", value: (r) => r.status },
+    priority: { label: "Priority", value: (r) => r.priority },
     kind: { label: "Kind", value: (r) => r.objectType.replace(/_/g, " ") },
     requester: { label: "Requested by", value: (r) => r.requestedByName },
     approver: { label: "Approver", value: (r) => r.approverName },
@@ -58,7 +61,7 @@ export const APPROVALS_LIST: ListSpec<ApprovalListRow> = {
     requested: { label: "Requested", value: (r) => at(r.requestedAt) },
     reason: { label: "Reason", value: (r) => r.decisionReason },
   },
-  filters: ["status", "objectType", "approverUserId"],
+  filters: ["status", "objectType", "approverUserId", "priority"],
   defaultSort: { col: "requested", dir: "desc" },
   idCol: approvals.id,
 };
