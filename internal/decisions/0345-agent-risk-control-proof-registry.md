@@ -1,6 +1,6 @@
 # ADR-0345: Agent risk register with controls and continuous proofs
 
-- **Status**: Accepted (slice 1 implemented)
+- **Status**: Accepted (slices 1 and 2a implemented)
 - **Date**: 2026-11-17
 - **Lane**: E26
 - **Related**: ADR-0085 (EU AI Act tier screening), ADR-0158 (regulatory intelligence feed), ADR-0180 (continuous assurance: A2 measurable conditions, `MEASUREMENT_STATES`), ADR-0057/0068 (continuous red-team, its statistics), ADR-0058 (compliance packs), ADR-0060 (hash-chained
@@ -93,8 +93,21 @@ What exists already:
    control objectives, and to the trust dashboard, without a second scoring scheme.
 8. **Slices.**
    - Slice 1 (this PR): this ADR, the catalogue with its invariants, and the schema.
-   - Slice 2: the proof scheduler job, the three engines' adapters, evidence writing, and alerts and approvals on
-     failure.
+   - Slice 2a: the proof scheduler job (`agent-risk-proof-sweep`, hourly; each proof runs when its interval has
+     elapsed), the `assurance_metric` and `ledger_check` engines, evidence writing, and alerts and approvals on
+     failure (`apps/gateway/src/agent-risk-proof-runner.ts`). Until 2b, each gateway probe is recorded as `not_run`
+     (reason `probe_harness_not_built`), so it shows as a raised alert, never as a pass.
+     - The metric engine measures every registered agent (an empty scope is `not_run`).
+     - The chain check passes only an intact chain whose anchor agrees (`verifyAuditChain`); an empty chain is
+       `not_run`.
+     - Register hygiene fails a live risk with an inactive owner, no scope, or no change inside 90 days.
+       `ai_risks` has no review-date column, so its `updated_at` stands for the last review (owner question below).
+     - The signature (ADR-0116 export key) covers the hex content hash, base64-encoded.
+     - An engine that throws is `not_run`, and the row keeps only the error class.
+     - The alert is deduped per proof while open. A repeat failure refreshes it, reuses the pending acknowledgement
+       (`agent_risk_proof` approval, stage `agent-risk-proof:<key>`) and links the new result. A pass resolves it.
+   - Slice 2b: the gateway-probe harness (the eight probes), the ADR-0058 pack collector and the ADR-0214 posture
+     input, and the verifier's `unverifiable` label for a result whose audit row is gone.
    - Slice 3: the read and settings APIs for the view. The UI belongs to a design builder and is a `KNOWN_UI_GAPS`
      entry tracked on #453.
 9. **Geography is a factor in risk tiering.** Owner, 2026-11-17, from the competitor gap audit (C5). The

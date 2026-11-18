@@ -1881,6 +1881,9 @@ export const auditLog = pgTable(
         // text column — no DDL needed.
         "governance_alert",
         "governance_monitor",
+        // ADR-0345 slice 2a: one agent-risk proof result (objectId null; detail.contentHash ties it to the
+        // agent_risk_proof_results row written in the same transaction). Plain text column — no DDL.
+        "agent_risk_proof",
         // ADR-0173 batch 2c (K): a KRI or a monitoring dashboard created /
         // changed / deleted, and an automation rule created / changed /
         // paused / backfilled / matched (objectId = the row). Plain text — no DDL.
