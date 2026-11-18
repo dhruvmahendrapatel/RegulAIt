@@ -220,6 +220,10 @@ export const DETECTION_RESPONSE_MACHINE = defineMachine({
       to: "failed",
       by: ["system"],
       summary: "The configured response could not be applied; the fixed reason is recorded and it is not retried.",
+    },
+  },
+});
+
 /** `rule_step_suggestions.status` (ADR-0327). A scan inserts `suggested`. Shadow mode measures the suggested rule
  * beside the AI without changing routing, and can be stopped and started again. Dismissal is final: a rescan
  * refreshes a dismissed suggestion's evidence but never its status. */
