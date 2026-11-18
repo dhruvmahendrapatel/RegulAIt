@@ -4,6 +4,7 @@
 -- Every decision becomes a hash-chained audit_log row, which is the source of truth. These tables are what the batch
 -- route needs beside it:
 --   - endpoint_decision_batches: one row per accepted batch, so a resent batch is a duplicate, never a second copy.
+--   - endpoint_decision_events: one row per accepted event id, so an event resent in another batch is never audited twice.
 --   - endpoint_coding_sessions: one coding-agent session on one device user. Its counters are a measured read model
 --     whose source of truth is audit_log (rule ids endpoint-hook-*), kept so the session view needs no audit scan.
 --   - endpoint_coding_session_modes: each permission mode a session reported (a session can change mode), so a
@@ -14,7 +15,7 @@
 -- The vendor session id never reaches the gateway: the agent sends a device-keyed hash of it (session_ref). A vendor
 -- that gives no session id has one NULL-ref session per device user and agent (NULLS NOT DISTINCT).
 --
--- Hand-authored, additive and idempotent. No functions or triggers (zz-dbguard-0185 checked by hand).
+-- Hand-authored, additive and idempotent. One guard function (search_path pinned) keeps the two ledgers write-once.
 CREATE TABLE IF NOT EXISTS "endpoint_decision_batches" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
   "identity_id" uuid NOT NULL REFERENCES "endpoint_agent_identities"("identity_id") ON DELETE CASCADE,
@@ -30,6 +31,49 @@ CREATE TABLE IF NOT EXISTS "endpoint_decision_batches" (
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "endpoint_decision_batches_received_idx" ON "endpoint_decision_batches" ("received_at");
+--> statement-breakpoint
+-- one row per accepted event id (#1044 review): a resent event under a new batch id is a duplicate, never audited twice
+CREATE TABLE IF NOT EXISTS "endpoint_decision_events" (
+  "identity_id" uuid NOT NULL REFERENCES "endpoint_agent_identities"("identity_id") ON DELETE CASCADE,
+  "event_id" uuid NOT NULL,
+  "batch_id" uuid NOT NULL REFERENCES "endpoint_decision_batches"("id") ON DELETE CASCADE,
+  CONSTRAINT "endpoint_decision_events_pkey" PRIMARY KEY ("identity_id", "event_id")
+);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "endpoint_decision_events_batch_idx" ON "endpoint_decision_events" ("batch_id");
+--> statement-breakpoint
+-- the batch and event ledgers are evidence of what was received: written once, never updated, and deleted only as the
+-- cascade of their own identity (0207's pattern for endpoint_agent_reports); TRUNCATE is refused (0185's rule)
+CREATE OR REPLACE FUNCTION "regulait_endpoint_decision_ledger_guard"() RETURNS trigger AS $$
+BEGIN
+  IF TG_OP = 'DELETE' AND pg_trigger_depth() > 1
+     AND NOT EXISTS (SELECT 1 FROM public."endpoint_agent_identities" WHERE "identity_id" = OLD."identity_id") THEN
+    RETURN OLD;
+  END IF;
+  RAISE EXCEPTION '%: a received decision batch or event is written once; it goes only with its identity', TG_TABLE_NAME
+    USING ERRCODE = 'insufficient_privilege';
+END;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp;
+--> statement-breakpoint
+DROP TRIGGER IF EXISTS "endpoint_decision_batches_guard" ON "endpoint_decision_batches";
+--> statement-breakpoint
+CREATE TRIGGER "endpoint_decision_batches_guard" BEFORE UPDATE OR DELETE ON "endpoint_decision_batches"
+  FOR EACH ROW EXECUTE FUNCTION "regulait_endpoint_decision_ledger_guard"();
+--> statement-breakpoint
+DROP TRIGGER IF EXISTS "endpoint_decision_batches_no_truncate" ON public."endpoint_decision_batches";
+--> statement-breakpoint
+CREATE TRIGGER "endpoint_decision_batches_no_truncate" BEFORE TRUNCATE ON public."endpoint_decision_batches"
+  FOR EACH STATEMENT EXECUTE FUNCTION public.regulait_refuse_truncate();
+--> statement-breakpoint
+DROP TRIGGER IF EXISTS "endpoint_decision_events_guard" ON "endpoint_decision_events";
+--> statement-breakpoint
+CREATE TRIGGER "endpoint_decision_events_guard" BEFORE UPDATE OR DELETE ON "endpoint_decision_events"
+  FOR EACH ROW EXECUTE FUNCTION "regulait_endpoint_decision_ledger_guard"();
+--> statement-breakpoint
+DROP TRIGGER IF EXISTS "endpoint_decision_events_no_truncate" ON public."endpoint_decision_events";
+--> statement-breakpoint
+CREATE TRIGGER "endpoint_decision_events_no_truncate" BEFORE TRUNCATE ON public."endpoint_decision_events"
+  FOR EACH STATEMENT EXECUTE FUNCTION public.regulait_refuse_truncate();
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "endpoint_coding_sessions" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
@@ -94,6 +138,16 @@ ALTER TABLE "endpoint_decision_batches" FORCE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS endpoint_decision_batches_all ON "endpoint_decision_batches";
 --> statement-breakpoint
 CREATE POLICY endpoint_decision_batches_all ON "endpoint_decision_batches" FOR ALL
+  USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['credential_request', 'migration']))
+  WITH CHECK ((SELECT regulait_rls_system_reason()) = ANY (ARRAY['credential_request', 'migration']));
+--> statement-breakpoint
+ALTER TABLE "endpoint_decision_events" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "endpoint_decision_events" FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+DROP POLICY IF EXISTS endpoint_decision_events_all ON "endpoint_decision_events";
+--> statement-breakpoint
+CREATE POLICY endpoint_decision_events_all ON "endpoint_decision_events" FOR ALL
   USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['credential_request', 'migration']))
   WITH CHECK ((SELECT regulait_rls_system_reason()) = ANY (ARRAY['credential_request', 'migration']));
 --> statement-breakpoint

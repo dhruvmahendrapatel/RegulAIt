@@ -7,5 +7,5 @@ interface (`decisionlog.Event` / `Emitter`) that lane E31's command, file and pa
 `GET /v1/endpoint-decisions/sessions` flags permission-bypass sessions (`--dangerously-skip-permissions`, `--yolo`)
 from the hook's `permission_mode`, and says which agents report no mode (Cursor, Copilot CLI).
 `GET /v1/endpoint-decisions/tamper` shows a changed managed file, a missing or weakened hook, and whether the bytes
-match an exported bundle. The pending migration is `endpoint_decision_audit` (4 tables, RLS forced). Both views are
+match an exported bundle. The pending migration is `endpoint_decision_audit` (5 tables, RLS forced, the two ledgers write-once). Both views are
 API-only gaps on #453 (`KNOWN_UI_GAPS_MAX` 75). Restore of a changed file is a later step that needs admin approval.

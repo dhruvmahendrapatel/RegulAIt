@@ -188,7 +188,7 @@ describe("ADR-0310 addendum: signed decision batches", () => {
     });
     const r = await a.key.decisions(body, batchId);
     expect(r.statusCode, r.body).toBe(202);
-    expect(r.json()).toEqual({ accepted: true, duplicate: false, audited: 4, refused: 0 });
+    expect(r.json()).toEqual({ accepted: true, duplicate: false, audited: 4, stale: 0, duplicateEvents: 0 });
 
     const rows = await decisionAudits(a.deviceId);
     const byRule = (id: string) => rows.filter((x) => x.ruleId === id);
@@ -258,15 +258,44 @@ describe("ADR-0310 addendum: signed decision batches", () => {
     expect((await inject("POST", "/v1/endpoint-agent/decisions", AUTH, {})).statusCode).toBe(401);
   });
 
-  it("counts stale and future events as refused without auditing them, and reports device-side drops", async () => {
+  it("audits stale and future events flagged stale without counting them, skips a resent event, and reports device-side drops", async () => {
     const a = await enrolled();
     const old = new Date(Date.now() - 8 * 24 * 3600 * 1000);
     const ahead = new Date(Date.now() + 3600 * 1000);
-    const b = batch({ droppedEvents: 7, events: [decision({ occurredAt: iso(old) }), decision({ occurredAt: iso(ahead) }), decision()] });
+    const now1 = decision();
+    const b = batch({ droppedEvents: 7, events: [decision({ occurredAt: iso(old) }), decision({ occurredAt: iso(ahead) }), now1] });
     const r = await a.key.decisions(b.body, b.batchId);
-    expect(r.json()).toEqual({ accepted: true, duplicate: false, audited: 1, refused: 2 });
+    expect(r.json()).toEqual({ accepted: true, duplicate: false, audited: 3, stale: 2, duplicateEvents: 0 });
     const [row] = await db.select().from(endpointDecisionBatches).where(eq(endpointDecisionBatches.batchId, b.batchId));
     expect({ refused: row!.eventsRefused, dropped: row!.droppedEvents }).toEqual({ refused: 2, dropped: 7 });
+    const flagged = (await decisionAudits(a.deviceId)).filter((x) => x.ruleId === "endpoint-hook-deny").map((x) => (x.detail as { stale: boolean }).stale);
+    expect(flagged.sort()).toEqual([false, true, true]);
+    const [s1] = await db.select().from(endpointCodingSessions).where(eq(endpointCodingSessions.identityId, a.identityId));
+    expect(s1!.decisions).toBe(1);
+    // the same event resent under a new batch id is skipped, never audited twice
+    const again = batch({ events: [now1, decision()] });
+    expect((await a.key.decisions(again.body, again.batchId)).json()).toEqual({ accepted: true, duplicate: false, audited: 1, stale: 0, duplicateEvents: 1 });
+    const [s2] = await db.select().from(endpointCodingSessions).where(eq(endpointCodingSessions.identityId, a.identityId));
+    expect(s2!.decisions).toBe(2);
+  });
+
+  it("refuses a known batch id with other bytes (409, audited), and keeps the ledgers write-once", async () => {
+    const a = await enrolled();
+    const id = randomUUID();
+    const first = batch({ batchId: id, events: [decision()] });
+    expect((await a.key.decisions(first.body, id)).statusCode).toBe(202);
+    const other = batch({ batchId: id, events: [decision()] });
+    const r = await a.key.decisions(other.body, id);
+    expect(`${r.statusCode} ${r.json().error}`).toBe("409 batch_id_conflict");
+    expect((await decisionAudits(a.deviceId)).some((x) => x.ruleId === "endpoint-decision-batch-refused" && (x.detail as { code: string }).code === "batch_id_conflict")).toBe(true);
+    // evidence: no update, no plain delete, no truncate
+    const refusedBy = async (q: Promise<unknown>) => {
+      const e = (await q.then(() => null, (x: unknown) => x)) as { cause?: { message?: string } } | null;
+      return e?.cause?.message ?? "not refused";
+    };
+    expect(await refusedBy(db.execute(sql`update endpoint_decision_batches set dropped_events = 1 where batch_id = ${id}`))).toMatch(/written once/);
+    expect(await refusedBy(db.execute(sql`delete from endpoint_decision_events where identity_id = ${a.identityId}`))).toMatch(/written once/);
+    expect(await refusedBy(db.execute(sql`truncate endpoint_decision_batches cascade`))).not.toBe("not refused");
   });
 });
 
@@ -282,65 +311,75 @@ describe("ADR-0310 addendum: the permission-bypass session view", () => {
     });
     expect((await a.key.decisions(b.body, b.batchId)).statusCode).toBe(202);
     expect((await inject("GET", "/v1/endpoint-decisions/sessions", memberKey)).statusCode).toBe(403);
+    type Page = { items: Array<{ id: string; agent: string; permissionBypass: boolean | null; finding: string | null; permissionModeReported: boolean; device: { pseudonym: string } }>; nextCursor: string | null; total: number | null; coverage: Array<{ agent: string; permissionModeReported: boolean }> };
     const all = await inject("GET", `/v1/endpoint-decisions/sessions?deviceId=${a.deviceId}`, AUTH);
     expect(all.statusCode, all.body).toBe(200);
-    const s = all.json() as { sessions: Array<{ agent: string; permissionBypass: boolean | null; finding: string | null; permissionModeReported: boolean; device: { pseudonym: string } }>; coverage: Array<{ agent: string; permissionModeReported: boolean }> };
-    const of = (agent: string) => s.sessions.find((x) => x.agent === agent)!;
+    const s = all.json() as Page;
+    const of = (agent: string) => s.items.find((x) => x.agent === agent)!;
     expect(of("claude-code")).toMatchObject({ permissionBypass: true, finding: "permission_bypass", permissionModeReported: true });
     expect(of("codex")).toMatchObject({ permissionBypass: false, finding: null });
     expect(of("cursor")).toMatchObject({ permissionBypass: null, finding: null, permissionModeReported: false });
     expect(of("claude-code").device.pseudonym).toMatch(/^psn:[0-9a-f]{24}$/);
     expect(s.coverage.filter((c) => !c.permissionModeReported).map((c) => c.agent).sort()).toEqual(["copilot-cli", "cursor"]);
-    const onlyBypass = await inject("GET", `/v1/endpoint-decisions/sessions?deviceId=${a.deviceId}&bypass=true`, AUTH);
-    expect((onlyBypass.json() as { sessions: unknown[] }).sessions).toHaveLength(1);
-    // keyset pages: one at a time, no repeats, then the end
-    const p1 = (await inject("GET", `/v1/endpoint-decisions/sessions?deviceId=${a.deviceId}&limit=2`, AUTH)).json() as { sessions: Array<{ id: string }>; next: string | null };
-    expect(p1.sessions).toHaveLength(2);
-    const p2 = (await inject("GET", `/v1/endpoint-decisions/sessions?deviceId=${a.deviceId}&limit=2&before=${p1.next}`, AUTH)).json() as { sessions: Array<{ id: string }>; next: string | null };
-    expect(p2.sessions).toHaveLength(1);
-    expect(p2.next).toBeNull();
-    expect(new Set([...p1.sessions, ...p2.sessions].map((x) => x.id)).size).toBe(3);
+    const filtered = async (bypass: string) => ((await inject("GET", `/v1/endpoint-decisions/sessions?deviceId=${a.deviceId}&bypass=${bypass}`, AUTH)).json() as Page).items.map((x) => x.agent);
+    expect(await filtered("true")).toEqual(["claude-code"]);
+    // "not bypassed" lists only agents that report a mode: cursor is unknown, never listed as safe
+    expect(await filtered("false")).toEqual(["codex"]);
+    // the shared list contract (ADR-0226): keyset pages over lastSeen, an exact total, and its own refusals
+    const p1 = (await inject("GET", `/v1/endpoint-decisions/sessions?deviceId=${a.deviceId}&limit=10&sort=agent&dir=asc&count=exact`, AUTH)).json() as Page;
+    expect(p1.items.map((x) => x.agent)).toEqual(["claude-code", "codex", "cursor"]);
+    expect(p1.total).toBe(3);
     expect((await inject("GET", "/v1/endpoint-decisions/sessions?limit=999", AUTH)).statusCode).toBe(400);
+    expect((await inject("GET", "/v1/endpoint-decisions/sessions?cursor=------------------------------------", AUTH)).statusCode).toBe(400);
+    expect((await inject("GET", "/v1/endpoint-decisions/sessions?nope=1", AUTH)).statusCode).toBe(400);
   });
 });
 
 describe("ADR-0310 addendum: managed-file tamper reporting", () => {
-  it("shows a changed file, a lost hook and a removed file, audits each change once, and stays quiet for an unchanged one", async () => {
+  it("audits every transition from the latest state, a return and a repeat included, and a first report that is not intact", async () => {
     const a = await enrolled();
     const send = async (integrity: unknown[]) => {
       const b = batch({ integrity });
       const r = await a.key.decisions(b.body, b.batchId);
       expect(r.statusCode, r.body).toBe(202);
     };
+    const A = { file: "claude-code/managed-settings.json", state: "present", sha256: hex("a"), hookStatus: "registered" };
+    const B = { file: "claude-code/managed-settings.json", state: "present", sha256: hex("b"), hookStatus: "weakened" };
+    const changes = async () => (await decisionAudits(a.deviceId)).filter((x) => x.ruleId === "endpoint-managed-file-changed").length;
+    const notIntact = async () => (await decisionAudits(a.deviceId)).filter((x) => x.ruleId === "endpoint-managed-file-not-intact").map((x) => (x.detail as { file: string }).file).sort();
+    // the first report: codex is already weakened (a finding at once); a vendor not deployed (missing) is not
     await send([
-      { file: "claude-code/managed-settings.json", state: "present", sha256: hex("a"), hookStatus: "registered" },
-      { file: "openai-codex/requirements.toml", state: "present", sha256: hex("b"), hookStatus: "registered" },
-      { file: "cursor/hooks.json", state: "present", sha256: hex("c"), hookStatus: "registered" },
+      A,
+      { file: "openai-codex/requirements.toml", state: "present", sha256: hex("c"), hookStatus: "weakened" },
+      { file: "cursor/hooks.json", state: "present", sha256: hex("d"), hookStatus: "registered" },
       { file: "copilot-cli/policy.json", state: "missing", sha256: null, hookStatus: null },
     ]);
-    // the same state again is not a change
-    await send([{ file: "claude-code/managed-settings.json", state: "present", sha256: hex("a"), hookStatus: "registered" }]);
-    expect((await decisionAudits(a.deviceId)).filter((x) => x.ruleId === "endpoint-managed-file-changed")).toHaveLength(0);
-    await send([
-      { file: "claude-code/managed-settings.json", state: "present", sha256: hex("d"), hookStatus: "registered" },
-      { file: "openai-codex/requirements.toml", state: "present", sha256: hex("e"), hookStatus: "weakened" },
-      { file: "cursor/hooks.json", state: "missing", sha256: null, hookStatus: null },
-      { file: "copilot-cli/policy.json", state: "missing", sha256: null, hookStatus: null },
-    ]);
-    expect((await decisionAudits(a.deviceId)).filter((x) => x.ruleId === "endpoint-managed-file-changed")).toHaveLength(3);
+    expect(await notIntact()).toEqual(["openai-codex/requirements.toml"]);
+    // unchanged: nothing
+    await send([A]);
+    expect(await changes()).toBe(0);
+    // A -> B -> A -> B: three transitions, each audited, the repeat included
+    await send([B]);
+    await send([A]);
+    await send([B]);
+    expect(await changes()).toBe(3);
+    // cursor removed
+    await send([{ file: "cursor/hooks.json", state: "missing", sha256: null, hookStatus: null }, { file: "copilot-cli/policy.json", state: "missing", sha256: null, hookStatus: null }]);
+    expect(await changes()).toBe(4);
+
     expect((await inject("GET", "/v1/endpoint-decisions/tamper", memberKey)).statusCode).toBe(403);
-    const r = await inject("GET", `/v1/endpoint-decisions/tamper?deviceId=${a.deviceId}`, AUTH);
+    const r = await inject("GET", `/v1/endpoint-decisions/tamper?deviceId=${a.deviceId}&count=exact`, AUTH);
     expect(r.statusCode, r.body).toBe(200);
-    const t = r.json() as { devices: Array<{ files: Array<{ file: string; status: string; finding: boolean; bundleMatch: unknown; statesSeen?: number }> }>; findings: number };
-    expect(t.devices).toHaveLength(1);
-    const f = (name: string) => t.devices[0]!.files.find((x) => x.file === name)!;
-    expect(f("claude-code/managed-settings.json")).toMatchObject({ status: "changed", finding: true, bundleMatch: "none", statesSeen: 2 });
+    const t = r.json() as { items: Array<{ findings: number; files: Array<{ file: string; status: string; finding: boolean; bundleMatch: unknown; statesSeen?: number }> }>; total: number };
+    expect(t.total).toBe(1);
+    const f = (name: string) => t.items[0]!.files.find((x) => x.file === name)!;
+    expect(f("claude-code/managed-settings.json")).toMatchObject({ status: "hook_weakened", finding: true, bundleMatch: "none", statesSeen: 2 });
     expect(f("openai-codex/requirements.toml")).toMatchObject({ status: "hook_weakened", finding: true });
     expect(f("cursor/hooks.json")).toMatchObject({ status: "file_missing", finding: true, bundleMatch: null });
     // never present on this device: the vendor is not deployed there, which is not tamper
     expect(f("copilot-cli/policy.json")).toMatchObject({ status: "file_missing", finding: false });
-    expect(t.findings).toBe(3);
+    expect(t.items[0]!.findings).toBe(3);
     const obs = await db.select({ n: sql<number>`count(*)::int` }).from(endpointManagedFileObservations).where(eq(endpointManagedFileObservations.identityId, a.identityId));
-    expect(obs[0]!.n).toBe(7);
+    expect(obs[0]!.n).toBe(6);
   });
 });

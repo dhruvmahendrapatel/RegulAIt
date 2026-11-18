@@ -157,10 +157,13 @@ The ADR-0298/0330/0350 hook decided on the device and told nobody. The master ap
    - Authentication: the DPoP-bound endpoint-agent token and an RFC 9530 `Content-Digest`.
    - Signature: `Regulait-Decisions-Signature`, an ES256 JWS by the device key, typ `regulait-endpoint-decisions+jwt`,
      binding the digest, the batch id and the URL.
-   - Replay and duplicates: one use per signature (the replay store), and one copy per batch id
-     (`endpoint_decision_batches`).
-   - Stale events (over 7 days) and future events (over 5 min) are counted as refused and are not audited.
-   - Every refusal is audited with a fixed code.
+   - Replay and duplicates: one use per signature (the replay store), one copy per batch id
+     (`endpoint_decision_batches`), and one copy per event id (`endpoint_decision_events`), so an event resent in
+     another batch is skipped, never audited twice. The same batch id with other bytes is refused (409
+     `batch_id_conflict`). Both ledgers are write-once and refuse TRUNCATE (0207's and 0185's pattern).
+   - Stale events (over 7 days) and future events (over 5 min) are still audited, flagged `stale`, but they do not move
+     a session's counters.
+   - Every refusal is audited with a fixed code. The reports route and this route share one signed-upload check.
 5. **The audit.**
    - Each decision is one hash-chained `audit_log` row (`objectType` `endpoint_device`, `objectId` the device), with
      these rule ids:
@@ -188,11 +191,19 @@ The ADR-0298/0330/0350 hook decided on the device and told nobody. The master ap
    `requirements.toml`.
    - It reports the file's state (present, missing, unreadable, or not system-owned), its SHA-256, and the status of
      the RegulAIt hook: `registered`, `weakened` (no fail-closed or managed-only setting), `absent` or `unparseable`.
-   - Each distinct state is a row (`endpoint_managed_file_observations`), so a second state is a change, audited once.
+   - Each distinct state is a row (`endpoint_managed_file_observations`). Every transition from the previous latest
+     state is audited (`endpoint-managed-file-changed`), including a return to an earlier state and a repeat. A first
+     report that is not intact (present, hook registered) is a finding at once (`endpoint-managed-file-not-intact`).
+   - The hook status fails closed: every vendor event must carry the hook, together with the vendor's fail-closed or
+     managed-only setting. A disabled-hooks switch, or a command that is not `regulait-agent hook <agent>` as its only
+     command, reads as `weakened` or `absent`. On Windows the paths come from the known-folder API, never the
+     environment. Reparse points and files not owned by an administrator are `not_system_owned`, and a check that
+     cannot complete is `unreadable`.
    - The view also shows whether the bytes match an exported bundle file (Claude Code and Codex are delivered as files).
      Bundles do not yet carry the hook registration, so a hand-merged file shows `bundleMatch: "none"` honestly.
    - A file never present on a device is "vendor not deployed", not tamper.
-8. **Row-level security.** All four tables have RLS forced. The agent route (`credential_request`) is the only writer,
+8. **Row-level security.** All five tables have RLS forced. Both views answer the ADR-0226 list contract, and every
+   read is bounded by the page. The agent route (`credential_request`) is the only writer,
    and the views are admin-only.
 
 **Open-source comparison (owner rule 9).**

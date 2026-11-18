@@ -27,13 +27,16 @@
  */
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { and, desc, eq, inArray, lt, or, sql, type SQL } from "@regulait/db";
+import { and, asc, desc, eq, inArray, sql, type SQL } from "@regulait/db";
+import type { ListSpec } from "./list-contract.js";
+import { answerListPage, type ContractList } from "./list-contract-route.js";
 import {
   auditLog,
   endpointAgentIdentities,
   endpointCodingSessionModes,
   endpointCodingSessions,
   endpointDecisionBatches,
+  endpointDecisionEvents,
   endpointDevices,
   endpointManagedFileObservations,
   managedSettingsBundleFiles,
@@ -141,6 +144,7 @@ const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
 type Agent = { identityId: string; deviceId: string; sourceId: string };
 type Effect = "allow" | "deny" | "require_approval";
+type AuditRow = typeof auditLog.$inferInsert;
 
 /** the audit effect and rule id of one decision */
 export function auditOfDecision(d: NonNullable<EndpointDecisionEvent["decision"]>): { effect: Effect; ruleId: string } {
@@ -150,36 +154,78 @@ export function auditOfDecision(d: NonNullable<EndpointDecisionEvent["decision"]
   return { effect: "allow", ruleId: d.wouldDeny ? "endpoint-hook-would-deny" : "endpoint-hook-would-ask" };
 }
 
-export type IngestOutcome = { duplicate: true } | { duplicate: false; audited: number; refused: number; sessions: number; bypassSessions: number; fileChanges: number };
+/** a managed file's reported state, as compared between reports */
+type FileState = { state: string; sha256: string | null; hookStatus: string | null };
+const sameState = (a: FileState, b: FileState) => a.state === b.state && a.sha256 === b.sha256 && a.hookStatus === b.hookStatus;
+/** the one state that is not itself a finding: present, with the hook registered */
+const intactState = (f: FileState) => f.state === "present" && f.hookStatus === "registered";
+
+export type IngestOutcome =
+  | { outcome: "duplicate" }
+  | { outcome: "conflict" }
+  | { outcome: "accepted"; audited: number; stale: number; duplicateEvents: number; sessions: number; bypassSessions: number; fileChanges: number };
 
 /**
- * Record one verified batch in one transaction: the batch row (a duplicate stops here), the decision audit rows, the
- * session and mode read models, and the managed-file observations. `now` is the database clock.
+ * Record one verified batch in one transaction: the batch row (a resend stops here; the same id with other bytes is a
+ * conflict), the event ledger (an event already received in another batch is a duplicate), the decision audit rows,
+ * the session and mode read models, and the managed-file observations. `now` is the database clock.
  */
 export async function ingestDecisionBatch(db: Db, agent: Agent, batch: EndpointDecisionBatch, bodySha256: string, now: Date): Promise<IngestOutcome> {
-  const fresh = (e: EndpointDecisionEvent) => {
-    const t = Date.parse(e.occurredAt);
-    return t >= now.getTime() - ENDPOINT_DECISION_MAX_AGE_MS && t <= now.getTime() + ENDPOINT_DECISION_MAX_SKEW_MS;
+  // an event far in the past or the future is still audited, flagged stale, but never moves a session's counters
+  const isStale = (e: EndpointDecisionEvent) => {
+    const at = Date.parse(e.occurredAt);
+    return at < now.getTime() - ENDPOINT_DECISION_MAX_AGE_MS || at > now.getTime() + ENDPOINT_DECISION_MAX_SKEW_MS;
   };
-  const accepted = batch.events.filter(fresh);
-  const refused = batch.events.length - accepted.length;
   return db.transaction(async (tx) => {
     const t = tx as unknown as Db;
+    // event ids this identity already sent (the ledger below also refuses a racing insert)
+    const seen = batch.events.length
+      ? new Set(
+          (
+            await t
+              .select({ eventId: endpointDecisionEvents.eventId })
+              .from(endpointDecisionEvents)
+              .where(and(eq(endpointDecisionEvents.identityId, agent.identityId), inArray(endpointDecisionEvents.eventId, batch.events.map((e) => e.eventId))))
+          ).map((r) => r.eventId),
+        )
+      : new Set<string>();
+    const refusedUpfront = batch.events.filter((e) => seen.has(e.eventId) || isStale(e)).length;
     const [row] = await t
       .insert(endpointDecisionBatches)
-      .values({ identityId: agent.identityId, batchId: batch.batchId, bodySha256, eventsReceived: batch.events.length, eventsRefused: refused, droppedEvents: batch.droppedEvents })
+      .values({ identityId: agent.identityId, batchId: batch.batchId, bodySha256, eventsReceived: batch.events.length, eventsRefused: refusedUpfront, droppedEvents: batch.droppedEvents })
       .onConflictDoNothing({ target: [endpointDecisionBatches.identityId, endpointDecisionBatches.batchId] })
       .returning({ id: endpointDecisionBatches.id });
-    if (!row) return { duplicate: true } as const;
+    if (!row) {
+      const [prior] = await t
+        .select({ bodySha256: endpointDecisionBatches.bodySha256 })
+        .from(endpointDecisionBatches)
+        .where(and(eq(endpointDecisionBatches.identityId, agent.identityId), eq(endpointDecisionBatches.batchId, batch.batchId)));
+      return prior?.bodySha256 === bodySha256 ? ({ outcome: "duplicate" } as const) : ({ outcome: "conflict" } as const);
+    }
+
+    // the event ledger: only an event id this identity never sent before is recorded (#1044 review)
+    const fresh = new Set<string>();
+    if (batch.events.length) {
+      const inserted = await t
+        .insert(endpointDecisionEvents)
+        .values(batch.events.map((e) => ({ identityId: agent.identityId, eventId: e.eventId, batchId: row.id })))
+        .onConflictDoNothing({ target: [endpointDecisionEvents.identityId, endpointDecisionEvents.eventId] })
+        .returning({ eventId: endpointDecisionEvents.eventId });
+      for (const r of inserted) fresh.add(r.eventId);
+    }
+    const events = batch.events.filter((e) => fresh.has(e.eventId));
+    const duplicateEvents = batch.events.length - events.length;
+    const current = events.filter((e) => !isStale(e));
+    const stale = events.length - current.length;
 
     // sessions: one upsert per (agent, sessionRef) in this batch, with its counters and time span
     type Acc = { agent: EndpointDecisionEvent["agent"]; sessionRef: string | null; first: Date; last: Date; decisions: number; denies: number; asks: number; wouldDenies: number; wouldAsks: number; modes: Map<string, { first: Date; last: Date }> };
     const acc = new Map<string, Acc>();
-    for (const e of accepted) {
-      const key = `${e.agent}|${e.sessionRef ?? ""}`;
+    const keyOf = (e: EndpointDecisionEvent) => `${e.agent}|${e.sessionRef ?? ""}`;
+    for (const e of current) {
       const at = new Date(e.occurredAt);
-      let a = acc.get(key);
-      if (!a) acc.set(key, (a = { agent: e.agent, sessionRef: e.sessionRef, first: at, last: at, decisions: 0, denies: 0, asks: 0, wouldDenies: 0, wouldAsks: 0, modes: new Map() }));
+      let a = acc.get(keyOf(e));
+      if (!a) acc.set(keyOf(e), (a = { agent: e.agent, sessionRef: e.sessionRef, first: at, last: at, decisions: 0, denies: 0, asks: 0, wouldDenies: 0, wouldAsks: 0, modes: new Map() }));
       if (at < a.first) a.first = at;
       if (at > a.last) a.last = at;
       if (e.permissionMode !== null) {
@@ -200,7 +246,7 @@ export async function ingestDecisionBatch(db: Db, agent: Agent, batch: EndpointD
     }
     const sessionIds = new Map<string, string>();
     let bypassSessions = 0;
-    const bypassAudits: Array<typeof auditLog.$inferInsert> = [];
+    const findingAudits: AuditRow[] = [];
     for (const [key, a] of acc) {
       const [s] = await t
         .insert(endpointCodingSessions)
@@ -235,7 +281,7 @@ export async function ingestDecisionBatch(db: Db, agent: Agent, batch: EndpointD
           .returning({ inserted: sql<boolean>`(xmax = 0)` });
         if (mode === bypassValue && m?.inserted) {
           bypassSessions++;
-          bypassAudits.push({
+          findingAudits.push({
             userId: NIL_UUID,
             objectType: "endpoint_device",
             objectId: agent.deviceId,
@@ -250,10 +296,11 @@ export async function ingestDecisionBatch(db: Db, agent: Agent, batch: EndpointD
     }
 
     // one chained audit row per decision (the audit_log interceptor chains a multi-row insert in order)
-    const decisionAudits: Array<typeof auditLog.$inferInsert> = [];
-    for (const e of accepted) {
+    const decisionAudits: AuditRow[] = [];
+    for (const e of events) {
       if (!e.decision) continue;
       const { effect, ruleId } = auditOfDecision(e.decision);
+      const late = isStale(e);
       decisionAudits.push({
         userId: NIL_UUID,
         objectType: "endpoint_device",
@@ -262,9 +309,10 @@ export async function ingestDecisionBatch(db: Db, agent: Agent, batch: EndpointD
           subsystem: "endpoint-decision-audit",
           eventId: e.eventId,
           occurredAt: e.occurredAt,
+          stale: late,
           batchId: batch.batchId,
           identityId: agent.identityId,
-          sessionId: sessionIds.get(`${e.agent}|${e.sessionRef ?? ""}`) ?? null,
+          sessionId: late ? null : (sessionIds.get(keyOf(e)) ?? null),
           agent: e.agent,
           permissionMode: e.permissionMode,
           ...e.decision,
@@ -272,157 +320,213 @@ export async function ingestDecisionBatch(db: Db, agent: Agent, batch: EndpointD
         effect,
         ruleId,
         ruleChain: e.decision.ruleId ? [e.decision.ruleId] : [],
-        reason: `endpoint hook ${e.decision.verdict === "none" ? (e.decision.wouldDeny ? "would deny (audit mode)" : "would ask (audit mode)") : e.decision.verdict} on a ${e.decision.action} call by ${e.agent} (${e.decision.emitter})`,
+        reason: `endpoint hook ${e.decision.verdict === "none" ? (e.decision.wouldDeny ? "would deny (audit mode)" : "would ask (audit mode)") : e.decision.verdict} on a ${e.decision.action} call by ${e.agent} (${e.decision.emitter})${late ? "; its time is outside the accepted window, so it is flagged stale" : ""}`,
       });
     }
 
-    // managed-file observations: a state not seen before is a change (unless it is the first report for that file)
+    // managed-file observations: every transition from the previous latest state is audited, a return included, and
+    // a first report that is not intact is a finding at once (#1044 review)
     let fileChanges = 0;
-    const fileAudits: Array<typeof auditLog.$inferInsert> = [];
     for (const f of batch.integrity) {
-      const before = await t
-        .select({ n: sql<number>`count(*)::int` })
+      const [prev] = await t
+        .select({ state: endpointManagedFileObservations.state, sha256: endpointManagedFileObservations.sha256, hookStatus: endpointManagedFileObservations.hookStatus })
         .from(endpointManagedFileObservations)
-        .where(and(eq(endpointManagedFileObservations.identityId, agent.identityId), eq(endpointManagedFileObservations.file, f.file)));
-      const [o] = await t
+        .where(and(eq(endpointManagedFileObservations.identityId, agent.identityId), eq(endpointManagedFileObservations.file, f.file)))
+        .orderBy(desc(endpointManagedFileObservations.lastSeenAt), desc(endpointManagedFileObservations.id))
+        .limit(1);
+      await t
         .insert(endpointManagedFileObservations)
         .values({ identityId: agent.identityId, file: f.file, state: f.state, sha256: f.sha256, hookStatus: f.hookStatus, firstSeenAt: now, lastSeenAt: now })
         .onConflictDoUpdate({
           target: [endpointManagedFileObservations.identityId, endpointManagedFileObservations.file, endpointManagedFileObservations.state, endpointManagedFileObservations.sha256, endpointManagedFileObservations.hookStatus],
           set: { lastSeenAt: sql`greatest(${endpointManagedFileObservations.lastSeenAt}, excluded.last_seen_at)` },
-        })
-        .returning({ inserted: sql<boolean>`(xmax = 0)` });
-      if (o?.inserted && (before[0]?.n ?? 0) > 0) {
-        fileChanges++;
-        fileAudits.push({
-          userId: NIL_UUID,
-          objectType: "endpoint_device",
-          objectId: agent.deviceId,
-          detail: { subsystem: "endpoint-decision-audit", finding: "managed_file_changed", identityId: agent.identityId, file: f.file, state: f.state, sha256: f.sha256, hookStatus: f.hookStatus },
-          effect: "deny",
-          ruleId: "endpoint-managed-file-changed",
-          ruleChain: [],
-          reason: `a managed settings or hook file changed on an endpoint device: ${f.file} is now ${f.state}${f.hookStatus ? `, hook ${f.hookStatus}` : ""} (ADR-0310 addendum)`,
         });
-      }
+      const changed = prev ? !sameState(prev, f) : !intactState(f) && f.state !== "missing";
+      if (!changed) continue;
+      fileChanges++;
+      findingAudits.push({
+        userId: NIL_UUID,
+        objectType: "endpoint_device",
+        objectId: agent.deviceId,
+        detail: { subsystem: "endpoint-decision-audit", finding: prev ? "managed_file_changed" : "managed_file_not_intact", identityId: agent.identityId, file: f.file, from: prev ?? null, to: { state: f.state, sha256: f.sha256, hookStatus: f.hookStatus } },
+        effect: intactState(f) ? "allow" : "deny",
+        ruleId: prev ? "endpoint-managed-file-changed" : "endpoint-managed-file-not-intact",
+        ruleChain: [],
+        reason: prev
+          ? `a managed settings or hook file changed on an endpoint device: ${f.file} went from ${prev.state}${prev.hookStatus ? `, hook ${prev.hookStatus}` : ""} to ${f.state}${f.hookStatus ? `, hook ${f.hookStatus}` : ""} (ADR-0310 addendum)`
+          : `a managed settings or hook file was first reported not intact on an endpoint device: ${f.file} is ${f.state}${f.hookStatus ? `, hook ${f.hookStatus}` : ""} (ADR-0310 addendum)`,
+      });
     }
 
-    const all = [...decisionAudits, ...bypassAudits, ...fileAudits];
+    const all: AuditRow[] = [...decisionAudits, ...findingAudits];
     all.push({
       userId: NIL_UUID,
       objectType: "endpoint_device",
       objectId: agent.deviceId,
-      detail: { subsystem: "endpoint-decision-audit", batchId: batch.batchId, identityId: agent.identityId, eventsReceived: batch.events.length, eventsRefused: refused, droppedEvents: batch.droppedEvents, decisionsAudited: decisionAudits.length, bypassSessions, fileChanges, bodySha256 },
+      detail: { subsystem: "endpoint-decision-audit", batchId: batch.batchId, identityId: agent.identityId, eventsReceived: batch.events.length, duplicateEvents, staleEvents: stale, droppedEvents: batch.droppedEvents, decisionsAudited: decisionAudits.length, bypassSessions, fileChanges, bodySha256 },
       effect: "allow",
       ruleId: "endpoint-decision-batch-accepted",
       ruleChain: [],
-      reason: `an endpoint decision batch was accepted: ${decisionAudits.length} decision(s) audited, ${refused} stale event(s) refused, ${batch.droppedEvents} dropped on the device (ADR-0310 addendum)`,
+      reason: `an endpoint decision batch was accepted: ${decisionAudits.length} decision(s) audited (${stale} stale), ${duplicateEvents} already-received event(s) skipped, ${batch.droppedEvents} dropped on the device (ADR-0310 addendum)`,
     });
     await t.insert(auditLog).values(all);
-    await t.update(endpointAgentIdentities).set({ lastReportAt: sql`now()` }).where(eq(endpointAgentIdentities.identityId, agent.identityId));
-    return { duplicate: false, audited: decisionAudits.length, refused, sessions: acc.size, bypassSessions, fileChanges } as const;
+    return { outcome: "accepted", audited: decisionAudits.length, stale, duplicateEvents, sessions: acc.size, bypassSessions, fileChanges } as const;
   });
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Admin views
+// Admin views, under the ADR-0226 list contract
 // ---------------------------------------------------------------------------------------------------------------------
 
-export const sessionsQuery = z
+/** the agents whose hook reports a permission mode, and so whose sessions can be judged bypassed or not */
+const MODE_REPORTING_AGENTS = ENDPOINT_HOOK_AGENTS.filter(modeReported);
+/** "this session reported its agent's bypass mode", derived from PERMISSION_MODE_BYPASS so the two cannot drift */
+const BYPASS_EXISTS = sql.join(
+  MODE_REPORTING_AGENTS.map(
+    (a) =>
+      sql`(${endpointCodingSessions.agent} = ${a} AND EXISTS (SELECT 1 FROM ${endpointCodingSessionModes} m WHERE m.session_id = ${endpointCodingSessions.id} AND m.permission_mode = ${PERMISSION_MODE_BYPASS[a]}))`,
+  ),
+  sql` OR `,
+);
+
+export const sessionsFilters = z
   .object({
     bypass: z.enum(["true", "false"]).optional(),
     agent: z.enum(ENDPOINT_HOOK_AGENTS).optional(),
     deviceId: z.string().uuid().optional(),
-    limit: z.coerce.number().int().min(1).max(200).default(50),
-    /** keyset cursor: the `next` of the previous page */
-    before: z.string().regex(/^\d{13}_[0-9a-f-]{36}$/).optional(),
   })
   .strict();
 
-const BYPASS_EXISTS = sql`EXISTS (SELECT 1 FROM ${endpointCodingSessionModes} m WHERE m.session_id = ${endpointCodingSessions.id} AND m.permission_mode = 'bypassPermissions' AND ${endpointCodingSessions.agent} IN ('claude-code', 'codex'))`;
+const sessionBase = {
+  id: endpointCodingSessions.id,
+  agent: endpointCodingSessions.agent,
+  sessionRef: endpointCodingSessions.sessionRef,
+  firstSeenAt: endpointCodingSessions.firstSeenAt,
+  lastSeenAt: endpointCodingSessions.lastSeenAt,
+  decisions: endpointCodingSessions.decisions,
+  denies: endpointCodingSessions.denies,
+  asks: endpointCodingSessions.asks,
+  wouldDenies: endpointCodingSessions.wouldDenies,
+  wouldAsks: endpointCodingSessions.wouldAsks,
+  deviceId: endpointAgentIdentities.deviceId,
+  devicePseudonym: endpointDevices.devicePseudonym,
+  deviceUserPseudonym: endpointAgentIdentities.deviceUserPseudonym,
+};
 
-/** coding-agent sessions, newest activity first, with their modes and whether each is a permission-bypass finding */
-export async function listCodingSessions(db: Db, q: z.infer<typeof sessionsQuery>) {
-  const conds: SQL[] = [];
-  if (q.agent) conds.push(eq(endpointCodingSessions.agent, q.agent));
-  if (q.deviceId) conds.push(eq(endpointAgentIdentities.deviceId, q.deviceId));
-  if (q.bypass === "true") conds.push(BYPASS_EXISTS);
-  if (q.bypass === "false") conds.push(sql`NOT ${BYPASS_EXISTS}`);
-  if (q.before) {
-    const [ms, id] = q.before.split("_") as [string, string];
-    const at = new Date(Number(ms));
-    conds.push(or(lt(endpointCodingSessions.lastSeenAt, at), and(eq(endpointCodingSessions.lastSeenAt, at), lt(endpointCodingSessions.id, id)))!);
-  }
-  const rows = await db
-    .select({
-      id: endpointCodingSessions.id,
-      agent: endpointCodingSessions.agent,
-      sessionRef: endpointCodingSessions.sessionRef,
-      firstSeenAt: endpointCodingSessions.firstSeenAt,
-      lastSeenAt: endpointCodingSessions.lastSeenAt,
-      decisions: endpointCodingSessions.decisions,
-      denies: endpointCodingSessions.denies,
-      asks: endpointCodingSessions.asks,
-      wouldDenies: endpointCodingSessions.wouldDenies,
-      wouldAsks: endpointCodingSessions.wouldAsks,
-      deviceId: endpointAgentIdentities.deviceId,
-      devicePseudonym: endpointDevices.devicePseudonym,
-      deviceUserPseudonym: endpointAgentIdentities.deviceUserPseudonym,
-    })
-    .from(endpointCodingSessions)
-    .innerJoin(endpointAgentIdentities, eq(endpointAgentIdentities.identityId, endpointCodingSessions.identityId))
-    .innerJoin(endpointDevices, eq(endpointDevices.id, endpointAgentIdentities.deviceId))
-    .where(conds.length ? and(...conds) : undefined)
-    .orderBy(desc(endpointCodingSessions.lastSeenAt), desc(endpointCodingSessions.id))
-    .limit(q.limit + 1);
-  const page = rows.slice(0, q.limit);
-  const modes = page.length
-    ? await db
-        .select({ sessionId: endpointCodingSessionModes.sessionId, permissionMode: endpointCodingSessionModes.permissionMode, firstSeenAt: endpointCodingSessionModes.firstSeenAt, lastSeenAt: endpointCodingSessionModes.lastSeenAt })
-        .from(endpointCodingSessionModes)
-        .where(inArray(endpointCodingSessionModes.sessionId, page.map((r) => r.id)))
-    : [];
-  const sessions = page.map((r) => {
-    const own = modes.filter((m) => m.sessionId === r.id).sort((a, b) => a.firstSeenAt.getTime() - b.firstSeenAt.getTime());
-    const reported = modeReported(r.agent);
-    const bypass = reported && own.some((m) => m.permissionMode === PERMISSION_MODE_BYPASS[r.agent]);
-    return {
-      id: r.id,
-      agent: r.agent,
-      sessionIdentified: r.sessionRef !== null,
-      device: { id: r.deviceId, pseudonym: r.devicePseudonym, userPseudonym: r.deviceUserPseudonym },
-      firstSeenAt: r.firstSeenAt.toISOString(),
-      lastSeenAt: r.lastSeenAt.toISOString(),
-      counts: { decisions: r.decisions, denies: r.denies, asks: r.asks, wouldDenies: r.wouldDenies, wouldAsks: r.wouldAsks },
-      permissionModeReported: reported,
-      permissionModes: own.map((m) => ({ mode: m.permissionMode, firstSeenAt: m.firstSeenAt.toISOString(), lastSeenAt: m.lastSeenAt.toISOString() })),
-      // null when the agent does not report its mode: unknown, never "not bypassed" (ADR-0180)
-      permissionBypass: reported ? bypass : null,
-      finding: bypass ? "permission_bypass" : null,
-    };
-  });
-  const last = page[page.length - 1];
+export type CodingSessionView = {
+  id: string;
+  agent: (typeof ENDPOINT_HOOK_AGENTS)[number];
+  sessionIdentified: boolean;
+  device: { id: string; pseudonym: string; userPseudonym: string };
+  firstSeenAt: string;
+  lastSeenAt: string;
+  counts: { decisions: number; denies: number; asks: number; wouldDenies: number; wouldAsks: number };
+  permissionModeReported: boolean;
+  permissionModes: Array<{ mode: string; firstSeenAt: string; lastSeenAt: string }>;
+  /** null when the agent does not report its mode: unknown, never "not bypassed" (ADR-0180) */
+  permissionBypass: boolean | null;
+  finding: "permission_bypass" | null;
+};
+
+/** at most this many modes are shown per session; the device controls how many it reports */
+const MODES_SHOWN = 16;
+
+export const CODING_SESSIONS_LIST: ListSpec<CodingSessionView> = {
+  id: "endpoint-coding-sessions",
+  sorts: {
+    lastSeen: { expr: endpointCodingSessions.lastSeenAt, keysetAt: endpointCodingSessions.lastSeenAt },
+    firstSeen: { expr: endpointCodingSessions.firstSeenAt, keysetAt: endpointCodingSessions.firstSeenAt },
+    agent: { expr: endpointCodingSessions.agent },
+    decisions: { expr: endpointCodingSessions.decisions },
+    denies: { expr: endpointCodingSessions.denies },
+  },
+  columns: {
+    agent: { label: "Agent", value: (r) => r.agent },
+    device: { label: "Device", value: (r) => r.device.pseudonym },
+    user: { label: "Device user", value: (r) => r.device.userPseudonym },
+    bypass: { label: "Permission bypass", value: (r) => (r.permissionBypass === null ? "not reported" : r.permissionBypass) },
+    decisions: { label: "Decisions", value: (r) => r.counts.decisions },
+    denies: { label: "Denies", value: (r) => r.counts.denies },
+    lastSeen: { label: "Last seen", value: (r) => r.lastSeenAt },
+  },
+  filters: ["bypass", "agent", "deviceId"],
+  defaultSort: { col: "lastSeen", dir: "desc" },
+  idCol: endpointCodingSessions.id,
+};
+
+function codingSessionsList(db: Db): ContractList<CodingSessionView, z.infer<typeof sessionsFilters>> {
   return {
-    sessions,
-    next: rows.length > q.limit && last ? `${last.lastSeenAt.getTime()}_${last.id}` : null,
-    coverage: ENDPOINT_HOOK_AGENTS.map((a) => ({
-      agent: a,
-      permissionModeReported: modeReported(a),
-      note: modeReported(a)
-        ? `${a} reports its permission mode in every hook call; ${PERMISSION_MODE_BYPASS[a]} is a permission-bypass session`
-        : `${a} does not report its permission mode to hooks, so a permission-bypass session cannot be seen; its hook decisions are still audited`,
-    })),
+    spec: CODING_SESSIONS_LIST,
+    filters: sessionsFilters,
+    where: (_req, f) => {
+      const conds: SQL[] = [];
+      if (f.agent) conds.push(eq(endpointCodingSessions.agent, f.agent));
+      if (f.deviceId) conds.push(eq(endpointAgentIdentities.deviceId, f.deviceId));
+      if (f.bypass === "true") conds.push(sql`(${BYPASS_EXISTS})`);
+      // "not bypassed" only for agents that report a mode: the others are unknown, and never listed as safe
+      if (f.bypass === "false") conds.push(sql`(${inArray(endpointCodingSessions.agent, MODE_REPORTING_AGENTS)} AND NOT (${BYPASS_EXISTS}))`);
+      return conds.length ? and(...conds) : undefined;
+    },
+    reader: {
+      fetch: async (q) => {
+        const rows = await db
+          .select({ ...sessionBase, _cursorAt: q.cursorAt })
+          .from(endpointCodingSessions)
+          .innerJoin(endpointAgentIdentities, eq(endpointAgentIdentities.identityId, endpointCodingSessions.identityId))
+          .innerJoin(endpointDevices, eq(endpointDevices.id, endpointAgentIdentities.deviceId))
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset);
+        const modes = rows.length
+          ? await db
+              .select({ sessionId: endpointCodingSessionModes.sessionId, permissionMode: endpointCodingSessionModes.permissionMode, firstSeenAt: endpointCodingSessionModes.firstSeenAt, lastSeenAt: endpointCodingSessionModes.lastSeenAt })
+              .from(endpointCodingSessionModes)
+              .where(inArray(endpointCodingSessionModes.sessionId, rows.map((r) => r.id)))
+              .orderBy(asc(endpointCodingSessionModes.firstSeenAt))
+              .limit(rows.length * MODES_SHOWN)
+          : [];
+        return rows.map((r) => {
+          const own = modes.filter((m) => m.sessionId === r.id);
+          const reported = modeReported(r.agent);
+          const bypass = reported && own.some((m) => m.permissionMode === PERMISSION_MODE_BYPASS[r.agent]);
+          return {
+            _cursorAt: r._cursorAt,
+            id: r.id,
+            agent: r.agent,
+            sessionIdentified: r.sessionRef !== null,
+            device: { id: r.deviceId, pseudonym: r.devicePseudonym, userPseudonym: r.deviceUserPseudonym },
+            firstSeenAt: r.firstSeenAt.toISOString(),
+            lastSeenAt: r.lastSeenAt.toISOString(),
+            counts: { decisions: r.decisions, denies: r.denies, asks: r.asks, wouldDenies: r.wouldDenies, wouldAsks: r.wouldAsks },
+            permissionModeReported: reported,
+            permissionModes: own.slice(0, MODES_SHOWN).map((m) => ({ mode: m.permissionMode, firstSeenAt: m.firstSeenAt.toISOString(), lastSeenAt: m.lastSeenAt.toISOString() })),
+            permissionBypass: reported ? bypass : null,
+            finding: bypass ? ("permission_bypass" as const) : null,
+          };
+        });
+      },
+      countable: (where) =>
+        db
+          .select({ one: sql`1` })
+          .from(endpointCodingSessions)
+          .innerJoin(endpointAgentIdentities, eq(endpointAgentIdentities.identityId, endpointCodingSessions.identityId))
+          .where(where),
+      idOf: (r) => r.id,
+    },
+    extra: () => ({
+      coverage: ENDPOINT_HOOK_AGENTS.map((a) => ({
+        agent: a,
+        permissionModeReported: modeReported(a),
+        note: modeReported(a)
+          ? `${a} reports its permission mode in every hook call; ${PERMISSION_MODE_BYPASS[a]} is a permission-bypass session`
+          : `${a} does not report its permission mode to hooks, so a permission-bypass session cannot be seen; its hook decisions are still audited`,
+      })),
+    }),
   };
 }
 
-export const tamperQuery = z
-  .object({
-    deviceId: z.string().uuid().optional(),
-    limit: z.coerce.number().int().min(1).max(200).default(50),
-    /** keyset cursor over device user identities: the `next` of the previous page */
-    before: z.string().uuid().optional(),
-  })
-  .strict();
+export const tamperFilters = z.object({ deviceId: z.string().uuid().optional() }).strict();
 
 /** the managed files whose bundle copy is delivered as a file, so the device's bytes can match an exported bundle */
 const BUNDLE_FILE_OF: Partial<Record<(typeof ENDPOINT_MANAGED_FILES)[number], string>> = {
@@ -432,77 +536,116 @@ const BUNDLE_FILE_OF: Partial<Record<(typeof ENDPOINT_MANAGED_FILES)[number], st
 
 export type FileStatus = "intact" | "changed" | "hook_missing" | "hook_weakened" | "file_missing" | "unreadable" | "not_system_owned";
 
+export type ManagedFilesView = {
+  identityId: string;
+  device: { id: string; pseudonym: string; userPseudonym: string };
+  findings: number;
+  files: Array<Record<string, unknown> & { file: string; status: FileStatus | "not_reported"; finding: boolean }>;
+};
+
+export const MANAGED_FILES_LIST: ListSpec<ManagedFilesView> = {
+  id: "endpoint-managed-files",
+  sorts: { registered: { expr: endpointAgentIdentities.registeredAt, keysetAt: endpointAgentIdentities.registeredAt } },
+  columns: {
+    device: { label: "Device", value: (r) => r.device.pseudonym },
+    user: { label: "Device user", value: (r) => r.device.userPseudonym },
+    findings: { label: "Findings", value: (r) => r.findings },
+  },
+  filters: ["deviceId"],
+  defaultSort: { col: "registered", dir: "desc" },
+  idCol: endpointAgentIdentities.identityId,
+};
+
 /**
- * Per device user, the latest state of each managed file and whether it changed. "changed" means the device has
- * reported more than one state for the file, and the latest is not the first. The hook is the control: a missing or
- * weakened hook registration is a finding of its own. Restore is a later step and needs admin approval.
+ * Per device user, the latest state of each managed file and whether it changed. The hook is the control: a missing
+ * or weakened registration is a finding of its own. Every read is bounded by the page: the latest observation per
+ * file, a count per file, and only the bundle files whose hash a latest observation carries. Restore is a later
+ * step and needs admin approval.
  */
-export async function managedSettingsTamper(db: Db, q: z.infer<typeof tamperQuery>) {
-  const conds: SQL[] = [];
-  if (q.deviceId) conds.push(eq(endpointAgentIdentities.deviceId, q.deviceId));
-  if (q.before) conds.push(lt(endpointAgentIdentities.identityId, q.before));
-  // identities that reported at least one managed-file observation
-  conds.push(sql`EXISTS (SELECT 1 FROM ${endpointManagedFileObservations} o WHERE o.identity_id = ${endpointAgentIdentities.identityId})`);
-  const ids = await db
-    .select({ identityId: endpointAgentIdentities.identityId, deviceId: endpointAgentIdentities.deviceId, devicePseudonym: endpointDevices.devicePseudonym, deviceUserPseudonym: endpointAgentIdentities.deviceUserPseudonym })
-    .from(endpointAgentIdentities)
-    .innerJoin(endpointDevices, eq(endpointDevices.id, endpointAgentIdentities.deviceId))
-    .where(and(...conds))
-    .orderBy(desc(endpointAgentIdentities.identityId))
-    .limit(q.limit + 1);
-  const page = ids.slice(0, q.limit);
-  const obs = page.length
-    ? await db.select().from(endpointManagedFileObservations).where(inArray(endpointManagedFileObservations.identityId, page.map((r) => r.identityId)))
-    : [];
-  // the exported bundles' hashes per bundle file, newest version first
-  const exported = await db
-    .select({ path: managedSettingsBundleFiles.path, sha256: managedSettingsBundleFiles.sha256, bundleId: managedSettingsBundles.id, version: managedSettingsBundles.version, createdAt: managedSettingsBundles.createdAt })
-    .from(managedSettingsBundleFiles)
-    .innerJoin(managedSettingsBundles, eq(managedSettingsBundles.id, managedSettingsBundleFiles.bundleId))
-    .where(inArray(managedSettingsBundleFiles.path, Object.values(BUNDLE_FILE_OF) as string[]));
-  let findings = 0;
-  const devices = page.map((d) => {
-    const files = ENDPOINT_MANAGED_FILES.map((file) => {
-      const mine = obs.filter((o) => o.identityId === d.identityId && o.file === file).sort((a, b) => a.lastSeenAt.getTime() - b.lastSeenAt.getTime() || a.firstSeenAt.getTime() - b.firstSeenAt.getTime());
-      if (mine.length === 0) return { file, status: "not_reported" as const, finding: false };
-      const latest = mine[mine.length - 1]!;
-      const first = mine.reduce((a, b) => (b.firstSeenAt < a.firstSeenAt ? b : a));
-      const changed = mine.length > 1 && latest.id !== first.id;
-      const status: FileStatus =
-        latest.state === "missing" ? "file_missing"
-        : latest.state === "unreadable" ? "unreadable"
-        : latest.state === "not_system_owned" ? "not_system_owned"
-        : latest.hookStatus === "absent" || latest.hookStatus === "unparseable" ? "hook_missing"
-        : latest.hookStatus === "weakened" ? "hook_weakened"
-        : changed ? "changed"
-        : "intact";
-      const bundlePath = BUNDLE_FILE_OF[file];
-      const match = bundlePath && latest.sha256 ? exported.filter((x) => x.path === bundlePath && x.sha256 === latest.sha256).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0] : undefined;
-      // a missing file is a finding only once the device had reported it present (a vendor not deployed is not tamper)
-      const finding = status !== "intact" && !(status === "file_missing" && !mine.some((m) => m.state === "present"));
-      if (finding) findings++;
-      return {
-        file,
-        status,
-        finding,
-        state: latest.state,
-        sha256: latest.sha256,
-        hookStatus: latest.hookStatus,
-        firstSeenAt: latest.firstSeenAt.toISOString(),
-        lastSeenAt: latest.lastSeenAt.toISOString(),
-        statesSeen: mine.length,
-        // compared only for the files a bundle delivers as a file; null when there is nothing to compare against
-        bundleMatch: bundlePath ? (latest.sha256 ? (match ? { bundleId: match.bundleId, version: match.version } : "none") : null) : null,
-      };
-    });
-    return { device: { id: d.deviceId, pseudonym: d.devicePseudonym, userPseudonym: d.deviceUserPseudonym }, identityId: d.identityId, files };
-  });
-  const last = page[page.length - 1];
+function managedFilesList(db: Db): ContractList<ManagedFilesView, z.infer<typeof tamperFilters>> {
   return {
-    devices,
-    findings,
-    next: ids.length > q.limit && last ? last.identityId : null,
-    note: "Tamper is measured from what each device reports: a device that stops reporting shows its last state. Restoring a changed file is a later step and needs admin approval.",
+    spec: MANAGED_FILES_LIST,
+    filters: tamperFilters,
+    where: (_req, f) => {
+      const conds: SQL[] = [sql`EXISTS (SELECT 1 FROM ${endpointManagedFileObservations} o WHERE o.identity_id = ${endpointAgentIdentities.identityId})`];
+      if (f.deviceId) conds.push(eq(endpointAgentIdentities.deviceId, f.deviceId));
+      return and(...conds);
+    },
+    reader: {
+      fetch: async (q) => {
+        const rows = await db
+          .select({ identityId: endpointAgentIdentities.identityId, deviceId: endpointAgentIdentities.deviceId, devicePseudonym: endpointDevices.devicePseudonym, deviceUserPseudonym: endpointAgentIdentities.deviceUserPseudonym, _cursorAt: q.cursorAt })
+          .from(endpointAgentIdentities)
+          .innerJoin(endpointDevices, eq(endpointDevices.id, endpointAgentIdentities.deviceId))
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset);
+        if (!rows.length) return [];
+        const ids = rows.map((r) => r.identityId);
+        const o = endpointManagedFileObservations;
+        // the latest observation per (identity, file), and per file how many states it has had and whether it was ever present
+        const latest = (await db
+          .selectDistinctOn([o.identityId, o.file], { identityId: o.identityId, file: o.file, state: o.state, sha256: o.sha256, hookStatus: o.hookStatus, lastSeenAt: o.lastSeenAt })
+          .from(o)
+          .where(inArray(o.identityId, ids))
+          .orderBy(o.identityId, o.file, desc(o.lastSeenAt), desc(o.id))) as Array<{ identityId: string; file: string; state: string; sha256: string | null; hookStatus: string | null; lastSeenAt: Date }>;
+        const stats = await db
+          .select({ identityId: o.identityId, file: o.file, states: sql<number>`count(*)::int`, everPresent: sql<boolean>`bool_or(${o.state} = 'present')`, firstSeenAt: sql<Date>`min(${o.firstSeenAt})` })
+          .from(o)
+          .where(inArray(o.identityId, ids))
+          .groupBy(o.identityId, o.file);
+        const hashes = [...new Set(latest.filter((l) => BUNDLE_FILE_OF[l.file as keyof typeof BUNDLE_FILE_OF] && l.sha256).map((l) => l.sha256!))];
+        const exported = hashes.length
+          ? await db
+              .selectDistinctOn([managedSettingsBundleFiles.path, managedSettingsBundleFiles.sha256], { path: managedSettingsBundleFiles.path, sha256: managedSettingsBundleFiles.sha256, bundleId: managedSettingsBundles.id, version: managedSettingsBundles.version })
+              .from(managedSettingsBundleFiles)
+              .innerJoin(managedSettingsBundles, eq(managedSettingsBundles.id, managedSettingsBundleFiles.bundleId))
+              .where(and(inArray(managedSettingsBundleFiles.path, Object.values(BUNDLE_FILE_OF) as string[]), inArray(managedSettingsBundleFiles.sha256, hashes)))
+              .orderBy(managedSettingsBundleFiles.path, managedSettingsBundleFiles.sha256, desc(managedSettingsBundles.createdAt))
+          : [];
+        return rows.map((d) => {
+          let findings = 0;
+          const files = ENDPOINT_MANAGED_FILES.map((file) => {
+            const l = latest.find((x) => x.identityId === d.identityId && x.file === file);
+            const st = stats.find((x) => x.identityId === d.identityId && x.file === file);
+            if (!l || !st) return { file, status: "not_reported" as const, finding: false };
+            const status: FileStatus =
+              l.state === "missing" ? "file_missing"
+              : l.state === "unreadable" ? "unreadable"
+              : l.state === "not_system_owned" ? "not_system_owned"
+              : l.hookStatus === "absent" || l.hookStatus === "unparseable" ? "hook_missing"
+              : l.hookStatus === "weakened" ? "hook_weakened"
+              : st.states > 1 ? "changed"
+              : "intact";
+            const bundlePath = BUNDLE_FILE_OF[file];
+            const match = bundlePath && l.sha256 ? exported.find((x) => x.path === bundlePath && x.sha256 === l.sha256) : undefined;
+            // a file never present on this device is a vendor not deployed there, which is not tamper
+            const finding = status !== "intact" && !(status === "file_missing" && !st.everPresent);
+            if (finding) findings++;
+            return {
+              file,
+              status,
+              finding,
+              state: l.state,
+              sha256: l.sha256,
+              hookStatus: l.hookStatus,
+              lastSeenAt: l.lastSeenAt.toISOString(),
+              firstReportedAt: new Date(st.firstSeenAt).toISOString(),
+              statesSeen: st.states,
+              // compared only for the files a bundle delivers as a file; null when there is nothing to compare against
+              bundleMatch: bundlePath ? (l.sha256 ? (match ? { bundleId: match.bundleId, version: match.version } : "none") : null) : null,
+            };
+          });
+          return { _cursorAt: d._cursorAt, identityId: d.identityId, device: { id: d.deviceId, pseudonym: d.devicePseudonym, userPseudonym: d.deviceUserPseudonym }, findings, files };
+        });
+      },
+      countable: (where) => db.select({ one: sql`1` }).from(endpointAgentIdentities).where(where),
+      idOf: (r) => r.identityId,
+    },
+    extra: () => ({
+      note: "Tamper is measured from what each device reports: a device that stops reporting shows its last state. Every change is in the audit log. Restoring a changed file is a later step and needs admin approval.",
+    }),
   };
 }
 
@@ -510,17 +653,9 @@ export async function managedSettingsTamper(db: Db, q: z.infer<typeof tamperQuer
 // Routes (admin-only by the app-level default: neither is in NON_ADMIN_ROUTES)
 // ---------------------------------------------------------------------------------------------------------------------
 
-const issues = (e: z.ZodError) => e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
-
 export function registerEndpointDecisionRoutes(app: FastifyInstance, db: Db): void {
-  app.get("/v1/endpoint-decisions/sessions", async (req, reply) => {
-    const q = sessionsQuery.safeParse(req.query ?? {});
-    if (!q.success) return reply.status(400).send({ error: "invalid_query", detail: issues(q.error) });
-    return listCodingSessions(db, q.data);
-  });
-  app.get("/v1/endpoint-decisions/tamper", async (req, reply) => {
-    const q = tamperQuery.safeParse(req.query ?? {});
-    if (!q.success) return reply.status(400).send({ error: "invalid_query", detail: issues(q.error) });
-    return managedSettingsTamper(db, q.data);
-  });
+  const sessions = codingSessionsList(db);
+  const files = managedFilesList(db);
+  app.get("/v1/endpoint-decisions/sessions", async (req, reply) => answerListPage(db, req, reply, sessions));
+  app.get("/v1/endpoint-decisions/tamper", async (req, reply) => answerListPage(db, req, reply, files));
 }

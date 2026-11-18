@@ -8634,6 +8634,25 @@ export const endpointDecisionBatches = pgTable(
 );
 export type EndpointDecisionBatchRow = typeof endpointDecisionBatches.$inferSelect;
 
+/** one row per accepted event id (#1044 review): an event resent under another batch id is never audited twice */
+export const endpointDecisionEvents = pgTable(
+  "endpoint_decision_events",
+  {
+    identityId: uuid("identity_id")
+      .notNull()
+      .references(() => endpointAgentIdentities.identityId, { onDelete: "cascade" }),
+    eventId: uuid("event_id").notNull(),
+    batchId: uuid("batch_id")
+      .notNull()
+      .references(() => endpointDecisionBatches.id, { onDelete: "cascade" }),
+  },
+  (t) => [
+    primaryKey({ name: "endpoint_decision_events_pkey", columns: [t.identityId, t.eventId] }),
+    index("endpoint_decision_events_batch_idx").on(t.batchId),
+  ],
+);
+export type EndpointDecisionEventRow = typeof endpointDecisionEvents.$inferSelect;
+
 /** one coding-agent session of one device user; sessionRef is a device-keyed hash of the vendor's id, never the id */
 export const endpointCodingSessions = pgTable(
   "endpoint_coding_sessions",
