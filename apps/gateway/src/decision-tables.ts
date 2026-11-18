@@ -13,6 +13,7 @@
  *  - Publishing changes no routing: the AI still answers the step until the switch (ADR-0327 slice 4) is approved.
  *    Nothing here is an authorisation decision (ADR-0327 §Decision 5).
  */
+import { createHash } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
@@ -39,7 +40,7 @@ import {
   type DecisionTableBody,
   type InducedRule,
 } from "@regulait/optimizer-kernel";
-import { DECISION_TABLE_VERSION_MACHINE } from "@regulait/shared";
+import { DECISION_TABLE_VERSION_MACHINE, canonicalJson } from "@regulait/shared";
 import type { ListSpec } from "./list-contract.js";
 import { whereFrom } from "./state-transition.js";
 import { answerListPage, type ContractList } from "./list-contract-route.js";
@@ -55,7 +56,17 @@ export const DECISION_TABLE_AUDIT_RULE_IDS = {
   published: "decision_table_version_published",
   rejected: "decision_table_version_rejected",
   stale: "decision_table_version_stale",
+  digestMismatch: "decision_table_version_digest_mismatch",
 } as const;
+
+/**
+ * What a reviewer approves: sha256 hex over ADR-0060's `canonicalJson` of the version body (key order is not an input,
+ * and it survives the jsonb round trip). Stored on the version and as the approval's `arguments_digest`, the consent
+ * fingerprint ADR-0104 binds approvals with; publishing recomputes it from the stored body and refuses on a mismatch.
+ */
+export function decisionTableBodyDigest(body: unknown): string {
+  return createHash("sha256").update(canonicalJson(body)).digest("hex");
+}
 
 /**
  * The version lifecycle (owner rule 12) is the shared ADR-0348 machine `DECISION_TABLE_VERSION_MACHINE`; every status
@@ -367,12 +378,14 @@ export function registerDecisionTableRoutes(app: FastifyInstance, db: Db): void 
         .from(decisionTableVersions)
         .where(eq(decisionTableVersions.tableId, id));
       const version = (top ?? 0) + 1;
+      const digest = decisionTableBodyDigest(body.table);
       const [v] = await tx
         .insert(decisionTableVersions)
         .values({
           tableId: id,
           version,
           body: body.table,
+          bodySha256: digest,
           baseVersion: published?.version ?? null,
           status: DECISION_TABLE_VERSION_INITIAL,
           authorUserId: actor,
@@ -386,6 +399,8 @@ export function registerDecisionTableRoutes(app: FastifyInstance, db: Db): void 
           objectType: "decision_table",
           stageId: `${DECISION_TABLE_VERSION_PREFIX}${v!.id}`,
           approverUserId: body.reviewerUserId,
+          // the consent is for exactly this body (ADR-0104's fingerprint column)
+          argumentsDigest: digest,
         })
         .returning({ id: approvals.id });
       await tx.update(decisionTableVersions).set({ approvalId: a!.id }).where(eq(decisionTableVersions.id, v!.id));
@@ -437,7 +452,7 @@ export async function precheckDecisionTableDecision(
  */
 export async function applyDecisionTableDecision(
   tx: Db,
-  approval: { id: string; stageId: string | null },
+  approval: { id: string; stageId: string | null; argumentsDigest: string | null },
   decision: "approved" | "denied",
   deciderUserId: string,
 ): Promise<void> {
@@ -473,6 +488,23 @@ export async function applyDecisionTableDecision(
         "deny",
         `version ${draft.version} approved but not published: it was proposed against version ${draft.baseVersion ?? "none"}, and version ${published?.version ?? "none"} is published now; propose it again`,
         { ...detail, baseVersion: draft.baseVersion, publishedVersion: published?.version ?? null },
+      );
+    }
+    return;
+  }
+  // what was approved is what is published: the stored body must still hash to the digest the version and the
+  // approval were bound to (the DB trigger freezes the body; this refuses even if that guard were bypassed)
+  const now = decisionTableBodyDigest(draft.body);
+  if (now !== draft.bodySha256 || approval.argumentsDigest !== draft.bodySha256) {
+    if (await transitionVersion(tx, draft.id, "mark_stale", decided)) {
+      await audit(
+        tx,
+        deciderUserId,
+        table.id,
+        DECISION_TABLE_AUDIT_RULE_IDS.digestMismatch,
+        "deny",
+        `version ${draft.version} approved but not published: its body no longer matches what was proposed for review; propose it again`,
+        { ...detail, proposedSha256: draft.bodySha256, approvalSha256: approval.argumentsDigest, storedSha256: now },
       );
     }
     return;

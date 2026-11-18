@@ -17389,6 +17389,9 @@ export const decisionTableVersions = pgTable(
     /** schema-validated configuration document (ADR-0200 exception): `{fields, rows}` as the author wrote it, validated
      * by the gateway's zod schema and `compileDecisionTable` before insert; immutable once written */
     body: jsonb("body").notNull(),
+    /** sha256 hex of `canonicalJson(body)`: the approval carries the same digest, and publishing recomputes it and
+     * refuses on a mismatch. A DB trigger freezes body, digest, table, version, base and author after insert. */
+    bodySha256: text("body_sha256").notNull(),
     /** the published version this one was proposed against (null = none was published) */
     baseVersion: integer("base_version"),
     status: text("status", { enum: DECISION_TABLE_VERSION_STATUSES }).notNull().default("pending_review"),
@@ -17409,6 +17412,7 @@ export const decisionTableVersions = pgTable(
       .where(sql`${t.status} = 'pending_review'`),
     index("decision_table_versions_approval_idx").on(t.approvalId),
     check("decision_table_versions_version_check", sql`${t.version} >= 1`),
+    check("decision_table_versions_body_sha256_check", sql`${t.bodySha256} ~ '^[0-9a-f]{64}$'`),
     check(
       "decision_table_versions_status_check",
       sql`${t.status} IN ('pending_review', 'published', 'superseded', 'rejected', 'stale')`,

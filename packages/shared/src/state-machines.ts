@@ -233,7 +233,8 @@ export const DECISION_TABLE_VERSION_MACHINE = defineMachine({
       from: ["pending_review"],
       to: "stale",
       by: ["system"],
-      summary: "The version was approved after another version was published; it is recorded stale and not published.",
+      summary:
+        "The version was approved after another version was published, or its body no longer matches the digest its approval was bound to; it is recorded stale and not published.",
     },
     supersede: {
       from: ["published"],

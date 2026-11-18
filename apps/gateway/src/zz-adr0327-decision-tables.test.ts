@@ -1,14 +1,14 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, auditLog, createDb, decisionTables, decisionTableVersions, desc, eq, runMigrations, type Db } from "@regulait/db";
+import { and, approvals, auditLog, createDb, decisionTables, decisionTableVersions, desc, eq, runMigrations, type Db } from "@regulait/db";
 import { applyInducedRule, compileDecisionTable, type DecisionTableBody } from "@regulait/optimizer-kernel";
 import { buildApp } from "./app.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { DECISION_TABLE_VERSION_STATUSES } from "@regulait/db";
 import { DECISION_TABLE_VERSION_MACHINE, STATE_MACHINES } from "@regulait/shared";
-import { DECISION_TABLE_AUDIT_RULE_IDS, DECISION_TABLE_VERSION_INITIAL } from "./decision-tables.js";
+import { DECISION_TABLE_AUDIT_RULE_IDS, DECISION_TABLE_VERSION_INITIAL, decisionTableBodyDigest } from "./decision-tables.js";
 
 /**
  * ADR-0327 addendum — business-authored decision tables. A table is validated by a schema, compiles to the exact-match
@@ -222,5 +222,47 @@ describe("decision tables (ADR-0327 addendum)", () => {
     expect(d.published).toBeNull();
     expect(d.history.find((v: { version: number }) => v.version === 4).status).toBe("stale");
     expect(await lastAudit(DECISION_TABLE_AUDIT_RULE_IDS.stale)).toBeTruthy();
+  });
+
+  // security review #1020 B1: a version is frozen once proposed, and its approval is bound to its body
+  const versionRow = async (version: number) =>
+    (await db.select().from(decisionTableVersions).where(and(eq(decisionTableVersions.tableId, tableId), eq(decisionTableVersions.version, version))))[0]!;
+  const refused = async (change: Parameters<ReturnType<typeof db.update<typeof decisionTableVersions>>["set"]>[0], id: string) => {
+    const err = await db.update(decisionTableVersions).set(change).where(eq(decisionTableVersions.id, id)).then(() => null, (e: unknown) => e);
+    expect(err, JSON.stringify(change)).toBeTruthy();
+    expect(String((err as { cause?: { code?: string } }).cause?.code ?? (err as { code?: string }).code)).toBe("23514");
+  };
+
+  it("freezes what was proposed: body, digest, table, version, base and author cannot change after insert", async () => {
+    const p = await propose(author, triage("frozen"));
+    expect(p.statusCode, p.body).toBe(202);
+    const v = await versionRow(p.json().version);
+    await refused({ body: { fields: ["severity"], rows: [{ when: { severity: "high" }, then: "someone else" }] } }, v.id);
+    await refused({ bodySha256: "0".repeat(64) }, v.id);
+    await refused({ version: v.version + 100 }, v.id);
+    await refused({ baseVersion: 99 }, v.id);
+    await refused({ authorUserId: reviewer.id }, v.id);
+    expect((await versionRow(v.version)).body).toEqual(v.body);
+    // the decision columns still move, and the author may become NULL (the users FK's ON DELETE SET NULL)
+    await db.update(decisionTableVersions).set({ authorUserId: null }).where(eq(decisionTableVersions.id, v.id));
+    expect((await decide(reviewer, p.json().approvalId, "denied")).statusCode).toBe(200);
+    expect((await versionRow(v.version)).status).toBe("rejected");
+  });
+
+  it("binds the approval to the body it shows, and refuses to publish when they no longer match", async () => {
+    const table = triage("bound");
+    const p = await propose(author, table);
+    expect(p.statusCode, p.body).toBe(202);
+    const v = await versionRow(p.json().version);
+    const [a] = await db.select().from(approvals).where(eq(approvals.id, p.json().approvalId));
+    expect(v.bodySha256).toBe(decisionTableBodyDigest(table));
+    expect(a!.argumentsDigest).toBe(v.bodySha256);
+    // a consent recorded for some other body: approving it must not publish this one
+    await db.update(approvals).set({ argumentsDigest: decisionTableBodyDigest(triage("something else")) }).where(eq(approvals.id, a!.id));
+    expect((await decide(reviewer, a!.id, "approved")).statusCode).toBe(200);
+    const d = await detail();
+    expect(d.published).toBeNull();
+    expect((await versionRow(v.version)).status).toBe("stale");
+    expect((await lastAudit(DECISION_TABLE_AUDIT_RULE_IDS.digestMismatch))?.detail).toMatchObject({ proposedSha256: v.bodySha256 });
   });
 });

@@ -160,6 +160,21 @@ approval. This addendum records it; no new ADR.
   `rejected` and changes nothing. A version that compiles to the same cells as the published one is refused
   (`no_change`). At most one published and one pending version per table (partial unique indexes). Create, proposal
   and every decision outcome are audited (`object_type` `decision_table`).
+- **Frozen and bound (security review of #1020).** A version is frozen once proposed. A BEFORE UPDATE trigger on
+  `decision_table_versions` refuses any change to `body`, `body_sha256`, `table_id`, `version` and `base_version`,
+  and lets `author_user_id` change only to NULL (the users FK's `ON DELETE SET NULL`), so only the status, the approval
+  link and the decision columns move. `body_sha256` is sha256 over ADR-0060's `canonicalJson(body)`; the approval row
+  carries the same value as its ADR-0104 consent fingerprint (`arguments_digest`). Publishing recomputes the digest
+  from the stored body and compares it with both; on a mismatch the version is recorded `stale`
+  (`decision_table_version_digest_mismatch`) and nothing is published.
+- **Why not `config_versions` (ADR-0048).** The reviewer preferred reusing the shared version store, as compliance
+  profiles do. It does not fit without changing a column other lanes depend on. Its lifecycle is draft, canary,
+  active, rolled_back, superseded and retired, with canary percentages; a decision-table version needs `rejected`
+  (the reviewer said no) and `stale` (approved against a base that moved, or a body that no longer matches), and has
+  no canary. Adding them to `CONFIG_VERSION_STATUSES` would put two states into the machine every other artifact type
+  shares. It is also polymorphic (`artifact_type` and `artifact_id` with no foreign key), where this table cascades
+  with its agent. It has no database freeze either, so moving there would not by itself have closed the finding.
+  Re-check if `config_versions` gains a per-type lifecycle.
 - **Lifecycle (owner rule 12).** The shared ADR-0348 machine `DECISION_TABLE_VERSION_MACHINE` (`@regulait/shared`)
   declares the transitions once (publish, reject, mark stale from `pending_review`; supersede from `published`), and
   `transitionVersion` enforces each through `whereFrom`, a guarded UPDATE on the event's `from` states. Each version
