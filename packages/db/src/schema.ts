@@ -17410,7 +17410,10 @@ export type AgentRiskProofFollowupRow = typeof agentRiskProofFollowups.$inferSel
 export const jurisdictions = pgTable(
   "jurisdictions",
   {
-    code: text("code").primaryKey(),
+    // `id` keys the row for platform tooling (the ADR-0233 existing-rows report); `code` is the natural key the
+    // ADR-0158 feed, the obligations and the use-case join reference.
+    id: uuid("id").primaryKey().defaultRandom(),
+    code: text("code").notNull().unique("jurisdictions_code_uq"),
     name: text("name").notNull(),
     parentCode: text("parent_code").references((): AnyPgColumn => jurisdictions.code, { onDelete: "restrict" }),
     global: boolean("global").notNull().default(false),

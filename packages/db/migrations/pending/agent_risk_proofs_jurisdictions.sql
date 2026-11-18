@@ -3,11 +3,13 @@
 -- or used in are DATA: seeded here, admin-editable. The seeded obligations cite only ADR-0158 regulatory feed entries,
 -- which carry a primary source and a verified date; the mapping routes evidence and is not a legal determination.
 CREATE TABLE IF NOT EXISTS "jurisdictions" (
-  "code" text PRIMARY KEY NOT NULL,
+  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+  "code" text NOT NULL,
   "name" text NOT NULL,
   "parent_code" text REFERENCES "jurisdictions"("code") ON DELETE RESTRICT,
   "global" boolean DEFAULT false NOT NULL,
   "created_at" timestamp with time zone DEFAULT now() NOT NULL,
+  CONSTRAINT "jurisdictions_code_uq" UNIQUE ("code"),
   CONSTRAINT "jurisdictions_code_check" CHECK ("code" ~ '^[A-Z][A-Za-z]{1,12}(-[A-Z0-9]{2,4})?$'),
   CONSTRAINT "jurisdictions_name_check" CHECK (length(btrim("name")) BETWEEN 1 AND 120),
   CONSTRAINT "jurisdictions_parent_check" CHECK ("parent_code" IS NULL OR "parent_code" <> "code")
