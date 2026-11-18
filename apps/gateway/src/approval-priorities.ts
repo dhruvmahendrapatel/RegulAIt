@@ -39,7 +39,8 @@ export function registerApprovalPriorityRoutes(app: FastifyInstance, db: Db) {
         ruleChain: [],
         ruleId: "approval-priority-changed",
         reason: "An administrator changed a pending approval's queue priority.",
-        detail: { approvalId: row.id, from: row.priority, to: priority },
+        // Queue metadata is an operator control, never an approval decision receipt.
+        detail: { receiptClass: "excluded", approvalId: row.id, from: row.priority, to: priority },
       });
       return { status: 200, body: { ...updated, changed: true } };
     });

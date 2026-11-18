@@ -73,7 +73,7 @@ describe("ADR-0352 approval priority", () => {
     expect(updated).toEqual({ ...row, priority: "urgent" });
     const audits = await db.select().from(auditLog).where(eq(auditLog.objectId, row.id));
     expect(audits.filter(a => a.ruleId === "approval-priority-changed")).toHaveLength(1);
-    expect(audits.find(a => a.ruleId === "approval-priority-changed")!.detail).toEqual({ approvalId: row.id, from: "normal", to: "urgent" });
+    expect(audits.find(a => a.ruleId === "approval-priority-changed")!.detail).toEqual({ receiptClass: "excluded", approvalId: row.id, from: "normal", to: "urgent" });
     expect((await patch(row.id, "urgent", "urgent")).json().changed).toBe(false);
   });
   it("refuses non-admins, unknown levels, stale writes and every decided status", async () => {
