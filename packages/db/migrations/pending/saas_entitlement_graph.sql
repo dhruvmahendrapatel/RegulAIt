@@ -39,6 +39,8 @@ ALTER TABLE "discovery_runs" ADD CONSTRAINT "discovery_runs_kind_check" CHECK ("
   'saas_inventory_api', 'idp_entra', 'ml_mlflow',
   'entitlement_m365', 'entitlement_google_workspace', 'entitlement_salesforce', 'entitlement_slack'));
 --> statement-breakpoint
+ALTER TABLE "discovery_settings" ADD COLUMN IF NOT EXISTS "google_directory_tokens_enabled" boolean DEFAULT false NOT NULL;
+--> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "saas_entitlement_apps" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
   "source_id" uuid NOT NULL REFERENCES "discovery_sources"("id") ON DELETE CASCADE,
@@ -68,7 +70,7 @@ CREATE INDEX IF NOT EXISTS "saas_entitlement_apps_agent_idx" ON "saas_entitlemen
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "agent_vendor_identifiers" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
-  "agent_id" uuid NOT NULL REFERENCES "agents"("id") ON DELETE CASCADE,
+  "agent_id" uuid NOT NULL REFERENCES "agents"("id") ON DELETE RESTRICT,
   "platform" text NOT NULL,
   "external_id" text NOT NULL,
   "created_by_user_id" uuid REFERENCES "users"("id") ON DELETE SET NULL,

@@ -7,7 +7,9 @@
  *    "linked" mean "names an agent";
  *  - a read auto-links an app whose vendor id equals a declared identifier, with one audit row per link; a case
  *    variant or a prefix is not linked;
- *  - declaring an identifier links the already-stored apps at once, audited;
+ *  - declaring an identifier links the already-stored apps at once, audited; the declaration's own audit row names
+ *    every app and source it linked (it applies to every source of its platform);
+ *  - an M365 GUID is stored lowercase; an agent with an identifier cannot be deleted (RESTRICT);
  *  - an admin unlinks (audited) and a later read does not link the app again; an admin links a partial match;
  *  - a transition the machine does not allow is refused (409) and changes nothing; a non-admin is refused (403).
  *
@@ -170,6 +172,67 @@ describe("ADR-0337 §6 vendor app to agent link", () => {
     // the same identifier on the same platform cannot name a second agent
     const dup = await app.inject({ method: "POST", url: "/v1/discovery/agent-identifiers", headers: AUTH, payload: { agentId: await mkAgent("dup"), platform: "m365", externalId: LATER } });
     expect(dup.statusCode).toBe(409);
+  });
+
+  it("a declaration applies to every source of its platform, and its own audit row names each app and source it linked", async () => {
+    const id = `cross-${RUN}`;
+    const [s1, s2] = [await mkSource(), await mkSource()];
+    await runOnce(s1, m365([appOf(id)]));
+    await runOnce(s2, m365([appOf(id)]));
+    const agentId = await mkAgent("cross");
+    const decl = await app.inject({ method: "POST", url: "/v1/discovery/agent-identifiers", headers: AUTH, payload: { agentId, platform: "m365", externalId: id } });
+    expect(decl.statusCode, decl.body).toBe(201);
+    const [a1, a2] = [await appRow(s1.id, id), await appRow(s2.id, id)];
+    expect([...decl.json().autoLinked].sort()).toEqual([a1.id, a2.id].sort());
+    expect([...decl.json().autoLinkedSources].sort()).toEqual([s1.id, s2.id].sort());
+    const [row] = await db
+      .select({ detail: auditLog.detail, reason: auditLog.reason })
+      .from(auditLog)
+      .where(and(eq(auditLog.ruleId, "agent-vendor-identifier-declared"), eq(auditLog.objectId, decl.json().identifier.id)));
+    const detail = row!.detail as { autoLinkedApps: string[]; autoLinkedSources: string[]; scope: string };
+    expect([...detail.autoLinkedApps].sort()).toEqual([a1.id, a2.id].sort());
+    expect([...detail.autoLinkedSources].sort()).toEqual([s1.id, s2.id].sort());
+    expect(detail.scope).toBe("every entitlement source of this platform");
+    expect(row!.reason).toContain("2 app(s) in 2 source(s)");
+  });
+
+  it("an M365 GUID identifier is stored lowercase, so an upper-case declaration still matches Graph's lowercase app id", async () => {
+    const guid = `${RUN}-aaaa-4bbb-8ccc-${RUN}dddd`;
+    const s = await mkSource();
+    await runOnce(s, m365([appOf(guid)]));
+    const agentId = await mkAgent("guid");
+    const decl = await app.inject({ method: "POST", url: "/v1/discovery/agent-identifiers", headers: AUTH, payload: { agentId, platform: "m365", externalId: guid.toUpperCase() } });
+    expect(decl.statusCode, decl.body).toBe(201);
+    expect(decl.json().identifier.externalId).toBe(guid);
+    expect((await appRow(s.id, guid)).agentLinkState).toBe("auto");
+    // the same GUID in the other case is the same identifier
+    const dup = await app.inject({ method: "POST", url: "/v1/discovery/agent-identifiers", headers: AUTH, payload: { agentId: await mkAgent("guid2"), platform: "m365", externalId: guid } });
+    expect(dup.statusCode).toBe(409);
+  });
+
+  it("a retired agent is never linked: declaring or linking is refused (409), and a read does not auto-link it", async () => {
+    const id = `retired-${RUN}`;
+    const agentId = await mkAgent("retired");
+    const decl = await app.inject({ method: "POST", url: "/v1/discovery/agent-identifiers", headers: AUTH, payload: { agentId, platform: "m365", externalId: id } });
+    expect(decl.statusCode, decl.body).toBe(201);
+    await db.update(agents).set({ lifecycleStatus: "retired", lifecycleReason: "test" } as Partial<typeof agents.$inferInsert>).where(eq(agents.id, agentId));
+    const s = await mkSource();
+    await runOnce(s, m365([appOf(id)]));
+    const a = await appRow(s.id, id);
+    expect([a.agentLinkState, a.agentId]).toEqual(["none", null]);
+    const ln = await app.inject({ method: "PUT", url: `/v1/discovery/entitlements/apps/${a.id}/agent-link`, headers: AUTH, payload: { agentId } });
+    expect([ln.statusCode, ln.json().error]).toEqual([409, "agent_retired"]);
+    const again = await app.inject({ method: "POST", url: "/v1/discovery/agent-identifiers", headers: AUTH, payload: { agentId, platform: "m365", externalId: `${id}-2` } });
+    expect([again.statusCode, again.json().error]).toEqual([409, "agent_retired"]);
+  });
+
+  it("an agent with a declared identifier cannot be deleted out from under it (RESTRICT, not a silent cascade)", async () => {
+    const agentId = await mkAgent("restrict");
+    const decl = await app.inject({ method: "POST", url: "/v1/discovery/agent-identifiers", headers: AUTH, payload: { agentId, platform: "m365", externalId: `restrict-${RUN}` } });
+    expect(decl.statusCode, decl.body).toBe(201);
+    await expect(db.delete(agents).where(eq(agents.id, agentId))).rejects.toThrow();
+    const [still] = await db.select().from(agentVendorIdentifiers).where(eq(agentVendorIdentifiers.agentId, agentId));
+    expect(still?.externalId).toBe(`restrict-${RUN}`);
   });
 
   it("an admin unlinks (audited) and a later read never re-links it; an admin links a partial match by hand", async () => {

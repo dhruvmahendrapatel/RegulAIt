@@ -90,9 +90,16 @@ the window is not seen and is never removed for that reason.
   cannot be read, so the credential is `unverified`, never `read_only`.
 - **Google Directory token listing (owner decision 2026-11-17: allowed as an admin opt-in).** The Directory API's
   per-user token listing sees grants older than the Reports window, but its only scope (`admin.directory.user.security`)
-  can also revoke tokens. It is off by default: the source's target `directoryTokens: "on"` turns it on, and it takes
-  effect only on an enabled source, so turning it on is the existing enable step-up (its approved facts include the
-  target), or the widening step-up when the source is already enabled; both are audited. With it on, the reader asks
+  can also revoke tokens. It is off by default behind two gates (security review of #884). First the org switch
+  `googleDirectoryTokens` in the discovery settings: off by default, turned on only with a `settings_relax` step-up
+  bound to exactly it (`DISCOVERY_STEP_UP_KEYS.googleDirectoryTokens`), audited before/after, turned off for free; it
+  shows in the settings view, and the posture names every source configured for the listing. While it is off, a
+  source with `directoryTokens: "on"` cannot be created, widened into, enabled or run (409
+  `directory_tokens_not_allowed`), and a run queued before it was turned off fails in the worker before any credential
+  is read. Then the source: its target `directoryTokens: "on"` takes effect only on an enabled source, so turning it on
+  is the existing enable step-up (its approved facts include the target), or the widening step-up when the source is
+  already enabled; both are audited. Turning it OFF on an enabled source, with nothing else changed, narrows the read
+  and needs no step-up. With it on, the reader asks
   for exactly `admin.directory.user.readonly` and `admin.directory.user.security` (not the Reports scope), lists every
   user and each user's tokens, and its batch is complete when every listing was read. RegulAIt never revokes with the
   scope: every data call goes through `readOnlyFetch`, which refuses any method but GET and HEAD before it leaves the
@@ -121,7 +128,16 @@ public-exposure rule reads it through their interface rather than a second adapt
   (`agent_vendor_identifiers`: agent, platform, external id; one identifier names one agent). An app whose vendor id
   equals it exactly (case-sensitive, same platform) is linked to that agent automatically: after each read, inside the
   run's transaction, and at once when the identifier is declared. Each auto-link writes its own
-  `saas-entitlement-agent-auto-linked` audit row.
+  `saas-entitlement-agent-auto-linked` audit row. An M365 app id is a GUID that Graph prints lowercase and the reader
+  stores lowercase, so a GUID identifier is stored lowercase too (the same GUID in either case is one identifier);
+  every other platform's id is exact.
+- **An identifier applies across sources (security review of #884).** It names a platform, not a source, so declaring
+  it links matching apps in EVERY entitlement source of that platform. That is deliberate (one agent, one app id,
+  however many tenants are read) and explicit: the declaration's own `agent-vendor-identifier-declared` audit row and
+  response name every app and source it linked. An agent with a declared identifier cannot be deleted (`ON DELETE
+  RESTRICT`), so an identifier never disappears without its own `agent-vendor-identifier-removed` row. A retired agent
+  (terminal, ADR-0089) is never linked: declaring an identifier for it or linking it is refused (409 `agent_retired`),
+  and a read does not auto-link through an identifier whose agent was retired later.
 - **Partial or fuzzy matches stay admin-only.** A case variant, prefix or similar name is never linked automatically;
   an admin links it by hand (`saas-entitlement-agent-linked`).
 - **An admin can unlink** any link (`saas-entitlement-agent-unlinked`); an unlinked app is not auto-linked again until an

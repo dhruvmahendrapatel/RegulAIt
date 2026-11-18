@@ -26,6 +26,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { AGENT_VENDOR_IDENTIFIER_PATTERN, SAAS_APP_AGENT_LINK_MACHINE, SAAS_ENTITLEMENT_PLATFORMS } from "@regulait/shared";
+import { GUID } from "./discovery-wider-scanners.js";
 import { autoLinkApps, changeAgentLink } from "./saas-entitlements.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
@@ -49,11 +50,25 @@ const identifierBody = z
   })
   .strict();
 
+/**
+ * An identifier as stored: Microsoft 365 app ids are GUIDs, which Graph may print in either case, so they are kept
+ * lowercase (and the M365 reader stores them as Graph returns them, lowercase); every other platform's id is exact.
+ */
+export function normaliseAgentIdentifier(platform: (typeof SAAS_ENTITLEMENT_PLATFORMS)[number], externalId: string): string {
+  return platform === "m365" && GUID.test(externalId) ? externalId.toLowerCase() : externalId;
+}
+
 export function registerSaasEntitlementRoutes(app: FastifyInstance, db: Db): void {
   const actor = (req: FastifyRequest) => req.authCtx.userId ?? NIL_UUID;
   const badRequest = (reply: FastifyReply, err: z.ZodError) =>
     reply.status(400).send({ error: "invalid_request", detail: err.issues.map((i) => `${i.path.join(".") || "body"}: ${i.message}`).join("; ") });
-  const agentExists = async (t: Db, id: string) => (await t.select({ id: agents.id }).from(agents).where(eq(agents.id, id))).length === 1;
+  // an agent to link to: it exists and is not retired (a retired agent is terminal; security review of #884, N4)
+  const agentProblem = async (t: Db, id: string) => {
+    const [a] = await t.select({ status: agents.lifecycleStatus }).from(agents).where(eq(agents.id, id));
+    if (!a) return { ok: false as const, status: 404 as const, error: "agent_not_found", detail: "no such agent" };
+    if (a.status === "retired") return { ok: false as const, status: 409 as const, error: "agent_retired", detail: "a retired agent cannot be linked to a vendor app" };
+    return null;
+  };
 
   // the apps one entitlement source holds, each with its link state and what can be done with it next
   app.get("/v1/discovery/entitlements/apps", async (req, reply) => {
@@ -90,7 +105,8 @@ export function registerSaasEntitlementRoutes(app: FastifyInstance, db: Db): voi
     if (!b.success) return badRequest(reply, b.error);
     const out = await db.transaction(async (tx) => {
       const t = tx as unknown as Db;
-      if (!(await agentExists(t, b.data.agentId))) return { ok: false as const, status: 404 as const, error: "agent_not_found", detail: "no such agent" };
+      const bad = await agentProblem(t, b.data.agentId);
+      if (bad) return bad;
       return changeAgentLink(t, { appId: p.data.appId, event: "link", agentId: b.data.agentId, actorUserId: actor(req) });
     });
     if (!out.ok) return reply.status(out.status).send({ error: out.error, detail: out.detail });
@@ -135,29 +151,43 @@ export function registerSaasEntitlementRoutes(app: FastifyInstance, db: Db): voi
   app.post("/v1/discovery/agent-identifiers", async (req, reply) => {
     const b = identifierBody.safeParse(req.body ?? {});
     if (!b.success) return badRequest(reply, b.error);
+    const externalId = normaliseAgentIdentifier(b.data.platform, b.data.externalId);
     try {
       const out = await db.transaction(async (tx) => {
         const t = tx as unknown as Db;
-        if (!(await agentExists(t, b.data.agentId))) return null;
+        const bad = await agentProblem(t, b.data.agentId);
+        if (bad) return bad;
         const [row] = await t
           .insert(agentVendorIdentifiers)
-          .values({ agentId: b.data.agentId, platform: b.data.platform, externalId: b.data.externalId, createdByUserId: req.authCtx.userId ?? null })
+          .values({ agentId: b.data.agentId, platform: b.data.platform, externalId, createdByUserId: req.authCtx.userId ?? null })
           .returning();
+        // the link pass runs first so the declaration's own audit row states its whole effect: an identifier applies to
+        // EVERY entitlement source of its platform, so it names each app and source it linked (each link is audited too)
+        const linked = await autoLinkApps(t, { identifierId: row!.id }, actor(req));
+        const sourceIds = [...new Set(linked.map((l) => l.sourceId))];
         await t.insert(auditLog).values({
           userId: actor(req),
           objectType: "agent_vendor_identifier",
           objectId: row!.id,
-          detail: { subsystem: "saas-entitlements", agentId: row!.agentId, platform: row!.platform, externalId: row!.externalId },
+          detail: {
+            subsystem: "saas-entitlements",
+            agentId: row!.agentId,
+            platform: row!.platform,
+            externalId: row!.externalId,
+            scope: "every entitlement source of this platform",
+            autoLinkedApps: linked.map((l) => l.appId),
+            autoLinkedSources: sourceIds,
+          },
           effect: "allow",
           ruleId: "agent-vendor-identifier-declared",
           ruleChain: [],
-          reason: `identifier '${row!.externalId}' (${row!.platform}) declared for agent ${row!.agentId}: apps with exactly this id are auto-linked`,
+          reason: `identifier '${row!.externalId}' (${row!.platform}) declared for agent ${row!.agentId}: applies to every ${row!.platform} source; ${linked.length} app(s) in ${sourceIds.length} source(s) auto-linked on an exact match`,
         });
-        const linked = await autoLinkApps(t, { identifierId: row!.id }, actor(req));
-        return { identifier: row!, autoLinked: linked.map((l) => l.appId) };
+        return { ok: true as const, identifier: row!, autoLinked: linked.map((l) => l.appId), autoLinkedSources: sourceIds };
       });
-      if (!out) return reply.status(404).send({ error: "agent_not_found", detail: "no such agent" });
-      return reply.status(201).send(out);
+      if (!out.ok) return reply.status(out.status).send({ error: out.error, detail: out.detail });
+      const { ok: _ok, ...created } = out;
+      return reply.status(201).send(created);
     } catch (e) {
       if (isUniqueViolation(e)) return reply.status(409).send({ error: "identifier_taken", detail: "that identifier is already declared for an agent on this platform" });
       throw e;

@@ -274,8 +274,10 @@ export async function autoLinkApps(t: Db, scope: { sourceId: string } | { identi
   const res = await t.execute(sql`
     UPDATE saas_entitlement_apps a
        SET agent_id = i.agent_id, agent_link_state = ${SAAS_APP_AGENT_LINK_MACHINE.next("none", "auto_link")}
-      FROM agent_vendor_identifiers i, discovery_sources s
+      FROM agent_vendor_identifiers i, discovery_sources s, agents ag
      WHERE s.id = a.source_id AND i.external_id = a.external_id AND i.platform = ${platformOfKindSql(sql`s.kind`)}
+       -- a retired agent is never linked (security review of #884, N4); its identifier stays, inert
+       AND ag.id = i.agent_id AND ag.lifecycle_status <> 'retired'
        AND ${inStates(sql`a.agent_link_state`, SAAS_APP_AGENT_LINK_MACHINE.sourcesOf("auto_link"))}
        AND ${where}
     RETURNING a.id AS app_id, a.source_id, a.external_id, i.agent_id, i.id AS identifier_id`);

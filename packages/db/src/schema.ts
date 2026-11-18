@@ -8301,6 +8301,9 @@ export const discoverySettings = pgTable(
     mlPlatformSourcesEnabled: boolean("ml_platform_sources_enabled").notNull().default(false),
     // ADR-0259: endpoint MCP client-config discovery through the SD4 agent, off (pending migration endpoint_mcp_config_discovery, ADR-0252)
     endpointMcpConfigEnabled: boolean("endpoint_mcp_config_enabled").notNull().default(false),
+    /** ADR-0337 §4: whether a Google Workspace entitlement source may use the Directory token listing (off by default;
+     * turning it on is a `settings_relax` step-up bound to `discoveryGoogleDirectoryTokens`) */
+    googleDirectoryTokensEnabled: boolean("google_directory_tokens_enabled").notNull().default(false),
     version: integer("version").notNull().default(1),
     updatedBy: uuid("updated_by"),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -17186,9 +17189,10 @@ export const agentVendorIdentifiers = pgTable(
   "agent_vendor_identifiers",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    /** RESTRICT: an agent is retired, not deleted; its identifiers are removed through the audited route first */
     agentId: uuid("agent_id")
       .notNull()
-      .references(() => agents.id, { onDelete: "cascade" }),
+      .references(() => agents.id, { onDelete: "restrict" }),
     platform: text("platform", { enum: SAAS_ENTITLEMENT_PLATFORM_VALUES }).notNull(),
     externalId: text("external_id").notNull(),
     createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
