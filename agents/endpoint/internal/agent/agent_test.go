@@ -20,6 +20,7 @@ import (
 
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/collect"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/contract"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/decisionlog"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/devicekey"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/gatewaytest"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/pack/packtest"
@@ -103,6 +104,13 @@ func (f *fixture) cycle() *Cycle {
 			return &collect.Env{OS: "linux", Roots: map[contract.Root]fs.FS{contract.RootHome: home}, StartupFiles: collect.DefaultStartupFiles("linux")}, nil
 		},
 		Identity: privacy.Identity{HomeDir: "/home/jdoe", UserName: "jdoe", Hostname: "jdoe-laptop"},
+		// never the real /etc: the tamper report reads these (all missing unless a test writes one)
+		ManagedFiles: []decisionlog.ManagedFile{
+			{File: contract.ManagedFileClaudeCode, Path: filepath.Join(f.dir, "managed", "managed-settings.json")},
+			{File: contract.ManagedFileCursor, Path: filepath.Join(f.dir, "managed", "hooks.json")},
+			{File: contract.ManagedFileCopilotCLI, Path: filepath.Join(f.dir, "managed", "regulait.json")},
+			{File: contract.ManagedFileCodex, Path: filepath.Join(f.dir, "managed", "requirements.toml")},
+		},
 	}
 }
 

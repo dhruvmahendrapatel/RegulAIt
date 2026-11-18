@@ -9,7 +9,7 @@ Searched and checked 2026-10-17 against `proxy.golang.org` (release dates) and e
 
 | Module | Version | Licence | Platforms | Used for, and why |
 |---|---|---|---|---|
-| `github.com/go-jose/go-jose/v4` | `v4.1.6` (2026-10-14) | Apache-2.0 | all | ES256 compact JWS: the `private_key_jwt` assertion, DPoP proofs, rotation proof, report signature (`internal/auth`). Signs through `OpaqueSigner`, so a TPM key never leaves the TPM. R15 §1.2 named it (or `jwx`) |
+| `github.com/go-jose/go-jose/v4` | `v4.1.6` (2026-10-14) | Apache-2.0 | all | ES256 compact JWS: the `private_key_jwt` assertion, DPoP proofs, rotation proof, report and decisions signatures (`internal/auth`). Signs through `OpaqueSigner`, so a TPM key never leaves the TPM. R15 §1.2 named it (or `jwx`) |
 | `golang.org/x/sys` | `v0.50.0` (2026-11-06; moved with the test-only `golang.org/x/crypto` v0.59.0 bump, 2026-11-15) | BSD-3-Clause | all | Windows registry reads, DPAPI, Toolhelp snapshot, the NCrypt and iphlpapi calls |
 | `github.com/google/go-tpm` | `v0.9.8` (2025-12-29) | Apache-2.0 | linux | The TPM 2.0 device key over `/dev/tpmrm0` (`internal/devicekey/tpm.go`) |
 | `github.com/shirou/gopsutil/v4` | `v4.26.9` (2026-09-27) | BSD-3-Clause | linux, darwin | Process names and listening sockets (`internal/collect/proc.go`). Not used on Windows: there it links `github.com/yusufpapurcu/wmi` (last release 2024-01-28) and `github.com/go-ole/go-ole` (last release 2023-08-04), which fail the 12-month rule, so Windows uses `x/sys/windows` directly (`proc_windows.go`) |
@@ -17,7 +17,7 @@ Searched and checked 2026-10-17 against `proxy.golang.org` (release dates) and e
 | `github.com/tklauser/numcpus` | `v0.12.0` (2026-05-11) | Apache-2.0 | linux | Transitive, through go-sysconf |
 | `github.com/ebitengine/purego` | `v0.11.1` (2026-09-18) | Apache-2.0 | darwin | Transitive, through gopsutil (calls libSystem without cgo) |
 | `github.com/tidwall/jsonc` | `v0.3.3` (2026-03-10) | MIT | all | Blanks JSONC comments and trailing commas (offset-preserving) before `encoding/json` reads an MCP host config: VS Code `settings.json`, Zed settings (`internal/collect/mcp.go`, ADR-0259 amendment 2026-11-14). No dependencies. v0.3.4 (2026-11-12) was less than two weeks old when pinned |
-| `github.com/pelletier/go-toml/v2` | `v2.4.3` (2026-07-05) | MIT | all | Decodes TOML MCP host configs: Codex `config.toml` (`internal/collect/mcp.go`, ADR-0259 amendment 2026-11-14). No dependencies |
+| `github.com/pelletier/go-toml/v2` | `v2.4.3` (2026-07-05) | MIT | all | Decodes TOML MCP host configs: Codex `config.toml` (`internal/collect/mcp.go`, ADR-0259 amendment 2026-11-14), and Codex's managed `requirements.toml` for the tamper report (`internal/decisionlog/integrity.go`, ADR-0310 addendum). No dependencies |
 | `mvdan.cc/sh/v3` | `v3.14.1` (2026-09-06) | BSD-3-Clause | all | Parses a coding agent's shell command line as bash (`syntax` package only: lists, pipelines, quoting, substitutions, redirections) so command rules match argv, never a regex over the joined line (`internal/enforce/shell.go`, ADR-0350). The parser shfmt uses. Compared with a hand-written tokenizer (re-solves quoting and nesting) and `github.com/google/shlex` (no release since 2019, splits words but not lists or substitutions) |
 | `github.com/bmatcuk/doublestar/v4` | `v4.10.4` (2026-10-24) | MIT | all | `**` path and argument globs in command rules (`internal/enforce/command.go`, ADR-0350); the standard library's `path.Match` has no `**`. No dependencies |
 

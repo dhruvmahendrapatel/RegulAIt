@@ -27,6 +27,7 @@ bash scripts/package-linux.sh <bin> <out> <version>   # unsigned .deb and .rpm
 | `internal/devicekey` | Device keys: TPM (Linux, Windows), file and DPAPI fallbacks, the darwin refusal |
 | `internal/auth`, `internal/transport` | ES256 JOSE, the DPoP-bound token client, the issuer-only TLS 1.3 client |
 | `internal/agent` | Config, enrolment, the cycle, the signed upload and key rotation |
+| `internal/decisionlog` | The hook decision log (spool, signed batches) and the managed-hook-file tamper report |
 | `internal/gatewaytest`, `internal/pack/packtest` | Test doubles: a strict fake gateway and a run-time pack signer |
 
 ## On-device enforcement hooks (ADR-0298, ADR-0330; default off)
@@ -80,3 +81,18 @@ Registrations (paths are examples; use absolute paths with no shell metacharacte
   `PreToolUse` command `/usr/local/bin/regulait-agent hook codex -policy /etc/regulait/policy.json`, with
   `allow_managed_hooks_only = true` and `[features] hooks = true`. Pair it with the `[mcp_servers.<name>] identity`
   allow-list.
+
+**Decision audit and tamper reporting (ADR-0310 addendum).** Every answered hook call that is a decision (an allow,
+a deny, an ask, or audit mode's would-deny or would-ask) is written to the user's spool, `<state dir>/decisions/`
+(0700, at most 10,000 events; beyond that events are dropped and counted). An event names the agent, the rule set
+(`emitter`), the kind of action, the verdict, the policy mode and the deciding rule's id. It never carries the tool's
+arguments, a command, a file path, a prompt, the working directory or the vendor's session id: a session is an HMAC of
+that id under a salt that never leaves the device. A call that is not a decision records, once per session and
+permission mode, that the session was seen, so a Claude Code or Codex `bypassPermissions` session is visible even if no
+governed call happens (Cursor and Copilot CLI report no mode). A spool error never changes the hook's answer. Each
+`run-once` cycle then uploads the spool to `POST /v1/endpoint-agent/decisions` in signed batches of at most 500,
+oldest first (a batch is kept in the outbox until accepted, so a retry resends the same id and bytes), with a report
+of each managed file above: present, missing, unreadable or not system-owned, its SHA-256, and whether it still
+registers the RegulAIt hook with the vendor's fail-closed or managed-only setting (`registered`, `weakened`, `absent`
+or `unparseable`). The agent reports and never restores. The spool belongs to the device user, so it records what the
+hook answered; it is not proof against that user.

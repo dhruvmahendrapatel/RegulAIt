@@ -124,11 +124,40 @@ func (a Adapter) Hook(stdin io.Reader, policy *Policy) (stdout []byte, stderr st
 // HookWith answers one hook call: parse, decide, render. Unreadable input is a deny. policy is nil when none
 // verified. An ask the agent cannot show for this call is a deny (fail closed, ADR-0350 §4).
 func (a Adapter) HookWith(stdin io.Reader, policy *Policy, env HookEnv) (stdout []byte, stderr string, exit int) {
+	r := a.HookDecide(stdin, policy, env)
+	return r.Stdout, r.Stderr, r.Exit
+}
+
+// HookResult is one answered hook call: the call as parsed, the decision as answered (after an unshowable ask became
+// a deny) and the rendered answer. Parsed is false when the input could not be read (the decision is then a deny).
+type HookResult struct {
+	Call     Call
+	Parsed   bool
+	Decision Decision
+	Stdout   []byte
+	Stderr   string
+	Exit     int
+}
+
+// RuleUnreadableInput is the rule id of the deny an unreadable hook input gets.
+const RuleUnreadableInput = "hook.unreadable-input"
+
+// HookDecide is HookWith returning the call and the decision too, so the decision can be recorded
+// (internal/decisionlog). It answers exactly what HookWith answers.
+func (a Adapter) HookDecide(stdin io.Reader, policy *Policy, env HookEnv) HookResult {
+	r := HookResult{Call: Call{Agent: a.Name}}
 	call, err := a.Parse(stdin)
 	if err != nil {
-		return a.Render(Decision{Verdict: Deny, Reason: unreadable(err)})
+		r.Decision = Decision{Verdict: Deny, Reason: unreadable(err), Rule: RuleUnreadableInput}
+	} else {
+		call.Agent = a.Name
+		r.Call, r.Parsed, r.Decision = call, true, a.decide(call, policy, env)
 	}
-	call.Agent = a.Name
+	r.Stdout, r.Stderr, r.Exit = a.Render(r.Decision)
+	return r
+}
+
+func (a Adapter) decide(call Call, policy *Policy, env HookEnv) Decision {
 	if call.MCP != nil && a.UnattestedSource != "" {
 		call.MCP.Source = a.UnattestedSource
 	}
@@ -138,7 +167,7 @@ func (a Adapter) HookWith(stdin io.Reader, policy *Policy, env HookEnv) (stdout 
 		d.Verdict = Deny
 		d.Reason += " This coding agent cannot ask you to confirm it here, so it is blocked."
 	}
-	return a.Render(d)
+	return d
 }
 
 // Adapters is every supported coding agent, in a fixed order.

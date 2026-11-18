@@ -167,6 +167,18 @@ func ReportSignature(key crypto.Signer, clientID, reportsURL, snapshotID, conten
 	})
 }
 
+// DecisionsSignature is ReportSignature for a decision batch (ADR-0310 addendum): its own typ, the batch id in
+// place of the snapshot id, and the decisions URL as the audience.
+func DecisionsSignature(key crypto.Signer, clientID, decisionsURL, batchID, contentDigest string) (string, error) {
+	kid, err := Thumbprint(key.Public())
+	if err != nil {
+		return "", err
+	}
+	return sign(key, contract.TypDecisionsSignature, false, kid, map[string]any{
+		"iss": clientID, "aud": decisionsURL, "iat": clock().Unix(), "jti": jti(), "batchId": batchID, "contentDigest": contentDigest,
+	})
+}
+
 // ContentDigest is the RFC 9530 `Content-Digest` value for body: `sha-256=:<base64>:`.
 func ContentDigest(body []byte) string {
 	d := sha256.Sum256(body)
