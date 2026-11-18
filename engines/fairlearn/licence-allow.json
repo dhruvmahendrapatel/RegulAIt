@@ -1,0 +1,32 @@
+[
+  {
+    "subject": "python",
+    "licence": "PSF-2.0",
+    "decision": "reused from ADR-0187 decision 193 for fairlearn; owner to confirm (ADR-0346)",
+    "why": "the CPython runtime of the base image (the same pinned python:3.12-slim-trixie as garak's and spikee's); PSF-2.0, permissive, not on the ADR-0176 list. Accepted for garak on 2026-10-10 (ADR-0187 decision 193)."
+  },
+  {
+    "subject": "numpy",
+    "licence": "Zlib",
+    "decision": "reused from ADR-0187 decision 106 for fairlearn; owner to confirm (ADR-0346)",
+    "why": "fairlearn's, pandas' and scikit-learn's array library; numpy 2.5.5's License-Expression is BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0, and Zlib is the one term outside the ADR-0176 list: a permissive licence on code numpy ships. Accepted for modelscan and reused for garak and spikee (ADR-0187 decision 106)."
+  },
+  {
+    "subject": "scipy.libs/libgfortran",
+    "licence": "GPL-3.0-or-later WITH GCC-exception-3.1",
+    "decision": "reused from ADR-0187 decision 106 for fairlearn; owner to confirm (ADR-0346)",
+    "why": "the GCC Fortran runtime under the GCC Runtime Library Exception, shipped unmodified inside scipy's wheel (two builds, both named by scipy's dist-info LICENSE.txt). Decision 106 accepted this library under this licence inside numpy's wheel; here it is the same library inside scipy's, which scikit-learn needs."
+  },
+  {
+    "subject": "scipy.libs/libquadmath",
+    "licence": "LGPL-2.1-or-later",
+    "decision": "reused from ADR-0187 decision 106 for fairlearn; owner to confirm (ADR-0346)",
+    "why": "an unmodified, dynamically linked LGPL library shipped as its own shared object inside scipy's wheel (two builds, named by scipy's dist-info LICENSE.txt). Decision 106 accepted it inside numpy's wheel; here it is the same library inside scipy's."
+  },
+  {
+    "subject": "scikit_learn.libs/libgomp",
+    "licence": "GPL-3.0-or-later WITH GCC-exception-3.1",
+    "decision": "reused from ADR-0187 decision 106 for fairlearn; owner to confirm (ADR-0346)",
+    "why": "the GNU OpenMP runtime, shipped unmodified inside scikit-learn's wheel (its licenses/COPYING names it as the GCC runtime library under the GCC Runtime Library Exception 3.1). Decision 106 accepted a GCC runtime library (libgfortran) under exactly this licence; libgomp is another library of the same runtime under the same exception, so the reuse is by licence, not by the same file: the owner should confirm it."
+  }
+]

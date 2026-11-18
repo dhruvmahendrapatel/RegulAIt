@@ -1,0 +1,10 @@
+[
+  {
+    "subject": "scipy",
+    "version": "1.18.1",
+    "file": "LICENSE.txt",
+    "sha256": "17e7db9ffa4913121fa2df484633a362456a482da736c99db4711a98473770ea",
+    "licence": "BSD-3-Clause",
+    "read": "SciPy's own three-clause BSD text, then the native libraries the wheel bundles (OpenBLAS BSD-3-Clause with its LAPACK, the GCC runtime, libquadmath), each judged by its own scipy.libs row; the vendored sources in the wheel carry their own three-clause BSD notices (scipy/_lib/_uarray/LICENSE, scipy/integrate/LICENSE_DOP, scipy/fft/_duccfft/LICENSE.md). METADATA's License field is the full text and its only classifier the ambiguous BSD one"
+  }
+]

@@ -4,6 +4,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { FAIRNESS_DEFAULT_THRESHOLDS } from "./fairness.js";
+import { FAIRNESS_BREACH_REVIEW_MACHINE, FAIRNESS_EVALUATION_MACHINE, STATE_MACHINES } from "./state-machines.js";
 import {
   FAIRNESS_EVALUATION_DEFAULT_SETTINGS,
   acceptFairnessBreachSchema,
@@ -22,9 +23,6 @@ import {
   templateColumns,
   unparseableOverCap,
   FAIRNESS_BREACH_REVIEW_STATUSES,
-  FAIRNESS_BREACH_REVIEW_TRANSITIONS,
-  FAIRNESS_EVALUATION_TRANSITIONS,
-  lifecycleAllows,
   type GateCandidateRun,
 } from "./fairness-evaluation.js";
 
@@ -191,20 +189,23 @@ describe("breaches and the promotion gate", () => {
   });
 });
 
-describe("the declared lifecycles (rule 12)", () => {
+describe("the declared lifecycles (ADR-0348 machines)", () => {
   it("a breach review starts pending, is decided once, and only supersession follows an acceptance", () => {
-    const T = FAIRNESS_BREACH_REVIEW_TRANSITIONS;
-    expect(Object.keys(T).sort()).toEqual([...FAIRNESS_BREACH_REVIEW_STATUSES].sort());
-    expect(lifecycleAllows(T, "pending", "accepted")).toBe(true);
-    expect(lifecycleAllows(T, "pending", "rejected")).toBe(true);
-    expect(lifecycleAllows(T, "accepted", "superseded")).toBe(true);
-    expect(lifecycleAllows(T, "accepted", "rejected")).toBe(false);
-    expect(lifecycleAllows(T, "rejected", "accepted")).toBe(false);
-    expect(lifecycleAllows(T, "superseded", "pending")).toBe(false);
-    expect(lifecycleAllows(T, "pending", "pending")).toBe(false);
+    const M = FAIRNESS_BREACH_REVIEW_MACHINE;
+    expect([...M.def.states]).toEqual([...FAIRNESS_BREACH_REVIEW_STATUSES]);
+    expect(STATE_MACHINES[M.def.id]).toBe(M);
+    expect(M.can("pending", "accept")).toBe(true);
+    expect(M.can("pending", "reject")).toBe(true);
+    expect(M.can("accepted", "supersede")).toBe(true);
+    expect(M.can("accepted", "reject")).toBe(false);
+    expect(M.can("rejected", "accept")).toBe(false);
+    expect(M.isTerminal("superseded")).toBe(true);
+    expect([...M.sourcesOf("supersede")].sort()).toEqual(["accepted", "pending"]);
   });
   it("archiving an evaluation is final", () => {
-    expect(lifecycleAllows(FAIRNESS_EVALUATION_TRANSITIONS, "active", "archived")).toBe(true);
-    expect(lifecycleAllows(FAIRNESS_EVALUATION_TRANSITIONS, "archived", "active")).toBe(false);
+    const M = FAIRNESS_EVALUATION_MACHINE;
+    expect(STATE_MACHINES[M.def.id]).toBe(M);
+    expect(M.next("active", "archive")).toBe("archived");
+    expect(M.isTerminal("archived")).toBe(true);
   });
 });

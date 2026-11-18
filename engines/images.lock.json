@@ -48,6 +48,14 @@
       "publishGeneration": 0,
       "sourceCommit": null,
       "publishedAt": null
+    },
+    "fairlearn": {
+      "repository": null,
+      "manifestDigest": null,
+      "imageId": null,
+      "publishGeneration": 0,
+      "sourceCommit": null,
+      "publishedAt": null
     }
   }
 }
