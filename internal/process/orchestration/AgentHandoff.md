@@ -38,17 +38,19 @@ Read this first if you are taking over as the master session of the RegulAIt bui
 
 ## Where we left off (current master)
 
-- **2026-11-18:**
-  - #1004 (the picomatch no-fix gate, ADR-0184 addendum) merged at 5aacbc16; the audit was OK.
-  - Lanes whose PRs failed only "Dependency audit" were told to merge main once, in the same push as their review fixes.
-- **New lane E45:** RPA "Robots" (#1010; design document only until rule 15 lifts).
-- **Owner decisions today:** D-2026-11-18-01 to -07 in DecisionLog.md. The master phases sessions down to 10.
-- **In review:**
-  - #973: R3 and Xtyd8.
-  - #941 delta: WaRPg and a3BYi.
-  - #883 delta: WaRPg and Xtyd8.
+- **2026-11-18, 14:40 UTC.** Master hand-over at about 08:54 UTC; the new master runs the merge loop.
+- **Merged and audited since the hand-over:** #941, #1013 (docs), #904 (E26), #1010 (E45 RPA ADR), #903 (E12). Every
+  merge's second parent equals the released SHA.
+- **Census-counter bottleneck.** `KNOWN_UI_GAPS_MAX` in `scripts/preflight-ui-route-census.mjs` (and its test pin) is
+  edited by every PR that adds API-only routes, so each merge makes the others conflict. Five approved, released PRs
+  are being refreshed one at a time: #744 (UI-B) first, then #902 (E1), #883 (E20), #848 (E2), #855 (E3). The waiting
+  builders were told not to merge main until their turn. A computed count would remove the bottleneck; that is a
+  proposal for the owner, not started.
+- **Request changes, fixes pushed, waiting for READY:** #861 (E7), #865 (E15), #982 (E44), #952 (E31), #867 (E16),
+  #871 (E13). On READY they return to the same reviewer pair.
+- **In review:** #1019 (E26, geography risk factor).
+- **Waiting on the builder:** #884 (E18), #996 (E27, three failing checks), Codex #936 (route first on READY), #1006,
+  #1007.
 - **Next steps:**
-  1. Release the PRs that reach both approvals at their head.
-  2. Route #936 (Codex C1, CI build-once) first when it posts READY.
-  3. Archive lanes as they say "LANE DONE".
-  4. Lift rule 15 a few lanes at a time once the open PR count is under 50, with E45's code first.
+  1. Work the census order; after each merge, tell the next builder main's new count.
+  2. Lift rule 15 a few lanes at a time once the open PR count is under 50, with E45's code first.
