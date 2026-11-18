@@ -847,6 +847,7 @@ import { endpointAgentJobDefinitions } from "./endpoint-agent-routes.js";
 import { spiffeBundleRefreshJobDefinitions } from "./oauth/spiffe-bundle-endpoint.js";
 import { fairnessJobDefinitions } from "./fairness.js";
 import { siemJobDefinitions } from "./siem-delivery.js";
+import { agentRiskProofJobDefinitions } from "./agent-risk-proof-runner.js";
 import { processAnalyticsJobDefinitions } from "./process-analytics.js";
 import { thirdPartyIngestJobDefinitions } from "./third-party-ingest-retention.js";
 import { agentRiskJobDefinitions } from "./agent-risk.js";
@@ -870,6 +871,7 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...thirdPartyIngestJobDefinitions(), // ADR-0302: third-party-evidence-retention-sweep
     ...agentRiskJobDefinitions(), // ADR-0339: agent-risk-recompute-sweep, agent-risk-daily-mark
     ...processAnalyticsJobDefinitions(), // ADR-0342: process-analytics-projector
+    ...agentRiskProofJobDefinitions(), // ADR-0345 slice 2a: agent-risk-proof-sweep
   ];
 }
 // ===== end ADR-0182 block ====================================================
