@@ -8,6 +8,9 @@ import {
   agentRiskCatalogProblems,
   agentRiskProofByKey,
   agentRiskProofs,
+  effectiveRiskTier,
+  JURISDICTION_CODE_RE,
+  resolveGeography,
   type AgentRisk,
 } from "./agent-risk-proofs.js";
 
@@ -66,5 +69,56 @@ describe("ADR-0345 agent risk / control / proof catalogue", () => {
   it("looks proofs up by their stable key", () => {
     expect(agentRiskProofByKey("access_control.approval_replay")?.risk.key).toBe("access_control_failure");
     expect(agentRiskProofByKey("nope")).toBeUndefined();
+  });
+});
+
+describe("ADR-0345 §9 geography", () => {
+  const J = [
+    { code: "EU", parentCode: null, global: false },
+    { code: "US", parentCode: null, global: false },
+    { code: "US-CO", parentCode: "US", global: false },
+    { code: "International", parentCode: null, global: true },
+  ];
+  const O = [
+    { jurisdictionCode: "EU", regulatoryUpdateKey: "eu-x", agentRiskKey: "prompt_injection" as const, tierFloor: null },
+    { jurisdictionCode: "US", regulatoryUpdateKey: "us-x", agentRiskKey: "governance_gap" as const, tierFloor: "limited" as const },
+    { jurisdictionCode: "US-CO", regulatoryUpdateKey: "co-x", agentRiskKey: "hallucination" as const, tierFloor: "high" as const },
+    { jurisdictionCode: "International", regulatoryUpdateKey: "iso", agentRiskKey: "governance_gap" as const, tierFloor: null },
+  ];
+
+  it("brings in the declared jurisdiction, its ancestors and the global ones", () => {
+    const r = resolveGeography(["US-CO"], J, O);
+    expect(r.inScope).toEqual(["International", "US", "US-CO"]);
+    expect(r.obligations.map((o) => o.regulatoryUpdateKey).sort()).toEqual(["co-x", "iso", "us-x"]);
+    expect(r.tierFloor).toBe("high");
+    expect(r.undeclared).toBe(false);
+  });
+
+  it("strict default: a use case that declares none is in scope of every jurisdiction", () => {
+    const r = resolveGeography([], J, O);
+    expect(r.undeclared).toBe(true);
+    expect(r.obligations).toHaveLength(4);
+  });
+
+  it("reports an unknown code rather than dropping it, and survives a parent cycle", () => {
+    const cyclic = [
+      { code: "AA", parentCode: "BB", global: false },
+      { code: "BB", parentCode: "AA", global: false },
+    ];
+    const r = resolveGeography(["AA", "ZZ"], cyclic, []);
+    expect(r.unknown).toEqual(["ZZ"]);
+    expect(r.inScope).toEqual(["AA", "BB"]);
+  });
+
+  it("raises the screened tier to the floor, never lowers it, and never stands in for screening", () => {
+    expect(effectiveRiskTier("minimal", "high")).toBe("high");
+    expect(effectiveRiskTier("prohibited", "high")).toBe("prohibited");
+    expect(effectiveRiskTier("limited", null)).toBe("limited");
+    expect(effectiveRiskTier("unscreened", "high")).toBe("unscreened");
+  });
+
+  it("the code shape the feed uses", () => {
+    for (const c of ["EU", "US", "US-CO", "US-NYC", "International"]) expect(JURISDICTION_CODE_RE.test(c)).toBe(true);
+    expect(JURISDICTION_CODE_RE.test("eu")).toBe(false);
   });
 });

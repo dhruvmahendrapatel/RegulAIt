@@ -72,6 +72,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.initiatives, ["name"]],
   [s.teams, ["name"]],
   [s.aiUseCases, ["name", "description"]],
+  // ADR-0345 §9: admin-editable reference data (the jurisdiction list is data, not code)
+  [s.jurisdictions, ["name"]],
   [s.aiVendors, ["name", "description"]],
   [s.aiRisks, ["title", "description"]],
   [s.kris, ["name", "scoreName"]],
