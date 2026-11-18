@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  assertCompensationStatus,
+  closePrSupersededByMerge,
+  COMPENSATION_LIFECYCLE,
+  STAGE_DEADLINE_LIFECYCLE,
+  nextDeadlinePhase,
+  compensationStatusFor,
+  compensationPhaseOf,
   compensationPlan,
+  nextCompensationPhase,
   currentPlanningStage,
   isCompensating,
   initialState,
@@ -1167,21 +1175,20 @@ describe("ADR-0340 slice 2: stage deadlines (sla)", () => {
     validateDefinition({ workflow: "sla", stages: base.map((s, i) => (i === at ? { ...s, ...extra } : s)) });
 
   it("accepts a bounded deadline on a resting or executed stage, with notify as the default action", () => {
-    const def = withStage({ sla: { warnAfterSeconds: 3600, breachAfterSeconds: 86_400 } });
-    expect(def.stages[2]!.sla).toEqual({ warnAfterSeconds: 3600, breachAfterSeconds: 86_400, onBreach: "notify" });
+    const def = withStage({ sla: { warnAfterSeconds: 3600, breachAfterSeconds: 86_400 } }, 1);
+    expect(def.stages[1]!.sla).toEqual({ warnAfterSeconds: 3600, breachAfterSeconds: 86_400, onBreach: "notify" });
     expect(withStage({ sla: { breachAfterSeconds: 600, onBreach: "fail" } }, 3).stages[3]!.sla?.onBreach).toBe("fail");
-    expect(withStage({ sla: { breachAfterSeconds: 600, onBreach: "reassign", reassignTo: ["admin_not_initiator"] } }).stages[2]!.sla?.reassignTo).toEqual([
-      "admin_not_initiator",
-    ]);
+    // a sign-off may only cancel the instance on breach
+    expect(withStage({ sla: { breachAfterSeconds: 600, onBreach: "fail" } }).stages[2]!.sla?.onBreach).toBe("fail");
   });
 
-  it("refuses bad bounds, a reassign without a sign-off, and timed failure paths", () => {
-    expect(() => withStage({ sla: { breachAfterSeconds: 30 } })).toThrow();
-    expect(() => withStage({ sla: { breachAfterSeconds: 600, warnAfterSeconds: 600 } })).toThrow(/less than/);
-    expect(() => withStage({ sla: { breachAfterSeconds: 600, onBreach: "reassign" } })).toThrow(/reassignTo is required/);
-    expect(() => withStage({ sla: { breachAfterSeconds: 600, reassignTo: ["u"] } })).toThrow(/reassignTo is required/);
-    expect(() => withStage({ sla: { breachAfterSeconds: 600, onBreach: "reassign", reassignTo: ["u"] } }, 1)).toThrow(/only a human_approval/);
-    expect(() => withStage({ sla: { breachAfterSeconds: 600, extra: 1 } })).toThrow();
+  it("refuses bad bounds, timed failure paths, and a sign-off's own reminders or escalation (decision 9)", () => {
+    expect(() => withStage({ sla: { breachAfterSeconds: 30 } }, 1)).toThrow();
+    expect(() => withStage({ sla: { breachAfterSeconds: 600, warnAfterSeconds: 600 } }, 1)).toThrow(/less than/);
+    expect(() => withStage({ sla: { breachAfterSeconds: 600, onBreach: "reassign", reassignTo: ["u"] } })).toThrow();
+    expect(() => withStage({ sla: { breachAfterSeconds: 600, extra: 1 } }, 1)).toThrow();
+    expect(() => withStage({ sla: { breachAfterSeconds: 600 } })).toThrow(/approvals queue's SLA/);
+    expect(() => withStage({ sla: { breachAfterSeconds: 600, warnAfterSeconds: 60, onBreach: "fail" } })).toThrow(/approvals queue's SLA/);
     expect(() => withStage({ sla: { breachAfterSeconds: 600 } }, 0)).toThrow(/not timed/);
     expect(() =>
       validateDefinition({
@@ -1192,5 +1199,127 @@ describe("ADR-0340 slice 2: stage deadlines (sla)", () => {
         ],
       }),
     ).toThrow(/not timed/);
+  });
+});
+
+describe("ADR-0340 rule 12: the stage deadline lifecycle is one declared table", () => {
+  it("pins every allowed move, and refuses anything else", () => {
+    expect(STAGE_DEADLINE_LIFECYCLE).toEqual({
+      none: { enter: "scheduled", enter_unsent: "unscheduled" },
+      scheduled: { warn: "warned", breach: "breached" },
+      warned: { breach: "breached" },
+      unscheduled: {},
+      breached: {},
+    });
+    expect(nextDeadlinePhase("scheduled", "warn")).toBe("warned");
+    expect(nextDeadlinePhase("warned", "warn")).toBeNull();
+    expect(nextDeadlinePhase("breached", "warn")).toBeNull();
+    expect(nextDeadlinePhase("breached", "breach")).toBeNull();
+    expect(nextDeadlinePhase("unscheduled", "breach")).toBeNull();
+  });
+});
+
+describe("ADR-0340 rule 12: the compensation lifecycle is one declared table", () => {
+  it("pins every allowed move, and refuses anything else", () => {
+    expect(COMPENSATION_LIFECYCLE).toEqual({
+      none: { cancel: { to: "compensating", status: "stage" }, deny: { to: "compensating", status: "stage" } },
+      compensating: {
+        step_succeeded: { to: "compensating", status: "stage" },
+        step_failed: { to: "compensating", status: "unchanged" },
+        last_step_succeeded: { to: "completed", status: "cause" },
+        abort: { to: "abandoned", status: "cause" },
+      },
+      completed: {},
+      abandoned: {},
+    });
+    expect(() => nextCompensationPhase("completed", "abort")).toThrow(/cannot 'abort' from 'completed'/);
+    expect(() => nextCompensationPhase("none", "step_succeeded")).toThrow();
+    expect(() => nextCompensationPhase("abandoned", "cancel")).toThrow();
+  });
+
+  it("an instance's phase follows the table through a real saga", () => {
+    const def = validateDefinition({
+      workflow: "phase",
+      stages: [
+        { id: "intake", type: "trigger" },
+        { id: "branch", type: "git_operation", action: "create_branch", connection: "gh", repo: "o/r" },
+        { id: "gate", type: "human_approval", approvers: ["requesting_user"] },
+        { id: "undo", type: "git_operation", action: "delete_branch", connection: "gh", repo: "o/r", compensates: "branch" },
+      ],
+    });
+    let r = transition(def, initialState(def), { kind: "start" });
+    r = transition(def, r.state, { kind: "execution_succeeded", stageId: "branch" });
+    expect(compensationPhaseOf(r.state)).toBe("none");
+    r = transition(def, r.state, { kind: "abort" });
+    expect(compensationPhaseOf(r.state)).toBe("compensating");
+    expect(r.state.status).toBe("awaiting_execution");
+    expect(() => assertCompensationStatus(def, r.state)).not.toThrow();
+    r = transition(def, r.state, { kind: "execution_succeeded", stageId: "undo" });
+    expect(compensationPhaseOf(r.state)).toBe("completed");
+    expect(r.state.status).toBe("aborted");
+    expect(compensationStatusFor(def, r.state)).toBe("aborted");
+  });
+
+  it("the status each phase implies is checked: a finished saga without its terminal status is refused", () => {
+    const def = validateDefinition({
+      workflow: "phase-status",
+      stages: [
+        { id: "intake", type: "trigger" },
+        { id: "branch", type: "git_operation", action: "create_branch", connection: "gh", repo: "o/r" },
+        { id: "gate", type: "human_approval", approvers: ["requesting_user"] },
+        { id: "undo", type: "git_operation", action: "delete_branch", connection: "gh", repo: "o/r", compensates: "branch" },
+      ],
+    });
+    let r = transition(def, initialState(def), { kind: "start" });
+    r = transition(def, r.state, { kind: "execution_succeeded", stageId: "branch" });
+    expect(compensationStatusFor(def, r.state)).toBeNull();
+    r = transition(def, r.state, { kind: "approval_denied", stageId: "gate", approver: "u" } as never);
+    expect(r.state.status).toBe("awaiting_execution");
+    // a later edit that ends the saga without its outcome, or sets the outcome without the status, is caught
+    expect(() => assertCompensationStatus(def, { ...r.state, status: "denied" })).toThrow(/needs status 'awaiting_execution'/);
+    const done = transition(def, r.state, { kind: "execution_succeeded", stageId: "undo" }).state;
+    expect(done.status).toBe("denied");
+    expect(() => assertCompensationStatus(def, { ...done, status: "awaiting_execution" })).toThrow(/needs status 'denied'/);
+    // a failed compensation keeps its status (retryable)
+    const failed = transition(def, r.state, { kind: "execution_failed", stageId: "undo", error: "x" } as never).state;
+    expect(failed.status).toBe("awaiting_execution");
+  });
+});
+
+describe("ADR-0340: a saga after a merge", () => {
+  const stages = [
+    { id: "intake", type: "trigger" },
+    { id: "branch", type: "git_operation", action: "create_branch", connection: "gh", repo: "o/r" },
+    { id: "pr", type: "git_operation", action: "open_pr", connection: "gh", repo: "o/r" },
+    { id: "merge", type: "git_operation", action: "merge", connection: "gh", repo: "o/r" },
+    { id: "release", type: "human_approval", approvers: ["requesting_user"] },
+    { id: "undo_branch", type: "git_operation", action: "delete_branch", connection: "gh", repo: "o/r", compensates: "branch" },
+    { id: "undo_pr", type: "git_operation", action: "close_pr", connection: "gh", repo: "o/r", compensates: "pr" },
+  ];
+
+  it("a close_pr whose pull request a stage merges needs that merge compensated too", () => {
+    expect(() => validateDefinition({ workflow: "m", stages })).toThrow(/closes the pull request that 'merge' merges/);
+    expect(() =>
+      validateDefinition({ workflow: "m", stages: [...stages, { id: "revert", type: "automated_build", compensates: "merge" }] }),
+    ).not.toThrow();
+  });
+
+  it("close_pr is superseded only once the merge's own revert completed in this saga", () => {
+    const def = validateDefinition({ workflow: "m", stages: [...stages, { id: "revert", type: "automated_build", compensates: "merge" }] });
+    let r = transition(def, initialState(def), { kind: "start" });
+    for (const id of ["branch", "pr", "merge"]) r = transition(def, r.state, { kind: "execution_succeeded", stageId: id });
+    expect(r.state.status).toBe("blocked_on_approval");
+    expect(closePrSupersededByMerge(def, r.state, "undo_pr")).toBe(false);
+    r = transition(def, r.state, { kind: "abort" });
+    expect(r.state.compensation!.plan).toEqual(["revert", "undo_pr", "undo_branch"]);
+    expect(closePrSupersededByMerge(def, r.state, "undo_pr")).toBe(false); // the revert has not run yet
+    r = transition(def, r.state, { kind: "human_trigger", stageId: "revert" } as never);
+    expect(r.state.status).toBe("awaiting_execution");
+    expect(closePrSupersededByMerge(def, r.state, "undo_pr")).toBe(true);
+    expect(closePrSupersededByMerge(def, r.state, "undo_branch")).toBe(false);
+    r = transition(def, r.state, { kind: "execution_succeeded", stageId: "undo_pr" });
+    r = transition(def, r.state, { kind: "execution_succeeded", stageId: "undo_branch" });
+    expect(r.state.status).toBe("aborted");
+    expect(r.state.compensation!.outcome).toBe("completed");
   });
 });

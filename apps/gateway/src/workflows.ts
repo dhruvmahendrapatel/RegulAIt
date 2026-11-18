@@ -26,9 +26,13 @@ import {
   type Db,
 } from "@regulait/db";
 import {
+  assertCompensationStatus,
+  closePrSupersededByMerge,
   initialState,
   isCompensating,
   matchTemplates,
+  nextDeadlinePhase,
+  type DeadlinePhase,
   mergeDefinitions,
   transition,
   validateDefinition,
@@ -182,8 +186,7 @@ const TERMINAL_STATUSES: readonly string[] = ["completed", "aborted", "denied", 
 
 /**
  * Request a stage's sign-off from `approvers` (resolved: `requesting_user` is the initiator, ADR-0195 A4
- * `admin_not_initiator` is every active admin other than the initiator, deduplicated). The stage's request and an
- * ADR-0340 SLA reassignment both write through here.
+ * `admin_not_initiator` is every active admin other than the initiator, deduplicated).
  */
 async function requestStageApprovals(
   tx: DbOrTx,
@@ -244,8 +247,11 @@ async function scheduleStageDeadlines(
   const sent = [];
   for (const p of phases) sent.push({ ...p, result: await enqueueStageDeadline(tx as unknown as Db, { ...base, phase: p.phase }, p.after) });
   const failed = sent.filter((x) => !x.result.scheduled && x.result.reason !== "already_scheduled");
+  // a new entry's deadline starts from `none` (rule 12: STAGE_DEADLINE_LIFECYCLE)
+  const phase = nextDeadlinePhase("none", failed.length > 0 ? "enter_unsent" : "enter")!;
   const marker = {
     executionKey,
+    phase,
     onBreach: sla.onBreach,
     ...(sla.warnAfterSeconds !== undefined ? { warnAt: new Date(now + sla.warnAfterSeconds * 1000).toISOString() } : {}),
     dueAt: new Date(now + sla.breachAfterSeconds * 1000).toISOString(),
@@ -400,7 +406,11 @@ async function applyEvent(
     const round = instance.round + (isReopen ? 1 : 0);
     const stageEntry = instance.stageEntry + (bumpEntry ? 1 : 0);
 
-    await tx
+    // ADR-0340 (rule 12): a compensation phase implies the instance status (the lifecycle table); a state that
+    // disagrees is refused before it is written. The UPDATE is guarded on the status and stage entry read under the
+    // lock, so the move it writes is exactly the one computed from that row.
+    assertCompensationStatus(def, state);
+    const written = await tx
       .update(workflowInstances)
       .set({
         state,
@@ -410,7 +420,15 @@ async function applyEvent(
         updatedAt: new Date(),
         ...(context ? { context } : {}),
       })
-      .where(eq(workflowInstances.id, instance.id));
+      .where(
+        and(
+          eq(workflowInstances.id, instance.id),
+          eq(workflowInstances.status, instance.status),
+          eq(workflowInstances.stageEntry, instance.stageEntry),
+        ),
+      )
+      .returning({ id: workflowInstances.id });
+    if (written.length !== 1) throw new WorkflowStateError(`instance ${instance.id} moved while '${event.kind}' was applied`);
     await tx.insert(workflowEvents).values({ instanceId: instance.id, event, actorUserId });
 
     const isDenial = event.kind === "approval_denied" || event.kind === "abort";
@@ -2259,7 +2277,18 @@ async function runGitExecutions(
             context[recordKey] = { action: stage.action, compensates: stage.compensates, branch, changed: res?.deleted ?? false, ...(branch ? {} : { nothingRecorded: true }) };
           } else {
             const prId = context.prId === undefined || context.prId === null ? null : String(context.prId);
-            const res = prId
+            // a pull request this instance merged, whose merge its own revert already undid in this saga, has
+            // nothing left to close: closing a merged pull request throws on every provider, so without this the
+            // saga would fail on every retry. Only a provider that says MERGED supersedes it; a PR merged by
+            // anyone else, or with no revert, still fails honestly.
+            const superseded =
+              prId !== null &&
+              closePrSupersededByMerge(def, instance.state as InstanceState, stage.id) &&
+              (await provider.getPullRequest(stage.repo!, prId)).state === "merged";
+            if (superseded) {
+              context[recordKey] = { action: stage.action, compensates: stage.compensates, prId, changed: false, superseded: "merged" };
+            }
+            const res = prId && !superseded
               ? await runExternalWrite(
                   db,
                   "git.close_pull_request",
@@ -2267,7 +2296,9 @@ async function runGitExecutions(
                   effectAudit((r) => ({ repo: stage.repo, prId, closed: r.closed, compensates: stage.compensates })),
                 )
               : null;
-            context[recordKey] = { action: stage.action, compensates: stage.compensates, prId, changed: res?.closed ?? false, ...(prId ? {} : { nothingRecorded: true }) };
+            if (!superseded) {
+              context[recordKey] = { action: stage.action, compensates: stage.compensates, prId, changed: res?.closed ?? false, ...(prId ? {} : { nothingRecorded: true }) };
+            }
           }
         }
       } else if (stage.action === "create_branch") {
@@ -2915,15 +2946,16 @@ async function commitStageResult(
  */
 /**
  * ADR-0340 slice 2 — ONE DEADLINE TIMER FIRING. Under the instance lock: if the instance still rests at the stage
- * execution the job names (same stage, round and entry; not ended, not compensating) and this phase has not run for
- * it yet, the phase runs and is recorded on the `sla:<stage>` marker in the same transaction as its audit row:
+ * execution the job names (same stage, round and entry; not ended, not compensating) and the deadline lifecycle table
+ * (rule 12, `STAGE_DEADLINE_LIFECYCLE`) allows this phase from the marker's current one, the phase runs and is
+ * recorded on the `sla:<stage>` marker in the same transaction as its audit row:
  *  - `warn`: `workflow:sla-warned`, and a reminder;
- *  - `breach`: `workflow:sla-breached` (deny), then the stage's `onBreach`: `notify` (a notice), `reassign` (the
- *    stage's pending sign-off rows are superseded and the `reassignTo` approvers are requested, audited
- *    `workflow:sla-reassigned`) or `fail` (the kernel's `abort`, as the system actor `workflow-sla`, which supersedes
- *    the gates and compensates when the template declares compensations; the first compensation runs after the
- *    commit, with the same executor and guard as any other).
- * Escalation never approves or denies a sign-off. The chat notice is sent after the commit and never fails the job.
+ *  - `breach`: `workflow:sla-breached` (deny), then the stage's `onBreach`: `notify` (a notice) or `fail` (the
+ *    kernel's `abort`, as the system actor `workflow-sla`, which supersedes the gates and compensates when the
+ *    template declares compensations; the first compensation runs after the commit, with the same executor and guard
+ *    as any other).
+ * A deadline never approves or denies a sign-off, and never reminds or escalates one (that is the approvals queue's
+ * SLA, decision 9). The chat notice is sent after the commit and never fails the job.
  */
 export async function runStageDeadlineJob(
   db: Db,
@@ -2953,66 +2985,44 @@ export async function runStageDeadlineJob(
     const sla = stage.sla;
     const markerKey = `sla:${stage.id}`;
     const marker = { ...((row.context as Record<string, unknown>)[markerKey] as Record<string, unknown> | undefined) };
-    const doneKey = job.phase === "warn" ? "warnedAt" : "breachedAt";
-    if (marker.executionKey === key && marker[doneKey] !== undefined) return "already_done";
+    if (marker.executionKey !== key) return "superseded";
+    const from = (typeof marker.phase === "string" ? marker.phase : "scheduled") as DeadlinePhase;
+    const to = nextDeadlinePhase(from, job.phase);
+    if (to === null) return "already_done";
     const at = new Date().toISOString();
-    Object.assign(marker, { executionKey: key, [doneKey]: at });
+    Object.assign(marker, { phase: to, [job.phase === "warn" ? "warnedAt" : "breachedAt"]: at });
     await tx
       .update(workflowInstances)
       .set({ context: sql`${workflowInstances.context} || jsonb_build_object(${markerKey}::text, ${JSON.stringify(marker)}::jsonb)` })
       .where(eq(workflowInstances.id, row.id));
-    const pendingApprovers = async () =>
-      (
-        await tx
-          .select({ approverUserId: approvals.approverUserId })
-          .from(approvals)
-          .where(and(eq(approvals.instanceId, row.id), eq(approvals.stageId, stage.id), eq(approvals.status, "pending")))
-      ).map((r) => r.approverUserId);
     const audit = (ruleId: string, effect: "allow" | "deny", reason: string, extra: Record<string, unknown> = {}) =>
       tx.insert(auditLog).values({
         userId: SYSTEM_IDENTITY,
         objectType: "workflow",
         objectId: row.id,
-        detail: { actor: "workflow-sla", stageId: stage.id, executionKey: key, phase: job.phase, dueAt: marker.dueAt ?? null, ...extra },
+        detail: { actor: "workflow-sla", stageId: stage.id, executionKey: key, phase: job.phase, from, to, dueAt: marker.dueAt ?? null, ...extra },
         effect,
         ruleId,
         ruleChain: [],
         reason,
       });
     const dueAt = typeof marker.dueAt === "string" ? marker.dueAt : null;
+    const toInitiator = [row.initiatorUserId];
     if (job.phase === "warn") {
       await audit("workflow:sla-warned", "allow", `stage '${stage.id}' is approaching its deadline${dueAt ? ` (${dueAt})` : ""}; a reminder was sent`);
-      notice = { instanceId: row.id, stageId: stage.id, phase: "warn", action: "notify", recipientUserIds: await pendingApprovers(), dueAt };
+      notice = { instanceId: row.id, stageId: stage.id, phase: "warn", action: "notify", recipientUserIds: toInitiator, dueAt };
       return "warned";
     }
     await audit("workflow:sla-breached", "deny", `stage '${stage.id}' missed its deadline${dueAt ? ` (${dueAt})` : ""}; on breach: ${sla.onBreach}`, {
       onBreach: sla.onBreach,
     });
-    if (sla.onBreach === "reassign") {
-      const superseded = await withinSystemReason(tx, "approval_maintenance", "workflows.sla-reassign", async () =>
-        tx
-          .update(approvals)
-          .set({ status: "superseded" })
-          .where(and(eq(approvals.instanceId, row.id), eq(approvals.stageId, stage.id), eq(approvals.status, "pending")))
-          .returning({ id: approvals.id, approverUserId: approvals.approverUserId }),
-      );
-      const requested = await requestStageApprovals(tx, row, stage.id, sla.reassignTo ?? [], "workflows.sla-reassign");
-      await audit(
-        "workflow:sla-reassigned",
-        "allow",
-        `stage '${stage.id}' sign-off moved from ${superseded.length} pending approver row(s) to ${requested.length} approver(s) by its deadline; nothing was approved or denied`,
-        { supersededApprovalIds: superseded.map((r) => r.id), from: superseded.map((r) => r.approverUserId), to: requested },
-      );
-      notice = { instanceId: row.id, stageId: stage.id, phase: "breach", action: "reassign", recipientUserIds: requested, dueAt };
-      return "reassigned";
-    }
     if (sla.onBreach === "fail") {
       const applied = await applyEvent(tx, row.id, { kind: "abort" }, null, undefined, undefined, { systemActor: "workflow-sla" });
       followUp = applied.effects;
-      notice = { instanceId: row.id, stageId: stage.id, phase: "breach", action: "fail", recipientUserIds: [row.initiatorUserId], dueAt };
+      notice = { instanceId: row.id, stageId: stage.id, phase: "breach", action: "fail", recipientUserIds: toInitiator, dueAt };
       return "failed_instance";
     }
-    notice = { instanceId: row.id, stageId: stage.id, phase: "breach", action: "notify", recipientUserIds: await pendingApprovers(), dueAt };
+    notice = { instanceId: row.id, stageId: stage.id, phase: "breach", action: "notify", recipientUserIds: toInitiator, dueAt };
     return "notified";
   });
   // the cancel's first compensation runs once the cancel is durable, through the ordinary executor and its guard
@@ -3124,6 +3134,20 @@ export async function createWorkflowTemplateValidated(
   | { ok: false; status: number; body: Record<string, unknown> }
 > {
   const definition = validateDefinition(body.definition);
+  const refused = await checkWorkflowTemplateReferences(db, definition);
+  if (refused) return refused;
+  return insertWorkflowTemplate(db, body.name, definition, actorUserId);
+}
+
+/**
+ * ADR-0341: the gateway-side checks of a kernel-valid definition (what the kernel cannot see: retired datasets,
+ * registry agents, user ids, nested run graphs), shared by the create path and the builder's validate and publish.
+ * Null = the definition may be stored; otherwise the refusal to send.
+ */
+export async function checkWorkflowTemplateReferences(
+  db: Db,
+  definition: WorkflowDefinition,
+): Promise<{ ok: false; status: number; body: Record<string, unknown> } | null> {
   // ADR-0208 G9: a new quality gate may not bind a retired eval dataset (bindings name the dataset by NAME)
   const retiredBound = await retiredEvalDatasetNames(db, evalDatasetNamesBoundBy(definition));
   if (retiredBound.length > 0) {
@@ -3208,6 +3232,15 @@ export async function createWorkflowTemplateValidated(
       return { ok: false, status: 422, body: { error: "invalid_approver" } };
     }
   }
+  return null;
+}
+
+async function insertWorkflowTemplate(
+  db: Db,
+  name: string,
+  definition: WorkflowDefinition,
+  actorUserId: string | null,
+): Promise<{ ok: true; row: typeof workflowTemplates.$inferSelect }> {
   // ADR-0283 owner decision (2026-11-15): no stage retries unless its template
   // says so; a template that turns automatic retry on is audited, by stage and
   // policy, in ONE transaction with the insert (a savepoint when the caller
@@ -3216,18 +3249,18 @@ export async function createWorkflowTemplateValidated(
   const row = await db.transaction(async (tx) => {
     const [created] = await tx
       .insert(workflowTemplates)
-      .values({ name: body.name, definition })
+      .values({ name, definition })
       .returning();
     if (retried.length === 0) return created!;
     await tx.insert(auditLog).values({
       userId: actorUserId ?? SYSTEM_IDENTITY,
       objectType: "workflow_template",
       objectId: created!.id,
-      detail: { templateName: body.name, stages: retried.map((st) => ({ stageId: st.id, type: st.type, retry: st.retry })) },
+      detail: { templateName: name, stages: retried.map((st) => ({ stageId: st.id, type: st.type, retry: st.retry })) },
       effect: "allow",
       ruleId: "workflow:template-stage-retry-enabled",
       ruleChain: [],
-      reason: `template '${body.name}' turns on automatic retry for ${retried.map((st) => `'${st.id}'`).join(", ")} (capped by each stage's retry policy)`,
+      reason: `template '${name}' turns on automatic retry for ${retried.map((st) => `'${st.id}'`).join(", ")} (capped by each stage's retry policy)`,
     });
     return created!;
   });

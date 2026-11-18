@@ -42,6 +42,22 @@ installSecrets:
   existingClaim: ""
   size: 1Gi
   storageClassName: ""
+  # ReadWriteMany is required for replicas > 1: every replica must read the same signing keys and runtime-login file
+  # (ADR-0343 §3). With existingClaim, this states the claim's access mode.
+  accessMode: ReadWriteOnce
+
+# Gateway replicas (ADR-0343). 1 keeps the single-replica shape (Recreate). More than 1 needs
+# installSecrets.accessMode: ReadWriteMany and gets a RollingUpdate, a PodDisruptionBudget and zone spread. Boot
+# migrations take a cluster-wide lock, so replicas may start together.
+replicas: 1
+
+highAvailability:
+  # Seconds a terminating replica answers /ready 503 while it keeps serving, so the Service stops routing to it before
+  # it closes (REGULAIT_DRAIN_DELAY_MS). The pod's termination grace period is this plus the 15 s drain.
+  drainDelaySeconds: 10
+  # replicas > 1: spread across zones and nodes. DoNotSchedule (the default) refuses to put two replicas in one zone
+  # while another zone has room; ScheduleAnyway only prefers it.
+  zoneSpread: DoNotSchedule
 
 # NetworkPolicy is always default-deny for ingress and egress. These only open holes.
 egress:

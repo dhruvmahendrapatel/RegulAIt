@@ -13,7 +13,8 @@ Zlib, Unicode-3.0) and oletools' public-domain `oledump` with the BSD `tablestre
 exceptions to the ADR-0176 list, recorded in the rows below.
 
 **Admission status: NOT ADMISSIBLE YET.** The image builds and passes its licence gate and offline smoke scan (measured
-locally, 2026-11-07), but it is not published: no digest is recorded in `engines/images.lock.json`, the image-level scan
+locally, 2026-11-07) and is publishable by the engine-images workflow (ADR-0242 L4.5, 2026-11-17), but no publish is
+recorded yet: its `engines/images.lock.json` entry is all null, the image-level scan
 (OS layer, vulnerabilities, licences) has not run in CI, and the closure's advisories have not been checked (phase 2,
 ADR-0242 §6). The shipped manifest carries no digest, so the engine cannot be enabled (ADR-0187 decision 3).
 

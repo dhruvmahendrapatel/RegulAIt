@@ -5610,6 +5610,12 @@ attributes, one vocabulary per concept). Deliberate exceptions carry a column co
 normalized, ADR-0060), schema-validated config documents, verbatim external payloads, measured read models. Existing
 tables follow in audited expand-contract batches. Rule in CLAUDE.md (Data guidelines); DESIGN_GUIDELINES.md points to it.
 
+**ADR-0200 addendum (owner, 2026-11-17): four build rules.** (1) Compare at least two open-source approaches on GitHub
+before writing an unfamiliar feature. (2) Score bugs for frequency × severity (1–10 each); below 5 is a `triage-low`
+issue and the code is left alone; security-checklist gaps stay blocking. (3) Finish the whole job, ask the owner before
+deleting anything, end with a plain-words recap. (4) Explicit, reused, server-enforced state machines that serve UX, DX
+and AX together; app-wide inventory and approach from lane E29 (in flight). Rules in CLAUDE.md.
+
 **ADR-0233 (builder, 2026-11-06, Proposed): refuse credentials typed into content columns (PENDING S6).** Content
 (`name`, `title`, `description`, `summary`, `body`) is not redacted like ADR-0102's prose; a write that puts
 credential-shaped text into one of the 84 guarded columns is REFUSED with `422 credential_in_content`, naming the

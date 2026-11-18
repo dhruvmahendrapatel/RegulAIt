@@ -107,25 +107,25 @@ export class GitHubProvider implements GitProvider {
   }
 
   /** a request whose success has no JSON body (204): the status only */
-  private async requestNoContent(method: string, path: string): Promise<number> {
+  async deleteBranch(repo: string, branch: string): Promise<{ deleted: boolean }> {
+    // each ref segment is encoded; the slashes between segments stay (GitHub reads the ref as a path)
+    const ref = branch.split("/").map(encodeURIComponent).join("/");
+    const path = `/repos/${repo}/git/refs/heads/${ref}`;
     const res = await this.fetchImpl(`${this.base}${path}`, {
-      method,
+      method: "DELETE",
       headers: {
         authorization: `Bearer ${this.token}`,
         accept: "application/vnd.github+json",
         "user-agent": "regulait-gateway",
       },
     });
-    if (res.status >= 400 && res.status !== 404 && res.status !== 422) {
-      throw new GitProviderError(`github ${method} ${path} failed: ${scrubSecrets(await res.text(), [this.token])}`, res.status);
-    }
-    return res.status;
-  }
-
-  async deleteBranch(repo: string, branch: string): Promise<{ deleted: boolean }> {
-    // 404 / 422 ("Reference does not exist"): already gone
-    const status = await this.requestNoContent("DELETE", `/repos/${repo}/git/refs/heads/${branch}`);
-    return { deleted: status < 400 };
+    if (res.status < 400) return { deleted: true };
+    const text = await res.text();
+    // ADR-0340: only a ref that does not exist is "already gone" (404, or GitHub's 422 "Reference does not
+    // exist"). Any other refusal (branch protection, a rule set, a validation error) leaves the branch in place,
+    // so it throws and the compensation fails instead of recording an undo that did not happen.
+    if (res.status === 404 || (res.status === 422 && /reference does not exist/i.test(text))) return { deleted: false };
+    throw new GitProviderError(`github DELETE ${path} failed: ${scrubSecrets(text, [this.token])}`, res.status);
   }
 
   async closePullRequest(repo: string, prId: string): Promise<{ closed: boolean }> {

@@ -368,7 +368,6 @@ export type StageDeadlineOutcome =
   | "already_done"
   | "warned"
   | "notified"
-  | "reassigned"
   | "failed_instance";
 
 export type StageDeadlineHandler = (job: StageDeadlineJob) => Promise<StageDeadlineOutcome>;

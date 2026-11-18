@@ -188,6 +188,56 @@ describe("ADR-0340 compensation", () => {
     expect(row?.detail).toMatchObject({ notRun: ["revert_merge", "undo_branch"] });
   });
 
+  it("a denial after the merge reverts it, records the merged PR's close as superseded, and still ends denied", async () => {
+    const name = `wc-merged-${RUN}`;
+    await registerTemplate(name, [
+      { id: "intake", type: "trigger" },
+      { id: "branch", type: "git_operation", action: "create_branch", ...g },
+      { id: "pr", type: "git_operation", action: "open_pr", ...g },
+      { id: "merge", type: "git_operation", action: "merge", ...g },
+      { id: "release", type: "human_approval", approvers: [ana.id] },
+      { id: "revert_merge", type: "automated_build", compensates: "merge" },
+      { id: "undo_pr", type: "git_operation", action: "close_pr", compensates: "pr", ...g },
+      { id: "undo_branch", type: "git_operation", action: "delete_branch", compensates: "branch", ...g },
+    ]);
+    const id = await start(name);
+    let inst = await view(id);
+    expect(inst.status).toBe("blocked_on_approval");
+    expect(inst.context.mergeSha).toBeDefined();
+    await decideGate(id, "release", "denied");
+    inst = await view(id);
+    expect(inst.status).toBe("awaiting_trigger");
+    expect(inst.state.compensation).toMatchObject({ plan: ["revert_merge", "undo_pr", "undo_branch"] });
+    // a person reverts the merge; the merged PR has nothing left to close, and the branch delete runs
+    const done = await post(`/v1/workflows/instances/${id}/advance`, { stageId: "revert_merge" }, pia.auth);
+    expect(done.statusCode, done.body).toBe(200);
+    inst = await view(id);
+    expect(inst.status).toBe("denied");
+    expect(inst.state.compensation).toMatchObject({ outcome: "completed" });
+    expect(inst.context["compensation:undo_pr"]).toMatchObject({ prId: String(inst.context.prId), changed: false, superseded: "merged" });
+    expect(inst.context["compensation:undo_branch"]).toMatchObject({ changed: true });
+    const rules = await auditRules(id);
+    expect(rules).toContain("workflow:compensation-completed");
+    expect(rules).not.toContain("external-effect:git.close_pull_request");
+  });
+
+  it("a close_pr whose PR a stage merges, with no compensation for that merge, is refused at creation", async () => {
+    const res = await post("/v1/workflows/templates", {
+      name: `wc-nomergeundo-${RUN}`,
+      definition: {
+        workflow: `wc-nomergeundo-${RUN}`,
+        stages: [
+          { id: "intake", type: "trigger" },
+          { id: "pr", type: "git_operation", action: "open_pr", ...g },
+          { id: "merge", type: "git_operation", action: "merge", ...g },
+          { id: "undo_pr", type: "git_operation", action: "close_pr", compensates: "pr", ...g },
+        ],
+      },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.body).toMatch(/closing cannot undo a merge/);
+  });
+
   it("templates with a bad compensation are refused at creation", async () => {
     const res = await post("/v1/workflows/templates", {
       name: `wc-bad-${RUN}`,

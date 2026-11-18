@@ -147,6 +147,19 @@ in the PR body saying why.
   migrations (add, backfill, switch readers, drop), hand-written, and evidence rows are never rewritten. A new
   denormalized column without its exception comment is a review finding.
 
+## Owner build rules (owner, 2026-11-17; ADR-0200 addendum)
+
+- **Compare open source first:** do not write an unfamiliar feature from scratch. Search GitHub, compare at least two
+  approaches (ADR-0176 tests, maintenance, fit), record the comparison, then start.
+- **Bug triage:** score each bug 1–10 for frequency (F) and severity (S). F×S below 5 → file an issue labelled
+  `triage-low` and leave the code alone. No designing for rare or future cases nobody asked about. A confirmed
+  security-checklist gap stays blocking regardless of score.
+- **Finish, ask, recap:** finish the whole job without offering to continue; ask the owner before deleting anything; end
+  with a plain-words recap, key points first.
+- **Explicit state machines:** statuses, lifecycles and multi-step flows declare their states and allowed transitions in
+  one reused place, enforced server side, shown honestly in the UI and readable by agents, without breaking existing
+  transitions (inventory and shared approach: lane E29, in flight).
+
 ## Security checklist — every build and review (owner, 2026-10-24; ADR-0200)
 
 **A confirmed gap here is a vulnerability, and under ADR-0180 a blocking bug.** Check what your change touches, and

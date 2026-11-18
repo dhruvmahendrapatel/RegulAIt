@@ -16,8 +16,8 @@ export interface WorkflowSlaNotice {
   /** a reminder before the deadline, or the breach itself */
   phase: "warn" | "breach";
   /** what the breach did (`notify` for a reminder) */
-  action: "notify" | "reassign" | "fail";
-  /** the people the stage now waits on, when it waits on named people (a sign-off); they are mailed by resend */
+  action: "notify" | "fail";
+  /** the people the notice is for (the instance's initiator); they are mailed by resend */
   recipientUserIds: string[];
   dueAt: string | null;
 }
@@ -40,7 +40,6 @@ export async function notifyWorkflowSla(db: Db, notice: WorkflowSlaNotice): Prom
 export function workflowSlaNoticeText(n: WorkflowSlaNotice): string {
   const at = `stage '${n.stageId}' of workflow instance ${n.instanceId.slice(0, 8)}`;
   if (n.phase === "warn") return `Reminder: ${at} is due${n.dueAt ? ` at ${n.dueAt}` : " soon"}.`;
-  if (n.action === "reassign") return `Deadline missed: ${at} was reassigned to new approvers.`;
   if (n.action === "fail") return `Deadline missed: ${at} was cancelled by its SLA (compensations, if any, are running).`;
   return `Deadline missed: ${at} is overdue.`;
 }
