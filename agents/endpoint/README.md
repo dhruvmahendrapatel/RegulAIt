@@ -63,12 +63,16 @@ needs the built-in tools:
 
 Registrations (paths are examples; use absolute paths with no shell metacharacters):
 
-- **Claude Code**, managed settings: a `PreToolUse` hook with matcher `mcp__.*`, exec form
+- **Claude Code**, managed settings: a `PreToolUse` hook with matcher
+  `Bash|PowerShell|Read|Write|Edit|MultiEdit|NotebookEdit|mcp__.*` (the tamper report requires the matcher to match
+  an MCP tool and Bash, Read, Write and Edit as a whole-name regular expression), exec form
   `"args": ["/usr/local/bin/regulait-agent", "hook", "claude-code", "-policy", "/etc/regulait/policy.json"]`,
   `"onFailure": "block"`, and `allowManagedHooksOnly: true`.
 - **Cursor**, enterprise `hooks.json` (`/etc/cursor/hooks.json`, `/Library/Application Support/Cursor/hooks.json` or
   `C:\ProgramData\Cursor\hooks.json`):
-  `{"version": 1, "hooks": {"beforeMCPExecution": [{"command": "'/usr/local/bin/regulait-agent' 'hook' 'cursor' '-policy' '/etc/regulait/policy.json'", "failClosed": true}]}}`.
+  `{"version": 1, "hooks": {"beforeMCPExecution": [{"command": "'/usr/local/bin/regulait-agent' 'hook' 'cursor' '-policy' '/etc/regulait/policy.json'", "failClosed": true}]}}`,
+  and the same entry under `beforeShellExecution` and `beforeReadFile` (the tamper report reads a file without all
+  three as `weakened`).
   Cursor has no exec form (`execForm: false` in `regulait-agent hook-capabilities`), so the command runs through a
   shell: keep the path and every argument quoted, with nothing interpolated. On Windows it runs through PowerShell,
   so prefix the quoted path with the call operator `&`.
@@ -94,5 +98,9 @@ governed call happens (Cursor and Copilot CLI report no mode). A spool error nev
 oldest first (a batch is kept in the outbox until accepted, so a retry resends the same id and bytes), with a report
 of each managed file above: present, missing, unreadable or not system-owned, its SHA-256, and whether it still
 registers the RegulAIt hook with the vendor's fail-closed or managed-only setting (`registered`, `weakened`, `absent`
-or `unparseable`). The agent reports and never restores. The spool belongs to the device user, so it records what the
+or `unparseable`). It fails closed: `registered` needs the program to be the first word and the whole command one
+simple call of `regulait-agent hook <agent>` (no `||`, `;`, pipe, redirect or subshell), on every event above, with
+Claude Code's `disableAllHooks` unset and Codex's `[features] hooks = true`; a mention of `regulait-agent` that is
+anything else is `weakened`. On Windows the paths come from the known-folder API, not `%ProgramData%`, and a file
+whose owner is not SYSTEM or Administrators, or whose DACL lets anyone else write it, is not system-owned. The agent reports and never restores. The spool belongs to the device user, so it records what the
 hook answered; it is not proof against that user.

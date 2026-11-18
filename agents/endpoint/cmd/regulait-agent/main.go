@@ -160,13 +160,14 @@ func hook(args []string) int {
 		_ = f.Close()
 	}
 	r := adapter.HookDecide(os.Stdin, policy, hookEnv(adapter.Name))
-	spoolDecision(adapter.Name, r, policy)
+	// answer first, then spool: a slow state directory must not push the answer past the vendor's hook timeout
 	if len(r.Stdout) > 0 {
 		_, _ = os.Stdout.Write(r.Stdout)
 	}
 	if r.Stderr != "" {
 		fmt.Fprintln(os.Stderr, r.Stderr)
 	}
+	spoolDecision(adapter.Name, r, policy)
 	return r.Exit
 }
 

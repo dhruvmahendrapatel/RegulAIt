@@ -22,6 +22,7 @@ import (
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/contract"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/decisionlog"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/devicekey"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/fsutil"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/gatewaytest"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/pack/packtest"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/privacy"
@@ -523,11 +524,11 @@ func TestReadCheckedRefusesAnotherOwnerUID(t *testing.T) {
 	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readChecked(path, os.Getuid(), OwnerOnly); err != nil {
+	if _, err := readChecked(path, os.Getuid(), fsutil.OwnerOnly); err != nil {
 		t.Fatalf("own file: %v", err)
 	}
 	other := os.Getuid() + 1
-	if _, err := readChecked(path, other, OwnerOnly); !errors.Is(err, ErrUnsafeFile) || !strings.Contains(err.Error(), "owned by uid") {
+	if _, err := readChecked(path, other, fsutil.OwnerOnly); !errors.Is(err, fsutil.ErrUnsafeFile) || !strings.Contains(err.Error(), "owned by uid") {
 		t.Fatalf("checked against uid %d: %v", other, err)
 	}
 }
@@ -541,7 +542,7 @@ func TestFileOwnedByAnotherUIDIsUnsafe(t *testing.T) {
 	if err := os.Chown(f.opts.Paths.EnrolFile, 4242, -1); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readChecked(f.opts.Paths.EnrolFile, 0, OwnerOnly); !errors.Is(err, ErrUnsafeFile) || !strings.Contains(err.Error(), "owned by uid 4242") {
+	if _, err := readChecked(f.opts.Paths.EnrolFile, 0, fsutil.OwnerOnly); !errors.Is(err, fsutil.ErrUnsafeFile) || !strings.Contains(err.Error(), "owned by uid 4242") {
 		t.Fatalf("another uid's file: %v", err)
 	}
 	if st := Redeem(context.Background(), f.opts); st.Outcome != OutcomeTokenFileUnsafe {
@@ -564,7 +565,7 @@ func TestSymlinkIsAnUnsafeFile(t *testing.T) {
 	if err := os.Symlink(real, f.opts.Paths.EnrolFile); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readChecked(f.opts.Paths.EnrolFile, os.Getuid(), OwnerOnly); !errors.Is(err, ErrUnsafeFile) {
+	if _, err := readChecked(f.opts.Paths.EnrolFile, os.Getuid(), fsutil.OwnerOnly); !errors.Is(err, fsutil.ErrUnsafeFile) {
 		t.Fatalf("symlink: %v", err)
 	}
 	if st := Redeem(context.Background(), f.opts); st.Outcome != OutcomeTokenFileUnsafe {

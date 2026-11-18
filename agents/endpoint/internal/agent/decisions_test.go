@@ -16,6 +16,7 @@ import (
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/contract"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/decisionlog"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/enforce"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/fsutil"
 )
 
 // spoolDecisions stands in for the hook: n decisions and one bypass session in the user's spool.
@@ -40,7 +41,7 @@ func (f *fixture) decisionRequests() []contract.DecisionBatch {
 	for _, q := range f.gw.Requests {
 		if q.Path == contract.RouteDecisions {
 			var b contract.DecisionBatch
-			if strictJSON(q.Body, &b) == nil {
+			if fsutil.StrictJSON(q.Body, &b) == nil {
 				out = append(out, b)
 			}
 		}

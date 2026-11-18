@@ -1,4 +1,4 @@
-package agent
+package fsutil
 
 import (
 	"strings"
@@ -58,6 +58,9 @@ func TestJudgeWindowsFile(t *testing.T) {
 		{"OWNER RIGHTS is trusted", winFileSecurity{Owner: sidSystem, DACLPresent: true, ACEs: with(allow(sidOwnerRights, fullAccess))}, "", OwnerOnly, ""},
 		{"TrustedInstaller is trusted", winFileSecurity{Owner: sidSystem, DACLPresent: true, ACEs: with(allow(sidTrustedInstaller, fullAccess))}, "", OwnerOnly, ""},
 		{"CREATOR OWNER is not trusted", winFileSecurity{Owner: sidSystem, DACLPresent: true, ACEs: with(allow("S-1-3-0", fullAccess))}, "", OwnerOnly, "may write"},
+		{"managed file: Users read and execute", winFileSecurity{Owner: sidAdministrators, DACLPresent: true, ACEs: with(allow(sidUsers, fileGenericRead|fileExecute))}, "", WorldReadExec, ""},
+		{"managed file: Users may write", winFileSecurity{Owner: sidAdministrators, DACLPresent: true, ACEs: with(allow(sidUsers, fileGenericWrite))}, "", WorldReadExec, "may write"},
+		{"managed file owned by a user", winFileSecurity{Owner: testUserSID, DACLPresent: true, ACEs: base}, "", WorldReadExec, "owned by"},
 		{"unknown entry type", winFileSecurity{Owner: sidSystem, DACLPresent: true, ACEs: with(winACE{Type: 5, Mask: fullAccess})}, "", WorldRead, "type 5"},
 	}
 	for _, c := range cases {

@@ -19,6 +19,7 @@ import (
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/contract"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/decisionlog"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/devicekey"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/fsutil"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/pack"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/privacy"
 )
@@ -155,7 +156,7 @@ func (c *Cycle) report(ctx context.Context, cl *auth.Client, cfg *Config, s *Sta
 		return nil, &auth.HTTPError{Op: "config", Status: res.Status, Code: res.Code()}
 	}
 	var conf contract.ConfigResponse
-	if err := strictJSON(res.Body, &conf); err != nil {
+	if err := fsutil.StrictJSON(res.Body, &conf); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
 	}
 	verified, err := pack.Verify(conf.Pack, c.Keyring, s.PackVersion)
@@ -303,7 +304,7 @@ func (c *Cycle) upload(ctx context.Context, cl *auth.Client, rep *contract.Repor
 		return &auth.HTTPError{Op: "report", Status: res.Status, Code: res.Code()}
 	}
 	var rr contract.ReportResponse
-	if err := strictJSON(res.Body, &rr); err != nil || !rr.Accepted {
+	if err := fsutil.StrictJSON(res.Body, &rr); err != nil || !rr.Accepted {
 		return errors.New("the report answer is malformed")
 	}
 	return nil
@@ -347,7 +348,7 @@ func (c *Cycle) rotate(ctx context.Context, cfg *Config, cl *auth.Client, store 
 	}
 	var rr contract.RegisterResponse
 	newID, _ := auth.ClientID(next.Public())
-	if err := strictJSON(res.Body, &rr); err != nil || rr.ClientID != newID {
+	if err := fsutil.StrictJSON(res.Body, &rr); err != nil || rr.ClientID != newID {
 		return errors.New("the rotation answer is malformed")
 	}
 	old := s.KeyID

@@ -1,6 +1,6 @@
 //go:build !windows
 
-package agent
+package fsutil
 
 import (
 	"errors"
@@ -10,19 +10,21 @@ import (
 	"syscall"
 )
 
-func openNoFollow(path string) (*os.File, error) {
+// OpenNoFollow opens read-only without following a final symlink (O_NOFOLLOW).
+func OpenNoFollow(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 }
 
-// isUnsafeOpen: O_NOFOLLOW on a symlink fails with ELOOP.
-func isUnsafeOpen(err error) bool { return errors.Is(err, syscall.ELOOP) }
+// IsUnsafeOpen: O_NOFOLLOW on a symlink fails with ELOOP.
+func IsUnsafeOpen(err error) bool { return errors.Is(err, syscall.ELOOP) }
 
-// createExclusive creates the file 0600; writeAtomic sets the final mode before the rename.
+// createExclusive creates the file 0600; WriteTemp sets the final mode before the rename.
 func createExclusive(path string, _ os.FileMode) (*os.File, error) {
 	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
 }
 
-func checkMode(_ *os.File, st fs.FileInfo, owner int, a Access) error {
+// CheckMode: a regular file owned by owner (a uid; < 0 skips the uid check) with no mode bits beyond what a allows.
+func CheckMode(_ *os.File, st fs.FileInfo, owner int, a Access) error {
 	if !st.Mode().IsRegular() {
 		return errors.New("not a regular file")
 	}
@@ -38,6 +40,8 @@ func checkMode(_ *os.File, st fs.FileInfo, owner int, a Access) error {
 		allowed = 0o640
 	case WorldRead:
 		allowed = 0o644
+	case WorldReadExec:
+		allowed = 0o755
 	}
 	if perm&^allowed != 0 {
 		return fmt.Errorf("mode %o allows more than %o", perm, allowed)

@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/contract"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/fsutil"
 )
 
 // Spool bounds. A full spool drops new events and counts them; the count is reported in the next batch.
@@ -73,7 +74,8 @@ func (s *Spool) ensure() error {
 }
 
 // Emit spools one event. A session event is kept only the first time its (agent, sessionRef, permissionMode) is seen;
-// a decision event marks it seen too, since it already shows the session in that mode.
+// a decision event marks it seen too, since it already shows the session in that mode. The seen marker is created
+// only after the event is written, so a failed write never hides the session's first event.
 func (s *Spool) Emit(ev Event) error {
 	if err := Validate(ev); err != nil {
 		return err
@@ -81,7 +83,8 @@ func (s *Spool) Emit(ev Event) error {
 	if err := s.ensure(); err != nil {
 		return err
 	}
-	if first := s.markSeen(ev); !first && ev.Kind == contract.EventSession {
+	marker := s.seenMarker(ev)
+	if _, err := os.Lstat(marker); err == nil && ev.Kind == contract.EventSession {
 		return nil
 	}
 	n, err := s.count()
@@ -98,12 +101,15 @@ func (s *Spool) Emit(ev Event) error {
 	if err != nil {
 		return err
 	}
-	return writeFile(filepath.Join(s.Dir, ev.EventID+".json"), body, false)
+	if err := fsutil.WriteAtomic(filepath.Join(s.Dir, ev.EventID+".json"), body, 0o600, -1, false); err != nil {
+		return err
+	}
+	markSeen(marker)
+	return nil
 }
 
-// markSeen creates the session's marker and reports whether it is new. A marker that cannot be written counts as
-// new, so a broken marker directory costs duplicate session events, never a missing one.
-func (s *Spool) markSeen(ev Event) bool {
+// seenMarker is the path of the marker for the event's (agent, sessionRef, permissionMode).
+func (s *Spool) seenMarker(ev Event) string {
 	h := sha256.New()
 	for _, part := range []*string{&ev.Agent, ev.SessionRef, ev.PermissionMode} {
 		if part == nil {
@@ -114,14 +120,15 @@ func (s *Spool) markSeen(ev Event) bool {
 		}
 		h.Write([]byte{0xff})
 	}
-	f, err := os.OpenFile(filepath.Join(s.seenDir(), hex.EncodeToString(h.Sum(nil))), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if errors.Is(err, fs.ErrExist) {
-		return false
-	}
-	if err == nil {
+	return filepath.Join(s.seenDir(), hex.EncodeToString(h.Sum(nil)))
+}
+
+// markSeen creates the marker. One that already exists (a concurrent hook) or cannot be written is left alone: a
+// broken marker directory costs duplicate session events, never a missing one.
+func markSeen(marker string) {
+	if f, err := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600); err == nil {
 		_ = f.Close()
 	}
-	return true
 }
 
 // SessionRef is hex(HMAC-SHA256(salt, id)), or nil when id is empty or the salt cannot be had (never the raw id).
@@ -158,7 +165,7 @@ func (s *Spool) salt() ([]byte, error) {
 	if _, err := rand.Read(b); err != nil {
 		return nil, err
 	}
-	tmp, err := writeTemp(s.Dir, "salt", b, false)
+	tmp, err := fsutil.WriteTemp(path, b, 0o600, -1, false)
 	if err != nil {
 		return nil, err
 	}
@@ -267,41 +274,4 @@ func sizeOf(path string) int {
 		return 0
 	}
 	return min(int(st.Size()), maxDropped)
-}
-
-// writeFile writes data to path through a temporary file in the same directory, 0600, and renames it into place.
-func writeFile(path string, data []byte, sync bool) error {
-	tmp, err := writeTemp(filepath.Dir(path), filepath.Base(path), data, sync)
-	if err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
-}
-
-func writeTemp(dir, base string, data []byte, sync bool) (string, error) {
-	var r [8]byte
-	if _, err := rand.Read(r[:]); err != nil {
-		return "", err
-	}
-	tmp := filepath.Join(dir, "."+base+"."+hex.EncodeToString(r[:])+".tmp")
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return "", err
-	}
-	_, err = f.Write(data)
-	if err == nil && sync {
-		err = f.Sync()
-	}
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		_ = os.Remove(tmp)
-		return "", err
-	}
-	return tmp, nil
 }

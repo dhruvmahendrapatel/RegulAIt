@@ -22,6 +22,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/contract"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/fsutil"
 )
 
 // Gateway is the fake. Fields are read and written under mu by the tests.
@@ -134,7 +135,7 @@ func (g *Gateway) tickets(w http.ResponseWriter, r *http.Request, body []byte) {
 		return
 	}
 	var req contract.TicketRequest
-	if err := strictJSON(body, &req); err != nil || req.Hostname == "" || req.OS == "" {
+	if err := fsutil.StrictJSON(body, &req); err != nil || req.Hostname == "" || req.OS == "" {
 		refuse(w, http.StatusBadRequest, "invalid_body")
 		return
 	}
@@ -160,7 +161,7 @@ func (g *Gateway) register(w http.ResponseWriter, r *http.Request, body []byte) 
 		return
 	}
 	var req contract.RegisterRequest
-	if err := strictJSON(body, &req); err != nil {
+	if err := fsutil.StrictJSON(body, &req); err != nil {
 		refuse(w, http.StatusBadRequest, "invalid_body")
 		return
 	}
@@ -320,7 +321,7 @@ func (g *Gateway) report(w http.ResponseWriter, r *http.Request, body []byte) {
 		return
 	}
 	var rep contract.Report
-	if err := strictJSON(body, &rep); err != nil || rep.Schema != contract.SchemaReport || claims["snapshotId"] != rep.SnapshotID {
+	if err := fsutil.StrictJSON(body, &rep); err != nil || rep.Schema != contract.SchemaReport || claims["snapshotId"] != rep.SnapshotID {
 		refuse(w, http.StatusBadRequest, "invalid_body")
 		return
 	}
@@ -353,7 +354,7 @@ func (g *Gateway) decisions(w http.ResponseWriter, r *http.Request, body []byte)
 		return
 	}
 	var b contract.DecisionBatch
-	if err := strictJSON(body, &b); err != nil || b.Schema != contract.SchemaDecisions || claims["batchId"] != b.BatchID ||
+	if err := fsutil.StrictJSON(body, &b); err != nil || b.Schema != contract.SchemaDecisions || claims["batchId"] != b.BatchID ||
 		len(b.Events) > contract.MaxDecisionEvents || b.Events == nil || b.Integrity == nil {
 		refuse(w, http.StatusBadRequest, "invalid_body")
 		return
@@ -392,7 +393,7 @@ func (g *Gateway) rotate(w http.ResponseWriter, r *http.Request, body []byte) {
 		return
 	}
 	var req contract.RotateRequest
-	if err := strictJSON(body, &req); err != nil {
+	if err := fsutil.StrictJSON(body, &req); err != nil {
 		refuse(w, http.StatusBadRequest, "invalid_body")
 		return
 	}

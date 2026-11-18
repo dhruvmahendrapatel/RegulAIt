@@ -1,7 +1,6 @@
 package decisionlog
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/contract"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/fsutil"
 )
 
 // DefaultMaxBatches bounds the batches one Drain sends.
@@ -123,7 +123,7 @@ func (s *Spool) Drain(ctx context.Context, o DrainOptions) (DrainResult, error) 
 				continue
 			}
 		}
-		if err := writeFile(filepath.Join(s.outboxDir(), id+".json"), body, true); err != nil {
+		if err := fsutil.WriteAtomic(filepath.Join(s.outboxDir(), id+".json"), body, 0o600, -1, true); err != nil {
 			s.drop(id, nil, 0) // the events stay spooled; the taken count goes back to the counter
 			return res, err
 		}
@@ -197,7 +197,7 @@ func (s *Spool) pending(res *DrainResult, log *slog.Logger) ([]pendingBatch, map
 		body, err := os.ReadFile(path)
 		var b contract.DecisionBatch
 		if err == nil {
-			err = strictJSON(body, &b)
+			err = fsutil.StrictJSON(body, &b)
 		}
 		if err != nil || b.BatchID != id {
 			log.Warn("an unreadable decision batch was discarded; its events are sent again", "err", err)
@@ -242,7 +242,7 @@ func (s *Spool) load(inFlight map[string]bool, res *DrainResult, log *slog.Logge
 		b, err := os.ReadFile(path)
 		var ev Event
 		if err == nil {
-			err = strictJSON(b, &ev)
+			err = fsutil.StrictJSON(b, &ev)
 		}
 		if err == nil {
 			err = Validate(ev)
@@ -306,16 +306,4 @@ func eventIDs(evs []Event) []string {
 		out[i] = e.EventID
 	}
 	return out
-}
-
-func strictJSON(b []byte, v any) error {
-	d := json.NewDecoder(bytes.NewReader(b))
-	d.DisallowUnknownFields()
-	if err := d.Decode(v); err != nil {
-		return err
-	}
-	if d.More() {
-		return errors.New("trailing data")
-	}
-	return nil
 }

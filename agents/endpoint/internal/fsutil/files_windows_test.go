@@ -1,6 +1,6 @@
 //go:build windows
 
-package agent
+package fsutil
 
 import (
 	"errors"
@@ -36,10 +36,10 @@ func TestWindowsFileACLs(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "state.json")
-	if err := writeAtomic(path, []byte("{}"), 0o600, -1); err != nil {
+	if err := WriteAtomic(path, []byte("{}"), 0o600, -1, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readChecked(path, ownerCurrentUser, OwnerOnly); err != nil {
+	if _, err := ReadChecked(path, OwnerCurrentUser, OwnerOnly, 1<<10); err != nil {
 		t.Fatalf("the agent's own file: %v", err)
 	}
 	own := "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;" + user + ")"
@@ -57,7 +57,7 @@ func TestWindowsFileACLs(t *testing.T) {
 		{own + "(D;;FA;;;BG)", OwnerOnly, false},
 	} {
 		setDACL(t, path, c.sddl)
-		_, err := readChecked(path, ownerCurrentUser, c.access)
+		_, err := ReadChecked(path, OwnerCurrentUser, c.access, 1<<10)
 		if got := errors.Is(err, ErrUnsafeFile); got != c.unsafe {
 			t.Errorf("%s access %d: unsafe=%v, want %v (%v)", c.sddl, c.access, got, c.unsafe, err)
 		}
@@ -72,7 +72,7 @@ func TestWindowsFileACLs(t *testing.T) {
 	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, sid, nil, nil, nil); err != nil {
 		t.Fatalf("set the owner to %s: %v", user, err)
 	}
-	if _, err := readChecked(path, -1, WorldRead); !errors.Is(err, ErrUnsafeFile) || !strings.Contains(err.Error(), "owned by") {
+	if _, err := ReadChecked(path, -1, WorldRead, 1<<10); !errors.Is(err, ErrUnsafeFile) || !strings.Contains(err.Error(), "owned by") {
 		t.Fatalf("a user-owned system file was accepted: %v", err)
 	}
 }

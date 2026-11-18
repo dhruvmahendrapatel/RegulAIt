@@ -13,6 +13,7 @@ import (
 
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/contract"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/enforce"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/fsutil"
 )
 
 func decisionEvent(at time.Time) Event {
@@ -45,7 +46,7 @@ func TestSpoolWritesPrivateFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	var back Event
-	if err := strictJSON(b, &back); err != nil || back.EventID != ev.EventID {
+	if err := fsutil.StrictJSON(b, &back); err != nil || back.EventID != ev.EventID {
 		t.Fatalf("%v %s", err, b)
 	}
 	if runtime.GOOS != "windows" {
@@ -165,7 +166,7 @@ func (f *fakeGateway) send(_ context.Context, id string, body []byte) error {
 func (f *fakeGateway) batch(t *testing.T, i int) contract.DecisionBatch {
 	t.Helper()
 	var b contract.DecisionBatch
-	if err := strictJSON(f.bodies[i], &b); err != nil {
+	if err := fsutil.StrictJSON(f.bodies[i], &b); err != nil {
 		t.Fatal(err)
 	}
 	return b
@@ -321,4 +322,37 @@ func fullIntegrity() []contract.IntegrityEntry {
 		out = append(out, contract.IntegrityEntry{File: f, State: contract.FileStatePresent, SHA256: &sum, HookStatus: &status})
 	}
 	return out
+}
+
+// The seen marker follows the event write: a write that fails leaves no marker, so the session's first event is
+// spooled on the next call instead of being lost.
+func TestSeenMarkerOnlyAfterTheEventIsWritten(t *testing.T) {
+	s := New(t.TempDir())
+	ref := s.SessionRef("vendor-session-1")
+	bypass := "bypassPermissions"
+	ev := sessionEvent(ref, &bypass)
+	// a non-empty directory where the event file goes: the rename into place fails
+	blocker := filepath.Join(s.Dir, ev.EventID+".json")
+	if err := os.MkdirAll(filepath.Join(blocker, "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Emit(ev); err == nil {
+		t.Fatal("the event write did not fail")
+	}
+	if _, err := os.Lstat(s.seenMarker(ev)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a seen marker was left after a failed write: %v", err)
+	}
+	if err := os.RemoveAll(blocker); err != nil {
+		t.Fatal(err)
+	}
+	again := sessionEvent(ref, &bypass)
+	if err := s.Emit(again); err != nil {
+		t.Fatal(err)
+	}
+	if n := spooled(t, s); n != 1 {
+		t.Fatalf("spooled %d, want the session's first event", n)
+	}
+	if _, err := os.Lstat(s.seenMarker(again)); err != nil {
+		t.Fatalf("no seen marker after the write: %v", err)
+	}
 }

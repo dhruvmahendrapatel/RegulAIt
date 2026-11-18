@@ -312,3 +312,20 @@ func TestProgramNamedByPath(t *testing.T) {
 		t.Errorf("an exception allowed a path-named program: got %v", got)
 	}
 }
+
+// SimpleCommand accepts exactly one simple command of literal words, and nothing that could discard its result or
+// run something else.
+func TestSimpleCommand(t *testing.T) {
+	argv, ok := SimpleCommand(`'/usr/local/bin/regulait-agent' 'hook' "cursor" -policy /p # a comment`)
+	if !ok || !reflect.DeepEqual(argv, []string{"/usr/local/bin/regulait-agent", "hook", "cursor", "-policy", "/p"}) {
+		t.Fatalf("%v %v", argv, ok)
+	}
+	for _, line := range []string{
+		"a || exit 0", "a && b", "a; b", "a | b", "a &", "(a)", "{ a; }", "a > /dev/null", "a 2>&1", "! a",
+		"FOO=1 a", "a $(b)", "a $X", "a `b`", "a <<< x", "", "a 'unterminated",
+	} {
+		if argv, ok := SimpleCommand(line); ok {
+			t.Errorf("%q accepted as %v", line, argv)
+		}
+	}
+}

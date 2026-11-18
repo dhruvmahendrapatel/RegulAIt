@@ -128,3 +128,17 @@ func TestDecisionsSignature(t *testing.T) {
 		t.Fatal("jti reused")
 	}
 }
+
+// One signer serves every upload route: typ, id claim and audience are the caller's, and nothing else differs.
+func TestBodySignatureIsParameterised(t *testing.T) {
+	k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	s, err := BodySignature(k, "example+jwt", "cid", "https://gw.example.invalid/v1/x", "uploadId", "u-1", "sha-256=:y:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, claims, _ := parse(t, s)
+	if h.ExtraHeaders["typ"] != "example+jwt" || claims["uploadId"] != "u-1" || claims["aud"] != "https://gw.example.invalid/v1/x" ||
+		claims["contentDigest"] != "sha-256=:y:" || claims["batchId"] != nil || claims["snapshotId"] != nil {
+		t.Fatalf("header %+v claims %+v", h, claims)
+	}
+}
