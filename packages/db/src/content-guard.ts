@@ -111,6 +111,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.thirdPartyIngestSources, ["name"]],
   // ADR-0303: a SIEM destination an admin names
   [s.siemDestinations, ["name"]],
+  // ADR-0363 slice 2: a customer classifier an admin names
+  [s.customClassifiers, ["name"]],
   [s.engineRunners, ["name"]],
   [s.executors, ["name"]],
   [s.externalScorers, ["name"]],
