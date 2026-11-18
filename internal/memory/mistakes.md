@@ -1950,3 +1950,20 @@ and the file was restored and re-edited.
 Rule: never rename by a repo-wide or file-wide string replace in a shared file (`schema.ts`, `_journal.json`, `app.ts`,
 STATE.md). Count the occurrences in each file first (`grep -c` on `HEAD`'s version); if any exist that the change did not
 add, edit the new block only, then check that `git diff` shows no `-` line outside it.
+
+### M-115 (2026-11-18) - A PR was marked ready for review before it had any approval
+
+On #1004 (master-authored) the master posted READY and also called the ready-for-review route straight away. Marking a
+PR ready is half of "release" in this process. No harm followed, because the merge loop merges only what is listed in
+released.txt, but the PR looked released to anyone reading GitHub.
+
+Rule: a master-authored PR stays a draft until both verdicts are posted at its head. Mark it ready only together with
+the released.txt line.
+
+### M-116 (2026-11-18) - Container restarts silently stopped the merge loop three times
+
+The merge loop runs as a background task in the master's container. Restarts at about 19:00, 01:10, 03:54 and 05:40
+killed it. Once (19:00-22:00) nothing merged for three hours, and a READY (#941) went unrouted.
+
+Rule: on every wake, check `pgrep -fa merge-loop.sh` first and restart the loop if it is gone. Keep the hand-over state
+in the repo (internal/process/orchestration/), not only in the scratchpad.
