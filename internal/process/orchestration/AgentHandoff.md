@@ -38,20 +38,19 @@ Read this first if you are taking over as the master session of the RegulAIt bui
 
 ## Where we left off (current master)
 
-- **2026-11-18, about 08:54 UTC:** master hand-over. The previous master stopped its merge loop and its scheduled tasks,
-  and its session is to be archived. The new master runs the merge loop from its own scratchpad, seeded with the same
-  released.txt.
-- **Merged and audited today:** #1004, #880, #1011, #973, #941 (merge 82142059, second parent 3b86b4e0 = released).
-- **Released, not merged (dirty after other merges):** #904 (E26), #903 (E12), #902 (E1), #883 (E20). Each builder was
-  told to merge main and post a new READY. Then delta reviews: #904 R3 + Xtyd8; #903 R2 + a3BYi; #902 WaRPg + a3BYi;
-  #883 WaRPg + Xtyd8.
-- **Request changes, waiting on the builder:** #1010 (E45, RPA ADR only), #884 (E18, security RC on the directory opt-in
-  and auto-link).
-- **Older lanes:** E24 and E25 were done with no open PR and are archived. E2 (#848), E3 (#855), E7 (#861), E13 (#871),
-  E15 (#865), E16 (#867) and E27 (#996) had been idle since 2026-11-17. Each was told to merge main once (the picomatch
-  no-fix gate, #1004, clears their audit failure), fix any real failure, and post READY.
+- **2026-11-18, 14:40 UTC.** Master hand-over at about 08:54 UTC; the new master runs the merge loop.
+- **Merged and audited since the hand-over:** #941, #1013 (docs), #904 (E26), #1010 (E45 RPA ADR), #903 (E12). Every
+  merge's second parent equals the released SHA.
+- **Census-counter bottleneck.** `KNOWN_UI_GAPS_MAX` in `scripts/preflight-ui-route-census.mjs` (and its test pin) is
+  edited by every PR that adds API-only routes, so each merge makes the others conflict. Five approved, released PRs
+  are being refreshed one at a time: #744 (UI-B) first, then #902 (E1), #883 (E20), #848 (E2), #855 (E3). The waiting
+  builders were told not to merge main until their turn. A computed count would remove the bottleneck; that is a
+  proposal for the owner, not started.
+- **Request changes, fixes pushed, waiting for READY:** #861 (E7), #865 (E15), #982 (E44), #952 (E31), #867 (E16),
+  #871 (E13). On READY they return to the same reviewer pair.
+- **In review:** #1019 (E26, geography risk factor).
+- **Waiting on the builder:** #884 (E18), #996 (E27, three failing checks), Codex #936 (route first on READY), #1006,
+  #1007.
 - **Next steps:**
-  1. Route #936 (Codex C1, CI build-once) first when it posts READY.
-  2. Delta-review the four dirty PRs as their READYs arrive; release on both approvals at the head.
-  3. Archive lanes as they say "LANE DONE".
-  4. Lift rule 15 a few lanes at a time once the open PR count is under 50, with E45's code first.
+  1. Work the census order; after each merge, tell the next builder main's new count.
+  2. Lift rule 15 a few lanes at a time once the open PR count is under 50, with E45's code first.
