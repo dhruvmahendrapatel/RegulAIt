@@ -128,6 +128,85 @@ own allowlists, which the vendors' clients enforce.
 - **Push.** RegulAIt produces the bundle. MDM, the `.github-private` repository or the Codex admin console delivers
   it. An MCP client that ignores managed settings is not governed by this rung; that is the `network` rung.
 
+## Addendum (2026-11-18): endpoint decision audit and tamper reporting (lane E1, no new ADR)
+
+The ADR-0298/0330/0350 hook decided on the device and told nobody. The master approved this slice as an addendum on
+2026-11-18. Restore of a changed file is a later step and needs admin approval. It is not built here.
+
+1. **One decision-event interface.** Every on-device rule set emits the same event: the MCP rules (ADR-0330), the
+   command, file and package rules (ADR-0350, lane E31), and any later one. There is no second audit path.
+   - The emitter names itself in `decision.emitter` (`mcp-rules`, `command-rules`, …).
+   - The Go type is `decisionlog.Event`, and `decisionlog.Emitter` is the interface. The spool implements it.
+   - The gateway twin is `decisionBatchSchema` in `apps/gateway/src/endpoint-decisions.ts`.
+   - A fixture shared by both sides pins the bytes: `agents/endpoint/internal/contract/testdata/decisions-batch.json`.
+2. **What an event carries.**
+   - It carries: the agent, the verdict actually returned (`allow`, `deny` or `ask`, or `none` for an audit-mode
+     would-deny or would-ask), the mode (`audit`, `enforce` or `no_policy`), the action kind, the rule id, and the
+     permission mode.
+   - The session is a device-keyed HMAC of the vendor's session id.
+   - It never carries a tool argument, command, path, prompt or the raw session id. The schema is strict, and the
+     agent's pseudonymity guard checks the bytes first.
+   - A plain no-decision is not an event. A coding session is still recorded once per (agent, session, mode), so a
+     bypass session shows up even with no governed call.
+3. **Spool, then a signed batch.**
+   - The hook writes each event to a per-user spool (one file per event, 0600, at most 10 000, with drops counted).
+     It never sends anything. A spool error never changes the decision.
+   - The agent's run loop uploads batches of up to 500 events to `POST /v1/endpoint-agent/decisions`. A batch is
+     persisted before it is sent, so a retry resends the same batch id.
+4. **Verification.** The route uses the reports channel unchanged.
+   - Authentication: the DPoP-bound endpoint-agent token and an RFC 9530 `Content-Digest`.
+   - Signature: `Regulait-Decisions-Signature`, an ES256 JWS by the device key, typ `regulait-endpoint-decisions+jwt`,
+     binding the digest, the batch id and the URL.
+   - Replay and duplicates: one use per signature (the replay store), and one copy per batch id
+     (`endpoint_decision_batches`).
+   - Stale events (over 7 days) and future events (over 5 min) are counted as refused and are not audited.
+   - Every refusal is audited with a fixed code.
+5. **The audit.**
+   - Each decision is one hash-chained `audit_log` row (`objectType` `endpoint_device`, `objectId` the device), with
+     these rule ids:
+
+     | Decision | Rule id | Effect |
+     |---|---|---|
+     | allow | `endpoint-hook-allow` | allow |
+     | deny | `endpoint-hook-deny` | deny |
+     | ask | `endpoint-hook-ask` | `require_approval` |
+     | audit-mode would-deny or would-ask | `endpoint-hook-would-deny` / `-would-ask` | allow |
+
+   - Other rows: one `endpoint-decision-batch-accepted` summary per batch, and findings
+     `endpoint-permission-bypass-session` (once per session) and `endpoint-managed-file-changed`.
+   - `audit_log` is the source of truth. `endpoint_coding_sessions` counters are a read model, commented as such.
+6. **Permission-bypass sessions** (`GET /v1/endpoint-decisions/sessions`, admin, keyset-paginated).
+   - Claude Code and Codex put `permission_mode` in every hook input, and `bypassPermissions` is
+     `--dangerously-skip-permissions` / `--yolo` (both vendors' hook docs, checked 2026-11-18).
+   - Each mode a session reported is a row (`endpoint_coding_session_modes`).
+   - Cursor and Copilot CLI do not report a mode. Their sessions show `permissionBypass: null` and a coverage note,
+     never "not bypassed" (ADR-0180).
+   - The managed hook still decides a bypass session's governed calls. Bypass skips the vendor's own prompts, not the
+     hook.
+7. **Tamper reporting** (`GET /v1/endpoint-decisions/tamper`, admin, keyset-paginated). Each cycle the agent reports
+   each managed file: Claude Code `managed-settings.json`, Cursor `hooks.json`, the Copilot CLI policy file and Codex
+   `requirements.toml`.
+   - It reports the file's state (present, missing, unreadable, or not system-owned), its SHA-256, and the status of
+     the RegulAIt hook: `registered`, `weakened` (no fail-closed or managed-only setting), `absent` or `unparseable`.
+   - Each distinct state is a row (`endpoint_managed_file_observations`), so a second state is a change, audited once.
+   - The view also shows whether the bytes match an exported bundle file (Claude Code and Codex are delivered as files).
+     Bundles do not yet carry the hook registration, so a hand-merged file shows `bundleMatch: "none"` honestly.
+   - A file never present on a device is "vendor not deployed", not tamper.
+8. **Row-level security.** All four tables have RLS forced. The agent route (`credential_request`) is the only writer,
+   and the views are admin-only.
+
+**Open-source comparison (owner rule 9).**
+- Signed upload. Considered (a) the existing compact JWS plus RFC 9530 digest through `jose` (MIT, already pinned,
+  reviewed under SD4b), (b) RFC 9421 HTTP Message Signatures (`http-message-signatures`, MIT), and (c) DSSE envelopes
+  (sigstore). Chose (a): (b) and (c) add a second signing scheme and dependency for the same guarantee.
+- Spool. Considered (a) one file per event with the standard library (tmp + rename), (b) `bbolt` (MIT), and (c)
+  SQLite. Chose (a): concurrent hook processes need no lock, and (b) and (c) serialise every hook call on a file lock.
+
+**Limits, recorded.**
+- A device user can delete their own unsent spool. Drops the agent sees are counted; deletions are not.
+- A device that stops reporting shows its last state.
+- Bundles do not compile the hook registration. Emitting it, so the bundle hash is the tamper baseline, is a follow-up.
+
 ## Consequences
 
 The Managed rung exists and follows pillar 1. Re-exporting after a grant change gives a new version, and an unchanged

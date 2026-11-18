@@ -114,7 +114,7 @@ describe("ADR-0195 SD4b: the SD4a wire contract", () => {
   });
 
   it("confines the agent's token to its three routes", () => {
-    expect([...ENDPOINT_AGENT_TOKEN_ROUTES].sort()).toEqual(["GET /v1/endpoint-agent/config", "POST /v1/endpoint-agent/credentials", "POST /v1/endpoint-agent/reports"]);
+    expect([...ENDPOINT_AGENT_TOKEN_ROUTES].sort()).toEqual(["GET /v1/endpoint-agent/config", "POST /v1/endpoint-agent/credentials", "POST /v1/endpoint-agent/decisions", "POST /v1/endpoint-agent/reports"]);
   });
 });
 

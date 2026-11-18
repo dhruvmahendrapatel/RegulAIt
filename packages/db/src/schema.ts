@@ -2016,6 +2016,9 @@ export const auditLog = pgTable(
         "auditor_grant",
         // ADR-0310 (G2): a signed managed-settings bundle export (objectId = the bundle). Plain text column — no DDL.
         "managed_settings_bundle",
+        // ADR-0310 addendum (lane E1): an endpoint device's hook decisions, permission-bypass sessions and managed-file
+        // changes (objectId = the device). Plain text column — no DDL.
+        "endpoint_device",
       ],
     })
       .notNull()
@@ -8590,6 +8593,132 @@ export const endpointMcpServers = pgTable(
   ],
 );
 export type EndpointMcpServerRow = typeof endpointMcpServers.$inferSelect;
+
+// ---------------------------------------------------------------------------------------------------------------------
+// ADR-0310 addendum (lane E1): endpoint decision audit and tamper reporting (pending migration endpoint_decision_audit).
+// audit_log is the source of truth for every hook decision; these are the batch ledger and the session and tamper
+// read models the admin views need.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** the coding agents an endpoint hook adapter speaks for (ADR-0330), in lockstep with the agent's adapter names */
+export const ENDPOINT_HOOK_AGENTS = ["claude-code", "cursor", "copilot-cli", "codex"] as const;
+/** the managed settings and hook files a device reports on, by logical name (the device path differs per OS) */
+export const ENDPOINT_MANAGED_FILES = ["claude-code/managed-settings.json", "cursor/hooks.json", "copilot-cli/policy.json", "openai-codex/requirements.toml"] as const;
+export const ENDPOINT_MANAGED_FILE_STATES = ["present", "missing", "unreadable", "not_system_owned"] as const;
+export const ENDPOINT_HOOK_STATUSES = ["registered", "weakened", "absent", "unparseable"] as const;
+
+/** one accepted decision batch per (identity, batchId): a resent batch is a duplicate, never a second copy */
+export const endpointDecisionBatches = pgTable(
+  "endpoint_decision_batches",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    identityId: uuid("identity_id")
+      .notNull()
+      .references(() => endpointAgentIdentities.identityId, { onDelete: "cascade" }),
+    batchId: uuid("batch_id").notNull(),
+    bodySha256: text("body_sha256").notNull(),
+    eventsReceived: integer("events_received").notNull(),
+    eventsRefused: integer("events_refused").notNull(),
+    droppedEvents: integer("dropped_events").notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("endpoint_decision_batches_uq").on(t.identityId, t.batchId),
+    check("endpoint_decision_batches_sha_check", sql`${t.bodySha256} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "endpoint_decision_batches_counts_check",
+      sql`${t.eventsReceived} >= 0 AND ${t.eventsRefused} >= 0 AND ${t.eventsRefused} <= ${t.eventsReceived} AND ${t.droppedEvents} >= 0`,
+    ),
+    index("endpoint_decision_batches_received_idx").on(t.receivedAt),
+  ],
+);
+export type EndpointDecisionBatchRow = typeof endpointDecisionBatches.$inferSelect;
+
+/** one coding-agent session of one device user; sessionRef is a device-keyed hash of the vendor's id, never the id */
+export const endpointCodingSessions = pgTable(
+  "endpoint_coding_sessions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    identityId: uuid("identity_id")
+      .notNull()
+      .references(() => endpointAgentIdentities.identityId, { onDelete: "cascade" }),
+    agent: text("agent", { enum: ENDPOINT_HOOK_AGENTS }).notNull(),
+    sessionRef: text("session_ref"),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+    // a measured read model over audit_log (the session's endpoint-hook-* rows), so the session view needs no audit scan
+    decisions: integer("decisions").notNull().default(0),
+    denies: integer("denies").notNull().default(0),
+    asks: integer("asks").notNull().default(0),
+    wouldDenies: integer("would_denies").notNull().default(0),
+    wouldAsks: integer("would_asks").notNull().default(0),
+  },
+  (t) => [
+    unique("endpoint_coding_sessions_uq").on(t.identityId, t.agent, t.sessionRef).nullsNotDistinct(),
+    check("endpoint_coding_sessions_agent_check", sql`${t.agent} IN ('claude-code', 'cursor', 'copilot-cli', 'codex')`),
+    check("endpoint_coding_sessions_ref_check", sql`${t.sessionRef} IS NULL OR ${t.sessionRef} ~ '^[0-9a-f]{64}$'`),
+    check("endpoint_coding_sessions_seen_check", sql`${t.lastSeenAt} >= ${t.firstSeenAt}`),
+    check(
+      "endpoint_coding_sessions_counts_check",
+      sql`${t.decisions} >= 0 AND ${t.denies} >= 0 AND ${t.asks} >= 0 AND ${t.wouldDenies} >= 0 AND ${t.wouldAsks} >= 0`,
+    ),
+    index("endpoint_coding_sessions_seen_idx").on(t.lastSeenAt, t.id),
+  ],
+);
+export type EndpointCodingSessionRow = typeof endpointCodingSessions.$inferSelect;
+
+/** each permission mode a session reported; a bypass session is a row here with the vendor's bypass value */
+export const endpointCodingSessionModes = pgTable(
+  "endpoint_coding_session_modes",
+  {
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => endpointCodingSessions.id, { onDelete: "cascade" }),
+    permissionMode: text("permission_mode").notNull(),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    primaryKey({ name: "endpoint_coding_session_modes_pkey", columns: [t.sessionId, t.permissionMode] }),
+    check("endpoint_coding_session_modes_mode_check", sql`${t.permissionMode} ~ '^[A-Za-z][A-Za-z0-9_-]{0,31}$'`),
+    check("endpoint_coding_session_modes_seen_check", sql`${t.lastSeenAt} >= ${t.firstSeenAt}`),
+    index("endpoint_coding_session_modes_mode_idx").on(t.permissionMode, t.sessionId),
+  ],
+);
+export type EndpointCodingSessionModeRow = typeof endpointCodingSessionModes.$inferSelect;
+
+/** each distinct state of a managed settings or hook file a device user reported; a second row is a change */
+export const endpointManagedFileObservations = pgTable(
+  "endpoint_managed_file_observations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    identityId: uuid("identity_id")
+      .notNull()
+      .references(() => endpointAgentIdentities.identityId, { onDelete: "cascade" }),
+    file: text("file", { enum: ENDPOINT_MANAGED_FILES }).notNull(),
+    state: text("state", { enum: ENDPOINT_MANAGED_FILE_STATES }).notNull(),
+    sha256: text("sha256"),
+    hookStatus: text("hook_status", { enum: ENDPOINT_HOOK_STATUSES }),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    unique("endpoint_managed_file_observations_uq").on(t.identityId, t.file, t.state, t.sha256, t.hookStatus).nullsNotDistinct(),
+    check(
+      "endpoint_managed_file_observations_file_check",
+      sql`${t.file} IN ('claude-code/managed-settings.json', 'cursor/hooks.json', 'copilot-cli/policy.json', 'openai-codex/requirements.toml')`,
+    ),
+    check("endpoint_managed_file_observations_state_check", sql`${t.state} IN ('present', 'missing', 'unreadable', 'not_system_owned')`),
+    check(
+      "endpoint_managed_file_observations_sha_check",
+      sql`(${t.state} = 'present') = (${t.sha256} IS NOT NULL) AND (${t.sha256} IS NULL OR ${t.sha256} ~ '^[0-9a-f]{64}$')`,
+    ),
+    check("endpoint_managed_file_observations_hook_check", sql`${t.hookStatus} IS NULL OR ${t.hookStatus} IN ('registered', 'weakened', 'absent', 'unparseable')`),
+    check("endpoint_managed_file_observations_seen_check", sql`${t.lastSeenAt} >= ${t.firstSeenAt}`),
+    index("endpoint_managed_file_observations_seen_idx").on(t.identityId, t.file, t.lastSeenAt),
+  ],
+);
+export type EndpointManagedFileObservationRow = typeof endpointManagedFileObservations.$inferSelect;
 
 /** an admin's statement that a configured server identity is an approved `mcp_servers` row (audited) */
 export const endpointMcpServerLinks = pgTable(

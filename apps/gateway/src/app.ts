@@ -638,6 +638,7 @@ import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
 import { registerEndpointMcpConfigRoutes } from "./endpoint-mcp-config.js";
 // ADR-0310 (G2): vendor-native managed settings bundles
 import { registerManagedSettingsRoutes } from "./managed-settings.js";
+import { registerEndpointDecisionRoutes } from "./endpoint-decisions.js";
 import { registerEndpointAddonInventoryRoutes } from "./endpoint-addon-inventory.js";
 import { registerProcessAnalyticsRoutes } from "./process-analytics.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
@@ -6255,6 +6256,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // links to approved servers. Admin-only by default; reads what the agent reports, contacts nothing.
   registerEndpointMcpConfigRoutes(app, db);
   registerManagedSettingsRoutes(app, db);
+  // ADR-0310 addendum (lane E1): the permission-bypass session view and the managed-file tamper view (admin)
+  registerEndpointDecisionRoutes(app, db);
   // ADR-0332 (lane E14): the endpoint AI add-on inventory (admin-only, RLS: admins and system_task)
   registerEndpointAddonInventoryRoutes(app, db);
   // ADR-0342 (lane E23): process analytics over the workflow history (reads scoped by the ADR-0047 decision; refresh admin)

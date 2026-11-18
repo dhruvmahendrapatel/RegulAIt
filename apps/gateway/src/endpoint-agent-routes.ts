@@ -126,6 +126,7 @@ import type { SchedulerJobDefinition } from "./scheduler.js";
 import { requireStepUp, type StepUpCheckArgs } from "./step-up.js";
 import { MCP_CONFIG_KIND, recordMcpServers } from "./endpoint-mcp-config.js";
 import { loadDiscoverySettings } from "./discovery-posture.js";
+import { decisionBatchSchema, ENDPOINT_DECISIONS_MAX_BYTES, ENDPOINT_DECISIONS_SIGNATURE_HEADER, ENDPOINT_DECISIONS_SIGNATURE_TYP, ingestDecisionBatch } from "./endpoint-decisions.js";
 import { hashToken } from "./token-hash.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
@@ -134,7 +135,7 @@ const ENROL_BODY_LIMIT = 16 * 1024;
 export const ENDPOINT_AGENT_INGEST_JOB_NAME = "endpoint-agent-ingest";
 const DEVICES_LISTED = 500;
 
-type AuditObject = "discovery_source" | "discovery_run" | "workload_identity";
+type AuditObject = "discovery_source" | "discovery_run" | "workload_identity" | "endpoint_device";
 
 async function audit(db: Db, actor: string, objectType: AuditObject, objectId: string | null, ruleId: string, effect: "allow" | "deny", reason: string, detail: Record<string, unknown>) {
   await db.insert(auditLog).values({
@@ -856,6 +857,52 @@ export function registerEndpointAgentRoutes(app: FastifyInstance, db: Db, opts: 
         await commitPendingEndpointReports(db, source).catch((e: unknown) => req.log.warn({ code: (e as { code?: string }).code ?? "ingest_error" }, "endpoint report merge deferred to the ingest job"));
       }
       return reply.status(202).send({ accepted: true, duplicate: false });
+    });
+
+    // -- hook decisions and managed-file observations (ADR-0310 addendum, lane E1) --------------------------------
+    scope.post(ENDPOINT_AGENT_PATHS.decisions, { bodyLimit: ENDPOINT_DECISIONS_MAX_BYTES }, async (req, reply) => {
+      const agent = await agentOf(req, reply);
+      if (!agent) return reply;
+      const issuer = identityIssuer();
+      if (!issuer) return refuse(reply, 503, "issuer_not_configured");
+      const raw = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      const bodySha256 = createHash("sha256").update(raw).digest("hex");
+      const refusedWith = async (status: number, code: string) => {
+        await audit(db, NIL_UUID, "endpoint_device", agent.deviceId, "endpoint-decision-batch-refused", "deny", `an endpoint decision batch was refused: ${code} (ADR-0310 addendum)`, {
+          code,
+          identityId: agent.identityId,
+          bodySha256,
+        });
+        return refuse(reply, status, code);
+      };
+      const parsed = decisionBatchSchema.safeParse(jsonOf(req.body));
+      if (!parsed.success || !isUuidV4(parsed.data.batchId)) return refusedWith(400, "invalid_body");
+      const batch = parsed.data;
+      const [cred] = await db
+        .select({ publicJwk: workloadCredentials.publicJwk, jwkThumbprint: workloadCredentials.jwkThumbprint })
+        .from(workloadCredentials)
+        .where(and(eq(workloadCredentials.id, req.authCtx.workloadCredentialId!), eq(workloadCredentials.identityId, agent.identityId)));
+      if (!cred?.publicJwk || !cred.jwkThumbprint || (cred.publicJwk as Record<string, string>).kty !== "EC") return refusedWith(401, "invalid_token");
+      const now = await databaseNow(db);
+      const header = (name: string) => (typeof req.headers[name] === "string" ? (req.headers[name] as string) : undefined);
+      const sig = await verifyReportSignature({
+        signature: header(ENDPOINT_DECISIONS_SIGNATURE_HEADER),
+        contentDigestHeader: header(CONTENT_DIGEST_HEADER),
+        rawBody: raw,
+        publicJwk: cred.publicJwk as Record<string, string>,
+        thumbprint: cred.jwkThumbprint,
+        audience: `${issuer}${ENDPOINT_AGENT_PATHS.decisions}`,
+        snapshotId: batch.batchId,
+        now,
+        typ: ENDPOINT_DECISIONS_SIGNATURE_TYP,
+        idClaim: "batchId",
+      });
+      if (!sig.ok) return refusedWith(400, sig.code === "invalid_report_signature" ? "invalid_decisions_signature" : sig.code === "report_signature_stale" ? "decisions_signature_stale" : sig.code);
+      const expires = new Date((sig.iat + ENDPOINT_REPORT_SIGNATURE_MAX_AGE_SECONDS + ENDPOINT_REPORT_SIGNATURE_MAX_FUTURE_SECONDS) * 1000);
+      if (!(await claimReplay(db, "client_assertion", `endpoint-decisions:${cred.jwkThumbprint}:${sig.jti}`, expires))) return refusedWith(400, "decisions_replayed");
+      const out = await ingestDecisionBatch(db, agent, batch, bodySha256, now);
+      if (out.duplicate) return reply.status(202).send({ accepted: true, duplicate: true });
+      return reply.status(202).send({ accepted: true, duplicate: false, audited: out.audited, refused: out.refused });
     });
   });
 
