@@ -22,6 +22,8 @@ Searched and checked 2026-10-17 (the tidwall rows 2026-11-15) against `proxy.gol
 | `github.com/tidwall/gjson` | `v1.20.0` (2026-10-05) | MIT | all | Transitive, through sjson (path lookup). v1.20.1 and v1.20.2 (2026-11-06, 2026-11-08) were less than two weeks old when pinned |
 | `github.com/tidwall/pretty` | `v1.2.2` (2026-09-27) | MIT | all | Transitive, through gjson. v1.3.0 (2026-11-08) was less than two weeks old when pinned |
 | `github.com/tidwall/match` | `v1.2.0` (2025-09-05) | MIT | all | Transitive, through gjson (wildcard matching; our paths are escaped literals, so it never matches a wildcard) |
+| `mvdan.cc/sh/v3` | `v3.14.1` (2026-09-06) | BSD-3-Clause | all | Parses a coding agent's shell command line as bash (`syntax` package only: lists, pipelines, quoting, substitutions, redirections) so command rules match argv, never a regex over the joined line (`internal/enforce/shell.go`, ADR-0350). The parser shfmt uses. Compared with a hand-written tokenizer (re-solves quoting and nesting) and `github.com/google/shlex` (no release since 2019, splits words but not lists or substitutions) |
+| `github.com/bmatcuk/doublestar/v4` | `v4.10.4` (2026-10-24) | MIT | all | `**` path and argument globs in command rules (`internal/enforce/command.go`, ADR-0350); the standard library's `path.Match` has no `**`. No dependencies |
 
 ## Test-only (never linked)
 
