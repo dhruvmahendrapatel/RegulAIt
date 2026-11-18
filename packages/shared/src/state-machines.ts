@@ -217,6 +217,37 @@ export const CLASSIFIER_VERSION_MACHINE = defineMachine({
   },
 });
 
+/** `rule_step_suggestions.status` (ADR-0327). A scan inserts `suggested`. Shadow mode measures the suggested rule
+ * beside the AI without changing routing, and can be stopped and started again. Dismissal is final: a rescan
+ * refreshes a dismissed suggestion's evidence but never its status. */
+export const RULE_STEP_SUGGESTION_MACHINE = defineMachine({
+  id: "rule_step_suggestion",
+  stored: "rule_step_suggestions.status",
+  states: ["suggested", "shadow", "dismissed"],
+  initial: ["suggested"],
+  terminal: ["dismissed"],
+  transitions: {
+    shadow_start: {
+      from: ["suggested"],
+      to: "shadow",
+      by: ["admin"],
+      summary: "An admin starts measuring the suggested rule against live traffic; the AI still answers every request.",
+    },
+    shadow_stop: {
+      from: ["shadow"],
+      to: "suggested",
+      by: ["admin"],
+      summary: "An admin stops the measurement; the counts so far are kept and a rescan may refresh the suggestion again.",
+    },
+    dismiss: {
+      from: ["suggested"],
+      to: "dismissed",
+      by: ["admin"],
+      summary: "An admin dismisses the suggestion; it is never suggested again for this step.",
+    },
+  },
+});
+
 /** Every declared machine, by id: the one list an agent or a document reads. */
 export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string>>> = Object.freeze({
   [TRAINING_JOB_MACHINE.def.id]: TRAINING_JOB_MACHINE,
@@ -224,4 +255,5 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [INCIDENT_MACHINE.def.id]: INCIDENT_MACHINE,
   [EVAL_RUN_MACHINE.def.id]: EVAL_RUN_MACHINE,
   [CLASSIFIER_VERSION_MACHINE.def.id]: CLASSIFIER_VERSION_MACHINE,
+  [RULE_STEP_SUGGESTION_MACHINE.def.id]: RULE_STEP_SUGGESTION_MACHINE,
 } as Record<string, StateMachine<string, string>>);

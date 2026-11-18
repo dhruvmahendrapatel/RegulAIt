@@ -36,6 +36,12 @@ compares the status in JavaScript, then writes `WHERE id = $1`; a concurrent wri
 | Customer classifier version (`custom_classifier_versions.status`) | `CLASSIFIER_VERSION_MACHINE` in `packages/shared/src/state-machines.ts`, written by `apps/gateway/src/custom-classifiers.ts` | Declared from the start (ADR-0363 slice 2): every write is `whereFrom` plus `.returning()`, a lost race is a 409, retire re-reads under `FOR UPDATE`. |
 | Model card approvals, prompt promotions, federated link requests, governance alerts, data-subject requests, supplier invitations, certification campaigns, agent lifecycle, executors, workload identities, framework imports, kill switch, break-glass | `mrm.ts`, `prompt-registry.ts`, `auth.ts`, `governance-monitor.ts`, `privacy-ops.ts`, `supplier-portal.ts`, `grant-certification.ts`, `agents-connectors.ts`, `isolation-routes.ts`, `workload-identity-admin.ts`, `framework-imports.ts`, `execution-control.ts`, `break-glass.ts` | Guarded writes or `FOR UPDATE`. They will move onto declared tables as their files are next touched (DX, AX); no bug today. |
 
+### Declared by their own lanes after the audit
+
+| Machine | Declared in | Guarded writers | Notes |
+|---|---|---|---|
+| Rule-step suggestion (`rule_step_suggestions.status`, ADR-0327) | `RULE_STEP_SUGGESTION_MACHINE`, `packages/shared/src/state-machines.ts` | `transitionSuggestion` in `apps/gateway/src/rule-steps.ts` (`whereFrom`, returned row) | suggested ⇄ shadow; suggested → dismissed (final). The list answer carries `lifecycle`; shadow start is shown blocked while detection is off. Converted from a hand-written table in review of #903 (E12). |
+
 ## 3. Machines to convert, ranked by F×S
 
 | # | Machine | Where (main at 753da597) | States | Problem today | Trigger | F | S | F×S | Slice |
