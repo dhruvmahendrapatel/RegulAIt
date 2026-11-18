@@ -6,7 +6,9 @@ import { applyInducedRule, compileDecisionTable, type DecisionTableBody } from "
 import { buildApp } from "./app.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxStepUpAround } from "./testing/step-up-posture.js";
-import { DECISION_TABLE_AUDIT_RULE_IDS, DECISION_TABLE_VERSION_INITIAL, DECISION_TABLE_VERSION_TRANSITIONS } from "./decision-tables.js";
+import { DECISION_TABLE_VERSION_STATUSES } from "@regulait/db";
+import { DECISION_TABLE_VERSION_MACHINE, STATE_MACHINES } from "@regulait/shared";
+import { DECISION_TABLE_AUDIT_RULE_IDS, DECISION_TABLE_VERSION_INITIAL } from "./decision-tables.js";
 
 /**
  * ADR-0327 addendum — business-authored decision tables. A table is validated by a schema, compiles to the exact-match
@@ -91,14 +93,19 @@ afterAll(async () => {
 });
 
 describe("decision tables (ADR-0327 addendum)", () => {
-  it("declares the version lifecycle once: created in review, published or rejected or stale by the reviewer, superseded by the next", () => {
+  it("the version lifecycle is the declared ADR-0348 machine: created in review, published or rejected or stale by the reviewer, superseded by the next", () => {
+    const m = DECISION_TABLE_VERSION_MACHINE;
+    expect([...m.def.states].sort()).toEqual([...DECISION_TABLE_VERSION_STATUSES].sort());
+    expect(STATE_MACHINES[m.def.id]).toBe(m);
     expect(DECISION_TABLE_VERSION_INITIAL).toBe("pending_review");
-    expect(DECISION_TABLE_VERSION_TRANSITIONS).toEqual({
-      publish: { from: "pending_review", to: "published" },
-      reject: { from: "pending_review", to: "rejected" },
-      mark_stale: { from: "pending_review", to: "stale" },
-      supersede: { from: "published", to: "superseded" },
+    expect([...m.def.initial]).toEqual([DECISION_TABLE_VERSION_INITIAL]);
+    expect(Object.fromEntries(Object.entries(m.def.transitions).map(([e, t]) => [e, { from: [...t.from], to: t.to }]))).toEqual({
+      publish: { from: ["pending_review"], to: "published" },
+      reject: { from: ["pending_review"], to: "rejected" },
+      mark_stale: { from: ["pending_review"], to: "stale" },
+      supersede: { from: ["published"], to: "superseded" },
     });
+    expect([...m.def.terminal].sort()).toEqual(["rejected", "stale", "superseded"]);
   });
 
   it("is admin-only", async () => {
@@ -161,6 +168,14 @@ describe("decision tables (ADR-0327 addendum)", () => {
     const d = await detail();
     expect(d.published).toMatchObject({ version: 1, status: "published", decidedBy: reviewer.id, cells: 3 });
     expect(d.pending).toBeNull();
+    // the view carries the machine's description, so the UI and agents read the allowed next events from one place
+    expect(d.published.lifecycle).toMatchObject({ machine: "decision_table_version", state: "published", terminal: false });
+    expect(Object.fromEntries(d.published.lifecycle.transitions.map((e: { event: string; allowed: boolean }) => [e.event, e.allowed]))).toEqual({
+      publish: false,
+      reject: false,
+      mark_stale: false,
+      supersede: true,
+    });
     expect(d.published.lines.at(-1)).toBe("otherwise -> ask the AI (input not covered by this table)");
     // the published table runs on the existing exact-match engine, unchanged
     const compiled = compileDecisionTable(d.published.table);

@@ -39,7 +39,9 @@ import {
   type DecisionTableBody,
   type InducedRule,
 } from "@regulait/optimizer-kernel";
+import { DECISION_TABLE_VERSION_MACHINE } from "@regulait/shared";
 import type { ListSpec } from "./list-contract.js";
+import { whereFrom } from "./state-transition.js";
 import { answerListPage, type ContractList } from "./list-contract-route.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
@@ -56,25 +58,19 @@ export const DECISION_TABLE_AUDIT_RULE_IDS = {
 } as const;
 
 /**
- * The version lifecycle (owner rule 12), declared once and enforced by `transitionVersion` as a compare-and-set on the
- * `from` state. A version is created in `DECISION_TABLE_VERSION_INITIAL`; nothing else ever changes its status.
+ * The version lifecycle (owner rule 12) is the shared ADR-0348 machine `DECISION_TABLE_VERSION_MACHINE`; every status
+ * change goes through `transitionVersion`, a guarded UPDATE (`whereFrom`) on the event's `from` states. A version is
+ * created in the machine's initial state; nothing else ever changes its status.
  */
-export const DECISION_TABLE_VERSION_INITIAL = "pending_review" as const satisfies DecisionTableVersionStatus;
-export const DECISION_TABLE_VERSION_TRANSITIONS = {
-  publish: { from: "pending_review", to: "published" },
-  reject: { from: "pending_review", to: "rejected" },
-  mark_stale: { from: "pending_review", to: "stale" },
-  supersede: { from: "published", to: "superseded" },
-} as const satisfies Record<string, { from: DecisionTableVersionStatus; to: DecisionTableVersionStatus }>;
-type VersionAction = keyof typeof DECISION_TABLE_VERSION_TRANSITIONS;
+export const DECISION_TABLE_VERSION_INITIAL = "pending_review" as const satisfies (typeof DECISION_TABLE_VERSION_MACHINE.def.initial)[number];
+type VersionEvent = (typeof DECISION_TABLE_VERSION_MACHINE.events)[number];
 
 type Decided = { decidedBy: string; decidedAt: ReturnType<typeof sql> };
-async function transitionVersion(db: Db, id: string, action: VersionAction, extra: Partial<Decided> = {}) {
-  const t = DECISION_TABLE_VERSION_TRANSITIONS[action];
+async function transitionVersion(db: Db, id: string, event: VersionEvent, extra: Partial<Decided> = {}) {
   const [row] = await db
     .update(decisionTableVersions)
-    .set({ ...extra, status: t.to })
-    .where(and(eq(decisionTableVersions.id, id), eq(decisionTableVersions.status, t.from)))
+    .set({ ...extra, status: DECISION_TABLE_VERSION_MACHINE.def.transitions[event].to })
+    .where(and(eq(decisionTableVersions.id, id), whereFrom(decisionTableVersions.status, DECISION_TABLE_VERSION_MACHINE, event)))
     .returning();
   return row ?? null;
 }
@@ -137,6 +133,7 @@ function versionView(v: DecisionTableVersionRow, withBody: boolean) {
     id: v.id,
     version: v.version,
     status: v.status,
+    lifecycle: DECISION_TABLE_VERSION_MACHINE.describe(v.status),
     baseVersion: v.baseVersion,
     authorUserId: v.authorUserId,
     reason: v.reason,

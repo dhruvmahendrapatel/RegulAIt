@@ -160,9 +160,10 @@ approval. This addendum records it; no new ADR.
   `rejected` and changes nothing. A version that compiles to the same cells as the published one is refused
   (`no_change`). At most one published and one pending version per table (partial unique indexes). Create, proposal
   and every decision outcome are audited (`object_type` `decision_table`).
-- **Lifecycle (owner rule 12).** `DECISION_TABLE_VERSION_TRANSITIONS` declares the transitions once (publish, reject,
-  mark stale from `pending_review`; supersede from `published`) and `transitionVersion` enforces each as a
-  compare-and-set on the `from` state.
+- **Lifecycle (owner rule 12).** The shared ADR-0348 machine `DECISION_TABLE_VERSION_MACHINE` (`@regulait/shared`)
+  declares the transitions once (publish, reject, mark stale from `pending_review`; supersede from `published`), and
+  `transitionVersion` enforces each through `whereFrom`, a guarded UPDATE on the event's `from` states. Each version
+  in the detail answer carries the machine's `lifecycle` description.
 - **Routes** (admin-only through the default gate, API only; UI-D builds the editor): `GET`/`POST /v1/decision-tables`
   (the list under the ADR-0226 contract), `GET /v1/decision-tables/:id` (published and pending versions with readable
   rows and test cases, plus the latest 20 versions), `POST /v1/decision-tables/:id/versions`.

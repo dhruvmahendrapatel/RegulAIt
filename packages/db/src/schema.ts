@@ -17373,7 +17373,7 @@ export const decisionTables = pgTable(
 );
 export type DecisionTableRow = typeof decisionTables.$inferSelect;
 
-/** the version lifecycle; transitions are declared once in `DECISION_TABLE_VERSION_TRANSITIONS` (gateway) */
+/** the version lifecycle; transitions are declared once in `DECISION_TABLE_VERSION_MACHINE` (`@regulait/shared`, ADR-0348) */
 export const DECISION_TABLE_VERSION_STATUSES = ["pending_review", "published", "superseded", "rejected", "stale"] as const;
 export type DecisionTableVersionStatus = (typeof DECISION_TABLE_VERSION_STATUSES)[number];
 

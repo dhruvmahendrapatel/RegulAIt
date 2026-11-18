@@ -205,6 +205,45 @@ export const RULE_STEP_SUGGESTION_MACHINE = defineMachine({
   },
 });
 
+/**
+ * ADR-0327 addendum (lane E12): a decision-table version's lifecycle. A version is proposed `pending_review` with a named
+ * reviewer in the approvals queue; only that approval's decide path moves it on. Stored in
+ * `decision_table_versions.status`.
+ */
+export const DECISION_TABLE_VERSION_MACHINE = defineMachine({
+  id: "decision_table_version",
+  stored: "decision_table_versions.status",
+  states: ["pending_review", "published", "superseded", "rejected", "stale"],
+  initial: ["pending_review"],
+  terminal: ["superseded", "rejected", "stale"],
+  transitions: {
+    publish: {
+      from: ["pending_review"],
+      to: "published",
+      by: ["approver"],
+      summary: "The named reviewer approves the version; it becomes the table's published version.",
+    },
+    reject: {
+      from: ["pending_review"],
+      to: "rejected",
+      by: ["approver"],
+      summary: "The named reviewer denies the version; the published version is unchanged.",
+    },
+    mark_stale: {
+      from: ["pending_review"],
+      to: "stale",
+      by: ["system"],
+      summary: "The version was approved after another version was published; it is recorded stale and not published.",
+    },
+    supersede: {
+      from: ["published"],
+      to: "superseded",
+      by: ["system"],
+      summary: "A newer version of the table is published in the same transaction; this one is kept as history.",
+    },
+  },
+});
+
 /** Every declared machine, by id: the one list an agent or a document reads. */
 export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string>>> = Object.freeze({
   [TRAINING_JOB_MACHINE.def.id]: TRAINING_JOB_MACHINE,
@@ -212,4 +251,5 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [INCIDENT_MACHINE.def.id]: INCIDENT_MACHINE,
   [EVAL_RUN_MACHINE.def.id]: EVAL_RUN_MACHINE,
   [RULE_STEP_SUGGESTION_MACHINE.def.id]: RULE_STEP_SUGGESTION_MACHINE,
+  [DECISION_TABLE_VERSION_MACHINE.def.id]: DECISION_TABLE_VERSION_MACHINE,
 } as Record<string, StateMachine<string, string>>);
