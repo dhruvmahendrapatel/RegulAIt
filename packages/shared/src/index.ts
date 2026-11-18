@@ -4982,6 +4982,7 @@ export * from "./sector-packs.js";
 export * from "./aiuc-packs.js";
 // ADR-0243 (P24): the OWASP MCP and LLM Top 10 packs
 export * from "./owasp-packs.js";
+export * from "./agent-risk-proofs.js";
 export * from "./nist-ai-600-1-pack.js";
 // ADR-0212 (P12 b): modality pricing
 export * from "./modality-pricing.js";
@@ -5066,6 +5067,9 @@ export * from "./supplier-portal.js";
 export * from "./external-mfa.js";
 // ADR-0222 (P13(a)): fairness testing — the group metrics, thresholds and outcome (pure)
 export * from "./fairness.js";
+// ADR-0348: declared lifecycle state machines (one transition table each; agents read `describe`)
+export * from "./state-machine.js";
+export * from "./state-machines.js";
 // ADR-0261 (P37): third-party security telemetry ingest — the DefenseClaw JSONL parser and mapping (pure)
 export * from "./third-party-ingest/index.js";
 // ADR-0310 (G2): vendor-native managed settings compiled from effective MCP entitlements
@@ -5073,3 +5077,9 @@ export * from "./managed-settings.js";
 
 // ADR-0341: RFC 6902 patches for diff views
 export { jsonPatch, type JsonPatchOperation } from "./json-patch.js";
+
+// ADR-0363 slice 1: customer sensitivity labels (Purview first, vendor-neutral provider interface)
+export * from "./sensitivity-labels.js";
+
+// ADR-0346: fairness evaluation through the gateway — definitions, the reply mapping and the promotion gate (pure)
+export * from "./fairness-evaluation.js";

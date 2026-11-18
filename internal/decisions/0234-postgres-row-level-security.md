@@ -206,7 +206,7 @@ the role split, because it is the only option that protects real boundaries insi
    | #614 | model_signing_keys, model_artifact_signatures, model_artifact_supply_chain_relaxations | none (deployment-wide evidence) unless a principal key appears |
    | #628 | model_drift_settings, model_drift_monitors, model_drift_reports, model_explainability_artefacts | none (deployment-wide), or 5 if they carry `project_id` |
    | #633 | fairness_datasets, fairness_runs | 5 if they carry `project_id`, else none |
-   | #862 (merged; ADR-0327, lane E12) | rule_step_settings, rule_step_suggestions | none (deployment-wide by the appendix rule: no project, team, owner or listed actor column; admin-only routes; a suggestion names an agent, not a principal) |
+   | #862 (merged; ADR-0327, lane E12) and slice 3b (`rule_step_shadows`) | rule_step_settings, rule_step_suggestions, rule_step_shadows | none (deployment-wide by the appendix rule: no project, team, owner or listed actor column; admin-only routes; a suggestion names an agent, not a principal) |
    | ADR-0327 addendum (lane E12, decision tables) | decision_tables, decision_table_versions | none (deployment-wide by the appendix rule: configuration bound to an agent and step, no project, team or owner column; admin-only routes; `created_by`, `author_user_id` and `decided_by` record who acted, not who may read) |
    | #604, #605, #627, #673 | no new tables (columns, guards and triggers only); a new column that names a user is checked against the table's batch | — |
 

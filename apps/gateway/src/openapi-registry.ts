@@ -431,6 +431,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/decision-tables": "internal",
   "GET /v1/decision-tables/:id": "internal",
   "POST /v1/decision-tables/:id/versions": "internal",
+  "POST /v1/rule-steps/suggestions/:id/shadow": "internal",
+  "POST /v1/rule-steps/suggestions/:id/shadow/stop": "internal",
   "GET /v1/model-drift/settings": "internal",
   "PUT /v1/model-drift/settings": "internal",
   "GET /v1/mrm/cards/:id/drift": "internal",
@@ -1048,6 +1050,12 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/discovery/endpoint-mcp-server-links": "internal",
   "POST /v1/discovery/endpoint-mcp-server-links/remove": "internal",
   // ADR-0332 (lane E14): the endpoint AI add-on inventory
+  // ADR-0342 (lane E23): process analytics
+  "GET /v1/process-analytics/templates": "internal",
+  "GET /v1/process-analytics/stages": "internal",
+  "GET /v1/process-analytics/heatmap": "internal",
+  "GET /v1/process-analytics/throughput": "internal",
+  "POST /v1/process-analytics/refresh": "internal",
   "GET /v1/endpoint-addons/versions": "internal",
   "GET /v1/endpoint-addons/sightings": "internal",
   "GET /v1/endpoint-addons/flagged": "internal",
@@ -1289,6 +1297,10 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // ===== ADR-0180 (D3) — continuous assurance. Internal: admin console and
   // governance surfaces whose shapes are still moving. Append-only per owner.
   // --- P0
+  "GET /v1/sensitivity-labels": "internal",
+  "PUT /v1/sensitivity-labels/settings": "internal",
+  "PUT /v1/sensitivity-labels/:definitionId/rule": "internal",
+  "DELETE /v1/sensitivity-labels/:definitionId/rule": "internal",
   "GET /v1/org/settings/assurance-gate-mode": "internal",
   "PUT /v1/org/settings/assurance-gate-mode": "internal",
   // --- ADR-0211 (P17)
@@ -1886,6 +1898,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/decision-tables": "cost-events",
   "GET /v1/decision-tables/:id": "cost-events",
   "POST /v1/decision-tables/:id/versions": "cost-events",
+  "POST /v1/rule-steps/suggestions/:id/shadow": "cost-events",
+  "POST /v1/rule-steps/suggestions/:id/shadow/stop": "cost-events",
   "GET /v1/model-drift/settings": "mrm",
   "PUT /v1/model-drift/settings": "mrm",
   "GET /v1/mrm/cards/:id/drift": "mrm",
@@ -2400,6 +2414,11 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/discovery/endpoint-mcp-servers": "shadow-ai",
   "POST /v1/discovery/endpoint-mcp-server-links": "shadow-ai",
   "POST /v1/discovery/endpoint-mcp-server-links/remove": "shadow-ai",
+  "GET /v1/process-analytics/templates": "reports",
+  "GET /v1/process-analytics/stages": "reports",
+  "GET /v1/process-analytics/heatmap": "reports",
+  "GET /v1/process-analytics/throughput": "reports",
+  "POST /v1/process-analytics/refresh": "reports",
   "GET /v1/endpoint-addons/versions": "shadow-ai",
   "GET /v1/endpoint-addons/sightings": "shadow-ai",
   "GET /v1/endpoint-addons/flagged": "shadow-ai",
@@ -2625,6 +2644,10 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
 
   // ===== ADR-0180 (D3) — continuous assurance. Append-only per owner.
   // --- P0
+  "GET /v1/sensitivity-labels": "org",
+  "PUT /v1/sensitivity-labels/settings": "org",
+  "PUT /v1/sensitivity-labels/:definitionId/rule": "org",
+  "DELETE /v1/sensitivity-labels/:definitionId/rule": "org",
   "GET /v1/org/settings/assurance-gate-mode": "org",
   "PUT /v1/org/settings/assurance-gate-mode": "org",
   "GET /v1/org/settings/risk-treatments": "org",
