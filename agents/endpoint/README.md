@@ -95,7 +95,7 @@ when the entry's identity matches.
   and a symlink is never written through.
 - **What is left alone.** JSONC and TOML configs are reported `unsupported_format` and not edited. Skills, plugins,
   editor extensions and the coding agent itself are never touched.
-- **Reporting.** The developer sees a platform notice: `osascript`, `notify-send` or `msg`, run as an argument list
+- **Reporting.** The developer sees a platform notice: `/usr/bin/osascript`, `/usr/bin/notify-send` or the system `msg.exe` (absolute paths, never `PATH`), run as an argument list
   with no shell. Each outcome (`removed`, `nothing_to_remove` or `failed`, with a fixed code) is posted back to the
   gateway's audit trail.
 - **Current state.** The compiled keyring is empty until SD4, so a directive verifies only under a pinned

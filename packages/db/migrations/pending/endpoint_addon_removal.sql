@@ -9,16 +9,24 @@
 --    one and an `endpoint_remediation` grant authorises nothing else. The three kind CHECKs carry all ten kinds (0203's
 --    nine, `pseudonym_reveal` and `key_management` included); another migration that rewrites them must carry every
 --    kind listed here. The existing org row requires the new kind too (first load, no grandfathering).
--- 3. `endpoint_addon_removals`: one admin-started removal of one MCP server identity (the request).
--- 4. `endpoint_addon_removal_targets`: the endpoint config entries a removal resolved to at creation, each one signed
+-- 3. `endpoint_addon_removals`: one admin-started removal of one MCP server identity (the request). Its `status` is
+--    ADR-0348's `endpoint_addon_removal` machine: it is sent to no device until a second administrator decides its
+--    ADR-0186 approval (`approval_id`, whose arguments digest binds the request and the resolved target set).
+-- 4. `endpoint_addon_removal_targets`: the endpoint config entries a removal resolved to, written when it is approved
+--    (never before), each one signed
 --    directive (its id is the directive's `directiveId`), with the outcome the device reported. Each is bound to the
 --    agent identity (one device user) whose signed report last showed the entry: config paths are relative to that
 --    user's home, so only that identity's agent is served it or may report it. The device is reached through the
 --    identity (third normal form), not copied.
 --
--- No function or trigger, so the 0185 guards have nothing new to check. Discovery tables are admin-scope, not per-user
--- tenant tables, so no RLS policy is added (as for every other ADR-0195 and ADR-0259 table); the 0272 default
--- privileges give `regulait_app` its grants.
+--    Its `status` is ADR-0348's `endpoint_addon_target` machine; the one CHECK listing the states is
+--    `…_status_check`, and `…_evidence_check` says what each state carries.
+-- 5. Row-level security, ENABLEd and FORCEd on all three tables (as the ADR-0332 inventory tables): an admin principal, or
+--    the `system_task` reason, reaches them. The endpoint agent's routes enter `system_task` for their one narrow read
+--    and outcome write, and scope every row to the calling agent's own identity in the query itself.
+--
+-- No function or trigger, so the 0185 guards have nothing new to check; the 0272 default privileges give
+-- `regulait_app` its grants.
 
 ALTER TABLE "discovery_settings" ADD COLUMN IF NOT EXISTS "endpoint_addon_removal_enabled" boolean DEFAULT false NOT NULL;
 --> statement-breakpoint
@@ -64,8 +72,14 @@ CREATE TABLE IF NOT EXISTS "endpoint_addon_removals" (
   "reason" text NOT NULL,
   -- every directive of this removal is valid until here (ADR-0331 section 4)
   "expires_at" timestamp with time zone NOT NULL,
+  "status" text DEFAULT 'awaiting_approval' NOT NULL,
+  -- the ADR-0186 approval a second administrator decides (its decision, who and when, lives on that row)
+  "approval_id" uuid NOT NULL REFERENCES "approvals"("id") ON DELETE RESTRICT,
   "cancelled_at" timestamp with time zone,
   "cancelled_by" uuid REFERENCES "users"("id") ON DELETE SET NULL,
+  CONSTRAINT "endpoint_addon_removals_approval_uq" UNIQUE ("approval_id"),
+  CONSTRAINT "endpoint_addon_removals_status_check" CHECK ("status" IN ('awaiting_approval', 'active', 'denied', 'stale', 'cancelled')),
+  CONSTRAINT "endpoint_addon_removals_cancelled_check" CHECK (("status" = 'cancelled') = ("cancelled_at" IS NOT NULL)),
   CONSTRAINT "endpoint_addon_removals_action_check" CHECK ("action" IN ('remove_mcp_server')),
   CONSTRAINT "endpoint_addon_removals_identity_check" CHECK (
     "identity_kind" IN ('package', 'host', 'command') AND char_length("identity") BETWEEN 1 AND 255
@@ -83,6 +97,16 @@ CREATE TABLE IF NOT EXISTS "endpoint_addon_removals" (
 CREATE INDEX IF NOT EXISTS "endpoint_addon_removals_created_idx" ON "endpoint_addon_removals" ("created_at");
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "endpoint_addon_removals_identity_idx" ON "endpoint_addon_removals" ("identity_kind", "identity");
+--> statement-breakpoint
+-- the devices a `device` or `devices` scope names (a join table, not an id array): the approval re-resolves the
+-- targets from them
+CREATE TABLE IF NOT EXISTS "endpoint_addon_removal_devices" (
+  "removal_id" uuid NOT NULL REFERENCES "endpoint_addon_removals"("id") ON DELETE CASCADE,
+  "device_id" uuid NOT NULL REFERENCES "endpoint_devices"("id") ON DELETE CASCADE,
+  CONSTRAINT "endpoint_addon_removal_devices_pk" PRIMARY KEY ("removal_id", "device_id")
+);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "endpoint_addon_removal_devices_device_idx" ON "endpoint_addon_removal_devices" ("device_id");
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "endpoint_addon_removal_targets" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
@@ -106,18 +130,55 @@ CREATE TABLE IF NOT EXISTS "endpoint_addon_removal_targets" (
     char_length("signature_id") BETWEEN 1 AND 128 AND char_length("provider") BETWEEN 1 AND 64
     AND "config_root" IN ('home', 'appdata', 'localappdata') AND char_length("config_path") BETWEEN 1 AND 1024
     AND "server_name" ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'),
-  CONSTRAINT "endpoint_addon_removal_targets_status_check" CHECK (CASE "status"
+  -- the one CHECK listing the states (ADR-0348: equal to the endpoint_addon_target machine's states)
+  CONSTRAINT "endpoint_addon_removal_targets_status_check" CHECK (
+    "status" IN ('pending', 'delivered', 'removed', 'nothing_to_remove', 'failed', 'cancelled')),
+  -- what each state carries; the codes are ORs, not IN, so this is not a second state list
+  CONSTRAINT "endpoint_addon_removal_targets_evidence_check" CHECK (CASE "status"
     WHEN 'pending' THEN "delivered_at" IS NULL AND "reported_at" IS NULL AND "code" IS NULL AND "notified" IS NULL
     WHEN 'delivered' THEN "delivered_at" IS NOT NULL AND "reported_at" IS NULL AND "code" IS NULL AND "notified" IS NULL
-    WHEN 'cancelled' THEN "reported_at" IS NULL AND "code" IS NULL AND "notified" IS NULL
+    WHEN 'cancelled' THEN "delivered_at" IS NULL AND "reported_at" IS NULL AND "code" IS NULL AND "notified" IS NULL
     WHEN 'removed' THEN "code" = 'removed'
       AND "delivered_at" IS NOT NULL AND "reported_at" IS NOT NULL AND "notified" IS NOT NULL
-    WHEN 'nothing_to_remove' THEN "code" IN ('not_present', 'identity_differs')
+    WHEN 'nothing_to_remove' THEN ("code" = 'not_present' OR "code" = 'identity_differs')
       AND "delivered_at" IS NOT NULL AND "reported_at" IS NOT NULL AND "notified" IS NOT NULL
-    WHEN 'failed' THEN "code" IN ('not_in_manifest', 'path_refused', 'unsupported_format', 'parse_failed', 'write_failed', 'expired', 'wrong_identity')
+    WHEN 'failed' THEN ("code" = 'not_in_manifest' OR "code" = 'path_refused' OR "code" = 'unsupported_format'
+        OR "code" = 'parse_failed' OR "code" = 'write_failed' OR "code" = 'expired' OR "code" = 'wrong_identity')
       AND "delivered_at" IS NOT NULL AND "reported_at" IS NOT NULL AND "notified" IS NOT NULL
     ELSE false END),
   CONSTRAINT "endpoint_addon_removal_targets_times_check" CHECK ("reported_at" IS NULL OR "reported_at" >= "delivered_at")
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "endpoint_addon_removal_targets_identity_idx" ON "endpoint_addon_removal_targets" ("identity_id", "status");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "endpoint_addon_removals_status_idx" ON "endpoint_addon_removals" ("status", "expires_at");
+--> statement-breakpoint
+ALTER TABLE "endpoint_addon_removals" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "endpoint_addon_removals" FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+DROP POLICY IF EXISTS "endpoint_addon_removals_admin" ON "endpoint_addon_removals";
+--> statement-breakpoint
+CREATE POLICY "endpoint_addon_removals_admin" ON "endpoint_addon_removals" FOR ALL
+  USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
+  WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
+--> statement-breakpoint
+ALTER TABLE "endpoint_addon_removal_targets" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "endpoint_addon_removal_targets" FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+DROP POLICY IF EXISTS "endpoint_addon_removal_targets_admin" ON "endpoint_addon_removal_targets";
+--> statement-breakpoint
+CREATE POLICY "endpoint_addon_removal_targets_admin" ON "endpoint_addon_removal_targets" FOR ALL
+  USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
+  WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
+--> statement-breakpoint
+ALTER TABLE "endpoint_addon_removal_devices" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "endpoint_addon_removal_devices" FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+DROP POLICY IF EXISTS "endpoint_addon_removal_devices_admin" ON "endpoint_addon_removal_devices";
+--> statement-breakpoint
+CREATE POLICY "endpoint_addon_removal_devices_admin" ON "endpoint_addon_removal_devices" FOR ALL
+  USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
+  WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));

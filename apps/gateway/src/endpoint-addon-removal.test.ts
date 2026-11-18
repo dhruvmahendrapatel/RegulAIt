@@ -6,14 +6,9 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import {
-  ENDPOINT_ADDON_TARGET_OPEN_STATUSES,
-  ENDPOINT_ADDON_TARGET_STATUSES,
-  ENDPOINT_ADDON_TARGET_TRANSITIONS,
-  ENDPOINT_DIRECTIVE_OUTCOME_CODES,
-  endpointAddonTargetSources,
-} from "@regulait/db";
-import { directivePayload, outcomeCodeValid } from "./endpoint-addon-removal.js";
+import { ENDPOINT_ADDON_REMOVAL_STATUSES, ENDPOINT_ADDON_TARGET_STATUSES, ENDPOINT_DIRECTIVE_OUTCOME_CODES } from "@regulait/db";
+import { ENDPOINT_ADDON_REMOVAL_MACHINE, ENDPOINT_ADDON_TARGET_MACHINE, STATE_MACHINES } from "@regulait/shared";
+import { directivePayload, outcomeCodeValid, removalArgumentsDigest, type ResolvedTarget } from "./endpoint-addon-removal.js";
 
 const GOLDEN = fileURLToPath(new URL("../../../agents/endpoint/internal/contract/testdata/directive-payload.json", import.meta.url));
 
@@ -51,25 +46,41 @@ describe("ADR-0331: the directive payload", () => {
   });
 });
 
-// Owner rule 12 (2026-11-17): the target lifecycle is one declared table; these pin its shape so a later edit cannot
-// open a path the ADR forbids (a final outcome rewritten, an undelivered target reported, a cancelled one revived).
-describe("ADR-0331: the removal target lifecycle", () => {
-  it("declares every status, and only known statuses", () => {
-    expect(Object.keys(ENDPOINT_ADDON_TARGET_TRANSITIONS).sort()).toEqual([...ENDPOINT_ADDON_TARGET_STATUSES].sort());
-    for (const to of Object.values(ENDPOINT_ADDON_TARGET_TRANSITIONS).flat()) expect(ENDPOINT_ADDON_TARGET_STATUSES).toContain(to);
+// Owner rule 12 and ADR-0348: both lifecycles are declared machines in the one registry; these pin their shape so a
+// later edit cannot open a path the ADR forbids (a final outcome rewritten, an undelivered target reported, a delivered
+// target cancelled so its real outcome is lost, an unapproved removal delivered).
+describe("ADR-0331: the removal and target lifecycles (ADR-0348 machines)", () => {
+  it("are registered, and the column enums are the machines' states", () => {
+    expect(STATE_MACHINES.endpoint_addon_removal).toBe(ENDPOINT_ADDON_REMOVAL_MACHINE);
+    expect(STATE_MACHINES.endpoint_addon_target).toBe(ENDPOINT_ADDON_TARGET_MACHINE);
+    expect([...ENDPOINT_ADDON_TARGET_MACHINE.def.states]).toEqual([...ENDPOINT_ADDON_TARGET_STATUSES]);
+    expect([...ENDPOINT_ADDON_REMOVAL_MACHINE.def.states]).toEqual([...ENDPOINT_ADDON_REMOVAL_STATUSES]);
   });
-  it("makes every outcome and cancelled final", () => {
-    for (const s of [...(Object.keys(ENDPOINT_DIRECTIVE_OUTCOME_CODES) as (keyof typeof ENDPOINT_DIRECTIVE_OUTCOME_CODES)[]), "cancelled" as const]) {
-      expect(ENDPOINT_ADDON_TARGET_TRANSITIONS[s]).toEqual([]);
-    }
-    expect(ENDPOINT_ADDON_TARGET_OPEN_STATUSES).toEqual(["pending", "delivered"]);
+  it("a target: delivered only from pending, an outcome only from delivered, cancel only before delivery", () => {
+    const m = ENDPOINT_ADDON_TARGET_MACHINE;
+    expect(m.sourcesOf("deliver")).toEqual(["pending"]);
+    for (const e of ["report_removed", "report_nothing", "report_failed"] as const) expect(m.sourcesOf(e)).toEqual(["delivered"]);
+    expect(m.sourcesOf("cancel")).toEqual(["pending"]);
+    expect([...m.def.terminal].sort()).toEqual([...(Object.keys(ENDPOINT_DIRECTIVE_OUTCOME_CODES) as string[]), "cancelled"].sort());
   });
-  it("reaches an outcome only from delivered, delivery only from pending, and cancel from any open state", () => {
-    for (const o of Object.keys(ENDPOINT_DIRECTIVE_OUTCOME_CODES) as (keyof typeof ENDPOINT_DIRECTIVE_OUTCOME_CODES)[]) {
-      expect(endpointAddonTargetSources(o)).toEqual(["delivered"]);
-    }
-    expect(endpointAddonTargetSources("delivered")).toEqual(["pending"]);
-    expect(endpointAddonTargetSources("cancelled")).toEqual(["pending", "delivered"]);
-    expect(endpointAddonTargetSources("pending")).toEqual([]);
+  it("a removal: sent only once approved; denied, stale and cancelled are final", () => {
+    const m = ENDPOINT_ADDON_REMOVAL_MACHINE;
+    expect(m.def.initial).toEqual(["awaiting_approval"]);
+    expect(m.sourcesOf("approve")).toEqual(["awaiting_approval"]);
+    expect(m.sourcesOf("go_stale")).toEqual(["awaiting_approval"]);
+    expect([...m.sourcesOf("cancel")].sort()).toEqual(["active", "awaiting_approval"]);
+    expect([...m.def.terminal].sort()).toEqual(["cancelled", "denied", "stale"]);
+  });
+});
+
+describe("ADR-0331: the approval's arguments digest", () => {
+  const facts = { identityKind: "package", identity: "@evil/x", packageVersion: null, serverName: null, scope: { kind: "recent", days: 7 }, blockReinstall: true, reason: "r" };
+  const t = (path: string): ResolvedTarget => ({ deviceId: "d", identityId: "i", signatureId: "s", provider: "p", configRoot: "home", configPath: path, serverName: "x" });
+  it("binds the request and the exact target set, in any order", () => {
+    const one = removalArgumentsDigest(facts, [t("a.json"), t("b.json")]);
+    expect(removalArgumentsDigest(facts, [t("b.json"), t("a.json")])).toBe(one);
+    expect(removalArgumentsDigest(facts, [t("a.json")])).not.toBe(one);
+    expect(removalArgumentsDigest(facts, [t("a.json"), t("c.json")])).not.toBe(one);
+    expect(removalArgumentsDigest({ ...facts, reason: "other" }, [t("a.json"), t("b.json")])).not.toBe(one);
   });
 });

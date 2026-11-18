@@ -60,15 +60,44 @@ A removal names:
   - a selected list of devices (500 at most);
   - every device whose signed reports showed the server in the last N days (N from 1 to 90).
 - **Whether to block a reinstall** (`blockReinstall`, default true; section 6).
+- **The approver** (`approverUserId`): a second administrator (section 3a).
 - **A reason** (at most 500 characters).
 
-The targets are resolved once, at creation, from `endpoint_mcp_servers` evidence. Each target keeps a point-in-time copy
-of the config location it was seen in. Only user-writable roots are eligible: `home`, `appdata` and `localappdata`. A
-server seen only under `system_applications` is never targeted. A removal that resolves to no endpoint is refused.
+The targets are resolved from `endpoint_mcp_servers` evidence. Each target keeps a point-in-time copy of the config
+location it was seen in. Only user-writable roots are eligible: `home`, `appdata` and `localappdata`. A server seen only
+under `system_applications` is never targeted. A removal that resolves to no endpoint is refused. A device or devices
+scope is stored as a join table (`endpoint_addon_removal_devices`), so the approval can resolve it again.
 
-Three writes commit in one transaction, together with spending the step-up: the removal, its targets, and an audit row.
-`POST …/:id/cancel` stops the removal's undelivered targets; cancelling narrows, so it needs no step-up, and it is
+The request commits in one transaction, together with spending the step-up: the removal (`awaiting_approval`), its
+ADR-0186 approval, its scope devices and an audit row (`require_approval`). No target is written yet.
+`POST …/:id/cancel` cancels a removal that awaits its decision (its approval is withdrawn) or an active one. It stops
+only targets that were never delivered: a delivered directive may already have run on the device, so the target stays
+`delivered` and the device's real outcome is still recorded. Cancelling narrows, so it needs no step-up, and it is
 audited.
+
+### 3a. A second administrator approves it, and the execution dial can stop it (review of #871, 2026-11-18)
+
+- **Second person (ADR-0186).** A request queues an approval of kind `endpoint_addon_removal` for the named approver.
+  The approver must be another active administrator in the approval pool (`loadApprovalPool`: never the requester, never
+  anyone delegation-linked to the requester). The decision goes through the one decide path
+  (`POST /v1/approvals/:id/decide`): the requester is refused by name (`cannot_approve_own_endpoint_addon_removal`), an
+  admin outside the pool is refused (`not_in_approval_pool`, no admin override), and the decider needs an
+  `approval_decide` step-up bound to `{approvalId, decision, argumentsDigest}`, spent in the decision's transaction.
+  Bulk and ChatOps decisions of this kind are refused, because they carry no step-up.
+- **What is approved is what is sent.** The approval's `argumentsDigest` covers the canonical request and every config
+  entry it resolved to. On approval the targets are resolved again: only when they give the same digest are they
+  written and the removal becomes `active`. If the endpoints changed, or the switch was turned off, the removal becomes
+  `stale`, nothing is sent, and a new request is needed. This also closes the gap that the requester's step-up binds the
+  request, not what it resolves to. The approval expires with the removal (seven days).
+- **Kill switch.** Signing a directive is a classified external write, `device_policy.sign_payload`: the
+  `DevicePolicySigner` is a contract in `external-effects.test.ts`, and every signature is the direct body of
+  `runExternalWrite`, which re-reads the execution mode immediately before it. Outside `normal`, no removal is requested
+  or approved, and the agent's directive read serves an empty list (audited as `execution_halted`, `execution_read_only`
+  or `execution_requires_approval`). A halt cancels nothing: the targets wait, undelivered (execution control principle 4,
+  "nothing is destroyed"). The barrier matrix has a row for the operation.
+- **Row-level security (ADR-0234).** The three removal tables have RLS ENABLED and FORCED, with one policy each: an
+  admin principal, or the `system_task` reason. The agent's two routes enter `system_task` for their one read and one
+  outcome write, and every query in them is scoped to the calling agent's own identity.
 
 ### 4. The directive
 
@@ -169,17 +198,26 @@ claiming coverage.
     `expired` or `wrong_identity`.
 
   Each outcome also carries `notified` (true or false).
-- **The target lifecycle.** One declared table, `ENDPOINT_ADDON_TARGET_TRANSITIONS` in `packages/db`, holds every
-  allowed move:
+- **The lifecycles (ADR-0348).** Both are declared machines in `packages/shared/src/state-machines.ts`, registered in
+  `STATE_MACHINES`. The removal, `ENDPOINT_ADDON_REMOVAL_MACHINE`:
 
-  | From | To |
-  |---|---|
-  | `pending` | `delivered` (served to the agent), `cancelled` |
-  | `delivered` | `removed`, `nothing_to_remove`, `failed`, `cancelled` |
-  | `removed`, `nothing_to_remove`, `failed`, `cancelled` | nothing: final |
+  | Event | From | To |
+  |---|---|---|
+  | `approve` | `awaiting_approval` | `active` |
+  | `deny` | `awaiting_approval` | `denied` |
+  | `go_stale` | `awaiting_approval` | `stale` |
+  | `cancel` | `awaiting_approval`, `active` | `cancelled` |
 
-  Every status write (deliver, report, cancel) takes its allowed source states from this table, as the SQL guard
-  `status IN (sources)`, so each move is atomic and no route decides a transition by itself. A test pins the table.
+  The target, `ENDPOINT_ADDON_TARGET_MACHINE`:
+
+  | Event | From | To |
+  |---|---|---|
+  | `deliver` | `pending` | `delivered` (served to the agent) |
+  | `report_removed`, `report_nothing`, `report_failed` | `delivered` | `removed`, `nothing_to_remove`, `failed` |
+  | `cancel` | `pending` | `cancelled` |
+
+  Every status write guards with `whereFrom(…, event)`, so each move is atomic and no route decides a transition by
+  itself. Each column has exactly one CHECK listing its states, and the ADR-0348 test holds it equal to the machine.
 - **Gateway side.** An outcome is accepted only for a target of the calling device that was delivered, and it is final.
   Repeating the same outcome is idempotent; a different one is refused. The target update and its audit row are written
   in one transaction.
@@ -188,8 +226,11 @@ claiming coverage.
   from the gateway reaches the device. The notice goes through the platform's own notifier, run as an argument list with
   no shell:
   - macOS: `osascript`, with the text passed as an `argv` item, never interpolated into the script;
-  - Linux: `notify-send`;
-  - Windows: `msg`.
+  - Linux: `/usr/bin/notify-send`;
+  - Windows: `msg.exe` under `SystemRoot` (when it is a plain drive path, else `C:\Windows`).
+
+  Every tool is named by its absolute path, never found through `PATH`. A rewritten config keeps its mode and, on Unix,
+  its owner and group.
 
   A missing notifier gives `notified: false`, and the removal stands.
 
@@ -237,14 +278,18 @@ Coverage follows the MCP hosts whose config files the signed collection manifest
 - The admin screens for the switch, creating and cancelling removals and per-endpoint outcomes. These are known UI gaps
   tracked on #453.
 - A gateway directive signer: the ADR-0195 SD4 key ceremony, which is pending.
+- **Restoring a removed entry (decision, review of #871).** The removed entry's JSON is not kept, so a removal cannot be
+  undone by RegulAIt in this slice. A removal is already narrow (one named entry, one plain-JSON file), approved by a
+  second person, and the developer is told what was removed and from where, so they or their admin can add it back. A
+  backup in the agent's state directory and a signed restore directive are a follow-up, filed as an issue.
 
 ## Consequences
 
 - **Agent.** An org can, deliberately and visibly, take a flagged MCP server off its developers' machines. The agent's
   write power is exactly one key in one file the signed manifest already names, and only when a directive bound to that
   agent's identity verifies.
-- **Gateway.** It gains one org switch, one step-up kind, two tables, three admin routes and two agent routes. Every
-  write is audited.
+- **Gateway.** It gains one org switch, one step-up kind, one approval kind, one external-write operation, three tables,
+  two declared machines, four admin routes and two agent routes. Every write is audited.
 - **Until SD4.** The whole path is inert unless an admin pins a device-policy key on the device and the gateway has a
   signer: until both exist, no directive is delivered or verified.
 

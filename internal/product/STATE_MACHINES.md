@@ -40,6 +40,8 @@ compares the status in JavaScript, then writes `WHERE id = $1`; a concurrent wri
 | Machine | Declared in | Guarded writers | Notes |
 |---|---|---|---|
 | Rule-step suggestion (`rule_step_suggestions.status`, ADR-0327) | `RULE_STEP_SUGGESTION_MACHINE`, `packages/shared/src/state-machines.ts` | `transitionSuggestion` in `apps/gateway/src/rule-steps.ts` (`whereFrom`, returned row) | suggested ⇄ shadow; suggested → dismissed (final). The list answer carries `lifecycle`; shadow start is shown blocked while detection is off. Converted from a hand-written table in review of #903 (E12). |
+| Endpoint add-on removal (`endpoint_addon_removals.status`, ADR-0331) | `ENDPOINT_ADDON_REMOVAL_MACHINE`, `packages/shared/src/state-machines.ts` | `endpoint-addon-removal.ts`: request, `applyEndpointAddonRemovalDecision` (decide path), cancel (`whereFrom`, row lock) | awaiting_approval → active \| denied \| stale \| cancelled; active → cancelled. Nothing is delivered until a second administrator approves (ADR-0186); the views carry `lifecycle`. Converted from a hand-written table in review of #871 (E13). |
+| Endpoint add-on removal target (`endpoint_addon_removal_targets.status`, ADR-0331) | `ENDPOINT_ADDON_TARGET_MACHINE`, same file | delivery, outcome reports and cancel in `endpoint-addon-removal.ts` (`whereFrom`) | pending → delivered \| cancelled; delivered → removed \| nothing_to_remove \| failed. Cancel stops undelivered targets only, so a delivered directive's real outcome is still recorded. |
 
 ## 3. Machines to convert, ranked by F×S
 

@@ -640,7 +640,13 @@ import { registerThirdPartyIngestRoutes } from "./third-party-ingest-routes.js";
 import { registerSiemDeliveryRoutes } from "./siem-delivery.js";
 import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
 import { registerEndpointMcpConfigRoutes } from "./endpoint-mcp-config.js";
-import { registerEndpointAddonRemovalRoutes, type DevicePolicySigner } from "./endpoint-addon-removal.js";
+import {
+  applyEndpointAddonRemovalDecision,
+  endpointAddonRemovalApprovalLabels,
+  precheckEndpointAddonRemovalDecision,
+  registerEndpointAddonRemovalRoutes,
+  type DevicePolicySigner,
+} from "./endpoint-addon-removal.js";
 // ADR-0310 (G2): vendor-native managed settings bundles
 import { registerManagedSettingsRoutes } from "./managed-settings.js";
 import { registerEndpointAddonInventoryRoutes } from "./endpoint-addon-inventory.js";
@@ -4640,6 +4646,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     );
     const complianceVersionLabelFor = (stageId: string | null): string | null =>
       stageId?.startsWith(COMPLIANCE_VERSION_PREFIX) ? (complianceVersionById.get(stageId.slice(COMPLIANCE_VERSION_PREFIX.length)) ?? null) : null;
+    // ADR-0331: what an MCP server removal from endpoints asks the approver to approve
+    const endpointAddonRemovalLabel = await endpointAddonRemovalApprovalLabels(
+      db,
+      rows.filter((r) => r.objectType === "endpoint_addon_removal").map((r) => r.stageId),
+    );
     const sodOverrideLabelFor = (stageId: string | null): string | null => {
       if (!stageId?.startsWith(SOD_OVERRIDE_PREFIX)) return null;
       return sodOverrideById.get(stageId.slice(SOD_OVERRIDE_PREFIX.length)) ?? null;
@@ -4720,6 +4731,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         (r.objectType === "sod_override" ? sodOverrideLabelFor(r.stageId) : null) ??
         (r.objectType === "remediation" ? governanceRemediationLabelFor(r.stageId) : null) ??
         (r.objectType === "compliance_profile" ? complianceVersionLabelFor(r.stageId) : null) ??
+        (r.objectType === "endpoint_addon_removal" && r.stageId ? (endpointAddonRemovalLabel.get(r.stageId) ?? null) : null) ??
         r.toolName ??
         null,
       // ADR-0022: this row reached the caller via an active delegation —
@@ -5216,6 +5228,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const refusal = await precheckRemediationDecision(db, row, deciderUserId);
       if (refusal) return fail(refusal.status, refusal.body);
     }
+    // ADR-0331 — an MCP server removal from endpoints: never the requester, only an admin in the pool (no override),
+    // the dial `normal` to approve, and an `approval_decide` step-up bound to {approvalId, decision, argumentsDigest}
+    if (row.objectType === "endpoint_addon_removal") {
+      const refusal = await precheckEndpointAddonRemovalDecision(db, row, deciderUserId, binaryDecision, input.req);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
     // ADR-0173 batch 2b — `cannot_approve_own_prompt_commit`, keyed on the
     // DECIDER so the commit's author cannot reach its promotion through
     // delegation or the admin override above.
@@ -5569,6 +5587,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // ADR-0159 remediation: approved = the STORED kind+params execute HERE,
       // inside the decision's transaction; the monitor re-evaluates after
       // commit so a cleared condition resolves its alert straight away.
+      // ADR-0331: approved = the targets are resolved again and written only if they still give the approved digest;
+      // the approver's step-up is spent here, with those writes. Denied = nothing is ever sent.
+      if (updated.objectType === "endpoint_addon_removal") {
+        await applyEndpointAddonRemovalDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId, input.req);
+      }
       if (updated.objectType === "remediation") {
         const applied = await applyRemediationDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
         if (applied) {

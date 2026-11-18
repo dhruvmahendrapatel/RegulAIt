@@ -168,6 +168,9 @@ import {
   FAIRNESS_RUN_MODES,
   FAIRNESS_BREACH_REVIEW_STATUSES,
   FAIRNESS_EVALUATION_STATUSES,
+  // ADR-0331 (migration endpoint_addon_removal): the removal and target lifecycles, ADR-0348 machines
+  ENDPOINT_ADDON_REMOVAL_STATES,
+  ENDPOINT_ADDON_TARGET_STATES,
 } from "@regulait/shared";
 import {
   type AnyPgColumn,
@@ -16820,29 +16823,13 @@ export const ENDPOINT_ADDON_REMOVAL_ACTIONS = ["remove_mcp_server"] as const;
 export const ENDPOINT_ADDON_REMOVAL_SCOPES = ["device", "devices", "recent"] as const;
 /** the user-writable config roots a removal may target; `system_applications` never is (ADR-0331 §3) */
 export const ENDPOINT_ADDON_REMOVAL_ROOTS = ["home", "appdata", "localappdata"] as const;
-export const ENDPOINT_ADDON_TARGET_STATUSES = ["pending", "delivered", "removed", "nothing_to_remove", "failed", "cancelled"] as const;
+/** the target lifecycle is ADR-0348's `ENDPOINT_ADDON_TARGET_MACHINE` (@regulait/shared): every status write guards with
+ * `whereFrom(…, event)`, so no route decides a transition by itself */
+export const ENDPOINT_ADDON_TARGET_STATUSES = ENDPOINT_ADDON_TARGET_STATES;
 export type EndpointAddonTargetStatus = (typeof ENDPOINT_ADDON_TARGET_STATUSES)[number];
-/**
- * ADR-0331: the one declared lifecycle of a removal target. Every status write reads its allowed source states from
- * this table (the SQL guard `status IN (sources)` makes each move atomic), so no route decides a transition by itself.
- * pending → delivered (served to the agent) | cancelled; delivered → one final outcome | cancelled; the rest are final.
- */
-export const ENDPOINT_ADDON_TARGET_TRANSITIONS = {
-  pending: ["delivered", "cancelled"],
-  delivered: ["removed", "nothing_to_remove", "failed", "cancelled"],
-  removed: [],
-  nothing_to_remove: [],
-  failed: [],
-  cancelled: [],
-} as const satisfies Record<EndpointAddonTargetStatus, readonly EndpointAddonTargetStatus[]>;
-/** the states a target may move to `to` from */
-export function endpointAddonTargetSources(to: EndpointAddonTargetStatus): EndpointAddonTargetStatus[] {
-  return ENDPOINT_ADDON_TARGET_STATUSES.filter((from) => (ENDPOINT_ADDON_TARGET_TRANSITIONS[from] as readonly string[]).includes(to));
-}
-/** the states that are not final: a target in one of them can still be served, reported or cancelled */
-export const ENDPOINT_ADDON_TARGET_OPEN_STATUSES: EndpointAddonTargetStatus[] = ENDPOINT_ADDON_TARGET_STATUSES.filter(
-  (s) => ENDPOINT_ADDON_TARGET_TRANSITIONS[s].length > 0,
-);
+/** the removal lifecycle is ADR-0348's `ENDPOINT_ADDON_REMOVAL_MACHINE`: nothing is sent until a second person approves */
+export const ENDPOINT_ADDON_REMOVAL_STATUSES = ENDPOINT_ADDON_REMOVAL_STATES;
+export type EndpointAddonRemovalStatus = (typeof ENDPOINT_ADDON_REMOVAL_STATUSES)[number];
 /** ADR-0331 §7: each outcome and the closed codes it may carry (the agent's `contract.OutcomeCodes`) */
 export const ENDPOINT_DIRECTIVE_OUTCOME_CODES = {
   removed: ["removed"],
@@ -16869,10 +16856,20 @@ export const endpointAddonRemovals = pgTable(
     reason: text("reason").notNull(),
     /** every directive of this removal is valid until here: created_at + 7 days (ADR-0331 §4) */
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    /** ADR-0348 `ENDPOINT_ADDON_REMOVAL_MACHINE` */
+    status: text("status", { enum: ENDPOINT_ADDON_REMOVAL_STATUSES }).notNull().default("awaiting_approval"),
+    /** the ADR-0186 approval a second administrator decides; its arguments digest binds the request and the resolved
+     * target set, and its decision (who, when) lives on that row, not here */
+    approvalId: uuid("approval_id")
+      .notNull()
+      .unique("endpoint_addon_removals_approval_uq")
+      .references(() => approvals.id, { onDelete: "restrict" }),
     cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
     cancelledBy: uuid("cancelled_by").references(() => users.id, { onDelete: "set null" }),
   },
   (t) => [
+    check("endpoint_addon_removals_status_check", sql`${t.status} IN ('awaiting_approval', 'active', 'denied', 'stale', 'cancelled')`),
+    check("endpoint_addon_removals_cancelled_check", sql`(${t.status} = 'cancelled') = (${t.cancelledAt} IS NOT NULL)`),
     check("endpoint_addon_removals_action_check", sql`${t.action} IN ('remove_mcp_server')`),
     check(
       "endpoint_addon_removals_identity_check",
@@ -16893,9 +16890,25 @@ export const endpointAddonRemovals = pgTable(
     ),
     index("endpoint_addon_removals_created_idx").on(t.createdAt),
     index("endpoint_addon_removals_identity_idx").on(t.identityKind, t.identity),
+    index("endpoint_addon_removals_status_idx").on(t.status, t.expiresAt),
   ],
 );
 export type EndpointAddonRemovalRow = typeof endpointAddonRemovals.$inferSelect;
+
+/** the devices a `device` or `devices` scope names (a list of references is a join table, ADR-0200 addendum); the
+ * approval re-resolves the targets from them, so what is approved is what is sent */
+export const endpointAddonRemovalDevices = pgTable(
+  "endpoint_addon_removal_devices",
+  {
+    removalId: uuid("removal_id")
+      .notNull()
+      .references(() => endpointAddonRemovals.id, { onDelete: "cascade" }),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => endpointDevices.id, { onDelete: "cascade" }),
+  },
+  (t) => [primaryKey({ columns: [t.removalId, t.deviceId], name: "endpoint_addon_removal_devices_pk" }), index("endpoint_addon_removal_devices_device_idx").on(t.deviceId)],
+);
 
 /**
  * one endpoint config entry a removal resolved to; its id is the signed directive's `directiveId`. It is bound to the
@@ -16935,17 +16948,24 @@ export const endpointAddonRemovalTargets = pgTable(
         AND ${t.configRoot} IN ('home', 'appdata', 'localappdata') AND char_length(${t.configPath}) BETWEEN 1 AND 1024
         AND ${t.serverName} ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'`,
     ),
+    // the one CHECK listing the states (ADR-0348: it equals ENDPOINT_ADDON_TARGET_MACHINE's states)
     check(
       "endpoint_addon_removal_targets_status_check",
+      sql`${t.status} IN ('pending', 'delivered', 'removed', 'nothing_to_remove', 'failed', 'cancelled')`,
+    ),
+    // what each state carries; codes are ORs, not IN, so this is not a second state list for the ADR-0348 test
+    check(
+      "endpoint_addon_removal_targets_evidence_check",
       sql`CASE ${t.status}
         WHEN 'pending' THEN ${t.deliveredAt} IS NULL AND ${t.reportedAt} IS NULL AND ${t.code} IS NULL AND ${t.notified} IS NULL
         WHEN 'delivered' THEN ${t.deliveredAt} IS NOT NULL AND ${t.reportedAt} IS NULL AND ${t.code} IS NULL AND ${t.notified} IS NULL
-        WHEN 'cancelled' THEN ${t.reportedAt} IS NULL AND ${t.code} IS NULL AND ${t.notified} IS NULL
+        WHEN 'cancelled' THEN ${t.deliveredAt} IS NULL AND ${t.reportedAt} IS NULL AND ${t.code} IS NULL AND ${t.notified} IS NULL
         WHEN 'removed' THEN ${t.code} = 'removed'
           AND ${t.deliveredAt} IS NOT NULL AND ${t.reportedAt} IS NOT NULL AND ${t.notified} IS NOT NULL
-        WHEN 'nothing_to_remove' THEN ${t.code} IN ('not_present', 'identity_differs')
+        WHEN 'nothing_to_remove' THEN (${t.code} = 'not_present' OR ${t.code} = 'identity_differs')
           AND ${t.deliveredAt} IS NOT NULL AND ${t.reportedAt} IS NOT NULL AND ${t.notified} IS NOT NULL
-        WHEN 'failed' THEN ${t.code} IN ('not_in_manifest', 'path_refused', 'unsupported_format', 'parse_failed', 'write_failed', 'expired', 'wrong_identity')
+        WHEN 'failed' THEN (${t.code} = 'not_in_manifest' OR ${t.code} = 'path_refused' OR ${t.code} = 'unsupported_format'
+            OR ${t.code} = 'parse_failed' OR ${t.code} = 'write_failed' OR ${t.code} = 'expired' OR ${t.code} = 'wrong_identity')
           AND ${t.deliveredAt} IS NOT NULL AND ${t.reportedAt} IS NOT NULL AND ${t.notified} IS NOT NULL
         ELSE false END`,
     ),

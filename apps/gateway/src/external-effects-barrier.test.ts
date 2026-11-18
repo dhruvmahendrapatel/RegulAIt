@@ -34,12 +34,27 @@
  * approval-decision, the scan auto-remediation and the cert_rotate operator
  * action-decision; pm.create_work_item, pm.update_fields
  * (run sync: create, then repair-in-place), pm.transition_state (node status
- * mirror on run events), pm.add_comment (decision mirror).
+ * mirror on run events), pm.add_comment (decision mirror); device_policy.sign_payload (ADR-0331: an endpoint agent's directive
+ * read of an approved removal, the counting fake being the device-policy signer).
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createDb, runMigrations, type Db } from "@regulait/db";
+import { createHash, generateKeyPairSync, sign as edSign } from "node:crypto";
+import {
+  approvals,
+  createDb,
+  discoveryPseudonymKeys,
+  discoverySettings,
+  discoverySources,
+  endpointAddonRemovals,
+  endpointAddonRemovalTargets,
+  eq,
+  inArray,
+  runMigrations,
+  sql,
+  type Db,
+} from "@regulait/db";
 import { EXTERNAL_WRITE_OPERATIONS, type ExternalWriteOperation } from "./external-effects.js";
 
 // ---------------------------------------------------------------------------
@@ -158,6 +173,7 @@ if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integra
 const migrationsFolder = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations");
 
 const BOOT = "barrier-matrix-bootstrap";
+const DATA_KEY = "d".repeat(64);
 const AUTH = { authorization: `Bearer ${BOOT}` };
 const RUN = Math.random().toString(36).slice(2, 8);
 const MODES = ["halted", "read_only", "require_approval"] as const;
@@ -306,7 +322,13 @@ async function parkAfterGate(instanceId: string) {
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
-  app = buildApp(db, { bootstrapToken: BOOT, dataKey: "d".repeat(64) });
+  // ADR-0331: the device-policy signer is the counting fake for device_policy.sign_payload (one call per directive)
+  const directiveKey = generateKeyPairSync("ed25519").privateKey;
+  const devicePolicySigner = probe.counting(
+    { kind: "device_policy_signer" as const, keyId: "barrier-directive-key", signPayload: async (b: Buffer) => edSign(null, b, directiveKey) },
+    { signPayload: "device_policy.sign_payload" },
+  );
+  app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY, devicePolicySigner });
   const pia = await makeUser(`bm-pia-${RUN}@example.com`);
   piaId = pia.id;
   piaAuth = pia.auth;
@@ -629,6 +651,87 @@ describe("AER-018 — the barrier matrix: flip the dial while the route waits on
     const commented = await admitted("pm.add_comment", () => decision("normal"));
     expect(commented.statusCode, commented.body).toBe(201);
     expect(commented.json().pmMirror).toEqual({ ok: true, action: "comment" });
+  });
+
+  it("device_policy.sign_payload (ADR-0331: an endpoint agent's directive read of an approved removal)", async () => {
+    const { endpointAgentKeys } = await import("./testing/endpoint-agent-client.js");
+    const { enrolEndpointAgent, seenMcpServer } = await import("./testing/endpoint-addon-removal-fixture.js");
+    const { useTestIssuerKey } = await import("./testing/workload-client.js");
+    const { relaxIdentityForTest } = await import("./testing/identity-posture.js");
+    const ORIGIN = "http://localhost";
+    const prevUrl = process.env.REGULAIT_PUBLIC_URL;
+    process.env.REGULAIT_PUBLIC_URL = ORIGIN; // the agent's DPoP token is issued for this deployment's issuer
+    const restores: Array<() => Promise<unknown>> = [];
+    const sourceIds: string[] = [];
+    const pkg = `@bm-${RUN}/flagged`;
+    try {
+      restores.push(await relaxIdentityForTest(db, { mfaRequired: "off" }));
+      restores.push(await useTestIssuerKey(db));
+      // the per-tenant pseudonym key is wrapped under the first data key that asks for it (see the ADR-0259 suite)
+      const priorKeys = await db.select().from(discoveryPseudonymKeys);
+      await db.delete(discoveryPseudonymKeys);
+      restores.push(async () => {
+        await db.delete(discoveryPseudonymKeys);
+        if (priorKeys.length) await db.insert(discoveryPseudonymKeys).values(priorKeys);
+      });
+      const [s0] = await db.select({ on: discoverySettings.endpointAddonRemovalEnabled }).from(discoverySettings).where(eq(discoverySettings.id, 1));
+      restores.push(() => db.update(discoverySettings).set({ endpointAddonRemovalEnabled: s0?.on ?? false }).where(eq(discoverySettings.id, 1)));
+      await db.update(discoverySettings).set({ endpointAddonRemovalEnabled: true }).where(eq(discoverySettings.id, 1));
+
+      const keys = endpointAgentKeys(() => app, DATA_KEY, ORIGIN);
+      const agent = await enrolEndpointAgent(app, db, keys, { auth: AUTH, run: `bm${RUN}`, enabledBy: piaId, sourceIds });
+      await seenMcpServer(db, agent, { pkg, path: `.config/bm-${RUN}/mcp.json` });
+      // an APPROVED removal of one target (the request and decision routes have their own suite): written directly
+      const [ap] = await db
+        .insert(approvals)
+        .values({ userId: piaId, objectType: "endpoint_addon_removal", approverUserId: anaId, status: "approved", argumentsDigest: createHash("sha256").update(pkg).digest("hex") })
+        .returning({ id: approvals.id });
+      const [removal] = await db
+        .insert(endpointAddonRemovals)
+        .values({
+          identityKind: "package",
+          identity: pkg,
+          scopeKind: "recent",
+          scopeDays: 1,
+          reason: `barrier ${RUN}`,
+          status: "active",
+          approvalId: ap!.id,
+          createdBy: piaId,
+          createdAt: sql`now()`,
+          expiresAt: sql`now() + interval '7 days'`,
+        })
+        .returning({ id: endpointAddonRemovals.id });
+      restores.push(async () => {
+        await db.delete(endpointAddonRemovals).where(eq(endpointAddonRemovals.id, removal!.id));
+        await db.delete(approvals).where(eq(approvals.id, ap!.id));
+      });
+      const [target] = await db
+        .insert(endpointAddonRemovalTargets)
+        .values({ removalId: removal!.id, identityId: agent.identityId, signatureId: "sig.a331.host", provider: "a331prov", configRoot: "home", configPath: `.config/bm-${RUN}/mcp.json`, serverName: "flagged" })
+        .returning({ id: endpointAddonRemovalTargets.id });
+
+      const read = async () =>
+        app.inject({ method: "GET", url: "/v1/endpoint-agent/directives", headers: await agent.key.headers("GET", "/v1/endpoint-agent/directives") });
+      for (const mode of MODES) {
+        const res = await refusedAtBarrier("device_policy.sign_payload", mode, read);
+        expect(res.statusCode, res.body).toBe(200);
+        expect(res.json()).toEqual({ directives: [] });
+        // nothing destroyed: the target waits, undelivered
+        expect((await db.select().from(endpointAddonRemovalTargets).where(eq(endpointAddonRemovalTargets.id, target!.id)))[0]!.status).toBe("pending");
+      }
+      const served = await admitted("device_policy.sign_payload", read);
+      expect(served.statusCode, served.body).toBe(200);
+      expect(served.json().directives).toHaveLength(1);
+      expect((await db.select().from(endpointAddonRemovalTargets).where(eq(endpointAddonRemovalTargets.id, target!.id)))[0]!.status).toBe("delivered");
+    } finally {
+      if (sourceIds.length) {
+        await db.update(discoverySources).set({ enabled: false }).where(inArray(discoverySources.id, sourceIds));
+        await db.delete(discoverySources).where(inArray(discoverySources.id, sourceIds));
+      }
+      for (const r of restores.reverse()) await r();
+      if (prevUrl === undefined) delete process.env.REGULAIT_PUBLIC_URL;
+      else process.env.REGULAIT_PUBLIC_URL = prevUrl;
+    }
   });
 
   it("covered every classified operation under every mode, plus its positive control", () => {

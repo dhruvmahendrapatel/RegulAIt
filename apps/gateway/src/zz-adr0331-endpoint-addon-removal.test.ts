@@ -24,21 +24,22 @@ import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign as edSig
 import { fileURLToPath } from "node:url";
 import {
   and,
+  approvals,
   auditLog,
   createDb,
   discoveryPseudonymKeys,
   discoverySettings,
   discoverySources,
+  endpointAddonRemovalDevices,
   endpointAddonRemovals,
   endpointAddonRemovalTargets,
-  endpointAgentReports,
   endpointDevices,
-  endpointMcpServers,
   eq,
   inArray,
   orgSettings,
   ORG_SETTINGS_ID,
   runMigrations,
+  runWithRlsPrincipal,
   sql,
   stepUpGrants,
   users,
@@ -46,9 +47,10 @@ import {
 } from "@regulait/db";
 import { BATCH4_STRICT_DEFAULTS, DISCOVERY_STEP_UP_KEYS } from "@regulait/shared";
 import { buildApp } from "./app.js";
-import { createRemovalSchema, endpointRemediationStepUp, type DevicePolicySigner } from "./endpoint-addon-removal.js";
+import { createRemovalSchema, endpointAddonRemovalDecideStepUp, endpointRemediationStepUp, type DevicePolicySigner } from "./endpoint-addon-removal.js";
 import type { StepUpCheckArgs } from "./step-up.js";
 import { endpointAgentKeys } from "./testing/endpoint-agent-client.js";
+import { enrolEndpointAgent, seenMcpServer, type EnrolledAgent } from "./testing/endpoint-addon-removal-fixture.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { grantSpent, grantStepUpForTest, sessionRequest, stepUpRequest } from "./testing/step-up-grant.js";
 import { useTestIssuerKey } from "./testing/workload-client.js";
@@ -71,13 +73,16 @@ process.env.REGULAIT_PUBLIC_URL = ORIGIN;
 
 // a runtime Ed25519 key pair: the test signer the production build never has (SD4 pending)
 const directiveKeys = generateKeyPairSync("ed25519");
-const signer: DevicePolicySigner = { keyId: "test-directive-key", sign: async (b) => edSign(null, b, directiveKeys.privateKey) };
+const signer: DevicePolicySigner = { kind: "device_policy_signer", keyId: "test-directive-key", signPayload: async (b) => edSign(null, b, directiveKeys.privateKey) };
 
 let db: Db;
 let app: ReturnType<typeof buildApp>;
 let unsigned: ReturnType<typeof buildApp>;
 let adminId: string;
 let adminKey: { authorization: string };
+/** the second administrator a removal names (ADR-0186), and a third admin outside its pool */
+let approverId: string;
+let otherAdminId: string;
 const restores: Array<() => Promise<void>> = [];
 const sourceIds: string[] = [];
 
@@ -98,39 +103,40 @@ async function asAdmin(args: StepUpCheckArgs | null, method: Method, url: string
   return { res, grantId: g.grantId };
 }
 const stepFor = (body: Record<string, unknown>) => endpointRemediationStepUp(createRemovalSchema.parse(body));
-/** create a removal with the right grant; expects 201 */
-async function createRemoval(body: Record<string, unknown>) {
+/** request a removal with the right grant (expects 201): it awaits approval, nothing is written for its targets */
+async function requestRemoval(body: Record<string, unknown>) {
   const { res } = await asAdmin(stepFor(body), "POST", "/v1/discovery/endpoint-addon-removals", body);
   expect(res.statusCode, res.body).toBe(201);
-  return res.json() as { removal: { id: string; targets: Record<string, number>; expiresAt: string }; devices: number };
+  return res.json() as { removal: { id: string; status: string; approvalId: string; targets: Record<string, number>; expiresAt: string }; resolved: number; devices: number };
 }
+const approvalOfRemoval = async (removalId: string) => {
+  const [r] = await db.select().from(endpointAddonRemovals).where(eq(endpointAddonRemovals.id, removalId));
+  return (await db.select().from(approvals).where(eq(approvals.id, r!.approvalId)))[0]!;
+};
+/** a decision through the one decide path, as `as`, with an approval_decide grant bound to `facts` (default: the right ones) */
+async function decide(removalId: string, decision: "approved" | "denied" = "approved", as = approverId, grant: "right" | "none" | "wrong" = "right", reason?: string) {
+  const ap = await approvalOfRemoval(removalId);
+  const right = endpointAddonRemovalDecideStepUp(ap.id, decision, ap.argumentsDigest!);
+  const args = grant === "wrong" ? endpointAddonRemovalDecideStepUp(ap.id, decision, "0".repeat(64)) : right;
+  const g = await grantStepUpForTest(db, as, args);
+  const r = grant === "none" ? sessionRequest(g) : stepUpRequest(g);
+  const res = await app.inject({ method: "POST", url: `/v1/approvals/${ap.id}/decide`, headers: r.headers, cookies: r.cookies, payload: { decision, ...(reason ? { reason } : {}) } });
+  return { res, grantId: g.grantId };
+}
+/** request and approve a removal (expects both to succeed); returns its detail after the approval */
+async function createRemoval(body: Record<string, unknown>) {
+  const asked = await requestRemoval(body);
+  const d = await decide(asked.removal.id);
+  expect(d.res.statusCode, d.res.body).toBe(200);
+  const detail = await inject(app, "GET", `/v1/discovery/endpoint-addon-removals/${asked.removal.id}`, adminKey);
+  expect(detail.statusCode, detail.body).toBe(200);
+  return { removal: detail.json().removal as { id: string; status: string; targets: Record<string, number>; expiresAt: string }, devices: asked.devices };
+}
+const setMode = (mode: "normal" | "halted" | "read_only") =>
+  db.update(orgSettings).set({ executionMode: mode, executionModeReason: mode === "normal" ? null : `a331 ${mode}` }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
 
-let seq = 0;
-async function enrolled() {
-  const r = await inject(app, "POST", "/v1/discovery/sources", AUTH, { name: `a331-agent-${RUN}-${++seq}`, kind: "endpoint_agent", target: { fleet: `fleet-${RUN}` }, scope: { orgLevel: true, include: [] } });
-  expect(r.statusCode, r.body).toBe(201);
-  const sourceId = r.json().id as string;
-  sourceIds.push(sourceId);
-  // enabling is SD0's step-up route (covered by SD0's suite); here the row is set directly
-  await db.update(discoverySources).set({ enabled: true, enabledAt: new Date(), enabledBy: adminId }).where(eq(discoverySources.id, sourceId));
-  const tok = await inject(app, "POST", `/v1/discovery/sources/${sourceId}/enrolment-tokens`, AUTH, { label: `a331-${RUN}`, deviceCap: 5 });
-  expect(tok.statusCode, tok.body).toBe(201);
-  const t = await inject(app, "POST", "/v1/endpoint-agent/enrolment-tickets", { authorization: `Bearer ${tok.json().enrolFile.token}` }, { hostname: `a331-host-${RUN}-${seq}`, os: "linux", arch: "amd64", agentVersion: "0.1.0" });
-  expect(t.statusCode, t.body).toBe(201);
-  const key = await AgentKey.make();
-  const reg = await inject(app, "POST", "/v1/endpoint-agent/register", { authorization: `Bearer ${t.json().ticket}` }, {
-    publicJwk: key.jwk,
-    keyProtection: "hardware",
-    keyProvider: "tpm",
-    agentVersion: "0.1.0",
-    os: "linux",
-    arch: "amd64",
-    deviceUser: `a331user${RUN}`,
-  });
-  expect(reg.statusCode, reg.body).toBe(201);
-  return { sourceId, deviceId: t.json().ticketId as string, identityId: reg.json().identityId as string, key, ticket: t.json().ticket as string };
-}
-type Agent = Awaited<ReturnType<typeof enrolled>>;
+const enrolled = () => enrolEndpointAgent(app, db, AgentKey, { auth: AUTH, run: RUN, enabledBy: adminId, sourceIds });
+type Agent = EnrolledAgent;
 
 /** a second device user on the same device: another identity registered under the same device ticket */
 async function secondUser(a: Agent): Promise<Agent> {
@@ -148,54 +154,9 @@ async function secondUser(a: Agent): Promise<Agent> {
   return { ...a, identityId: reg.json().identityId as string, key };
 }
 
-/** a signed report of `a` as the ingest leaves it (refused status, so no ingest pass in another suite picks it up) */
-async function reportOf(a: Agent): Promise<string> {
-  const [r] = await db
-    .insert(endpointAgentReports)
-    .values({
-      identityId: a.identityId,
-      deviceId: a.deviceId,
-      sourceId: a.sourceId,
-      snapshotId: randomUUID(),
-      collectedAt: new Date(),
-      bodySha256: "a".repeat(64),
-      factsDigest: "b".repeat(64),
-      manifestVersion: "1.0.0",
-      manifestDigest: "c".repeat(64),
-      factsReceived: 0,
-      factsEnvRefused: 0,
-      factsUnmatched: 0,
-      droppedSnapshots: 0,
-      status: "refused",
-      runId: randomUUID(),
-      committedAt: new Date(),
-    })
-    .returning({ id: endpointAgentReports.id });
-  return r!.id;
-}
-
 /** evidence as an accepted report leaves it (ADR-0259's table), written directly so each case is exact */
-async function seen(a: Agent, o: { root?: string; serverName?: string; pkg?: string; version?: string | null; daysAgo?: number; path?: string; noReport?: boolean }) {
-  const at = new Date(Date.now() - (o.daysAgo ?? 0) * 86_400_000);
-  await db.insert(endpointMcpServers).values({
-    deviceId: a.deviceId,
-    // the identity whose report last showed it; `noReport`: that report is gone
-    lastReportId: o.noReport ? randomUUID() : await reportOf(a),
-    signatureId: "sig.a331.host",
-    provider: "a331prov",
-    configRoot: (o.root ?? "home") as "home",
-    configPath: o.path ?? CONFIG,
-    serverName: o.serverName ?? "flagged",
-    transport: "stdio",
-    command: "npx",
-    package: o.pkg ?? PKG,
-    packageVersion: o.version === undefined ? "1.2.3" : o.version,
-    identityKind: "package",
-    identity: o.pkg ?? PKG,
-    firstSeenAt: at,
-    lastSeenAt: at,
-  });
-}
+const seen = (a: Agent, o: { root?: string; serverName?: string; pkg?: string; version?: string | null; daysAgo?: number; path?: string; noReport?: boolean }) =>
+  seenMcpServer(db, a, { ...o, pkg: o.pkg ?? PKG, path: o.path ?? CONFIG });
 
 const directivesOf = async (a: Agent, via = app) => inject(via, "GET", "/v1/endpoint-agent/directives", await a.key.headers("GET", "/v1/endpoint-agent/directives"));
 async function postOutcomes(a: Agent, outcomes: unknown[]) {
@@ -238,9 +199,9 @@ beforeAll(async () => {
     await db.update(discoverySettings).set({ endpointAddonRemovalEnabled: s0.endpointAddonRemovalEnabled }).where(eq(discoverySettings.id, 1));
   });
   // the strict step-up policy, every kind (this suite proves the new one); put back what was there afterwards
-  const [o0] = await db.select({ mode: orgSettings.stepUpMode, actions: orgSettings.stepUpActions }).from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  const [o0] = await db.select({ mode: orgSettings.stepUpMode, actions: orgSettings.stepUpActions, exec: orgSettings.executionMode }).from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   restores.push(async () => {
-    if (o0) await db.update(orgSettings).set({ stepUpMode: o0.mode, stepUpActions: o0.actions }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    if (o0) await db.update(orgSettings).set({ stepUpMode: o0.mode, stepUpActions: o0.actions, executionMode: o0.exec }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY, devicePolicySigner: signer });
   unsigned = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
@@ -252,6 +213,14 @@ beforeAll(async () => {
   await db.update(users).set({ isAdmin: true }).where(eq(users.id, adminId));
   adminKey = { authorization: `Bearer ${(await inject(app, "POST", `/v1/users/${adminId}/keys`, AUTH, { name: "k" })).json().token}` };
   await db.update(users).set({ totpEnabled: true }).where(eq(users.id, adminId));
+  for (const who of ["approver", "other"] as const) {
+    const u = await inject(app, "POST", "/v1/users", AUTH, { email: `a331-${who}-${RUN}@example.com`, displayName: `a331 ${who}` });
+    expect(u.statusCode, u.body).toBe(201);
+    await db.update(users).set({ isAdmin: true, totpEnabled: true }).where(eq(users.id, u.json().id));
+    if (who === "approver") approverId = u.json().id;
+    else otherAdminId = u.json().id;
+  }
+  await setMode("normal");
   A = await enrolled();
   B = await enrolled();
   C = await enrolled();
@@ -270,7 +239,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (db) {
     await db.delete(endpointAddonRemovals).where(sql`${endpointAddonRemovals.identity} LIKE ${`%${RUN}%`}`);
-    if (adminId) await db.update(users).set({ totpEnabled: false }).where(eq(users.id, adminId));
+    for (const id of [adminId, approverId, otherAdminId]) if (id) await db.update(users).set({ totpEnabled: false }).where(eq(users.id, id));
     if (sourceIds.length) {
       await db.update(discoverySources).set({ enabled: false }).where(inArray(discoverySources.id, sourceIds));
       await db.delete(discoverySources).where(inArray(discoverySources.id, sourceIds));
@@ -283,7 +252,7 @@ afterAll(async () => {
   else process.env.REGULAIT_PUBLIC_URL = prevPublicUrl;
 });
 
-const base = (scope: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({ identityKind: "package", identity: PKG, scope, reason: `a331 flagged ${RUN}`, ...extra });
+const base = (scope: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({ identityKind: "package", identity: PKG, scope, approverUserId: approverId, reason: `a331 flagged ${RUN}`, ...extra });
 
 describe("ADR-0331: the org switch", () => {
   it("is off by default; on needs the settings_relax step-up bound to it (audited); off is free", async () => {
@@ -386,9 +355,12 @@ describe("ADR-0331: starting a removal", () => {
     const [row] = await db.select().from(endpointAddonRemovals).where(eq(endpointAddonRemovals.id, one.removal.id));
     expect(row!.expiresAt.getTime() - row!.createdAt.getTime()).toBe(7 * 86_400_000);
     expect(row!.createdBy).toBe(adminId);
-    const [audit] = await db.select().from(auditLog).where(and(eq(auditLog.objectId, one.removal.id), eq(auditLog.ruleId, "endpoint-addon-removal-created")));
-    expect(audit).toMatchObject({ userId: adminId, effect: "allow", objectType: "endpoint_addon_removal" });
-    expect(audit!.detail).toMatchObject({ targets: 2, devices: 1, stepUp: "totp", stepUpKind: "endpoint_remediation", blockReinstall: true });
+    const [audit] = await db.select().from(auditLog).where(and(eq(auditLog.objectId, one.removal.id), eq(auditLog.ruleId, "endpoint-addon-removal-requested")));
+    expect(audit).toMatchObject({ userId: adminId, effect: "require_approval", objectType: "endpoint_addon_removal" });
+    expect(audit!.detail).toMatchObject({ targets: 2, devices: 1, stepUp: "totp", stepUpKind: "endpoint_remediation", blockReinstall: true, approverUserId: approverId });
+    const [approved] = await db.select().from(auditLog).where(and(eq(auditLog.objectId, one.removal.id), eq(auditLog.ruleId, "endpoint-addon-removal-approved")));
+    expect(approved).toMatchObject({ userId: approverId, effect: "allow" });
+    expect(approved!.detail).toMatchObject({ targets: 2, devices: 1, stepUp: "totp" });
 
     const many = await createRemoval(base({ kind: "devices", deviceIds: [B.deviceId, A.deviceId, C.deviceId] }));
     const mt = await targetsOf(many.removal.id);
@@ -586,6 +558,29 @@ describe("ADR-0331: directives and outcomes", () => {
     expect(JSON.stringify(detail)).not.toContain(`a331user${RUN}`);
   });
 
+  it("cancelling after delivery stops only undelivered targets; a delivered directive's real outcome is still recorded", async () => {
+    await setSwitch(true);
+    const pkg = `@a331-${RUN}/late-cancel`;
+    await seen(A, { pkg });
+    await seen(A, { pkg, root: "appdata", path: `Cursor/a331-late-${RUN}/mcp.json` });
+    const r = await createRemoval(base({ kind: "device", deviceId: A.deviceId }, { identity: pkg }));
+    const ts = await targetsOf(r.removal.id);
+    expect(ts).toHaveLength(2);
+    // deliver ONE of the two (the other stays pending), as an agent that fetched before the cancel
+    await db.update(endpointAddonRemovalTargets).set({ status: "delivered", deliveredAt: sql`now()` }).where(eq(endpointAddonRemovalTargets.id, ts[0]!.id));
+    const c = await app.inject({ method: "POST", url: `/v1/discovery/endpoint-addon-removals/${r.removal.id}/cancel`, headers: adminKey });
+    expect(c.statusCode, c.body).toBe(200);
+    expect(c.json()).toMatchObject({ cancelled: 1, removal: { status: "cancelled", targets: { delivered: 1, cancelled: 1 } } });
+    // the device ran it: its report is accepted and recorded, not refused as cancelled
+    const out = await postOutcomes(A, [{ directiveId: ts[0]!.id, outcome: "removed", code: "removed", notified: true }]);
+    expect(out.json()).toEqual({ accepted: 1, refused: [] });
+    expect((await db.select().from(endpointAddonRemovalTargets).where(eq(endpointAddonRemovalTargets.id, ts[0]!.id)))[0]).toMatchObject({ status: "removed", code: "removed" });
+    // the cancelled one never had a directive out: a report of it is refused, and it is never served
+    expect((await postOutcomes(A, [{ directiveId: ts[1]!.id, outcome: "removed", code: "removed", notified: true }])).json()).toEqual({ accepted: 0, refused: [{ directiveId: ts[1]!.id, code: "directive_cancelled" }] });
+    const ids = ((await directivesOf(A)).json().directives as Array<{ payload: string }>).map((e) => decode(e).removalId);
+    expect(ids).not.toContain(r.removal.id);
+  });
+
   it("admin routes refuse a non-admin; agent routes refuse a person", async () => {
     const m = await inject(app, "POST", "/v1/users", AUTH, { email: `a331-member-${RUN}@example.com`, displayName: "a331 member" });
     const memberKey = { authorization: `Bearer ${(await inject(app, "POST", `/v1/users/${m.json().id}/keys`, AUTH, { name: "k" })).json().token}` };
@@ -597,5 +592,160 @@ describe("ADR-0331: directives and outcomes", () => {
     // a step-up grant of the new kind exists only through the CHECK's new vocabulary
     const [g] = await db.select({ n: sql<number>`count(*)::int` }).from(stepUpGrants).where(and(eq(stepUpGrants.userId, adminId), eq(stepUpGrants.actionKind, "endpoint_remediation")));
     expect(Number(g!.n)).toBeGreaterThan(0);
+  });
+});
+
+describe("ADR-0331 + ADR-0186: a second administrator approves before anything is sent", () => {
+  const pkg = `@a331-${RUN}/approval`;
+  it("the request names an eligible approver; it queues an approval and writes no target", async () => {
+    await setSwitch(true);
+    await seen(A, { pkg });
+    const self = base({ kind: "device", deviceId: A.deviceId }, { identity: pkg, approverUserId: adminId });
+    expect((await asAdmin(stepFor(self), "POST", "/v1/discovery/endpoint-addon-removals", self)).res.json().error).toBe("approver_is_requester");
+    const m = await inject(app, "POST", "/v1/users", AUTH, { email: `a331-nonadmin-${RUN}@example.com`, displayName: "a331 non-admin" });
+    const nonAdmin = base({ kind: "device", deviceId: A.deviceId }, { identity: pkg, approverUserId: m.json().id });
+    const na = await asAdmin(stepFor(nonAdmin), "POST", "/v1/discovery/endpoint-addon-removals", nonAdmin);
+    expect(na.res.statusCode).toBe(422);
+    expect(na.res.json().error).toBe("approver_not_eligible");
+    expect(await grantSpent(db, na.grantId)).toBe(false);
+
+    const asked = await requestRemoval(base({ kind: "device", deviceId: A.deviceId }, { identity: pkg }));
+    expect(asked.removal.status).toBe("awaiting_approval");
+    expect(asked.resolved).toBe(1);
+    expect(await targetsOf(asked.removal.id)).toEqual([]);
+    const ap = await approvalOfRemoval(asked.removal.id);
+    expect(ap).toMatchObject({ objectType: "endpoint_addon_removal", userId: adminId, approverUserId: approverId, status: "pending" });
+    expect(ap.argumentsDigest).toMatch(/^[0-9a-f]{64}$/);
+    // the approver's queue says what it removes, from where
+    const sess = sessionRequest(await grantStepUpForTest(db, approverId, { kind: "settings_relax", facts: { unused: RUN } }));
+    const queue = await app.inject({ method: "GET", url: "/v1/approvals?status=pending", headers: sess.headers, cookies: sess.cookies });
+    expect(queue.statusCode, queue.body).toBe(200);
+    const row = (queue.json().approvals as Array<{ id: string; objectType: string; objectLabel: string }>).find((x) => x.id === ap.id);
+    expect(row).toMatchObject({ objectType: "endpoint_addon_removal", objectLabel: `remove MCP server package '${pkg}' from one endpoint` });
+    expect(ap.expiresAt!.getTime()).toBe((await db.select().from(endpointAddonRemovals).where(eq(endpointAddonRemovals.id, asked.removal.id)))[0]!.expiresAt.getTime());
+    expect(await db.select().from(endpointAddonRemovalDevices).where(eq(endpointAddonRemovalDevices.removalId, asked.removal.id))).toEqual([{ removalId: asked.removal.id, deviceId: A.deviceId }]);
+    // nothing is served while it waits
+    const served = ((await directivesOf(A)).json().directives as Array<{ payload: string }>).map((e) => decode(e).removalId);
+    expect(served).not.toContain(asked.removal.id);
+
+    // the requester cannot decide it, nor an admin outside its pool, nor the approver without the bound step-up
+    // (with a reason, so the generic admin-override rule is satisfied and this kind's own guards answer)
+    expect((await decide(asked.removal.id, "approved", adminId, "right", "override")).res.json().error).toBe("cannot_approve_own_endpoint_addon_removal");
+    const outside = await decide(asked.removal.id, "approved", otherAdminId, "right", "override");
+    expect(outside.res.statusCode).toBe(403);
+    expect(outside.res.json().error).toBe("not_in_approval_pool");
+    expect(await grantSpent(db, outside.grantId)).toBe(false);
+    const none = await decide(asked.removal.id, "approved", approverId, "none");
+    expect(none.res.statusCode).toBe(403);
+    expect(none.res.json()).toMatchObject({ error: "step_up_required", actionKind: "approval_decide" });
+    const wrong = await decide(asked.removal.id, "approved", approverId, "wrong");
+    expect(wrong.res.statusCode).toBe(403);
+    expect(await grantSpent(db, wrong.grantId)).toBe(false);
+    expect((await approvalOfRemoval(asked.removal.id)).status).toBe("pending");
+
+    const ok = await decide(asked.removal.id);
+    expect(ok.res.statusCode, ok.res.body).toBe(200);
+    expect(await grantSpent(db, ok.grantId)).toBe(true);
+    expect((await db.select().from(endpointAddonRemovals).where(eq(endpointAddonRemovals.id, asked.removal.id)))[0]!.status).toBe("active");
+    expect(await targetsOf(asked.removal.id)).toHaveLength(1);
+    const now = ((await directivesOf(A)).json().directives as Array<{ payload: string }>).map((e) => decode(e).removalId);
+    expect(now).toContain(asked.removal.id);
+  });
+
+  it("denied: nothing is ever written or sent", async () => {
+    await setSwitch(true);
+    const asked = await requestRemoval(base({ kind: "device", deviceId: A.deviceId }, { identity: pkg, reason: `deny ${RUN}` }));
+    const d = await decide(asked.removal.id, "denied");
+    expect(d.res.statusCode, d.res.body).toBe(200);
+    expect((await db.select().from(endpointAddonRemovals).where(eq(endpointAddonRemovals.id, asked.removal.id)))[0]!.status).toBe("denied");
+    expect(await targetsOf(asked.removal.id)).toEqual([]);
+    const c = await app.inject({ method: "POST", url: `/v1/discovery/endpoint-addon-removals/${asked.removal.id}/cancel`, headers: adminKey });
+    expect(c.statusCode).toBe(409);
+    expect(c.json().error).toBe("removal_not_cancellable");
+  });
+
+  it("stale: when the endpoints changed after the request, the approval sends nothing", async () => {
+    await setSwitch(true);
+    const stalePkg = `@a331-${RUN}/stale`;
+    await seen(A, { pkg: stalePkg });
+    const asked = await requestRemoval(base({ kind: "recent", days: 1 }, { identity: stalePkg }));
+    // another endpoint reports it before the decision: what would be sent is no longer what was approved
+    await seen(B, { pkg: stalePkg });
+    const d = await decide(asked.removal.id);
+    expect(d.res.statusCode, d.res.body).toBe(200);
+    expect((await db.select().from(endpointAddonRemovals).where(eq(endpointAddonRemovals.id, asked.removal.id)))[0]!.status).toBe("stale");
+    expect(await targetsOf(asked.removal.id)).toEqual([]);
+    const [audit] = await db.select().from(auditLog).where(and(eq(auditLog.objectId, asked.removal.id), eq(auditLog.ruleId, "endpoint-addon-removal-stale")));
+    expect(audit!.detail).toMatchObject({ why: "targets_changed", resolved: 2 });
+  });
+
+  it("cancelling a removal that awaits its decision withdraws the approval", async () => {
+    await setSwitch(true);
+    const asked = await requestRemoval(base({ kind: "device", deviceId: A.deviceId }, { identity: pkg, reason: `withdraw ${RUN}` }));
+    const c = await app.inject({ method: "POST", url: `/v1/discovery/endpoint-addon-removals/${asked.removal.id}/cancel`, headers: adminKey });
+    expect(c.statusCode, c.body).toBe(200);
+    expect(c.json()).toMatchObject({ cancelled: 0, removal: { status: "cancelled" } });
+    expect((await approvalOfRemoval(asked.removal.id)).status).toBe("superseded");
+    expect((await decide(asked.removal.id)).res.statusCode).not.toBe(200);
+    expect(await targetsOf(asked.removal.id)).toEqual([]);
+  });
+});
+
+describe("ADR-0331 + ADR-0186: the execution dial (kill switch)", () => {
+  const pkg = `@a331-${RUN}/dial`;
+  it("outside normal: no request is queued, no approval is accepted, and no directive is signed or delivered", async () => {
+    await setSwitch(true);
+    await seen(A, { pkg });
+    const asked = await requestRemoval(base({ kind: "device", deviceId: A.deviceId }, { identity: pkg }));
+    try {
+      for (const mode of ["halted", "read_only"] as const) {
+        await setMode(mode);
+        const body = base({ kind: "device", deviceId: A.deviceId }, { identity: pkg, reason: `dial ${mode} ${RUN}` });
+        const r = await asAdmin(stepFor(body), "POST", "/v1/discovery/endpoint-addon-removals", body);
+        expect(r.res.statusCode).toBe(409);
+        expect(r.res.json().error).toBe(mode === "halted" ? "execution_halted" : "execution_read_only");
+        expect(await grantSpent(db, r.grantId)).toBe(false);
+        const d = await decide(asked.removal.id);
+        expect(d.res.statusCode).toBe(409);
+        expect(await grantSpent(db, d.grantId)).toBe(false);
+      }
+      await setMode("normal");
+      expect((await decide(asked.removal.id)).res.statusCode).toBe(200);
+      const [target] = await targetsOf(asked.removal.id);
+      for (const mode of ["halted", "read_only"] as const) {
+        await setMode(mode);
+        const res = await directivesOf(A);
+        expect(res.statusCode, res.body).toBe(200);
+        expect(res.json()).toEqual({ directives: [] });
+        expect((await lastRead(A)).detail).toMatchObject({ served: 0, outcome: mode === "halted" ? "execution_halted" : "execution_read_only" });
+        // a halt destroys nothing: the target waits, undelivered
+        expect((await db.select().from(endpointAddonRemovalTargets).where(eq(endpointAddonRemovalTargets.id, target!.id)))[0]!.status).toBe("pending");
+      }
+    } finally {
+      await setMode("normal");
+    }
+    const served = ((await directivesOf(A)).json().directives as Array<{ payload: string }>).map((e) => decode(e).removalId);
+    expect(served).toContain(asked.removal.id);
+  });
+});
+
+describe("ADR-0331: the removal tables are under forced row-level security", () => {
+  const TABLES = ["endpoint_addon_removal_devices", "endpoint_addon_removal_targets", "endpoint_addon_removals"];
+  it("ENABLED and FORCED on all three; a non-admin principal sees nothing, an admin sees the rows", async () => {
+    const r = await db.execute<{ relname: string; on: boolean; forced: boolean }>(sql`
+      select relname, relrowsecurity as on, relforcerowsecurity as forced from pg_class
+       where relnamespace = 'public'::regnamespace and relname in ('endpoint_addon_removal_devices', 'endpoint_addon_removal_targets', 'endpoint_addon_removals') and relkind = 'r' order by relname`);
+    expect(r.rows.map((x) => [x.relname, x.on, x.forced])).toEqual(TABLES.map((t) => [t, true, true]));
+    const m = await inject(app, "POST", "/v1/users", AUTH, { email: `a331-rls-${RUN}@example.com`, displayName: "a331 rls" });
+    const count = async () => {
+      const out: number[] = [];
+      for (const t of TABLES) out.push((await db.execute<{ n: number }>(sql.raw(`select count(*)::int as n from ${t}`))).rows[0]!.n);
+      return out;
+    };
+    await runWithRlsPrincipal({ userId: m.json().id }, async () => expect(await count()).toEqual([0, 0, 0]));
+    await runWithRlsPrincipal({ userId: adminId }, async () => {
+      const [devices, targets, removals] = await count();
+      expect(devices! > 0 && targets! > 0 && removals! > 0).toBe(true);
+    });
   });
 });
