@@ -24,11 +24,11 @@ output "vpc_id" {
 }
 
 output "db_endpoint" {
-  value = module.db.db_instance_address
+  value = module.pg.address
 }
 
 output "db_port" {
-  value = module.db.db_instance_port
+  value = module.pg.port
 }
 
 output "db_name" {
@@ -37,7 +37,7 @@ output "db_name" {
 
 output "db_master_secret_arn" {
   description = "Secrets Manager secret holding the database master username and password (managed and encrypted by RDS)."
-  value       = module.db.db_instance_master_user_secret_arn
+  value       = module.pg.master_user_secret_arn
 }
 
 output "kms_key_arn" {
@@ -129,7 +129,7 @@ output "data_boundary" {
     Control plane and agent-execution plane: BOTH run in this account (EKS
     cluster ${module.eks.cluster_name}, region ${local.region}). Every prompt,
     completion, connector payload, audit row and key stays here: RDS
-    ${module.db.db_instance_identifier}, audit bucket ${module.audit_anchors.bucket},
+    ${module.pg.identifier}, audit bucket ${module.audit_anchors.bucket},
     KMS key ${module.kms.key_arn}.
     To RegulAIt (the vendor): nothing. The product has no telemetry, licence
     check or update call (docs/deployment/DATA_BOUNDARY.md section 1), and this
