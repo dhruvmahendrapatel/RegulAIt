@@ -160,6 +160,8 @@ import {
   CONTENT_SOURCE_KINDS,
   CONTENT_TRUST_TIERS,
   CONTENT_TRUST_WRITE_FLOORS,
+  AGENT_RISK_PROOF_OUTCOMES,
+  AGENT_RISK_PROOF_TRIGGERS,
   type ModalitySplit,
   // ADR-0346 (migration fairness_evaluation): the fairness-evaluation vocabularies, in lockstep with the CHECKs
   FAIRNESS_DATASET_KINDS,
@@ -17096,7 +17098,7 @@ export const ruleStepSettings = pgTable(
 );
 export type RuleStepSettingsRow = typeof ruleStepSettings.$inferSelect;
 
-export const RULE_STEP_SUGGESTION_STATUSES = ["suggested", "dismissed"] as const;
+export const RULE_STEP_SUGGESTION_STATUSES = ["suggested", "shadow", "dismissed"] as const;
 
 /** one suggestion per AI step (agent + span name): the latest scan's rule and its evidence */
 export const ruleStepSuggestions = pgTable(
@@ -17127,7 +17129,7 @@ export const ruleStepSuggestions = pgTable(
   (t) => [
     uniqueIndex("rule_step_suggestions_step_uq").on(t.agentId, t.stepName),
     index("rule_step_suggestions_status_savings_idx").on(t.status, t.projectedMonthlySavingsUsd),
-    check("rule_step_suggestions_status_check", sql`${t.status} IN ('suggested', 'dismissed')`),
+    check("rule_step_suggestions_status_check", sql`${t.status} IN ('suggested', 'shadow', 'dismissed')`),
     check("rule_step_suggestions_rates_check", sql`${t.agreement} BETWEEN 0 AND 1 AND ${t.coverage} BETWEEN 0 AND 1`),
     check(
       "rule_step_suggestions_dismissed_check",
@@ -17136,6 +17138,43 @@ export const ruleStepSuggestions = pgTable(
   ],
 );
 export type RuleStepSuggestionRow = typeof ruleStepSuggestions.$inferSelect;
+
+/**
+ * ADR-0327 slice 3b (migration `rule_step_shadow`): one shadow period of a suggestion. The counters are a measured read
+ * model of `trace_spans` (its source of truth), advanced through the `(evaluatedThrough, evaluatedThroughId)` keyset; counts only, never span content.
+ * At most one open period per suggestion. Nothing here changes routing.
+ */
+export const ruleStepShadows = pgTable(
+  "rule_step_shadows",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    suggestionId: uuid("suggestion_id")
+      .notNull()
+      .references(() => ruleStepSuggestions.id, { onDelete: "cascade" }),
+    startedBy: uuid("started_by").references(() => users.id, { onDelete: "set null" }),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    stoppedBy: uuid("stopped_by").references(() => users.id, { onDelete: "set null" }),
+    stoppedAt: timestamp("stopped_at", { withTimezone: true }),
+    /** the last span already counted, as a keyset (start time, id); both null until something is counted. No foreign
+     * key: it is a cursor position, and the span may be pruned while the period stays */
+    evaluatedThrough: timestamp("evaluated_through", { withTimezone: true }),
+    evaluatedThroughId: uuid("evaluated_through_id"),
+    /** structured runs seen since the start */
+    runs: integer("runs").notNull().default(0),
+    /** of those, the runs the rule answers (an input inside its table) */
+    covered: integer("covered").notNull().default(0),
+    /** of those, the runs where the rule's answer equals the AI's */
+    agreed: integer("agreed").notNull().default(0),
+  },
+  (t) => [
+    uniqueIndex("rule_step_shadows_open_uq").on(t.suggestionId).where(sql`${t.stoppedAt} IS NULL`),
+    index("rule_step_shadows_suggestion_started_idx").on(t.suggestionId, t.startedAt),
+    check("rule_step_shadows_counts_check", sql`${t.runs} >= 0 AND ${t.covered} BETWEEN 0 AND ${t.runs} AND ${t.agreed} BETWEEN 0 AND ${t.covered}`),
+    check("rule_step_shadows_stop_check", sql`${t.stoppedAt} IS NULL OR ${t.stoppedAt} >= ${t.startedAt}`),
+    check("rule_step_shadows_cursor_check", sql`(${t.evaluatedThrough} IS NULL) = (${t.evaluatedThroughId} IS NULL)`),
+  ],
+);
+export type RuleStepShadowRow = typeof ruleStepShadows.$inferSelect;
 
 // ---------------------------------------------------------------------------
 // Lane L7 (P14 + P16 lineage; ADR-0216 / ADR-0217 amendments, migration model_artifact_lineage)
@@ -17449,6 +17488,106 @@ export const workflowTemplateVersions = pgTable(
 );
 export type WorkflowTemplateVersionRow = typeof workflowTemplateVersions.$inferSelect;
 // ===== end ADR-0341 =====
+
+// ===== ADR-0345 (lane E26): agent risk / control / proof registry =====
+// The catalogue (risks, OWASP items, controls, proofs) is code in `@regulait/shared` (`AGENT_RISKS`), like ADR-0081's
+// `RISK_CATEGORY_EVIDENCE`. `proof_key` columns reference that catalogue's stable keys, not a table (ADR-0200
+// exception: the referent is a versioned code catalogue; the CHECK pins the key's shape and the gateway refuses an
+// unknown key). Single-tenant deployment: isolation is the admin/system RLS policy of the migration.
+
+/**
+ * An admin's relaxation of one proof's schedule. No row = the secure default (enabled, the catalogue's interval).
+ * Written only by the audited settings route.
+ */
+export const agentRiskProofSettings = pgTable(
+  "agent_risk_proof_settings",
+  {
+    proofKey: text("proof_key").primaryKey(),
+    enabled: boolean("enabled").notNull().default(true),
+    /** null = the catalogue's default interval */
+    intervalHours: integer("interval_hours"),
+    updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("agent_risk_proof_settings_key_check", sql`${t.proofKey} ~ '^[a-z_]+[.][a-z_]+$'`),
+    check(
+      "agent_risk_proof_settings_interval_check",
+      sql`${t.intervalHours} IS NULL OR ${t.intervalHours} BETWEEN 1 AND 168`,
+    ),
+  ],
+);
+export type AgentRiskProofSettingRow = typeof agentRiskProofSettings.$inferSelect;
+
+/**
+ * One proof run's result: append-only evidence, INSERTED only by the proof runner (system task) or a migration and
+ * read by admins (RLS), so no principal can fabricate a pass; never updated or deleted (`regulait_refuse_mutation`, no
+ * TRUNCATE). `outcome` is ADR-0180's `MeasurementState`. Each row is written in the same transaction as its
+ * hash-chained audit row (ADR-0060), which it references and which carries the same `content_hash` (SHA-256 of
+ * ADR-0060's canonical JSON of the evidence); `signature` is the ADR-0116 Ed25519 signature over that hash when a
+ * signing key is configured (both or neither). `detail` is a point-in-time snapshot (ADR-0200 exception): the engine's
+ * summary as it was when the proof ran.
+ */
+export const agentRiskProofResults = pgTable(
+  "agent_risk_proof_results",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    proofKey: text("proof_key").notNull(),
+    catalogVersion: integer("catalog_version").notNull(),
+    trigger: text("trigger", { enum: AGENT_RISK_PROOF_TRIGGERS }).notNull(),
+    outcome: text("outcome", { enum: AGENT_RISK_PROOF_OUTCOMES }).notNull(),
+    runAsUserId: uuid("run_as_user_id").references(() => users.id, { onDelete: "set null" }),
+    redteamRunId: uuid("redteam_run_id").references(() => redteamRuns.id, { onDelete: "set null" }),
+    /** the hash-chained audit row written with this result. Deliberately no FK (ADR-0200 exception, the
+     * `execution_placements.audit_id` precedent): nothing references `audit_log`, which retention prunes (ADR-0021),
+     * and the evidence row must outlive a pruned audit row. */
+    auditLogId: uuid("audit_log_id").notNull(),
+    contentHash: text("content_hash").notNull(),
+    signature: text("signature"),
+    signingKeyId: text("signing_key_id"),
+    detail: jsonb("detail").notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("agent_risk_proof_results_key_check", sql`${t.proofKey} ~ '^[a-z_]+[.][a-z_]+$'`),
+    check("agent_risk_proof_results_hash_check", sql`${t.contentHash} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "agent_risk_proof_results_signature_check",
+      sql`(${t.signature} IS NULL) = (${t.signingKeyId} IS NULL)`,
+    ),
+    check("agent_risk_proof_results_detail_check", sql`jsonb_typeof(${t.detail}) = 'object'`),
+    check("agent_risk_proof_results_order_check", sql`${t.finishedAt} >= ${t.startedAt}`),
+    check("agent_risk_proof_results_trigger_check", sql`${t.trigger} IN ('scheduled', 'manual')`),
+    check(
+      "agent_risk_proof_results_outcome_check",
+      sql`${t.outcome} IN ('pass', 'fail', 'insufficient', 'not_run')`,
+    ),
+    uniqueIndex("agent_risk_proof_results_audit_uq").on(t.auditLogId),
+    index("agent_risk_proof_results_latest_idx").on(t.proofKey, t.finishedAt),
+    index("agent_risk_proof_results_redteam_run_idx").on(t.redteamRunId),
+  ],
+);
+export type AgentRiskProofResultRow = typeof agentRiskProofResults.$inferSelect;
+
+/** What a failed proof raised: the governance alert and the approvals-queue item, each linked to the result. */
+export const agentRiskProofFollowups = pgTable(
+  "agent_risk_proof_followups",
+  {
+    resultId: uuid("result_id")
+      .primaryKey()
+      .references(() => agentRiskProofResults.id, { onDelete: "cascade" }),
+    alertId: uuid("alert_id").references(() => governanceAlerts.id, { onDelete: "set null" }),
+    approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("agent_risk_proof_followups_alert_idx").on(t.alertId),
+    index("agent_risk_proof_followups_approval_idx").on(t.approvalId),
+  ],
+);
+export type AgentRiskProofFollowupRow = typeof agentRiskProofFollowups.$inferSelect;
+// ===== end ADR-0345 =====
 
 // ===== ADR-0363 (lane E44): customer sensitivity labels — migration `sensitivity_labels` (pending, numbered at merge) =====
 /**
