@@ -19,17 +19,23 @@ import { z } from "zod";
 import {
   agents,
   and,
+  asc,
   auditLog,
   desc,
   eq,
   getTableColumns,
+  inArray,
+  isNull,
   ruleStepSettings,
+  ruleStepShadows,
   ruleStepSuggestions,
   sql,
   traceSpans,
   type Db,
   type RuleStepSettingsRow,
+  type RuleStepShadowRow,
   type RuleStepSuggestionRow,
+  type SQL,
   RULE_STEP_SUGGESTION_STATUSES,
 } from "@regulait/db";
 import {
@@ -37,11 +43,13 @@ import {
   RULE_INDUCTION_FLOORS,
   extractStepFields,
   renderInducedRule,
+  tallyShadow,
   type InducedRule,
   type StepRun,
 } from "@regulait/optimizer-kernel";
 import { induceStepRuleOffThread } from "@regulait/optimizer-kernel/offload";
-import { TRACE_TRUNCATION_MARKER } from "@regulait/shared";
+import { RULE_STEP_SUGGESTION_MACHINE, TRACE_TRUNCATION_MARKER } from "@regulait/shared";
+import { whereFrom } from "./state-transition.js";
 import { requireStepUp } from "./step-up.js";
 import { SCAN_WINDOW_DAYS } from "./rule-step-retention.js";
 import type { ListSpec } from "./list-contract.js";
@@ -56,10 +64,35 @@ export { SCAN_WINDOW_DAYS };
 export const SCAN_SPACING_MINUTES = 10;
 const MONTH_DAYS = 30;
 
+/** ADR-0327: the suggestion lifecycle is `RULE_STEP_SUGGESTION_MACHINE` (ADR-0348, `@regulait/shared`); every status
+ * change goes through `transitionSuggestion`, and nothing else writes `status`. */
+export type RuleStepTransition = (typeof RULE_STEP_SUGGESTION_MACHINE.events)[number];
+
+/**
+ * Apply one declared transition atomically: the row moves only if it is still in a state the event may leave from
+ * (ADR-0348 `whereFrom`, one compare-and-set UPDATE), so two concurrent requests cannot both move it. Returns the
+ * updated row, or null when the suggestion does not exist or is not in such a state.
+ */
+async function transitionSuggestion(
+  db: Db,
+  id: string,
+  event: RuleStepTransition,
+  extra: { [K in keyof typeof ruleStepSuggestions.$inferInsert]?: (typeof ruleStepSuggestions.$inferInsert)[K] | SQL } = {},
+): Promise<RuleStepSuggestionRow | null> {
+  const [row] = await db
+    .update(ruleStepSuggestions)
+    .set({ ...extra, status: RULE_STEP_SUGGESTION_MACHINE.def.transitions[event].to })
+    .where(and(eq(ruleStepSuggestions.id, id), whereFrom(ruleStepSuggestions.status, RULE_STEP_SUGGESTION_MACHINE, event)))
+    .returning();
+  return row ?? null;
+}
+
 export const RULE_STEP_AUDIT_RULE_IDS = {
   settings: "rule_step_settings_changed",
   scan: "rule_step_scan",
   dismiss: "rule_step_suggestion_dismissed",
+  shadowStarted: "rule_step_shadow_started",
+  shadowStopped: "rule_step_shadow_stopped",
 } as const;
 
 type Thresholds = { minRuns: number; minAgreement: number; minCoverage: number; minCellSupport: number };
@@ -113,7 +146,37 @@ export function relaxedRuleStepSettings(body: z.infer<typeof settingsBody>, curr
   return out;
 }
 
-function view(row: RuleStepSuggestionRow & { agentName: string | null }) {
+/** a shadow period as the API shows it: counts and the two rates (null until there is something to divide) */
+function shadowView(s: RuleStepShadowRow | undefined) {
+  if (!s) return null;
+  return {
+    id: s.id,
+    startedAt: s.startedAt,
+    stoppedAt: s.stoppedAt,
+    evaluatedThrough: s.evaluatedThrough,
+    runs: s.runs,
+    covered: s.covered,
+    agreed: s.agreed,
+    coverage: s.runs > 0 ? s.covered / s.runs : null,
+    agreement: s.covered > 0 ? s.agreed / s.covered : null,
+  };
+}
+
+/** the latest shadow period of each suggestion, in one query (no N+1) */
+async function latestShadows(db: Db, suggestionIds: readonly string[]): Promise<Map<string, RuleStepShadowRow>> {
+  if (suggestionIds.length === 0) return new Map();
+  const rows = await db
+    .selectDistinctOn([ruleStepShadows.suggestionId])
+    .from(ruleStepShadows)
+    .where(inArray(ruleStepShadows.suggestionId, [...suggestionIds]))
+    .orderBy(ruleStepShadows.suggestionId, desc(ruleStepShadows.startedAt));
+  return new Map(rows.map((r) => [r.suggestionId, r]));
+}
+
+/** a refusal the table alone cannot know, shown beside the lifecycle (ADR-0348 `describe`) */
+const DETECTION_OFF = "rule-like step detection is off; an admin turns it on in the rule-step settings";
+
+function view(row: RuleStepSuggestionRow & { agentName: string | null }, shadow: RuleStepShadowRow | undefined, detectionOn: boolean) {
   const rule = row.rule as InducedRule;
   return {
     id: row.id,
@@ -121,6 +184,8 @@ function view(row: RuleStepSuggestionRow & { agentName: string | null }) {
     agentName: row.agentName,
     stepName: row.stepName,
     status: row.status,
+    /** read-only (ADR-0348): every event, whether it is allowed now, and why not */
+    lifecycle: RULE_STEP_SUGGESTION_MACHINE.describe(row.status, detectionOn ? {} : { shadow_start: DETECTION_OFF }),
     fields: rule.fields,
     ruleLines: renderInducedRule(rule),
     /** each trusted cell is a test case drawn from history: these inputs gave this output in held-out agreement */
@@ -140,6 +205,8 @@ function view(row: RuleStepSuggestionRow & { agentName: string | null }) {
     },
     detectedAt: row.detectedAt,
     dismissedAt: row.dismissedAt,
+    /** ADR-0327 slice 3b: the latest shadow period (live agreement), or null if it was never shadowed */
+    shadow: shadowView(shadow),
   };
 }
 
@@ -191,6 +258,92 @@ export function spansToRuns(rows: ReadonlyArray<{ inputPreview: string | null; o
     runs.push({ fields, output: r.outputPreview });
   }
   return runs;
+}
+
+export interface ShadowEvaluation {
+  shadowId: string;
+  /** the last span counted, as (start time as Postgres text, id): the next pass starts after it */
+  through: string;
+  throughId: string;
+  suggestionId: string;
+  agentId: string;
+  stepName: string;
+  /** what this pass added */
+  runs: number;
+  covered: number;
+  agreed: number;
+}
+
+/**
+ * ADR-0327 slice 3b, SHADOW MODE. For each open shadow period (at most `SCAN_MAX_STEPS`, oldest first), measure the
+ * suggestion's rule against the step's model spans recorded since the period's cursor, at most `SCAN_MAX_RUNS` per
+ * pass, and add the counts. Nothing changes routing: the AI already answered every one of these runs.
+ *
+ * The cursor is the last counted span's (start time, id), a keyset in the same order the spans are read, so a span is
+ * never counted twice and none is skipped, even when more spans than one pass reads share a start time. The time is
+ * Postgres text (microseconds), never a JS Date (milliseconds).
+ *
+ * Read-only: it returns what to add, and `applyShadowEvaluations` writes it in the scan's transaction, with the audit
+ * row.
+ */
+export async function measureShadows(db: Db): Promise<ShadowEvaluation[]> {
+  const open = await db
+    .select({
+      shadowId: ruleStepShadows.id,
+      fromAt: sql<string>`coalesce(${ruleStepShadows.evaluatedThrough}, ${ruleStepShadows.startedAt})::text`,
+      fromId: ruleStepShadows.evaluatedThroughId,
+      suggestionId: ruleStepSuggestions.id,
+      agentId: ruleStepSuggestions.agentId,
+      stepName: ruleStepSuggestions.stepName,
+      rule: ruleStepSuggestions.rule,
+    })
+    .from(ruleStepShadows)
+    .innerJoin(ruleStepSuggestions, eq(ruleStepSuggestions.id, ruleStepShadows.suggestionId))
+    .where(and(isNull(ruleStepShadows.stoppedAt), eq(ruleStepSuggestions.status, RULE_STEP_SUGGESTION_MACHINE.def.transitions.shadow_start.to)))
+    .orderBy(asc(ruleStepShadows.startedAt))
+    .limit(SCAN_MAX_STEPS);
+  const out: ShadowEvaluation[] = [];
+  for (const o of open) {
+    const rows = await db
+      .select({ id: traceSpans.id, inputPreview: traceSpans.inputPreview, outputPreview: traceSpans.outputPreview, at: sql<string>`${traceSpans.startedAt}::text` })
+      .from(traceSpans)
+      .where(
+        and(
+          eq(traceSpans.kind, "llm"),
+          eq(traceSpans.agentId, o.agentId),
+          eq(traceSpans.name, o.stepName),
+          eq(traceSpans.status, "ok"),
+          eq(traceSpans.contentWithheld, false),
+          // nothing counted yet: every span after the start; else the keyset after the last counted span
+          o.fromId === null
+            ? sql`${traceSpans.startedAt} > ${o.fromAt}::timestamptz`
+            : sql`(${traceSpans.startedAt}, ${traceSpans.id}) > (${o.fromAt}::timestamptz, ${o.fromId}::uuid)`,
+        ),
+      )
+      .orderBy(asc(traceSpans.startedAt), asc(traceSpans.id))
+      .limit(SCAN_MAX_RUNS);
+    if (rows.length === 0) continue;
+    const last = rows[rows.length - 1]!;
+    const t = tallyShadow(o.rule as InducedRule, spansToRuns(rows));
+    out.push({ shadowId: o.shadowId, through: last.at, throughId: last.id, suggestionId: o.suggestionId, agentId: o.agentId, stepName: o.stepName, ...t });
+  }
+  return out;
+}
+
+/** add the measured counts and advance each cursor; a period stopped meanwhile is left as it was */
+export async function applyShadowEvaluations(db: Db, evaluations: readonly ShadowEvaluation[]): Promise<void> {
+  for (const e of evaluations) {
+    await db
+      .update(ruleStepShadows)
+      .set({
+        runs: sql`${ruleStepShadows.runs} + ${e.runs}`,
+        covered: sql`${ruleStepShadows.covered} + ${e.covered}`,
+        agreed: sql`${ruleStepShadows.agreed} + ${e.agreed}`,
+        evaluatedThrough: sql`${e.through}::timestamptz`,
+        evaluatedThroughId: e.throughId,
+      })
+      .where(and(eq(ruleStepShadows.id, e.shadowId), isNull(ruleStepShadows.stoppedAt)));
+  }
 }
 
 async function scan(db: Db, settings: RuleStepSettings): Promise<StepScan[]> {
@@ -341,32 +494,48 @@ export function registerRuleStepRoutes(app: FastifyInstance, db: Db): void {
     }
     // reads and induction first (no transaction held open), then every write and the audit row together
     const results = await scan(db, pick(claimed));
+    // slice 3b: measure every open shadow on the spans recorded since its last pass (counts only)
+    const shadows = await measureShadows(db);
     const steps = results.map((r) => (r.outcome === "rule_like" ? { agentId: r.agentId, stepName: r.stepName, outcome: r.outcome, projectedMonthlySavingsUsd: r.projectedMonthlySavingsUsd } : r));
     const found = results.filter((r) => r.outcome === "rule_like").length;
     await db.transaction(async (tx) => {
       for (const r of results) {
         if (r.outcome !== "rule_like") continue;
-        // a dismissed suggestion stays dismissed: its evidence refreshes, its status does not
+        // a dismissed suggestion stays dismissed: its evidence refreshes, its status does not. A suggestion in shadow
+        // is not touched at all, so its shadow counts always describe the one rule under test (slice 3b).
         await tx
           .insert(ruleStepSuggestions)
           .values({ agentId: r.agentId, stepName: r.stepName, ...r.values })
           .onConflictDoUpdate({
             target: [ruleStepSuggestions.agentId, ruleStepSuggestions.stepName],
             set: { ...r.values, detectedAt: sql`now()` },
+            setWhere: sql`${ruleStepSuggestions.status} <> ${RULE_STEP_SUGGESTION_MACHINE.def.transitions.shadow_start.to}`,
           });
       }
+      await applyShadowEvaluations(tx as unknown as Db, shadows);
       await tx.insert(auditLog).values({
         userId: userId ?? NO_IDENTITY,
         objectType: "org_settings",
         objectId: null,
-        detail: { scope: "rule_steps", stepsScanned: results.length, ruleLike: found, steps },
+        detail: {
+          scope: "rule_steps",
+          stepsScanned: results.length,
+          ruleLike: found,
+          steps,
+          shadows: shadows.map((x) => ({ suggestionId: x.suggestionId, runs: x.runs, covered: x.covered, agreed: x.agreed })),
+        },
         effect: "allow",
         ruleId: RULE_STEP_AUDIT_RULE_IDS.scan,
         ruleChain: [],
         reason: `rule-like step scan: ${results.length} steps scanned, ${found} rule-like`,
       });
     });
-    return { stepsScanned: results.length, ruleLike: found, steps };
+    return {
+      stepsScanned: results.length,
+      ruleLike: found,
+      steps,
+      shadows: shadows.map((x) => ({ suggestionId: x.suggestionId, agentId: x.agentId, stepName: x.stepName, runs: x.runs, covered: x.covered, agreed: x.agreed })),
+    };
   });
 
   // ADR-0226: the shared list contract (sort, cursor or offset, count, export); the status filter defaults to open
@@ -383,7 +552,8 @@ export function registerRuleStepRoutes(app: FastifyInstance, db: Db): void {
           .orderBy(...q.orderBy)
           .limit(q.limit)
           .offset(q.offset);
-        return rows.map(({ _cursorAt, ...r }) => ({ ...view(r), _cursorAt }));
+        const [shadows, settings] = await Promise.all([latestShadows(db, rows.map((r) => r.id)), loadRuleStepSettings(db)]);
+        return rows.map(({ _cursorAt, ...r }) => ({ ...view(r, shadows.get(r.id), settings.enabled), _cursorAt }));
       },
       countable: (where) =>
         db.select({ one: sql`1` }).from(ruleStepSuggestions).leftJoin(agents, eq(agents.id, ruleStepSuggestions.agentId)).where(where),
@@ -398,11 +568,7 @@ export function registerRuleStepRoutes(app: FastifyInstance, db: Db): void {
     const { id } = idParam.parse(req.params);
     const userId = req.authCtx.userId ?? null;
     const out = await db.transaction(async (tx) => {
-      const [row] = await tx
-        .update(ruleStepSuggestions)
-        .set({ status: "dismissed", dismissedAt: sql`now()`, dismissedBy: userId })
-        .where(and(eq(ruleStepSuggestions.id, id), eq(ruleStepSuggestions.status, "suggested")))
-        .returning();
+      const row = await transitionSuggestion(tx as unknown as Db, id, "dismiss", { dismissedAt: sql`now()`, dismissedBy: userId });
       if (!row) return null;
       await tx.insert(auditLog).values({
         userId: userId ?? NO_IDENTITY,
@@ -418,5 +584,72 @@ export function registerRuleStepRoutes(app: FastifyInstance, db: Db): void {
     });
     if (!out) return reply.status(404).send({ error: "unknown_or_dismissed_suggestion" });
     return { id: out.id, status: out.status, dismissedAt: out.dismissedAt };
+  });
+
+  /**
+   * ADR-0327 slice 3b: start a shadow period. The suggestion's rule is measured against live model spans by every
+   * later scan, and frozen meanwhile; the AI still answers every request. Refused while detection is off. Audited in the
+   * same transaction. No step-up: shadow mode changes no routing and relaxes nothing (switching, slice 4, is an
+   * approval).
+   */
+  app.post("/v1/rule-steps/suggestions/:id/shadow", async (req, reply) => {
+    const { id } = idParam.parse(req.params);
+    const userId = req.authCtx.userId ?? null;
+    if (!(await loadRuleStepSettings(db)).enabled) {
+      return reply.status(409).send({ error: "rule_steps_disabled", detail: DETECTION_OFF });
+    }
+    const out = await db.transaction(async (tx) => {
+      const row = await transitionSuggestion(tx as unknown as Db, id, "shadow_start");
+      if (!row) return null;
+      const [shadow] = await tx.insert(ruleStepShadows).values({ suggestionId: id, startedBy: userId }).returning();
+      await tx.insert(auditLog).values({
+        userId: userId ?? NO_IDENTITY,
+        objectType: "org_settings",
+        objectId: null,
+        detail: { scope: "rule_steps", suggestionId: id, shadowId: shadow!.id, agentId: row.agentId, stepName: row.stepName },
+        effect: "allow",
+        ruleId: RULE_STEP_AUDIT_RULE_IDS.shadowStarted,
+        ruleChain: [],
+        reason: "rule-like step suggestion put in shadow mode (measured only; the AI still answers)",
+      });
+      return { row, shadow: shadow! };
+    });
+    if (!out) return reply.status(404).send({ error: "unknown_or_not_open_suggestion" });
+    return { id: out.row.id, status: out.row.status, shadow: shadowView(out.shadow) };
+  });
+
+  /** ADR-0327 slice 3b: stop the open shadow period; the suggestion is open again and its counts are kept. Audited. */
+  app.post("/v1/rule-steps/suggestions/:id/shadow/stop", async (req, reply) => {
+    const { id } = idParam.parse(req.params);
+    const userId = req.authCtx.userId ?? null;
+    const out = await db.transaction(async (tx) => {
+      const row = await transitionSuggestion(tx as unknown as Db, id, "shadow_stop");
+      if (!row) return null;
+      const [shadow] = await tx
+        .update(ruleStepShadows)
+        .set({ stoppedAt: sql`now()`, stoppedBy: userId })
+        .where(and(eq(ruleStepShadows.suggestionId, id), isNull(ruleStepShadows.stoppedAt)))
+        .returning();
+      await tx.insert(auditLog).values({
+        userId: userId ?? NO_IDENTITY,
+        objectType: "org_settings",
+        objectId: null,
+        detail: {
+          scope: "rule_steps",
+          suggestionId: id,
+          shadowId: shadow?.id ?? null,
+          runs: shadow?.runs ?? 0,
+          covered: shadow?.covered ?? 0,
+          agreed: shadow?.agreed ?? 0,
+        },
+        effect: "allow",
+        ruleId: RULE_STEP_AUDIT_RULE_IDS.shadowStopped,
+        ruleChain: [],
+        reason: "rule-like step shadow mode stopped",
+      });
+      return { row, shadow };
+    });
+    if (!out) return reply.status(404).send({ error: "unknown_or_not_shadowing_suggestion" });
+    return { id: out.row.id, status: out.row.status, shadow: shadowView(out.shadow) };
   });
 }

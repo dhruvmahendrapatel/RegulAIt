@@ -120,3 +120,17 @@ induction over numeric ranges is deferred to a sandboxed engine image with sciki
     scan rebuilds them only from spans still held. Trace spans themselves are outside the locator today and are
     bounded by the retention floor; that is unchanged here;
   - **RLS:** both tables are classified deployment-wide in ADR-0234 (no row policy; admin-only routes).
+- Slice 3b, shadow mode (migration `pending/rule_step_shadow.sql`):
+  - `POST /v1/rule-steps/suggestions/:id/shadow` puts an open suggestion in shadow (refused while detection is off), and
+    `.../shadow/stop` ends the period. Both are admin-only and audited in the same transaction. No step-up: shadow
+    changes no routing and relaxes nothing; the switch (slice 4) is an approval.
+  - Each shadow period is a row in `rule_step_shadows` (at most one open per suggestion). Its counters (`runs`,
+    `covered`, `agreed`) are a measured read model of `trace_spans`, advanced by every scan through
+    `evaluated_through`, a microsecond cursor kept as Postgres text, so no span is counted twice. When a pass hits the
+    row limit, spans sharing the last start time wait for the next pass. The counts and the cursor commit with the
+    scan's audit row.
+  - The kernel's `tallyShadow` applies the rule with one key lookup per run (cost `runs + cells`), matching
+    `applyInducedRule`.
+  - While a suggestion is in shadow, a rescan does not touch its row (`setWhere status <> 'shadow'`), so the counts
+    always describe the rule under test. The list shows each suggestion's latest period, with coverage and agreement.
+  - Retention and erasure still apply: deleting a suggestion deletes its periods, which hold counts only.

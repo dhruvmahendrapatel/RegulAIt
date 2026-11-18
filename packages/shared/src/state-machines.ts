@@ -220,6 +220,33 @@ export const DETECTION_RESPONSE_MACHINE = defineMachine({
       to: "failed",
       by: ["system"],
       summary: "The configured response could not be applied; the fixed reason is recorded and it is not retried.",
+/** `rule_step_suggestions.status` (ADR-0327). A scan inserts `suggested`. Shadow mode measures the suggested rule
+ * beside the AI without changing routing, and can be stopped and started again. Dismissal is final: a rescan
+ * refreshes a dismissed suggestion's evidence but never its status. */
+export const RULE_STEP_SUGGESTION_MACHINE = defineMachine({
+  id: "rule_step_suggestion",
+  stored: "rule_step_suggestions.status",
+  states: ["suggested", "shadow", "dismissed"],
+  initial: ["suggested"],
+  terminal: ["dismissed"],
+  transitions: {
+    shadow_start: {
+      from: ["suggested"],
+      to: "shadow",
+      by: ["admin"],
+      summary: "An admin starts measuring the suggested rule against live traffic; the AI still answers every request.",
+    },
+    shadow_stop: {
+      from: ["shadow"],
+      to: "suggested",
+      by: ["admin"],
+      summary: "An admin stops the measurement; the counts so far are kept and a rescan may refresh the suggestion again.",
+    },
+    dismiss: {
+      from: ["suggested"],
+      to: "dismissed",
+      by: ["admin"],
+      summary: "An admin dismisses the suggestion; it is never suggested again for this step.",
     },
   },
 });
@@ -232,4 +259,5 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [EVAL_RUN_MACHINE.def.id]: EVAL_RUN_MACHINE,
   [DETECTION_INCIDENT_MACHINE.def.id]: DETECTION_INCIDENT_MACHINE,
   [DETECTION_RESPONSE_MACHINE.def.id]: DETECTION_RESPONSE_MACHINE,
+  [RULE_STEP_SUGGESTION_MACHINE.def.id]: RULE_STEP_SUGGESTION_MACHINE,
 } as Record<string, StateMachine<string, string>>);
