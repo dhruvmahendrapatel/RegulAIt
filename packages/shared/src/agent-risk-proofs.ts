@@ -26,6 +26,7 @@ import { MEASUREMENT_STATES, metricSpecSchema, type MeasurementState, type Metri
 import { validateMetricParams } from "./condition-metrics.js";
 import { OWASP_AGENTIC_NAMES } from "./owasp-framework-mappings.js";
 import { OWASP_LLM_EDITIONS, OWASP_MCP_IDS } from "./owasp-packs.js";
+import { EU_AI_ACT_TIER_RANK, type EuAiActTier } from "./eu-ai-act.js";
 import { AI_RISK_CATEGORIES, type AiRiskCategory } from "./risks.js";
 
 /** bumped whenever a risk, control or proof changes meaning; every evidence row records the version it ran under */
@@ -450,4 +451,86 @@ export function agentRiskCatalogProblems(risks: readonly AgentRisk[] = AGENT_RIS
   }
   for (const k of AGENT_RISK_KEYS) if (!seenRisk.has(k)) problems.push(`${k}: risk key has no catalogue entry`);
   return problems;
+}
+
+// ---------------------------------------------------------------------------
+// Geography (ADR-0345 §9, owner 2026-11-17, gap audit C5): the jurisdictions a use case is deployed or used in decide
+// which obligations apply and may raise its risk tier. The jurisdictions and the obligation mapping are DATA (the
+// `jurisdictions` and `jurisdiction_obligations` tables, seeded by migration, admin-editable); this is only the
+// resolution over those rows.
+// ---------------------------------------------------------------------------
+
+/** a jurisdiction code: `EU`, `US`, `US-CO`, `US-NYC`, `International` (the ADR-0158 feed's spelling) */
+export const JURISDICTION_CODE_RE = /^[A-Z][A-Za-z]{1,12}(-[A-Z0-9]{2,4})?$/;
+
+
+export interface JurisdictionRow {
+  code: string;
+  /** the enclosing jurisdiction (US for US-CO); its obligations apply too */
+  parentCode: string | null;
+  /** applies to every use case wherever it runs (ISO-style international standards) */
+  global: boolean;
+}
+
+export interface JurisdictionObligationRow {
+  jurisdictionCode: string;
+  /** an ADR-0158 regulatory feed key: the sourced instrument the obligation comes from */
+  regulatoryUpdateKey: string;
+  /** the agent risk whose controls and proofs answer the obligation */
+  agentRiskKey: AgentRiskKey;
+  /** the lowest tier a use case in scope may carry; null = the obligation does not move the tier */
+  tierFloor: EuAiActTier | null;
+}
+
+export interface GeographyResolution {
+  /** every jurisdiction in scope: the declared ones, their ancestors and the global ones */
+  inScope: string[];
+  /** true when the use case declared none: every jurisdiction is in scope (strict default, never "nothing applies") */
+  undeclared: boolean;
+  /** declared codes that are not in the jurisdictions data (reported, never silently dropped) */
+  unknown: string[];
+  obligations: JurisdictionObligationRow[];
+  /** the strictest floor any in-scope obligation sets, or null */
+  tierFloor: EuAiActTier | null;
+}
+
+
+/** the obligations a use case's declared jurisdictions bring in, and the tier floor they set */
+export function resolveGeography(
+  declared: readonly string[],
+  jurisdictions: readonly JurisdictionRow[],
+  obligations: readonly JurisdictionObligationRow[],
+): GeographyResolution {
+  const byCode = new Map(jurisdictions.map((j) => [j.code, j]));
+  const unknown = [...new Set(declared.filter((c) => !byCode.has(c)))].sort();
+  const undeclared = declared.length === 0;
+  const inScope = new Set<string>();
+  if (undeclared) for (const j of jurisdictions) inScope.add(j.code);
+  for (const code of declared) {
+    // walk to the root; the visited set stops a cycle in admin-edited data
+    let cur = byCode.get(code);
+    while (cur && !inScope.has(cur.code)) {
+      inScope.add(cur.code);
+      cur = cur.parentCode ? byCode.get(cur.parentCode) : undefined;
+    }
+  }
+  for (const j of jurisdictions) if (j.global) inScope.add(j.code);
+  const applied = obligations.filter((o) => inScope.has(o.jurisdictionCode));
+  let tierFloor: EuAiActTier | null = null;
+  for (const o of applied) {
+    if (o.tierFloor && (tierFloor === null || EU_AI_ACT_TIER_RANK[o.tierFloor] > EU_AI_ACT_TIER_RANK[tierFloor])) tierFloor = o.tierFloor;
+  }
+  return { inScope: [...inScope].sort(), undeclared, unknown, obligations: applied, tierFloor };
+}
+
+/**
+ * The tier a use case is treated at once geography is a factor: the stricter of its screened tier and the floor its
+ * jurisdictions set. An unscreened use case stays `unscreened` (a floor never stands in for the screening).
+ */
+export function effectiveRiskTier(
+  screened: EuAiActTier | "unscreened",
+  floor: EuAiActTier | null,
+): EuAiActTier | "unscreened" {
+  if (screened === "unscreened" || floor === null) return screened;
+  return EU_AI_ACT_TIER_RANK[floor] > EU_AI_ACT_TIER_RANK[screened] ? floor : screened;
 }
