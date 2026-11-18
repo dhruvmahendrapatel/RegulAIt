@@ -17,7 +17,8 @@ import path from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { createDb, eq, inArray, runMigrations, sql, users, type Db } from "@regulait/db";
-import { agentRiskControlColumns, agentRiskControlTables } from "@regulait/shared";
+import { AGENT_RISKS, agentRiskControlColumns, agentRiskControlTables } from "@regulait/shared";
+import { ORG_SETTING_STRICTNESS } from "./org-setting-strictness.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -189,3 +190,49 @@ describe("ADR-0345: every catalogue control is bound to something that exists", 
     expect(tables.filter((t) => !live.has(t))).toEqual([]);
   });
 });
+
+describe("ADR-0345: an org_settings control's secure value IS the strictness registry's (#904 round 2)", () => {
+  const camel = (snake: string) => snake.replace(/_([a-z])/g, (_m, c: string) => c.toUpperCase());
+  const orgControls = AGENT_RISKS.flatMap((r) =>
+    r.controls.flatMap((c) => (c.kind === "setting" && c.column.startsWith("org_settings.") ? [{ risk: r.key, c }] : [])),
+  );
+
+  it("names at least the four org_settings controls", () => {
+    expect(orgControls.map((x) => x.c.kind === "setting" && x.c.column).sort()).toEqual([
+      "org_settings.approval_ttl_hours",
+      "org_settings.budget_enforcement",
+      "org_settings.mcp_admission_mode",
+      "org_settings.mcp_definition_pin_mode",
+    ]);
+  });
+
+  it("each one is a registry rule (never an exemption) whose strict value the catalogue calls secure", () => {
+    for (const { risk, c } of orgControls) {
+      if (c.kind !== "setting") continue;
+      const key = camel(c.column.slice("org_settings.".length)) as keyof typeof ORG_SETTING_STRICTNESS;
+      const entry = ORG_SETTING_STRICTNESS[key];
+      expect(entry, `${risk}: ${c.column} is not in ORG_SETTING_STRICTNESS`).toBeDefined();
+      expect(entry.kind, `${risk}: ${c.column} is exempt from the registry, so it is not a control`).toBe("rule");
+      if (entry.kind !== "rule") continue;
+      const s = c.secure;
+      if ("oneOf" in s) {
+        // the registry's strict value is secure, and every value the catalogue calls secure is not a relaxation
+        expect(s.oneOf).toContain(entry.strict);
+        for (const v of s.oneOf) expect(entry.relaxed(v), `${c.column}=${v}`).toBe(false);
+      } else if ("atMost" in s) {
+        expect(entry.strict).toBe(s.atMost);
+        expect(entry.relaxed(s.atMost)).toBe(false);
+        expect(entry.relaxed(s.atMost + 1)).toBe(true);
+      } else {
+        expect(entry.strict).toBe(s.atLeast);
+        expect(entry.relaxed(s.atLeast)).toBe(false);
+        expect(entry.relaxed(s.atLeast - 1)).toBe(true);
+      }
+    }
+  });
+
+  it("NEGATIVE: an exempt capacity key such as max_worker_turns would be refused as a control", () => {
+    expect(ORG_SETTING_STRICTNESS.maxWorkerTurns.kind).toBe("exempt");
+  });
+});
+

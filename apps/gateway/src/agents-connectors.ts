@@ -152,8 +152,12 @@ import {
   postDispatchProjectAlert,
   preDispatchProjectGate,
   projectPiiMode,
+  stricterPiiMode,
+  complianceProfilesForTags,
+  effectiveCompliancePolicy,
   type PiiMode,
 } from "./projects.js";
+import { labelDispatchGate } from "./sensitivity-labels.js";
 import {
   loadOwnConversationForReplay,
   recordConversationTurns,
@@ -1617,7 +1621,30 @@ async function dispatchAttempt(
   // §8.4 PII ENFORCEMENT (pillar 3). The project's effective piiMode is
   // resolved from its compliance cascade; an unclassified/unmatched project
   // yields null and every check below is a no-op (byte-identical behaviour).
-  const piiMode = await projectPiiMode(db, args.projectId ?? null);
+  // ADR-0363 slice 1 — CUSTOMER SENSITIVITY LABELS, before the PII rung and any provider work. Each attached image or
+  // document is read for its Purview label; a `block` refuses here, a `redact` swaps the file for a marker, and a
+  // label mapped to a compliance profile pulls that profile into THIS call's cascade (PII mode, guardrail floor), so
+  // it can only raise them. A call with no file block reads nothing.
+  const labelGate = await labelDispatchGate(db, {
+    userId,
+    agentId: served.id,
+    projectId: args.projectId ?? null,
+    messages: args.messages,
+  });
+  if (labelGate.kind === "refuse") {
+    sink.auditLogId = labelGate.auditLogId;
+    return { ok: false, status: labelGate.status, error: labelGate.error, detail: labelGate.detail };
+  }
+  const labelTags = labelGate.kind === "proceed" ? labelGate.complianceTags : [];
+  // the messages the provider is sent: a redacted file is replaced by its marker. A redaction changes what the model
+  // sees, so an answer cached for the unredacted request is never served (`labelRedacted` below).
+  const labelRedacted = labelGate.kind === "proceed" && labelGate.messages !== undefined;
+  const dispatchMessages = labelGate.kind === "proceed" && labelGate.messages ? labelGate.messages : args.messages;
+  const labelPiiFloor = labelTags.length
+    ? effectiveCompliancePolicy(await complianceProfilesForTags(db, labelTags)).piiMode
+    : null;
+
+  const piiMode = stricterPiiMode(await projectPiiMode(db, args.projectId ?? null), labelPiiFloor);
   // ADR-0117: resolved ONCE for this dispatch and reused by the output check
   // below, so the input and output gates can never disagree about which
   // jurisdictions are in force for the same call.
@@ -1696,6 +1723,7 @@ async function dispatchAttempt(
     projectId: args.projectId ?? null,
     agentId: served.id,
     userId,
+    extraComplianceTags: labelTags,
   });
   let guardrailInput: Awaited<ReturnType<typeof runGuardrailsAsync>> | null = null;
   if (guardrails.active) {
@@ -1732,7 +1760,7 @@ async function dispatchAttempt(
     }
   }
 
-  if (args.cachedResponse) {
+  if (args.cachedResponse && !labelRedacted) {
     const cached = args.cachedResponse;
     let outputHits: PiiHit[] = [];
     if (piiMode) {
@@ -2236,7 +2264,7 @@ async function dispatchAttempt(
     result = await provider.dispatch({
       model: served.model,
       input: args.input,
-      ...(args.messages ? { messages: args.messages } : {}),
+      ...(dispatchMessages ? { messages: dispatchMessages } : {}),
       ...(dispatchSystem ? { system: dispatchSystem } : {}),
       ...(args.cacheSystem ? { cacheSystem: true } : {}),
       ...(args.tools ? { tools: args.tools } : {}),
