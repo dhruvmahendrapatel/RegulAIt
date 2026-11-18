@@ -68,7 +68,9 @@ D-2026-11-18-04 to -07). Where these rules and CLAUDE.md conflict, stop and ask 
 Keep AgentHandoff.md, DecisionLog.md and Status.md current after every task or decision, not only at hand-over. Log every
 mistake in `internal/memory/mistakes.md` the moment it happens, with its fix and a prevention rule.
 
-To keep CI cost down, batch these updates into one small docs PR every few hours, or sooner after an owner decision. The
+To keep CI cost down, batch these updates into one small docs PR every few hours, or sooner after an owner decision.
+The batching covers only the files in this folder: ADRs and STATE.md rows are still committed the moment a decision is
+made, as CLAUDE.md requires. The
 master's working logs (released.txt, lanes.md) stay in its scratchpad. They can be rebuilt from PR comments and merges,
 and Status.md records their current content.
 

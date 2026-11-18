@@ -17,12 +17,12 @@ Read this first if you are taking over as the master session of the RegulAIt bui
    - Let the merge loop merge it.
    - Audit every merge: its second parent must equal the released SHA.
    - Fast-forward `dhruv/active` to `main`.
-3. **Scripts** (copy them to your scratchpad, and keep `released.txt` and the loop log there):
-   - `scripts/status.sh`: one line per open PR, with head, draft flag, failing and pending checks, and the verdicts at
-     the head.
-   - `scripts/merge-loop.sh <state-dir> 7000 90`: run with `MIN_AGE=120` in the background, with a 2-hour timeout.
-     Restart it about every 1h55m and after every container restart (`pgrep -fa merge-loop.sh`). It merges only PRs
-     listed in `released.txt`, at that exact head, with a merge commit.
+3. **Scripts:** these are in `scripts/master/` at the repo root. Keep `released.txt` and the loop log in your scratchpad.
+   - `scripts/master/status.sh`: one line per open PR, with head, draft flag, failing and pending checks, and the verdicts
+     at the head.
+   - `scripts/master/merge-loop.sh <state-dir> 7000 90` (FS-25): run with `MIN_AGE=120` in the background, with a 2-hour
+     timeout. Restart it about every 1h55m and after every container restart (`pgrep -fa merge-loop.sh`). It merges only
+     PRs listed in `released.txt`, at that exact head, with a merge commit.
 4. **Lane briefs:** every builder brief ends with the common rules 1-15 (rule 15: finish before starting). The text is
    in Status.md, under "Common lane rules".
 5. **Messaging another session:** use a one-shot scheduled task bound to that session, set a few minutes ahead. The

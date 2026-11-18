@@ -15,7 +15,6 @@
 
 | Item | Owner | Since | Notes |
 |---|---|---|---|
-| #1004 picomatch no-fix gate | merge loop | 2026-11-18 | Released at 07ca5186. After it merges, every lane failing only "Dependency audit" merges main once |
 | #973 E44 Purview labels | R3 + Xtyd8 | 2026-11-18 | First review |
 | #941 E31 on-device rules | WaRPg + a3BYi | 2026-11-18 | Delta re-review |
 | #883 E20 agent risk score | WaRPg + Xtyd8 | 2026-11-18 | Delta check of the conflict merge |
@@ -27,7 +26,8 @@
 
 ## Done log (newest first)
 
-- 2026-11-18: #898 per-route bundle budgets merged; #881 governed vendor-agent control merged.
+- 2026-11-18: #1004 picomatch no-fix gate merged at 5aacbc16 (second parent 07ca5186, audited); lanes failing only
+  "Dependency audit" were told to merge main once. #898 per-route bundle budgets merged; #881 governed vendor-agent control merged.
 - 2026-11-17: #940, #885, #888, #935, #921, #910, #920, #897, #896, #889, #874, #828, #899, #906, #901, #850 and #887
   merged. Every merge was audited: second parent = released SHA.
 

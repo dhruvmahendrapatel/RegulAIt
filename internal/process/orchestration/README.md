@@ -10,7 +10,9 @@ emails, session links or anything else that identifies a person.
 | [DecisionLog.md](DecisionLog.md) | Open questions for the owner at the top, then every owner decision | The moment a decision is given |
 | [Status.md](Status.md) | Current state, pending items, done log | After every task |
 | [RULES.md](RULES.md) | The orchestration rules (owner, 2026-11-18) | Only on an owner decision |
-| `scripts/` | The master's status scan and merge loop | When the process changes |
+| `scripts/master/` (repo root) | The master's status scan (`status.sh`) and merge loop (`merge-loop.sh`, FS-25) | When the process changes |
 
 Mistakes go in [internal/memory/mistakes.md](../../memory/mistakes.md), the existing ledger, not in a second file.
-ADRs stay in `internal/decisions/`; product decisions are never logged only here.
+ADRs stay in `internal/decisions/`; product decisions are never logged only here. The roles of the master, cloud
+sessions and Codex are defined on the coordination board, [AGENT_COORDINATION.md](../AGENT_COORDINATION.md); read the
+two together.
