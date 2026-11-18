@@ -38,20 +38,15 @@ Read this first if you are taking over as the master session of the RegulAIt bui
 
 ## Where we left off (current master)
 
-- **2026-11-18, about 08:54 UTC:** master hand-over. The previous master stopped its merge loop and its scheduled tasks,
-  and its session is to be archived. The new master runs the merge loop from its own scratchpad, seeded with the same
-  released.txt.
-- **Merged and audited today:** #1004, #880, #1011, #973, #941 (merge 82142059, second parent 3b86b4e0 = released).
-- **Released, not merged (dirty after other merges):** #904 (E26), #903 (E12), #902 (E1), #883 (E20). Each builder was
-  told to merge main and post a new READY. Then delta reviews: #904 R3 + Xtyd8; #903 R2 + a3BYi; #902 WaRPg + a3BYi;
-  #883 WaRPg + Xtyd8.
-- **Request changes, waiting on the builder:** #1010 (E45, RPA ADR only), #884 (E18, security RC on the directory opt-in
-  and auto-link).
-- **Older lanes:** E24 and E25 were done with no open PR and are archived. E2 (#848), E3 (#855), E7 (#861), E13 (#871),
-  E15 (#865), E16 (#867) and E27 (#996) had been idle since 2026-11-17. Each was told to merge main once (the picomatch
-  no-fix gate, #1004, clears their audit failure), fix any real failure, and post READY.
-- **Next steps:**
-  1. Route #936 (Codex C1, CI build-once) first when it posts READY.
-  2. Delta-review the four dirty PRs as their READYs arrive; release on both approvals at the head.
-  3. Archive lanes as they say "LANE DONE".
-  4. Lift rule 15 a few lanes at a time once the open PR count is under 50, with E45's code first.
+- **2026-11-18, 18:10 UTC.** Master hand-over at about 08:54 UTC; the new master runs the merge loop.
+- **Merged and audited since the hand-over:** #941, #1013, #904, #1010, #903, #1035, #744, #1019. Every merge's second
+  parent equals the released SHA. #952 (E31) is released and should merge next.
+- **Census-counter queue (M-118).** One PR that edits `KNOWN_UI_GAPS_MAX` is released at a time. Order: #902 (E1, CI
+  running after its main merge, census 73), then #883 (E20), #848 (E2), #855 (E3), #861 (E7), #867 (E16), and #865
+  (E15) once approved. Each builder waits for the master's message, merges main, sets the census to main's value plus its
+  own routes, and posts READY; then a merge-only delta review and release.
+- **In review:** #865 (E15) delta R3 + Xtyd8.
+- **Request changes, waiting for READY:** #1020 (E12), #982 (E44), #871 (E13).
+- **Waiting on the builder:** #884 (E18), #996 (E27, three failing checks), Codex #936 (route first on READY), #1006,
+  #1007.
+- **Proposal for the owner, not started:** compute the census count instead of hand-setting it, to end the queue.

@@ -160,6 +160,7 @@ import {
   CONTENT_SOURCE_KINDS,
   CONTENT_TRUST_TIERS,
   CONTENT_TRUST_WRITE_FLOORS,
+  AGENT_RISK_KEYS,
   AGENT_RISK_PROOF_OUTCOMES,
   AGENT_RISK_PROOF_TRIGGERS,
   type ModalitySplit,
@@ -1883,6 +1884,9 @@ export const auditLog = pgTable(
         // text column — no DDL needed.
         "governance_alert",
         "governance_monitor",
+        // ADR-0345 slice 2a: one agent-risk proof result (objectId null; detail.contentHash ties it to the
+        // agent_risk_proof_results row written in the same transaction). Plain text column — no DDL.
+        "agent_risk_proof",
         // ADR-0173 batch 2c (K): a KRI or a monitoring dashboard created /
         // changed / deleted, and an automation rule created / changed /
         // paused / backfilled / matched (objectId = the row). Plain text — no DDL.
@@ -17332,6 +17336,109 @@ export const endpointAddonSightingSecretTypes = pgTable(
 );
 // ===== end ADR-0332 =====
 
+// ===== ADR-0339 (lane E20) — the agent risk score, recomputed on every change =====
+// Migration `pending/agent_risk_scores.sql` (numbered at merge, ADR-0252). Database triggers on every write path of an
+// agent (the row, its tools, schedules, sub-agents, channels, skills, shares and grants, and a config activation) mark
+// the agent in `agent_risk_recompute_requests` in the change's own transaction, so no route can forget to; the
+// scheduled sweep (agent-risk.ts) scores each marked agent and appends an assessment with its audit row in one
+// transaction. Not tenant-scoped data (ADR-0234 scope): read through admin or steward routes only, so no RLS batch.
+import {
+  AGENT_RISK_BANDS as AGENT_RISK_BANDS_E20,
+  AGENT_RISK_TRIGGERS as AGENT_RISK_TRIGGERS_E20,
+} from "@regulait/shared";
+
+/** a pending recompute: one row per agent and reason; drained (deleted) by the sweep in the assessment's transaction */
+export const agentRiskRecomputeRequests = pgTable(
+  "agent_risk_recompute_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    builderAgentId: uuid("builder_agent_id").references(() => builderAgents.id, { onDelete: "cascade" }),
+    trigger: text("trigger", { enum: AGENT_RISK_TRIGGERS_E20 }).notNull(),
+    requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("agent_risk_recompute_requests_subject_check", sql`num_nonnulls(${t.agentId}, ${t.builderAgentId}) = 1`),
+    check(
+      "agent_risk_recompute_requests_trigger_check",
+      sql`${t.trigger} IN ('created', 'modified', 'published', 'access_changed', 'evidence_changed', 'imported', 'backfill', 'scheduled', 'manual')`,
+    ),
+    uniqueIndex("agent_risk_recompute_requests_agent_uq").on(t.agentId, t.trigger).where(sql`${t.agentId} IS NOT NULL`),
+    uniqueIndex("agent_risk_recompute_requests_builder_uq")
+      .on(t.builderAgentId, t.trigger)
+      .where(sql`${t.builderAgentId} IS NOT NULL`),
+    index("agent_risk_recompute_requests_requested_idx").on(t.requestedAt),
+  ],
+);
+export type AgentRiskRecomputeRequestRow = typeof agentRiskRecomputeRequests.$inferSelect;
+
+/**
+ * One assessment: append-only evidence (UPDATE and DELETE refused by trigger, except a parent agent's cascade;
+ * TRUNCATE refused). `score`, `band` and `method_version` are columns because the ranked list filters and sorts on them.
+ */
+export const agentRiskAssessments = pgTable(
+  "agent_risk_assessments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    builderAgentId: uuid("builder_agent_id").references(() => builderAgents.id, { onDelete: "cascade" }),
+    methodVersion: text("method_version").notNull(),
+    score: integer("score").notNull(),
+    band: text("band", { enum: AGENT_RISK_BANDS_E20 }).notNull(),
+    /** the reasons drained into this assessment (closed vocabulary values, not references) */
+    triggers: text("triggers").array().notNull(),
+    /**
+     * DELIBERATE EXCEPTION to third normal form (ADR-0200 addendum): a point-in-time evidence snapshot. The factors,
+     * combinations, reach and ranked fixes exactly as scored, so a later change to the agent or to the weights never
+     * rewrites what was shown. Source of truth for "what was the score then"; the live score is recomputed on read.
+     */
+    assessment: jsonb("assessment").notNull(),
+    /** sha256 (hex) of the canonical assessment, so an unchanged recompute is visible as unchanged */
+    assessmentDigest: text("assessment_digest").notNull(),
+    computedAt: timestamp("computed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("agent_risk_assessments_subject_check", sql`num_nonnulls(${t.agentId}, ${t.builderAgentId}) = 1`),
+    check("agent_risk_assessments_score_check", sql`${t.score} BETWEEN 0 AND 100`),
+    check("agent_risk_assessments_band_check", sql`${t.band} IN ('low', 'medium', 'high', 'critical')`),
+    check("agent_risk_assessments_method_check", sql`${t.methodVersion} ~ '^[a-z0-9.-]{1,32}$'`),
+    check("agent_risk_assessments_digest_check", sql`${t.assessmentDigest} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "agent_risk_assessments_triggers_check",
+      sql`cardinality(${t.triggers}) BETWEEN 1 AND 9 AND ${t.triggers} <@ ARRAY['created', 'modified', 'published', 'access_changed', 'evidence_changed', 'imported', 'backfill', 'scheduled', 'manual']::text[]`,
+    ),
+    index("agent_risk_assessments_agent_idx").on(t.agentId, t.computedAt, t.id).where(sql`${t.agentId} IS NOT NULL`),
+    index("agent_risk_assessments_builder_idx")
+      .on(t.builderAgentId, t.computedAt, t.id)
+      .where(sql`${t.builderAgentId} IS NOT NULL`),
+  ],
+);
+export type AgentRiskAssessmentRow = typeof agentRiskAssessments.$inferSelect;
+
+/**
+ * The ranked list's read path: one pointer per agent to its newest assessment, moved forward by a database trigger on
+ * every append (never by application code), so the list reads one row per agent instead of sorting the whole history.
+ * References only (third normal form): the score and band are read through the pointer.
+ */
+export const agentRiskLatest = pgTable(
+  "agent_risk_latest",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    builderAgentId: uuid("builder_agent_id").references(() => builderAgents.id, { onDelete: "cascade" }),
+    assessmentId: uuid("assessment_id")
+      .notNull()
+      .references(() => agentRiskAssessments.id, { onDelete: "cascade" }),
+  },
+  (t) => [
+    check("agent_risk_latest_subject_check", sql`num_nonnulls(${t.agentId}, ${t.builderAgentId}) = 1`),
+    uniqueIndex("agent_risk_latest_agent_uq").on(t.agentId).where(sql`${t.agentId} IS NOT NULL`),
+    uniqueIndex("agent_risk_latest_builder_uq").on(t.builderAgentId).where(sql`${t.builderAgentId} IS NOT NULL`),
+    uniqueIndex("agent_risk_latest_assessment_uq").on(t.assessmentId),
+  ],
+);
+// ===== end ADR-0339 =====
+
 // ===== ADR-0342 (lane E23): process analytics read model =====
 // A MEASURED READ MODEL (ADR-0200 addendum). Source of truth: `workflow_events` (the append-only per-instance history)
 // replayed through the pure workflow kernel against the instance's snapshotted definition. The projector
@@ -17607,6 +17714,84 @@ export const agentRiskProofFollowups = pgTable(
   ],
 );
 export type AgentRiskProofFollowupRow = typeof agentRiskProofFollowups.$inferSelect;
+// ADR-0345 §9 — geography as a factor in risk tiering. Jurisdictions, the obligations each brings into the register,
+// and the jurisdictions a use case is deployed or used in, as DATA (seeded by the migration, admin-editable).
+
+/** A jurisdiction. `parent_code` encloses it (US for US-CO) and its obligations apply too; `global` applies everywhere. */
+export const jurisdictions = pgTable(
+  "jurisdictions",
+  {
+    // `id` keys the row for platform tooling (the ADR-0233 existing-rows report); `code` is the natural key the
+    // ADR-0158 feed, the obligations and the use-case join reference.
+    id: uuid("id").primaryKey().defaultRandom(),
+    code: text("code").notNull().unique("jurisdictions_code_uq"),
+    name: text("name").notNull(),
+    parentCode: text("parent_code").references((): AnyPgColumn => jurisdictions.code, { onDelete: "restrict" }),
+    global: boolean("global").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("jurisdictions_code_check", sql`${t.code} ~ '^[A-Z][A-Za-z]{1,12}(-[A-Z0-9]{2,4})?$'`),
+    check("jurisdictions_name_check", sql`length(btrim(${t.name})) BETWEEN 1 AND 120`),
+    check("jurisdictions_parent_check", sql`${t.parentCode} IS NULL OR ${t.parentCode} <> ${t.code}`),
+    index("jurisdictions_parent_idx").on(t.parentCode),
+  ],
+);
+export type JurisdictionDbRow = typeof jurisdictions.$inferSelect;
+
+/**
+ * One obligation a jurisdiction brings in: a sourced ADR-0158 feed instrument answered by one agent risk's controls
+ * and proofs. `regulatory_update_key` and `agent_risk_key` reference versioned code catalogues, so they carry no FK
+ * (ADR-0200 exception; CHECKs pin their shape and the gateway refuses an unknown key). `tier_floor` is the lowest tier
+ * a use case in scope may carry (null = it does not move the tier).
+ */
+export const jurisdictionObligations = pgTable(
+  "jurisdiction_obligations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    jurisdictionCode: text("jurisdiction_code")
+      .notNull()
+      .references(() => jurisdictions.code, { onDelete: "cascade" }),
+    regulatoryUpdateKey: text("regulatory_update_key").notNull(),
+    agentRiskKey: text("agent_risk_key", { enum: AGENT_RISK_KEYS }).notNull(),
+    // the ADR-0085 screening tiers (`EU_AI_ACT_TIER_VALUES`, the mirror of `EU_AI_ACT_TIERS`); the CHECK repeats them
+    tierFloor: text("tier_floor", { enum: EU_AI_ACT_TIER_VALUES }),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("jurisdiction_obligations_update_key_check", sql`${t.regulatoryUpdateKey} ~ '^[a-z0-9]+(-[a-z0-9]+)*$'`),
+    check(
+      "jurisdiction_obligations_risk_check",
+      sql`${t.agentRiskKey} IN ('prompt_injection', 'data_leakage', 'tool_misuse', 'hallucination', 'access_control_failure', 'autonomous_overreach', 'supply_chain', 'memory_context_exploit', 'infrastructure_baseline', 'governance_gap')`,
+    ),
+    check(
+      "jurisdiction_obligations_tier_check",
+      sql`${t.tierFloor} IS NULL OR ${t.tierFloor} IN ('minimal', 'limited', 'high', 'prohibited')`,
+    ),
+    uniqueIndex("jurisdiction_obligations_uq").on(t.jurisdictionCode, t.regulatoryUpdateKey, t.agentRiskKey),
+  ],
+);
+export type JurisdictionObligationDbRow = typeof jurisdictionObligations.$inferSelect;
+
+/** The jurisdictions a use case is deployed or used in (a join table; none declared = every jurisdiction applies). */
+export const aiUseCaseJurisdictions = pgTable(
+  "ai_use_case_jurisdictions",
+  {
+    useCaseId: uuid("use_case_id")
+      .notNull()
+      .references(() => aiUseCases.id, { onDelete: "cascade" }),
+    jurisdictionCode: text("jurisdiction_code")
+      .notNull()
+      .references(() => jurisdictions.code, { onDelete: "restrict" }),
+    addedByUserId: uuid("added_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    addedAt: timestamp("added_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ name: "ai_use_case_jurisdictions_pk", columns: [t.useCaseId, t.jurisdictionCode] }),
+    index("ai_use_case_jurisdictions_code_idx").on(t.jurisdictionCode),
+  ],
+);
 // ===== end ADR-0345 =====
 
 // ===== ADR-0363 (lane E44): customer sensitivity labels — migration `sensitivity_labels` (pending, numbered at merge) =====

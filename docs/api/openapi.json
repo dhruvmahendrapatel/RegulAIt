@@ -1133,6 +1133,7 @@
                 "eval_run",
                 "compliance_profile",
                 "model_call",
+                "agent_risk_proof",
                 "endpoint_addon_removal"
               ]
             }
