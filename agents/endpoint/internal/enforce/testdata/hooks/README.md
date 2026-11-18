@@ -13,8 +13,10 @@ Rules, which the shared tests enforce:
 - **Coverage.** Every adapter has a directory for its current contract version, every input file is listed in
   `cases.json`, and every version has at least one deny and one no-policy case.
 - **No edits in place.** When a vendor's contract changes, add a new version directory and bump the adapter's
-  `Contract.Version`. Never edit an old directory's files. Old directories stay, and they keep passing, so a contract
-  change cannot silently break agents still on the older version.
+  `Contract.Version`. Never edit an old directory's input files. Old directories stay, and they keep passing, so a
+  contract change cannot silently break agents still on the older version. An expected answer in `cases.json` changes
+  only when an ADR changes what we decide: ADR-0350 made built-in shell calls governed, so four old cases changed
+  (`builtin-bash`/`builtin-shell` with no policy now deny; Cursor's `shell-event` is now decided).
 - **Arguments stay private.** Inputs carry `"secret-argument"` inside tool arguments (or, for Cursor, inside the stdio
   launch command), and the tests assert that it never reaches hook output.
 
