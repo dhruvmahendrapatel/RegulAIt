@@ -235,8 +235,10 @@ type CommandCall struct {
 	Files []FileAccess
 	// Cwd is the working directory relative paths resolve against.
 	Cwd string
-	// Workspace are the roots an access inside of which is "in the workspace" (the project directory, or the
-	// agent's workspace roots).
+	// Workspace are the roots the agent itself declares (Cursor's workspace_roots); with HookEnv.ProjectDir they are
+	// the only workspace. The cwd never counts on its own, and a root that is a filesystem or drive root, the home
+	// directory or an ancestor of it is ignored (review #941 S-B1), so a session started from / or ~ has no workspace
+	// and every file action gets the outside defaults.
 	Workspace []string
 	// Unresolved is set by an adapter that saw a governed tool but could not find what it acts on.
 	Unresolved string
@@ -281,7 +283,7 @@ type outcome struct {
 
 // decideCommand returns the strictest outcome across the call's actions. It never returns no verdict.
 func decideCommand(p *Policy, c CommandCall, env HookEnv) outcome {
-	env.roots = append(append([]string{}, c.Workspace...), env.ProjectDir)
+	env.roots = acceptableRoots(append(append([]string{}, c.Workspace...), env.ProjectDir), env.Home)
 	acts := commandActions(c, env)
 	best := outcome{verdict: RuleAllow, rule: "default.workspace", reason: "inside the workspace"}
 	first := true
@@ -352,13 +354,26 @@ func decideAction(p *Policy, a action, env HookEnv) outcome {
 	case "unresolved":
 		return outcome{verdict: r.Unresolved, rule: unresolvedRuleID, reason: "RegulAIt: this command cannot be checked (" + a.cause + ")."}
 	case "exec":
+		byPath := strings.ContainsAny(a.argv[0], `/\`)
 		o := strictest(p, env, func(yield func(id, verdict string)) {
 			for _, x := range r.Exec {
-				if argvMatch(x.Argv, a.argv) {
-					yield(x.ID, x.Verdict)
+				if !argvMatch(x.Argv, a.argv) {
+					continue
 				}
+				// a bare-name rule matches a program named by path for deny and ask (/bin/rm is still rm), but it
+				// never ALLOWS one: an allow names the program found on PATH, or names its full path (review #941)
+				if x.Verdict == RuleAllow && byPath && !strings.Contains(x.Argv[0], "/") {
+					continue
+				}
+				yield(x.ID, x.Verdict)
 			}
 		})
+		if o.verdict == RuleAllow && byPath && o.rule != "" {
+			// an exception may relax a bare-name rule, but not to an allow of a program named by path
+			if x, ok := execRule(r, o.rule); ok && !strings.Contains(x.Argv[0], "/") {
+				o.verdict = RuleAsk
+			}
+		}
 		if o.rule == "" {
 			return outcome{verdict: r.Default, rule: defaultExecRuleID, reason: "RegulAIt: `" + a.argv[0] + "` is decided by your organisation's default for commands."}
 		}
@@ -438,6 +453,31 @@ func relaxed(p *Policy, env HookEnv, id, verdict string) string {
 	return verdict
 }
 
+var driveRoot = regexp.MustCompile(`^[A-Za-z]:[\\/]?$`)
+
+// acceptableRoots drops roots that would make most of the disk "inside the workspace": empty, relative, a filesystem
+// or drive root, the home directory, or an ancestor of the home directory.
+func acceptableRoots(roots []string, home string) []string {
+	var out []string
+	for _, r := range roots {
+		if r == "" || driveRoot.MatchString(r) || !rooted(r) {
+			continue
+		}
+		c := filepath.Clean(r)
+		if c == string(filepath.Separator) || c == "/" || c == `\` {
+			continue
+		}
+		if home != "" {
+			h := filepath.Clean(home)
+			if c == h || strings.HasPrefix(h, strings.TrimSuffix(c, string(filepath.Separator))+string(filepath.Separator)) {
+				continue
+			}
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
 func insideAny(p string, roots []string) bool {
 	for _, r := range roots {
 		if r == "" {
@@ -468,6 +508,15 @@ func pathMatch(pattern, p, home string) bool {
 		pattern, p = strings.ToLower(pattern), strings.ToLower(p)
 	}
 	return globMatch(pattern, p)
+}
+
+func execRule(r *CommandRules, id string) (ExecRule, bool) {
+	for _, x := range r.Exec {
+		if x.ID == id {
+			return x, true
+		}
+	}
+	return ExecRule{}, false
 }
 
 func argvMatch(pats, argv []string) bool {

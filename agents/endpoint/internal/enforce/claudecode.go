@@ -55,7 +55,8 @@ func ParseClaudeCodePreToolUse(r io.Reader) (Call, error) {
 		return Call{}, errors.New("no tool_name")
 	}
 	c := Call{Tool: in.ToolName}
-	roots := []string{in.Cwd}
+	// the cwd is never a workspace root by itself (review #941 S-B1): only a root the agent declares counts
+	var roots []string
 	switch in.ToolName {
 	case "Bash":
 		c.Command = shellCall(in.ToolInput, "command", in.Cwd, roots)

@@ -40,7 +40,7 @@ Rules are data, never code, and every default is stated in the policy (the devic
 
 | Kind | Matches | Default when no rule matches |
 |---|---|---|
-| exec | one doublestar glob per argument; `argv[0]` by base name unless the pattern has a `/`; a final `**` is "any remaining arguments" | `default` |
+| exec | one doublestar glob per argument; `argv[0]` by base name unless the pattern has a `/` (for deny and ask; an allow without a `/` matches only a program found on `PATH`); a final `**` is "any remaining arguments" | `default` |
 | file | access (`read`, `write`, `any`) and an absolute path glob (`/`, `~/`, `**/`, `C:/`) | inside the workspace: allow; outside: `outsideRead` / `outsideWrite` |
 | package | ecosystem (`npm`, `pypi`, `apt`, `dnf`, `apk`, `brew`, `cargo`, `go`, `gem`, `*`) and a name glob | `packages.default` |
 | unresolved | anything the parser cannot reduce to literal words | `unresolved` (ask or deny, never allow) |
@@ -63,9 +63,18 @@ or tag (`left-pad@1` is `left-pad`; `Flask_Login[x]>=1` is `flask-login`); an in
 with an empty name.
 
 File paths are made absolute against the call's working directory, cleaned (so `..` cannot step out of a rule), and
-resolved through symlinks on the longest existing prefix. The workspace is the call's `cwd` plus the agent's own root
-(Claude Code's `CLAUDE_PROJECT_DIR`, Cursor's `workspace_roots`). Path matching is case-insensitive on Windows and
+resolved through symlinks on the longest existing prefix. The workspace is only the roots the agent declares (Claude
+Code's `CLAUDE_PROJECT_DIR`, Cursor's `workspace_roots`); the `cwd` never counts on its own, and a root that is a
+filesystem or drive root, the home directory or an ancestor of it is ignored, so a session started from `/` or `~` has
+no workspace and every file action gets the outside defaults (review of #941, security B1). Copilot CLI and Codex
+declare no root, so all their file actions get the outside defaults. Path matching is case-insensitive on Windows and
 macOS.
+
+A program named by a relative path (`./git`, `bin/npm`) is a file whose contents are not seen, so it is unresolved, as
+a script file is. A deny or ask rule naming a bare program still matches it by base name (`/bin/rm` is `rm`), but an
+allow rule naming a bare program never allows one named by path, and an exception cannot relax such a rule into that
+allow; an admin who wants `/usr/bin/git` allowed writes the path (review of #941, code finding 1). `PATH` itself is
+not checked: a bare-name allow trusts whichever program `PATH` resolves to.
 
 **This is a guardrail, not containment.** Matching is on what the command line says, never on what a program does: a
 renamed or copied binary, a script file, an interpreter one-liner (`python -c`), an option order a rule did not

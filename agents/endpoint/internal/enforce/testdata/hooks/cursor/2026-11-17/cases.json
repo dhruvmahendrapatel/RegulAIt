@@ -11,5 +11,6 @@
   {"input": "shell-deny.json", "policy": "none", "want": "deny"},
   {"input": "read-outside.json", "policy": "enforce", "want": "deny"},
   {"input": "read-outside.json", "policy": "audit", "want": "allow"},
-  {"input": "read-inside.json", "policy": "enforce", "want": "allow"}
+  {"input": "read-inside.json", "policy": "enforce", "want": "allow"},
+  {"input": "bash-path-program.json", "policy": "enforce", "want": "ask"}
 ]

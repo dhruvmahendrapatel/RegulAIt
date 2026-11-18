@@ -51,7 +51,9 @@ parsed as bash), file reads and writes (path globs, with defaults for outside th
 (ecosystem and name), each allow, ask or deny, the strictest winning. An ask shows the agent's own permission prompt;
 where the agent has no ask for that action it is a deny. `regulait-agent hook-capabilities` prints, per agent, which
 actions the hook can see (`commands.shell`, `fileRead`, `fileWrite`: `ask`, `block` or `none`) and the vendor's
-limits. Matching is textual: a guardrail, not containment. For command rules to apply, each registration below also
+limits. Matching is textual: a guardrail, not containment. A bare-name allow (`git status`) trusts whichever `git` the
+user's `PATH` finds; a program named by a relative path (`./git`) is unresolved, and the workspace is only the roots
+the agent declares, never `/`, `~` or a parent of `~`. For command rules to apply, each registration below also
 needs the built-in tools:
 
 - Claude Code: matcher `Bash|PowerShell|Read|Write|Edit|MultiEdit|NotebookEdit|mcp__.*`.
