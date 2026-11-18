@@ -1,0 +1,2 @@
+<!-- fold: pending -->
+- **E45 Robots (ADR-0364), open owner questions with the secure default built:** (1) should free-form browser control also require a project with a budget? Default yes. (2) Maximum robot run wall-clock: default 5 minutes, admins may lower it without step-up; raising it is a stepped-up relaxation. Slices S2 to S4 are in progress; S5 (desktop engine, workflow "Robot step") is later.
