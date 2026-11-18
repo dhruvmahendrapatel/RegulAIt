@@ -17349,7 +17349,8 @@ export type WorkflowTemplateVersionRow = typeof workflowTemplateVersions.$inferS
 // Device groups only NARROW a person's on-device policy: their rules are ask or deny, never allow. An exception
 // relaxes one named rule on one device until `not_after`, after a step-up approval by someone other than the
 // requester, bound to the exact terms (`terms_digest`, the approvals queue's ADR-0104 binding). The lifecycle is the
-// table in @regulait/shared `ENDPOINT_EXCEPTION_TRANSITIONS`; `expired` is derived from `not_after`, never stored.
+// machine `ENDPOINT_COMMAND_EXCEPTION_MACHINE` in @regulait/shared (ADR-0348); `expired` is derived from `not_after`,
+// never stored. The terms columns are frozen once written (trigger in the migration).
 // Admin-only (row-level security admits an admin principal, system tasks and migrations).
 
 export const endpointDeviceGroups = pgTable(
@@ -17458,7 +17459,7 @@ export const endpointCommandExceptions = pgTable(
     // an approved (or later revoked) exception always has an expiry, and it is at most `hours` after the decision
     check(
       "endpoint_command_exceptions_expiry_check",
-      sql`(${t.status} IN ('approved', 'revoked')) = (${t.notAfter} IS NOT NULL) AND (${t.notAfter} IS NULL OR ${t.notAfter} <= ${t.decidedAt} + make_interval(hours => ${t.hours}))`,
+      sql`(${t.status} = 'approved' OR ${t.status} = 'revoked') = (${t.notAfter} IS NOT NULL) AND (${t.notAfter} IS NULL OR ${t.notAfter} <= ${t.decidedAt} + make_interval(hours => ${t.hours}))`,
     ),
   ],
 );

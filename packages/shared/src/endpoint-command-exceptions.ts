@@ -9,6 +9,7 @@
  * Pure and zero-I/O.
  */
 import { approvalArgumentsDigest } from "./approval-binding.js";
+import { defineMachine, type StateDescription } from "./state-machine.js";
 
 export const ENDPOINT_EXCEPTION_STATES = ["requested", "approved", "rejected", "cancelled", "revoked", "expired"] as const;
 export type EndpointExceptionState = (typeof ENDPOINT_EXCEPTION_STATES)[number];
@@ -17,14 +18,45 @@ export type EndpointExceptionState = (typeof ENDPOINT_EXCEPTION_STATES)[number];
 export const ENDPOINT_EXCEPTION_STORED_STATES = ["requested", "approved", "rejected", "cancelled", "revoked"] as const;
 export type EndpointExceptionStoredState = (typeof ENDPOINT_EXCEPTION_STORED_STATES)[number];
 
-/** Allowed transitions, by the action that makes them. Terminal states have none. */
-export const ENDPOINT_EXCEPTION_TRANSITIONS = {
-  approve: { from: "requested", to: "approved" },
-  reject: { from: "requested", to: "rejected" },
-  cancel: { from: "requested", to: "cancelled" },
-  revoke: { from: "approved", to: "revoked" },
-} as const satisfies Record<string, { from: EndpointExceptionState; to: EndpointExceptionStoredState }>;
-export type EndpointExceptionAction = keyof typeof ENDPOINT_EXCEPTION_TRANSITIONS;
+/**
+ * `endpoint_command_exceptions.status` (ADR-0348, registered in `STATE_MACHINES`). Its states are the stored
+ * ones; `expired` is a derived value excluded from the machine (ADR-0348 allows it): an approved row whose
+ * `not_after` has passed reads as expired and refuses `revoke`, without a sweep writing anything.
+ */
+export const ENDPOINT_COMMAND_EXCEPTION_MACHINE = defineMachine({
+  id: "endpoint_command_exception",
+  stored: "endpoint_command_exceptions.status",
+  states: ENDPOINT_EXCEPTION_STORED_STATES,
+  initial: ["requested"],
+  terminal: ["rejected", "cancelled", "revoked"],
+  transitions: {
+    approve: {
+      from: ["requested"],
+      to: "approved",
+      by: ["approver"],
+      summary: "The named approver, who is not the requester, approved the exact terms with a step-up; it lasts until not_after.",
+    },
+    reject: {
+      from: ["requested"],
+      to: "rejected",
+      by: ["admin"],
+      summary: "An admin other than the requester refused the request (refusing is the stricter outcome, so any admin may).",
+    },
+    cancel: {
+      from: ["requested"],
+      to: "cancelled",
+      by: ["user"],
+      summary: "The requester withdrew the request before a decision.",
+    },
+    revoke: {
+      from: ["approved"],
+      to: "revoked",
+      by: ["admin"],
+      summary: "An admin ended an approved exception before its expiry; the device stops applying it on its next policy.",
+    },
+  },
+});
+export type EndpointExceptionAction = (typeof ENDPOINT_COMMAND_EXCEPTION_MACHINE.events)[number];
 
 /** Exceptions last at most this long without a separate relaxation (owner question open; secure default). */
 export const ENDPOINT_EXCEPTION_DEFAULT_MAX_HOURS = 24;
@@ -45,8 +77,18 @@ export function endpointExceptionState(row: { status: EndpointExceptionStoredSta
 
 /** Why `action` cannot be applied to a row in `state`, or null when it can. */
 export function endpointExceptionTransitionRefusal(state: EndpointExceptionState, action: EndpointExceptionAction): string | null {
-  const t = ENDPOINT_EXCEPTION_TRANSITIONS[action];
-  return t.from === state ? null : `an exception that is ${state} cannot be moved to ${t.to}`;
+  const to = ENDPOINT_COMMAND_EXCEPTION_MACHINE.def.transitions[action].to;
+  if (state !== "expired" && ENDPOINT_COMMAND_EXCEPTION_MACHINE.can(state, action)) return null;
+  return `an exception that is ${state} cannot be moved to ${to}`;
+}
+
+/** The machine-readable lifecycle of a row now: its stored state, every event and why one is refused. */
+export function endpointExceptionLifecycle(
+  row: { status: EndpointExceptionStoredState; notAfter: Date | null },
+  now: Date,
+): StateDescription<EndpointExceptionStoredState, EndpointExceptionAction> {
+  const expired = endpointExceptionState(row, now) === "expired";
+  return ENDPOINT_COMMAND_EXCEPTION_MACHINE.describe(row.status, expired ? { revoke: "the exception has already expired" } : {});
 }
 
 /** What an approver approves: exactly these facts, digested with the approvals queue's binding (ADR-0104). */

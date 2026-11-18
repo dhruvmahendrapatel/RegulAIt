@@ -40,6 +40,7 @@ compares the status in JavaScript, then writes `WHERE id = $1`; a concurrent wri
 | Machine | Declared in | Guarded writers | Notes |
 |---|---|---|---|
 | Rule-step suggestion (`rule_step_suggestions.status`, ADR-0327) | `RULE_STEP_SUGGESTION_MACHINE`, `packages/shared/src/state-machines.ts` | `transitionSuggestion` in `apps/gateway/src/rule-steps.ts` (`whereFrom`, returned row) | suggested ⇄ shadow; suggested → dismissed (final). The list answer carries `lifecycle`; shadow start is shown blocked while detection is off. Converted from a hand-written table in review of #903 (E12). |
+| Endpoint command-rule exception (`endpoint_command_exceptions.status`, ADR-0350 §5) | `ENDPOINT_COMMAND_EXCEPTION_MACHINE`, `packages/shared/src/endpoint-command-exceptions.ts` | approve, reject, cancel and revoke in `apps/gateway/src/endpoint-command-exceptions.ts` (`whereFrom`, returned row, audit in the same transaction) | requested → approved, rejected or cancelled; approved → revoked. `expired` is derived from `not_after` and excluded from the stored states, and an expired row shows `revoke` refused. Each row carries `lifecycle`. Converted from a hand-written table in review of #964 (E31). |
 
 ## 3. Machines to convert, ranked by F×S
 

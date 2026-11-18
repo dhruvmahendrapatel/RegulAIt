@@ -35,15 +35,17 @@ import {
 import {
   ENDPOINT_EXCEPTION_DEFAULT_MAX_HOURS,
   ENDPOINT_EXCEPTION_HARD_MAX_HOURS,
-  ENDPOINT_EXCEPTION_TRANSITIONS,
+  ENDPOINT_COMMAND_EXCEPTION_MACHINE,
   ENDPOINT_EXCEPTION_VERDICTS,
   ENDPOINT_GROUP_RULE_VERDICTS,
   ENDPOINT_RULE_ID,
   type EndpointExceptionAction,
   endpointExceptionDigest,
+  endpointExceptionLifecycle,
   endpointExceptionState,
   endpointExceptionTransitionRefusal,
 } from "@regulait/shared";
+import { whereFrom } from "./state-transition.js";
 import { requireStepUp, requireStepUps, type StepUpCheckArgs } from "./step-up.js";
 
 const LIST_MAX = 200;
@@ -98,7 +100,10 @@ type AuditObject = "endpoint_device_group" | "endpoint_command_exception";
 // the bootstrap token has no user: its audit rows carry the nil id, as the other endpoint routes do
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
-async function audit(db: Db, userId: string | null, objectType: AuditObject, objectId: string, ruleId: string, reason: string, detail: Record<string, unknown>) {
+/** a transaction handle: every change and its audit row commit together (review #964) */
+type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+async function audit(db: Db | Tx, userId: string | null, objectType: AuditObject, objectId: string, ruleId: string, reason: string, detail: Record<string, unknown>) {
   await db.insert(auditLog).values({ userId: userId ?? NIL_UUID, objectType, objectId, detail: { adr: "ADR-0350", ...detail }, effect: "allow", ruleId, ruleChain: [], reason });
 }
 
@@ -116,6 +121,7 @@ function view(row: ExceptionRow, now: Date) {
     requestedBy: row.requestedBy,
     approverUserId: row.approverUserId,
     state: endpointExceptionState({ status: row.status, notAfter: row.notAfter }, now),
+    lifecycle: endpointExceptionLifecycle({ status: row.status, notAfter: row.notAfter }, now),
     decidedBy: row.decidedBy,
     decidedAt: row.decidedAt?.toISOString() ?? null,
     decisionReason: row.decisionReason,
@@ -140,13 +146,16 @@ export function registerEndpointCommandExceptionRoutes(app: FastifyInstance, db:
   app.post("/v1/endpoint-device-groups", async (req, reply) => {
     const b = groupBody.safeParse(req.body ?? {});
     if (!b.success) return refuse(reply, 400, "invalid_body", issues(b.error));
-    const [row] = await db
-      .insert(endpointDeviceGroups)
-      .values({ name: b.data.name, description: b.data.description ?? null, createdBy: actor(req) })
-      .onConflictDoNothing()
-      .returning();
+    const row = await db.transaction(async (tx) => {
+      const [r] = await tx
+        .insert(endpointDeviceGroups)
+        .values({ name: b.data.name, description: b.data.description ?? null, createdBy: actor(req) })
+        .onConflictDoNothing()
+        .returning();
+      if (r) await audit(tx, actor(req), "endpoint_device_group", r.id, "endpoint-device-group.create", "device group created", { name: r.name });
+      return r;
+    });
     if (!row) return refuse(reply, 409, "name_taken", "a device group with this name exists");
-    await audit(db, actor(req), "endpoint_device_group", row.id, "endpoint-device-group.create", "device group created", { name: row.name });
     return reply.status(201).send({ id: row.id, name: row.name, description: row.description, createdAt: row.createdAt.toISOString() });
   });
 
@@ -172,9 +181,12 @@ export function registerEndpointCommandExceptionRoutes(app: FastifyInstance, db:
     // deleting a group drops its narrowing rules from every member device: a relaxation
     const step = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { values: { endpointDeviceGroupDelete: { groupId } } } });
     if (!step.ok) return reply;
-    const [gone] = await db.delete(endpointDeviceGroups).where(eq(endpointDeviceGroups.id, groupId)).returning({ id: endpointDeviceGroups.id, name: endpointDeviceGroups.name });
+    const gone = await db.transaction(async (tx) => {
+      const [g] = await tx.delete(endpointDeviceGroups).where(eq(endpointDeviceGroups.id, groupId)).returning({ id: endpointDeviceGroups.id, name: endpointDeviceGroups.name });
+      if (g) await audit(tx, actor(req), "endpoint_device_group", groupId, "endpoint-device-group.delete", "device group deleted with its memberships and rules", { name: g.name, stepUp: step.method });
+      return g;
+    });
     if (!gone) return refuse(reply, 404, "not_found", "no such group");
-    await audit(db, actor(req), "endpoint_device_group", groupId, "endpoint-device-group.delete", "device group deleted with its memberships and rules", { name: gone.name, stepUp: step.method });
     return reply.send({ removed: true });
   });
 
@@ -186,8 +198,11 @@ export function registerEndpointCommandExceptionRoutes(app: FastifyInstance, db:
     const [g] = await db.select({ id: endpointDeviceGroups.id }).from(endpointDeviceGroups).where(eq(endpointDeviceGroups.id, groupId));
     const [d] = await db.select({ id: endpointDevices.id, revokedAt: endpointDevices.revokedAt }).from(endpointDevices).where(eq(endpointDevices.id, b.data.deviceId));
     if (!g || !d) return refuse(reply, 404, "not_found", "no such group or device");
-    const added = await db.insert(endpointDeviceGroupMembers).values({ groupId, deviceId: d.id, addedBy: actor(req) }).onConflictDoNothing().returning();
-    if (added.length) await audit(db, actor(req), "endpoint_device_group", groupId, "endpoint-device-group.member-add", "device added to group", { deviceId: d.id });
+    const added = await db.transaction(async (tx) => {
+      const rows = await tx.insert(endpointDeviceGroupMembers).values({ groupId, deviceId: d.id, addedBy: actor(req) }).onConflictDoNothing().returning();
+      if (rows.length) await audit(tx, actor(req), "endpoint_device_group", groupId, "endpoint-device-group.member-add", "device added to group", { deviceId: d.id });
+      return rows;
+    });
     return reply.status(added.length ? 201 : 200).send({ groupId, deviceId: d.id, added: added.length > 0 });
   });
 
@@ -197,12 +212,15 @@ export function registerEndpointCommandExceptionRoutes(app: FastifyInstance, db:
     // leaving a group drops its narrowing rules from the device: a relaxation
     const step = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { values: { endpointDeviceGroupMemberRemove: p.data } } });
     if (!step.ok) return reply;
-    const gone = await db
-      .delete(endpointDeviceGroupMembers)
-      .where(and(eq(endpointDeviceGroupMembers.groupId, p.data.groupId), eq(endpointDeviceGroupMembers.deviceId, p.data.deviceId)))
-      .returning();
+    const gone = await db.transaction(async (tx) => {
+      const rows = await tx
+        .delete(endpointDeviceGroupMembers)
+        .where(and(eq(endpointDeviceGroupMembers.groupId, p.data.groupId), eq(endpointDeviceGroupMembers.deviceId, p.data.deviceId)))
+        .returning();
+      if (rows.length) await audit(tx, actor(req), "endpoint_device_group", p.data.groupId, "endpoint-device-group.member-remove", "device removed from group", { deviceId: p.data.deviceId, stepUp: step.method });
+      return rows;
+    });
     if (!gone.length) return refuse(reply, 404, "not_found", "the device is not in this group");
-    await audit(db, actor(req), "endpoint_device_group", p.data.groupId, "endpoint-device-group.member-remove", "device removed from group", { deviceId: p.data.deviceId, stepUp: step.method });
     return reply.send({ removed: true });
   });
 
@@ -214,13 +232,16 @@ export function registerEndpointCommandExceptionRoutes(app: FastifyInstance, db:
     const groupId = p.data.groupId as string;
     const [g] = await db.select({ id: endpointDeviceGroups.id }).from(endpointDeviceGroups).where(eq(endpointDeviceGroups.id, groupId));
     if (!g) return refuse(reply, 404, "not_found", "no such group");
-    const [row] = await db
-      .insert(endpointDeviceGroupRules)
-      .values({ groupId, ruleId: b.data.ruleId, kind: b.data.kind, rule: b.data.rule, verdict: b.data.verdict, createdBy: actor(req) })
-      .onConflictDoNothing()
-      .returning();
+    const row = await db.transaction(async (tx) => {
+      const [r] = await tx
+        .insert(endpointDeviceGroupRules)
+        .values({ groupId, ruleId: b.data.ruleId, kind: b.data.kind, rule: b.data.rule, verdict: b.data.verdict, createdBy: actor(req) })
+        .onConflictDoNothing()
+        .returning();
+      if (r) await audit(tx, actor(req), "endpoint_device_group", groupId, "endpoint-device-group.rule-add", "narrowing rule added", { ruleId: r.ruleId, kind: r.kind, verdict: r.verdict });
+      return r;
+    });
     if (!row) return refuse(reply, 409, "rule_id_taken", "this group already has a rule with this id");
-    await audit(db, actor(req), "endpoint_device_group", groupId, "endpoint-device-group.rule-add", "narrowing rule added", { ruleId: row.ruleId, kind: row.kind, verdict: row.verdict });
     return reply.status(201).send({ id: row.id, ruleId: row.ruleId, kind: row.kind, rule: row.rule, verdict: row.verdict });
   });
 
@@ -229,12 +250,15 @@ export function registerEndpointCommandExceptionRoutes(app: FastifyInstance, db:
     if (!p.success) return refuse(reply, 400, "invalid_request", "groupId must be a uuid and ruleId a rule id");
     const step = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { values: { endpointDeviceGroupRuleRemove: p.data } } });
     if (!step.ok) return reply;
-    const gone = await db
-      .delete(endpointDeviceGroupRules)
-      .where(and(eq(endpointDeviceGroupRules.groupId, p.data.groupId), eq(endpointDeviceGroupRules.ruleId, p.data.ruleId)))
-      .returning();
+    const gone = await db.transaction(async (tx) => {
+      const rows = await tx
+        .delete(endpointDeviceGroupRules)
+        .where(and(eq(endpointDeviceGroupRules.groupId, p.data.groupId), eq(endpointDeviceGroupRules.ruleId, p.data.ruleId)))
+        .returning();
+      if (rows.length) await audit(tx, actor(req), "endpoint_device_group", p.data.groupId, "endpoint-device-group.rule-remove", "narrowing rule removed", { ruleId: p.data.ruleId, stepUp: step.method });
+      return rows;
+    });
     if (!gone.length) return refuse(reply, 404, "not_found", "no such rule in this group");
-    await audit(db, actor(req), "endpoint_device_group", p.data.groupId, "endpoint-device-group.rule-remove", "narrowing rule removed", { ruleId: p.data.ruleId, stepUp: step.method });
     return reply.send({ removed: true });
   });
 
@@ -252,11 +276,14 @@ export function registerEndpointCommandExceptionRoutes(app: FastifyInstance, db:
     // the digest covers the reason as stored: the write path scrubs credentials out of it (ADR-0102), so the
     // approver approves the text they can read
     const terms = { deviceId: d.id, ruleId: b.data.ruleId, verdict: b.data.verdict, hours: b.data.hours, reason: PROSE_SCRUB(b.data.reason) };
-    const [row] = await db
-      .insert(endpointCommandExceptions)
-      .values({ ...terms, termsDigest: endpointExceptionDigest(terms), requestedBy: requester, approverUserId: b.data.approverUserId })
-      .returning();
-    await audit(db, requester, "endpoint_command_exception", row!.id, "endpoint-command-exception.request", "exception requested", { ...terms, approverUserId: b.data.approverUserId });
+    const row = await db.transaction(async (tx) => {
+      const [r] = await tx
+        .insert(endpointCommandExceptions)
+        .values({ ...terms, termsDigest: endpointExceptionDigest(terms), requestedBy: requester, approverUserId: b.data.approverUserId })
+        .returning();
+      await audit(tx, requester, "endpoint_command_exception", r!.id, "endpoint-command-exception.request", "exception requested", { ...terms, approverUserId: b.data.approverUserId });
+      return r;
+    });
     return reply.status(201).send(view(row!, await dbNow(db)));
   });
 
@@ -270,7 +297,7 @@ export function registerEndpointCommandExceptionRoutes(app: FastifyInstance, db:
     const rows = await db.select().from(endpointCommandExceptions).where(where).orderBy(desc(endpointCommandExceptions.createdAt), desc(endpointCommandExceptions.id)).limit(q.data.limit + 1);
     const now = await dbNow(db);
     const page = rows.slice(0, q.data.limit);
-    return { items: page.map((r) => view(r, now)), next: rows.length > q.data.limit ? page[page.length - 1]!.createdAt.toISOString() : null, transitions: ENDPOINT_EXCEPTION_TRANSITIONS };
+    return { items: page.map((r) => view(r, now)), next: rows.length > q.data.limit ? page[page.length - 1]!.createdAt.toISOString() : null, machine: ENDPOINT_COMMAND_EXCEPTION_MACHINE.toJSON() };
   });
 
   /** Load, check the lifecycle table, and apply one transition as a conditional update. */
@@ -303,17 +330,31 @@ export function registerEndpointCommandExceptionRoutes(app: FastifyInstance, db:
     const decider = actor(req);
     if (!decider || decider === row.requestedBy || decider !== row.approverUserId) return refuse(reply, 403, "caller_cannot_approve", "only the named approver, who is not the requester, may approve");
     if (b.data.termsDigest !== row.termsDigest) return refuse(reply, 409, "terms_changed", "the approval names different terms from the request");
+    // the stored digest must still be the digest of the stored terms: the approver approves the row's own device,
+    // rule, verdict, hours and reason, never a digest that outlived an edit to them (review #964)
+    const stored = endpointExceptionDigest({ deviceId: row.deviceId, ruleId: row.ruleId, verdict: row.verdict, hours: row.hours, reason: row.reason });
+    if (stored !== row.termsDigest) return refuse(reply, 409, "terms_changed", "the request's terms no longer match the digest it was made with");
     const steps: StepUpCheckArgs[] = [{ kind: "approval_decide", facts: { endpointCommandException: row.id, termsDigest: row.termsDigest } }];
     // longer than the default maximum is a relaxation of its own
     if (row.hours > ENDPOINT_EXCEPTION_DEFAULT_MAX_HOURS) steps.push({ kind: "settings_relax", facts: { values: { endpointCommandExceptionHours: { exception: row.id, hours: row.hours } } } });
     if (!(await requireStepUps(db, req, reply, steps))) return reply;
-    const [done] = await db
-      .update(endpointCommandExceptions)
-      .set({ status: "approved", decidedBy: decider, decidedAt: sql`now()`, decisionReason: b.data.decisionReason ?? null, notAfter: sql`now() + make_interval(hours => ${row.hours})` })
-      .where(and(eq(endpointCommandExceptions.id, row.id), eq(endpointCommandExceptions.status, "requested"), eq(endpointCommandExceptions.termsDigest, row.termsDigest)))
-      .returning();
+    const done = await db.transaction(async (tx) => {
+      const [r] = await tx
+        .update(endpointCommandExceptions)
+        .set({ status: "approved", decidedBy: decider, decidedAt: sql`now()`, decisionReason: b.data.decisionReason ?? null, notAfter: sql`now() + make_interval(hours => ${row.hours})` })
+        .where(
+          and(
+            eq(endpointCommandExceptions.id, row.id),
+            whereFrom(endpointCommandExceptions.status, ENDPOINT_COMMAND_EXCEPTION_MACHINE, "approve"),
+            eq(endpointCommandExceptions.termsDigest, row.termsDigest),
+            eq(endpointCommandExceptions.hours, row.hours),
+          ),
+        )
+        .returning();
+      if (r) await audit(tx, decider, "endpoint_command_exception", row.id, "endpoint-command-exception.approve", "exception approved", { termsDigest: row.termsDigest, notAfter: r.notAfter?.toISOString(), hours: row.hours });
+      return r;
+    });
     if (!done) return refuse(reply, 409, "invalid_transition", "the exception was decided concurrently");
-    await audit(db, decider, "endpoint_command_exception", row.id, "endpoint-command-exception.approve", "exception approved", { termsDigest: row.termsDigest, notAfter: done.notAfter?.toISOString(), hours: row.hours });
     return reply.send(view(done, await dbNow(db)));
   });
 
@@ -324,13 +365,16 @@ export function registerEndpointCommandExceptionRoutes(app: FastifyInstance, db:
     if (!t) return reply;
     const decider = actor(req);
     if (!decider || decider === t.row.requestedBy) return refuse(reply, 403, "caller_cannot_decide", "the requester cannot reject their own request; cancel it instead");
-    const [done] = await db
-      .update(endpointCommandExceptions)
-      .set({ status: "rejected", decidedBy: decider, decidedAt: sql`now()`, decisionReason: b.data.reason })
-      .where(and(eq(endpointCommandExceptions.id, t.row.id), eq(endpointCommandExceptions.status, "requested")))
-      .returning();
+    const done = await db.transaction(async (tx) => {
+      const [r] = await tx
+        .update(endpointCommandExceptions)
+        .set({ status: "rejected", decidedBy: decider, decidedAt: sql`now()`, decisionReason: b.data.reason })
+        .where(and(eq(endpointCommandExceptions.id, t.row.id), whereFrom(endpointCommandExceptions.status, ENDPOINT_COMMAND_EXCEPTION_MACHINE, "reject")))
+        .returning();
+      if (r) await audit(tx, decider, "endpoint_command_exception", t.row.id, "endpoint-command-exception.reject", "exception rejected", { reason: b.data.reason });
+      return r;
+    });
     if (!done) return refuse(reply, 409, "invalid_transition", "the exception was decided concurrently");
-    await audit(db, decider, "endpoint_command_exception", t.row.id, "endpoint-command-exception.reject", "exception rejected", { reason: b.data.reason });
     return reply.send(view(done, await dbNow(db)));
   });
 
@@ -339,13 +383,16 @@ export function registerEndpointCommandExceptionRoutes(app: FastifyInstance, db:
     if (!t) return reply;
     const caller = actor(req);
     if (caller !== t.row.requestedBy) return refuse(reply, 403, "caller_cannot_cancel", "only the requester may cancel a request");
-    const [done] = await db
-      .update(endpointCommandExceptions)
-      .set({ status: "cancelled", decidedBy: caller, decidedAt: sql`now()` })
-      .where(and(eq(endpointCommandExceptions.id, t.row.id), eq(endpointCommandExceptions.status, "requested")))
-      .returning();
+    const done = await db.transaction(async (tx) => {
+      const [r] = await tx
+        .update(endpointCommandExceptions)
+        .set({ status: "cancelled", decidedBy: caller, decidedAt: sql`now()` })
+        .where(and(eq(endpointCommandExceptions.id, t.row.id), whereFrom(endpointCommandExceptions.status, ENDPOINT_COMMAND_EXCEPTION_MACHINE, "cancel")))
+        .returning();
+      if (r) await audit(tx, caller, "endpoint_command_exception", t.row.id, "endpoint-command-exception.cancel", "exception request cancelled", {});
+      return r;
+    });
     if (!done) return refuse(reply, 409, "invalid_transition", "the exception was decided concurrently");
-    await audit(db, caller, "endpoint_command_exception", t.row.id, "endpoint-command-exception.cancel", "exception request cancelled", {});
     return reply.send(view(done, await dbNow(db)));
   });
 
@@ -355,13 +402,23 @@ export function registerEndpointCommandExceptionRoutes(app: FastifyInstance, db:
     const t = await transition(req, reply, "revoke");
     if (!t) return reply;
     // revoking tightens, so it needs no step-up; the device stops applying it on its next policy
-    const [done] = await db
-      .update(endpointCommandExceptions)
-      .set({ status: "revoked", revokedBy: actor(req), revokedAt: sql`now()` })
-      .where(and(eq(endpointCommandExceptions.id, t.row.id), eq(endpointCommandExceptions.status, "approved"), sql`${endpointCommandExceptions.notAfter} > now()`, isNull(endpointCommandExceptions.revokedAt)))
-      .returning();
+    const done = await db.transaction(async (tx) => {
+      const [r] = await tx
+        .update(endpointCommandExceptions)
+        .set({ status: "revoked", revokedBy: actor(req), revokedAt: sql`now()` })
+        .where(
+          and(
+            eq(endpointCommandExceptions.id, t.row.id),
+            whereFrom(endpointCommandExceptions.status, ENDPOINT_COMMAND_EXCEPTION_MACHINE, "revoke"),
+            sql`${endpointCommandExceptions.notAfter} > now()`,
+            isNull(endpointCommandExceptions.revokedAt),
+          ),
+        )
+        .returning();
+      if (r) await audit(tx, actor(req), "endpoint_command_exception", t.row.id, "endpoint-command-exception.revoke", "exception revoked", { reason: b.data.reason });
+      return r;
+    });
     if (!done) return refuse(reply, 409, "invalid_transition", "the exception expired or was revoked concurrently");
-    await audit(db, actor(req), "endpoint_command_exception", t.row.id, "endpoint-command-exception.revoke", "exception revoked", { reason: b.data.reason });
     return reply.send(view(done, await dbNow(db)));
   });
 }

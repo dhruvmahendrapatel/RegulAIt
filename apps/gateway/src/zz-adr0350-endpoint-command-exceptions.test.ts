@@ -153,7 +153,12 @@ describe("ADR-0350 exceptions", () => {
     await db.execute(sql`UPDATE endpoint_command_exceptions SET decided_at = now() - interval '2 hours', not_after = now() - interval '1 hour' WHERE id = ${ex.id}`);
     const list = (await app.inject({ method: "GET", url: `/v1/endpoint-command-exceptions?deviceId=${deviceId}`, headers: keys.a })).json();
     expect(list.items.find((i: { id: string }) => i.id === ex.id).state).toBe("expired");
-    expect(list.transitions.approve).toEqual({ from: "requested", to: "approved" });
+    // the declared ADR-0348 machine, and each row's lifecycle shows revoke refused once expired
+    expect(list.machine.id).toBe("endpoint_command_exception");
+    expect(list.machine.transitions.approve).toMatchObject({ from: ["requested"], to: "approved" });
+    const lifecycle = list.items.find((i: { id: string }) => i.id === ex.id).lifecycle;
+    expect(lifecycle.state).toBe("approved");
+    expect(lifecycle.transitions.find((t: { event: string }) => t.event === "revoke")).toMatchObject({ allowed: false });
     expect((await post(`/v1/endpoint-command-exceptions/${ex.id}/revoke`, { reason: "late" }, "a")).statusCode).toBe(409);
   });
 
@@ -205,6 +210,51 @@ describe("ADR-0350 exceptions", () => {
     expect(ex.reason).not.toContain(key);
     expect(JSON.stringify(await db.select().from(endpointCommandExceptions).where(eq(endpointCommandExceptions.id, ex.id)))).not.toContain(key);
     expect((await approve(ex)).statusCode).toBe(200);
+  });
+
+  // review #964 B2: the database freezes the terms, and the approval recomputes the digest from the row
+  it("an exception's terms cannot change once written, and an approval refuses a digest the row no longer has", async () => {
+    const ex = (await request()).json();
+    const frozen = async (q: ReturnType<typeof sql>) => {
+      const err = await db.execute(q).then(() => null, (e: Error & { cause?: Error }) => e);
+      expect(`${err?.message} ${err?.cause?.message}`).toMatch(/terms of an exception cannot change/);
+    };
+    await frozen(sql`UPDATE endpoint_command_exceptions SET hours = 168 WHERE id = ${ex.id}`);
+    await frozen(sql`UPDATE endpoint_command_exceptions SET rule_id = 'other' WHERE id = ${ex.id}`);
+    // with the trigger bypassed (a superuser edit), the route still refuses: the stored digest is not the row's
+    await db.execute(sql`ALTER TABLE endpoint_command_exceptions DISABLE TRIGGER endpoint_command_exceptions_terms_frozen`);
+    try {
+      await db.execute(sql`UPDATE endpoint_command_exceptions SET hours = 8 WHERE id = ${ex.id}`);
+    } finally {
+      await db.execute(sql`ALTER TABLE endpoint_command_exceptions ENABLE TRIGGER endpoint_command_exceptions_terms_frozen`);
+    }
+    const r = await approve(ex);
+    expect(r.statusCode).toBe(409);
+    expect(r.json().error).toBe("terms_changed");
+    const [row] = await db.select({ status: endpointCommandExceptions.status }).from(endpointCommandExceptions).where(eq(endpointCommandExceptions.id, ex.id));
+    expect(row!.status).toBe("requested");
+  });
+
+  // review #964 B1: a change and its audit row commit together; if the audit write fails, nothing moved
+  it("an approval whose audit row cannot be written is rolled back", async () => {
+    const ex = (await request()).json();
+    const fn = `e31_refuse_audit_${RUN}`;
+    await db.execute(sql.raw(`CREATE FUNCTION "${fn}"() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+      IF NEW.rule_id = 'endpoint-command-exception.approve' AND NEW.object_id = '${ex.id}' THEN RAISE EXCEPTION 'e31 audit refused'; END IF;
+      RETURN NEW; END $$`));
+    await db.execute(sql.raw(`CREATE TRIGGER "${fn}" BEFORE INSERT ON audit_log FOR EACH ROW EXECUTE FUNCTION "${fn}"()`));
+    try {
+      expect((await approve(ex)).statusCode).toBeGreaterThanOrEqual(500);
+    } finally {
+      await db.execute(sql.raw(`DROP TRIGGER IF EXISTS "${fn}" ON audit_log`));
+      await db.execute(sql.raw(`DROP FUNCTION IF EXISTS "${fn}"()`));
+    }
+    const [row] = await db.select({ status: endpointCommandExceptions.status, notAfter: endpointCommandExceptions.notAfter }).from(endpointCommandExceptions).where(eq(endpointCommandExceptions.id, ex.id));
+    expect(row).toEqual({ status: "requested", notAfter: null });
+    // and with the audit back, the same approval goes through and is audited
+    expect((await approve(ex)).statusCode).toBe(200);
+    const trail = await db.select({ ruleId: auditLog.ruleId }).from(auditLog).where(eq(auditLog.objectId, ex.id));
+    expect(trail.map((t) => t.ruleId)).toContain("endpoint-command-exception.approve");
   });
 
   it("refuses terms the device would refuse", async () => {

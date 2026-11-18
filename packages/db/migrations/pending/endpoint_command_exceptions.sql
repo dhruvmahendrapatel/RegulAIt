@@ -2,10 +2,11 @@
 --
 -- Third normal form: a group, its device memberships (a join table to endpoint_devices), its narrowing rules (ask or
 -- deny only; `rule` is a schema-validated configuration document, ADR-0200 exception), and exceptions, each relaxing
--- one rule on one device until `not_after`. The exception lifecycle is @regulait/shared ENDPOINT_EXCEPTION_TRANSITIONS;
+-- one rule on one device until `not_after`. The exception lifecycle is @regulait/shared ENDPOINT_COMMAND_EXCEPTION_MACHINE (ADR-0348);
 -- `expired` is derived from `not_after` and never stored. Nobody approves their own exception (CHECK), an approved
 -- exception always has an expiry no later than `hours` after the decision (CHECK), and the approval names the
--- ADR-0104 digest of the exact terms.
+-- ADR-0104 digest of the exact terms. The terms are frozen once written (trigger below): only the status and the
+-- decision and revoke columns move, so the digest an approver approves is always the digest of the row (review #964).
 --
 -- Row-level security, ENABLED and FORCED on every table: an active admin principal (regulait_rls_is_admin()) and the
 -- `system_task` and `migration` reasons only.
@@ -74,7 +75,7 @@ CREATE TABLE IF NOT EXISTS "endpoint_command_exceptions" (
   CONSTRAINT "endpoint_command_exceptions_approver_check" CHECK ("approver_user_id" <> "requested_by"),
   CONSTRAINT "endpoint_command_exceptions_decider_check" CHECK ("decided_by" IS NULL OR "decided_by" <> "requested_by" OR "status" = 'cancelled'),
   CONSTRAINT "endpoint_command_exceptions_revoked_check" CHECK (("status" = 'revoked') = ("revoked_at" IS NOT NULL)),
-  CONSTRAINT "endpoint_command_exceptions_expiry_check" CHECK (("status" IN ('approved', 'revoked')) = ("not_after" IS NOT NULL) AND ("not_after" IS NULL OR "not_after" <= "decided_at" + make_interval(hours => "hours")))
+  CONSTRAINT "endpoint_command_exceptions_expiry_check" CHECK (("status" = 'approved' OR "status" = 'revoked') = ("not_after" IS NOT NULL) AND ("not_after" IS NULL OR "not_after" <= "decided_at" + make_interval(hours => "hours")))
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "endpoint_command_exceptions_device_idx" ON "endpoint_command_exceptions" ("device_id", "status");
@@ -118,3 +119,26 @@ DROP POLICY IF EXISTS "endpoint_command_exceptions_admin" ON "endpoint_command_e
 CREATE POLICY "endpoint_command_exceptions_admin" ON "endpoint_command_exceptions" FOR ALL
   USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
   WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
+--> statement-breakpoint
+CREATE OR REPLACE FUNCTION "regulait_endpoint_exception_terms_frozen"() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW."device_id" IS DISTINCT FROM OLD."device_id"
+     OR NEW."rule_id" IS DISTINCT FROM OLD."rule_id"
+     OR NEW."verdict" IS DISTINCT FROM OLD."verdict"
+     OR NEW."hours" IS DISTINCT FROM OLD."hours"
+     OR NEW."reason" IS DISTINCT FROM OLD."reason"
+     OR NEW."terms_digest" IS DISTINCT FROM OLD."terms_digest"
+     OR NEW."requested_by" IS DISTINCT FROM OLD."requested_by"
+     OR NEW."approver_user_id" IS DISTINCT FROM OLD."approver_user_id"
+     OR NEW."created_at" IS DISTINCT FROM OLD."created_at" THEN
+    RAISE EXCEPTION 'endpoint_command_exceptions: the terms of an exception cannot change (ADR-0350)' USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END
+$$;
+--> statement-breakpoint
+DROP TRIGGER IF EXISTS "endpoint_command_exceptions_terms_frozen" ON "endpoint_command_exceptions";
+--> statement-breakpoint
+CREATE TRIGGER "endpoint_command_exceptions_terms_frozen"
+  BEFORE UPDATE ON "endpoint_command_exceptions"
+  FOR EACH ROW EXECUTE FUNCTION "regulait_endpoint_exception_terms_frozen"();

@@ -118,8 +118,13 @@ now governed, so with no policy they deny.
   | rejected, cancelled, revoked, expired | (terminal) |
 
   A reason is mandatory. Approval is a step-up (`requireStepUp`, a fresh MFA) by someone other than the requester,
-  bound to the exact rule, device and expiry, and reuses the approvals queue's payload binding (ADR-0104/0105) rather
-  than a second approval path. The expiry is mandatory; the default maximum is 24 hours and an admin may raise it to
+  bound to the exact rule, device and expiry. It reuses the approvals queue's payload binding (the ADR-0104 terms
+  digest), but the decision is this lane's own `/approve` route, not the Approvals Queue decide path. The terms are
+  frozen in the database once written, and the approval recomputes the digest from the row before it accepts it
+  (review #964). Any admin other than the requester may reject, because rejecting is the stricter outcome. The
+  lifecycle is the declared machine `ENDPOINT_COMMAND_EXCEPTION_MACHINE` (ADR-0348), with `expired` derived and
+  excluded from the stored states, and each change commits in one transaction with its audit row. The expiry is
+  mandatory; the default maximum is 24 hours and an admin may raise it to
   seven days (a `settings_relax` step-up, audited). Every transition is audited. `expired` is derived from the clock
   (database `now()`), and the device's own expiry check (§3) means a lapsed exception stops applying even before the
   next policy fetch.
