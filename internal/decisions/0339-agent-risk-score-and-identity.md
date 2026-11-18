@@ -63,6 +63,23 @@ as, and whether its owner is gone or inactive.
    their tools, schedules, sub-agents, channels and skills, their shares, `agent_grants`, `role_agent_grants`,
    `role_assignments`, and a `config_versions` row for an agent artifact becoming active (`published`). A route added
    later is covered without remembering to call anything. The migration marks every existing agent (`backfill`).
+   - **The score's other inputs mark too** (`evidence_changed`, review round 1 on #883), so the admin ranking never
+     waits for an unrelated agent edit:
+     - an agent's guardrail override marks that agent and the builder agents bound to it; the org guardrail row marks
+       every agent;
+     - a model card, or a sign-off on it, marks the agent it describes, or every agent served by the custom provider
+       it describes;
+     - a red-team run marks the agent it probed when it finishes;
+     - an SoD rule or one of its sides marks every agent, once per statement;
+     - a user disabled or re-enabled marks the agents they own and the agents they can use;
+     - a skill's admission changing marks the builder agents that carry it;
+     - an MCP tool renamed, moved or deleted marks the builder agents bound to it.
+   - **Reach changes mark the agent whose reach changed** (`access_changed`): a use case naming or dropping the
+     agent; a sub-agent link (the child's dependents, not only the parent); a builder agent bound to, unbound from or
+     archived off a model agent (the model's dependents).
+   - **A daily mark** (`agent-risk-daily-mark`, every 24 hours, trigger `scheduled`) marks every agent, so a fact
+     that changes with time alone reaches the stored score: a sign-off or a red-team run going stale, an owner going
+     inactive. The sweep then scores the marked agents at its usual 50 a pass.
 3. **The sweep** (`agent-risk-recompute-sweep`, every 60 s, 50 agents a pass; `POST /v1/agent-risk/recompute` runs the
    same function) scores each marked agent and, in one transaction, appends an `agent_risk_assessments` row, writes
    its audit row (score, previous score, unchanged flag, triggers, top fixes) and deletes exactly the requests it read.
@@ -74,7 +91,12 @@ as, and whether its owner is gone or inactive.
      the newest stored assessment and whether a recompute is pending. An admin or the agent's steward or owner;
      anyone else gets the 404 a missing agent gets. `private, no-store`.
    - `GET /v1/agent-risk/:kind/:subjectId/history`: the stored assessments, keyset-paged.
-   - `GET /v1/agent-risk` (admin): agents ranked by their newest score, with the count not yet scored.
+   - `GET /v1/agent-risk` (admin): agents ranked by their newest score, with the count not yet scored. It reads
+     `agent_risk_latest`, one pointer per agent to its newest assessment. A database trigger moves the pointer
+     forward on every append and never moves it back, so the list reads one row per agent rather than sorting the
+     whole append-only history. The pointer holds references only, so the table stays in third normal form.
+     Measured on 2,000 agents with 500,000 assessments: 386 ms with a 28 MB disk sort before, 7 ms with primary-key
+     lookups after.
    - `POST /v1/agent-risk/recompute` (admin).
 
 ### Slice 2: author, runner, non-human identity, orphans
@@ -121,9 +143,12 @@ as, and whether its owner is gone or inactive.
 
 ## Consequences
 
-- Every agent has a score and a history from the first sweep after the migration. A change of evidence that is not an
-  agent change (a new red-team run, a guardrail policy edit) shows in the live score at once and in the stored history
-  at the agent's next change.
+- Every agent has a score and a history from the first sweep after the migration. A change of evidence that is not
+  an agent change (a red-team run, a guardrail policy edit, a sign-off, an SoD rule, the owner's account) shows in
+  the live score at once. It reaches the stored history and the ranked list at the next sweep, within a minute for
+  up to 50 marked agents. A fact that changes with time alone reaches them within a day.
+- An org-wide change (the org guardrail row, an SoD rule) marks every agent. The marks are upserts, one queue row per
+  agent and reason, so a burst of such changes queues each agent once.
 - Every agent write now runs one small trigger; the update triggers fire only on risk-relevant columns.
 - The weights are a published method version. Changing one means a new `methodVersion`, so old assessments keep their
   meaning.

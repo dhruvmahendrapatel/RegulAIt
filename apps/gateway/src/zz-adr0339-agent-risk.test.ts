@@ -6,6 +6,10 @@
  *    (created), a risk-relevant update (modified; a price edit marks nothing), a grant (access_changed), a config
  *    activation (published, through the real PATCH route); a builder agent's insert, its tools and shares; and a
  *    builder agent bound to a model that changes. The spend-limit lease does not mark.
+ *  - EVIDENCE INPUTS mark too (review round 1): an agent guardrail override, a model card and its sign-off, a finished
+ *    red-team run, an SoD rule, the owner's account being disabled, a skill's admission, a use case naming the agent,
+ *    a sub-agent link (the child's reach), a builder agent binding to a model (the model's reach), and the daily mark.
+ *  - THE LATEST POINTER moves forward with every append and serves the ranked list.
  *  - THE SWEEP scores exactly the marked agent, appends one assessment and one audit row in one transaction, deletes
  *    the requests it read, and records an unchanged recompute as unchanged.
  *  - EVIDENCE: assessments refuse UPDATE, DELETE and TRUNCATE, and go with their agent's own deletion.
@@ -23,6 +27,18 @@ import { fileURLToPath } from "node:url";
 import {
   agentGrants,
   agentRiskAssessments,
+  agentRiskLatest,
+  aiUseCases,
+  builderAgentSkills,
+  builderAgentSubagents,
+  builderSkills,
+  evalDatasets,
+  evalRuns,
+  guardrailConfigs,
+  modelCardApprovals,
+  modelCards,
+  redteamLibraries,
+  redteamRuns,
   agentRiskRecomputeRequests,
   agents,
   auditLog,
@@ -44,7 +60,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
-import { runAgentRiskRecomputeSweep, type AgentRiskSubject } from "./agent-risk.js";
+import { markAllAgentRisk, runAgentRiskRecomputeSweep, type AgentRiskSubject } from "./agent-risk.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -175,6 +191,147 @@ describe("ADR-0339 triggers: every write path marks the agent", () => {
     await sweep(s);
     await db.update(agents).set({ expectedServedModel: "something-else" }).where(eq(agents.id, model));
     expect(await requests(s)).toEqual(["modified"]);
+  });
+});
+
+describe("ADR-0339 triggers: the score's other inputs mark the agent (evidence_changed)", () => {
+  const drain = async (...ss: AgentRiskSubject[]) => {
+    for (const x of ss) await sweep(x);
+  };
+
+  it("an agent guardrail override marks the agent and the builder agents bound to it", async () => {
+    const model = await mkAgent("r339-gr");
+    const b = await mkBuilder("r339-gr-b", model);
+    const sm: AgentRiskSubject = { kind: "agent", id: model };
+    const sb: AgentRiskSubject = { kind: "builder_agent", id: b };
+    await drain(sm, sb);
+    const [g] = await db.insert(guardrailConfigs).values({ scope: "agent", scopeId: model, promptInjectionMode: "warn" }).returning({ id: guardrailConfigs.id });
+    expect(await requests(sm)).toEqual(["evidence_changed"]);
+    expect(await requests(sb)).toEqual(["evidence_changed"]);
+    await drain(sm, sb);
+    await db.delete(guardrailConfigs).where(eq(guardrailConfigs.id, g!.id));
+    expect(await requests(sm)).toEqual(["evidence_changed"]);
+  });
+
+  it("a model card and its sign-off mark the agent the card describes", async () => {
+    const id = await mkAgent("r339-card");
+    const s: AgentRiskSubject = { kind: "agent", id };
+    await drain(s);
+    const [card] = await db.insert(modelCards).values({ agentId: id, intendedUse: `r339 ${RUN}` }).returning({ id: modelCards.id });
+    expect(await requests(s)).toEqual(["evidence_changed"]);
+    await drain(s);
+    await db.insert(modelCardApprovals).values({ cardId: card!.id, approverUserId: owner.id });
+    expect(await requests(s)).toEqual(["evidence_changed"]);
+  });
+
+  it("a red-team run marks the agent when it finishes, not while it runs", async () => {
+    const id = await mkAgent("r339-rt");
+    const s: AgentRiskSubject = { kind: "agent", id };
+    await drain(s);
+    const [lib] = await db.insert(redteamLibraries).values({ name: `r339-lib-${RUN}` }).returning();
+    const [ds] = await db.insert(evalDatasets).values({ name: `r339-ds-${RUN}` }).returning();
+    const [ev] = await db.insert(evalRuns).values({ datasetId: ds!.id, datasetVersion: ds!.version, agentName: "r339", trigger: "manual" }).returning();
+    const [run] = await db
+      .insert(redteamRuns)
+      .values({ libraryId: lib!.id, libraryName: lib!.name, libraryVersion: 1, evalRunId: ev!.id, agentId: id, agentName: "r339" })
+      .returning({ id: redteamRuns.id });
+    expect(await requests(s)).toEqual([]);
+    await db.update(redteamRuns).set({ finishedAt: new Date(), classSummary: [{ attackClass: "jailbreak", probes: 1, resisted: 1, defeated: 0 }] }).where(eq(redteamRuns.id, run!.id));
+    expect(await requests(s)).toEqual(["evidence_changed"]);
+  });
+
+  it("an SoD rule toggled marks every agent; the owner's account disabled marks the agents they own", async () => {
+    const id = await mkAgent("r339-own");
+    const peer = await mkAgent("r339-own-peer");
+    const gone = await mkUser("gone");
+    const s: AgentRiskSubject = { kind: "agent", id };
+    await db.update(agents).set({ ownerUserId: gone.id }).where(eq(agents.id, id));
+    await drain(s);
+    const [rule] = await db.insert(sodRules).values({ name: `r339-toggle-${RUN}`, reason: "r339", aKind: "agent", aObjectId: id, bKind: "agent", bObjectId: peer, enabled: false }).returning({ id: sodRules.id });
+    expect(await requests(s)).toEqual(["evidence_changed"]);
+    await drain(s);
+    await db.update(sodRules).set({ enabled: true }).where(eq(sodRules.id, rule!.id));
+    expect(await requests(s)).toEqual(["evidence_changed"]);
+    await db.delete(sodRules).where(eq(sodRules.id, rule!.id));
+    await drain(s);
+    await db.update(users).set({ disabledAt: new Date() }).where(eq(users.id, gone.id));
+    expect(await requests(s)).toEqual(["evidence_changed"]);
+    await drain(s);
+    // a second write that does not change disabled-or-not marks nothing
+    await db.update(users).set({ disabledAt: new Date(Date.now() - 1000) }).where(eq(users.id, gone.id));
+    expect(await requests(s)).toEqual([]);
+    await db.update(users).set({ disabledAt: null }).where(eq(users.id, gone.id));
+    expect(await requests(s)).toEqual(["evidence_changed"]);
+  });
+
+  it("a skill's admission, a use case, a sub-agent link and a model binding each mark the agent whose score reads them", async () => {
+    const model = await mkAgent("r339-reach");
+    const parent = await mkBuilder("r339-parent", null);
+    const child = await mkBuilder("r339-child", null);
+    const sm: AgentRiskSubject = { kind: "agent", id: model };
+    const sp: AgentRiskSubject = { kind: "builder_agent", id: parent };
+    const sc: AgentRiskSubject = { kind: "builder_agent", id: child };
+    await drain(sm, sp, sc);
+
+    const [skill] = await db.insert(builderSkills).values({ name: `r339-skill-${RUN}`, ownerUserId: owner.id }).returning({ id: builderSkills.id });
+    await db.insert(builderAgentSkills).values({ agentId: parent, skillId: skill!.id });
+    await drain(sp);
+    await db.update(builderSkills).set({ admissionState: "held" }).where(eq(builderSkills.id, skill!.id));
+    expect(await requests(sp)).toEqual(["evidence_changed"]);
+    await drain(sp);
+
+    await db.insert(builderAgentSubagents).values({ parentId: parent, childId: child, name: "r339-child" });
+    expect(await requests(sc)).toEqual(["access_changed"]);
+    expect(await requests(sp)).toEqual(["modified"]);
+    await drain(sp, sc);
+
+    await db.update(builderAgents).set({ modelAgentId: model }).where(eq(builderAgents.id, child));
+    expect(await requests(sm)).toEqual(["access_changed"]);
+    await drain(sm, sc);
+
+    const [uc] = await db
+      .insert(aiUseCases)
+      .values({ name: `r339-uc-${RUN}`, description: "r339", ownerUserId: owner.id, businessContext: "r339", dataSensitivity: "internal", intendedAgentIds: [model] })
+      .returning({ id: aiUseCases.id });
+    expect(await requests(sm)).toEqual(["access_changed"]);
+    await db.delete(aiUseCases).where(eq(aiUseCases.id, uc!.id));
+    await db.delete(builderSkills).where(eq(builderSkills.id, skill!.id));
+  });
+
+  it("the daily mark queues every agent 'scheduled', so time alone reaches the stored score", async () => {
+    const id = await mkAgent("r339-daily");
+    const s: AgentRiskSubject = { kind: "agent", id };
+    await drain(s);
+    const n = await markAllAgentRisk(db, "scheduled");
+    expect(n).toBeGreaterThan(0);
+    expect(await requests(s)).toEqual(["scheduled"]);
+    await drain(s);
+    const [a] = await assessments(s);
+    expect(a!.triggers).toEqual(["scheduled"]);
+    // the daily mark is not left behind for other suites' agents
+    await db.delete(agentRiskRecomputeRequests).where(eq(agentRiskRecomputeRequests.trigger, "scheduled"));
+  });
+});
+
+describe("ADR-0339 the latest pointer", () => {
+  it("moves forward with every append and is what the ranked list reads", async () => {
+    const id = await mkAgent("r339-latest");
+    const s: AgentRiskSubject = { kind: "agent", id };
+    await sweep(s);
+    await db.update(agents).set({ ownerUserId: owner.id }).where(eq(agents.id, id));
+    await sweep(s);
+    const [newest] = await assessments(s);
+    const [p] = await db.select().from(agentRiskLatest).where(eq(agentRiskLatest.agentId, id));
+    expect(p!.assessmentId).toBe(newest!.id);
+    let found: { id: string; score: number; assessmentId: string } | undefined;
+    let cursor: string | null = null;
+    do {
+      const r: { statusCode: number; json: () => { items: Array<{ id: string; score: number; assessmentId: string }>; nextCursor: string | null } } = await app.inject({ method: "GET", headers: ADMIN, url: `/v1/agent-risk?limit=100${cursor ? `&cursor=${cursor}` : ""}` });
+      expect(r.statusCode).toBe(200);
+      found = r.json().items.find((i) => i.id === id);
+      cursor = r.json().nextCursor;
+    } while (!found && cursor);
+    expect(found).toMatchObject({ score: newest!.score, assessmentId: newest!.id });
   });
 });
 

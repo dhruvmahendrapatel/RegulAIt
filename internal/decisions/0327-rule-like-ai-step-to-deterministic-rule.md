@@ -5,7 +5,7 @@
 - **Index**: **Rule-like AI step → deterministic rule (pillar 6): find AI steps whose output is an exact-match function of a few input fields (held-out agreement, strict org-tunable floors), suggest a readable rule table with test cases and projected savings, run it in shadow, switch only on an approval, revert in one action; inputs outside the table always fall back to the AI. Off by default.**
 - **Backlog item**: owner direction 2026-11-15 (lane E12, item 1); PENDING fragment `2026-11-15-e12-rule-like-steps-pending.md`
 - **Built in**: lane E12, one PR per slice (slice 1: this ADR and the detector in `packages/optimizer-kernel/src/rule-induction.ts`)
-- **Migration**: none in slice 1; slice 2 adds `pending/rule_step_settings.sql` (settings and suggestions), numbered at merge
+- **Migration**: none in slice 1; slice 2 adds `pending/rule_step_detection.sql` (settings, suggestions and a scan index on `trace_spans`), numbered at merge
 - **Related**: [TOKEN_OPTIMIZATION_SPEC §8, §12](../product/TOKEN_OPTIMIZATION_SPEC.md), ADR-0172 (builder agents),
   ADR-0044 (eval harness), ADR-0176 (open source first), ADR-0180 (secure by default), ADR-0200 (3NF, security
   checklist), ADR-0251 (one governed decision core), ADR-0252 (merge-time numbering), the repetitive-ask lane item (repetitive ask →
@@ -85,3 +85,52 @@ induction over numeric ranges is deferred to a sandboxed engine image with sciki
 - Security review note (not a finding under the scope guard): `workflow-review-checks.ts` lets an LLM review verdict
   fail an `automated_check` stage. It is a quality gate, fails closed and is not an authorisation decision; it stays
   as designed.
+
+## As built (slice 2, lane E12)
+
+- Tables `rule_step_settings` (singleton, absent = off; CHECKs repeat the kernel floors) and `rule_step_suggestions`
+  (one row per agent and span name; `rule` is a point-in-time snapshot, the ADR-0200 exception), plus the partial
+  index `trace_spans_llm_step_started_idx` for the scan. Written only by `apps/gateway/src/rule-steps.ts`.
+- Routes, admin-only through the default gate and listed as known UI gaps for UI-D: `GET`/`PUT /v1/rule-steps/settings`,
+  `POST /v1/rule-steps/scan`, `GET /v1/rule-steps/suggestions`, `POST /v1/rule-steps/suggestions/:id/dismiss`.
+- Decision 2 said "background job"; slice 2 ships an admin-triggered scan instead, bounded to the 10 costliest steps,
+  5 000 runs each and a 30-day window, and spaced 10 minutes apart by a compare-and-set on `last_scan_at` (database
+  clock), so two replicas cannot run it at once. A scheduler entry can call the same function later.
+- Test cases are the rule's own cells (input fields, expected output, support); no extra copy of captured inputs is
+  stored. The saving is `window cost × (30 / 30 days) × structured share × held-out coverage`, labelled an estimate.
+- A dismissed suggestion stays dismissed when a later scan refreshes its evidence.
+- Review #862: induction runs on a worker thread (`induceStepRuleOffThread`, entry `@regulait/optimizer-kernel/offload`,
+  Node's `node:worker_threads`, no dependency), one step at a time, with a 120 s timeout and a 256 MB heap cap. Measured
+  on 5 000 runs × 24 fields: inline the event loop served no timer for 3.7 s; off-thread it kept ticking, with an
+  identical result. A step whose worker fails or times out is reported as `induction_failed` in the scan's audit row.
+- Review #862 (second round): `GET /v1/rule-steps/suggestions` answers through the shared ADR-0226 list contract
+  (`RULE_STEP_SUGGESTIONS_LIST` with `answerListPage`, sort, cursor or offset, count), with its `status` filter
+  defaulting to open suggestions, and `GET /v1/rule-steps/suggestions/export.xlsx` exports through `answerListExport`
+  (audited). The export carries summary columns only, never the rule's cells.
+- Not yet done, tracked for slice 3 (PENDING): the scan still answers when it finishes; answering 202 with the scan's
+  audit id, so a proxy timeout cannot cut a completed scan's response, comes with the scheduler entry.
+- Slice 3, first part (done): `rule_step_suggestions.rule` copies input values out of `trace_spans`, so
+  - **retention:** the §8.3 prune pass (`runAuditPruneOnce`, the same floor that prunes traces) deletes every suggestion
+    whose scan window `[detected_at − 30 days, detected_at]` starts before the cutoff (`rule-step-retention.ts`), so no
+    cell outlives a span it was copied from (review #901: keying on `detected_at` alone let a suggestion detected
+    inside the floor keep values from spans up to 30 days older than it); a rescan rebuilds it from spans still held;
+  - **erasure:** privacy-ops locates the subject in a fifth store, `rule_step_suggestions` (each cell's key values and
+    output, compared element by element), and an
+    erasure deletes the matching suggestions rather than redacting a cell, which would leave a wrong rule. A later
+    scan rebuilds them only from spans still held. Trace spans themselves are outside the locator today and are
+    bounded by the retention floor; that is unchanged here;
+  - **RLS:** both tables are classified deployment-wide in ADR-0234 (no row policy; admin-only routes).
+- Slice 3b, shadow mode (migration `pending/rule_step_shadow.sql`):
+  - `POST /v1/rule-steps/suggestions/:id/shadow` puts an open suggestion in shadow (refused while detection is off), and
+    `.../shadow/stop` ends the period. Both are admin-only and audited in the same transaction. No step-up: shadow
+    changes no routing and relaxes nothing; the switch (slice 4) is an approval.
+  - Each shadow period is a row in `rule_step_shadows` (at most one open per suggestion). Its counters (`runs`,
+    `covered`, `agreed`) are a measured read model of `trace_spans`, advanced by every scan through
+    `evaluated_through`, a microsecond cursor kept as Postgres text, so no span is counted twice. When a pass hits the
+    row limit, spans sharing the last start time wait for the next pass. The counts and the cursor commit with the
+    scan's audit row.
+  - The kernel's `tallyShadow` applies the rule with one key lookup per run (cost `runs + cells`), matching
+    `applyInducedRule`.
+  - While a suggestion is in shadow, a rescan does not touch its row (`setWhere status <> 'shadow'`), so the counts
+    always describe the rule under test. The list shows each suggestion's latest period, with coverage and agreement.
+  - Retention and erasure still apply: deleting a suggestion deletes its periods, which hold counts only.

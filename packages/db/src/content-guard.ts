@@ -72,6 +72,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.initiatives, ["name"]],
   [s.teams, ["name"]],
   [s.aiUseCases, ["name", "description"]],
+  // ADR-0345 §9: admin-editable reference data (the jurisdiction list is data, not code)
+  [s.jurisdictions, ["name"]],
   [s.aiVendors, ["name", "description"]],
   [s.aiRisks, ["title", "description"]],
   [s.kris, ["name", "scoreName"]],
@@ -121,6 +123,9 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.redteamLibraries, ["name"]],
   [s.trainingDatasets, ["name"]],
   [s.fairnessDatasets, ["name", "description"]],
+  // ADR-0346: an evaluation's name, and a model-input dataset's input column names (CSV headers an admin typed)
+  [s.fairnessEvaluations, ["name"]],
+  [s.fairnessDatasetInputColumns, ["columnName"]],
   [s.modelDriftMonitors, ["name"]],
   [s.trainingJobs, ["name"]],
   [s.monitoringDashboards, ["name"]],
@@ -159,6 +164,8 @@ export const CONTENT_GUARD_EXCLUSION_REASONS: Readonly<Record<ContentGuardExclus
 export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclusion>> = {
   // ADR-0261: an event identifier the sending product chose (a linear lower-case identifier check bounds it)
   "third_party_ingest_records.event_name": "ingested",
+  // ADR-0363 slice 1: a label's display name as Microsoft Graph returns it (the customer's Purview tenant)
+  "sensitivity_label_definitions.name": "ingested",
   "ai_incident_actions.title": "prose_owned_by_adr0102",
   "ai_incidents.summary": "prose_owned_by_adr0102",
   "ai_incidents.title": "prose_owned_by_adr0102",
@@ -190,6 +197,7 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   "policy_simulation_flips.project_name": "platform_copy",
   "redteam_runs.agent_name": "platform_copy",
   "redteam_runs.library_name": "platform_copy",
+  "rule_step_suggestions.step_name": "platform_copy",
   "scheduler_runs.job_name": "platform_copy",
   "use_case_decision_records.intake_template_name": "platform_copy",
   "cert_inventory.common_name": "ingested",
@@ -226,6 +234,11 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   "conversations.title": "conversation",
   "ai_bom_snapshots.body": "signed_evidence",
   "decision_boms.body": "signed_evidence",
+  // ADR-0346: the canonical bytes of a signed fairness run (aggregates the gateway computed; refusing would break the signature)
+  "fairness_run_evidence.body": "signed_evidence",
+  // ADR-0310: a compiled managed-settings file (vendor JSON/TOML of gateway URLs and tool names); its sha256 is in the
+  // signed bundle manifest, so refusing it after compilation would break the signature, not stop a paste
+  "managed_settings_bundle_files.body": "signed_evidence",
   "model_artifact_signatures.resource_name": "signed_evidence",
   "model_artifact_signatures.signed_name": "signed_evidence",
   "prompt_tags.name": "check_constrained",

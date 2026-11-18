@@ -693,3 +693,14 @@ that grows, so nothing on it moved.
 
 - Entry JS measured 138,097 B before and 138,109 B after on the same lockfile; all JS 1,077,999 B before and
   1,078,404 B after. No ceiling changes.
+
+## Addendum / As built (2026-11-15) — all JS 1,150 → 1,160 kB (the P21 usage-counts card)
+
+The owner decided this raise on 2026-11-15: <https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6903109405>. It is the ADR-recorded exception the `--guard` rule requires, with
+one `CEILING_EXCEPTIONS` row.
+
+- `all JS` from `1150 kB` to `1160 kB` (+10 kB). The entry JS, entry CSS and lazy chunk ceilings are unchanged.
+- Why: main measured 1,148,326 B gzip (1.7 kB of headroom), and the owner-approved P21 usage-counts card and mapping
+  editor on the Agents page (#744, approved on #453 on 2026-11-07) adds 6,227 B, almost all of it in the lazy
+  `admin-integrations` chunk. Lazy-loading the card would not lower the total, which counts every chunk.
+- The owner chose this over trimming main first or cutting the approved screen. Crossing 1,160 kB goes back to the owner.

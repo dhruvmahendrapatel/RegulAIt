@@ -1132,7 +1132,8 @@
                 "engine_run",
                 "eval_run",
                 "compliance_profile",
-                "model_call"
+                "model_call",
+                "agent_risk_proof"
               ]
             }
           },
@@ -1420,7 +1421,7 @@
     "/health": {
       "get": {
         "operationId": "getHealth",
-        "summary": "Liveness probe. The only route that is never rate limited.",
+        "summary": "Liveness probe. Never rate limited (nor is the internal readiness probe, /ready).",
         "tags": [
           "health"
         ],

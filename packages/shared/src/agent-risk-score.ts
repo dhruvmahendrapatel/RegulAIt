@@ -36,7 +36,13 @@ export const AGENT_RISK_SUBJECT_KINDS = ["agent", "builder_agent"] as const;
 export type AgentRiskSubjectKind = (typeof AGENT_RISK_SUBJECT_KINDS)[number];
 
 /** why a recompute was asked for (the DB triggers write these; `backfill` is the migration's, `manual` an admin's) */
-export const AGENT_RISK_TRIGGERS = ["created", "modified", "published", "access_changed", "imported", "backfill", "manual"] as const;
+/**
+ * Why an agent was marked for a recompute. `evidence_changed`: an input that is not the agent itself changed (a guardrail
+ * mode, a model card or its sign-off, a red-team run, an SoD rule, the owner's account, a skill's admission, a use case,
+ * an MCP tool). `scheduled`: the daily mark, so a fact that changes with time alone (a sign-off or a test going stale, an
+ * owner going inactive) reaches the stored score.
+ */
+export const AGENT_RISK_TRIGGERS = ["created", "modified", "published", "access_changed", "evidence_changed", "imported", "backfill", "scheduled", "manual"] as const;
 export type AgentRiskTrigger = (typeof AGENT_RISK_TRIGGERS)[number];
 
 export const AGENT_RISK_BANDS = ["low", "medium", "high", "critical"] as const;

@@ -120,6 +120,26 @@ refuse "DNS to the metadata host"          --set 'egress.dns.cidrs={169.254.169.
 refuse "upgrade with no known installed version" --is-upgrade
 refuse "malformed installed version"       --set bundle.installedVersion=latest
 refuse "signing keys on the default StorageClass" --set installSecrets.storageClassName=
+# ADR-0343: replicas share one install-secrets volume, or each would sign with different keys
+refuse "replicas > 1 on a ReadWriteOnce claim" --set replicas=2
+refuse "replicas above the schema maximum"     --set replicas=21 --set installSecrets.accessMode=ReadWriteMany
+refuse "a drain delay above 60 s"              --set highAvailability.drainDelaySeconds=61
+
+# ADR-0343: the replica shapes. One replica keeps Recreate and no PodDisruptionBudget; three get a RollingUpdate that
+# never drops below the replica count, a PDB, zone spread, and the /ready probe; both drain through /ready.
+one="$("$HELM" template t . -f ci/byoc-values.yaml)"
+three="$("$HELM" template t . -f ci/byoc-values.yaml --set replicas=3 --set installSecrets.accessMode=ReadWriteMany)"
+if grep -q "type: Recreate" <<<"$one" && ! grep -q "kind: PodDisruptionBudget" <<<"$one" && grep -q "replicas: 1$" <<<"$one" \
+    && grep -q "path: /ready" <<<"$one"; then ok "one replica: Recreate, no PDB, /ready"
+else bad "one replica does not keep Recreate without a PDB, probing /ready"; fi
+if grep -q "replicas: 3$" <<<"$three" && grep -q "rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }" <<<"$three" \
+    && grep -q "kind: PodDisruptionBudget" <<<"$three" && grep -q "maxUnavailable: 1$" <<<"$three" \
+    && grep -q "topologyKey: topology.kubernetes.io/zone" <<<"$three" && grep -q "whenUnsatisfiable: DoNotSchedule" <<<"$three" \
+    && grep -q "accessModes: \[ReadWriteMany\]" <<<"$three"; then ok "three replicas: RollingUpdate, PDB, zone spread, RWX"
+else bad "three replicas are missing the rolling update, PDB, zone spread or RWX claim"; fi
+if grep -A1 "name: REGULAIT_DRAIN_DELAY_MS" <<<"$three" | grep -q '"10000"' \
+    && grep -q "terminationGracePeriodSeconds: 30$" <<<"$three"; then ok "drain delay 10 s inside a 30 s grace period"
+else bad "the drain delay or grace period is not rendered"; fi
 
 # An upgrade with bundle.installedVersion renders the downgrade check against it.
 if "$HELM" template t . -f ci/byoc-values.yaml --is-upgrade --set bundle.installedVersion=0.9.0 2>/dev/null \

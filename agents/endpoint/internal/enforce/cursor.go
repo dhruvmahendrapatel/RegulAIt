@@ -11,6 +11,12 @@ package enforce
 //     "failClosed": true, which the registration ADR-0330 documents always sets. Team (dashboard) hooks cannot set
 //     it, so only the enterprise (MDM) hooks.json location is supported.
 //
+// Built-in actions (ADR-0350, contract re-checked 2026-11-17): beforeShellExecution {command, cwd} answers allow,
+// deny or ask and honours failClosed; beforeReadFile {file_path, content} answers allow or deny only, so an ask rule
+// is answered as a deny there. File writes have no documented pre-hook with a path field (afterFileEdit runs after
+// the edit; preToolUse's Write input is not documented), so this adapter decides no writes. The workspace is the
+// common workspace_roots field. The registration adds these two events beside beforeMCPExecution.
+//
 // What Cursor cannot tell us: which mcp.json defined the server (enterprise, project or user). Every call is
 // therefore reported with the adapter's unattested source, and a policy accepts Cursor's calls only by listing that
 // source. The docs advise treating a missing mcp_server_name as a deny, and this adapter does.
@@ -26,8 +32,13 @@ type cursorInput struct {
 	CursorVersion string `json:"cursor_version"`
 	ToolName      string `json:"tool_name"`
 	MCPServerName string `json:"mcp_server_name"`
-	// tool_input, url, mcp_server_url and command are never decoded: the decision does not use them, and a stdio
-	// launch command can carry secrets in its arguments.
+	// beforeShellExecution and beforeReadFile; content (the whole file) is never decoded
+	Command        string   `json:"command"`
+	Cwd            string   `json:"cwd"`
+	FilePath       string   `json:"file_path"`
+	WorkspaceRoots []string `json:"workspace_roots"`
+	// tool_input, url and mcp_server_url are never decoded. command is read only on beforeShellExecution; on
+	// beforeMCPExecution (a stdio launch command, which can carry secrets) it is never used or echoed.
 }
 
 // ParseCursorBeforeMCP reads a beforeMCPExecution hook input. Every call on this event is an MCP call.
@@ -36,18 +47,35 @@ func ParseCursorBeforeMCP(r io.Reader) (Call, error) {
 	if err := readHookInput(r, &in); err != nil {
 		return Call{}, err
 	}
-	if in.HookEventName != "beforeMCPExecution" {
-		return Call{}, errors.New("not a beforeMCPExecution event")
-	}
-	if in.ToolName == "" {
-		return Call{}, errors.New("no tool_name")
-	}
 	if in.CursorVersion == "" {
 		// a common field on every documented event; its absence means a contract this adapter was not checked against
 		return Call{}, errors.New("no cursor_version")
 	}
+	roots := append([]string{}, in.WorkspaceRoots...)
+	switch in.HookEventName {
+	case "beforeShellExecution":
+		c := &CommandCall{Shell: in.Command, Cwd: in.Cwd, Workspace: roots}
+		if in.Command == "" {
+			c.Unresolved = "the coding agent's hook input does not show the command"
+		}
+		return Call{Tool: "shell", Command: c}, nil
+	case "beforeReadFile":
+		c := &CommandCall{Workspace: roots}
+		if in.FilePath == "" {
+			c.Unresolved = "the coding agent's hook input does not show the file"
+		} else {
+			c.Files = []FileAccess{{Path: in.FilePath}}
+		}
+		return Call{Tool: "read", Command: c, NoAsk: true}, nil
+	case "beforeMCPExecution":
+	default:
+		return Call{}, errors.New("not a beforeMCPExecution, beforeShellExecution or beforeReadFile event")
+	}
+	if in.ToolName == "" {
+		return Call{}, errors.New("no tool_name")
+	}
 	// a missing mcp_server_name leaves Server empty, which Decide denies
-	return Call{Tool: in.ToolName, MCP: &MCPCall{Server: in.MCPServerName}}, nil
+	return Call{Tool: in.ToolName, MCP: &MCPCall{Server: in.MCPServerName, Tool: in.ToolName}}, nil
 }
 
 type cursorOutput struct {
@@ -71,6 +99,16 @@ func RenderCursor(d Decision) (stdout []byte, stderr string, exit int) {
 		b, _ := json.Marshal(cursorOutput{Permission: "allow"})
 		return b, "", 0
 	}
+	if d.Verdict == Ask {
+		b, _ := json.Marshal(cursorOutput{Permission: "ask", UserMessage: d.Reason, AgentMessage: d.Reason})
+		return b, "", 0
+	}
+	if d.NoAsk {
+		// audit mode on beforeReadFile, which has no ask: audit never blocks, and a read has no Cursor confirmation
+		// that an allow would skip (ADR-0350 §4)
+		b, _ := json.Marshal(cursorOutput{Permission: "allow"})
+		return b, "", 0
+	}
 	// NoDecision only arises in audit mode here (every call is MCP): never block, never approve
 	b, _ := json.Marshal(cursorOutput{Permission: "ask"})
 	return b, "", 0
@@ -79,13 +117,18 @@ func RenderCursor(d Decision) (stdout []byte, stderr string, exit int) {
 var cursorAdapter = Adapter{
 	Name: AgentCursor,
 	Contract: Contract{
-		Version: "2026-11-15", Event: "beforeMCPExecution",
+		Version: "2026-11-17", Event: "beforeMCPExecution, beforeShellExecution, beforeReadFile",
 		AgentVersions: "hooks as documented on 2026-11-15 (sample cursor_version 1.7.2; no minimum stated)",
 		Docs:          []string{"https://cursor.com/docs/hooks"},
 	},
 	Capabilities: Capabilities{
 		CanBlock: true, MCPServer: ServerFromField, MCPProvenance: false,
 		OnError: FailClosedIfConfigured, OnTimeout: FailClosedIfConfigured, ExecForm: false, ManagedLocation: true,
+		Commands: CommandCapabilities{Shell: CoverAsk, FileRead: CoverBlock, FileWrite: CoverNone, Notes: []string{
+			"beforeReadFile answers allow or deny only: an ask rule on a read is a deny.",
+			"No documented pre-write hook with a path: file writes are not decided (afterFileEdit runs after the edit).",
+			"Only the enterprise (MDM) hooks.json can set failClosed; dashboard hooks cannot.",
+		}},
 	},
 	UnattestedSource: SourceCursorUnattested,
 	Coverage:         CoverageEnforce,
