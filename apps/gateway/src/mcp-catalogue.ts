@@ -21,8 +21,8 @@
  *
  * Admin-only: none of these routes is in NON_ADMIN_ROUTES.
  */
-import { createHash, createPublicKey, verify as ed25519Verify, type KeyObject } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { createHash, type KeyObject } from "node:crypto";
+import { loadSignedBundleKeyring, verifySignedBundle } from "./signed-bundle.js";
 import {
   and,
   asc,
@@ -87,46 +87,8 @@ export const MCP_CATALOGUE_BUNDLE_KEYS_FILE_ENV = "REGULAIT_MCP_CATALOGUE_BUNDLE
 // the keyring
 // ---------------------------------------------------------------------------
 
-const keyringSchema = z
-  .array(z.object({ keyId: z.string().min(1).max(128), publicKeyPem: z.string().min(1).max(4096) }).strict())
-  .max(32);
-
-/**
- * The trusted bundle keys, by id. Public keys only, so not a secret, but still out of code and rotatable: list the new
- * key beside the old, then drop the old. Only Ed25519 is accepted (the algorithm is pinned). An unparseable keyring,
- * a non-Ed25519 key or a key id listed twice refuses the WHOLE keyring, so a typo never half-trusts.
- */
 export function loadBundleKeyring(env: NodeJS.ProcessEnv = process.env): Map<string, KeyObject> | { error: string } {
-  const inline = env[MCP_CATALOGUE_BUNDLE_KEYS_ENV]?.trim();
-  const file = env[MCP_CATALOGUE_BUNDLE_KEYS_FILE_ENV]?.trim();
-  if (inline && file) return { error: `set one of ${MCP_CATALOGUE_BUNDLE_KEYS_ENV} and ${MCP_CATALOGUE_BUNDLE_KEYS_FILE_ENV}, not both` };
-  let raw: unknown = null;
-  try {
-    if (inline) raw = JSON.parse(inline) as unknown;
-    else if (file) {
-      const st = statSync(file);
-      if (!st.isFile() || st.size > 256 * 1024) return { error: `${MCP_CATALOGUE_BUNDLE_KEYS_FILE_ENV} is not a readable keyring file` };
-      raw = JSON.parse(readFileSync(file, "utf8")) as unknown;
-    }
-  } catch {
-    return { error: "the MCP catalogue bundle keyring is not valid JSON" };
-  }
-  const out = new Map<string, KeyObject>();
-  if (raw === null) return out;
-  const parsed = keyringSchema.safeParse(raw);
-  if (!parsed.success) return { error: "the MCP catalogue bundle keyring is not a list of { keyId, publicKeyPem }" };
-  for (const k of parsed.data) {
-    if (out.has(k.keyId)) return { error: `the MCP catalogue bundle keyring lists key '${k.keyId}' twice` };
-    let key: KeyObject;
-    try {
-      key = createPublicKey(k.publicKeyPem);
-    } catch {
-      return { error: `MCP catalogue bundle key '${k.keyId}' is not a public key` };
-    }
-    if (key.asymmetricKeyType !== "ed25519") return { error: `MCP catalogue bundle key '${k.keyId}' is not Ed25519` };
-    out.set(k.keyId, key);
-  }
-  return out;
+  return loadSignedBundleKeyring(MCP_CATALOGUE_BUNDLE_KEYS_ENV, MCP_CATALOGUE_BUNDLE_KEYS_FILE_ENV, "MCP catalogue bundle", env);
 }
 
 // ---------------------------------------------------------------------------
@@ -161,13 +123,8 @@ export function verifyBundle(body: z.infer<typeof importBundleBodySchema>, keyri
   if (bytes.length > MCP_CATALOGUE_BUNDLE_MAX_BYTES) return { ok: false, code: "too_large", detail: `the bundle exceeds ${MCP_CATALOGUE_BUNDLE_MAX_BYTES} bytes` };
   const key = keyring.get(body.keyId);
   if (!key) return { ok: false, code: "unknown_key", detail: `key '${body.keyId}' is not in the MCP catalogue bundle keyring` };
-  let good = false;
-  try {
-    good = ed25519Verify(null, bytes, key, Buffer.from(body.signature, "base64"));
-  } catch {
-    good = false;
-  }
-  if (!good) return { ok: false, code: "bad_signature", detail: `the bundle does not verify under key '${body.keyId}'` };
+  const signatureVerdict = verifySignedBundle(body, keyring, MCP_CATALOGUE_BUNDLE_MAX_BYTES);
+  if (!signatureVerdict.ok) return { ok: false, code: "bad_signature", detail: `the bundle does not verify under key '${body.keyId}'` };
   let json: unknown;
   try {
     json = JSON.parse(body.bundle) as unknown;
