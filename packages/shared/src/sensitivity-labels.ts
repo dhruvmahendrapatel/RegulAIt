@@ -47,7 +47,7 @@ export type EmbeddedLabelRead =
   | { kind: "labels"; labels: ContentLabel[] }
   | { kind: "none" }
   | { kind: "protected" }
-  | { kind: "unreadable"; reason: "zip_part_too_large" | "corrupt" };
+  | { kind: "unreadable"; reason: "zip_part_too_large" | "corrupt" | "pdf_object_streams" };
 
 /** a label definition from the provider (Purview: Graph `security/informationProtection/sensitivityLabels`) */
 export interface LabelDefinition {
@@ -73,7 +73,6 @@ export interface LabelProvider {
 // ---------------------------------------------------------------------------------------------------------------
 
 const MAX_XML_PART = 1024 * 1024;
-const PDF_WINDOW = 256 * 1024;
 const LABEL_INFO_PART = "docMetadata/LabelInfo.xml";
 const CUSTOM_PROPS_PART = "docProps/custom.xml";
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -208,13 +207,14 @@ function readOoxml(bytes: Uint8Array): EmbeddedLabelRead {
   return { kind: "none" };
 }
 
-/** PDF: literal scan of the head and tail windows (info dictionary and XMP sit there) for MSIP pairs */
+/**
+ * PDF: literal scan of the WHOLE buffer for MSIP pairs (ADR-0363 review finding 2: an incremental save can put the Info
+ * dictionary or XMP stream mid-file, so head/tail windows fail open). The buffer is already in memory and bounded by
+ * the request body limit; the scan is linear (indexOf), never a regex over the input (M-061).
+ */
 function readPdf(bytes: Uint8Array): EmbeddedLabelRead {
   const latin1 = new TextDecoder("latin1");
-  const windows =
-    bytes.byteLength <= PDF_WINDOW * 2
-      ? [latin1.decode(bytes)]
-      : [latin1.decode(bytes.subarray(0, PDF_WINDOW)), latin1.decode(bytes.subarray(bytes.byteLength - PDF_WINDOW))];
+  const windows = [latin1.decode(bytes)];
   const pairs: [string, string][] = [];
   const needle = "msip_label_";
   for (const w of windows) {
@@ -238,7 +238,11 @@ function readPdf(bytes: Uint8Array): EmbeddedLabelRead {
     }
   }
   const labels = labelsFromMsipPairs(pairs, "pdf_metadata");
-  return labels.length ? { kind: "labels", labels } : { kind: "none" };
+  if (labels.length) return { kind: "labels", labels };
+  // PDF 1.5+ object streams are compressed: an Info dictionary inside one cannot be seen by a literal scan, so "no
+  // label found" is not proof of "no label". Fail closed to `unreadable` (decided by unreadable_action, block by default).
+  if (windows[0]!.includes("/ObjStm")) return { kind: "unreadable", reason: "pdf_object_streams" };
+  return { kind: "none" };
 }
 
 export const purviewLabelProvider: LabelProvider = Object.freeze({
@@ -294,6 +298,11 @@ export interface LabelMappingRule {
   labelId: string;
   action: LabelAction;
   sensitivity: LabelDataSensitivity;
+  /**
+   * the compliance profile whose cascade (PII mode, guardrail floor) the labelled content pulls in. Dropping it, or
+   * swapping it for another, can lower those floors, so either is a relaxation (ADR-0363 review finding 1).
+   */
+  complianceProfileId?: string | null;
 }
 
 /** the org's label policy; every field defaults to its strict value (ADR-0180) */
@@ -378,7 +387,10 @@ export function labelPolicyProblems(policy: LabelPolicy, definitions: readonly L
   return out;
 }
 
-/** true when `next` relaxes `prev` anywhere (a looser action or sensitivity, a new trusted tenant): a step-up change */
+/**
+ * true when `next` relaxes `prev` anywhere: a looser fallback, a new trusted tenant, a looser action or sensitivity, a
+ * rule removed while `unmappedAction` is looser than it, or a compliance profile dropped or swapped. A step-up change.
+ */
 export function labelPolicyRelaxes(prev: LabelPolicy, next: LabelPolicy): boolean {
   for (const k of ["unmappedAction", "protectedAction", "unreadableAction"] as const)
     if (strictness(next[k]) < strictness(prev[k])) return true;
@@ -391,6 +403,15 @@ export function labelPolicyRelaxes(prev: LabelPolicy, next: LabelPolicy): boolea
     if (strictness(r.action) < strictness(oldAction)) return true;
     if (old && sensitivityRank(r.sensitivity) < sensitivityRank(old.sensitivity)) return true;
     if (!old && sensitivityRank(r.sensitivity) < sensitivityRank("restricted")) return true;
+    // a profile dropped or swapped can lower the PII mode and guardrail floor the label pulled in; adding one only tightens
+    const oldProfile = old?.complianceProfileId ?? null;
+    if (oldProfile !== null && (r.complianceProfileId ?? null) !== oldProfile) return true;
+  }
+  // a rule removed: the label falls to next.unmappedAction (which carries no compliance profile)
+  for (const old of prev.rules) {
+    if (next.rules.some((r) => r.provider === old.provider && r.labelId === old.labelId)) continue;
+    if (strictness(next.unmappedAction) < strictness(old.action)) return true;
+    if ((old.complianceProfileId ?? null) !== null) return true;
   }
   return false;
 }

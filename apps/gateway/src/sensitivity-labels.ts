@@ -61,6 +61,7 @@ export async function loadLabelPolicy(db: Db): Promise<LoadedLabelPolicy> {
         labelId: sensitivityLabelDefinitions.labelId,
         action: sensitivityLabelRules.action,
         sensitivity: sensitivityLabelRules.sensitivity,
+        complianceProfileId: sensitivityLabelRules.complianceProfileId,
         tag: complianceProfiles.tag,
       })
       .from(sensitivityLabelRules)
@@ -72,7 +73,7 @@ export async function loadLabelPolicy(db: Db): Promise<LoadedLabelPolicy> {
   for (const r of rules) if (r.tag) complianceTags.set(`${r.provider}:${r.labelId}`, r.tag);
   return {
     trustedTenantIds: tenants.map((t) => t.tenantId),
-    rules: rules.map((r) => ({ provider: r.provider, labelId: r.labelId, action: r.action, sensitivity: r.sensitivity })),
+    rules: rules.map((r) => ({ provider: r.provider, labelId: r.labelId, action: r.action, sensitivity: r.sensitivity, complianceProfileId: r.complianceProfileId })),
     unmappedAction: settings?.unmappedAction ?? DEFAULT_LABEL_POLICY.unmappedAction,
     protectedAction: settings?.protectedAction ?? DEFAULT_LABEL_POLICY.protectedAction,
     unreadableAction: settings?.unreadableAction ?? DEFAULT_LABEL_POLICY.unreadableAction,
@@ -311,7 +312,7 @@ function relaxFacts(prev: LabelPolicy, next: LabelPolicy): Record<string, unknow
     "sensitivityLabels.unmappedAction": next.unmappedAction,
     "sensitivityLabels.protectedAction": next.protectedAction,
     "sensitivityLabels.unreadableAction": next.unreadableAction,
-    "sensitivityLabels.rules": next.rules.map((r) => `${r.labelId}:${r.action}:${r.sensitivity}`).sort(),
+    "sensitivityLabels.rules": next.rules.map((r) => `${r.labelId}:${r.action}:${r.sensitivity}:${r.complianceProfileId ?? "-"}`).sort(),
   };
 }
 
@@ -372,7 +373,7 @@ export function registerSensitivityLabelRoutes(app: FastifyInstance, db: Db): vo
       if (!p) return reply.status(422).send({ error: "compliance_profile_not_found" });
     }
     const prev = await loadLabelPolicy(db);
-    const rule = { provider: def.provider, labelId: def.labelId, action: body.action, sensitivity: body.sensitivity };
+    const rule = { provider: def.provider, labelId: def.labelId, action: body.action, sensitivity: body.sensitivity, complianceProfileId: body.complianceProfileId ?? null };
     const next: LabelPolicy = { ...prev, rules: [...prev.rules.filter((r) => !(r.provider === def.provider && r.labelId === def.labelId)), rule] };
     if (!(await requireRelaxStepUp(db, req, reply, relaxFacts(prev, next)))) return reply;
     const actor = req.authCtx.userId ?? NO_IDENTITY;
@@ -411,7 +412,8 @@ export function registerSensitivityLabelRoutes(app: FastifyInstance, db: Db): vo
     if (!def.action) return reply.status(204).send();
     const prev = await loadLabelPolicy(db);
     const next: LabelPolicy = { ...prev, rules: prev.rules.filter((r) => !(r.provider === def.provider && r.labelId === def.labelId)) };
-    // the label falls back to `unmappedAction`; if that is looser than the rule, removing it is a relaxation
+    // the label falls back to `unmappedAction` (and loses any compliance profile): looser than the rule = a relaxation
+    const relaxes = labelPolicyRelaxes(prev, next);
     if (!(await requireRelaxStepUp(db, req, reply, relaxFacts(prev, next)))) return reply;
     await db.transaction(async (tx) => {
       await tx.delete(sensitivityLabelRules).where(eq(sensitivityLabelRules.definitionId, definitionId));
@@ -419,9 +421,9 @@ export function registerSensitivityLabelRoutes(app: FastifyInstance, db: Db): vo
         userId: req.authCtx.userId ?? NO_IDENTITY,
         objectType: "org_settings",
         objectId: null,
-        detail: { via: req.authCtx.via, setting: "sensitivityLabels.rule", definitionId, labelId: def.labelId, provider: def.provider, from: { action: def.action, sensitivity: def.sensitivity }, to: null },
+        detail: { via: req.authCtx.via, setting: "sensitivityLabels.rule", definitionId, labelId: def.labelId, provider: def.provider, from: { action: def.action, sensitivity: def.sensitivity, complianceProfileId: def.complianceProfileId }, to: null },
         effect: "allow",
-        ruleId: "sensitivity-label-rule-removed",
+        ruleId: relaxes ? "sensitivity-label-rule-relaxed" : "sensitivity-label-rule-removed",
         ruleChain: [],
         reason: `label '${def.name}' unmapped: it now falls to the unmapped action (${prev.unmappedAction})`,
       });

@@ -224,6 +224,27 @@ describe("ADR-0363 slice 1: sensitivity labels at the gateway", () => {
     expect(nonAdmin.statusCode).toBe(403);
   });
 
+  it("review finding 1: removing a block rule under a looser fallback, or dropping a rule's profile, is audited as a relaxation", async () => {
+    const lastRuleAudit = async () =>
+      (await db.select().from(auditLog).where(eq(auditLog.objectType, "org_settings")).orderBy(desc(auditLog.at)).limit(1))[0];
+    // (b) PHI keeps its action and sensitivity but drops its compliance profile
+    expect((await mapLabel(PHI, { action: "allow", sensitivity: "restricted", complianceProfileId: null })).statusCode).toBe(200);
+    expect(await lastRuleAudit()).toMatchObject({ ruleId: "sensitivity-label-rule-relaxed" });
+    // (a) loosen the unmapped fallback, then remove the HC block rule: HC would fall to redact
+    expect((await mapLabel(HC, { action: "block", sensitivity: "restricted" })).statusCode).toBe(200);
+    expect((await app.inject({ method: "PUT", headers: AUTH, url: "/v1/sensitivity-labels/settings", payload: { unmappedAction: "redact" } })).statusCode).toBe(200);
+    const del = await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/sensitivity-labels/${defId[HC]}/rule` });
+    expect(del.statusCode).toBe(204);
+    expect(await lastRuleAudit()).toMatchObject({ ruleId: "sensitivity-label-rule-relaxed" });
+    // restore the strict state for the tests that follow
+    expect((await app.inject({ method: "PUT", headers: AUTH, url: "/v1/sensitivity-labels/settings", payload: { unmappedAction: "block" } })).statusCode).toBe(200);
+    expect((await mapLabel(HC, { action: "block", sensitivity: "restricted" })).statusCode).toBe(200);
+    // under the strict fallback, removing the block rule is not a relaxation
+    await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/sensitivity-labels/${defId[HC]}/rule` });
+    expect(await lastRuleAudit()).toMatchObject({ ruleId: "sensitivity-label-rule-removed" });
+    expect((await mapLabel(HC, { action: "block", sensitivity: "restricted" })).statusCode).toBe(200);
+  });
+
   it("a re-sync marks labels the provider no longer lists inactive, never deleting a mapped one", async () => {
     const out = await upsertLabelDefinitions(db, {
       tenantId: TENANT,

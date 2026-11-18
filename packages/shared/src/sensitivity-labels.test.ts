@@ -88,6 +88,24 @@ describe("ADR-0363 slice 1: reading embedded Purview labels", () => {
     });
   });
 
+  it("review finding 2: a label mid-file in a ~1 MiB PDF is found (no head/tail windows)", () => {
+    const pad = "%" + "x".repeat(512 * 1024) + "\n";
+    const pdf = strToU8(
+      `%PDF-1.7\n${pad}1 0 obj << /MSIP_Label_${HC}_Enabled (true) /MSIP_Label_${HC}_SiteId (${TENANT}) >> endobj\n${pad}%%EOF`,
+    );
+    expect(pdf.byteLength).toBeGreaterThan(1024 * 1024);
+    expect(readEmbeddedLabels(pdf, "application/pdf")).toEqual({
+      kind: "labels",
+      labels: [{ provider: "microsoft_purview", labelId: HC, tenantId: TENANT, source: "pdf_metadata" }],
+    });
+  });
+
+  it("review finding 2: a PDF with compressed object streams and no visible label fails closed to unreadable", () => {
+    const pdf = strToU8("%PDF-1.7\n5 0 obj << /Type /ObjStm /N 3 /First 20 /Filter /FlateDecode >> stream\nx\nendstream endobj\n%%EOF");
+    expect(readEmbeddedLabels(pdf, "application/pdf")).toEqual({ kind: "unreadable", reason: "pdf_object_streams" });
+    expect(decideLabels(readEmbeddedLabels(pdf, "application/pdf"), policy()).action).toBe("block");
+  });
+
   it("reads the MSIP_Labels email header", () => {
     const h = `MSIP_Label_${HC}_Enabled=True; MSIP_Label_${HC}_SiteId=${TENANT}; MSIP_Label_${HC}_Method=Standard`;
     expect(labelsFromMsipHeader(h)).toEqual([{ provider: "microsoft_purview", labelId: HC, tenantId: TENANT, source: "email_header" }]);
@@ -139,6 +157,28 @@ describe("ADR-0363 slice 1: the label decision", () => {
     expect(labelPolicyRelaxes(base, { ...base, rules: [{ ...base.rules[0]!, action: "redact" }, base.rules[1]!] })).toBe(true);
     expect(labelPolicyRelaxes(DEFAULT_LABEL_POLICY, { ...DEFAULT_LABEL_POLICY, rules: [{ provider: "microsoft_purview", labelId: HC, action: "block", sensitivity: "restricted" }] })).toBe(false);
     expect(labelPolicyRelaxes({ ...base, unmappedAction: "allow" }, base)).toBe(false);
+  });
+
+  it("review finding 1: removing a rule relaxes when the unmapped fallback is looser; tightening does not", () => {
+    const loose = policy({ unmappedAction: "redact" });
+    const withoutHc = { ...loose, rules: loose.rules.filter((r) => r.labelId !== HC) };
+    expect(labelPolicyRelaxes(loose, withoutHc)).toBe(true); // block rule -> redact fallback
+    // strict fallback: removing the block rule leaves the label at block, no relaxation
+    const strict = policy();
+    expect(labelPolicyRelaxes(strict, { ...strict, rules: strict.rules.filter((r) => r.labelId !== HC) })).toBe(false);
+    // removing an allow rule under a block fallback only tightens
+    expect(labelPolicyRelaxes(strict, { ...strict, rules: strict.rules.filter((r) => r.labelId !== GEN) })).toBe(false);
+  });
+
+  it("review finding 1: dropping or swapping a rule's compliance profile relaxes; adding one does not", () => {
+    const P1 = "aaaaaaaa-0000-4000-8000-000000000001";
+    const P2 = "aaaaaaaa-0000-4000-8000-000000000002";
+    const base = policy();
+    const withProfile = { ...base, rules: [{ ...base.rules[0]!, complianceProfileId: P1 }, base.rules[1]!] };
+    expect(labelPolicyRelaxes(base, withProfile)).toBe(false); // added: tightens
+    expect(labelPolicyRelaxes(withProfile, base)).toBe(true); // dropped (same action and sensitivity)
+    expect(labelPolicyRelaxes(withProfile, { ...withProfile, rules: [{ ...withProfile.rules[0]!, complianceProfileId: P2 }, base.rules[1]!] })).toBe(true); // swapped
+    expect(labelPolicyRelaxes(withProfile, { ...withProfile, rules: [base.rules[1]!] })).toBe(true); // rule with a profile removed
   });
 
   it("maps Graph sensitivityLabel JSON and drops malformed entries", () => {
