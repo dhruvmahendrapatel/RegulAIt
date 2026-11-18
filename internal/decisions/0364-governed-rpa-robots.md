@@ -87,11 +87,18 @@ feed as `rpa_instead_of_model` (S3), never estimated where it cannot be measured
 
 All three authoring paths end in the **same** human review:
 
-1. **Recorder and step editor**: a recorded run in a sandboxed browser (Playwright codegen inside the robot sandbox),
-   turned into plain steps (go to, fill, click, select, read, download, check) and stored as a versioned script.
+1. **Recorder and step editor**: the recorder **is Playwright codegen**, run inside the robot sandbox (we write no
+   recorder). Its output is turned into plain steps (go to, fill, click, select, read, download, check; verbs shaped by
+   TagUI's plain-English vocabulary, ideas only) and stored as a versioned script.
 2. **Code upload**: a Playwright TypeScript script or a Robot Framework `.robot` task (the latter with S5).
 3. **Agent-drafted**: an agent watches or does a free-form run and drafts the script; the draft enters `in_review` as a
    new version authored by the agent *on behalf of* its initiating user (both recorded), never approved by an agent.
+   This follows workflow-use's pattern (ideas only, AGPL, no code): **record once, replay deterministically, and fall
+   back to the model only when a step breaks.** The fallback is a per-robot setting, **off by default** (ADR-0180),
+   turning it on is audited. When on and a step fails, the runner stops and the gateway makes **one governed model call**
+   (the ADR-0251 core, as the run's initiating user, against the run's project budget) that proposes a repaired step.
+   The run ends `failed` with the proposal attached. The proposal becomes a new **draft** version that goes through
+   review like any other. An approved version is never edited, and a run never continues on model output.
 
 Submitting a version for review writes one row to the **existing approvals queue** with a new object type
 `robot_version`. The approver is never the author or the initiating user of an agent-drafted version (the queue's
@@ -141,7 +148,8 @@ own. S5's addendum decides whether the desktop engine takes it over.
 S2 adds these tables in its own block of `packages/db/src/schema.ts`, in `pending/robots.sql`:
 
 - **`robots`**: `id`, `slug` (unique, `^[a-z0-9_]{1,48}$`), `name`, `description`, `engine` (`browser` | `desktop`),
-  `owner_user_id` → `users`, `status` (the ROBOT machine, §8), `created_at`, `retired_at`.
+  `owner_user_id` → `users`, `status` (the ROBOT machine, §8), `model_fallback` (boolean, default false, §3 path 3;
+  changes audited), `created_at`, `retired_at`.
 - **`robot_versions`**: `id`, `robot_id` → `robots`, `version` (integer, unique per robot), `status` (`draft` |
   `in_review` | `approved` | `rejected` | `retired`, the version machine), `source` (`recorded` | `uploaded` |
   `agent_drafted`), `script_format` (`steps_v1` | `playwright_ts` | `robot_framework`), `script` (text, the reviewed
@@ -161,7 +169,8 @@ S2 adds these tables in its own block of `packages/db/src/schema.ts`, in `pendin
   `builder_agents` (nullable; null for a test run), `project_id` → `projects` (nullable), `mcp_call_audit_id` →
   `audit_log` (the governed call that started it), `placement_id` → the isolation placement, `status` (the ROBOT_RUN
   machine), `kind` (`test` | `agent` | `freeform`), `started_at`, `finished_at`, `step_count`, `duration_ms`,
-  `failure_code` (a fixed vocabulary), `created_at`.
+  `failure_code` (a fixed vocabulary), `proposed_version_id` → `robot_versions` (nullable: the draft a model
+  fallback proposed), `created_at`.
 - **`robot_run_evidence`**: `id`, `robot_run_id` → `robot_runs`, `kind` (`screenshot` | `trace` | `download` | `log`),
   `step_index`, `object_key`, `sha256`, `bytes`, `redaction` (`none` | `masked` | `withheld`), `expires_at`.
   Append-only (exception comment: evidence).
@@ -181,6 +190,7 @@ requester, the agent's owner and admins.
 | **Credential theft or leakage** | Secrets live in `robot_secrets` under the ADR-0204 envelope, never in a script, a version, an input, a log or an audit row. The runner receives values for one run over the executor channel, held in memory, injected only into `fill` steps that name them; the step editor and the upload lint refuse a script that reads a secret into an output, a `read` step, a URL or a log. Screenshots mask every field a secret was typed into (§ PII below), and Playwright traces are recorded with secret values replaced. A secret can be sent only to an origin on the version's allow-list, so a changed page cannot exfiltrate it to another host. |
 | **SSRF and egress** | The sandbox has no direct network. Its only route out is a per-run forward proxy that admits CONNECT only to origins on the version's `robot_version_allowed_sites` (free-form: the authorised-targets list), after the same destination check `mcp-egress.ts` applies (DNS re-validation, address pinning, private, loopback, link-local and metadata ranges refused unless the org's private-network setting allows them, redirects to other origins refused). Playwright `route` blocking repeats the allow-list inside the browser as a second line. Downloads are size-capped and stored as evidence, never executed. |
 | **Screenshot PII** | Screenshots and traces follow the **PII handling mode of the compliance tag** that cascades to the run's project (pillar 3): `block` withholds screenshots and keeps only step outcomes; `warn` and `log` mask detected PII (the existing `mcp-pii.ts` detectors on the page text, plus masks over input fields and any element the script marks sensitive) before upload. With no tag the strict default is masking. |
+| **Evidence capture** | Run evidence **is Playwright's own trace and screenshots** (`tracing.start` / `tracing.stop`, `page.screenshot`), redacted before upload as above. We write no capture code, only the redaction and the upload. |
 | **Evidence retention** | Evidence is written to the object store under the org's evidence bucket, content-addressed (`sha256`), and expires at the audit-retention period of the run's compliance tag (pillar 3), default the org's audit retention. Evidence rows are append-only; deletion happens only by expiry, recorded. |
 | **Sandbox escape** | gVisor L2 by default, a read-only root filesystem, no secrets on disk, no host mounts, a non-root user, seccomp, CPU, memory, wall-clock and step limits, and one sandbox per run destroyed afterwards. The image is digest-pinned and signed; the executor's existing attestation refuses a mismatch. |
 | **Prompt injection from page content** | A robot's script is fixed: page content cannot change which steps run, only what a `read` step returns. Outputs are typed (validated against the output schema, strings length-capped) and returned to the agent marked as **untrusted tool output**, the same as any MCP result, so the existing guardrails on tool results apply. A robot never calls a model. In free-form mode the model does read the page, which is why it is high-risk, opt-in, allow-listed and quorum-approved. |
@@ -256,6 +266,41 @@ Two findings shape the build:
 - **Its `--allowed-origins` / `--blocked-origins` are not a security boundary** (its README says so, and they do not
   apply to redirects). They are a second line only; the boundary is our own per-run egress proxy (§7).
 
+### 9a. Reuse map (master addendum, owner direction 2026-11-18: "reuse the best features from the open-source projects, not write things on our own")
+
+**Use as-is** (pinned exactly, Apache-2.0, a `THIRD_PARTY.md` row in the package that adds it, in the slice that adds it):
+
+| Project | Used for | We do not write |
+|---|---|---|
+| Playwright | the browser runner (S3) | a browser driver |
+| Playwright codegen | the recorder (S4) | a recorder |
+| Playwright trace and screenshots | run evidence (S3) | capture code |
+| `@playwright/mcp` | the free-form browser tools, wrapped behind the gateway as a high-risk server (S3) | any browser tool |
+| Robot Framework + rpaframework | desktop, Excel, PDF, email and OCR steps (S5) | those libraries |
+| rf-mcp (RobotMCP) | evaluated in S5 **before** any MCP wrapper of our own is written | a wrapper, unless the evaluation records why rf-mcp fails |
+| robotgo, Astron RPA | in reserve | |
+
+**Ideas only** (AGPL or MPL: we read their documentation and never copy their code):
+
+- **workflow-use**: record once, replay deterministically, fall back to the model only when a step breaks. This is the
+  model for agent-drafted mode, and the fallback is itself a governed call (§3, path 3).
+- **UI.Vision**: visual and OCR steps (find an image or text on screen). These are future step types (S5), built on
+  rpaframework's OCR.
+- **TagUI**: the plain-English step vocabulary. It shapes the step editor's verbs (§3, path 1).
+
+**We write only:**
+- the robot and version data model (§6) and the lifecycle machines (§8);
+- version pinning (§2);
+- the approval, allow-list, audit and cost hooks into the existing governance (§2, §3, §7);
+- the thin first-party MCP server that maps approved versions to tools (§2), on the MCP SDK;
+- the sandbox workload glue (§5): the placement, the per-run egress proxy configuration, the secret injection, and the
+  evidence redaction and upload.
+
+Anything beyond this list needs a written ADR-0176 exception in an addendum to this ADR. One item needs a note now. The
+step model (`steps_v1`) and its compiler to a Playwright script are ours, because it is a RegulAIt evidence and review
+format: what a reviewer approves is a list of plain steps. S4 records codegen's output in that format and compiles it
+back to Playwright calls. It does not interpret steps itself.
+
 ### 10. UI
 
 The UI lanes build the screens from these mock-ups (rule 3); this lane builds none. S2's routes go into the route census
@@ -286,8 +331,9 @@ Agent editor ▸ Toolbox ▸ Add connection
 - **Harder:** a new transport value (`first_party`), a new workload kind (`robot_browser`), a new approvals object type
   (`robot_version`) and a runner image to publish and keep patched. Pages change, so robots break; a broken robot fails
   its run with evidence rather than guessing, and the fix is a new version through review.
-- **Given up:** self-healing selectors and model-assisted recovery inside a robot run (that would put a model back in a
-  path we promised is deterministic). Free-form control covers the cases that need judgment, under its stricter gate.
+- **Given up:** self-healing selectors and silent model recovery inside a robot run. A broken step never continues on
+  model output; the opt-in fallback (§3, path 3) only proposes a new draft version for review. Free-form control covers
+  the cases that need judgment, under its stricter gate.
 - **Follow-ups:** S2 to S5 as listed above. Owner questions recorded as open with their secure defaults: whether the
   free-form opt-in should also require a project with a budget (default: yes, as the SAP write path does); and the
   maximum run wall-clock (default 5 minutes, admin-adjustable down only without step-up).
