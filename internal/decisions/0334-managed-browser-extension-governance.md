@@ -232,7 +232,10 @@ builder: the eleven admin routes are `KNOWN_UI_GAPS` entries pointing at #453.
 - **Another browser** on the same machine is not governed by this extension; the endpoint agent and network controls
   remain the answer there.
 - **A leaked enrolment token** registers devices up to its cap until it expires or is revoked, the same trade-off as
-  the endpoint agent's bulk token.
+  the endpoint agent's bulk token. Issuing one is a `settings_relax` step-up bound to its label, cap and lifetime.
+- **The profile account is the device's claim.** A device registered with a leaked token could name any colleague's
+  email. So a device is bound to the first account it presents and refuses any other (section 12), and every row says
+  its attribution is `device_asserted`. Verifying an identity-provider ID token is the follow-up that removes the claim.
 
 ## Not in this slice (recorded as follow-ups)
 
@@ -243,13 +246,47 @@ builder: the eleven admin routes are `KNOWN_UI_GAPS` entries pointing at #453.
   detection engine is a follow-up through those lanes' documented contracts.
 - **Turning a DLP rule off** for the browser (a relaxation, audited); today every shared rule is on.
 - **Hardware-bound device keys** through native messaging to the endpoint agent's TPM or Secure Enclave key.
-- **Retention for `browser_events`** (they hold no prompt text and refuse every DELETE today), and the RLS batch for the
-  new tables (single-tenant register tables, like ADR-0261's).
+- **Retention for `browser_events`** (they hold no prompt text and refuse every DELETE today).
+- **Verified attribution:** an identity-provider ID token from `chrome.identity`, checked by the gateway, in place of
+  the device-asserted account (section 12; PENDING fragment).
+- **The gateway origin in `host_permissions` and CORS** for the extension origin, so registration passes a real
+  Chromium preflight (it fails closed today; PENDING fragment).
 - **In-app, audited rotation of the device-policy key** (the issuer key's activate/rotate/revoke lifecycle); today
   rotation is the operator's file and active key id.
 - **Per-role site rules** (today a rule is org-wide; per-user entitlement comes from the user match and the posture).
 - **Firefox** is a later slice (owner decision B3; PENDING fragment), and Safari after it.
 - **Browser-driving agents** (surface (b)): their own ADR and PR.
+
+## 12. Review fixes (#867, 2026-11-18)
+
+The security and code reviews at `4398879` asked for these; each is built and tested in
+`zz-adr0334-browser-governance.test.ts`.
+
+- **Account binding (security 1).** `browser_devices` gains `bound_subject` (the pseudonym), `bound_user_id` and
+  `bound_at`. The first non-empty profile account a device presents binds it (audited `browser-device-account-bound`).
+  After that, `/policy`, `/events` and `/prompt-captures` refuse any other account, or none, with 409
+  `account_mismatch` (audited `browser-device-account-mismatch`, pseudonyms only) and attribute nothing. The extension
+  treats 409 as a refusal and fails closed. Events and captures carry `attribution = 'device_asserted'` (a CHECK allows
+  only that value until verified attribution exists).
+- **Row-level security (security 2).** All seven tables ENABLE and FORCE RLS. An admin, `system_task` (the retention
+  sweep) and `migration` reach every row. The extension runs under `credential_request` in a transaction that names
+  its workload identity in `regulait.browser_identity_id`. It reads the settings, site rules and tokens, updates only
+  the token counter, and reaches only its own device row and its own events and captures. `browser-device.ts` enters
+  that scope itself, because the token endpoint and the self-token check run outside the request's scope.
+- **List contract (code 1).** The token, device and event lists answer through `answerListPage` with keyset
+  `ListSpec`s on `(created_at, id)`, `(registered_at, id)` and `(received_at, id)`. A batch's events share one
+  `received_at`, and the id tie-breaker pages through them without dropping any. The event list no longer returns
+  `userId` beside the pseudonym.
+- **Settings under the lock (code 2).** The settings write locks the singleton row, judges the relaxations on the
+  locked row, and claims the step-up inside the same transaction. A refused claim rolls the write back. The audit
+  records `settingTransitions` (old to new, ADR-0181).
+- **Smaller fixes.** The token and device lifecycles are ADR-0348 `defineMachine` tables (derived states, so they are
+  not in the CHECK-backed `STATE_MACHINES` registry). Client timestamps outside now minus 7 days to now plus 300 seconds
+  are refused `invalid_body`. Issuing an enrolment token is a step-up. The `devices_enrolled` cap counter has its
+  ADR-0200 exception comment.
+- **Filed as issues, not fixed here:** the `user_disabled` bypass through a personal account (it conflicts with owner
+  decision B1, so it is the owner's call); CORS and the gateway origin; audit flooding from bad-token registrations;
+  forged `block.html` events.
 
 ## Consequences
 

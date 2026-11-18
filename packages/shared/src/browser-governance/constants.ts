@@ -32,6 +32,17 @@ export const DEVICE_POLICY_KEY_ID_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
 export const BROWSER_POLICY_TTL_SECONDS = 4 * 3600;
 /** a policy issued further than this in the extension's future is refused (clock skew allowance) */
 export const BROWSER_POLICY_MAX_FUTURE_SKEW_SECONDS = 300;
+/**
+ * The window a client timestamp (`occurredAt`, `capturedAt`) must fall in, against the gateway's clock: at most this
+ * old (the extension's queue lives in session storage, so older events cannot be pending) and at most this far ahead.
+ * Outside it the batch is refused `invalid_body`, so evidence is never backdated and never an Invalid Date.
+ */
+export const BROWSER_CLIENT_TIME_MAX_AGE_SECONDS = 7 * 86_400;
+export const BROWSER_CLIENT_TIME_MAX_FUTURE_SECONDS = 300;
+/** is a client timestamp (unix seconds) inside the accepted window around `nowSeconds`? */
+export function browserClientTimeAcceptable(at: number, nowSeconds: number): boolean {
+  return Number.isSafeInteger(at) && at >= nowSeconds - BROWSER_CLIENT_TIME_MAX_AGE_SECONDS && at <= nowSeconds + BROWSER_CLIENT_TIME_MAX_FUTURE_SECONDS;
+}
 
 export const BROWSER_REQUEST_MAX_BYTES = 64 * 1024;
 export const BROWSER_EVENTS_PER_REQUEST = 50;
@@ -207,39 +218,22 @@ export const BROWSER_REFUSAL_CODES = [
   "issuer_not_configured",
   "credential_already_registered",
   "browser_extension_token_required",
+  /** the profile account is not the one this device is bound to (or is empty on a bound device): refused, audited */
+  "account_mismatch",
 ] as const;
 export type BrowserRefusalCode = (typeof BROWSER_REFUSAL_CODES)[number];
 
 // ---------------------------------------------------------------------------
-// The two lifecycles on this surface, declared once (owner build rule 12, 2026-11-17). A state is derived from the
-// row's facts (the columns stay the source of truth); every route that moves or checks one reads this table. The
-// app-wide state-machine audit is lane E29's (ADR-0348), so nothing outside this surface is refactored here.
+// The two lifecycles on this surface (owner build rule 12). Their transition tables are ADR-0348 machines,
+// `BROWSER_ENROLMENT_TOKEN_MACHINE` and `BROWSER_DEVICE_MACHINE` in `state-machines.ts`; a state is derived from the
+// row's facts (the columns stay the source of truth) by the two functions below, which the extension can also load
+// (this file stays free of zod and of the machine registry's imports).
 // ---------------------------------------------------------------------------
 
 export const BROWSER_ENROLMENT_TOKEN_STATES = ["active", "exhausted", "expired", "revoked"] as const;
 export type BrowserEnrolmentTokenState = (typeof BROWSER_ENROLMENT_TOKEN_STATES)[number];
 export const BROWSER_DEVICE_STATES = ["active", "revoked"] as const;
 export type BrowserDeviceState = (typeof BROWSER_DEVICE_STATES)[number];
-
-/** allowed transitions; `revoked` is terminal, and time (expiry) and use (the cap) move a token on without an admin */
-export const BROWSER_LIFECYCLES = {
-  enrolmentToken: {
-    active: ["exhausted", "expired", "revoked"],
-    exhausted: ["expired", "revoked"],
-    expired: ["revoked"],
-    revoked: [],
-  } satisfies Record<BrowserEnrolmentTokenState, readonly BrowserEnrolmentTokenState[]>,
-  device: {
-    active: ["revoked"],
-    revoked: [],
-  } satisfies Record<BrowserDeviceState, readonly BrowserDeviceState[]>,
-} as const;
-type BrowserLifecycles = typeof BROWSER_LIFECYCLES;
-
-export function browserCanTransition<M extends keyof BrowserLifecycles>(machine: M, from: keyof BrowserLifecycles[M], to: keyof BrowserLifecycles[M]): boolean {
-  const next = BROWSER_LIFECYCLES[machine][from] as readonly string[];
-  return next.includes(to as string);
-}
 
 /** revoked wins over expired, expired over exhausted: the strictest fact a token carries is its state */
 export function enrolmentTokenState(token: { revokedAt: Date | null; expiresAt: Date; devicesEnrolled: number; deviceCap: number }, now: Date): BrowserEnrolmentTokenState {

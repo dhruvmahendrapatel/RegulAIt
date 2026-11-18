@@ -14,6 +14,16 @@
 --    SET NULL is the data-key re-encryption walk rewriting a capture's ciphertext. The one DELETE admitted is the
 --    prompt-capture retention sweep's (owner decision B2: 30 days by default). Events are kept (no retention yet).
 --
+-- 6. Device binding (#867 security review): a device is bound to the first profile account it presents
+--    (`bound_subject`, the keyed pseudonym, and `bound_user_id` when it matches a person). Every later request
+--    must present the same account; any other is refused and audited, never attributed. Every evidence row says
+--    how its person was established (`attribution`): `device_asserted`, the only kind this slice can establish
+--    (identity-provider verification of the account is a recorded follow-up).
+-- 7. Row-level security (ADR-0234) on all seven tables, FORCED: admins, scheduler jobs (`system_task`) and
+--    migrations see every row; a browser extension's request (`credential_request`) reads the settings and rules,
+--    reads and counts enrolment tokens at registration, and reaches only ITS OWN device row and evidence, through
+--    the transaction-local `regulait.browser_identity_id` the gateway sets to the authenticated workload identity.
+--
 -- One new function, pinned to `search_path = pg_catalog, public, pg_temp` (0185). Single-tenant deployment: like the
 -- other register tables (0281) there is no tenant column; 0272's default privileges grant the app role.
 
@@ -65,6 +75,8 @@ CREATE TABLE IF NOT EXISTS "browser_site_account_domains" (
   CONSTRAINT "browser_site_account_domains_domain_check" CHECK (char_length("domain") BETWEEN 3 AND 253 AND "domain" = lower("domain"))
 );
 --> statement-breakpoint
+-- `devices_enrolled` is a deliberate counter (ADR-0200 exception): the cap is enforced under this row's FOR UPDATE
+-- lock, and it counts registrations ever made, including devices later revoked, which a count of rows would not.
 CREATE TABLE IF NOT EXISTS "browser_enrolment_tokens" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
   "label" text NOT NULL,
@@ -94,6 +106,13 @@ CREATE TABLE IF NOT EXISTS "browser_devices" (
   "last_seen_at" timestamp with time zone,
   "revoked_at" timestamp with time zone,
   "revoked_by" uuid REFERENCES "users"("id") ON DELETE SET NULL,
+  -- the account the device is bound to: its keyed pseudonym (point-in-time evidence, ADR-0200 exception), the person
+  -- it matched when bound, and when
+  "bound_subject" text,
+  "bound_user_id" uuid REFERENCES "users"("id") ON DELETE SET NULL,
+  "bound_at" timestamp with time zone,
+  CONSTRAINT "browser_devices_bound_check" CHECK (("bound_subject" IS NULL) = ("bound_at" IS NULL) AND ("bound_user_id" IS NULL OR "bound_subject" IS NOT NULL)),
+  CONSTRAINT "browser_devices_bound_subject_check" CHECK ("bound_subject" IS NULL OR "bound_subject" ~ '^psn:[0-9a-f]{24}$'),
   CONSTRAINT "browser_devices_os_check" CHECK ("os" IN ('mac', 'win', 'linux', 'cros', 'other')),
   CONSTRAINT "browser_devices_major_check" CHECK ("browser_major" BETWEEN 1 AND 10000),
   CONSTRAINT "browser_devices_version_check" CHECK (char_length("extension_version") BETWEEN 1 AND 32)
@@ -118,6 +137,8 @@ CREATE TABLE IF NOT EXISTS "browser_events" (
   "occurred_at" timestamp with time zone NOT NULL,
   "received_at" timestamp with time zone DEFAULT now() NOT NULL,
   "audit_id" uuid NOT NULL,
+  "attribution" text DEFAULT 'device_asserted' NOT NULL,
+  CONSTRAINT "browser_events_attribution_check" CHECK ("attribution" IN ('device_asserted')),
   CONSTRAINT "browser_events_kind_check" CHECK ("kind" IN ('site_blocked', 'account_blocked', 'dlp_blocked')),
   CONSTRAINT "browser_events_outcome_check" CHECK ("outcome" IN ('blocked', 'would_block')),
   CONSTRAINT "browser_events_code_check" CHECK ("code" ~ '^[a-z_]{1,40}$'),
@@ -146,6 +167,8 @@ CREATE TABLE IF NOT EXISTS "browser_prompt_captures" (
   "captured_at" timestamp with time zone NOT NULL,
   "received_at" timestamp with time zone DEFAULT now() NOT NULL,
   "audit_id" uuid NOT NULL,
+  "attribution" text DEFAULT 'device_asserted' NOT NULL,
+  CONSTRAINT "browser_prompt_captures_attribution_check" CHECK ("attribution" IN ('device_asserted')),
   CONSTRAINT "browser_prompt_captures_site_check" CHECK ("site_id" ~ '^ep-[a-z0-9-]{1,60}$'),
   CONSTRAINT "browser_prompt_captures_subject_check" CHECK ("subject_pseudonym" = '' OR "subject_pseudonym" ~ '^psn:[0-9a-f]{24}$'),
   CONSTRAINT "browser_prompt_captures_conversation_check" CHECK ("conversation_ref" ~ '^cnv:[0-9a-f]{32}$'),
@@ -214,3 +237,137 @@ DROP TRIGGER IF EXISTS "browser_prompt_captures_no_truncate" ON public."browser_
 --> statement-breakpoint
 CREATE TRIGGER "browser_prompt_captures_no_truncate" BEFORE TRUNCATE ON public."browser_prompt_captures"
   FOR EACH STATEMENT EXECUTE FUNCTION public.regulait_refuse_truncate();
+
+-- ---- 7. row-level security (ADR-0234; #867 security review) ----------------------------------------------------
+--> statement-breakpoint
+ALTER TABLE "browser_governance_settings" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "browser_governance_settings" FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+DROP POLICY IF EXISTS "browser_governance_settings_admin" ON "browser_governance_settings";
+--> statement-breakpoint
+CREATE POLICY "browser_governance_settings_admin" ON "browser_governance_settings" FOR ALL
+  USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
+  WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
+--> statement-breakpoint
+DROP POLICY IF EXISTS "browser_governance_settings_extension_read" ON "browser_governance_settings";
+--> statement-breakpoint
+CREATE POLICY "browser_governance_settings_extension_read" ON "browser_governance_settings" FOR SELECT
+  USING ((SELECT regulait_rls_system_reason()) = 'credential_request');
+--> statement-breakpoint
+ALTER TABLE "browser_site_rules" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "browser_site_rules" FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+DROP POLICY IF EXISTS "browser_site_rules_admin" ON "browser_site_rules";
+--> statement-breakpoint
+CREATE POLICY "browser_site_rules_admin" ON "browser_site_rules" FOR ALL
+  USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
+  WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
+--> statement-breakpoint
+DROP POLICY IF EXISTS "browser_site_rules_extension_read" ON "browser_site_rules";
+--> statement-breakpoint
+CREATE POLICY "browser_site_rules_extension_read" ON "browser_site_rules" FOR SELECT
+  USING ((SELECT regulait_rls_system_reason()) = 'credential_request');
+--> statement-breakpoint
+ALTER TABLE "browser_site_account_domains" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "browser_site_account_domains" FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+DROP POLICY IF EXISTS "browser_site_account_domains_admin" ON "browser_site_account_domains";
+--> statement-breakpoint
+CREATE POLICY "browser_site_account_domains_admin" ON "browser_site_account_domains" FOR ALL
+  USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
+  WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
+--> statement-breakpoint
+DROP POLICY IF EXISTS "browser_site_account_domains_extension_read" ON "browser_site_account_domains";
+--> statement-breakpoint
+CREATE POLICY "browser_site_account_domains_extension_read" ON "browser_site_account_domains" FOR SELECT
+  USING ((SELECT regulait_rls_system_reason()) = 'credential_request');
+--> statement-breakpoint
+ALTER TABLE "browser_enrolment_tokens" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "browser_enrolment_tokens" FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+DROP POLICY IF EXISTS "browser_enrolment_tokens_admin" ON "browser_enrolment_tokens";
+--> statement-breakpoint
+CREATE POLICY "browser_enrolment_tokens_admin" ON "browser_enrolment_tokens" FOR ALL
+  USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
+  WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
+--> statement-breakpoint
+DROP POLICY IF EXISTS "browser_enrolment_tokens_extension_read" ON "browser_enrolment_tokens";
+--> statement-breakpoint
+CREATE POLICY "browser_enrolment_tokens_extension_read" ON "browser_enrolment_tokens" FOR SELECT
+  USING ((SELECT regulait_rls_system_reason()) = 'credential_request');
+--> statement-breakpoint
+DROP POLICY IF EXISTS "browser_enrolment_tokens_extension_count" ON "browser_enrolment_tokens";
+--> statement-breakpoint
+CREATE POLICY "browser_enrolment_tokens_extension_count" ON "browser_enrolment_tokens" FOR UPDATE
+  USING ((SELECT regulait_rls_system_reason()) = 'credential_request')
+  WITH CHECK ((SELECT regulait_rls_system_reason()) = 'credential_request');
+--> statement-breakpoint
+ALTER TABLE "browser_devices" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "browser_devices" FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+DROP POLICY IF EXISTS "browser_devices_admin" ON "browser_devices";
+--> statement-breakpoint
+CREATE POLICY "browser_devices_admin" ON "browser_devices" FOR ALL
+  USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
+  WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
+--> statement-breakpoint
+DROP POLICY IF EXISTS "browser_devices_own_read" ON "browser_devices";
+--> statement-breakpoint
+CREATE POLICY "browser_devices_own_read" ON "browser_devices" FOR SELECT
+  USING ((SELECT regulait_rls_system_reason()) = 'credential_request' AND "identity_id" = nullif(current_setting('regulait.browser_identity_id', true), '')::uuid);
+--> statement-breakpoint
+DROP POLICY IF EXISTS "browser_devices_own_update" ON "browser_devices";
+--> statement-breakpoint
+CREATE POLICY "browser_devices_own_update" ON "browser_devices" FOR UPDATE
+  USING ((SELECT regulait_rls_system_reason()) = 'credential_request' AND "identity_id" = nullif(current_setting('regulait.browser_identity_id', true), '')::uuid)
+  WITH CHECK ((SELECT regulait_rls_system_reason()) = 'credential_request' AND "identity_id" = nullif(current_setting('regulait.browser_identity_id', true), '')::uuid);
+--> statement-breakpoint
+DROP POLICY IF EXISTS "browser_devices_own_insert" ON "browser_devices";
+--> statement-breakpoint
+CREATE POLICY "browser_devices_own_insert" ON "browser_devices" FOR INSERT
+  WITH CHECK ((SELECT regulait_rls_system_reason()) = 'credential_request' AND "identity_id" = nullif(current_setting('regulait.browser_identity_id', true), '')::uuid);
+--> statement-breakpoint
+ALTER TABLE "browser_events" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "browser_events" FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+DROP POLICY IF EXISTS "browser_events_admin" ON "browser_events";
+--> statement-breakpoint
+CREATE POLICY "browser_events_admin" ON "browser_events" FOR ALL
+  USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
+  WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
+--> statement-breakpoint
+DROP POLICY IF EXISTS "browser_events_own_insert" ON "browser_events";
+--> statement-breakpoint
+CREATE POLICY "browser_events_own_insert" ON "browser_events" FOR INSERT
+  WITH CHECK ((SELECT regulait_rls_system_reason()) = 'credential_request' AND "device_id" IN (SELECT d."id" FROM "browser_devices" d WHERE d."identity_id" = nullif(current_setting('regulait.browser_identity_id', true), '')::uuid AND d."revoked_at" IS NULL));
+--> statement-breakpoint
+DROP POLICY IF EXISTS "browser_events_own_read" ON "browser_events";
+--> statement-breakpoint
+CREATE POLICY "browser_events_own_read" ON "browser_events" FOR SELECT
+  USING ((SELECT regulait_rls_system_reason()) = 'credential_request' AND "device_id" IN (SELECT d."id" FROM "browser_devices" d WHERE d."identity_id" = nullif(current_setting('regulait.browser_identity_id', true), '')::uuid AND d."revoked_at" IS NULL));
+--> statement-breakpoint
+ALTER TABLE "browser_prompt_captures" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "browser_prompt_captures" FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+DROP POLICY IF EXISTS "browser_prompt_captures_admin" ON "browser_prompt_captures";
+--> statement-breakpoint
+CREATE POLICY "browser_prompt_captures_admin" ON "browser_prompt_captures" FOR ALL
+  USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
+  WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
+--> statement-breakpoint
+DROP POLICY IF EXISTS "browser_prompt_captures_own_insert" ON "browser_prompt_captures";
+--> statement-breakpoint
+CREATE POLICY "browser_prompt_captures_own_insert" ON "browser_prompt_captures" FOR INSERT
+  WITH CHECK ((SELECT regulait_rls_system_reason()) = 'credential_request' AND "device_id" IN (SELECT d."id" FROM "browser_devices" d WHERE d."identity_id" = nullif(current_setting('regulait.browser_identity_id', true), '')::uuid AND d."revoked_at" IS NULL));
+--> statement-breakpoint
+DROP POLICY IF EXISTS "browser_prompt_captures_own_read" ON "browser_prompt_captures";
+--> statement-breakpoint
+CREATE POLICY "browser_prompt_captures_own_read" ON "browser_prompt_captures" FOR SELECT
+  USING ((SELECT regulait_rls_system_reason()) = 'credential_request' AND "device_id" IN (SELECT d."id" FROM "browser_devices" d WHERE d."identity_id" = nullif(current_setting('regulait.browser_identity_id', true), '')::uuid AND d."revoked_at" IS NULL));

@@ -205,6 +205,61 @@ export const RULE_STEP_SUGGESTION_MACHINE = defineMachine({
   },
 });
 
+/*
+ * The two ADR-0334 lifecycles below are declared with `defineMachine` and enforced by their routes (a revoke checks
+ * `can(state, "revoke")` under the row lock and its UPDATE is guarded by `revoked_at IS NULL`), but their state is
+ * DERIVED from timestamps and a counter rather than stored in a status column, so they are not in `STATE_MACHINES`,
+ * whose entries each match a CHECK-constrained column (adr0348-state-machines.test.ts). Lane E29's app-wide audit
+ * owns how derived lifecycles are listed.
+ */
+
+/** `browser_enrolment_tokens` (ADR-0334), derived from the row (`revoked_at`, `expires_at`, the device cap) by
+ * `enrolmentTokenState`. Use and time move a token on without an admin; revocation is final. */
+export const BROWSER_ENROLMENT_TOKEN_MACHINE = defineMachine({
+  id: "browser_enrolment_token",
+  stored: "browser_enrolment_tokens (revoked_at, expires_at, devices_enrolled vs device_cap)",
+  states: ["active", "exhausted", "expired", "revoked"],
+  initial: ["active"],
+  terminal: ["revoked"],
+  transitions: {
+    exhaust: {
+      from: ["active"],
+      to: "exhausted",
+      by: ["system"],
+      summary: "The last device the token allows registers; it still answers the devices it enrolled, never a new one.",
+    },
+    expire: {
+      from: ["active", "exhausted"],
+      to: "expired",
+      by: ["system"],
+      summary: "The token's expiry passes; no device registers with it any more.",
+    },
+    revoke: {
+      from: ["active", "exhausted", "expired"],
+      to: "revoked",
+      by: ["admin"],
+      summary: "An admin revokes the token; no device registers with it again.",
+    },
+  },
+});
+
+/** `browser_devices.revoked_at` (ADR-0334): a device is active until an admin revokes it, and revocation is final. */
+export const BROWSER_DEVICE_MACHINE = defineMachine({
+  id: "browser_device",
+  stored: "browser_devices.revoked_at",
+  states: ["active", "revoked"],
+  initial: ["active"],
+  terminal: ["revoked"],
+  transitions: {
+    revoke: {
+      from: ["active"],
+      to: "revoked",
+      by: ["admin"],
+      summary: "An admin revokes the device; its proofs are refused and it blocks every governed site.",
+    },
+  },
+});
+
 /** Every declared machine, by id: the one list an agent or a document reads. */
 export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string>>> = Object.freeze({
   [TRAINING_JOB_MACHINE.def.id]: TRAINING_JOB_MACHINE,

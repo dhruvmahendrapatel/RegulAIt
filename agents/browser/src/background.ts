@@ -136,8 +136,9 @@ async function refreshOnce(): Promise<void> {
   if (!reg) return failClosed();
   const email = await profileEmail();
   const res = await reg.client.post(BROWSER_EXTENSION_PATHS.policy, { profileEmail: email });
-  if (!res || res.status === 401 || res.status === 403) {
-    // refused (a revoked device, governance turned off, no token): closed until a later refresh succeeds
+  if (!res || res.status === 401 || res.status === 403 || res.status === 409) {
+    // refused (a revoked device, governance turned off, no token, or a profile account other than the one this device
+    // is bound to): closed until a later refresh succeeds
     return failClosed();
   }
   if (res.status !== 200) {
@@ -171,7 +172,8 @@ async function flushEvents(reg: Registered): Promise<void> {
   while (queue.length > 0) {
     const batch = queue.slice(0, BROWSER_EVENTS_PER_REQUEST);
     const res = await reg.client.post(BROWSER_EXTENSION_PATHS.events, { profileEmail: await profileEmail(), events: batch });
-    if (res?.status !== 202) break;
+    // a 400 can never succeed on retry (a timestamp outside the gateway's window): drop it rather than wedge the queue
+    if (res?.status !== 202 && res?.status !== 400) break;
     queue = queue.slice(batch.length);
     await chrome.storage.session.set({ queue });
   }

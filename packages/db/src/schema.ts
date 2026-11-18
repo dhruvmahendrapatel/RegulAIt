@@ -16811,9 +16811,14 @@ export const resourceRateReservations = pgTable(
 
 // ===== ADR-0334 (lane E16): managed browser extension governance ============================================
 // Migration `pending/browser_governance.sql`. Off until an admin enables it (a `settings_relax` step-up, audited).
-// Single-tenant deployment: like the other register tables (0281 header), no tenant column and no RLS yet (the RLS
-// batches cover new tables in their own slices).
+// Single-tenant deployment: like the other register tables (0281 header), no tenant column. Row-level security is
+// FORCED on all seven tables (#867 review): admins, `system_task` and migrations see every row; an extension's request
+// (`credential_request`) reads the settings, rules and tokens and reaches only its own device row and evidence.
 export const BROWSER_GOVERNANCE_MODES = ["enforce", "audit"] as const;
+/** how an evidence row's person was established (#867 review); identity-provider verification is a follow-up */
+export const BROWSER_ATTRIBUTIONS = ["device_asserted"] as const;
+/** the transaction-local setting the gateway sets to the authenticated extension's workload identity (RLS) */
+export const BROWSER_IDENTITY_SETTING = "regulait.browser_identity_id";
 
 /** The one settings row (id = 1). Every column defaults to the strict value (ADR-0180). */
 export const browserGovernanceSettings = pgTable(
@@ -16862,6 +16867,8 @@ export const browserEnrolmentTokens = pgTable(
     label: text("label").notNull(),
     tokenHash: text("token_hash").notNull(),
     deviceCap: integer("device_cap").notNull(),
+    /** a deliberate counter (ADR-0200 exception): the cap is enforced under this row's FOR UPDATE lock, and it counts
+     * every registration ever made, revoked devices included, which a count of `browser_devices` rows would not */
     devicesEnrolled: integer("devices_enrolled").notNull().default(0),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
@@ -16894,6 +16901,12 @@ export const browserDevices = pgTable(
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     revokedBy: uuid("revoked_by").references(() => users.id, { onDelete: "set null" }),
+    /** #867 review: the first profile account the device presented, as its keyed pseudonym (point-in-time evidence,
+     * ADR-0200 exception); every later request must present the same account */
+    boundSubject: text("bound_subject"),
+    /** the person that account matched when the device was bound (null: it matched nobody, owner decision B1) */
+    boundUserId: uuid("bound_user_id").references(() => users.id, { onDelete: "set null" }),
+    boundAt: timestamp("bound_at", { withTimezone: true }),
   },
   (t) => [uniqueIndex("browser_devices_identity_uq").on(t.identityId), index("browser_devices_token_idx").on(t.tokenId)],
 );
@@ -16926,6 +16939,8 @@ export const browserEvents = pgTable(
     receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
     /** the audit-chain row of the batch this event arrived in (`audit_log` carries no FKs by design) */
     auditId: uuid("audit_id").notNull(),
+    /** how the person was established: `device_asserted` (the device's bound profile account) is the only kind yet */
+    attribution: text("attribution", { enum: BROWSER_ATTRIBUTIONS }).notNull().default("device_asserted"),
   },
   (t) => [
     uniqueIndex("browser_events_device_event_uq").on(t.deviceId, t.eventId),
@@ -16957,6 +16972,7 @@ export const browserPromptCaptures = pgTable(
     capturedAt: timestamp("captured_at", { withTimezone: true }).notNull(),
     receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
     auditId: uuid("audit_id").notNull(),
+    attribution: text("attribution", { enum: BROWSER_ATTRIBUTIONS }).notNull().default("device_asserted"),
   },
   (t) => [uniqueIndex("browser_prompt_captures_device_capture_uq").on(t.deviceId, t.captureId), index("browser_prompt_captures_received_idx").on(t.receivedAt)],
 );
