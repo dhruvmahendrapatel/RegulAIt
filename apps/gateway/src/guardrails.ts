@@ -308,6 +308,11 @@ export async function resolveGuardrailPolicy(
     connectorId?: string | null | undefined;
     /** ADR-0237: the caller, for cost attribution of a third-party guardrail call (absent = unattributed) */
     userId?: string | null | undefined;
+    /**
+     * ADR-0363: compliance tags the CONTENT pulls in (a sensitivity label mapped to a profile), composed into the
+     * floor with the project's own tags. It can only add profiles, so it can only raise the floor.
+     */
+    extraComplianceTags?: readonly string[] | undefined;
   },
 ): Promise<GuardrailPolicy> {
   const scopeId = args.agentId ?? args.connectorId ?? null;
@@ -351,8 +356,9 @@ export async function resolveGuardrailPolicy(
 
   // the §8.3 floor: MAX across every profile the project's tags resolve to
   let floor: Partial<GuardrailModes> | null = null;
-  if (args.projectId) {
-    const tags = await projectClassifications(db, args.projectId);
+  const extraTags = args.extraComplianceTags ?? [];
+  if (args.projectId || extraTags.length > 0) {
+    const tags = [...new Set([...(args.projectId ? await projectClassifications(db, args.projectId) : []), ...extraTags])];
     if (tags.length > 0) {
       const profiles = await complianceProfilesForTags(db, tags);
       const declared = profiles

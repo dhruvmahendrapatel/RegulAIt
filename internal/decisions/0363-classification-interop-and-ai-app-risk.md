@@ -56,9 +56,16 @@ What exists and is reused (repo search, 2026-11-17):
    reader of labels embedded in content, a reader of message headers) and `LabelDefinition`. Purview is the first
    provider. It reads `docMetadata/LabelInfo.xml` (authoritative when present), else `docProps/custom.xml`, the PDF
    info/XMP keys and the `MSIP_Labels` email header. Only enabled, not-removed labels count. An OLE compound file
-   (an encrypted Office file) is `protected`. A corrupt zip or an oversized label part is `unreadable`. Bounds: only
-   the two XML parts are inflated, each at most 1 MiB by declared size. The PDF scan reads the first and last 256 KiB
-   and uses a literal search, not a regex over the content.
+   (an encrypted Office file) is `protected`. Legacy binary Office files (`.doc`, `.xls`, `.ppt`) are OLE compound
+   files too, so they are also `protected` and decided by `protected_action` (block by default), labelled or not:
+   safe, but an admin who sees them refused should know why. A corrupt zip or an oversized label part is
+   `unreadable`. Bounds: only the two XML parts are inflated, each at most 1 MiB by declared size. The PDF scan reads
+   the whole buffer (already in memory and bounded by the request body limit) with a literal search, not a regex over
+   the content; head and tail windows alone failed open on a label written mid-file by an incremental save (review of
+   #973). A PDF with compressed object streams (`/ObjStm`, PDF 1.5+) in which no label key is visible is `unreadable`
+   (block by default), because a label inside a compressed stream cannot be seen by a literal scan.
+   Relaxations (step-up, audited as relaxations) include removing a rule while `unmapped_action` is looser than it,
+   and dropping or swapping a rule's compliance profile (review of #973).
 2. **Definitions are read-only, through the `idp_entra` scan.** When the app's own token carries
    `InformationProtectionPolicy.Read.All`, the scan reads
    `GET /beta/security/informationProtection/sensitivityLabels` (the only Graph listing of labels; beta). It commits the complete
