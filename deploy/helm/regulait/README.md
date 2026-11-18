@@ -12,7 +12,7 @@ operator in [`deploy/operator`](../../operator/README.md) is the declarative pat
 | Migration Job (hook) | `pre-install,pre-upgrade`, weight 0. An init container first runs the operator binary's `verify-bundle` against the signed manifest in `bundle.configMapName`, using the same compiled-in release keyring. It refuses an unsigned or tampered manifest, a version other than `version`, and a downgrade from the installed version: `bundle.installedVersion` when set, else the running Deployment's version label read with `lookup`. An upgrade where neither is available (`helm template --is-upgrade`, `--dry-run`, GitOps renderers) is refused at render time, so the downgrade check is never skipped. Then `node apps/gateway/dist/migrate-job.js` runs from the new image. A failed check or migration fails the release, so the old version keeps running. |
 | NetworkPolicies | Ordinary release resources, so an upgrade never removes them from the running gateway and `helm uninstall` deletes them. `<release>-baseline` denies all ingress and egress for every pod in the namespace. `<release>-gateway` opens DNS, `egress.databaseCIDRs` on 5432, `egress.allowedCIDRs`, and, in byoc with `egress.allowPublicEgress`, public 443 (excluding `169.254.0.0/16` and the private ranges); ingress is port 3000 from `ingressFrom` only. `<release>-database-clients` (the migration Job) opens DNS and the database only. DNS defaults to the `k8s-app: kube-dns` pods. Set `egress.dns` for NodeLocal DNSCache or a renamed CoreDNS. |
 | NetworkPolicy (hook) | `<release>-hook-database-clients`, the same rules as `<release>-database-clients`, at hook weight -10. Hooks run before release resources exist, so it covers the migration Job on a first install. It is deleted when the hook phase succeeds. |
-| Deployment | One replica with `Recreate` (one gateway at a time until P2). Non-root (uid 1000), read-only root filesystem, every capability dropped, RuntimeDefault seccomp, no service-account token. The image is pulled by digest. |
+| Deployment | `replicas` gateways (default 1, ADR-0343). One replica uses `Recreate`. More than one uses `RollingUpdate` (`maxUnavailable: 0`), zone and node topology spread, and a PodDisruptionBudget (`maxUnavailable: 1`), and it needs `installSecrets.accessMode: ReadWriteMany`. The readiness probe is `/ready`, which turns 503 as soon as a drain starts; the pod keeps serving for `highAvailability.drainDelaySeconds` before it closes. Non-root (uid 1000), read-only root filesystem, every capability dropped, RuntimeDefault seccomp, no service-account token. The image is pulled by digest. |
 | Service, ServiceAccount | ClusterIP on 3000. The ServiceAccount does not mount a token. |
 | PersistentVolumeClaim | Holds `/app/install-secrets` and `/app/audit-anchors`. It carries `helm.sh/resource-policy: keep`, because losing it loses the receipt and identity signing keys. |
 
@@ -71,7 +71,27 @@ of a digest, `hosted` mode and a malformed version. The templates refuse:
 - in any mode, an egress entry that overlaps `169.254.0.0/16` or a cloud metadata address, an IPv6 entry that is not
   a unique-local range of /48 or longer, or one inside `fd00:ec2::/32` (templates cannot do IPv6 containment, so the
   chart is stricter than the operator here: public IPv6 opens only through `allowPublicEgress`);
-- a DNS entry that is neither a private range nor one link-local address (NodeLocal DNSCache).
+- a DNS entry that is neither a private range nor one link-local address (NodeLocal DNSCache);
+- `replicas` above 1 on a `ReadWriteOnce` install-secrets claim. Every replica must read the same install-generated
+  signing keys and runtime-login file, or receipts and tokens signed by one replica would not verify on another
+  (ADR-0343 §3).
+
+### High availability (ADR-0343)
+
+Run at least two replicas across zones, on a ReadWriteMany class that encrypts at rest (EFS, Azure Files, Filestore,
+or an encrypted CSI driver):
+
+```yaml
+replicas: 3
+installSecrets:
+  storageClassName: encrypted-rwx
+  accessMode: ReadWriteMany
+```
+
+Replicas may start together, because boot migrations take a cluster-wide Postgres lock. The database is the other
+half of HA: point `database-url` at a highly available Postgres writer endpoint. For RDS Multi-AZ, Azure
+zone-redundant or Cloud SQL regional, see `infra/modules/postgres-ha-*`. For in-cluster or air-gapped installs, use
+CloudNativePG with a synchronous standby and its `-rw` Service.
 
 After install, `NOTES.txt` states that the signature covers the version and not the image digest. It names the
 registries the digest is limited to, or warns that any registry is allowed. It also lists every public egress hole. Until a bundle schema binds the digest, the right
