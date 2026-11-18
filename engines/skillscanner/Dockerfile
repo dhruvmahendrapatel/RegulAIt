@@ -1,9 +1,16 @@
 # ADR-0242 — the skillscanner engine image: Cisco skill-scanner 2.3.2 with ONLY its core local analyzers (static
 # signatures on the baked YARA-X rule packs, bytecode, pipeline taint, correlation), run by our driver (scan.py) on
-# one agent skill (SKILL.md and its bundled files) the gateway hands it. This file builds the SCANNER (the task an
-# executor runs in a no-network sandbox: `python -I /opt/skillscanner/scan.py <skill-dir> <out>`). The Node runner
-# shim joins it as the image's runner stage in phase 2 (ADR-0242 §6); until an image is published and recorded in
-# engines/images.lock.json the engine carries no digest and cannot be enabled.
+# one agent skill (SKILL.md and its bundled files) the gateway hands it. ONE image, two uses (ADR-0242 §6.1, as
+# modelscan's):
+#
+#   the runner  `node /app/dist/main.js` (packages/engine-admission-scan), on the internal `engines` network,
+#               holding the runner key on its state volume; it never runs the scanner
+#   the task    `node /app/dist/task-main.js skillscanner` (the manifest's taskEntry), started ONLY by the sandbox
+#               executor in a gVisor sandbox under the run's engine_worker placement: no network, no token, no
+#               state; it runs `python -I /opt/skillscanner/scan.py <input root> <report>` on the gateway's SKILL.md
+#
+# Until an image is published and recorded in engines/images.lock.json (§6.3) the engine carries no digest and
+# cannot be enabled.
 #
 # Built from the REPOSITORY ROOT:
 #
@@ -64,6 +71,26 @@ RUN python -m venv /opt/skillscanner/venv \
  && cp rules.sha256 /opt/skillscanner/rules.sha256 \
  && find /opt/skillscanner/venv -name '__pycache__' -prune -exec rm -rf {} +
 
+# ---- the runner and task shim (ADR-0242 §6.1, as engines/modelscan/Dockerfile's) -----------------------------------
+# packages/engine-admission-scan, one package for both admission-scan images: `node /app/dist/main.js` is the runner
+# (on the internal `engines` network, holding the runner key; it never runs the scanner) and
+# `node /app/dist/task-main.js skillscanner` is the manifest's taskEntry, started ONLY by the sandbox executor in a gVisor
+# sandbox under the run's engine_worker placement, where it runs our driver on the gateway's subject file.
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS shim
+RUN corepack enable
+WORKDIR /src
+COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./
+COPY packages ./packages
+COPY apps ./apps
+# reproducible builds (ADR-0187 addendum 2026-10-21): pnpm records the install time and the order the concurrent
+# install finished in /out/node_modules/.modules.yaml; the normaliser sorts it and takes the time from SOURCE_DATE_EPOCH
+COPY scripts/engine-images-normalise.mjs ./scripts/engine-images-normalise.mjs
+ARG SOURCE_DATE_EPOCH
+RUN NODE_OPTIONS=--max-old-space-size=3072 pnpm install --frozen-lockfile \
+ && pnpm --filter "@regulait/engine-admission-scan..." build \
+ && pnpm --filter @regulait/engine-admission-scan deploy --prod --legacy /out \
+ && node scripts/engine-images-normalise.mjs modules-yaml /out/node_modules/.modules.yaml
+
 # ---- stage 3: runtime ---------------------------------------------------------------------------------------
 FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635c12fcd0a3d74c21a5b93a54 AS runtime
 LABEL org.opencontainers.image.title="regulait-engine-skillscanner" \
@@ -81,13 +108,36 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log /var/cache/ldconfig/aux-cache
 RUN rm -rf /usr/local/lib/python3.12/site-packages/pip /usr/local/lib/python3.12/site-packages/pip-* \
            /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.12
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+# PR #212 review [4235322394] (ADR-0187 decision 129), as modelscan's: the Node binary comes from the node image, but
+# its shared libraries (libstdc++.so.6, libgcc_s.so.1) must come from THIS base, as Debian packages Trivy sees and
+# scans. Fail the build, here, if either package is missing, if any library node links against does not resolve, or
+# if node cannot start; never at the first run.
+RUN dpkg-query -W -f='${Package} ${Version}\n' libstdc++6 libgcc-s1 \
+ && if ldd /usr/local/bin/node | grep -q 'not found'; then ldd /usr/local/bin/node; exit 1; fi \
+ && node --version
 COPY --from=closure /opt/skillscanner /opt/skillscanner
+COPY --from=shim /out /app
 COPY engines/skillscanner/fixtures /opt/skillscanner/fixtures
 COPY engines/skillscanner/selftest.py /opt/skillscanner/selftest.py
 RUN chmod -R a-w /opt/skillscanner \
  && mkdir -p /work /in /out && chown 10001:10001 /work /in /out
-ENV HOME=/work \
+# the runner's state volume is its own (0700, uid 10001); the bridge's exchange directories are the runner's too
+RUN mkdir -p /state /jobs /results \
+ && chown 10001:10001 /state /jobs /results \
+ && chmod 0700 /state
+# REGULAIT_ADMISSION_ENGINE: which engine the runner serves (the task takes it from the manifest's argv).
+# REGULAIT_EGRESS_PROBE_ADDRESS: the public literal address the runner's egress self-test must FAIL to reach
+# (ADR-0187 decision 19); the task probes ENGINE_TASK_EGRESS_PROBE_ADDRESS itself (the sandbox init passes no env).
+ENV NODE_ENV=production \
+    HOME=/work \
     LANG=C.UTF-8 \
+    REGULAIT_ADMISSION_ENGINE=skillscanner \
+    REGULAIT_WORK_DIR=/work \
+    REGULAIT_RUNNER_STATE_DIR=/state \
+    REGULAIT_ADMISSION_JOBS_DIR=/jobs \
+    REGULAIT_ADMISSION_RESULTS_DIR=/results \
+    REGULAIT_EGRESS_PROBE_ADDRESS=93.184.215.14 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONNOUSERSITE=1 \
     LITELLM_LOCAL_MODEL_COST_MAP=True \
@@ -108,5 +158,5 @@ RUN --network=none /opt/skillscanner/venv/bin/python -I /opt/skillscanner/selfte
  && rm -f /work/bad.json /work/clean.json \
  && leftover="$(ls -A /work /tmp | grep -v -e '^/' -e '^$' || true)" \
  && { [ -z "$leftover" ] || { echo "the smoke scan left files in the image (they would make it unreproducible): $leftover" >&2; exit 1; }; }
-ENTRYPOINT ["/opt/skillscanner/venv/bin/python", "-I", "/opt/skillscanner/scan.py"]
-CMD ["/in", "/out/report.json"]
+# the runner; the task (`node /app/dist/task-main.js <engine>`) is started only by the sandbox executor
+CMD ["node", "/app/dist/main.js"]
