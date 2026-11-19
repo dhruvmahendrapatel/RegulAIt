@@ -17,3 +17,5 @@ export { default as VendorsPage } from "../views/admin/governance/VendorsPage";
 // P3 (#453): the Discovery sources area (overview + full runs/tokens/devices lists) as one lazy chunk reached through
 // this screen, so the sub-pages add nothing to the entry bundle (its module owns the nested <Routes>; see App.tsx).
 export { DiscoverySourcesArea } from "../views/admin/governance/DiscoveryListPages";
+// ADR-0334 (lane E16, D5): the managed browser extension's admin page
+export { default as BrowserGovernancePage } from "../views/admin/governance/BrowserGovernancePage";

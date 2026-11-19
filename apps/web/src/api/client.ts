@@ -362,6 +362,8 @@ export const api = {
   del: <T>(path: string, body?: unknown) => request<T>("DELETE", path, body),
   /** POST with extra request headers (e.g. `Idempotency-Key`), answering the body and the response headers */
   postWithHeaders: <T>(path: string, body: unknown, headers: Record<string, string>) => send<T>("POST", path, body, headers),
+  /** GET with extra request headers (a read that is itself a step-up, e.g. revealing a captured prompt, ADR-0334) */
+  getWithHeaders: async <T>(path: string, headers: Record<string, string>) => (await send<T>("GET", path, undefined, headers)).body,
   /** PATCH with extra request headers (e.g. a step-up grant, ADR-0186) — the same session-loss handling as every write */
   patchWithHeaders: async <T>(path: string, body: unknown, headers: Record<string, string>) =>
     (await send<T>("PATCH", path, body, headers)).body,

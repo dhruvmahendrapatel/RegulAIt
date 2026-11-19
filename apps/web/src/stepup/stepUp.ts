@@ -162,7 +162,9 @@ export function installGlobalStepUp(): () => void {
 
 /** the step-up-capable request helper (same CSRF header, same ApiError as the shared client) */
 export const api = {
-  get: <T>(path: string) => sharedApi.get<T>(path),
+  // a read that is itself a step-up (revealing a captured prompt) carries the grant like a write
+  get: <T>(path: string, headers: Record<string, string> = {}) =>
+    Object.keys(headers).length > 0 ? sharedApi.getWithHeaders<T>(path, headers) : sharedApi.get<T>(path),
   // every write goes through the shared client's header forms: its session-loss
   // handling and its refusal reading (PR #198 round 7: PATCH too, never a raw fetch)
   post: async <T>(path: string, body: unknown = {}, headers: Record<string, string> = {}) =>
