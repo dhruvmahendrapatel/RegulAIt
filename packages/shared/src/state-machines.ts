@@ -383,6 +383,85 @@ export const VENDOR_USAGE_PULL_RUN_MACHINE = defineMachine({
   },
 });
 
+/** `endpoint_addon_removals.status` (ADR-0331): one admin-started removal of an MCP server from endpoints. It is sent
+ * to no device until a second person approves it (ADR-0186); expiry is `expires_at`, not a state. */
+export const ENDPOINT_ADDON_REMOVAL_STATES = ["awaiting_approval", "active", "denied", "stale", "cancelled"] as const;
+export const ENDPOINT_ADDON_REMOVAL_MACHINE = defineMachine({
+  id: "endpoint_addon_removal",
+  stored: "endpoint_addon_removals.status",
+  states: ENDPOINT_ADDON_REMOVAL_STATES,
+  initial: ["awaiting_approval"],
+  terminal: ["denied", "stale", "cancelled"],
+  transitions: {
+    approve: {
+      from: ["awaiting_approval"],
+      to: "active",
+      by: ["approver"],
+      summary: "A second administrator approved it, and the endpoints it resolves to are unchanged; its directives may be delivered.",
+    },
+    deny: {
+      from: ["awaiting_approval"],
+      to: "denied",
+      by: ["approver"],
+      summary: "The approver refused it; nothing is sent to any endpoint.",
+    },
+    go_stale: {
+      from: ["awaiting_approval"],
+      to: "stale",
+      by: ["system"],
+      summary: "It was approved, but the endpoints it resolves to changed since it was requested; nothing is sent, and a new request is needed.",
+    },
+    cancel: {
+      from: ["awaiting_approval", "active"],
+      to: "cancelled",
+      by: ["admin"],
+      summary: "An admin cancelled it; nothing more is delivered, and outcomes of directives already delivered are still recorded.",
+    },
+  },
+});
+
+/** `endpoint_addon_removal_targets.status` (ADR-0331): one config entry on one device user's endpoint. */
+export const ENDPOINT_ADDON_TARGET_STATES = ["pending", "delivered", "removed", "nothing_to_remove", "failed", "cancelled"] as const;
+export const ENDPOINT_ADDON_TARGET_MACHINE = defineMachine({
+  id: "endpoint_addon_target",
+  stored: "endpoint_addon_removal_targets.status",
+  states: ENDPOINT_ADDON_TARGET_STATES,
+  initial: ["pending"],
+  terminal: ["removed", "nothing_to_remove", "failed", "cancelled"],
+  transitions: {
+    deliver: {
+      from: ["pending"],
+      to: "delivered",
+      by: ["agent"],
+      summary: "The endpoint agent fetched the signed directive.",
+    },
+    report_removed: {
+      from: ["delivered"],
+      to: "removed",
+      by: ["agent"],
+      summary: "The agent removed the named entry from the config.",
+    },
+    report_nothing: {
+      from: ["delivered"],
+      to: "nothing_to_remove",
+      by: ["agent"],
+      summary: "The agent found the entry absent, or a different server under that name; nothing was changed.",
+    },
+    report_failed: {
+      from: ["delivered"],
+      to: "failed",
+      by: ["agent"],
+      summary: "The agent refused or could not make the edit; the code says why.",
+    },
+    cancel: {
+      from: ["pending"],
+      to: "cancelled",
+      by: ["admin"],
+      summary: "The removal was cancelled before this directive was delivered. A delivered directive is not cancelled: its outcome is still recorded.",
+    },
+  },
+});
+
 /** Every declared machine, by id: the one list an agent or a document reads. */
 export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string>>> = Object.freeze({
   [TRAINING_JOB_MACHINE.def.id]: TRAINING_JOB_MACHINE,
@@ -394,4 +473,6 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [RULE_STEP_SUGGESTION_MACHINE.def.id]: RULE_STEP_SUGGESTION_MACHINE,
   [DECISION_TABLE_VERSION_MACHINE.def.id]: DECISION_TABLE_VERSION_MACHINE,
   [VENDOR_USAGE_PULL_RUN_MACHINE.def.id]: VENDOR_USAGE_PULL_RUN_MACHINE,
+  [ENDPOINT_ADDON_REMOVAL_MACHINE.def.id]: ENDPOINT_ADDON_REMOVAL_MACHINE,
+  [ENDPOINT_ADDON_TARGET_MACHINE.def.id]: ENDPOINT_ADDON_TARGET_MACHINE,
 } as Record<string, StateMachine<string, string>>);

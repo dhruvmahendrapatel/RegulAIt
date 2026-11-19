@@ -298,6 +298,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.engineRunners, ["revokeReason"]],
   // ADR-0217: an automatic re-test's reason (a runner's gate reason or refusal detail, which can quote a case)
   [s.mrmRetestRuns, ["reason"]],
+  // ADR-0331: the admin's reason for removing an MCP server from endpoints (shown in the list and the audit)
+  [s.endpointAddonRemovals, ["reason"]],
 ];
 
 /**

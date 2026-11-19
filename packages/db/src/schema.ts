@@ -172,6 +172,9 @@ import {
   FAIRNESS_RUN_MODES,
   FAIRNESS_BREACH_REVIEW_STATUSES,
   FAIRNESS_EVALUATION_STATUSES,
+  // ADR-0331 (migration endpoint_addon_removal): the removal and target lifecycles, ADR-0348 machines
+  ENDPOINT_ADDON_REMOVAL_STATES,
+  ENDPOINT_ADDON_TARGET_STATES,
 } from "@regulait/shared";
 import {
   type AnyPgColumn,
@@ -2032,6 +2035,8 @@ export const auditLog = pgTable(
         // ADR-0334 (lane E16): browser governance settings, site rules, enrolment tokens, devices and the breach
         // events and prompt captures an extension reports. Plain text column — no DDL.
         "browser_governance",
+        // ADR-0331: a governed add-on removal (created, cancelled; objectId = the removal). Plain text column — no DDL.
+        "endpoint_addon_removal",
         // ADR-0310 (G2): a signed managed-settings bundle export (objectId = the bundle). Plain text column — no DDL.
         "managed_settings_bundle",
         // ADR-0327 addendum: a decision table (objectId = the table): created, a version proposed for review, and the
@@ -5653,7 +5658,7 @@ export const orgSettings = pgTable(
     check("org_settings_step_up_max_age_seconds_check", sql`${t.stepUpMaxAgeSeconds} BETWEEN 30 AND 900`),
     check(
       "org_settings_step_up_actions_check",
-      sql`jsonb_typeof(${t.stepUpActions}) = 'array' AND ${t.stepUpActions} <@ '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management"]'::jsonb`,
+      sql`jsonb_typeof(${t.stepUpActions}) = 'array' AND ${t.stepUpActions} <@ '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management", "endpoint_remediation"]'::jsonb`,
     ),
     check(
       "org_settings_tool_approval_sensitive_quorum_check",
@@ -8334,6 +8339,8 @@ export const discoverySettings = pgTable(
     agentRegistrySourcesEnabled: boolean("agent_registry_sources_enabled").notNull().default(false),
     // ADR-0259: endpoint MCP client-config discovery through the SD4 agent, off (pending migration endpoint_mcp_config_discovery, ADR-0252)
     endpointMcpConfigEnabled: boolean("endpoint_mcp_config_enabled").notNull().default(false),
+    // ADR-0331: the governed removal of flagged MCP servers from endpoints, off (pending migration endpoint_addon_removal)
+    endpointAddonRemovalEnabled: boolean("endpoint_addon_removal_enabled").notNull().default(false),
     version: integer("version").notNull().default(1),
     updatedBy: uuid("updated_by"),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -13690,7 +13697,7 @@ export const webauthnChallenges = pgTable(
     check("webauthn_challenges_used_check", sql`${t.usedAt} IS NULL OR ${t.usedAt} >= ${t.createdAt}`),
     check(
       "webauthn_challenges_action_kind_check",
-      sql`${t.actionKind} IS NULL OR ${t.actionKind} IN ('approval_decide', 'settings_relax', 'evidence_hold_override', 'break_glass', 'passkey_manage', 'owner_change', 'identity_manage', 'pseudonym_reveal', 'key_management')`,
+      sql`${t.actionKind} IS NULL OR ${t.actionKind} IN ('approval_decide', 'settings_relax', 'evidence_hold_override', 'break_glass', 'passkey_manage', 'owner_change', 'identity_manage', 'pseudonym_reveal', 'key_management', 'endpoint_remediation')`,
     ),
     check(
       "webauthn_challenges_action_digest_check",
@@ -13735,7 +13742,7 @@ export const stepUpGrants = pgTable(
     check("step_up_grants_method_check", sql`${t.method} IN ('passkey', 'totp', 'sso')`),
     check(
       "step_up_grants_action_kind_check",
-      sql`${t.actionKind} IN ('approval_decide', 'settings_relax', 'evidence_hold_override', 'break_glass', 'passkey_manage', 'owner_change', 'identity_manage', 'pseudonym_reveal', 'key_management')`,
+      sql`${t.actionKind} IN ('approval_decide', 'settings_relax', 'evidence_hold_override', 'break_glass', 'passkey_manage', 'owner_change', 'identity_manage', 'pseudonym_reveal', 'key_management', 'endpoint_remediation')`,
     ),
     check("step_up_grants_action_digest_check", sql`${t.actionDigest} ~ '^[0-9a-f]{64}$'`),
     check(
@@ -17304,6 +17311,168 @@ export const browserPromptCaptures = pgTable(
   (t) => [uniqueIndex("browser_prompt_captures_device_capture_uq").on(t.deviceId, t.captureId), index("browser_prompt_captures_received_idx").on(t.receivedAt)],
 );
 // ===== end ADR-0334 =================================================================================================
+
+// ===== ADR-0331 (lane E13) governed add-on removal ==============================================================
+// Pending migration endpoint_addon_removal (ADR-0252). An admin, with an `endpoint_remediation` step-up, asks for one MCP
+// server identity to be removed from endpoints; the targets are resolved once, at creation, from `endpoint_mcp_servers`
+// evidence; each target is one signed directive the endpoint agent fetches and reports an outcome for. Off by default
+// (`discovery_settings.endpoint_addon_removal_enabled`), and inert until the ADR-0195 SD4 directive signer exists.
+
+export const ENDPOINT_ADDON_REMOVAL_ACTIONS = ["remove_mcp_server"] as const;
+export const ENDPOINT_ADDON_REMOVAL_SCOPES = ["device", "devices", "recent"] as const;
+/** the user-writable config roots a removal may target; `system_applications` never is (ADR-0331 §3) */
+export const ENDPOINT_ADDON_REMOVAL_ROOTS = ["home", "appdata", "localappdata"] as const;
+/** the target lifecycle is ADR-0348's `ENDPOINT_ADDON_TARGET_MACHINE` (@regulait/shared): every status write guards with
+ * `whereFrom(…, event)`, so no route decides a transition by itself */
+export const ENDPOINT_ADDON_TARGET_STATUSES = ENDPOINT_ADDON_TARGET_STATES;
+export type EndpointAddonTargetStatus = (typeof ENDPOINT_ADDON_TARGET_STATUSES)[number];
+/** the removal lifecycle is ADR-0348's `ENDPOINT_ADDON_REMOVAL_MACHINE`: nothing is sent until a second person approves */
+export const ENDPOINT_ADDON_REMOVAL_STATUSES = ENDPOINT_ADDON_REMOVAL_STATES;
+export type EndpointAddonRemovalStatus = (typeof ENDPOINT_ADDON_REMOVAL_STATUSES)[number];
+/** ADR-0331 §7: each outcome and the closed codes it may carry (the agent's `contract.OutcomeCodes`) */
+export const ENDPOINT_DIRECTIVE_OUTCOME_CODES = {
+  removed: ["removed"],
+  nothing_to_remove: ["not_present", "identity_differs"],
+  failed: ["not_in_manifest", "path_refused", "unsupported_format", "parse_failed", "write_failed", "expired", "wrong_identity"],
+} as const;
+
+/** one admin-started removal of one MCP server identity (the request; its targets are the endpoints it resolved to) */
+export const endpointAddonRemovals = pgTable(
+  "endpoint_addon_removals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    action: text("action", { enum: ENDPOINT_ADDON_REMOVAL_ACTIONS }).notNull().default("remove_mcp_server"),
+    identityKind: text("identity_kind", { enum: ENDPOINT_MCP_LINK_IDENTITY_KINDS }).notNull(),
+    identity: text("identity").notNull(),
+    packageVersion: text("package_version"),
+    serverName: text("server_name"),
+    scopeKind: text("scope_kind", { enum: ENDPOINT_ADDON_REMOVAL_SCOPES }).notNull(),
+    /** the look-back of a `recent` scope, in days; null for the other scopes */
+    scopeDays: integer("scope_days"),
+    blockReinstall: boolean("block_reinstall").notNull().default(true),
+    reason: text("reason").notNull(),
+    /** every directive of this removal is valid until here: created_at + 7 days (ADR-0331 §4) */
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    /** ADR-0348 `ENDPOINT_ADDON_REMOVAL_MACHINE` */
+    status: text("status", { enum: ENDPOINT_ADDON_REMOVAL_STATUSES }).notNull().default("awaiting_approval"),
+    /** the ADR-0186 approval a second administrator decides; its arguments digest binds the request and the resolved
+     * target set, and its decision (who, when) lives on that row, not here */
+    approvalId: uuid("approval_id")
+      .notNull()
+      .unique("endpoint_addon_removals_approval_uq")
+      .references(() => approvals.id, { onDelete: "restrict" }),
+    cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+    cancelledBy: uuid("cancelled_by").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    check("endpoint_addon_removals_status_check", sql`${t.status} IN ('awaiting_approval', 'active', 'denied', 'stale', 'cancelled')`),
+    check("endpoint_addon_removals_cancelled_check", sql`(${t.status} = 'cancelled') = (${t.cancelledAt} IS NOT NULL)`),
+    check("endpoint_addon_removals_action_check", sql`${t.action} IN ('remove_mcp_server')`),
+    check(
+      "endpoint_addon_removals_identity_check",
+      sql`${t.identityKind} IN ('package', 'host', 'command') AND char_length(${t.identity}) BETWEEN 1 AND 255
+        AND (${t.packageVersion} IS NULL OR char_length(${t.packageVersion}) BETWEEN 1 AND 64)
+        AND (${t.serverName} IS NULL OR ${t.serverName} ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')`,
+    ),
+    check(
+      "endpoint_addon_removals_scope_check",
+      sql`${t.scopeKind} IN ('device', 'devices', 'recent') AND (${t.scopeKind} = 'recent') = (${t.scopeDays} IS NOT NULL)
+        AND (${t.scopeDays} IS NULL OR ${t.scopeDays} BETWEEN 1 AND 90)`,
+    ),
+    check("endpoint_addon_removals_reason_check", sql`char_length(${t.reason}) BETWEEN 1 AND 500`),
+    check("endpoint_addon_removals_expiry_check", sql`${t.expiresAt} = ${t.createdAt} + interval '7 days'`),
+    check(
+      "endpoint_addon_removals_cancel_check",
+      sql`(${t.cancelledAt} IS NULL OR ${t.cancelledAt} >= ${t.createdAt}) AND (${t.cancelledBy} IS NULL OR ${t.cancelledAt} IS NOT NULL)`,
+    ),
+    index("endpoint_addon_removals_created_idx").on(t.createdAt),
+    index("endpoint_addon_removals_identity_idx").on(t.identityKind, t.identity),
+    index("endpoint_addon_removals_status_idx").on(t.status, t.expiresAt),
+  ],
+);
+export type EndpointAddonRemovalRow = typeof endpointAddonRemovals.$inferSelect;
+
+/** the devices a `device` or `devices` scope names (a list of references is a join table, ADR-0200 addendum); the
+ * approval re-resolves the targets from them, so what is approved is what is sent */
+export const endpointAddonRemovalDevices = pgTable(
+  "endpoint_addon_removal_devices",
+  {
+    removalId: uuid("removal_id")
+      .notNull()
+      .references(() => endpointAddonRemovals.id, { onDelete: "cascade" }),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => endpointDevices.id, { onDelete: "cascade" }),
+  },
+  (t) => [primaryKey({ columns: [t.removalId, t.deviceId], name: "endpoint_addon_removal_devices_pk" }), index("endpoint_addon_removal_devices_device_idx").on(t.deviceId)],
+);
+
+/**
+ * one endpoint config entry a removal resolved to; its id is the signed directive's `directiveId`. It is bound to the
+ * agent identity (one device user) whose signed report last showed the entry: config paths are relative to that user's
+ * home, so only that identity's agent is served the directive or may report its outcome. 3NF: the device is reached
+ * through the identity (`endpoint_agent_identities.device_id`), not copied here.
+ */
+export const endpointAddonRemovalTargets = pgTable(
+  "endpoint_addon_removal_targets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    removalId: uuid("removal_id")
+      .notNull()
+      .references(() => endpointAddonRemovals.id, { onDelete: "cascade" }),
+    identityId: uuid("identity_id")
+      .notNull()
+      .references(() => endpointAgentIdentities.identityId, { onDelete: "cascade" }),
+    // exception (ADR-0200 addendum): point-in-time evidence copies of the `endpoint_mcp_servers` row the target was
+    // resolved from (that row is refreshed or pruned by later reports; the directive must name what was seen)
+    signatureId: text("signature_id").notNull(),
+    provider: text("provider").notNull(),
+    configRoot: text("config_root", { enum: ENDPOINT_ADDON_REMOVAL_ROOTS }).notNull(),
+    configPath: text("config_path").notNull(),
+    serverName: text("server_name").notNull(),
+    status: text("status", { enum: ENDPOINT_ADDON_TARGET_STATUSES }).notNull().default("pending"),
+    code: text("code"),
+    notified: boolean("notified"),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    reportedAt: timestamp("reported_at", { withTimezone: true }),
+  },
+  (t) => [
+    unique("endpoint_addon_removal_targets_entry_uq").on(t.removalId, t.identityId, t.configRoot, t.configPath, t.serverName),
+    index("endpoint_addon_removal_targets_identity_idx").on(t.identityId, t.status),
+    check(
+      "endpoint_addon_removal_targets_shape_check",
+      sql`char_length(${t.signatureId}) BETWEEN 1 AND 128 AND char_length(${t.provider}) BETWEEN 1 AND 64
+        AND ${t.configRoot} IN ('home', 'appdata', 'localappdata') AND char_length(${t.configPath}) BETWEEN 1 AND 1024
+        AND ${t.serverName} ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'`,
+    ),
+    // the one CHECK listing the states (ADR-0348: it equals ENDPOINT_ADDON_TARGET_MACHINE's states)
+    check(
+      "endpoint_addon_removal_targets_status_check",
+      sql`${t.status} IN ('pending', 'delivered', 'removed', 'nothing_to_remove', 'failed', 'cancelled')`,
+    ),
+    // what each state carries; codes are ORs, not IN, so this is not a second state list for the ADR-0348 test
+    check(
+      "endpoint_addon_removal_targets_evidence_check",
+      sql`CASE ${t.status}
+        WHEN 'pending' THEN ${t.deliveredAt} IS NULL AND ${t.reportedAt} IS NULL AND ${t.code} IS NULL AND ${t.notified} IS NULL
+        WHEN 'delivered' THEN ${t.deliveredAt} IS NOT NULL AND ${t.reportedAt} IS NULL AND ${t.code} IS NULL AND ${t.notified} IS NULL
+        WHEN 'cancelled' THEN ${t.deliveredAt} IS NULL AND ${t.reportedAt} IS NULL AND ${t.code} IS NULL AND ${t.notified} IS NULL
+        WHEN 'removed' THEN ${t.code} = 'removed'
+          AND ${t.deliveredAt} IS NOT NULL AND ${t.reportedAt} IS NOT NULL AND ${t.notified} IS NOT NULL
+        WHEN 'nothing_to_remove' THEN (${t.code} = 'not_present' OR ${t.code} = 'identity_differs')
+          AND ${t.deliveredAt} IS NOT NULL AND ${t.reportedAt} IS NOT NULL AND ${t.notified} IS NOT NULL
+        WHEN 'failed' THEN (${t.code} = 'not_in_manifest' OR ${t.code} = 'path_refused' OR ${t.code} = 'unsupported_format'
+            OR ${t.code} = 'parse_failed' OR ${t.code} = 'write_failed' OR ${t.code} = 'expired' OR ${t.code} = 'wrong_identity')
+          AND ${t.deliveredAt} IS NOT NULL AND ${t.reportedAt} IS NOT NULL AND ${t.notified} IS NOT NULL
+        ELSE false END`,
+    ),
+    check("endpoint_addon_removal_targets_times_check", sql`${t.reportedAt} IS NULL OR ${t.reportedAt} >= ${t.deliveredAt}`),
+  ],
+);
+export type EndpointAddonRemovalTargetRow = typeof endpointAddonRemovalTargets.$inferSelect;
+// ===== end ADR-0331 ====================================================================================================
 
 // ---------------------------------------------------------------------------
 // ADR-0289 (builder lane L6) — the PM project / work-item importer (ADR-0054 §3).

@@ -17,6 +17,8 @@ export const EXTERNAL_WRITE_OPERATIONS = [
   "pm.update_fields",
   "pm.transition_state",
   "pm.add_comment",
+  // ADR-0331: a device-policy signature (an endpoint directive acts on a developer's device only under one)
+  "device_policy.sign_payload",
 ] as const;
 
 export type ExternalWriteOperation = (typeof EXTERNAL_WRITE_OPERATIONS)[number];

@@ -25,6 +25,8 @@ export interface DiscoverySettingsView {
   families: DiscoveryFamilySwitches;
   /** ADR-0259: MCP client-config discovery through the endpoint agent (off by default) */
   endpointMcpConfig: boolean;
+  /** ADR-0331: governed removal of flagged MCP servers from endpoints (off by default) */
+  endpointAddonRemoval: boolean;
   version: number;
   updatedAt: string | null;
 }
@@ -38,6 +40,7 @@ export async function loadDiscoverySettings(db: Db): Promise<DiscoverySettingsVi
       endpointRetentionDays: DISCOVERY_ENDPOINT_RETENTION_DEFAULT_DAYS,
       families: DISCOVERY_FAMILY_SWITCHES_DEFAULT,
       endpointMcpConfig: false,
+      endpointAddonRemoval: false,
       version: 1,
       updatedAt: null,
     };
@@ -47,6 +50,7 @@ export async function loadDiscoverySettings(db: Db): Promise<DiscoverySettingsVi
     endpointRetentionDays: row.endpointRetentionDays,
     families: { saas: row.saasSourcesEnabled, identity: row.identitySourcesEnabled, ml_platform: row.mlPlatformSourcesEnabled, agent_registry: row.agentRegistrySourcesEnabled },
     endpointMcpConfig: row.endpointMcpConfigEnabled,
+    endpointAddonRemoval: row.endpointAddonRemovalEnabled,
     version: row.version,
     updatedAt: row.updatedAt.toISOString(),
   };

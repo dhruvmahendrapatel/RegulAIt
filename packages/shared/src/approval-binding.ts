@@ -103,6 +103,8 @@ export const APPROVAL_OBJECT_TYPES = [
   "decision_table",
   // ADR-0345 slice 2a: acknowledging an agent-risk proof that did not pass (stageId = agent-risk-proof:<proof key>)
   "agent_risk_proof",
+  // ADR-0331: removing an MCP server from endpoints, sent to no device until a second administrator approves it
+  "endpoint_addon_removal",
 ] as const;
 export type ApprovalObjectType = (typeof APPROVAL_OBJECT_TYPES)[number];
 
@@ -127,6 +129,7 @@ export const APPROVAL_OBJECT_TYPE_LABELS: Record<ApprovalObjectType, string> = {
   model_call: "model call",
   decision_table: "decision table version",
   agent_risk_proof: "agent risk proof acknowledgement",
+  endpoint_addon_removal: "MCP server removal from endpoints",
 };
 
 /**

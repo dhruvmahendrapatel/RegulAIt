@@ -45,6 +45,11 @@ type Gateway struct {
 	tokens       map[string]string // access token -> client id
 	RotateAfter  int64
 	Revoked      bool
+	// ADR-0331: Directives is served when DirectiveSigner is true; otherwise the route answers 503
+	// directive_signer_unavailable, as the real gateway does until SD4. Outcomes collects what the agent posted.
+	DirectiveSigner bool
+	Directives      []json.RawMessage
+	Outcomes        []contract.DirectiveOutcome
 }
 
 // Request is what one call carried, for assertions.
@@ -100,6 +105,30 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request) {
 		}
 	case r.Method == http.MethodPost && r.URL.Path == contract.RouteReports:
 		g.report(w, r, body)
+	case r.Method == http.MethodGet && r.URL.Path == contract.RouteDirectives:
+		if _, ok := g.authorized(w, r); ok {
+			if !g.DirectiveSigner {
+				refuse(w, http.StatusServiceUnavailable, "directive_signer_unavailable")
+				return
+			}
+			d := g.Directives
+			if d == nil {
+				d = []json.RawMessage{}
+			}
+			writeJSON(w, http.StatusOK, contract.DirectivesResponse{Directives: d})
+		}
+	case r.Method == http.MethodPost && r.URL.Path == contract.RouteDirectiveOutcomes:
+		if _, ok := g.authorized(w, r); ok {
+			var req contract.DirectiveOutcomesRequest
+			dec := json.NewDecoder(bytes.NewReader(body))
+			dec.DisallowUnknownFields()
+			if dec.Decode(&req) != nil || len(req.Outcomes) == 0 || len(req.Outcomes) > contract.MaxDirectivesPerSync {
+				refuse(w, http.StatusBadRequest, "invalid_body")
+				return
+			}
+			g.Outcomes = append(g.Outcomes, req.Outcomes...)
+			writeJSON(w, http.StatusOK, map[string]any{"accepted": len(req.Outcomes), "refused": []any{}})
+		}
 	case r.Method == http.MethodPost && r.URL.Path == contract.RouteCredentials:
 		g.rotate(w, r, body)
 	default:
