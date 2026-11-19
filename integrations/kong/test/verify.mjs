@@ -671,7 +671,7 @@ async function main() {
   // Tool B is a READ tool on the OTHER seeded server that the PDP already
   // refuses the entitled user; found by asking the PDP rather than by assuming
   // the seed's order, because the seed's roles make several tools hers.
-  const serverB = servers.find((s) => s.id !== server.id);
+  const serverB = servers.find((s) => s.id !== server.id && s.transport !== "first_party");
   if (!serverB) throw new Error("the seed registered one server — the two-route case needs two");
   const toolsB = ((await api("GET", `${base}/v1/servers/${serverB.id}/tools`, undefined, boot)).json.tools ?? [])
     .filter((t) => t.kind === "read");
