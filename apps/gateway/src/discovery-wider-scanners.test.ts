@@ -87,11 +87,11 @@ describe("ADR-0235 registration and gating", () => {
   it("every wider kind has a scanner in the production registry, needs a credential, and is switched off by default", () => {
     for (const kind of ["saas_inventory_api", "idp_entra", "ml_mlflow"] as const) {
       expect(DISCOVERY_SCANNERS.get(kind)?.requiresCredential).toBe(true);
-      expect(familySwitchProblem(kind, { saas: false, identity: false, ml_platform: false })).toMatch(/switched off/);
+      expect(familySwitchProblem(kind, { saas: false, identity: false, ml_platform: false, agent_registry: false })).toMatch(/switched off/);
     }
-    expect(familySwitchProblem("idp_entra", { saas: false, identity: true, ml_platform: false })).toBeNull();
+    expect(familySwitchProblem("idp_entra", { saas: false, identity: true, ml_platform: false, agent_registry: false })).toBeNull();
     // the ADR-0195 families have no switch
-    expect(familySwitchProblem("cloud_aws", { saas: false, identity: false, ml_platform: false })).toBeNull();
+    expect(familySwitchProblem("cloud_aws", { saas: false, identity: false, ml_platform: false, agent_registry: false })).toBeNull();
   });
 
   it("public config: a federated token cannot work for the generic APIs; Entra needs tenant and client ids", () => {

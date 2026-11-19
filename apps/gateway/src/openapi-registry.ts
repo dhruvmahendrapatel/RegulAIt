@@ -1004,6 +1004,10 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/discovery/runs/export.xlsx": "internal",
   "GET /v1/discovery/settings": "internal",
   "PUT /v1/discovery/settings": "internal",
+  // ADR-0314 (G6): vendor agent registry records and their import
+  "GET /v1/agent-registry/records": "internal",
+  "GET /v1/agent-registry/records/:recordId": "internal",
+  "POST /v1/agent-registry/records/:recordId/import": "internal",
   "POST /v1/discovery/pseudonyms/:pseudonym/reveal": "internal",
   // ADR-0195 SD2b: the cloud federation issuer
   "GET /federation/.well-known/openid-configuration": "internal",
@@ -2400,6 +2404,9 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/discovery/runs/export.xlsx": "shadow-ai",
   "GET /v1/discovery/settings": "shadow-ai",
   "PUT /v1/discovery/settings": "shadow-ai",
+  "GET /v1/agent-registry/records": "shadow-ai",
+  "GET /v1/agent-registry/records/:recordId": "shadow-ai",
+  "POST /v1/agent-registry/records/:recordId/import": "shadow-ai",
   "POST /v1/discovery/pseudonyms/:pseudonym/reveal": "shadow-ai",
   // ADR-0195 SD2b: the cloud federation issuer
   "GET /federation/.well-known/openid-configuration": "shadow-ai",
