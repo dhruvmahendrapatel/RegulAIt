@@ -72,6 +72,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.initiatives, ["name"]],
   [s.teams, ["name"]],
   [s.aiUseCases, ["name", "description"]],
+  // ADR-0345 §9: admin-editable reference data (the jurisdiction list is data, not code)
+  [s.jurisdictions, ["name"]],
   [s.aiVendors, ["name", "description"]],
   [s.aiRisks, ["title", "description"]],
   [s.kris, ["name", "scoreName"]],
@@ -165,6 +167,8 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   // ADR-0337: an app's display name and a scope name as the SaaS vendor reports them (read-only entitlement reads)
   "saas_entitlement_apps.display_name": "ingested",
   "saas_entitlement_scopes.name": "ingested",
+  // ADR-0363 slice 1: a label's display name as Microsoft Graph returns it (the customer's Purview tenant)
+  "sensitivity_label_definitions.name": "ingested",
   "ai_incident_actions.title": "prose_owned_by_adr0102",
   "ai_incidents.summary": "prose_owned_by_adr0102",
   "ai_incidents.title": "prose_owned_by_adr0102",

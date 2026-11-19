@@ -33,7 +33,14 @@
  *                        credential: static only; secret = the API token; publicConfig authHeader? as above
  */
 import { BodyTooLargeError, azureCredential as entraCredential, readBodyCapped } from "@regulait/cloud-discovery";
-import { DISCOVERY_READ_OUTCOMES_MAX, authHeaderNameRefused, type DiscoveryReadOutcome, type DiscoveryReadStatus } from "@regulait/shared";
+import {
+  DISCOVERY_READ_OUTCOMES_MAX,
+  authHeaderNameRefused,
+  purviewDefinitionsFromGraph,
+  type DiscoveryReadOutcome,
+  type DiscoveryReadStatus,
+  type LabelDefinition,
+} from "@regulait/shared";
 import { dedupedSecretSink, scannerFetch } from "./discovery-cloud-scanners.js";
 import { errMessage } from "./err-serializer.js";
 import type { ScanContext, ScanObservation, ScanResult, Scanner } from "./discovery-scanners.js";
@@ -477,8 +484,38 @@ async function runEntra(ctx: ScanContext): Promise<ScanResult> {
   if (unmatched > 0) {
     outcomes.push({ read: "Entra grants matched to applications", status: "skipped", detail: `${unmatched} consented application(s) were not in the service principal listing and are not reported` });
   }
-  return finish(observations, outcomes, write.scope);
+
+  // ADR-0363 slice 1: the tenant's Purview sensitivity-label definitions, read only when the app was granted the
+  // read-only `InformationProtectionPolicy.Read.All` (the role is checked on our own token, never assumed)
+  let labelDefinitions: LabelDefinition[] | undefined;
+  if (write.roles.includes(PURVIEW_LABEL_ROLE)) {
+    const collected: unknown[] = [];
+    const complete = await readListing(
+      ctx,
+      "Purview sensitivity labels",
+      `${GRAPH_ORIGIN}/beta/security/informationProtection/sensitivityLabels`,
+      outcomes,
+      (body) => {
+        const value = atPath(body, "value");
+        if (!Array.isArray(value)) throw new ReadFailure("error", "the sensitivity label listing has no value list");
+        for (const l of value) {
+          if (collected.length >= WIDER_MAX_ITEMS) return ITEM_CAP;
+          collected.push(l);
+        }
+        return nextLink(body);
+      },
+      get,
+    );
+    // a listing cut short would mark the unread labels inactive, so only a complete read is kept
+    if (complete) labelDefinitions = purviewDefinitionsFromGraph({ value: collected });
+  } else {
+    outcomes.push({ read: "Purview sensitivity labels", status: "skipped", detail: `grant the app ${PURVIEW_LABEL_ROLE} to honour Purview labels at the gateway` });
+  }
+  return { ...finish(observations, outcomes, write.scope), ...(labelDefinitions ? { labelDefinitions } : {}) };
 }
+
+/** the one Graph application permission the label read needs (read-only) */
+export const PURVIEW_LABEL_ROLE = "InformationProtectionPolicy.Read.All";
 
 // ---------------------------------------------------------------------------
 // ml_mlflow

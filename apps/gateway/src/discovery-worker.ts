@@ -88,7 +88,9 @@ import {
   FEDERATION_AWS_PRINCIPAL_SUBJECT,
   federationSourceSubject,
   type DiscoverySourceKind,
+  normaliseGuid,
 } from "@regulait/shared";
+import { upsertLabelDefinitions } from "./sensitivity-labels.js";
 import { loadEgressAllowList } from "./custom-providers.js";
 import { createGuardedFetch, EgressBlockedError, EgressRedirectError, type EgressResolver } from "./egress-guard.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
@@ -786,18 +788,19 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
     }
   }
   const digest = rawSeen ? hash.digest("hex") : createHash("sha256").update(JSON.stringify(observations)).digest("hex");
+  // ADR-0363 slice 1: an Entra scan that read the tenant's complete Purview label list commits it with the run
+  const labelTenant = source.kind === "idp_entra" ? normaliseGuid(cred?.publicConfig.tenantId) : null;
+  const labels = result.labelDefinitions;
+  // ADR-0337: an entitlement batch commits with the run too; both hooks run in the run's own fenced transaction
   const batch = entitlements;
-  return applyDiscoveryRunObservations(
-    db,
-    run,
-    owner,
-    source,
-    observations,
-    digest,
-    classifyCatalogue,
-    readOutcomes,
-    batch ? async (t) => void (await persistEntitlementBatch(t, { runId: run.id, sourceId: source.id, sourceName: source.name }, batch)) : undefined,
-  );
+  const inCommit =
+    (labels && labelTenant) || batch
+      ? async (t: Db) => {
+          if (labels && labelTenant) await upsertLabelDefinitions(t, { tenantId: labelTenant, sourceId: source.id, definitions: labels });
+          if (batch) await persistEntitlementBatch(t, { runId: run.id, sourceId: source.id, sourceName: source.name }, batch);
+        }
+      : undefined;
+  return applyDiscoveryRunObservations(db, run, owner, source, observations, digest, classifyCatalogue, readOutcomes, inCommit);
 }
 
 /**

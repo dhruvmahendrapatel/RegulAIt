@@ -38,7 +38,7 @@
  * prefix and length); or call a provider to test a key it found (decision 6).
  */
 import type { DiscoveryEvidenceKind, DiscoveryPseudonymKind, DiscoverySourceKind, DiscoverySubjectKind, ArtifactSignatureKind } from "@regulait/shared";
-import type { AiSignature, AiSignatureKind, DiscoveryCredentialMode, DiscoveryReadOutcome, SaasEntitlementBatch } from "@regulait/shared";
+import type { AiSignature, AiSignatureKind, DiscoveryCredentialMode, DiscoveryReadOutcome, LabelDefinition, SaasEntitlementBatch } from "@regulait/shared";
 import { REPO_SCANNERS } from "./discovery-repo-scanner.js";
 import { cloudDiscoveryScanners } from "./discovery-cloud-scanners.js";
 import { ENDPOINT_AGENT_SCANNER, ENDPOINT_IMPORT_SCANNERS } from "./endpoint-discovery-scanners.js";
@@ -180,6 +180,11 @@ export interface ScanResult {
    * The worker checks it and stores it in the run's own transaction.
    */
   entitlements?: SaasEntitlementBatch;
+  /**
+   * ADR-0363 slice 1, `idp_entra` only: the tenant's complete sensitivity-label list. Absent when it was not read (no
+   * permission, or a listing cut short), which leaves the stored definitions as they are.
+   */
+  labelDefinitions?: LabelDefinition[];
 }
 
 export interface Scanner {
