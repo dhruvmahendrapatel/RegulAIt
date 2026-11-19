@@ -41,7 +41,11 @@ import {
   OAUTH_TOKEN_PATH,
   DEFENSECLAW_INGEST_PATH,
   DEFENSECLAW_OTLP_LOGS_PATH,
+  BROWSER_EXTENSION_PATHS,
 } from "@regulait/shared";
+
+/** ADR-0334: the browser extension route authenticated in-route (registration); the rest take its self token */
+const BROWSER_EXTENSION_AUTH_PATHS: readonly string[] = [BROWSER_EXTENSION_PATHS.register];
 
 /** ADR-0187: the routes only an engine runner credential reaches */
 const RUNNER_ROUTE_KEYS: ReadonlySet<string> = new Set<string>([...ENGINE_RUNNER_ROUTES, ...ENGINE_ENROLLMENT_ROUTES]);
@@ -196,6 +200,10 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   DEFENSECLAW_INGEST_PATH,
   // ADR-0302 decision 2: the same exporter channel over OTLP/HTTP logs, the same in-route `rgti_` token
   DEFENSECLAW_OTLP_LOGS_PATH,
+  // ADR-0334 (lane E16): a browser extension's registration holds no RegulAIt session or key yet: it authenticates
+  // IN-ROUTE on the bulk enrolment token (`rgbe_`, SHA-256 lookup) and refuses while browser governance is off. Its
+  // other routes take its DPoP-bound self token only (the endpoint agent's pattern).
+  ...BROWSER_EXTENSION_AUTH_PATHS,
 ]);
 
 export const NON_ADMIN_ROUTES = new Set([
@@ -263,6 +271,18 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/builder/integrations",
   "GET /v1/builder/toolbox-options",
   "GET /v1/builder/usage",
+  // ADR-0364 (lane E45 S2) — robots. Each route is gated in the handler to the robot's owner or an admin (404
+  // unknown_robot otherwise); a version's review is decided in the one approvals queue, never here.
+  "GET /v1/robots",
+  "POST /v1/robots",
+  "GET /v1/robots/:robotId",
+  "POST /v1/robots/:robotId/retire",
+  "POST /v1/robots/:robotId/versions",
+  "PUT /v1/robots/:robotId/versions/:version",
+  "POST /v1/robots/:robotId/versions/:version/submit",
+  "POST /v1/robots/:robotId/versions/:version/retire",
+  "PUT /v1/robots/:robotId/secrets/:name/:scope",
+  "DELETE /v1/robots/:robotId/secrets/:name/:scope",
   // ADR-0173 batch 2b — the run graph. Read-only, and each read is gated in the
   // handler by exactly who may open the underlying object: a builder turn by
   // the thread's person or an admin (404 unknown_thread otherwise), a run by
@@ -397,6 +417,13 @@ export const NON_ADMIN_ROUTES = new Set([
   // already read (an agent they steward, a use case they own or may read; everything for an admin)
   "GET /v1/reports/posture/assets",
   "GET /v1/reports/posture/assets/:kind/:assetId",
+  // ADR-0339 — one agent's risk score and its history: any user, scoped in the handler to an admin or the agent's own
+  // steward/owner (404 otherwise). The ranked list and the recompute stay admin through the default gate.
+  "GET /v1/agent-risk/:kind/:subjectId",
+  "GET /v1/agent-risk/:kind/:subjectId/history",
+  // ADR-0339 slice 2 — one agent's author, runner and identity links: same scoping as its risk score. The findings
+  // list and the link writes stay admin through the default gate.
+  "GET /v1/agent-identity/:kind/:subjectId",
   "GET /v1/risks",
   "GET /v1/risks/library",
   // G2/X8: the scenario library — same class as the risk library
@@ -457,6 +484,10 @@ export const NON_ADMIN_ROUTES = new Set([
   // leak sideways. Every other cost-import route — uploading a file, asserting
   // an identity mapping, reading fleet-wide — is absent here on purpose.
   "GET /v1/users/:userId/cost-consolidated",
+  // ADR-0312: a non-admin pages the outcomes of workflows they initiated (handler predicate and the table's RLS)
+  "GET /v1/cost-outcomes",
+  // ADR-0312 (pilot addendum): a person reads their own spend budget and spend (refused in-handler otherwise)
+  "GET /v1/users/:userId/spend-budget",
   // ADR-0342 (lane E23): process analytics. Each read applies `evaluateReportAccess` in the handler and is narrowed to
   // the projects in scope the caller is a member of (org scope is admin-only); refresh stays admin.
   "GET /v1/process-analytics/templates",
@@ -930,6 +961,8 @@ export const NON_ADMIN_ROUTES = new Set([
   `POST ${DEFENSECLAW_INGEST_PATH}`,
   // ADR-0302 decision 2: its OTLP/HTTP logs twin
   `POST ${DEFENSECLAW_OTLP_LOGS_PATH}`,
+  // ADR-0334 (lane E16): the browser extension's registration (auth-exempt above too; in-route enrolment token)
+  ...BROWSER_EXTENSION_AUTH_PATHS.map((p) => `POST ${p}`),
 
   // ADR-0189 slice B4 — the Decision BOM and AI BOM reads, bundles and the
   // online verifier. The gate is `bom_export_roles` (§7, §9), checked IN THE
