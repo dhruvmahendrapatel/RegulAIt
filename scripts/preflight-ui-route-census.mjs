@@ -93,6 +93,7 @@ export const MACHINE_ONLY = new Map([
   ["GET /v1/models", "data plane: OpenAI-compatible model list for vendor SDKs"],
   ["POST /mcp/:serverId", "data plane: the governed MCP proxy endpoint MCP clients connect to"],
   ["GET /mcp/:serverId", "protocol plumbing: the Streamable HTTP SSE probe MCP clients send after initialize; answers 405 Allow: POST"],
+  ["DELETE /mcp/:serverId", "protocol plumbing: the Streamable HTTP session end; no session is issued, so it answers 405 Allow: POST (ADR-0311)"],
   ["GET /v1/prompts/resolve", "data plane: runtimes and SDKs resolve a prompt@tag reference at call time"],
   ["POST /v1/connectors/:connectorId/invoke", "data plane: an agent runtime invokes a connector through the governance gate"],
   ["POST /v1/a2a/agents/:agentId/messages", "data plane: a person's client or a worker calls a remote A2A agent through the governance gate (ADR-0219)"],
