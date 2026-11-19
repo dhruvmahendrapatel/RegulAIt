@@ -129,6 +129,8 @@ export const SCHEDULER_JOB_NAMES = {
   fairnessDatasetRetentionSweep: "fairness-dataset-retention-sweep",
   // ADR-0303: delivers the audit chain to enabled SIEM destinations (siem-delivery.ts)
   siemDeliverySweep: "siem-delivery-sweep",
+  // ADR-0333 (E15): evaluates the detection rule pack over new audit-chain rows (detection/sweep.ts)
+  agentDetectionSweep: "agent-detection-sweep",
   // ADR-0322: pulls vendor usage and cost from enabled connectors (vendor-usage-pull.ts); off by default
   vendorUsagePullSweep: "vendor-usage-pull-sweep",
   // ADR-0312: records cost-per-outcome evidence (cost-outcomes.ts)
@@ -869,6 +871,7 @@ import { endpointAgentJobDefinitions } from "./endpoint-agent-routes.js";
 import { spiffeBundleRefreshJobDefinitions } from "./oauth/spiffe-bundle-endpoint.js";
 import { fairnessJobDefinitions } from "./fairness.js";
 import { siemJobDefinitions } from "./siem-delivery.js";
+import { detectionJobDefinitions } from "./detection/sweep.js";
 import { costOutcomeJobDefinitions } from "./cost-outcomes.js";
 import { agentRiskProofJobDefinitions } from "./agent-risk-proof-runner.js";
 import { processAnalyticsJobDefinitions } from "./process-analytics.js";
@@ -893,6 +896,7 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...spiffeBundleRefreshJobDefinitions(), // ADR-0188 S9 follow-up: spiffe-bundle-refresh
     ...fairnessJobDefinitions(), // ADR-0222 (P13(a)): fairness-dataset-retention-sweep
     ...siemJobDefinitions({ dataKey: opts.dataKey }), // ADR-0303: siem-delivery-sweep
+    ...detectionJobDefinitions(), // ADR-0333: agent-detection-sweep
     ...costOutcomeJobDefinitions(), // ADR-0312: cost-outcome-recorder
     ...thirdPartyIngestJobDefinitions(), // ADR-0302: third-party-evidence-retention-sweep
     ...browserGovernanceJobDefinitions(), // ADR-0334 B2: browser-prompt-capture-retention-sweep

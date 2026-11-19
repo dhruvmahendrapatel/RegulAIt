@@ -813,6 +813,9 @@ describe("every sweep is registered", () => {
         // ADR-0303: audit-chain delivery to enabled SIEM destinations; driven end to end in
         // zz-adr0303-siem-delivery.test.ts (with no destination enabled it sends nothing)
         SCHEDULER_JOB_NAMES.siemDeliverySweep,
+        // ADR-0333 (E15): evaluates the detection rule pack over new audit-chain rows; driven end-to-end in
+        // zz-adr0333-detection.test.ts; this list pins its registration.
+        SCHEDULER_JOB_NAMES.agentDetectionSweep,
         // ADR-0312: records cost-per-outcome evidence; driven end to end in zz-adr0312-cost-per-outcome.test.ts
         SCHEDULER_JOB_NAMES.costOutcomeRecorder,
         // ADR-0312 (pilot addendum): the spend-budget pass; driven end to end in zz-adr0312-cost-per-outcome.test.ts

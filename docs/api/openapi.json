@@ -1134,7 +1134,10 @@
                 "compliance_profile",
                 "model_call",
                 "custom_classifier",
-                "agent_risk_proof"
+                "decision_table",
+                "agent_risk_proof",
+                "robot_version",
+                "endpoint_addon_removal"
               ]
             }
           },

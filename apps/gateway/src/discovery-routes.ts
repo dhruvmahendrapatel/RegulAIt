@@ -88,7 +88,7 @@ import {
 import { checkStepUp, isStepUpPrompt, type StepUpCheckArgs } from "./step-up.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { DISCOVERY_SCANNERS, type ScannerRegistry } from "./discovery-scanners.js";
-import { discoveryPosture, loadDiscoverySettings } from "./discovery-posture.js";
+import { directoryTokensProblem, directoryTokensRequested, discoveryPosture, loadDiscoverySettings } from "./discovery-posture.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -155,6 +155,10 @@ const settingsSchema = z
       .optional(),
     // ADR-0259: MCP client-config discovery through the endpoint agent; turning it on is a relaxation
     endpointMcpConfig: z.boolean().optional(),
+    // ADR-0337 §4: Google Workspace sources may use the Directory token listing; turning it on is a relaxation
+    googleDirectoryTokens: z.boolean().optional(),
+    // ADR-0331: governed removal of flagged MCP servers from endpoints; turning it on is a relaxation
+    endpointAddonRemoval: z.boolean().optional(),
   })
   .strict();
 const uuidParam = z.object({ sourceId: z.string().uuid() });
@@ -316,6 +320,9 @@ interface Refusal {
   body: Record<string, unknown>;
 }
 const refusal = (status: number, error: string, detail: string, extra: Record<string, unknown> = {}): Refusal => ({ status, body: { error, detail, ...extra } });
+/** a target without one key, keys sorted, for comparing two targets on everything else */
+const withoutKey = (target: Readonly<Record<string, unknown>>, key: string) =>
+  Object.fromEntries(Object.entries(target).filter(([k]) => k !== key).sort(([a], [b]) => a.localeCompare(b)));
 const isRefusal = (x: unknown): x is Refusal => typeof x === "object" && x !== null && "status" in x && "body" in x;
 
 const isUniqueViolation = (e: unknown): boolean => {
@@ -433,8 +440,12 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
       return send(reply, refusal(409, "scanner_not_built", `no scanner is built for ${body.kind} yet (ADR-0195 ${DISCOVERY_KIND_SPECS[body.kind].slice}); a source of this kind cannot be created`));
     }
     // ADR-0235: a wider-source family is off until an admin turns it on
-    const createFamilyOff = familySwitchProblem(body.kind, (await loadDiscoverySettings(db)).families);
+    const createSettings = await loadDiscoverySettings(db);
+    const createFamilyOff = familySwitchProblem(body.kind, createSettings.families);
     if (createFamilyOff) return send(reply, refusal(409, "family_disabled", createFamilyOff));
+    // ADR-0337 §4: the Directory token listing needs its own org switch first
+    const createDirectory = directoryTokensProblem(body.kind, body.target, createSettings);
+    if (createDirectory) return send(reply, refusal(409, "directory_tokens_not_allowed", createDirectory));
     // secure by default: a target the kind's scanner rejects is refused at save time, not at run time
     const createProblem = registry.get(body.kind)!.validateTarget?.(body.target, body.scope) ?? null;
     if (createProblem) return send(reply, refusal(400, "target_invalid", createProblem));
@@ -494,7 +505,16 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
         const tp = body.target ? targetProblem(s.kind, body.target) : null;
         if (tp) return refusal(400, "target_invalid", tp);
         const scope = body.scope ?? s.scope;
-        const targetChanged = body.target !== undefined && JSON.stringify(body.target) !== JSON.stringify(s.target);
+        // ADR-0337 §4: asking for the Directory token listing needs the org switch first
+        const patchDirectory = body.target ? directoryTokensProblem(s.kind, body.target, await loadDiscoverySettings(t)) : null;
+        if (patchDirectory) return refusal(409, "directory_tokens_not_allowed", patchDirectory);
+        // turning the Directory token listing OFF (and changing nothing else) narrows the read: no step-up for it
+        const onlyNarrowsDirectory =
+          body.target !== undefined &&
+          directoryTokensRequested(s.kind, s.target) &&
+          !directoryTokensRequested(s.kind, body.target) &&
+          JSON.stringify(withoutKey(body.target, "directoryTokens")) === JSON.stringify(withoutKey(s.target, "directoryTokens"));
+        const targetChanged = body.target !== undefined && !onlyNarrowsDirectory && JSON.stringify(body.target) !== JSON.stringify(s.target);
         const widened = body.scope !== undefined && scopeWidens(s.scope, body.scope);
         // a duplicate name is refused BEFORE any grant is spent (review of #403)
         if (body.name !== undefined && body.name.toLowerCase() !== s.name.toLowerCase()) {
@@ -548,8 +568,11 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
       if (s.enabled) return refusal(409, "already_enabled", "this source is already enabled");
       const scanner = registry.get(s.kind);
       if (!scanner) return refusal(409, "scanner_not_built", `no scanner is built for ${s.kind} yet (ADR-0195 ${DISCOVERY_KIND_SPECS[s.kind].slice})`);
-      const enableFamilyOff = familySwitchProblem(s.kind, (await loadDiscoverySettings(t)).families);
+      const enableSettings = await loadDiscoverySettings(t);
+      const enableFamilyOff = familySwitchProblem(s.kind, enableSettings.families);
       if (enableFamilyOff) return refusal(409, "family_disabled", enableFamilyOff);
+      const enableDirectory = directoryTokensProblem(s.kind, s.target, enableSettings);
+      if (enableDirectory) return refusal(409, "directory_tokens_not_allowed", enableDirectory);
       const enableCred = await liveCredential(t, s.id);
       if (scanner.requiresCredential && !enableCred) {
         return refusal(409, "credential_missing", "store a credential for this source before enabling it");
@@ -738,8 +761,11 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
     if (!s.enabled) return send(reply, refusal(409, "source_disabled", "enable this source before running it"));
     const scanner = registry.get(s.kind);
     if (!scanner) return send(reply, refusal(409, "scanner_not_built", `no scanner is built for ${s.kind} yet`));
-    const runFamilyOff = familySwitchProblem(s.kind, (await loadDiscoverySettings(db)).families);
+    const runSettings = await loadDiscoverySettings(db);
+    const runFamilyOff = familySwitchProblem(s.kind, runSettings.families);
     if (runFamilyOff) return send(reply, refusal(409, "family_disabled", runFamilyOff));
+    const runDirectory = directoryTokensProblem(s.kind, s.target, runSettings);
+    if (runDirectory) return send(reply, refusal(409, "directory_tokens_not_allowed", runDirectory));
     const runCred = await liveCredential(db, s.id);
     if (scanner.requiresCredential && !runCred) {
       return send(reply, refusal(409, "credential_missing", "store a credential for this source first"));
@@ -845,6 +871,13 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
       // ADR-0259: reading MCP host configs on employee machines is off until an admin turns it on (step-up); off is free
       const mcpAfter = body.endpointMcpConfig ?? row.endpointMcpConfigEnabled;
       if (mcpAfter && !row.endpointMcpConfigEnabled) relaxed[DISCOVERY_STEP_UP_KEYS.endpointMcpConfig] = true;
+      // ADR-0337 §4: the Directory token listing reads every user's OAuth grants with a scope that could revoke them;
+      // off until an admin turns it on with a step-up bound to exactly this switch; off is free
+      const gdtAfter = body.googleDirectoryTokens ?? row.googleDirectoryTokensEnabled;
+      if (gdtAfter && !row.googleDirectoryTokensEnabled) relaxed[DISCOVERY_STEP_UP_KEYS.googleDirectoryTokens] = true;
+      // ADR-0331: removing flagged MCP servers from employee machines is off until an admin turns it on (step-up); off is free
+      const removalAfter = body.endpointAddonRemoval ?? row.endpointAddonRemovalEnabled;
+      if (removalAfter && !row.endpointAddonRemovalEnabled) relaxed[DISCOVERY_STEP_UP_KEYS.endpointAddonRemoval] = true;
       if (Object.keys(relaxed).length > 0) {
         const r = await spendStepUp(req, { kind: "settings_relax", facts: { values: relaxed } }, null);
         if (r) return r;
@@ -859,6 +892,8 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
           mlPlatformSourcesEnabled: afterFamilies.ml_platform,
           agentRegistrySourcesEnabled: afterFamilies.agent_registry,
           endpointMcpConfigEnabled: mcpAfter,
+          googleDirectoryTokensEnabled: gdtAfter,
+          endpointAddonRemovalEnabled: removalAfter,
           version: row.version + 1,
           updatedBy: actor(req),
           updatedAt: sql`now()`,
@@ -867,8 +902,8 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
       await audit(t, req, "discovery_settings", null, Object.keys(relaxed).length ? "discovery-settings-relaxed" : "discovery-settings-updated", "allow",
         `discovery settings updated${Object.keys(relaxed).length ? " (relaxed, with a step-up)" : ""}`,
         {
-          before: { credentialWarningAgeDays: row.credentialWarningAgeDays, endpointRetentionDays: row.endpointRetentionDays, families: beforeFamilies, endpointMcpConfig: row.endpointMcpConfigEnabled },
-          after: { credentialWarningAgeDays: body.credentialWarningAgeDays ?? row.credentialWarningAgeDays, endpointRetentionDays: body.endpointRetentionDays ?? row.endpointRetentionDays, families: afterFamilies, endpointMcpConfig: mcpAfter },
+          before: { credentialWarningAgeDays: row.credentialWarningAgeDays, endpointRetentionDays: row.endpointRetentionDays, families: beforeFamilies, endpointMcpConfig: row.endpointMcpConfigEnabled, endpointAddonRemoval: row.endpointAddonRemovalEnabled, googleDirectoryTokens: row.googleDirectoryTokensEnabled },
+          after: { credentialWarningAgeDays: body.credentialWarningAgeDays ?? row.credentialWarningAgeDays, endpointRetentionDays: body.endpointRetentionDays ?? row.endpointRetentionDays, families: afterFamilies, endpointMcpConfig: mcpAfter, endpointAddonRemoval: removalAfter, googleDirectoryTokens: gdtAfter },
         });
       return true;
     });

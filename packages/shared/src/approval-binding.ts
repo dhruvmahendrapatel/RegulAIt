@@ -101,8 +101,14 @@ export const APPROVAL_OBJECT_TYPES = [
   "model_call",
   // ADR-0363 slice 2: a drafted customer-classifier version, published only when its named reviewer approves
   "custom_classifier",
+  // ADR-0327 addendum: a proposed decision-table version, published only when its named reviewer approves it
+  "decision_table",
   // ADR-0345 slice 2a: acknowledging an agent-risk proof that did not pass (stageId = agent-risk-proof:<proof key>)
   "agent_risk_proof",
+  // ADR-0364 (lane E45 S2): a robot version submitted for review (stageId = robot-version:<version id>)
+  "robot_version",
+  // ADR-0331: removing an MCP server from endpoints, sent to no device until a second administrator approves it
+  "endpoint_addon_removal",
 ] as const;
 export type ApprovalObjectType = (typeof APPROVAL_OBJECT_TYPES)[number];
 
@@ -126,7 +132,10 @@ export const APPROVAL_OBJECT_TYPE_LABELS: Record<ApprovalObjectType, string> = {
   compliance_profile: "compliance profile change",
   model_call: "model call",
   custom_classifier: "customer classifier version",
+  decision_table: "decision table version",
   agent_risk_proof: "agent risk proof acknowledgement",
+  robot_version: "robot version review",
+  endpoint_addon_removal: "MCP server removal from endpoints",
 };
 
 /**

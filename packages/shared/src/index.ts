@@ -5042,6 +5042,8 @@ export * from "./repo-manifests.js";
 export * from "./repo-analysis.js";
 // ADR-0195 SD0: shadow-AI active discovery (sources, credentials, runs, evidence kinds)
 export * from "./discovery/index.js";
+// ADR-0337 (lane E18): the SaaS entitlement graph vocabulary (batch shape and checks, the frozen scope classifier)
+export * from "./saas-entitlements.js";
 // ADR-0195 SD3: endpoint discovery without an agent (osquery pack, importers, endpoint signature seed).
 export * from "./endpoint-discovery/index.js";
 // ADR-0193 (I4) P0/P1: the content provenance label and digest, and the trust-tier policy
@@ -5073,6 +5075,7 @@ export * from "./fairness.js";
 // ADR-0348: declared lifecycle state machines (one transition table each; agents read `describe`)
 export * from "./state-machine.js";
 export * from "./state-machines.js";
+export * from "./robots.js";
 // ADR-0261 (P37): third-party security telemetry ingest — the DefenseClaw JSONL parser and mapping (pure)
 export * from "./third-party-ingest/index.js";
 // ADR-0334 (lane E16): the managed browser extension's contract (also the `@regulait/shared/browser-governance` subpath)
@@ -5084,6 +5087,8 @@ export * from "./vendor-usage.js";
 
 // ADR-0339 (lane E20): the agent risk score, recomputed on every change (pure; OWASP ids only)
 export * from "./agent-risk-score.js";
+// ADR-0339 slice 2 (lane E20): author vs runner and non-human identity links (pure vocabulary)
+export * from "./agent-identity.js";
 
 // ADR-0310 (G2): vendor-native managed settings compiled from effective MCP entitlements
 export * from "./managed-settings.js";
