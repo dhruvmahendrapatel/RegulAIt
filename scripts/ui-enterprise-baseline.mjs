@@ -70,6 +70,8 @@ export const CEILING_EXCEPTIONS = [
   { name: "entry JS (index)", from: "138.5 kB", to: "139.5 kB", date: "2026-10-31", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6545733056" },
   // P21 usage-counts card (#744): main had 1.7 kB of headroom and the owner-approved screen adds 6.2 kB
   { name: "all JS", from: "1150 kB", to: "1160 kB", date: "2026-11-15", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6903109405" },
+  // Shadow AI screens #1075, #1077, #1078 (owner-approved on #453): main had 3.5 kB of headroom, the three add about 24 kB
+  { name: "all JS", from: "1160 kB", to: "1190 kB", date: "2026-11-19", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-7024071207" },
 ];
 const DECISION_LINK = /^https:\/\/github\.com\/dhruvmahendrapatel\/RegulAIt\/issues\/\d+#issuecomment-\d+$/;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
