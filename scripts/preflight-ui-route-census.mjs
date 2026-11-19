@@ -370,6 +370,11 @@ export const INDIRECT_UI_CALLS = new Map([
  * until the entry is deleted, and KNOWN_UI_GAPS_MAX is lowered to match.
  */
 export const KNOWN_UI_GAPS = new Map([
+  ["GET /v1/detection/rule-pack", { does: "reads the active detection rule pack, its version, digest and verification state", tracking: "ADR-0333 (E15) #453" }],
+  ["PUT /v1/detection/rule-pack", { does: "stores a new signed detection rule pack version (audited; a relaxation needs a settings_relax step-up)", tracking: "ADR-0333 (E15) #453" }],
+  ["GET /v1/detection/incidents", { does: "pages detection incidents, newest first, filtered by status", tracking: "ADR-0333 (E15) #453" }],
+  ["GET /v1/detection/incidents/:incidentId", { does: "one detection incident with its evidence chain (audit rows, row hashes, receipts)", tracking: "ADR-0333 (E15) #453" }],
+  ["PUT /v1/detection/incidents/:incidentId/status", { does: "acknowledges or closes a detection incident (audited)", tracking: "ADR-0333 (E15) #453" }],
   ["GET /v1/sensitivity-labels", { does: "lists the Purview sensitivity labels read from the tenant, each label's mapping (allow, redact or block; data sensitivity; compliance profile) and the strict fallbacks", tracking: "ADR-0363 slice 1 (lane E44): the brief is API-only (rule 3); the label mapping screen is for the design builder on #453. RAISED for review: the master decides on the PR" }],
   ["PUT /v1/sensitivity-labels/settings", { does: "sets the fallbacks for unmapped labels, encrypted files and unreadable files (relaxing is a settings_relax step-up, audited)", tracking: "ADR-0363 slice 1 (lane E44): the brief is API-only (rule 3); the label mapping screen is for the design builder on #453. RAISED for review: the master decides on the PR" }],
   ["PUT /v1/sensitivity-labels/:definitionId/rule", { does: "maps one label to an action, a data sensitivity and optionally a compliance profile (relaxing is a settings_relax step-up, audited)", tracking: "ADR-0363 slice 1 (lane E44): the brief is API-only (rule 3); the label mapping screen is for the design builder on #453. RAISED for review: the master decides on the PR" }],
