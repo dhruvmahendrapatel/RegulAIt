@@ -46,7 +46,7 @@ import { runCanaryObservationPrune } from "./config-versions.js";
 import { runMcpAdmissionRescan } from "./mcp-admission-rescan.js";
 import { runMcpRegistrySync } from "./mcp-registry.js";
 import { runMcpHealthProbeSweep } from "./mcp-health-probe.js";
-import { runGovernanceMonitor } from "./governance-monitor.js";
+import { runGovernanceMonitor, runSpendBudgetPass } from "./governance-monitor.js";
 import { runTraceEvaluationSweep } from "./trace-evaluation.js";
 import { runUseCaseRecertificationSweep } from "./review-policy.js";
 import { runBuilderScheduleSweep } from "./builder-runtime.js";
@@ -129,8 +129,19 @@ export const SCHEDULER_JOB_NAMES = {
   fairnessDatasetRetentionSweep: "fairness-dataset-retention-sweep",
   // ADR-0303: delivers the audit chain to enabled SIEM destinations (siem-delivery.ts)
   siemDeliverySweep: "siem-delivery-sweep",
+  // ADR-0322: pulls vendor usage and cost from enabled connectors (vendor-usage-pull.ts); off by default
+  vendorUsagePullSweep: "vendor-usage-pull-sweep",
+  // ADR-0312: records cost-per-outcome evidence (cost-outcomes.ts)
+  costOutcomeRecorder: "cost-outcome-recorder",
+  // ADR-0312 (pilot addendum): the five-minute spend-budget pass of the governance monitor (governance-monitor.ts)
+  spendBudgetAlerts: "spend-budget-alerts",
   // ADR-0302 (P37 follow-up): deletes third-party ingest evidence past the audit floor (third-party-ingest-retention.ts)
   thirdPartyEvidenceRetentionSweep: "third-party-evidence-retention-sweep",
+  // ADR-0334 (owner decision B2): deletes captured browser prompts past their retention (browser-capture-retention.ts)
+  browserPromptCaptureRetentionSweep: "browser-prompt-capture-retention-sweep",
+  // ADR-0339: scores every agent a change marked (agent-risk.ts)
+  agentRiskRecomputeSweep: "agent-risk-recompute-sweep",
+  agentRiskDailyMark: "agent-risk-daily-mark",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -591,6 +602,20 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
       },
     },
     {
+      // ADR-0312 (pilot addendum): the project and person budget rules only, through the monitor's one alert-write
+      // path, so a budget alert fires within minutes of the spend that crossed it. Every other rule is untouched.
+      name: SCHEDULER_JOB_NAMES.spendBudgetAlerts,
+      description:
+        "Evaluate the governance monitor's spend-budget rules (project and person budget alert thresholds) and raise, " +
+        "refresh or resolve their alerts, delivered like every monitor alert. Alerting only: no call is refused.",
+      adr: "ADR-0312",
+      defaultIntervalSeconds: 300,
+      run: async (ctx) => {
+        const out = await runSpendBudgetPass(ctx.db, { actorUserId: ctx.actorUserId, now: ctx.now });
+        return { itemsProcessed: out.raised + out.resolved, detail: { ...out } };
+      },
+    },
+    {
       // ADR-0160. Re-runs the shipped heuristic detectors over stored previews
       // of completed model calls (counts only). Feeds the monitor's
       // agent_output_leakage rule; changes nothing a dispatch reads.
@@ -844,8 +869,13 @@ import { endpointAgentJobDefinitions } from "./endpoint-agent-routes.js";
 import { spiffeBundleRefreshJobDefinitions } from "./oauth/spiffe-bundle-endpoint.js";
 import { fairnessJobDefinitions } from "./fairness.js";
 import { siemJobDefinitions } from "./siem-delivery.js";
+import { costOutcomeJobDefinitions } from "./cost-outcomes.js";
+import { agentRiskProofJobDefinitions } from "./agent-risk-proof-runner.js";
 import { processAnalyticsJobDefinitions } from "./process-analytics.js";
 import { thirdPartyIngestJobDefinitions } from "./third-party-ingest-retention.js";
+import { browserGovernanceJobDefinitions } from "./browser-capture-retention.js";
+import { vendorUsageJobDefinitions } from "./vendor-usage-pull.js";
+import { agentRiskJobDefinitions } from "./agent-risk.js";
 
 function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
   return [
@@ -863,8 +893,13 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...spiffeBundleRefreshJobDefinitions(), // ADR-0188 S9 follow-up: spiffe-bundle-refresh
     ...fairnessJobDefinitions(), // ADR-0222 (P13(a)): fairness-dataset-retention-sweep
     ...siemJobDefinitions({ dataKey: opts.dataKey }), // ADR-0303: siem-delivery-sweep
+    ...costOutcomeJobDefinitions(), // ADR-0312: cost-outcome-recorder
     ...thirdPartyIngestJobDefinitions(), // ADR-0302: third-party-evidence-retention-sweep
+    ...browserGovernanceJobDefinitions(), // ADR-0334 B2: browser-prompt-capture-retention-sweep
+    ...vendorUsageJobDefinitions({ dataKey: opts.dataKey }), // ADR-0322: vendor-usage-pull-sweep
+    ...agentRiskJobDefinitions(), // ADR-0339: agent-risk-recompute-sweep, agent-risk-daily-mark
     ...processAnalyticsJobDefinitions(), // ADR-0342: process-analytics-projector
+    ...agentRiskProofJobDefinitions(), // ADR-0345 slice 2a: agent-risk-proof-sweep
   ];
 }
 // ===== end ADR-0182 block ====================================================

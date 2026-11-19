@@ -101,6 +101,8 @@ export const APPROVAL_OBJECT_TYPES = [
   "model_call",
   // ADR-0363 slice 2: a drafted customer-classifier version, published only when its named reviewer approves
   "custom_classifier",
+  // ADR-0345 slice 2a: acknowledging an agent-risk proof that did not pass (stageId = agent-risk-proof:<proof key>)
+  "agent_risk_proof",
 ] as const;
 export type ApprovalObjectType = (typeof APPROVAL_OBJECT_TYPES)[number];
 
@@ -124,6 +126,7 @@ export const APPROVAL_OBJECT_TYPE_LABELS: Record<ApprovalObjectType, string> = {
   compliance_profile: "compliance profile change",
   model_call: "model call",
   custom_classifier: "customer classifier version",
+  agent_risk_proof: "agent risk proof acknowledgement",
 };
 
 /**

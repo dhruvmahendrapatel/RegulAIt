@@ -248,6 +248,94 @@ export const RULE_STEP_SUGGESTION_MACHINE = defineMachine({
   },
 });
 
+/*
+ * The two ADR-0334 lifecycles below are declared with `defineMachine` and enforced by their routes (a revoke checks
+ * `can(state, "revoke")` under the row lock and its UPDATE is guarded by `revoked_at IS NULL`), but their state is
+ * DERIVED from timestamps and a counter rather than stored in a status column, so they are not in `STATE_MACHINES`,
+ * whose entries each match a CHECK-constrained column (adr0348-state-machines.test.ts). Lane E29's app-wide audit
+ * owns how derived lifecycles are listed.
+ */
+
+/** `browser_enrolment_tokens` (ADR-0334), derived from the row (`revoked_at`, `expires_at`, the device cap) by
+ * `enrolmentTokenState`. Use and time move a token on without an admin; revocation is final. */
+export const BROWSER_ENROLMENT_TOKEN_MACHINE = defineMachine({
+  id: "browser_enrolment_token",
+  stored: "browser_enrolment_tokens (revoked_at, expires_at, devices_enrolled vs device_cap)",
+  states: ["active", "exhausted", "expired", "revoked"],
+  initial: ["active"],
+  terminal: ["revoked"],
+  transitions: {
+    exhaust: {
+      from: ["active"],
+      to: "exhausted",
+      by: ["system"],
+      summary: "The last device the token allows registers; it still answers the devices it enrolled, never a new one.",
+    },
+    expire: {
+      from: ["active", "exhausted"],
+      to: "expired",
+      by: ["system"],
+      summary: "The token's expiry passes; no device registers with it any more.",
+    },
+    revoke: {
+      from: ["active", "exhausted", "expired"],
+      to: "revoked",
+      by: ["admin"],
+      summary: "An admin revokes the token; no device registers with it again.",
+    },
+  },
+});
+
+/** `browser_devices.revoked_at` (ADR-0334): a device is active until an admin revokes it, and revocation is final. */
+export const BROWSER_DEVICE_MACHINE = defineMachine({
+  id: "browser_device",
+  stored: "browser_devices.revoked_at",
+  states: ["active", "revoked"],
+  initial: ["active"],
+  terminal: ["revoked"],
+  transitions: {
+    revoke: {
+      from: ["active"],
+      to: "revoked",
+      by: ["admin"],
+      summary: "An admin revokes the device; its proofs are refused and it blocks every governed site.",
+    },
+  },
+});
+
+/** `vendor_usage_pull_runs.status` (ADR-0322). A run opens `running`, or is written already `refused` when another
+ * pull of the same connector holds the lease. A running run ends exactly once: the batch committed, the vendor or
+ * the write failed, or a precondition (policy off, no credential, air-gapped) refused it. */
+export const VENDOR_USAGE_PULL_RUN_STATUSES = ["running", "succeeded", "failed", "refused"] as const;
+export type VendorUsagePullRunStatus = (typeof VENDOR_USAGE_PULL_RUN_STATUSES)[number];
+export const VENDOR_USAGE_PULL_RUN_MACHINE = defineMachine({
+  id: "vendor_usage_pull_run",
+  stored: "vendor_usage_pull_runs.status",
+  states: VENDOR_USAGE_PULL_RUN_STATUSES,
+  initial: ["running", "refused"],
+  terminal: ["succeeded", "failed", "refused"],
+  transitions: {
+    succeed: {
+      from: ["running"],
+      to: "succeeded",
+      by: ["system"],
+      summary: "The pulled lines, the batch and the connector's pulled-through day committed together.",
+    },
+    fail: {
+      from: ["running"],
+      to: "failed",
+      by: ["system"],
+      summary: "The vendor answered with an error or an unusable page, or the write was rolled back; nothing was imported.",
+    },
+    refuse: {
+      from: ["running"],
+      to: "refused",
+      by: ["system"],
+      summary: "A precondition failed before any request: the policy or connector is off, no live credential, no data key, or air-gapped.",
+    },
+  },
+});
+
 /** Every declared machine, by id: the one list an agent or a document reads. */
 export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string>>> = Object.freeze({
   [TRAINING_JOB_MACHINE.def.id]: TRAINING_JOB_MACHINE,
@@ -256,4 +344,5 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [EVAL_RUN_MACHINE.def.id]: EVAL_RUN_MACHINE,
   [CLASSIFIER_VERSION_MACHINE.def.id]: CLASSIFIER_VERSION_MACHINE,
   [RULE_STEP_SUGGESTION_MACHINE.def.id]: RULE_STEP_SUGGESTION_MACHINE,
+  [VENDOR_USAGE_PULL_RUN_MACHINE.def.id]: VENDOR_USAGE_PULL_RUN_MACHINE,
 } as Record<string, StateMachine<string, string>>);

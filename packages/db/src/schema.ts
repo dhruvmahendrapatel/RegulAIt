@@ -140,6 +140,7 @@ import {
   DISCOVERY_RUN_STATUSES,
   DISCOVERY_RUN_TRIGGERS,
   DISCOVERY_SOURCE_KINDS,
+  AGENT_REGISTRIES,
   DISCOVERY_EVIDENCE_KINDS,
   // ADR-0261 (P37): third-party security telemetry ingest
   THIRD_PARTY_EVIDENCE_KINDS,
@@ -160,9 +161,12 @@ import {
   CONTENT_SOURCE_KINDS,
   CONTENT_TRUST_TIERS,
   CONTENT_TRUST_WRITE_FLOORS,
+  AGENT_RISK_KEYS,
   AGENT_RISK_PROOF_OUTCOMES,
   AGENT_RISK_PROOF_TRIGGERS,
   type ModalitySplit,
+  // ADR-0322: the vendor usage pull run states, declared with their machine (ADR-0348)
+  VENDOR_USAGE_PULL_RUN_STATUSES,
   // ADR-0346 (migration fairness_evaluation): the fairness-evaluation vocabularies, in lockstep with the CHECKs
   FAIRNESS_DATASET_KINDS,
   FAIRNESS_RUN_MODES,
@@ -1883,6 +1887,9 @@ export const auditLog = pgTable(
         // text column — no DDL needed.
         "governance_alert",
         "governance_monitor",
+        // ADR-0345 slice 2a: one agent-risk proof result (objectId null; detail.contentHash ties it to the
+        // agent_risk_proof_results row written in the same transaction). Plain text column — no DDL.
+        "agent_risk_proof",
         // ADR-0173 batch 2c (K): a KRI or a monitoring dashboard created /
         // changed / deleted, and an automation rule created / changed /
         // paused / backfilled / matched (objectId = the row). Plain text — no DDL.
@@ -2003,6 +2010,15 @@ export const auditLog = pgTable(
         // ADR-0303: a SIEM destination (created, enabled, disabled, secret rotated, dead-lettered, recovered). Plain
         // text column — no DDL.
         "siem_destination",
+        // ADR-0322: the vendor usage pull policy, a connector (created, configured, enabled, disabled), its credential
+        // (stored, replaced, revoked; never the secret) and each pull run. Plain text column — no DDL.
+        "vendor_usage_pull_policy",
+        "vendor_usage_connector",
+        "vendor_usage_credential",
+        "vendor_usage_pull_run",
+        // ADR-0312: the cost-per-outcome recorder ran (manual refresh) and an admin read the outcome roll-up. Plain
+        // text column — no DDL.
+        "cost_outcome",
         // ADR-0193 (I4): a content provenance record (objectId = the record) and a trust-tier change (a source's
         // tier, or the write floor). Plain text column — no DDL.
         "content_provenance",
@@ -2016,6 +2032,9 @@ export const auditLog = pgTable(
         "trust_publication",
         "trust_center",
         "auditor_grant",
+        // ADR-0334 (lane E16): browser governance settings, site rules, enrolment tokens, devices and the breach
+        // events and prompt captures an extension reports. Plain text column — no DDL.
+        "browser_governance",
         // ADR-0310 (G2): a signed managed-settings bundle export (objectId = the bundle). Plain text column — no DDL.
         "managed_settings_bundle",
       ],
@@ -3610,7 +3629,11 @@ export const orchestrationRuns = pgTable(
       .default("planned"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("orchestration_runs_user_idx").on(t.initiatingUserId)],
+  (t) => [
+    index("orchestration_runs_user_idx").on(t.initiatingUserId),
+    // ADR-0312: the cost-per-outcome spend join reads an instance's runs; built CONCURRENTLY by runMigrations
+    index("orchestration_runs_workflow_instance_idx").on(t.workflowInstanceId).where(sql`${t.workflowInstanceId} IS NOT NULL`),
+  ],
 );
 
 export const orchestrationRunEvents = pgTable(
@@ -3895,6 +3918,9 @@ export const usageEvents = pgTable(
     index("usage_events_connector_at_idx").on(t.connectorId, t.at).where(sql`${t.connectorId} IS NOT NULL`),
     // ADR-0212 (migration 0230): the model rate limit's dispatch-time count
     index("usage_events_user_agent_at_idx").on(t.userId, t.agentId, t.at).where(sql`${t.objectType} = 'agent'`),
+    // ADR-0312 (cost per outcome): the spend join reads a run's rows by detail.runId; built CONCURRENTLY by
+    // runMigrations (CONCURRENT_INDEXES, slug cost_outcomes), partial so it holds only rows a run dispatched
+    index("usage_events_run_id_idx").on(sql`(${t.detail}->>'runId')`).where(sql`(${t.detail}->>'runId') IS NOT NULL`),
     check(
       "usage_events_modality_usage_ck",
       sql`${t.modalityUsage} IS NULL OR (jsonb_typeof(${t.modalityUsage}) = 'object' AND ${t.modalityUsage} ?& ARRAY['text', 'image', 'audio'])`,
@@ -8180,7 +8206,7 @@ export const discoverySources = pgTable(
   (t) => [
     check(
       "discovery_sources_kind_check",
-      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow')`,
+      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow', 'agent_registry_entra', 'agent_registry_gemini', 'agent_registry_agentcore')`,
     ),
     check("discovery_sources_name_check", sql`char_length(${t.name}) BETWEEN 1 AND 120`),
     check("discovery_sources_target_check", sql`jsonb_typeof(${t.target}) = 'object'`),
@@ -8265,7 +8291,7 @@ export const discoveryRuns = pgTable(
     check("discovery_runs_status_check", sql`${t.status} IN ('queued', 'running', 'succeeded', 'failed')`),
     check(
       "discovery_runs_kind_check",
-      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow')`,
+      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow', 'agent_registry_entra', 'agent_registry_gemini', 'agent_registry_agentcore')`,
     ),
     check("discovery_runs_attempt_check", sql`${t.attempt} BETWEEN 0 AND 3`),
     check("discovery_runs_gaps_check", sql`jsonb_typeof(${t.catalogueGaps}) = 'array' AND jsonb_array_length(${t.catalogueGaps}) <= 50`),
@@ -8300,6 +8326,8 @@ export const discoverySettings = pgTable(
     saasSourcesEnabled: boolean("saas_sources_enabled").notNull().default(false),
     identitySourcesEnabled: boolean("identity_sources_enabled").notNull().default(false),
     mlPlatformSourcesEnabled: boolean("ml_platform_sources_enabled").notNull().default(false),
+    /** ADR-0314 (G6): the vendor agent registry family switch, off by default like the ADR-0235 families */
+    agentRegistrySourcesEnabled: boolean("agent_registry_sources_enabled").notNull().default(false),
     // ADR-0259: endpoint MCP client-config discovery through the SD4 agent, off (pending migration endpoint_mcp_config_discovery, ADR-0252)
     endpointMcpConfigEnabled: boolean("endpoint_mcp_config_enabled").notNull().default(false),
     version: integer("version").notNull().default(1),
@@ -10360,8 +10388,12 @@ export const costImportBatches = pgTable(
     appliedAt: timestamp("applied_at", { withTimezone: true }),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     revokedByUserId: uuid("revoked_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** ADR-0322: 'file' for an upload (ADR-0069), 'pull' for a scheduled or manual vendor API pull. Either way the
+     * lines are restated vendor documents, basis 'imported'. */
+    origin: text("origin", { enum: ["file", "pull"] }).notNull().default("file"),
   },
   (t) => [
+    check("cost_import_batches_origin_check", sql`${t.origin} IN ('file', 'pull')`),
     index("cost_import_batches_created_idx").on(t.createdAt),
     index("cost_import_batches_status_idx").on(t.status),
     index("cost_import_batches_vendor_idx").on(t.vendor),
@@ -10441,8 +10473,18 @@ export const importedCostLines = pgTable(
     supersededByLineId: uuid("superseded_by_line_id"),
     supersededRunId: uuid("superseded_run_id"),
     supersededReason: text("superseded_reason"),
+    // --- ADR-0322: pulled lines ---------------------------------------------------------------------------------
+    // A pulled line names its connector and the vendor's own fact identity; the partial unique index below makes a
+    // re-pull of the same window an upsert rather than a second copy. `overlaps_metered` marks spend the vendor
+    // billed to a key, project or workspace the gateway itself holds: that spend is already in `usage_events`, so the
+    // consolidated read excludes the line from the imported side and discloses the exclusion.
+    pullConnectorId: uuid("pull_connector_id").references(() => vendorUsageConnectors.id, { onDelete: "restrict" }),
+    factKey: text("fact_key"),
+    overlapsMetered: boolean("overlaps_metered").notNull().default(false),
   },
   (t) => [
+    check("imported_cost_lines_pull_fact_check", sql`(${t.pullConnectorId} IS NULL) = (${t.factKey} IS NULL)`),
+    uniqueIndex("imported_cost_lines_pull_fact_uq").on(t.pullConnectorId, t.factKey).where(sql`${t.pullConnectorId} IS NOT NULL`),
     index("imported_cost_lines_batch_idx").on(t.batchId),
     index("imported_cost_lines_user_idx").on(t.resolvedUserId, t.periodStart),
     index("imported_cost_lines_period_idx").on(t.periodStart, t.periodEnd),
@@ -14775,11 +14817,11 @@ export const workloadIdentities = pgTable(
     unique("workload_identities_engine_runner_uq").on(t.engineRunnerId),
     check(
       "workload_identities_kind_check",
-      sql`${t.kind} IN ('agent', 'builder_agent', 'engine_runner', 'worker_runtime', 'pdp', 'endpoint_agent')`,
+      sql`${t.kind} IN ('agent', 'builder_agent', 'engine_runner', 'worker_runtime', 'pdp', 'endpoint_agent', 'browser_extension')`,
     ),
     check(
       "workload_identities_subject_check",
-      sql`(${t.kind} = 'agent' AND ${t.agentId} IS NOT NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NULL) OR (${t.kind} = 'builder_agent' AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NOT NULL AND ${t.engineRunnerId} IS NULL) OR (${t.kind} = 'engine_runner' AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NOT NULL) OR (${t.kind} IN ('worker_runtime', 'pdp', 'endpoint_agent') AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NULL)`,
+      sql`(${t.kind} = 'agent' AND ${t.agentId} IS NOT NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NULL) OR (${t.kind} = 'builder_agent' AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NOT NULL AND ${t.engineRunnerId} IS NULL) OR (${t.kind} = 'engine_runner' AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NOT NULL) OR (${t.kind} IN ('worker_runtime', 'pdp', 'endpoint_agent', 'browser_extension') AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NULL)`,
     ),
     check(
       "workload_identities_identifier_check",
@@ -16808,6 +16850,456 @@ export const resourceRateReservations = pgTable(
     ),
   ],
 );
+// ===== ADR-0322 (lane E7): opt-in vendor usage/cost pull ===================================================
+
+/** The one org-level switch (singleton row). OFF by default; on is a step-up, audited, refused under air_gapped. */
+export const vendorUsagePullPolicy = pgTable(
+  "vendor_usage_pull_policy",
+  {
+    id: text("id").primaryKey().default("singleton"),
+    enabled: boolean("enabled").notNull().default(false),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [check("vendor_usage_pull_policy_singleton_check", sql`${t.id} = 'singleton'`)],
+);
+
+export const VENDOR_USAGE_VENDORS = ["anthropic", "openai", "github_copilot", "cursor", "openai_codex", "aws_cur"] as const;
+
+/**
+ * One vendor account an admin registered for pulling. Disabled when created.
+ *
+ * 3NF exception, deliberate: `public_config` is a schema-validated configuration document (the vendor's
+ * non-secret settings and the list of vendor key/project/workspace ids the gateway itself uses), validated by
+ * `vendorUsagePublicConfigSchema` in @regulait/shared on every write.
+ */
+export const vendorUsageConnectors = pgTable(
+  "vendor_usage_connectors",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    vendor: text("vendor", { enum: VENDOR_USAGE_VENDORS }).notNull(),
+    name: text("name").notNull(),
+    enabled: boolean("enabled").notNull().default(false),
+    publicConfig: jsonb("public_config").$type<Record<string, unknown>>().notNull().default({}),
+    /** the end of the last window pulled successfully; the next pull resumes here */
+    pulledThrough: timestamp("pulled_through", { withTimezone: true }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "vendor_usage_connectors_vendor_check",
+      sql`${t.vendor} IN ('anthropic', 'openai', 'github_copilot', 'cursor', 'openai_codex', 'aws_cur')`,
+    ),
+    check("vendor_usage_connectors_public_config_check", sql`jsonb_typeof(${t.publicConfig}) = 'object'`),
+    check("vendor_usage_connectors_name_check", sql`char_length(${t.name}) BETWEEN 1 AND 120`),
+    uniqueIndex("vendor_usage_connectors_name_uq").on(sql`lower(${t.name})`),
+  ],
+);
+export type VendorUsageConnectorRow = typeof vendorUsageConnectors.$inferSelect;
+
+/** The vendor key, under the data key. Never returned by any route; destroyed (NULL) on revoke. */
+export const vendorUsageCredentials = pgTable(
+  "vendor_usage_credentials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectorId: uuid("connector_id")
+      .notNull()
+      .references(() => vendorUsageConnectors.id, { onDelete: "cascade" }),
+    /** a data-key envelope (CIPHERTEXT_COLUMNS); never returned by any route, destroyed on revoke */
+    secretCiphertext: text("secret_ciphertext"),
+    scopePosture: text("scope_posture", { enum: ["read_only", "write_capable", "unverified"] }).notNull(),
+    writeCapableAcknowledgedAt: timestamp("write_capable_acknowledged_at", { withTimezone: true }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: uuid("revoked_by").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    check("vendor_usage_credentials_scope_check", sql`${t.scopePosture} IN ('read_only', 'write_capable', 'unverified')`),
+    check(
+      "vendor_usage_credentials_ack_check",
+      sql`${t.scopePosture} <> 'write_capable' OR ${t.writeCapableAcknowledgedAt} IS NOT NULL`,
+    ),
+    check("vendor_usage_credentials_live_secret_check", sql`${t.revokedAt} IS NOT NULL OR ${t.secretCiphertext} IS NOT NULL`),
+    check("vendor_usage_credentials_revoked_check", sql`${t.revokedAt} IS NULL OR ${t.secretCiphertext} IS NULL`),
+    uniqueIndex("vendor_usage_credentials_live_uq").on(t.connectorId).where(sql`${t.revokedAt} IS NULL`),
+  ],
+);
+
+export const VENDOR_USAGE_PULL_ERROR_CODES = [
+  "disabled",
+  "air_gapped",
+  "no_credential",
+  "data_key_unavailable",
+  "egress_refused",
+  "unauthorized",
+  "forbidden",
+  "rate_limited",
+  "http_error",
+  "bad_response",
+  "response_too_large",
+  "network_error",
+  "page_limit",
+  "scan_blocked",
+  "internal",
+  // a second pull of a connector refused while another is still running (#861 review)
+  "in_progress",
+] as const;
+
+/**
+ * The pull run ledger, open-first like `scheduler_runs`. An error is a fixed code plus RegulAIt-authored detail,
+ * never vendor response text, so no third-party bytes (and no echoed key) can land here.
+ */
+export const vendorUsagePullRuns = pgTable(
+  "vendor_usage_pull_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectorId: uuid("connector_id")
+      .notNull()
+      .references(() => vendorUsageConnectors.id, { onDelete: "cascade" }),
+    trigger: text("trigger", { enum: ["schedule", "manual"] }).notNull(),
+    // the lifecycle (initial states, transitions) is VENDOR_USAGE_PULL_RUN_MACHINE in @regulait/shared (ADR-0348)
+    status: text("status", { enum: VENDOR_USAGE_PULL_RUN_STATUSES }).notNull().default("running"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    windowStart: timestamp("window_start", { withTimezone: true }),
+    windowEnd: timestamp("window_end", { withTimezone: true }),
+    batchId: uuid("batch_id").references(() => costImportBatches.id, { onDelete: "set null" }),
+    pages: integer("pages").notNull().default(0),
+    linesUpserted: integer("lines_upserted").notNull().default(0),
+    overlapLines: integer("overlap_lines").notNull().default(0),
+    errorCode: text("error_code", { enum: VENDOR_USAGE_PULL_ERROR_CODES }),
+    errorDetail: text("error_detail"),
+    requestedBy: uuid("requested_by").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    check("vendor_usage_pull_runs_trigger_check", sql`${t.trigger} IN ('schedule', 'manual')`),
+    check("vendor_usage_pull_runs_status_check", sql`${t.status} IN ('running', 'succeeded', 'failed', 'refused')`),
+    check(
+      "vendor_usage_pull_runs_error_code_check",
+      sql`${t.errorCode} IS NULL OR ${t.errorCode} IN ('disabled', 'air_gapped', 'no_credential', 'data_key_unavailable', 'egress_refused', 'unauthorized', 'forbidden', 'rate_limited', 'http_error', 'bad_response', 'response_too_large', 'network_error', 'page_limit', 'scan_blocked', 'internal')`,
+    ),
+    check(
+      "vendor_usage_pull_runs_error_detail_check",
+      sql`${t.errorDetail} IS NULL OR char_length(${t.errorDetail}) <= 500`,
+    ),
+    check(
+      "vendor_usage_pull_runs_outcome_check",
+      // two comparisons, not a value list: the one value-list CHECK on status is the ADR-0348 machine's
+      sql`(${t.status} <> 'failed' AND ${t.status} <> 'refused') = (${t.errorCode} IS NULL)`,
+    ),
+    index("vendor_usage_pull_runs_connector_idx").on(t.connectorId, t.startedAt),
+  ],
+);
+export type VendorUsagePullRunRow = typeof vendorUsagePullRuns.$inferSelect;
+// ===== end ADR-0322 =================================================================================================
+// ===== ADR-0312 (lane E2, G3): cost per outcome ======================================================================
+/**
+ * ADR-0312 (migration `pending/cost_outcomes.sql`, numbered at merge) — THE OUTCOME LEDGER. One row per outcome the
+ * recorder observed: a merged pull request, a finished workflow run, an accepted change (a run that completed every
+ * stage), or a completed PM work item. The spend is NOT stored here: it is read from `usage_events` (the metered
+ * ledger) at query time through the subject's orchestration runs, so a late-settling call or a correction restates
+ * the figure rather than leaving a stale copy. Imported spend never joins an outcome (ADR-0069).
+ *
+ * Append-only evidence: the app role may insert and read, never update or delete (migration REVOKE). Row-level
+ * security: an admin and the recorder's `system_task` read everything; any other principal reads the outcomes of
+ * workflows it initiated.
+ */
+export const costOutcomes = pgTable(
+  "cost_outcomes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kind: text("kind", { enum: ["merged_pr", "workflow_run", "accepted_change", "completed_work_item"] }).notNull(),
+    workflowInstanceId: uuid("workflow_instance_id").references(() => workflowInstances.id, { onDelete: "set null" }),
+    /** completed_work_item linked to a run or a run node: the run whose spend the item carries */
+    orchestrationRunId: uuid("orchestration_run_id").references(() => orchestrationRuns.id, { onDelete: "set null" }),
+    /** completed_work_item linked to one task-graph node (pm_links.node_id) */
+    nodeId: text("node_id"),
+    pmLinkId: uuid("pm_link_id").references(() => pmLinks.id, { onDelete: "set null" }),
+    /** 3NF exception, deliberate (point-in-time evidence): the project the subject billed to when the outcome was
+     * observed. The subject's own project column is FK-free and may be re-pointed; this row records the attribution
+     * the roll-up was built on. */
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
+    /** 3NF exception, deliberate (point-in-time evidence and the RLS read key): who initiated the subject */
+    initiatorUserId: uuid("initiator_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** 3NF exception, deliberate (point-in-time evidence): the merge commit of a merged_pr, as the provider returned it */
+    mergeSha: text("merge_sha"),
+    /** 3NF exception, deliberate (point-in-time evidence): the subject's terminal status when observed */
+    subjectStatus: text("subject_status").notNull(),
+    trigger: text("trigger", { enum: ["schedule", "manual"] }).notNull(),
+    observedAt: timestamp("observed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("cost_outcomes_instance_kind_uq")
+      .on(t.kind, t.workflowInstanceId)
+      .where(sql`${t.kind} <> 'completed_work_item' AND ${t.workflowInstanceId} IS NOT NULL`),
+    uniqueIndex("cost_outcomes_pm_link_uq").on(t.pmLinkId).where(sql`${t.kind} = 'completed_work_item' AND ${t.pmLinkId} IS NOT NULL`),
+    index("cost_outcomes_observed_idx").on(t.observedAt),
+    index("cost_outcomes_project_observed_idx").on(t.projectId, t.observedAt),
+    index("cost_outcomes_initiator_idx").on(t.initiatorUserId, t.observedAt),
+    check("cost_outcomes_merge_sha_check", sql`(${t.kind} = 'merged_pr') = (${t.mergeSha} IS NOT NULL)`),
+    check(
+      "cost_outcomes_subject_check",
+      // a subject's FKs may later be nulled by its deletion (the outcome stays as evidence), so only the shape is checked
+      sql`${t.kind} = 'completed_work_item' OR (${t.pmLinkId} IS NULL AND ${t.nodeId} IS NULL)`,
+    ),
+  ],
+);
+export type CostOutcomeRow = typeof costOutcomes.$inferSelect;
+
+/**
+ * ADR-0312 (pilot addendum; migration `pending/user_spend_budgets.sql`) — A PERSON'S SPEND BUDGET, alert only. The
+ * governance monitor's `user_budget_threshold` rule raises an alert when the person's metered spend across every model,
+ * MCP tool and connector call in the window reaches `alert_threshold_pct` of `budget_usd` (high at 100%). Nothing is
+ * refused on it; the project budget and run caps are the enforcement. Monthly by default (the strict, bounded window).
+ * Row-level security ENABLED and FORCED: an admin, `system_task` and `migration` read every row, a person only their
+ * own; only an admin or `migration` writes.
+ */
+export const userSpendBudgets = pgTable(
+  "user_spend_budgets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    budgetUsd: doublePrecision("budget_usd").notNull(),
+    budgetPeriod: text("budget_period", { enum: ["monthly", "none"] }).notNull().default("monthly"),
+    alertThresholdPct: integer("alert_threshold_pct").notNull().default(80),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("user_spend_budgets_user_uq").on(t.userId),
+    check("user_spend_budgets_budget_check", sql`${t.budgetUsd} > 0 AND ${t.budgetUsd} <= 10000000`),
+    check("user_spend_budgets_pct_check", sql`${t.alertThresholdPct} BETWEEN 1 AND 100`),
+  ],
+);
+export type UserSpendBudgetRow = typeof userSpendBudgets.$inferSelect;
+// ===== end ADR-0312 =================================================================================================
+
+/*
+ * ADR-0314 (G6; migration agent_registry_records) — agents read from a vendor agent registry (Microsoft Entra Agent
+ * ID and Agent 365, Google Gemini Enterprise, AWS Bedrock AgentCore) by an `agent_registry_*` discovery source,
+ * staged here until an admin imports one into `agents`. Written only by the discovery worker (upsert per source,
+ * registry and vendor id, in the run's fenced commit) and by the admin-only, step-up-gated import route.
+ *
+ * Provenance: every row names its source and the run that last saw it; an imported agent's provenance is the row
+ * whose `agent_id` points at it (unique, so one agent has one registry origin). Import creates the agent with
+ * `enabled = false`, lifecycle `proposed` and no grant of any kind: default-deny until an admin grants it.
+ *
+ * 3NF exception, deliberate: `vendor_attributes` is a bounded, verbatim subset of the vendor's own record (its status
+ * string, platform, version, region, owner pseudonyms), kept as evidence of what the registry said. Nothing joins on
+ * it and RegulAIt never writes it from anything but the vendor's response. People in it are pseudonyms only.
+ */
+export const agentRegistryRecords = pgTable(
+  "agent_registry_records",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => discoverySources.id, { onDelete: "cascade" }),
+    registry: text("registry", { enum: AGENT_REGISTRIES }).notNull(),
+    /** the vendor's own id for the agent (an object id, a resource name, an ARN) */
+    externalId: text("external_id").notNull(),
+    displayName: text("display_name").notNull(),
+    description: text("description"),
+    vendorAttributes: jsonb("vendor_attributes").$type<Record<string, string | string[] | boolean | null>>().notNull().default(sql`'{}'::jsonb`),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    /** set when a complete read of the registry no longer lists it; cleared when it is listed again */
+    absentSince: timestamp("absent_since", { withTimezone: true }),
+    lastRunId: uuid("last_run_id").references(() => discoveryRuns.id, { onDelete: "set null" }),
+    /** the agent it was imported as; null until imported. ON DELETE SET NULL: deleting the agent re-opens the record */
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    importedAt: timestamp("imported_at", { withTimezone: true }),
+    importedByUserId: uuid("imported_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    uniqueIndex("agent_registry_records_vendor_uq").on(t.sourceId, t.registry, t.externalId),
+    uniqueIndex("agent_registry_records_agent_uq").on(t.agentId),
+    index("agent_registry_records_open_idx").on(t.lastSeenAt).where(sql`${t.agentId} IS NULL`),
+    check("agent_registry_records_registry_check", sql`${t.registry} IN ('entra_agent_id', 'agent_365', 'gemini_enterprise', 'bedrock_agentcore')`),
+    check("agent_registry_records_external_id_check", sql`char_length(${t.externalId}) BETWEEN 1 AND 2048`),
+    check("agent_registry_records_display_name_check", sql`char_length(${t.displayName}) BETWEEN 1 AND 256`),
+    check("agent_registry_records_description_check", sql`${t.description} IS NULL OR char_length(${t.description}) <= 1000`),
+    check("agent_registry_records_attributes_check", sql`jsonb_typeof(${t.vendorAttributes}) = 'object' AND pg_column_size(${t.vendorAttributes}) <= 8192`),
+    // an imported record says when; a record whose agent was deleted keeps that time (agent_id is set null) and may be imported again
+    check("agent_registry_records_imported_check", sql`${t.agentId} IS NULL OR ${t.importedAt} IS NOT NULL`),
+  ],
+);
+
+
+// ===== ADR-0334 (lane E16): managed browser extension governance ============================================
+// Migration `pending/browser_governance.sql`. Off until an admin enables it (a `settings_relax` step-up, audited).
+// Single-tenant deployment: like the other register tables (0281 header), no tenant column. Row-level security is
+// FORCED on all seven tables (#867 review): admins, `system_task` and migrations see every row; an extension's request
+// (`credential_request`) reads the settings, rules and tokens and reaches only its own device row and evidence.
+export const BROWSER_GOVERNANCE_MODES = ["enforce", "audit"] as const;
+/** how an evidence row's person was established (#867 review); identity-provider verification is a follow-up */
+export const BROWSER_ATTRIBUTIONS = ["device_asserted"] as const;
+/** the transaction-local setting the gateway sets to the authenticated extension's workload identity (RLS) */
+export const BROWSER_IDENTITY_SETTING = "regulait.browser_identity_id";
+
+/** The one settings row (id = 1). Every column defaults to the strict value (ADR-0180). */
+export const browserGovernanceSettings = pgTable(
+  "browser_governance_settings",
+  {
+    id: smallint("id").primaryKey().default(1),
+    enabled: boolean("enabled").notNull().default(false),
+    /** `audit` (decide and record, never block) is a relaxation of `enforce` */
+    mode: text("mode", { enum: BROWSER_GOVERNANCE_MODES }).notNull().default("enforce"),
+    promptCaptureEnabled: boolean("prompt_capture_enabled").notNull().default(false),
+    /** owner decision B2: captured prompts older than this are deleted by the retention sweep; longer is a step-up */
+    promptCaptureRetentionDays: integer("prompt_capture_retention_days").notNull().default(30),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [check("browser_governance_settings_singleton", sql`${t.id} = 1`)],
+);
+export type BrowserGovernanceSettingsRow = typeof browserGovernanceSettings.$inferSelect;
+
+/** An admin's decision for one catalogue site. A site with no row is denied (`no_site_rule`). */
+export const browserSiteRules = pgTable("browser_site_rules", {
+  /** a BROWSER_SITE_CATALOGUE_IDS value (a CHECK holds the list) */
+  siteId: text("site_id").primaryKey(),
+  decision: text("decision", { enum: ["allow", "deny"] }).notNull(),
+  setBy: uuid("set_by").references(() => users.id, { onDelete: "set null" }),
+  setAt: timestamp("set_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** The account domains one site requires the browser profile to be signed in with (a join table, ADR-0200 3NF). */
+export const browserSiteAccountDomains = pgTable(
+  "browser_site_account_domains",
+  {
+    siteId: text("site_id")
+      .notNull()
+      .references(() => browserSiteRules.siteId, { onDelete: "cascade" }),
+    domain: text("domain").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.siteId, t.domain] })],
+);
+
+/** A capped bulk enrolment token (`rgbe_`), delivered in the extension's managed storage; only its SHA-256 is kept. */
+export const browserEnrolmentTokens = pgTable(
+  "browser_enrolment_tokens",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    label: text("label").notNull(),
+    tokenHash: text("token_hash").notNull(),
+    deviceCap: integer("device_cap").notNull(),
+    /** a deliberate counter (ADR-0200 exception): the cap is enforced under this row's FOR UPDATE lock, and it counts
+     * every registration ever made, revoked devices included, which a count of `browser_devices` rows would not */
+    devicesEnrolled: integer("devices_enrolled").notNull().default(0),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("browser_enrolment_tokens_hash_uq").on(t.tokenHash)],
+);
+export type BrowserEnrolmentTokenRow = typeof browserEnrolmentTokens.$inferSelect;
+
+/**
+ * One installed extension. Its key and tokens are its workload identity's (kind `browser_extension`, bound through
+ * S6's one-key-one-identity path): this row adds only what the device is and which token enrolled it. Devices are
+ * revoked, never deleted, so the evidence rows below always name one.
+ */
+export const browserDevices = pgTable(
+  "browser_devices",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tokenId: uuid("token_id")
+      .notNull()
+      .references(() => browserEnrolmentTokens.id, { onDelete: "restrict" }),
+    identityId: uuid("identity_id")
+      .notNull()
+      .references(() => workloadIdentities.id, { onDelete: "restrict" }),
+    os: text("os").notNull(),
+    browserMajor: integer("browser_major").notNull(),
+    extensionVersion: text("extension_version").notNull(),
+    registeredAt: timestamp("registered_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: uuid("revoked_by").references(() => users.id, { onDelete: "set null" }),
+    /** #867 review: the first profile account the device presented, as its keyed pseudonym (point-in-time evidence,
+     * ADR-0200 exception); every later request must present the same account */
+    boundSubject: text("bound_subject"),
+    /** the person that account matched when the device was bound (null: it matched nobody, owner decision B1) */
+    boundUserId: uuid("bound_user_id").references(() => users.id, { onDelete: "set null" }),
+    boundAt: timestamp("bound_at", { withTimezone: true }),
+  },
+  (t) => [uniqueIndex("browser_devices_identity_uq").on(t.identityId), index("browser_devices_token_idx").on(t.tokenId)],
+);
+export type BrowserDeviceRow = typeof browserDevices.$inferSelect;
+
+/**
+ * One policy breach reported by an extension. APPEND-ONLY EVIDENCE (a trigger refuses UPDATE, DELETE and TRUNCATE).
+ * Point-in-time attribution, the ADR-0200 evidence exception: `user_id` is the person the profile account matched
+ * when the event arrived, `subject_pseudonym` the keyed hash of that account, `conversation_ref` the keyed hash of
+ * the site and path, and `rule_ids` the dlp.secret.* ids that matched (code constants, not references). No prompt
+ * text, path or account name is stored.
+ */
+export const browserEvents = pgTable(
+  "browser_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => browserDevices.id, { onDelete: "restrict" }),
+    eventId: uuid("event_id").notNull(),
+    kind: text("kind").notNull(),
+    outcome: text("outcome").notNull(),
+    code: text("code").notNull(),
+    siteId: text("site_id").notNull(),
+    ruleIds: text("rule_ids").array().notNull(),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
+    subjectPseudonym: text("subject_pseudonym").notNull(),
+    conversationRef: text("conversation_ref"),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+    /** the audit-chain row of the batch this event arrived in (`audit_log` carries no FKs by design) */
+    auditId: uuid("audit_id").notNull(),
+    /** how the person was established: `device_asserted` (the device's bound profile account) is the only kind yet */
+    attribution: text("attribution", { enum: BROWSER_ATTRIBUTIONS }).notNull().default("device_asserted"),
+  },
+  (t) => [
+    uniqueIndex("browser_events_device_event_uq").on(t.deviceId, t.eventId),
+    index("browser_events_received_idx").on(t.receivedAt),
+    index("browser_events_user_idx").on(t.userId, t.receivedAt),
+  ],
+);
+export type BrowserEventRow = typeof browserEvents.$inferSelect;
+
+/**
+ * One captured prompt, only while an admin has turned prompt capture on (a step-up relaxation, audited) and the
+ * extension shows its notice. APPEND-ONLY EVIDENCE, text enveloped under REGULAIT_DATA_KEY. Point-in-time attribution
+ * as for `browser_events`.
+ */
+export const browserPromptCaptures = pgTable(
+  "browser_prompt_captures",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => browserDevices.id, { onDelete: "restrict" }),
+    captureId: uuid("capture_id").notNull(),
+    siteId: text("site_id").notNull(),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
+    subjectPseudonym: text("subject_pseudonym").notNull(),
+    conversationRef: text("conversation_ref").notNull(),
+    textCiphertext: text("text_ciphertext").notNull(),
+    textChars: integer("text_chars").notNull(),
+    capturedAt: timestamp("captured_at", { withTimezone: true }).notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+    auditId: uuid("audit_id").notNull(),
+    attribution: text("attribution", { enum: BROWSER_ATTRIBUTIONS }).notNull().default("device_asserted"),
+  },
+  (t) => [uniqueIndex("browser_prompt_captures_device_capture_uq").on(t.deviceId, t.captureId), index("browser_prompt_captures_received_idx").on(t.receivedAt)],
+);
+// ===== end ADR-0334 =================================================================================================
 
 // ---------------------------------------------------------------------------
 // ADR-0289 (builder lane L6) — the PM project / work-item importer (ADR-0054 §3).
@@ -17166,6 +17658,109 @@ export const endpointAddonSightingSecretTypes = pgTable(
 );
 // ===== end ADR-0332 =====
 
+// ===== ADR-0339 (lane E20) — the agent risk score, recomputed on every change =====
+// Migration `pending/agent_risk_scores.sql` (numbered at merge, ADR-0252). Database triggers on every write path of an
+// agent (the row, its tools, schedules, sub-agents, channels, skills, shares and grants, and a config activation) mark
+// the agent in `agent_risk_recompute_requests` in the change's own transaction, so no route can forget to; the
+// scheduled sweep (agent-risk.ts) scores each marked agent and appends an assessment with its audit row in one
+// transaction. Not tenant-scoped data (ADR-0234 scope): read through admin or steward routes only, so no RLS batch.
+import {
+  AGENT_RISK_BANDS as AGENT_RISK_BANDS_E20,
+  AGENT_RISK_TRIGGERS as AGENT_RISK_TRIGGERS_E20,
+} from "@regulait/shared";
+
+/** a pending recompute: one row per agent and reason; drained (deleted) by the sweep in the assessment's transaction */
+export const agentRiskRecomputeRequests = pgTable(
+  "agent_risk_recompute_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    builderAgentId: uuid("builder_agent_id").references(() => builderAgents.id, { onDelete: "cascade" }),
+    trigger: text("trigger", { enum: AGENT_RISK_TRIGGERS_E20 }).notNull(),
+    requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("agent_risk_recompute_requests_subject_check", sql`num_nonnulls(${t.agentId}, ${t.builderAgentId}) = 1`),
+    check(
+      "agent_risk_recompute_requests_trigger_check",
+      sql`${t.trigger} IN ('created', 'modified', 'published', 'access_changed', 'evidence_changed', 'imported', 'backfill', 'scheduled', 'manual')`,
+    ),
+    uniqueIndex("agent_risk_recompute_requests_agent_uq").on(t.agentId, t.trigger).where(sql`${t.agentId} IS NOT NULL`),
+    uniqueIndex("agent_risk_recompute_requests_builder_uq")
+      .on(t.builderAgentId, t.trigger)
+      .where(sql`${t.builderAgentId} IS NOT NULL`),
+    index("agent_risk_recompute_requests_requested_idx").on(t.requestedAt),
+  ],
+);
+export type AgentRiskRecomputeRequestRow = typeof agentRiskRecomputeRequests.$inferSelect;
+
+/**
+ * One assessment: append-only evidence (UPDATE and DELETE refused by trigger, except a parent agent's cascade;
+ * TRUNCATE refused). `score`, `band` and `method_version` are columns because the ranked list filters and sorts on them.
+ */
+export const agentRiskAssessments = pgTable(
+  "agent_risk_assessments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    builderAgentId: uuid("builder_agent_id").references(() => builderAgents.id, { onDelete: "cascade" }),
+    methodVersion: text("method_version").notNull(),
+    score: integer("score").notNull(),
+    band: text("band", { enum: AGENT_RISK_BANDS_E20 }).notNull(),
+    /** the reasons drained into this assessment (closed vocabulary values, not references) */
+    triggers: text("triggers").array().notNull(),
+    /**
+     * DELIBERATE EXCEPTION to third normal form (ADR-0200 addendum): a point-in-time evidence snapshot. The factors,
+     * combinations, reach and ranked fixes exactly as scored, so a later change to the agent or to the weights never
+     * rewrites what was shown. Source of truth for "what was the score then"; the live score is recomputed on read.
+     */
+    assessment: jsonb("assessment").notNull(),
+    /** sha256 (hex) of the canonical assessment, so an unchanged recompute is visible as unchanged */
+    assessmentDigest: text("assessment_digest").notNull(),
+    computedAt: timestamp("computed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("agent_risk_assessments_subject_check", sql`num_nonnulls(${t.agentId}, ${t.builderAgentId}) = 1`),
+    check("agent_risk_assessments_score_check", sql`${t.score} BETWEEN 0 AND 100`),
+    check("agent_risk_assessments_band_check", sql`${t.band} IN ('low', 'medium', 'high', 'critical')`),
+    check("agent_risk_assessments_method_check", sql`${t.methodVersion} ~ '^[a-z0-9.-]{1,32}$'`),
+    check("agent_risk_assessments_digest_check", sql`${t.assessmentDigest} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "agent_risk_assessments_triggers_check",
+      sql`cardinality(${t.triggers}) BETWEEN 1 AND 9 AND ${t.triggers} <@ ARRAY['created', 'modified', 'published', 'access_changed', 'evidence_changed', 'imported', 'backfill', 'scheduled', 'manual']::text[]`,
+    ),
+    index("agent_risk_assessments_agent_idx").on(t.agentId, t.computedAt, t.id).where(sql`${t.agentId} IS NOT NULL`),
+    index("agent_risk_assessments_builder_idx")
+      .on(t.builderAgentId, t.computedAt, t.id)
+      .where(sql`${t.builderAgentId} IS NOT NULL`),
+  ],
+);
+export type AgentRiskAssessmentRow = typeof agentRiskAssessments.$inferSelect;
+
+/**
+ * The ranked list's read path: one pointer per agent to its newest assessment, moved forward by a database trigger on
+ * every append (never by application code), so the list reads one row per agent instead of sorting the whole history.
+ * References only (third normal form): the score and band are read through the pointer.
+ */
+export const agentRiskLatest = pgTable(
+  "agent_risk_latest",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    builderAgentId: uuid("builder_agent_id").references(() => builderAgents.id, { onDelete: "cascade" }),
+    assessmentId: uuid("assessment_id")
+      .notNull()
+      .references(() => agentRiskAssessments.id, { onDelete: "cascade" }),
+  },
+  (t) => [
+    check("agent_risk_latest_subject_check", sql`num_nonnulls(${t.agentId}, ${t.builderAgentId}) = 1`),
+    uniqueIndex("agent_risk_latest_agent_uq").on(t.agentId).where(sql`${t.agentId} IS NOT NULL`),
+    uniqueIndex("agent_risk_latest_builder_uq").on(t.builderAgentId).where(sql`${t.builderAgentId} IS NOT NULL`),
+    uniqueIndex("agent_risk_latest_assessment_uq").on(t.assessmentId),
+  ],
+);
+// ===== end ADR-0339 =====
+
 // ===== ADR-0342 (lane E23): process analytics read model =====
 // A MEASURED READ MODEL (ADR-0200 addendum). Source of truth: `workflow_events` (the append-only per-instance history)
 // replayed through the pure workflow kernel against the instance's snapshotted definition. The projector
@@ -17441,6 +18036,84 @@ export const agentRiskProofFollowups = pgTable(
   ],
 );
 export type AgentRiskProofFollowupRow = typeof agentRiskProofFollowups.$inferSelect;
+// ADR-0345 §9 — geography as a factor in risk tiering. Jurisdictions, the obligations each brings into the register,
+// and the jurisdictions a use case is deployed or used in, as DATA (seeded by the migration, admin-editable).
+
+/** A jurisdiction. `parent_code` encloses it (US for US-CO) and its obligations apply too; `global` applies everywhere. */
+export const jurisdictions = pgTable(
+  "jurisdictions",
+  {
+    // `id` keys the row for platform tooling (the ADR-0233 existing-rows report); `code` is the natural key the
+    // ADR-0158 feed, the obligations and the use-case join reference.
+    id: uuid("id").primaryKey().defaultRandom(),
+    code: text("code").notNull().unique("jurisdictions_code_uq"),
+    name: text("name").notNull(),
+    parentCode: text("parent_code").references((): AnyPgColumn => jurisdictions.code, { onDelete: "restrict" }),
+    global: boolean("global").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("jurisdictions_code_check", sql`${t.code} ~ '^[A-Z][A-Za-z]{1,12}(-[A-Z0-9]{2,4})?$'`),
+    check("jurisdictions_name_check", sql`length(btrim(${t.name})) BETWEEN 1 AND 120`),
+    check("jurisdictions_parent_check", sql`${t.parentCode} IS NULL OR ${t.parentCode} <> ${t.code}`),
+    index("jurisdictions_parent_idx").on(t.parentCode),
+  ],
+);
+export type JurisdictionDbRow = typeof jurisdictions.$inferSelect;
+
+/**
+ * One obligation a jurisdiction brings in: a sourced ADR-0158 feed instrument answered by one agent risk's controls
+ * and proofs. `regulatory_update_key` and `agent_risk_key` reference versioned code catalogues, so they carry no FK
+ * (ADR-0200 exception; CHECKs pin their shape and the gateway refuses an unknown key). `tier_floor` is the lowest tier
+ * a use case in scope may carry (null = it does not move the tier).
+ */
+export const jurisdictionObligations = pgTable(
+  "jurisdiction_obligations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    jurisdictionCode: text("jurisdiction_code")
+      .notNull()
+      .references(() => jurisdictions.code, { onDelete: "cascade" }),
+    regulatoryUpdateKey: text("regulatory_update_key").notNull(),
+    agentRiskKey: text("agent_risk_key", { enum: AGENT_RISK_KEYS }).notNull(),
+    // the ADR-0085 screening tiers (`EU_AI_ACT_TIER_VALUES`, the mirror of `EU_AI_ACT_TIERS`); the CHECK repeats them
+    tierFloor: text("tier_floor", { enum: EU_AI_ACT_TIER_VALUES }),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("jurisdiction_obligations_update_key_check", sql`${t.regulatoryUpdateKey} ~ '^[a-z0-9]+(-[a-z0-9]+)*$'`),
+    check(
+      "jurisdiction_obligations_risk_check",
+      sql`${t.agentRiskKey} IN ('prompt_injection', 'data_leakage', 'tool_misuse', 'hallucination', 'access_control_failure', 'autonomous_overreach', 'supply_chain', 'memory_context_exploit', 'infrastructure_baseline', 'governance_gap')`,
+    ),
+    check(
+      "jurisdiction_obligations_tier_check",
+      sql`${t.tierFloor} IS NULL OR ${t.tierFloor} IN ('minimal', 'limited', 'high', 'prohibited')`,
+    ),
+    uniqueIndex("jurisdiction_obligations_uq").on(t.jurisdictionCode, t.regulatoryUpdateKey, t.agentRiskKey),
+  ],
+);
+export type JurisdictionObligationDbRow = typeof jurisdictionObligations.$inferSelect;
+
+/** The jurisdictions a use case is deployed or used in (a join table; none declared = every jurisdiction applies). */
+export const aiUseCaseJurisdictions = pgTable(
+  "ai_use_case_jurisdictions",
+  {
+    useCaseId: uuid("use_case_id")
+      .notNull()
+      .references(() => aiUseCases.id, { onDelete: "cascade" }),
+    jurisdictionCode: text("jurisdiction_code")
+      .notNull()
+      .references(() => jurisdictions.code, { onDelete: "restrict" }),
+    addedByUserId: uuid("added_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    addedAt: timestamp("added_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ name: "ai_use_case_jurisdictions_pk", columns: [t.useCaseId, t.jurisdictionCode] }),
+    index("ai_use_case_jurisdictions_code_idx").on(t.jurisdictionCode),
+  ],
+);
 // ===== end ADR-0345 =====
 
 // ===== ADR-0363 (lane E44): customer sensitivity labels — migration `sensitivity_labels` (pending, numbered at merge) =====
