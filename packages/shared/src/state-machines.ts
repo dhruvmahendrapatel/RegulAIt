@@ -7,6 +7,7 @@
 import { defineMachine, type StateMachine } from "./state-machine.js";
 import { MCP_ADMISSION_STATES } from "./mcp-admission.js";
 import { INCIDENT_STATUSES } from "./accountability.js";
+import { ENDPOINT_COMMAND_EXCEPTION_MACHINE } from "./endpoint-command-exceptions.js";
 import { CLASSIFIER_VERSION_STATUSES } from "./custom-classifiers.js";
 import { AGENT_NHI_LINK_STATUSES } from "./agent-identity.js";
 
@@ -679,6 +680,7 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [DETECTION_INCIDENT_MACHINE.def.id]: DETECTION_INCIDENT_MACHINE,
   [DETECTION_RESPONSE_MACHINE.def.id]: DETECTION_RESPONSE_MACHINE,
   [RULE_STEP_SUGGESTION_MACHINE.def.id]: RULE_STEP_SUGGESTION_MACHINE,
+  [ENDPOINT_COMMAND_EXCEPTION_MACHINE.def.id]: ENDPOINT_COMMAND_EXCEPTION_MACHINE,
   [ROBOT_VERSION_MACHINE.def.id]: ROBOT_VERSION_MACHINE,
   [ROBOT_MACHINE.def.id]: ROBOT_MACHINE,
   [ROBOT_RUN_MACHINE.def.id]: ROBOT_RUN_MACHINE,

@@ -123,6 +123,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   // --- governance decisions and overrides (pillar 1) ---
   [s.approvals, ["decisionReason"]],
   [s.approvalDelegations, ["reason"]],
+  // ADR-0350 (lane E31) — why a per-device command-rule exception is asked for, and the approver's note
+  [s.endpointCommandExceptions, ["reason", "decisionReason"]],
   [s.agentRevocations, ["reason"]],
   [s.connectorRevocations, ["reason"]],
   // ADR-0327 addendum — why the author proposed a decision-table version
