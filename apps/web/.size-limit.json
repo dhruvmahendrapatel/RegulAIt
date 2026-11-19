@@ -39,6 +39,12 @@
     "limit": "10.3 kB"
   },
   {
+    "name": "chunk: AddonRemovalsPage",
+    "path": "dist/assets/AddonRemovalsPage-????????.js",
+    "gzip": true,
+    "limit": "7.4 kB"
+  },
+  {
     "name": "chunk: AgentStewardship",
     "path": "dist/assets/AgentStewardship-????????.js",
     "gzip": true,
@@ -229,6 +235,12 @@
     "path": "dist/assets/RunGraph-????????.js",
     "gzip": true,
     "limit": "5.5 kB"
+  },
+  {
+    "name": "chunk: SaasAppLinksPage",
+    "path": "dist/assets/SaasAppLinksPage-????????.js",
+    "gzip": true,
+    "limit": "6.1 kB"
   },
   {
     "name": "chunk: SpdxFieldsPanel",
