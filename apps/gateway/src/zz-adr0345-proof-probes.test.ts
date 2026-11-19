@@ -1,0 +1,104 @@
+/**
+ * ADR-0345 (lane E26) slice 2c, part 1 — the gateway-probe harness, against a real database.
+ *
+ *  - each built probe passes on the shipped secure defaults, through the enforcing code the live path calls;
+ *  - NEGATIVE: relaxing the tenant control a probe reads makes it fail (guardrail mode, pin mode), and an unbuilt
+ *    probe is `not_run`;
+ *  - the drift probe leaves no fixture behind (its transaction always rolls back);
+ *  - through the runner, a probe result is recorded as evidence like any other engine.
+ */
+import { beforeAll, describe, expect, it } from "vitest";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { and, createDb, eq, guardrailConfigs, isNull, mcpServers, orgSettings, runMigrations, runWithRlsSystem, sql, type Db } from "@regulait/db";
+import { AGENT_RISK_GATEWAY_PROBES, AGENT_RISK_PROOF_ORIGIN_TAG, agentRiskProofs } from "@regulait/shared";
+import { AGENT_RISK_PROBES_NOT_BUILT, runGatewayProbe } from "./agent-risk-proof-probes.js";
+import { runAgentRiskProofEngine } from "./agent-risk-proof-runner.js";
+
+const DATABASE_URL = process.env.DATABASE_URL;
+if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
+const migrationsFolder = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations");
+
+let db: Db;
+const sys = <T>(fn: () => Promise<T>) => runWithRlsSystem("system_task", "test.adr0345.probes", fn);
+const BUILT = AGENT_RISK_GATEWAY_PROBES.filter((p) => !AGENT_RISK_PROBES_NOT_BUILT.includes(p));
+
+class Rollback extends Error {}
+/** run `fn` against a relaxed setting inside a transaction that is always rolled back */
+async function underRelaxed<T>(relax: (tx: Db) => Promise<unknown>, fn: (tx: Db) => Promise<T>): Promise<T> {
+  let out: T | undefined;
+  try {
+    await db.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Db;
+      await relax(tx);
+      out = await fn(tx);
+      throw new Rollback();
+    });
+  } catch (err) {
+    if (!(err instanceof Rollback)) throw err;
+  }
+  return out as T;
+}
+
+beforeAll(async () => {
+  db = createDb(DATABASE_URL);
+  await runMigrations(db, migrationsFolder);
+}, 120_000);
+
+describe("ADR-0345 slice 2c: gateway probes on the secure defaults", () => {
+  it.each(BUILT)("%s passes through the enforcing code", async (probe) => {
+    const r = await sys(() => runGatewayProbe(db, probe));
+    expect(r.outcome, JSON.stringify(r.detail)).toBe("pass");
+  });
+
+  it("NEGATIVE: a probe whose harness is not built yet is not_run", async () => {
+    for (const probe of AGENT_RISK_PROBES_NOT_BUILT) {
+      expect(await sys(() => runGatewayProbe(db, probe))).toEqual({ outcome: "not_run", detail: { reason: "probe_not_built", probe } });
+    }
+  });
+
+  it("the drift probe commits no fixture server", async () => {
+    await sys(() => runGatewayProbe(db, "mcp_definition_drift"));
+    const left = await db.select({ id: mcpServers.id }).from(mcpServers).where(sql`${mcpServers.name} like ${`${AGENT_RISK_PROOF_ORIGIN_TAG}-%`}`);
+    expect(left).toEqual([]);
+  });
+});
+
+describe("ADR-0345 slice 2c: a relaxed control fails its probe", () => {
+  it("NEGATIVE: prompt-injection guardrail at warn fails the hidden-instruction probe", async () => {
+    const r = await sys(() =>
+      underRelaxed(
+        async (tx) => {
+          const orgWhere = and(eq(guardrailConfigs.scope, "org"), isNull(guardrailConfigs.scopeId));
+          const [row] = await tx.select({ id: guardrailConfigs.id }).from(guardrailConfigs).where(orgWhere);
+          if (row) await tx.update(guardrailConfigs).set({ promptInjectionMode: "warn" }).where(orgWhere);
+          else await tx.insert(guardrailConfigs).values({ scope: "org", scopeId: null, promptInjectionMode: "warn" });
+        },
+        (tx) => runGatewayProbe(tx, "hidden_instruction_in_document"),
+      ),
+    );
+    expect(r.outcome).toBe("fail");
+  });
+
+  it("NEGATIVE: definition pin mode at warn fails the drift probe", async () => {
+    const r = await sys(() =>
+      underRelaxed(
+        (tx) => tx.update(orgSettings).set({ mcpDefinitionPinMode: "warn" }),
+        (tx) => runGatewayProbe(tx, "mcp_definition_drift"),
+      ),
+    );
+    expect(r).toMatchObject({ outcome: "fail", detail: { refused: false } });
+  });
+});
+
+describe("ADR-0345 slice 2c: through the runner", () => {
+  it("every built probe's catalogue proof runs through runAgentRiskProofEngine and passes", async () => {
+    const entries = agentRiskProofs().filter((p) => p.proof.engine === "gateway_probe" && BUILT.includes(p.proof.probe!));
+    expect(entries.length).toBe(BUILT.length);
+    for (const { proof } of entries) {
+      const r = await sys(() => runAgentRiskProofEngine(db, proof, new Date()));
+      expect(r.outcome, `${proof.key} ${JSON.stringify(r.detail)}`).toBe("pass");
+    }
+  });
+});
+
