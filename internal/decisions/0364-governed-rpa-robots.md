@@ -539,10 +539,26 @@ S3 ships §5 and the §7 egress, secret and evidence controls for scripted (`ste
   Go 1.27.4 on distroless) are registered as **unpublished** engine images. They are built twice and compared in CI,
   and never pushed until published. `robotRunnerImage()` reads the images lock, so a robot run is refused
   `robot_runner_unavailable` until the first publish.
-- **Free-form settings without a default.** `org_settings.freeform_browser_session_budget_usd` and
-  `freeform_browser_max_run_minutes` are NULL-only columns (CHECKs bound them to ≤ $1000 and 1–30 minutes once set).
-  No route sets them yet, because the owner has not chosen the values. Free-form browsing stays unreachable.
+- **Free-form limits** are set to the owner's values (addendum below):
+  - `org_settings.freeform_browser_session_budget_usd` defaults to 2, and `freeform_browser_max_run_minutes` to 30.
+  - `projects.freeform_browser_budget_usd` is the per-project override.
+  - The admin route that sets the override, as an audited settings change, ships with free-form browsing in S4.
 - **Follow-ups:**
   - Link the run's placement to the governed decision (the I4/I8 contract; S3 places an unlinked one).
   - Add the evidence retention sweep.
   - An expired review still leaves its version `in_review` (from S2).
+
+## Addendum: free-form browsing limits (owner decision, 2026-11-19)
+
+This closes the two §4 questions left open with the owner:
+
+- **Maximum run time:** 30 minutes per free-form session. The existing ends still apply: the end of the agent's turn
+  and 5 minutes idle. Recorded as `org_settings.freeform_browser_max_run_minutes`, default 30, CHECK 1 to 30.
+- **Budget:** $2 per session by default, counted against the project's budget. An admin may change it per project
+  (`projects.freeform_browser_budget_usd`; NULL means the org default). The change is audited as a settings change, a
+  `settings_relax` step-up when it raises the amount. Recorded as `org_settings.freeform_browser_session_budget_usd`,
+  default 2.
+- **Unchanged:** free-form browsing stays **off by default**, with the per-user admin opt-in (`freeformBrowserUsers`,
+  empty by default), the high-risk class, quorum approval and the authorised-targets egress of §4.
+- **Where it lands:** the limits are stored in S3. The free-form server, which enforces them, and the per-project admin
+  route land together in S4.

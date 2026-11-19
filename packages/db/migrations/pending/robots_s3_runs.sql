@@ -7,8 +7,10 @@
 --  - robot_run_evidence: one row per stored evidence item (a redacted screenshot, a download, the run's egress log).
 --    The bytes live in the content-addressed store under `sha256/<hex>`; the row is append-only (no UPDATE, no
 --    DELETE, no TRUNCATE): evidence leaves only by retention expiry, a later slice's recorded sweep.
---  - org_settings.freeform_browser_session_budget_usd / freeform_browser_max_run_minutes: NULL until an admin sets
---    them. NULL means free-form browser control is refused (fail closed); there is deliberately no default.
+--  - org_settings.freeform_browser_session_budget_usd / freeform_browser_max_run_minutes: the owner's limits for a
+--    free-form browser session (decision 2026-11-19, ADR-0364 addendum): $2 per session against the project budget,
+--    30 minutes at most. Free-form browsing itself stays off (per-user opt-in, §4); these bound it once it exists.
+--  - projects.freeform_browser_budget_usd: an admin's per-project override of that $2 (NULL = the org default).
 
 ALTER TABLE "robot_runs" ADD COLUMN IF NOT EXISTS "execution_placement_id" uuid REFERENCES "execution_placements"("id") ON DELETE RESTRICT;
 --> statement-breakpoint
@@ -71,19 +73,26 @@ DROP POLICY IF EXISTS robot_run_evidence_insert ON "robot_run_evidence";
 CREATE POLICY robot_run_evidence_insert ON "robot_run_evidence" FOR INSERT
   WITH CHECK ((SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
 --> statement-breakpoint
-ALTER TABLE "org_settings" ADD COLUMN IF NOT EXISTS "freeform_browser_session_budget_usd" double precision;
+ALTER TABLE "org_settings" ADD COLUMN IF NOT EXISTS "freeform_browser_session_budget_usd" double precision NOT NULL DEFAULT 2;
 --> statement-breakpoint
-ALTER TABLE "org_settings" ADD COLUMN IF NOT EXISTS "freeform_browser_max_run_minutes" integer;
+ALTER TABLE "org_settings" ADD COLUMN IF NOT EXISTS "freeform_browser_max_run_minutes" integer NOT NULL DEFAULT 30;
 --> statement-breakpoint
 ALTER TABLE "org_settings" DROP CONSTRAINT IF EXISTS "org_settings_freeform_browser_budget_check";
 --> statement-breakpoint
 ALTER TABLE "org_settings" ADD CONSTRAINT "org_settings_freeform_browser_budget_check"
-  CHECK ("freeform_browser_session_budget_usd" IS NULL OR ("freeform_browser_session_budget_usd" > 0 AND "freeform_browser_session_budget_usd" <= 1000));
+  CHECK ("freeform_browser_session_budget_usd" > 0 AND "freeform_browser_session_budget_usd" <= 1000);
 --> statement-breakpoint
 ALTER TABLE "org_settings" DROP CONSTRAINT IF EXISTS "org_settings_freeform_browser_minutes_check";
 --> statement-breakpoint
 ALTER TABLE "org_settings" ADD CONSTRAINT "org_settings_freeform_browser_minutes_check"
-  CHECK ("freeform_browser_max_run_minutes" IS NULL OR ("freeform_browser_max_run_minutes" >= 1 AND "freeform_browser_max_run_minutes" <= 30));
+  CHECK ("freeform_browser_max_run_minutes" >= 1 AND "freeform_browser_max_run_minutes" <= 30);
+--> statement-breakpoint
+ALTER TABLE "projects" ADD COLUMN IF NOT EXISTS "freeform_browser_budget_usd" double precision;
+--> statement-breakpoint
+ALTER TABLE "projects" DROP CONSTRAINT IF EXISTS "projects_freeform_browser_budget_check";
+--> statement-breakpoint
+ALTER TABLE "projects" ADD CONSTRAINT "projects_freeform_browser_budget_check"
+  CHECK ("freeform_browser_budget_usd" IS NULL OR ("freeform_browser_budget_usd" > 0 AND "freeform_browser_budget_usd" <= 1000));
 --> statement-breakpoint
 -- the offer a robot run was placed under names that run (robot_browser_isolation.sql adds the column; it sorts before
 -- robots.sql, so the foreign key is added here, once robot_runs exists)

@@ -4016,6 +4016,8 @@ export const projects = pgTable("projects", {
    * orphans its children back to ungrouped, never deletes project rows. */
   initiativeId: uuid("initiative_id").references(() => initiatives.id, { onDelete: "set null" }),
   budgetUsd: doublePrecision("budget_usd"),
+  /** ADR-0364 addendum: an admin's per-project override of the free-form browser session budget (NULL = org default) */
+  freeformBrowserBudgetUsd: doublePrecision("freeform_browser_budget_usd"),
   budgetApproverUserId: uuid("budget_approver_user_id").references(() => users.id, {
     onDelete: "set null",
   }),
@@ -4875,11 +4877,12 @@ export const orgSettings = pgTable(
     /** the budget a run gets when it names none (USD); higher relaxes it */
     engineDefaultRunBudgetUsd: doublePrecision("engine_default_run_budget_usd").notNull().default(2),
     /**
-     * ADR-0364 S3: free-form browser control's per-session budget and maximum run time. NULL until an admin sets them
-     * (owner decision pending); NULL means free-form browsing is refused. Deliberately no default.
+     * ADR-0364 addendum (owner decision 2026-11-19): a free-form browser session's default budget ($2, counted against
+     * the project budget; an admin may override it per project, `projects.freeform_browser_budget_usd`) and its maximum
+     * run time (30 minutes, besides the end-of-turn and 5-minute-idle ends). Free-form browsing itself stays off.
      */
-    freeformBrowserSessionBudgetUsd: doublePrecision("freeform_browser_session_budget_usd"),
-    freeformBrowserMaxRunMinutes: integer("freeform_browser_max_run_minutes"),
+    freeformBrowserSessionBudgetUsd: doublePrecision("freeform_browser_session_budget_usd").notNull().default(2),
+    freeformBrowserMaxRunMinutes: integer("freeform_browser_max_run_minutes").notNull().default(30),
     /** a run whose budget is above this waits for approval (USD); higher relaxes it */
     engineRunApprovalThresholdUsd: doublePrecision("engine_run_approval_threshold_usd").notNull().default(10),
     /** raw engine reports kept (encrypted) this many days; longer relaxes it */
