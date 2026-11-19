@@ -21,12 +21,16 @@ import { createRobotsMcpServer, ROBOTS_SERVER_URL } from "./robots-mcp.js";
 /** the governed call a connect serves (the person, the project, the agent and grant), or null (a sync or a probe) */
 export type FirstPartyCallContext = NonNullable<McpEgressDeps["placement"]> | null;
 
-const FIRST_PARTY_SERVERS: ReadonlyMap<string, (db: Db, serverId: string, call: FirstPartyCallContext) => Server> = new Map([
-  [ROBOTS_SERVER_URL, createRobotsMcpServer],
-]);
+type FirstPartyFactory = (db: Db, serverId: string, call: FirstPartyCallContext) => Server;
+/** built on first use, not at module init, so a module loaded alone never reads robots-mcp's bindings mid-cycle */
+let firstPartyServers: ReadonlyMap<string, FirstPartyFactory> | null = null;
+function servers(): ReadonlyMap<string, FirstPartyFactory> {
+  firstPartyServers ??= new Map<string, FirstPartyFactory>([[ROBOTS_SERVER_URL, createRobotsMcpServer]]);
+  return firstPartyServers;
+}
 
 export function isFirstPartyServerUrl(url: string): boolean {
-  return FIRST_PARTY_SERVERS.has(url);
+  return servers().has(url);
 }
 
 /** open a client session to the in-process server named by `url`; null = not a first-party server we serve */
@@ -36,7 +40,7 @@ export async function connectFirstPartyServer(
   deadlineMs: number,
   call: FirstPartyCallContext = null,
 ): Promise<Client | null> {
-  const factory = FIRST_PARTY_SERVERS.get(row.url);
+  const factory = servers().get(row.url);
   if (!factory) return null;
   const server = factory(db, row.id, call);
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();

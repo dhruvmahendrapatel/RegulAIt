@@ -30,7 +30,9 @@ import {
 } from "@regulait/db";
 import { robotContentDigest, robotToolName } from "@regulait/shared";
 import type { FirstPartyCallContext } from "./mcp-first-party.js";
-import { startRobotRun, type RobotRunDeps } from "./robot-runs.js";
+// robot-runs.ts reaches the stdio and placement modules, which reach mcp-egress → mcp-first-party → this module:
+// it is loaded on the first tools/call, never at import (the import-cycle smoke, M-068)
+import type { RobotRunDeps } from "./robot-runs.js";
 
 /** the run deps (the data key and the evidence store), set once at startup by `registerRobotRoutes` */
 let runDeps: RobotRunDeps = { dataKey: undefined, store: null };
@@ -141,6 +143,7 @@ export function createRobotsMcpServer(db: Db, serverId: string, call: FirstParty
       return refusal("robot-run-needs-project", `'${name}' runs only from a governed call attributed to a project; nothing ran.`);
     }
     const args = (req.params.arguments ?? {}) as Record<string, unknown>;
+    const { startRobotRun } = await import("./robot-runs.js");
     const outcome = await startRobotRun(
       db,
       {
