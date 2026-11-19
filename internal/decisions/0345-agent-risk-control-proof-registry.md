@@ -1,6 +1,6 @@
 # ADR-0345: Agent risk register with controls and continuous proofs
 
-- **Status**: Accepted (slices 1, 2a and 2b implemented)
+- **Status**: Accepted (slices 1, 2a, 2b and 2c part 1 implemented)
 - **Date**: 2026-11-17
 - **Lane**: E26
 - **Related**: ADR-0085 (EU AI Act tier screening), ADR-0158 (regulatory intelligence feed), ADR-0180 (continuous assurance: A2 measurable conditions, `MEASUREMENT_STATES`), ADR-0057/0068 (continuous red-team, its statistics), ADR-0058 (compliance packs), ADR-0060 (hash-chained
@@ -126,7 +126,29 @@ What exists already:
        is a new pack version for the ADR-0243 owner (owner question below).
      - The ADR-0214 posture document gains a `riskProofs` section, shown as inputs to the adversarial objective. It
        does not change the published weights or any score (owner question below).
-   - Slice 2c: the gateway-probe harness for the eight probes, which record `not_run` until then.
+   - Slice 2c: the gateway-probe harness (`apps/gateway/src/agent-risk-proof-probes.ts`).
+     - A probe makes one governed decision through the enforcing function the live path calls, and passes only on
+       the refusal its assertion names. Nothing is a new runner or a second copy of a rule.
+     - Part 1 builds five probes:
+       - `hidden_instruction_in_document`: the org guardrail policy (`resolveGuardrailPolicy`) and the MCP output
+         phase's deterministic detectors (`runGuardrails`) on a document with a hidden instruction. It passes only
+         when `prompt_injection` blocks it. The async trained-detector path is not called, so a probe meters nothing.
+       - `tool_out_of_scope_argument` and `kill_switch_halted`: the policy kernel's `evaluate` on a synthetic granted
+         write call. Pass means a deny by the fixture data-scope rule, or by `execution-halted`. These two read no
+         tenant state: they prove the shipped kernel, so a modified build fails them.
+       - `mcp_definition_drift`: `definitionPinRefusal` against a sandbox server with a drifted pin. The fixture is
+         created inside a transaction that is always rolled back, so it is never visible or left behind, and its URL
+         is on the reserved `.invalid` TLD. It reads the org pin mode, so `warn` fails the probe.
+       - `untrusted_context_write`: the org write floor (`contentTrustWriteFloor`) through `evaluateContentTrust` on
+         untrusted content.
+     - The floor gates write tool calls. The shared-context write route (`POST /v1/projects/:projectId/context`) is
+       not gated by it. Catalogue v2 rewords the proof's assertion to what is enforced, so a pass does not overclaim.
+       The route gap is tracked as an issue for the ADR-0193 owner.
+     - Part 2 builds `approval_replay`, `approval_expired` and `loop_turn_cap`. Each needs the full dispatch path
+       (`executeGovernedToolCall`, an orchestration run) with sandbox fixtures. Until then each is `not_run`
+       (reason `probe_not_built`), which raises an alert, never a pass.
+     - Tagged traffic: the red-team `purpose` tag is a label only, and nothing excludes it from metering. Part 1
+       makes no metered call. Part 2 will tag its dispatches `risk-proof` the same way.
    - Slice 3: the read and settings APIs for the view. The UI belongs to a design builder and is a `KNOWN_UI_GAPS`
      entry tracked on #453.
 9. **Geography is a factor in risk tiering.** Owner, 2026-11-17, from the competitor gap audit (C5). The
@@ -204,3 +226,5 @@ What exists already:
 - Should a failed proof also block promotion through the ADR-0057 `automated_check` gate, or only alert and queue?
   The default is alert and queue.
 - Should the governance-gap review window default to 90 days?
+- Should the ADR-0193 trust floor also gate the shared-context write route? Today it gates write tool calls only, and
+  the memory proof's assertion (catalogue v2) says so.

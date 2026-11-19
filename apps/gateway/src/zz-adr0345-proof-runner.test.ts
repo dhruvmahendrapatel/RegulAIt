@@ -70,7 +70,8 @@ const deps = (state: Measurement["state"], over: Partial<AgentRiskProofDeps> = {
   ...over,
 });
 const metricProof = () => agentRiskProofs().find((p) => p.proof.engine === "assurance_metric")!;
-const probeProof = () => agentRiskProofs().find((p) => p.proof.engine === "gateway_probe")!;
+/** a gateway probe whose harness is not built yet (slice 2c part 2) */
+const probeProof = () => agentRiskProofs().find((p) => p.proof.engine === "gateway_probe" && p.proof.probe === "approval_replay")!;
 
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
@@ -186,9 +187,9 @@ describe("ADR-0345 slice 2a: a failure is raised, not filed", () => {
 });
 
 describe("ADR-0345 slice 2a: engines", () => {
-  it("NEGATIVE: a gateway probe has no harness yet, so it is not_run (never a pass)", async () => {
+  it("NEGATIVE: a gateway probe whose harness is not built yet is not_run (never a pass)", async () => {
     const r = await runAgentRiskProofEngine(db, probeProof().proof, new Date(), deps("pass"));
-    expect(r).toMatchObject({ outcome: "not_run", detail: { reason: "probe_harness_not_built" } });
+    expect(r).toMatchObject({ outcome: "not_run", detail: { reason: "probe_not_built" } });
   });
 
   it("NEGATIVE: an engine that throws is not_run, and the row keeps only the error class", async () => {
