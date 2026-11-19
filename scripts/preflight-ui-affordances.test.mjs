@@ -101,7 +101,9 @@ describe("affordance census: a notBuilt route counts only when the file defines 
     // revoke until the #453 vendor usage screen, the ADR-0337 §6 identifier removal and agent unlink until the
     // entitlement graph screen on #453, ADR-0364 S2's robot secret clear until the robot detail screen on #453, and the
     // three ADR-0350 (lane E31) device-group removals until the device-group screen on #453
+    // ADR-0311 (lane E1): the MCP endpoint's session-end DELETE, a 405 protocol answer that deletes nothing
     expect([...DELIBERATELY_API_ONLY.keys()]).toEqual([
+      "/mcp/:x",
       "/v1/mcp/authorised-targets/:x",
       "/v1/endpoint-device-groups/:x",
       "/v1/endpoint-device-groups/:x/members/:x",
