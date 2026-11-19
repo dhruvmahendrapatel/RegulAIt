@@ -120,7 +120,8 @@ CREATE POLICY "endpoint_command_exceptions_admin" ON "endpoint_command_exception
   USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
   WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
 --> statement-breakpoint
-CREATE OR REPLACE FUNCTION "regulait_endpoint_exception_terms_frozen"() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE OR REPLACE FUNCTION "regulait_endpoint_exception_terms_frozen"() RETURNS trigger LANGUAGE plpgsql
+  SET search_path = pg_catalog, public, pg_temp AS $$
 BEGIN
   IF NEW."device_id" IS DISTINCT FROM OLD."device_id"
      OR NEW."rule_id" IS DISTINCT FROM OLD."rule_id"
@@ -142,3 +143,9 @@ DROP TRIGGER IF EXISTS "endpoint_command_exceptions_terms_frozen" ON "endpoint_c
 CREATE TRIGGER "endpoint_command_exceptions_terms_frozen"
   BEFORE UPDATE ON "endpoint_command_exceptions"
   FOR EACH ROW EXECUTE FUNCTION "regulait_endpoint_exception_terms_frozen"();
+--> statement-breakpoint
+-- the frozen-terms trigger makes this a guarded table: a TRUNCATE would bypass it, so it is refused too (ADR-0185)
+DROP TRIGGER IF EXISTS "endpoint_command_exceptions_no_truncate" ON public."endpoint_command_exceptions";
+--> statement-breakpoint
+CREATE TRIGGER "endpoint_command_exceptions_no_truncate" BEFORE TRUNCATE ON public."endpoint_command_exceptions"
+  FOR EACH STATEMENT EXECUTE FUNCTION public.regulait_refuse_truncate();
