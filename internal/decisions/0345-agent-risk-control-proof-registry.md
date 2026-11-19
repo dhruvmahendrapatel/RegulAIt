@@ -1,6 +1,6 @@
 # ADR-0345: Agent risk register with controls and continuous proofs
 
-- **Status**: Accepted (slices 1, 2a, 2b and 2c part 1 implemented)
+- **Status**: Accepted (slices 1, 2a, 2b and 2c implemented)
 - **Date**: 2026-11-17
 - **Lane**: E26
 - **Related**: ADR-0085 (EU AI Act tier screening), ADR-0158 (regulatory intelligence feed), ADR-0180 (continuous assurance: A2 measurable conditions, `MEASUREMENT_STATES`), ADR-0057/0068 (continuous red-team, its statistics), ADR-0058 (compliance packs), ADR-0060 (hash-chained
@@ -144,11 +144,31 @@ What exists already:
      - The floor gates write tool calls. The shared-context write route (`POST /v1/projects/:projectId/context`) is
        not gated by it. Catalogue v2 rewords the proof's assertion to what is enforced, so a pass does not overclaim.
        The route gap is tracked as an issue for the ADR-0193 owner.
-     - Part 2 builds `approval_replay`, `approval_expired` and `loop_turn_cap`. Each needs the full dispatch path
-       (`executeGovernedToolCall`, an orchestration run) with sandbox fixtures. Until then each is `not_run`
-       (reason `probe_not_built`), which raises an alert, never a pass.
-     - Tagged traffic: the red-team `purpose` tag is a label only, and nothing excludes it from metering. Part 1
-       makes no metered call. Part 2 will tag its dispatches `risk-proof` the same way.
+     - Part 2 builds the other three:
+       - `approval_replay`: `consumeApprovalOrRetire` (ADR-0104/0105), the consuming half of the live path, spends a
+         sandbox approval and is then presented with it again. It passes only when the first presentation is spent
+         and the second comes back `approval_consumed_race`.
+       - `approval_expired`: the same function on a sandbox approval past its expiry. It passes only on
+         `approval_expired`.
+       - `loop_turn_cap`: `workerTurnCap` (ADR-0021), now the one function that bounds the dispatch loop in
+         `dispatchRunNodeInner`, on the org's worker dials. A worker seeded to loop (it declares more turns than
+         any ceiling) must be clamped to the org ceiling and to the settings schema's 20-turn wall.
+         `org_settings.max_worker_turns` has no database CHECK, so a value written around the settings route fails
+         the probe.
+     - The approval fixture is a sandbox server, its registered tool, one approved approval and one approving
+       decision, all built in the always-rolled-back transaction.
+       - RLS refuses the runner's inserts into `users`, as it should. So the fixture references the deployment's
+         own admins (ADR-0107 attribution): the oldest active admin requests and the next one approves.
+       - An approver pool never contains the requester. A deployment with fewer than two active admins therefore
+         records these two probes as `not_run` (`needs_two_active_admins`). That is never a pass, and never a
+         self-approval.
+       - `signature_mode` is `off` so the probe stays on single use and expiry. The ADR-0186 passkey recheck has its
+         own tests.
+     - The audit chain allocates `seq` as `max(seq)+1` under its advisory lock. So the audit rows the enforcing code
+       writes inside the rolled-back transaction (a consume, a supersede) leave no hole in the chain. No probe makes a
+       network call, so the transaction never waits on a second connection.
+     - Tagged traffic: the red-team `purpose` tag is a label only, and nothing excludes it from metering. No probe
+       makes a metered call.
    - Slice 3: the read and settings APIs for the view. The UI belongs to a design builder and is a `KNOWN_UI_GAPS`
      entry tracked on #453.
 9. **Geography is a factor in risk tiering.** Owner, 2026-11-17, from the competitor gap audit (C5). The
