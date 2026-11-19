@@ -283,7 +283,6 @@ export const INDIRECT_UI_CALLS = new Map([
     ["GET /v1/shadow-ai/imports", "apps/web/src/views/admin/governance/ShadowAiPage.tsx"],
     ["GET /v1/discovery/runs", "apps/web/src/views/admin/governance/DiscoveryListPages.tsx"],
     ["GET /v1/discovery/sources/:sourceId/enrolment-tokens", "apps/web/src/views/admin/governance/DiscoveryListPages.tsx"],
-    ["GET /v1/discovery/sources/:sourceId/endpoint-devices", "apps/web/src/views/admin/governance/DiscoveryListPages.tsx"],
     ["GET /v1/content-provenance/records", "apps/web/src/views/admin/governance/ContentTrustPage.tsx"],
     ["GET /v1/annotation-queues/:queueId/items", "apps/web/src/views/admin/governance/AnnotationQueuesPage.tsx"],
     ["GET /v1/governance/decision-regression/runs", "apps/web/src/views/admin/governance/DecisionRegressionPage.tsx"],

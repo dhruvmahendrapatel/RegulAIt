@@ -137,6 +137,7 @@ const BY_ROUTE: Record<string, keyof typeof G> = {
   "/admin/risks": "warning",
   "/admin/shadow-ai": "eye",
   "/admin/shadow-ai/discovery-sources": "radar", // ADR-0195 SD0
+  "/admin/endpoint-policy": "laptop", // ADR-0350 (lane E31)
   "/admin/inventory": "robot",
   "/admin/recommendations": "bulb",
   "/admin/certification": "ribbon",

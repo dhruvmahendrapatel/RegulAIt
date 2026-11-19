@@ -1,0 +1,133 @@
+/* ADR-0350 (lane E31): the Endpoint policy page. Tokens only (preflight-ui-tokens). */
+.split {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  align-items: flex-start;
+}
+.side {
+  flex: 1 1 280px;
+  max-width: 340px;
+  min-width: 0;
+}
+.main {
+  flex: 999 1 520px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+.pane {
+  flex: 1 1 420px;
+  min-width: 0;
+}
+.groupList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.group {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: var(--text);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--s1) var(--s1-5);
+  cursor: pointer;
+}
+.group:hover {
+  background: var(--rg-hover);
+}
+.group[aria-pressed="true"] {
+  border-color: var(--primary);
+  box-shadow: inset 0 0 0 1px var(--primary);
+  background: var(--primary-soft);
+}
+.groupMeta {
+  display: block;
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+}
+.stepChip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s0-5);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--text-dim);
+  background: var(--surface-2);
+  border-radius: var(--rg-r-pill);
+  padding: var(--s-half) var(--s1);
+  white-space: nowrap;
+}
+.addRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1-5);
+  align-items: flex-end;
+  background: var(--surface-2);
+  border-radius: var(--radius-md);
+  padding: var(--s1-5);
+}
+.warnNote {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--warn-soft-text);
+  background: var(--warn-soft);
+  border-radius: var(--radius-sm);
+  padding: var(--s1) var(--s1-5);
+}
+.terms {
+  margin: 0;
+  display: grid;
+  grid-template-columns: minmax(120px, 160px) 1fr;
+  gap: var(--s1) var(--s2);
+  font-size: var(--text-md);
+}
+.terms dt {
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.terms dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1);
+  justify-content: flex-end;
+  align-items: center;
+}
+.cellActions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--s0-5);
+  justify-content: flex-end;
+  align-items: center;
+}
+.review {
+  border: 2px solid var(--primary);
+}
+.intro {
+  margin: 0;
+  max-width: 860px;
+}
+.tabCount {
+  margin-left: var(--s0-5);
+}
+@media (max-width: 600px) {
+  .terms {
+    grid-template-columns: 1fr;
+  }
+  .side {
+    max-width: none;
+  }
+}

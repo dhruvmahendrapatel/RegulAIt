@@ -30,7 +30,7 @@
     "name": "all JS",
     "path": "dist/assets/*.js",
     "gzip": true,
-    "limit": "1160 kB"
+    "limit": "1190 kB"
   },
   {
     "name": "chunk: AccountSubpages",
@@ -321,6 +321,12 @@
     "limit": "29.0 kB"
   },
   {
+    "name": "chunk: admin-endpoint-policy",
+    "path": "dist/assets/admin-endpoint-policy-????????.js",
+    "gzip": true,
+    "limit": "11.9 kB"
+  },
+  {
     "name": "chunk: admin-identity-access",
     "path": "dist/assets/admin-identity-access-????????.js",
     "gzip": true,
@@ -589,6 +595,12 @@
     "path": "dist/assets/useCaseLifecycle-????????.js",
     "gzip": true,
     "limit": "4.0 kB"
+  },
+  {
+    "name": "chunk: useInfiniteQuery",
+    "path": "dist/assets/useInfiniteQuery-????????.js",
+    "gzip": true,
+    "limit": "2.5 kB"
   },
   {
     "name": "chunk: useMutation",
