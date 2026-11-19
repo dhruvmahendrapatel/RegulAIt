@@ -96,11 +96,13 @@ describe("affordance census: a notBuilt route counts only when the file defines 
 
   it("no exemption names a stub: a stub is skipped already, so an entry for one is stale", () => {
     // real handlers, not stubs: ADR-0246 (P27) authorised-targets, raised for the master's review (the two ADR-0236
-    // bundle routes left this list when the #453 bundle screen landed); the ADR-0230 A2 SAP business unmark until its
-    // #453 screen; ADR-0322 (lane E7) vendor usage credential revoke, raised for review until the #453 vendor usage screen
+    // bundle routes left this list when the #453 bundle screen landed), the ADR-0230 A2 SAP business unmark until its
+    // #453 screen, ADR-0312's spend-budget removal until its #453 screen, and ADR-0322 (lane E7) vendor usage credential
+    // revoke until the #453 vendor usage screen
     expect([...DELIBERATELY_API_ONLY.keys()]).toEqual([
       "/v1/mcp/authorised-targets/:x",
       "/v1/servers/:x/system-class",
+      "/v1/users/:x/spend-budget",
       "/v1/vendor-usage/connectors/:x/credential",
     ]);
   });

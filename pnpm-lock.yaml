@@ -369,6 +369,9 @@ importers:
       '@aws-sdk/client-bedrock-agent':
         specifier: 3.1160.0
         version: 3.1160.0
+      '@aws-sdk/client-bedrock-agentcore-control':
+        specifier: 3.1160.0
+        version: 3.1160.0
       '@aws-sdk/client-cloudtrail':
         specifier: 3.1160.0
         version: 3.1160.0
@@ -929,6 +932,10 @@ packages:
 
   '@aws-sdk/client-bedrock-agent@3.1160.0':
     resolution: {integrity: sha512-HU4gseEVwrAchQ6c6LKDKpZjX654mTey839faDyO9JyPlngq5L8jB6y6iZUQUapSVgxOJUjHPlTSVqcrEjaUDw==}
+    engines: {node: '>=20.0.0'}
+
+  '@aws-sdk/client-bedrock-agentcore-control@3.1160.0':
+    resolution: {integrity: sha512-Hv2Soc+POmxm6tc0CR5IVvUOhQehh4SsuOnbZ6f61pOZIM3NDdubIOPPNIxSy/5QPd3tONutOdJt7N/bA+pZJQ==}
     engines: {node: '>=20.0.0'}
 
   '@aws-sdk/client-bedrock@3.1160.0':
@@ -4377,6 +4384,17 @@ snapshots:
       tslib: 2.8.1
 
   '@aws-sdk/client-bedrock-agent@3.1160.0':
+    dependencies:
+      '@aws-sdk/core': 3.980.0
+      '@aws-sdk/credential-provider-node': 3.972.93
+      '@aws-sdk/types': 3.975.0
+      '@smithy/core': 3.39.0
+      '@smithy/fetch-http-handler': 5.8.0
+      '@smithy/node-http-handler': 4.14.2
+      '@smithy/types': 4.19.0
+      tslib: 2.8.1
+
+  '@aws-sdk/client-bedrock-agentcore-control@3.1160.0':
     dependencies:
       '@aws-sdk/core': 3.980.0
       '@aws-sdk/credential-provider-node': 3.972.93
