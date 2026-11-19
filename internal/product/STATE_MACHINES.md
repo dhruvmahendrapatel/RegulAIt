@@ -40,6 +40,7 @@ compares the status in JavaScript, then writes `WHERE id = $1`; a concurrent wri
 | Machine | Declared in | Guarded writers | Notes |
 |---|---|---|---|
 | Rule-step suggestion (`rule_step_suggestions.status`, ADR-0327) | `RULE_STEP_SUGGESTION_MACHINE`, `packages/shared/src/state-machines.ts` | `transitionSuggestion` in `apps/gateway/src/rule-steps.ts` (`whereFrom`, returned row) | suggested ⇄ shadow; suggested → dismissed (final). The list answer carries `lifecycle`; shadow start is shown blocked while detection is off. Converted from a hand-written table in review of #903 (E12). |
+| Agent identity link (`agent_identity_links.status`, ADR-0339 slice 2) | `AGENT_NHI_LINK_MACHINE`, `packages/shared/src/state-machines.ts` | the decide route in `apps/gateway/src/agent-identity.ts` (`whereFrom`, returned row; a lost race is 409) | staged → confirmed or rejected, by a second named admin under an `identity_manage` step-up; both final. Unlink or supersede on rotation is a later event (triage-low). Declared in review of #892 (E20). |
 
 ## 3. Machines to convert, ranked by F×S
 
