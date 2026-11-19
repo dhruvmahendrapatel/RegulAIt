@@ -293,6 +293,8 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   { table: "discovery_credentials", column: "secret_ciphertext", what: "discovery scanner credentials" },
   { table: "vendor_usage_credentials", column: "secret_ciphertext", what: "vendor usage/cost pull credentials (ADR-0322)" },
   { table: "discovery_pseudonym_keys", column: "key_ciphertext", what: "the discovery pseudonym key" },
+  // ADR-0363 slice 2: the random EDM HMAC key, enveloped; the key itself never rotates, so stored digests stay valid
+  { table: "custom_classifier_hash_key", column: "key_ciphertext", what: "the customer-classifier exact-data-match key" },
   { table: "discovery_pseudonyms", column: "display_name_ciphertext", what: "discovery pseudonym display names" },
   // ADR-0193 decision 3 (migration 0206): the per-tenant HMAC key of keyed (pii) content digests
   { table: "content_digest_keys", column: "key_ciphertext", what: "the content digest key" },

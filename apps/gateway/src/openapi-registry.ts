@@ -1375,6 +1375,12 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // ===== ADR-0180 (D3) — continuous assurance. Internal: admin console and
   // governance surfaces whose shapes are still moving. Append-only per owner.
   // --- P0
+  "GET /v1/classifiers": "internal",
+  "POST /v1/classifiers": "internal",
+  "POST /v1/classifiers/:id/versions": "internal",
+  "POST /v1/classifiers/:id/versions/:version/submit": "internal",
+  "POST /v1/classifiers/:id/retire": "internal",
+  "POST /v1/classifiers/test": "internal",
   "GET /v1/sensitivity-labels": "internal",
   "PUT /v1/sensitivity-labels/settings": "internal",
   "PUT /v1/sensitivity-labels/:definitionId/rule": "internal",
@@ -2792,6 +2798,12 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
 
   // ===== ADR-0180 (D3) — continuous assurance. Append-only per owner.
   // --- P0
+  "GET /v1/classifiers": "org",
+  "POST /v1/classifiers": "org",
+  "POST /v1/classifiers/:id/versions": "org",
+  "POST /v1/classifiers/:id/versions/:version/submit": "org",
+  "POST /v1/classifiers/:id/retire": "org",
+  "POST /v1/classifiers/test": "org",
   "GET /v1/sensitivity-labels": "org",
   "PUT /v1/sensitivity-labels/settings": "org",
   "PUT /v1/sensitivity-labels/:definitionId/rule": "org",

@@ -1670,6 +1670,9 @@ export const auditLog = pgTable(
         // `config_version` rows are what `activateVersion` writes underneath it.
         // Plain text column — no DDL needed.
         "compliance_profile",
+        // ADR-0363 slice 2: a customer-classifier version's approval (the approvals queue writes its own object type
+        // here). Plain text column — no DDL needed.
+        "custom_classifier",
         // ADR-0051: an admin authoring an immutable RATE CARD version, opening
         // or CLOSING a billing period, every statement CUT (with the effective
         // scope it was permitted to total), the one-way ISSUE, every EXPORT,
@@ -19238,3 +19241,90 @@ export const detectionDegradedMarks = pgTable(
   ],
 );
 // ===== end ADR-0333 =================================================================================================
+
+// ===== ADR-0363 slice 2 (lane E44): customer classifiers — migration `custom_classifiers` (pending, numbered at merge) =====
+export const customClassifiers = pgTable(
+  "custom_classifiers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    key: text("key").notNull(),
+    name: text("name").notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("custom_classifiers_key_uq").on(t.key),
+    check("custom_classifiers_key_check", sql`${t.key} ~ '^[a-z][a-z0-9_]{1,47}$'`),
+    check("custom_classifiers_name_check", sql`char_length(btrim(${t.name})) BETWEEN 1 AND 120`),
+  ],
+);
+export type CustomClassifierRow = typeof customClassifiers.$inferSelect;
+
+/**
+ * Every version of a classifier, with its declared lifecycle (CLASSIFIER_VERSION_MACHINE, ADR-0348). `definition` is a
+ * schema-validated configuration document (ADR-0200 exception); EDM values are never in it, only their digests in
+ * `custom_classifier_edm_digests`.
+ */
+export const customClassifierVersions = pgTable(
+  "custom_classifier_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    classifierId: uuid("classifier_id")
+      .notNull()
+      .references(() => customClassifiers.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    kind: text("kind", { enum: ["regex", "keyword", "dictionary", "exact_data_match"] }).notNull(),
+    mode: text("mode", { enum: ["log", "warn", "block"] }).notNull(),
+    scanInput: boolean("scan_input").notNull().default(true),
+    scanOutput: boolean("scan_output").notNull().default(true),
+    definition: jsonb("definition").$type<Record<string, unknown>>().notNull(),
+    status: text("status", { enum: ["draft", "pending_approval", "published", "rejected", "superseded", "retired"] }).notNull().default("draft"),
+    approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    authorUserId: uuid("author_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    statusChangedAt: timestamp("status_changed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("custom_classifier_versions_uq").on(t.classifierId, t.version),
+    uniqueIndex("custom_classifier_versions_one_published_uq").on(t.classifierId).where(sql`${t.status} = 'published'`),
+    index("custom_classifier_versions_status_idx").on(t.status),
+    index("custom_classifier_versions_approval_idx").on(t.approvalId).where(sql`${t.approvalId} IS NOT NULL`),
+    check("custom_classifier_versions_version_check", sql`${t.version} >= 1`),
+    check("custom_classifier_versions_kind_check", sql`${t.kind} IN ('regex', 'keyword', 'dictionary', 'exact_data_match')`),
+    check("custom_classifier_versions_mode_check", sql`${t.mode} IN ('log', 'warn', 'block')`),
+    check("custom_classifier_versions_phase_check", sql`${t.scanInput} OR ${t.scanOutput}`),
+    check(
+      "custom_classifier_versions_status_check",
+      sql`${t.status} IN ('draft', 'pending_approval', 'published', 'rejected', 'superseded', 'retired')`,
+    ),
+    check("custom_classifier_versions_definition_check", sql`jsonb_typeof(${t.definition}) = 'object' AND ${t.definition}->>'kind' = ${t.kind}`),
+  ],
+);
+export type CustomClassifierVersionRow = typeof customClassifierVersions.$inferSelect;
+
+/** an EDM version's values as HMAC-SHA256 digests; the plaintext is never stored */
+export const customClassifierEdmDigests = pgTable(
+  "custom_classifier_edm_digests",
+  {
+    versionId: uuid("version_id")
+      .notNull()
+      .references(() => customClassifierVersions.id, { onDelete: "cascade" }),
+    digest: text("digest").notNull(),
+  },
+  (t) => [
+    primaryKey({ name: "custom_classifier_edm_digests_pk", columns: [t.versionId, t.digest] }),
+    check("custom_classifier_edm_digests_digest_check", sql`${t.digest} ~ '^[0-9a-f]{64}$'`),
+  ],
+);
+
+/** one row: the deployment's random EDM HMAC key, enveloped under the data key (CIPHERTEXT_COLUMNS) */
+export const customClassifierHashKey = pgTable(
+  "custom_classifier_hash_key",
+  {
+    id: boolean("id").primaryKey().default(true),
+    keyCiphertext: text("key_ciphertext").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [check("custom_classifier_hash_key_singleton_check", sql`${t.id}`)],
+);
+// ===== end ADR-0363 slice 2 =====
