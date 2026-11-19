@@ -118,11 +118,33 @@ now governed, so with no policy they deny.
   | rejected, cancelled, revoked, expired | (terminal) |
 
   A reason is mandatory. Approval is a step-up (`requireStepUp`, a fresh MFA) by someone other than the requester,
-  bound to the exact rule, device and expiry, and reuses the approvals queue's payload binding (ADR-0104/0105) rather
-  than a second approval path. The expiry is mandatory; the default maximum is 24 hours and an admin may raise it to
+  bound to the exact rule, device and expiry. It reuses the approvals queue's payload binding (the ADR-0104 terms
+  digest), but the decision is this lane's own `/approve` route, not the Approvals Queue decide path. The terms are
+  frozen in the database once written, and the approval recomputes the digest from the row before it accepts it
+  (review #964). Any admin other than the requester may reject, because rejecting is the stricter outcome. The
+  lifecycle is the declared machine `ENDPOINT_COMMAND_EXCEPTION_MACHINE` (ADR-0348), with `expired` derived and
+  excluded from the stored states, and each change commits in one transaction with its audit row. The expiry is
+  mandatory; the default maximum is 24 hours and an admin may raise it to
   seven days (a `settings_relax` step-up, audited). Every transition is audited. `expired` is derived from the clock
   (database `now()`), and the device's own expiry check (§3) means a lapsed exception stops applying even before the
   next policy fetch.
+
+**As built (slice 3).** Tables `endpoint_device_groups`, `endpoint_device_group_members` (a join table),
+`endpoint_device_group_rules` and `endpoint_command_exceptions` (migration `pending/endpoint_command_exceptions.sql`,
+row-level security admin-only). The lifecycle table is `ENDPOINT_EXCEPTION_TRANSITIONS` in `@regulait/shared`, and
+every transition is a conditional `UPDATE` from the state it names. Two choices differ from the text above and are
+recorded here:
+
+- **The approval reuses the approvals queue's binding, not its table.** The request stores the ADR-0104 digest of
+  the exact terms (`approvalArgumentsDigest`), the approver names that digest, and the `approval_decide` step-up is
+  bound to it. Rows do not go into `approvals`, because the generic decide route admits a self-review with a reason,
+  and these exceptions must never be self-approved. The database refuses it as well (CHECK).
+- **Longer than 24 hours is a step-up on that exception**, not an org setting: approving one beyond 24 hours needs a
+  second, `settings_relax` grant bound to the exception and its hours. That keeps the default strict without a new
+  org-wide switch. 168 hours stays the hard limit, on both the control plane and the device.
+
+Removing a device from a group, or a rule from a group, is a relaxation and needs a `settings_relax` step-up; adding
+either narrows and needs none. Revoking an active exception tightens and needs none.
 
 ### 6. One compiler, from the gateway's own entitlements (slice 2)
 
@@ -228,6 +250,7 @@ the device carries out by refusing every call (as a missing policy already does)
       device with its device id; the gateway's connector route consulting the same rules; the E35 response mapping
       (§10).
 3. Device groups and exceptions (§5): migration, routes (known UI gaps on #453), the lifecycle table, step-up, audit.
+   Built. Folding approved exceptions and group rules into each device's compiled policy is part of 2b.
 
 ## Owner questions open (built with the secure default)
 

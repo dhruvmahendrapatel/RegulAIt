@@ -16,7 +16,6 @@ package enforce
 import (
 	"bytes"
 	"crypto/ed25519"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -153,27 +152,9 @@ func LoadPolicy(r io.Reader, keys Keyring, now time.Time) (*Policy, error) {
 	if len(raw) > maxPolicyBytes {
 		return nil, refuse("policy too large")
 	}
-	var env Envelope
-	if err := strictJSON(raw, &env); err != nil {
-		return nil, refuse("envelope: %v", err)
-	}
-	if !keyIDShape.MatchString(env.KeyID) {
-		return nil, refuse("key id not well formed")
-	}
-	key, ok := keys[env.KeyID]
-	if !ok || len(key) != ed25519.PublicKeySize {
-		return nil, refuse("key %q is not pinned in this build", env.KeyID)
-	}
-	payload, err := base64.StdEncoding.DecodeString(env.Payload)
+	payload, err := VerifyEnvelope(raw, keys)
 	if err != nil {
-		return nil, refuse("payload encoding")
-	}
-	sig, err := base64.StdEncoding.DecodeString(env.Signature)
-	if err != nil || len(sig) != ed25519.SignatureSize {
-		return nil, refuse("signature encoding")
-	}
-	if !ed25519.Verify(key, payload, sig) {
-		return nil, refuse("signature does not verify")
+		return nil, refuse("%v", err)
 	}
 	var p Policy
 	if err := strictJSON(payload, &p); err != nil {

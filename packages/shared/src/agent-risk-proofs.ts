@@ -23,6 +23,7 @@
  * a pass. A tenant cannot edit the catalogue; it can only relax a proof's schedule (audited, `agent_risk_proof_settings`).
  */
 import { MEASUREMENT_STATES, metricSpecSchema, type MeasurementState, type MetricSpec } from "./assurance.js";
+import { canonicalJson } from "./audit-chain.js";
 import { validateMetricParams } from "./condition-metrics.js";
 import { OWASP_AGENTIC_NAMES } from "./owasp-framework-mappings.js";
 import { OWASP_LLM_EDITIONS, OWASP_MCP_IDS } from "./owasp-packs.js";
@@ -533,4 +534,31 @@ export function effectiveRiskTier(
 ): EuAiActTier | "unscreened" {
   if (screened === "unscreened" || floor === null) return screened;
   return EU_AI_ACT_TIER_RANK[floor] > EU_AI_ACT_TIER_RANK[screened] ? floor : screened;
+}
+
+/**
+ * The canonical bytes an agent-risk proof result's `content_hash` and signature cover (ADR-0345 decision 5): ADR-0060's
+ * canonical JSON over the fields that make the result what it is. The runner hashes them; the evidence reader
+ * recomputes them.
+ */
+export function agentRiskProofEvidence(r: {
+  proofKey: string;
+  riskKey: string;
+  catalogVersion: number;
+  trigger: AgentRiskProofTrigger;
+  outcome: MeasurementState;
+  startedAt: Date;
+  finishedAt: Date;
+  detail: Record<string, unknown>;
+}): string {
+  return canonicalJson({
+    proofKey: r.proofKey,
+    riskKey: r.riskKey,
+    catalogVersion: r.catalogVersion,
+    trigger: r.trigger,
+    outcome: r.outcome,
+    startedAt: r.startedAt.toISOString(),
+    finishedAt: r.finishedAt.toISOString(),
+    detail: r.detail,
+  });
 }

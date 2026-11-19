@@ -19,6 +19,8 @@ import (
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/contract"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/decisionlog"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/devicekey"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/directive"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/enforce"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/fsutil"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/pack"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/privacy"
@@ -43,6 +45,11 @@ type Cycle struct {
 	Identity privacy.Identity
 	// ManagedFiles are the vendor hook files the tamper report reads (decisionlog.DefaultManagedFiles when nil).
 	ManagedFiles []decisionlog.ManagedFile
+	// DirectiveKeyring verifies add-on removal directives (ADR-0331): the compiled enforcement keyring. Each cycle adds
+	// the device-policy keys pinned in the root-owned config (ADR-0330 §8, B4); a pin never overrides a compiled key.
+	DirectiveKeyring enforce.Keyring
+	// Notify shows the developer a removal notice (directive.PlatformNotifier in production).
+	Notify directive.Notifier
 
 	lastConfig *auth.Response
 }
@@ -52,6 +59,8 @@ type Result struct {
 	Interval time.Duration
 	Report   *contract.Report
 	Rotated  bool
+	// Directives is the add-on removal sync (ADR-0331); nil when it did not run.
+	Directives *DirectiveRun
 }
 
 func clampInterval(seconds int) time.Duration {
@@ -220,7 +229,14 @@ func (c *Cycle) report(ctx context.Context, cl *auth.Client, cfg *Config, s *Sta
 	if err := saveState(c.Options, s); err != nil {
 		return nil, err
 	}
-	return &Result{Interval: clampInterval(conf.OrgPolicy.IntervalSeconds), Report: rep}, nil
+	out := &Result{Interval: clampInterval(conf.OrgPolicy.IntervalSeconds), Report: rep}
+	// ADR-0331: removal directives, bounded by the manifest verified above; a failure here never fails the cycle
+	if run, err := c.syncDirectives(ctx, cl, s, verified.Collection, env, c.DirectiveKeyring.With(cfg.DevicePolicyKeys)); err != nil {
+		c.Log.Info("removal directives not synced", "err", err)
+	} else {
+		out.Directives = run
+	}
+	return out, nil
 }
 
 // uploadDecisions drains the user's decision spool into signed batches (decisionlog.Spool.Drain), with this cycle's

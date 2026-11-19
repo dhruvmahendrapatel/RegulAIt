@@ -50,6 +50,9 @@ export const ENDPOINT_AGENT_PATHS = {
   reports: "/v1/endpoint-agent/reports",
   // ADR-0310 addendum (lane E1): signed batches of hook decisions and managed-file observations
   decisions: "/v1/endpoint-agent/decisions",
+  // ADR-0331: the agent fetches its signed removal directives and reports each one's outcome
+  directives: "/v1/endpoint-agent/directives",
+  directiveOutcomes: "/v1/endpoint-agent/directive-outcomes",
 } as const;
 
 /** the routes an endpoint agent's self token reaches, and nothing else (`via: "endpoint-agent"`) */
@@ -58,6 +61,8 @@ export const ENDPOINT_AGENT_TOKEN_ROUTES: ReadonlySet<string> = new Set([
   `POST ${ENDPOINT_AGENT_PATHS.reports}`,
   `POST ${ENDPOINT_AGENT_PATHS.decisions}`,
   `POST ${ENDPOINT_AGENT_PATHS.credentials}`,
+  `GET ${ENDPOINT_AGENT_PATHS.directives}`,
+  `POST ${ENDPOINT_AGENT_PATHS.directiveOutcomes}`,
 ]);
 
 /** the two routes that take no access token: a bulk enrolment token, then a device ticket, checked in-route */
