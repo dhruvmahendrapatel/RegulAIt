@@ -101,6 +101,8 @@ export const APPROVAL_OBJECT_TYPES = [
   "model_call",
   // ADR-0345 slice 2a: acknowledging an agent-risk proof that did not pass (stageId = agent-risk-proof:<proof key>)
   "agent_risk_proof",
+  // ADR-0364 (lane E45 S2): a robot version submitted for review (stageId = robot-version:<version id>)
+  "robot_version",
 ] as const;
 export type ApprovalObjectType = (typeof APPROVAL_OBJECT_TYPES)[number];
 
@@ -124,6 +126,7 @@ export const APPROVAL_OBJECT_TYPE_LABELS: Record<ApprovalObjectType, string> = {
   compliance_profile: "compliance profile change",
   model_call: "model call",
   agent_risk_proof: "agent risk proof acknowledgement",
+  robot_version: "robot version review",
 };
 
 /**

@@ -205,6 +205,108 @@ export const RULE_STEP_SUGGESTION_MACHINE = defineMachine({
   },
 });
 
+/** `robot_versions.status` (ADR-0364 §8). A version is edited only while `draft`; once submitted its content is
+ * frozen (a trigger), and a rejected or retired version is never reopened: a fix is a new version number. */
+export const ROBOT_VERSION_STATES = ["draft", "in_review", "approved", "rejected", "retired"] as const;
+export type RobotVersionState = (typeof ROBOT_VERSION_STATES)[number];
+export const ROBOT_VERSION_MACHINE = defineMachine({
+  id: "robot_version",
+  stored: "robot_versions.status",
+  states: ROBOT_VERSION_STATES,
+  initial: ["draft"],
+  terminal: ["rejected", "retired"],
+  transitions: {
+    submit: {
+      from: ["draft"],
+      to: "in_review",
+      by: ["user"],
+      summary: "The author sends the version for review in the Approvals Queue; it needs a passing test run on its exact digest.",
+    },
+    approve: {
+      from: ["in_review"],
+      to: "approved",
+      by: ["approver"],
+      summary: "A reviewer who is not the author approved the version; it becomes one pinned tool on the Robots server.",
+    },
+    reject: {
+      from: ["in_review"],
+      to: "rejected",
+      by: ["approver", "system"],
+      summary: "A reviewer refused the version, or its robot was retired while it waited; the record of what was refused is kept.",
+    },
+    discard: {
+      from: ["draft"],
+      to: "rejected",
+      by: ["system"],
+      summary: "The robot was retired while this version was still a draft; it was never submitted.",
+    },
+    retire: {
+      from: ["approved"],
+      to: "retired",
+      by: ["user", "admin", "system"],
+      summary: "The version's tool is blocked; agents that pinned it show it as unavailable and calls are refused.",
+    },
+  },
+});
+
+/** `robots.status` (ADR-0364 §8): the robot's own lifecycle. The list's "Status" column is computed from the
+ * versions on read (`robotListStatus`), never stored. */
+export const ROBOT_STATES = ["active", "retired"] as const;
+export type RobotState = (typeof ROBOT_STATES)[number];
+export const ROBOT_MACHINE = defineMachine({
+  id: "robot",
+  stored: "robots.status",
+  states: ROBOT_STATES,
+  initial: ["active"],
+  terminal: ["retired"],
+  transitions: {
+    retire: {
+      from: ["active"],
+      to: "retired",
+      by: ["user", "admin"],
+      summary: "The robot is retired: every approved version is retired and every draft or in-review version is rejected, in one transaction.",
+    },
+  },
+});
+
+/** `robot_runs.status` (ADR-0364 §8). S2 records runs; the sandbox runner that moves them is S3. */
+export const ROBOT_RUN_STATES = ["queued", "running", "succeeded", "failed", "timed_out", "cancelled", "refused"] as const;
+export type RobotRunState = (typeof ROBOT_RUN_STATES)[number];
+export const ROBOT_RUN_MACHINE = defineMachine({
+  id: "robot_run",
+  stored: "robot_runs.status",
+  states: ROBOT_RUN_STATES,
+  initial: ["queued"],
+  terminal: ["succeeded", "failed", "timed_out", "cancelled", "refused"],
+  transitions: {
+    start: { from: ["queued"], to: "running", by: ["system"], summary: "The sandbox placement was accepted and the runner started." },
+    succeed: { from: ["running"], to: "succeeded", by: ["worker"], summary: "Every step ran and the outputs matched the output schema." },
+    fail: { from: ["running"], to: "failed", by: ["worker"], summary: "A step failed; the run stopped with evidence." },
+    time_out: { from: ["running"], to: "timed_out", by: ["worker", "system"], summary: "The run hit its wall-clock or step limit." },
+    cancel: {
+      from: ["queued", "running"],
+      to: "cancelled",
+      by: ["user", "system"],
+      summary: "Someone cancelled the run, or the kill switch halted it at the next step.",
+    },
+    refuse: {
+      from: ["queued"],
+      to: "refused",
+      by: ["system"],
+      summary: "Nothing ran: the placement, the egress list or a secret could not be resolved.",
+    },
+  },
+});
+
+/** ADR-0364 §8: the Robots list's "Status" column, computed from the robot and its versions (never stored). */
+export type RobotListStatus = "draft" | "in_review" | "approved" | "retired";
+export function robotListStatus(robot: RobotState, versions: readonly RobotVersionState[]): RobotListStatus {
+  if (robot === "retired") return "retired";
+  if (versions.includes("approved")) return "approved";
+  if (versions.includes("in_review")) return "in_review";
+  return "draft";
+}
+
 /** Every declared machine, by id: the one list an agent or a document reads. */
 export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string>>> = Object.freeze({
   [TRAINING_JOB_MACHINE.def.id]: TRAINING_JOB_MACHINE,
@@ -212,4 +314,7 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [INCIDENT_MACHINE.def.id]: INCIDENT_MACHINE,
   [EVAL_RUN_MACHINE.def.id]: EVAL_RUN_MACHINE,
   [RULE_STEP_SUGGESTION_MACHINE.def.id]: RULE_STEP_SUGGESTION_MACHINE,
+  [ROBOT_VERSION_MACHINE.def.id]: ROBOT_VERSION_MACHINE,
+  [ROBOT_MACHINE.def.id]: ROBOT_MACHINE,
+  [ROBOT_RUN_MACHINE.def.id]: ROBOT_RUN_MACHINE,
 } as Record<string, StateMachine<string, string>>);

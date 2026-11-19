@@ -45,6 +45,7 @@ import {
   KRI_ON_BREACH,
   USE_CASE_DECISIONS,
   MCP_UPSTREAM_TRANSPORTS,
+  MCP_SERVER_TRANSPORTS,
   // ADR-0186 (migration 0170): the batch-4 vocabularies, in lockstep with the
   // migration's CHECKs by being the same constants
   ANCHOR_TSA_STATUSES,
@@ -921,7 +922,7 @@ export const mcpServers = pgTable("mcp_servers", {
    * row's `url` is the `stdio:<name>` sentinel, which fails the egress check on
    * any path that forgets to branch on transport. The shape is a DB CHECK
    * (`mcp_servers_transport_shape`). */
-  transport: text("transport", { enum: MCP_UPSTREAM_TRANSPORTS }).notNull().default("streamable_http"),
+  transport: text("transport", { enum: MCP_SERVER_TRANSPORTS }).notNull().default("streamable_http"),
   /** stdio only: the absolute command path */
   stdioCommand: text("stdio_command"),
   /** stdio only: the argv, a JSON array of strings */
@@ -945,7 +946,11 @@ export const mcpServers = pgTable("mcp_servers", {
   executionProfileId: uuid("execution_profile_id").references((): AnyPgColumn => executionProfiles.id, { onDelete: "restrict" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
-  check("mcp_servers_transport_check", sql`${t.transport} IN ('streamable_http', 'sse', 'stdio')`),
+  // ADR-0364 (migration `pending/robots.sql`): 'first_party', a server the gateway serves in-process; never in the
+  // org's enable-list (mcp_upstream_transports), and its url is always `regulait:<name>`
+  check("mcp_servers_transport_check", sql`${t.transport} IN ('streamable_http', 'sse', 'stdio', 'first_party')`),
+  check("mcp_servers_first_party_url_check", sql`(${t.transport} = 'first_party') = (${t.url} LIKE 'regulait:%')`),
+  uniqueIndex("mcp_servers_first_party_url_uq").on(t.url).where(sql`${t.transport} = 'first_party'`),
   check("mcp_servers_execution_profile_check", sql`${t.executionProfileId} IS NULL OR ${t.transport} = 'stdio'`),
   check("mcp_servers_disclose_agent_ids_check", sql`NOT ${t.discloseAgentWorkloadIds} OR ${t.identityPropagation} = 'signed_assertion'`),
   check(
@@ -1885,6 +1890,11 @@ export const auditLog = pgTable(
         // ADR-0345 slice 2a: one agent-risk proof result (objectId null; detail.contentHash ties it to the
         // agent_risk_proof_results row written in the same transaction). Plain text column — no DDL.
         "agent_risk_proof",
+        // ADR-0364 (lane E45 S2): a robot, one of its versions, or one of its secrets (objectId = the row; a secret's
+        // audit carries its name, scope and last four characters, never the value). Plain text column — no DDL.
+        "robot",
+        "robot_version",
+        "robot_secret",
         // ADR-0173 batch 2c (K): a KRI or a monitoring dashboard created /
         // changed / deleted, and an automation rule created / changed /
         // paused / backfilled / matched (objectId = the row). Plain text — no DDL.
@@ -18026,3 +18036,189 @@ export type FairnessEvaluationRow = typeof fairnessEvaluations.$inferSelect;
 export type FairnessRunEvidenceRow = typeof fairnessRunEvidence.$inferSelect;
 export type FairnessBreachReviewRow = typeof fairnessBreachReviews.$inferSelect;
 // ===== end ADR-0346 =====
+
+// ===== ADR-0364 (lane E45 S2): governed RPA "Robots" ================================================================
+// Migration `pending/robots.sql` (numbered at merge, ADR-0252). Third normal form: the allow-list and the secret
+// bindings are join tables, and a version binds only its own robot's secrets, on one of its own allowed sites, by
+// composite foreign keys. The list's status and "Used by N agents" are computed on read. A version's content, its
+// allow-list and its bindings are frozen by triggers once it leaves 'draft' (ADR-0364 §3).
+// Row-level security ENABLED and FORCED on all six tables: any signed-in principal reads robots, versions, sites and
+// bindings (the gateway's object-level checks decide who sees what); the owner or an admin writes, and the named
+// approver or decider of a version's approval applies the decision. Secrets: owner, admin and system_task only.
+import {
+  ROBOT_ENGINES as ROBOT_ENGINES_E45,
+  ROBOT_RUN_KINDS as ROBOT_RUN_KINDS_E45,
+  ROBOT_RUN_STATES as ROBOT_RUN_STATES_E45,
+  ROBOT_SCRIPT_FORMATS as ROBOT_SCRIPT_FORMATS_E45,
+  ROBOT_SECRET_SCOPES as ROBOT_SECRET_SCOPES_E45,
+  ROBOT_STATES as ROBOT_STATES_E45,
+  ROBOT_VERSION_SOURCES as ROBOT_VERSION_SOURCES_E45,
+  ROBOT_VERSION_STATES as ROBOT_VERSION_STATES_E45,
+} from "@regulait/shared";
+
+export const robots = pgTable(
+  "robots",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    slug: text("slug").notNull(),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    engine: text("engine", { enum: ROBOT_ENGINES_E45 }).notNull().default("browser"),
+    ownerUserId: uuid("owner_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    /** ROBOT_MACHINE: the robot's own lifecycle, never a summary of its versions */
+    status: text("status", { enum: ROBOT_STATES_E45 }).notNull().default("active"),
+    /** ADR-0364 §3 path 3: the opt-in model fallback (off by default; changes audited). Used from S3. */
+    modelFallback: boolean("model_fallback").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("robots_slug_uq").on(t.slug),
+    index("robots_owner_idx").on(t.ownerUserId, t.createdAt),
+    check("robots_slug_check", sql`${t.slug} ~ '^[a-z0-9_]{1,48}$'`),
+    check("robots_name_check", sql`length(${t.name}) BETWEEN 1 AND 120`),
+    check("robots_engine_check", sql`${t.engine} IN ('browser', 'desktop')`),
+    check("robots_status_check", sql`${t.status} IN ('active', 'retired')`),
+    check("robots_retired_shape", sql`(${t.status} = 'retired') = (${t.retiredAt} IS NOT NULL)`),
+  ],
+);
+export type RobotRow = typeof robots.$inferSelect;
+
+export const robotVersions = pgTable(
+  "robot_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    robotId: uuid("robot_id")
+      .notNull()
+      .references(() => robots.id, { onDelete: "restrict" }),
+    version: integer("version").notNull(),
+    /** ROBOT_VERSION_MACHINE */
+    status: text("status", { enum: ROBOT_VERSION_STATES_E45 }).notNull().default("draft"),
+    source: text("source", { enum: ROBOT_VERSION_SOURCES_E45 }).notNull().default("recorded"),
+    scriptFormat: text("script_format", { enum: ROBOT_SCRIPT_FORMATS_E45 }).notNull().default("steps_v1"),
+    /** EXCEPTION (ADR-0200 3NF addendum): the reviewed artefact itself, frozen once submitted (trigger) */
+    script: text("script").notNull(),
+    scriptSha256: text("script_sha256").notNull(),
+    compiledSha256: text("compiled_sha256"),
+    compilerVersion: text("compiler_version"),
+    /** the digest the approval is bound to (ADR-0364 §3); set at submit */
+    contentDigest: text("content_digest"),
+    /** EXCEPTION (ADR-0200 3NF addendum): schema-validated configuration documents (JSON Schema), frozen once submitted */
+    inputSchema: jsonb("input_schema").$type<Record<string, unknown>>().notNull(),
+    outputSchema: jsonb("output_schema").$type<Record<string, unknown>>().notNull(),
+    authorUserId: uuid("author_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    draftedByAgentId: uuid("drafted_by_agent_id").references(() => builderAgents.id, { onDelete: "set null" }),
+    approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "restrict" }),
+    mcpToolId: uuid("mcp_tool_id").references(() => mcpTools.id, { onDelete: "restrict" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    submittedAt: timestamp("submitted_at", { withTimezone: true }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("robot_versions_robot_version_uq").on(t.robotId, t.version),
+    uniqueIndex("robot_versions_id_robot_uq").on(t.id, t.robotId),
+    uniqueIndex("robot_versions_approval_uq").on(t.approvalId).where(sql`${t.approvalId} IS NOT NULL`),
+    uniqueIndex("robot_versions_tool_uq").on(t.mcpToolId).where(sql`${t.mcpToolId} IS NOT NULL`),
+    index("robot_versions_status_idx").on(t.status, t.robotId),
+    check("robot_versions_version_check", sql`${t.version} BETWEEN 1 AND 100000`),
+    check("robot_versions_status_check", sql`${t.status} IN ('draft', 'in_review', 'approved', 'rejected', 'retired')`),
+    check("robot_versions_source_check", sql`${t.source} IN ('recorded', 'uploaded', 'agent_drafted')`),
+    check("robot_versions_format_check", sql`${t.scriptFormat} IN ('steps_v1', 'playwright_ts', 'robot_framework')`),
+    check("robot_versions_script_size_check", sql`octet_length(${t.script}) <= 262144`),
+  ],
+);
+export type RobotVersionRow = typeof robotVersions.$inferSelect;
+
+export const robotVersionAllowedSites = pgTable(
+  "robot_version_allowed_sites",
+  {
+    robotVersionId: uuid("robot_version_id")
+      .notNull()
+      .references(() => robotVersions.id, { onDelete: "cascade" }),
+    origin: text("origin").notNull(),
+  },
+  (t) => [primaryKey({ name: "robot_version_allowed_sites_pk", columns: [t.robotVersionId, t.origin] })],
+);
+
+export const robotSecrets = pgTable(
+  "robot_secrets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    robotId: uuid("robot_id")
+      .notNull()
+      .references(() => robots.id, { onDelete: "restrict" }),
+    name: text("name").notNull(),
+    scope: text("scope", { enum: ROBOT_SECRET_SCOPES_E45 }).notNull(),
+    /** the ADR-0204 data-key envelope (`encryptSecret`); listed in CIPHERTEXT_COLUMNS; no route returns it */
+    valueCiphertext: text("value_ciphertext").notNull(),
+    last4: text("last4").notNull(),
+    setBy: uuid("set_by").references(() => users.id, { onDelete: "set null" }),
+    setAt: timestamp("set_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("robot_secrets_name_scope_uq").on(t.robotId, t.name, t.scope),
+    uniqueIndex("robot_secrets_id_robot_uq").on(t.id, t.robotId),
+    check("robot_secrets_scope_check", sql`${t.scope} IN ('live', 'test')`),
+  ],
+);
+
+export const robotVersionSecrets = pgTable(
+  "robot_version_secrets",
+  {
+    robotVersionId: uuid("robot_version_id").notNull(),
+    robotId: uuid("robot_id").notNull(),
+    name: text("name").notNull(),
+    /** the one allowed site this secret may be filled on */
+    origin: text("origin").notNull(),
+    /** resolved at submit (part of the digest) */
+    liveSecretId: uuid("live_secret_id"),
+    testSecretId: uuid("test_secret_id"),
+  },
+  (t) => [
+    primaryKey({ name: "robot_version_secrets_pk", columns: [t.robotVersionId, t.name] }),
+    foreignKey({ name: "robot_version_secrets_version_fk", columns: [t.robotVersionId, t.robotId], foreignColumns: [robotVersions.id, robotVersions.robotId] }).onDelete("cascade"),
+    foreignKey({ name: "robot_version_secrets_site_fk", columns: [t.robotVersionId, t.origin], foreignColumns: [robotVersionAllowedSites.robotVersionId, robotVersionAllowedSites.origin] }).onDelete("cascade"),
+    foreignKey({ name: "robot_version_secrets_live_fk", columns: [t.liveSecretId, t.robotId], foreignColumns: [robotSecrets.id, robotSecrets.robotId] }).onDelete("restrict"),
+    foreignKey({ name: "robot_version_secrets_test_fk", columns: [t.testSecretId, t.robotId], foreignColumns: [robotSecrets.id, robotSecrets.robotId] }).onDelete("restrict"),
+  ],
+);
+
+export const robotRuns = pgTable(
+  "robot_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    robotVersionId: uuid("robot_version_id")
+      .notNull()
+      .references(() => robotVersions.id, { onDelete: "restrict" }),
+    requestedBy: uuid("requested_by")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    agentId: uuid("agent_id").references(() => builderAgents.id, { onDelete: "set null" }),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "restrict" }),
+    kind: text("kind", { enum: ROBOT_RUN_KINDS_E45 }).notNull(),
+    /** ROBOT_RUN_MACHINE; moved by the sandbox runner (S3) */
+    status: text("status", { enum: ROBOT_RUN_STATES_E45 }).notNull().default("queued"),
+    /** point-in-time copy: the digest this run executed, so a passing test run proves one exact version content */
+    contentDigest: text("content_digest").notNull(),
+    stepCount: integer("step_count"),
+    durationMs: integer("duration_ms"),
+    failureCode: text("failure_code"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("robot_runs_version_idx").on(t.robotVersionId, t.status, t.contentDigest),
+    check("robot_runs_kind_check", sql`${t.kind} IN ('test', 'agent', 'freeform')`),
+    check("robot_runs_status_check", sql`${t.status} IN ('queued', 'running', 'succeeded', 'failed', 'timed_out', 'cancelled', 'refused')`),
+  ],
+);
+export type RobotRunRow = typeof robotRuns.$inferSelect;
+// ===== end ADR-0364 =================================================================================================
