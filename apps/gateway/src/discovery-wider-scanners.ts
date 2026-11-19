@@ -33,7 +33,14 @@
  *                        credential: static only; secret = the API token; publicConfig authHeader? as above
  */
 import { BodyTooLargeError, azureCredential as entraCredential, readBodyCapped } from "@regulait/cloud-discovery";
-import { DISCOVERY_READ_OUTCOMES_MAX, authHeaderNameRefused, type DiscoveryReadOutcome, type DiscoveryReadStatus } from "@regulait/shared";
+import {
+  DISCOVERY_READ_OUTCOMES_MAX,
+  authHeaderNameRefused,
+  purviewDefinitionsFromGraph,
+  type DiscoveryReadOutcome,
+  type DiscoveryReadStatus,
+  type LabelDefinition,
+} from "@regulait/shared";
 import { dedupedSecretSink, scannerFetch } from "./discovery-cloud-scanners.js";
 import { errMessage } from "./err-serializer.js";
 import type { ScanContext, ScanObservation, ScanResult, Scanner } from "./discovery-scanners.js";
@@ -52,7 +59,7 @@ export const WIDER_MAX_ITEMS = 5_000;
 /** at most this much of one JSON body is parsed */
 export const WIDER_MAX_BODY_BYTES = 8 * 1024 * 1024;
 
-const GRAPH_ORIGIN = "https://graph.microsoft.com";
+export const GRAPH_ORIGIN = "https://graph.microsoft.com";
 const GRAPH_SCOPE = "https://graph.microsoft.com/.default";
 
 // ---------------------------------------------------------------------------
@@ -100,7 +107,7 @@ export function atPath(value: unknown, path: string): unknown {
   return cur;
 }
 
-const str = (v: unknown, max = 256): string | null => (typeof v === "string" && v.trim() ? v.trim().slice(0, max) : null);
+export const str = (v: unknown, max = 256): string | null => (typeof v === "string" && v.trim() ? v.trim().slice(0, max) : null);
 
 /** the host of an http(s) URL or bare domain, lower-case; null when it is not one */
 export function hostOf(raw: string | null): string | null {
@@ -126,7 +133,7 @@ function tokenHeaders(ctx: ScanContext, kind: string): Record<string, string> {
   return header && header.toLowerCase() !== "authorization" ? { [header]: c.secret } : { authorization: `Bearer ${c.secret}` };
 }
 
-class ReadFailure extends Error {
+export class ReadFailure extends Error {
   constructor(
     readonly status: DiscoveryReadStatus,
     message: string,
@@ -136,7 +143,7 @@ class ReadFailure extends Error {
 }
 
 /** GET a JSON body, bounded; an HTTP or transport failure becomes a `ReadFailure` with a read status */
-async function getJson(fetchImpl: typeof fetch, url: string, headers: Record<string, string>, signal: AbortSignal): Promise<unknown> {
+export async function getJson(fetchImpl: typeof fetch, url: string, headers: Record<string, string>, signal: AbortSignal): Promise<unknown> {
   let res: Response;
   try {
     res = await fetchImpl(url, { method: "GET", headers: { accept: "application/json", ...headers }, redirect: "manual", signal });
@@ -182,10 +189,10 @@ function finish(observations: ScanObservation[], outcomes: DiscoveryReadOutcome[
 }
 
 /** returned by a page callback that stopped at `WIDER_MAX_ITEMS`, so the outcome says the listing was cut short */
-const ITEM_CAP = Symbol("item cap");
+export const ITEM_CAP = Symbol("item cap");
 
 /** run one paged listing, recording its outcome; `page` returns the next URL, null at the end, or ITEM_CAP */
-async function readListing(
+export async function readListing(
   ctx: ScanContext,
   read: string,
   first: string,
@@ -222,7 +229,7 @@ async function readListing(
 }
 
 /** a next-page URL the service returned, kept only when it stays on the first URL's origin */
-function sameOriginNext(base: string, next: unknown): string | null {
+export function sameOriginNext(base: string, next: unknown): string | null {
   const s = str(next, 4096);
   if (!s) return null;
   try {
@@ -297,7 +304,7 @@ async function runSaasInventory(ctx: ScanContext): Promise<ScanResult> {
 // idp_entra
 // ---------------------------------------------------------------------------
 
-const GUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+export const GUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 function entraTargetProblem(target: Readonly<Record<string, string>>, scope: Readonly<{ orgLevel: boolean; include: readonly string[] }>): string | null {
   if (!target.tenantId || !GUID.test(target.tenantId)) return "'tenantId' must be the Entra tenant's id (a GUID)";
@@ -331,21 +338,24 @@ interface EntraApp {
   host: string | null;
 }
 
-async function runEntra(ctx: ScanContext): Promise<ScanResult> {
-  const problem = entraTargetProblem(ctx.source.target, ctx.source.scope);
-  if (problem) throw new WiderSourceConfigError(`idp_entra: ${problem}`);
+/**
+ * A Microsoft Graph access token for an Entra-reading source (`idp_entra`, ADR-0314 `agent_registry_entra`): the
+ * credential must name the source's tenant; static mode uses its client secret, federated mode the source's
+ * federation token. The token is registered for scrubbing before it is returned, with the write scope it carries.
+ */
+export async function entraGraphToken(ctx: ScanContext, kind: string): Promise<{ accessToken: string; write: ReturnType<typeof entraWriteScope> }> {
   const c = ctx.credential;
-  if (!c) throw new WiderSourceConfigError("idp_entra: a credential is required");
+  if (!c) throw new WiderSourceConfigError(`${kind}: a credential is required`);
   const tenantId = c.publicConfig.tenantId;
   const clientId = c.publicConfig.clientId;
-  if (!tenantId || !clientId) throw new WiderSourceConfigError("idp_entra: the credential names tenantId and clientId");
-  if (tenantId.toLowerCase() !== ctx.source.target.tenantId!.toLowerCase()) throw new WiderSourceConfigError("idp_entra: the credential's tenant is not the source's tenant");
+  if (!tenantId || !clientId) throw new WiderSourceConfigError(`${kind}: the credential names tenantId and clientId`);
+  if (tenantId.toLowerCase() !== (ctx.source.target.tenantId ?? "").toLowerCase()) throw new WiderSourceConfigError(`${kind}: the credential's tenant is not the source's tenant`);
   let credential;
   if (c.mode === "static") {
-    if (!c.secret) throw new WiderSourceConfigError("idp_entra: the static credential has no client secret");
+    if (!c.secret) throw new WiderSourceConfigError(`${kind}: the static credential has no client secret`);
     credential = { mode: "azure_client_secret" as const, tenantId, clientId, clientSecret: c.secret };
   } else {
-    if (!ctx.federation) throw new WiderSourceConfigError("idp_entra: federated credentials need RegulAIt's federation issuer; an admin turns federation on under Discovery sources");
+    if (!ctx.federation) throw new WiderSourceConfigError(`${kind}: federated credentials need RegulAIt's federation issuer; an admin turns federation on under Discovery sources`);
     credential = { mode: "azure_federated" as const, tenantId, clientId };
   }
   const onSecret = dedupedSecretSink(ctx.registerSecret);
@@ -365,10 +375,16 @@ async function runEntra(ctx: ScanContext): Promise<ScanResult> {
   } catch (err) {
     // only the AADSTS code is kept from the error text (as discovery-git-federation.ts does)
     const code = /AADSTS[0-9]{5,7}/.exec(errMessage(err))?.[0];
-    throw new WiderSourceConfigError(`idp_entra: the Entra token request failed${code ? ` (${code})` : ""}`);
+    throw new WiderSourceConfigError(`${kind}: the Entra token request failed${code ? ` (${code})` : ""}`);
   }
   onSecret(accessToken);
-  const write = entraWriteScope(accessToken);
+  return { accessToken, write: entraWriteScope(accessToken) };
+}
+
+async function runEntra(ctx: ScanContext): Promise<ScanResult> {
+  const problem = entraTargetProblem(ctx.source.target, ctx.source.scope);
+  if (problem) throw new WiderSourceConfigError(`idp_entra: ${problem}`);
+  const { accessToken, write } = await entraGraphToken(ctx, "idp_entra");
   if (write.scope === "write") {
     // decision 7: a credential that may write is refused before anything is read
     return { observations: [], credentialWriteScope: "write", readOutcomes: [{ read: "credential write scope", status: "denied", detail: `the app holds more than read permissions: ${write.roles.join(", ").slice(0, 300)}` }] };
@@ -461,8 +477,38 @@ async function runEntra(ctx: ScanContext): Promise<ScanResult> {
   if (unmatched > 0) {
     outcomes.push({ read: "Entra grants matched to applications", status: "skipped", detail: `${unmatched} consented application(s) were not in the service principal listing and are not reported` });
   }
-  return finish(observations, outcomes, write.scope);
+
+  // ADR-0363 slice 1: the tenant's Purview sensitivity-label definitions, read only when the app was granted the
+  // read-only `InformationProtectionPolicy.Read.All` (the role is checked on our own token, never assumed)
+  let labelDefinitions: LabelDefinition[] | undefined;
+  if (write.roles.includes(PURVIEW_LABEL_ROLE)) {
+    const collected: unknown[] = [];
+    const complete = await readListing(
+      ctx,
+      "Purview sensitivity labels",
+      `${GRAPH_ORIGIN}/beta/security/informationProtection/sensitivityLabels`,
+      outcomes,
+      (body) => {
+        const value = atPath(body, "value");
+        if (!Array.isArray(value)) throw new ReadFailure("error", "the sensitivity label listing has no value list");
+        for (const l of value) {
+          if (collected.length >= WIDER_MAX_ITEMS) return ITEM_CAP;
+          collected.push(l);
+        }
+        return nextLink(body);
+      },
+      get,
+    );
+    // a listing cut short would mark the unread labels inactive, so only a complete read is kept
+    if (complete) labelDefinitions = purviewDefinitionsFromGraph({ value: collected });
+  } else {
+    outcomes.push({ read: "Purview sensitivity labels", status: "skipped", detail: `grant the app ${PURVIEW_LABEL_ROLE} to honour Purview labels at the gateway` });
+  }
+  return { ...finish(observations, outcomes, write.scope), ...(labelDefinitions ? { labelDefinitions } : {}) };
 }
+
+/** the one Graph application permission the label read needs (read-only) */
+export const PURVIEW_LABEL_ROLE = "InformationProtectionPolicy.Read.All";
 
 // ---------------------------------------------------------------------------
 // ml_mlflow

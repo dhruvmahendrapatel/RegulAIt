@@ -9,6 +9,9 @@ export const EXTERNAL_WRITE_OPERATIONS = [
   "git.create_branch",
   "git.open_pull_request",
   "git.merge_pull_request",
+  // ADR-0340: the compensating git writes a saga runs on cancel or denial
+  "git.delete_branch",
+  "git.close_pull_request",
   "infra.remediate",
   "pm.create_work_item",
   "pm.update_fields",

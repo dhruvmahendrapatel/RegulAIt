@@ -38,6 +38,14 @@ They stay as they are. This ADR adds a per-session sequence engine beside them.
 - **Grouping ("session").** An event belongs to the delegation tree it ran under (`grant:<root grant id>`, ADR-0188)
   when it has an actor, and otherwise to the sponsor user (`user:<user id>`). Every rule window is per group.
   `endpoint:<device id>` is a reserved prefix for the hook decisions above.
+- **Bounded look-back, never silently short (review of #865).** Each batch loads the window's earlier rows for the
+  groups it touches, filtered by the fresh rows' sponsors (served by `audit_log_user_at_idx`) so the scan never walks
+  the chain backwards. It keeps at most 2,000 rows per group and 20,000 per batch, so one busy group cannot push
+  another group's first step out of the window. When a group's look-back is cut, the batch writes one
+  `detection-degraded` audit row (effect `deny`, the groups and the seq range), which reaches the SIEM like any
+  incident. A group is reported once per detection window (`detection_degraded_marks`), not on every batch while it
+  stays busy. **Residual:** a sequence whose first step lies more than 2,000 rows back in its own group, inside the
+  window, may go undetected; it is reported, not hidden.
 - **First run replays history (D2).** On first run the live cursor starts at the chain head. The retained history,
   from the first retained row up to that head, is replayed behind a second cursor (`replay_cursor_seq` up to
   `replay_until_seq`):
@@ -57,7 +65,9 @@ They stay as they are. This ADR adds a per-session sequence engine beside them.
   - `single`: one event matches the rule's selector;
   - `temporal_ordered`: the steps match in order, in one group, within `timespanSeconds`, optionally with a step
     required to name a different server from the previous one (`differentServer`);
-  - `event_count`: at least `threshold` matching events in one group within `timespanSeconds`.
+  - `event_count`: at least `threshold` matching events in one group within `timespanSeconds`. A burst is one
+    episode: while an incident for the same rule and group is not closed, no second one is raised within
+    `timespanSeconds` of it, so a steady probe yields one incident per window, not one per call.
 - **Selectors** are conjunctions over closed fields: `objectType`, `effect`, `ruleId` (exact list), `toolClass`,
   `phase`, `dataScoped` (the decision's rule chain carries a data-scope step), `addonSeverityAtLeast` (the MCP
   server's admission severity) and `delegated` (the call was made by an agent).
@@ -78,9 +88,13 @@ They stay as they are. This ADR adds a per-session sequence engine beside them.
 - **Signing.** The built-in default pack ships in code. An admin's edit is stored as a new version, signed (Ed25519,
   over the canonical JSON) with the installation's receipt signing key (ADR-0186), which is registered in
   `receipt_signing_keys`. With no usable key an edit is refused (409 `detection_signing_unavailable`), the same fail
-  closed rule as R25 sign-offs. At every sweep the engine verifies the active version. A version that does not verify
-  is not used: the engine falls back to the built-in default pack and writes one audit row
-  (`detection-pack-unverified`), so tampering with the stored pack can never switch detection off.
+  closed rule as R25 sign-offs. At every sweep the engine verifies the active version against the gateway's
+  **configured** receipt key (the operator secret or the install-generated file), never against a key read from the
+  database, so a key INSERTed into `receipt_signing_keys` cannot vouch for a pack. A version that does not verify is
+  not used: the engine falls back to the built-in default pack and writes one audit row
+  (`detection-pack-unverified`). Database write access alone therefore cannot switch detection off; it needs the
+  signing key, which lives outside the database. **Consequence:** after the receipt key is rotated the stored pack no
+  longer verifies, the stricter built-in pack runs, and the fallback is audited until an admin re-saves the pack.
 - **Audit and step-up.** Every change writes an audit row (`detection-pack-updated`, with the old and new digests). A
   change is a relaxation unless it only adds rules and leaves every existing rule byte-identical. A relaxation (a rule
   removed, disabled, narrowed or slowed) needs a `settings_relax` step-up and is audited as one (ADR-0180).
@@ -113,8 +127,10 @@ match tool names only, so they are heuristics, and the admin can edit them.
 - **Foreign keys.** The incident's sponsor, grant and identity are foreign keys, set only when the id still resolves
   (the audit trail itself is FK-free). An incident about a deleted user keeps its group key and evidence.
 - **Declared lifecycles.** `status` (open → acknowledged | closed; acknowledged → acknowledged | closed; closed is
-  terminal) and `response_state` (none → done | failed; both terminal) are one transition table each in
-  `apps/gateway/src/detection/lifecycle.ts`. The status route's guarded UPDATE takes its WHERE set from that table.
+  terminal) and `response_state` (none → done | failed; both terminal) are ADR-0348 machines,
+  `DETECTION_INCIDENT_MACHINE` and `DETECTION_RESPONSE_MACHINE` in `@regulait/shared`. The status route's UPDATE is
+  guarded with `whereFrom`, the incident read serves each machine's `describe()`, and the ADR-0348 test holds both
+  tables equal to their CHECK constraints.
 - **The sweep never feeds itself.** Rows with `objectType` `detection_incident` or `detection_rule_pack` are skipped.
 
 ### 5. Responses (slice 2)
@@ -156,6 +172,22 @@ match tool names only, so they are heuristics, and the admin can edit them.
   which leads into the Approvals Queue.
 - **Not reused: ADR-0186's monitor rules.** They are periodic 24-hour posture checks over the assurance monitor, with
   no per-session window, so they stay separate.
+- **Not reused: `governance_alerts` (ADR-0157) and `ai_incidents` (ADR-0182 A12), checked in the review of #865.**
+  - `governance_alerts` keeps ONE active row per (rule, subject) episode (`governance_alerts_active_uq`) and folds
+    every repeat into `last_detected_at` and a jsonb `detail`. A detection needs one row per match:
+    - its own evidence chain, a join table to the exact audit rows and their receipts (ADR-0200: never a jsonb list
+      of ids);
+    - the signed pack version that raised it (a foreign key);
+    - its own configured response with a run-once state (§5);
+    - the `historical` flag with its alert-only CHECK.
+
+    Two separate escalation attempts in one delegation tree are two incidents with two evidence chains, not one
+    episode. The burst rule's episode semantics (§2, `event_count`) are kept in the engine instead.
+  - `ai_incidents` is the human-run AI incident register: notification clocks, corrective actions, root cause and
+    deploy-gate release. A machine detection is an input a responder may promote into it, not an incident of that
+    register, and raising every match there would flood it.
+  - Follow-up, not in this slice: raise a `governance_alerts` episode per (rule, group) that points at the incidents,
+    so detections inherit that table's owner and SLA sweep.
 
 **Open source, for the windowed sequence part:**
 - **json-rules-engine 7.3.1 (ISC).** Stateless facts-to-events rules with no sequence or window. Its last release

@@ -251,6 +251,15 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "DELETE /v1/cost-imports/domain-rules/:ruleId": "internal",
   // ADR-0076: reconciliation (run-now + health/report) and the roster ingest
   "POST /v1/cost-imports/reconcile": "internal",
+  "GET /v1/vendor-usage": "internal", // ADR-0322
+  "PUT /v1/vendor-usage/policy": "internal", // ADR-0322
+  "POST /v1/vendor-usage/connectors": "internal", // ADR-0322
+  "PUT /v1/vendor-usage/connectors/:connectorId/config": "internal", // ADR-0322
+  "PUT /v1/vendor-usage/connectors/:connectorId/credential": "internal", // ADR-0322
+  "DELETE /v1/vendor-usage/connectors/:connectorId/credential": "internal", // ADR-0322
+  "PUT /v1/vendor-usage/connectors/:connectorId/enabled": "internal", // ADR-0322
+  "POST /v1/vendor-usage/connectors/:connectorId/pull": "internal", // ADR-0322
+  "GET /v1/vendor-usage/connectors/:connectorId/runs": "internal", // ADR-0322
   "GET /v1/cost-imports/reconciliation": "internal",
   "POST /v1/cost-imports/roster": "internal",
   "DELETE /v1/cost-imports/:importId": "internal",
@@ -427,6 +436,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/rule-steps/suggestions": "internal",
   "GET /v1/rule-steps/suggestions/export.xlsx": "internal",
   "POST /v1/rule-steps/suggestions/:id/dismiss": "internal",
+  "POST /v1/rule-steps/suggestions/:id/shadow": "internal",
+  "POST /v1/rule-steps/suggestions/:id/shadow/stop": "internal",
   "GET /v1/model-drift/settings": "internal",
   "PUT /v1/model-drift/settings": "internal",
   "GET /v1/mrm/cards/:id/drift": "internal",
@@ -462,6 +473,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/onboarding/imports": "internal",
   "GET /v1/onboarding/imports/export.xlsx": "internal",
   "POST /v1/onboarding/imports/group-roles": "internal",
+  "POST /v1/onboarding/imports/pm": "internal",
+  "GET /v1/onboarding/imports/pm/items": "internal",
   "POST /v1/onboarding/imports/users": "internal",
   "POST /v1/onboarding/roles/seed": "internal",
   "POST /v1/onboarding/steps/:stepKey": "internal",
@@ -658,6 +671,11 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // ADR-0214 amendment — per-asset posture scores; internal like the posture report.
   "GET /v1/reports/posture/assets": "internal",
   "GET /v1/reports/posture/assets/:kind/:assetId": "internal",
+  // ADR-0339 — the agent risk score; internal like the posture scores.
+  "GET /v1/agent-risk": "internal",
+  "GET /v1/agent-risk/:kind/:subjectId": "internal",
+  "GET /v1/agent-risk/:kind/:subjectId/history": "internal",
+  "POST /v1/agent-risk/recompute": "internal",
   "GET /v1/reports/trust": "internal",
   "GET /v1/reports/runs": "public-beta",
   "GET /v1/reports/runs/export.xlsx": "internal",
@@ -770,6 +788,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/managed-settings/bundles": "internal",
   "GET /v1/managed-settings/bundles": "internal",
   "GET /v1/managed-settings/bundles/:id/archive": "internal",
+  "GET /v1/managed-settings/drift": "internal",
   "GET /v1/mcp-bundles/:bundleId": "internal",
   "PATCH /v1/mcp-bundles/:bundleId": "internal",
   "DELETE /v1/mcp-bundles/:bundleId": "internal",
@@ -994,6 +1013,10 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/discovery/runs/export.xlsx": "internal",
   "GET /v1/discovery/settings": "internal",
   "PUT /v1/discovery/settings": "internal",
+  // ADR-0314 (G6): vendor agent registry records and their import
+  "GET /v1/agent-registry/records": "internal",
+  "GET /v1/agent-registry/records/:recordId": "internal",
+  "POST /v1/agent-registry/records/:recordId/import": "internal",
   "POST /v1/discovery/pseudonyms/:pseudonym/reveal": "internal",
   // ADR-0195 SD2b: the cloud federation issuer
   "GET /federation/.well-known/openid-configuration": "internal",
@@ -1024,6 +1047,22 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/third-party-ingest/sources/:sourceId/records": "internal",
   "POST /v1/third-party-ingest/defenseclaw/records": "internal",
   "POST /v1/third-party-ingest/defenseclaw/otlp/v1/logs": "internal",
+  // ADR-0334 (lane E16): the managed browser extension channel and its admin routes
+  "POST /v1/browser-extension/register": "internal",
+  "POST /v1/browser-extension/policy": "internal",
+  "POST /v1/browser-extension/events": "internal",
+  "POST /v1/browser-extension/prompt-captures": "internal",
+  "GET /v1/browser-governance": "internal",
+  "PUT /v1/browser-governance/settings": "internal",
+  "GET /v1/browser-governance/sites": "internal",
+  "PUT /v1/browser-governance/sites/:siteId": "internal",
+  "POST /v1/browser-governance/enrolment-tokens": "internal",
+  "GET /v1/browser-governance/enrolment-tokens": "internal",
+  "POST /v1/browser-governance/enrolment-tokens/:tokenId/revoke": "internal",
+  "GET /v1/browser-governance/devices": "internal",
+  "POST /v1/browser-governance/devices/:deviceId/revoke": "internal",
+  "GET /v1/browser-governance/events": "internal",
+  "GET /v1/browser-governance/prompt-captures/:captureId": "internal",
   // ADR-0303: SIEM delivery of the audit chain
   "GET /v1/siem/destinations": "internal",
   "POST /v1/siem/destinations": "internal",
@@ -1036,6 +1075,14 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/detection/incidents": "internal",
   "GET /v1/detection/incidents/:incidentId": "internal",
   "PUT /v1/detection/incidents/:incidentId/status": "internal",
+  // ADR-0312: cost per outcome
+  "GET /v1/cost-outcomes": "internal",
+  "GET /v1/cost-outcomes/summary": "internal",
+  "POST /v1/cost-outcomes/refresh": "internal",
+  "GET /v1/user-spend-budgets": "internal",
+  "GET /v1/users/:userId/spend-budget": "internal",
+  "PUT /v1/users/:userId/spend-budget": "internal",
+  "DELETE /v1/users/:userId/spend-budget": "internal",
   "POST /v1/discovery/sources/:sourceId/enrolment-tokens": "internal",
   "GET /v1/discovery/sources/:sourceId/enrolment-tokens": "internal",
   "GET /v1/discovery/sources/:sourceId/enrolment-tokens/export.xlsx": "internal",
@@ -1048,6 +1095,12 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/discovery/endpoint-mcp-server-links": "internal",
   "POST /v1/discovery/endpoint-mcp-server-links/remove": "internal",
   // ADR-0332 (lane E14): the endpoint AI add-on inventory
+  // ADR-0342 (lane E23): process analytics
+  "GET /v1/process-analytics/templates": "internal",
+  "GET /v1/process-analytics/stages": "internal",
+  "GET /v1/process-analytics/heatmap": "internal",
+  "GET /v1/process-analytics/throughput": "internal",
+  "POST /v1/process-analytics/refresh": "internal",
   "GET /v1/endpoint-addons/versions": "internal",
   "GET /v1/endpoint-addons/sightings": "internal",
   "GET /v1/endpoint-addons/flagged": "internal",
@@ -1289,6 +1342,10 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // ===== ADR-0180 (D3) — continuous assurance. Internal: admin console and
   // governance surfaces whose shapes are still moving. Append-only per owner.
   // --- P0
+  "GET /v1/sensitivity-labels": "internal",
+  "PUT /v1/sensitivity-labels/settings": "internal",
+  "PUT /v1/sensitivity-labels/:definitionId/rule": "internal",
+  "DELETE /v1/sensitivity-labels/:definitionId/rule": "internal",
   "GET /v1/org/settings/assurance-gate-mode": "internal",
   "PUT /v1/org/settings/assurance-gate-mode": "internal",
   // --- ADR-0211 (P17)
@@ -1676,6 +1733,13 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/cost-events": "cost-events",
   "GET /v1/cost-events/export.xlsx": "cost-events",
   "GET /v1/cost-consolidated": "cost-imports",
+  "GET /v1/cost-outcomes": "cost-outcomes",
+  "GET /v1/cost-outcomes/summary": "cost-outcomes",
+  "POST /v1/cost-outcomes/refresh": "cost-outcomes",
+  "GET /v1/user-spend-budgets": "cost-outcomes",
+  "GET /v1/users/:userId/spend-budget": "cost-outcomes",
+  "PUT /v1/users/:userId/spend-budget": "cost-outcomes",
+  "DELETE /v1/users/:userId/spend-budget": "cost-outcomes",
   "GET /v1/traces": "tracing",
   "GET /v1/traces/:traceId": "tracing",
   "GET /v1/sessions": "tracing",
@@ -1695,6 +1759,15 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/cost-imports/domain-rules": "cost-imports",
   "DELETE /v1/cost-imports/domain-rules/:ruleId": "cost-imports",
   "POST /v1/cost-imports/reconcile": "cost-imports",
+  "GET /v1/vendor-usage": "cost-imports", // ADR-0322
+  "PUT /v1/vendor-usage/policy": "cost-imports", // ADR-0322
+  "POST /v1/vendor-usage/connectors": "cost-imports", // ADR-0322
+  "PUT /v1/vendor-usage/connectors/:connectorId/config": "cost-imports", // ADR-0322
+  "PUT /v1/vendor-usage/connectors/:connectorId/credential": "cost-imports", // ADR-0322
+  "DELETE /v1/vendor-usage/connectors/:connectorId/credential": "cost-imports", // ADR-0322
+  "PUT /v1/vendor-usage/connectors/:connectorId/enabled": "cost-imports", // ADR-0322
+  "POST /v1/vendor-usage/connectors/:connectorId/pull": "cost-imports", // ADR-0322
+  "GET /v1/vendor-usage/connectors/:connectorId/runs": "cost-imports", // ADR-0322
   "GET /v1/cost-imports/reconciliation": "cost-imports",
   "POST /v1/cost-imports/roster": "cost-imports",
   "DELETE /v1/cost-imports/:importId": "cost-imports",
@@ -1887,6 +1960,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/rule-steps/suggestions": "cost-events",
   "GET /v1/rule-steps/suggestions/export.xlsx": "cost-events",
   "POST /v1/rule-steps/suggestions/:id/dismiss": "cost-events",
+  "POST /v1/rule-steps/suggestions/:id/shadow": "cost-events",
+  "POST /v1/rule-steps/suggestions/:id/shadow/stop": "cost-events",
   "GET /v1/model-drift/settings": "mrm",
   "PUT /v1/model-drift/settings": "mrm",
   "GET /v1/mrm/cards/:id/drift": "mrm",
@@ -1921,6 +1996,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/onboarding/imports": "onboarding",
   "GET /v1/onboarding/imports/export.xlsx": "onboarding",
   "POST /v1/onboarding/imports/group-roles": "onboarding",
+  "POST /v1/onboarding/imports/pm": "onboarding",
+  "GET /v1/onboarding/imports/pm/items": "onboarding",
   "POST /v1/onboarding/imports/users": "onboarding",
   "POST /v1/onboarding/roles/seed": "onboarding",
   "POST /v1/onboarding/steps/:stepKey": "onboarding",
@@ -2072,6 +2149,10 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/reports/posture": "reports",
   "GET /v1/reports/posture/assets": "reports",
   "GET /v1/reports/posture/assets/:kind/:assetId": "reports",
+  "GET /v1/agent-risk": "reports",
+  "GET /v1/agent-risk/:kind/:subjectId": "reports",
+  "GET /v1/agent-risk/:kind/:subjectId/history": "reports",
+  "POST /v1/agent-risk/recompute": "reports",
   "GET /v1/reports/trust": "reports",
   "GET /v1/reports/runs": "reports",
   "GET /v1/reports/runs/export.xlsx": "reports",
@@ -2182,6 +2263,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/managed-settings/bundles": "servers",
   "GET /v1/managed-settings/bundles": "servers",
   "GET /v1/managed-settings/bundles/:id/archive": "servers",
+  "GET /v1/managed-settings/drift": "servers",
   "GET /v1/mcp-bundles/:bundleId": "servers",
   "PATCH /v1/mcp-bundles/:bundleId": "servers",
   "DELETE /v1/mcp-bundles/:bundleId": "servers",
@@ -2367,6 +2449,9 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/discovery/runs/export.xlsx": "shadow-ai",
   "GET /v1/discovery/settings": "shadow-ai",
   "PUT /v1/discovery/settings": "shadow-ai",
+  "GET /v1/agent-registry/records": "shadow-ai",
+  "GET /v1/agent-registry/records/:recordId": "shadow-ai",
+  "POST /v1/agent-registry/records/:recordId/import": "shadow-ai",
   "POST /v1/discovery/pseudonyms/:pseudonym/reveal": "shadow-ai",
   // ADR-0195 SD2b: the cloud federation issuer
   "GET /federation/.well-known/openid-configuration": "shadow-ai",
@@ -2391,6 +2476,21 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/third-party-ingest/sources/:sourceId/records": "shadow-ai",
   "POST /v1/third-party-ingest/defenseclaw/records": "shadow-ai",
   "POST /v1/third-party-ingest/defenseclaw/otlp/v1/logs": "shadow-ai",
+  "POST /v1/browser-extension/register": "shadow-ai",
+  "POST /v1/browser-extension/policy": "shadow-ai",
+  "POST /v1/browser-extension/events": "shadow-ai",
+  "POST /v1/browser-extension/prompt-captures": "shadow-ai",
+  "GET /v1/browser-governance": "shadow-ai",
+  "PUT /v1/browser-governance/settings": "shadow-ai",
+  "GET /v1/browser-governance/sites": "shadow-ai",
+  "PUT /v1/browser-governance/sites/:siteId": "shadow-ai",
+  "POST /v1/browser-governance/enrolment-tokens": "shadow-ai",
+  "GET /v1/browser-governance/enrolment-tokens": "shadow-ai",
+  "POST /v1/browser-governance/enrolment-tokens/:tokenId/revoke": "shadow-ai",
+  "GET /v1/browser-governance/devices": "shadow-ai",
+  "POST /v1/browser-governance/devices/:deviceId/revoke": "shadow-ai",
+  "GET /v1/browser-governance/events": "shadow-ai",
+  "GET /v1/browser-governance/prompt-captures/:captureId": "shadow-ai",
   "POST /v1/discovery/sources/:sourceId/enrolment-tokens": "shadow-ai",
   "GET /v1/discovery/sources/:sourceId/enrolment-tokens": "shadow-ai",
   "GET /v1/discovery/sources/:sourceId/enrolment-tokens/export.xlsx": "shadow-ai",
@@ -2399,6 +2499,11 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/discovery/endpoint-mcp-servers": "shadow-ai",
   "POST /v1/discovery/endpoint-mcp-server-links": "shadow-ai",
   "POST /v1/discovery/endpoint-mcp-server-links/remove": "shadow-ai",
+  "GET /v1/process-analytics/templates": "reports",
+  "GET /v1/process-analytics/stages": "reports",
+  "GET /v1/process-analytics/heatmap": "reports",
+  "GET /v1/process-analytics/throughput": "reports",
+  "POST /v1/process-analytics/refresh": "reports",
   "GET /v1/endpoint-addons/versions": "shadow-ai",
   "GET /v1/endpoint-addons/sightings": "shadow-ai",
   "GET /v1/endpoint-addons/flagged": "shadow-ai",
@@ -2624,6 +2729,10 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
 
   // ===== ADR-0180 (D3) — continuous assurance. Append-only per owner.
   // --- P0
+  "GET /v1/sensitivity-labels": "org",
+  "PUT /v1/sensitivity-labels/settings": "org",
+  "PUT /v1/sensitivity-labels/:definitionId/rule": "org",
+  "DELETE /v1/sensitivity-labels/:definitionId/rule": "org",
   "GET /v1/org/settings/assurance-gate-mode": "org",
   "PUT /v1/org/settings/assurance-gate-mode": "org",
   "GET /v1/org/settings/risk-treatments": "org",

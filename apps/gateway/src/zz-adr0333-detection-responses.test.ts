@@ -137,7 +137,7 @@ describe("ADR-0333 responses", () => {
     expect((await db.select().from(detectionIncidents).where(eq(detectionIncidents.id, incident!.id)))[0]!.responseErrorCode).toBe("no_independent_approver");
   });
 
-  it("a terminal response state is never overwritten (lifecycle.ts)", async () => {
+  it("a terminal response state is never overwritten (DETECTION_RESPONSE_MACHINE)", async () => {
     const [incident] = await db.select().from(detectionIncidents).where(eq(detectionIncidents.response, "suspend_grant")).limit(1);
     await db.update(detectionIncidents).set({ responseState: "done", responseErrorCode: null }).where(eq(detectionIncidents.id, incident!.id));
     await runDetectionResponse(db, {

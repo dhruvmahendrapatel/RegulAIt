@@ -136,6 +136,24 @@ export class GitLabProvider implements GitProvider {
     });
   }
 
+  async deleteBranch(repo: string, branch: string): Promise<{ deleted: boolean }> {
+    try {
+      await this.request("DELETE", `/projects/${this.proj(repo)}/repository/branches/${encodeURIComponent(branch)}`);
+      return { deleted: true };
+    } catch (err) {
+      if (err instanceof GitProviderError && err.status === 404) return { deleted: false };
+      throw err;
+    }
+  }
+
+  async closePullRequest(repo: string, prId: string): Promise<{ closed: boolean }> {
+    const mr = await this.getPullRequest(repo, prId);
+    if (mr.state === "merged") throw new GitProviderError(`gitlab merge request !${prId} is merged; closing cannot undo it`, 409);
+    if (mr.state === "closed") return { closed: false };
+    await this.request("PUT", `/projects/${this.proj(repo)}/merge_requests/${prId}`, { state_event: "close" });
+    return { closed: true };
+  }
+
   async openPullRequest(
     repo: string,
     params: { head: string; base: string; title: string; body: string },
