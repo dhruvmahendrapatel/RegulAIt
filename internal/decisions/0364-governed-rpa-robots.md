@@ -444,7 +444,28 @@ S2 ships §2, §3 (review), §6 and §8 as written, with these recorded differen
   anyone entitled to it through the toolbox; there is no separate version read for them yet.
 - **Secret writes are a `settings_relax` step-up** (facts: robot, name, scope); the value is never returned or audited,
   and `last4` is kept only for a secret of 12 characters or more.
-- **The first-party server row** is seeded by the migration with `release_seen_at` at the epoch: its code ships with the
-  gateway release, so the ADR-0175 cooldown for newly seen third-party releases does not hold it. `first_party` is not an
-  org-enable-able upstream transport; `checkUpstreamDestination` refuses it on any path other than the in-process one.
+- **The first-party server and the ADR-0175 release-age cooldown.** `serverReleaseStatus` exempts a first-party server
+  on the gateway's fixed list: its code is the installed gateway, and each change to its manifest is a robot version
+  that was just approved on its exact content, not a new third-party release (review of #1059: the first approved robot
+  otherwise put the server in a seven-day quarantine). Admission scanning still applies to its manifest. `first_party` is
+  not an org-enable-able upstream transport; the proxy preflight skips only the egress half for a server on the fixed
+  list (`servedInProcess`), and `checkUpstreamDestination` refuses any other `first_party` row.
+- **Separation of duties at decide time (review of #1059).** Every user who wrote a draft's content is recorded in
+  `robot_version_editors` (the author on create, each editor on every edit; frozen with the version). The decide path
+  refuses any of them and the submitter, keyed on the decider, so delegation and the admin override do not reach it;
+  submit refuses naming any of them as approver.
+- **What the reviewer sees.** The approval preview carries the full reviewed content: the script, both schemas and the
+  exact tool definition agents will read (name, description, schemas, annotations), beside the digest. The named
+  approver of a pending version, and anyone the approver has an active delegation to, may read the robot (read only;
+  writes stay owner-or-admin). **Who may be named approver:** any active user other than the author, editors and
+  submitter, as for every other approvals-queue kind (the eval-run pattern), or the org's default approver. A narrower
+  review role is left to the approvals queue's own routing (ADR-0168), not special-cased here.
+- **The version status is guarded in the database too.** The freeze trigger refuses any status change that is not an
+  edge of `ROBOT_VERSION_MACHINE`, so a version cannot be moved back to `draft` to reopen its content.
+- **The call-time pin** compares the stored content's digest with both the version's digest and the digest its approval
+  was granted on.
+- **`agent_drafted`** is refused from clients in S2: it is set only by the gateway for a version an agent proposed (S3).
+- **The list** answers the ADR-0226 list contract (sort, keyset or offset, count, filters); the detail answers the
+  newest 20 versions, with older pages by `?versionsBefore=`, and reads each page's sites, bindings, editors and test
+  runs in four batched queries.
 - **Open with the owner (S3/S4, not built in S2):** the free-form browsing budget requirement and the maximum run time.

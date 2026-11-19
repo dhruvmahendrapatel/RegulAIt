@@ -17,6 +17,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import {
   and,
+  approvals,
   asc,
   eq,
   mcpTools,
@@ -98,10 +99,11 @@ export function createRobotsMcpServer(db: Db, serverId: string): Server {
   server.setRequestHandler(CallToolRequestSchema, async (req): Promise<CallToolResult> => {
     const name = req.params.name;
     const [row] = await db
-      .select({ robot: robots, version: robotVersions, tool: mcpTools })
+      .select({ robot: robots, version: robotVersions, tool: mcpTools, approvedDigest: approvals.argumentsDigest, approvalStatus: approvals.status })
       .from(robotVersions)
       .innerJoin(robots, eq(robots.id, robotVersions.robotId))
       .innerJoin(mcpTools, eq(mcpTools.id, robotVersions.mcpToolId))
+      .leftJoin(approvals, eq(approvals.id, robotVersions.approvalId))
       .where(and(eq(mcpTools.serverId, serverId), eq(mcpTools.name, name)));
     if (!row || row.robot.status !== "active" || row.version.status !== "approved") {
       return refusal("robot_version_not_approved", `'${name}' is not an approved robot version; nothing ran.`);
@@ -110,7 +112,14 @@ export function createRobotsMcpServer(db: Db, serverId: string): Server {
       return refusal("robot_version_retired", `'${name}' is halted; nothing ran.`);
     }
     const content = await robotVersionContent(db, row.version);
-    if (!row.version.contentDigest || content.digest !== row.version.contentDigest) {
+    // the stored content must hash to BOTH the version's digest and the digest its approval was granted on, so a
+    // database-level rewrite of the script and its digest together is still refused
+    if (
+      !row.version.contentDigest ||
+      content.digest !== row.version.contentDigest ||
+      row.approvedDigest !== row.version.contentDigest ||
+      row.approvalStatus !== "approved"
+    ) {
       return refusal(
         "robot_version_digest_mismatch",
         `'${name}' no longer matches the content its reviewer approved; nothing ran. Submit a new version for review.`,

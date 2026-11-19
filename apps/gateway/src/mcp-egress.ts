@@ -68,7 +68,7 @@ import { openUpstreamCredential, upstreamCredentialMiddleware } from "./mcp-upst
 import { loadEgressAllowList } from "./custom-providers.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { timeouts } from "./timeouts.js";
-import { connectFirstPartyServer } from "./mcp-first-party.js";
+import { connectFirstPartyServer, isFirstPartyServerUrl } from "./mcp-first-party.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 
@@ -404,6 +404,17 @@ async function withTransportColumns(db: Db, row: McpUpstreamRow): Promise<FullUp
   return stored ? { ...row, ...stored } : { ...row, transport: rowTransport(row) };
 }
 
+/**
+ * ADR-0364: is this row a first-party server the gateway serves in-process (the fixed list in `mcp-first-party.ts`)?
+ * Such a server has no destination to decide — nothing leaves the process — so the preflight skips only the egress
+ * half for it; admission and every per-call decision still apply. Any other `first_party` row answers false and is
+ * refused by `checkUpstreamDestination` (fail closed).
+ */
+export async function servedInProcess(db: Db, serverRow: McpUpstreamRow): Promise<boolean> {
+  const row = await withTransportColumns(db, serverRow);
+  return row.transport === "first_party" && isFirstPartyServerUrl(row.url);
+}
+
 /** what the destination decision allowed; `guardedMcpConnect` opens it */
 export type UpstreamDestination =
   | { transport: "streamable_http" | "sse"; row: FullUpstreamRow; posture: McpEgressPosture }
@@ -442,7 +453,18 @@ export async function checkUpstreamDestination(
   const enabled = (org.mcpUpstreamTransports ?? []) as McpUpstreamTransport[];
   // ADR-0364: a `first_party` row is served in-process by `guardedMcpConnect` and is never an org-enabled transport,
   // so any path that reaches this check with one fails closed here (nothing is sent anywhere)
-  if (row.transport === "first_party" || !enabled.includes(row.transport)) {
+  if (row.transport === "first_party") {
+    await refuseUpstream(
+      db,
+      row,
+      "mcp_transport_disabled",
+      `${label} refused: a first-party server is served only in-process by the gateway, and this one is not on the ` +
+        `gateway's first-party list. No setting enables it; nothing was started or sent.`,
+      { firstParty: true },
+    );
+    throw new Error("unreachable");
+  }
+  if (!enabled.includes(row.transport)) {
     await refuseUpstream(
       db,
       row,

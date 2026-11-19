@@ -27,6 +27,7 @@ import {
   desc,
   eq,
   inArray,
+  lt,
   mcpDefinitionPins,
   mcpServers,
   mcpTools,
@@ -34,6 +35,7 @@ import {
   robots,
   robotSecrets,
   robotVersionAllowedSites,
+  robotVersionEditors,
   robotVersions,
   robotVersionSecrets,
   sql,
@@ -63,8 +65,10 @@ import {
 } from "@regulait/shared";
 import { encryptSecret } from "./secrets.js";
 import { loadOrgSettings } from "./org-settings.js";
-import { afterCursorDesc, atTextSql, decodeCursor, encodeCursor } from "./pagination.js";
-import { checkStepUp } from "./step-up.js";
+import { requireStepUp } from "./step-up.js";
+import { activeDelegationFrom } from "./delegations.js";
+import { answerListPage, type ContractList } from "./list-contract-route.js";
+import type { ListSpec } from "./list-contract.js";
 import { whereFrom } from "./state-transition.js";
 import { robotToolDefinition, robotVersionContent, ROBOTS_SERVER_URL } from "./robots-mcp.js";
 
@@ -78,7 +82,21 @@ const secretParam = z.object({
   name: z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,63}$/),
   scope: z.enum(["live", "test"]),
 });
-const listQuery = z.object({ limit: z.coerce.number().int().min(1).max(100).default(50), cursor: z.string().max(200).optional() });
+const detailQuery = z.object({ versionsBefore: z.coerce.number().int().min(2).max(100001).optional() }).strict();
+
+/** S2: `agent_drafted` is the label of a version an agent proposed (S3's model fallback, recorded with its agent id);
+ * a client cannot claim it (security review #1059, finding 10) */
+function agentDraftedRefusal(draft: RobotVersionDraft): Refusal | null {
+  return draft.source === "agent_drafted"
+    ? { status: 422, body: { error: "robot_source_refused", detail: "'agent_drafted' is set only by the gateway for a version an agent proposed; use 'recorded' or 'uploaded'" } }
+    : null;
+}
+
+/** a guarded transition that must have moved exactly the locked row (the caller holds FOR UPDATE on it) */
+async function expectOne(q: Promise<Array<{ id: string }>>) {
+  const rows = await q;
+  if (rows.length !== 1) throw new Error("robot version transition did not apply to its locked row");
+}
 
 function viewerOf(req: FastifyRequest, reply: FastifyReply): Viewer | null {
   const userId = req.authCtx.userId;
@@ -110,6 +128,40 @@ async function managedRobot(db: Db, viewer: Viewer, robotId: string, reply: Fast
     return null;
   }
   return robot;
+}
+
+/**
+ * The robot, if the viewer may READ it: its owner, an admin, or a reviewer of one of its versions — the approver named
+ * on a pending review, or someone that approver has an active delegation to (security review #1059, finding 2: an
+ * approver must be able to see what they approve). Reviewers read; only `managedRobot` callers write.
+ */
+async function readableRobot(db: Db, viewer: Viewer, robotId: string, reply: FastifyReply): Promise<{ robot: RobotRow; reviewer: boolean } | null> {
+  const [robot] = await db.select().from(robots).where(eq(robots.id, robotId));
+  if (robot && (viewer.isAdmin || robot.ownerUserId === viewer.userId)) return { robot, reviewer: false };
+  if (robot) {
+    const pending = await db
+      .select({ approverUserId: approvals.approverUserId })
+      .from(approvals)
+      .innerJoin(robotVersions, eq(robotVersions.approvalId, approvals.id))
+      .where(and(eq(robotVersions.robotId, robot.id), eq(robotVersions.status, "in_review"), eq(approvals.status, "pending")));
+    for (const p of pending) {
+      if (!p.approverUserId) continue;
+      if (p.approverUserId === viewer.userId || (await activeDelegationFrom(db, p.approverUserId, viewer.userId))) return { robot, reviewer: true };
+    }
+  }
+  void reply.status(404).send({ error: "unknown_robot" });
+  return null;
+}
+
+/** record `userId` as having written this draft's content (separation of duties at decide time) */
+async function recordEditor(tx: Db, versionId: string, userId: string) {
+  await tx.insert(robotVersionEditors).values({ robotVersionId: versionId, userId }).onConflictDoNothing();
+}
+
+/** everyone who wrote the version's content (author included) */
+async function editorsOf(db: Db, version: { id: string; authorUserId: string }): Promise<Set<string>> {
+  const rows = await db.select({ userId: robotVersionEditors.userId }).from(robotVersionEditors).where(eq(robotVersionEditors.robotVersionId, version.id));
+  return new Set([version.authorUserId, ...rows.map((r) => r.userId)]);
 }
 
 async function versionOf(db: Db, robotId: string, version: number): Promise<RobotVersionRow | undefined> {
@@ -177,14 +229,68 @@ async function writeDraftChildren(tx: Db, versionId: string, robotId: string, or
   }
 }
 
-async function versionView(db: Db, robot: RobotRow, v: RobotVersionRow, viewer: Viewer) {
-  const content = await robotVersionContent(db, v);
-  const [lastTest] = await db
-    .select({ id: robotRuns.id, status: robotRuns.status, contentDigest: robotRuns.contentDigest, finishedAt: robotRuns.finishedAt })
-    .from(robotRuns)
-    .where(and(eq(robotRuns.robotVersionId, v.id), eq(robotRuns.kind, "test")))
-    .orderBy(desc(robotRuns.createdAt))
-    .limit(1);
+/** the most versions one detail answer carries; older ones page with `?versionsBefore=<version>` */
+const VERSIONS_PAGE = 20;
+
+/**
+ * The views of a page of versions: the allow-lists, bindings, editors and latest test runs of the whole page in four
+ * batched reads (never per version), then each view's digest computed from those rows.
+ */
+async function versionViews(db: Db, robot: RobotRow, versions: RobotVersionRow[], viewer: Viewer) {
+  const ids = versions.map((v) => v.id);
+  if (!ids.length) return [];
+  const [sites, bindings, editors, runs] = await Promise.all([
+    db.select().from(robotVersionAllowedSites).where(inArray(robotVersionAllowedSites.robotVersionId, ids)).orderBy(asc(robotVersionAllowedSites.origin)),
+    db.select().from(robotVersionSecrets).where(inArray(robotVersionSecrets.robotVersionId, ids)).orderBy(asc(robotVersionSecrets.name)),
+    db.select().from(robotVersionEditors).where(inArray(robotVersionEditors.robotVersionId, ids)).orderBy(asc(robotVersionEditors.firstEditedAt)),
+    db
+      .selectDistinctOn([robotRuns.robotVersionId], {
+        robotVersionId: robotRuns.robotVersionId,
+        id: robotRuns.id,
+        status: robotRuns.status,
+        contentDigest: robotRuns.contentDigest,
+        finishedAt: robotRuns.finishedAt,
+      })
+      .from(robotRuns)
+      .where(and(inArray(robotRuns.robotVersionId, ids), eq(robotRuns.kind, "test")))
+      .orderBy(robotRuns.robotVersionId, desc(robotRuns.createdAt)),
+  ]);
+  return versions.map((v) =>
+    versionView(robot, v, viewer, {
+      allowedOrigins: sites.filter((s) => s.robotVersionId === v.id).map((s) => s.origin),
+      bindings: bindings.filter((b) => b.robotVersionId === v.id),
+      editors: editors.filter((e) => e.robotVersionId === v.id).map((e) => e.userId),
+      lastTest: runs.find((r) => r.robotVersionId === v.id) ?? null,
+    }),
+  );
+}
+
+function versionView(
+  robot: RobotRow,
+  v: RobotVersionRow,
+  viewer: Viewer,
+  rel: {
+    allowedOrigins: string[];
+    bindings: Array<{ name: string; origin: string; liveSecretId: string | null }>;
+    editors: string[];
+    lastTest: { id: string; status: string; contentDigest: string; finishedAt: Date | null } | null;
+  },
+) {
+  const content = {
+    allowedOrigins: rel.allowedOrigins,
+    bindings: rel.bindings,
+    digest: robotContentDigest({
+      scriptFormat: v.scriptFormat,
+      script: v.script,
+      compiledSha256: v.compiledSha256,
+      compilerVersion: v.compilerVersion,
+      inputSchema: v.inputSchema,
+      outputSchema: v.outputSchema,
+      allowedOrigins: rel.allowedOrigins,
+      secretBindings: rel.bindings.map((b) => ({ name: b.name, origin: b.origin, liveSecretId: b.liveSecretId })),
+    }),
+  };
+  const lastTest = rel.lastTest ? { id: rel.lastTest.id, status: rel.lastTest.status, contentDigest: rel.lastTest.contentDigest, finishedAt: rel.lastTest.finishedAt } : null;
   const isManager = viewer.isAdmin || robot.ownerUserId === viewer.userId;
   return {
     id: v.id,
@@ -208,6 +314,8 @@ async function versionView(db: Db, robot: RobotRow, v: RobotVersionRow, viewer: 
     /** what the content would hash to now, so a client can see a test run matches it before submitting */
     currentDigest: content.digest,
     authorUserId: v.authorUserId,
+    /** everyone who wrote this version's content as a draft: none of them may decide its review */
+    editorUserIds: rel.editors,
     approvalId: v.approvalId,
     toolName: v.mcpToolId ? robotToolName(robot.slug, v.version) : null,
     lastTestRun: lastTest ?? null,
@@ -251,6 +359,85 @@ async function resolvedDigest(db: Db, v: RobotVersionRow) {
   return { digest, bindings, allowedOrigins: content.allowedOrigins };
 }
 
+type RobotListItem = {
+  id: string;
+  slug: string;
+  name: string;
+  description: string;
+  engine: string;
+  ownerUserId: string;
+  robotStatus: string;
+  status: string;
+  latestVersion: number | null;
+  usedByAgents: number;
+  createdAt: Date;
+};
+
+const robotListFilters = z
+  .object({
+    robotStatus: z.enum(["active", "retired"]).optional(),
+    engine: z.enum(["browser", "desktop"]).optional(),
+    ownerUserId: z.string().uuid().optional(),
+  })
+  .strict();
+
+export const ROBOTS_LIST: ListSpec<RobotListItem> = {
+  id: "robots",
+  sorts: {
+    created: { expr: robots.createdAt, keysetAt: robots.createdAt },
+    name: { expr: robots.name },
+    slug: { expr: robots.slug },
+  },
+  columns: {
+    slug: { label: "Slug", value: (r) => r.slug },
+    name: { label: "Name", value: (r) => r.name },
+    engine: { label: "Engine", value: (r) => r.engine },
+    status: { label: "Status", value: (r) => r.status },
+    latestVersion: { label: "Latest version", value: (r) => r.latestVersion },
+    usedByAgents: { label: "Used by agents", value: (r) => r.usedByAgents },
+    created: { label: "Created", value: (r) => r.createdAt },
+  },
+  filters: ["robotStatus", "engine", "ownerUserId"],
+  defaultSort: { col: "created", dir: "desc" },
+  idCol: robots.id,
+};
+
+/** the computed list columns for a page of robots: two batched reads for the whole page */
+async function decorateRobotRows(db: Db, page: RobotRow[]): Promise<RobotListItem[]> {
+  const ids = page.map((r) => r.id);
+  const versions = ids.length
+    ? await db
+        .select({ robotId: robotVersions.robotId, version: robotVersions.version, status: robotVersions.status, toolId: robotVersions.mcpToolId })
+        .from(robotVersions)
+        .where(inArray(robotVersions.robotId, ids))
+    : [];
+  const toolIds = versions.map((v) => v.toolId).filter((x): x is string => !!x);
+  // "Used by N agents": distinct agents whose toolbox holds any of the robot's version tools (computed, never stored)
+  const usage = toolIds.length
+    ? await db
+        .select({ refId: builderAgentTools.refId, agentId: builderAgentTools.agentId })
+        .from(builderAgentTools)
+        .where(and(eq(builderAgentTools.kind, "mcp_tool"), inArray(builderAgentTools.refId, toolIds)))
+    : [];
+  return page.map((robot) => {
+    const mine = versions.filter((v) => v.robotId === robot.id);
+    const tools = new Set(mine.map((v) => v.toolId).filter((x): x is string => !!x));
+    return {
+      id: robot.id,
+      slug: robot.slug,
+      name: robot.name,
+      description: robot.description,
+      engine: robot.engine,
+      ownerUserId: robot.ownerUserId,
+      robotStatus: robot.status,
+      status: robotListStatus(robot.status, mine.map((v) => v.status)),
+      latestVersion: mine.reduce((m, v) => Math.max(m, v.version), 0) || null,
+      usedByAgents: new Set(usage.filter((u) => tools.has(u.refId)).map((u) => u.agentId)).size,
+      createdAt: robot.createdAt,
+    };
+  });
+}
+
 /** halt a retired version's tool (ADR-0124's halt, which the execution posture already enforces on every call) */
 async function haltVersionTool(tx: Db, v: RobotVersionRow, userId: string, reason: string) {
   if (!v.mcpToolId) return;
@@ -261,58 +448,34 @@ async function haltVersionTool(tx: Db, v: RobotVersionRow, userId: string, reaso
 }
 
 export function registerRobotRoutes(app: FastifyInstance, db: Db, opts: { dataKey?: string | undefined } = {}): void {
-  app.get("/v1/robots", async (req, reply) => {
-    const viewer = viewerOf(req, reply);
-    if (!viewer) return;
-    const q = listQuery.safeParse(req.query ?? {});
-    if (!q.success) return reply.status(400).send({ error: "invalid_query" });
-    const cursor = q.data.cursor ? decodeCursor(q.data.cursor) : null;
-    if (q.data.cursor && !cursor) return reply.status(400).send({ error: "invalid_cursor" });
-    const conds = [
-      ...(viewer.isAdmin ? [] : [eq(robots.ownerUserId, viewer.userId)]),
-      ...(cursor ? [afterCursorDesc(robots.createdAt, robots.id, cursor)] : []),
-    ];
-    const rows = await db
-      .select({ robot: robots, at: atTextSql(robots.createdAt) })
-      .from(robots)
-      .where(conds.length ? and(...conds) : undefined)
-      .orderBy(desc(robots.createdAt), desc(robots.id))
-      .limit(q.data.limit + 1);
-    const page = rows.slice(0, q.data.limit);
-    const ids = page.map((r) => r.robot.id);
-    const versions = ids.length
-      ? await db
-          .select({ robotId: robotVersions.robotId, version: robotVersions.version, status: robotVersions.status, toolId: robotVersions.mcpToolId })
-          .from(robotVersions)
-          .where(inArray(robotVersions.robotId, ids))
-      : [];
-    const toolIds = versions.map((v) => v.toolId).filter((x): x is string => !!x);
-    // "Used by N agents": distinct agents whose toolbox holds any of the robot's version tools (computed, never stored)
-    const usage = toolIds.length
-      ? await db
-          .select({ refId: builderAgentTools.refId, agentId: builderAgentTools.agentId })
-          .from(builderAgentTools)
-          .where(and(eq(builderAgentTools.kind, "mcp_tool"), inArray(builderAgentTools.refId, toolIds)))
-      : [];
-    const items = page.map(({ robot }) => {
-      const mine = versions.filter((v) => v.robotId === robot.id);
-      const tools = new Set(mine.map((v) => v.toolId).filter((x): x is string => !!x));
-      return {
-        id: robot.id,
-        slug: robot.slug,
-        name: robot.name,
-        description: robot.description,
-        engine: robot.engine,
-        ownerUserId: robot.ownerUserId,
-        status: robotListStatus(robot.status, mine.map((v) => v.status)),
-        latestVersion: mine.reduce((m, v) => Math.max(m, v.version), 0) || null,
-        usedByAgents: new Set(usage.filter((u) => tools.has(u.refId)).map((u) => u.agentId)).size,
-        createdAt: robot.createdAt,
-      };
-    });
-    const last = rows.length > q.data.limit ? page[page.length - 1] : undefined;
-    return { robots: items, nextCursor: last ? encodeCursor({ at: last.at, id: last.robot.id }) : null };
-  });
+  // ADR-0226: the list answers through the shared list contract (sort, keyset or offset paging, count). The computed
+  // status and "Used by N agents" are filled per page with two batched reads, never per row.
+  const robotsList: ContractList<RobotListItem, z.infer<typeof robotListFilters>> = {
+    spec: ROBOTS_LIST,
+    filters: robotListFilters,
+    reader: {
+      fetch: async (q) => {
+        const rows = await db.select({ robot: robots, _cursorAt: q.cursorAt }).from(robots).where(q.where).orderBy(...q.orderBy).limit(q.limit).offset(q.offset);
+        const decorated = await decorateRobotRows(db, rows.map((r) => r.robot));
+        return decorated.map((item, i) => ({ ...item, _cursorAt: rows[i]!._cursorAt }));
+      },
+      countable: (where) => db.select({ one: sql`1` }).from(robots).where(where),
+      idOf: (r) => r.id,
+    },
+    where: (req, f) => {
+      const userId = req.authCtx.userId;
+      if (!userId) return null;
+      const conds = [
+        ...(req.authCtx.isAdmin ? [] : [eq(robots.ownerUserId, userId)]),
+        ...(f.robotStatus ? [eq(robots.status, f.robotStatus)] : []),
+        ...(f.engine ? [eq(robots.engine, f.engine)] : []),
+        ...(f.ownerUserId ? [eq(robots.ownerUserId, f.ownerUserId)] : []),
+      ];
+      return conds.length ? and(...conds) : undefined;
+    },
+    refusal: { status: 403, body: { error: "robots_require_identity", detail: "a robot is owned and reviewed by people; a token with no user identity cannot list them" } },
+  };
+  app.get("/v1/robots", async (req, reply) => answerListPage(db, req, reply, robotsList));
 
   app.post("/v1/robots", async (req, reply) => {
     const viewer = viewerOf(req, reply);
@@ -344,9 +507,22 @@ export function registerRobotRoutes(app: FastifyInstance, db: Db, opts: { dataKe
     const viewer = viewerOf(req, reply);
     if (!viewer) return;
     const { robotId } = robotParam.parse(req.params);
-    const robot = await managedRobot(db, viewer, robotId, reply);
-    if (!robot) return reply;
-    const versions = await db.select().from(robotVersions).where(eq(robotVersions.robotId, robot.id)).orderBy(desc(robotVersions.version));
+    const q = detailQuery.safeParse(req.query ?? {});
+    if (!q.success) return reply.status(400).send({ error: "invalid_query", detail: "versionsBefore is a version number" });
+    const readable = await readableRobot(db, viewer, robotId, reply);
+    if (!readable) return reply;
+    const robot = readable.robot;
+    // the newest VERSIONS_PAGE versions (older pages with ?versionsBefore=<version>); the list status reads statuses only
+    const [versions, statuses] = await Promise.all([
+      db
+        .select()
+        .from(robotVersions)
+        .where(and(eq(robotVersions.robotId, robot.id), ...(q.data.versionsBefore ? [lt(robotVersions.version, q.data.versionsBefore)] : [])))
+        .orderBy(desc(robotVersions.version))
+        .limit(VERSIONS_PAGE + 1),
+      db.select({ status: robotVersions.status }).from(robotVersions).where(eq(robotVersions.robotId, robot.id)),
+    ]);
+    const page = versions.slice(0, VERSIONS_PAGE);
     const secrets = await db
       .select({ name: robotSecrets.name, scope: robotSecrets.scope, last4: robotSecrets.last4, setAt: robotSecrets.setAt, setBy: robotSecrets.setBy })
       .from(robotSecrets)
@@ -355,10 +531,13 @@ export function registerRobotRoutes(app: FastifyInstance, db: Db, opts: { dataKe
     return {
       robot: {
         ...robot,
-        status: robotListStatus(robot.status, versions.map((v) => v.status)),
+        status: robotListStatus(robot.status, statuses.map((v) => v.status)),
         lifecycle: ROBOT_MACHINE.describe(robot.status),
       },
-      versions: await Promise.all(versions.map((v) => versionView(db, robot, v, viewer))),
+      /** true when the viewer reads this robot as the reviewer of a pending version, not as its owner or an admin */
+      readAsReviewer: readable.reviewer,
+      versions: await versionViews(db, robot, page, viewer),
+      nextVersionsBefore: versions.length > VERSIONS_PAGE ? page[page.length - 1]!.version : null,
       // never the value: name, scope, last four and who set it when
       secrets,
     };
@@ -382,11 +561,11 @@ export function registerRobotRoutes(app: FastifyInstance, db: Db, opts: { dataKe
       for (const v of versions) {
         if (v.status === "approved") {
           await haltVersionTool(tx, v, viewer.userId, `robot '${robot.slug}' retired`);
-          await tx.update(robotVersions).set({ status: "retired", updatedAt: sql`now()` }).where(and(eq(robotVersions.id, v.id), whereFrom(robotVersions.status, ROBOT_VERSION_MACHINE, "retire")));
+          await expectOne(tx.update(robotVersions).set({ status: "retired", updatedAt: sql`now()` }).where(and(eq(robotVersions.id, v.id), whereFrom(robotVersions.status, ROBOT_VERSION_MACHINE, "retire"))).returning({ id: robotVersions.id }));
         } else if (v.status === "draft") {
-          await tx.update(robotVersions).set({ status: "rejected", updatedAt: sql`now()` }).where(and(eq(robotVersions.id, v.id), whereFrom(robotVersions.status, ROBOT_VERSION_MACHINE, "discard")));
+          await expectOne(tx.update(robotVersions).set({ status: "rejected", updatedAt: sql`now()` }).where(and(eq(robotVersions.id, v.id), whereFrom(robotVersions.status, ROBOT_VERSION_MACHINE, "discard"))).returning({ id: robotVersions.id }));
         } else if (v.status === "in_review") {
-          await tx.update(robotVersions).set({ status: "rejected", decidedAt: sql`now()`, updatedAt: sql`now()` }).where(and(eq(robotVersions.id, v.id), whereFrom(robotVersions.status, ROBOT_VERSION_MACHINE, "reject")));
+          await expectOne(tx.update(robotVersions).set({ status: "rejected", decidedAt: sql`now()`, updatedAt: sql`now()` }).where(and(eq(robotVersions.id, v.id), whereFrom(robotVersions.status, ROBOT_VERSION_MACHINE, "reject"))).returning({ id: robotVersions.id }));
           // the pending review can no longer be decided: superseded, so nobody approves a retired robot
           if (v.approvalId) await tx.update(approvals).set({ status: "superseded" }).where(and(eq(approvals.id, v.approvalId), eq(approvals.status, "pending")));
         }
@@ -410,6 +589,8 @@ export function registerRobotRoutes(app: FastifyInstance, db: Db, opts: { dataKe
     const parsed = robotVersionDraftSchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.status(400).send({ error: "invalid_request", issues: parsed.error.issues.slice(0, 20) });
     const draft = parsed.data;
+    const sourceRefusal = agentDraftedRefusal(draft);
+    if (sourceRefusal) return reply.status(sourceRefusal.status).send(sourceRefusal.body);
     const check = checkDraft(robot, draft);
     if (!check.ok) return reply.status(check.refusal.status).send(check.refusal.body);
     const row = await db.transaction(async (rawTx) => {
@@ -435,6 +616,7 @@ export function registerRobotRoutes(app: FastifyInstance, db: Db, opts: { dataKe
         })
         .returning();
       await writeDraftChildren(tx, v!.id, robot.id, check.origins, check.bindings);
+      await recordEditor(tx, v!.id, viewer.userId);
       await audit(tx, viewer.userId, "robot_version", v!.id, "robot-version-drafted", `robot '${robot.slug}' version ${v!.version} drafted`, {
         robotId: robot.id,
         version: v!.version,
@@ -444,7 +626,7 @@ export function registerRobotRoutes(app: FastifyInstance, db: Db, opts: { dataKe
       });
       return v!;
     });
-    return reply.status(201).send({ version: await versionView(db, robot, row, viewer) });
+    return reply.status(201).send({ version: (await versionViews(db, robot, [row], viewer))[0] });
   });
 
   app.put("/v1/robots/:robotId/versions/:version", async (req, reply) => {
@@ -461,6 +643,8 @@ export function registerRobotRoutes(app: FastifyInstance, db: Db, opts: { dataKe
     const parsed = robotVersionDraftSchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.status(400).send({ error: "invalid_request", issues: parsed.error.issues.slice(0, 20) });
     const draft = parsed.data;
+    const sourceRefusal = agentDraftedRefusal(draft);
+    if (sourceRefusal) return reply.status(sourceRefusal.status).send(sourceRefusal.body);
     const check = checkDraft(robot, draft);
     if (!check.ok) return reply.status(check.refusal.status).send(check.refusal.body);
     const row = await db.transaction(async (rawTx) => {
@@ -480,6 +664,8 @@ export function registerRobotRoutes(app: FastifyInstance, db: Db, opts: { dataKe
         .returning();
       if (!u) return null;
       await writeDraftChildren(tx, v.id, robot.id, check.origins, check.bindings);
+      // every editor is recorded: none of them may decide this version's review (separation of duties)
+      await recordEditor(tx, v.id, viewer.userId);
       await audit(tx, viewer.userId, "robot_version", v.id, "robot-version-edited", `robot '${robot.slug}' version ${v.version} draft edited`, {
         robotId: robot.id,
         version: v.version,
@@ -489,7 +675,7 @@ export function registerRobotRoutes(app: FastifyInstance, db: Db, opts: { dataKe
       return u;
     });
     if (!row) return reply.status(409).send({ error: "robot_version_frozen" });
-    return { version: await versionView(db, robot, row, viewer) };
+    return { version: (await versionViews(db, robot, [row], viewer))[0] };
   });
 
   app.post("/v1/robots/:robotId/versions/:version/submit", async (req, reply) => {
@@ -538,8 +724,8 @@ export function registerRobotRoutes(app: FastifyInstance, db: Db, opts: { dataKe
     if (!approverUserId) {
       return reply.status(422).send({ error: "robot_approver_required", detail: "name approverUserId, or set a default approver in org settings" });
     }
-    if (approverUserId === v.authorUserId || approverUserId === viewer.userId) {
-      return reply.status(403).send({ error: "caller_cannot_approve", detail: "a robot version is reviewed by someone other than its author or submitter" });
+    if ((await editorsOf(db, v)).has(approverUserId) || approverUserId === viewer.userId) {
+      return reply.status(403).send({ error: "caller_cannot_approve", detail: "a robot version is reviewed by someone other than its author, its editors or its submitter" });
     }
     const [approver] = await db.select({ id: users.id, disabledAt: users.disabledAt }).from(users).where(eq(users.id, approverUserId));
     if (!approver || approver.disabledAt) return reply.status(404).send({ error: "unknown_approver" });
@@ -577,6 +763,12 @@ export function registerRobotRoutes(app: FastifyInstance, db: Db, opts: { dataKe
             secrets: resolved.bindings.map((b) => ({ name: b.name, origin: b.origin })),
             testRunId: passed.id,
             toolName: robotToolName(robot.slug, v.version),
+            // security review #1059, finding 2: the reviewer sees exactly what will be published — the script, the
+            // schemas and the tool definition (the description agents read) — not only a hash of it
+            script: v.script,
+            inputSchema: v.inputSchema,
+            outputSchema: v.outputSchema,
+            toolDefinition: robotToolDefinition(robot, v),
           },
           argumentsPreviewKind: "arguments_v1",
           approvalScope: "action",
@@ -589,6 +781,7 @@ export function registerRobotRoutes(app: FastifyInstance, db: Db, opts: { dataKe
         .set({ status: "in_review", contentDigest: resolved.digest, approvalId: a!.id, submittedAt: sql`now()`, updatedAt: sql`now()` })
         .where(and(eq(robotVersions.id, v.id), whereFrom(robotVersions.status, ROBOT_VERSION_MACHINE, "submit")))
         .returning();
+      if (!u) throw new Error("robot version left draft under its own row lock");
       await audit(tx, viewer.userId, "robot_version", v.id, "robot-version-submitted", `robot '${robot.slug}' version ${v.version} submitted for review`, {
         robotId: robot.id,
         version: v.version,
@@ -597,11 +790,11 @@ export function registerRobotRoutes(app: FastifyInstance, db: Db, opts: { dataKe
         contentDigest: resolved.digest,
         testRunId: passed.id,
       }, "require_approval");
-      return u!;
+      return u;
     });
     if (out === null) return reply.status(409).send({ error: "robot_version_not_draft" });
     if (out === "changed") return reply.status(409).send({ error: "robot_version_changed", detail: "the version's content changed while it was submitted; submit again" });
-    return reply.status(202).send({ version: await versionView(db, robot, out, viewer) });
+    return reply.status(202).send({ version: (await versionViews(db, robot, [out], viewer))[0] });
   });
 
   app.post("/v1/robots/:robotId/versions/:version/retire", async (req, reply) => {
@@ -629,7 +822,7 @@ export function registerRobotRoutes(app: FastifyInstance, db: Db, opts: { dataKe
       return u;
     });
     if (!out) return reply.status(409).send({ error: "robot_version_not_approved", lifecycle: ROBOT_VERSION_MACHINE.describe(v.status) });
-    return { version: await versionView(db, robot, out, viewer) };
+    return { version: (await versionViews(db, robot, [out], viewer))[0] };
   });
 
   app.put("/v1/robots/:robotId/secrets/:name/:scope", async (req, reply) => {
@@ -646,8 +839,8 @@ export function registerRobotRoutes(app: FastifyInstance, db: Db, opts: { dataKe
     if (!parsed.success) return reply.status(400).send({ error: "invalid_request", detail: "expected { value } (1 to 8192 characters)" });
     if (!opts.dataKey) return reply.status(503).send({ error: "data_key_unavailable", detail: "the data key is not configured, so a secret cannot be stored encrypted" });
     const stepUp = { kind: "settings_relax" as const, facts: { op: "robot_secret_set", robotId: robot.id, name, scope } };
-    const look = await checkStepUp(db, req, stepUp, { spend: true });
-    if (!look.ok) return reply.status(look.status).send(look.body);
+    const su = await requireStepUp(db, req, reply, stepUp);
+    if (!su.ok) return reply;
     const value = parsed.data.value;
     const values = {
       valueCiphertext: encryptSecret(opts.dataKey, value),
@@ -706,13 +899,25 @@ export function registerRobotRoutes(app: FastifyInstance, db: Db, opts: { dataKe
 
 /** `cannot_approve_own_robot_version`, keyed on the DECIDER, so the author cannot reach their own review through
  * delegation or the admin override */
-export async function precheckRobotVersionDecision(db: Db, approval: { id: string }, deciderUserId: string): Promise<Refusal | null> {
-  const [v] = await db.select({ authorUserId: robotVersions.authorUserId }).from(robotVersions).where(eq(robotVersions.approvalId, approval.id));
+export async function precheckRobotVersionDecision(
+  db: Db,
+  approval: { id: string; userId: string | null },
+  deciderUserId: string,
+): Promise<Refusal | null> {
+  const [v] = await db.select({ id: robotVersions.id, authorUserId: robotVersions.authorUserId }).from(robotVersions).where(eq(robotVersions.approvalId, approval.id));
   if (!v) return null;
-  if (v.authorUserId === deciderUserId) {
+  // security review #1059, finding 1: the author, every editor of the draft, and the submitter are all refused — so no
+  // one who wrote or put forward the content decides it, through delegation or the admin override included
+  if ((await editorsOf(db, v)).has(deciderUserId)) {
     return {
       status: 403,
-      body: { error: "cannot_approve_own_robot_version", detail: "the decider wrote this robot version; another reviewer must decide it" },
+      body: { error: "cannot_approve_own_robot_version", detail: "the decider wrote or edited this robot version; another reviewer must decide it" },
+    };
+  }
+  if (approval.userId === deciderUserId) {
+    return {
+      status: 403,
+      body: { error: "cannot_approve_own_robot_version", detail: "the decider submitted this robot version for review; another reviewer must decide it" },
     };
   }
   return null;
@@ -734,10 +939,13 @@ export async function applyRobotVersionDecision(
   if (!v || v.status !== "in_review") return null;
   const [robot] = await tx.select().from(robots).where(eq(robots.id, v.robotId));
   const reject = async (ruleId: string, reason: string, detail: Record<string, unknown> = {}) => {
-    await tx
-      .update(robotVersions)
-      .set({ status: "rejected", decidedAt: sql`now()`, updatedAt: sql`now()` })
-      .where(and(eq(robotVersions.id, v.id), whereFrom(robotVersions.status, ROBOT_VERSION_MACHINE, "reject")));
+    await expectOne(
+      tx
+        .update(robotVersions)
+        .set({ status: "rejected", decidedAt: sql`now()`, updatedAt: sql`now()` })
+        .where(and(eq(robotVersions.id, v.id), whereFrom(robotVersions.status, ROBOT_VERSION_MACHINE, "reject")))
+        .returning({ id: robotVersions.id }),
+    );
     await audit(tx, deciderUserId, "robot_version", v.id, ruleId, reason, { robotId: v.robotId, version: v.version, approvalId: approval.id, ...detail }, decision === "approved" ? "deny" : "allow");
     return null;
   };
@@ -753,6 +961,9 @@ export async function applyRobotVersionDecision(
   const serverId = await robotsServerId(tx);
   if (!serverId) return reject("robot-version-stale", `robot version ${v.version} not published: the Robots MCP server is not registered`);
   const def = robotToolDefinition(robot, v);
+  // fail closed: a definition that cannot be pinned is not published (code review #1059, triage item 1)
+  const pin = pinnableDefinition("tool", def);
+  if (!pin) return reject("robot-version-stale", `robot version ${v.version} not published: its tool definition cannot be pinned`);
   const [tool] = await tx
     .insert(mcpTools)
     .values({ serverId, name: def.name, kind: "write", description: def.description ?? null, inputSchema: def.inputSchema as Record<string, unknown> })
@@ -761,8 +972,7 @@ export async function applyRobotVersionDecision(
       set: { kind: "write", description: def.description ?? null, inputSchema: def.inputSchema as Record<string, unknown> },
     })
     .returning({ id: mcpTools.id });
-  const pin = pinnableDefinition("tool", def);
-  if (pin) {
+  {
     const approvedPin = {
       approvedDigest: pin.digest,
       approvedDefinition: pin.definition,
@@ -780,10 +990,13 @@ export async function applyRobotVersionDecision(
     // the server's baseline is the reviewed set: a later sync compares against approved pins, never re-baselines them
     await tx.update(mcpServers).set({ definitionsPinnedAt: sql`now()` }).where(and(eq(mcpServers.id, serverId), sql`${mcpServers.definitionsPinnedAt} IS NULL`));
   }
-  await tx
-    .update(robotVersions)
-    .set({ status: "approved", mcpToolId: tool!.id, decidedAt: sql`now()`, updatedAt: sql`now()` })
-    .where(and(eq(robotVersions.id, v.id), whereFrom(robotVersions.status, ROBOT_VERSION_MACHINE, "approve")));
+  await expectOne(
+    tx
+      .update(robotVersions)
+      .set({ status: "approved", mcpToolId: tool!.id, decidedAt: sql`now()`, updatedAt: sql`now()` })
+      .where(and(eq(robotVersions.id, v.id), whereFrom(robotVersions.status, ROBOT_VERSION_MACHINE, "approve")))
+      .returning({ id: robotVersions.id }),
+  );
   await audit(tx, deciderUserId, "robot_version", v.id, "robot-version-approved", `robot '${robot.slug}' version ${v.version} approved; published as tool '${def.name}'`, {
     robotId: robot.id,
     version: v.version,

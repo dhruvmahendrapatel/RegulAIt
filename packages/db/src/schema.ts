@@ -18635,7 +18635,7 @@ export type FairnessBreachReviewRow = typeof fairnessBreachReviews.$inferSelect;
 // bindings are join tables, and a version binds only its own robot's secrets, on one of its own allowed sites, by
 // composite foreign keys. The list's status and "Used by N agents" are computed on read. A version's content, its
 // allow-list and its bindings are frozen by triggers once it leaves 'draft' (ADR-0364 §3).
-// Row-level security ENABLED and FORCED on all six tables: any signed-in principal reads robots, versions, sites and
+// Row-level security ENABLED and FORCED on all seven tables: any signed-in principal reads robots, versions, sites and
 // bindings (the gateway's object-level checks decide who sees what); the owner or an admin writes, and the named
 // approver or decider of a version's approval applies the decision. Secrets: owner, admin and system_task only.
 import {
@@ -18736,6 +18736,24 @@ export const robotVersionAllowedSites = pgTable(
     origin: text("origin").notNull(),
   },
   (t) => [primaryKey({ name: "robot_version_allowed_sites_pk", columns: [t.robotVersionId, t.origin] })],
+);
+
+/** everyone who wrote a version's content while it was a draft; the decide path refuses each of them (ADR-0364 §3) */
+export const robotVersionEditors = pgTable(
+  "robot_version_editors",
+  {
+    robotVersionId: uuid("robot_version_id")
+      .notNull()
+      .references(() => robotVersions.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    firstEditedAt: timestamp("first_edited_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ name: "robot_version_editors_pk", columns: [t.robotVersionId, t.userId] }),
+    index("robot_version_editors_user_idx").on(t.userId),
+  ],
 );
 
 export const robotSecrets = pgTable(

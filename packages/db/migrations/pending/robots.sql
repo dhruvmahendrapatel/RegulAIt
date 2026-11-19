@@ -1,6 +1,6 @@
 -- ADR-0364 (lane E45 S2): governed RPA "Robots". Hand-authored (never drizzle-kit generate), additive and idempotent.
 --
--- Tables: robots, robot_versions, robot_version_allowed_sites, robot_secrets, robot_version_secrets, robot_runs.
+-- Tables: robots, robot_versions, robot_version_allowed_sites, robot_version_editors, robot_secrets, robot_version_secrets, robot_runs.
 -- Third normal form: the allow-list and the secret bindings are join tables; a version binds only its own robot's
 -- secrets, and only on one of its own allowed sites, by composite foreign keys. "Used by N agents" and the list's
 -- status are computed on read, never stored. Exceptions, commented on the column in schema.ts: the script and the two
@@ -98,6 +98,17 @@ CREATE TABLE IF NOT EXISTS "robot_version_allowed_sites" (
   CONSTRAINT "robot_version_allowed_sites_origin_check" CHECK ("origin" ~ '^https://[a-z0-9.-]+(:[0-9]{1,5})?$' AND length("origin") <= 300)
 );
 --> statement-breakpoint
+-- Everyone who wrote a version's content while it was a draft (its author and every editor), so the decide path can
+-- refuse each of them, not only the author (separation of duties, ADR-0364 §3). A join table, frozen with the version.
+CREATE TABLE IF NOT EXISTS "robot_version_editors" (
+  "robot_version_id" uuid NOT NULL REFERENCES "robot_versions"("id") ON DELETE CASCADE,
+  "user_id" uuid NOT NULL REFERENCES "users"("id") ON DELETE RESTRICT,
+  "first_edited_at" timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT "robot_version_editors_pk" PRIMARY KEY ("robot_version_id", "user_id")
+);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "robot_version_editors_user_idx" ON "robot_version_editors" ("user_id");
+--> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "robot_secrets" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
   "robot_id" uuid NOT NULL REFERENCES "robots"("id") ON DELETE RESTRICT,
@@ -165,6 +176,15 @@ CREATE INDEX IF NOT EXISTS "robot_runs_version_idx" ON "robot_runs" ("robot_vers
 CREATE OR REPLACE FUNCTION regulait_robot_version_freeze() RETURNS trigger
   LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
 BEGIN
+  -- the status moves only along ROBOT_VERSION_MACHINE's edges (packages/shared/src/state-machines.ts): a version is
+  -- never moved back to draft, which would otherwise reopen its content and its child rows to edits
+  IF NEW.status IS DISTINCT FROM OLD.status AND NOT (
+       (OLD.status = 'draft' AND NEW.status IN ('in_review', 'rejected'))
+    OR (OLD.status = 'in_review' AND NEW.status IN ('approved', 'rejected'))
+    OR (OLD.status = 'approved' AND NEW.status = 'retired')) THEN
+    RAISE EXCEPTION 'robot version % cannot move from % to % (ADR-0364 §8)', OLD.id, OLD.status, NEW.status
+      USING ERRCODE = 'check_violation';
+  END IF;
   IF OLD.status <> 'draft' AND (
        NEW.script IS DISTINCT FROM OLD.script OR NEW.script_format IS DISTINCT FROM OLD.script_format
     OR NEW.script_sha256 IS DISTINCT FROM OLD.script_sha256 OR NEW.compiled_sha256 IS DISTINCT FROM OLD.compiled_sha256
@@ -203,6 +223,16 @@ DROP TRIGGER IF EXISTS robot_version_allowed_sites_freeze ON "robot_version_allo
 --> statement-breakpoint
 CREATE TRIGGER robot_version_allowed_sites_freeze BEFORE INSERT OR UPDATE OR DELETE ON "robot_version_allowed_sites"
   FOR EACH ROW EXECUTE FUNCTION regulait_robot_version_child_freeze();
+--> statement-breakpoint
+DROP TRIGGER IF EXISTS robot_version_editors_freeze ON "robot_version_editors";
+--> statement-breakpoint
+CREATE TRIGGER robot_version_editors_freeze BEFORE INSERT OR UPDATE OR DELETE ON "robot_version_editors"
+  FOR EACH ROW EXECUTE FUNCTION regulait_robot_version_child_freeze();
+--> statement-breakpoint
+DROP TRIGGER IF EXISTS "robot_version_editors_no_truncate" ON public."robot_version_editors";
+--> statement-breakpoint
+CREATE TRIGGER "robot_version_editors_no_truncate" BEFORE TRUNCATE ON public."robot_version_editors"
+  FOR EACH STATEMENT EXECUTE FUNCTION public.regulait_refuse_truncate();
 --> statement-breakpoint
 DROP TRIGGER IF EXISTS robot_version_secrets_freeze ON "robot_version_secrets";
 --> statement-breakpoint
@@ -259,10 +289,10 @@ ALTER TABLE "mcp_servers" ADD CONSTRAINT "mcp_servers_first_party_url_check"
 CREATE UNIQUE INDEX IF NOT EXISTS "mcp_servers_first_party_url_uq" ON "mcp_servers" ("url") WHERE "transport" = 'first_party';
 --> statement-breakpoint
 -- The one first-party row. Its code ships inside the gateway release the operator installed, so the ADR-0175
--- release-age cooldown (which holds a NEWLY SEEN third-party release) starts at the epoch rather than at this
--- migration; every tool it serves is a robot version that passed its own review (ADR-0364 §3).
-INSERT INTO "mcp_servers" ("name", "url", "transport", "release_seen_at")
-  SELECT 'RegulAIt Robots', 'regulait:robots', 'first_party', timestamptz 'epoch'
+-- release-age cooldown does not apply to it (`serverReleaseStatus` exempts a first-party server on the gateway's fixed
+-- list); every tool it serves is a robot version that passed its own review (ADR-0364 §3).
+INSERT INTO "mcp_servers" ("name", "url", "transport")
+  SELECT 'RegulAIt Robots', 'regulait:robots', 'first_party'
   WHERE NOT EXISTS (SELECT 1 FROM "mcp_servers" WHERE "url" = 'regulait:robots');
 --> statement-breakpoint
 ALTER TABLE "robots" ENABLE ROW LEVEL SECURITY;
@@ -272,6 +302,10 @@ ALTER TABLE "robots" FORCE ROW LEVEL SECURITY;
 ALTER TABLE "robot_versions" ENABLE ROW LEVEL SECURITY;
 --> statement-breakpoint
 ALTER TABLE "robot_versions" FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "robot_version_editors" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "robot_version_editors" FORCE ROW LEVEL SECURITY;
 --> statement-breakpoint
 ALTER TABLE "robot_version_allowed_sites" ENABLE ROW LEVEL SECURITY;
 --> statement-breakpoint
@@ -362,6 +396,24 @@ CREATE POLICY robot_version_allowed_sites_select ON "robot_version_allowed_sites
 DROP POLICY IF EXISTS robot_version_allowed_sites_write ON "robot_version_allowed_sites";
 --> statement-breakpoint
 CREATE POLICY robot_version_allowed_sites_write ON "robot_version_allowed_sites" FOR ALL
+  USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = 'migration'
+    OR EXISTS (SELECT 1 FROM "robot_versions" v JOIN "robots" r ON r."id" = v."robot_id"
+      WHERE v."id" = "robot_version_id" AND r."owner_user_id" = (SELECT regulait_rls_user_id())))
+  WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = 'migration'
+    OR EXISTS (SELECT 1 FROM "robot_versions" v JOIN "robots" r ON r."id" = v."robot_id"
+      WHERE v."id" = "robot_version_id" AND r."owner_user_id" = (SELECT regulait_rls_user_id())));
+--> statement-breakpoint
+DROP POLICY IF EXISTS robot_version_editors_select ON "robot_version_editors";
+--> statement-breakpoint
+CREATE POLICY robot_version_editors_select ON "robot_version_editors" FOR SELECT USING (
+  (SELECT regulait_rls_user_id()) IS NOT NULL
+  OR (SELECT regulait_rls_is_admin())
+  OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration'])
+);
+--> statement-breakpoint
+DROP POLICY IF EXISTS robot_version_editors_write ON "robot_version_editors";
+--> statement-breakpoint
+CREATE POLICY robot_version_editors_write ON "robot_version_editors" FOR ALL
   USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = 'migration'
     OR EXISTS (SELECT 1 FROM "robot_versions" v JOIN "robots" r ON r."id" = v."robot_id"
       WHERE v."id" = "robot_version_id" AND r."owner_user_id" = (SELECT regulait_rls_user_id())))

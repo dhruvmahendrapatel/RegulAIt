@@ -74,6 +74,7 @@ import { abacPrincipalFromRequest, type AbacPrincipalContext } from "./abac-prin
 import {
   auditMcpUpstreamUnreachable,
   checkUpstreamDestination,
+  servedInProcess,
   guardedMcpConnect,
   McpEgressBlockedError,
   McpUpstreamRefusedError,
@@ -236,6 +237,9 @@ export async function preflightUpstream(
   serverRow: McpUpstreamRow,
 ): Promise<void> {
   await assertAdmitted(db, serverRow.id);
+  // ADR-0364: a first-party server on the gateway's fixed list is served in-process — there is no destination to
+  // decide. Admission (above) and every per-call decision still apply; any other first-party row is refused below.
+  if (await servedInProcess(db, serverRow)) return;
   // ADR-0185 G4: the destination decision (today the URL egress check, audited
   // and thrown exactly as before) — the G4 slice branches it on transport
   await checkUpstreamDestination(db, serverRow);
