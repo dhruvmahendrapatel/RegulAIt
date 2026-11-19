@@ -4982,6 +4982,7 @@ export * from "./sector-packs.js";
 export * from "./aiuc-packs.js";
 // ADR-0243 (P24): the OWASP MCP and LLM Top 10 packs
 export * from "./owasp-packs.js";
+export * from "./agent-risk-proofs.js";
 export * from "./nist-ai-600-1-pack.js";
 // ADR-0212 (P12 b): modality pricing
 export * from "./modality-pricing.js";
@@ -4993,6 +4994,8 @@ export {
   MODEL_DRIFT_MONITOR_RULE_ID,
   suggestedHaltFor,
   type AccountabilityMonitorRuleId,
+  SPEND_MONITOR_RULE_IDS,
+  type SpendMonitorRuleId,
 } from "./governance-monitor.js";
 
 // ===== ADR-0186 (batch 4) — dual control, step-up, passkey-signed approvals,
@@ -5071,8 +5074,12 @@ export * from "./state-machine.js";
 export * from "./state-machines.js";
 // ADR-0261 (P37): third-party security telemetry ingest — the DefenseClaw JSONL parser and mapping (pure)
 export * from "./third-party-ingest/index.js";
+// ADR-0339 (lane E20): the agent risk score, recomputed on every change (pure; OWASP ids only)
+export * from "./agent-risk-score.js";
+
 // ADR-0310 (G2): vendor-native managed settings compiled from effective MCP entitlements
 export * from "./managed-settings.js";
+export * from "./endpoint-actions.js";
 
 // ADR-0341: RFC 6902 patches for diff views
 export { jsonPatch, type JsonPatchOperation } from "./json-patch.js";

@@ -1,31 +1,40 @@
 # Build status
 
-## Current state (2026-11-18)
+## Current state (2026-11-19, 00:15 UTC)
 
-- **Rule 15 (finish before starting)** is in force for every builder lane. Each lane works only its oldest open PR, and
-  no new PRs or slices are started.
-- **Queue:** about 90 open PRs. Target: under 50, then lift rule 15 a few lanes at a time, E45 (RPA) code first.
-- **Sessions:** phasing down to 10 at once (D-2026-11-18-04). Lanes are archived as each says "LANE DONE".
-- **CI:** about 16 runs queued. Codex C1 (#936, build the gateway once for CI) is the main speed-up and is reviewed
-  first.
-- **Merge loop:** runs from the master's scratchpad. It merges only PRs listed in released.txt, at the exact released
-  head.
+- **Rule 15 (finish before starting)** is in force for every builder lane.
+- **Queue:** about 75 open PRs. Target: under 50, then lift rule 15 a few lanes at a time, E45 (RPA) code first.
+- **Sessions:** phasing down to 10 (D-2026-11-18-04). Archived: E24, E25.
+- **Merge loop:** runs from the master's scratchpad, restarted every 7000 s. One census-counter PR released at a time
+  (M-118).
+- **Usage-limit outage, 2026-11-18 21:40-21:58 UTC.** The account's weekly limit stopped every session on the account,
+  the master included; the owner reset it. No merge was lost, since the loop kept running. Five sessions had failed turns
+  and were resumed, reviewers first. Rule for the next one: pause, start nothing new, then resume the failed sessions,
+  reviewers first, at about 7 messages a minute.
 
 ## Pending
 
 | Item | Owner | Since | Notes |
 |---|---|---|---|
-| #973 E44 Purview labels | R3 + Xtyd8 | 2026-11-18 | First review |
-| #941 E31 on-device rules | WaRPg + a3BYi | 2026-11-18 | Delta re-review |
-| #883 E20 agent risk score | WaRPg + Xtyd8 | 2026-11-18 | Delta check of the conflict merge |
-| #1010 E45 RPA ADR | E45 | 2026-11-18 | ADR only until rule 15 lifts |
+| Census queue: #848 E2 (now), #855 E3, #861 E7, #867 E16, #865 E15, #1020 E12, #871 E13 | builders, one at a time | 2026-11-18 | M-118; approved PRs waiting for their turn |
+| Census PRs in review or fixing: #964 E31, #1044 E1, #892 E20, #982 E44 | builders and reviewers | 2026-11-18 | Join the census queue once approved |
+| #1045 E26 proof results | E26 | 2026-11-19 | Code request changes; no census, released on approval |
+| #884 E18 SaaS entitlement graph | E18 | 2026-11-18 | Security request changes; no READY yet |
+| #996 E27 fairness slice 2 | E27 | 2026-11-18 | Three failing checks |
 | #936 Codex C1 CI build-once | Codex | 2026-11-18 | Route first when READY |
-| #1009 flaky SAP idempotency test | triage-low | 2026-11-18 | F2 × S2 = 4; code left alone |
+| #1006 C2, #1007 C3 | Codex | 2026-11-18 | Drafts, checks failing |
+| Census counter computed instead of hand-set | owner | 2026-11-18 | Proposal only |
+| #1009 flaky SAP idempotency test | triage-low | 2026-11-18 | F2 × S2 = 4; one re-run allowed |
 | S7 RLS PM-tables batch push | S7 | 2026-11-18 | Owner approved the push (D-2026-11-18-08); confirm that S7 pushed |
-| E10 rehearsal | parked | 2026-11-18 | Owner deferred the rehearsal role (D-2026-11-18-09) |
+| E10 rehearsal | parked | 2026-11-18 | Owner deferred (D-2026-11-18-09) |
 
 ## Done log (newest first)
 
+- 2026-11-18 (late): #1040, #952, #902, #883 and #1039 merged, each audited (second parent = released SHA).
+- 2026-11-18 (evening): #1035, #744 and #1019 merged, each audited. M-118 logged.
+- 2026-11-18 (afternoon): #1013, #904, #1010 and #903 merged, each audited (second parent = released SHA).
+- 2026-11-18: master hand-over (about 08:54 UTC). #941 merged (82142059, second parent 3b86b4e0, audited); #973 and
+  #1011 merged and audited; #880 merged. Lanes E24 and E25 archived (done, no open PR).
 - 2026-11-18: #1004 picomatch no-fix gate merged at 5aacbc16 (second parent 07ca5186, audited); lanes failing only
   "Dependency audit" were told to merge main once. #898 per-route bundle budgets merged; #881 governed vendor-agent control merged.
 - 2026-11-17: #940, #885, #888, #935, #921, #910, #920, #897, #896, #889, #874, #828, #899, #906, #901, #850 and #887

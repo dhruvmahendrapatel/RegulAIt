@@ -38,17 +38,11 @@ Read this first if you are taking over as the master session of the RegulAIt bui
 
 ## Where we left off (current master)
 
-- **2026-11-18:**
-  - #1004 (the picomatch no-fix gate, ADR-0184 addendum) merged at 5aacbc16; the audit was OK.
-  - Lanes whose PRs failed only "Dependency audit" were told to merge main once, in the same push as their review fixes.
-- **New lane E45:** RPA "Robots" (#1010; design document only until rule 15 lifts).
-- **Owner decisions today:** D-2026-11-18-01 to -07 in DecisionLog.md. The master phases sessions down to 10.
-- **In review:**
-  - #973: R3 and Xtyd8.
-  - #941 delta: WaRPg and a3BYi.
-  - #883 delta: WaRPg and Xtyd8.
-- **Next steps:**
-  1. Release the PRs that reach both approvals at their head.
-  2. Route #936 (Codex C1, CI build-once) first when it posts READY.
-  3. Archive lanes as they say "LANE DONE".
-  4. Lift rule 15 a few lanes at a time once the open PR count is under 50, with E45's code first.
+- **2026-11-19, 00:15 UTC.** Merged and audited since the hand-over: #941, #1013, #904, #1010, #903, #1035, #744, #1019,
+  #952, #1040, #902, #883, #1039.
+- **Census queue (M-118):** #848 (E2) is in its turn; then #855, #861, #867, #865, #1020, #871, and later #964, #1044,
+  #892, #982 once approved. After each census merge, read `KNOWN_UI_GAPS_MAX` on main and give the next builder main's
+  value plus its own delta (`git diff origin/main...origin/<branch> -- scripts/preflight-ui-route-census.mjs`).
+- **Non-census PRs** are released in parallel as soon as both approvals land (#1045 next).
+- **Waiting on builders:** #884 (E18), #996 (E27), Codex #936 (route first on READY).
+- **Usage limit:** see Status.md for the 2026-11-18 outage and the resume rule.
