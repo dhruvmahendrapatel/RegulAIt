@@ -18337,6 +18337,8 @@ export const robotSecrets = pgTable(
 export const robotVersionSecrets = pgTable(
   "robot_version_secrets",
   {
+    /** a row id for the ADR-0233 existing-rows report; the key is (version, name) */
+    id: uuid("id").notNull().defaultRandom().unique(),
     robotVersionId: uuid("robot_version_id").notNull(),
     robotId: uuid("robot_id").notNull(),
     name: text("name").notNull(),

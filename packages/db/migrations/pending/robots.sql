@@ -117,6 +117,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS "robot_secrets_name_scope_uq" ON "robot_secret
 CREATE UNIQUE INDEX IF NOT EXISTS "robot_secrets_id_robot_uq" ON "robot_secrets" ("id", "robot_id");
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "robot_version_secrets" (
+  -- a row id for the ADR-0233 existing-rows report (it keys every guarded table by `id`); the key is (version, name)
+  "id" uuid NOT NULL DEFAULT gen_random_uuid() UNIQUE,
   "robot_version_id" uuid NOT NULL,
   "robot_id" uuid NOT NULL,
   "name" text NOT NULL,

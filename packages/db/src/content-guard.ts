@@ -66,6 +66,10 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.builderAgentSubagents, ["name", "description"]],
   [s.builderAgentSchedules, ["name"]],
   [s.builderSkills, ["name", "description", "body"]],
+  // ADR-0364 (lane E45 S2): robots, and the names a robot's secrets are bound and stored under
+  [s.robots, ["name", "description"]],
+  [s.robotSecrets, ["name"]],
+  [s.robotVersionSecrets, ["name"]],
   [s.orchestrationRuns, ["name"]],
   // --- projects, initiatives and the AI inventory ---
   [s.projects, ["name"]],
