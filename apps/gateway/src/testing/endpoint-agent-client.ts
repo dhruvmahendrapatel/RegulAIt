@@ -11,8 +11,11 @@ import { contentDigestOf } from "../endpoint-agent.js";
 
 export type Method = "GET" | "POST";
 
-/** the AgentKey class bound to one app, data key and public origin */
-export function endpointAgentKeys(getApp: () => ReturnType<typeof buildApp>, dataKey: string, ORIGIN: string) {
+/**
+ * the AgentKey class bound to one app, data key and public origin. `resourcePath` is the self token's control-plane
+ * resource: the endpoint agent's by default; ADR-0334's browser extension takes its self token the same way
+ */
+export function endpointAgentKeys(getApp: () => ReturnType<typeof buildApp>, dataKey: string, ORIGIN: string, resourcePath = "/v1/endpoint-agent") {
   const nonce = () => issueDpopNonce(deriveIdentitySecrets(dataKey).nonceKey);
   const b64sha = (v: string) => createHash("sha256").update(v).digest("base64url");
   /** a device key the test holds: P-256, made at run time, as the agent's TPM/DPAPI key is */
@@ -54,7 +57,7 @@ export function endpointAgentKeys(getApp: () => ReturnType<typeof buildApp>, dat
         client_id: this.clientId,
         client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
         client_assertion: assertion,
-        resource: `${ORIGIN}/v1/endpoint-agent`,
+        resource: `${ORIGIN}${resourcePath}`,
       };
       return getApp().inject({
         method: "POST",

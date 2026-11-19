@@ -10,6 +10,18 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./browser-governance": {
+      "types": "./dist/browser-governance/index.d.ts",
+      "default": "./dist/browser-governance/index.js"
+    },
+    "./browser-governance/constants": {
+      "types": "./dist/browser-governance/constants.d.ts",
+      "default": "./dist/browser-governance/constants.js"
+    },
+    "./dlp-secret-re2": {
+      "types": "./dist/dlp-secret-re2.d.ts",
+      "default": "./dist/dlp-secret-re2.js"
     }
   },
   "scripts": {

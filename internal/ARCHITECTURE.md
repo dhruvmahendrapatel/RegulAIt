@@ -85,6 +85,7 @@ builds on its own.
 | [integrations/](../integrations) | Kong plugin and Envoy `ext_authz` config that call `POST /v1/evaluate` as an external decision point. |
 | [endpoint-discovery/](../endpoint-discovery) | The osquery pack for endpoint AI discovery. |
 | [agents/endpoint](../agents/endpoint) | The read-only Go endpoint agent; sends signed, pseudonymous snapshots. |
+| [agents/browser](../agents/browser) | The managed MV3 browser extension (ADR-0334): blocks governed AI sites until a signed per-user policy allows them, checks prompts against the shared credential rules, reports breaches with per-device proofs. |
 | [security/](../security) | Third-party inventory and the audit, image and SAST allow-lists. |
 | [scripts/](../scripts) | CI gates and tooling: ADR index test, licence gate, `preflight-*` checks, engine image lock and verify, BOM tooling, bundle signing, `install.sh`, `scripts/master/` merge loop. |
 | [spikes/](../spikes) | Throwaway probes behind individual ADRs; not shipped. |

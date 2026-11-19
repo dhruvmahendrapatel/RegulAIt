@@ -75,7 +75,7 @@ func ParseCursorBeforeMCP(r io.Reader) (Call, error) {
 		return Call{}, errors.New("no tool_name")
 	}
 	// a missing mcp_server_name leaves Server empty, which Decide denies
-	return Call{Tool: in.ToolName, MCP: &MCPCall{Server: in.MCPServerName}}, nil
+	return Call{Tool: in.ToolName, MCP: &MCPCall{Server: in.MCPServerName, Tool: in.ToolName}}, nil
 }
 
 type cursorOutput struct {
