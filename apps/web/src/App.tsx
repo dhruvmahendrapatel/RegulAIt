@@ -99,7 +99,7 @@ const AuditLogPage = screen(() => import("./screens/admin-approvals-audit"), "Au
 const ShadowAiPage = screen(() => import("./screens/admin-ai-governance"), "ShadowAiPage");
 const DiscoverySourcesArea = screen(() => import("./screens/admin-ai-governance"), "DiscoverySourcesArea");
 // ADR-0334 (lane E16, D5): in the Discovery screens' chunk
-const BrowserGovernancePage = screen(() => import("./screens/admin-ai-governance"), "BrowserGovernancePage");
+const BrowserGovernancePage = screen(() => import("./screens/admin-browser-governance"), "BrowserGovernancePage");
 const CopilotPage = screen(() => import("./screens/admin-overview"), "CopilotPage");
 const ChatOpsArea = screen(() => import("./screens/admin-approvals-audit"), "ChatOpsArea");
 const LineagePage = screen(() => import("./screens/admin-approvals-audit"), "LineagePage");

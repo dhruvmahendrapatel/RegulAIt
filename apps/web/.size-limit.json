@@ -30,7 +30,7 @@
     "name": "all JS",
     "path": "dist/assets/*.js",
     "gzip": true,
-    "limit": "1160 kB"
+    "limit": "1190 kB"
   },
   {
     "name": "chunk: AccountSubpages",
@@ -307,6 +307,12 @@
     "path": "dist/assets/admin-approvals-audit-????????.js",
     "gzip": true,
     "limit": "44.2 kB"
+  },
+  {
+    "name": "chunk: admin-browser-governance",
+    "path": "dist/assets/admin-browser-governance-????????.js",
+    "gzip": true,
+    "limit": "8.3 kB"
   },
   {
     "name": "chunk: admin-compliance-infra",
