@@ -9,8 +9,12 @@
 -- 2. `agent_identity_links`: an agent's cloud service account, vendor agent identity or OAuth client. Staged by an
 --    admin or an importer; a SECOND admin confirms or rejects it (four-eyes CHECK). A link confers nothing.
 --
--- Not tenant-scoped data (ADR-0234 scope): admin or steward routes only, no RLS batch. Every function pins its
--- search_path (zz-dbguard-0185). Hand-authored, additive and idempotent.
+-- ADR-0234 classes, by the appendix rule: `agent_identity_links` is ACTOR-STAMPED (it carries `decided_by_user_id`)
+-- and `agent_authorship` is DEPLOYMENT-WIDE (no project, team, owner or listed actor column); neither gets a row
+-- policy, both are listed in ADR-0234's open-PR table, and both are read only through admin or owner routes.
+-- The four-eyes CHECK passes when `staged_by_user_id` is NULL (an importer stage, or a stager since deleted): that is
+-- intended, because the decide route still requires a NAMED admin, so the bootstrap credential can never decide.
+-- Every function pins its search_path (zz-dbguard-0185). Hand-authored, additive and idempotent.
 CREATE TABLE IF NOT EXISTS "agent_authorship" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
   "agent_id" uuid REFERENCES "agents"("id") ON DELETE CASCADE,

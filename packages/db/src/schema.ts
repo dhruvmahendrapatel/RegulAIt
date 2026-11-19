@@ -17271,8 +17271,8 @@ export const agentRiskLatest = pgTable(
 // ===== end ADR-0339 =====
 
 // ===== ADR-0339 slice 2 (lane E20) — author vs runner, non-human identity links =====
-// Migration `pending/agent_identity_links.sql` (numbered at merge). Not tenant-scoped data (ADR-0234 scope): admin or
-// steward routes only, no RLS batch.
+// Migration `pending/agent_identity_links.sql` (numbered at merge). ADR-0234: `agent_identity_links` is actor-stamped
+// (`decided_by_user_id`), `agent_authorship` deployment-wide; no row policy, admin or owner routes only.
 import {
   AGENT_AUTHOR_SOURCES as AGENT_AUTHOR_SOURCES_E20,
   AGENT_NHI_KINDS as AGENT_NHI_KINDS_E20,
