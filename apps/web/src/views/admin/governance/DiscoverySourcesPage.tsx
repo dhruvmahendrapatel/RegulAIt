@@ -34,6 +34,7 @@ import { EndpointImportCard } from "./EndpointImportCard";
 import { EndpointAgentCard } from "./EndpointAgentCard";
 import { EndpointMcpServersCard } from "./EndpointMcpServersCard";
 import { FoldTable } from "../../../ui/fold";
+import { entitlementPlatformOf } from "./discoverySubpagesModel";
 import { DISCOVERY_SOURCES_PATH, ListPreview, runColumns, runsAttention, usePreviewPage, type PreviewSource } from "./discoveryLists";
 import {
   describeSchedule,
@@ -377,7 +378,20 @@ export default function DiscoverySourcesPage() {
               rowKey={(s) => s.id}
               empty={<EmptyState title="No discovery source" body="Nothing is scanned yet. Add a source above to start scanning, read-only." />}
               columns={[
-                { key: "name", header: "Source", render: (s) => <><strong>{s.name}</strong><div className={v.faint}>{kinds.find((k) => k.kind === s.kind)?.label ?? s.kind}</div></> },
+                {
+                  key: "name",
+                  header: "Source",
+                  render: (s) => (
+                    <>
+                      <strong>{s.name}</strong>
+                      <div className={v.faint}>
+                        {kinds.find((k) => k.kind === s.kind)?.label ?? s.kind}
+                        {/* ADR-0337 §6: an entitlement source's apps and their agent links, on their own page */}
+                        {entitlementPlatformOf(s.kind) ? <> · <Link to={`${DISCOVERY_SOURCES_PATH}/apps?source=${s.id}`} aria-label={`View apps, ${s.name}`}>View apps</Link></> : null}
+                      </div>
+                    </>
+                  ),
+                },
                 { key: "state", header: "State", render: (s) => (s.enabled ? <Badge tone="warn">enabled</Badge> : <Badge tone="neutral">disabled</Badge>) },
                 { key: "scope", header: "Scope", render: (s) => <>{describeScope(s.scope)}<div className={v.faint}>{kinds.find((k) => k.kind === s.kind)?.uploadFed ? "fed by uploads" : describeSchedule(s.scheduleIntervalSeconds)}</div></> },
                 {

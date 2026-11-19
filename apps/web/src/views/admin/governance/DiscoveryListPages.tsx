@@ -4,7 +4,7 @@
  * parent, the shared list control (ADR-0226) and the list's filters. Admin-only like the parent (the gateway's
  * default gate). The overview keeps a preview of each.
  */
-import { useMemo, useState } from "react";
+import { lazy, Suspense, useMemo, useState } from "react";
 import { Link, Route, Routes, useSearchParams } from "react-router-dom";
 import DiscoverySourcesPage from "./DiscoverySourcesPage";
 import { useQuery } from "@tanstack/react-query";
@@ -36,8 +36,8 @@ function useSources() {
   });
 }
 
-/** Discovery / Discovery sources / <this list>, the parent a link back */
-function Crumbs(props: { here: string }) {
+/** Discovery / Discovery sources / [<the part of it>] / <this list>, the parent a link back */
+export function Crumbs(props: { here: string; mid?: string }) {
   return (
     <nav aria-label="Breadcrumb">
       <ol className={l.crumbs}>
@@ -45,6 +45,7 @@ function Crumbs(props: { here: string }) {
         <li>
           <Link to={DISCOVERY_SOURCES_PATH}>Discovery sources</Link>
         </li>
+        {props.mid ? <li>{props.mid}</li> : null}
         <li aria-current="page">{props.here}</li>
       </ol>
     </nav>
@@ -236,9 +237,15 @@ export function EndpointDevicesPage() {
   );
 }
 
+// D1 + D2 (ADR-0337 §6, ADR-0331): two sub-pages with writes of their own, each in its own lazy chunk
+const SaasAppLinksPage = lazy(() => import("./SaasAppLinksPage"));
+const AddonRemovalsPage = lazy(() => import("./AddonRemovalsPage"));
+const loadingSubPage = <SkeletonBlock lines={6} />;
+
 /**
  * The Discovery sources area: the Discovery sources page (with its five-row previews) at the index, the full runs,
- * enrolment-token and device lists each on their own nested route. One lazy chunk mounted at
+ * enrolment-token and device lists each on their own nested route, and the SaaS app links and MCP server removals
+ * sub-pages (lazy, so their writes add nothing to this chunk). One lazy chunk mounted at
  * `shadow-ai/discovery-sources/*`, reached through the Shadow AI screen barrel, so the sub-pages add nothing to the
  * entry bundle (ADR-0196 U4; the SPA route census follows this module — scripts/ui-spa-routes.mjs).
  */
@@ -249,6 +256,8 @@ export function DiscoverySourcesArea() {
       <Route path="runs" element={<DiscoveryRunsPage />} />
       <Route path="tokens" element={<EnrolmentTokensPage />} />
       <Route path="devices" element={<EndpointDevicesPage />} />
+      <Route path="apps" element={<Suspense fallback={loadingSubPage}><SaasAppLinksPage /></Suspense>} />
+      <Route path="addon-removals" element={<Suspense fallback={loadingSubPage}><AddonRemovalsPage /></Suspense>} />
     </Routes>
   );
 }

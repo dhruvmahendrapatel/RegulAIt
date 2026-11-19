@@ -2,7 +2,8 @@
  * The MCP servers named in MCP host configs on enrolled employee machines, read-only through the endpoint agent,
  * with each one's registry state: linked by an admin, registered (its host is a registry server's host) or
  * unregistered. An admin may link an unregistered identity to an approved server, or remove that link; both are
- * audited. The list is keyset-paginated ("Load more"), with a bounded page size.
+ * audited. The list is keyset-paginated ("Load more"), with a bounded page size. ADR-0331: "Removals" opens the governed
+ * removal sub-page, and a flagged row's "Request removal…" opens it with that server and device filled in.
  */
 import { useState } from "react";
 import { Link } from "react-router-dom";
@@ -12,6 +13,7 @@ import type { McpServer } from "../../../api/adminTypes";
 import { fmtDateTime, humanize, providerLabel } from "../../../api/format";
 import { Badge, Button, Card, ConfirmModal, EmptyState, Field, IdChip, RowActions, Select, SkeletonBlock, Table } from "../../../ui/kit";
 import { adminKeys, useAction } from "../adminKit";
+import { DISCOVERY_SOURCES_PATH } from "./discoveryLists";
 import v from "../../views.module.css";
 import {
   endpointMcpUrl,
@@ -25,6 +27,17 @@ import {
   type EndpointMcpServerView,
   type EndpointMcpServersPage,
 } from "./endpointMcpModel";
+
+const REMOVALS_PATH = `${DISCOVERY_SOURCES_PATH}/addon-removals`;
+const flagged = (r: EndpointMcpServerView) => r.risks.length + r.riskyTools.length + r.secretTypes.length > 0;
+/** the removal form, prefilled with this row's server identity and device */
+function removalLink(r: EndpointMcpServerView): string | null {
+  const id = linkIdentity(r);
+  if (!id || !flagged(r)) return null;
+  const q = new URLSearchParams({ identityKind: id.identityKind, identity: id.identity, serverName: r.serverName, device: r.deviceId });
+  if (r.packageVersion) q.set("packageVersion", r.packageVersion);
+  return `${REMOVALS_PATH}?${q.toString()}`;
+}
 
 export function EndpointMcpServersCard() {
   const act = useAction();
@@ -68,7 +81,7 @@ export function EndpointMcpServersCard() {
   };
 
   return (
-    <Card title="MCP servers on employee machines" actions={<Badge tone="info">Links audited</Badge>} contain>
+    <Card title="MCP servers on employee machines" actions={<><Badge tone="info">Links audited</Badge> <Link to={REMOVALS_PATH}>Removals</Link></>} contain>
       <div className={v.stack} data-testid="endpoint-mcp-card">
         {first ? <p data-testid="endpoint-mcp-posture">{first.posture}</p> : list.isPending ? <SkeletonBlock lines={1} /> : null}
         <div className={v.row}>
@@ -173,6 +186,10 @@ export function EndpointMcpServersCard() {
                         <Button size="sm" disabled={act.busy} aria-label={`Unlink, ${r.serverName}`} onClick={() => setUnlinking(r)}>Unlink</Button>
                       ) : null
                     }
+                    rest={(() => {
+                      const to = removalLink(r);
+                      return to ? <Link to={to} aria-label={`Request removal, ${r.serverName} on ${r.devicePseudonym}`}>Request removal…</Link> : null;
+                    })()}
                   />
                 ),
             },
