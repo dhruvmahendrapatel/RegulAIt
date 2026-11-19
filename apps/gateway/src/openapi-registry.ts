@@ -2472,6 +2472,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/robots/:robotId/versions/:version/submit": "builder",
   "POST /v1/robots/:robotId/versions/:version/retire": "builder",
   "PUT /v1/robots/:robotId/secrets/:name/:scope": "builder",
+  "POST /v1/robots/:robotId/versions/:version/test-runs": "builder",
+  "GET /v1/robots/:robotId/runs/:runId": "builder",
   "DELETE /v1/robots/:robotId/secrets/:name/:scope": "builder",
   "GET /v1/copilot/tools": "copilot",
   "POST /v1/copilot/ask": "copilot",
