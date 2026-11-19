@@ -169,7 +169,13 @@ func TestCheckIntegrity(t *testing.T) {
 	}
 	got := CheckIntegrity(files, owner)
 	sum := sha256.Sum256([]byte(claude))
-	if got[0].State != contract.FileStatePresent || *got[0].SHA256 != hex.EncodeToString(sum[:]) || *got[0].HookStatus != contract.HookRegistered {
+	if runtime.GOOS == "windows" {
+		// a file in the test's temp directory belongs to the runner's user, not SYSTEM or Administrators, so on
+		// Windows it must never read as present: fail closed (integrity_windows_test.go covers the owner checks)
+		if got[0].State != contract.FileStateNotSystemOwned || got[0].SHA256 != nil || got[0].HookStatus != nil {
+			t.Fatalf("user-owned on windows: %+v", got[0])
+		}
+	} else if got[0].State != contract.FileStatePresent || *got[0].SHA256 != hex.EncodeToString(sum[:]) || *got[0].HookStatus != contract.HookRegistered {
 		t.Fatalf("present: %+v", got[0])
 	}
 	if got[1].State != contract.FileStateMissing || got[1].SHA256 != nil || got[1].HookStatus != nil {
