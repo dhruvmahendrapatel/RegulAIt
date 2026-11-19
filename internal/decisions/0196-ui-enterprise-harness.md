@@ -704,3 +704,18 @@ one `CEILING_EXCEPTIONS` row.
   editor on the Agents page (#744, approved on #453 on 2026-11-07) adds 6,227 B, almost all of it in the lazy
   `admin-integrations` chunk. Lazy-loading the card would not lower the total, which counts every chunk.
 - The owner chose this over trimming main first or cutting the approved screen. Crossing 1,160 kB goes back to the owner.
+
+## Addendum / As built (2026-11-19) — all JS 1,160 → 1,190 kB (the Shadow AI backlog screens)
+
+The owner decided this raise on 2026-11-19: <https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-7024071207>. It is the ADR-recorded exception the `--guard` rule requires, with
+one `CEILING_EXCEPTIONS` row. The same change lands in each of the three PRs so each passes on its own.
+
+- `all JS` from `1160 kB` to `1190 kB` (+30 kB). The entry JS and entry CSS ceilings are unchanged. Endpoint policy
+  (#1077) and Browser governance (#1078) get their own lazy chunks with their own ceilings, so the shared
+  `admin-ai-governance` chunk keeps its 125.5 kB ceiling.
+- Why: main measured about 1,156.5 kB gzip (3.5 kB of headroom), and the three owner-approved screens (approved on #453 on
+  2026-11-19, comment 7023229382) add about 24 kB together: Discovery sub-pages #1075 about 10.5 kB, Endpoint policy
+  #1077 about 8.4 kB, Browser governance #1078 about 5.2 kB. Every new page is lazy-loaded already; the total counts
+  every chunk.
+- The owner chose this over raising only to fit, trimming main first, or shipping one screen at a time. Crossing
+  1,190 kB goes back to the owner.

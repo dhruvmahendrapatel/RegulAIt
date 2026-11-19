@@ -123,6 +123,8 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       { label: "Shadow-AI discovery", to: "/admin/shadow-ai" },
       // ADR-0195 SD0 — where RegulAIt may scan, read-only, for shadow AI; every source off until enabled
       { label: "Discovery sources", to: "/admin/shadow-ai/discovery-sources" },
+      // ADR-0334 (lane E16, D5) — the managed browser extension: governed AI sites, enrolment, breach events
+      { label: "Browser governance", to: "/admin/browser-governance" },
     ],
   },
   {

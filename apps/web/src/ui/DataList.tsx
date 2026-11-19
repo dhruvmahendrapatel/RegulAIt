@@ -64,8 +64,8 @@ export interface DataListProps<T> {
   noun: string;
   /** the list route, e.g. `/v1/runs` */
   endpoint: string;
-  /** the gateway's Excel export of the same list, e.g. `/v1/runs/export.xlsx` */
-  exportPath: string;
+  /** the gateway's Excel export of the same list, e.g. `/v1/runs/export.xlsx`; a list the gateway does not export omits it */
+  exportPath?: string;
   /** A page header can host the same filtered export button instead of showing it in the list toolbar. */
   exportTarget?: HTMLElement | null;
   /** the query-cache prefix, so a page's existing invalidation refreshes the list */
@@ -344,7 +344,7 @@ export function DataList<T>(props: DataListProps<T>) {
   const q = all ? infinite : paged;
   const refresh = () => void q.refetch();
   const download = async () => {
-    if (exporting) return;
+    if (exporting || !props.exportPath) return;
     setExporting(true);
     setCapNote(null);
     const columns = layout.visible.filter((k) => !byKey.get(k)?.action);
@@ -402,7 +402,7 @@ export function DataList<T>(props: DataListProps<T>) {
         <IconButton label={`Choose columns for ${props.noun}`} onClick={() => setPickerOpen(true)}>
           <GearIcon />
         </IconButton>
-        {props.exportTarget ? createPortal(exportButton, props.exportTarget) : exportButton}
+        {!props.exportPath ? null : props.exportTarget ? createPortal(exportButton, props.exportTarget) : exportButton}
       </div>
       {capNote && (
         <p className={d.capNote} role="alert">

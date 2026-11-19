@@ -319,6 +319,10 @@ export const INDIRECT_UI_CALLS = new Map([
     ["GET /v1/spend/anomalies", "apps/web/src/views/admin/cost/SpendHistory.tsx"],
     ["GET /v1/spend/scheduled-changes", "apps/web/src/views/admin/cost/SpendHistory.tsx"],
     ["GET /v1/webhooks/:subscriptionId/deliveries", "apps/web/src/views/admin/integrations/WebhooksPage.tsx"],
+    // ADR-0334 (lane E16, D5): the Browser governance page's three lists
+    ["GET /v1/browser-governance/enrolment-tokens", "apps/web/src/views/admin/governance/BrowserGovernancePage.tsx"],
+    ["GET /v1/browser-governance/devices", "apps/web/src/views/admin/governance/BrowserGovernancePage.tsx"],
+    ["GET /v1/browser-governance/events", "apps/web/src/views/admin/governance/BrowserGovernancePage.tsx"],
   ].map(([r, page]) => [
     r,
     {
