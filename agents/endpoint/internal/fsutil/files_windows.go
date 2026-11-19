@@ -1,6 +1,6 @@
 //go:build windows
 
-package agent
+package fsutil
 
 import (
 	"errors"
@@ -17,11 +17,11 @@ import (
 
 var errReparsePoint = errors.New("refusing a reparse point")
 
-// isUnsafeOpen: the path is a reparse point (a symlink or a junction).
-func isUnsafeOpen(err error) bool { return errors.Is(err, errReparsePoint) }
+// IsUnsafeOpen: the path is a reparse point (a symlink or a junction).
+func IsUnsafeOpen(err error) bool { return errors.Is(err, errReparsePoint) }
 
-// openNoFollow opens the reparse point itself, never its target, and refuses it.
-func openNoFollow(path string) (*os.File, error) {
+// OpenNoFollow opens the reparse point itself, never its target, and refuses it.
+func OpenNoFollow(path string) (*os.File, error) {
 	p, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return nil, err
@@ -75,22 +75,22 @@ func createExclusive(path string, mode os.FileMode) (*os.File, error) {
 	return os.NewFile(uintptr(h), path), nil
 }
 
-// checkMode: a regular file whose owner and DACL pass judgeWindowsFile. owner == ownerCurrentUser is the user's own
-// file; anything else is a system file.
-func checkMode(f *os.File, st fs.FileInfo, owner int, a Access) error {
+// CheckMode: a regular file whose owner and DACL pass judgeWindowsFile. owner == OwnerCurrentUser is the user's own
+// file; anything else is a system file. A security descriptor that cannot be read wraps ErrCannotCheck.
+func CheckMode(f *os.File, st fs.FileInfo, owner int, a Access) error {
 	if !st.Mode().IsRegular() {
 		return errors.New("not a regular file")
 	}
 	user := ""
-	if owner == ownerCurrentUser {
+	if owner == OwnerCurrentUser {
 		var err error
 		if user, err = currentUserSID(); err != nil {
-			return fmt.Errorf("the agent's user SID: %v", err)
+			return fmt.Errorf("%w: the agent's user SID: %v", ErrCannotCheck, err)
 		}
 	}
 	sec, err := fileSecurity(f)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %v", ErrCannotCheck, err)
 	}
 	return judgeWindowsFile(sec, user, a)
 }

@@ -47,13 +47,15 @@ var copilotBuiltins = map[string]bool{
 
 type copilotInput struct {
 	// camelCase form
-	ToolName string `json:"toolName"`
+	ToolName  string `json:"toolName"`
+	SessionID string `json:"sessionId"`
 	// PascalCase form
-	HookEventName string          `json:"hook_event_name"`
-	ToolNameSnake string          `json:"tool_name"`
-	Cwd           string          `json:"cwd"`
-	ToolArgs      json.RawMessage `json:"toolArgs"`
-	ToolInput     json.RawMessage `json:"tool_input"`
+	HookEventName  string          `json:"hook_event_name"`
+	ToolNameSnake  string          `json:"tool_name"`
+	SessionIDSnake string          `json:"session_id"`
+	Cwd            string          `json:"cwd"`
+	ToolArgs       json.RawMessage `json:"toolArgs"`
+	ToolInput      json.RawMessage `json:"tool_input"`
 	// of toolArgs and tool_input only a shell tool's command field is read
 }
 
@@ -63,15 +65,16 @@ func ParseCopilotPreToolUse(r io.Reader) (Call, error) {
 	if err := readHookInput(r, &in); err != nil {
 		return Call{}, err
 	}
-	tool, args := in.ToolName, in.ToolArgs
+	tool, args, session := in.ToolName, in.ToolArgs, in.SessionID
 	switch {
 	case in.HookEventName == "" && in.ToolName != "" && in.ToolNameSnake == "":
 	case in.HookEventName == "PreToolUse" && in.ToolNameSnake != "" && in.ToolName == "":
-		tool, args = in.ToolNameSnake, in.ToolInput
+		tool, args, session = in.ToolNameSnake, in.ToolInput, in.SessionIDSnake
 	default:
 		return Call{}, errors.New("not a preToolUse event")
 	}
-	c := Call{Tool: tool}
+	// the session id is read only for the decision record; Copilot CLI reports no permission mode
+	c := Call{Tool: tool, SessionID: session}
 	// the cwd is never a workspace root by itself (review #941 S-B1): only a root the agent declares counts
 	var roots []string
 	switch tool {

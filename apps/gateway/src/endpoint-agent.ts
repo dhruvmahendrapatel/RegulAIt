@@ -48,6 +48,8 @@ export const ENDPOINT_AGENT_PATHS = {
   credentials: "/v1/endpoint-agent/credentials",
   config: "/v1/endpoint-agent/config",
   reports: "/v1/endpoint-agent/reports",
+  // ADR-0310 addendum (lane E1): signed batches of hook decisions and managed-file observations
+  decisions: "/v1/endpoint-agent/decisions",
   // ADR-0331: the agent fetches its signed removal directives and reports each one's outcome
   directives: "/v1/endpoint-agent/directives",
   directiveOutcomes: "/v1/endpoint-agent/directive-outcomes",
@@ -57,6 +59,7 @@ export const ENDPOINT_AGENT_PATHS = {
 export const ENDPOINT_AGENT_TOKEN_ROUTES: ReadonlySet<string> = new Set([
   `GET ${ENDPOINT_AGENT_PATHS.config}`,
   `POST ${ENDPOINT_AGENT_PATHS.reports}`,
+  `POST ${ENDPOINT_AGENT_PATHS.decisions}`,
   `POST ${ENDPOINT_AGENT_PATHS.credentials}`,
   `GET ${ENDPOINT_AGENT_PATHS.directives}`,
   `POST ${ENDPOINT_AGENT_PATHS.directiveOutcomes}`,
@@ -236,6 +239,10 @@ export async function verifyReportSignature(input: {
   audience: string;
   snapshotId: string;
   now: Date;
+  /** the JWS `typ` (default the report's); the decision batch route (ADR-0310 addendum) passes its own */
+  typ?: string;
+  /** the claim that binds the body's id (default `snapshotId`; the decision batch binds `batchId`) */
+  idClaim?: "snapshotId" | "batchId";
 }): Promise<ReportSignatureCheck> {
   const digest = contentDigestOf(input.rawBody);
   if (input.contentDigestHeader !== digest) return { ok: false, code: "content_digest_mismatch" };
@@ -247,7 +254,7 @@ export async function verifyReportSignature(input: {
     const key = await importJWK({ kty: "EC", crv: "P-256", x: input.publicJwk.x!, y: input.publicJwk.y! } as JWK, "ES256");
     const { payload } = await jwtVerify(jws, key, {
       algorithms: ["ES256"],
-      typ: ENDPOINT_REPORT_SIGNATURE_TYP,
+      typ: input.typ ?? ENDPOINT_REPORT_SIGNATURE_TYP,
       audience: input.audience,
       issuer: `${JWK_THUMBPRINT_URI_PREFIX}${input.thumbprint}`,
       currentDate: input.now,
@@ -255,7 +262,7 @@ export async function verifyReportSignature(input: {
     });
     const nowS = Math.floor(input.now.getTime() / 1000);
     if (typeof payload.jti !== "string" || payload.jti.length === 0 || payload.jti.length > 200) return { ok: false, code: "invalid_report_signature" };
-    if (payload.snapshotId !== input.snapshotId || payload.contentDigest !== digest) return { ok: false, code: "invalid_report_signature" };
+    if (payload[input.idClaim ?? "snapshotId"] !== input.snapshotId || payload.contentDigest !== digest) return { ok: false, code: "invalid_report_signature" };
     const iat = payload.iat!;
     if (iat < nowS - ENDPOINT_REPORT_SIGNATURE_MAX_AGE_SECONDS || iat > nowS + ENDPOINT_REPORT_SIGNATURE_MAX_FUTURE_SECONDS) {
       return { ok: false, code: "report_signature_stale" };

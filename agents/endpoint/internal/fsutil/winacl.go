@@ -1,4 +1,4 @@
-package agent
+package fsutil
 
 import "fmt"
 
@@ -97,7 +97,7 @@ func judgeWindowsFile(sec winFileSecurity, userSID string, a Access) error {
 			continue
 		}
 		switch {
-		case a == WorldRead:
+		case a == WorldRead || a == WorldReadExec:
 		case a == GroupRead && ace.SID == sidInteractive:
 		default:
 			return fmt.Errorf("%s may read it (mask 0x%08x)", ace.SID, ace.Mask)

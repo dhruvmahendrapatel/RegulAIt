@@ -18,6 +18,8 @@ const (
 	RouteCredentials      = "/v1/endpoint-agent/credentials"
 	RouteConfig           = "/v1/endpoint-agent/config"
 	RouteReports          = "/v1/endpoint-agent/reports"
+	// RouteDecisions takes batches of hook decisions and managed-file observations (ADR-0310 addendum, lane E1).
+	RouteDecisions = "/v1/endpoint-agent/decisions"
 	// ADR-0331: signed add-on removal directives, and the agent's per-directive outcomes
 	RouteDirectives        = "/v1/endpoint-agent/directives"
 	RouteDirectiveOutcomes = "/v1/endpoint-agent/directive-outcomes"
@@ -31,6 +33,8 @@ const (
 	TypDPoP            = "dpop+jwt"
 	TypKeyRotation     = "regulait-key-rotation+jwt"
 	TypReportSignature = "regulait-endpoint-report+jwt"
+	// TypDecisionsSignature is the decision batch's signature (ADR-0310 addendum), the report signature's twin.
+	TypDecisionsSignature = "regulait-endpoint-decisions+jwt"
 	// JWKThumbprintURIPrefix makes the RFC 9278 client id from a key's RFC 7638 thumbprint, as S7 does.
 	JWKThumbprintURIPrefix = "urn:ietf:params:oauth:jwk-thumbprint:sha-256:"
 	// RotateAfterMember is the non-standard token-response member (ADR-0188 decision 12), epoch seconds.
@@ -41,11 +45,14 @@ const (
 const (
 	HeaderContentDigest   = "Content-Digest"
 	HeaderReportSignature = "Regulait-Report-Signature"
+	// HeaderDecisionsSignature carries the decision batch's signature beside Content-Digest.
+	HeaderDecisionsSignature = "Regulait-Decisions-Signature"
 )
 
 // Schema identifiers. Every body and every file the agent reads names its schema; an unknown one is refused.
 const (
 	SchemaReport           = "regulait.endpoint-report/1"
+	SchemaDecisions        = "regulait.endpoint-decisions/1"
 	SchemaEnrolFile        = "regulait.endpoint-enrol/1"
 	SchemaTicketFile       = "regulait.endpoint-ticket/1"
 	SchemaConfigFile       = "regulait.endpoint-agent-config/1"
@@ -287,6 +294,132 @@ type Gap struct {
 type ReportResponse struct {
 	Accepted  bool `json:"accepted"`
 	Duplicate bool `json:"duplicate"`
+}
+
+// DecisionBatch is POST /v1/endpoint-agent/decisions (ADR-0310 addendum, lane E1): the hook decisions the device
+// spooled since the last batch, and what the agent saw of each vendor's managed hook file this cycle. Idempotent on
+// BatchID: a resend carries the same id and the same bytes. It never carries a tool's arguments, a command, a file
+// path, a prompt, a working directory or a vendor's session id.
+type DecisionBatch struct {
+	Schema       string `json:"schema"`
+	BatchID      string `json:"batchId"` // UUID v4
+	SentAt       string `json:"sentAt"`  // RFC 3339, UTC, whole seconds
+	AgentVersion string `json:"agentVersion"`
+	// DroppedEvents counts events the device could not keep (spool full, unreadable, refused by the guard) since the
+	// last accepted batch, so a gap is visible.
+	DroppedEvents int              `json:"droppedEvents"`
+	Events        []DecisionEvent  `json:"events"`    // at most MaxDecisionEvents
+	Integrity     []IntegrityEntry `json:"integrity"` // at most one per ManagedFiles entry
+}
+
+// MaxDecisionEvents bounds one batch.
+const MaxDecisionEvents = 500
+
+// Event kinds: a decision a rule set made, or the first sight of a coding-agent session in a permission mode.
+const (
+	EventDecision = "decision"
+	EventSession  = "session"
+)
+
+// DecisionEvent is one spooled event. Decision is set exactly when Kind is EventDecision.
+type DecisionEvent struct {
+	EventID    string `json:"eventId"`    // UUID v4
+	OccurredAt string `json:"occurredAt"` // RFC 3339, UTC, whole seconds
+	Kind       string `json:"kind"`
+	Agent      string `json:"agent"` // a hook adapter name
+	// SessionRef is the hex HMAC-SHA256 of the vendor's session id under a per-device salt that never leaves the
+	// device: it links one session's events, and nothing else. Null when the hook input carries no session id.
+	SessionRef *string `json:"sessionRef"`
+	// PermissionMode is the hook input's permission_mode, verbatim (Claude Code and Codex only); null otherwise.
+	PermissionMode *string       `json:"permissionMode"`
+	Decision       *HookDecision `json:"decision,omitempty"`
+}
+
+// HookDecision is what a rule set answered.
+type HookDecision struct {
+	// Emitter names the on-device rule set that decided (DecisionEmitter* values, or a later rule set's own name).
+	Emitter string `json:"emitter"`
+	Action  string `json:"action"`  // Action* values
+	Verdict string `json:"verdict"` // Verdict* values: what the coding agent was answered
+	// WouldDeny and WouldAsk are audit mode's "enforce mode would have"; never both.
+	WouldDeny bool    `json:"wouldDeny"`
+	WouldAsk  bool    `json:"wouldAsk"`
+	Mode      string  `json:"mode"`   // DecisionMode* values
+	RuleID    *string `json:"ruleId"` // the deciding rule, when it has an id
+}
+
+// Rule sets that emit decisions.
+const (
+	DecisionEmitterMCP       = "mcp-rules"
+	DecisionEmitterCommand   = "command-rules"
+	DecisionEmitterHookInput = "hook-input" // the hook could not read the call and blocked it
+)
+
+// Actions a decision is about.
+const (
+	ActionMCP       = "mcp"
+	ActionCommand   = "command"
+	ActionFileRead  = "file_read"
+	ActionFileWrite = "file_write"
+	ActionPackage   = "package"
+	ActionOther     = "other"
+)
+
+// Verdicts. VerdictNone is only ever an audit-mode would-deny or would-ask; a plain no-decision is not an event.
+const (
+	VerdictAllow = "allow"
+	VerdictDeny  = "deny"
+	VerdictAsk   = "ask"
+	VerdictNone  = "none"
+)
+
+// Decision modes: the policy's mode for the agent, or no_policy when none verified.
+const (
+	DecisionModeAudit    = "audit"
+	DecisionModeEnforce  = "enforce"
+	DecisionModeNoPolicy = "no_policy"
+)
+
+// IntegrityEntry is one vendor-managed hook file as the agent found it this cycle.
+type IntegrityEntry struct {
+	File   string  `json:"file"`   // ManagedFile* values
+	State  string  `json:"state"`  // FileState* values
+	SHA256 *string `json:"sha256"` // hex SHA-256 of the exact bytes; set exactly when State is FileStatePresent
+	// HookStatus is what the file says about the RegulAIt hook; set only when State is FileStatePresent.
+	HookStatus *string `json:"hookStatus"`
+}
+
+// The managed files, named by vendor rather than by path (paths differ per OS and never leave the device).
+const (
+	ManagedFileClaudeCode = "claude-code/managed-settings.json"
+	ManagedFileCursor     = "cursor/hooks.json"
+	ManagedFileCopilotCLI = "copilot-cli/policy.json"
+	ManagedFileCodex      = "openai-codex/requirements.toml"
+)
+
+// Managed-file states.
+const (
+	FileStatePresent        = "present"
+	FileStateMissing        = "missing"
+	FileStateUnreadable     = "unreadable"
+	FileStateNotSystemOwned = "not_system_owned"
+)
+
+// Hook statuses of a present managed file.
+const (
+	HookRegistered  = "registered"  // the RegulAIt hook, with the vendor's fail-closed / managed-only settings
+	HookWeakened    = "weakened"    // the RegulAIt hook, without them
+	HookAbsent      = "absent"      // the file parses but registers no RegulAIt hook
+	HookUnparseable = "unparseable" // the file does not parse
+)
+
+// DecisionsResponse is the 202 answer. A resend of an accepted batch is answered Duplicate. Audited and Refused
+// are informational.
+type DecisionsResponse struct {
+	Accepted  bool `json:"accepted"`
+	Duplicate bool `json:"duplicate"`
+	Audited   int  `json:"audited,omitempty"`
+	Refused   int  `json:"refused,omitempty"`
 }
 
 // ErrorBody is every refusal's body. Error is a stable code (e.g. `enrolment_cap_reached`).

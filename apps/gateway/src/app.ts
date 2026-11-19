@@ -662,6 +662,7 @@ import {
 } from "./endpoint-addon-removal.js";
 // ADR-0310 (G2): vendor-native managed settings bundles
 import { registerManagedSettingsRoutes } from "./managed-settings.js";
+import { registerEndpointDecisionRoutes } from "./endpoint-decisions.js";
 import { registerEndpointAddonInventoryRoutes } from "./endpoint-addon-inventory.js";
 import { registerEndpointCommandExceptionRoutes } from "./endpoint-command-exceptions.js";
 import { registerProcessAnalyticsRoutes } from "./process-analytics.js";
@@ -6362,6 +6363,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // off until the org switch is on), list, read and cancel. Admin-only by default (none is in NON_ADMIN_ROUTES).
   registerEndpointAddonRemovalRoutes(app, db, { signer: opts.directiveSigner ?? null });
   registerManagedSettingsRoutes(app, db);
+  // ADR-0310 addendum (lane E1): the permission-bypass session view and the managed-file tamper view (admin)
+  registerEndpointDecisionRoutes(app, db);
   // ADR-0332 (lane E14): the endpoint AI add-on inventory (admin-only, RLS: admins and system_task)
   registerEndpointAddonInventoryRoutes(app, db);
   registerEndpointCommandExceptionRoutes(app, db);

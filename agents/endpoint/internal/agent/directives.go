@@ -17,6 +17,7 @@ import (
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/contract"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/directive"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/enforce"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/fsutil"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/pack"
 )
 
@@ -41,7 +42,7 @@ func (c *Cycle) syncDirectives(ctx context.Context, cl *auth.Client, s *State, c
 		return nil, &auth.HTTPError{Op: "directives", Status: res.Status, Code: res.Code()}
 	}
 	var dr contract.DirectivesResponse
-	if err := strictJSON(res.Body, &dr); err != nil || len(dr.Directives) > contract.MaxDirectivesPerSync {
+	if err := fsutil.StrictJSON(res.Body, &dr); err != nil || len(dr.Directives) > contract.MaxDirectivesPerSync {
 		return nil, errors.New("the directives answer is malformed")
 	}
 	ledger, err := c.loadLedger()
@@ -105,7 +106,7 @@ func (c *Cycle) syncDirectives(ctx context.Context, cl *auth.Client, s *State, c
 }
 
 func (c *Cycle) loadLedger() (*directive.Ledger, error) {
-	raw, err := readChecked(filepath.Join(c.Paths.StateDir, ledgerFile), ownUID(), OwnerOnly)
+	raw, err := readChecked(filepath.Join(c.Paths.StateDir, ledgerFile), ownUID(), fsutil.OwnerOnly)
 	if errors.Is(err, os.ErrNotExist) {
 		return directive.NewLedger(), nil
 	}
@@ -113,7 +114,7 @@ func (c *Cycle) loadLedger() (*directive.Ledger, error) {
 		return nil, err
 	}
 	var l directive.Ledger
-	if err := strictJSON(raw, &l); err != nil || l.Schema != directive.LedgerSchema || l.Entries == nil {
+	if err := fsutil.StrictJSON(raw, &l); err != nil || l.Schema != directive.LedgerSchema || l.Entries == nil {
 		// a damaged ledger is never replaced by an empty one: that would re-open replay
 		return nil, errors.New("the directive ledger is malformed")
 	}
@@ -128,5 +129,5 @@ func (c *Cycle) saveLedger(l *directive.Ledger) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(filepath.Join(c.Paths.StateDir, ledgerFile), append(b, '\n'), 0o600, -1)
+	return fsutil.WriteAtomic(filepath.Join(c.Paths.StateDir, ledgerFile), append(b, '\n'), 0o600, -1, true)
 }

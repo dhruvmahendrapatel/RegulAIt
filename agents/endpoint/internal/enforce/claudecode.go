@@ -36,7 +36,10 @@ type claudeInput struct {
 	ToolName      string          `json:"tool_name"`
 	Cwd           string          `json:"cwd"`
 	ToolInput     json.RawMessage `json:"tool_input"`
-	MCPServer     *struct {
+	// session_id and permission_mode are common input fields, read only for the decision record
+	SessionID      string `json:"session_id"`
+	PermissionMode string `json:"permission_mode"`
+	MCPServer      *struct {
 		Name   string `json:"name"`
 		Source string `json:"source"`
 	} `json:"mcp_server"`
@@ -55,7 +58,7 @@ func ParseClaudeCodePreToolUse(r io.Reader) (Call, error) {
 	if in.ToolName == "" {
 		return Call{}, errors.New("no tool_name")
 	}
-	c := Call{Tool: in.ToolName}
+	c := Call{Tool: in.ToolName, SessionID: in.SessionID, PermissionMode: in.PermissionMode}
 	// the cwd is never a workspace root by itself (review #941 S-B1): only a root the agent declares counts
 	var roots []string
 	switch in.ToolName {
