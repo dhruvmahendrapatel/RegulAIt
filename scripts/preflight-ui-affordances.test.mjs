@@ -98,8 +98,8 @@ describe("affordance census: a notBuilt route counts only when the file defines 
     // real handlers, not stubs: ADR-0246 (P27) authorised-targets, raised for the master's review (the two ADR-0236
     // bundle routes left this list when the #453 bundle screen landed), the ADR-0230 A2 SAP business unmark until its
     // #453 screen, ADR-0312's spend-budget removal until its #453 screen, ADR-0322 (lane E7) vendor usage credential
-    // revoke until the #453 vendor usage screen, and the ADR-0337 §6 identifier removal and agent unlink until the
-    // entitlement graph screen on #453
+    // revoke until the #453 vendor usage screen, the ADR-0337 §6 identifier removal and agent unlink until the
+    // entitlement graph screen on #453, and ADR-0364 S2's robot secret clear until the robot detail screen on #453
     expect([...DELIBERATELY_API_ONLY.keys()]).toEqual([
       "/v1/mcp/authorised-targets/:x",
       "/v1/discovery/agent-identifiers/:x",
@@ -107,6 +107,7 @@ describe("affordance census: a notBuilt route counts only when the file defines 
       "/v1/servers/:x/system-class",
       "/v1/users/:x/spend-budget",
       "/v1/vendor-usage/connectors/:x/credential",
+      "/v1/robots/:x/secrets/:x/:x",
     ]);
   });
 });

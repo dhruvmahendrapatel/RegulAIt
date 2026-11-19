@@ -412,3 +412,60 @@ Agent editor ▸ Toolbox ▸ Add connection
 - **Follow-ups:** S2 to S5 as listed above. Owner questions recorded as open with their secure defaults: whether the
   free-form opt-in should also require a project with a budget (default: yes, as the SAP write path does); and the
   maximum run wall-clock (default 5 minutes, admin-adjustable down only without step-up).
+
+## As built: S2 (backend, 2026-11-19)
+
+S2 ships §2, §3 (review), §6 and §8 as written, with these recorded differences:
+
+- **Narrower defaults than the end state:** the `browser` engine only, the `steps_v1` script format only (`playwright_ts`
+  waits for the S4 lint, `robot_framework` for S5), and https named-host origins only (no IP literals, credentials,
+  paths or single-label hosts). Anything else is refused by name (`robot_engine_unavailable`,
+  `robot_script_format_unavailable`, `robot_site_refused`).
+- **The submit gate is real, and nothing passes it in S2:** a submit needs a `succeeded` test run whose
+  `content_digest` equals the digest being bound, and the runner that writes one arrives in S3. Only tests insert such
+  rows. A submit also needs a live secret for every binding (`robot_secret_missing`) and resolves the binding's live and
+  test secret ids before the freeze. The approver is named or the org's default approver, and is never the author or
+  the submitter (`caller_cannot_approve`); the decide path refuses the author by name
+  (`cannot_approve_own_robot_version`), keyed on the decider, so delegation and the admin override do not reach it.
+- **Publication happens inside the decision's transaction**, not by a later manifest sync: the decision re-checks the
+  robot is active and the stored content still hashes to the digest both the version and the approval carry (else the
+  version is recorded `rejected`, `robot-version-stale`), upserts the `mcp_tools` row (`kind = write`) and writes its
+  definition pin as approved by the decider, so the ADR-0246 strict pin mode does not hold a reviewed tool as "added".
+- **tools/call in S2** re-checks approved, active, not halted and digest, then refuses with `robot_runner_unavailable`;
+  nothing executes.
+- **A fifth version transition, `discard`** (draft → rejected, by the system), is what robot retirement uses for a
+  draft (§8 says drafts move to `rejected`; a declared machine needs an event for it). A pending review of a retired
+  robot is moved to `rejected` by `reject` and its approval row to `superseded`.
+- **The secret column is `value_ciphertext`** (the `*_ciphertext` naming the data-key custody test reads), not
+  `ciphertext`.
+- **`robot_runs` is the S2 subset:** `mcp_call_audit_id`, `placement_id` and `proposed_version_id` arrive with the runner
+  (S3), as does `robot_run_evidence`.
+- **Read access is owner or admin** on every robot route (404 otherwise). A version is also reachable, as a tool, by
+  anyone entitled to it through the toolbox; there is no separate version read for them yet.
+- **Secret writes are a `settings_relax` step-up** (facts: robot, name, scope); the value is never returned or audited,
+  and `last4` is kept only for a secret of 12 characters or more.
+- **The first-party server and the ADR-0175 release-age cooldown.** `serverReleaseStatus` exempts a first-party server
+  on the gateway's fixed list: its code is the installed gateway, and each change to its manifest is a robot version
+  that was just approved on its exact content, not a new third-party release (review of #1059: the first approved robot
+  otherwise put the server in a seven-day quarantine). Admission scanning still applies to its manifest. `first_party` is
+  not an org-enable-able upstream transport; the proxy preflight skips only the egress half for a server on the fixed
+  list (`servedInProcess`), and `checkUpstreamDestination` refuses any other `first_party` row.
+- **Separation of duties at decide time (review of #1059).** Every user who wrote a draft's content is recorded in
+  `robot_version_editors` (the author on create, each editor on every edit; frozen with the version). The decide path
+  refuses any of them and the submitter, keyed on the decider, so delegation and the admin override do not reach it;
+  submit refuses naming any of them as approver.
+- **What the reviewer sees.** The approval preview carries the full reviewed content: the script, both schemas and the
+  exact tool definition agents will read (name, description, schemas, annotations), beside the digest. The named
+  approver of a pending version, and anyone the approver has an active delegation to, may read the robot (read only;
+  writes stay owner-or-admin). **Who may be named approver:** any active user other than the author, editors and
+  submitter, as for every other approvals-queue kind (the eval-run pattern), or the org's default approver. A narrower
+  review role is left to the approvals queue's own routing (ADR-0168), not special-cased here.
+- **The version status is guarded in the database too.** The freeze trigger refuses any status change that is not an
+  edge of `ROBOT_VERSION_MACHINE`, so a version cannot be moved back to `draft` to reopen its content.
+- **The call-time pin** compares the stored content's digest with both the version's digest and the digest its approval
+  was granted on.
+- **`agent_drafted`** is refused from clients in S2: it is set only by the gateway for a version an agent proposed (S3).
+- **The list** answers the ADR-0226 list contract (sort, keyset or offset, count, filters); the detail answers the
+  newest 20 versions, with older pages by `?versionsBefore=`, and reads each page's sites, bindings, editors and test
+  runs in four batched queries.
+- **Open with the owner (S3/S4, not built in S2):** the free-form browsing budget requirement and the maximum run time.

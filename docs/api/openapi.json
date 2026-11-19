@@ -1135,6 +1135,7 @@
                 "model_call",
                 "decision_table",
                 "agent_risk_proof",
+                "robot_version",
                 "endpoint_addon_removal"
               ]
             }
