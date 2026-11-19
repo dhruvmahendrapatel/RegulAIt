@@ -191,12 +191,15 @@ import { registerEvalRoutes } from "./evals.js";
 import { applyModelCardApprovalDecision, registerMrmRoutes } from "./mrm.js";
 import { registerFairnessRoutes } from "./fairness.js";
 import { registerClassicalDriftRoutes } from "./classical-drift.js";
+import { registerRuleStepRoutes } from "./rule-steps.js";
+import { registerDriftIngestCredentialRoutes } from "./drift-ingest-credentials.js";
 import { AiBomError } from "./ai-bom.js";
 import { runAiBomSignoffs, type AiBomSignoff } from "./ai-bom-signoff.js";
 import { registerRedTeamRoutes } from "./redteam.js";
 import { registerReportingRoutes } from "./reporting.js";
 import { registerPostureRoutes } from "./posture.js";
 import { registerAssetScoreRoutes } from "./asset-score.js";
+import { registerAgentRiskRoutes } from "./agent-risk.js";
 import { registerTrustDashboardRoutes } from "./trust-dashboard.js";
 import { registerUseCaseOverviewRoutes } from "./use-case-overview.js";
 import { registerUseCaseDraftRoutes } from "./use-case-drafts.js";
@@ -353,6 +356,13 @@ declare module "fastify" {
 export interface BuildAppOptions {
   /** deploy-time admin token used to create the first real user + key */
   bootstrapToken?: string;
+  /**
+   * ADR-0167 amendment (S-02): the bootstrap token RETIRES once an active admin
+   * exists. `true` is the relaxation (`REGULAIT_BOOTSTRAP_AFTER_ADMIN=1`), for an
+   * in-process operator tool that already holds the database, and the test
+   * suite. Absent = read that variable (unset = retire).
+   */
+  bootstrapAfterAdmin?: boolean;
   /** ROADMAP G2 deadlines; a test pins these rather than touching process.env */
   timeouts?: Partial<TimeoutConfig>;
   /** ADR-0126 circuit-breaker thresholds; same reason */
@@ -481,6 +491,8 @@ import {
 import { registerMcpToolSyncRoutes } from "./mcp-tool-sync.js";
 import { registerMcpDefinitionPinRoutes } from "./mcp-definition-pins.js";
 import { registerMcpHighRiskRoutes } from "./mcp-high-risk.js";
+import { registerMcpSapBusinessRoutes } from "./mcp-sap-business.js";
+import { sapStoredToolKind, serverSystemClass } from "./sap-tool-kind.js";
 // ADR-0101 — federated MCP registries. Admin-only through the default gate;
 // a sync writes only the catalogue and an import is an explicit operator act.
 import { privateRangesRelaxation, registerMcpRegistryRoutes } from "./mcp-registry.js";
@@ -511,6 +523,7 @@ import { mirrorApprovalDecision, registerPmRoutes } from "./pm.js";
 import { RunStateError } from "@regulait/orchestration-kernel";
 import { applyWorkflowApprovalDecision, registerWorkflowRoutes } from "./workflows.js";
 import { registerTemplateGalleryRoutes } from "./template-gallery.js";
+import { registerWorkflowBuilderRoutes } from "./workflow-builder.js";
 // ADR-0080 — the AI use-case registry (L1 front-door) and its lifecycle join.
 import {
   acceptUseCaseRisks,
@@ -601,6 +614,7 @@ import { applyEngineRunApprovalDecision, lockEngineRunOfApprovalTx, registerEngi
 import { registerEngineRunnerScopeHook, engineCredentialRoutes } from "./engine-runner-auth.js";
 import { registerModelArtifactRoutes, type ArtifactStore } from "./model-artifacts.js";
 import { registerModelSupplyChainRoutes } from "./model-supply-chain.js";
+import { registerModelLineageRoutes } from "./model-lineage.js";
 import { schedulerJobRegistry } from "./scheduler-jobs.js";
 import { registerDataKeyRoutes } from "./data-key.js";
 import { registerDataKeyReencryptionRoutes } from "./data-key-reencrypt.js";
@@ -609,10 +623,13 @@ import { WEB_UI_ROUTES, defaultWebDistDir, registerWebServing } from "./web-serv
 // their own module so the published OpenAPI document derives each route's
 // documented credential requirement from the SAME objects that enforce it.
 import { AUTH_EXEMPT_ROUTES, NON_ADMIN_ROUTES, requestRlsScope } from "./route-classes.js";
+import { isDraining } from "./readiness.js";
 import { registerOpenApiRoutes, type RouteInventoryEntry } from "./openapi.js";
 import { registerOnboardingRoutes } from "./onboarding.js";
+import { registerPmImportRoutes } from "./pm-import.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
 import { registerDiscoveryRoutes } from "./discovery-routes.js";
+import { registerAgentRegistryRoutes } from "./agent-registry-routes.js";
 import { registerContentTrustRoutes } from "./content-trust-routes.js";
 import { registerFederationRoutes } from "./federation-routes.js";
 import { registerAgentCredentialRoutes } from "./agent-credential-routes.js";
@@ -620,8 +637,14 @@ import { registerMcpIdentityOidcRoutes } from "./mcp-identity-oidc-routes.js";
 import { registerEndpointImportRoutes } from "./endpoint-import-routes.js";
 import { registerThirdPartyIngestRoutes } from "./third-party-ingest-routes.js";
 import { registerSiemDeliveryRoutes } from "./siem-delivery.js";
+import { registerCostOutcomeRoutes } from "./cost-outcomes.js";
+import { registerBudgetAlertRoutes } from "./budget-alerts.js";
 import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
 import { registerEndpointMcpConfigRoutes } from "./endpoint-mcp-config.js";
+// ADR-0310 (G2): vendor-native managed settings bundles
+import { registerManagedSettingsRoutes } from "./managed-settings.js";
+import { registerEndpointAddonInventoryRoutes } from "./endpoint-addon-inventory.js";
+import { registerProcessAnalyticsRoutes } from "./process-analytics.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
 import { registerCostImportRoutes } from "./cost-import.js";
 import { registerCostReconciliationRoutes } from "./cost-reconcile.js";
@@ -632,6 +655,7 @@ import { registerCopilotRedteamGateRoutes } from "./copilot-redteam-gate.js";
 import { registerBuilderRoutes } from "./builder.js";
 // ADR-0180 (D3) — continuous assurance: P0's gate-mode setting and each item owner's routes
 import { registerAssuranceSettingsRoutes } from "./assurance-settings.js";
+import { registerSensitivityLabelRoutes } from "./sensitivity-labels.js";
 import { registerRiskTreatmentSettingsRoutes } from "./risk-treatment-settings.js";
 import { decideApprovalWithMeasuredSchema, registerConditionMetricRoutes } from "./condition-metrics.js";
 import { registerRequiredTestRoutes } from "./required-tests.js";
@@ -658,6 +682,7 @@ import {
 } from "./export-bundle.js";
 import { MergeConflictError, WorkflowStateError, type WorkflowDefinition } from "@regulait/workflow-kernel";
 import { stageExcludesInitiator } from "./workflow-approvers.js";
+import { activeAdminExists, bootstrapAfterAdminRelaxed, bootstrapRetired } from "./dev-secrets.js";
 
 const uuidParam = z.object({ serverId: z.string().uuid() });
 const visibleToolsParams = z.object({
@@ -859,6 +884,8 @@ class StepUpRefusedInTx extends Error {
 }
 
 export function buildApp(db: Db, opts: BuildAppOptions = {}) {
+  // ADR-0167 amendment (S-02): resolved once, so every credential path agrees
+  const bootstrapAfterAdmin = opts.bootstrapAfterAdmin ?? bootstrapAfterAdminRelaxed(process.env);
   // trustProxy (ADR-0029, NARROWED by ADR-0031 item 3): the deployed stack runs
   // behind a Caddy TLS terminator, so the socket peer is the proxy, not the
   // user. Without trusting it, `req.ip` — recorded on every auth_sessions row
@@ -967,7 +994,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       timeWindow: (_req, key) => rateLimitWindowMs(rateCfg, key),
       // a load balancer's liveness poll must never be throttled into a false
       // "gateway is down"
-      allowList: (req) => req.url === "/health",
+      allowList: (req) => req.url === "/health" || req.url === "/ready",
       // The plugin constructs this itself and hands it the whole options
       // object, so the db arrives through the closure rather than through a
       // constructor argument we control.
@@ -1203,7 +1230,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const alt = req.headers["x-api-key"];
       if (typeof alt === "string" && alt.length > 0) authorization = `Bearer ${alt}`;
     }
-    const ctx = await authenticate(db, opts.bootstrapToken, authorization);
+    const ctx = await authenticate(db, opts.bootstrapToken, authorization, { afterAdmin: bootstrapAfterAdmin });
     // ADR-0066: `authenticate` may now answer with a refusal STRING for a
     // credential that exists but may not be used (deactivated owner, revoked or
     // expired virtual key). None of those resolves to an identity, so scope
@@ -1274,7 +1301,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       if (cookieToken) {
         // ADR-0039: the client IP rides into the SAME update as the idle-slide
         // so last_seen_ip tracks where the session IS, not where it started
-        const session = await resolveSession(db, cookieToken, Boolean(opts.bootstrapToken), req.ip ?? null);
+        const session = await resolveSession(
+          db,
+          cookieToken,
+          async () => Boolean(opts.bootstrapToken) && !(await bootstrapRetired(db, bootstrapAfterAdmin)),
+          req.ip ?? null,
+        );
         if (session === "disabled") {
           return reply.status(401).send({
             error: "user_disabled",
@@ -1383,7 +1415,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       if (workloadKey && app.rateLimitCredential && (await app.rateLimitCredential(req, reply, workloadKey))) return reply;
       return;
     }
-    const ctx = await authenticate(db, opts.bootstrapToken, authorization);
+    const ctx = await authenticate(db, opts.bootstrapToken, authorization, { afterAdmin: bootstrapAfterAdmin });
     // ADR-0022: a valid key whose user is DEACTIVATED gets its own reason —
     // the holder should learn "your account is disabled", not "bad token".
     if (ctx === "disabled") {
@@ -1930,6 +1962,24 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         error: "user_disabled",
         detail: "this account is deactivated — reactivate it before issuing keys",
       });
+    }
+    // ADR-0167 amendment (S-02): a key for SOMEONE ELSE is a credential that
+    // acts as them, so issuing one is identity administration and needs an
+    // `identity_manage` step-up. Before this, an admin session (or the
+    // bootstrap token) could mint a working key for any user, a TOTP-enrolled
+    // admin included, with no fresh proof of who was asking. A key for
+    // yourself is not gated here. The bootstrap credential passes only while
+    // no admin has a way to step up (first-admin setup, step-up.ts B4S-06).
+    // Under REGULAIT_BOOTSTRAP_AFTER_ADMIN=1 (the relaxation the test suite,
+    // the e2e harness and the in-process demo tools set) the bootstrap
+    // credential keeps its pre-S-02 power here too; that is part of what the
+    // relaxation relaxes, and the boot log and the boot audit row (rule bootstrap-after-admin-relaxed) say so.
+    if (req.authCtx.userId !== userId && !(req.authCtx.via === "bootstrap" && bootstrapAfterAdmin)) {
+      const stepUp = await requireStepUp(db, req, reply, {
+        kind: "identity_manage",
+        facts: { action: "api_key_issue", targetUserId: userId, name: body.name },
+      });
+      if (!stepUp.ok) return reply;
     }
     // ADR-0098 — THE LIFETIME. Three inputs with three meanings (absent = "you
     // decide", a timestamp = an explicit request, explicit null = "never
@@ -2705,7 +2755,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     if (await refuseUnknownServer(serverId, reply)) return reply;
     const [row] = await db
       .insert(mcpTools)
-      .values({ serverId, name: body.name, kind: body.kind, description: body.description ?? null })
+      // security review #798: a tool on an SAP business server is stored as a write whatever kind is posted
+      .values({ serverId, name: body.name, kind: sapStoredToolKind(await serverSystemClass(db, serverId), body.kind), description: body.description ?? null })
       .returning();
     return reply.status(201).send(row);
   });
@@ -5673,12 +5724,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // human landing on / gets the app (the SPA since the phase-2 swap), a load
   // balancer or uptime check gets a status. Both are auth-exempt.
   app.get("/", async (_req, reply) => reply.redirect("/ui", 302));
-  app.get("/health", async (_req, reply) => {
-    // ADR-0167 (CFG-08): the probe RACES a short deadline. `select 1` goes
-    // through the same pool every request uses, so with the pool exhausted it
-    // would queue behind them and the liveness check would hang rather than
-    // answer — a probe that cannot say "degraded" is not a probe. The query is
-    // left to settle on its own; it is one slot, and the answer is already out.
+  // ADR-0167 (CFG-08): the probe RACES a short deadline. `select 1` goes through the same pool every request uses, so
+  // with the pool exhausted it would queue behind them and the check would hang rather than answer — a probe that
+  // cannot say "degraded" is not a probe. The query is left to settle on its own; it is one slot, and the answer is
+  // already out.
+  const probeDatabase = async (): Promise<"ok" | "unreachable" | "timeout"> => {
     const probe = db.execute(sql`select 1`).then(
       () => "ok" as const,
       () => "unreachable" as const,
@@ -5689,10 +5739,21 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     });
     const database = await Promise.race([probe, deadline]);
     if (timer) clearTimeout(timer);
+    return database;
+  };
+  app.get("/health", async (_req, reply) => {
+    const database = await probeDatabase();
     if (database !== "ok") {
       return reply.status(503).send({ status: "degraded", database });
     }
     return { status: "ok", database: "ok" };
+  });
+  // ADR-0343: readiness. 503 `draining` once a shutdown has started, so the load balancer stops routing here first.
+  app.get("/ready", async (_req, reply) => {
+    if (isDraining(app)) return reply.status(503).send({ status: "draining" });
+    const database = await probeDatabase();
+    if (database !== "ok") return reply.status(503).send({ status: "degraded", database });
+    return { status: "ready", database: "ok" };
   });
 
   // ADR-0031 item 6: the health surface the two boot schedulers report into.
@@ -5715,7 +5776,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0025: password/session/TOTP/OIDC login surface + the admin endpoints
   // for one-time passwords, MFA recovery, session revocation and SSO
   // provider CRUD.
-  registerAuthRoutes(app, db, { bootstrapToken: opts.bootstrapToken, dataKey: opts.dataKey });
+  registerAuthRoutes(app, db, { bootstrapToken: opts.bootstrapToken, bootstrapAfterAdmin, dataKey: opts.dataKey });
   registerSamlRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0218: a person saves their own palette and mode to their account
   registerAppearanceRoutes(app, db);
@@ -5793,6 +5854,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerFairnessRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0223 (P13b): drift and explainability for classical models, on the model register; off by default
   registerClassicalDriftRoutes(app, db);
+  // ADR-0327 (lane E12): rule-like AI step detection, admin-only via the default gate
+  registerRuleStepRoutes(app, db);
+  // ADR-0223 amendment 1: the per-monitor write-only ingestion credential and its one route
+  registerDriftIngestCredentialRoutes(app, db);
   // ADR-0057 — CONTINUOUS RED-TEAMING. Versioned attack libraries, the shipped
   // corpus, and runs — every one of which is an ADR-0044 eval run underneath,
   // so probes take the same governed dispatch, the same metering and the same
@@ -5846,6 +5911,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   const anchorSink: AnchorSink | null = opts.auditAnchorSink !== undefined ? opts.auditAnchorSink : resolveAnchorSink();
   registerPostureRoutes(app, db, { sink: anchorSink });
   registerAssetScoreRoutes(app, db);
+  // ADR-0339 (lane E20) — the agent risk score, recomputed on every change
+  registerAgentRiskRoutes(app, db);
   // ADR-0148 — the six-dimension trust dashboard (demo task C1)
   registerTrustDashboardRoutes(app, db);
   // ADR-0082 — the standing agent dependency inventory: per registered agent,
@@ -6011,6 +6078,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   });
   // ADR-0077 — the cascade-annotated template gallery (admin-gated by default)
   registerTemplateGalleryRoutes(app, db);
+  // ADR-0341 — the visual pipeline builder: drafts, versions, diff and publish of workflow templates (admin)
+  registerWorkflowBuilderRoutes(app, db);
   registerUseCaseRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0171 / AER-050 — the intake wizard's server-side drafts
   registerUseCaseDraftRoutes(app, db);
@@ -6081,6 +6150,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerMcpDefinitionPinRoutes(app, db);
   // ADR-0246 addendum: offensive MCP servers as high-risk — the policy template and the authorised-targets list
   registerMcpHighRiskRoutes(app, db);
+  registerMcpSapBusinessRoutes(app, db);
   // ADR-0101 — configure an upstream MCP registry, pull its catalogue, and
   // import ONE entry as a federated `mcp_servers` row that is `unscanned`,
   // ungranted and subject to the same ADR-0097 admission and ADR-0043 egress
@@ -6113,7 +6183,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerRoleTeamRenameRoutes(app, db);
   // ADR-0255 (P31) — the governed connector catalogue; admin-only (not in NON_ADMIN_ROUTES), enablement audited
   registerConnectorCatalogueRoutes(app, db);
-  registerPosturePresetRoutes(app, db, { sink: anchorSink, bootstrapConfigured: Boolean(opts.bootstrapToken) });
+  registerPosturePresetRoutes(app, db, {
+    sink: anchorSink,
+    bootstrapConfigured: Boolean(opts.bootstrapToken),
+    // S-02: the posture page says when the token is retired (no audit row: a posture read is not a presentation)
+    bootstrapRetired: async () => !bootstrapAfterAdmin && (await activeAdminExists(db)),
+  });
   // ADR-0124 — the kill switch and safe modes
   registerExecutionControlRoutes(app, db);
 
@@ -6142,6 +6217,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // exactly the authority a non-admin must not reach. None appear in
   // NON_ADMIN_ROUTES.
   registerOnboardingRoutes(app, db, { dataKey: opts.dataKey });
+  registerPmImportRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0055 — SHADOW-AI DISCOVERY. Admin-only by default (nothing here is in
   // NON_ADMIN_ROUTES): uploading a customer's proxy export, editing the
   // detection catalogue and dispositioning findings are all operator authority.
@@ -6154,6 +6230,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     dataKey: opts.dataKey,
     ...(opts.discoveryScanners === undefined ? {} : { registry: opts.discoveryScanners }),
   });
+  // ADR-0314 (G6) — agents staged from vendor agent registries (Entra Agent ID / Agent 365, Gemini Enterprise,
+  // Bedrock AgentCore) and their step-up import into the inventory (disabled, proposed, no grants). Admin-only.
+  registerAgentRegistryRoutes(app, db);
   // ADR-0193 (I4) P1 — content source trust tiers, the write floor (both step-up, audited) and the P0 provenance
   // evidence view. Admin-only by default (none of these routes is in NON_ADMIN_ROUTES).
   registerContentTrustRoutes(app, db);
@@ -6177,6 +6256,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerThirdPartyIngestRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0303: SIEM delivery of the audit chain (admin-only through the default gate)
   registerSiemDeliveryRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0312: cost per outcome (the list is self-scoped and in NON_ADMIN_ROUTES; the roll-up and refresh are admin-only)
+  registerCostOutcomeRoutes(app, db);
+  // ADR-0312 (pilot addendum): a person's spend budget (admin; the self read is in NON_ADMIN_ROUTES)
+  registerBudgetAlertRoutes(app, db);
   // ADR-0195 SD4b — the RegulAIt endpoint agent: ticket redemption and registration (authenticated in-route by the
   // bulk token or the device ticket), the agent's own routes (its DPoP-bound self token only), and the admin's
   // enrolment-token and device routes (admin-only by default). Nothing works until an endpoint agent source is enabled.
@@ -6187,6 +6270,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0259 (P35) — the MCP servers enrolled devices' host configs name, with the registry diff, and the admin's
   // links to approved servers. Admin-only by default; reads what the agent reports, contacts nothing.
   registerEndpointMcpConfigRoutes(app, db);
+  registerManagedSettingsRoutes(app, db);
+  // ADR-0332 (lane E14): the endpoint AI add-on inventory (admin-only, RLS: admins and system_task)
+  registerEndpointAddonInventoryRoutes(app, db);
+  // ADR-0342 (lane E23): process analytics over the workflow history (reads scoped by the ADR-0047 decision; refresh admin)
+  registerProcessAnalyticsRoutes(app, db);
   // ADR-0069 — CROSS-VENDOR COST CONSOLIDATION. Admin-only by default: the ONLY
   // route here in NON_ADMIN_ROUTES is `GET /v1/users/:userId/cost-consolidated`,
   // which refuses in-handler unless the caller IS that user. Uploading a file
@@ -6297,6 +6385,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // A8 autonomy, A10 risk tolerance and acceptance (stubs answer 501 until
   // their owner lands).
   registerAssuranceSettingsRoutes(app, db);
+  // ADR-0363 slice 1: customer sensitivity labels (admin API; the UI is a #453 gap)
+  registerSensitivityLabelRoutes(app, db);
   // ADR-0211 (P17): the default-off switch for transferred and avoided risk treatments
   registerRiskTreatmentSettingsRoutes(app, db);
   registerConditionMetricRoutes(app, db);
@@ -6315,7 +6405,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerIncidentRoutes(app, db, { dataKey: opts.dataKey });
   registerFeedbackRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0225 (P13 d): the public trust centre, AI system cards and the auditor portal (shipped off)
-  registerTrustPagesRoutes(app, db);
+  registerTrustPagesRoutes(app, db, { dataKey: opts.dataKey });
   registerAiLiteracyRoutes(app, db);
   registerAlertOwnershipRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0186 (batch 4, AgentCoordination §4.9). A: passkeys and step-up (self
@@ -6349,6 +6439,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerModelArtifactRoutes(app, db, opts.artifactStore === undefined ? {} : { artifactStore: opts.artifactStore });
   // ADR-0216: signing keys (admin), signatures (uploader or admin), supply-chain relaxations (admin, step-up)
   registerModelSupplyChainRoutes(app, db);
+  // lane L7 (P14 + P16): model-file lineage
+  registerModelLineageRoutes(app, db);
   // ADR-0224 (P13 c): records of processing and data-subject requests (admin-only, the default gate)
   registerPrivacyOpsRoutes(app, db, { dataKey: opts.dataKey });
 

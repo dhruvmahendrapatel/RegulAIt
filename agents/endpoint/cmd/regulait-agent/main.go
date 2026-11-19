@@ -6,8 +6,10 @@
 //	regulait-agent run-once                         one collection and upload
 //	regulait-agent run                              run-once on the org's schedule until stopped
 //	regulait-agent preview -manifest FILE           collect against a local manifest and print the facts; sends nothing
-//	regulait-agent hook claude-code -policy FILE    on-device enforcement (ADR-0298, default off): Claude Code's
-//	                                                PreToolUse hook for MCP tool calls; reads stdin, never the network
+//	regulait-agent hook AGENT -policy FILE          on-device enforcement (ADR-0298, ADR-0330, ADR-0350, default off): the
+//	                                                MCP and built-in command hook for AGENT = claude-code, cursor, copilot-cli
+//	                                                or codex; reads stdin, never the network
+//	regulait-agent hook-capabilities                print each hook adapter's contract and capability matrix as JSON
 //	regulait-agent version
 package main
 
@@ -21,6 +23,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -31,13 +34,19 @@ import (
 )
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: regulait-agent redeem-ticket [-ticket-gid N] | register | run-once | run | preview -manifest FILE | hook claude-code -policy FILE | version")
+	fmt.Fprintln(os.Stderr, "usage: regulait-agent redeem-ticket [-ticket-gid N] | register | run-once | run | preview -manifest FILE | hook claude-code|cursor|copilot-cli|codex -policy FILE | hook-capabilities | version")
 	os.Exit(2)
 }
 
 func main() {
 	if len(os.Args) < 2 {
 		usage()
+	}
+	if os.Args[1] == "hook-capabilities" {
+		// the per-agent capability matrix (ADR-0330), for the admin console and for a customer's own review
+		out, _ := json.MarshalIndent(enforce.Adapters, "", "  ")
+		fmt.Println(string(out))
+		return
 	}
 	if os.Args[1] == "hook" {
 		os.Exit(hook(os.Args[2:]))
@@ -115,26 +124,39 @@ func preview(log *slog.Logger, file string) {
 	fmt.Println(string(out))
 }
 
-// hook answers one coding-agent hook call (ADR-0298). Every failure blocks: a missing or unverifiable policy denies
-// MCP tool calls, and a usage error exits 2, which the agent treats as a block. Nothing is sent anywhere.
+// hook answers one coding-agent hook call (ADR-0298, ADR-0330). Every failure blocks: a missing or unverifiable
+// policy denies MCP tool calls, and a usage error exits 2, which every supported agent treats as a block. Nothing is
+// sent anywhere.
 func hook(args []string) int {
-	if len(args) < 1 || args[0] != "claude-code" {
-		fmt.Fprintln(os.Stderr, "RegulAIt: usage: regulait-agent hook claude-code -policy FILE")
+	const usage = "RegulAIt: usage: regulait-agent hook claude-code|cursor|copilot-cli|codex -policy FILE"
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, usage)
 		return enforce.ExitBlock
 	}
-	fs := flag.NewFlagSet("hook claude-code", flag.ContinueOnError)
+	adapter, ok := enforce.Lookup(args[0])
+	if !ok {
+		fmt.Fprintln(os.Stderr, usage)
+		return enforce.ExitBlock
+	}
+	fs := flag.NewFlagSet("hook "+args[0], flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	file := fs.String("policy", "", "the signed enforcement policy (regulait.endpoint-enforcement/1)")
+	file := fs.String("policy", "", "the signed enforcement policy (regulait.endpoint-enforcement/2)")
 	if err := fs.Parse(args[1:]); err != nil || *file == "" {
 		fmt.Fprintln(os.Stderr, "RegulAIt: the enforcement hook is registered without a policy file, so it blocks.")
 		return enforce.ExitBlock
 	}
+	// the keyring: the compiled keys plus the device-policy signer's keys the admin pinned in the agent's
+	// root-owned config (owner decision B4). An unreadable or invalid config pins nothing, so the hook still denies.
+	keys := enforce.CompiledKeyring
+	if cfg, err := agent.LoadConfig(agent.DefaultPaths().ConfigFile, agent.SystemOwner()); err == nil {
+		keys = keys.With(cfg.DevicePolicyKeys)
+	}
 	var policy *enforce.Policy
 	if f, err := os.Open(*file); err == nil {
-		policy, _ = enforce.LoadPolicy(f, enforce.CompiledKeyring, time.Now())
+		policy, _ = enforce.LoadPolicy(f, keys, time.Now())
 		_ = f.Close()
 	}
-	stdout, stderr, code := enforce.HookClaudeCode(os.Stdin, policy)
+	stdout, stderr, code := adapter.HookWith(os.Stdin, policy, hookEnv(adapter.Name))
 	if len(stdout) > 0 {
 		_, _ = os.Stdout.Write(stdout)
 	}
@@ -142,6 +164,36 @@ func hook(args []string) int {
 		fmt.Fprintln(os.Stderr, stderr)
 	}
 	return code
+}
+
+// hookEnv is what a command decision reads from the device (ADR-0350). The device id stays empty until the agent
+// delivers policies itself (slice 2), so a policy's per-device exceptions never apply yet: strict by default.
+func hookEnv(agentName string) enforce.HookEnv {
+	env := enforce.HookEnv{Now: time.Now(), Resolve: resolveExisting}
+	if home, err := os.UserHomeDir(); err == nil {
+		env.Home = home
+	}
+	if agentName == enforce.AgentClaudeCode {
+		// Claude Code sets it for every hook: the project root, a workspace root besides the call's cwd
+		env.ProjectDir = os.Getenv("CLAUDE_PROJECT_DIR")
+	}
+	return env
+}
+
+// resolveExisting resolves symlinks in the longest prefix of p that exists, so a link cannot step around a path
+// rule; the rest of p (a file about to be created) is kept as written.
+func resolveExisting(p string) string {
+	rest := ""
+	for dir := p; ; dir = filepath.Dir(dir) {
+		if real, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Join(real, rest)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return p
+		}
+		rest = filepath.Join(filepath.Base(dir), rest)
+	}
 }
 
 func fail(log *slog.Logger, err error) {

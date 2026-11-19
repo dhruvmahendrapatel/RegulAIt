@@ -64,6 +64,26 @@ pg-boss. The prototype is in `spikes/workflow-p30/` (default off); there is no p
 - Jira/monday URL-token rotation is #605's G6 rotate route (HOLD; its ADR is not yet on `main`); #605 must drop its own copy of the legacy fallback when it rebases.
 - #717 review (21:09): Jira, monday, Azure DevOps and Asana must also carry an in-body creation time no older than 7 days (below the 30-day record retention), so a replay after the prune is refused; concurrent-duplicate test added ([ADR-0010 amendment (b)](../decisions/0010-pm-inbound-sync-webhooks-plus-read-through.md)).
 
+**2026-11-07 - S-02 closed: published dev secrets need loopback or an opt-in; the bootstrap credential retires (PR #728, [ADR-0167 amendment](../decisions/0167-security-review-batch.md)).**
+- 2026-11-15 addendum (owner: restructure CodeQL alerts, never dismiss): `hashToken` is now scrypt (N=2^10, r=8)
+  over the domain salt `regulait:token-hash:v2`, so every stored token hash (sessions, keys, handles) stops resolving and
+  is re-issued; `constantTimeEqual` is a random-keyed HKDF compare; five SAST allow-list entries removed.
+- The published `dev-bootstrap` token and 64×`a` data key boot only on a loopback-only listener with no deploy signal, or
+  with `REGULAIT_ALLOW_DEV_SECRETS=1` (a boot banner and a `dev-secrets-opt-in` audit row). Every compose bring-up now
+  needs the opt-in in `.env` or real values; the README quickstart says so.
+- An https non-loopback `REGULAIT_PUBLIC_URL` is a deploy signal; the base compose forwards `REGULAIT_HSTS` (no default).
+- The bootstrap token answers 401 `bootstrap_retired` once an enabled admin has signed in with their own credential
+  (audited once per process). `REGULAIT_BOOTSTRAP_AFTER_ADMIN=1` relaxes it; the gateway suite, the e2e harness and
+  the demo workflow set it, and the in-process `seed`/`demo:*` tools pass it in code.
+- Minting an API key for another user is an `identity_manage` step-up; the admin Users page wraps it in `withStepUp`.
+
+**2026-11-07 - drift ingestion credential (builder lane, [ADR-0223 amendment 1](../decisions/0223-classical-model-drift-explainability.md), pending migration `drift_ingest_credentials`).**
+- The #628 follow-up: each drift monitor can hold a write-only `rgldi_` credential that opens only
+  `POST /v1/model-drift/ingest/:monitorId/reports` for that monitor. Hash-only, always expiring (90 days default, 365
+  CHECK-capped), revoked at once; issue, rotate and revoke need an `identity_manage` step-up and are audited in the
+  same transaction; replay-safe through an Idempotency-Key. Branch `builder/p13b-ingest-credential`, draft PR held for
+  review. The admin panel is posted on #453 for the designer session.
+
 **2026-10-29 - the customer demo moves to one date, Saturday 2026-10-31 (owner, #453 c6508111468).**
 - **Date:** the internal run-through on Sun 11-01 and the external demo on Tue 11-03 are dropped; there is one run, on
   10-31. LIVE is never re-prepared, so every beat, state-changing ones included, runs on LIVE once, at the demo; the
@@ -5589,6 +5609,12 @@ form (one fact in one place, foreign keys for every reference, join tables inste
 attributes, one vocabulary per concept). Deliberate exceptions carry a column comment: snapshots and evidence (never
 normalized, ADR-0060), schema-validated config documents, verbatim external payloads, measured read models. Existing
 tables follow in audited expand-contract batches. Rule in CLAUDE.md (Data guidelines); DESIGN_GUIDELINES.md points to it.
+
+**ADR-0200 addendum (owner, 2026-11-17): four build rules.** (1) Compare at least two open-source approaches on GitHub
+before writing an unfamiliar feature. (2) Score bugs for frequency × severity (1–10 each); below 5 is a `triage-low`
+issue and the code is left alone; security-checklist gaps stay blocking. (3) Finish the whole job, ask the owner before
+deleting anything, end with a plain-words recap. (4) Explicit, reused, server-enforced state machines that serve UX, DX
+and AX together; app-wide inventory and approach from lane E29 (in flight). Rules in CLAUDE.md.
 
 **ADR-0233 (builder, 2026-11-06, Proposed): refuse credentials typed into content columns (PENDING S6).** Content
 (`name`, `title`, `description`, `summary`, `body`) is not redacted like ADR-0102's prose; a write that puts

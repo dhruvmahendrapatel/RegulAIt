@@ -20,7 +20,7 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import { ApiError, api } from "../../../api/client";
-import { UUID_RE, ago, fmtUsd } from "../../../api/format";
+import { UUID_RE, ago, fmtUsd, errorText } from "../../../api/format";
 import { Badge, Button, Card, ConfirmModal, EmptyState, Field, IdChip, Input, Meter, Select, SeverityBadge, Table } from "../../../ui/kit";
 import { KV, OutcomePanel, agentOpts, optionEls, projectOpts, useAgents, useApiAction, useProjects, useUserPicker, userOpts } from "../adminKit";
 import { DataList } from "../../../ui/DataList";
@@ -159,7 +159,7 @@ export function EngineRunsPanel(props: { surface: EngineSurface }) {
           <p className={v.faint}>Loading engines…</p>
         ) : engines.error ? (
           <div className={v.errLine} role="alert">
-            Couldn&apos;t load the engines: {engines.error instanceof Error ? engines.error.message : String(engines.error)}{" "}
+            Couldn&apos;t load the engines: {errorText(engines.error)}{" "}
             <Button size="sm" onClick={() => void engines.refetch()}>
               Retry
             </Button>
@@ -312,7 +312,7 @@ export function EngineRunsPanel(props: { surface: EngineSurface }) {
             <p className={v.faint}>Loading the run…</p>
           ) : detail.error ? (
             <div className={v.errLine} role="alert">
-              Couldn&apos;t load this run: {detail.error instanceof Error ? detail.error.message : String(detail.error)}{" "}
+              Couldn&apos;t load this run: {errorText(detail.error)}{" "}
               <Button size="sm" onClick={() => void detail.refetch()}>
                 Retry
               </Button>

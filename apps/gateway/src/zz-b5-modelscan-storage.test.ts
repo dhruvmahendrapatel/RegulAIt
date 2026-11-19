@@ -11,6 +11,7 @@
  * Every assertion over shared tables is a delta or scoped to this file's own rows (the suite shares its
  * database with the other gateway files).
  */
+import { hashToken } from "./token-hash.js";
 import { afterAll, beforeAll, describe, expect, it, onTestFinished } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -129,7 +130,7 @@ async function person(email: string, isAdmin = false): Promise<Person> {
   const u = await makeUser(email, isAdmin);
   const token = "rgls_" + randomBytes(32).toString("hex");
   await db.insert(authSessions).values({
-    tokenHash: createHash("sha256").update(token).digest("hex"),
+    tokenHash: hashToken(token),
     userId: u.id,
     origin: "password",
     expiresAt: new Date(Date.now() + 3_600_000),

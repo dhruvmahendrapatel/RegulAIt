@@ -2,7 +2,7 @@
 #
 # The default rule set stays on in full. The only exceptions below are the
 # SYNTHETIC values our own tests and docs use to prove that redaction, DLP and
-# secret scrubbing work, plus four non-secrets the generic rule misreads.
+# secret scrubbing work, plus non-secrets the generic rule misreads.
 #
 # Every exception is (path AND exact value), never a path alone: a real secret
 # pasted into one of these test files is still a finding, because its value is
@@ -33,6 +33,16 @@ regexes = [
   '''^abcdefghijkl$''',
   '''^OnBhdHBhdHBhdA==$''',
 ]
+
+[[allowlists]]
+# ADR-0343: the first commit of the replica readiness test (PR #887) used the same synthetic data-key fixture as
+# process-lifecycle.test.ts (allow-listed below). The test now generates its key at run time, but that commit stays in
+# the PR's scanned range, so its exact value is listed here for that one file only.
+description = "Synthetic data-key fixture in the ADR-0343 replica readiness test"
+condition = "AND"
+paths = ['''^apps/gateway/src/zz-adr0343-leader-and-readiness\.test\.ts$''']
+regexTarget = "secret"
+regexes = ['''^3f9a1c7e2b8d4f60a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718$''']
 
 [[allowlists]]
 description = "Synthetic test credentials: redaction, DLP and scrub test inputs"
@@ -131,6 +141,13 @@ regexes = [
 ]
 
 # --- Non-secrets in source and docs that the generic rule misreads ---
+
+[[allowlists]]
+description = "ADR-0324: the SHA-256 of the ADR-0041 development release key's PUBLIC key (DER SPKI), already published in infra/release-keys/README.md; verify-release.sh pins it so the untouched dev keyring is recognised. The generic rule reads the 'KEY' in the variable name of an earlier commit (52cfacb3) as a key name. Exact value, this one file."
+condition = "AND"
+paths = ['''^scripts/verify-release\.sh$''']
+regexTarget = "secret"
+regexes = ['''^f2cbda4b1471e4070f7bd75edb69617a48cf58721f34607011935933fa629ff1$''']
 
 [[allowlists]]
 description = "Demo scenario keys are identifiers, not credentials"

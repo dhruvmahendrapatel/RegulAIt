@@ -78,7 +78,7 @@ async function session(args?: StepUpCheckArgs) {
   const token = "rgls_" + randomBytes(32).toString("hex");
   const [s] = await db
     .insert(authSessions)
-    .values({ tokenHash: createHash("sha256").update(token).digest("hex"), userId: adminId, origin: "password", expiresAt: new Date(Date.now() + 3_600_000), idleExpiresAt: new Date(Date.now() + 3_600_000), idleMinutes: 60 })
+    .values({ tokenHash: hashToken(token), userId: adminId, origin: "password", expiresAt: new Date(Date.now() + 3_600_000), idleExpiresAt: new Date(Date.now() + 3_600_000), idleMinutes: 60 })
     .returning({ id: authSessions.id });
   let stepUp: string | null = null;
   if (args) {

@@ -98,14 +98,120 @@ named, tagged or designated production.
   boundary, and the managed-policy size limits. Terraform is installed by `infra/scripts/install-terraform.sh`, pinned to
   1.16.7 (terraform-aws-modules/rds 7.x needs 1.11 or later) with its SHA-256 committed.
 
+### PR 2: the BYOC AWS module
+
+- **`infra/modules/byoc-aws`** builds what the Helm chart runs on, inside the customer's account (details in its
+  README): a VPC over two zones; egress `allow_list` (default: AWS Network Firewall, strict rule order, TLS SNI allow-list
+  of `egress_allowed_domains`, default only `login.microsoftonline.com`, everything else dropped and logged) or `none`;
+  VPC endpoints for every AWS API the stack uses, so AWS traffic never crosses the firewall; EKS (private API
+  endpoint by default, `0.0.0.0/0` refused, access entries only, KMS envelope encryption, control-plane audit logs,
+  IMDSv2 hop limit 1, VPC CNI with NetworkPolicy enforcement on, EBS CSI and Pod Identity add-ons); RDS PostgreSQL 16
+  (stack key, TLS forced, Multi-AZ, 14-day PITR, final snapshot, deletion protection, RDS-managed master secret); one
+  rotating KMS key; the audit-anchor Object Lock bucket in COMPLIANCE mode through `audit-anchor-worm-s3`; a gateway
+  Pod Identity role that may invoke only the listed Bedrock models and write anchors; private ECR repositories
+  (immutable, scanned) and a `public.ecr.aws` pull-through cache.
+- **`infra/environments/byoc-aws`** is the root the customer applies; the rehearsal applies the same root with
+  `rehearsal.tfvars.example`, so the rehearsal exercises the customer's exact path.
+- **Data boundary**: both the control plane and the agent-execution plane run in the customer's account, and nothing
+  goes to the vendor. The product has no channel to us (DATA_BOUNDARY.md §1) and the stack opens none. The brief's
+  "metadata only to our control plane" has no counterpart in the product today. Adding one would be a new, opt-in data
+  path that needs its own ADR, so it is not built (owner note).
+- **Egress posture (ADR-0062)**: strict on both layers by default. At the network layer, the firewall allow-list
+  passes only the listed hosts. At the app layer, the org setting `egressCompiledDefaultPolicy` defaults to `strict`
+  (since ADR-0180), so a `byoc` install also checks compiled vendor endpoints against `egress_allow_hosts`. The
+  runbook has the installer confirm it and add the same hosts there.
+- **Preflight** `infra/modules/byoc-aws/preflight/preflight.sh` (read-only): tools, signed-in account, region and
+  zones, quotas, Network Firewall and endpoint availability, Bedrock model access, and free names.
+
+### PR 3: the install runbook and the rehearsal workflow
+
+- **[docs/deployment/BYOC_AWS_INSTALL.md](../../docs/deployment/BYOC_AWS_INSTALL.md)** is written for a platform
+  team that does not know RegulAIt. It runs about two hours hands-on plus about 45 minutes of waiting, and covers
+  prerequisites, quotas and Bedrock access, bundle verification, preflight, one `terraform apply`, the chart install
+  (images mirrored into the customer's ECR, secrets generated in place, the data-key warning), the internal ALB, the
+  first admin, Entra ID OIDC, the smoke test, upgrade and rollback, uninstall (the COMPLIANCE bucket is kept as
+  evidence), the support bundle, the data boundary and the known gaps. The uninstall is ordered (load balancer first,
+  then the two protections off in one reviewed apply, then the mirrored images, then destroy) and lists what is left
+  behind on purpose: the final RDS snapshot, the COMPLIANCE anchors, the KMS key in its 30-day waiting period and the
+  retained install-secrets volume (#868 review, finding 5).
+- **`infra/modules/byoc-aws/smoke/smoke-test.sh`** runs its checks from short-lived pods under the gateway's own
+  namespace and service account, using images by digest through the ECR pull-through cache. It checks that:
+  - nodes are Ready;
+  - the pod gets the gateway role through Pod Identity;
+  - the bucket has Object Lock, and (optionally) a delete of a probe object is refused;
+  - one Bedrock Converse call works;
+  - the database accepts TLS and refuses plain connections;
+  - an allow-listed host is reachable and `example.com` is not;
+  - default-deny NetworkPolicy is enforced.
+
+  **`support-bundle.sh`** collects statuses, events and the last 500 log lines, with no secret values and no state,
+  and the installer reviews it before sending.
+- **`.github/workflows/byoc-rehearsal.yml`** runs on manual dispatch, in the `rehearsal` environment, so a reviewer
+  must approve each run. It:
+  - exchanges the job's OIDC token for a three-hour session of the rehearsal role with the AWS CLI (no third-party
+    action);
+  - refuses any account but regulait-dev: the caller must match the role ARN, and the account's IAM alias must equal
+    `EXPECTED_ACCOUNT_ALIAS`, which is committed in the workflow (#873 review, finding 1). The role ARN comes from an
+    environment variable, so it proves nothing alone. The alias is used, not a hash of the account ID, because the
+    repository is public and a hash of a 12-digit ID can be reversed by brute force. The account ID is masked in logs;
+  - refuses to start while anything tagged `purpose=rehearsal` is still live, so a missed teardown blocks the next
+    rehearsal instead of piling up (finding 2);
+  - runs the preflight, applies the customer root with `rehearsal.tfvars.example`, and runs the smoke test with the
+    WORM probe. For the length of the run, the cluster's public API endpoint is open to the runner's own /32, read from
+    `checkip.amazonaws.com`, and to nothing else. It is gone when the stack is destroyed;
+  - caps every step so the caps add up to the job's 170 minutes (apply 70, smoke 20, destroy 55). The 180-minute
+    session starts after setup and outlives the job, so destroy always has time and live credentials, even after a
+    hung apply (finding 2). State is local to the runner, which is why the leftovers gate exists: a lost runner loses
+    the state, and the next run refuses to start until the owner clears what it left;
+  - **always** destroys, after `infra/scripts/byoc-rehearsal-sweep.sh` empties the GOVERNANCE-mode rehearsal bucket
+    and the cache repositories (the sweep refuses any prefix that is not `regulait-rehearsal*`, and any bucket in
+    COMPLIANCE mode);
+  - lists anything still tagged `purpose=rehearsal`, and writes every step's start, duration and result to the run
+    summary, which the lane copies into its PR.
+
+- The runbook's §6 is idempotent (finding 3). It uses `--dry-run=client | kubectl apply`, `helm upgrade --install`
+  and `helm repo add --force-update`. §6.3 keeps an existing `regulait` Secret and never generates a second data key,
+  because a re-run that rotated it would leave every stored credential unreadable (ADR-0035). The database URL asks
+  for `sslmode=verify-full`. Until the chart can mount the RDS CA bundle, that is listed as a known gap rather than
+  weakened (ADR-0180).
+- **Operator backups to S3 (ADR-0305 §2) are not in this PR** (#868 review, finding 4). `backup-target-s3` grants
+  `s3:ListBucket` (ADR-0305 forbids it) and no S3-conditioned `kms:GenerateDataKey`/`kms:Decrypt`, so composing it
+  as is would break the operator's least-privilege contract, and changing it touches its other callers. A follow-up
+  PR extends it with a Pod Identity writer mode that matches ADR-0305 exactly and composes it in `byoc-aws`. Until
+  then a BYOC install backs up to the operator's PVC path, and RDS point-in-time backups cover the database.
+
 ### Open source first (ADR-0176)
 
 Searched: `terraform-aws-modules/iam` (Apache-2.0) has `iam-github-oidc-provider` and `iam-github-oidc-role`
 submodules. Its role submodule matches `sub` with `StringLike` and attaches managed policy ARNs; it does not take an
 inline boundary-scoped policy or refuse a wildcard subject. Our module already existed and is ~100 lines, so it is
 extended rather than replaced; the boundary and deployer policy are RegulAIt's governance semantics (what an
-installer may do), which ADR-0176 §4 keeps in house. `terraform-aws-modules` is the first choice for PR 2's VPC, EKS
-and RDS.
+installer may do), which ADR-0176 §4 keeps in house. PR 2 composes validated modules instead of hand-written
+resources, all Apache-2.0 and pinned to exact versions: `terraform-aws-modules` vpc 6.7.3 (with `vpc-endpoints`), eks
+21.29.0, rds 7.2.2, eks-pod-identity 2.10.0 (every Pod Identity role: gateway, EBS CSI driver, Load Balancer
+Controller, the last two with their upstream-maintained policies), kms 4.2.2, ecr 3.2.1 and network-firewall 2.3.0
+(firewall, policy and rule group), plus the repo's own `audit-anchor-worm-s3`. What stays hand-written, and why
+(ADR-0176 §4): the per-zone NAT gateways and the routes node subnet, firewall endpoint, NAT and back, because the vpc
+module's NAT routes private subnets straight to the NAT and cannot place the firewall endpoint on the symmetric path;
+the firewall's CloudWatch log groups (encrypted with the stack key); the gp3 StorageClass in the outputs.
+
+### Review of #868 (2026-11-16)
+
+The code review returned REQUEST CHANGES at `eeaa0698`; the security review approved.
+
+1. Pod Identity roles now come from `terraform-aws-modules/eks-pod-identity`; the copied Load Balancer Controller
+   policy file is gone. The EBS CSI role keeps the tighter key grant (`kms:ViaService` EC2) through the module's
+   `policy_statements`.
+2. The stack key comes from `terraform-aws-modules/kms`, the repositories and pull-through cache from
+   `terraform-aws-modules/ecr`.
+3. The firewall, policy and rule group come from `terraform-aws-modules/network-firewall`; the NAT and routes stay
+   hand-written for the reason above. The firewall now defaults to delete protection (`firewall_delete_protection`,
+   off only in the rehearsal tfvars), and its policy and rule group are encrypted with the stack key too.
+4. Operator backups to S3 (ADR-0305 §2) move to PR 3. `infra/modules/backup-target-s3` does not fit as it stands: it
+   grants `s3:ListBucket` (ADR-0305 forbids it) and no `kms:GenerateDataKey`/`kms:Decrypt` conditioned on S3, so PR 3
+   either extends that module with a pod-identity writer mode or records why not.
+5. PR 3's runbook and sweep document the ordered teardown and what is left behind on purpose: the final RDS snapshot,
+   the COMPLIANCE audit anchors and the KMS key in its 30-day deletion window.
 
 ### Review of #854 (2026-11-15)
 

@@ -20,7 +20,7 @@
 import { useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
-import { ago, fmtUsd } from "../../../api/format";
+import { ago, fmtUsd, errorText } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Select, Table } from "../../../ui/kit";
 import { KV, QueryGate, Stat, downloadCsv, optionEls, projectOpts, teamOpts, useAction, useProjects, useTeams } from "../adminKit";
@@ -167,7 +167,7 @@ export default function BillingPage() {
       }
     } catch (err) {
       // e.g. the body could not be read: never an unhandled rejection with no message
-      setExportError(`The export failed: ${err instanceof Error ? err.message : String(err)}`);
+      setExportError(`The export failed: ${errorText(err)}`);
     } finally {
       setExporting(null);
     }
@@ -265,7 +265,7 @@ export default function BillingPage() {
         info={<p>Nothing on this page meters. Every governed agent, connector and MCP call already writes a measured row to the usage ledger and an estimated (list-price) row to the cost ledger at the point of the call; billing is a read-side consumer of that one ledger, so no number here can drift from the cost dashboard. Rate cards are immutable versions and every statement freezes the snapshot it was rated against, so changing a price cannot restate an invoice you already issued.</p>}
       />
       <div className={v.stack}>
-        <QueryGate loading={overview.isLoading} error={overview.error} onRetry={() => void overview.refetch()}>
+        <QueryGate query={overview}>
           <Card title="What this does and does not do" info={o?.note ? <p>{o.note}</p> : undefined}>
             <div className={a.statRow}>
               <Stat value={o?.ledger.totalEvents ?? 0} label="metered events in the ledger" />

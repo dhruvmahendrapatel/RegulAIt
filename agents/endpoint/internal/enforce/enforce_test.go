@@ -26,7 +26,28 @@ func basePolicy() Policy {
 	return Policy{
 		Schema: PolicySchema, Subject: "u-0123456789abcdef", Mode: ModeEnforce,
 		IssuedAt: now.Add(-time.Hour), NotAfter: now.Add(72 * time.Hour),
-		MCP: MCPRules{AllowServers: []string{"regulait", "docs"}, DenyServers: []string{"docs"}, AllowSources: []string{"managed", "user"}},
+		MCP:      MCPRules{AllowServers: []string{"regulait", "docs"}, DenyServers: []string{"docs"}, AllowSources: []string{"managed", "user"}},
+		Commands: testCommands(),
+	}
+}
+
+// testCommands is the command section the fixtures are decided against (ADR-0350).
+func testCommands() CommandRules {
+	return CommandRules{
+		Default: RuleAllow, Unresolved: RuleAsk,
+		Exec: []ExecRule{
+			{ID: "git-status", Argv: []string{"git", "status"}, Verdict: RuleAllow},
+			{ID: "git-push", Argv: []string{"git", "push", "**"}, Verdict: RuleAsk},
+			{ID: "rm-rf", Argv: []string{"rm", "-rf", "**"}, Verdict: RuleDeny},
+			{ID: "curl", Argv: []string{"curl", "**"}, Verdict: RuleDeny},
+		},
+		Files: FileRules{OutsideRead: RuleAsk, OutsideWrite: RuleDeny, Rules: []FileRule{
+			{ID: "dotenv", Access: "any", Path: "**/.env", Verdict: RuleDeny},
+		}},
+		Packages: PkgRules{Default: RuleAsk, Rules: []PkgRule{
+			{ID: "left-pad", Ecosystem: "npm", Name: "left-pad", Verdict: RuleDeny},
+			{ID: "lodash", Ecosystem: "npm", Name: "lodash", Verdict: RuleAllow},
+		}},
 	}
 }
 
@@ -69,19 +90,20 @@ func TestLoadPolicyRefuses(t *testing.T) {
 		keys Keyring
 		env  []byte
 	}{
-		"the compiled keyring is empty": {CompiledKeyring, env},
-		"wrong key":                     {keys, sign(t, otherPriv, "regulait-policy-test", payload)},
-		"unpinned key id":               {keys, sign(t, otherPriv, "regulait-policy-other", payload)},
-		"tampered payload":              {keys, tampered},
-		"unknown envelope member":       {keys, bytes.Replace(env, []byte(`{`), []byte(`{"x":1,`), 1)},
-		"not JSON":                      {keys, []byte("nope")},
-		"expired":                       {keys, mutate(func(p *Policy) { p.NotAfter = now.Add(-time.Second) })},
-		"from the future":               {keys, mutate(func(p *Policy) { p.IssuedAt = now.Add(time.Hour); p.NotAfter = now.Add(2 * time.Hour) })},
-		"unknown mode":                  {keys, mutate(func(p *Policy) { p.Mode = "off" })},
-		"unknown schema":                {keys, mutate(func(p *Policy) { p.Schema = "regulait.endpoint-enforcement/2" })},
-		"bad server name":               {keys, mutate(func(p *Policy) { p.MCP.AllowServers = []string{"a b"} })},
-		"empty source":                  {keys, mutate(func(p *Policy) { p.MCP.AllowSources = []string{""} })},
-		"too large":                     {keys, bytes.Repeat([]byte(" "), maxPolicyBytes+1)},
+		"the compiled keyring is empty":  {CompiledKeyring, env},
+		"wrong key":                      {keys, sign(t, otherPriv, "regulait-policy-test", payload)},
+		"unpinned key id":                {keys, sign(t, otherPriv, "regulait-policy-other", payload)},
+		"tampered payload":               {keys, tampered},
+		"unknown envelope member":        {keys, bytes.Replace(env, []byte(`{`), []byte(`{"x":1,`), 1)},
+		"not JSON":                       {keys, []byte("nope")},
+		"expired":                        {keys, mutate(func(p *Policy) { p.NotAfter = now.Add(-time.Second) })},
+		"from the future":                {keys, mutate(func(p *Policy) { p.IssuedAt = now.Add(time.Hour); p.NotAfter = now.Add(2 * time.Hour) })},
+		"unknown mode":                   {keys, mutate(func(p *Policy) { p.Mode = "off" })},
+		"schema 1 (no commands section)": {keys, mutate(func(p *Policy) { p.Schema = "regulait.endpoint-enforcement/1" })},
+		"unknown schema":                 {keys, mutate(func(p *Policy) { p.Schema = "regulait.endpoint-enforcement/3" })},
+		"bad server name":                {keys, mutate(func(p *Policy) { p.MCP.AllowServers = []string{"a b"} })},
+		"empty source":                   {keys, mutate(func(p *Policy) { p.MCP.AllowSources = []string{""} })},
+		"too large":                      {keys, bytes.Repeat([]byte(" "), maxPolicyBytes+1)},
 	}
 	for name, c := range cases {
 		// testKey is deterministic, so every signed() case is signed by the key in keys
@@ -130,12 +152,12 @@ func TestClaudeCodeHook(t *testing.T) {
 	mcpIn := `{"session_id":"s","hook_event_name":"PreToolUse","tool_name":"mcp__regulait__search","tool_use_id":"t1",
 	  "tool_input":{"q":"secret-argument"},"mcp_server":{"name":"regulait","source":"managed"},"future_field":true}`
 
-	if out, _, code := HookClaudeCode(in(mcpIn), &p); code != 0 || out != nil {
+	if out, _, code := claudeCodeAdapter.Hook(in(mcpIn), &p); code != 0 || out != nil {
 		t.Errorf("an allowed call is not left to Claude Code's own permission flow: %d %s", code, out)
 	}
 
 	shadow := strings.ReplaceAll(mcpIn, `"regulait"`, `"shadow"`)
-	out, reason, code := HookClaudeCode(in(shadow), &p)
+	out, reason, code := claudeCodeAdapter.Hook(in(shadow), &p)
 	if code != ExitBlock || !strings.Contains(string(out), `"permissionDecision":"deny"`) || !strings.Contains(string(out), `"hookEventName":"PreToolUse"`) || reason == "" {
 		t.Errorf("a denied call does not block: %d %s %q", code, out, reason)
 	}
@@ -143,18 +165,22 @@ func TestClaudeCodeHook(t *testing.T) {
 		t.Error("a tool argument reached the hook output")
 	}
 
-	if _, _, code := HookClaudeCode(in(mcpIn), nil); code != ExitBlock {
+	if _, _, code := claudeCodeAdapter.Hook(in(mcpIn), nil); code != ExitBlock {
 		t.Error("no policy does not fail closed")
 	}
-	if out, _, code := HookClaudeCode(in(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{}}`), nil); code != 0 || out != nil {
-		t.Error("a non-MCP tool got a decision")
+	if out, _, code := claudeCodeAdapter.Hook(in(`{"hook_event_name":"PreToolUse","tool_name":"WebFetch","tool_input":{}}`), nil); code != 0 || out != nil {
+		t.Error("a tool that is neither MCP nor governed got a decision")
+	}
+	// a governed built-in fails closed without a policy (ADR-0350)
+	if _, _, code := claudeCodeAdapter.Hook(in(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}`), nil); code != ExitBlock {
+		t.Error("a shell command without a policy is not blocked")
 	}
 	noProvenance := `{"hook_event_name":"PreToolUse","tool_name":"mcp__regulait__search","tool_input":{}}`
-	if _, _, code := HookClaudeCode(in(noProvenance), &p); code != ExitBlock {
+	if _, _, code := claudeCodeAdapter.Hook(in(noProvenance), &p); code != ExitBlock {
 		t.Error("an MCP call without mcp_server provenance is allowed")
 	}
 	for _, bad := range []string{"", "not json", `{"hook_event_name":"PostToolUse","tool_name":"mcp__a__b"}`, `{"hook_event_name":"PreToolUse"}`} {
-		if _, _, code := HookClaudeCode(in(bad), &p); code != ExitBlock {
+		if _, _, code := claudeCodeAdapter.Hook(in(bad), &p); code != ExitBlock {
 			t.Errorf("unreadable input %q does not block", bad)
 		}
 	}
@@ -165,5 +191,36 @@ func TestToolNameServer(t *testing.T) {
 		if got := mcpServerFromToolName(in); got != want {
 			t.Errorf("%s: %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestPinnedDevicePolicyKeys(t *testing.T) {
+	pub, priv := testKey(t)
+	x := base64.RawURLEncoding.EncodeToString(pub)
+	keys, err := KeyringFrom([]PinnedKey{{KeyID: "device-policy-1", X: x}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(basePolicy())
+	// a policy signed by the shared device-policy signer verifies through the pinned key, on top of the compiled set
+	if _, err := LoadPolicy(bytes.NewReader(sign(t, priv, "device-policy-1", payload)), CompiledKeyring.With(keys), now); err != nil {
+		t.Fatalf("a pinned device-policy key did not verify: %v", err)
+	}
+	other := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))
+	for name, pins := range map[string][]PinnedKey{
+		"three keys":    {{"k-aa1", x}, {"k-aa2", other}, {"k-aa3", other}},
+		"duplicate id":  {{"device-policy-1", x}, {"device-policy-1", other}},
+		"bad id":        {{"A B", x}},
+		"short key":     {{"device-policy-1", "AAAA"}},
+		"padded base64": {{"device-policy-1", base64.URLEncoding.EncodeToString(pub)}},
+	} {
+		if _, err := KeyringFrom(pins); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// a pin never overrides a compiled key of the same id
+	compiled := Keyring{"device-policy-1": pub}
+	if got := compiled.With(Keyring{"device-policy-1": ed25519.PublicKey(bytes.Repeat([]byte{1}, 32))}); !got["device-policy-1"].Equal(pub) {
+		t.Error("a pinned key replaced a compiled one")
 	}
 }

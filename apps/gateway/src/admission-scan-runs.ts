@@ -271,7 +271,10 @@ export async function recordSubjectRunEndTx(
   if (!["completed", "failed", "timeout"].includes(args.status)) return null;
   const subject = subjectOfRun(run);
   if (!subject) return null;
-  const out = await recordAdmissionEngineScanTx(tx, { subject, report: args.status === "completed" ? args.report : null, engineRunId: run.id });
+  // #843 security review: the verdict counts only when the driver names exactly the file the task start recorded
+  const engineId = run.engineId as keyof typeof ADMISSION_SCAN_INPUT_FILE;
+  const expectedInput = run.targetSubjectInputSha256 ? { path: ADMISSION_SCAN_INPUT_FILE[engineId], sha256: run.targetSubjectInputSha256 } : null;
+  const out = await recordAdmissionEngineScanTx(tx, { subject, report: args.status === "completed" ? args.report : null, engineRunId: run.id, expectedInput });
   return { scanId: out.id, verdict: out.verdict, state: out.state, current: out.current };
 }
 

@@ -25,7 +25,7 @@ import {
   type AgentCredentialAudienceCreate,
 } from "@regulait/shared";
 import { agentCredentialAudiences, agentCredentialAudienceScopes, agents, auditLog, connectors, desc, eq, inArray, isNull, mcpServers, sql, type Db } from "@regulait/db";
-import { agentCredentialIssuer } from "./agent-credential.js";
+import { AUDIENCE_TRANSITIONS, agentCredentialIssuer, audienceIssues, audienceState } from "./agent-credential.js";
 import { jwksDocument, publishedSigningKeys } from "./identity-signing-keys.js";
 import { requireStepUp } from "./step-up.js";
 
@@ -80,7 +80,8 @@ export function registerAgentCredentialRoutes(app: FastifyInstance, db: Db): voi
         algorithm: r.algorithm,
         binding: r.binding,
         maxTtlSeconds: r.maxTtlSeconds,
-        enabled: r.disabledAt === null,
+        state: audienceState(r),
+        enabled: audienceIssues(r),
         disabledAt: r.disabledAt?.toISOString() ?? null,
         createdAt: r.createdAt.toISOString(),
         scopes: scopes
@@ -143,6 +144,9 @@ export function registerAgentCredentialRoutes(app: FastifyInstance, db: Db): voi
     const p = audienceParam.safeParse(req.params);
     if (!p.success) return badRequest(reply, p.error);
     const out = await db.transaction(async (tx) => {
+      // the declared machine decides; the row is locked so a concurrent disable sees the moved state
+      const [cur] = await tx.select({ disabledAt: agentCredentialAudiences.disabledAt }).from(agentCredentialAudiences).where(eq(agentCredentialAudiences.id, p.data.audienceId)).for("update");
+      if (!cur || !AUDIENCE_TRANSITIONS[audienceState(cur)].includes("disabled")) return null;
       const [row] = await tx
         .update(agentCredentialAudiences)
         .set({ disabledAt: sql`now()` })

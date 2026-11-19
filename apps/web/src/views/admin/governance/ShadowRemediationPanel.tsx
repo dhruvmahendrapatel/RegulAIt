@@ -73,7 +73,7 @@ export function ShadowRemediationPanel(props: { findingId: string; onClose: () =
           Close plan
         </Button>
       </div>}
-      <QueryGate loading={plan.isLoading} error={plan.error} onRetry={() => void plan.refetch()}>
+      <QueryGate query={plan}>
         {plan.data ? <PlanBody key={plan.data.findingId} plan={plan.data} onLinked={props.onLinked} /> : null}
       </QueryGate>
     </section>

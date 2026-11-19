@@ -73,6 +73,7 @@ builds on its own.
 | `training-provider` | The pure training half of the in-house model work. |
 | `engine-runner` | Sidecar runner core for the evaluation engines; hands every run to the executor, never runs one itself. |
 | `engine-promptfoo`, `engine-modelscan`, `engine-garak` | Per-engine shims (adapter, config, mapper, worker). |
+| `engine-admission-scan` | The runner and task shim of both ADR-0242 admission-scan images (mcpscanner, skillscanner): subject runs on the task bridge, the driver's report posted as the raw report. |
 | `sandbox-executor` | The isolation executor: `runc` (L1 hardened container) and `gvisor` (L2 user-space kernel) backends, chosen by `REGULAIT_EXECUTOR_BACKEND`. |
 | `api-client` | The supported TypeScript client for the public API (generated from [openapi.json](../docs/api/openapi.json)). |
 
@@ -108,8 +109,8 @@ In hook order in `apps/gateway/src/app.ts`:
      MFA enrolment gate;
    - workload token: `DPoP` or certificate-bound access token, verified in `oauth/resource.ts`, accepted only on the
      workload routes (`/mcp/:serverId` and the model compat endpoints);
-   - bearer credential (`authenticate()`): bootstrap token, virtual key (never admin), engine credential, or hashed API
-     key (refused if its owner lacks MFA the org requires).
+   - bearer credential (`authenticate()`): bootstrap token (retired once an active admin exists, ADR-0167 S-02), virtual
+     key (never admin), engine credential, or hashed API key (refused if its owner lacks MFA the org requires).
 5. **Credential-tier rate limit**, the **virtual-key route allow-list**, **admin-only gating**, and the **audit actor
    context** for delegated callers.
 

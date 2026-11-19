@@ -40,6 +40,23 @@ import { identityIssuer, identitySecretsFor } from "./oauth/common.js";
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
 /** the issuer string: `<public URL>/agent-credentials`; null when the public URL is not configured */
+/**
+ * An audience's lifecycle, declared once (owner build rule 12). Derived from `disabled_at`, never stored:
+ * `enabled` can be disabled (free, audited: it only narrows); `disabled` is terminal, because re-enabling would widen
+ * issuance and is a new registration (with its step-up), not a toggle.
+ */
+export const AUDIENCE_STATES = ["enabled", "disabled"] as const;
+export type AudienceState = (typeof AUDIENCE_STATES)[number];
+export const AUDIENCE_TRANSITIONS: Readonly<Record<AudienceState, readonly AudienceState[]>> = Object.freeze({
+  enabled: ["disabled"],
+  disabled: [],
+});
+export function audienceState(r: { disabledAt: Date | null }): AudienceState {
+  return r.disabledAt ? "disabled" : "enabled";
+}
+/** only an enabled audience is issued to */
+export const audienceIssues = (r: { disabledAt: Date | null }) => audienceState(r) === "enabled";
+
 export function agentCredentialIssuer(env: NodeJS.ProcessEnv = process.env): string | null {
   const base = identityIssuer(env);
   return base ? `${base.replace(/\/+$/, "")}${AGENT_CREDENTIAL_ISSUER_PATH}` : null;
@@ -135,7 +152,7 @@ export async function mintAgentCredential(db: Db, input: MintAgentCredentialInpu
 
   const [audience] = await db.select().from(agentCredentialAudiences).where(eq(agentCredentialAudiences.id, input.audienceId));
   if (!audience) return refuse("audience_unknown", "no such registered audience");
-  if (audience.disabledAt) return refuse("audience_disabled", "this audience is disabled");
+  if (!audienceIssues(audience)) return refuse("audience_disabled", "this audience is disabled");
   if (audience.binding === "dpop" && !input.holderJkt) return refuse("dpop_required", "this audience requires a DPoP-bound credential");
 
   const now = await databaseNow(db);

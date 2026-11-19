@@ -180,8 +180,27 @@ The `regulait_*` claims are private names (RFC 7519 §4.3), held until a standar
 
 - `jose` signs and verifies, as it already does for every RegulAIt token.
 - `oidc-provider` already hosts `/oauth/token`; the new token type is a token-exchange handler there.
-- No library implements the Token Status List draft, so encoding the list is our own code: a zlib-compressed
-  bitstring, with `node:zlib`. The exception is written down here and re-checked when a maintained implementation exists.
+- **Status list (slice 2), corrected 2026-11-19:** `@sd-jwt/jwt-status-list` (Apache-2.0, OpenWallet Foundation
+  `sd-jwt-js`, 0.19.0, released 2026-07) implements the IETF Token Status List for JWTs, compression included. Slice 2
+  uses it, pinned and listed in `THIRD_PARTY.md`, instead of hand-encoding the bitstring. The earlier note that no
+  library existed was wrong.
+- **Approaches compared (owner build rule 9).** A GitHub search on 2026-11-19 covered "token status list",
+  "sd-jwt", "verifiable credentials" and "agent identity credential".
+  - *A W3C VC framework* (`decentralized-identity/veramo`, Apache-2.0, active): not adopted. It brings a DID and
+    key-management stack and the VC data model. Our credential is an RFC 9068 JWT access-token profile that verifiers
+    already parse, signed with the keys `/.well-known/jwks.json` already publishes.
+  - *SD-JWT VC* (`@sd-jwt/sd-jwt-vc`, same project): not adopted for the token. The holder has nothing optional to
+    disclose, since the scope is already projected to the audience, and SD-JWT parsing is not yet common in API
+    gateways.
+  - *Chosen:* `jose` for signing and verifying, and `@sd-jwt/jwt-status-list` for revocation. Both are maintained,
+    permissively licensed and work air-gapped.
+
+## Audience lifecycle (owner build rule 12)
+
+An audience is `enabled` or `disabled`, derived from `disabled_at` and declared once in `AUDIENCE_TRANSITIONS`
+(`apps/gateway/src/agent-credential.ts`). `disabled` is terminal: re-enabling would widen issuance, so it is a new
+registration with its own step-up. Minting and the disable route both read that table. The issued credential's
+lifecycle (issued → revoked) is declared with revocation in slice 2.
 
 ## Consequences
 

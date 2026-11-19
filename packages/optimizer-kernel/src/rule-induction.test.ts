@@ -6,7 +6,10 @@ import {
   extractStepFields,
   induceStepRule,
   normalizeStepOutput,
+  renderInducedRule,
   resolveRuleInductionOptions,
+  tallyShadow,
+  type InducedRule,
   type StepRun,
 } from "./index.js";
 
@@ -187,5 +190,52 @@ describe("extractStepFields / normalizeStepOutput", () => {
 
   it("keeps case and collapses whitespace", () => {
     expect(normalizeStepOutput("  On-Call \n now ")).toBe("On-Call now");
+  });
+});
+
+describe("renderInducedRule", () => {
+  it("prints one quoted line per cell and the AI fallback", () => {
+    const lines = renderInducedRule({ fields: ["owner", "severity"], cells: [{ key: [ABSENT, "high"], output: "on-call", support: 9 }] });
+    expect(lines).toEqual(['when owner = (absent) and severity = "high" -> "on-call" (9 runs)', "otherwise -> ask the AI (input not covered by this rule)"]);
+    expect(renderInducedRule({ fields: [], cells: [{ key: [], output: "ok", support: 300 }] })[0]).toBe('always -> "ok" (300 runs)');
+  });
+});
+
+describe("tallyShadow (ADR-0327 shadow mode)", () => {
+  const rule = { fields: ["severity"], cells: [{ key: ["high"], output: "on-call", support: 9 }] } as unknown as InducedRule;
+  it("counts covered runs and agreement after normalisation; inputs outside the table are not covered", () => {
+    const t = tallyShadow(rule, [
+      { fields: { severity: "high" }, output: "  on-call " },
+      { fields: { severity: "high" }, output: "backlog" },
+      { fields: { severity: "low" }, output: "backlog" },
+    ]);
+    expect(t).toEqual({ runs: 3, covered: 2, agreed: 1 });
+  });
+  it("is zero on no runs", () => {
+    expect(tallyShadow(rule, [])).toEqual({ runs: 0, covered: 0, agreed: 0 });
+  });
+});
+
+describe("tallyShadow agrees with applyInducedRule", () => {
+  it("gives the same coverage and agreement as applying the rule run by run", () => {
+    const rnd = lcg(11);
+    const values = ["a", "b", "c", "d"];
+    const rule = {
+      fields: ["x", "y"],
+      cells: values.flatMap((x, i) => values.map((y, j) => ({ key: [x, y], output: `o${(i + j) % 3}`, support: 5 }))).slice(0, 12),
+    } as unknown as InducedRule;
+    const runs: StepRun[] = Array.from({ length: 400 }, () => ({
+      fields: { x: values[Math.floor(rnd() * 4)]!, y: values[Math.floor(rnd() * 4)]! },
+      output: `o${Math.floor(rnd() * 3)}`,
+    }));
+    let covered = 0;
+    let agreed = 0;
+    for (const r of runs) {
+      const a = applyInducedRule(rule, r.fields);
+      if (!a.matched) continue;
+      covered += 1;
+      if (a.output === normalizeStepOutput(r.output)) agreed += 1;
+    }
+    expect(tallyShadow(rule, runs)).toEqual({ runs: 400, covered, agreed });
   });
 });

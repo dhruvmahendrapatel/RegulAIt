@@ -407,6 +407,28 @@ export function auditRowHash(prevHash: string, contentHash: string): string {
   return sha256Hex(`${prevHash}${contentHash}`);
 }
 
+/**
+ * Is one audit row self-consistent under the recorded v2 boundary? Its `seq` and three hashes are present, its stored
+ * version is the one the boundary requires (and a v1 row carries no actor fields), its `content_hash` recomputes from
+ * its content, and its `row_hash` recomputes from `prev_hash || content_hash`.
+ *
+ * This checks the row on its own. It does NOT check linkage (that `prev_hash` is the previous row's `row_hash`);
+ * only the full chain walk (`verifyAuditChain`) proves that. One place for the receipt sweep and the proof-evidence
+ * reader, so the two never disagree on what "an intact row" means.
+ */
+export function auditRowSelfConsistent<T extends Omit<ChainedAuditRow, "seq"> & { seq: number | null }>(
+  row: T,
+  v2FromSeq: number | null,
+): row is T & { seq: number; contentHash: string; prevHash: string; rowHash: string } {
+  if (row.seq === null || !row.contentHash || !row.rowHash || !row.prevHash) return false;
+  const seq = row.seq;
+  return (
+    auditRowVersionProblem({ ...row, seq }, v2FromSeq) === null &&
+    row.contentHash === auditContentHashFor(row, auditChainVersionAt(seq, v2FromSeq)) &&
+    row.rowHash === auditRowHash(row.prevHash, row.contentHash)
+  );
+}
+
 // --- the genesis row ---------------------------------------------------------
 //
 // ADR-0060 §2. Rows written before this migration CANNOT be retroactively
