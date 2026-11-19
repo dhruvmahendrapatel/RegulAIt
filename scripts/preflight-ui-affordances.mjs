@@ -47,10 +47,6 @@ export const DELIBERATELY_API_ONLY = new Map([
   // it becomes a real handler, and an entry for one is reported stale (see staleExemptions).
   ["/v1/mcp/authorised-targets/:x", "ADR-0246 (P27): API-only brief; the authorised-targets screen is posted on #453 (route census KNOWN_UI_GAPS). RAISED for the master's review on the PR: delete this entry when the screen lands"],
   // ADR-0230 A2 (P19, Lane L3): the UI is built by the design builder; delete this entry when the screen lands
-  // ADR-0350 (lane E31): each removal relaxes a device's policy and is a settings_relax step-up, audited
-  ["/v1/endpoint-device-groups/:x", "deleting an endpoint device group (settings_relax step-up). ADR-0350 (lane E31): master brief rule 3, API-only; the device-group screen is requested on #453 (route census KNOWN_UI_GAPS). Delete this entry when the screen lands"],
-  ["/v1/endpoint-device-groups/:x/members/:x", "removing a device from a device group (settings_relax step-up). ADR-0350 (lane E31): master brief rule 3, API-only; the device-group screen is requested on #453 (route census KNOWN_UI_GAPS). Delete this entry when the screen lands"],
-  ["/v1/endpoint-device-groups/:x/rules/:x", "removing a device group's narrowing rule (settings_relax step-up). ADR-0350 (lane E31): master brief rule 3, API-only; the device-group screen is requested on #453 (route census KNOWN_UI_GAPS). Delete this entry when the screen lands"],
   // ADR-0337 §6 (lane E18, owner decision 2026-11-17): API-only until the entitlement graph screen on #453; delete these
   // entries when the screen lands
   ["/v1/discovery/agent-identifiers/:x", "removing an agent's declared vendor identifier (audited): API-only until the entitlement graph screen on #453 (route census KNOWN_UI_GAPS)"],

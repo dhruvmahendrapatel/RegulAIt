@@ -39,9 +39,9 @@ describe("AI Governance suite sections (owner decision on #453, 2026-10-21)", ()
   it("puts Discovery between Overview and the AI Governance registers", () => {
     expect(suite.sections.map((sec) => sec.group)).toEqual(["Overview", "Discovery", "AI Governance"]);
   });
-  it("holds Shadow-AI discovery and Discovery sources, which the registers no longer repeat", () => {
+  it("holds Shadow-AI discovery, Discovery sources and Endpoint policy (ADR-0350), which the registers no longer repeat", () => {
     const discovery = suite.sections.find((sec) => sec.group === "Discovery")!;
-    expect(discovery.items.map((i) => i.to)).toEqual(["/admin/shadow-ai", "/admin/shadow-ai/discovery-sources"]);
+    expect(discovery.items.map((i) => i.to)).toEqual(["/admin/shadow-ai", "/admin/shadow-ai/discovery-sources", "/admin/endpoint-policy"]);
     const registers = suite.sections.find((sec) => sec.group === "AI Governance")!;
     expect(registers.items.some((i) => i.to.startsWith("/admin/shadow-ai"))).toBe(false);
   });

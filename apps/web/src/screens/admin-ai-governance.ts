@@ -2,6 +2,8 @@
 export { default as DecisionRegressionPage } from "../views/admin/governance/DecisionRegressionPage";
 export { default as DependencyGraphPage } from "../views/admin/governance/DependencyGraphPage";
 export { default as DiscoverySourcesPage } from "../views/admin/governance/DiscoverySourcesPage";
+// ADR-0350 (lane E31): Endpoint policy, beside the other Discovery screens
+export { default as EndpointPolicyPage } from "../views/admin/endpoint/EndpointPolicyPage";
 export { default as IntakeWizardPage } from "../views/admin/governance/IntakeWizardPage";
 export { default as LiteracyPage } from "../views/admin/governance/LiteracyPage";
 export { default as ModelRiskPage } from "../views/admin/governance/ModelRiskPage";

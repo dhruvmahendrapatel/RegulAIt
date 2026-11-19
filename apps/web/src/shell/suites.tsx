@@ -123,6 +123,8 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       { label: "Shadow-AI discovery", to: "/admin/shadow-ai" },
       // ADR-0195 SD0 — where RegulAIt may scan, read-only, for shadow AI; every source off until enabled
       { label: "Discovery sources", to: "/admin/shadow-ai/discovery-sources" },
+      // ADR-0350 (lane E31) — device groups that only narrow on-device rules, and time-limited command exceptions
+      { label: "Endpoint policy", to: "/admin/endpoint-policy" },
     ],
   },
   {

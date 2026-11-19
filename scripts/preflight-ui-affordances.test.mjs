@@ -99,13 +99,10 @@ describe("affordance census: a notBuilt route counts only when the file defines 
     // bundle routes left this list when the #453 bundle screen landed), the ADR-0230 A2 SAP business unmark until its
     // #453 screen, ADR-0312's spend-budget removal until its #453 screen, ADR-0322 (lane E7) vendor usage credential
     // revoke until the #453 vendor usage screen, the ADR-0337 §6 identifier removal and agent unlink until the
-    // entitlement graph screen on #453, ADR-0364 S2's robot secret clear until the robot detail screen on #453, and the
-    // three ADR-0350 (lane E31) device-group removals until the device-group screen on #453
+    // entitlement graph screen on #453, and ADR-0364 S2's robot secret clear until the robot detail screen on #453 (the three
+    // ADR-0350 (lane E31) device-group removals left with the Endpoint policy screen)
     expect([...DELIBERATELY_API_ONLY.keys()]).toEqual([
       "/v1/mcp/authorised-targets/:x",
-      "/v1/endpoint-device-groups/:x",
-      "/v1/endpoint-device-groups/:x/members/:x",
-      "/v1/endpoint-device-groups/:x/rules/:x",
       "/v1/discovery/agent-identifiers/:x",
       "/v1/discovery/entitlements/apps/:x/agent-link",
       "/v1/servers/:x/system-class",

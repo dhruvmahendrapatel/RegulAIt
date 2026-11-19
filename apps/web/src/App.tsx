@@ -98,6 +98,8 @@ const ReviewWorkbenchPage = screen(() => import("./screens/admin-approvals-audit
 const AuditLogPage = screen(() => import("./screens/admin-approvals-audit"), "AuditLogPage");
 const ShadowAiPage = screen(() => import("./screens/admin-ai-governance"), "ShadowAiPage");
 const DiscoverySourcesArea = screen(() => import("./screens/admin-ai-governance"), "DiscoverySourcesArea");
+// ADR-0350 (lane E31): device groups and command exceptions, in the Discovery screens' chunk
+const EndpointPolicyPage = screen(() => import("./screens/admin-ai-governance"), "EndpointPolicyPage");
 const CopilotPage = screen(() => import("./screens/admin-overview"), "CopilotPage");
 const ChatOpsArea = screen(() => import("./screens/admin-approvals-audit"), "ChatOpsArea");
 const LineagePage = screen(() => import("./screens/admin-approvals-audit"), "LineagePage");
@@ -331,6 +333,8 @@ function ApplicationRoutes() {
                 {/* ADR-0195 SD0 */}
                 {/* P3 (#453): one lazy chunk owns the overview and its full lists (see DiscoveryListPages) */}
                 <Route path="shadow-ai/discovery-sources/*" element={<DiscoverySourcesArea />} />
+                {/* ADR-0350 (lane E31) */}
+                <Route path="endpoint-policy" element={<EndpointPolicyPage />} />
                 {/* ADR-0056 */}
                 <Route path="copilot" element={<CopilotPage />} />
                 {/* ADR-0061 */}
