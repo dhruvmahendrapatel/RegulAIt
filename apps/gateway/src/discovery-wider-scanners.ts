@@ -332,22 +332,24 @@ export function entraWriteScope(accessToken: string): { scope: "read_only" | "wr
   return { scope: roles.every((r) => /\.Read(?:Basic)?\.All$/.test(r)) ? "read_only" : "write", roles };
 }
 
+interface EntraApp {
+  appId: string;
+  displayName: string | null;
+  host: string | null;
+}
+
 /**
- * An access token for Microsoft Graph from the source's Entra credential (federated or a client secret), registered as
- * a secret before it is used. A token whose app holds more than read permissions is refused before anything is read
- * (ADR-0195 decision 7): the caller returns `refused` as its result. Shared by `idp_entra` and ADR-0337's
- * `entitlement_m365`.
+ * A Microsoft Graph access token for an Entra-reading source (`idp_entra`, ADR-0314 `agent_registry_entra`, ADR-0337 `entitlement_m365`): the
+ * credential must name the source's tenant; static mode uses its client secret, federated mode the source's
+ * federation token. The token is registered for scrubbing before it is returned, with the write scope it carries.
  */
-export async function entraGraphToken(
-  ctx: ScanContext,
-  kind: string,
-): Promise<{ accessToken: string; write: ReturnType<typeof entraWriteScope> } | { refused: ScanResult }> {
+export async function entraGraphToken(ctx: ScanContext, kind: string): Promise<{ accessToken: string; write: ReturnType<typeof entraWriteScope> }> {
   const c = ctx.credential;
   if (!c) throw new WiderSourceConfigError(`${kind}: a credential is required`);
   const tenantId = c.publicConfig.tenantId;
   const clientId = c.publicConfig.clientId;
   if (!tenantId || !clientId) throw new WiderSourceConfigError(`${kind}: the credential names tenantId and clientId`);
-  if (tenantId.toLowerCase() !== ctx.source.target.tenantId!.toLowerCase()) throw new WiderSourceConfigError(`${kind}: the credential's tenant is not the source's tenant`);
+  if (tenantId.toLowerCase() !== (ctx.source.target.tenantId ?? "").toLowerCase()) throw new WiderSourceConfigError(`${kind}: the credential's tenant is not the source's tenant`);
   let credential;
   if (c.mode === "static") {
     if (!c.secret) throw new WiderSourceConfigError(`${kind}: the static credential has no client secret`);
@@ -376,26 +378,17 @@ export async function entraGraphToken(
     throw new WiderSourceConfigError(`${kind}: the Entra token request failed${code ? ` (${code})` : ""}`);
   }
   onSecret(accessToken);
-  const write = entraWriteScope(accessToken);
-  if (write.scope === "write") {
-    // decision 7: a credential that may write is refused before anything is read
-    return { refused: { observations: [], credentialWriteScope: "write", readOutcomes: [{ read: "credential write scope", status: "denied", detail: `the app holds more than read permissions: ${write.roles.join(", ").slice(0, 300)}` }] } };
-  }
-  return { accessToken, write };
-}
-
-interface EntraApp {
-  appId: string;
-  displayName: string | null;
-  host: string | null;
+  return { accessToken, write: entraWriteScope(accessToken) };
 }
 
 async function runEntra(ctx: ScanContext): Promise<ScanResult> {
   const problem = entraTargetProblem(ctx.source.target, ctx.source.scope);
   if (problem) throw new WiderSourceConfigError(`idp_entra: ${problem}`);
-  const token = await entraGraphToken(ctx, "idp_entra");
-  if ("refused" in token) return token.refused;
-  const { accessToken, write } = token;
+  const { accessToken, write } = await entraGraphToken(ctx, "idp_entra");
+  if (write.scope === "write") {
+    // decision 7: a credential that may write is refused before anything is read
+    return { observations: [], credentialWriteScope: "write", readOutcomes: [{ read: "credential write scope", status: "denied", detail: `the app holds more than read permissions: ${write.roles.join(", ").slice(0, 300)}` }] };
+  }
   const fetchImpl = scannerFetch(ctx);
   const headers = { authorization: `Bearer ${accessToken}` };
   const outcomes: DiscoveryReadOutcome[] = [];

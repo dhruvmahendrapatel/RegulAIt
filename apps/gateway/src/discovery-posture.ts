@@ -48,7 +48,7 @@ export async function loadDiscoverySettings(db: Db): Promise<DiscoverySettingsVi
   return {
     credentialWarningAgeDays: row.credentialWarningAgeDays,
     endpointRetentionDays: row.endpointRetentionDays,
-    families: { saas: row.saasSourcesEnabled, identity: row.identitySourcesEnabled, ml_platform: row.mlPlatformSourcesEnabled },
+    families: { saas: row.saasSourcesEnabled, identity: row.identitySourcesEnabled, ml_platform: row.mlPlatformSourcesEnabled, agent_registry: row.agentRegistrySourcesEnabled },
     endpointMcpConfig: row.endpointMcpConfigEnabled,
     googleDirectoryTokens: row.googleDirectoryTokensEnabled,
     version: row.version,

@@ -80,7 +80,7 @@ const FEDERATION_UNAVAILABLE =
   "federated cloud credentials need RegulAIt's federation issuer, which this run was not given (ADR-0195 SD2b): an admin turns federation on under Discovery sources, Cloud federation";
 
 /** the source's token supplier: the test seam, else the worker's federation hook */
-function sourceToken(ctx: ScanContext, opts: CloudScannerOptions): OidcTokenSupplier {
+export function sourceToken(ctx: ScanContext, opts: CloudScannerOptions): OidcTokenSupplier {
   const t = opts.oidcToken ?? ctx.federation?.sourceToken;
   if (!t) throw new CloudSourceConfigError(FEDERATION_UNAVAILABLE);
   return t;
@@ -93,6 +93,8 @@ function sourceToken(ctx: ScanContext, opts: CloudScannerOptions): OidcTokenSupp
 export function federationAudiences(kind: DiscoverySourceKind, publicConfig: Readonly<Record<string, string>>): string[] {
   switch (kind) {
     case "cloud_aws":
+    // ADR-0314: AgentCore runtimes through the same STS web-identity exchange
+    case "agent_registry_agentcore":
       return [FEDERATION_AUDIENCES.aws];
     case "cloud_azure":
     // ADR-0195 A5: Azure DevOps through Entra workload identity federation
@@ -101,8 +103,12 @@ export function federationAudiences(kind: DiscoverySourceKind, publicConfig: Rea
     case "idp_entra":
     // ADR-0337: Microsoft 365 entitlements through the same Entra workload identity federation
     case "entitlement_m365":
+    // ADR-0314: Entra Agent ID and Agent 365 through the same Entra workload identity federation
+    case "agent_registry_entra":
       return [FEDERATION_AUDIENCES.azure];
-    case "cloud_gcp": {
+    case "cloud_gcp":
+    // ADR-0314: Gemini Enterprise through the same workload identity pool provider
+    case "agent_registry_gemini": {
       const { projectNumber, workloadIdentityPool, workloadIdentityProvider } = publicConfig;
       if (!projectNumber || !workloadIdentityPool || !workloadIdentityProvider) return [];
       return [`https:${gcpWifAudience(projectNumber, workloadIdentityPool, workloadIdentityProvider)}`];
@@ -185,7 +191,7 @@ export async function digestBounded(res: Response, recordRaw: (chunk: string | U
   }
 }
 
-function awsCredential(ctx: ScanContext, opts: CloudScannerOptions): AwsCredentialInput {
+export function awsCredential(ctx: ScanContext, opts: CloudScannerOptions): AwsCredentialInput {
   const c = ctx.credential!;
   if (c.mode === "static") {
     const s = parseJsonSecret(c.secret, "cloud_aws");
@@ -210,7 +216,7 @@ function awsTrust(ctx: ScanContext): "oidc" | "principal" {
   throw new CloudSourceConfigError("cloud_aws: target 'federation' must be 'oidc' or 'principal'");
 }
 
-function gcpCredential(ctx: ScanContext, opts: CloudScannerOptions): GcpCredentialInput {
+export function gcpCredential(ctx: ScanContext, opts: CloudScannerOptions): GcpCredentialInput {
   const c = ctx.credential!;
   if (c.mode === "static") {
     if (!c.secret) throw new CloudSourceConfigError("cloud_gcp: the static credential has no secret");

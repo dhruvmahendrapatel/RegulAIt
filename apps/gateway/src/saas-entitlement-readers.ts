@@ -130,7 +130,10 @@ async function runM365Entitlements(ctx: ScanContext): Promise<ScanResult> {
   const problem = m365TargetProblem(ctx.source.target, ctx.source.scope);
   if (problem) throw new WiderSourceConfigError(`entitlement_m365: ${problem}`);
   const token = await entraGraphToken(ctx, "entitlement_m365");
-  if ("refused" in token) return token.refused;
+  if (token.write.scope === "write") {
+    // ADR-0195 decision 7: a credential that may write is refused before anything is read
+    return { observations: [], credentialWriteScope: "write", readOutcomes: [{ read: "credential write scope", status: "denied", detail: `the app holds more than read permissions: ${token.write.roles.join(", ").slice(0, 300)}` }] };
+  }
   const fetchImpl = scannerFetch(ctx);
   const headers = { authorization: `Bearer ${token.accessToken}` };
   const outcomes: DiscoveryReadOutcome[] = [];

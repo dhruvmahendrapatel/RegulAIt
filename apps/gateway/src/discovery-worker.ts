@@ -103,6 +103,7 @@ import type { SchedulerJobDefinition } from "./scheduler.js";
 import { errMessage } from "./err-serializer.js";
 import { runEndpointMcpRetention } from "./endpoint-mcp-config.js";
 import { persistEntitlementBatch } from "./saas-entitlements.js";
+import { RegistryRecordRefused, checkRegistryAgents, stageRegistryRecords } from "./agent-registry-records.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -767,11 +768,14 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
   const nowIso = new Date((await db.execute<{ now: string }>(sql`SELECT now()::text AS now`)).rows[0]!.now).toISOString();
   let observations: Observation[];
   let readOutcomes: DiscoveryReadOutcome[];
+  let registry: ReturnType<typeof checkRegistryAgents>;
   try {
     observations = checkObservations(source.kind, result.observations ?? [], nowIso, classifyCatalogue);
     readOutcomes = checkReadOutcomes(result.readOutcomes, secrets);
+    // ADR-0314: a registry source's agents are shape-checked like observations; a refused record refuses the run
+    registry = checkRegistryAgents(source.kind, result.registryAgents, result.registriesComplete);
   } catch (err) {
-    if (err instanceof ObservationRefused) return fail("observation_refused", err.message);
+    if (err instanceof ObservationRefused || err instanceof RegistryRecordRefused) return fail("observation_refused", err.message);
     throw err;
   }
   // ADR-0337: an entitlement reader's graph is checked here and stored with the run's completion, in its transaction
@@ -791,15 +795,33 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
   // ADR-0363 slice 1: an Entra scan that read the tenant's complete Purview label list commits it with the run
   const labelTenant = source.kind === "idp_entra" ? normaliseGuid(cred?.publicConfig.tenantId) : null;
   const labels = result.labelDefinitions;
-  // ADR-0337: an entitlement batch commits with the run too; both hooks run in the run's own fenced transaction
-  const batch = entitlements;
-  const inCommit =
-    (labels && labelTenant) || batch
-      ? async (t: Db) => {
-          if (labels && labelTenant) await upsertLabelDefinitions(t, { tenantId: labelTenant, sourceId: source.id, definitions: labels });
-          if (batch) await persistEntitlementBatch(t, { runId: run.id, sourceId: source.id, sourceName: source.name }, batch);
-        }
-      : undefined;
+  // every write that must commit with the run, fenced on its lease: the labels (ADR-0363), the staged registry agents (ADR-0314) and the entitlement graph (ADR-0337)
+  const writes: Array<(t: Db) => Promise<void>> = [];
+  if (labels && labelTenant) {
+    writes.push(async (t) => {
+      await upsertLabelDefinitions(t, { tenantId: labelTenant, sourceId: source.id, definitions: labels });
+    });
+  }
+  if (registry.records.length || registry.complete.length) {
+    writes.push(async (t) => {
+      const staged = await stageRegistryRecords(t, source.id, run.id, registry.records, registry.complete);
+      await audit(t, "discovery_run", run.id, "agent-registry-records-staged", "allow",
+        `discovery run of '${source.name}' staged ${staged.staged} registry agent(s) for import; ${staged.absent} no longer listed`,
+        { sourceId: source.id, kind: source.kind, staged: staged.staged, absent: staged.absent, completeRegistries: registry.complete });
+    });
+  }
+  // ADR-0337: an entitlement batch (only an `entitlement_*` kind returns one)
+  if (entitlements) {
+    const batch = entitlements;
+    writes.push(async (t) => {
+      await persistEntitlementBatch(t, { runId: run.id, sourceId: source.id, sourceName: source.name }, batch);
+    });
+  }
+  const inCommit = writes.length
+    ? async (t: Db) => {
+        for (const w of writes) await w(t);
+      }
+    : undefined;
   return applyDiscoveryRunObservations(db, run, owner, source, observations, digest, classifyCatalogue, readOutcomes, inCommit);
 }
 

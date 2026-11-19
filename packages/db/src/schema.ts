@@ -140,6 +140,7 @@ import {
   DISCOVERY_RUN_STATUSES,
   DISCOVERY_RUN_TRIGGERS,
   DISCOVERY_SOURCE_KINDS,
+  AGENT_REGISTRIES,
   DISCOVERY_EVIDENCE_KINDS,
   // ADR-0261 (P37): third-party security telemetry ingest
   THIRD_PARTY_EVIDENCE_KINDS,
@@ -8195,7 +8196,7 @@ export const discoverySources = pgTable(
   (t) => [
     check(
       "discovery_sources_kind_check",
-      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow', 'entitlement_m365', 'entitlement_google_workspace', 'entitlement_salesforce', 'entitlement_slack')`,
+      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow', 'entitlement_m365', 'entitlement_google_workspace', 'entitlement_salesforce', 'entitlement_slack', 'agent_registry_entra', 'agent_registry_gemini', 'agent_registry_agentcore')`,
     ),
     check("discovery_sources_name_check", sql`char_length(${t.name}) BETWEEN 1 AND 120`),
     check("discovery_sources_target_check", sql`jsonb_typeof(${t.target}) = 'object'`),
@@ -8280,7 +8281,7 @@ export const discoveryRuns = pgTable(
     check("discovery_runs_status_check", sql`${t.status} IN ('queued', 'running', 'succeeded', 'failed')`),
     check(
       "discovery_runs_kind_check",
-      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow', 'entitlement_m365', 'entitlement_google_workspace', 'entitlement_salesforce', 'entitlement_slack')`,
+      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow', 'entitlement_m365', 'entitlement_google_workspace', 'entitlement_salesforce', 'entitlement_slack', 'agent_registry_entra', 'agent_registry_gemini', 'agent_registry_agentcore')`,
     ),
     check("discovery_runs_attempt_check", sql`${t.attempt} BETWEEN 0 AND 3`),
     check("discovery_runs_gaps_check", sql`jsonb_typeof(${t.catalogueGaps}) = 'array' AND jsonb_array_length(${t.catalogueGaps}) <= 50`),
@@ -8315,6 +8316,8 @@ export const discoverySettings = pgTable(
     saasSourcesEnabled: boolean("saas_sources_enabled").notNull().default(false),
     identitySourcesEnabled: boolean("identity_sources_enabled").notNull().default(false),
     mlPlatformSourcesEnabled: boolean("ml_platform_sources_enabled").notNull().default(false),
+    /** ADR-0314 (G6): the vendor agent registry family switch, off by default like the ADR-0235 families */
+    agentRegistrySourcesEnabled: boolean("agent_registry_sources_enabled").notNull().default(false),
     // ADR-0259: endpoint MCP client-config discovery through the SD4 agent, off (pending migration endpoint_mcp_config_discovery, ADR-0252)
     endpointMcpConfigEnabled: boolean("endpoint_mcp_config_enabled").notNull().default(false),
     /** ADR-0337 §4: whether a Google Workspace entitlement source may use the Directory token listing (off by default;
@@ -16910,6 +16913,58 @@ export const userSpendBudgets = pgTable(
 );
 export type UserSpendBudgetRow = typeof userSpendBudgets.$inferSelect;
 // ===== end ADR-0312 =================================================================================================
+
+/*
+ * ADR-0314 (G6; migration agent_registry_records) — agents read from a vendor agent registry (Microsoft Entra Agent
+ * ID and Agent 365, Google Gemini Enterprise, AWS Bedrock AgentCore) by an `agent_registry_*` discovery source,
+ * staged here until an admin imports one into `agents`. Written only by the discovery worker (upsert per source,
+ * registry and vendor id, in the run's fenced commit) and by the admin-only, step-up-gated import route.
+ *
+ * Provenance: every row names its source and the run that last saw it; an imported agent's provenance is the row
+ * whose `agent_id` points at it (unique, so one agent has one registry origin). Import creates the agent with
+ * `enabled = false`, lifecycle `proposed` and no grant of any kind: default-deny until an admin grants it.
+ *
+ * 3NF exception, deliberate: `vendor_attributes` is a bounded, verbatim subset of the vendor's own record (its status
+ * string, platform, version, region, owner pseudonyms), kept as evidence of what the registry said. Nothing joins on
+ * it and RegulAIt never writes it from anything but the vendor's response. People in it are pseudonyms only.
+ */
+export const agentRegistryRecords = pgTable(
+  "agent_registry_records",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => discoverySources.id, { onDelete: "cascade" }),
+    registry: text("registry", { enum: AGENT_REGISTRIES }).notNull(),
+    /** the vendor's own id for the agent (an object id, a resource name, an ARN) */
+    externalId: text("external_id").notNull(),
+    displayName: text("display_name").notNull(),
+    description: text("description"),
+    vendorAttributes: jsonb("vendor_attributes").$type<Record<string, string | string[] | boolean | null>>().notNull().default(sql`'{}'::jsonb`),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    /** set when a complete read of the registry no longer lists it; cleared when it is listed again */
+    absentSince: timestamp("absent_since", { withTimezone: true }),
+    lastRunId: uuid("last_run_id").references(() => discoveryRuns.id, { onDelete: "set null" }),
+    /** the agent it was imported as; null until imported. ON DELETE SET NULL: deleting the agent re-opens the record */
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    importedAt: timestamp("imported_at", { withTimezone: true }),
+    importedByUserId: uuid("imported_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    uniqueIndex("agent_registry_records_vendor_uq").on(t.sourceId, t.registry, t.externalId),
+    uniqueIndex("agent_registry_records_agent_uq").on(t.agentId),
+    index("agent_registry_records_open_idx").on(t.lastSeenAt).where(sql`${t.agentId} IS NULL`),
+    check("agent_registry_records_registry_check", sql`${t.registry} IN ('entra_agent_id', 'agent_365', 'gemini_enterprise', 'bedrock_agentcore')`),
+    check("agent_registry_records_external_id_check", sql`char_length(${t.externalId}) BETWEEN 1 AND 2048`),
+    check("agent_registry_records_display_name_check", sql`char_length(${t.displayName}) BETWEEN 1 AND 256`),
+    check("agent_registry_records_description_check", sql`${t.description} IS NULL OR char_length(${t.description}) <= 1000`),
+    check("agent_registry_records_attributes_check", sql`jsonb_typeof(${t.vendorAttributes}) = 'object' AND pg_column_size(${t.vendorAttributes}) <= 8192`),
+    // an imported record says when; a record whose agent was deleted keeps that time (agent_id is set null) and may be imported again
+    check("agent_registry_records_imported_check", sql`${t.agentId} IS NULL OR ${t.importedAt} IS NOT NULL`),
+  ],
+);
+
 
 // ---------------------------------------------------------------------------
 // ADR-0289 (builder lane L6) — the PM project / work-item importer (ADR-0054 §3).

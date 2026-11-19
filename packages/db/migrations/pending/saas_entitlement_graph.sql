@@ -28,7 +28,8 @@ ALTER TABLE "discovery_sources" ADD CONSTRAINT "discovery_sources_kind_check" CH
   'cloud_aws', 'cloud_gcp', 'cloud_azure',
   'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent',
   'saas_inventory_api', 'idp_entra', 'ml_mlflow',
-  'entitlement_m365', 'entitlement_google_workspace', 'entitlement_salesforce', 'entitlement_slack'));
+  'entitlement_m365', 'entitlement_google_workspace', 'entitlement_salesforce', 'entitlement_slack',
+  'agent_registry_entra', 'agent_registry_gemini', 'agent_registry_agentcore'));
 --> statement-breakpoint
 ALTER TABLE "discovery_runs" DROP CONSTRAINT IF EXISTS "discovery_runs_kind_check";
 --> statement-breakpoint
@@ -37,7 +38,8 @@ ALTER TABLE "discovery_runs" ADD CONSTRAINT "discovery_runs_kind_check" CHECK ("
   'cloud_aws', 'cloud_gcp', 'cloud_azure',
   'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent',
   'saas_inventory_api', 'idp_entra', 'ml_mlflow',
-  'entitlement_m365', 'entitlement_google_workspace', 'entitlement_salesforce', 'entitlement_slack'));
+  'entitlement_m365', 'entitlement_google_workspace', 'entitlement_salesforce', 'entitlement_slack',
+  'agent_registry_entra', 'agent_registry_gemini', 'agent_registry_agentcore'));
 --> statement-breakpoint
 ALTER TABLE "discovery_settings" ADD COLUMN IF NOT EXISTS "google_directory_tokens_enabled" boolean DEFAULT false NOT NULL;
 --> statement-breakpoint
