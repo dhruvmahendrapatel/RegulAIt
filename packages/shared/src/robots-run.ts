@@ -6,6 +6,9 @@
  *                                                          gateway-only task bridge (the sandbox has no other route
  *                                                          to the gateway). Secret values are in this answer once:
  *                                                          the plan is claimed on first read and never served again.
+ *   (each request is an ADR-0190 `http` stdout frame of the gateway-held stdio session; the gateway answers it with
+ *   `http_res` / `http_err`. No runner credential exists: the session itself, behind the executor's MACed window, is
+ *   the authority, and the frames never carry the run key.)
  *   heartbeat POST /v1/robot-runner/runs/:runId/heartbeat  between steps; answers {cancel} (the ADR-0187 pattern),
  *                                                          so `halted` cancels an in-flight run at the next step.
  *   evidence  POST /v1/robot-runner/runs/:runId/evidence   one redacted screenshot or download per call, bounded.
@@ -15,6 +18,7 @@
  * Egress (§7): the sandbox's only peer is its own Smokescreen. `smokescreenAcl` generates that run's ACL from the
  * version's allowed origins: one enforce rule, nothing else allowed, no `open`/`report` action.
  */
+import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:crypto";
 import { z } from "zod";
 import { ROBOT_LIMITS } from "./robots.js";
 
@@ -62,9 +66,14 @@ export const robotRunPlanSchema = z
     kind: z.enum(["test", "agent"]),
     allowedOrigins: z.array(httpsOrigin).min(1).max(ROBOT_LIMITS.allowedSites),
     steps: z.array(robotPlanStepSchema).min(1).max(ROBOT_LIMITS.steps),
-    /** secret values for this run only, each bound to one origin (§6); held in memory, never logged */
+    /**
+     * secret values for this run only, each bound to one origin (§6), SEALED under the run key (`sealRobotSecret`).
+     * The plan travels as stdin frames the gateway's relay keeps in a table (migration 0204), so a value is never in
+     * a frame in the clear: the key reaches the sandbox only through the task-scoped release on fd 3, and never
+     * appears in any frame either way. The runner opens each value in memory and never logs it.
+     */
     secrets: z
-      .array(z.object({ ref: fieldName, origin: httpsOrigin, value: z.string().min(1).max(8192) }).strict())
+      .array(z.object({ ref: fieldName, origin: httpsOrigin, sealed: z.string().regex(/^[A-Za-z0-9_-]{40,16384}$/) }).strict())
       .max(ROBOT_LIMITS.secretBindings),
     limits: z
       .object({
@@ -201,4 +210,36 @@ export function compileRobotPlanSteps(
         return s.text === undefined ? { op: "check", selector: s.selector } : { op: "check", selector: s.selector, text: s.text };
     }
   });
+}
+
+// ---------------------------------------------------------------------------
+// the run key and the sealed secret values
+// ---------------------------------------------------------------------------
+
+/** a fresh run key: 32 random bytes, base64url (matches the task-scoped release format, ENGINE_TASK_SECRET_RE) */
+export function newRobotRunKey(): string {
+  return randomBytes(32).toString("base64url");
+}
+
+function sealKey(runKey: string): Buffer {
+  return Buffer.from(hkdfSync("sha256", Buffer.from(runKey, "utf8"), Buffer.alloc(0), "regulait robot secret v1", 32));
+}
+
+/** AES-256-GCM under a key derived from the run key; the run id and the secret's ref are the associated data */
+export function sealRobotSecret(runKey: string, runId: string, ref: string, value: string): string {
+  const iv = randomBytes(12);
+  const c = createCipheriv("aes-256-gcm", sealKey(runKey), iv);
+  c.setAAD(Buffer.from(`${runId}\n${ref}`, "utf8"));
+  const ct = Buffer.concat([c.update(value, "utf8"), c.final()]);
+  return Buffer.concat([iv, c.getAuthTag(), ct]).toString("base64url");
+}
+
+/** the inverse; throws on a wrong key, a moved value (another run or ref), or tampering */
+export function openRobotSecret(runKey: string, runId: string, ref: string, sealed: string): string {
+  const buf = Buffer.from(sealed, "base64url");
+  if (buf.length < 29) throw new Error("sealed value too short");
+  const d = createDecipheriv("aes-256-gcm", sealKey(runKey), buf.subarray(0, 12));
+  d.setAAD(Buffer.from(`${runId}\n${ref}`, "utf8"));
+  d.setAuthTag(buf.subarray(12, 28));
+  return Buffer.concat([d.update(buf.subarray(28)), d.final()]).toString("utf8");
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compileRobotPlanSteps, originAllowed, robotEgressTargets, robotRunPlanSchema, robotRunResultSchema, smokescreenAcl } from "./robots-run.js";
+import { compileRobotPlanSteps, newRobotRunKey, openRobotSecret, sealRobotSecret, originAllowed, robotEgressTargets, robotRunPlanSchema, robotRunResultSchema, smokescreenAcl } from "./robots-run.js";
 
 describe("ADR-0364 S3 robot run contract", () => {
   it("builds an enforce-only Smokescreen ACL from the allowed hosts", () => {
@@ -55,5 +55,16 @@ describe("ADR-0364 S3 robot run contract", () => {
     expect(robotRunPlanSchema.safeParse({ ...plan, limits: { ...plan.limits, wallClockMs: 3_600_000 } }).success).toBe(false);
     expect(robotRunResultSchema.safeParse({ status: "succeeded", stepsCompleted: 1, outputs: {} }).success).toBe(true);
     expect(robotRunResultSchema.safeParse({ status: "failed", stepsCompleted: 0, outputs: {} }).success).toBe(false);
+  });
+
+  it("seals secret values to one run and one ref", () => {
+    const key = newRobotRunKey();
+    expect(key).toMatch(/^[\x21-\x7e]{1,1024}$/);
+    const sealed = sealRobotSecret(key, "run-1", "PASSWORD", "hunter2-canary");
+    expect(sealed).not.toContain("hunter2");
+    expect(openRobotSecret(key, "run-1", "PASSWORD", sealed)).toBe("hunter2-canary");
+    expect(() => openRobotSecret(key, "run-2", "PASSWORD", sealed)).toThrow();
+    expect(() => openRobotSecret(key, "run-1", "OTHER", sealed)).toThrow();
+    expect(() => openRobotSecret(newRobotRunKey(), "run-1", "PASSWORD", sealed)).toThrow();
   });
 });
