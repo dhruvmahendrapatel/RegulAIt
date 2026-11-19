@@ -238,8 +238,11 @@ ALTER TABLE "mcp_servers" ADD CONSTRAINT "mcp_servers_first_party_url_check"
 --> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "mcp_servers_first_party_url_uq" ON "mcp_servers" ("url") WHERE "transport" = 'first_party';
 --> statement-breakpoint
-INSERT INTO "mcp_servers" ("name", "url", "transport")
-  SELECT 'RegulAIt Robots', 'regulait:robots', 'first_party'
+-- The one first-party row. Its code ships inside the gateway release the operator installed, so the ADR-0175
+-- release-age cooldown (which holds a NEWLY SEEN third-party release) starts at the epoch rather than at this
+-- migration; every tool it serves is a robot version that passed its own review (ADR-0364 §3).
+INSERT INTO "mcp_servers" ("name", "url", "transport", "release_seen_at")
+  SELECT 'RegulAIt Robots', 'regulait:robots', 'first_party', timestamptz 'epoch'
   WHERE NOT EXISTS (SELECT 1 FROM "mcp_servers" WHERE "url" = 'regulait:robots');
 --> statement-breakpoint
 ALTER TABLE "robots" ENABLE ROW LEVEL SECURITY;

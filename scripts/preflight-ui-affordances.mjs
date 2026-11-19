@@ -51,6 +51,8 @@ export const DELIBERATELY_API_ONLY = new Map([
   // ADR-0312 (lane E2, pilot addendum): removing a person's spend budget (a step-up relaxation) is API-only until the
   // spend-budget screen on #453 lands (route census KNOWN_UI_GAPS holds the same route); delete this entry then.
   ["/v1/users/:x/spend-budget", "removing a person's spend budget (settings_relax step-up, audited): API-only until the spend-budget screen on #453 (ADR-0312 pilot addendum)"],
+  // ADR-0364 S2 (lane E45): the Robots screens are the design builder's (#453); delete this entry when the robot detail screen lands
+  ["/v1/robots/:x/secrets/:x/:x", "clearing a robot secret no submitted version is bound to (audited): API-only until the robot detail screen on #453 (route census KNOWN_UI_GAPS holds the same route)"],
 ]);
 
 /**

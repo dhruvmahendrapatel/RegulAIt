@@ -40,6 +40,9 @@ compares the status in JavaScript, then writes `WHERE id = $1`; a concurrent wri
 | Machine | Declared in | Guarded writers | Notes |
 |---|---|---|---|
 | Rule-step suggestion (`rule_step_suggestions.status`, ADR-0327) | `RULE_STEP_SUGGESTION_MACHINE`, `packages/shared/src/state-machines.ts` | `transitionSuggestion` in `apps/gateway/src/rule-steps.ts` (`whereFrom`, returned row) | suggested ⇄ shadow; suggested → dismissed (final). The list answer carries `lifecycle`; shadow start is shown blocked while detection is off. Converted from a hand-written table in review of #903 (E12). |
+| Robot version (`robot_versions.status`, ADR-0364) | `ROBOT_VERSION_MACHINE`, `packages/shared/src/state-machines.ts` | `apps/gateway/src/robots.ts` routes and `applyRobotVersionDecision` (`whereFrom`, returned row); content frozen by trigger once not draft | draft → in_review (submit, needs a passing test run on the digest) → approved / rejected (the queue); approved → retired; draft → rejected (`discard`, robot retired). Rejected and retired are final. Responses carry `lifecycle`. |
+| Robot (`robots.status`, ADR-0364) | `ROBOT_MACHINE` | `POST /v1/robots/:id/retire` (`whereFrom`) | active → retired (final), retiring every version in the same transaction. The list's status is computed by `robotListStatus`. |
+| Robot run (`robot_runs.status`, ADR-0364) | `ROBOT_RUN_MACHINE` | the S3 runner (none in S2) | queued → running → succeeded / failed / timed_out / cancelled; queued → refused. |
 
 ## 3. Machines to convert, ranked by F×S
 
