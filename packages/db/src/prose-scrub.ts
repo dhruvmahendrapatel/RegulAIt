@@ -125,6 +125,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.approvalDelegations, ["reason"]],
   [s.agentRevocations, ["reason"]],
   [s.connectorRevocations, ["reason"]],
+  // ADR-0327 addendum — why the author proposed a decision-table version
+  [s.decisionTableVersions, ["reason"]],
   // ADR-0207 — why an admin disabled a connector (the server twin is on the mcp_servers entry above)
   [s.connectors, ["disabledReason"]],
   // ADR-0124 — the emergency-stop reasons. Operator free prose typed under

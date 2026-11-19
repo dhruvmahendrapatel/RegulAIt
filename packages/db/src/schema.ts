@@ -2034,6 +2034,9 @@ export const auditLog = pgTable(
         "browser_governance",
         // ADR-0310 (G2): a signed managed-settings bundle export (objectId = the bundle). Plain text column — no DDL.
         "managed_settings_bundle",
+        // ADR-0327 addendum: a decision table (objectId = the table): created, a version proposed for review, and the
+        // reviewer's decision (published, rejected, or approved but stale). Plain text column — no DDL.
+        "decision_table",
         // ADR-0333 (E15): a detection incident (objectId = the incident) and a detection rule pack change (objectId
         // null). Plain text column — no DDL.
         "detection_incident",
@@ -17938,6 +17941,84 @@ export const workflowTemplateVersions = pgTable(
 );
 export type WorkflowTemplateVersionRow = typeof workflowTemplateVersions.$inferSelect;
 // ===== end ADR-0341 =====
+
+// ---------------------------------------------------------------------------
+// ADR-0327 addendum (lane E12, migration `decision_tables`) — business-authored decision tables. A table is bound to one
+// AI step (agent + span name, the rule-step suggestion key) and compiles to the same exact-match rule
+// (`compileDecisionTable` → `InducedRule`). Versions are immutable; a version is published only when its named reviewer
+// approves it in the approvals queue. Written only by `apps/gateway/src/decision-tables.ts`, each write in the same
+// transaction as its audit row.
+// ---------------------------------------------------------------------------
+
+export const decisionTables = pgTable(
+  "decision_tables",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    /** the trace span name that identifies the step within the agent */
+    stepName: text("step_name").notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("decision_tables_name_uq").on(sql`lower(${t.name})`),
+    uniqueIndex("decision_tables_step_uq").on(t.agentId, t.stepName),
+    check("decision_tables_name_check", sql`char_length(${t.name}) BETWEEN 1 AND 120`),
+    check("decision_tables_step_name_check", sql`char_length(${t.stepName}) BETWEEN 1 AND 200`),
+  ],
+);
+export type DecisionTableRow = typeof decisionTables.$inferSelect;
+
+/** the version lifecycle; transitions are declared once in `DECISION_TABLE_VERSION_MACHINE` (`@regulait/shared`, ADR-0348) */
+export const DECISION_TABLE_VERSION_STATUSES = ["pending_review", "published", "superseded", "rejected", "stale"] as const;
+export type DecisionTableVersionStatus = (typeof DECISION_TABLE_VERSION_STATUSES)[number];
+
+export const decisionTableVersions = pgTable(
+  "decision_table_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tableId: uuid("table_id")
+      .notNull()
+      .references(() => decisionTables.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    /** schema-validated configuration document (ADR-0200 exception): `{fields, rows}` as the author wrote it, validated
+     * by the gateway's zod schema and `compileDecisionTable` before insert; immutable once written */
+    body: jsonb("body").notNull(),
+    /** sha256 hex of `canonicalJson(body)`: the approval carries the same digest, and publishing recomputes it and
+     * refuses on a mismatch. A DB trigger freezes body, digest, table, version, base and author after insert. */
+    bodySha256: text("body_sha256").notNull(),
+    /** the published version this one was proposed against (null = none was published) */
+    baseVersion: integer("base_version"),
+    status: text("status", { enum: DECISION_TABLE_VERSION_STATUSES }).notNull().default("pending_review"),
+    authorUserId: uuid("author_user_id").references(() => users.id, { onDelete: "set null" }),
+    reason: text("reason"),
+    approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    decidedBy: uuid("decided_by").references(() => users.id, { onDelete: "set null" }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("decision_table_versions_version_uq").on(t.tableId, t.version),
+    uniqueIndex("decision_table_versions_one_published_uq")
+      .on(t.tableId)
+      .where(sql`${t.status} = 'published'`),
+    uniqueIndex("decision_table_versions_one_pending_uq")
+      .on(t.tableId)
+      .where(sql`${t.status} = 'pending_review'`),
+    index("decision_table_versions_approval_idx").on(t.approvalId),
+    check("decision_table_versions_version_check", sql`${t.version} >= 1`),
+    check("decision_table_versions_body_sha256_check", sql`${t.bodySha256} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "decision_table_versions_status_check",
+      sql`${t.status} IN ('pending_review', 'published', 'superseded', 'rejected', 'stale')`,
+    ),
+    check("decision_table_versions_decided_check", sql`(${t.status} = 'pending_review') = (${t.decidedAt} IS NULL)`),
+  ],
+);
+export type DecisionTableVersionRow = typeof decisionTableVersions.$inferSelect;
 
 // ===== ADR-0345 (lane E26): agent risk / control / proof registry =====
 // The catalogue (risks, OWASP items, controls, proofs) is code in `@regulait/shared` (`AGENT_RISKS`), like ADR-0081's

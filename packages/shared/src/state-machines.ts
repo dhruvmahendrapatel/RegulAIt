@@ -255,6 +255,46 @@ export const RULE_STEP_SUGGESTION_MACHINE = defineMachine({
   },
 });
 
+/**
+ * ADR-0327 addendum (lane E12): a decision-table version's lifecycle. A version is proposed `pending_review` with a named
+ * reviewer in the approvals queue; only that approval's decide path moves it on. Stored in
+ * `decision_table_versions.status`.
+ */
+export const DECISION_TABLE_VERSION_MACHINE = defineMachine({
+  id: "decision_table_version",
+  stored: "decision_table_versions.status",
+  states: ["pending_review", "published", "superseded", "rejected", "stale"],
+  initial: ["pending_review"],
+  terminal: ["superseded", "rejected", "stale"],
+  transitions: {
+    publish: {
+      from: ["pending_review"],
+      to: "published",
+      by: ["approver"],
+      summary: "The named reviewer approves the version; it becomes the table's published version.",
+    },
+    reject: {
+      from: ["pending_review"],
+      to: "rejected",
+      by: ["approver"],
+      summary: "The named reviewer denies the version; the published version is unchanged.",
+    },
+    mark_stale: {
+      from: ["pending_review"],
+      to: "stale",
+      by: ["system"],
+      summary:
+        "The version was approved after another version was published, or its body no longer matches the digest its approval was bound to; it is recorded stale and not published.",
+    },
+    supersede: {
+      from: ["published"],
+      to: "superseded",
+      by: ["system"],
+      summary: "A newer version of the table is published in the same transaction; this one is kept as history.",
+    },
+  },
+});
+
 /*
  * The two ADR-0334 lifecycles below are declared with `defineMachine` and enforced by their routes (a revoke checks
  * `can(state, "revoke")` under the row lock and its UPDATE is guarded by `revoked_at IS NULL`), but their state is
@@ -352,5 +392,6 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [DETECTION_INCIDENT_MACHINE.def.id]: DETECTION_INCIDENT_MACHINE,
   [DETECTION_RESPONSE_MACHINE.def.id]: DETECTION_RESPONSE_MACHINE,
   [RULE_STEP_SUGGESTION_MACHINE.def.id]: RULE_STEP_SUGGESTION_MACHINE,
+  [DECISION_TABLE_VERSION_MACHINE.def.id]: DECISION_TABLE_VERSION_MACHINE,
   [VENDOR_USAGE_PULL_RUN_MACHINE.def.id]: VENDOR_USAGE_PULL_RUN_MACHINE,
 } as Record<string, StateMachine<string, string>>);
