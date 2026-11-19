@@ -1,20 +1,24 @@
 # Build status
 
-## Current state (2026-11-18, 18:10 UTC)
+## Current state (2026-11-19, 00:15 UTC)
 
 - **Rule 15 (finish before starting)** is in force for every builder lane.
 - **Queue:** about 75 open PRs. Target: under 50, then lift rule 15 a few lanes at a time, E45 (RPA) code first.
-- **Sessions:** phasing down to 10 (D-2026-11-18-04). Archived today: E24, E25.
+- **Sessions:** phasing down to 10 (D-2026-11-18-04). Archived: E24, E25.
 - **Merge loop:** runs from the master's scratchpad, restarted every 7000 s. One census-counter PR released at a time
   (M-118).
+- **Usage-limit outage, 2026-11-18 21:40-21:58 UTC.** The account's weekly limit stopped every session on the account,
+  the master included; the owner reset it. No merge was lost, since the loop kept running. Five sessions had failed turns
+  and were resumed, reviewers first. Rule for the next one: pause, start nothing new, then resume the failed sessions,
+  reviewers first, at about 7 messages a minute.
 
 ## Pending
 
 | Item | Owner | Since | Notes |
 |---|---|---|---|
-| Census queue: #902 E1, #883 E20, #848 E2, #855 E3, #861 E7, #867 E16, #865 E15 | builders, one at a time | 2026-11-18 | M-118; #902 first |
-| #952 E31 | merge loop | 2026-11-18 | Released at ac673b69 |
-| #1020 E12, #982 E44, #871 E13 | builders | 2026-11-18 | Request changes; waiting for READY |
+| Census queue: #848 E2 (now), #855 E3, #861 E7, #867 E16, #865 E15, #1020 E12, #871 E13 | builders, one at a time | 2026-11-18 | M-118; approved PRs waiting for their turn |
+| Census PRs in review or fixing: #964 E31, #1044 E1, #892 E20, #982 E44 | builders and reviewers | 2026-11-18 | Join the census queue once approved |
+| #1045 E26 proof results | E26 | 2026-11-19 | Code request changes; no census, released on approval |
 | #884 E18 SaaS entitlement graph | E18 | 2026-11-18 | Security request changes; no READY yet |
 | #996 E27 fairness slice 2 | E27 | 2026-11-18 | Three failing checks |
 | #936 Codex C1 CI build-once | Codex | 2026-11-18 | Route first when READY |
@@ -26,6 +30,7 @@
 
 ## Done log (newest first)
 
+- 2026-11-18 (late): #1040, #952, #902, #883 and #1039 merged, each audited (second parent = released SHA).
 - 2026-11-18 (evening): #1035, #744 and #1019 merged, each audited. M-118 logged.
 - 2026-11-18 (afternoon): #1013, #904, #1010 and #903 merged, each audited (second parent = released SHA).
 - 2026-11-18: master hand-over (about 08:54 UTC). #941 merged (82142059, second parent 3b86b4e0, audited); #973 and
