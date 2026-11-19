@@ -513,5 +513,17 @@ export function estimateGraphCost(
   };
 }
 
+/**
+ * ADR-0021 worker caps: how many turns a worker loop may run. The declared value (or the org default when none is
+ * declared) is clamped to at least one turn and at most the org ceiling, which the settings schema already bounds at
+ * 20. One function, so the dispatch loop and the ADR-0345 loop probe can never disagree on the cap.
+ */
+export function workerTurnCap(
+  declared: number | null | undefined,
+  org: { readonly defaultWorkerMaxTurns: number; readonly maxWorkerTurns: number },
+): number {
+  return Math.min(Math.max(declared ?? org.defaultWorkerMaxTurns, 1), org.maxWorkerTurns);
+}
+
 // ADR-0320: cloud coding agents as governed workers.
 export * from "./cloud-worker.js";
