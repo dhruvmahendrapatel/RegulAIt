@@ -6,8 +6,9 @@
  *   - `assurance_metric`: ADR-0180's `measureAssuranceMetric`, judged by its own `measurementStateFor`;
  *   - `ledger_check`:     ADR-0060's `verifyAuditChain` (the chain verifies), and a read of the ADR-0081 register
  *                         (every live risk has an active owner, a scope and a review inside the window);
- *   - `gateway_probe`:    not built yet (slice 2b). Each is recorded as `not_run`, which is never a pass, so the page
- *                         shows a raised alert for it rather than a green tick.
+ *   - `gateway_probe`:    the slice 2c harness (`agent-risk-proof-probes.ts`): one governed decision through the
+ *                         gateway's own enforcement code, passing only on the refusal its assertion names. A probe
+ *                         whose harness is not built yet is `not_run`, which is never a pass.
  *
  * Each result is one append-only `agent_risk_proof_results` row written in the SAME transaction as its audit row,
  * which `withAuditChain` (applied by `createDb`) hash-chains. The audit row's `detail.contentHash` carries the result's
@@ -58,6 +59,7 @@ import {
 import { afterAlertsRaised, alertOwnershipAtRaise } from "./alert-ownership.js";
 import { resolveAnchorSink, verifyAuditChain, type VerifyReport } from "./audit-chain.js";
 import { measureAssuranceMetric } from "./condition-metrics.js";
+import { runGatewayProbe } from "./agent-risk-proof-probes.js";
 import { resolveExportSigningKey, type ExportSigningKey, type ExportSigningRefusal } from "./export-bundle.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
 import { oldestActiveAdmin, systemAttributionActor } from "./system-attribution.js";
@@ -190,7 +192,7 @@ export async function runAgentRiskProofEngine(
       case "ledger_check":
         return proof.check === "audit_chain_verifies" ? await runAuditChainCheck(db, deps) : await runRegisterHygiene(db, now);
       case "gateway_probe":
-        return { outcome: "not_run", detail: { reason: "probe_harness_not_built", probe: proof.probe } };
+        return proof.probe ? await runGatewayProbe(db, proof.probe) : { outcome: "not_run", detail: { reason: "probe_missing" } };
     }
   } catch (err) {
     // the error's class only: a message may carry tenant data, and the row is evidence that outlives the incident

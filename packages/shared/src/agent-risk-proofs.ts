@@ -31,7 +31,7 @@ import { EU_AI_ACT_TIER_RANK, type EuAiActTier } from "./eu-ai-act.js";
 import { AI_RISK_CATEGORIES, type AiRiskCategory } from "./risks.js";
 
 /** bumped whenever a risk, control or proof changes meaning; every evidence row records the version it ran under */
-export const AGENT_RISK_CATALOG_VERSION = 1;
+export const AGENT_RISK_CATALOG_VERSION = 2;
 
 /**
  * The origin tag on every proof's test traffic. It rides the same `purpose` slot the red-team tag does (ADR-0057 §2),
@@ -338,7 +338,9 @@ export const AGENT_RISKS: readonly AgentRisk[] = [
       probeProof(
         "memory.untrusted_context_write",
         "untrusted_context_write",
-        "An untrusted source's write into shared context is refused by the trust floor.",
+        // v2: worded to what the ADR-0193 floor enforces (a write tool call). The shared-context write route is not
+        // gated by the floor yet; until it is, this proof must not claim it.
+        "A write tool call whose causal context holds untrusted content is refused by the trust floor.",
       ),
     ],
   },

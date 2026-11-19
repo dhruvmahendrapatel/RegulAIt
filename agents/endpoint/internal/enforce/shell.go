@@ -102,6 +102,29 @@ func markEnv(acts []action) {
 	}
 }
 
+// SimpleCommand returns line's argv when line is exactly one simple command whose every word is literal: no list,
+// pipeline, subshell, background job, negation, redirection, assignment or substitution. ok is false otherwise, and
+// for a line the bash parser cannot read. The tamper report (internal/decisionlog) uses it to recognise a hook
+// registration whose verdict nothing can discard.
+func SimpleCommand(line string) (argv []string, ok bool) {
+	if len(line) > maxCommandBytes {
+		return nil, false
+	}
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(line), "")
+	if err != nil || len(file.Stmts) != 1 {
+		return nil, false
+	}
+	st := file.Stmts[0]
+	if st.Negated || st.Background || st.Coprocess || len(st.Redirs) > 0 {
+		return nil, false
+	}
+	call, isCall := st.Cmd.(*syntax.CallExpr)
+	if !isCall || len(call.Assigns) > 0 || len(call.Args) == 0 {
+		return nil, false
+	}
+	return literalArgv(call.Args)
+}
+
 // literalArgv returns the words as the shell would pass them, when every word is literal.
 func literalArgv(words []*syntax.Word) ([]string, bool) {
 	argv := make([]string, 0, len(words))

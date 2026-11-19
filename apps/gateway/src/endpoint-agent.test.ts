@@ -113,8 +113,15 @@ describe("ADR-0195 SD4b: the SD4a wire contract", () => {
     expect(reportSchema.safeParse({ ...base, facts: [{ ...base.facts[0], kind: "keystrokes" }] }).success).toBe(false);
   });
 
-  it("confines the agent's token to its three routes", () => {
-    expect([...ENDPOINT_AGENT_TOKEN_ROUTES].sort()).toEqual(["GET /v1/endpoint-agent/config", "POST /v1/endpoint-agent/credentials", "POST /v1/endpoint-agent/reports"]);
+  it("confines the agent's token to its six routes (ADR-0331 added the directives and their outcomes; the ADR-0310 addendum the decision batches)", () => {
+    expect([...ENDPOINT_AGENT_TOKEN_ROUTES].sort()).toEqual([
+      "GET /v1/endpoint-agent/config",
+      "GET /v1/endpoint-agent/directives",
+      "POST /v1/endpoint-agent/credentials",
+      "POST /v1/endpoint-agent/decisions",
+      "POST /v1/endpoint-agent/directive-outcomes",
+      "POST /v1/endpoint-agent/reports",
+    ]);
   });
 });
 

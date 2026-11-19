@@ -345,7 +345,9 @@ function encodeKey(fields: readonly string[], values: Readonly<Record<string, Fi
   return JSON.stringify(fields.map((f) => encodeValue(Object.hasOwn(values, f) ? values[f] : ABSENT)));
 }
 
-function encodeCellKey(key: readonly (FieldValue | AbsentMarker)[]): string {
+/** The key a rule cell is looked up by (`applyInducedRule`): exported so the decision-table compiler detects
+ * overlapping rows with the same encoding the engine matches on (one encoding, never two). */
+export function encodeCellKey(key: readonly (FieldValue | AbsentMarker)[]): string {
   return JSON.stringify(key.map((v) => encodeValue(v)));
 }
 

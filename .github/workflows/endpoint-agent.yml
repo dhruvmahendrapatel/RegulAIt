@@ -125,7 +125,7 @@ jobs:
         with:
           go-version-file: agents/endpoint/go.mod
           cache-dependency-path: agents/endpoint/go.sum
-      - run: go test -count=1 -v ./internal/devicekey/ ./internal/collect/ ./internal/agent/ -run 'Windows|DPAPI|NCrypt'
+      - run: go test -count=1 -v ./internal/devicekey/ ./internal/collect/ ./internal/agent/ ./internal/fsutil/ ./internal/decisionlog/ -run 'Windows|DPAPI|NCrypt'
       - run: go test -count=1 ./...
 
   build:

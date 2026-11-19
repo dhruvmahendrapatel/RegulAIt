@@ -27,6 +27,7 @@ bash scripts/package-linux.sh <bin> <out> <version>   # unsigned .deb and .rpm
 | `internal/devicekey` | Device keys: TPM (Linux, Windows), file and DPAPI fallbacks, the darwin refusal |
 | `internal/auth`, `internal/transport` | ES256 JOSE, the DPoP-bound token client, the issuer-only TLS 1.3 client |
 | `internal/agent` | Config, enrolment, the cycle, the signed upload and key rotation |
+| `internal/decisionlog` | The hook decision log (spool, signed batches) and the managed-hook-file tamper report |
 | `internal/gatewaytest`, `internal/pack/packtest` | Test doubles: a strict fake gateway and a run-time pack signer |
 
 ## On-device enforcement hooks (ADR-0298, ADR-0330; default off)
@@ -62,12 +63,16 @@ needs the built-in tools:
 
 Registrations (paths are examples; use absolute paths with no shell metacharacters):
 
-- **Claude Code**, managed settings: a `PreToolUse` hook with matcher `mcp__.*`, exec form
+- **Claude Code**, managed settings: a `PreToolUse` hook with matcher
+  `Bash|PowerShell|Read|Write|Edit|MultiEdit|NotebookEdit|mcp__.*` (the tamper report requires the matcher to match
+  an MCP tool and Bash, Read, Write and Edit as a whole-name regular expression), exec form
   `"args": ["/usr/local/bin/regulait-agent", "hook", "claude-code", "-policy", "/etc/regulait/policy.json"]`,
   `"onFailure": "block"`, and `allowManagedHooksOnly: true`.
 - **Cursor**, enterprise `hooks.json` (`/etc/cursor/hooks.json`, `/Library/Application Support/Cursor/hooks.json` or
   `C:\ProgramData\Cursor\hooks.json`):
-  `{"version": 1, "hooks": {"beforeMCPExecution": [{"command": "'/usr/local/bin/regulait-agent' 'hook' 'cursor' '-policy' '/etc/regulait/policy.json'", "failClosed": true}]}}`.
+  `{"version": 1, "hooks": {"beforeMCPExecution": [{"command": "'/usr/local/bin/regulait-agent' 'hook' 'cursor' '-policy' '/etc/regulait/policy.json'", "failClosed": true}]}}`,
+  and the same entry under `beforeShellExecution` and `beforeReadFile` (the tamper report reads a file without all
+  three as `weakened`).
   Cursor has no exec form (`execForm: false` in `regulait-agent hook-capabilities`), so the command runs through a
   shell: keep the path and every argument quoted, with nothing interpolated. On Windows it runs through PowerShell,
   so prefix the quoted path with the call operator `&`.
@@ -80,3 +85,42 @@ Registrations (paths are examples; use absolute paths with no shell metacharacte
   `PreToolUse` command `/usr/local/bin/regulait-agent hook codex -policy /etc/regulait/policy.json`, with
   `allow_managed_hooks_only = true` and `[features] hooks = true`. Pair it with the `[mcp_servers.<name>] identity`
   allow-list.
+
+**Decision audit and tamper reporting (ADR-0310 addendum).** Every answered hook call that is a decision (an allow,
+a deny, an ask, or audit mode's would-deny or would-ask) is written to the user's spool, `<state dir>/decisions/`
+(0700, at most 10,000 events; beyond that events are dropped and counted). An event names the agent, the rule set
+(`emitter`), the kind of action, the verdict, the policy mode and the deciding rule's id. It never carries the tool's
+arguments, a command, a file path, a prompt, the working directory or the vendor's session id: a session is an HMAC of
+that id under a salt that never leaves the device. A call that is not a decision records, once per session and
+permission mode, that the session was seen, so a Claude Code or Codex `bypassPermissions` session is visible even if no
+governed call happens (Cursor and Copilot CLI report no mode). A spool error never changes the hook's answer. Each
+`run-once` cycle then uploads the spool to `POST /v1/endpoint-agent/decisions` in signed batches of at most 500,
+oldest first (a batch is kept in the outbox until accepted, so a retry resends the same id and bytes), with a report
+of each managed file above: present, missing, unreadable or not system-owned, its SHA-256, and whether it still
+registers the RegulAIt hook with the vendor's fail-closed or managed-only setting (`registered`, `weakened`, `absent`
+or `unparseable`). It fails closed: `registered` needs the program to be the first word and the whole command one
+simple call of `regulait-agent hook <agent>` (no `||`, `;`, pipe, redirect or subshell), on every event above, with
+Claude Code's `disableAllHooks` unset and Codex's `[features] hooks = true`; a mention of `regulait-agent` that is
+anything else is `weakened`. On Windows the paths come from the known-folder API, not `%ProgramData%`, and a file
+whose owner is not SYSTEM or Administrators, or whose DACL lets anyone else write it, is not system-owned. The agent reports and never restores. The spool belongs to the device user, so it records what the
+hook answered; it is not proof against that user.
+
+## Governed add-on removal (ADR-0331; off by default)
+
+This is the agent's only write outside its own state directory, a narrow and recorded exception to ADR-0195 decision
+19. At each sync, after the collection pack has verified, the agent fetches its signed removal directives. A directive
+removes one named MCP server entry from one plain-JSON MCP client config that the signed manifest locates, and only
+when the entry's identity matches.
+
+- **Checks before acting.** A directive is acted on only if it is signed under the enforcement keyring (the compiled keys plus the pinned `devicePolicyKeys`) and bound to
+  this agent's identity. It must be inside its validity window (at most 7 days) and not already in the replay ledger
+  (`directive-ledger.json`, 0600).
+- **How the edit is made.** Every other byte of the file is kept. The file is replaced atomically through `os.Root`,
+  and a symlink is never written through.
+- **What is left alone.** JSONC and TOML configs are reported `unsupported_format` and not edited. Skills, plugins,
+  editor extensions and the coding agent itself are never touched.
+- **Reporting.** The developer sees a platform notice: `/usr/bin/osascript`, `/usr/bin/notify-send` or the system `msg.exe` (absolute paths, never `PATH`), run as an argument list
+  with no shell. Each outcome (`removed`, `nothing_to_remove` or `failed`, with a fixed code) is posted back to the
+  gateway's audit trail.
+- **Current state.** The compiled keyring is empty until SD4, so a directive verifies only under a pinned
+  `devicePolicyKeys` key, and the gateway answers `503 directive_signer_unavailable` until it has a signer.

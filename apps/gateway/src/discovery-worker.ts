@@ -53,6 +53,10 @@ import {
   runWithRlsSystem,
 } from "@regulait/db";
 import {
+  checkSaasEntitlementBatch,
+  entitlementPlatformOf,
+  SaasEntitlementBatchRefused,
+  type SaasEntitlementBatch,
   classifyObservation,
   correlateObservations,
   DISCOVERY_KIND_SPECS,
@@ -91,13 +95,14 @@ import { loadEgressAllowList } from "./custom-providers.js";
 import { createGuardedFetch, EgressBlockedError, EgressRedirectError, type EgressResolver } from "./egress-guard.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { upsertFindings } from "./shadow-ai.js";
-import { loadDiscoverySettings } from "./discovery-posture.js";
+import { directoryTokensProblem, loadDiscoverySettings } from "./discovery-posture.js";
 import { DISCOVERY_SCANNERS, type ScanFederation, type ScanObservation, type ScannerRegistry, type ScanResult } from "./discovery-scanners.js";
 import { federationAudiences } from "./discovery-cloud-scanners.js";
 import { awsPrincipalRoleArn, federationTokenMinter } from "./federation-signing-keys.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
 import { errMessage } from "./err-serializer.js";
 import { runEndpointMcpRetention } from "./endpoint-mcp-config.js";
+import { persistEntitlementBatch } from "./saas-entitlements.js";
 import { RegistryRecordRefused, checkRegistryAgents, stageRegistryRecords } from "./agent-registry-records.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
@@ -374,7 +379,7 @@ export async function failRun(db: Db, run: DiscoveryRunRow, owner: string, code:
 // pseudonyms (ADR-0195 decision 20)
 // ---------------------------------------------------------------------------
 
-async function pseudonymKey(db: Db, dataKey: string): Promise<Buffer> {
+export async function pseudonymKey(db: Db, dataKey: string): Promise<Buffer> {
   const read = async () => (await db.select().from(discoveryPseudonymKeys).limit(1))[0];
   let row = await read();
   if (!row) {
@@ -618,8 +623,12 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
   if (!source) return fail("source_missing", "the source was deleted");
   if (!source.enabled) return fail("source_disabled", "the source was disabled before the run started");
   // ADR-0235: a run of a family switched off after it was queued stops here, before any credential is read
-  const familyOff = familySwitchProblem(source.kind, (await loadDiscoverySettings(db)).families);
+  const runSettings = await loadDiscoverySettings(db);
+  const familyOff = familySwitchProblem(source.kind, runSettings.families);
   if (familyOff) return fail("family_disabled", familyOff);
+  // ADR-0337 §4: the Directory token listing switched off after the run was queued stops here, before any credential
+  const directoryOff = directoryTokensProblem(source.kind, source.target, runSettings);
+  if (directoryOff) return fail("directory_tokens_not_allowed", directoryOff);
   const scanner = opts.registry.get(source.kind);
   if (!scanner) return fail("scanner_not_built", `no scanner is built for ${source.kind} yet (ADR-0195 ${DISCOVERY_KIND_SPECS[source.kind].slice})`);
 
@@ -769,11 +778,24 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
     if (err instanceof ObservationRefused || err instanceof RegistryRecordRefused) return fail("observation_refused", err.message);
     throw err;
   }
+  // ADR-0337: an entitlement reader's graph is checked here and stored with the run's completion, in its transaction
+  const platform = entitlementPlatformOf(source.kind);
+  let entitlements: SaasEntitlementBatch | null = null;
+  if (result.entitlements !== undefined && !platform) return fail("entitlements_refused", `a ${source.kind} source may not return an entitlement graph`);
+  if (platform) {
+    if (result.entitlements === undefined) return fail("entitlements_missing", "the entitlement reader returned no entitlement graph");
+    try {
+      entitlements = checkSaasEntitlementBatch(result.entitlements, platform);
+    } catch (err) {
+      if (err instanceof SaasEntitlementBatchRefused) return fail("entitlements_refused", err.message);
+      throw err;
+    }
+  }
   const digest = rawSeen ? hash.digest("hex") : createHash("sha256").update(JSON.stringify(observations)).digest("hex");
   // ADR-0363 slice 1: an Entra scan that read the tenant's complete Purview label list commits it with the run
   const labelTenant = source.kind === "idp_entra" ? normaliseGuid(cred?.publicConfig.tenantId) : null;
   const labels = result.labelDefinitions;
-  // every write that must commit with the run, fenced on its lease: the labels (ADR-0363) and the staged registry agents (ADR-0314)
+  // every write that must commit with the run, fenced on its lease: the labels (ADR-0363), the staged registry agents (ADR-0314) and the entitlement graph (ADR-0337)
   const writes: Array<(t: Db) => Promise<void>> = [];
   if (labels && labelTenant) {
     writes.push(async (t) => {
@@ -786,6 +808,13 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
       await audit(t, "discovery_run", run.id, "agent-registry-records-staged", "allow",
         `discovery run of '${source.name}' staged ${staged.staged} registry agent(s) for import; ${staged.absent} no longer listed`,
         { sourceId: source.id, kind: source.kind, staged: staged.staged, absent: staged.absent, completeRegistries: registry.complete });
+    });
+  }
+  // ADR-0337: an entitlement batch (only an `entitlement_*` kind returns one)
+  if (entitlements) {
+    const batch = entitlements;
+    writes.push(async (t) => {
+      await persistEntitlementBatch(t, { runId: run.id, sourceId: source.id, sourceName: source.name }, batch);
     });
   }
   const inCommit = writes.length

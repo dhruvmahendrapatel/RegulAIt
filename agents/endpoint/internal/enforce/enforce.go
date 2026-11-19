@@ -16,7 +16,6 @@ package enforce
 import (
 	"bytes"
 	"crypto/ed25519"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -97,6 +96,9 @@ const (
 	SourceCodexUnattested   = "codex-unattested"
 )
 
+// ModeFor is the mode that applies to one agent's calls (ModeAudit or ModeEnforce), for the decision record.
+func (p *Policy) ModeFor(agent string) string { return p.modeFor(agent) }
+
 // modeFor is the mode that applies to one agent's calls.
 func (p *Policy) modeFor(agent string) string {
 	if m, ok := p.AgentModes[agent]; ok {
@@ -150,27 +152,9 @@ func LoadPolicy(r io.Reader, keys Keyring, now time.Time) (*Policy, error) {
 	if len(raw) > maxPolicyBytes {
 		return nil, refuse("policy too large")
 	}
-	var env Envelope
-	if err := strictJSON(raw, &env); err != nil {
-		return nil, refuse("envelope: %v", err)
-	}
-	if !keyIDShape.MatchString(env.KeyID) {
-		return nil, refuse("key id not well formed")
-	}
-	key, ok := keys[env.KeyID]
-	if !ok || len(key) != ed25519.PublicKeySize {
-		return nil, refuse("key %q is not pinned in this build", env.KeyID)
-	}
-	payload, err := base64.StdEncoding.DecodeString(env.Payload)
+	payload, err := VerifyEnvelope(raw, keys)
 	if err != nil {
-		return nil, refuse("payload encoding")
-	}
-	sig, err := base64.StdEncoding.DecodeString(env.Signature)
-	if err != nil || len(sig) != ed25519.SignatureSize {
-		return nil, refuse("signature encoding")
-	}
-	if !ed25519.Verify(key, payload, sig) {
-		return nil, refuse("signature does not verify")
+		return nil, refuse("%v", err)
 	}
 	var p Policy
 	if err := strictJSON(payload, &p); err != nil {
@@ -245,6 +229,11 @@ type Call struct {
 	Command *CommandCall
 	// NoAsk: the agent cannot show its own confirmation for this call, so an ask is answered as a deny.
 	NoAsk bool
+	// SessionID is the vendor's session (or conversation) id from the hook input, when it has one. It is never sent:
+	// the decision log keeps only a keyed hash of it (internal/decisionlog). Nothing decides on it.
+	SessionID string
+	// PermissionMode is the hook input's permission_mode (Claude Code and Codex), verbatim. Nothing decides on it.
+	PermissionMode string
 }
 
 // MCPCall names the server a tool call goes to and where the agent says the server was defined.
@@ -278,7 +267,19 @@ type Decision struct {
 	Rule string
 	// NoAsk: the call came on an event that has no ask answer (set by Adapter.HookWith for Render).
 	NoAsk bool
+	// Action is what kind of action decided the call, for the decision record: one of the Kind* values, or "" when
+	// no single action did (an unresolved call, or no decision).
+	Action string
 }
+
+// Decision action kinds (Decision.Action).
+const (
+	KindMCP     = "mcp"
+	KindExec    = "exec"
+	KindPackage = "package"
+	KindRead    = "read"
+	KindWrite   = "write"
+)
 
 // Decide is DecideWith with no device environment.
 func Decide(policy *Policy, c Call) Decision { return DecideWith(policy, c, HookEnv{}) }
@@ -297,7 +298,7 @@ func DecideWith(policy *Policy, c Call, env HookEnv) Decision {
 	}
 	deny, reason := mcpDenied(policy.MCP, *c.MCP)
 	if !deny {
-		d := Decision{Verdict: Allow, Reason: "RegulAIt: MCP server allowed by policy"}
+		d := Decision{Verdict: Allow, Reason: "RegulAIt: MCP server allowed by policy", Action: KindMCP}
 		// the one-policy action rules for this tool (ADR-0350 §9): the device gives the gateway's answer
 		// (no device exception applies: these rules come from the gateway entitlements). A call whose tool name cannot
 		// be read may be any action the server's rules name: the strictest of them, and never less than ask.
@@ -312,7 +313,7 @@ func DecideWith(policy *Policy, c Call, env HookEnv) Decision {
 				o.verdict = RuleAsk
 			}
 			if o.rule != "" && o.verdict != RuleAllow {
-				d = Decision{Verdict: Ask, Rule: o.rule, Reason: "RegulAIt: this MCP tool matches your organisation's action rule " + o.rule + "."}
+				d = Decision{Verdict: Ask, Rule: o.rule, Action: KindMCP, Reason: "RegulAIt: this MCP tool matches your organisation's action rule " + o.rule + "."}
 				if o.verdict == RuleDeny {
 					d.Verdict = Deny
 				}
@@ -324,9 +325,9 @@ func DecideWith(policy *Policy, c Call, env HookEnv) Decision {
 		return d
 	}
 	if policy.modeFor(c.Agent) == ModeAudit {
-		return Decision{Verdict: NoDecision, WouldDeny: true, Reason: reason}
+		return Decision{Verdict: NoDecision, WouldDeny: true, Reason: reason, Action: KindMCP}
 	}
-	return Decision{Verdict: Deny, Reason: reason}
+	return Decision{Verdict: Deny, Reason: reason, Action: KindMCP}
 }
 
 func mcpDenied(r MCPRules, c MCPCall) (bool, string) {
@@ -361,7 +362,7 @@ func decideCommandCall(policy *Policy, c Call, env HookEnv) Decision {
 		return Decision{Verdict: Deny, Rule: "no-policy", Reason: "RegulAIt: no valid enforcement policy on this device, so this command is blocked. Ask your administrator."}
 	}
 	o := decideCommand(policy, *c.Command, env)
-	d := Decision{Rule: o.rule, Reason: o.reason}
+	d := Decision{Rule: o.rule, Reason: o.reason, Action: o.kind}
 	switch o.verdict {
 	case RuleAllow:
 		d.Verdict = Allow

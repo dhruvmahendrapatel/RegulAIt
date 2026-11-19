@@ -193,3 +193,72 @@ The routes are API only; screens are tracked on #453.
   stated reason and writes nothing; it never maps a field it does not recognise.
 - ADR-0069's "there is no vendor billing-API client in this repository" and ADR-0076's "Still no polling" are no
   longer true for tenants that opt in. Both ADRs' status lines point here.
+
+## As built — slice 2 (2026-11-15): foundation, Anthropic and OpenAI
+
+Migration `pending/vendor_usage_pull.sql` (numbered at merge); code in `apps/gateway/src/vendor-usage-pull.ts` and
+`packages/shared/src/vendor-usage.ts`; proof in `zz-adr0322-vendor-usage-pull.test.ts` (fake vendors only).
+
+- **The policy is its own singleton table** (`vendor_usage_pull_policy`) rather than an `org_settings` column, so it
+  can only be changed through its own route with a required reason, and the generic settings route cannot turn it on.
+- **Credentials** follow ADR-0195's `discovery_credentials` shape: compare-and-set rotation (`replacesCredentialId`),
+  revoke nulls the ciphertext and disables the connector. Both vendors' Admin keys are `write_capable`; storing one
+  without `acknowledgeWriteCapable: true` is a 409.
+- **Step-up** reuses the `settings_relax` kind with distinct facts (policy on, connector enabled, credential stored),
+  as discovery does; no new step-up kind.
+- **Anthropic**: `GET /v1/organizations/cost_report` grouped by `workspace_id` and `description`, called with the
+  guarded fetch (`anthropic-version: 2023-06-01`). Amounts are decimal strings in cents and are converted by moving
+  the decimal point, not by float division. The report has no person or key dimension, so a line resolves to a
+  person only through an admin alias for its workspace, and the metered overlap matches on workspace ids.
+- **OpenAI**: `GET /v1/organization/costs` grouped by `project_id`, `line_item` and `api_key_id`, through the
+  official SDK (`client.admin.organization.usage.costs`). The overlap matches on API key ids and project ids.
+- **Window**: the first pull reads `backfillDays` (default 7, at most 31); later pulls resume at the last pulled day
+  minus two days, which both vendors restate, and never ask for more than 31 days.
+- **Upsert key**: sha-256 of the vendor's own fact identity, unique per connector, so a re-pull updates amounts in
+  place. The fact identity of the Anthropic report includes every grouping field the vendor returns.
+- **Run errors** are one of a fixed set of codes (CHECK) plus a sentence RegulAIt wrote; no vendor body is stored.
+- **Consolidated read**: `overlaps_metered` lines are excluded from the imported side and disclosed as
+  `meteredOverlap` (count and amount by currency). Changing a connector's gateway-id lists re-marks its stored lines.
+- **Review round (#861)**:
+  - **Row-level security** (§7, ADR-0234): the four new tables are ENABLED and FORCED. Only an active admin
+    principal, the scheduled sweep (`system_task`) and `migration` reach them. A plain app connection and every
+    request-only reason see and write nothing, which the suite proves for `public_ingest`, `credential_request` and a
+    non-admin principal. `imported_cost_lines` and `cost_import_batches` are not under RLS yet; they belong to the
+    ADR-0069 import surface and are a tracked follow-up (fragment), not part of this table set.
+  - **Audit with the change**: every state change and its audit row share one transaction (policy, connector create,
+    config with its re-marking, enable, credential store/replace and revoke). A pull's outcome and audit row commit
+    with its batch, so a pull is never recorded as succeeded without its lines, or the reverse.
+  - **Batches keep their lines**: a re-pulled line keeps the batch that first brought it in. Each pull batch records
+    `newLines` and `restatedLines`. Revoking a pull batch withdraws only the lines it introduced, and rewinds the
+    connector's `pulled_through` to the batch's first day, so the next pull fetches those days again.
+  - **One pull per connector at a time**: opening a run takes a per-connector advisory lock. A run still `running`
+    inside a 30-minute lease refuses a second one (`in_progress`) without calling the vendor. A row stuck past the lease
+    is treated as a crashed process and stops blocking.
+  - **Failure handling**: an error in the batch write rolls the batch back and closes the run as `internal` with
+    RegulAIt's own sentence. A connector that throws does not stop the sweep for the others. A fact key the vendor
+    returns twice in one pull is one fact.
+  - **Bounds**: a vendor that repeats a page cursor is refused (`bad_response`) instead of looping to the 40-page cap.
+    Re-marking reads in keyset pages of 1000 and updates per page. The runs list is keyset-paginated (`before`, 50 per
+    page).
+- **Review round 2 (#861)**:
+  - **Run lifecycle on the ADR-0348 machine**: `vendor_usage_pull_runs.status` is `VENDOR_USAGE_PULL_RUN_MACHINE` in
+    `@regulait/shared` (registered in `STATE_MACHINES`, listed in `internal/product/STATE_MACHINES.md`). A run opens
+    `running`, or is written already `refused` when another pull holds the lease; the finish step moves it with the
+    events succeed, fail and refuse through `whereFrom`. The outcome CHECK is written as two comparisons so the one
+    value-list CHECK on the column is the machine's, which the ADR-0348 test holds equal.
+  - **Revoke is atomic and serialised with pulls**: revoking an import batch runs in one transaction (reinstate,
+    withdraw, batch status, connector rewind, audit). A pulled batch takes its connector's pull lock and is refused
+    (409 `pull_in_progress`) while a pull holds the lease, so a running pull cannot overwrite the rewound day.
+- **Differences from §3 and §5**:
+  - **No per-vendor rate limit yet**: each scheduled pass makes at most one run per connector, of at most 40 requests.
+  - **A 429 fails the run** as `rate_limited` instead of backing off inside it. The next pass resumes from
+    `pulled_through` (minus the two restated days), which is the stored cursor. Nothing is lost, only delayed.
+  - **Not built**: the in-run backoff, and the §5 variance report (vendor-reported spend against metered spend for the
+    same keys and window). Both are tracked in the pending fragment.
+- **API-only routes (lane brief)**: the nine routes are in the route census as `KNOWN_UI_GAPS` entries pointing at
+  #453. That is the lane brief's own instruction for new routes ("new routes go in the route census plus a
+  KNOWN_UI_GAPS entry pointing at #453 (no screens)"), and the cap moves by nine.
+- **Not built in this slice**: Claude Code per-user cost (the Claude Code report's API-billed cost is already inside
+  the cost report, so pulling it as spend would double count; it needs an attribution-only design); Anthropic's newer
+  Analytics API (`/v1/organizations/analytics/cost`, beta); the settings screen (#453); live-tenant tests (lane E11).
+

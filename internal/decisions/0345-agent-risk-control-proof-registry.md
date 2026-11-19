@@ -1,6 +1,6 @@
 # ADR-0345: Agent risk register with controls and continuous proofs
 
-- **Status**: Accepted (slices 1, 2a and 2b implemented)
+- **Status**: Accepted (slices 1, 2a, 2b and 2c implemented)
 - **Date**: 2026-11-17
 - **Lane**: E26
 - **Related**: ADR-0085 (EU AI Act tier screening), ADR-0158 (regulatory intelligence feed), ADR-0180 (continuous assurance: A2 measurable conditions, `MEASUREMENT_STATES`), ADR-0057/0068 (continuous red-team, its statistics), ADR-0058 (compliance packs), ADR-0060 (hash-chained
@@ -126,7 +126,49 @@ What exists already:
        is a new pack version for the ADR-0243 owner (owner question below).
      - The ADR-0214 posture document gains a `riskProofs` section, shown as inputs to the adversarial objective. It
        does not change the published weights or any score (owner question below).
-   - Slice 2c: the gateway-probe harness for the eight probes, which record `not_run` until then.
+   - Slice 2c: the gateway-probe harness (`apps/gateway/src/agent-risk-proof-probes.ts`).
+     - A probe makes one governed decision through the enforcing function the live path calls, and passes only on
+       the refusal its assertion names. Nothing is a new runner or a second copy of a rule.
+     - Part 1 builds five probes:
+       - `hidden_instruction_in_document`: the org guardrail policy (`resolveGuardrailPolicy`) and the MCP output
+         phase's deterministic detectors (`runGuardrails`) on a document with a hidden instruction. It passes only
+         when `prompt_injection` blocks it. The async trained-detector path is not called, so a probe meters nothing.
+       - `tool_out_of_scope_argument` and `kill_switch_halted`: the policy kernel's `evaluate` on a synthetic granted
+         write call. Pass means a deny by the fixture data-scope rule, or by `execution-halted`. These two read no
+         tenant state: they prove the shipped kernel, so a modified build fails them.
+       - `mcp_definition_drift`: `definitionPinRefusal` against a sandbox server with a drifted pin. The fixture is
+         created inside a transaction that is always rolled back, so it is never visible or left behind, and its URL
+         is on the reserved `.invalid` TLD. It reads the org pin mode, so `warn` fails the probe.
+       - `untrusted_context_write`: the org write floor (`contentTrustWriteFloor`) through `evaluateContentTrust` on
+         untrusted content.
+     - The floor gates write tool calls. The shared-context write route (`POST /v1/projects/:projectId/context`) is
+       not gated by it. Catalogue v2 rewords the proof's assertion to what is enforced, so a pass does not overclaim.
+       The route gap is tracked as an issue for the ADR-0193 owner.
+     - Part 2 builds the other three:
+       - `approval_replay`: `consumeApprovalOrRetire` (ADR-0104/0105), the consuming half of the live path, spends a
+         sandbox approval and is then presented with it again. It passes only when the first presentation is spent
+         and the second comes back `approval_consumed_race`.
+       - `approval_expired`: the same function on a sandbox approval past its expiry. It passes only on
+         `approval_expired`.
+       - `loop_turn_cap`: `workerTurnCap` (ADR-0021), now the one function that bounds the dispatch loop in
+         `dispatchRunNodeInner`, on the org's worker dials. A worker seeded to loop (it declares more turns than
+         any ceiling) must be clamped to the org ceiling and to the settings schema's 20-turn wall.
+         `org_settings.max_worker_turns` has no database CHECK, so a value written around the settings route fails
+         the probe.
+     - The approval fixture is a sandbox server, its registered tool, one approved approval and one approving
+       decision, all built in the always-rolled-back transaction.
+       - RLS refuses the runner's inserts into `users`, as it should. So the fixture references the deployment's
+         own admins (ADR-0107 attribution): the oldest active admin requests and the next one approves.
+       - An approver pool never contains the requester. A deployment with fewer than two active admins therefore
+         records these two probes as `not_run` (`needs_two_active_admins`). That is never a pass, and never a
+         self-approval.
+       - `signature_mode` is `off` so the probe stays on single use and expiry. The ADR-0186 passkey recheck has its
+         own tests.
+     - The audit chain allocates `seq` as `max(seq)+1` under its advisory lock. So the audit rows the enforcing code
+       writes inside the rolled-back transaction (a consume, a supersede) leave no hole in the chain. No probe makes a
+       network call, so the transaction never waits on a second connection.
+     - Tagged traffic: the red-team `purpose` tag is a label only, and nothing excludes it from metering. No probe
+       makes a metered call.
    - Slice 3: the read and settings APIs for the view. The UI belongs to a design builder and is a `KNOWN_UI_GAPS`
      entry tracked on #453.
 9. **Geography is a factor in risk tiering.** Owner, 2026-11-17, from the competitor gap audit (C5). The
@@ -204,3 +246,5 @@ What exists already:
 - Should a failed proof also block promotion through the ADR-0057 `automated_check` gate, or only alert and queue?
   The default is alert and queue.
 - Should the governance-gap review window default to 90 days?
+- Should the ADR-0193 trust floor also gate the shared-context write route? Today it gates write tool calls only, and
+  the memory proof's assertion (catalogue v2) says so.
