@@ -212,8 +212,8 @@ describe("ENG-IMG publish gate: the decision, on a throwaway repository", () => 
 
 describe("ADR-0242 the admission-scan engines (L4.5: publishable, as spikee)", () => {
   it("have image inputs (their own directory and the shared admission-scan shim) and are planned for publish like every locked engine", () => {
-    // L4.5 (2026-11-17): no engine is built without being publishable any more
-    expect(UNPUBLISHED_ENGINE_IDS).toEqual([]);
+    // L4.5 (2026-11-17): the admission-scan engines are publishable (only ADR-0364's robot images are unpublished)
+    for (const id of ["mcpscanner", "skillscanner"]) expect(UNPUBLISHED_ENGINE_IDS).not.toContain(id);
     const pkgs = readWorkspace();
     for (const id of ["mcpscanner", "skillscanner"]) {
       const specs = specsFor(id);
@@ -229,5 +229,28 @@ describe("ADR-0242 the admission-scan engines (L4.5: publishable, as spikee)", (
       const files = repoGit(["ls-files", "--", ...specs]).split("\n").filter(Boolean);
       for (const other of REPRO_ENGINE_IDS.filter((o) => o !== id)) expect(files.filter((f) => f.startsWith(`engines/${other}/`))).toEqual([]);
     }
+  });
+});
+
+describe("ADR-0364 S3 the robot images (unpublished: built twice and compared, never planned for publish)", () => {
+  it("are repro-only, with their own inputs, and never in the lock's ENGINE_IDS", () => {
+    expect(UNPUBLISHED_ENGINE_IDS).toEqual(["robot-runner", "robot-egress"]);
+    const pkgs = readWorkspace();
+    for (const id of UNPUBLISHED_ENGINE_IDS) {
+      expect(ENGINE_IDS).not.toContain(id);
+      expect(REPRO_ENGINE_IDS).toContain(id);
+      // --plan walks ENGINE_IDS only: an unpublished image is never in its verdict
+      expect(Object.keys(plan({ engines: {} }, { changed: () => [] }).engines)).not.toContain(id);
+      const specs = specsFor(id);
+      expect(specs).toContain(`engines/${id}`);
+      const files = repoGit(["ls-files", "--", ...specs]).split("\n").filter(Boolean);
+      expect(files).toContain(`engines/${id}/Dockerfile`);
+      for (const other of REPRO_ENGINE_IDS.filter((o) => o !== id)) expect(files.filter((f) => f.startsWith(`engines/${other}/`))).toEqual([]);
+    }
+    // the runner builds its workspace package; the egress image is one Go binary from its published module
+    expect(enginePackage("robot-runner")).toBe("@regulait/robot-runner");
+    expect(workspaceClosure("robot-runner", pkgs)).toEqual(["packages/engine-runner", "packages/robot-runner", "packages/shared"]);
+    expect(enginePackage("robot-egress")).toBeNull();
+    expect(workspaceClosure("robot-egress", pkgs)).toEqual([]);
   });
 });
