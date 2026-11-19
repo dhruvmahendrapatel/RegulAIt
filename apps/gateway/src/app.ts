@@ -640,6 +640,7 @@ import { registerEndpointImportRoutes } from "./endpoint-import-routes.js";
 import { registerThirdPartyIngestRoutes } from "./third-party-ingest-routes.js";
 import { registerBrowserGovernanceRoutes } from "./browser-governance-routes.js";
 import { registerSiemDeliveryRoutes } from "./siem-delivery.js";
+import { registerDetectionRoutes } from "./detection/routes.js";
 import { registerCostOutcomeRoutes } from "./cost-outcomes.js";
 import { registerBudgetAlertRoutes } from "./budget-alerts.js";
 import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
@@ -6261,6 +6262,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerBrowserGovernanceRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0303: SIEM delivery of the audit chain (admin-only through the default gate)
   registerSiemDeliveryRoutes(app, db, { dataKey: opts.dataKey });
+  registerDetectionRoutes(app, db); // ADR-0333 (E15): agent behaviour detection
   // ADR-0312: cost per outcome (the list is self-scoped and in NON_ADMIN_ROUTES; the roll-up and refresh are admin-only)
   registerCostOutcomeRoutes(app, db);
   // ADR-0312 (pilot addendum): a person's spend budget (admin; the self read is in NON_ADMIN_ROUTES)

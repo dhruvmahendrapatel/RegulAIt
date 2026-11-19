@@ -174,6 +174,56 @@ export const EVAL_RUN_MACHINE = defineMachine({
   },
 });
 
+/** `detection_incidents.status` (ADR-0333, lane E15). An admin acknowledges an open incident (again, idempotently)
+ * or closes it; a closed incident is final, so a later burst raises a new incident instead of reopening this one.
+ * Same values as `DETECTION_INCIDENT_STATUSES` in @regulait/db. */
+export const DETECTION_INCIDENT_MACHINE = defineMachine({
+  id: "detection_incident",
+  stored: "detection_incidents.status",
+  states: ["open", "acknowledged", "closed"],
+  initial: ["open"],
+  terminal: ["closed"],
+  transitions: {
+    acknowledge: {
+      from: ["open", "acknowledged"],
+      to: "acknowledged",
+      by: ["admin"],
+      summary: "An admin has seen the incident and is looking into it; nothing about the agent changes.",
+    },
+    close: {
+      from: ["open", "acknowledged"],
+      to: "closed",
+      by: ["admin"],
+      summary: "An admin closes the incident; it is final, and a new match raises a new incident.",
+    },
+  },
+});
+
+/** `detection_incidents.response_state` (ADR-0333 §5). A configured response runs at most once: it either took
+ * effect or failed with a fixed code, and neither is retried. An alert-only incident stays `none`.
+ * Same values as `DETECTION_RESPONSE_STATES` in @regulait/db. */
+export const DETECTION_RESPONSE_MACHINE = defineMachine({
+  id: "detection_response",
+  stored: "detection_incidents.response_state",
+  states: ["none", "done", "failed"],
+  initial: ["none"],
+  terminal: ["done", "failed"],
+  transitions: {
+    apply: {
+      from: ["none"],
+      to: "done",
+      by: ["system"],
+      summary: "The configured response (suspend the grant, revoke the credential, or require approval) took effect.",
+    },
+    fail: {
+      from: ["none"],
+      to: "failed",
+      by: ["system"],
+      summary: "The configured response could not be applied; the fixed reason is recorded and it is not retried.",
+    },
+  },
+});
+
 /** `rule_step_suggestions.status` (ADR-0327). A scan inserts `suggested`. Shadow mode measures the suggested rule
  * beside the AI without changing routing, and can be stopped and started again. Dismissal is final: a rescan
  * refreshes a dismissed suggestion's evidence but never its status. */
@@ -299,6 +349,8 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [MCP_ADMISSION_MACHINE.def.id]: MCP_ADMISSION_MACHINE,
   [INCIDENT_MACHINE.def.id]: INCIDENT_MACHINE,
   [EVAL_RUN_MACHINE.def.id]: EVAL_RUN_MACHINE,
+  [DETECTION_INCIDENT_MACHINE.def.id]: DETECTION_INCIDENT_MACHINE,
+  [DETECTION_RESPONSE_MACHINE.def.id]: DETECTION_RESPONSE_MACHINE,
   [RULE_STEP_SUGGESTION_MACHINE.def.id]: RULE_STEP_SUGGESTION_MACHINE,
   [VENDOR_USAGE_PULL_RUN_MACHINE.def.id]: VENDOR_USAGE_PULL_RUN_MACHINE,
 } as Record<string, StateMachine<string, string>>);
