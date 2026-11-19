@@ -1903,6 +1903,9 @@ export const auditLog = pgTable(
         "robot",
         "robot_version",
         "robot_secret",
+        // ADR-0364 S3: one robot run (objectId = robot_runs.id; detail carries the version, the outcome and evidence
+        // hashes, never an input value, an output value or a secret). Plain text column — no DDL.
+        "robot_run",
         // ADR-0173 batch 2c (K): a KRI or a monitoring dashboard created /
         // changed / deleted, and an automation rule created / changed /
         // paused / backfilled / matched (objectId = the row). Plain text — no DDL.
@@ -4871,6 +4874,12 @@ export const orgSettings = pgTable(
     engineMaxRunTimeoutMinutes: integer("engine_max_run_timeout_minutes").notNull().default(30),
     /** the budget a run gets when it names none (USD); higher relaxes it */
     engineDefaultRunBudgetUsd: doublePrecision("engine_default_run_budget_usd").notNull().default(2),
+    /**
+     * ADR-0364 S3: free-form browser control's per-session budget and maximum run time. NULL until an admin sets them
+     * (owner decision pending); NULL means free-form browsing is refused. Deliberately no default.
+     */
+    freeformBrowserSessionBudgetUsd: doublePrecision("freeform_browser_session_budget_usd"),
+    freeformBrowserMaxRunMinutes: integer("freeform_browser_max_run_minutes"),
     /** a run whose budget is above this waits for approval (USD); higher relaxes it */
     engineRunApprovalThresholdUsd: doublePrecision("engine_run_approval_threshold_usd").notNull().default(10),
     /** raw engine reports kept (encrypted) this many days; longer relaxes it */
@@ -19342,14 +19351,46 @@ export const robotRuns = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     startedAt: timestamp("started_at", { withTimezone: true }),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
+    /** ADR-0364 S3: the decision 7 placement the run executed under (set once) */
+    executionPlacementId: uuid("execution_placement_id").references(() => executionPlacements.id, { onDelete: "restrict" }),
   },
   (t) => [
+    index("robot_runs_placement_idx").on(t.executionPlacementId),
     index("robot_runs_version_idx").on(t.robotVersionId, t.status, t.contentDigest),
     check("robot_runs_kind_check", sql`${t.kind} IN ('test', 'agent', 'freeform')`),
     check("robot_runs_status_check", sql`${t.status} IN ('queued', 'running', 'succeeded', 'failed', 'timed_out', 'cancelled', 'refused')`),
   ],
 );
 export type RobotRunRow = typeof robotRuns.$inferSelect;
+
+/**
+ * ADR-0364 S3: one stored evidence item of a run (a redacted screenshot, a download, the egress log). The bytes are in
+ * the content-addressed store under `sha256/<hex>`; the row is append-only (a trigger refuses UPDATE, DELETE and
+ * TRUNCATE). Evidence leaves only by retention expiry.
+ */
+export const ROBOT_EVIDENCE_KINDS_E45 = ["screenshot", "download", "egress_log"] as const;
+export const robotRunEvidence = pgTable(
+  "robot_run_evidence",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    robotRunId: uuid("robot_run_id")
+      .notNull()
+      .references(() => robotRuns.id, { onDelete: "restrict" }),
+    item: integer("item").notNull(),
+    kind: text("kind", { enum: ROBOT_EVIDENCE_KINDS_E45 }).notNull(),
+    step: integer("step"),
+    contentType: text("content_type").notNull(),
+    sha256: text("sha256").notNull(),
+    sizeBytes: integer("size_bytes").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("robot_run_evidence_item_uq").on(t.robotRunId, t.item),
+    index("robot_run_evidence_sha_idx").on(t.sha256),
+    check("robot_run_evidence_kind_check", sql`${t.kind} IN ('screenshot', 'download', 'egress_log')`),
+  ],
+);
+export type RobotRunEvidenceRow = typeof robotRunEvidence.$inferSelect;
 // ===== end ADR-0364 =================================================================================================
 
 // ===== ADR-0333 (lane E15): rule-based detection of risky agent behaviour =========================================

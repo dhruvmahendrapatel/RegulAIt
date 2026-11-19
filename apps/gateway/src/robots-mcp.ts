@@ -11,7 +11,7 @@
  *
  * tools/list: the approved versions of active robots. tools/call: re-checks, at call time, that the version is still
  * approved, its robot active, its tool the one this version was approved as, and its stored content still hashes to
- * the digest the reviewer approved. In S2 it then refuses: the sandbox runner arrives in S3, so nothing executes yet.
+ * the digest the reviewer approved. S3: it then places one robot_browser run for the governed call (`robot-runs.ts`).
  */
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult, type Tool } from "@modelcontextprotocol/sdk/types.js";
@@ -29,6 +29,14 @@ import {
   type RobotVersionRow,
 } from "@regulait/db";
 import { robotContentDigest, robotToolName } from "@regulait/shared";
+import type { FirstPartyCallContext } from "./mcp-first-party.js";
+import { startRobotRun, type RobotRunDeps } from "./robot-runs.js";
+
+/** the run deps (the data key and the evidence store), set once at startup by `registerRobotRoutes` */
+let runDeps: RobotRunDeps = { dataKey: undefined, store: null };
+export function setRobotRunDeps(deps: RobotRunDeps): void {
+  runDeps = deps;
+}
 
 /** the fixed URL of the one first-party Robots server row (seeded by the migration) */
 export const ROBOTS_SERVER_URL = "regulait:robots";
@@ -82,8 +90,11 @@ const refusal = (code: string, text: string): CallToolResult => ({
   structuredContent: { error: code },
 });
 
-/** build the in-process server; `serverId` is the Robots row's id (for the tool-row re-check) */
-export function createRobotsMcpServer(db: Db, serverId: string): Server {
+/**
+ * build the in-process server; `serverId` is the Robots row's id (for the tool-row re-check), `call` the governed
+ * call this connect serves (null for a manifest sync or a probe: tools/list works, tools/call refuses)
+ */
+export function createRobotsMcpServer(db: Db, serverId: string, call: FirstPartyCallContext = null): Server {
   const server = new Server({ name: "regulait-robots", version: "1.0.0" }, { capabilities: { tools: {} } });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -125,10 +136,41 @@ export function createRobotsMcpServer(db: Db, serverId: string): Server {
         `'${name}' no longer matches the content its reviewer approved; nothing ran. Submit a new version for review.`,
       );
     }
-    return refusal(
-      "robot_runner_unavailable",
-      `'${name}' is approved, but the robot sandbox runner is not installed in this release; nothing ran.`,
+    // ADR-0364 S3: the governed call places one robot_browser run. A connect with no call behind it never runs one.
+    if (!call || !call.userId) {
+      return refusal("robot-run-needs-project", `'${name}' runs only from a governed call attributed to a project; nothing ran.`);
+    }
+    const args = (req.params.arguments ?? {}) as Record<string, unknown>;
+    const outcome = await startRobotRun(
+      db,
+      {
+        robot: row.robot,
+        version: row.version,
+        kind: "agent",
+        requestedBy: call.userId,
+        projectId: call.projectId,
+        inputs: args,
+        agent: call.agent ?? null,
+        parentGrantId: call.parentGrantId ?? null,
+        interactivePerson: call.interactivePerson === true,
+        builderAgentId: call.agent?.kind === "builder_agent" ? call.agent.id : null,
+        contentDigest: row.version.contentDigest!,
+      },
+      runDeps,
     );
+    if (outcome.kind === "refused") return refusal(outcome.code, outcome.message);
+    if (outcome.status !== "succeeded" || !outcome.outputs) {
+      return refusal(
+        `robot_run_${outcome.status}`,
+        `'${name}' ${outcome.status.replaceAll("_", " ")}${outcome.failureCode ? ` (${outcome.failureCode})` : ""}; run ${outcome.runId}.`,
+      );
+    }
+    // §7: the outputs are page content — returned as untrusted tool output, validated against the output schema
+    return {
+      content: [{ type: "text", text: JSON.stringify(outcome.outputs) }],
+      structuredContent: outcome.outputs,
+      _meta: { "regulait/robotRunId": outcome.runId, "regulait/untrusted": true },
+    };
   });
 
   return server;
