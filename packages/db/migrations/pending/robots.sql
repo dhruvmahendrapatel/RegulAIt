@@ -163,7 +163,7 @@ CREATE INDEX IF NOT EXISTS "robot_runs_version_idx" ON "robot_runs" ("robot_vers
 --> statement-breakpoint
 -- Freeze a version's content once it leaves 'draft'. Status, approval, tool and timestamps stay writable.
 CREATE OR REPLACE FUNCTION regulait_robot_version_freeze() RETURNS trigger
-  LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
+  LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
 BEGIN
   IF OLD.status <> 'draft' AND (
        NEW.script IS DISTINCT FROM OLD.script OR NEW.script_format IS DISTINCT FROM OLD.script_format
@@ -183,7 +183,7 @@ CREATE TRIGGER robot_versions_freeze BEFORE UPDATE ON "robot_versions" FOR EACH 
 --> statement-breakpoint
 -- The allow-list and the bindings of a submitted version cannot change either.
 CREATE OR REPLACE FUNCTION regulait_robot_version_child_freeze() RETURNS trigger
-  LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
+  LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE
   v_status text;
 BEGIN
@@ -211,7 +211,7 @@ CREATE TRIGGER robot_version_secrets_freeze BEFORE INSERT OR UPDATE OR DELETE ON
 --> statement-breakpoint
 -- A binding's live secret must be a live one and its test secret a test one.
 CREATE OR REPLACE FUNCTION regulait_robot_binding_scope() RETURNS trigger
-  LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
+  LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
 BEGIN
   IF NEW.live_secret_id IS NOT NULL AND (SELECT scope FROM robot_secrets WHERE id = NEW.live_secret_id) <> 'live' THEN
     RAISE EXCEPTION 'a binding''s live secret must have scope live' USING ERRCODE = 'check_violation';
@@ -221,6 +221,24 @@ BEGIN
   END IF;
   RETURN NEW;
 END $$;
+--> statement-breakpoint
+-- A row-level freeze trigger is useless against TRUNCATE (migration 0185's invariant): refuse it too.
+DROP TRIGGER IF EXISTS "robot_versions_no_truncate" ON public."robot_versions";
+--> statement-breakpoint
+CREATE TRIGGER "robot_versions_no_truncate" BEFORE TRUNCATE ON public."robot_versions"
+  FOR EACH STATEMENT EXECUTE FUNCTION public.regulait_refuse_truncate();
+--> statement-breakpoint
+-- A row-level freeze trigger is useless against TRUNCATE (migration 0185's invariant): refuse it too.
+DROP TRIGGER IF EXISTS "robot_version_allowed_sites_no_truncate" ON public."robot_version_allowed_sites";
+--> statement-breakpoint
+CREATE TRIGGER "robot_version_allowed_sites_no_truncate" BEFORE TRUNCATE ON public."robot_version_allowed_sites"
+  FOR EACH STATEMENT EXECUTE FUNCTION public.regulait_refuse_truncate();
+--> statement-breakpoint
+-- A row-level freeze trigger is useless against TRUNCATE (migration 0185's invariant): refuse it too.
+DROP TRIGGER IF EXISTS "robot_version_secrets_no_truncate" ON public."robot_version_secrets";
+--> statement-breakpoint
+CREATE TRIGGER "robot_version_secrets_no_truncate" BEFORE TRUNCATE ON public."robot_version_secrets"
+  FOR EACH STATEMENT EXECUTE FUNCTION public.regulait_refuse_truncate();
 --> statement-breakpoint
 DROP TRIGGER IF EXISTS robot_version_secrets_scope ON "robot_version_secrets";
 --> statement-breakpoint
