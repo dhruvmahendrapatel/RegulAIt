@@ -1,6 +1,6 @@
 # ADR-0339: Agent risk score recomputed on every change, and author vs runner identity
 
-- **Status**: Accepted (slice 1 built; slice 2 built, method `adr0339-v2`)
+- **Status**: Accepted (slice 1 built; slice 2 built; addendum: capability combinations, method `adr0339-v3`)
 - **Date**: 2026-11-16
 - **Driver**: owner, 2026-11-16: close the gaps found against Obsidian Security's AI Agent Security product. Builder
   lane E20 covers gap rows 3 (author vs runner, orphaned agents, NHI mapping) and 7 (risk score on every publish or
@@ -12,8 +12,8 @@
   (toxic combinations), [ADR-0089](0089-agent-ownership-alignment.md) (owner and orphan flag),
   [ADR-0188](0188-batch6-agent-workload-identity.md) (agent principal, sponsors, actor chain),
   [ADR-0156](0156-ai-system-dependency-graph-risk-propagation.md) (dependents).
-- **Migration**: slice 1 `pending/agent_risk_scores.sql`, slice 2 `pending/agent_identity_links.sql` (both numbered at
-  merge, ADR-0252).
+- **Migration**: slice 1 `pending/agent_risk_scores.sql`, slice 2 `pending/agent_identity_links.sql`, addendum
+  `pending/risk_score_capability_marks.sql` (trigger-only; all numbered at merge, ADR-0252).
 - **Setting**: none. The score changes no enforcement; it is read-only toward every agent, grant and setting.
 
 ## Context
@@ -129,6 +129,67 @@ as, and whether its owner is gone or inactive.
     `POST /v1/agent-identity/:kind/:subjectId/links` (admin), `POST /v1/agent-identity/links/:linkId/decision` (admin,
     step-up, four eyes).
 
+### Addendum (2026-11-19, owner-approved follow-up): capability-combination exposure findings
+
+The owner asked for capability-combination findings (the lethal trifecta and similar) as factors in the score, reusing
+ADR-0091 toxic combinations and the ADR-0059 blast radius, each explaining itself with a ranked fix. Method
+`adr0339-v3`.
+
+1. **Capabilities, one row each.** The gateway resolves what an agent itself holds (`agent-capabilities.ts`):
+   - a builder agent's tool and connector bindings (Ask-first = `requires_approval`), its inbound channels and computer
+     use;
+   - a registry agent's active workload identity grants (ADR-0188/0262, direct and through identity roles, merged by
+     `loadActorEntitlements`).
+
+   A registry agent with no active identity holds nothing of its own: its combinations read "not applicable". Each row
+   says whether the capability reads, writes, has Ask-first (null for a registry agent, which has no switch), the
+   ADR-0193 tier of its source, whether it reaches the open world, whether it is destructive, and how many other agents
+   hold it.
+2. **Fails closed.**
+   - An MCP tool reads or writes by its `kind` (no `readOnlyHint` is a write).
+   - It reaches the open world unless its admitted definition pin says `openWorldHint: false`.
+   - A write is destructive if an admin marked it dangerous (ADR-0236), or unless its admitted definition says
+     `destructiveHint: false`. These are the MCP specification's defaults.
+   - A source nobody classified is untrusted (ADR-0193).
+   - A connector reads and writes by its provider (`connectorOperations`); a read never reaches the open world, and it
+     is not destructive.
+3. **Legs** (pure, `capabilityLegs` in @regulait/shared):
+   - private data: any read;
+   - untrusted content: an inbound channel, computer use, or a read from a source not classified trusted or standard;
+   - external communication: a write without Ask-first, or an open-world read (a fetch can carry data out);
+   - unconfirmed destructive action: a destructive write without Ask-first.
+4. **Combinations** replace the coarse builder-only "untrusted input + data + unconfirmed action":
+   - `lethal_trifecta`: private data + untrusted content + external communication (OWASP LLM01, LLM02, ASI01, ASI02);
+   - `untrusted_input_unconfirmed_destructive`: untrusted content + unconfirmed destructive action (LLM01, LLM03,
+     ASI01, ASI02);
+   - `sod_rule_held_by_agent` (ADR-0091) is unchanged.
+
+   Each combination lists every leg with its members and the reason each one is there, also when a leg is empty and the
+   combination is broken.
+5. **Ranked fix options** (`rankFixOptions`): one option per leg, each of which breaks the combination on its own.
+   - The fewest members to change comes first.
+   - Ask-first comes before removal, because it keeps the capability. It is offered only when every member of the leg
+     is a write with an Ask-first switch.
+   - Then the smaller blast radius: members held by fewer other agents.
+   - Then the leg order.
+
+   The first option is the combination's `fix`. The score-level counterfactual list is unchanged.
+6. **Blast radius weights the combinations.** Every toxic combination now adds `round(15 x reach multiplier)`, the same
+   ADR-0059 reach band that multiplies exposure.
+7. **Every change.** `pending/risk_score_capability_marks.sql` marks the holders when any of these change:
+   - an MCP tool's kind or dangerous flag;
+   - a connector's provider or disabled state;
+   - an ADR-0193 tier;
+   - a tool's admitted definition;
+   - an identity's grants, roles or status;
+   - a role's tool, server or connector grants.
+
+   It is named to sort after `agent_risk_scores.sql` and `connector_disable.sql`, whose objects it uses.
+8. **Not counted as a mitigation (strict default):** the ADR-0193 write floor and per-call approval rules. The floor
+   gates only calls made with a run or thread context, and an approval rule is not Ask-first on every call. Counting
+   either would understate the risk.
+9. **No new table, column or route.** The census counter is untouched.
+
 ## Reuse and open source (ADR-0176)
 
 - **Reused, not re-derived:** `loadFloorEvidence` and `loadAutonomyFacts` and the A8 derivation (autonomy.ts),
@@ -141,7 +202,24 @@ as, and whether its owner is gone or inactive.
   the arithmetic is sums and a band lookup, and the queue is one table drained by the existing scheduler (pg-boss is
   already in the tree, but a dirty-mark table written by triggers is what guarantees coverage of every write path).
 
+- **Addendum comparison (owner rule 9):**
+  - **Invariant Labs mcp-scan "toxic flows"** (Apache-2.0) labels tools through its cloud API, so it does not work
+    air-gapped. Only the leg taxonomy is reused.
+  - **Invariant Guardrails** (Apache-2.0) checks runtime traces in Python. That is a different layer from a capability
+    set.
+  - **OPA/Rego** and **Cedar** (Apache-2.0) could express the rules, but they add a policy runtime for a set
+    intersection, and they decide allow or deny, not exposure.
+  - **MCP tool annotations** (the specification, MIT) are adopted as the vocabulary, with the specification's
+    fail-closed defaults.
+  - The rule itself comes from the lethal-trifecta and "rule of two" write-ups (concepts, no code).
+  - No rule library fits, so the rules stay ours (the ADR-0176 §4 exception for governance semantics).
+
 ## Consequences
+
+- Addendum: an agent that reads from an unclassified MCP server reaching the open world forms the trifecta with one
+  tool. That is the strict default, not a false positive: classifying the server (ADR-0193) or admitting a definition
+  that says `openWorldHint: false` is the fix. Scores move up when `adr0339-v3` first runs. Old assessments keep their
+  `adr0339-v2` meaning.
 
 - Every agent has a score and a history from the first sweep after the migration. A change of evidence that is not
   an agent change (a red-team run, a guardrail policy edit, a sign-off, an SoD rule, the owner's account) shows in

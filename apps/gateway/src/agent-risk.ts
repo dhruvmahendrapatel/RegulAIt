@@ -20,6 +20,7 @@
  *
  * Read-only toward everything it scores: it changes no agent, grant or setting.
  */
+import { builderAgentCapabilities, registryAgentCapabilities } from "./agent-capabilities.js";
 import { createHash } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -155,6 +156,7 @@ export async function registryAgentInput(db: Db, agentId: string, now: Date): Pr
     servedModelRelaxed: a.expectedServedModel !== null && a.expectedServedModel !== a.model,
     reach,
     sodRule: await sodRuleHeldBy(db, [{ kind: "agent", objectId: a.id, toolName: null, mode: null }]),
+    capabilities: await registryAgentCapabilities(db, a.id),
   };
 }
 
@@ -220,6 +222,7 @@ export async function builderAgentInput(db: Db, agentId: string, now: Date): Pro
       detail: `sharing '${b.sharing}': ${people} people can use it; ${Number(parents?.n ?? 0)} agents use it as a sub-agent`,
     },
     sodRule: await sodRuleHeldBy(db, capabilities),
+    capabilities: await builderAgentCapabilities(db, b),
   };
 }
 
