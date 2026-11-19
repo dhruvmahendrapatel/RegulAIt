@@ -150,11 +150,13 @@ const settingsSchema = z
     endpointRetentionDays: z.number().int().min(DISCOVERY_ENDPOINT_RETENTION_MIN_DAYS).max(DISCOVERY_ENDPOINT_RETENTION_MAX_DAYS).optional(),
     // ADR-0235: the wider-source family switches; turning one on is a relaxation, turning one off is free
     families: z
-      .object({ saas: z.boolean().optional(), identity: z.boolean().optional(), ml_platform: z.boolean().optional() })
+      .object({ saas: z.boolean().optional(), identity: z.boolean().optional(), ml_platform: z.boolean().optional(), agent_registry: z.boolean().optional() })
       .strict()
       .optional(),
     // ADR-0259: MCP client-config discovery through the endpoint agent; turning it on is a relaxation
     endpointMcpConfig: z.boolean().optional(),
+    // ADR-0331: governed removal of flagged MCP servers from endpoints; turning it on is a relaxation
+    endpointAddonRemoval: z.boolean().optional(),
   })
   .strict();
 const uuidParam = z.object({ sourceId: z.string().uuid() });
@@ -838,13 +840,16 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
         relaxed[DISCOVERY_STEP_UP_KEYS.retention] = body.endpointRetentionDays;
       }
       // ADR-0235: turning a wider-source family ON is a relaxation, bound to exactly the families being turned on
-      const beforeFamilies = { saas: row.saasSourcesEnabled, identity: row.identitySourcesEnabled, ml_platform: row.mlPlatformSourcesEnabled };
+      const beforeFamilies = { saas: row.saasSourcesEnabled, identity: row.identitySourcesEnabled, ml_platform: row.mlPlatformSourcesEnabled, agent_registry: row.agentRegistrySourcesEnabled };
       const afterFamilies = { ...beforeFamilies, ...(body.families ?? {}) };
       const turnedOn = DISCOVERY_GATED_FAMILIES.filter((f) => afterFamilies[f] && !beforeFamilies[f]);
       if (turnedOn.length > 0) relaxed[DISCOVERY_STEP_UP_KEYS.families] = turnedOn;
       // ADR-0259: reading MCP host configs on employee machines is off until an admin turns it on (step-up); off is free
       const mcpAfter = body.endpointMcpConfig ?? row.endpointMcpConfigEnabled;
       if (mcpAfter && !row.endpointMcpConfigEnabled) relaxed[DISCOVERY_STEP_UP_KEYS.endpointMcpConfig] = true;
+      // ADR-0331: removing flagged MCP servers from employee machines is off until an admin turns it on (step-up); off is free
+      const removalAfter = body.endpointAddonRemoval ?? row.endpointAddonRemovalEnabled;
+      if (removalAfter && !row.endpointAddonRemovalEnabled) relaxed[DISCOVERY_STEP_UP_KEYS.endpointAddonRemoval] = true;
       if (Object.keys(relaxed).length > 0) {
         const r = await spendStepUp(req, { kind: "settings_relax", facts: { values: relaxed } }, null);
         if (r) return r;
@@ -857,7 +862,9 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
           saasSourcesEnabled: afterFamilies.saas,
           identitySourcesEnabled: afterFamilies.identity,
           mlPlatformSourcesEnabled: afterFamilies.ml_platform,
+          agentRegistrySourcesEnabled: afterFamilies.agent_registry,
           endpointMcpConfigEnabled: mcpAfter,
+          endpointAddonRemovalEnabled: removalAfter,
           version: row.version + 1,
           updatedBy: actor(req),
           updatedAt: sql`now()`,
@@ -866,8 +873,8 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
       await audit(t, req, "discovery_settings", null, Object.keys(relaxed).length ? "discovery-settings-relaxed" : "discovery-settings-updated", "allow",
         `discovery settings updated${Object.keys(relaxed).length ? " (relaxed, with a step-up)" : ""}`,
         {
-          before: { credentialWarningAgeDays: row.credentialWarningAgeDays, endpointRetentionDays: row.endpointRetentionDays, families: beforeFamilies, endpointMcpConfig: row.endpointMcpConfigEnabled },
-          after: { credentialWarningAgeDays: body.credentialWarningAgeDays ?? row.credentialWarningAgeDays, endpointRetentionDays: body.endpointRetentionDays ?? row.endpointRetentionDays, families: afterFamilies, endpointMcpConfig: mcpAfter },
+          before: { credentialWarningAgeDays: row.credentialWarningAgeDays, endpointRetentionDays: row.endpointRetentionDays, families: beforeFamilies, endpointMcpConfig: row.endpointMcpConfigEnabled, endpointAddonRemoval: row.endpointAddonRemovalEnabled },
+          after: { credentialWarningAgeDays: body.credentialWarningAgeDays ?? row.credentialWarningAgeDays, endpointRetentionDays: body.endpointRetentionDays ?? row.endpointRetentionDays, families: afterFamilies, endpointMcpConfig: mcpAfter, endpointAddonRemoval: removalAfter },
         });
       return true;
     });

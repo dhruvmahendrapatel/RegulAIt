@@ -45,7 +45,7 @@ import {
   AGENT_RISK_PROOF_ORIGIN_TAG,
   LIVE_RISK_STATUSES,
   agentRiskProofs,
-  canonicalJson,
+  agentRiskProofEvidence,
   measurementStateFor,
   sha256Hex,
   type AgentRisk,
@@ -202,28 +202,8 @@ export async function runAgentRiskProofEngine(
 // evidence
 // ---------------------------------------------------------------------------
 
-/** the canonical bytes a result's hash and signature cover (ADR-0060's canonical JSON) */
-export function agentRiskProofEvidence(r: {
-  proofKey: string;
-  riskKey: string;
-  catalogVersion: number;
-  trigger: AgentRiskProofTrigger;
-  outcome: MeasurementState;
-  startedAt: Date;
-  finishedAt: Date;
-  detail: Record<string, unknown>;
-}): string {
-  return canonicalJson({
-    proofKey: r.proofKey,
-    riskKey: r.riskKey,
-    catalogVersion: r.catalogVersion,
-    trigger: r.trigger,
-    outcome: r.outcome,
-    startedAt: r.startedAt.toISOString(),
-    finishedAt: r.finishedAt.toISOString(),
-    detail: r.detail,
-  });
-}
+/** the canonical bytes a result's hash and signature cover; defined in `@regulait/shared` so a reader needs no runner */
+export { agentRiskProofEvidence };
 
 export interface RecordedProof {
   resultId: string;

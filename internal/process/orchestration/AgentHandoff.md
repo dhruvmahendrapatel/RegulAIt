@@ -38,15 +38,11 @@ Read this first if you are taking over as the master session of the RegulAIt bui
 
 ## Where we left off (current master)
 
-- **2026-11-18, 18:10 UTC.** Master hand-over at about 08:54 UTC; the new master runs the merge loop.
-- **Merged and audited since the hand-over:** #941, #1013, #904, #1010, #903, #1035, #744, #1019. Every merge's second
-  parent equals the released SHA. #952 (E31) is released and should merge next.
-- **Census-counter queue (M-118).** One PR that edits `KNOWN_UI_GAPS_MAX` is released at a time. Order: #902 (E1, CI
-  running after its main merge, census 73), then #883 (E20), #848 (E2), #855 (E3), #861 (E7), #867 (E16), and #865
-  (E15) once approved. Each builder waits for the master's message, merges main, sets the census to main's value plus its
-  own routes, and posts READY; then a merge-only delta review and release.
-- **In review:** #865 (E15) delta R3 + Xtyd8.
-- **Request changes, waiting for READY:** #1020 (E12), #982 (E44), #871 (E13).
-- **Waiting on the builder:** #884 (E18), #996 (E27, three failing checks), Codex #936 (route first on READY), #1006,
-  #1007.
-- **Proposal for the owner, not started:** compute the census count instead of hand-setting it, to end the queue.
+- **2026-11-19, 00:15 UTC.** Merged and audited since the hand-over: #941, #1013, #904, #1010, #903, #1035, #744, #1019,
+  #952, #1040, #902, #883, #1039.
+- **Census queue (M-118):** #848 (E2) is in its turn; then #855, #861, #867, #865, #1020, #871, and later #964, #1044,
+  #892, #982 once approved. After each census merge, read `KNOWN_UI_GAPS_MAX` on main and give the next builder main's
+  value plus its own delta (`git diff origin/main...origin/<branch> -- scripts/preflight-ui-route-census.mjs`).
+- **Non-census PRs** are released in parallel as soon as both approvals land (#1045 next).
+- **Waiting on builders:** #884 (E18), #996 (E27), Codex #936 (route first on READY).
+- **Usage limit:** see Status.md for the 2026-11-18 outage and the resume rule.

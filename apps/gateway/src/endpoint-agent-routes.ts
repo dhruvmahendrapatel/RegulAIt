@@ -15,6 +15,8 @@
  *   POST /v1/endpoint-agent/credentials         the agent's self token; key rotation (ADR-0188 S7 point 4)
  *   GET  /v1/endpoint-agent/config              the agent's self token; 503 until a signed collection pack exists
  *   POST /v1/endpoint-agent/reports             the agent's self token + Content-Digest + report signature
+ *   GET  /v1/endpoint-agent/directives          the agent's self token; ADR-0331 signed removal directives (503 unsigned)
+ *   POST /v1/endpoint-agent/directive-outcomes  the agent's self token; ADR-0331 outcomes, one per directive
  *
  *   POST /v1/discovery/sources/:sourceId/enrolment-tokens     admin: issue (capped, 30 days at most; up to 90 only
  *                                                             with a `settings_relax` step-up, ADR-0197 Q13; shown once)
@@ -125,6 +127,7 @@ import { bindPreparedCredentialTx, IdentityAdminError, revokeWorkloadIdentity } 
 import type { SchedulerJobDefinition } from "./scheduler.js";
 import { requireStepUp, type StepUpCheckArgs } from "./step-up.js";
 import { MCP_CONFIG_KIND, recordMcpServers } from "./endpoint-mcp-config.js";
+import { registerEndpointDirectiveRoutes, type DirectiveSigner } from "./endpoint-addon-removal.js";
 import { loadDiscoverySettings } from "./discovery-posture.js";
 import { hashToken } from "./token-hash.js";
 
@@ -479,7 +482,11 @@ async function revokeDeviceTx(t: Db, deviceId: string, actorId: string, revokedB
   return { device, identitiesRevoked, tokensRevoked };
 }
 
-export function registerEndpointAgentRoutes(app: FastifyInstance, db: Db, opts: { dataKey?: string | undefined; registry?: ScannerRegistry } = {}): void {
+export function registerEndpointAgentRoutes(
+  app: FastifyInstance,
+  db: Db,
+  opts: { dataKey?: string | undefined; registry?: ScannerRegistry; directiveSigner?: DirectiveSigner | null } = {},
+): void {
   const registry = opts.registry ?? DISCOVERY_SCANNERS;
 
   // ---- the agent's routes: raw bodies (the report digest covers the exact bytes) -------------------------------
@@ -727,6 +734,15 @@ export function registerEndpointAgentRoutes(app: FastifyInstance, db: Db, opts: 
       // the collection pack is signed under its own key (ADR-0195 SD4 decisions); that key and the signing stage do
       // not exist yet, and an unsigned pack is never served (the agent refuses one anyway)
       return refuse(reply, 503, "collection_pack_unavailable");
+    });
+
+    // -- ADR-0331: signed add-on removal directives and their outcomes (endpoint-addon-removal.ts) ----------------
+    registerEndpointDirectiveRoutes(scope, db, {
+      agentOf,
+      audit: (t, sourceId, ruleId, effect, reason, detail) => audit(t, NIL_UUID, "discovery_source", sourceId, ruleId, effect, reason, { adr: "0331", ...detail }),
+      refuse,
+      jsonOf,
+      signer: opts.directiveSigner ?? null,
     });
 
     // -- key rotation (ADR-0188 S7 point 4) -----------------------------------------------------------------------

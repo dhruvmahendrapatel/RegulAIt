@@ -9,6 +9,8 @@
 // the display names encrypted. A report never carries either, and never carries an absolute path.
 package contract
 
+import "encoding/json"
+
 // Route paths under the issuer. The gateway serves only these to an endpoint agent (`via: "endpoint-agent"`).
 const (
 	RouteEnrolmentTickets = "/v1/endpoint-agent/enrolment-tickets"
@@ -16,7 +18,10 @@ const (
 	RouteCredentials      = "/v1/endpoint-agent/credentials"
 	RouteConfig           = "/v1/endpoint-agent/config"
 	RouteReports          = "/v1/endpoint-agent/reports"
-	RouteToken            = "/oauth/token"
+	// ADR-0331: signed add-on removal directives, and the agent's per-directive outcomes
+	RouteDirectives        = "/v1/endpoint-agent/directives"
+	RouteDirectiveOutcomes = "/v1/endpoint-agent/directive-outcomes"
+	RouteToken             = "/oauth/token"
 	// ResourcePath is the RFC 8707 resource an agent's self token names (ADR-0188 S7 point 1).
 	ResourcePath = "/v1/endpoint-agent"
 )
@@ -299,3 +304,41 @@ const (
 	ErrUseDPoPNonce        = "use_dpop_nonce"
 	ErrDeviceRevoked       = "device_revoked"
 )
+
+// ADR-0331: governed add-on removal. The directive itself is a signed envelope (enforce.Envelope) whose payload
+// internal/directive decodes; these are the transport bodies around it.
+
+// DirectivesResponse is GET RouteDirectives: at most MaxDirectivesPerSync signed envelopes.
+type DirectivesResponse struct {
+	Directives []json.RawMessage `json:"directives"`
+}
+
+// MaxDirectivesPerSync bounds one sync, on both sides.
+const MaxDirectivesPerSync = 20
+
+// Directive outcomes and their closed code vocabulary (ADR-0331 section 7).
+const (
+	OutcomeRemoved         = "removed"
+	OutcomeNothingToRemove = "nothing_to_remove"
+	OutcomeFailed          = "failed"
+)
+
+// OutcomeCodes maps each outcome to the codes it may carry.
+var OutcomeCodes = map[string][]string{
+	OutcomeRemoved:         {"removed"},
+	OutcomeNothingToRemove: {"not_present", "identity_differs"},
+	OutcomeFailed:          {"not_in_manifest", "path_refused", "unsupported_format", "parse_failed", "write_failed", "expired", "wrong_identity"},
+}
+
+// DirectiveOutcome is one directive's result on this device.
+type DirectiveOutcome struct {
+	DirectiveID string `json:"directiveId"`
+	Outcome     string `json:"outcome"`
+	Code        string `json:"code"`
+	Notified    bool   `json:"notified"`
+}
+
+// DirectiveOutcomesRequest is POST RouteDirectiveOutcomes.
+type DirectiveOutcomesRequest struct {
+	Outcomes []DirectiveOutcome `json:"outcomes"`
+}

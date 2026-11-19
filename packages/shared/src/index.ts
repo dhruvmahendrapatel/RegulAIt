@@ -3172,6 +3172,7 @@ export {
   auditContentHash,
   auditContentHashFor,
   auditRowHash,
+  auditRowSelfConsistent,
   canonicalAuditPayload,
   canonicalAuditPayloadV2,
   type AuditChainVersion,
@@ -4994,6 +4995,8 @@ export {
   MODEL_DRIFT_MONITOR_RULE_ID,
   suggestedHaltFor,
   type AccountabilityMonitorRuleId,
+  SPEND_MONITOR_RULE_IDS,
+  type SpendMonitorRuleId,
 } from "./governance-monitor.js";
 
 // ===== ADR-0186 (batch 4) — dual control, step-up, passkey-signed approvals,
@@ -5072,6 +5075,13 @@ export * from "./state-machine.js";
 export * from "./state-machines.js";
 // ADR-0261 (P37): third-party security telemetry ingest — the DefenseClaw JSONL parser and mapping (pure)
 export * from "./third-party-ingest/index.js";
+// ADR-0334 (lane E16): the managed browser extension's contract (also the `@regulait/shared/browser-governance` subpath)
+export * from "./browser-governance/index.js";
+export { dlpRuleIds, matchDlp } from "./dlp-secret-re2.js";
+
+// ADR-0322: vendor usage/cost pull (catalogue, config and response schemas, normalisers)
+export * from "./vendor-usage.js";
+
 // ADR-0339 (lane E20): the agent risk score, recomputed on every change (pure; OWASP ids only)
 export * from "./agent-risk-score.js";
 // ADR-0339 slice 2 (lane E20): author vs runner and non-human identity links (pure vocabulary)

@@ -252,7 +252,7 @@ beforeAll(async () => {
     await db.execute(sql`UPDATE org_settings SET step_up_mode = ${prior!.mode}, step_up_actions = ${JSON.stringify(prior!.actions)}::jsonb WHERE id = ${ORG_SETTINGS_ID}`);
   });
   await db.execute(sql`UPDATE org_settings SET step_up_mode = 'required',
-    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management"]'::jsonb
+    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management", "endpoint_remediation"]'::jsonb
     WHERE id = ${ORG_SETTINGS_ID}`);
 
   // the issuer's ES256 key (the subject token is an ADR-0210 OIDC assertion)

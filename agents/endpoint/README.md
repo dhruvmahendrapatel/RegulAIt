@@ -80,3 +80,23 @@ Registrations (paths are examples; use absolute paths with no shell metacharacte
   `PreToolUse` command `/usr/local/bin/regulait-agent hook codex -policy /etc/regulait/policy.json`, with
   `allow_managed_hooks_only = true` and `[features] hooks = true`. Pair it with the `[mcp_servers.<name>] identity`
   allow-list.
+
+## Governed add-on removal (ADR-0331; off by default)
+
+This is the agent's only write outside its own state directory, a narrow and recorded exception to ADR-0195 decision
+19. At each sync, after the collection pack has verified, the agent fetches its signed removal directives. A directive
+removes one named MCP server entry from one plain-JSON MCP client config that the signed manifest locates, and only
+when the entry's identity matches.
+
+- **Checks before acting.** A directive is acted on only if it is signed under the enforcement keyring (the compiled keys plus the pinned `devicePolicyKeys`) and bound to
+  this agent's identity. It must be inside its validity window (at most 7 days) and not already in the replay ledger
+  (`directive-ledger.json`, 0600).
+- **How the edit is made.** Every other byte of the file is kept. The file is replaced atomically through `os.Root`,
+  and a symlink is never written through.
+- **What is left alone.** JSONC and TOML configs are reported `unsupported_format` and not edited. Skills, plugins,
+  editor extensions and the coding agent itself are never touched.
+- **Reporting.** The developer sees a platform notice: `/usr/bin/osascript`, `/usr/bin/notify-send` or the system `msg.exe` (absolute paths, never `PATH`), run as an argument list
+  with no shell. Each outcome (`removed`, `nothing_to_remove` or `failed`, with a fixed code) is posted back to the
+  gateway's audit trail.
+- **Current state.** The compiled keyring is empty until SD4, so a directive verifies only under a pinned
+  `devicePolicyKeys` key, and the gateway answers `503 directive_signer_unavailable` until it has a signer.
