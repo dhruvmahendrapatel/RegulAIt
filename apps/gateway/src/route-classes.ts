@@ -405,6 +405,10 @@ export const NON_ADMIN_ROUTES = new Set([
   // already read (an agent they steward, a use case they own or may read; everything for an admin)
   "GET /v1/reports/posture/assets",
   "GET /v1/reports/posture/assets/:kind/:assetId",
+  // ADR-0339 — one agent's risk score and its history: any user, scoped in the handler to an admin or the agent's own
+  // steward/owner (404 otherwise). The ranked list and the recompute stay admin through the default gate.
+  "GET /v1/agent-risk/:kind/:subjectId",
+  "GET /v1/agent-risk/:kind/:subjectId/history",
   "GET /v1/risks",
   "GET /v1/risks/library",
   // G2/X8: the scenario library — same class as the risk library
@@ -465,6 +469,10 @@ export const NON_ADMIN_ROUTES = new Set([
   // leak sideways. Every other cost-import route — uploading a file, asserting
   // an identity mapping, reading fleet-wide — is absent here on purpose.
   "GET /v1/users/:userId/cost-consolidated",
+  // ADR-0312: a non-admin pages the outcomes of workflows they initiated (handler predicate and the table's RLS)
+  "GET /v1/cost-outcomes",
+  // ADR-0312 (pilot addendum): a person reads their own spend budget and spend (refused in-handler otherwise)
+  "GET /v1/users/:userId/spend-budget",
   // ADR-0342 (lane E23): process analytics. Each read applies `evaluateReportAccess` in the handler and is narrowed to
   // the projects in scope the caller is a member of (org scope is admin-only); refresh stays admin.
   "GET /v1/process-analytics/templates",

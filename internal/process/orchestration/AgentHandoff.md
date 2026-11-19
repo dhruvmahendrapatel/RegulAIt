@@ -38,20 +38,11 @@ Read this first if you are taking over as the master session of the RegulAIt bui
 
 ## Where we left off (current master)
 
-- **2026-11-18, about 08:54 UTC:** master hand-over. The previous master stopped its merge loop and its scheduled tasks,
-  and its session is to be archived. The new master runs the merge loop from its own scratchpad, seeded with the same
-  released.txt.
-- **Merged and audited today:** #1004, #880, #1011, #973, #941 (merge 82142059, second parent 3b86b4e0 = released).
-- **Released, not merged (dirty after other merges):** #904 (E26), #903 (E12), #902 (E1), #883 (E20). Each builder was
-  told to merge main and post a new READY. Then delta reviews: #904 R3 + Xtyd8; #903 R2 + a3BYi; #902 WaRPg + a3BYi;
-  #883 WaRPg + Xtyd8.
-- **Request changes, waiting on the builder:** #1010 (E45, RPA ADR only), #884 (E18, security RC on the directory opt-in
-  and auto-link).
-- **Older lanes:** E24 and E25 were done with no open PR and are archived. E2 (#848), E3 (#855), E7 (#861), E13 (#871),
-  E15 (#865), E16 (#867) and E27 (#996) had been idle since 2026-11-17. Each was told to merge main once (the picomatch
-  no-fix gate, #1004, clears their audit failure), fix any real failure, and post READY.
-- **Next steps:**
-  1. Route #936 (Codex C1, CI build-once) first when it posts READY.
-  2. Delta-review the four dirty PRs as their READYs arrive; release on both approvals at the head.
-  3. Archive lanes as they say "LANE DONE".
-  4. Lift rule 15 a few lanes at a time once the open PR count is under 50, with E45's code first.
+- **2026-11-19, 00:15 UTC.** Merged and audited since the hand-over: #941, #1013, #904, #1010, #903, #1035, #744, #1019,
+  #952, #1040, #902, #883, #1039.
+- **Census queue (M-118):** #848 (E2) is in its turn; then #855, #861, #867, #865, #1020, #871, and later #964, #1044,
+  #892, #982 once approved. After each census merge, read `KNOWN_UI_GAPS_MAX` on main and give the next builder main's
+  value plus its own delta (`git diff origin/main...origin/<branch> -- scripts/preflight-ui-route-census.mjs`).
+- **Non-census PRs** are released in parallel as soon as both approvals land (#1045 next).
+- **Waiting on builders:** #884 (E18), #996 (E27), Codex #936 (route first on READY).
+- **Usage limit:** see Status.md for the 2026-11-18 outage and the resume rule.

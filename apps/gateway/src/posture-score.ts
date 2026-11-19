@@ -38,6 +38,9 @@ export interface PostureScoreInput {
   agentOwnership: { total: number; owned: number; unowned: number; orphaned: number };
   certificationCampaigns: { expiredIncomplete: number };
   sod: { currentViolations: number };
+  /** ADR-0345: the latest result of each agent-risk proof. Shown as inputs to the adversarial objective; it does not
+   * change the published weights or the score (a re-weighting is an owner decision, recorded in ADR-0345). */
+  riskProofs?: { total: number; passingWithEvidence: number; notPassing: number; unverifiable: number };
 }
 
 export type ObjectiveId = "coverage" | "risk" | "adversarial" | "evaluation" | "access" | "audit" | "spend";
@@ -212,6 +215,16 @@ function adversarial(d: PostureScoreInput): Draft {
       inputs: [
         { label: "Attack-success rate, upper bound of the 95% interval", value: upper === null ? "unmeasured" : pctText(upper * 100) },
         { label: "Runs in the report window", value: String(rt.runsInWindow) },
+        ...(d.riskProofs
+          ? [
+              {
+                label: "Agent-risk proofs passing with evidence (ADR-0345)",
+                value: `${d.riskProofs.passingWithEvidence} of ${d.riskProofs.total}`,
+              },
+              { label: "Agent-risk proofs not passing", value: String(d.riskProofs.notPassing) },
+              { label: "Agent-risk proof results whose evidence no longer holds", value: String(d.riskProofs.unverifiable) },
+            ]
+          : []),
       ],
       formula: `(1 − upper bound of the attack-success rate) × 100, halved when no run falls in the report window. Unmeasured scores 0.`,
       link,
