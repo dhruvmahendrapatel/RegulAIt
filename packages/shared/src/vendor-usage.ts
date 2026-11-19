@@ -78,7 +78,8 @@ export const VENDOR_USAGE_CATALOGUE: Readonly<Record<VendorUsagePullVendor, Vend
       "GitHub documents organisation 'Administration' read (fine-grained token) for the organisation report and " +
       "enterprise billing read for the enterprise report. A fine-grained token can also carry write permissions, " +
       "and GitHub does not report a fine-grained token's permissions back, so RegulAIt cannot verify the scope. " +
-      "Issue a token with read permissions only; RegulAIt calls only the usage report with it.",
+      "Storing it needs the administrator's attestation that it carries read permissions only (recorded and " +
+      "audited); RegulAIt calls only the usage report with it.",
     overlapMatchesOn: [],
     limits:
       "The daily usage report is billed per organisation, product, SKU and repository, not per person, so a line " +
@@ -99,8 +100,9 @@ export const VENDOR_USAGE_CATALOGUE: Readonly<Record<VendorUsagePullVendor, Vend
     overlapMatchesOn: [],
     limits:
       "Usage events are summed per day, user email (or service account), model, kind and product from each " +
-      "event's charged cents, so included usage that Cursor does not charge counts as zero. A user resolves to a " +
-      "person by email. A window with more than 40,000 events stops with page_limit: lower backfillDays. The " +
+      "event's charged cents, so included usage that Cursor does not charge counts as zero. The user's email is " +
+      "stored on each line as its account reference, as for file-imported cost lines, and resolves it to a person. " +
+      "A window with more than 40,000 events stops with page_limit: lower backfillDays. The " +
       "gateway does not meter Cursor, so no line is excluded as already metered.",
   },
 };
@@ -433,7 +435,10 @@ function utcDay(ms: number): { start: string; end: string } {
  * currency; it bills in USD, and the catalogue says so.
  */
 export function normalizeGithubCopilotUsage(page: GithubBillingUsage, account: { kind: "organization" | "enterprise"; slug: string }): VendorUsageFact[] {
-  const facts: VendorUsageFact[] = [];
+  // items with the same identity on the same day (for example around a price change) are summed, never collapsed:
+  // the gateway keeps one fact per key, so an unsummed duplicate would silently drop spend (#1069 R4)
+  const groups = new Map<string, { fact: VendorUsageFact; net: number; qty: number | null; gross: number | null; discount: number | null }>();
+  const micro = (n: number) => Math.round(n * 1e6);
   for (const item of page.usageItems) {
     if (!item.product.toLowerCase().includes("copilot")) continue;
     const at = Date.parse(item.date);
@@ -441,28 +446,49 @@ export function normalizeGithubCopilotUsage(page: GithubBillingUsage, account: {
     const { start, end } = utcDay(at);
     const org = item.organizationName ?? (account.kind === "organization" ? account.slug : null);
     const repo = item.repositoryName ?? null;
-    facts.push({
-      factCanonical: canonical(["github_copilot.billing_usage.v1", account.kind, account.slug, start, item.product, item.sku, org, repo]),
-      accountRef: org ? `github organization ${org}` : `github enterprise ${account.slug}`,
-      accountKind: "organisation",
-      accountId: org,
-      periodStart: start,
-      periodEnd: end,
-      amount: item.netAmount,
-      currency: "USD",
-      service: item.sku ?? item.product,
-      description: item.product,
-      quantity: item.quantity ?? null,
-      unit: item.unitType ?? null,
-      detail: {
-        source: "github billing usage",
-        ...(repo ? { repository: repo } : {}),
-        ...(typeof item.grossAmount === "number" ? { grossAmount: item.grossAmount } : {}),
-        ...(typeof item.discountAmount === "number" ? { discountAmount: item.discountAmount } : {}),
-      },
-    });
+    const factCanonical = canonical(["github_copilot.billing_usage.v1", account.kind, account.slug, start, item.product, item.sku, org, repo]);
+    let g = groups.get(factCanonical);
+    if (!g) {
+      g = {
+        fact: {
+          factCanonical,
+          accountRef: org ? `github organization ${org}` : `github enterprise ${account.slug}`,
+          accountKind: "organisation",
+          accountId: org,
+          periodStart: start,
+          periodEnd: end,
+          amount: 0,
+          currency: "USD",
+          service: item.sku ?? item.product,
+          description: item.product,
+          quantity: null,
+          unit: item.unitType ?? null,
+          detail: { source: "github billing usage", ...(repo ? { repository: repo } : {}) },
+        },
+        net: 0,
+        qty: null,
+        gross: null,
+        discount: null,
+      };
+      groups.set(factCanonical, g);
+    }
+    g.net += micro(item.netAmount);
+    if (typeof item.quantity === "number") g.qty = (g.qty ?? 0) + micro(item.quantity);
+    if (typeof item.grossAmount === "number") g.gross = (g.gross ?? 0) + micro(item.grossAmount);
+    if (typeof item.discountAmount === "number") g.discount = (g.discount ?? 0) + micro(item.discountAmount);
+    // a unit that differs between summed items is not one unit any more
+    if (g.fact.unit !== (item.unitType ?? null)) g.fact.unit = null;
   }
-  return facts;
+  return [...groups.values()].map(({ fact, net, qty, gross, discount }) => ({
+    ...fact,
+    amount: net / 1e6,
+    quantity: qty === null ? null : qty / 1e6,
+    detail: {
+      ...fact.detail,
+      ...(gross !== null ? { grossAmount: gross / 1e6 } : {}),
+      ...(discount !== null ? { discountAmount: discount / 1e6 } : {}),
+    },
+  }));
 }
 
 /**

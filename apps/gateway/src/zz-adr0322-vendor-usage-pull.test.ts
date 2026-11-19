@@ -128,12 +128,13 @@ async function createConnector(vendor: "anthropic" | "openai" | "github_copilot"
   return c as { id: string; enabled: boolean; credential: unknown };
 }
 
-async function storeKey(connectorId: string, secret: string) {
+async function storeKey(connectorId: string, secret: string, extra: Record<string, unknown> = {}) {
   return steppedPut(`/v1/vendor-usage/connectors/${connectorId}/credential`, {
     secret,
     replacesCredentialId: null,
     acknowledgeWriteCapable: true,
     reason: "adr0322 suite key",
+    ...extra,
   });
 }
 
@@ -530,7 +531,7 @@ async function allowHost(host: string) {
 
 async function enabledConnector(vendor: "github_copilot" | "cursor", config: Record<string, unknown>, secret: string) {
   const c = await createConnector(vendor, config);
-  expect((await storeKey(c.id, secret)).statusCode).toBe(201);
+  expect((await storeKey(c.id, secret, vendor === "github_copilot" ? { acknowledgeUnverifiedScope: true } : {})).statusCode).toBe(201);
   expect((await steppedPut(`/v1/vendor-usage/connectors/${c.id}/enabled`, { enabled: true, reason: "adr0322 suite" })).statusCode).toBe(200);
   return c;
 }
@@ -546,10 +547,33 @@ describe("ADR-0322 slice 3: the GitHub Copilot pull (billing usage report, Copil
     expect(res.statusCode).toBe(400);
   });
 
-  it("reads one report per day of the window, keeps the Copilot lines, stores the token as unverified, and upserts on re-pull", async () => {
-    const c = await enabledConnector("github_copilot", { account: "organization", slug: "acme-eng", backfillDays: 3 }, GITHUB_TOKEN);
+  it("stores a token whose scope cannot be checked only with the admin's attestation, recorded and audited (#1069 S4)", async () => {
+    const c = await createConnector("github_copilot", { account: "organization", slug: "acme-eng" });
+    const refused = await storeKey(c.id, GITHUB_TOKEN);
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json().error).toBe("unverified_scope_acknowledgement_required");
+    expect(await db.select().from(vendorUsageCredentials).where(eq(vendorUsageCredentials.connectorId, c.id))).toHaveLength(0);
+
+    const stored = await storeKey(c.id, GITHUB_TOKEN, { acknowledgeUnverifiedScope: true });
+    expect(stored.statusCode, stored.body).toBe(201);
+    expect(stored.json().credential).toMatchObject({ scopePosture: "unverified", scopeAttestation: expect.stringMatching(/read permissions only/) });
+    expect(stored.json().credential.scopeAcknowledgedAt).not.toBeNull();
     const [cred] = await db.select().from(vendorUsageCredentials).where(eq(vendorUsageCredentials.connectorId, c.id));
-    expect([cred?.scopePosture, cred?.writeCapableAcknowledgedAt]).toEqual(["unverified", null]);
+    expect(cred?.scopePosture).toBe("unverified");
+    expect(cred?.writeCapableAcknowledgedAt).not.toBeNull();
+    const [row] = await db
+      .select({ detail: auditLog.detail })
+      .from(auditLog)
+      .where(and(eq(auditLog.ruleId, VENDOR_USAGE_RULE_IDS.credentialStored), eq(auditLog.objectId, cred!.id)));
+    expect(row?.detail).toMatchObject({ scopePosture: "unverified", scopeAttestation: expect.stringMatching(/read permissions only/) });
+    expect(JSON.stringify(row?.detail)).not.toContain(GITHUB_TOKEN);
+    const view = await app.inject({ method: "GET", url: "/v1/vendor-usage", headers: AUTH });
+    const mine = view.json().connectors.find((x: { id: string }) => x.id === c.id);
+    expect(mine.credential).toMatchObject({ scopePosture: "unverified", scopeAttestation: expect.stringMatching(/read permissions only/) });
+  });
+
+  it("reads one report per day of the window, keeps the Copilot lines, and upserts on re-pull", async () => {
+    const c = await enabledConnector("github_copilot", { account: "organization", slug: "acme-eng", backfillDays: 3 }, GITHUB_TOKEN);
     await allowHost("api.github.com");
 
     const yesterday = new Date(dayIso(-1));

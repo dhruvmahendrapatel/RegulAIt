@@ -294,6 +294,19 @@ Admin API) on 2026-11-19.
   - **Bounds**: a window of more than 40 pages (40,000 events) stops with `page_limit`; the admin lowers
     `backfillDays` (at most 30, Cursor's stated range for its other usage endpoints). A page number other than the one
     asked for is refused as `bad_response`.
+- **Review round (#1069)**:
+  - **An unverified scope needs an attestation** (S4 finding 1, ADR-0180): storing a credential whose posture is
+    `unverified` is refused (409 `unverified_scope_acknowledgement_required`) unless the admin sends
+    `acknowledgeUnverifiedScope: true`, attesting that the token carries read permissions only. The acknowledgement
+    time is recorded on the credential (the existing `write_capable_acknowledged_at` column now holds the
+    acknowledgement of any posture other than `read_only`; no migration). The attestation is in the audit row and on
+    the posture read (`scopeAcknowledgedAt`, `scopeAttestation`).
+  - **Same-key Copilot items are summed** (R4 finding 1): two items with the same day, product, SKU, organisation and
+    repository (for example around a price change) are one fact whose net amount, quantity, gross and discount are
+    summed in integer micro-units. Before this, the pull kept only the last one and dropped the rest of the spend.
+  - **Disclosure** (S4 finding 2): the Cursor catalogue limits state that the user's email is stored as each line's
+    account reference.
+  - **Tracked, not changed**: a Cursor window can reach 32 days after a long gap (R4 finding 2, triage-low #1083).
 - **No metered overlap**: the gateway meters neither Copilot nor Cursor, so neither connector declares gateway ids and
   the posture read says so instead of the "nothing declared" warning.
 - **Open source first (ADR-0176)**: `@octokit/request` (MIT, maintained) was compared with the guarded fetch already

@@ -134,6 +134,19 @@ describe("ADR-0322 slice 3: GitHub Copilot and Cursor normalisers", () => {
     expect(factOverlapsMetered("github_copilot", facts[0]!, vendorUsagePublicConfigSchemas.github_copilot.parse({ account: "organization", slug: "acme-eng" }))).toBe(false);
   });
 
+  it("sums two Copilot items with the same identity on one day instead of keeping only one (#1069 R4)", () => {
+    const page = githubBillingUsageSchema.parse({
+      usageItems: [
+        { date: "2026-11-17", product: "Copilot", sku: "Premium request", quantity: 10, unitType: "requests", pricePerUnit: 0.04, grossAmount: 0.4, discountAmount: 0, netAmount: 0.4, organizationName: "acme-eng" },
+        { date: "2026-11-17", product: "Copilot", sku: "Premium request", quantity: 5, unitType: "requests", pricePerUnit: 0.02, grossAmount: 0.1, discountAmount: 0, netAmount: 0.1, organizationName: "acme-eng" },
+      ],
+    });
+    const facts = normalizeGithubCopilotUsage(page, { kind: "organization", slug: "acme-eng" });
+    expect(facts).toHaveLength(1);
+    expect([facts[0]!.amount, facts[0]!.quantity, facts[0]!.unit]).toEqual([0.5, 15, "requests"]);
+    expect(facts[0]!.detail).toMatchObject({ grossAmount: 0.5, discountAmount: 0 });
+  });
+
   it("refuses a usage item whose date is not a date", () => {
     const page = githubBillingUsageSchema.parse({ usageItems: [{ date: "yesterday", product: "Copilot", netAmount: 1 }] });
     expect(() => normalizeGithubCopilotUsage(page, { kind: "enterprise", slug: "acme" })).toThrow(VendorUsageResponseError);

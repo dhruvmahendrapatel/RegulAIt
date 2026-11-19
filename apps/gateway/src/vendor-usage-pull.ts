@@ -859,6 +859,8 @@ const credentialBody = z
     secret: z.string().min(8).max(4096),
     replacesCredentialId: z.string().uuid().nullable(),
     acknowledgeWriteCapable: z.boolean().default(false),
+    /** the admin attests the token carries read permissions only, where RegulAIt cannot check its scope (#1069 S4) */
+    acknowledgeUnverifiedScope: z.boolean().default(false),
     reason: reasonField,
   })
   .strict();
@@ -872,7 +874,23 @@ function declaredGatewayIds(cfg: PublicConfig): number {
   return 0;
 }
 
-function connectorView(c: VendorUsageConnectorRow, cred: { id: string; scopePosture: string; createdAt: Date } | null) {
+/** what the admin attests when storing a token whose scope RegulAIt cannot check (#1069 S4) */
+const UNVERIFIED_SCOPE_ATTESTATION =
+  "the administrator attested that this token carries read permissions only; RegulAIt cannot verify its scope";
+
+type CredentialViewRow = { id: string; scopePosture: string; createdAt: Date; writeCapableAcknowledgedAt: Date | null };
+
+function credentialView(cred: CredentialViewRow) {
+  return {
+    id: cred.id,
+    scopePosture: cred.scopePosture,
+    storedAt: cred.createdAt.toISOString(),
+    scopeAcknowledgedAt: cred.writeCapableAcknowledgedAt?.toISOString() ?? null,
+    ...(cred.scopePosture === "unverified" ? { scopeAttestation: UNVERIFIED_SCOPE_ATTESTATION } : {}),
+  };
+}
+
+function connectorView(c: VendorUsageConnectorRow, cred: CredentialViewRow | null) {
   return {
     id: c.id,
     vendor: c.vendor,
@@ -880,7 +898,7 @@ function connectorView(c: VendorUsageConnectorRow, cred: { id: string; scopePost
     enabled: c.enabled,
     config: c.publicConfig,
     pulledThrough: c.pulledThrough?.toISOString() ?? null,
-    credential: cred ? { id: cred.id, scopePosture: cred.scopePosture, storedAt: cred.createdAt.toISOString() } : null,
+    credential: cred ? credentialView(cred) : null,
     createdAt: c.createdAt.toISOString(),
   };
 }
@@ -1023,7 +1041,7 @@ export function registerVendorUsagePullRoutes(
     if (!connector || !isPullVendor(connector.vendor)) return reply.status(404).send({ error: "not_found" });
     const parsed = credentialBody.safeParse(req.body);
     if (!parsed.success) {
-      return reply.status(400).send(bad("expected { secret, replacesCredentialId: uuid | null, acknowledgeWriteCapable?, reason }"));
+      return reply.status(400).send(bad("expected { secret, replacesCredentialId: uuid | null, acknowledgeWriteCapable?, acknowledgeUnverifiedScope?, reason }"));
     }
     if (resolveDeployMode() === "air_gapped") {
       return reply.status(409).send({ error: "vendor_usage_air_gapped", detail: "this deployment is air-gapped; no vendor credential can be stored" });
@@ -1037,6 +1055,16 @@ export function registerVendorUsagePullRoutes(
       return reply.status(409).send({
         error: "write_capable_acknowledgement_required",
         detail: VENDOR_USAGE_CATALOGUE[connector.vendor].scopeNote + " Send acknowledgeWriteCapable: true to store it.",
+      });
+    }
+    // secure by default (ADR-0180): a scope RegulAIt cannot check is held at least as strictly as one it knows can
+    // write, so storing it needs the admin's own attestation, recorded with the credential and in the audit row
+    if (posture === "unverified" && !parsed.data.acknowledgeUnverifiedScope) {
+      return reply.status(409).send({
+        error: "unverified_scope_acknowledgement_required",
+        detail:
+          VENDOR_USAGE_CATALOGUE[connector.vendor].scopeNote +
+          " Send acknowledgeUnverifiedScope: true to attest that the token carries read permissions only.",
       });
     }
     if (!(await requireStepUp(db, req, reply, {
@@ -1067,17 +1095,25 @@ export function registerVendorUsagePullRoutes(
           connectorId: connector.id,
           secretCiphertext: ciphertext,
           scopePosture: posture,
-          writeCapableAcknowledgedAt: posture === "write_capable" ? new Date() : null,
+          // the acknowledgement of any scope RegulAIt cannot hold to read-only: write_capable or unverified
+          writeCapableAcknowledgedAt: posture === "read_only" ? null : new Date(),
           createdBy: actor(req),
         })
         .returning();
       const ruleId = existing ? VENDOR_USAGE_RULE_IDS.credentialReplaced : VENDOR_USAGE_RULE_IDS.credentialStored;
       await audit(tx, actor(req), "vendor_usage_credential", row!.id, ruleId, "allow",
         `vendor usage credential ${existing ? "replaced" : "stored"} for '${connector.name}' (${posture}): ${parsed.data.reason}`,
-        { connectorId: connector.id, replacedCredentialId: existing?.id ?? null, scopePosture: posture, writeCapableAcknowledged: posture === "write_capable", reason: parsed.data.reason });
+        {
+          connectorId: connector.id,
+          replacedCredentialId: existing?.id ?? null,
+          scopePosture: posture,
+          writeCapableAcknowledged: posture === "write_capable",
+          ...(posture === "unverified" ? { scopeAttestation: UNVERIFIED_SCOPE_ATTESTATION } : {}),
+          reason: parsed.data.reason,
+        });
       return row!;
     });
-    return reply.status(existing ? 200 : 201).send({ credential: { id: stored.id, scopePosture: posture, storedAt: stored.createdAt.toISOString() } });
+    return reply.status(existing ? 200 : 201).send({ credential: credentialView(stored) });
   });
 
   // revoking is never harder than granting: no step-up (ADR-0322 §2)
