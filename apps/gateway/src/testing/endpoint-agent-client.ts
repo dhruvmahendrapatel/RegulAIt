@@ -105,6 +105,32 @@ export function endpointAgentKeys(getApp: () => ReturnType<typeof buildApp>, dat
         payload: body,
       });
     }
+    /** the ADR-0310 addendum decision batch signature: typ regulait-endpoint-decisions+jwt, binding batchId */
+    async decisionsSignature(body: string, o: { batchId: string; jti?: string; iat?: number; key?: AgentKey; typ?: string }) {
+      const k = o.key ?? this;
+      return new SignJWT({ batchId: o.batchId, contentDigest: contentDigestOf(Buffer.from(body)) })
+        .setProtectedHeader({ alg: "ES256", typ: o.typ ?? "regulait-endpoint-decisions+jwt", kid: k.jkt })
+        .setIssuer(k.clientId)
+        .setAudience(`${ORIGIN}/v1/endpoint-agent/decisions`)
+        .setIssuedAt(o.iat ?? Math.floor(Date.now() / 1000))
+        .setJti(o.jti ?? randomUUID())
+        .sign(k.privateKey);
+    }
+    /** POST a decision batch; `signature` overrides the signature header (null: none) */
+    async decisions(body: string, batchId: string, o: { signature?: string | null } = {}) {
+      const sig = o.signature === undefined ? await this.decisionsSignature(body, { batchId }) : o.signature;
+      return getApp().inject({
+        method: "POST",
+        url: "/v1/endpoint-agent/decisions",
+        headers: {
+          ...(await this.headers("POST", "/v1/endpoint-agent/decisions")),
+          "content-type": "application/json",
+          "content-digest": contentDigestOf(Buffer.from(body)),
+          ...(sig ? { "regulait-decisions-signature": sig } : {}),
+        },
+        payload: body,
+      });
+    }
   }
   return AgentKey;
 }

@@ -5,7 +5,9 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  AGENT_OWNER_INACTIVE_DAYS,
   AGENT_RISK_BAND_EDGES,
+  agentOwnershipFlag,
   AGENT_RISK_METHOD_VERSION,
   bandFor,
   reachBand,
@@ -95,6 +97,21 @@ describe("ADR-0339 agent risk score", () => {
     expect(a.score).toBe(points);
     expect(a.fixes).toHaveLength(1);
     expect(a.fixes[0]!.points).toBe(points);
+  });
+
+  it("ownership scores owned 0, inactive 8, unowned 10, orphaned 15", () => {
+    const pts = (["owned", "inactive", "unowned", "orphaned"] as const).map((o) => scoreAgentRisk({ ...clean(), ownership: o }).score);
+    expect(pts).toEqual([0, 8, 10, 15]);
+  });
+
+  it("the ownership flag: unowned, orphaned before inactive, inactive past the window or never active", () => {
+    const now = new Date("2026-11-16T00:00:00Z");
+    const day = 86_400_000;
+    expect(agentOwnershipFlag(null, false, now, now)).toBe("unowned");
+    expect(agentOwnershipFlag("u", true, now, now)).toBe("orphaned");
+    expect(agentOwnershipFlag("u", false, null, now)).toBe("inactive");
+    expect(agentOwnershipFlag("u", false, new Date(now.getTime() - AGENT_OWNER_INACTIVE_DAYS * day), now)).toBe("owned");
+    expect(agentOwnershipFlag("u", false, new Date(now.getTime() - AGENT_OWNER_INACTIVE_DAYS * day - 1), now)).toBe("inactive");
   });
 
   it("unprotected guardrail modes score off 8, log 6, warn 3, block 0", () => {

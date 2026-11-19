@@ -248,6 +248,8 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   { table: "pm_connections", column: "token_ciphertext", what: "PM tool tokens" },
   { table: "pm_connections", column: "webhook_secret_ciphertext", what: "PM webhook secrets" },
   { table: "pm_connections", column: "previous_webhook_secret_ciphertext", what: "PM webhook secrets in a rotation window" },
+  // ADR-0364 (lane E45 S2): a robot's live and test secrets, filled only on their bound origin by the runner (S3)
+  { table: "robot_secrets", column: "value_ciphertext", what: "robot secrets (live and test)" },
   { table: "deploy_targets", column: "credential_ciphertext", what: "deploy-target credentials" },
   { table: "chatops_connections", column: "signing_secret_ciphertext", what: "ChatOps signing secrets" },
   // ADR-0065: the credential a REMOTE training backend needs before it will do
@@ -291,6 +293,8 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   { table: "discovery_credentials", column: "secret_ciphertext", what: "discovery scanner credentials" },
   { table: "vendor_usage_credentials", column: "secret_ciphertext", what: "vendor usage/cost pull credentials (ADR-0322)" },
   { table: "discovery_pseudonym_keys", column: "key_ciphertext", what: "the discovery pseudonym key" },
+  // ADR-0363 slice 2: the random EDM HMAC key, enveloped; the key itself never rotates, so stored digests stay valid
+  { table: "custom_classifier_hash_key", column: "key_ciphertext", what: "the customer-classifier exact-data-match key" },
   { table: "discovery_pseudonyms", column: "display_name_ciphertext", what: "discovery pseudonym display names" },
   // ADR-0193 decision 3 (migration 0206): the per-tenant HMAC key of keyed (pii) content digests
   { table: "content_digest_keys", column: "key_ciphertext", what: "the content digest key" },

@@ -288,6 +288,8 @@ type outcome struct {
 	verdict string
 	rule    string
 	reason  string
+	// kind is the deciding action's kind (Decision.Action), set by decideCommand; "" for an unresolved one
+	kind string
 }
 
 // decideCommand returns the strictest outcome across the call's actions. It never returns no verdict.
@@ -300,9 +302,25 @@ func decideCommand(p *Policy, c CommandCall, env HookEnv) outcome {
 		o := decideAction(p, a, env)
 		if first || strictness(o.verdict) > strictness(best.verdict) {
 			best, first = o, false
+			best.kind = actionKind(a.kind)
 		}
 	}
 	return best
+}
+
+// actionKind names an action's kind for the decision record; an unresolved action names none.
+func actionKind(kind string) string {
+	switch kind {
+	case "exec":
+		return KindExec
+	case "package":
+		return KindPackage
+	case "read":
+		return KindRead
+	case "write":
+		return KindWrite
+	}
+	return ""
 }
 
 func commandActions(c CommandCall, env HookEnv) []action {

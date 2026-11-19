@@ -1133,9 +1133,12 @@
                 "eval_run",
                 "compliance_profile",
                 "model_call",
+                "custom_classifier",
                 "decision_table",
                 "agent_risk_proof",
-                "rule_step_switch"
+                "rule_step_switch",
+                "robot_version",
+                "endpoint_addon_removal"
               ]
             }
           },

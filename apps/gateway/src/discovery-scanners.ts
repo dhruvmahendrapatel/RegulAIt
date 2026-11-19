@@ -38,11 +38,12 @@
  * prefix and length); or call a provider to test a key it found (decision 6).
  */
 import type { DiscoveryEvidenceKind, DiscoveryPseudonymKind, DiscoverySourceKind, DiscoverySubjectKind, ArtifactSignatureKind } from "@regulait/shared";
-import type { AgentRegistry, AiSignature, AiSignatureKind, DiscoveryCredentialMode, DiscoveryReadOutcome, LabelDefinition } from "@regulait/shared";
+import type { AgentRegistry, AiSignature, AiSignatureKind, DiscoveryCredentialMode, DiscoveryReadOutcome, LabelDefinition, SaasEntitlementBatch } from "@regulait/shared";
 import { REPO_SCANNERS } from "./discovery-repo-scanner.js";
 import { cloudDiscoveryScanners } from "./discovery-cloud-scanners.js";
 import { ENDPOINT_AGENT_SCANNER, ENDPOINT_IMPORT_SCANNERS } from "./endpoint-discovery-scanners.js";
 import { WIDER_DISCOVERY_SCANNERS } from "./discovery-wider-scanners.js";
+import { SAAS_ENTITLEMENT_SCANNERS } from "./saas-entitlement-readers.js";
 import { AGENT_REGISTRY_SCANNERS } from "./agent-registry-scanners.js";
 
 /** the source as a scanner sees it */
@@ -176,6 +177,11 @@ export interface ScanResult {
    */
   readOutcomes?: DiscoveryReadOutcome[];
   /**
+   * ADR-0337: an entitlement reader's graph (only a kind whose spec says `entitlements`; anything else is refused).
+   * The worker checks it and stores it in the run's own transaction.
+   */
+  entitlements?: SaasEntitlementBatch;
+  /**
    * ADR-0314 (G6): an `agent_registry_*` scanner's agents, staged by the worker in `agent_registry_records` (never
    * findings). Only the registries `AGENT_REGISTRIES_BY_KIND` names for the source's kind are accepted.
    */
@@ -248,6 +254,8 @@ export const DISCOVERY_SCANNERS: ScannerRegistry = scannerRegistry([
   ENDPOINT_AGENT_SCANNER,
   // ADR-0235 (P9): saas_inventory_api, idp_entra, ml_mlflow, each family behind its default-off org switch
   ...WIDER_DISCOVERY_SCANNERS,
+  // ADR-0337 (E18): entitlement_m365, entitlement_google_workspace (Salesforce and Slack follow in slice 2)
+  ...SAAS_ENTITLEMENT_SCANNERS,
   // ADR-0314 (G6): agent_registry_entra, agent_registry_gemini, agent_registry_agentcore
   ...AGENT_REGISTRY_SCANNERS,
 ]);

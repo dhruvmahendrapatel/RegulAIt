@@ -25,6 +25,10 @@ export interface DiscoverySettingsView {
   families: DiscoveryFamilySwitches;
   /** ADR-0259: MCP client-config discovery through the endpoint agent (off by default) */
   endpointMcpConfig: boolean;
+  /** ADR-0337 §4: Google Workspace sources may use the Directory token listing (off by default) */
+  googleDirectoryTokens: boolean;
+  /** ADR-0331: governed removal of flagged MCP servers from endpoints (off by default) */
+  endpointAddonRemoval: boolean;
   version: number;
   updatedAt: string | null;
 }
@@ -38,6 +42,8 @@ export async function loadDiscoverySettings(db: Db): Promise<DiscoverySettingsVi
       endpointRetentionDays: DISCOVERY_ENDPOINT_RETENTION_DEFAULT_DAYS,
       families: DISCOVERY_FAMILY_SWITCHES_DEFAULT,
       endpointMcpConfig: false,
+      googleDirectoryTokens: false,
+      endpointAddonRemoval: false,
       version: 1,
       updatedAt: null,
     };
@@ -47,6 +53,8 @@ export async function loadDiscoverySettings(db: Db): Promise<DiscoverySettingsVi
     endpointRetentionDays: row.endpointRetentionDays,
     families: { saas: row.saasSourcesEnabled, identity: row.identitySourcesEnabled, ml_platform: row.mlPlatformSourcesEnabled, agent_registry: row.agentRegistrySourcesEnabled },
     endpointMcpConfig: row.endpointMcpConfigEnabled,
+    googleDirectoryTokens: row.googleDirectoryTokensEnabled,
+    endpointAddonRemoval: row.endpointAddonRemovalEnabled,
     version: row.version,
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -90,15 +98,20 @@ export interface DiscoveryPosture {
   endpointRetentionDays: number;
   /** ADR-0235: the wider-source family switches */
   families: DiscoveryFamilySwitches;
+  /** ADR-0337 §4: whether Google Workspace sources may use the Directory token listing (its scope could revoke) */
+  googleDirectoryTokens: boolean;
+  /** ADR-0337 §4: the Google Workspace sources configured to read every user's OAuth token grants */
+  directoryTokenSources: SourceRef[];
   statement: string;
 }
 
 export async function discoveryPosture(db: Db): Promise<DiscoveryPosture> {
   const settings = await loadDiscoverySettings(db);
   const sources = await db
-    .select({ sourceId: discoverySources.id, name: discoverySources.name, kind: discoverySources.kind, enabled: discoverySources.enabled })
+    .select({ sourceId: discoverySources.id, name: discoverySources.name, kind: discoverySources.kind, enabled: discoverySources.enabled, target: discoverySources.target })
     .from(discoverySources)
-    .orderBy(asc(discoverySources.name));
+    .orderBy(asc(discoverySources.name))
+    .then((rows) => rows.map(({ target, ...ref }) => ({ ...ref, directoryTokens: directoryTokensRequested(ref.kind, target) })));
   const creds = await db
     .select({
       sourceId: discoveryCredentials.sourceId,
@@ -109,7 +122,7 @@ export async function discoveryPosture(db: Db): Promise<DiscoveryPosture> {
     })
     .from(discoveryCredentials)
     .where(and(isNull(discoveryCredentials.revokedAt)));
-  const byId = new Map(sources.map((s) => [s.sourceId, s]));
+  const byId = new Map(sources.map(({ directoryTokens: _d, ...s }) => [s.sourceId, s]));
   const staticCredentials: DiscoveryPosture["staticCredentials"] = [];
   const writeScopeUnverified: SourceRef[] = [];
   const credentialsRefused: SourceRef[] = [];
@@ -122,7 +135,8 @@ export async function discoveryPosture(db: Db): Promise<DiscoveryPosture> {
   }
   const staleCredentials = staticCredentials.filter((c) => c.ageDays >= settings.credentialWarningAgeDays);
   // a source whose family is switched off is never run, so it is not counted as scanning (ADR-0235)
-  const enabled = sources.filter((s) => s.enabled && familySwitchProblem(s.kind, settings.families) === null);
+  const enabled = sources.filter((s) => s.enabled && familySwitchProblem(s.kind, settings.families) === null).map(({ directoryTokens: _d, ...s }) => s);
+  const directoryTokenSources = sources.filter((s) => s.directoryTokens).map(({ directoryTokens: _d, ...s }) => s);
   return {
     sourcesTotal: sources.length,
     sourcesEnabled: enabled,
@@ -133,6 +147,23 @@ export async function discoveryPosture(db: Db): Promise<DiscoveryPosture> {
     credentialWarningAgeDays: settings.credentialWarningAgeDays,
     endpointRetentionDays: settings.endpointRetentionDays,
     families: settings.families,
+    googleDirectoryTokens: settings.googleDirectoryTokens,
+    directoryTokenSources,
     statement: activeDiscoveryPosture(enabled),
   };
+}
+
+/** ADR-0337 §4: a Google Workspace source whose target asks for the Directory token listing */
+export function directoryTokensRequested(kind: DiscoverySourceKind, target: Readonly<Record<string, unknown>>): boolean {
+  return kind === "entitlement_google_workspace" && target.directoryTokens === "on";
+}
+
+/**
+ * ADR-0337 §4: why a source may not use the Directory token listing, or null. The listing's scope could also revoke
+ * tokens, so the org switch (`googleDirectoryTokens`, off by default, its own `settings_relax` step-up) must be on
+ * before any source is created, widened, enabled or run with it.
+ */
+export function directoryTokensProblem(kind: DiscoverySourceKind, target: Readonly<Record<string, unknown>>, settings: Pick<DiscoverySettingsView, "googleDirectoryTokens">): string | null {
+  if (!directoryTokensRequested(kind, target) || settings.googleDirectoryTokens) return null;
+  return "the Google Directory token listing is not allowed: an admin must first turn on 'googleDirectoryTokens' in the discovery settings (a step-up); its scope could also revoke tokens";
 }

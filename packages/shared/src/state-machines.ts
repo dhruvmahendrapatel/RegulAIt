@@ -7,6 +7,9 @@
 import { defineMachine, type StateMachine } from "./state-machine.js";
 import { MCP_ADMISSION_STATES } from "./mcp-admission.js";
 import { INCIDENT_STATUSES } from "./accountability.js";
+import { ENDPOINT_COMMAND_EXCEPTION_MACHINE } from "./endpoint-command-exceptions.js";
+import { CLASSIFIER_VERSION_STATUSES } from "./custom-classifiers.js";
+import { AGENT_NHI_LINK_STATUSES } from "./agent-identity.js";
 
 /** `training_jobs.status` (ADR-0065). Same values as `TRAINING_JOB_STATUSES` in @regulait/db. */
 export const TRAINING_JOB_MACHINE = defineMachine({
@@ -174,6 +177,83 @@ export const EVAL_RUN_MACHINE = defineMachine({
   },
 });
 
+/** `custom_classifier_versions.status` (ADR-0363 slice 2). A version takes effect only through an approval in the
+ * one queue; publishing supersedes the classifier's previous published version in the same transaction. */
+export const CLASSIFIER_VERSION_MACHINE = defineMachine({
+  id: "custom_classifier_version",
+  stored: "custom_classifier_versions.status",
+  states: CLASSIFIER_VERSION_STATUSES,
+  initial: ["draft"],
+  terminal: ["rejected", "superseded", "retired"],
+  transitions: {
+    submit: {
+      from: ["draft"],
+      to: "pending_approval",
+      by: ["admin"],
+      summary: "The author submitted the version to a named reviewer; a looser version needs the author's step-up.",
+    },
+    approve: {
+      from: ["pending_approval"],
+      to: "published",
+      by: ["approver"],
+      summary: "The reviewer approved it in the Approvals Queue; it runs in every guardrail scan from the next call.",
+    },
+    reject: {
+      from: ["pending_approval"],
+      to: "rejected",
+      by: ["approver"],
+      summary: "The reviewer denied it; it never takes effect.",
+    },
+    supersede: {
+      from: ["published"],
+      to: "superseded",
+      by: ["system"],
+      summary: "A newer version of the classifier was published.",
+    },
+    retire: {
+      from: ["published"],
+      to: "retired",
+      by: ["admin"],
+      summary: "An admin retired the classifier with a step-up; it stops running.",
+    },
+  },
+});
+
+// ADR-0337 §6 (lane E18; owner decision 2026-11-17)
+/**
+ * `saas_entitlement_apps.agent_link_state` (ADR-0348 declared machine). An app starts unlinked (`none`). The system
+ * links it on an EXACT match between the app's vendor id and an identifier an admin declared for an agent
+ * (`auto`, audited); an admin links it by hand (`admin`, for a partial or fuzzy match) or unlinks it (`unlinked`). An
+ * unlinked app is never auto-linked again: only an admin can link it.
+ */
+export const SAAS_APP_AGENT_LINK_MACHINE = defineMachine({
+  id: "saas_app_agent_link",
+  stored: "saas_entitlement_apps.agent_link_state",
+  states: ["none", "auto", "admin", "unlinked"],
+  initial: ["none"],
+  terminal: [],
+  transitions: {
+    auto_link: {
+      from: ["none"],
+      to: "auto",
+      by: ["system"],
+      summary: "The app's vendor id exactly equals an identifier an admin declared for an agent, so the app is linked to that agent (audited).",
+    },
+    link: {
+      from: ["none", "auto", "admin", "unlinked"],
+      to: "admin",
+      by: ["admin"],
+      summary: "An admin linked the app to an agent (any match, including a partial one), or moved the link to another agent (audited).",
+    },
+    unlink: {
+      from: ["auto", "admin"],
+      to: "unlinked",
+      by: ["admin"],
+      summary: "An admin removed the link (audited); the app is not auto-linked again until an admin links it.",
+    },
+  },
+});
+export type SaasAppAgentLinkState = (typeof SAAS_APP_AGENT_LINK_MACHINE.def.states)[number];
 /** `detection_incidents.status` (ADR-0333, lane E15). An admin acknowledges an open incident (again, idempotently)
  * or closes it; a closed incident is final, so a later burst raises a new incident instead of reopening this one.
  * Same values as `DETECTION_INCIDENT_STATUSES` in @regulait/db. */
@@ -264,6 +344,124 @@ export const RULE_STEP_SUGGESTION_MACHINE = defineMachine({
       to: "suggested",
       by: ["admin"],
       summary: "An admin reverts the switch in one action, with no approval needed; the AI answers every request again.",
+    },
+  },
+});
+
+/** `robot_versions.status` (ADR-0364 §8). A version is edited only while `draft`; once submitted its content is
+ * frozen (a trigger), and a rejected or retired version is never reopened: a fix is a new version number. */
+export const ROBOT_VERSION_STATES = ["draft", "in_review", "approved", "rejected", "retired"] as const;
+export type RobotVersionState = (typeof ROBOT_VERSION_STATES)[number];
+export const ROBOT_VERSION_MACHINE = defineMachine({
+  id: "robot_version",
+  stored: "robot_versions.status",
+  states: ROBOT_VERSION_STATES,
+  initial: ["draft"],
+  terminal: ["rejected", "retired"],
+  transitions: {
+    submit: {
+      from: ["draft"],
+      to: "in_review",
+      by: ["user"],
+      summary: "The author sends the version for review in the Approvals Queue; it needs a passing test run on its exact digest.",
+    },
+    approve: {
+      from: ["in_review"],
+      to: "approved",
+      by: ["approver"],
+      summary: "A reviewer who is not the author approved the version; it becomes one pinned tool on the Robots server.",
+    },
+    reject: {
+      from: ["in_review"],
+      to: "rejected",
+      by: ["approver", "system"],
+      summary: "A reviewer refused the version, or its robot was retired while it waited; the record of what was refused is kept.",
+    },
+    discard: {
+      from: ["draft"],
+      to: "rejected",
+      by: ["system"],
+      summary: "The robot was retired while this version was still a draft; it was never submitted.",
+    },
+    retire: {
+      from: ["approved"],
+      to: "retired",
+      by: ["user", "admin", "system"],
+      summary: "The version's tool is blocked; agents that pinned it show it as unavailable and calls are refused.",
+    },
+  },
+});
+
+/** `robots.status` (ADR-0364 §8): the robot's own lifecycle. The list's "Status" column is computed from the
+ * versions on read (`robotListStatus`), never stored. */
+export const ROBOT_STATES = ["active", "retired"] as const;
+export type RobotState = (typeof ROBOT_STATES)[number];
+export const ROBOT_MACHINE = defineMachine({
+  id: "robot",
+  stored: "robots.status",
+  states: ROBOT_STATES,
+  initial: ["active"],
+  terminal: ["retired"],
+  transitions: {
+    retire: {
+      from: ["active"],
+      to: "retired",
+      by: ["user", "admin"],
+      summary: "The robot is retired: every approved version is retired and every draft or in-review version is rejected, in one transaction.",
+    },
+  },
+});
+
+/** `robot_runs.status` (ADR-0364 §8). S2 records runs; the sandbox runner that moves them is S3. */
+export const ROBOT_RUN_STATES = ["queued", "running", "succeeded", "failed", "timed_out", "cancelled", "refused"] as const;
+export type RobotRunState = (typeof ROBOT_RUN_STATES)[number];
+export const ROBOT_RUN_MACHINE = defineMachine({
+  id: "robot_run",
+  stored: "robot_runs.status",
+  states: ROBOT_RUN_STATES,
+  initial: ["queued"],
+  terminal: ["succeeded", "failed", "timed_out", "cancelled", "refused"],
+  transitions: {
+    start: { from: ["queued"], to: "running", by: ["system"], summary: "The sandbox placement was accepted and the runner started." },
+    succeed: { from: ["running"], to: "succeeded", by: ["worker"], summary: "Every step ran and the outputs matched the output schema." },
+    fail: { from: ["running"], to: "failed", by: ["worker"], summary: "A step failed; the run stopped with evidence." },
+    time_out: { from: ["running"], to: "timed_out", by: ["worker", "system"], summary: "The run hit its wall-clock or step limit." },
+    cancel: {
+      from: ["queued", "running"],
+      to: "cancelled",
+      by: ["user", "system"],
+      summary: "Someone cancelled the run, or the kill switch halted it at the next step.",
+    },
+    refuse: {
+      from: ["queued"],
+      to: "refused",
+      by: ["system"],
+      summary: "Nothing ran: the placement, the egress list or a secret could not be resolved.",
+    },
+  },
+});
+
+/** `agent_identity_links.status` (ADR-0339 slice 2). An admin (or later the importer) stages a link; a second, named
+ * admin confirms or rejects it under an `identity_manage` step-up. A link confers nothing in any state. Both outcomes
+ * are final today; unlinking a rotated or deleted identity is a later event (triage-low, recorded on #892). */
+export const AGENT_NHI_LINK_MACHINE = defineMachine({
+  id: "agent_nhi_link",
+  stored: "agent_identity_links.status",
+  states: AGENT_NHI_LINK_STATUSES,
+  initial: ["staged"],
+  terminal: ["confirmed", "rejected"],
+  transitions: {
+    confirm: {
+      from: ["staged"],
+      to: "confirmed",
+      by: ["admin"],
+      summary: "A second, named admin (not the one who staged it) confirms the link under an identity_manage step-up.",
+    },
+    reject: {
+      from: ["staged"],
+      to: "rejected",
+      by: ["admin"],
+      summary: "A second, named admin (not the one who staged it) rejects the link under an identity_manage step-up.",
     },
   },
 });
@@ -436,16 +634,113 @@ export const RULE_STEP_SWITCH_MACHINE = defineMachine({
   },
 });
 
+/** ADR-0364 §8: the Robots list's "Status" column, computed from the robot and its versions (never stored). */
+export type RobotListStatus = "draft" | "in_review" | "approved" | "retired";
+export function robotListStatus(robot: RobotState, versions: readonly RobotVersionState[]): RobotListStatus {
+  if (robot === "retired") return "retired";
+  if (versions.includes("approved")) return "approved";
+  if (versions.includes("in_review")) return "in_review";
+  return "draft";
+}
+
+/** `endpoint_addon_removals.status` (ADR-0331): one admin-started removal of an MCP server from endpoints. It is sent
+ * to no device until a second person approves it (ADR-0186); expiry is `expires_at`, not a state. */
+export const ENDPOINT_ADDON_REMOVAL_STATES = ["awaiting_approval", "active", "denied", "stale", "cancelled"] as const;
+export const ENDPOINT_ADDON_REMOVAL_MACHINE = defineMachine({
+  id: "endpoint_addon_removal",
+  stored: "endpoint_addon_removals.status",
+  states: ENDPOINT_ADDON_REMOVAL_STATES,
+  initial: ["awaiting_approval"],
+  terminal: ["denied", "stale", "cancelled"],
+  transitions: {
+    approve: {
+      from: ["awaiting_approval"],
+      to: "active",
+      by: ["approver"],
+      summary: "A second administrator approved it, and the endpoints it resolves to are unchanged; its directives may be delivered.",
+    },
+    deny: {
+      from: ["awaiting_approval"],
+      to: "denied",
+      by: ["approver"],
+      summary: "The approver refused it; nothing is sent to any endpoint.",
+    },
+    go_stale: {
+      from: ["awaiting_approval"],
+      to: "stale",
+      by: ["system"],
+      summary: "It was approved, but the endpoints it resolves to changed since it was requested; nothing is sent, and a new request is needed.",
+    },
+    cancel: {
+      from: ["awaiting_approval", "active"],
+      to: "cancelled",
+      by: ["admin"],
+      summary: "An admin cancelled it; nothing more is delivered, and outcomes of directives already delivered are still recorded.",
+    },
+  },
+});
+
+/** `endpoint_addon_removal_targets.status` (ADR-0331): one config entry on one device user's endpoint. */
+export const ENDPOINT_ADDON_TARGET_STATES = ["pending", "delivered", "removed", "nothing_to_remove", "failed", "cancelled"] as const;
+export const ENDPOINT_ADDON_TARGET_MACHINE = defineMachine({
+  id: "endpoint_addon_target",
+  stored: "endpoint_addon_removal_targets.status",
+  states: ENDPOINT_ADDON_TARGET_STATES,
+  initial: ["pending"],
+  terminal: ["removed", "nothing_to_remove", "failed", "cancelled"],
+  transitions: {
+    deliver: {
+      from: ["pending"],
+      to: "delivered",
+      by: ["agent"],
+      summary: "The endpoint agent fetched the signed directive.",
+    },
+    report_removed: {
+      from: ["delivered"],
+      to: "removed",
+      by: ["agent"],
+      summary: "The agent removed the named entry from the config.",
+    },
+    report_nothing: {
+      from: ["delivered"],
+      to: "nothing_to_remove",
+      by: ["agent"],
+      summary: "The agent found the entry absent, or a different server under that name; nothing was changed.",
+    },
+    report_failed: {
+      from: ["delivered"],
+      to: "failed",
+      by: ["agent"],
+      summary: "The agent refused or could not make the edit; the code says why.",
+    },
+    cancel: {
+      from: ["pending"],
+      to: "cancelled",
+      by: ["admin"],
+      summary: "The removal was cancelled before this directive was delivered. A delivered directive is not cancelled: its outcome is still recorded.",
+    },
+  },
+});
+
 /** Every declared machine, by id: the one list an agent or a document reads. */
 export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string>>> = Object.freeze({
   [TRAINING_JOB_MACHINE.def.id]: TRAINING_JOB_MACHINE,
   [MCP_ADMISSION_MACHINE.def.id]: MCP_ADMISSION_MACHINE,
   [INCIDENT_MACHINE.def.id]: INCIDENT_MACHINE,
   [EVAL_RUN_MACHINE.def.id]: EVAL_RUN_MACHINE,
+  [CLASSIFIER_VERSION_MACHINE.def.id]: CLASSIFIER_VERSION_MACHINE,
+  [SAAS_APP_AGENT_LINK_MACHINE.def.id]: SAAS_APP_AGENT_LINK_MACHINE,
   [DETECTION_INCIDENT_MACHINE.def.id]: DETECTION_INCIDENT_MACHINE,
   [DETECTION_RESPONSE_MACHINE.def.id]: DETECTION_RESPONSE_MACHINE,
   [RULE_STEP_SUGGESTION_MACHINE.def.id]: RULE_STEP_SUGGESTION_MACHINE,
+  [ENDPOINT_COMMAND_EXCEPTION_MACHINE.def.id]: ENDPOINT_COMMAND_EXCEPTION_MACHINE,
+  [ROBOT_VERSION_MACHINE.def.id]: ROBOT_VERSION_MACHINE,
+  [ROBOT_MACHINE.def.id]: ROBOT_MACHINE,
+  [ROBOT_RUN_MACHINE.def.id]: ROBOT_RUN_MACHINE,
+  [AGENT_NHI_LINK_MACHINE.def.id]: AGENT_NHI_LINK_MACHINE,
   [DECISION_TABLE_VERSION_MACHINE.def.id]: DECISION_TABLE_VERSION_MACHINE,
   [RULE_STEP_SWITCH_MACHINE.def.id]: RULE_STEP_SWITCH_MACHINE,
   [VENDOR_USAGE_PULL_RUN_MACHINE.def.id]: VENDOR_USAGE_PULL_RUN_MACHINE,
+  [ENDPOINT_ADDON_REMOVAL_MACHINE.def.id]: ENDPOINT_ADDON_REMOVAL_MACHINE,
+  [ENDPOINT_ADDON_TARGET_MACHINE.def.id]: ENDPOINT_ADDON_TARGET_MACHINE,
 } as Record<string, StateMachine<string, string>>);

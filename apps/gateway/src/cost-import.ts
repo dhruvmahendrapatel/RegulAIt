@@ -254,6 +254,8 @@ export async function scanFreeTexts(
       modes: policy.modes,
       terms: {},
       exclude: ["pii"],
+      // ADR-0363 slice 2: the published customer classifiers run here too (every guardrail site)
+      classifiers: policy.classifiers,
     });
     if (evaluation.action === "block") guardrailBlocked = true;
     for (const finding of evaluation.findings) {

@@ -1,6 +1,6 @@
 # ADR-0339: Agent risk score recomputed on every change, and author vs runner identity
 
-- **Status**: Accepted (slice 1 built; slice 2 designed, built in the next PR of lane E20)
+- **Status**: Accepted (slice 1 built; slice 2 built, method `adr0339-v2`)
 - **Date**: 2026-11-16
 - **Driver**: owner, 2026-11-16: close the gaps found against Obsidian Security's AI Agent Security product. Builder
   lane E20 covers gap rows 3 (author vs runner, orphaned agents, NHI mapping) and 7 (risk score on every publish or
@@ -12,7 +12,8 @@
   (toxic combinations), [ADR-0089](0089-agent-ownership-alignment.md) (owner and orphan flag),
   [ADR-0188](0188-batch6-agent-workload-identity.md) (agent principal, sponsors, actor chain),
   [ADR-0156](0156-ai-system-dependency-graph-risk-propagation.md) (dependents).
-- **Migration**: slice 1 `pending/agent_risk_scores.sql` (numbered at merge, ADR-0252).
+- **Migration**: slice 1 `pending/agent_risk_scores.sql`, slice 2 `pending/agent_identity_links.sql` (both numbered at
+  merge, ADR-0252).
 - **Setting**: none. The score changes no enforcement; it is read-only toward every agent, grant and setting.
 
 ## Context
@@ -98,23 +99,41 @@ as, and whether its owner is gone or inactive.
      lookups after.
    - `POST /v1/agent-risk/recompute` (admin).
 
-### Slice 2: author, runner, non-human identity, orphans (next PR)
+### Slice 2: author, runner, non-human identity, orphans
 
-6. **Author**: recorded at creation from the request principal, and for imported agents from the vendor record's
-   pseudonymous creator (the import in PR #855). Existing agents are `unknown`, never a guessed author.
-7. **Runner**: computed on read: the workload identity it runs as (ADR-0188), the people seen invoking it (usage
-   ledger, observation window), and for builder agents the connection format (owner's connections or each caller's).
-8. **Non-human identity links**: an agent is linked to cloud service accounts or vendor agent identities (AWS role
-   ARN, Entra service principal, GCP service account, vendor agent id), staged by an importer or an admin. A staged
-   link confers nothing; confirming one is an admin act with a step-up, audited in the same transaction. Read-only
-   toward the vendor platform. Vendor-neutral: the provider is a closed vocabulary with `other`.
-9. **Orphans**: the ADR-0089 flag gains `inactive` (owner has not signed in within a configurable window, strict
-   default 90 days) beside `unowned` and `orphaned`; each is a finding and feeds the ownership factor above.
+6. **Author** (`agent_authorship`, one row per agent): an insert trigger records it in the creating transaction. A
+   registry agent's author is the request's row-level-security principal (`regulait_rls_user_id()`, when it names an
+   existing user); a builder agent's is its owner at creation; with no principal (the bootstrap credential, a job) it is
+   `unknown`. Existing agents are backfilled `unknown`: an author is never guessed. The row is never rewritten (UPDATE
+   refused except the SET NULL of a deleted author, DELETE only with its agent, TRUNCATE refused). `vendor_record` with a
+   pseudonym is reserved for the vendor import (PR #855) to write.
+7. **Runner**, computed on read and never stored: the ADR-0188 workload identity the agent runs as (with its sponsors),
+   the people the ledgers saw invoking it in the last 30 days (usage events for a registry agent, chat threads for a
+   builder agent; top 10), and for a builder agent whose connections its tools use (`per_user` or the owner's shared
+   ones) and that its unattended runs run as its owner (ADR-0172).
+8. **Non-human identity links** (`agent_identity_links`): a cloud service account, vendor agent identity or OAuth client,
+   with the provider from a closed, vendor-neutral list (`aws`, `azure`, `gcp`, `entra`, `okta`, `other`) and an
+   identifier checked against the shapes that provider issues. An admin (later an importer) stages a link, audited in the
+   same transaction; it is `staged` and confers nothing. A **second, named** admin confirms or rejects it with an
+   `identity_manage` step-up bound to the link and the decision, audited in the same transaction. The stager cannot
+   decide (route check and a DB CHECK), the bootstrap credential cannot decide (it names nobody), and an API key cannot
+   carry the step-up. A link never calls the vendor (read-only toward vendor platforms) and never grants anything.
+9. **Orphans**: the ADR-0089 flag gains `inactive`: the owner is in the directory but has not been seen (the newest
+   session, API key use or federated sign-in, with the account's creation as a floor) within
+   `AGENT_OWNER_INACTIVE_DAYS` = 90 (strict default, a constant until the owner asks for a setting). The flag feeds the
+   risk score's ownership factor (owned 0, inactive 8, unowned 10, orphaned 15; method `adr0339-v2`), and
+   `GET /v1/agent-identity/ownership-findings` (admin) lists every agent whose flag is not `owned`, scanning one keyset
+   page of agents at a time.
+10. **Routes** (API only, KNOWN_UI_GAPS on #453): `GET /v1/agent-identity/:kind/:subjectId` (admin or the agent's own
+    steward/owner, 404 otherwise, `private, no-store`), `GET /v1/agent-identity/ownership-findings` (admin),
+    `POST /v1/agent-identity/:kind/:subjectId/links` (admin), `POST /v1/agent-identity/links/:linkId/decision` (admin,
+    step-up, four eyes).
 
 ## Reuse and open source (ADR-0176)
 
 - **Reused, not re-derived:** `loadFloorEvidence` and `loadAutonomyFacts` and the A8 derivation (autonomy.ts),
-  `ownershipFlagFor` (inventory.ts), `checkSodFootprint` (sod.ts), `regulait_refuse_mutation` and
+  the ADR-0089 ownership flag (widened, not forked), `checkSodFootprint` (sod.ts), the ADR-0188 workload identities and
+  the `identity_manage` step-up, `regulait_refuse_mutation` and
   `regulait_refuse_truncate` (append-only guards), `canonicalJson` (digest), the scheduler registry, the ADR-0214
   counterfactual and the evaluator catalog's OWASP refs. The per-asset posture score (and its screen, PR #831) is a
   different question and is not duplicated: it is not an input and its routes are untouched.

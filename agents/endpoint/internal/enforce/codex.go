@@ -36,6 +36,9 @@ type codexInput struct {
 	ToolName      string          `json:"tool_name"`
 	Cwd           string          `json:"cwd"`
 	ToolInput     json.RawMessage `json:"tool_input"`
+	// session_id and permission_mode are read only for the decision record
+	SessionID      string `json:"session_id"`
+	PermissionMode string `json:"permission_mode"`
 	// of tool_input only the command field of Bash and apply_patch is read
 }
 
@@ -51,7 +54,7 @@ func ParseCodexPreToolUse(r io.Reader) (Call, error) {
 	if in.ToolName == "" {
 		return Call{}, errors.New("no tool_name")
 	}
-	c := Call{Tool: in.ToolName, NoAsk: true}
+	c := Call{Tool: in.ToolName, NoAsk: true, SessionID: in.SessionID, PermissionMode: in.PermissionMode}
 	// the cwd is never a workspace root by itself (review #941 S-B1): only a root the agent declares counts
 	var roots []string
 	switch in.ToolName {

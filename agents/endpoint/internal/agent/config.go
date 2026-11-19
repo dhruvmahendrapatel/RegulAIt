@@ -14,6 +14,7 @@ import (
 
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/contract"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/enforce"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/fsutil"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/transport"
 )
 
@@ -45,12 +46,12 @@ type Config struct {
 
 // LoadConfig reads and validates the config file and its CA bundle.
 func LoadConfig(path string, owner int) (*Config, error) {
-	raw, err := readChecked(path, owner, WorldRead)
+	raw, err := readChecked(path, owner, fsutil.WorldRead)
 	if err != nil {
 		return nil, fmt.Errorf("config: %w", err)
 	}
 	var lc LocalConfig
-	if err := strictJSON(raw, &lc); err != nil {
+	if err := fsutil.StrictJSON(raw, &lc); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
 	}
 	if lc.Schema != contract.SchemaConfigFile {
@@ -79,7 +80,7 @@ func LoadConfig(path string, owner int) (*Config, error) {
 		if !filepath.IsAbs(lc.CABundleFile) {
 			return nil, errors.New("config: caBundleFile must be an absolute path")
 		}
-		ca, err := readChecked(lc.CABundleFile, owner, WorldRead)
+		ca, err := readChecked(lc.CABundleFile, owner, fsutil.WorldRead)
 		if err != nil {
 			return nil, fmt.Errorf("config: CA bundle: %w", err)
 		}
@@ -140,14 +141,6 @@ func validSecret(s string) bool {
 
 func parseTime(s string) (time.Time, error) {
 	return time.Parse(time.RFC3339, s)
-}
-
-func randomHex(n int) string {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		panic(err)
-	}
-	return hex.EncodeToString(b)
 }
 
 // uuidV4 formats 16 random bytes as an RFC 9562 version-4 UUID.

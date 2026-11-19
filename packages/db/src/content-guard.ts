@@ -66,6 +66,10 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.builderAgentSubagents, ["name", "description"]],
   [s.builderAgentSchedules, ["name"]],
   [s.builderSkills, ["name", "description", "body"]],
+  // ADR-0364 (lane E45 S2): robots, and the names a robot's secrets are bound and stored under
+  [s.robots, ["name", "description"]],
+  [s.robotSecrets, ["name"]],
+  [s.robotVersionSecrets, ["name"]],
   [s.orchestrationRuns, ["name"]],
   // --- projects, initiatives and the AI inventory ---
   [s.projects, ["name"]],
@@ -113,6 +117,10 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.thirdPartyIngestSources, ["name"]],
   // ADR-0303: a SIEM destination an admin names
   [s.siemDestinations, ["name"]],
+  // ADR-0350 (lane E31): an endpoint device group an admin names and describes
+  [s.endpointDeviceGroups, ["name", "description"]],
+  // ADR-0363 slice 2: a customer classifier an admin names
+  [s.customClassifiers, ["name"]],
   // ADR-0322: an operator-typed vendor usage connector name (a pasted vendor key here would be refused)
   [s.vendorUsageConnectors, ["name"]],
   [s.engineRunners, ["name"]],
@@ -136,6 +144,9 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.rateCards, ["name", "description"]],
   // ADR-0327 addendum: a decision table's name is typed by an administrator
   [s.decisionTables, ["name"]],
+  // ADR-0331: the server name an admin types to narrow a removal; refused when credential-shaped (such a name is
+  // stored as "(unnamed)" in the evidence and could never match anyway)
+  [s.endpointAddonRemovals, ["serverName"]],
 ];
 
 export type ContentGuardExclusion =
@@ -171,6 +182,9 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   "agent_registry_records.display_name": "ingested",
   // ADR-0261: an event identifier the sending product chose (a linear lower-case identifier check bounds it)
   "third_party_ingest_records.event_name": "ingested",
+  // ADR-0337: an app's display name and a scope name as the SaaS vendor reports them (read-only entitlement reads)
+  "saas_entitlement_apps.display_name": "ingested",
+  "saas_entitlement_scopes.name": "ingested",
   // ADR-0363 slice 1: a label's display name as Microsoft Graph returns it (the customer's Purview tenant)
   "sensitivity_label_definitions.name": "ingested",
   "ai_incident_actions.title": "prose_owned_by_adr0102",
@@ -212,6 +226,8 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   "use_case_decision_records.intake_template_name": "platform_copy",
   "cert_inventory.common_name": "ingested",
   "endpoint_mcp_servers.server_name": "ingested",
+  // ADR-0331: the target's point-in-time copy of endpoint_mcp_servers.server_name (ingested above)
+  "endpoint_addon_removal_targets.server_name": "platform_copy",
   "imported_cost_lines.description": "ingested",
   "infra_resources.name": "ingested",
   "mcp_registry_entries.description": "ingested",
