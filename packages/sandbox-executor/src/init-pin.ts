@@ -10,7 +10,7 @@
  *    gVisor as far as this executor is concerned (its sandboxes are reported as `runc`, and the gateway refuses
  *    them). A new gVisor release is added here, from its verified tarball, in a reviewed change.
  */
-export const SANDBOX_INIT_SHA256 = "bbd95cb65c56e3a384373d31133fb41867941aef0d154cd4b3d8f9a8d3defdc3";
+export const SANDBOX_INIT_SHA256 = "9ef671484d27e4172d8a3a70a2c2cc546e6467f71d9939503b0d719019e6e54c";
 
 export const RUNSC_RELEASES: Readonly<Record<string, string>> = {
   "release-20261012.0":

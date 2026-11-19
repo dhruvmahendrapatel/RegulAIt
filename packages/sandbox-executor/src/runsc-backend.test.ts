@@ -386,7 +386,7 @@ describe("the handshake with the real sandbox init (run on this host in place of
     const b = backend(calls);
     expect(b.describe()).toEqual({ backend: "gvisor", runtimeVersion: "release-20261012.0", classes: ["user_space_kernel"] });
     await expect(b.startCanary(restricted, "hardened_container")).rejects.toThrow(/user_space_kernel only/);
-    await expect(b.start({ ...offer, workloadKind: "code_exec" }, restricted, "user_space_kernel")).rejects.toThrow(/mcp_stdio and engine_worker/);
+    await expect(b.start({ ...offer, workloadKind: "code_exec" }, restricted, "user_space_kernel")).rejects.toThrow(/mcp_stdio, engine_worker and robot_browser/);
     // I5: an engine task needs its input; a profile that declares none cannot run one
     await expect(b.start({ ...offer, workloadKind: "engine_worker" }, restricted, "user_space_kernel")).rejects.toThrow(/declares no input/);
     await expect(b.start(offer, SHIPPED_EXECUTION_PROFILES["engine-worker"], "user_space_kernel")).rejects.toThrow(/nothing was started/);

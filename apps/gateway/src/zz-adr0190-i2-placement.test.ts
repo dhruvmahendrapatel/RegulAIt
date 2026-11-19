@@ -374,6 +374,40 @@ describe("ADR-0190 decision 7: the placement decision from the database", () => 
     if (archived.kind === "refused") expect(archived.requirement).toMatchObject({ kind: "unresolved", fact: "autonomyFloor" });
   });
 
+  it("ADR-0364 S3: a robot run is offered under robot-browser at L2 with its egress on the offer; egress elsewhere is refused", async () => {
+    const ROBOT_DIGEST = executionProfileDigest(SHIPPED_EXECUTION_PROFILES["robot-browser"]);
+    const ex = await newExecutor("robot-l2", "gvisor", [{ digest: ROBOT_DIGEST, cls: "user_space_kernel" }]);
+    const projectId = await newProject("internal");
+    const egress = { runId: randomUUID(), targets: [{ host: "portal.example.com", port: 443 }] };
+    // a test run (no agent) of our own runner image is not an unknown agent: L2, not L3
+    const d = await decidePlacement(db, { workloadKind: "robot_browser", projectId, agent: null, egress, imageDigest: IMAGE, onlyExecutorIds: [ex], ttlSeconds: 1 });
+    expect(d).toMatchObject({ kind: "offered", requirement: { requiredClass: "user_space_kernel", profile: { name: "robot-browser", source: "shipped_default" } } });
+    const [o] = await db.select().from(executionOffers).where(eq(executionOffers.executorId, ex));
+    expect(o).toMatchObject({ workloadKind: "robot_browser", egressTargets: egress.targets, robotRunId: egress.runId });
+    // egress exactly on robot_browser: a caller fault, thrown before anything is read or written
+    await expect(decidePlacement(db, { workloadKind: "robot_browser", projectId, agent: null, imageDigest: IMAGE, onlyExecutorIds: [ex] })).rejects.toThrow(/needs its per-run egress/);
+    await expect(
+      decidePlacement(db, { workloadKind: "mcp_stdio", mcpServerId: stdioId, projectId, agent: null, egress, imageDigest: IMAGE, onlyExecutorIds: [ex] }),
+    ).rejects.toThrow(/robot_browser placements only/);
+    await expect(
+      decidePlacement(db, { workloadKind: "robot_browser", projectId, agent: null, egress: { runId: "x", targets: [] } as never, imageDigest: IMAGE, onlyExecutorIds: [ex] }),
+    ).rejects.toThrow(/not a list/);
+    expect(await offersFor(ex)).toBe(1);
+    // the row CHECK refuses a robot offer without its egress, and egress on any other kind
+    await expect(
+      db.insert(executionOffers).values({ executorId: ex, workloadKind: "robot_browser", requiredClass: "user_space_kernel", requiredBy: "workload_kind", enforcement: "enforce", profileDigest: ROBOT_DIGEST, imageDigest: IMAGE, expiresAt: new Date(Date.now() + 1000) }),
+    ).rejects.toThrow();
+    await expect(
+      db.insert(executionOffers).values({ executorId: ex, workloadKind: "mcp_stdio", requiredClass: "user_space_kernel", requiredBy: "workload_kind", enforcement: "enforce", profileDigest: ROBOT_DIGEST, imageDigest: IMAGE, expiresAt: new Date(Date.now() + 1000), egressTargets: egress.targets, robotRunId: egress.runId }),
+    ).rejects.toThrow();
+  });
+
+  it("ADR-0364 S3: the org's robot floor is strict L2 and never below L1", async () => {
+    const [s] = rows<{ f: string }>(await db.execute(sql`select isolation_floor_robot_browser as f from org_settings limit 1`));
+    expect(s!.f).toBe("user_space_kernel");
+    await expect(db.execute(sql`update org_settings set isolation_floor_robot_browser = 'in_gateway'`)).rejects.toThrow();
+  });
+
   it("a non-isolable kind is never placed: in_gateway or external", async () => {
     expect(await decidePlacement(db, { workloadKind: "model_call", projectId: null, agent: null, imageDigest: IMAGE })).toEqual({ kind: "not_isolable", execution: "in_gateway" });
     expect(await decidePlacement(db, { workloadKind: "remote_mcp", projectId: null, agent: null, imageDigest: IMAGE })).toEqual({ kind: "not_isolable", execution: "external" });

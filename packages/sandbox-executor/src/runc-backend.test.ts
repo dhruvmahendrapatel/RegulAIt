@@ -317,7 +317,7 @@ describe("the runc backend on this host (the real init in place of docker run)",
     await expect(b.startCanary(restricted, "user_space_kernel")).rejects.toThrow(/runc backend attests hardened_container only/);
     await expect(b.start({ ...offer, requiredClass: "user_space_kernel" }, l1, "user_space_kernel")).rejects.toThrow(/hardened_container only/);
     await expect(b.start(offer, l1, "microvm")).rejects.toThrow(/hardened_container only/);
-    await expect(b.start({ ...offer, workloadKind: "code_exec" }, l1, "hardened_container")).rejects.toThrow(/mcp_stdio and engine_worker/);
+    await expect(b.start({ ...offer, workloadKind: "code_exec" }, l1, "hardened_container")).rejects.toThrow(/mcp_stdio, engine_worker and robot_browser/);
     expect(calls, "no docker run for a refused container").toEqual([]);
   });
 

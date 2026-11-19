@@ -178,6 +178,58 @@ export function smokescreenAcl(allowedOrigins: readonly string[]): string {
   return ["---", "version: v1", "services: []", "default:", "  name: robot-run", "  project: regulait-robots", "  action: enforce", "  allowed_domains:", ...hosts.map((h) => `    - ${h}`), ""].join("\n");
 }
 
+/**
+ * ADR-0364 S3 (executor side): one host and port a run's sandbox may reach through its proxy. A lower-case DNS name of
+ * at least two labels (Smokescreen's `allowed_domains` are names; an IP literal is never a target), checked label by
+ * label (linear, no nested quantifier).
+ */
+export function isRobotEgressHost(h: unknown): h is string {
+  if (typeof h !== "string" || h.length < 3 || h.length > 253) return false;
+  const labels = h.split(".");
+  return (
+    labels.length >= 2 &&
+    labels.every((l) => l.length >= 1 && l.length <= 63 && /^[a-z0-9-]+$/.test(l) && l[0] !== "-" && l[l.length - 1] !== "-") &&
+    // a top-level label holds a letter, so a dotted IPv4 literal is never a name
+    /[a-z]/.test(labels[labels.length - 1]!)
+  );
+}
+
+export const robotEgressTargetSchema = z
+  .object({ host: z.string().refine(isRobotEgressHost, { message: "a lower-case DNS name" }), port: z.number().int().min(1).max(65535) })
+  .strict();
+export type RobotEgressTarget = z.infer<typeof robotEgressTargetSchema>;
+
+/**
+ * The robot part of a `robot_browser` offer (and of its `PlacementRequest`; no other kind may carry it): the run it
+ * is for (`runId`, the `robot_runs` row; the executor gives it to the runner as `REGULAIT_ROBOT_RUN_ID`, and the
+ * runner reads its plan by it) and the hosts and ports of the version's allowed origins (`robotEgressTargets`), at
+ * most one per allowed site, no duplicates.
+ */
+export const robotEgressSchema = z
+  .object({
+    runId: z.string().uuid(),
+    targets: z
+      .array(robotEgressTargetSchema)
+      .min(1)
+      .max(ROBOT_LIMITS.allowedSites)
+      .refine((ts) => new Set(ts.map((t) => `${t.host}:${t.port}`)).size === ts.length, { message: "duplicate egress target" }),
+  })
+  .strict();
+export type RobotEgress = z.infer<typeof robotEgressSchema>;
+
+/** the port the per-run Smokescreen listens on inside its internal network (Smokescreen's own default, 4750) */
+export const ROBOT_EGRESS_PROXY_PORT = 4750;
+
+/**
+ * THE ONE PLACE a run's ACL is generated from its offer's targets (the executor calls it; the gateway sends targets,
+ * never ACL text): each target back to its origin, then `smokescreenAcl`. Ports are not in a Smokescreen ACL; the
+ * in-browser route check (`originAllowed`) holds them.
+ */
+export function smokescreenAclForTargets(targets: readonly RobotEgressTarget[]): string {
+  for (const t of targets) if (!robotEgressTargetSchema.safeParse(t).success) throw new Error("not an egress target");
+  return smokescreenAcl(targets.map((t) => (t.port === 443 ? `https://${t.host}` : `https://${t.host}:${t.port}`)));
+}
+
 /** true when `url` is on one of the allowed origins (the in-browser second line, §7) */
 export function originAllowed(url: string, allowedOrigins: readonly string[]): boolean {
   let u: URL;

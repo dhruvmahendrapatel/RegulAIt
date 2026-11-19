@@ -27,17 +27,21 @@
  */
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, copyFile, mkdir, readFile } from "node:fs/promises";
+import { chmod, chown, copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { request } from "node:http";
 import path from "node:path";
 import type { Readable, Writable } from "node:stream";
 import {
   ENGINE_TASK_INPUT_NAME,
+  ROBOT_EGRESS_LOG_MAX_BYTES,
+  ROBOT_EGRESS_PROXY_PORT,
   STDIO_FRAME_MAX_BYTES,
   STDIO_SANDBOX_INIT_DIR,
   STDIO_SANDBOX_INIT_PATH,
   STDIO_SANDBOX_NODE,
   isStdioClosureImage,
+  robotEgressSchema,
+  smokescreenAclForTargets,
   stdioLineBytes,
   type AppliedIsolationKind,
   type AttestationProbe,
@@ -45,6 +49,7 @@ import {
   type ExecutionProfileBody,
   type ProbeObserved,
   type RequirableIsolationClass,
+  type RobotEgress,
 } from "@regulait/shared";
 import type { BackendDescription, ProbeSet, SandboxBackend, SandboxHandle, SandboxStdio } from "./backend.js";
 import { reconcileTaskInputs, removeTaskInput, writeTaskInput, type SandboxTaskInput } from "./task-input.js";
@@ -93,6 +98,11 @@ export interface ExecutorSideObservation {
   throttledPeriods: number;
   /** the container's own HostConfig as `docker inspect` reports it (the runc backend's outside hardening check reads it) */
   hostConfig?: ContainerHostConfig;
+  /**
+   * ADR-0364 S3: the network this executor attached the sandbox to (`none`, or a robot run's per-run internal network);
+   * the outside checks hold the container's `NetworkMode` to it. Absent = `none`.
+   */
+  expectedNetworkMode?: string;
 }
 
 /** the parts of a container's `HostConfig` (docker inspect) the backends read; every field as the daemon sent it */
@@ -153,6 +163,161 @@ export interface DockerRunInput {
    * daemon's default. The gVisor line is unchanged until #385 verifies L2 (a follow-up there).
    */
   cgroupnsPrivate?: boolean;
+  /**
+   * ADR-0364 S3: a robot run's per-run INTERNAL network (`regulait-egn-<uuid>`), the sandbox's only network; its one
+   * other member is the run's egress proxy. Absent = `--network none`. Never `host`, `bridge` or another container's.
+   */
+  network?: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0364 S3: a robot run's per-run egress (pure builders)
+// ---------------------------------------------------------------------------
+
+const UUID_TAIL = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+/** a robot run's internal network: named after its sandbox, nothing else ever matches */
+export const EGRESS_NETWORK_NAME = new RegExp(`^regulait-egn-${UUID_TAIL}$`);
+/** a robot run's egress proxy container: named after its sandbox */
+export const EGRESS_PROXY_NAME = new RegExp(`^regulait-egp-${UUID_TAIL}$`);
+/** the per-run network and proxy names of one sandbox */
+export function egressNames(sandboxName: string): { network: string; proxy: string } {
+  if (!SANDBOX_NAME.test(sandboxName)) throw new DockerBackendError("not a sandbox name");
+  const id = sandboxName.slice("regulait-sbx-".length);
+  return { network: `regulait-egn-${id}`, proxy: `regulait-egp-${id}` };
+}
+
+/** where the proxy reads its ACL (the run's ACL directory, mounted read-only) */
+export const SMOKESCREEN_ACL_DIR = "/etc/regulait-egress" as const;
+export const SMOKESCREEN_ACL_FILE = "acl.yaml" as const;
+
+/**
+ * THE PER-RUN SMOKESCREEN FLAGS, in one place. Flag names verified against stripe/smokescreen `cmd/smokescreen.go` on
+ * master (2026-11-19) and by running the `robot-egress` image (engines/robot-egress). The image FIXES the rest in its
+ * entry point: `--config-file /etc/regulait/smokescreen.yaml` (`allow_missing_role: true` and the deny ranges
+ * `ROBOT_EGRESS_DENY_RANGES`, on top of Smokescreen's non-public default) and `--disable-acl-policy-action open` /
+ * `report`. Per run the executor adds only these: the run's ACL file, and the proxy's own address on the run's internal
+ * network (it listens nowhere else) on the default port 4750. The sandbox presents no client certificate, so every
+ * request falls to the ACL's `default` rule (`enforce`). Smokescreen cannot restrict destination ports: the version's
+ * ports are held by the in-browser route check alone (decided upstream, ADR-0364 §7). No `--allow-range`.
+ */
+export function smokescreenArgs(listenIp: string): string[] {
+  if (!/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(listenIp)) throw new DockerBackendError("the proxy's listen address is not an IPv4 address");
+  return ["--egress-acl-file", `${SMOKESCREEN_ACL_DIR}/${SMOKESCREEN_ACL_FILE}`, "--listen-ip", listenIp, "--listen-port", String(ROBOT_EGRESS_PROXY_PORT)];
+}
+
+/**
+ * The proxy starts with an EMPTY environment: every proxy variable an image, a daemon or a Docker client config could
+ * add is blanked (Go reads an empty value as unset), so Smokescreen never dials through a host proxy.
+ */
+export const PROXY_BLANKED_ENV = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "no_proxy", "all_proxy"] as const;
+
+/** `docker network create` for a robot run: INTERNAL (no route off the host), labelled as ours */
+export function egressNetworkCreateArgs(network: string): string[] {
+  if (!EGRESS_NETWORK_NAME.test(network)) throw new DockerBackendError("not a robot run's internal network name");
+  return ["network", "create", "--internal", "--driver", "bridge", "--label", "org.regulait.sandbox=1", network];
+}
+
+/**
+ * The proxy's address on the run's internal network: the subnet's second host (the first is Docker's gateway
+ * address), so it is known before the proxy starts and Smokescreen listens on it alone. IPv4, at most a /29.
+ */
+export function egressProxyAddress(subnet: unknown): string {
+  const m = typeof subnet === "string" ? /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/.exec(subnet) : null;
+  if (!m) throw new DockerBackendError("the internal network has no IPv4 subnet");
+  const octets = m.slice(1, 5).map(Number);
+  const len = Number(m[5]);
+  if (octets.some((o) => o > 255) || len < 8 || len > 29) throw new DockerBackendError("the internal network's subnet is not usable");
+  const base = ((octets[0]! << 24) >>> 0) + (octets[1]! << 16) + (octets[2]! << 8) + octets[3]!;
+  const mask = len === 0 ? 0 : (0xffffffff << (32 - len)) >>> 0;
+  const ip = ((base & mask) >>> 0) + 2;
+  return [ip >>> 24, (ip >>> 16) & 255, (ip >>> 8) & 255, ip & 255].join(".");
+}
+
+/** a pinned image reference: `sha256:<64 hex>` (a local image id) or `<repository>@sha256:<64 hex>`; never a tag */
+export function isPinnedImageRef(ref: unknown): ref is string {
+  if (typeof ref !== "string" || ref.length > 300) return false;
+  const at = ref.indexOf("@");
+  const digest = at < 0 ? ref : ref.slice(at + 1);
+  if (!/^sha256:[0-9a-f]{64}$/.test(digest)) return false;
+  // with a repository, Docker resolves the reference by the digest alone (a tag beside it is ignored)
+  return at < 0 || /^[a-z0-9][a-z0-9._/:-]{0,200}$/.test(ref.slice(0, at));
+}
+
+export interface ProxyRunInput {
+  name: string;
+  image: string;
+  /** the run's internal network (the proxy's first network; the uplink is connected after it starts) */
+  network: string;
+  /** the proxy's address on it (`egressProxyAddress`) */
+  ip: string;
+  /** the Docker volume holding the run ACL directories, and this run's sub-directory */
+  aclVolume: string;
+  aclSubpath: string;
+  /** `uid:gid` the proxy runs as (the ACL file's owner; never root) */
+  user: string;
+}
+
+/** `docker run -d` for a run's Smokescreen: hardened like a sandbox, its ACL read-only, its log kept for evidence */
+export function proxyRunArgs(input: ProxyRunInput): string[] {
+  if (!EGRESS_PROXY_NAME.test(input.name)) throw new DockerBackendError("not a robot run's proxy name");
+  if (!EGRESS_NETWORK_NAME.test(input.network)) throw new DockerBackendError("not a robot run's internal network name");
+  if (!isPinnedImageRef(input.image)) throw new DockerBackendError("the egress proxy image must be pinned by digest (sha256:<64 hex>)");
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(input.aclVolume)) throw new DockerBackendError("the ACL volume is not a Docker volume name");
+  if (!SANDBOX_NAME.test(input.aclSubpath)) throw new DockerBackendError("the ACL sub-path is not ours");
+  const user = /^(\d{1,10}):(\d{1,10})$/.exec(input.user);
+  if (!user || user[1] === "0") throw new DockerBackendError("the egress proxy never runs as root");
+  return [
+    "run",
+    "-d",
+    "--name",
+    input.name,
+    "--pull",
+    "never",
+    "--network",
+    input.network,
+    "--ip",
+    input.ip,
+    "--read-only",
+    "--user",
+    input.user,
+    "--cap-drop",
+    "ALL",
+    "--security-opt",
+    "no-new-privileges=true",
+    "--cpus",
+    "0.5",
+    "--memory",
+    "256m",
+    "--memory-swap",
+    "256m",
+    "--pids-limit",
+    "256",
+    // the log IS the run's egress evidence: bounded, read back with `docker logs` before the proxy is removed
+    "--log-driver",
+    "json-file",
+    "--log-opt",
+    "max-size=4m",
+    "--log-opt",
+    "max-file=1",
+    "--label",
+    "org.regulait.sandbox=1",
+    "--label",
+    "org.regulait.egress-proxy=1",
+    "--mount",
+    `type=volume,src=${input.aclVolume},dst=${SMOKESCREEN_ACL_DIR},readonly,volume-subpath=${input.aclSubpath}`,
+    ...PROXY_BLANKED_ENV.flatMap((name) => ["--env", `${name}=`]),
+    input.image,
+    ...smokescreenArgs(input.ip),
+  ];
+}
+
+/** keep the head of a log within `max` bytes, then a marker (never an unbounded buffer) */
+export function capEgressLog(text: string, max: number = ROBOT_EGRESS_LOG_MAX_BYTES): string {
+  if (Buffer.byteLength(text, "utf8") <= max) return text;
+  const marker = "\n[regulait: egress log truncated]\n";
+  const head = Buffer.from(text, "utf8").subarray(0, max - Buffer.byteLength(marker));
+  // drop a split trailing multi-byte sequence rather than emit a replacement character
+  return new TextDecoder("utf-8", { fatal: false }).decode(head).replace(/�+$/, "") + marker;
 }
 
 /**
@@ -167,7 +332,7 @@ export const STDIO_SANDBOX_BLANKED_ENV = ["NODE_OPTIONS", "NODE_PATH", "NODE_REP
  * `task_scoped` secrets (delivered on the release line, then fd 3). A scoped volume, an allow-list network and
  * `injected_at_egress` secrets are still refused.
  */
-export function unsupportedProfileFeature(profile: ExecutionProfileBody, opts: { inputVolume?: boolean } = {}): string | null {
+export function unsupportedProfileFeature(profile: ExecutionProfileBody, opts: { inputVolume?: boolean; egressProxy?: string | null } = {}): string | null {
   const inputs = profile.filesystem.inputs;
   if (inputs.length > 0) {
     if (!opts.inputVolume) return "declared read-only inputs (this executor has no input volume)";
@@ -175,6 +340,11 @@ export function unsupportedProfileFeature(profile: ExecutionProfileBody, opts: {
   }
   if (profile.persistence !== "none") return "a scoped volume";
   if (profile.network.mode === "allow_list") return "an allow-list network";
+  // ADR-0364 S3: `egressProxy` is null when this executor can build a robot run's egress, else why it cannot (fail
+  // closed: unset = cannot). A profile it cannot serve is never self-tested, so never attested, so never offered here.
+  if (profile.network.mode === "egress_proxy" && opts.egressProxy !== null) {
+    return `a per-run egress proxy (${opts.egressProxy ?? "this executor has no robot egress configuration"})`;
+  }
   if (profile.secrets === "injected_at_egress") return "secrets: injected_at_egress";
   return null;
 }
@@ -205,6 +375,13 @@ export function dockerRunArgs(input: DockerRunInput): string[] {
     seccomp.push("--security-opt", `seccomp=${path.join(input.seccompDir, `${p.process.seccomp.profile}.json`)}`);
   }
   const cpus = (p.resources.cpuMillis / 1000).toFixed(3).replace(/\.?0+$/, "");
+  // ADR-0364 S3: `none`, or a robot run's own internal network (only for an egress_proxy profile); never the host's,
+  // the default bridge or another container's namespace
+  const network = input.network ?? "none";
+  if (network !== "none" && (!EGRESS_NETWORK_NAME.test(network) || p.network.mode !== "egress_proxy")) {
+    throw new DockerBackendError("a sandbox joins no network but its own run's internal network, and only under an egress_proxy profile");
+  }
+  if (network === "none" && p.network.mode === "egress_proxy") throw new DockerBackendError("an egress_proxy sandbox needs its run's internal network");
   return [
     "run",
     "-i",
@@ -215,7 +392,7 @@ export function dockerRunArgs(input: DockerRunInput): string[] {
     "--pull",
     "never",
     "--network",
-    "none",
+    network,
     "--ipc",
     "none",
     ...(input.cgroupnsPrivate ? ["--cgroupns", "private"] : []),
@@ -367,8 +544,12 @@ export function probesFromObservation(init: InitObservation, side: ExecutorSideO
           out[probe] = notRun("interfaces_unreadable");
           break;
         }
-        // the decision 4 channel is the stdio pipe: no channel interface exists
-        out[probe] = { observed: { interfaces: names as string[], channelInterface: null } };
+        // the decision 4 channel is the stdio pipe: no channel interface exists. ADR-0364 S3: a robot run's sandbox has
+        // ONE more interface, on the internal network the executor attached it to (its only peer is its proxy); it is
+        // named as the channel only when it is the one non-loopback interface, so a second interface still fails
+        const extra = (names as string[]).filter((n) => n !== "lo");
+        const egressNet = side.expectedNetworkMode !== undefined && side.expectedNetworkMode !== "none";
+        out[probe] = { observed: { interfaces: names as string[], channelInterface: egressNet && extra.length === 1 ? extra[0]! : null } };
         break;
       }
       case "no_executor_credentials": {
@@ -523,9 +704,38 @@ export interface DockerBackendOptions {
   inputVolume?: string | null;
   /** how long the sandbox init may take to print its probes (default 60 s) */
   probeTimeoutMs?: number;
+  /**
+   * ADR-0364 S3: a robot run's egress. Each unset here falls back to its environment variable; any one missing means
+   * this executor serves no `egress_proxy` profile (never self-tested, never offered; a placement that still arrives is
+   * refused before anything starts: fail closed).
+   *  - `robotEgressImage` (`REGULAIT_ROBOT_EGRESS_IMAGE`): the `robot-egress` Smokescreen image, pinned by digest
+   *  - `egressAclDir` + `egressAclVolume` (`REGULAIT_ROBOT_EGRESS_ACL_DIR`, `REGULAIT_ROBOT_EGRESS_ACL_VOLUME`): the
+   *    Docker volume the run ACLs are written to and where this executor has it mounted (as the input volume)
+   *  - `egressUplinkNetwork` (`REGULAIT_ROBOT_EGRESS_NETWORK`, default `bridge`): the egress-capable network the proxy
+   *    alone is also connected to
+   *  - `egressRuntimeName` (`REGULAIT_EXECUTOR_EGRESS_RUNTIME`): the Docker runtime a robot sandbox runs under. The
+   *    runc backend uses its own runtime; the gVisor backend needs a second runsc runtime registered with
+   *    `--network=sandbox` (gVisor's netstack on the run's internal network) in place of `--network=none`.
+   *  - `egressProxyUser` (default 65532:65532): who the proxy runs as when this executor itself is root (otherwise it
+   *    runs as this executor's own uid:gid, the owner of the 0600 ACL file)
+   */
+  robotEgressImage?: string | null;
+  egressAclDir?: string | null;
+  egressAclVolume?: string | null;
+  egressUplinkNetwork?: string | null;
+  egressRuntimeName?: string | null;
+  egressProxyUser?: string;
   /** test seams */
   spawnDocker?: (args: string[], env: NodeJS.ProcessEnv) => DockerChild;
   dockerApi?: (apiPath: string) => Promise<unknown>;
+}
+
+/** ADR-0364 S3: one robot run's egress as set up: its network, its proxy's URL (null for a canary), and its removal */
+interface EgressRun {
+  network: string;
+  proxyUrl: string | null;
+  /** remove the proxy (after reading its log), the network and the ACL; resolves with the log ("" without a proxy) */
+  teardown: () => Promise<string>;
 }
 
 /** what a backend's runtime check found before a sandbox: the runtime's path and arguments as the daemon names them */
@@ -567,23 +777,61 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
     const vol = options.inputVolume === undefined ? (process.env.REGULAIT_EXECUTOR_INPUT_VOLUME ?? null) : options.inputVolume;
     this.inputDir = dir && vol ? dir : null;
     this.inputVolume = dir && vol ? vol : null;
+    // ADR-0364 S3: a robot run's egress configuration (each from the options, else the environment)
+    const opt = (v: string | null | undefined, env: string | undefined) => (v === undefined ? (env ?? null) : v) || null;
+    this.egressImage = opt(options.robotEgressImage, process.env.REGULAIT_ROBOT_EGRESS_IMAGE);
+    this.egressAclDir = opt(options.egressAclDir, process.env.REGULAIT_ROBOT_EGRESS_ACL_DIR);
+    this.egressAclVolume = opt(options.egressAclVolume, process.env.REGULAIT_ROBOT_EGRESS_ACL_VOLUME);
+    this.egressUplink = opt(options.egressUplinkNetwork, process.env.REGULAIT_ROBOT_EGRESS_NETWORK) ?? "bridge";
+    this.egressRuntime = opt(options.egressRuntimeName, process.env.REGULAIT_EXECUTOR_EGRESS_RUNTIME);
   }
 
+  private readonly egressImage: string | null;
+  private readonly egressAclDir: string | null;
+  private readonly egressAclVolume: string | null;
+  private readonly egressUplink: string;
+  private readonly egressRuntime: string | null;
+
   abstract describe(): BackendDescription;
-  /** the runtime's checks before any sandbox (`force`: a self-test re-checks everything it caches) */
-  protected abstract checkRuntime(force: boolean): Promise<RuntimeCheck>;
-  /** after the container started: does THIS container's runtime (docker inspect) carry the backend's evidence? */
-  protected abstract containerRuntimeVerified(containerRuntime: string | null, rt: RuntimeCheck): Promise<boolean>;
+  /** the runtime's checks before any sandbox under `runtimeName` (`force`: a self-test re-checks everything it caches) */
+  protected abstract checkRuntime(force: boolean, runtimeName: string): Promise<RuntimeCheck>;
+  /** after the container started: does THIS container's runtime (docker inspect) carry the backend's evidence for `runtimeName`? */
+  protected abstract containerRuntimeVerified(containerRuntime: string | null, rt: RuntimeCheck, runtimeName: string): Promise<boolean>;
   /** extra `docker run` choices a backend makes (the runc backend asks for a private cgroup namespace) */
   protected runOptions(): { cgroupnsPrivate: boolean } {
     return { cgroupnsPrivate: false };
   }
-  /** the report's probes from the init's line and the executor's outside observation */
-  protected abstract probesFor(init: InitObservation, side: ExecutorSideObservation, profile: ExecutionProfileBody, wanted: readonly AttestationProbe[]): ProbeSet;
+  /** the report's probes from the init's line and the executor's outside observation, for a sandbox under `runtimeName` */
+  protected abstract probesFor(init: InitObservation, side: ExecutorSideObservation, profile: ExecutionProfileBody, wanted: readonly AttestationProbe[], runtimeName: string): ProbeSet;
+  /**
+   * ADR-0364 S3: the runtime a robot run's sandbox runs under when none is configured, or null (none: the profile is
+   * unsupported). The runc backend has no network flag, so it uses its own; the gVisor backend needs a second runtime.
+   */
+  protected defaultEgressRuntime(): string | null {
+    return null;
+  }
+
+  /** the Docker runtime a sandbox under `profile` runs under, or null when this executor has none for it */
+  protected runtimeNameFor(profile: ExecutionProfileBody): string | null {
+    if (profile.network.mode !== "egress_proxy") return this.options.runtimeName;
+    return this.egressRuntime ?? this.defaultEgressRuntime();
+  }
+
+  /** ADR-0364 S3: null when this executor can build a robot run's egress, else why not */
+  protected egressProblem(): string | null {
+    if (!this.egressImage) return "REGULAIT_ROBOT_EGRESS_IMAGE is not set";
+    if (!isPinnedImageRef(this.egressImage)) return "REGULAIT_ROBOT_EGRESS_IMAGE is not pinned by digest";
+    if (!this.egressAclDir || !this.egressAclVolume) return "no ACL volume (REGULAIT_ROBOT_EGRESS_ACL_DIR and REGULAIT_ROBOT_EGRESS_ACL_VOLUME)";
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(this.egressUplink) || ["host", "none"].includes(this.egressUplink)) return "the uplink network is not a Docker network name";
+    const rt = this.egressRuntime ?? this.defaultEgressRuntime();
+    if (!rt) return `no runtime for robot sandboxes (REGULAIT_EXECUTOR_EGRESS_RUNTIME; the ${this.label} backend needs its own)`;
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(rt)) return "the robot runtime is not a Docker runtime name";
+    return null;
+  }
 
   /** review MEDIUM-2: a profile this host cannot place under (no input volume for an engine task, …) is never attested */
   unsupported(profile: ExecutionProfileBody): string | null {
-    return unsupportedProfileFeature(profile, { inputVolume: this.inputDir !== null && this.inputVolume !== null });
+    return unsupportedProfileFeature(profile, { inputVolume: this.inputDir !== null && this.inputVolume !== null, egressProxy: this.egressProblem() });
   }
 
   /**
@@ -610,8 +858,8 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
   }
 
   /** check, before any sandbox, the backend's runtime and the init; the first preflight also clears stale inputs */
-  async preflight(force = false): Promise<RuntimeCheck> {
-    const rt = await this.checkRuntime(force);
+  async preflight(force = false, runtimeName: string = this.options.runtimeName): Promise<RuntimeCheck> {
+    const rt = await this.checkRuntime(force, runtimeName);
     await this.verifyInit();
     // review LOW-2: the first preflight removes the inputs a previous run of this executor left behind
     if (!this.inputsReconciled && this.inputDir !== null) {
@@ -638,18 +886,122 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
     });
   }
 
-  private async sandbox(kind: "canary" | "placement", image: string, profile: ExecutionProfileBody, cls: AppliedIsolationKind, task?: SandboxTaskInput): Promise<SandboxHandle> {
+  /** ADR-0364 S3: a docker command's stdout and stderr together, at most `max` bytes kept (the rest drained) */
+  private async dockerCapture(args: string[], max: number): Promise<{ code: number; out: string }> {
+    const child = this.run(args);
+    child.stdin.end();
+    const parts: Buffer[] = [];
+    let kept = 0;
+    let over = false;
+    const take = (c: Buffer | string) => {
+      const b = typeof c === "string" ? Buffer.from(c, "utf8") : c;
+      if (kept >= max) {
+        over = true;
+        return;
+      }
+      const slice = b.subarray(0, max - kept);
+      if (slice.length < b.length) over = true;
+      parts.push(slice);
+      kept += slice.length;
+    };
+    child.stdout.on("data", take);
+    child.stderr.on("data", take);
+    const code = await new Promise<number>((resolve) => {
+      child.once("error", () => resolve(-1));
+      child.once("exit", (c) => resolve(c ?? -1));
+    });
+    const text = new TextDecoder("utf-8", { fatal: false }).decode(Buffer.concat(parts));
+    return { code, out: over ? capEgressLog(`${text}\n[regulait: egress log truncated]\n`, max) : text };
+  }
+
+  /**
+   * ADR-0364 S3: a robot run's egress, set up BEFORE its sandbox exists: the run's INTERNAL network, then (placement
+   * only; a canary self-test gets the network alone) the run's ACL written 0600 under the ACL volume, its Smokescreen
+   * started on the internal network at a known address and only then connected to the uplink. Any step that fails
+   * removes whatever was made and throws: no sandbox starts without its proxy (fail closed).
+   */
+  private async setupEgress(name: string, egress: RobotEgress | null): Promise<EgressRun> {
+    const { network, proxy } = egressNames(name);
+    const made = { network: false, proxy: false, acl: null as string | null };
+    const teardown = async (): Promise<string> => {
+      let log = "";
+      if (made.proxy) {
+        // the log is the run's egress evidence: read before the proxy goes
+        log = (await this.dockerCapture(["logs", proxy], ROBOT_EGRESS_LOG_MAX_BYTES)).out;
+        await this.docker(["rm", "-f", proxy]);
+      }
+      if (made.network) await this.docker(["network", "rm", network]);
+      if (made.acl) await rm(made.acl, { recursive: true, force: true }).catch(() => undefined);
+      return log;
+    };
+    try {
+      if ((await this.docker(egressNetworkCreateArgs(network))) !== 0) throw new DockerBackendError("the run's internal network was not created");
+      made.network = true;
+      if (!egress) return { network, proxyUrl: null, teardown };
+      const targets = robotEgressSchema.parse(egress).targets;
+      const net = (await this.api(`/networks/${network}`)) as { Internal?: unknown; IPAM?: { Config?: Array<{ Subnet?: unknown }> } };
+      if (net.Internal !== true) throw new DockerBackendError("the run's network is not internal");
+      const ip = egressProxyAddress(net.IPAM?.Config?.find((c) => typeof c.Subnet === "string" && c.Subnet.includes("."))?.Subnet);
+      // the ACL, generated in one place from the offer's targets, written 0600 and owned by whoever the proxy runs as
+      const dir = path.join(this.egressAclDir!, name);
+      made.acl = dir;
+      await mkdir(dir, { recursive: true, mode: 0o700 });
+      const file = path.join(dir, SMOKESCREEN_ACL_FILE);
+      await writeFile(file, smokescreenAclForTargets(targets), { mode: 0o600, flag: "wx" });
+      const user = await this.proxyUser(dir, file);
+      const args = proxyRunArgs({ name: proxy, image: this.egressImage!, network, ip, aclVolume: this.egressAclVolume!, aclSubpath: name, user });
+      const started = await this.docker(args);
+      made.proxy = true;
+      if (started !== 0) throw new DockerBackendError("the run's egress proxy did not start");
+      if ((await this.docker(["network", "connect", this.egressUplink, proxy])) !== 0) throw new DockerBackendError("the run's egress proxy was not connected to the uplink");
+      const state = (await this.api(`/containers/${proxy}/json`)) as { State?: { Running?: unknown } };
+      if (state.State?.Running !== true) throw new DockerBackendError("the run's egress proxy is not running");
+      return { network, proxyUrl: `http://${ip}:${ROBOT_EGRESS_PROXY_PORT}`, teardown };
+    } catch (e) {
+      await teardown().catch(() => undefined);
+      throw e instanceof DockerBackendError ? e : new DockerBackendError(`the run's egress was not set up (${(e as Error).message}); nothing was started`);
+    }
+  }
+
+  /** who the proxy runs as: this executor's own uid:gid (the ACL's owner), or, when this executor is root, the configured non-root user, given the ACL */
+  private async proxyUser(dir: string, file: string): Promise<string> {
+    const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+    const gid = typeof process.getgid === "function" ? process.getgid() : 0;
+    if (uid !== 0) return `${uid}:${gid}`;
+    const user = this.options.egressProxyUser ?? "65532:65532";
+    const m = /^(\d{1,10}):(\d{1,10})$/.exec(user);
+    if (!m || m[1] === "0") throw new DockerBackendError("the egress proxy user must be a non-root uid:gid");
+    await chown(dir, Number(m[1]), Number(m[2]));
+    await chown(file, Number(m[1]), Number(m[2]));
+    return user;
+  }
+
+  private async sandbox(
+    kind: "canary" | "placement",
+    image: string,
+    profile: ExecutionProfileBody,
+    cls: AppliedIsolationKind,
+    task?: SandboxTaskInput,
+    egress?: RobotEgress,
+  ): Promise<SandboxHandle> {
     if (cls !== this.attestedClass) throw new DockerBackendError(`the ${this.label} backend attests ${this.attestedClass} only (asked ${cls})`);
     const inputVolume = this.inputDir !== null && this.inputVolume !== null;
+    const egressMode = profile.network.mode === "egress_proxy";
     if (kind === "placement") {
-      const unsupported = unsupportedProfileFeature(profile, { inputVolume });
+      const unsupported = unsupportedProfileFeature(profile, { inputVolume, egressProxy: this.egressProblem() });
       if (unsupported) throw new DockerBackendError(`the profile asks for ${unsupported}, which the ${this.label} backend does not provide in this release; nothing was started`);
       // I5: an input is required exactly when the profile declares one (a task without one, or one with an input the
       // profile does not declare, is refused: the sandbox never runs on an input nobody checked)
       if ((profile.filesystem.inputs.length > 0) !== (task !== undefined)) throw new DockerBackendError("the task's input does not match the profile's declared inputs; nothing was started");
+      // ADR-0364 S3: a per-run egress exactly under an egress_proxy profile
+      if (egressMode !== (egress !== undefined)) throw new DockerBackendError("the run's egress does not match the profile's network; nothing was started");
+    } else if (egressMode && this.egressProblem()) {
+      throw new DockerBackendError(`the profile asks for a per-run egress proxy (${this.egressProblem()}); nothing was started`);
     }
+    const runtimeName = this.runtimeNameFor(profile);
+    if (!runtimeName) throw new DockerBackendError(`the ${this.label} backend has no runtime for this profile; nothing was started`);
     // a self-test re-checks the runtime; a placement re-checks whatever the backend caches when it changed
-    const rt = await this.preflight(kind === "canary");
+    const rt = await this.preflight(kind === "canary", runtimeName);
     const name = `regulait-sbx-${randomUUID()}`;
     // I5: the input, written and verified under this executor's input volume BEFORE the sandbox exists
     let inputSha256: string | undefined;
@@ -667,13 +1019,43 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
       }
       input = { volume: this.inputVolume!, subpath: `${name}/${declared.name}`, mountPath: declared.mountPath };
     }
+    // ADR-0364 S3: the run's network and proxy, removed with the sandbox; the proxy's log is kept as evidence
+    let egressRun: EgressRun | null = null;
+    let egressLogText: string | null = null;
+    let egressTorn: Promise<void> | null = null;
+    const teardownEgress = (): Promise<void> => {
+      if (!egressRun) return Promise.resolve();
+      const run = egressRun;
+      egressTorn ??= run.teardown().then(
+        (log) => {
+          egressLogText = capEgressLog(log);
+        },
+        () => {
+          egressLogText ??= "";
+        },
+      );
+      return egressTorn;
+    };
     const cleanupInput = async () => {
       if (inputRoot) await removeTaskInput(inputRoot).catch(() => undefined);
     };
     let args: string[];
     try {
-      args = dockerRunArgs({ name, runtimeName: this.options.runtimeName, image, profile, canary: kind === "canary", seccompDir: this.options.seccompDir ?? null, initVolume: this.options.initVolume, input, ...this.runOptions() });
+      if (egressMode) egressRun = await this.setupEgress(name, kind === "placement" ? egress! : null);
+      args = dockerRunArgs({
+        name,
+        runtimeName,
+        image,
+        profile,
+        canary: kind === "canary",
+        seccompDir: this.options.seccompDir ?? null,
+        initVolume: this.options.initVolume,
+        input,
+        network: egressRun?.network ?? null,
+        ...this.runOptions(),
+      });
     } catch (e) {
+      await teardownEgress();
       await cleanupInput();
       throw e;
     }
@@ -699,6 +1081,8 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
           // the container may already be gone
         }
         await self.docker(["rm", "-f", name]);
+        // ADR-0364 S3: the run's proxy (its log read first) and its network go with the sandbox, always
+        await teardownEgress();
         // I5: the task's input goes with its sandbox (the task secret never touched a disk)
         await cleanupInput();
         endedResolve(outcome ?? (oom ? "limit_exceeded" : code === 0 ? "completed" : "failed"));
@@ -727,7 +1111,14 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
       await stop("killed");
       throw new DockerBackendError("the sandbox did not start the RegulAIt sandbox init (is the image built FROM the stdio base?)");
     }
-    const inspect = (await this.api(`/containers/${name}/json`)) as { Image?: unknown; HostConfig?: unknown };
+    let inspect: { Image?: unknown; HostConfig?: unknown };
+    try {
+      inspect = (await this.api(`/containers/${name}/json`)) as { Image?: unknown; HostConfig?: unknown };
+    } catch (e) {
+      // the sandbox (and a robot run's proxy and network with it) never outlives a failed start
+      await stop("killed");
+      throw e;
+    }
     let throttled = 0;
     try {
       const stats = (await this.api(`/containers/${name}/stats?stream=false&one-shot=true`)) as { cpu_stats?: { throttling_data?: { throttled_periods?: unknown } } };
@@ -739,7 +1130,7 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
     const containerRuntime = typeof hostConfig.Runtime === "string" ? hostConfig.Runtime : null;
     const side: ExecutorSideObservation = {
       containerRuntime,
-      runtimeBinaryVerified: await this.containerRuntimeVerified(containerRuntime, rt),
+      runtimeBinaryVerified: await this.containerRuntimeVerified(containerRuntime, rt, runtimeName),
       runtimePath: rt.path,
       runtimeArgs: rt.args,
       imageId: typeof inspect.Image === "string" ? inspect.Image : null,
@@ -750,6 +1141,7 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
       pidsLimit: num(hostConfig.PidsLimit),
       throttledPeriods: throttled,
       hostConfig,
+      expectedNetworkMode: egressRun?.network ?? "none",
     };
     const observedImage = side.imageId && isStdioClosureImage(side.imageId) ? side.imageId : `sha256:${"0".repeat(64)}`;
     let released = false;
@@ -794,7 +1186,7 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
       id: name,
       imageDigest: observedImage,
       async probe(probes) {
-        return self.probesFor(init!, side, profile, probes);
+        return self.probesFor(init!, side, profile, probes, runtimeName);
       },
       ...(inputSha256 !== undefined ? { inputSha256 } : {}),
       async releaseInput(workload, secret) {
@@ -803,9 +1195,14 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
         if (secret !== undefined && (profile.secrets !== "task_scoped" || !workload)) throw new DockerBackendError("this sandbox's profile admits no task secret");
         released = true;
         // I5: the task secret rides the release line on the init's stdin (never env, argv or a file Docker can show);
-        // the init hands it to the workload on fd 3. The line is written once and not kept.
+        // the init hands it to the workload on fd 3. The line is written once and not kept. ADR-0364 S3: a robot run's
+        // proxy URL and run id ride it too; the init puts them in the workload's environment as
+        // REGULAIT_ROBOT_EGRESS_PROXY and REGULAIT_ROBOT_RUN_ID (the runner refuses to start without both).
+        const proxy = egressRun?.proxyUrl ?? null;
         const line = JSON.stringify(
-          workload ? { "regulait-release": 1, argv: [workload.command, ...workload.args], ...(secret !== undefined ? { secret } : {}) } : { "regulait-release": 1 },
+          workload
+            ? { "regulait-release": 1, argv: [workload.command, ...workload.args], ...(secret !== undefined ? { secret } : {}), ...(proxy && egress ? { egressProxy: proxy, robotRunId: egress.runId } : {}) }
+            : { "regulait-release": 1 },
         );
         await new Promise<void>((resolve, reject) => child.stdin.write(`${line}\n`, (err) => (err ? reject(err) : resolve())));
       },
@@ -813,6 +1210,19 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
         await stop("killed");
       },
       ...(stdio ? { stdio } : {}),
+      ...(egressRun?.proxyUrl
+        ? {
+            // ADR-0364 S3: the final log once the run's proxy is gone; before that, what it has logged so far
+            async egressLog() {
+              if (egressLogText !== null) return egressLogText;
+              if (egressTorn) {
+                await egressTorn;
+                return egressLogText ?? "";
+              }
+              return capEgressLog((await self.dockerCapture(["logs", egressNames(name).proxy], ROBOT_EGRESS_LOG_MAX_BYTES)).out);
+            },
+          }
+        : {}),
       ended,
     };
     return handle;
@@ -823,13 +1233,24 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
   }
 
   async start(offer: ExecutionOffer, profile: ExecutionProfileBody, cls: AppliedIsolationKind, task?: SandboxTaskInput): Promise<SandboxHandle> {
-    // I5: engine tasks (`engine_worker`) join I4's stdio servers; code execution and BYOC workers are not built
-    if (offer.workloadKind !== "mcp_stdio" && offer.workloadKind !== "engine_worker") {
-      throw new DockerBackendError(`the ${this.label} backend runs mcp_stdio and engine_worker placements in this release (offer is ${offer.workloadKind})`);
+    // I5: engine tasks (`engine_worker`) join I4's stdio servers; ADR-0364 S3 adds robot runs (`robot_browser`); code
+    // execution and BYOC workers are not built
+    if (offer.workloadKind !== "mcp_stdio" && offer.workloadKind !== "engine_worker" && offer.workloadKind !== "robot_browser") {
+      throw new DockerBackendError(`the ${this.label} backend runs mcp_stdio, engine_worker and robot_browser placements in this release (offer is ${offer.workloadKind})`);
     }
     if (offer.workloadKind === "mcp_stdio" && task) throw new DockerBackendError("a stdio MCP server takes no task input");
     // an engine task runs on its input: a profile with no input cannot run one (the gateway would refuse its report)
     if (offer.workloadKind === "engine_worker" && profile.filesystem.inputs.length === 0) throw new DockerBackendError("an engine task's profile declares no input; nothing was started");
+    // ADR-0364 S3: a robot run takes no input, runs only under an egress_proxy profile, and only with its own egress;
+    // no other kind ever gets an egress (the offer schema refuses it too)
+    if (offer.workloadKind === "robot_browser") {
+      if (task) throw new DockerBackendError("a robot run takes no task input");
+      if (profile.network.mode !== "egress_proxy") throw new DockerBackendError("a robot run's profile has no per-run egress proxy; nothing was started");
+      const egress = robotEgressSchema.safeParse(offer.egress);
+      if (!egress.success) throw new DockerBackendError("a robot run's offer carries no valid egress; nothing was started");
+      return this.sandbox("placement", offer.imageDigest, profile, cls, task, egress.data);
+    }
+    if (offer.egress !== undefined) throw new DockerBackendError(`a ${offer.workloadKind} placement has no egress; nothing was started`);
     return this.sandbox("placement", offer.imageDigest, profile, cls, task);
   }
 }
