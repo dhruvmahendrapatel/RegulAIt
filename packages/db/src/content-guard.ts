@@ -113,6 +113,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.thirdPartyIngestSources, ["name"]],
   // ADR-0303: a SIEM destination an admin names
   [s.siemDestinations, ["name"]],
+  // ADR-0322: an operator-typed vendor usage connector name (a pasted vendor key here would be refused)
+  [s.vendorUsageConnectors, ["name"]],
   [s.engineRunners, ["name"]],
   [s.executors, ["name"]],
   [s.externalScorers, ["name"]],
@@ -164,6 +166,9 @@ export const CONTENT_GUARD_EXCLUSION_REASONS: Readonly<Record<ContentGuardExclus
 
 /** DELIBERATELY NOT GUARDED — named, with a category, so the inventory test can tell a decision from an oversight. */
 export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclusion>> = {
+  // ADR-0314: a vendor agent registry's own name and description for an agent, read-only and bounded at staging
+  "agent_registry_records.description": "ingested",
+  "agent_registry_records.display_name": "ingested",
   // ADR-0261: an event identifier the sending product chose (a linear lower-case identifier check bounds it)
   "third_party_ingest_records.event_name": "ingested",
   // ADR-0363 slice 1: a label's display name as Microsoft Graph returns it (the customer's Purview tenant)

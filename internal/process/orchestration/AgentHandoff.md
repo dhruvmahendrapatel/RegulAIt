@@ -38,19 +38,11 @@ Read this first if you are taking over as the master session of the RegulAIt bui
 
 ## Where we left off (current master)
 
-- **2026-11-18, 14:40 UTC.** Master hand-over at about 08:54 UTC; the new master runs the merge loop.
-- **Merged and audited since the hand-over:** #941, #1013 (docs), #904 (E26), #1010 (E45 RPA ADR), #903 (E12). Every
-  merge's second parent equals the released SHA.
-- **Census-counter bottleneck.** `KNOWN_UI_GAPS_MAX` in `scripts/preflight-ui-route-census.mjs` (and its test pin) is
-  edited by every PR that adds API-only routes, so each merge makes the others conflict. Five approved, released PRs
-  are being refreshed one at a time: #744 (UI-B) first, then #902 (E1), #883 (E20), #848 (E2), #855 (E3). The waiting
-  builders were told not to merge main until their turn. A computed count would remove the bottleneck; that is a
-  proposal for the owner, not started.
-- **Request changes, fixes pushed, waiting for READY:** #861 (E7), #865 (E15), #982 (E44), #952 (E31), #867 (E16),
-  #871 (E13). On READY they return to the same reviewer pair.
-- **In review:** #1019 (E26, geography risk factor).
-- **Waiting on the builder:** #884 (E18), #996 (E27, three failing checks), Codex #936 (route first on READY), #1006,
-  #1007.
-- **Next steps:**
-  1. Work the census order; after each merge, tell the next builder main's new count.
-  2. Lift rule 15 a few lanes at a time once the open PR count is under 50, with E45's code first.
+- **2026-11-19, 00:15 UTC.** Merged and audited since the hand-over: #941, #1013, #904, #1010, #903, #1035, #744, #1019,
+  #952, #1040, #902, #883, #1039.
+- **Census queue (M-118):** #848 (E2) is in its turn; then #855, #861, #867, #865, #1020, #871, and later #964, #1044,
+  #892, #982 once approved. After each census merge, read `KNOWN_UI_GAPS_MAX` on main and give the next builder main's
+  value plus its own delta (`git diff origin/main...origin/<branch> -- scripts/preflight-ui-route-census.mjs`).
+- **Non-census PRs** are released in parallel as soon as both approvals land (#1045 next).
+- **Waiting on builders:** #884 (E18), #996 (E27), Codex #936 (route first on READY).
+- **Usage limit:** see Status.md for the 2026-11-18 outage and the resume rule.

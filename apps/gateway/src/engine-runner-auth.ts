@@ -31,6 +31,7 @@ import { and, engineEnrollmentTokens, eq, gt, sql, type Db } from "@regulait/db"
 import { ENGINE_ENROLLMENT_ROUTES, ENGINE_ENROLLMENT_TOKEN_PREFIX, ENGINE_RUNNER_ROUTES } from "@regulait/shared";
 import { hashToken } from "./token-hash.js";
 import { ENDPOINT_AGENT_TOKEN_ROUTES } from "./endpoint-agent.js";
+import { BROWSER_EXTENSION_TOKEN_ROUTES } from "./browser-device.js";
 import type { AuthContext, AuthRefusal } from "./auth.js";
 
 export const RUNNER_ROUTE_SET: ReadonlySet<string> = new Set<string>(ENGINE_RUNNER_ROUTES);
@@ -86,6 +87,8 @@ export function engineCredentialRoutes(ctx: { via: string }): ReadonlySet<string
   if (ctx.via === "pdp") return PDP_CLIENT_ROUTES;
   // ADR-0195 SD4b: an endpoint agent's self token reaches its config, reports and key rotation only
   if (ctx.via === "endpoint-agent") return ENDPOINT_AGENT_TOKEN_ROUTES;
+  // ADR-0334: a browser extension's self token reaches its policy, events and prompt-capture routes only
+  if (ctx.via === "browser-extension") return BROWSER_EXTENSION_TOKEN_ROUTES;
   return null;
 }
 
@@ -98,10 +101,10 @@ export function registerEngineRunnerScopeHook(app: FastifyInstance): void {
     const route = `${req.method} ${req.routeOptions.url ?? ""}`;
     const allowed = req.authCtx ? engineCredentialRoutes(req.authCtx) : null;
     if (allowed) {
-      if (!allowed.has(route) && (req.authCtx.via === "pdp" || req.authCtx.via === "endpoint-agent")) {
+      if (!allowed.has(route) && (req.authCtx.via === "pdp" || req.authCtx.via === "endpoint-agent" || req.authCtx.via === "browser-extension")) {
         return reply.status(403).send({
           error: "workload_scope",
-          detail: `a${req.authCtx.via === "pdp" ? " PDP client's" : "n endpoint agent's"} token may only reach ${[...allowed].join(", ")}; '${route}' is not one of them.`,
+          detail: `a${req.authCtx.via === "pdp" ? " PDP client's" : req.authCtx.via === "browser-extension" ? " browser extension's" : "n endpoint agent's"} token may only reach ${[...allowed].join(", ")}; '${route}' is not one of them.`,
         });
       }
       if (!allowed.has(route)) {

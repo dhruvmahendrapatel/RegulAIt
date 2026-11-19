@@ -71,7 +71,8 @@ func ParseCodexPreToolUse(r io.Reader) (Call, error) {
 	}
 	if strings.HasPrefix(in.ToolName, "mcp__") {
 		// a name that does not split into mcp__<server>__<tool> leaves Server empty, which Decide denies
-		c.MCP = &MCPCall{Server: mcpServerFromToolName(in.ToolName)}
+		server := mcpServerFromToolName(in.ToolName)
+		c.MCP = &MCPCall{Server: server, Tool: mcpToolFromToolName(in.ToolName, server)}
 	}
 	return c, nil
 }

@@ -1,22 +1,25 @@
 # Build status
 
-## Current state (2026-11-18, 14:40 UTC)
+## Current state (2026-11-19, 00:15 UTC)
 
 - **Rule 15 (finish before starting)** is in force for every builder lane.
-- **Queue:** about 80 open PRs. Target: under 50, then lift rule 15 a few lanes at a time, E45 (RPA) code first.
-- **Sessions:** phasing down to 10 (D-2026-11-18-04). Archived today: E24, E25.
-- **Merge loop:** runs from the master's scratchpad, restarted every 7000 s. released.txt now also holds 1013, 904,
-  1010, 903 (merged) and 744, 848, 855, 902, 883 (released, then made dirty by the census counter; each needs a new
-  release line at its new head).
+- **Queue:** about 75 open PRs. Target: under 50, then lift rule 15 a few lanes at a time, E45 (RPA) code first.
+- **Sessions:** phasing down to 10 (D-2026-11-18-04). Archived: E24, E25.
+- **Merge loop:** runs from the master's scratchpad, restarted every 7000 s. One census-counter PR released at a time
+  (M-118).
+- **Usage-limit outage, 2026-11-18 21:40-21:58 UTC.** The account's weekly limit stopped every session on the account,
+  the master included; the owner reset it. No merge was lost, since the loop kept running. Five sessions had failed turns
+  and were resumed, reviewers first. Rule for the next one: pause, start nothing new, then resume the failed sessions,
+  reviewers first, at about 7 messages a minute.
 
 ## Pending
 
 | Item | Owner | Since | Notes |
 |---|---|---|---|
-| #744 UI-B, #902 E1, #883 E20, #848 E2, #855 E3 | builders, one at a time | 2026-11-18 | Census-counter conflict; serial refresh, #744 first |
-| #861 E7, #865 E15, #982 E44, #952 E31, #867 E16, #871 E13 | builders | 2026-11-18 | Request changes; fixes pushed, waiting for READY |
-| #1019 E26 geography factor | WaRPg + Xtyd8 | 2026-11-18 | First review |
-| #884 E18 SaaS entitlement graph | E18 | 2026-11-18 | Security request changes; fix pushed, no READY yet |
+| Census queue: #848 E2 (now), #855 E3, #861 E7, #867 E16, #865 E15, #1020 E12, #871 E13 | builders, one at a time | 2026-11-18 | M-118; approved PRs waiting for their turn |
+| Census PRs in review or fixing: #964 E31, #1044 E1, #892 E20, #982 E44 | builders and reviewers | 2026-11-18 | Join the census queue once approved |
+| #1045 E26 proof results | E26 | 2026-11-19 | Code request changes; no census, released on approval |
+| #884 E18 SaaS entitlement graph | E18 | 2026-11-18 | Security request changes; no READY yet |
 | #996 E27 fairness slice 2 | E27 | 2026-11-18 | Three failing checks |
 | #936 Codex C1 CI build-once | Codex | 2026-11-18 | Route first when READY |
 | #1006 C2, #1007 C3 | Codex | 2026-11-18 | Drafts, checks failing |
@@ -27,6 +30,8 @@
 
 ## Done log (newest first)
 
+- 2026-11-18 (late): #1040, #952, #902, #883 and #1039 merged, each audited (second parent = released SHA).
+- 2026-11-18 (evening): #1035, #744 and #1019 merged, each audited. M-118 logged.
 - 2026-11-18 (afternoon): #1013, #904, #1010 and #903 merged, each audited (second parent = released SHA).
 - 2026-11-18: master hand-over (about 08:54 UTC). #941 merged (82142059, second parent 3b86b4e0, audited); #973 and
   #1011 merged and audited; #880 merged. Lanes E24 and E25 archived (done, no open PR).
