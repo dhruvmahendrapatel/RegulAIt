@@ -238,11 +238,24 @@ async function main() {
   const secret = release.secret;
   if (secret !== undefined && (typeof secret !== "string" || !/^[\x21-\x7e]{1,1024}$/.test(secret))) process.exit(4);
   release.secret = undefined;
+  // ADR-0364 S3: a robot run's per-run egress proxy (the sandbox's only peer), named by the executor on this line:
+  // http, an IPv4 literal and a port, nothing else; it is the one variable the workload gets beyond PATH and HOME
+  const egressProxy = release.egressProxy;
+  if (egressProxy !== undefined && (typeof egressProxy !== "string" || !/^http:\/\/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{1,5}$/.test(egressProxy))) process.exit(4);
+  // with it, the run the robot runner reads its plan for (a uuid); both or neither
+  const robotRunId = release.robotRunId;
+  if (robotRunId !== undefined && (typeof robotRunId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(robotRunId))) process.exit(4);
+  if ((egressProxy === undefined) !== (robotRunId === undefined)) process.exit(4);
   const [command, ...args] = argv;
   // the workload's environment: nothing but a PATH and HOME (the work directory the executor set as the cwd) (decision 5: no secret, nothing inherited from the executor)
+  const env = { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: process.cwd() };
+  if (egressProxy !== undefined) {
+    env.REGULAIT_ROBOT_EGRESS_PROXY = egressProxy;
+    env.REGULAIT_ROBOT_RUN_ID = robotRunId;
+  }
   const child = spawn(command, args, {
     stdio: secret === undefined ? "inherit" : ["inherit", "inherit", "inherit", "pipe"],
-    env: { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: process.cwd() },
+    env,
   });
   if (secret !== undefined) child.stdio[3].end(secret);
   child.on("error", () => process.exit(5));

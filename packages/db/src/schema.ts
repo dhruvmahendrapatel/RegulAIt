@@ -4951,6 +4951,10 @@ export const orgSettings = pgTable(
     isolationFloorEngineWorker: text("isolation_floor_engine_worker", { enum: REQUIRABLE_ISOLATION_CLASSES })
       .notNull()
       .default("user_space_kernel"),
+    /** ADR-0364 S3 (pending migration robot_browser_isolation): the robot run floor, L2; L1 relaxes it (never below L1) */
+    isolationFloorRobotBrowser: text("isolation_floor_robot_browser", { enum: REQUIRABLE_ISOLATION_CLASSES })
+      .notNull()
+      .default("user_space_kernel"),
     /** an executor's self-test is fresh this long, 60–1440 minutes; longer relaxes it */
     executorAttestationMaxAgeMinutes: integer("executor_attestation_max_age_minutes").notNull().default(120),
 
@@ -5759,6 +5763,11 @@ export const orgSettings = pgTable(
     check(
       "org_settings_isolation_floors_check",
       sql`${t.isolationFloorPublic} IN ('hardened_container', 'user_space_kernel', 'microvm') AND ${t.isolationFloorInternal} IN ('hardened_container', 'user_space_kernel', 'microvm') AND ${t.isolationFloorConfidential} IN ('hardened_container', 'user_space_kernel', 'microvm') AND ${t.isolationFloorRegulated} IN ('hardened_container', 'user_space_kernel', 'microvm') AND ${t.isolationFloorMcpStdio} IN ('hardened_container', 'user_space_kernel', 'microvm') AND ${t.isolationFloorEngineWorker} IN ('hardened_container', 'user_space_kernel', 'microvm')`,
+    ),
+    /** ADR-0364 S3: a robot run is never placed below a hardened container (there is no L0 value) */
+    check(
+      "org_settings_isolation_floor_robot_browser_check",
+      sql`${t.isolationFloorRobotBrowser} IN ('hardened_container', 'user_space_kernel', 'microvm')`,
     ),
     check(
       "org_settings_executor_attestation_max_age_minutes_check",
@@ -15867,7 +15876,7 @@ export const executionPlacements = pgTable(
     check("execution_placements_runtime_flags_sha256_check", sql`${t.runtimeFlagsSha256} IS NULL OR ${t.runtimeFlagsSha256} ~ '^[0-9a-f]{64}$'`),
     check(
       "execution_placements_workload_kind_check",
-      sql`${t.workloadKind} IN ('mcp_stdio', 'code_exec', 'engine_worker', 'byoc_worker')`,
+      sql`${t.workloadKind} IN ('mcp_stdio', 'code_exec', 'engine_worker', 'byoc_worker', 'robot_browser')`,
     ),
     check(
       "execution_placements_required_class_check",
@@ -16018,9 +16027,30 @@ export const executionOffers = pgTable(
     acceptedAt: timestamp("accepted_at", { withTimezone: true }),
     reportedAt: timestamp("reported_at", { withTimezone: true }),
     endedAt: timestamp("ended_at", { withTimezone: true }),
+    /**
+     * ADR-0364 S3 (pending migration robot_browser_isolation): a robot_browser offer's per-run egress targets
+     * (`[{host, port}]`), required on that kind and NULL on every other. Exception comment (ADR-0200 3NF): a
+     * point-in-time "as offered" snapshot of the version's `robot_version_allowed_sites` (the source of truth), the
+     * instruction the executor builds the run's proxy ACL from; written once with the offer.
+     */
+    egressTargets: jsonb("egress_targets").$type<Array<{ host: string; port: number }>>(),
+    /**
+     * ADR-0364 S3: the robot run this offer is for (`robot_runs.id`), required on a robot_browser offer and NULL on every
+     * other; the executor hands it to the runner. Its foreign key to `robot_runs` is added by the migration that
+     * creates `robot_runs` (pending robots.sql runs after this one).
+     */
+    robotRunId: uuid("robot_run_id"),
   },
   (t) => [
-    check("execution_offers_workload_kind_check", sql`${t.workloadKind} IN ('mcp_stdio', 'code_exec', 'engine_worker', 'byoc_worker')`),
+    check(
+      "execution_offers_workload_kind_check",
+      sql`${t.workloadKind} IN ('mcp_stdio', 'code_exec', 'engine_worker', 'byoc_worker', 'robot_browser')`,
+    ),
+    check(
+      "execution_offers_egress_targets_check",
+      sql`(${t.workloadKind} = 'robot_browser') = (${t.egressTargets} IS NOT NULL) AND (${t.egressTargets} IS NULL OR (jsonb_typeof(${t.egressTargets}) = 'array' AND jsonb_array_length(${t.egressTargets}) BETWEEN 1 AND 64))`,
+    ),
+    check("execution_offers_robot_run_check", sql`(${t.workloadKind} = 'robot_browser') = (${t.robotRunId} IS NOT NULL)`),
     check("execution_offers_required_class_check", sql`${t.requiredClass} IN ('hardened_container', 'user_space_kernel', 'microvm')`),
     check(
       "execution_offers_required_by_check",
