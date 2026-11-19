@@ -348,9 +348,11 @@ jobs:
       # on a reasoned list in that script (machine-only by category,
       # superseded by a route the UI calls, an indirect call with its
       # evidence), or is a 501 stub. Real gaps sit in a TEMPORARY
-      # `KNOWN_UI_GAPS` list that this step prints loudly and whose count may
-      # only go down. A list entry that no longer matches fails the step, so
-      # the lists cannot rot.
+      # `KNOWN_UI_GAPS` list (one file per ADR and lane in
+      # scripts/known-ui-gaps/, ADR-0252 addendum) that this step prints
+      # loudly; its count is the number of entries. A list entry that no longer
+      # matches fails the step, so the lists cannot rot and the count falls as
+      # screens land.
       #
       # Two steps, and the census runs whenever the affordance step RAN (passed
       # or failed), so both reports always show in one run. Neither runs after a
