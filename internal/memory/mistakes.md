@@ -1987,3 +1987,7 @@ Rule: before releasing a batch, run `git diff --name-only origin/main...origin/<
 shared hand-edited file (the census counter, a journal, an index). Release only one PR that edits such a file at a time;
 release the next after the previous one merges and its builder has merged main. PRs that do not touch the file can be
 released in parallel.
+
+Superseded by the computed counter (2026-11-19, ADR-0252 addendum): `KNOWN_UI_GAPS_MAX` and its pin are gone, and each
+ADR and lane's gaps are a file of their own in `scripts/known-ui-gaps/`, so census PRs no longer share a line. The rule
+still holds for any other shared hand-edited file.
