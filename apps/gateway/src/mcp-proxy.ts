@@ -49,6 +49,7 @@ import {
   type PreparedPiiApproval,
   type ScannableTool,
   type McpServedDefinitions,
+  type McpServerTransport,
   type McpUpstreamTransport,
   CONTENT_TRUST_REFUSAL_CODE,
   CONTENT_TRUST_RULE_ID,
@@ -2174,7 +2175,7 @@ async function observeServedDefinitions(
   client: Client,
   tools: readonly unknown[],
   /** the same `/metrics` labels the manifest read uses, so each list request is counted once (ADR-0185 G5) */
-  observe: { serverId: string; transport?: McpUpstreamTransport | null | undefined },
+  observe: { serverId: string; transport?: McpServerTransport | null | undefined },
 ): Promise<McpServedDefinitions> {
   const caps = client.getServerCapabilities() ?? {};
   const list = async <T>(fetch: (timeout: number) => Promise<T>): Promise<T | null> => {
@@ -2198,7 +2199,7 @@ export async function syncUpstreamTools(
   client: Client,
   trigger: McpAdmissionTrigger = "sync",
   /** ADR-0185 G5: the row's transport, for the `/metrics` label only */
-  transport?: McpUpstreamTransport | null,
+  transport?: McpServerTransport | null,
   /** the on-demand sync's audit row (mcp-tool-sync.ts), written in the transaction that stores the manifest */
   onStored?: (tx: Db, tools: Tool[]) => Promise<void>,
 ): Promise<Tool[]> {

@@ -516,6 +516,7 @@ import {
   registerComplianceProfileLifecycleRoutes,
 } from "./compliance-profile-lifecycle.js";
 import { applyInfraApprovalDecision, registerInfraRoutes } from "./infra.js";
+import { applyRobotVersionDecision, precheckRobotVersionDecision, registerRobotRoutes } from "./robots.js";
 import { registerOptimizationRoutes } from "./optimization.js";
 import { applyRunApprovalDecision, registerOrchestrationRoutes } from "./orchestration.js";
 import { registerDecomposeRoutes } from "./decompose.js";
@@ -5228,6 +5229,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const refusal = await precheckComplianceProfileDecision(db, row, deciderUserId);
       if (refusal) return fail(refusal.status, refusal.body);
     }
+    // ADR-0364 — `cannot_approve_own_robot_version`, keyed on the DECIDER so a robot version's author cannot reach
+    // its review through delegation or the admin override above.
+    if (row.objectType === "robot_version") {
+      const refusal = await precheckRobotVersionDecision(db, row, deciderUserId);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
     // Separation-of-duties guard: the person deciding IS the person who
     // triggered the governed action. Still decidable (alternate-approver
     // routing is deliberately out of scope) but never silently — a recorded
@@ -5494,6 +5501,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // (named-approver, admin-override-reason, self-review-reason) apply above.
       if (updated.objectType === "infra_operation") {
         await applyInfraApprovalDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
+      }
+      // ADR-0364: a reviewed robot version — approved = it becomes a tool on the first-party Robots MCP server (and
+      // its definition pin is approved by this decision) only if its content still hashes to the approved digest and
+      // its robot is active, else it is recorded rejected; denied = rejected.
+      if (updated.objectType === "robot_version") {
+        await applyRobotVersionDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
       }
       // ADR-0208 (G7): a reviewed compliance-profile version — approved = it becomes the active version here, inside
       // the decision's transaction, only if its base version is still the active one (else recorded stale); running
@@ -6272,6 +6285,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerEndpointAddonInventoryRoutes(app, db);
   // ADR-0342 (lane E23): process analytics over the workflow history (reads scoped by the ADR-0047 decision; refresh admin)
   registerProcessAnalyticsRoutes(app, db);
+  // ADR-0364 (lane E45 S2): governed RPA robots — versions, review, secrets (the Robots MCP server is first-party)
+  registerRobotRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0069 — CROSS-VENDOR COST CONSOLIDATION. Admin-only by default: the ONLY
   // route here in NON_ADMIN_ROUTES is `GET /v1/users/:userId/cost-consolidated`,
   // which refuses in-handler unless the caller IS that user. Uploading a file

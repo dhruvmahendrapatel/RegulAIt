@@ -1133,7 +1133,8 @@
                 "eval_run",
                 "compliance_profile",
                 "model_call",
-                "agent_risk_proof"
+                "agent_risk_proof",
+                "robot_version"
               ]
             }
           },

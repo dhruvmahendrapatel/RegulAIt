@@ -42,7 +42,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { auditLog, eq, mcpServers, type Db } from "@regulait/db";
-import type { ExecutionRefusalReason, McpUpstreamTransport } from "@regulait/shared";
+import type { ExecutionRefusalReason, McpServerTransport, McpUpstreamTransport } from "@regulait/shared";
 import {
   checkEgress,
   createGuardedFetch,
@@ -68,6 +68,7 @@ import { openUpstreamCredential, upstreamCredentialMiddleware } from "./mcp-upst
 import { loadEgressAllowList } from "./custom-providers.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { timeouts } from "./timeouts.js";
+import { connectFirstPartyServer } from "./mcp-first-party.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 
@@ -309,7 +310,7 @@ export interface McpUpstreamRow {
   url: string;
   allowPrivateRanges: boolean | null;
   name?: string;
-  transport?: McpUpstreamTransport;
+  transport?: McpServerTransport;
   stdioCommand?: string | null;
   stdioArgs?: string[] | null;
   stdioCommandDigest?: string | null;
@@ -360,7 +361,7 @@ export class McpUpstreamRefusedError extends McpEgressBlockedError {
 
 async function refuseUpstream(
   db: Db,
-  row: { id: string; transport: McpUpstreamTransport },
+  row: { id: string; transport: McpServerTransport },
   error: McpUpstreamRefusal,
   reason: string,
   detail: Record<string, unknown> = {},
@@ -382,7 +383,7 @@ async function refuseUpstream(
   throw new McpUpstreamRefusedError(error, reason, refusalCode, executionRefusal);
 }
 
-type FullUpstreamRow = McpUpstreamRow & { transport: McpUpstreamTransport };
+type FullUpstreamRow = McpUpstreamRow & { transport: McpServerTransport };
 
 /** the row with its transport columns, read from the database when the caller
  * selected a narrower shape (the rescan and probe sweeps, older callers) */
@@ -439,7 +440,9 @@ export async function checkUpstreamDestination(
   const label = `MCP server '${row.name ?? row.id}'`;
   const org = await loadOrgSettings(db);
   const enabled = (org.mcpUpstreamTransports ?? []) as McpUpstreamTransport[];
-  if (!enabled.includes(row.transport)) {
+  // ADR-0364: a `first_party` row is served in-process by `guardedMcpConnect` and is never an org-enabled transport,
+  // so any path that reaches this check with one fails closed here (nothing is sent anywhere)
+  if (row.transport === "first_party" || !enabled.includes(row.transport)) {
     await refuseUpstream(
       db,
       row,
@@ -480,7 +483,7 @@ export async function checkUpstreamDestination(
     });
     throw new McpEgressBlockedError(decision);
   }
-  return { transport: row.transport, row, posture };
+  return { transport: row.transport as "streamable_http" | "sse", row, posture };
 }
 
 /** a deadline the SDK's own timers do not cover (SSE waiting for its
@@ -522,13 +525,36 @@ export async function guardedMcpConnect(
   deps: McpEgressDeps = {},
 ): Promise<Client> {
   const startedAt = Date.now();
-  let transportLabel: McpUpstreamTransport = rowTransport(serverRow);
+  let transportLabel: McpServerTransport = rowTransport(serverRow);
   const observe = (outcome: MetricUpstreamOutcome) =>
     observeUpstream({ serverId: serverRow.id, transport: transportLabel, outcome }, Date.now() - startedAt);
 
+  // ADR-0364: a first-party server (the RegulAIt Robots server) is served in-process — nothing leaves the gateway,
+  // so there is no egress decision to make. Only a URL on the fixed first-party list is served; any other is refused.
+  const stored = await withTransportColumns(db, serverRow);
+  if (stored.transport === "first_party") {
+    transportLabel = "first_party";
+    try {
+      const client = await connectFirstPartyServer(db, stored, deps.connectDeadlineMs ?? timeouts().mcpConnectMs);
+      if (!client) {
+        await refuseUpstream(
+          db,
+          stored,
+          "mcp_transport_disabled",
+          `MCP server '${stored.name ?? stored.id}' refused: it is marked first-party but is not a server this gateway serves. Nothing was started or sent.`,
+        );
+      }
+      observe("ok");
+      return client!;
+    } catch (err) {
+      observe(connectOutcome(err));
+      throw err;
+    }
+  }
+
   let dest: UpstreamDestination;
   try {
-    dest = await checkUpstreamDestination(db, serverRow, deps);
+    dest = await checkUpstreamDestination(db, stored, deps);
   } catch (err) {
     observe(connectOutcome(err));
     throw err;

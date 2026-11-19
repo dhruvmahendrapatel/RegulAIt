@@ -263,6 +263,18 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/builder/integrations",
   "GET /v1/builder/toolbox-options",
   "GET /v1/builder/usage",
+  // ADR-0364 (lane E45 S2) — robots. Each route is gated in the handler to the robot's owner or an admin (404
+  // unknown_robot otherwise); a version's review is decided in the one approvals queue, never here.
+  "GET /v1/robots",
+  "POST /v1/robots",
+  "GET /v1/robots/:robotId",
+  "POST /v1/robots/:robotId/retire",
+  "POST /v1/robots/:robotId/versions",
+  "PUT /v1/robots/:robotId/versions/:version",
+  "POST /v1/robots/:robotId/versions/:version/submit",
+  "POST /v1/robots/:robotId/versions/:version/retire",
+  "PUT /v1/robots/:robotId/secrets/:name/:scope",
+  "DELETE /v1/robots/:robotId/secrets/:name/:scope",
   // ADR-0173 batch 2b — the run graph. Read-only, and each read is gated in the
   // handler by exactly who may open the underlying object: a builder turn by
   // the thread's person or an admin (404 unknown_thread otherwise), a run by
