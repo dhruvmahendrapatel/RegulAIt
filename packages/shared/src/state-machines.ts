@@ -7,6 +7,7 @@
 import { defineMachine, type StateMachine } from "./state-machine.js";
 import { MCP_ADMISSION_STATES } from "./mcp-admission.js";
 import { INCIDENT_STATUSES } from "./accountability.js";
+import { AGENT_NHI_LINK_STATUSES } from "./agent-identity.js";
 
 /** `training_jobs.status` (ADR-0065). Same values as `TRAINING_JOB_STATUSES` in @regulait/db. */
 export const TRAINING_JOB_MACHINE = defineMachine({
@@ -255,6 +256,31 @@ export const RULE_STEP_SUGGESTION_MACHINE = defineMachine({
   },
 });
 
+/** `agent_identity_links.status` (ADR-0339 slice 2). An admin (or later the importer) stages a link; a second, named
+ * admin confirms or rejects it under an `identity_manage` step-up. A link confers nothing in any state. Both outcomes
+ * are final today; unlinking a rotated or deleted identity is a later event (triage-low, recorded on #892). */
+export const AGENT_NHI_LINK_MACHINE = defineMachine({
+  id: "agent_nhi_link",
+  stored: "agent_identity_links.status",
+  states: AGENT_NHI_LINK_STATUSES,
+  initial: ["staged"],
+  terminal: ["confirmed", "rejected"],
+  transitions: {
+    confirm: {
+      from: ["staged"],
+      to: "confirmed",
+      by: ["admin"],
+      summary: "A second, named admin (not the one who staged it) confirms the link under an identity_manage step-up.",
+    },
+    reject: {
+      from: ["staged"],
+      to: "rejected",
+      by: ["admin"],
+      summary: "A second, named admin (not the one who staged it) rejects the link under an identity_manage step-up.",
+    },
+  },
+});
+
 /**
  * ADR-0327 addendum (lane E12): a decision-table version's lifecycle. A version is proposed `pending_review` with a named
  * reviewer in the approvals queue; only that approval's decide path moves it on. Stored in
@@ -471,6 +497,7 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [DETECTION_INCIDENT_MACHINE.def.id]: DETECTION_INCIDENT_MACHINE,
   [DETECTION_RESPONSE_MACHINE.def.id]: DETECTION_RESPONSE_MACHINE,
   [RULE_STEP_SUGGESTION_MACHINE.def.id]: RULE_STEP_SUGGESTION_MACHINE,
+  [AGENT_NHI_LINK_MACHINE.def.id]: AGENT_NHI_LINK_MACHINE,
   [DECISION_TABLE_VERSION_MACHINE.def.id]: DECISION_TABLE_VERSION_MACHINE,
   [VENDOR_USAGE_PULL_RUN_MACHINE.def.id]: VENDOR_USAGE_PULL_RUN_MACHINE,
   [ENDPOINT_ADDON_REMOVAL_MACHINE.def.id]: ENDPOINT_ADDON_REMOVAL_MACHINE,
