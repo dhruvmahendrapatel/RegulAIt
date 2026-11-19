@@ -3,8 +3,9 @@
  *
  * A result row is evidence only when everything that ties it down still agrees (ADR-0345 decision 5):
  *   - its `content_hash` recomputes from the canonical bytes (`agentRiskProofEvidence`);
- *   - its audit row is still in the ADR-0060 chain (seq, content hash and row hash recompute) and that row's
- *     `detail.contentHash` is the same hash;
+ *   - its audit row still exists and is self-consistent under ADR-0060 (`auditRowSelfConsistent`: seq present, content
+ *     hash and row hash recompute), and that row's `detail.contentHash` is the same hash. This is a per-row check, not
+ *     a linkage check; the full chain walk (`verifyAuditChain`, the audit-chain proof) covers linkage;
  *   - when it carries a signature, the signature verifies against the ADR-0116 export key it names.
  *
  * The label is one of:
@@ -20,9 +21,9 @@ import { createPublicKey, verify as edVerify } from "node:crypto";
 import {
   agentRiskProofResults,
   auditLog,
+  desc,
   inArray,
   loadAuditChainBoundary,
-  sql,
   type AgentRiskProofResultRow,
   type Db,
 } from "@regulait/db";
@@ -30,10 +31,7 @@ import {
   agentRiskProofByKey,
   agentRiskProofEvidence,
   agentRiskProofs,
-  auditChainVersionAt,
-  auditContentHashFor,
-  auditRowHash,
-  auditRowVersionProblem,
+  auditRowSelfConsistent,
   sha256Hex,
   type MeasurementState,
 } from "@regulait/shared";
@@ -113,16 +111,7 @@ export async function checkAgentRiskProofEvidence(
       out.set(row.id, unverifiable("chain_boundary_unsupported"));
       continue;
     }
-    const v2FromSeq = boundary.v2FromSeq;
-    if (
-      a.seq === null ||
-      !a.contentHash ||
-      !a.rowHash ||
-      !a.prevHash ||
-      auditRowVersionProblem({ ...a, seq: a.seq }, v2FromSeq) !== null ||
-      a.contentHash !== auditContentHashFor(a, auditChainVersionAt(a.seq, v2FromSeq)) ||
-      a.rowHash !== auditRowHash(a.prevHash, a.contentHash)
-    ) {
+    if (!auditRowSelfConsistent(a, boundary.v2FromSeq)) {
       out.set(row.id, unverifiable("audit_row_broken"));
       continue;
     }
@@ -162,28 +151,10 @@ export async function latestAgentRiskProofs(
   db: Db,
   deps: AgentRiskProofEvidenceDeps = DEFAULT_DEPS,
 ): Promise<LatestAgentRiskProof[]> {
-  const latest = (await db.execute(sql`
-    select distinct on (${agentRiskProofResults.proofKey}) *
-    from ${agentRiskProofResults}
-    order by ${agentRiskProofResults.proofKey}, ${agentRiskProofResults.finishedAt} desc, ${agentRiskProofResults.id} desc`))
-    .rows as Array<Record<string, unknown>>;
-  // the raw select returns column names; map them to the Drizzle row shape once
-  const rows: AgentRiskProofResultRow[] = latest.map((r) => ({
-    id: r.id as string,
-    proofKey: r.proof_key as string,
-    catalogVersion: Number(r.catalog_version),
-    trigger: r.trigger as AgentRiskProofResultRow["trigger"],
-    outcome: r.outcome as AgentRiskProofResultRow["outcome"],
-    runAsUserId: (r.run_as_user_id as string | null) ?? null,
-    redteamRunId: (r.redteam_run_id as string | null) ?? null,
-    auditLogId: r.audit_log_id as string,
-    contentHash: r.content_hash as string,
-    signature: (r.signature as string | null) ?? null,
-    signingKeyId: (r.signing_key_id as string | null) ?? null,
-    detail: r.detail,
-    startedAt: new Date(r.started_at as string),
-    finishedAt: new Date(r.finished_at as string),
-  }));
+  const rows = await db
+    .selectDistinctOn([agentRiskProofResults.proofKey])
+    .from(agentRiskProofResults)
+    .orderBy(agentRiskProofResults.proofKey, desc(agentRiskProofResults.finishedAt), desc(agentRiskProofResults.id));
   const checks = await checkAgentRiskProofEvidence(db, rows, deps);
   const byKey = new Map(rows.map((r) => [r.proofKey, r]));
   return agentRiskProofs().map(({ risk, proof }) => {

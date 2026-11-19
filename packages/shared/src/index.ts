@@ -3172,6 +3172,7 @@ export {
   auditContentHash,
   auditContentHashFor,
   auditRowHash,
+  auditRowSelfConsistent,
   canonicalAuditPayload,
   canonicalAuditPayloadV2,
   type AuditChainVersion,
