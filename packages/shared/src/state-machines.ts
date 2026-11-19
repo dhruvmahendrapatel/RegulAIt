@@ -175,6 +175,41 @@ export const EVAL_RUN_MACHINE = defineMachine({
   },
 });
 
+// ADR-0337 §6 (lane E18; owner decision 2026-11-17)
+/**
+ * `saas_entitlement_apps.agent_link_state` (ADR-0348 declared machine). An app starts unlinked (`none`). The system
+ * links it on an EXACT match between the app's vendor id and an identifier an admin declared for an agent
+ * (`auto`, audited); an admin links it by hand (`admin`, for a partial or fuzzy match) or unlinks it (`unlinked`). An
+ * unlinked app is never auto-linked again: only an admin can link it.
+ */
+export const SAAS_APP_AGENT_LINK_MACHINE = defineMachine({
+  id: "saas_app_agent_link",
+  stored: "saas_entitlement_apps.agent_link_state",
+  states: ["none", "auto", "admin", "unlinked"],
+  initial: ["none"],
+  terminal: [],
+  transitions: {
+    auto_link: {
+      from: ["none"],
+      to: "auto",
+      by: ["system"],
+      summary: "The app's vendor id exactly equals an identifier an admin declared for an agent, so the app is linked to that agent (audited).",
+    },
+    link: {
+      from: ["none", "auto", "admin", "unlinked"],
+      to: "admin",
+      by: ["admin"],
+      summary: "An admin linked the app to an agent (any match, including a partial one), or moved the link to another agent (audited).",
+    },
+    unlink: {
+      from: ["auto", "admin"],
+      to: "unlinked",
+      by: ["admin"],
+      summary: "An admin removed the link (audited); the app is not auto-linked again until an admin links it.",
+    },
+  },
+});
+export type SaasAppAgentLinkState = (typeof SAAS_APP_AGENT_LINK_MACHINE.def.states)[number];
 /** `detection_incidents.status` (ADR-0333, lane E15). An admin acknowledges an open incident (again, idempotently)
  * or closes it; a closed incident is final, so a later burst raises a new incident instead of reopening this one.
  * Same values as `DETECTION_INCIDENT_STATUSES` in @regulait/db. */
@@ -494,6 +529,7 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [MCP_ADMISSION_MACHINE.def.id]: MCP_ADMISSION_MACHINE,
   [INCIDENT_MACHINE.def.id]: INCIDENT_MACHINE,
   [EVAL_RUN_MACHINE.def.id]: EVAL_RUN_MACHINE,
+  [SAAS_APP_AGENT_LINK_MACHINE.def.id]: SAAS_APP_AGENT_LINK_MACHINE,
   [DETECTION_INCIDENT_MACHINE.def.id]: DETECTION_INCIDENT_MACHINE,
   [DETECTION_RESPONSE_MACHINE.def.id]: DETECTION_RESPONSE_MACHINE,
   [RULE_STEP_SUGGESTION_MACHINE.def.id]: RULE_STEP_SUGGESTION_MACHINE,

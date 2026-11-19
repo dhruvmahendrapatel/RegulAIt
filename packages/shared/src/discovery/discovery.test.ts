@@ -40,12 +40,13 @@ describe("ADR-0195 SD0 discovery vocabulary", () => {
     expect(DISCOVERY_SOURCE_KINDS.filter((k) => DISCOVERY_KIND_SPECS[k].uploadFed)).toEqual(["endpoint_osquery", "endpoint_inventory", "endpoint_agent"]);
   });
 
-  it("every finding-producing source kind has a spec whose evidence and subject kinds are non-empty", () => {
+  it("every finding-producing source kind has a spec whose evidence and subject kinds are non-empty; an entitlement reader (ADR-0337) returns a graph and no observations", () => {
     for (const k of DISCOVERY_SOURCE_KINDS) {
+      const spec = DISCOVERY_KIND_SPECS[k];
       // ADR-0314: a vendor agent registry kind produces no findings (it stages registry records instead)
-      if (DISCOVERY_KIND_SPECS[k].family === "agent_registry") continue;
-      expect(DISCOVERY_KIND_SPECS[k].evidenceKinds.length).toBeGreaterThan(0);
-      expect(DISCOVERY_KIND_SPECS[k].subjectKinds.length).toBeGreaterThan(0);
+      if (spec.family === "agent_registry") continue;
+      expect(spec.evidenceKinds.length === 0, k).toBe(spec.entitlements === true);
+      expect(spec.subjectKinds.length === 0, k).toBe(spec.entitlements === true);
     }
   });
 

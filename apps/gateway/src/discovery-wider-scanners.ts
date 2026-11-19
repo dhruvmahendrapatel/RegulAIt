@@ -176,11 +176,11 @@ export async function getJson(fetchImpl: typeof fetch, url: string, headers: Rec
 }
 
 /** the include list, lower-cased; null for an organisation-level scope */
-const includeSet = (ctx: ScanContext): Set<string> | null =>
+export const includeSet = (ctx: ScanContext): Set<string> | null =>
   ctx.source.scope.orgLevel ? null : new Set(ctx.source.scope.include.map((x) => x.trim().toLowerCase()));
 
 /** finish a run: read outcomes (problems first), and a failure when nothing could be read at all */
-function finish(observations: ScanObservation[], outcomes: DiscoveryReadOutcome[], writeScope: ScanResult["credentialWriteScope"]): ScanResult {
+export function finish(observations: ScanObservation[], outcomes: DiscoveryReadOutcome[], writeScope: ScanResult["credentialWriteScope"]): ScanResult {
   const sorted = [...outcomes.filter((o) => o.status !== "read"), ...outcomes.filter((o) => o.status === "read")].slice(0, DISCOVERY_READ_OUTCOMES_MAX);
   if (!outcomes.some((o) => o.status === "read")) {
     throw new WiderSourceConfigError(`nothing could be read: ${sorted.map((o) => `${o.read} ${o.status}${o.detail ? ` (${o.detail})` : ""}`).join("; ").slice(0, 600)}`);
@@ -339,7 +339,7 @@ interface EntraApp {
 }
 
 /**
- * A Microsoft Graph access token for an Entra-reading source (`idp_entra`, ADR-0314 `agent_registry_entra`): the
+ * A Microsoft Graph access token for an Entra-reading source (`idp_entra`, ADR-0314 `agent_registry_entra`, ADR-0337 `entitlement_m365`): the
  * credential must name the source's tenant; static mode uses its client secret, federated mode the source's
  * federation token. The token is registered for scrubbing before it is returned, with the write scope it carries.
  */
