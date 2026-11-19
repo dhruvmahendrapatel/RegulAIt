@@ -99,7 +99,7 @@ const AuditLogPage = screen(() => import("./screens/admin-approvals-audit"), "Au
 const ShadowAiPage = screen(() => import("./screens/admin-ai-governance"), "ShadowAiPage");
 const DiscoverySourcesArea = screen(() => import("./screens/admin-ai-governance"), "DiscoverySourcesArea");
 // ADR-0350 (lane E31): device groups and command exceptions, in the Discovery screens' chunk
-const EndpointPolicyPage = screen(() => import("./screens/admin-ai-governance"), "EndpointPolicyPage");
+const EndpointPolicyPage = screen(() => import("./screens/admin-endpoint-policy"), "EndpointPolicyPage");
 const CopilotPage = screen(() => import("./screens/admin-overview"), "CopilotPage");
 const ChatOpsArea = screen(() => import("./screens/admin-approvals-audit"), "ChatOpsArea");
 const LineagePage = screen(() => import("./screens/admin-approvals-audit"), "LineagePage");
