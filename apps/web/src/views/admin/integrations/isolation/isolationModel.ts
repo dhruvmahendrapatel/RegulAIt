@@ -63,6 +63,7 @@ export const SETTING_DEFAULTS = {
   isolationFloorRegulated: "microvm",
   isolationFloorMcpStdio: "user_space_kernel",
   isolationFloorEngineWorker: "user_space_kernel",
+  isolationFloorRobotBrowser: "user_space_kernel",
   executorAttestationMaxAgeMinutes: 120,
 } as const;
 export type SettingKey = keyof typeof SETTING_DEFAULTS;
@@ -75,6 +76,7 @@ export const FLOOR_KEYS = [
   "isolationFloorRegulated",
   "isolationFloorMcpStdio",
   "isolationFloorEngineWorker",
+  "isolationFloorRobotBrowser",
 ] as const satisfies readonly SettingKey[];
 export type FloorKey = (typeof FLOOR_KEYS)[number];
 
@@ -93,6 +95,7 @@ export const SETTING_LABEL: Readonly<Record<SettingKey, string>> = {
   isolationFloorRegulated: "Isolation floor: regulated projects",
   isolationFloorMcpStdio: "Isolation floor: local (stdio) MCP servers",
   isolationFloorEngineWorker: "Isolation floor: engine workers",
+  isolationFloorRobotBrowser: "Isolation floor: robot runs (browser)",
   executorAttestationMaxAgeMinutes: "Executor attestation lifetime (minutes)",
 };
 
@@ -461,7 +464,7 @@ export function parseProfileVersion(raw: unknown): ProfileVersion | null {
  * `VERSIONABLE_SHIPPED_EXECUTION_PROFILES` in @regulait/shared, checked by the model test). `restricted` and
  * `restricted-microvm` are the strict references: neither versioned nor retired.
  */
-export const VERSIONABLE_SHIPPED_PROFILES: readonly string[] = ["engine-worker"];
+export const VERSIONABLE_SHIPPED_PROFILES: readonly string[] = ["engine-worker", "robot-browser"];
 
 /** which admin actions a profile version offers (the caller also requires it to be the live latest version) */
 export function profileActions(p: Pick<ProfileVersion, "name" | "shipped">): { version: boolean; retire: boolean } {

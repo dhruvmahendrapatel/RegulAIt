@@ -31,6 +31,7 @@ import {
   mcpDefinitionPins,
   mcpServers,
   mcpTools,
+  robotRunEvidence,
   robotRuns,
   robots,
   robotSecrets,
@@ -51,6 +52,8 @@ import {
   ROBOT_ENGINES_AVAILABLE,
   ROBOT_LIMITS,
   ROBOT_MACHINE,
+  ROBOT_RUN_LIMITS,
+  ROBOT_RUN_MACHINE,
   ROBOT_SCRIPT_FORMATS_AVAILABLE,
   ROBOT_VERSION_MACHINE,
   robotContentDigest,
@@ -70,13 +73,22 @@ import { activeDelegationFrom } from "./delegations.js";
 import { answerListPage, type ContractList } from "./list-contract-route.js";
 import type { ListSpec } from "./list-contract.js";
 import { whereFrom } from "./state-transition.js";
-import { robotToolDefinition, robotVersionContent, ROBOTS_SERVER_URL } from "./robots-mcp.js";
+import { robotToolDefinition, robotVersionContent, ROBOTS_SERVER_URL, setRobotRunDeps } from "./robots-mcp.js";
+import { startRobotRun, type RobotRunDeps } from "./robot-runs.js";
+import { callerProjectIds } from "./reporting.js";
+import type { ArtifactStore } from "./model-artifacts.js";
 
 type Viewer = { userId: string; isAdmin: boolean };
 type Refusal = { status: number; body: Record<string, unknown> };
 
 const robotParam = z.object({ robotId: z.string().uuid() });
 const versionParam = z.object({ robotId: z.string().uuid(), version: z.coerce.number().int().min(1).max(100000) });
+const runParam = z.object({ robotId: z.string().uuid(), runId: z.string().uuid() });
+/** ADR-0364 S3: a test run names one of the author's projects (with a budget) and the inputs */
+const robotTestRunSchema = z
+  .object({ projectId: z.string().uuid(), inputs: z.record(z.string().max(64), z.unknown()).default({}) })
+  .strict()
+  .refine((b) => JSON.stringify(b.inputs).length <= 64 * 1024, { message: "inputs are at most 64 KiB" });
 const secretParam = z.object({
   robotId: z.string().uuid(),
   name: z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,63}$/),
@@ -447,7 +459,10 @@ async function haltVersionTool(tx: Db, v: RobotVersionRow, userId: string, reaso
     .where(and(eq(mcpTools.id, v.mcpToolId), sql`${mcpTools.haltedAt} IS NULL`));
 }
 
-export function registerRobotRoutes(app: FastifyInstance, db: Db, opts: { dataKey?: string | undefined } = {}): void {
+export function registerRobotRoutes(app: FastifyInstance, db: Db, opts: { dataKey?: string | undefined; artifactStore?: ArtifactStore | null } = {}): void {
+  // ADR-0364 S3: the run deps the test-run route and the Robots server's tools/call share
+  const runDeps: RobotRunDeps = { dataKey: opts.dataKey, store: opts.artifactStore ?? null };
+  setRobotRunDeps(runDeps);
   // ADR-0226: the list answers through the shared list contract (sort, keyset or offset paging, count). The computed
   // status and "Used by N agents" are filled per page with two batched reads, never per row.
   const robotsList: ContractList<RobotListItem, z.infer<typeof robotListFilters>> = {
@@ -823,6 +838,77 @@ export function registerRobotRoutes(app: FastifyInstance, db: Db, opts: { dataKe
     });
     if (!out) return reply.status(409).send({ error: "robot_version_not_approved", lifecycle: ROBOT_VERSION_MACHINE.describe(v.status) });
     return { version: (await versionViews(db, robot, [out], viewer))[0] };
+  });
+
+  // ADR-0364 S3: the author's test run. It runs the version as it is (a draft too) with the TEST secrets, attributed
+  // to one of the author's projects with a budget; a passing run of the exact digest is what submit requires (§3).
+  app.post("/v1/robots/:robotId/versions/:version/test-runs", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const { robotId, version } = versionParam.parse(req.params);
+    const robot = await managedRobot(db, viewer, robotId, reply);
+    if (!robot) return reply;
+    const body = robotTestRunSchema.safeParse(req.body ?? {});
+    if (!body.success) return reply.status(400).send({ error: "invalid_body", issues: body.error.issues.slice(0, 10) });
+    const v = await versionOf(db, robot.id, version);
+    if (!v) return reply.status(404).send({ error: "unknown_robot_version" });
+    // the project is one the requester belongs to (an admin may name any): never someone else's budget
+    if (!viewer.isAdmin && !(await callerProjectIds(db, viewer.userId)).includes(body.data.projectId)) {
+      return reply.status(403).send({ error: "robot_run_project_not_yours", message: "A test run is attributed to one of your own projects." });
+    }
+    const { digest } = await resolvedDigest(db, v);
+    const outcome = await startRobotRun(
+      db,
+      { robot, version: v, kind: "test", requestedBy: viewer.userId, projectId: body.data.projectId, inputs: body.data.inputs, contentDigest: digest },
+      runDeps,
+    );
+    if (outcome.kind === "refused") {
+      const status = outcome.code === "robot_run_safe_mode" || outcome.code === "robot_runner_unavailable" || outcome.code === "robot_run_placement_refused" ? 503 : 422;
+      return reply.status(status).send({ error: outcome.code, message: outcome.message, runId: outcome.runId });
+    }
+    return {
+      run: { id: outcome.runId, status: outcome.status, failureCode: outcome.failureCode, outputs: outcome.outputs, lifecycle: ROBOT_RUN_MACHINE.describe(outcome.status) },
+    };
+  });
+
+  // ADR-0364 S3: one run and its evidence list (hashes and sizes; the bytes are content-addressed in the store)
+  app.get("/v1/robots/:robotId/runs/:runId", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const { robotId, runId } = runParam.parse(req.params);
+    const readable = await readableRobot(db, viewer, robotId, reply);
+    if (!readable) return reply;
+    const [run] = await db
+      .select({ run: robotRuns, version: robotVersions.version })
+      .from(robotRuns)
+      .innerJoin(robotVersions, eq(robotVersions.id, robotRuns.robotVersionId))
+      .where(and(eq(robotRuns.id, runId), eq(robotVersions.robotId, readable.robot.id)));
+    if (!run) return reply.status(404).send({ error: "unknown_robot_run" });
+    const evidence = await db
+      .select({ item: robotRunEvidence.item, kind: robotRunEvidence.kind, step: robotRunEvidence.step, contentType: robotRunEvidence.contentType, sha256: robotRunEvidence.sha256, sizeBytes: robotRunEvidence.sizeBytes, createdAt: robotRunEvidence.createdAt })
+      .from(robotRunEvidence)
+      .where(eq(robotRunEvidence.robotRunId, run.run.id))
+      .orderBy(asc(robotRunEvidence.item))
+      .limit(ROBOT_RUN_LIMITS.evidenceItems);
+    const r = run.run;
+    return {
+      run: {
+        id: r.id,
+        version: run.version,
+        kind: r.kind,
+        status: r.status,
+        failureCode: r.failureCode,
+        stepCount: r.stepCount,
+        durationMs: r.durationMs,
+        contentDigest: r.contentDigest,
+        projectId: r.projectId,
+        createdAt: r.createdAt,
+        startedAt: r.startedAt,
+        finishedAt: r.finishedAt,
+        lifecycle: ROBOT_RUN_MACHINE.describe(r.status),
+      },
+      evidence,
+    };
   });
 
   app.put("/v1/robots/:robotId/secrets/:name/:scope", async (req, reply) => {

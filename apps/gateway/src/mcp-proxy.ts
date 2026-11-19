@@ -378,8 +378,9 @@ export async function connectUpstream(
       await assertAdmitted(db, serverRow.id);
       return guardedMcpConnect(db, serverRow, {
         connectDeadlineMs: deadlineMs,
-        // ADR-0190 I4: only a stdio row is placed; the context is read fresh per attempt
-        ...(serverRow.transport === "stdio" && opts.placement
+        // ADR-0190 I4: only a stdio row is placed; the context is read fresh per attempt. ADR-0364 S3: the first-party
+        // Robots server gets the same context, because a tools/call there places a robot_browser run for that call
+        ...((serverRow.transport === "stdio" || serverRow.transport === "first_party") && opts.placement
           ? { placement: { ...(await stdioPlacementContext(db, opts.placement)), linkedOfferId: opts.placement.linkedOfferId ?? null } }
           : {}),
         // ADR-0188 S8: an opted-in server's identity holder (unarmed until the call is allowed)

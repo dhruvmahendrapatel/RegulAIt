@@ -46,7 +46,7 @@ export const BOM_SECTION_STATUSES = ["recorded", "not_applicable", "not_recorded
 export const BOM_NOT_RECORDED_REASONS = ["pre_identity", "pre_facts", "capture_off", "no_bound_row", "unsigned_addendum", "not_captured_by_path", "anchor_absent", "pre_isolation", "no_placement"] as const;
 
 // ADR-0190 decision 9 / I8: the execution facts vocabularies (`packages/shared/src/isolation/contract.ts`, mirrored)
-export const WORKLOAD_KINDS = ["model_call", "connector_call", "remote_mcp", "mcp_stdio", "code_exec", "engine_worker", "byoc_worker"] as const;
+export const WORKLOAD_KINDS = ["model_call", "connector_call", "remote_mcp", "mcp_stdio", "code_exec", "engine_worker", "byoc_worker", "robot_browser"] as const;
 export const DECISION_EXECUTION_PLACEMENTS = ["in_gateway", "external", "placed", "refused", "mismatch", "offered"] as const;
 /** ADR-0190 I4: the linked report rows of an offered placement (`execution_placement_reports`), mirrored */
 export const PLACEMENT_REPORT_OUTCOMES = ["placed", "mismatch", "refused", "cancelled", "session_lost"] as const;

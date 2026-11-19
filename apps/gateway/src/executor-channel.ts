@@ -69,7 +69,9 @@ import {
   executorReportDigest,
   executorSelfTestSchema,
   isolationClassRank,
+  robotEgressSchema,
   unresolvedPlacementFact,
+  type RobotEgress,
   type AppliedIsolationKind,
   type ExecutionOffer,
   type ExecutionProfileBody,
@@ -107,6 +109,13 @@ export interface ExecutorChannelOptions {
    * (fail closed).
    */
   engineTasks?: EngineTaskChannelHooks;
+  /**
+   * ADR-0364 S3: where a robot run's Smokescreen log (its egress evidence, §7) goes when the executor ends the
+   * placement, inside the end's transaction, after the audit row that anchors its sha256. Handed in by the app (the
+   * robot routes own `robot_run_evidence`). Absent: the log's sha256 and size are still on the `execution-ended` audit
+   * row, the bytes are not kept.
+   */
+  robotEgressLog?: (tx: Db, end: { offerId: string; placementId: string | null; log: string; sha256: string }) => Promise<void>;
 }
 
 /** I5: what the executor channel needs from the engine tasks this process holds (engine-tasks.ts implements it) */
@@ -341,6 +350,8 @@ function offerView(o: ExecutionOfferRow): ExecutionOffer {
     profileDigest: o.profileDigest,
     imageDigest: o.imageDigest,
     expiresAt: o.expiresAt.toISOString(),
+    // ADR-0364 S3: a robot run's per-run egress (the row's CHECK holds it on that kind only)
+    ...(o.egressTargets && o.robotRunId ? { egress: { runId: o.robotRunId, targets: o.egressTargets.map((t) => ({ host: t.host, port: t.port })) } } : {}),
   };
 }
 
@@ -354,6 +365,8 @@ export interface OfferPlacementInput {
   requiredBy: RequiredClassSource;
   profileDigest: string;
   imageDigest: string;
+  /** ADR-0364 S3: a robot_browser offer's per-run egress; required on that kind, refused on every other (`insertOffer`) */
+  egress?: RobotEgress;
   /** how long the offer waits to be accepted (default EXECUTION_OFFER_TTL_SECONDS) */
   ttlSeconds?: number;
   /** consider only these executors (a placement affinity, and the seam a test uses to pick its own executor) */
@@ -385,6 +398,8 @@ type Selection =
  * I4 governed stdio decision (`offerLinkedPlacement`), so both refuse and choose by the same rule.
  */
 async function selectExecutor(db: Db, input: OfferPlacementInput): Promise<Selection> {
+  // ADR-0364 S3: a caller fault in the egress is thrown before anything is read, chosen or written
+  assertOfferEgress(input);
   // Amendment item 15 with OWNER DECISION B: a policy fact that is missing or outside its vocabulary refuses
   // `policy_unresolved` before anything else is looked at, and before any executor is offered work.
   const unresolved = unresolvedPlacementFact({
@@ -440,7 +455,21 @@ async function selectExecutor(db: Db, input: OfferPlacementInput): Promise<Selec
   return { kind: "chosen", executor: chosen.row, cls: chosen.fresh.class, attestation: chosen.fresh, input };
 }
 
+/**
+ * ADR-0364 S3: the server-side twin of the offer schema's refine. An offer carries egress exactly when it is a
+ * robot_browser offer, and that egress is a valid target list; anything else is a caller fault, thrown before any
+ * executor is chosen or any row written (the row's CHECK refuses it too).
+ */
+export function assertOfferEgress(input: Pick<OfferPlacementInput, "workloadKind" | "egress">): void {
+  const robot = input.workloadKind === "robot_browser";
+  if (robot !== (input.egress !== undefined)) {
+    throw new Error(robot ? "a robot_browser offer needs its per-run egress" : `egress is for robot_browser offers only (this is ${input.workloadKind})`);
+  }
+  if (robot && !robotEgressSchema.safeParse(input.egress).success) throw new Error("the offer's egress is not a list of host and port targets");
+}
+
 async function insertOffer(db: Db, executorId: string, input: OfferPlacementInput): Promise<string> {
+  assertOfferEgress(input);
   const ttl = Math.max(1, Math.min(600, input.ttlSeconds ?? EXECUTION_OFFER_TTL_SECONDS));
   const [offer] = await db
     .insert(executionOffers)
@@ -453,6 +482,7 @@ async function insertOffer(db: Db, executorId: string, input: OfferPlacementInpu
       profileDigest: input.profileDigest,
       imageDigest: input.imageDigest,
       expiresAt: sql`now() + make_interval(secs => ${ttl})`,
+      ...(input.egress ? { egressTargets: input.egress.targets.map((t) => ({ host: t.host, port: t.port })), robotRunId: input.egress.runId } : {}),
     })
     .returning({ id: executionOffers.id });
   return offer!.id;
@@ -1203,37 +1233,59 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
         next: nextFor(current),
         // review M4: the stdio session's MAC secret (derived; every replica the same), in this answer only
         // I5: an engine task's session is an I4 stdio session (its MACed `start` carries the task secret)
-        ...(out.workloadKind === "mcp_stdio" || out.workloadKind === "engine_worker" ? { stdioSecret: stdioSecretFor(p.data.offerId) } : {}),
+        // ADR-0364 S3: a robot run's runner reaches the gateway over the same task bridge (an I4 stdio session)
+        ...(out.workloadKind === "mcp_stdio" || out.workloadKind === "engine_worker" || out.workloadKind === "robot_browser" ? { stdioSecret: stdioSecretFor(p.data.offerId) } : {}),
       });
     });
 
     // ---- end --------------------------------------------------------------
-    scope.post(`${EXECUTOR_CHANNEL_PREFIX}/offers/:offerId/end`, { bodyLimit: 1024 }, async (req, reply) => {
+    // ADR-0364 S3: the body may carry a robot run's egress log (at most ROBOT_EGRESS_LOG_MAX_BYTES, JSON-escaped)
+    scope.post(`${EXECUTOR_CHANNEL_PREFIX}/offers/:offerId/end`, { bodyLimit: 2 * 1024 * 1024 }, async (req, reply) => {
       const auth = await authed(req, reply, true);
       if (!auth) return reply;
       const row = auth.executor!;
       const p = uuidParam.safeParse(req.params);
       const body = executorEndSchema.safeParse(jsonOf(req));
       if (!p.success || !body.success) return refused(reply, 400, "invalid_body", row);
+      const egressLog = body.data.egressLog;
       const ended = await db.transaction(async (tx) => {
+        const [current] = await tx
+          .select({ workloadKind: executionOffers.workloadKind })
+          .from(executionOffers)
+          .where(and(eq(executionOffers.id, p.data.offerId), eq(executionOffers.executorId, row.id)));
+        // an egress log belongs to a robot run's end only
+        if (egressLog !== undefined && current?.workloadKind !== "robot_browser") return "egress_log_refused" as const;
         const [o] = await tx
           .update(executionOffers)
           .set({ status: "ended", endOutcome: body.data.outcome, endedAt: sql`now()` })
           .where(and(eq(executionOffers.id, p.data.offerId), eq(executionOffers.executorId, row.id), eq(executionOffers.status, "placed")))
           .returning();
         if (!o) return false;
-        // review L5: how a placed sandbox ended is audit evidence too
+        const egressSha256 = egressLog === undefined ? null : createHash("sha256").update(egressLog, "utf8").digest("hex");
+        // review L5: how a placed sandbox ended is audit evidence too (ADR-0364 S3: with the egress log's digest)
         await auditExecutor(tx as unknown as Db, {
           userId: NO_IDENTITY,
           objectType: "execution_placement",
           objectId: o.id,
           ruleId: "execution-ended",
           effect: body.data.outcome === "completed" ? "allow" : "deny",
-          detail: { offerId: o.id, placementId: o.placementId, executorId: row.id, executorName: row.name, workloadKind: o.workloadKind, outcome: body.data.outcome },
+          detail: {
+            offerId: o.id,
+            placementId: o.placementId,
+            executorId: row.id,
+            executorName: row.name,
+            workloadKind: o.workloadKind,
+            outcome: body.data.outcome,
+            ...(egressSha256 !== null ? { egressLogSha256: egressSha256, egressLogBytes: Buffer.byteLength(egressLog!, "utf8") } : {}),
+          },
           reason: `the sandbox placed on executor ${row.name} ended: ${body.data.outcome} (ADR-0190 decision 13)`,
         });
+        if (egressSha256 !== null && opts.robotEgressLog) {
+          await opts.robotEgressLog(tx as unknown as Db, { offerId: o.id, placementId: o.placementId, log: egressLog!, sha256: egressSha256 });
+        }
         return true;
       });
+      if (ended === "egress_log_refused") return refused(reply, 400, "invalid_body", row);
       if (!ended) return refused(reply, 409, "offer_unavailable", row);
       // I4: a stdio session this process holds ends with its sandbox (another replica's ends when its relay sees this)
       await endStdioSession(db, p.data.offerId);
