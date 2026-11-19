@@ -547,7 +547,8 @@ async function main() {
   const users = (await api("GET", `${base}/v1/users`, undefined, boot)).json.users;
   const servers = (await api("GET", `${base}/v1/servers`, undefined, boot)).json.servers ?? [];
   if (!servers.length) throw new Error("the seed registered no MCP server — nothing to govern");
-  const server = servers[0];
+  // ADR-0364: the first-party Robots server (seeded by migration, in-process) is not the demo upstream
+  const server = servers.find((s) => s.transport !== "first_party") ?? servers[0];
   const tools = (await api("GET", `${base}/v1/servers/${server.id}/tools`, undefined, boot)).json.tools ?? [];
   if (!tools.length) throw new Error("the seeded server has no tools — nothing to govern");
   const tool = tools[0];
