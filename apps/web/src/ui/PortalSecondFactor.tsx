@@ -1,6 +1,6 @@
 /**
  * ADR-0240 — the second-factor step both external portals show after a spent sign-in link (the supplier portal and
- * the auditor portal; each page supplies how a code is sent). The logic is in `portalSecondFactor.ts`.
+ * the auditor portal; each page supplies how a code is sent). The logic is in `portalSecondFactorModel.ts`.
  *
  * States, one at a time: `entering` (a code can be typed and sent; a refused code shows its reason here),
  * `checking` (a code is on its way, the button is off and says so), `ended` (the step is over: only a new link helps,
@@ -12,7 +12,7 @@ import { useId, useState, type FormEvent } from "react";
 import { fmtAt } from "../api/format";
 import { Button, Card, ErrorState, Field, Input } from "./kit";
 import { TotpQrCode } from "./TotpQrCode";
-import { cleanCode, type ExternalMfaStart, type MfaOutcome } from "./portalSecondFactor";
+import { cleanCode, type ExternalMfaStart, type MfaOutcome } from "./portalSecondFactorModel";
 
 type Step = { kind: "entering"; refused: string | null } | { kind: "checking" } | { kind: "ended"; message: string };
 

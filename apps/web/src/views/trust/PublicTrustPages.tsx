@@ -14,7 +14,7 @@ import { ApiError, api } from "../../api/client";
 import { fmtAt } from "../../api/format";
 import { Badge, Button, Card, EmptyState, ErrorState, SkeletonBlock } from "../../ui/kit";
 import { PortalSecondFactor } from "../../ui/PortalSecondFactor";
-import { isMfaStart, mfaRefusal, type ExternalMfaStart, type MfaOutcome } from "../../ui/portalSecondFactor";
+import { isMfaStart, mfaRefusal, type ExternalMfaStart, type MfaOutcome } from "../../ui/portalSecondFactorModel";
 import v from "../views.module.css";
 import t from "./trust.module.css";
 import { FIELD_LABELS, KIND_LABELS, fieldsFor, tokenFromHash, type PublicItem, type PublicTrustCenter } from "./trustModel";

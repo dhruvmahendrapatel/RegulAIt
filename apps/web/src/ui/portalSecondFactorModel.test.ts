@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CODE_FALLBACK, cleanCode, ENDED_FALLBACK, isMfaStart, mfaRefusal } from "./portalSecondFactor";
+import { CODE_FALLBACK, cleanCode, ENDED_FALLBACK, isMfaStart, mfaRefusal } from "./portalSecondFactorModel";
 
 const at = "2026-11-19T22:10:00.000Z";
 

@@ -15,7 +15,7 @@ import { fmtAt, fmtBytes, frameworkLabel } from "../../api/format";
 import { Lockup } from "../../ui/Brand";
 import { Badge, Button, Card, EmptyState, ErrorState, Field, SkeletonBlock, Textarea, type Tone } from "../../ui/kit";
 import { PortalSecondFactor } from "../../ui/PortalSecondFactor";
-import { isMfaStart, mfaRefusal, type ExternalMfaStart, type MfaOutcome } from "../../ui/portalSecondFactor";
+import { isMfaStart, mfaRefusal, type ExternalMfaStart, type MfaOutcome } from "../../ui/portalSecondFactorModel";
 import v from "../views.module.css";
 import s from "./supplier.module.css";
 import {
