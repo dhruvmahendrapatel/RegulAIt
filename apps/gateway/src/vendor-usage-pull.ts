@@ -25,7 +25,10 @@
  * Open source first (ADR-0176): OpenAI's costs endpoint is called through the official `openai` SDK
  * (`client.admin.organization.usage.costs`, Apache-2.0) with the guarded fetch injected. `@anthropic-ai/sdk` has no
  * method for `/v1/organizations/cost_report` (checked against its api.md at 0.113.0 and main, 2026-11-15), so that
- * endpoint is called with the guarded fetch directly.
+ * endpoint is called with the guarded fetch directly. GitHub's billing usage report is one unpaginated GET per day:
+ * `@octokit/request` (MIT) was compared and not added, because it would be a new dependency whose fetch must be
+ * replaced by the guarded one anyway, for a single GET. Cursor publishes no SDK for its Admin API (slice 3,
+ * 2026-11-19).
  */
 import { createHash } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
@@ -52,9 +55,13 @@ import {
 } from "@regulait/db";
 import {
   anthropicCostReportSchema,
+  cursorUsageEventsSchema,
   factOverlapsMetered,
+  githubBillingUsageSchema,
   normalizeAccountKey,
   normalizeAnthropicCostReport,
+  normalizeCursorUsageEvents,
+  normalizeGithubCopilotUsage,
   normalizeOpenAiCosts,
   openAiCostsSchema,
   resolveVendorAccount,
@@ -68,9 +75,10 @@ import {
   VENDOR_USAGE_PULL_RUN_MACHINE,
   vendorUsagePublicConfigSchemas,
   VendorUsageResponseError,
-  type AnthropicPublicConfig,
-  type OpenAiPublicConfig,
+  type CursorUsageEvent,
+  type GithubCopilotPublicConfig,
   type VendorUsageFact,
+  type VendorUsagePublicConfig,
   type VendorUsagePullVendor,
 } from "@regulait/shared";
 import { loadResolutionContext, scanFreeTexts } from "./cost-import.js";
@@ -122,7 +130,7 @@ export interface VendorUsageDeps {
   resolve?: EgressResolver | undefined;
 }
 
-type PublicConfig = AnthropicPublicConfig | OpenAiPublicConfig;
+type PublicConfig = VendorUsagePublicConfig;
 
 function isPullVendor(v: string): v is VendorUsagePullVendor {
   return (VENDOR_USAGE_PULL_VENDORS as readonly string[]).includes(v);
@@ -308,6 +316,121 @@ async function fetchOpenAi(
   throw new PullError("page_limit", `the vendor still had more pages after ${VENDOR_USAGE_MAX_PAGES}; nothing was written`);
 }
 
+/** GitHub's REST API version the billing usage report is documented under (re-checked 2026-11-19) */
+const GITHUB_API_VERSION = "2026-03-10";
+
+/** a GET or POST through the guarded fetch that returns parsed JSON or throws a classified error */
+async function fetchJson(fetcher: typeof fetch, url: string, init: RequestInit, page: number): Promise<unknown> {
+  try {
+    const res = await fetcher(url, { ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    if (!res.ok) {
+      await res.arrayBuffer().catch(() => undefined);
+      throw statusError(res.status, page);
+    }
+    return await res.json();
+  } catch (err) {
+    throw classifyError(err, page);
+  }
+}
+
+/** GitHub's daily billing usage report, one request per day of the window, Copilot lines only */
+async function fetchGithubCopilot(
+  key: string,
+  window: { start: Date; end: Date },
+  fetcher: typeof fetch,
+  config: GithubCopilotPublicConfig,
+): Promise<{ facts: VendorUsageFact[]; pages: number }> {
+  const facts: VendorUsageFact[] = [];
+  const base = config.account === "organization" ? "organizations" : "enterprises";
+  let n = 0;
+  for (let day = window.start.getTime(); day < window.end.getTime(); day += DAY_MS) {
+    n += 1;
+    if (n > VENDOR_USAGE_MAX_PAGES) {
+      throw new PullError("page_limit", `the window needed more than ${VENDOR_USAGE_MAX_PAGES} requests; nothing was written`);
+    }
+    const d = new Date(day);
+    const url = new URL(`https://${VENDOR_USAGE_CATALOGUE.github_copilot.host}/${base}/${encodeURIComponent(config.slug)}/settings/billing/usage`);
+    url.searchParams.set("year", String(d.getUTCFullYear()));
+    url.searchParams.set("month", String(d.getUTCMonth() + 1));
+    url.searchParams.set("day", String(d.getUTCDate()));
+    const body = await fetchJson(
+      fetcher,
+      url.toString(),
+      {
+        method: "GET",
+        headers: { authorization: `Bearer ${key}`, accept: "application/vnd.github+json", "x-github-api-version": GITHUB_API_VERSION },
+      },
+      n,
+    );
+    try {
+      facts.push(...normalizeGithubCopilotUsage(githubBillingUsageSchema.parse(body), { kind: config.account, slug: config.slug }));
+    } catch (err) {
+      throw classifyError(err, n);
+    }
+  }
+  return { facts, pages: n };
+}
+
+/** Cursor's filtered usage events for the window (both bounds inclusive, epoch ms), 1000 a page */
+async function fetchCursor(
+  key: string,
+  window: { start: Date; end: Date },
+  fetcher: typeof fetch,
+): Promise<{ facts: VendorUsageFact[]; pages: number }> {
+  const events: CursorUsageEvent[] = [];
+  const authorization = `Basic ${Buffer.from(`${key}:`, "utf8").toString("base64")}`;
+  for (let n = 1; n <= VENDOR_USAGE_MAX_PAGES; n++) {
+    const body = await fetchJson(
+      fetcher,
+      `https://${VENDOR_USAGE_CATALOGUE.cursor.host}/teams/filtered-usage-events`,
+      {
+        method: "POST",
+        headers: { authorization, accept: "application/json", "content-type": "application/json" },
+        body: JSON.stringify({ startDate: window.start.getTime(), endDate: window.end.getTime() - 1, page: n, pageSize: 1000 }),
+      },
+      n,
+    );
+    let parsed;
+    try {
+      parsed = cursorUsageEventsSchema.parse(body);
+    } catch (err) {
+      throw classifyError(err, n);
+    }
+    // a vendor that answers a different page than the one asked for would loop or skip pages; refuse it
+    if (parsed.pagination.currentPage !== n) {
+      throw new PullError("bad_response", `the vendor answered page ${parsed.pagination.currentPage} when page ${n} was asked for; nothing was written`);
+    }
+    events.push(...parsed.usageEvents);
+    if (!parsed.pagination.hasNextPage) {
+      try {
+        return { facts: normalizeCursorUsageEvents(events), pages: n };
+      } catch (err) {
+        throw classifyError(err, n);
+      }
+    }
+  }
+  throw new PullError("page_limit", `the vendor still had more pages after ${VENDOR_USAGE_MAX_PAGES}; nothing was written`);
+}
+
+function fetchVendor(
+  vendor: VendorUsagePullVendor,
+  config: PublicConfig,
+  key: string,
+  window: { start: Date; end: Date },
+  fetcher: typeof fetch,
+): Promise<{ facts: VendorUsageFact[]; pages: number }> {
+  switch (vendor) {
+    case "anthropic":
+      return fetchAnthropic(key, window, fetcher);
+    case "openai":
+      return fetchOpenAi(key, window, fetcher);
+    case "github_copilot":
+      return fetchGithubCopilot(key, window, fetcher, config as GithubCopilotPublicConfig);
+    case "cursor":
+      return fetchCursor(key, window, fetcher);
+  }
+}
+
 // --------------------------------------------------------------------------------------------------------------------
 // The pull
 // --------------------------------------------------------------------------------------------------------------------
@@ -472,7 +595,7 @@ export async function runVendorUsagePull(
   let fetched: { facts: VendorUsageFact[]; pages: number };
   try {
     const fetcher = guardedFetch(await loadEgressAllowList(db), opts.deps ?? {});
-    fetched = vendor === "anthropic" ? await fetchAnthropic(key, window, fetcher) : await fetchOpenAi(key, window, fetcher);
+    fetched = await fetchVendor(vendor, config, key, window, fetcher);
   } catch (err) {
     const e = classifyError(err, 0);
     return finish("fail", {errorCode: e.code, errorDetail: e.detail }, VENDOR_USAGE_RULE_IDS.pullFailed, "deny", e.detail);
@@ -742,6 +865,13 @@ const credentialBody = z
 const revokeBody = z.object({ reason: reasonField }).strict();
 const idParam = z.object({ connectorId: z.string().uuid() });
 
+/** how many gateway-owned vendor ids a connector declares for the metered-overlap exclusion */
+function declaredGatewayIds(cfg: PublicConfig): number {
+  if ("gatewayWorkspaceIds" in cfg) return cfg.gatewayWorkspaceIds.length;
+  if ("gatewayApiKeyIds" in cfg) return cfg.gatewayApiKeyIds.length + cfg.gatewayProjectIds.length;
+  return 0;
+}
+
 function connectorView(c: VendorUsageConnectorRow, cred: { id: string; scopePosture: string; createdAt: Date } | null) {
   return {
     id: c.id,
@@ -797,15 +927,13 @@ export function registerVendorUsagePullRoutes(
       catalogue: Object.values(VENDOR_USAGE_CATALOGUE),
       connectors: connectors.map((c) => {
         const cfg = isPullVendor(c.vendor) ? parseConfig(c.vendor, c.publicConfig) : null;
-        const declared = cfg
-          ? "gatewayWorkspaceIds" in cfg
-            ? cfg.gatewayWorkspaceIds.length
-            : cfg.gatewayApiKeyIds.length + cfg.gatewayProjectIds.length
-          : 0;
+        const declared = cfg ? declaredGatewayIds(cfg) : 0;
+        const unmetered = c.vendor === "github_copilot" || c.vendor === "cursor";
         return {
           ...connectorView(c, credBy.get(c.id) ?? null),
-          meteredOverlap:
-            declared > 0
+          meteredOverlap: unmetered
+            ? "the gateway does not meter this vendor, so no line is excluded as already metered"
+            : declared > 0
               ? "lines billed to the declared gateway keys, projects or workspaces are excluded as already metered"
               : "no gateway key, project or workspace is declared, so spend the gateway metered cannot be excluded for this connector",
         };

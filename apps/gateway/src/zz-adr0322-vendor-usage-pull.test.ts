@@ -51,6 +51,8 @@ const DATA_KEY = "e".repeat(64);
 const RUN = Date.now();
 const ANTHROPIC_KEY = `sk-ant-admin01-FAKE-${RUN}-secret`;
 const OPENAI_KEY = `sk-admin-FAKE-${RUN}-secret`;
+const GITHUB_TOKEN = `github_pat_FAKE_${RUN}_secret`;
+const CURSOR_KEY = `key_FAKE_${RUN}_secret`;
 const resolve = async () => [{ address: "93.184.216.34", family: 4 }];
 
 interface Seen {
@@ -113,7 +115,7 @@ function anthropicPages(amountCents: string) {
 const put = (url: string, payload: unknown) => app.inject({ method: "PUT", url, headers: AUTH, payload: payload as object });
 const steppedPut = (url: string, payload: unknown) => relaxStepUpAround(db, () => put(url, payload));
 
-async function createConnector(vendor: "anthropic" | "openai", config: Record<string, unknown>) {
+async function createConnector(vendor: "anthropic" | "openai" | "github_copilot" | "cursor", config: Record<string, unknown>) {
   const res = await app.inject({
     method: "POST",
     url: "/v1/vendor-usage/connectors",
@@ -176,7 +178,7 @@ afterAll(async () => {
 });
 
 describe("ADR-0322: off by default, three switches before anything leaves", () => {
-  it("starts off, and lists both vendors as write-capable with their honest limits", async () => {
+  it("starts off, and lists every vendor with its scope posture and honest limits", async () => {
     const res = await app.inject({ method: "GET", url: "/v1/vendor-usage", headers: AUTH });
     expect(res.statusCode).toBe(200);
     const body = res.json();
@@ -184,6 +186,8 @@ describe("ADR-0322: off by default, three switches before anything leaves", () =
     expect(body.catalogue.map((c: { vendor: string; scopePosture: string }) => [c.vendor, c.scopePosture])).toEqual([
       ["anthropic", "write_capable"],
       ["openai", "write_capable"],
+      ["github_copilot", "unverified"],
+      ["cursor", "write_capable"],
     ]);
     expect(body.statement).toMatch(/IMPORTED/);
   });
@@ -513,6 +517,147 @@ describe("ADR-0322: the OpenAI pull (official SDK, guarded fetch injected)", () 
     expect(conn?.enabled).toBe(false);
     const { run } = await runVendorUsagePull(db, c, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl, resolve } });
     expect([run.status, run.errorCode]).toEqual(["refused", "disabled"]);
+  });
+});
+
+async function allowHost(host: string) {
+  // egress-allow-cleanup: afterAll (tracked host, removed by allowed.removeAll)
+  const allow = await relaxStepUpAround(db, () =>
+    app.inject({ method: "POST", url: "/v1/egress-allow-hosts", headers: AUTH, payload: { host: allowed.trackHost(host), allowPrivateRanges: false, allowPlaintextHttp: false, note: `adr0322 ${RUN}` } }),
+  );
+  expect([200, 201]).toContain(allow.statusCode);
+}
+
+async function enabledConnector(vendor: "github_copilot" | "cursor", config: Record<string, unknown>, secret: string) {
+  const c = await createConnector(vendor, config);
+  expect((await storeKey(c.id, secret)).statusCode).toBe(201);
+  expect((await steppedPut(`/v1/vendor-usage/connectors/${c.id}/enabled`, { enabled: true, reason: "adr0322 suite" })).statusCode).toBe(200);
+  return c;
+}
+
+describe("ADR-0322 slice 3: the GitHub Copilot pull (billing usage report, Copilot lines only)", () => {
+  it("refuses a slug that is not a GitHub login, so the path segment cannot be steered", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/vendor-usage/connectors",
+      headers: AUTH,
+      payload: { vendor: "github_copilot", name: `adr0322-bad-gh-${RUN}`, config: { account: "organization", slug: "../../user" }, reason: "adr0322 suite" },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("reads one report per day of the window, keeps the Copilot lines, stores the token as unverified, and upserts on re-pull", async () => {
+    const c = await enabledConnector("github_copilot", { account: "organization", slug: "acme-eng", backfillDays: 3 }, GITHUB_TOKEN);
+    const [cred] = await db.select().from(vendorUsageCredentials).where(eq(vendorUsageCredentials.connectorId, c.id));
+    expect([cred?.scopePosture, cred?.writeCapableAcknowledgedAt]).toEqual(["unverified", null]);
+    await allowHost("api.github.com");
+
+    const yesterday = new Date(dayIso(-1));
+    const items = (url: URL) => {
+      const asked = Date.UTC(Number(url.searchParams.get("year")), Number(url.searchParams.get("month")) - 1, Number(url.searchParams.get("day")));
+      if (asked !== yesterday.getTime()) return [];
+      const date = yesterday.toISOString();
+      return [
+        { date, product: "Copilot", sku: "Copilot Business", quantity: 4, unitType: "user-months", netAmount: 76, organizationName: "acme-eng" },
+        { date, product: "Copilot", sku: "Premium request", quantity: 25, unitType: "requests", netAmount: 1, organizationName: "acme-eng", repositoryName: "acme-eng/api" },
+        { date, product: "Actions", sku: "Linux", quantity: 100, unitType: "minutes", netAmount: 0.8, organizationName: "acme-eng" },
+      ];
+    };
+    answer = (url) =>
+      url.pathname === "/organizations/acme-eng/settings/billing/usage" ? json({ usageItems: items(url) }) : json({ message: "Not Found" }, 404);
+
+    seen = [];
+    const first = await runVendorUsagePull(db, c.id, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl, resolve } });
+    expect(first.run).toMatchObject({ status: "succeeded", linesUpserted: 2, overlapLines: 0 });
+    // backfillDays 3 = three past days and today
+    expect(seen).toHaveLength(4);
+    expect(seen.every((s) => s.url.host === "api.github.com")).toBe(true);
+    expect(seen[0]!.headers.get("authorization")).toBe(`Bearer ${GITHUB_TOKEN}`);
+    expect(seen[0]!.headers.get("x-github-api-version")).toBe("2026-03-10");
+
+    const lines = await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c.id));
+    expect(lines.map((l) => [l.accountRef, l.amount, l.overlapsMetered, l.basis]).sort()).toEqual([
+      ["github organization acme-eng", 1, false, "imported"],
+      ["github organization acme-eng", 76, false, "imported"],
+    ]);
+
+    await runVendorUsagePull(db, c.id, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl, resolve } });
+    expect(await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c.id))).toHaveLength(2);
+    const view = await app.inject({ method: "GET", url: "/v1/vendor-usage", headers: AUTH });
+    expect(view.body).not.toContain(GITHUB_TOKEN);
+    const mine = view.json().connectors.find((x: { id: string }) => x.id === c.id);
+    expect(mine.meteredOverlap).toMatch(/does not meter this vendor/);
+  });
+
+  it("stores a fixed code when GitHub refuses the token, never GitHub's body", async () => {
+    const c = connectorIds[connectorIds.length - 1]!;
+    answer = () => json({ message: `Bad credentials ${GITHUB_TOKEN}` }, 401);
+    const { run } = await runVendorUsagePull(db, c, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl, resolve } });
+    expect([run.status, run.errorCode]).toEqual(["failed", "unauthorized"]);
+    expect(run.errorDetail).not.toContain(GITHUB_TOKEN);
+  });
+});
+
+describe("ADR-0322 slice 3: the Cursor pull (filtered usage events, Basic auth)", () => {
+  it("pages through the events, sums them per day and person, and resolves a person by email", async () => {
+    const c = await enabledConnector("cursor", { backfillDays: 2 }, CURSOR_KEY);
+    await allowHost("api.cursor.com");
+    const at = Date.parse(dayIso(-1)) + 3_600_000;
+    const bodies: Array<Record<string, unknown>> = [];
+    const requestBodies: Promise<void>[] = [];
+    const cursorFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const req = new Request(input, init);
+      requestBodies.push(req.clone().text().then((t) => void bodies.push(JSON.parse(t))));
+      return fetchImpl(input, init);
+    }) as typeof fetch;
+    let pageNo = 0;
+    answer = (url) => {
+      if (url.pathname !== "/teams/filtered-usage-events") return json({ error: "unexpected path" }, 404);
+      pageNo += 1;
+      return pageNo === 1
+        ? json({
+            usageEvents: [
+              { timestamp: String(at), userEmail: `adr0322-admin-${RUN}@example.com`, model: "model-a", kind: "Usage-based", product: "agent", requestsCosts: 1, chargedCents: 12.5 },
+              { timestamp: String(at + 60_000), serviceAccountId: "sa_ci", model: "model-a", kind: "Usage-based", product: "agent", chargedCents: 40 },
+            ],
+            pagination: { currentPage: 1, hasNextPage: true },
+          })
+        : json({
+            usageEvents: [{ timestamp: String(at + 120_000), userEmail: `ADR0322-admin-${RUN}@example.com`, model: "model-a", kind: "Usage-based", product: "agent", requestsCosts: 2, chargedCents: 7.25 }],
+            pagination: { currentPage: 2, hasNextPage: false },
+          });
+    };
+    seen = [];
+    const { run } = await runVendorUsagePull(db, c.id, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl: cursorFetch, resolve } });
+    await Promise.all(requestBodies);
+    expect(run).toMatchObject({ status: "succeeded", linesUpserted: 2, overlapLines: 0 });
+    expect(seen.map((s) => s.url.host)).toEqual(["api.cursor.com", "api.cursor.com"]);
+    expect(seen[0]!.headers.get("authorization")).toBe(`Basic ${Buffer.from(`${CURSOR_KEY}:`).toString("base64")}`);
+    expect(bodies.map((b) => [b.page, b.pageSize])).toEqual([
+      [1, 1000],
+      [2, 1000],
+    ]);
+    expect(Number(bodies[0]!.endDate)).toBeGreaterThan(Number(bodies[0]!.startDate));
+
+    const lines = await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c.id));
+    const byRef = new Map(lines.map((l) => [l.accountRef, l]));
+    expect(byRef.get(`adr0322-admin-${RUN}@example.com`)).toMatchObject({ amount: 0.1975, resolutionMethod: "exact_email" });
+    expect(byRef.get("cursor service account sa_ci")).toMatchObject({ amount: 0.4 });
+  });
+
+  it("refuses a vendor that answers a different page than the one asked for, and writes nothing", async () => {
+    const c = connectorIds[connectorIds.length - 1]!;
+    const before = await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c));
+    answer = () => json({ usageEvents: [], pagination: { currentPage: 1, hasNextPage: true } });
+    let calls = 0;
+    const counting = (async (input: string | URL | Request, init?: RequestInit) => {
+      calls += 1;
+      if (calls > 1) return json({ usageEvents: [], pagination: { currentPage: 1, hasNextPage: true } });
+      return fetchImpl(input, init);
+    }) as typeof fetch;
+    const { run } = await runVendorUsagePull(db, c, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl: counting, resolve } });
+    expect([run.status, run.errorCode, calls]).toEqual(["failed", "bad_response", 2]);
+    expect(await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c))).toHaveLength(before.length);
   });
 });
 
