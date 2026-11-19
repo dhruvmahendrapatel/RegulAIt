@@ -84,3 +84,9 @@ ALTER TABLE "org_settings" DROP CONSTRAINT IF EXISTS "org_settings_freeform_brow
 --> statement-breakpoint
 ALTER TABLE "org_settings" ADD CONSTRAINT "org_settings_freeform_browser_minutes_check"
   CHECK ("freeform_browser_max_run_minutes" IS NULL OR ("freeform_browser_max_run_minutes" >= 1 AND "freeform_browser_max_run_minutes" <= 30));
+--> statement-breakpoint
+-- the offer a robot run was placed under names that run (robot_browser_isolation.sql adds the column; it sorts before
+-- robots.sql, so the foreign key is added here, once robot_runs exists)
+ALTER TABLE "execution_offers" DROP CONSTRAINT IF EXISTS "execution_offers_robot_run_fk";
+--> statement-breakpoint
+ALTER TABLE "execution_offers" ADD CONSTRAINT "execution_offers_robot_run_fk" FOREIGN KEY ("robot_run_id") REFERENCES "robot_runs"("id") ON DELETE RESTRICT;

@@ -42,7 +42,7 @@ let stranger: Person;
 let robotId: string;
 
 describe.skipIf(!process.env.DATABASE_URL)("ADR-0364 S3 robot runs (gateway)", () => {
-  const setMode = (mode: string) =>
+  const setMode = (mode: "normal" | "read_only" | "require_approval" | "halted") =>
     kit.db
       .update(orgSettings)
       .set({ executionMode: mode, executionModeReason: mode === "normal" ? null : "ADR-0364 S3 test", executionModeApproverUserId: mode === "require_approval" ? owner.id : null });
@@ -112,7 +112,7 @@ describe.skipIf(!process.env.DATABASE_URL)("ADR-0364 S3 robot runs (gateway)", (
   it("refuses every run in read_only and halted, and a test run under require_approval", async () => {
     setRobotRunnerImageForTest("sha256:" + "a".repeat(64));
     const { robot, version } = await loaded();
-    for (const mode of ["read_only", "halted", "require_approval"]) {
+    for (const mode of ["read_only", "halted", "require_approval"] as const) {
       await setMode(mode);
       const out = await startRobotRun(kit.db, { robot, version, kind: "test", requestedBy: owner.id, projectId: owner.projectId, inputs: { username: "a" }, contentDigest: "c".repeat(64) }, { dataKey: undefined, store: null });
       expect(out.kind).toBe("refused");

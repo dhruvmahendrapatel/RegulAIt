@@ -526,6 +526,7 @@ import {
 } from "./compliance-profile-lifecycle.js";
 import { applyInfraApprovalDecision, registerInfraRoutes } from "./infra.js";
 import { applyRobotVersionDecision, precheckRobotVersionDecision, registerRobotRoutes } from "./robots.js";
+import { robotEgressLogHook } from "./robot-runs.js";
 import { registerOptimizationRoutes } from "./optimization.js";
 import { applyRunApprovalDecision, registerOrchestrationRoutes } from "./orchestration.js";
 import { registerDecomposeRoutes } from "./decompose.js";
@@ -6534,7 +6535,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerIsolationRoutes(app, db);
   // ADR-0190 I5: an engine task's artifact input is streamed from the same artifact store the upload route writes
   const engineTaskStore = opts.artifactStore === undefined ? {} : { artifactStore: opts.artifactStore };
-  registerExecutorChannelRoutes(app, db, { ...(opts.executorChannel ?? {}), ...(opts.dataKey ? { dataKey: opts.dataKey } : {}), ...engineTaskStore, engineTasks: engineTaskChannelHooks });
+  registerExecutorChannelRoutes(app, db, {
+    // ADR-0364 S3: a robot placement's end carries its Smokescreen log, stored as that run's egress evidence
+    robotEgressLog: robotEgressLogHook(opts.artifactStore ?? null),
+    ...(opts.executorChannel ?? {}),
+    ...(opts.dataKey ? { dataKey: opts.dataKey } : {}),
+    ...engineTaskStore,
+    engineTasks: engineTaskChannelHooks,
+  });
   // ADR-0187 (batch 5, AgentCoordination §4.10): the engines (admin; GET is any
   // user), engine runs and schedules (any user, own runs), and the runner routes
   // (the runner's self token only: registerEngineRunnerScopeHook).

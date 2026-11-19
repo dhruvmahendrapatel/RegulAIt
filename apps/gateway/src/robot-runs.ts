@@ -33,7 +33,9 @@ import path from "node:path";
 import {
   and,
   auditLog,
+  count,
   eq,
+  executionOffers,
   projects,
   robotRunEvidence,
   robotRuns,
@@ -270,8 +272,8 @@ export async function startRobotRun(db: Db, req: RobotRunRequest, deps: RobotRun
     interactivePerson: req.interactivePerson === true,
     imageDigest,
     actorUserId: req.requestedBy,
-    egress: { targets },
-  } as Parameters<typeof decidePlacement>[1]);
+    egress: { runId, targets },
+  });
   if (decision.kind !== "offered") {
     const code = decision.kind === "refused" ? decision.code : "policy_unresolved";
     return refuse(db, req, "robot_run_placement_refused", `No sandbox could be placed for the run (${code}); nothing ran.`, runId);
@@ -547,6 +549,45 @@ export class RobotRunController {
       }),
     );
   }
+}
+
+/**
+ * The executor's end of a robot placement carries the run's Smokescreen log (capped by the executor); it is stored as
+ * that run's `egress_log` evidence, in the end call's own transaction (`ExecutorChannelOptions.robotEgressLog`). It
+ * holds host names and verdicts only: the run's secrets never reach the proxy (TLS is end to end through CONNECT).
+ */
+export function robotEgressLogHook(store: ArtifactStore | null) {
+  return async (tx: Db, end: { offerId: string; placementId: string | null; log: string; sha256: string }): Promise<void> => {
+    const [offer] = await tx.select({ robotRunId: executionOffers.robotRunId }).from(executionOffers).where(eq(executionOffers.id, end.offerId));
+    if (!offer?.robotRunId) return;
+    const bytes = Buffer.from(end.log, "utf8");
+    const [{ n }] = (await tx.select({ n: count() }).from(robotRunEvidence).where(eq(robotRunEvidence.robotRunId, offer.robotRunId))) as [{ n: number }];
+    if (n >= ROBOT_RUN_LIMITS.evidenceItems) return;
+    if (store) {
+      const key = artifactStorageKey(end.sha256);
+      if (!(await store.has(key))) {
+        const dir = await mkdtemp(path.join(tmpdir(), "robot-egress-"));
+        const file = path.join(dir, randomUUID());
+        try {
+          await writeFile(file, bytes, { mode: 0o600 });
+          await store.putFile(key, file, end.sha256, bytes.length);
+        } finally {
+          await rm(dir, { recursive: true, force: true });
+        }
+      }
+    }
+    await runWithRlsSystem("system_task", "robot-run.egress-log", () =>
+      tx.insert(robotRunEvidence).values({
+        robotRunId: offer.robotRunId!,
+        item: n,
+        kind: "egress_log",
+        step: null,
+        contentType: "text/plain",
+        sha256: end.sha256,
+        sizeBytes: bytes.length,
+      }),
+    );
+  };
 }
 
 /** the robot and version a test run names, re-read in the run's own reads (never a cached row) */
