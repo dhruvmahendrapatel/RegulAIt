@@ -35,21 +35,28 @@ import {
   users,
   workloadIdentities,
   type Db,
+  type PgColumn,
+  type SQL,
 } from "@regulait/db";
 import {
+  AGENT_NHI_LINK_MACHINE,
   AGENT_OWNER_INACTIVE_DAYS,
+  AGENT_OWNERSHIP_FLAGS,
   AGENT_RISK_SUBJECT_KINDS,
   agentOwnershipFlag,
   decideAgentNhiLinkSchema,
   stageAgentNhiLinkSchema,
+  type AgentNhiLinkStatus,
   type AgentOwnershipFlag,
 } from "@regulait/shared";
 import { databaseNow } from "./db-clock.js";
+import type { ListSpec } from "./list-contract.js";
+import { answerListPage, type ContractList } from "./list-contract-route.js";
+import { whereFrom } from "./state-transition.js";
 import { requireStepUp } from "./step-up.js";
 
 export const AGENT_RUNNER_WINDOW_DAYS = 30;
 const RUNNER_TOP = 10;
-const FINDINGS_MAX_LIMIT = 200;
 const LINKS_MAX = 100;
 const DAY_MS = 86_400_000;
 const SYSTEM_ACTOR = "00000000-0000-0000-0000-000000000000";
@@ -64,21 +71,28 @@ interface Subject {
 // Ownership
 // ---------------------------------------------------------------------------
 
-/** when each user was last seen: the newest session, API key use or federated sign-in, never before their creation */
+/**
+ * When a user was last seen: the newest session, API key use or federated sign-in, never before their creation. One
+ * SQL expression, so the view, the risk score and the findings list cannot disagree about who is inactive.
+ */
+function lastActiveSql(userId: SQL, createdAt: SQL): SQL {
+  // explicit aliases: inside a correlated subquery an unqualified column would resolve to the inner table
+  return sql`GREATEST(
+    ${createdAt},
+    (SELECT max(s.last_seen_at) FROM auth_sessions s WHERE s.user_id = ${userId}),
+    (SELECT max(k.last_used_at) FROM api_keys k WHERE k.user_id = ${userId}),
+    (SELECT max(f.last_login_at) FROM federated_identities f WHERE f.user_id = ${userId})
+  )`;
+}
+
+/** when each user was last seen (see `lastActiveSql`) and whether they are deactivated */
 export async function ownerLastActive(db: Db, userIds: ReadonlyArray<string | null>): Promise<Map<string, { disabled: boolean; lastActiveAt: Date | null }>> {
   const ids = [...new Set(userIds.filter((u): u is string => !!u))];
   const out = new Map<string, { disabled: boolean; lastActiveAt: Date | null }>();
   if (!ids.length) return out;
-  // explicit aliases: inside a correlated subquery an unqualified column would resolve to the inner table
   const rows = (
     await db.execute<{ id: string; disabled: boolean; last_active_at: string | Date | null }>(sql`
-      SELECT u.id, u.disabled_at IS NOT NULL AS disabled,
-        GREATEST(
-          u.created_at,
-          (SELECT max(s.last_seen_at) FROM auth_sessions s WHERE s.user_id = u.id),
-          (SELECT max(k.last_used_at) FROM api_keys k WHERE k.user_id = u.id),
-          (SELECT max(f.last_login_at) FROM federated_identities f WHERE f.user_id = u.id)
-        ) AS last_active_at
+      SELECT u.id, u.disabled_at IS NOT NULL AS disabled, ${lastActiveSql(sql`u.id`, sql`u.created_at`)} AS last_active_at
       FROM users u WHERE u.id IN (${sql.join(ids.map((i) => sql`${i}::uuid`), sql`, `)})`)
   ).rows.map((r) => ({ id: r.id, disabled: !!r.disabled, lastActiveAt: r.last_active_at ? new Date(r.last_active_at) : null }));
   for (const r of rows) out.set(r.id, { disabled: !!r.disabled, lastActiveAt: r.lastActiveAt });
@@ -194,13 +208,82 @@ export async function agentIdentityView(db: Db, s: Subject, now: Date) {
 
 const subjectParams = z.object({ kind: z.enum(AGENT_RISK_SUBJECT_KINDS), subjectId: z.string().uuid() });
 const linkParams = z.object({ linkId: z.string().uuid() });
-const findingsQuery = z
+const findingsFilters = z
   .object({
     kind: z.enum(AGENT_RISK_SUBJECT_KINDS).default("agent"),
-    limit: z.coerce.number().int().min(1).max(FINDINGS_MAX_LIMIT).default(100),
-    cursor: z.string().uuid().optional(),
+    flag: z.enum(AGENT_OWNERSHIP_FLAGS.filter((f) => f !== "owned") as ["inactive", "unowned", "orphaned"]).optional(),
   })
   .strict();
+
+interface OwnershipFinding {
+  kind: SubjectKind;
+  id: string;
+  name: string;
+  ownerUserId: string | null;
+  flag: AgentOwnershipFlag;
+  ownerLastActiveAt: string | null;
+}
+
+/**
+ * The ADR-0089 flag (widened with `inactive`) in SQL, over a row joined to its owner: the same rule as
+ * `agentOwnershipFlag`, so the findings list filters before paging instead of after. A test holds the two equal.
+ */
+function ownershipFlagSql(ownerUserId: PgColumn): SQL<AgentOwnershipFlag> {
+  const last = lastActiveSql(sql`${users.id}`, sql`${users.createdAt}`);
+  return sql<AgentOwnershipFlag>`(CASE
+    WHEN ${ownerUserId} IS NULL THEN 'unowned'
+    WHEN ${users.id} IS NULL OR ${users.disabledAt} IS NOT NULL THEN 'orphaned'
+    WHEN ${last} < now() - make_interval(days => ${AGENT_OWNER_INACTIVE_DAYS}) THEN 'inactive'
+    ELSE 'owned' END)`;
+}
+
+/** ADR-0226: the findings list under the shared list contract, one spec per agent kind (each has its own id column) */
+function findingsList(db: Db, kind: SubjectKind): ContractList<OwnershipFinding, z.infer<typeof findingsFilters>> {
+  const t = kind === "agent" ? agents : builderAgents;
+  const live = kind === "agent" ? sql`${agents.lifecycleStatus} <> 'retired'` : isNull(builderAgents.archivedAt);
+  const flag = ownershipFlagSql(t.ownerUserId);
+  const spec: ListSpec<OwnershipFinding> = {
+    id: `agent-ownership-findings-${kind}`,
+    sorts: { name: { expr: sql`lower(${t.name})` }, flag: { expr: flag } },
+    columns: {
+      name: { label: "Agent", value: (r) => r.name },
+      flag: { label: "Ownership", value: (r) => r.flag },
+      owner: { label: "Owner", value: (r) => r.ownerUserId },
+      lastActive: { label: "Owner last active", value: (r) => r.ownerLastActiveAt },
+    },
+    filters: ["kind", "flag"],
+    defaultSort: { col: "name", dir: "asc" },
+    idCol: t.id,
+  };
+  return {
+    spec,
+    filters: findingsFilters,
+    reader: {
+      fetch: async (q) => {
+        const rows = await db
+          .select({
+            id: t.id,
+            name: t.name,
+            ownerUserId: t.ownerUserId,
+            flag,
+            ownerLastActiveAt: sql<string | null>`CASE WHEN ${users.id} IS NULL THEN NULL ELSE ${lastActiveSql(sql`${users.id}`, sql`${users.createdAt}`)} END`,
+            _cursorAt: q.cursorAt,
+          })
+          .from(t)
+          .leftJoin(users, eq(users.id, t.ownerUserId))
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset);
+        return rows.map((r) => ({ kind, ...r, ownerLastActiveAt: r.ownerLastActiveAt ? new Date(r.ownerLastActiveAt).toISOString() : null }));
+      },
+      countable: (where) => db.select({ one: sql`1` }).from(t).leftJoin(users, eq(users.id, t.ownerUserId)).where(where),
+      idOf: (r) => r.id,
+    },
+    where: (_req, f) => and(live, sql`${flag} <> 'owned'`, f.flag ? sql`${flag} = ${f.flag}` : undefined),
+    extra: () => ({ kind, inactiveAfterDays: AGENT_OWNER_INACTIVE_DAYS }),
+  };
+}
 
 function privateNoStore(reply: FastifyReply) {
   reply.header("cache-control", "private, no-store");
@@ -227,39 +310,15 @@ export function registerAgentIdentityRoutes(app: FastifyInstance, db: Db): void 
   });
 
   /**
-   * Admin: agents whose owner is missing, deactivated or inactive. Scans one keyset page of agents (by id) and returns
-   * the flagged ones in it, so a page can hold fewer items than `limit`; `nextCursor` continues the scan.
+   * Admin: agents whose owner is missing, deactivated or inactive, filtered in SQL and paged by the ADR-0226 list
+   * contract (sort, cursor or offset, count). `kind` picks the agent registry or the builder agents.
    */
+  const findings = { agent: findingsList(db, "agent"), builder_agent: findingsList(db, "builder_agent") } as const;
   app.get("/v1/agent-identity/ownership-findings", async (req, reply) => {
     privateNoStore(reply);
-    const q = findingsQuery.safeParse(req.query);
-    if (!q.success) return reply.status(400).send({ error: "invalid_query", issues: issues(q.error) });
-    const { kind, limit, cursor } = q.data;
-    const rows =
-      kind === "agent"
-        ? await db
-            .select({ id: agents.id, name: agents.name, ownerUserId: agents.ownerUserId })
-            .from(agents)
-            .where(cursor ? sql`${agents.id} > ${cursor}::uuid AND ${agents.lifecycleStatus} <> 'retired'` : sql`${agents.lifecycleStatus} <> 'retired'`)
-            .orderBy(asc(agents.id))
-            .limit(limit + 1)
-        : await db
-            .select({ id: builderAgents.id, name: builderAgents.name, ownerUserId: builderAgents.ownerUserId })
-            .from(builderAgents)
-            .where(cursor ? and(isNull(builderAgents.archivedAt), sql`${builderAgents.id} > ${cursor}::uuid`) : isNull(builderAgents.archivedAt))
-            .orderBy(asc(builderAgents.id))
-            .limit(limit + 1);
-    const page = rows.slice(0, limit);
-    const now = await databaseNow(db);
-    const activity = await ownerLastActive(db, page.map((r) => r.ownerUserId));
-    const items = page
-      .map((r) => {
-        const a = r.ownerUserId ? activity.get(r.ownerUserId) : undefined;
-        return { kind, id: r.id, name: r.name, ownerUserId: r.ownerUserId, flag: flagFor(r.ownerUserId, activity, now), ownerLastActiveAt: a?.lastActiveAt ?? null };
-      })
-      .filter((i) => i.flag !== "owned");
-    const last = page[page.length - 1];
-    return { kind, items, scanned: page.length, nextCursor: rows.length > limit && last ? last.id : null, inactiveAfterDays: AGENT_OWNER_INACTIVE_DAYS };
+    const k = z.object({ kind: z.enum(AGENT_RISK_SUBJECT_KINDS).default("agent") }).safeParse({ kind: (req.query as { kind?: unknown } | undefined)?.kind });
+    if (!k.success) return reply.status(400).send({ error: "invalid_query", issues: issues(k.error) });
+    return answerListPage(db, req, reply, findings[k.data.kind]);
   });
 
   /** Admin: stage a non-human identity link. Staged confers nothing; a second admin confirms it. Audited in the same transaction. */
@@ -318,7 +377,8 @@ export function registerAgentIdentityRoutes(app: FastifyInstance, db: Db): void 
     if (!body.success) return reply.status(400).send({ error: "invalid_body", issues: issues(body.error) });
     const [link] = await db.select().from(agentIdentityLinks).where(eq(agentIdentityLinks.id, p.data.linkId));
     if (!link) return notFound(reply);
-    if (link.status !== "staged") return reply.status(409).send({ error: "already_decided", status: link.status });
+    const event = body.data.decision === "confirmed" ? "confirm" : "reject";
+    if (!AGENT_NHI_LINK_MACHINE.can(link.status as AgentNhiLinkStatus, event)) return reply.status(409).send({ error: "already_decided", status: link.status });
     const decider = req.authCtx.userId ?? null;
     if (!decider) return reply.status(403).send({ error: "named_admin_required", detail: "a link is confirmed or rejected by a named admin, not the bootstrap credential" });
     if (link.stagedByUserId === decider) {
@@ -330,11 +390,11 @@ export function registerAgentIdentityRoutes(app: FastifyInstance, db: Db): void 
     });
     if (!su.ok) return reply;
     const row = await db.transaction(async (tx) => {
-      // the status is re-checked under the row lock, so two deciders cannot both win
+      // ADR-0348: the declared machine's guard, re-checked in the UPDATE, so two deciders cannot both win
       const [updated] = await tx
         .update(agentIdentityLinks)
-        .set({ status: body.data.decision, decidedByUserId: decider, decidedAt: sql`now()`, decisionNote: body.data.note ?? null })
-        .where(and(eq(agentIdentityLinks.id, link.id), eq(agentIdentityLinks.status, "staged")))
+        .set({ status: AGENT_NHI_LINK_MACHINE.next("staged", event), decidedByUserId: decider, decidedAt: sql`now()`, decisionNote: body.data.note ?? null })
+        .where(and(eq(agentIdentityLinks.id, link.id), whereFrom(agentIdentityLinks.status, AGENT_NHI_LINK_MACHINE, event)))
         .returning();
       if (!updated) return null;
       const kind: SubjectKind = updated.agentId ? "agent" : "builder_agent";

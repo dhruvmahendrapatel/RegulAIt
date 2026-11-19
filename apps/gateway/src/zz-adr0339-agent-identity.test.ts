@@ -162,6 +162,8 @@ describe("ADR-0339 slice 2: ownership", () => {
     await db.update(users).set({ createdAt: past }).where(eq(users.id, owner.id));
     await db.execute(sql`UPDATE api_keys SET last_used_at = ${past.toISOString()}::timestamptz WHERE user_id = ${owner.id}`);
     expect(await flag()).toBe("inactive");
+    const inactive = await app.inject({ method: "GET", headers: adminA.auth, url: "/v1/agent-identity/ownership-findings?kind=agent&flag=inactive&limit=500" });
+    expect((inactive.json().items as Array<{ id: string; flag: string }>).find((i) => i.id === id)?.flag).toBe("inactive");
     const risk = await assessAgentRisk(db, { kind: "agent", id });
     expect(risk!.factors.find((f) => f.id === "ownership")).toMatchObject({ present: true, points: 8 });
 
@@ -172,17 +174,24 @@ describe("ADR-0339 slice 2: ownership", () => {
     await db.update(users).set({ disabledAt: new Date() }).where(eq(users.id, owner.id));
     expect(await flag()).toBe("orphaned");
 
-    const findings = await app.inject({ method: "GET", headers: adminA.auth, url: "/v1/agent-identity/ownership-findings?kind=agent&limit=200" });
+    // ADR-0226: the list is filtered in SQL before paging, so every item on a page is a finding (no sparse pages),
+    // and the SQL flag agrees with the view's TypeScript flag for the same owner
+    const findings = await app.inject({ method: "GET", headers: adminA.auth, url: "/v1/agent-identity/ownership-findings?kind=agent&flag=orphaned&limit=500&count=exact" });
     expect(findings.statusCode).toBe(200);
-    // scan every page for this agent (pages are scans, so a page may be sparse)
-    let found = (findings.json().items as Array<{ id: string; flag: string }>).find((i) => i.id === id);
-    let cursor = findings.json().nextCursor as string | null;
-    while (!found && cursor) {
-      const next = await app.inject({ method: "GET", headers: adminA.auth, url: `/v1/agent-identity/ownership-findings?kind=agent&limit=200&cursor=${cursor}` });
-      found = (next.json().items as Array<{ id: string; flag: string }>).find((i) => i.id === id);
-      cursor = next.json().nextCursor;
-    }
-    expect(found?.flag).toBe("orphaned");
+    const page = findings.json() as { kind: string; items: Array<{ id: string; flag: string }>; total: number; inactiveAfterDays: number };
+    expect(page.kind).toBe("agent");
+    expect(page.inactiveAfterDays).toBe(AGENT_OWNER_INACTIVE_DAYS);
+    expect(page.items.length).toBeGreaterThan(0);
+    expect(page.items.every((i) => i.flag === "orphaned")).toBe(true);
+    expect(page.items.find((i) => i.id === id)?.flag).toBe("orphaned");
+    expect(page.total).toBeGreaterThanOrEqual(page.items.length);
+    // the default list never carries an owned agent
+    const all = await app.inject({ method: "GET", headers: adminA.auth, url: "/v1/agent-identity/ownership-findings?limit=10" });
+    expect(all.statusCode).toBe(200);
+    expect((all.json().items as Array<{ flag: string }>).every((i) => i.flag !== "owned")).toBe(true);
+    // the contract's limits and unknown filters are refused
+    expect((await app.inject({ method: "GET", headers: adminA.auth, url: "/v1/agent-identity/ownership-findings?limit=200" })).statusCode).toBe(400);
+    expect((await app.inject({ method: "GET", headers: adminA.auth, url: "/v1/agent-identity/ownership-findings?flag=owned" })).statusCode).toBe(400);
     expect((await app.inject({ method: "GET", headers: plain.auth, url: "/v1/agent-identity/ownership-findings" })).statusCode).toBe(403);
   });
 });
