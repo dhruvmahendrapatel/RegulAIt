@@ -41,7 +41,11 @@ import {
   OAUTH_TOKEN_PATH,
   DEFENSECLAW_INGEST_PATH,
   DEFENSECLAW_OTLP_LOGS_PATH,
+  BROWSER_EXTENSION_PATHS,
 } from "@regulait/shared";
+
+/** ADR-0334: the browser extension route authenticated in-route (registration); the rest take its self token */
+const BROWSER_EXTENSION_AUTH_PATHS: readonly string[] = [BROWSER_EXTENSION_PATHS.register];
 
 /** ADR-0187: the routes only an engine runner credential reaches */
 const RUNNER_ROUTE_KEYS: ReadonlySet<string> = new Set<string>([...ENGINE_RUNNER_ROUTES, ...ENGINE_ENROLLMENT_ROUTES]);
@@ -196,6 +200,10 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   DEFENSECLAW_INGEST_PATH,
   // ADR-0302 decision 2: the same exporter channel over OTLP/HTTP logs, the same in-route `rgti_` token
   DEFENSECLAW_OTLP_LOGS_PATH,
+  // ADR-0334 (lane E16): a browser extension's registration holds no RegulAIt session or key yet: it authenticates
+  // IN-ROUTE on the bulk enrolment token (`rgbe_`, SHA-256 lookup) and refuses while browser governance is off. Its
+  // other routes take its DPoP-bound self token only (the endpoint agent's pattern).
+  ...BROWSER_EXTENSION_AUTH_PATHS,
 ]);
 
 export const NON_ADMIN_ROUTES = new Set([
@@ -950,6 +958,8 @@ export const NON_ADMIN_ROUTES = new Set([
   `POST ${DEFENSECLAW_INGEST_PATH}`,
   // ADR-0302 decision 2: its OTLP/HTTP logs twin
   `POST ${DEFENSECLAW_OTLP_LOGS_PATH}`,
+  // ADR-0334 (lane E16): the browser extension's registration (auth-exempt above too; in-route enrolment token)
+  ...BROWSER_EXTENSION_AUTH_PATHS.map((p) => `POST ${p}`),
 
   // ADR-0189 slice B4 — the Decision BOM and AI BOM reads, bundles and the
   // online verifier. The gate is `bom_export_roles` (§7, §9), checked IN THE

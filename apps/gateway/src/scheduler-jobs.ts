@@ -137,6 +137,8 @@ export const SCHEDULER_JOB_NAMES = {
   spendBudgetAlerts: "spend-budget-alerts",
   // ADR-0302 (P37 follow-up): deletes third-party ingest evidence past the audit floor (third-party-ingest-retention.ts)
   thirdPartyEvidenceRetentionSweep: "third-party-evidence-retention-sweep",
+  // ADR-0334 (owner decision B2): deletes captured browser prompts past their retention (browser-capture-retention.ts)
+  browserPromptCaptureRetentionSweep: "browser-prompt-capture-retention-sweep",
   // ADR-0339: scores every agent a change marked (agent-risk.ts)
   agentRiskRecomputeSweep: "agent-risk-recompute-sweep",
   agentRiskDailyMark: "agent-risk-daily-mark",
@@ -871,6 +873,7 @@ import { costOutcomeJobDefinitions } from "./cost-outcomes.js";
 import { agentRiskProofJobDefinitions } from "./agent-risk-proof-runner.js";
 import { processAnalyticsJobDefinitions } from "./process-analytics.js";
 import { thirdPartyIngestJobDefinitions } from "./third-party-ingest-retention.js";
+import { browserGovernanceJobDefinitions } from "./browser-capture-retention.js";
 import { vendorUsageJobDefinitions } from "./vendor-usage-pull.js";
 import { agentRiskJobDefinitions } from "./agent-risk.js";
 
@@ -892,6 +895,7 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...siemJobDefinitions({ dataKey: opts.dataKey }), // ADR-0303: siem-delivery-sweep
     ...costOutcomeJobDefinitions(), // ADR-0312: cost-outcome-recorder
     ...thirdPartyIngestJobDefinitions(), // ADR-0302: third-party-evidence-retention-sweep
+    ...browserGovernanceJobDefinitions(), // ADR-0334 B2: browser-prompt-capture-retention-sweep
     ...vendorUsageJobDefinitions({ dataKey: opts.dataKey }), // ADR-0322: vendor-usage-pull-sweep
     ...agentRiskJobDefinitions(), // ADR-0339: agent-risk-recompute-sweep, agent-risk-daily-mark
     ...processAnalyticsJobDefinitions(), // ADR-0342: process-analytics-projector

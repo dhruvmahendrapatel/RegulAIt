@@ -5076,6 +5076,10 @@ export * from "./state-machines.js";
 export * from "./robots.js";
 // ADR-0261 (P37): third-party security telemetry ingest — the DefenseClaw JSONL parser and mapping (pure)
 export * from "./third-party-ingest/index.js";
+// ADR-0334 (lane E16): the managed browser extension's contract (also the `@regulait/shared/browser-governance` subpath)
+export * from "./browser-governance/index.js";
+export { dlpRuleIds, matchDlp } from "./dlp-secret-re2.js";
+
 // ADR-0322: vendor usage/cost pull (catalogue, config and response schemas, normalisers)
 export * from "./vendor-usage.js";
 
