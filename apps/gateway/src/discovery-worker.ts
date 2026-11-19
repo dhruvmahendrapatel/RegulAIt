@@ -379,7 +379,7 @@ export async function failRun(db: Db, run: DiscoveryRunRow, owner: string, code:
 // pseudonyms (ADR-0195 decision 20)
 // ---------------------------------------------------------------------------
 
-async function pseudonymKey(db: Db, dataKey: string): Promise<Buffer> {
+export async function pseudonymKey(db: Db, dataKey: string): Promise<Buffer> {
   const read = async () => (await db.select().from(discoveryPseudonymKeys).limit(1))[0];
   let row = await read();
   if (!row) {

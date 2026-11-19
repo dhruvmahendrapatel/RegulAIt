@@ -227,6 +227,8 @@ export const DISCOVERY_STEP_UP_KEYS = Object.freeze({
   endpointMcpConfig: "discoveryEndpointMcpConfig",
   /** ADR-0337 §4: allowing Google Workspace sources to use the Directory token listing (its scope could revoke tokens) */
   googleDirectoryTokens: "discoveryGoogleDirectoryTokens",
+  /** ADR-0331: turning on the governed removal of flagged MCP servers from endpoints (signed directives) */
+  endpointAddonRemoval: "discoveryEndpointAddonRemoval",
 });
 // revealing a pseudonymised name is NOT a settings relaxation: it is the `pseudonym_reveal` step-up kind
 

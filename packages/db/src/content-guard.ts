@@ -113,6 +113,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.thirdPartyIngestSources, ["name"]],
   // ADR-0303: a SIEM destination an admin names
   [s.siemDestinations, ["name"]],
+  // ADR-0322: an operator-typed vendor usage connector name (a pasted vendor key here would be refused)
+  [s.vendorUsageConnectors, ["name"]],
   [s.engineRunners, ["name"]],
   [s.executors, ["name"]],
   [s.externalScorers, ["name"]],
@@ -132,6 +134,11 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.automationRules, ["name"]],
   [s.policySimulations, ["policyName"]],
   [s.rateCards, ["name", "description"]],
+  // ADR-0327 addendum: a decision table's name is typed by an administrator
+  [s.decisionTables, ["name"]],
+  // ADR-0331: the server name an admin types to narrow a removal; refused when credential-shaped (such a name is
+  // stored as "(unnamed)" in the evidence and could never match anyway)
+  [s.endpointAddonRemovals, ["serverName"]],
 ];
 
 export type ContentGuardExclusion =
@@ -204,10 +211,15 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   "redteam_runs.agent_name": "platform_copy",
   "redteam_runs.library_name": "platform_copy",
   "rule_step_suggestions.step_name": "platform_copy",
+  // ADR-0327 addendum: names an existing trace span (`trace_spans.name`, machine) and must equal it exactly to bind the
+  // table to that step; refusing it would make the step unbindable, not stop a paste
+  "decision_tables.step_name": "platform_copy",
   "scheduler_runs.job_name": "platform_copy",
   "use_case_decision_records.intake_template_name": "platform_copy",
   "cert_inventory.common_name": "ingested",
   "endpoint_mcp_servers.server_name": "ingested",
+  // ADR-0331: the target's point-in-time copy of endpoint_mcp_servers.server_name (ingested above)
+  "endpoint_addon_removal_targets.server_name": "platform_copy",
   "imported_cost_lines.description": "ingested",
   "infra_resources.name": "ingested",
   "mcp_registry_entries.description": "ingested",

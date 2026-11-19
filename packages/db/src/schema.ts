@@ -165,11 +165,16 @@ import {
   AGENT_RISK_PROOF_OUTCOMES,
   AGENT_RISK_PROOF_TRIGGERS,
   type ModalitySplit,
+  // ADR-0322: the vendor usage pull run states, declared with their machine (ADR-0348)
+  VENDOR_USAGE_PULL_RUN_STATUSES,
   // ADR-0346 (migration fairness_evaluation): the fairness-evaluation vocabularies, in lockstep with the CHECKs
   FAIRNESS_DATASET_KINDS,
   FAIRNESS_RUN_MODES,
   FAIRNESS_BREACH_REVIEW_STATUSES,
   FAIRNESS_EVALUATION_STATUSES,
+  // ADR-0331 (migration endpoint_addon_removal): the removal and target lifecycles, ADR-0348 machines
+  ENDPOINT_ADDON_REMOVAL_STATES,
+  ENDPOINT_ADDON_TARGET_STATES,
 } from "@regulait/shared";
 import {
   type AnyPgColumn,
@@ -2009,6 +2014,12 @@ export const auditLog = pgTable(
         // ADR-0303: a SIEM destination (created, enabled, disabled, secret rotated, dead-lettered, recovered). Plain
         // text column — no DDL.
         "siem_destination",
+        // ADR-0322: the vendor usage pull policy, a connector (created, configured, enabled, disabled), its credential
+        // (stored, replaced, revoked; never the secret) and each pull run. Plain text column — no DDL.
+        "vendor_usage_pull_policy",
+        "vendor_usage_connector",
+        "vendor_usage_credential",
+        "vendor_usage_pull_run",
         // ADR-0312: the cost-per-outcome recorder ran (manual refresh) and an admin read the outcome roll-up. Plain
         // text column — no DDL.
         "cost_outcome",
@@ -2025,8 +2036,20 @@ export const auditLog = pgTable(
         "trust_publication",
         "trust_center",
         "auditor_grant",
+        // ADR-0334 (lane E16): browser governance settings, site rules, enrolment tokens, devices and the breach
+        // events and prompt captures an extension reports. Plain text column — no DDL.
+        "browser_governance",
+        // ADR-0331: a governed add-on removal (created, cancelled; objectId = the removal). Plain text column — no DDL.
+        "endpoint_addon_removal",
         // ADR-0310 (G2): a signed managed-settings bundle export (objectId = the bundle). Plain text column — no DDL.
         "managed_settings_bundle",
+        // ADR-0327 addendum: a decision table (objectId = the table): created, a version proposed for review, and the
+        // reviewer's decision (published, rejected, or approved but stale). Plain text column — no DDL.
+        "decision_table",
+        // ADR-0333 (E15): a detection incident (objectId = the incident) and a detection rule pack change (objectId
+        // null). Plain text column — no DDL.
+        "detection_incident",
+        "detection_rule_pack",
       ],
     })
       .notNull()
@@ -5639,7 +5662,7 @@ export const orgSettings = pgTable(
     check("org_settings_step_up_max_age_seconds_check", sql`${t.stepUpMaxAgeSeconds} BETWEEN 30 AND 900`),
     check(
       "org_settings_step_up_actions_check",
-      sql`jsonb_typeof(${t.stepUpActions}) = 'array' AND ${t.stepUpActions} <@ '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management"]'::jsonb`,
+      sql`jsonb_typeof(${t.stepUpActions}) = 'array' AND ${t.stepUpActions} <@ '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management", "endpoint_remediation"]'::jsonb`,
     ),
     check(
       "org_settings_tool_approval_sensitive_quorum_check",
@@ -8323,6 +8346,8 @@ export const discoverySettings = pgTable(
     /** ADR-0337 §4: whether a Google Workspace entitlement source may use the Directory token listing (off by default;
      * turning it on is a `settings_relax` step-up bound to `discoveryGoogleDirectoryTokens`) */
     googleDirectoryTokensEnabled: boolean("google_directory_tokens_enabled").notNull().default(false),
+    // ADR-0331: the governed removal of flagged MCP servers from endpoints, off (pending migration endpoint_addon_removal)
+    endpointAddonRemovalEnabled: boolean("endpoint_addon_removal_enabled").notNull().default(false),
     version: integer("version").notNull().default(1),
     updatedBy: uuid("updated_by"),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -10381,8 +10406,12 @@ export const costImportBatches = pgTable(
     appliedAt: timestamp("applied_at", { withTimezone: true }),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     revokedByUserId: uuid("revoked_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** ADR-0322: 'file' for an upload (ADR-0069), 'pull' for a scheduled or manual vendor API pull. Either way the
+     * lines are restated vendor documents, basis 'imported'. */
+    origin: text("origin", { enum: ["file", "pull"] }).notNull().default("file"),
   },
   (t) => [
+    check("cost_import_batches_origin_check", sql`${t.origin} IN ('file', 'pull')`),
     index("cost_import_batches_created_idx").on(t.createdAt),
     index("cost_import_batches_status_idx").on(t.status),
     index("cost_import_batches_vendor_idx").on(t.vendor),
@@ -10462,8 +10491,18 @@ export const importedCostLines = pgTable(
     supersededByLineId: uuid("superseded_by_line_id"),
     supersededRunId: uuid("superseded_run_id"),
     supersededReason: text("superseded_reason"),
+    // --- ADR-0322: pulled lines ---------------------------------------------------------------------------------
+    // A pulled line names its connector and the vendor's own fact identity; the partial unique index below makes a
+    // re-pull of the same window an upsert rather than a second copy. `overlaps_metered` marks spend the vendor
+    // billed to a key, project or workspace the gateway itself holds: that spend is already in `usage_events`, so the
+    // consolidated read excludes the line from the imported side and discloses the exclusion.
+    pullConnectorId: uuid("pull_connector_id").references(() => vendorUsageConnectors.id, { onDelete: "restrict" }),
+    factKey: text("fact_key"),
+    overlapsMetered: boolean("overlaps_metered").notNull().default(false),
   },
   (t) => [
+    check("imported_cost_lines_pull_fact_check", sql`(${t.pullConnectorId} IS NULL) = (${t.factKey} IS NULL)`),
+    uniqueIndex("imported_cost_lines_pull_fact_uq").on(t.pullConnectorId, t.factKey).where(sql`${t.pullConnectorId} IS NOT NULL`),
     index("imported_cost_lines_batch_idx").on(t.batchId),
     index("imported_cost_lines_user_idx").on(t.resolvedUserId, t.periodStart),
     index("imported_cost_lines_period_idx").on(t.periodStart, t.periodEnd),
@@ -13665,7 +13704,7 @@ export const webauthnChallenges = pgTable(
     check("webauthn_challenges_used_check", sql`${t.usedAt} IS NULL OR ${t.usedAt} >= ${t.createdAt}`),
     check(
       "webauthn_challenges_action_kind_check",
-      sql`${t.actionKind} IS NULL OR ${t.actionKind} IN ('approval_decide', 'settings_relax', 'evidence_hold_override', 'break_glass', 'passkey_manage', 'owner_change', 'identity_manage', 'pseudonym_reveal', 'key_management')`,
+      sql`${t.actionKind} IS NULL OR ${t.actionKind} IN ('approval_decide', 'settings_relax', 'evidence_hold_override', 'break_glass', 'passkey_manage', 'owner_change', 'identity_manage', 'pseudonym_reveal', 'key_management', 'endpoint_remediation')`,
     ),
     check(
       "webauthn_challenges_action_digest_check",
@@ -13710,7 +13749,7 @@ export const stepUpGrants = pgTable(
     check("step_up_grants_method_check", sql`${t.method} IN ('passkey', 'totp', 'sso')`),
     check(
       "step_up_grants_action_kind_check",
-      sql`${t.actionKind} IN ('approval_decide', 'settings_relax', 'evidence_hold_override', 'break_glass', 'passkey_manage', 'owner_change', 'identity_manage', 'pseudonym_reveal', 'key_management')`,
+      sql`${t.actionKind} IN ('approval_decide', 'settings_relax', 'evidence_hold_override', 'break_glass', 'passkey_manage', 'owner_change', 'identity_manage', 'pseudonym_reveal', 'key_management', 'endpoint_remediation')`,
     ),
     check("step_up_grants_action_digest_check", sql`${t.actionDigest} ~ '^[0-9a-f]{64}$'`),
     check(
@@ -14796,11 +14835,11 @@ export const workloadIdentities = pgTable(
     unique("workload_identities_engine_runner_uq").on(t.engineRunnerId),
     check(
       "workload_identities_kind_check",
-      sql`${t.kind} IN ('agent', 'builder_agent', 'engine_runner', 'worker_runtime', 'pdp', 'endpoint_agent')`,
+      sql`${t.kind} IN ('agent', 'builder_agent', 'engine_runner', 'worker_runtime', 'pdp', 'endpoint_agent', 'browser_extension')`,
     ),
     check(
       "workload_identities_subject_check",
-      sql`(${t.kind} = 'agent' AND ${t.agentId} IS NOT NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NULL) OR (${t.kind} = 'builder_agent' AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NOT NULL AND ${t.engineRunnerId} IS NULL) OR (${t.kind} = 'engine_runner' AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NOT NULL) OR (${t.kind} IN ('worker_runtime', 'pdp', 'endpoint_agent') AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NULL)`,
+      sql`(${t.kind} = 'agent' AND ${t.agentId} IS NOT NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NULL) OR (${t.kind} = 'builder_agent' AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NOT NULL AND ${t.engineRunnerId} IS NULL) OR (${t.kind} = 'engine_runner' AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NOT NULL) OR (${t.kind} IN ('worker_runtime', 'pdp', 'endpoint_agent', 'browser_extension') AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NULL)`,
     ),
     check(
       "workload_identities_identifier_check",
@@ -16829,6 +16868,151 @@ export const resourceRateReservations = pgTable(
     ),
   ],
 );
+// ===== ADR-0322 (lane E7): opt-in vendor usage/cost pull ===================================================
+
+/** The one org-level switch (singleton row). OFF by default; on is a step-up, audited, refused under air_gapped. */
+export const vendorUsagePullPolicy = pgTable(
+  "vendor_usage_pull_policy",
+  {
+    id: text("id").primaryKey().default("singleton"),
+    enabled: boolean("enabled").notNull().default(false),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [check("vendor_usage_pull_policy_singleton_check", sql`${t.id} = 'singleton'`)],
+);
+
+export const VENDOR_USAGE_VENDORS = ["anthropic", "openai", "github_copilot", "cursor", "openai_codex", "aws_cur"] as const;
+
+/**
+ * One vendor account an admin registered for pulling. Disabled when created.
+ *
+ * 3NF exception, deliberate: `public_config` is a schema-validated configuration document (the vendor's
+ * non-secret settings and the list of vendor key/project/workspace ids the gateway itself uses), validated by
+ * `vendorUsagePublicConfigSchema` in @regulait/shared on every write.
+ */
+export const vendorUsageConnectors = pgTable(
+  "vendor_usage_connectors",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    vendor: text("vendor", { enum: VENDOR_USAGE_VENDORS }).notNull(),
+    name: text("name").notNull(),
+    enabled: boolean("enabled").notNull().default(false),
+    publicConfig: jsonb("public_config").$type<Record<string, unknown>>().notNull().default({}),
+    /** the end of the last window pulled successfully; the next pull resumes here */
+    pulledThrough: timestamp("pulled_through", { withTimezone: true }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "vendor_usage_connectors_vendor_check",
+      sql`${t.vendor} IN ('anthropic', 'openai', 'github_copilot', 'cursor', 'openai_codex', 'aws_cur')`,
+    ),
+    check("vendor_usage_connectors_public_config_check", sql`jsonb_typeof(${t.publicConfig}) = 'object'`),
+    check("vendor_usage_connectors_name_check", sql`char_length(${t.name}) BETWEEN 1 AND 120`),
+    uniqueIndex("vendor_usage_connectors_name_uq").on(sql`lower(${t.name})`),
+  ],
+);
+export type VendorUsageConnectorRow = typeof vendorUsageConnectors.$inferSelect;
+
+/** The vendor key, under the data key. Never returned by any route; destroyed (NULL) on revoke. */
+export const vendorUsageCredentials = pgTable(
+  "vendor_usage_credentials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectorId: uuid("connector_id")
+      .notNull()
+      .references(() => vendorUsageConnectors.id, { onDelete: "cascade" }),
+    /** a data-key envelope (CIPHERTEXT_COLUMNS); never returned by any route, destroyed on revoke */
+    secretCiphertext: text("secret_ciphertext"),
+    scopePosture: text("scope_posture", { enum: ["read_only", "write_capable", "unverified"] }).notNull(),
+    writeCapableAcknowledgedAt: timestamp("write_capable_acknowledged_at", { withTimezone: true }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: uuid("revoked_by").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    check("vendor_usage_credentials_scope_check", sql`${t.scopePosture} IN ('read_only', 'write_capable', 'unverified')`),
+    check(
+      "vendor_usage_credentials_ack_check",
+      sql`${t.scopePosture} <> 'write_capable' OR ${t.writeCapableAcknowledgedAt} IS NOT NULL`,
+    ),
+    check("vendor_usage_credentials_live_secret_check", sql`${t.revokedAt} IS NOT NULL OR ${t.secretCiphertext} IS NOT NULL`),
+    check("vendor_usage_credentials_revoked_check", sql`${t.revokedAt} IS NULL OR ${t.secretCiphertext} IS NULL`),
+    uniqueIndex("vendor_usage_credentials_live_uq").on(t.connectorId).where(sql`${t.revokedAt} IS NULL`),
+  ],
+);
+
+export const VENDOR_USAGE_PULL_ERROR_CODES = [
+  "disabled",
+  "air_gapped",
+  "no_credential",
+  "data_key_unavailable",
+  "egress_refused",
+  "unauthorized",
+  "forbidden",
+  "rate_limited",
+  "http_error",
+  "bad_response",
+  "response_too_large",
+  "network_error",
+  "page_limit",
+  "scan_blocked",
+  "internal",
+  // a second pull of a connector refused while another is still running (#861 review)
+  "in_progress",
+] as const;
+
+/**
+ * The pull run ledger, open-first like `scheduler_runs`. An error is a fixed code plus RegulAIt-authored detail,
+ * never vendor response text, so no third-party bytes (and no echoed key) can land here.
+ */
+export const vendorUsagePullRuns = pgTable(
+  "vendor_usage_pull_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectorId: uuid("connector_id")
+      .notNull()
+      .references(() => vendorUsageConnectors.id, { onDelete: "cascade" }),
+    trigger: text("trigger", { enum: ["schedule", "manual"] }).notNull(),
+    // the lifecycle (initial states, transitions) is VENDOR_USAGE_PULL_RUN_MACHINE in @regulait/shared (ADR-0348)
+    status: text("status", { enum: VENDOR_USAGE_PULL_RUN_STATUSES }).notNull().default("running"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    windowStart: timestamp("window_start", { withTimezone: true }),
+    windowEnd: timestamp("window_end", { withTimezone: true }),
+    batchId: uuid("batch_id").references(() => costImportBatches.id, { onDelete: "set null" }),
+    pages: integer("pages").notNull().default(0),
+    linesUpserted: integer("lines_upserted").notNull().default(0),
+    overlapLines: integer("overlap_lines").notNull().default(0),
+    errorCode: text("error_code", { enum: VENDOR_USAGE_PULL_ERROR_CODES }),
+    errorDetail: text("error_detail"),
+    requestedBy: uuid("requested_by").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    check("vendor_usage_pull_runs_trigger_check", sql`${t.trigger} IN ('schedule', 'manual')`),
+    check("vendor_usage_pull_runs_status_check", sql`${t.status} IN ('running', 'succeeded', 'failed', 'refused')`),
+    check(
+      "vendor_usage_pull_runs_error_code_check",
+      sql`${t.errorCode} IS NULL OR ${t.errorCode} IN ('disabled', 'air_gapped', 'no_credential', 'data_key_unavailable', 'egress_refused', 'unauthorized', 'forbidden', 'rate_limited', 'http_error', 'bad_response', 'response_too_large', 'network_error', 'page_limit', 'scan_blocked', 'internal')`,
+    ),
+    check(
+      "vendor_usage_pull_runs_error_detail_check",
+      sql`${t.errorDetail} IS NULL OR char_length(${t.errorDetail}) <= 500`,
+    ),
+    check(
+      "vendor_usage_pull_runs_outcome_check",
+      // two comparisons, not a value list: the one value-list CHECK on status is the ADR-0348 machine's
+      sql`(${t.status} <> 'failed' AND ${t.status} <> 'refused') = (${t.errorCode} IS NULL)`,
+    ),
+    index("vendor_usage_pull_runs_connector_idx").on(t.connectorId, t.startedAt),
+  ],
+);
+export type VendorUsagePullRunRow = typeof vendorUsagePullRuns.$inferSelect;
+// ===== end ADR-0322 =================================================================================================
 // ===== ADR-0312 (lane E2, G3): cost per outcome ======================================================================
 /**
  * ADR-0312 (migration `pending/cost_outcomes.sql`, numbered at merge) — THE OUTCOME LEDGER. One row per outcome the
@@ -16965,6 +17149,337 @@ export const agentRegistryRecords = pgTable(
   ],
 );
 
+
+// ===== ADR-0334 (lane E16): managed browser extension governance ============================================
+// Migration `pending/browser_governance.sql`. Off until an admin enables it (a `settings_relax` step-up, audited).
+// Single-tenant deployment: like the other register tables (0281 header), no tenant column. Row-level security is
+// FORCED on all seven tables (#867 review): admins, `system_task` and migrations see every row; an extension's request
+// (`credential_request`) reads the settings, rules and tokens and reaches only its own device row and evidence.
+export const BROWSER_GOVERNANCE_MODES = ["enforce", "audit"] as const;
+/** how an evidence row's person was established (#867 review); identity-provider verification is a follow-up */
+export const BROWSER_ATTRIBUTIONS = ["device_asserted"] as const;
+/** the transaction-local setting the gateway sets to the authenticated extension's workload identity (RLS) */
+export const BROWSER_IDENTITY_SETTING = "regulait.browser_identity_id";
+
+/** The one settings row (id = 1). Every column defaults to the strict value (ADR-0180). */
+export const browserGovernanceSettings = pgTable(
+  "browser_governance_settings",
+  {
+    id: smallint("id").primaryKey().default(1),
+    enabled: boolean("enabled").notNull().default(false),
+    /** `audit` (decide and record, never block) is a relaxation of `enforce` */
+    mode: text("mode", { enum: BROWSER_GOVERNANCE_MODES }).notNull().default("enforce"),
+    promptCaptureEnabled: boolean("prompt_capture_enabled").notNull().default(false),
+    /** owner decision B2: captured prompts older than this are deleted by the retention sweep; longer is a step-up */
+    promptCaptureRetentionDays: integer("prompt_capture_retention_days").notNull().default(30),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [check("browser_governance_settings_singleton", sql`${t.id} = 1`)],
+);
+export type BrowserGovernanceSettingsRow = typeof browserGovernanceSettings.$inferSelect;
+
+/** An admin's decision for one catalogue site. A site with no row is denied (`no_site_rule`). */
+export const browserSiteRules = pgTable("browser_site_rules", {
+  /** a BROWSER_SITE_CATALOGUE_IDS value (a CHECK holds the list) */
+  siteId: text("site_id").primaryKey(),
+  decision: text("decision", { enum: ["allow", "deny"] }).notNull(),
+  setBy: uuid("set_by").references(() => users.id, { onDelete: "set null" }),
+  setAt: timestamp("set_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** The account domains one site requires the browser profile to be signed in with (a join table, ADR-0200 3NF). */
+export const browserSiteAccountDomains = pgTable(
+  "browser_site_account_domains",
+  {
+    siteId: text("site_id")
+      .notNull()
+      .references(() => browserSiteRules.siteId, { onDelete: "cascade" }),
+    domain: text("domain").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.siteId, t.domain] })],
+);
+
+/** A capped bulk enrolment token (`rgbe_`), delivered in the extension's managed storage; only its SHA-256 is kept. */
+export const browserEnrolmentTokens = pgTable(
+  "browser_enrolment_tokens",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    label: text("label").notNull(),
+    tokenHash: text("token_hash").notNull(),
+    deviceCap: integer("device_cap").notNull(),
+    /** a deliberate counter (ADR-0200 exception): the cap is enforced under this row's FOR UPDATE lock, and it counts
+     * every registration ever made, revoked devices included, which a count of `browser_devices` rows would not */
+    devicesEnrolled: integer("devices_enrolled").notNull().default(0),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("browser_enrolment_tokens_hash_uq").on(t.tokenHash)],
+);
+export type BrowserEnrolmentTokenRow = typeof browserEnrolmentTokens.$inferSelect;
+
+/**
+ * One installed extension. Its key and tokens are its workload identity's (kind `browser_extension`, bound through
+ * S6's one-key-one-identity path): this row adds only what the device is and which token enrolled it. Devices are
+ * revoked, never deleted, so the evidence rows below always name one.
+ */
+export const browserDevices = pgTable(
+  "browser_devices",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tokenId: uuid("token_id")
+      .notNull()
+      .references(() => browserEnrolmentTokens.id, { onDelete: "restrict" }),
+    identityId: uuid("identity_id")
+      .notNull()
+      .references(() => workloadIdentities.id, { onDelete: "restrict" }),
+    os: text("os").notNull(),
+    browserMajor: integer("browser_major").notNull(),
+    extensionVersion: text("extension_version").notNull(),
+    registeredAt: timestamp("registered_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: uuid("revoked_by").references(() => users.id, { onDelete: "set null" }),
+    /** #867 review: the first profile account the device presented, as its keyed pseudonym (point-in-time evidence,
+     * ADR-0200 exception); every later request must present the same account */
+    boundSubject: text("bound_subject"),
+    /** the person that account matched when the device was bound (null: it matched nobody, owner decision B1) */
+    boundUserId: uuid("bound_user_id").references(() => users.id, { onDelete: "set null" }),
+    boundAt: timestamp("bound_at", { withTimezone: true }),
+  },
+  (t) => [uniqueIndex("browser_devices_identity_uq").on(t.identityId), index("browser_devices_token_idx").on(t.tokenId)],
+);
+export type BrowserDeviceRow = typeof browserDevices.$inferSelect;
+
+/**
+ * One policy breach reported by an extension. APPEND-ONLY EVIDENCE (a trigger refuses UPDATE, DELETE and TRUNCATE).
+ * Point-in-time attribution, the ADR-0200 evidence exception: `user_id` is the person the profile account matched
+ * when the event arrived, `subject_pseudonym` the keyed hash of that account, `conversation_ref` the keyed hash of
+ * the site and path, and `rule_ids` the dlp.secret.* ids that matched (code constants, not references). No prompt
+ * text, path or account name is stored.
+ */
+export const browserEvents = pgTable(
+  "browser_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => browserDevices.id, { onDelete: "restrict" }),
+    eventId: uuid("event_id").notNull(),
+    kind: text("kind").notNull(),
+    outcome: text("outcome").notNull(),
+    code: text("code").notNull(),
+    siteId: text("site_id").notNull(),
+    ruleIds: text("rule_ids").array().notNull(),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
+    subjectPseudonym: text("subject_pseudonym").notNull(),
+    conversationRef: text("conversation_ref"),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+    /** the audit-chain row of the batch this event arrived in (`audit_log` carries no FKs by design) */
+    auditId: uuid("audit_id").notNull(),
+    /** how the person was established: `device_asserted` (the device's bound profile account) is the only kind yet */
+    attribution: text("attribution", { enum: BROWSER_ATTRIBUTIONS }).notNull().default("device_asserted"),
+  },
+  (t) => [
+    uniqueIndex("browser_events_device_event_uq").on(t.deviceId, t.eventId),
+    index("browser_events_received_idx").on(t.receivedAt),
+    index("browser_events_user_idx").on(t.userId, t.receivedAt),
+  ],
+);
+export type BrowserEventRow = typeof browserEvents.$inferSelect;
+
+/**
+ * One captured prompt, only while an admin has turned prompt capture on (a step-up relaxation, audited) and the
+ * extension shows its notice. APPEND-ONLY EVIDENCE, text enveloped under REGULAIT_DATA_KEY. Point-in-time attribution
+ * as for `browser_events`.
+ */
+export const browserPromptCaptures = pgTable(
+  "browser_prompt_captures",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => browserDevices.id, { onDelete: "restrict" }),
+    captureId: uuid("capture_id").notNull(),
+    siteId: text("site_id").notNull(),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
+    subjectPseudonym: text("subject_pseudonym").notNull(),
+    conversationRef: text("conversation_ref").notNull(),
+    textCiphertext: text("text_ciphertext").notNull(),
+    textChars: integer("text_chars").notNull(),
+    capturedAt: timestamp("captured_at", { withTimezone: true }).notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+    auditId: uuid("audit_id").notNull(),
+    attribution: text("attribution", { enum: BROWSER_ATTRIBUTIONS }).notNull().default("device_asserted"),
+  },
+  (t) => [uniqueIndex("browser_prompt_captures_device_capture_uq").on(t.deviceId, t.captureId), index("browser_prompt_captures_received_idx").on(t.receivedAt)],
+);
+// ===== end ADR-0334 =================================================================================================
+
+// ===== ADR-0331 (lane E13) governed add-on removal ==============================================================
+// Pending migration endpoint_addon_removal (ADR-0252). An admin, with an `endpoint_remediation` step-up, asks for one MCP
+// server identity to be removed from endpoints; the targets are resolved once, at creation, from `endpoint_mcp_servers`
+// evidence; each target is one signed directive the endpoint agent fetches and reports an outcome for. Off by default
+// (`discovery_settings.endpoint_addon_removal_enabled`), and inert until the ADR-0195 SD4 directive signer exists.
+
+export const ENDPOINT_ADDON_REMOVAL_ACTIONS = ["remove_mcp_server"] as const;
+export const ENDPOINT_ADDON_REMOVAL_SCOPES = ["device", "devices", "recent"] as const;
+/** the user-writable config roots a removal may target; `system_applications` never is (ADR-0331 §3) */
+export const ENDPOINT_ADDON_REMOVAL_ROOTS = ["home", "appdata", "localappdata"] as const;
+/** the target lifecycle is ADR-0348's `ENDPOINT_ADDON_TARGET_MACHINE` (@regulait/shared): every status write guards with
+ * `whereFrom(…, event)`, so no route decides a transition by itself */
+export const ENDPOINT_ADDON_TARGET_STATUSES = ENDPOINT_ADDON_TARGET_STATES;
+export type EndpointAddonTargetStatus = (typeof ENDPOINT_ADDON_TARGET_STATUSES)[number];
+/** the removal lifecycle is ADR-0348's `ENDPOINT_ADDON_REMOVAL_MACHINE`: nothing is sent until a second person approves */
+export const ENDPOINT_ADDON_REMOVAL_STATUSES = ENDPOINT_ADDON_REMOVAL_STATES;
+export type EndpointAddonRemovalStatus = (typeof ENDPOINT_ADDON_REMOVAL_STATUSES)[number];
+/** ADR-0331 §7: each outcome and the closed codes it may carry (the agent's `contract.OutcomeCodes`) */
+export const ENDPOINT_DIRECTIVE_OUTCOME_CODES = {
+  removed: ["removed"],
+  nothing_to_remove: ["not_present", "identity_differs"],
+  failed: ["not_in_manifest", "path_refused", "unsupported_format", "parse_failed", "write_failed", "expired", "wrong_identity"],
+} as const;
+
+/** one admin-started removal of one MCP server identity (the request; its targets are the endpoints it resolved to) */
+export const endpointAddonRemovals = pgTable(
+  "endpoint_addon_removals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    action: text("action", { enum: ENDPOINT_ADDON_REMOVAL_ACTIONS }).notNull().default("remove_mcp_server"),
+    identityKind: text("identity_kind", { enum: ENDPOINT_MCP_LINK_IDENTITY_KINDS }).notNull(),
+    identity: text("identity").notNull(),
+    packageVersion: text("package_version"),
+    serverName: text("server_name"),
+    scopeKind: text("scope_kind", { enum: ENDPOINT_ADDON_REMOVAL_SCOPES }).notNull(),
+    /** the look-back of a `recent` scope, in days; null for the other scopes */
+    scopeDays: integer("scope_days"),
+    blockReinstall: boolean("block_reinstall").notNull().default(true),
+    reason: text("reason").notNull(),
+    /** every directive of this removal is valid until here: created_at + 7 days (ADR-0331 §4) */
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    /** ADR-0348 `ENDPOINT_ADDON_REMOVAL_MACHINE` */
+    status: text("status", { enum: ENDPOINT_ADDON_REMOVAL_STATUSES }).notNull().default("awaiting_approval"),
+    /** the ADR-0186 approval a second administrator decides; its arguments digest binds the request and the resolved
+     * target set, and its decision (who, when) lives on that row, not here */
+    approvalId: uuid("approval_id")
+      .notNull()
+      .unique("endpoint_addon_removals_approval_uq")
+      .references(() => approvals.id, { onDelete: "restrict" }),
+    cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+    cancelledBy: uuid("cancelled_by").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    check("endpoint_addon_removals_status_check", sql`${t.status} IN ('awaiting_approval', 'active', 'denied', 'stale', 'cancelled')`),
+    check("endpoint_addon_removals_cancelled_check", sql`(${t.status} = 'cancelled') = (${t.cancelledAt} IS NOT NULL)`),
+    check("endpoint_addon_removals_action_check", sql`${t.action} IN ('remove_mcp_server')`),
+    check(
+      "endpoint_addon_removals_identity_check",
+      sql`${t.identityKind} IN ('package', 'host', 'command') AND char_length(${t.identity}) BETWEEN 1 AND 255
+        AND (${t.packageVersion} IS NULL OR char_length(${t.packageVersion}) BETWEEN 1 AND 64)
+        AND (${t.serverName} IS NULL OR ${t.serverName} ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')`,
+    ),
+    check(
+      "endpoint_addon_removals_scope_check",
+      sql`${t.scopeKind} IN ('device', 'devices', 'recent') AND (${t.scopeKind} = 'recent') = (${t.scopeDays} IS NOT NULL)
+        AND (${t.scopeDays} IS NULL OR ${t.scopeDays} BETWEEN 1 AND 90)`,
+    ),
+    check("endpoint_addon_removals_reason_check", sql`char_length(${t.reason}) BETWEEN 1 AND 500`),
+    check("endpoint_addon_removals_expiry_check", sql`${t.expiresAt} = ${t.createdAt} + interval '7 days'`),
+    check(
+      "endpoint_addon_removals_cancel_check",
+      sql`(${t.cancelledAt} IS NULL OR ${t.cancelledAt} >= ${t.createdAt}) AND (${t.cancelledBy} IS NULL OR ${t.cancelledAt} IS NOT NULL)`,
+    ),
+    index("endpoint_addon_removals_created_idx").on(t.createdAt),
+    index("endpoint_addon_removals_identity_idx").on(t.identityKind, t.identity),
+    index("endpoint_addon_removals_status_idx").on(t.status, t.expiresAt),
+  ],
+);
+export type EndpointAddonRemovalRow = typeof endpointAddonRemovals.$inferSelect;
+
+/** the devices a `device` or `devices` scope names (a list of references is a join table, ADR-0200 addendum); the
+ * approval re-resolves the targets from them, so what is approved is what is sent */
+export const endpointAddonRemovalDevices = pgTable(
+  "endpoint_addon_removal_devices",
+  {
+    removalId: uuid("removal_id")
+      .notNull()
+      .references(() => endpointAddonRemovals.id, { onDelete: "cascade" }),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => endpointDevices.id, { onDelete: "cascade" }),
+  },
+  (t) => [primaryKey({ columns: [t.removalId, t.deviceId], name: "endpoint_addon_removal_devices_pk" }), index("endpoint_addon_removal_devices_device_idx").on(t.deviceId)],
+);
+
+/**
+ * one endpoint config entry a removal resolved to; its id is the signed directive's `directiveId`. It is bound to the
+ * agent identity (one device user) whose signed report last showed the entry: config paths are relative to that user's
+ * home, so only that identity's agent is served the directive or may report its outcome. 3NF: the device is reached
+ * through the identity (`endpoint_agent_identities.device_id`), not copied here.
+ */
+export const endpointAddonRemovalTargets = pgTable(
+  "endpoint_addon_removal_targets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    removalId: uuid("removal_id")
+      .notNull()
+      .references(() => endpointAddonRemovals.id, { onDelete: "cascade" }),
+    identityId: uuid("identity_id")
+      .notNull()
+      .references(() => endpointAgentIdentities.identityId, { onDelete: "cascade" }),
+    // exception (ADR-0200 addendum): point-in-time evidence copies of the `endpoint_mcp_servers` row the target was
+    // resolved from (that row is refreshed or pruned by later reports; the directive must name what was seen)
+    signatureId: text("signature_id").notNull(),
+    provider: text("provider").notNull(),
+    configRoot: text("config_root", { enum: ENDPOINT_ADDON_REMOVAL_ROOTS }).notNull(),
+    configPath: text("config_path").notNull(),
+    serverName: text("server_name").notNull(),
+    status: text("status", { enum: ENDPOINT_ADDON_TARGET_STATUSES }).notNull().default("pending"),
+    code: text("code"),
+    notified: boolean("notified"),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    reportedAt: timestamp("reported_at", { withTimezone: true }),
+  },
+  (t) => [
+    unique("endpoint_addon_removal_targets_entry_uq").on(t.removalId, t.identityId, t.configRoot, t.configPath, t.serverName),
+    index("endpoint_addon_removal_targets_identity_idx").on(t.identityId, t.status),
+    check(
+      "endpoint_addon_removal_targets_shape_check",
+      sql`char_length(${t.signatureId}) BETWEEN 1 AND 128 AND char_length(${t.provider}) BETWEEN 1 AND 64
+        AND ${t.configRoot} IN ('home', 'appdata', 'localappdata') AND char_length(${t.configPath}) BETWEEN 1 AND 1024
+        AND ${t.serverName} ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'`,
+    ),
+    // the one CHECK listing the states (ADR-0348: it equals ENDPOINT_ADDON_TARGET_MACHINE's states)
+    check(
+      "endpoint_addon_removal_targets_status_check",
+      sql`${t.status} IN ('pending', 'delivered', 'removed', 'nothing_to_remove', 'failed', 'cancelled')`,
+    ),
+    // what each state carries; codes are ORs, not IN, so this is not a second state list for the ADR-0348 test
+    check(
+      "endpoint_addon_removal_targets_evidence_check",
+      sql`CASE ${t.status}
+        WHEN 'pending' THEN ${t.deliveredAt} IS NULL AND ${t.reportedAt} IS NULL AND ${t.code} IS NULL AND ${t.notified} IS NULL
+        WHEN 'delivered' THEN ${t.deliveredAt} IS NOT NULL AND ${t.reportedAt} IS NULL AND ${t.code} IS NULL AND ${t.notified} IS NULL
+        WHEN 'cancelled' THEN ${t.deliveredAt} IS NULL AND ${t.reportedAt} IS NULL AND ${t.code} IS NULL AND ${t.notified} IS NULL
+        WHEN 'removed' THEN ${t.code} = 'removed'
+          AND ${t.deliveredAt} IS NOT NULL AND ${t.reportedAt} IS NOT NULL AND ${t.notified} IS NOT NULL
+        WHEN 'nothing_to_remove' THEN (${t.code} = 'not_present' OR ${t.code} = 'identity_differs')
+          AND ${t.deliveredAt} IS NOT NULL AND ${t.reportedAt} IS NOT NULL AND ${t.notified} IS NOT NULL
+        WHEN 'failed' THEN (${t.code} = 'not_in_manifest' OR ${t.code} = 'path_refused' OR ${t.code} = 'unsupported_format'
+            OR ${t.code} = 'parse_failed' OR ${t.code} = 'write_failed' OR ${t.code} = 'expired' OR ${t.code} = 'wrong_identity')
+          AND ${t.deliveredAt} IS NOT NULL AND ${t.reportedAt} IS NOT NULL AND ${t.notified} IS NOT NULL
+        ELSE false END`,
+    ),
+    check("endpoint_addon_removal_targets_times_check", sql`${t.reportedAt} IS NULL OR ${t.reportedAt} >= ${t.deliveredAt}`),
+  ],
+);
+export type EndpointAddonRemovalTargetRow = typeof endpointAddonRemovalTargets.$inferSelect;
+// ===== end ADR-0331 ====================================================================================================
 
 // ---------------------------------------------------------------------------
 // ADR-0289 (builder lane L6) — the PM project / work-item importer (ADR-0054 §3).
@@ -17570,6 +18085,95 @@ export const agentRiskLatest = pgTable(
 );
 // ===== end ADR-0339 =====
 
+// ===== ADR-0339 slice 2 (lane E20) — author vs runner, non-human identity links =====
+// Migration `pending/agent_identity_links.sql` (numbered at merge). ADR-0234: `agent_identity_links` is actor-stamped
+// (`decided_by_user_id`), `agent_authorship` deployment-wide; no row policy, admin or owner routes only.
+import {
+  AGENT_AUTHOR_SOURCES as AGENT_AUTHOR_SOURCES_E20,
+  AGENT_NHI_KINDS as AGENT_NHI_KINDS_E20,
+  AGENT_NHI_LINK_SOURCES as AGENT_NHI_LINK_SOURCES_E20,
+  AGENT_NHI_LINK_STATUSES as AGENT_NHI_LINK_STATUSES_E20,
+  AGENT_NHI_PROVIDERS as AGENT_NHI_PROVIDERS_E20,
+} from "@regulait/shared";
+
+/**
+ * Who built an agent: one row per agent, written by the insert trigger in the creating transaction and never
+ * rewritten (UPDATE refused except the SET NULL of a deleted author; DELETE only with the agent). Agents that existed
+ * before are `unknown`: an author is never guessed.
+ */
+export const agentAuthorship = pgTable(
+  "agent_authorship",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    builderAgentId: uuid("builder_agent_id").references(() => builderAgents.id, { onDelete: "cascade" }),
+    authorUserId: uuid("author_user_id").references(() => users.id, { onDelete: "set null" }),
+    source: text("source", { enum: AGENT_AUTHOR_SOURCES_E20 }).notNull(),
+    /** an imported agent's vendor-side creator, as the import's pseudonym (never a name) */
+    vendorCreatorPseudonym: text("vendor_creator_pseudonym"),
+    recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("agent_authorship_subject_check", sql`num_nonnulls(${t.agentId}, ${t.builderAgentId}) = 1`),
+    check("agent_authorship_source_check", sql`${t.source} IN ('principal', 'builder_owner', 'vendor_record', 'unknown')`),
+    check("agent_authorship_unknown_check", sql`${t.source} <> 'unknown' OR ${t.authorUserId} IS NULL`),
+    check(
+      "agent_authorship_vendor_check",
+      sql`(${t.source} = 'vendor_record') = (${t.vendorCreatorPseudonym} IS NOT NULL) AND (${t.vendorCreatorPseudonym} IS NULL OR length(${t.vendorCreatorPseudonym}) BETWEEN 1 AND 128)`,
+    ),
+    uniqueIndex("agent_authorship_agent_uq").on(t.agentId).where(sql`${t.agentId} IS NOT NULL`),
+    uniqueIndex("agent_authorship_builder_uq").on(t.builderAgentId).where(sql`${t.builderAgentId} IS NOT NULL`),
+    index("agent_authorship_author_idx").on(t.authorUserId),
+  ],
+);
+export type AgentAuthorshipRow = typeof agentAuthorship.$inferSelect;
+
+/** an agent's cloud service account, vendor agent identity or OAuth client: staged, then confirmed by a second admin */
+export const agentIdentityLinks = pgTable(
+  "agent_identity_links",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    builderAgentId: uuid("builder_agent_id").references(() => builderAgents.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: AGENT_NHI_KINDS_E20 }).notNull(),
+    provider: text("provider", { enum: AGENT_NHI_PROVIDERS_E20 }).notNull(),
+    externalId: text("external_id").notNull(),
+    status: text("status", { enum: AGENT_NHI_LINK_STATUSES_E20 }).notNull().default("staged"),
+    source: text("source", { enum: AGENT_NHI_LINK_SOURCES_E20 }).notNull(),
+    note: text("note"),
+    stagedByUserId: uuid("staged_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    stagedAt: timestamp("staged_at", { withTimezone: true }).notNull().defaultNow(),
+    decidedByUserId: uuid("decided_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    decisionNote: text("decision_note"),
+  },
+  (t) => [
+    check("agent_identity_links_subject_check", sql`num_nonnulls(${t.agentId}, ${t.builderAgentId}) = 1`),
+    check("agent_identity_links_kind_check", sql`${t.kind} IN ('cloud_service_account', 'vendor_agent_identity', 'oauth_client')`),
+    check("agent_identity_links_provider_check", sql`${t.provider} IN ('aws', 'azure', 'gcp', 'entra', 'okta', 'other')`),
+    check("agent_identity_links_status_check", sql`${t.status} IN ('staged', 'confirmed', 'rejected')`),
+    check("agent_identity_links_source_check", sql`${t.source} IN ('admin', 'importer')`),
+    check("agent_identity_links_external_id_check", sql`length(${t.externalId}) BETWEEN 1 AND 1024`),
+    check(
+      "agent_identity_links_notes_check",
+      sql`(${t.note} IS NULL OR length(${t.note}) <= 500) AND (${t.decisionNote} IS NULL OR length(${t.decisionNote}) <= 500)`,
+    ),
+    check("agent_identity_links_decided_check", sql`(${t.status} = 'staged') = (${t.decidedAt} IS NULL)`),
+    check(
+      "agent_identity_links_four_eyes_check",
+      sql`${t.decidedByUserId} IS NULL OR ${t.stagedByUserId} IS NULL OR ${t.decidedByUserId} <> ${t.stagedByUserId}`,
+    ),
+    uniqueIndex("agent_identity_links_agent_uq")
+      .on(t.agentId, t.provider, t.externalId)
+      .where(sql`${t.agentId} IS NOT NULL`),
+    uniqueIndex("agent_identity_links_builder_uq")
+      .on(t.builderAgentId, t.provider, t.externalId)
+      .where(sql`${t.builderAgentId} IS NOT NULL`),
+    index("agent_identity_links_external_idx").on(t.provider, t.externalId),
+  ],
+);
+export type AgentIdentityLinkRow = typeof agentIdentityLinks.$inferSelect;
+// ===== end ADR-0339 slice 2 =====
 // ===== ADR-0342 (lane E23): process analytics read model =====
 // A MEASURED READ MODEL (ADR-0200 addendum). Source of truth: `workflow_events` (the append-only per-instance history)
 // replayed through the pure workflow kernel against the instance's snapshotted definition. The projector
@@ -17746,6 +18350,84 @@ export const workflowTemplateVersions = pgTable(
 );
 export type WorkflowTemplateVersionRow = typeof workflowTemplateVersions.$inferSelect;
 // ===== end ADR-0341 =====
+
+// ---------------------------------------------------------------------------
+// ADR-0327 addendum (lane E12, migration `decision_tables`) — business-authored decision tables. A table is bound to one
+// AI step (agent + span name, the rule-step suggestion key) and compiles to the same exact-match rule
+// (`compileDecisionTable` → `InducedRule`). Versions are immutable; a version is published only when its named reviewer
+// approves it in the approvals queue. Written only by `apps/gateway/src/decision-tables.ts`, each write in the same
+// transaction as its audit row.
+// ---------------------------------------------------------------------------
+
+export const decisionTables = pgTable(
+  "decision_tables",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    /** the trace span name that identifies the step within the agent */
+    stepName: text("step_name").notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("decision_tables_name_uq").on(sql`lower(${t.name})`),
+    uniqueIndex("decision_tables_step_uq").on(t.agentId, t.stepName),
+    check("decision_tables_name_check", sql`char_length(${t.name}) BETWEEN 1 AND 120`),
+    check("decision_tables_step_name_check", sql`char_length(${t.stepName}) BETWEEN 1 AND 200`),
+  ],
+);
+export type DecisionTableRow = typeof decisionTables.$inferSelect;
+
+/** the version lifecycle; transitions are declared once in `DECISION_TABLE_VERSION_MACHINE` (`@regulait/shared`, ADR-0348) */
+export const DECISION_TABLE_VERSION_STATUSES = ["pending_review", "published", "superseded", "rejected", "stale"] as const;
+export type DecisionTableVersionStatus = (typeof DECISION_TABLE_VERSION_STATUSES)[number];
+
+export const decisionTableVersions = pgTable(
+  "decision_table_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tableId: uuid("table_id")
+      .notNull()
+      .references(() => decisionTables.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    /** schema-validated configuration document (ADR-0200 exception): `{fields, rows}` as the author wrote it, validated
+     * by the gateway's zod schema and `compileDecisionTable` before insert; immutable once written */
+    body: jsonb("body").notNull(),
+    /** sha256 hex of `canonicalJson(body)`: the approval carries the same digest, and publishing recomputes it and
+     * refuses on a mismatch. A DB trigger freezes body, digest, table, version, base and author after insert. */
+    bodySha256: text("body_sha256").notNull(),
+    /** the published version this one was proposed against (null = none was published) */
+    baseVersion: integer("base_version"),
+    status: text("status", { enum: DECISION_TABLE_VERSION_STATUSES }).notNull().default("pending_review"),
+    authorUserId: uuid("author_user_id").references(() => users.id, { onDelete: "set null" }),
+    reason: text("reason"),
+    approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    decidedBy: uuid("decided_by").references(() => users.id, { onDelete: "set null" }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("decision_table_versions_version_uq").on(t.tableId, t.version),
+    uniqueIndex("decision_table_versions_one_published_uq")
+      .on(t.tableId)
+      .where(sql`${t.status} = 'published'`),
+    uniqueIndex("decision_table_versions_one_pending_uq")
+      .on(t.tableId)
+      .where(sql`${t.status} = 'pending_review'`),
+    index("decision_table_versions_approval_idx").on(t.approvalId),
+    check("decision_table_versions_version_check", sql`${t.version} >= 1`),
+    check("decision_table_versions_body_sha256_check", sql`${t.bodySha256} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "decision_table_versions_status_check",
+      sql`${t.status} IN ('pending_review', 'published', 'superseded', 'rejected', 'stale')`,
+    ),
+    check("decision_table_versions_decided_check", sql`(${t.status} = 'pending_review') = (${t.decidedAt} IS NULL)`),
+  ],
+);
+export type DecisionTableVersionRow = typeof decisionTableVersions.$inferSelect;
 
 // ===== ADR-0345 (lane E26): agent risk / control / proof registry =====
 // The catalogue (risks, OWASP items, controls, proofs) is code in `@regulait/shared` (`AGENT_RISKS`), like ADR-0081's
@@ -18177,3 +18859,166 @@ export type FairnessEvaluationRow = typeof fairnessEvaluations.$inferSelect;
 export type FairnessRunEvidenceRow = typeof fairnessRunEvidence.$inferSelect;
 export type FairnessBreachReviewRow = typeof fairnessBreachReviews.$inferSelect;
 // ===== end ADR-0346 =====
+
+// ===== ADR-0333 (lane E15): rule-based detection of risky agent behaviour =========================================
+export const DETECTION_SEVERITIES = ["low", "medium", "high", "critical"] as const;
+export const DETECTION_INCIDENT_STATUSES = ["open", "acknowledged", "closed"] as const;
+export const DETECTION_RESPONSES = ["alert", "suspend_grant", "revoke_credential", "require_approval"] as const;
+export const DETECTION_RESPONSE_STATES = ["none", "done", "failed"] as const;
+
+/**
+ * An admin-edited detection rule pack, one row per version (the active one is the highest version). The built-in
+ * default pack ships in code and has no row. `pack` is a schema-validated configuration document
+ * (`regulait.detection-pack.v1`, ADR-0200 exception: validated config), signed with the installation's receipt key
+ * over its canonical JSON. The engine verifies the signature on every sweep and falls back to the built-in pack when
+ * it does not verify.
+ */
+export const detectionRulePacks = pgTable(
+  "detection_rule_packs",
+  {
+    version: integer("version").primaryKey(),
+    pack: jsonb("pack").notNull(),
+    packDigest: text("pack_digest").notNull(),
+    /** Ed25519 over the canonical pack JSON, base64url */
+    signature: text("signature").notNull(),
+    keyId: text("key_id")
+      .notNull()
+      .references(() => receiptSigningKeys.keyId),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("detection_rule_packs_version_check", sql`${t.version} >= 1`),
+    check("detection_rule_packs_digest_check", sql`${t.packDigest} ~ '^[0-9a-f]{64}$'`),
+    check("detection_rule_packs_signature_check", sql`${t.signature} ~ '^[A-Za-z0-9_-]{86}$'`),
+  ],
+);
+export type DetectionRulePackRow = typeof detectionRulePacks.$inferSelect;
+
+/** The engine's single cursor over `audit_log.seq`, leased per sweep so two replicas never evaluate the same rows. */
+export const detectionEngineState = pgTable(
+  "detection_engine_state",
+  {
+    id: smallint("id").primaryKey().default(1),
+    cursorSeq: bigint("cursor_seq", { mode: "number" }).notNull(),
+    leaseUntil: timestamp("lease_until", { withTimezone: true }),
+    leaseToken: uuid("lease_token"),
+    lastSweepAt: timestamp("last_sweep_at", { withTimezone: true }),
+    /** the stored pack version last reported as unverified, so the audit row is written once per version */
+    unverifiedPackVersion: integer("unverified_pack_version"),
+    // ADR-0333 D2 (owner, 2026-11-15): the retained history is replayed on first run behind its own checkpoint,
+    // from the first retained row up to the chain head the live cursor started at
+    replayCursorSeq: bigint("replay_cursor_seq", { mode: "number" }).notNull().default(0),
+    replayUntilSeq: bigint("replay_until_seq", { mode: "number" }).notNull().default(0),
+    replayCompletedAt: timestamp("replay_completed_at", { withTimezone: true }),
+  },
+  (t) => [check("detection_engine_state_singleton_check", sql`${t.id} = 1`)],
+);
+
+/**
+ * One detection: a rule matched in one group (`grant:<root grant>`, `user:<user>` or `endpoint:<device>`). One row
+ * per (rule, trigger audit row), so a replayed batch cannot raise it twice. `pack_version` NULL means the built-in
+ * default pack.
+ */
+export const detectionIncidents = pgTable(
+  "detection_incidents",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ruleId: text("rule_id").notNull(),
+    packVersion: integer("pack_version").references(() => detectionRulePacks.version, { onDelete: "restrict" }),
+    // ADR-0200 exception (evidence snapshot): the rule's severity in the signed pack version that raised it. A
+    // later pack may re-grade the rule; the incident keeps the grade it was raised with.
+    severity: text("severity", { enum: DETECTION_SEVERITIES }).notNull(),
+    // ADR-0200 exception (evidence snapshot): the group the rule window ran over (`grant:<root>` / `user:<id>`), as
+    // computed when it matched. A grant's root or a user can be deleted; the incident's group must not change.
+    groupKey: text("group_key").notNull(),
+    // Evidence pointer, deliberately FK-free like `decision_receipts.audit_id`: the audit trail is FK-free and its
+    // retention prune must not be blocked or cascade into incident history.
+    triggerAuditId: uuid("trigger_audit_id").notNull(),
+    // ADR-0200 exception (evidence snapshot): the trigger's chain position, kept because the audit row it points at
+    // may be pruned while the incident is retained. It equals the last evidence row's `audit_seq`, held here so the
+    // (rule, trigger) idempotency key and the incident list need no join.
+    triggerAuditSeq: bigint("trigger_audit_seq", { mode: "number" }).notNull(),
+    // ADR-0200 exception (evidence snapshot): the trigger row's sponsor, grant and identity as foreign keys, set only
+    // while the id resolves (the audit row itself is FK-free and may be pruned); they are the incident's subjects
+    // for row-level security and the slice-2 responses, not a copy of a mutable attribute.
+    userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
+    delegationGrantId: uuid("delegation_grant_id").references(() => delegationGrants.id, { onDelete: "set null" }),
+    actorIdentityId: uuid("actor_identity_id").references(() => workloadIdentities.id, { onDelete: "set null" }),
+    // ADR-0200 exception (evidence snapshot): the trigger row's `actor_chain` as it was when the incident was raised.
+    actorChain: jsonb("actor_chain").$type<string[]>(),
+    /** ADR-0333 D2: raised by the first-run replay of retained history, not live (always alert-only) */
+    historical: boolean("historical").notNull().default(false),
+    status: text("status", { enum: DETECTION_INCIDENT_STATUSES }).notNull().default("open"),
+    statusChangedBy: uuid("status_changed_by").references(() => users.id, { onDelete: "set null" }),
+    statusChangedAt: timestamp("status_changed_at", { withTimezone: true }),
+    response: text("response", { enum: DETECTION_RESPONSES }).notNull().default("alert"),
+    responseState: text("response_state", { enum: DETECTION_RESPONSE_STATES }).notNull().default("none"),
+    responseErrorCode: text("response_error_code"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("detection_incidents_rule_trigger_uq").on(t.ruleId, t.triggerAuditId),
+    index("detection_incidents_status_created_idx").on(t.status, t.createdAt),
+    index("detection_incidents_group_idx").on(t.groupKey, t.createdAt),
+    check("detection_incidents_rule_id_check", sql`${t.ruleId} ~ '^[a-z0-9][a-z0-9-]{0,63}$'`),
+    check(
+      "detection_incidents_group_key_check",
+      sql`${t.groupKey} ~ '^(grant|user|endpoint):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'`,
+    ),
+    check(
+      "detection_incidents_actor_chain_check",
+      sql`${t.actorChain} IS NULL OR (jsonb_typeof(${t.actorChain}) = 'array' AND jsonb_array_length(${t.actorChain}) BETWEEN 1 AND 9)`,
+    ),
+    check("detection_incidents_response_error_check", sql`${t.responseErrorCode} IS NULL OR ${t.responseErrorCode} ~ '^[a-z_]{1,48}$'`),
+    check("detection_incidents_severity_check", sql`${t.severity} IN ('low', 'medium', 'high', 'critical')`),
+    check("detection_incidents_status_check", sql`${t.status} IN ('open', 'acknowledged', 'closed')`),
+    check(
+      "detection_incidents_response_check",
+      sql`${t.response} IN ('alert', 'suspend_grant', 'revoke_credential', 'require_approval')`,
+    ),
+    check("detection_incidents_response_state_check", sql`${t.responseState} IN ('none', 'done', 'failed')`),
+    check("detection_incidents_historical_alert_check", sql`NOT ${t.historical} OR ${t.response} = 'alert'`),
+  ],
+);
+export type DetectionIncidentRow = typeof detectionIncidents.$inferSelect;
+
+/** The evidence chain of an incident: the audit rows that matched, in step order (a join table, ADR-0200). */
+export const detectionIncidentEvidence = pgTable(
+  "detection_incident_evidence",
+  {
+    incidentId: uuid("incident_id")
+      .notNull()
+      .references(() => detectionIncidents.id, { onDelete: "cascade" }),
+    // FK-free evidence pointer (see `detection_incidents.trigger_audit_id`); the receipt is joined through
+    // `decision_receipts.audit_id`, never copied.
+    auditId: uuid("audit_id").notNull(),
+    // ADR-0200 exception (evidence snapshot): the evidence row's chain position, kept because the audit row may be
+    // pruned while the evidence is retained; it orders the chain and is half of the primary key.
+    auditSeq: bigint("audit_seq", { mode: "number" }).notNull(),
+    stepIndex: smallint("step_index").notNull(),
+  },
+  (t) => [
+    primaryKey({ name: "detection_incident_evidence_pk", columns: [t.incidentId, t.auditSeq] }),
+    check("detection_incident_evidence_step_check", sql`${t.stepIndex} BETWEEN 0 AND 999`),
+  ],
+);
+
+/**
+ * When the engine last AUDITED a truncated look-back for a group (`detection-degraded`), so a group that stays busy
+ * is reported once per detection window, not on every batch (review of #865). One row per group, overwritten.
+ */
+export const detectionDegradedMarks = pgTable(
+  "detection_degraded_marks",
+  {
+    groupKey: text("group_key").primaryKey(),
+    recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "detection_degraded_marks_group_key_check",
+      sql`${t.groupKey} ~ '^(grant|user|endpoint):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'`,
+    ),
+  ],
+);
+// ===== end ADR-0333 =================================================================================================

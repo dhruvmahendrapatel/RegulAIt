@@ -27,6 +27,8 @@ export interface DiscoverySettingsView {
   endpointMcpConfig: boolean;
   /** ADR-0337 §4: Google Workspace sources may use the Directory token listing (off by default) */
   googleDirectoryTokens: boolean;
+  /** ADR-0331: governed removal of flagged MCP servers from endpoints (off by default) */
+  endpointAddonRemoval: boolean;
   version: number;
   updatedAt: string | null;
 }
@@ -41,6 +43,7 @@ export async function loadDiscoverySettings(db: Db): Promise<DiscoverySettingsVi
       families: DISCOVERY_FAMILY_SWITCHES_DEFAULT,
       endpointMcpConfig: false,
       googleDirectoryTokens: false,
+      endpointAddonRemoval: false,
       version: 1,
       updatedAt: null,
     };
@@ -51,6 +54,7 @@ export async function loadDiscoverySettings(db: Db): Promise<DiscoverySettingsVi
     families: { saas: row.saasSourcesEnabled, identity: row.identitySourcesEnabled, ml_platform: row.mlPlatformSourcesEnabled, agent_registry: row.agentRegistrySourcesEnabled },
     endpointMcpConfig: row.endpointMcpConfigEnabled,
     googleDirectoryTokens: row.googleDirectoryTokensEnabled,
+    endpointAddonRemoval: row.endpointAddonRemovalEnabled,
     version: row.version,
     updatedAt: row.updatedAt.toISOString(),
   };
