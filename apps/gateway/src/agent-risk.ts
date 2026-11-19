@@ -6,7 +6,7 @@
  *  - GATHERS each agent's facts from the ledgers, reusing the existing readers rather than re-deriving them: the
  *    ADR-0180 A8 floor evidence (`loadFloorEvidence`: effective guardrail modes, the model-card gate read as enforced,
  *    the newest fresh run per agentic red-team class), the A8 autonomy facts and class (`loadAutonomyFacts`,
- *    `deriveAutonomyClass`), the ADR-0089 ownership flag (`ownershipFlagFor`) and the ADR-0091 SoD check
+ *    `deriveAutonomyClass`), the ADR-0089 ownership flag widened with `inactive` (agent-identity.ts, slice 2) and the ADR-0091 SoD check
  *    (`checkSodFootprint`, with a holder that holds nothing, so only a rule whose every side the agent's own
  *    capability set holds can match: the "bundle-internal" case).
  *  - RECOMPUTES ON EVERY CHANGE. Database triggers (migration `agent_risk_scores`) mark the agent in
@@ -42,7 +42,6 @@ import {
   desc,
   eq,
   inArray,
-  isNotNull,
   isNull,
   lt,
   mcpTools,
@@ -71,7 +70,7 @@ import {
   type AutonomyClass,
 } from "@regulait/shared";
 import { loadAutonomyFacts, loadFloorEvidence } from "./autonomy.js";
-import { ownershipFlagFor } from "./inventory.js";
+import { flagFor, ownerLastActive } from "./agent-identity.js";
 import { checkSodFootprint, type Capability } from "./sod.js";
 import { databaseNow } from "./db-clock.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
@@ -98,13 +97,6 @@ const emptyFacts = () => ({ ...NO_AUTONOMY_FACTS, ...NO_AUTONOMY_OBSERVATION });
 // ---------------------------------------------------------------------------
 // Gather
 // ---------------------------------------------------------------------------
-
-async function disabledUsers(db: Db, ids: Array<string | null>): Promise<Set<string>> {
-  const want = [...new Set(ids.filter((i): i is string => !!i))];
-  if (!want.length) return new Set();
-  const rows = await db.select({ id: users.id }).from(users).where(and(inArray(users.id, want), isNotNull(users.disabledAt)));
-  return new Set(rows.map((r) => r.id));
-}
 
 async function sodRuleHeldBy(db: Db, capabilities: Capability[]): Promise<{ id: string; name: string } | null> {
   if (!capabilities.length) return null;
@@ -146,14 +138,14 @@ async function registryReach(db: Db, agentId: string) {
 export async function registryAgentInput(db: Db, agentId: string, now: Date): Promise<AgentRiskInput | null> {
   const [a] = await db.select().from(agents).where(eq(agents.id, agentId));
   if (!a) return null;
-  const disabled = await disabledUsers(db, [a.ownerUserId]);
+  const activity = await ownerLastActive(db, [a.ownerUserId]);
   const evidence = await loadFloorEvidence(db, { projectId: null, modelAgentId: a.id, monthlyLimitUsd: null }, emptyFacts(), now);
   const reach = await registryReach(db, a.id);
   return {
     kind: "agent",
     id: a.id,
     name: a.name,
-    ownership: ownershipFlagFor(a.ownerUserId, !!a.ownerUserId && disabled.has(a.ownerUserId)),
+    ownership: flagFor(a.ownerUserId, activity, now),
     guardrailModes: evidence.guardrailModes,
     modelBound: !!a.model,
     modelCardApproved: evidence.modelCardApproved,
@@ -179,7 +171,7 @@ export async function builderAgentInput(db: Db, agentId: string, now: Date): Pro
         .from(agents)
         .where(eq(agents.id, b.modelAgentId))
     : [];
-  const disabled = await disabledUsers(db, [b.ownerUserId]);
+  const activity = await ownerLastActive(db, [b.ownerUserId]);
 
   const [skills] = await db
     .select({ n: count() })
@@ -207,7 +199,7 @@ export async function builderAgentInput(db: Db, agentId: string, now: Date): Pro
     kind: "builder_agent",
     id: b.id,
     name: b.name,
-    ownership: ownershipFlagFor(b.ownerUserId, disabled.has(b.ownerUserId)),
+    ownership: flagFor(b.ownerUserId, activity, now),
     guardrailModes: evidence.guardrailModes,
     modelBound: !!model?.model,
     modelCardApproved: evidence.modelCardApproved,

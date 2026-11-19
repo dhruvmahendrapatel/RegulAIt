@@ -2014,6 +2014,10 @@ export const auditLog = pgTable(
         "discovery_run",
         "discovery_settings",
         "discovery_pseudonym",
+        // ADR-0337: a vendor app's agent link (auto-linked, linked, unlinked) and an agent's vendor identifier
+        // (declared, removed). Plain text column — no DDL.
+        "saas_entitlement_app",
+        "agent_vendor_identifier",
         // ADR-0261 (P37): a third-party ingest source (created, enabled, disabled, its write-only credential issued or
         // revoked) and each accepted or refused batch of third-party evidence. Plain text column — no DDL.
         "third_party_ingest_source",
@@ -8225,7 +8229,7 @@ export const discoverySources = pgTable(
   (t) => [
     check(
       "discovery_sources_kind_check",
-      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow', 'agent_registry_entra', 'agent_registry_gemini', 'agent_registry_agentcore')`,
+      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow', 'entitlement_m365', 'entitlement_google_workspace', 'entitlement_salesforce', 'entitlement_slack', 'agent_registry_entra', 'agent_registry_gemini', 'agent_registry_agentcore')`,
     ),
     check("discovery_sources_name_check", sql`char_length(${t.name}) BETWEEN 1 AND 120`),
     check("discovery_sources_target_check", sql`jsonb_typeof(${t.target}) = 'object'`),
@@ -8310,7 +8314,7 @@ export const discoveryRuns = pgTable(
     check("discovery_runs_status_check", sql`${t.status} IN ('queued', 'running', 'succeeded', 'failed')`),
     check(
       "discovery_runs_kind_check",
-      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow', 'agent_registry_entra', 'agent_registry_gemini', 'agent_registry_agentcore')`,
+      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow', 'entitlement_m365', 'entitlement_google_workspace', 'entitlement_salesforce', 'entitlement_slack', 'agent_registry_entra', 'agent_registry_gemini', 'agent_registry_agentcore')`,
     ),
     check("discovery_runs_attempt_check", sql`${t.attempt} BETWEEN 0 AND 3`),
     check("discovery_runs_gaps_check", sql`jsonb_typeof(${t.catalogueGaps}) = 'array' AND jsonb_array_length(${t.catalogueGaps}) <= 50`),
@@ -8349,6 +8353,9 @@ export const discoverySettings = pgTable(
     agentRegistrySourcesEnabled: boolean("agent_registry_sources_enabled").notNull().default(false),
     // ADR-0259: endpoint MCP client-config discovery through the SD4 agent, off (pending migration endpoint_mcp_config_discovery, ADR-0252)
     endpointMcpConfigEnabled: boolean("endpoint_mcp_config_enabled").notNull().default(false),
+    /** ADR-0337 §4: whether a Google Workspace entitlement source may use the Directory token listing (off by default;
+     * turning it on is a `settings_relax` step-up bound to `discoveryGoogleDirectoryTokens`) */
+    googleDirectoryTokensEnabled: boolean("google_directory_tokens_enabled").notNull().default(false),
     // ADR-0331: the governed removal of flagged MCP servers from endpoints, off (pending migration endpoint_addon_removal)
     endpointAddonRemovalEnabled: boolean("endpoint_addon_removal_enabled").notNull().default(false),
     version: integer("version").notNull().default(1),
@@ -17841,6 +17848,150 @@ export const endpointAddonSightingSecretTypes = pgTable(
 );
 // ===== end ADR-0332 =====
 
+// ===== ADR-0337 (lane E18): the SaaS entitlement graph =====
+// What an entitlement read (an ADR-0195 discovery source of an `entitlement_*` kind) returns, in third normal form:
+// an app per source, a scope dictionary, app x scope grants and grant x pseudonymised-user principals. The platform is
+// the source's kind (not copied onto the app); a scope's access class is computed from its name by the frozen
+// classifier in `@regulait/shared` (not stored). Row-level security: admins and the `system_task` reason only (pending
+// migration `saas_entitlement_graph`).
+
+export const SAAS_ENTITLEMENT_APP_KINDS = ["service_principal", "oauth_client", "connected_app", "slack_app"] as const;
+export const SAAS_ENTITLEMENT_PLATFORM_VALUES = ["m365", "google_workspace", "salesforce", "slack"] as const;
+export const SAAS_ENTITLEMENT_GRANT_TYPES = ["delegated", "application"] as const;
+export const SAAS_ENTITLEMENT_CONSENTS = ["tenant", "user"] as const;
+export const SAAS_APP_AGENT_LINK_STATES = ["none", "auto", "admin", "unlinked"] as const;
+
+/** one app holding grants in the tenant one discovery source reads (deleted with the source) */
+export const saasEntitlementApps = pgTable(
+  "saas_entitlement_apps",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => discoverySources.id, { onDelete: "cascade" }),
+    externalId: text("external_id").notNull(),
+    appKind: text("app_kind", { enum: SAAS_ENTITLEMENT_APP_KINDS }).notNull(),
+    displayName: text("display_name"),
+    publisher: text("publisher"),
+    publisherVerified: boolean("publisher_verified"),
+    /** the RegulAIt agent this vendor-side app is, when linked (auto on an exact identifier match, or by an admin).
+     * RESTRICT: an agent is retired through its lifecycle, never deleted while an app is linked to it */
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "restrict" }),
+    /** ADR-0348 machine SAAS_APP_AGENT_LINK_MACHINE (@regulait/shared): none | auto | admin | unlinked */
+    agentLinkState: text("agent_link_state", { enum: SAAS_APP_AGENT_LINK_STATES }).notNull().default("none"),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+    lastSeenRunId: uuid("last_seen_run_id").references(() => discoveryRuns.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    unique("saas_entitlement_apps_uq").on(t.sourceId, t.externalId),
+    index("saas_entitlement_apps_agent_idx").on(t.agentId).where(sql`${t.agentId} IS NOT NULL`),
+    check("saas_entitlement_apps_kind_check", sql`${t.appKind} IN ('service_principal', 'oauth_client', 'connected_app', 'slack_app')`),
+    check("saas_entitlement_apps_external_id_check", sql`length(${t.externalId}) BETWEEN 1 AND 255`),
+    check("saas_entitlement_apps_display_name_check", sql`${t.displayName} IS NULL OR length(${t.displayName}) BETWEEN 1 AND 200`),
+    check("saas_entitlement_apps_publisher_check", sql`${t.publisher} IS NULL OR length(${t.publisher}) BETWEEN 1 AND 200`),
+    check("saas_entitlement_apps_seen_check", sql`${t.firstSeenAt} <= ${t.lastSeenAt}`),
+    check("saas_entitlement_apps_agent_link_state_check", sql`${t.agentLinkState} IN ('none', 'auto', 'admin', 'unlinked')`),
+    check(
+      "saas_entitlement_apps_agent_link_pair_check",
+      sql`(${t.agentId} IS NOT NULL) = (${t.agentLinkState} = 'auto' OR ${t.agentLinkState} = 'admin')`,
+    ),
+  ],
+);
+export type SaasEntitlementAppRow = typeof saasEntitlementApps.$inferSelect;
+
+/** an identifier an admin declares for an agent (its app id on one platform); an app whose vendor id EXACTLY equals it
+ * is auto-linked to the agent (owner decision 2026-11-17). One identifier names one agent. */
+export const agentVendorIdentifiers = pgTable(
+  "agent_vendor_identifiers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** RESTRICT: an agent is retired, not deleted; its identifiers are removed through the audited route first */
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "restrict" }),
+    platform: text("platform", { enum: SAAS_ENTITLEMENT_PLATFORM_VALUES }).notNull(),
+    externalId: text("external_id").notNull(),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("agent_vendor_identifiers_uq").on(t.platform, t.externalId),
+    index("agent_vendor_identifiers_agent_idx").on(t.agentId),
+    check("agent_vendor_identifiers_platform_check", sql`${t.platform} IN ('m365', 'google_workspace', 'salesforce', 'slack')`),
+    check("agent_vendor_identifiers_external_id_check", sql`${t.externalId} ~ '^[!-~]{1,255}$'`),
+  ],
+);
+export type AgentVendorIdentifierRow = typeof agentVendorIdentifiers.$inferSelect;
+
+/** the scope dictionary: one row per platform, resource ('' where scope names are global) and scope name */
+export const saasEntitlementScopes = pgTable(
+  "saas_entitlement_scopes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    platform: text("platform", { enum: SAAS_ENTITLEMENT_PLATFORM_VALUES }).notNull(),
+    resource: text("resource").notNull().default(""),
+    name: text("name").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("saas_entitlement_scopes_uq").on(t.platform, t.resource, t.name),
+    check("saas_entitlement_scopes_platform_check", sql`${t.platform} IN ('m365', 'google_workspace', 'salesforce', 'slack')`),
+    check("saas_entitlement_scopes_resource_check", sql`length(${t.resource}) <= 255`),
+    check("saas_entitlement_scopes_name_check", sql`length(${t.name}) BETWEEN 1 AND 512`),
+  ],
+);
+export type SaasEntitlementScopeRow = typeof saasEntitlementScopes.$inferSelect;
+
+/** app x scope x grant type: one scope one app holds one way, with how broadly it was consented */
+export const saasEntitlementGrants = pgTable(
+  "saas_entitlement_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    appId: uuid("app_id")
+      .notNull()
+      .references(() => saasEntitlementApps.id, { onDelete: "cascade" }),
+    scopeId: uuid("scope_id")
+      .notNull()
+      .references(() => saasEntitlementScopes.id, { onDelete: "restrict" }),
+    grantType: text("grant_type", { enum: SAAS_ENTITLEMENT_GRANT_TYPES }).notNull(),
+    consent: text("consent", { enum: SAAS_ENTITLEMENT_CONSENTS }).notNull(),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+    lastSeenRunId: uuid("last_seen_run_id").references(() => discoveryRuns.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    unique("saas_entitlement_grants_uq").on(t.appId, t.scopeId, t.grantType),
+    index("saas_entitlement_grants_scope_idx").on(t.scopeId),
+    check("saas_entitlement_grants_type_check", sql`${t.grantType} IN ('delegated', 'application')`),
+    check("saas_entitlement_grants_consent_check", sql`${t.consent} IN ('tenant', 'user')`),
+    check("saas_entitlement_grants_seen_check", sql`${t.firstSeenAt} <= ${t.lastSeenAt}`),
+  ],
+);
+export type SaasEntitlementGrantRow = typeof saasEntitlementGrants.$inferSelect;
+
+/** grant x pseudonymised user: who consented to a user-consent grant (only ever a pseudonym, ADR-0195 decision 20) */
+export const saasEntitlementGrantPrincipals = pgTable(
+  "saas_entitlement_grant_principals",
+  {
+    grantId: uuid("grant_id")
+      .notNull()
+      .references(() => saasEntitlementGrants.id, { onDelete: "cascade" }),
+    pseudonymId: uuid("pseudonym_id")
+      .notNull()
+      .references(() => discoveryPseudonyms.id, { onDelete: "cascade" }),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    primaryKey({ name: "saas_entitlement_grant_principals_pk", columns: [t.grantId, t.pseudonymId] }),
+    index("saas_entitlement_grant_principals_pseudonym_idx").on(t.pseudonymId),
+    check("saas_entitlement_grant_principals_seen_check", sql`${t.firstSeenAt} <= ${t.lastSeenAt}`),
+  ],
+);
+export type SaasEntitlementGrantPrincipalRow = typeof saasEntitlementGrantPrincipals.$inferSelect;
+// ===== end ADR-0337 =====
+
 // ===== ADR-0339 (lane E20) — the agent risk score, recomputed on every change =====
 // Migration `pending/agent_risk_scores.sql` (numbered at merge, ADR-0252). Database triggers on every write path of an
 // agent (the row, its tools, schedules, sub-agents, channels, skills, shares and grants, and a config activation) mark
@@ -17944,6 +18095,95 @@ export const agentRiskLatest = pgTable(
 );
 // ===== end ADR-0339 =====
 
+// ===== ADR-0339 slice 2 (lane E20) — author vs runner, non-human identity links =====
+// Migration `pending/agent_identity_links.sql` (numbered at merge). ADR-0234: `agent_identity_links` is actor-stamped
+// (`decided_by_user_id`), `agent_authorship` deployment-wide; no row policy, admin or owner routes only.
+import {
+  AGENT_AUTHOR_SOURCES as AGENT_AUTHOR_SOURCES_E20,
+  AGENT_NHI_KINDS as AGENT_NHI_KINDS_E20,
+  AGENT_NHI_LINK_SOURCES as AGENT_NHI_LINK_SOURCES_E20,
+  AGENT_NHI_LINK_STATUSES as AGENT_NHI_LINK_STATUSES_E20,
+  AGENT_NHI_PROVIDERS as AGENT_NHI_PROVIDERS_E20,
+} from "@regulait/shared";
+
+/**
+ * Who built an agent: one row per agent, written by the insert trigger in the creating transaction and never
+ * rewritten (UPDATE refused except the SET NULL of a deleted author; DELETE only with the agent). Agents that existed
+ * before are `unknown`: an author is never guessed.
+ */
+export const agentAuthorship = pgTable(
+  "agent_authorship",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    builderAgentId: uuid("builder_agent_id").references(() => builderAgents.id, { onDelete: "cascade" }),
+    authorUserId: uuid("author_user_id").references(() => users.id, { onDelete: "set null" }),
+    source: text("source", { enum: AGENT_AUTHOR_SOURCES_E20 }).notNull(),
+    /** an imported agent's vendor-side creator, as the import's pseudonym (never a name) */
+    vendorCreatorPseudonym: text("vendor_creator_pseudonym"),
+    recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("agent_authorship_subject_check", sql`num_nonnulls(${t.agentId}, ${t.builderAgentId}) = 1`),
+    check("agent_authorship_source_check", sql`${t.source} IN ('principal', 'builder_owner', 'vendor_record', 'unknown')`),
+    check("agent_authorship_unknown_check", sql`${t.source} <> 'unknown' OR ${t.authorUserId} IS NULL`),
+    check(
+      "agent_authorship_vendor_check",
+      sql`(${t.source} = 'vendor_record') = (${t.vendorCreatorPseudonym} IS NOT NULL) AND (${t.vendorCreatorPseudonym} IS NULL OR length(${t.vendorCreatorPseudonym}) BETWEEN 1 AND 128)`,
+    ),
+    uniqueIndex("agent_authorship_agent_uq").on(t.agentId).where(sql`${t.agentId} IS NOT NULL`),
+    uniqueIndex("agent_authorship_builder_uq").on(t.builderAgentId).where(sql`${t.builderAgentId} IS NOT NULL`),
+    index("agent_authorship_author_idx").on(t.authorUserId),
+  ],
+);
+export type AgentAuthorshipRow = typeof agentAuthorship.$inferSelect;
+
+/** an agent's cloud service account, vendor agent identity or OAuth client: staged, then confirmed by a second admin */
+export const agentIdentityLinks = pgTable(
+  "agent_identity_links",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    builderAgentId: uuid("builder_agent_id").references(() => builderAgents.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: AGENT_NHI_KINDS_E20 }).notNull(),
+    provider: text("provider", { enum: AGENT_NHI_PROVIDERS_E20 }).notNull(),
+    externalId: text("external_id").notNull(),
+    status: text("status", { enum: AGENT_NHI_LINK_STATUSES_E20 }).notNull().default("staged"),
+    source: text("source", { enum: AGENT_NHI_LINK_SOURCES_E20 }).notNull(),
+    note: text("note"),
+    stagedByUserId: uuid("staged_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    stagedAt: timestamp("staged_at", { withTimezone: true }).notNull().defaultNow(),
+    decidedByUserId: uuid("decided_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    decisionNote: text("decision_note"),
+  },
+  (t) => [
+    check("agent_identity_links_subject_check", sql`num_nonnulls(${t.agentId}, ${t.builderAgentId}) = 1`),
+    check("agent_identity_links_kind_check", sql`${t.kind} IN ('cloud_service_account', 'vendor_agent_identity', 'oauth_client')`),
+    check("agent_identity_links_provider_check", sql`${t.provider} IN ('aws', 'azure', 'gcp', 'entra', 'okta', 'other')`),
+    check("agent_identity_links_status_check", sql`${t.status} IN ('staged', 'confirmed', 'rejected')`),
+    check("agent_identity_links_source_check", sql`${t.source} IN ('admin', 'importer')`),
+    check("agent_identity_links_external_id_check", sql`length(${t.externalId}) BETWEEN 1 AND 1024`),
+    check(
+      "agent_identity_links_notes_check",
+      sql`(${t.note} IS NULL OR length(${t.note}) <= 500) AND (${t.decisionNote} IS NULL OR length(${t.decisionNote}) <= 500)`,
+    ),
+    check("agent_identity_links_decided_check", sql`(${t.status} = 'staged') = (${t.decidedAt} IS NULL)`),
+    check(
+      "agent_identity_links_four_eyes_check",
+      sql`${t.decidedByUserId} IS NULL OR ${t.stagedByUserId} IS NULL OR ${t.decidedByUserId} <> ${t.stagedByUserId}`,
+    ),
+    uniqueIndex("agent_identity_links_agent_uq")
+      .on(t.agentId, t.provider, t.externalId)
+      .where(sql`${t.agentId} IS NOT NULL`),
+    uniqueIndex("agent_identity_links_builder_uq")
+      .on(t.builderAgentId, t.provider, t.externalId)
+      .where(sql`${t.builderAgentId} IS NOT NULL`),
+    index("agent_identity_links_external_idx").on(t.provider, t.externalId),
+  ],
+);
+export type AgentIdentityLinkRow = typeof agentIdentityLinks.$inferSelect;
+// ===== end ADR-0339 slice 2 =====
 // ===== ADR-0342 (lane E23): process analytics read model =====
 // A MEASURED READ MODEL (ADR-0200 addendum). Source of truth: `workflow_events` (the append-only per-instance history)
 // replayed through the pure workflow kernel against the instance's snapshotted definition. The projector

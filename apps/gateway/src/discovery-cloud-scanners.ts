@@ -101,6 +101,8 @@ export function federationAudiences(kind: DiscoverySourceKind, publicConfig: Rea
     case "repo_azure_devops":
     // ADR-0235: Entra app consents through the same Entra workload identity federation
     case "idp_entra":
+    // ADR-0337: Microsoft 365 entitlements through the same Entra workload identity federation
+    case "entitlement_m365":
     // ADR-0314: Entra Agent ID and Agent 365 through the same Entra workload identity federation
     case "agent_registry_entra":
       return [FEDERATION_AUDIENCES.azure];

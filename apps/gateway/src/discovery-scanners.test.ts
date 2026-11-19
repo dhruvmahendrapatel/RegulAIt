@@ -11,8 +11,8 @@ import { checkObservations, checkReadOutcomes, ObservationRefused, retryAfterMs,
 const NOW = "2026-10-17T00:00:00.000Z";
 
 describe("ADR-0195 SD0 scanner contract", () => {
-  it("ships only the built scanners (SD1: the four repo kinds; SD2: the three clouds; SD3: the two upload-fed endpoint kinds; SD4b: the endpoint agent; ADR-0235: the three wider kinds; ADR-0314: the three agent registry kinds), and a registry refuses two scanners for one kind", () => {
-    expect([...DISCOVERY_SCANNERS.keys()].sort()).toEqual(["agent_registry_agentcore", "agent_registry_entra", "agent_registry_gemini", "cloud_aws", "cloud_azure", "cloud_gcp", "endpoint_agent", "endpoint_inventory", "endpoint_osquery", "idp_entra", "ml_mlflow", "repo_azure_devops", "repo_bitbucket", "repo_github", "repo_gitlab", "saas_inventory_api"]);
+  it("ships only the built scanners (SD1: the four repo kinds; SD2: the three clouds; SD3: the two upload-fed endpoint kinds; SD4b: the endpoint agent; ADR-0235: the three wider kinds; ADR-0314: the three agent registry kinds; ADR-0337: two entitlement readers), and a registry refuses two scanners for one kind", () => {
+    expect([...DISCOVERY_SCANNERS.keys()].sort()).toEqual(["agent_registry_agentcore", "agent_registry_entra", "agent_registry_gemini", "cloud_aws", "cloud_azure", "cloud_gcp", "endpoint_agent", "endpoint_inventory", "endpoint_osquery", "entitlement_google_workspace", "entitlement_m365", "idp_entra", "ml_mlflow", "repo_azure_devops", "repo_bitbucket", "repo_github", "repo_gitlab", "saas_inventory_api"]);
     expect(() => scannerRegistry([noopTestScanner("repo_github"), noopTestScanner("repo_github")])).toThrow(/duplicate/);
   });
 
