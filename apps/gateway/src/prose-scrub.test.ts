@@ -577,6 +577,9 @@ describe("6. the covered / NOT-covered inventory", () => {
     "redteam_runs.gate_reason",
     "redteam_runs.note",
     "remediation_proposals.rationale",
+    // ADR-0327 slice 4a — a rule-step switch request's reason and revert reason
+    "rule_step_switches.reason",
+    "rule_step_switches.revert_reason",
     "shadow_ai_findings.disposition_reason",
     "shadow_ai_findings.replacement_note",
     "shadow_ai_imports.reason",

@@ -191,7 +191,7 @@ import { registerEvalRoutes } from "./evals.js";
 import { applyModelCardApprovalDecision, registerMrmRoutes } from "./mrm.js";
 import { registerFairnessRoutes } from "./fairness.js";
 import { registerClassicalDriftRoutes } from "./classical-drift.js";
-import { registerRuleStepRoutes } from "./rule-steps.js";
+import { applyRuleStepSwitchDecision, precheckRuleStepSwitchDecision, registerRuleStepRoutes } from "./rule-steps.js";
 import { applyDecisionTableDecision, precheckDecisionTableDecision, registerDecisionTableRoutes } from "./decision-tables.js";
 import { registerDriftIngestCredentialRoutes } from "./drift-ingest-credentials.js";
 import { AiBomError } from "./ai-bom.js";
@@ -5240,6 +5240,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const refusal = await precheckDecisionTableDecision(db, row, deciderUserId);
       if (refusal) return fail(refusal.status, refusal.body);
     }
+    // ADR-0327 slice 4a — `cannot_approve_own_rule_step_switch`, keyed on the DECIDER (same reasoning as above).
+    if (row.objectType === "rule_step_switch") {
+      const refusal = await precheckRuleStepSwitchDecision(db, row, deciderUserId);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
     // Separation-of-duties guard: the person deciding IS the person who
     // triggered the governed action. Still decidable (alternate-approver
     // routing is deliberately out of scope) but never silently — a recorded
@@ -5524,6 +5529,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // only if the version it was proposed against is still the published one (else recorded stale). Denied = rejected.
       if (updated.objectType === "decision_table") {
         await applyDecisionTableDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
+      }
+      // ADR-0327 slice 4a: a reviewed switch of a rule-like step — approved = switched, inside the decision's transaction,
+      // only while the suggestion is in shadow and its rule still matches the bound digest (else stale). Denied = rejected.
+      if (updated.objectType === "rule_step_switch") {
+        await applyRuleStepSwitchDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
       }
       // ADR-0045 MRM sign-offs: the risk acceptance is recorded on the model
       // card chain HERE, inside the one decide path, so it inherits every

@@ -134,6 +134,28 @@ induction over numeric ranges is deferred to a sandboxed engine image with sciki
   - While a suggestion is in shadow, a rescan does not touch its row (`setWhere status <> 'shadow'`), so the counts
     always describe the rule under test. The list shows each suggestion's latest period, with coverage and agreement.
   - Retention and erasure still apply: deleting a suggestion deletes its periods, which hold counts only.
+- Slice 4a, the switch lifecycle (migration `pending/rule_step_switch.sql`). Nothing here serves the rule yet: slice
+  4b puts it on the request path.
+  - `POST /v1/rule-steps/suggestions/:id/switch` asks for a step in shadow mode to be switched to its rule. It needs a
+    user identity (so the reviewer is provably someone else), a step-up (`settings_relax`), detection on, and a named
+    active administrator other than the requester. It creates a `rule_step_switches` row and an `approvals` row
+    (`object_type` `rule_step_switch`) bound to `rule_sha256`, the canonical-JSON digest of the measured rule, as the
+    approval's ADR-0104 `arguments_digest`. At most one open (pending or switched) request per suggestion.
+  - The one approvals decide path applies the decision in its own transaction. Approved: the suggestion moves
+    shadow -> switched and its shadow period closes, but only while it is still in shadow and its rule still hashes to
+    the bound digest (else the request is recorded `stale`). Denied: `rejected`, and the step stays in shadow. The
+    requester can never decide their own request, by delegation or the admin override
+    (`cannot_approve_own_rule_step_switch`).
+  - `POST /v1/rule-steps/suggestions/:id/revert` takes a switched step back to the AI in one action, with no approval
+    (it only removes the rule). Audited.
+  - Both lifecycles are ADR-0348 machines: the suggestion's (`suggested`, `shadow`, `switched`, `dismissed`, with the
+    new `switch` and `revert` events) and the request's (`RULE_STEP_SWITCH_MACHINE`). A BEFORE UPDATE trigger
+    freezes the request's suggestion, digest, request time and requester. A rescan leaves shadow and switched rows
+    alone. The reasons are prose-scrubbed (ADR-0102). RLS: deployment-wide (ADR-0234 appendix).
+- Slice 4b (next): serve a switched rule through the dispatch core where the ADR-0119 semantic cache serves a
+  cached answer, so governance and the output PII and guardrail checks still run. An input the rule does not cover
+  goes to the AI. Record the `rule_replacement` technique in `cost_events`, and keep rule-served spans out of
+  detection and shadow counts. Switching to a published decision table follows it.
 
 ## Addendum: decision tables (owner approval 2026-11-17, competitor gap audit, Camunda row 6)
 

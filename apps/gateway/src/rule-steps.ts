@@ -14,11 +14,13 @@
  *  - The projected monthly saving is the step's measured span cost over the window, scaled to 30 days, times the share
  *    of runs the rule would answer (structured share × held-out coverage). It is an estimate and says so.
  */
+import { createHash } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
   agents,
   and,
+  approvals,
   asc,
   auditLog,
   desc,
@@ -29,12 +31,15 @@ import {
   ruleStepSettings,
   ruleStepShadows,
   ruleStepSuggestions,
+  ruleStepSwitches,
   sql,
   traceSpans,
+  users,
   type Db,
   type RuleStepSettingsRow,
   type RuleStepShadowRow,
   type RuleStepSuggestionRow,
+  type RuleStepSwitchRow,
   type SQL,
   RULE_STEP_SUGGESTION_STATUSES,
 } from "@regulait/db";
@@ -48,7 +53,7 @@ import {
   type StepRun,
 } from "@regulait/optimizer-kernel";
 import { induceStepRuleOffThread } from "@regulait/optimizer-kernel/offload";
-import { RULE_STEP_SUGGESTION_MACHINE, TRACE_TRUNCATION_MARKER } from "@regulait/shared";
+import { RULE_STEP_SUGGESTION_MACHINE, RULE_STEP_SWITCH_MACHINE, TRACE_TRUNCATION_MARKER, canonicalJson } from "@regulait/shared";
 import { whereFrom } from "./state-transition.js";
 import { requireStepUp } from "./step-up.js";
 import { SCAN_WINDOW_DAYS } from "./rule-step-retention.js";
@@ -93,7 +98,52 @@ export const RULE_STEP_AUDIT_RULE_IDS = {
   dismiss: "rule_step_suggestion_dismissed",
   shadowStarted: "rule_step_shadow_started",
   shadowStopped: "rule_step_shadow_stopped",
+  switchRequested: "rule_step_switch_requested",
+  switched: "rule_step_switched",
+  switchRejected: "rule_step_switch_rejected",
+  switchStale: "rule_step_switch_stale",
+  reverted: "rule_step_switch_reverted",
 } as const;
+
+/** approvals.stage_id of a switch review: the prefix plus the switch request id */
+export const RULE_STEP_SWITCH_PREFIX = "__rule_step_switch__:";
+
+/**
+ * What a reviewer approves when they approve a switch: sha256 hex over ADR-0060's `canonicalJson` of the suggestion's
+ * rule. Stored on the request and as the approval's ADR-0104 consent fingerprint (`arguments_digest`); the decide path
+ * recomputes it from the suggestion and refuses to switch on a mismatch.
+ */
+export function ruleStepRuleDigest(rule: unknown): string {
+  return createHash("sha256").update(canonicalJson(rule)).digest("hex");
+}
+
+type SwitchEvent = (typeof RULE_STEP_SWITCH_MACHINE.events)[number];
+async function transitionSwitch(
+  db: Db,
+  id: string,
+  event: SwitchEvent,
+  extra: { [K in keyof typeof ruleStepSwitches.$inferInsert]?: (typeof ruleStepSwitches.$inferInsert)[K] | SQL } = {},
+): Promise<RuleStepSwitchRow | null> {
+  const [row] = await db
+    .update(ruleStepSwitches)
+    .set({ ...extra, status: RULE_STEP_SWITCH_MACHINE.def.transitions[event].to })
+    .where(and(eq(ruleStepSwitches.id, id), whereFrom(ruleStepSwitches.status, RULE_STEP_SWITCH_MACHINE, event)))
+    .returning();
+  return row ?? null;
+}
+
+async function switchAudit(db: Db, userId: string | null, ruleId: string, effect: "allow" | "deny" | "require_approval", reason: string, detail: Record<string, unknown>) {
+  await db.insert(auditLog).values({
+    userId: userId ?? NO_IDENTITY,
+    objectType: "org_settings",
+    objectId: null,
+    detail: { scope: "rule_steps", ...detail },
+    effect,
+    ruleId,
+    ruleChain: [],
+    reason,
+  });
+}
 
 type Thresholds = { minRuns: number; minAgreement: number; minCoverage: number; minCellSupport: number };
 export type RuleStepSettings = Thresholds & { enabled: boolean; lastScanAt: Date | null };
@@ -117,6 +167,8 @@ const settingsBody = z
 /** the list's one filter beside the ADR-0226 contract's own params; absent means the open suggestions */
 const suggestionFilters = z.object({ status: z.enum(RULE_STEP_SUGGESTION_STATUSES).optional() }).strict();
 const idParam = z.object({ id: z.string().uuid() }).strict();
+const switchBody = z.object({ reviewerUserId: z.string().uuid(), reason: z.string().trim().min(1).max(500) }).strict();
+const revertBody = z.object({ reason: z.string().trim().min(1).max(500) }).strict();
 
 export async function loadRuleStepSettings(db: Db): Promise<RuleStepSettings> {
   const [row] = await db.select().from(ruleStepSettings).where(eq(ruleStepSettings.id, SETTINGS_ID));
@@ -176,7 +228,40 @@ async function latestShadows(db: Db, suggestionIds: readonly string[]): Promise<
 /** a refusal the table alone cannot know, shown beside the lifecycle (ADR-0348 `describe`) */
 const DETECTION_OFF = "rule-like step detection is off; an admin turns it on in the rule-step settings";
 
-function view(row: RuleStepSuggestionRow & { agentName: string | null }, shadow: RuleStepShadowRow | undefined, detectionOn: boolean) {
+function switchView(w: RuleStepSwitchRow | undefined) {
+  if (!w) return null;
+  return {
+    id: w.id,
+    status: w.status,
+    /** read-only (ADR-0348): the request's own lifecycle */
+    lifecycle: RULE_STEP_SWITCH_MACHINE.describe(w.status),
+    approvalId: w.approvalId,
+    requestedBy: w.requestedBy,
+    requestedAt: w.requestedAt,
+    decidedBy: w.decidedBy,
+    decidedAt: w.decidedAt,
+    revertedBy: w.revertedBy,
+    revertedAt: w.revertedAt,
+  };
+}
+
+/** the latest switch request of each suggestion, in one query (no N+1) */
+async function latestSwitches(db: Db, suggestionIds: readonly string[]): Promise<Map<string, RuleStepSwitchRow>> {
+  if (suggestionIds.length === 0) return new Map();
+  const rows = await db
+    .selectDistinctOn([ruleStepSwitches.suggestionId])
+    .from(ruleStepSwitches)
+    .where(inArray(ruleStepSwitches.suggestionId, [...suggestionIds]))
+    .orderBy(ruleStepSwitches.suggestionId, desc(ruleStepSwitches.requestedAt));
+  return new Map(rows.map((r) => [r.suggestionId, r]));
+}
+
+function view(
+  row: RuleStepSuggestionRow & { agentName: string | null },
+  shadow: RuleStepShadowRow | undefined,
+  detectionOn: boolean,
+  sw?: RuleStepSwitchRow,
+) {
   const rule = row.rule as InducedRule;
   return {
     id: row.id,
@@ -185,7 +270,9 @@ function view(row: RuleStepSuggestionRow & { agentName: string | null }, shadow:
     stepName: row.stepName,
     status: row.status,
     /** read-only (ADR-0348): every event, whether it is allowed now, and why not */
-    lifecycle: RULE_STEP_SUGGESTION_MACHINE.describe(row.status, detectionOn ? {} : { shadow_start: DETECTION_OFF }),
+    lifecycle: RULE_STEP_SUGGESTION_MACHINE.describe(row.status, detectionOn ? {} : { shadow_start: DETECTION_OFF, switch: DETECTION_OFF }),
+    /** the latest switch request (slice 4a), or null */
+    switch: switchView(sw),
     fields: rule.fields,
     ruleLines: renderInducedRule(rule),
     /** each trusted cell is a test case drawn from history: these inputs gave this output in held-out agreement */
@@ -509,7 +596,8 @@ export function registerRuleStepRoutes(app: FastifyInstance, db: Db): void {
           .onConflictDoUpdate({
             target: [ruleStepSuggestions.agentId, ruleStepSuggestions.stepName],
             set: { ...r.values, detectedAt: sql`now()` },
-            setWhere: sql`${ruleStepSuggestions.status} <> ${RULE_STEP_SUGGESTION_MACHINE.def.transitions.shadow_start.to}`,
+            // a suggestion under test (shadow) or answering the step (switched) keeps the rule that was measured and approved
+            setWhere: sql`${ruleStepSuggestions.status} NOT IN (${RULE_STEP_SUGGESTION_MACHINE.def.transitions.shadow_start.to}, ${RULE_STEP_SUGGESTION_MACHINE.def.transitions.switch.to})`,
           });
       }
       await applyShadowEvaluations(tx as unknown as Db, shadows);
@@ -552,8 +640,9 @@ export function registerRuleStepRoutes(app: FastifyInstance, db: Db): void {
           .orderBy(...q.orderBy)
           .limit(q.limit)
           .offset(q.offset);
-        const [shadows, settings] = await Promise.all([latestShadows(db, rows.map((r) => r.id)), loadRuleStepSettings(db)]);
-        return rows.map(({ _cursorAt, ...r }) => ({ ...view(r, shadows.get(r.id), settings.enabled), _cursorAt }));
+        const ids = rows.map((r) => r.id);
+        const [shadows, switches, settings] = await Promise.all([latestShadows(db, ids), latestSwitches(db, ids), loadRuleStepSettings(db)]);
+        return rows.map(({ _cursorAt, ...r }) => ({ ...view(r, shadows.get(r.id), settings.enabled, switches.get(r.id)), _cursorAt }));
       },
       countable: (where) =>
         db.select({ one: sql`1` }).from(ruleStepSuggestions).leftJoin(agents, eq(agents.id, ruleStepSuggestions.agentId)).where(where),
@@ -652,4 +741,179 @@ export function registerRuleStepRoutes(app: FastifyInstance, db: Db): void {
     if (!out) return reply.status(404).send({ error: "unknown_or_not_shadowing_suggestion" });
     return { id: out.row.id, status: out.row.status, shadow: shadowView(out.shadow) };
   });
+
+  /**
+   * ADR-0327 slice 4a: ask for the step to be switched from the AI to its rule. Only from shadow mode, only with a user
+   * identity (so the reviewer is provably someone else), step-up, and decided by a named active administrator in the
+   * approvals queue. The approval is bound to the digest of the rule being measured. Nothing changes until then.
+   */
+  app.post("/v1/rule-steps/suggestions/:id/switch", async (req, reply) => {
+    const { id } = idParam.parse(req.params);
+    const parsed = switchBody.safeParse(req.body);
+    if (!parsed.success) return reply.status(400).send({ error: "invalid_body", issues: parsed.error.issues.slice(0, 20) });
+    const body = parsed.data;
+    const actor = req.authCtx.userId ?? null;
+    if (!actor) {
+      return reply.status(422).send({ error: "user_identity_required", detail: "a switch is requested by a person, so its reviewer can be someone else" });
+    }
+    if (body.reviewerUserId === actor) {
+      return reply.status(422).send({ error: "reviewer_is_requester", detail: "a switch is reviewed by someone other than the person who asked for it" });
+    }
+    if (!(await loadRuleStepSettings(db)).enabled) {
+      return reply.status(409).send({ error: "rule_steps_disabled", detail: DETECTION_OFF });
+    }
+    const [reviewer] = await db.select({ isAdmin: users.isAdmin, disabledAt: users.disabledAt }).from(users).where(eq(users.id, body.reviewerUserId));
+    if (!reviewer || reviewer.disabledAt !== null || !reviewer.isAdmin) {
+      return reply.status(422).send({ error: "reviewer_not_eligible", detail: "the reviewer must be an active administrator" });
+    }
+    if (!(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { ruleSteps: "switch", suggestionId: id } })).ok) return reply;
+    const out = await db.transaction(async (tx) => {
+      // one request at a time per suggestion: the suggestion row is the lock
+      const [row] = await tx.select().from(ruleStepSuggestions).where(eq(ruleStepSuggestions.id, id)).for("update");
+      if (!row) return { status: 404, body: { error: "unknown_suggestion" } } as const;
+      if (!RULE_STEP_SUGGESTION_MACHINE.can(row.status, "switch")) {
+        return { status: 409, body: { error: "not_in_shadow", detail: "a step is switched only after its rule has been measured in shadow mode" } } as const;
+      }
+      const [open] = await tx
+        .select({ id: ruleStepSwitches.id, approvalId: ruleStepSwitches.approvalId })
+        .from(ruleStepSwitches)
+        .where(and(eq(ruleStepSwitches.suggestionId, id), inArray(ruleStepSwitches.status, ["pending_review", "switched"])));
+      if (open) return { status: 409, body: { error: "switch_pending", approvalId: open.approvalId } } as const;
+      const digest = ruleStepRuleDigest(row.rule);
+      const [w] = await tx.insert(ruleStepSwitches).values({ suggestionId: id, ruleSha256: digest, requestedBy: actor, reason: body.reason }).returning();
+      const [a] = await tx
+        .insert(approvals)
+        .values({
+          userId: actor,
+          objectType: "rule_step_switch",
+          stageId: `${RULE_STEP_SWITCH_PREFIX}${w!.id}`,
+          approverUserId: body.reviewerUserId,
+          // the consent is for exactly this rule (ADR-0104's fingerprint column)
+          argumentsDigest: digest,
+        })
+        .returning({ id: approvals.id });
+      await tx.update(ruleStepSwitches).set({ approvalId: a!.id }).where(eq(ruleStepSwitches.id, w!.id));
+      await switchAudit(tx as unknown as Db, actor, RULE_STEP_AUDIT_RULE_IDS.switchRequested, "require_approval", body.reason, {
+        suggestionId: id,
+        switchId: w!.id,
+        approvalId: a!.id,
+        reviewerUserId: body.reviewerUserId,
+        agentId: row.agentId,
+        stepName: row.stepName,
+        ruleSha256: digest,
+      });
+      return { status: 202, body: { pending: true, switchId: w!.id, approvalId: a!.id } } as const;
+    });
+    return reply.status(out.status).send(out.body);
+  });
+
+  /** ADR-0327 slice 4a: revert a switched step to the AI in one action. No approval: it only takes the rule out. Audited. */
+  app.post("/v1/rule-steps/suggestions/:id/revert", async (req, reply) => {
+    const { id } = idParam.parse(req.params);
+    const parsed = revertBody.safeParse(req.body);
+    if (!parsed.success) return reply.status(400).send({ error: "invalid_body", issues: parsed.error.issues.slice(0, 20) });
+    const userId = req.authCtx.userId ?? null;
+    const out = await db.transaction(async (tx) => {
+      const row = await transitionSuggestion(tx as unknown as Db, id, "revert");
+      if (!row) return null;
+      const [open] = await tx
+        .select({ id: ruleStepSwitches.id })
+        .from(ruleStepSwitches)
+        .where(and(eq(ruleStepSwitches.suggestionId, id), eq(ruleStepSwitches.status, "switched")));
+      const sw = open
+        ? await transitionSwitch(tx as unknown as Db, open.id, "revert", { revertedBy: userId, revertedAt: sql`now()`, revertReason: parsed.data.reason })
+        : null;
+      await switchAudit(tx as unknown as Db, userId, RULE_STEP_AUDIT_RULE_IDS.reverted, "allow", parsed.data.reason, {
+        suggestionId: id,
+        switchId: sw?.id ?? null,
+        agentId: row.agentId,
+        stepName: row.stepName,
+      });
+      return { row, sw };
+    });
+    if (!out) return reply.status(409).send({ error: "not_switched", detail: "only a switched step can be reverted" });
+    return { id: out.row.id, status: out.row.status, switch: switchView(out.sw ?? undefined) };
+  });
+}
+
+function switchIdOf(approval: { stageId: string | null }): string | null {
+  return approval.stageId?.startsWith(RULE_STEP_SWITCH_PREFIX) ? approval.stageId.slice(RULE_STEP_SWITCH_PREFIX.length) : null;
+}
+
+/** ADR-0327 slice 4a: the requester never decides their own switch, through delegation or the admin override either */
+export async function precheckRuleStepSwitchDecision(
+  db: Pick<Db, "select">,
+  approval: { stageId: string | null },
+  deciderUserId: string,
+): Promise<{ status: number; body: Record<string, unknown> } | null> {
+  const switchId = switchIdOf(approval);
+  if (!switchId) return null;
+  const [w] = await db.select({ requestedBy: ruleStepSwitches.requestedBy }).from(ruleStepSwitches).where(eq(ruleStepSwitches.id, switchId));
+  if (w?.requestedBy === deciderUserId) {
+    return { status: 403, body: { error: "cannot_approve_own_rule_step_switch", detail: "the decider asked for this switch; the named reviewer decides it" } };
+  }
+  return null;
+}
+
+/**
+ * ADR-0327 slice 4a: apply a reviewer's decision inside the decide path's transaction. Approved = the suggestion is
+ * switched and its open shadow period closed, but only while it is still in shadow and its rule still hashes to the
+ * digest the request and the approval were bound to (else the request is recorded stale). Denied = rejected; the
+ * suggestion stays in shadow.
+ */
+export async function applyRuleStepSwitchDecision(
+  tx: Db,
+  approval: { id: string; stageId: string | null; argumentsDigest: string | null },
+  decision: "approved" | "denied",
+  deciderUserId: string,
+): Promise<void> {
+  const switchId = switchIdOf(approval);
+  if (!switchId) return;
+  const [ref] = await tx.select({ suggestionId: ruleStepSwitches.suggestionId }).from(ruleStepSwitches).where(eq(ruleStepSwitches.id, switchId));
+  if (!ref) return;
+  // serialized with requests and reverts on the suggestion row; the request is read again under that lock
+  const [row] = await tx.select().from(ruleStepSuggestions).where(eq(ruleStepSuggestions.id, ref.suggestionId)).for("update");
+  if (!row) return;
+  const [w] = await tx.select().from(ruleStepSwitches).where(eq(ruleStepSwitches.id, switchId));
+  if (!w || w.status !== "pending_review") return;
+  const decided = { decidedBy: deciderUserId, decidedAt: sql`now()` };
+  const detail = { suggestionId: row.id, switchId: w.id, approvalId: approval.id, agentId: row.agentId, stepName: row.stepName };
+
+  if (decision === "denied") {
+    if (await transitionSwitch(tx, w.id, "reject", decided)) {
+      await switchAudit(tx, deciderUserId, RULE_STEP_AUDIT_RULE_IDS.switchRejected, "deny", "switch denied by the named reviewer; the AI keeps answering", detail);
+    }
+    return;
+  }
+  const now = ruleStepRuleDigest(row.rule);
+  const inShadow = RULE_STEP_SUGGESTION_MACHINE.can(row.status, "switch");
+  if (!inShadow || now !== w.ruleSha256 || approval.argumentsDigest !== w.ruleSha256) {
+    if (await transitionSwitch(tx, w.id, "mark_stale", decided)) {
+      await switchAudit(
+        tx,
+        deciderUserId,
+        RULE_STEP_AUDIT_RULE_IDS.switchStale,
+        "deny",
+        inShadow
+          ? "switch approved but not applied: the rule no longer matches what was requested for review; ask again"
+          : `switch approved but not applied: the suggestion is ${row.status}, not in shadow mode; ask again`,
+        { ...detail, status: row.status, requestedSha256: w.ruleSha256, approvalSha256: approval.argumentsDigest, ruleSha256: now },
+      );
+    }
+    return;
+  }
+  if (!(await transitionSuggestion(tx, row.id, "switch"))) return;
+  if (!(await transitionSwitch(tx, w.id, "approve", decided))) return;
+  await tx
+    .update(ruleStepShadows)
+    .set({ stoppedAt: sql`now()`, stoppedBy: deciderUserId })
+    .where(and(eq(ruleStepShadows.suggestionId, row.id), isNull(ruleStepShadows.stoppedAt)));
+  await switchAudit(
+    tx,
+    deciderUserId,
+    RULE_STEP_AUDIT_RULE_IDS.switched,
+    "allow",
+    "switch approved by the named reviewer: the rule answers the inputs it covers and the AI answers the rest",
+    { ...detail, ruleSha256: w.ruleSha256 },
+  );
 }

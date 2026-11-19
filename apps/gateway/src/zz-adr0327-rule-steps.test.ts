@@ -406,6 +406,8 @@ describe("ADR-0327 suggestion lifecycle is the declared ADR-0348 machine (owner 
       shadow_start: [["suggested"], "shadow"],
       shadow_stop: [["shadow"], "suggested"],
       dismiss: [["suggested"], "dismissed"],
+      switch: [["shadow"], "switched"],
+      revert: [["switched"], "suggested"],
     });
     expect(RULE_STEP_SUGGESTION_MACHINE.def.terminal).toEqual(["dismissed"]);
   });
@@ -417,7 +419,7 @@ describe("ADR-0327 suggestion lifecycle is the declared ADR-0348 machine (owner 
     expect(items.length).toBeGreaterThan(0);
     for (const it of items) {
       expect(it.lifecycle).toMatchObject({ machine: "rule_step_suggestion", state: it.status, terminal: false });
-      expect(Object.fromEntries(it.lifecycle.transitions.map((t) => [t.event, t.allowed]))).toEqual({ shadow_start: false, shadow_stop: true, dismiss: false });
+      expect(Object.fromEntries(it.lifecycle.transitions.map((t) => [t.event, t.allowed]))).toEqual({ shadow_start: false, shadow_stop: true, dismiss: false, switch: true, revert: false });
     }
   });
 });
