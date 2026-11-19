@@ -200,6 +200,7 @@ export async function startRobotRun(db: Db, req: RobotRunRequest, deps: RobotRun
 
   // 2. attribution: a project with a budget
   if (!req.projectId) return refuse(db, req, "robot-run-needs-project", "A robot run must be attributed to a project with a budget; nothing ran.");
+  const projectId: string = req.projectId;
   const [project] = await db.select({ id: projects.id, budgetUsd: projects.budgetUsd }).from(projects).where(eq(projects.id, req.projectId));
   if (!project || project.budgetUsd === null || project.budgetUsd === undefined) {
     return refuse(db, req, "robot-run-needs-project", "The run's project has no budget; a robot run needs one. Nothing ran.");
@@ -253,7 +254,7 @@ export async function startRobotRun(db: Db, req: RobotRunRequest, deps: RobotRun
         robotVersionId: version.id,
         requestedBy: req.requestedBy,
         agentId: req.builderAgentId ?? null,
-        projectId: req.projectId,
+        projectId,
         kind: req.kind,
         contentDigest: req.contentDigest,
       })
