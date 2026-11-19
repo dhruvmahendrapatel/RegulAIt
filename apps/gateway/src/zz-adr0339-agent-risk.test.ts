@@ -51,6 +51,9 @@ import {
   connectors,
   contentTrustTiers,
   identityConnectorGrants,
+  identityServerGrants,
+  mcpServers,
+  mcpTools,
   workloadIdentities,
   createDb,
   desc,
@@ -139,6 +142,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (identityIds.length) {
     await db.delete(identityConnectorGrants).where(inArray(identityConnectorGrants.identityId, identityIds));
+    await db.delete(identityServerGrants).where(inArray(identityServerGrants.identityId, identityIds));
     // an identity is never deleted (revoke it); its agent stays too (the identity's foreign key restricts it)
   }
   if (connectorIds.length) await db.delete(contentTrustTiers).where(inArray(contentTrustTiers.sourceId, connectorIds));
@@ -482,6 +486,30 @@ describe("ADR-0339 addendum: capability combinations", () => {
     await sweep(s);
     t = (await toxicOf(s)).toxicCombinations.find((x) => x.id === "lethal_trifecta")!;
     expect(t.present).toBe(true);
+  });
+
+  it("registry agent: a new write tool on a whole-server grant marks the identity's agent and is scored at once", async () => {
+    const id = await mkAgent("r339-reg-srv");
+    const s: AgentRiskSubject = { kind: "agent", id };
+    const [server] = await db.insert(mcpServers).values({ name: `r339-srv-${RUN}`, url: "https://r339-mcp.example.test/" }).returning({ id: mcpServers.id });
+    await db.insert(mcpTools).values({ serverId: server!.id, name: `r339-read-${RUN}`, kind: "read" });
+    const [wid] = await db
+      .insert(workloadIdentities)
+      .values({ kind: "agent", agentId: id, identifier: `spiffe://regulait.test/regulait/agent/${id}`, sponsorUserIds: [owner.id] })
+      .returning({ id: workloadIdentities.id });
+    identityIds.push(wid!.id);
+    agentIds.splice(agentIds.indexOf(id), 1);
+    await db.insert(identityServerGrants).values({ identityId: wid!.id, serverId: server!.id, readOnlyAll: false });
+    await sweep(s);
+    const destructive = async () => (await toxicOf(s)).toxicCombinations.find((x) => x.id === "untrusted_input_unconfirmed_destructive")!;
+    expect((await destructive()).present).toBe(false);
+    // a tool sync adds a write tool to the server: the grant holds it at once, so the insert itself marks the agent
+    await db.insert(mcpTools).values({ serverId: server!.id, name: `r339-write-${RUN}`, kind: "write" });
+    expect((await requests(s)).length).toBeGreaterThan(0);
+    await sweep(s);
+    const d = await destructive();
+    expect(d.present).toBe(true);
+    expect(d.legs!.find((l) => l.id === "unconfirmed_destructive")!.members.map((m) => m.name)).toEqual([`r339-write-${RUN}`]);
   });
 });
 

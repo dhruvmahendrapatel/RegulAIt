@@ -5,8 +5,9 @@
 -- Trigger-only and additive: no table, column or route. Every function pins its search_path (zz-dbguard-0185) and
 -- writes only through `regulait_agent_risk_mark` (pending/agent_risk_scores.sql). Named to sort after it and after pending/connector_disable.sql, whose `disabled_at` column the connectors trigger watches. Marks (all 'evidence_changed', except
 -- an identity's own grants, which are 'access_changed'):
---   - mcp_tools: a change of kind or dangerous (as well as the existing name/server/delete), for the builder agents
---     bound to the tool AND the registry agents whose identity holds it (a tool grant or a server grant);
+--   - mcp_tools: a new tool (a whole-server grant holds it at once), a change of kind or dangerous (as well as the
+--     existing name/server/delete), for the builder agents bound to the tool AND the registry agents whose identity
+--     holds it (a tool grant or a server grant);
 --   - connectors: provider_kind or disabled_at, for the builder agents bound to it and the identities granted it;
 --   - content_trust_tiers (ADR-0193): any change, for every holder of the classified server's tools or the connector;
 --   - mcp_definition_pins: a tool's approved definition changing (its annotations), for the holders of that tool;
@@ -59,17 +60,19 @@ BEGIN
   END IF;
 END $$;
 --> statement-breakpoint
--- mcp_tools: the existing trigger now also fires on kind and dangerous, and marks identity holders too
+-- mcp_tools: the existing trigger now also fires on a new tool, kind and dangerous, and marks identity holders too
 CREATE OR REPLACE FUNCTION public.regulait_agent_risk_on_mcp_tool() RETURNS trigger
   LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE
   r record;
 BEGIN
-  FOR r IN SELECT t."agent_id" FROM public.builder_agent_tools t WHERE t."kind" = 'mcp_tool' AND t."ref_id" = OLD."id" LOOP
-    PERFORM public.regulait_agent_risk_mark(NULL, r."agent_id", 'evidence_changed');
-  END LOOP;
-  PERFORM public.regulait_agent_risk_mark_holders(OLD."server_id", OLD."name", NULL);
-  IF TG_OP = 'UPDATE' THEN
+  IF TG_OP <> 'INSERT' THEN
+    FOR r IN SELECT t."agent_id" FROM public.builder_agent_tools t WHERE t."kind" = 'mcp_tool' AND t."ref_id" = OLD."id" LOOP
+      PERFORM public.regulait_agent_risk_mark(NULL, r."agent_id", 'evidence_changed');
+    END LOOP;
+    PERFORM public.regulait_agent_risk_mark_holders(OLD."server_id", OLD."name", NULL);
+  END IF;
+  IF TG_OP <> 'DELETE' THEN
     PERFORM public.regulait_agent_risk_mark_holders(NEW."server_id", NEW."name", NULL);
   END IF;
   RETURN NULL;
@@ -77,7 +80,7 @@ END $$;
 --> statement-breakpoint
 DROP TRIGGER IF EXISTS "mcp_tools_risk_mark" ON "mcp_tools";
 --> statement-breakpoint
-CREATE TRIGGER "mcp_tools_risk_mark" AFTER UPDATE OF "server_id", "name", "kind", "dangerous" OR DELETE ON "mcp_tools"
+CREATE TRIGGER "mcp_tools_risk_mark" AFTER INSERT OR UPDATE OF "server_id", "name", "kind", "dangerous" OR DELETE ON "mcp_tools"
   FOR EACH ROW EXECUTE FUNCTION public.regulait_agent_risk_on_mcp_tool();
 --> statement-breakpoint
 -- connectors: what they can do (provider) and whether they are live
