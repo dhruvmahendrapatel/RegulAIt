@@ -160,6 +160,20 @@ describe("runRobotPlan", () => {
     expect(shots.map((c) => [c.item, c.step, c.contentType])).toEqual([0, 1, 2, 3, 4, 5].map((i) => [i, i, "image/jpeg"]));
   });
 
+  it("an oversized screenshot is not uploaded (the step stands), and a screenshot that fails is runner_error", async () => {
+    const page = new FakePage();
+    page.screenshot = async () => Buffer.alloc(2 * 1024 * 1024 + 1);
+    const big = await run(makePlan([{ op: "goto", url: "https://app.example.com/" }]), page);
+    expect(big.result.status).toBe("succeeded");
+    expect(big.gw.evidenceChunks).toEqual([]);
+    const broken = new FakePage();
+    broken.screenshot = async () => {
+      throw new Error("page text CANARY");
+    };
+    const r = await run(makePlan([{ op: "goto", url: "https://app.example.com/" }]), broken);
+    expect(r.result).toMatchObject({ status: "failed", failureCode: "runner_error", failedStep: 0, stepsCompleted: 1 });
+  });
+
   it("screenshots none: no evidence at all, and no screenshot is taken", async () => {
     const page = new FakePage();
     page.texts["#balance"] = "1";
