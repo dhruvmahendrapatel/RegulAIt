@@ -461,6 +461,10 @@ export const NON_ADMIN_ROUTES = new Set([
   // leak sideways. Every other cost-import route — uploading a file, asserting
   // an identity mapping, reading fleet-wide — is absent here on purpose.
   "GET /v1/users/:userId/cost-consolidated",
+  // ADR-0312: a non-admin pages the outcomes of workflows they initiated (handler predicate and the table's RLS)
+  "GET /v1/cost-outcomes",
+  // ADR-0312 (pilot addendum): a person reads their own spend budget and spend (refused in-handler otherwise)
+  "GET /v1/users/:userId/spend-budget",
   // ADR-0342 (lane E23): process analytics. Each read applies `evaluateReportAccess` in the handler and is narrowed to
   // the projects in scope the caller is a member of (org scope is admin-only); refresh stays admin.
   "GET /v1/process-analytics/templates",
