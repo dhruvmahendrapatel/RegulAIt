@@ -33,7 +33,6 @@ import path from "node:path";
 import {
   and,
   auditLog,
-  count,
   eq,
   executionOffers,
   projects,
@@ -45,6 +44,8 @@ import {
   robotVersionSecrets,
   robotVersions,
   runWithRlsSystem,
+  sql,
+  withinSystemReason,
   type Db,
   type RobotRow,
   type RobotVersionRow,
@@ -78,6 +79,8 @@ import { whereFrom } from "./state-transition.js";
 export const ROBOT_RUNNER_WORKLOAD = { command: "/usr/local/bin/node", args: ["/app/robot-runner/dist/main.js"] } as const;
 /** margin over the run's wall clock before the gateway withdraws a placement whose runner never reported */
 const WALL_CLOCK_MARGIN_MS = 30_000;
+/** after a result, how long the runner has to receive its answer and exit by itself before the session is closed */
+const RESULT_EXIT_GRACE_MS = 10_000;
 
 export type RobotRunRefusal =
   | "robot_run_safe_mode"
@@ -158,10 +161,12 @@ async function refuse(
   runId: string | null = null,
 ): Promise<RobotRunOutcome> {
   if (runId) {
-    await db
-      .update(robotRuns)
-      .set({ status: "refused", failureCode: code.replaceAll("-", "_"), finishedAt: new Date() })
-      .where(and(eq(robotRuns.id, runId), whereFrom(robotRuns.status, ROBOT_RUN_MACHINE, "refuse")));
+    await runWithRlsSystem("system_task", "robot-run.refuse", () =>
+      db
+        .update(robotRuns)
+        .set({ status: "refused", failureCode: code.replaceAll("-", "_"), finishedAt: new Date() })
+        .where(and(eq(robotRuns.id, runId), whereFrom(robotRuns.status, ROBOT_RUN_MACHINE, "refuse"))),
+    );
   }
   await db.insert(auditLog).values({
     userId: req.requestedBy,
@@ -240,17 +245,20 @@ export async function startRobotRun(db: Db, req: RobotRunRequest, deps: RobotRun
   if (!imageDigest) return refuse(db, req, "robot_runner_unavailable", "The robot runner image is not published in this release; nothing ran.");
 
   // the run row (queued), then 6. decision 7
-  const [run] = await db
-    .insert(robotRuns)
-    .values({
-      robotVersionId: version.id,
-      requestedBy: req.requestedBy,
-      agentId: req.builderAgentId ?? null,
-      projectId: req.projectId,
-      kind: req.kind,
-      contentDigest: req.contentDigest,
-    })
-    .returning({ id: robotRuns.id });
+  // robot_runs is written by the gateway only (its RLS write policy: admin or system_task), never as the requester
+  const [run] = await runWithRlsSystem("system_task", "robot-run.queue", () =>
+    db
+      .insert(robotRuns)
+      .values({
+        robotVersionId: version.id,
+        requestedBy: req.requestedBy,
+        agentId: req.builderAgentId ?? null,
+        projectId: req.projectId,
+        kind: req.kind,
+        contentDigest: req.contentDigest,
+      })
+      .returning({ id: robotRuns.id }),
+  );
   const runId = run!.id;
   await auditRun(db, req.requestedBy, runId, "robot-run-queued", `Robot '${robot.slug}' version ${version.version} queued (${req.kind} run).`, {
     robotId: robot.id,
@@ -313,12 +321,17 @@ export async function startRobotRun(db: Db, req: RobotRunRequest, deps: RobotRun
     return refuse(db, req, "robot_run_placement_refused", `The sandbox did not start (${placed.code}); nothing ran.`, runId);
   }
   watchHeldStdioSession(db, session);
-  await db
-    .update(robotRuns)
-    .set({ status: "running", startedAt: new Date(), executionPlacementId: placed.placementId })
-    .where(and(eq(robotRuns.id, runId), whereFrom(robotRuns.status, ROBOT_RUN_MACHINE, "start")));
+  await runWithRlsSystem("system_task", "robot-run.start", () =>
+    db
+      .update(robotRuns)
+      .set({ status: "running", startedAt: new Date(), executionPlacementId: placed.placementId })
+      .where(and(eq(robotRuns.id, runId), whereFrom(robotRuns.status, ROBOT_RUN_MACHINE, "start"))),
+  );
 
   const result = await controller.wait(plan.limits.wallClockMs + WALL_CLOCK_MARGIN_MS);
+  // the runner awaits its result's answer, then closes its browser and writes its `end` frame: closing the session at
+  // once would drop that answer and stop the sandbox before it exits (every run's sandbox would end `killed`)
+  if (result) await controller.sessionEndedWithin(RESULT_EXIT_GRACE_MS);
   session.close();
   await endStdioSession(db, decision.offerId).catch(() => undefined);
   return finishRun(db, req, runId, result, version.outputSchema as Record<string, unknown>);
@@ -338,14 +351,16 @@ async function finishRun(db: Db, req: RobotRunRequest, runId: string, r: RobotRu
     }
   }
   const event = status === "succeeded" ? "succeed" : status === "failed" ? "fail" : status === "timed_out" ? "time_out" : "cancel";
-  await db
-    .update(robotRuns)
-    .set({ status, failureCode, stepCount: r?.stepsCompleted ?? null, finishedAt: new Date() })
-    .where(and(eq(robotRuns.id, runId), whereFrom(robotRuns.status, ROBOT_RUN_MACHINE, event)));
-  const [row] = await db.select({ startedAt: robotRuns.startedAt, finishedAt: robotRuns.finishedAt }).from(robotRuns).where(eq(robotRuns.id, runId));
-  if (row?.startedAt && row.finishedAt) {
-    await db.update(robotRuns).set({ durationMs: row.finishedAt.getTime() - row.startedAt.getTime() }).where(eq(robotRuns.id, runId));
-  }
+  await runWithRlsSystem("system_task", "robot-run.finish", async () => {
+    await db
+      .update(robotRuns)
+      .set({ status, failureCode, stepCount: r?.stepsCompleted ?? null, finishedAt: new Date() })
+      .where(and(eq(robotRuns.id, runId), whereFrom(robotRuns.status, ROBOT_RUN_MACHINE, event)));
+    const [row] = await db.select({ startedAt: robotRuns.startedAt, finishedAt: robotRuns.finishedAt }).from(robotRuns).where(eq(robotRuns.id, runId));
+    if (row?.startedAt && row.finishedAt) {
+      await db.update(robotRuns).set({ durationMs: row.finishedAt.getTime() - row.startedAt.getTime() }).where(eq(robotRuns.id, runId));
+    }
+  });
   await auditRun(
     db,
     req.requestedBy,
@@ -378,6 +393,8 @@ export class RobotRunController {
   private result: RobotRunResult | null = null;
   private done = false;
   private waiters: Array<() => void> = [];
+  private sessionDone = false;
+  private endWaiters: Array<() => void> = [];
   private readonly items = new Map<number, EvidenceItem>();
   private storedItems = 0;
   private readonly startedAt = Date.now();
@@ -417,7 +434,21 @@ export class RobotRunController {
   }
 
   sessionEnded(): void {
+    this.sessionDone = true;
+    for (const w of this.endWaiters.splice(0)) w();
     this.finish(this.result);
+  }
+
+  /** resolves when the sandbox's side of the session ended (its stdout's eof), or after `ms` */
+  sessionEndedWithin(ms: number): Promise<void> {
+    if (this.sessionDone) return Promise.resolve();
+    return new Promise((resolve) => {
+      const t = setTimeout(resolve, ms);
+      this.endWaiters.push(() => {
+        clearTimeout(t);
+        resolve();
+      });
+    });
   }
 
   private finish(r: RobotRunResult | null): void {
@@ -436,8 +467,14 @@ export class RobotRunController {
       return; // not a frame: the runner speaks frames only; anything else is dropped, never echoed
     }
     if (frame.t !== "http") return;
-    const reply = (status: number, body: unknown) =>
-      session.push(JSON.stringify({ t: "http_res", id: frame.id, status, headers: { "content-type": "application/json" }, body: Buffer.from(JSON.stringify(body)).toString("base64") }));
+    // a session that closed meanwhile (the run ended) takes no answer: dropped, never an unhandled rejection
+    const reply = (status: number, body: unknown) => {
+      try {
+        session.push(JSON.stringify({ t: "http_res", id: frame.id, status, headers: { "content-type": "application/json" }, body: Buffer.from(JSON.stringify(body)).toString("base64") }));
+      } catch {
+        /* the session is closed */
+      }
+    };
     this.chain = this.chain
       .then(() => this.answer(frame as Extract<typeof frame, { t: "http" }>))
       .then(([status, body]) => reply(status, body))
@@ -561,7 +598,14 @@ export function robotEgressLogHook(store: ArtifactStore | null) {
     const [offer] = await tx.select({ robotRunId: executionOffers.robotRunId }).from(executionOffers).where(eq(executionOffers.id, end.offerId));
     if (!offer?.robotRunId) return;
     const bytes = Buffer.from(end.log, "utf8");
-    const [{ n }] = (await tx.select({ n: count() }).from(robotRunEvidence).where(eq(robotRunEvidence.robotRunId, offer.robotRunId))) as [{ n: number }];
+    // the executor's end runs as the executor's principal, which robot_run_evidence's policies do not open: the read
+    // and the write below are the gateway's own (system_task) steps inside that transaction. The log takes the item
+    // after the highest stored one (items need not be contiguous: a refused item leaves a gap).
+    const runId = offer.robotRunId;
+    const [{ top }] = (await withinSystemReason(tx, "system_task", "robot-run.egress-log-read", () =>
+      tx.select({ top: sql<number | null>`max(${robotRunEvidence.item})` }).from(robotRunEvidence).where(eq(robotRunEvidence.robotRunId, runId)),
+    )) as [{ top: number | null }];
+    const n = top === null ? 0 : Number(top) + 1;
     if (n >= ROBOT_RUN_LIMITS.evidenceItems) return;
     if (store) {
       const key = artifactStorageKey(end.sha256);
@@ -576,9 +620,9 @@ export function robotEgressLogHook(store: ArtifactStore | null) {
         }
       }
     }
-    await runWithRlsSystem("system_task", "robot-run.egress-log", () =>
+    await withinSystemReason(tx, "system_task", "robot-run.egress-log", () =>
       tx.insert(robotRunEvidence).values({
-        robotRunId: offer.robotRunId!,
+        robotRunId: runId,
         item: n,
         kind: "egress_log",
         step: null,
