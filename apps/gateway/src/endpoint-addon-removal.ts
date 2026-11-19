@@ -76,7 +76,7 @@ import { ENDPOINT_AGENT_PATHS, type EndpointAgentContext } from "./endpoint-agen
 import { mcpIdentityInput, mcpServerSchema } from "./endpoint-mcp-config.js";
 import { filterParams, parseListPage, runListPage, sendListError, type ListReader, type ListSpec } from "./list-contract.js";
 import { loadExecutionMode } from "./execution-posture.js";
-import type { DevicePolicySigner } from "./device-policy-signer.js";
+import type { DirectiveSigner } from "./directive-signer.js";
 import { ExternalEffectBlockedError, runExternalWrite } from "./external-effects.js";
 import { whereFrom } from "./state-transition.js";
 import { checkStepUp, isStepUpPrompt, type StepUpCheckArgs } from "./step-up.js";
@@ -107,7 +107,7 @@ const KEY_ID_SHAPE = /^[a-z0-9][a-z0-9-]{2,63}$/;
 /** an addressable server entry name (the agent's serverShape); `(unnamed)` never is */
 const SERVER_NAME_SHAPE = "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$";
 
-export type { DevicePolicySigner } from "./device-policy-signer.js";
+export type { DirectiveSigner } from "./directive-signer.js";
 
 type OutcomeKind = keyof typeof ENDPOINT_DIRECTIVE_OUTCOME_CODES;
 const OUTCOMES = Object.keys(ENDPOINT_DIRECTIVE_OUTCOME_CODES) as OutcomeKind[];
@@ -465,7 +465,7 @@ const isRefusal = (x: unknown): x is Refusal => typeof x === "object" && x !== n
 // Admin routes
 // ---------------------------------------------------------------------------
 
-export function registerEndpointAddonRemovalRoutes(app: FastifyInstance, db: Db, opts: { signer?: DevicePolicySigner | null } = {}): void {
+export function registerEndpointAddonRemovalRoutes(app: FastifyInstance, db: Db, opts: { signer?: DirectiveSigner | null } = {}): void {
   const signerConfigured = !!opts.signer;
   const actor = (req: FastifyRequest) => req.authCtx.userId ?? NIL_UUID;
   const badRequest = (reply: FastifyReply, err: z.ZodError) =>
@@ -908,7 +908,7 @@ export interface DirectiveRouteDeps {
   refuse(reply: FastifyReply, status: number, error: string): FastifyReply;
   /** the raw body as JSON, or undefined (never echoed) */
   jsonOf(body: unknown): unknown;
-  signer: DevicePolicySigner | null;
+  signer: DirectiveSigner | null;
 }
 
 export function registerEndpointDirectiveRoutes(scope: FastifyInstance, db: Db, deps: DirectiveRouteDeps): void {

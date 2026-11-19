@@ -127,7 +127,7 @@ import { bindPreparedCredentialTx, IdentityAdminError, revokeWorkloadIdentity } 
 import type { SchedulerJobDefinition } from "./scheduler.js";
 import { requireStepUp, type StepUpCheckArgs } from "./step-up.js";
 import { MCP_CONFIG_KIND, recordMcpServers } from "./endpoint-mcp-config.js";
-import { registerEndpointDirectiveRoutes, type DevicePolicySigner } from "./endpoint-addon-removal.js";
+import { registerEndpointDirectiveRoutes, type DirectiveSigner } from "./endpoint-addon-removal.js";
 import { loadDiscoverySettings } from "./discovery-posture.js";
 import { hashToken } from "./token-hash.js";
 
@@ -485,7 +485,7 @@ async function revokeDeviceTx(t: Db, deviceId: string, actorId: string, revokedB
 export function registerEndpointAgentRoutes(
   app: FastifyInstance,
   db: Db,
-  opts: { dataKey?: string | undefined; registry?: ScannerRegistry; devicePolicySigner?: DevicePolicySigner | null } = {},
+  opts: { dataKey?: string | undefined; registry?: ScannerRegistry; directiveSigner?: DirectiveSigner | null } = {},
 ): void {
   const registry = opts.registry ?? DISCOVERY_SCANNERS;
 
@@ -742,7 +742,7 @@ export function registerEndpointAgentRoutes(
       audit: (t, sourceId, ruleId, effect, reason, detail) => audit(t, NIL_UUID, "discovery_source", sourceId, ruleId, effect, reason, { adr: "0331", ...detail }),
       refuse,
       jsonOf,
-      signer: opts.devicePolicySigner ?? null,
+      signer: opts.directiveSigner ?? null,
     });
 
     // -- key rotation (ADR-0188 S7 point 4) -----------------------------------------------------------------------

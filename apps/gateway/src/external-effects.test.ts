@@ -105,7 +105,7 @@ describe("external provider mutation admission", () => {
     { adapter: "infra", module: "@regulait/infra-provider", source: path.join(PACKAGES, "infra-provider/src/index.ts"), iface: "InfraProvider", reads: ["scan"] },
     { adapter: "pm", module: "@regulait/pm-provider", source: path.join(PACKAGES, "pm-provider/src/index.ts"), iface: "PmProvider", reads: ["getWorkItem", "listWorkItems"] },
     // ADR-0331: the device-policy signer; a signature is what lets a directive act on a device
-    { adapter: "device_policy", module: path.join(here, "device-policy-signer.ts"), source: path.join(here, "device-policy-signer.ts"), iface: "DevicePolicySigner", reads: ["keyId"] },
+    { adapter: "device_policy", module: path.join(here, "directive-signer.ts"), source: path.join(here, "directive-signer.ts"), iface: "DirectiveSigner", reads: ["keyId"] },
   ] as const;
   type Contract = (typeof CONTRACTS)[number];
 

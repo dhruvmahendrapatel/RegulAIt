@@ -324,11 +324,11 @@ beforeAll(async () => {
   await runMigrations(db, migrationsFolder);
   // ADR-0331: the device-policy signer is the counting fake for device_policy.sign_payload (one call per directive)
   const directiveKey = generateKeyPairSync("ed25519").privateKey;
-  const devicePolicySigner = probe.counting(
-    { kind: "device_policy_signer" as const, keyId: "barrier-directive-key", signPayload: async (b: Buffer) => edSign(null, b, directiveKey) },
+  const directiveSigner = probe.counting(
+    { kind: "directive_signer" as const, keyId: "barrier-directive-key", signPayload: async (b: Buffer) => edSign(null, b, directiveKey) },
     { signPayload: "device_policy.sign_payload" },
   );
-  app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY, devicePolicySigner });
+  app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY, directiveSigner });
   const pia = await makeUser(`bm-pia-${RUN}@example.com`);
   piaId = pia.id;
   piaAuth = pia.auth;

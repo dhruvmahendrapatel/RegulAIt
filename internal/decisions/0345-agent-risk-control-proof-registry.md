@@ -1,6 +1,6 @@
 # ADR-0345: Agent risk register with controls and continuous proofs
 
-- **Status**: Accepted (slices 1 and 2a implemented)
+- **Status**: Accepted (slices 1, 2a and 2b implemented)
 - **Date**: 2026-11-17
 - **Lane**: E26
 - **Related**: ADR-0085 (EU AI Act tier screening), ADR-0158 (regulatory intelligence feed), ADR-0180 (continuous assurance: A2 measurable conditions, `MEASUREMENT_STATES`), ADR-0057/0068 (continuous red-team, its statistics), ADR-0058 (compliance packs), ADR-0060 (hash-chained
@@ -115,8 +115,18 @@ What exists already:
        admin, else the all-zero system id. The acknowledgement's requester must be a real user (foreign key), and
        its approver is someone else wherever the deployment has a second admin or an alert owner.
      - One proof that cannot be recorded is audited (`agent-risk-proof-run-failed`); the sweep goes on to the others.
-   - Slice 2b: the gateway-probe harness (the eight probes), the ADR-0058 pack collector and the ADR-0214 posture
-     input, and the verifier's `unverifiable` label for a result whose audit row is gone.
+   - Slice 2b: reading results as evidence (`apps/gateway/src/agent-risk-proof-evidence.ts`).
+     - Each result is labelled. `verified` means the hash recomputes, the audit row is still in the chain with the
+       same hash, and the signature verifies against the export key it names. `unsigned` means the same but with no
+       signature. `unverifiable` comes with a reason: audit row missing or broken, hash mismatch, a key this
+       deployment no longer holds, or a bad signature.
+     - Only a passing result that is not `unverifiable` counts as evidence anywhere.
+     - The ADR-0058 collector `agent_risk_proofs` counts those results for the proofs whose risk cites the control
+       being evaluated (org-scoped reports only). No shipped pack version names it yet: adopting it in an OWASP pack
+       is a new pack version for the ADR-0243 owner (owner question below).
+     - The ADR-0214 posture document gains a `riskProofs` section, shown as inputs to the adversarial objective. It
+       does not change the published weights or any score (owner question below).
+   - Slice 2c: the gateway-probe harness for the eight probes, which record `not_run` until then.
    - Slice 3: the read and settings APIs for the view. The UI belongs to a design builder and is a `KNOWN_UI_GAPS`
      entry tracked on #453.
 9. **Geography is a factor in risk tiering.** Owner, 2026-11-17, from the competitor gap audit (C5). The
@@ -179,6 +189,11 @@ What exists already:
   added, so `THIRD_PARTY.md` does not change.
 
 ## Owner questions (open)
+
+- Should the next OWASP LLM / MCP pack versions name the `agent_risk_proofs` collector for the controls a proof
+  covers? Then a passing, evidenced proof satisfies them automatically.
+- Should the proofs carry weight in the posture estimate, for example as part of the adversarial objective? Today
+  they are shown as inputs only, so the published weights stay as they are.
 
 - Should review routing (`tierKeyFor`) read the effective tier (screened tier plus jurisdiction floor)? Doing so
   changes the required reviewers for existing use cases. Which tier floors should the seeded jurisdictions carry? None

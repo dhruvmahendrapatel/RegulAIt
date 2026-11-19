@@ -1,31 +1,40 @@
 # Build status
 
-## Current state (2026-11-18, 18:10 UTC)
+## Current state (2026-11-19, 10:15 UTC)
 
-- **Rule 15 (finish before starting)** is in force for every builder lane.
-- **Queue:** about 75 open PRs. Target: under 50, then lift rule 15 a few lanes at a time, E45 (RPA) code first.
-- **Sessions:** phasing down to 10 (D-2026-11-18-04). Archived today: E24, E25.
-- **Merge loop:** runs from the master's scratchpad, restarted every 7000 s. One census-counter PR released at a time
-  (M-118).
+- **Rule 15 (finish before starting)** is in force for every builder lane except E45: the owner approved an exception
+  for E45 S2, the Robots backend (D-2026-11-19-01).
+- **Queue:** 81 open PRs. Target: under 50, then lift rule 15 a few lanes at a time.
+- **Main's census counter:** `KNOWN_UI_GAPS_MAX` = 112 at 6f10a239. One census-counter PR released at a time (M-118).
+- **Merge loop:** runs from the master's scratchpad, restarted every 7000 s.
+- **CVE-2026-97054 (Go stdlib 1.27.3), 2026-11-19 03:42-04:45 UTC.** A new Trivy advisory against the skillscanner CEL
+  helper turned main's "Engine image scan and SBOM (skillscanner)" red and blocked every release. Hotfix #1058 rebuilt
+  the helper with Go 1.27.4 (patched, not allow-listed) and merged at 04:45. Rule: a new advisory that turns main red
+  gets one hotfix lane, released ahead of the queue. Open PRs then merge main to pick up the green scan.
+- **Usage-limit outage, 2026-11-18 21:40-21:58 UTC.** The account's weekly limit stopped every session on the account,
+  the master included. Rule for the next one: pause, start nothing new, then resume the failed sessions, reviewers
+  first, at about 7 messages a minute.
 
 ## Pending
 
 | Item | Owner | Since | Notes |
 |---|---|---|---|
-| Census queue: #902 E1, #883 E20, #848 E2, #855 E3, #861 E7, #867 E16, #865 E15 | builders, one at a time | 2026-11-18 | M-118; #902 first |
-| #952 E31 | merge loop | 2026-11-18 | Released at ac673b69 |
-| #1020 E12, #982 E44, #871 E13 | builders | 2026-11-18 | Request changes; waiting for READY |
-| #884 E18 SaaS entitlement graph | E18 | 2026-11-18 | Security request changes; no READY yet |
+| Census queue: #1020 E12 (in delta review), #871 E13, #892 E20, #884 E18, #964 E31, #1044 E1, #982 E44 | builders, one at a time | 2026-11-18 | M-118. #964 and #1044 say all findings are fixed; #982 is approved at 4c2d5694 |
+| E45 S2 Robots backend (ADR-0364) | E45 | 2026-11-19 | Rule-15 exception; no PR yet |
+| Free-form browsing budget and max run time (ADR-0364 S3/S4) | owner | 2026-11-18 | Not needed for S2 |
+| E2E capability probe report (governed MCP and agents) | owner | 2026-11-19 | Held in the probe session; not sent cross-session |
 | #996 E27 fairness slice 2 | E27 | 2026-11-18 | Three failing checks |
 | #936 Codex C1 CI build-once | Codex | 2026-11-18 | Route first when READY |
 | #1006 C2, #1007 C3 | Codex | 2026-11-18 | Drafts, checks failing |
 | Census counter computed instead of hand-set | owner | 2026-11-18 | Proposal only |
 | #1009 flaky SAP idempotency test | triage-low | 2026-11-18 | F2 × S2 = 4; one re-run allowed |
-| S7 RLS PM-tables batch push | S7 | 2026-11-18 | Owner approved the push (D-2026-11-18-08); confirm that S7 pushed |
 | E10 rehearsal | parked | 2026-11-18 | Owner deferred (D-2026-11-18-09) |
 
 ## Done log (newest first)
 
+- 2026-11-19 (night to morning): #1045, #855, #1058 (CVE hotfix), #861, #867 and #865 merged, each audited
+  (second parent = released SHA); dhruv/active fast-forwarded after each.
+- 2026-11-18 (late): #1040, #952, #902, #883 and #1039 merged, each audited (second parent = released SHA).
 - 2026-11-18 (evening): #1035, #744 and #1019 merged, each audited. M-118 logged.
 - 2026-11-18 (afternoon): #1013, #904, #1010 and #903 merged, each audited (second parent = released SHA).
 - 2026-11-18: master hand-over (about 08:54 UTC). #941 merged (82142059, second parent 3b86b4e0, audited); #973 and

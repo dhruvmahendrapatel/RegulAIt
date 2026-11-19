@@ -90,7 +90,7 @@ audited.
   `stale`, nothing is sent, and a new request is needed. This also closes the gap that the requester's step-up binds the
   request, not what it resolves to. The approval expires with the removal (seven days).
 - **Kill switch.** Signing a directive is a classified external write, `device_policy.sign_payload`: the
-  `DevicePolicySigner` is a contract in `external-effects.test.ts`, and every signature is the direct body of
+  `DirectiveSigner` (`apps/gateway/src/directive-signer.ts`) is a contract in `external-effects.test.ts`, and every signature is the direct body of
   `runExternalWrite`, which re-reads the execution mode immediately before it. Outside `normal`, no removal is requested
   or approved, and the agent's directive read serves an empty list (audited as `execution_halted`, `execution_read_only`
   or `execution_requires_approval`). A halt cancels nothing: the targets wait, undelivered (execution control principle 4,

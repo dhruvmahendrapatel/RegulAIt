@@ -47,7 +47,7 @@ import {
 } from "@regulait/db";
 import { BATCH4_STRICT_DEFAULTS, DISCOVERY_STEP_UP_KEYS } from "@regulait/shared";
 import { buildApp } from "./app.js";
-import { createRemovalSchema, endpointAddonRemovalDecideStepUp, endpointRemediationStepUp, type DevicePolicySigner } from "./endpoint-addon-removal.js";
+import { createRemovalSchema, endpointAddonRemovalDecideStepUp, endpointRemediationStepUp, type DirectiveSigner } from "./endpoint-addon-removal.js";
 import type { StepUpCheckArgs } from "./step-up.js";
 import { endpointAgentKeys } from "./testing/endpoint-agent-client.js";
 import { enrolEndpointAgent, seenMcpServer, type EnrolledAgent } from "./testing/endpoint-addon-removal-fixture.js";
@@ -73,7 +73,7 @@ process.env.REGULAIT_PUBLIC_URL = ORIGIN;
 
 // a runtime Ed25519 key pair: the test signer the production build never has (SD4 pending)
 const directiveKeys = generateKeyPairSync("ed25519");
-const signer: DevicePolicySigner = { kind: "device_policy_signer", keyId: "test-directive-key", signPayload: async (b) => edSign(null, b, directiveKeys.privateKey) };
+const signer: DirectiveSigner = { kind: "directive_signer", keyId: "test-directive-key", signPayload: async (b) => edSign(null, b, directiveKeys.privateKey) };
 
 let db: Db;
 let app: ReturnType<typeof buildApp>;
@@ -203,7 +203,7 @@ beforeAll(async () => {
   restores.push(async () => {
     if (o0) await db.update(orgSettings).set({ stepUpMode: o0.mode, stepUpActions: o0.actions, executionMode: o0.exec }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   });
-  app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY, devicePolicySigner: signer });
+  app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY, directiveSigner: signer });
   unsigned = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   await Promise.all([app.ready(), unsigned.ready()]);
   await db.update(orgSettings).set({ stepUpMode: "required", stepUpActions: [...BATCH4_STRICT_DEFAULTS.stepUpActions] }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
