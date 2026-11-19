@@ -120,15 +120,28 @@ export type RobotRunResult = z.infer<typeof robotRunResultSchema>;
 export const ROBOT_EVIDENCE_KINDS = ["screenshot", "download", "egress_log"] as const;
 export type RobotEvidenceKind = (typeof ROBOT_EVIDENCE_KINDS)[number];
 
-/** the JSON half of an evidence upload; the bytes are the request body (base64 here keeps one JSON route) */
+/** raw bytes per evidence chunk: one chunk's base64 fits the gateway channel's 512 KiB request body */
+export const ROBOT_EVIDENCE_CHUNK_BYTES = 256 * 1024;
+
+/**
+ * One chunk of one evidence item (the gateway channel bounds a request body, so an item goes up in order, in chunks).
+ * `item` is the runner's 0-based item number; the last chunk carries the whole item's size and sha256, which the
+ * gateway recomputes before it stores anything. Screenshots are JPEG (`page.screenshot({ type: "jpeg" })`).
+ */
 export const robotEvidenceUploadSchema = z
   .object({
+    item: z.number().int().min(0).max(ROBOT_RUN_LIMITS.evidenceItems - 1),
     kind: z.enum(ROBOT_EVIDENCE_KINDS),
     step: z.number().int().min(0).max(ROBOT_LIMITS.steps).nullable(),
-    contentType: z.enum(["image/png", "application/octet-stream", "text/plain"]),
-    dataBase64: z.string().max(Math.ceil((ROBOT_RUN_LIMITS.downloadBytes * 4) / 3) + 4),
+    contentType: z.enum(["image/jpeg", "application/octet-stream", "text/plain"]),
+    chunk: z.number().int().min(0).max(Math.ceil(ROBOT_RUN_LIMITS.downloadBytes / ROBOT_EVIDENCE_CHUNK_BYTES)),
+    dataBase64: z.string().max(Math.ceil((ROBOT_EVIDENCE_CHUNK_BYTES * 4) / 3) + 4),
+    last: z.boolean(),
+    size: z.number().int().min(0).max(ROBOT_RUN_LIMITS.downloadBytes).optional(),
+    sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   })
-  .strict();
+  .strict()
+  .refine((u) => !u.last || (u.size !== undefined && u.sha256 !== undefined), { message: "the last chunk names the item's size and sha256" });
 export type RobotEvidenceUpload = z.infer<typeof robotEvidenceUploadSchema>;
 
 export const robotHeartbeatSchema = z.object({ step: z.number().int().min(0).max(ROBOT_LIMITS.steps) }).strict();
