@@ -10,9 +10,9 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, createDb, eq, guardrailConfigs, isNull, mcpServers, orgSettings, runMigrations, runWithRlsSystem, sql, type Db } from "@regulait/db";
+import { and, createDb, eq, approvals, guardrailConfigs, isNull, mcpServers, orgSettings, runMigrations, users, runWithRlsSystem, sql, type Db } from "@regulait/db";
 import { AGENT_RISK_GATEWAY_PROBES, AGENT_RISK_PROOF_ORIGIN_TAG, agentRiskProofs } from "@regulait/shared";
-import { AGENT_RISK_PROBES_NOT_BUILT, runGatewayProbe } from "./agent-risk-proof-probes.js";
+import { AGENT_RISK_PROBES_NOT_BUILT, RISK_PROOF_TOOL, runGatewayProbe } from "./agent-risk-proof-probes.js";
 import { runAgentRiskProofEngine } from "./agent-risk-proof-runner.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -43,6 +43,11 @@ async function underRelaxed<T>(relax: (tx: Db) => Promise<unknown>, fn: (tx: Db)
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // the approval fixtures reference the deployment's own admins (the runner may not create users)
+  await db.insert(users).values([
+    { email: `e26-probes-a-${process.pid}@example.test`, displayName: "e26 probe admin a", isAdmin: true },
+    { email: `e26-probes-b-${process.pid}@example.test`, displayName: "e26 probe admin b", isAdmin: true },
+  ]).onConflictDoNothing();
 }, 120_000);
 
 describe("ADR-0345 slice 2c: gateway probes on the secure defaults", () => {
@@ -51,16 +56,16 @@ describe("ADR-0345 slice 2c: gateway probes on the secure defaults", () => {
     expect(r.outcome, JSON.stringify(r.detail)).toBe("pass");
   });
 
-  it("NEGATIVE: a probe whose harness is not built yet is not_run", async () => {
-    for (const probe of AGENT_RISK_PROBES_NOT_BUILT) {
-      expect(await sys(() => runGatewayProbe(db, probe))).toEqual({ outcome: "not_run", detail: { reason: "probe_not_built", probe } });
-    }
+  it("every catalogue probe has a harness (none is left not_run)", () => {
+    expect(AGENT_RISK_PROBES_NOT_BUILT).toEqual([]);
+    expect(BUILT).toEqual([...AGENT_RISK_GATEWAY_PROBES]);
   });
 
-  it("the drift probe commits no fixture server", async () => {
-    await sys(() => runGatewayProbe(db, "mcp_definition_drift"));
-    const left = await db.select({ id: mcpServers.id }).from(mcpServers).where(sql`${mcpServers.name} like ${`${AGENT_RISK_PROOF_ORIGIN_TAG}-%`}`);
-    expect(left).toEqual([]);
+  it("the fixture probes commit nothing: no sandbox server or approval is left behind", async () => {
+    for (const probe of ["mcp_definition_drift", "approval_replay", "approval_expired"] as const) await sys(() => runGatewayProbe(db, probe));
+    const tag = `${AGENT_RISK_PROOF_ORIGIN_TAG}-%`;
+    expect(await db.select({ id: mcpServers.id }).from(mcpServers).where(sql`${mcpServers.name} like ${tag}`)).toEqual([]);
+    expect(await db.select({ id: approvals.id }).from(approvals).where(eq(approvals.toolName, RISK_PROOF_TOOL))).toEqual([]);
   });
 });
 
@@ -88,6 +93,18 @@ describe("ADR-0345 slice 2c: a relaxed control fails its probe", () => {
       ),
     );
     expect(r).toMatchObject({ outcome: "fail", detail: { refused: false } });
+  });
+});
+
+describe("ADR-0345 slice 2c part 2: the loop cap reads the org dials", () => {
+  it("NEGATIVE: a worker ceiling written around the settings schema (past the 20-turn wall) fails the loop probe", async () => {
+    const r = await sys(() =>
+      underRelaxed(
+        (tx) => tx.update(orgSettings).set({ maxWorkerTurns: 1000, defaultWorkerMaxTurns: 1000 }),
+        (tx) => runGatewayProbe(tx, "loop_turn_cap"),
+      ),
+    );
+    expect(r).toMatchObject({ outcome: "fail", detail: { seededLoopCap: 1000 } });
   });
 });
 
