@@ -8,12 +8,14 @@ questions.
 
 | Since | Question | Blocks |
 |---|---|---|
-| 2026-11-18 | Free-form browsing (ADR-0364 §4): the per-session budget and the maximum run time | E45 S3/S4, not S2 |
+| none | (none open) | |
 
 ## Decisions
 
 | ID | Date | Question | Answer | Applied in |
 |---|---|---|---|---|
+| D-2026-11-19-03 | 2026-11-19 | Free-form browsing limits (ADR-0364 §4); session housekeeping | 30-minute maximum run time and a $2 default budget per session (an admin can change it per project, audited). Archive the finished sessions, keep lanes running, and ask the owner questions as popups | E45 told 23:15 |
+| D-2026-11-19-02 | 2026-11-19 | Speed up the build | Computed UI-gaps counter (#1067); lift rule 15 for E2, E7, E16 and UI-B; add reviewers R4 and S4; E45 starts S3 (browser runner) | Lanes told 21:45 |
 | D-2026-11-19-01 | 2026-11-19 | Start lane E45 (Robots, governed browser automation for agents) now, while rule 15 holds? | Yes, as an exception for E45 only: S2 (backend) starts now and goes through the usual code and security review. Every other lane stays paused | E45 told 06:16 |
 | D-2026-11-18-09 | 2026-11-18 | Apply the dev-account rehearsal role for E10? | Deferred. E10 parks the rehearsal and does no AWS step | E10 told 06:09 |
 | D-2026-11-18-08 | 2026-11-18 | Approve S7's git push (its permission layer refused it)? | Approved, push only (no force-push), relayed to S7. If S7's own permission layer still refuses, the owner approves in S7's session | S7 told 06:09 |
