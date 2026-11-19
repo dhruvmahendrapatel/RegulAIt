@@ -251,6 +251,15 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "DELETE /v1/cost-imports/domain-rules/:ruleId": "internal",
   // ADR-0076: reconciliation (run-now + health/report) and the roster ingest
   "POST /v1/cost-imports/reconcile": "internal",
+  "GET /v1/vendor-usage": "internal", // ADR-0322
+  "PUT /v1/vendor-usage/policy": "internal", // ADR-0322
+  "POST /v1/vendor-usage/connectors": "internal", // ADR-0322
+  "PUT /v1/vendor-usage/connectors/:connectorId/config": "internal", // ADR-0322
+  "PUT /v1/vendor-usage/connectors/:connectorId/credential": "internal", // ADR-0322
+  "DELETE /v1/vendor-usage/connectors/:connectorId/credential": "internal", // ADR-0322
+  "PUT /v1/vendor-usage/connectors/:connectorId/enabled": "internal", // ADR-0322
+  "POST /v1/vendor-usage/connectors/:connectorId/pull": "internal", // ADR-0322
+  "GET /v1/vendor-usage/connectors/:connectorId/runs": "internal", // ADR-0322
   "GET /v1/cost-imports/reconciliation": "internal",
   "POST /v1/cost-imports/roster": "internal",
   "DELETE /v1/cost-imports/:importId": "internal",
@@ -1734,6 +1743,15 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/cost-imports/domain-rules": "cost-imports",
   "DELETE /v1/cost-imports/domain-rules/:ruleId": "cost-imports",
   "POST /v1/cost-imports/reconcile": "cost-imports",
+  "GET /v1/vendor-usage": "cost-imports", // ADR-0322
+  "PUT /v1/vendor-usage/policy": "cost-imports", // ADR-0322
+  "POST /v1/vendor-usage/connectors": "cost-imports", // ADR-0322
+  "PUT /v1/vendor-usage/connectors/:connectorId/config": "cost-imports", // ADR-0322
+  "PUT /v1/vendor-usage/connectors/:connectorId/credential": "cost-imports", // ADR-0322
+  "DELETE /v1/vendor-usage/connectors/:connectorId/credential": "cost-imports", // ADR-0322
+  "PUT /v1/vendor-usage/connectors/:connectorId/enabled": "cost-imports", // ADR-0322
+  "POST /v1/vendor-usage/connectors/:connectorId/pull": "cost-imports", // ADR-0322
+  "GET /v1/vendor-usage/connectors/:connectorId/runs": "cost-imports", // ADR-0322
   "GET /v1/cost-imports/reconciliation": "cost-imports",
   "POST /v1/cost-imports/roster": "cost-imports",
   "DELETE /v1/cost-imports/:importId": "cost-imports",

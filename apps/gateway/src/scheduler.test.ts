@@ -820,6 +820,9 @@ describe("every sweep is registered", () => {
         // ADR-0302: third-party ingest evidence past the audit floor; driven end to end in
         // zz-adr0302-evidence-retention.test.ts (with no floor configured it deletes nothing)
         SCHEDULER_JOB_NAMES.thirdPartyEvidenceRetentionSweep,
+        // ADR-0322: vendor usage/cost pull from enabled connectors; driven end to end in
+        // zz-adr0322-vendor-usage-pull.test.ts (with the org policy off, the default, it pulls nothing)
+        SCHEDULER_JOB_NAMES.vendorUsagePullSweep,
         // ADR-0339: scores every agent a change marked. Driven end-to-end in zz-adr0339-agent-risk.test.ts.
         SCHEDULER_JOB_NAMES.agentRiskRecomputeSweep,
         SCHEDULER_JOB_NAMES.agentRiskDailyMark,

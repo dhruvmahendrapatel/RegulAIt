@@ -298,6 +298,39 @@ export const ROBOT_RUN_MACHINE = defineMachine({
   },
 });
 
+/** `vendor_usage_pull_runs.status` (ADR-0322). A run opens `running`, or is written already `refused` when another
+ * pull of the same connector holds the lease. A running run ends exactly once: the batch committed, the vendor or
+ * the write failed, or a precondition (policy off, no credential, air-gapped) refused it. */
+export const VENDOR_USAGE_PULL_RUN_STATUSES = ["running", "succeeded", "failed", "refused"] as const;
+export type VendorUsagePullRunStatus = (typeof VENDOR_USAGE_PULL_RUN_STATUSES)[number];
+export const VENDOR_USAGE_PULL_RUN_MACHINE = defineMachine({
+  id: "vendor_usage_pull_run",
+  stored: "vendor_usage_pull_runs.status",
+  states: VENDOR_USAGE_PULL_RUN_STATUSES,
+  initial: ["running", "refused"],
+  terminal: ["succeeded", "failed", "refused"],
+  transitions: {
+    succeed: {
+      from: ["running"],
+      to: "succeeded",
+      by: ["system"],
+      summary: "The pulled lines, the batch and the connector's pulled-through day committed together.",
+    },
+    fail: {
+      from: ["running"],
+      to: "failed",
+      by: ["system"],
+      summary: "The vendor answered with an error or an unusable page, or the write was rolled back; nothing was imported.",
+    },
+    refuse: {
+      from: ["running"],
+      to: "refused",
+      by: ["system"],
+      summary: "A precondition failed before any request: the policy or connector is off, no live credential, no data key, or air-gapped.",
+    },
+  },
+});
+
 /** ADR-0364 §8: the Robots list's "Status" column, computed from the robot and its versions (never stored). */
 export type RobotListStatus = "draft" | "in_review" | "approved" | "retired";
 export function robotListStatus(robot: RobotState, versions: readonly RobotVersionState[]): RobotListStatus {
@@ -317,4 +350,5 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [ROBOT_VERSION_MACHINE.def.id]: ROBOT_VERSION_MACHINE,
   [ROBOT_MACHINE.def.id]: ROBOT_MACHINE,
   [ROBOT_RUN_MACHINE.def.id]: ROBOT_RUN_MACHINE,
+  [VENDOR_USAGE_PULL_RUN_MACHINE.def.id]: VENDOR_USAGE_PULL_RUN_MACHINE,
 } as Record<string, StateMachine<string, string>>);

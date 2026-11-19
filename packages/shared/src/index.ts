@@ -5076,6 +5076,9 @@ export * from "./state-machines.js";
 export * from "./robots.js";
 // ADR-0261 (P37): third-party security telemetry ingest — the DefenseClaw JSONL parser and mapping (pure)
 export * from "./third-party-ingest/index.js";
+// ADR-0322: vendor usage/cost pull (catalogue, config and response schemas, normalisers)
+export * from "./vendor-usage.js";
+
 // ADR-0339 (lane E20): the agent risk score, recomputed on every change (pure; OWASP ids only)
 export * from "./agent-risk-score.js";
 

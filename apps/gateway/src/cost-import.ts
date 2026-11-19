@@ -90,6 +90,8 @@ import {
   eq,
   gte,
   importedCostLines,
+  vendorUsageConnectors,
+  vendorUsagePullPolicy,
   inArray,
   initiatives,
   isNotNull,
@@ -140,6 +142,7 @@ import {
   piiInternationalCategories,
 } from "./org-settings.js";
 import { reinstateLinesSupersededBy } from "./cost-reconcile.js";
+import { lockConnectorAndFindRunningPull } from "./vendor-usage-lock.js";
 import { securityHeaders } from "./security-headers.js";
 import { errMessage } from "./err-serializer.js";
 
@@ -298,13 +301,13 @@ export async function scanCostLines(
 // Identity resolution context, loaded once per import / re-resolution pass
 // ---------------------------------------------------------------------------
 
-interface ResolutionContext {
+export interface ResolutionContext {
   userIdByEmail: Map<string, string>;
   aliases: VendorAliasRow[];
   domainRules: VendorDomainRuleRow[];
 }
 
-async function loadResolutionContext(db: Db): Promise<ResolutionContext> {
+export async function loadResolutionContext(db: Db): Promise<ResolutionContext> {
   const [userRows, aliasRows, ruleRows] = await Promise.all([
     db.select({ id: users.id, email: users.email }).from(users),
     db.select().from(vendorAccountAliases),
@@ -350,8 +353,9 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
     effect: "allow" | "deny",
     reason: string,
     detail: Record<string, unknown>,
+    executor: Pick<Db, "insert"> = db,
   ) =>
-    db.insert(auditLog).values({
+    executor.insert(auditLog).values({
       userId: actorUserId ?? NIL_UUID,
       objectType,
       objectId,
@@ -371,9 +375,10 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
     basisStatement: IMPORTED_BASIS_STATEMENT,
     piiPosture: COST_IMPORT_PII_POSTURE,
     posture:
-      "Every adapter here parses a file. NONE of them calls a vendor API: RegulAIt holds no billing-API credential " +
-      "for any vendor, so there is nothing to poll and no scheduled re-import. An import is an operator act with a " +
-      "file attached, and the consolidated view reports how stale each vendor's data is.",
+      "Every adapter here parses a file. NONE of them calls a vendor API, and without the separate, opt-in vendor " +
+      "pull (ADR-0322: off by default, refused when air-gapped, GET /v1/vendor-usage) there is no scheduled re-import. " +
+      "An import is an operator act with a file attached, and the consolidated view reports how stale each vendor's " +
+      "data is.",
   }));
 
   // =======================================================================
@@ -774,29 +779,63 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
         detail: `batch ${importId} is '${batch.status}' — only an applied batch holds lines to withdraw`,
       });
     }
-    // ADR-0076: if any of this batch's lines had SUPERSEDED older duplicates,
-    // those older lines come back to life BEFORE the deletion — a withdrawn
-    // restatement must not silently erase the fact it restated.
-    const doomedIds = (
-      await db.select({ id: importedCostLines.id }).from(importedCostLines).where(eq(importedCostLines.batchId, importId))
-    ).map((r) => r.id);
-    const reinstated = await reinstateLinesSupersededBy(db, {
-      batchId: importId,
-      lineIds: doomedIds,
-      actorUserId: req.authCtx.userId ?? null,
-      reason: body.reason,
+    const pullConnectorId =
+      batch.origin === "pull" ? ((batch.summary as { connectorId?: unknown } | null)?.connectorId as string | undefined) : undefined;
+    // the withdrawal, the batch status, the connector rewind and the audit row commit together (#861 review). A pulled
+    // batch is revoked under its connector's pull lock and refused while a pull holds the lease, so a running pull can
+    // never overwrite the rewound day afterwards.
+    const outcome = await db.transaction(async (tx) => {
+      if (pullConnectorId) {
+        const busy = await lockConnectorAndFindRunningPull(tx, pullConnectorId);
+        if (busy) return { busyRunId: busy.id } as const;
+      }
+      // ADR-0076: if any of this batch's lines had SUPERSEDED older duplicates,
+      // those older lines come back to life BEFORE the deletion — a withdrawn
+      // restatement must not silently erase the fact it restated.
+      const doomedIds = (
+        await tx.select({ id: importedCostLines.id }).from(importedCostLines).where(eq(importedCostLines.batchId, importId))
+      ).map((r) => r.id);
+      const reinstated = await reinstateLinesSupersededBy(tx, {
+        batchId: importId,
+        lineIds: doomedIds,
+        actorUserId: req.authCtx.userId ?? null,
+        reason: body.reason,
+      });
+      const removed = await tx.delete(importedCostLines).where(eq(importedCostLines.batchId, importId)).returning({ id: importedCostLines.id });
+      const [updated] = await tx
+        .update(costImportBatches)
+        .set({ status: "revoked", revokedAt: new Date(), revokedByUserId: req.authCtx.userId ?? null, reason: `revoked: ${body.reason}` })
+        .where(and(eq(costImportBatches.id, importId), eq(costImportBatches.status, "applied")))
+        .returning();
+      if (!updated) return { raced: true } as const;
+      // ADR-0322 (#861 review): a pulled batch holds only the lines it first introduced, so withdrawing it removes days the
+      // connector believes it already has. Rewind the connector to the batch's first day, so the next pull fetches them again.
+      let connectorRewoundTo: string | null = null;
+      if (pullConnectorId && batch.periodStart && removed.length > 0) {
+        const [rewound] = await tx
+          .update(vendorUsageConnectors)
+          .set({ pulledThrough: sql`least(${vendorUsageConnectors.pulledThrough}, ${batch.periodStart})`, updatedAt: sql`now()` })
+          .where(eq(vendorUsageConnectors.id, pullConnectorId))
+          .returning({ pulledThrough: vendorUsageConnectors.pulledThrough });
+        connectorRewoundTo = rewound?.pulledThrough?.toISOString() ?? null;
+      }
+      await audit(req.authCtx.userId, "cost_import_batch", importId, COST_IMPORT_RULE_IDS.importRevoked, "allow",
+        `withdrew ${removed.length} imported cost line(s) from batch ${importId}: ${body.reason}` +
+          (reinstated > 0 ? ` — ${reinstated} older line(s) this batch had superseded were reinstated` : ""),
+        { linesRemoved: removed.length, linesReinstated: reinstated, vendor: batch.vendor, adapter: batch.adapter, payloadSha256: batch.payloadSha256, ...(pullConnectorId ? { pullConnectorId, connectorRewoundTo } : {}) },
+        tx);
+      return { updated, removed: removed.length, reinstated } as const;
     });
-    const removed = await db.delete(importedCostLines).where(eq(importedCostLines.batchId, importId)).returning({ id: importedCostLines.id });
-    const [updated] = await db
-      .update(costImportBatches)
-      .set({ status: "revoked", revokedAt: new Date(), revokedByUserId: req.authCtx.userId ?? null, reason: `revoked: ${body.reason}` })
-      .where(eq(costImportBatches.id, importId))
-      .returning();
-    await audit(req.authCtx.userId, "cost_import_batch", importId, COST_IMPORT_RULE_IDS.importRevoked, "allow",
-      `withdrew ${removed.length} imported cost line(s) from batch ${importId}: ${body.reason}` +
-        (reinstated > 0 ? ` — ${reinstated} older line(s) this batch had superseded were reinstated` : ""),
-      { linesRemoved: removed.length, linesReinstated: reinstated, vendor: batch.vendor, adapter: batch.adapter, payloadSha256: batch.payloadSha256 });
-    return { revoked: true, import: updated, linesRemoved: removed.length, linesReinstated: reinstated };
+    if ("busyRunId" in outcome) {
+      return reply.status(409).send({
+        error: "pull_in_progress",
+        detail: `a pull of this batch's connector (run ${outcome.busyRunId}) is running; revoke the batch once it has finished`,
+      });
+    }
+    if ("raced" in outcome) {
+      return reply.status(409).send({ error: "not_revocable", detail: `batch ${importId} was revoked by another request` });
+    }
+    return { revoked: true, import: outcome.updated, linesRemoved: outcome.removed, linesReinstated: outcome.reinstated };
   });
 
   // =======================================================================
@@ -1351,13 +1390,42 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
               lt(importedCostLines.periodStart, window.end),
               eq(importedCostLines.resolvedUserId, onlyUserId),
               isNull(importedCostLines.supersededAt),
+              eq(importedCostLines.overlapsMetered, false),
             )
           : and(
               gte(importedCostLines.periodStart, window.start),
               lt(importedCostLines.periodStart, window.end),
               isNull(importedCostLines.supersededAt),
+              eq(importedCostLines.overlapsMetered, false),
             ),
       );
+
+    // ADR-0322 §5: pulled lines the vendor billed to the gateway's own keys are already in `usage_events`. They are
+    // excluded from the imported side above and disclosed here, by count and by currency, never silently.
+    const overlapRows = await db
+      .select({
+        currency: importedCostLines.currency,
+        n: sql<number>`count(*)::int`,
+        amount: sql<number>`coalesce(sum(${importedCostLines.amount}), 0)::float8`,
+      })
+      .from(importedCostLines)
+      .where(
+        onlyUserId
+          ? and(
+              gte(importedCostLines.periodStart, window.start),
+              lt(importedCostLines.periodStart, window.end),
+              eq(importedCostLines.resolvedUserId, onlyUserId),
+              isNull(importedCostLines.supersededAt),
+              eq(importedCostLines.overlapsMetered, true),
+            )
+          : and(
+              gte(importedCostLines.periodStart, window.start),
+              lt(importedCostLines.periodStart, window.end),
+              isNull(importedCostLines.supersededAt),
+              eq(importedCostLines.overlapsMetered, true),
+            ),
+      )
+      .groupBy(importedCostLines.currency);
 
     const [supersededInWindow] = await db
       .select({ n: sql<number>`count(*)::int` })
@@ -1420,6 +1488,12 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
     // STALENESS, mirroring ADR-0055's coverage scorecard: an operator has to be
     // able to see that nobody has uploaded a Copilot invoice since March, or
     // the imported side quietly becomes a stale number nobody questions.
+    const [pulling] = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(vendorUsageConnectors)
+      .innerJoin(vendorUsagePullPolicy, eq(vendorUsagePullPolicy.enabled, true))
+      .where(eq(vendorUsageConnectors.enabled, true));
+    const pullingConnectors = pulling?.n ?? 0;
     const vendorFreshness = await db
       .select({
         vendor: costImportBatches.vendor,
@@ -1446,6 +1520,13 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
           "They are marked, never deleted: each carries the line that replaced it, the run that decided it and a " +
           "stated reason, and the full list is readable at /v1/cost-imports/reconciliation.",
       },
+      meteredOverlap: {
+        linesExcluded: overlapRows.reduce((n, r) => n + r.n, 0),
+        byCurrency: overlapRows.map((r) => ({ currency: r.currency, lines: r.n, amount: r.amount })),
+        note:
+          "Lines a vendor pull found billed to the gateway's own keys, projects or workspaces are excluded from the " +
+          "imported side above: that spend already appears on the metered side. They are kept, never deleted.",
+      },
       staleness: {
         vendors: vendorFreshness.map((v) => ({
           vendor: v.vendor,
@@ -1457,8 +1538,13 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
               : Math.floor((Date.now() - new Date(v.lastImportedAt).getTime()) / (24 * 3600 * 1000)),
         })),
         note:
-          "There is no scheduled re-import: RegulAIt holds no vendor billing-API credential, so there is nothing to " +
-          "poll. The imported side of every figure above is exactly as fresh as the last file somebody uploaded.",
+          pullingConnectors === 0
+            ? "There is no scheduled re-import: no vendor pull connector is enabled (ADR-0322, off by default), so " +
+              "there is nothing to poll. The imported side of every figure above is exactly as fresh as the last " +
+              "file somebody uploaded."
+            : `${pullingConnectors} vendor pull connector(s) are enabled (ADR-0322): their vendors' imported side is ` +
+              "as fresh as the last successful pull (GET /v1/vendor-usage/connectors/:id/runs); every other vendor's " +
+              "is as fresh as the last file somebody uploaded.",
       },
       note:
         "There is deliberately no combined figure. `metered` was observed and priced by RegulAIt; `imported` was " +
