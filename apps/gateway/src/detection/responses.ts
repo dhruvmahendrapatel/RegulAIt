@@ -12,7 +12,7 @@
  * recorded on the incident (`response_state`, a fixed `response_error_code`) and audited; a failure is never retried
  * silently.
  */
-import { and, auditLog, approvalRules, detectionIncidents, eq, isNull, sql, type Db } from "@regulait/db";
+import { and, auditLog, approvalRules, detectionIncidents, eq, gt, isNull, issuedTokens, sql, type Db } from "@regulait/db";
 import { createApprovalRuleSchema } from "@regulait/shared";
 import { DelegationRefusedError, revokeDelegationGrant } from "../delegation.js";
 import { createApprovalRuleRow } from "../rule-creates.js";
@@ -64,11 +64,12 @@ async function suspendGrant(db: Db, t: DetectionResponseTarget): Promise<Outcome
 
 async function revokeTokens(db: Db, t: DetectionResponseTarget): Promise<Outcome> {
   if (!t.actorIdentityId) return { ok: false, code: "no_actor_identity" };
-  const revoked = await db.execute(sql`
-    UPDATE issued_tokens SET revoked_at = GREATEST(now(), issued_at)
-    WHERE subject_identity_id = ${t.actorIdentityId} AND revoked_at IS NULL AND expires_at > now()
-    RETURNING jti`);
-  return { ok: true, detail: { actorIdentityId: t.actorIdentityId, tokensRevoked: (revoked as unknown as { rows: unknown[] }).rows.length } };
+  const revoked = await db
+    .update(issuedTokens)
+    .set({ revokedAt: sql`GREATEST(now(), ${issuedTokens.issuedAt})` })
+    .where(and(eq(issuedTokens.subjectIdentityId, t.actorIdentityId), isNull(issuedTokens.revokedAt), gt(issuedTokens.expiresAt, sql`now()`)))
+    .returning({ jti: issuedTokens.jti });
+  return { ok: true, detail: { actorIdentityId: t.actorIdentityId, tokensRevoked: revoked.length } };
 }
 
 async function requireApproval(db: Db, t: DetectionResponseTarget): Promise<Outcome> {
@@ -90,6 +91,11 @@ async function requireApproval(db: Db, t: DetectionResponseTarget): Promise<Outc
             eq(approvalRules.userId, sponsor),
             isNull(approvalRules.toolName),
             eq(approvalRules.approverUserId, approver),
+            // only a rule of EXACTLY the shape this response creates counts: a narrower one (write-only, one deploy
+            // mode, or a reusable per-tool approval) would leave the sponsor's other calls unapproved (review of #1060)
+            eq(approvalRules.writeOnly, false),
+            isNull(approvalRules.deployMode),
+            eq(approvalRules.approvalScope, "action"),
           ),
         )
         .limit(1);
@@ -113,40 +119,77 @@ async function requireApproval(db: Db, t: DetectionResponseTarget): Promise<Outc
   }
 }
 
-/** Run one incident's response, record the outcome on the incident and audit it. Never throws. */
-export async function runDetectionResponse(db: Db, t: DetectionResponseTarget): Promise<"done" | "failed"> {
-  let outcome: Outcome;
-  try {
-    outcome =
-      t.response === "suspend_grant" ? await suspendGrant(db, t) : t.response === "revoke_credential" ? await revokeTokens(db, t) : await requireApproval(db, t);
-  } catch {
-    outcome = { ok: false, code: "response_error" };
+/** The guarded UPDATE matched no row: the incident's response is already terminal (a concurrent or repeated run). */
+class ResponseAlreadyRecorded extends Error {
+  constructor() {
+    super("detection_response_already_recorded");
+    this.name = "ResponseAlreadyRecorded";
   }
+}
+
+/** Record the outcome on the incident (through DETECTION_RESPONSE_MACHINE) and audit it, in the caller's transaction. */
+async function recordOutcome(tx: Db, t: DetectionResponseTarget, outcome: Outcome): Promise<"done" | "failed"> {
   const state = outcome.ok ? "done" : "failed";
-  await db.transaction(async (tx) => {
-    await tx
-      .update(detectionIncidents)
-      .set({ responseState: state, responseErrorCode: outcome.ok ? null : outcome.code })
-      // ADR-0348 DETECTION_RESPONSE_MACHINE: a terminal response state is never overwritten
-      .where(and(eq(detectionIncidents.id, t.incidentId), whereFrom(detectionIncidents.responseState, DETECTION_RESPONSE_MACHINE, outcome.ok ? "apply" : "fail")));
-    await tx.insert(auditLog).values({
-      userId: t.packAuthor ?? t.auditUserId,
-      objectType: "detection_incident",
-      objectId: t.incidentId,
-      detail: {
-        subsystem: "agent-detection",
-        adr: "0333",
-        rule: t.ruleId,
-        response: t.response,
-        outcome: state,
-        ...(outcome.ok ? outcome.detail : { code: outcome.code }),
-      },
-      // a response that took effect restricted the agent; a failed one restricted nothing
-      effect: outcome.ok ? "deny" : "allow",
-      ruleId: DETECTION_RESPONSE_RULE_ID,
-      ruleChain: [],
-      reason: outcome.ok ? `Detection response ${t.response} applied` : `Detection response ${t.response} failed (${outcome.code})`,
-    });
+  const moved = await tx
+    .update(detectionIncidents)
+    .set({ responseState: state, responseErrorCode: outcome.ok ? null : outcome.code })
+    // ADR-0348: a terminal response state is never overwritten, and an outcome that was not recorded is not audited
+    .where(and(eq(detectionIncidents.id, t.incidentId), whereFrom(detectionIncidents.responseState, DETECTION_RESPONSE_MACHINE, outcome.ok ? "apply" : "fail")))
+    .returning({ id: detectionIncidents.id });
+  if (moved.length === 0) throw new ResponseAlreadyRecorded();
+  await tx.insert(auditLog).values({
+    userId: t.packAuthor ?? t.auditUserId,
+    objectType: "detection_incident",
+    objectId: t.incidentId,
+    detail: {
+      subsystem: "agent-detection",
+      adr: "0333",
+      rule: t.ruleId,
+      response: t.response,
+      outcome: state,
+      ...(outcome.ok ? outcome.detail : { code: outcome.code }),
+    },
+    // a response that took effect restricted the agent; a failed one restricted nothing
+    effect: outcome.ok ? "deny" : "allow",
+    ruleId: DETECTION_RESPONSE_RULE_ID,
+    ruleChain: [],
+    reason: outcome.ok ? `Detection response ${t.response} applied` : `Detection response ${t.response} failed (${outcome.code})`,
   });
   return state;
+}
+
+export interface DetectionResponseRunOptions {
+  /** test seam: runs inside the transaction after the action, before its outcome is recorded */
+  afterAction?: () => Promise<void>;
+}
+
+/**
+ * Run one incident's response. The action, the incident's `response_state` and the audit row commit in ONE
+ * transaction (review of #1060): a crash or error between them rolls the action back, so an applied response is
+ * never left pending or unaudited. `revokeDelegationGrant` and the approval-rule create join it as savepoints.
+ * An unexpected error is recorded as `response_error` in a fresh transaction, with nothing applied. Never throws.
+ * Returns `unchanged` when the incident's response was already recorded (the action is rolled back too).
+ */
+export async function runDetectionResponse(
+  db: Db,
+  t: DetectionResponseTarget,
+  opts: DetectionResponseRunOptions = {},
+): Promise<"done" | "failed" | "unchanged"> {
+  try {
+    return await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      const outcome =
+        t.response === "suspend_grant" ? await suspendGrant(tx, t) : t.response === "revoke_credential" ? await revokeTokens(tx, t) : await requireApproval(tx, t);
+      await opts.afterAction?.();
+      return recordOutcome(tx, t, outcome);
+    });
+  } catch (err) {
+    if (err instanceof ResponseAlreadyRecorded) return "unchanged";
+    try {
+      return await db.transaction(async (rawTx) => recordOutcome(rawTx as unknown as Db, t, { ok: false, code: "response_error" }));
+    } catch (again) {
+      if (again instanceof ResponseAlreadyRecorded) return "unchanged";
+      throw again;
+    }
+  }
 }

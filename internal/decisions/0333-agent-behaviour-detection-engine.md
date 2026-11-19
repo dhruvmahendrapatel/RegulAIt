@@ -156,6 +156,17 @@ match tool names only, so they are heuristics, and the admin can edit them.
   on the incident (`done` or `failed`, with a fixed `response_error_code`) and in a `detection-response` audit row.
   That row's effect is `deny` when the response took effect and `allow` when it did not. A failure is never retried
   silently.
+- **One transaction per response (review of #1060).** The action, the guarded `response_state` move and the audit row
+  commit together; `revokeDelegationGrant` and the approval-rule create join it as savepoints. A crash or an error
+  between them rolls the action back, so a response is never applied without being recorded and audited. An
+  unexpected error is recorded as `response_error` in a fresh transaction with nothing applied. A run against an
+  incident whose response is already terminal changes nothing.
+- **`require_approval` reuses only an identical rule.** An existing rule counts only if it has exactly the shape the
+  response creates (user scope, all servers, no tool, not write-only, every deploy mode, per-action approval, the same
+  approver). A narrower rule an admin set up earlier does not satisfy it, so the full rule is still created.
+- **The pack author.** The acting admin and approver is the author of the pack version that raised the incident. Their
+  standing is not re-checked when a restricting response runs; for `require_approval`, a pool the author can no longer
+  satisfy is refused by the approval-rule create, so the response fails closed (`approval_rule_refused`).
 
 ### 6. Reuse and open-source search (ADR-0176)
 
