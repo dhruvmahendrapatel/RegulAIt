@@ -16,7 +16,7 @@
 #
 # What is NOT in it: npm, npx, corepack (removed from the runtime stage), any
 # secret (the executor generates its own key on its state volume at first start).
-FROM --platform=linux/amd64 docker:29.9.3-cli@sha256:2357639ad1ea7d0194134bf3292622fd4e562483966ed674e5d7c945b5f3b28d AS dockercli
+FROM --platform=linux/amd64 docker:29.9.3-cli@sha256:5a7af0dcb0e46c803efe9b45371dd21cb500e5b4453250394ac6f06d49b6e6f1 AS dockercli
 
 FROM --platform=linux/amd64 node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS build
 RUN corepack enable
