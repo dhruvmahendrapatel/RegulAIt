@@ -1,0 +1,10 @@
+{
+  "adr": "ADR-0310",
+  "lane": "E1",
+  "tracking": "ADR-0310 (G2, lane E1): the brief is API-only; the managed-settings export screen is requested on #453 (Governed Designer). raised under the lane E1 brief rule 3 (new routes go to the census with a KNOWN_UI_GAPS entry on #453; recorded in ADR-0310)",
+  "gaps": {
+    "POST /v1/managed-settings/bundles": "compiles a user's or role's effective MCP entitlements into signed vendor managed settings (audited)",
+    "GET /v1/managed-settings/bundles": "lists managed-settings bundle versions, newest first",
+    "GET /v1/managed-settings/bundles/:id/archive": "downloads a bundle's signed tar.gz for MDM push"
+  }
+}
