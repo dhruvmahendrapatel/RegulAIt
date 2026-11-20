@@ -56,7 +56,7 @@ import {
 import {
   approvalArgumentsDigest,
   approvalArgumentsPreview,
-  effectOfDirection,
+  changeOfDirection,
   killSwitchNarrowingOnly,
   scrubAuditText,
   targetStateOf,
@@ -192,7 +192,7 @@ const refOf = (r: VendorAgentActionRow): VendorAgentRef => ({ recordId: r.record
 // ---------------------------------------------------------------------------
 
 /** the execute guard's refusal for an action under the current dial (what `describe` reports) */
-const guardFor = (r: Pick<VendorAgentActionRow, "direction">, dial: Awaited<ReturnType<typeof loadExecutionMode>>) => killSwitchNarrowingOnly({ dial, effect: effectOfDirection(r.direction) });
+const guardFor = (r: Pick<VendorAgentActionRow, "direction">, dial: Awaited<ReturnType<typeof loadExecutionMode>>) => killSwitchNarrowingOnly({ dial, direction: changeOfDirection(r.direction) });
 
 function actionView(r: VendorAgentActionRow, dial: Awaited<ReturnType<typeof loadExecutionMode>>) {
   const reason = guardFor(r, dial);

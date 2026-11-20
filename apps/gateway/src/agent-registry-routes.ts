@@ -11,7 +11,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { AGENT_REGISTRIES, AGENT_REGISTRY_LABELS, type AgentRegistry } from "@regulait/shared";
-import { agentRegistryRecords, agents, and, auditLog, desc, discoverySources, eq, sql, type Db } from "@regulait/db";
+import { agentRegistryRecordComponents, agentRegistryRecords, agents, and, asc, auditLog, count, desc, discoverySources, eq, sql, type Db } from "@regulait/db";
 import { checkOwnerTarget } from "./ownership.js";
 import { REGISTRY_RECORD_STATES, REGISTRY_RECORD_STATE_WHERE, canMoveRegistryRecord, registryRecordState } from "./agent-registry-records.js";
 import { requireStepUp } from "./step-up.js";
@@ -25,6 +25,7 @@ export const REGISTRY_PROVIDER: Readonly<Record<AgentRegistry, string>> = Object
   agent_365: "microsoft",
   gemini_enterprise: "google",
   bedrock_agentcore: "aws",
+  copilot_studio: "microsoft",
 });
 
 export const AGENT_REGISTRY_PAGE_MAX = 200;
@@ -134,7 +135,20 @@ export function registerAgentRegistryRoutes(app: FastifyInstance, db: Db): void 
       .leftJoin(discoverySources, eq(discoverySources.id, agentRegistryRecords.sourceId))
       .where(eq(agentRegistryRecords.id, p.data.recordId));
     if (!row) return reply.status(404).send({ error: "unknown_registry_record" });
-    return recordView(row.r, row.sourceName);
+    // ADR-0336 decision 3: what the agent uses, as last read completely (bounded at staging: at most 200)
+    const components = await db
+      .select({
+        kind: agentRegistryRecordComponents.kind,
+        vendorRef: agentRegistryRecordComponents.vendorRef,
+        displayName: agentRegistryRecordComponents.displayName,
+        enabled: agentRegistryRecordComponents.enabled,
+        providedBy: agentRegistryRecordComponents.providedBy,
+      })
+      .from(agentRegistryRecordComponents)
+      .where(eq(agentRegistryRecordComponents.recordId, row.r.id))
+      .orderBy(asc(agentRegistryRecordComponents.kind), asc(agentRegistryRecordComponents.displayName), asc(agentRegistryRecordComponents.id))
+      .limit(200);
+    return { ...recordView(row.r, row.sourceName), components };
   });
 
   app.post("/v1/agent-registry/records/:recordId/import", async (req, reply) => {
@@ -180,6 +194,8 @@ export function registerAgentRegistryRoutes(app: FastifyInstance, db: Db): void 
         .onConflictDoNothing({ target: agents.name })
         .returning();
       if (!agent) return { nameTaken: true as const };
+      // ADR-0336 decision 7: the audit row carries how many components the agent was staged with
+      const [{ n: componentCount } = { n: 0 }] = await t.select({ n: count() }).from(agentRegistryRecordComponents).where(eq(agentRegistryRecordComponents.recordId, locked.id));
       await t
         .update(agentRegistryRecords)
         .set({ agentId: agent.id, importedAt: sql`now()`, importedByUserId: actor(req) })
@@ -196,6 +212,7 @@ export function registerAgentRegistryRoutes(app: FastifyInstance, db: Db): void 
           enabled: false,
           lifecycleStatus: "proposed",
           grants: 0,
+          components: componentCount,
           stepUp: su.method,
           receiptClass: "configuration",
         },

@@ -435,9 +435,9 @@ export interface BuildAppOptions {
   artifactStore?: ArtifactStore | null;
   /** ADR-0195 SD0 TEST SEAM: the discovery scanner registry (default: `DISCOVERY_SCANNERS`, empty in SD0). Code-only. */
   discoveryScanners?: ScannerRegistry;
-  /** ADR-0331 TEST SEAM: the device-policy signer (owner answer B4: one rotatable signer for endpoint and browser
-   * policies, built by the browser lane; wired here when it lands). Absent or null = no signer, which is production
-   * today (the directive route answers 503). Code-only: never env or admin input. */
+  /** ADR-0331 TEST SEAM: the directive signer. Absent = the shared ADR-0334 device-policy key (owner decision B4),
+   * resolved for every directive read, which is production; null = no signer (the directive route answers 503).
+   * Code-only: never env or admin input. */
   directiveSigner?: DirectiveSigner | null;
   /** ADR-0338 TEST SEAM ONLY (code, never env or admin input): vendor control members and the credential resolver */
   vendorAgentControl?: VendorAgentControlDeps;
@@ -645,6 +645,7 @@ import { registerSaasEntitlementRoutes } from "./saas-entitlement-routes.js";
 import { registerAgentRegistryRoutes } from "./agent-registry-routes.js";
 import { registerContentTrustRoutes } from "./content-trust-routes.js";
 import { registerFederationRoutes } from "./federation-routes.js";
+import { registerAgentCredentialRoutes } from "./agent-credential-routes.js";
 import { registerMcpIdentityOidcRoutes } from "./mcp-identity-oidc-routes.js";
 import { registerEndpointImportRoutes } from "./endpoint-import-routes.js";
 import { registerThirdPartyIngestRoutes } from "./third-party-ingest-routes.js";
@@ -6364,6 +6365,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerFederationRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0210: the OIDC-profile identity assertion issuer's public discovery document and ES256 JWKS
   registerMcpIdentityOidcRoutes(app, db);
+  // ADR-0315 (G7) — the agent credential issuer's public metadata and JWKS, and the admin registry of audiences
+  registerAgentCredentialRoutes(app, db);
   // ADR-0195 SD3 — no-agent endpoint evidence (osquery results, MDM/EDR inventory) imported into an endpoint source,
   // and the endpoint signature seed. Admin-only by default.
   registerEndpointImportRoutes(app, db, {
@@ -6390,14 +6393,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerEndpointAgentRoutes(app, db, {
     dataKey: opts.dataKey,
     ...(opts.discoveryScanners === undefined ? {} : { registry: opts.discoveryScanners }),
-    directiveSigner: opts.directiveSigner ?? null,
+    directiveSigner: opts.directiveSigner,
   });
   // ADR-0259 (P35) — the MCP servers enrolled devices' host configs name, with the registry diff, and the admin's
   // links to approved servers. Admin-only by default; reads what the agent reports, contacts nothing.
   registerEndpointMcpConfigRoutes(app, db);
   // ADR-0331 — the governed removal of flagged MCP servers from endpoints: create (an `endpoint_remediation` step-up,
   // off until the org switch is on), list, read and cancel. Admin-only by default (none is in NON_ADMIN_ROUTES).
-  registerEndpointAddonRemovalRoutes(app, db, { signer: opts.directiveSigner ?? null });
+  registerEndpointAddonRemovalRoutes(app, db, { signer: opts.directiveSigner });
   // ADR-0338: governed vendor agent control. No registry offers a control and no control credential resolves in
   // production until slice 1b; both come only through the code-only test seam below
   registerVendorAgentControlRoutes(app, db, opts.vendorAgentControl ?? {});

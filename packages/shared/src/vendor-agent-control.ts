@@ -4,6 +4,7 @@
  * member speaks (the member's interface is gateway-local). No vendor is named here; a vendor offers an action only once
  * its adapter declares one.
  */
+import type { ChangeDirection } from "./kill-switch-guard.js";
 import { defineMachine } from "./state-machine.js";
 
 /** The two actions that take an agent out of service. `restore` is never a free choice: it reverses one of these. */
@@ -47,25 +48,12 @@ export function targetStateOf(op: ControlOp): VendorAgentServiceState {
 }
 
 // ---------------------------------------------------------------------------
-// The kill-switch guard (ADR-0338 section 7, owner decision 2: narrowing only)
+// The kill-switch guard (ADR-0338 section 7) is the shared, generic `killSwitchNarrowingOnly` in kill-switch-guard.ts
+// (built for lane E15 and reused here). A control's direction maps onto the guard's change direction.
 // ---------------------------------------------------------------------------
 
-/** the org execution dial (ADR-0124), as `org_settings.execution_mode` stores it */
-export type KillSwitchDial = "normal" | "read_only" | "require_approval" | "halted";
-/** narrowing takes access away; widening gives it back */
-export type ActionEffect = "narrowing" | "widening";
-
-export const effectOfDirection = (direction: ControlDirection): ActionEffect => (direction === "apply" ? "narrowing" : "widening");
-
-/**
- * Generic and vendor-neutral, so any lifecycle that takes something out of service can reuse it: a narrowing action
- * passes under any dial, a widening one only under `normal`. Returns null when allowed, or the refusal in words a
- * person or an agent can act on (the same text `describe` reports).
- */
-export function killSwitchNarrowingOnly(args: { readonly dial: KillSwitchDial; readonly effect: ActionEffect }): string | null {
-  if (args.dial === "normal" || args.effect === "narrowing") return null;
-  return `the execution mode is '${args.dial}': only actions that take something out of service run until it is back to normal`;
-}
+/** `apply` takes the agent out of service (narrows); `reverse` puts it back (widens) */
+export const changeOfDirection = (direction: ControlDirection): ChangeDirection => (direction === "apply" ? "narrowing" : "widening");
 
 // ---------------------------------------------------------------------------
 // The action lifecycle (ADR-0338 section 5), declared with ADR-0348's defineMachine

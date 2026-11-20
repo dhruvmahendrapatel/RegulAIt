@@ -3,33 +3,29 @@
  */
 import { describe, expect, it } from "vitest";
 import {
-  effectOfDirection,
-  killSwitchNarrowingOnly,
+  changeOfDirection,
   targetStateOf,
   VENDOR_ACTION_MACHINE,
   VENDOR_AGENT_ACTION_STATES,
-  type KillSwitchDial,
 } from "./vendor-agent-control.js";
+import { killSwitchNarrowingOnly, type KillSwitchDial } from "./kill-switch-guard.js";
 import { STATE_MACHINES } from "./state-machines.js";
 import { IllegalTransitionError } from "./state-machine.js";
 
 const DIALS: readonly KillSwitchDial[] = ["normal", "read_only", "require_approval", "halted"];
 
-describe("killSwitchNarrowingOnly (owner decision 2)", () => {
-  it.each(DIALS)("a narrowing action passes under %s", (dial) => {
-    expect(killSwitchNarrowingOnly({ dial, effect: "narrowing" })).toBeNull();
-  });
-
-  it("a widening action passes only under normal", () => {
-    expect(killSwitchNarrowingOnly({ dial: "normal", effect: "widening" })).toBeNull();
-    for (const dial of DIALS.filter((d) => d !== "normal")) {
-      expect(killSwitchNarrowingOnly({ dial, effect: "widening" })).toMatch(new RegExp(`'${dial}'`));
-    }
-  });
-
+// the guard itself is tested in kill-switch-guard.test.ts (both directions under every dial); here, the mapping
+describe("a control's direction under the shared kill-switch guard (owner decision 2)", () => {
   it("apply narrows and reverse widens", () => {
-    expect(effectOfDirection("apply")).toBe("narrowing");
-    expect(effectOfDirection("reverse")).toBe("widening");
+    expect(changeOfDirection("apply")).toBe("narrowing");
+    expect(changeOfDirection("reverse")).toBe("widening");
+  });
+
+  it.each(DIALS)("under %s an apply passes, and a reverse passes only under normal", (dial) => {
+    expect(killSwitchNarrowingOnly({ dial, direction: changeOfDirection("apply") })).toBeNull();
+    const reverse = killSwitchNarrowingOnly({ dial, direction: changeOfDirection("reverse") });
+    if (dial === "normal") expect(reverse).toBeNull();
+    else expect(reverse).toContain(dial);
   });
 });
 
@@ -64,7 +60,7 @@ describe("the action machine", () => {
   });
 
   it("describe reports a guard refusal the server would give", () => {
-    const reason = killSwitchNarrowingOnly({ dial: "halted", effect: "widening" })!;
+    const reason = killSwitchNarrowingOnly({ dial: "halted", direction: "widening" })!;
     const view = VENDOR_ACTION_MACHINE.describe("approved", { execute: reason });
     expect(view.transitions.find((t) => t.event === "execute")).toMatchObject({ allowed: false, reason });
   });
