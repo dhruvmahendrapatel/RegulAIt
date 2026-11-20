@@ -110,6 +110,7 @@ describe("affordance census: a notBuilt route counts only when the file defines 
       "/v1/endpoint-device-groups/:x/rules/:x",
       "/v1/discovery/agent-identifiers/:x",
       "/v1/discovery/entitlements/apps/:x/agent-link",
+      "/v1/discovery/sources/:x/control-credential",
       "/v1/servers/:x/system-class",
       "/v1/users/:x/spend-budget",
       "/v1/vendor-usage/connectors/:x/credential",
