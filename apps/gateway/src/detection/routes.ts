@@ -7,6 +7,11 @@
  *   GET /v1/detection/incidents                      incidents, newest first, keyset-paginated
  *   GET /v1/detection/incidents/:incidentId          one incident with its evidence chain and receipts
  *   PUT /v1/detection/incidents/:incidentId/status   acknowledge or close (audited)
+ *   GET  /v1/detection/quarantines                   device quarantines (ADR-0333 §6), newest first, keyset-paginated
+ *   GET  /v1/detection/quarantines/:quarantineId     one quarantine and its lifecycle
+ *   POST /v1/detection/quarantines/:quarantineId/release
+ *                                                    a human admin ends it early: `settings_relax` step-up bound to the
+ *                                                    quarantine, only under the `normal` execution dial (audited)
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -16,6 +21,8 @@ import {
   desc,
   detectionIncidents,
   detectionRulePacks,
+  endpointDeviceQuarantines,
+  ENDPOINT_DEVICE_QUARANTINE_STATUSES,
   eq,
   sql,
   DETECTION_INCIDENT_STATUSES,
@@ -25,10 +32,11 @@ import { requireStepUp } from "../step-up.js";
 import { ReceiptKeyError, resolveReceiptSigningKey } from "../receipt-signing-key.js";
 import { registerReceiptSigningKey } from "../decision-receipts.js";
 import { DETECTION_RULE_IDS, loadActiveDetectionPack } from "./sweep.js";
-import { DETECTION_INCIDENT_MACHINE, DETECTION_RESPONSE_MACHINE } from "@regulait/shared";
+import { DETECTION_INCIDENT_MACHINE, DETECTION_RESPONSE_MACHINE, ENDPOINT_DEVICE_QUARANTINE_MACHINE } from "@regulait/shared";
 import { whereFrom } from "../state-transition.js";
 import { afterCursorDesc, atTextSql, decodeCursor, encodeCursor } from "../pagination.js";
 import { packChangeIsRelaxation, packDigest, parseDetectionPack, signDetectionPack } from "./pack.js";
+import { QUARANTINE_DEVICE_ENFORCEMENT, releaseQuarantine } from "./quarantine.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 const PAGE_MAX = 100;
@@ -49,6 +57,15 @@ const listQuery = z
     before: z.string().min(1).max(200).optional(),
   })
   .strict();
+const quarantineParam = z.object({ quarantineId: z.string().uuid() });
+const quarantineListQuery = z
+  .object({
+    status: z.enum(ENDPOINT_DEVICE_QUARANTINE_STATUSES).optional(),
+    deviceId: z.string().uuid().optional(),
+    limit: z.coerce.number().int().min(1).max(PAGE_MAX).default(50),
+    before: z.string().min(1).max(200).optional(),
+  })
+  .strict();
 const statusBody = z.object({ status: z.enum(["acknowledged", "closed"]) }).strict();
 /** the requested status -> the DETECTION_INCIDENT_MACHINE event that lands there (ADR-0348) */
 const STATUS_EVENT = { acknowledged: "acknowledge", closed: "close" } as const;
@@ -56,6 +73,7 @@ const STATUS_EVENT = { acknowledged: "acknowledge", closed: "close" } as const;
 type Rows<T> = { rows: T[] };
 
 export function registerDetectionRoutes(app: FastifyInstance, db: Db): void {
+  registerQuarantineRoutes(app, db);
   const actor = (req: FastifyRequest) => req.authCtx.userId ?? NIL_UUID;
   const refuse = (reply: FastifyReply, status: number, error: string, detail?: string) =>
     reply.status(status).send({ error, ...(detail ? { detail } : {}) });
@@ -219,6 +237,73 @@ export function registerDetectionRoutes(app: FastifyInstance, db: Db): void {
     });
     if (!updated) return refuse(reply, 404, "not_found", "no open or acknowledged incident with that id");
     return updated;
+  });
+}
+
+/** register the ADR-0333 §6 quarantine routes (called from registerDetectionRoutes) */
+function registerQuarantineRoutes(app: FastifyInstance, db: Db): void {
+  const refuse = (reply: FastifyReply, status: number, error: string, detail?: string) =>
+    reply.status(status).send({ error, ...(detail ? { detail } : {}) });
+  const view = (q: typeof endpointDeviceQuarantines.$inferSelect) => ({
+    ...q,
+    deviceEnforcement: QUARANTINE_DEVICE_ENFORCEMENT,
+    lifecycle: ENDPOINT_DEVICE_QUARANTINE_MACHINE.describe(q.status),
+  });
+
+  app.get("/v1/detection/quarantines", async (req, reply) => {
+    const q = quarantineListQuery.safeParse(req.query);
+    if (!q.success) return refuse(reply, 400, "invalid_request");
+    const conds = [];
+    if (q.data.status) conds.push(eq(endpointDeviceQuarantines.status, q.data.status));
+    if (q.data.deviceId) conds.push(eq(endpointDeviceQuarantines.deviceId, q.data.deviceId));
+    if (q.data.before) {
+      const cursor = decodeCursor(q.data.before);
+      if (!cursor) return refuse(reply, 400, "invalid_request", "before is not a valid cursor");
+      conds.push(afterCursorDesc(endpointDeviceQuarantines.createdAt, endpointDeviceQuarantines.id, cursor));
+    }
+    const rows = await db
+      .select({ q: endpointDeviceQuarantines, cursorAt: atTextSql(endpointDeviceQuarantines.createdAt) })
+      .from(endpointDeviceQuarantines)
+      .where(conds.length ? and(...conds) : undefined)
+      .orderBy(desc(endpointDeviceQuarantines.createdAt), desc(endpointDeviceQuarantines.id))
+      .limit(q.data.limit + 1);
+    const more = rows.length > q.data.limit;
+    const page = more ? rows.slice(0, q.data.limit) : rows;
+    const last = page[page.length - 1];
+    return {
+      quarantines: page.map((r) => view(r.q)),
+      next: more && last ? encodeCursor({ at: last.cursorAt, id: last.q.id }) : null,
+    };
+  });
+
+  app.get("/v1/detection/quarantines/:quarantineId", async (req, reply) => {
+    const p = quarantineParam.safeParse(req.params);
+    if (!p.success) return refuse(reply, 400, "invalid_request", "quarantineId must be a uuid");
+    const [row] = await db.select().from(endpointDeviceQuarantines).where(eq(endpointDeviceQuarantines.id, p.data.quarantineId));
+    if (!row) return refuse(reply, 404, "not_found");
+    return { quarantine: view(row) };
+  });
+
+  app.post("/v1/detection/quarantines/:quarantineId/release", async (req, reply) => {
+    const p = quarantineParam.safeParse(req.params);
+    if (!p.success) return refuse(reply, 400, "invalid_request", "quarantineId must be a uuid");
+    const body = z.object({}).strict().safeParse(req.body ?? {});
+    if (!body.success) return refuse(reply, 400, "invalid_request", "the body takes no fields");
+    const actorUserId = req.authCtx.userId;
+    if (!actorUserId || actorUserId === NIL_UUID) return refuse(reply, 403, "human_admin_required", "a release is a human admin's decision");
+    const [row] = await db.select({ status: endpointDeviceQuarantines.status }).from(endpointDeviceQuarantines).where(eq(endpointDeviceQuarantines.id, p.data.quarantineId));
+    if (!row) return refuse(reply, 404, "not_found");
+    if (row.status !== "active") return refuse(reply, 409, "quarantine_not_active", `the quarantine is ${row.status}`);
+    // a release widens the device's access: a settings_relax step-up bound to this quarantine
+    const su = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { detection: "device-quarantine-release", quarantineId: p.data.quarantineId } });
+    if (!su.ok) return reply;
+    const out = await releaseQuarantine(db, { quarantineId: p.data.quarantineId, actorUserId, stepUp: su.method });
+    if (!out.ok) {
+      const status = out.code === "quarantine_not_found" ? 404 : 409;
+      return refuse(reply, status, out.code, out.detail);
+    }
+    const [after] = await db.select().from(endpointDeviceQuarantines).where(eq(endpointDeviceQuarantines.id, p.data.quarantineId));
+    return { quarantine: view(after!) };
   });
 }
 
