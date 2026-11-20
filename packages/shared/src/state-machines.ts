@@ -304,6 +304,34 @@ export const DETECTION_RESPONSE_MACHINE = defineMachine({
   },
 });
 
+/** `endpoint_device_quarantines.status` (ADR-0333 §6, lane E15). A `quarantine_device` detection response opens a
+ * quarantine `active`: the device's AI tools are refused until it ends. It ends exactly once, either released by an
+ * admin with a step-up (a human decision; widening, so only under the `normal` execution dial) or expired by the
+ * system at `expires_at` (also widening, so also only under `normal`). Both ends are final; a later incident opens a
+ * new quarantine. Same values as `ENDPOINT_DEVICE_QUARANTINE_STATUSES` in @regulait/db. */
+export const ENDPOINT_DEVICE_QUARANTINE_MACHINE = defineMachine({
+  id: "endpoint_device_quarantine",
+  stored: "endpoint_device_quarantines.status",
+  states: ["active", "released", "expired"],
+  initial: ["active"],
+  terminal: ["released", "expired"],
+  transitions: {
+    release: {
+      from: ["active"],
+      to: "released",
+      by: ["admin"],
+      summary: "An admin released the device after a step-up; its AI tools are governed by the normal policy again.",
+    },
+    expire: {
+      from: ["active"],
+      to: "expired",
+      by: ["system"],
+      summary: "The quarantine reached its end time and the execution dial is normal, so it ended on its own.",
+    },
+  },
+});
+export type EndpointDeviceQuarantineState = (typeof ENDPOINT_DEVICE_QUARANTINE_MACHINE.def.states)[number];
+
 /** `rule_step_suggestions.status` (ADR-0327). A scan inserts `suggested`. Shadow mode measures the suggested rule
  * beside the AI without changing routing, and can be stopped and started again. Dismissal is final: a rescan
  * refreshes a dismissed suggestion's evidence but never its status. */
@@ -779,6 +807,7 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [SAAS_APP_AGENT_LINK_MACHINE.def.id]: SAAS_APP_AGENT_LINK_MACHINE,
   [DETECTION_INCIDENT_MACHINE.def.id]: DETECTION_INCIDENT_MACHINE,
   [DETECTION_RESPONSE_MACHINE.def.id]: DETECTION_RESPONSE_MACHINE,
+  [ENDPOINT_DEVICE_QUARANTINE_MACHINE.def.id]: ENDPOINT_DEVICE_QUARANTINE_MACHINE,
   [RULE_STEP_SUGGESTION_MACHINE.def.id]: RULE_STEP_SUGGESTION_MACHINE,
   [ENDPOINT_COMMAND_EXCEPTION_MACHINE.def.id]: ENDPOINT_COMMAND_EXCEPTION_MACHINE,
   [ROBOT_VERSION_MACHINE.def.id]: ROBOT_VERSION_MACHINE,

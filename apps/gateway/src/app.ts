@@ -435,9 +435,9 @@ export interface BuildAppOptions {
   artifactStore?: ArtifactStore | null;
   /** ADR-0195 SD0 TEST SEAM: the discovery scanner registry (default: `DISCOVERY_SCANNERS`, empty in SD0). Code-only. */
   discoveryScanners?: ScannerRegistry;
-  /** ADR-0331 TEST SEAM: the device-policy signer (owner answer B4: one rotatable signer for endpoint and browser
-   * policies, built by the browser lane; wired here when it lands). Absent or null = no signer, which is production
-   * today (the directive route answers 503). Code-only: never env or admin input. */
+  /** ADR-0331 TEST SEAM: the directive signer. Absent = the shared ADR-0334 device-policy key (owner decision B4),
+   * resolved for every directive read, which is production; null = no signer (the directive route answers 503).
+   * Code-only: never env or admin input. */
   directiveSigner?: DirectiveSigner | null;
 }
 import { z } from "zod";
@@ -6365,14 +6365,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerEndpointAgentRoutes(app, db, {
     dataKey: opts.dataKey,
     ...(opts.discoveryScanners === undefined ? {} : { registry: opts.discoveryScanners }),
-    directiveSigner: opts.directiveSigner ?? null,
+    directiveSigner: opts.directiveSigner,
   });
   // ADR-0259 (P35) — the MCP servers enrolled devices' host configs name, with the registry diff, and the admin's
   // links to approved servers. Admin-only by default; reads what the agent reports, contacts nothing.
   registerEndpointMcpConfigRoutes(app, db);
   // ADR-0331 — the governed removal of flagged MCP servers from endpoints: create (an `endpoint_remediation` step-up,
   // off until the org switch is on), list, read and cancel. Admin-only by default (none is in NON_ADMIN_ROUTES).
-  registerEndpointAddonRemovalRoutes(app, db, { signer: opts.directiveSigner ?? null });
+  registerEndpointAddonRemovalRoutes(app, db, { signer: opts.directiveSigner });
   registerManagedSettingsRoutes(app, db);
   // ADR-0310 addendum (lane E1): the permission-bypass session view and the managed-file tamper view (admin)
   registerEndpointDecisionRoutes(app, db);

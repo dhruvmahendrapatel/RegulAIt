@@ -25,6 +25,8 @@ D-2026-11-18-04 to -07). Where these rules and CLAUDE.md conflict, stop and ask 
 
   These posts are the review trail. Anything else outward goes through the master: issues, other repositories, any
   external service.
+- **Suspended by the owner on 2026-11-20 (D-2026-11-20-01):** lanes keep running past the cap to speed up the build.
+  The cap below applies again when the owner reinstates it.
 - **At most 10 worker sessions at once** (owner, 2026-11-18), on separate files. The target mix is about 4 reviewers and
   6 builders. The existing long-lived lanes are phased down as they finish under rule 15 of the lane brief: when a lane's
   queue is done it says "LANE DONE" and the master archives it.

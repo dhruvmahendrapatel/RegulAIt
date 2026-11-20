@@ -14,7 +14,6 @@
  *  - The projected monthly saving is the step's measured span cost over the window, scaled to 30 days, times the share
  *    of runs the rule would answer (structured share × held-out coverage). It is an estimate and says so.
  */
-import { createHash } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
@@ -53,8 +52,11 @@ import {
   type StepRun,
 } from "@regulait/optimizer-kernel";
 import { induceStepRuleOffThread } from "@regulait/optimizer-kernel/offload";
-import { RULE_STEP_SUGGESTION_MACHINE, RULE_STEP_SWITCH_MACHINE, TRACE_TRUNCATION_MARKER, canonicalJson } from "@regulait/shared";
+import { RULE_STEP_SUGGESTION_MACHINE, RULE_STEP_SWITCH_MACHINE, TRACE_TRUNCATION_MARKER } from "@regulait/shared";
 import { whereFrom } from "./state-transition.js";
+import { NOT_RULE_SERVED_SPAN, ruleStepRuleDigest } from "./rule-step-serve.js";
+
+export { ruleStepRuleDigest };
 import { requireStepUp } from "./step-up.js";
 import { SCAN_WINDOW_DAYS } from "./rule-step-retention.js";
 import type { ListSpec } from "./list-contract.js";
@@ -107,15 +109,6 @@ export const RULE_STEP_AUDIT_RULE_IDS = {
 
 /** approvals.stage_id of a switch review: the prefix plus the switch request id */
 export const RULE_STEP_SWITCH_PREFIX = "__rule_step_switch__:";
-
-/**
- * What a reviewer approves when they approve a switch: sha256 hex over ADR-0060's `canonicalJson` of the suggestion's
- * rule. Stored on the request and as the approval's ADR-0104 consent fingerprint (`arguments_digest`); the decide path
- * recomputes it from the suggestion and refuses to switch on a mismatch.
- */
-export function ruleStepRuleDigest(rule: unknown): string {
-  return createHash("sha256").update(canonicalJson(rule)).digest("hex");
-}
 
 type SwitchEvent = (typeof RULE_STEP_SWITCH_MACHINE.events)[number];
 async function transitionSwitch(
@@ -401,6 +394,7 @@ export async function measureShadows(db: Db): Promise<ShadowEvaluation[]> {
           eq(traceSpans.name, o.stepName),
           eq(traceSpans.status, "ok"),
           eq(traceSpans.contentWithheld, false),
+          NOT_RULE_SERVED_SPAN,
           // nothing counted yet: every span after the start; else the keyset after the last counted span
           o.fromId === null
             ? sql`${traceSpans.startedAt} > ${o.fromAt}::timestamptz`
@@ -449,6 +443,7 @@ async function scan(db: Db, settings: RuleStepSettings): Promise<StepScan[]> {
         sql`${traceSpans.agentId} IS NOT NULL`,
         eq(traceSpans.status, "ok"),
         eq(traceSpans.contentWithheld, false),
+        NOT_RULE_SERVED_SPAN,
         sql`${traceSpans.startedAt} >= ${since}`,
       ),
     )
@@ -470,6 +465,7 @@ async function scan(db: Db, settings: RuleStepSettings): Promise<StepScan[]> {
           eq(traceSpans.name, step.stepName),
           eq(traceSpans.status, "ok"),
           eq(traceSpans.contentWithheld, false),
+          NOT_RULE_SERVED_SPAN,
           sql`${traceSpans.startedAt} >= ${since}`,
         ),
       )

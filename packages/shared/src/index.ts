@@ -5076,6 +5076,7 @@ export * from "./fairness.js";
 export * from "./state-machine.js";
 export * from "./state-machines.js";
 export * from "./pipeline-steps.js";
+export * from "./kill-switch-guard.js";
 export * from "./robots.js";
 // ADR-0261 (P37): third-party security telemetry ingest — the DefenseClaw JSONL parser and mapping (pure)
 export * from "./third-party-ingest/index.js";
