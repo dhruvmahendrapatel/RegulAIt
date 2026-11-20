@@ -6,7 +6,7 @@
 #
 # Pinned: smokescreen v0.1.0 (tag of commit 609eb8931420453daf5893509be0b25b21bd9edb, 2026-09-18), its module zip by
 # its go.sum hash (h1:E9Nd/WWMkMK3QAvCTlxiRBh1jTYyVy3BmXRci+zkXH8=, the checksum database's record), every dependency
-# by smokescreen's own go.sum (`-mod=readonly`, `go mod verify`). Modules are fetched at BUILD time only; the image runs
+# by smokescreen's own go.sum (`-mod=readonly`, `go mod verify`), except the patched modules below. Modules are fetched at BUILD time only; the image runs
 # air-gapped. The licence gate judges exactly the modules the built binary links (`go version -m`).
 #
 # How the executor runs it, and the flags it adds per run: engines/robot-egress/README.md.
@@ -24,6 +24,16 @@ RUN test "$(go env GOVERSION)" = "go1.27.4" \
  && node -e 'const j = require("/tmp/smokescreen.json"); if (j.Sum !== "h1:E9Nd/WWMkMK3QAvCTlxiRBh1jTYyVy3BmXRci+zkXH8=" || j.Origin?.Hash !== "609eb8931420453daf5893509be0b25b21bd9edb") { console.error("smokescreen v0.1.0 is not the pinned module"); process.exit(1); } console.log(j.Dir)' > /tmp/smokescreen.dir \
  && cp -r "$(cat /tmp/smokescreen.dir)" /src && chmod -R u+w /src
 WORKDIR /src
+# Vulnerable dependencies are patched, never allow-listed (CLAUDE.md security checklist): smokescreen v0.1.0's go.mod
+# pins logrus v1.9.0 (CVE-2025-65637), x/net v0.56.0 (CVE-2026-78661, CVE-2026-78669) and x/text v0.39.0
+# (CVE-2026-56851). The fixed releases are taken here, each checked against the Go checksum database, and the
+# resolved set is asserted exactly; the licence gate re-reads every linked module at its new version.
+RUN GOFLAGS= go get github.com/sirupsen/logrus@v1.9.3 golang.org/x/net@v0.62.0 golang.org/x/text@v0.43.0 \
+ && GOFLAGS= go mod tidy \
+ && grep -qx '	github.com/sirupsen/logrus v1.9.3' go.mod \
+ && grep -qx '	golang.org/x/net v0.62.0' go.mod \
+ && grep -qx '	golang.org/x/text v0.43.0 // indirect' go.mod \
+ && grep -qx '	golang.org/x/sys v0.49.0 // indirect' go.mod
 RUN go mod download && go mod verify \
  && go build -trimpath -buildvcs=false -ldflags "-s -w" -o /out/smokescreen . \
  && go version -m /out/smokescreen | tee /tmp/buildinfo.txt \
