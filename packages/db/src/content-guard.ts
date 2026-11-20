@@ -60,6 +60,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.agents, ["name"]],
   [s.a2aAgents, ["name"]],
   [s.a2aAgentCredentials, ["headerName"]],
+  // ADR-0315 (G7): an agent credential audience's admin-typed name
+  [s.agentCredentialAudiences, ["name"]],
   // ADR-0236 (P11): governed MCP bundles
   [s.mcpBundles, ["name", "description"]],
   [s.builderAgents, ["name", "description"]],
@@ -194,6 +196,8 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   "ai_incidents.title": "prose_owned_by_adr0102",
   "ai_policy_documents.title": "prose_owned_by_adr0102",
   "audit_log.tool_name": "audit_owned_by_adr0099",
+  // ADR-0315 (G7): a scope map row names the governed tool it maps
+  "agent_credential_audience_scopes.tool_name": "tool_reference",
   "approval_rules.tool_name": "tool_reference",
   "approvals.tool_name": "tool_reference",
   "config_canary_observations.tool_name": "tool_reference",

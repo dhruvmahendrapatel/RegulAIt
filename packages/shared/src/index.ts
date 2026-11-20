@@ -5107,3 +5107,4 @@ export * from "./fairness-evaluation.js";
 
 // ADR-0363 slice 2: customer-defined classifiers inside the guardrail pipeline
 export * from "./custom-classifiers.js";
+export * from "./agent-credential.js";
