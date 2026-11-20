@@ -29,6 +29,8 @@ export const FEDERATION_KEY_OVERLAP_SECONDS = 600;
 export const federationSourceSubject = (sourceId: string): string => `regulait:discovery-source:${sourceId}`;
 /** the token subject of RegulAIt's own AWS principal (the role it assumes customer roles from, with an external id) */
 export const FEDERATION_AWS_PRINCIPAL_SUBJECT = "regulait:aws-principal";
+/** the `sub` of a token RegulAIt presents for a vendor usage connector (ADR-0322 slice 4a); the customer's role pins it */
+export const vendorUsageConnectorSubject = (connectorId: string): string => `regulait:vendor-usage-connector:${connectorId}`;
 /** the deployment variable naming RegulAIt's own AWS principal (an IAM role ARN trusting the federation issuer) */
 export const AWS_PRINCIPAL_ROLE_ENV = "REGULAIT_AWS_PRINCIPAL_ROLE_ARN";
 

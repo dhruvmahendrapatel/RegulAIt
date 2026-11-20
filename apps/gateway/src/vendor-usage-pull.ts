@@ -33,6 +33,7 @@
 import { createHash } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import OpenAiSdk from "openai";
+import { AWS_CUR_MAX_OBJECT_BYTES, AwsCurReadError, awsCredentialProvider, readAwsCurPeriod } from "@regulait/cloud-discovery";
 import { z } from "zod";
 import {
   and,
@@ -55,7 +56,16 @@ import {
 } from "@regulait/db";
 import {
   anthropicCostReportSchema,
+  AWS_CUR_MAX_ROWS,
+  awsCurBillingPeriods,
+  awsCurFacts,
+  awsCurManifestSchema,
+  awsCurPeriodBounds,
   cursorUsageEventsSchema,
+  FEDERATION_AUDIENCES,
+  normalizeAwsCurCsv,
+  vendorUsageConnectorSubject,
+  vendorUsageSecretSchemas,
   factOverlapsMetered,
   githubBillingUsageSchema,
   normalizeAccountKey,
@@ -75,6 +85,7 @@ import {
   VENDOR_USAGE_PULL_RUN_MACHINE,
   vendorUsagePublicConfigSchemas,
   VendorUsageResponseError,
+  type AwsCurPublicConfig,
   type CursorUsageEvent,
   type GithubCopilotPublicConfig,
   type VendorUsageFact,
@@ -83,6 +94,7 @@ import {
 } from "@regulait/shared";
 import { loadResolutionContext, scanFreeTexts } from "./cost-import.js";
 import { loadEgressAllowList } from "./custom-providers.js";
+import { FederationError, federationTokenMinter } from "./federation-signing-keys.js";
 import { resolveDeployMode } from "./deploy-posture.js";
 import {
   createGuardedFetch,
@@ -205,6 +217,13 @@ function classifyError(err: unknown, page: number): PullError {
     }
   }
   if (err instanceof OpenAiSdk.APIError && typeof err.status === "number") return statusError(err.status, page);
+  if (err instanceof AwsCurReadError) {
+    const code: PullErrorCode = err.reason === "too_large" ? "response_too_large" : err.reason === "too_many_files" ? "page_limit" : "bad_response";
+    return new PullError(code, err.message);
+  }
+  // an AWS SDK service error carries the HTTP status in $metadata; its message is AWS text and is not kept
+  const awsStatus = (err as { $metadata?: { httpStatusCode?: unknown } } | null)?.$metadata?.httpStatusCode;
+  if (typeof awsStatus === "number" && awsStatus >= 400) return statusError(awsStatus, page);
   if (err instanceof VendorUsageResponseError || err instanceof z.ZodError || err instanceof SyntaxError) {
     return new PullError("bad_response", `a vendor response did not match the documented shape on page ${page}`);
   }
@@ -412,13 +431,95 @@ async function fetchCursor(
   throw new PullError("page_limit", `the vendor still had more pages after ${VENDOR_USAGE_MAX_PAGES}; nothing was written`);
 }
 
+/** what a fetch returns; `replacePeriods` are AWS billing months read in full, whose stale lines are withdrawn */
+interface Fetched {
+  facts: VendorUsageFact[];
+  pages: number;
+  replacePeriods?: string[];
+}
+
+/** what the AWS fetch needs beyond the key: the federation minter's inputs and a guarded fetch sized for CUR files */
+interface AwsFetchContext {
+  db: Db;
+  dataKey: string | undefined;
+  connectorId: string;
+  periods: string[];
+  allowList: Awaited<ReturnType<typeof loadEgressAllowList>>;
+  deps: VendorUsageDeps;
+}
+
+/** a federated connector stores no secret: this marker is its credential row, and revoking it stops the pull */
+export const AWS_CUR_FEDERATED_SECRET = JSON.stringify({ mode: "federated" });
+
+/** a stored secret parsed for its connector's credential mode, or null when they disagree */
+function awsCurSecret(raw: string, config: AwsCurPublicConfig) {
+  let parsed;
+  try {
+    parsed = vendorUsageSecretSchemas.aws_cur.parse(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+  return parsed.mode === config.credentialMode ? parsed : null;
+}
+
+/**
+ * AWS Data Exports (CUR 2.0): each billing period through @regulait/cloud-discovery's reader, STS and S3 both on the
+ * guarded fetch. Federated mode presents a token minted for this connector's subject; static mode signs with the
+ * stored key pair. Only Bedrock lines are kept (`productCodes`), summed per day in integer micro-units.
+ */
+async function fetchAwsCur(key: string, config: AwsCurPublicConfig, ctx: AwsFetchContext): Promise<Fetched> {
+  const secret = awsCurSecret(key, config);
+  if (!secret) throw new PullError("unauthorized", "the stored credential does not match the connector's credential mode");
+  // CUR objects are larger than an API page: the S3 and STS calls get their own guarded fetch with the reader's cap
+  const fetcher = createGuardedFetch({
+    allowList: ctx.allowList,
+    maxResponseBytes: AWS_CUR_MAX_OBJECT_BYTES,
+    ...(ctx.deps.fetchImpl ? { fetchImpl: ctx.deps.fetchImpl } : {}),
+    ...(ctx.deps.resolve ? { resolve: ctx.deps.resolve } : {}),
+  });
+  const credentials =
+    secret.mode === "static"
+      ? awsCredentialProvider({ fetch: fetcher, credential: { mode: "aws_static", accessKeyId: secret.accessKeyId, secretAccessKey: secret.secretAccessKey } }, config.region)
+      : awsCredentialProvider(
+          {
+            fetch: fetcher,
+            credential: { mode: "aws_web_identity", roleArn: config.roleArn!, roleSessionName: "regulait-vendor-usage" },
+            oidcToken: federationTokenMinter(ctx.db, {
+              dataKey: ctx.dataKey,
+              subject: vendorUsageConnectorSubject(ctx.connectorId),
+              allowedAudiences: [FEDERATION_AUDIENCES.aws],
+            }),
+          },
+          config.region,
+        );
+  const target = { bucket: config.bucket, region: config.region, prefix: config.prefix, exportName: config.exportName };
+  const facts: VendorUsageFact[] = [];
+  const replacePeriods: string[] = [];
+  let rows = 0;
+  let files = 0;
+  for (const period of ctx.periods) {
+    const groups = new Map<string, { fact: VendorUsageFact; micro: number; qty: number }>();
+    const read = await readAwsCurPeriod({ fetch: fetcher, credentials, parseManifest: (raw) => awsCurManifestSchema.parse(raw) }, target, period, (text) => {
+      const out = normalizeAwsCurCsv(text, period, config, groups);
+      rows += out.rows;
+      if (rows > AWS_CUR_MAX_ROWS) throw new PullError("page_limit", `the export has more than ${AWS_CUR_MAX_ROWS} rows in this window; use a Bedrock-only export`);
+    });
+    files += read.files;
+    if (!read.delivered) continue;
+    facts.push(...awsCurFacts(groups));
+    replacePeriods.push(period);
+  }
+  return { facts, pages: files, replacePeriods };
+}
+
 function fetchVendor(
   vendor: VendorUsagePullVendor,
   config: PublicConfig,
   key: string,
   window: { start: Date; end: Date },
   fetcher: typeof fetch,
-): Promise<{ facts: VendorUsageFact[]; pages: number }> {
+  aws: AwsFetchContext,
+): Promise<Fetched> {
   switch (vendor) {
     case "anthropic":
       return fetchAnthropic(key, window, fetcher);
@@ -428,6 +529,8 @@ function fetchVendor(
       return fetchGithubCopilot(key, window, fetcher, config as GithubCopilotPublicConfig);
     case "cursor":
       return fetchCursor(key, window, fetcher);
+    case "aws_cur":
+      return fetchAwsCur(key, config as AwsCurPublicConfig, aws);
   }
 }
 
@@ -579,7 +682,12 @@ export async function runVendorUsagePull(
 
   const vendor = connector.vendor;
   const config = parseConfig(vendor, connector.publicConfig);
-  const window = pullWindow(connector.pulledThrough, config.backfillDays, now);
+  // AWS delivers whole billing months; every other vendor answers a daily range
+  const periods = vendor === "aws_cur" ? awsCurBillingPeriods(connector.pulledThrough, (config as AwsCurPublicConfig).backfillMonths, now) : [];
+  const window =
+    vendor === "aws_cur"
+      ? { start: awsCurPeriodBounds(periods[0]!).start, end: awsCurPeriodBounds(periods[periods.length - 1]!).end }
+      : pullWindow(connector.pulledThrough, (config as { backfillDays: number }).backfillDays, now);
   await db
     .update(vendorUsagePullRuns)
     .set({ windowStart: window.start, windowEnd: window.end })
@@ -592,11 +700,25 @@ export async function runVendorUsagePull(
     return refuse("data_key_unavailable", "the stored credential could not be decrypted with the configured data key");
   }
 
-  let fetched: { facts: VendorUsageFact[]; pages: number };
+  let fetched: Fetched;
   try {
-    const fetcher = guardedFetch(await loadEgressAllowList(db), opts.deps ?? {});
-    fetched = await fetchVendor(vendor, config, key, window, fetcher);
+    const allowList = await loadEgressAllowList(db);
+    const fetcher = guardedFetch(allowList, opts.deps ?? {});
+    fetched = await fetchVendor(vendor, config, key, window, fetcher, {
+      db,
+      dataKey: opts.dataKey,
+      connectorId,
+      periods,
+      allowList,
+      deps: opts.deps ?? {},
+    });
   } catch (err) {
+    // federation off (or its issuer unset) means the federated credential cannot be used: a refusal, not a failure
+    for (let e: unknown = err, depth = 0; e && depth < 5; e = (e as { cause?: unknown }).cause, depth++) {
+      if (e instanceof FederationError) {
+        return refuse("no_credential", "this connector's federated credential cannot be used: cloud workload identity federation is off or has no issuer (ADR-0195)");
+      }
+    }
     const e = classifyError(err, 0);
     return finish("fail", {errorCode: e.code, errorDetail: e.detail }, VENDOR_USAGE_RULE_IDS.pullFailed, "deny", e.detail);
   }
@@ -612,7 +734,10 @@ export async function runVendorUsagePull(
     return finish("fail", {errorCode: "scan_blocked", errorDetail: detail, pages: fetched.pages }, VENDOR_USAGE_RULE_IDS.pullFailed, "deny", detail);
   }
 
-  const ctx = await loadResolutionContext(db);
+  const loaded = await loadResolutionContext(db);
+  // an AWS principal's role session name is chosen by the caller, so it is never read as an email (owner decision,
+  // 2026-11-20): AWS lines resolve through admin aliases only
+  const ctx = vendor === "aws_cur" ? { ...loaded, userIdByEmail: new Map<string, string>(), domainRules: [] } : loaded;
   // a fact key the vendor returned twice is one fact: the later bucket wins, so one statement never touches a row twice
   const byKey = new Map<string, { fact: VendorUsageFact; i: number; factKey: string }>();
   fetched.facts.forEach((fact, i) => {
@@ -730,9 +855,38 @@ export async function runVendorUsagePull(
         .returning({ inserted: sql<boolean>`(xmax = 0)` });
       newLines += written.filter((w) => w.inserted).length;
     }
+    // AWS months read in full replace what was stored for them (owner decision, 2026-11-20): a line AWS no longer
+    // reports for a re-read month is withdrawn, so the ledger matches AWS's restated file
+    let withdrawnLines = 0;
+    if (fetched.replacePeriods && fetched.replacePeriods.length > 0) {
+      const keep = lines.map((l) => l.factKey);
+      const withdrawn = await tx
+        .delete(importedCostLines)
+        .where(
+          and(
+            eq(importedCostLines.pullConnectorId, connectorId),
+            inArray(sql<string>`${importedCostLines.detail}->>'billingPeriod'`, fetched.replacePeriods),
+            keep.length ? sql`${importedCostLines.factKey} <> ALL(${sql.param(keep)}::text[])` : undefined,
+          ),
+        )
+        .returning({ id: importedCostLines.id });
+      withdrawnLines = withdrawn.length;
+    }
     await tx
       .update(costImportBatches)
-      .set({ summary: { origin: "pull", connectorId, runId, vendors: [vendor], overlapLines, pages: fetched.pages, newLines, restatedLines: lines.length - newLines } })
+      .set({
+        summary: {
+          origin: "pull",
+          connectorId,
+          runId,
+          vendors: [vendor],
+          overlapLines,
+          pages: fetched.pages,
+          newLines,
+          restatedLines: lines.length - newLines,
+          ...(fetched.replacePeriods ? { replacedPeriods: fetched.replacePeriods, withdrawnLines } : {}),
+        },
+      })
       .where(eq(costImportBatches.id, batch!.id));
     const through = new Date(Math.min(window.end.getTime(), now.getTime()));
     await tx
@@ -861,6 +1015,8 @@ const credentialBody = z
     acknowledgeWriteCapable: z.boolean().default(false),
     /** the admin attests the token carries read permissions only, where RegulAIt cannot check its scope (#1069 S4) */
     acknowledgeUnverifiedScope: z.boolean().default(false),
+    /** an AWS access-key pair is long-lived; storing one is a relaxation the admin acknowledges separately */
+    acknowledgeStaticAwsKey: z.boolean().default(false),
     reason: reasonField,
   })
   .strict();
@@ -946,7 +1102,7 @@ export function registerVendorUsagePullRoutes(
       connectors: connectors.map((c) => {
         const cfg = isPullVendor(c.vendor) ? parseConfig(c.vendor, c.publicConfig) : null;
         const declared = cfg ? declaredGatewayIds(cfg) : 0;
-        const unmetered = c.vendor === "github_copilot" || c.vendor === "cursor";
+        const unmetered = c.vendor === "github_copilot" || c.vendor === "cursor" || c.vendor === "aws_cur";
         return {
           ...connectorView(c, credBy.get(c.id) ?? null),
           meteredOverlap: unmetered
@@ -1041,7 +1197,7 @@ export function registerVendorUsagePullRoutes(
     if (!connector || !isPullVendor(connector.vendor)) return reply.status(404).send({ error: "not_found" });
     const parsed = credentialBody.safeParse(req.body);
     if (!parsed.success) {
-      return reply.status(400).send(bad("expected { secret, replacesCredentialId: uuid | null, acknowledgeWriteCapable?, acknowledgeUnverifiedScope?, reason }"));
+      return reply.status(400).send(bad("expected { secret, replacesCredentialId: uuid | null, acknowledgeWriteCapable?, acknowledgeUnverifiedScope?, acknowledgeStaticAwsKey?, reason }"));
     }
     if (resolveDeployMode() === "air_gapped") {
       return reply.status(409).send({ error: "vendor_usage_air_gapped", detail: "this deployment is air-gapped; no vendor credential can be stored" });
@@ -1059,6 +1215,29 @@ export function registerVendorUsagePullRoutes(
     }
     // secure by default (ADR-0180): a scope RegulAIt cannot check is held at least as strictly as one it knows can
     // write, so storing it needs the admin's own attestation, recorded with the credential and in the audit row
+    // a structured secret must be the shape its connector's mode expects (ADR-0322 slice 4a)
+    let staticAwsKey = false;
+    if (connector.vendor === "aws_cur") {
+      const cfg = parseConfig("aws_cur", connector.publicConfig) as AwsCurPublicConfig;
+      if (!awsCurSecret(parsed.data.secret, cfg)) {
+        return reply.status(400).send({
+          error: "invalid_credential_shape",
+          detail:
+            cfg.credentialMode === "federated"
+              ? `a federated AWS connector stores ${AWS_CUR_FEDERATED_SECRET} as its credential`
+              : 'a static AWS connector stores {"mode":"static","accessKeyId":"…","secretAccessKey":"…"}',
+        });
+      }
+      staticAwsKey = cfg.credentialMode === "static";
+      if (staticAwsKey && !parsed.data.acknowledgeStaticAwsKey) {
+        return reply.status(409).send({
+          error: "static_aws_key_acknowledgement_required",
+          detail:
+            "a static AWS access key is long-lived and is stored encrypted until it is revoked; the federated role is " +
+            "the secure default. Send acknowledgeStaticAwsKey: true to store it.",
+        });
+      }
+    }
     if (posture === "unverified" && !parsed.data.acknowledgeUnverifiedScope) {
       return reply.status(409).send({
         error: "unverified_scope_acknowledgement_required",
@@ -1069,7 +1248,7 @@ export function registerVendorUsagePullRoutes(
     }
     if (!(await requireStepUp(db, req, reply, {
       kind: "settings_relax",
-      facts: { vendorUsageConnector: connector.id, values: { credential: "store", scopePosture: posture } },
+      facts: { vendorUsageConnector: connector.id, values: { credential: "store", scopePosture: posture, ...(staticAwsKey ? { staticAwsKey: true } : {}) } },
     })).ok) {
       return reply;
     }
@@ -1109,6 +1288,7 @@ export function registerVendorUsagePullRoutes(
           scopePosture: posture,
           writeCapableAcknowledged: posture === "write_capable",
           ...(posture === "unverified" ? { scopeAttestation: UNVERIFIED_SCOPE_ATTESTATION } : {}),
+          ...(staticAwsKey ? { staticAwsKeyAcknowledged: true } : {}),
           reason: parsed.data.reason,
         });
       return row!;

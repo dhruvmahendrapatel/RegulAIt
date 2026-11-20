@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   anthropicCostReportSchema,
+  awsCurBillingPeriods,
+  awsCurFacts,
   centsDecimalToDollars,
+  decimalToMicro,
+  normalizeAwsCurCsv,
+  vendorUsageSecretSchemas,
   cursorUsageEventsSchema,
   factOverlapsMetered,
   githubBillingUsageSchema,
@@ -187,5 +192,77 @@ describe("ADR-0322 slice 3: GitHub Copilot and Cursor normalisers", () => {
     expect(cursorUsageEventsSchema.safeParse({ usageEvents: [{ timestamp: "2026-11-17", chargedCents: 1 }], pagination: { currentPage: 1, hasNextPage: false } }).success).toBe(false);
     expect(() => normalizeCursorUsageEvents([{ timestamp: "9999999999999999", chargedCents: 1 }])).toThrow(VendorUsageResponseError);
     expect(() => normalizeCursorUsageEvents([{ timestamp: "9000000000000000", chargedCents: 1 }])).toThrow(VendorUsageResponseError);
+  });
+});
+
+describe("ADR-0322 slice 4a: AWS CUR 2.0, Bedrock lines", () => {
+  const cfg = vendorUsagePublicConfigSchemas.aws_cur;
+  const header =
+    "bill_billing_period_start_date,line_item_usage_start_date,line_item_usage_account_id,line_item_product_code,line_item_usage_type,line_item_line_item_type,line_item_unblended_cost,line_item_currency_code,line_item_usage_amount,line_item_iam_principal,resource_tags,line_item_line_item_description";
+  const row = (start: string, product: string, cost: string, principal = "", type = "Usage") =>
+    `2026-11-01T00:00:00Z,${start},123456789012,${product},USE1-Model-input-tokens,${type},${cost},USD,1000,${principal},"{""team"":""x""}",free text kept nowhere`;
+
+  it("validates the connector configuration strictly", () => {
+    const good = { credentialMode: "federated", roleArn: "arn:aws:iam::123456789012:role/regulait-cur", region: "us-east-1", bucket: "acme-cur", prefix: "exports/ai", exportName: "bedrock-cur" };
+    expect(cfg.parse(good)).toMatchObject({ productCodes: ["AmazonBedrock"], backfillMonths: 1 });
+    expect(cfg.safeParse({ ...good, roleArn: undefined }).success).toBe(false);
+    expect(cfg.safeParse({ ...good, credentialMode: "static" }).success).toBe(false);
+    expect(cfg.safeParse({ ...good, roleArn: undefined, credentialMode: "static" }).success).toBe(true);
+    for (const bad of [{ bucket: "acme.cur" }, { bucket: "Acme" }, { prefix: "../x" }, { prefix: "a/../b" }, { prefix: "/abs" }, { region: "moon-1" }, { exportName: "a b" }, { endpoint: "https://x" }]) {
+      expect(cfg.safeParse({ ...good, ...bad }).success, JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it("accepts only the two documented secret shapes", () => {
+    const s = vendorUsageSecretSchemas.aws_cur;
+    expect(s.safeParse({ mode: "federated" }).success).toBe(true);
+    expect(s.safeParse({ mode: "static", accessKeyId: ["AKIA", "Z".repeat(16)].join(""), secretAccessKey: "x".repeat(40) }).success).toBe(true);
+    expect(s.safeParse({ mode: "static", accessKeyId: ["AKIA", "Z".repeat(16)].join("") }).success).toBe(false);
+    expect(s.safeParse({ mode: "federated", roleArn: "x" }).success).toBe(false);
+  });
+
+  it("converts decimal costs exactly and refuses anything that is not a number", () => {
+    expect(decimalToMicro("0.0000025")).toBe(3);
+    expect(decimalToMicro("12.3456789")).toBe(12_345_679);
+    expect(decimalToMicro("-1.5")).toBe(-1_500_000);
+    expect(decimalToMicro("1.0E-6")).toBe(1);
+    for (const bad of ["", "1,5", "NaN", "0x10", "1e400", "1234567890.5"]) expect(() => decimalToMicro(bad), bad).toThrow(VendorUsageResponseError);
+  });
+
+  it("keeps only Bedrock lines, sums them per day and principal, and discards every other column", () => {
+    const csv = [
+      header,
+      row("2026-11-17T01:00:00Z", "AmazonBedrock", "0.10", "arn:aws:sts::123456789012:assumed-role/dev/alice@example.com"),
+      row("2026-11-17T02:00:00Z", "AmazonBedrock", "0.20", "arn:aws:sts::123456789012:assumed-role/dev/alice@example.com"),
+      row("2026-11-17T03:00:00Z", "AmazonBedrock", "-0.05", "arn:aws:sts::123456789012:assumed-role/dev/alice@example.com", "Credit"),
+      row("2026-11-17T04:00:00Z", "AmazonBedrock", "1.5"),
+      row("2026-11-17T05:00:00Z", "AmazonEC2", "99"),
+    ].join("\n");
+    const { groups, rows, kept } = normalizeAwsCurCsv(csv, "2026-11", { productCodes: ["AmazonBedrock"] });
+    expect([rows, kept]).toEqual([5, 4]);
+    const facts = awsCurFacts(groups);
+    expect(facts.map((f) => [f.accountRef, f.accountKind, f.amount, f.detail.lineItemType])).toEqual([
+      ["arn:aws:sts::123456789012:assumed-role/dev/alice@example.com", "iam_principal", 0.3, "Usage"],
+      ["arn:aws:sts::123456789012:assumed-role/dev/alice@example.com", "iam_principal", -0.05, "Credit"],
+      ["aws account 123456789012", "aws_account", 1.5, "Usage"],
+    ]);
+    expect(facts[0]!.periodStart).toBe("2026-11-17T00:00:00.000Z");
+    expect(facts[0]!.detail).toEqual({ source: "aws cur 2.0", billingPeriod: "2026-11", awsAccountId: "123456789012", productCode: "AmazonBedrock", usageType: "USE1-Model-input-tokens", lineItemType: "Usage" });
+    expect(JSON.stringify(facts)).not.toMatch(/team|free text/);
+  });
+
+  it("refuses a missing column, a line outside its billing period and a malformed account", () => {
+    expect(() => normalizeAwsCurCsv("line_item_usage_start_date\n2026-11-01", "2026-11", { productCodes: ["AmazonBedrock"] })).toThrow(/line_item_usage_account_id/);
+    expect(() => normalizeAwsCurCsv([header, row("2026-10-31T23:00:00Z", "AmazonBedrock", "1")].join("\n"), "2026-11", { productCodes: ["AmazonBedrock"] })).toThrow(/outside billing period/);
+    expect(() => normalizeAwsCurCsv([header, row("2026-11-02T00:00:00Z", "AmazonBedrock", "1").replace("123456789012", "12")].join("\n"), "2026-11", { productCodes: ["AmazonBedrock"] })).toThrow(/account id/);
+  });
+
+  it("reads the backfill months first, then resumes, re-reading the previous month while AWS may restate it", () => {
+    expect(awsCurBillingPeriods(null, 2, new Date("2026-11-20T00:00:00Z"))).toEqual(["2026-10", "2026-11"]);
+    expect(awsCurBillingPeriods(null, 1, new Date("2026-11-20T00:00:00Z"))).toEqual(["2026-11"]);
+    expect(awsCurBillingPeriods(null, 1, new Date("2026-11-10T00:00:00Z"))).toEqual(["2026-10", "2026-11"]);
+    expect(awsCurBillingPeriods(new Date("2026-11-19T00:00:00Z"), 1, new Date("2026-12-03T00:00:00Z"))).toEqual(["2026-11", "2026-12"]);
+    expect(awsCurBillingPeriods(new Date("2026-01-05T00:00:00Z"), 1, new Date("2026-12-20T00:00:00Z"))).toHaveLength(4);
+    expect(awsCurBillingPeriods(new Date("2026-12-31T00:00:00Z"), 1, new Date("2027-01-02T00:00:00Z"))).toEqual(["2026-12", "2027-01"]);
   });
 });

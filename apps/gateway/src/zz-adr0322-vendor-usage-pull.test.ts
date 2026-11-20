@@ -16,6 +16,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
+import { gzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 import {
   and,
@@ -115,7 +116,7 @@ function anthropicPages(amountCents: string) {
 const put = (url: string, payload: unknown) => app.inject({ method: "PUT", url, headers: AUTH, payload: payload as object });
 const steppedPut = (url: string, payload: unknown) => relaxStepUpAround(db, () => put(url, payload));
 
-async function createConnector(vendor: "anthropic" | "openai" | "github_copilot" | "cursor", config: Record<string, unknown>) {
+async function createConnector(vendor: "anthropic" | "openai" | "github_copilot" | "cursor" | "aws_cur", config: Record<string, unknown>) {
   const res = await app.inject({
     method: "POST",
     url: "/v1/vendor-usage/connectors",
@@ -189,6 +190,7 @@ describe("ADR-0322: off by default, three switches before anything leaves", () =
       ["openai", "write_capable"],
       ["github_copilot", "unverified"],
       ["cursor", "write_capable"],
+      ["aws_cur", "unverified"],
     ]);
     expect(body.statement).toMatch(/IMPORTED/);
   });
@@ -682,6 +684,111 @@ describe("ADR-0322 slice 3: the Cursor pull (filtered usage events, Basic auth)"
     const { run } = await runVendorUsagePull(db, c, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl: counting, resolve } });
     expect([run.status, run.errorCode, calls]).toEqual(["failed", "bad_response", 2]);
     expect(await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c))).toHaveLength(before.length);
+  });
+});
+
+describe("ADR-0322 slice 4a: AWS CUR 2.0, Bedrock lines (static key path; federated exchange in cloud-discovery)", () => {
+  const NOW = new Date("2026-11-20T12:00:00Z");
+  const BUCKET_HOST = "acme-cur.s3.us-east-1.amazonaws.com";
+  const META = "exports/ai/bedrock/metadata/BILLING_PERIOD=2026-11/";
+  const DATA = "exports/ai/bedrock/data/BILLING_PERIOD=2026-11/";
+  const base = { region: "us-east-1", bucket: "acme-cur", prefix: "exports/ai", exportName: "bedrock" };
+  const AKID = `AKIA${String(RUN).padStart(16, "0").slice(-16)}`;
+  const SECRET = JSON.stringify({ mode: "static", accessKeyId: AKID, secretAccessKey: `fake-${RUN}-aws-secret-key` });
+  const header = "line_item_usage_start_date,line_item_usage_account_id,line_item_product_code,line_item_usage_type,line_item_line_item_type,line_item_unblended_cost,line_item_currency_code,line_item_usage_amount,line_item_iam_principal";
+  const principal = `arn:aws:sts::123456789012:assumed-role/dev/adr0322-admin-${RUN}@example.com`;
+  let files: Record<string, string | Uint8Array> = {};
+  const s3 = (url: URL) => {
+    if (url.hostname !== BUCKET_HOST) return json({ error: "unexpected host" }, 404);
+    if (url.searchParams.get("list-type") === "2") {
+      const p = url.searchParams.get("prefix") ?? "";
+      const keys = Object.keys(files).filter((k) => k.startsWith(p)).map((k) => `<Contents><Key>${k}</Key><LastModified>2026-11-19T00:00:00.000Z</LastModified></Contents>`);
+      return new Response(`<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>acme-cur</Name><IsTruncated>false</IsTruncated>${keys.join("")}</ListBucketResult>`, { headers: { "content-type": "application/xml" } });
+    }
+    const body = files[decodeURIComponent(url.pathname.slice(1))];
+    return body === undefined ? new Response("<Error><Code>NoSuchKey</Code></Error>", { status: 404 }) : new Response(body);
+  };
+  const deliver = (rows: string[], dataFile = "bedrock-00001.csv.gz") => {
+    files = {
+      [`${META}bedrock-Manifest.json`]: JSON.stringify({ executionId: `exec-${rows.length}`, dataFiles: [`s3://acme-cur/${DATA}${dataFile}`] }),
+      [`${DATA}${dataFile}`]: gzipSync(Buffer.from([header, ...rows].join("\n"))),
+    };
+  };
+
+  it("refuses a credential whose shape does not match the mode, and a static key without its own acknowledgement", async () => {
+    const fed = await createConnector("aws_cur", { ...base, credentialMode: "federated", roleArn: "arn:aws:iam::123456789012:role/regulait-cur" });
+    expect((await storeKey(fed.id, SECRET, { acknowledgeUnverifiedScope: true })).json().error).toBe("invalid_credential_shape");
+    const c = await createConnector("aws_cur", { ...base, credentialMode: "static" });
+    expect((await storeKey(c.id, JSON.stringify({ mode: "federated" }), { acknowledgeUnverifiedScope: true })).statusCode).toBe(400);
+    const noStatic = await storeKey(c.id, SECRET, { acknowledgeUnverifiedScope: true });
+    expect([noStatic.statusCode, noStatic.json().error]).toEqual([409, "static_aws_key_acknowledgement_required"]);
+    const noScope = await storeKey(c.id, SECRET, { acknowledgeStaticAwsKey: true });
+    expect([noScope.statusCode, noScope.json().error]).toEqual([409, "unverified_scope_acknowledgement_required"]);
+    const ok = await storeKey(c.id, SECRET, { acknowledgeStaticAwsKey: true, acknowledgeUnverifiedScope: true });
+    expect(ok.statusCode, ok.body).toBe(201);
+    expect(ok.body).not.toContain(AKID);
+    const [audit] = await db.select({ detail: auditLog.detail }).from(auditLog).where(and(eq(auditLog.ruleId, VENDOR_USAGE_RULE_IDS.credentialStored), eq(auditLog.objectId, ok.json().credential.id)));
+    expect(audit?.detail).toMatchObject({ staticAwsKeyAcknowledged: true, scopePosture: "unverified" });
+    expect(JSON.stringify(audit?.detail)).not.toContain(AKID);
+    expect((await steppedPut(`/v1/vendor-usage/connectors/${c.id}/enabled`, { enabled: true, reason: "adr0322 suite" })).statusCode).toBe(200);
+  });
+
+  it("reads the month's export, keeps Bedrock lines only, and resolves a principal through admin aliases only", async () => {
+    const c = connectorIds[connectorIds.length - 1]!;
+    await allowHost(BUCKET_HOST);
+    deliver([
+      `2026-11-17T01:00:00Z,123456789012,AmazonBedrock,USE1-input-tokens,Usage,0.10,USD,1000,${principal}`,
+      `2026-11-17T02:00:00Z,123456789012,AmazonBedrock,USE1-input-tokens,Usage,0.25,USD,2500,${principal}`,
+      `2026-11-17T03:00:00Z,123456789012,AmazonBedrock,USE1-output-tokens,Usage,1.00,USD,100,`,
+      `2026-11-17T04:00:00Z,123456789012,AmazonEC2,BoxUsage,Usage,9.99,USD,1,`,
+    ]);
+    seen = [];
+    answer = s3;
+    const { run } = await runVendorUsagePull(db, c, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl, resolve }, now: NOW });
+    expect(run, run.errorDetail ?? "").toMatchObject({ status: "succeeded", linesUpserted: 2, overlapLines: 0 });
+    expect(seen.every((x) => x.url.hostname === BUCKET_HOST)).toBe(true);
+    expect(seen[0]!.headers.get("authorization")).toMatch(new RegExp(`^AWS4-HMAC-SHA256 Credential=${AKID}/`));
+    const lines = await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c));
+    const byRef = new Map(lines.map((l) => [l.accountRef, l]));
+    // the session name is the admin's email, but a caller chooses it: no automatic resolution
+    expect(byRef.get(principal)).toMatchObject({ amount: 0.35, resolutionMethod: "unresolved", basis: "imported" });
+    expect(byRef.get("aws account 123456789012")).toMatchObject({ amount: 1 });
+    expect(JSON.stringify(await db.select().from(vendorUsagePullRuns).where(eq(vendorUsagePullRuns.connectorId, c)))).not.toContain(AKID);
+  });
+
+  it("replaces a re-read month: a restated amount updates in place and a line AWS removed is withdrawn", async () => {
+    const c = connectorIds[connectorIds.length - 1]!;
+    deliver([`2026-11-17T01:00:00Z,123456789012,AmazonBedrock,USE1-input-tokens,Usage,0.40,USD,1000,${principal}`]);
+    const { run } = await runVendorUsagePull(db, c, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl, resolve }, now: NOW });
+    expect(run).toMatchObject({ status: "succeeded", linesUpserted: 1 });
+    const lines = await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c));
+    expect(lines.map((l) => [l.accountRef, l.amount])).toEqual([[principal, 0.4]]);
+    const [batch] = await db.select({ summary: costImportBatches.summary }).from(costImportBatches).where(eq(costImportBatches.id, run.batchId!));
+    expect(batch?.summary).toMatchObject({ replacedPeriods: ["2026-11"], withdrawnLines: 1 });
+  });
+
+  it("refuses a Parquet export with a fixed code and RegulAIt's own sentence", async () => {
+    const c = connectorIds[connectorIds.length - 1]!;
+    files = { [`${META}Manifest.json`]: JSON.stringify({ dataFiles: [`${DATA}bedrock-00001.snappy.parquet`] }) };
+    const { run } = await runVendorUsagePull(db, c, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl, resolve }, now: NOW });
+    expect([run.status, run.errorCode, run.errorDetail]).toEqual(["failed", "bad_response", "this export is Parquet; recreate it as gzip-compressed CSV"]);
+    expect(await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c))).toHaveLength(1);
+  });
+
+  it("refuses a federated connector while the federation issuer is not configured, without calling AWS", async () => {
+    const c = await createConnector("aws_cur", { ...base, credentialMode: "federated", roleArn: "arn:aws:iam::123456789012:role/regulait-cur" });
+    expect((await storeKey(c.id, JSON.stringify({ mode: "federated" }), { acknowledgeUnverifiedScope: true })).statusCode).toBe(201);
+    expect((await steppedPut(`/v1/vendor-usage/connectors/${c.id}/enabled`, { enabled: true, reason: "adr0322 suite" })).statusCode).toBe(200);
+    const saved = process.env.REGULAIT_PUBLIC_URL;
+    delete process.env.REGULAIT_PUBLIC_URL;
+    try {
+      seen = [];
+      const { run } = await runVendorUsagePull(db, c.id, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl, resolve }, now: NOW });
+      expect([run.status, run.errorCode]).toEqual(["refused", "no_credential"]);
+      expect(seen.filter((x) => x.url.hostname.endsWith("amazonaws.com"))).toHaveLength(0);
+    } finally {
+      if (saved !== undefined) process.env.REGULAIT_PUBLIC_URL = saved;
+    }
   });
 });
 
