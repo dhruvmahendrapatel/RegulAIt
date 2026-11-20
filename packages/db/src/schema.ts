@@ -92,6 +92,8 @@ import {
   WORKLOAD_IDENTITY_STATUSES,
   WORKLOAD_CREDENTIAL_KINDS,
   DELEGATION_BINDING_KINDS,
+  AGENT_CREDENTIAL_ALGORITHMS,
+  AGENT_CREDENTIAL_BINDINGS,
   DELEGATION_ALLOCATION_STATUSES,
   DELEGATION_REVOKE_REASONS,
   TOKEN_BINDING_KINDS,
@@ -142,6 +144,9 @@ import {
   DISCOVERY_RUN_TRIGGERS,
   DISCOVERY_SOURCE_KINDS,
   AGENT_REGISTRIES,
+  // ADR-0336 (lane E17): what a staged registry agent uses
+  REGISTRY_COMPONENT_KINDS,
+  REGISTRY_COMPONENT_PROVIDERS,
   DISCOVERY_EVIDENCE_KINDS,
   // ADR-0261 (P37): third-party security telemetry ingest
   THIRD_PARTY_EVIDENCE_KINDS,
@@ -1903,6 +1908,8 @@ export const auditLog = pgTable(
         "robot",
         "robot_version",
         "robot_secret",
+        // ADR-0232 (lane E49 slice 1): a pipeline run (objectId = the run). Plain text column — no DDL.
+        "pipeline_run",
         // ADR-0173 batch 2c (K): a KRI or a monitoring dashboard created /
         // changed / deleted, and an automation rule created / changed /
         // paused / backfilled / matched (objectId = the row). Plain text — no DDL.
@@ -2017,6 +2024,9 @@ export const auditLog = pgTable(
         "discovery_run",
         "discovery_settings",
         "discovery_pseudonym",
+        // ADR-0315 (G7): the portable agent credential (issuance, refusal) and its registered audiences. Plain text column — no DDL.
+        "agent_credential",
+        "agent_credential_audience",
         // ADR-0337: a vendor app's agent link (auto-linked, linked, unlinked) and an agent's vendor identifier
         // (declared, removed). Plain text column — no DDL.
         "saas_entitlement_app",
@@ -3590,6 +3600,8 @@ export const costEvents = pgTable(
         "lazy_tool_loading",
         "semantic_caching",
         "request_batching",
+        // ADR-0327 slice 4b: a switched rule-like step answered by its approved rule
+        "rule_replacement",
       ],
     }).notNull(),
     requestedAgentId: uuid("requested_agent_id"),
@@ -8242,7 +8254,7 @@ export const discoverySources = pgTable(
   (t) => [
     check(
       "discovery_sources_kind_check",
-      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow', 'entitlement_m365', 'entitlement_google_workspace', 'entitlement_salesforce', 'entitlement_slack', 'agent_registry_entra', 'agent_registry_gemini', 'agent_registry_agentcore')`,
+      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow', 'entitlement_m365', 'entitlement_google_workspace', 'entitlement_salesforce', 'entitlement_slack', 'agent_registry_entra', 'agent_registry_gemini', 'agent_registry_agentcore', 'agent_registry_copilot_studio')`,
     ),
     check("discovery_sources_name_check", sql`char_length(${t.name}) BETWEEN 1 AND 120`),
     check("discovery_sources_target_check", sql`jsonb_typeof(${t.target}) = 'object'`),
@@ -8327,7 +8339,7 @@ export const discoveryRuns = pgTable(
     check("discovery_runs_status_check", sql`${t.status} IN ('queued', 'running', 'succeeded', 'failed')`),
     check(
       "discovery_runs_kind_check",
-      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow', 'entitlement_m365', 'entitlement_google_workspace', 'entitlement_salesforce', 'entitlement_slack', 'agent_registry_entra', 'agent_registry_gemini', 'agent_registry_agentcore')`,
+      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow', 'entitlement_m365', 'entitlement_google_workspace', 'entitlement_salesforce', 'entitlement_slack', 'agent_registry_entra', 'agent_registry_gemini', 'agent_registry_agentcore', 'agent_registry_copilot_studio')`,
     ),
     check("discovery_runs_attempt_check", sql`${t.attempt} BETWEEN 0 AND 3`),
     check("discovery_runs_gaps_check", sql`jsonb_typeof(${t.catalogueGaps}) = 'array' AND jsonb_array_length(${t.catalogueGaps}) <= 50`),
@@ -17308,13 +17320,46 @@ export const agentRegistryRecords = pgTable(
     uniqueIndex("agent_registry_records_vendor_uq").on(t.sourceId, t.registry, t.externalId),
     uniqueIndex("agent_registry_records_agent_uq").on(t.agentId),
     index("agent_registry_records_open_idx").on(t.lastSeenAt).where(sql`${t.agentId} IS NULL`),
-    check("agent_registry_records_registry_check", sql`${t.registry} IN ('entra_agent_id', 'agent_365', 'gemini_enterprise', 'bedrock_agentcore')`),
+    check("agent_registry_records_registry_check", sql`${t.registry} IN ('entra_agent_id', 'agent_365', 'gemini_enterprise', 'bedrock_agentcore', 'copilot_studio')`),
     check("agent_registry_records_external_id_check", sql`char_length(${t.externalId}) BETWEEN 1 AND 2048`),
     check("agent_registry_records_display_name_check", sql`char_length(${t.displayName}) BETWEEN 1 AND 256`),
     check("agent_registry_records_description_check", sql`${t.description} IS NULL OR char_length(${t.description}) <= 1000`),
     check("agent_registry_records_attributes_check", sql`jsonb_typeof(${t.vendorAttributes}) = 'object' AND pg_column_size(${t.vendorAttributes}) <= 8192`),
     // an imported record says when; a record whose agent was deleted keeps that time (agent_id is set null) and may be imported again
     check("agent_registry_records_imported_check", sql`${t.agentId} IS NULL OR ${t.importedAt} IS NOT NULL`),
+  ],
+);
+
+// ===== ADR-0336 (lane E17): agent platform discovery, the components of a staged registry agent =====================
+// Migration `pending/vendor_agent_platform_components.sql`. One row per (record, kind, vendor reference): the models,
+// tools, MCP servers, connected apps and knowledge sources an agent uses, normalised (a list is a table, ADR-0200).
+// Replaced for a record, in the run's fenced commit, only when that record's components were read completely; kept
+// as they are after a partial read. Never secrets and never instructions or prompt text (ADR-0336 decision 4): a
+// connected app is a connector reference, a knowledge source its name. Row-level security is FORCED: admins, the
+// discovery worker (`system_task`) and migrations only; the parent's routes are admin-only.
+export const agentRegistryRecordComponents = pgTable(
+  "agent_registry_record_components",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    recordId: uuid("record_id")
+      .notNull()
+      .references(() => agentRegistryRecords.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: REGISTRY_COMPONENT_KINDS }).notNull(),
+    /** the vendor's own reference for it: a connector id, a knowledge source's component id, a model name */
+    vendorRef: text("vendor_ref").notNull(),
+    displayName: text("display_name").notNull(),
+    /** whether the vendor reports it switched on; null when the vendor does not say */
+    enabled: boolean("enabled"),
+    /** who supplies a connected app's connection (maker or end user); null when the vendor does not say */
+    providedBy: text("provided_by", { enum: REGISTRY_COMPONENT_PROVIDERS }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("agent_registry_record_components_uq").on(t.recordId, t.kind, t.vendorRef),
+    check("agent_registry_record_components_kind_check", sql`${t.kind} IN ('model', 'tool', 'mcp_server', 'connected_app', 'knowledge')`),
+    check("agent_registry_record_components_provided_by_check", sql`${t.providedBy} IS NULL OR ${t.providedBy} IN ('maker', 'end_user')`),
+    check("agent_registry_record_components_vendor_ref_check", sql`char_length(${t.vendorRef}) BETWEEN 1 AND 512`),
+    check("agent_registry_record_components_display_name_check", sql`char_length(${t.displayName}) BETWEEN 1 AND 256`),
   ],
 );
 
@@ -19703,3 +19748,161 @@ export const customClassifierHashKey = pgTable(
   (t) => [check("custom_classifier_hash_key_singleton_check", sql`${t.id}`)],
 );
 // ===== end ADR-0363 slice 2 =====
+
+// ===== ADR-0232 §3–§5, lane E49 slice 1: pipeline runs (migration pending/workflow_template_pipeline_runs.sql) =====
+// A pipeline run is one governed run of one published workflow-template version (ADR-0341), started through the
+// workflow engine's one instance-creation path. `status` is PIPELINE_RUN_MACHINE; its settling states are a read model
+// of `workflow_instances.status` (the source of truth). Runs are never deleted; steps are append-only. RLS ENABLED and
+// FORCED on both: the requester and an admin read, an admin request or the system writes.
+import { PIPELINE_RUN_STATES as PIPELINE_RUN_STATES_E49 } from "@regulait/shared";
+
+export const pipelineRuns = pgTable(
+  "pipeline_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    templateVersionId: uuid("template_version_id")
+      .notNull()
+      .references(() => workflowTemplateVersions.id, { onDelete: "restrict" }),
+    workflowInstanceId: uuid("workflow_instance_id").references(() => workflowInstances.id, { onDelete: "restrict" }),
+    requestedBy: uuid("requested_by")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "restrict" }),
+    trigger: text("trigger", { enum: ["manual"] }).notNull().default("manual"),
+    idempotencyKey: text("idempotency_key"),
+    status: text("status", { enum: PIPELINE_RUN_STATES_E49 }).notNull().default("requested"),
+    refusalCode: text("refusal_code"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("pipeline_runs_instance_uq").on(t.workflowInstanceId),
+    uniqueIndex("pipeline_runs_idempotency_uq").on(t.requestedBy, t.idempotencyKey),
+    index("pipeline_runs_status_created_idx").on(t.status, t.createdAt.desc(), t.id),
+    index("pipeline_runs_requested_by_idx").on(t.requestedBy, t.createdAt.desc()),
+    index("pipeline_runs_version_idx").on(t.templateVersionId),
+    index("pipeline_runs_project_idx").on(t.projectId),
+    check("pipeline_runs_trigger_check", sql`${t.trigger} IN ('manual')`),
+    check("pipeline_runs_status_check", sql`${t.status} IN ('requested', 'running', 'succeeded', 'failed', 'cancelled', 'refused')`),
+    check("pipeline_runs_idempotency_key_check", sql`${t.idempotencyKey} IS NULL OR ${t.idempotencyKey} ~ '^[A-Za-z0-9._:-]{1,128}$'`),
+    check("pipeline_runs_refusal_code_check", sql`${t.refusalCode} IS NULL OR ${t.refusalCode} ~ '^[a-z_]{1,64}$'`),
+    check("pipeline_runs_instance_check", sql`(${t.status} = 'requested' OR ${t.status} = 'refused') = (${t.workflowInstanceId} IS NULL)`),
+    check("pipeline_runs_refusal_check", sql`(${t.status} = 'refused') = (${t.refusalCode} IS NOT NULL)`),
+  ],
+);
+export type PipelineRunRow = typeof pipelineRuns.$inferSelect;
+
+export const pipelineRunSteps = pgTable(
+  "pipeline_run_steps",
+  {
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => pipelineRuns.id, { onDelete: "restrict" }),
+    ordinal: integer("ordinal").notNull(),
+    attempt: integer("attempt").notNull().default(1),
+    stageId: text("stage_id").notNull(),
+    /** point-in-time snapshot (ADR-0200 exception): the catalogue step type and class the step started under */
+    stepType: text("step_type").notNull(),
+    writes: boolean("writes").notNull(),
+    autoRetry: boolean("auto_retry").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ name: "pipeline_run_steps_pk", columns: [t.runId, t.ordinal, t.attempt] }),
+    uniqueIndex("pipeline_run_steps_stage_uq").on(t.runId, t.stageId, t.attempt),
+    check("pipeline_run_steps_ordinal_check", sql`${t.ordinal} >= 0 AND ${t.ordinal} < 200`),
+    check("pipeline_run_steps_attempt_check", sql`${t.attempt} >= 1`),
+    check("pipeline_run_steps_stage_id_check", sql`char_length(${t.stageId}) BETWEEN 1 AND 128`),
+    check("pipeline_run_steps_step_type_check", sql`${t.stepType} ~ '^[a-z_]{1,64}$'`),
+    check("pipeline_run_steps_retry_check", sql`NOT (${t.writes} AND ${t.autoRetry})`),
+  ],
+);
+export type PipelineRunStepRow = typeof pipelineRunSteps.$inferSelect;
+// ===== end ADR-0232 lane E49 slice 1 =====
+
+/*
+ * ADR-0315 (G7; migration agent_credential_audiences) — the portable agent credential's registered audiences
+ * (third-party enforcement points), their scope maps, and the credentials issued to them. Default-deny: with no
+ * audience row nothing is issued; with no mapping for a grant's atom that atom is never sent. Registering an audience,
+ * choosing `bearer` or a lifetime above the default is a `settings_relax` step-up, audited.
+ */
+export const agentCredentialAudiences = pgTable(
+  "agent_credential_audiences",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** the exact `aud` value (an https URI); unique among ENABLED rows (partial index below) */
+    audience: text("audience").notNull(),
+    name: text("name").notNull(),
+    algorithm: text("algorithm", { enum: AGENT_CREDENTIAL_ALGORITHMS }).notNull().default("ES256"),
+    binding: text("binding", { enum: AGENT_CREDENTIAL_BINDINGS }).notNull().default("dpop"),
+    maxTtlSeconds: integer("max_ttl_seconds").notNull().default(300),
+    /** set when an admin disables the audience (free, audited); a disabled audience gets no new credential */
+    disabledAt: timestamp("disabled_at", { withTimezone: true }),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // one enabled registration per URI; a disabled row is terminal, so the URI can be registered again (ADR-0315)
+    uniqueIndex("agent_credential_audiences_audience_enabled_uq").on(t.audience).where(sql`${t.disabledAt} IS NULL`),
+    check("agent_credential_audiences_algorithm_check", sql`${t.algorithm} IN ('ES256', 'EdDSA')`),
+    check("agent_credential_audiences_binding_check", sql`${t.binding} IN ('dpop', 'bearer')`),
+    check("agent_credential_audiences_ttl_check", sql`${t.maxTtlSeconds} BETWEEN 60 AND 900`),
+    check("agent_credential_audiences_audience_check", sql`char_length(${t.audience}) BETWEEN 9 AND 512 AND ${t.audience} LIKE 'https://%'`),
+    check("agent_credential_audiences_name_check", sql`char_length(${t.name}) BETWEEN 1 AND 120`),
+  ],
+);
+
+/** one scope-map row: which grant atom (type, resource, kind) becomes which `scope` string at the audience (3NF: FKs) */
+export const agentCredentialAudienceScopes = pgTable(
+  "agent_credential_audience_scopes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    audienceId: uuid("audience_id")
+      .notNull()
+      .references(() => agentCredentialAudiences.id, { onDelete: "cascade" }),
+    resourceType: text("resource_type", { enum: ["mcp_tool", "connector", "agent"] }).notNull(),
+    serverId: uuid("server_id").references(() => mcpServers.id, { onDelete: "cascade" }),
+    toolName: text("tool_name"),
+    connectorId: uuid("connector_id").references(() => connectors.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: ["read", "write"] }).notNull(),
+    scope: text("scope").notNull(),
+  },
+  (t) => [
+    index("agent_credential_audience_scopes_audience_idx").on(t.audienceId),
+    check(
+      "agent_credential_audience_scopes_type_check",
+      sql`CASE ${t.resourceType} WHEN 'mcp_tool' THEN ${t.serverId} IS NOT NULL AND ${t.toolName} IS NOT NULL AND ${t.connectorId} IS NULL AND ${t.agentId} IS NULL WHEN 'connector' THEN ${t.connectorId} IS NOT NULL AND ${t.serverId} IS NULL AND ${t.toolName} IS NULL AND ${t.agentId} IS NULL WHEN 'agent' THEN ${t.agentId} IS NOT NULL AND ${t.serverId} IS NULL AND ${t.toolName} IS NULL AND ${t.connectorId} IS NULL ELSE false END`,
+    ),
+    check("agent_credential_audience_scopes_kind_check", sql`${t.kind} IN ('read', 'write')`),
+    check("agent_credential_audience_scopes_scope_check", sql`${t.scope} ~ '^[!#-\\[\\]-~]{1,128}$'`),
+  ],
+);
+
+/**
+ * One issued credential (point-in-time evidence: append-only except for revocation). `status_index` is its bit in
+ * the Token Status List (slice 2); the token itself is never stored.
+ */
+export const agentCredentialsIssued = pgTable(
+  "agent_credentials_issued",
+  {
+    jti: text("jti").primaryKey(),
+    statusIndex: bigint("status_index", { mode: "number" }).notNull().generatedAlwaysAsIdentity(),
+    audienceId: uuid("audience_id")
+      .notNull()
+      .references(() => agentCredentialAudiences.id, { onDelete: "restrict" }),
+    grantId: uuid("grant_id")
+      .notNull()
+      .references(() => delegationGrants.id, { onDelete: "restrict" }),
+    issuedAt: timestamp("issued_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("agent_credentials_issued_status_index_uq").on(t.statusIndex),
+    index("agent_credentials_issued_grant_idx").on(t.grantId),
+    check("agent_credentials_issued_jti_check", sql`${t.jti} ~ '^[A-Za-z0-9_-]{43}$'`),
+    check("agent_credentials_issued_lifetime_check", sql`${t.expiresAt} > ${t.issuedAt} AND ${t.expiresAt} <= ${t.issuedAt} + interval '900 seconds'`),
+  ],
+);

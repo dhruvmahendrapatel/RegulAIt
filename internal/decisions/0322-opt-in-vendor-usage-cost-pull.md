@@ -194,6 +194,24 @@ The routes are API only; screens are tracked on #453.
 - ADR-0069's "there is no vendor billing-API client in this repository" and ADR-0076's "Still no polling" are no
   longer true for tenants that opt in. Both ADRs' status lines point here.
 
+## Owner decisions for slice 4a, AWS Bedrock spend (2026-11-20, answered in lane E7)
+
+Asked by the lane E7 builder before building the `aws_cur` connector; the owner answered each question directly.
+
+1. **Credentials**: the federated role (the customer's role trusts RegulAIt's federation issuer,
+   `AssumeRoleWithWebIdentity`, audience `sts.amazonaws.com`) and a static access-key pair, the latter as an audited
+   relaxation with its own acknowledgement. The "RegulAIt principal plus external id" mode is left to a later PR.
+2. **Restatement**: a pull **replaces the connector's lines for each billing month it re-reads**. A line that is no
+   longer in AWS's restated file is withdrawn, not kept stale.
+3. **Money**: `line_item_unblended_cost`, matching the ADR-0069 CUR file import. Every line item type is kept (usage,
+   credits, refunds, tax), with the type recorded on the line.
+4. **Identity**: an IAM principal maps to a person only through an admin alias. An email-shaped role session name is
+   never resolved automatically, because the caller chooses it.
+
+Defaults the builder chose, recorded for review: the connector expects a dedicated Bedrock-only CUR 2.0 export (a
+whole-estate export at a large organisation exceeds the per-run bounds), and failures reuse the existing run error
+codes (`no_credential` when federation is off, `bad_response` for a Parquet export), so no migration is needed.
+
 ## As built — slice 2 (2026-11-15): foundation, Anthropic and OpenAI
 
 Migration `pending/vendor_usage_pull.sql` (numbered at merge); code in `apps/gateway/src/vendor-usage-pull.ts` and
@@ -313,3 +331,52 @@ Admin API) on 2026-11-19.
   used for Anthropic. It was not added: it is a new dependency whose fetch would have to be replaced by the guarded one
   anyway, for one unpaginated GET per day. Cursor publishes no SDK for its Admin API.
 
+## As built — slice 4a (2026-11-20): AWS Bedrock spend from CUR 2.0
+
+Built to the owner decisions above. Code: `packages/cloud-discovery/src/aws-cur.ts` (the S3 reader),
+`packages/shared/src/vendor-usage.ts` (catalogue, config and secret schemas, `normalizeAwsCurCsv`,
+`awsCurBillingPeriods`) and `apps/gateway/src/vendor-usage-pull.ts` (`fetchAwsCur`, month replacement). Proof:
+`aws-cur.test.ts` (fake S3 and STS behind the injected fetch), `vendor-usage.test.ts` and
+`zz-adr0322-vendor-usage-pull.test.ts`. No new route, no migration, no new dependency: `@aws-sdk/client-s3` is already
+pinned in `@regulait/cloud-discovery` (its THIRD_PARTY row now names this use).
+
+- **Credentials**:
+  - **Federated** (the default to offer): the connector's config names the customer's role; the pull presents a
+    RegulAIt federation token (`sub` = `regulait:vendor-usage-connector:<id>`, `aud` = `sts.amazonaws.com`) to
+    `AssumeRoleWithWebIdentity`, through `awsCredentialProvider`. The customer's trust policy pins both. The stored
+    credential is a marker (`{"mode":"federated"}`), so storing, attesting and revoking it is still the switch. While
+    federation is off or its issuer is unset the run is refused as `no_credential` and AWS is not called.
+  - **Static**: `{"mode":"static","accessKeyId","secretAccessKey"}`, stored only with `acknowledgeStaticAwsKey: true`,
+    recorded in the step-up facts and the audit row (`staticAwsKeyAcknowledged`).
+  - Both are `unverified` (RegulAIt cannot read the IAM policy without wider access) and need the
+    `acknowledgeUnverifiedScope` attestation; the catalogue names the minimal policy (`s3:ListBucket`, `s3:GetObject`
+    on the export prefix, `kms:Decrypt` for a KMS bucket). A secret that does not match the connector's mode is a 400.
+- **Transport**: STS and S3 run on one guarded fetch (`guardedAwsRequestHandler`, pinned endpoints, virtual-hosted
+  addressing, no accelerate or ARN-region endpoints), sized for CUR objects. The hosts the admin allow-lists are
+  `<bucket>.s3.<region>.amazonaws.com` and, for federated mode, `sts.<region>.amazonaws.com`. The bucket name may not
+  contain dots, so virtual-hosted TLS always works.
+- **Read path**: per billing period, the manifest at `<prefix>/<exportName>/metadata/BILLING_PERIOD=YYYY-MM/`
+  (`Manifest.json` or `<exportName>-Manifest.json`; the latest if AWS left several). Every data file it names must lie
+  under the period's `data/` folder in the same bucket, checked before the first read. Only `.csv.gz` is read; a
+  Parquet export fails as `bad_response` with "this export is Parquet; recreate it as gzip-compressed CSV". Bounds: 20
+  data files a period, 32 MB an object (declared length and a running cap), 128 MB inflated (a gzip bomb is refused),
+  one million rows a run (`page_limit`). A period with no manifest yet is skipped, not an error.
+- **Normalisation**: only the named `line_item_*` columns are read; tags, resource ids and the free-text description
+  are discarded at parse. Lines with a product code in `productCodes` (default `AmazonBedrock`; Marketplace model codes
+  unverified) are summed per UTC day, account, IAM principal, product code, usage type, line item type and currency.
+  The amount is `line_item_unblended_cost` in integer micro-units (a decimal string is never divided as a float); every
+  line item type is kept and recorded. A line dated outside its billing period, a malformed account id or a principal
+  that is not an ARN fails the run rather than being moved or guessed.
+- **Identity**: `line_item_iam_principal` when the export carries it (`accountKind` `iam_principal`), else
+  `aws account <id>`. Resolution is admin aliases only: the email and domain-rule paths are switched off for this
+  vendor, because a role session name is caller-chosen.
+- **Months, not days**: `awsCurBillingPeriods` replaces the daily window. The first pull reads the current month and
+  `backfillMonths - 1` before it (at most 3); later pulls resume at the month of `pulled_through`. The previous month
+  is re-read while the day of the month is at most 15 (AWS restates for about two weeks). At most four months a run.
+- **Month replacement**: after the upsert, in the same transaction, the connector's stored lines for each delivered
+  month whose fact key AWS no longer reports are withdrawn (deleted, as a batch revoke withdraws). The batch summary
+  records `replacedPeriods` and `withdrawnLines`. Revoking that batch afterwards withdraws what it introduced and
+  rewinds `pulled_through` as before; lines it withdrew come back on the next pull only if AWS still reports them.
+- **No metered overlap**: the gateway has no Bedrock provider, so no line is excluded as already metered.
+- **Not built**: the RegulAIt-principal mode with an external id; Parquet (hyparquet, MIT, to be compared under
+  ADR-0176 first); live-tenant tests (lane E11); the settings screen (#453); OpenAI Codex analytics (slice 4b).

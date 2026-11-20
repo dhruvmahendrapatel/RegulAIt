@@ -1,0 +1,11 @@
+{
+  "adr": "ADR-0232",
+  "lane": "E49",
+  "tracking": "ADR-0232 (lane E49 slice 1): API-only by the lane brief (master dispatch 2026-11-20: new routes go in the census with a KNOWN_UI_GAPS entry, no screens), recorded in ADR-0232 (As built, E49 slice 1); the pipeline runs list, run detail and catalogue palette are posted on #453",
+  "gaps": {
+    "GET /v1/pipelines/catalogue": "the pipeline step catalogue: the steps that run today as workflow stages and the planned ADR-0232 steps, with each step's governed primitive and write class",
+    "POST /v1/pipeline-runs": "starts a pipeline run of the live version of a workflow template through the workflow engine's start path (idempotency key, project attribution, compliance cascade)",
+    "GET /v1/pipeline-runs": "lists pipeline runs under the list contract, each settled from its workflow instance and carrying its lifecycle",
+    "GET /v1/pipeline-runs/:runId": "one pipeline run with its recorded plan and each step's live status from its workflow instance"
+  }
+}

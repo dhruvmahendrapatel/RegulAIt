@@ -152,10 +152,25 @@ induction over numeric ranges is deferred to a sandboxed engine image with sciki
     new `switch` and `revert` events) and the request's (`RULE_STEP_SWITCH_MACHINE`). A BEFORE UPDATE trigger
     freezes the request's suggestion, digest, request time and requester. A rescan leaves shadow and switched rows
     alone. The reasons are prose-scrubbed (ADR-0102). RLS: deployment-wide (ADR-0234 appendix).
-- Slice 4b (next): serve a switched rule through the dispatch core where the ADR-0119 semantic cache serves a
-  cached answer, so governance and the output PII and guardrail checks still run. An input the rule does not cover
-  goes to the AI. Record the `rule_replacement` technique in `cost_events`, and keep rule-served spans out of
-  detection and shadow counts. Switching to a published decision table follows it.
+- Slice 4b (built, compat path): a switched step is answered by its rule on the Anthropic- and OpenAI-shaped
+  (compat) surfaces.
+  - **When the rule answers.** Re-checked on every call:
+    - the suggestion is `switched` and its latest switch request is `switched`;
+    - the rule still hashes to the digest the reviewer approved;
+    - the input parses into the rule's fields, and an exact-match cell covers it.
+  - **When the AI answers instead:** a tool-bearing or tool-forcing turn, a structured-output request, a passthrough
+    call, and any input the rule does not cover. These go to the AI exactly as before.
+  - **Same gates as the semantic cache.** The rule's answer goes through the one dispatch core as a candidate
+    (`cachedResponse` plus `ruleStepServed`), the way an ADR-0119 cache hit does. Every input gate and the output PII
+    and guardrail checks still run on it. The span and the audit rows say a rule answered, never a cache.
+  - **Records.** A `rule_replacement` row in `cost_events` records the saving: the step's measured average AI cost
+    per run over its scan window. No `usage_events` row is written. The span carries a `ruleStep` attribute, and
+    detection and shadow measurement read only spans without it (`NOT_RULE_SERVED_SPAN`), so a rule never measures
+    itself.
+  - **Turning detection off does not unswitch a step.** Revert is the one way back to the AI, so a step's lifecycle
+    state is never contradicted by a hidden setting.
+- Slice 4c (next): the same serving on the native `/v1/agents/:agentId/invoke` path. Switching to a published
+  decision table follows it.
 
 ## Addendum: decision tables (owner approval 2026-11-17, competitor gap audit, Camunda row 6)
 

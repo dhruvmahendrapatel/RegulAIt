@@ -159,6 +159,7 @@ const BY_ROUTE: Record<string, keyof typeof G> = {
   "/admin/client-access": "laptop",
   "/admin/virtual-keys": "key",
   "/admin/credentials": "key",
+  "/admin/agent-credentials": "idCard", // ADR-0315 G7
   "/admin/workload-identities": "robot", // ADR-0188 S6
   "/admin/sso": "lock",
   "/admin/provisioning": "sync",

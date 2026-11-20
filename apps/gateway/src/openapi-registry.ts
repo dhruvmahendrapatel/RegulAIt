@@ -975,6 +975,11 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/builder/toolbox-options": "internal",
   "GET /v1/builder/usage": "internal",
   // ADR-0364 (lane E45 S2) — robots: internal while the runner (S3) and the review screens land
+  // ADR-0232 (lane E49 slice 1): the pipeline step catalogue and governed pipeline runs
+  "GET /v1/pipelines/catalogue": "internal",
+  "POST /v1/pipeline-runs": "internal",
+  "GET /v1/pipeline-runs": "internal",
+  "GET /v1/pipeline-runs/:runId": "internal",
   "GET /v1/robots": "internal",
   "POST /v1/robots": "internal",
   "GET /v1/robots/:robotId": "internal",
@@ -1054,6 +1059,12 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // ADR-0210: the OIDC-profile MCP identity assertion issuer
   "GET /mcp-identity/.well-known/openid-configuration": "internal",
   "GET /mcp-identity/.well-known/jwks.json": "internal",
+  // ADR-0315 (G7): the agent credential issuer and its audience registry
+  "GET /agent-credentials/.well-known/openid-configuration": "internal",
+  "GET /agent-credentials/.well-known/jwks.json": "internal",
+  "GET /v1/agent-credentials/audiences": "internal",
+  "POST /v1/agent-credentials/audiences": "internal",
+  "POST /v1/agent-credentials/audiences/:audienceId/disable": "internal",
   "GET /v1/discovery/federation": "internal",
   "POST /v1/discovery/federation/keys": "internal",
   "POST /v1/discovery/federation/keys/:kid/activate": "internal",
@@ -2354,6 +2365,11 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   // ADR-0210: the OIDC-profile MCP identity assertion issuer (an MCP server setting, not an ADR-0188 identity route)
   "GET /mcp-identity/.well-known/openid-configuration": "servers",
   "GET /mcp-identity/.well-known/jwks.json": "servers",
+  "GET /agent-credentials/.well-known/openid-configuration": "servers",
+  "GET /agent-credentials/.well-known/jwks.json": "servers",
+  "GET /v1/agent-credentials/audiences": "servers",
+  "POST /v1/agent-credentials/audiences": "servers",
+  "POST /v1/agent-credentials/audiences/:audienceId/disable": "servers",
   "GET /v1/servers/:serverId/upstream-credential": "servers",
   "PUT /v1/servers/:serverId/upstream-credential": "servers",
   "DELETE /v1/servers/:serverId/upstream-credential": "servers",
@@ -2473,6 +2489,11 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/builder/integrations": "builder",
   "GET /v1/builder/toolbox-options": "builder",
   "GET /v1/builder/usage": "builder",
+  // ADR-0232 (lane E49 slice 1): grouped with the workflow builder they run
+  "GET /v1/pipelines/catalogue": "workflows",
+  "POST /v1/pipeline-runs": "workflows",
+  "GET /v1/pipeline-runs": "workflows",
+  "GET /v1/pipeline-runs/:runId": "workflows",
   "GET /v1/robots": "builder",
   "POST /v1/robots": "builder",
   "GET /v1/robots/:robotId": "builder",
