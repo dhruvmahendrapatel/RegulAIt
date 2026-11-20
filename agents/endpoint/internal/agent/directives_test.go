@@ -74,7 +74,7 @@ func (f *directiveFixture) serve(t *testing.T, d directive.Directive) {
 	t.Helper()
 	payload, _ := json.Marshal(d)
 	env, _ := json.Marshal(enforce.Envelope{KeyID: "regulait-policy-test", Payload: base64.StdEncoding.EncodeToString(payload),
-		Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(f.priv, payload))})
+		Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(f.priv, append(append([]byte{}, directive.SignatureDomain...), payload...)))})
 	f.gw.Lock()
 	f.gw.DirectiveSigner = true
 	f.gw.Directives = append(f.gw.Directives, env)

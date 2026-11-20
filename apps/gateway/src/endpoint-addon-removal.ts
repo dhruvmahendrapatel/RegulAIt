@@ -14,9 +14,10 @@
  *   - the org switch `discovery_settings.endpoint_addon_removal_enabled` is off; turning it on is a `settings_relax`
  *     step-up through `PUT /v1/discovery/settings` (discovery-routes.ts). While it is off no removal is created and no
  *     directive is delivered, pending ones included;
- *   - the directive signer is null in production (the ADR-0195 SD4 key ceremony is pending), so the directive route
- *     answers `503 directive_signer_unavailable`, as the config route answers `503 collection_pack_unavailable`. It is
- *     injectable only through buildApp's code-only test seam (`endpointDirectiveSigner`), never env or admin input.
+ *   - directives are signed by the shared ADR-0334 device-policy key (owner decision B4; ADR-0331 addendum), and only
+ *     when one is configured: with no key the directive route answers `503 directive_signer_unavailable` and serves
+ *     nothing. An agent applies a directive only under a key its admin pinned (`devicePolicyKeys`, ADR-0330 §8), and
+ *     the signature carries its own domain (`DIRECTIVE_SIGNATURE_DOMAIN`), so it can never pass as a policy.
  *
  * Admin routes (admin-only: none is in NON_ADMIN_ROUTES; every write audited in its own transaction):
  *   POST /v1/discovery/endpoint-addon-removals              request: `endpoint_remediation` step-up, queues the approval
@@ -76,9 +77,10 @@ import { ENDPOINT_AGENT_PATHS, type EndpointAgentContext } from "./endpoint-agen
 import { mcpIdentityInput, mcpServerSchema } from "./endpoint-mcp-config.js";
 import { filterParams, parseListPage, runListPage, sendListError, type ListReader, type ListSpec } from "./list-contract.js";
 import { loadExecutionMode } from "./execution-posture.js";
-import type { DirectiveSigner } from "./directive-signer.js";
+import { resolveDirectiveSigner, type DirectiveSigner } from "./directive-signer.js";
 import { ExternalEffectBlockedError, runExternalWrite } from "./external-effects.js";
 import { whereFrom } from "./state-transition.js";
+import { idempotentReplay, readIdempotencyKey, requestDigestOf, withIdempotencyKey } from "./request-idempotency.js";
 import { checkStepUp, isStepUpPrompt, type StepUpCheckArgs } from "./step-up.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
@@ -335,8 +337,19 @@ export function directivePayload(d: DirectiveInput) {
   };
 }
 
-/** the exact bytes the device-policy signer signs for one directive */
+/** the exact payload bytes of one directive (the envelope's `payload`) */
 export const directiveBytes = (d: DirectiveInput): Buffer => Buffer.from(JSON.stringify(directivePayload(d)), "utf8");
+
+/**
+ * Domain separation (#1033, ADR-0331 addendum): one device-policy key signs browser policies, the endpoint policy and
+ * these directives (owner decision B4). A directive's signature is over this prefix followed by the payload bytes, so
+ * it never verifies as a policy, and a policy's (over bare JSON, which starts with `{`) never verifies as a directive.
+ * The agent checks the same bytes (agents/endpoint/internal/directive: SignatureDomain).
+ */
+export const DIRECTIVE_SIGNATURE_DOMAIN = Buffer.from(`${DIRECTIVE_SCHEMA}\u0000`, "utf8");
+
+/** the exact bytes the device-policy key signs for one directive: the domain, then the payload */
+export const directiveSigningInput = (payload: Buffer): Buffer => Buffer.concat([DIRECTIVE_SIGNATURE_DOMAIN, payload]);
 
 /** one signed envelope (the agent's `enforce.Envelope`): standard base64 of the exact payload bytes and the signature */
 export function directiveEnvelope(keyId: string, bytes: Buffer, sig: Buffer): { keyId: string; payload: string; signature: string } {
@@ -459,14 +472,28 @@ interface Refusal {
   body: Record<string, unknown>;
 }
 const refusal = (status: number, error: string, detail: string): Refusal => ({ status, body: { error, detail } });
+/** a refusal thrown out of the Idempotency-Key transaction, so the key's claim rolls back with the rest */
+class RemovalRefused extends Error {
+  constructor(readonly refusal: Refusal) {
+    super(String(refusal.body.error));
+  }
+}
+
+/** a stored replay: the removal it created and what the first answer counted (no request text is kept, ADR-0179) */
+function replayOfStored(stored: Record<string, unknown>): { id: string; resolved: number; devices: number } | null {
+  const { replayOf, resolved, devices } = stored;
+  return typeof replayOf === "string" && typeof resolved === "number" && typeof devices === "number" ? { id: replayOf, resolved, devices } : null;
+}
+
 const isRefusal = (x: unknown): x is Refusal => typeof x === "object" && x !== null && "status" in x && "body" in x;
 
 // ---------------------------------------------------------------------------
 // Admin routes
 // ---------------------------------------------------------------------------
 
-export function registerEndpointAddonRemovalRoutes(app: FastifyInstance, db: Db, opts: { signer?: DirectiveSigner | null } = {}): void {
-  const signerConfigured = !!opts.signer;
+export function registerEndpointAddonRemovalRoutes(app: FastifyInstance, db: Db, opts: { signer?: DirectiveSigner | null | undefined } = {}): void {
+  // an injected signer (buildApp's test seam) or, in production, the shared device-policy key, read again each time
+  const signerOf = async (): Promise<DirectiveSigner | null> => (opts.signer !== undefined ? opts.signer : await resolveDirectiveSigner());
   const actor = (req: FastifyRequest) => req.authCtx.userId ?? NIL_UUID;
   const badRequest = (reply: FastifyReply, err: z.ZodError) =>
     reply.status(400).send({ error: "invalid_request", detail: err.issues.map((i) => `${i.path.join(".") || "body"}: ${i.message}`).join("; ") });
@@ -490,6 +517,26 @@ export function registerEndpointAddonRemovalRoutes(app: FastifyInstance, db: Db,
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "person_required", detail: "a removal is started by a signed-in administrator" });
     const approverUserId = b.approverUserId.toLowerCase();
+    // #1033: an optional Idempotency-Key, so a retried POST after a lost answer replays the first removal rather than
+    // queueing a second approval (the shared ADR-0179 store; checked before anything else, as a replay writes nothing)
+    const keyRead = readIdempotencyKey(req);
+    if (!keyRead.ok) return reply.status(400).send(keyRead.body);
+    const claim = keyRead.key ? { userId, scope: "endpoint-addon-removal", key: keyRead.key, requestDigest: requestDigestOf(b) } : null;
+    const replayed = async (stored: Record<string, unknown>) => {
+      const ref = replayOfStored(stored);
+      const [row] = ref ? await db.select().from(endpointAddonRemovals).where(eq(endpointAddonRemovals.id, ref.id)) : [];
+      if (!ref || !row) return reply.status(409).send({ error: "idempotency_replay_unavailable", detail: "the removal this key created is no longer readable" });
+      const [now, counts] = await Promise.all([databaseNow(db), countsFor(db, [row.id])]);
+      return reply
+        .status(200)
+        .header("Idempotent-Replay", "true")
+        .send({ removal: { ...removalView(row, now), targets: counts.get(row.id) ?? emptyCounts() }, resolved: ref.resolved, devices: ref.devices });
+    };
+    if (claim) {
+      const prior = await idempotentReplay(db, claim);
+      if (prior?.kind === "replay") return replayed(prior.body);
+      if (prior?.kind === "conflict") return reply.status(prior.status).send(prior.body);
+    }
     // the execution dial (ADR-0186 kill switch): outside `normal` no removal is even queued
     const mode = await loadExecutionMode(db);
     if (mode !== "normal") {
@@ -497,8 +544,9 @@ export function registerEndpointAddonRemovalRoutes(app: FastifyInstance, db: Db,
       return reply.status(409).send({ error: blocked.code, detail: `removing MCP servers from endpoints is stopped while the execution mode is '${mode}'` });
     }
     const stepUp = endpointRemediationStepUp(b);
-    const out = await db.transaction(async (tx): Promise<Refusal | { removal: EndpointAddonRemovalRow; targets: number; devices: number }> => {
-      const t = tx as unknown as Db;
+    // a step-up refusal is audited even when the key's transaction rolls back (written after it, below)
+    let stepUpRefusalAudit: Record<string, unknown> | null = null;
+    const work = async (t: Db): Promise<Refusal | { removal: EndpointAddonRemovalRow; targets: number; devices: number }> => {
       // FOR SHARE: a concurrent switch-off (FOR UPDATE in PUT /v1/discovery/settings) waits for this removal, or wins
       const [settings] = await t.select({ on: discoverySettings.endpointAddonRemovalEnabled }).from(discoverySettings).where(eq(discoverySettings.id, 1)).for("share");
       if (!settings?.on) {
@@ -523,12 +571,7 @@ export function registerEndpointAddonRemovalRoutes(app: FastifyInstance, db: Db,
       // the grant is spent in this transaction, with the writes it authorises (ADR-0331 §3)
       const su = await checkStepUp(t, req, stepUp, { spend: true });
       if (!su.ok) {
-        if (!isStepUpPrompt(su.body)) {
-          await audit(t, req, null, "endpoint-addon-removal-step-up-refused", "deny", `an endpoint add-on removal was refused: ${String(su.body.error)} (ADR-0331)`, {
-            actionKind: stepUp.kind,
-            error: su.body.error,
-          });
-        }
+        if (!isStepUpPrompt(su.body)) stepUpRefusalAudit = { actionKind: stepUp.kind, error: su.body.error };
         return { status: su.status, body: su.body };
       }
       const id = randomUUID();
@@ -589,10 +632,38 @@ export function registerEndpointAddonRemovalRoutes(app: FastifyInstance, db: Db,
           expiresAt: removal!.expiresAt.toISOString(),
           stepUp: su.method,
           stepUpKind: stepUp.kind,
+          ...(claim ? { idempotencyKey: true } : {}),
         },
       );
       return { removal: removal!, targets: found.length, devices };
-    });
+    };
+    let out: Refusal | { removal: EndpointAddonRemovalRow; targets: number; devices: number };
+    if (!claim) {
+      out = await db.transaction((tx) => work(tx as unknown as Db));
+    } else {
+      // a refusal throws, so the key's claim rolls back with it and the same key can be retried once it is fixed
+      const outcome = await withIdempotencyKey(
+        db,
+        claim,
+        async (t) => {
+          const r = await work(t);
+          if (isRefusal(r)) throw new RemovalRefused(r);
+          return r;
+        },
+        (r) => ({ replayOf: r.removal.id, resolved: r.targets, devices: r.devices }),
+      ).catch((e: unknown) => {
+        if (e instanceof RemovalRefused) return { kind: "refused" as const, refusal: e.refusal };
+        throw e;
+      });
+      if (outcome.kind === "replay") return replayed(outcome.body);
+      if (outcome.kind === "conflict") return reply.status(outcome.status).send(outcome.body);
+      out = outcome.kind === "refused" ? outcome.refusal : outcome.body;
+    }
+    // (set inside `work`, which TypeScript's narrowing cannot see)
+    const refusedStepUp = stepUpRefusalAudit as Record<string, unknown> | null;
+    if (refusedStepUp) {
+      await audit(db, req, null, "endpoint-addon-removal-step-up-refused", "deny", `an endpoint add-on removal was refused: ${String(refusedStepUp.error)} (ADR-0331)`, refusedStepUp);
+    }
     if (isRefusal(out)) return reply.status(out.status).send(out.body);
     const now = await databaseNow(db);
     // nothing is written for the targets until the approval: `resolved` is what the approver is asked to approve
@@ -621,9 +692,9 @@ export function registerEndpointAddonRemovalRoutes(app: FastifyInstance, db: Db,
       const q = (req.query ?? {}) as Record<string, unknown>;
       z.object({}).strict().parse(filterParams(q));
       const page = parseListPage(ADDON_REMOVALS_LIST, q);
-      const [out, settings] = await Promise.all([runListPage(db, ADDON_REMOVALS_LIST, removalsReader, undefined, page), loadDiscoverySettings(db)]);
-      // the posture an admin screen shows: whether removals are on, and whether any directive could be signed yet (SD4)
-      return reply.send({ ...out, enabled: settings.endpointAddonRemoval, signerConfigured });
+      const [out, settings, signer] = await Promise.all([runListPage(db, ADDON_REMOVALS_LIST, removalsReader, undefined, page), loadDiscoverySettings(db), signerOf()]);
+      // the posture an admin screen shows: whether removals are on, and whether a directive can be signed (and by which key)
+      return reply.send({ ...out, enabled: settings.endpointAddonRemoval, signerConfigured: !!signer, signerKeyId: signer?.keyId ?? null });
     } catch (e) {
       if (e instanceof z.ZodError) return badRequest(reply, e);
       return sendListError(reply, e);
@@ -908,7 +979,8 @@ export interface DirectiveRouteDeps {
   refuse(reply: FastifyReply, status: number, error: string): FastifyReply;
   /** the raw body as JSON, or undefined (never echoed) */
   jsonOf(body: unknown): unknown;
-  signer: DirectiveSigner | null;
+  /** an injected signer; undefined means the shared device-policy key (owner decision B4), resolved per read */
+  signer: DirectiveSigner | null | undefined;
 }
 
 export function registerEndpointDirectiveRoutes(scope: FastifyInstance, db: Db, deps: DirectiveRouteDeps): void {
@@ -971,7 +1043,8 @@ export function registerEndpointDirectiveRoutes(scope: FastifyInstance, db: Db, 
         await readAudit(db, agent, "none", []);
         return reply.send({ directives: [] });
       }
-      const signer = deps.signer;
+      // the injected signer, or the shared device-policy key as it is configured now (a rotation applies at once)
+      const signer = deps.signer !== undefined ? deps.signer : await resolveDirectiveSigner();
       if (!signer || !KEY_ID_SHAPE.test(signer.keyId)) {
         // no device-policy signer yet: an unsigned directive is never served (the agent refuses one anyway)
         await readAudit(db, agent, "signer_unavailable", []);
@@ -1000,7 +1073,7 @@ export function registerEndpointDirectiveRoutes(scope: FastifyInstance, db: Db, 
         );
         // each signature is the barrier's direct body: the dial is re-read immediately before every one
         const signed = await Promise.all(
-          payloads.map(async (bytes) => directiveEnvelope(signer.keyId, bytes, await runExternalWrite(db, "device_policy.sign_payload", () => signer.signPayload(bytes)))),
+          payloads.map(async (bytes) => directiveEnvelope(signer.keyId, bytes, await runExternalWrite(db, "device_policy.sign_payload", () => signer.signPayload(directiveSigningInput(bytes))))),
         );
         // the delivery mark and the read's audit row commit together
         await db.transaction(async (tx) => {
