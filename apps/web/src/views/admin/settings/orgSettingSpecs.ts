@@ -654,26 +654,23 @@ export const CORE_SPECS: Readonly<Record<string, OrgSettingSpec>> = {
     control: onOff("On", "Off"),
     isRelaxed: notEqual(false),
   },
-  // ADR-0224 (P13 c, owner 10-30): shipped off, so no value is looser than the default; once on, turning it off again
-  // is a settings_relax step-up (the gateway's `fromStored(false, …)`)
+  // ADR-0224 (owner 10-30): ships off; turning it off once on is a settings_relax step-up (gateway `fromStored`)
   privacyOpsEnabled: {
     key: "privacyOpsEnabled",
-    label: "Processing limit (records of processing)",
+    label: "Processing limit",
     strictDefault: false,
-    strict:
-      "Off as shipped: records of processing are kept but refuse nothing. Turn it on to refuse personal data in any " +
-      "model, connector or MCP call whose project has no active record listing its category.",
-    relaxed: "Turning it off again lets personal data through every call without a record of processing.",
+    strict: "Off as shipped. On, personal data with no record of processing is refused.",
+    relaxed: "Off lets personal data through without a record.",
     control: onOff("On", "Off"),
     isRelaxed: () => false,
     looser: (v, b) => b === true && v === false,
   },
   dsrSlaDays: {
     key: "dsrSlaDays",
-    label: "Data-subject request due date (days)",
+    label: "Data-subject request due (days)",
     strictDefault: 30,
-    strict: "30 days: a request is due one month after it is received (GDPR Article 12(3)). Shorter is stricter.",
-    relaxed: "A longer period (up to 90 days) gives the person a later answer.",
+    strict: "30 days (GDPR Art. 12(3)).",
+    relaxed: "Longer answers the person later.",
     control: { kind: "int", min: 1, max: 90, unit: "days" },
     isRelaxed: atMost(30),
     looser: largerLooser,

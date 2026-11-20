@@ -648,8 +648,8 @@ function Loaded(props: { settings: Record<string, unknown> }) {
           {/* ADR-0117: which international national identifiers are detected (ships empty) */}
           <OrgSettingsCard title="2a · International identifiers" keys={["piiInternationalCategories"]} testId="org-pii-international" />
 
-          {/* ADR-0224 addendum: the processing limit (records of processing) and the data-subject request due date */}
-          <OrgSettingsCard title="2b · Privacy operations" keys={["privacyOpsEnabled", "dsrSlaDays"]} testId="org-privacy-ops" />
+          {/* ADR-0224 addendum: the processing limit and the data-subject request due date */}
+          <OrgSettingsCard title="2b · Privacy" keys={["privacyOpsEnabled", "dsrSlaDays"]} testId="org-privacy" />
 
           <Card title="5f · Credentials in names and descriptions">
             <SectionShell
