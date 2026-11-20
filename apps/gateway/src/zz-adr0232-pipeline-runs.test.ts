@@ -213,9 +213,14 @@ describe("ADR-0232 governed pipeline runs", () => {
     // written directly: creating an intake variant through the API needs a decision-regression preview (ADR-0182)
     const [intakeRow] = await db.insert(workflowTemplates).values({ name: `ai-use-case-intake/pr-${RUN}`, definition: definition(`pr-${RUN}-intake`) }).returning();
     const intake = intakeRow!.id;
-    const i = await startRun({ templateId: intake });
-    expect(i.statusCode, i.body).toBe(409);
-    expect(i.json().error).toBe("intake_template_not_runnable");
+    // M-068: an intake variant is global state the use-case registry routes to, so it is removed before this test ends
+    try {
+      const i = await startRun({ templateId: intake });
+      expect(i.statusCode, i.body).toBe(409);
+      expect(i.json().error).toBe("intake_template_not_runnable");
+    } finally {
+      await db.delete(workflowTemplates).where(eq(workflowTemplates.id, intake));
+    }
   });
 
   it("derives the same server-side change and cascade as the workflow start route (one shared helper)", async () => {
