@@ -389,6 +389,50 @@ describe("ADR-0338: expiry, crash recovery, settle and cancel", () => {
     expect((await settle(act.id)).res.json().action).toMatchObject({ status: "failed", outcomeCode: "not_applied" });
   });
 
+  it("#1096 review 1: a crash where the vendor did not act settles failed / not_applied and frees the agent", async () => {
+    const a = await agent();
+    const act = await approved(a.recordId, "quarantine");
+    // the process died before anything was recorded: no prior state, the lease in the past
+    await db.update(vendorAgentActions).set({ status: "executing", leaseExpiresAt: sql`now() - interval '1 second'`, priorState: null }).where(eq(vendorAgentActions.id, act.id));
+    expect((await app.inject({ method: "GET", url: `${URL_}/${act.id}`, headers: adminKey })).json().action).toMatchObject({ status: "unknown", priorState: null });
+    const calls = vendor.calls.length;
+    expect((await settle(act.id)).res.json().action).toMatchObject({ status: "failed", outcomeCode: "not_applied", observedState: "active" });
+    expect(vendor.calls.length).toBe(calls);
+    // the agent is not left unactionable: a new request is accepted
+    expect((await request(body(a.recordId, "quarantine"))).status).toBe("requested");
+  });
+
+  it("#1096 review 1: an unreadable prior and a timeout still settle failed / not_applied once the state reads", async () => {
+    const a = await agent();
+    const act = await approved(a.recordId, "disable");
+    vendor.unreadable(true);
+    vendor.behave("timeout");
+    try {
+      expect((await execute(act)).res.json().action).toMatchObject({ status: "unknown", priorState: "unknown", outcomeCode: "vendor_timeout" });
+    } finally {
+      vendor.unreadable(false);
+      vendor.behave("ok");
+    }
+    expect((await settle(act.id)).res.json().action).toMatchObject({ status: "failed", outcomeCode: "not_applied" });
+  });
+
+  it("#1096 review 1: the prior state is recorded before the vendor call", async () => {
+    const a = await agent();
+    const act = await approved(a.recordId, "quarantine");
+    const original = vendor.control.apply;
+    let seen: string | null | undefined;
+    vendor.control.apply = async (ctx, ref, action) => {
+      seen = (await rowOf(act.id)).priorState;
+      return original(ctx, ref, action);
+    };
+    try {
+      expect((await execute(act)).res.json().action.status).toBe("succeeded");
+    } finally {
+      vendor.control.apply = original;
+    }
+    expect(seen).toBe("active");
+  });
+
   it("a vendor refusal ends failed with its fixed code and status", async () => {
     const a = await agent();
     const act = await approved(a.recordId, "quarantine");

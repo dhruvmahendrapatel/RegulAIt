@@ -86,9 +86,10 @@ const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
 /** the approval's `stage_id` names its action */
 export const VENDOR_AGENT_CONTROL_APPROVAL_PREFIX = "__vendor_agent_control__:";
-/** the vendor deadline of one control call (the `ControlContext` signal) */
+/** the vendor deadline of one execution: ONE signal shared by its prior read, its apply and its observed read, so the
+ * whole sequence ends inside the lease (#1096 review 2) */
 export const VENDOR_CONTROL_DEADLINE_MS = 30_000;
-/** the execution lease: the deadline plus 60 seconds of margin (ADR-0338 §4) */
+/** the execution lease: the shared deadline plus 60 seconds of margin (ADR-0338 §4) */
 export const VENDOR_CONTROL_LEASE_SECONDS = VENDOR_CONTROL_DEADLINE_MS / 1000 + 60;
 /** the most bytes one vendor answer may carry (a state read or an apply is a small JSON object) */
 const VENDOR_RESPONSE_MAX_BYTES = 256 * 1024;
@@ -336,9 +337,9 @@ export function registerVendorAgentControlRoutes(app: FastifyInstance, db: Db, d
       ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
       ...(deps.resolve ? { resolve: deps.resolve } : {}),
     });
-  const readState = async (control: VendorAgentControl, r: VendorAgentActionRow, token: string): Promise<VendorAgentServiceState> => {
+  const readState = async (control: VendorAgentControl, r: VendorAgentActionRow, token: string, signal: AbortSignal): Promise<VendorAgentServiceState> => {
     try {
-      const s = await control.readState({ fetch: await guardedFetch(), signal: AbortSignal.timeout(VENDOR_CONTROL_DEADLINE_MS), token }, refOf(r));
+      const s = await control.readState({ fetch: await guardedFetch(), signal, token }, refOf(r));
       return s.state;
     } catch {
       return "unknown";
@@ -556,14 +557,22 @@ export function registerVendorAgentControlRoutes(app: FastifyInstance, db: Db, d
     const { row, control, credential } = started;
     const op = opOf(row);
     const target = targetStateOf(op);
-    const prior = await readState(control, row, credential.token);
+    // one deadline for the whole sequence (prior read, the call, the observed read), so it ends inside the lease
+    const deadline = AbortSignal.timeout(VENDOR_CONTROL_DEADLINE_MS);
+    const prior = await readState(control, row, credential.token, deadline);
+    // ADR-0338 §4 step 3: the prior state is recorded BEFORE the vendor call, so a crash after it still leaves the row
+    // with what the agent was in (#1096 review 1); conditional on the row still executing
+    await db
+      .update(vendorAgentActions)
+      .set({ priorState: prior, updatedAt: sql`now()` })
+      .where(and(eq(vendorAgentActions.id, row.id), eq(vendorAgentActions.status, "executing")));
     let event: "succeed" | "find_in_state" | "fail" | "lose_track";
     let code: string;
     let httpStatus: number | null = null;
     let observed: VendorAgentServiceState | null = null;
     try {
       const fetchForCall = await guardedFetch();
-      const ctx: ControlContext = { fetch: fetchForCall, signal: AbortSignal.timeout(VENDOR_CONTROL_DEADLINE_MS), token: credential.token };
+      const ctx: ControlContext = { fetch: fetchForCall, signal: deadline, token: credential.token };
       const effect = { userId, objectType: "vendor_agent_control" as const, objectId: row.id, detail: { registry: row.registry, direction: op.direction }, summarize: (x: ControlResult) => ({ outcome: x.outcome, code: x.code, httpStatus: x.httpStatus ?? null }) };
       // one classified operation per contract method: `apply` narrows (the one dial exemption), `reverse` widens
       const result: ControlResult =
@@ -575,7 +584,7 @@ export function registerVendorAgentControlRoutes(app: FastifyInstance, db: Db, d
       if (result.outcome === "already_in_state") event = "find_in_state";
       else if (result.outcome === "refused" || result.outcome === "failed") event = "fail";
       else {
-        observed = await readState(control, row, credential.token);
+        observed = await readState(control, row, credential.token, deadline);
         event = observed === target ? "succeed" : "lose_track";
         if (event === "lose_track") code = "not_confirmed";
       }
@@ -641,9 +650,13 @@ export function registerVendorAgentControlRoutes(app: FastifyInstance, db: Db, d
     if (isRefusal(ready)) return reply.status(ready.status).send(ready.body);
     const { row, control, credential } = ready;
     // a read only, under any dial: never a second apply
-    const state = await readState(control, row, credential.token);
+    const state = await readState(control, row, credential.token, AbortSignal.timeout(VENDOR_CONTROL_DEADLINE_MS));
     const target = targetStateOf(opOf(row));
-    const event = state === target ? "succeed" : state !== "unknown" && row.priorState !== null && state === row.priorState ? "fail" : null;
+    // decided from the direction, never only from a stored prior (#1096 review 1): the target state means the call took
+    // effect; any other KNOWN state means it did not (`apply` left the agent in service, `reverse` left it out of
+    // service), so the action ends `failed / not_applied` and the agent is free for a new request. Only an unreadable
+    // state keeps it `unknown`.
+    const event = state === target ? "succeed" : state !== "unknown" ? "fail" : null;
     const final = await db.transaction(async (tx) => {
       const t = tx as unknown as Db;
       if (!event) {

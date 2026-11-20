@@ -11,6 +11,8 @@ export interface VendorAgentRef {
   readonly recordId: string;
   readonly sourceId: string;
   readonly registry: string;
+  /** reported by the vendor through discovery, so untrusted: an adapter path-encodes it (`encodeURIComponent`) and
+   * never splices it into a host or an unescaped query (#1096 security review, nit 1) */
   readonly externalId: string;
 }
 
