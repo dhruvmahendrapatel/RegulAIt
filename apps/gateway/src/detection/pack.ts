@@ -25,7 +25,7 @@ export const DETECTION_LIMITS = {
 const SEVERITIES = ["low", "medium", "high", "critical"] as const;
 export type DetectionSeverity = (typeof SEVERITIES)[number];
 
-/** slice 1 runs `alert` only; the stronger responses are carried by the schema so a pack round-trips (slice 2) */
+/** `alert` is the default; the others run after the incident commits (responses.ts), and need a step-up (ADR-0333 §5) */
 export const RESPONSES = ["alert", "suspend_grant", "revoke_credential", "require_approval"] as const;
 export type DetectionResponse = (typeof RESPONSES)[number];
 

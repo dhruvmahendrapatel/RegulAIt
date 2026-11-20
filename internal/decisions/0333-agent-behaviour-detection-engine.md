@@ -136,12 +136,37 @@ match tool names only, so they are heuristics, and the admin can edit them.
 ### 5. Responses (slice 2)
 
 - `alert` is the default for every rule.
-- An admin may set a rule's `response` to `suspend_grant` (revoke the agent session's delegation tree, ADR-0188),
-  `revoke_credential` (revoke the acting identity's short-lived credentials) or `require_approval` (the group's next
-  governed call needs approval through the existing Approvals Queue).
+- An admin may set a rule's `response` to one of three values. Each reuses an existing mechanism, so no new
+  enforcement path is added:
+  - `suspend_grant`: revoke the group's delegation tree at its root (`revokeDelegationGrant`, which cascades). Every
+    later use of a grant in the tree fails, because `loadLiveChain` re-reads the path. The revoke reason is `admin`,
+    and the actor is the pack author. A group that is not a delegation tree fails with `not_delegated`.
+  - `revoke_credential`: revoke the acting identity's live short-lived access tokens (`issued_tokens`). The identity
+    can mint new tokens through its own credential. For a lasting stop, use `suspend_grant`. A call with no actor
+    fails with `no_actor_identity`.
+  - `require_approval`: a user-scoped, all-servers approval rule for the sponsor, written through the one create
+    (`createApprovalRuleRow`) with the pack author as approver. The sponsor's MCP tool calls then meet the existing
+    Approvals Queue. This is stricter than "the next call": the rule stays until an admin removes it. If the
+    approver would be the sponsor, the response fails with `no_independent_approver`. A second detection reuses the
+    rule rather than adding another.
 - A pack whose rules carry any response stronger than `alert` is a relaxation of the default posture. It needs a
-  `settings_relax` step-up and is audited as one. Responses run after the incident commits, are recorded on the
-  incident, and their failure is recorded, never retried silently.
+  `settings_relax` step-up and is audited as one. Its author is the acting admin.
+- Responses run after the incident commits, in the same leased pass. A pass that ends between the commit and the
+  response leaves the response pending (`response_state = none`), and the next pass runs it. The outcome is recorded
+  on the incident (`done` or `failed`, with a fixed `response_error_code`) and in a `detection-response` audit row.
+  That row's effect is `deny` when the response took effect and `allow` when it did not. A failure is never retried
+  silently.
+- **One transaction per response (review of #1060).** The action, the guarded `response_state` move and the audit row
+  commit together; `revokeDelegationGrant` and the approval-rule create join it as savepoints. A crash or an error
+  between them rolls the action back, so a response is never applied without being recorded and audited. An
+  unexpected error is recorded as `response_error` in a fresh transaction with nothing applied. A run against an
+  incident whose response is already terminal changes nothing.
+- **`require_approval` reuses only an identical rule.** An existing rule counts only if it has exactly the shape the
+  response creates (user scope, all servers, no tool, not write-only, every deploy mode, per-action approval, the same
+  approver). A narrower rule an admin set up earlier does not satisfy it, so the full rule is still created.
+- **The pack author.** The acting admin and approver is the author of the pack version that raised the incident. Their
+  standing is not re-checked when a restricting response runs; for `require_approval`, a pool the author can no longer
+  satisfy is refused by the approval-rule create, so the response fails closed (`approval_rule_refused`).
 
 ### 6. Reuse and open-source search (ADR-0176)
 

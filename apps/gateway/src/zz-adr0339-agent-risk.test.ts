@@ -49,6 +49,12 @@ import {
   chatopsConnections,
   configVersions,
   connectors,
+  contentTrustTiers,
+  identityConnectorGrants,
+  identityServerGrants,
+  mcpServers,
+  mcpTools,
+  workloadIdentities,
   createDb,
   desc,
   eq,
@@ -78,6 +84,7 @@ const agentIds: string[] = [];
 const builderIds: string[] = [];
 const connectorIds: string[] = [];
 let sodRuleId: string | null = null;
+const identityIds: string[] = [];
 
 async function mkUser(tag: string) {
   const u = await app.inject({ method: "POST", headers: ADMIN, url: "/v1/users", payload: { email: `r339-${tag}-${RUN}@example.com`, displayName: `r339 ${tag}` } });
@@ -133,6 +140,12 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (identityIds.length) {
+    await db.delete(identityConnectorGrants).where(inArray(identityConnectorGrants.identityId, identityIds));
+    await db.delete(identityServerGrants).where(inArray(identityServerGrants.identityId, identityIds));
+    // an identity is never deleted (revoke it); its agent stays too (the identity's foreign key restricts it)
+  }
+  if (connectorIds.length) await db.delete(contentTrustTiers).where(inArray(contentTrustTiers.sourceId, connectorIds));
   if (sodRuleId) await db.delete(sodRules).where(eq(sodRules.id, sodRuleId));
   if (builderIds.length) await db.delete(builderAgents).where(inArray(builderAgents.id, builderIds));
   if (agentIds.length) await db.delete(agents).where(inArray(agents.id, agentIds));
@@ -378,7 +391,7 @@ describe("ADR-0339 sweep and evidence", () => {
     expect(await assessments(s)).toHaveLength(0);
   });
 
-  it("finds the untrusted-input + data + unconfirmed-action combination and an SoD rule the agent alone holds", async () => {
+  it("finds the lethal trifecta (naming each leg's members) and an SoD rule the agent alone holds", async () => {
     const model = await mkAgent("r339-tmodel");
     const id = await mkBuilder("r339-toxic", model);
     const s: AgentRiskSubject = { kind: "builder_agent", id };
@@ -397,8 +410,16 @@ describe("ADR-0339 sweep and evidence", () => {
     sodRuleId = rule!.id;
     await sweep(s);
     const [a] = await assessments(s);
-    const toxic = (a!.assessment as { toxicCombinations: Array<{ id: string; present: boolean; evidence: string }> }).toxicCombinations;
-    expect(toxic.find((t) => t.id === "untrusted_input_data_action")!.present).toBe(true);
+    type Toxic = { id: string; present: boolean; evidence: string; legs?: Array<{ id: string; members: Array<{ name: string }> }>; fixOptions?: Array<{ action: string; leg: string }> };
+    const toxic = (a!.assessment as { toxicCombinations: Toxic[] }).toxicCombinations;
+    const tri = toxic.find((t) => t.id === "lethal_trifecta")!;
+    expect(tri.present).toBe(true);
+    const leg = (id: string) => tri.legs!.find((l) => l.id === id)!.members.map((m) => m.name);
+    // both connectors read (and are unclassified, so untrusted); only the one without Ask-first communicates out
+    expect(leg("private_data")).toEqual(expect.arrayContaining([`r339-pay-${RUN}`, `r339-approve-${RUN}`]));
+    expect(leg("untrusted_content")).toContain("slack inbound channel");
+    expect(leg("external_communication")).toEqual([`r339-pay-${RUN}`]);
+    expect(tri.fixOptions![0]).toMatchObject({ action: "ask_first", leg: "external_communication" });
     const sod = toxic.find((t) => t.id === "sod_rule_held_by_agent")!;
     expect(sod.present).toBe(true);
     expect(sod.evidence).toContain(`r339-pay-approve-${RUN}`);
@@ -408,6 +429,87 @@ describe("ADR-0339 sweep and evidence", () => {
     const [b] = await assessments(s);
     expect((b!.assessment as { toxicCombinations: Array<{ id: string; present: boolean }> }).toxicCombinations.find((t) => t.id === "sod_rule_held_by_agent")!.present).toBe(false);
     expect(b!.score).toBe(a!.score - 15);
+  });
+});
+
+describe("ADR-0339 addendum: capability combinations", () => {
+  type Toxic = { id: string; present: boolean; evidence: string; legs?: Array<{ id: string; members: Array<{ name: string }> }> };
+  const toxicOf = async (s: AgentRiskSubject) => {
+    const [a] = await assessments(s);
+    return (a!.assessment as { methodVersion: string; toxicCombinations: Toxic[] });
+  };
+
+  it("builder agent: Ask-first on the write and a trusted source each clear the trifecta", async () => {
+    const id = await mkBuilder("r339-tri", null);
+    const s: AgentRiskSubject = { kind: "builder_agent", id };
+    const c = await mkConnector("tri");
+    await db.insert(builderAgentTools).values({ agentId: id, kind: "connector", refId: c, requiresApproval: false });
+    await sweep(s);
+    // one unclassified read+write connector: private data, untrusted content and external communication in one tool
+    let a = await toxicOf(s);
+    expect(a.methodVersion).toBe("adr0339-v3");
+    expect(a.toxicCombinations.find((t) => t.id === "lethal_trifecta")!.present).toBe(true);
+    // Ask-first on its write breaks the external-communication leg (a connector read does not reach the open world)
+    await db.update(builderAgentTools).set({ requiresApproval: true }).where(eq(builderAgentTools.agentId, id));
+    await sweep(s);
+    a = await toxicOf(s);
+    const t = a.toxicCombinations.find((x) => x.id === "lethal_trifecta")!;
+    expect(t.present).toBe(false);
+    expect(t.evidence).toContain("external communication: none");
+    // back to no Ask-first, but the source classified trusted (ADR-0193): no untrusted content left
+    await db.update(builderAgentTools).set({ requiresApproval: false }).where(eq(builderAgentTools.agentId, id));
+    await db.insert(contentTrustTiers).values({ sourceKind: "connector", sourceId: c, tier: "trusted", setByUserId: owner.id });
+    await sweep(s);
+    expect((await toxicOf(s)).toxicCombinations.find((x) => x.id === "lethal_trifecta")!.present).toBe(false);
+  });
+
+  it("registry agent: not applicable without a workload identity; its identity's grants form the legs", async () => {
+    const id = await mkAgent("r339-reg-tri");
+    const s: AgentRiskSubject = { kind: "agent", id };
+    await sweep(s);
+    expect((await toxicOf(s)).toxicCombinations.find((t) => t.id === "lethal_trifecta")!.evidence).toContain("not applicable");
+    const c = await mkConnector("reg-tri");
+    const [wid] = await db
+      .insert(workloadIdentities)
+      .values({ kind: "agent", agentId: id, identifier: `spiffe://regulait.test/regulait/agent/${id}`, sponsorUserIds: [owner.id] })
+      .returning({ id: workloadIdentities.id });
+    identityIds.push(wid!.id);
+    agentIds.splice(agentIds.indexOf(id), 1);
+    // read-only grant: private data and untrusted content, but nothing communicates out
+    await db.insert(identityConnectorGrants).values({ identityId: wid!.id, connectorId: c, mode: "read", allowedObjects: [] });
+    await sweep(s);
+    let t = (await toxicOf(s)).toxicCombinations.find((x) => x.id === "lethal_trifecta")!;
+    expect(t.present).toBe(false);
+    expect(t.legs!.find((l) => l.id === "private_data")!.members.map((m) => m.name)).toEqual([`r339-reg-tri-${RUN}`]);
+    // read-write: a registry agent has no Ask-first, so its write is unconfirmed external communication
+    await db.update(identityConnectorGrants).set({ mode: "readwrite" }).where(eq(identityConnectorGrants.identityId, wid!.id));
+    await sweep(s);
+    t = (await toxicOf(s)).toxicCombinations.find((x) => x.id === "lethal_trifecta")!;
+    expect(t.present).toBe(true);
+  });
+
+  it("registry agent: a new write tool on a whole-server grant marks the identity's agent and is scored at once", async () => {
+    const id = await mkAgent("r339-reg-srv");
+    const s: AgentRiskSubject = { kind: "agent", id };
+    const [server] = await db.insert(mcpServers).values({ name: `r339-srv-${RUN}`, url: "https://r339-mcp.example.test/" }).returning({ id: mcpServers.id });
+    await db.insert(mcpTools).values({ serverId: server!.id, name: `r339-read-${RUN}`, kind: "read" });
+    const [wid] = await db
+      .insert(workloadIdentities)
+      .values({ kind: "agent", agentId: id, identifier: `spiffe://regulait.test/regulait/agent/${id}`, sponsorUserIds: [owner.id] })
+      .returning({ id: workloadIdentities.id });
+    identityIds.push(wid!.id);
+    agentIds.splice(agentIds.indexOf(id), 1);
+    await db.insert(identityServerGrants).values({ identityId: wid!.id, serverId: server!.id, readOnlyAll: false });
+    await sweep(s);
+    const destructive = async () => (await toxicOf(s)).toxicCombinations.find((x) => x.id === "untrusted_input_unconfirmed_destructive")!;
+    expect((await destructive()).present).toBe(false);
+    // a tool sync adds a write tool to the server: the grant holds it at once, so the insert itself marks the agent
+    await db.insert(mcpTools).values({ serverId: server!.id, name: `r339-write-${RUN}`, kind: "write" });
+    expect((await requests(s)).length).toBeGreaterThan(0);
+    await sweep(s);
+    const d = await destructive();
+    expect(d.present).toBe(true);
+    expect(d.legs!.find((l) => l.id === "unconfirmed_destructive")!.members.map((m) => m.name)).toEqual([`r339-write-${RUN}`]);
   });
 });
 

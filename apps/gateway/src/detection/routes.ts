@@ -81,10 +81,6 @@ export function registerDetectionRoutes(app: FastifyInstance, db: Db): void {
       const issue = err instanceof z.ZodError ? err.issues[0] : undefined;
       return refuse(reply, 400, "invalid_detection_pack", issue ? `${issue.path.join(".")}: ${issue.message}` : undefined);
     }
-    // Slice 1 runs alert-only responses; a stronger response is refused rather than stored and silently ignored.
-    if (next.rules.some((r) => r.response !== "alert")) {
-      return refuse(reply, 400, "detection_response_not_available", "only the alert response is available in this build");
-    }
     const active = await loadActiveDetectionPack(db);
     const [latest] = await db.select({ version: detectionRulePacks.version }).from(detectionRulePacks).orderBy(desc(detectionRulePacks.version)).limit(1);
     const latestVersion = latest?.version ?? null;
