@@ -69,6 +69,12 @@
     "limit": "8.7 kB"
   },
   {
+    "name": "chunk: CopilotRedteamGateCard",
+    "path": "dist/assets/CopilotRedteamGateCard-????????.js",
+    "gzip": true,
+    "limit": "5.3 kB"
+  },
+  {
     "name": "chunk: DataList",
     "path": "dist/assets/DataList-????????.js",
     "gzip": true,
