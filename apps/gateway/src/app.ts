@@ -534,6 +534,7 @@ import { RunStateError } from "@regulait/orchestration-kernel";
 import { applyWorkflowApprovalDecision, registerWorkflowRoutes } from "./workflows.js";
 import { registerTemplateGalleryRoutes } from "./template-gallery.js";
 import { registerWorkflowBuilderRoutes } from "./workflow-builder.js";
+import { registerPipelineRoutes } from "./pipelines.js";
 // ADR-0080 — the AI use-case registry (L1 front-door) and its lifecycle join.
 import {
   acceptUseCaseRisks,
@@ -6382,6 +6383,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerProcessAnalyticsRoutes(app, db);
   // ADR-0364 (lane E45 S2): governed RPA robots — versions, review, secrets (the Robots MCP server is first-party)
   registerRobotRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0232 (lane E49 slice 1): the step catalogue and governed pipeline runs over published template versions
+  registerPipelineRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0069 — CROSS-VENDOR COST CONSOLIDATION. Admin-only by default: the ONLY
   // route here in NON_ADMIN_ROUTES is `GET /v1/users/:userId/cost-consolidated`,
   // which refuses in-handler unless the caller IS that user. Uploading a file
