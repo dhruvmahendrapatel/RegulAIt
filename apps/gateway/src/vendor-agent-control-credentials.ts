@@ -33,6 +33,7 @@ import {
   type DiscoveryStoredCredentialMode,
 } from "@regulait/shared";
 import { azureCredential } from "@regulait/cloud-discovery";
+import { errMessage } from "./err-serializer.js";
 import { federationTokenMinter } from "./federation-signing-keys.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { checkStepUp, isStepUpPrompt, type StepUpCheckArgs } from "./step-up.js";
@@ -146,7 +147,7 @@ async function acquireToken(db: Db, deps: ControlTokenDeps, cred: DiscoveryCrede
     return tok.token;
   } catch (err) {
     // only the AADSTS code is kept from the error text (as discovery-wider-scanners.ts does)
-    const aad = /AADSTS[0-9]{5,7}/.exec(err instanceof Error ? err.message : String(err))?.[0];
+    const aad = /AADSTS[0-9]{5,7}/.exec(errMessage(err))?.[0];
     throw new ControlTokenError("control_token_failed", `the Entra token request failed${aad ? ` (${aad})` : ""}`);
   }
 }
