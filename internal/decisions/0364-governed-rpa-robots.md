@@ -494,7 +494,7 @@ S3 ships §5 and the §7 egress, secret and evidence controls for scripted (`ste
     uplink network.
   - The sandbox joins the internal network only. The proxy URL and the run id reach the runner as environment through
     the sandbox init's release line.
-  - On end, kill or start failure, it collects the proxy log (≤ 256 KiB) and removes the proxy, the network and the
+  - On end, kill or start failure, it collects the proxy log (a 128 KiB head and tail) and removes the proxy, the network and the
     ACL.
   - It refuses to place a robot run unless `REGULAIT_ROBOT_EGRESS_IMAGE` (by digest) and the ACL directory and volume
     are configured. Under gVisor it also needs a second runsc runtime registered with `--network=sandbox`. Fail closed.
@@ -502,11 +502,15 @@ S3 ships §5 and the §7 egress, secret and evidence controls for scripted (`ste
   - Image flags: `--config-file` (`allow_missing_role: true`, because a role only comes from a client certificate, and
     the metadata `deny_ranges`), plus `--disable-acl-policy-action open` and `--disable-acl-policy-action report`.
   - Per-run flags: `--egress-acl-file`, `--listen-ip` and `--listen-port 4750`.
-- **Open: Smokescreen cannot restrict destination ports.** Its ACL matches host names only; we tested an allowed host
-  on another port and it was dialled. §7 provides a CONNECT filter in front of Smokescreen, recorded as an ADR-0176
-  exception. S3 does not build it. Ports are enforced today by the in-browser route check (the second line) and by
-  `steps_v1` validation (a `goto` must land on an allowed origin). The master decides whether the filter lands in S3 or
-  becomes its own follow-up.
+- **Ports: an ADR-0176 exception, a first-party hook on Smokescreen** (review round, 2026-11-20). Smokescreen v0.1.0
+  has no port setting: its ACL matches host names only, and an allowed host was dialled on another port. The §7 CONNECT
+  filter is therefore built **inside** Smokescreen, not in front of it. `engines/robot-egress/portfilter` is
+  Smokescreen's own `main` with one `Config.PostDecisionRequestHandler`. That handler parses with Smokescreen's own
+  `hostport.New` and refuses any request that is not a CONNECT, or whose `host:port` is not in the run's targets file
+  (`ports.txt`). The executor writes that file next to the ACL from the offer's targets, with the same 0600 mode, mount
+  and cleanup, and the proxy exits before it listens if the file is missing or invalid. Smokescreen is used unmodified,
+  as a library. The unmet requirement is a per-host port limit. Re-check this exception when Smokescreen adds a port
+  option.
 - **Open (owner): MPL-2.0 in the egress image.** `hashicorp/golang-lru` v1.0.2 is linked into Smokescreen through
   `stripe/goproxy`. It is recorded as "owner to confirm" under the ADR-0187 decision 194 precedent (MPL-2.0 allowed
   while unmodified). The image is built and tested but is not admissible until the owner decides.
@@ -547,6 +551,38 @@ S3 ships §5 and the §7 egress, secret and evidence controls for scripted (`ste
   - Link the run's placement to the governed decision (the I4/I8 contract; S3 places an unlinked one).
   - Add the evidence retention sweep.
   - An expired review still leaves its version `in_review` (from S2).
+
+- **S3 review round (2026-11-20; the code and security reviews at 4dbc10e4):**
+  - **No host address on the run network.** The network is created `--internal --ipv6=false` with
+    `com.docker.network.bridge.inhibit_ipv4=true`, so the host keeps no address on it, and `--internal` alone left the
+    bridge's `.1` reachable. This was chosen over host firewall rules because it needs no host firewall change. The
+    executor re-reads the network after creating it and refuses a run unless the network is internal, has no IPv6,
+    has the option set and has no gateway. Chromium runs with `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`
+    and `--disable-quic`. A Docker-gated integration test (`robot-egress.integration.test.ts`) proves, from inside a
+    real sandbox (runc; gVisor not verified), that these are refused: a host not on the ACL, an IP literal,
+    169.254.169.254, the gateway, a wrong port, plain HTTP and direct TCP/UDP.
+  - **Accepted risk: Chromium's own sandbox is off** (`chromiumSandbox: false`, now explicit). The boundary is the
+    robot_browser sandbox: gVisor, no capabilities, no-new-privileges and seccomp. A renderer exploit would hold the
+    run's opened secrets, and the output canary below is then the last stop.
+  - **Secrets never reach the model.** The canary checks every output in its raw, JSON-escaped, percent-encoded,
+    form-encoded, UTF-16LE and base64 forms. On a hit the run fails `secret_in_output` and returns no outputs. Values
+    under 4 characters are not checked.
+  - **PII mode.** The run takes its project's PII mode through the compliance cascade, and an unresolved mode falls
+    back to the org floor (`block`, ADR-0181). Under `block` there are no screenshots, and a download keeps only its
+    sha256 and size (`robot_run_evidence.bytes_withheld`). Every other mode stores masked screenshots.
+  - **Bounds and lifecycle.**
+    - In-flight evidence is capped at 16 MiB per run and 64 MiB across runs.
+    - The egress-log evidence keeps a 128 KiB head and a 128 KiB tail with a dropped-byte marker.
+    - The end audit row carries the ordered `[{item, kind, sha256}]` list.
+    - Every status write checks that its row moved, and a lost race writes no audit.
+    - `robot-run-stale-sweep` ends stale runs as `timed_out` / `stale_run`.
+    - The executor reconciles orphaned proxies, sandboxes, networks and ACL folders at start-up and every 5 minutes.
+      This assumes one executor per Docker daemon.
+  - **Budget and deadline.**
+    - `preDispatchProjectGate` refuses a project that is over budget.
+    - Each run writes a `robot_run` usage row with a NULL cost. A robot run has no price yet, and no figure is invented.
+    - A robot tools/call gets a deadline that covers placement, the run and its margin, with one attempt and no retry.
+    - The call's abort signal cancels the run (`caller_aborted`).
 
 ## Addendum: free-form browsing limits (owner decision, 2026-11-19)
 
