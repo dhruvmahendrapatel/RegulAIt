@@ -13,9 +13,9 @@ term missing. The new items are below; items already in flight are listed for co
   an unmet floor block dispatch for `delegated` and `autonomous` agents until the floors for their risk tier are met.
   An admin may relax this, and the change is audited.
 - **In flight: goal hijack (OWASP ASI01).** A runtime check that each tool call fits the agent's declared purpose,
-  steering or blocking it when it diverges. Graduated steering responses are open PR #960 (ADR-0354); the
+  steering or blocking it when it diverges. Graduated steering responses are open PR #960 (its ADR is in that PR); the
   goal-alignment check itself is not yet specified.
 - **In flight: rogue agent (OWASP ASI10).** Learned behaviour baselines with out-of-role findings and an automatic
-  safe-mode trigger: open PR #966 (ADR-0359).
+  safe-mode trigger: open PR #966 (its ADR is in that PR).
 - **In flight: scoped credentials and sandboxing.** Credential revocation and the status list are open PR #1117
   (ADR-0315 slice 2). The sandboxed browser robot runner is open PR #1082 (ADR-0364 S3).
