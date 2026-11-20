@@ -9,6 +9,7 @@
  *
  * The page reads `kind` rather than assuming webhooks: ADR-0351 adds syslog-over-TLS destinations, which have no secret.
  */
+import { fromNow } from "../../../api/format";
 import type { Tone } from "../../../ui/kit";
 
 export type SiemState = "active" | "backoff" | "dead_letter";
@@ -45,6 +46,12 @@ export function deliveryState(d: SiemDestination): { label: string; tone: Tone }
   if (d.state === "dead_letter") return { label: "Stopped after failures", tone: "danger" };
   if (d.state === "backoff") return { label: "Retrying", tone: "warn" };
   return { label: "Delivering", tone: "ok" };
+}
+
+/** when a backing-off destination tries again: `nextAttemptAt` is in the future, so it is read forwards */
+export function nextTryText(d: Pick<SiemDestination, "state" | "nextAttemptAt">, now: number = Date.now()): string | null {
+  if (d.state !== "backoff" || !d.nextAttemptAt) return null;
+  return `next try ${fromNow(d.nextAttemptAt, now)}`;
 }
 
 const ERROR_TEXT: Readonly<Record<string, string>> = Object.freeze({

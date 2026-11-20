@@ -27,6 +27,7 @@ import {
   deliveryState,
   EMPTY_DRAFT,
   errorText,
+  nextTryText,
   rowActions,
   SIEM_REFUSALS,
   SIEM_STORED_NOTE,
@@ -128,11 +129,12 @@ export default function SiemDeliveryPage() {
                 render: (d) => {
                   const st = deliveryState(d);
                   const err = errorText(d.lastErrorCode);
+                  const next = nextTryText(d);
                   return (
                     <>
                       <Badge tone={st.tone}>{st.label}</Badge>
                       {err && d.state !== "active" ? <div className={v.faint}>{err}</div> : null}
-                      {d.state === "backoff" && d.nextAttemptAt ? <div className={v.faint}>next try {ago(d.nextAttemptAt)}</div> : null}
+                      {next ? <div className={v.faint}>{next}</div> : null}
                     </>
                   );
                 },
@@ -158,11 +160,11 @@ export default function SiemDeliveryPage() {
                     <RowActions
                       primary={
                         d.enabled ? (
-                          <Button size="sm" aria-label={`Turn off ${d.name}`} aria-disabled={act.busy || undefined} onClick={() => !act.busy && setEnabled(d, false)}>
+                          <Button size="sm" aria-label={`Turn off ${d.name}`} disabled={act.busy} onClick={() => setEnabled(d, false)}>
                             Turn off
                           </Button>
                         ) : (
-                          <Button size="sm" variant="primary" aria-label={`Turn on ${d.name}`} aria-disabled={act.busy || undefined} onClick={() => !act.busy && setEnableFor(d)}>
+                          <Button size="sm" variant="primary" aria-label={`Turn on ${d.name}`} disabled={act.busy} onClick={() => setEnableFor(d)}>
                             Turn on
                           </Button>
                         )

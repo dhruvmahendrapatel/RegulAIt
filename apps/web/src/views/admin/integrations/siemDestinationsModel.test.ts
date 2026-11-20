@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createBody, createProblems, deliveryState, EMPTY_DRAFT, errorText, rowActions, type SiemDestination } from "./siemDestinationsModel";
+import { createBody, createProblems, deliveryState, EMPTY_DRAFT, errorText, nextTryText, rowActions, type SiemDestination } from "./siemDestinationsModel";
 
 const dest = (over: Partial<SiemDestination> = {}): SiemDestination => ({
   id: "11111111-1111-4111-8111-111111111111",
@@ -36,6 +36,18 @@ describe("SIEM destinations model (ADR-0303)", () => {
     }
     expect(errorText("brand_new")).toBe("Last error: brand_new.");
     expect(errorText(null)).toBeNull();
+  });
+
+  it("reads the next retry forwards, not as 'just now' (review #1108 [1])", () => {
+    const now = Date.parse("2026-11-20T12:00:00Z");
+    const at = (sec: number) => new Date(now + sec * 1000).toISOString();
+    expect(nextTryText(dest({ state: "backoff", nextAttemptAt: at(12 * 60) }), now)).toBe("next try in 12m");
+    expect(nextTryText(dest({ state: "backoff", nextAttemptAt: at(3 * 3600 + 5) }), now)).toBe("next try in 3h");
+    expect(nextTryText(dest({ state: "backoff", nextAttemptAt: at(20) }), now)).toBe("next try in under a minute");
+    expect(nextTryText(dest({ state: "backoff", nextAttemptAt: at(-5) }), now)).toBe("next try now");
+    // only a backing-off destination has a next try
+    expect(nextTryText(dest({ state: "dead_letter", nextAttemptAt: at(600) }), now)).toBeNull();
+    expect(nextTryText(dest({ state: "backoff", nextAttemptAt: null }), now)).toBeNull();
   });
 
   it("says why recover and rotate are off", () => {

@@ -7,6 +7,7 @@
  *    off is a plain PUT;
  *  - a dead-lettered destination shows the stored error in plain words and can be recovered (no step-up); recover is
  *    off, with its reason, while delivery is healthy;
+ *  - a backing-off destination says when it tries next, read forwards ("next try in 1h"), never "just now";
  *  - rotating the secret is confirmed and step-up'd, and shows the new secret once; a syslog destination cannot rotate;
  *  - axe (WCAG 2.x A/AA) in light and dark on the page.
  */
@@ -17,6 +18,7 @@ import { confirmStepUp, requireStepUpOn } from "./step-up-harness";
 const A = "11111111-1111-4111-8111-111111111111";
 const B = "22222222-2222-4222-8222-222222222222";
 const NEW = "33333333-3333-4333-8333-333333333333";
+const RETRY = "44444444-4444-4444-8444-444444444444";
 const THEMES = ["light", "dark"] as const;
 const json = (route: Route, body: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
@@ -56,6 +58,8 @@ async function mock(page: Page): Promise<State> {
   const state: State = { posts: [], puts: [], recovers: [] };
   const rows: Record<string, unknown>[] = [
     { ...base, id: A, name: "splunk-hec", url: "https://siem.example.test/in", enabled: true, state: "dead_letter", lag: 4200, consecutiveFailures: 12, lastErrorCode: "egress_blocked" },
+    // backing off: its next try is 90 minutes away, so the row must not say "just now" (review #1108 [1])
+    { ...base, id: RETRY, name: "sentinel-eu", enabled: true, state: "backoff", lag: 30, consecutiveFailures: 2, lastErrorCode: "http_5xx", nextAttemptAt: new Date(Date.now() + 90 * 60_000).toISOString() },
     { ...base, id: B, name: "syslog-dc", kind: "syslog_tls", url: "syslog+tls://logs.example.test:6514", enabled: true, state: "active", lag: 0, secretRotatedAt: null },
   ];
   const me = { id: "riley", email: "riley@example.test", displayName: "Riley Admin" };
@@ -74,7 +78,7 @@ async function mock(page: Page): Promise<State> {
       state.posts.push(body);
       const d = { ...base, id: NEW, name: body.name, url: body.url, enabled: false, state: "active", lag: 0, lastSuccessAt: null, deliveredEvents: 0 };
       rows.push(d);
-      return json(route, { destination: d, secret: "whsec_NEWSECRETvalue123" }, 201);
+      return json(route, { destination: d, secret: "TESTONLY-not-a-secret-1" }, 201);
     }
     const en = /^\/v1\/siem\/destinations\/([^/]+)\/enabled$/.exec(p);
     if (en && m === "PUT") {
@@ -92,7 +96,7 @@ async function mock(page: Page): Promise<State> {
       return json(route, { destination: row });
     }
     const rot = /^\/v1\/siem\/destinations\/([^/]+)\/rotate-secret$/.exec(p);
-    if (rot && m === "POST") return json(route, { destination: rows.find((r) => r.id === rot[1]), secret: "whsec_ROTATEDvalue456" });
+    if (rot && m === "POST") return json(route, { destination: rows.find((r) => r.id === rot[1]), secret: "TESTONLY-not-a-secret-2" });
     if (m === "GET") return json(route, {});
     return json(route, { error: "not_found" }, 404);
   });
@@ -107,6 +111,8 @@ test.describe("ADR-0303: SIEM delivery", () => {
     await expect(page.getByText("Stopped after failures")).toBeVisible();
     await expect(page.getByText("The host is not on this deployment's egress allow-list.")).toBeVisible();
     await expect(page.getByText("4,200")).toBeVisible();
+    await expect(page.getByText("next try in 1h")).toBeVisible();
+    await expect(page.getByText(/next try just now/)).toHaveCount(0);
     // healthy: nothing to recover; syslog: no secret to rotate
     await expect(page.getByRole("button", { name: "Recover syslog-dc" })).toBeDisabled();
     await expect(page.getByRole("button", { name: "Rotate the secret of syslog-dc" })).toBeDisabled();
@@ -128,7 +134,7 @@ test.describe("ADR-0303: SIEM delivery", () => {
     expect(state.posts).toEqual([]);
     await page.getByRole("textbox", { name: "Receiver URL" }).fill("https://sentinel.example.test/in");
     await page.getByRole("button", { name: "Add destination" }).click();
-    await expect(page.getByTestId("revealed-secret")).toHaveText("whsec_NEWSECRETvalue123");
+    await expect(page.getByTestId("revealed-secret")).toHaveText("TESTONLY-not-a-secret-1");
     await expect(page.getByText(/stored encrypted under this deployment's data key/)).toBeVisible();
     await expect(page.getByText(/keeps only a hash/)).toHaveCount(0);
     expect(state.posts).toEqual([{ name: "sentinel", url: "https://sentinel.example.test/in" }]);
@@ -152,6 +158,6 @@ test.describe("ADR-0303: SIEM delivery", () => {
     await page.getByRole("dialog", { name: "Rotate the signing secret of splunk-hec?" }).getByRole("button", { name: "Rotate secret" }).click();
     await confirmStepUp(page);
     await su.expectResentOnce();
-    await expect(page.getByTestId("revealed-secret")).toHaveText("whsec_ROTATEDvalue456");
+    await expect(page.getByTestId("revealed-secret")).toHaveText("TESTONLY-not-a-secret-2");
   });
 });
