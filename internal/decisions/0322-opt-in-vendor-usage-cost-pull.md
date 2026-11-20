@@ -421,7 +421,7 @@ pinned in `@regulait/cloud-discovery` (its THIRD_PARTY row now names this use).
   so an email change updates the same line.
 - **Restatement**: upsert only, re-reading the last two days, as for the other daily vendors. Lines are not withdrawn:
   the vendor drops deleted users from the per-user report, and withdrawing their earlier lines would lose real spend.
-  An `unattributed` line whose remainder later falls to zero keeps its last amount (rare; filed if it matters).
+  An `unattributed` line whose remainder later falls to zero keeps its last amount (rare; triage-low #1115).
 - **No metered overlap**: the gateway does not meter ChatGPT or Codex, so no line is excluded as already metered.
 - **Open source first (ADR-0176)**: the `openai` SDK (6.49.0) has no method for this host. A client generated from the
   vendor's OpenAPI document (`openapi-fetch`, MIT) was compared and not added: it would vendor a 700 KB document and a
