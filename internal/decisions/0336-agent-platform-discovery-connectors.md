@@ -148,10 +148,13 @@ reply, 2026-08), so a GPT's connected apps are what its configured actions name,
      names `scope: unverified` in its binding and its audit row, and the source's API representation carries the same
      `scope: unverified` field, not only a label on each run.
    - The Agentforce JWT signing key is held like every other stored secret: encrypted with the data key, never
-     returned, rotatable. It is bound to one consumer key and one integration user; the assertion lives for the
-     shortest time Salesforce accepts, and its `aud` is pinned to the source's validated My Domain login host. The token
-     endpoint the assertion is posted to is derived from that same validated host, never from configuration or a
-     vendor response, so a signed assertion cannot be sent anywhere else.
+     returned, rotatable. It is bound to one consumer key and one integration user, and the assertion lives for
+     2 minutes (Salesforce allows 3 for clock skew) with a fresh `jti`. **Corrected in slice 2:** Salesforce documents
+     the `aud` as its authorization server, `https://login.salesforce.com` for production or
+     `https://test.salesforce.com` for a sandbox, not the My Domain host, so `aud` follows the source's validated
+     `environment`, and the My Domain host must match that environment. The token endpoint the assertion is POSTed to
+     is derived from the validated My Domain host, never from configuration or a vendor response (the returned
+     `instance_url` is ignored), so a signed assertion cannot be sent anywhere else.
    - **Every adapter enforces a fixed endpoint allow-list in code.** Each adapter's fetch wrapper, on top of the
      guarded fetch, admits only the (method, path template) pairs the adapter declares, and refuses anything else
      before the request leaves:
@@ -159,13 +162,15 @@ reply, 2026-08), so a GPT's connected apps are what its configured actions name,
      - OpenAI: the Compliance API GPT listing endpoint(s) only;
      - Copilot Studio: `GET` on the Dataverse `WhoAmI`, `RetrieveUserPrivileges`, `bots`, `botcomponents` and
        `connectionreferences` paths only;
-     - Agentforce: `GET` on the REST and Tooling `query` paths and on `UserPermissionAccess` only, plus the single
-       token `POST` above.
+     - Agentforce: `GET` on the REST and Tooling `query` paths (and their locator pages) only, plus the single token
+       `POST` above. `UserPermissionAccess` is read through the `query` path.
 
      Against the vendor's API the read credential is used with `GET` only; the one exception is that token exchange.
-     Entra token acquisition for Dataverse stays on the existing ADR-0195 `@azure/identity` path, unchanged. Pagination cursors are
-     passed back as query parameters on an allow-listed path, never followed as URLs (no `nextRecordsUrl`, `next` or
-     `@odata.nextLink` is fetched as given). Each slice's tests assert that any other method or path, and a cursor
+     Entra token acquisition for Dataverse stays on the existing ADR-0195 `@azure/identity` path, unchanged.
+     Pagination cursors are passed back on an allow-listed path, never followed as URLs (no `nextRecordsUrl`, `next`
+     or `@odata.nextLink` is fetched as given): Dataverse's `$skiptoken` as a query parameter on the adapter's own
+     first URL, and Salesforce's query locator, checked against its fixed shape, as the last segment of the adapter's
+     own `query` path. Each slice's tests assert that any other method or path, and a cursor
      that would leave the path, is refused before a request is made. This matters most for the OpenAI and n8n keys,
      whose scope cannot be checked: the allow-list is the control that keeps a possibly broad key on its read
      endpoints, and it also makes "the read credential is never used to write" enforced rather than declared.
@@ -220,6 +225,24 @@ reply, 2026-08), so a GPT's connected apps are what its configured actions name,
 - **Write-scope states:** `DISCOVERY_WRITE_SCOPE_TRANSITIONS`, `nextDiscoveryWriteScope` and
   `discoveryWriteScopeFinal` in `@regulait/shared`, read by the worker and the discovery routes.
 
+## Slice 2 as built
+
+- **Agentforce:** `agent-registry-agentforce.ts`, kind `agent_registry_agentforce`, registry `agentforce`, provider
+  `salesforce`.
+  - **Credential:** static only (Salesforce takes no external OIDC token). The public config is the consumer key and
+    the integration user's name; the secret is the PKCS#8 private key. The JWT bearer helper is `salesforce-jwt.ts`,
+    kept apart so the ADR-0337 Salesforce entitlement reader can reuse it.
+  - **Read-only check:** first on every run, `UserPermissionAccess` (eleven write, escalation and user-management
+    permissions) and then `ObjectPermissions` over the user's permission-set assignments (any object write). Either
+    refuses the credential, and a check that cannot be read means nothing is read.
+  - **Reads:** `BotDefinition`, `BotVersion` (the active version), `GenAiPlannerDefinition` (Tooling, for
+    `LinkedBotVersionId`), `GenAiPluginDefinition` (topics, counted) and `GenAiFunctionDefinition` (actions, staged
+    as `tool` components, linked to their agent through `PlannerId` or their topic). The SOQL is pinned in tests, and
+    no free-text column is selected.
+  - **Run-as user:** staged as a pseudonym only.
+- **Migration:** `pending/vendor_agent_platform_components_agentforce.sql` widens the kind and registry CHECKs. It is
+  named to sort after slice 1's file, which re-creates the same CHECKs.
+
 ## Open-source check (ADR-0176)
 
 Searched 2026-11-16. Reused: `@azure/identity` (MIT, already used for Entra) for Dataverse tokens; `jose` (MIT,
@@ -241,6 +264,21 @@ the RegulAIt-specific part: mapping a vendor's agent shape onto the governed inv
   inside the agent's configuration text, which is never read (decision 4); OpenAI covers ChatGPT custom GPTs only, without connected apps; n8n and OpenAI keys cannot be proven
   read-only and their runs say `unverified`; n8n's community edition keys carry full scope, which the source's docs
   state plainly.
+- **Agentforce read-only check (slice 2, tightened on #1111 review):** `read_only` is recorded only when both checks
+  pass.
+  - The session holds none of the write, escalation or user-management system permissions: `ModifyAllData`,
+    `ModifyMetadata`, `CustomizeApplication`, `AuthorApex`, `ManageUsers`, `AssignPermissionSets`,
+    `ManageProfilesPermissionsets`, `ManageInternalUsers`, `ManageRoles`, `ManageSharing` and `ResetPasswords`.
+  - No permission set assigned to the user (profiles included) grants Create, Edit, Delete or Modify All Records on
+    any object.
+
+  The user is the one the token response's identity URL names. Either check refuses the credential, and a check that
+  cannot be read means nothing is read. The integration user therefore needs View Setup and Configuration, to read
+  the setup objects, plus read access to the agent objects. RSA keys under 2048 bits are refused.
+- **Agentforce known limits (slice 2):** components are the agent's actions only: Salesforce exposes no model name, and an
+  action's connected service is not a separate field. An agent whose planner is not linked through
+  `GenAiPlannerDefinition.LinkedBotVersionId` keeps its stored components, because the read cannot tell "none" from
+  "not found".
 - **Follow-ups (PENDING fragment):** the inventory API for Copilot Studio once it accepts app-only tokens; AgentKit
   Agent Builder once listable; the import and components screens
   (#453).

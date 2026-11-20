@@ -26,6 +26,7 @@ export const REGISTRY_PROVIDER: Readonly<Record<AgentRegistry, string>> = Object
   gemini_enterprise: "google",
   bedrock_agentcore: "aws",
   copilot_studio: "microsoft",
+  agentforce: "salesforce",
 });
 
 export const AGENT_REGISTRY_PAGE_MAX = 200;

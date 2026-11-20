@@ -15,6 +15,7 @@
  */
 import type { DiscoverySourceKind } from "@regulait/shared";
 import { AGENT_REGISTRY_SCANNERS } from "./agent-registry-scanners.js";
+import { AGENTFORCE_ENDPOINTS, AGENTFORCE_SCANNER } from "./agent-registry-agentforce.js";
 import { COPILOT_STUDIO_ENDPOINTS, COPILOT_STUDIO_SCANNER } from "./agent-registry-copilot-studio.js";
 import type { EndpointRule } from "./agent-platform-endpoints.js";
 import type { Scanner } from "./discovery-scanners.js";
@@ -64,6 +65,8 @@ export const AGENT_PLATFORM_ADAPTERS: readonly AgentPlatformAdapter[] = Object.f
   // ADR-0336 slice 1. No action: SetAsQuarantined is documented only for a delegated admin user token (decision 2's
   // open constraint), which ADR-0195's credential model refuses, so E19 decides how, or whether, to close it.
   Object.freeze({ vendor: "microsoft", kind: "agent_registry_copilot_studio", scanner: COPILOT_STUDIO_SCANNER, readEndpoints: COPILOT_STUDIO_ENDPOINTS, governedActions: Object.freeze([]) }),
+  // ADR-0336 slice 2. No action yet: deactivating the active BotVersion is E19's, with its own write credential.
+  Object.freeze({ vendor: "salesforce", kind: "agent_registry_agentforce", scanner: AGENTFORCE_SCANNER, readEndpoints: AGENTFORCE_ENDPOINTS, governedActions: Object.freeze([]) }),
 ]);
 
 export const AGENT_PLATFORM_SCANNERS: readonly Scanner[] = Object.freeze(AGENT_PLATFORM_ADAPTERS.map((a) => a.scanner));

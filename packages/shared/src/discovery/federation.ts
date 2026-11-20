@@ -119,6 +119,10 @@ export function federationUnsupportedReason(kind: string): string | null {
   if (kind === "entitlement_google_workspace" || kind === "entitlement_salesforce" || kind === "entitlement_slack") {
     return "this platform accepts no external OIDC token for a delegated admin read, so a federated credential cannot work; store the read-only key or token in static mode (a relaxation, confirmed with a step-up)";
   }
+  // ADR-0336: Agentforce reads through Salesforce's JWT bearer flow, signed with the connected app's own key
+  if (kind === "agent_registry_agentforce") {
+    return "Salesforce accepts no external OIDC token, so a federated credential cannot work; store the connected app's private key in static mode (a relaxation, confirmed with a step-up)";
+  }
   return null;
 }
 
