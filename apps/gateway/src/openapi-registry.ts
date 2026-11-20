@@ -1133,6 +1133,13 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/discovery/endpoint-addon-removals": "internal",
   "GET /v1/discovery/endpoint-addon-removals/:id": "internal",
   "POST /v1/discovery/endpoint-addon-removals/:id/cancel": "internal",
+  // ADR-0338: governed vendor agent control
+  "POST /v1/vendor-agent-control/actions": "internal",
+  "GET /v1/vendor-agent-control/actions": "internal",
+  "GET /v1/vendor-agent-control/actions/:id": "internal",
+  "POST /v1/vendor-agent-control/actions/:id/execute": "internal",
+  "POST /v1/vendor-agent-control/actions/:id/settle": "internal",
+  "POST /v1/vendor-agent-control/actions/:id/cancel": "internal",
   // ADR-0332 (lane E14): the endpoint AI add-on inventory
   // ADR-0342 (lane E23): process analytics
   "GET /v1/process-analytics/templates": "internal",
@@ -2594,6 +2601,13 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/discovery/endpoint-addon-removals": "shadow-ai",
   "GET /v1/discovery/endpoint-addon-removals/:id": "shadow-ai",
   "POST /v1/discovery/endpoint-addon-removals/:id/cancel": "shadow-ai",
+  // ADR-0338: governed vendor agent control
+  "POST /v1/vendor-agent-control/actions": "shadow-ai",
+  "GET /v1/vendor-agent-control/actions": "shadow-ai",
+  "GET /v1/vendor-agent-control/actions/:id": "shadow-ai",
+  "POST /v1/vendor-agent-control/actions/:id/execute": "shadow-ai",
+  "POST /v1/vendor-agent-control/actions/:id/settle": "shadow-ai",
+  "POST /v1/vendor-agent-control/actions/:id/cancel": "shadow-ai",
   "GET /v1/process-analytics/templates": "reports",
   "GET /v1/process-analytics/stages": "reports",
   "GET /v1/process-analytics/heatmap": "reports",

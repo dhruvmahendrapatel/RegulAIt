@@ -159,6 +159,9 @@ const settingsSchema = z
     googleDirectoryTokens: z.boolean().optional(),
     // ADR-0331: governed removal of flagged MCP servers from endpoints; turning it on is a relaxation
     endpointAddonRemoval: z.boolean().optional(),
+    // ADR-0338: governed vendor agent control; turning it on is a relaxation, and so is a window longer than 24 hours
+    vendorAgentControl: z.boolean().optional(),
+    vendorAgentControlApprovalTtlHours: z.number().int().min(1).max(72).optional(),
   })
   .strict();
 const uuidParam = z.object({ sourceId: z.string().uuid() });
@@ -878,6 +881,12 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
       // ADR-0331: removing flagged MCP servers from employee machines is off until an admin turns it on (step-up); off is free
       const removalAfter = body.endpointAddonRemoval ?? row.endpointAddonRemovalEnabled;
       if (removalAfter && !row.endpointAddonRemovalEnabled) relaxed[DISCOVERY_STEP_UP_KEYS.endpointAddonRemoval] = true;
+      // ADR-0338: disabling, quarantining or restoring agents in vendor platforms is off until an admin turns it on
+      // (step-up); off is free. Its approval window may be shortened freely; lengthening it past 24 hours is a step-up
+      const vacAfter = body.vendorAgentControl ?? row.vendorAgentControlEnabled;
+      if (vacAfter && !row.vendorAgentControlEnabled) relaxed[DISCOVERY_STEP_UP_KEYS.vendorAgentControl] = true;
+      const ttlAfter = body.vendorAgentControlApprovalTtlHours ?? row.vendorAgentControlApprovalTtlHours;
+      if (ttlAfter > row.vendorAgentControlApprovalTtlHours && ttlAfter > 24) relaxed[DISCOVERY_STEP_UP_KEYS.vendorAgentControlTtl] = ttlAfter;
       if (Object.keys(relaxed).length > 0) {
         const r = await spendStepUp(req, { kind: "settings_relax", facts: { values: relaxed } }, null);
         if (r) return r;
@@ -894,6 +903,8 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
           endpointMcpConfigEnabled: mcpAfter,
           googleDirectoryTokensEnabled: gdtAfter,
           endpointAddonRemovalEnabled: removalAfter,
+          vendorAgentControlEnabled: vacAfter,
+          vendorAgentControlApprovalTtlHours: ttlAfter,
           version: row.version + 1,
           updatedBy: actor(req),
           updatedAt: sql`now()`,
@@ -902,8 +913,8 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
       await audit(t, req, "discovery_settings", null, Object.keys(relaxed).length ? "discovery-settings-relaxed" : "discovery-settings-updated", "allow",
         `discovery settings updated${Object.keys(relaxed).length ? " (relaxed, with a step-up)" : ""}`,
         {
-          before: { credentialWarningAgeDays: row.credentialWarningAgeDays, endpointRetentionDays: row.endpointRetentionDays, families: beforeFamilies, endpointMcpConfig: row.endpointMcpConfigEnabled, endpointAddonRemoval: row.endpointAddonRemovalEnabled, googleDirectoryTokens: row.googleDirectoryTokensEnabled },
-          after: { credentialWarningAgeDays: body.credentialWarningAgeDays ?? row.credentialWarningAgeDays, endpointRetentionDays: body.endpointRetentionDays ?? row.endpointRetentionDays, families: afterFamilies, endpointMcpConfig: mcpAfter, endpointAddonRemoval: removalAfter, googleDirectoryTokens: gdtAfter },
+          before: { credentialWarningAgeDays: row.credentialWarningAgeDays, endpointRetentionDays: row.endpointRetentionDays, families: beforeFamilies, endpointMcpConfig: row.endpointMcpConfigEnabled, endpointAddonRemoval: row.endpointAddonRemovalEnabled, googleDirectoryTokens: row.googleDirectoryTokensEnabled, vendorAgentControl: row.vendorAgentControlEnabled, vendorAgentControlApprovalTtlHours: row.vendorAgentControlApprovalTtlHours },
+          after: { credentialWarningAgeDays: body.credentialWarningAgeDays ?? row.credentialWarningAgeDays, endpointRetentionDays: body.endpointRetentionDays ?? row.endpointRetentionDays, families: afterFamilies, endpointMcpConfig: mcpAfter, endpointAddonRemoval: removalAfter, googleDirectoryTokens: gdtAfter, vendorAgentControl: vacAfter, vendorAgentControlApprovalTtlHours: ttlAfter },
         });
       return true;
     });

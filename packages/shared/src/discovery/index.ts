@@ -229,6 +229,10 @@ export const DISCOVERY_STEP_UP_KEYS = Object.freeze({
   googleDirectoryTokens: "discoveryGoogleDirectoryTokens",
   /** ADR-0331: turning on the governed removal of flagged MCP servers from endpoints (signed directives) */
   endpointAddonRemoval: "discoveryEndpointAddonRemoval",
+  /** ADR-0338: turning on governed vendor agent control (disable, quarantine, restore through the vendor admin API) */
+  vendorAgentControl: "discoveryVendorAgentControl",
+  /** ADR-0338 §4: lengthening a vendor agent control approval's window past 24 hours */
+  vendorAgentControlTtl: "discoveryVendorAgentControlApprovalTtl",
 });
 // revealing a pseudonymised name is NOT a settings relaxation: it is the `pseudonym_reveal` step-up kind
 

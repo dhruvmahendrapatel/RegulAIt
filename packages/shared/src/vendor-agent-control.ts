@@ -1,7 +1,8 @@
 /**
  * ADR-0338: governed control of an agent inside its vendor platform (disable, quarantine and restore), the
- * vendor-neutral half: the action lifecycle, the kill-switch guard and the contract a vendor adapter's `control`
- * member implements. No vendor is named here; a vendor offers an action only once its adapter declares one.
+ * vendor-neutral half: the action lifecycle, the kill-switch guard and the vocabulary a vendor adapter's `control`
+ * member speaks (the member's interface is gateway-local). No vendor is named here; a vendor offers an action only once
+ * its adapter declares one.
  */
 import { defineMachine } from "./state-machine.js";
 
@@ -36,32 +37,8 @@ export interface ControlResult {
   readonly httpStatus?: number;
 }
 
-/** The agent to act on, taken only from a discovered registry record: an admin never types a vendor id. */
-export interface VendorAgentRef {
-  readonly recordId: string;
-  readonly sourceId: string;
-  readonly registry: string;
-  readonly externalId: string;
-}
-
-/**
- * Everything a control call may use. The fetch is the tenant's guarded fetch (egress allow-list, SSRF guard); an
- * adapter holds no fetch of its own. The token comes from the source's `platform_write` credential, server side.
- */
-export interface ControlContext {
-  readonly fetch: typeof globalThis.fetch;
-  readonly signal: AbortSignal;
-  readonly token: string;
-}
-
-/** The `control` member of one vendor's adapter (ADR-0338 section 3). */
-export interface VendorAgentControl {
-  readonly actions: readonly VendorAgentControlAction[];
-  /** read the agent's current service state (the vendor's documented read; never lists the inventory) */
-  readState(ctx: ControlContext, ref: VendorAgentRef): Promise<VendorAgentState>;
-  /** apply one action or its inverse; must be idempotent at the vendor */
-  apply(ctx: ControlContext, ref: VendorAgentRef, op: ControlOp): Promise<ControlResult>;
-}
+// The adapter contract itself (`VendorAgentControl`, its context and agent reference) is gateway-local
+// (apps/gateway/src/vendor-agent-control-contract.ts), so the external-effects barrier classifies its writes.
 
 /** the service state an action leaves the agent in, and the one its reverse leaves it in */
 export function targetStateOf(op: ControlOp): VendorAgentServiceState {
