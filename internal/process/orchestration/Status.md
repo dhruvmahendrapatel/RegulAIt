@@ -1,15 +1,15 @@
 # Build status
 
-## Current state (2026-11-19, 23:30 UTC)
+## Current state (2026-11-20, 03:40 UTC)
 
 - **UI-gaps counter is computed (#1067, owner 2026-11-19).** `KNOWN_UI_GAPS_MAX` is no longer hand-set. PRs that add
   routes add their own `KNOWN_UI_GAPS` entries and merge in parallel; the one-at-a-time queue (M-118) is retired. About
   45 open PRs still carry an old MAX edit: each builder merges main and drops it when the PR next comes up.
-- **Rule 15 is lifted for E45, E2, E7, E16 and UI-B** (D-2026-11-19-01, D-2026-11-19-02). Other lanes finish their
-  open PRs first.
+- **Rule 15 is lifted for every idle lane** (D-2026-11-19-01, D-2026-11-19-02, D-2026-11-20-01). New lanes E46-E49
+  are running.
+- **Session cap suspended:** the owner chose to keep lanes running past the 10-session cap (D-2026-11-20-01).
 - **Reviewers:** six pairs, R2 + Xtyd8, R3 + a3BYi, R4 + S4, WaRPg + S3, R5 + S5 and R6 + S6 (D-2026-11-20-01).
-- **Builders:** rule 15 is lifted for every idle lane, and new lanes E46-E49 are running (D-2026-11-20-01). Check-ins run about every 20
-  minutes while the queue is busy.
+  Check-ins run about every 20 minutes while the queue is busy.
 - **Queue:** 67 open PRs, not counting Dependabot's.
 - **Merge loop:** runs from the master's scratchpad and restarts every 7000 s. When the owner enables the merge queue,
   it switches to `gh pr merge --merge --auto`.
