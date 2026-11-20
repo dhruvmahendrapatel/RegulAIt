@@ -180,6 +180,8 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   // ADR-0314: a vendor agent registry's own name and description for an agent, read-only and bounded at staging
   "agent_registry_records.description": "ingested",
   "agent_registry_records.display_name": "ingested",
+  // ADR-0336: a staged agent's component name (a knowledge source, a skill, a connector) as the vendor reports it
+  "agent_registry_record_components.display_name": "ingested",
   // ADR-0261: an event identifier the sending product chose (a linear lower-case identifier check bounds it)
   "third_party_ingest_records.event_name": "ingested",
   // ADR-0337: an app's display name and a scope name as the SaaS vendor reports them (read-only entitlement reads)

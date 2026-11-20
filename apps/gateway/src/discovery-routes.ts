@@ -84,6 +84,7 @@ import {
   scopeWidens,
   DISCOVERY_GATED_FAMILIES,
   familySwitchProblem,
+  discoveryWriteScopeFinal,
 } from "@regulait/shared";
 import { checkStepUp, isStepUpPrompt, type StepUpCheckArgs } from "./step-up.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
@@ -577,7 +578,7 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
       if (scanner.requiresCredential && !enableCred) {
         return refusal(409, "credential_missing", "store a credential for this source before enabling it");
       }
-      if (enableCred?.writeScope === "refused") {
+      if (enableCred && discoveryWriteScopeFinal(enableCred.writeScope)) {
         return refusal(409, "credential_refused", "this source's credential grants write access and is refused; replace it with a read-only credential first");
       }
       const r = await spendStepUp(req, enableStepUpArgs(s.id, s.kind, s.target, s.scope, enableCred?.id ?? null), s.id);
@@ -770,7 +771,7 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
     if (scanner.requiresCredential && !runCred) {
       return send(reply, refusal(409, "credential_missing", "store a credential for this source first"));
     }
-    if (runCred?.writeScope === "refused") {
+    if (runCred && discoveryWriteScopeFinal(runCred.writeScope)) {
       return send(reply, refusal(409, "credential_refused", "this source's credential grants write access and is refused; replace it first"));
     }
     const [run] = await db

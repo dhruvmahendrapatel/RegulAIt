@@ -172,8 +172,9 @@ reply, 2026-08), so a GPT's connected apps are what its configured actions name,
    - The OpenAI source's documentation states plainly how broad a Compliance API key is (it reaches workspace data
      well beyond the GPT listing), so the admin who accepts the `scope: unverified` relaxation knows what is stored.
 
-6. **Targets are named, never guessed, and shape-checked.** Copilot Studio takes a list of Dataverse org URLs
-   (`https://<org>.crm[N].dynamics.com`, plus the sovereign suffixes, each validated); Agentforce a My Domain URL on a
+6. **Targets are named, never guessed, and shape-checked.** Copilot Studio takes a list of 1 to 20 Dataverse org
+   URLs (`https://<org>.crm[N].dynamics.com`, each validated; as built in slice 1, a sovereign-cloud host is refused,
+   because its Entra authority differs from the one the existing `@azure/identity` path uses); Agentforce a My Domain URL on a
    Salesforce host and a pinned API version (default 67.0); OpenAI a workspace id; n8n a base URL. A self-hosted n8n on
    a private address is reachable only through the guarded fetch's existing egress allow-list; this ADR adds no SSRF
    exception. Each adapter's `validateTarget` refuses anything else before a write.
@@ -200,6 +201,25 @@ reply, 2026-08), so a GPT's connected apps are what its configured actions name,
 3. The OpenAI and n8n adapters.
 4. Plaintext-secret findings in imported agent configurations (decision 4), across all four adapters.
 
+## Slice 1 as built
+
+- **Adapter contract:** `apps/gateway/src/agent-platform-adapters.ts`. `AGENT_PLATFORM_ADAPTERS` wraps #855's three
+  registry scanners (`governedActions: []`, `readEndpoints: null`, since they reach fixed hosts through ADR-0314's
+  helpers) and adds Copilot Studio. The `agent_registry` scanners in `DISCOVERY_SCANNERS` are built from that list.
+- **Endpoint allow-list:** `allowListedFetch` (`agent-platform-endpoints.ts`) refuses any other method, origin or
+  path, or any userinfo, before the request leaves. A refusal is recorded as a `denied` read outcome.
+- **Copilot Studio:** `agent-registry-copilot-studio.ts`. `WhoAmI` and `RetrieveUserPrivileges` run on every run;
+  any privilege that is not `prvRead*` refuses the credential. The credential is `read_only` only when every
+  environment's privileges were listed and all of them are reads. The columns read are pinned in tests. Dataverse
+  paging passes `$skiptoken` back on the adapter's own URL; a next link to another origin or path ends the listing,
+  which then reads as partial.
+- **Components:** `agent_registry_record_components`, migration `pending/vendor_agent_platform_components.sql`.
+  The file is named to sort after `agent_registry_records.sql` and `saas_entitlement_graph.sql`, because pending
+  files are applied and numbered in byte order and the latter re-creates the kind CHECKs. RLS is forced. The table is
+  shown on `GET /v1/agent-registry/records/:id`, so no new route is added, and its count is on the import audit row.
+- **Write-scope states:** `DISCOVERY_WRITE_SCOPE_TRANSITIONS`, `nextDiscoveryWriteScope` and
+  `discoveryWriteScopeFinal` in `@regulait/shared`, read by the worker and the discovery routes.
+
 ## Open-source check (ADR-0176)
 
 Searched 2026-11-16. Reused: `@azure/identity` (MIT, already used for Entra) for Dataverse tokens; `jose` (MIT,
@@ -216,7 +236,9 @@ the RegulAIt-specific part: mapping a vendor's agent shape onto the governed inv
   posture, risk and least-privilege work (gaps 2, 4 and 5) can join on.
 - Lane E19 gets a single place per vendor to add disable and quarantine, with the credential split already fixed.
 - **Known limits:** Copilot Studio needs one application user per environment and does not see classic (V1)
-  chatbots; OpenAI covers ChatGPT custom GPTs only, without connected apps; n8n and OpenAI keys cannot be proven
+  chatbots; its components are knowledge sources (`botcomponent` types 14 and 16), skills (types 1 and 13) and the
+  connectors behind its connection references, and no model or MCP-server row, because Dataverse states those only
+  inside the agent's configuration text, which is never read (decision 4); OpenAI covers ChatGPT custom GPTs only, without connected apps; n8n and OpenAI keys cannot be proven
   read-only and their runs say `unverified`; n8n's community edition keys carry full scope, which the source's docs
   state plainly.
 - **Follow-ups (PENDING fragment):** the inventory API for Copilot Studio once it accepts app-only tokens; AgentKit
