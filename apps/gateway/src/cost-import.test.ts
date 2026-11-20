@@ -31,6 +31,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  and,
   auditLog,
   costImportBatches,
   createDb,
@@ -450,7 +451,11 @@ describe("applying an import", () => {
     await db.delete(costImportBatches).where(eq(costImportBatches.id, again.json().importId));
     await db.delete(costImportBatches).where(eq(costImportBatches.id, id));
 
-    const revokedAudit = await db.select().from(auditLog).where(eq(auditLog.ruleId, COST_IMPORT_RULE_IDS.importRevoked));
+    // scoped to this test's batch: other suites on the shared database revoke batches of their own (ADR-0322's pull suite does)
+    const revokedAudit = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.ruleId, COST_IMPORT_RULE_IDS.importRevoked), eq(auditLog.objectId, id)));
     expect(revokedAudit.length).toBe(1);
     expect(revokedAudit[0]!.reason).toContain("wrong file");
   });

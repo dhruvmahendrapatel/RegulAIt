@@ -1950,3 +1950,44 @@ and the file was restored and re-edited.
 Rule: never rename by a repo-wide or file-wide string replace in a shared file (`schema.ts`, `_journal.json`, `app.ts`,
 STATE.md). Count the occurrences in each file first (`grep -c` on `HEAD`'s version); if any exist that the change did not
 add, edit the new block only, then check that `git diff` shows no `-` line outside it.
+
+### M-115 (2026-11-18) - A PR was marked ready for review before it had any approval
+
+On #1004 (master-authored) the master posted READY and also called the ready-for-review route straight away. Marking a
+PR ready is half of "release" in this process. No harm followed, because the merge loop merges only what is listed in
+released.txt, but the PR looked released to anyone reading GitHub.
+
+Rule: a master-authored PR stays a draft until both verdicts are posted at its head. Mark it ready only together with
+the released.txt line.
+
+### M-116 (2026-11-18) - Container restarts silently stopped the merge loop three times
+
+The merge loop runs as a background task in the master's container. Restarts at about 19:00, 01:10, 03:54 and 05:40
+killed it. Once (19:00-22:00) nothing merged for three hours, and a READY (#941) went unrouted.
+
+Rule: on every wake, check `pgrep -fa merge-loop.sh` first and restart the loop if it is gone. Keep the hand-over state
+in the repo (internal/process/orchestration/), not only in the scratchpad.
+
+### M-117 (2026-11-18) - REPEAT: a doc cited an ADR that is only on an open PR
+
+#1011 cited lane E45's ADR by number while it is still only on #1010, and `scripts/adr-index.test.mjs` failed after the push. The same mistake
+happened on 2026-11-17 with two other lane ADRs. The test was run, but the failure was not read before pushing (the
+commit was chained in the same command).
+
+Rule: cite an unmerged ADR by its PR number and lane, never by its ADR number. Run the adr-index test as its own step, and
+push only after it prints all passed; never chain the push into the same command as the test.
+
+### M-118 (2026-11-18) - Six PRs that all edit one counter were released at once
+
+At 13:13 the master released #903, #744, #848, #855, #902 and #883 together. Each one edits `KNOWN_UI_GAPS_MAX` in
+`scripts/preflight-ui-route-census.mjs` and its test pin. #903 merged first, and the other five conflicted at once. Each
+then needed a main merge, a full CI run and a delta review, so five approved PRs lost about four hours.
+
+Rule: before releasing a batch, run `git diff --name-only origin/main...origin/<branch>` for each PR and look for a
+shared hand-edited file (the census counter, a journal, an index). Release only one PR that edits such a file at a time;
+release the next after the previous one merges and its builder has merged main. PRs that do not touch the file can be
+released in parallel.
+
+Superseded by the computed counter (2026-11-19, ADR-0252 addendum): `KNOWN_UI_GAPS_MAX` and its pin are gone, and each
+ADR and lane's gaps are a file of their own in `scripts/known-ui-gaps/`, so census PRs no longer share a line. The rule
+still holds for any other shared hand-edited file.
