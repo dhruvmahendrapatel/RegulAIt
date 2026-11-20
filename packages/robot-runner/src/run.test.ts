@@ -125,6 +125,21 @@ describe("runRobot (the sandbox side of the gateway channel)", () => {
     }
   });
 
+  it("N7: launches the image's baked headless shell from ROBOT_CHROMIUM (the init passes it from the image's ENV)", async () => {
+    const shell = "/ms-playwright/chromium_headless_shell-1255/chrome-headless-shell-linux64/chrome-headless-shell";
+    for (const [e, want] of [
+      [env({ ROBOT_CHROMIUM: shell }), shell],
+      [env(), undefined],
+    ] as const) {
+      const p = makePlan([{ op: "goto", url: "https://app.example.com/" }]);
+      const h = harness(p.plan);
+      let launched: LaunchOptions | null = null;
+      await runRobot({ env: e, stdout: h.stdout, stdin: h.stdin, readRunKey: () => p.runKey, launch: async (o) => ((launched = o), { page: new FakePage(), close: async () => undefined }), log: () => undefined });
+      expect(launched).not.toBeNull();
+      expect(launched!.executablePath).toBe(want);
+    }
+  });
+
   it("a plan that cannot be read: runner_error result, no browser", async () => {
     const h = harness(null);
     let launched = false;

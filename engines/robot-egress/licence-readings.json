@@ -1,7 +1,7 @@
 [
   {
     "module": "github.com/stripe/smokescreen",
-    "version": "(main)",
+    "version": "v0.1.0",
     "licence": "MIT",
     "file": "LICENSE.txt",
     "sha256": "87f4c6e8082dfe39d705be46f91dd329cfca135cbabff1ebdd278e934b9964ea",

@@ -271,6 +271,8 @@ describe("selection: an L1 executor never holds an L2 or L3 attestation", () => 
 /** the docker seam: run the real sandbox init on this host in place of the container */
 function hostInit(calls: string[][]) {
   return (args: string[]): DockerChild => {
+    // the first preflight's reconciler listings (tested in robot-egress.test.ts): empty, and not recorded here
+    if (args[0] === "ps" || (args[0] === "network" && args[1] === "ls")) return spawn(process.execPath, ["-e", ""], { stdio: ["pipe", "pipe", "pipe"] }) as DockerChild;
     calls.push(args);
     if (args[0] === "run") return spawn(process.execPath, [INIT, ...(args.at(-1) === "--canary" ? ["--canary"] : [])], { stdio: ["pipe", "pipe", "pipe"] }) as DockerChild;
     return spawn(process.execPath, ["-e", ""], { stdio: ["pipe", "pipe", "pipe"] }) as DockerChild;

@@ -48,6 +48,12 @@ const DNS_HOST = "example.com";
 /** names and shapes of credentials an executor, runner or gateway would hold (never their values) */
 const CREDENTIAL_NAME = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|DATABASE_URL|DOCKER_HOST|^REGULAIT_)/i;
 const CREDENTIAL_VALUE = /(^rge_|^pdp_|-----BEGIN [A-Z ]*PRIVATE KEY-----|^eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.)/;
+/**
+ * N7: the robot runner image's browser location, the ONLY values a robot run's workload takes from the image's own
+ * environment (each an absolute path; never a `REGULAIT_` name, which the credential scan above would count); plus
+ * PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD, passed only as "1"
+ */
+const ROBOT_IMAGE_ENV = ["PLAYWRIGHT_BROWSERS_PATH", "ROBOT_CHROMIUM"];
 /** paths that would hand the sandbox the executor's runtime or key */
 const CREDENTIAL_PATHS = ["/var/run/docker.sock", "/run/docker.sock", "/run/containerd/containerd.sock", "/state", "/root/.docker", "/run/secrets", "/etc/regulait"];
 
@@ -239,7 +245,7 @@ async function main() {
   if (secret !== undefined && (typeof secret !== "string" || !/^[\x21-\x7e]{1,1024}$/.test(secret))) process.exit(4);
   release.secret = undefined;
   // ADR-0364 S3: a robot run's per-run egress proxy (the sandbox's only peer), named by the executor on this line:
-  // http, an IPv4 literal and a port, nothing else; it is the one variable the workload gets beyond PATH and HOME
+  // http, an IPv4 literal and a port, nothing else (with the run id and the browser location below, all the workload gets beyond PATH and HOME)
   const egressProxy = release.egressProxy;
   if (egressProxy !== undefined && (typeof egressProxy !== "string" || !/^http:\/\/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{1,5}$/.test(egressProxy))) process.exit(4);
   // with it, the run the robot runner reads its plan for (a uuid); both or neither
@@ -252,6 +258,14 @@ async function main() {
   if (egressProxy !== undefined) {
     env.REGULAIT_ROBOT_EGRESS_PROXY = egressProxy;
     env.REGULAIT_ROBOT_RUN_ID = robotRunId;
+    // N7: a robot run's browser location, from the IMAGE's own environment (its ENV; the executor passes none in), by a
+    // fixed allow-list and only as absolute paths of plain segments; anything else is not passed (the runner then finds
+    // no browser and fails closed)
+    for (const name of ROBOT_IMAGE_ENV) {
+      const v = process.env[name];
+      if (typeof v === "string" && v.length <= 512 && /^\/[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/.test(v) && !v.split("/").includes("..")) env[name] = v;
+    }
+    if (process.env.PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD === "1") env.PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
   }
   const child = spawn(command, args, {
     stdio: secret === undefined ? "inherit" : ["inherit", "inherit", "inherit", "pipe"],

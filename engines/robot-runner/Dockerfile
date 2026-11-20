@@ -67,12 +67,15 @@ RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack 
            /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 COPY --from=browser /ms-playwright /ms-playwright
 RUN mkdir -p /work && chown 10001:10001 /work && chmod 0700 /work
+# N7: the sandbox init gives the workload only PATH, HOME, the run's proxy and run id, and from this ENV exactly
+# PLAYWRIGHT_BROWSERS_PATH, ROBOT_CHROMIUM (absolute paths) and PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1. No `REGULAIT_` name is
+# set here: the init's credential scan counts every one in its environment (the runner's work directory is /work, its
+# default, the profile's tmpfs).
 ENV NODE_ENV=production \
     HOME=/work \
-    REGULAIT_WORK_DIR=/work \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
-    REGULAIT_ROBOT_CHROMIUM=/ms-playwright/chromium_headless_shell-1255/chrome-headless-shell-linux64/chrome-headless-shell
+    ROBOT_CHROMIUM=/ms-playwright/chromium_headless_shell-1255/chrome-headless-shell-linux64/chrome-headless-shell
 USER 10001:10001
 WORKDIR /work
 CMD ["node", "/app/dist/main.js"]

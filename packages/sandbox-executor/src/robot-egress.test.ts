@@ -11,19 +11,24 @@
  *  - cleanup: the sandbox, the proxy (its log read first) and the network are removed, and the ACL deleted, on
  *    success, on a failed start and on a kill; the egress log is the handle's evidence;
  *  - an egress on any other kind, or a robot offer without one, is refused.
- * A real Docker run (Smokescreen in its image, gVisor's netstack on an internal network) is NOT VERIFIED here (M-041).
+ * A real Docker run: robot-egress.integration.test.ts (runc; gVisor's netstack there is NOT VERIFIED, M-041).
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, existsSync, readFileSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { SHIPPED_EXECUTION_PROFILES, smokescreenAclForTargets, type ExecutionOffer, type ExecutionProfileBody } from "@regulait/shared";
 import {
+  BRIDGE_INHIBIT_IPV4,
   DockerBackendError,
+  capEgressBytes,
   dockerRunArgs,
+  egressLogMarker,
   egressNetworkCreateArgs,
+  egressNetworkProblem,
+  egressPortsFile,
   egressProxyAddress,
   isPinnedImageRef,
   proxyRunArgs,
@@ -83,13 +88,54 @@ describe("the pure builders", () => {
     expect(valuesAfter(args, "--env").every((e) => e.endsWith("="))).toBe(true);
   });
 
-  it("the run's network is internal", () => {
-    expect(egressNetworkCreateArgs(NET)).toEqual(["network", "create", "--internal", "--driver", "bridge", "--label", "org.regulait.sandbox=1", NET]);
+  it("the run's network is internal, IPv4 only, and gives the host no address on it (code review 2)", () => {
+    expect(egressNetworkCreateArgs(NET)).toEqual([
+      "network",
+      "create",
+      "--internal",
+      "--driver",
+      "bridge",
+      "--ipv6=false",
+      "--opt",
+      "com.docker.network.bridge.inhibit_ipv4=true",
+      "--label",
+      "org.regulait.sandbox=1",
+      NET,
+    ]);
     expect(() => egressNetworkCreateArgs("bridge")).toThrow();
+  });
+
+  it("the network as the daemon made it is checked before the proxy starts", () => {
+    const good = { Internal: true, EnableIPv6: false, Options: { [BRIDGE_INHIBIT_IPV4]: "true" }, IPAM: { Config: [{ Subnet: "172.30.5.0/24" }] } };
+    expect(egressNetworkProblem(good)).toBeNull();
+    expect(egressNetworkProblem({ ...good, Internal: false })).toMatch(/not internal/);
+    expect(egressNetworkProblem({ ...good, EnableIPv6: true })).toMatch(/IPv6/);
+    expect(egressNetworkProblem({ ...good, EnableIPv6: undefined })).toMatch(/IPv6/);
+    expect(egressNetworkProblem({ ...good, Options: {} })).toMatch(/inhibit_ipv4/);
+    expect(egressNetworkProblem({ ...good, Options: null })).toMatch(/inhibit_ipv4/);
+    expect(egressNetworkProblem({ ...good, IPAM: { Config: [{ Subnet: "172.30.5.0/24", Gateway: "172.30.5.1" }] } })).toMatch(/gateway/);
+    expect(egressNetworkProblem({ ...good, IPAM: { Config: [{ Subnet: "172.30.5.0/24" }, { Subnet: "fd00:1::/64" }] } })).toMatch(/IPv6 subnet/);
+    expect(egressNetworkProblem(null)).not.toBeNull();
+  });
+
+  it("the ports file names exactly the offer's host:port targets (Security B3)", () => {
+    expect(egressPortsFile(TARGETS)).toBe("files.example.com:8443\nportal.example.com:443\n");
+    expect(egressPortsFile([...TARGETS, TARGETS[0]!])).toBe("files.example.com:8443\nportal.example.com:443\n");
+    expect(() => egressPortsFile([])).toThrow(DockerBackendError);
+    for (const bad of [{ host: "10.0.0.1", port: 443 }, { host: "Portal.example.com", port: 443 }, { host: "portal.example.com", port: 0 }, { host: "a.example.com\nb.example.com", port: 443 }]) {
+      expect(() => egressPortsFile([bad]), JSON.stringify(bad)).toThrow(DockerBackendError);
+    }
   });
 
   it("the proxy gets the ACL read-only, the per-run flags, an empty proxy environment, and never root", () => {
     const args = proxyRunArgs({ name: PROXY, image: EGRESS_IMAGE, network: NET, ip: "172.30.5.2", aclVolume: "regulait-acl", aclSubpath: SANDBOX, user: "65532:65532" });
+    // item 17: an explicit runtime and Docker's default seccomp profile, named
+    expect(valueAfter(args, "--runtime")).toBe("runc");
+    expect(valuesAfter(args, "--security-opt")).toEqual(["no-new-privileges=true", "seccomp=builtin"]);
+    // not --rm: the log is read before the proxy is removed
+    expect(args).not.toContain("--rm");
+    expect(valueAfter(proxyRunArgs({ name: PROXY, image: EGRESS_IMAGE, network: NET, ip: "172.30.5.2", aclVolume: "regulait-acl", aclSubpath: SANDBOX, user: "1:1", runtime: "runsc-proxy" }), "--runtime")).toBe("runsc-proxy");
+    expect(() => proxyRunArgs({ name: PROXY, image: EGRESS_IMAGE, network: NET, ip: "172.30.5.2", aclVolume: "regulait-acl", aclSubpath: SANDBOX, user: "1:1", runtime: "--privileged" })).toThrow(/runtime/);
     expect(valueAfter(args, "--network")).toBe(NET);
     expect(valueAfter(args, "--ip")).toBe("172.30.5.2");
     expect(valueAfter(args, "--pull")).toBe("never");
@@ -129,41 +175,77 @@ interface Rig {
   aclDir: string;
   /** what the ACL file held, and its mode, when the proxy was started */
   aclAtStart: { text: string; mode: number } | null;
+  /** what the ports file held, and its mode, when the proxy was started */
+  portsAtStart: { text: string; mode: number } | null;
+}
+
+/** the image ENV the robot runner image sets (engines/robot-runner/Dockerfile), plus values the init must NOT pass on */
+const IMAGE_ENV = {
+  PLAYWRIGHT_BROWSERS_PATH: "/ms-playwright",
+  ROBOT_CHROMIUM: "/ms-playwright/chromium_headless_shell-1255/chrome-headless-shell-linux64/chrome-headless-shell",
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1",
+  LEAK_ME: "image-only",
+  NODE_ENV: "production",
+};
+
+interface SeamOptions {
+  proxyFails?: boolean;
+  sandboxSilent?: boolean;
+  /** the sandbox init's own environment (the image's ENV); default the test process's plus IMAGE_ENV */
+  initEnv?: NodeJS.ProcessEnv;
+  /** `docker ps` / `docker network ls` output for the reconciler */
+  ps?: string;
+  networks?: string;
+  /** a script whose stdout is `docker logs` */
+  logsScript?: string;
+  /** a docker verb that never exits (the timeout) */
+  hang?: string;
 }
 
 /** the docker seam: the real init for the sandbox's `docker run`, no-ops (or the configured failures) for the rest */
-function seam(rig: Rig, opts: { proxyFails?: boolean; sandboxSilent?: boolean } = {}) {
+function seam(rig: Rig, opts: SeamOptions = {}) {
   let sandbox: ChildProcess | null = null;
   return (args: string[]): DockerChild => {
     rig.calls.push(args);
     const noop = (code = 0, out = "") => spawn(process.execPath, ["-e", `process.stdout.write(${JSON.stringify(out)}); process.exit(${code})`], { stdio: ["pipe", "pipe", "pipe"] }) as DockerChild;
+    if (opts.hang && (args[0] === opts.hang || `${args[0]} ${args[1]}` === opts.hang)) return spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: ["pipe", "pipe", "pipe"] }) as DockerChild;
     if (args[0] === "run" && args[1] === "-d") {
       const mount = valueAfter(args, "--mount")!;
       const sub = /volume-subpath=([^,]+)$/.exec(mount)![1]!;
       const file = path.join(rig.aclDir, sub, "acl.yaml");
       rig.aclAtStart = { text: readFileSync(file, "utf8"), mode: statSync(file).mode & 0o777 };
+      const ports = path.join(rig.aclDir, sub, "ports.txt");
+      rig.portsAtStart = { text: readFileSync(ports, "utf8"), mode: statSync(ports).mode & 0o777 };
       return noop(opts.proxyFails ? 1 : 0, "proxy-id\n");
     }
     if (args[0] === "run") {
+      const env = opts.initEnv ?? { ...process.env, ...IMAGE_ENV };
       sandbox = opts.sandboxSilent
         ? spawn(process.execPath, ["-e", "process.exit(1)"], { stdio: ["pipe", "pipe", "pipe"] })
-        : spawn(process.execPath, [INIT, ...(args.at(-1) === "--canary" ? ["--canary"] : [])], { stdio: ["pipe", "pipe", "pipe"] });
+        : spawn(process.execPath, [INIT, ...(args.at(-1) === "--canary" ? ["--canary"] : [])], { stdio: ["pipe", "pipe", "pipe"], env });
       return sandbox as DockerChild;
     }
     if (args[0] === "kill") sandbox?.kill("SIGKILL");
-    if (args[0] === "logs") return noop(0, '{"allow":true,"requested_hostport":"portal.example.com:443","msg":"CANONICAL-PROXY-DECISION"}\n');
+    if (args[0] === "logs") {
+      if (opts.logsScript) return spawn(process.execPath, ["-e", opts.logsScript], { stdio: ["pipe", "pipe", "pipe"] }) as DockerChild;
+      return noop(0, '{"allow":true,"requested_hostport":"portal.example.com:443","msg":"CANONICAL-PROXY-DECISION"}\n');
+    }
+    if (args[0] === "ps") return noop(0, opts.ps ?? "");
+    if (args[0] === "network" && args[1] === "ls") return noop(0, opts.networks ?? "");
     return noop();
   };
 }
+const GOOD_NET = { Internal: true, EnableIPv6: false, Options: { "com.docker.network.bridge.inhibit_ipv4": "true" }, IPAM: { Config: [{ Subnet: "172.30.5.0/24" }] } };
+let netAnswer: unknown = GOOD_NET;
 const api = (rig: Rig) => async (p: string) => {
   if (p === "/info") return RUNC_INFO;
-  if (p.startsWith("/networks/")) return { Internal: true, IPAM: { Config: [{ Subnet: "172.30.5.0/24" }] } };
+  if (p.startsWith("/networks/")) return netAnswer;
   if (p.startsWith("/containers/regulait-egp-")) return { State: { Running: true } };
   const run = rig.calls.find((c) => c[0] === "run" && c[1] !== "-d");
   if (p.endsWith("/json")) return { Image: IMAGE, HostConfig: { Runtime: "runc", NetworkMode: run ? valueAfter(run, "--network") : "none" }, State: { OOMKilled: false } };
   return { cpu_stats: { throttling_data: { throttled_periods: 0 } } };
 };
-function runc(rig: Rig, opts: Parameters<typeof seam>[1] & { egressImage?: string | null } = {}) {
+function runc(rig: Rig, opts: SeamOptions & { egressImage?: string | null; dockerTimeoutMs?: number } = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), "regulait-robot-"));
   return new RuncDockerBackend({
     runtimeName: "runc",
@@ -179,12 +261,18 @@ function runc(rig: Rig, opts: Parameters<typeof seam>[1] & { egressImage?: strin
     egressAclVolume: "regulait-acl",
     egressUplinkNetwork: "regulait-uplink",
     egressRuntimeName: null,
+    reconcileIntervalMs: 0,
+    ...(opts.dockerTimeoutMs !== undefined ? { dockerTimeoutMs: opts.dockerTimeoutMs } : {}),
     spawnDocker: seam(rig, opts),
     dockerApi: api(rig),
   });
 }
-const newRig = (): Rig => ({ calls: [], aclDir: mkdtempSync(path.join(tmpdir(), "regulait-acl-")), aclAtStart: null });
-const verbs = (calls: string[][]) => calls.map((c) => (c[0] === "network" ? `network ${c[1]}` : c[0] === "run" && c[1] === "-d" ? "run proxy" : c[0] === "run" ? "run sandbox" : c[0]!));
+const newRig = (): Rig => ({ calls: [], aclDir: mkdtempSync(path.join(tmpdir(), "regulait-acl-")), aclAtStart: null, portsAtStart: null });
+/** a run's docker calls in order, without the first preflight's reconciler listings (`ps`, `network ls`) */
+const verbs = (calls: string[][]) =>
+  calls
+    .filter((c) => c[0] !== "ps" && !(c[0] === "network" && c[1] === "ls"))
+    .map((c) => (c[0] === "network" ? `network ${c[1]}` : c[0] === "run" && c[1] === "-d" ? "run proxy" : c[0] === "run" ? "run sandbox" : c[0]!));
 const removedAll = (calls: string[][], name: string, net: string, proxy: string) => {
   expect(calls.some((c) => c[0] === "rm" && c.includes(name)), "sandbox removed").toBe(true);
   expect(calls.some((c) => c[0] === "rm" && c.includes(proxy)), "proxy removed").toBe(true);
@@ -201,23 +289,32 @@ describe("a robot run on the runc backend (the real init in place of docker run)
     const net = valueAfter(sandboxRun, "--network")!;
     const proxy = net.replace("regulait-egn-", "regulait-egp-");
     expect(verbs(rig.calls)).toEqual(["network create", "run proxy", "network connect", "run sandbox"]);
-    expect(rig.calls[0]).toEqual(egressNetworkCreateArgs(net));
+    const run = rig.calls.filter((c) => c[0] !== "ps" && !(c[0] === "network" && c[1] === "ls"));
+    expect(run[0]).toEqual(egressNetworkCreateArgs(net));
     // the proxy alone joins the uplink
-    expect(rig.calls[2]).toEqual(["network", "connect", "regulait-uplink", proxy]);
+    expect(run[2]).toEqual(["network", "connect", "regulait-uplink", proxy]);
     expect(valuesAfter(sandboxRun, "--network")).toEqual([net]);
     // the ACL: generated from the offer's targets in the one place, written 0600
     expect(rig.aclAtStart).toEqual({ text: smokescreenAclForTargets(TARGETS), mode: 0o600 });
-    const proxyRun = rig.calls[1]!;
+    // Security B3: the ports file beside it, the same mode, from the same targets
+    expect(rig.portsAtStart).toEqual({ text: "files.example.com:8443\nportal.example.com:443\n", mode: 0o600 });
+    const proxyRun = run[1]!;
     expect(proxyRun.slice(-6)).toEqual(["--egress-acl-file", "/etc/regulait-egress/acl.yaml", "--listen-ip", "172.30.5.2", "--listen-port", "4750"]);
     expect(valueAfter(proxyRun, "--user")).not.toMatch(/^0:/);
-    // the workload (a host node here) sees exactly the proxy and the run id the init put in its environment
-    await h.releaseInput({ command: process.execPath, args: ["-e", "console.log(JSON.stringify({p: process.env.REGULAIT_ROBOT_EGRESS_PROXY, r: process.env.REGULAIT_ROBOT_RUN_ID, n: Object.keys(process.env).sort()}))"] });
+    // the workload (a host node here) sees exactly the proxy and the run id the init put in its environment, and (N7)
+    // the browser location from the image's ENV by the init's allow-list; nothing else of the image's ENV
+    await h.releaseInput({ command: process.execPath, args: ["-e", "console.log(JSON.stringify({p: process.env.REGULAIT_ROBOT_EGRESS_PROXY, r: process.env.REGULAIT_ROBOT_RUN_ID, e: process.env, n: Object.keys(process.env).sort()}))"] });
     const seen: string[] = [];
     for await (const l of h.stdio!.lines()) seen.push(l);
-    const env = JSON.parse(seen.at(-1)!) as { p: string; r: string; n: string[] };
+    const env = JSON.parse(seen.at(-1)!) as { p: string; r: string; e: Record<string, string>; n: string[] };
     expect(env.p).toBe("http://172.30.5.2:4750");
     expect(env.r).toBe(RUN_ID);
-    expect(env.n.filter((k) => !["PATH", "HOME", "REGULAIT_ROBOT_EGRESS_PROXY", "REGULAIT_ROBOT_RUN_ID"].includes(k) && !k.startsWith("NODE") && k !== "PWD" && k !== "SHLVL" && k !== "_")).toEqual([]);
+    expect(env.e.PLAYWRIGHT_BROWSERS_PATH).toBe(IMAGE_ENV.PLAYWRIGHT_BROWSERS_PATH);
+    expect(env.e.ROBOT_CHROMIUM).toBe(IMAGE_ENV.ROBOT_CHROMIUM);
+    expect(env.e.PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD).toBe("1");
+    expect(env.e.LEAK_ME).toBeUndefined();
+    expect(env.e.NODE_ENV).toBeUndefined();
+    expect(env.n.filter((k) => !["PATH", "HOME", "REGULAIT_ROBOT_EGRESS_PROXY", "REGULAIT_ROBOT_RUN_ID", "PLAYWRIGHT_BROWSERS_PATH", "ROBOT_CHROMIUM", "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD"].includes(k) && k !== "PWD" && k !== "SHLVL" && k !== "_")).toEqual([]);
     expect(await h.ended).toBe("completed");
     removedAll(rig.calls, sandboxRun[sandboxRun.indexOf("--name") + 1]!, net, proxy);
     // the log was read before the proxy was removed, and is the handle's evidence
@@ -254,7 +351,7 @@ describe("a robot run on the runc backend (the real init in place of docker run)
     await expect(runc(rig, { proxyFails: true }).start(offer, ROBOT_L1, "hardened_container")).rejects.toThrow(/egress proxy did not start/);
     expect(rig.calls.some((c) => c[0] === "run" && c[1] !== "-d"), "no sandbox started").toBe(false);
     expect(verbs(rig.calls)).toEqual(["network create", "run proxy", "logs", "rm", "network rm"]);
-    const net = rig.calls[0]!.at(-1)!;
+    const net = rig.calls.find((c) => c[0] === "network" && c[1] === "create")!.at(-1)!;
     expect(rig.calls.at(-1)).toEqual(["network", "rm", net]);
   });
 
@@ -288,9 +385,125 @@ describe("a robot run on the runc backend (the real init in place of docker run)
     await h.ended;
     expect(verbs(rig.calls).slice(0, 2)).toEqual(["network create", "run sandbox"]);
     expect(rig.calls.some((c) => c[0] === "run" && c[1] === "-d")).toBe(false);
-    const net = rig.calls[0]!.at(-1)!;
+    const net = rig.calls.find((c) => c[0] === "network" && c[1] === "create")!.at(-1)!;
     expect(rig.calls.some((c) => c[0] === "network" && c[1] === "rm" && c[2] === net)).toBe(true);
   }, 30_000);
+});
+
+describe("the network check, the reconciler and the docker timeout (code review 2, 7)", () => {
+  it("a network the daemon made with a host address or IPv6 is refused: no proxy, no sandbox, the network removed", async () => {
+    for (const bad of [{ ...GOOD_NET, Options: {} }, { ...GOOD_NET, EnableIPv6: true }, { ...GOOD_NET, IPAM: { Config: [{ Subnet: "172.30.5.0/24", Gateway: "172.30.5.1" }] } }]) {
+      netAnswer = bad;
+      const rig = newRig();
+      try {
+        await expect(runc(rig).start(offer, ROBOT_L1, "hardened_container")).rejects.toThrow(DockerBackendError);
+      } finally {
+        netAnswer = GOOD_NET;
+      }
+      expect(verbs(rig.calls)).toEqual(["network create", "network rm"]);
+    }
+  });
+
+  it("removes labelled sandboxes, proxies, run networks and ACL directories no live sandbox owns; nothing else", async () => {
+    const rig = newRig();
+    const orphan = "regulait-sbx-99999999-2222-4333-8444-555555555555";
+    const orphanProxy = "regulait-egp-88888888-2222-4333-8444-555555555555";
+    const orphanNet = "regulait-egn-77777777-2222-4333-8444-555555555555";
+    mkdirSync(path.join(rig.aclDir, orphan));
+    mkdirSync(path.join(rig.aclDir, "keep-me"));
+    writeFileSync(path.join(rig.aclDir, "regulait-sbx-not-a-uuid"), "x");
+    const b = runc(rig, { ps: `${orphan}\n${orphanProxy}\npostgres\nregulait-sbx-not-a-uuid\n`, networks: `${orphanNet}\nbridge\nregulait-egn-x\n` });
+    expect(await b.reconcileOrphans()).toEqual({ containers: 2, networks: 1, aclDirs: 1 });
+    const rms = rig.calls.filter((c) => c[0] === "rm").map((c) => c.at(-1));
+    expect(rms.sort()).toEqual([orphanProxy, orphan].sort());
+    expect(rig.calls.filter((c) => c[0] === "network" && c[1] === "rm").map((c) => c[2])).toEqual([orphanNet]);
+    expect(existsSync(path.join(rig.aclDir, orphan))).toBe(false);
+    expect(existsSync(path.join(rig.aclDir, "keep-me"))).toBe(true);
+    expect(existsSync(path.join(rig.aclDir, "regulait-sbx-not-a-uuid"))).toBe(true);
+    // only labelled objects are listed
+    expect(rig.calls.find((c) => c[0] === "ps")).toEqual(["ps", "-a", "--filter", "label=org.regulait.sandbox=1", "--format", "{{.Names}}"]);
+    expect(rig.calls.find((c) => c[0] === "network" && c[1] === "ls")).toEqual(["network", "ls", "--filter", "label=org.regulait.sandbox=1", "--format", "{{.Name}}"]);
+  });
+
+  it("runs at the first preflight, and never touches a live run's sandbox, proxy, network or ACL", async () => {
+    const rig = newRig();
+    const b = runc(rig);
+    const h = await b.start(offer, ROBOT_L1, "hardened_container");
+    // the first preflight listed (and found nothing)
+    expect(rig.calls[0]![0]).toBe("ps");
+    const sandboxRun = rig.calls.find((c) => c[0] === "run" && c[1] !== "-d")!;
+    const name = sandboxRun[sandboxRun.indexOf("--name") + 1]!;
+    const id = name.slice("regulait-sbx-".length);
+    // the daemon now lists the live run's sandbox, proxy and network (the seam is swapped to say so)
+    const own = b as unknown as { reconcileOrphans(): Promise<{ containers: number; networks: number; aclDirs: number }>; options: { spawnDocker: unknown } };
+    const runSeam = own.options.spawnDocker;
+    own.options.spawnDocker = seam(rig, { ps: `${name}\nregulait-egp-${id}\n`, networks: `regulait-egn-${id}\n` });
+    const before = rig.calls.length;
+    expect(await own.reconcileOrphans()).toEqual({ containers: 0, networks: 0, aclDirs: 0 });
+    expect(rig.calls.slice(before).filter((c) => c[0] === "rm" || (c[0] === "network" && c[1] === "rm"))).toEqual([]);
+    expect(existsSync(path.join(rig.aclDir, name))).toBe(true);
+    own.options.spawnDocker = runSeam;
+    await h.kill();
+    await h.ended;
+  }, 30_000);
+
+  it("a docker call that hangs is killed at its bound (teardown and the reconciler never wait forever)", async () => {
+    const rig = newRig();
+    const b = runc(rig, { hang: "ps", dockerTimeoutMs: 300 });
+    const t0 = Date.now();
+    expect(await b.reconcileOrphans()).toEqual({ containers: 0, networks: 0, aclDirs: 0 });
+    expect(Date.now() - t0).toBeLessThan(5_000);
+    // a run whose network removal hangs still ends
+    const rig2 = newRig();
+    const h = await runc(rig2, { hang: "network rm", dockerTimeoutMs: 300 }).start(offer, ROBOT_L1, "hardened_container");
+    await h.kill();
+    expect(await h.ended).toBe("killed");
+  }, 30_000);
+
+  it("the egress log keeps its head and its tail (code review 8)", async () => {
+    const rig = newRig();
+    // 1 MiB of log: a first line, filler, a last line
+    const h = await runc(rig, { logsScript: "process.stdout.write('FIRST-LINE\\n' + 'x'.repeat(1024 * 1024) + '\\nLAST-LINE\\n')" }).start(offer, ROBOT_L1, "hardened_container");
+    await h.kill();
+    await h.ended;
+    const log = await h.egressLog!();
+    expect(log.startsWith("FIRST-LINE\n")).toBe(true);
+    expect(log.endsWith("\nLAST-LINE\n")).toBe(true);
+    expect(log).toMatch(/\[regulait: egress log truncated, \d+ bytes dropped\]/);
+    expect(Buffer.byteLength(log)).toBeLessThanOrEqual(256 * 1024);
+  }, 30_000);
+});
+
+describe("the sandbox init's environment for a robot run (N7)", () => {
+  /** run the real init on this host: its probe line, then a release line; the workload prints its environment */
+  async function workloadEnv(initEnv: NodeJS.ProcessEnv, robot: boolean): Promise<Record<string, string>> {
+    const child = spawn(process.execPath, [INIT], { stdio: ["pipe", "pipe", "pipe"], env: initEnv, cwd: mkdtempSync(path.join(tmpdir(), "regulait-init-")) });
+    let out = "";
+    child.stdout.on("data", (c: Buffer) => {
+      out += c.toString("utf8");
+      if (out.split("\n").length === 2) {
+        const release = { "regulait-release": 1, argv: [process.execPath, "-e", "console.log(JSON.stringify(process.env))"], ...(robot ? { egressProxy: "http://172.30.5.2:4750", robotRunId: RUN_ID } : {}) };
+        child.stdin.write(`${JSON.stringify(release)}\n`);
+      }
+    });
+    await new Promise((r) => child.once("exit", r));
+    return JSON.parse(out.trim().split("\n").at(-1)!) as Record<string, string>;
+  }
+
+  it("passes the allow-listed browser variables to a robot run only, as plain absolute paths", async () => {
+    const robot = await workloadEnv({ ...process.env, ...IMAGE_ENV }, true);
+    expect(robot).toMatchObject({ PLAYWRIGHT_BROWSERS_PATH: "/ms-playwright", ROBOT_CHROMIUM: IMAGE_ENV.ROBOT_CHROMIUM, PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1" });
+    expect(robot.LEAK_ME).toBeUndefined();
+    // a stdio server or engine task gets none of them
+    const other = await workloadEnv({ ...process.env, ...IMAGE_ENV }, false);
+    for (const k of ["PLAYWRIGHT_BROWSERS_PATH", "ROBOT_CHROMIUM", "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "LEAK_ME"]) expect(other[k], k).toBeUndefined();
+    // a value that is not a plain absolute path is not passed
+    const bad = await workloadEnv({ ...process.env, PLAYWRIGHT_BROWSERS_PATH: "relative/path", ROBOT_CHROMIUM: "/ms-playwright/../etc/x", PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "0" }, true);
+    for (const k of ["PLAYWRIGHT_BROWSERS_PATH", "ROBOT_CHROMIUM", "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD"]) expect(bad[k], k).toBeUndefined();
+    const semi = await workloadEnv({ ...process.env, ROBOT_CHROMIUM: "/a;b", PLAYWRIGHT_BROWSERS_PATH: "/a b" }, true);
+    expect(semi.ROBOT_CHROMIUM).toBeUndefined();
+    expect(semi.PLAYWRIGHT_BROWSERS_PATH).toBeUndefined();
+  }, 60_000);
 });
 
 describe("the gVisor backend needs its own robot runtime", () => {
@@ -333,20 +546,50 @@ describe("the fake backend (for gateway tests without docker)", () => {
   });
 });
 
-describe("capEgressLog (CodeQL alert 81: linear trim of a split trailing sequence)", () => {
-  it("keeps a short log, caps a long one with a marker and drops a split multi-byte tail", async () => {
+describe("capEgressLog (code review 8: head AND tail; CodeQL alert 81: linear trims, no regex on log text)", () => {
+  it("keeps a short log, caps a long one to its head and tail with the dropped byte count, never splitting a character", async () => {
     const { capEgressLog } = await import("./docker-backend.js");
     expect(capEgressLog("ok", 64)).toBe("ok");
-    const capped = capEgressLog("é".repeat(100), 51);
-    expect(capped.endsWith("[regulait: egress log truncated]\n")).toBe(true);
-    expect(capped).not.toContain("�");
-    expect(Buffer.byteLength(capped, "utf8")).toBeLessThanOrEqual(51);
+    const text = "HEAD" + "é".repeat(500) + "TAIL";
+    for (const max of [120, 121, 122, 123, 200]) {
+      const capped = capEgressLog(text, max);
+      expect(capped.startsWith("HEAD"), String(max)).toBe(true);
+      expect(capped.endsWith("TAIL"), String(max)).toBe(true);
+      expect(capped).not.toContain("�");
+      expect(Buffer.byteLength(capped, "utf8")).toBeLessThanOrEqual(max);
+      const m = /truncated, (\d+) bytes dropped/.exec(capped)!;
+      const kept = Buffer.byteLength(capped, "utf8") - Buffer.byteLength(egressLogMarker(Number(m[1])));
+      expect(kept + Number(m[1])).toBe(Buffer.byteLength(text, "utf8"));
+    }
+    // 4-byte characters at both cuts
+    const emoji = capEgressLog("😀".repeat(1000), 301);
+    expect(emoji).not.toContain("�");
+    expect(Buffer.byteLength(emoji, "utf8")).toBeLessThanOrEqual(301);
+  });
+
+  it("capEgressBytes: separate head and tail buffers (the capture keeps only those) give the same result", () => {
+    const full = Buffer.from("a".repeat(1000) + "MIDDLE" + "z".repeat(1000), "utf8");
+    const max = 300;
+    const viaFull = capEgressBytes(full, full, full.length, max);
+    const viaParts = capEgressBytes(full.subarray(0, max), full.subarray(full.length - max), full.length, max);
+    expect(viaParts).toBe(viaFull);
+    expect(viaFull).not.toContain("MIDDLE");
+    expect(viaFull.startsWith("a")).toBe(true);
+    expect(viaFull.endsWith("z")).toBe(true);
+    expect(capEgressBytes(Buffer.from("short"), Buffer.from("short"), 5, max)).toBe("short");
   });
   it("stays fast on a log of many replacement characters", async () => {
     const { capEgressLog } = await import("./docker-backend.js");
     const t0 = Date.now();
     const out = capEgressLog("�".repeat(200_000) + "x", 300_000);
     expect(Date.now() - t0).toBeLessThan(1000);
-    expect(out).not.toMatch(/�\n\[regulait/);
+    // genuine U+FFFD characters are text and kept; only a sequence split by a cut is dropped
+    expect(out.startsWith("�")).toBe(true);
+    expect(out.endsWith("x")).toBe(true);
+    expect(Buffer.byteLength(out, "utf8")).toBeLessThanOrEqual(300_000);
+    // and on one of many continuation bytes (an invalid log is still trimmed in bounded steps)
+    const t1 = Date.now();
+    capEgressBytes(Buffer.alloc(2_000_000, 0x80), Buffer.alloc(2_000_000, 0x80), 2_000_000, 300_000);
+    expect(Date.now() - t1).toBeLessThan(1000);
   });
 });

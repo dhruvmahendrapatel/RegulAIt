@@ -8,9 +8,12 @@ ADR-0364 §7. Read from smokescreen v0.1.0's own source (`cmd/smokescreen.go`, `
 The image's ENTRYPOINT is fixed:
 
 ```
-smokescreen --config-file /etc/regulait/smokescreen.yaml \
-            --disable-acl-policy-action open --disable-acl-policy-action report
+robot-egress --config-file /etc/regulait/smokescreen.yaml \
+             --disable-acl-policy-action open --disable-acl-policy-action report
 ```
+
+`robot-egress` is smokescreen v0.1.0 used as a library (`portfilter/main.go` is smokescreen's own `main.go` plus one
+hook; the same flags and config); see "ports" below.
 
 Per run the executor appends:
 
@@ -47,13 +50,25 @@ a run's egress path.
 - Checked by running the binary: a host off the ACL is refused with 407 (`"decision_reason":"default rule policy
   used"`), 169.254.169.254 is refused, an allowed host is tunnelled.
 
-## Can Smokescreen restrict destination PORTS? No.
+## Can Smokescreen restrict destination PORTS? Not by configuration: the port filter does it
 
 The ACL (`allowed_domains`, `acl/v1`) matches host names only; no ACL field, config key or flag limits the destination
 port for a host. The only port-aware settings are `--deny-address` / `--allow-address` `IP:PORT` entries, which match a
 resolved IP address, not a host name, so they cannot express "this host, port 443 only". Checked by running it: with
 `example.com` allowed, a request for `example.com:8080` was allowed (`"allow":true`) and dialled.
 
-So today the port limit of ADR-0364 §7 rests on the in-browser route check alone (`originAllowed`: an origin's port is
-part of the match, default 443). §7 says that, where Smokescreen has no port setting, a CONNECT filter in front of it
-closes the gap as an ADR-0176 exception. **Not built here: the lead decides.**
+So the image's binary adds ONE hook through smokescreen's library API (ADR-0176 exception, ADR-0364 §7):
+`smokescreen.Config.PostDecisionRequestHandler func(*http.Request) error` (pkg/smokescreen/config.go). Smokescreen calls
+it in `handleConnect` (and for plain-HTTP proxy requests) only after its own ACL and IP checks allowed the request, and
+denies the request when it returns an error (`denyError`, logged in the CANONICAL-PROXY-DECISION line's `error`).
+`portfilter/portfilter.go` (`PortFilter.Check`):
+
+- refuses every request that is not `CONNECT` (a robot's origins are https only);
+- parses the CONNECT authority with smokescreen's own `pkg/smokescreen/hostport.New` and refuses a `host:port` that is not
+  in the run's ports file.
+
+The ports file is `/etc/regulait-egress/ports.txt` (fixed in the binary), one `host:port` per line, written by the
+executor beside the ACL from the same offer targets (`egressPortsFile`, 0600, the same owner, mount and cleanup). A
+missing, empty or malformed file stops the binary before it listens (fail closed). Tests: `go test` in `portfilter/`
+(run in the image build too), and the executor's network-level test `robot-egress.integration.test.ts` (an allowed host
+on a port it does not name is refused with 407).

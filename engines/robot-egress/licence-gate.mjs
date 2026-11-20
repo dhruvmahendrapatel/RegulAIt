@@ -1,7 +1,12 @@
 #!/usr/bin/env node
 /**
- * ADR-0364 S3 / ADR-0176 — the licence gate for the robot egress image's ONE binary (stripe/smokescreen), run inside
- * the image build on exactly what was linked: the module list `go version -m` reads out of the built binary.
+ * ADR-0364 S3 / ADR-0176 — the licence gate for the robot egress image's ONE binary (stripe/smokescreen used as a
+ * library, plus RegulAIt's port filter: `portfilter/`), run inside the image build on exactly what was linked: the module
+ * list `go version -m` reads out of the built binary.
+ *
+ * The binary's MAIN module must be RegulAIt's own `regulait.invalid/robot-egress` (FIRST_PARTY_MAIN: first-party code,
+ * no third-party licence to judge); any other main module fails the build. Every DEPENDENCY, smokescreen included, is
+ * judged as below.
  *
  * Every module the binary links (and smokescreen itself) is judged by a READING (licence-readings.json): the licence a
  * person read in the module's licence file, pinned to that exact module version AND that file's sha256 in the module
@@ -20,13 +25,15 @@
  * unmodified), which holds here because the Dockerfile runs `go mod verify` on the build's module cache first.
  * Everything else is DENIED and fails the build.
  *
- * Usage: node licence-gate.mjs <go-version-m.txt> <GOMODCACHE> <smokescreen source dir>
+ * Usage: node licence-gate.mjs <go-version-m.txt> <GOMODCACHE>
  */
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+/** the one main module the robot egress binary may be built from: RegulAIt's port-filter entry point (`portfilter/`) */
+export const FIRST_PARTY_MAIN = "regulait.invalid/robot-egress";
 export const ALLOWED = new Set(["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unlicense", "CC0-1.0", "0BSD"]);
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -59,10 +66,13 @@ export function classify(licence, module, allow) {
 }
 
 /** judge the binary's modules; returns {allowed, pending, denied} rows */
-export function judge({ buildInfo, modcache, srcDir, readings, allow, read = (f) => (existsSync(f) ? readFileSync(f) : null) }) {
+export function judge({ buildInfo, modcache, readings, allow, read = (f) => (existsSync(f) ? readFileSync(f) : null) }) {
   const out = { allowed: [], pending: [], denied: [] };
   const used = new Set();
-  const subjects = [{ module: buildInfo.main, version: "(main)", dir: srcDir }, ...buildInfo.deps.map((d) => ({ ...d, dir: path.join(modcache, `${escapeModulePath(d.module)}@${d.version}`) }))];
+  // the main module is RegulAIt's own code (first-party), or the build fails
+  if (buildInfo.main === FIRST_PARTY_MAIN) out.allowed.push({ module: buildInfo.main, version: "(main)", licence: "first-party", why: "RegulAIt's own port filter" });
+  else out.denied.push({ module: buildInfo.main, version: "(main)", why: `the main module is not ${FIRST_PARTY_MAIN}` });
+  const subjects = buildInfo.deps.map((d) => ({ ...d, dir: path.join(modcache, `${escapeModulePath(d.module)}@${d.version}`) }));
   for (const s of subjects) {
     const idx = readings.findIndex((r) => r.module === s.module && r.version === s.version);
     if (idx < 0) {
@@ -87,15 +97,14 @@ export function judge({ buildInfo, modcache, srcDir, readings, allow, read = (f)
 }
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
-  const [info, modcache, srcDir] = process.argv.slice(2);
-  if (!info || !modcache || !srcDir) {
-    console.error("usage: licence-gate.mjs <go-version-m.txt> <GOMODCACHE> <smokescreen source dir>");
+  const [info, modcache] = process.argv.slice(2);
+  if (!info || !modcache) {
+    console.error("usage: licence-gate.mjs <go-version-m.txt> <GOMODCACHE>");
     process.exit(2);
   }
   const res = judge({
     buildInfo: parseBuildInfo(readFileSync(info, "utf8")),
     modcache,
-    srcDir,
     readings: JSON.parse(readFileSync(path.join(HERE, "licence-readings.json"), "utf8")),
     allow: JSON.parse(readFileSync(path.join(HERE, "licence-allow.json"), "utf8")),
   });

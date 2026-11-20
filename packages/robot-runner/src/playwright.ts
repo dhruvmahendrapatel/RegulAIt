@@ -12,7 +12,7 @@
  *  - traces are never started (S3: traces off).
  */
 import { readFile, stat } from "node:fs/promises";
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
+import { chromium, type Browser, type BrowserContext, type LaunchOptions as PlaywrightLaunchOptions, type Page } from "playwright-core";
 import { originAllowed } from "@regulait/shared";
 import type { RobotPage } from "./executor.js";
 
@@ -90,14 +90,35 @@ class PlaywrightRobotPage implements RobotPage {
   }
 }
 
-export async function launchRobotBrowser(opts: LaunchOptions): Promise<RobotBrowser> {
+/**
+ * Code review 2: Chromium's own switches that keep every byte on the proxy. The proxy carries TCP (CONNECT) only, so:
+ *  - WebRTC may use no UDP that does not go through the proxy (`disable_non_proxied_udp`: no host or STUN candidates,
+ *    no non-proxied UDP; Chromium's `--force-webrtc-ip-handling-policy`, which a page cannot change);
+ *  - no QUIC (HTTP/3 is UDP and would not use the HTTP proxy).
+ * Playwright adds `--proxy-server` and `--proxy-bypass-list=<-loopback>` itself (loopback is proxied too, so refused).
+ * The network under them already has no route but the proxy (an internal network whose only peer is the proxy); these
+ * keep the browser from trying.
+ */
+export const ROBOT_CHROMIUM_ARGS = ["--force-webrtc-ip-handling-policy=disable_non_proxied_udp", "--disable-quic"] as const;
+
+/** the options `chromium.launch` gets (pure; exported for tests) */
+export function robotLaunchOptions(opts: LaunchOptions): PlaywrightLaunchOptions {
   if (!/^http:\/\/[A-Za-z0-9.-]+:\d{1,5}$/.test(opts.proxyServer)) throw new Error("the egress proxy must be http://host:port");
-  const browser: Browser = await chromium.launch({
+  return {
     headless: true,
     ...(opts.executablePath ? { executablePath: opts.executablePath } : {}),
     proxy: { server: opts.proxyServer },
     downloadsPath: opts.downloadsPath,
-  });
+    args: [...ROBOT_CHROMIUM_ARGS],
+    // Chromium's own sandbox stays OFF (Playwright's default, stated here): it needs user namespaces or a setuid
+    // helper, which the robot_browser sandbox (no capabilities, no-new-privileges, seccomp, gVisor) withholds. The
+    // isolation boundary is that sandbox, not Chromium's (an accepted risk, ADR-0364).
+    chromiumSandbox: false,
+  };
+}
+
+export async function launchRobotBrowser(opts: LaunchOptions): Promise<RobotBrowser> {
+  const browser: Browser = await chromium.launch(robotLaunchOptions(opts));
   try {
     const context: BrowserContext = await browser.newContext({ acceptDownloads: true, serviceWorkers: "block", permissions: [] });
     await context.route("**/*", (route) => (requestAllowed(route.request().url(), opts.allowedOrigins) ? route.continue() : route.abort("blockedbyclient")));

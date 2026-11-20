@@ -27,7 +27,7 @@
  */
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, chown, copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, chown, copyFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { request } from "node:http";
 import path from "node:path";
 import type { Readable, Writable } from "node:stream";
@@ -41,6 +41,7 @@ import {
   STDIO_SANDBOX_NODE,
   isStdioClosureImage,
   robotEgressSchema,
+  robotEgressTargetSchema,
   smokescreenAclForTargets,
   stdioLineBytes,
   type AppliedIsolationKind,
@@ -50,6 +51,7 @@ import {
   type ProbeObserved,
   type RequirableIsolationClass,
   type RobotEgress,
+  type RobotEgressTarget,
 } from "@regulait/shared";
 import type { BackendDescription, ProbeSet, SandboxBackend, SandboxHandle, SandboxStdio } from "./backend.js";
 import { reconcileTaskInputs, removeTaskInput, writeTaskInput, type SandboxTaskInput } from "./task-input.js";
@@ -189,6 +191,23 @@ export function egressNames(sandboxName: string): { network: string; proxy: stri
 /** where the proxy reads its ACL (the run's ACL directory, mounted read-only) */
 export const SMOKESCREEN_ACL_DIR = "/etc/regulait-egress" as const;
 export const SMOKESCREEN_ACL_FILE = "acl.yaml" as const;
+/**
+ * Security B3: the run's PORTS FILE, beside the ACL in the same read-only directory. The robot egress binary's port
+ * filter (engines/robot-egress/portfilter, `PortsFile` there) reads it at start and refuses every CONNECT whose
+ * `host:port` it does not name; without a valid file the proxy never listens.
+ */
+export const SMOKESCREEN_PORTS_FILE = "ports.txt" as const;
+
+/** the ports file's text: one `host:port` per line, from the offer's targets (validated again here), sorted, unique */
+export function egressPortsFile(targets: readonly RobotEgressTarget[]): string {
+  if (targets.length === 0) throw new DockerBackendError("a run's egress names at least one target");
+  const lines = new Set<string>();
+  for (const t of targets) {
+    if (!robotEgressTargetSchema.safeParse(t).success) throw new DockerBackendError("not an egress target");
+    lines.add(`${t.host}:${t.port}`);
+  }
+  return `${[...lines].sort().join("\n")}\n`;
+}
 
 /**
  * THE PER-RUN SMOKESCREEN FLAGS, in one place. Flag names verified against stripe/smokescreen `cmd/smokescreen.go` on
@@ -197,8 +216,10 @@ export const SMOKESCREEN_ACL_FILE = "acl.yaml" as const;
  * `ROBOT_EGRESS_DENY_RANGES`, on top of Smokescreen's non-public default) and `--disable-acl-policy-action open` /
  * `report`. Per run the executor adds only these: the run's ACL file, and the proxy's own address on the run's internal
  * network (it listens nowhere else) on the default port 4750. The sandbox presents no client certificate, so every
- * request falls to the ACL's `default` rule (`enforce`). Smokescreen cannot restrict destination ports: the version's
- * ports are held by the in-browser route check alone (decided upstream, ADR-0364 §7). No `--allow-range`.
+ * request falls to the ACL's `default` rule (`enforce`). Smokescreen's ACL cannot restrict destination ports: the
+ * image's port filter (Smokescreen's `PostDecisionRequestHandler` hook) holds them, from the run's ports file
+ * (`SMOKESCREEN_PORTS_FILE`, at a path fixed in the binary), with the in-browser route check as the second line
+ * (ADR-0364 §7). No `--allow-range`.
  */
 export function smokescreenArgs(listenIp: string): string[] {
   if (!/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(listenIp)) throw new DockerBackendError("the proxy's listen address is not an IPv4 address");
@@ -211,15 +232,37 @@ export function smokescreenArgs(listenIp: string): string[] {
  */
 export const PROXY_BLANKED_ENV = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "no_proxy", "all_proxy"] as const;
 
-/** `docker network create` for a robot run: INTERNAL (no route off the host), labelled as ours */
+/** the bridge driver option that gives the HOST no address on the network (Docker's `inhibit_ipv4`) */
+export const BRIDGE_INHIBIT_IPV4 = "com.docker.network.bridge.inhibit_ipv4" as const;
+
+/**
+ * `docker network create` for a robot run: INTERNAL (no route off the host), labelled as ours, IPv4 only, and with NO
+ * HOST ADDRESS on it (code review 2). `--internal` alone still gives the host's bridge the subnet's gateway address
+ * (`.1`), so a sandbox could reach every host service listening on all interfaces; `inhibit_ipv4` leaves the bridge
+ * without an IPv4 address (Docker reserves no gateway), so the network's only addresses are its containers' (the
+ * proxy at its fixed address, the sandbox). IPv6 is refused (`--ipv6=false`, checked again after create).
+ */
 export function egressNetworkCreateArgs(network: string): string[] {
   if (!EGRESS_NETWORK_NAME.test(network)) throw new DockerBackendError("not a robot run's internal network name");
-  return ["network", "create", "--internal", "--driver", "bridge", "--label", "org.regulait.sandbox=1", network];
+  return ["network", "create", "--internal", "--driver", "bridge", "--ipv6=false", "--opt", `${BRIDGE_INHIBIT_IPV4}=true`, "--label", "org.regulait.sandbox=1", network];
+}
+
+/** what `GET /networks/{name}` must show for a run's network before its proxy starts: null, or what is wrong */
+export function egressNetworkProblem(net: unknown): string | null {
+  const n = (net ?? {}) as { Internal?: unknown; EnableIPv6?: unknown; Options?: Record<string, unknown> | null; IPAM?: { Config?: Array<{ Subnet?: unknown; Gateway?: unknown }> | null } };
+  if (n.Internal !== true) return "the run's network is not internal";
+  if (n.EnableIPv6 !== false) return "the run's network has IPv6";
+  if (n.Options?.[BRIDGE_INHIBIT_IPV4] !== "true") return "the run's network gives the host an address (inhibit_ipv4 is not set)";
+  const configs = Array.isArray(n.IPAM?.Config) ? n.IPAM.Config : [];
+  if (configs.some((c) => typeof c.Subnet === "string" && c.Subnet.includes(":"))) return "the run's network has an IPv6 subnet";
+  if (configs.some((c) => typeof c.Gateway === "string" && c.Gateway !== "")) return "the run's network has a gateway address";
+  return null;
 }
 
 /**
- * The proxy's address on the run's internal network: the subnet's second host (the first is Docker's gateway
- * address), so it is known before the proxy starts and Smokescreen listens on it alone. IPv4, at most a /29.
+ * The proxy's address on the run's internal network: the subnet's second host (with `inhibit_ipv4` no gateway is
+ * reserved, so the first may go to the sandbox; the host has none), so it is known before the proxy starts and
+ * Smokescreen listens on it alone. IPv4, at most a /29.
  */
 export function egressProxyAddress(subnet: unknown): string {
   const m = typeof subnet === "string" ? /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/.exec(subnet) : null;
@@ -255,6 +298,8 @@ export interface ProxyRunInput {
   aclSubpath: string;
   /** `uid:gid` the proxy runs as (the ACL file's owner; never root) */
   user: string;
+  /** item 17: the Docker runtime the proxy runs under, named explicitly (default `runc`) */
+  runtime?: string;
 }
 
 /** `docker run -d` for a run's Smokescreen: hardened like a sandbox, its ACL read-only, its log kept for evidence */
@@ -266,11 +311,17 @@ export function proxyRunArgs(input: ProxyRunInput): string[] {
   if (!SANDBOX_NAME.test(input.aclSubpath)) throw new DockerBackendError("the ACL sub-path is not ours");
   const user = /^(\d{1,10}):(\d{1,10})$/.exec(input.user);
   if (!user || user[1] === "0") throw new DockerBackendError("the egress proxy never runs as root");
+  const runtime = input.runtime ?? "runc";
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(runtime)) throw new DockerBackendError("the egress proxy's runtime is not a Docker runtime name");
+  // not `--rm`: a proxy that exits early would take its log (the run's egress evidence) with it; teardown reads the log
+  // and then removes the proxy explicitly, and the reconciler removes one a crashed executor left behind
   return [
     "run",
     "-d",
     "--name",
     input.name,
+    "--runtime",
+    runtime,
     "--pull",
     "never",
     "--network",
@@ -284,6 +335,10 @@ export function proxyRunArgs(input: ProxyRunInput): string[] {
     "ALL",
     "--security-opt",
     "no-new-privileges=true",
+    // item 17: Docker's default seccomp profile, asked for explicitly (a daemon configured with another default, or
+    // with none, does not change it)
+    "--security-opt",
+    "seccomp=builtin",
     "--cpus",
     "0.5",
     "--memory",
@@ -311,17 +366,51 @@ export function proxyRunArgs(input: ProxyRunInput): string[] {
   ];
 }
 
-/** keep the head of a log within `max` bytes, then a marker (never an unbounded buffer) */
+/** the marker between a capped log's head and tail */
+export const egressLogMarker = (dropped: number) => `\n[regulait: egress log truncated, ${dropped} bytes dropped]\n`;
+
+/** a lead byte's UTF-8 sequence length (1 for an ASCII or invalid byte) */
+const seqLen = (b: number) => (b >= 0xf0 && b < 0xf8 ? 4 : b >= 0xe0 && b < 0xf0 ? 3 : b >= 0xc0 && b < 0xe0 ? 2 : 1);
+const isCont = (b: number) => (b & 0xc0) === 0x80;
+/** the length of `buf` without a split multi-byte sequence at its end (looks at the last 4 bytes only) */
+function completeEnd(buf: Buffer): number {
+  for (let i = buf.length - 1; i >= 0 && i >= buf.length - 4; i -= 1) {
+    if (!isCont(buf[i]!)) return i + seqLen(buf[i]!) > buf.length ? i : buf.length;
+  }
+  return buf.length;
+}
+/** the offset in `buf` past a split multi-byte sequence at its start (at most 3 continuation bytes) */
+function completeStart(buf: Buffer): number {
+  let i = 0;
+  while (i < 3 && i < buf.length && isCont(buf[i]!)) i += 1;
+  return i;
+}
+const decodeLossy = (b: Buffer) => new TextDecoder("utf-8", { fatal: false }).decode(b);
+
+/**
+ * Code review 8: a log of `total` bytes, of which `head` holds at least the first and `tail` at least the last bytes
+ * the cap keeps, within `max` bytes: the HEAD (how the run started) and the TAIL (how it ended), half the budget each,
+ * with a marker naming the dropped byte count between them. Byte-level and linear: a split multi-byte sequence at a
+ * cut is dropped by looking at no more than four bytes (no regex on log text: CodeQL alert 81).
+ */
+export function capEgressBytes(head: Buffer, tail: Buffer, total: number, max: number = ROBOT_EGRESS_LOG_MAX_BYTES): string {
+  if (total <= max && head.length >= total) return decodeLossy(head.subarray(0, total));
+  const reserve = Buffer.byteLength(egressLogMarker(total));
+  const budget = Math.max(0, max - reserve);
+  const h = Math.floor(budget / 2);
+  const t = budget - h;
+  let hb = head.subarray(0, Math.min(h, head.length));
+  hb = hb.subarray(0, completeEnd(hb));
+  let tb = tail.subarray(Math.max(0, tail.length - t));
+  tb = tb.subarray(completeStart(tb));
+  return decodeLossy(hb) + egressLogMarker(total - hb.length - tb.length) + decodeLossy(tb);
+}
+
+/** a log within `max` bytes: as it is, or its head and tail with a marker between (`capEgressBytes`) */
 export function capEgressLog(text: string, max: number = ROBOT_EGRESS_LOG_MAX_BYTES): string {
-  if (Buffer.byteLength(text, "utf8") <= max) return text;
-  const marker = "\n[regulait: egress log truncated]\n";
-  const head = Buffer.from(text, "utf8").subarray(0, max - Buffer.byteLength(marker));
-  // drop a split trailing multi-byte sequence rather than emit a replacement character
-  // (a linear trim, not a `/\uFFFD+$/` regex: CodeQL alert 81, polynomial backtracking on untrusted log text)
-  const decoded = new TextDecoder("utf-8", { fatal: false }).decode(head);
-  let end = decoded.length;
-  while (end > 0 && decoded.charCodeAt(end - 1) === 0xfffd) end -= 1;
-  return decoded.slice(0, end) + marker;
+  const buf = Buffer.from(text, "utf8");
+  if (buf.length <= max) return text;
+  return capEgressBytes(buf, buf, buf.length, max);
 }
 
 /**
@@ -729,6 +818,16 @@ export interface DockerBackendOptions {
   egressUplinkNetwork?: string | null;
   egressRuntimeName?: string | null;
   egressProxyUser?: string;
+  /** item 17: the Docker runtime the proxy runs under (`REGULAIT_ROBOT_EGRESS_PROXY_RUNTIME`, default `runc`) */
+  egressProxyRuntime?: string | null;
+  /**
+   * Code review 7: how often the reconciler removes labelled sandboxes, proxies, run networks and ACL directories that
+   * no live sandbox of this executor owns (default 5 minutes; 0 = only at the first preflight). One executor per
+   * Docker daemon: another executor's live sandboxes on the same daemon would look orphaned.
+   */
+  reconcileIntervalMs?: number;
+  /** a bound on every short docker CLI call (create, rm, kill, logs, ps, …; default 60 s); a call over it is killed */
+  dockerTimeoutMs?: number;
   /** test seams */
   spawnDocker?: (args: string[], env: NodeJS.ProcessEnv) => DockerChild;
   dockerApi?: (apiPath: string) => Promise<unknown>;
@@ -788,7 +887,14 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
     this.egressAclVolume = opt(options.egressAclVolume, process.env.REGULAIT_ROBOT_EGRESS_ACL_VOLUME);
     this.egressUplink = opt(options.egressUplinkNetwork, process.env.REGULAIT_ROBOT_EGRESS_NETWORK) ?? "bridge";
     this.egressRuntime = opt(options.egressRuntimeName, process.env.REGULAIT_EXECUTOR_EGRESS_RUNTIME);
+    this.egressProxyRuntime = opt(options.egressProxyRuntime, process.env.REGULAIT_ROBOT_EGRESS_PROXY_RUNTIME) ?? "runc";
   }
+
+  private readonly egressProxyRuntime: string;
+  /** code review 7: the sandboxes this executor process owns right now (named before anything of theirs exists) */
+  private readonly live = new Set<string>();
+  private reconciled = false;
+  private reconcileTimer: NodeJS.Timeout | null = null;
 
   private readonly egressImage: string | null;
   private readonly egressAclDir: string | null;
@@ -827,6 +933,7 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
     if (!isPinnedImageRef(this.egressImage)) return "REGULAIT_ROBOT_EGRESS_IMAGE is not pinned by digest";
     if (!this.egressAclDir || !this.egressAclVolume) return "no ACL volume (REGULAIT_ROBOT_EGRESS_ACL_DIR and REGULAIT_ROBOT_EGRESS_ACL_VOLUME)";
     if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(this.egressUplink) || ["host", "none"].includes(this.egressUplink)) return "the uplink network is not a Docker network name";
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(this.egressProxyRuntime)) return "the egress proxy's runtime is not a Docker runtime name";
     const rt = this.egressRuntime ?? this.defaultEgressRuntime();
     if (!rt) return `no runtime for robot sandboxes (REGULAIT_EXECUTOR_EGRESS_RUNTIME; the ${this.label} backend needs its own)`;
     if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(rt)) return "the robot runtime is not a Docker runtime name";
@@ -870,7 +977,64 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
       await reconcileTaskInputs(this.inputDir, (n) => SANDBOX_NAME.test(n));
       this.inputsReconciled = true;
     }
+    // code review 7: and the sandboxes, proxies, run networks and ACL directories (then again periodically)
+    if (!this.reconciled) {
+      this.reconciled = true;
+      await this.reconcileOrphans().catch(() => undefined);
+      const every = this.options.reconcileIntervalMs ?? 5 * 60_000;
+      if (every > 0) {
+        this.reconcileTimer = setInterval(() => void this.reconcileOrphans().catch(() => undefined), every);
+        this.reconcileTimer.unref?.();
+      }
+    }
     return rt;
+  }
+
+  /** stop the periodic reconciler (an executor shutting down; tests) */
+  stopReconciler(): void {
+    if (this.reconcileTimer) clearInterval(this.reconcileTimer);
+    this.reconcileTimer = null;
+  }
+
+  /**
+   * Code review 7 (the pattern of `reconcileTaskInputs`): remove what a previous run of this executor (a crash, a
+   * killed process, a failed teardown) left behind and no sandbox this process owns still uses: labelled containers
+   * named as our sandboxes or proxies, labelled networks named as run networks, and run ACL directories. Only names
+   * this backend generates are touched (each matched by its full pattern); everything else is left alone.
+   */
+  async reconcileOrphans(): Promise<{ containers: number; networks: number; aclDirs: number }> {
+    const idOf = (name: string): string | null => {
+      for (const [re, prefix] of [
+        [SANDBOX_NAME, "regulait-sbx-"],
+        [EGRESS_PROXY_NAME, "regulait-egp-"],
+        [EGRESS_NETWORK_NAME, "regulait-egn-"],
+      ] as const) {
+        if (re.test(name)) return `regulait-sbx-${name.slice(prefix.length)}`;
+      }
+      return null;
+    };
+    const orphan = (name: string): boolean => {
+      const id = idOf(name);
+      return id !== null && !this.live.has(id);
+    };
+    const names = (out: string) => out.split("\n").map((l) => l.trim()).filter((l) => l !== "");
+    const done = { containers: 0, networks: 0, aclDirs: 0 };
+    const ps = await this.dockerCapture(["ps", "-a", "--filter", "label=org.regulait.sandbox=1", "--format", "{{.Names}}"], 1024 * 1024);
+    if (ps.code === 0) {
+      for (const n of names(ps.out).filter((x) => !EGRESS_NETWORK_NAME.test(x) && orphan(x))) if ((await this.docker(["rm", "-f", n])) === 0) done.containers += 1;
+    }
+    const nets = await this.dockerCapture(["network", "ls", "--filter", "label=org.regulait.sandbox=1", "--format", "{{.Name}}"], 1024 * 1024);
+    if (nets.code === 0) {
+      for (const n of names(nets.out).filter((x) => EGRESS_NETWORK_NAME.test(x) && orphan(x))) if ((await this.docker(["network", "rm", n])) === 0) done.networks += 1;
+    }
+    if (this.egressAclDir) {
+      for (const e of await readdir(this.egressAclDir, { withFileTypes: true }).catch(() => [])) {
+        if (!e.isDirectory() || !SANDBOX_NAME.test(e.name) || this.live.has(e.name)) continue;
+        await rm(path.join(this.egressAclDir, e.name), { recursive: true, force: true }).catch(() => undefined);
+        done.aclDirs += 1;
+      }
+    }
+    return done;
   }
 
   private run(args: string[]): DockerChild {
@@ -879,43 +1043,64 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
     return spawn(this.dockerBin, args, { stdio: ["pipe", "pipe", "pipe"], env });
   }
 
+  /** code review 7: a short docker CLI call that outlives its bound is killed and counts as failed (-1) */
+  private bound(child: DockerChild): Promise<number> {
+    const ms = this.options.dockerTimeoutMs ?? 60_000;
+    return new Promise<number>((resolve) => {
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        resolve(-1);
+      }, ms);
+      timer.unref?.();
+      child.once("error", () => {
+        clearTimeout(timer);
+        resolve(-1);
+      });
+      child.once("exit", (code) => {
+        clearTimeout(timer);
+        resolve(code ?? -1);
+      });
+    });
+  }
+
   private async docker(args: string[]): Promise<number> {
     const child = this.run(args);
     child.stdin.end();
     child.stdout.resume();
     child.stderr.resume();
-    return new Promise((resolve) => {
-      child.once("error", () => resolve(-1));
-      child.once("exit", (code) => resolve(code ?? -1));
-    });
+    return this.bound(child);
   }
 
-  /** ADR-0364 S3: a docker command's stdout and stderr together, at most `max` bytes kept (the rest drained) */
+  /**
+   * ADR-0364 S3: a docker command's stdout and stderr together, within `max` bytes: the whole output, or (code review
+   * 8) its head and its tail with a marker (`capEgressBytes`). At most `max` head bytes and about `max` tail bytes are
+   * held, whatever the output's length.
+   */
   private async dockerCapture(args: string[], max: number): Promise<{ code: number; out: string }> {
     const child = this.run(args);
     child.stdin.end();
-    const parts: Buffer[] = [];
-    let kept = 0;
-    let over = false;
+    const head: Buffer[] = [];
+    let headLen = 0;
+    const tail: Buffer[] = [];
+    let tailLen = 0;
+    let total = 0;
     const take = (c: Buffer | string) => {
       const b = typeof c === "string" ? Buffer.from(c, "utf8") : c;
-      if (kept >= max) {
-        over = true;
-        return;
+      total += b.length;
+      if (headLen < max) {
+        const slice = b.subarray(0, max - headLen);
+        head.push(slice);
+        headLen += slice.length;
       }
-      const slice = b.subarray(0, max - kept);
-      if (slice.length < b.length) over = true;
-      parts.push(slice);
-      kept += slice.length;
+      tail.push(b);
+      tailLen += b.length;
+      while (tail.length > 1 && tailLen - tail[0]!.length >= max) tailLen -= tail.shift()!.length;
     };
     child.stdout.on("data", take);
     child.stderr.on("data", take);
-    const code = await new Promise<number>((resolve) => {
-      child.once("error", () => resolve(-1));
-      child.once("exit", (c) => resolve(c ?? -1));
-    });
-    const text = new TextDecoder("utf-8", { fatal: false }).decode(Buffer.concat(parts));
-    return { code, out: over ? capEgressLog(`${text}\n[regulait: egress log truncated]\n`, max) : text };
+    const code = await this.bound(child);
+    const tailBuf = Buffer.concat(tail);
+    return { code, out: capEgressBytes(Buffer.concat(head), tailBuf.subarray(Math.max(0, tailBuf.length - max)), total, max) };
   }
 
   /**
@@ -943,17 +1128,21 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
       made.network = true;
       if (!egress) return { network, proxyUrl: null, teardown };
       const targets = robotEgressSchema.parse(egress).targets;
-      const net = (await this.api(`/networks/${network}`)) as { Internal?: unknown; IPAM?: { Config?: Array<{ Subnet?: unknown }> } };
-      if (net.Internal !== true) throw new DockerBackendError("the run's network is not internal");
+      const net = (await this.api(`/networks/${network}`)) as { IPAM?: { Config?: Array<{ Subnet?: unknown }> } };
+      // internal, IPv4 only, no host address on it (code review 2): checked on what the daemon made, not assumed
+      const problem = egressNetworkProblem(net);
+      if (problem) throw new DockerBackendError(problem);
       const ip = egressProxyAddress(net.IPAM?.Config?.find((c) => typeof c.Subnet === "string" && c.Subnet.includes("."))?.Subnet);
-      // the ACL, generated in one place from the offer's targets, written 0600 and owned by whoever the proxy runs as
+      // the ACL and the ports file, from the offer's targets, written 0600 and owned by whoever the proxy runs as
       const dir = path.join(this.egressAclDir!, name);
       made.acl = dir;
       await mkdir(dir, { recursive: true, mode: 0o700 });
       const file = path.join(dir, SMOKESCREEN_ACL_FILE);
       await writeFile(file, smokescreenAclForTargets(targets), { mode: 0o600, flag: "wx" });
-      const user = await this.proxyUser(dir, file);
-      const args = proxyRunArgs({ name: proxy, image: this.egressImage!, network, ip, aclVolume: this.egressAclVolume!, aclSubpath: name, user });
+      const ports = path.join(dir, SMOKESCREEN_PORTS_FILE);
+      await writeFile(ports, egressPortsFile(targets), { mode: 0o600, flag: "wx" });
+      const user = await this.proxyUser(dir, [file, ports]);
+      const args = proxyRunArgs({ name: proxy, image: this.egressImage!, network, ip, aclVolume: this.egressAclVolume!, aclSubpath: name, user, runtime: this.egressProxyRuntime });
       const started = await this.docker(args);
       made.proxy = true;
       if (started !== 0) throw new DockerBackendError("the run's egress proxy did not start");
@@ -968,7 +1157,7 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
   }
 
   /** who the proxy runs as: this executor's own uid:gid (the ACL's owner), or, when this executor is root, the configured non-root user, given the ACL */
-  private async proxyUser(dir: string, file: string): Promise<string> {
+  private async proxyUser(dir: string, files: readonly string[]): Promise<string> {
     const uid = typeof process.getuid === "function" ? process.getuid() : 0;
     const gid = typeof process.getgid === "function" ? process.getgid() : 0;
     if (uid !== 0) return `${uid}:${gid}`;
@@ -976,7 +1165,7 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
     const m = /^(\d{1,10}):(\d{1,10})$/.exec(user);
     if (!m || m[1] === "0") throw new DockerBackendError("the egress proxy user must be a non-root uid:gid");
     await chown(dir, Number(m[1]), Number(m[2]));
-    await chown(file, Number(m[1]), Number(m[2]));
+    for (const f of files) await chown(f, Number(m[1]), Number(m[2]));
     return user;
   }
 
@@ -1007,6 +1196,8 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
     // a self-test re-checks the runtime; a placement re-checks whatever the backend caches when it changed
     const rt = await this.preflight(kind === "canary", runtimeName);
     const name = `regulait-sbx-${randomUUID()}`;
+    // code review 7: owned from here (before its input, network or proxy exists) until its cleanup is done
+    this.live.add(name);
     // I5: the input, written and verified under this executor's input volume BEFORE the sandbox exists
     let inputSha256: string | undefined;
     let inputRoot: string | null = null;
@@ -1019,6 +1210,7 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
       } catch (e) {
         // review LOW-2: the sandbox's whole input directory goes, not only the input under it
         await removeTaskInput(inputRoot).catch(() => undefined);
+        this.live.delete(name);
         throw e;
       }
       input = { volume: this.inputVolume!, subpath: `${name}/${declared.name}`, mountPath: declared.mountPath };
@@ -1061,6 +1253,7 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
     } catch (e) {
       await teardownEgress();
       await cleanupInput();
+      this.live.delete(name);
       throw e;
     }
     const child = this.run(args);
@@ -1089,6 +1282,7 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
         await teardownEgress();
         // I5: the task's input goes with its sandbox (the task secret never touched a disk)
         await cleanupInput();
+        this.live.delete(name);
         endedResolve(outcome ?? (oom ? "limit_exceeded" : code === 0 ? "completed" : "failed"));
       })();
     });

@@ -69,7 +69,9 @@ export async function runRobot(deps: RobotRunnerDeps): Promise<number> {
       const work = deps.env.REGULAIT_WORK_DIR || "/work";
       const downloadsPath = path.join(work, "downloads");
       await mkdir(downloadsPath, { recursive: true, mode: 0o700 });
-      const executablePath = deps.env.REGULAIT_ROBOT_CHROMIUM;
+      // the image's baked headless shell (ROBOT_CHROMIUM, given by the sandbox init from the image's ENV); absent =
+      // Playwright's own lookup under PLAYWRIGHT_BROWSERS_PATH
+      const executablePath = deps.env.ROBOT_CHROMIUM;
       browser = await (deps.launch ?? launchRobotBrowser)({ allowedOrigins: plan.allowedOrigins, proxyServer, downloadsPath, ...(executablePath ? { executablePath } : {}) });
     } catch {
       log("browser: not launched");
