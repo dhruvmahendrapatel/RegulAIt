@@ -439,6 +439,8 @@ export interface BuildAppOptions {
    * resolved for every directive read, which is production; null = no signer (the directive route answers 503).
    * Code-only: never env or admin input. */
   directiveSigner?: DirectiveSigner | null;
+  /** ADR-0338 TEST SEAM ONLY (code, never env or admin input): vendor control members and the credential resolver */
+  vendorAgentControl?: VendorAgentControlDeps;
 }
 import { z } from "zod";
 import { boundTargetsForApprovals, registerMcpProxy } from "./mcp-proxy.js";
@@ -662,6 +664,13 @@ import {
   registerEndpointAddonRemovalRoutes,
   type DirectiveSigner,
 } from "./endpoint-addon-removal.js";
+import {
+  applyVendorAgentControlDecision,
+  precheckVendorAgentControlDecision,
+  registerVendorAgentControlRoutes,
+  vendorAgentControlApprovalLabels,
+  type VendorAgentControlDeps,
+} from "./vendor-agent-control.js";
 // ADR-0310 (G2): vendor-native managed settings bundles
 import { registerManagedSettingsRoutes } from "./managed-settings.js";
 import { registerEndpointDecisionRoutes } from "./endpoint-decisions.js";
@@ -4677,6 +4686,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       db,
       rows.filter((r) => r.objectType === "endpoint_addon_removal").map((r) => r.stageId),
     );
+    // ADR-0338: what a vendor agent control action asks the approver to approve
+    const vendorAgentControlLabel = await vendorAgentControlApprovalLabels(
+      db,
+      rows.filter((r) => r.objectType === "vendor_agent_control").map((r) => r.stageId),
+    );
     const sodOverrideLabelFor = (stageId: string | null): string | null => {
       if (!stageId?.startsWith(SOD_OVERRIDE_PREFIX)) return null;
       return sodOverrideById.get(stageId.slice(SOD_OVERRIDE_PREFIX.length)) ?? null;
@@ -4758,6 +4772,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         (r.objectType === "remediation" ? governanceRemediationLabelFor(r.stageId) : null) ??
         (r.objectType === "compliance_profile" ? complianceVersionLabelFor(r.stageId) : null) ??
         (r.objectType === "endpoint_addon_removal" && r.stageId ? (endpointAddonRemovalLabel.get(r.stageId) ?? null) : null) ??
+        (r.objectType === "vendor_agent_control" && r.stageId ? (vendorAgentControlLabel.get(r.stageId) ?? null) : null) ??
         r.toolName ??
         null,
       // ADR-0022: this row reached the caller via an active delegation —
@@ -5260,6 +5275,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const refusal = await precheckEndpointAddonRemovalDecision(db, row, deciderUserId, binaryDecision, input.req);
       if (refusal) return fail(refusal.status, refusal.body);
     }
+    // ADR-0338 — a vendor agent control action: never the requester, only an admin in the pool (no override), and an
+    // `approval_decide` step-up bound to {approvalId, decision, argumentsDigest}
+    if (row.objectType === "vendor_agent_control") {
+      const refusal = await precheckVendorAgentControlDecision(db, row, deciderUserId, binaryDecision, input.req);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
     // ADR-0173 batch 2b — `cannot_approve_own_prompt_commit`, keyed on the
     // DECIDER so the commit's author cannot reach its promotion through
     // delegation or the admin override above.
@@ -5658,6 +5679,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // the approver's step-up is spent here, with those writes. Denied = nothing is ever sent.
       if (updated.objectType === "endpoint_addon_removal") {
         await applyEndpointAddonRemovalDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId, input.req);
+      }
+      // ADR-0338: approved = the action may be executed once by its requester; denied = nothing is ever sent. The
+      // approver's step-up is spent here, with the move.
+      if (updated.objectType === "vendor_agent_control") {
+        await applyVendorAgentControlDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId, input.req);
       }
       if (updated.objectType === "remediation") {
         const applied = await applyRemediationDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
@@ -6376,6 +6402,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0331 — the governed removal of flagged MCP servers from endpoints: create (an `endpoint_remediation` step-up,
   // off until the org switch is on), list, read and cancel. Admin-only by default (none is in NON_ADMIN_ROUTES).
   registerEndpointAddonRemovalRoutes(app, db, { signer: opts.directiveSigner });
+  // ADR-0338: governed vendor agent control. No registry offers a control and no control credential resolves in
+  // production until slice 1b; both come only through the code-only test seam below
+  registerVendorAgentControlRoutes(app, db, opts.vendorAgentControl ?? {});
   registerManagedSettingsRoutes(app, db);
   // ADR-0310 addendum (lane E1): the permission-bypass session view and the managed-file tamper view (admin)
   registerEndpointDecisionRoutes(app, db);
