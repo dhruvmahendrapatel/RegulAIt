@@ -975,6 +975,11 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/builder/toolbox-options": "internal",
   "GET /v1/builder/usage": "internal",
   // ADR-0364 (lane E45 S2) — robots: internal while the runner (S3) and the review screens land
+  // ADR-0232 (lane E49 slice 1): the pipeline step catalogue and governed pipeline runs
+  "GET /v1/pipelines/catalogue": "internal",
+  "POST /v1/pipeline-runs": "internal",
+  "GET /v1/pipeline-runs": "internal",
+  "GET /v1/pipeline-runs/:runId": "internal",
   "GET /v1/robots": "internal",
   "POST /v1/robots": "internal",
   "GET /v1/robots/:robotId": "internal",
@@ -2484,6 +2489,11 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/builder/integrations": "builder",
   "GET /v1/builder/toolbox-options": "builder",
   "GET /v1/builder/usage": "builder",
+  // ADR-0232 (lane E49 slice 1): grouped with the workflow builder they run
+  "GET /v1/pipelines/catalogue": "workflows",
+  "POST /v1/pipeline-runs": "workflows",
+  "GET /v1/pipeline-runs": "workflows",
+  "GET /v1/pipeline-runs/:runId": "workflows",
   "GET /v1/robots": "builder",
   "POST /v1/robots": "builder",
   "GET /v1/robots/:robotId": "builder",
