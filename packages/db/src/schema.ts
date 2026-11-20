@@ -1912,6 +1912,8 @@ export const auditLog = pgTable(
         "robot",
         "robot_version",
         "robot_secret",
+        // ADR-0232 (lane E49 slice 1): a pipeline run (objectId = the run). Plain text column — no DDL.
+        "pipeline_run",
         // ADR-0173 batch 2c (K): a KRI or a monitoring dashboard created /
         // changed / deleted, and an automation rule created / changed /
         // paused / backfilled / matched (objectId = the row). Plain text — no DDL.
@@ -19758,6 +19760,78 @@ export const customClassifierHashKey = pgTable(
   (t) => [check("custom_classifier_hash_key_singleton_check", sql`${t.id}`)],
 );
 // ===== end ADR-0363 slice 2 =====
+
+// ===== ADR-0232 §3–§5, lane E49 slice 1: pipeline runs (migration pending/workflow_template_pipeline_runs.sql) =====
+// A pipeline run is one governed run of one published workflow-template version (ADR-0341), started through the
+// workflow engine's one instance-creation path. `status` is PIPELINE_RUN_MACHINE; its settling states are a read model
+// of `workflow_instances.status` (the source of truth). Runs are never deleted; steps are append-only. RLS ENABLED and
+// FORCED on both: the requester and an admin read, an admin request or the system writes.
+import { PIPELINE_RUN_STATES as PIPELINE_RUN_STATES_E49 } from "@regulait/shared";
+
+export const pipelineRuns = pgTable(
+  "pipeline_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    templateVersionId: uuid("template_version_id")
+      .notNull()
+      .references(() => workflowTemplateVersions.id, { onDelete: "restrict" }),
+    workflowInstanceId: uuid("workflow_instance_id").references(() => workflowInstances.id, { onDelete: "restrict" }),
+    requestedBy: uuid("requested_by")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "restrict" }),
+    trigger: text("trigger", { enum: ["manual"] }).notNull().default("manual"),
+    idempotencyKey: text("idempotency_key"),
+    status: text("status", { enum: PIPELINE_RUN_STATES_E49 }).notNull().default("requested"),
+    refusalCode: text("refusal_code"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("pipeline_runs_instance_uq").on(t.workflowInstanceId),
+    uniqueIndex("pipeline_runs_idempotency_uq").on(t.requestedBy, t.idempotencyKey),
+    index("pipeline_runs_status_created_idx").on(t.status, t.createdAt.desc(), t.id),
+    index("pipeline_runs_requested_by_idx").on(t.requestedBy, t.createdAt.desc()),
+    index("pipeline_runs_version_idx").on(t.templateVersionId),
+    index("pipeline_runs_project_idx").on(t.projectId),
+    check("pipeline_runs_trigger_check", sql`${t.trigger} IN ('manual')`),
+    check("pipeline_runs_status_check", sql`${t.status} IN ('requested', 'running', 'succeeded', 'failed', 'cancelled', 'refused')`),
+    check("pipeline_runs_idempotency_key_check", sql`${t.idempotencyKey} IS NULL OR ${t.idempotencyKey} ~ '^[A-Za-z0-9._:-]{1,128}$'`),
+    check("pipeline_runs_refusal_code_check", sql`${t.refusalCode} IS NULL OR ${t.refusalCode} ~ '^[a-z_]{1,64}$'`),
+    check("pipeline_runs_instance_check", sql`(${t.status} = 'requested' OR ${t.status} = 'refused') = (${t.workflowInstanceId} IS NULL)`),
+    check("pipeline_runs_refusal_check", sql`(${t.status} = 'refused') = (${t.refusalCode} IS NOT NULL)`),
+  ],
+);
+export type PipelineRunRow = typeof pipelineRuns.$inferSelect;
+
+export const pipelineRunSteps = pgTable(
+  "pipeline_run_steps",
+  {
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => pipelineRuns.id, { onDelete: "restrict" }),
+    ordinal: integer("ordinal").notNull(),
+    attempt: integer("attempt").notNull().default(1),
+    stageId: text("stage_id").notNull(),
+    /** point-in-time snapshot (ADR-0200 exception): the catalogue step type and class the step started under */
+    stepType: text("step_type").notNull(),
+    writes: boolean("writes").notNull(),
+    autoRetry: boolean("auto_retry").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ name: "pipeline_run_steps_pk", columns: [t.runId, t.ordinal, t.attempt] }),
+    uniqueIndex("pipeline_run_steps_stage_uq").on(t.runId, t.stageId, t.attempt),
+    check("pipeline_run_steps_ordinal_check", sql`${t.ordinal} >= 0 AND ${t.ordinal} < 200`),
+    check("pipeline_run_steps_attempt_check", sql`${t.attempt} >= 1`),
+    check("pipeline_run_steps_stage_id_check", sql`char_length(${t.stageId}) BETWEEN 1 AND 128`),
+    check("pipeline_run_steps_step_type_check", sql`${t.stepType} ~ '^[a-z_]{1,64}$'`),
+    check("pipeline_run_steps_retry_check", sql`NOT (${t.writes} AND ${t.autoRetry})`),
+  ],
+);
+export type PipelineRunStepRow = typeof pipelineRunSteps.$inferSelect;
+// ===== end ADR-0232 lane E49 slice 1 =====
 
 /*
  * ADR-0315 (G7; migration agent_credential_audiences) — the portable agent credential's registered audiences

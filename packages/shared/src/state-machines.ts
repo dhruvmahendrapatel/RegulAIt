@@ -751,6 +751,53 @@ export const ENDPOINT_ADDON_TARGET_MACHINE = defineMachine({
   },
 });
 
+/** `pipeline_runs.status` (ADR-0232 §3–§5 as built by lane E49 slice 1). A pipeline run is one governed run of one
+ * published workflow-template version (ADR-0341): it never executes anything itself. `start` is recorded in the same
+ * transaction as the workflow instance the governed start path (`startWorkflowInstanceWithTemplates`) created, and
+ * `refuse` when that path refused (nothing ran). The settling events are observed from the instance's own terminal
+ * status: `completed` succeeds, `aborted` cancels, `denied` and `rolled_back` fail. */
+export const PIPELINE_RUN_STATES = ["requested", "running", "succeeded", "failed", "cancelled", "refused"] as const;
+export type PipelineRunState = (typeof PIPELINE_RUN_STATES)[number];
+export const PIPELINE_RUN_MACHINE = defineMachine({
+  id: "pipeline_run",
+  stored: "pipeline_runs.status",
+  states: PIPELINE_RUN_STATES,
+  initial: ["requested"],
+  terminal: ["succeeded", "failed", "cancelled", "refused"],
+  transitions: {
+    start: {
+      from: ["requested"],
+      to: "running",
+      by: ["system"],
+      summary: "The governed workflow start accepted the run and created its workflow instance.",
+    },
+    refuse: {
+      from: ["requested"],
+      to: "refused",
+      by: ["system"],
+      summary: "The governed workflow start refused the run (a retired template, attribution, a missing approver); nothing ran.",
+    },
+    succeed: {
+      from: ["running"],
+      to: "succeeded",
+      by: ["system"],
+      summary: "The workflow instance completed.",
+    },
+    fail: {
+      from: ["running"],
+      to: "failed",
+      by: ["system"],
+      summary: "The workflow instance was denied at a sign-off or rolled back.",
+    },
+    cancel: {
+      from: ["running"],
+      to: "cancelled",
+      by: ["system"],
+      summary: "The workflow instance was aborted.",
+    },
+  },
+});
+
 /** Every declared machine, by id: the one list an agent or a document reads. */
 export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string>>> = Object.freeze({
   [TRAINING_JOB_MACHINE.def.id]: TRAINING_JOB_MACHINE,
@@ -773,6 +820,7 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [VENDOR_USAGE_PULL_RUN_MACHINE.def.id]: VENDOR_USAGE_PULL_RUN_MACHINE,
   [ENDPOINT_ADDON_REMOVAL_MACHINE.def.id]: ENDPOINT_ADDON_REMOVAL_MACHINE,
   [ENDPOINT_ADDON_TARGET_MACHINE.def.id]: ENDPOINT_ADDON_TARGET_MACHINE,
+  [PIPELINE_RUN_MACHINE.def.id]: PIPELINE_RUN_MACHINE,
   // ADR-0338: a governed disable, quarantine or restore of an agent inside its vendor platform
   [VENDOR_ACTION_MACHINE.def.id]: VENDOR_ACTION_MACHINE,
 } as Record<string, StateMachine<string, string>>);
