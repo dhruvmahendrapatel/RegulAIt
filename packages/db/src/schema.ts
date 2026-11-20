@@ -19617,8 +19617,8 @@ export const agentCredentialAudiences = pgTable(
   "agent_credential_audiences",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    /** the exact `aud` value (an https URI) */
-    audience: text("audience").notNull().unique(),
+    /** the exact `aud` value (an https URI); unique among ENABLED rows (partial index below) */
+    audience: text("audience").notNull(),
     name: text("name").notNull(),
     algorithm: text("algorithm", { enum: AGENT_CREDENTIAL_ALGORITHMS }).notNull().default("ES256"),
     binding: text("binding", { enum: AGENT_CREDENTIAL_BINDINGS }).notNull().default("dpop"),
@@ -19629,6 +19629,8 @@ export const agentCredentialAudiences = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    // one enabled registration per URI; a disabled row is terminal, so the URI can be registered again (ADR-0315)
+    uniqueIndex("agent_credential_audiences_audience_enabled_uq").on(t.audience).where(sql`${t.disabledAt} IS NULL`),
     check("agent_credential_audiences_algorithm_check", sql`${t.algorithm} IN ('ES256', 'EdDSA')`),
     check("agent_credential_audiences_binding_check", sql`${t.binding} IN ('dpop', 'bearer')`),
     check("agent_credential_audiences_ttl_check", sql`${t.maxTtlSeconds} BETWEEN 60 AND 900`),

@@ -24,13 +24,16 @@ CREATE TABLE IF NOT EXISTS "agent_credential_audiences" (
   "disabled_at" timestamp with time zone,
   "created_by_user_id" uuid REFERENCES "users"("id") ON DELETE SET NULL,
   "created_at" timestamp with time zone DEFAULT now() NOT NULL,
-  CONSTRAINT "agent_credential_audiences_audience_unique" UNIQUE ("audience"),
   CONSTRAINT "agent_credential_audiences_algorithm_check" CHECK ("algorithm" IN ('ES256', 'EdDSA')),
   CONSTRAINT "agent_credential_audiences_binding_check" CHECK ("binding" IN ('dpop', 'bearer')),
   CONSTRAINT "agent_credential_audiences_ttl_check" CHECK ("max_ttl_seconds" BETWEEN 60 AND 900),
   CONSTRAINT "agent_credential_audiences_audience_check" CHECK (char_length("audience") BETWEEN 9 AND 512 AND "audience" LIKE 'https://%'),
   CONSTRAINT "agent_credential_audiences_name_check" CHECK (char_length("name") BETWEEN 1 AND 120)
 );
+--> statement-breakpoint
+-- One ENABLED registration per audience URI. A disabled row is terminal (AUDIENCE_TRANSITIONS) and keeps its issued
+-- rows; re-enabling is a new registration with its own step-up, so the same URI may be registered again once disabled.
+CREATE UNIQUE INDEX IF NOT EXISTS "agent_credential_audiences_audience_enabled_uq" ON "agent_credential_audiences" ("audience") WHERE "disabled_at" IS NULL;
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "agent_credential_audience_scopes" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,

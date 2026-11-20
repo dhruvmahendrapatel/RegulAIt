@@ -197,6 +197,23 @@ describe("ADR-0315 agent credential", () => {
     expect((await (await session(agentCredentialAudienceStepUpArgs(body)))("POST", "/v1/agent-credentials/audiences", body)).statusCode).toBe(409);
   });
 
+  it("lets a disabled audience URI be registered again, as a new registration (R4 finding 1)", async () => {
+    const body: AgentCredentialAudienceCreate = {
+      audience: `https://reregister.vendor.test/${RUN}`, name: "re-registered", algorithm: "ES256", binding: "dpop", maxTtlSeconds: 300,
+      scopes: [{ type: "agent", agentId: x, kind: "write", scope: "x.invoke" }],
+    };
+    const first = await register(body);
+    expect((await inject("POST", `/v1/agent-credentials/audiences/${first}/disable`, AUTH, {})).statusCode).toBe(200);
+    // disabled is terminal: disabling again is refused, and the row stays disabled
+    expect((await inject("POST", `/v1/agent-credentials/audiences/${first}/disable`, AUTH, {})).statusCode).toBe(404);
+    const second = await register(body);
+    expect(second).not.toBe(first);
+    const rows = await db.select().from(agentCredentialAudiences).where(eq(agentCredentialAudiences.audience, body.audience));
+    expect(rows.map((r) => [r.id === first, r.disabledAt !== null]).sort()).toEqual([[false, false], [true, true]]);
+    // while the new registration is enabled, the URI is taken again
+    expect((await (await session(agentCredentialAudienceStepUpArgs(body)))("POST", "/v1/agent-credentials/audiences", body)).statusCode).toBe(409);
+  });
+
   it("mints a credential that verifies offline, carries the chain, and never more than the grant", async () => {
     const sponsor = await inject("POST", "/v1/users", AUTH, { email: `ac315-ivy-${RUN}@example.com`, displayName: "ivy" });
     const ivy = sponsor.json().id as string;

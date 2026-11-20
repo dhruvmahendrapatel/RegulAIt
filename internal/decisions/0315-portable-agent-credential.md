@@ -199,7 +199,9 @@ The `regulait_*` claims are private names (RFC 7519 §4.3), held until a standar
 
 An audience is `enabled` or `disabled`, derived from `disabled_at` and declared once in `AUDIENCE_TRANSITIONS`
 (`apps/gateway/src/agent-credential.ts`). `disabled` is terminal: re-enabling would widen issuance, so it is a new
-registration with its own step-up. Minting and the disable route both read that table. The issued credential's
+registration with its own step-up, and the audience URI may be registered again once disabled: the URI is unique
+only among enabled rows (a partial unique index). The disabled row keeps its issued rows. Minting and the disable
+route both read that table. The issued credential's
 lifecycle (issued → revoked) is declared with revocation in slice 2.
 
 ## Consequences

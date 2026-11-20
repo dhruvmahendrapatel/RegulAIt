@@ -24,7 +24,7 @@ import {
   agentCredentialDiscoveryDocument,
   type AgentCredentialAudienceCreate,
 } from "@regulait/shared";
-import { agentCredentialAudiences, agentCredentialAudienceScopes, agents, auditLog, connectors, desc, eq, inArray, isNull, mcpServers, sql, type Db } from "@regulait/db";
+import { agentCredentialAudiences, and, agentCredentialAudienceScopes, agents, auditLog, connectors, desc, eq, inArray, isNull, mcpServers, sql, type Db } from "@regulait/db";
 import { AUDIENCE_TRANSITIONS, agentCredentialIssuer, audienceIssues, audienceState } from "./agent-credential.js";
 import { jwksDocument, publishedSigningKeys } from "./identity-signing-keys.js";
 import { requireStepUp } from "./step-up.js";
@@ -103,8 +103,8 @@ export function registerAgentCredentialRoutes(app: FastifyInstance, db: Db): voi
     if (!(await found(mcpServers, srv)) || !(await found(connectors, con)) || !(await found(agents, agt))) {
       return reply.status(400).send({ error: "unknown_resource", detail: "a scope mapping names a server, connector or agent that does not exist" });
     }
-    const [taken] = await db.select({ id: agentCredentialAudiences.id }).from(agentCredentialAudiences).where(eq(agentCredentialAudiences.audience, body.audience));
-    if (taken) return reply.status(409).send({ error: "conflict", detail: "this audience is already registered" });
+    const [taken] = await db.select({ id: agentCredentialAudiences.id }).from(agentCredentialAudiences).where(and(eq(agentCredentialAudiences.audience, body.audience), isNull(agentCredentialAudiences.disabledAt)));
+    if (taken) return reply.status(409).send({ error: "conflict", detail: "this audience is already registered and enabled" });
     const su = await requireStepUp(db, req, reply, agentCredentialAudienceStepUpArgs(body));
     if (!su.ok) return reply;
     const relaxations = [...(body.binding === "bearer" ? ["bearer"] : []), ...(body.maxTtlSeconds > AGENT_CREDENTIAL_TTL_DEFAULT_SECONDS ? ["lifetime"] : [])];
