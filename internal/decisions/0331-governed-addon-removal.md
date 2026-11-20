@@ -283,6 +283,29 @@ Coverage follows the MCP hosts whose config files the signed collection manifest
   second person, and the developer is told what was removed and from where, so they or their admin can add it back. A
   backup in the agent's state directory and a signed restore directive are a follow-up, filed as an issue.
 
+## Addendum (slice 3, 2026-11-20): the shared device-policy key signs directives
+
+Lane E13 adopts the ADR-0334 device-policy signer (owner decision B4) and closes #1033.
+
+- **The signer.** With no injected signer (the production wiring), the directive route resolves the shared
+  device-policy key (`resolveDevicePolicySigner`) for every read and adapts it (`devicePolicyDirectiveSigner`,
+  `directive-signer.ts`). A rotation of the active key applies to the next read. No key, or a key file that does not
+  parse, answers `503 directive_signer_unavailable`, and nothing is served. The key is never created here: it is the
+  operator's key file or the install key created when browser governance is turned on (ADR-0334 §4). The list read
+  reports `signerConfigured` and `signerKeyId`, so an admin knows which key a device must pin (`devicePolicyKeys`,
+  ADR-0330 §8). buildApp's code-only seam can still inject a signer, or `null` for none.
+- **Domain separation.** A directive's signature is over `regulait.endpoint-directive/1` and a NUL byte, then the
+  payload bytes (`DIRECTIVE_SIGNATURE_DOMAIN`; the agent's `directive.SignatureDomain` and
+  `enforce.VerifyEnvelopeInDomain`). Policies stay signed over the bare JSON, which starts with `{`, so a directive's
+  signature never verifies as a policy and a policy's never verifies as a directive, under the one key. The envelope
+  and the golden payload are unchanged. No directive was ever signed before this change, so nothing is re-signed.
+- **Idempotency key.** `POST /v1/discovery/endpoint-addon-removals` accepts an optional `Idempotency-Key` (the shared
+  ADR-0179 store, scope `endpoint-addon-removal`). A retry with the same key and body replays the first removal (200,
+  `Idempotent-Replay: true`) without spending a grant or queueing a second approval; the same key with another body is
+  `422 idempotency_key_reused`. A refusal rolls the claim back, so the key can be used again once the cause is fixed.
+  The stored claim keeps only the removal id and the two counts, never request text.
+- **Open source first (ADR-0176).** Nothing new: Node's and Go's Ed25519 and the repository's idempotency store.
+
 ## Consequences
 
 - **Agent.** An org can, deliberately and visibly, take a flagged MCP server off its developers' machines. The agent's
@@ -290,8 +313,8 @@ Coverage follows the MCP hosts whose config files the signed collection manifest
   agent's identity verifies.
 - **Gateway.** It gains one org switch, one step-up kind, one approval kind, one external-write operation, three tables,
   two declared machines, four admin routes and two agent routes. Every write is audited.
-- **Until SD4.** The whole path is inert unless an admin pins a device-policy key on the device and the gateway has a
-  signer: until both exist, no directive is delivered or verified.
+- **Until a key is pinned.** The whole path is inert unless the gateway has a device-policy key (slice 3) and an admin
+  pins it on the device: until both exist, no directive is delivered or verified.
 
 ## Numbering
 

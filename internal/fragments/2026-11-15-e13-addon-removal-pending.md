@@ -7,12 +7,8 @@
   policy's `denyServers` once ADR-0298 policy content is delivered (SD4).
 - **JSONC and TOML configs.** VS Code `settings.json`, Zed and Codex `config.toml` are reported `unsupported_format`.
   Editing them safely needs a format-preserving editor that meets ADR-0176.
-- **Directive signer.** It is the ADR-0195 SD4 key ceremony. Until a key is pinned in `enforce.CompiledKeyring` and
-  the gateway has a signer, the whole path is inert.
+- **Device-policy key for directives.** Built in slice 3 (ADR-0331 addendum): the shared ADR-0334 key signs them. The
+  key is not created when removal is turned on; it comes from the operator's file or from turning browser governance
+  on. Generating it on the removal switch's first enable is a small follow-up if an org uses removal alone.
 - **Restore a removed entry** (review of #871, F6 × S4). Keep the removed entry's JSON in the agent's state directory
   and add a signed restore directive; recorded as a decision in ADR-0331 ("Not in this slice").
-- **Domain separation of the device-policy signature** (review of #871, F2 × S4). One signer signs policies and
-  directives, kept apart today by their `schema` member; add a domain prefix to the signed bytes when the shared signer
-  lands (#867), on both the gateway and the agent, with the golden payload.
-- **Idempotency key on the removal request** (review of #871, F3 × S2). A retried POST after a lost answer queues a
-  second approval; accept an `Idempotency-Key` as other create routes do.
