@@ -6,7 +6,7 @@
  * imports the shared module at test time and fails on any drift.
  *
  * What the gateway serves today (read at `isolation-routes.ts`):
- *  - `GET /v1/org/settings`: the eight isolation settings (I1, built).
+ *  - `GET /v1/org/settings`: the nine isolation settings (I1, built; ADR-0364 S3 adds the robot_browser floor).
  *  - `GET /v1/executors`: executors with the gateway's own freshness verdict
  *    per profile digest, judged on the database clock (I3, built).
  *  - `GET /v1/execution-profiles` and `GET /v1/execution-placements` (I2,
@@ -113,7 +113,7 @@ export function isSetting(key: SettingKey, value: unknown): boolean {
   return isClass(value);
 }
 
-/** all eight reported and valid; otherwise the card is unmeasured and read-only */
+/** all nine reported and valid; otherwise the card is unmeasured and read-only */
 export const settingsComplete = (settings: Record<string, unknown> | null): settings is Record<SettingKey, string | number> =>
   settings !== null && SETTING_KEYS.every((key) => isSetting(key, settings[key]));
 
