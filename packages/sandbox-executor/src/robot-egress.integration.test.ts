@@ -29,7 +29,7 @@
  *  - the reconciler runs at the first preflight: do not run this on a daemon that hosts a live executor's sandboxes.
  */
 import { execFileSync, spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomInt } from "node:crypto";
 import { createSocket, type Socket as UdpSocket } from "node:dgram";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:net";
@@ -141,7 +141,7 @@ function udp(host, port) {
 
 describe.skipIf(!enabled)(`a robot run's egress ${why}`, () => {
   const id = randomBytes(4).toString("hex");
-  const third = 10 + (randomBytes(1)[0]! % 240);
+  const third = randomInt(10, 250);
   const subnet = `10.250.${third}.0/24`;
   const uplinkGw = `10.250.${third}.1`;
   const targetIp = `10.250.${third}.10`;
