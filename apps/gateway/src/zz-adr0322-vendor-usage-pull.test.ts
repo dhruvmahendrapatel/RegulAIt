@@ -785,7 +785,8 @@ describe("ADR-0322 slice 4a: AWS CUR 2.0, Bedrock lines (static key path; federa
       seen = [];
       const { run } = await runVendorUsagePull(db, c.id, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl, resolve }, now: NOW });
       expect([run.status, run.errorCode]).toEqual(["refused", "no_credential"]);
-      expect(seen.filter((x) => x.url.hostname.endsWith("amazonaws.com"))).toHaveLength(0);
+      // no request at all leaves: the federation token is refused before STS or S3 is called
+      expect(seen).toHaveLength(0);
     } finally {
       if (saved !== undefined) process.env.REGULAIT_PUBLIC_URL = saved;
     }
