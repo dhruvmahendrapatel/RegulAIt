@@ -204,7 +204,7 @@ describe("ADR-0195 SD0 discovery foundation", () => {
     const k = await inject("GET", "/v1/discovery/scanners", AUTH, undefined, bare);
     expect(k.statusCode).toBe(200);
     const kinds = k.json().kinds as Array<{ kind: string; built: boolean }>;
-    expect(kinds.filter((x) => x.built).map((x) => x.kind).sort()).toEqual(["agent_registry_agentcore", "agent_registry_copilot_studio", "agent_registry_entra", "agent_registry_gemini", "cloud_aws", "cloud_azure", "cloud_gcp", "endpoint_agent", "endpoint_inventory", "endpoint_osquery", "entitlement_google_workspace", "entitlement_m365", "idp_entra", "ml_mlflow", "repo_azure_devops", "repo_bitbucket", "repo_github", "repo_gitlab", "saas_inventory_api"]);
+    expect(kinds.filter((x) => x.built).map((x) => x.kind).sort()).toEqual(["agent_registry_agentcore", "agent_registry_agentforce", "agent_registry_copilot_studio", "agent_registry_entra", "agent_registry_gemini", "cloud_aws", "cloud_azure", "cloud_gcp", "endpoint_agent", "endpoint_inventory", "endpoint_osquery", "entitlement_google_workspace", "entitlement_m365", "idp_entra", "ml_mlflow", "repo_azure_devops", "repo_bitbucket", "repo_github", "repo_gitlab", "saas_inventory_api"]);
     // SD4b built the last ADR-0195 kind; ADR-0337's Salesforce and Slack readers come in its slice 2. A kind outside
     // the closed set is refused before any write.
     expect(kinds.filter((x) => !x.built).map((x) => x.kind).sort()).toEqual(["entitlement_salesforce", "entitlement_slack"]);
