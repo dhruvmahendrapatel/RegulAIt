@@ -35,6 +35,7 @@ import {
   MCP_IDENTITY_OIDC_JWKS_PATH,
   AGENT_CREDENTIAL_DISCOVERY_PATH,
   AGENT_CREDENTIAL_JWKS_PATH,
+  AGENT_CREDENTIAL_STATUS_PATH,
   IDENTITY_JWKS_PATH,
   SUPPLIER_ROUTE_PATHS,
   SUPPLIER_ROUTES,
@@ -149,6 +150,9 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // NON_ADMIN_ROUTES too, so `public`.
   AGENT_CREDENTIAL_DISCOVERY_PATH,
   AGENT_CREDENTIAL_JWKS_PATH,
+  // ADR-0315 slice 2 — its signed Token Status List: public by definition (the same verifier fetches it to learn of a
+  // revocation or a kill). Bits and a signature only; no credential, grant or identity is named in it.
+  AGENT_CREDENTIAL_STATUS_PATH,
   // ADR-0182 (D4) A13 — a PUBLIC SIGNED FEEDBACK LINK: the one D4 exemption.
   // People outside the organisation, who hold no RegulAIt credential, report a
   // problem or appeal a decision through a link a use-case owner minted. The
@@ -964,6 +968,7 @@ export const NON_ADMIN_ROUTES = new Set([
   // ADR-0315 (G7) — the agent credential issuer's public metadata (auth-exempt above too)
   `GET ${AGENT_CREDENTIAL_DISCOVERY_PATH}`,
   `GET ${AGENT_CREDENTIAL_JWKS_PATH}`,
+  `GET ${AGENT_CREDENTIAL_STATUS_PATH}`,
   `POST ${OAUTH_TOKEN_PATH}`,
   `POST ${OAUTH_REVOCATION_PATH}`,
   `POST ${OAUTH_INTROSPECTION_PATH}`,

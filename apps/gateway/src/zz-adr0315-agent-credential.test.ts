@@ -73,6 +73,12 @@ const agentIds: string[] = [];
 type Method = "GET" | "POST";
 const inject = (method: Method, url: string, headers: Record<string, string>, payload?: unknown) =>
   app.inject({ method, url, headers, ...(payload === undefined ? {} : { payload: payload as object }) });
+/** the verifier's status-list fetch, through the real public route */
+const statusList = async (uri: string) => {
+  const r = await inject("GET", new URL(uri).pathname, {});
+  if (r.statusCode !== 200) throw new Error(`status list ${r.statusCode}`);
+  return r.body;
+};
 
 async function session(args?: StepUpCheckArgs) {
   const token = "rgls_" + randomBytes(32).toString("hex");
@@ -235,7 +241,7 @@ describe("ADR-0315 agent credential", () => {
 
     const minted = await mintAgentCredential(db, { grantId: leafGrant, audienceId: aud!.id, holderJkt: jkt, dataKey: DATA_KEY });
     const jwks = (await inject("GET", "/agent-credentials/.well-known/jwks.json", {})).json() as JSONWebKeySet;
-    const opts = { jwks, issuer: ISSUER, audience: aud!.audience, algorithm: "ES256" as const, binding: "dpop" as const, holderJkt: jkt };
+    const opts = { jwks, issuer: ISSUER, audience: aud!.audience, algorithm: "ES256" as const, binding: "dpop" as const, holderJkt: jkt, statusList };
     expect(jwks.keys.find((k) => k.kid === minted.kid)).toMatchObject({ alg: "ES256", kty: "EC" });
     expect(jwks.keys.some((k) => "d" in k)).toBe(false);
     const claims = await verifyAgentCredential(minted.token, opts);
@@ -277,7 +283,7 @@ describe("ADR-0315 agent credential", () => {
     const bearer = await register({ audience: `https://gw.vendor.test/${RUN}`, name: "gateway", algorithm: "EdDSA", binding: "bearer", maxTtlSeconds: 120, scopes: [{ type: "agent", agentId: x, kind: "write", scope: "x" }] });
     const ed = await mintAgentCredential(db, { grantId: leafGrant, audienceId: bearer, holderJkt: null, dataKey: DATA_KEY });
     const jwks = (await inject("GET", "/agent-credentials/.well-known/jwks.json", {})).json() as JSONWebKeySet;
-    const edClaims = await verifyAgentCredential(ed.token, { jwks, issuer: ISSUER, audience: `https://gw.vendor.test/${RUN}`, algorithm: "EdDSA", binding: "bearer" });
+    const edClaims = await verifyAgentCredential(ed.token, { jwks, issuer: ISSUER, audience: `https://gw.vendor.test/${RUN}`, algorithm: "EdDSA", binding: "bearer", statusList });
     expect(edClaims.cnf).toBeUndefined();
     expect(edClaims.exp - edClaims.iat).toBe(120);
     const [relaxed] = await db.select().from(auditLog).where(eq(auditLog.objectId, bearer));
