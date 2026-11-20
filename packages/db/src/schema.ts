@@ -19409,7 +19409,7 @@ export type RobotRunRow = typeof robotRuns.$inferSelect;
 // ===== ADR-0333 (lane E15): rule-based detection of risky agent behaviour =========================================
 export const DETECTION_SEVERITIES = ["low", "medium", "high", "critical"] as const;
 export const DETECTION_INCIDENT_STATUSES = ["open", "acknowledged", "closed"] as const;
-export const DETECTION_RESPONSES = ["alert", "suspend_grant", "revoke_credential", "require_approval"] as const;
+export const DETECTION_RESPONSES = ["alert", "suspend_grant", "revoke_credential", "require_approval", "quarantine_device"] as const;
 export const DETECTION_RESPONSE_STATES = ["none", "done", "failed"] as const;
 
 /**
@@ -19521,7 +19521,7 @@ export const detectionIncidents = pgTable(
     check("detection_incidents_status_check", sql`${t.status} IN ('open', 'acknowledged', 'closed')`),
     check(
       "detection_incidents_response_check",
-      sql`${t.response} IN ('alert', 'suspend_grant', 'revoke_credential', 'require_approval')`,
+      sql`${t.response} IN ('alert', 'suspend_grant', 'revoke_credential', 'require_approval', 'quarantine_device')`,
     ),
     check("detection_incidents_response_state_check", sql`${t.responseState} IN ('none', 'done', 'failed')`),
     check("detection_incidents_historical_alert_check", sql`NOT ${t.historical} OR ${t.response} = 'alert'`),
@@ -19567,6 +19567,54 @@ export const detectionDegradedMarks = pgTable(
     ),
   ],
 );
+
+/** ADR-0333 §6 (slice 3): `endpoint_device_quarantines.status`, the ADR-0348 machine ENDPOINT_DEVICE_QUARANTINE_MACHINE */
+export const ENDPOINT_DEVICE_QUARANTINE_STATUSES = ["active", "released", "expired"] as const;
+
+/**
+ * One quarantine a `quarantine_device` detection response opened (migration `agent_detection_device_quarantine`,
+ * pending). While `active`, the device's AI tools are refused (ADR-0333 §6). It ends once: `released` by an admin with a
+ * step-up, or `expired` by the sweep at `expires_at`; both are widening, so both wait for the `normal` execution dial
+ * (ADR-0338 §7 `killSwitchNarrowingOnly`). At most one is active per device. Every column is a fact of this row; the
+ * device, incident and releasing admin are foreign keys (3NF, ADR-0200).
+ */
+export const endpointDeviceQuarantines = pgTable(
+  "endpoint_device_quarantines",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => endpointDevices.id, { onDelete: "cascade" }),
+    incidentId: uuid("incident_id")
+      .notNull()
+      .references(() => detectionIncidents.id, { onDelete: "restrict" }),
+    status: text("status", { enum: ENDPOINT_DEVICE_QUARANTINE_STATUSES }).notNull().default("active"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+    releasedBy: uuid("released_by").references(() => users.id, { onDelete: "set null" }),
+    /** the step-up method the releasing admin used (a fixed code, never a secret) */
+    releaseStepUp: text("release_step_up"),
+  },
+  (t) => [
+    unique("endpoint_device_quarantines_incident_uq").on(t.incidentId),
+    check("endpoint_device_quarantines_status_check", sql`${t.status} IN ('active', 'released', 'expired')`),
+    check("endpoint_device_quarantines_expiry_check", sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} <= ${t.createdAt} + interval '30 days'`),
+    check(
+      "endpoint_device_quarantines_ended_check",
+      sql`(${t.status} = 'active') = (${t.endedAt} IS NULL) AND (${t.endedAt} IS NULL OR ${t.endedAt} >= ${t.createdAt})`,
+    ),
+    check(
+      "endpoint_device_quarantines_release_check",
+      sql`(${t.status} = 'released') = (${t.releaseStepUp} IS NOT NULL) AND (${t.releasedBy} IS NULL OR ${t.status} = 'released')`,
+    ),
+    check("endpoint_device_quarantines_step_up_check", sql`${t.releaseStepUp} IS NULL OR ${t.releaseStepUp} ~ '^[a-z_]{1,32}$'`),
+    uniqueIndex("endpoint_device_quarantines_one_active_uq").on(t.deviceId).where(sql`${t.status} = 'active'`),
+    index("endpoint_device_quarantines_expiry_idx").on(t.expiresAt).where(sql`${t.status} = 'active'`),
+    index("endpoint_device_quarantines_created_idx").on(t.createdAt, t.id),
+  ],
+);
+export type EndpointDeviceQuarantineRow = typeof endpointDeviceQuarantines.$inferSelect;
 // ===== end ADR-0333 =================================================================================================
 
 // ===== ADR-0363 slice 2 (lane E44): customer classifiers — migration `custom_classifiers` (pending, numbered at merge) =====

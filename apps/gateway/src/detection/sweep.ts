@@ -27,6 +27,7 @@ const SYSTEM_ACTOR = "00000000-0000-0000-0000-000000000000";
 import { episodeKey, evaluateDetections, raisedKey, type DetectionEpisodes, type DetectionEvent, type DetectionMatch } from "./engine.js";
 import { DETECTION_INCIDENT_MACHINE, DETECTION_RESPONSE_MACHINE } from "@regulait/shared";
 import { runDetectionResponse, type DetectionResponseTarget } from "./responses.js";
+import { expireQuarantines } from "./quarantine.js";
 import { DEFAULT_DETECTION_PACK, packDigest, parseDetectionPack, verifyDetectionPack, type DetectionPack } from "./pack.js";
 
 export const DETECTION_SWEEP_JOB_NAME = "agent-detection-sweep";
@@ -148,10 +149,15 @@ const toEvent = (r: EventRow): FreshEvent => {
   return { ...rest, seq: Number(r.seq), at: Number(atMs), addonSeverity: addonSeverity(r.addonSeverity, skillSeverityRank) };
 };
 
+/** ADR-0333 §6: an endpoint hook decision (ADR-0310 addendum) is grouped by its DEVICE, not by its user column, which
+ * is the nil sentinel for every device; before slice 3 every device's decisions fell into one `user:` group. */
+export const ENDPOINT_GROUP_PREFIX = "endpoint:";
+
 /** the event projection: the group key, the data-scope flag and the add-on's admission severity, from one row */
 const EVENT_SELECT = sql`
   a.id AS "auditId", a.seq AS seq, (extract(epoch FROM a.at) * 1000)::float8 AS "atMs",
   CASE WHEN a.delegation_grant_id IS NOT NULL THEN 'grant:' || coalesce(g.root_grant_id, a.delegation_grant_id)::text
+       WHEN a.object_type = 'endpoint_device' AND a.object_id IS NOT NULL THEN 'endpoint:' || a.object_id::text
        ELSE 'user:' || a.user_id::text END AS "group",
   a.user_id AS "userId", a.object_type AS "objectType", a.effect AS effect, a.rule_id AS "ruleId",
   a.tool_name AS "toolName", a.server_id AS "serverId", a.detail->>'phase' AS phase,
@@ -183,6 +189,8 @@ export interface DetectionSweepResult {
   responses: number;
   packVersion: number | null;
   lookbackTruncated: boolean;
+  /** ADR-0333 §6: device quarantines that reached their end time and ended (only under the `normal` dial) */
+  quarantinesExpired: number;
   /** ADR-0333 D2: history rows replayed in this pass, and whether the replay has finished */
   replayed: number;
   replayComplete: boolean;
@@ -260,6 +268,7 @@ export async function runDetectionSweep(db: Db, actorUserId: string | null): Pro
     responses: 0,
     packVersion: active.version,
     lookbackTruncated: false,
+    quarantinesExpired: 0,
     replayed: 0,
     replayComplete: false,
   };
@@ -275,6 +284,8 @@ export async function runDetectionSweep(db: Db, actorUserId: string | null): Pro
     result.rowsRead += live;
     // configured responses run for live incidents only (replayed ones are historical and alert-only)
     result.responses += await runPendingResponses(db, actorUserId);
+    // ADR-0333 §6: end quarantines past their time; widening, so a non-normal dial keeps them in force
+    result.quarantinesExpired = (await expireQuarantines(db, actorUserId ?? SYSTEM_ACTOR)).expired;
     result.replayComplete = claimed.replayCursor >= claimed.replayUntil;
     if (!result.replayComplete) {
       const replayed = await runRange(db, token, active, "replay", claimed.replayCursor, claimed.replayUntil, maxSpanSeconds, result);
@@ -343,13 +354,19 @@ async function evaluateBatch(
     // the scan never walks the whole chain backwards (review of #865).
     const users = [...new Set(fresh.map((e) => e.userId))];
     const userList = sql`ARRAY[${sql.join(users.map((u) => sql`${u}`), sql`, `)}]::uuid[]`;
+    // endpoint groups share the nil user, so their rows are narrowed to the fresh devices too (ADR-0333 §6)
+    const devices = groups.filter((g) => g.startsWith(ENDPOINT_GROUP_PREFIX)).map((g) => g.slice(ENDPOINT_GROUP_PREFIX.length));
+    const deviceFilter =
+      devices.length === 0
+        ? sql`AND a.object_type <> 'endpoint_device'`
+        : sql`AND (a.object_type <> 'endpoint_device' OR a.object_id = ANY(ARRAY[${sql.join(devices.map((d) => sql`${d}`), sql`, `)}]::uuid[]))`;
     const perGroup = DETECTION_SWEEP_LIMITS.lookbackRowsPerGroup;
     const loaded = await rows<EventRow & { rn: number | string }>(
       db,
       sql`SELECT * FROM (
             SELECT w.*, row_number() OVER (PARTITION BY w."group" ORDER BY w.seq DESC) AS rn FROM (
               SELECT ${EVENT_SELECT} ${EVENT_FROM}
-              WHERE a.user_id = ANY(${userList}) AND a.at >= to_timestamp(${since / 1000}::float8)
+              WHERE a.user_id = ANY(${userList}) AND a.at >= to_timestamp(${since / 1000}::float8) ${deviceFilter}
                 AND a.seq <= ${cursor} AND a.seq IS NOT NULL AND ${NOT_OWN}
             ) w WHERE w."group" = ANY(${groupList})
           ) r WHERE r.rn <= ${perGroup + 1}
@@ -402,7 +419,8 @@ async function runPendingResponses(db: Db, actorUserId: string | null): Promise<
   const pending = await rows<Omit<DetectionResponseTarget, "auditUserId">>(
     db,
     sql`SELECT i.id AS "incidentId", i.rule_id AS "ruleId", i.response AS response, i.group_key AS "groupKey",
-               i.user_id AS "userId", i.actor_identity_id AS "actorIdentityId", p.created_by AS "packAuthor"
+               i.user_id AS "userId", i.actor_identity_id AS "actorIdentityId", p.created_by AS "packAuthor",
+               (SELECT r->'quarantineHours' FROM jsonb_array_elements(p.pack->'rules') r WHERE r->>'id' = i.rule_id LIMIT 1) AS "quarantineHours"
         FROM detection_incidents i LEFT JOIN detection_rule_packs p ON p.version = i.pack_version
         WHERE i.response <> 'alert' AND i.response_state IN (${sql.join(DETECTION_RESPONSE_MACHINE.def.states.filter((st) => !DETECTION_RESPONSE_MACHINE.isTerminal(st)).map((st) => sql`${st}`), sql`, `)})
         ORDER BY i.created_at, i.id LIMIT 100`,

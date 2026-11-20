@@ -27,6 +27,10 @@
       "types": "./dist/approval-rule-cedar.d.ts",
       "default": "./dist/approval-rule-cedar.js"
     },
+    "./resource-approval-rule-cedar": {
+      "types": "./dist/resource-approval-rule-cedar.d.ts",
+      "default": "./dist/resource-approval-rule-cedar.js"
+    },
     "./detection-cedar": {
       "types": "./dist/detection-cedar.d.ts",
       "default": "./dist/detection-cedar.js"
