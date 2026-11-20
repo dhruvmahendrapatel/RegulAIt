@@ -70,9 +70,12 @@ RegulAIt computes each list fresh from its own records. A credential's entry cha
 | The organisation's kill switch is set to `halted` | SUSPENDED, VALID again when it is lifted |
 | A workload identity in the chain is suspended, or the person is disabled | SUSPENDED |
 
-You learn of a change within the list's `ttl` (60 seconds), plus up to 10 seconds of caching at RegulAIt. The
-credential's short lifetime limits the window if you cannot fetch the list at all. The kill switch also stops new
-credentials at once.
+You learn of a change within about 80 seconds at worst, if you refetch at the list's `ttl`. That is up to 60 seconds of
+your own caching (the `ttl`), up to 10 seconds of HTTP caching (`max-age=10`), and up to 10 seconds in which a RegulAIt
+server keeps a list it already signed. A revocation by `jti` clears that copy on the server that handled it, but
+another server can still answer with its copy for those 10 seconds. A list is never usable after its `exp` (120
+seconds after it was signed). The credential's short lifetime limits the window if you cannot fetch the list at all.
+The kill switch also stops new credentials at once.
 
 ## Gateway configuration
 

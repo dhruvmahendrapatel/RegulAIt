@@ -239,12 +239,22 @@ describe("ADR-0315 slice 2: status list, revocation and the kill switch", () => 
     const audits = await db.select().from(auditLog).where(sql`${auditLog.ruleId} = 'agent-credential-revoked' AND ${auditLog.detail}->>'jti' = ${a.jti}`);
     expect(audits).toHaveLength(1);
     expect(audits[0]!.reason).toContain("key leaked");
-    const list = await inject("GET", `/v1/agent-credentials/issued?grantId=${leafGrant}&limit=2`, AUTH);
-    expect(list.statusCode, list.body).toBe(200);
-    expect(list.json().credentials.map((c: { jti: string; state: string }) => [c.jti, c.state])).toEqual([[b.jti, "issued"], [a.jti, "revoked"]]);
-    const next = await inject("GET", `/v1/agent-credentials/issued?grantId=${leafGrant}&limit=2&before=${list.json().next}`, AUTH);
-    expect(next.json().credentials.length).toBeGreaterThan(0);
-    expect((await inject("GET", "/v1/agent-credentials/issued?limit=999", AUTH)).statusCode).toBe(400);
+    // the ADR-0226 list contract: filters, the default newest-first sort, offset paging, a count and the export
+    type Item = { jti: string; state: string };
+    const page = await inject("GET", `/v1/agent-credentials/issued?grantId=${leafGrant}&limit=10&count=exact`, AUTH);
+    expect(page.statusCode, page.body).toBe(200);
+    const all = page.json().items as Item[];
+    expect(page.json().total).toBe(all.length);
+    expect(all.slice(0, 2).map((c) => [c.jti, c.state])).toEqual([[b.jti, "issued"], [a.jti, "revoked"]]);
+    const revoked = await inject("GET", `/v1/agent-credentials/issued?grantId=${leafGrant}&state=revoked&limit=10`, AUTH);
+    expect((revoked.json().items as Item[]).map((c) => c.jti)).toEqual([a.jti]);
+    const first = await inject("GET", `/v1/agent-credentials/issued?grantId=${leafGrant}&limit=10&sort=issued&dir=asc`, AUTH);
+    expect((first.json().items as Item[]).map((c) => c.jti)).toEqual(all.map((c) => c.jti).reverse());
+    const xlsx = await inject("GET", `/v1/agent-credentials/issued/export.xlsx?grantId=${leafGrant}&columns=jti,state`, AUTH);
+    expect(xlsx.statusCode, xlsx.body.slice(0, 200)).toBe(200);
+    expect(xlsx.headers["content-type"]).toContain("spreadsheetml");
+    // NEGATIVE CONTROLS: a page size the contract does not offer, an unknown filter, an unknown sort, an unknown state
+    for (const q of ["limit=999", "before=1", "sort=jti", "state=expired"]) expect((await inject("GET", `/v1/agent-credentials/issued?${q}`, AUTH)).statusCode, q).toBe(400);
   });
 
   it("propagates the kill switch: SUSPENDED while an agent or the org is halted, VALID once lifted", async () => {
