@@ -194,6 +194,24 @@ The routes are API only; screens are tracked on #453.
 - ADR-0069's "there is no vendor billing-API client in this repository" and ADR-0076's "Still no polling" are no
   longer true for tenants that opt in. Both ADRs' status lines point here.
 
+## Owner decisions for slice 4a, AWS Bedrock spend (2026-11-20, answered in lane E7)
+
+Asked by the lane E7 builder before building the `aws_cur` connector; the owner answered each question directly.
+
+1. **Credentials**: the federated role (the customer's role trusts RegulAIt's federation issuer,
+   `AssumeRoleWithWebIdentity`, audience `sts.amazonaws.com`) and a static access-key pair, the latter as an audited
+   relaxation with its own acknowledgement. The "RegulAIt principal plus external id" mode is left to a later PR.
+2. **Restatement**: a pull **replaces the connector's lines for each billing month it re-reads**. A line that is no
+   longer in AWS's restated file is withdrawn, not kept stale.
+3. **Money**: `line_item_unblended_cost`, matching the ADR-0069 CUR file import. Every line item type is kept (usage,
+   credits, refunds, tax), with the type recorded on the line.
+4. **Identity**: an IAM principal maps to a person only through an admin alias. An email-shaped role session name is
+   never resolved automatically, because the caller chooses it.
+
+Defaults the builder chose, recorded for review: the connector expects a dedicated Bedrock-only CUR 2.0 export (a
+whole-estate export at a large organisation exceeds the per-run bounds), and failures reuse the existing run error
+codes (`no_credential` when federation is off, `bad_response` for a Parquet export), so no migration is needed.
+
 ## As built — slice 2 (2026-11-15): foundation, Anthropic and OpenAI
 
 Migration `pending/vendor_usage_pull.sql` (numbered at merge); code in `apps/gateway/src/vendor-usage-pull.ts` and
