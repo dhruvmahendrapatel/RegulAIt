@@ -276,7 +276,7 @@ export const DISCOVERY_SCANNERS: ScannerRegistry = scannerRegistry([
   // ADR-0337 (E18): entitlement_m365, entitlement_google_workspace (Salesforce and Slack follow in slice 2)
   ...SAAS_ENTITLEMENT_SCANNERS,
   // ADR-0314 (G6) and ADR-0336 (E17): the agent_registry family, built from the one agent platform adapter list
-  // (agent_registry_entra, agent_registry_gemini, agent_registry_agentcore, agent_registry_copilot_studio, agent_registry_agentforce)
+  // (agent_registry_entra, agent_registry_gemini, agent_registry_agentcore, agent_registry_copilot_studio, agent_registry_agentforce, agent_registry_openai, agent_registry_n8n)
   ...AGENT_PLATFORM_SCANNERS,
 ]);
 

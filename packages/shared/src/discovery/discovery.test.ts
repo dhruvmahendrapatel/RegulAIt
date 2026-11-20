@@ -52,7 +52,7 @@ describe("ADR-0195 SD0 discovery vocabulary", () => {
 
   it("ADR-0314: every agent registry kind reports no evidence or subject kind, names at least one registry, and is gated off by default", () => {
     const registryKinds = DISCOVERY_SOURCE_KINDS.filter((k) => DISCOVERY_KIND_SPECS[k].family === "agent_registry");
-    expect([...registryKinds].sort()).toEqual(["agent_registry_agentcore", "agent_registry_agentforce", "agent_registry_copilot_studio", "agent_registry_entra", "agent_registry_gemini"]);
+    expect([...registryKinds].sort()).toEqual(["agent_registry_agentcore", "agent_registry_agentforce", "agent_registry_copilot_studio", "agent_registry_entra", "agent_registry_gemini", "agent_registry_n8n", "agent_registry_openai"]);
     for (const k of registryKinds) {
       expect(DISCOVERY_KIND_SPECS[k].evidenceKinds).toEqual([]);
       expect(DISCOVERY_KIND_SPECS[k].subjectKinds).toEqual([]);
