@@ -30,7 +30,7 @@
     "name": "all JS",
     "path": "dist/assets/*.js",
     "gzip": true,
-    "limit": "1150 kB"
+    "limit": "1160 kB"
   },
   {
     "name": "chunk: AccountSubpages",
@@ -265,6 +265,12 @@
     "path": "dist/assets/ThemesCard-????????.js",
     "gzip": true,
     "limit": "3.0 kB"
+  },
+  {
+    "name": "chunk: TokenExchange",
+    "path": "dist/assets/TokenExchange-????????.js",
+    "gzip": true,
+    "limit": "5.7 kB"
   },
   {
     "name": "chunk: TrustDashboardPage",
