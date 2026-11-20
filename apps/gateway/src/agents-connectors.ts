@@ -192,7 +192,7 @@ import {
   type SemanticCacheKey,
   type SemanticCacheHit,
 } from "./semantic-cache-shared.js";
-import { switchedRuleAnswer } from "./rule-step-serve.js";
+import { recordRuleStepSaving, switchedRuleAnswer } from "./rule-step-serve.js";
 import { loadInterceptionSettings } from "./compat-core.js";
 import { customProviderDisabledRefusal, resolveCustomProviderForDispatch } from "./custom-providers.js";
 import { resolveArtifactProviderForDispatch } from "./regulait-llm.js";
@@ -4336,21 +4336,13 @@ export function registerAgentConnectorRoutes(
             });
         }
         // No usage_events: nothing was spent. The ledger records the saving.
-        await db.insert(costEvents).values({
+        await recordRuleStepSaving(db, {
           userId,
-          objectType: "agent",
-          objectId: agent.id,
-          technique: "rule_replacement",
           requestedAgentId: agent.id,
           servedAgentId: agent.id,
-          baselineAgentId: agent.id,
-          estimatedCostSavedUsd: ruleAnswer.avgCostPerRunUsd,
-          estimationBasis:
-            "rule-replacement: a switched rule-like step answered by its approved exact-match rule — the step's " +
-            "measured average AI cost per run over its scan window saved (null when no run was priced)",
-          ruleId: "rule-step-served",
-          projectId,
-          detail: { ...ruleStep, surface: "invoke" },
+          projectId: projectId ?? null,
+          ruleAnswer,
+          surface: "invoke",
         });
         await db.insert(auditLog).values({
           userId,
