@@ -123,6 +123,10 @@ export function federationUnsupportedReason(kind: string): string | null {
   if (kind === "agent_registry_agentforce") {
     return "Salesforce accepts no external OIDC token, so a federated credential cannot work; store the connected app's private key in static mode (a relaxation, confirmed with a step-up)";
   }
+  // ADR-0336: an OpenAI Compliance API key and an n8n API key are API keys only; neither vendor federates
+  if (kind === "agent_registry_openai" || kind === "agent_registry_n8n") {
+    return "this platform accepts no external OIDC token, so a federated credential cannot work; store its API key in static mode (a relaxation, confirmed with a step-up, recorded with an unverified scope)";
+  }
   return null;
 }
 

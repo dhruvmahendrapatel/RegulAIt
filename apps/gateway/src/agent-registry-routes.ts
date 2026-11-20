@@ -27,6 +27,8 @@ export const REGISTRY_PROVIDER: Readonly<Record<AgentRegistry, string>> = Object
   bedrock_agentcore: "aws",
   copilot_studio: "microsoft",
   agentforce: "salesforce",
+  openai_gpts: "openai",
+  n8n: "n8n",
 });
 
 export const AGENT_REGISTRY_PAGE_MAX = 200;

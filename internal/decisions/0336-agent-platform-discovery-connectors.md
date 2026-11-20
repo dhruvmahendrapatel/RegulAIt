@@ -36,7 +36,7 @@ against fakes):
 | Copilot Studio | Dataverse Web API per environment: `GET {org}/api/data/v9.2/bots`, `botcomponents` (by `_parentbotid_value`), `connectionreferences` | Entra app-only token for the environment (`@azure/identity`, federated by default) as a Dataverse application user | `WhoAmI` then `RetrieveUserPrivileges`: refused if any Create, Write, Delete, Append, AppendTo, Assign or Share privilege is held |
 | Agentforce | REST and Tooling SOQL `GET …/query?q=`: `BotDefinition` (`AgentType`), `BotVersion`, `GenAiPlannerDefinition`, `GenAiPluginDefinition` (topics), `GenAiFunctionDefinition` (actions) | OAuth 2.0 JWT bearer flow for an integration user (assertion signed with `jose`) | `UserPermissionAccess`: refused if `ModifyAllData`, `CustomizeApplication` or any permission on a fixed write list is true |
 | OpenAI (ChatGPT) | Compliance API listing of the workspace's custom GPTs (configuration, owner, actions, files metadata) | Compliance API key, static (the vendor offers no federation) | none the vendor exposes: reported `unverified` on the run |
-| n8n | Public API `GET /api/v1/workflows?excludePinnedData=true` (cursor-paged) | `X-N8N-API-KEY`, static | none the API exposes: `unverified`; the source's docs ask for a key with only `workflow:read` |
+| n8n | Public API `GET /api/v1/workflows?excludePinnedData=true` (cursor-paged) | `X-N8N-API-KEY`, static | `GET /api/v1/discover` lists the key's scopes on n8n 2.14+ (found in slice 3): any non-read scope refuses it; older instances: `unverified`; the source's docs ask for a key with only `workflow:list` and `workflow:read` |
 
 Why not the obvious Microsoft endpoint: the Power Platform **inventory API** (`resourcequery/resources/query`) returns
 every Copilot Studio agent tenant-wide with model and connectors, but Microsoft documents (2026-11) that it accepts
@@ -158,7 +158,7 @@ reply, 2026-08), so a GPT's connected apps are what its configured actions name,
    - **Every adapter enforces a fixed endpoint allow-list in code.** Each adapter's fetch wrapper, on top of the
      guarded fetch, admits only the (method, path template) pairs the adapter declares, and refuses anything else
      before the request leaves:
-     - n8n: `GET /api/v1/workflows` only;
+     - n8n: `GET /api/v1/workflows`, and (slice 3) `GET /api/v1/discover` for the key's scope check, only;
      - OpenAI: the Compliance API GPT listing endpoint(s) only;
      - Copilot Studio: `GET` on the Dataverse `WhoAmI`, `RetrieveUserPrivileges`, `bots`, `botcomponents` and
        `connectionreferences` paths only;
@@ -242,6 +242,43 @@ reply, 2026-08), so a GPT's connected apps are what its configured actions name,
   - **Run-as user:** staged as a pseudonym only.
 - **Migration:** `pending/vendor_agent_platform_components_agentforce.sql` widens the kind and registry CHECKs. It is
   named to sort after slice 1's file, which re-creates the same CHECKs.
+
+## Slice 3 as built
+
+- **OpenAI:** `agent-registry-openai.ts`, kind `agent_registry_openai`, registry `openai_gpts`, provider `openai`.
+  - **Read:** `GET https://api.chatgpt.com/v1/compliance/workspaces/{workspaceId}/gpts`, `limit=20` (OpenAI's documented
+    default; its reference names no maximum), `file_format=id` (file ids, never download URLs), paged by passing
+    `last_id` back as `after` after a shape check. Live workspace GPTs only: the listing excludes drafts and
+    third-party GPTs.
+  - **Components:** built-in tools (`tool`), custom actions as `connected_app` by domain (sign-in `oauth` → supplied
+    by the end user, a stored key → by the maker), knowledge files by id and name (`knowledge`). There is no model
+    row: the Compliance API does not report one.
+  - **Kept fields:** pinned in `OPENAI_GPT_FIELDS`. `instructions`, `conversation_starters`, `description`,
+    `categories`, `action_openapi_raw` and file content are never kept. The owner is a pseudonym of the owner's email.
+  - **Credential:** static, an admin key with `chatgpt.enterprise.compliance_export: read`; always `unverified`.
+- **n8n:** `agent-registry-n8n.ts`, kind `agent_registry_n8n`, registry `n8n`, provider `n8n`.
+  - **Agent:** a workflow is staged when a node in it receives an `ai_languageModel` connection. Its components are
+    the nodes feeding such a root over `ai_languageModel` (model), `ai_tool` (tool; MCP client as `mcp_server` by
+    origin; vector store as `knowledge`), `ai_vectorStore`, `ai_retriever` or `ai_document` (knowledge), plus the
+    credential references of every node (`connected_app`, type and id, supplied by the maker).
+  - **Kept fields:** from a node, only its id, name, type, disabled flag, model name and MCP endpoint origin; a system
+    message, a tool parameter or pinned data is never kept.
+  - **Paging:** `nextCursor`, shape-checked, is passed back as `cursor` on the adapter's own URL. A target may carry
+    a path prefix, and the allow-list is built under it.
+  - **Scope check (a finding of slice 3, tightening decision 5):** n8n 2.14+ answers `GET /api/v1/discover` with
+    the key's scopes. Any scope that is not `:read` or `:list` refuses the key before a workflow is read; read scopes
+    only record `read_only`; an instance without the endpoint, or one that lists no scopes, stays `unverified`.
+- **The recorded relaxation (decision 5):** `DISCOVERY_SCOPE_UNVERIFIABLE_KINDS` in `@regulait/shared` declares the two
+  kinds once. The stored-secret step-up, the enable step-up and the credential-on-enabled-source step-up each carry
+  `credentialScope: "unverified"` in their binding, and a grant confirmed without it is refused. The credential-stored
+  and source-enabled audit rows carry the same field, and the source view and its credential view carry
+  `credentialScope` (`unverified` or `checked`). Other kinds' bindings are unchanged. Setup and key-breadth guidance
+  is in `docs/deployment/AGENT_PLATFORM_DISCOVERY.md`.
+- **Migration:** `pending/vendor_agent_platform_components_openai_n8n.sql` widens the kind and registry CHECKs. It is
+  named to sort after slice 2's file.
+- **Known limits (slice 3):** OpenAI is moving custom GPTs to workspace agents and plugins, and its Compliance API has
+  separate listings for those, which this slice does not read yet. A failed page ends an OpenAI run, because the run
+  has one listing; nothing is then staged or marked absent.
 
 ## Open-source check (ADR-0176)
 

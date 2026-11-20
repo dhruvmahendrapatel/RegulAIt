@@ -42,6 +42,8 @@ export const DISCOVERY_SOURCE_KINDS = [
   // ADR-0336 (lane E17): agents built in low-code agent platforms, through one adapter per vendor (same family)
   "agent_registry_copilot_studio",
   "agent_registry_agentforce",
+  "agent_registry_openai",
+  "agent_registry_n8n",
 ] as const;
 export type DiscoverySourceKind = (typeof DISCOVERY_SOURCE_KINDS)[number];
 
@@ -154,6 +156,8 @@ export const DISCOVERY_KIND_SPECS: Readonly<Record<DiscoverySourceKind, Discover
   // ADR-0336 (E17): the agent platforms; each also stages the agent's components (agent_registry_record_components)
   agent_registry_copilot_studio: { family: "agent_registry", evidenceKinds: [], subjectKinds: [], slice: "E17", label: "Copilot Studio agents (Power Platform Dataverse)" },
   agent_registry_agentforce: { family: "agent_registry", evidenceKinds: [], subjectKinds: [], slice: "E17", label: "Salesforce Agentforce agents" },
+  agent_registry_openai: { family: "agent_registry", evidenceKinds: [], subjectKinds: [], slice: "E17", label: "OpenAI ChatGPT custom GPTs (Compliance API)" },
+  agent_registry_n8n: { family: "agent_registry", evidenceKinds: [], subjectKinds: [], slice: "E17", label: "n8n AI agent workflows" },
 });
 
 /**
@@ -161,7 +165,7 @@ export const DISCOVERY_KIND_SPECS: Readonly<Record<DiscoverySourceKind, Discover
  * an `agent_registry_entra` source reads Entra Agent ID identities and, when its target asks, the Agent 365 catalogue.
  * The adapter interface is per registry, so another vendor (an Atlassian agent account directory) adds one value.
  */
-export const AGENT_REGISTRIES = ["entra_agent_id", "agent_365", "gemini_enterprise", "bedrock_agentcore", "copilot_studio", "agentforce"] as const;
+export const AGENT_REGISTRIES = ["entra_agent_id", "agent_365", "gemini_enterprise", "bedrock_agentcore", "copilot_studio", "agentforce", "openai_gpts", "n8n"] as const;
 export type AgentRegistry = (typeof AGENT_REGISTRIES)[number];
 export const AGENT_REGISTRY_LABELS: Readonly<Record<AgentRegistry, string>> = Object.freeze({
   entra_agent_id: "Microsoft Entra Agent ID",
@@ -170,6 +174,8 @@ export const AGENT_REGISTRY_LABELS: Readonly<Record<AgentRegistry, string>> = Ob
   bedrock_agentcore: "AWS Bedrock AgentCore",
   copilot_studio: "Copilot Studio",
   agentforce: "Salesforce Agentforce",
+  openai_gpts: "OpenAI ChatGPT custom GPTs",
+  n8n: "n8n",
 });
 /** which registries a source kind may report records for; anything else is refused by the worker */
 export const AGENT_REGISTRIES_BY_KIND: Readonly<Partial<Record<DiscoverySourceKind, readonly AgentRegistry[]>>> = Object.freeze({
@@ -178,6 +184,8 @@ export const AGENT_REGISTRIES_BY_KIND: Readonly<Partial<Record<DiscoverySourceKi
   agent_registry_agentcore: ["bedrock_agentcore"],
   agent_registry_copilot_studio: ["copilot_studio"],
   agent_registry_agentforce: ["agentforce"],
+  agent_registry_openai: ["openai_gpts"],
+  agent_registry_n8n: ["n8n"],
 });
 
 /**
@@ -223,6 +231,19 @@ export type DiscoveryWriteScopeObservation = "read_only" | "write" | "unverified
 export function nextDiscoveryWriteScope(current: DiscoveryWriteScopeState, observed: DiscoveryWriteScopeObservation | undefined): DiscoveryWriteScopeState | null {
   const to: DiscoveryWriteScopeState | null = observed === "write" ? "refused" : observed === "read_only" ? "read_only" : null;
   return to !== null && DISCOVERY_WRITE_SCOPE_TRANSITIONS[current].includes(to) ? to : null;
+}
+
+/**
+ * ADR-0336 decision 5: the kinds whose credential scope no API lets RegulAIt check (an OpenAI Compliance API key; an
+ * n8n API key, which on the community edition carries full scope). Such a credential is accepted only as a recorded
+ * relaxation (ADR-0180): every step-up that stores or enables it names `credentialScope: "unverified"` in its binding
+ * and its audit row, and the source's API representation carries the same field. Its runs report `unverified`.
+ */
+export const DISCOVERY_SCOPE_UNVERIFIABLE_KINDS: readonly DiscoverySourceKind[] = Object.freeze(["agent_registry_openai", "agent_registry_n8n"]);
+export type DiscoveryCredentialScope = "checked" | "unverified";
+/** whether a kind's credential scope is checked on each run (`checked`) or cannot be (`unverified`) */
+export function discoveryCredentialScope(kind: string): DiscoveryCredentialScope {
+  return (DISCOVERY_SCOPE_UNVERIFIABLE_KINDS as readonly string[]).includes(kind) ? "unverified" : "checked";
 }
 
 export const DISCOVERY_RUN_STATUSES = ["queued", "running", "succeeded", "failed"] as const;
@@ -477,6 +498,10 @@ export const DISCOVERY_PUBLIC_CONFIG: Readonly<Record<DiscoverySourceKind, Reado
     federated: {},
     static: { consumerKey: { shape: "salesforce_consumer_key", required: true }, username: { shape: "email", required: true } },
   },
+  // ADR-0336: an OpenAI Compliance API key and an n8n API key are the secret, with nothing public beside them; the
+  // workspace id and the base URL are the source's target. Neither vendor accepts an external OIDC token.
+  agent_registry_openai: { federated: {}, static: {} },
+  agent_registry_n8n: { federated: {}, static: {} },
   // ADR-0336: Dataverse through the same Entra app registration (an application user in each environment)
   agent_registry_copilot_studio: {
     federated: { tenantId: { shape: "guid", required: true }, clientId: { shape: "guid", required: true } },
