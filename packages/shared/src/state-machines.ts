@@ -10,6 +10,7 @@ import { INCIDENT_STATUSES } from "./accountability.js";
 import { ENDPOINT_COMMAND_EXCEPTION_MACHINE } from "./endpoint-command-exceptions.js";
 import { CLASSIFIER_VERSION_STATUSES } from "./custom-classifiers.js";
 import { AGENT_NHI_LINK_STATUSES } from "./agent-identity.js";
+import { VENDOR_ACTION_MACHINE } from "./vendor-agent-control.js";
 
 /** `training_jobs.status` (ADR-0065). Same values as `TRAINING_JOB_STATUSES` in @regulait/db. */
 export const TRAINING_JOB_MACHINE = defineMachine({
@@ -743,4 +744,6 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [VENDOR_USAGE_PULL_RUN_MACHINE.def.id]: VENDOR_USAGE_PULL_RUN_MACHINE,
   [ENDPOINT_ADDON_REMOVAL_MACHINE.def.id]: ENDPOINT_ADDON_REMOVAL_MACHINE,
   [ENDPOINT_ADDON_TARGET_MACHINE.def.id]: ENDPOINT_ADDON_TARGET_MACHINE,
+  // ADR-0338: a governed disable, quarantine or restore of an agent inside its vendor platform
+  [VENDOR_ACTION_MACHINE.def.id]: VENDOR_ACTION_MACHINE,
 } as Record<string, StateMachine<string, string>>);

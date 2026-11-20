@@ -5075,6 +5075,7 @@ export * from "./fairness.js";
 // ADR-0348: declared lifecycle state machines (one transition table each; agents read `describe`)
 export * from "./state-machine.js";
 export * from "./state-machines.js";
+export * from "./vendor-agent-control.js";
 export * from "./robots.js";
 // ADR-0261 (P37): third-party security telemetry ingest — the DefenseClaw JSONL parser and mapping (pure)
 export * from "./third-party-ingest/index.js";
