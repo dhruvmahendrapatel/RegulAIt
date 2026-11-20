@@ -502,7 +502,7 @@ async function fetchAwsCur(key: string, config: AwsCurPublicConfig, ctx: AwsFetc
     const read = await readAwsCurPeriod({ fetch: fetcher, credentials, parseManifest: (raw) => awsCurManifestSchema.parse(raw) }, target, period, (text) => {
       const out = normalizeAwsCurCsv(text, period, config, groups);
       rows += out.rows;
-      if (rows > AWS_CUR_MAX_ROWS) throw new PullError("page_limit", `the export has more than ${AWS_CUR_MAX_ROWS} rows in this window; use a Bedrock-only export`);
+      if (rows > AWS_CUR_MAX_ROWS) throw new PullError("page_limit", `the export has more than ${AWS_CUR_MAX_ROWS} rows in this window; use an export limited to the configured product codes`);
     });
     files += read.files;
     if (!read.delivered) continue;
