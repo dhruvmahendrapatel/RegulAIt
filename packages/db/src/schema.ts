@@ -3590,6 +3590,8 @@ export const costEvents = pgTable(
         "lazy_tool_loading",
         "semantic_caching",
         "request_batching",
+        // ADR-0327 slice 4b: a switched rule-like step answered by its approved rule
+        "rule_replacement",
       ],
     }).notNull(),
     requestedAgentId: uuid("requested_agent_id"),
