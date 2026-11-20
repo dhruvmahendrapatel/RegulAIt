@@ -30,6 +30,11 @@ export const SALESFORCE_JWT_MIN_RSA_BITS = 2048;
 /** the identity URL in the token response names the org and the session's user: `…/id/<org id>/<user id>` */
 const IDENTITY_USER = /\/id\/[A-Za-z0-9]{15,18}\/([A-Za-z0-9]{15,18})$/;
 
+/** an RSA key of at least SALESFORCE_JWT_MIN_RSA_BITS; anything else (another key type, a short modulus) is refused */
+export function rsaKeyStrongEnough(type: string | undefined, modulusBits: number | undefined): boolean {
+  return type === "rsa" && typeof modulusBits === "number" && modulusBits >= SALESFORCE_JWT_MIN_RSA_BITS;
+}
+
 export interface SalesforceSession {
   accessToken: string;
   /** the integration user the token acts as, from the response's identity URL (an 18- or 15-character id) */
@@ -55,8 +60,8 @@ export interface SalesforceJwtInput {
 export async function salesforceJwtToken(kind: string, i: SalesforceJwtInput): Promise<SalesforceSession> {
   let key: Awaited<ReturnType<typeof importPKCS8>>;
   try {
-    const details = createPrivateKey({ key: i.privateKeyPem.trim(), format: "pem" }).asymmetricKeyDetails;
-    if ((details?.modulusLength ?? 0) < SALESFORCE_JWT_MIN_RSA_BITS) throw new Error("short key");
+    const k = createPrivateKey({ key: i.privateKeyPem.trim(), format: "pem" });
+    if (!rsaKeyStrongEnough(k.asymmetricKeyType, k.asymmetricKeyDetails?.modulusLength)) throw new Error("not a strong RSA key");
     key = await importPKCS8(i.privateKeyPem.trim(), "RS256");
   } catch {
     throw new WiderSourceConfigError(`${kind}: the stored secret is not an RSA private key of at least ${SALESFORCE_JWT_MIN_RSA_BITS} bits in PKCS#8 PEM form`);

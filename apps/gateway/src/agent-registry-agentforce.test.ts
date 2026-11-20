@@ -9,7 +9,7 @@ import { createLocalJWKSet, exportJWK, importSPKI, jwtVerify } from "jose";
 import { describe, expect, it } from "vitest";
 import type { ScanContext, ScanSource } from "./discovery-scanners.js";
 import { WRITE_SYSTEM_PERMISSIONS, AGENTFORCE_ENDPOINTS, AGENTFORCE_QUERIES, AGENTFORCE_SCANNER, agentforceTargetProblem, objectWriteQuery } from "./agent-registry-agentforce.js";
-import { SALESFORCE_JWT_LIFETIME_S } from "./salesforce-jwt.js";
+import { SALESFORCE_JWT_LIFETIME_S, rsaKeyStrongEnough } from "./salesforce-jwt.js";
 import { checkRegistryAgents } from "./agent-registry-records.js";
 
 const ORIGIN = "https://acme.my.salesforce.com";
@@ -301,11 +301,18 @@ describe("ADR-0336 agent_registry_agentforce: the read", () => {
     const bad = run({}, {}, { mode: "static", publicConfig: { consumerKey: CONSUMER_KEY, username: USERNAME }, secret: "not a key" });
     await expect(bad.promise).rejects.toThrow(/PKCS#8/);
     expect(bad.calls.urls).toEqual([]);
-    // #1111 S4 [2]: an RSA key under 2048 bits is refused
-    const short = generateKeyPairSync("rsa", { modulusLength: 1024, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey;
-    const weak = run({}, {}, { mode: "static", publicConfig: { consumerKey: CONSUMER_KEY, username: USERNAME }, secret: short });
-    await expect(weak.promise).rejects.toThrow(/at least 2048 bits/);
-    expect(weak.calls.urls).toEqual([]);
+    // #1111 S4 [2]: only an RSA key of at least 2048 bits is used. A non-RSA key is refused end to end; the modulus
+    // bound is proven on the predicate, so no weak key is ever generated here
+    const ec = generateKeyPairSync("ec", { namedCurve: "P-256", privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey;
+    const notRsa = run({}, {}, { mode: "static", publicConfig: { consumerKey: CONSUMER_KEY, username: USERNAME }, secret: ec });
+    await expect(notRsa.promise).rejects.toThrow(/at least 2048 bits/);
+    expect(notRsa.calls.urls).toEqual([]);
+    expect(rsaKeyStrongEnough("rsa", 2048)).toBe(true);
+    expect(rsaKeyStrongEnough("rsa", 4096)).toBe(true);
+    expect(rsaKeyStrongEnough("rsa", 2047)).toBe(false);
+    expect(rsaKeyStrongEnough("rsa", undefined)).toBe(false);
+    expect(rsaKeyStrongEnough("rsa-pss", 4096)).toBe(false);
+    expect(rsaKeyStrongEnough("ec", 4096)).toBe(false);
   });
 
   it("is registered as an adapter whose endpoints are the token POST and GET on the query paths only", () => {
