@@ -219,9 +219,26 @@ lifecycle (issued → revoked) is declared with revocation in slice 2.
    - `mintAgentCredential`: the projection, every mint-time check through the delegation's own `loadLiveChain`
      (which already covers the kill switch and halted agents), the issued-credential record and the audit;
    - the offline reference verifier `verifyAgentCredential`.
-2. **1b:** the `requested_token_type` branch in `POST /oauth/token`. The caller's own delegated `at+jwt` is the
-   `subject_token`; the request goes through the endpoint's DPoP preflight and replay claims, and the result calls
-   `mintAgentCredential`.
+2. **1b (built on `builder/e3-agent-credential-1b`):** the `requested_token_type` branch in `POST /oauth/token`.
+   - **Form.** The form is strict (`agentCredentialExchangeRequestSchema`):
+     - `subject_token`: the caller's own delegated `at+jwt`, with `subject_token_type` set to `access_token`;
+     - `resource`: the registered https audience;
+     - `requested_token_type=urn:regulait:params:oauth:token-type:agent-credential`;
+     - the usual client authentication.
+     No scope can be asked for: the scope is the grant's, projected through the audience's scope map.
+   - **Checks before any claim** (in the client-assertion hook, R11 rule 1):
+     - a DPoP proof signed by the key the subject token is bound to, so only its holder can exchange it;
+     - an enabled audience;
+     - the subject token verifies (`verifyHeldDelegatedToken`, shared with the child exchange): signature, stored
+       row, binding and live chain;
+     - its leaf actor is the authenticated workload identity.
+   - **Then:**
+     - the request's DPoP `jti` is claimed, so one proof mints once;
+     - `mintAgentCredential` re-checks everything and refuses rather than narrows;
+     - the response is `issued_token_type` = the agent-credential type, with `token_type` `DPoP` (`Bearer` only for
+       a `bearer` audience).
+   - **Refusals** carry an `agent_credential_*` `error_code`. Every request is audited as `agent_credential`
+     (`agent-credential-exchange-issued` or `-refused`), beside the mint's own issuance row.
 3. **2:** the status list (`agent_credentials_issued.status_index` is already allocated), revocation and kill-switch
    propagation to the list, the verifier guide, and a reference verifier test against agentgateway's and Kong's JWT
    configuration shapes.
