@@ -90,6 +90,7 @@ import { stdioRefusalSentence } from "./mcp-egress.js";
 import { armOutboundIdentity, IdentityAssertionRefusedError, outboundIdentityFor, type OutboundIdentity } from "./mcp-identity-assertion.js";
 import { armUpstreamExchange, UpstreamExchangeHolder } from "./upstream-token-exchange.js";
 import { timeouts } from "./timeouts.js";
+import { isRobotsServerRow, ROBOT_TOOL_CALL_DEADLINE_MS } from "./robots-mcp.js";
 import {
   attemptsForToolKind,
   classifyUpstreamError,
@@ -234,6 +235,16 @@ function toolKind(tool: Tool): "read" | "write" {
  * both gates on its own (a retry attempt must never become a bypass); on the
  * allow path that is one extra read, on the refuse path it is never reached.
  */
+/**
+ * ADR-0364 S3: the deadline one tools/call gets. A robot tool runs a whole sandboxed browser run (placement, up to a
+ * 5-minute wall clock, its margin), which the generic `mcpCallToolMs` would sever mid-run; it gets the run's own
+ * bound instead (never less than the generic one). Every tool still has one attempt.
+ */
+export function toolCallBudgetMs(serverRow: { transport: string; url: string }): number {
+  const generic = timeouts().mcpCallToolMs;
+  return isRobotsServerRow(serverRow) ? Math.max(generic, ROBOT_TOOL_CALL_DEADLINE_MS) : generic;
+}
+
 export async function preflightUpstream(
   db: Db,
   serverRow: McpUpstreamRow,
@@ -1626,7 +1637,7 @@ async function executeGovernedToolCallInner(
           // G2: by far the most generous of the three deadlines, because this is
           // the upstream doing real work — a build, a query, a scan. A bound that
           // severs legitimate work is worse than the hang it replaced.
-          budgetMs: timeouts().mcpCallToolMs,
+          budgetMs: toolCallBudgetMs(serverRow),
           maxAttempts: attemptsForToolKind(kind),
           // ADR-0185 G5: the call is one upstream operation on /metrics. The
           // connect before it is observed separately, once per attempt, inside

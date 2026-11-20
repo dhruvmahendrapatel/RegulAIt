@@ -39,6 +39,7 @@ import {
   robots,
   runMigrations,
   sql,
+  usageEvents,
   type Db,
 } from "@regulait/db";
 import {
@@ -55,7 +56,7 @@ import {
 } from "@regulait/sandbox-executor/testing";
 import { openRobotSecret, robotRunPlanSchema } from "@regulait/shared";
 import { buildApp } from "./app.js";
-import { FileArtifactStore } from "./model-artifacts.js";
+import { artifactStorageKey, FileArtifactStore } from "./model-artifacts.js";
 import { deploymentEnvironment } from "./oauth/common.js";
 import { setRobotRunnerImageForTest, startRobotRun } from "./robot-runs.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
@@ -224,6 +225,10 @@ interface RunnerTrace {
   heartbeats: Array<{ cancel: boolean }>;
   planStatus: number | null;
   resultStatus: number | null;
+  screenshots: string | null;
+  evidenceStatus: number | null;
+  /** called once, after the first heartbeat's answer (the abort scenario aborts the call here) */
+  onFirstHeartbeat?: () => void;
 }
 const newTrace = (): RunnerTrace => ({
   out: [],
@@ -235,9 +240,11 @@ const newTrace = (): RunnerTrace => ({
   heartbeats: [],
   planStatus: null,
   resultStatus: null,
+  screenshots: null,
+  evidenceStatus: null,
 });
 
-function robotRunner(trace: RunnerTrace, scenario: "succeed" | "halt") {
+function robotRunner(trace: RunnerTrace, scenario: "succeed" | "halt" | "loop" | "download") {
   return async (ctx: {
     secret: string | undefined;
     workload: { command: string; args: string[] };
@@ -302,6 +309,7 @@ function robotRunner(trace: RunnerTrace, scenario: "succeed" | "halt") {
     const planRes = await call("GET", "plan");
     trace.planStatus = planRes.status;
     const plan = robotRunPlanSchema.parse(planRes.body);
+    trace.screenshots = plan.screenshots;
     const s = plan.secrets.find((x) => x.ref === "PORTAL_PASSWORD")!;
     trace.secretOpened = openRobotSecret(
       ctx.secret!,
@@ -314,6 +322,39 @@ function robotRunner(trace: RunnerTrace, scenario: "succeed" | "halt") {
       cancel: boolean;
     };
     trace.heartbeats.push(hb1);
+    trace.onFirstHeartbeat?.();
+    if (scenario === "loop") {
+      // as run.ts between steps: heartbeat until the gateway answers {cancel}, then report cancelled
+      for (let i = 0; i < 400; i++) {
+        const hb = (await call("POST", "heartbeat", { step: 1 })).body as { cancel: boolean };
+        trace.heartbeats.push(hb);
+        if (hb.cancel) break;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      const res = await call("POST", "result", { status: "cancelled", failureCode: "halted", stepsCompleted: 1, outputs: {} });
+      trace.resultStatus = res.status;
+      write({ t: "end", code: 0 });
+      return;
+    }
+    if (scenario === "download") {
+      const bytes = Buffer.from("downloaded-statement-bytes-0001");
+      const r = await call("POST", "evidence", {
+        item: 0,
+        kind: "download",
+        step: 3,
+        contentType: "application/octet-stream",
+        chunk: 0,
+        dataBase64: bytes.toString("base64"),
+        last: true,
+        size: bytes.length,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+      });
+      trace.evidenceStatus = r.status;
+      const res = await call("POST", "result", { status: "succeeded", stepsCompleted: plan.steps.length, outputs: { balance: "7" } });
+      trace.resultStatus = res.status;
+      write({ t: "end", code: 0 });
+      return;
+    }
     if (scenario === "halt") {
       await setMode("halted");
       const hb2 = (await call("POST", "heartbeat", { step: 1 })).body as {
@@ -487,6 +528,8 @@ describe.skipIf(!DATABASE_URL)(
         expect(s.statusCode, s.body).toBe(200);
       }
       setRobotRunnerImageForTest(IMAGE);
+      // B2: the org PII floor ships `block` (no screenshots, downloads by digest only); the first runs use `warn`
+      await db.update(orgSettings).set({ defaultPiiMode: "warn" });
     }, 180_000);
 
     afterAll(async () => {
@@ -596,10 +639,13 @@ describe.skipIf(!DATABASE_URL)(
         ...acl.matchAll(/[a-z0-9-]+(?:\.[a-z0-9-]+)+\.[a-z]{2,}/gi),
       ].map((m) => m[0]);
       expect(new Set(hosts)).toEqual(new Set(["portal.example.com"]));
+      // N7: the argv the image runs (engines/robot-runner/Dockerfile: CMD ["node","/app/dist/main.js"])
       expect(trace.workload).toEqual({
         command: "/usr/local/bin/node",
-        args: ["/app/robot-runner/dist/main.js"],
+        args: ["/app/dist/main.js"],
       });
+      // B2: an unclassified project under the org default `warn` masks screenshots (and keeps them)
+      expect(trace.screenshots).toBe("masked");
 
       // the run key (the session secret the release carried) is what opened the sealed secret
       expect(trace.runKey).toBeTruthy();
@@ -631,6 +677,20 @@ describe.skipIf(!DATABASE_URL)(
         contentType: "text/plain",
         step: null,
       });
+      // the screenshot's bytes are kept (the store is configured)
+      expect(shot[0]!.bytesWithheld).toBeNull();
+
+      // Code 4: the end audit carries the ordered evidence list the run stored by then
+      const [end] = await db
+        .select({ detail: auditLog.detail })
+        .from(auditLog)
+        .where(eq(auditLog.ruleId, "robot-run-succeeded"));
+      const listed = (end!.detail as { evidence: { item: number; kind: string; sha256: string }[] }).evidence;
+      expect(listed[0]).toEqual({ item: 0, kind: "screenshot", sha256: JPEG_SHA });
+      // Code 3: the run is on the usage ledger, attributed to its project, unpriced (NULL, never an invented figure)
+      const usage = await db.select().from(usageEvents).where(eq(usageEvents.objectType, "robot_run"));
+      expect(usage).toEqual([expect.objectContaining({ projectId, userId: ownerId, costUsd: null })]);
+      expect((usage[0]!.detail as { robotRunId: string }).robotRunId).toBe(runId);
     }, 120_000);
 
     it("CANARY: the test secret value is in no frame (either way), no audit row and no evidence row", async () => {
@@ -712,6 +772,96 @@ describe.skipIf(!DATABASE_URL)(
         });
       } finally {
         await setMode("normal");
+        abort.abort();
+        await loop;
+      }
+    }, 120_000);
+
+    it("Code 1: aborting the call cancels the run (heartbeat {cancel}, run cancelled, sandbox released), and no second run starts", async () => {
+      const t = newTrace();
+      const call = new AbortController();
+      // the caller gives up mid-run (a beat after the first heartbeat, once the run is `running`)
+      t.onFirstHeartbeat = () => void setTimeout(() => call.abort(), 1_000);
+      const ex = await rig(
+        "gvisor-abort",
+        new FakeSandboxBackend({
+          backend: "gvisor",
+          classes: ["hardened_container", "user_space_kernel"],
+          robotTask: robotRunner(t, "loop"),
+        }),
+      );
+      const { robot, version } = (
+        await db
+          .select({ robot: robots, version: robotVersions })
+          .from(robotVersions)
+          .innerJoin(robots, eq(robots.id, robotVersions.robotId))
+          .where(eq(robots.id, robotId))
+      )[0]!;
+      const before = (await db.select({ id: robotRuns.id }).from(robotRuns)).length;
+      await ex.loop({ maxWindows: 1 });
+      const abort = new AbortController();
+      const loop = ex.loop({ signal: abort.signal });
+      try {
+        const out = await startRobotRun(
+          db,
+          { robot, version, kind: "test", requestedBy: ownerId, projectId, inputs: { username: "alice" }, contentDigest: "f".repeat(64), signal: call.signal },
+          { dataKey: DATA_KEY, store: null, onlyExecutorIds: [ex.executorId], abortGraceMs: 5_000 },
+        );
+        expect(out, ex.logs.join("\n")).toMatchObject({ kind: "finished", status: "cancelled", failureCode: "caller_aborted", outputs: null });
+        expect(t.heartbeats[0]).toEqual({ cancel: false });
+        expect(t.heartbeats.at(-1)).toEqual({ cancel: true });
+        const [row] = await db.select().from(robotRuns).where(eq(robotRuns.id, (out as { runId: string }).runId));
+        expect(row).toMatchObject({ status: "cancelled", failureCode: "caller_aborted" });
+        // exactly one run row was written for the call: an aborted call is never retried into a second run
+        expect((await db.select({ id: robotRuns.id }).from(robotRuns)).length).toBe(before + 1);
+        const [sb] = placementSandboxes(ex.backend);
+        expect(sb).toMatchObject({ released: true });
+      } finally {
+        abort.abort();
+        await loop;
+      }
+    }, 120_000);
+
+    it("B2: under PII mode block the plan turns screenshots off and a download is kept as its sha256 and size only", async () => {
+      await db.update(orgSettings).set({ defaultPiiMode: "block" });
+      const t = newTrace();
+      const ex = await rig(
+        "gvisor-block",
+        new FakeSandboxBackend({
+          backend: "gvisor",
+          classes: ["hardened_container", "user_space_kernel"],
+          robotTask: robotRunner(t, "download"),
+        }),
+      );
+      const { robot, version } = (
+        await db
+          .select({ robot: robots, version: robotVersions })
+          .from(robotVersions)
+          .innerJoin(robots, eq(robots.id, robotVersions.robotId))
+          .where(eq(robots.id, robotId))
+      )[0]!;
+      await ex.loop({ maxWindows: 1 });
+      const abort = new AbortController();
+      const loop = ex.loop({ signal: abort.signal });
+      const store = new FileArtifactStore(storeDir);
+      try {
+        const out = await startRobotRun(
+          db,
+          { robot, version, kind: "test", requestedBy: ownerId, projectId, inputs: { username: "alice" }, contentDigest: "9".repeat(64) },
+          { dataKey: DATA_KEY, store, onlyExecutorIds: [ex.executorId] },
+        );
+        expect(out, ex.logs.join("\n")).toMatchObject({ kind: "finished", status: "succeeded" });
+        expect(t.screenshots).toBe("none");
+        expect(t.evidenceStatus).toBe(200);
+        const bytes = Buffer.from("downloaded-statement-bytes-0001");
+        const sha = createHash("sha256").update(bytes).digest("hex");
+        const ev = await db.select().from(robotRunEvidence).where(eq(robotRunEvidence.robotRunId, (out as { runId: string }).runId));
+        expect(ev.filter((e) => e.kind === "download")).toEqual([
+          expect.objectContaining({ item: 0, sha256: sha, sizeBytes: bytes.length, bytesWithheld: "pii_block" }),
+        ]);
+        expect(await store.has(artifactStorageKey(sha))).toBe(false);
+      } finally {
+        await db.update(orgSettings).set({ defaultPiiMode: "warn" });
         abort.abort();
         await loop;
       }

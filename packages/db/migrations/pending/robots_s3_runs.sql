@@ -37,6 +37,15 @@ CREATE TABLE IF NOT EXISTS "robot_run_evidence" (
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "robot_run_evidence_sha_idx" ON "robot_run_evidence" ("sha256");
 --> statement-breakpoint
+-- why an item's bytes were never kept (NULL = they are in the store under the sha256): `pii_block` (the project's PII
+-- mode is `block`, so a download is recorded by its sha256 and size only, §7) or `no_store` (no store configured)
+ALTER TABLE "robot_run_evidence" ADD COLUMN IF NOT EXISTS "bytes_withheld" text;
+--> statement-breakpoint
+ALTER TABLE "robot_run_evidence" DROP CONSTRAINT IF EXISTS "robot_run_evidence_withheld_check";
+--> statement-breakpoint
+ALTER TABLE "robot_run_evidence" ADD CONSTRAINT "robot_run_evidence_withheld_check"
+  CHECK ("bytes_withheld" IS NULL OR "bytes_withheld" IN ('pii_block', 'no_store'));
+--> statement-breakpoint
 CREATE OR REPLACE FUNCTION regulait_robot_run_evidence_append_only() RETURNS trigger
   LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
 BEGIN

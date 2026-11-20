@@ -28,7 +28,13 @@ import {
   type Db,
   type RobotVersionRow,
 } from "@regulait/db";
-import { robotContentDigest, robotToolName } from "@regulait/shared";
+import {
+  EXECUTION_OFFER_REPORT_TTL_SECONDS,
+  EXECUTION_OFFER_TTL_SECONDS,
+  ROBOT_RUN_LIMITS,
+  robotContentDigest,
+  robotToolName,
+} from "@regulait/shared";
 import type { FirstPartyCallContext } from "./mcp-first-party.js";
 // robot-runs.ts reaches the stdio and placement modules, which reach mcp-egress → mcp-first-party → this module:
 // it is loaded on the first tools/call, never at import (the import-cycle smoke, M-068)
@@ -42,6 +48,31 @@ export function setRobotRunDeps(deps: RobotRunDeps): void {
 
 /** the fixed URL of the one first-party Robots server row (seeded by the migration) */
 export const ROBOTS_SERVER_URL = "regulait:robots";
+
+// ---------------------------------------------------------------------------
+// a run's time bounds (here, not in robot-runs.ts, so mcp-proxy can read them without loading the run module, M-068)
+// ---------------------------------------------------------------------------
+
+/** margin over the run's wall clock before the gateway withdraws a placement whose runner never reported */
+export const ROBOT_RUN_WALL_CLOCK_MARGIN_MS = 30_000;
+/** after a result, how long the runner has to receive its answer and exit by itself before the session is closed */
+export const ROBOT_RUN_RESULT_EXIT_GRACE_MS = 10_000;
+/** the default wait for a robot placement: the offer's accept window plus its report window (`awaitPlacement`) */
+export const ROBOT_RUN_PLACEMENT_WAIT_MS = (EXECUTION_OFFER_TTL_SECONDS + EXECUTION_OFFER_REPORT_TTL_SECONDS) * 1000;
+/** the longest one run can be live in a gateway: placement, the wall clock, its margin and the exit grace */
+export const ROBOT_RUN_MAX_LIFETIME_MS =
+  ROBOT_RUN_PLACEMENT_WAIT_MS + ROBOT_RUN_LIMITS.wallClockMs + ROBOT_RUN_WALL_CLOCK_MARGIN_MS + ROBOT_RUN_RESULT_EXIT_GRACE_MS;
+/**
+ * The tools/call deadline a robot tool gets (mcp-proxy) instead of the generic `mcpCallToolMs` (120 s): the run's
+ * whole lifetime plus 30 s for the checks before it and the writes after it. The call still has ONE attempt (ADR-0128:
+ * a tools/call is never retried), and if the caller gives up first, the call's abort cancels the run (`startRobotRun`).
+ */
+export const ROBOT_TOOL_CALL_DEADLINE_MS = ROBOT_RUN_MAX_LIFETIME_MS + 30_000;
+
+/** true for the one first-party Robots server row */
+export function isRobotsServerRow(row: { transport: string; url: string }): boolean {
+  return row.transport === "first_party" && row.url === ROBOTS_SERVER_URL;
+}
 
 /** the sites and bindings a version's digest covers, read from the join tables */
 export async function robotVersionContent(db: Db, version: RobotVersionRow) {
@@ -109,7 +140,7 @@ export function createRobotsMcpServer(db: Db, serverId: string, call: FirstParty
     return { tools: rows.map((r) => robotToolDefinition(r.robot, r.version)) };
   });
 
-  server.setRequestHandler(CallToolRequestSchema, async (req): Promise<CallToolResult> => {
+  server.setRequestHandler(CallToolRequestSchema, async (req, extra): Promise<CallToolResult> => {
     const name = req.params.name;
     const [row] = await db
       .select({ robot: robots, version: robotVersions, tool: mcpTools, approvedDigest: approvals.argumentsDigest, approvalStatus: approvals.status })
@@ -158,10 +189,13 @@ export function createRobotsMcpServer(db: Db, serverId: string, call: FirstParty
         interactivePerson: call.interactivePerson === true,
         builderAgentId: call.agent?.kind === "builder_agent" ? call.agent.id : null,
         contentDigest: row.version.contentDigest!,
+        // the call's own abort (the caller's deadline, a cancellation, or the session closing) cancels the run
+        signal: extra.signal,
       },
       runDeps,
     );
     if (outcome.kind === "refused") return refusal(outcome.code, outcome.message);
+    if (outcome.kind === "lost") return refusal("robot_run_lost", `'${name}': ${outcome.message} Run ${outcome.runId}.`);
     if (outcome.status !== "succeeded" || !outcome.outputs) {
       return refusal(
         `robot_run_${outcome.status}`,

@@ -863,9 +863,18 @@ export function registerRobotRoutes(app: FastifyInstance, db: Db, opts: { dataKe
       runDeps,
     );
     if (outcome.kind === "refused") {
-      const status = outcome.code === "robot_run_safe_mode" || outcome.code === "robot_runner_unavailable" || outcome.code === "robot_run_placement_refused" ? 503 : 422;
+      // the project budget gate's refusal keeps the gate's own status (409 project_budget_exceeded, as on every path)
+      const status =
+        outcome.httpStatus ??
+        (outcome.code === "robot_run_safe_mode" ||
+        outcome.code === "robot_runner_unavailable" ||
+        outcome.code === "robot_run_placement_refused" ||
+        outcome.code === "robot_run_placement_failed"
+          ? 503
+          : 422);
       return reply.status(status).send({ error: outcome.code, message: outcome.message, runId: outcome.runId });
     }
+    if (outcome.kind === "lost") return reply.status(409).send({ error: "robot_run_lost", message: outcome.message, runId: outcome.runId });
     return {
       run: { id: outcome.runId, status: outcome.status, failureCode: outcome.failureCode, outputs: outcome.outputs, lifecycle: ROBOT_RUN_MACHINE.describe(outcome.status) },
     };
@@ -885,7 +894,7 @@ export function registerRobotRoutes(app: FastifyInstance, db: Db, opts: { dataKe
       .where(and(eq(robotRuns.id, runId), eq(robotVersions.robotId, readable.robot.id)));
     if (!run) return reply.status(404).send({ error: "unknown_robot_run" });
     const evidence = await db
-      .select({ item: robotRunEvidence.item, kind: robotRunEvidence.kind, step: robotRunEvidence.step, contentType: robotRunEvidence.contentType, sha256: robotRunEvidence.sha256, sizeBytes: robotRunEvidence.sizeBytes, createdAt: robotRunEvidence.createdAt })
+      .select({ item: robotRunEvidence.item, kind: robotRunEvidence.kind, step: robotRunEvidence.step, contentType: robotRunEvidence.contentType, sha256: robotRunEvidence.sha256, sizeBytes: robotRunEvidence.sizeBytes, bytesWithheld: robotRunEvidence.bytesWithheld, createdAt: robotRunEvidence.createdAt })
       .from(robotRunEvidence)
       .where(eq(robotRunEvidence.robotRunId, run.run.id))
       .orderBy(asc(robotRunEvidence.item))

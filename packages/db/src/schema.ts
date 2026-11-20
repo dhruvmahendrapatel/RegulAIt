@@ -16052,9 +16052,9 @@ export const executionOffers = pgTable(
     /**
      * ADR-0364 S3: the robot run this offer is for (`robot_runs.id`), required on a robot_browser offer and NULL on every
      * other; the executor hands it to the runner. Its foreign key to `robot_runs` is added by the migration that
-     * creates `robot_runs` (pending robots.sql runs after this one).
+     * creates `robot_runs` (pending robots_s3_runs.sql, `execution_offers_robot_run_fk`, runs after this one).
      */
-    robotRunId: uuid("robot_run_id"),
+    robotRunId: uuid("robot_run_id").references(() => robotRuns.id, { onDelete: "restrict" }),
   },
   (t) => [
     check(
@@ -19455,6 +19455,7 @@ export type RobotRunRow = typeof robotRuns.$inferSelect;
  * TRUNCATE). Evidence leaves only by retention expiry.
  */
 export const ROBOT_EVIDENCE_KINDS_E45 = ["screenshot", "download", "egress_log"] as const;
+export const ROBOT_EVIDENCE_WITHHELD_E45 = ["pii_block", "no_store"] as const;
 export const robotRunEvidence = pgTable(
   "robot_run_evidence",
   {
@@ -19468,6 +19469,12 @@ export const robotRunEvidence = pgTable(
     contentType: text("content_type").notNull(),
     sha256: text("sha256").notNull(),
     sizeBytes: integer("size_bytes").notNull(),
+    /**
+     * ADR-0364 §7: NULL = the bytes are in the store under the sha256. Otherwise why they were never kept: `pii_block`
+     * (the project's PII mode is `block`, so a download is recorded by its sha256 and size only) or `no_store` (no
+     * artifact store is configured).
+     */
+    bytesWithheld: text("bytes_withheld", { enum: ROBOT_EVIDENCE_WITHHELD_E45 }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
