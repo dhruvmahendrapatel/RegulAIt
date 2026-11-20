@@ -218,6 +218,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /mcp/:serverId",
   // the Streamable HTTP GET probe answers 405 to any authenticated caller
   "GET /mcp/:serverId",
+  // ADR-0311: DELETE (end a session) answers 405 too: no session is ever issued
+  "DELETE /mcp/:serverId",
   "POST /v1/agents/:agentId/invoke",
   // ADR-0219 (P10): any person may ASK; executeGovernedA2aCall decides on their own grant (default-deny)
   "POST /v1/a2a/agents/:agentId/messages",

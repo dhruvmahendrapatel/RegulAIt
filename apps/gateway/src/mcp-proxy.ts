@@ -1,4 +1,6 @@
 import { engineKeyWorkflowInstance, guardProjectPlanOnly } from "./plan-only.js";
+import { MCP_BATCH_REFUSAL, mcpBatchRefused, mcpOriginRefusal } from "./mcp-conformance.js";
+import { resolvePublicUrl } from "./public-url.js";
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -2449,13 +2451,20 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
   // server-to-client SSE stream with GET. This proxy is stateless (one
   // transport per POST, no session id), so it offers none, and the spec's
   // answer for that is 405 with `Allow: POST`. A 404 here made a conformant
-  // client report a transport error after every `initialize`. (No DELETE: a
-  // client sends it only to end a session, and no session id is ever issued.)
+  // client report a transport error after every `initialize`. DELETE ends a
+  // session, and none is ever issued, so it is 405 too (ADR-0311: the spec's
+  // answer for a server without sessions, where a 404 read as "session gone").
   // Auth still runs first (the app-level hook), so an anonymous probe gets 401.
-  app.get("/mcp/:serverId", async (_req, reply: FastifyReply) =>
-    reply.status(405).header("allow", "POST").send({ error: "method_not_allowed", detail: "this MCP endpoint is POST-only (stateless Streamable HTTP)" }));
+  const postOnly = async (_req: unknown, reply: FastifyReply) =>
+    reply.status(405).header("allow", "POST").send({ error: "method_not_allowed", detail: "this MCP endpoint is POST-only (stateless Streamable HTTP)" });
+  app.get("/mcp/:serverId", postOnly);
+  app.delete("/mcp/:serverId", postOnly);
 
   app.post("/mcp/:serverId", async (req, reply) => {
+    // ADR-0311: the transport MUSTs the SDK does not enforce for us, before anything reaches an upstream
+    const originRefused = mcpOriginRefusal(req.headers.origin, resolvePublicUrl());
+    if (originRefused) return reply.status(originRefused.status).send({ error: originRefused.error, detail: originRefused.detail });
+    if (mcpBatchRefused(req.body, req.headers["mcp-protocol-version"])) return reply.status(400).send(MCP_BATCH_REFUSAL);
     const { serverId } = proxyParams.parse(req.params);
     const queryParse = proxyQuery.safeParse(req.query);
     if (!queryParse.success) {
