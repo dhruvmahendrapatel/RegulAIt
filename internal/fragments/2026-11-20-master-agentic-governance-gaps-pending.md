@@ -15,7 +15,9 @@ term missing. The new items are below; items already in flight are listed for co
 - **In flight: goal hijack (OWASP ASI01).** A runtime check that each tool call fits the agent's declared purpose,
   steering or blocking it when it diverges. Graduated steering responses are open PR #960 (its ADR is in that PR); the
   goal-alignment check itself is not yet specified.
-- **In flight: rogue agent (OWASP ASI10).** Learned behaviour baselines with out-of-role findings and an automatic
-  safe-mode trigger: open PR #966 (its ADR is in that PR).
+- **In flight: rogue agent (OWASP ASI10).** Per-install behaviour baselines with explainable findings in shadow mode
+  are open PR #966 (its ADR is in that PR).
+- **New: rogue-agent containment.** An automatic safe-mode trigger when an agent acts out of role. It is not yet
+  specified, and #966 does not include it.
 - **In flight: scoped credentials and sandboxing.** Credential revocation and the status list are open PR #1117
   (ADR-0315 slice 2). The sandboxed browser robot runner is open PR #1082 (ADR-0364 S3).
