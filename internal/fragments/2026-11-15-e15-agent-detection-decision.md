@@ -10,5 +10,6 @@
 - **Evidence and SIEM:** each incident has its evidence rows (join table) and one chained audit row, so ADR-0303 delivers
   it to the SIEM. Never AI, never in the decision path. A stored pack that does not verify falls back to the built-in
   pack (audited once). A relaxing pack change needs a `settings_relax` step-up.
-- **Slice 1** is alert-only. Slice 2 adds the per-rule responses. Migration `pending/agent_detection.sql`. API only:
+- **Responses (slice 2):** `suspend_grant` (revoke the delegation tree), `revoke_credential` (the identity's live
+  tokens) and `require_approval` (an approval rule for the sponsor), each behind a `settings_relax` step-up. Migration `pending/agent_detection.sql`. API only:
   five routes are known UI gaps on #453.
