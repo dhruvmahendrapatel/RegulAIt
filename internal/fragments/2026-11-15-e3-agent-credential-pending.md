@@ -5,4 +5,3 @@
   with DPoP preflight and replay claims.
 - **2:** the Token Status List, revocation by `jti`, kill-switch propagation to the list, the verifier guide, and
   verifier tests for the agentgateway and Kong configuration shapes.
-- The audience registry screen (#453).

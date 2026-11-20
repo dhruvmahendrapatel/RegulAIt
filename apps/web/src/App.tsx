@@ -58,6 +58,7 @@ const ClientAccessPage = screen(() => import("./screens/admin-identity-access"),
 const SsoArea = screen(() => import("./screens/admin-identity-access"), "SsoArea");
 const ScimPage = screen(() => import("./screens/admin-identity-access"), "ScimPage");
 const CredentialsPage = screen(() => import("./screens/admin-identity-access"), "CredentialsPage");
+const AgentCredentialsPage = screen(() => import("./screens/admin-identity-access"), "AgentCredentialsPage");
 const GroupMappingsPage = screen(() => import("./screens/admin-identity-access"), "GroupMappingsPage");
 const VirtualKeysPage = screen(() => import("./screens/admin-identity-access"), "VirtualKeysPage");
 const WorkloadIdentitiesArea = screen(() => import("./screens/admin-identity-access"), "WorkloadIdentitiesArea");
@@ -270,6 +271,8 @@ function ApplicationRoutes() {
                 <Route path="virtual-keys" element={<VirtualKeysPage />} />
                 {/* ADR-0175 A7 */}
                 <Route path="credentials" element={<CredentialsPage />} />
+                {/* ADR-0315 G7 */}
+                <Route path="agent-credentials" element={<AgentCredentialsPage />} />
                 {/* ADR-0188 S6 preview: routed but deliberately NOT in the navigation
                     (suites.tsx) until creating/revoking an identity and binding a
                     credential stop answering 501 — see the page's header comment */}
