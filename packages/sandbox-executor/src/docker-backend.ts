@@ -317,7 +317,11 @@ export function capEgressLog(text: string, max: number = ROBOT_EGRESS_LOG_MAX_BY
   const marker = "\n[regulait: egress log truncated]\n";
   const head = Buffer.from(text, "utf8").subarray(0, max - Buffer.byteLength(marker));
   // drop a split trailing multi-byte sequence rather than emit a replacement character
-  return new TextDecoder("utf-8", { fatal: false }).decode(head).replace(/�+$/, "") + marker;
+  // (a linear trim, not a `/\uFFFD+$/` regex: CodeQL alert 81, polynomial backtracking on untrusted log text)
+  const decoded = new TextDecoder("utf-8", { fatal: false }).decode(head);
+  let end = decoded.length;
+  while (end > 0 && decoded.charCodeAt(end - 1) === 0xfffd) end -= 1;
+  return decoded.slice(0, end) + marker;
 }
 
 /**

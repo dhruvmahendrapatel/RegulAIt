@@ -332,3 +332,21 @@ describe("the fake backend (for gateway tests without docker)", () => {
     await expect(b.start({ ...offer, workloadKind: "mcp_stdio" }, SHIPPED_EXECUTION_PROFILES.restricted, "user_space_kernel")).rejects.toThrow(/has no egress/);
   });
 });
+
+describe("capEgressLog (CodeQL alert 81: linear trim of a split trailing sequence)", () => {
+  it("keeps a short log, caps a long one with a marker and drops a split multi-byte tail", async () => {
+    const { capEgressLog } = await import("./docker-backend.js");
+    expect(capEgressLog("ok", 64)).toBe("ok");
+    const capped = capEgressLog("é".repeat(100), 51);
+    expect(capped.endsWith("[regulait: egress log truncated]\n")).toBe(true);
+    expect(capped).not.toContain("�");
+    expect(Buffer.byteLength(capped, "utf8")).toBeLessThanOrEqual(51);
+  });
+  it("stays fast on a log of many replacement characters", async () => {
+    const { capEgressLog } = await import("./docker-backend.js");
+    const t0 = Date.now();
+    const out = capEgressLog("�".repeat(200_000) + "x", 300_000);
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(out).not.toMatch(/�\n\[regulait/);
+  });
+});
