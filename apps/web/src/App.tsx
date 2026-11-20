@@ -110,7 +110,8 @@ const AgentsArea = screen(() => import("./screens/admin-integrations"), "AgentsA
 const ModelCredentialsPage = screen(() => import("./screens/admin-integrations"), "ModelCredentialsPage");
 const CustomProvidersPage = screen(() => import("./screens/admin-integrations"), "CustomProvidersPage");
 const ExternalScorersPage = screen(() => import("./screens/admin-quality-security"), "ExternalScorersPage");
-const ConnectorsPage = screen(() => import("./screens/admin-integrations"), "ConnectorsPage");
+// ADR-0255: the Connectors page at the index, the connector catalogue at connectors/catalogue
+const ConnectorsArea = screen(() => import("./screens/admin-integrations"), "ConnectorsArea");
 // P3 (#453 c6527514889): each long operations/cost area is one lazy chunk whose module owns its nested <Routes> — the
 // overview at the index, each full list on its own page — so the sub-pages add nothing to the entry bundle.
 const McpServersArea = screen(() => import("./screens/admin-integrations"), "McpServersArea");
@@ -341,7 +342,7 @@ function ApplicationRoutes() {
                 <Route path="custom-providers" element={<CustomProvidersPage />} />
                 {/* ADR-0088 */}
                 <Route path="external-scorers" element={<ExternalScorersPage />} />
-                <Route path="connectors" element={<ConnectorsPage />} />
+                <Route path="connectors/*" element={<ConnectorsArea />} />
                 <Route path="mcp-servers/*" element={<McpServersArea />} />
                 {/* ADR-0173 batch 2b */}
                 <Route path="webhooks" element={<WebhooksPage />} />
