@@ -1059,6 +1059,12 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // ADR-0210: the OIDC-profile MCP identity assertion issuer
   "GET /mcp-identity/.well-known/openid-configuration": "internal",
   "GET /mcp-identity/.well-known/jwks.json": "internal",
+  // ADR-0315 (G7): the agent credential issuer and its audience registry
+  "GET /agent-credentials/.well-known/openid-configuration": "internal",
+  "GET /agent-credentials/.well-known/jwks.json": "internal",
+  "GET /v1/agent-credentials/audiences": "internal",
+  "POST /v1/agent-credentials/audiences": "internal",
+  "POST /v1/agent-credentials/audiences/:audienceId/disable": "internal",
   "GET /v1/discovery/federation": "internal",
   "POST /v1/discovery/federation/keys": "internal",
   "POST /v1/discovery/federation/keys/:kid/activate": "internal",
@@ -2359,6 +2365,11 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   // ADR-0210: the OIDC-profile MCP identity assertion issuer (an MCP server setting, not an ADR-0188 identity route)
   "GET /mcp-identity/.well-known/openid-configuration": "servers",
   "GET /mcp-identity/.well-known/jwks.json": "servers",
+  "GET /agent-credentials/.well-known/openid-configuration": "servers",
+  "GET /agent-credentials/.well-known/jwks.json": "servers",
+  "GET /v1/agent-credentials/audiences": "servers",
+  "POST /v1/agent-credentials/audiences": "servers",
+  "POST /v1/agent-credentials/audiences/:audienceId/disable": "servers",
   "GET /v1/servers/:serverId/upstream-credential": "servers",
   "PUT /v1/servers/:serverId/upstream-credential": "servers",
   "DELETE /v1/servers/:serverId/upstream-credential": "servers",

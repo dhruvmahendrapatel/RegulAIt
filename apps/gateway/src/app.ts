@@ -644,6 +644,7 @@ import { registerSaasEntitlementRoutes } from "./saas-entitlement-routes.js";
 import { registerAgentRegistryRoutes } from "./agent-registry-routes.js";
 import { registerContentTrustRoutes } from "./content-trust-routes.js";
 import { registerFederationRoutes } from "./federation-routes.js";
+import { registerAgentCredentialRoutes } from "./agent-credential-routes.js";
 import { registerMcpIdentityOidcRoutes } from "./mcp-identity-oidc-routes.js";
 import { registerEndpointImportRoutes } from "./endpoint-import-routes.js";
 import { registerThirdPartyIngestRoutes } from "./third-party-ingest-routes.js";
@@ -6339,6 +6340,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerFederationRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0210: the OIDC-profile identity assertion issuer's public discovery document and ES256 JWKS
   registerMcpIdentityOidcRoutes(app, db);
+  // ADR-0315 (G7) — the agent credential issuer's public metadata and JWKS, and the admin registry of audiences
+  registerAgentCredentialRoutes(app, db);
   // ADR-0195 SD3 — no-agent endpoint evidence (osquery results, MDM/EDR inventory) imported into an endpoint source,
   // and the endpoint signature seed. Admin-only by default.
   registerEndpointImportRoutes(app, db, {

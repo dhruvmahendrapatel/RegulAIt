@@ -80,6 +80,8 @@ export const MACHINE_ONLY = new Map([
   ["GET /federation/.well-known/jwks.json", "auth plumbing: the cloud federation issuer's RS256 JWKS, fetched by AWS, GCP and Entra"],
   ["GET /mcp-identity/.well-known/openid-configuration", "auth plumbing: the OIDC-profile MCP identity assertion issuer's discovery document, fetched by an upstream's validator (ADR-0210)"],
   ["GET /mcp-identity/.well-known/jwks.json", "auth plumbing: the OIDC-profile MCP identity assertion issuer's ES256 JWKS, fetched by an upstream's validator (ADR-0210)"],
+  ["GET /agent-credentials/.well-known/openid-configuration", "auth plumbing: the agent credential issuer's discovery document, fetched by a third-party enforcement point (ADR-0315)"],
+  ["GET /agent-credentials/.well-known/jwks.json", "auth plumbing: the agent credential issuer's JWKS, fetched by a third-party enforcement point to verify offline (ADR-0315)"],
   ["POST /oauth/token", "auth plumbing: RFC 6749 token endpoint for workload clients"],
   ["POST /oauth/token/revocation", "auth plumbing: RFC 7009 token revocation for workload clients"],
   ["POST /oauth/token/introspection", "auth plumbing: RFC 7662 token introspection for resource servers"],
