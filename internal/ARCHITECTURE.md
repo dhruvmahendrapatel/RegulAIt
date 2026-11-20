@@ -85,6 +85,7 @@ builds on its own.
 | [integrations/](../integrations) | Kong plugin and Envoy `ext_authz` config that call `POST /v1/evaluate` as an external decision point. |
 | [endpoint-discovery/](../endpoint-discovery) | The osquery pack for endpoint AI discovery. |
 | [agents/endpoint](../agents/endpoint) | The read-only Go endpoint agent; sends signed, pseudonymous snapshots. |
+| [agents/browser](../agents/browser) | The managed MV3 browser extension (ADR-0334): blocks governed AI sites until a signed per-user policy allows them, checks prompts against the shared credential rules, reports breaches with per-device proofs. |
 | [security/](../security) | Third-party inventory and the audit, image and SAST allow-lists. |
 | [scripts/](../scripts) | CI gates and tooling: ADR index test, licence gate, `preflight-*` checks, engine image lock and verify, BOM tooling, bundle signing, `install.sh`, `scripts/master/` merge loop. |
 | [spikes/](../spikes) | Throwaway probes behind individual ADRs; not shipped. |
@@ -93,7 +94,10 @@ builds on its own.
 Key ADRs: [0009](decisions/0009-typescript-fastify-stack.md), [0003](decisions/0003-terraform-over-cloudformation.md),
 [0053](decisions/0053-public-api-sdks.md), [0127](decisions/0127-authorization-callout.md),
 [0176](decisions/0176-open-source-first.md), [0187](decisions/0187-batch5-sidecar-engines.md),
-[0195](decisions/0195-shadow-ai-active-discovery.md).
+[0195](decisions/0195-shadow-ai-active-discovery.md). The SaaS entitlement graph (which OAuth scopes agents hold in
+M365, Google Workspace, Salesforce and Slack) is read by `entitlement_*` discovery sources on the same framework, and
+each vendor app is linked to a RegulAIt agent on an exact identifier match or by an admin (declared machine
+`saas_app_agent_link`): [0337](decisions/0337-saas-entitlement-graph.md).
 
 ## Request path through the gateway
 
